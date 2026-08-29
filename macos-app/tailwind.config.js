@@ -17,6 +17,8 @@ export default {
         green:    'var(--color-green)',
         red:      'var(--color-red)',
         blue:     'var(--color-blue)',
+        purple:   'var(--color-purple)',
+        cyan:     'var(--color-cyan)',
       },
       fontFamily: {
         mono: ['"JetBrains Mono"', '"Fira Code"', 'Menlo', 'monospace'],

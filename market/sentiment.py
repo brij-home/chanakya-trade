@@ -35,7 +35,7 @@ class FIIDIIData:
 NSE_FIIDII_URL = "https://www.nseindia.com/api/fiidiiTradeReact"
 
 
-def get_fii_dii_data(days: int = 5) -> list[FIIDIIData]:
+def get_fii_dii_data(days: int = 5, use_cache: bool = True) -> list[FIIDIIData]:
     """
     FII / DII buy-sell activity from NSE (last N trading days) with persistent caching.
 
@@ -43,14 +43,15 @@ def get_fii_dii_data(days: int = 5) -> list[FIIDIIData]:
     per date. We group them into one record per date.
     """
     cache_key = f"fii_dii_data_{days}"
-    try:
-        from engine.analysis_cache import analysis_cache
+    if use_cache:
+        try:
+            from engine.analysis_cache import analysis_cache
 
-        cached = analysis_cache.get_macro(cache_key)
-        if cached and isinstance(cached, list):
-            return [FIIDIIData(**item) for item in cached]
-    except Exception:
-        pass
+            cached = analysis_cache.get_macro(cache_key)
+            if cached and isinstance(cached, list) and len(cached) > 0:
+                return [FIIDIIData(**item) for item in cached]
+        except Exception:
+            pass
 
     try:
         headers = {

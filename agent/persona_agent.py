@@ -511,12 +511,33 @@ def run_persona_analysis(
             user_message=prompt,
             llm_provider=llm_provider,
         )
-        if response_text and "LLM call failed" not in response_text:
-            return parse_persona_response(response_text, persona_id)
+        if response_text and not any(
+            err in response_text.lower()
+            for err in ("llm call failed", "gemini error", "503 unavailable", "resource_exhausted", "[gemini error")
+        ):
+            sig = parse_persona_response(response_text, persona_id)
+            if sig and sig.rationale and not any("error" in r.lower() for r in sig.rationale):
+                sig.key_metrics["Analysis Engine"] = f"AI Multi-Agent ({getattr(llm_provider, 'model', 'LLM')})"
+                return sig
         # Fall through to rule-based if LLM failed
 
     # 3. Rule-based fallback
-    return _rule_based_signal(persona_id, brief)
+    try:
+        from engine.telemetry import record_event, EVENT_QUANT_FALLBACK
+        record_event(
+            event_type=EVENT_QUANT_FALLBACK,
+            component="persona_agent",
+            action_taken=f"Switched to deterministic rule-based quantitative signal for {persona_id}",
+            reason="LLM provider offline, throttling, or returned empty/error response",
+            details={"persona": persona_id, "symbol": symbol, "exchange": exchange},
+            severity="WARNING",
+        )
+    except Exception:
+        pass
+
+    sig = _rule_based_signal(persona_id, brief)
+    sig.key_metrics["Analysis Engine"] = "Quantitative Engine (Deterministic Fallback)"
+    return sig
 
 
 def run_debate(

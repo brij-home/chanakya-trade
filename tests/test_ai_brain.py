@@ -132,6 +132,8 @@ class TestWebSearch:
     def test_available_false_when_no_keys(self, monkeypatch):
         monkeypatch.delenv("EXA_API_KEY", raising=False)
         monkeypatch.delenv("PERPLEXITY_API_KEY", raising=False)
+        monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+        monkeypatch.delenv("SERPAPI_API_KEY", raising=False)
 
         from agent.web_search import web_search_available
 

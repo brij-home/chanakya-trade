@@ -86,6 +86,25 @@ cp .env.example .env
 
 ### Launching the Platform
 
+#### ⚡ One-Command Local Development Bootstrap
+Start both FastAPI sidecar backend (`http://127.0.0.1:8765`) and Vite desktop web terminal (`http://127.0.0.1:5173`) with automated preflight checks and dependency verification:
+
+```powershell
+# On Windows (PowerShell):
+.\scripts\dev.ps1
+
+# On macOS / Linux (POSIX Bash):
+./scripts/dev.sh
+```
+
+#### 🔍 System Preflight Diagnostics
+Verify system health, port status, SQLite storage, and masked configuration without starting servers:
+
+```bash
+python -m app.main --preflight
+```
+
+#### 🕹️ Alternative Terminal Launchers
 ```bash
 # 1. Launch Interactive Terminal REPL
 python -m app.main --no-broker
@@ -93,7 +112,7 @@ python -m app.main --no-broker
 # 2. Launch Textual Split-Panel TUI
 python -m app.main --tui
 
-# 3. Launch FastAPI Sidecar Backend (Port 8765)
+# 3. Launch FastAPI Sidecar Backend Standalone (Port 8765)
 python -m uvicorn web.api:app --host 127.0.0.1 --port 8765 --reload
 ```
 

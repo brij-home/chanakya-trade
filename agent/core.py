@@ -86,7 +86,7 @@ console = Console(legacy_windows=False)
 
 ANTHROPIC_DEFAULT_MODEL = "claude-opus-4-5"
 OPENAI_DEFAULT_MODEL = "gpt-4o"
-GEMINI_DEFAULT_MODEL = "gemini-3.7-flash"
+GEMINI_DEFAULT_MODEL = "gemini-3.6-flash"
 OLLAMA_DEFAULT_MODEL = "llama3.1"
 NVIDIA_DEFAULT_MODEL = "meta/llama-3.3-70b-instruct"
 GROQ_DEFAULT_MODEL = "llama-3.3-70b-versatile"
@@ -1673,7 +1673,7 @@ class GeminiProvider(LLMProvider):
         chat_session = None
 
         candidate_models = [active_model] + [
-            m for m in ["gemini-3.7-flash", "gemini-3.5-flash", "gemini-3.5-flash-lite", "gemini-3.6-flash", "gemini-flash-latest"]
+            m for m in ["gemini-3.6-flash", "gemini-3.5-flash", "gemini-3.5-flash-lite", "gemini-2.5-flash", "gemini-flash-latest"]
             if m != active_model
         ]
 
@@ -1723,10 +1723,33 @@ class GeminiProvider(LLMProvider):
                         "is not valid",
                         "rate limit",
                         "429",
+                        "503",
+                        "unavailable",
+                        "high demand",
+                        "overloaded",
+                        "service unavailable",
+                        "500",
+                        "502",
+                        "bad gateway",
+                        "temporarily unavailable",
+                        "deadline_exceeded",
                     )
                 )
                 if is_fallback_candidate:
                     self._mark_key_cooldown(client_idx, cooldown_seconds=45.0)
+
+                    try:
+                        from engine.telemetry import record_event, EVENT_LLM_COOLDOWN, EVENT_LLM_FAILOVER
+                        record_event(
+                            event_type=EVENT_LLM_COOLDOWN,
+                            component="gemini_provider",
+                            action_taken=f"Marked API key #{client_idx + 1} on 45s cooldown",
+                            reason=err_str[:120],
+                            details={"model": active_model, "key_index": client_idx},
+                            severity="WARNING",
+                        )
+                    except Exception:
+                        pass
 
                     # 1. Try other keys in the pool first for the current model
                     key_recovered = False
@@ -1740,6 +1763,18 @@ class GeminiProvider(LLMProvider):
                                 chat_session = fb_session
                                 client_idx = next_idx
                                 key_recovered = True
+                                try:
+                                    from engine.telemetry import record_event, EVENT_LLM_FAILOVER
+                                    record_event(
+                                        event_type=EVENT_LLM_FAILOVER,
+                                        component="gemini_provider",
+                                        action_taken=f"Rotated to API key #{next_idx + 1} for {active_model}",
+                                        reason="Active key throttled or rate-limited",
+                                        details={"new_key_index": next_idx, "model": active_model},
+                                        severity="INFO",
+                                    )
+                                except Exception:
+                                    pass
                                 break
                             except Exception:
                                 self._mark_key_cooldown(next_idx, cooldown_seconds=45.0)
@@ -1760,6 +1795,18 @@ class GeminiProvider(LLMProvider):
                                     active_model = fb_model
                                     client_idx = c_idx
                                     model_recovered = True
+                                    try:
+                                        from engine.telemetry import record_event, EVENT_LLM_FAILOVER
+                                        record_event(
+                                            event_type=EVENT_LLM_FAILOVER,
+                                            component="gemini_provider",
+                                            action_taken=f"Failover to fallback model {fb_model} (key #{c_idx + 1})",
+                                            reason="Primary model throttled or high demand",
+                                            details={"fallback_model": fb_model, "key_index": c_idx},
+                                            severity="WARNING",
+                                        )
+                                    except Exception:
+                                        pass
                                     break
                                 except Exception:
                                     continue

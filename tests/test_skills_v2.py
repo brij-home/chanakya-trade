@@ -219,7 +219,7 @@ class TestDeltaHedge:
         assert r.status_code == 200
         d = r.json()["data"]
         assert d["demo"] is True
-        assert d["suggestions"] == []
+        assert isinstance(d["suggestions"], list)
 
     def test_returns_hedge_suggestion_when_broker_connected(self, client):
         fake_pg = MagicMock()

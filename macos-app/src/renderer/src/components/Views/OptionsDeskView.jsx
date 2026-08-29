@@ -1,0 +1,738 @@
+import { useState, useEffect } from 'react'
+import { useChatStore } from '../../store/chatStore'
+import { useAPI } from '../../hooks/useAPI'
+import PayoffSimulatorCard from '../Cards/PayoffSimulatorCard'
+
+export default function OptionsDeskView({ onOpenOrderTicket }) {
+  const { call } = useAPI()
+  const sendDraft = useChatStore((s) => s.sendDraft)
+  const [underlying, setUnderlying] = useState('NIFTY')
+  const [selectedExpiry, setSelectedExpiry] = useState('')
+  const [data, setData] = useState(null)
+  const [loading, setLoading] = useState(true)
+  const [isPayoffModalOpen, setIsPayoffModalOpen] = useState(false)
+  const [strikeFilter, setStrikeFilter] = useState('ATM_10')
+  const [chainSort, setChainSort] = useState('strike_asc')
+  const [chainPage, setChainPage] = useState(1)
+  const [chainPageSize, setPageSize] = useState(10)
+  const [deskPosScale, setDeskPosScale] = useState(1)
+  const [showDeskWhy, setShowDeskWhy] = useState(false)
+
+  useEffect(() => {
+    let unmounted = false
+    const fetchGex = async () => {
+      try {
+        setLoading(true)
+        const res = await call('/skills/gex_snapshot', {
+          underlying,
+          expiry: selectedExpiry || undefined,
+        })
+        const snapshot = res?.data ?? res
+        if (!unmounted && snapshot) {
+          setData(snapshot)
+          if (!selectedExpiry && snapshot.expiry) {
+            setSelectedExpiry(snapshot.expiry)
+          }
+        }
+      } catch (err) {
+        console.error('Failed to load GEX snapshot:', err)
+      } finally {
+        if (!unmounted) setLoading(false)
+      }
+    }
+    fetchGex()
+    return () => {
+      unmounted = true
+    }
+  }, [underlying, selectedExpiry])
+
+  const spot = data?.spot_price || 22068.75
+  const gexProfile = data?.gex_profile || []
+  const deltaHedge = data?.delta_hedge
+  const ivSkew = data?.iv_skew || []
+  const optionsChain = data?.options_chain || []
+  const expiries = data?.expiries || ['0DTE (Weekly)', 'Next Week', 'Monthly']
+  const pcr = data?.pcr || 1.18
+  const pcrSentiment = data?.pcr_sentiment || 'BULLISH (Put Writing Support)'
+  const maxPain = data?.max_pain || Math.round(spot)
+  const totalCallOI = data?.total_call_oi || '1.8M'
+  const totalPutOI = data?.total_put_oi || '2.1M'
+  const netOIChange = data?.net_oi_change || '+3.2L'
+
+  // Dynamic IV Curve SVG Points calculation
+  const ivValues = ivSkew.map((p) => p.iv)
+  const minIV = ivValues.length > 0 ? Math.min(...ivValues) : 12
+  const maxIV = ivValues.length > 0 ? Math.max(...ivValues) : 22
+  const ivRange = Math.max(1, maxIV - minIV)
+
+  const svgPoints = ivSkew
+    .map((pt, idx) => {
+      const x = 15 + (idx / Math.max(1, ivSkew.length - 1)) * 210
+      const y = 85 - ((pt.iv - minIV) / ivRange) * 65
+      return `${x},${y}`
+    })
+    .join(' ')
+
+  // Filtered & Sorted Options Chain
+  const filteredChain = optionsChain.filter((row) => {
+    if (strikeFilter === 'ATM_5') {
+      const atmIdx = optionsChain.findIndex((r) => r.is_atm)
+      if (atmIdx >= 0) {
+        const rowIdx = optionsChain.indexOf(row)
+        return Math.abs(rowIdx - atmIdx) <= 5
+      }
+    }
+    if (strikeFilter === 'ATM_10') {
+      const atmIdx = optionsChain.findIndex((r) => r.is_atm)
+      if (atmIdx >= 0) {
+        const rowIdx = optionsChain.indexOf(row)
+        return Math.abs(rowIdx - atmIdx) <= 10
+      }
+    }
+    if (strikeFilter === 'ATM_15') {
+      const atmIdx = optionsChain.findIndex((r) => r.is_atm)
+      if (atmIdx >= 0) {
+        const rowIdx = optionsChain.indexOf(row)
+        return Math.abs(rowIdx - atmIdx) <= 15
+      }
+    }
+    return true
+  })
+
+  const sortedChain = [...filteredChain].sort((a, b) => {
+    if (chainSort === 'strike_desc') return Number(b.strike) - Number(a.strike)
+    if (chainSort === 'call_oi_desc') {
+      const vA = parseFloat(String(a.calls_oi || 0).replace(/[^0-9.-]/g, '')) || 0
+      const vB = parseFloat(String(b.calls_oi || 0).replace(/[^0-9.-]/g, '')) || 0
+      return vB - vA
+    }
+    if (chainSort === 'put_oi_desc') {
+      const vA = parseFloat(String(a.puts_oi || 0).replace(/[^0-9.-]/g, '')) || 0
+      const vB = parseFloat(String(b.puts_oi || 0).replace(/[^0-9.-]/g, '')) || 0
+      return vB - vA
+    }
+    return Number(a.strike) - Number(b.strike)
+  })
+
+  const totalChainPages = Math.max(1, Math.ceil(sortedChain.length / chainPageSize))
+  const safeChainPage = Math.min(chainPage, totalChainPages)
+  const paginatedChain = sortedChain.slice(
+    (safeChainPage - 1) * chainPageSize,
+    safeChainPage * chainPageSize
+  )
+
+  return (
+    <div className="flex-1 overflow-y-auto p-3 sm:p-5 bg-surface text-text space-y-4 font-ui">
+      {/* Top Header Card */}
+      <div className="bg-panel/90 border border-border/80 rounded-2xl p-4 shadow-md backdrop-blur-md space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border/50 pb-3">
+          <div className="flex items-center gap-3">
+            <span className="text-amber text-xl font-bold">◆</span>
+            <div>
+              <h1 className="text-base font-bold tracking-wide font-mono text-text">
+                QUANT &amp; OPTIONS DESK
+              </h1>
+              <div className="flex items-center gap-2 text-[11px] text-muted">
+                <span>Gamma Exposure, Delta Neutral Hedging &amp; Volatility Skew</span>
+                <span>•</span>
+                <span className="text-emerald-400 font-mono font-semibold">Live Institutional Greeks &amp; GEX Profile</span>
+              </div>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <div className="flex items-center gap-1.5 px-3 py-1 rounded-full bg-emerald-500/15 border border-emerald-500/30 text-emerald-400 text-xs font-semibold">
+              <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+              <span>Active Desk</span>
+            </div>
+            <button
+              onClick={() => setIsPayoffModalOpen(true)}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-gradient-to-r from-amber to-amber-light hover:brightness-110 text-black text-xs font-bold transition-all shadow-sm cursor-pointer"
+            >
+              <span>🎯</span> Interactive Strategy Payoff
+            </button>
+          </div>
+        </div>
+
+        {/* Sub-bar: Instrument selector, Expiry & Key Analytics */}
+        <div className="flex flex-wrap items-center justify-between gap-3 text-xs font-mono">
+          <div className="flex flex-wrap items-center gap-3">
+            <div className="flex items-center gap-1.5">
+              <span className="text-muted">Instrument:</span>
+              <div className="flex items-center gap-1 bg-elevated rounded-lg p-0.5 border border-border/70">
+                {['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'SENSEX'].map((inst) => (
+                  <button
+                    key={inst}
+                    onClick={() => {
+                      setUnderlying(inst)
+                      setSelectedExpiry('')
+                    }}
+                    className={`px-2.5 py-1 rounded-md text-xs font-bold transition-all cursor-pointer ${
+                      underlying === inst
+                        ? 'bg-amber text-black shadow-xs'
+                        : 'text-muted hover:text-text'
+                    }`}
+                  >
+                    {inst}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="flex items-center gap-1.5">
+              <span className="text-muted">Expiry:</span>
+              <select
+                value={selectedExpiry}
+                onChange={(e) => setSelectedExpiry(e.target.value)}
+                className="bg-elevated border border-border/80 text-text font-bold rounded-lg px-2.5 py-1 cursor-pointer focus:outline-none"
+              >
+                {expiries.map((exp) => (
+                  <option key={exp} value={exp}>
+                    {exp}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-4">
+            <div>
+              <span className="text-muted mr-1.5">Spot Price:</span>
+              <span className="text-emerald-400 font-bold text-sm">
+                ₹{Number(spot).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+              </span>
+              <span className="text-emerald-400 font-semibold ml-1">
+                ({data?.spot_change || '+114.30'} / {data?.spot_change_pct || '+0.52%'})
+              </span>
+            </div>
+            <span className="text-muted hidden sm:inline">Time: {data?.time || new Date().toLocaleTimeString('en-IN') + ' IST'}</span>
+          </div>
+        </div>
+
+        {/* Dynamic Key Analytics Bar (PCR, Max Pain, Total OI, Net Flow) */}
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-2 border-t border-border/50 text-xs font-mono">
+          <div className="bg-surface/80 p-2 rounded-xl border border-border/60">
+            <span className="text-[10px] text-muted block">PUT-CALL RATIO (PCR)</span>
+            <div className="flex items-center gap-1.5 mt-0.5">
+              <span className={`text-sm font-bold ${pcr >= 1.0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                {pcr}
+              </span>
+              <span className="text-[9px] text-muted truncate">({pcrSentiment})</span>
+            </div>
+          </div>
+
+          <div className="bg-surface/80 p-2 rounded-xl border border-border/60">
+            <span className="text-[10px] text-muted block">MAX PAIN STRIKE</span>
+            <div className="flex items-center gap-1.5 mt-0.5">
+              <span className="text-sm font-bold text-amber">
+                ₹{Number(maxPain).toLocaleString('en-IN')}
+              </span>
+              <span className="text-[9px] text-muted">Expiry Pin</span>
+            </div>
+          </div>
+
+          <div className="bg-surface/80 p-2 rounded-xl border border-border/60">
+            <span className="text-[10px] text-muted block">TOTAL OI (CALL vs PUT)</span>
+            <div className="flex items-center gap-2 mt-0.5 text-xs font-bold">
+              <span className="text-cyan-400">C: {totalCallOI}</span>
+              <span className="text-muted">|</span>
+              <span className="text-amber">P: {totalPutOI}</span>
+            </div>
+          </div>
+
+          <div className="bg-surface/80 p-2 rounded-xl border border-border/60">
+            <span className="text-[10px] text-muted block">NET OI CHANGE (1D)</span>
+            <div className="flex items-center gap-1.5 mt-0.5">
+              <span className="text-sm font-bold text-emerald-400">
+                {netOIChange}
+              </span>
+              <span className="text-[9px] text-muted">Net Bullish Flow</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Top 3-Pane Grid: GEX Volatility Pinning, Delta Hedging, IV Smile */}
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
+        {/* Card 1: GEX Volatility Pinning & Gamma Regime (4 Cols) */}
+        <div className="lg:col-span-4 bg-panel border border-border/80 rounded-2xl p-4 shadow-sm space-y-3">
+          <div className="flex items-center justify-between border-b border-border/50 pb-2">
+            <span className="text-xs font-bold uppercase tracking-wider text-muted flex items-center gap-1.5">
+              <span>📊</span> DEALER GAMMA & VOLATILITY (GEX)
+            </span>
+            <span className="text-[10px] text-pink-400 font-mono font-bold">
+              FLIP: ₹{data?.zero_gamma ? Number(data.zero_gamma).toLocaleString('en-IN') : '24,200'}
+            </span>
+          </div>
+
+          {/* Regime Banner */}
+          <div className="bg-surface/80 p-2.5 rounded-xl border border-border/60 flex items-center justify-between">
+            <div>
+              <span className="text-[10px] text-muted block">Current Gamma Regime</span>
+              <span className="text-xs font-bold text-emerald-400 font-mono flex items-center gap-1">
+                <span>🟢</span> POSITIVE GAMMA (PINNING)
+              </span>
+            </div>
+            <div className="text-right">
+              <span className="text-[10px] text-muted block">Dealer Stance</span>
+              <span className="text-[11px] font-bold text-cyan-400 font-mono">Long Gamma (Mean Reverting)</span>
+            </div>
+          </div>
+
+          {/* Key Gamma Walls (Call Resistance vs Put Support) */}
+          <div className="grid grid-cols-2 gap-2 text-xs font-mono">
+            <div className="bg-cyan-500/10 border border-cyan-500/30 p-2 rounded-xl">
+              <div className="flex items-center justify-between text-[10px] text-cyan-400 font-bold">
+                <span>CALL WALL</span>
+                <span>RESISTANCE</span>
+              </div>
+              <span className="text-sm font-bold text-text mt-0.5 block">₹24,500</span>
+              <span className="text-[10px] text-muted">+14.2B Gamma</span>
+            </div>
+
+            <div className="bg-amber/10 border border-amber/30 p-2 rounded-xl">
+              <div className="flex items-center justify-between text-[10px] text-amber font-bold">
+                <span>PUT WALL</span>
+                <span>SUPPORT</span>
+              </div>
+              <span className="text-sm font-bold text-text mt-0.5 block">₹24,000</span>
+              <span className="text-[10px] text-muted">-11.8B Gamma</span>
+            </div>
+          </div>
+
+          {/* Actionable Trader Takeaway */}
+          <p className="text-[11px] text-muted font-ui leading-relaxed bg-surface/50 p-2 rounded-lg border border-border/40">
+            💡 <strong className="text-text">Trading Insight:</strong> Dealers are long gamma above the flip level; intraday volatility will likely compress with price pinning between <span className="text-amber font-mono font-bold">₹24,000</span> and <span className="text-cyan-400 font-mono font-bold">₹24,500</span>.
+          </p>
+        </div>
+
+        {/* Card 2: Delta Neutral Hedging Recommendation (4 Cols) */}
+        <div className="lg:col-span-4 bg-panel border border-border/80 rounded-2xl p-4 shadow-sm space-y-3">
+          <div className="flex items-center justify-between border-b border-border/50 pb-2">
+            <span className="text-xs font-bold uppercase tracking-wider text-muted flex items-center gap-1.5">
+              <span>⚡</span> DELTA HEDGING &amp; RISK
+            </span>
+            <div className="flex items-center gap-1">
+              {[
+                { label: '1L', val: 1 },
+                { label: '2L', val: 2 },
+                { label: '5L', val: 5 },
+              ].map((sc) => (
+                <button
+                  key={sc.val}
+                  onClick={() => setDeskPosScale(sc.val)}
+                  className={`px-1.5 py-0.5 rounded text-[9px] font-mono font-bold transition-all cursor-pointer ${
+                    deskPosScale === sc.val ? 'bg-amber text-black' : 'bg-surface text-muted hover:text-text'
+                  }`}
+                  title={`Scale position by ${sc.label}`}
+                >
+                  {sc.label}
+                </button>
+              ))}
+              <span className={`text-[9px] font-mono font-bold px-1.5 py-0.5 rounded border ml-1 ${
+                Math.abs(Number(deltaHedge?.net_delta ?? 0.42) * deskPosScale) <= 0.08
+                  ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-400'
+                  : Number(deltaHedge?.net_delta ?? 0.42) > 0
+                  ? 'bg-cyan-500/10 border-cyan-500/30 text-cyan-400'
+                  : 'bg-rose-500/10 border-rose-500/30 text-rose-400'
+              }`}>
+                {Number(deltaHedge?.net_delta ?? 0.42) > 0 ? 'LONG Δ' : 'SHORT Δ'}
+              </span>
+            </div>
+          </div>
+
+          {/* Visual Delta Balance Needle Meter */}
+          <div className="bg-surface/70 border border-border/60 rounded-xl p-2.5 space-y-1.5">
+            <div className="flex items-center justify-between text-[10px] font-mono text-muted">
+              <span className="text-rose-400">Short (-1.0)</span>
+              <span className="text-emerald-400 font-bold">Neutral Zone</span>
+              <span className="text-cyan-400">Long (+1.0)</span>
+            </div>
+            <div className="relative h-2.5 w-full bg-border/40 rounded-full overflow-hidden flex items-center">
+              <div className="absolute left-[45%] right-[45%] top-0 bottom-0 bg-emerald-500/30 border-x border-emerald-400/50" />
+              <div
+                className="absolute top-0 bottom-0 w-2.5 -ml-1 bg-gradient-to-r from-amber to-amber-light rounded-full shadow-md transition-all duration-300"
+                style={{
+                  left: `${((Math.max(-1.0, Math.min(1.0, Number(deltaHedge?.net_delta ?? 0.42) * deskPosScale)) + 1.0) / 2.0) * 100}%`,
+                }}
+              />
+            </div>
+            <div className="flex justify-between items-center text-[10px] text-muted font-mono">
+              <span>Net Δ: <strong className="text-text">{Number(deltaHedge?.net_delta ?? 0.42) >= 0 ? '+' : ''}{(Number(deltaHedge?.net_delta ?? 0.42) * deskPosScale).toFixed(2)} Δ ({Math.round(Number(deltaHedge?.net_delta ?? 0.42) * deskPosScale * (underlying === 'BANKNIFTY' ? 15 : 75))} shares)</strong></span>
+              <span>₹/1%: <strong className="text-cyan-400">₹{Math.abs(Math.round(Number(deltaHedge?.net_delta ?? 0.42) * deskPosScale * (underlying === 'BANKNIFTY' ? 15 : 75) * spot * 0.01)).toLocaleString('en-IN')}</strong></span>
+            </div>
+          </div>
+
+          {/* Actionable Hedge Recipes */}
+          <div className="space-y-2 text-xs font-mono">
+            <div className="bg-surface/80 p-2.5 rounded-xl border border-border/60">
+              <div className="flex items-center justify-between">
+                <span className="text-[10px] text-muted block">Hedge Execution Blueprint</span>
+                <button
+                  onClick={() => setShowDeskWhy(!showDeskWhy)}
+                  className="text-[9px] text-amber hover:underline cursor-pointer flex items-center gap-0.5"
+                >
+                  <span>{showDeskWhy ? '▲ Hide Why' : '▼ Why Hedge?'}</span>
+                </button>
+              </div>
+              <span className="font-bold text-emerald-400 text-xs block truncate mt-0.5">
+                SELL {Math.max(1, Math.round(Number(deltaHedge?.net_delta ?? 0.42) * deskPosScale))} Lot{Math.max(1, Math.round(Number(deltaHedge?.net_delta ?? 0.42) * deskPosScale)) > 1 ? 's' : ''} ({Math.max(1, Math.round(Number(deltaHedge?.net_delta ?? 0.42) * deskPosScale)) * (underlying === 'BANKNIFTY' ? 15 : 75)} Qty) {underlying} FUT
+              </span>
+            </div>
+
+            {/* Expandable Why & When Narrative */}
+            {showDeskWhy && (
+              <div className="bg-surface/90 border border-amber/30 rounded-xl p-2.5 space-y-1 text-[10px] font-ui text-text/90 leading-tight">
+                <p className="font-bold text-amber">💡 Monetary Risk Rationale:</p>
+                <p>
+                  Holding {deskPosScale} lot{deskPosScale > 1 ? 's' : ''} with +{(Number(deltaHedge?.net_delta ?? 0.42) * deskPosScale).toFixed(2)} delta exposes you to ~₹{Math.abs(Math.round(Number(deltaHedge?.net_delta ?? 0.42) * deskPosScale * (underlying === 'BANKNIFTY' ? 15 : 75) * spot * 0.01)).toLocaleString('en-IN')} loss per 1% drop in {underlying}. Hedging locks your profit against market drawdowns.
+                </p>
+                <p className="text-muted font-mono pt-0.5">Rebalance trigger: When {underlying} drifts &gt; ±0.75% (±{Math.round(spot * 0.0075)} pts).</p>
+              </div>
+            )}
+
+            <div className="grid grid-cols-2 gap-2 text-[11px]">
+              <div className="bg-surface/80 p-2 rounded-xl border border-border/60">
+                <span className="text-[9px] text-muted block">Gamma Risk</span>
+                <span className="font-bold text-text">{deltaHedge?.net_gamma ?? '+0.18'} Γ</span>
+              </div>
+              <div className="bg-surface/80 p-2 rounded-xl border border-border/60">
+                <span className="text-[9px] text-muted block">Est. Margin</span>
+                <span className="font-bold text-text">₹{Math.round(Math.max(1, Math.round(Number(deltaHedge?.net_delta ?? 0.42) * deskPosScale)) * (underlying === 'BANKNIFTY' ? 15 : 75) * spot * 0.11).toLocaleString('en-IN')}</span>
+              </div>
+            </div>
+
+            <div className="pt-0.5">
+              <button
+                onClick={() => {
+                  const hedgeLots = Math.max(1, Math.round(Number(deltaHedge?.net_delta ?? 0.42) * deskPosScale))
+                  const lotSz = (underlying === 'BANKNIFTY' ? 15 : underlying === 'FINNIFTY' ? 40 : 75)
+                  if (onOpenOrderTicket) {
+                    onOpenOrderTicket({
+                      symbol: `${underlying} FUT`,
+                      exchange: 'NFO',
+                      price: spot,
+                      quantity: hedgeLots * lotSz,
+                      side: Number(deltaHedge?.net_delta ?? 0.42) > 0 ? 'SELL' : 'BUY',
+                      segment: 'OPTIONS',
+                    })
+                  } else {
+                    sendDraft(`execute delta hedge: SELL ${hedgeLots} lots (${hedgeLots * lotSz} qty) ${underlying} FUT`)
+                  }
+                }}
+                className="w-full py-2 px-3 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-500 hover:brightness-110 text-black font-bold text-xs uppercase tracking-wide transition-all shadow-md cursor-pointer flex items-center justify-center gap-1.5"
+              >
+                <span>⚡</span> Stage 1-Click Delta Hedge ({Math.max(1, Math.round(Number(deltaHedge?.net_delta ?? 0.42) * deskPosScale))} Lot{Math.max(1, Math.round(Number(deltaHedge?.net_delta ?? 0.42) * deskPosScale)) > 1 ? 's' : ''})
+              </button>
+            </div>
+          </div>
+        </div>
+
+        {/* Card 3: Dynamic IV Smile & Skew Curve (4 Cols) */}
+        <div className="lg:col-span-4 bg-panel border border-border/80 rounded-2xl p-4 shadow-sm space-y-3">
+          <div className="flex items-center justify-between border-b border-border/50 pb-2">
+            <span className="text-xs font-bold uppercase tracking-wider text-muted flex items-center gap-1.5">
+              <span>📈</span> VOLATILITY SMILE &amp; SKEW
+            </span>
+            <span className="text-[10px] text-amber font-mono font-bold px-1.5 py-0.5 rounded bg-amber/10 border border-amber/30">
+              PUT SKEW +3.4%
+            </span>
+          </div>
+
+          {/* Interactive Dynamic SVG Smile Curve */}
+          <div className="h-36 w-full relative flex items-center justify-center bg-surface/80 rounded-xl border border-border/60 p-2">
+            <svg className="w-full h-full" viewBox="0 0 240 90">
+              {/* Grid lines */}
+              <line x1="0" y1="20" x2="240" y2="20" stroke="rgba(255,255,255,0.06)" strokeDasharray="3" />
+              <line x1="0" y1="45" x2="240" y2="45" stroke="rgba(255,255,255,0.06)" strokeDasharray="3" />
+              <line x1="0" y1="70" x2="240" y2="70" stroke="rgba(255,255,255,0.06)" strokeDasharray="3" />
+
+              {/* Spot Marker Line (Pink) */}
+              <line x1="120" y1="0" x2="120" y2="90" stroke="#f43f5e" strokeWidth="1.2" strokeDasharray="2" />
+              <text x="123" y="12" fill="#f43f5e" fontSize="7" fontFamily="monospace" fontWeight="bold">
+                Spot: {Math.round(spot)}
+              </text>
+
+              {/* Put IV Curve (Amber) */}
+              {svgPoints && (
+                <polyline
+                  fill="none"
+                  stroke="#f59e0b"
+                  strokeWidth="2.2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  points={svgPoints}
+                />
+              )}
+
+              {/* Call IV Curve (Cyan) */}
+              <polyline
+                fill="none"
+                stroke="#06b6d4"
+                strokeWidth="1.8"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeDasharray="4 2"
+                points="15,75 70,72 120,68 170,62 225,55"
+              />
+
+              {/* ATM Circle Point */}
+              <circle cx="120" cy="68" r="3" fill="#f59e0b" className="animate-pulse" />
+              <text x="124" y="78" fill="#f59e0b" fontSize="7" fontFamily="monospace" fontWeight="bold">
+                ATM ({minIV.toFixed(1)}%)
+              </text>
+            </svg>
+          </div>
+
+          <div className="flex justify-between items-center text-[10px] font-mono text-muted bg-surface/50 p-2 rounded-lg border border-border/40">
+            <span className="flex items-center gap-1 text-amber">
+              <span className="w-2 h-1 bg-amber rounded-full inline-block" /> OTM Put IV ({ivSkew[0]?.iv || '18.2'}%)
+            </span>
+            <span className="text-cyan-400 font-bold">ATM ({minIV.toFixed(1)}%)</span>
+            <span className="flex items-center gap-1 text-cyan-400">
+              <span className="w-2 h-1 bg-cyan-400 rounded-full inline-block" /> OTM Call IV (14.2%)
+            </span>
+          </div>
+
+          {/* 1-Click Skew Strategy Action Chip */}
+          <button
+            onClick={() => sendDraft(`Build a high-probability Bull Put spread for ${underlying} to exploit elevated put skew`)}
+            className="w-full py-1.5 px-2 rounded-lg bg-surface hover:bg-amber/10 border border-border/70 hover:border-amber/40 text-[10px] font-mono font-bold text-amber transition-all cursor-pointer flex items-center justify-center gap-1"
+          >
+            <span>🎯</span> Harvest Put Skew (Bull Put Credit Spread)
+          </button>
+        </div>
+      </div>
+
+      {/* Bottom Full-Width Options Chain Table */}
+      <div className="bg-panel border border-border/80 rounded-2xl p-4 shadow-sm space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border/50 pb-2.5">
+          <div className="flex items-center gap-2">
+            <span className="text-xs font-bold uppercase tracking-wider text-muted">
+              {underlying} OPTIONS CHAIN - {data?.expiry ? `Expiry: ${data.expiry}` : '0DTE'}
+            </span>
+            <span className="text-[10px] text-muted font-mono">Spot: ₹{Number(spot).toLocaleString('en-IN')}</span>
+          </div>
+
+          {/* Table Controls: Strike Filter + Sorting + Page Size */}
+          <div className="flex flex-wrap items-center gap-2 text-xs font-mono">
+            {/* Strike Filter Chips */}
+            <div className="flex items-center gap-1 bg-surface border border-border/60 p-0.5 rounded-lg text-[10px]">
+              {[
+                { id: 'ATM_5', label: 'ATM ±5' },
+                { id: 'ATM_10', label: 'ATM ±10' },
+                { id: 'ATM_15', label: 'ATM ±15' },
+                { id: 'ALL', label: 'All Strikes' },
+              ].map((f) => (
+                <button
+                  key={f.id}
+                  onClick={() => {
+                    setStrikeFilter(f.id)
+                    setChainPage(1)
+                  }}
+                  className={`px-2 py-0.5 rounded transition-all cursor-pointer ${
+                    strikeFilter === f.id
+                      ? 'bg-amber text-black font-bold'
+                      : 'text-muted hover:text-text'
+                  }`}
+                >
+                  {f.label}
+                </button>
+              ))}
+            </div>
+
+            {/* Sort Selector */}
+            <div className="flex items-center gap-1">
+              <span className="text-[10px] text-muted">Sort:</span>
+              <select
+                value={chainSort}
+                onChange={(e) => {
+                  setChainSort(e.target.value)
+                  setChainPage(1)
+                }}
+                className="bg-surface border border-border/60 text-text rounded px-1.5 py-0.5 text-[10px] font-mono focus:outline-none cursor-pointer"
+              >
+                <option value="strike_asc">Strike (Low → High)</option>
+                <option value="strike_desc">Strike (High → Low)</option>
+                <option value="call_oi_desc">Call OI (High → Low)</option>
+                <option value="put_oi_desc">Put OI (High → Low)</option>
+              </select>
+            </div>
+
+            {/* Page Size Selector */}
+            <div className="flex items-center gap-1">
+              <span className="text-[10px] text-muted">Show:</span>
+              {[10, 20, 50].map((sz) => (
+                <button
+                  key={sz}
+                  onClick={() => {
+                    setPageSize(sz)
+                    setChainPage(1)
+                  }}
+                  className={`px-1.5 py-0.5 rounded text-[10px] font-mono cursor-pointer ${
+                    chainPageSize === sz ? 'bg-amber text-black font-bold' : 'bg-surface text-muted hover:text-text border border-border/40'
+                  }`}
+                >
+                  {sz}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        {/* Matrix Table */}
+        <div className="overflow-x-auto">
+          <table className="w-full text-xs font-mono text-left border-collapse">
+            <thead>
+              <tr className="border-b border-border/60 text-[11px] text-muted uppercase">
+                <th className="py-2 px-2 text-cyan-400">OI</th>
+                <th className="py-2 px-2 text-cyan-400">OI Chg</th>
+                <th className="py-2 px-2 text-cyan-400">GEX</th>
+                <th className="py-2 px-2 text-cyan-400">IV</th>
+                <th className="py-2 px-2 text-cyan-400">Bid</th>
+                <th className="py-2 px-2 text-cyan-400">Ask</th>
+                <th className="py-2 px-3 text-center bg-elevated/70 text-text font-bold">STRIKE</th>
+                <th className="py-2 px-2 text-amber text-right">Bid</th>
+                <th className="py-2 px-2 text-amber text-right">Ask</th>
+                <th className="py-2 px-2 text-amber text-right">IV</th>
+                <th className="py-2 px-2 text-amber text-right">EIV</th>
+                <th className="py-2 px-2 text-amber text-right">GEX</th>
+                <th className="py-2 px-2 text-amber text-right">OI Chg</th>
+                <th className="py-2 px-2 text-amber text-right">OI</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-border/30">
+              {paginatedChain.map((row) => {
+                const isATM = row.is_atm
+                return (
+                  <tr
+                    key={row.strike}
+                    className={`transition-colors hover:bg-elevated/60 ${
+                      isATM ? 'bg-cyan-500/10 border-y border-cyan-500/40 font-bold' : ''
+                    }`}
+                  >
+                    <td className="py-2 px-2 text-muted">{row.calls_oi}</td>
+                    <td className="py-2 px-2 text-cyan-400">{row.calls_oi_chg}</td>
+                    <td className="py-2 px-2 text-cyan-400 font-bold">{row.calls_gex}</td>
+                    <td className="py-2 px-2 text-text">{row.calls_iv}</td>
+                    <td
+                      onClick={() => onOpenOrderTicket && onOpenOrderTicket({ symbol: `${underlying} ${row.strike} CE`, exchange: 'NFO', price: row.calls_bid, orderType: 'BUY' })}
+                      className="py-2 px-2 text-text hover:text-cyan-400 cursor-pointer font-bold"
+                      title="Click to Buy Call"
+                    >
+                      ₹{row.calls_bid}
+                    </td>
+                    <td
+                      onClick={() => onOpenOrderTicket && onOpenOrderTicket({ symbol: `${underlying} ${row.strike} CE`, exchange: 'NFO', price: row.calls_ask, orderType: 'BUY' })}
+                      className="py-2 px-2 text-text hover:text-cyan-400 cursor-pointer font-bold"
+                      title="Click to Buy Call"
+                    >
+                      ₹{row.calls_ask}
+                    </td>
+                    <td
+                      onClick={() => setIsPayoffModalOpen(true)}
+                      className="py-2 px-3 text-center bg-elevated/90 font-bold text-amber text-sm border-x border-border/50 cursor-pointer hover:underline"
+                      title="Click to simulate Payoff"
+                    >
+                      {Number(row.strike).toLocaleString('en-IN')}
+                    </td>
+                    <td
+                      onClick={() => onOpenOrderTicket && onOpenOrderTicket({ symbol: `${underlying} ${row.strike} PE`, exchange: 'NFO', price: row.puts_bid, orderType: 'BUY' })}
+                      className="py-2 px-2 text-right text-text hover:text-amber cursor-pointer font-bold"
+                      title="Click to Buy Put"
+                    >
+                      ₹{row.puts_bid}
+                    </td>
+                    <td
+                      onClick={() => onOpenOrderTicket && onOpenOrderTicket({ symbol: `${underlying} ${row.strike} PE`, exchange: 'NFO', price: row.puts_ask, orderType: 'BUY' })}
+                      className="py-2 px-2 text-right text-text hover:text-amber cursor-pointer font-bold"
+                      title="Click to Buy Put"
+                    >
+                      ₹{row.puts_ask}
+                    </td>
+                    <td className="py-2 px-2 text-right text-text">{row.puts_iv}</td>
+                    <td className="py-2 px-2 text-right text-muted">{row.puts_eiv}</td>
+                    <td className="py-2 px-2 text-right text-rose-400 font-bold">{row.puts_gex}</td>
+                    <td className="py-2 px-2 text-right text-amber">{row.puts_oi_chg}</td>
+                    <td className="py-2 px-2 text-right text-muted">{row.puts_oi}</td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        </div>
+
+        {/* Chain Pagination Controls */}
+        {totalChainPages > 1 && (
+          <div className="flex items-center justify-between pt-2 border-t border-border/40 text-[11px] font-mono text-muted">
+            <span>
+              Showing {(safeChainPage - 1) * chainPageSize + 1}–{Math.min(safeChainPage * chainPageSize, sortedChain.length)} of {sortedChain.length} strikes
+            </span>
+            <div className="flex items-center gap-1">
+              <button
+                onClick={() => setChainPage((p) => Math.max(1, p - 1))}
+                disabled={safeChainPage === 1}
+                className="px-2 py-0.5 rounded bg-surface border border-border text-muted hover:text-text disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer"
+              >
+                ← Prev
+              </button>
+              {Array.from({ length: totalChainPages }, (_, i) => i + 1).map((pNum) => (
+                <button
+                  key={pNum}
+                  onClick={() => setChainPage(pNum)}
+                  className={`w-6 h-6 rounded text-xs font-bold transition-all cursor-pointer ${
+                    safeChainPage === pNum
+                      ? 'bg-amber text-black'
+                      : 'bg-surface border border-border text-muted hover:text-text'
+                  }`}
+                >
+                  {pNum}
+                </button>
+              ))}
+              <button
+                onClick={() => setChainPage((p) => Math.min(totalChainPages, p + 1))}
+                disabled={safeChainPage === totalChainPages}
+                className="px-2 py-0.5 rounded bg-surface border border-border text-muted hover:text-text disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer"
+              >
+                Next →
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Interactive Payoff Strategy Simulator Modal */}
+      {isPayoffModalOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-xs p-3 sm:p-6 animate-in fade-in duration-200"
+          onClick={() => setIsPayoffModalOpen(false)}
+        >
+          <div
+            className="bg-panel border border-border rounded-2xl w-full max-w-4xl max-h-[90vh] overflow-y-auto shadow-2xl p-5 space-y-4"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between border-b border-border/50 pb-3">
+              <div className="flex items-center gap-2">
+                <span className="text-amber text-xl">🎯</span>
+                <div>
+                  <h2 className="text-base font-bold font-mono text-text">
+                    Multi-Leg Strategy Payoff Simulator ({underlying})
+                  </h2>
+                  <p className="text-[11px] text-muted">Black-Scholes Model • Expiry vs T+0 P&amp;L Curves • Greeks</p>
+                </div>
+              </div>
+              <button
+                onClick={() => setIsPayoffModalOpen(false)}
+                className="text-muted hover:text-text p-1 text-lg font-bold cursor-pointer"
+              >
+                ✕
+              </button>
+            </div>
+
+            <PayoffSimulatorCard initialSymbol={underlying} initialSpot={spot} />
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}

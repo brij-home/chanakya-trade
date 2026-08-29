@@ -139,10 +139,11 @@ class TestFIIDIISorting:
         mock_session = MagicMock()
         mock_session.get.return_value = mock_response
         mock_client_cls.return_value = mock_session
+        mock_client_cls.return_value.__enter__.return_value = mock_session
 
         from market.sentiment import get_fii_dii_data
 
-        result = get_fii_dii_data(days=5)
+        result = get_fii_dii_data(days=5, use_cache=False)
 
         assert len(result) >= 2
         # First entry should be the most recent date (03-Apr)
@@ -192,10 +193,11 @@ class TestFIIDIISorting:
         mock_session = MagicMock()
         mock_session.get.return_value = mock_response
         mock_client_cls.return_value = mock_session
+        mock_client_cls.return_value.__enter__.return_value = mock_session
 
         from market.sentiment import get_fii_dii_data
 
-        result = get_fii_dii_data(days=5)
+        result = get_fii_dii_data(days=5, use_cache=False)
         today_fii = result[0].fii_net
         total_fii = sum(r.fii_net for r in result)
 

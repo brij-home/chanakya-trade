@@ -116,6 +116,34 @@
     - Wrap all debate futures in defensive 18.0s timeout wrappers with deterministic quantitative fallbacks.
     - Fast-fail provider authentication/key errors (`api_key_invalid`, `401`, `unauthorized`) immediately to prevent retry storms across model fallback loops.
     - Dispatch an immediate SSE start pulse (`type="debate_step", step="starting"`) as soon as Phase 2 starts to maintain responsive UI feedback.
+14. **RCA First & Holistic Strategic Fixes (No Patch Work)**:
+    - Never apply shallow surface-level band-aids. Always diagnose the true Root Cause Analysis (RCA) across the entire stack (data schemas, API contracts, state management, LLM routing, and DOM rendering).
+    - When a bug or exception occurs, identify *why* the failure mode was possible (e.g. unhandled status codes, missing model aliases, temporal dead zone ordering, unmounted states) and refactor the architecture to make that entire class of bugs impossible.
+    - If an immediate tactical fix is required for uptime, immediately follow up with the permanent strategic architectural fix.
+15. **Continuous Learning & Multi-Tier Model Resilience**:
+    - Treat external API limits, rate throttles, model deprecations, and network transient states (e.g. `503 UNAVAILABLE`, `429 RESOURCE_EXHAUSTED`, `high demand`) as expected operational realities.
+    - Build self-healing multi-tier resilience: (1) Comma-separated API key pools with automatic round-robin cooldown rotation, (2) Validated fallback model chains (`gemini-3.6-flash` -> `gemini-3.5-flash-lite` -> `gemini-3.5-flash`), and (3) Rich deterministic quantitative engine fallback (VIX + FII/DII + Minervini + SMC) so the terminal NEVER presents raw error strings or blank cards to the user.
+16. **Holistic Automated Validation & Regression Gates**:
+    - Whenever modifications are made to any core module (`agent/`, `analysis/`, `engine/`, `web/`, `ui/`, `macos-app/`), execute thorough automated validation suites to ensure cross-module integrity.
+    - Rebuild and test both ends of the bridge: verify the Vite bundle (`npm run build:web`), restart daemon processes, and validate API HTTP contracts end-to-end.
+17. **Explicit Fallback Observability & Self-Healing Telemetry Loop**:
+    - Whenever any fallback is triggered (`LLM_FAILOVER`, `LLM_COOLDOWN`, `QUANT_FALLBACK`, `DATA_FALLBACK`, `BROKER_FAILOVER`, `EXCEPTION`), the system MUST record a structured telemetry event via [`engine/telemetry.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/telemetry.py).
+    - API payloads and UI views must state their execution mode explicitly (e.g. `Analysis Engine: AI Multi-Agent` vs `Quantitative Engine (Deterministic Fallback)`).
+    - Periodically inspect telemetry events via `GET /skills/telemetry/summary` and CLI diagnostics to detect recurring rate limits, API drops, or missing data points, and proactively implement permanent architectural improvements.
+18. **High-Density Data Controls (Filtering, Sorting & Pagination Standards)**:
+    - All institutional data tables, radar cards, sector drilldown modals, and option chains must support rich data controls: (1) multi-factor filtering (e.g. Execution Status `READY`/`STALK`, Setup patterns, Strike distance `ATM ±5/±10`), (2) multi-column sorting (e.g. Conviction Score, Max Gain %, RS-Ratio, Alphabetical), (3) instant fuzzy search, and (4) paginated navigation with configurable page sizes (e.g. 5, 10, 20 items per view).
+    - Never overwhelm the DOM with unbounded lists; ensure predictable vertical bounds and immediate visual feedback.
+19. **Living Operational Memory & Continuous Self-Improvement**:
+    - Always learn from runtime anomalies, demand spikes, and user workflows.
+    - Permanently document newly discovered architectural invariants, UI ergonomics, and error prevention patterns in `AGENTS.md` and `.agents/skills/` runbooks to maintain a living, self-evolving institutional codebase.
+20. **Dynamic Risk-Gated Level Calibration & Directional Invariance**:
+    - Never use static legacy price levels (e.g. `21795.5` from 2024) in frontend state fallbacks or backend payload generators. Always compute dynamic levels relative to the currently active instrument's live price and ATR volatility bounds ($1.0\times - 1.2\times \text{ATR}$).
+    - Enforce strict directional integrity: trade actions (`LONG (BUY)` vs `SHORT (SELL)`) must strictly match the market structure score. Never default `action = "LONG"` when market structure is bearish, which inverts the stop-loss above entry on a "long" label.
+    - Every automated trade setup ticket must provide: (1) explicit timeline horizon (e.g. `1–3 Trading Sessions (Intraday Swing)`, `5–15 Trading Days (Positional Markup)`), (2) structured setup thesis explaining the technical confluence, and (3) explicit trailing stop rules (`2R Breakeven`, `Chandelier 3x ATR`).
+21. **Fullscreen Viewport Adaptability & 1-Click Chart Recenter Ergonomics**:
+    - All modal overlay charts and fullscreen displays must dynamically calculate available viewport heights (`Math.max(520, window.innerHeight * 0.92 - 95)`) so that secondary sub-panes (such as Stochastic RSI or MACD) are guaranteed dedicated vertical space without scroll cutoffs or clipping.
+    - Order Block (OB) ribbons must use ultra-sheer background fills ($1.5\%\text{--}2.5\%$ alpha) with dashed boundaries and semi-translucent glass chip badges to ensure candlesticks and wicks remain 100% visible and uncluttered.
+    - Charts must provide a dedicated 1-click `⟲ Reset View` button that calls `fitContent()`, restores price autoscale, and recalculates DOM overlay coordinates at 60fps.
 
 ---
 

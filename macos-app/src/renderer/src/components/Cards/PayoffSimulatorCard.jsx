@@ -64,6 +64,18 @@ export default function PayoffSimulatorCard({ initialSymbol = 'NIFTY', initialSp
   const [simData, setSimData] = useState(null)
   const [loading, setLoading] = useState(false)
 
+  // Sync with incoming props when underlying or spot price changes
+  useEffect(() => {
+    if (initialSymbol) setSymbol(initialSymbol)
+    if (initialSpot && initialSpot > 0) {
+      setSpotPrice(initialSpot)
+      setSliderSpot(initialSpot)
+      if (PRESETS[selectedPreset]) {
+        setLegs(PRESETS[selectedPreset](initialSpot))
+      }
+    }
+  }, [initialSymbol, initialSpot])
+
   // Apply preset
   const handlePresetSelect = (presetName) => {
     setSelectedPreset(presetName)
@@ -393,9 +405,10 @@ export default function PayoffSimulatorCard({ initialSymbol = 'NIFTY', initialSp
 function PayoffSVG({ expiryData = [], targetData = [], spotPrice, breakevens = [] }) {
   if (expiryData.length === 0) return null
 
+  const [hoveredPoint, setHoveredPoint] = useState(null)
   const width = 680
-  const height = 220
-  const pad = { top: 20, right: 30, bottom: 30, left: 50 }
+  const height = 240
+  const pad = { top: 25, right: 30, bottom: 35, left: 55 }
 
   const allPoints = [...expiryData, ...targetData]
   const minSpot = Math.min(...allPoints.map((p) => p.spot))
@@ -405,6 +418,7 @@ function PayoffSVG({ expiryData = [], targetData = [], spotPrice, breakevens = [
 
   const scaleX = (s) => pad.left + ((s - minSpot) / (maxSpot - minSpot || 1)) * (width - pad.left - pad.right)
   const scaleY = (p) => pad.top + ((maxPnl - p) / (maxPnl - minPnl || 1)) * (height - pad.top - pad.bottom)
+  const unscaleX = (x) => minSpot + ((x - pad.left) / (width - pad.left - pad.right)) * (maxSpot - minSpot)
 
   const zeroY = scaleY(0)
   const spotX = scaleX(spotPrice)
@@ -413,41 +427,201 @@ function PayoffSVG({ expiryData = [], targetData = [], spotPrice, breakevens = [
   const expPath = expiryData.map((p, i) => `${i === 0 ? 'M' : 'L'} ${scaleX(p.spot)} ${scaleY(p.pnl)}`).join(' ')
   const targetPath = targetData.map((p, i) => `${i === 0 ? 'M' : 'L'} ${scaleX(p.spot)} ${scaleY(p.pnl)}`).join(' ')
 
+  // Build Area Fills
+  const firstX = scaleX(expiryData[0].spot)
+  const lastX = scaleX(expiryData[expiryData.length - 1].spot)
+  const areaExpPath = `${expPath} L ${lastX} ${zeroY} L ${firstX} ${zeroY} Z`
+
+  const handleMouseMove = (e) => {
+    const rect = e.currentTarget.getBoundingClientRect()
+    const mouseX = ((e.clientX - rect.left) / rect.width) * width
+    if (mouseX >= pad.left && mouseX <= width - pad.right) {
+      const approxSpot = Math.round(unscaleX(mouseX))
+      // Find nearest point
+      const expPt = expiryData.reduce((prev, curr) =>
+        Math.abs(curr.spot - approxSpot) < Math.abs(prev.spot - approxSpot) ? curr : prev
+      )
+      const tgtPt = targetData.find((p) => p.spot === expPt.spot) || expPt
+      const pctDiff = ((expPt.spot - spotPrice) / spotPrice) * 100
+
+      setHoveredPoint({
+        spot: expPt.spot,
+        x: scaleX(expPt.spot),
+        expPnl: expPt.pnl,
+        tgtPnl: tgtPt.pnl,
+        pctDiff,
+      })
+    }
+  }
+
+  const handleMouseLeave = () => setHoveredPoint(null)
+
   return (
-    <svg viewBox={`0 0 ${width} ${height}`} className="w-full h-auto select-none overflow-visible">
-      {/* Grid Lines */}
-      <line x1={pad.left} y1={zeroY} x2={width - pad.right} y2={zeroY} stroke="#333333" strokeDasharray="3 3" strokeWidth="1.5" />
-      <text x={pad.left - 8} y={zeroY + 3} fill="#666" fontSize="10" textAnchor="end" fontFamily="monospace">₹0</text>
+    <div className="relative">
+      <svg
+        viewBox={`0 0 ${width} ${height}`}
+        onMouseMove={handleMouseMove}
+        onMouseLeave={handleMouseLeave}
+        className="w-full h-auto select-none overflow-visible cursor-crosshair"
+      >
+        <defs>
+          <linearGradient id="profitFill" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor="#22c55e" stopOpacity="0.25" />
+            <stop offset="100%" stopColor="#22c55e" stopOpacity="0.0" />
+          </linearGradient>
+          <linearGradient id="lossFill" x1="0" y1="1" x2="0" y2="0">
+            <stop offset="0%" stopColor="#ef4444" stopOpacity="0.25" />
+            <stop offset="100%" stopColor="#ef4444" stopOpacity="0.0" />
+          </linearGradient>
+        </defs>
 
-      {/* Spot Price vertical marker */}
-      {spotX >= pad.left && spotX <= width - pad.right && (
-        <g>
-          <line x1={spotX} y1={pad.top} x2={spotX} y2={height - pad.bottom} stroke="#f59e0b" strokeWidth="1.5" strokeDasharray="2 2" />
-          <circle cx={spotX} cy={zeroY} r="3" fill="#f59e0b" />
-        </g>
-      )}
+        {/* Shaded Area Under Curve */}
+        <path d={areaExpPath} fill="url(#profitFill)" opacity="0.8" />
 
-      {/* Breakeven lines */}
-      {breakevens.map((be, idx) => {
-        const bx = scaleX(be)
-        if (bx < pad.left || bx > width - pad.right) return null
-        return (
-          <g key={idx}>
-            <line x1={bx} y1={pad.top} x2={bx} y2={height - pad.bottom} stroke="#6b7280" strokeWidth="1" strokeDasharray="2 2" />
-            <text x={bx} y={height - pad.bottom + 12} fill="#9ca3af" fontSize="9" textAnchor="middle" fontFamily="monospace">
-              BE ₹{Math.round(be)}
+        {/* Zero P&L Axis */}
+        <line
+          x1={pad.left}
+          y1={zeroY}
+          x2={width - pad.right}
+          y2={zeroY}
+          stroke="#4b5563"
+          strokeDasharray="3 3"
+          strokeWidth="1.5"
+        />
+        <text
+          x={pad.left - 8}
+          y={zeroY + 3}
+          fill="#9ca3af"
+          fontSize="10"
+          textAnchor="end"
+          fontFamily="monospace"
+          fontWeight="bold"
+        >
+          ₹0
+        </text>
+
+        {/* Spot Price vertical marker */}
+        {spotX >= pad.left && spotX <= width - pad.right && (
+          <g>
+            <line
+              x1={spotX}
+              y1={pad.top}
+              x2={spotX}
+              y2={height - pad.bottom}
+              stroke="#f59e0b"
+              strokeWidth="1.8"
+              strokeDasharray="3 3"
+            />
+            <circle cx={spotX} cy={zeroY} r="4" fill="#f59e0b" stroke="#000" strokeWidth="1.5" />
+            <text
+              x={spotX}
+              y={pad.top - 6}
+              fill="#f59e0b"
+              fontSize="9"
+              textAnchor="middle"
+              fontFamily="monospace"
+              fontWeight="bold"
+            >
+              SPOT ₹{Math.round(spotPrice).toLocaleString('en-IN')}
             </text>
           </g>
-        )
-      })}
+        )}
 
-      {/* Expiry Payoff Line */}
-      <path d={expPath} fill="none" stroke="#22c55e" strokeWidth="2.5" />
+        {/* Breakeven lines */}
+        {breakevens.map((be, idx) => {
+          const bx = scaleX(be)
+          if (bx < pad.left || bx > width - pad.right) return null
+          return (
+            <g key={idx}>
+              <line
+                x1={bx}
+                y1={pad.top}
+                x2={bx}
+                y2={height - pad.bottom}
+                stroke="#9ca3af"
+                strokeWidth="1"
+                strokeDasharray="2 2"
+              />
+              <circle cx={bx} cy={zeroY} r="2.5" fill="#9ca3af" />
+              <text
+                x={bx}
+                y={height - pad.bottom + 14}
+                fill="#9ca3af"
+                fontSize="9"
+                textAnchor="middle"
+                fontFamily="monospace"
+              >
+                BE ₹{Math.round(be).toLocaleString('en-IN')}
+              </text>
+            </g>
+          )
+        })}
 
-      {/* Target Date T+0 Payoff Line */}
-      {targetPath && (
-        <path d={targetPath} fill="none" stroke="#3b82f6" strokeWidth="2" strokeDasharray="4 2" />
+        {/* Expiry Payoff Line */}
+        <path d={expPath} fill="none" stroke="#22c55e" strokeWidth="3" strokeLinecap="round" />
+
+        {/* Target Date T+DTE Payoff Line */}
+        {targetPath && (
+          <path d={targetPath} fill="none" stroke="#38bdf8" strokeWidth="2" strokeDasharray="4 3" />
+        )}
+
+        {/* Hover Crosshair Marker */}
+        {hoveredPoint && (
+          <g>
+            <line
+              x1={hoveredPoint.x}
+              y1={pad.top}
+              x2={hoveredPoint.x}
+              y2={height - pad.bottom}
+              stroke="#e5e7eb"
+              strokeWidth="1"
+              strokeDasharray="2 2"
+            />
+            <circle
+              cx={hoveredPoint.x}
+              cy={scaleY(hoveredPoint.expPnl)}
+              r="4.5"
+              fill={hoveredPoint.expPnl >= 0 ? '#22c55e' : '#ef4444'}
+              stroke="#ffffff"
+              strokeWidth="2"
+            />
+          </g>
+        )}
+      </svg>
+
+      {/* Dynamic Hover Tooltip Bubble */}
+      {hoveredPoint && (
+        <div
+          style={{
+            left: `${Math.max(10, Math.min(85, (hoveredPoint.x / width) * 100))}%`,
+            top: '8px',
+          }}
+          className="absolute -translate-x-1/2 bg-elevated/95 border border-border/80 backdrop-blur-md px-3 py-1.5 rounded-xl shadow-xl font-mono text-[11px] pointer-events-none z-30 flex items-center gap-3 animate-in fade-in"
+        >
+          <div>
+            <span className="text-muted block text-[9px]">UNDERLYING SPOT</span>
+            <span className="font-bold text-text">
+              ₹{hoveredPoint.spot.toLocaleString('en-IN')}{' '}
+              <span className={`text-[10px] ${hoveredPoint.pctDiff >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                ({hoveredPoint.pctDiff >= 0 ? '+' : ''}
+                {hoveredPoint.pctDiff.toFixed(1)}%)
+              </span>
+            </span>
+          </div>
+          <div className="border-l border-border/50 pl-2.5">
+            <span className="text-muted block text-[9px]">EXPIRY P&L</span>
+            <span className={`font-bold ${hoveredPoint.expPnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+              {hoveredPoint.expPnl >= 0 ? '+' : ''}₹{Math.round(hoveredPoint.expPnl).toLocaleString('en-IN')}
+            </span>
+          </div>
+          <div className="border-l border-border/50 pl-2.5">
+            <span className="text-muted block text-[9px]">T+TARGET P&L</span>
+            <span className={`font-bold ${hoveredPoint.tgtPnl >= 0 ? 'text-cyan-400' : 'text-rose-400'}`}>
+              {hoveredPoint.tgtPnl >= 0 ? '+' : ''}₹{Math.round(hoveredPoint.tgtPnl).toLocaleString('en-IN')}
+            </span>
+          </div>
+        </div>
       )}
-    </svg>
+    </div>
   )
 }

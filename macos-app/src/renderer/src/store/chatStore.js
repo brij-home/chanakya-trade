@@ -79,6 +79,51 @@ export const useChatStore = create((set, get) => ({
   },
   activeSessionId: defaultId,
 
+  // ── High-Fidelity Workspace Views ('terminal' | 'debate' | 'options' | 'copilot') ──
+  activeView: 'terminal',
+  setActiveView: (view) => set({ activeView: view }),
+
+  // ── Global In-Flight Activity & Progress HUD State ─────────
+  activeActivity: null, // { id, title, details, progress, type, cancelFn, startedAt }
+  startActivity: (activity) => {
+    set({
+      activeActivity: {
+        id: 'act-' + Date.now(),
+        title: activity.title || 'Processing Market Intelligence...',
+        details: activity.details || 'Computing institutional models...',
+        type: activity.type || 'quant',
+        progress: activity.progress || null,
+        cancelFn: activity.cancelFn || null,
+        startedAt: Date.now(),
+      },
+    })
+  },
+  updateActivity: (updates) => {
+    set((s) => {
+      if (!s.activeActivity) return {}
+      return { activeActivity: { ...s.activeActivity, ...updates } }
+    })
+  },
+  stopActivity: () => set({ activeActivity: null }),
+  cancelActiveActivity: () => {
+    const { activeActivity, streamCancel } = get()
+    if (activeActivity?.cancelFn) {
+      try {
+        activeActivity.cancelFn()
+      } catch (e) {
+        console.error('Cancel fn error', e)
+      }
+    }
+    if (streamCancel) {
+      try {
+        streamCancel()
+      } catch (e) {
+        console.error('Stream cancel error', e)
+      }
+    }
+    set({ activeActivity: null, streamCancel: null, isLoading: false })
+  },
+
   // ── Backward-compatible flat messages (swapped on session switch) ──
   messages:      [],
   isLoading:     false,
@@ -246,7 +291,7 @@ export const useChatStore = create((set, get) => ({
   draft: '',
   autoSubmit: false,
   setDraft: (text) => set({ draft: text, autoSubmit: false }),
-  sendDraft: (text) => set({ draft: text, autoSubmit: true, showDashboard: false }),
+  sendDraft: (text) => set({ draft: text, autoSubmit: true, showDashboard: false, activeView: 'copilot' }),
   clearAutoSubmit: () => set({ autoSubmit: false }),
 
   // Context queued while a streaming analysis is running (#102)

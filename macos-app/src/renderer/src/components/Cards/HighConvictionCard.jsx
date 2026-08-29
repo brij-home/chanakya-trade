@@ -21,6 +21,10 @@ export default function HighConvictionCard({ data, onOpenOrderTicket }) {
   const d = data?.data ?? data ?? {}
   const opportunities = d.opportunities || []
   const [filter, setFilter] = useState('ALL')
+  const [searchQuery, setSearchQuery] = useState('')
+  const [sortBy, setSortBy] = useState('score_desc')
+  const [page, setPage] = useState(1)
+  const [pageSize, setPageSize] = useState(5)
   const [expandedRow, setExpandedRow] = useState(null)
   const [telegramStatus, setTelegramStatus] = useState({})
   const { call } = useAPI()
@@ -54,18 +58,44 @@ export default function HighConvictionCard({ data, onOpenOrderTicket }) {
 
   // Filter logic
   const filteredOpps = opportunities.filter((opp) => {
-    if (filter === 'ALL') return true
-    const status = opp.eligibility_status || (opp.conviction_score >= 70 ? 'READY' : 'STALK')
-    if (filter === 'READY') return status === 'READY'
-    if (filter === 'STALK') return status === 'STALK'
-    if (filter === 'STAND_DOWN') return status === 'STAND_DOWN'
-    const setup = (opp.setup_type || '').toUpperCase()
-    if (filter === 'BREAKOUT') return setup.includes('BREAKOUT') || setup.includes('STAGE_2')
-    if (filter === 'VCP') return setup.includes('VCP')
-    if (filter === 'PULLBACK') return setup.includes('PULLBACK')
-    if (filter === 'BOTTOM_FISHING') return setup.includes('BOTTOM_FISHING')
-    return false
+    if (filter !== 'ALL') {
+      const status = opp.eligibility_status || (opp.conviction_score >= 70 ? 'READY' : 'STALK')
+      if (filter === 'READY' && status !== 'READY') return false
+      if (filter === 'STALK' && status !== 'STALK') return false
+      if (filter === 'STAND_DOWN' && status !== 'STAND_DOWN') return false
+      const setup = (opp.setup_type || '').toUpperCase()
+      if (filter === 'BREAKOUT' && !(setup.includes('BREAKOUT') || setup.includes('STAGE_2'))) return false
+      if (filter === 'VCP' && !setup.includes('VCP')) return false
+      if (filter === 'PULLBACK' && !setup.includes('PULLBACK')) return false
+      if (filter === 'BOTTOM_FISHING' && !setup.includes('BOTTOM_FISHING')) return false
+    }
+
+    if (searchQuery.trim()) {
+      const q = searchQuery.trim().toUpperCase()
+      const matchSymbol = opp.symbol?.toUpperCase().includes(q)
+      const matchSector = opp.sector?.toUpperCase().includes(q)
+      const matchSetup = opp.setup_type?.toUpperCase().includes(q)
+      if (!matchSymbol && !matchSector && !matchSetup) return false
+    }
+    return true
   })
+
+  // Sort logic
+  const sortedOpps = [...filteredOpps].sort((a, b) => {
+    if (sortBy === 'score_desc') return (b.conviction_score || 0) - (a.conviction_score || 0)
+    if (sortBy === 'score_asc') return (a.conviction_score || 0) - (b.conviction_score || 0)
+    if (sortBy === 'gain_desc') {
+      const gA = a.target_2 && a.entry_price ? ((a.target_2 - a.entry_price) / a.entry_price) * 100 : 0
+      const gB = b.target_2 && b.entry_price ? ((b.target_2 - b.entry_price) / b.entry_price) * 100 : 0
+      return gB - gA
+    }
+    if (sortBy === 'symbol_asc') return (a.symbol || '').localeCompare(b.symbol || '')
+    return 0
+  })
+
+  const totalPages = Math.max(1, Math.ceil(sortedOpps.length / pageSize))
+  const safePage = Math.min(page, totalPages)
+  const paginatedOpps = sortedOpps.slice((safePage - 1) * pageSize, safePage * pageSize)
 
   return (
     <div className="bg-elevated border border-border rounded-xl p-4 max-w-3xl w-full space-y-4 font-mono shadow-md">
@@ -151,6 +181,72 @@ export default function HighConvictionCard({ data, onOpenOrderTicket }) {
         </div>
       )}
 
+      {/* Search & Sort Controls Bar */}
+      <div className="flex flex-wrap items-center justify-between gap-2 bg-panel/70 border border-border/50 p-2 rounded-xl text-xs font-ui">
+        {/* Instant Search Input */}
+        <div className="relative flex-1 min-w-[160px]">
+          <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-muted text-xs">🔍</span>
+          <input
+            type="text"
+            value={searchQuery}
+            onChange={(e) => {
+              setSearchQuery(e.target.value)
+              setPage(1)
+            }}
+            placeholder="Search ticker, sector, or setup (e.g. INFY, IT, VCP)..."
+            className="w-full bg-surface border border-border/70 rounded-lg pl-7 pr-3 py-1.5 text-xs text-text placeholder:text-muted/60 focus:outline-none focus:border-amber/50 font-mono"
+          />
+          {searchQuery && (
+            <button
+              onClick={() => {
+                setSearchQuery('')
+                setPage(1)
+              }}
+              className="absolute right-2 top-1/2 -translate-y-1/2 text-muted hover:text-text text-xs"
+            >
+              ✕
+            </button>
+          )}
+        </div>
+
+        {/* Sort Selector */}
+        <div className="flex items-center gap-1.5">
+          <span className="text-[11px] text-muted whitespace-nowrap">Sort:</span>
+          <select
+            value={sortBy}
+            onChange={(e) => {
+              setSortBy(e.target.value)
+              setPage(1)
+            }}
+            className="bg-surface border border-border/70 text-text rounded-lg px-2.5 py-1.5 text-xs font-mono focus:outline-none focus:border-amber/50 cursor-pointer"
+          >
+            <option value="score_desc">Conviction (High → Low)</option>
+            <option value="score_asc">Conviction (Low → High)</option>
+            <option value="gain_desc">Max Upside T2 (High → Low)</option>
+            <option value="symbol_asc">Symbol (A → Z)</option>
+          </select>
+        </div>
+
+        {/* Page Size Selector */}
+        <div className="flex items-center gap-1">
+          <span className="text-[11px] text-muted">Show:</span>
+          {[5, 10, 20].map((sz) => (
+            <button
+              key={sz}
+              onClick={() => {
+                setPageSize(sz)
+                setPage(1)
+              }}
+              className={`px-2 py-0.5 rounded text-[11px] font-mono cursor-pointer transition-all ${
+                pageSize === sz ? 'bg-amber text-black font-bold' : 'bg-surface text-muted hover:text-text border border-border/40'
+              }`}
+            >
+              {sz}
+            </button>
+          ))}
+        </div>
+      </div>
+
       {/* Filter Tabs */}
       <div className="flex items-center gap-1.5 overflow-x-auto pb-1 text-xs font-ui">
         {[
@@ -164,7 +260,10 @@ export default function HighConvictionCard({ data, onOpenOrderTicket }) {
         ].map((tab) => (
           <button
             key={tab.id}
-            onClick={() => setFilter(tab.id)}
+            onClick={() => {
+              setFilter(tab.id)
+              setPage(1)
+            }}
             className={`px-2.5 py-1 rounded-lg text-xs font-medium transition-colors cursor-pointer flex-shrink-0 ${
               filter === tab.id
                 ? (tab.activeClass || 'bg-amber text-black font-bold')
@@ -178,12 +277,12 @@ export default function HighConvictionCard({ data, onOpenOrderTicket }) {
 
       {/* Opportunity Table / Card List */}
       <div className="space-y-2">
-        {filteredOpps.length === 0 ? (
+        {sortedOpps.length === 0 ? (
           <div className="p-6 text-center text-muted text-xs font-ui bg-panel rounded-lg border border-border/40">
-            No opportunities match this filter in the current scan.
+            No opportunities match your filter or search query.
           </div>
         ) : (
-          filteredOpps.map((opp) => {
+          paginatedOpps.map((opp) => {
             const isExpanded = expandedRow === opp.symbol
             const scoreColor =
               opp.conviction_score >= 85 ? 'text-green' : opp.conviction_score >= 70 ? 'text-amber' : 'text-blue'
@@ -382,12 +481,52 @@ export default function HighConvictionCard({ data, onOpenOrderTicket }) {
                     </div>
                   </div>
                 )}
-
               </div>
             )
           })
         )}
       </div>
+
+      {/* Pagination Bar */}
+      {totalPages > 1 && (
+        <div className="flex flex-wrap items-center justify-between gap-2 bg-panel/80 border border-border/50 px-3 py-2 rounded-xl text-xs font-mono">
+          <span className="text-muted text-[11px]">
+            Showing {(safePage - 1) * pageSize + 1}–{Math.min(safePage * pageSize, sortedOpps.length)} of {sortedOpps.length} opportunities
+          </span>
+
+          <div className="flex items-center gap-1">
+            <button
+              onClick={() => setPage((p) => Math.max(1, p - 1))}
+              disabled={safePage === 1}
+              className="px-2.5 py-1 rounded bg-surface border border-border text-muted hover:text-text disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer transition-colors"
+            >
+              ← Prev
+            </button>
+
+            {Array.from({ length: totalPages }, (_, i) => i + 1).map((pNum) => (
+              <button
+                key={pNum}
+                onClick={() => setPage(pNum)}
+                className={`w-7 h-7 rounded text-xs font-bold transition-all cursor-pointer ${
+                  safePage === pNum
+                    ? 'bg-amber text-black'
+                    : 'bg-surface border border-border text-muted hover:text-text'
+                }`}
+              >
+                {pNum}
+              </button>
+            ))}
+
+            <button
+              onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+              disabled={safePage === totalPages}
+              className="px-2.5 py-1 rounded bg-surface border border-border text-muted hover:text-text disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer transition-colors"
+            >
+              Next →
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Footer Summary */}
       <div className="text-[11px] text-muted font-ui leading-relaxed bg-panel p-2.5 rounded border border-border/40">

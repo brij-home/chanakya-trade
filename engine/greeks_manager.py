@@ -40,6 +40,16 @@ class _PortfolioGreeksLike:
     by_underlying: dict = field(default_factory=dict)
 
 
+LOT_SIZES: dict[str, int] = {
+    "NIFTY": 75,
+    "BANKNIFTY": 15,
+    "FINNIFTY": 40,
+    "MIDCPNIFTY": 50,
+    "SENSEX": 10,
+    "BANKEX": 15,
+}
+
+
 # ── Delta Hedge ──────────────────────────────────────────────
 
 
@@ -48,55 +58,109 @@ class DeltaHedgeSuggestion:
     current_delta: float
     target_delta: float
     gap: float  # how much delta to add (positive) or remove (negative)
-    suggestions: list[dict]  # [{"action", "instrument", "lots", "delta_change"}]
+    suggestions: list[dict]  # [{"action", "instrument", "lots", "delta_change", "why", "when", "how"}]
     cost_estimate: float = 0.0
+    lot_size: int = 75
+    rupee_sensitivity: float = 0.0
+    why: str = ""
+    when: str = ""
+    how: str = ""
 
 
 def compute_delta_hedge(
     net_delta: float,
     target_delta: float = 0.0,
-    lot_size: int = 25,
+    lot_size: int | None = None,
     underlying: str = "NIFTY",
     tolerance: float = 10.0,
+    spot_price: float = 24250.0,
 ) -> DeltaHedgeSuggestion:
     """
-    Compute trades needed to move portfolio delta toward target.
+    Compute realistic trades needed to move portfolio delta toward target.
 
     Args:
-        net_delta: current net portfolio delta
+        net_delta: current net portfolio delta (shares/units equivalent)
         target_delta: desired delta (0 = delta-neutral)
-        lot_size: lot size for the hedging instrument
+        lot_size: lot size for the hedging instrument (auto-resolved if None)
         underlying: index/stock for hedging
         tolerance: don't hedge if gap is within this range
+        spot_price: current underlying spot price for cash sensitivity calculation
 
     Returns:
-        DeltaHedgeSuggestion with concrete trade suggestions.
+        DeltaHedgeSuggestion with concrete trade suggestions and why/when/how rationale.
     """
+    sym = underlying.upper().replace("NSE:", "").replace("NFO:", "")
+    actual_lot_size = lot_size if lot_size is not None else LOT_SIZES.get(sym, 75)
+
     gap = target_delta - net_delta  # positive = need to buy, negative = need to sell
     suggestions = []
 
-    if abs(gap) <= tolerance:
+    # Calculate monetary cash sensitivity per 1% move in underlying
+    point_move_1pct = spot_price * 0.01
+    rupee_sensitivity = round(net_delta * point_move_1pct, 2)
+
+    # Why, When, How narrative explanations
+    abs_gap = abs(gap)
+    pts_1pct = round(point_move_1pct, 1)
+
+    if net_delta > tolerance:
+        direction = "Long Delta (Bullish Exposure)"
+        risk_desc = f"If {sym} drops 1% (~₹{pts_1pct} pts), the options book suffers an immediate ~₹{abs(rupee_sensitivity):,.0f} loss from directional delta drift before volatility/gamma compensations."
+    elif net_delta < -tolerance:
+        direction = "Short Delta (Bearish Exposure)"
+        risk_desc = f"If {sym} rallies 1% (~₹{pts_1pct} pts), the options book suffers an immediate ~₹{abs(rupee_sensitivity):,.0f} loss from upside delta drift."
+    else:
+        direction = "Delta Neutral"
+        risk_desc = f"Portfolio directional exposure is balanced within tolerance (±{tolerance} delta). No mandatory delta hedge required."
+
+    why_text = (
+        f"Directional Risk Stance: {direction}. {risk_desc} "
+        f"Delta hedging neutralizes directional drift, isolating pure Theta time decay and Vega volatility capture."
+    )
+
+    when_text = (
+        f"1. Spot Drift: Rebalance when {sym} moves > ±0.75% (~₹{round(spot_price * 0.0075)} pts) from current spot (₹{spot_price:,.0f}).\n"
+        f"2. Greek Threshold: Rebalance whenever Net Delta deviates beyond ±{tolerance:.1f} from target {target_delta:.1f}.\n"
+        f"3. Time of Day: Execute rebalance around 03:15 PM IST to mitigate overnight gap risk, or ahead of major macro announcements."
+    )
+
+    if abs_gap <= tolerance:
         return DeltaHedgeSuggestion(
             current_delta=net_delta,
             target_delta=target_delta,
             gap=gap,
             suggestions=[],
+            lot_size=actual_lot_size,
+            rupee_sensitivity=rupee_sensitivity,
+            why=why_text,
+            when=when_text,
+            how="Portfolio is within safe delta neutral bounds. Maintain current positions and monitor 03:15 PM IST closing drift.",
         )
 
-    # Futures hedge (delta ≈ 1.0 per lot × lot_size)
-    delta_per_lot = lot_size  # 1 future lot = lot_size delta
-    lots_needed = abs(gap) / delta_per_lot
-    lots_rounded = math.ceil(lots_needed)
+    # Futures hedge (1 future lot = actual_lot_size delta)
+    delta_per_lot = actual_lot_size
+    lots_needed = abs_gap / delta_per_lot
+    lots_rounded = max(1, math.ceil(lots_needed))
+    est_margin = round(lots_rounded * actual_lot_size * spot_price * 0.11)
+
+    how_text = (
+        f"Route a LIMIT order to {'BUY' if gap > 0 else 'SELL'} {lots_rounded} Lot{'s' if lots_rounded > 1 else ''} "
+        f"({lots_rounded * actual_lot_size} Qty) of {sym} nearest-expiry Futures at ₹{spot_price:,.2f} "
+        f"(Est. Margin: ₹{est_margin:,.0f}) with an invalidation stop-loss placed ±{round(spot_price * 0.005)} pts away."
+    )
 
     if gap > 0:
         # Need positive delta: BUY futures
         suggestions.append(
             {
                 "action": "BUY",
-                "instrument": f"{underlying} FUT (nearest expiry)",
+                "instrument": f"{sym} FUT (nearest expiry)",
                 "lots": lots_rounded,
+                "quantity": lots_rounded * actual_lot_size,
                 "delta_change": f"+{lots_rounded * delta_per_lot:.0f}",
-                "note": f"Adds +{lots_rounded * delta_per_lot:.0f} delta",
+                "margin_required": est_margin,
+                "note": f"Adds +{lots_rounded * delta_per_lot:.0f} delta with zero theta decay",
+                "strategy_type": "FUTURES",
             }
         )
     else:
@@ -104,41 +168,46 @@ def compute_delta_hedge(
         suggestions.append(
             {
                 "action": "SELL",
-                "instrument": f"{underlying} FUT (nearest expiry)",
+                "instrument": f"{sym} FUT (nearest expiry)",
                 "lots": lots_rounded,
+                "quantity": lots_rounded * actual_lot_size,
                 "delta_change": f"-{lots_rounded * delta_per_lot:.0f}",
-                "note": f"Reduces delta by {lots_rounded * delta_per_lot:.0f}",
+                "margin_required": est_margin,
+                "note": f"Reduces delta by {lots_rounded * delta_per_lot:.0f} with zero theta decay",
+                "strategy_type": "FUTURES",
             }
         )
 
-    # Also suggest options alternative
-    if abs(gap) > 50:
-        if gap > 0:
-            suggestions.append(
-                {
-                    "action": "BUY",
-                    "instrument": f"{underlying} ATM CE (alternative)",
-                    "lots": lots_rounded * 2,  # delta ~0.5 per option
-                    "delta_change": f"+{lots_rounded * delta_per_lot:.0f}",
-                    "note": "Options: ~0.5 delta per lot, need 2x lots",
-                }
-            )
-        else:
-            suggestions.append(
-                {
-                    "action": "BUY",
-                    "instrument": f"{underlying} ATM PE (alternative)",
-                    "lots": lots_rounded * 2,
-                    "delta_change": f"-{lots_rounded * delta_per_lot:.0f}",
-                    "note": "Options: ~-0.5 delta per lot, need 2x lots",
-                }
-            )
+    # Options hedge alternative (ATM option has ~0.50 delta per share)
+    opt_lots = max(1, math.ceil((abs_gap / (actual_lot_size * 0.5))))
+    opt_strike = round(spot_price / 50) * 50
+    opt_type = "CE" if gap > 0 else "PE"
+    opt_cost = round(opt_lots * actual_lot_size * (spot_price * 0.008))
+
+    suggestions.append(
+        {
+            "action": "BUY",
+            "instrument": f"{sym} {opt_strike} {opt_type} (nearest expiry)",
+            "lots": opt_lots,
+            "quantity": opt_lots * actual_lot_size,
+            "delta_change": f"{'+' if gap > 0 else '-'}{opt_lots * actual_lot_size * 0.5:.0f}",
+            "margin_required": opt_cost,
+            "note": f"Defined-risk option hedge: adds {'+' if gap > 0 else '-'}{opt_lots * actual_lot_size * 0.5:.0f} delta with capped max risk",
+            "strategy_type": "OPTIONS",
+        }
+    )
 
     return DeltaHedgeSuggestion(
         current_delta=net_delta,
         target_delta=target_delta,
         gap=gap,
         suggestions=suggestions,
+        cost_estimate=float(est_margin),
+        lot_size=actual_lot_size,
+        rupee_sensitivity=rupee_sensitivity,
+        why=why_text,
+        when=when_text,
+        how=how_text,
     )
 
 
