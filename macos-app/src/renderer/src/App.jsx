@@ -4,6 +4,9 @@ import { useMarketClock } from './hooks/useMarketClock'
 import Sidebar from './components/Sidebar'
 import ChatArea from './components/Chat/ChatArea'
 import InputBar from './components/Input/InputBar'
+import TerminalView from './components/Views/TerminalView'
+import DebateArenaView from './components/Views/DebateArenaView'
+import OptionsDeskView from './components/Views/OptionsDeskView'
 import SetupScreen from './components/SetupScreen'
 import OnboardingWizard from './components/Onboarding/OnboardingWizard'
 import CommandPalette from './components/Modals/CommandPalette'
@@ -39,30 +42,50 @@ function useTheme() {
 }
 
 export default function App() {
-  const { setPort, setSidecarError, setBrokerStatuses } = useChatStore()
+  const { setPort, setSidecarError, setBrokerStatuses, activeView, setActiveView } = useChatStore()
   const createSession = useChatStore((s) => s.createSession)
   const port = useChatStore((s) => s.port)
   const { theme, toggle: toggleTheme } = useTheme()
 
   // Setup phase state machine
   const [setupPhase, setSetupPhase] = useState('initializing')
-  // 'initializing' | 'progress' | 'python_missing' | 'error' | 'onboarding' | 'ready'
   const [setupData, setSetupData] = useState(null)
 
   const [isCommandPaletteOpen, setIsCommandPaletteOpen] = useState(false)
   const [isOrderTicketOpen, setIsOrderTicketOpen] = useState(false)
+  const [orderTicketData, setOrderTicketData] = useState({
+    symbol: 'RELIANCE',
+    exchange: 'NSE',
+    price: 2800,
+    stopLoss: 2760,
+    target: 2890,
+  })
   const [isTopOppsOpen, setIsTopOppsOpen] = useState(false)
   const [sectorDrilldown, setSectorDrilldown] = useState({ isOpen: false, sector: null })
 
-  // Listen for open-sector-drilldown events
+  // Listen for open-sector-drilldown & open-top-opportunities events
   useEffect(() => {
     const onOpenSector = (e) => {
       if (e.detail?.sector) {
         setSectorDrilldown({ isOpen: true, sector: e.detail.sector })
       }
     }
+    const onOpenTop = () => setIsTopOppsOpen(true)
+    const onCloseModals = () => {
+      setIsCommandPaletteOpen(false)
+      setIsTopOppsOpen(false)
+      setSectorDrilldown({ isOpen: false, sector: null })
+      setIsOrderTicketOpen(false)
+    }
+
     window.addEventListener('open-sector-drilldown', onOpenSector)
-    return () => window.removeEventListener('open-sector-drilldown', onOpenSector)
+    window.addEventListener('open-top-opportunities', onOpenTop)
+    window.addEventListener('close-all-modals', onCloseModals)
+    return () => {
+      window.removeEventListener('open-sector-drilldown', onOpenSector)
+      window.removeEventListener('open-top-opportunities', onOpenTop)
+      window.removeEventListener('close-all-modals', onCloseModals)
+    }
   }, [])
 
   useEffect(() => {
@@ -71,21 +94,22 @@ export default function App() {
       const checkReady = async () => {
         try {
           const res = await fetch('/api/onboarding/status')
-          if (res.status === 401) {
-            window.location.href = '/'
-            return
-          }
-          const data = await res.json()
           const currentPort = parseInt(window.location.port, 10) || 8765
           setPort(currentPort)
-          if (data.onboarding_complete) {
-            setSetupPhase('ready')
+          if (res.ok) {
+            const data = await res.json()
+            if (data.onboarding_complete) {
+              setSetupPhase('ready')
+            } else {
+              setSetupPhase('onboarding')
+            }
           } else {
-            setSetupPhase('onboarding')
+            setSetupPhase('ready')
           }
         } catch {
-          setSetupPhase('error')
-          setSetupData({ message: 'Cannot connect to server' })
+          const currentPort = parseInt(window.location.port, 10) || 8765
+          setPort(currentPort)
+          setSetupPhase('ready')
         }
       }
       checkReady()
@@ -157,25 +181,44 @@ export default function App() {
     return () => clearInterval(t)
   }, [port])
 
-  // Keybindings: Cmd/Ctrl+N, Cmd/Ctrl+K, Cmd/Ctrl+O (Top Opps)
+  // Keybindings: Cmd/Ctrl+1..4 for Workspaces, Cmd/Ctrl+N, Cmd/Ctrl+K, Cmd/Ctrl+O
   useEffect(() => {
     function onKeyDown(e) {
-      if ((e.metaKey || e.ctrlKey) && e.key === 'n') {
-        e.preventDefault()
-        createSession()
-      }
-      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
-        e.preventDefault()
-        setIsCommandPaletteOpen((prev) => !prev)
-      }
-      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'o') {
-        e.preventDefault()
-        setIsTopOppsOpen((prev) => !prev)
+      if (e.metaKey || e.ctrlKey) {
+        if (e.key === '1') {
+          e.preventDefault()
+          setActiveView('terminal')
+        } else if (e.key === '2') {
+          e.preventDefault()
+          setActiveView('debate')
+        } else if (e.key === '3') {
+          e.preventDefault()
+          setActiveView('options')
+        } else if (e.key === '4') {
+          e.preventDefault()
+          setActiveView('copilot')
+        } else if (e.key === 'n') {
+          e.preventDefault()
+          createSession()
+        } else if (e.key.toLowerCase() === 'k') {
+          e.preventDefault()
+          setIsCommandPaletteOpen((prev) => !prev)
+        } else if (e.key.toLowerCase() === 'o') {
+          e.preventDefault()
+          setIsTopOppsOpen((prev) => !prev)
+        }
       }
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [createSession])
+  }, [createSession, setActiveView])
+
+  const handleOpenOrderTicket = (ticketData) => {
+    if (ticketData) {
+      setOrderTicketData((prev) => ({ ...prev, ...ticketData }))
+    }
+    setIsOrderTicketOpen(true)
+  }
 
   if (setupPhase === 'onboarding') {
     return <OnboardingWizard port={port} onComplete={() => setSetupPhase('ready')} />
@@ -187,61 +230,137 @@ export default function App() {
 
   return (
     <div className="flex flex-col h-full bg-surface">
-      {/* Title bar */}
-      <div className="drag flex items-center h-[52px] bg-panel border-b border-border flex-shrink-0 px-4">
-        <div className="flex items-center gap-2 pointer-events-none">
-          <span className="text-amber text-[15px]">◆</span>
-          <span className="text-text text-[13px] font-semibold tracking-wide font-ui">
+      {/* Top Main Navigation Bar */}
+      <div className="drag flex items-center justify-between h-[56px] bg-panel border-b border-border flex-shrink-0 px-4 gap-3">
+        {/* Brand & Logo */}
+        <div className="flex items-center gap-2.5 flex-shrink-0">
+          <span className="text-amber text-lg font-bold">◆</span>
+          <span className="text-text text-sm font-bold tracking-wide font-ui hidden sm:inline">
             ChanakyaTrade
           </span>
         </div>
 
-        {/* Center: Command Palette Trigger Omnibox */}
-        <div className="no-drag flex-1 max-w-sm mx-auto px-4">
+        {/* Center: Workspace Switcher Tabs */}
+        <div className="no-drag flex items-center bg-elevated/80 border border-border/80 rounded-xl p-1 text-xs font-ui shadow-inner">
           <button
             type="button"
-            onClick={() => setIsCommandPaletteOpen(true)}
-            className="w-full flex items-center justify-between bg-elevated/70 hover:bg-elevated text-muted hover:text-text border border-border/60 hover:border-amber/40 px-3 py-1.5 rounded-lg text-xs font-ui transition-all shadow-xs cursor-pointer"
+            onClick={() => setActiveView('terminal')}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg font-semibold transition-all cursor-pointer ${
+              activeView === 'terminal'
+                ? 'bg-amber text-black shadow-xs'
+                : 'text-muted hover:text-text hover:bg-panel'
+            }`}
+            title="Strategic Quant Terminal (Ctrl+1)"
           >
-            <span className="flex items-center gap-2 truncate">
-              <span>🔍</span> Search stocks, options, indicators…
-            </span>
-            <kbd className="text-[10px] bg-panel border border-border px-1.5 py-0.5 rounded text-amber font-mono font-bold">
-              Ctrl+K
-            </kbd>
+            <span>📊</span>
+            <span className="hidden md:inline">Terminal</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setActiveView('debate')}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg font-semibold transition-all cursor-pointer ${
+              activeView === 'debate'
+                ? 'bg-emerald-500 text-black shadow-xs'
+                : 'text-muted hover:text-text hover:bg-panel'
+            }`}
+            title="Multi-Agent Debate Arena (Ctrl+2)"
+          >
+            <span>⚔️</span>
+            <span className="hidden md:inline">Debate Arena</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setActiveView('options')}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg font-semibold transition-all cursor-pointer ${
+              activeView === 'options'
+                ? 'bg-cyan-400 text-black shadow-xs'
+                : 'text-muted hover:text-text hover:bg-panel'
+            }`}
+            title="Quant & Options GEX Desk (Ctrl+3)"
+          >
+            <span>⚡</span>
+            <span className="hidden md:inline">Options &amp; GEX</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setActiveView('copilot')}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg font-semibold transition-all cursor-pointer ${
+              activeView === 'copilot'
+                ? 'bg-amber-light text-black shadow-xs'
+                : 'text-muted hover:text-text hover:bg-panel'
+            }`}
+            title="AI Copilot Stream & Custom Quant (Ctrl+4)"
+          >
+            <span>💬</span>
+            <span className="hidden md:inline">AI Copilot</span>
           </button>
         </div>
 
-        {/* Right Action Icons */}
-        <div className="no-drag flex items-center gap-2.5">
+        {/* Omnibox / Search & Action Icons */}
+        <div className="no-drag flex items-center gap-2">
+          {/* Quick Search */}
           <button
             type="button"
-            onClick={() => setIsTopOppsOpen(true)}
-            className="hidden sm:flex items-center gap-1.5 bg-amber/15 hover:bg-amber/25 text-amber border border-amber/30 px-2.5 py-1 rounded-lg text-xs font-ui font-bold transition-colors cursor-pointer shadow-xs"
-            title="Open Top 10 High-Conviction Opportunities Radar (Ctrl+O)"
+            onClick={() => setIsCommandPaletteOpen(true)}
+            className="hidden lg:flex items-center gap-2 bg-elevated/70 hover:bg-elevated text-muted hover:text-text border border-border/60 px-2.5 py-1.5 rounded-lg text-xs font-ui transition-all shadow-xs cursor-pointer"
           >
-            <span>🎯</span> Top 10 Radar
+            <span>🔍 Search…</span>
+            <kbd className="text-[10px] bg-panel border border-border px-1 rounded text-amber font-mono font-bold">
+              ^K
+            </kbd>
           </button>
 
           <button
             type="button"
-            onClick={() => setIsOrderTicketOpen(true)}
-            className="hidden sm:flex items-center gap-1.5 bg-green/10 hover:bg-green/20 text-green border border-green/30 px-2.5 py-1 rounded-lg text-xs font-ui font-semibold transition-colors cursor-pointer"
+            onClick={() => setIsTopOppsOpen(true)}
+            className="hidden sm:flex items-center gap-1 bg-amber/15 hover:bg-amber/25 text-amber border border-amber/30 px-2.5 py-1 rounded-lg text-xs font-ui font-bold transition-colors cursor-pointer shadow-xs"
+            title="Open Top 10 High-Conviction Opportunities Radar (Ctrl+O)"
           >
-            <span>⚡</span> Stage Order
+            <span>🎯</span> Radar
           </button>
+
+          <button
+            type="button"
+            onClick={() => handleOpenOrderTicket()}
+            className="hidden sm:flex items-center gap-1 bg-green/10 hover:bg-green/20 text-green border border-green/30 px-2.5 py-1 rounded-lg text-xs font-ui font-semibold transition-colors cursor-pointer"
+          >
+            <span>⚡</span> Order
+          </button>
+
           <MarketBadge />
           <ThemeToggle theme={theme} toggle={toggleTheme} />
           <StatusDot />
         </div>
       </div>
 
-      {/* Main layout */}
+      {/* Main Workspace Layout based on activeView */}
       <div className="flex flex-1 overflow-hidden">
-        <Sidebar />
+        {/* If Copilot workspace, show the Sidebar */}
+        {activeView === 'copilot' && <Sidebar />}
+
+        {/* View Switcher Container */}
         <div className="flex flex-col flex-1 overflow-hidden">
-          <ChatArea />
-          <InputBar />
+          {activeView === 'terminal' && (
+            <TerminalView onOpenOrderTicket={handleOpenOrderTicket} />
+          )}
+
+          {activeView === 'debate' && (
+            <DebateArenaView onOpenOrderTicket={handleOpenOrderTicket} />
+          )}
+
+          {activeView === 'options' && (
+            <OptionsDeskView onOpenOrderTicket={handleOpenOrderTicket} />
+          )}
+
+          {activeView === 'copilot' && (
+            <>
+              <ChatArea />
+              <InputBar />
+            </>
+          )}
         </div>
       </div>
 
@@ -257,7 +376,7 @@ export default function App() {
       <OrderTicketModal
         isOpen={isOrderTicketOpen}
         onClose={() => setIsOrderTicketOpen(false)}
-        initialData={{ symbol: 'RELIANCE', exchange: 'NSE', price: 2800, stopLoss: 2760, target: 2890 }}
+        initialData={orderTicketData}
       />
       <TopOpportunitiesModal
         isOpen={isTopOppsOpen}

@@ -27,7 +27,7 @@ export const QUICK_COMMANDS = [
 ]
 
 export default function Sidebar() {
-  const { isLoading, brokerStatuses, port } = useChatStore()
+  const { isLoading, brokerStatuses, port, activeView, setActiveView } = useChatStore()
   const sessions = useChatStore((s) => s.sessions)
   const activeSessionId = useChatStore((s) => s.activeSessionId)
   const createSession = useChatStore((s) => s.createSession)
@@ -51,33 +51,81 @@ export default function Sidebar() {
       {/* Broker panel overlay */}
       {showBrokerPanel && <BrokerPanel onClose={() => setShowBrokerPanel(false)} />}
 
-      {/* Navigation: Overview Dashboard & New Session */}
-      <div className="px-3 pt-3 pb-2 space-y-1.5">
+      {/* Workspace Quick Jump */}
+      <div className="px-3 pt-3 pb-2 space-y-1 border-b border-border/50">
+        <div className="flex items-center justify-between px-1 pb-1">
+          <span className="text-[10px] uppercase font-ui tracking-wider text-muted font-bold">Workspaces</span>
+        </div>
         <button
-          onClick={() => setShowDashboard(true)}
-          className={`w-full flex items-center gap-2 px-3 py-2 rounded-lg border text-[12px] font-ui transition-colors cursor-pointer ${
-            showDashboard
-              ? 'bg-amber/15 border-amber/40 text-amber font-semibold shadow-xs'
+          onClick={() => setActiveView('terminal')}
+          className={`w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg border text-[11px] font-ui transition-colors cursor-pointer ${
+            activeView === 'terminal'
+              ? 'bg-amber/15 border-amber/40 text-amber font-bold shadow-xs'
               : 'border-border/60 text-muted hover:text-text hover:bg-elevated'
           }`}
-          title="Return to Home / Overview Dashboard"
+          title="Switch to Strategic Quant Terminal (Ctrl+1)"
         >
-          <span>🏠</span>
-          <span>Overview Dashboard</span>
+          <span>📊</span>
+          <span>Terminal</span>
+          <span className="ml-auto text-[9px] text-subtle font-mono">^1</span>
         </button>
 
         <button
-          onClick={() => { setShowDashboard(false); createSession(); }}
+          onClick={() => setActiveView('debate')}
+          className={`w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg border text-[11px] font-ui transition-colors cursor-pointer ${
+            activeView === 'debate'
+              ? 'bg-emerald-500/15 border-emerald-500/40 text-emerald-400 font-bold shadow-xs'
+              : 'border-border/60 text-muted hover:text-text hover:bg-elevated'
+          }`}
+          title="Switch to Multi-Agent Debate Arena (Ctrl+2)"
+        >
+          <span>⚔️</span>
+          <span>Debate Arena</span>
+          <span className="ml-auto text-[9px] text-subtle font-mono">^2</span>
+        </button>
+
+        <button
+          onClick={() => setActiveView('options')}
+          className={`w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg border text-[11px] font-ui transition-colors cursor-pointer ${
+            activeView === 'options'
+              ? 'bg-cyan-500/15 border-cyan-500/40 text-cyan-400 font-bold shadow-xs'
+              : 'border-border/60 text-muted hover:text-text hover:bg-elevated'
+          }`}
+          title="Switch to Quant Options & GEX Desk (Ctrl+3)"
+        >
+          <span>⚡</span>
+          <span>Options &amp; GEX</span>
+          <span className="ml-auto text-[9px] text-subtle font-mono">^3</span>
+        </button>
+      </div>
+
+      {/* Navigation: Overview Dashboard & New Session */}
+      <div className="px-3 pt-2 pb-2 space-y-1.5">
+        <button
+          onClick={() => { setActiveView('copilot'); setShowDashboard(true); }}
+          className={`w-full flex items-center gap-2 px-3 py-1.5 rounded-lg border text-[11px] font-ui transition-colors cursor-pointer ${
+            showDashboard && activeView === 'copilot'
+              ? 'bg-amber/15 border-amber/40 text-amber font-semibold shadow-xs'
+              : 'border-border/60 text-muted hover:text-text hover:bg-elevated'
+          }`}
+          title="Return to Copilot Dashboard"
+        >
+          <span>🏠</span>
+          <span>Copilot Overview</span>
+        </button>
+
+        <button
+          onClick={() => { setActiveView('copilot'); setShowDashboard(false); createSession(); }}
           className="w-full flex items-center gap-2 px-3 py-1.5 rounded-lg border border-border/60
-                     text-[12px] font-ui text-muted hover:text-text hover:bg-elevated
+                     text-[11px] font-ui text-muted hover:text-text hover:bg-elevated
                      transition-colors cursor-pointer"
           title="Start a new analysis session"
         >
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
             <path d="M12 5v14M5 12h14" />
           </svg>
           <span>New Session</span>
-          <span className="ml-auto text-[10px] text-subtle font-ui">⌘N</span>
+          <span className="ml-auto text-[9px] text-subtle font-mono">^N</span>
         </button>
       </div>
 

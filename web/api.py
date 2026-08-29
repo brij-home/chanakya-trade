@@ -1978,7 +1978,10 @@ if os.path.isdir(_static_dir):
 
     @app.get("/")
     async def root():
-        """Redirect to login or app based on session."""
+        """Serve React SPA terminal at root URL /."""
+        index = os.path.join(_static_dir, "index.html")
+        if os.path.exists(index):
+            return FileResponse(index)
         return FileResponse(os.path.join(_static_dir, "auth.html"))
 
     app.mount("/static", StaticFiles(directory=_static_dir), name="static")

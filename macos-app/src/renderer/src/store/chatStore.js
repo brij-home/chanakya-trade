@@ -79,6 +79,10 @@ export const useChatStore = create((set, get) => ({
   },
   activeSessionId: defaultId,
 
+  // ── High-Fidelity Workspace Views ('terminal' | 'debate' | 'options' | 'copilot') ──
+  activeView: 'terminal',
+  setActiveView: (view) => set({ activeView: view }),
+
   // ── Backward-compatible flat messages (swapped on session switch) ──
   messages:      [],
   isLoading:     false,

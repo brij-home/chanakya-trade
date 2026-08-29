@@ -20,6 +20,22 @@ export default function OrderTicketModal({ isOpen, onClose, initialData = {} }) 
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [statusMsg, setStatusMsg] = useState(null)
 
+  // Sync state whenever modal opens or initialData changes
+  useEffect(() => {
+    if (isOpen) {
+      if (initialData.symbol) setSymbol(initialData.symbol)
+      if (initialData.exchange) setExchange(initialData.exchange)
+      if (initialData.action) setAction(initialData.action)
+      if (initialData.price) setPrice(Number(initialData.price))
+      if (initialData.stopLoss) setStopLoss(Number(initialData.stopLoss))
+      if (initialData.target) setTarget(Number(initialData.target))
+      if (initialData.qty) setQty(Number(initialData.qty))
+      setStep(1)
+      setStatusMsg(null)
+      setConfirmedRisk(false)
+    }
+  }, [isOpen, initialData])
+
   // Auto-calculate position size based on 1% risk rule
   useEffect(() => {
     if (price > 0 && stopLoss > 0 && price !== stopLoss) {
