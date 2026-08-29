@@ -246,6 +246,7 @@ export default function InputBar() {
     addUserMessage, addResponse, addError, isLoading,
     startStreamingMessage, updateStreamingMessage, finalizeStreamingMessage,
     setStreamCancel, setActiveStreamId,
+    startActivity, updateActivity, stopActivity,
   } = useChatStore()
 
   // True when an analysis is actively streaming — input stays active in "context mode"
@@ -273,12 +274,25 @@ export default function InputBar() {
     const msgId = Date.now() + 1
     startStreamingMessage(msgId, symbol, exchange)
 
+    startActivity({
+      title: `Multi-Agent Debate (${symbol})`,
+      details: 'Connecting to multi-agent intelligence pipeline...',
+      type: 'debate',
+      cancelFn: () => {
+        if (es) es.close()
+        setStreamCancel(null)
+        finalizeStreamingMessage(msgId)
+        stopActivity()
+      },
+    })
+
     const url = `${getBaseUrl(port)}/skills/analyze/stream?symbol=${symbol}&exchange=${exchange}`
     const es  = new EventSource(url)
 
     function applyEvent(event) {
       if (event.type === 'started') {
         updateStreamingMessage(msgId, (d) => ({ ...d, phase: 'started' }))
+        updateActivity({ details: `Evaluating quantitative models for ${symbol}...` })
         // Track stream_id for mid-stream context injection (#113)
         if (event.stream_id) setActiveStreamId(event.stream_id)
       } else if (event.type === 'hint_ack') {
@@ -287,12 +301,14 @@ export default function InputBar() {
           ...d,
           hint_ack: event.hint,
         }))
+        updateActivity({ details: `Context injected: ${event.hint}` })
       } else if (event.type === 'hint_applied') {
         // User hint was injected into synthesis
         updateStreamingMessage(msgId, (d) => ({
           ...d,
           hint_applied: event.hint_text,
         }))
+        updateActivity({ details: `Synthesis adapting to user context...` })
       } else if (event.type === 'analyst') {
         updateStreamingMessage(msgId, (d) => ({
           ...d,
@@ -302,15 +318,19 @@ export default function InputBar() {
             key_points: event.key_points ?? [],
           }],
         }))
+        updateActivity({ details: `Analyst ${event.name} finished: ${event.verdict} (${event.confidence}% confidence)` })
       } else if (event.type === 'phase') {
         updateStreamingMessage(msgId, (d) => ({ ...d, phase: event.phase }))
+        updateActivity({ details: `Entering ${event.phase} stage...` })
       } else if (event.type === 'debate_step') {
         updateStreamingMessage(msgId, (d) => ({
           ...d,
           debate_steps: [...(d.debate_steps ?? []), { step: event.step, label: event.label, text: event.text }],
         }))
+        updateActivity({ details: `${event.label}: ${event.text ? event.text.slice(0, 45) + '...' : 'Rebuttal in progress'}` })
       } else if (event.type === 'synthesis_text') {
         updateStreamingMessage(msgId, (d) => ({ ...d, synthesis_text: event.text }))
+        updateActivity({ details: 'Synthesizing final institutional trade plan...' })
       } else if (event.type === 'done') {
         updateStreamingMessage(msgId, (d) => ({
           ...d, phase: 'done', report: event.report, trade_plans: event.trade_plans,
@@ -318,6 +338,7 @@ export default function InputBar() {
         es.close()
         setStreamCancel(null)
         finalizeStreamingMessage(msgId)
+        stopActivity()
       } else if (event.type === 'error') {
         es.close()
         setStreamCancel(null)
@@ -329,6 +350,7 @@ export default function InputBar() {
         }))
         addError(event.message)
         finalizeStreamingMessage(msgId)
+        stopActivity()
       }
     }
 
@@ -336,6 +358,7 @@ export default function InputBar() {
     setStreamCancel(() => {
       es.close()
       finalizeStreamingMessage(msgId)
+      stopActivity()
     })
 
     es.onmessage = (e) => {
@@ -351,6 +374,7 @@ export default function InputBar() {
         error: 'Stream connection closed or interrupted.',
       }))
       finalizeStreamingMessage(msgId)
+      stopActivity()
     }
   }
 
@@ -404,6 +428,14 @@ export default function InputBar() {
     }
 
     try {
+      startActivity({
+        title: `Quant Engine (${parsed.cardType?.toUpperCase() || 'QUERY'})`,
+        details: `Computing ${text}...`,
+        type: 'quant',
+        cancelFn: () => {
+          stopActivity()
+        },
+      })
       // Inject session_id for chat and follow-up endpoints
       let body = parsed.body
       if (parsed.endpoint === '/skills/chat' && activeSessionId) {
@@ -415,6 +447,8 @@ export default function InputBar() {
       addResponse({ cardType: parsed.cardType, data: result.data ?? result })
     } catch (e) {
       addError(e.message)
+    } finally {
+      stopActivity()
     }
   }
 

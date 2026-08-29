@@ -116,6 +116,20 @@
     - Wrap all debate futures in defensive 18.0s timeout wrappers with deterministic quantitative fallbacks.
     - Fast-fail provider authentication/key errors (`api_key_invalid`, `401`, `unauthorized`) immediately to prevent retry storms across model fallback loops.
     - Dispatch an immediate SSE start pulse (`type="debate_step", step="starting"`) as soon as Phase 2 starts to maintain responsive UI feedback.
+14. **RCA First & Holistic Strategic Fixes (No Patch Work)**:
+    - Never apply shallow surface-level band-aids. Always diagnose the true Root Cause Analysis (RCA) across the entire stack (data schemas, API contracts, state management, LLM routing, and DOM rendering).
+    - When a bug or exception occurs, identify *why* the failure mode was possible (e.g. unhandled status codes, missing model aliases, temporal dead zone ordering, unmounted states) and refactor the architecture to make that entire class of bugs impossible.
+    - If an immediate tactical fix is required for uptime, immediately follow up with the permanent strategic architectural fix.
+15. **Continuous Learning & Multi-Tier Model Resilience**:
+    - Treat external API limits, rate throttles, model deprecations, and network transient states (e.g. `503 UNAVAILABLE`, `429 RESOURCE_EXHAUSTED`, `high demand`) as expected operational realities.
+    - Build self-healing multi-tier resilience: (1) Comma-separated API key pools with automatic round-robin cooldown rotation, (2) Validated fallback model chains (`gemini-3.6-flash` -> `gemini-3.5-flash-lite` -> `gemini-3.5-flash`), and (3) Rich deterministic quantitative engine fallback (VIX + FII/DII + Minervini + SMC) so the terminal NEVER presents raw error strings or blank cards to the user.
+16. **Holistic Automated Validation & Regression Gates**:
+    - Whenever modifications are made to any core module (`agent/`, `analysis/`, `engine/`, `web/`, `ui/`, `macos-app/`), execute thorough automated validation suites to ensure cross-module integrity.
+    - Rebuild and test both ends of the bridge: verify the Vite bundle (`npm run build:web`), restart daemon processes, and validate API HTTP contracts end-to-end.
+17. **Explicit Fallback Observability & Self-Healing Telemetry Loop**:
+    - Whenever any fallback is triggered (`LLM_FAILOVER`, `LLM_COOLDOWN`, `QUANT_FALLBACK`, `DATA_FALLBACK`, `BROKER_FAILOVER`, `EXCEPTION`), the system MUST record a structured telemetry event via [`engine/telemetry.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/telemetry.py).
+    - API payloads and UI views must state their execution mode explicitly (e.g. `Analysis Engine: AI Multi-Agent` vs `Quantitative Engine (Deterministic Fallback)`).
+    - Periodically inspect telemetry events via `GET /skills/telemetry/summary` and CLI diagnostics to detect recurring rate limits, API drops, or missing data points, and proactively implement permanent architectural improvements.
 
 ---
 

@@ -11,9 +11,11 @@ import SetupScreen from './components/SetupScreen'
 import OnboardingWizard from './components/Onboarding/OnboardingWizard'
 import CommandPalette from './components/Modals/CommandPalette'
 import OrderTicketModal from './components/Modals/OrderTicketModal'
-import MetricExplainerModal from './components/Modals/MetricExplainerModal'
 import TopOpportunitiesModal from './components/Modals/TopOpportunitiesModal'
 import SectorDrilldownModal from './components/Modals/SectorDrilldownModal'
+import MetricExplainerModal from './components/Modals/MetricExplainerModal'
+import ActivityHUD from './components/Common/ActivityHUD'
+import ErrorBoundary from './components/ErrorBoundary'
 
 function useTheme() {
   const [theme, setThemeState] = useState(() => {
@@ -341,26 +343,28 @@ export default function App() {
         {/* If Copilot workspace, show the Sidebar */}
         {activeView === 'copilot' && <Sidebar />}
 
-        {/* View Switcher Container */}
+        {/* View Switcher Container with Error Boundary Protection */}
         <div className="flex flex-col flex-1 overflow-hidden">
-          {activeView === 'terminal' && (
-            <TerminalView onOpenOrderTicket={handleOpenOrderTicket} />
-          )}
+          <ErrorBoundary title="Strategic Quant Terminal">
+            {activeView === 'terminal' && (
+              <TerminalView onOpenOrderTicket={handleOpenOrderTicket} />
+            )}
 
-          {activeView === 'debate' && (
-            <DebateArenaView onOpenOrderTicket={handleOpenOrderTicket} />
-          )}
+            {activeView === 'debate' && (
+              <DebateArenaView onOpenOrderTicket={handleOpenOrderTicket} />
+            )}
 
-          {activeView === 'options' && (
-            <OptionsDeskView onOpenOrderTicket={handleOpenOrderTicket} />
-          )}
+            {activeView === 'options' && (
+              <OptionsDeskView onOpenOrderTicket={handleOpenOrderTicket} />
+            )}
 
-          {activeView === 'copilot' && (
-            <>
-              <ChatArea />
-              <InputBar />
-            </>
-          )}
+            {activeView === 'copilot' && (
+              <>
+                <ChatArea />
+                <InputBar />
+              </>
+            )}
+          </ErrorBoundary>
         </div>
       </div>
 
@@ -388,6 +392,7 @@ export default function App() {
         onClose={() => setSectorDrilldown({ isOpen: false, sector: null })}
       />
       <MetricExplainerModal />
+      <ActivityHUD />
     </div>
   )
 }

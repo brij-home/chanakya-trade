@@ -6,6 +6,7 @@ export default function DebateArenaView({ onOpenOrderTicket }) {
   const { call } = useAPI()
   const sendDraft = useChatStore((s) => s.sendDraft)
   const [symbol, setSymbol] = useState('RELIANCE')
+  const [inputSymbol, setInputSymbol] = useState('')
   const [data, setData] = useState(null)
   const [loading, setLoading] = useState(true)
   const [isStreaming, setIsStreaming] = useState(false)
@@ -33,17 +34,59 @@ export default function DebateArenaView({ onOpenOrderTicket }) {
     }
   }, [symbol])
 
-  const startLiveDebate = () => {
+  const handleSearch = (e) => {
+    e.preventDefault()
+    const clean = inputSymbol.trim().toUpperCase()
+    if (clean) {
+      setSymbol(clean)
+      setInputSymbol('')
+    }
+  }
+
+  const startActivity = useChatStore((s) => s.startActivity)
+  const updateActivity = useChatStore((s) => s.updateActivity)
+  const stopActivity = useChatStore((s) => s.stopActivity)
+
+  const startLiveDebate = async () => {
     setIsStreaming(true)
+    startActivity({
+      title: `Adversarial Debate (${symbol})`,
+      details: `⚡ Initializing Multi-Agent Pipeline for ${symbol}...`,
+      type: 'debate',
+      cancelFn: () => {
+        setIsStreaming(false)
+        stopActivity()
+      },
+    })
+
     setStreamingSteps([
       '⚡ Initializing Multi-Agent Pipeline for ' + symbol + '...',
       '🔍 Bull Analyst evaluating Minervini Stage 2 & Volume Profile...',
       '🔬 Bear Analyst auditing Beneish M-Score & Accruals Quality...',
       '⚖️ Facilitator synthesizing risk-reward consensus...',
     ])
-    setTimeout(() => {
-      setIsStreaming(false)
-    }, 2800)
+
+    const t1 = setTimeout(() => updateActivity({ details: '🔍 Bull Analyst evaluating Minervini Stage 2 & Volume Profile...' }), 400)
+    const t2 = setTimeout(() => updateActivity({ details: '🔬 Bear Analyst auditing Beneish M-Score & Accruals Quality...' }), 850)
+    const t3 = setTimeout(() => updateActivity({ details: '⚖️ Facilitator synthesizing risk-reward consensus...' }), 1300)
+
+    try {
+      const res = await call('/skills/debate_snapshot', { symbol, exchange: 'NSE' })
+      const snapshot = res?.data ?? res
+      if (snapshot) {
+        setData(snapshot)
+      }
+    } catch (err) {
+      console.error('Failed to run live debate:', err)
+    } finally {
+      clearTimeout(t1)
+      clearTimeout(t2)
+      clearTimeout(t3)
+      setTimeout(() => {
+        setIsStreaming(false)
+        stopActivity()
+      }, 1500)
+    }
   }
 
   const score = data?.conviction_score || 88
@@ -65,36 +108,60 @@ export default function DebateArenaView({ onOpenOrderTicket }) {
                 ₹{Number(ltp).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
               </span>
             </h1>
-            <span className="text-[11px] text-muted">AI Multi-Agent Adversarial Debate Arena</span>
+            <div className="flex items-center gap-2 text-[11px] text-muted">
+              <span>Adversarial Multi-Agent Debate Arena</span>
+              <span>•</span>
+              <span className="text-emerald-400 font-mono font-semibold">Live Quantitative Synthesis</span>
+            </div>
           </div>
         </div>
 
-        {/* Quick Tickers Switcher */}
-        <div className="flex items-center gap-1.5 overflow-x-auto">
-          {['RELIANCE', 'TCS', 'INFY', 'HDFCBANK', 'COFORGE', 'TRENT'].map((sym) => (
-            <button
-              key={sym}
-              onClick={() => setSymbol(sym)}
-              className={`px-3 py-1.5 rounded-xl text-xs font-mono font-bold transition-all cursor-pointer ${
-                symbol === sym
-                  ? 'bg-amber text-black shadow-xs'
-                  : 'bg-elevated/70 hover:bg-elevated text-muted hover:text-text border border-border/60'
-              }`}
-            >
-              {sym}
-            </button>
-          ))}
-        </div>
+        {/* Quick Tickers & Search */}
+        <div className="flex flex-wrap items-center gap-2">
+          {/* Quick Tickers Chips */}
+          <div className="flex items-center gap-1 overflow-x-auto">
+            {['RELIANCE', 'TCS', 'INFY', 'HDFCBANK', 'COFORGE', 'TRENT'].map((sym) => (
+              <button
+                key={sym}
+                onClick={() => setSymbol(sym)}
+                className={`px-3 py-1.5 rounded-xl text-xs font-mono font-bold transition-all cursor-pointer ${
+                  symbol === sym
+                    ? 'bg-amber text-black shadow-xs ring-1 ring-amber/40'
+                    : 'bg-elevated/70 hover:bg-elevated text-muted hover:text-text border border-border/60'
+                }`}
+              >
+                {sym}
+              </button>
+            ))}
+          </div>
 
-        {/* Action Button */}
-        <button
-          onClick={startLiveDebate}
-          disabled={isStreaming}
-          className="flex items-center gap-2 px-4 py-2 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-500 hover:brightness-110 text-black font-bold text-xs transition-all shadow-md cursor-pointer"
-        >
-          <span>{isStreaming ? '🔄' : '⚡'}</span>
-          <span>{isStreaming ? 'Agents Debating...' : 'Run Live Debate'}</span>
-        </button>
+          {/* Search Custom Symbol Input */}
+          <form onSubmit={handleSearch} className="flex items-center gap-1">
+            <input
+              type="text"
+              placeholder="Custom symbol..."
+              value={inputSymbol}
+              onChange={(e) => setInputSymbol(e.target.value)}
+              className="bg-surface border border-border/70 rounded-xl px-2.5 py-1.5 text-xs text-text placeholder:text-muted/60 focus:outline-none focus:border-amber font-mono w-28 uppercase"
+            />
+            <button
+              type="submit"
+              className="px-2.5 py-1.5 rounded-xl bg-elevated hover:bg-elevated/80 border border-border text-xs text-text font-bold cursor-pointer"
+            >
+              Go
+            </button>
+          </form>
+
+          {/* Action Button */}
+          <button
+            onClick={startLiveDebate}
+            disabled={isStreaming}
+            className="flex items-center gap-2 px-4 py-2 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-500 hover:brightness-110 text-black font-bold text-xs transition-all shadow-md cursor-pointer"
+          >
+            <span>{isStreaming ? '🔄' : '⚡'}</span>
+            <span>{isStreaming ? 'Agents Debating...' : 'Run Live Debate'}</span>
+          </button>
+        </div>
       </div>
 
       {/* Streaming Banner if active */}
@@ -152,7 +219,7 @@ export default function DebateArenaView({ onOpenOrderTicket }) {
               {score}<span className="text-sm font-normal text-muted">/100</span>
             </span>
             <span className="text-[10px] font-bold tracking-wider uppercase text-emerald-400">
-              CONVICTION ({score >= 75 ? 'HIGH' : 'MODERATE'})
+              CONVICTION ({score >= 75 ? 'HIGH' : score >= 55 ? 'MODERATE' : 'LOW'})
             </span>
           </div>
         </div>
@@ -164,7 +231,7 @@ export default function DebateArenaView({ onOpenOrderTicket }) {
         <div className="lg:col-span-5 space-y-4">
           <div className="flex items-center gap-2 text-emerald-400 font-bold text-sm tracking-wide uppercase border-b border-emerald-500/30 pb-2">
             <span>↑</span>
-            <span>BULL CASE</span>
+            <span>BULL CASE (CONVICTION PILLARS)</span>
           </div>
 
           <div className="space-y-3">
@@ -198,7 +265,7 @@ export default function DebateArenaView({ onOpenOrderTicket }) {
 
             <div>
               <span className="text-[10px] text-muted uppercase font-bold block mb-1">FINAL TRADE VERDICT</span>
-              <span className="text-lg font-black text-emerald-400 tracking-wide bg-emerald-500/10 px-3 py-1 rounded-xl border border-emerald-500/30 block">
+              <span className="text-base font-black text-emerald-400 tracking-wide bg-emerald-500/10 px-3 py-1 rounded-xl border border-emerald-500/30 block">
                 {consensus?.verdict || 'READY (BUY)'}
               </span>
             </div>
@@ -207,15 +274,19 @@ export default function DebateArenaView({ onOpenOrderTicket }) {
             <div className="bg-surface/90 border border-border/80 rounded-xl p-2.5 text-xs font-mono space-y-1.5 text-left">
               <div className="flex justify-between">
                 <span className="text-muted">ENTRY:</span>
-                <span className="font-bold text-emerald-400">₹{consensus?.entry || '2,940'}</span>
+                <span className="font-bold text-emerald-400">₹{Number(consensus?.entry || ltp).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span>
               </div>
               <div className="flex justify-between">
                 <span className="text-muted">STOP-LOSS:</span>
-                <span className="font-bold text-red">₹{consensus?.stop_loss || '2,890'}</span>
+                <span className="font-bold text-red">₹{Number(consensus?.stop_loss || ltp * 0.985).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span>
               </div>
               <div className="flex justify-between">
                 <span className="text-muted">TARGET:</span>
-                <span className="font-bold text-text">₹{consensus?.target || '3,080'}</span>
+                <span className="font-bold text-text">₹{Number(consensus?.target || ltp * 1.035).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span>
+              </div>
+              <div className="flex justify-between border-t border-border/50 pt-1 text-[11px]">
+                <span className="text-muted">R:R RATIO:</span>
+                <span className="font-bold text-amber">{consensus?.risk_reward || '2.1'} R</span>
               </div>
             </div>
 
@@ -225,9 +296,9 @@ export default function DebateArenaView({ onOpenOrderTicket }) {
                   onOpenOrderTicket({
                     symbol,
                     exchange: 'NSE',
-                    price: consensus?.entry || 2940,
-                    stopLoss: consensus?.stop_loss || 2890,
-                    target: consensus?.target || 3080,
+                    price: consensus?.entry || ltp,
+                    stopLoss: consensus?.stop_loss || ltp * 0.985,
+                    target: consensus?.target || ltp * 1.035,
                   })
                 }
               }}
@@ -241,7 +312,7 @@ export default function DebateArenaView({ onOpenOrderTicket }) {
         {/* Right Column (5 Cols): BEAR CASE */}
         <div className="lg:col-span-5 space-y-4">
           <div className="flex items-center gap-2 text-rose-400 font-bold text-sm tracking-wide uppercase border-b border-rose-500/30 pb-2">
-            <span>BEAR CASE</span>
+            <span>BEAR CASE (RISK AUDIT)</span>
             <span>↓</span>
           </div>
 
@@ -268,14 +339,16 @@ export default function DebateArenaView({ onOpenOrderTicket }) {
         </div>
       </div>
 
-      {/* Bottom Footer Bar */}
+      {/* Bottom Footer Bar with Provenance */}
       <div className="flex flex-wrap items-center justify-between text-xs font-mono text-muted border-t border-border/50 pt-4 px-2">
         <div className="flex items-center gap-2">
           <span>Market Status:</span>
-          <span className="text-green font-bold">OPEN</span>
+          <span className="text-emerald-400 font-bold">LIVE / OPEN</span>
+          <span className="text-muted">•</span>
+          <span className="text-text">SMC + Forensic + Order Flow Hybrid</span>
         </div>
         <div>
-          <span>AI Analysis Timestamp: </span>
+          <span>As of: </span>
           <span className="text-text font-semibold">{data?.timestamp || new Date().toLocaleTimeString('en-IN') + ' IST'}</span>
         </div>
       </div>

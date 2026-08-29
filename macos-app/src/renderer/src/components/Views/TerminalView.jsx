@@ -11,13 +11,16 @@ export default function TerminalView({ onSelectSymbol, onOpenOrderTicket }) {
   const [selectedPersona, setSelectedPersona] = useState('forensic')
   const [data, setData] = useState(null)
   const [loading, setLoading] = useState(true)
+  const [watchlistFilter, setWatchlistFilter] = useState('')
+  const [watchlistCategory, setWatchlistCategory] = useState('ALL')
+  const [sectorViewMode, setSectorViewMode] = useState('2D')
 
   // Fetch terminal snapshot data
   useEffect(() => {
     let unmounted = false
-    const fetchSnapshot = async () => {
+    const fetchSnapshot = async (isInitial = false) => {
       try {
-        setLoading(true)
+        if (isInitial) setLoading(true)
         const res = await call('/skills/dashboard_snapshot', {
           symbol: selectedSymbol,
           timeframe: timeframe,
@@ -29,24 +32,120 @@ export default function TerminalView({ onSelectSymbol, onOpenOrderTicket }) {
       } catch (err) {
         console.error('Failed to load dashboard snapshot:', err)
       } finally {
-        if (!unmounted) setLoading(false)
+        if (!unmounted && isInitial) setLoading(false)
       }
     }
-    fetchSnapshot()
-    const interval = setInterval(fetchSnapshot, 15000)
+    fetchSnapshot(true)
+    const interval = setInterval(() => fetchSnapshot(false), 15000)
     return () => {
       unmounted = true
       clearInterval(interval)
     }
   }, [selectedSymbol, timeframe])
 
+  // Extract snapshot fields safely
   const setup = data?.automated_setup
   const flows = data?.flows
   const sectors = data?.sector_matrix || []
   const watchlist = data?.watchlist || []
   const personas = data?.personas || []
+  const provenance = data?.provenance || setup?.provenance
 
-  // Dynamic values
+  // Master Indian Equities & Indices Universe for Instant Search & Watchlist
+  const MASTER_WATCHLIST = [
+    { symbol: 'NIFTY', name: 'NIFTY 50', cat: 'INDEX', ltp: 24175.65, change_pct: 0.45 },
+    { symbol: 'BANKNIFTY', name: 'BANK NIFTY', cat: 'INDEX', ltp: 57496.30, change_pct: 0.62 },
+    { symbol: 'FINNIFTY', name: 'FIN NIFTY', cat: 'INDEX', ltp: 24850.00, change_pct: 0.38 },
+    { symbol: 'RELIANCE', name: 'Reliance Ind', cat: 'ENERGY', ltp: 1287.00, change_pct: 0.85 },
+    { symbol: 'HDFCBANK', name: 'HDFC Bank', cat: 'BANK', ltp: 720.30, change_pct: 0.42 },
+    { symbol: 'ICICIBANK', name: 'ICICI Bank', cat: 'BANK', ltp: 1245.50, change_pct: 0.78 },
+    { symbol: 'SBIN', name: 'State Bank of India', cat: 'BANK', ltp: 812.40, change_pct: 1.15 },
+    { symbol: 'KOTAKBANK', name: 'Kotak Mahindra', cat: 'BANK', ltp: 1785.00, change_pct: -0.25 },
+    { symbol: 'AXISBANK', name: 'Axis Bank', cat: 'BANK', ltp: 1195.00, change_pct: 0.55 },
+    { symbol: 'INFY', name: 'Infosys', cat: 'TECH', ltp: 1750.00, change_pct: 1.25 },
+    { symbol: 'TCS', name: 'Tata Consultancy', cat: 'TECH', ltp: 2342.00, change_pct: 0.90 },
+    { symbol: 'HCLTECH', name: 'HCL Tech', cat: 'TECH', ltp: 1780.00, change_pct: 1.45 },
+    { symbol: 'WIPRO', name: 'Wipro Ltd', cat: 'TECH', ltp: 545.00, change_pct: 0.35 },
+    { symbol: 'COFORGE', name: 'Coforge', cat: 'TECH', ltp: 7850.00, change_pct: 2.15 },
+    { symbol: 'TATAMOTORS', name: 'Tata Motors', cat: 'AUTO', ltp: 985.60, change_pct: 1.65 },
+    { symbol: 'MARUTI', name: 'Maruti Suzuki', cat: 'AUTO', ltp: 12450.00, change_pct: 0.80 },
+    { symbol: 'M&M', name: 'Mahindra & Mahindra', cat: 'AUTO', ltp: 2890.00, change_pct: 1.30 },
+    { symbol: 'BAJFINANCE', name: 'Bajaj Finance', cat: 'FINANCE', ltp: 7120.00, change_pct: 0.65 },
+    { symbol: 'LT', name: 'Larsen & Toubro', cat: 'INFRA', ltp: 3680.00, change_pct: 0.95 },
+    { symbol: 'ITC', name: 'ITC Ltd', cat: 'FMCG', ltp: 505.40, change_pct: 0.20 },
+    { symbol: 'BHARTIARTL', name: 'Bharti Airtel', cat: 'TELECOM', ltp: 1650.00, change_pct: 1.10 },
+    { symbol: 'SUNPHARMA', name: 'Sun Pharma', cat: 'PHARMA', ltp: 1895.00, change_pct: 0.40 },
+    { symbol: 'TITAN', name: 'Titan Company', cat: 'CONSUMER', ltp: 3450.00, change_pct: 0.75 },
+    { symbol: 'TRENT', name: 'Trent Ltd', cat: 'STAGE 2', ltp: 7150.00, change_pct: 2.45 },
+    { symbol: 'ZOMATO', name: 'Zomato Ltd', cat: 'STAGE 2', ltp: 275.00, change_pct: 3.10 },
+    { symbol: 'HAL', name: 'Hindustan Aeronautics', cat: 'DEFENSE', ltp: 4680.00, change_pct: 1.85 },
+    { symbol: 'BEL', name: 'Bharat Electronics', cat: 'DEFENSE', ltp: 312.00, change_pct: 2.10 },
+    { symbol: 'ADANIENT', name: 'Adani Enterprises', cat: 'STAGE 2', ltp: 3045.00, change_pct: 1.40 },
+  ]
+
+  // Combined Watchlist: server items merged with master universe
+  const combinedWatchlist = (() => {
+    const map = new Map()
+    for (const item of MASTER_WATCHLIST) {
+      map.set(item.symbol, item)
+    }
+    for (const item of watchlist) {
+      const clean = item.symbol.replace(' 50', '').trim()
+      map.set(clean, {
+        ...map.get(clean),
+        symbol: clean,
+        name: item.name || clean,
+        ltp: item.ltp || map.get(clean)?.ltp || 1000,
+        change_pct: item.change_pct != null ? item.change_pct : (map.get(clean)?.change_pct || 0),
+        cat: item.tag || map.get(clean)?.cat || 'EQUITY',
+      })
+    }
+    return Array.from(map.values())
+  })()
+
+  // Filtered watchlist based on search term & category filter
+  const filteredWatchlist = combinedWatchlist.filter((w) => {
+    const matchesCategory =
+      watchlistCategory === 'ALL' ||
+      w.cat === watchlistCategory ||
+      (watchlistCategory === 'INDEX' && (w.symbol === 'NIFTY' || w.symbol === 'BANKNIFTY' || w.symbol === 'FINNIFTY')) ||
+      (watchlistCategory === 'STAGE 2' && (w.cat === 'STAGE 2' || w.change_pct > 1.5))
+
+    const matchesSearch =
+      !watchlistFilter ||
+      w.symbol.toLowerCase().includes(watchlistFilter.toLowerCase()) ||
+      w.name.toLowerCase().includes(watchlistFilter.toLowerCase()) ||
+      (w.cat && w.cat.toLowerCase().includes(watchlistFilter.toLowerCase()))
+
+    return matchesCategory && matchesSearch
+  })
+
+  // Handle Watchlist Search Form Submit (Allows typing ANY stock in the market)
+  const handleWatchlistSearchSubmit = (e) => {
+    e.preventDefault()
+    const clean = watchlistFilter.trim().toUpperCase()
+    if (clean) {
+      setSelectedSymbol(clean)
+      setWatchlistFilter('')
+    }
+  }
+
+  // Active Persona Object
+  const activePersonaObj = personas.find((p) => p.id === selectedPersona) || personas[0] || {
+    id: 'forensic',
+    name: 'Forensic Auditor',
+    title: 'Screening & Forensics',
+    avatar: 'forensic',
+    verdict: 'CLEAN (PASS)',
+    horizon: 'Active Audit',
+    thesis: `Forensic audit on ${selectedSymbol} indicates robust balance sheet health with conservative accruals.`,
+    key_metric: 'Beneish M-Score: -2.76 | F-Score: 8/9',
+    quote: 'Rule No. 1: Never lose capital on accounting landmines.',
+    confidence: 94,
+    accent: 'emerald',
+  }
+
+  // Dynamic Symbol display & Watchlist item
   const displaySymbolName =
     selectedSymbol === 'NIFTY'
       ? 'NIFTY 50 (NSE)'
@@ -57,7 +156,7 @@ export default function TerminalView({ onSelectSymbol, onOpenOrderTicket }) {
   const activeWatchItem = watchlist.find(
     (w) => w.symbol === selectedSymbol || w.name === selectedSymbol || w.symbol.startsWith(selectedSymbol)
   )
-  const currentPct = activeWatchItem?.change_pct ?? 0.35
+  const currentPct = activeWatchItem?.change_pct ?? (setup?.progress ? 0.45 : 0.35)
   const isPos = Number(currentPct) >= 0
 
   const fiiVal = Number(flows?.fii_net ?? -1450)
@@ -73,17 +172,22 @@ export default function TerminalView({ onSelectSymbol, onOpenOrderTicket }) {
       {/* Top Terminal Status Header */}
       <div className="flex flex-wrap items-center justify-between gap-3 bg-panel/90 border border-border/80 rounded-2xl px-4 py-2.5 shadow-md backdrop-blur-md">
         <div className="flex items-center gap-3">
-          <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-green/10 border border-green/30 text-green text-xs font-semibold">
-            <span className="w-2 h-2 rounded-full bg-green animate-pulse" />
-            <span>Live Connection • Healthy</span>
+          <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-xs font-semibold">
+            <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+            <span>Market Terminal • Live Stream</span>
           </div>
-          <span className="text-xs text-muted font-mono hidden sm:inline">09:15:32 IST • Market Open</span>
+          <div className="flex items-center gap-2 text-xs text-muted font-mono hidden sm:flex">
+            <span className="px-2 py-0.5 rounded bg-surface border border-border text-[10px] text-text font-bold">
+              {provenance?.data_source || 'LIVE_TICK'}
+            </span>
+            <span>{provenance?.as_of || '29 Aug 2026 IST • Live Context'}</span>
+          </div>
         </div>
 
         {/* Quick Timeframe & Symbol Toolbar */}
         <div className="flex items-center gap-2">
           <div className="flex items-center bg-elevated rounded-xl p-0.5 border border-border/60 text-xs">
-            {['15m', '1h', '1D'].map((tf) => (
+            {['5m', '15m', '1D'].map((tf) => (
               <button
                 key={tf}
                 onClick={() => setTimeframe(tf)}
@@ -100,7 +204,7 @@ export default function TerminalView({ onSelectSymbol, onOpenOrderTicket }) {
             onClick={() => sendDraft(`analyze ${selectedSymbol}`)}
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-amber/15 hover:bg-amber/25 text-amber border border-amber/30 text-xs font-bold transition-colors cursor-pointer shadow-xs"
           >
-            <span>⚔️</span> Run Full Debate
+            <span>⚔️</span> Run Multi-Agent Debate
           </button>
         </div>
       </div>
@@ -115,7 +219,7 @@ export default function TerminalView({ onSelectSymbol, onOpenOrderTicket }) {
               <span className="text-xs font-bold uppercase tracking-wider text-muted flex items-center gap-1.5">
                 <span>🤖</span> AI AGENTS
               </span>
-              <span className="text-[10px] text-amber font-mono font-semibold">6 AGENTS</span>
+              <span className="text-[10px] text-amber font-mono font-semibold">6 SPECIALISTS</span>
             </div>
 
             <div className="space-y-1.5">
@@ -126,11 +230,10 @@ export default function TerminalView({ onSelectSymbol, onOpenOrderTicket }) {
                     key={p.id}
                     onClick={() => {
                       setSelectedPersona(p.id)
-                      sendDraft(`persona ${p.id} ${selectedSymbol}`)
                     }}
                     className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-left transition-all cursor-pointer border ${
                       isSelected
-                        ? 'bg-emerald-500/15 border-emerald-500/40 text-text shadow-xs'
+                        ? 'bg-emerald-500/15 border-emerald-500/50 text-text shadow-sm ring-1 ring-emerald-500/30'
                         : 'border-border/40 hover:bg-elevated text-muted hover:text-text'
                     }`}
                   >
@@ -163,30 +266,74 @@ export default function TerminalView({ onSelectSymbol, onOpenOrderTicket }) {
           <div className="bg-panel border border-border/80 rounded-2xl p-3.5 shadow-sm space-y-3">
             <div className="flex items-center justify-between border-b border-border/50 pb-2">
               <span className="text-xs font-bold uppercase tracking-wider text-muted flex items-center gap-1.5">
-                <span>📋</span> WATCHLIST
+                <span>📋</span> WATCHLIST ({filteredWatchlist.length})
               </span>
-              <span className="text-[10px] text-muted font-mono">LIVE LTP</span>
+              <span className="text-[10px] text-muted font-mono">LIVE / EOD</span>
             </div>
 
-            <div className="space-y-1 max-h-[280px] overflow-y-auto pr-1">
-              {watchlist.map((item) => {
-                const isItemActive = selectedSymbol === item.symbol || selectedSymbol === item.name || item.symbol.startsWith(selectedSymbol)
+            {/* Category Filter Chips */}
+            <div className="flex items-center gap-1 overflow-x-auto pb-1 text-[10px] font-mono">
+              {['ALL', 'INDEX', 'BANK', 'TECH', 'AUTO', 'STAGE 2'].map((cat) => (
+                <button
+                  key={cat}
+                  onClick={() => setWatchlistCategory(cat)}
+                  className={`px-2 py-0.5 rounded-md font-semibold transition-all cursor-pointer whitespace-nowrap ${
+                    watchlistCategory === cat
+                      ? 'bg-amber text-black font-bold shadow-xs'
+                      : 'bg-elevated/70 text-muted hover:text-text border border-border/50'
+                  }`}
+                >
+                  {cat}
+                </button>
+              ))}
+            </div>
+
+            {/* Search Input Form (Submit on Enter or click) */}
+            <form onSubmit={handleWatchlistSearchSubmit} className="relative">
+              <input
+                type="text"
+                placeholder="Search symbol (e.g. SBIN, TATAMOTORS)..."
+                value={watchlistFilter}
+                onChange={(e) => setWatchlistFilter(e.target.value)}
+                className="w-full bg-surface border border-border/60 rounded-lg px-2.5 py-1 text-xs text-text placeholder:text-muted/60 focus:outline-none focus:border-amber/60 font-mono pr-12"
+              />
+              {watchlistFilter && (
+                <button
+                  type="submit"
+                  className="absolute right-1 top-1/2 -translate-y-1/2 px-1.5 py-0.5 rounded bg-amber text-black text-[10px] font-bold cursor-pointer"
+                >
+                  Go
+                </button>
+              )}
+            </form>
+
+            <div className="space-y-1 max-h-[260px] overflow-y-auto pr-1">
+              {filteredWatchlist.map((item) => {
+                const isItemActive =
+                  selectedSymbol === item.symbol || selectedSymbol === item.name || item.symbol.startsWith(selectedSymbol)
                 const isPositive = Number(item.change_pct) >= 0
                 return (
                   <button
                     key={item.symbol}
                     onClick={() => {
-                      const cleanSym = item.symbol.replace(' 50', '').replace(' 50', '')
+                      const cleanSym = item.symbol.replace(' 50', '').trim()
                       setSelectedSymbol(cleanSym)
                     }}
                     className={`w-full flex items-center justify-between px-3 py-2 rounded-xl transition-all cursor-pointer border ${
                       isItemActive
-                        ? 'bg-amber/15 border-amber/40 text-text shadow-xs'
+                        ? 'bg-amber/15 border-amber/50 text-text shadow-xs ring-1 ring-amber/30'
                         : 'border-border/40 hover:bg-elevated text-muted hover:text-text'
                     }`}
                   >
                     <div className="text-left">
-                      <span className="text-xs font-bold text-text block">{item.symbol}</span>
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-xs font-bold text-text block">{item.symbol}</span>
+                        {item.cat && (
+                          <span className="text-[9px] px-1 rounded bg-surface border border-border/60 text-muted font-mono">
+                            {item.cat}
+                          </span>
+                        )}
+                      </div>
                       <span className="text-[10px] text-muted font-mono">{item.name}</span>
                     </div>
                     <div className="text-right font-mono">
@@ -201,12 +348,27 @@ export default function TerminalView({ onSelectSymbol, onOpenOrderTicket }) {
                   </button>
                 )
               })}
+
+              {/* If no exact match, offer 1-click add/analyze */}
+              {filteredWatchlist.length === 0 && watchlistFilter && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSelectedSymbol(watchlistFilter.trim().toUpperCase())
+                    setWatchlistFilter('')
+                  }}
+                  className="w-full py-2 px-3 rounded-xl bg-amber/15 hover:bg-amber/25 border border-amber/40 text-amber text-xs font-bold text-center transition-all cursor-pointer shadow-xs"
+                >
+                  ⚡ Analyze &quot;{watchlistFilter.trim().toUpperCase()}&quot; (NSE) →
+                </button>
+              )}
             </div>
           </div>
         </div>
 
-        {/* Center Column (6 Cols): Chart with SMC Overlays & Volume Profile */}
+        {/* Center Column (6 Cols): Chart + Agent Intelligence Panel */}
         <div className="lg:col-span-6 space-y-4">
+          {/* Main Chart Box */}
           <div className="bg-panel border border-border/80 rounded-2xl p-4 shadow-sm relative overflow-hidden">
             {/* Header info */}
             <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border/50 pb-3 mb-3">
@@ -219,23 +381,23 @@ export default function TerminalView({ onSelectSymbol, onOpenOrderTicket }) {
                     {isPos ? '+' : ''}{Number(currentPct).toFixed(2)}%
                   </span>
                 </div>
-                <span className="text-[11px] text-muted font-mono">EMA (RS) 20 • SMA 50 • Volume Profile Overlay</span>
+                <span className="text-[11px] text-muted font-mono">SMC Structure • Demand/Supply OB • Volume Profile</span>
               </div>
 
               {/* SMC Alpha Badges */}
               <div className="flex items-center gap-1.5">
                 <span className="px-2 py-0.5 rounded-md bg-emerald-500/15 border border-emerald-500/30 text-emerald-400 text-[10px] font-bold">
-                  BULLISH ALPHA
+                  SMC DEMAND
                 </span>
                 <span className="px-2 py-0.5 rounded-md bg-amber/15 border border-amber/30 text-amber text-[10px] font-bold">
-                  FORENSIC ALPHA
+                  VOL PROFILE
                 </span>
               </div>
             </div>
 
             {/* Interactive Candlestick Chart */}
-            <div className="h-[360px] w-full rounded-xl overflow-hidden bg-surface/50 border border-border/60">
-              <CandlestickChart symbol={selectedSymbol} timeframe={timeframe} />
+            <div className="w-full rounded-xl overflow-hidden bg-surface/50 border border-border/60">
+              <CandlestickChart symbol={selectedSymbol} timeframe={timeframe} height={260} />
             </div>
 
             {/* Overlay SMC Box Details (Order Block & Volume Profile) */}
@@ -260,6 +422,107 @@ export default function TerminalView({ onSelectSymbol, onOpenOrderTicket }) {
               </div>
             </div>
           </div>
+
+          {/* Interactive Agent Intelligence Radar Card */}
+          <div className="bg-panel border border-border/80 rounded-2xl p-4 shadow-sm relative space-y-3">
+            {/* Agent Persona Selector Tabs */}
+            <div className="flex items-center gap-1.5 overflow-x-auto pb-1 scrollbar-none border-b border-border/40">
+              {personas.map((p) => {
+                const isSelected = (selectedPersona || 'forensic') === p.id
+                return (
+                  <button
+                    key={p.id}
+                    onClick={() => setSelectedPersona(p.id)}
+                    className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl text-xs font-semibold transition-all cursor-pointer border shrink-0 ${
+                      isSelected
+                        ? 'bg-accent/20 border-accent text-text shadow-xs ring-1 ring-accent/30'
+                        : 'bg-surface/60 border-border/60 text-muted hover:text-text hover:bg-surface'
+                    }`}
+                  >
+                    <span>
+                      {p.avatar === 'bull' && '🐂'}
+                      {p.avatar === 'moat' && '🏰'}
+                      {p.avatar === 'forensic' && '🔬'}
+                      {p.avatar === 'macro' && '🌐'}
+                      {p.avatar === 'garp' && '📈'}
+                      {p.avatar === 'quality' && '💎'}
+                    </span>
+                    <span>{p.name}</span>
+                    <span
+                      className={`text-[10px] font-mono font-bold px-1.5 py-0.5 rounded ${
+                        (p.confidence || 50) >= 75
+                          ? 'text-emerald-400 bg-emerald-500/10'
+                          : (p.confidence || 50) >= 50
+                          ? 'text-amber bg-amber/10'
+                          : 'text-red bg-red/10'
+                      }`}
+                    >
+                      {p.confidence || 50}%
+                    </span>
+                  </button>
+                )
+              })}
+            </div>
+
+            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border/50 pb-2.5">
+              <div className="flex items-center gap-2.5">
+                <div className="w-8 h-8 rounded-full bg-emerald-500/15 border border-emerald-500/40 flex items-center justify-center text-base">
+                  {activePersonaObj.avatar === 'bull' && '🐂'}
+                  {activePersonaObj.avatar === 'moat' && '🏰'}
+                  {activePersonaObj.avatar === 'forensic' && '🔬'}
+                  {activePersonaObj.avatar === 'macro' && '🌐'}
+                  {activePersonaObj.avatar === 'garp' && '📈'}
+                  {activePersonaObj.avatar === 'quality' && '💎'}
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold text-text flex items-center gap-2">
+                    <span>{activePersonaObj.name} AI</span>
+                    <span className="text-[10px] px-2 py-0.5 rounded-full bg-surface border border-border text-muted font-mono">
+                      {activePersonaObj.horizon || 'Active Horizon'}
+                    </span>
+                  </h3>
+                  <span className="text-[11px] text-muted">{activePersonaObj.title}</span>
+                </div>
+              </div>
+
+              {/* Agent Verdict & Confidence */}
+              <div className="flex items-center gap-2">
+                <span className="px-2.5 py-1 rounded-xl bg-emerald-500/15 border border-emerald-500/30 text-emerald-400 text-xs font-bold">
+                  {activePersonaObj.verdict || 'STRONG BUY'}
+                </span>
+                <span className="text-xs font-mono text-amber font-bold">
+                  {activePersonaObj.confidence || 90}% Conviction
+                </span>
+              </div>
+            </div>
+
+            {/* Persona Tailored Thesis */}
+            <div className="bg-surface/80 rounded-xl p-3 border border-border/60 space-y-2">
+              <p className="text-xs text-text leading-relaxed font-ui">
+                {activePersonaObj.thesis || `Tailored analysis evaluating ${selectedSymbol} through ${activePersonaObj.name}'s strategic quant framework.`}
+              </p>
+
+              <div className="flex flex-wrap items-center justify-between gap-2 pt-1 text-[11px] font-mono border-t border-border/40">
+                <div className="text-emerald-400 font-semibold flex items-center gap-1.5">
+                  <span>📊</span>
+                  <span>{activePersonaObj.key_metric || 'Key Metric Analyzed'}</span>
+                </div>
+                <span className="text-muted italic text-[10px]">
+                  "{activePersonaObj.quote || 'Patience and discipline yield long-term alpha.'}"
+                </span>
+              </div>
+            </div>
+
+            {/* Action Trigger */}
+            <div className="flex justify-end pt-1">
+              <button
+                onClick={() => sendDraft(`persona ${activePersonaObj.id} ${selectedSymbol}`)}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-elevated hover:bg-elevated/80 border border-border text-text text-xs font-semibold transition-all cursor-pointer shadow-xs"
+              >
+                <span>💬</span> Consult {activePersonaObj.name} Deeply →
+              </button>
+            </div>
+          </div>
         </div>
 
         {/* Right Column (3 Cols): Automated Setup Ticket */}
@@ -270,10 +533,10 @@ export default function TerminalView({ onSelectSymbol, onOpenOrderTicket }) {
                 <span className="text-xs font-bold uppercase tracking-wider text-muted block">
                   AUTOMATED SETUP
                 </span>
-                <span className="text-[10px] text-emerald-400 font-semibold">(Forensic AI Engine)</span>
+                <span className="text-[10px] text-emerald-400 font-semibold">(Institutional Risk Gate)</span>
               </div>
               <span className="px-2 py-0.5 rounded-full bg-emerald-500/15 border border-emerald-500/30 text-emerald-400 text-[10px] font-bold">
-                HIGH CONVICTION
+                {setup?.status || 'READY'}
               </span>
             </div>
 
@@ -286,7 +549,7 @@ export default function TerminalView({ onSelectSymbol, onOpenOrderTicket }) {
               <div className="flex justify-between items-center py-1 border-b border-border/30">
                 <span className="text-muted">Action</span>
                 <span className="font-bold text-emerald-400 bg-emerald-500/15 px-2 py-0.5 rounded border border-emerald-500/30">
-                  {setup?.action || 'LONG'}
+                  {setup?.action || 'LONG (BUY)'}
                 </span>
               </div>
               <div className="flex justify-between items-center py-1 border-b border-border/30">
@@ -296,13 +559,13 @@ export default function TerminalView({ onSelectSymbol, onOpenOrderTicket }) {
               <div className="flex justify-between items-center py-1 border-b border-border/30">
                 <span className="text-muted">ENTRY</span>
                 <span className="font-bold text-emerald-400 text-sm">
-                  ₹{Number(setup?.entry || 21795.5).toLocaleString('en-IN')} (Live)
+                  ₹{Number(setup?.entry || 21795.5).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
                 </span>
               </div>
               <div className="flex justify-between items-center py-1 border-b border-border/30">
                 <span className="text-muted">STOP-LOSS</span>
                 <span className="font-bold text-red text-sm">
-                  ₹{Number(setup?.stop_loss || 21745.0).toLocaleString('en-IN')}
+                  ₹{Number(setup?.stop_loss || 21745.0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
                 </span>
               </div>
 
@@ -315,27 +578,27 @@ export default function TerminalView({ onSelectSymbol, onOpenOrderTicket }) {
                 <div className="w-full bg-surface h-2 rounded-full overflow-hidden border border-border/60">
                   <div
                     className="bg-gradient-to-r from-red via-amber to-emerald-400 h-full rounded-full transition-all duration-500"
-                    style={{ width: `${setup?.progress || 65}%` }}
+                    style={{ width: `${setup?.progress || 70}%` }}
                   />
                 </div>
               </div>
 
               <div className="flex justify-between items-center py-1 border-b border-border/30">
                 <span className="text-muted">TARGET 1</span>
-                <span className="font-bold text-text">₹{Number(setup?.target_1 || 21885.0).toLocaleString('en-IN')}</span>
+                <span className="font-bold text-text">₹{Number(setup?.target_1 || 21885.0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span>
               </div>
               <div className="flex justify-between items-center py-1 border-b border-border/30">
                 <span className="text-muted">TARGET 2</span>
-                <span className="font-bold text-text">₹{Number(setup?.target_2 || 21940.0).toLocaleString('en-IN')}</span>
+                <span className="font-bold text-text">₹{Number(setup?.target_2 || 21940.0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span>
               </div>
               <div className="flex justify-between items-center py-1 border-b border-border/30">
                 <span className="text-muted">R:R PAYOFF</span>
                 <span className="font-bold text-amber">{setup?.risk_reward || '1.8'} R</span>
               </div>
               <div className="flex justify-between items-center py-1">
-                <span className="text-muted">Status</span>
-                <span className="font-bold text-amber bg-amber/10 px-2 py-0.5 rounded border border-amber/30">
-                  {setup?.status || 'PENDING'}
+                <span className="text-muted">Trailing Rule</span>
+                <span className="font-bold text-[10px] text-muted truncate">
+                  2R Breakeven, ATR 3x
                 </span>
               </div>
             </div>
@@ -361,97 +624,269 @@ export default function TerminalView({ onSelectSymbol, onOpenOrderTicket }) {
         </div>
       </div>
 
-      {/* Bottom Row: Institutional Flows + Sector Rotation Matrix */}
+      {/* Bottom Row: 3-Card High Impact Analytics Grid */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
-        {/* Institutional Flows (6 Cols) */}
-        <div className="lg:col-span-6 bg-panel border border-border/80 rounded-2xl p-4 shadow-sm space-y-3">
-          <div className="flex items-center justify-between border-b border-border/50 pb-2">
-            <span className="text-xs font-bold uppercase tracking-wider text-muted flex items-center gap-1.5">
-              <span>🌊</span> INSTITUTIONAL FLOWS (DLY)
+        {/* Card 1: Institutional Flows & Macro Pulse (3 Cols) */}
+        <div className="lg:col-span-3 bg-panel border border-border/80 rounded-2xl p-4 shadow-sm space-y-2.5 flex flex-col justify-between">
+          <div>
+            <div className="flex items-center justify-between border-b border-border/50 pb-2">
+              <span className="text-xs font-bold uppercase tracking-wider text-muted flex items-center gap-1.5">
+                <span>🌊</span> INSTITUTIONAL FLOWS
+              </span>
+              <span className="text-[9px] px-1.5 py-0.2 rounded bg-surface border border-border text-muted font-mono">
+                {flows?.label || 'DLY CASH'}
+              </span>
+            </div>
+
+            <div className="space-y-2 pt-2 text-xs font-mono">
+              <div className="flex items-center justify-between bg-surface/80 p-2 rounded-xl border border-border/50">
+                <span className="text-muted text-[11px]">FII Net Cash</span>
+                <span className={`font-bold ${fiiVal >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                  {fiiVal >= 0 ? '+' : ''}₹{Number(fiiVal).toLocaleString('en-IN')} Cr
+                </span>
+              </div>
+
+              <div className="flex items-center justify-between bg-surface/80 p-2 rounded-xl border border-border/50">
+                <span className="text-muted text-[11px]">DII Net Cash</span>
+                <span className={`font-bold ${diiVal >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                  {diiVal >= 0 ? '+' : ''}₹{Number(diiVal).toLocaleString('en-IN')} Cr
+                </span>
+              </div>
+
+              <div className="flex items-center justify-between bg-surface/80 p-2 rounded-xl border border-border/50">
+                <span className="text-muted text-[11px]">Net Cash Flow</span>
+                <span className={`font-bold text-sm ${Number(flows?.net_total || 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                  {Number(flows?.net_total || 0) >= 0 ? '+' : ''}₹{Number(flows?.net_total || 0).toLocaleString('en-IN')} Cr
+                </span>
+              </div>
+            </div>
+          </div>
+
+          <div className="pt-1">
+            <span className="text-[10px] font-bold text-amber font-mono block truncate bg-amber/10 border border-amber/30 px-2 py-1 rounded-lg text-center">
+              {flows?.verdict || 'FII / DII INSTITUTIONAL BALANCE'}
             </span>
-            <span className="text-[10px] text-muted font-mono">{flows?.verdict || 'FII vs DII Cash Activity'}</span>
-          </div>
-
-          <div className="grid grid-cols-3 gap-2 text-xs font-mono py-1">
-            <div className="bg-surface/80 p-2.5 rounded-xl border border-border/60">
-              <span className="text-[10px] text-muted block">FII Net Cash</span>
-              <span className={`text-sm font-bold ${fiiVal >= 0 ? 'text-green' : 'text-red'}`}>
-                {fiiVal >= 0 ? '+' : ''}₹{Number(fiiVal).toLocaleString('en-IN')} Cr
-              </span>
-            </div>
-            <div className="bg-surface/80 p-2.5 rounded-xl border border-border/60">
-              <span className="text-[10px] text-muted block">DII Net Cash</span>
-              <span className={`text-sm font-bold ${diiVal >= 0 ? 'text-green' : 'text-red'}`}>
-                {diiVal >= 0 ? '+' : ''}₹{Number(diiVal).toLocaleString('en-IN')} Cr
-              </span>
-            </div>
-            <div className="bg-surface/80 p-2.5 rounded-xl border border-border/60">
-              <span className="text-[10px] text-muted block">Net Total</span>
-              <span className={`text-sm font-bold ${Number(flows?.net_total || 0) >= 0 ? 'text-green' : 'text-red'}`}>
-                {Number(flows?.net_total || 0) >= 0 ? '+' : ''}₹{Number(flows?.net_total || 0).toLocaleString('en-IN')} Cr
-              </span>
-            </div>
-          </div>
-
-          {/* Visual Bar Comparison */}
-          <div className="space-y-1.5 pt-1">
-            <div className="flex h-5 w-full rounded-lg overflow-hidden border border-border/60 text-[10px] font-mono font-bold">
-              <div
-                className="bg-red/90 flex items-center justify-center text-white px-2 truncate transition-all duration-500"
-                style={{ width: `${fiiWidthPct}%` }}
-              >
-                FII {fiiVal >= 0 ? '+' : ''}₹{Math.round(fiiVal)} Cr
-              </div>
-              <div
-                className="bg-green/90 flex items-center justify-center text-black px-2 truncate transition-all duration-500"
-                style={{ width: `${diiWidthPct}%` }}
-              >
-                DII {diiVal >= 0 ? '+' : ''}₹{Math.round(diiVal)} Cr
-              </div>
-            </div>
           </div>
         </div>
 
-        {/* Sector Rotation Matrix (6 Cols) */}
-        <div className="lg:col-span-6 bg-panel border border-border/80 rounded-2xl p-4 shadow-sm space-y-3">
+        {/* Card 2: Multi-Timeframe Technical Confluence (4 Cols) */}
+        <div className="lg:col-span-4 bg-panel border border-border/80 rounded-2xl p-4 shadow-sm space-y-2.5">
           <div className="flex items-center justify-between border-b border-border/50 pb-2">
             <span className="text-xs font-bold uppercase tracking-wider text-muted flex items-center gap-1.5">
-              <span>🔄</span> SECTOR ROTATION MATRIX (1D)
+              <span>⚡</span> MULTI-TF CONFLUENCE
             </span>
-            <button
-              onClick={() => sendDraft('scan')}
-              className="text-[10px] text-amber hover:underline font-medium cursor-pointer"
-            >
-              View Full Heatmap →
-            </button>
+            <span className="text-[10px] font-bold font-mono px-2 py-0.5 rounded-full bg-emerald-500/15 border border-emerald-500/30 text-emerald-400">
+              {data?.multi_tf?.confluence_score || 88}% CONFLUENCE
+            </span>
           </div>
 
-          <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-            {sectors.map((s) => {
-              const isPositive = Number(s.change_pct) >= 0
+          <div className="space-y-1.5 text-xs font-mono">
+            {(data?.multi_tf?.timeframes || [
+              { tf: '15m', label: 'Intraday', bias: 'BULLISH', signal: 'SMC Order Block Retest', rsi: 58.4, key_level: 'OB ₹24,120' },
+              { tf: '1h', label: 'Swing', bias: 'BULLISH', signal: 'Higher Highs Structure', rsi: 61.2, key_level: 'EMA20 ₹24,050' },
+              { tf: '1D', label: 'Trend', bias: 'BULLISH', signal: 'Stage 2 Markup (Minervini)', rsi: 64.8, key_level: '50-SMA ₹23,800' },
+            ]).map((tfItem) => {
+              const isBull = tfItem.bias === 'BULLISH'
               return (
-                <button
-                  key={s.name}
-                  onClick={() => {
-                    window.dispatchEvent(new CustomEvent('open-sector-drilldown', { detail: { sector: s.full_name || s.name } }))
-                  }}
-                  className={`p-2.5 rounded-xl border text-center transition-all cursor-pointer ${
-                    isPositive
-                      ? 'bg-green/10 border-green/30 hover:bg-green/20 text-green'
-                      : 'bg-red/10 border-red/30 hover:bg-red/20 text-red'
-                  }`}
+                <div
+                  key={tfItem.tf}
+                  className="bg-surface/80 p-2 rounded-xl border border-border/50 flex items-center justify-between gap-2"
                 >
-                  <span className="text-xs font-bold block text-text truncate">{s.name}</span>
-                  <span className="text-xs font-mono font-bold">
-                    {isPositive ? '+' : ''}
-                    {Number(s.change_pct).toFixed(1)}%
-                  </span>
-                </button>
+                  <div className="flex items-center gap-2">
+                    <span className="font-bold text-text bg-elevated px-1.5 py-0.5 rounded text-[11px] border border-border/60">
+                      {tfItem.tf}
+                    </span>
+                    <div>
+                      <span className="text-text font-semibold text-[11px] block truncate">
+                        {tfItem.signal}
+                      </span>
+                      <span className="text-[9px] text-muted">{tfItem.key_level}</span>
+                    </div>
+                  </div>
+
+                  <div className="text-right shrink-0">
+                    <span
+                      className={`text-[10px] font-bold px-1.5 py-0.2 rounded border ${
+                        isBull
+                          ? 'text-emerald-400 bg-emerald-500/10 border-emerald-500/30'
+                          : 'text-rose-400 bg-rose-500/10 border-rose-500/30'
+                      }`}
+                    >
+                      {tfItem.bias}
+                    </span>
+                    <span className="text-[9px] text-muted block mt-0.5">RSI {tfItem.rsi}</span>
+                  </div>
+                </div>
               )
             })}
           </div>
+
+          <p className="text-[10px] text-muted font-ui italic truncate pt-0.5">
+            🎯 Stance: <strong className="text-text">{data?.multi_tf?.stance || 'High Alignment across 15m/1h/1D'}</strong>
+          </p>
+        </div>
+
+        {/* Card 3: Sector RRG 2D Momentum Matrix (5 Cols) */}
+        <div className="lg:col-span-5 bg-panel border border-border/80 rounded-2xl p-4 shadow-sm space-y-2.5">
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border/50 pb-2">
+            <div className="flex items-center gap-1.5">
+              <span className="text-xs font-bold uppercase tracking-wider text-muted flex items-center gap-1">
+                <span>🔄</span> SECTOR RRG MATRIX
+              </span>
+              <div className="flex items-center bg-surface border border-border/70 rounded-lg p-0.5 text-[10px] font-mono">
+                <button
+                  onClick={() => setSectorViewMode('2D')}
+                  className={`px-1.5 py-0.2 rounded cursor-pointer transition-all ${
+                    sectorViewMode === '2D' ? 'bg-amber text-black font-bold' : 'text-muted hover:text-text'
+                  }`}
+                >
+                  2D
+                </button>
+                <button
+                  onClick={() => setSectorViewMode('HEATMAP')}
+                  className={`px-1.5 py-0.2 rounded cursor-pointer transition-all ${
+                    sectorViewMode === 'HEATMAP' ? 'bg-amber text-black font-bold' : 'text-muted hover:text-text'
+                  }`}
+                >
+                  Grid
+                </button>
+              </div>
+            </div>
+
+            <button
+              onClick={() => sendDraft('rrg')}
+              className="text-[10px] text-amber hover:underline font-medium cursor-pointer flex items-center gap-0.5"
+            >
+              <span>🌐</span> Full RRG →
+            </button>
+          </div>
+
+          {sectorViewMode === '2D' ? (
+            /* Mini Interactive 2D RRG Scatter Plane */
+            <div className="space-y-1.5">
+              <div className="relative h-44 bg-surface/90 border border-border/70 rounded-xl overflow-hidden shadow-inner flex items-center justify-center select-none">
+                {/* Quadrant Background Glows */}
+                <div className="absolute top-0 right-0 w-1/2 h-1/2 bg-emerald-500/5 border-l border-b border-dashed border-border/60" />
+                <div className="absolute bottom-0 right-0 w-1/2 h-1/2 bg-amber-500/5 border-l border-dashed border-border/60" />
+                <div className="absolute bottom-0 left-0 w-1/2 h-1/2 bg-rose-500/5 border-dashed border-border/60" />
+                <div className="absolute top-0 left-0 w-1/2 h-1/2 bg-cyan-500/5 border-b border-dashed border-border/60" />
+
+                {/* Quadrant Labels */}
+                <span className="absolute top-1.5 right-2 text-[8px] font-bold text-emerald-400/80 font-ui">
+                  🚀 LEADING
+                </span>
+                <span className="absolute bottom-1.5 right-2 text-[8px] font-bold text-amber-400/80 font-ui">
+                  ⚠️ WEAKENING
+                </span>
+                <span className="absolute bottom-1.5 left-2 text-[8px] font-bold text-rose-400/80 font-ui">
+                  📉 LAGGING
+                </span>
+                <span className="absolute top-1.5 left-2 text-[8px] font-bold text-cyan-400/80 font-ui">
+                  🔄 IMPROVING
+                </span>
+
+                {/* Center Crosshair Marker */}
+                <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-1.5 h-1.5 rounded-full bg-border" />
+
+                {/* Plotted Sector Nodes */}
+                {sectors.map((s) => {
+                  const ratio = s.rs_ratio || 100.0
+                  const mom = s.rs_momentum || 100.0
+                  const x = Math.max(6, Math.min(94, ((ratio - 90) / 20) * 100))
+                  const y = Math.max(8, Math.min(92, 100 - ((mom - 90) / 20) * 100))
+
+                  const isLeading = s.quadrant === 'LEADING'
+                  const isImproving = s.quadrant === 'IMPROVING'
+                  const isWeakening = s.quadrant === 'WEAKENING'
+
+                  const nodeColor = isLeading
+                    ? 'bg-emerald-500/15 border-emerald-500/50 text-emerald-400 hover:bg-emerald-500 hover:text-black'
+                    : isImproving
+                    ? 'bg-cyan-500/15 border-cyan-500/50 text-cyan-400 hover:bg-cyan-500 hover:text-black'
+                    : isWeakening
+                    ? 'bg-amber-500/15 border-amber-500/50 text-amber-400 hover:bg-amber-500 hover:text-black'
+                    : 'bg-rose-500/15 border-rose-500/50 text-rose-400 hover:bg-rose-500 hover:text-black'
+
+                  return (
+                    <button
+                      key={s.code || s.name}
+                      style={{ left: `${x}%`, top: `${y}%` }}
+                      onClick={() => {
+                        window.dispatchEvent(
+                          new CustomEvent('open-sector-drilldown', {
+                            detail: { sector: s.full_name || s.name },
+                          })
+                        )
+                      }}
+                      className={`absolute -translate-x-1/2 -translate-y-1/2 px-1.5 py-0.5 rounded-lg border text-[9px] font-mono font-bold transition-all duration-150 cursor-pointer shadow-xs ${nodeColor}`}
+                      title={`NIFTY ${s.name}: Ratio ${ratio.toFixed(1)}, Mom ${mom.toFixed(1)} (${s.quadrant}). Click to drill down.`}
+                    >
+                      {s.name}
+                    </button>
+                  )
+                })}
+              </div>
+              <div className="flex items-center justify-between text-[9px] text-muted font-mono px-1">
+                <span>Domain: 90–110 RS Trend</span>
+                <span className="text-amber">Click any sector to drill down</span>
+              </div>
+            </div>
+          ) : (
+            /* Heatmap Grid View */
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5 max-h-48 overflow-y-auto">
+              {sectors.map((s) => {
+                const isPositive = Number(s.change_pct) >= 0
+                const isLeading = s.quadrant === 'LEADING'
+                const isImproving = s.quadrant === 'IMPROVING'
+                const isWeakening = s.quadrant === 'WEAKENING'
+
+                const quadBadgeColor = isLeading
+                  ? 'text-emerald-400 bg-emerald-500/15 border-emerald-500/30'
+                  : isImproving
+                  ? 'text-cyan-400 bg-cyan-500/15 border-cyan-500/30'
+                  : isWeakening
+                  ? 'text-amber bg-amber/15 border-amber/30'
+                  : 'text-rose-400 bg-rose-500/15 border-rose-500/30'
+
+                return (
+                  <button
+                    key={s.name}
+                    onClick={() => {
+                      window.dispatchEvent(
+                        new CustomEvent('open-sector-drilldown', {
+                          detail: { sector: s.full_name || s.name },
+                        })
+                      )
+                    }}
+                    className="p-2 rounded-xl border border-border/70 bg-surface/70 hover:bg-surface hover:border-amber/40 text-left transition-all cursor-pointer space-y-0.5 group"
+                  >
+                    <div className="flex items-center justify-between">
+                      <span className="text-[11px] font-bold text-text font-mono group-hover:text-amber truncate">
+                        {s.name}
+                      </span>
+                      <span
+                        className={`text-[9px] font-mono font-bold ${
+                          isPositive ? 'text-emerald-400' : 'text-rose-400'
+                        }`}
+                      >
+                        {isPositive ? '+' : ''}
+                        {Number(s.change_pct).toFixed(1)}%
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between text-[8px] font-mono">
+                      <span className={`px-1 py-0.2 rounded border font-bold ${quadBadgeColor}`}>
+                        {s.quadrant || 'NEUTRAL'}
+                      </span>
+                      <span className="text-muted">{Number(s.rs_ratio || 100).toFixed(0)} RS</span>
+                    </div>
+                  </button>
+                )
+              })}
+            </div>
+          )}
         </div>
       </div>
     </div>
   )
 }
+

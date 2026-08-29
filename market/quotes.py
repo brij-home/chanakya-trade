@@ -62,19 +62,22 @@ def _yf_fallback_quotes(instruments: list[str]) -> dict[str, Quote]:
     return {}
 
 
-def get_quote(instruments: list[str]) -> dict[str, Quote]:
+def get_quote(instruments: list[str] | str) -> dict[str, Quote]:
     """
     Live quotes for one or more instruments.
 
     Priority: WebSocket cache (instant) → Broker REST API → yfinance fallback.
 
     Args:
-        instruments: List of "EXCHANGE:SYMBOL" strings.
+        instruments: List of "EXCHANGE:SYMBOL" strings, or a single instrument string.
                      e.g. ["NSE:RELIANCE", "NSE:NIFTY 50", "NFO:NIFTY24APR22900CE"]
 
     Returns:
         Dict keyed by instrument string → Quote dataclass.
     """
+    if isinstance(instruments, str):
+        instruments = [instruments]
+
     # 1. Try WebSocket cache (instant)
     result = _ws_quotes(instruments)
     missing = [i for i in instruments if i not in result]
