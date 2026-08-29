@@ -136,6 +136,14 @@
 19. **Living Operational Memory & Continuous Self-Improvement**:
     - Always learn from runtime anomalies, demand spikes, and user workflows.
     - Permanently document newly discovered architectural invariants, UI ergonomics, and error prevention patterns in `AGENTS.md` and `.agents/skills/` runbooks to maintain a living, self-evolving institutional codebase.
+20. **Dynamic Risk-Gated Level Calibration & Directional Invariance**:
+    - Never use static legacy price levels (e.g. `21795.5` from 2024) in frontend state fallbacks or backend payload generators. Always compute dynamic levels relative to the currently active instrument's live price and ATR volatility bounds ($1.0\times - 1.2\times \text{ATR}$).
+    - Enforce strict directional integrity: trade actions (`LONG (BUY)` vs `SHORT (SELL)`) must strictly match the market structure score. Never default `action = "LONG"` when market structure is bearish, which inverts the stop-loss above entry on a "long" label.
+    - Every automated trade setup ticket must provide: (1) explicit timeline horizon (e.g. `1–3 Trading Sessions (Intraday Swing)`, `5–15 Trading Days (Positional Markup)`), (2) structured setup thesis explaining the technical confluence, and (3) explicit trailing stop rules (`2R Breakeven`, `Chandelier 3x ATR`).
+21. **Fullscreen Viewport Adaptability & 1-Click Chart Recenter Ergonomics**:
+    - All modal overlay charts and fullscreen displays must dynamically calculate available viewport heights (`Math.max(520, window.innerHeight * 0.92 - 95)`) so that secondary sub-panes (such as Stochastic RSI or MACD) are guaranteed dedicated vertical space without scroll cutoffs or clipping.
+    - Order Block (OB) ribbons must use ultra-sheer background fills ($1.5\%\text{--}2.5\%$ alpha) with dashed boundaries and semi-translucent glass chip badges to ensure candlesticks and wicks remain 100% visible and uncluttered.
+    - Charts must provide a dedicated 1-click `⟲ Reset View` button that calls `fitContent()`, restores price autoscale, and recalculates DOM overlay coordinates at 60fps.
 
 ---
 

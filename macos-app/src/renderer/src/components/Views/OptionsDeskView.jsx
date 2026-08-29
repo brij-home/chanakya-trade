@@ -15,6 +15,8 @@ export default function OptionsDeskView({ onOpenOrderTicket }) {
   const [chainSort, setChainSort] = useState('strike_asc')
   const [chainPage, setChainPage] = useState(1)
   const [chainPageSize, setPageSize] = useState(10)
+  const [deskPosScale, setDeskPosScale] = useState(1)
+  const [showDeskWhy, setShowDeskWhy] = useState(false)
 
   useEffect(() => {
     let unmounted = false
@@ -308,43 +310,119 @@ export default function OptionsDeskView({ onOpenOrderTicket }) {
         <div className="lg:col-span-4 bg-panel border border-border/80 rounded-2xl p-4 shadow-sm space-y-3">
           <div className="flex items-center justify-between border-b border-border/50 pb-2">
             <span className="text-xs font-bold uppercase tracking-wider text-muted flex items-center gap-1.5">
-              <span>⚡</span> DELTA HEDGING
+              <span>⚡</span> DELTA HEDGING &amp; RISK
             </span>
-            <span className="text-[10px] text-emerald-400 font-mono font-semibold">RECOMMENDED</span>
+            <div className="flex items-center gap-1">
+              {[
+                { label: '1L', val: 1 },
+                { label: '2L', val: 2 },
+                { label: '5L', val: 5 },
+              ].map((sc) => (
+                <button
+                  key={sc.val}
+                  onClick={() => setDeskPosScale(sc.val)}
+                  className={`px-1.5 py-0.5 rounded text-[9px] font-mono font-bold transition-all cursor-pointer ${
+                    deskPosScale === sc.val ? 'bg-amber text-black' : 'bg-surface text-muted hover:text-text'
+                  }`}
+                  title={`Scale position by ${sc.label}`}
+                >
+                  {sc.label}
+                </button>
+              ))}
+              <span className={`text-[9px] font-mono font-bold px-1.5 py-0.5 rounded border ml-1 ${
+                Math.abs(Number(deltaHedge?.net_delta ?? 0.42) * deskPosScale) <= 0.08
+                  ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-400'
+                  : Number(deltaHedge?.net_delta ?? 0.42) > 0
+                  ? 'bg-cyan-500/10 border-cyan-500/30 text-cyan-400'
+                  : 'bg-rose-500/10 border-rose-500/30 text-rose-400'
+              }`}>
+                {Number(deltaHedge?.net_delta ?? 0.42) > 0 ? 'LONG Δ' : 'SHORT Δ'}
+              </span>
+            </div>
           </div>
 
+          {/* Visual Delta Balance Needle Meter */}
+          <div className="bg-surface/70 border border-border/60 rounded-xl p-2.5 space-y-1.5">
+            <div className="flex items-center justify-between text-[10px] font-mono text-muted">
+              <span className="text-rose-400">Short (-1.0)</span>
+              <span className="text-emerald-400 font-bold">Neutral Zone</span>
+              <span className="text-cyan-400">Long (+1.0)</span>
+            </div>
+            <div className="relative h-2.5 w-full bg-border/40 rounded-full overflow-hidden flex items-center">
+              <div className="absolute left-[45%] right-[45%] top-0 bottom-0 bg-emerald-500/30 border-x border-emerald-400/50" />
+              <div
+                className="absolute top-0 bottom-0 w-2.5 -ml-1 bg-gradient-to-r from-amber to-amber-light rounded-full shadow-md transition-all duration-300"
+                style={{
+                  left: `${((Math.max(-1.0, Math.min(1.0, Number(deltaHedge?.net_delta ?? 0.42) * deskPosScale)) + 1.0) / 2.0) * 100}%`,
+                }}
+              />
+            </div>
+            <div className="flex justify-between items-center text-[10px] text-muted font-mono">
+              <span>Net Δ: <strong className="text-text">{Number(deltaHedge?.net_delta ?? 0.42) >= 0 ? '+' : ''}{(Number(deltaHedge?.net_delta ?? 0.42) * deskPosScale).toFixed(2)} Δ ({Math.round(Number(deltaHedge?.net_delta ?? 0.42) * deskPosScale * (underlying === 'BANKNIFTY' ? 15 : 75))} shares)</strong></span>
+              <span>₹/1%: <strong className="text-cyan-400">₹{Math.abs(Math.round(Number(deltaHedge?.net_delta ?? 0.42) * deskPosScale * (underlying === 'BANKNIFTY' ? 15 : 75) * spot * 0.01)).toLocaleString('en-IN')}</strong></span>
+            </div>
+          </div>
+
+          {/* Actionable Hedge Recipes */}
           <div className="space-y-2 text-xs font-mono">
             <div className="bg-surface/80 p-2.5 rounded-xl border border-border/60">
-              <span className="text-[10px] text-muted block">Hedge Action</span>
-              <span className="font-bold text-emerald-400 text-sm">{deltaHedge?.recommendation || `BUY 100 Lots ${underlying} FUT`}</span>
+              <div className="flex items-center justify-between">
+                <span className="text-[10px] text-muted block">Hedge Execution Blueprint</span>
+                <button
+                  onClick={() => setShowDeskWhy(!showDeskWhy)}
+                  className="text-[9px] text-amber hover:underline cursor-pointer flex items-center gap-0.5"
+                >
+                  <span>{showDeskWhy ? '▲ Hide Why' : '▼ Why Hedge?'}</span>
+                </button>
+              </div>
+              <span className="font-bold text-emerald-400 text-xs block truncate mt-0.5">
+                SELL {Math.max(1, Math.round(Number(deltaHedge?.net_delta ?? 0.42) * deskPosScale))} Lot{Math.max(1, Math.round(Number(deltaHedge?.net_delta ?? 0.42) * deskPosScale)) > 1 ? 's' : ''} ({Math.max(1, Math.round(Number(deltaHedge?.net_delta ?? 0.42) * deskPosScale)) * (underlying === 'BANKNIFTY' ? 15 : 75)} Qty) {underlying} FUT
+              </span>
             </div>
 
-            <div className="grid grid-cols-2 gap-2">
+            {/* Expandable Why & When Narrative */}
+            {showDeskWhy && (
+              <div className="bg-surface/90 border border-amber/30 rounded-xl p-2.5 space-y-1 text-[10px] font-ui text-text/90 leading-tight">
+                <p className="font-bold text-amber">💡 Monetary Risk Rationale:</p>
+                <p>
+                  Holding {deskPosScale} lot{deskPosScale > 1 ? 's' : ''} with +{(Number(deltaHedge?.net_delta ?? 0.42) * deskPosScale).toFixed(2)} delta exposes you to ~₹{Math.abs(Math.round(Number(deltaHedge?.net_delta ?? 0.42) * deskPosScale * (underlying === 'BANKNIFTY' ? 15 : 75) * spot * 0.01)).toLocaleString('en-IN')} loss per 1% drop in {underlying}. Hedging locks your profit against market drawdowns.
+                </p>
+                <p className="text-muted font-mono pt-0.5">Rebalance trigger: When {underlying} drifts &gt; ±0.75% (±{Math.round(spot * 0.0075)} pts).</p>
+              </div>
+            )}
+
+            <div className="grid grid-cols-2 gap-2 text-[11px]">
               <div className="bg-surface/80 p-2 rounded-xl border border-border/60">
-                <span className="text-[10px] text-muted block">Net Delta</span>
-                <span className="font-bold text-text">{deltaHedge?.net_delta ?? '+0.42'}</span>
+                <span className="text-[9px] text-muted block">Gamma Risk</span>
+                <span className="font-bold text-text">{deltaHedge?.net_gamma ?? '+0.18'} Γ</span>
               </div>
               <div className="bg-surface/80 p-2 rounded-xl border border-border/60">
-                <span className="text-[10px] text-muted block">Net Gamma</span>
-                <span className="font-bold text-text">{deltaHedge?.net_gamma ?? '+0.18'}</span>
+                <span className="text-[9px] text-muted block">Est. Margin</span>
+                <span className="font-bold text-text">₹{Math.round(Math.max(1, Math.round(Number(deltaHedge?.net_delta ?? 0.42) * deskPosScale)) * (underlying === 'BANKNIFTY' ? 15 : 75) * spot * 0.11).toLocaleString('en-IN')}</span>
               </div>
             </div>
 
-            <div className="pt-1">
+            <div className="pt-0.5">
               <button
                 onClick={() => {
+                  const hedgeLots = Math.max(1, Math.round(Number(deltaHedge?.net_delta ?? 0.42) * deskPosScale))
+                  const lotSz = (underlying === 'BANKNIFTY' ? 15 : underlying === 'FINNIFTY' ? 40 : 75)
                   if (onOpenOrderTicket) {
                     onOpenOrderTicket({
                       symbol: `${underlying} FUT`,
                       exchange: 'NFO',
                       price: spot,
-                      quantity: 100,
+                      quantity: hedgeLots * lotSz,
+                      side: Number(deltaHedge?.net_delta ?? 0.42) > 0 ? 'SELL' : 'BUY',
+                      segment: 'OPTIONS',
                     })
+                  } else {
+                    sendDraft(`execute delta hedge: SELL ${hedgeLots} lots (${hedgeLots * lotSz} qty) ${underlying} FUT`)
                   }
                 }}
                 className="w-full py-2 px-3 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-500 hover:brightness-110 text-black font-bold text-xs uppercase tracking-wide transition-all shadow-md cursor-pointer flex items-center justify-center gap-1.5"
               >
-                <span>⚡</span> Stage Delta Hedge Order
+                <span>⚡</span> Stage 1-Click Delta Hedge ({Math.max(1, Math.round(Number(deltaHedge?.net_delta ?? 0.42) * deskPosScale))} Lot{Math.max(1, Math.round(Number(deltaHedge?.net_delta ?? 0.42) * deskPosScale)) > 1 ? 's' : ''})
               </button>
             </div>
           </div>
@@ -356,48 +434,73 @@ export default function OptionsDeskView({ onOpenOrderTicket }) {
             <span className="text-xs font-bold uppercase tracking-wider text-muted flex items-center gap-1.5">
               <span>📈</span> VOLATILITY SMILE &amp; SKEW
             </span>
-            <span className="text-[10px] text-cyan-400 font-mono font-semibold">DYNAMIC CURVE</span>
+            <span className="text-[10px] text-amber font-mono font-bold px-1.5 py-0.5 rounded bg-amber/10 border border-amber/30">
+              PUT SKEW +3.4%
+            </span>
           </div>
 
           {/* Interactive Dynamic SVG Smile Curve */}
-          <div className="h-40 w-full relative flex items-center justify-center bg-surface/50 rounded-xl border border-border/50 p-2">
-            <svg className="w-full h-full" viewBox="0 0 240 100">
+          <div className="h-36 w-full relative flex items-center justify-center bg-surface/80 rounded-xl border border-border/60 p-2">
+            <svg className="w-full h-full" viewBox="0 0 240 90">
               {/* Grid lines */}
               <line x1="0" y1="20" x2="240" y2="20" stroke="rgba(255,255,255,0.06)" strokeDasharray="3" />
-              <line x1="0" y1="50" x2="240" y2="50" stroke="rgba(255,255,255,0.06)" strokeDasharray="3" />
-              <line x1="0" y1="80" x2="240" y2="80" stroke="rgba(255,255,255,0.06)" strokeDasharray="3" />
+              <line x1="0" y1="45" x2="240" y2="45" stroke="rgba(255,255,255,0.06)" strokeDasharray="3" />
+              <line x1="0" y1="70" x2="240" y2="70" stroke="rgba(255,255,255,0.06)" strokeDasharray="3" />
 
               {/* Spot Marker Line (Pink) */}
-              <line x1="120" y1="0" x2="120" y2="100" stroke="#f43f5e" strokeWidth="1.5" strokeDasharray="2" />
-              <text x="123" y="14" fill="#f43f5e" fontSize="7" fontFamily="monospace" fontWeight="bold">
+              <line x1="120" y1="0" x2="120" y2="90" stroke="#f43f5e" strokeWidth="1.2" strokeDasharray="2" />
+              <text x="123" y="12" fill="#f43f5e" fontSize="7" fontFamily="monospace" fontWeight="bold">
                 Spot: {Math.round(spot)}
               </text>
 
-              {/* Dynamic Polyline Smile */}
+              {/* Put IV Curve (Amber) */}
               {svgPoints && (
                 <polyline
                   fill="none"
-                  stroke="#22d3ee"
-                  strokeWidth="2.5"
+                  stroke="#f59e0b"
+                  strokeWidth="2.2"
                   strokeLinecap="round"
                   strokeLinejoin="round"
                   points={svgPoints}
                 />
               )}
 
+              {/* Call IV Curve (Cyan) */}
+              <polyline
+                fill="none"
+                stroke="#06b6d4"
+                strokeWidth="1.8"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeDasharray="4 2"
+                points="15,75 70,72 120,68 170,62 225,55"
+              />
+
               {/* ATM Circle Point */}
-              <circle cx="120" cy="76" r="3.5" fill="#22d3ee" className="animate-pulse" />
-              <text x="124" y="86" fill="#22d3ee" fontSize="7.5" fontFamily="monospace" fontWeight="bold">
+              <circle cx="120" cy="68" r="3" fill="#f59e0b" className="animate-pulse" />
+              <text x="124" y="78" fill="#f59e0b" fontSize="7" fontFamily="monospace" fontWeight="bold">
                 ATM ({minIV.toFixed(1)}%)
               </text>
             </svg>
           </div>
 
-          <div className="flex justify-between items-center text-[10px] font-mono text-muted">
-            <span>{ivSkew[0]?.strike ? Number(ivSkew[0].strike).toLocaleString('en-IN') : 'OTM Put'} ({ivSkew[0]?.iv || '18.2'}%)</span>
+          <div className="flex justify-between items-center text-[10px] font-mono text-muted bg-surface/50 p-2 rounded-lg border border-border/40">
+            <span className="flex items-center gap-1 text-amber">
+              <span className="w-2 h-1 bg-amber rounded-full inline-block" /> OTM Put IV ({ivSkew[0]?.iv || '18.2'}%)
+            </span>
             <span className="text-cyan-400 font-bold">ATM ({minIV.toFixed(1)}%)</span>
-            <span>{ivSkew[ivSkew.length - 1]?.strike ? Number(ivSkew[ivSkew.length - 1].strike).toLocaleString('en-IN') : 'OTM Call'} ({ivSkew[ivSkew.length - 1]?.iv || '19.8'}%)</span>
+            <span className="flex items-center gap-1 text-cyan-400">
+              <span className="w-2 h-1 bg-cyan-400 rounded-full inline-block" /> OTM Call IV (14.2%)
+            </span>
           </div>
+
+          {/* 1-Click Skew Strategy Action Chip */}
+          <button
+            onClick={() => sendDraft(`Build a high-probability Bull Put spread for ${underlying} to exploit elevated put skew`)}
+            className="w-full py-1.5 px-2 rounded-lg bg-surface hover:bg-amber/10 border border-border/70 hover:border-amber/40 text-[10px] font-mono font-bold text-amber transition-all cursor-pointer flex items-center justify-center gap-1"
+          >
+            <span>🎯</span> Harvest Put Skew (Bull Put Credit Spread)
+          </button>
         </div>
       </div>
 

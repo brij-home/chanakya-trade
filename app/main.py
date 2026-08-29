@@ -76,6 +76,12 @@ def main() -> None:
     console.print(BANNER)
 
     # ── Check for flags ───────────────────────────────────────
+    if "--preflight" in sys.argv:
+        from scripts.preflight import run_preflight
+
+        rep = run_preflight(verbose=True)
+        sys.exit(0 if rep.healthy else 1)
+
     use_tui = "--tui" in sys.argv
     no_broker = "--no-broker" in sys.argv
 

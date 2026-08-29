@@ -590,7 +590,7 @@ export default function TerminalView({ onSelectSymbol, onOpenOrderTicket }) {
 
         {/* Right Column (3 Cols): Automated Setup Ticket */}
         <div className="lg:col-span-3 space-y-4">
-          <div className="bg-panel border border-border/80 rounded-2xl p-4 shadow-sm space-y-4">
+          <div className="bg-panel border border-border/80 rounded-2xl p-4 shadow-sm space-y-3.5">
             <div className="flex items-center justify-between border-b border-border/50 pb-2.5">
               <div>
                 <span className="text-xs font-bold uppercase tracking-wider text-muted block">
@@ -598,91 +598,130 @@ export default function TerminalView({ onSelectSymbol, onOpenOrderTicket }) {
                 </span>
                 <span className="text-[10px] text-emerald-400 font-semibold">(Institutional Risk Gate)</span>
               </div>
-              <span className="px-2 py-0.5 rounded-full bg-emerald-500/15 border border-emerald-500/30 text-emerald-400 text-[10px] font-bold">
+              <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold border ${
+                setup?.action?.includes('SHORT')
+                  ? 'bg-rose-500/15 border-rose-500/30 text-rose-400'
+                  : 'bg-emerald-500/15 border-emerald-500/30 text-emerald-400'
+              }`}>
                 {setup?.status || 'READY'}
               </span>
             </div>
 
-            {/* Signal Details */}
-            <div className="space-y-2.5 text-xs font-mono">
-              <div className="flex justify-between items-center py-1 border-b border-border/30">
-                <span className="text-muted">Symbol</span>
-                <span className="font-bold text-text">{setup?.symbol || `${selectedSymbol} (NSE)`}</span>
-              </div>
-              <div className="flex justify-between items-center py-1 border-b border-border/30">
-                <span className="text-muted">Action</span>
-                <span className="font-bold text-emerald-400 bg-emerald-500/15 px-2 py-0.5 rounded border border-emerald-500/30">
-                  {setup?.action || 'LONG (BUY)'}
-                </span>
-              </div>
-              <div className="flex justify-between items-center py-1 border-b border-border/30">
-                <span className="text-muted">Trigger</span>
-                <span className="font-bold text-text">{setup?.trigger || 'OB Retest'}</span>
-              </div>
-              <div className="flex justify-between items-center py-1 border-b border-border/30">
-                <span className="text-muted">ENTRY</span>
-                <span className="font-bold text-emerald-400 text-sm">
-                  ₹{Number(setup?.entry || 21795.5).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
-                </span>
-              </div>
-              <div className="flex justify-between items-center py-1 border-b border-border/30">
-                <span className="text-muted">STOP-LOSS</span>
-                <span className="font-bold text-red text-sm">
-                  ₹{Number(setup?.stop_loss || 21745.0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
-                </span>
-              </div>
-
-              {/* Progress Slider */}
-              <div className="py-2 space-y-1.5">
-                <div className="flex justify-between text-[10px] text-muted">
-                  <span>SL: ₹{setup?.stop_loss || 21745}</span>
-                  <span className="text-emerald-400 font-bold">Target 2: ₹{setup?.target_2 || 21940}</span>
-                </div>
-                <div className="w-full bg-surface h-2 rounded-full overflow-hidden border border-border/60">
-                  <div
-                    className="bg-gradient-to-r from-red via-amber to-emerald-400 h-full rounded-full transition-all duration-500"
-                    style={{ width: `${setup?.progress || 70}%` }}
-                  />
-                </div>
-              </div>
-
-              <div className="flex justify-between items-center py-1 border-b border-border/30">
-                <span className="text-muted">TARGET 1</span>
-                <span className="font-bold text-text">₹{Number(setup?.target_1 || 21885.0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span>
-              </div>
-              <div className="flex justify-between items-center py-1 border-b border-border/30">
-                <span className="text-muted">TARGET 2</span>
-                <span className="font-bold text-text">₹{Number(setup?.target_2 || 21940.0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span>
-              </div>
-              <div className="flex justify-between items-center py-1 border-b border-border/30">
-                <span className="text-muted">R:R PAYOFF</span>
-                <span className="font-bold text-amber">{setup?.risk_reward || '1.8'} R</span>
-              </div>
-              <div className="flex justify-between items-center py-1">
-                <span className="text-muted">Trailing Rule</span>
-                <span className="font-bold text-[10px] text-muted truncate">
-                  2R Breakeven, ATR 3x
-                </span>
-              </div>
+            {/* Timeline Horizon Badge */}
+            <div className="flex items-center justify-between px-2.5 py-1 rounded-lg bg-surface/80 border border-border/60 text-[11px] font-mono">
+              <span className="text-muted">⏱️ Timeline</span>
+              <span className="text-amber font-semibold">{setup?.timeline || `${timeframe === 'day' ? '5–15 Days (Positional)' : '1–3 Sessions (Intraday)'}`}</span>
             </div>
 
-            {/* Execute Button */}
-            <button
-              onClick={() => {
-                if (onOpenOrderTicket) {
-                  onOpenOrderTicket({
-                    symbol: selectedSymbol,
-                    exchange: 'NSE',
-                    price: setup?.entry || 21795.5,
-                    stopLoss: setup?.stop_loss || 21745.0,
-                    target: setup?.target_1 || 21885.0,
-                  })
-                }
-              }}
-              className="w-full py-2.5 px-4 rounded-xl bg-gradient-to-r from-amber to-amber-light hover:brightness-110 text-black font-bold text-xs uppercase tracking-wider transition-all shadow-md cursor-pointer flex items-center justify-center gap-2"
-            >
-              <span>⚡</span> STAGE / EXECUTE ORDER
-            </button>
+            {/* Signal Details */}
+            {(() => {
+              const curLtp = MASTER_WATCHLIST.find((m) => m.symbol === selectedSymbol)?.ltp || data?.ltp || 1000.0
+              const isShort = setup?.action && setup.action.includes('SHORT')
+              const safeEntry = setup?.entry != null ? Number(setup.entry) : Number((curLtp * (isShort ? 1.002 : 0.998)).toFixed(2))
+              const safeSl = setup?.stop_loss != null ? Number(setup.stop_loss) : Number((isShort ? curLtp * 1.012 : curLtp * 0.988).toFixed(2))
+              const safeTgt1 = setup?.target_1 != null ? Number(setup.target_1) : Number((isShort ? curLtp * 0.976 : curLtp * 1.024).toFixed(2))
+              const safeTgt2 = setup?.target_2 != null ? Number(setup.target_2) : Number((isShort ? curLtp * 0.958 : curLtp * 1.042).toFixed(2))
+              const riskPts = setup?.risk_points ?? Math.abs(safeEntry - safeSl).toFixed(2)
+              const riskPct = setup?.risk_pct ?? ((riskPts / safeEntry) * 100).toFixed(2)
+              const rewPts = setup?.reward_points ?? Math.abs(safeTgt1 - safeEntry).toFixed(2)
+              const rewPct = setup?.reward_pct ?? ((rewPts / safeEntry) * 100).toFixed(2)
+
+              return (
+                <div className="space-y-2 text-xs font-mono">
+                  <div className="flex justify-between items-center py-1 border-b border-border/30">
+                    <span className="text-muted">Symbol</span>
+                    <span className="font-bold text-text">{setup?.symbol || `${selectedSymbol} (NSE)`}</span>
+                  </div>
+                  <div className="flex justify-between items-center py-1 border-b border-border/30">
+                    <span className="text-muted">Action</span>
+                    <span className={`font-bold px-2 py-0.5 rounded border ${
+                      isShort
+                        ? 'text-rose-400 bg-rose-500/15 border-rose-500/30'
+                        : 'text-emerald-400 bg-emerald-500/15 border-emerald-500/30'
+                    }`}>
+                      {setup?.action || (isShort ? 'SHORT (SELL)' : 'LONG (BUY)')}
+                    </span>
+                  </div>
+                  <div className="flex justify-between items-center py-1 border-b border-border/30">
+                    <span className="text-muted">Trigger</span>
+                    <span className="font-bold text-text">{setup?.trigger || (isShort ? 'Supply Rejection' : 'Demand Retest')}</span>
+                  </div>
+                  <div className="flex justify-between items-center py-1 border-b border-border/30">
+                    <span className="text-muted">ENTRY</span>
+                    <span className="font-bold text-emerald-400 text-sm">
+                      ₹{safeEntry.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                    </span>
+                  </div>
+                  <div className="flex justify-between items-center py-1 border-b border-border/30">
+                    <span className="text-muted">STOP-LOSS</span>
+                    <div className="text-right">
+                      <span className="font-bold text-red text-sm">
+                        ₹{safeSl.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                      </span>
+                      <span className="text-[10px] text-muted block">
+                        (-{riskPts} pts | -{riskPct}%)
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="flex justify-between items-center py-1 border-b border-border/30">
+                    <span className="text-muted">TARGET 1 (2R)</span>
+                    <div className="text-right">
+                      <span className="font-bold text-emerald-400">
+                        ₹{safeTgt1.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                      </span>
+                      <span className="text-[10px] text-emerald-500/80 block">
+                        (+{rewPts} pts | +{rewPct}%)
+                      </span>
+                    </div>
+                  </div>
+                  <div className="flex justify-between items-center py-1 border-b border-border/30">
+                    <span className="text-muted">TARGET 2 (3.5R)</span>
+                    <span className="font-bold text-text">
+                      ₹{safeTgt2.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                    </span>
+                  </div>
+                  <div className="flex justify-between items-center py-1 border-b border-border/30">
+                    <span className="text-muted">R:R PAYOFF</span>
+                    <span className="font-bold text-amber">1 : {setup?.risk_reward || '2.0'} R</span>
+                  </div>
+
+                  {/* Setup Thesis & Actionable Insights Box */}
+                  <div className="p-2 rounded-xl bg-surface/90 border border-border/60 text-[11px] space-y-1">
+                    <span className="text-muted font-bold block flex items-center gap-1">
+                      <span>💡</span> Setup Thesis
+                    </span>
+                    <p className="text-text leading-snug font-ui text-[11px]">
+                      {setup?.thesis || `Unmitigated ${isShort ? 'Supply' : 'Demand'} zone retest with institutional volume absorption and structured invalidation.`}
+                    </p>
+                  </div>
+
+                  {/* Trailing Stop Rule */}
+                  <div className="px-2 py-1.5 rounded-lg bg-elevated/60 border border-border/40 text-[10px] text-muted flex items-start gap-1.5">
+                    <span>🛡️</span>
+                    <span><strong>Rule:</strong> Move SL to Breakeven (+0.2% buffer) at Target 1. Trail rest with 3x ATR.</span>
+                  </div>
+
+                  {/* Execute Button */}
+                  <button
+                    onClick={() => {
+                      if (onOpenOrderTicket) {
+                        onOpenOrderTicket({
+                          symbol: selectedSymbol,
+                          exchange: 'NSE',
+                          price: safeEntry,
+                          stopLoss: safeSl,
+                          target: safeTgt1,
+                        })
+                      }
+                    }}
+                    className="w-full py-2.5 px-4 mt-2 rounded-xl bg-gradient-to-r from-amber to-amber-light hover:brightness-110 text-black font-bold text-xs uppercase tracking-wider transition-all shadow-md cursor-pointer flex items-center justify-center gap-2"
+                  >
+                    <span>⚡</span> STAGE / EXECUTE ORDER
+                  </button>
+                </div>
+              )
+            })()}
           </div>
         </div>
       </div>

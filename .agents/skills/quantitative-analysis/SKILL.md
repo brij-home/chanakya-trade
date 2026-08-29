@@ -163,7 +163,23 @@ The execution gate ([`analysis/execution_gate.py`](file:///c:/Users/brije/.gemin
 
 ---
 
-## 9. Testing & Verification
+## 10. Dynamic ATR-Bounded Trade Level Calibration & Timeline Horizons
+
+When generating automated trade tickets:
+- **ATR Volatility Risk Gating**: Invalidation stop-loss risk must be bounded by $1.0\times - 1.2\times \text{ATR}$ ($0.35\% - 1.5\%$ on NIFTY/BANKNIFTY, $1.0\% - 2.0\%$ on individual equities) and anchored strictly to unmitigated Demand/Supply Order Block boundaries.
+- **SMC Optimal Trade Entry (OTE)**: Limit entry prices target the $50\%$ Mean Threshold of the active Order Block.
+- **Directional Integrity**:
+  - `LONG (BUY)`: Entry at Demand OTE, Invalidation Stop-Loss below Demand base, Target 1 ($2R$), Target 2 ($3.5R$).
+  - `SHORT (SELL)`: Entry at Supply OTE, Invalidation Stop-Loss above Supply base, Target 1 ($2R$), Target 2 ($3.5R$).
+- **Timeframe Horizon Mapping**:
+  - `5m / 15m`: `1–3 Trading Sessions (Intraday Swing)`
+  - `1h`: `2–5 Trading Days (Swing Pivot)`
+  - `1D / Daily`: `5–15 Trading Days (Positional Markup)`
+  - `1W / Weekly`: `3–8 Weeks (Trend Continuation)`
+
+---
+
+## 11. Testing & Verification
 
 ```powershell
 # Run quantitative and structural test suites

@@ -27,8 +27,15 @@ INTERVAL_MAP = {
     "15m": "15minute",
     "30m": "30minute",
     "1h": "60minute",
+    "60m": "60minute",
     "1d": "day",
     "day": "day",
+    "1w": "week",
+    "1wk": "week",
+    "week": "week",
+    "1M": "month",
+    "1mo": "month",
+    "month": "month",
 }
 
 
@@ -301,3 +308,5 @@ def _get_instrument_token(symbol: str, exchange: str) -> int:
 # NOTE: _mock_ohlcv and get_ohlcv_mock were removed.
 # All market data now comes from real sources (broker API or yfinance).
 # No synthetic/random data is ever served to users.
+
+get_historical_data = get_ohlcv

@@ -51,6 +51,8 @@ class OrderBlock:
     formed_date: str
     mitigated: bool = False
     volume_ratio: float = 1.0
+    confluence_count: int = 1  # Number of aggregated overlapping blocks
+    ote_price: float = 0.0     # 50% Mean Threshold (MT) / Optimal Trade Entry sweet spot
 
 
 @dataclass
@@ -210,10 +212,10 @@ def detect_order_blocks(df: pd.DataFrame, swings: list[SwingPoint]) -> tuple[lis
             ob_bottom = float(lows[i])
             ob_mid = (ob_top + ob_bottom) / 2.0
             
-            # Check if mitigated later
+            # Check if broken later (close below bottom invalidates demand OB)
             mitigated = False
             for j in range(i + 2, n):
-                if lows[j] <= ob_top:
+                if closes[j] < ob_bottom:
                     mitigated = True
                     break
 
@@ -236,9 +238,10 @@ def detect_order_blocks(df: pd.DataFrame, swings: list[SwingPoint]) -> tuple[lis
             ob_bottom = float(lows[i])
             ob_mid = (ob_top + ob_bottom) / 2.0
 
+            # Check if broken later (close above top invalidates supply OB)
             mitigated = False
             for j in range(i + 2, n):
-                if highs[j] >= ob_bottom:
+                if closes[j] > ob_top:
                     mitigated = True
                     break
 
@@ -251,10 +254,114 @@ def detect_order_blocks(df: pd.DataFrame, swings: list[SwingPoint]) -> tuple[lis
                     formed_date=str(dates[i]),
                     mitigated=mitigated,
                     volume_ratio=float(vols[i] / avg_vol) if avg_vol > 0 else 1.0,
+                    confluence_count=1,
+                    ote_price=round(ob_mid, 2),
                 )
             )
 
-    return demand_obs, supply_obs
+    # Aggregate nearby and overlapping order blocks into unified confluence zones
+    agg_demand = aggregate_overlapping_order_blocks(demand_obs)
+    agg_supply = aggregate_overlapping_order_blocks(supply_obs)
+
+    # Filter for strong, data-backed unmitigated blocks only (volume >= 1.1x or confluence >= 2x)
+    # and retain the top 2 nearest institutional zones to prevent chart clutter
+    valid_demand = [
+        d for d in agg_demand
+        if not d.mitigated and (d.volume_ratio >= 1.1 or d.confluence_count >= 2 or (d.top - d.bottom) / (d.bottom or 1) >= 0.003)
+    ]
+    # Sort demand: nearest below current price first, keep top 2
+    valid_demand.sort(key=lambda x: x.top, reverse=True)
+    top_demand = sorted(valid_demand[:2], key=lambda x: x.bottom)
+
+    valid_supply = [
+        s for s in agg_supply
+        if not s.mitigated and (s.volume_ratio >= 1.1 or s.confluence_count >= 2 or (s.top - s.bottom) / (s.bottom or 1) >= 0.003)
+    ]
+    # Sort supply: nearest above current price first, keep top 2
+    valid_supply.sort(key=lambda x: x.bottom)
+    top_supply = valid_supply[:2]
+
+    return top_demand, top_supply
+
+
+def aggregate_overlapping_order_blocks(
+    obs: list[OrderBlock], proximity_pct: float = 0.01
+) -> list[OrderBlock]:
+    """
+    Combines nearby and overlapping unmitigated Order Blocks into unified institutional
+    Confluence Zones (Clusters).
+    
+    Why:
+    Multiple adjacent fractals or candles often produce separate overlapping blocks.
+    Aggregating them creates a high-conviction decision zone with a 50% Mean Threshold
+    (OTE sweet spot) for highest R:R entries and clean chart readability.
+    """
+    if not obs:
+        return []
+
+    # Sort from low to high for demand, high to low for supply
+    sorted_obs = sorted(obs, key=lambda x: x.bottom)
+    merged: list[OrderBlock] = []
+
+    for ob in sorted_obs:
+        if ob.mitigated:
+            continue
+            
+        if not merged:
+            merged_ob = OrderBlock(
+                type=ob.type,
+                top=ob.top,
+                bottom=ob.bottom,
+                midpoint=(ob.top + ob.bottom) / 2.0,
+                formed_date=ob.formed_date,
+                mitigated=False,
+                volume_ratio=ob.volume_ratio,
+                confluence_count=1,
+                ote_price=round((ob.top + ob.bottom) / 2.0, 2),
+            )
+            merged.append(merged_ob)
+            continue
+
+        prev = merged[-1]
+        
+        # Check overlap or tight proximity (within proximity_pct)
+        overlap = not (ob.bottom > prev.top and (ob.bottom - prev.top) / prev.top > proximity_pct)
+
+        if overlap:
+            # Merge into higher-conviction unified zone
+            new_top = max(prev.top, ob.top)
+            new_bottom = min(prev.bottom, ob.bottom)
+            new_mid = (new_top + new_bottom) / 2.0
+            new_vol = max(prev.volume_ratio, ob.volume_ratio)
+            new_confluence = prev.confluence_count + 1
+            
+            merged[-1] = OrderBlock(
+                type=prev.type,
+                top=new_top,
+                bottom=new_bottom,
+                midpoint=new_mid,
+                formed_date=prev.formed_date,
+                mitigated=False,
+                volume_ratio=round(new_vol, 2),
+                confluence_count=new_confluence,
+                ote_price=round(new_mid, 2),
+            )
+        else:
+            merged.append(
+                OrderBlock(
+                    type=ob.type,
+                    top=ob.top,
+                    bottom=ob.bottom,
+                    midpoint=(ob.top + ob.bottom) / 2.0,
+                    formed_date=ob.formed_date,
+                    mitigated=False,
+                    volume_ratio=ob.volume_ratio,
+                    confluence_count=1,
+                    ote_price=round((ob.top + ob.bottom) / 2.0, 2),
+                )
+            )
+
+    return merged
 
 
 def detect_fair_value_gaps(df: pd.DataFrame) -> list[FairValueGap]:
