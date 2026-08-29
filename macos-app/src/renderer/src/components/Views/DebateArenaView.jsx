@@ -93,7 +93,7 @@ export default function DebateArenaView({ onOpenOrderTicket }) {
   const bullCase = data?.bull_case || []
   const bearCase = data?.bear_case || []
   const consensus = data?.facilitator_consensus
-  const ltp = data?.ltp || 2940.0
+  const ltp = data?.ltp || 0
 
   return (
     <div className="flex-1 overflow-y-auto p-3 sm:p-6 bg-surface text-text space-y-6 font-ui relative">
@@ -105,7 +105,7 @@ export default function DebateArenaView({ onOpenOrderTicket }) {
             <h1 className="text-lg font-bold font-mono text-text flex items-center gap-2">
               <span>{symbol} (NSE)</span>
               <span className="text-xs px-2 py-0.5 rounded-full bg-green/15 text-green font-bold border border-green/30">
-                ₹{Number(ltp).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                {ltp > 0 ? `₹${Number(ltp).toLocaleString('en-IN', { minimumFractionDigits: 2 })}` : 'Live Fetching…'}
               </span>
             </h1>
             <div className="flex items-center gap-2 text-[11px] text-muted">
@@ -274,31 +274,48 @@ export default function DebateArenaView({ onOpenOrderTicket }) {
             <div className="bg-surface/90 border border-border/80 rounded-xl p-2.5 text-xs font-mono space-y-1.5 text-left">
               <div className="flex justify-between">
                 <span className="text-muted">ENTRY:</span>
-                <span className="font-bold text-emerald-400">₹{Number(consensus?.entry || ltp).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span>
+                <span className="font-bold text-emerald-400">
+                  {consensus?.entry != null
+                    ? `₹${Number(consensus.entry).toLocaleString('en-IN', { minimumFractionDigits: 2 })}`
+                    : (ltp > 0 ? `₹${Number(ltp * 0.998).toLocaleString('en-IN', { minimumFractionDigits: 2 })}` : '—')}
+                </span>
               </div>
               <div className="flex justify-between">
                 <span className="text-muted">STOP-LOSS:</span>
-                <span className="font-bold text-red">₹{Number(consensus?.stop_loss || ltp * 0.985).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span>
+                <span className="font-bold text-red">
+                  {consensus?.stop_loss != null
+                    ? `₹${Number(consensus.stop_loss).toLocaleString('en-IN', { minimumFractionDigits: 2 })}`
+                    : (ltp > 0 ? `₹${Number(ltp * 0.988).toLocaleString('en-IN', { minimumFractionDigits: 2 })}` : '—')}
+                </span>
               </div>
               <div className="flex justify-between">
                 <span className="text-muted">TARGET:</span>
-                <span className="font-bold text-text">₹{Number(consensus?.target || ltp * 1.035).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span>
+                <span className="font-bold text-text">
+                  {consensus?.target != null
+                    ? `₹${Number(consensus.target).toLocaleString('en-IN', { minimumFractionDigits: 2 })}`
+                    : (ltp > 0 ? `₹${Number(ltp * 1.024).toLocaleString('en-IN', { minimumFractionDigits: 2 })}` : '—')}
+                </span>
               </div>
               <div className="flex justify-between border-t border-border/50 pt-1 text-[11px]">
                 <span className="text-muted">R:R RATIO:</span>
-                <span className="font-bold text-amber">{consensus?.risk_reward || '2.1'} R</span>
+                <span className="font-bold text-amber">{consensus?.risk_reward ? `${consensus.risk_reward} R` : '2.0 R'}</span>
               </div>
             </div>
 
             <button
               onClick={() => {
                 if (onOpenOrderTicket) {
+                  const isBear = consensus?.verdict_bias === 'BEARISH' || (consensus?.verdict && consensus.verdict.includes('SELL'))
+                  const entryVal = consensus?.entry != null ? Number(consensus.entry) : (ltp > 0 ? Number((ltp * (isBear ? 1.002 : 0.998)).toFixed(2)) : 0)
+                  const slVal = consensus?.stop_loss != null ? Number(consensus.stop_loss) : (ltp > 0 ? Number((isBear ? ltp * 1.012 : ltp * 0.988)).toFixed(2) : 0)
+                  const tgtVal = consensus?.target != null ? Number(consensus.target) : (ltp > 0 ? Number((isBear ? ltp * 0.976 : ltp * 1.024)).toFixed(2) : 0)
                   onOpenOrderTicket({
                     symbol,
                     exchange: 'NSE',
-                    price: consensus?.entry || ltp,
-                    stopLoss: consensus?.stop_loss || ltp * 0.985,
-                    target: consensus?.target || ltp * 1.035,
+                    action: isBear ? 'SELL' : 'BUY',
+                    price: entryVal,
+                    stopLoss: slVal,
+                    target: tgtVal,
                   })
                 }
               }}

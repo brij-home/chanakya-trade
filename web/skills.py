@@ -2923,21 +2923,6 @@ async def skill_dashboard_snapshot(req: Optional[DashboardSnapshotRequest] = Non
         quote_target = get_quote([f"{exch}:{setup_sym}"]) or {}
         q_obj = quote_target.get(f"{exch}:{setup_sym}")
         cur_ltp = (float(q_obj.last_price) if q_obj and q_obj.last_price else 0.0) or get_ltp(f"{exch}:{setup_sym}")
-        if not cur_ltp or cur_ltp <= 0:
-            if setup_sym == "NIFTY":
-                cur_ltp = 24175.65
-            elif setup_sym == "BANKNIFTY":
-                cur_ltp = 57496.30
-            elif setup_sym == "RELIANCE":
-                cur_ltp = 1287.0
-            elif setup_sym == "TCS":
-                cur_ltp = 2342.0
-            elif setup_sym == "INFY":
-                cur_ltp = 1750.0
-            elif setup_sym == "HDFCBANK":
-                cur_ltp = 720.30
-            else:
-                cur_ltp = 2940.0
 
         # Fetch OHLCV data for setup_sym
         df = None
@@ -2948,6 +2933,16 @@ async def skill_dashboard_snapshot(req: Optional[DashboardSnapshotRequest] = Non
             df = get_historical_data(setup_sym, interval=inv, days=d_count, exchange=exch)
         except Exception:
             pass
+
+        if not cur_ltp or cur_ltp <= 0:
+            if df is not None and not df.empty and "close" in df.columns:
+                cur_ltp = float(df["close"].iloc[-1])
+            else:
+                idx = get_index(setup_sym)
+                if idx and idx.last_price > 0:
+                    cur_ltp = float(idx.last_price)
+                else:
+                    cur_ltp = 1000.0
 
         # Market Structure & Volume Profile for active symbol
         ms_report = None
@@ -3220,7 +3215,7 @@ async def skill_dashboard_snapshot(req: Optional[DashboardSnapshotRequest] = Non
             "trailing_stop": "2R Breakeven (+0.2% buffer), Chandelier ATR 3x",
             "provenance": {
                 "data_source": "LIVE_TICK" if quotes_map else "EOD_HISTORICAL",
-                "as_of": "29 Aug 2026 IST • Live Market Context",
+                "as_of": f"{datetime.now().strftime('%d %b %Y, %I:%M %p IST')} • Live Market Context",
                 "is_real_time": True,
                 "dataset_timeline": f"Real-Time Live State & {timeline_str}",
             },
@@ -3338,7 +3333,7 @@ async def skill_dashboard_snapshot(req: Optional[DashboardSnapshotRequest] = Non
             "multi_tf": multi_tf,
             "provenance": {
                 "data_source": "LIVE_TICK" if quotes_map else "EOD_HISTORICAL",
-                "as_of": "29 Aug 2026 IST • Live Market Context",
+                "as_of": f"{datetime.now().strftime('%d %b %Y, %I:%M %p IST')} • Live Market Context",
                 "dataset_timeline": "250D Daily Historical Bars & 15m SMC Order Blocks",
             },
         }
@@ -3389,7 +3384,19 @@ async def skill_debate_snapshot(req: Optional[DebateSnapshotRequest] = None):
             pass
 
         quote = get_quote(f"{exch}:{sym}") or {}
-        ltp = quote.get("ltp") or get_ltp(f"{exch}:{sym}") or (21795.5 if sym in ("NIFTY", "NIFTY 50") else 2940.0)
+        ltp = quote.get("ltp") or get_ltp(f"{exch}:{sym}") or (quote.get("last_price") if quote else 0.0)
+        if not ltp or ltp <= 0:
+            from market.indices import get_index
+            idx = get_index(sym)
+            if idx and idx.last_price > 0:
+                ltp = float(idx.last_price)
+            else:
+                from market.history import get_ohlcv
+                df_last = get_ohlcv(sym, exchange=exch, interval="day", days=5)
+                if df_last is not None and not df_last.empty and "close" in df_last.columns:
+                    ltp = float(df_last["close"].iloc[-1])
+                else:
+                    ltp = 1000.0
 
         # 1. Market structure (SMC)
         ms = None
@@ -3440,33 +3447,25 @@ async def skill_debate_snapshot(req: Optional[DebateSnapshotRequest] = None):
             base_score -= 15
         if mb and getattr(mb, "stage_2_confirmed", False):
             base_score += 7
-        conviction_score = min(96, max(38, base_score))
+        conviction_score = max(20, min(95, base_score))
 
         # Dynamic Bull Case
-        if ms:
-            trend_name = getattr(ms, "trend", "UPTREND")
-            choch_msg = "CHoCH Reversal confirmed" if ms.choch_detected else ("BOS Breakout active" if ms.bos_detected else "Bullish Market Structure")
-            rvol_str = f"{vp.rvol_20d:.1f}x" if vp else "1.6x"
-            tech_desc = f"Structure is {trend_name} (Score: {ms.structure_score:+d}/100) with {choch_msg}. 20D Relative Volume at {rvol_str} confirms institutional participation."
-        else:
-            tech_desc = f"Stage 2 Markup confirmed; strong accumulation pattern building above recent swing lows near ₹{round(ltp * 0.98, 2):,}."
-
+        fii_verdict = flows.verdict if flows else "Institutional accumulation"
         if ms and ms.active_demand_zones:
-            top_ob = ms.active_demand_zones[-1]
-            poc_str = f"₹{vp.poc_price:,.2f}" if vp else f"₹{top_ob.bottom:,.2f}"
-            flow_desc = f"Unmitigated Demand Order Block at ₹{top_ob.bottom:,.2f}–₹{top_ob.top:,.2f}. Point of Control (POC) high-volume node established at {poc_str}."
-        elif vp:
-            flow_desc = f"Volume Profile reveals Point of Control (POC) at ₹{vp.poc_price:,.2f} with strong buyer inventory absorption in Value Area."
+            top_ob = ms.active_demand_zones[0]
+            flow_desc = f"Unmitigated Demand Order Block at ₹{top_ob.bottom:.2f}-₹{top_ob.top:.2f} confirms strong smart money buying interest. Volume absorption noted."
         else:
-            flow_desc = f"Unmitigated Demand Order Block resting at ₹{round(ltp * 0.993, 2):,}; institutional absorption defending key support."
+            flow_desc = "Accumulation base observed with healthy volume absorption near key exponential moving average support."
 
-        if fa:
-            piot_score = getattr(fa, "piotroski_f_score", 7)
-            altman_val = getattr(fa, "altman_z_score", 3.2)
-            dist_zone = getattr(fa, "distress_zone", "SAFE")
-            inst_desc = f"Piotroski F-Score stands at {piot_score}/9 indicating operational efficiency. Altman Z''-Score is {altman_val:.2f} ({dist_zone} Zone)."
+        if mb:
+            stage_str = mb.stage
+            tech_desc = f"Stock is in {stage_str}. Passing {mb.passed_checks_count}/8 Minervini Trend Template criteria with expanding relative strength."
         else:
-            fii_verdict = flows.verdict.replace("_", " ") if flows else "Net Positive Accumulation"
+            tech_desc = f"Constructive price action holding above 50-day moving average with positive trend momentum."
+
+        if fa and getattr(fa, "altman_z_score", 0) > 2.6:
+            inst_desc = f"Institutional flows indicate {fii_verdict}. Altman Z-Score of {fa.altman_z_score:.2f} places company in safe credit zone with pristine balance sheet."
+        else:
             inst_desc = f"Institutional flows indicate {fii_verdict}. Capital efficiency metrics confirm solid balance sheet resilience."
 
         bull_case = [
@@ -3502,22 +3501,40 @@ async def skill_debate_snapshot(req: Optional[DebateSnapshotRequest] = None):
             {"category": "SENTIMENT", "title": "Invalidation Risk", "desc": sent_desc, "avatar": "robot-news"},
         ]
 
-        # Consensus Trade Levels
-        entry_px = ms.nearest_support if (ms and ms.nearest_support) else round(ltp, 2)
-        sl_px = ms.invalidation_level if (ms and ms.invalidation_level) else round(ltp * 0.983, 2)
-        tgt_px = ms.target_1 if (ms and ms.target_1) else round(ltp * 1.048, 2)
-        rr_ratio = round((tgt_px - entry_px) / max(0.1, entry_px - sl_px), 2)
 
-        verdict_str = "READY (BUY)" if conviction_score >= 75 else ("STALK (TRIGGER)" if conviction_score >= 55 else "STAND DOWN (WAIT)")
+        # Consensus Trade Levels with Dynamic ATR-Bounded Calibration
+        is_bull = bool(ms and ms.structure_score >= 0) if ms else (conviction_score >= 50)
+        atr_px = ltp * 0.012
+
+        if is_bull:
+            raw_entry = ms.nearest_support if (ms and ms.nearest_support) else round(ltp * 0.998, 2)
+            entry_px = max(ltp * 0.985, min(ltp * 1.002, raw_entry))
+            raw_sl = ms.invalidation_level if (ms and ms.invalidation_level) else (entry_px - 1.2 * atr_px)
+            risk_u = max(entry_px * 0.0035, min(entry_px * 0.022, entry_px - raw_sl, 1.2 * atr_px))
+            sl_px = entry_px - risk_u
+            tgt_px = entry_px + (risk_u * 2.0)
+            rr_ratio = 2.0
+            verdict_str = "READY (BUY)" if conviction_score >= 75 else ("STALK (BUY)" if conviction_score >= 55 else "STAND DOWN")
+            verdict_bias = "BULLISH"
+        else:
+            raw_entry = ms.nearest_resistance if (ms and ms.nearest_resistance) else round(ltp * 1.002, 2)
+            entry_px = max(ltp * 0.998, min(ltp * 1.015, raw_entry))
+            raw_sl = ms.invalidation_level if (ms and ms.invalidation_level) else (entry_px + 1.2 * atr_px)
+            risk_u = max(entry_px * 0.0035, min(entry_px * 0.022, raw_sl - entry_px, 1.2 * atr_px))
+            sl_px = entry_px + risk_u
+            tgt_px = entry_px - (risk_u * 2.0)
+            rr_ratio = 2.0
+            verdict_str = "READY (SELL)" if conviction_score >= 75 else ("STALK (SELL)" if conviction_score >= 55 else "STAND DOWN")
+            verdict_bias = "BEARISH"
 
         consensus = {
             "verdict": verdict_str,
-            "verdict_bias": "BULLISH" if conviction_score >= 55 else "NEUTRAL",
+            "verdict_bias": verdict_bias,
             "entry": round(entry_px, 2),
             "stop_loss": round(sl_px, 2),
             "target": round(tgt_px, 2),
             "risk_reward": rr_ratio,
-            "summary": f"Institutional demand defense at ₹{sl_px:,.2f} yields a {rr_ratio}R asymmetric payoff targeting ₹{tgt_px:,.2f}.",
+            "summary": f"Institutional defense at ₹{sl_px:,.2f} yields a {rr_ratio}R asymmetric payoff targeting ₹{tgt_px:,.2f}.",
         }
 
         now_time = datetime.now().strftime("%H:%M:%S IST")

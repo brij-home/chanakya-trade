@@ -198,7 +198,7 @@ export default function TerminalView({ onSelectSymbol, onOpenOrderTicket }) {
             <span className="px-2 py-0.5 rounded bg-surface border border-border text-[10px] text-text font-bold">
               {provenance?.data_source || 'LIVE_TICK'}
             </span>
-            <span>{provenance?.as_of || '29 Aug 2026 IST • Live Context'}</span>
+            <span>{provenance?.as_of || 'Live Market Context'}</span>
           </div>
         </div>
 
