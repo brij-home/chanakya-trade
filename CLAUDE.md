@@ -11,7 +11,7 @@
 - Run tests before committing
 
 ## Project context
-- India stock market trading platform (NSE/BSE/NFO)
+- AI-Powered Strategic Quant Terminal & Multi-Agent Intelligence for Indian Markets (NSE/BSE/NFO/MCX)
 - Terminal CLI + macOS Electron app
 - FastAPI sidecar on port 8765
 - Brokers: Fyers (data, free), Zerodha (execution)

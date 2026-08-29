@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "chanakya-trade"
 version = "0.1.0"
-description = "ChanakyaTrade: AI-powered multi-agent stock & options analysis platform for Indian markets"
+description = "AI-Powered Strategic Quant Terminal & Multi-Agent Intelligence for Indian Markets"
 requires-python = ">=3.11"
 readme = "README.md"
 license = {text = "MIT"}

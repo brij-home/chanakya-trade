@@ -1,6 +1,6 @@
 # ChanakyaTrade
 
-**Agentic trading platform for Indian markets** -- 7 AI analyst agents analyze stocks in parallel, debate bull vs bear, and deliver trade plans with entry, stop, and targets. Open-source LLM trader for NSE, BSE, and NFO.
+**AI-Powered Strategic Quant Terminal & Multi-Agent Intelligence for Indian Markets** -- 7 AI analyst agents analyze stocks in parallel, debate bull vs bear, and deliver trade plans with entry, stop, and targets. Open-source LLM trader for NSE, BSE, and NFO.
 
 > An agentic quantitative researcher that runs multi-agent AI analysis, backtests quant strategies, places live orders via Indian brokers, and pushes Telegram alerts -- all from a terminal CLI, macOS app, or web interface.
 

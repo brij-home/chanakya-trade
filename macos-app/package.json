@@ -2,7 +2,7 @@
   "name": "chanakya-trade",
   "productName": "ChanakyaTrade",
   "version": "0.2.0",
-  "description": "ChanakyaTrade — macOS desktop app",
+  "description": "ChanakyaTrade — AI-Powered Strategic Quant Terminal & Multi-Agent Intelligence for Indian Markets",
   "author": "ChanakyaTrade Team",
   "main": "out/main/index.js",
   "scripts": {

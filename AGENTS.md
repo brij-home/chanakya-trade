@@ -6,7 +6,7 @@
 
 ## 1. Project Context & High-Level Architecture
 
-`chanakya-trade` is an institutional-grade, AI-powered multi-agent algorithmic trading, analysis, and backtesting platform for Indian financial markets (**NSE, BSE, NFO, MCX**).
+`ChanakyaTrade` is an institutional-grade AI-Powered Strategic Quant Terminal & Multi-Agent Intelligence for Indian Markets (**NSE, BSE, NFO, MCX**).
 
 ### Component Map
 

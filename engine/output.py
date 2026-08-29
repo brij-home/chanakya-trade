@@ -87,7 +87,7 @@ def _build_pdf(content: str, title: str) -> object:
     pdf.multi_cell(
         w,
         4,
-        "ChanakyaTrade CLI | AI-Powered Multi-Agent Stock Analysis | github.com/brij-home/chanakya-trade",
+        "ChanakyaTrade CLI | AI-Powered Strategic Quant Terminal & Multi-Agent Intelligence for Indian Markets | github.com/brij-home/chanakya-trade",
     )
 
     return pdf
