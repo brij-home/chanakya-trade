@@ -1,0 +1,69 @@
+# ── Secrets & Credentials ────────────────────────────────────
+.env
+*.env
+!.env.example
+*.key
+*.pem
+*.secret
+*credentials*
+*secret*
+*.creds
+
+# ── Local Databases & Caches ─────────────────────────────────
+*.db
+*.sqlite
+*.sqlite3
+users.db
+analysis_cache.db
+
+# ── Broker tokens (stored locally) ───────────────────────────
+~/.trading_platform/
+*.json.token
+*_token.json
+*_credentials.json
+*.token
+
+# ── Python ───────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# ── Virtual environments ──────────────────────────────────────
+.venv/
+venv/
+env/
+ENV/
+
+# ── IDE ───────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# ── Data / cache ─────────────────────────────────────────────
+.pytest_trading_platform/
+*.csv
+*.parquet
+.cache/
+data/
+
+# ── Logs ─────────────────────────────────────────────────────
+*.log
+logs/
+
+# ── Generated docs (regenerate with: node docs/generate_*.js) ─
+docs/*.pdf
+docs/*.docx
+docs/node_modules/
+docs/package-lock.json
+docs/package.json
+
+# Test-run artifacts (PDF exports written by the suite)
+.pytest_trading_platform/
