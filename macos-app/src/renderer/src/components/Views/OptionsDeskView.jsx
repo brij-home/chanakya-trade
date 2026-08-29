@@ -11,6 +11,10 @@ export default function OptionsDeskView({ onOpenOrderTicket }) {
   const [data, setData] = useState(null)
   const [loading, setLoading] = useState(true)
   const [isPayoffModalOpen, setIsPayoffModalOpen] = useState(false)
+  const [strikeFilter, setStrikeFilter] = useState('ATM_10')
+  const [chainSort, setChainSort] = useState('strike_asc')
+  const [chainPage, setChainPage] = useState(1)
+  const [chainPageSize, setPageSize] = useState(10)
 
   useEffect(() => {
     let unmounted = false
@@ -66,6 +70,54 @@ export default function OptionsDeskView({ onOpenOrderTicket }) {
       return `${x},${y}`
     })
     .join(' ')
+
+  // Filtered & Sorted Options Chain
+  const filteredChain = optionsChain.filter((row) => {
+    if (strikeFilter === 'ATM_5') {
+      const atmIdx = optionsChain.findIndex((r) => r.is_atm)
+      if (atmIdx >= 0) {
+        const rowIdx = optionsChain.indexOf(row)
+        return Math.abs(rowIdx - atmIdx) <= 5
+      }
+    }
+    if (strikeFilter === 'ATM_10') {
+      const atmIdx = optionsChain.findIndex((r) => r.is_atm)
+      if (atmIdx >= 0) {
+        const rowIdx = optionsChain.indexOf(row)
+        return Math.abs(rowIdx - atmIdx) <= 10
+      }
+    }
+    if (strikeFilter === 'ATM_15') {
+      const atmIdx = optionsChain.findIndex((r) => r.is_atm)
+      if (atmIdx >= 0) {
+        const rowIdx = optionsChain.indexOf(row)
+        return Math.abs(rowIdx - atmIdx) <= 15
+      }
+    }
+    return true
+  })
+
+  const sortedChain = [...filteredChain].sort((a, b) => {
+    if (chainSort === 'strike_desc') return Number(b.strike) - Number(a.strike)
+    if (chainSort === 'call_oi_desc') {
+      const vA = parseFloat(String(a.calls_oi || 0).replace(/[^0-9.-]/g, '')) || 0
+      const vB = parseFloat(String(b.calls_oi || 0).replace(/[^0-9.-]/g, '')) || 0
+      return vB - vA
+    }
+    if (chainSort === 'put_oi_desc') {
+      const vA = parseFloat(String(a.puts_oi || 0).replace(/[^0-9.-]/g, '')) || 0
+      const vB = parseFloat(String(b.puts_oi || 0).replace(/[^0-9.-]/g, '')) || 0
+      return vB - vA
+    }
+    return Number(a.strike) - Number(b.strike)
+  })
+
+  const totalChainPages = Math.max(1, Math.ceil(sortedChain.length / chainPageSize))
+  const safeChainPage = Math.min(chainPage, totalChainPages)
+  const paginatedChain = sortedChain.slice(
+    (safeChainPage - 1) * chainPageSize,
+    safeChainPage * chainPageSize
+  )
 
   return (
     <div className="flex-1 overflow-y-auto p-3 sm:p-5 bg-surface text-text space-y-4 font-ui">
@@ -352,17 +404,76 @@ export default function OptionsDeskView({ onOpenOrderTicket }) {
       {/* Bottom Full-Width Options Chain Table */}
       <div className="bg-panel border border-border/80 rounded-2xl p-4 shadow-sm space-y-3">
         <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border/50 pb-2.5">
-          <div>
+          <div className="flex items-center gap-2">
             <span className="text-xs font-bold uppercase tracking-wider text-muted">
               {underlying} OPTIONS CHAIN - {data?.expiry ? `Expiry: ${data.expiry}` : '0DTE'}
             </span>
-            <span className="text-[10px] text-muted font-mono ml-2">Spot: ₹{Number(spot).toLocaleString('en-IN')} (Click any cell to Stage Option Order)</span>
+            <span className="text-[10px] text-muted font-mono">Spot: ₹{Number(spot).toLocaleString('en-IN')}</span>
           </div>
 
-          <div className="flex items-center gap-3 text-xs font-mono">
-            <span className="text-cyan-400 font-bold">CALLS (CE)</span>
-            <span className="text-muted">|</span>
-            <span className="text-amber font-bold">PUTS (PE)</span>
+          {/* Table Controls: Strike Filter + Sorting + Page Size */}
+          <div className="flex flex-wrap items-center gap-2 text-xs font-mono">
+            {/* Strike Filter Chips */}
+            <div className="flex items-center gap-1 bg-surface border border-border/60 p-0.5 rounded-lg text-[10px]">
+              {[
+                { id: 'ATM_5', label: 'ATM ±5' },
+                { id: 'ATM_10', label: 'ATM ±10' },
+                { id: 'ATM_15', label: 'ATM ±15' },
+                { id: 'ALL', label: 'All Strikes' },
+              ].map((f) => (
+                <button
+                  key={f.id}
+                  onClick={() => {
+                    setStrikeFilter(f.id)
+                    setChainPage(1)
+                  }}
+                  className={`px-2 py-0.5 rounded transition-all cursor-pointer ${
+                    strikeFilter === f.id
+                      ? 'bg-amber text-black font-bold'
+                      : 'text-muted hover:text-text'
+                  }`}
+                >
+                  {f.label}
+                </button>
+              ))}
+            </div>
+
+            {/* Sort Selector */}
+            <div className="flex items-center gap-1">
+              <span className="text-[10px] text-muted">Sort:</span>
+              <select
+                value={chainSort}
+                onChange={(e) => {
+                  setChainSort(e.target.value)
+                  setChainPage(1)
+                }}
+                className="bg-surface border border-border/60 text-text rounded px-1.5 py-0.5 text-[10px] font-mono focus:outline-none cursor-pointer"
+              >
+                <option value="strike_asc">Strike (Low → High)</option>
+                <option value="strike_desc">Strike (High → Low)</option>
+                <option value="call_oi_desc">Call OI (High → Low)</option>
+                <option value="put_oi_desc">Put OI (High → Low)</option>
+              </select>
+            </div>
+
+            {/* Page Size Selector */}
+            <div className="flex items-center gap-1">
+              <span className="text-[10px] text-muted">Show:</span>
+              {[10, 20, 50].map((sz) => (
+                <button
+                  key={sz}
+                  onClick={() => {
+                    setPageSize(sz)
+                    setChainPage(1)
+                  }}
+                  className={`px-1.5 py-0.5 rounded text-[10px] font-mono cursor-pointer ${
+                    chainPageSize === sz ? 'bg-amber text-black font-bold' : 'bg-surface text-muted hover:text-text border border-border/40'
+                  }`}
+                >
+                  {sz}
+                </button>
+              ))}
+            </div>
           </div>
         </div>
 
@@ -388,7 +499,7 @@ export default function OptionsDeskView({ onOpenOrderTicket }) {
               </tr>
             </thead>
             <tbody className="divide-y divide-border/30">
-              {optionsChain.map((row) => {
+              {paginatedChain.map((row) => {
                 const isATM = row.is_atm
                 return (
                   <tr
@@ -447,6 +558,44 @@ export default function OptionsDeskView({ onOpenOrderTicket }) {
             </tbody>
           </table>
         </div>
+
+        {/* Chain Pagination Controls */}
+        {totalChainPages > 1 && (
+          <div className="flex items-center justify-between pt-2 border-t border-border/40 text-[11px] font-mono text-muted">
+            <span>
+              Showing {(safeChainPage - 1) * chainPageSize + 1}–{Math.min(safeChainPage * chainPageSize, sortedChain.length)} of {sortedChain.length} strikes
+            </span>
+            <div className="flex items-center gap-1">
+              <button
+                onClick={() => setChainPage((p) => Math.max(1, p - 1))}
+                disabled={safeChainPage === 1}
+                className="px-2 py-0.5 rounded bg-surface border border-border text-muted hover:text-text disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer"
+              >
+                ← Prev
+              </button>
+              {Array.from({ length: totalChainPages }, (_, i) => i + 1).map((pNum) => (
+                <button
+                  key={pNum}
+                  onClick={() => setChainPage(pNum)}
+                  className={`w-6 h-6 rounded text-xs font-bold transition-all cursor-pointer ${
+                    safeChainPage === pNum
+                      ? 'bg-amber text-black'
+                      : 'bg-surface border border-border text-muted hover:text-text'
+                  }`}
+                >
+                  {pNum}
+                </button>
+              ))}
+              <button
+                onClick={() => setChainPage((p) => Math.min(totalChainPages, p + 1))}
+                disabled={safeChainPage === totalChainPages}
+                className="px-2 py-0.5 rounded bg-surface border border-border text-muted hover:text-text disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer"
+              >
+                Next →
+              </button>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Interactive Payoff Strategy Simulator Modal */}

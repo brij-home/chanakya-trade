@@ -130,6 +130,12 @@
     - Whenever any fallback is triggered (`LLM_FAILOVER`, `LLM_COOLDOWN`, `QUANT_FALLBACK`, `DATA_FALLBACK`, `BROKER_FAILOVER`, `EXCEPTION`), the system MUST record a structured telemetry event via [`engine/telemetry.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/telemetry.py).
     - API payloads and UI views must state their execution mode explicitly (e.g. `Analysis Engine: AI Multi-Agent` vs `Quantitative Engine (Deterministic Fallback)`).
     - Periodically inspect telemetry events via `GET /skills/telemetry/summary` and CLI diagnostics to detect recurring rate limits, API drops, or missing data points, and proactively implement permanent architectural improvements.
+18. **High-Density Data Controls (Filtering, Sorting & Pagination Standards)**:
+    - All institutional data tables, radar cards, sector drilldown modals, and option chains must support rich data controls: (1) multi-factor filtering (e.g. Execution Status `READY`/`STALK`, Setup patterns, Strike distance `ATM ±5/±10`), (2) multi-column sorting (e.g. Conviction Score, Max Gain %, RS-Ratio, Alphabetical), (3) instant fuzzy search, and (4) paginated navigation with configurable page sizes (e.g. 5, 10, 20 items per view).
+    - Never overwhelm the DOM with unbounded lists; ensure predictable vertical bounds and immediate visual feedback.
+19. **Living Operational Memory & Continuous Self-Improvement**:
+    - Always learn from runtime anomalies, demand spikes, and user workflows.
+    - Permanently document newly discovered architectural invariants, UI ergonomics, and error prevention patterns in `AGENTS.md` and `.agents/skills/` runbooks to maintain a living, self-evolving institutional codebase.
 
 ---
 

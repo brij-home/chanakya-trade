@@ -55,10 +55,43 @@ export default function RRGCard({ data }) {
     LAGGING: sectors.filter(s => s.quadrant === 'LAGGING').length,
   }), [sectors])
 
-  const filteredSectors = useMemo(() => {
-    if (selectedQuad === 'ALL') return sectors
-    return sectors.filter(s => s.quadrant === selectedQuad)
-  }, [sectors, selectedQuad])
+  const [sortCol, setSortCol] = useState('rs_ratio')
+  const [sortDir, setSortDir] = useState('desc')
+  const [sectorSearch, setSectorSearch] = useState('')
+
+  const handleHeaderSort = (col) => {
+    if (sortCol === col) {
+      setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'))
+    } else {
+      setSortCol(col)
+      setSortDir('desc')
+    }
+  }
+
+  const sortedAndFilteredSectors = useMemo(() => {
+    let result = sectors
+    if (selectedQuad !== 'ALL') {
+      result = result.filter((s) => s.quadrant === selectedQuad)
+    }
+    if (sectorSearch.trim()) {
+      const q = sectorSearch.trim().toUpperCase()
+      result = result.filter(
+        (s) =>
+          s.sector?.toUpperCase().includes(q) ||
+          s.top_stocks?.some((st) => st.toUpperCase().includes(q))
+      )
+    }
+    return [...result].sort((a, b) => {
+      let valA = a[sortCol]
+      let valB = b[sortCol]
+      if (typeof valA === 'string') {
+        return sortDir === 'asc' ? valA.localeCompare(valB) : valB.localeCompare(valA)
+      }
+      valA = Number(valA) || 0
+      valB = Number(valB) || 0
+      return sortDir === 'asc' ? valA - valB : valB - valA
+    })
+  }, [sectors, selectedQuad, sectorSearch, sortCol, sortDir])
 
   // Coordinate normalizer for 2D plane (domain: 85 to 115)
   const getCoords = (ratio, mom) => {
@@ -330,22 +363,66 @@ export default function RRGCard({ data }) {
         </div>
       </div>
 
+      {/* Sector Details Table Header & Search */}
+      <div className="flex flex-wrap items-center justify-between gap-2 pt-2">
+        <span className="text-xs font-bold font-mono text-muted uppercase tracking-wider">
+          Sector Breakdown ({sortedAndFilteredSectors.length})
+        </span>
+        <div className="relative">
+          <input
+            type="text"
+            placeholder="Filter sector or stock..."
+            value={sectorSearch}
+            onChange={(e) => setSectorSearch(e.target.value)}
+            className="bg-surface border border-border/60 rounded-lg px-2.5 py-1 text-xs text-text placeholder:text-muted/60 focus:outline-none focus:border-amber/60 font-mono w-44"
+          />
+          {sectorSearch && (
+            <button
+              onClick={() => setSectorSearch('')}
+              className="absolute right-2 top-1/2 -translate-y-1/2 text-muted hover:text-text text-xs"
+            >
+              ✕
+            </button>
+          )}
+        </div>
+      </div>
+
       {/* Sector Details Table with Top Constituents */}
       <div className="overflow-x-auto rounded-xl border border-border/60">
         <table className="w-full text-xs font-ui text-left">
           <thead className="bg-surface/90">
-            <tr className="border-b border-border/60 text-[10px] uppercase text-muted tracking-wider">
-              <th className="py-2 px-3 font-semibold">Sector</th>
-              <th className="py-2 px-2 font-semibold text-right">RS-Ratio</th>
-              <th className="py-2 px-2 font-semibold text-right">RS-Mom</th>
-              <th className="py-2 px-2 font-semibold text-right">1D Chg</th>
+            <tr className="border-b border-border/60 text-[10px] uppercase text-muted tracking-wider select-none">
+              <th
+                onClick={() => handleHeaderSort('sector')}
+                className="py-2 px-3 font-semibold cursor-pointer hover:text-amber"
+              >
+                Sector {sortCol === 'sector' ? (sortDir === 'asc' ? '▲' : '▼') : ''}
+              </th>
+              <th
+                onClick={() => handleHeaderSort('rs_ratio')}
+                className="py-2 px-2 font-semibold text-right cursor-pointer hover:text-amber"
+              >
+                RS-Ratio {sortCol === 'rs_ratio' ? (sortDir === 'asc' ? '▲' : '▼') : ''}
+              </th>
+              <th
+                onClick={() => handleHeaderSort('rs_momentum')}
+                className="py-2 px-2 font-semibold text-right cursor-pointer hover:text-amber"
+              >
+                RS-Mom {sortCol === 'rs_momentum' ? (sortDir === 'asc' ? '▲' : '▼') : ''}
+              </th>
+              <th
+                onClick={() => handleHeaderSort('day_change_pct')}
+                className="py-2 px-2 font-semibold text-right cursor-pointer hover:text-amber"
+              >
+                1D Chg {sortCol === 'day_change_pct' ? (sortDir === 'asc' ? '▲' : '▼') : ''}
+              </th>
               <th className="py-2 px-2 font-semibold text-center">Quadrant</th>
               <th className="py-2 px-3 font-semibold">Top Constituents</th>
               <th className="py-2 px-3 font-semibold text-right">Action</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-border/30 bg-panel/50">
-            {filteredSectors.map((s) => {
+            {sortedAndFilteredSectors.map((s) => {
               const qCfg = QUADRANT_CONFIG[s.quadrant] || QUADRANT_CONFIG.LEADING
               const chgColor = s.day_change_pct >= 0 ? 'text-emerald-400' : 'text-rose-400'
               const isHovered = hoveredSector === s.sector

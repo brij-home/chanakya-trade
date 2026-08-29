@@ -59,4 +59,6 @@ The FastAPI sidecar (`web.api:app`) acts as the local backend service on port `8
 8. **Non-Blocking UI**: Modal dialogs must support backdrop dismiss (`onClick={onClose}` + `e.stopPropagation()`) and avoid blocking browser `alert()` popups.
 9. **Connection Lifecycle & Socket Hygiene**: Wrap all scraper `httpx.Client()` instances in context managers (`with httpx.Client(...) as session:`) to prevent unclosed TCP connection leaks.
 10. **Bounded In-Memory Caches**: Always cap in-memory dictionaries (`_chat_sessions`, `_sessions`, `_df_memory_cache`) with maximum capacity LRU evictions and TTL checks to prevent memory leaks during long-running sidecar sessions.
+11. **Filtering, Sorting & Pagination Consistency**: Data cards, radar screeners, and option chains must implement client/server multi-factor filtering, multi-column sorting (`score_desc`, `gain_desc`, `symbol_asc`, `strike_asc`), and configurable pagination (e.g. 5/10/20 per page) to ensure optimal visual density and zero layout shifts.
+12. **Activity & Cancellation Protocol**: Frontend streaming must support graceful client-side abort (`EventSource.close()`, activity reset) and render institutional step progress with timers via `ActivityHUD`.
 

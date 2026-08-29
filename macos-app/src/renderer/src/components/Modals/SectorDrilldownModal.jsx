@@ -38,6 +38,10 @@ export default function SectorDrilldownModal({ isOpen, sector, onClose }) {
   const [data, setData] = useState(null)
   const [loading, setLoading] = useState(false)
   const [filter, setFilter] = useState('ALL')
+  const [searchQuery, setSearchQuery] = useState('')
+  const [sortBy, setSortBy] = useState('score_desc')
+  const [page, setPage] = useState(1)
+  const [pageSize, setPageSize] = useState(5)
   const [expandedSymbol, setExpandedSymbol] = useState(null)
   const [telegramStatus, setTelegramStatus] = useState({})
   const { call } = useAPI()
@@ -63,6 +67,8 @@ export default function SectorDrilldownModal({ isOpen, sector, onClose }) {
   useEffect(() => {
     if (isOpen && sector) {
       setFilter('ALL')
+      setSearchQuery('')
+      setPage(1)
       setExpandedSymbol(null)
       setData(null)
       fetchSectorDrilldown(sector, false)
@@ -92,12 +98,42 @@ export default function SectorDrilldownModal({ isOpen, sector, onClose }) {
   const breadth = data?.breadth || {}
   const quadCfg = QUADRANT_CONFIG[rrg.quadrant] || QUADRANT_CONFIG.LEADING
 
-  // Filter stocks by eligibility
+  // Filter stocks by eligibility & search query
   const filteredOpps = opportunities.filter((opp) => {
-    if (filter === 'ALL') return true
-    const status = opp.eligibility_status || 'READY'
-    return status === filter
+    if (filter !== 'ALL') {
+      const status = opp.eligibility_status || 'READY'
+      if (status !== filter) return false
+    }
+    if (searchQuery.trim()) {
+      const q = searchQuery.trim().toUpperCase()
+      const matchSymbol = opp.symbol?.toUpperCase().includes(q)
+      const matchSetup =
+        opp.setup_type?.toUpperCase().includes(q) ||
+        opp.setup_title?.toUpperCase().includes(q)
+      if (!matchSymbol && !matchSetup) return false
+    }
+    return true
   })
+
+  // Multi-column sorting
+  const sortedOpps = [...filteredOpps].sort((a, b) => {
+    if (sortBy === 'score_desc') return (b.conviction_score || 0) - (a.conviction_score || 0)
+    if (sortBy === 'score_asc') return (a.conviction_score || 0) - (b.conviction_score || 0)
+    if (sortBy === 'gain_desc') {
+      const gA = a.target_2 && a.entry_price ? ((a.target_2 - a.entry_price) / a.entry_price) * 100 : 0
+      const gB = b.target_2 && b.entry_price ? ((b.target_2 - b.entry_price) / b.entry_price) * 100 : 0
+      return gB - gA
+    }
+    if (sortBy === 'symbol_asc') return (a.symbol || '').localeCompare(b.symbol || '')
+    return 0
+  })
+
+  const totalPages = Math.max(1, Math.ceil(sortedOpps.length / pageSize))
+  const safePage = Math.min(page, totalPages)
+  const paginatedOpps = sortedOpps.slice(
+    (safePage - 1) * pageSize,
+    safePage * pageSize
+  )
 
   const readyCount = breadth.ready_count ?? opportunities.filter((o) => o.eligibility_status === 'READY').length
   const stalkCount = breadth.stalk_count ?? opportunities.filter((o) => o.eligibility_status === 'STALK').length
@@ -213,29 +249,74 @@ export default function SectorDrilldownModal({ isOpen, sector, onClose }) {
           </div>
         </div>
 
-        {/* Eligibility Filter Pills */}
-        <div className="flex items-center gap-2 px-6 py-2.5 border-b border-border/40 bg-panel/30 overflow-x-auto text-xs flex-shrink-0">
-          <span className="text-muted text-[11px] font-semibold uppercase tracking-wider flex-shrink-0">
-            Eligibility Filter:
-          </span>
-          {[
-            { id: 'ALL', label: `All Equities (${opportunities.length})` },
-            { id: 'READY', label: `🟢 Top Picks (Ready to Execute) (${readyCount})`, activeClass: 'bg-green/20 text-green border-green/40 font-bold' },
-            { id: 'STALK', label: `🟡 Watchlist / Stalking (${stalkCount})`, activeClass: 'bg-amber/20 text-amber border-amber/40 font-bold' },
-            { id: 'STAND_DOWN', label: `⚪ Avoid / Low Conviction (${standDownCount})`, activeClass: 'bg-panel text-muted border-border font-bold' },
-          ].map((tab) => (
-            <button
-              key={tab.id}
-              onClick={() => setFilter(tab.id)}
-              className={`px-3 py-1 rounded-lg text-xs transition-colors cursor-pointer flex-shrink-0 border ${
-                filter === tab.id
-                  ? (tab.activeClass || 'bg-amber text-black font-bold border-amber')
-                  : 'bg-elevated/50 hover:bg-elevated text-muted hover:text-text border-border/40'
-              }`}
+        {/* Controls Bar: Filter Pills + Search & Sort */}
+        <div className="flex flex-wrap items-center justify-between gap-3 px-6 py-2.5 border-b border-border/40 bg-panel/30 text-xs flex-shrink-0">
+          {/* Eligibility Filter Pills */}
+          <div className="flex items-center gap-1.5 overflow-x-auto">
+            {[
+              { id: 'ALL', label: `All (${opportunities.length})` },
+              { id: 'READY', label: `🟢 Ready (${readyCount})`, activeClass: 'bg-green/20 text-green border-green/40 font-bold' },
+              { id: 'STALK', label: `🟡 Stalk (${stalkCount})`, activeClass: 'bg-amber/20 text-amber border-amber/40 font-bold' },
+              { id: 'STAND_DOWN', label: `⚪ Avoid (${standDownCount})`, activeClass: 'bg-panel text-muted border-border font-bold' },
+            ].map((tab) => (
+              <button
+                key={tab.id}
+                onClick={() => {
+                  setFilter(tab.id)
+                  setPage(1)
+                }}
+                className={`px-2.5 py-1 rounded-lg text-xs transition-colors cursor-pointer flex-shrink-0 border ${
+                  filter === tab.id
+                    ? (tab.activeClass || 'bg-amber text-black font-bold border-amber')
+                    : 'bg-elevated/50 hover:bg-elevated text-muted hover:text-text border-border/40'
+                }`}
+              >
+                {tab.label}
+              </button>
+            ))}
+          </div>
+
+          {/* Quick Search & Sort Bar */}
+          <div className="flex items-center gap-2">
+            <div className="relative">
+              <input
+                type="text"
+                placeholder="Search stock..."
+                value={searchQuery}
+                onChange={(e) => {
+                  setSearchQuery(e.target.value)
+                  setPage(1)
+                }}
+                className="bg-surface border border-border/60 rounded-lg pl-6 pr-2 py-1 text-xs text-text placeholder:text-muted/60 focus:outline-none focus:border-amber/60 font-mono w-36"
+              />
+              <span className="absolute left-2 top-1/2 -translate-y-1/2 text-muted text-[10px]">🔍</span>
+              {searchQuery && (
+                <button
+                  onClick={() => {
+                    setSearchQuery('')
+                    setPage(1)
+                  }}
+                  className="absolute right-1.5 top-1/2 -translate-y-1/2 text-muted hover:text-text text-xs"
+                >
+                  ✕
+                </button>
+              )}
+            </div>
+
+            <select
+              value={sortBy}
+              onChange={(e) => {
+                setSortBy(e.target.value)
+                setPage(1)
+              }}
+              className="bg-surface border border-border/60 text-text rounded-lg px-2 py-1 text-xs font-mono focus:outline-none cursor-pointer"
             >
-              {tab.label}
-            </button>
-          ))}
+              <option value="score_desc">Conviction (High → Low)</option>
+              <option value="score_asc">Conviction (Low → High)</option>
+              <option value="gain_desc">Max Gain T2 (High → Low)</option>
+              <option value="symbol_asc">Symbol (A → Z)</option>
+            </select>
+          </div>
         </div>
 
         {/* Modal Body: Stock Cards with Contributing Factors & Rationale */}
@@ -246,12 +327,12 @@ export default function SectorDrilldownModal({ isOpen, sector, onClose }) {
               <p className="text-sm font-semibold text-text">Scanning sector constituents and computing quantitative factors…</p>
               <p className="text-xs text-muted">Analyzing SMC Market Structure, RVOL surge, Minervini criteria & Forensics.</p>
             </div>
-          ) : filteredOpps.length === 0 ? (
+          ) : sortedOpps.length === 0 ? (
             <div className="p-8 text-center text-muted text-xs bg-panel rounded-xl border border-border/40 font-ui">
-              No equities match the selected eligibility filter in this sector scan.
+              No equities match the selected filter or search query in this sector scan.
             </div>
           ) : (
-            filteredOpps.map((opp) => {
+            paginatedOpps.map((opp) => {
               const isExpanded = expandedSymbol === opp.symbol
               const elig = ELIGIBILITY_CONFIG[opp.eligibility_status] || ELIGIBILITY_CONFIG.READY
               const scoreColor = opp.conviction_score >= 80 ? 'text-green' : opp.conviction_score >= 60 ? 'text-amber' : 'text-blue'
@@ -429,6 +510,44 @@ export default function SectorDrilldownModal({ isOpen, sector, onClose }) {
             })
           )}
         </div>
+
+        {/* Modal Pagination Bar */}
+        {totalPages > 1 && (
+          <div className="px-6 py-2 border-t border-border/40 bg-panel/70 flex items-center justify-between text-xs font-mono text-muted flex-shrink-0">
+            <span>
+              Showing {(safePage - 1) * pageSize + 1}–{Math.min(safePage * pageSize, sortedOpps.length)} of {sortedOpps.length} equities
+            </span>
+            <div className="flex items-center gap-1">
+              <button
+                onClick={() => setPage((p) => Math.max(1, p - 1))}
+                disabled={safePage === 1}
+                className="px-2 py-0.5 rounded bg-surface border border-border text-muted hover:text-text disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer"
+              >
+                ← Prev
+              </button>
+              {Array.from({ length: totalPages }, (_, i) => i + 1).map((pNum) => (
+                <button
+                  key={pNum}
+                  onClick={() => setPage(pNum)}
+                  className={`w-6 h-6 rounded text-xs font-bold transition-all cursor-pointer ${
+                    safePage === pNum
+                      ? 'bg-amber text-black'
+                      : 'bg-surface border border-border text-muted hover:text-text'
+                  }`}
+                >
+                  {pNum}
+                </button>
+              ))}
+              <button
+                onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                disabled={safePage === totalPages}
+                className="px-2 py-0.5 rounded bg-surface border border-border text-muted hover:text-text disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer"
+              >
+                Next →
+              </button>
+            </div>
+          </div>
+        )}
 
         {/* Modal Footer */}
         <div className="px-6 py-3 border-t border-border/50 bg-panel/50 flex items-center justify-between text-xs text-muted flex-shrink-0 font-ui">

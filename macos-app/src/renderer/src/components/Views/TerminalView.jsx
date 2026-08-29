@@ -13,7 +13,10 @@ export default function TerminalView({ onSelectSymbol, onOpenOrderTicket }) {
   const [loading, setLoading] = useState(true)
   const [watchlistFilter, setWatchlistFilter] = useState('')
   const [watchlistCategory, setWatchlistCategory] = useState('ALL')
+  const [watchlistSort, setWatchlistSort] = useState('alpha_asc')
+  const [watchlistPage, setWatchlistPage] = useState(1)
   const [sectorViewMode, setSectorViewMode] = useState('2D')
+  const watchlistPageSize = 7
 
   // Fetch terminal snapshot data
   useEffect(() => {
@@ -119,6 +122,21 @@ export default function TerminalView({ onSelectSymbol, onOpenOrderTicket }) {
 
     return matchesCategory && matchesSearch
   })
+
+  // Sort logic for Watchlist
+  const sortedWatchlist = [...filteredWatchlist].sort((a, b) => {
+    if (watchlistSort === 'gain_desc') return (b.change_pct || 0) - (a.change_pct || 0)
+    if (watchlistSort === 'gain_asc') return (a.change_pct || 0) - (b.change_pct || 0)
+    if (watchlistSort === 'price_desc') return (b.ltp || 0) - (a.ltp || 0)
+    return (a.symbol || '').localeCompare(b.symbol || '')
+  })
+
+  const totalWatchlistPages = Math.max(1, Math.ceil(sortedWatchlist.length / watchlistPageSize))
+  const safeWatchlistPage = Math.min(watchlistPage, totalWatchlistPages)
+  const paginatedWatchlist = sortedWatchlist.slice(
+    (safeWatchlistPage - 1) * watchlistPageSize,
+    safeWatchlistPage * watchlistPageSize
+  )
 
   // Handle Watchlist Search Form Submit (Allows typing ANY stock in the market)
   const handleWatchlistSearchSubmit = (e) => {
@@ -263,12 +281,26 @@ export default function TerminalView({ onSelectSymbol, onOpenOrderTicket }) {
           </div>
 
           {/* Watchlist Card */}
-          <div className="bg-panel border border-border/80 rounded-2xl p-3.5 shadow-sm space-y-3">
+          <div className="bg-panel border border-border/80 rounded-2xl p-3.5 shadow-sm space-y-2.5">
             <div className="flex items-center justify-between border-b border-border/50 pb-2">
               <span className="text-xs font-bold uppercase tracking-wider text-muted flex items-center gap-1.5">
                 <span>📋</span> WATCHLIST ({filteredWatchlist.length})
               </span>
-              <span className="text-[10px] text-muted font-mono">LIVE / EOD</span>
+              <div className="flex items-center gap-1.5">
+                <select
+                  value={watchlistSort}
+                  onChange={(e) => {
+                    setWatchlistSort(e.target.value)
+                    setWatchlistPage(1)
+                  }}
+                  className="bg-surface border border-border/60 text-text rounded px-1.5 py-0.5 text-[10px] font-mono focus:outline-none cursor-pointer"
+                >
+                  <option value="alpha_asc">A–Z</option>
+                  <option value="gain_desc">Top Gainers (%)</option>
+                  <option value="gain_asc">Top Losers (%)</option>
+                  <option value="price_desc">Price (High-Low)</option>
+                </select>
+              </div>
             </div>
 
             {/* Category Filter Chips */}
@@ -276,7 +308,10 @@ export default function TerminalView({ onSelectSymbol, onOpenOrderTicket }) {
               {['ALL', 'INDEX', 'BANK', 'TECH', 'AUTO', 'STAGE 2'].map((cat) => (
                 <button
                   key={cat}
-                  onClick={() => setWatchlistCategory(cat)}
+                  onClick={() => {
+                    setWatchlistCategory(cat)
+                    setWatchlistPage(1)
+                  }}
                   className={`px-2 py-0.5 rounded-md font-semibold transition-all cursor-pointer whitespace-nowrap ${
                     watchlistCategory === cat
                       ? 'bg-amber text-black font-bold shadow-xs'
@@ -294,7 +329,10 @@ export default function TerminalView({ onSelectSymbol, onOpenOrderTicket }) {
                 type="text"
                 placeholder="Search symbol (e.g. SBIN, TATAMOTORS)..."
                 value={watchlistFilter}
-                onChange={(e) => setWatchlistFilter(e.target.value)}
+                onChange={(e) => {
+                  setWatchlistFilter(e.target.value)
+                  setWatchlistPage(1)
+                }}
                 className="w-full bg-surface border border-border/60 rounded-lg px-2.5 py-1 text-xs text-text placeholder:text-muted/60 focus:outline-none focus:border-amber/60 font-mono pr-12"
               />
               {watchlistFilter && (
@@ -308,7 +346,7 @@ export default function TerminalView({ onSelectSymbol, onOpenOrderTicket }) {
             </form>
 
             <div className="space-y-1 max-h-[260px] overflow-y-auto pr-1">
-              {filteredWatchlist.map((item) => {
+              {paginatedWatchlist.map((item) => {
                 const isItemActive =
                   selectedSymbol === item.symbol || selectedSymbol === item.name || item.symbol.startsWith(selectedSymbol)
                 const isPositive = Number(item.change_pct) >= 0
@@ -319,7 +357,7 @@ export default function TerminalView({ onSelectSymbol, onOpenOrderTicket }) {
                       const cleanSym = item.symbol.replace(' 50', '').trim()
                       setSelectedSymbol(cleanSym)
                     }}
-                    className={`w-full flex items-center justify-between px-3 py-2 rounded-xl transition-all cursor-pointer border ${
+                    className={`w-full flex items-center justify-between px-3 py-1.5 rounded-xl transition-all cursor-pointer border ${
                       isItemActive
                         ? 'bg-amber/15 border-amber/50 text-text shadow-xs ring-1 ring-amber/30'
                         : 'border-border/40 hover:bg-elevated text-muted hover:text-text'
@@ -334,7 +372,7 @@ export default function TerminalView({ onSelectSymbol, onOpenOrderTicket }) {
                           </span>
                         )}
                       </div>
-                      <span className="text-[10px] text-muted font-mono">{item.name}</span>
+                      <span className="text-[10px] text-muted font-mono truncate max-w-[110px] block">{item.name}</span>
                     </div>
                     <div className="text-right font-mono">
                       <span className="text-xs font-bold text-text block">
@@ -350,7 +388,7 @@ export default function TerminalView({ onSelectSymbol, onOpenOrderTicket }) {
               })}
 
               {/* If no exact match, offer 1-click add/analyze */}
-              {filteredWatchlist.length === 0 && watchlistFilter && (
+              {paginatedWatchlist.length === 0 && watchlistFilter && (
                 <button
                   type="button"
                   onClick={() => {
@@ -363,8 +401,33 @@ export default function TerminalView({ onSelectSymbol, onOpenOrderTicket }) {
                 </button>
               )}
             </div>
+
+            {/* Watchlist Pagination Controls */}
+            {totalWatchlistPages > 1 && (
+              <div className="flex items-center justify-between pt-1 border-t border-border/40 text-[10px] font-mono text-muted">
+                <span>
+                  Page {safeWatchlistPage} of {totalWatchlistPages}
+                </span>
+                <div className="flex items-center gap-1">
+                  <button
+                    onClick={() => setWatchlistPage((p) => Math.max(1, p - 1))}
+                    disabled={safeWatchlistPage === 1}
+                    className="px-1.5 py-0.5 rounded bg-surface border border-border text-muted hover:text-text disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer"
+                  >
+                    ←
+                  </button>
+                  <button
+                    onClick={() => setWatchlistPage((p) => Math.min(totalWatchlistPages, p + 1))}
+                    disabled={safeWatchlistPage === totalWatchlistPages}
+                    className="px-1.5 py-0.5 rounded bg-surface border border-border text-muted hover:text-text disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer"
+                  >
+                    →
+                  </button>
+                  </div>
+                </div>
+              )}
+            </div>
           </div>
-        </div>
 
         {/* Center Column (6 Cols): Chart + Agent Intelligence Panel */}
         <div className="lg:col-span-6 space-y-4">
