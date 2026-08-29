@@ -49,7 +49,7 @@ export default function TerminalView({ onSelectSymbol, onOpenOrderTicket }) {
   // Extract snapshot fields safely
   const setup = data?.automated_setup
   const flows = data?.flows
-  const sectors = data?.sector_matrix || []
+  const sectors = (data?.sector_matrix && data.sector_matrix.length > 0) ? data.sector_matrix : (data?.rrg_sectors && data.rrg_sectors.length > 0 ? data.rrg_sectors : [])
   const watchlist = data?.watchlist || []
   const personas = data?.personas || []
   const provenance = data?.provenance || setup?.provenance
