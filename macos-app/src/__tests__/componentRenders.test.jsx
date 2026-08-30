@@ -51,12 +51,52 @@ if (typeof window !== 'undefined') {
 }
 
 // Global fetch mock to prevent network calls in tests
-global.fetch = vi.fn().mockImplementation(() =>
-  Promise.resolve({
+global.fetch = vi.fn().mockImplementation((url) => {
+  const urlStr = String(url)
+  if (urlStr.includes('/skills/whale_flows')) {
+    return Promise.resolve({
+      ok: true,
+      json: () => Promise.resolve({
+        data: {
+          deals: [
+            { symbol: 'RELIANCE', company_name: 'Reliance Industries', investor_name: 'LIC', sector: 'Energy', deal_type: 'BUY', deal_value_cr: 450, client_name: 'LIC India' }
+          ],
+          marquee_investors: [
+            { name: 'LIC India', deal_count: 5, total_invested_cr: 1200, top_sectors: ['Financial Services', 'Energy'] }
+          ]
+        }
+      }),
+    })
+  }
+  if (urlStr.includes('/skills/persona/track_records')) {
+    return Promise.resolve({
+      ok: true,
+      json: () => Promise.resolve({
+        data: {
+          track_records: [
+            { persona_id: 'minervini', name: 'Mark Minervini', win_rate: 68.5, compound_r: 12.4, dynamic_weight_multiplier: 1.25, total_trades: 40, active_regime: 'Markup' }
+          ]
+        }
+      }),
+    })
+  }
+  if (urlStr.includes('/skills/flows_history')) {
+    return Promise.resolve({
+      ok: true,
+      json: () => Promise.resolve({
+        data: {
+          history: [
+            { date: '2026-08-28', fii_net: 1450, dii_net: 820 }
+          ]
+        }
+      }),
+    })
+  }
+  return Promise.resolve({
     ok: true,
     json: () => Promise.resolve({ data: {}, status: 'ok' }),
   })
-)
+})
 
 vi.mock('../renderer/src/components/Charts/CandlestickChart', () => ({
   default: () => <div data-testid="mock-candlestick-chart">CandlestickChart</div>,
