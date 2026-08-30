@@ -1,7 +1,8 @@
 const fs = require('fs');
 const path = require('path');
 const parser = require('@babel/parser');
-const traverse = require('@babel/traverse').default;
+const _traverse = require('@babel/traverse');
+const traverse = _traverse.default || _traverse;
 
 const srcDir = path.resolve(__dirname, '../src/renderer/src');
 let totalViolations = 0;
