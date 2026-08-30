@@ -80,7 +80,7 @@ jobs:
 
       - name: Install frontend dependencies
         working-directory: macos-app
-        run: npm ci
+        run: npm install
 
       - name: Run frontend tests
         working-directory: macos-app
