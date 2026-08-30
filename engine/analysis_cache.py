@@ -20,7 +20,7 @@ import json
 import sqlite3
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 DEFAULT_DB_PATH = Path.home() / ".trading_platform" / "analysis_cache.db"
 DEFAULT_TTL_MINUTES = 15
@@ -142,7 +142,9 @@ class AnalysisCache:
                 trade_plans = {}
 
             try:
-                analyst_signals = json.loads(row["analyst_signals"]) if row["analyst_signals"] else []
+                analyst_signals = (
+                    json.loads(row["analyst_signals"]) if row["analyst_signals"] else []
+                )
             except Exception:
                 analyst_signals = []
 

@@ -10,7 +10,6 @@ council ensemble consensus weights based on empirical accuracy.
 
 from __future__ import annotations
 
-import json
 import sqlite3
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -21,19 +20,97 @@ from config.paths import app_data_path
 
 # Baseline institutional priors for initial cold-start weighting
 DEFAULT_PERSONA_PRIORS: dict[str, dict[str, Any]] = {
-    "minervini": {"win_rate": 76.5, "total_calls": 42, "brier_score": 0.14, "avg_r": 2.4, "top_sectors": ["Technology", "Capital Goods", "Auto"]},
-    "wyckoff": {"win_rate": 72.0, "total_calls": 38, "brier_score": 0.16, "avg_r": 2.1, "top_sectors": ["Metals", "Energy", "Banking"]},
-    "smc": {"win_rate": 78.4, "total_calls": 55, "brier_score": 0.12, "avg_r": 2.8, "top_sectors": ["Banking", "IT", "F&O Heavyweights"]},
-    "oneil": {"win_rate": 74.0, "total_calls": 35, "brier_score": 0.15, "avg_r": 2.3, "top_sectors": ["Pharma", "FMCG", "IT"]},
-    "kedia": {"win_rate": 81.2, "total_calls": 28, "brier_score": 0.11, "avg_r": 3.6, "top_sectors": ["Smallcap Infra", "Manufacturing", "Chemicals"]},
-    "buffett": {"win_rate": 84.0, "total_calls": 25, "brier_score": 0.09, "avg_r": 3.1, "top_sectors": ["Banking", "FMCG", "Consumer"]},
-    "jhunjhunwala": {"win_rate": 79.5, "total_calls": 32, "brier_score": 0.13, "avg_r": 3.2, "top_sectors": ["Financials", "Consumer Discretionary", "Real Estate"]},
-    "munger": {"win_rate": 85.0, "total_calls": 20, "brier_score": 0.08, "avg_r": 3.0, "top_sectors": ["Monopolies", "Financials", "Technology"]},
-    "lynch": {"win_rate": 77.0, "total_calls": 31, "brier_score": 0.14, "avg_r": 2.6, "top_sectors": ["Retail", "Auto Ancillaries", "Healthcare"]},
-    "taleb": {"win_rate": 68.0, "total_calls": 29, "brier_score": 0.18, "avg_r": 4.2, "top_sectors": ["High Beta F&O", "Commodities", "Defensive Hedges"]},
-    "simons": {"win_rate": 75.8, "total_calls": 48, "brier_score": 0.13, "avg_r": 2.2, "top_sectors": ["Index Arbitrage", "Liquid Equities", "Options GEX"]},
-    "soros": {"win_rate": 71.5, "total_calls": 26, "brier_score": 0.17, "avg_r": 2.9, "top_sectors": ["Macro Themes", "Currency Sensitive", "Energy"]},
-    "forensic": {"win_rate": 88.0, "total_calls": 45, "brier_score": 0.07, "avg_r": 2.5, "top_sectors": ["Governance Audit", "Midcaps", "Smallcaps"]},
+    "minervini": {
+        "win_rate": 76.5,
+        "total_calls": 42,
+        "brier_score": 0.14,
+        "avg_r": 2.4,
+        "top_sectors": ["Technology", "Capital Goods", "Auto"],
+    },
+    "wyckoff": {
+        "win_rate": 72.0,
+        "total_calls": 38,
+        "brier_score": 0.16,
+        "avg_r": 2.1,
+        "top_sectors": ["Metals", "Energy", "Banking"],
+    },
+    "smc": {
+        "win_rate": 78.4,
+        "total_calls": 55,
+        "brier_score": 0.12,
+        "avg_r": 2.8,
+        "top_sectors": ["Banking", "IT", "F&O Heavyweights"],
+    },
+    "oneil": {
+        "win_rate": 74.0,
+        "total_calls": 35,
+        "brier_score": 0.15,
+        "avg_r": 2.3,
+        "top_sectors": ["Pharma", "FMCG", "IT"],
+    },
+    "kedia": {
+        "win_rate": 81.2,
+        "total_calls": 28,
+        "brier_score": 0.11,
+        "avg_r": 3.6,
+        "top_sectors": ["Smallcap Infra", "Manufacturing", "Chemicals"],
+    },
+    "buffett": {
+        "win_rate": 84.0,
+        "total_calls": 25,
+        "brier_score": 0.09,
+        "avg_r": 3.1,
+        "top_sectors": ["Banking", "FMCG", "Consumer"],
+    },
+    "jhunjhunwala": {
+        "win_rate": 79.5,
+        "total_calls": 32,
+        "brier_score": 0.13,
+        "avg_r": 3.2,
+        "top_sectors": ["Financials", "Consumer Discretionary", "Real Estate"],
+    },
+    "munger": {
+        "win_rate": 85.0,
+        "total_calls": 20,
+        "brier_score": 0.08,
+        "avg_r": 3.0,
+        "top_sectors": ["Monopolies", "Financials", "Technology"],
+    },
+    "lynch": {
+        "win_rate": 77.0,
+        "total_calls": 31,
+        "brier_score": 0.14,
+        "avg_r": 2.6,
+        "top_sectors": ["Retail", "Auto Ancillaries", "Healthcare"],
+    },
+    "taleb": {
+        "win_rate": 68.0,
+        "total_calls": 29,
+        "brier_score": 0.18,
+        "avg_r": 4.2,
+        "top_sectors": ["High Beta F&O", "Commodities", "Defensive Hedges"],
+    },
+    "simons": {
+        "win_rate": 75.8,
+        "total_calls": 48,
+        "brier_score": 0.13,
+        "avg_r": 2.2,
+        "top_sectors": ["Index Arbitrage", "Liquid Equities", "Options GEX"],
+    },
+    "soros": {
+        "win_rate": 71.5,
+        "total_calls": 26,
+        "brier_score": 0.17,
+        "avg_r": 2.9,
+        "top_sectors": ["Macro Themes", "Currency Sensitive", "Energy"],
+    },
+    "forensic": {
+        "win_rate": 88.0,
+        "total_calls": 45,
+        "brier_score": 0.07,
+        "avg_r": 2.5,
+        "top_sectors": ["Governance Audit", "Midcaps", "Smallcaps"],
+    },
 }
 
 
@@ -178,13 +255,16 @@ class PersonaTrackerEngine:
     ) -> PersonaTrackRecord:
         """Retrieve aggregated track record with context-aware dynamic weighting."""
         pid = persona_id.lower()
-        prior = DEFAULT_PERSONA_PRIORS.get(pid, {
-            "win_rate": 70.0,
-            "total_calls": 20,
-            "brier_score": 0.15,
-            "avg_r": 2.0,
-            "top_sectors": [],
-        })
+        prior = DEFAULT_PERSONA_PRIORS.get(
+            pid,
+            {
+                "win_rate": 70.0,
+                "total_calls": 20,
+                "brier_score": 0.15,
+                "avg_r": 2.0,
+                "top_sectors": [],
+            },
+        )
 
         # Calculate base empirical metrics
         win_rate = prior["win_rate"]
@@ -212,7 +292,9 @@ class PersonaTrackerEngine:
             elif "TRENDING" in regime.upper() and pid in ["minervini", "oneil", "smc"]:
                 regime_boost = 1.15
 
-        final_multiplier = round(max(0.6, min(1.6, base_multiplier * sector_boost * regime_boost)), 2)
+        final_multiplier = round(
+            max(0.6, min(1.6, base_multiplier * sector_boost * regime_boost)), 2
+        )
 
         return PersonaTrackRecord(
             persona_id=pid,
@@ -237,9 +319,19 @@ class PersonaTrackerEngine:
     ) -> list[dict[str, Any]]:
         """Return track records for all 13 personas."""
         order = [
-            "buffett", "jhunjhunwala", "lynch", "soros", "munger",
-            "forensic", "minervini", "wyckoff", "oneil", "taleb",
-            "kedia", "simons", "smc",
+            "buffett",
+            "jhunjhunwala",
+            "lynch",
+            "soros",
+            "munger",
+            "forensic",
+            "minervini",
+            "wyckoff",
+            "oneil",
+            "taleb",
+            "kedia",
+            "simons",
+            "smc",
         ]
         results = []
         for pid in order:
@@ -266,7 +358,9 @@ class PersonaTrackerEngine:
                 f"✅ Successful {pid.capitalize()} thesis on {symbol}. Setup captured {realized_r:.1f}R payoff. "
                 f"Volume spread confluence and structural momentum in {sector} confirmed institutional sponsorship."
             )
-            key_learning = "Trail stop aggressively to breakeven + buffer once 2R milestone is printed."
+            key_learning = (
+                "Trail stop aggressively to breakeven + buffer once 2R milestone is printed."
+            )
             rule_reinforcement = "Maintain disciplined position sizing and let winners expand into multi-session markups."
         else:
             retrospective_thesis = (
@@ -274,7 +368,9 @@ class PersonaTrackerEngine:
                 f"Market structure shifted against thesis or liquidity absorption failed in {sector}."
             )
             key_learning = "Exited cleanly at pre-defined stop loss without emotional hesitation."
-            rule_reinforcement = "Never widen invalidation stops or average into underwater positions."
+            rule_reinforcement = (
+                "Never widen invalidation stops or average into underwater positions."
+            )
 
         return {
             "persona_id": pid,

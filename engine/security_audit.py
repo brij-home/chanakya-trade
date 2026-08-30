@@ -56,8 +56,12 @@ def _init_audit_db():
             )
             """
         )
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON security_audit_log(timestamp)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_event_type ON security_audit_log(event_type)")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON security_audit_log(timestamp)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_audit_event_type ON security_audit_log(event_type)"
+        )
         conn.commit()
 
 
@@ -126,7 +130,9 @@ def get_audit_logs(limit: int = 50, event_type: Optional[str] = None) -> list[di
                 (event_type, limit),
             )
         else:
-            cursor = conn.execute("SELECT * FROM security_audit_log ORDER BY id DESC LIMIT ?", (limit,))
+            cursor = conn.execute(
+                "SELECT * FROM security_audit_log ORDER BY id DESC LIMIT ?", (limit,)
+            )
         rows = cursor.fetchall()
         return [dict(r) for r in rows]
 

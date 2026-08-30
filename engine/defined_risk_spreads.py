@@ -22,7 +22,7 @@ Calculates:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Literal, Optional, Any
 from engine.options_backtest import bs_premium
 
@@ -196,7 +196,7 @@ def build_defined_risk_spread(
         legs.append(SpreadLeg(sym, "PE", buy_strike, "BUY", buy_prem, lots, total_qty, dte))
 
         net_credit_per_unit = sell_prem - buy_prem
-        net_flow = - (net_credit_per_unit * total_qty)  # negative indicates credit received
+        net_flow = -(net_credit_per_unit * total_qty)  # negative indicates credit received
         strike_width = sell_strike - buy_strike
 
         max_profit = max(0.0, net_credit_per_unit * total_qty)
@@ -224,7 +224,7 @@ def build_defined_risk_spread(
         legs.append(SpreadLeg(sym, "CE", call_buy, "BUY", c_buy_prem, lots, total_qty, dte))
 
         net_credit_per_unit = (p_sell_prem - p_buy_prem) + (c_sell_prem - c_buy_prem)
-        net_flow = - (net_credit_per_unit * total_qty)
+        net_flow = -(net_credit_per_unit * total_qty)
         wing_width = 2 * step
 
         max_profit = max(0.0, net_credit_per_unit * total_qty)
@@ -246,7 +246,7 @@ def build_defined_risk_spread(
         legs.append(SpreadLeg(sym, "CE", buy_strike, "BUY", buy_prem, lots, total_qty, dte))
 
         net_credit_per_unit = sell_prem - buy_prem
-        net_flow = - (net_credit_per_unit * total_qty)
+        net_flow = -(net_credit_per_unit * total_qty)
         strike_width = buy_strike - sell_strike
 
         max_profit = max(0.0, net_credit_per_unit * total_qty)
@@ -286,6 +286,7 @@ def recommend_defined_risk_spreads(
     if spot is None or spot <= 0:
         try:
             from market.quotes import get_quote
+
             inst = f"NSE:{sym}" if ":" not in sym else sym
             q = get_quote([inst])
             if q and inst in q:
@@ -308,11 +309,17 @@ def recommend_defined_risk_spreads(
     if sentiment_hint:
         hint_upper = sentiment_hint.upper()
         if "BULL" in hint_upper:
-            spreads = [s for s in spreads if s.sentiment == "BULLISH"] + [s for s in spreads if s.sentiment != "BULLISH"]
+            spreads = [s for s in spreads if s.sentiment == "BULLISH"] + [
+                s for s in spreads if s.sentiment != "BULLISH"
+            ]
         elif "BEAR" in hint_upper:
-            spreads = [s for s in spreads if s.sentiment == "BEARISH"] + [s for s in spreads if s.sentiment != "BEARISH"]
+            spreads = [s for s in spreads if s.sentiment == "BEARISH"] + [
+                s for s in spreads if s.sentiment != "BEARISH"
+            ]
         elif "RANGE" in hint_upper or "NEUTRAL" in hint_upper:
-            spreads = [s for s in spreads if s.sentiment in ("RANGE_BOUND", "NEUTRAL")] + [s for s in spreads if s.sentiment not in ("RANGE_BOUND", "NEUTRAL")]
+            spreads = [s for s in spreads if s.sentiment in ("RANGE_BOUND", "NEUTRAL")] + [
+                s for s in spreads if s.sentiment not in ("RANGE_BOUND", "NEUTRAL")
+            ]
 
     return spreads
 
@@ -325,7 +332,11 @@ def print_defined_risk_spread(spread: DefinedRiskSpread) -> None:
 
     console = Console()
     flow_style = "green" if spread.net_debit_or_credit < 0 else "yellow"
-    flow_label = f"Net Credit ₹{abs(spread.net_debit_or_credit):,.2f}" if spread.net_debit_or_credit < 0 else f"Net Debit ₹{spread.net_debit_or_credit:,.2f}"
+    flow_label = (
+        f"Net Credit ₹{abs(spread.net_debit_or_credit):,.2f}"
+        if spread.net_debit_or_credit < 0
+        else f"Net Debit ₹{spread.net_debit_or_credit:,.2f}"
+    )
 
     lines = [
         f"  [bold]Underlying Spot[/bold]   : [bold white]{spread.underlying} @ ₹{spread.spot_price:,.2f}[/bold white] (Lot Size: {spread.lot_size})",
@@ -339,7 +350,13 @@ def print_defined_risk_spread(spread: DefinedRiskSpread) -> None:
     ]
 
     console.print()
-    console.print(Panel("\n".join(lines), title="[bold cyan]🛡 Defined-Risk Options Spread Generator[/bold cyan]", border_style="cyan"))
+    console.print(
+        Panel(
+            "\n".join(lines),
+            title="[bold cyan]🛡 Defined-Risk Options Spread Generator[/bold cyan]",
+            border_style="cyan",
+        )
+    )
 
     # Legs table
     table = Table(title="Multi-Leg Execution Structure", show_header=True, header_style="bold cyan")
@@ -361,4 +378,3 @@ def print_defined_risk_spread(spread: DefinedRiskSpread) -> None:
 
     console.print(table)
     console.print(f"[dim]  Thesis: {spread.thesis}[/dim]\n")
-

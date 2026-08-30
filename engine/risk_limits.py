@@ -35,7 +35,7 @@ from typing import Optional
 
 
 from dataclasses import dataclass, field
-from typing import Optional, Any
+from typing import Any
 
 
 @dataclass
@@ -206,7 +206,9 @@ class RiskLimits:
                 f"Daily loss threshold reached (-₹{abs(current_loss):,.0f} vs limit -₹{abs(self.max_daily_loss):,.0f}). "
                 f"Continuing past daily loss boundaries statistically compounds drawdown by 2.4x."
             )
-            recs.append("Take the remainder of the trading session off to protect capital and mental clarity.")
+            recs.append(
+                "Take the remainder of the trading session off to protect capital and mental clarity."
+            )
 
         # 2. Consecutive Losses (Tilt / Revenge Trading)
         streak = self._consecutive_losses_today()
@@ -216,7 +218,9 @@ class RiskLimits:
                 f"Tilt & revenge trading alert: {streak} consecutive losing trades today (limit: {self.max_consecutive_losses}). "
                 f"Statistically, urgent re-entries during loss streaks have a >78% failure rate."
             )
-            recs.append("Step away for a 15-minute breather or reduce position size to 0.5% capital.")
+            recs.append(
+                "Step away for a 15-minute breather or reduce position size to 0.5% capital."
+            )
 
         # 3. Max Daily Trades
         trades = self._trades_today()
@@ -234,7 +238,9 @@ class RiskLimits:
             disclaimers.append(
                 f"Symbol over-focus alert: {sym_trades} trades on {sym} today (limit: {self.max_trades_per_symbol})."
             )
-            recs.append(f"Diversify attention across other uncorrelated sectors or wait for a clearer structure on {sym}.")
+            recs.append(
+                f"Diversify attention across other uncorrelated sectors or wait for a clearer structure on {sym}."
+            )
 
         # 5. Anti-Pyramiding into Losers
         if current_position and act == "BUY" and quantity > 0:
@@ -246,7 +252,9 @@ class RiskLimits:
                     f"Anti-pyramiding alert: adding size to a losing position in {sym} (held at avg ₹{avg:,.2f} vs LTP ₹{price:,.2f}, {loss_pct:.1f}% below avg). "
                     f"Pyramiding into a losing position increases total capital at risk."
                 )
-                recs.append("Ensure you have a strict invalidation stop-loss rather than emotional averaging.")
+                recs.append(
+                    "Ensure you have a strict invalidation stop-loss rather than emotional averaging."
+                )
 
         requires_confirm = len(flags) > 0
         if requires_confirm:
@@ -326,7 +334,6 @@ class RiskLimits:
 
     # ── Record ────────────────────────────────────────────────
 
-
     def record_trade(
         self,
         symbol: str,
@@ -374,10 +381,11 @@ class RiskLimits:
             "remaining_loss_room": -remaining_loss if loss < 0 else abs(self.max_daily_loss),
             "remaining_trades": max(0, self.max_daily_trades - trades),
             "tilt_lockout_active": streak >= self.max_consecutive_losses,
-            "limits_hit": loss <= self.max_daily_loss or trades >= self.max_daily_trades or streak >= self.max_consecutive_losses,
+            "limits_hit": loss <= self.max_daily_loss
+            or trades >= self.max_daily_trades
+            or streak >= self.max_consecutive_losses,
         }
 
 
 # ── Singleton ─────────────────────────────────────────────────
 risk_limits = RiskLimits()
-

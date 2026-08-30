@@ -626,11 +626,11 @@ export default function DebateArenaView({ onOpenOrderTicket }) {
                         ))}
                       </div>
 
-                      {sig.key_metrics && Object.keys(sig.key_metrics).length > 0 && (
+                      {sig.key_metrics && typeof sig.key_metrics === 'object' && !Array.isArray(sig.key_metrics) && Object.keys(sig.key_metrics).length > 0 && (
                         <div className="pt-1 flex flex-wrap gap-1.5">
                           {Object.entries(sig.key_metrics).map(([k, v]) => (
                             <span key={k} className="px-2 py-0.5 rounded-md bg-elevated border border-border/50 text-[10px] text-muted font-mono">
-                              {k}: <strong className="text-text">{v}</strong>
+                              {k}: <strong className="text-text">{String(v)}</strong>
                             </span>
                           ))}
                         </div>

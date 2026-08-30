@@ -6,7 +6,6 @@ Unit tests for Forensic accounting, Beneish M-Score, Altman Z-Score, and Piotros
 
 from __future__ import annotations
 
-import pytest
 from analysis.forensic import (
     ForensicAuditResult,
     audit_forensics,

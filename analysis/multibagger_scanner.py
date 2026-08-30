@@ -117,7 +117,9 @@ def scan_multibagger_universe(
     # 1. Resolve symbols from universe
     symbols, universe_desc = resolve_dynamic_universe(universe, max_stocks=120)
     if not symbols:
-        symbols = THEMATIC_PRESETS.get("multibagger_hunters", {}).get("symbols", ["TRENT", "DIXON", "HAL", "BEL", "BSE"])
+        symbols = THEMATIC_PRESETS.get("multibagger_hunters", {}).get(
+            "symbols", ["TRENT", "DIXON", "HAL", "BEL", "BSE"]
+        )
 
     u_name = THEMATIC_PRESETS.get(universe.lower(), {}).get("name", universe_desc)
     norm_horizon = horizon.upper().strip()
@@ -128,8 +130,7 @@ def scan_multibagger_universe(
     reports: list[MultibaggerReport] = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=parallel_workers) as executor:
         future_map = {
-            executor.submit(_process_single_stock, sym, exchange, df_cache): sym
-            for sym in symbols
+            executor.submit(_process_single_stock, sym, exchange, df_cache): sym for sym in symbols
         }
         for future in concurrent.futures.as_completed(future_map):
             rep = future.result()

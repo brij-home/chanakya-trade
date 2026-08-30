@@ -10,7 +10,6 @@ Dolly Khanna, Porinju Veliyath) and Tier-1 Institutional Mutual Funds / FIIs.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from typing import Any
 

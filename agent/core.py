@@ -59,6 +59,7 @@ import os
 import subprocess
 import sys
 from abc import ABC, abstractmethod
+from typing import Any
 
 # Fix Windows charmap / cp1252 codec errors for unicode console prints
 if sys.platform == "win32":
@@ -144,7 +145,6 @@ def _assistant_msg(content: str) -> dict:
 # ── Abstract provider ──────────────────────────────────────────
 
 
-
 def _retry_api_call(fn, *args, max_retries: int = 2, initial_delay: float = 0.5, **kwargs):
     """Execute an API function with adaptive retry on transient errors (503, 429, timeout)."""
     import re
@@ -161,10 +161,22 @@ def _retry_api_call(fn, *args, max_retries: int = 2, initial_delay: float = 0.5,
             is_transient = any(
                 term in err_str
                 for term in (
-                    "503", "429", "resource_exhausted", "unavailable", "timeout",
-                    "high demand", "rate limit", "overloaded", "connection reset",
-                    "econnreset", "502", "504", "bad gateway", "service unavailable",
-                    "temporarily unavailable", "quota exceeded"
+                    "503",
+                    "429",
+                    "resource_exhausted",
+                    "unavailable",
+                    "timeout",
+                    "high demand",
+                    "rate limit",
+                    "overloaded",
+                    "connection reset",
+                    "econnreset",
+                    "502",
+                    "504",
+                    "bad gateway",
+                    "service unavailable",
+                    "temporarily unavailable",
+                    "quota exceeded",
                 )
             )
             if is_transient and attempt < max_retries - 1:
@@ -224,7 +236,12 @@ class AnthropicProvider(LLMProvider):
     """
 
     def __init__(self, model: str, registry: ToolRegistry, system_prompt: str) -> None:
-        resolved = model or os.environ.get("ANTHROPIC_MODEL") or os.environ.get("AI_MODEL") or ANTHROPIC_DEFAULT_MODEL
+        resolved = (
+            model
+            or os.environ.get("ANTHROPIC_MODEL")
+            or os.environ.get("AI_MODEL")
+            or ANTHROPIC_DEFAULT_MODEL
+        )
         super().__init__(resolved, registry, system_prompt)
         try:
             import anthropic as _sdk
@@ -500,7 +517,13 @@ class OpenAIProvider(LLMProvider):
                 flat.append({"role": "user", "content": f"[Tool Result]: {m.get('content', '')}"})
             elif m.get("role") == "assistant" and m.get("tool_calls"):
                 tc_names = [tc["function"]["name"] for tc in m["tool_calls"]]
-                flat.append({"role": "assistant", "content": m.get("content") or f"I analyzed tool outputs for: {', '.join(tc_names)}"})
+                flat.append(
+                    {
+                        "role": "assistant",
+                        "content": m.get("content")
+                        or f"I analyzed tool outputs for: {', '.join(tc_names)}",
+                    }
+                )
             else:
                 flat.append(m)
         return flat
@@ -516,12 +539,16 @@ class OpenAIProvider(LLMProvider):
         # Iterate in chunks of 3 for OpenRouter, or 1 for others
         chunk_size = 3 if is_openrouter else 1
         for i in range(0, len(candidates), chunk_size):
-            chunk = candidates[i:i + chunk_size]
+            chunk = candidates[i : i + chunk_size]
             current_model = chunk[0]
             extra_body = {"models": chunk} if (is_openrouter and len(chunk) > 1) else None
 
             try:
-                kwargs = {"model": current_model, "messages": messages, "tools": tools if tools else None}
+                kwargs = {
+                    "model": current_model,
+                    "messages": messages,
+                    "tools": tools if tools else None,
+                }
                 if extra_body:
                     kwargs["extra_body"] = extra_body
                 r = _retry_api_call(self._client.chat.completions.create, **kwargs)
@@ -537,7 +564,23 @@ class OpenAIProvider(LLMProvider):
                 return msg.content or "", tcs
             except Exception as e:
                 err_str = str(e).lower()
-                if any(c in err_str for c in ("single tool-call", "tool_call", "parallel tool", "tools at once", "400", "404", "413", "not supported", "tokens per minute", "tpm", "rate_limit_exceeded", "request too large")):
+                if any(
+                    c in err_str
+                    for c in (
+                        "single tool-call",
+                        "tool_call",
+                        "parallel tool",
+                        "tools at once",
+                        "400",
+                        "404",
+                        "413",
+                        "not supported",
+                        "tokens per minute",
+                        "tpm",
+                        "rate_limit_exceeded",
+                        "request too large",
+                    )
+                ):
                     try:
                         flat = self._flatten_messages(messages)
                         kwargs = {"model": current_model, "messages": flat}
@@ -571,12 +614,17 @@ class OpenAIProvider(LLMProvider):
 
         chunk_size = 3 if is_openrouter else 1
         for i in range(0, len(candidates), chunk_size):
-            chunk = candidates[i:i + chunk_size]
+            chunk = candidates[i : i + chunk_size]
             current_model = chunk[0]
             extra_body = {"models": chunk} if (is_openrouter and len(chunk) > 1) else None
 
             try:
-                kwargs = {"model": current_model, "messages": messages, "tools": tools if tools else None, "stream": True}
+                kwargs = {
+                    "model": current_model,
+                    "messages": messages,
+                    "tools": tools if tools else None,
+                    "stream": True,
+                }
                 if extra_body:
                     kwargs["extra_body"] = extra_body
                 stream = _retry_api_call(self._client.chat.completions.create, **kwargs)
@@ -615,7 +663,23 @@ class OpenAIProvider(LLMProvider):
                 return text, tcs
             except Exception as e:
                 err_str = str(e).lower()
-                if any(c in err_str for c in ("single tool-call", "tool_call", "parallel tool", "tools at once", "400", "404", "413", "not supported", "tokens per minute", "tpm", "rate_limit_exceeded", "request too large")):
+                if any(
+                    c in err_str
+                    for c in (
+                        "single tool-call",
+                        "tool_call",
+                        "parallel tool",
+                        "tools at once",
+                        "400",
+                        "404",
+                        "413",
+                        "not supported",
+                        "tokens per minute",
+                        "tpm",
+                        "rate_limit_exceeded",
+                        "request too large",
+                    )
+                ):
                     try:
                         flat = self._flatten_messages(messages)
                         kwargs = {"model": current_model, "messages": flat, "stream": True}
@@ -671,7 +735,12 @@ class ClaudeCLIProvider(LLMProvider):
     """
 
     def __init__(self, model: str, registry: ToolRegistry, system_prompt: str) -> None:
-        resolved = model or os.environ.get("ANTHROPIC_MODEL") or os.environ.get("AI_MODEL") or ANTHROPIC_DEFAULT_MODEL
+        resolved = (
+            model
+            or os.environ.get("ANTHROPIC_MODEL")
+            or os.environ.get("AI_MODEL")
+            or ANTHROPIC_DEFAULT_MODEL
+        )
         super().__init__(resolved, registry, system_prompt)
         self._cli = self._find_claude_cli()
 
@@ -1568,7 +1637,12 @@ class GeminiProvider(LLMProvider):
     """
 
     def __init__(self, model: str, registry: ToolRegistry, system_prompt: str) -> None:
-        resolved = model or os.environ.get("GEMINI_MODEL") or os.environ.get("AI_MODEL") or GEMINI_DEFAULT_MODEL
+        resolved = (
+            model
+            or os.environ.get("GEMINI_MODEL")
+            or os.environ.get("AI_MODEL")
+            or GEMINI_DEFAULT_MODEL
+        )
         super().__init__(resolved, registry, system_prompt)
         try:
             from google import genai
@@ -1581,7 +1655,9 @@ class GeminiProvider(LLMProvider):
                 os.environ.get("GEMINI_API_KEY")
                 or os.environ.get("GEMINI_API_KEYS")
                 or os.environ.get("GOOGLE_API_KEY")
-                or get_credential("GEMINI_API_KEY", "Google Gemini API Key", secret=True, required=False)
+                or get_credential(
+                    "GEMINI_API_KEY", "Google Gemini API Key", secret=True, required=False
+                )
                 or ""
             )
             # Parse comma-, semicolon-, or newline-separated key pool
@@ -1624,7 +1700,11 @@ class GeminiProvider(LLMProvider):
                 return idx, self._clients[idx]
 
         # If all keys are in cooldown, select the one with earliest expiration
-        earliest_idx = min(self._client_cooldowns, key=self._client_cooldowns.get) if self._client_cooldowns else 0
+        earliest_idx = (
+            min(self._client_cooldowns, key=self._client_cooldowns.get)
+            if self._client_cooldowns
+            else 0
+        )
         return earliest_idx, self._clients[earliest_idx]
 
     def _mark_key_cooldown(self, key_idx: int, cooldown_seconds: float = 45.0) -> None:
@@ -1678,7 +1758,14 @@ class GeminiProvider(LLMProvider):
         chat_session = None
 
         candidate_models = [active_model] + [
-            m for m in ["gemini-3.6-flash", "gemini-3.5-flash", "gemini-3.5-flash-lite", "gemini-2.5-flash", "gemini-flash-latest"]
+            m
+            for m in [
+                "gemini-3.6-flash",
+                "gemini-3.5-flash",
+                "gemini-3.5-flash-lite",
+                "gemini-2.5-flash",
+                "gemini-flash-latest",
+            ]
             if m != active_model
         ]
 
@@ -1712,7 +1799,13 @@ class GeminiProvider(LLMProvider):
                 err_str = str(e).lower()
                 is_auth_error = any(
                     term in err_str
-                    for term in ("api key not valid", "api_key_invalid", "unauthorized", "invalid api key", "401")
+                    for term in (
+                        "api key not valid",
+                        "api_key_invalid",
+                        "unauthorized",
+                        "invalid api key",
+                        "401",
+                    )
                 )
                 if is_auth_error:
                     return f"[Gemini error: {e}]"
@@ -1744,7 +1837,12 @@ class GeminiProvider(LLMProvider):
                     self._mark_key_cooldown(client_idx, cooldown_seconds=45.0)
 
                     try:
-                        from engine.telemetry import record_event, EVENT_LLM_COOLDOWN, EVENT_LLM_FAILOVER
+                        from engine.telemetry import (
+                            record_event,
+                            EVENT_LLM_COOLDOWN,
+                            EVENT_LLM_FAILOVER,
+                        )
+
                         record_event(
                             event_type=EVENT_LLM_COOLDOWN,
                             component="gemini_provider",
@@ -1770,6 +1868,7 @@ class GeminiProvider(LLMProvider):
                                 key_recovered = True
                                 try:
                                     from engine.telemetry import record_event, EVENT_LLM_FAILOVER
+
                                     record_event(
                                         event_type=EVENT_LLM_FAILOVER,
                                         component="gemini_provider",
@@ -1801,13 +1900,20 @@ class GeminiProvider(LLMProvider):
                                     client_idx = c_idx
                                     model_recovered = True
                                     try:
-                                        from engine.telemetry import record_event, EVENT_LLM_FAILOVER
+                                        from engine.telemetry import (
+                                            record_event,
+                                            EVENT_LLM_FAILOVER,
+                                        )
+
                                         record_event(
                                             event_type=EVENT_LLM_FAILOVER,
                                             component="gemini_provider",
                                             action_taken=f"Failover to fallback model {fb_model} (key #{c_idx + 1})",
                                             reason="Primary model throttled or high demand",
-                                            details={"fallback_model": fb_model, "key_index": c_idx},
+                                            details={
+                                                "fallback_model": fb_model,
+                                                "key_index": c_idx,
+                                            },
                                             severity="WARNING",
                                         )
                                     except Exception:
@@ -1826,7 +1932,11 @@ class GeminiProvider(LLMProvider):
             tool_calls = []
             text_parts = []
 
-            if not response.candidates or not response.candidates[0].content or not response.candidates[0].content.parts:
+            if (
+                not response.candidates
+                or not response.candidates[0].content
+                or not response.candidates[0].content.parts
+            ):
                 return "[Gemini returned empty response]"
 
             for part in response.candidates[0].content.parts:
@@ -1909,7 +2019,12 @@ class GeminiVertexProvider(LLMProvider):
     """
 
     def __init__(self, model: str, registry: ToolRegistry, system_prompt: str) -> None:
-        resolved = model or os.environ.get("GEMINI_MODEL") or os.environ.get("AI_MODEL") or GEMINI_DEFAULT_MODEL
+        resolved = (
+            model
+            or os.environ.get("GEMINI_MODEL")
+            or os.environ.get("AI_MODEL")
+            or GEMINI_DEFAULT_MODEL
+        )
         super().__init__(resolved, registry, system_prompt)
         self._project = os.environ.get("GOOGLE_CLOUD_PROJECT", "")
         self._location = os.environ.get("GOOGLE_CLOUD_LOCATION", "us-central1")
@@ -2024,8 +2139,9 @@ class GeminiVertexProvider(LLMProvider):
 # ── Provider factory ───────────────────────────────────────────
 
 
-
-def _build_custom_openai_provider(prov_name: str, model: str | None, registry: ToolRegistry, sys_prompt: str) -> LLMProvider | None:
+def _build_custom_openai_provider(
+    prov_name: str, model: str | None, registry: ToolRegistry, sys_prompt: str
+) -> LLMProvider | None:
     """Build OpenAI-compatible providers: NVIDIA, Groq, DeepSeek, OpenRouter, Ollama."""
     if prov_name == PROVIDER_OLLAMA:
         base = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434/v1")
@@ -2052,6 +2168,7 @@ def _build_custom_openai_provider(prov_name: str, model: str | None, registry: T
         mdl = model or os.environ.get("OPENROUTER_MODEL", OPENROUTER_DEFAULT_MODEL)
         return OpenAIProvider(mdl, registry, sys_prompt, base_url=base, api_key=key)
     return None
+
 
 def get_provider(
     provider: str | None = None,
@@ -2331,7 +2448,11 @@ def _auto_detect_provider() -> str:
         return PROVIDER_ANTHROPIC
     if env.get("OPENAI_API_KEY") or get_credential("OPENAI_API_KEY", required=False):
         return PROVIDER_OPENAI
-    if env.get("GEMINI_API_KEY") or env.get("GOOGLE_API_KEY") or get_credential("GEMINI_API_KEY", required=False):
+    if (
+        env.get("GEMINI_API_KEY")
+        or env.get("GOOGLE_API_KEY")
+        or get_credential("GEMINI_API_KEY", required=False)
+    ):
         return PROVIDER_GEMINI
     if env.get("GROQ_API_KEY") or get_credential("GROQ_API_KEY", required=False):
         return PROVIDER_GROQ
@@ -2725,7 +2846,11 @@ def get_deep_provider(
         or (os.environ.get("OPENROUTER_MODEL") if deep_prov == PROVIDER_OPENROUTER else None)
         or (os.environ.get("OPENAI_MODEL") if deep_prov == PROVIDER_OPENAI else None)
         or (os.environ.get("ANTHROPIC_MODEL") if deep_prov == PROVIDER_ANTHROPIC else None)
-        or (os.environ.get("GEMINI_MODEL") if deep_prov in (PROVIDER_GEMINI, PROVIDER_GEMINI_SUB) else None)
+        or (
+            os.environ.get("GEMINI_MODEL")
+            if deep_prov in (PROVIDER_GEMINI, PROVIDER_GEMINI_SUB)
+            else None
+        )
         or _default_model(deep_prov)
     )
     return get_provider(provider=deep_prov, model=deep_model, registry=registry)
@@ -2788,74 +2913,6 @@ def get_fast_provider(
         if deep_provider is not None:
             return deep_provider
         return get_provider(registry=registry)
-
-
-def build_provider_from_env(registry=None, system_prompt=None) -> "LLMProvider":
-    """Build a provider using current env vars. Used by QuickScanner and similar."""
-    reg = registry or build_registry()
-    sys = system_prompt or build_system_prompt()
-    chosen = os.environ.get("AI_PROVIDER", "").lower() or _auto_detect_provider()
-    model = os.environ.get("AI_MODEL", "") or _default_model(chosen)
-
-    dispatch = {
-        PROVIDER_ANTHROPIC: AnthropicProvider,
-        PROVIDER_OPENAI: OpenAIProvider,
-        PROVIDER_GEMINI: GeminiProvider,
-        PROVIDER_CLAUDE_CLI: ClaudeCLIProvider,
-        PROVIDER_GEMINI_SUB: GeminiVertexProvider,
-        PROVIDER_OLLAMA: None,
-    }
-
-    custom = _build_custom_openai_provider(chosen, model, reg, sys)
-    if custom is not None:
-        return custom
-    prov_cls = dispatch.get(chosen, AnthropicProvider)
-    return prov_cls(model, reg, sys)
-
-
-def build_fast_provider_from_env(registry=None) -> "LLMProvider":
-    """
-    Build a *fast* (cheap) LLM provider for extraction/classification (#91).
-
-    Uses AI_FAST_MODEL + AI_FAST_PROVIDER env vars.
-    Falls back to the deep provider if neither is set, so the feature is
-    completely transparent when not configured.
-
-    Configure in .env or via credentials:
-        AI_FAST_PROVIDER=anthropic
-        AI_FAST_MODEL=claude-haiku-3-5
-        # or mix providers:
-        AI_FAST_PROVIDER=gemini
-        AI_FAST_MODEL=gemini-3.7-flash
-    """
-    fast_model = os.environ.get("AI_FAST_MODEL", "").strip()
-    fast_provider_name = os.environ.get("AI_FAST_PROVIDER", "").strip().lower()
-
-    # If neither is set, return the standard (deep) provider — no regression
-    if not fast_model and not fast_provider_name:
-        return build_provider_from_env(registry=registry)
-
-    reg = registry or build_registry()
-    sys = "You are a concise financial data extraction assistant."
-
-    # Provider to use for the fast model
-    chosen = (
-        fast_provider_name or os.environ.get("AI_PROVIDER", "").lower() or _auto_detect_provider()
-    )
-    model = fast_model or _default_model(chosen)
-
-    dispatch = {
-        PROVIDER_ANTHROPIC: AnthropicProvider,
-        PROVIDER_OPENAI: OpenAIProvider,
-        PROVIDER_GEMINI: GeminiProvider,
-        PROVIDER_CLAUDE_CLI: ClaudeCLIProvider,
-        PROVIDER_GEMINI_SUB: GeminiVertexProvider,
-    }
-    custom = _build_custom_openai_provider(chosen, model, reg, sys)
-    if custom is not None:
-        return custom
-    prov_cls = dispatch.get(chosen, AnthropicProvider)
-    return prov_cls(model, reg, sys)
 
 
 # ── Singleton access ───────────────────────────────────────────

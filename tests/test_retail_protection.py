@@ -10,10 +10,13 @@ Unit test suite verifying retail protection guardrails:
 
 import pytest
 from engine.risk_limits import RiskLimits, RiskLimitError
-from engine.risk_gate import compute_allowed_actions
-from engine.charges import calculate_capital_gains_tax, calculate_fo_turnover, suggest_tax_loss_harvesting
+from engine.charges import (
+    calculate_capital_gains_tax,
+    calculate_fo_turnover,
+    suggest_tax_loss_harvesting,
+)
 from engine.defined_risk_spreads import build_defined_risk_spread
-from engine.portfolio import PortfolioHealthAudit, audit_portfolio_health, PortfolioSummary, HoldingRow, RiskMeter
+from engine.portfolio import audit_portfolio_health, PortfolioSummary, HoldingRow, RiskMeter
 from brokers.base import Funds
 
 
@@ -66,20 +69,26 @@ def test_consecutive_losses_tilt_lockout(tmp_path, monkeypatch):
 def test_capital_gains_tax_stcg_and_ltcg():
     """Verify Post-Budget 2024 STCG (20%) and LTCG (12.5% above ₹1.25L)."""
     # STCG (<365 days)
-    stcg = calculate_capital_gains_tax(gross_pnl=50000.0, holding_period_days=120, segment="EQUITY_DELIVERY")
+    stcg = calculate_capital_gains_tax(
+        gross_pnl=50000.0, holding_period_days=120, segment="EQUITY_DELIVERY"
+    )
     assert stcg.tax_type == "STCG"
     assert stcg.tax_rate_pct == 20.0
     assert stcg.estimated_tax == 10000.0
     assert stcg.net_post_tax_pnl == 40000.0
 
     # LTCG (>=365 days, below exemption limit)
-    ltcg_low = calculate_capital_gains_tax(gross_pnl=100000.0, holding_period_days=400, segment="EQUITY_DELIVERY")
+    ltcg_low = calculate_capital_gains_tax(
+        gross_pnl=100000.0, holding_period_days=400, segment="EQUITY_DELIVERY"
+    )
     assert ltcg_low.tax_type == "LTCG"
     assert ltcg_low.estimated_tax == 0.0
     assert ltcg_low.net_post_tax_pnl == 100000.0
 
     # LTCG (above ₹1.25L exemption: ₹2.25L gain -> ₹1.00L taxable @ 12.5% = ₹12,500)
-    ltcg_high = calculate_capital_gains_tax(gross_pnl=225000.0, holding_period_days=450, segment="EQUITY_DELIVERY")
+    ltcg_high = calculate_capital_gains_tax(
+        gross_pnl=225000.0, holding_period_days=450, segment="EQUITY_DELIVERY"
+    )
     assert ltcg_high.tax_type == "LTCG"
     assert ltcg_high.tax_rate_pct == 12.5
     assert ltcg_high.estimated_tax == 12500.0
@@ -141,16 +150,43 @@ def test_defined_risk_spread_builder():
 def test_portfolio_health_audit():
     """Verify concentration scoring and wealth pyramid audit."""
     holdings = [
-        HoldingRow(symbol="RELIANCE", qty=100, avg_price=2500.0, ltp=2800.0, value=280000.0, pnl=30000.0, pnl_pct=12.0, product="CNC"),
-        HoldingRow(symbol="TCS", qty=10, avg_price=3400.0, ltp=3500.0, value=35000.0, pnl=1000.0, pnl_pct=2.9, product="CNC"),
+        HoldingRow(
+            symbol="RELIANCE",
+            qty=100,
+            avg_price=2500.0,
+            ltp=2800.0,
+            value=280000.0,
+            pnl=30000.0,
+            pnl_pct=12.0,
+            product="CNC",
+        ),
+        HoldingRow(
+            symbol="TCS",
+            qty=10,
+            avg_price=3400.0,
+            ltp=3500.0,
+            value=35000.0,
+            pnl=1000.0,
+            pnl_pct=2.9,
+            product="CNC",
+        ),
     ]
     funds = Funds(available_cash=50000.0, used_margin=0.0, total_balance=365000.0)
-    risk = RiskMeter(total_capital=365000.0, deployed_cash=315000.0, used_margin=0.0, free_cash=50000.0, deployment_pct=86.3, unrealised_pnl=31000.0, max_loss_estimate=315000.0, risk_rating="MEDIUM")
+    risk = RiskMeter(
+        total_capital=365000.0,
+        deployed_cash=315000.0,
+        used_margin=0.0,
+        free_cash=50000.0,
+        deployment_pct=86.3,
+        unrealised_pnl=31000.0,
+        max_loss_estimate=315000.0,
+        risk_rating="MEDIUM",
+    )
     summary = PortfolioSummary(
         holdings=holdings,
         positions=[],
         funds=funds,
-        greeks=None, # type: ignore
+        greeks=None,  # type: ignore
         risk=risk,
         total_value=365000.0,
         total_pnl=31000.0,
@@ -168,6 +204,7 @@ def test_portfolio_health_audit():
 def test_all_defined_risk_spread_strategies():
     """Verify all defined risk strategies build properly."""
     from engine.defined_risk_spreads import recommend_defined_risk_spreads
+
     spreads = recommend_defined_risk_spreads("NIFTY", spot_price=24500.0)
     assert len(spreads) == 5
     strat_names = {s.strategy_name for s in spreads}
@@ -181,14 +218,19 @@ def test_all_defined_risk_spread_strategies():
 def test_statutory_charges_calculation():
     """Verify statutory charges computation across segments."""
     from engine.charges import calculate_transaction_charges
+
     # Equity delivery buy
-    eq_buy = calculate_transaction_charges(price=1000.0, quantity=100, segment="EQUITY_DELIVERY", side="BUY")
+    eq_buy = calculate_transaction_charges(
+        price=1000.0, quantity=100, segment="EQUITY_DELIVERY", side="BUY"
+    )
     assert eq_buy.notional_turnover == 100000.0
     assert eq_buy.stt > 0
     assert eq_buy.stamp_duty > 0
 
     # Options sell
-    opt_sell = calculate_transaction_charges(price=150.0, quantity=75, segment="OPTIONS", side="SELL")
+    opt_sell = calculate_transaction_charges(
+        price=150.0, quantity=75, segment="OPTIONS", side="SELL"
+    )
     assert opt_sell.stt > 0
     assert opt_sell.total_charges > 0
 
@@ -210,4 +252,3 @@ def test_tool_registry_and_openclaw_skills():
     assert "tax_estimate" in skill_names
     assert "tax_harvesting" in skill_names
     assert "defined_risk_spreads" in skill_names
-

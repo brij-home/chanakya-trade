@@ -15,12 +15,12 @@ from datetime import datetime, timezone
 from typing import Any, Literal, Optional
 
 ProvenanceSource = Literal[
-    "LIVE_BROKER",      # Real-time WebSocket or REST tick from connected broker (Fyers, Zerodha, etc.)
-    "LIVE_TICK",        # Direct live exchange quote
-    "NSE_SCRAPER",      # Official NSE live scraper feed
-    "HISTORICAL_EOD",   # Verified End-of-Day historical bar dataset
+    "LIVE_BROKER",  # Real-time WebSocket or REST tick from connected broker (Fyers, Zerodha, etc.)
+    "LIVE_TICK",  # Direct live exchange quote
+    "NSE_SCRAPER",  # Official NSE live scraper feed
+    "HISTORICAL_EOD",  # Verified End-of-Day historical bar dataset
     "SYNTHETIC_PROXY",  # Black-Scholes / Monte Carlo calculated synthetic proxy
-    "FALLBACK_CACHE",   # Stored SQLite / in-memory cache fallback
+    "FALLBACK_CACHE",  # Stored SQLite / in-memory cache fallback
 ]
 
 
@@ -33,7 +33,9 @@ class DataProvenance:
     as_of_ist: str = ""
     freshness_seconds: float = 0.0
     completeness_pct: float = 100.0
-    is_indicative_proxy: bool = False  # True when synthetic options or Black-Scholes approximations are used
+    is_indicative_proxy: bool = (
+        False  # True when synthetic options or Black-Scholes approximations are used
+    )
     fallback_reason: Optional[str] = None
 
     def __post_init__(self):

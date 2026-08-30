@@ -37,7 +37,7 @@ export default function WhaleFlowsCard({ onOpenOrderTicket }) {
   const investors = data?.marquee_investors || []
 
   const filteredDeals = deals.filter((d) => {
-    if (investorFilter !== 'ALL' && !d.investor_name.toLowerCase().includes(investorFilter.toLowerCase())) {
+    if (investorFilter !== 'ALL' && !d?.investor_name?.toLowerCase().includes(investorFilter.toLowerCase())) {
       return false
     }
     if (searchQuery.trim()) {

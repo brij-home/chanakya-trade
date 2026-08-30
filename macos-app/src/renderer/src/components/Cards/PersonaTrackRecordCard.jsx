@@ -60,11 +60,11 @@ export default function PersonaTrackRecordCard() {
     fetchTrackRecords()
   }, [])
 
-  const sortedRecords = [...records].sort((a, b) => {
-    if (sortBy === 'win_rate_desc') return b.win_rate - a.win_rate
-    if (sortBy === 'r_desc') return b.compound_r - a.compound_r
-    if (sortBy === 'weight_desc') return b.dynamic_weight_multiplier - a.dynamic_weight_multiplier
-    return a.name.localeCompare(b.name)
+  const sortedRecords = [...(records || [])].sort((a, b) => {
+    if (sortBy === 'win_rate_desc') return (b.win_rate || 0) - (a.win_rate || 0)
+    if (sortBy === 'r_desc') return (b.compound_r || 0) - (a.compound_r || 0)
+    if (sortBy === 'weight_desc') return (b.dynamic_weight_multiplier || 0) - (a.dynamic_weight_multiplier || 0)
+    return (a?.name || '').localeCompare(b?.name || '')
   })
 
   return (

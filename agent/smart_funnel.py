@@ -53,48 +53,182 @@ console = Console(legacy_windows=False)
 
 WATCHLIST_PRESETS: dict[str, list[str]] = {
     "nifty_50": [
-        "RELIANCE", "TCS", "HDFCBANK", "INFY", "ICICIBANK", "SBIN", "BHARTIARTL",
-        "ITC", "LT", "KOTAKBANK", "AXISBANK", "TATAMOTORS", "MARUTI", "SUNPHARMA",
-        "BAJFINANCE", "TITAN", "HINDUNILVR", "NTPC", "ONGC", "POWERGRID",
-        "TATASTEEL", "COALINDIA", "ASIANPAINT", "M&M", "ADANIENT", "ADANIPORTS",
-        "TECHM", "HCLTECH", "WIPRO", "ULTRACEMCO", "JSWSTEEL", "GRASIM",
-        "BAJAJFINSV", "NESTLEIND", "TRENT", "BEL", "CIPLA", "HEROMOTOCO",
-        "DRREDDY", "APOLLOHOSP", "BPCL", "SHRIRAMFIN", "EICHERMOT", "HINDALCO",
-        "TATACONSUM", "DIVISLAB", "SBILIFE", "HDFCLIFE", "BRITANNIA", "INDUSINDBK"
+        "RELIANCE",
+        "TCS",
+        "HDFCBANK",
+        "INFY",
+        "ICICIBANK",
+        "SBIN",
+        "BHARTIARTL",
+        "ITC",
+        "LT",
+        "KOTAKBANK",
+        "AXISBANK",
+        "TATAMOTORS",
+        "MARUTI",
+        "SUNPHARMA",
+        "BAJFINANCE",
+        "TITAN",
+        "HINDUNILVR",
+        "NTPC",
+        "ONGC",
+        "POWERGRID",
+        "TATASTEEL",
+        "COALINDIA",
+        "ASIANPAINT",
+        "M&M",
+        "ADANIENT",
+        "ADANIPORTS",
+        "TECHM",
+        "HCLTECH",
+        "WIPRO",
+        "ULTRACEMCO",
+        "JSWSTEEL",
+        "GRASIM",
+        "BAJAJFINSV",
+        "NESTLEIND",
+        "TRENT",
+        "BEL",
+        "CIPLA",
+        "HEROMOTOCO",
+        "DRREDDY",
+        "APOLLOHOSP",
+        "BPCL",
+        "SHRIRAMFIN",
+        "EICHERMOT",
+        "HINDALCO",
+        "TATACONSUM",
+        "DIVISLAB",
+        "SBILIFE",
+        "HDFCLIFE",
+        "BRITANNIA",
+        "INDUSINDBK",
     ],
     "nifty50": [
-        "RELIANCE", "TCS", "HDFCBANK", "INFY", "ICICIBANK", "SBIN", "BHARTIARTL",
-        "ITC", "LT", "KOTAKBANK", "AXISBANK", "TATAMOTORS", "MARUTI", "SUNPHARMA",
-        "BAJFINANCE", "TITAN", "HINDUNILVR", "NTPC", "ONGC", "POWERGRID",
-        "TATASTEEL", "COALINDIA", "ASIANPAINT", "M&M", "ADANIENT", "ADANIPORTS",
-        "TECHM", "HCLTECH", "WIPRO", "ULTRACEMCO", "JSWSTEEL", "GRASIM",
-        "BAJAJFINSV", "NESTLEIND", "TRENT", "BEL", "CIPLA", "HEROMOTOCO",
-        "DRREDDY", "APOLLOHOSP", "BPCL", "SHRIRAMFIN", "EICHERMOT", "HINDALCO",
-        "TATACONSUM", "DIVISLAB", "SBILIFE", "HDFCLIFE", "BRITANNIA", "INDUSINDBK"
+        "RELIANCE",
+        "TCS",
+        "HDFCBANK",
+        "INFY",
+        "ICICIBANK",
+        "SBIN",
+        "BHARTIARTL",
+        "ITC",
+        "LT",
+        "KOTAKBANK",
+        "AXISBANK",
+        "TATAMOTORS",
+        "MARUTI",
+        "SUNPHARMA",
+        "BAJFINANCE",
+        "TITAN",
+        "HINDUNILVR",
+        "NTPC",
+        "ONGC",
+        "POWERGRID",
+        "TATASTEEL",
+        "COALINDIA",
+        "ASIANPAINT",
+        "M&M",
+        "ADANIENT",
+        "ADANIPORTS",
+        "TECHM",
+        "HCLTECH",
+        "WIPRO",
+        "ULTRACEMCO",
+        "JSWSTEEL",
+        "GRASIM",
+        "BAJAJFINSV",
+        "NESTLEIND",
+        "TRENT",
+        "BEL",
+        "CIPLA",
+        "HEROMOTOCO",
+        "DRREDDY",
+        "APOLLOHOSP",
+        "BPCL",
+        "SHRIRAMFIN",
+        "EICHERMOT",
+        "HINDALCO",
+        "TATACONSUM",
+        "DIVISLAB",
+        "SBILIFE",
+        "HDFCLIFE",
+        "BRITANNIA",
+        "INDUSINDBK",
     ],
     "nifty_it": [
-        "INFY", "TCS", "HCLTECH", "WIPRO", "TECHM", "LTIM", "PERSISTENT",
-        "COFORGE", "OFSS", "MPHASIS"
+        "INFY",
+        "TCS",
+        "HCLTECH",
+        "WIPRO",
+        "TECHM",
+        "LTIM",
+        "PERSISTENT",
+        "COFORGE",
+        "OFSS",
+        "MPHASIS",
     ],
     "nifty_bank": [
-        "HDFCBANK", "ICICIBANK", "SBIN", "KOTAKBANK", "AXISBANK", "INDUSINDBK",
-        "BANKBARODA", "PNB", "FEDERALBNK", "IDFCFIRSTB", "AUBANK", "BANDHANBNK"
+        "HDFCBANK",
+        "ICICIBANK",
+        "SBIN",
+        "KOTAKBANK",
+        "AXISBANK",
+        "INDUSINDBK",
+        "BANKBARODA",
+        "PNB",
+        "FEDERALBNK",
+        "IDFCFIRSTB",
+        "AUBANK",
+        "BANDHANBNK",
     ],
     "nifty_auto": [
-        "TATAMOTORS", "MARUTI", "M&M", "BAJAJ-AUTO", "HEROMOTOCO", "EICHERMOT",
-        "TVSMOTOR", "BHARATFORG", "ASHOKLEY", "MOTHERSON"
+        "TATAMOTORS",
+        "MARUTI",
+        "M&M",
+        "BAJAJ-AUTO",
+        "HEROMOTOCO",
+        "EICHERMOT",
+        "TVSMOTOR",
+        "BHARATFORG",
+        "ASHOKLEY",
+        "MOTHERSON",
     ],
     "nifty_metal": [
-        "TATASTEEL", "JSWSTEEL", "HINDALCO", "JINDALSTEL", "VEDL", "NMDC",
-        "SAIL", "NATIONALUM", "APLAPOLLO", "HINDCOPPER"
+        "TATASTEEL",
+        "JSWSTEEL",
+        "HINDALCO",
+        "JINDALSTEL",
+        "VEDL",
+        "NMDC",
+        "SAIL",
+        "NATIONALUM",
+        "APLAPOLLO",
+        "HINDCOPPER",
     ],
     "nifty_pharma": [
-        "SUNPHARMA", "CIPLA", "DRREDDY", "DIVISLAB", "LUPIN", "AUROPHARMA",
-        "TORNTPHARM", "ALKEM", "BIOCON", "GLENMARK"
+        "SUNPHARMA",
+        "CIPLA",
+        "DRREDDY",
+        "DIVISLAB",
+        "LUPIN",
+        "AUROPHARMA",
+        "TORNTPHARM",
+        "ALKEM",
+        "BIOCON",
+        "GLENMARK",
     ],
     "nifty_fmcg": [
-        "ITC", "HINDUNILVR", "NESTLEIND", "BRITANNIA", "TATACONSUM", "DABUR",
-        "GODREJCP", "MARICO", "COLPAL", "VBL"
+        "ITC",
+        "HINDUNILVR",
+        "NESTLEIND",
+        "BRITANNIA",
+        "TATACONSUM",
+        "DABUR",
+        "GODREJCP",
+        "MARICO",
+        "COLPAL",
+        "VBL",
     ],
 }
 
@@ -153,6 +287,7 @@ class SmartFunnelResult:
 
     def as_dict(self) -> dict[str, Any]:
         import dataclasses
+
         return dataclasses.asdict(self)
 
 
@@ -192,13 +327,16 @@ class SmartFunnel:
             try:
                 from pathlib import Path
                 from dotenv import load_dotenv
+
                 load_dotenv(Path(__file__).parent.parent / ".env")
 
                 from agent.core import get_deep_provider, build_fast_provider_from_env
 
                 reg = self._get_registry()
                 self._deep_provider = self._deep_provider or get_deep_provider()
-                self._fast_provider = self._fast_provider or build_fast_provider_from_env(registry=reg)
+                self._fast_provider = self._fast_provider or build_fast_provider_from_env(
+                    registry=reg
+                )
             except Exception as e:
                 console.print(f"[dim yellow]Provider warning: {e}[/dim yellow]")
         return self._deep_provider, self._fast_provider
@@ -386,8 +524,7 @@ class SmartFunnel:
         reports: list[PreFilterReport] = []
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
             future_to_sym = {
-                executor.submit(self.evaluate_stock_quant, sym, exchange): sym
-                for sym in symbols
+                executor.submit(self.evaluate_stock_quant, sym, exchange): sym for sym in symbols
             }
             for future in concurrent.futures.as_completed(future_to_sym):
                 try:
@@ -461,14 +598,24 @@ class SmartFunnel:
         if pos_m:
             position_size = pos_m.group(1).strip()
 
-        rat_sec = re.search(r"RATIONALE[^\n]*:(.*?)(?:RISKS|===|\Z)", text, re.DOTALL | re.IGNORECASE)
+        rat_sec = re.search(
+            r"RATIONALE[^\n]*:(.*?)(?:RISKS|===|\Z)", text, re.DOTALL | re.IGNORECASE
+        )
         if rat_sec:
-            bullets = [b.strip("- •*").strip() for b in rat_sec.group(1).splitlines() if b.strip().startswith(("-", "•", "*"))]
+            bullets = [
+                b.strip("- •*").strip()
+                for b in rat_sec.group(1).splitlines()
+                if b.strip().startswith(("-", "•", "*"))
+            ]
             rationale = bullets[:3]
 
         risk_sec = re.search(r"RISKS[^\n]*:(.*?)(?:===|\Z)", text, re.DOTALL | re.IGNORECASE)
         if risk_sec:
-            bullets = [b.strip("- •*").strip() for b in risk_sec.group(1).splitlines() if b.strip().startswith(("-", "•", "*"))]
+            bullets = [
+                b.strip("- •*").strip()
+                for b in risk_sec.group(1).splitlines()
+                if b.strip().startswith(("-", "•", "*"))
+            ]
             risks = bullets[:2]
 
         return TradePlanSummary(
@@ -540,8 +687,10 @@ class SmartFunnel:
 
         # ── STAGE 1: Parallel Quant Pre-Filter ─────────────────────────────
         if self.verbose:
-            console.print(f"\n[bold green]⚡ STAGE 1: Fast Quantitative Pre-Filter (0 LLM Tokens, Parallel)[/bold green]")
-        
+            console.print(
+                "\n[bold green]⚡ STAGE 1: Fast Quantitative Pre-Filter (0 LLM Tokens, Parallel)[/bold green]"
+            )
+
         filter_reports = self.run_pre_filter_batch(sym_list, exchange=exchange)
         qualified_reports = [r for r in filter_reports if r.qualified]
         filtered_reports = [r for r in filter_reports if not r.qualified]
@@ -561,7 +710,9 @@ class SmartFunnel:
             target_candidates = filter_reports[:top_n]
             is_fallback = True
             if self.verbose:
-                console.print("[dim yellow]  (0 stocks met strict qualification; evaluating top relative scorers)[/dim yellow]")
+                console.print(
+                    "[dim yellow]  (0 stocks met strict qualification; evaluating top relative scorers)[/dim yellow]"
+                )
 
         candidate_symbols = [r.symbol for r in target_candidates]
 
@@ -609,13 +760,21 @@ class SmartFunnel:
                         risks=["API/Timeout error"],
                     )
 
-            with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(candidate_symbols), 3)) as executor:
-                future_to_sym = {executor.submit(_analyze_candidate, sym): sym for sym in candidate_symbols}
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=min(len(candidate_symbols), 3)
+            ) as executor:
+                future_to_sym = {
+                    executor.submit(_analyze_candidate, sym): sym for sym in candidate_symbols
+                }
                 for f in concurrent.futures.as_completed(future_to_sym):
                     trade_plans.append(f.result())
 
             # Sort trade_plans to match candidate_symbols ranking
-            trade_plans.sort(key=lambda p: candidate_symbols.index(p.symbol) if p.symbol in candidate_symbols else 999)
+            trade_plans.sort(
+                key=lambda p: (
+                    candidate_symbols.index(p.symbol) if p.symbol in candidate_symbols else 999
+                )
+            )
 
         elapsed = round(time.time() - t0, 2)
         return SmartFunnelResult(
@@ -642,7 +801,9 @@ class SmartFunnel:
         console.print("═" * 80 + "\n")
 
         # ── 1. Funnel Flow Summary Table ──
-        t_flow = Table(title="🚰 1. Funnel Pipeline Flow Metrics", border_style="cyan", show_header=True)
+        t_flow = Table(
+            title="🚰 1. Funnel Pipeline Flow Metrics", border_style="cyan", show_header=True
+        )
         t_flow.add_column("Stage", style="bold")
         t_flow.add_column("Count", justify="right", style="cyan")
         t_flow.add_column("Token Overhead", justify="right")
@@ -661,9 +822,21 @@ class SmartFunnel:
             f"Saved ~{result.filtered_count * 11000:,} tokens from non-setups",
         )
 
-        stage3_title = "3. Qualified for Multi-Agent Debate" if not result.is_fallback_selection else "3. Evaluated Candidates (Fallback Closest Setups)"
-        stage3_count = str(len(result.qualified_symbols)) if not result.is_fallback_selection else f"0 Qualified ({len(result.candidate_symbols)} fallback candidates)"
-        stage3_impact = "High-probability momentum & quality filters passed" if not result.is_fallback_selection else "0 met strict criteria — evaluated closest relative scorers"
+        stage3_title = (
+            "3. Qualified for Multi-Agent Debate"
+            if not result.is_fallback_selection
+            else "3. Evaluated Candidates (Fallback Closest Setups)"
+        )
+        stage3_count = (
+            str(len(result.qualified_symbols))
+            if not result.is_fallback_selection
+            else f"0 Qualified ({len(result.candidate_symbols)} fallback candidates)"
+        )
+        stage3_impact = (
+            "High-probability momentum & quality filters passed"
+            if not result.is_fallback_selection
+            else "0 met strict criteria — evaluated closest relative scorers"
+        )
 
         t_flow.add_row(
             stage3_title,
@@ -693,9 +866,7 @@ class SmartFunnel:
 
         for r in result.pre_filter_reports:
             status_styled = (
-                "[green]QUALIFIED[/green]"
-                if r.qualified
-                else "[dim red]FILTERED OUT[/dim red]"
+                "[green]QUALIFIED[/green]" if r.qualified else "[dim red]FILTERED OUT[/dim red]"
             )
             t_log.add_row(
                 r.symbol,
@@ -746,7 +917,10 @@ class SmartFunnel:
             console.print()
 
             for p in result.trade_plans:
-                rat_text = "\n".join(f"• {r}" for r in p.rationale) or "• Comprehensive multi-analyst conviction"
+                rat_text = (
+                    "\n".join(f"• {r}" for r in p.rationale)
+                    or "• Comprehensive multi-analyst conviction"
+                )
                 risk_text = "\n".join(f"• {r}" for r in p.risks) or "• Standard market volatility"
                 panel_content = (
                     f"[bold]Strategy:[/bold] {p.strategy} | [bold]Winner:[/bold] {p.winner}\n"

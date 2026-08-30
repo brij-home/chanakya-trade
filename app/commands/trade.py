@@ -150,7 +150,9 @@ def run(symbol: str | None = None, view: str | None = None) -> None:
     )
     console.print(f"  Stop-loss: ₹{sl_price:,.2f}")
 
-    if not Confirm.ask("\n  [bold]Step 1: Review trade parameters and proceed?[/bold]", default=False):
+    if not Confirm.ask(
+        "\n  [bold]Step 1: Review trade parameters and proceed?[/bold]", default=False
+    ):
         console.print("[dim]Trade cancelled.[/dim]")
         return
 

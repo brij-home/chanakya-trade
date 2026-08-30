@@ -34,8 +34,15 @@ from agent.core import (
 def clean_model_env(monkeypatch):
     """Ensure local .env model configurations do not contaminate default model unit tests."""
     for var in [
-        "AI_MODEL", "AI_FAST_MODEL", "AI_DEEP_MODEL", "AI_FAST_PROVIDER", "AI_DEEP_PROVIDER",
-        "ANTHROPIC_MODEL", "GEMINI_MODEL", "OPENAI_MODEL", "OLLAMA_MODEL",
+        "AI_MODEL",
+        "AI_FAST_MODEL",
+        "AI_DEEP_MODEL",
+        "AI_FAST_PROVIDER",
+        "AI_DEEP_PROVIDER",
+        "ANTHROPIC_MODEL",
+        "GEMINI_MODEL",
+        "OPENAI_MODEL",
+        "OLLAMA_MODEL",
     ]:
         monkeypatch.delenv(var, raising=False)
 

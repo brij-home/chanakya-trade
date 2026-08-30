@@ -307,10 +307,22 @@ class TradingTUI(App):
                 from analysis.sector_rotation import get_sector_rrg_matrix
 
                 points = get_sector_rrg_matrix(use_cache=True)
-                chat.write("[bold green]🌐 Relative Rotation Graph (RRG) Sectors vs NIFTY 50:[/bold green]")
+                chat.write(
+                    "[bold green]🌐 Relative Rotation Graph (RRG) Sectors vs NIFTY 50:[/bold green]"
+                )
                 for p in points:
-                    q_col = "green" if p.quadrant == "LEADING" else "yellow" if p.quadrant == "WEAKENING" else "cyan" if p.quadrant == "IMPROVING" else "red"
-                    chat.write(f"  • [bold]{p.sector:<10}[/bold] Ratio: {p.rs_ratio:>5.1f} | Mom: {p.rs_momentum:>5.1f} | [{q_col}]{p.quadrant}[/{q_col}]")
+                    q_col = (
+                        "green"
+                        if p.quadrant == "LEADING"
+                        else "yellow"
+                        if p.quadrant == "WEAKENING"
+                        else "cyan"
+                        if p.quadrant == "IMPROVING"
+                        else "red"
+                    )
+                    chat.write(
+                        f"  • [bold]{p.sector:<10}[/bold] Ratio: {p.rs_ratio:>5.1f} | Mom: {p.rs_momentum:>5.1f} | [{q_col}]{p.quadrant}[/{q_col}]"
+                    )
                 return
             except Exception as exc:
                 chat.write(f"[red]RRG error: {exc}[/red]")
@@ -322,9 +334,15 @@ class TradingTUI(App):
                 from analysis.forensic import audit_forensics
 
                 res = audit_forensics(sym)
-                chat.write(f"[bold green]🛡️ Forensic Audit: {res.symbol} (Grade: {res.quality_rating})[/bold green]")
-                chat.write(f"  • Beneish M-Score: {res.beneish_m_score:.2f} ({'FLAGGED' if res.is_beneish_flagged else 'CLEAN'})")
-                chat.write(f"  • Altman Z''-Score: {res.altman_z_score:.2f} ({res.distress_zone} zone)")
+                chat.write(
+                    f"[bold green]🛡️ Forensic Audit: {res.symbol} (Grade: {res.quality_rating})[/bold green]"
+                )
+                chat.write(
+                    f"  • Beneish M-Score: {res.beneish_m_score:.2f} ({'FLAGGED' if res.is_beneish_flagged else 'CLEAN'})"
+                )
+                chat.write(
+                    f"  • Altman Z''-Score: {res.altman_z_score:.2f} ({res.distress_zone} zone)"
+                )
                 chat.write(f"  • Piotroski F-Score: {res.piotroski_f_score}/9")
                 if res.governance_red_flags:
                     chat.write(f"  [red]⚠️ Red Flags: {'; '.join(res.governance_red_flags)}[/red]")
@@ -342,8 +360,12 @@ class TradingTUI(App):
 
                 res = calculate_position_size(symbol=sym, entry_price=entry, stop_loss=sl)
                 chat.write(f"[bold green]⚖️ Position Sizer: {res.symbol}[/bold green]")
-                chat.write(f"  • Shares: [bold]{res.shares}[/bold] ({res.lots} lot{'s' if res.lots > 1 else ''})")
-                chat.write(f"  • Capital: ₹{res.capital_allocated:,.0f} ({res.capital_pct:.1f}%) | Max Risk: ₹{res.risk_amount:,.0f}")
+                chat.write(
+                    f"  • Shares: [bold]{res.shares}[/bold] ({res.lots} lot{'s' if res.lots > 1 else ''})"
+                )
+                chat.write(
+                    f"  • Capital: ₹{res.capital_allocated:,.0f} ({res.capital_pct:.1f}%) | Max Risk: ₹{res.risk_amount:,.0f}"
+                )
                 return
             except Exception as exc:
                 chat.write(f"[red]Sizing error: {exc}[/red]")

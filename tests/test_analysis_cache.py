@@ -5,8 +5,6 @@ Unit tests for AnalysisCache (SQLite persistence, TTL, price drift, pruning, tok
 """
 
 import pytest
-import time
-from pathlib import Path
 from engine.analysis_cache import AnalysisCache
 
 
@@ -48,10 +46,15 @@ def test_cache_price_drift_invalidation(temp_cache):
     )
 
     # 0.5% drift -> Valid (below 1.0% limit)
-    assert temp_cache.get_analysis("INFY", "NSE", current_spot=1507.0, max_price_drift_pct=1.0) is not None
+    assert (
+        temp_cache.get_analysis("INFY", "NSE", current_spot=1507.0, max_price_drift_pct=1.0)
+        is not None
+    )
 
     # 2.0% drift (1500 -> 1535) -> Invalidated due to market price movement
-    assert temp_cache.get_analysis("INFY", "NSE", current_spot=1535.0, max_price_drift_pct=1.0) is None
+    assert (
+        temp_cache.get_analysis("INFY", "NSE", current_spot=1535.0, max_price_drift_pct=1.0) is None
+    )
 
 
 def test_cache_macro_storage(temp_cache):

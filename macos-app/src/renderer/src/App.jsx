@@ -92,12 +92,17 @@ export default function App() {
 
   useEffect(() => {
     // Web mode — no Electron IPC, just check if server is ready
-    if (window.__CHANAKYA_TRADE_WEB__) {
+    const isWeb = typeof window !== 'undefined' && (window.__CHANAKYA_TRADE_WEB__ || !window.electronAPI)
+
+    if (isWeb) {
       const checkReady = async () => {
+        const currentPort =
+          parseInt(window.location.port, 10) === 5173
+            ? 8765
+            : parseInt(window.location.port, 10) || 8765
+        setPort(currentPort)
         try {
-          const res = await fetch('/api/onboarding/status')
-          const currentPort = parseInt(window.location.port, 10) || 8765
-          setPort(currentPort)
+          const res = await fetch(`${getBaseUrl(currentPort)}/api/onboarding/status`)
           if (res.ok) {
             const data = await res.json()
             if (data.onboarding_complete) {
@@ -109,14 +114,17 @@ export default function App() {
             setSetupPhase('ready')
           }
         } catch {
-          const currentPort = parseInt(window.location.port, 10) || 8765
-          setPort(currentPort)
           setSetupPhase('ready')
         }
       }
       checkReady()
       return
     }
+
+    // Safety fallback timer so Electron startup never hangs indefinitely on a blank/initializing screen
+    const safetyTimer = setTimeout(() => {
+      setSetupPhase((prev) => (prev === 'initializing' ? 'ready' : prev))
+    }, 2000)
 
     window.electronAPI?.onSetupProgress((data) => {
       setSetupPhase('progress')
@@ -129,6 +137,7 @@ export default function App() {
     })
 
     window.electronAPI?.onSidecarReady(async ({ port }) => {
+      clearTimeout(safetyTimer)
       setPort(port)
       try {
         const res = await fetch(`${getBaseUrl(port)}/api/onboarding/status`)
@@ -144,6 +153,7 @@ export default function App() {
     })
 
     window.electronAPI?.onSidecarError(({ message, details }) => {
+      clearTimeout(safetyTimer)
       setSidecarError(message)
       if (setupPhase !== 'ready') {
         setSetupPhase('error')
@@ -151,8 +161,9 @@ export default function App() {
       }
     })
 
-    window.electronAPI?.getPort().then(async (port) => {
+    window.electronAPI?.getPort?.()?.then(async (port) => {
       if (port) {
+        clearTimeout(safetyTimer)
         setPort(port)
         try {
           const res = await fetch(`${getBaseUrl(port)}/api/onboarding/status`)
@@ -167,6 +178,8 @@ export default function App() {
         }
       }
     })
+
+    return () => clearTimeout(safetyTimer)
   }, [])
 
   // Poll /api/status every 8s once sidecar is up

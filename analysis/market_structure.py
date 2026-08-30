@@ -23,7 +23,6 @@ Accepts OHLCV DataFrame or fetches live/cached history via market.history.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
-from datetime import datetime
 from typing import Any, Optional
 
 import numpy as np
@@ -52,7 +51,7 @@ class OrderBlock:
     mitigated: bool = False
     volume_ratio: float = 1.0
     confluence_count: int = 1  # Number of aggregated overlapping blocks
-    ote_price: float = 0.0     # 50% Mean Threshold (MT) / Optimal Trade Entry sweet spot
+    ote_price: float = 0.0  # 50% Mean Threshold (MT) / Optimal Trade Entry sweet spot
 
 
 @dataclass
@@ -67,7 +66,9 @@ class FairValueGap:
 
 @dataclass
 class LiquiditySweep:
-    type: str  # "BULLISH_SWEEP" (Spring/Stop-hunt below low) | "BEARISH_SWEEP" (Upthrust above high)
+    type: (
+        str  # "BULLISH_SWEEP" (Spring/Stop-hunt below low) | "BEARISH_SWEEP" (Upthrust above high)
+    )
     swept_level: float
     reclaim_price: float
     date: str
@@ -82,31 +83,31 @@ class MarketStructureReport:
     structure_score: int  # -100 (Extremely Bearish) to +100 (Extremely Bullish)
     setup_type: str  # "BREAKOUT_EXPANSION" | "PULLBACK_RETEST" | "BOTTOM_FISHING_SPRING" | "TOP_FISHING_UTAD" | "VCP_CONTRACTION" | "CONSOLIDATION"
     setup_confidence: int  # 0 - 100
-    
+
     # Swings
     recent_swings: list[SwingPoint] = field(default_factory=list)
     last_swing_high: Optional[float] = None
     last_swing_low: Optional[float] = None
-    
+
     # SMC Elements
     active_demand_zones: list[OrderBlock] = field(default_factory=list)
     active_supply_zones: list[OrderBlock] = field(default_factory=list)
     fair_value_gaps: list[FairValueGap] = field(default_factory=list)
     liquidity_sweeps: list[LiquiditySweep] = field(default_factory=list)
-    
+
     # Signals & Key Levels
     choch_detected: bool = False
     choch_type: Optional[str] = None  # "BULLISH_CHOCH" | "BEARISH_CHOCH"
     bos_detected: bool = False
     bos_type: Optional[str] = None  # "BULLISH_BOS" | "BEARISH_BOS"
-    
+
     nearest_support: float = 0.0
     nearest_resistance: float = 0.0
     invalidation_level: float = 0.0  # Stop-loss reference level
     target_1: float = 0.0
     target_2: float = 0.0
     risk_reward_ratio: float = 0.0
-    
+
     summary: str = ""
     actionable_trade_idea: str = ""
 
@@ -140,7 +141,9 @@ def find_swing_points(df: pd.DataFrame, window: int = 3) -> list[SwingPoint]:
                 is_high = False
                 break
         if is_high:
-            swings.append(SwingPoint(index=i, date=str(dates[i]), price=float(highs[i]), type="HIGH"))
+            swings.append(
+                SwingPoint(index=i, date=str(dates[i]), price=float(highs[i]), type="HIGH")
+            )
 
         # Swing Low
         is_low = True
@@ -179,7 +182,9 @@ def find_swing_points(df: pd.DataFrame, window: int = 3) -> list[SwingPoint]:
     return swings
 
 
-def detect_order_blocks(df: pd.DataFrame, swings: list[SwingPoint]) -> tuple[list[OrderBlock], list[OrderBlock]]:
+def detect_order_blocks(
+    df: pd.DataFrame, swings: list[SwingPoint]
+) -> tuple[list[OrderBlock], list[OrderBlock]]:
     """
     Identifies unmitigated Bullish Demand and Bearish Supply Order Blocks.
     Demand OB: The last down-close candle before a high-momentum upward displacement move that broke structure.
@@ -211,7 +216,7 @@ def detect_order_blocks(df: pd.DataFrame, swings: list[SwingPoint]) -> tuple[lis
             ob_top = float(highs[i])
             ob_bottom = float(lows[i])
             ob_mid = (ob_top + ob_bottom) / 2.0
-            
+
             # Check if broken later (close below bottom invalidates demand OB)
             mitigated = False
             for j in range(i + 2, n):
@@ -266,16 +271,28 @@ def detect_order_blocks(df: pd.DataFrame, swings: list[SwingPoint]) -> tuple[lis
     # Filter for strong, data-backed unmitigated blocks only (volume >= 1.1x or confluence >= 2x)
     # and retain the top 2 nearest institutional zones to prevent chart clutter
     valid_demand = [
-        d for d in agg_demand
-        if not d.mitigated and (d.volume_ratio >= 1.1 or d.confluence_count >= 2 or (d.top - d.bottom) / (d.bottom or 1) >= 0.003)
+        d
+        for d in agg_demand
+        if not d.mitigated
+        and (
+            d.volume_ratio >= 1.1
+            or d.confluence_count >= 2
+            or (d.top - d.bottom) / (d.bottom or 1) >= 0.003
+        )
     ]
     # Sort demand: nearest below current price first, keep top 2
     valid_demand.sort(key=lambda x: x.top, reverse=True)
     top_demand = sorted(valid_demand[:2], key=lambda x: x.bottom)
 
     valid_supply = [
-        s for s in agg_supply
-        if not s.mitigated and (s.volume_ratio >= 1.1 or s.confluence_count >= 2 or (s.top - s.bottom) / (s.bottom or 1) >= 0.003)
+        s
+        for s in agg_supply
+        if not s.mitigated
+        and (
+            s.volume_ratio >= 1.1
+            or s.confluence_count >= 2
+            or (s.top - s.bottom) / (s.bottom or 1) >= 0.003
+        )
     ]
     # Sort supply: nearest above current price first, keep top 2
     valid_supply.sort(key=lambda x: x.bottom)
@@ -290,7 +307,7 @@ def aggregate_overlapping_order_blocks(
     """
     Combines nearby and overlapping unmitigated Order Blocks into unified institutional
     Confluence Zones (Clusters).
-    
+
     Why:
     Multiple adjacent fractals or candles often produce separate overlapping blocks.
     Aggregating them creates a high-conviction decision zone with a 50% Mean Threshold
@@ -306,7 +323,7 @@ def aggregate_overlapping_order_blocks(
     for ob in sorted_obs:
         if ob.mitigated:
             continue
-            
+
         if not merged:
             merged_ob = OrderBlock(
                 type=ob.type,
@@ -323,7 +340,7 @@ def aggregate_overlapping_order_blocks(
             continue
 
         prev = merged[-1]
-        
+
         # Check overlap or tight proximity (within proximity_pct)
         overlap = not (ob.bottom > prev.top and (ob.bottom - prev.top) / prev.top > proximity_pct)
 
@@ -334,7 +351,7 @@ def aggregate_overlapping_order_blocks(
             new_mid = (new_top + new_bottom) / 2.0
             new_vol = max(prev.volume_ratio, ob.volume_ratio)
             new_confluence = prev.confluence_count + 1
-            
+
             merged[-1] = OrderBlock(
                 type=prev.type,
                 top=new_top,
@@ -385,10 +402,10 @@ def detect_fair_value_gaps(df: pd.DataFrame) -> list[FairValueGap]:
             gap_bottom = float(highs[i])
             gap_top = float(lows[i + 2])
             gap_size = gap_top - gap_bottom
-            
+
             # Check if filled by subsequent candles
             filled = any(lows[j] <= gap_bottom for j in range(i + 3, n))
-            
+
             fvgs.append(
                 FairValueGap(
                     type="BULLISH",
@@ -543,10 +560,14 @@ def analyze_market_structure(
     structure_score = 0
     regime = "RANGING"
 
-    if (hh_count + hl_count) >= (lh_count + ll_count) + 2 or (short_slope > 0.05 and ltp > last_swing_high * 0.98):
+    if (hh_count + hl_count) >= (lh_count + ll_count) + 2 or (
+        short_slope > 0.05 and ltp > last_swing_high * 0.98
+    ):
         regime = "BULLISH"
         structure_score = min(90, 40 + (hh_count + hl_count) * 12 + int(short_slope * 200))
-    elif (lh_count + ll_count) >= (hh_count + hl_count) + 2 or (short_slope < -0.05 and ltp < last_swing_low * 1.02):
+    elif (lh_count + ll_count) >= (hh_count + hl_count) + 2 or (
+        short_slope < -0.05 and ltp < last_swing_low * 1.02
+    ):
         regime = "BEARISH"
         structure_score = max(-90, -40 - (lh_count + ll_count) * 12 + int(short_slope * 200))
     else:
@@ -560,13 +581,21 @@ def analyze_market_structure(
     bos_type = None
 
     # CHoCH Bullish: Downtrend prior / LHs present, now price broke above the last swing high
-    if (lh_count >= 1 or regime == "BEARISH" or short_slope < 0) and high_swings and ltp > high_swings[-1].price:
+    if (
+        (lh_count >= 1 or regime == "BEARISH" or short_slope < 0)
+        and high_swings
+        and ltp > high_swings[-1].price
+    ):
         choch_detected = True
         choch_type = "BULLISH_CHOCH"
         structure_score = max(35, structure_score + 35)
 
     # CHoCH Bearish: Uptrend prior / HLs present, now price broke below the last swing low
-    elif (hl_count >= 1 or regime == "BULLISH" or short_slope > 0) and low_swings and ltp < low_swings[-1].price:
+    elif (
+        (hl_count >= 1 or regime == "BULLISH" or short_slope > 0)
+        and low_swings
+        and ltp < low_swings[-1].price
+    ):
         choch_detected = True
         choch_type = "BEARISH_CHOCH"
         structure_score = min(-35, structure_score - 35)
@@ -601,7 +630,11 @@ def analyze_market_structure(
     elif bos_type == "BULLISH_BOS" or (regime == "BULLISH" and ltp >= last_swing_high * 0.99):
         setup_type = "BREAKOUT_EXPANSION"
         setup_confidence = 80
-    elif regime == "BULLISH" and active_demand and any(ob.bottom <= ltp <= ob.top * 1.02 for ob in active_demand):
+    elif (
+        regime == "BULLISH"
+        and active_demand
+        and any(ob.bottom <= ltp <= ob.top * 1.02 for ob in active_demand)
+    ):
         setup_type = "PULLBACK_RETEST"
         setup_confidence = 78
     elif bos_type == "BEARISH_BOS" or (regime == "BEARISH" and ltp <= last_swing_low * 1.01):
@@ -609,10 +642,14 @@ def analyze_market_structure(
         setup_confidence = 78
 
     # 6. Key Levels, Invalidations & Payoff Targets
-    supports = [ob.top for ob in active_demand if ob.top < ltp] + [s.price for s in low_swings if s.price < ltp]
+    supports = [ob.top for ob in active_demand if ob.top < ltp] + [
+        s.price for s in low_swings if s.price < ltp
+    ]
     nearest_support = max(supports) if supports else last_swing_low
 
-    resistances = [ob.bottom for ob in active_supply if ob.bottom > ltp] + [s.price for s in high_swings if s.price > ltp]
+    resistances = [ob.bottom for ob in active_supply if ob.bottom > ltp] + [
+        s.price for s in high_swings if s.price > ltp
+    ]
     nearest_resistance = min(resistances) if resistances else last_swing_high
 
     if nearest_resistance <= ltp:
@@ -642,7 +679,9 @@ def analyze_market_structure(
     if has_bull_sweep:
         summary_parts.append("🎯 Bullish Liquidity Sweep (Spring) detected below support.")
     if active_demand:
-        summary_parts.append(f"🛡️ Key Demand Order Block at ₹{active_demand[-1].bottom:.1f}–₹{active_demand[-1].top:.1f}.")
+        summary_parts.append(
+            f"🛡️ Key Demand Order Block at ₹{active_demand[-1].bottom:.1f}–₹{active_demand[-1].top:.1f}."
+        )
 
     summary = " ".join(summary_parts)
 

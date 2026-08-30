@@ -20,7 +20,6 @@ Features:
 
 from __future__ import annotations
 
-import datetime
 import sys
 from dataclasses import asdict, dataclass, field
 from typing import Any, Optional
@@ -59,12 +58,16 @@ class OptionsFlowBias:
     has_options: bool
     pcr: float
     max_pain_strike: float
-    dominant_regime: str  # "LONG_BUILDUP" | "SHORT_COVERING" | "SHORT_BUILDUP" | "LONG_UNWINDING" | "BALANCED"
+    dominant_regime: (
+        str  # "LONG_BUILDUP" | "SHORT_COVERING" | "SHORT_BUILDUP" | "LONG_UNWINDING" | "BALANCED"
+    )
     call_oi_total: int
     put_oi_total: int
     highest_call_oi_strike: float
     highest_put_oi_strike: float
-    institutional_sentiment: str  # "AGGRESSIVE_BULLISH" | "MODERATE_BULLISH" | "NEUTRAL" | "AGGRESSIVE_BEARISH"
+    institutional_sentiment: (
+        str  # "AGGRESSIVE_BULLISH" | "MODERATE_BULLISH" | "NEUTRAL" | "AGGRESSIVE_BEARISH"
+    )
 
 
 @dataclass
@@ -92,7 +95,9 @@ class BigMovePrediction:
 # ── Quantitative Helper Calculations ─────────────────────────────────
 
 
-def compute_ttm_squeeze(df: pd.DataFrame, bb_period: int = 20, bb_mult: float = 2.0, kc_mult: float = 1.5) -> SqueezeState:
+def compute_ttm_squeeze(
+    df: pd.DataFrame, bb_period: int = 20, bb_mult: float = 2.0, kc_mult: float = 1.5
+) -> SqueezeState:
     """
     Computes John Carter Volatility Squeeze (Bollinger Bands vs Keltner Channels).
     """
@@ -202,8 +207,12 @@ def analyze_options_flow(symbol: str, ltp: float) -> OptionsFlowBias:
                 institutional_sentiment="NEUTRAL",
             )
 
-        call_oi_total = sum(c.oi for c in chain if getattr(c, "option_type", getattr(c, "type", "CE")) == "CE")
-        put_oi_total = sum(c.oi for c in chain if getattr(c, "option_type", getattr(c, "type", "PE")) == "PE")
+        call_oi_total = sum(
+            c.oi for c in chain if getattr(c, "option_type", getattr(c, "type", "CE")) == "CE"
+        )
+        put_oi_total = sum(
+            c.oi for c in chain if getattr(c, "option_type", getattr(c, "type", "PE")) == "PE"
+        )
 
         pcr = round(put_oi_total / max(1, call_oi_total), 2)
 
@@ -231,7 +240,6 @@ def analyze_options_flow(symbol: str, ltp: float) -> OptionsFlowBias:
             if loss < min_loss:
                 min_loss = loss
                 max_pain = s
-
 
         # Classify Dominant Regime
         if pcr >= 1.25:
@@ -351,7 +359,9 @@ def predict_large_move(
     if squeeze.squeeze_fired:
         catalysts.append("🚀 Squeeze FIRED — Volatility expansion ignition confirmed!")
     elif squeeze.is_squeeze_on:
-        catalysts.append(f"🔴 Energy coiling inside Volatility Squeeze for {squeeze.squeeze_duration_bars} bars")
+        catalysts.append(
+            f"🔴 Energy coiling inside Volatility Squeeze for {squeeze.squeeze_duration_bars} bars"
+        )
 
     # Factor B: Market Structure SMC (Weight: 25%)
     if ms.regime == "BULLISH":
@@ -389,7 +399,9 @@ def predict_large_move(
     # Factor D: Sector Momentum Tailwind (Weight: 15%)
     if sector_quad == "LEADING":
         bull_pts += 15
-        catalysts.append(f"Sector {sector_info.get('sector')} in LEADING quadrant with strong tailwind")
+        catalysts.append(
+            f"Sector {sector_info.get('sector')} in LEADING quadrant with strong tailwind"
+        )
     elif sector_quad == "LAGGING":
         bear_pts += 12
         catalysts.append(f"Sector {sector_info.get('sector')} in LAGGING quadrant")
@@ -425,7 +437,11 @@ def predict_large_move(
         verdict = "COILING_SQUEEZE_PENDING"
         timing = "PREPARE_FOR_BREAKOUT"
     elif directional_probability >= 78:
-        verdict = "EXPLOSIVE_BULLISH_EXPANSION" if directional_bias == "BULLISH" else "EXPLOSIVE_BEARISH_BREAKDOWN"
+        verdict = (
+            "EXPLOSIVE_BULLISH_EXPANSION"
+            if directional_bias == "BULLISH"
+            else "EXPLOSIVE_BEARISH_BREAKDOWN"
+        )
         timing = "STALK_ON_PULLBACK"
     else:
         verdict = "CHOPPY_RANGE"
@@ -446,12 +462,22 @@ def predict_large_move(
 
     if directional_bias == "BULLISH":
         target_price = round(ltp + expected_move_pts, 2)
-        invalidation_price = round(ms.invalidation_level if (ms.invalidation_level and ms.invalidation_level < ltp) else ltp - (atr14 * 1.2), 2)
+        invalidation_price = round(
+            ms.invalidation_level
+            if (ms.invalidation_level and ms.invalidation_level < ltp)
+            else ltp - (atr14 * 1.2),
+            2,
+        )
         risk = max(0.1, ltp - invalidation_price)
         reward = max(0.1, target_price - ltp)
     else:
         target_price = round(ltp - expected_move_pts, 2)
-        invalidation_price = round(ms.invalidation_level if (ms.invalidation_level and ms.invalidation_level > ltp) else ltp + (atr14 * 1.2), 2)
+        invalidation_price = round(
+            ms.invalidation_level
+            if (ms.invalidation_level and ms.invalidation_level > ltp)
+            else ltp + (atr14 * 1.2),
+            2,
+        )
         risk = max(0.1, invalidation_price - ltp)
         reward = max(0.1, ltp - target_price)
 

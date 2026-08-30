@@ -811,7 +811,11 @@ class Backtester:
         avg_loss = sum(t.pnl_pct for t in losers) / len(losers) if losers else 0
         gross_profit = sum(t.pnl for t in winners)
         gross_loss = abs(sum(t.pnl for t in losers))
-        profit_factor = round(gross_profit / gross_loss, 2) if gross_loss > 0 else (99.99 if gross_profit > 0 else 0.0)
+        profit_factor = (
+            round(gross_profit / gross_loss, 2)
+            if gross_loss > 0
+            else (99.99 if gross_profit > 0 else 0.0)
+        )
         avg_hold = sum(t.hold_days for t in trades) / len(trades) if trades else 0
 
         return BacktestResult(

@@ -96,7 +96,9 @@ def _init_orders_db():
             )
             """
         )
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_orders_idemp ON orders_ledger(idempotency_key)")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_orders_idemp ON orders_ledger(idempotency_key)"
+        )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_orders_status ON orders_ledger(status)")
         conn.commit()
 
@@ -115,7 +117,10 @@ def preview_order_intent(
     Generate an order preview with statutory Indian charges and idempotency check.
     """
     _init_orders_db()
-    idemp = idempotency_key or hashlib.sha256(f"{symbol}:{side}:{quantity}:{price}:{product}".encode()).hexdigest()[:16]
+    idemp = (
+        idempotency_key
+        or hashlib.sha256(f"{symbol}:{side}:{quantity}:{price}:{product}".encode()).hexdigest()[:16]
+    )
 
     # Check for existing idempotency key
     with sqlite3.connect(DB_PATH) as conn:
@@ -198,7 +203,12 @@ def preview_order_intent(
         event_type="ORDER_PREVIEW_GENERATED",
         mode=intent.mode,
         actor="SYSTEM",
-        details={"order_id": intent.order_id, "symbol": intent.symbol, "side": intent.side, "qty": intent.quantity},
+        details={
+            "order_id": intent.order_id,
+            "symbol": intent.symbol,
+            "side": intent.side,
+            "qty": intent.quantity,
+        },
     )
 
     return intent
@@ -231,7 +241,9 @@ def execute_order_intent(order_id: str) -> OrderIntent:
                 (d["status"], d["rejection_reason"], now_iso, order_id),
             )
             conn.commit()
-        record_audit_event("ORDER_REJECTED_OBSERVE_MODE", mode="OBSERVE", details={"order_id": order_id})
+        record_audit_event(
+            "ORDER_REJECTED_OBSERVE_MODE", mode="OBSERVE", details={"order_id": order_id}
+        )
     else:
         # In SIMULATE or EXECUTE mode
         d["status"] = "FILLED" if mode_info.is_simulate else "OPEN"

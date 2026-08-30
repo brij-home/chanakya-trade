@@ -46,7 +46,6 @@ class AllowedAction:
     coaching_recommendations: list[str] = field(default_factory=list)
 
 
-
 # ── Internal helpers ──────────────────────────────────────────
 
 

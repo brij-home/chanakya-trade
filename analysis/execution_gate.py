@@ -40,7 +40,6 @@ if sys.platform == "win32":
         except Exception:
             pass
 
-import numpy as np
 import pandas as pd
 
 from analysis.big_move import compute_ttm_squeeze, analyze_options_flow
@@ -135,9 +134,10 @@ def evaluate_execution_gate(
             telegram_sent=False,
         )
 
-    # Normalize column names if needed
-    col_map = {c: c.lower() for c in df.columns}
-    close_col = "close" if "close" in df.columns else "Close" if "Close" in df.columns else df.columns[3]
+    # Determine close column and ltp
+    close_col = (
+        "close" if "close" in df.columns else "Close" if "Close" in df.columns else df.columns[3]
+    )
     ltp = float(df[close_col].iloc[-1])
 
     # 1. Tier 1: Strategic Macro & Positional Analysis (Historical Lookback)
@@ -158,7 +158,9 @@ def evaluate_execution_gate(
         strat_score += 15
     if ms.regime == "BULLISH":
         strat_score += 10
-    if (isinstance(sec_align, dict) and sec_align.get("quadrant") == "LEADING") or sec_align == "STRONG_LEADING":
+    if (
+        isinstance(sec_align, dict) and sec_align.get("quadrant") == "LEADING"
+    ) or sec_align == "STRONG_LEADING":
         strat_score += 10
     strat_score = int(min(98, max(20, strat_score)))
 
@@ -182,7 +184,9 @@ def evaluate_execution_gate(
     # Factor B: Squeeze Explosion
     if squeeze.squeeze_fired:
         tact_score += 20
-        catalysts.append(f"🚀 Squeeze FIRED ({squeeze.momentum_direction}) — Volatility expansion active")
+        catalysts.append(
+            f"🚀 Squeeze FIRED ({squeeze.momentum_direction}) — Volatility expansion active"
+        )
     elif squeeze.is_squeeze_on:
         tact_score += 10
         catalysts.append(f"🔴 Energy coiling in Squeeze ({squeeze.squeeze_duration_bars} bars)")
@@ -208,23 +212,37 @@ def evaluate_execution_gate(
         action_summary = f"⚡ Alignment confirmed! Execute Long near ₹{ltp:.2f}."
     elif strat_score >= 70 and tact_score >= 50:
         execution_status = "STALK"
-        action_summary = f"🎯 Strategic setup valid. Stalk entry on intraday pullback near ₹{ltp * 0.985:.2f}."
+        action_summary = (
+            f"🎯 Strategic setup valid. Stalk entry on intraday pullback near ₹{ltp * 0.985:.2f}."
+        )
     else:
         execution_status = "STAND_DOWN"
         action_summary = "Stand down. Awaiting live volume or structural confirmation."
 
     # Actionable Blueprint Levels
     entry_price = round(ltp, 2)
-    atr = float(df["High"].iloc[-14:] - df["Low"].iloc[-14:]).mean() if "High" in df.columns and len(df) >= 14 else ltp * 0.02
+    atr = (
+        float(df["High"].iloc[-14:] - df["Low"].iloc[-14:]).mean()
+        if "High" in df.columns and len(df) >= 14
+        else ltp * 0.02
+    )
     stop_loss = round(max(ltp * 0.85, ltp - (1.5 * atr)), 2)
     risk_pts = max(1.0, entry_price - stop_loss)
     target_1 = round(entry_price + (risk_pts * 2.0), 2)
     target_2 = round(entry_price + (risk_pts * 3.5), 2)
     rr_ratio = round((target_1 - entry_price) / risk_pts, 2)
 
-    setup_title = "💎 Stage 2 Markup" if mb.weinstein_stage == "STAGE_2_MARKUP" else (ms.setup_type.replace("_", " ").title())
+    setup_title = (
+        "💎 Stage 2 Markup"
+        if mb.weinstein_stage == "STAGE_2_MARKUP"
+        else (ms.setup_type.replace("_", " ").title())
+    )
 
-    expected_timeline = "3–10 Trading Days (Swing Momentum)" if mb.weinstein_stage == "STAGE_2_MARKUP" else "2–7 Trading Days (Swing Reversal)"
+    expected_timeline = (
+        "3–10 Trading Days (Swing Momentum)"
+        if mb.weinstein_stage == "STAGE_2_MARKUP"
+        else "2–7 Trading Days (Swing Reversal)"
+    )
     t1_timeline = "2–5 Trading Days"
     t2_timeline = "6–10 Trading Days"
     time_stop_days = 10
@@ -302,5 +320,7 @@ def scan_and_alert_execution_candidates(
             continue
 
     # Sort: READY first, then by tactical score descending
-    results.sort(key=lambda x: (1 if x.execution_status == "READY" else 0, x.tactical_score), reverse=True)
+    results.sort(
+        key=lambda x: (1 if x.execution_status == "READY" else 0, x.tactical_score), reverse=True
+    )
     return results[:top_n]

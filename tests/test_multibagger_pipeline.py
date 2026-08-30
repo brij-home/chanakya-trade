@@ -15,8 +15,6 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-import pytest
-from httpx import ASGITransport, AsyncClient
 
 from analysis.multibagger import (
     classify_weinstein_stage,
@@ -25,11 +23,10 @@ from analysis.multibagger import (
     evaluate_mid_term_horizon,
     evaluate_short_term_horizon,
     evaluate_trend_template,
-    generate_multibagger_trade_ticket,
     scan_multibagger_opportunity,
 )
 from analysis.multibagger_scanner import scan_multibagger_universe
-from engine.multibagger_alerts import MultibaggerAlert, MultibaggerAlertManager
+from engine.multibagger_alerts import MultibaggerAlertManager
 from web.api import app
 
 
@@ -46,13 +43,16 @@ def _create_synthetic_superperformer_df(n: int = 260) -> pd.DataFrame:
     volumes[-5:] *= 2.5  # volume surge at breakout
 
     dates = pd.date_range(end="2026-08-30", periods=n, freq="B")
-    return pd.DataFrame({
-        "open": closes * 0.99,
-        "high": highs,
-        "low": lows,
-        "close": closes,
-        "volume": volumes,
-    }, index=dates)
+    return pd.DataFrame(
+        {
+            "open": closes * 0.99,
+            "high": highs,
+            "low": lows,
+            "close": closes,
+            "volume": volumes,
+        },
+        index=dates,
+    )
 
 
 def _create_synthetic_downtrend_df(n: int = 260) -> pd.DataFrame:
@@ -66,13 +66,16 @@ def _create_synthetic_downtrend_df(n: int = 260) -> pd.DataFrame:
     volumes = np.random.uniform(50000, 150000, n)
 
     dates = pd.date_range(end="2026-08-30", periods=n, freq="B")
-    return pd.DataFrame({
-        "open": closes * 1.01,
-        "high": highs,
-        "low": lows,
-        "close": closes,
-        "volume": volumes,
-    }, index=dates)
+    return pd.DataFrame(
+        {
+            "open": closes * 1.01,
+            "high": highs,
+            "low": lows,
+            "close": closes,
+            "volume": volumes,
+        },
+        index=dates,
+    )
 
 
 # ── 1. Minervini & Weinstein Core Tests ─────────────────────────
@@ -119,13 +122,15 @@ def test_vcp_contraction_detection():
     lows[30:45] = 97
     closes[30:45] = 99.5
 
-    df_vcp = pd.DataFrame({
-        "open": closes,
-        "high": highs,
-        "low": lows,
-        "close": closes,
-        "volume": np.ones(50) * 1000,
-    })
+    df_vcp = pd.DataFrame(
+        {
+            "open": closes,
+            "high": highs,
+            "low": lows,
+            "close": closes,
+            "volume": np.ones(50) * 1000,
+        }
+    )
 
     is_vcp, contractions, pivot = detect_vcp(df_vcp)
     assert is_vcp is True
@@ -219,6 +224,7 @@ def test_multibagger_alert_manager():
 
 def test_fastapi_multibagger_endpoints():
     from fastapi.testclient import TestClient
+
     client = TestClient(app)
 
     # 1. Universes list

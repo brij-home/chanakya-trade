@@ -152,7 +152,6 @@ class TestMissingSkillsAdded:
         missing = EXPECTED_SKILLS - present
         assert missing == set(), f"Missing skills in manifest: {missing}"
 
-
     def test_no_duplicate_names(self):
         names = [s["name"] for s in MANIFEST["skills"]]
         assert len(names) == len(set(names)), (

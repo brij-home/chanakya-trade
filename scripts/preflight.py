@@ -18,7 +18,6 @@ import os
 import socket
 import sys
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any, Dict, List, Literal
 
 
@@ -316,7 +315,9 @@ def print_preflight_report(report: PreflightReport) -> None:
         print("=== ChanakyaTrade Preflight Readiness ===")
         for c in report.checks:
             print(f"[{c.status}] {c.name}: {c.message}")
-        print(f"Overall Health: {'HEALTHY' if report.healthy else 'ACTION REQUIRED'} (Mode: {report.mode})")
+        print(
+            f"Overall Health: {'HEALTHY' if report.healthy else 'ACTION REQUIRED'} (Mode: {report.mode})"
+        )
 
 
 if __name__ == "__main__":

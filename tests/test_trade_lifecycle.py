@@ -5,7 +5,6 @@ Unit tests for Position Lifecycle, 2R Breakeven Pivot, and Dynamic Trailing Stop
 Runs offline using deterministic synthetic data.
 """
 
-import numpy as np
 import pandas as pd
 import pytest
 

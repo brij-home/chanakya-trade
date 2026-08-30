@@ -55,21 +55,21 @@ class VolumeProfileReport:
     rvol_20d: float  # Relative Volume vs 20D SMA (e.g. 2.4x)
     rvol_50d: float
     volume_tier: str  # "ULTRA_HIGH" | "HIGH" | "NORMAL" | "DRY_UP"
-    
+
     # Institutional Footprint
     footprint_bias: str  # "ACCUMULATION" | "DISTRIBUTION" | "ABSORPTION" | "NEUTRAL"
     footprint_score: int  # -100 to +100
-    
+
     # Volume Profile Value Area
     poc_price: float  # Point of Control
     vah_price: float  # Value Area High (70%)
     val_price: float  # Value Area Low (70%)
     price_vs_value_area: str  # "ABOVE_VAH" | "INSIDE_VALUE_AREA" | "BELOW_VAL"
-    
+
     # Signals
     vsa_signals: list[VSASignal] = field(default_factory=list)
     profile_buckets: list[VolumeProfileBucket] = field(default_factory=list)
-    
+
     summary: str = ""
     takeaway: str = ""
 
@@ -80,7 +80,9 @@ class VolumeProfileReport:
 # ── Volume Profile & POC Calculator ───────────────────────────
 
 
-def compute_volume_profile(df: pd.DataFrame, num_bins: int = 12) -> tuple[float, float, float, list[VolumeProfileBucket]]:
+def compute_volume_profile(
+    df: pd.DataFrame, num_bins: int = 12
+) -> tuple[float, float, float, list[VolumeProfileBucket]]:
     """
     Computes approximate price-volume distribution (Volume Profile).
     Returns (poc_price, vah_price, val_price, buckets).
@@ -115,7 +117,7 @@ def compute_volume_profile(df: pd.DataFrame, num_bins: int = 12) -> tuple[float,
         c_low = lows[i]
         c_high = highs[i]
         c_vol = vols[i]
-        
+
         if np.isnan(c_low) or np.isnan(c_high) or np.isnan(c_vol) or c_vol <= 0:
             continue
 
@@ -127,7 +129,7 @@ def compute_volume_profile(df: pd.DataFrame, num_bins: int = 12) -> tuple[float,
 
         start_bin = int(np.clip(low_ratio, 0, num_bins - 1))
         end_bin = int(np.clip(high_ratio, 0, num_bins - 1))
-        
+
         count_bins = max(1, end_bin - start_bin + 1)
         vol_per_bin = c_vol / count_bins
         for b in range(start_bin, end_bin + 1):
@@ -199,7 +201,6 @@ def analyze_vsa(df: pd.DataFrame) -> list[VSASignal]:
     dates = df["date"].astype(str).values if "date" in df.columns else [str(i) for i in df.index]
 
     spreads = highs - lows
-    bodies = np.abs(closes - opens)
     avg_vol_20 = np.mean(vols[-20:]) if len(vols) >= 20 else np.mean(vols)
     avg_spread_20 = np.mean(spreads[-20:]) if len(spreads) >= 20 else np.mean(spreads)
 
@@ -210,11 +211,9 @@ def analyze_vsa(df: pd.DataFrame) -> list[VSASignal]:
     for i in range(n - check_window, n):
         c_vol = vols[i]
         c_spread = spreads[i]
-        c_body = bodies[i]
         c_close = closes[i]
         c_open = opens[i]
         c_low = lows[i]
-        c_high = highs[i]
 
         vol_ratio = c_vol / avg_vol_20 if avg_vol_20 > 0 else 1.0
         spread_ratio = c_spread / avg_spread_20 if avg_spread_20 > 0 else 1.0

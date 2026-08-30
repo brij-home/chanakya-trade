@@ -50,13 +50,31 @@ class ForensicWidget(Static):
             table.add_column("Metric", style="bold dim")
             table.add_column("Value", justify="right")
 
-            rating_color = "green" if res.quality_rating in ("A+", "A") else "yellow" if res.quality_rating == "B" else "red"
-            z_color = "green" if res.distress_zone == "SAFE" else "yellow" if res.distress_zone == "GREY" else "red"
+            rating_color = (
+                "green"
+                if res.quality_rating in ("A+", "A")
+                else "yellow"
+                if res.quality_rating == "B"
+                else "red"
+            )
+            z_color = (
+                "green"
+                if res.distress_zone == "SAFE"
+                else "yellow"
+                if res.distress_zone == "GREY"
+                else "red"
+            )
 
             table.add_row("Symbol", f"[bold]{res.symbol}[/bold]")
             table.add_row("Quality Grade", f"[{rating_color}]{res.quality_rating}[/{rating_color}]")
-            table.add_row("Beneish M-Score", f"{res.beneish_m_score:.2f} ({'FLAGGED' if res.is_beneish_flagged else 'CLEAN'})")
-            table.add_row("Altman Z''-Score", f"[{z_color}]{res.altman_z_score:.2f} ({res.distress_zone})[/{z_color}]")
+            table.add_row(
+                "Beneish M-Score",
+                f"{res.beneish_m_score:.2f} ({'FLAGGED' if res.is_beneish_flagged else 'CLEAN'})",
+            )
+            table.add_row(
+                "Altman Z''-Score",
+                f"[{z_color}]{res.altman_z_score:.2f} ({res.distress_zone})[/{z_color}]",
+            )
             table.add_row("Piotroski Score", f"{res.piotroski_f_score}/9")
 
             self.query_one("#forensic-body", Static).update(table)

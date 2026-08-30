@@ -34,7 +34,7 @@ Statutory Rates (Effective 2024-2026 Union Budget / SEBI schedules):
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Literal, Dict, Any
 
@@ -185,7 +185,11 @@ def calculate_transaction_charges(
     sebi_rounded = _round_currency(sebi_charges)
 
     total = b_rounded + stt_rounded + ex_rounded + gst_rounded + sd_rounded + sebi_rounded
-    effective_pct = _round_currency((total / turnover) * Decimal("100")) if turnover > Decimal("0") else Decimal("0.00")
+    effective_pct = (
+        _round_currency((total / turnover) * Decimal("100"))
+        if turnover > Decimal("0")
+        else Decimal("0.00")
+    )
 
     return TransactionCostBreakdown(
         segment=segment,
@@ -255,7 +259,9 @@ def calculate_capital_gains_tax(
         return CapitalGainsEstimate(
             gross_pnl=pnl,
             holding_period_days=holding_period_days,
-            tax_type="LTCG" if holding_period_days >= 365 and segment == "EQUITY_DELIVERY" else ("STCG" if segment == "EQUITY_DELIVERY" else "BUSINESS_FO"),
+            tax_type="LTCG"
+            if holding_period_days >= 365 and segment == "EQUITY_DELIVERY"
+            else ("STCG" if segment == "EQUITY_DELIVERY" else "BUSINESS_FO"),
             tax_rate_pct=0.0,
             tax_exemption_applied=0.0,
             estimated_tax=0.0,
@@ -347,7 +353,7 @@ def calculate_fo_turnover(trades: list[dict]) -> dict[str, Any]:
         if t.get("segment") == "OPTIONS" and t.get("side", "").upper() == "SELL":
             price = float(t.get("price", 0.0))
             qty = abs(int(t.get("quantity", 0)))
-            options_premium_turnover += (price * qty)
+            options_premium_turnover += price * qty
 
     total_turnover = total_abs_pnl + options_premium_turnover
     audit_threshold_standard = 100000000.0  # ₹10 Crore for digital transactions (Section 44AB)
@@ -363,7 +369,9 @@ def calculate_fo_turnover(trades: list[dict]) -> dict[str, Any]:
     }
 
 
-def suggest_tax_loss_harvesting(holdings: list[dict], realized_stcg_gain: float = 0.0) -> list[dict[str, Any]]:
+def suggest_tax_loss_harvesting(
+    holdings: list[dict], realized_stcg_gain: float = 0.0
+) -> list[dict[str, Any]]:
     """
     Identify positions with unrealized short-term losses that can be harvested
     to offset realized STCG gains before March 31.
@@ -379,15 +387,17 @@ def suggest_tax_loss_harvesting(holdings: list[dict], realized_stcg_gain: float 
         if pnl < 0 and qty > 0 and days_held < 365:
             loss_amount = abs(pnl)
             potential_tax_saved = loss_amount * 0.20  # 20% STCG
-            harvestable.append({
-                "symbol": symbol,
-                "qty": qty,
-                "current_price": ltp,
-                "unrealized_loss": round(loss_amount, 2),
-                "potential_stcg_tax_saved": round(potential_tax_saved, 2),
-                "holding_days": days_held,
-                "recommendation": f"Sell {qty} shares of {symbol} to harvest ₹{loss_amount:,.2f} loss, saving ~₹{potential_tax_saved:,.2f} in STCG tax."
-            })
+            harvestable.append(
+                {
+                    "symbol": symbol,
+                    "qty": qty,
+                    "current_price": ltp,
+                    "unrealized_loss": round(loss_amount, 2),
+                    "potential_stcg_tax_saved": round(potential_tax_saved, 2),
+                    "holding_days": days_held,
+                    "recommendation": f"Sell {qty} shares of {symbol} to harvest ₹{loss_amount:,.2f} loss, saving ~₹{potential_tax_saved:,.2f} in STCG tax.",
+                }
+            )
 
     harvestable.sort(key=lambda x: x["unrealized_loss"], reverse=True)
     return harvestable
@@ -411,20 +421,38 @@ def print_transaction_charges(breakdown: TransactionCostBreakdown) -> None:
         f"  [bold]Total Charges[/bold]    : [bold yellow]₹{breakdown.total_charges:,.2f}[/bold yellow] ([dim]{breakdown.effective_pct:.3f}% of turnover[/dim])",
     ]
     console.print()
-    console.print(Panel("\n".join(header_lines), title="[bold cyan]🇮🇳 Statutory Transaction Charges[/bold cyan]", border_style="cyan"))
+    console.print(
+        Panel(
+            "\n".join(header_lines),
+            title="[bold cyan]🇮🇳 Statutory Transaction Charges[/bold cyan]",
+            border_style="cyan",
+        )
+    )
 
     table = Table(show_header=True, header_style="bold cyan")
     table.add_column("Charge Component", style="bold white")
     table.add_column("Amount (₹)", justify="right")
     table.add_column("Statutory Basis", style="dim")
 
-    table.add_row("Brokerage", f"₹{breakdown.brokerage:,.2f}", "Discount broker max ₹20 / free delivery")
-    table.add_row("Securities Transaction Tax (STT)", f"₹{breakdown.stt:,.2f}", "Govt of India STT Schedule")
-    table.add_row("Exchange Turnover Charges", f"₹{breakdown.exchange_charges:,.2f}", "NSE / BSE Transaction Fee")
+    table.add_row(
+        "Brokerage", f"₹{breakdown.brokerage:,.2f}", "Discount broker max ₹20 / free delivery"
+    )
+    table.add_row(
+        "Securities Transaction Tax (STT)", f"₹{breakdown.stt:,.2f}", "Govt of India STT Schedule"
+    )
+    table.add_row(
+        "Exchange Turnover Charges",
+        f"₹{breakdown.exchange_charges:,.2f}",
+        "NSE / BSE Transaction Fee",
+    )
     table.add_row("GST (18%)", f"₹{breakdown.gst:,.2f}", "18% on (Brokerage + Exchange Fees)")
     table.add_row("Stamp Duty", f"₹{breakdown.stamp_duty:,.2f}", "State Stamp Act (Buy Side)")
     table.add_row("SEBI Turnover Fee", f"₹{breakdown.sebi_charges:,.2f}", "₹10 / Crore")
-    table.add_row("[bold]Total Statutory Cost[/bold]", f"[bold yellow]₹{breakdown.total_charges:,.2f}[/bold yellow]", "[bold]All Inclusive[/bold]")
+    table.add_row(
+        "[bold]Total Statutory Cost[/bold]",
+        f"[bold yellow]₹{breakdown.total_charges:,.2f}[/bold yellow]",
+        "[bold]All Inclusive[/bold]",
+    )
 
     console.print(table)
     console.print()
@@ -434,7 +462,6 @@ def print_tax_estimate(estimate: CapitalGainsEstimate) -> None:
     """Display capital gains tax estimate as a Rich dashboard."""
     from rich.console import Console
     from rich.panel import Panel
-    from rich.table import Table
 
     console = Console()
     pnl_style = "green" if estimate.gross_pnl >= 0 else "red"
@@ -449,7 +476,13 @@ def print_tax_estimate(estimate: CapitalGainsEstimate) -> None:
     ]
 
     console.print()
-    console.print(Panel("\n".join(lines), title="[bold cyan]📊 Indian Income Tax & Capital Gains Estimator[/bold cyan]", border_style="cyan"))
+    console.print(
+        Panel(
+            "\n".join(lines),
+            title="[bold cyan]📊 Indian Income Tax & Capital Gains Estimator[/bold cyan]",
+            border_style="cyan",
+        )
+    )
     console.print(f"[dim]  Rules Applied: {estimate.rules_applied}[/dim]\n")
 
 
@@ -461,7 +494,9 @@ def print_fo_turnover(turnover_dict: dict[str, Any]) -> None:
     console = Console()
     audit_req = turnover_dict.get("tax_audit_required", False)
     status_style = "bold red" if audit_req else "bold green"
-    status_text = "MANDATORY (Threshold Exceeded)" if audit_req else "NOT REQUIRED (Safe within limits)"
+    status_text = (
+        "MANDATORY (Threshold Exceeded)" if audit_req else "NOT REQUIRED (Safe within limits)"
+    )
 
     lines = [
         f"  [bold]Trades Analyzed[/bold]         : {turnover_dict.get('trades_analyzed', 0)}",
@@ -474,7 +509,13 @@ def print_fo_turnover(turnover_dict: dict[str, Any]) -> None:
     ]
 
     console.print()
-    console.print(Panel("\n".join(lines), title="[bold cyan]💼 F&O Section 43(5) / 44AB Tax Audit Turnover[/bold cyan]", border_style="cyan"))
+    console.print(
+        Panel(
+            "\n".join(lines),
+            title="[bold cyan]💼 F&O Section 43(5) / 44AB Tax Audit Turnover[/bold cyan]",
+            border_style="cyan",
+        )
+    )
     console.print()
 
 
@@ -486,7 +527,9 @@ def print_tax_harvesting(opportunities: list[dict[str, Any]]) -> None:
 
     console = Console()
     if not opportunities:
-        console.print("\n[bold green]✓ No tax-loss harvesting needed.[/bold green] [dim]All holdings are profitable or long-term.[/dim]\n")
+        console.print(
+            "\n[bold green]✓ No tax-loss harvesting needed.[/bold green] [dim]All holdings are profitable or long-term.[/dim]\n"
+        )
         return
 
     total_saved = sum(o.get("potential_stcg_tax_saved", 0.0) for o in opportunities)
@@ -519,6 +562,6 @@ def print_tax_harvesting(opportunities: list[dict[str, Any]]) -> None:
         )
 
     console.print(table)
-    console.print("\n[dim]Note: Re-buy after T+1 settlement to maintain long-term fundamental positioning while booking tax offset.[/dim]\n")
-
-
+    console.print(
+        "\n[dim]Note: Re-buy after T+1 settlement to maintain long-term fundamental positioning while booking tax offset.[/dim]\n"
+    )

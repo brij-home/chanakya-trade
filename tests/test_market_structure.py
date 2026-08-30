@@ -12,7 +12,6 @@ import pytest
 from analysis.market_structure import (
     analyze_market_structure,
     detect_fair_value_gaps,
-    detect_liquidity_sweeps,
     detect_order_blocks,
     find_swing_points,
 )
@@ -114,4 +113,3 @@ def test_analyze_market_structure_choch(choch_reversal_df):
     report = analyze_market_structure("TEST_CHOCH", df=choch_reversal_df)
     assert report.symbol == "TEST_CHOCH"
     assert report.structure_score > 0 or report.choch_detected is True
-

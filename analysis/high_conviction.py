@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import concurrent.futures
 import datetime
-import os
 import sys
 from dataclasses import asdict, dataclass, field, fields
 from typing import Any, Optional
@@ -45,6 +44,7 @@ from analysis.universe import get_stock_sector, resolve_dynamic_universe
 from analysis.volume_profile import analyze_volume_profile
 from engine.analysis_cache import cache_get, cache_set
 
+
 @dataclass
 class HighConvictionOpportunity:
     rank: int
@@ -69,7 +69,9 @@ class HighConvictionOpportunity:
     rvol_20d: float
     vcp_detected: bool
     forensic_quality: str
-    liquidity_tier: str = "TIER_1_ULTRA_LIQUID"  # "TIER_1_ULTRA_LIQUID" | "TIER_2_ACTIVE_LIQUID" | "TIER_3_MIDCAP"
+    liquidity_tier: str = (
+        "TIER_1_ULTRA_LIQUID"  # "TIER_1_ULTRA_LIQUID" | "TIER_2_ACTIVE_LIQUID" | "TIER_3_MIDCAP"
+    )
     est_turnover_cr: float = 100.0  # Estimated daily turnover in Crores
     sector_icon: str = "🏢"
     data_source: str = "HISTORICAL_EOD"  # "LIVE_TICK" | "HISTORICAL_EOD"
@@ -117,7 +119,6 @@ class HighConvictionScanResult:
             "data_source": self.data_source,
             "dataset_timeline": self.dataset_timeline,
         }
-
 
 
 def _evaluate_single_stock(
@@ -236,7 +237,9 @@ def _evaluate_single_stock(
             setup_title = "⚡ VCP Volatility Contraction"
             tags.append("VCP")
             tags.append("Tight Base")
-        elif ms.setup_type == "BOTTOM_FISHING_SPRING" or (ms.choch_detected and ms.choch_type == "BULLISH_CHOCH"):
+        elif ms.setup_type == "BOTTOM_FISHING_SPRING" or (
+            ms.choch_detected and ms.choch_type == "BULLISH_CHOCH"
+        ):
             setup_type = "BOTTOM_FISHING_SPRING"
             setup_title = "🎣 Bottom Fishing (Wyckoff Spring)"
             tags.append("Reversal")
@@ -278,7 +281,9 @@ def _evaluate_single_stock(
             if stop_loss >= entry_price or stop_loss <= 0:
                 stop_loss = round(entry_price * 0.965, 2)
             risk_pts = round(entry_price - stop_loss, 2)
-            reward_pts = round((target_1 - entry_price) if target_1 > entry_price else risk_pts * 2.0, 2)
+            reward_pts = round(
+                (target_1 - entry_price) if target_1 > entry_price else risk_pts * 2.0, 2
+            )
             if target_1 <= entry_price:
                 target_1 = round(entry_price + risk_pts * 2.0, 2)
             if target_2 <= target_1:
@@ -287,7 +292,9 @@ def _evaluate_single_stock(
             if stop_loss <= entry_price or stop_loss <= 0:
                 stop_loss = round(entry_price * 1.035, 2)
             risk_pts = round(stop_loss - entry_price, 2)
-            reward_pts = round((entry_price - target_1) if target_1 < entry_price else risk_pts * 2.0, 2)
+            reward_pts = round(
+                (entry_price - target_1) if target_1 < entry_price else risk_pts * 2.0, 2
+            )
             if target_1 >= entry_price:
                 target_1 = round(entry_price - risk_pts * 2.0, 2)
             if target_2 >= target_1:
@@ -298,9 +305,18 @@ def _evaluate_single_stock(
         # ── Sector Taxonomy & Icon ────────────────────────────────────
         sec_id, sec_display = get_stock_sector(symbol)
         sector_icons = {
-            "banking": "🏦", "it": "💻", "auto": "🚗", "defence": "🛡️",
-            "energy": "⚡", "metals": "⛏️", "pharma": "💊", "fmcg": "🛒",
-            "infra": "🏗️", "chemicals": "🧪", "telecom": "📡", "broad_market": "🏢",
+            "banking": "🏦",
+            "it": "💻",
+            "auto": "🚗",
+            "defence": "🛡️",
+            "energy": "⚡",
+            "metals": "⛏️",
+            "pharma": "💊",
+            "fmcg": "🛒",
+            "infra": "🏗️",
+            "chemicals": "🧪",
+            "telecom": "📡",
+            "broad_market": "🏢",
         }
         sec_icon = sector_icons.get(sec_id, "🏢")
 
@@ -329,7 +345,9 @@ def _evaluate_single_stock(
         if forensic.quality_rating in ("A+", "A"):
             catalyst_parts.append(f"Grade {forensic.quality_rating} Balance Sheet")
 
-        catalyst_summary = " · ".join(catalyst_parts) if catalyst_parts else "Multi-factor quantitative alignment."
+        catalyst_summary = (
+            " · ".join(catalyst_parts) if catalyst_parts else "Multi-factor quantitative alignment."
+        )
 
         # Determine data provenance & timeline
         now_dt = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=5, minutes=30)))
@@ -371,10 +389,23 @@ def _evaluate_single_stock(
         )
 
         # ── Eligibility Classification & Institutional Rationale ──────
-        if conviction_score >= 70 and (vp.rvol_20d >= 1.3 or mb.weinstein_stage == "STAGE_2_MARKUP" or ms.choch_detected or mb.vcp_detected) and not forensic.governance_red_flags:
+        if (
+            conviction_score >= 70
+            and (
+                vp.rvol_20d >= 1.3
+                or mb.weinstein_stage == "STAGE_2_MARKUP"
+                or ms.choch_detected
+                or mb.vcp_detected
+            )
+            and not forensic.governance_red_flags
+        ):
             eligibility_status = "READY"
             eligibility_label = "🟢 TOP PICK (READY TO EXECUTE)"
-            stage_str = mb.weinstein_stage.replace('_', ' ').title() if mb.weinstein_stage else 'Structural Markup'
+            stage_str = (
+                mb.weinstein_stage.replace("_", " ").title()
+                if mb.weinstein_stage
+                else "Structural Markup"
+            )
             why_rationale = (
                 f"🟢 Top Pick: Confirmed {stage_str} with {mb.trend_template_passed}/8 Minervini criteria passed, "
                 f"{vp.rvol_20d:.1f}x institutional RVOL surge, clean balance sheet (Grade {forensic.quality_rating}), "
@@ -396,10 +427,16 @@ def _evaluate_single_stock(
             )
 
         contributing_factors = {
-            "stage": mb.weinstein_stage.replace('_', ' ').title() if mb.weinstein_stage else "Stage 2 Markup",
+            "stage": mb.weinstein_stage.replace("_", " ").title()
+            if mb.weinstein_stage
+            else "Stage 2 Markup",
             "trend_template": f"{mb.trend_template_passed}/8 Criteria Passed",
             "rvol": f"{vp.rvol_20d:.1f}x",
-            "smc_structure": ms.choch_type if ms.choch_detected else ms.bos_type if ms.bos_detected else ms.regime,
+            "smc_structure": ms.choch_type
+            if ms.choch_detected
+            else ms.bos_type
+            if ms.bos_detected
+            else ms.regime,
             "forensic_grade": f"Grade {forensic.quality_rating}",
             "sector_quadrant": sector_quadrant,
             "piotroski_f": int(getattr(forensic, "piotroski_f_score", 7) or 7),
@@ -448,8 +485,9 @@ def _evaluate_single_stock(
             tags=tags[:4],
         )
 
-    except Exception as e:
+    except Exception:
         import traceback
+
         traceback.print_exc()
         return None
 
@@ -464,7 +502,9 @@ def scan_high_conviction_opportunities(
     Scans a market-aware dynamic universe of liquid stocks and returns Top N High-Conviction trading opportunities.
     """
     now_ist = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=5, minutes=30)))
-    cache_key = f"high_conviction_{universe if isinstance(universe, str) else len(universe)}_{top_n}"
+    cache_key = (
+        f"high_conviction_{universe if isinstance(universe, str) else len(universe)}_{top_n}"
+    )
 
     if use_cache:
         cached = cache_get(cache_key, namespace="high_conviction", max_age_seconds=600)  # 10m cache
@@ -490,9 +530,11 @@ def scan_high_conviction_opportunities(
                     summary=cached.get("summary", ""),
                     top_down_rationale=cached.get("top_down_rationale", ""),
                     data_source=cached.get("data_source", "HISTORICAL_EOD"),
-                    dataset_timeline=cached.get("dataset_timeline", f"Dataset: 250D Daily Historical Bars (As of {now_ist.strftime('%d %b %Y')} Close)"),
+                    dataset_timeline=cached.get(
+                        "dataset_timeline",
+                        f"Dataset: 250D Daily Historical Bars (As of {now_ist.strftime('%d %b %Y')} Close)",
+                    ),
                 )
-
 
     # Resolve dynamic top-down or sector universe
     if isinstance(universe, list):
@@ -506,12 +548,27 @@ def scan_high_conviction_opportunities(
     leading_sectors = []
     if isinstance(rrg_matrix, list):
         for s in rrg_matrix:
-            q = getattr(s, "quadrant", None) if hasattr(s, "quadrant") else s.get("quadrant") if isinstance(s, dict) else None
-            sec = getattr(s, "sector", None) if hasattr(s, "sector") else s.get("sector") if isinstance(s, dict) else None
+            q = (
+                getattr(s, "quadrant", None)
+                if hasattr(s, "quadrant")
+                else s.get("quadrant")
+                if isinstance(s, dict)
+                else None
+            )
+            sec = (
+                getattr(s, "sector", None)
+                if hasattr(s, "sector")
+                else s.get("sector")
+                if isinstance(s, dict)
+                else None
+            )
             if q == "LEADING" and sec:
                 leading_sectors.append(sec)
     elif isinstance(rrg_matrix, dict):
-        leading_sectors = [s["sector"] if isinstance(s, dict) else getattr(s, "sector", str(s)) for s in rrg_matrix.get("leading", [])]
+        leading_sectors = [
+            s["sector"] if isinstance(s, dict) else getattr(s, "sector", str(s))
+            for s in rrg_matrix.get("leading", [])
+        ]
 
     # Parallel evaluation
     candidates: list[HighConvictionOpportunity] = []
@@ -541,14 +598,20 @@ def scan_high_conviction_opportunities(
     else:
         market_posture = "CHOPPY_ROTATION"
 
-    avg_conv = int(sum(o.conviction_score for o in top_opportunities) / max(1, len(top_opportunities))) if top_opportunities else 0
+    avg_conv = (
+        int(sum(o.conviction_score for o in top_opportunities) / max(1, len(top_opportunities)))
+        if top_opportunities
+        else 0
+    )
     summary = (
         f"Scanned {len(candidates)} liquid tickers. Market posture: {market_posture}. "
         f"Top setups led by {', '.join([o.symbol for o in top_opportunities[:3]])} with average conviction "
         f"{avg_conv}/100."
     )
 
-    dataset_timeline = f"Dataset: 250D Daily Historical Bars (As of {now_ist.strftime('%d %b %Y')} Close)"
+    dataset_timeline = (
+        f"Dataset: 250D Daily Historical Bars (As of {now_ist.strftime('%d %b %Y')} Close)"
+    )
 
     result = HighConvictionScanResult(
         timestamp=now_ist.strftime("%d %b %Y, %I:%M %p IST"),
@@ -567,5 +630,3 @@ def scan_high_conviction_opportunities(
         cache_set(cache_key, result.to_dict(), namespace="high_conviction")
 
     return result
-
-

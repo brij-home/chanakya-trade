@@ -504,6 +504,7 @@ def _fetch_yfinance(symbol: str) -> dict:
 
         try:
             from market.yfinance_provider import _to_yf_symbol
+
             yf_sym = _to_yf_symbol(symbol)
         except ImportError:
             yf_sym = f"{symbol.upper()}.NS"
@@ -527,18 +528,30 @@ def _fetch_yfinance(symbol: str) -> dict:
 
         # Fetch financial statements concurrently
         bs, inc, cf, q_inc = None, None, None, None
+
         def _get_bs():
-            try: return ticker.balance_sheet
-            except Exception: return None
+            try:
+                return ticker.balance_sheet
+            except Exception:
+                return None
+
         def _get_inc():
-            try: return ticker.income_stmt
-            except Exception: return None
+            try:
+                return ticker.income_stmt
+            except Exception:
+                return None
+
         def _get_cf():
-            try: return ticker.cashflow
-            except Exception: return None
+            try:
+                return ticker.cashflow
+            except Exception:
+                return None
+
         def _get_q_inc():
-            try: return ticker.quarterly_income_stmt
-            except Exception: return None
+            try:
+                return ticker.quarterly_income_stmt
+            except Exception:
+                return None
 
         with ThreadPoolExecutor(max_workers=4) as executor:
             f_bs = executor.submit(_get_bs)
@@ -554,28 +567,48 @@ def _fetch_yfinance(symbol: str) -> dict:
         roce_computed = None
         try:
             if bs is not None and inc is not None and not bs.empty and not inc.empty:
-                if "Net Income Common Stockholders" in inc.index and "Stockholders Equity" in bs.index:
+                if (
+                    "Net Income Common Stockholders" in inc.index
+                    and "Stockholders Equity" in bs.index
+                ):
                     net_income = inc.loc["Net Income Common Stockholders"].iloc[0]
                     equity = bs.loc["Stockholders Equity"].iloc[0]
                     if equity and equity > 0 and not _is_nan(net_income):
                         roe_computed = round((net_income / equity) * 100, 1)
 
                 ebit = inc.loc["EBIT"].iloc[0] if "EBIT" in inc.index else None
-                total_assets = bs.loc["Total Assets"].iloc[0] if "Total Assets" in bs.index else None
-                current_liab = bs.loc["Current Liabilities"].iloc[0] if "Current Liabilities" in bs.index else None
-                current_assets = bs.loc["Current Assets"].iloc[0] if "Current Assets" in bs.index else None
+                total_assets = (
+                    bs.loc["Total Assets"].iloc[0] if "Total Assets" in bs.index else None
+                )
+                current_liab = (
+                    bs.loc["Current Liabilities"].iloc[0]
+                    if "Current Liabilities" in bs.index
+                    else None
+                )
+                current_assets = (
+                    bs.loc["Current Assets"].iloc[0] if "Current Assets" in bs.index else None
+                )
 
                 if ebit and total_assets and current_liab and not _is_nan(ebit):
                     capital_employed = total_assets - current_liab
                     if capital_employed > 0:
                         roce_computed = round((ebit / capital_employed) * 100, 1)
 
-                if current_assets and current_liab and not _is_nan(current_assets) and current_liab > 0:
+                if (
+                    current_assets
+                    and current_liab
+                    and not _is_nan(current_assets)
+                    and current_liab > 0
+                ):
                     current_ratio_computed = round(current_assets / current_liab, 2)
 
                 if ebit and not _is_nan(ebit):
                     for idx_name in inc.index:
-                        if "interest" in str(idx_name).lower() and "expense" in str(idx_name).lower() and "non" not in str(idx_name).lower():
+                        if (
+                            "interest" in str(idx_name).lower()
+                            and "expense" in str(idx_name).lower()
+                            and "non" not in str(idx_name).lower()
+                        ):
                             int_exp = abs(inc.loc[idx_name].iloc[0])
                             if int_exp and not _is_nan(int_exp) and int_exp > 0:
                                 interest_coverage_computed = round(ebit / int_exp, 1)
@@ -619,8 +652,14 @@ def _fetch_yfinance(symbol: str) -> dict:
             if q_inc is not None and not q_inc.empty:
                 for col in q_inc.columns[:4]:
                     q_date = str(col)[:10]
-                    rev = q_inc.loc["Total Revenue"].loc[col] if "Total Revenue" in q_inc.index else None
-                    net_p = q_inc.loc["Net Income"].loc[col] if "Net Income" in q_inc.index else None
+                    rev = (
+                        q_inc.loc["Total Revenue"].loc[col]
+                        if "Total Revenue" in q_inc.index
+                        else None
+                    )
+                    net_p = (
+                        q_inc.loc["Net Income"].loc[col] if "Net Income" in q_inc.index else None
+                    )
                     entry = {"quarter": q_date}
                     if rev is not None and not _is_nan(rev):
                         entry["revenue_cr"] = round(rev / 1e7, 1)
@@ -631,7 +670,7 @@ def _fetch_yfinance(symbol: str) -> dict:
         except Exception:
             pass
 
-        return {
+        res = {
             "name": info.get("longName") or info.get("shortName") or symbol,
             "pe": info.get("trailingPE"),
             "pb": info.get("priceToBook"),
@@ -871,7 +910,6 @@ def _fetch_nse_announcements(symbol: str, limit: int = 5) -> list[dict]:
         return []
 
 
-import time
 import threading
 
 _fund_cache_lock = threading.Lock()

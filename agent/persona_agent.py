@@ -183,7 +183,11 @@ def _fetch_data_brief(
     # Forensic snapshot
     forensic = _safe_call("audit_forensics", symbol=symbol)
     if forensic:
-        brief["forensics"] = forensic if isinstance(forensic, dict) else (forensic.as_dict() if hasattr(forensic, "as_dict") else vars(forensic))
+        brief["forensics"] = (
+            forensic
+            if isinstance(forensic, dict)
+            else (forensic.as_dict() if hasattr(forensic, "as_dict") else vars(forensic))
+        )
 
     # FII/DII data
     fii = _safe_call("get_fii_dii_data")
@@ -546,11 +550,13 @@ def run_persona_analysis(
         if registry is None:
             try:
                 from agent.core import ToolRegistry
+
                 registry = ToolRegistry()
             except Exception:
                 registry = None
         try:
             from agent.core import get_provider
+
             llm_provider = get_provider(registry=registry)
         except Exception:
             llm_provider = None
@@ -583,13 +589,16 @@ def run_persona_analysis(
         ):
             sig = parse_persona_response(response_text, persona_id)
             if sig and sig.rationale and not any("error" in r.lower() for r in sig.rationale):
-                sig.key_metrics["Analysis Engine"] = f"AI Multi-Agent ({getattr(llm_provider, 'model', 'LLM')})"
+                sig.key_metrics["Analysis Engine"] = (
+                    f"AI Multi-Agent ({getattr(llm_provider, 'model', 'LLM')})"
+                )
                 return sig
         # Fall through to rule-based if LLM failed or refused
 
     # 3. Rule-based fallback
     try:
         from engine.telemetry import record_event, EVENT_QUANT_FALLBACK
+
         record_event(
             event_type=EVENT_QUANT_FALLBACK,
             component="persona_agent",
@@ -670,8 +679,7 @@ def run_council(
         persona_ids = COUNCIL_PRESETS.get("breakout", ["minervini", "wyckoff", "oneil", "forensic"])
 
     signals = [
-        run_persona_analysis(pid, symbol, exchange, registry, llm_provider)
-        for pid in persona_ids
+        run_persona_analysis(pid, symbol, exchange, registry, llm_provider) for pid in persona_ids
     ]
 
     verdict_scores = {
@@ -723,7 +731,10 @@ def print_council_verdict(res: dict[str, Any]) -> None:
         "STRONG_SELL": "bold red",
     }.get(res["consensus_verdict"], "cyan")
 
-    table = Table(title=f"🏛️ Council: {res['council'].upper()} — {res['symbol']} ({res['exchange']})", border_style="cyan")
+    table = Table(
+        title=f"🏛️ Council: {res['council'].upper()} — {res['symbol']} ({res['exchange']})",
+        border_style="cyan",
+    )
     table.add_column("Persona", style="bold white", width=22)
     table.add_column("Verdict", width=14)
     table.add_column("Confidence", justify="right", width=12)
@@ -746,5 +757,10 @@ def print_council_verdict(res: dict[str, Any]) -> None:
     )
 
     console.print(table)
-    console.print(Panel(summary_text, title="🎯 Council Decision Synthesis", border_style="green" if "BUY" in res["consensus_verdict"] else "yellow"))
-
+    console.print(
+        Panel(
+            summary_text,
+            title="🎯 Council Decision Synthesis",
+            border_style="green" if "BUY" in res["consensus_verdict"] else "yellow",
+        )
+    )

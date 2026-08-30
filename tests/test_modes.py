@@ -6,11 +6,9 @@ Unit tests for strict 3-tier operating mode enforcement (engine/modes.py).
 
 from __future__ import annotations
 
-import os
 import pytest
 from engine.modes import (
     TradingMode,
-    get_current_mode,
     is_observe_mode,
     is_simulate_mode,
     is_execute_mode,

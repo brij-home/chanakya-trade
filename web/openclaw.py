@@ -836,8 +836,14 @@ MANIFEST: dict = {
             "input_schema": {
                 "type": "object",
                 "properties": {
-                    "underlying": {"type": "string", "description": "Symbol e.g. NIFTY or RELIANCE"},
-                    "strategy": {"type": "string", "description": "BULL_CALL_SPREAD, BEAR_PUT_SPREAD, BULL_PUT_SPREAD, BEAR_CALL_SPREAD, or IRON_CONDOR"},
+                    "underlying": {
+                        "type": "string",
+                        "description": "Symbol e.g. NIFTY or RELIANCE",
+                    },
+                    "strategy": {
+                        "type": "string",
+                        "description": "BULL_CALL_SPREAD, BEAR_PUT_SPREAD, BULL_PUT_SPREAD, BEAR_CALL_SPREAD, or IRON_CONDOR",
+                    },
                     "spot_price": {"type": "number"},
                     "iv": {"type": "number", "default": 0.15},
                     "dte": {"type": "integer", "default": 7},
@@ -856,7 +862,11 @@ MANIFEST: dict = {
                 "type": "object",
                 "properties": {
                     "symbol": {"type": "string", "description": "Stock ticker e.g. 'RELIANCE'"},
-                    "council": {"type": "string", "default": "breakout", "description": "Council preset ('breakout', 'options_sniper', 'multibagger', 'macro_regime', 'core_value')"},
+                    "council": {
+                        "type": "string",
+                        "default": "breakout",
+                        "description": "Council preset ('breakout', 'options_sniper', 'multibagger', 'macro_regime', 'core_value')",
+                    },
                     "exchange": {"type": "string", "default": "NSE"},
                 },
                 "required": ["symbol"],
@@ -872,7 +882,10 @@ MANIFEST: dict = {
                 "type": "object",
                 "properties": {
                     "symbol": {"type": "string", "description": "Stock ticker e.g. 'TCS'"},
-                    "persona_id": {"type": "string", "description": "Persona ID e.g. 'minervini', 'kedia', 'taleb', 'smc', 'buffett'"},
+                    "persona_id": {
+                        "type": "string",
+                        "description": "Persona ID e.g. 'minervini', 'kedia', 'taleb', 'smc', 'buffett'",
+                    },
                     "exchange": {"type": "string", "default": "NSE"},
                 },
                 "required": ["symbol", "persona_id"],
@@ -881,4 +894,3 @@ MANIFEST: dict = {
         },
     ],
 }
-

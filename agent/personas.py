@@ -570,4 +570,3 @@ def list_personas() -> list[InvestorPersona]:
         "smc",
     ]
     return [PERSONAS[k] for k in order if k in PERSONAS]
-

@@ -86,11 +86,15 @@ class MultibaggerReport:
 
     # ── 3-Horizon Breakdown ──────────────────────────────────
     short_term_score: int = 50  # 0 - 100
-    short_term_verdict: str = "⚪ DEVELOPING"  # "🟢 READY_FOR_ALPHA" | "🟡 STALK_PIVOT" | "⚪ DEVELOPING"
+    short_term_verdict: str = (
+        "⚪ DEVELOPING"  # "🟢 READY_FOR_ALPHA" | "🟡 STALK_PIVOT" | "⚪ DEVELOPING"
+    )
     short_term_details: dict[str, Any] = field(default_factory=dict)
 
     mid_term_score: int = 50  # 0 - 100
-    mid_term_verdict: str = "⚪ CONSOLIDATING"  # "🚀 STAGE_2_SUPERPERFORMER" | "🟡 FORMING_BASE" | "⚪ CONSOLIDATING"
+    mid_term_verdict: str = (
+        "⚪ CONSOLIDATING"  # "🚀 STAGE_2_SUPERPERFORMER" | "🟡 FORMING_BASE" | "⚪ CONSOLIDATING"
+    )
     mid_term_details: dict[str, Any] = field(default_factory=dict)
 
     long_term_score: int = 50  # 0 - 100
@@ -122,8 +126,8 @@ def evaluate_trend_template(df: pd.DataFrame) -> tuple[int, list[TrendTemplateCr
 
     # Moving averages (approximated for length of df)
     sma_50 = float(np.mean(closes[-50:])) if n >= 50 else float(np.mean(closes))
-    sma_150 = float(np.mean(closes[-150:])) if n >= 150 else float(np.mean(closes[-min(n, 75):]))
-    sma_200 = float(np.mean(closes[-200:])) if n >= 200 else float(np.mean(closes[-min(n, 100):]))
+    sma_150 = float(np.mean(closes[-150:])) if n >= 150 else float(np.mean(closes[-min(n, 75) :]))
+    sma_200 = float(np.mean(closes[-200:])) if n >= 200 else float(np.mean(closes[-min(n, 100) :]))
 
     # 200 SMA slope over last 20-30 bars
     sma_200_prev = float(np.mean(closes[-220:-20])) if n >= 220 else sma_200 * 0.99
@@ -218,7 +222,7 @@ def classify_weinstein_stage(df: pd.DataFrame) -> tuple[str, int]:
     n = len(df)
 
     sma_50 = float(np.mean(closes[-50:])) if n >= 50 else float(np.mean(closes))
-    sma_200 = float(np.mean(closes[-200:])) if n >= 200 else float(np.mean(closes[-min(n, 75):]))
+    sma_200 = float(np.mean(closes[-200:])) if n >= 200 else float(np.mean(closes[-min(n, 75) :]))
     sma_200_prev = float(np.mean(closes[-220:-20])) if n >= 220 else sma_200 * 0.99
 
     slope = (sma_200 - sma_200_prev) / sma_200_prev if sma_200_prev > 0 else 0
@@ -272,9 +276,21 @@ def detect_vcp(df: pd.DataFrame) -> tuple[bool, list[VCPContraction], float]:
     c3_depth = ((c3_high - c3_low) / c3_high) * 100 if c3_high > 0 else 0
 
     contractions = [
-        VCPContraction(number=1, depth_pct=round(c1_depth, 1), bars_duration=seg_len, is_tightening=True),
-        VCPContraction(number=2, depth_pct=round(c2_depth, 1), bars_duration=seg_len, is_tightening=bool(c2_depth <= c1_depth * 1.1)),
-        VCPContraction(number=3, depth_pct=round(c3_depth, 1), bars_duration=seg_len, is_tightening=bool(c3_depth < c2_depth)),
+        VCPContraction(
+            number=1, depth_pct=round(c1_depth, 1), bars_duration=seg_len, is_tightening=True
+        ),
+        VCPContraction(
+            number=2,
+            depth_pct=round(c2_depth, 1),
+            bars_duration=seg_len,
+            is_tightening=bool(c2_depth <= c1_depth * 1.1),
+        ),
+        VCPContraction(
+            number=3,
+            depth_pct=round(c3_depth, 1),
+            bars_duration=seg_len,
+            is_tightening=bool(c3_depth < c2_depth),
+        ),
     ]
 
     is_vcp = (c3_depth < c2_depth) and (c2_depth <= c1_depth * 1.15) and (c3_depth <= 10.0)
@@ -638,9 +654,7 @@ def scan_multibagger_opportunity(
     mt_score, mt_verdict, mt_details = evaluate_mid_term_horizon(
         df, ltp, passed_count, stage, stage_conf
     )
-    lt_score, lt_verdict, lt_details = evaluate_long_term_horizon(
-        clean_sym, df, ltp, forensic_safe
-    )
+    lt_score, lt_verdict, lt_details = evaluate_long_term_horizon(clean_sym, df, ltp, forensic_safe)
 
     # 6. Composite Multibagger Potential Score (0-100)
     composite_score = int(round((st_score * 0.25) + (mt_score * 0.50) + (lt_score * 0.25)))
@@ -663,22 +677,20 @@ def scan_multibagger_opportunity(
         category = "DEVELOPING_SETUP"
 
     # Execution Ticket
-    ticket = generate_multibagger_trade_ticket(
-        ltp, df, stage, is_vcp, pivot_price, best_horizon
-    )
+    ticket = generate_multibagger_trade_ticket(ltp, df, stage, is_vcp, pivot_price, best_horizon)
 
     # Synthesis Summaries
     summary = f"{clean_sym} ranks {category} (Multibagger Score: {composite_score}/100 | Best Horizon: {best_horizon}). Minervini: {passed_count}/8 passed. Weinstein Stage: {stage}. Sector Tailwind: {sector_tailwind}/100 ({sector})."
 
     if is_vcp:
         catalyst = f"VCP Contraction active with pivot resistance at ₹{pivot_price:.2f}. Volatility is drying up prior to potential Stage 2 expansion."
-        entry_strat = f"Buy on volume breakout above VCP Pivot ₹{pivot_price:.2f} (or on retest). Stop-loss ₹{ticket.get('stop_loss', ltp*0.95):.2f}."
+        entry_strat = f"Buy on volume breakout above VCP Pivot ₹{pivot_price:.2f} (or on retest). Stop-loss ₹{ticket.get('stop_loss', ltp * 0.95):.2f}."
     elif stage == "STAGE_2_MARKUP":
-        catalyst = f"Established Stage 2 markup with rising 50/200 SMA alignment and positive institutional sector momentum."
-        entry_strat = f"Enter near ₹{ltp:.2f} on 20/50-day EMA pullbacks. Target ₹{ticket.get('target_1', ltp*1.15):.2f} (+2R) with SL at ₹{ticket.get('stop_loss', ltp*0.95):.2f}."
+        catalyst = "Established Stage 2 markup with rising 50/200 SMA alignment and positive institutional sector momentum."
+        entry_strat = f"Enter near ₹{ltp:.2f} on 20/50-day EMA pullbacks. Target ₹{ticket.get('target_1', ltp * 1.15):.2f} (+2R) with SL at ₹{ticket.get('stop_loss', ltp * 0.95):.2f}."
     else:
-        catalyst = f"Consolidating or basing. Watch for Stage 2 volume breakout confirmation."
-        entry_strat = f"Wait for Minervini criteria >= 6/8 and confirmed Stage 2 expansion before taking heavy positional allocation."
+        catalyst = "Consolidating or basing. Watch for Stage 2 volume breakout confirmation."
+        entry_strat = "Wait for Minervini criteria >= 6/8 and confirmed Stage 2 expansion before taking heavy positional allocation."
 
     return MultibaggerReport(
         symbol=clean_sym,

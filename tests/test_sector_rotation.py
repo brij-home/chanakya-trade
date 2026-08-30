@@ -6,7 +6,6 @@ Unit tests for RRG (Relative Rotation Graph) and sector momentum calculations.
 
 from __future__ import annotations
 
-import pytest
 from analysis.sector_rotation import (
     SectorRRGPoint,
     _classify_quadrant,
@@ -60,7 +59,18 @@ class TestSectorMatrix:
                 high=1010.0,
                 low=985.0,
             )
-            for k in ["BANK", "IT", "PHARMA", "AUTO", "FMCG", "METAL", "REALTY", "ENERGY", "INFRA", "PSU_BANK"]
+            for k in [
+                "BANK",
+                "IT",
+                "PHARMA",
+                "AUTO",
+                "FMCG",
+                "METAL",
+                "REALTY",
+                "ENERGY",
+                "INFRA",
+                "PSU_BANK",
+            ]
         ]
         monkeypatch.setattr(ind_mod, "get_sector_snapshot", lambda: fake_snaps)
         monkeypatch.setattr(q_mod, "get_quote", lambda _: {})

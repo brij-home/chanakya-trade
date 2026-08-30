@@ -6,7 +6,6 @@ Unit tests for institutional position sizing and risk-parity calculations.
 
 from __future__ import annotations
 
-import pytest
 from engine.position_sizer import (
     PositionSizeResult,
     calculate_position_size,

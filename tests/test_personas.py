@@ -714,12 +714,16 @@ class TestCouncilEnsembles:
 
     def test_all_council_presets_exist(self):
         from agent.persona_agent import COUNCIL_PRESETS
+
         expected = {"breakout", "options_sniper", "multibagger", "macro_regime", "core_value"}
         assert set(COUNCIL_PRESETS.keys()) == expected
 
-    @pytest.mark.parametrize("council_name", ["breakout", "options_sniper", "multibagger", "macro_regime", "core_value"])
+    @pytest.mark.parametrize(
+        "council_name", ["breakout", "options_sniper", "multibagger", "macro_regime", "core_value"]
+    )
     def test_council_members_are_valid_personas(self, council_name: str):
         from agent.persona_agent import COUNCIL_PRESETS
+
         members = COUNCIL_PRESETS[council_name]
         assert len(members) >= 3
         for m in members:
@@ -727,6 +731,7 @@ class TestCouncilEnsembles:
 
     def test_run_council_returns_valid_consensus(self):
         from agent.persona_agent import run_council
+
         res = run_council("breakout", "RELIANCE")
         assert res["council"] == "breakout"
         assert res["symbol"] == "RELIANCE"
@@ -735,4 +740,3 @@ class TestCouncilEnsembles:
         assert len(res["signals"]) == 4
         for sig in res["signals"]:
             assert isinstance(sig, PersonaSignal)
-

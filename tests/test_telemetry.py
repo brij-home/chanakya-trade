@@ -13,7 +13,6 @@ from engine.telemetry import (
     EVENT_LLM_FAILOVER,
     EVENT_LLM_COOLDOWN,
     EVENT_QUANT_FALLBACK,
-    EVENT_DATA_FALLBACK,
 )
 
 

@@ -69,7 +69,9 @@ class MagicTrendReport:
     pe_ratio: Optional[float] = None
     roce_pct: Optional[float] = None
     sales_growth_3y: Optional[float] = None
-    dual_engine_multiplier_potential: str = "2x - 5x Potential (Twin Turbo: EPS Expansion + PE Re-Rating)"
+    dual_engine_multiplier_potential: str = (
+        "2x - 5x Potential (Twin Turbo: EPS Expansion + PE Re-Rating)"
+    )
 
     # Execution & Risk Ticket
     weinstein_stage: str = "STAGE_1_BASE"
@@ -139,7 +141,9 @@ def _evaluate_axis_x_quality(
 
     if score >= 28:
         grade = "EXEMPLARY"
-        rationale = "Elite economic moat with outstanding ROCE, low leverage, and pristine governance."
+        rationale = (
+            "Elite economic moat with outstanding ROCE, low leverage, and pristine governance."
+        )
     elif score >= 20:
         grade = "STRONG"
         rationale = "Robust balance sheet with safe debt limits and clean accounting quality."
@@ -406,7 +410,15 @@ def calculate_magic_trend_score(
         clean_sym, sales_growth, profit_growth, market_cap, reinvestment_rate
     )
     score_z, ax_z = _evaluate_axis_z_timing(
-        df, ltp, minervini_passed, stage, is_vcp, pivot_price, pe_ratio, sales_growth, sector_tailwind
+        df,
+        ltp,
+        minervini_passed,
+        stage,
+        is_vcp,
+        pivot_price,
+        pe_ratio,
+        sales_growth,
+        sector_tailwind,
     )
 
     composite_score = score_x + score_y + score_z
@@ -453,7 +465,9 @@ def calculate_magic_trend_score(
         "target_1": target_1,
         "target_2": target_2,
         "risk_reward_ratio": "1:2.0 (2R) / 1:3.5 (3.5R)",
-        "recommended_horizon": "1–6 Months (Positional Compounder)" if grade in ("👑 SUPER_COMPOUNDER", "🚀 HIGH_ALPHA") else "1–4 Weeks (Swing Alpha)",
+        "recommended_horizon": "1–6 Months (Positional Compounder)"
+        if grade in ("👑 SUPER_COMPOUNDER", "🚀 HIGH_ALPHA")
+        else "1–4 Weeks (Swing Alpha)",
         "trailing_stop_rule": "Scale 50% at Target 1 (+2R) -> Shift SL to Breakeven -> Trail remainder via 20-EMA.",
     }
 

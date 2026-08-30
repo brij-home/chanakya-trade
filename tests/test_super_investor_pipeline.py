@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-import pytest
 from fastapi.testclient import TestClient
 
 from analysis.magic_trend import calculate_magic_trend_score
@@ -37,13 +36,16 @@ def _create_synthetic_growth_df(n: int = 260) -> pd.DataFrame:
     volumes = np.random.uniform(100000, 400000, n)
 
     dates = pd.date_range(end="2026-08-30", periods=n, freq="B")
-    return pd.DataFrame({
-        "open": closes * 0.99,
-        "high": highs,
-        "low": lows,
-        "close": closes,
-        "volume": volumes,
-    }, index=dates)
+    return pd.DataFrame(
+        {
+            "open": closes * 0.99,
+            "high": highs,
+            "low": lows,
+            "close": closes,
+            "volume": volumes,
+        },
+        index=dates,
+    )
 
 
 # ── 1. Magic Trend 3-Axis Engine Tests ─────────────────────────
@@ -94,9 +96,36 @@ def test_thematic_baskets_metadata_and_scanning():
 def test_portfolio_doctor_diagnosis():
     # Setup test portfolio with a high concentration and a Stage 4 loser
     demo_holdings = [
-        HoldingRow(symbol="TRENT", qty=30, avg_price=5000.0, ltp=7000.0, value=210000.0, pnl=60000.0, pnl_pct=40.0, product="CNC"),
-        HoldingRow(symbol="HAL", qty=20, avg_price=4000.0, ltp=4600.0, value=92000.0, pnl=12000.0, pnl_pct=15.0, product="CNC"),
-        HoldingRow(symbol="IDEA", qty=2000, avg_price=16.0, ltp=8.0, value=16000.0, pnl=-16000.0, pnl_pct=-50.0, product="CNC"),
+        HoldingRow(
+            symbol="TRENT",
+            qty=30,
+            avg_price=5000.0,
+            ltp=7000.0,
+            value=210000.0,
+            pnl=60000.0,
+            pnl_pct=40.0,
+            product="CNC",
+        ),
+        HoldingRow(
+            symbol="HAL",
+            qty=20,
+            avg_price=4000.0,
+            ltp=4600.0,
+            value=92000.0,
+            pnl=12000.0,
+            pnl_pct=15.0,
+            product="CNC",
+        ),
+        HoldingRow(
+            symbol="IDEA",
+            qty=2000,
+            avg_price=16.0,
+            ltp=8.0,
+            value=16000.0,
+            pnl=-16000.0,
+            pnl_pct=-50.0,
+            product="CNC",
+        ),
     ]
     summary = PortfolioSummary(
         holdings=demo_holdings,

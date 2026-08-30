@@ -17,7 +17,7 @@ simultaneously connected brokers (e.g. Zerodha + Groww).
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Any, Literal, Optional
 import re
 
 from brokers.session import get_execution_broker
@@ -585,7 +585,9 @@ class PortfolioHealthAudit:
         }
 
 
-def audit_portfolio_health(portfolio_summary: Optional[PortfolioSummary] = None) -> PortfolioHealthAudit:
+def audit_portfolio_health(
+    portfolio_summary: Optional[PortfolioSummary] = None,
+) -> PortfolioHealthAudit:
     """
     Perform deep retail portfolio audit:
     - Concentration risk (HHI index & Top 3 concentration)
@@ -621,11 +623,13 @@ def audit_portfolio_health(portfolio_summary: Optional[PortfolioSummary] = None)
 
         for h in sorted_holdings:
             weight_pct = (h.value / total_equity) * 100.0
-            hhi += (weight_pct ** 2)
+            hhi += weight_pct**2
 
             # Single stock > 25% warning
             if weight_pct > 25.0:
-                recs.append(f"High single-stock risk: {h.symbol} is {weight_pct:.1f}% of your portfolio. Consider trimming towards <15%.")
+                recs.append(
+                    f"High single-stock risk: {h.symbol} is {weight_pct:.1f}% of your portfolio. Consider trimming towards <15%."
+                )
 
     if hhi > 2500:
         conc_risk = "CRITICAL"
@@ -640,9 +644,13 @@ def audit_portfolio_health(portfolio_summary: Optional[PortfolioSummary] = None)
     # Cash buffer check
     cash_drag = (cash / net_worth * 100.0) if net_worth > 0 else 0.0
     if cash_drag < 10.0:
-        recs.append("Low emergency cash reserve (<10%). Keep a liquid cash buffer to take advantage of market drawdowns.")
+        recs.append(
+            "Low emergency cash reserve (<10%). Keep a liquid cash buffer to take advantage of market drawdowns."
+        )
     elif cash_drag > 40.0:
-        recs.append(f"High cash drag ({cash_drag:.1f}% uninvested). Consider deploying into core index or undervalued leaders.")
+        recs.append(
+            f"High cash drag ({cash_drag:.1f}% uninvested). Consider deploying into core index or undervalued leaders."
+        )
 
     # Allocation pyramid
     used_margin = getattr(summary.risk, "used_margin", 0.0)
@@ -657,28 +665,43 @@ def audit_portfolio_health(portfolio_summary: Optional[PortfolioSummary] = None)
     for h in holdings:
         try:
             from analysis.forensic import audit_company_forensics
+
             sym = getattr(h, "symbol", "")
             if sym and not sym.endswith("-INDEX"):
                 f_res = audit_company_forensics(sym)
-                if f_res.is_manipulator_risk or f_res.distress_zone == "DISTRESS" or len(f_res.governance_red_flags) > 0:
+                if (
+                    f_res.is_manipulator_risk
+                    or f_res.distress_zone == "DISTRESS"
+                    or len(f_res.governance_red_flags) > 0
+                ):
                     flags_list = list(f_res.governance_red_flags)
                     if f_res.is_manipulator_risk:
-                        flags_list.append(f"Beneish M-Score {f_res.beneish_m_score:.2f} (Earnings Manipulation Risk)")
+                        flags_list.append(
+                            f"Beneish M-Score {f_res.beneish_m_score:.2f} (Earnings Manipulation Risk)"
+                        )
                     if f_res.distress_zone == "DISTRESS":
-                        flags_list.append(f"Altman Z-Score {f_res.altman_z_score:.2f} (Credit Distress)")
-                    
-                    forensic_flags.append({
-                        "symbol": sym,
-                        "rating": f_res.quality_rating,
-                        "distress_zone": f_res.distress_zone,
-                        "flags": flags_list,
-                    })
-                    recs.append(f"Forensic Red Flag on {sym}: {', '.join(flags_list)}. Review fundamental health or consider exit.")
+                        flags_list.append(
+                            f"Altman Z-Score {f_res.altman_z_score:.2f} (Credit Distress)"
+                        )
+
+                    forensic_flags.append(
+                        {
+                            "symbol": sym,
+                            "rating": f_res.quality_rating,
+                            "distress_zone": f_res.distress_zone,
+                            "flags": flags_list,
+                        }
+                    )
+                    recs.append(
+                        f"Forensic Red Flag on {sym}: {', '.join(flags_list)}. Review fundamental health or consider exit."
+                    )
         except Exception:
             pass
 
     if not recs:
-        recs.append("Portfolio health is institutional grade with healthy diversification and liquidity buffers.")
+        recs.append(
+            "Portfolio health is institutional grade with healthy diversification and liquidity buffers."
+        )
 
     return PortfolioHealthAudit(
         total_holdings_count=len(holdings),
@@ -720,30 +743,54 @@ def print_portfolio_health(audit_data: Optional[PortfolioHealthAudit] = None) ->
         f"  [bold]Concentration Risk[/bold] : [{risk_style}]{audit.concentration_risk}[/{risk_style}] (HHI: {audit.herfindahl_concentration_index:.0f} / 10000)",
     ]
     if audit.top_holding:
-        lines.append(f"  [bold]Largest Holding[/bold]    : [cyan]{audit.top_holding.get('symbol')}[/cyan] ({audit.top_holding.get('pct')}%)")
+        lines.append(
+            f"  [bold]Largest Holding[/bold]    : [cyan]{audit.top_holding.get('symbol')}[/cyan] ({audit.top_holding.get('pct')}%)"
+        )
     lines.append(f"  [bold]Top 3 Concentration[/bold]: {audit.top_3_concentration_pct:.1f}%")
 
     console.print()
     console.print(
-        Panel("\n".join(lines), title="[bold cyan]🛡 Institutional Portfolio Health & Wealth Audit[/bold cyan]", border_style="cyan")
+        Panel(
+            "\n".join(lines),
+            title="[bold cyan]🛡 Institutional Portfolio Health & Wealth Audit[/bold cyan]",
+            border_style="cyan",
+        )
     )
 
     # Allocation Pyramid
-    pyramid_table = Table(title="Asset Allocation Pyramid", show_header=True, header_style="bold cyan")
+    pyramid_table = Table(
+        title="Asset Allocation Pyramid", show_header=True, header_style="bold cyan"
+    )
     pyramid_table.add_column("Asset Bucket", style="bold white")
     pyramid_table.add_column("Allocation %", justify="right")
     pyramid_table.add_column("Target Guidance", style="dim")
 
-    pyramid_table.add_row("Core Long-Term Equity", f"{audit.allocation_pyramid.get('Core Long-Term Equity %', 0.0):.1f}%", "60% – 75% (Compounding Engine)")
-    pyramid_table.add_row("Active Trading / F&O Margin", f"{audit.allocation_pyramid.get('Active Trading / F&O %', 0.0):.1f}%", "10% – 20% (Alpha & Hedging)")
-    pyramid_table.add_row("Liquid Cash Buffer", f"{audit.allocation_pyramid.get('Liquid Cash Buffer %', 0.0):.1f}%", "10% – 20% (Dry Powder for Dip Buying)")
+    pyramid_table.add_row(
+        "Core Long-Term Equity",
+        f"{audit.allocation_pyramid.get('Core Long-Term Equity %', 0.0):.1f}%",
+        "60% – 75% (Compounding Engine)",
+    )
+    pyramid_table.add_row(
+        "Active Trading / F&O Margin",
+        f"{audit.allocation_pyramid.get('Active Trading / F&O %', 0.0):.1f}%",
+        "10% – 20% (Alpha & Hedging)",
+    )
+    pyramid_table.add_row(
+        "Liquid Cash Buffer",
+        f"{audit.allocation_pyramid.get('Liquid Cash Buffer %', 0.0):.1f}%",
+        "10% – 20% (Dry Powder for Dip Buying)",
+    )
     console.print(pyramid_table)
 
     # Forensic Warnings
     if audit.forensic_warnings:
-        console.print("\n[bold red]⚠️ Forensic & Governance Red Flags on Active Holdings:[/bold red]")
+        console.print(
+            "\n[bold red]⚠️ Forensic & Governance Red Flags on Active Holdings:[/bold red]"
+        )
         for fw in audit.forensic_warnings:
-            console.print(f"  • [bold]{fw['symbol']}[/bold] (Rating: {fw['rating']}, Distress Zone: {fw['distress_zone']})")
+            console.print(
+                f"  • [bold]{fw['symbol']}[/bold] (Rating: {fw['rating']}, Distress Zone: {fw['distress_zone']})"
+            )
             for f in fw["flags"]:
                 console.print(f"    - [red]{f}[/red]")
 
@@ -752,5 +799,3 @@ def print_portfolio_health(audit_data: Optional[PortfolioHealthAudit] = None) ->
     for r in audit.recommendations:
         console.print(f"  ✓ [white]{r}[/white]")
     console.print()
-
-

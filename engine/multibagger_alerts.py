@@ -21,7 +21,6 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 import threading
-import time
 import uuid
 from typing import Any, Optional
 
@@ -125,7 +124,7 @@ class MultibaggerAlertManager:
                 symbol=report.symbol,
                 event_type="FORENSIC_EARNINGS_SURPRISE",
                 headline=f"💎 {report.symbol} Clean Forensics & Generational Compounder Setup",
-                description=f"High ROCE, zero pledge, clean forensic audit score with strong operating leverage. Long-term wealth creation candidate.",
+                description="High ROCE, zero pledge, clean forensic audit score with strong operating leverage. Long-term wealth creation candidate.",
                 severity="HIGH",
                 horizon="LONG_TERM",
                 ltp=report.ltp,
