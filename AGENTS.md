@@ -49,7 +49,20 @@
 ### AI Multi-Agent & Smart Funnel Pipeline
 1. **Stage 1 (Pure Quant Pre-Filter)**: 0-token deterministic screening on technicals, valuation, sector RRG momentum, forensic accounting flags, and Minervini Stage 2 status before any LLM is called.
 2. **Stage 2 (Macro & Sector Context)**: India VIX, NIFTY 50 breadth, FII/DII institutional flows, and Sector RRG rotation matrix.
-3. **Stage 3 (Adversarial Multi-Agent Debate)**: Bull vs Bear analysts + 6 Persona Analysts (`buffett`, `jhunjhunwala`, `lynch`, `soros`, `munger`, `forensic`) + Facilitator + Fund Manager verdict synthesis.
+3. **Stage 3 (Adversarial Multi-Agent Debate & Persona Councils)**:
+   - Bull vs Bear analysts + 13 Specialist Personas:
+     - *Value & Moat*: `buffett`, `munger`, `lynch`
+     - *Indian Growth & Multibaggers*: `jhunjhunwala`, `kedia` (SMILE Framework)
+     - *Momentum & Breakouts*: `minervini` (SEPA/VCP), `wyckoff` (VSA/Spring), `oneil` (CAN SLIM)
+     - *Macro, Quant & Convexity*: `soros`, `simons` (Statistical Arbitrage), `taleb` (Defined-Risk Asymmetry)
+     - *Price Action & Liquidity*: `smc` (ICT Order Blocks & Sweeps)
+     - *Forensic Quality*: `forensic` (Beneish M-Score, Altman Z''-Score, Pledging)
+   - Specialized **Council Ensembles**:
+     - `breakout`: Minervini + Wyckoff + O'Neil + Forensic Auditor
+     - `options_sniper`: SMC + Taleb + Simons
+     - `multibagger`: Kedia + Buffett + Munger + Jhunjhunwala + Forensic Auditor
+     - `macro_regime`: Soros + Jhunjhunwala + Simons + Forensic Auditor
+     - `core_value`: Buffett + Munger + Lynch + Forensic Auditor
 4. **Dual-LLM Routing**:
    - Fast extraction layer (`AI_FAST_PROVIDER` e.g. Gemini Flash / Groq) for high-speed parallel extraction.
    - Deep reasoning layer (`AI_DEEP_PROVIDER` e.g. NVIDIA NIM / Claude / OpenAI / DeepSeek R1) for synthesis & risk gating.
@@ -151,6 +164,11 @@
       2. Actionable coaching alternatives (e.g. reducing position risk to 0.5% or taking a 15-minute breather).
       3. Explicit **Double Confirmation** (`[x] I acknowledge the heightened risk and choose to proceed with conscious awareness`).
     - The backend engine must evaluate preflight (`evaluate_preflight`) and allow execution with user acknowledgment (`allow_override=True`), logging an immutable audit record.
+23. **Specialist Personas & Council Ensemble Consensus Architecture**:
+    - The terminal supports 13 specialist market personas across value, momentum, price action, quantitative statistics, macro flows, and forensic accounting:
+      - `buffett`, `jhunjhunwala`, `lynch`, `soros`, `munger`, `forensic`, `minervini`, `wyckoff`, `oneil`, `taleb`, `kedia`, `simons`, `smc`.
+    - Always provide predefined high-conviction **Council Ensembles** (`breakout`, `options_sniper`, `multibagger`, `macro_regime`, `core_value`) combining complementary minds to eliminate false positives and synthesize conviction scores (0-100).
+    - Every persona must support both AI multi-agent LLM execution and deterministic quantitative rule-based fallback so the terminal never fails or renders blank cards.
 
 ---
 

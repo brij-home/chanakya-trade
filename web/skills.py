@@ -3904,3 +3904,51 @@ async def skill_defined_risk_spreads(req: DefinedRiskSpreadRequest):
     except Exception as e:
         raise _err(str(e))
 
+
+class CouncilRequest(BaseModel):
+    symbol: str
+    council: str = "breakout"
+    exchange: str = "NSE"
+
+
+class PersonaAnalyzeRequest(BaseModel):
+    symbol: str
+    persona_id: str
+    exchange: str = "NSE"
+
+
+@router.post("/persona/council")
+@router.post("/skills/persona/council")
+async def skill_persona_council(req: CouncilRequest):
+    """Run a specialized Council Ensemble of legendary personas on a stock symbol."""
+    try:
+        from agent.persona_agent import run_council
+        res = run_council(
+            council_name=req.council,
+            symbol=req.symbol,
+            exchange=req.exchange,
+        )
+        # Convert PersonaSignal objects to dict
+        if "signals" in res:
+            res["signals"] = [s.to_dict() if hasattr(s, "to_dict") else s for s in res["signals"]]
+        return _ok(res)
+    except Exception as e:
+        raise _err(str(e))
+
+
+@router.post("/persona/analyze")
+@router.post("/skills/persona/analyze")
+async def skill_persona_analyze(req: PersonaAnalyzeRequest):
+    """Analyze a stock ticker from the perspective of a specific legendary investor/trader persona."""
+    try:
+        from agent.persona_agent import run_persona_analysis
+        sig = run_persona_analysis(
+            persona_id=req.persona_id,
+            symbol=req.symbol,
+            exchange=req.exchange,
+        )
+        return _ok(sig.to_dict())
+    except Exception as e:
+        raise _err(str(e))
+
+

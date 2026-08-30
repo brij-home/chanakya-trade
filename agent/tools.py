@@ -1757,6 +1757,64 @@ def build_registry() -> ToolRegistry:
         ),
     )
 
+    reg.register(
+        name="run_persona_council",
+        description=(
+            "Run a specialized Council Ensemble of legendary investor & quant personas "
+            "(e.g. 'breakout' [Minervini, Wyckoff, O'Neil, Forensic], 'options_sniper' [SMC, Taleb, Simons], "
+            "'multibagger' [Kedia, Buffett, Munger, Jhunjhunwala, Forensic]) on a stock ticker to synthesize high-conviction consensus."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "symbol": {"type": "string", "description": "NSE/BSE stock ticker e.g. 'RELIANCE' or 'TATAMOTORS'"},
+                "council": {
+                    "type": "string",
+                    "default": "breakout",
+                    "description": "Council preset name: 'breakout', 'options_sniper', 'multibagger', 'macro_regime', or 'core_value'",
+                },
+                "exchange": {"type": "string", "default": "NSE", "description": "Exchange ('NSE' or 'BSE')"},
+            },
+            "required": ["symbol"],
+        },
+        fn=lambda symbol, council="breakout", exchange="NSE": (
+            __import__("agent.persona_agent", fromlist=["run_council"]).run_council(
+                council_name=council,
+                symbol=symbol,
+                exchange=exchange,
+                registry=reg,
+            )
+        ),
+    )
+
+    reg.register(
+        name="analyze_persona",
+        description=(
+            "Run a specific legendary investor/trader persona analysis "
+            "('buffett', 'jhunjhunwala', 'lynch', 'soros', 'munger', 'forensic', 'minervini', 'wyckoff', 'oneil', 'taleb', 'kedia', 'simons', 'smc') on a stock ticker."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "symbol": {"type": "string", "description": "Stock ticker e.g. 'INFY'"},
+                "persona_id": {
+                    "type": "string",
+                    "description": "Persona identifier e.g. 'minervini', 'kedia', 'taleb', 'smc', 'buffett'",
+                },
+                "exchange": {"type": "string", "default": "NSE"},
+            },
+            "required": ["symbol", "persona_id"],
+        },
+        fn=lambda symbol, persona_id, exchange="NSE": (
+            __import__("agent.persona_agent", fromlist=["run_persona_analysis"]).run_persona_analysis(
+                persona_id=persona_id,
+                symbol=symbol,
+                exchange=exchange,
+                registry=reg,
+            ).to_dict()
+        ),
+    )
+
     # ── Tag all registered tools as read-only + concurrency-safe ──
     # Every tool in the base registry is a read/analyse tool — none place orders.
     # Destructive tools (execute_trade) are added separately by the harness.

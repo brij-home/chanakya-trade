@@ -847,6 +847,38 @@ MANIFEST: dict = {
             },
             "output_description": "DefinedRiskSpread with legs, net_cashflow, max_profit, max_loss, risk_reward_ratio, breakevens, and margin required.",
         },
+        {
+            "name": "persona_council",
+            "path": "/skills/persona/council",
+            "method": "POST",
+            "description": "Run a specialized Council Ensemble of legendary personas (Breakout, Options Sniper, Multibagger, Macro Regime) on a stock symbol.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "symbol": {"type": "string", "description": "Stock ticker e.g. 'RELIANCE'"},
+                    "council": {"type": "string", "default": "breakout", "description": "Council preset ('breakout', 'options_sniper', 'multibagger', 'macro_regime', 'core_value')"},
+                    "exchange": {"type": "string", "default": "NSE"},
+                },
+                "required": ["symbol"],
+            },
+            "output_description": "Consensus verdict, conviction score (0-100), and individual persona signals from the council.",
+        },
+        {
+            "name": "persona_analyze",
+            "path": "/skills/persona/analyze",
+            "method": "POST",
+            "description": "Analyze a stock from the perspective of a specific legendary investor/trader persona (Buffett, Minervini, Kedia, Taleb, Wyckoff, O'Neil, Simons, SMC, etc.).",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "symbol": {"type": "string", "description": "Stock ticker e.g. 'TCS'"},
+                    "persona_id": {"type": "string", "description": "Persona ID e.g. 'minervini', 'kedia', 'taleb', 'smc', 'buffett'"},
+                    "exchange": {"type": "string", "default": "NSE"},
+                },
+                "required": ["symbol", "persona_id"],
+            },
+            "output_description": "PersonaSignal with verdict, confidence, rationale checklist, and key metrics.",
+        },
     ],
 }
 

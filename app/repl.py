@@ -130,6 +130,8 @@ COMMANDS = [
     "spreads",
     "charges",
     "tilt",
+    "council",
+    "persona",
     "execute",
     "harness",
     "save-pdf",
@@ -2599,6 +2601,54 @@ def run_repl(broker: BrokerAPI) -> None:
                     except Exception as err:
                         console.print(f"[red]Error computing charges:[/red] {err}")
 
+            elif command == "council":
+                # Usage: council [COUNCIL_NAME] <SYMBOL>
+                # e.g. council breakout RELIANCE, council multibagger TATAMOTORS, council options_sniper NIFTY
+                if not args:
+                    console.print("[yellow]Usage: council [breakout|options_sniper|multibagger|macro_regime|core_value] <SYMBOL>[/yellow]")
+                    console.print("[dim]Available councils: breakout, options_sniper, multibagger, macro_regime, core_value[/dim]")
+                else:
+                    council_name = "breakout"
+                    symbol = args[0].upper()
+                    if len(args) >= 2:
+                        council_name = args[0].lower()
+                        symbol = args[1].upper()
+                    elif args[0].lower() in ("breakout", "options_sniper", "multibagger", "macro_regime", "core_value", "options"):
+                        console.print(f"[red]Please specify a symbol: council {args[0]} <SYMBOL>[/red]")
+                        symbol = None
+
+                    if symbol:
+                        from agent.persona_agent import run_council, print_council_verdict
+                        with console.status(f"[cyan]Polling {council_name.upper()} council for {symbol}…[/cyan]"):
+                            res = run_council(council_name=council_name, symbol=symbol)
+                        print_council_verdict(res)
+
+            elif command == "persona":
+                # Usage: persona <PERSONA_ID> <SYMBOL>
+                # e.g. persona minervini RELIANCE, persona kedia TATAMOTORS, persona taleb NIFTY
+                if len(args) < 2:
+                    console.print("[yellow]Usage: persona <buffett|jhunjhunwala|lynch|soros|munger|forensic|minervini|wyckoff|oneil|taleb|kedia|simons|smc> <SYMBOL>[/yellow]")
+                else:
+                    pid = args[0].lower()
+                    sym = args[1].upper()
+                    from agent.persona_agent import run_persona_analysis
+                    from rich.panel import Panel
+                    with console.status(f"[cyan]Consulting {pid.title()} on {sym}…[/cyan]"):
+                        sig = run_persona_analysis(persona_id=pid, symbol=sym)
+                    pv_color = "green" if "BUY" in sig.verdict else ("red" if "SELL" in sig.verdict else "yellow")
+                    lines = [
+                        f"[bold]Verdict[/bold]    : [{pv_color}]{sig.verdict}[/{pv_color}] (Confidence: {sig.confidence}%)",
+                        f"[bold]Rationale[/bold]  :",
+                    ]
+                    for r in sig.rationale:
+                        lines.append(f"  • {r}")
+                    if sig.key_metrics:
+                        lines.append("[bold]Key Checkpoints[/bold]:")
+                        for k, v in sig.key_metrics.items():
+                            lines.append(f"  - {k}: {v}")
+                    console.print()
+                    console.print(Panel("\n".join(lines), title=f"[bold cyan]🧠 Persona Analysis: {pid.title()} on {sym}[/bold cyan]", border_style=pv_color))
+                    console.print()
 
             else:
                 console.print(

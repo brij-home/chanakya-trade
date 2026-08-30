@@ -29,6 +29,9 @@ class SynthesisOutput(BaseModel):
     rationale: list[str] = Field(default_factory=list)
     risks: list[str] = Field(default_factory=list)
 
+    def to_dict(self) -> dict:
+        return self.model_dump()
+
 
 class AnalystSignal(BaseModel):
     """Structured signal from a single analyst."""
@@ -40,6 +43,9 @@ class AnalystSignal(BaseModel):
     key_points: list[str] = Field(default_factory=list)
     error: str = ""
 
+    def to_dict(self) -> dict:
+        return self.model_dump()
+
 
 class PersonaSignal(BaseModel):
     """Signal from a named investor persona (Buffett, Jhunjhunwala, etc.)."""
@@ -49,3 +55,7 @@ class PersonaSignal(BaseModel):
     confidence: int = Field(ge=0, le=100)
     rationale: list[str] = Field(default_factory=list)
     key_metrics: dict[str, str] = Field(default_factory=dict)  # metric_name -> value string
+
+    def to_dict(self) -> dict:
+        return self.model_dump()
+

@@ -547,7 +547,7 @@ def run_debate(
     llm_provider: Any = None,
 ) -> list[PersonaSignal]:
     """
-    Run all 5 personas and return their signals.
+    Run all defined personas and return their signals.
 
     Parameters
     ----------
@@ -574,3 +574,111 @@ def run_debate(
         signals.append(signal)
 
     return signals
+
+
+# ── Council Ensembles ─────────────────────────────────────────
+
+COUNCIL_PRESETS: dict[str, list[str]] = {
+    "breakout": ["minervini", "wyckoff", "oneil", "forensic"],
+    "options_sniper": ["smc", "taleb", "simons"],
+    "multibagger": ["kedia", "buffett", "munger", "jhunjhunwala", "forensic"],
+    "macro_regime": ["soros", "jhunjhunwala", "simons", "forensic"],
+    "core_value": ["buffett", "munger", "lynch", "forensic"],
+}
+
+
+def run_council(
+    council_name: str,
+    symbol: str,
+    exchange: str = "NSE",
+    registry: Any = None,
+    llm_provider: Any = None,
+) -> dict[str, Any]:
+    """
+    Run a specialized council ensemble of personas and synthesize a consensus recommendation.
+    """
+    c_key = council_name.lower().replace("-", "_").replace(" ", "_")
+    persona_ids = COUNCIL_PRESETS.get(c_key)
+    if not persona_ids:
+        # Match closest or fallback to breakout
+        persona_ids = COUNCIL_PRESETS.get("breakout", ["minervini", "wyckoff", "oneil", "forensic"])
+
+    signals = [
+        run_persona_analysis(pid, symbol, exchange, registry, llm_provider)
+        for pid in persona_ids
+    ]
+
+    verdict_scores = {
+        "STRONG_BUY": 100,
+        "BUY": 75,
+        "HOLD": 50,
+        "SELL": 25,
+        "STRONG_SELL": 0,
+    }
+    total_score = sum(verdict_scores.get(s.verdict, 50) * (s.confidence / 100.0) for s in signals)
+    weight_sum = sum(s.confidence / 100.0 for s in signals) or 1.0
+    consensus_score = total_score / weight_sum
+
+    if consensus_score >= 80:
+        consensus_verdict = "STRONG_BUY"
+    elif consensus_score >= 65:
+        consensus_verdict = "BUY"
+    elif consensus_score >= 40:
+        consensus_verdict = "HOLD"
+    elif consensus_score >= 25:
+        consensus_verdict = "SELL"
+    else:
+        consensus_verdict = "STRONG_SELL"
+
+    return {
+        "council": council_name,
+        "symbol": symbol.upper(),
+        "exchange": exchange.upper(),
+        "consensus_verdict": consensus_verdict,
+        "consensus_score": round(consensus_score, 1),
+        "signals": signals,
+        "member_count": len(signals),
+    }
+
+
+def print_council_verdict(res: dict[str, Any]) -> None:
+    """Print high-density Rich visualization of council signals."""
+    from rich.console import Console
+    from rich.panel import Panel
+    from rich.table import Table
+
+    console = Console()
+
+    v_color = {
+        "STRONG_BUY": "bold green",
+        "BUY": "green",
+        "HOLD": "yellow",
+        "SELL": "red",
+        "STRONG_SELL": "bold red",
+    }.get(res["consensus_verdict"], "cyan")
+
+    table = Table(title=f"🏛️ Council: {res['council'].upper()} — {res['symbol']} ({res['exchange']})", border_style="cyan")
+    table.add_column("Persona", style="bold white", width=22)
+    table.add_column("Verdict", width=14)
+    table.add_column("Confidence", justify="right", width=12)
+    table.add_column("Key Rationale / Checklist", style="dim")
+
+    for s in res["signals"]:
+        pv_color = "green" if "BUY" in s.verdict else ("red" if "SELL" in s.verdict else "yellow")
+        rationale_snip = s.rationale[0] if s.rationale else "No rationale provided"
+        table.add_row(
+            s.persona.title(),
+            f"[{pv_color}]{s.verdict}[/{pv_color}]",
+            f"{s.confidence}%",
+            rationale_snip,
+        )
+
+    summary_text = (
+        f"Consensus Verdict: [{v_color}]{res['consensus_verdict']}[/{v_color}]  "
+        f"(Conviction Score: [bold]{res['consensus_score']}/100[/bold])\n"
+        f"Council Members: {res['member_count']} Specialist Personas Polled"
+    )
+
+    console.print(table)
+    console.print(Panel(summary_text, title="🎯 Council Decision Synthesis", border_style="green" if "BUY" in res["consensus_verdict"] else "yellow"))
+

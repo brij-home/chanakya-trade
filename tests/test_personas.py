@@ -32,43 +32,160 @@ from agent.persona_agent import (
 class TestPersonaDefinitions:
     """Validate that all personas are correctly defined."""
 
-    EXPECTED_IDS = {"buffett", "jhunjhunwala", "lynch", "soros", "munger", "forensic"}
+    EXPECTED_IDS = {
+        "buffett",
+        "jhunjhunwala",
+        "lynch",
+        "soros",
+        "munger",
+        "forensic",
+        "minervini",
+        "wyckoff",
+        "oneil",
+        "taleb",
+        "kedia",
+        "simons",
+        "smc",
+    }
+    ALL_IDS = list(EXPECTED_IDS)
 
-    def test_all_five_personas_defined(self):
+    def test_all_thirteen_personas_defined(self):
         assert set(PERSONAS.keys()) == self.EXPECTED_IDS
 
-    @pytest.mark.parametrize("persona_id", ["buffett", "jhunjhunwala", "lynch", "soros", "munger", "forensic"])
+    @pytest.mark.parametrize(
+        "persona_id",
+        [
+            "buffett",
+            "jhunjhunwala",
+            "lynch",
+            "soros",
+            "munger",
+            "forensic",
+            "minervini",
+            "wyckoff",
+            "oneil",
+            "taleb",
+            "kedia",
+            "simons",
+            "smc",
+        ],
+    )
     def test_checklist_has_at_least_five_items(self, persona_id: str):
         persona = PERSONAS[persona_id]
         assert len(persona.checklist) >= 5, (
             f"{persona_id}.checklist has {len(persona.checklist)} items — need ≥5"
         )
 
-    @pytest.mark.parametrize("persona_id", ["buffett", "jhunjhunwala", "lynch", "soros", "munger", "forensic"])
+    @pytest.mark.parametrize(
+        "persona_id",
+        [
+            "buffett",
+            "jhunjhunwala",
+            "lynch",
+            "soros",
+            "munger",
+            "forensic",
+            "minervini",
+            "wyckoff",
+            "oneil",
+            "taleb",
+            "kedia",
+            "simons",
+            "smc",
+        ],
+    )
     def test_weights_sum_to_one(self, persona_id: str):
         persona = PERSONAS[persona_id]
         total = sum(persona.weights.values())
         assert abs(total - 1.0) < 1e-9, f"{persona_id}.weights sum to {total:.4f}, expected 1.0"
 
-    @pytest.mark.parametrize("persona_id", ["buffett", "jhunjhunwala", "lynch", "soros", "munger", "forensic"])
+    @pytest.mark.parametrize(
+        "persona_id",
+        [
+            "buffett",
+            "jhunjhunwala",
+            "lynch",
+            "soros",
+            "munger",
+            "forensic",
+            "minervini",
+            "wyckoff",
+            "oneil",
+            "taleb",
+            "kedia",
+            "simons",
+            "smc",
+        ],
+    )
     def test_system_prompt_non_empty(self, persona_id: str):
         persona = PERSONAS[persona_id]
         assert persona.system_prompt.strip(), f"{persona_id}.system_prompt is empty"
 
-    @pytest.mark.parametrize("persona_id", ["buffett", "jhunjhunwala", "lynch", "soros", "munger", "forensic"])
+    @pytest.mark.parametrize(
+        "persona_id",
+        [
+            "buffett",
+            "jhunjhunwala",
+            "lynch",
+            "soros",
+            "munger",
+            "forensic",
+            "minervini",
+            "wyckoff",
+            "oneil",
+            "taleb",
+            "kedia",
+            "simons",
+            "smc",
+        ],
+    )
     def test_system_prompt_has_meaningful_length(self, persona_id: str):
         persona = PERSONAS[persona_id]
         assert len(persona.system_prompt) >= 200, (
             f"{persona_id}.system_prompt too short ({len(persona.system_prompt)} chars)"
         )
 
-    @pytest.mark.parametrize("persona_id", ["buffett", "jhunjhunwala", "lynch", "soros", "munger", "forensic"])
+    @pytest.mark.parametrize(
+        "persona_id",
+        [
+            "buffett",
+            "jhunjhunwala",
+            "lynch",
+            "soros",
+            "munger",
+            "forensic",
+            "minervini",
+            "wyckoff",
+            "oneil",
+            "taleb",
+            "kedia",
+            "simons",
+            "smc",
+        ],
+    )
     def test_all_weight_values_positive(self, persona_id: str):
         persona = PERSONAS[persona_id]
         for dim, w in persona.weights.items():
             assert w > 0, f"{persona_id}.weights[{dim}] = {w}, must be > 0"
 
-    @pytest.mark.parametrize("persona_id", ["buffett", "jhunjhunwala", "lynch", "soros", "munger", "forensic"])
+    @pytest.mark.parametrize(
+        "persona_id",
+        [
+            "buffett",
+            "jhunjhunwala",
+            "lynch",
+            "soros",
+            "munger",
+            "forensic",
+            "minervini",
+            "wyckoff",
+            "oneil",
+            "taleb",
+            "kedia",
+            "simons",
+            "smc",
+        ],
+    )
     def test_persona_is_dataclass_instance(self, persona_id: str):
         persona = PERSONAS[persona_id]
         assert isinstance(persona, InvestorPersona)
@@ -97,6 +214,13 @@ class TestPersonaDefinitions:
         assert PERSONAS["soros"].style == "macro"
         assert PERSONAS["munger"].style == "quality"
         assert PERSONAS["forensic"].style == "forensic-quality"
+        assert PERSONAS["minervini"].style == "trend-momentum"
+        assert PERSONAS["wyckoff"].style == "price-action-vsa"
+        assert PERSONAS["oneil"].style == "can-slim"
+        assert PERSONAS["taleb"].style == "antifragile-convexity"
+        assert PERSONAS["kedia"].style == "indian-multibagger"
+        assert PERSONAS["simons"].style == "quantitative-statistical"
+        assert PERSONAS["smc"].style == "market-structure-liquidity"
 
 
 # ── Helper functions ──────────────────────────────────────────
@@ -121,7 +245,24 @@ class TestGetPersona:
         with pytest.raises(ValueError):
             get_persona("")
 
-    @pytest.mark.parametrize("persona_id", ["buffett", "jhunjhunwala", "lynch", "soros", "munger", "forensic"])
+    @pytest.mark.parametrize(
+        "persona_id",
+        [
+            "buffett",
+            "jhunjhunwala",
+            "lynch",
+            "soros",
+            "munger",
+            "forensic",
+            "minervini",
+            "wyckoff",
+            "oneil",
+            "taleb",
+            "kedia",
+            "simons",
+            "smc",
+        ],
+    )
     def test_all_known_ids_return_persona(self, persona_id: str):
         persona = get_persona(persona_id)
         assert persona.id == persona_id
@@ -562,3 +703,32 @@ class TestScoreDimension:
             for dim in ("fundamentals", "technicals", "macro", "sentiment", "options"):
                 score = _score_dimension(dim, brief)
                 assert 0 <= score <= 100, f"{dim} score {score} out of range"
+
+
+class TestCouncilEnsembles:
+    """Validate council ensembles and consensus synthesis."""
+
+    def test_all_council_presets_exist(self):
+        from agent.persona_agent import COUNCIL_PRESETS
+        expected = {"breakout", "options_sniper", "multibagger", "macro_regime", "core_value"}
+        assert set(COUNCIL_PRESETS.keys()) == expected
+
+    @pytest.mark.parametrize("council_name", ["breakout", "options_sniper", "multibagger", "macro_regime", "core_value"])
+    def test_council_members_are_valid_personas(self, council_name: str):
+        from agent.persona_agent import COUNCIL_PRESETS
+        members = COUNCIL_PRESETS[council_name]
+        assert len(members) >= 3
+        for m in members:
+            assert m in PERSONAS
+
+    def test_run_council_returns_valid_consensus(self):
+        from agent.persona_agent import run_council
+        res = run_council("breakout", "RELIANCE")
+        assert res["council"] == "breakout"
+        assert res["symbol"] == "RELIANCE"
+        assert res["consensus_verdict"] in ("STRONG_BUY", "BUY", "HOLD", "SELL", "STRONG_SELL")
+        assert 0 <= res["consensus_score"] <= 100
+        assert len(res["signals"]) == 4
+        for sig in res["signals"]:
+            assert isinstance(sig, PersonaSignal)
+
