@@ -1,6 +1,8 @@
 import { useState, useEffect } from 'react'
 import { useChatStore } from '../../store/chatStore'
 import { useAPI } from '../../hooks/useAPI'
+import SmartTypeahead from '../Common/SmartTypeahead'
+import { fuzzySearchUniverse } from '../../data/universeData'
 
 const COUNCIL_MODES = [
   { id: 'debate', name: 'Bull vs Bear Debate', icon: '⚔️', desc: 'Adversarial Thesis & Anti-Thesis' },
@@ -32,42 +34,91 @@ export default function DebateArenaView({ onOpenOrderTicket }) {
   const sendDraft = useChatStore((s) => s.sendDraft)
   const [symbol, setSymbol] = useState('RELIANCE')
   const [inputSymbol, setInputSymbol] = useState('')
+  const [showTypeahead, setShowTypeahead] = useState(false)
+  const [typeaheadIndex, setTypeaheadIndex] = useState(0)
   const [selectedCouncil, setSelectedCouncil] = useState('debate')
   const [data, setData] = useState(null)
   const [councilData, setCouncilData] = useState(null)
-  const [loading, setLoading] = useState(true)
+  const [loading, setLoading] = useState(false)
   const [isStreaming, setIsStreaming] = useState(false)
   const [streamingSteps, setStreamingSteps] = useState([])
   const [expandedMember, setExpandedMember] = useState(null)
 
-  useEffect(() => {
-    let unmounted = false
-    const fetchData = async () => {
-      try {
-        setLoading(true)
-        if (selectedCouncil === 'debate') {
-          const res = await call('/skills/debate_snapshot', { symbol, exchange: 'NSE' })
-          const snapshot = res?.data ?? res
-          if (!unmounted && snapshot) {
-            setData(snapshot)
-          }
-        } else {
-          const res = await call('/skills/persona/council', { symbol, council: selectedCouncil, exchange: 'NSE' })
-          const cSnapshot = res?.data ?? res
-          if (!unmounted && cSnapshot) {
-            setCouncilData(cSnapshot)
-          }
-        }
-      } catch (err) {
-        console.error('Failed to load snapshot:', err)
-      } finally {
-        if (!unmounted) setLoading(false)
+  const startActivity = useChatStore((s) => s.startActivity)
+  const updateActivity = useChatStore((s) => s.updateActivity)
+  const stopActivity = useChatStore((s) => s.stopActivity)
+
+  const executeDebate = async (targetSymbol = symbol, targetCouncil = selectedCouncil) => {
+    setIsStreaming(true)
+    setLoading(true)
+    const isCouncil = targetCouncil !== 'debate'
+    const councilName = COUNCIL_MODES.find((c) => c.id === targetCouncil)?.name || 'Council'
+    const title = isCouncil ? `${councilName} (${targetSymbol})` : `Adversarial Debate (${targetSymbol})`
+
+    const abortController = new AbortController()
+
+    startActivity({
+      title,
+      details: `⚡ Polling ${councilName} for ${targetSymbol}...`,
+      type: 'debate',
+      targetView: 'debate',
+      cancelFn: () => {
+        try {
+          abortController.abort()
+        } catch (e) {}
+        setIsStreaming(false)
+        setLoading(false)
+        stopActivity()
+      },
+    })
+
+    setStreamingSteps([
+      `⚡ Initializing Multi-Agent Pipeline for ${targetSymbol}...`,
+      `🔍 Extracting Minervini VCP, Wyckoff accumulation & SMC Order Blocks...`,
+      `🔬 Persona agents debating invalidation and risk parameters...`,
+      `⚖️ Synthesizing high-conviction consensus score...`,
+    ])
+
+    const t1 = setTimeout(() => updateActivity({ details: `🔍 Specialists extracting quantitative edge metrics for ${targetSymbol}...` }), 300)
+    const t2 = setTimeout(() => updateActivity({ details: `🔬 Persona agents debating invalidation and risk parameters...` }), 750)
+    const t3 = setTimeout(() => updateActivity({ details: `⚖️ Synthesizing high-conviction consensus score...` }), 1200)
+
+    try {
+      if (targetCouncil === 'debate') {
+        const res = await call('/skills/debate_snapshot', { symbol: targetSymbol, exchange: 'NSE' }, { signal: abortController.signal })
+        const snapshot = res?.data ?? res
+        if (snapshot) setData(snapshot)
+      } else {
+        const res = await call('/skills/persona/council', { symbol: targetSymbol, council: targetCouncil, exchange: 'NSE' }, { signal: abortController.signal })
+        const cSnapshot = res?.data ?? res
+        if (cSnapshot) setCouncilData(cSnapshot)
       }
+
+      const curView = useChatStore.getState().activeView
+      if (curView !== 'debate') {
+        useChatStore.getState().notifyCompletedActivity({
+          title: `${title} Ready`,
+          message: `Specialist persona consensus synthesized for ${targetSymbol}.`,
+          targetView: 'debate',
+        })
+      }
+    } catch (err) {
+      if (err.name !== 'AbortError') {
+        console.error('Failed to run live debate:', err)
+      }
+    } finally {
+      clearTimeout(t1)
+      clearTimeout(t2)
+      clearTimeout(t3)
+      setIsStreaming(false)
+      setLoading(false)
+      stopActivity()
     }
-    fetchData()
-    return () => {
-      unmounted = true
-    }
+  }
+
+  // Trigger analysis whenever symbol or selectedCouncil changes
+  useEffect(() => {
+    executeDebate(symbol, selectedCouncil)
   }, [symbol, selectedCouncil])
 
   const handleSearch = (e) => {
@@ -79,59 +130,8 @@ export default function DebateArenaView({ onOpenOrderTicket }) {
     }
   }
 
-  const startActivity = useChatStore((s) => s.startActivity)
-  const updateActivity = useChatStore((s) => s.updateActivity)
-  const stopActivity = useChatStore((s) => s.stopActivity)
-
-  const startLiveDebate = async () => {
-    setIsStreaming(true)
-    const isCouncil = selectedCouncil !== 'debate'
-    const title = isCouncil
-      ? `${COUNCIL_MODES.find(c => c.id === selectedCouncil)?.name || 'Council'} (${symbol})`
-      : `Adversarial Debate (${symbol})`
-
-    startActivity({
-      title,
-      details: `⚡ Initializing Multi-Agent Pipeline for ${symbol}...`,
-      type: 'debate',
-      cancelFn: () => {
-        setIsStreaming(false)
-        stopActivity()
-      },
-    })
-
-    setStreamingSteps([
-      '⚡ Initializing Multi-Agent Pipeline for ' + symbol + '...',
-      '🔍 Specialists extracting quantitative edge metrics...',
-      '🔬 Persona agents debating invalidation and risk parameters...',
-      '⚖️ Synthesizing high-conviction consensus score...',
-    ])
-
-    const t1 = setTimeout(() => updateActivity({ details: '🔍 Specialists extracting quantitative edge metrics...' }), 400)
-    const t2 = setTimeout(() => updateActivity({ details: '🔬 Persona agents debating invalidation and risk parameters...' }), 850)
-    const t3 = setTimeout(() => updateActivity({ details: '⚖️ Synthesizing high-conviction consensus score...' }), 1300)
-
-    try {
-      if (selectedCouncil === 'debate') {
-        const res = await call('/skills/debate_snapshot', { symbol, exchange: 'NSE' })
-        const snapshot = res?.data ?? res
-        if (snapshot) setData(snapshot)
-      } else {
-        const res = await call('/skills/persona/council', { symbol, council: selectedCouncil, exchange: 'NSE' })
-        const cSnapshot = res?.data ?? res
-        if (cSnapshot) setCouncilData(cSnapshot)
-      }
-    } catch (err) {
-      console.error('Failed to run live debate:', err)
-    } finally {
-      clearTimeout(t1)
-      clearTimeout(t2)
-      clearTimeout(t3)
-      setTimeout(() => {
-        setIsStreaming(false)
-        stopActivity()
-      }, 1500)
-    }
+  const startLiveDebate = () => {
+    executeDebate(symbol, selectedCouncil)
   }
 
   const score = selectedCouncil === 'debate'
@@ -148,19 +148,19 @@ export default function DebateArenaView({ onOpenOrderTicket }) {
   const isCouncilSell = councilVerdict.includes('SELL')
 
   return (
-    <div className="flex-1 overflow-y-auto p-3 sm:p-6 bg-surface text-text space-y-5 font-ui relative">
+    <div className="flex-1 overflow-y-auto p-2.5 sm:p-3.5 bg-surface text-text space-y-2.5 font-ui relative">
       {/* Top Header & Stock Switcher */}
-      <div className="flex flex-wrap items-center justify-between gap-4 bg-panel/90 border border-border/80 rounded-2xl px-5 py-3.5 shadow-md backdrop-blur-md">
-        <div className="flex items-center gap-3">
-          <span className="text-amber text-lg">◆</span>
+      <div className="relative z-30 flex flex-wrap items-center justify-between gap-2.5 bg-panel border border-border/80 rounded-xl px-3.5 py-2 shadow-xs">
+        <div className="flex items-center gap-2.5">
+          <span className="text-amber text-base">◆</span>
           <div>
-            <h1 className="text-lg font-bold font-mono text-text flex items-center gap-2">
+            <h1 className="text-sm font-bold font-mono text-text flex items-center gap-2">
               <span>{symbol} (NSE)</span>
-              <span className="text-xs px-2 py-0.5 rounded-full bg-green/15 text-green font-bold border border-green/30">
+              <span className="text-[10px] px-2 py-0.5 rounded-full bg-green/15 text-green font-bold border border-green/30">
                 {ltp > 0 ? `₹${Number(ltp).toLocaleString('en-IN', { minimumFractionDigits: 2 })}` : 'Live Stream'}
               </span>
             </h1>
-            <div className="flex items-center gap-2 text-[11px] text-muted">
+            <div className="flex items-center gap-2 text-[10px] text-muted">
               <span>Institutional Multi-Agent Intelligence Hub</span>
               <span>•</span>
               <span className="text-emerald-400 font-mono font-semibold">13 Specialist Personas</span>
@@ -169,14 +169,14 @@ export default function DebateArenaView({ onOpenOrderTicket }) {
         </div>
 
         {/* Quick Tickers & Search */}
-        <div className="flex flex-wrap items-center gap-2">
+        <div className="flex flex-wrap items-center gap-1.5">
           {/* Quick Tickers Chips */}
           <div className="flex items-center gap-1 overflow-x-auto">
             {['RELIANCE', 'TCS', 'INFY', 'HDFCBANK', 'COFORGE', 'TRENT'].map((sym) => (
               <button
                 key={sym}
                 onClick={() => setSymbol(sym)}
-                className={`px-3 py-1.5 rounded-xl text-xs font-mono font-bold transition-all cursor-pointer ${
+                className={`px-2.5 py-1 rounded-lg text-xs font-mono font-bold transition-all cursor-pointer ${
                   symbol === sym
                     ? 'bg-amber text-black shadow-xs ring-1 ring-amber/40'
                     : 'bg-elevated/70 hover:bg-elevated text-muted hover:text-text border border-border/60'
@@ -187,22 +187,84 @@ export default function DebateArenaView({ onOpenOrderTicket }) {
             ))}
           </div>
 
-          {/* Search Custom Symbol Input */}
-          <form onSubmit={handleSearch} className="flex items-center gap-1">
-            <input
-              type="text"
-              placeholder="Custom symbol..."
-              value={inputSymbol}
-              onChange={(e) => setInputSymbol(e.target.value)}
-              className="bg-surface border border-border/70 rounded-xl px-2.5 py-1.5 text-xs text-text placeholder:text-muted/60 focus:outline-none focus:border-amber font-mono w-28 uppercase"
+          {/* Search Custom Symbol Input with SmartTypeahead */}
+          <div className="relative z-50">
+            <form onSubmit={handleSearch} className="flex items-center gap-1">
+              <div className="flex items-center gap-1 bg-surface/90 border-2 border-border focus-within:border-amber focus-within:ring-2 focus-within:ring-amber/30 rounded-lg px-2 py-1 transition-all text-xs shadow-xs">
+                <span className="text-amber font-black text-xs">🔍</span>
+                <input
+                  type="text"
+                  placeholder="Switch symbol..."
+                  value={inputSymbol}
+                  onChange={(e) => {
+                    setInputSymbol(e.target.value)
+                    setShowTypeahead(true)
+                    setTypeaheadIndex(0)
+                  }}
+                  onFocus={() => setShowTypeahead(true)}
+                  onKeyDown={(e) => {
+                    if (showTypeahead) {
+                      const items = fuzzySearchUniverse(inputSymbol, symbol, 8).filter((r) => r.type === 'symbol')
+                      if (items.length > 0) {
+                        if (e.key === 'ArrowDown') {
+                          e.preventDefault()
+                          setTypeaheadIndex((prev) => (prev + 1) % items.length)
+                          return
+                        }
+                        if (e.key === 'ArrowUp') {
+                          e.preventDefault()
+                          setTypeaheadIndex((prev) => (prev - 1 + items.length) % items.length)
+                          return
+                        }
+                        if (e.key === 'Enter') {
+                          e.preventDefault()
+                          const selected = items[typeaheadIndex] || items[0]
+                          if (selected?.symbol) {
+                            setSymbol(selected.symbol)
+                            setInputSymbol('')
+                            setShowTypeahead(false)
+                          }
+                          return
+                        }
+                        if (e.key === 'Tab') {
+                          e.preventDefault()
+                          const selected = items[typeaheadIndex] || items[0]
+                          if (selected?.symbol) {
+                            setInputSymbol(selected.symbol)
+                          }
+                          return
+                        }
+                      }
+                    }
+                    if (e.key === 'Escape') setShowTypeahead(false)
+                  }}
+                  className="bg-transparent text-xs text-text font-mono font-bold uppercase outline-none placeholder:text-text/50 w-32"
+                />
+              </div>
+              <button
+                type="submit"
+                className="px-3 py-2 rounded-xl bg-elevated hover:bg-amber hover:text-black border-2 border-border text-xs text-text font-bold cursor-pointer transition-all shadow-xs"
+              >
+                Go
+              </button>
+            </form>
+
+            <SmartTypeahead
+              query={inputSymbol}
+              activeSymbol={symbol}
+              isOpen={showTypeahead}
+              onSelect={(item) => {
+                if (item.symbol) setSymbol(item.symbol)
+                setInputSymbol('')
+                setShowTypeahead(false)
+              }}
+              onClose={() => setShowTypeahead(false)}
+              mode="symbols_only"
+              position="below"
+              selectedIndex={typeaheadIndex}
+              setSelectedIndex={setTypeaheadIndex}
             />
-            <button
-              type="submit"
-              className="px-2.5 py-1.5 rounded-xl bg-elevated hover:bg-elevated/80 border border-border text-xs text-text font-bold cursor-pointer"
-            >
-              Go
-            </button>
-          </form>
+          </div>
 
           {/* Action Button */}
           <button
@@ -237,20 +299,61 @@ export default function DebateArenaView({ onOpenOrderTicket }) {
         })}
       </div>
 
-      {/* Streaming Banner if active */}
-      {isStreaming && (
-        <div className="bg-elevated/90 border border-amber/40 rounded-2xl p-4 shadow-lg animate-fade-slide">
-          <div className="flex items-center gap-2 text-xs font-bold text-amber mb-2">
-            <span className="w-2.5 h-2.5 rounded-full bg-amber animate-ping" />
-            <span>Multi-Agent Synthesis In Progress (Fast Extraction + Deep Reasoning)</span>
+      {/* Dynamic Multi-Agent Live Reasoning Banner */}
+      {(isStreaming || loading) && (
+        <div className="bg-panel/98 border border-amber/50 rounded-2xl p-5 shadow-2xl backdrop-blur-xl animate-fade-slide space-y-3 ring-1 ring-amber/25">
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border/60 pb-3">
+            <div className="flex items-center gap-2.5">
+              <span className="relative flex h-3 w-3">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber opacity-75" />
+                <span className="relative inline-flex rounded-full h-3 w-3 bg-amber" />
+              </span>
+              <div>
+                <h3 className="text-sm font-bold font-mono text-text">
+                  Polling {COUNCIL_MODES.find((c) => c.id === selectedCouncil)?.name || 'Council'} for {symbol} (NSE)
+                </h3>
+                <span className="text-[11px] text-muted font-ui">
+                  Dual-LLM Multi-Agent Pipeline & Quantitative Edge Synthesis
+                </span>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => {
+                  useChatStore.getState().cancelActiveActivity()
+                  setIsStreaming(false)
+                  setLoading(false)
+                }}
+                className="flex items-center gap-1 px-3 py-1.5 rounded-xl bg-rose-500/15 hover:bg-rose-500 hover:text-white border border-rose-500/30 text-rose-400 text-xs font-mono font-bold transition-all shadow-xs cursor-pointer"
+                title="Immediately stop/cancel the current analysis"
+              >
+                <span>⛔</span> Stop / Cancel
+              </button>
+            </div>
           </div>
-          <div className="space-y-1 font-mono text-xs text-muted">
+
+          {/* Progressive Step Progression */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 font-mono text-xs text-text/90 pt-1">
             {streamingSteps.map((step, idx) => (
-              <div key={idx} className="flex items-center gap-2">
-                <span className="text-green">✓</span>
-                <span>{step}</span>
+              <div key={idx} className="flex items-center gap-2 bg-surface/80 border border-border/60 rounded-xl px-3 py-2">
+                <span className="text-emerald-400 font-bold">✓</span>
+                <span className="truncate">{step}</span>
               </div>
             ))}
+          </div>
+
+          {/* Multitasking Advisory Note */}
+          <div className="flex items-center gap-2 px-3 py-2 rounded-xl bg-amber/10 border border-amber/20 text-amber text-xs font-ui">
+            <span>💡</span>
+            <span>
+              Background process running — you can freely navigate to <strong>Terminal</strong>, inspect <strong>Options</strong>, or view live charts without interrupting analysis.
+            </span>
+          </div>
+
+          {/* Progress Shimmer Bar */}
+          <div className="relative h-1.5 w-full bg-surface rounded-full overflow-hidden border border-border/40">
+            <div className="absolute inset-0 bg-gradient-to-r from-amber via-emerald-400 to-cyan-400 animate-[pulse_1.5s_ease-in-out_infinite] w-full" />
           </div>
         </div>
       )}
@@ -263,7 +366,8 @@ export default function DebateArenaView({ onOpenOrderTicket }) {
             <path
               d="M 15 80 A 65 65 0 0 1 145 80"
               fill="none"
-              stroke="rgba(255,255,255,0.1)"
+              stroke="currentColor"
+              className="text-border"
               strokeWidth="12"
               strokeLinecap="round"
             />
@@ -488,7 +592,10 @@ export default function DebateArenaView({ onOpenOrderTicket }) {
                     <div className="flex items-center gap-2">
                       <span className="text-base">🧠</span>
                       <span className="font-bold text-xs text-text">{pName}</span>
-                      <span className="text-[10px] text-muted">({sig.confidence}% conf)</span>
+                      <span className="text-[10px] text-muted font-mono">({sig.confidence}% conf)</span>
+                      <span className="text-[9px] font-mono font-bold bg-amber/15 text-amber border border-amber/30 px-1.5 py-0.5 rounded hidden sm:inline-block">
+                        ⚖️ Calibrated Weight
+                      </span>
                     </div>
 
                     <div className="flex items-center gap-2">

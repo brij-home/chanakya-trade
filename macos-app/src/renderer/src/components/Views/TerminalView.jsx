@@ -1,15 +1,24 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { useChatStore } from '../../store/chatStore'
 import { useAPI } from '../../hooks/useAPI'
 import CandlestickChart from '../Charts/CandlestickChart'
+import WhaleFlowsCard from '../Cards/WhaleFlowsCard'
+import PersonaTrackRecordCard from '../Cards/PersonaTrackRecordCard'
+import SmartTypeahead from '../Common/SmartTypeahead'
+import { INDIAN_UNIVERSE, fuzzySearchUniverse } from '../../data/universeData'
 
 export default function TerminalView({ onSelectSymbol, onOpenOrderTicket }) {
   const { call } = useAPI()
   const sendDraft = useChatStore((s) => s.sendDraft)
   const [selectedSymbol, setSelectedSymbol] = useState('NIFTY')
   const [timeframe, setTimeframe] = useState('15m')
-  const [leftTab, setLeftTab] = useState('councils') // 'councils' | 'personas' | 'watchlist'
+  const [symbolSearchQuery, setSymbolSearchQuery] = useState('')
+  const [showSymbolTypeahead, setShowSymbolTypeahead] = useState(false)
+  const [typeaheadIndex, setTypeaheadIndex] = useState(0)
+  const searchInputRef = useRef(null)
+  const [leftTab, setLeftTab] = useState('councils') // 'councils' | 'personas' | 'whales' | 'accuracy' | 'watchlist'
   const [intelligenceMode, setIntelligenceMode] = useState('councils') // 'councils' | 'personas'
+  const [layoutMode, setLayoutMode] = useState('single') // 'single' | 'dual' | 'whales' | 'accuracy'
   const [selectedCouncil, setSelectedCouncil] = useState('breakout')
   const [selectedPersona, setSelectedPersona] = useState('minervini')
   const [data, setData] = useState(null)
@@ -50,6 +59,29 @@ export default function TerminalView({ onSelectSymbol, onOpenOrderTicket }) {
     }
   }, [selectedSymbol, timeframe])
 
+  // Pro Trader Hotkeys ('/' search focus, '1'/'5'/'D' timeframes)
+  useEffect(() => {
+    const handleGlobalKeyDown = (e) => {
+      if (['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName)) {
+        return
+      }
+      if (e.key === '/') {
+        e.preventDefault()
+        searchInputRef.current?.focus()
+        setShowSymbolTypeahead(true)
+      } else if (e.key === '5') {
+        setTimeframe('5m')
+      } else if (e.key === '1') {
+        setTimeframe('15m')
+      } else if (e.key === 'd' || e.key === 'D') {
+        setTimeframe('1D')
+      }
+    }
+
+    window.addEventListener('keydown', handleGlobalKeyDown)
+    return () => window.removeEventListener('keydown', handleGlobalKeyDown)
+  }, [])
+
   // Synchronize intelligenceMode when user switches left panel tab
   const handleLeftTabChange = (tab) => {
     setLeftTab(tab)
@@ -57,7 +89,59 @@ export default function TerminalView({ onSelectSymbol, onOpenOrderTicket }) {
     if (tab === 'personas') setIntelligenceMode('personas')
   }
 
-  const setup = data?.automated_setup
+  const setupRaw = data?.automated_setup
+  // Check if data matches current selectedSymbol
+  const isDataMatching = Boolean(
+    data && (
+      data.symbol === selectedSymbol ||
+      (setupRaw?.symbol && setupRaw.symbol.toUpperCase().startsWith(selectedSymbol.toUpperCase()))
+    )
+  )
+
+  // Universe stock metadata for instant 0ms optimistic calibration
+  const universeStock = INDIAN_UNIVERSE.find((u) => u.symbol === selectedSymbol)
+  const fallbackLtp = universeStock?.type === 'index' 
+    ? 24150.0 
+    : (universeStock?.symbol === 'HAL' ? 4650.0 : (universeStock?.lotSize ? 1200.0 : 1000.0))
+  const curLtp = isDataMatching ? (data?.ltp || setupRaw?.entry || fallbackLtp) : fallbackLtp
+
+  const isShort = isDataMatching ? Boolean(setupRaw?.action && setupRaw.action.includes('SHORT')) : false
+  const safeEntry = isDataMatching && setupRaw?.entry != null 
+    ? Number(setupRaw.entry) 
+    : Number((curLtp * (isShort ? 1.002 : 0.998)).toFixed(2))
+  const safeSl = isDataMatching && setupRaw?.stop_loss != null 
+    ? Number(setupRaw.stop_loss) 
+    : Number((isShort ? curLtp * 1.012 : curLtp * 0.988).toFixed(2))
+  const safeTgt1 = isDataMatching && setupRaw?.target_1 != null 
+    ? Number(setupRaw.target_1) 
+    : Number((isShort ? curLtp * 0.976 : curLtp * 1.024).toFixed(2))
+  const safeTgt2 = isDataMatching && setupRaw?.target_2 != null 
+    ? Number(setupRaw.target_2) 
+    : Number((isShort ? curLtp * 0.958 : curLtp * 1.042).toFixed(2))
+  const riskPts = isDataMatching && setupRaw?.risk_points != null ? setupRaw.risk_points : Math.abs(safeEntry - safeSl).toFixed(2)
+  const riskPct = isDataMatching && setupRaw?.risk_pct != null ? setupRaw.risk_pct : ((riskPts / safeEntry) * 100).toFixed(2)
+  const rewPts = isDataMatching && setupRaw?.reward_points != null ? setupRaw.reward_points : Math.abs(safeTgt1 - safeEntry).toFixed(2)
+  const rewPct = isDataMatching && setupRaw?.reward_pct != null ? setupRaw.reward_pct : ((rewPts / safeEntry) * 100).toFixed(2)
+
+  const setup = {
+    symbol: `${selectedSymbol} (NSE)`,
+    action: isDataMatching && setupRaw?.action ? setupRaw.action : (isShort ? 'SHORT (SELL)' : 'LONG (BUY)'),
+    trigger: isDataMatching && setupRaw?.trigger ? setupRaw.trigger : (isShort ? 'Supply OB Rejection' : 'Demand OB Retest'),
+    entry: safeEntry,
+    stop_loss: safeSl,
+    target_1: safeTgt1,
+    target_2: safeTgt2,
+    risk_points: riskPts,
+    risk_pct: riskPct,
+    reward_points: rewPts,
+    reward_pct: rewPct,
+    risk_reward: isDataMatching && setupRaw?.risk_reward ? setupRaw.risk_reward : '2.0',
+    timeline: isDataMatching && setupRaw?.timeline ? setupRaw.timeline : (timeframe === '1D' ? '5–15 Days (Positional)' : '1–3 Sessions (Intraday)'),
+    thesis: isDataMatching && setupRaw?.thesis ? setupRaw.thesis : `Unmitigated ${isShort ? 'Supply' : 'Demand'} zone retest with institutional volume absorption and structured invalidation for ${selectedSymbol}.`,
+    status: isDataMatching ? (setupRaw?.status || 'READY') : (loading ? 'CALIBRATING' : 'READY'),
+    status_label: isDataMatching ? (setupRaw?.status_label || 'High Conviction Setup') : 'Calibrating Real-Time Execution',
+  }
+
   const flows = data?.flows
   const sectors = (data?.sector_matrix && data.sector_matrix.length > 0) ? data.sector_matrix : (data?.rrg_sectors && data.rrg_sectors.length > 0 ? data.rrg_sectors : [])
   const watchlist = data?.watchlist || []
@@ -500,31 +584,120 @@ export default function TerminalView({ onSelectSymbol, onOpenOrderTicket }) {
   const diiVal = Number(flows?.dii_net ?? 1120)
 
   return (
-    <div className="flex-1 overflow-y-auto p-3 sm:p-5 bg-surface text-text space-y-4 font-ui">
+    <div className="flex-1 overflow-y-auto p-2 sm:p-3 bg-surface text-text space-y-2.5 font-ui">
       {/* Top Terminal Status Header */}
-      <div className="flex flex-wrap items-center justify-between gap-3 bg-panel/90 border border-border/80 rounded-2xl px-4 py-2.5 shadow-md backdrop-blur-md">
-        <div className="flex items-center gap-3">
-          <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-xs font-semibold">
-            <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+      <div className="relative z-30 flex flex-wrap items-center justify-between gap-2 bg-panel border border-border/80 rounded-xl px-3 py-1.5 shadow-xs">
+        <div className="flex items-center gap-2.5">
+          <div className="flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-xs font-semibold">
+            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
             <span>Market Terminal • Live Stream</span>
           </div>
           <div className="flex items-center gap-2 text-xs text-muted font-mono hidden sm:flex">
-            <span className="px-2 py-0.5 rounded bg-surface border border-border text-[10px] text-text font-bold">
+            <span className="px-1.5 py-0.5 rounded bg-surface border border-border text-[10px] text-text font-bold">
               {provenance?.data_source || 'LIVE_TICK'}
             </span>
-            <span>{provenance?.as_of || 'Live Market Context'}</span>
+            <span className="text-[11px]">{provenance?.as_of || 'Live Market Context'}</span>
           </div>
         </div>
 
-        {/* Quick Timeframe & Action Toolbar */}
-        <div className="flex items-center gap-2">
+        {/* Quick Timeframe, Multi-Pane Layout & Action Toolbar */}
+        <div className="flex flex-wrap items-center gap-1.5">
+          {/* Symbol Quick Switcher with SmartTypeahead */}
+          <div className="relative z-50">
+            <div className="flex items-center gap-2 bg-surface/90 border-2 border-border focus-within:border-amber focus-within:ring-2 focus-within:ring-amber/30 rounded-xl px-3 py-1.5 transition-all text-xs shadow-xs">
+              <span className="text-amber font-black text-xs">🔍</span>
+              <input
+                ref={searchInputRef}
+                type="text"
+                placeholder={`Switch: ${selectedSymbol}`}
+                value={symbolSearchQuery}
+                onChange={(e) => {
+                  setSymbolSearchQuery(e.target.value)
+                  setShowSymbolTypeahead(true)
+                  setTypeaheadIndex(0)
+                }}
+                onFocus={() => setShowSymbolTypeahead(true)}
+                onKeyDown={(e) => {
+                  if (showSymbolTypeahead) {
+                    const items = fuzzySearchUniverse(symbolSearchQuery, selectedSymbol, 8).filter((r) => r.type === 'symbol')
+                    if (items.length > 0) {
+                      if (e.key === 'ArrowDown') {
+                        e.preventDefault()
+                        setTypeaheadIndex((prev) => (prev + 1) % items.length)
+                        return
+                      }
+                      if (e.key === 'ArrowUp') {
+                        e.preventDefault()
+                        setTypeaheadIndex((prev) => (prev - 1 + items.length) % items.length)
+                        return
+                      }
+                      if (e.key === 'Enter') {
+                        e.preventDefault()
+                        const selected = items[typeaheadIndex] || items[0]
+                        if (selected?.symbol) {
+                          setSelectedSymbol(selected.symbol)
+                          setSymbolSearchQuery('')
+                          setShowSymbolTypeahead(false)
+                        }
+                        return
+                      }
+                      if (e.key === 'Tab') {
+                        e.preventDefault()
+                        const selected = items[typeaheadIndex] || items[0]
+                        if (selected?.symbol) {
+                          setSymbolSearchQuery(selected.symbol)
+                        }
+                        return
+                      }
+                    }
+                  }
+                  if (e.key === 'Escape') {
+                    setShowSymbolTypeahead(false)
+                  }
+                }}
+                className="w-32 sm:w-40 bg-transparent text-xs text-text font-mono font-bold uppercase outline-none placeholder:text-text/50"
+              />
+              <span className="hidden sm:inline-block px-1.5 py-0.5 rounded bg-elevated border border-border text-[10px] font-mono font-bold text-text/70">
+                /
+              </span>
+              {symbolSearchQuery && (
+                <button
+                  onClick={() => {
+                    setSymbolSearchQuery('')
+                    setShowSymbolTypeahead(false)
+                  }}
+                  className="text-text/60 hover:text-text text-xs font-bold cursor-pointer ml-0.5"
+                >
+                  ✕
+                </button>
+              )}
+            </div>
+
+            <SmartTypeahead
+              query={symbolSearchQuery}
+              activeSymbol={selectedSymbol}
+              isOpen={showSymbolTypeahead}
+              onSelect={(item) => {
+                if (item.symbol) setSelectedSymbol(item.symbol)
+                setSymbolSearchQuery('')
+                setShowSymbolTypeahead(false)
+              }}
+              onClose={() => setShowSymbolTypeahead(false)}
+              mode="symbols_only"
+              position="below"
+              selectedIndex={typeaheadIndex}
+              setSelectedIndex={setTypeaheadIndex}
+            />
+          </div>
+
+          {/* Timeframe selector */}
           <div className="flex items-center bg-elevated rounded-xl p-0.5 border border-border/60 text-xs">
             {['5m', '15m', '1D'].map((tf) => (
               <button
                 key={tf}
                 onClick={() => setTimeframe(tf)}
                 className={`px-2.5 py-1 rounded-lg font-medium transition-all cursor-pointer ${
-                  timeframe === tf ? 'bg-amber text-black font-bold shadow-xs' : 'text-muted hover:text-text'
+                  timeframe === tf ? 'bg-amber text-black font-extrabold shadow-xs' : 'text-muted hover:text-text'
                 }`}
               >
                 {tf}
@@ -532,32 +705,72 @@ export default function TerminalView({ onSelectSymbol, onOpenOrderTicket }) {
             ))}
           </div>
 
+          {/* Multi-Pane Layout Selector */}
+          <div className="flex items-center bg-elevated rounded-xl p-0.5 border border-border/60 text-xs">
+            <button
+              onClick={() => setLayoutMode('single')}
+              className={`px-2.5 py-1 rounded-lg font-medium transition-all cursor-pointer ${
+                layoutMode === 'single' ? 'bg-amber text-black font-extrabold shadow-xs' : 'text-muted hover:text-text'
+              }`}
+              title="Single focus chart"
+            >
+              📊 Single
+            </button>
+            <button
+              onClick={() => setLayoutMode('dual')}
+              className={`px-2.5 py-1 rounded-lg font-medium transition-all cursor-pointer ${
+                layoutMode === 'dual' ? 'bg-amber text-black font-extrabold shadow-xs' : 'text-muted hover:text-text'
+              }`}
+              title="Dual timeframe 15m & 1D comparison"
+            >
+              📈 Dual-TF
+            </button>
+            <button
+              onClick={() => setLayoutMode('whales')}
+              className={`px-2.5 py-1 rounded-lg font-medium transition-all cursor-pointer ${
+                layoutMode === 'whales' ? 'bg-amber text-black font-extrabold shadow-xs' : 'text-muted hover:text-text'
+              }`}
+              title="Marquee whale flows"
+            >
+              🐋 Whales
+            </button>
+            <button
+              onClick={() => setLayoutMode('accuracy')}
+              className={`px-2.5 py-1 rounded-lg font-medium transition-all cursor-pointer ${
+                layoutMode === 'accuracy' ? 'bg-amber text-black font-extrabold shadow-xs' : 'text-muted hover:text-text'
+              }`}
+              title="AI persona accuracy scoreboard"
+            >
+              🏆 Accuracy
+            </button>
+          </div>
+
           <button
             onClick={() => sendDraft(`council ${selectedCouncil} ${selectedSymbol}`)}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-amber/15 hover:bg-amber/25 text-amber border border-amber/30 text-xs font-bold transition-colors cursor-pointer shadow-xs"
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-amber/15 hover:bg-amber hover:text-black border border-amber/30 text-amber text-xs font-bold transition-all cursor-pointer shadow-xs"
           >
             <span>🏛️</span> Poll {activeCouncilObj.name}
           </button>
           <button
             onClick={() => sendDraft(`analyze ${selectedSymbol}`)}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-400 border border-emerald-500/30 text-xs font-bold transition-colors cursor-pointer shadow-xs"
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-emerald-500/15 hover:bg-emerald-500 hover:text-black border border-emerald-500/30 text-emerald-400 text-xs font-bold transition-all cursor-pointer shadow-xs"
           >
-            <span>⚔️</span> Run Multi-Agent Debate
+            <span>⚔️</span> Run Debate
           </button>
         </div>
       </div>
 
       {/* Main 3-Column Terminal Layout */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
-        {/* Left Column (3 Cols): AI Councils / Personas / Watchlist */}
+        {/* Left Column (3 Cols): AI Councils / Personas / Whales / Accuracy / Watchlist */}
         <div className="lg:col-span-3 space-y-3">
           {/* Intelligence Switcher Tabs */}
-          <div className="flex items-center bg-panel border border-border/80 rounded-2xl p-1 text-xs font-ui shadow-xs">
+          <div className="flex flex-wrap items-center bg-panel border border-border/80 rounded-2xl p-1 text-xs font-ui shadow-xs gap-1">
             <button
               onClick={() => handleLeftTabChange('councils')}
-              className={`flex-1 py-1.5 rounded-xl font-bold transition-all cursor-pointer text-center text-[11px] ${
+              className={`flex-1 py-1.5 px-1 rounded-xl font-bold transition-all cursor-pointer text-center text-[10px] ${
                 leftTab === 'councils'
-                  ? 'bg-amber text-black shadow-xs'
+                  ? 'bg-amber text-black shadow-xs font-extrabold'
                   : 'text-muted hover:text-text'
               }`}
             >
@@ -565,19 +778,39 @@ export default function TerminalView({ onSelectSymbol, onOpenOrderTicket }) {
             </button>
             <button
               onClick={() => handleLeftTabChange('personas')}
-              className={`flex-1 py-1.5 rounded-xl font-bold transition-all cursor-pointer text-center text-[11px] ${
+              className={`flex-1 py-1.5 px-1 rounded-xl font-bold transition-all cursor-pointer text-center text-[10px] ${
                 leftTab === 'personas'
-                  ? 'bg-amber text-black shadow-xs'
+                  ? 'bg-amber text-black shadow-xs font-extrabold'
                   : 'text-muted hover:text-text'
               }`}
             >
               🧠 Personas
             </button>
             <button
+              onClick={() => handleLeftTabChange('whales')}
+              className={`flex-1 py-1.5 px-1 rounded-xl font-bold transition-all cursor-pointer text-center text-[10px] ${
+                leftTab === 'whales'
+                  ? 'bg-amber text-black shadow-xs font-extrabold'
+                  : 'text-muted hover:text-text'
+              }`}
+            >
+              🐋 Whales
+            </button>
+            <button
+              onClick={() => handleLeftTabChange('accuracy')}
+              className={`flex-1 py-1.5 px-1 rounded-xl font-bold transition-all cursor-pointer text-center text-[10px] ${
+                leftTab === 'accuracy'
+                  ? 'bg-amber text-black shadow-xs font-extrabold'
+                  : 'text-muted hover:text-text'
+              }`}
+            >
+              🏆 Stats
+            </button>
+            <button
               onClick={() => handleLeftTabChange('watchlist')}
-              className={`flex-1 py-1.5 rounded-xl font-bold transition-all cursor-pointer text-center text-[11px] ${
+              className={`flex-1 py-1.5 px-1 rounded-xl font-bold transition-all cursor-pointer text-center text-[10px] ${
                 leftTab === 'watchlist'
-                  ? 'bg-amber text-black shadow-xs'
+                  ? 'bg-amber text-black shadow-xs font-extrabold'
                   : 'text-muted hover:text-text'
               }`}
             >
@@ -836,41 +1069,82 @@ export default function TerminalView({ onSelectSymbol, onOpenOrderTicket }) {
               )}
             </div>
           )}
+
+          {/* TAB 3: WHALE & SAST FLOWS */}
+          {leftTab === 'whales' && (
+            <div className="animate-fade-slide">
+              <WhaleFlowsCard onOpenOrderTicket={onOpenOrderTicket} />
+            </div>
+          )}
+
+          {/* TAB 4: ACCURACY & TRACK RECORDS */}
+          {leftTab === 'accuracy' && (
+            <div className="animate-fade-slide">
+              <PersonaTrackRecordCard />
+            </div>
+          )}
         </div>
 
         {/* Center Column (6 Cols): Chart + Dynamic Intelligence Hub (Councils & Personas) */}
         <div className="lg:col-span-6 space-y-4">
-          {/* Main Chart Box */}
-          <div className="bg-panel border border-border/80 rounded-2xl p-4 shadow-sm relative overflow-hidden">
-            {/* Header info */}
-            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border/50 pb-3 mb-3">
-              <div>
-                <div className="flex items-center gap-2">
-                  <span className="text-base font-bold text-text font-mono">
-                    {displaySymbolName} • {timeframe} • Candlesticks
+          {/* Main Content Area based on layoutMode */}
+          {layoutMode === 'whales' ? (
+            <div className="animate-fade-slide">
+              <WhaleFlowsCard onOpenOrderTicket={onOpenOrderTicket} />
+            </div>
+          ) : layoutMode === 'accuracy' ? (
+            <div className="animate-fade-slide">
+              <PersonaTrackRecordCard />
+            </div>
+          ) : (
+            /* Main Chart Box (Single or Dual TF) */
+            <div className="bg-panel border border-border/80 rounded-2xl p-4 shadow-sm relative overflow-hidden">
+              {/* Header info */}
+              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border/50 pb-3 mb-3">
+                <div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-base font-bold text-text font-mono">
+                      {displaySymbolName} • {layoutMode === 'dual' ? 'Dual-TF (15m & 1D)' : `${timeframe} • Candlesticks`}
+                    </span>
+                    <span className={`text-xs px-2 py-0.5 rounded-full font-bold border ${isPos ? 'bg-green/10 text-green border-green/30' : 'bg-red/10 text-red border-red/30'}`}>
+                      {isPos ? '+' : ''}{Number(currentPct).toFixed(2)}%
+                    </span>
+                  </div>
+                  <span className="text-[11px] text-muted font-mono">SMC Structure • Demand/Supply OB • Volume Profile</span>
+                </div>
+
+                {/* SMC Alpha Badges */}
+                <div className="flex items-center gap-1.5">
+                  <span className="px-2 py-0.5 rounded-md bg-emerald-500/15 border border-emerald-500/30 text-emerald-400 text-[10px] font-bold">
+                    SMC DEMAND
                   </span>
-                  <span className={`text-xs px-2 py-0.5 rounded-full font-bold border ${isPos ? 'bg-green/10 text-green border-green/30' : 'bg-red/10 text-red border-red/30'}`}>
-                    {isPos ? '+' : ''}{Number(currentPct).toFixed(2)}%
+                  <span className="px-2 py-0.5 rounded-md bg-amber/15 border border-amber/30 text-amber text-[10px] font-bold">
+                    VOL PROFILE
                   </span>
                 </div>
-                <span className="text-[11px] text-muted font-mono">SMC Structure • Demand/Supply OB • Volume Profile</span>
               </div>
 
-              {/* SMC Alpha Badges */}
-              <div className="flex items-center gap-1.5">
-                <span className="px-2 py-0.5 rounded-md bg-emerald-500/15 border border-emerald-500/30 text-emerald-400 text-[10px] font-bold">
-                  SMC DEMAND
-                </span>
-                <span className="px-2 py-0.5 rounded-md bg-amber/15 border border-amber/30 text-amber text-[10px] font-bold">
-                  VOL PROFILE
-                </span>
-              </div>
-            </div>
-
-            {/* Interactive Candlestick Chart */}
-            <div className="w-full rounded-xl overflow-hidden bg-surface/50 border border-border/60">
-              <CandlestickChart symbol={selectedSymbol} timeframe={timeframe} height={260} />
-            </div>
+              {/* Interactive Candlestick Chart (Single or Dual Split) */}
+              {layoutMode === 'dual' ? (
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+                  <div className="rounded-xl overflow-hidden bg-surface/50 border border-border/60 p-2 space-y-1">
+                    <div className="flex items-center justify-between px-1">
+                      <span className="text-[11px] font-bold text-amber font-mono">⚡ 15m Intraday Structure (SMC)</span>
+                    </div>
+                    <CandlestickChart symbol={selectedSymbol} timeframe="15m" height={320} />
+                  </div>
+                  <div className="rounded-xl overflow-hidden bg-surface/50 border border-border/60 p-2 space-y-1">
+                    <div className="flex items-center justify-between px-1">
+                      <span className="text-[11px] font-bold text-emerald-500 font-mono">💎 1D Positional Markup (Stage 2)</span>
+                    </div>
+                    <CandlestickChart symbol={selectedSymbol} timeframe="1D" height={320} />
+                  </div>
+                </div>
+              ) : (
+                <div className="w-full rounded-xl overflow-hidden bg-surface/50 border border-border/60">
+                  <CandlestickChart symbol={selectedSymbol} timeframe={timeframe} height={280} />
+                </div>
+              )}
 
             {/* Overlay SMC Box Details (Order Block & Volume Profile) */}
             <div className="mt-3 grid grid-cols-2 sm:grid-cols-4 gap-2 pt-2 border-t border-border/40 text-xs font-mono">
@@ -894,6 +1168,7 @@ export default function TerminalView({ onSelectSymbol, onOpenOrderTicket }) {
               </div>
             </div>
           </div>
+        )}
 
           {/* DYNAMIC INTELLIGENCE DECK: Synchronized with Left Nav selection */}
           <div className="bg-panel border border-border/80 rounded-2xl p-4 shadow-sm relative space-y-3.5">
@@ -1200,114 +1475,99 @@ export default function TerminalView({ onSelectSymbol, onOpenOrderTicket }) {
             </div>
 
             {/* Signal Details */}
-            {(() => {
-              const curLtp = MASTER_WATCHLIST.find((m) => m.symbol === selectedSymbol)?.ltp || data?.ltp || 1000.0
-              const isShort = setup?.action && setup.action.includes('SHORT')
-              const safeEntry = setup?.entry != null ? Number(setup.entry) : Number((curLtp * (isShort ? 1.002 : 0.998)).toFixed(2))
-              const safeSl = setup?.stop_loss != null ? Number(setup.stop_loss) : Number((isShort ? curLtp * 1.012 : curLtp * 0.988).toFixed(2))
-              const safeTgt1 = setup?.target_1 != null ? Number(setup.target_1) : Number((isShort ? curLtp * 0.976 : curLtp * 1.024).toFixed(2))
-              const safeTgt2 = setup?.target_2 != null ? Number(setup.target_2) : Number((isShort ? curLtp * 0.958 : curLtp * 1.042).toFixed(2))
-              const riskPts = setup?.risk_points ?? Math.abs(safeEntry - safeSl).toFixed(2)
-              const riskPct = setup?.risk_pct ?? ((riskPts / safeEntry) * 100).toFixed(2)
-              const rewPts = setup?.reward_points ?? Math.abs(safeTgt1 - safeEntry).toFixed(2)
-              const rewPct = setup?.reward_pct ?? ((rewPts / safeEntry) * 100).toFixed(2)
-
-              return (
-                <div className="space-y-2 text-xs font-mono">
-                  <div className="flex justify-between items-center py-1 border-b border-border/30">
-                    <span className="text-muted">Symbol</span>
-                    <span className="font-bold text-text">{setup?.symbol || `${selectedSymbol} (NSE)`}</span>
-                  </div>
-                  <div className="flex justify-between items-center py-1 border-b border-border/30">
-                    <span className="text-muted">Action</span>
-                    <span className={`font-bold px-2 py-0.5 rounded border ${
-                      isShort
-                        ? 'text-rose-400 bg-rose-500/15 border-rose-500/30'
-                        : 'text-emerald-400 bg-emerald-500/15 border-emerald-500/30'
-                    }`}>
-                      {setup?.action || (isShort ? 'SHORT (SELL)' : 'LONG (BUY)')}
-                    </span>
-                  </div>
-                  <div className="flex justify-between items-center py-1 border-b border-border/30">
-                    <span className="text-muted">Trigger</span>
-                    <span className="font-bold text-text">{setup?.trigger || (isShort ? 'Supply Rejection' : 'Demand Retest')}</span>
-                  </div>
-                  <div className="flex justify-between items-center py-1 border-b border-border/30">
-                    <span className="text-muted">ENTRY PRICE</span>
-                    <span className="font-bold text-emerald-400">
-                      ₹{safeEntry.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
-                    </span>
-                  </div>
-                  <div className="flex justify-between items-center py-1 border-b border-border/30">
-                    <span className="text-muted">INVALIDATION SL</span>
-                    <div className="text-right">
-                      <span className="font-bold text-rose-400 block">
-                        ₹{safeSl.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
-                      </span>
-                      <span className="text-[10px] text-muted">
-                        (-{riskPts} pts / {riskPct}%)
-                      </span>
-                    </div>
-                  </div>
-                  <div className="flex justify-between items-center py-1 border-b border-border/30">
-                    <span className="text-muted">TARGET 1 (2R)</span>
-                    <div className="text-right">
-                      <span className="font-bold text-emerald-400 block">
-                        ₹{safeTgt1.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
-                      </span>
-                      <span className="text-[10px] text-muted">
-                        (+{rewPts} pts / {rewPct}%)
-                      </span>
-                    </div>
-                  </div>
-                  <div className="flex justify-between items-center py-1 border-b border-border/30">
-                    <span className="text-muted">TARGET 2 (3.5R)</span>
-                    <span className="font-bold text-text">
-                      ₹{safeTgt2.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
-                    </span>
-                  </div>
-                  <div className="flex justify-between items-center py-1 border-b border-border/30">
-                    <span className="text-muted">R:R PAYOFF</span>
-                    <span className="font-bold text-amber">1 : {setup?.risk_reward || '2.0'} R</span>
-                  </div>
-
-                  {/* Setup Thesis & Actionable Insights Box */}
-                  <div className="p-2 rounded-xl bg-surface/90 border border-border/60 text-[11px] space-y-1">
-                    <span className="text-muted font-bold block flex items-center gap-1">
-                      <span>💡</span> Setup Thesis
-                    </span>
-                    <p className="text-text leading-snug font-ui text-[11px]">
-                      {setup?.thesis || `Unmitigated ${isShort ? 'Supply' : 'Demand'} zone retest with institutional volume absorption and structured invalidation.`}
-                    </p>
-                  </div>
-
-                  {/* Trailing Stop Rule */}
-                  <div className="px-2 py-1.5 rounded-lg bg-elevated/60 border border-border/40 text-[10px] text-muted flex items-start gap-1.5">
-                    <span>🛡️</span>
-                    <span><strong>Rule:</strong> Move SL to Breakeven (+0.2% buffer) at Target 1. Trail rest with 3x ATR.</span>
-                  </div>
-
-                  {/* Execute Button */}
-                  <button
-                    onClick={() => {
-                      if (onOpenOrderTicket) {
-                        onOpenOrderTicket({
-                          symbol: selectedSymbol,
-                          exchange: 'NSE',
-                          price: safeEntry,
-                          stopLoss: safeSl,
-                          target: safeTgt1,
-                          action: isShort ? 'SELL' : 'BUY',
-                        })
-                      }
-                    }}
-                    className="w-full py-2.5 px-4 mt-2 rounded-xl bg-gradient-to-r from-amber to-amber-light hover:brightness-110 text-black font-bold text-xs uppercase tracking-wider transition-all shadow-md cursor-pointer flex items-center justify-center gap-2"
-                  >
-                    <span>⚡</span> STAGE / EXECUTE ORDER
-                  </button>
+            <div className="space-y-2 text-xs font-mono">
+              <div className="flex justify-between items-center py-1 border-b border-border/30">
+                <span className="text-muted">Symbol</span>
+                <span className="font-bold text-text">{setup.symbol}</span>
+              </div>
+              <div className="flex justify-between items-center py-1 border-b border-border/30">
+                <span className="text-muted">Action</span>
+                <span className={`font-bold px-2 py-0.5 rounded border ${
+                  setup.action.includes('SHORT')
+                    ? 'text-rose-400 bg-rose-500/15 border-rose-500/30'
+                    : 'text-emerald-400 bg-emerald-500/15 border-emerald-500/30'
+                }`}>
+                  {setup.action}
+                </span>
+              </div>
+              <div className="flex justify-between items-center py-1 border-b border-border/30">
+                <span className="text-muted">Trigger</span>
+                <span className="font-bold text-text">{setup.trigger}</span>
+              </div>
+              <div className="flex justify-between items-center py-1 border-b border-border/30">
+                <span className="text-muted">ENTRY PRICE</span>
+                <span className="font-bold text-emerald-400">
+                  ₹{Number(setup.entry).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                </span>
+              </div>
+              <div className="flex justify-between items-center py-1 border-b border-border/30">
+                <span className="text-muted">INVALIDATION SL</span>
+                <div className="text-right">
+                  <span className="font-bold text-rose-400 block">
+                    ₹{Number(setup.stop_loss).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                  </span>
+                  <span className="text-[10px] text-muted">
+                    (-{setup.risk_points} pts / {setup.risk_pct}%)
+                  </span>
                 </div>
-              )
-            })()}
+              </div>
+              <div className="flex justify-between items-center py-1 border-b border-border/30">
+                <span className="text-muted">TARGET 1 (2R)</span>
+                <div className="text-right">
+                  <span className="font-bold text-emerald-400 block">
+                    ₹{Number(setup.target_1).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                  </span>
+                  <span className="text-[10px] text-muted">
+                    (+{setup.reward_points} pts / {setup.reward_pct}%)
+                  </span>
+                </div>
+              </div>
+              <div className="flex justify-between items-center py-1 border-b border-border/30">
+                <span className="text-muted">TARGET 2 (3.5R)</span>
+                <span className="font-bold text-text">
+                  ₹{Number(setup.target_2).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                </span>
+              </div>
+              <div className="flex justify-between items-center py-1 border-b border-border/30">
+                <span className="text-muted">R:R PAYOFF</span>
+                <span className="font-bold text-amber">1 : {setup.risk_reward} R</span>
+              </div>
+
+              {/* Setup Thesis & Actionable Insights Box */}
+              <div className="p-2 rounded-xl bg-surface/90 border border-border/60 text-[11px] space-y-1">
+                <span className="text-muted font-bold block flex items-center gap-1">
+                  <span>💡</span> Setup Thesis
+                </span>
+                <p className="text-text leading-snug font-ui text-[11px]">
+                  {setup.thesis}
+                </p>
+              </div>
+
+              {/* Trailing Stop Rule */}
+              <div className="px-2 py-1.5 rounded-lg bg-elevated/60 border border-border/40 text-[10px] text-muted flex items-start gap-1.5">
+                <span>🛡️</span>
+                <span><strong>Rule:</strong> Move SL to Breakeven (+0.2% buffer) at Target 1. Trail rest with 3x ATR.</span>
+              </div>
+
+              {/* Execute Button */}
+              <button
+                onClick={() => {
+                  if (onOpenOrderTicket) {
+                    onOpenOrderTicket({
+                      symbol: selectedSymbol,
+                      exchange: 'NSE',
+                      price: setup.entry,
+                      stopLoss: setup.stop_loss,
+                      target: setup.target_1,
+                      action: setup.action.includes('SHORT') ? 'SELL' : 'BUY',
+                    })
+                  }
+                }}
+                className="w-full py-2.5 px-4 mt-2 rounded-xl bg-gradient-to-r from-amber to-amber-light hover:brightness-110 text-black font-bold text-xs uppercase tracking-wider transition-all shadow-md cursor-pointer flex items-center justify-center gap-2"
+              >
+                <span>⚡</span> STAGE / EXECUTE ORDER
+              </button>
+            </div>
           </div>
         </div>
       </div>
@@ -1428,72 +1688,129 @@ export default function TerminalView({ onSelectSymbol, onOpenOrderTicket }) {
             </div>
           </div>
 
-          {/* RRG Quadrant Grid */}
-          <div className="grid grid-cols-2 gap-2 text-xs font-mono">
-            {/* LEADING (Top Right) */}
-            <div className="bg-emerald-500/10 border border-emerald-500/30 rounded-xl p-2.5 space-y-1">
-              <span className="text-[10px] font-bold text-emerald-400 uppercase tracking-wider block flex items-center justify-between">
-                <span>🟢 LEADING</span>
-                <span className="text-[9px] text-muted">RS &gt; 100, Mom &gt; 100</span>
-              </span>
-              <div className="space-y-0.5">
-                {(sectors.filter((s) => s.quadrant === 'LEADING' || s.name?.includes('AUTO') || s.name?.includes('METALS') || s.name?.includes('DEFENSE')).slice(0, 2)).map((s, idx) => (
-                  <div key={idx} className="flex justify-between text-[11px]">
-                    <span className="font-bold text-text">{s.name || 'NIFTY AUTO'}</span>
-                    <span className="text-emerald-400 font-semibold">+{s.rs_ratio || 102.4}</span>
-                  </div>
-                ))}
+          {/* RRG Quadrant Grid or List View */}
+          {sectorViewMode === '2D' ? (
+            <div className="grid grid-cols-2 gap-2 text-xs font-mono">
+              {/* LEADING (Top Right) */}
+              <div className="bg-emerald-500/10 border border-emerald-500/30 rounded-xl p-2.5 space-y-1">
+                <span className="text-[10px] font-bold text-emerald-400 uppercase tracking-wider block flex items-center justify-between">
+                  <span>🟢 LEADING</span>
+                  <span className="text-[9px] text-muted">RS &gt; 100, Mom &gt; 100</span>
+                </span>
+                <div className="space-y-0.5">
+                  {(sectors.filter((s) => s.quadrant === 'LEADING' || s.name?.includes('AUTO') || s.name?.includes('METALS') || s.name?.includes('DEFENSE')).slice(0, 2)).map((s, idx) => (
+                    <div key={idx} className="flex justify-between text-[11px]">
+                      <span className="font-bold text-text">{s.name || 'NIFTY AUTO'}</span>
+                      <span className="text-emerald-400 font-semibold">+{s.rs_ratio || 102.4}</span>
+                    </div>
+                  ))}
+                </div>
               </div>
-            </div>
 
-            {/* IMPROVING (Bottom Right) */}
-            <div className="bg-cyan-500/10 border border-cyan-500/30 rounded-xl p-2.5 space-y-1">
-              <span className="text-[10px] font-bold text-cyan-400 uppercase tracking-wider block flex items-center justify-between">
-                <span>🔵 IMPROVING</span>
-                <span className="text-[9px] text-muted">Mom &gt; 100</span>
-              </span>
-              <div className="space-y-0.5">
-                {(sectors.filter((s) => s.quadrant === 'IMPROVING' || s.name?.includes('PHARMA') || s.name?.includes('IT') || s.name?.includes('TECH')).slice(0, 2)).map((s, idx) => (
-                  <div key={idx} className="flex justify-between text-[11px]">
-                    <span className="font-bold text-text">{s.name || 'NIFTY IT'}</span>
-                    <span className="text-cyan-400 font-semibold">+{s.rs_ratio || 99.8}</span>
-                  </div>
-                ))}
+              {/* IMPROVING (Bottom Right) */}
+              <div className="bg-cyan-500/10 border border-cyan-500/30 rounded-xl p-2.5 space-y-1">
+                <span className="text-[10px] font-bold text-cyan-400 uppercase tracking-wider block flex items-center justify-between">
+                  <span>🔵 IMPROVING</span>
+                  <span className="text-[9px] text-muted">Mom &gt; 100</span>
+                </span>
+                <div className="space-y-0.5">
+                  {(sectors.filter((s) => s.quadrant === 'IMPROVING' || s.name?.includes('PHARMA') || s.name?.includes('IT') || s.name?.includes('TECH')).slice(0, 2)).map((s, idx) => (
+                    <div key={idx} className="flex justify-between text-[11px]">
+                      <span className="font-bold text-text">{s.name || 'NIFTY IT'}</span>
+                      <span className="text-cyan-400 font-semibold">+{s.rs_ratio || 99.8}</span>
+                    </div>
+                  ))}
+                </div>
               </div>
-            </div>
 
-            {/* WEAKENING (Top Left) */}
-            <div className="bg-amber/10 border border-amber/30 rounded-xl p-2.5 space-y-1">
-              <span className="text-[10px] font-bold text-amber uppercase tracking-wider block flex items-center justify-between">
-                <span>🟡 WEAKENING</span>
-                <span className="text-[9px] text-muted">Mom &lt; 100</span>
-              </span>
-              <div className="space-y-0.5">
-                {(sectors.filter((s) => s.quadrant === 'WEAKENING' || s.name?.includes('BANK') || s.name?.includes('FIN')).slice(0, 2)).map((s, idx) => (
-                  <div key={idx} className="flex justify-between text-[11px]">
-                    <span className="font-bold text-text">{s.name || 'NIFTY BANK'}</span>
-                    <span className="text-amber font-semibold">{s.rs_ratio || 101.1}</span>
-                  </div>
-                ))}
+              {/* WEAKENING (Top Left) */}
+              <div className="bg-amber/10 border border-amber/30 rounded-xl p-2.5 space-y-1">
+                <span className="text-[10px] font-bold text-amber uppercase tracking-wider block flex items-center justify-between">
+                  <span>🟡 WEAKENING</span>
+                  <span className="text-[9px] text-muted">Mom &lt; 100</span>
+                </span>
+                <div className="space-y-0.5">
+                  {(sectors.filter((s) => s.quadrant === 'WEAKENING' || s.name?.includes('BANK') || s.name?.includes('FIN')).slice(0, 2)).map((s, idx) => (
+                    <div key={idx} className="flex justify-between text-[11px]">
+                      <span className="font-bold text-text">{s.name || 'NIFTY BANK'}</span>
+                      <span className="text-amber font-semibold">{s.rs_ratio || 101.1}</span>
+                    </div>
+                  ))}
+                </div>
               </div>
-            </div>
 
-            {/* LAGGING (Bottom Left) */}
-            <div className="bg-rose-500/10 border border-rose-500/30 rounded-xl p-2.5 space-y-1">
-              <span className="text-[10px] font-bold text-rose-400 uppercase tracking-wider block flex items-center justify-between">
-                <span>🔴 LAGGING</span>
-                <span className="text-[9px] text-muted">RS &lt; 100, Mom &lt; 100</span>
-              </span>
-              <div className="space-y-0.5">
-                {(sectors.filter((s) => s.quadrant === 'LAGGING' || s.name?.includes('FMCG') || s.name?.includes('MEDIA') || s.name?.includes('REALTY')).slice(0, 2)).map((s, idx) => (
-                  <div key={idx} className="flex justify-between text-[11px]">
-                    <span className="font-bold text-text">{s.name || 'NIFTY FMCG'}</span>
-                    <span className="text-rose-400 font-semibold">{s.rs_ratio || 97.5}</span>
-                  </div>
-                ))}
+              {/* LAGGING (Bottom Left) */}
+              <div className="bg-rose-500/10 border border-rose-500/30 rounded-xl p-2.5 space-y-1">
+                <span className="text-[10px] font-bold text-rose-400 uppercase tracking-wider block flex items-center justify-between">
+                  <span>🔴 LAGGING</span>
+                  <span className="text-[9px] text-muted">RS &lt; 100, Mom &lt; 100</span>
+                </span>
+                <div className="space-y-0.5">
+                  {(sectors.filter((s) => s.quadrant === 'LAGGING' || s.name?.includes('FMCG') || s.name?.includes('MEDIA') || s.name?.includes('REALTY')).slice(0, 2)).map((s, idx) => (
+                    <div key={idx} className="flex justify-between text-[11px]">
+                      <span className="font-bold text-text">{s.name || 'NIFTY FMCG'}</span>
+                      <span className="text-rose-400 font-semibold">{s.rs_ratio || 97.5}</span>
+                    </div>
+                  ))}
+                </div>
               </div>
             </div>
-          </div>
+          ) : (
+            /* Structured List View */
+            <div className="space-y-1.5 text-xs font-mono max-h-[148px] overflow-y-auto pr-1">
+              {(sectors.length > 0 ? sectors : [
+                { name: 'NIFTY AUTO', quadrant: 'LEADING', rs_ratio: 102.4, rs_momentum: 101.8 },
+                { name: 'NIFTY METALS', quadrant: 'LEADING', rs_ratio: 101.9, rs_momentum: 102.3 },
+                { name: 'NIFTY IT', quadrant: 'IMPROVING', rs_ratio: 99.8, rs_momentum: 102.1 },
+                { name: 'NIFTY PHARMA', quadrant: 'IMPROVING', rs_ratio: 98.9, rs_momentum: 101.4 },
+                { name: 'NIFTY BANK', quadrant: 'WEAKENING', rs_ratio: 101.1, rs_momentum: 98.6 },
+                { name: 'NIFTY FIN SERVICE', quadrant: 'WEAKENING', rs_ratio: 100.8, rs_momentum: 97.9 },
+                { name: 'NIFTY FMCG', quadrant: 'LAGGING', rs_ratio: 97.5, rs_momentum: 98.1 },
+                { name: 'NIFTY REALTY', quadrant: 'LAGGING', rs_ratio: 96.8, rs_momentum: 97.4 },
+              ]).map((s, idx) => {
+                const quad = s.quadrant || (s.rs_ratio >= 100 && s.rs_momentum >= 100 ? 'LEADING' : s.rs_ratio < 100 && s.rs_momentum >= 100 ? 'IMPROVING' : s.rs_ratio >= 100 ? 'WEAKENING' : 'LAGGING')
+                const isLeading = quad === 'LEADING'
+                const isImproving = quad === 'IMPROVING'
+                const isWeakening = quad === 'WEAKENING'
+                const badgeColor = isLeading
+                  ? 'text-emerald-400 bg-emerald-500/15 border-emerald-500/30'
+                  : isImproving
+                  ? 'text-cyan-400 bg-cyan-500/15 border-cyan-500/30'
+                  : isWeakening
+                  ? 'text-amber bg-amber/15 border-amber/30'
+                  : 'text-rose-400 bg-rose-500/15 border-rose-500/30'
+                const badgeIcon = isLeading ? '🟢' : isImproving ? '🔵' : isWeakening ? '🟡' : '🔴'
+
+                return (
+                  <div
+                    key={idx}
+                    onClick={() => sendDraft(`sector ${s.name || s.symbol}`)}
+                    className="flex items-center justify-between p-2 rounded-xl bg-surface/80 border border-border/50 hover:border-amber/40 hover:bg-elevated transition-all cursor-pointer group"
+                    title={`Click to drill down on ${s.name || 'sector'}`}
+                  >
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs">{badgeIcon}</span>
+                      <span className="font-bold text-text group-hover:text-amber transition-colors">
+                        {s.name || s.symbol || 'SECTOR'}
+                      </span>
+                      <span className={`text-[9px] font-bold px-1.5 py-0.2 rounded border ${badgeColor}`}>
+                        {quad}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-3 font-mono">
+                      <span className="text-[10px] text-muted">
+                        RS: <strong className="text-text">{s.rs_ratio || 100.0}</strong>
+                      </span>
+                      <span className="text-[10px] text-muted">
+                        Mom: <strong className="text-text">{s.rs_momentum || 100.0}</strong>
+                      </span>
+                      <span className="text-amber text-xs group-hover:translate-x-0.5 transition-transform">→</span>
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          )}
         </div>
       </div>
     </div>

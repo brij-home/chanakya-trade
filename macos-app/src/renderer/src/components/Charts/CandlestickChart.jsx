@@ -408,15 +408,13 @@ function CandlestickChartComponent({
     window.addEventListener('mouseup', handleMouseUp)
     container.addEventListener('wheel', handleWheel, { passive: true })
 
-    // Resize Observer
+    // Resize Observer: Strictly track container WIDTH only to eliminate vertical feedback loops
     const resizeObserver = new ResizeObserver((entries) => {
       if (!chartRef.current || entries.length === 0 || !entries[0].contentRect) return
-      const { width, height: h } = entries[0].contentRect
+      const { width } = entries[0].contentRect
       if (width > 0) {
         try {
-          const opts = { width }
-          if (h > 60) opts.height = h
-          chartRef.current.applyOptions(opts)
+          chartRef.current.applyOptions({ width })
           recalculateOBZones()
         } catch (e) {}
       }
@@ -439,6 +437,16 @@ function CandlestickChartComponent({
       sma50Ref.current = null
       sma200Ref.current = null
       activePriceLinesRef.current = []
+    }
+  }, [mainChartHeight, recalculateOBZones])
+
+  // Explicitly update chart height whenever mainChartHeight prop changes
+  useEffect(() => {
+    if (chartRef.current) {
+      try {
+        chartRef.current.applyOptions({ height: mainChartHeight })
+        recalculateOBZones()
+      } catch (e) {}
     }
   }, [mainChartHeight, recalculateOBZones])
 
@@ -908,7 +916,7 @@ function CandlestickChartComponent({
       </div>
 
       {/* Main Chart Canvas Area with Background Shaded Order Block Ribbons */}
-      <div className="relative w-full overflow-hidden flex-1 min-h-[220px]" style={{ height: `${mainChartHeight}px`, minHeight: `${mainChartHeight}px` }}>
+      <div className="relative w-full overflow-hidden" style={{ height: `${mainChartHeight}px`, minHeight: `${mainChartHeight}px`, maxHeight: `${mainChartHeight}px` }}>
         {loading && (
           <div className="absolute inset-0 z-20 flex items-center justify-center bg-surface/60 backdrop-blur-xs text-muted text-xs font-mono">
             <span className="text-amber animate-spin mr-2">◆</span> Loading institutional market data…

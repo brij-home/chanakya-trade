@@ -84,7 +84,9 @@ export const useChatStore = create((set, get) => ({
   setActiveView: (view) => set({ activeView: view }),
 
   // ── Global In-Flight Activity & Progress HUD State ─────────
-  activeActivity: null, // { id, title, details, progress, type, cancelFn, startedAt }
+  activeActivity: null, // { id, title, details, progress, type, targetView, cancelFn, startedAt }
+  completedNotification: null, // { id, title, message, targetView, actionLabel, timestamp }
+
   startActivity: (activity) => {
     set({
       activeActivity: {
@@ -92,6 +94,7 @@ export const useChatStore = create((set, get) => ({
         title: activity.title || 'Processing Market Intelligence...',
         details: activity.details || 'Computing institutional models...',
         type: activity.type || 'quant',
+        targetView: activity.targetView || 'copilot',
         progress: activity.progress || null,
         cancelFn: activity.cancelFn || null,
         startedAt: Date.now(),
@@ -123,6 +126,27 @@ export const useChatStore = create((set, get) => ({
     }
     set({ activeActivity: null, streamCancel: null, isLoading: false })
   },
+
+  notifyCompletedActivity: (notif) => {
+    const id = 'notif-' + Date.now()
+    set({
+      completedNotification: {
+        id,
+        title: notif.title || 'AI Intelligence Ready',
+        message: notif.message || 'Background analysis completed.',
+        targetView: notif.targetView || 'copilot',
+        actionLabel: notif.actionLabel || 'View Analysis →',
+        timestamp: Date.now(),
+      },
+    })
+    setTimeout(() => {
+      const current = get().completedNotification
+      if (current && current.id === id) {
+        set({ completedNotification: null })
+      }
+    }, 8500)
+  },
+  dismissNotification: () => set({ completedNotification: null }),
 
   // ── Backward-compatible flat messages (swapped on session switch) ──
   messages:      [],

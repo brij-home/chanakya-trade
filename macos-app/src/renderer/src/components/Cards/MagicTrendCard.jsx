@@ -3,10 +3,10 @@ import { useInspectorStore } from '../../store/inspectorStore'
 import Tooltip, { InfoBadge } from '../UI/Tooltip'
 
 const GRADE_CONFIG = {
-  '👑 SUPER_COMPOUNDER': { color: 'bg-green text-surface font-bold', border: 'border-green/40' },
-  '🚀 HIGH_ALPHA':        { color: 'bg-amber/15 text-amber border border-amber/30', border: 'border-amber/40' },
-  '⚖️ BALANCED_GROWTH':   { color: 'bg-blue/15 text-blue border border-blue/30', border: 'border-blue/40' },
-  '⚠️ DEAD_MONEY':       { color: 'bg-red text-surface font-bold', border: 'border-red/40' },
+  '👑 SUPER_COMPOUNDER': { color: 'bg-green text-black font-extrabold', border: 'border-green/40' },
+  '🚀 HIGH_ALPHA':        { color: 'bg-amber/15 text-amber border border-amber/30 font-bold', border: 'border-amber/40' },
+  '⚖️ BALANCED_GROWTH':   { color: 'bg-blue/15 text-blue border border-blue/30 font-bold', border: 'border-blue/40' },
+  '⚠️ DEAD_MONEY':       { color: 'bg-red text-white font-extrabold', border: 'border-red/40' },
 }
 
 export default function MagicTrendCard({ data }) {
@@ -121,7 +121,7 @@ export default function MagicTrendCard({ data }) {
         <div className="bg-panel border border-border/60 rounded-lg p-3 space-y-2 font-ui">
           <div className="flex items-center justify-between text-xs">
             <div className="flex items-center gap-2">
-              <span className="bg-green text-surface text-[10px] font-bold px-2 py-0.5 rounded">
+              <span className="bg-green text-black text-[10px] font-extrabold px-2 py-0.5 rounded">
                 {ticket.action || 'LONG (BUY)'}
               </span>
               <span className="font-semibold text-text">Dynamic Trade Setup Ticket</span>

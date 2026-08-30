@@ -3,11 +3,11 @@ import { useInspectorStore } from '../../store/inspectorStore'
 import Tooltip, { InfoBadge } from '../UI/Tooltip'
 
 const GRADE_STYLES = {
-  'A+': { color: 'bg-green text-surface font-bold', border: 'border-green/40' },
-  'A':  { color: 'bg-green/15 text-green border border-green/30', border: 'border-green/40' },
-  'B':  { color: 'bg-blue/15 text-blue border border-blue/30', border: 'border-blue/40' },
-  'C':  { color: 'bg-amber/15 text-amber border border-amber/30', border: 'border-amber/40' },
-  'D':  { color: 'bg-red text-surface font-bold', border: 'border-red/40' },
+  'A+': { color: 'bg-green text-black font-extrabold', border: 'border-green/40' },
+  'A':  { color: 'bg-green/15 text-green border border-green/30 font-bold', border: 'border-green/40' },
+  'B':  { color: 'bg-blue/15 text-blue border border-blue/30 font-bold', border: 'border-blue/40' },
+  'C':  { color: 'bg-amber/15 text-amber border border-amber/30 font-bold', border: 'border-amber/40' },
+  'D':  { color: 'bg-red text-white font-extrabold', border: 'border-red/40' },
 }
 
 export default function PortfolioDoctorCard({ data }) {

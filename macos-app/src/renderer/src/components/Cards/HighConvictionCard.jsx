@@ -5,9 +5,9 @@ import { useAPI } from '../../hooks/useAPI'
 import Tooltip, { InfoBadge } from '../UI/Tooltip'
 
 const POSTURE_BADGES = {
-  BULLISH_EXPANSION:    { label: '🚀 Bullish Expansion', color: 'bg-green text-surface font-bold', desc: 'Over 60% of universe in confirmed structural markup.' },
-  CHOPPY_ROTATION:      { label: '⚖️ Choppy Rotation', color: 'bg-amber/15 text-amber border border-amber/30', desc: 'Mixed market structure; prioritize stock-specific momentum and tight invalidation stops.' },
-  DEFENSIVE_RISK_OFF:   { label: '🛡️ Defensive / Risk-Off', color: 'bg-red text-surface font-bold', desc: 'Broad market weakness; focus on hedging or bottom-fishing springs.' },
+  BULLISH_EXPANSION:    { label: '🚀 Bullish Expansion', color: 'bg-green text-black font-extrabold', desc: 'Over 60% of universe in confirmed structural markup.' },
+  CHOPPY_ROTATION:      { label: '⚖️ Choppy Rotation', color: 'bg-amber/15 text-amber border border-amber/30 font-bold', desc: 'Mixed market structure; prioritize stock-specific momentum and tight invalidation stops.' },
+  DEFENSIVE_RISK_OFF:   { label: '🛡️ Defensive / Risk-Off', color: 'bg-red text-white font-extrabold', desc: 'Broad market weakness; focus on hedging or bottom-fishing springs.' },
 }
 
 const LIQUIDITY_TIER_BADGES = {

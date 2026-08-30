@@ -9,11 +9,13 @@ export default {
         panel:    'var(--color-panel)',
         elevated: 'var(--color-elevated)',
         border:   'var(--color-border)',
+        'border-subtle': 'var(--color-border-subtle)',
         text:     'var(--color-text)',
         muted:    'var(--color-muted)',
         subtle:   'var(--color-subtle)',
         amber:    'var(--color-amber)',
         'amber-dim': 'var(--color-amber-dim)',
+        'amber-light': '#fbbf24',
         green:    'var(--color-green)',
         red:      'var(--color-red)',
         blue:     'var(--color-blue)',
@@ -22,7 +24,13 @@ export default {
       },
       fontFamily: {
         mono: ['"JetBrains Mono"', '"Fira Code"', 'Menlo', 'monospace'],
-        ui:   ['-apple-system', 'BlinkMacSystemFont', '"Helvetica Neue"', 'sans-serif'],
+        ui:   ['-apple-system', 'BlinkMacSystemFont', '"Segoe UI"', 'Roboto', '"Helvetica Neue"', 'sans-serif'],
+      },
+      boxShadow: {
+        'glow-amber': '0 0 16px -2px rgba(245, 158, 11, 0.25)',
+        'glow-emerald': '0 0 16px -2px rgba(16, 185, 129, 0.25)',
+        'glow-rose': '0 0 16px -2px rgba(244, 63, 94, 0.25)',
+        'glow-cyan': '0 0 16px -2px rgba(6, 182, 212, 0.25)',
       },
       keyframes: {
         'fade-slide': {
@@ -31,9 +39,10 @@ export default {
         },
       },
       animation: {
-        'fade-slide': 'fade-slide 0.35s ease-out',
+        'fade-slide': 'fade-slide 0.3s cubic-bezier(0.16, 1, 0.3, 1)',
       },
     },
   },
   plugins: [],
 }
+

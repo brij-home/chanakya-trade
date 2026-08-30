@@ -180,6 +180,11 @@ def _fetch_data_brief(
     if fund:
         brief["fundamentals"] = fund if isinstance(fund, dict) else vars(fund)
 
+    # Forensic snapshot
+    forensic = _safe_call("audit_forensics", symbol=symbol)
+    if forensic:
+        brief["forensics"] = forensic if isinstance(forensic, dict) else (forensic.as_dict() if hasattr(forensic, "as_dict") else vars(forensic))
+
     # FII/DII data
     fii = _safe_call("get_fii_dii_data")
     if fii:
@@ -220,6 +225,13 @@ def _build_prompt(symbol: str, exchange: str, brief: dict[str, Any]) -> str:
             lines.append(f"  {k}: {v}")
         lines.append("")
 
+    forensic = brief.get("forensics", {})
+    if forensic:
+        lines.append("--- Forensic & Governance Audit ---")
+        for k, v in list(forensic.items())[:12]:
+            lines.append(f"  {k}: {v}")
+        lines.append("")
+
     macro = brief.get("macro", {})
     if macro:
         lines.append("--- Macro Data ---")
@@ -242,6 +254,11 @@ def _build_prompt(symbol: str, exchange: str, brief: dict[str, Any]) -> str:
         lines.append("")
 
     lines += [
+        "=== MANDATORY INSTRUCTION FOR AI PERSONA ===",
+        "1. You MUST ALWAYS evaluate the stock strictly based on the provided technical, fundamental, and forensic metrics.",
+        "2. NEVER decline to answer, never say you lack real-time access, and NEVER ask questions or ask the user for manual data.",
+        "3. You must ALWAYS output valid structured output matching the format below.",
+        "",
         "=== Required Output Format ===",
         "VERDICT: <STRONG_BUY|BUY|HOLD|SELL|STRONG_SELL>",
         "CONFIDENCE: <0-100>",
@@ -305,6 +322,30 @@ def _score_dimension(dimension: str, brief: dict[str, Any]) -> float:
                 score += 10 if fcf_yield > 5 else (-5 if fcf_yield < 2 else 0)
             except (TypeError, ValueError):
                 pass
+
+        # Forensic indicators
+        forensic = brief.get("forensics", {})
+        if forensic:
+            piotroski = forensic.get("piotroski_score")
+            if piotroski is not None:
+                try:
+                    p = float(piotroski)
+                    score += 15 if p >= 7 else (-15 if p <= 4 else 0)
+                except (TypeError, ValueError):
+                    pass
+            altman = forensic.get("altman_zone")
+            if altman:
+                if "SAFE" in str(altman).upper():
+                    score += 10
+                elif "DISTRESS" in str(altman).upper():
+                    score -= 20
+            pledge = forensic.get("promoter_pledge_pct")
+            if pledge is not None:
+                try:
+                    pl = float(pledge)
+                    score += 5 if pl < 5 else (-15 if pl > 20 else 0)
+                except (TypeError, ValueError):
+                    pass
 
         return max(0.0, min(100.0, score))
 
@@ -500,15 +541,14 @@ def run_persona_analysis(
     # Validate persona (raises ValueError for unknown ids)
     persona = get_persona(persona_id)
 
-    # 1. Initialize ToolRegistry and LLM Provider if not provided
-    if registry is None:
-        try:
-            from agent.core import ToolRegistry
-            registry = ToolRegistry()
-        except Exception:
-            registry = None
-
-    if llm_provider is None:
+    # 1. Initialize ToolRegistry and LLM Provider if explicitly requested as 'auto'
+    if llm_provider == "auto":
+        if registry is None:
+            try:
+                from agent.core import ToolRegistry
+                registry = ToolRegistry()
+            except Exception:
+                registry = None
         try:
             from agent.core import get_provider
             llm_provider = get_provider(registry=registry)
@@ -528,13 +568,24 @@ def run_persona_analysis(
         )
         if response_text and not any(
             err in response_text.lower()
-            for err in ("llm call failed", "gemini error", "503 unavailable", "resource_exhausted", "[gemini error")
+            for err in (
+                "llm call failed",
+                "gemini error",
+                "503 unavailable",
+                "resource_exhausted",
+                "[gemini error",
+                "i do not have access",
+                "would you like me to",
+                "please provide",
+                "cannot evaluate",
+                "insufficient financial data",
+            )
         ):
             sig = parse_persona_response(response_text, persona_id)
             if sig and sig.rationale and not any("error" in r.lower() for r in sig.rationale):
                 sig.key_metrics["Analysis Engine"] = f"AI Multi-Agent ({getattr(llm_provider, 'model', 'LLM')})"
                 return sig
-        # Fall through to rule-based if LLM failed
+        # Fall through to rule-based if LLM failed or refused
 
     # 3. Rule-based fallback
     try:

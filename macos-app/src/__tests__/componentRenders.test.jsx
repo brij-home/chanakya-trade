@@ -22,6 +22,8 @@ import DefinedRiskSpreadCard from '../renderer/src/components/Cards/DefinedRiskS
 import FlowsCard from '../renderer/src/components/Cards/FlowsCard'
 import ForensicCard from '../renderer/src/components/Cards/ForensicCard'
 import FunnelCard from '../renderer/src/components/Cards/FunnelCard'
+import WhaleFlowsCard from '../renderer/src/components/Cards/WhaleFlowsCard'
+import PersonaTrackRecordCard from '../renderer/src/components/Cards/PersonaTrackRecordCard'
 import Message from '../renderer/src/components/Chat/Message'
 
 // Mock matchMedia and ResizeObserver for JSDOM test environment
@@ -328,6 +330,14 @@ describe('React Component Rendering & Hook Invariant Gates', () => {
         />
       )
       expect(screen.getByText(/Institutional Screening Pipeline/i)).toBeTruthy()
+    })
+
+    it('renders WhaleFlowsCard and PersonaTrackRecordCard cleanly', () => {
+      render(<WhaleFlowsCard />)
+      expect(screen.getByText(/Indian Marquee Whale & SAST Flow Tracker/i)).toBeTruthy()
+
+      render(<PersonaTrackRecordCard />)
+      expect(screen.getByText(/AI Persona Accuracy & Dynamic Weighting Matrix/i)).toBeTruthy()
     })
   })
 

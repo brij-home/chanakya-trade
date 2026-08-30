@@ -4,9 +4,9 @@ import Tooltip, { InfoBadge } from '../UI/Tooltip'
 
 const STAGE_CONFIG = {
   'STAGE_1_BASE':         { label: 'Stage 1: Basing Area', color: 'bg-blue/15 text-blue border border-blue/30', desc: 'Accumulation base forming along flat 200 SMA' },
-  'STAGE_2_MARKUP':       { label: '🚀 Stage 2: Markup (Superperformer)', color: 'bg-green text-surface font-bold', desc: 'Sustained institutional uptrend above rising 50/200 SMA' },
+  'STAGE_2_MARKUP':       { label: '🚀 Stage 2: Markup (Superperformer)', color: 'bg-green text-black font-extrabold', desc: 'Sustained institutional uptrend above rising 50/200 SMA' },
   'STAGE_3_DISTRIBUTION': { label: '⚠️ Stage 3: Top / Distribution', color: 'bg-amber/15 text-amber border border-amber/30', desc: 'Choppy topping action near multi-month highs' },
-  'STAGE_4_MARKDOWN':     { label: '📉 Stage 4: Decline / Markdown', color: 'bg-red text-surface font-bold', desc: 'Downtrend below declining 50/200 SMA (AVOID)' },
+  'STAGE_4_MARKDOWN':     { label: '📉 Stage 4: Decline / Markdown', color: 'bg-red text-white font-extrabold', desc: 'Downtrend below declining 50/200 SMA (AVOID)' },
 }
 
 export default function MultibaggerCard({ data }) {
@@ -270,7 +270,7 @@ export default function MultibaggerCard({ data }) {
         <div className="bg-panel border border-border/60 rounded-lg p-3 space-y-2 font-ui">
           <div className="flex items-center justify-between text-xs">
             <div className="flex items-center gap-2">
-              <span className="bg-green text-surface text-[10px] font-bold px-2 py-0.5 rounded">
+              <span className="bg-green text-black text-[10px] font-extrabold px-2 py-0.5 rounded">
                 {ticket.action || 'LONG (BUY)'}
               </span>
               <span className="font-semibold text-text">Institutional Trade Ticket</span>

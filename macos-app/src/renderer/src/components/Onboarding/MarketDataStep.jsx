@@ -375,8 +375,8 @@ export default function MarketDataStep({ formData, setFormData, onNext, port }) 
           <button
             onClick={onNext}
             disabled={!canProceed}
-            className="px-6 py-2 bg-amber text-surface font-ui font-semibold text-sm rounded-lg
-                       hover:brightness-110 transition-all active:scale-95
+            className="px-6 py-2 bg-amber text-black font-ui font-extrabold text-sm rounded-lg
+                       hover:brightness-110 transition-all active:scale-95 shadow-sm cursor-pointer
                        disabled:opacity-40 disabled:cursor-not-allowed"
           >
             Next

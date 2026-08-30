@@ -3161,10 +3161,13 @@ async def skill_dashboard_snapshot(req: Optional[DashboardSnapshotRequest] = Non
             if df is not None and not df.empty and "close" in df.columns:
                 cur_ltp = float(df["close"].iloc[-1])
             else:
-                idx = get_index(setup_sym)
-                if idx and idx.last_price > 0:
-                    cur_ltp = float(idx.last_price)
-                else:
+                try:
+                    idx = get_index(setup_sym)
+                    if idx and idx.last_price > 0:
+                        cur_ltp = float(idx.last_price)
+                except Exception:
+                    pass
+                if not cur_ltp or cur_ltp <= 0:
                     cur_ltp = 1000.0
 
         # Market Structure & Volume Profile for active symbol
@@ -3179,27 +3182,54 @@ async def skill_dashboard_snapshot(req: Optional[DashboardSnapshotRequest] = Non
         except Exception:
             pass
 
-        # Real quantitative analysis for setup_sym
+        # Real quantitative analysis for setup_sym (executed concurrently for instant response)
         fund_snap = None
         forensic_rep = None
         mb_rep = None
-        try:
-            from analysis.fundamental import analyse as analyse_fund
-            fund_snap = analyse_fund(setup_sym)
-        except Exception:
-            pass
 
-        try:
-            from analysis.forensic import audit_forensics
-            forensic_rep = audit_forensics(setup_sym)
-        except Exception:
-            pass
+        def _fetch_fund():
+            try:
+                from analysis.fundamental import analyse as analyse_fund
+                return analyse_fund(setup_sym)
+            except Exception:
+                return None
 
-        try:
-            from analysis.multibagger import scan_multibagger_opportunity
-            mb_rep = scan_multibagger_opportunity(setup_sym)
-        except Exception:
-            pass
+        def _fetch_forensic():
+            try:
+                from analysis.forensic import audit_forensics
+                return audit_forensics(setup_sym)
+            except Exception:
+                return None
+
+        def _fetch_mb():
+            try:
+                from analysis.multibagger import scan_multibagger_opportunity
+                return scan_multibagger_opportunity(setup_sym)
+            except Exception:
+                return None
+
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+            fut_fund = executor.submit(_fetch_fund)
+            fut_forensic = executor.submit(_fetch_forensic)
+            fut_mb = executor.submit(_fetch_mb)
+
+            done, _ = concurrent.futures.wait([fut_fund, fut_forensic, fut_mb], timeout=1.8)
+            if fut_fund in done:
+                try:
+                    fund_snap = fut_fund.result()
+                except Exception:
+                    pass
+            if fut_forensic in done:
+                try:
+                    forensic_rep = fut_forensic.result()
+                except Exception:
+                    pass
+            if fut_mb in done:
+                try:
+                    mb_rep = fut_mb.result()
+                except Exception:
+                    pass
 
         # 2. Rich AI Personas with dynamically calculated quant metrics for setup_sym
         rvol_val = vp_report.rvol_20d if vp_report else 1.8
@@ -3823,11 +3853,11 @@ async def skill_gex_snapshot(req: Optional[GEXSnapshotRequest] = None):
         except Exception:
             pass
 
-        # Dynamic Strike Step & Calculation
+        # Dynamic Strike Step & Calculation (Full Market Coverage: 41 strikes from ATM-20 to ATM+20)
         strike_step = 50 if underlying in ("NIFTY", "FINNIFTY") else (100 if underlying in ("BANKNIFTY", "SENSEX") else (20 if spot > 1000 else 10))
         atm_strike = round(spot / strike_step) * strike_step
 
-        strikes = [atm_strike + i * strike_step for i in range(-6, 7)]
+        strikes = [atm_strike + i * strike_step for i in range(-20, 21)]
         gex_profile = []
         tot_call_oi = 0
         tot_put_oi = 0
@@ -4129,6 +4159,7 @@ async def skill_persona_council(req: CouncilRequest):
             council_name=req.council,
             symbol=req.symbol,
             exchange=req.exchange,
+            llm_provider="auto",
         )
         # Convert PersonaSignal objects to dict
         if "signals" in res:
@@ -4148,9 +4179,87 @@ async def skill_persona_analyze(req: PersonaAnalyzeRequest):
             persona_id=req.persona_id,
             symbol=req.symbol,
             exchange=req.exchange,
+            llm_provider="auto",
         )
         return _ok(sig.to_dict())
     except Exception as e:
         raise _err(str(e))
+
+
+class PersonaTrackRecordRequest(BaseModel):
+    sector: Optional[str] = None
+    regime: Optional[str] = None
+
+
+@router.get("/persona/track_records")
+@router.post("/persona/track_records")
+@router.get("/skills/persona/track_records")
+@router.post("/skills/persona/track_records")
+async def skill_persona_track_records(req: Optional[PersonaTrackRecordRequest] = None):
+    """Retrieve self-evolving empirical track records and dynamic weighting multipliers for all 13 personas."""
+    try:
+        from agent.persona_tracker import get_persona_tracker
+        tracker = get_persona_tracker()
+        sector = req.sector if req else None
+        regime = req.regime if req else None
+        records = tracker.get_all_track_records(sector=sector, regime=regime)
+        return _ok({"track_records": records, "total_personas": len(records)})
+    except Exception as e:
+        raise _err(str(e))
+
+
+class PostMortemRequest(BaseModel):
+    persona_id: str
+    symbol: str
+    outcome_status: str
+    realized_r: float
+    entry_price: float
+    exit_price: float
+    sector: Optional[str] = "Broad Market"
+
+
+@router.post("/persona/post_mortem")
+@router.post("/skills/persona/post_mortem")
+async def skill_persona_post_mortem(req: PostMortemRequest):
+    """Generate an institutional trade retrospective analysis and update persona heuristic memory."""
+    try:
+        from agent.persona_tracker import get_persona_tracker
+        tracker = get_persona_tracker()
+        res = tracker.generate_post_mortem(
+            persona_id=req.persona_id,
+            symbol=req.symbol,
+            outcome_status=req.outcome_status,
+            realized_r=req.realized_r,
+            entry_price=req.entry_price,
+            exit_price=req.exit_price,
+            sector=req.sector or "Broad Market",
+        )
+        return _ok(res)
+    except Exception as e:
+        raise _err(str(e))
+
+
+class WhaleFlowsRequest(BaseModel):
+    investor: Optional[str] = None
+    sector: Optional[str] = None
+    min_deal_cr: Optional[float] = 0.0
+
+
+@router.get("/whale_flows")
+@router.post("/whale_flows")
+@router.get("/skills/whale_flows")
+@router.post("/skills/whale_flows")
+async def skill_whale_flows(req: Optional[WhaleFlowsRequest] = None):
+    """Retrieve Indian marquee superstar investor bulk/block deals and SAST accumulations."""
+    try:
+        from analysis.whale_tracker import get_whale_flows
+        inv = req.investor if req else None
+        sec = req.sector if req else None
+        min_cr = req.min_deal_cr if (req and req.min_deal_cr is not None) else 0.0
+        res = get_whale_flows(investor_filter=inv, sector_filter=sec, min_deal_cr=min_cr)
+        return _ok(res)
+    except Exception as e:
+        raise _err(str(e))
+
 
 

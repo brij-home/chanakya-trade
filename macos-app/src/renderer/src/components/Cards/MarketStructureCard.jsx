@@ -9,12 +9,12 @@ const REGIME_CONFIG = {
 }
 
 const SETUP_BADGES = {
-  'BREAKOUT_EXPANSION':     { label: '🚀 Breakout Expansion', color: 'bg-green text-surface' },
-  'PULLBACK_RETEST':        { label: '🎯 Pullback to Demand OB', color: 'bg-blue/15 text-blue border border-blue/30' },
-  'BOTTOM_FISHING_SPRING':  { label: '🎣 Bottom Fishing (Wyckoff Spring)', color: 'bg-green/15 text-green border border-green/30' },
-  'TOP_FISHING_UTAD':       { label: '🏔️ Top Fishing (Wyckoff UTAD)', color: 'bg-red/15 text-red border border-red/30' },
-  'VCP_CONTRACTION':        { label: '⚡ VCP Volatility Contraction', color: 'bg-amber/15 text-amber border border-amber/30' },
-  'BREAKDOWN_EXPANSION':    { label: '📉 Breakdown Expansion', color: 'bg-red text-surface' },
+  'BREAKOUT_EXPANSION':     { label: '🚀 Breakout Expansion', color: 'bg-green text-black font-extrabold' },
+  'PULLBACK_RETEST':        { label: '🎯 Pullback to Demand OB', color: 'bg-blue/15 text-blue border border-blue/30 font-bold' },
+  'BOTTOM_FISHING_SPRING':  { label: '🎣 Bottom Fishing (Wyckoff Spring)', color: 'bg-green/15 text-green border border-green/30 font-bold' },
+  'TOP_FISHING_UTAD':       { label: '🏔️ Top Fishing (Wyckoff UTAD)', color: 'bg-red/15 text-red border border-red/30 font-bold' },
+  'VCP_CONTRACTION':        { label: '⚡ VCP Volatility Contraction', color: 'bg-amber/15 text-amber border border-amber/30 font-bold' },
+  'BREAKDOWN_EXPANSION':    { label: '📉 Breakdown Expansion', color: 'bg-red text-white font-extrabold' },
   'CONSOLIDATION':          { label: '🔄 Range Consolidation', color: 'bg-panel text-muted border border-border' },
 }
 

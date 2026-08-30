@@ -561,13 +561,17 @@ class TestRuleBasedFallback:
             )
 
     def test_no_data_defaults_to_hold_zone(self):
-        """With no data (registry=None), scores default to 50 → HOLD range."""
-        sig = run_persona_analysis(
-            persona_id="buffett",
-            symbol="RELIANCE",
-            registry=None,
-            llm_provider=None,
-        )
+        """With no data / empty brief, scores default to 50 → HOLD range."""
+        brief: dict = {
+            "symbol": "RELIANCE",
+            "exchange": "NSE",
+            "technicals": {},
+            "fundamentals": {},
+            "macro": {},
+            "news": [],
+            "fii_dii": {},
+        }
+        sig = _rule_based_signal("buffett", brief)
         # With all-neutral data, weighted score ~50 → HOLD
         assert sig.verdict == "HOLD"
 

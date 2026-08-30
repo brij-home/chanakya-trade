@@ -4,19 +4,19 @@ import Tooltip, { InfoBadge } from '../UI/Tooltip'
 
 const VERDICT_STYLES = {
   EXPLOSIVE_BULLISH_EXPANSION: {
-    badge: 'bg-green text-surface font-bold',
+    badge: 'bg-green text-black font-extrabold',
     label: '🚀 Explosive Bullish Expansion',
     icon: '🚀',
     border: 'border-green/40',
   },
   EXPLOSIVE_BEARISH_BREAKDOWN: {
-    badge: 'bg-red text-surface font-bold',
+    badge: 'bg-red text-white font-extrabold',
     label: '🚨 Explosive Bearish Breakdown',
     icon: '🚨',
     border: 'border-red/40',
   },
   COILING_SQUEEZE_PENDING: {
-    badge: 'bg-amber text-surface font-bold',
+    badge: 'bg-amber text-black font-extrabold',
     label: '🔴 Energy Coiling (Squeeze Pending)',
     icon: '🔴',
     border: 'border-amber/40',
