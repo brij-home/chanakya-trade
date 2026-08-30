@@ -29,18 +29,27 @@
 
 ## ⚡ Key Architectural Capabilities
 
-### 1. 🧠 Multi-Agent AI Reasoning & Smart Funnel
+### 1. 🧠 Multi-Agent AI Reasoning & High-Conviction Council Ensembles
 - **Stage 1 (0-Token Deterministic Filter)**: Instant quantitative pre-screening across 500+ NSE stocks (Minervini Stage 2 Markup, VCP, RRG Momentum, Beneish M-score).
 - **Stage 2 (Macro & Sector Rotation)**: Real-time India VIX, NIFTY breadth, FII/DII institutional liquidity flows, and JdK RS-Ratio sector graphs.
-- **Stage 3 (Adversarial Persona Debate)**: Bull vs Bear analysts with legendary investor personas (`Jhunjhunwala`, `Buffett`, `Lynch`, `Soros`, `Munger`, `Forensic Auditor`) synthesized by an AI Fund Manager.
+- **Stage 3 (Adversarial Multi-Agent Debates & 13 Specialist Personas)**:
+  - *Value & Quality*: `Buffett`, `Munger`, `Lynch`
+  - *Indian Growth & Compounders*: `Jhunjhunwala`, `Kedia` (SMILE Framework)
+  - *Momentum & Breakouts*: `Minervini` (SEPA/VCP), `Wyckoff` (VSA/Springs), `O'Neil` (CAN SLIM)
+  - *Macro, Quant & Convexity*: `Soros`, `Simons` (Statistical Arbitrage), `Taleb` (Antifragile Convexity)
+  - *Price Action & Liquidity*: `SMC` (ICT Liquidity Sweeps & Order Blocks)
+  - *Governance & Audit*: `Forensic Auditor` (Beneish M-Score, Altman Z''-Score, Pledging)
+- **High-Conviction Council Ensembles**: Combines complementary minds into consensus verdicts with 0–100 conviction scores (`Breakout`, `Options Sniper`, `Multibagger`, `Macro Regime`, `Core Value`).
 
 ### 2. 📊 Smart Money Concepts (SMC) & Volume Price Analysis
 - **Fractal Swings & Break of Structure (BOS)**: Automatic identification of `CHoCH` / `MSS` structural reversals.
 - **Unmitigated Order Blocks (OB) & Fair Value Gaps (FVG)**: Institutional liquidity sweeps, buy-side / sell-side liquidity pools.
 - **Volume Profile (VPA)**: Point of Control (`POC`), Value Area High (`VAH`), Value Area Low (`VAL`), and Wyckoff stopping volume detection.
 
-### 3. 🎯 Quantitative Options & Risk Management
-- **Gamma Exposure (GEX)**: Real-time Zero Gamma Flip Point calculation, Call Wall resistance, Put Support, and 0DTE/Weekly skew analytics.
+### 3. 🎯 Institutional Retail Protection & Defined-Risk Options
+- **Behavioral Risk Advisory & Mindful Friction**: Co-pilot coaching, loss-streak protection, and double-confirmation friction instead of hard paternalistic blocking.
+- **Defined-Risk Option Spreads**: Bull Call Spreads, Bear Put Spreads, Bull Put Spreads, Bear Call Spreads, and Iron Condors with strictly capped downside.
+- **Post-Budget Tax & Cost Engine**: Exact FY24-25 STCG (20%), LTCG (12.5%), F&O business income tax estimation, and automated tax-loss harvesting scans.
 - **Volatility Risk-Parity Sizing**: Dynamic position sizing adjusted for $1.5 \times \text{ATR}$ risk budgets and Indian F&O contract lot constraints.
 - **Active Trade Lifecycle**: Multi-tier trailing stops (`2R Breakeven`, `Chandelier ATR 3.0x`, and daily 20-EMA trail).
 
