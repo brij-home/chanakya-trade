@@ -2,37 +2,73 @@ import { useState, useEffect } from 'react'
 import { useChatStore } from '../../store/chatStore'
 import { useAPI } from '../../hooks/useAPI'
 
+const COUNCIL_MODES = [
+  { id: 'debate', name: 'Bull vs Bear Debate', icon: '⚔️', desc: 'Adversarial Thesis & Anti-Thesis' },
+  { id: 'breakout', name: 'Breakout Council', icon: '🚀', desc: 'Minervini + Wyckoff + O\'Neil + Forensic' },
+  { id: 'options_sniper', name: 'Options Sniper', icon: '🎯', desc: 'SMC + Taleb + Simons' },
+  { id: 'multibagger', name: 'Multibagger Hub', icon: '💎', desc: 'Kedia + Buffett + Munger + Jhunjhunwala' },
+  { id: 'macro_regime', name: 'Macro Regime', icon: '🌐', desc: 'Soros + Jhunjhunwala + Simons + Forensic' },
+  { id: 'core_value', name: 'Core Value', icon: '🏛️', desc: 'Buffett + Munger + Lynch + Forensic' },
+]
+
+const PERSONA_NAMES = {
+  buffett: 'Warren Buffett',
+  munger: 'Charlie Munger',
+  lynch: 'Peter Lynch',
+  jhunjhunwala: 'Rakesh Jhunjhunwala',
+  kedia: 'Vijay Kedia',
+  minervini: 'Mark Minervini',
+  wyckoff: 'Richard Wyckoff',
+  oneil: "William O'Neil",
+  taleb: 'Nassim Taleb',
+  simons: 'Jim Simons',
+  smc: 'Smart Money Concepts',
+  forensic: 'Forensic Auditor',
+  soros: 'George Soros',
+}
+
 export default function DebateArenaView({ onOpenOrderTicket }) {
   const { call } = useAPI()
   const sendDraft = useChatStore((s) => s.sendDraft)
   const [symbol, setSymbol] = useState('RELIANCE')
   const [inputSymbol, setInputSymbol] = useState('')
+  const [selectedCouncil, setSelectedCouncil] = useState('debate')
   const [data, setData] = useState(null)
+  const [councilData, setCouncilData] = useState(null)
   const [loading, setLoading] = useState(true)
   const [isStreaming, setIsStreaming] = useState(false)
   const [streamingSteps, setStreamingSteps] = useState([])
+  const [expandedMember, setExpandedMember] = useState(null)
 
   useEffect(() => {
     let unmounted = false
-    const fetchDebate = async () => {
+    const fetchData = async () => {
       try {
         setLoading(true)
-        const res = await call('/skills/debate_snapshot', { symbol, exchange: 'NSE' })
-        const snapshot = res?.data ?? res
-        if (!unmounted && snapshot) {
-          setData(snapshot)
+        if (selectedCouncil === 'debate') {
+          const res = await call('/skills/debate_snapshot', { symbol, exchange: 'NSE' })
+          const snapshot = res?.data ?? res
+          if (!unmounted && snapshot) {
+            setData(snapshot)
+          }
+        } else {
+          const res = await call('/skills/persona/council', { symbol, council: selectedCouncil, exchange: 'NSE' })
+          const cSnapshot = res?.data ?? res
+          if (!unmounted && cSnapshot) {
+            setCouncilData(cSnapshot)
+          }
         }
       } catch (err) {
-        console.error('Failed to load debate snapshot:', err)
+        console.error('Failed to load snapshot:', err)
       } finally {
         if (!unmounted) setLoading(false)
       }
     }
-    fetchDebate()
+    fetchData()
     return () => {
       unmounted = true
     }
-  }, [symbol])
+  }, [symbol, selectedCouncil])
 
   const handleSearch = (e) => {
     e.preventDefault()
@@ -49,8 +85,13 @@ export default function DebateArenaView({ onOpenOrderTicket }) {
 
   const startLiveDebate = async () => {
     setIsStreaming(true)
+    const isCouncil = selectedCouncil !== 'debate'
+    const title = isCouncil
+      ? `${COUNCIL_MODES.find(c => c.id === selectedCouncil)?.name || 'Council'} (${symbol})`
+      : `Adversarial Debate (${symbol})`
+
     startActivity({
-      title: `Adversarial Debate (${symbol})`,
+      title,
       details: `⚡ Initializing Multi-Agent Pipeline for ${symbol}...`,
       type: 'debate',
       cancelFn: () => {
@@ -61,20 +102,24 @@ export default function DebateArenaView({ onOpenOrderTicket }) {
 
     setStreamingSteps([
       '⚡ Initializing Multi-Agent Pipeline for ' + symbol + '...',
-      '🔍 Bull Analyst evaluating Minervini Stage 2 & Volume Profile...',
-      '🔬 Bear Analyst auditing Beneish M-Score & Accruals Quality...',
-      '⚖️ Facilitator synthesizing risk-reward consensus...',
+      '🔍 Specialists extracting quantitative edge metrics...',
+      '🔬 Persona agents debating invalidation and risk parameters...',
+      '⚖️ Synthesizing high-conviction consensus score...',
     ])
 
-    const t1 = setTimeout(() => updateActivity({ details: '🔍 Bull Analyst evaluating Minervini Stage 2 & Volume Profile...' }), 400)
-    const t2 = setTimeout(() => updateActivity({ details: '🔬 Bear Analyst auditing Beneish M-Score & Accruals Quality...' }), 850)
-    const t3 = setTimeout(() => updateActivity({ details: '⚖️ Facilitator synthesizing risk-reward consensus...' }), 1300)
+    const t1 = setTimeout(() => updateActivity({ details: '🔍 Specialists extracting quantitative edge metrics...' }), 400)
+    const t2 = setTimeout(() => updateActivity({ details: '🔬 Persona agents debating invalidation and risk parameters...' }), 850)
+    const t3 = setTimeout(() => updateActivity({ details: '⚖️ Synthesizing high-conviction consensus score...' }), 1300)
 
     try {
-      const res = await call('/skills/debate_snapshot', { symbol, exchange: 'NSE' })
-      const snapshot = res?.data ?? res
-      if (snapshot) {
-        setData(snapshot)
+      if (selectedCouncil === 'debate') {
+        const res = await call('/skills/debate_snapshot', { symbol, exchange: 'NSE' })
+        const snapshot = res?.data ?? res
+        if (snapshot) setData(snapshot)
+      } else {
+        const res = await call('/skills/persona/council', { symbol, council: selectedCouncil, exchange: 'NSE' })
+        const cSnapshot = res?.data ?? res
+        if (cSnapshot) setCouncilData(cSnapshot)
       }
     } catch (err) {
       console.error('Failed to run live debate:', err)
@@ -89,14 +134,21 @@ export default function DebateArenaView({ onOpenOrderTicket }) {
     }
   }
 
-  const score = data?.conviction_score || 88
+  const score = selectedCouncil === 'debate'
+    ? (data?.conviction_score || 88)
+    : (councilData?.consensus_score || 78)
   const bullCase = data?.bull_case || []
   const bearCase = data?.bear_case || []
   const consensus = data?.facilitator_consensus
   const ltp = data?.ltp || 0
 
+  const councilSignals = councilData?.signals || []
+  const councilVerdict = councilData?.consensus_verdict || 'HOLD'
+  const isCouncilBuy = councilVerdict.includes('BUY')
+  const isCouncilSell = councilVerdict.includes('SELL')
+
   return (
-    <div className="flex-1 overflow-y-auto p-3 sm:p-6 bg-surface text-text space-y-6 font-ui relative">
+    <div className="flex-1 overflow-y-auto p-3 sm:p-6 bg-surface text-text space-y-5 font-ui relative">
       {/* Top Header & Stock Switcher */}
       <div className="flex flex-wrap items-center justify-between gap-4 bg-panel/90 border border-border/80 rounded-2xl px-5 py-3.5 shadow-md backdrop-blur-md">
         <div className="flex items-center gap-3">
@@ -105,13 +157,13 @@ export default function DebateArenaView({ onOpenOrderTicket }) {
             <h1 className="text-lg font-bold font-mono text-text flex items-center gap-2">
               <span>{symbol} (NSE)</span>
               <span className="text-xs px-2 py-0.5 rounded-full bg-green/15 text-green font-bold border border-green/30">
-                {ltp > 0 ? `₹${Number(ltp).toLocaleString('en-IN', { minimumFractionDigits: 2 })}` : 'Live Fetching…'}
+                {ltp > 0 ? `₹${Number(ltp).toLocaleString('en-IN', { minimumFractionDigits: 2 })}` : 'Live Stream'}
               </span>
             </h1>
             <div className="flex items-center gap-2 text-[11px] text-muted">
-              <span>Adversarial Multi-Agent Debate Arena</span>
+              <span>Institutional Multi-Agent Intelligence Hub</span>
               <span>•</span>
-              <span className="text-emerald-400 font-mono font-semibold">Live Quantitative Synthesis</span>
+              <span className="text-emerald-400 font-mono font-semibold">13 Specialist Personas</span>
             </div>
           </div>
         </div>
@@ -159,9 +211,30 @@ export default function DebateArenaView({ onOpenOrderTicket }) {
             className="flex items-center gap-2 px-4 py-2 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-500 hover:brightness-110 text-black font-bold text-xs transition-all shadow-md cursor-pointer"
           >
             <span>{isStreaming ? '🔄' : '⚡'}</span>
-            <span>{isStreaming ? 'Agents Debating...' : 'Run Live Debate'}</span>
+            <span>{isStreaming ? 'Agents Polling...' : 'Run Analysis'}</span>
           </button>
         </div>
+      </div>
+
+      {/* Council Ensemble & Debate Mode Selector Bar */}
+      <div className="flex items-center gap-2 overflow-x-auto pb-1 bg-panel/70 p-1.5 rounded-2xl border border-border/70 text-xs">
+        {COUNCIL_MODES.map((mode) => {
+          const isActive = selectedCouncil === mode.id
+          return (
+            <button
+              key={mode.id}
+              onClick={() => setSelectedCouncil(mode.id)}
+              className={`flex items-center gap-2 px-3.5 py-2 rounded-xl font-bold transition-all cursor-pointer whitespace-nowrap ${
+                isActive
+                  ? 'bg-amber text-black shadow-md'
+                  : 'text-muted hover:text-text hover:bg-elevated border border-transparent'
+              }`}
+            >
+              <span>{mode.icon}</span>
+              <span>{mode.name}</span>
+            </button>
+          )
+        })}
       </div>
 
       {/* Streaming Banner if active */}
@@ -169,7 +242,7 @@ export default function DebateArenaView({ onOpenOrderTicket }) {
         <div className="bg-elevated/90 border border-amber/40 rounded-2xl p-4 shadow-lg animate-fade-slide">
           <div className="flex items-center gap-2 text-xs font-bold text-amber mb-2">
             <span className="w-2.5 h-2.5 rounded-full bg-amber animate-ping" />
-            <span>Multi-Agent Debate In Progress (Dual-LLM Fast Extraction + Deep Synthesis)</span>
+            <span>Multi-Agent Synthesis In Progress (Fast Extraction + Deep Reasoning)</span>
           </div>
           <div className="space-y-1 font-mono text-xs text-muted">
             {streamingSteps.map((step, idx) => (
@@ -183,7 +256,7 @@ export default function DebateArenaView({ onOpenOrderTicket }) {
       )}
 
       {/* Conviction Gauge Banner (Top Center) */}
-      <div className="flex flex-col items-center justify-center pt-2">
+      <div className="flex flex-col items-center justify-center pt-1">
         <div className="relative w-48 h-28 flex flex-col items-center justify-end">
           {/* Semicircular Arc SVG */}
           <svg className="w-48 h-28 overflow-visible" viewBox="0 0 160 90">
@@ -218,151 +291,259 @@ export default function DebateArenaView({ onOpenOrderTicket }) {
             <span className="text-3xl font-extrabold font-mono text-text tracking-tight">
               {score}<span className="text-sm font-normal text-muted">/100</span>
             </span>
-            <span className="text-[10px] font-bold tracking-wider uppercase text-emerald-400">
-              CONVICTION ({score >= 75 ? 'HIGH' : score >= 55 ? 'MODERATE' : 'LOW'})
+            <span className={`text-[10px] font-bold tracking-wider uppercase ${score >= 75 ? 'text-emerald-400' : score >= 55 ? 'text-amber' : 'text-rose-400'}`}>
+              {score >= 75 ? 'HIGH CONVICTION' : score >= 55 ? 'MODERATE' : 'LOW CONVICTION'}
             </span>
           </div>
         </div>
       </div>
 
-      {/* Main Debate Grid: Bull Case vs Bear Case with Center Floating Facilitator Card */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start relative">
-        {/* Left Column (5 Cols): BULL CASE */}
-        <div className="lg:col-span-5 space-y-4">
-          <div className="flex items-center gap-2 text-emerald-400 font-bold text-sm tracking-wide uppercase border-b border-emerald-500/30 pb-2">
-            <span>↑</span>
-            <span>BULL CASE (CONVICTION PILLARS)</span>
-          </div>
-
-          <div className="space-y-3">
-            {bullCase.map((item, idx) => (
-              <div
-                key={idx}
-                className="bg-panel border border-emerald-500/20 hover:border-emerald-500/40 rounded-2xl p-4 shadow-sm flex items-start gap-3.5 transition-all hover:bg-elevated/40"
-              >
-                <div className="w-10 h-10 rounded-full bg-emerald-500/15 border border-emerald-500/30 flex items-center justify-center text-lg flex-shrink-0">
-                  {item.avatar === 'robot-tech' && '📈'}
-                  {item.avatar === 'robot-flow' && '🌊'}
-                  {item.avatar === 'robot-inst' && '🏦'}
-                </div>
-                <div className="space-y-1">
-                  <span className="text-xs font-bold text-emerald-400 tracking-wide uppercase block">
-                    {item.title}
-                  </span>
-                  <p className="text-xs text-text/90 leading-relaxed font-ui">{item.desc}</p>
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-
-        {/* Center Overlay Card (2 Cols desktop layout bridging the sides): FACILITATOR CONSENSUS */}
-        <div className="lg:col-span-2 flex flex-col items-center justify-center self-center z-10 my-2 lg:my-0">
-          <div className="w-full bg-panel/95 border-2 border-emerald-500/50 rounded-2xl p-4 shadow-xl backdrop-blur-xl space-y-3.5 text-center">
-            <div className="bg-emerald-500/20 text-emerald-400 text-[10px] font-extrabold uppercase py-1 px-3 rounded-full border border-emerald-500/40 inline-block tracking-wider">
-              FACILITATOR CONSENSUS
+      {/* VIEW MODE 1: ADVERSARIAL BULL VS BEAR DEBATE */}
+      {selectedCouncil === 'debate' && (
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start relative animate-fade-slide">
+          {/* Left Column (5 Cols): BULL CASE */}
+          <div className="lg:col-span-5 space-y-4">
+            <div className="flex items-center gap-2 text-emerald-400 font-bold text-sm tracking-wide uppercase border-b border-emerald-500/30 pb-2">
+              <span>↑</span>
+              <span>BULL CASE (CONVICTION PILLARS)</span>
             </div>
 
+            <div className="space-y-3">
+              {bullCase.map((item, idx) => (
+                <div
+                  key={idx}
+                  className="bg-panel border border-emerald-500/20 hover:border-emerald-500/40 rounded-2xl p-4 shadow-sm flex items-start gap-3.5 transition-all hover:bg-elevated/40"
+                >
+                  <div className="w-10 h-10 rounded-full bg-emerald-500/15 border border-emerald-500/30 flex items-center justify-center text-lg flex-shrink-0">
+                    {item.avatar === 'robot-tech' && '📈'}
+                    {item.avatar === 'robot-flow' && '🌊'}
+                    {item.avatar === 'robot-inst' && '🏦'}
+                  </div>
+                  <div className="space-y-1">
+                    <span className="text-xs font-bold text-emerald-400 tracking-wide uppercase block">
+                      {item.title}
+                    </span>
+                    <p className="text-xs text-text/90 leading-relaxed font-ui">{item.desc}</p>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* Center Overlay Card: FACILITATOR CONSENSUS */}
+          <div className="lg:col-span-2 flex flex-col items-center justify-center self-center z-10 my-2 lg:my-0">
+            <div className="w-full bg-panel/95 border-2 border-emerald-500/50 rounded-2xl p-4 shadow-xl backdrop-blur-xl space-y-3.5 text-center">
+              <div className="bg-emerald-500/20 text-emerald-400 text-[10px] font-extrabold uppercase py-1 px-3 rounded-full border border-emerald-500/40 inline-block tracking-wider">
+                FACILITATOR CONSENSUS
+              </div>
+
+              <div>
+                <span className="text-[10px] text-muted uppercase font-bold block mb-1">FINAL TRADE VERDICT</span>
+                <span className="text-base font-black text-emerald-400 tracking-wide bg-emerald-500/10 px-3 py-1 rounded-xl border border-emerald-500/30 block">
+                  {consensus?.verdict || 'READY (BUY)'}
+                </span>
+              </div>
+
+              {/* Trade Levels Box */}
+              <div className="bg-surface/90 border border-border/80 rounded-xl p-2.5 text-xs font-mono space-y-1.5 text-left">
+                <div className="flex justify-between">
+                  <span className="text-muted">ENTRY:</span>
+                  <span className="font-bold text-emerald-400">
+                    {consensus?.entry != null
+                      ? `₹${Number(consensus.entry).toLocaleString('en-IN', { minimumFractionDigits: 2 })}`
+                      : (ltp > 0 ? `₹${Number(ltp * 0.998).toLocaleString('en-IN', { minimumFractionDigits: 2 })}` : '—')}
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-muted">STOP-LOSS:</span>
+                  <span className="font-bold text-red">
+                    {consensus?.stop_loss != null
+                      ? `₹${Number(consensus.stop_loss).toLocaleString('en-IN', { minimumFractionDigits: 2 })}`
+                      : (ltp > 0 ? `₹${Number(ltp * 0.988).toLocaleString('en-IN', { minimumFractionDigits: 2 })}` : '—')}
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-muted">TARGET:</span>
+                  <span className="font-bold text-text">
+                    {consensus?.target != null
+                      ? `₹${Number(consensus.target).toLocaleString('en-IN', { minimumFractionDigits: 2 })}`
+                      : (ltp > 0 ? `₹${Number(ltp * 1.024).toLocaleString('en-IN', { minimumFractionDigits: 2 })}` : '—')}
+                  </span>
+                </div>
+                <div className="flex justify-between border-t border-border/50 pt-1 text-[11px]">
+                  <span className="text-muted">R:R RATIO:</span>
+                  <span className="font-bold text-amber">{consensus?.risk_reward ? `${consensus.risk_reward} R` : '2.0 R'}</span>
+                </div>
+              </div>
+
+              <button
+                onClick={() => {
+                  if (onOpenOrderTicket) {
+                    const isBear = consensus?.verdict_bias === 'BEARISH' || (consensus?.verdict && consensus.verdict.includes('SELL'))
+                    const entryVal = consensus?.entry != null ? Number(consensus.entry) : (ltp > 0 ? Number((ltp * (isBear ? 1.002 : 0.998)).toFixed(2)) : 0)
+                    const slVal = consensus?.stop_loss != null ? Number(consensus.stop_loss) : (ltp > 0 ? Number((isBear ? ltp * 1.012 : ltp * 0.988)).toFixed(2) : 0)
+                    const tgtVal = consensus?.target != null ? Number(consensus.target) : (ltp > 0 ? Number((isBear ? ltp * 0.976 : ltp * 1.024)).toFixed(2) : 0)
+                    onOpenOrderTicket({
+                      symbol,
+                      exchange: 'NSE',
+                      action: isBear ? 'SELL' : 'BUY',
+                      price: entryVal,
+                      stopLoss: slVal,
+                      target: tgtVal,
+                    })
+                  }
+                }}
+                className="w-full py-2 px-3 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-black font-bold text-xs uppercase tracking-wide transition-all shadow-md cursor-pointer"
+              >
+                ⚡ Stage Ticket
+              </button>
+            </div>
+          </div>
+
+          {/* Right Column (5 Cols): BEAR CASE */}
+          <div className="lg:col-span-5 space-y-4">
+            <div className="flex items-center gap-2 text-rose-400 font-bold text-sm tracking-wide uppercase border-b border-rose-500/30 pb-2">
+              <span>BEAR CASE (RISK AUDIT)</span>
+              <span>↓</span>
+            </div>
+
+            <div className="space-y-3">
+              {bearCase.map((item, idx) => (
+                <div
+                  key={idx}
+                  className="bg-panel border border-rose-500/20 hover:border-rose-500/40 rounded-2xl p-4 shadow-sm flex items-start gap-3.5 transition-all hover:bg-elevated/40"
+                >
+                  <div className="w-10 h-10 rounded-full bg-rose-500/15 border border-rose-500/30 flex items-center justify-center text-lg flex-shrink-0">
+                    {item.avatar === 'robot-forensic' && '🔍'}
+                    {item.avatar === 'robot-val' && '📊'}
+                    {item.avatar === 'robot-news' && '📰'}
+                  </div>
+                  <div className="space-y-1">
+                    <span className="text-xs font-bold text-rose-400 tracking-wide uppercase block">
+                      {item.title}
+                    </span>
+                    <p className="text-xs text-text/90 leading-relaxed font-ui">{item.desc}</p>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* VIEW MODE 2: SPECIALIST COUNCIL ENSEMBLE */}
+      {selectedCouncil !== 'debate' && (
+        <div className="bg-panel border border-border/80 rounded-2xl p-5 shadow-sm space-y-4 animate-fade-slide">
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border/60 pb-3">
             <div>
-              <span className="text-[10px] text-muted uppercase font-bold block mb-1">FINAL TRADE VERDICT</span>
-              <span className="text-base font-black text-emerald-400 tracking-wide bg-emerald-500/10 px-3 py-1 rounded-xl border border-emerald-500/30 block">
-                {consensus?.verdict || 'READY (BUY)'}
+              <span className="text-[10px] uppercase font-bold text-muted font-ui tracking-wider block">
+                Council Ensemble Poll Results
               </span>
+              <h2 className="text-base font-bold text-text font-ui">
+                {COUNCIL_MODES.find(c => c.id === selectedCouncil)?.name} on {symbol}
+              </h2>
             </div>
 
-            {/* Trade Levels Box */}
-            <div className="bg-surface/90 border border-border/80 rounded-xl p-2.5 text-xs font-mono space-y-1.5 text-left">
-              <div className="flex justify-between">
-                <span className="text-muted">ENTRY:</span>
-                <span className="font-bold text-emerald-400">
-                  {consensus?.entry != null
-                    ? `₹${Number(consensus.entry).toLocaleString('en-IN', { minimumFractionDigits: 2 })}`
-                    : (ltp > 0 ? `₹${Number(ltp * 0.998).toLocaleString('en-IN', { minimumFractionDigits: 2 })}` : '—')}
-                </span>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-muted">STOP-LOSS:</span>
-                <span className="font-bold text-red">
-                  {consensus?.stop_loss != null
-                    ? `₹${Number(consensus.stop_loss).toLocaleString('en-IN', { minimumFractionDigits: 2 })}`
-                    : (ltp > 0 ? `₹${Number(ltp * 0.988).toLocaleString('en-IN', { minimumFractionDigits: 2 })}` : '—')}
-                </span>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-muted">TARGET:</span>
-                <span className="font-bold text-text">
-                  {consensus?.target != null
-                    ? `₹${Number(consensus.target).toLocaleString('en-IN', { minimumFractionDigits: 2 })}`
-                    : (ltp > 0 ? `₹${Number(ltp * 1.024).toLocaleString('en-IN', { minimumFractionDigits: 2 })}` : '—')}
-                </span>
-              </div>
-              <div className="flex justify-between border-t border-border/50 pt-1 text-[11px]">
-                <span className="text-muted">R:R RATIO:</span>
-                <span className="font-bold text-amber">{consensus?.risk_reward ? `${consensus.risk_reward} R` : '2.0 R'}</span>
-              </div>
-            </div>
-
-            <button
-              onClick={() => {
-                if (onOpenOrderTicket) {
-                  const isBear = consensus?.verdict_bias === 'BEARISH' || (consensus?.verdict && consensus.verdict.includes('SELL'))
-                  const entryVal = consensus?.entry != null ? Number(consensus.entry) : (ltp > 0 ? Number((ltp * (isBear ? 1.002 : 0.998)).toFixed(2)) : 0)
-                  const slVal = consensus?.stop_loss != null ? Number(consensus.stop_loss) : (ltp > 0 ? Number((isBear ? ltp * 1.012 : ltp * 0.988)).toFixed(2) : 0)
-                  const tgtVal = consensus?.target != null ? Number(consensus.target) : (ltp > 0 ? Number((isBear ? ltp * 0.976 : ltp * 1.024)).toFixed(2) : 0)
-                  onOpenOrderTicket({
-                    symbol,
-                    exchange: 'NSE',
-                    action: isBear ? 'SELL' : 'BUY',
-                    price: entryVal,
-                    stopLoss: slVal,
-                    target: tgtVal,
-                  })
-                }
-              }}
-              className="w-full py-2 px-3 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-black font-bold text-xs uppercase tracking-wide transition-all shadow-md cursor-pointer"
-            >
-              ⚡ Stage Ticket
-            </button>
-          </div>
-        </div>
-
-        {/* Right Column (5 Cols): BEAR CASE */}
-        <div className="lg:col-span-5 space-y-4">
-          <div className="flex items-center gap-2 text-rose-400 font-bold text-sm tracking-wide uppercase border-b border-rose-500/30 pb-2">
-            <span>BEAR CASE (RISK AUDIT)</span>
-            <span>↓</span>
-          </div>
-
-          <div className="space-y-3">
-            {bearCase.map((item, idx) => (
-              <div
-                key={idx}
-                className="bg-panel border border-rose-500/20 hover:border-rose-500/40 rounded-2xl p-4 shadow-sm flex items-start gap-3.5 transition-all hover:bg-elevated/40"
+            <div className="flex items-center gap-3">
+              <span className={`px-3 py-1 rounded-xl text-xs uppercase font-extrabold ${
+                isCouncilBuy ? 'bg-emerald-500 text-black' : isCouncilSell ? 'bg-rose-500 text-white' : 'bg-amber text-black'
+              }`}>
+                {councilVerdict}
+              </span>
+              <button
+                onClick={() => {
+                  if (onOpenOrderTicket) {
+                    onOpenOrderTicket({
+                      symbol,
+                      exchange: 'NSE',
+                      action: isCouncilSell ? 'SELL' : 'BUY',
+                    })
+                  }
+                }}
+                className="px-4 py-1.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-black font-bold text-xs uppercase tracking-wide transition-all shadow-md cursor-pointer"
               >
-                <div className="w-10 h-10 rounded-full bg-rose-500/15 border border-rose-500/30 flex items-center justify-center text-lg flex-shrink-0">
-                  {item.avatar === 'robot-forensic' && '🔍'}
-                  {item.avatar === 'robot-val' && '📊'}
-                  {item.avatar === 'robot-news' && '📰'}
+                ⚡ Stage Order Ticket
+              </button>
+            </div>
+          </div>
+
+          {/* Members Breakdown Grid */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            {councilSignals.map((sig) => {
+              const pid = sig.persona?.toLowerCase() || ''
+              const pName = PERSONA_NAMES[pid] || sig.persona
+              const isSigBuy = sig.verdict?.includes('BUY')
+              const isSigSell = sig.verdict?.includes('SELL')
+              const isExpanded = expandedMember === pid
+
+              return (
+                <div
+                  key={pid}
+                  className="p-3.5 rounded-xl bg-surface border border-border/70 hover:border-amber/40 transition-all space-y-2"
+                >
+                  <div
+                    className="flex items-center justify-between cursor-pointer"
+                    onClick={() => setExpandedMember(isExpanded ? null : pid)}
+                  >
+                    <div className="flex items-center gap-2">
+                      <span className="text-base">🧠</span>
+                      <span className="font-bold text-xs text-text">{pName}</span>
+                      <span className="text-[10px] text-muted">({sig.confidence}% conf)</span>
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                      <span className={`px-2 py-0.5 rounded-md text-[10px] font-bold ${
+                        isSigBuy ? 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/30' : isSigSell ? 'bg-rose-500/15 text-rose-400 border border-rose-500/30' : 'bg-amber/15 text-amber border border-amber/30'
+                      }`}>
+                        {sig.verdict}
+                      </span>
+                      <span className="text-xs text-muted">{isExpanded ? '▲' : '▼'}</span>
+                    </div>
+                  </div>
+
+                  {sig.rationale && sig.rationale.length > 0 && !isExpanded && (
+                    <p className="text-[11px] text-muted font-ui truncate pl-6">
+                      • {sig.rationale[0]}
+                    </p>
+                  )}
+
+                  {isExpanded && (
+                    <div className="pl-6 pt-2 border-t border-border/40 space-y-2 font-ui text-xs animate-fade-slide">
+                      <div className="space-y-1">
+                        <span className="text-[10px] uppercase font-bold text-muted block">Signals & Checklist:</span>
+                        {sig.rationale?.map((r, i) => (
+                          <div key={i} className="flex items-start gap-1.5 text-text/90 text-[11px]">
+                            <span className="text-amber">•</span>
+                            <span>{r}</span>
+                          </div>
+                        ))}
+                      </div>
+
+                      {sig.key_metrics && Object.keys(sig.key_metrics).length > 0 && (
+                        <div className="pt-1 flex flex-wrap gap-1.5">
+                          {Object.entries(sig.key_metrics).map(([k, v]) => (
+                            <span key={k} className="px-2 py-0.5 rounded-md bg-elevated border border-border/50 text-[10px] text-muted font-mono">
+                              {k}: <strong className="text-text">{v}</strong>
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
-                <div className="space-y-1">
-                  <span className="text-xs font-bold text-rose-400 tracking-wide uppercase block">
-                    {item.title}
-                  </span>
-                  <p className="text-xs text-text/90 leading-relaxed font-ui">{item.desc}</p>
-                </div>
-              </div>
-            ))}
+              )
+            })}
           </div>
         </div>
-      </div>
+      )}
 
       {/* Bottom Footer Bar with Provenance */}
       <div className="flex flex-wrap items-center justify-between text-xs font-mono text-muted border-t border-border/50 pt-4 px-2">
         <div className="flex items-center gap-2">
-          <span>Market Status:</span>
-          <span className="text-emerald-400 font-bold">LIVE / OPEN</span>
+          <span>Multi-Agent Framework:</span>
+          <span className="text-emerald-400 font-bold">13 Institutional Personas & 5 Councils</span>
           <span className="text-muted">•</span>
-          <span className="text-text">SMC + Forensic + Order Flow Hybrid</span>
+          <span className="text-text">Fast LLM + Deep NIM Dual Routing</span>
         </div>
         <div>
           <span>As of: </span>

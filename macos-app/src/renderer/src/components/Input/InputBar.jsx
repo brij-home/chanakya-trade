@@ -224,6 +224,48 @@ function parseCommand(input, contextSymbol = null) {
       return { endpoint: '/skills/big_move', body: { symbol: sym }, cardType: 'big_move' }
     }
 
+    case 'council': case 'councils': {
+      let cName = 'breakout'
+      let sym = contextSymbol || 'RELIANCE'
+      if (args.length >= 2) {
+        cName = args[0].toLowerCase()
+        sym = args[1].toUpperCase()
+      } else if (args.length === 1) {
+        if (['breakout', 'options_sniper', 'options', 'multibagger', 'macro_regime', 'core_value'].includes(args[0].toLowerCase())) {
+          cName = args[0].toLowerCase() === 'options' ? 'options_sniper' : args[0].toLowerCase()
+        } else {
+          sym = args[0].toUpperCase()
+        }
+      }
+      return { endpoint: '/skills/persona/council', body: { symbol: sym, council: cName }, cardType: 'council' }
+    }
+
+    case 'persona': case 'personas': {
+      const pId = args[0]?.toLowerCase() || 'buffett'
+      const sym = args[1]?.toUpperCase() || contextSymbol || 'RELIANCE'
+      return { endpoint: '/skills/persona/analyze', body: { symbol: sym, persona_id: pId }, cardType: 'persona' }
+    }
+
+    case 'spread': case 'spreads': case 'spread_builder': {
+      const sym = (args[0] || contextSymbol || 'NIFTY').toUpperCase()
+      const strat = (args[1] || 'BULL_CALL_SPREAD').toUpperCase()
+      return { endpoint: '/skills/options/defined_risk_spreads', body: { underlying: sym, strategy: strat }, cardType: 'defined_risk_spread' }
+    }
+
+    case 'tax': {
+      const pnl = parseFloat(args[0]) || 50000
+      const days = parseInt(args[1]) || 90
+      return { endpoint: '/skills/tax/calculate', body: { gross_pnl: pnl, holding_period_days: days }, cardType: 'markdown' }
+    }
+
+    case 'harvest': case 'tax-harvest': {
+      return { endpoint: '/skills/tax/harvesting', body: {}, cardType: 'markdown' }
+    }
+
+    case 'tilt': case 'risk-status': {
+      return { endpoint: '/api/risk/preflight', body: { action: 'BUY', symbol: contextSymbol || 'NIFTY', qty: 50, price: 24500 }, cardType: 'markdown' }
+    }
+
     default:
       // Fall through to AI chat — session_id injected in submit()
       return { endpoint: '/skills/chat', body: { message: input }, cardType: 'markdown' }

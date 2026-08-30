@@ -39,6 +39,9 @@ import MultibaggerCard from '../Cards/MultibaggerCard'
 import PositionTrackerCard from '../Cards/PositionTrackerCard'
 import HighConvictionCard from '../Cards/HighConvictionCard'
 import BigMoveCard from '../Cards/BigMoveCard'
+import CouncilCard from '../Cards/CouncilCard'
+import PersonaCard from '../Cards/PersonaCard'
+import DefinedRiskSpreadCard from '../Cards/DefinedRiskSpreadCard'
 
 
 export default function Message({ message }) {
@@ -104,6 +107,14 @@ export default function Message({ message }) {
     case 'conviction':
     case 'top10':
     case 'radar':              return <HighConvictionCard data={data} />
+    case 'council':
+    case 'persona_council':    return <CouncilCard data={data} />
+    case 'persona':
+    case 'persona_analyze':    return <PersonaCard data={data} />
+    case 'spread':
+    case 'spreads':
+    case 'defined_risk_spread':
+    case 'defined_risk_spreads': return <DefinedRiskSpreadCard data={data} />
     case 'big_move':
     case 'bigmove':
     case 'squeeze':            return <BigMoveCard data={data} />
