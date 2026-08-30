@@ -84,8 +84,7 @@ jobs:
 
       - name: Run frontend tests
         working-directory: macos-app
-        run: |
-          npm test -- --reporter=verbose
+        run: npx vitest run --pool=forks --poolOptions.forks.singleFork=true
 
   lint:
     runs-on: ubuntu-latest
