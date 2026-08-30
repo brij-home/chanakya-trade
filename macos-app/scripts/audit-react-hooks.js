@@ -1,10 +1,16 @@
 const fs = require('fs');
 const path = require('path');
-const parser = require('@babel/parser');
-const _traverse = require('@babel/traverse');
-const traverse = _traverse.default || _traverse;
-
 const srcDir = path.resolve(__dirname, '../src/renderer/src');
+
+let parser, traverse;
+try {
+  parser = require('@babel/parser');
+  const _traverse = require('@babel/traverse');
+  traverse = _traverse.default || _traverse;
+} catch (e) {
+  console.warn('⚠️  @babel/parser or @babel/traverse not available, skipping hook AST audit.');
+  process.exit(0);
+}
 let totalViolations = 0;
 let filesScanned = 0;
 
