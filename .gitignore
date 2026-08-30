@@ -58,6 +58,25 @@ data/
 *.log
 logs/
 
+# ── Node & Web App ───────────────────────────────────────────
+node_modules/
+**/node_modules/
+macos-app/node_modules/
+macos-app/build/
+macos-app/out/
+macos-app/dist/
+.vite/
+out/
+package-lock.json
+
+# ── Crash Dumps & Temp ───────────────────────────────────────
+*.dmp
+*.tmp
+*.temp
+uvicorn_*.log
+uvicorn_err.log
+uvicorn_out.log
+
 # ── Generated docs (regenerate with: node docs/generate_*.js) ─
 docs/*.pdf
 docs/*.docx

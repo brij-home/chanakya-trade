@@ -10,9 +10,9 @@ const HEALTH_CONFIG = {
 }
 
 export default function PositionTrackerCard({ data }) {
+  const openInspector = useInspectorStore((s) => s.openInspector)
   if (!data) return null
   const d = data?.data ?? data ?? {}
-  const openInspector = useInspectorStore((s) => s.openInspector)
 
   const healthCfg = HEALTH_CONFIG[d.health_status] || HEALTH_CONFIG['HEALTHY_ACCELERATING']
   const milestones = d.milestones || []

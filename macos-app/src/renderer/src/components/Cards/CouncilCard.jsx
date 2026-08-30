@@ -35,6 +35,9 @@ const PERSONA_NAMES = {
 }
 
 export default function CouncilCard({ data }) {
+  const sendDraft = useChatStore((s) => s.sendDraft)
+  const [expandedPersona, setExpandedPersona] = useState(null)
+
   if (!data) return null
   const d = data?.data ?? data ?? {}
   const council = d.council || 'breakout'
@@ -43,9 +46,6 @@ export default function CouncilCard({ data }) {
   const consensusVerdict = d.consensus_verdict || 'HOLD'
   const consensusScore = Number(d.consensus_score || 50)
   const signals = d.signals || []
-  const sendDraft = useChatStore((s) => s.sendDraft)
-
-  const [expandedPersona, setExpandedPersona] = useState(null)
 
   const icon = COUNCIL_ICONS[council.toLowerCase()] || '🏛️'
   const isBuy = consensusVerdict.includes('BUY')

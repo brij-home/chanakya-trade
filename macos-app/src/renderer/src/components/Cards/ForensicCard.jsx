@@ -10,9 +10,9 @@ const RATING_COLORS = {
 }
 
 export default function ForensicCard({ data }) {
+  const openInspector = useInspectorStore((s) => s.openInspector)
   if (!data) return null
   const d = data?.data ?? data ?? {}
-  const openInspector = useInspectorStore((s) => s.openInspector)
 
   const rating = d.quality_rating || 'B'
   const ratingStyle = RATING_COLORS[rating] || RATING_COLORS['B']

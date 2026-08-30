@@ -19,9 +19,9 @@ const SETUP_BADGES = {
 }
 
 export default function MarketStructureCard({ data }) {
+  const openInspector = useInspectorStore((s) => s.openInspector)
   if (!data) return null
   const d = data?.data ?? data ?? {}
-  const openInspector = useInspectorStore((s) => s.openInspector)
 
   const regimeCfg = REGIME_CONFIG[d.regime] || REGIME_CONFIG.RANGING
   const setupCfg = SETUP_BADGES[d.setup_type] || SETUP_BADGES.CONSOLIDATION

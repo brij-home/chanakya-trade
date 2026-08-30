@@ -17,9 +17,6 @@ const LIQUIDITY_TIER_BADGES = {
 }
 
 export default function HighConvictionCard({ data, onOpenOrderTicket }) {
-  if (!data) return null
-  const d = data?.data ?? data ?? {}
-  const opportunities = d.opportunities || []
   const [filter, setFilter] = useState('ALL')
   const [searchQuery, setSearchQuery] = useState('')
   const [sortBy, setSortBy] = useState('score_desc')
@@ -28,10 +25,12 @@ export default function HighConvictionCard({ data, onOpenOrderTicket }) {
   const [expandedRow, setExpandedRow] = useState(null)
   const [telegramStatus, setTelegramStatus] = useState({})
   const { call } = useAPI()
-
   const openInspector = useInspectorStore((s) => s.openInspector)
   const sendDraft = useChatStore((s) => s.sendDraft)
 
+  if (!data) return null
+  const d = data?.data ?? data ?? {}
+  const opportunities = d.opportunities || []
   const posture = POSTURE_BADGES[d.market_posture] || POSTURE_BADGES.CHOPPY_ROTATION
 
   const handleSendTelegram = async (opp) => {

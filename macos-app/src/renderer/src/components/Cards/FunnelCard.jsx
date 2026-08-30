@@ -12,16 +12,16 @@ const VERDICT_STYLES = {
 }
 
 export default function FunnelCard({ data }) {
+  const openInspector = useInspectorStore((s) => s.openInspector)
+  const [activeTab, setActiveTab] = useState('plans') // 'plans' | 'screen' | 'macro'
+
   if (!data) return null
   const d = data?.data ?? data ?? {}
-  const openInspector = useInspectorStore((s) => s.openInspector)
 
   const reports = d.pre_filter_reports || []
   const plans = d.trade_plans || []
   const qualified = reports.filter(r => r.qualified)
   const filtered = reports.filter(r => !r.qualified)
-
-  const [activeTab, setActiveTab] = useState('plans') // 'plans' | 'screen' | 'macro'
 
   return (
     <div className="bg-elevated border border-border rounded-xl p-4 max-w-2xl w-full space-y-4 font-mono shadow-sm">

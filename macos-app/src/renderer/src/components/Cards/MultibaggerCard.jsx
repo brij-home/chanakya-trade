@@ -10,9 +10,9 @@ const STAGE_CONFIG = {
 }
 
 export default function MultibaggerCard({ data }) {
+  const openInspector = useInspectorStore((s) => s.openInspector)
   if (!data) return null
   const d = data?.data ?? data ?? {}
-  const openInspector = useInspectorStore((s) => s.openInspector)
 
   const stageCfg = STAGE_CONFIG[d.weinstein_stage] || STAGE_CONFIG['STAGE_1_BASE']
   const criteria = d.criteria_breakdown || []

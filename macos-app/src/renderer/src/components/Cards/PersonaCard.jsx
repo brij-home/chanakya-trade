@@ -27,6 +27,7 @@ const PERSONA_DETAILS = {
 }
 
 export default function PersonaCard({ data }) {
+  const sendDraft = useChatStore((s) => s.sendDraft)
   if (!data) return null
   const d = data?.data ?? data ?? {}
   const personaId = (d.persona || 'buffett').toLowerCase()
@@ -34,7 +35,6 @@ export default function PersonaCard({ data }) {
   const confidence = Number(d.confidence || 50)
   const rationale = d.rationale || []
   const keyMetrics = d.key_metrics || {}
-  const sendDraft = useChatStore((s) => s.sendDraft)
 
   const meta = PERSONA_DETAILS[personaId] || {
     name: personaId.toUpperCase(),

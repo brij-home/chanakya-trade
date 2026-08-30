@@ -11,7 +11,6 @@ const QUADRANT_CONFIG = {
 }
 
 export default function RRGCard({ data }) {
-  if (!data) return null
   const d = data?.data ?? data ?? {}
   const sectors = d.sectors || []
   const stockAlign = d.stock_alignment
@@ -22,6 +21,10 @@ export default function RRGCard({ data }) {
   const [lookupSym, setLookupSym] = useState('')
   const [activeStockAlign, setActiveStockAlign] = useState(stockAlign)
   const [searching, setSearching] = useState(false)
+  const [sortCol, setSortCol] = useState('rs_ratio')
+  const [sortDir, setSortDir] = useState('desc')
+  const [sectorSearch, setSectorSearch] = useState('')
+
   const { call } = useAPI()
   const openInspector = useInspectorStore((s) => s.openInspector)
 
@@ -54,10 +57,6 @@ export default function RRGCard({ data }) {
     WEAKENING: sectors.filter(s => s.quadrant === 'WEAKENING').length,
     LAGGING: sectors.filter(s => s.quadrant === 'LAGGING').length,
   }), [sectors])
-
-  const [sortCol, setSortCol] = useState('rs_ratio')
-  const [sortDir, setSortDir] = useState('desc')
-  const [sectorSearch, setSectorSearch] = useState('')
 
   const handleHeaderSort = (col) => {
     if (sortCol === col) {
@@ -99,6 +98,8 @@ export default function RRGCard({ data }) {
     const y = Math.max(5, Math.min(95, 100 - ((mom - 90) / 20) * 100))
     return { x, y }
   }
+
+  if (!data) return null
 
   return (
     <div className="bg-elevated border border-border/80 rounded-2xl p-5 max-w-3xl w-full space-y-4 font-mono shadow-md">

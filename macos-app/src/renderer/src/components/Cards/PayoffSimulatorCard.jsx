@@ -403,9 +403,9 @@ export default function PayoffSimulatorCard({ initialSymbol = 'NIFTY', initialSp
 }
 
 function PayoffSVG({ expiryData = [], targetData = [], spotPrice, breakevens = [] }) {
+  const [hoveredPoint, setHoveredPoint] = useState(null)
   if (expiryData.length === 0) return null
 
-  const [hoveredPoint, setHoveredPoint] = useState(null)
   const width = 680
   const height = 240
   const pad = { top: 25, right: 30, bottom: 35, left: 55 }

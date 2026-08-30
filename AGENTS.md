@@ -172,7 +172,11 @@
 24. **Dynamic UI Intelligence Deck Synchronization & Multi-Persona Ergonomics**:
     - The terminal overview dashboard and debate views must maintain full bidirectional synchronization between left panel navigation controls (`councils` vs `personas` vs `watchlist`) and center intelligence cards.
     - The center intelligence deck directly below the primary chart must dynamically display: (1) Full Council Ensemble Consensus with individual specialist member signal breakdowns, confidence scores, and thesis confluences, or (2) 13 Specialist Personas in a high-density carousel with authentic checklist verification, evaluated dimension metrics, and 1-click execution staging.
-    - Always provide dedicated in-place mode toggles (`[ 🏛️ Councils View ]` ↔ `[ 🧠 13 Personas View ]`) with zero flash, smooth transitions, and instant action triggers.
+25. **Strict React Hook Invariants, Modal Isolation & Multi-Layer Test Automation Gates**:
+    - **React Rule of Hooks Purity**: In all React components and custom hooks, hooks (`useState`, `useEffect`, `useCallback`, `useMemo`, `useRef`, `useAPI`, `useChatStore`, `useInspectorStore`) MUST ALWAYS be declared unconditionally at the very top of the component function. Never place `if (!data) return null`, `if (!isOpen) return null`, or any conditional statement before any hook declaration. React strictly requires identical hook invocation order on every render; violating this causes fatal crashes (`Rendered more/fewer hooks than during previous render`) when asynchronous data streams or modal visibilities change.
+    - **Global Modal & Card Error Boundaries**: Every global modal (`OrderTicketModal`, `TopOpportunitiesModal`, `SectorDrilldownModal`, `CommandPalette`, `MetricExplainerModal`) in `App.jsx` and all dynamic cards in `Message.jsx` must be wrapped in isolated `<ErrorBoundary>` components with graceful fallback recovery to guarantee that an error in any individual component can never crash the workspace or render a blank screen.
+    - **Automated Hook AST Linting**: The static AST linter (`node scripts/audit-react-hooks.js`) is integrated into both `npm test` and `npm run build:web`. All pull requests and code modifications must pass 0 hook violations across all files.
+    - **Component Render Test Gates**: All React views, modals, and cards must maintain comprehensive automated component render tests (`componentRenders.test.jsx`) exercising null-state to populated-state transitions and user interactions before code is deployed.
 
 ---
 

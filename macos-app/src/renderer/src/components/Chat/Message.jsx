@@ -42,24 +42,9 @@ import BigMoveCard from '../Cards/BigMoveCard'
 import CouncilCard from '../Cards/CouncilCard'
 import PersonaCard from '../Cards/PersonaCard'
 import DefinedRiskSpreadCard from '../Cards/DefinedRiskSpreadCard'
+import ErrorBoundary from '../ErrorBoundary'
 
-
-export default function Message({ message }) {
-  const { role, text, cardType, data } = message
-
-  if (role === 'user') {
-    return (
-      <div className="flex justify-end">
-        <div className="max-w-lg bg-elevated border border-border rounded-xl px-4 py-2.5
-                        text-text text-sm font-mono">
-          {text}
-        </div>
-      </div>
-    )
-  }
-
-  if (role === 'error') return <ErrorCard text={text} />
-
+function renderCardContent(cardType, data) {
   switch (cardType) {
     case 'quote':              return <QuoteCard data={data} />
     case 'analysis':           return <AnalysisCard data={data} />
@@ -127,5 +112,27 @@ export default function Message({ message }) {
     case 'markdown':
     default:                   return <MarkdownCard data={data} />
   }
+}
+
+export default function Message({ message }) {
+  const { role, text, cardType, data } = message
+
+  if (role === 'user') {
+    return (
+      <div className="flex justify-end">
+        <div className="max-w-lg bg-elevated border border-border rounded-xl px-4 py-2.5 text-text text-sm font-mono">
+          {text}
+        </div>
+      </div>
+    )
+  }
+
+  if (role === 'error') return <ErrorCard text={text} />
+
+  return (
+    <ErrorBoundary title={cardType ? `${cardType.toUpperCase()} Card` : 'Message Content'}>
+      {renderCardContent(cardType, data)}
+    </ErrorBoundary>
+  )
 }
 

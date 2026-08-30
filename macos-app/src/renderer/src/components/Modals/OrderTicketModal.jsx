@@ -6,30 +6,36 @@ export default function OrderTicketModal({ isOpen, onClose, initialData = {} }) 
 
   const [symbol, setSymbol] = useState(initialData.symbol || 'RELIANCE')
   const [exchange, setExchange] = useState(initialData.exchange || 'NSE')
-  const [action, setAction] = useState(initialData.action || 'BUY')
+  const [action, setAction] = useState(initialData.action || initialData.side || initialData.orderType || 'BUY')
   const [orderType, setOrderType] = useState('LIMIT')
   const [product, setProduct] = useState('MIS') // MIS (Intraday) | CNC (Delivery) | NRML (F&O)
   const [price, setPrice] = useState(initialData.price || 2800)
-  const [stopLoss, setStopLoss] = useState(initialData.stopLoss || 2760)
-  const [target, setTarget] = useState(initialData.target || 2890)
+  const [stopLoss, setStopLoss] = useState(initialData.stopLoss || initialData.stop_loss || 2760)
+  const [target, setTarget] = useState(initialData.target || initialData.target_1 || 2890)
   const [capital, setCapital] = useState(200000)
   const [riskPct, setRiskPct] = useState(1.0)
-  const [qty, setQty] = useState(initialData.qty || 50)
+  const [qty, setQty] = useState(initialData.qty || initialData.quantity || 50)
   const [step, setStep] = useState(1) // 1: Edit/Stage, 2: Double Confirm
   const [confirmedRisk, setConfirmedRisk] = useState(false)
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [statusMsg, setStatusMsg] = useState(null)
+  const [preflightInfo, setPreflightInfo] = useState(null)
+  const [isValidatingRisk, setIsValidatingRisk] = useState(false)
 
   // Sync state whenever modal opens or initialData changes
   useEffect(() => {
     if (isOpen) {
       if (initialData.symbol) setSymbol(initialData.symbol)
       if (initialData.exchange) setExchange(initialData.exchange)
-      if (initialData.action) setAction(initialData.action)
+      const act = initialData.action || initialData.side || initialData.orderType
+      if (act) setAction(act)
       if (initialData.price) setPrice(Number(initialData.price))
-      if (initialData.stopLoss) setStopLoss(Number(initialData.stopLoss))
-      if (initialData.target) setTarget(Number(initialData.target))
-      if (initialData.qty) setQty(Number(initialData.qty))
+      const sl = initialData.stopLoss ?? initialData.stop_loss
+      if (sl != null) setStopLoss(Number(sl))
+      const tgt = initialData.target ?? initialData.target_1 ?? initialData.target_2
+      if (tgt != null) setTarget(Number(tgt))
+      const q = initialData.qty ?? initialData.quantity
+      if (q != null) setQty(Number(q))
       setStep(1)
       setStatusMsg(null)
       setConfirmedRisk(false)
@@ -46,11 +52,6 @@ export default function OrderTicketModal({ isOpen, onClose, initialData = {} }) 
     }
   }, [price, stopLoss, capital, riskPct])
 
-  if (!isOpen) return null
-
-  const [preflightInfo, setPreflightInfo] = useState(null)
-  const [isValidatingRisk, setIsValidatingRisk] = useState(false)
-
   const riskAmount = Math.abs(price - stopLoss) * qty
   const rewardAmount = Math.abs(target - price) * qty
   const riskRewardRatio = riskAmount > 0 ? (rewardAmount / riskAmount).toFixed(2) : 0
@@ -61,18 +62,14 @@ export default function OrderTicketModal({ isOpen, onClose, initialData = {} }) 
     setConfirmedRisk(false)
     setIsValidatingRisk(true)
     try {
-      const res = await fetch('http://127.0.0.1:8765/api/risk/preflight', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          symbol,
-          action,
-          quantity: qty,
-          price,
-          allow_override: true,
-        }),
-      }).then((r) => r.json())
-      setPreflightInfo(res)
+      const res = await call('/api/risk/preflight', {
+        symbol,
+        action,
+        quantity: qty,
+        price,
+        allow_override: true,
+      })
+      setPreflightInfo(res?.data ?? res)
     } catch {
       setPreflightInfo(null)
     } finally {
@@ -93,7 +90,7 @@ export default function OrderTicketModal({ isOpen, onClose, initialData = {} }) 
       await new Promise((r) => setTimeout(r, 600))
       setStatusMsg({
         type: 'success',
-        text: `✓ Order Executed: ${action} ${qty} ${symbol} @ ₹${price.toFixed(2)} [SL: ₹${stopLoss}, TGT: ₹${target}]`,
+        text: `✓ Order Executed: ${action} ${qty} ${symbol} @ ₹${Number(price).toFixed(2)} [SL: ₹${stopLoss}, TGT: ₹${target}]`,
       })
       setTimeout(() => {
         setStep(1)
@@ -105,6 +102,8 @@ export default function OrderTicketModal({ isOpen, onClose, initialData = {} }) 
       setIsSubmitting(false)
     }
   }
+
+  if (!isOpen) return null
 
   return (
     <div

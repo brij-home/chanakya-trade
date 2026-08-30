@@ -37,13 +37,12 @@ const TIMING_BADGES = {
 }
 
 export default function BigMoveCard({ data, onOpenOrderTicket }) {
+  const openInspector = useInspectorStore((s) => s.openInspector)
+  const sendDraft = useChatStore((s) => s.sendDraft)
   if (!data) return null
   const d = data?.data ?? data ?? {}
   const sq = d.squeeze || {}
   const opt = d.options_flow || {}
-
-  const openInspector = useInspectorStore((s) => s.openInspector)
-  const sendDraft = useChatStore((s) => s.sendDraft)
 
   const verdict = VERDICT_STYLES[d.prediction_verdict] || VERDICT_STYLES.CHOPPY_RANGE
   const timing = TIMING_BADGES[d.timing_trigger] || TIMING_BADGES.WAIT_FOR_CONFIRMATION

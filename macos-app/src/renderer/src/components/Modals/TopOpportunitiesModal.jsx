@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react'
 import { useAPI } from '../../hooks/useAPI'
 import HighConvictionCard from '../Cards/HighConvictionCard'
 
-export default function TopOpportunitiesModal({ isOpen, onClose }) {
+export default function TopOpportunitiesModal({ isOpen, onClose, onOpenOrderTicket }) {
   const [data, setData] = useState(null)
   const [isScanning, setIsScanning] = useState(false)
   const [universe, setUniverse] = useState('auto_market_aware')
@@ -232,7 +232,7 @@ export default function TopOpportunitiesModal({ isOpen, onClose }) {
               <p className="text-xs text-muted">Evaluating structure, volume footprints & Minervini Stage 2 across leading equities.</p>
             </div>
           ) : data ? (
-            <HighConvictionCard data={data} />
+            <HighConvictionCard data={data} onOpenOrderTicket={onOpenOrderTicket} />
           ) : (
             <div className="p-8 text-center text-muted text-sm">
               Unable to load opportunities. Click Scan Live to try again.

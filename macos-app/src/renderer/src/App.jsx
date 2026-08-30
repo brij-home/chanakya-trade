@@ -368,31 +368,50 @@ export default function App() {
         </div>
       </div>
 
-      {/* Global Modals */}
-      <CommandPalette
-        isOpen={isCommandPaletteOpen}
-        onClose={() => setIsCommandPaletteOpen(false)}
-        onOpenOrderTicket={() => {
-          setIsCommandPaletteOpen(false)
-          setIsOrderTicketOpen(true)
-        }}
-      />
-      <OrderTicketModal
-        isOpen={isOrderTicketOpen}
-        onClose={() => setIsOrderTicketOpen(false)}
-        initialData={orderTicketData}
-      />
-      <TopOpportunitiesModal
-        isOpen={isTopOppsOpen}
-        onClose={() => setIsTopOppsOpen(false)}
-      />
-      <SectorDrilldownModal
-        isOpen={sectorDrilldown.isOpen}
-        sector={sectorDrilldown.sector}
-        onClose={() => setSectorDrilldown({ isOpen: false, sector: null })}
-      />
-      <MetricExplainerModal />
-      <ActivityHUD />
+      {/* Global Modals protected with Error Boundaries */}
+      <ErrorBoundary title="Command Palette">
+        <CommandPalette
+          isOpen={isCommandPaletteOpen}
+          onClose={() => setIsCommandPaletteOpen(false)}
+          onOpenOrderTicket={(data) => {
+            setIsCommandPaletteOpen(false)
+            handleOpenOrderTicket(data)
+          }}
+        />
+      </ErrorBoundary>
+
+      <ErrorBoundary title="Smart Order Staging Gate">
+        <OrderTicketModal
+          isOpen={isOrderTicketOpen}
+          onClose={() => setIsOrderTicketOpen(false)}
+          initialData={orderTicketData}
+        />
+      </ErrorBoundary>
+
+      <ErrorBoundary title="High-Conviction Opportunities Radar">
+        <TopOpportunitiesModal
+          isOpen={isTopOppsOpen}
+          onClose={() => setIsTopOppsOpen(false)}
+          onOpenOrderTicket={handleOpenOrderTicket}
+        />
+      </ErrorBoundary>
+
+      <ErrorBoundary title="Sector & Thematic Drilldown">
+        <SectorDrilldownModal
+          isOpen={sectorDrilldown.isOpen}
+          sector={sectorDrilldown.sector}
+          onClose={() => setSectorDrilldown({ isOpen: false, sector: null })}
+          onOpenOrderTicket={handleOpenOrderTicket}
+        />
+      </ErrorBoundary>
+
+      <ErrorBoundary title="Metric Explainer">
+        <MetricExplainerModal />
+      </ErrorBoundary>
+
+      <ErrorBoundary title="Activity Monitor">
+        <ActivityHUD />
+      </ErrorBoundary>
     </div>
   )
 }

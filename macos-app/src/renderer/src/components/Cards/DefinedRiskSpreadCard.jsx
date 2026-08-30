@@ -3,6 +3,7 @@ import Tooltip, { InfoBadge } from '../UI/Tooltip'
 import { useChatStore } from '../../store/chatStore'
 
 export default function DefinedRiskSpreadCard({ data }) {
+  const sendDraft = useChatStore((s) => s.sendDraft)
   if (!data) return null
   const d = data?.data ?? data ?? {}
   const underlying = d.underlying || 'NIFTY'
@@ -15,7 +16,6 @@ export default function DefinedRiskSpreadCard({ data }) {
   const breakevens = d.breakevens || []
   const legs = d.legs || []
   const marginReq = Number(d.margin_required || 0)
-  const sendDraft = useChatStore((s) => s.sendDraft)
 
   const isDebit = netCashflow < 0
   const isCredit = netCashflow > 0
