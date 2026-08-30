@@ -41,7 +41,10 @@ jobs:
           python -m build --no-isolation
 
       - name: Run tests (fast — not network, not slow)
-        run: pytest tests/ --tb=short -m "not network and not slow" -n auto
+        env:
+          TRADING_PLATFORM_HOME: /tmp/pytest_trading_platform
+          TRADING_PLATFORM_DATA: /tmp/pytest_trading_platform
+        run: pytest tests/ --tb=short -m "not network and not slow" -n 4
 
   slow-tests:
     # Runs only on schedule (nightly) or manual dispatch — not on every PR
