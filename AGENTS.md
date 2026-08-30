@@ -191,6 +191,21 @@
       - `mayer_100_baggers`, `lynch_garp_fast_growers`, `jhunjhunwala_operating_leverage`, `canslim_high_momentum`, `order_book_powerhouses`, `value_migration_leaders`. Supports parallel multi-threaded batch scanning with caching.
     - **Broker Portfolio AI Doctor & Wealth Optimizer** ([`engine/portfolio_doctor.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/portfolio_doctor.py)):
       - Stan Weinstein Stage 4 Dead-Money detection, HHI concentration risk gauge, Tax-Loss Harvesting optimizer ($20\%$ STCG offset), and actionable switching prescriptions.
+28. **High-Density Terminal Ergonomics, Spacing & Vertical Rhythm Standards**:
+    - Layout padding, card gaps, and vertical rhythm must follow institutional Bloomberg/TradingView density standards.
+    - Use compact outer padding (`p-2.5 sm:p-3.5 space-y-2.5`), slim status header strips (`px-3 py-1.5 rounded-xl`), and tight 3-column grid gaps (`gap-2.5`).
+    - Maximize vertical viewport for primary data structures (candlestick charts, order books, and options chains).
+    - In institutional data tables (Option Chains, Watchlists, RRG Matrix), use compact cell padding (`py-1 px-2`), crisp monospace numerals, and micro-metric badges to eliminate unnecessary scroll fatigue.
+29. **Mathematically Guaranteed Strike Filter & Options Chain Coverage**:
+    - Option chain filters (`ATM ±5`, `ATM ±10`, `ATM ±15`, `All Strikes`) must never rely on fragile boolean presence (`is_atm`). Always calculate the true closest strike index mathematically (`min(abs(strike - spot))`) to guarantee exact strike window slices.
+    - Backend options chain endpoints (`/skills/gex_snapshot`) must generate comprehensive strike coverage ($\ge 41$ strikes, `range(-20, 21)` around ATM) to provide realistic deep ITM and far OTM liquidity across indices and high-beta equities.
+30. **Smart Typeahead, Search Ergonomics & Viewport Boundary Invariants**:
+    - Ticker search dropdowns and command palette typeaheads must dynamically calculate available viewport space, anchoring cleanly without clipping against left or right screen boundaries.
+    - Support full keyboard ergonomics (`↑`/`↓` selection, `Enter` submission, `Tab` auto-completion, `Escape` dismissal).
+31. **Unified Multi-Agent Execution Lifecycle & Zero-Latency Interruption**:
+    - In asynchronous AI multi-agent debate views and radar scanners, every trigger action (ticker chips, council mode switches, search inputs, Run buttons) must route through a unified execution pipeline.
+    - Always dispatch in-page progressive stage indicators (`⚡ Initializing...`, `🔍 Technicals & Patterns...`, `🔬 Cross-Examination...`, `⚖️ Consensus...`) and synchronize with floating `ActivityHUD`.
+    - Always wire zero-latency `⛔ Stop / Cancel` buttons using `AbortController` to allow instant user cancellation and multitasking.
 
 ---
 
