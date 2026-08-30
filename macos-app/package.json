@@ -11,7 +11,7 @@
     "build": "electron-vite build && electron-builder --mac",
     "preview": "electron-vite preview",
     "lint:hooks": "node scripts/audit-react-hooks.js",
-    "test": "node scripts/audit-react-hooks.js && vitest run src/__tests__",
+    "test": "vitest run",
     "test:watch": "vitest",
     "test:ui": "vitest --ui",
     "build:web": "node scripts/audit-react-hooks.js && electron-vite build && node scripts/build-web.js"
