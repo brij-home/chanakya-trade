@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional
 
 
 # ── Data model ────────────────────────────────────────────────
@@ -146,17 +146,19 @@ def web_search_available() -> bool:
     )
 
 
-def format_search_results(results: list[WebSearchResult]) -> str:
+def format_search_results(results: list[Any]) -> str:
     """Format a list of results into a compact text block for LLM prompts."""
     if not results:
         return ""
     lines = []
     for i, r in enumerate(results, 1):
-        date = f" [{r.published_date}]" if r.published_date else ""
+        date = f" [{r.published_date}]" if getattr(r, "published_date", None) else ""
         lines.append(f"{i}. {r.title}{date}")
-        lines.append(f"   {r.url}")
-        if r.snippet:
-            lines.append(f"   {r.snippet[:300]}")
+        if r.url:
+            lines.append(f"   {r.url}")
+        content = getattr(r, "snippet", "") or getattr(r, "text", "")
+        if content:
+            lines.append(f"   {content[:300]}")
     return "\n".join(lines)
 
 
