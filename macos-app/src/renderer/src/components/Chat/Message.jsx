@@ -42,6 +42,9 @@ import BigMoveCard from '../Cards/BigMoveCard'
 import CouncilCard from '../Cards/CouncilCard'
 import PersonaCard from '../Cards/PersonaCard'
 import DefinedRiskSpreadCard from '../Cards/DefinedRiskSpreadCard'
+import MagicTrendCard from '../Cards/MagicTrendCard'
+import ThematicBasketsCard from '../Cards/ThematicBasketsCard'
+import PortfolioDoctorCard from '../Cards/PortfolioDoctorCard'
 import ErrorBoundary from '../ErrorBoundary'
 
 function renderCardContent(cardType, data) {
@@ -85,6 +88,19 @@ function renderCardContent(cardType, data) {
     case 'multibagger':
     case 'vcp':
     case 'stage2':             return <MultibaggerCard data={data} />
+    case 'magic_trend':
+    case '3axis':
+    case 'super_investor':
+    case 'magictrend':         return <MagicTrendCard data={data} />
+    case 'thematic_baskets':
+    case 'baskets':
+    case '100baggers':
+    case 'lynch_garp':
+    case 'jhunjhunwala_capex':
+    case 'canslim_basket':     return <ThematicBasketsCard data={data} />
+    case 'portfolio_doctor':
+    case 'portfolio_health':
+    case 'doctor':             return <PortfolioDoctorCard data={data} />
     case 'lifecycle':
     case 'trade_lifecycle':
     case 'trailing_sl':        return <PositionTrackerCard data={data} />

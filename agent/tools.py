@@ -120,6 +120,11 @@ class ToolRegistry:
             if t.get("permission") != "deny" and (inc is None or name in inc)
         ]
 
+    def get_fn(self, name: str) -> Any:
+        """Return the underlying callable for a tool if registered."""
+        tool = self._tools.get(name)
+        return tool["fn"] if tool else None
+
     def execute(self, name: str, arguments: dict) -> Any:
         """Run a tool by name with given arguments. Returns JSON-serialisable result."""
         if name not in self._tools:

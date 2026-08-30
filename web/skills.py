@@ -2584,6 +2584,139 @@ async def skill_multibagger_alerts(horizon: Optional[str] = None, limit: int = 5
         raise _err(str(e))
 
 
+# ── 3-Axis Super-Investor & Magic Trend Skills ─────────────────
+
+
+class MagicTrendSkillRequest(BaseModel):
+    symbol: str
+    exchange: str = "NSE"
+
+
+class ThematicBasketScanSkillRequest(BaseModel):
+    basket_id: str = "mayer_100_baggers"
+    min_score: int = 50
+    max_results: int = 15
+    exchange: str = "NSE"
+
+
+@router.post("/magic_trend")
+async def skill_magic_trend(req: MagicTrendSkillRequest):
+    """
+    3-Axis (X: Quality, Y: Growth, Z: Timing/Value) Super-Investor & Magic Trend evaluation.
+    """
+    try:
+        from analysis.magic_trend import calculate_magic_trend_score
+
+        report = calculate_magic_trend_score(req.symbol, exchange=req.exchange)
+        return _ok(report.to_dict())
+    except Exception as e:
+        raise _err(str(e))
+
+
+@router.post("/thematic_baskets/scan")
+async def skill_thematic_baskets_scan(req: ThematicBasketScanSkillRequest):
+    """
+    Scans institutional thematic baskets (100-Baggers, Lynch GARP, Jhunjhunwala Capex, CAN SLIM).
+    """
+    try:
+        from analysis.thematic_baskets import scan_thematic_basket
+
+        result = scan_thematic_basket(
+            basket_id=req.basket_id,
+            min_score=req.min_score,
+            max_results=req.max_results,
+            exchange=req.exchange,
+        )
+        return _ok(result.to_dict())
+    except Exception as e:
+        raise _err(str(e))
+
+
+@router.get("/thematic_baskets/list")
+@router.post("/thematic_baskets/list")
+async def skill_thematic_baskets_list():
+    """
+    Lists all 6 institutional thematic baskets with philosophy, target CAGR, and criteria.
+    """
+    try:
+        from analysis.thematic_baskets import list_all_thematic_baskets
+
+        baskets = list_all_thematic_baskets()
+        return _ok({"baskets": baskets, "total_baskets": len(baskets)})
+    except Exception as e:
+        raise _err(str(e))
+
+
+# ── Broker Portfolio AI Doctor & Optimizer Skill ───────────────
+
+
+@router.get("/portfolio/doctor")
+@router.post("/portfolio/doctor")
+async def skill_portfolio_doctor():
+    """
+    Full AI Health Diagnosis on connected broker holdings:
+    Stage 4 dead-money detection, HHI concentration risks, tax-loss harvesting, and rebalancing prescriptions.
+    """
+    try:
+        from engine.portfolio_doctor import diagnose_portfolio
+
+        report = diagnose_portfolio()
+        return _ok(report.to_dict())
+    except Exception as e:
+        raise _err(str(e))
+
+
+# ── Proven Super-Investor Prompts Skill ─────────────────────────
+
+
+@router.get("/prompts/proven")
+@router.post("/prompts/proven")
+async def skill_prompts_proven():
+    """
+    Returns curated, proven institutional super-investor prompts for 1-click terminal execution.
+    """
+    try:
+        prompts = [
+            {
+                "category": "💎 100-Baggers & Compounders",
+                "title": "Christopher Mayer 100-Baggers Screen",
+                "prompt": "Scan NIFTY Microcap 250 for Christopher Mayer 100-Bagger candidates with ROCE > 20% and small market cap runway.",
+                "action": "thematic_baskets_scan",
+                "basket_id": "mayer_100_baggers",
+            },
+            {
+                "category": "🚀 Growth at Reasonable Price (GARP)",
+                "title": "Peter Lynch Fast-Growers",
+                "prompt": "Find top Peter Lynch GARP stocks with PEG < 1.0, EPS growth > 25%, and VCP pivot breakout.",
+                "action": "thematic_baskets_scan",
+                "basket_id": "lynch_garp_fast_growers",
+            },
+            {
+                "category": "🏗️ Capex & Order Books",
+                "title": "Mega Order-Book Titans",
+                "prompt": "Show companies with Order Book to Market Cap > 1.5x in Defence, Railways, and Power Grid with clean forensics.",
+                "action": "thematic_baskets_scan",
+                "basket_id": "order_book_powerhouses",
+            },
+            {
+                "category": "🛡️ Portfolio Optimization",
+                "title": "Run AI Portfolio Doctor",
+                "prompt": "Diagnose my connected broker portfolio for Stage 4 dead-money holdings, concentration risk, and tax-loss harvesting opportunities.",
+                "action": "portfolio_doctor",
+            },
+            {
+                "category": "📈 Momentum & Breakouts",
+                "title": "William O'Neil CAN SLIM Leaders",
+                "prompt": "Scan for CAN SLIM momentum leaders trading within 15% of 52-week new highs with institutional volume surges.",
+                "action": "thematic_baskets_scan",
+                "basket_id": "canslim_high_momentum",
+            },
+        ]
+        return _ok({"prompts": prompts, "total_prompts": len(prompts)})
+    except Exception as e:
+        raise _err(str(e))
+
+
 # ── Active Trade Lifecycle & Trailing Stop Skill ───────────────
 
 

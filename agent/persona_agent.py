@@ -500,10 +500,25 @@ def run_persona_analysis(
     # Validate persona (raises ValueError for unknown ids)
     persona = get_persona(persona_id)
 
-    # 1. Fetch data
+    # 1. Initialize ToolRegistry and LLM Provider if not provided
+    if registry is None:
+        try:
+            from agent.core import ToolRegistry
+            registry = ToolRegistry()
+        except Exception:
+            registry = None
+
+    if llm_provider is None:
+        try:
+            from agent.core import get_provider
+            llm_provider = get_provider(registry=registry)
+        except Exception:
+            llm_provider = None
+
+    # 2. Fetch data
     brief = _fetch_data_brief(symbol, exchange, registry)
 
-    # 2. LLM path
+    # 3. LLM path
     if llm_provider is not None:
         prompt = _build_prompt(symbol, exchange, brief)
         response_text = _call_llm(

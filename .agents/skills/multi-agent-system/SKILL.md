@@ -75,6 +75,10 @@ All tools exposed to LLM agents are defined in [`agent/tools.py`](file:///c:/Use
 - `get_macro_snapshot` & `get_stock_macro_linkages`: Global macro metrics & sensitivities.
 - `calculate_position_size`: Volatility risk-parity, Half-Kelly, and F&O lot sizing.
 - `get_quote`, `get_options_chain`, `get_pcr`, `get_dcf_valuation`, `search_web`.
+- `scan_multibagger_template`: Mark Minervini 8-point Trend Template, Stan Weinstein Stage 2 Markup & VCP.
+- `magic_trend_3axis`: 3-Axis (X: Moat/Forensics, Y: Growth/Value Migration, Z: Timing/Weinstein Stage 2) Super-Investor scoring and ATR trade tickets.
+- `scan_thematic_baskets`: 6 Institutional Baskets (100-Baggers, Lynch GARP, Capex Surge, CAN SLIM, Order Books, Value Migration).
+- `audit_portfolio_health`: Broker Portfolio Doctor for Stage 4 dead-money detection, HHI concentration, and STCG tax-loss harvesting.
 
 ---
 

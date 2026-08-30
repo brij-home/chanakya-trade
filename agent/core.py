@@ -74,10 +74,15 @@ if sys.platform == "win32":
             pass
 
 from rich.console import Console
+from dotenv import load_dotenv
 
 from agent.prompts import build_system_prompt
 from agent.tools import build_registry, ToolRegistry
-from config.credentials import get_credential
+from config.credentials import get_credential, load_all
+
+# Ensure .env and OS keychain credentials are fully loaded
+load_dotenv()
+load_all()
 
 console = Console(legacy_windows=False)
 
@@ -86,12 +91,12 @@ console = Console(legacy_windows=False)
 
 ANTHROPIC_DEFAULT_MODEL = "claude-opus-4-5"
 OPENAI_DEFAULT_MODEL = "gpt-4o"
-GEMINI_DEFAULT_MODEL = "gemini-3.6-flash"
+GEMINI_DEFAULT_MODEL = "gemini-3.5-flash-lite"
 OLLAMA_DEFAULT_MODEL = "llama3.1"
-NVIDIA_DEFAULT_MODEL = "meta/llama-3.3-70b-instruct"
-GROQ_DEFAULT_MODEL = "llama-3.3-70b-versatile"
+NVIDIA_DEFAULT_MODEL = "meta/llama-3.2-11b-vision-instruct"
+GROQ_DEFAULT_MODEL = "qwen/qwen3.8-27b"
 DEEPSEEK_DEFAULT_MODEL = "deepseek-chat"
-OPENROUTER_DEFAULT_MODEL = "anthropic/claude-3.5-sonnet"
+OPENROUTER_DEFAULT_MODEL = "deepseek/deepseek-chat"
 
 MAX_TOOL_ROUNDS = 10  # agentic loop safety cap
 
@@ -2090,7 +2095,12 @@ def get_provider(
             auto = _auto_detect_provider()
             chosen = auto if auto != PROVIDER_ANTHROPIC else "none"
 
-    chosen_model = model or os.environ.get("AI_MODEL") or _default_model(chosen)
+    if model:
+        chosen_model = model
+    elif chosen == os.environ.get("AI_PROVIDER", "").lower() and os.environ.get("AI_MODEL"):
+        chosen_model = os.environ.get("AI_MODEL")
+    else:
+        chosen_model = _default_model(chosen)
 
     system = build_system_prompt()
 
