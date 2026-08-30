@@ -17,8 +17,8 @@ jobs:
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    # Fast tier: skip slow & network tests, run in parallel
     strategy:
+      fail-fast: false
       matrix:
         python-version: ["3.11", "3.12", "3.13"]
 
@@ -41,7 +41,7 @@ jobs:
           python -m build --no-isolation
 
       - name: Run tests (fast — not network, not slow)
-        run: pytest tests/ -v --tb=short -m "not network and not slow" -n auto
+        run: pytest tests/ --tb=short -m "not network and not slow" -n auto
 
   slow-tests:
     # Runs only on schedule (nightly) or manual dispatch — not on every PR
