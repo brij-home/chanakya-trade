@@ -2501,16 +2501,85 @@ class MultibaggerSkillRequest(BaseModel):
     exchange: str = "NSE"
 
 
+class MultibaggerScanSkillRequest(BaseModel):
+    universe: str = "multibagger_hunters"
+    horizon: str = "ALL_HORIZONS"  # "SHORT_TERM" | "MID_TERM" | "LONG_TERM" | "ALL_HORIZONS"
+    min_conviction: int = 50
+    max_results: int = 25
+    exchange: str = "NSE"
+
+
 @router.post("/multibagger")
+@router.post("/multibagger_analyze")
 async def skill_multibagger(req: MultibaggerSkillRequest):
     """
-    Minervini 8-Point Trend Template, Weinstein Stage Analysis, VCP Detection, and Multibagger Score.
+    Minervini 8-Point Trend Template, Weinstein Stage Analysis, VCP Detection, 3-Horizon Potential, and Execution Tickets.
     """
     try:
         from analysis.multibagger import scan_multibagger_opportunity
 
         report = scan_multibagger_opportunity(req.symbol, exchange=req.exchange)
         return _ok(report.to_dict())
+    except Exception as e:
+        raise _err(str(e))
+
+
+@router.post("/multibagger_scan")
+async def skill_multibagger_scan(req: MultibaggerScanSkillRequest):
+    """
+    Parallel multi-threaded scanner across NIFTY 500, Microcap 250, BSE High Growth, or thematic universes.
+    """
+    try:
+        from analysis.multibagger_scanner import scan_multibagger_universe
+
+        result = scan_multibagger_universe(
+            universe=req.universe,
+            horizon=req.horizon,
+            min_conviction=req.min_conviction,
+            max_results=req.max_results,
+            exchange=req.exchange,
+        )
+        return _ok(result.to_dict())
+    except Exception as e:
+        raise _err(str(e))
+
+
+@router.get("/multibagger_universes")
+@router.post("/multibagger_universes")
+async def skill_multibagger_universes():
+    """
+    Returns available universe presets for multibagger scanning.
+    """
+    try:
+        from analysis.universe import THEMATIC_PRESETS
+
+        universes = [
+            {
+                "id": k,
+                "name": v.get("name", k),
+                "description": v.get("description", ""),
+                "count": len(v.get("symbols", [])),
+                "is_dynamic": "Dynamic" in v.get("name", ""),
+            }
+            for k, v in THEMATIC_PRESETS.items()
+        ]
+        return _ok({"universes": universes, "total_universes": len(universes)})
+    except Exception as e:
+        raise _err(str(e))
+
+
+@router.get("/multibagger_alerts")
+@router.post("/multibagger_alerts")
+async def skill_multibagger_alerts(horizon: Optional[str] = None, limit: int = 50):
+    """
+    Retrieves triggered real-time multibagger catalyst alerts.
+    """
+    try:
+        from engine.multibagger_alerts import get_alert_manager
+
+        mgr = get_alert_manager()
+        alerts = mgr.get_recent_alerts(limit=limit, horizon=horizon)
+        return _ok({"alerts": [a.to_dict() for a in alerts], "count": len(alerts)})
     except Exception as e:
         raise _err(str(e))
 

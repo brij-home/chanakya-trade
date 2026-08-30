@@ -197,6 +197,65 @@ THEMATIC_PRESETS: dict[str, dict[str, Any]] = {
             "DIVISLAB", "HINDALCO", "BPCL", "SHRIRAMFIN", "TATACONSUM",
         ],
     },
+    "nifty500": {
+        "name": "🇮🇳 NIFTY 500 Comprehensive Universe",
+        "description": "Top 500 Indian listed equities across Large, Mid, and Smallcap spectrum.",
+        "symbols": [
+            "RELIANCE", "TCS", "HDFCBANK", "INFY", "ICICIBANK", "SBIN", "BHARTIARTL", "ITC", "LT", "KOTAKBANK",
+            "AXISBANK", "TATAMOTORS", "MARUTI", "SUNPHARMA", "BAJFINANCE", "TITAN", "HINDUNILVR", "NTPC", "ONGC",
+            "POWERGRID", "TATASTEEL", "COALINDIA", "ASIANPAINT", "M&M", "ADANIENT", "ADANIPORTS", "TECHM", "HCLTECH",
+            "WIPRO", "ULTRACEMCO", "JSWSTEEL", "GRASIM", "HEROMOTOCO", "EICHERMOT", "BAJAJ-AUTO", "APOLLOHOSP",
+            "DRREDDY", "CIPLA", "TRENT", "BEL", "HAL", "ZOMATO", "NESTLEIND", "BRITANNIA", "DIVISLAB", "HINDALCO",
+            "BPCL", "SHRIRAMFIN", "TATACONSUM", "INDUSINDBK", "DLF", "GODREJPROP", "OBEROIRLTY", "PRESTIGE", "POLYCAB",
+            "KEI", "DIXON", "BSE", "MCX", "PERSISTENT", "COFORGE", "KPITTECH", "TATAELXSI", "OFSS", "MAXHEALTH",
+            "MANKIND", "CHOLAFIN", "MUTHOOTFIN", "JIOFIN", "SUZLON", "INOXWIND", "IREDA", "PFC", "REC", "NHPC",
+            "SJVN", "TORNTPOWER", "SOLARINDS", "MAZDOCK", "COCHINSHIP", "BDL", "DATAPATTNS", "ZENTEC", "MTARTECH",
+            "CYIENTDLM", "RADICO", "MEDANTA", "LALPATHLAB", "FORTIS", "SYNGENE", "GLENMARK", "BIOCON", "AUROPHARMA",
+            "IPCALAB", "ZYDUSLIFE", "TORNTPHARM", "LUPIN", "ALKEM", "PIIND", "SRF", "NAVINFLUOR", "DEEPAKNTR",
+            "ATUL", "COROMANDEL", "UPL", "TATACHEM", "FLUOROCHEM", "AETHER", "FINEORG", "GUJGASLTD", "ABB",
+            "SIEMENS", "CGPOWER", "BHEL", "THERMAX", "KNRCON", "PNCINFRA", "NCC", "VOLTAS", "HAVELLS", "KAYNES",
+            "SYRMA", "CENTURYTEX", "PREMIERENE", "WAAREEENER", "SWANENERGY", "MOTHERSON", "SONACOMS", "UNOINDA",
+            "EXIDEIND", "MRF", "APOLLOTYRE", "BALKRISIND", "BOSCHLTD", "ASHOKLEY", "BHARATFORG", "TVSMOTOR",
+            "CONCOR", "DELHIVERY", "BLUEDART", "INDIGO", "PVRINOX", "CDSL", "ANGELONE", "HDFCAMC", "CAMS",
+            "FEDERALBNK", "AUBANK", "BANDHANBNK", "IDFCFIRSTB", "BANKBARODA", "PNB", "CANBK", "UNIONBANK",
+            "SAIL", "NMDC", "NATIONALUM", "HINDZINC", "JINDALSTEL", "APLAPOLLO", "HINDCOPPER", "RATNAMANI",
+            "JINDALSAW", "WELCORP", "VBL", "DMART", "JUBLFOOD", "DEVYANI", "METRO", "PAGEIND", "BATAINDIA",
+            "DABUR", "MARICO", "GODREJCP", "COLPAL", "MAPMYINDIA", "NAUKRI", "POLICYBZR", "AFFLE", "ROUTE",
+            "KPITTECH", "TATACOMM", "RATEGAIN", "NEWGEN", "TANLA", "CEINFO", "JUSTDIAL", "SONATSOFTW", "BSOFT",
+            "MPHASIS", "LTTS", "CYIENT", "ZENSARTECH", "INTELLECT", "MASTEK", "HAPPSTMNDS", "LATENTVIEW",
+            "TITAGARH", "RAILTEL", "RVNL", "IRFC", "RITES", "IRCON", "TEXRAIL", "JUPITERWAG", "BEML",
+            "GRSE", "GSHIP", "SCI", "ELECON", "TRITURBINE", "KBL", "KIRLOSENG", "ENGINERSIN", "AIAENG",
+            "TIMKEN", "SKFINDIA", "SCHAEFFLER", "CUMMINSIND", "VOLTAMP", "SCHNEIDER", "HITACHI", "HONAUT",
+            "KEC", "KALPATPOWR", "TECHNOE", "PRAJIND", "GVT&D", "TDPOWERSYS", "GEPIL", "ISGEC", "DEEPAKFERT",
+            "CHAMBLFERT", "GNFC", "GSFC", "RCF", "FACT", "NFL", "SUMICHEM", "SHARDACROP", "DHANUKA",
+            "ASTRAZEN", "SANOFI", "PFIZER", "ABBOTINDIA", "GLAXO", "ERIS", "AJANTPHARM", "JBCHEPHARM",
+            "NATCOPHARM", "GRANULES", "MARKSANS", "FDC", "CAPLIPHARM", "POLYMED", "NEULANDLAB", "SUVENPHAR",
+            "LAURUSLABS", "DIVISLAB", "STAR", "SEQUENT", "HIKAL", "AARTIDRUGS", "RPGPHILIFE", "BLISSGVS"
+        ],
+    },
+    "microcap250": {
+        "name": "🌱 NIFTY Microcap & Emerging High-Beta",
+        "description": "Fast-growing high-beta small and microcaps with institutional volume surges.",
+        "symbols": [
+            "KAYNES", "SYRMA", "DATAPATTNS", "ZENTEC", "MTARTECH", "CYIENTDLM", "PARAS", "ASTRA",
+            "TITAGARH", "TEXRAIL", "JUPITERWAG", "PREMIERENE", "WAAREEENER", "SWANENERGY", "RATEGAIN",
+            "NEWGEN", "MAPMYINDIA", "CEINFO", "LATENTVIEW", "HAPPSTMNDS", "AETHER", "TATVA", "FINEORG",
+            "MEDANTA", "KIMS", "YATHARTH", "RAINBOW", "VIJAYA", "THYROCARE", "SHYAMMETL", "GALLANTT",
+            "SARDAEN", "JINDALSAW", "WELCORP", "ELECTCAST", "RAMASTEEL", "GRAVITA", "DREAMFOLKS",
+            "ETHOSLTD", "LANDMARK", "CAMPUS", "MANYAVAR", "SAPPHIRE", "WESTLIFE", "KIMS", "AVANTIFEED",
+            "APOLLOPIPE", "PRINCEPIPE", "FINPIPE", "ASTRAL", "SUPREMEIND", "RESPONIND", "CARYSIL"
+        ],
+    },
+    "bse_high_growth": {
+        "name": "🚀 BSE & Turnaround Super-Cycles",
+        "description": "High-conviction capex, deleveraging turnarounds, and thematic super-cycles (Solar, EMS, Defence, Rail, CDMO).",
+        "symbols": [
+            "BSE", "MCX", "CDSL", "ANGELONE", "SUZLON", "INOXWIND", "IREDA", "HAL", "BEL", "MAZDOCK",
+            "COCHINSHIP", "GRSE", "BDL", "TITAGARH", "RVNL", "IRFC", "RAILTEL", "TRENT", "DIXON",
+            "POLYCAB", "KEI", "RRKABEL", "KAYNES", "SYRMA", "PREMIERENE", "WAAREEENER", "PERSISTENT",
+            "COFORGE", "MAXHEALTH", "MANKIND", "CHOLAFIN", "MUTHOOTFIN", "JIOFIN", "SOLARINDS", "RADICO"
+        ],
+    },
     "multibagger_hunters": {
         "name": "💎 Multibagger Compounders",
         "description": "High-growth Stage 2 mid/smallcaps with tight VCP bases and strong fundamentals.",
@@ -204,7 +263,20 @@ THEMATIC_PRESETS: dict[str, dict[str, Any]] = {
             "TRENT", "DIXON", "HAL", "BEL", "BSE", "MCX", "MAZDOCK", "COCHINSHIP",
             "POLYCAB", "KEI", "PERSISTENT", "COFORGE", "KPITTECH", "MAXHEALTH",
             "MANKIND", "CHOLAFIN", "SUZLON", "INOXWIND", "IREDA", "SOLARINDS",
-            "DATAATAM", "CYIENTDLM", "AETHER", "RADICO", "MEDANTA",
+            "DATAPATTNS", "CYIENTDLM", "AETHER", "RADICO", "MEDANTA", "KAYNES", "TITAGARH"
+        ],
+    },
+    "multibagger_all_horizons": {
+        "name": "👑 All-Horizons Multibagger Master Watchlist",
+        "description": "Full-spectrum institutional universe spanning Short-Term (VCP/RVOL), Mid-Term (Stage 2/CAN SLIM), and Long-Term (SMILE/ROCE).",
+        "symbols": [
+            "TRENT", "DIXON", "HAL", "BEL", "BSE", "MCX", "MAZDOCK", "COCHINSHIP", "GRSE", "BDL",
+            "POLYCAB", "KEI", "RRKABEL", "PERSISTENT", "COFORGE", "KPITTECH", "MAXHEALTH", "MANKIND",
+            "CHOLAFIN", "SUZLON", "INOXWIND", "IREDA", "SOLARINDS", "DATAPATTNS", "CYIENTDLM",
+            "KAYNES", "SYRMA", "TITAGARH", "TEXRAIL", "JUPITERWAG", "PREMIERENE", "WAAREEENER",
+            "SWANENERGY", "RADICO", "MEDANTA", "KIMS", "YATHARTH", "NEWGEN", "RATEGAIN", "MAPMYINDIA",
+            "CEINFO", "AETHER", "TATVA", "FINEORG", "DEEPAKNTR", "PIIND", "NAVINFLUOR", "ZOMATO",
+            "JIOFIN", "CDSL", "ANGELONE", "CAMS", "HDFCAMC", "DLF", "PRESTIGE", "SOBHA", "BRIGADE"
         ],
     },
 }
