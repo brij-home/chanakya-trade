@@ -60,7 +60,7 @@ def parse_qty_or_pct(arg: str) -> tuple[float, bool]:
         "2.5%"→ (2.5, True)
 
     Raises:
-        ValueError: if percentage is <= 0 or not a valid number
+        ValueError: if the percentage or quantity is <= 0, or not a valid number
     """
     arg = arg.strip()
     if arg.endswith("%"):
@@ -68,7 +68,10 @@ def parse_qty_or_pct(arg: str) -> tuple[float, bool]:
         if raw <= 0:
             raise ValueError(f"Percentage must be > 0, got '{arg}'")
         return raw, True
-    return float(arg), False
+    quantity = float(arg)
+    if quantity <= 0:
+        raise ValueError(f"Quantity must be > 0, got '{arg}'")
+    return quantity, False
 
 
 def size_by_pct(
@@ -338,7 +341,9 @@ def execute_trade_plan(
         )
         step2 = Prompt.ask("  Double Confirmation", default="CANCEL")
         if step2.strip().upper() != "CONFIRM":
-            console.print("[dim]Execution cancelled: Did not match 'CONFIRM'. No orders were sent.[/dim]")
+            console.print(
+                "[dim]Execution cancelled: Did not match 'CONFIRM'. No orders were sent.[/dim]"
+            )
             return []
 
     # ── Paper override warning ────────────────────────────────

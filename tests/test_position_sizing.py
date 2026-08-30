@@ -112,3 +112,15 @@ class TestParsePctArg:
 
         with pytest.raises(ValueError):
             parse_qty_or_pct("-5%")
+
+    def test_zero_quantity_raises(self):
+        from engine.trade_executor import parse_qty_or_pct
+
+        with pytest.raises(ValueError, match="Quantity must be > 0"):
+            parse_qty_or_pct("0")
+
+    def test_negative_quantity_raises(self):
+        from engine.trade_executor import parse_qty_or_pct
+
+        with pytest.raises(ValueError, match="Quantity must be > 0"):
+            parse_qty_or_pct("-10")
