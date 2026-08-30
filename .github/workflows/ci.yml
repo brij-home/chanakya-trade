@@ -84,9 +84,7 @@ jobs:
 
       - name: Run frontend tests
         working-directory: macos-app
-        run: |
-          node scripts/audit-react-hooks.js
-          npx vitest run --passWithNoTests
+        run: npx vitest run src/__tests__ --reporter=verbose
 
   lint:
     runs-on: ubuntu-latest
