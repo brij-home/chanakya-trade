@@ -64,4 +64,8 @@ The FastAPI sidecar (`web.api:app`) acts as the local backend service on port `8
 13. **Full-Market Option Ladder Coverage**: Always generate wide strike ladders ($\ge 41$ strikes, `range(-20, 21)`) in `/skills/gex_snapshot` so that high-distance filters (`ATM ±10`, `ATM ±15`, `All Strikes`) provide realistic market depth across far OTM and deep ITM strikes.
 14. **Typeahead Viewport Boundary Safety**: Search suggestions and quick-switch menus must dynamically calculate viewport positioning to prevent horizontal overflow or clipping against screen edges.
 15. **Institutional Spacing & Ergonomics**: All desktop terminal views must follow high-density spacing standards (`p-2.5 sm:p-3.5 space-y-2.5`, `gap-2.5`, `py-1 px-2` table rows) to maximize screen real estate for charts, order flow, and option matrices.
+16. **Frontend Static Asset & Root Error Boundary Synchronization**:
+    - When updating React components in `macos-app/src/renderer/`, always verify the production web bundle (`npm run build:web`) compiles without errors and syncs to `web/static/`.
+    - Ensure all API data parsers and metric tables implement defensive null checks (`?.toLowerCase()`, `typeof === 'object'`) to prevent DOM rendering crashes.
+
 

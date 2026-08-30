@@ -149,6 +149,7 @@ class TestWebSearch:
     def test_available_true_when_perplexity_key(self, monkeypatch):
         monkeypatch.setenv("PERPLEXITY_API_KEY", "pplx-test")
         monkeypatch.delenv("EXA_API_KEY", raising=False)
+        monkeypatch.delenv("TAVILY_API_KEY", raising=False)
 
         from agent.web_search import web_search_available
 
@@ -157,16 +158,20 @@ class TestWebSearch:
     def test_web_search_returns_empty_on_failure(self, monkeypatch):
         monkeypatch.setenv("EXA_API_KEY", "bad-key")
         monkeypatch.delenv("PERPLEXITY_API_KEY", raising=False)
+        monkeypatch.delenv("TAVILY_API_KEY", raising=False)
 
         with patch("agent.web_search._exa_search", side_effect=RuntimeError("network")):
             with patch("agent.web_search._perplexity_search", side_effect=RuntimeError("no key")):
-                from agent.web_search import web_search
+                with patch("agent.web_search._tavily_search", side_effect=RuntimeError("no key")):
+                    from agent.web_search import web_search
 
-                results = web_search("INFY stock India 2026")
-                assert results == []
+                    results = web_search("INFY stock India 2026")
+                    assert results == []
 
     def test_web_search_returns_results_on_success(self, monkeypatch):
         monkeypatch.setenv("EXA_API_KEY", "sk-exa-test")
+        monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+        monkeypatch.delenv("PERPLEXITY_API_KEY", raising=False)
 
         from agent.web_search import SearchResult
 
@@ -191,6 +196,8 @@ class TestWebSearch:
 
     def test_max_results_capped_at_5(self, monkeypatch):
         monkeypatch.setenv("EXA_API_KEY", "sk-exa-test")
+        monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+        monkeypatch.delenv("PERPLEXITY_API_KEY", raising=False)
 
         with patch("agent.web_search._exa_search") as mock_exa:
             mock_exa.return_value = []
@@ -232,6 +239,7 @@ class TestWebSearch:
     def test_perplexity_fallback_on_exa_fail(self, monkeypatch):
         monkeypatch.setenv("EXA_API_KEY", "bad-exa")
         monkeypatch.setenv("PERPLEXITY_API_KEY", "good-pplx")
+        monkeypatch.delenv("TAVILY_API_KEY", raising=False)
 
         from agent.web_search import SearchResult
 

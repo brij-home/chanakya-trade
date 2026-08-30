@@ -206,6 +206,14 @@
     - In asynchronous AI multi-agent debate views and radar scanners, every trigger action (ticker chips, council mode switches, search inputs, Run buttons) must route through a unified execution pipeline.
     - Always dispatch in-page progressive stage indicators (`⚡ Initializing...`, `🔍 Technicals & Patterns...`, `🔬 Cross-Examination...`, `⚖️ Consensus...`) and synchronize with floating `ActivityHUD`.
     - Always wire zero-latency `⛔ Stop / Cancel` buttons using `AbortController` to allow instant user cancellation and multitasking.
+32. **Root Error Boundary & Web/Electron State Machine Invariance**:
+    - Always wrap the root application in `<ErrorBoundary title="...">` in [`macos-app/src/renderer/src/main.jsx`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/macos-app/src/renderer/src/main.jsx) to eliminate white/blank screens from unhandled rendering errors.
+    - Web mode detection in [`macos-app/src/renderer/src/App.jsx`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/macos-app/src/renderer/src/App.jsx) must support standalone browser access (`window.__CHANAKYA_TRADE_WEB__ || !window.electronAPI`) with automatic fallback port resolution (`8765`).
+    - Every setup/initialization state machine must incorporate a safety fallback timer (e.g. 2.0s) so the user interface never hangs on an uninitialized or loading progress screen.
+33. **Python Linting & Formatting CI Contract (`ruff` Rules)**:
+    - Always run `ruff check .` and `ruff format --check .` before proposing commits.
+    - Guarantee zero undefined variable names (including typing imports `Any`, `Literal` and library imports `pd`, `os`).
+    - Guard cache storage blocks: never do an early `return { ... }` that bypasses caching locks; assign `res = { ... }`, acquire lock, write cache, and return `res`.
 
 ---
 
