@@ -787,5 +787,66 @@ MANIFEST: dict = {
                 "buy_personas, sell_personas, hold_personas}."
             ),
         },
+        {
+            "name": "portfolio_health",
+            "path": "/skills/portfolio/health",
+            "method": "POST",
+            "description": "Audit portfolio health, concentration risk (HHI index), cash drag, and forensic accounting flags.",
+            "input_schema": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+            "output_description": "PortfolioHealthAudit with total_net_worth, concentration_risk, HHI, allocation_pyramid, forensic_warnings, and recommendations.",
+        },
+        {
+            "name": "tax_estimate",
+            "path": "/skills/tax/estimate",
+            "method": "POST",
+            "description": "Estimate post-budget Indian capital gains tax (STCG 20%, LTCG 12.5% u/s 112A with ₹1.25L exemption, F&O business income).",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "gross_pnl": {"type": "number", "description": "Gross P&L in INR"},
+                    "holding_period_days": {"type": "integer", "default": 30},
+                    "segment": {"type": "string", "default": "EQUITY_DELIVERY"},
+                    "prior_accumulated_ltcg": {"type": "number", "default": 0.0},
+                },
+                "required": ["gross_pnl"],
+            },
+            "output_description": "CapitalGainsEstimate with gross_pnl, tax_type, estimated_tax, net_post_tax_pnl, and rules_applied.",
+        },
+        {
+            "name": "tax_harvesting",
+            "path": "/skills/tax/harvesting",
+            "method": "POST",
+            "description": "Identify tax-loss harvesting candidates across holdings to offset realized STCG before fiscal year-end.",
+            "input_schema": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+            "output_description": "List of harvestable holdings with unrealized_loss, potential_stcg_tax_saved, and actionable recommendations.",
+        },
+        {
+            "name": "defined_risk_spreads",
+            "path": "/skills/options/defined_risk_spreads",
+            "method": "POST",
+            "description": "Construct defined-risk hedged options spreads (Bull Call Spread, Bear Put Spread, Bull Put Spread, Iron Condor).",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "underlying": {"type": "string", "description": "Symbol e.g. NIFTY or RELIANCE"},
+                    "strategy": {"type": "string", "description": "BULL_CALL_SPREAD, BEAR_PUT_SPREAD, BULL_PUT_SPREAD, BEAR_CALL_SPREAD, or IRON_CONDOR"},
+                    "spot_price": {"type": "number"},
+                    "iv": {"type": "number", "default": 0.15},
+                    "dte": {"type": "integer", "default": 7},
+                    "num_lots": {"type": "integer", "default": 1},
+                },
+                "required": ["underlying", "strategy"],
+            },
+            "output_description": "DefinedRiskSpread with legs, net_cashflow, max_profit, max_loss, risk_reward_ratio, breakevens, and margin required.",
+        },
     ],
 }
+

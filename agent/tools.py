@@ -1666,6 +1666,97 @@ def build_registry() -> ToolRegistry:
         ],
     )
 
+    # ── Retail Protection & Wealth Enablement Tools ───────────
+
+    reg.register(
+        name="audit_portfolio_health",
+        description=(
+            "Audit portfolio health, concentration risk (HHI index), cash drag, forensic red flags across active equity holdings, "
+            "and core-satellite wealth allocation pyramid."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {},
+        },
+        fn=lambda: __import__(
+            "engine.portfolio", fromlist=["audit_portfolio_health"]
+        ).audit_portfolio_health().to_dict(),
+    )
+
+    reg.register(
+        name="calculate_capital_gains_tax",
+        description=(
+            "Estimate post-budget Indian capital gains tax for an equity or F&O trade: "
+            "STCG 20% (Section 111A), LTCG 12.5% (Section 112A with ₹1.25L exemption), or F&O Section 43(5) business income."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "gross_pnl": {"type": "number", "description": "Gross P&L in INR"},
+                "holding_period_days": {"type": "integer", "default": 30, "description": "Holding period in days"},
+                "segment": {"type": "string", "default": "EQUITY_DELIVERY", "description": "EQUITY_DELIVERY, EQUITY_INTRADAY, FUTURES, or OPTIONS"},
+                "prior_accumulated_ltcg": {"type": "number", "default": 0.0, "description": "Prior LTCG gains used this fiscal year"},
+            },
+            "required": ["gross_pnl"],
+        },
+        fn=lambda gross_pnl, holding_period_days=30, segment="EQUITY_DELIVERY", prior_accumulated_ltcg=0.0: __import__(
+            "engine.charges", fromlist=["calculate_capital_gains_tax"]
+        ).calculate_capital_gains_tax(
+            gross_pnl=gross_pnl,
+            holding_period_days=holding_period_days,
+            segment=segment,
+            prior_accumulated_ltcg=prior_accumulated_ltcg,
+        ).to_dict(),
+    )
+
+    reg.register(
+        name="suggest_tax_loss_harvesting",
+        description=(
+            "Identify equity holdings with unrealized short-term capital losses that can be harvested "
+            "to offset realized short-term capital gains before fiscal year-end (March 31)."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {},
+        },
+        fn=lambda: __import__(
+            "engine.charges", fromlist=["suggest_tax_loss_harvesting"]
+        ).suggest_tax_loss_harvesting(
+            [
+                {"symbol": getattr(h, "symbol", ""), "qty": getattr(h, "qty", 0), "ltp": getattr(h, "ltp", 0.0), "pnl": getattr(h, "pnl", 0.0), "days_held": 90}
+                for h in __import__("engine.portfolio", fromlist=["get_portfolio_summary"]).get_portfolio_summary().holdings
+            ]
+        ),
+    )
+
+    reg.register(
+        name="build_defined_risk_spread",
+        description=(
+            "Construct a defined-risk multi-leg options spread (Bull Call Spread, Bear Put Spread, Bull Put Spread, "
+            "Bear Call Spread, or Iron Condor) to cap maximum loss and eliminate Theta bleed for Indian F&O contracts."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "underlying": {"type": "string", "description": "Underlying symbol e.g. 'NIFTY' or 'RELIANCE'"},
+                "strategy": {"type": "string", "description": "BULL_CALL_SPREAD, BEAR_PUT_SPREAD, BULL_PUT_SPREAD, BEAR_CALL_SPREAD, or IRON_CONDOR"},
+                "spot_price": {"type": "number", "description": "Optional underlying spot price"},
+                "dte": {"type": "integer", "default": 7, "description": "Days to expiry"},
+                "num_lots": {"type": "integer", "default": 1, "description": "Number of contracts/lots"},
+            },
+            "required": ["underlying", "strategy"],
+        },
+        fn=lambda underlying, strategy, spot_price=None, dte=7, num_lots=1: (
+            __import__("engine.defined_risk_spreads", fromlist=["build_defined_risk_spread"]).build_defined_risk_spread(
+                underlying=underlying,
+                spot_price=spot_price or (24500.0 if "NIFTY" in underlying.upper() else 1500.0),
+                strategy=strategy,
+                dte=dte,
+                num_lots=num_lots,
+            ).to_dict()
+        ),
+    )
+
     # ── Tag all registered tools as read-only + concurrency-safe ──
     # Every tool in the base registry is a read/analyse tool — none place orders.
     # Destructive tools (execute_trade) are added separately by the harness.
@@ -1676,5 +1767,6 @@ def build_registry() -> ToolRegistry:
         tool["permission"] = "auto"
 
     return reg
+
 
 

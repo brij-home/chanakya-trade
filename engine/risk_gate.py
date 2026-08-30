@@ -38,9 +38,13 @@ class AllowedAction:
     direction: Literal["BUY_ONLY", "SELL_ONLY", "BOTH", "NONE"]
     max_qty: int  # max shares allowed (0 if blocked)
     max_capital: float  # max INR value (0 if blocked)
-    flags: list[str]  # e.g. ["EARNINGS_PROXIMITY", "HIGH_VOLATILITY", "LOW_CASH"]
+    flags: list[str]  # e.g. ["EARNINGS_PROXIMITY", "HIGH_VOLATILITY", "LOW_CASH", "TILT_LOCKOUT"]
     block_reason: str = ""  # non-empty if allowed=False
     warnings: list[str] = field(default_factory=list)  # non-blocking warnings
+    requires_double_confirmation: bool = False
+    disclaimers: list[str] = field(default_factory=list)
+    coaching_recommendations: list[str] = field(default_factory=list)
+
 
 
 # ── Internal helpers ──────────────────────────────────────────
@@ -154,12 +158,15 @@ def compute_allowed_actions(
             warnings=warnings,
         )
 
-    # ── Check 1: Daily loss cap / trade counts ────────────────
+    # ── Check 1: Daily loss cap / trade counts / tilt lockout ────────────────
     rl = _get_risk_limits()
     try:
-        # Use a zero-price dummy call to just check the daily caps
+        # Use a zero-price dummy call to check daily caps and tilt lockout
         rl.check(sym, "BUY", 1, 0.0)
     except Exception as exc:
+        reason = str(exc).splitlines()[0]
+        if "tilt" in reason.lower():
+            flags.append("TILT_LOCKOUT")
         return AllowedAction(
             symbol=sym,
             allowed=False,
@@ -167,7 +174,7 @@ def compute_allowed_actions(
             max_qty=0,
             max_capital=0.0,
             flags=flags,
-            block_reason=str(exc).splitlines()[0],  # first line only
+            block_reason=reason,
             warnings=warnings,
         )
 

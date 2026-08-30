@@ -2147,17 +2147,22 @@ class MultiAgentAnalyzer:
         fast_llm = getattr(self, "fast_llm", None) or getattr(self, "llm", None)
         deep_llm = getattr(self, "llm", None)
 
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            f_agg = executor.submit(self._safe_chat, agg_prompt, agg_fallback, 18.0, fast_llm)
-            f_cons = executor.submit(self._safe_chat, cons_prompt, cons_fallback, 18.0, fast_llm)
-            try:
-                aggressive_view = f_agg.result(timeout=18.0)
-            except Exception:
-                aggressive_view = agg_fallback
-            try:
-                conservative_view = f_cons.result(timeout=18.0)
-            except Exception:
-                conservative_view = cons_fallback
+        if getattr(self, "parallel", True):
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                f_agg = executor.submit(self._safe_chat, agg_prompt, agg_fallback, 18.0, fast_llm)
+                f_cons = executor.submit(self._safe_chat, cons_prompt, cons_fallback, 18.0, fast_llm)
+                try:
+                    aggressive_view = f_agg.result(timeout=18.0)
+                except Exception:
+                    aggressive_view = agg_fallback
+                try:
+                    conservative_view = f_cons.result(timeout=18.0)
+                except Exception:
+                    conservative_view = cons_fallback
+        else:
+            aggressive_view = self._safe_chat(agg_prompt, agg_fallback, 18.0, fast_llm)
+            conservative_view = self._safe_chat(cons_prompt, cons_fallback, 18.0, fast_llm)
+
 
         # Neutral debater
         if self.verbose:

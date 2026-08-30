@@ -548,3 +548,209 @@ def print_portfolio_greeks() -> None:
         )
 
     console.print(table2)
+
+
+# ── Portfolio Health & Asset Allocation Auditor (Retail Protection) ──
+
+
+@dataclass
+class PortfolioHealthAudit:
+    total_holdings_count: int
+    total_equity_value: float
+    cash_balance: float
+    total_net_worth: float
+    cash_drag_pct: float
+    herfindahl_concentration_index: float  # HHI (0-10000)
+    concentration_risk: Literal["LOW", "MODERATE", "HIGH", "CRITICAL"]
+    top_3_concentration_pct: float
+    top_holding: dict[str, Any]
+    forensic_warnings: list[dict[str, Any]]
+    allocation_pyramid: dict[str, float]  # Core Equity, Satellite Trading, Cash Buffer
+    recommendations: list[str]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "total_holdings_count": self.total_holdings_count,
+            "total_equity_value": round(self.total_equity_value, 2),
+            "cash_balance": round(self.cash_balance, 2),
+            "total_net_worth": round(self.total_net_worth, 2),
+            "cash_drag_pct": round(self.cash_drag_pct, 2),
+            "herfindahl_concentration_index": round(self.herfindahl_concentration_index, 1),
+            "concentration_risk": self.concentration_risk,
+            "top_3_concentration_pct": round(self.top_3_concentration_pct, 2),
+            "top_holding": self.top_holding,
+            "forensic_warnings": self.forensic_warnings,
+            "allocation_pyramid": {k: round(v, 2) for k, v in self.allocation_pyramid.items()},
+            "recommendations": self.recommendations,
+        }
+
+
+def audit_portfolio_health(portfolio_summary: Optional[PortfolioSummary] = None) -> PortfolioHealthAudit:
+    """
+    Perform deep retail portfolio audit:
+    - Concentration risk (HHI index & Top 3 concentration)
+    - Asset allocation hygiene (Cash Buffer vs Equity vs F&O margin)
+    - Forensic flag scan on individual holdings
+    - Pragmatic retail action recommendations
+    """
+    summary = portfolio_summary or get_portfolio_summary()
+    holdings = summary.holdings
+    funds = summary.funds
+
+    total_equity = sum(h.value for h in holdings)
+    cash = getattr(funds, "available_cash", 0.0) or getattr(funds, "free_cash", 0.0) or 0.0
+    net_worth = total_equity + cash
+
+    recs = []
+    forensic_flags = []
+
+    # Concentration check
+    hhi = 0.0
+    top_3_pct = 0.0
+    top_holding_dict = {}
+
+    if total_equity > 0 and len(holdings) > 0:
+        sorted_holdings = sorted(holdings, key=lambda x: x.value, reverse=True)
+        top_holding_dict = {
+            "symbol": sorted_holdings[0].symbol,
+            "value": round(sorted_holdings[0].value, 2),
+            "pct": round((sorted_holdings[0].value / total_equity) * 100.0, 2),
+        }
+        top_3_val = sum(h.value for h in sorted_holdings[:3])
+        top_3_pct = (top_3_val / total_equity) * 100.0
+
+        for h in sorted_holdings:
+            weight_pct = (h.value / total_equity) * 100.0
+            hhi += (weight_pct ** 2)
+
+            # Single stock > 25% warning
+            if weight_pct > 25.0:
+                recs.append(f"High single-stock risk: {h.symbol} is {weight_pct:.1f}% of your portfolio. Consider trimming towards <15%.")
+
+    if hhi > 2500:
+        conc_risk = "CRITICAL"
+        recs.append("Portfolio is severely concentrated. Diversify across uncorrelated sectors.")
+    elif hhi > 1800:
+        conc_risk = "HIGH"
+    elif hhi > 1000:
+        conc_risk = "MODERATE"
+    else:
+        conc_risk = "LOW"
+
+    # Cash buffer check
+    cash_drag = (cash / net_worth * 100.0) if net_worth > 0 else 0.0
+    if cash_drag < 10.0:
+        recs.append("Low emergency cash reserve (<10%). Keep a liquid cash buffer to take advantage of market drawdowns.")
+    elif cash_drag > 40.0:
+        recs.append(f"High cash drag ({cash_drag:.1f}% uninvested). Consider deploying into core index or undervalued leaders.")
+
+    # Allocation pyramid
+    used_margin = getattr(summary.risk, "used_margin", 0.0)
+    core_equity = max(0.0, total_equity - used_margin)
+    pyramid = {
+        "Core Long-Term Equity %": (core_equity / net_worth * 100.0) if net_worth > 0 else 0.0,
+        "Active Trading / F&O %": (used_margin / net_worth * 100.0) if net_worth > 0 else 0.0,
+        "Liquid Cash Buffer %": cash_drag,
+    }
+
+    # Forensic checks on individual equity holdings
+    for h in holdings:
+        try:
+            from analysis.forensic import audit_company_forensics
+            sym = getattr(h, "symbol", "")
+            if sym and not sym.endswith("-INDEX"):
+                f_res = audit_company_forensics(sym)
+                if f_res.is_manipulator_risk or f_res.distress_zone == "DISTRESS" or len(f_res.governance_red_flags) > 0:
+                    flags_list = list(f_res.governance_red_flags)
+                    if f_res.is_manipulator_risk:
+                        flags_list.append(f"Beneish M-Score {f_res.beneish_m_score:.2f} (Earnings Manipulation Risk)")
+                    if f_res.distress_zone == "DISTRESS":
+                        flags_list.append(f"Altman Z-Score {f_res.altman_z_score:.2f} (Credit Distress)")
+                    
+                    forensic_flags.append({
+                        "symbol": sym,
+                        "rating": f_res.quality_rating,
+                        "distress_zone": f_res.distress_zone,
+                        "flags": flags_list,
+                    })
+                    recs.append(f"Forensic Red Flag on {sym}: {', '.join(flags_list)}. Review fundamental health or consider exit.")
+        except Exception:
+            pass
+
+    if not recs:
+        recs.append("Portfolio health is institutional grade with healthy diversification and liquidity buffers.")
+
+    return PortfolioHealthAudit(
+        total_holdings_count=len(holdings),
+        total_equity_value=total_equity,
+        cash_balance=cash,
+        total_net_worth=net_worth,
+        cash_drag_pct=cash_drag,
+        herfindahl_concentration_index=hhi,
+        concentration_risk=conc_risk,
+        top_3_concentration_pct=top_3_pct,
+        top_holding=top_holding_dict,
+        forensic_warnings=forensic_flags,
+        allocation_pyramid=pyramid,
+        recommendations=recs,
+    )
+
+
+def print_portfolio_health(audit_data: Optional[PortfolioHealthAudit] = None) -> None:
+    """Display comprehensive portfolio health audit as a sleek Rich terminal dashboard."""
+    from rich.console import Console
+    from rich.panel import Panel
+    from rich.table import Table
+
+    console = Console()
+    audit = audit_data or audit_portfolio_health()
+
+    risk_style = {
+        "LOW": "green",
+        "MODERATE": "yellow",
+        "HIGH": "bold red",
+        "CRITICAL": "bold white on red",
+    }.get(audit.concentration_risk, "cyan")
+
+    # Header overview
+    lines = [
+        f"  [bold]Total Net Worth[/bold]    : [bold white]₹{audit.total_net_worth:,.2f}[/bold white]",
+        f"  [bold]Equity Holdings[/bold]    : ₹{audit.total_equity_value:,.2f} ({audit.total_holdings_count} instruments)",
+        f"  [bold]Liquid Cash[/bold]        : ₹{audit.cash_balance:,.2f} ([dim]Cash Drag: {audit.cash_drag_pct:.1f}%[/dim])",
+        f"  [bold]Concentration Risk[/bold] : [{risk_style}]{audit.concentration_risk}[/{risk_style}] (HHI: {audit.herfindahl_concentration_index:.0f} / 10000)",
+    ]
+    if audit.top_holding:
+        lines.append(f"  [bold]Largest Holding[/bold]    : [cyan]{audit.top_holding.get('symbol')}[/cyan] ({audit.top_holding.get('pct')}%)")
+    lines.append(f"  [bold]Top 3 Concentration[/bold]: {audit.top_3_concentration_pct:.1f}%")
+
+    console.print()
+    console.print(
+        Panel("\n".join(lines), title="[bold cyan]🛡 Institutional Portfolio Health & Wealth Audit[/bold cyan]", border_style="cyan")
+    )
+
+    # Allocation Pyramid
+    pyramid_table = Table(title="Asset Allocation Pyramid", show_header=True, header_style="bold cyan")
+    pyramid_table.add_column("Asset Bucket", style="bold white")
+    pyramid_table.add_column("Allocation %", justify="right")
+    pyramid_table.add_column("Target Guidance", style="dim")
+
+    pyramid_table.add_row("Core Long-Term Equity", f"{audit.allocation_pyramid.get('Core Long-Term Equity %', 0.0):.1f}%", "60% – 75% (Compounding Engine)")
+    pyramid_table.add_row("Active Trading / F&O Margin", f"{audit.allocation_pyramid.get('Active Trading / F&O %', 0.0):.1f}%", "10% – 20% (Alpha & Hedging)")
+    pyramid_table.add_row("Liquid Cash Buffer", f"{audit.allocation_pyramid.get('Liquid Cash Buffer %', 0.0):.1f}%", "10% – 20% (Dry Powder for Dip Buying)")
+    console.print(pyramid_table)
+
+    # Forensic Warnings
+    if audit.forensic_warnings:
+        console.print("\n[bold red]⚠️ Forensic & Governance Red Flags on Active Holdings:[/bold red]")
+        for fw in audit.forensic_warnings:
+            console.print(f"  • [bold]{fw['symbol']}[/bold] (Rating: {fw['rating']}, Distress Zone: {fw['distress_zone']})")
+            for f in fw["flags"]:
+                console.print(f"    - [red]{f}[/red]")
+
+    # Actionable Recommendations
+    console.print("\n[bold green]💡 Institutional Wealth Enablement Recommendations:[/bold green]")
+    for r in audit.recommendations:
+        console.print(f"  ✓ [white]{r}[/white]")
+    console.print()
+
+

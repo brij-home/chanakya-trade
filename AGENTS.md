@@ -144,6 +144,13 @@
     - All modal overlay charts and fullscreen displays must dynamically calculate available viewport heights (`Math.max(520, window.innerHeight * 0.92 - 95)`) so that secondary sub-panes (such as Stochastic RSI or MACD) are guaranteed dedicated vertical space without scroll cutoffs or clipping.
     - Order Block (OB) ribbons must use ultra-sheer background fills ($1.5\%\text{--}2.5\%$ alpha) with dashed boundaries and semi-translucent glass chip badges to ensure candlesticks and wicks remain 100% visible and uncluttered.
     - Charts must provide a dedicated 1-click `⟲ Reset View` button that calls `fitContent()`, restores price autoscale, and recalculates DOM overlay coordinates at 60fps.
+22. **Advisory Risk Friction & Double-Confirmation Principle (Co-Pilot, Not Police)**:
+    - Trading platforms must act as an empowering institutional risk co-pilot rather than a paternalistic police. Never hard-block user actions without providing a clear escape path.
+    - When behavioral flags (consecutive loss streak $\ge 3$, anti-pyramiding into underwater positions, daily loss threshold) are triggered, present **mindful friction**:
+      1. High-visibility **Behavioral Risk & Coaching Advisory** displaying psychological context and statistical probabilities (e.g. 78% failure rate on immediate tilt re-entries).
+      2. Actionable coaching alternatives (e.g. reducing position risk to 0.5% or taking a 15-minute breather).
+      3. Explicit **Double Confirmation** (`[x] I acknowledge the heightened risk and choose to proceed with conscious awareness`).
+    - The backend engine must evaluate preflight (`evaluate_preflight`) and allow execution with user acknowledgment (`allow_override=True`), logging an immutable audit record.
 
 ---
 

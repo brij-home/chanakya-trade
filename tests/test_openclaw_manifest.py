@@ -50,6 +50,11 @@ EXPECTED_SKILLS = {
     "drift",
     "memory",
     "memory_query",
+    # Retail Protection & Wealth Enablement
+    "portfolio_health",
+    "tax_estimate",
+    "tax_harvesting",
+    "defined_risk_spreads",
 }
 
 
@@ -130,10 +135,23 @@ class TestMissingSkillsAdded:
     def test_memory_query_present(self):
         assert "memory_query" in self._skill_names()
 
+    def test_portfolio_health_present(self):
+        assert "portfolio_health" in self._skill_names()
+
+    def test_tax_estimate_present(self):
+        assert "tax_estimate" in self._skill_names()
+
+    def test_tax_harvesting_present(self):
+        assert "tax_harvesting" in self._skill_names()
+
+    def test_defined_risk_spreads_present(self):
+        assert "defined_risk_spreads" in self._skill_names()
+
     def test_all_expected_skills_present(self):
         present = self._skill_names()
         missing = EXPECTED_SKILLS - present
         assert missing == set(), f"Missing skills in manifest: {missing}"
+
 
     def test_no_duplicate_names(self):
         names = [s["name"] for s in MANIFEST["skills"]]

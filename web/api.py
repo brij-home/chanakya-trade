@@ -154,6 +154,7 @@ async def auth_middleware(request: _Request, call_next):
         or path == "/health"
         or path in (
             "/api/preflight",
+            "/api/risk/preflight",
             "/api/mode",
             "/api/charges/calculate",
             "/api/reconciliation",
@@ -171,16 +172,17 @@ async def auth_middleware(request: _Request, call_next):
     ):
         return await call_next(request)
 
-    # Localhost requests skip auth (Electron app, CLI, local dev, testclient)
-    # Auth only enforced for remote/web access
-    client_host = request.client.host if request.client else ""
-    if client_host in ("127.0.0.1", "::1", "localhost", "testclient"):
-        return await call_next(request)
-
-    # Self-hosted mode: skip auth if no users exist yet
+    # Self-hosted mode: skip auth if no users exist yet (first-time onboarding)
     deploy_mode = os.environ.get("DEPLOY_MODE", "")
-    if deploy_mode == "self-hosted" and user_count() == 0:
-        return await call_next(request)
+    if deploy_mode == "self-hosted":
+        if user_count() == 0:
+            return await call_next(request)
+    else:
+        # Local desktop mode: skip auth for localhost (Electron app, CLI, local dev, testclient)
+        client_host = request.client.host if request.client else ""
+        if client_host in ("127.0.0.1", "::1", "localhost", "testclient"):
+            return await call_next(request)
+
 
     # Check session cookie
     session_id = request.cookies.get("session_id")
@@ -2090,6 +2092,31 @@ async def api_order_execute(req: OrderExecuteRequest):
         raise _HTTPException(404, str(e))
     except Exception as e:
         raise _HTTPException(500, str(e))
+
+
+class RiskPreflightRequest(BaseModel):
+    symbol: str
+    action: str = "BUY"
+    quantity: int = 1
+    price: float = 0.0
+    current_position: Optional[dict] = None
+    allow_override: bool = False
+
+
+@app.post("/api/risk/preflight")
+async def api_risk_preflight(req: RiskPreflightRequest):
+    """Evaluate order against risk limits, returning structured behavioral guidance & double confirmation requirements."""
+    from engine.risk_limits import risk_limits
+
+    res = risk_limits.evaluate_preflight(
+        symbol=req.symbol,
+        action=req.action,
+        quantity=max(1, req.quantity),
+        price=max(0.0, req.price),
+        current_position=req.current_position,
+        allow_override=req.allow_override,
+    )
+    return JSONResponse(res.to_dict())
 
 
 # ── Reconciliation & Security Audit Endpoints ───────────────────
