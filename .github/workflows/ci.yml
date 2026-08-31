@@ -38,7 +38,12 @@ jobs:
       - name: Run tests (fast — not network, not slow)
         env:
           PYTHONPATH: .
-        run: pytest -m "not network and not slow" -n 4
+          TRADING_PLATFORM_HOME: ${{ runner.temp }}/pytest_platform
+          TRADING_PLATFORM_DATA: ${{ runner.temp }}/pytest_platform
+          TRADING_PLATFORM_PDF_DIR: ${{ runner.temp }}/pytest_platform/pdf
+        run: |
+          mkdir -p ${{ runner.temp }}/pytest_platform/pdf
+          pytest tests/ -v --tb=short -m "not network and not slow" -n 2
 
   slow-tests:
     # Runs only on schedule (nightly) or manual dispatch — not on every PR
@@ -62,7 +67,12 @@ jobs:
       - name: Run slow tests (SSE streams, Monte Carlo, ML training)
         env:
           PYTHONPATH: .
-        run: pytest tests/ -v --tb=short -m "slow and not network" -n auto
+          TRADING_PLATFORM_HOME: ${{ runner.temp }}/pytest_platform
+          TRADING_PLATFORM_DATA: ${{ runner.temp }}/pytest_platform
+          TRADING_PLATFORM_PDF_DIR: ${{ runner.temp }}/pytest_platform/pdf
+        run: |
+          mkdir -p ${{ runner.temp }}/pytest_platform/pdf
+          pytest tests/ -v --tb=short -m "slow and not network" -n 2
 
   frontend-test:
     runs-on: ubuntu-latest
