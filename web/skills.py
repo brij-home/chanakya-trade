@@ -1243,6 +1243,7 @@ async def skill_chat(req: ChatRequest):
         {"message": "What does the options chain say?", "session_id": "user-123"}
     """
     try:
+        import asyncio
         from agent.core import TradingAgent
 
         if req.session_id not in _chat_sessions:
@@ -1250,10 +1251,10 @@ async def skill_chat(req: ChatRequest):
                 # Evict oldest registered session
                 oldest_key = next(iter(_chat_sessions))
                 _chat_sessions.pop(oldest_key, None)
-            _chat_sessions[req.session_id] = TradingAgent(stream=False)
+            _chat_sessions[req.session_id] = await asyncio.to_thread(TradingAgent, stream=False)
 
         agent = _chat_sessions[req.session_id]
-        response = agent.chat(req.message)
+        response = await asyncio.to_thread(agent.chat, req.message)
 
         return {
             "status": "ok",
@@ -1264,7 +1265,26 @@ async def skill_chat(req: ChatRequest):
             },
         }
     except Exception as e:
-        raise _err(str(e))
+        # Fallback to direct quantitative response
+        try:
+            from agent.core import TradingAgent
+
+            fallback_agent = TradingAgent(stream=False)
+            fallback_response = fallback_agent._fallback_chat(req.message, str(e))
+        except Exception:
+            fallback_response = (
+                f"> ⚠️ **AI Assistant Notice**\n\n"
+                f"Encountered temporary issue: `{str(e)}`\n\n"
+                f"Please verify your AI API key in Settings or try a specific command like `analyze {req.message.upper()}`."
+            )
+        return {
+            "status": "ok",
+            "data": {
+                "session_id": req.session_id,
+                "response": fallback_response,
+                "history_length": 1,
+            },
+        }
 
 
 class ChatResetRequest(BaseModel):

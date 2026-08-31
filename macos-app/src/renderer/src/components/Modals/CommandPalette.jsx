@@ -2,9 +2,10 @@ import { useState, useEffect, useRef } from 'react'
 import { useChatStore, getActiveSymbol } from '../../store/chatStore'
 import { fuzzySearchUniverse, saveRecentSearch } from '../../data/universeData'
 
-export default function CommandPalette({ isOpen, onClose, onOpenOrderTicket }) {
+export default function CommandPalette({ isOpen, onClose }) {
   const [query, setQuery] = useState('')
   const [selectedIndex, setSelectedIndex] = useState(0)
+  const [categoryFilter, setCategoryFilter] = useState('all')
   const sendDraft = useChatStore((s) => s.sendDraft)
   const messages = useChatStore((s) => s.messages)
   const activeSymbol = getActiveSymbol(messages)
@@ -15,14 +16,15 @@ export default function CommandPalette({ isOpen, onClose, onOpenOrderTicket }) {
     if (isOpen) {
       setQuery('')
       setSelectedIndex(0)
+      setCategoryFilter('all')
       setTimeout(() => inputRef.current?.focus(), 50)
     }
   }, [isOpen])
 
   if (!isOpen) return null
 
-  // Search universe data
-  const results = fuzzySearchUniverse(query, activeSymbol, 14)
+  // Search universe data with category filter
+  const results = fuzzySearchUniverse(query, activeSymbol, 14, categoryFilter)
 
   const executeQuery = (text) => {
     const cleanText = (text || query).trim()
@@ -85,6 +87,17 @@ export default function CommandPalette({ isOpen, onClose, onOpenOrderTicket }) {
     }
   }
 
+  const categories = [
+    { id: 'all', label: 'All' },
+    { id: 'stock', label: 'Stocks' },
+    { id: 'index', label: 'Indices' },
+    { id: 'etf', label: 'ETFs' },
+    { id: 'commodity', label: 'Commodities' },
+    { id: 'currency', label: 'Currencies' },
+    { id: 'council', label: 'Councils' },
+    { id: 'persona', label: 'Personas' },
+  ]
+
   return (
     <div
       className="fixed inset-0 z-50 flex items-start justify-center pt-20 bg-black/60 backdrop-blur-md p-4 select-none animate-fade-slide"
@@ -103,7 +116,7 @@ export default function CommandPalette({ isOpen, onClose, onOpenOrderTicket }) {
           <input
             ref={inputRef}
             type="text"
-            placeholder="OmniSearch: Stock name, index, council, persona, or command (e.g. TRENT, breakout, kedia)..."
+            placeholder="OmniSearch: Stock name, index, ETF, MCX commodity, council, persona... (e.g. BAJAJ-AUTO, GOLDBEES, CRUDEOIL, breakout)"
             value={query}
             onChange={(e) => {
               setQuery(e.target.value)
@@ -133,6 +146,31 @@ export default function CommandPalette({ isOpen, onClose, onOpenOrderTicket }) {
           )}
         </form>
 
+        {/* Category Filter Pills */}
+        <div className="flex items-center gap-1 px-3 py-1.5 border-b border-border/40 bg-surface/50 overflow-x-auto no-scrollbar">
+          {categories.map((cat) => (
+            <button
+              key={cat.id}
+              type="button"
+              onMouseDown={(e) => {
+                e.preventDefault()
+                e.stopPropagation()
+              }}
+              onClick={() => {
+                setCategoryFilter(cat.id)
+                setSelectedIndex(0)
+              }}
+              className={`px-2 py-0.5 rounded-lg text-[10px] font-mono font-bold tracking-tight whitespace-nowrap cursor-pointer transition-all ${
+                categoryFilter === cat.id
+                  ? 'bg-amber text-black font-black shadow-xs'
+                  : 'bg-panel text-muted hover:text-text border border-border/40'
+              }`}
+            >
+              {cat.label}
+            </button>
+          ))}
+        </div>
+
         {/* Results List */}
         <div className="max-h-84 overflow-y-auto p-2 space-y-0.5">
           {results.map((item, idx) => {
@@ -141,6 +179,7 @@ export default function CommandPalette({ isOpen, onClose, onOpenOrderTicket }) {
             const isCouncil = item.type === 'council'
             const isPersona = item.type === 'persona'
             const isRecent = item.category === 'recent'
+            const stockType = item.stockType || item.category
 
             return (
               <button
@@ -165,20 +204,44 @@ export default function CommandPalette({ isOpen, onClose, onOpenOrderTicket }) {
                   </div>
 
                   <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-2">
+                    <div className="flex flex-wrap items-center gap-1.5">
                       <span className="font-bold text-xs text-text font-mono truncate">
                         {isStock ? item.symbol : (item.label || item.name || item.text)}
                       </span>
 
-                      {isStock && (
+                      {isStock && item.sector && (
                         <span className="text-[9px] px-1.5 py-0.5 rounded font-mono font-bold bg-surface border border-border/60 text-muted">
                           {item.sector}
                         </span>
                       )}
 
-                      {isStock && item.stockType === 'index' && (
+                      {isStock && item.lotSize && (
+                        <span className="text-[9px] px-1.5 py-0.5 rounded font-mono font-bold bg-surface border border-border/60 text-muted hidden sm:inline-block">
+                          Lot {item.lotSize}
+                        </span>
+                      )}
+
+                      {isStock && stockType === 'index' && (
                         <span className="text-[9px] px-1.5 py-0.5 rounded font-mono font-bold bg-emerald-500/15 border border-emerald-500/30 text-emerald-400">
                           INDEX
+                        </span>
+                      )}
+
+                      {isStock && stockType === 'etf' && (
+                        <span className="text-[9px] px-1.5 py-0.5 rounded font-mono font-bold bg-sky-500/15 border border-sky-500/30 text-sky-400">
+                          ETF
+                        </span>
+                      )}
+
+                      {isStock && stockType === 'commodity' && (
+                        <span className="text-[9px] px-1.5 py-0.5 rounded font-mono font-bold bg-amber-500/15 border border-amber-500/30 text-amber">
+                          MCX
+                        </span>
+                      )}
+
+                      {isStock && stockType === 'currency' && (
+                        <span className="text-[9px] px-1.5 py-0.5 rounded font-mono font-bold bg-violet-500/15 border border-violet-500/30 text-violet-400">
+                          FOREX
                         </span>
                       )}
 

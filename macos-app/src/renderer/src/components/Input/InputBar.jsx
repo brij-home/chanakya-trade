@@ -268,9 +268,15 @@ function parseCommand(input, contextSymbol = null) {
       return { endpoint: '/api/risk/preflight', body: { action: 'BUY', symbol: contextSymbol || 'NIFTY', qty: 50, price: 24500 }, cardType: 'markdown' }
     }
 
-    default:
+    default: {
+      // Check if the user typed a single symbol name like 'Bajaj-Auto', 'BAJAJ_AUTO', 'RELIANCE', 'NSE:TRENT'
+      const cleanSingle = input.trim().toUpperCase().replace(/^NSE:|^BSE:/, '').replace(/_/g, '-')
+      if (/^[A-Z0-9&-]{2,15}$/.test(cleanSingle) && !['HELLO', 'HI', 'HELP', 'CLEAR', 'RESET', 'YES', 'NO', 'CANCEL'].includes(cleanSingle)) {
+        return { stream: true, symbol: cleanSingle, exchange: 'NSE' }
+      }
       // Fall through to AI chat — session_id injected in submit()
       return { endpoint: '/skills/chat', body: { message: input }, cardType: 'markdown' }
+    }
   }
 }
 

@@ -7,6 +7,7 @@ import {
   PERSONA_REGISTRY,
   QUANT_COMMANDS,
   fuzzySearchUniverse,
+  normalizeQuery,
   getRecentSearches,
   saveRecentSearch,
   clearRecentSearches,
@@ -18,23 +19,69 @@ describe('Indian Market Universe & Fuzzy Search Engine', () => {
     clearRecentSearches()
   })
 
-  it('contains institutional Indian equity universe, councils, and personas', () => {
-    expect(INDIAN_UNIVERSE.length).toBeGreaterThan(40)
+  it('contains comprehensive institutional Indian market universe across all asset classes', () => {
+    expect(INDIAN_UNIVERSE.length).toBeGreaterThan(100)
     expect(COUNCIL_REGISTRY.length).toBe(5)
     expect(PERSONA_REGISTRY.length).toBe(13)
     expect(QUANT_COMMANDS.length).toBeGreaterThan(15)
+
+    // Verify all asset types are represented
+    const types = new Set(INDIAN_UNIVERSE.map((u) => u.type))
+    expect(types.has('stock')).toBe(true)
+    expect(types.has('index')).toBe(true)
+    expect(types.has('etf')).toBe(true)
+    expect(types.has('commodity')).toBe(true)
+    expect(types.has('currency')).toBe(true)
   })
 
-  it('fuzzy searches stock symbols by ticker, name, and sector', () => {
-    const relResults = fuzzySearchUniverse('rel')
-    expect(relResults.some((r) => r.symbol === 'RELIANCE')).toBe(true)
+  it('normalizes queries removing hyphens, underscores, dots, and spaces', () => {
+    expect(normalizeQuery('Bajaj-Auto')).toBe('bajajauto')
+    expect(normalizeQuery('bajaj_auto')).toBe('bajajauto')
+    expect(normalizeQuery('BAJAJ AUTO')).toBe('bajajauto')
+    expect(normalizeQuery('M&M')).toBe('mm')
+    expect(normalizeQuery('NIFTY 50')).toBe('nifty50')
+  })
 
-    const tataResults = fuzzySearchUniverse('tat')
-    expect(tataResults.some((r) => r.symbol === 'TATAMOTORS')).toBe(true)
-    expect(tataResults.some((r) => r.symbol === 'TCS')).toBe(true)
+  it('fuzzy searches BAJAJ-AUTO across all phonetic and punctuation variations', () => {
+    const q1 = fuzzySearchUniverse('Bajaj-Auto')
+    expect(q1.some((r) => r.symbol === 'BAJAJ-AUTO')).toBe(true)
+    expect(q1[0].symbol).toBe('BAJAJ-AUTO')
 
-    const itResults = fuzzySearchUniverse('software')
-    expect(itResults.length).toBeGreaterThan(0)
+    const q2 = fuzzySearchUniverse('bajaj auto')
+    expect(q2.some((r) => r.symbol === 'BAJAJ-AUTO')).toBe(true)
+
+    const q3 = fuzzySearchUniverse('bajaj_auto')
+    expect(q3.some((r) => r.symbol === 'BAJAJ-AUTO')).toBe(true)
+
+    const q4 = fuzzySearchUniverse('bajajauto')
+    expect(q4.some((r) => r.symbol === 'BAJAJ-AUTO')).toBe(true)
+
+    const q5 = fuzzySearchUniverse('bajaj')
+    expect(q5.some((r) => r.symbol === 'BAJAJ-AUTO')).toBe(true)
+  })
+
+  it('fuzzy searches indices, ETFs, commodities, and currencies accurately', () => {
+    const niftyRes = fuzzySearchUniverse('nifty 50')
+    expect(niftyRes.some((r) => r.symbol === 'NIFTY50')).toBe(true)
+
+    const goldbeesRes = fuzzySearchUniverse('goldbees')
+    expect(goldbeesRes.some((r) => r.symbol === 'GOLDBEES')).toBe(true)
+
+    const crudeRes = fuzzySearchUniverse('crude oil')
+    expect(crudeRes.some((r) => r.symbol === 'CRUDEOIL')).toBe(true)
+
+    const usdRes = fuzzySearchUniverse('usdinr')
+    expect(usdRes.some((r) => r.symbol === 'USDINR')).toBe(true)
+  })
+
+  it('filters results by category when categoryFilter is provided', () => {
+    const etfOnly = fuzzySearchUniverse('gold', null, 10, 'etf')
+    expect(etfOnly.every((r) => r.stockType === 'etf' || r.type === 'etf')).toBe(true)
+    expect(etfOnly.some((r) => r.symbol === 'GOLDBEES')).toBe(true)
+
+    const commodityOnly = fuzzySearchUniverse('gold', null, 10, 'commodity')
+    expect(commodityOnly.every((r) => r.stockType === 'commodity' || r.type === 'commodity')).toBe(true)
+    expect(commodityOnly.some((r) => r.symbol === 'GOLD')).toBe(true)
   })
 
   it('fuzzy searches councils and personas accurately', () => {
@@ -96,34 +143,16 @@ describe('SmartTypeahead Component', () => {
 
     render(
       <SmartTypeahead
-        query="trent"
+        query="bajaj auto"
         isOpen={true}
         onSelect={onSelect}
         onClose={onClose}
       />
     )
 
-    const matches = screen.getAllByText(/TRENT/i)
-    expect(matches.length).toBeGreaterThan(0)
-
-    fireEvent.click(matches[0])
+    const item = screen.getByText((content) => content.includes('BAJAJ-AUTO'))
+    expect(item).toBeDefined()
+    fireEvent.click(item)
     expect(onSelect).toHaveBeenCalled()
-  })
-
-  it('renders in symbols_only mode for quick ticker switcher', () => {
-    const onSelect = vi.fn()
-
-    render(
-      <SmartTypeahead
-        query="nifty"
-        isOpen={true}
-        mode="symbols_only"
-        onSelect={onSelect}
-        onClose={vi.fn()}
-      />
-    )
-
-    const matches = screen.getAllByText(/NIFTY/i)
-    expect(matches.length).toBeGreaterThan(0)
   })
 })

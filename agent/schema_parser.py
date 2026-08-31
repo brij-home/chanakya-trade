@@ -28,9 +28,13 @@ _VALID_VERDICTS = set(_VERDICT_TOKENS)
 _REC_KEY_MAP = {
     "strategy": "strategy",
     "entry": "entry",
+    "entry level": "entry",
     "stop-loss": "stop_loss",
     "stop_loss": "stop_loss",
+    "stop loss": "stop_loss",
     "target": "target",
+    "target 1": "target",
+    "target 2": "target_2",
     "r:r ratio": "risk_reward",
     "r:r": "risk_reward",
     "risk_reward": "risk_reward",
