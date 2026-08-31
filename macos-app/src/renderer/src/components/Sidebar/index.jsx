@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useMemo } from 'react'
 import { useChatStore, getActiveSymbol } from '../../store/chatStore'
 import { useAPI } from '../../hooks/useAPI'
 import BrokerPanel from './BrokerPanel'
@@ -41,9 +41,44 @@ export default function Sidebar() {
   const activeSymbol = getActiveSymbol(messages)
   const [showBrokerPanel, setShowBrokerPanel] = useState(false)
   const [hoveredSession, setHoveredSession] = useState(null)
+  const [sessionSearch, setSessionSearch] = useState('')
 
   const sessionList = Object.values(sessions).sort((a, b) => b.createdAt - a.createdAt)
   const connectedBrokers = Object.entries(brokerStatuses).filter(([, b]) => b.authenticated)
+
+  // Group sessions by date
+  const groupedSessions = useMemo(() => {
+    const oneDay = 24 * 60 * 60 * 1000
+    const todayStart = new Date().setHours(0, 0, 0, 0)
+    const yesterdayStart = todayStart - oneDay
+
+    const filtered = sessionList.filter((s) =>
+      !sessionSearch.trim() ||
+      s.title?.toLowerCase().includes(sessionSearch.toLowerCase())
+    )
+
+    const groups = {
+      Today: [],
+      Yesterday: [],
+      'This Week': [],
+      Older: [],
+    }
+
+    for (const s of filtered) {
+      const created = s.createdAt || 0
+      if (created >= todayStart) {
+        groups.Today.push(s)
+      } else if (created >= yesterdayStart) {
+        groups.Yesterday.push(s)
+      } else if (created >= todayStart - 7 * oneDay) {
+        groups['This Week'].push(s)
+      } else {
+        groups.Older.push(s)
+      }
+    }
+
+    return Object.entries(groups).filter(([, list]) => list.length > 0)
+  }, [sessionList, sessionSearch])
 
   return (
     <div className="w-60 flex-shrink-0 bg-panel border-r border-border flex flex-col relative">
@@ -100,7 +135,7 @@ export default function Sidebar() {
       </div>
 
       {/* Navigation: Overview Dashboard & New Session */}
-      <div className="px-3 pt-2 pb-2 space-y-1.5">
+      <div className="px-3 pt-2 pb-2 space-y-1.5 border-b border-border/40">
         <button
           onClick={() => { setActiveView('copilot'); setShowDashboard(true); }}
           className={`w-full flex items-center gap-2 px-3 py-1.5 rounded-lg border text-[11px] font-ui transition-colors cursor-pointer ${
@@ -127,38 +162,72 @@ export default function Sidebar() {
           <span>New Session</span>
           <span className="ml-auto text-[9px] text-subtle font-mono">^N</span>
         </button>
+
+        {/* Quick Filter Search for Sessions */}
+        {sessionList.length > 3 && (
+          <div className="relative pt-1">
+            <input
+              type="text"
+              placeholder="Search research sessions..."
+              value={sessionSearch}
+              onChange={(e) => setSessionSearch(e.target.value)}
+              className="w-full bg-elevated border border-border/70 rounded-lg px-2.5 py-1 text-[11px] text-text placeholder:text-muted outline-none focus:border-amber/50"
+            />
+            {sessionSearch && (
+              <button
+                onClick={() => setSessionSearch('')}
+                className="absolute right-2 top-2 text-xs text-muted hover:text-text"
+              >
+                ×
+              </button>
+            )}
+          </div>
+        )}
       </div>
 
-      {/* Session list — primary content */}
-      <div className="flex-1 overflow-y-auto px-2">
-        <div className="flex flex-col gap-0.5 py-1">
-          {sessionList.map(s => (
-            <div
-              key={s.id}
-              onMouseEnter={() => setHoveredSession(s.id)}
-              onMouseLeave={() => setHoveredSession(null)}
-              className={`group flex items-center rounded-lg cursor-pointer transition-colors
-                ${s.id === activeSessionId && !showDashboard
-                  ? 'bg-elevated text-text'
-                  : 'text-muted hover:bg-elevated/50 hover:text-text'}`}
-            >
-              <button
-                onClick={() => { setShowDashboard(false); switchSession(s.id); }}
-                className="flex-1 text-left px-3 py-2 text-[12px] font-ui truncate cursor-pointer"
-              >
-                {s.title}
-              </button>
-              {hoveredSession === s.id && sessionList.length > 1 && (
-                <button
-                  onClick={(e) => { e.stopPropagation(); deleteSession(s.id) }}
-                  className="pr-2 text-subtle hover:text-red text-[11px] cursor-pointer transition-colors"
-                  title="Delete session"
+      {/* Date-Grouped Session List — primary content */}
+      <div className="flex-1 overflow-y-auto px-2 py-1">
+        <div className="space-y-3">
+          {groupedSessions.map(([groupName, list]) => (
+            <div key={groupName} className="space-y-0.5">
+              <span className="text-[10px] uppercase font-bold text-muted px-2 py-0.5 tracking-wider block font-ui">
+                {groupName}
+              </span>
+
+              {list.map((s) => (
+                <div
+                  key={s.id}
+                  onMouseEnter={() => setHoveredSession(s.id)}
+                  onMouseLeave={() => setHoveredSession(null)}
+                  className={`group flex items-center rounded-lg cursor-pointer transition-colors ${
+                    s.id === activeSessionId && !showDashboard
+                      ? 'bg-elevated text-text font-semibold'
+                      : 'text-muted hover:bg-elevated/50 hover:text-text'
+                  }`}
                 >
-                  ×
-                </button>
-              )}
+                  <button
+                    onClick={() => { setShowDashboard(false); switchSession(s.id); }}
+                    className="flex-1 text-left px-2.5 py-1.5 text-[11px] font-ui truncate cursor-pointer"
+                  >
+                    {s.title}
+                  </button>
+                  {hoveredSession === s.id && sessionList.length > 1 && (
+                    <button
+                      onClick={(e) => { e.stopPropagation(); deleteSession(s.id) }}
+                      className="pr-2 text-subtle hover:text-red text-[11px] cursor-pointer transition-colors"
+                      title="Delete session"
+                    >
+                      ×
+                    </button>
+                  )}
+                </div>
+              ))}
             </div>
           ))}
+
+          {groupedSessions.length === 0 && (
+            <p className="text-[11px] text-muted text-center py-4">No matching sessions</p>
+          )}
         </div>
       </div>
 

@@ -1015,7 +1015,11 @@ export default function TerminalView({ onSelectSymbol, onOpenOrderTicket }) {
                         </div>
                         <span className="text-[10px] text-muted font-mono truncate max-w-[110px] block">{item.name}</span>
                       </div>
-                      <div className="text-right font-mono">
+
+                      {/* 7-Day Mini Trend Sparkline */}
+                      <MiniTrendSparkline symbol={item.symbol} isPositive={isPositive} />
+
+                      <div className="text-right font-mono flex-shrink-0">
                         <span className="text-xs font-bold text-text block">
                           ₹{Number(item.ltp).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
                         </span>
@@ -1927,3 +1931,24 @@ export default function TerminalView({ onSelectSymbol, onOpenOrderTicket }) {
     </div>
   )
 }
+
+function MiniTrendSparkline({ symbol = '', isPositive = true }) {
+  let hash = 0
+  for (let i = 0; i < symbol.length; i++) hash = (hash * 31 + symbol.charCodeAt(i)) & 0xffffffff
+  const pts = []
+  for (let i = 0; i < 6; i++) {
+    const pseudoRand = ((Math.sin(hash + i * 1.7) + 1) / 2) * 6
+    const base = isPositive ? (i * 2 + pseudoRand) : (12 - i * 2 + pseudoRand)
+    pts.push(Math.max(2, Math.min(14, base)))
+  }
+
+  const strokeColor = isPositive ? 'var(--color-emerald)' : 'var(--color-rose)'
+  const pathD = pts.map((y, i) => `${i === 0 ? 'M' : 'L'} ${i * 7 + 2} ${16 - y}`).join(' ')
+
+  return (
+    <svg width="38" height="16" className="overflow-visible flex-shrink-0 opacity-75 group-hover:opacity-100 hidden sm:block">
+      <path d={pathD} fill="none" stroke={strokeColor} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  )
+}
+

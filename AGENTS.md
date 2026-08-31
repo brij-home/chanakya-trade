@@ -179,6 +179,28 @@
 - **Root Error Boundary**: Wrap root app in [`main.jsx`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/macos-app/src/renderer/src/main.jsx) to prevent white screens.
 - **Web Mode**: Support standalone browser access (`window.__CHANAKYA_TRADE_WEB__ || !window.electronAPI`) with fallback port `8765`.
 
+### 6.5 JSDoc & TypeScript Type Contracts
+- **Type Definitions Repository**: All frontend data models are strongly typed in [`renderer/src/types/`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/macos-app/src/renderer/src/types/) (`contracts.ts`, `market.js`, `options.js`, `personas.js`, `backtest.js`, `index.js`).
+- **Mixed TS Support**: Configured via [`tsconfig.json`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/macos-app/tsconfig.json) (`allowJs: true`, `@/*` path alias) for zero-friction mixed JavaScript & TypeScript development.
+- **1:1 Backend Parity**: Frontend types mirror Python Pydantic backend models in `engine/` and `agent/personas.py`.
+- **Defensive Unwrapping**: Always normalize API responses via `const data = res?.data ?? res`.
+
+### 6.6 9-Workspace Navigational Architecture
+- **Persistent ActivityBar Rail**: 48px left rail with keyboard shortcut index:
+  - `^1`: **Strategic Quant Terminal** (4-column layout with Symbol header, Lightweight Charts, and Trade Desk Rail)
+  - `^2`: **Multi-Agent Debate Arena** (4-stage pipeline stepper + 13-member 3D flippable council cards)
+  - `^3`: **Options & GEX Desk** (Bloomberg-style chain + Payoff Simulator)
+  - `^4`: **AI Copilot** (Progressive typing wave + chronological date-grouped sessions)
+  - `^5`: **Market Overview** (VIX gauge, RRG mini-map, FII/DII flow tracker)
+  - `^6`: **Portfolio Doctor Pro** (Concentration & SEPA compliance diagnostics)
+  - `^7`: **Alerts Manager** (Price & technical threshold monitors)
+  - `^8`: **Trade Journal** (GitHub-style Win/Loss Calendar Heatmap + realized P&L stats)
+  - `^9`: **Backtest Studio** (Interactive equity progression vs NIFTY 50 + trade execution ledger)
+
+### 6.7 Indian Currency & Number Formatting Standard
+- **Utility**: Always use [`formatINR.js`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/macos-app/src/renderer/src/utils/formatINR.js) (`formatINR`, `formatINRFull`, `formatPct`, `formatVol`) for all price, P&L, turnover, and volume values.
+- **Units**: Automatic scaling (`₹Cr`, `₹L`, `₹K`) with null/NaN defensive guards and ₹ currency prefix.
+
 ---
 
 ## 7. Operational Invariants & Lessons Learned
