@@ -67,5 +67,7 @@ The FastAPI sidecar (`web.api:app`) acts as the local backend service on port `8
 16. **Frontend Static Asset & Root Error Boundary Synchronization**:
     - When updating React components in `macos-app/src/renderer/`, always verify the production web bundle (`npm run build:web`) compiles without errors and syncs to `web/static/`.
     - Ensure all API data parsers and metric tables implement defensive null checks (`?.toLowerCase()`, `typeof === 'object'`) to prevent DOM rendering crashes.
+17. **Automated Pre-Commit & Pre-Push Validation Gate**:
+    - Always execute `.venv\Scripts\python.exe scripts/validate_all.py` before proposing commits or pushes. This runs Python lint checks (`ruff check`), format checks (`ruff format --check`), AST React hook audits, Vitest component test suites, production web bundle generation, and the full 2,179+ pytest matrix locally.
 
 

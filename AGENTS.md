@@ -104,7 +104,9 @@
 7. **Modal UI/UX Standards**:
    - All overlay dialogs must support backdrop click dismiss (`onClick={onClose}` on the fixed container) and prevent event bubbling on the modal card (`onClick={(e) => e.stopPropagation()}`).
    - Never use blocking browser `alert(...)` popups; use non-blocking in-modal toast banners with auto-dismiss timers.
-8. **Git Commits & Push ("Always Ask First")**:
+8. **Git Commits & Push ("Always Validate First, Always Ask First")**:
+   - **MANDATORY AUTOMATED PRE-PUSH GATE**: Before proposing or executing any git commit or push, you MUST run `.venv\Scripts\python.exe scripts/validate_all.py` (or execute the equivalent: `ruff check .`, `ruff format --check .`, `node macos-app/scripts/audit-react-hooks.js`, `npm test` inside `macos-app`, and `pytest -m "not network and not slow" -n 4`).
+   - If any step fails, diagnose the root cause, fix it, and re-run until all gates pass 100% green before creating the commit.
    - **ALWAYS** request explicit user confirmation before executing any `git commit` or `git push` to GitHub.
    - Follow Conventional Commits format (`feat:`, `fix:`, `refactor:`, `test:`, `docs:`, `perf:`).
    - **Do NOT** add `Co-Authored-By: Claude` or any AI attribution headers in commit messages.
@@ -137,7 +139,7 @@
     - Treat external API limits, rate throttles, model deprecations, and network transient states (e.g. `503 UNAVAILABLE`, `429 RESOURCE_EXHAUSTED`, `high demand`) as expected operational realities.
     - Build self-healing multi-tier resilience: (1) Comma-separated API key pools with automatic round-robin cooldown rotation, (2) Validated fallback model chains (`gemini-3.6-flash` -> `gemini-3.5-flash-lite` -> `gemini-3.5-flash`), and (3) Rich deterministic quantitative engine fallback (VIX + FII/DII + Minervini + SMC) so the terminal NEVER presents raw error strings or blank cards to the user.
 16. **Holistic Automated Validation & Regression Gates**:
-    - Whenever modifications are made to any core module (`agent/`, `analysis/`, `engine/`, `web/`, `ui/`, `macos-app/`), execute thorough automated validation suites to ensure cross-module integrity.
+    - Whenever modifications are made to any core module (`agent/`, `analysis/`, `engine/`, `web/`, `ui/`, `macos-app/`), execute `.venv\Scripts\python.exe scripts/validate_all.py` to ensure complete cross-module and CI pipeline integrity.
     - Rebuild and test both ends of the bridge: verify the Vite bundle (`npm run build:web`), restart daemon processes, and validate API HTTP contracts end-to-end.
 17. **Explicit Fallback Observability & Self-Healing Telemetry Loop**:
     - Whenever any fallback is triggered (`LLM_FAILOVER`, `LLM_COOLDOWN`, `QUANT_FALLBACK`, `DATA_FALLBACK`, `BROKER_FAILOVER`, `EXCEPTION`), the system MUST record a structured telemetry event via [`engine/telemetry.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/telemetry.py).
