@@ -95,7 +95,11 @@ OPENAI_DEFAULT_MODEL = "gpt-4o"
 GEMINI_DEFAULT_MODEL = "gemini-3.5-flash-lite"
 OLLAMA_DEFAULT_MODEL = "llama3.1"
 NVIDIA_DEFAULT_MODEL = "meta/llama-3.2-11b-vision-instruct"
-GROQ_DEFAULT_MODEL = "openai/gpt-oss-120b,qwen/qwen3.8-27b,openai/gpt-oss-20b,qwen/qwen3.6-27b,groq/compound-mini,llama-3.3-70b-versatile"
+GROQ_DEFAULT_MODEL = (
+    "openai/gpt-oss-120b,qwen/qwen3.8-27b,openai/gpt-oss-20b,"
+    "qwen/qwen3.6-27b,groq/compound-mini"
+)
+
 DEEPSEEK_DEFAULT_MODEL = "deepseek-chat"
 OPENROUTER_DEFAULT_MODEL = "deepseek/deepseek-chat"
 CEREBRAS_DEFAULT_MODEL = "llama-3.3-70b"
@@ -1681,7 +1685,7 @@ class OpenAISubscriptionProvider(LLMProvider):
       AI_PROVIDER=openai
       OPENAI_BASE_URL=https://api.groq.com/openai/v1
       OPENAI_API_KEY=gsk_...           (from console.groq.com)
-      OPENAI_MODEL=llama-3.3-70b-versatile
+      OPENAI_MODEL=qwen/qwen3.8-27b
     ──────────────────────────────────────────────────────────────────────────
     """
 
@@ -1699,7 +1703,7 @@ class OpenAISubscriptionProvider(LLMProvider):
         "      AI_PROVIDER=openai\n"
         "      OPENAI_BASE_URL=https://api.groq.com/openai/v1\n"
         "      OPENAI_API_KEY=<key from console.groq.com>\n"
-        "      OPENAI_MODEL=llama-3.3-70b-versatile\n\n"
+        "      OPENAI_MODEL=qwen/qwen3.8-27b\n\n"
         "  • OpenAI API key: AI_PROVIDER=openai, OPENAI_API_KEY=sk-...\n"
         "    (platform.openai.com → usage-based billing)\n"
     )
