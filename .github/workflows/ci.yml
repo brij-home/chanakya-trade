@@ -43,7 +43,18 @@ jobs:
           TRADING_PLATFORM_PDF_DIR: ${{ runner.temp }}/pytest_platform/pdf
         run: |
           mkdir -p ${{ runner.temp }}/pytest_platform/pdf
-          pytest tests/ -v --tb=short -m "not network and not slow" -n 2
+          pytest tests/ -v --tb=short -m "not network and not slow" -n 2 --junitxml=junit.xml
+
+      - name: Print Failed Tests Summary
+        if: always()
+        run: python scripts/print_failures.py junit.xml
+
+      - name: Upload test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-report-${{ matrix.python-version }}
+          path: junit.xml
 
   slow-tests:
     # Runs only on schedule (nightly) or manual dispatch — not on every PR
