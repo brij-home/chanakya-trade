@@ -19,6 +19,8 @@ _TEST_DATA_DIR.mkdir(parents=True, exist_ok=True)
 os.environ.setdefault("TRADING_PLATFORM_HOME", str(_TEST_DATA_DIR))
 os.environ.setdefault("TRADING_PLATFORM_DATA", str(_TEST_DATA_DIR))
 os.environ.setdefault("TRADING_PLATFORM_PDF_DIR", str(_TEST_DATA_DIR / "pdf"))
+os.environ.setdefault("KEYRING_DISABLE", "1")
+os.environ.setdefault("PYTHONKEYRING_BACKEND", "keyring.backends.null.Keyring")
 
 
 @pytest.fixture

@@ -38,6 +38,8 @@ jobs:
       - name: Run tests (fast — not network, not slow)
         env:
           PYTHONPATH: .
+          KEYRING_DISABLE: "1"
+          PYTHONKEYRING_BACKEND: keyring.backends.null.Keyring
           TRADING_PLATFORM_HOME: ${{ runner.temp }}/pytest_platform
           TRADING_PLATFORM_DATA: ${{ runner.temp }}/pytest_platform
           TRADING_PLATFORM_PDF_DIR: ${{ runner.temp }}/pytest_platform/pdf
@@ -78,6 +80,8 @@ jobs:
       - name: Run slow tests (SSE streams, Monte Carlo, ML training)
         env:
           PYTHONPATH: .
+          KEYRING_DISABLE: "1"
+          PYTHONKEYRING_BACKEND: keyring.backends.null.Keyring
           TRADING_PLATFORM_HOME: ${{ runner.temp }}/pytest_platform
           TRADING_PLATFORM_DATA: ${{ runner.temp }}/pytest_platform
           TRADING_PLATFORM_PDF_DIR: ${{ runner.temp }}/pytest_platform/pdf
