@@ -77,7 +77,7 @@ def main() -> None:
 
     # ── Check for flags ───────────────────────────────────────
     if "--preflight" in sys.argv:
-        from scripts.preflight import run_preflight
+        from engine.preflight import run_preflight
 
         rep = run_preflight(verbose=True)
         sys.exit(0 if rep.healthy else 1)

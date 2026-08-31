@@ -2006,7 +2006,7 @@ async def stream_alerts():
 @app.get("/api/preflight", tags=["System"])
 async def get_preflight_diagnostics():
     """Return system readiness, port status, and masked environment report."""
-    from scripts.preflight import run_preflight
+    from engine.preflight import run_preflight
 
     report = run_preflight(verbose=False)
     return JSONResponse(report.to_dict())
