@@ -5,9 +5,12 @@
 *.key
 *.pem
 *.secret
-*credentials*
-*secret*
+*.credentials
 *.creds
+credentials.json
+*_credentials.json
+!config/credentials.py
+!tests/test_credentials.py
 
 # ── Local Databases & Caches ─────────────────────────────────
 *.db
