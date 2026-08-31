@@ -2,6 +2,7 @@
 Helper script to parse and format pytest junit.xml test failures in CI.
 """
 
+import os
 import sys
 import xml.etree.ElementTree as ET
 
@@ -35,7 +36,24 @@ def main():
             print(f"  Message: {msg}")
         if text:
             print(f"  Traceback:\n{text.strip()}")
+        # Emit GitHub Actions workflow annotation error
+        short_err = msg or (text.strip().split("\n")[-1] if text else "Test failed")
+        print(f"::error title={cname}::{name}::{short_err}")
     print("=======================================================\n")
+
+    summary_file = os.environ.get("GITHUB_STEP_SUMMARY")
+    if summary_file and failures:
+        try:
+            with open(summary_file, "a", encoding="utf-8") as f:
+                f.write(f"### ❌ Pytest Failures ({len(failures)})\n\n")
+                for cname, name, msg, text in failures:
+                    f.write(f"- **`{cname}::{name}`**\n")
+                    if msg:
+                        f.write(f"  > {msg}\n\n")
+                    if text:
+                        f.write(f"```text\n{text[:1000]}\n```\n\n")
+        except Exception as e:
+            print(f"Error writing step summary: {e}")
 
 
 if __name__ == "__main__":
