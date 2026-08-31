@@ -2,15 +2,19 @@ import { useEffect, useCallback } from 'react'
 
 const SECTIONS = [
   {
-    title: '🔍 Navigation',
+    title: '🔍 Navigation Workspaces',
     keys: [
-      { keys: ['Ctrl', 'K'],     desc: 'Universal symbol/command search' },
-      { keys: ['1'],              desc: 'Go to Market Terminal' },
-      { keys: ['2'],              desc: 'Go to Debate Arena' },
-      { keys: ['3'],              desc: 'Go to Journal' },
-      { keys: ['4'],              desc: 'Go to Portfolio' },
-      { keys: ['5'],              desc: 'Go to Overview' },
-      { keys: ['Esc'],            desc: 'Close modal / Return to chat' },
+      { keys: ['Ctrl', 'K'],     desc: 'Universal symbol & command search' },
+      { keys: ['Ctrl', '1'],     desc: 'Strategic Quant Terminal' },
+      { keys: ['Ctrl', '2'],     desc: 'Multi-Agent Debate Arena' },
+      { keys: ['Ctrl', '3'],     desc: 'Options & GEX Desk' },
+      { keys: ['Ctrl', '4'],     desc: 'AI Copilot' },
+      { keys: ['Ctrl', '5'],     desc: 'Market Overview' },
+      { keys: ['Ctrl', '6'],     desc: 'Portfolio Doctor' },
+      { keys: ['Ctrl', '7'],     desc: 'Alerts Manager' },
+      { keys: ['Ctrl', '8'],     desc: 'Trade Journal' },
+      { keys: ['Ctrl', '9'],     desc: 'Backtest Studio' },
+      { keys: ['Esc'],            desc: 'Close modal / Return to view' },
     ],
   },
   {

@@ -13,6 +13,7 @@ import OverviewView from './components/Views/OverviewView'
 import PortfolioView from './components/Views/PortfolioView'
 import JournalView from './components/Views/JournalView'
 import AlertsView from './components/Views/AlertsView'
+import BacktestStudioView from './components/Views/BacktestStudioView'
 import SetupScreen from './components/SetupScreen'
 import OnboardingWizard from './components/Onboarding/OnboardingWizard'
 import CommandPalette from './components/Modals/CommandPalette'
@@ -180,6 +181,8 @@ export default function App() {
           '6': () => setActiveView('portfolio'),
           '7': () => setActiveView('alerts'),
           '8': () => setActiveView('journal'),
+          '9': () => setActiveView('backtest'),
+          'b': () => setActiveView('backtest'),
           'n': () => createSession(),
           'k': () => setIsCommandPaletteOpen((v) => !v),
           'o': () => setIsTopOppsOpen((v) => !v),
@@ -363,6 +366,7 @@ export default function App() {
             {activeView === 'portfolio'  && <PortfolioView onOpenOrderTicket={handleOpenOrderTicket} />}
             {activeView === 'journal'    && <JournalView />}
             {activeView === 'alerts'     && <AlertsView onOpenOrderTicket={handleOpenOrderTicket} />}
+            {activeView === 'backtest'   && <BacktestStudioView onOpenOrderTicket={handleOpenOrderTicket} />}
 
           </ErrorBoundary>
         </div>

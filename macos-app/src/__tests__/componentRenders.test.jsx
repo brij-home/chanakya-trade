@@ -458,6 +458,22 @@ describe('React Component Rendering & Hook Invariant Gates', () => {
       expect(confirmBtn).toBeTruthy()
       fireEvent.click(confirmBtn)
     })
+
+    it('BacktestStudioView renders and shows quantitative simulation controls', async () => {
+      const onOpenOrderTicket = vi.fn()
+      const BacktestStudioView = (await import('../renderer/src/components/Views/BacktestStudioView')).default
+
+      const { findByText } = render(<BacktestStudioView onOpenOrderTicket={onOpenOrderTicket} />)
+      const heading = await findByText(/Quantitative Backtest Studio/i)
+      expect(heading).toBeTruthy()
+    })
+
+    it('PayoffSimulatorCard renders interactive legs and metrics', async () => {
+      const PayoffSimulatorCard = (await import('../renderer/src/components/Cards/PayoffSimulatorCard')).default
+      const { findByText } = render(<PayoffSimulatorCard initialSymbol="NIFTY" initialSpot={24000} />)
+      const title = await findByText(/Strategy Payoff Builder/i)
+      expect(title).toBeTruthy()
+    })
   })
 })
 

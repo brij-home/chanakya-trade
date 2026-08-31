@@ -42,6 +42,7 @@ const WORKSPACE_ITEMS = [
 ]
 
 const UTILITY_ITEMS = [
+  { id: 'backtest',   icon: '🧪', label: 'Backtest Studio',       shortcut: '^9' },
   { id: 'overview',   icon: '🌐', label: 'Market Overview',       shortcut: '^5' },
   { id: 'portfolio',  icon: '📈', label: 'Portfolio Doctor',      shortcut: '^6' },
   { id: 'alerts',     icon: '🔔', label: 'Alerts Manager',        shortcut: '^7' },
