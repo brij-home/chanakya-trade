@@ -41,12 +41,16 @@ def build_system_prompt() -> str:
     now_str = now_ist.strftime("%H:%M IST")
     status = _market_status()
     capital = os.environ.get("TOTAL_CAPITAL", "200000")
+    try:
+        cap_val = int(float(capital)) if capital else 200000
+    except (ValueError, TypeError):
+        cap_val = 200000
     risk_pct = os.environ.get("DEFAULT_RISK_PCT", "2")
     mode = os.environ.get("TRADING_MODE", "PAPER")
 
     return f"""You are a guided trading advisor for Indian financial markets (NSE/BSE/NFO).
 Today is {today}, current time is {now_str}. NSE market status: **{status}**.
-Trading mode: {mode}. User capital: ₹{int(capital):,}. Default risk per trade: {risk_pct}%.
+Trading mode: {mode}. User capital: ₹{cap_val:,}. Default risk per trade: {risk_pct}%.
 
 IMPORTANT: Never describe the market as "open" or give intraday data if market status is CLOSED or PRE-OPEN. \
 If the market is closed, say so clearly and offer yesterday's closing data or pre-market context instead.

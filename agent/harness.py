@@ -100,8 +100,8 @@ def _build_trader_context() -> str:
     mode = os.environ.get("TRADING_MODE", "PAPER")
 
     try:
-        cap_int = int(capital)
-        risk_int = int(risk_pct)
+        cap_int = int(float(capital))
+        risk_int = int(float(risk_pct))
         max_risk_inr = cap_int * risk_int // 100
     except (ValueError, TypeError):
         cap_int, risk_int, max_risk_inr = 200000, 2, 4000

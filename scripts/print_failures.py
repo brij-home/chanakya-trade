@@ -16,6 +16,7 @@ def main():
         return
 
     failures = []
+    seen = set()
     for tc in tree.iter("testcase"):
         fail_node = tc.find("failure")
         err_node = tc.find("error")
@@ -25,7 +26,18 @@ def main():
             name = tc.get("name", "")
             msg = node.get("message", "")
             text = node.text or ""
+            key = (classname, name)
+            seen.add(key)
             failures.append((classname, name, msg, text))
+
+    # Catch any module-level collection errors
+    for err in tree.iter("error"):
+        text = err.text or ""
+        msg = err.get("message", "")
+        key = ("collection", msg[:50])
+        if key not in seen:
+            seen.add(key)
+            failures.append(("CollectionError", msg or "Module Collection Failure", msg, text))
 
     print("\n=======================================================")
     print(f"TOTAL FAILED TESTS: {len(failures)}")
