@@ -304,19 +304,49 @@ function ThinkingIndicator() {
     return () => clearInterval(t)
   }, [])
 
-  const hint =
-    secs > 15
-      ? 'Running multi-agent analysis — synthesizing insights…'
-      : secs > 5
-      ? 'Calling quantitative AI reasoning agents…'
-      : 'Computing institutional metrics…'
+  const stages = [
+    { threshold: 0,  msg: 'Computing institutional metrics…', icon: '📊' },
+    { threshold: 5,  msg: 'Calling quantitative AI agents…',  icon: '🤖' },
+    { threshold: 12, msg: 'Running multi-agent debate rounds…', icon: '⚔️' },
+    { threshold: 20, msg: 'Synthesizing Fund Manager verdict…', icon: '⚖️' },
+    { threshold: 30, msg: 'Finalizing trade plan & risk levels…', icon: '📋' },
+  ]
+  const stage = [...stages].reverse().find((s) => secs >= s.threshold) || stages[0]
 
   return (
-    <div className="flex items-center gap-3 bg-elevated border border-border rounded-xl px-4 py-3 max-w-sm shadow-md animate-fade-slide">
-      <span className="text-amber animate-pulse text-lg">◆</span>
-      <div>
-        <p className="text-text text-sm font-ui font-medium">{hint}</p>
-        <p className="text-muted text-xs font-mono mt-0.5">{secs}s elapsed</p>
+    <div
+      className="flex items-center gap-3 max-w-sm rounded-2xl px-4 py-3 animate-slide-up-fade"
+      style={{
+        background: 'var(--color-panel)',
+        border: '1px solid rgba(245,166,35,0.35)',
+        boxShadow: '0 0 18px -4px rgba(245,166,35,0.2)',
+      }}
+    >
+      {/* Stage icon */}
+      <span className="text-xl flex-shrink-0">{stage.icon}</span>
+
+      <div className="flex-1 min-w-0">
+        <p className="text-xs font-semibold truncate" style={{ color: 'var(--color-text)' }}>
+          {stage.msg}
+        </p>
+        <p className="text-[10px] font-mono mt-0.5" style={{ color: 'var(--color-muted)' }}>
+          {secs}s elapsed
+        </p>
+      </div>
+
+      {/* 3-dot wave animation */}
+      <div className="flex items-center gap-1 flex-shrink-0">
+        {[0, 1, 2].map((i) => (
+          <span
+            key={i}
+            className="w-1.5 h-1.5 rounded-full"
+            style={{
+              background: 'var(--color-gold)',
+              animation: `typing-dot 1.2s ease-in-out ${i * 0.2}s infinite`,
+              display: 'inline-block',
+            }}
+          />
+        ))}
       </div>
     </div>
   )

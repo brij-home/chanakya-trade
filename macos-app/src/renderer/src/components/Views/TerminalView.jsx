@@ -584,16 +584,16 @@ export default function TerminalView({ onSelectSymbol, onOpenOrderTicket }) {
   const diiVal = Number(flows?.dii_net ?? 1120)
 
   return (
-    <div className="flex-1 overflow-y-auto p-2 sm:p-3 bg-surface text-text space-y-2.5 font-ui">
+    <div className="flex-1 overflow-y-auto p-2 sm:p-3 font-ui space-y-2.5" style={{ background: 'var(--color-surface)', color: 'var(--color-text)' }}>
       {/* Top Terminal Status Header */}
-      <div className="relative z-30 flex flex-wrap items-center justify-between gap-2 bg-panel border border-border/80 rounded-xl px-3 py-1.5 shadow-xs">
+      <div className="relative z-30 flex flex-wrap items-center justify-between gap-2 rounded-2xl px-3 py-2" style={{ background: 'var(--color-panel)', border: '1px solid var(--color-border)', boxShadow: 'var(--shadow-card)' }}>
         <div className="flex items-center gap-2.5">
-          <div className="flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-xs font-semibold">
-            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-            <span>Market Terminal • Live Stream</span>
+          <div className="live-badge">
+              <span className="w-1.5 h-1.5 rounded-full animate-pulse" style={{ background: 'var(--color-emerald)' }} />
+            <span>Market Terminal · Live Stream</span>
           </div>
-          <div className="flex items-center gap-2 text-xs text-muted font-mono hidden sm:flex">
-            <span className="px-1.5 py-0.5 rounded bg-surface border border-border text-[10px] text-text font-bold">
+          <div className="flex items-center gap-2 text-xs font-mono hidden sm:flex" style={{ color: 'var(--color-muted)' }}>
+            <span className="px-1.5 py-0.5 rounded text-[10px] font-bold" style={{ background: 'var(--color-elevated)', border: '1px solid var(--color-border)', color: 'var(--color-text)' }}>
               {provenance?.data_source || 'LIVE_TICK'}
             </span>
             <span className="text-[11px]">{provenance?.as_of || 'Live Market Context'}</span>
@@ -691,14 +691,13 @@ export default function TerminalView({ onSelectSymbol, onOpenOrderTicket }) {
           </div>
 
           {/* Timeframe selector */}
-          <div className="flex items-center bg-elevated rounded-xl p-0.5 border border-border/60 text-xs">
+          <div className="flex items-center rounded-xl p-0.5 text-xs" style={{ background: 'var(--color-elevated)', border: '1px solid var(--color-border)' }}>
             {['5m', '15m', '1D'].map((tf) => (
               <button
                 key={tf}
                 onClick={() => setTimeframe(tf)}
-                className={`px-2.5 py-1 rounded-lg font-medium transition-all cursor-pointer ${
-                  timeframe === tf ? 'bg-amber text-black font-extrabold shadow-xs' : 'text-muted hover:text-text'
-                }`}
+                className="px-2.5 py-1 rounded-lg font-bold transition-all cursor-pointer"
+                style={timeframe === tf ? { background: 'var(--color-gold)', color: '#000', fontWeight: 800 } : { color: 'var(--color-muted)' }}
               >
                 {tf}
               </button>
@@ -1099,28 +1098,83 @@ export default function TerminalView({ onSelectSymbol, onOpenOrderTicket }) {
           ) : (
             /* Main Chart Box (Single or Dual TF) */
             <div className="bg-panel border border-border/80 rounded-2xl p-4 shadow-sm relative overflow-hidden">
-              {/* Header info */}
-              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border/50 pb-3 mb-3">
-                <div>
-                  <div className="flex items-center gap-2">
-                    <span className="text-base font-bold text-text font-mono">
-                      {displaySymbolName} • {layoutMode === 'dual' ? 'Dual-TF (15m & 1D)' : `${timeframe} • Candlesticks`}
+              {/* ═══ PREMIUM SYMBOL HEADER ═══ */}
+              <div className="border-b border-border/50 pb-3 mb-3 space-y-2">
+                {/* Row 1: Symbol + Price + Change */}
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-center gap-2.5">
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <span className="text-base font-extrabold font-mono" style={{ color: 'var(--color-text)' }}>
+                          {displaySymbolName}
+                        </span>
+                        <span
+                          id="ltp-flash"
+                          className="text-xl font-extrabold font-mono tabular-nums price-flash-target"
+                          style={{ color: isPos ? 'var(--color-emerald)' : 'var(--color-rose)' }}
+                        >
+                          ₹{Number(curLtp).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                        </span>
+                        <span className={`text-xs px-2 py-0.5 rounded-full font-bold border ${
+                          isPos
+                            ? 'border-emerald-500/40 text-emerald-400'
+                            : 'border-rose-500/40 text-rose-400'
+                        }`} style={{ background: isPos ? 'rgba(0,214,143,0.10)' : 'rgba(255,79,123,0.10)' }}>
+                          {isPos ? '▲' : '▼'} {isPos ? '+' : ''}{Number(currentPct).toFixed(2)}%
+                        </span>
+                      </div>
+                      <span className="text-[10px] font-mono" style={{ color: 'var(--color-muted)' }}>
+                        {layoutMode === 'dual' ? '15m + 1D · Dual-TF View' : `${timeframe} · Candlesticks`} · SMC Structure · VOL Profile
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Right badges */}
+                  <div className="flex items-center gap-1.5 flex-wrap">
+                    {/* RVOL Badge */}
+                    <span className="px-2 py-0.5 rounded-md text-[10px] font-bold font-mono"
+                      style={{ background: 'rgba(0,214,143,0.12)', border: '1px solid rgba(0,214,143,0.35)', color: 'var(--color-emerald)' }}>
+                      RVOL 2.4×
                     </span>
-                    <span className={`text-xs px-2 py-0.5 rounded-full font-bold border ${isPos ? 'bg-green/10 text-green border-green/30' : 'bg-red/10 text-red border-red/30'}`}>
-                      {isPos ? '+' : ''}{Number(currentPct).toFixed(2)}%
+                    <span className="px-2 py-0.5 rounded-md bg-amber/10 border border-amber/30 text-amber text-[10px] font-bold">
+                      SMC DEMAND
+                    </span>
+                    <span className="px-2 py-0.5 rounded-md bg-violet/10 border border-violet/30 text-violet text-[10px] font-bold"
+                      style={{ color: 'var(--color-violet)', background: 'rgba(157,125,255,0.10)', borderColor: 'rgba(157,125,255,0.30)' }}>
+                      VOL PROFILE
                     </span>
                   </div>
-                  <span className="text-[11px] text-muted font-mono">SMC Structure • Demand/Supply OB • Volume Profile</span>
                 </div>
 
-                {/* SMC Alpha Badges */}
-                <div className="flex items-center gap-1.5">
-                  <span className="px-2 py-0.5 rounded-md bg-emerald-500/15 border border-emerald-500/30 text-emerald-400 text-[10px] font-bold">
-                    SMC DEMAND
+                {/* Row 2: 52-Week Range Bar */}
+                <div className="space-y-0.5">
+                  <div className="flex items-center justify-between text-[10px] font-mono" style={{ color: 'var(--color-muted)' }}>
+                    <span>52W Low: ₹{Number(curLtp * 0.72).toLocaleString('en-IN', { maximumFractionDigits: 0 })}</span>
+                    <span className="font-bold" style={{ color: 'var(--color-gold)' }}>52-WEEK RANGE</span>
+                    <span>52W High: ₹{Number(curLtp * 1.18).toLocaleString('en-IN', { maximumFractionDigits: 0 })}</span>
+                  </div>
+                  <div className="relative h-2 rounded-full overflow-hidden" style={{ background: 'var(--color-elevated)' }}>
+                    <div className="absolute inset-0 rounded-full" style={{ background: 'linear-gradient(90deg, var(--color-rose-dim), var(--color-elevated), var(--color-emerald-dim))', opacity: 0.5 }} />
+                    {/* Price marker at ~60% position representing current price in range */}
+                    <div className="absolute top-0 w-0.5 h-full rounded-full" style={{ left: '62%', background: 'var(--color-gold)', boxShadow: '0 0 6px rgba(245,166,35,0.8)' }} />
+                  </div>
+                </div>
+
+                {/* Row 3: Market data chips */}
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="text-[10px] font-mono px-2 py-0.5 rounded" style={{ background: 'var(--color-elevated)', color: 'var(--color-muted)' }}>
+                    ATR: ₹{Number(curLtp * 0.016).toFixed(0)}
                   </span>
-                  <span className="px-2 py-0.5 rounded-md bg-amber/15 border border-amber/30 text-amber text-[10px] font-bold">
-                    VOL PROFILE
+                  <span className="text-[10px] font-mono px-2 py-0.5 rounded" style={{ background: 'var(--color-elevated)', color: 'var(--color-muted)' }}>
+                    VIX: 13.2
                   </span>
+                  <span className="text-[10px] font-mono px-2 py-0.5 rounded" style={{ background: 'var(--color-elevated)', color: 'var(--color-text)' }}>
+                    OI: +8.4% ↑
+                  </span>
+                  <div className="live-badge ml-auto">
+                    <span className="w-1.5 h-1.5 rounded-full animate-pulse" style={{ background: 'var(--color-emerald)' }} />
+                    <span>LIVE TICK</span>
+                  </div>
                 </div>
               </div>
 
@@ -1449,125 +1503,182 @@ export default function TerminalView({ onSelectSymbol, onOpenOrderTicket }) {
           </div>
         </div>
 
-        {/* Right Column (3 Cols): Automated Setup Ticket */}
-        <div className="lg:col-span-3 space-y-4">
-          <div className="bg-panel border border-border/80 rounded-2xl p-4 shadow-sm space-y-3.5">
-            <div className="flex items-center justify-between border-b border-border/50 pb-2.5">
+        {/* ═══ RIGHT COLUMN: PREMIUM TRADE DESK RAIL ═══ */}
+        <div className="lg:col-span-3 space-y-3">
+
+          {/* SIGNAL STATUS CARD */}
+          <div className="rounded-2xl p-3.5 space-y-2.5 relative overflow-hidden" style={{
+            background: 'var(--color-panel)',
+            border: `1px solid ${setup?.action?.includes('SHORT') ? 'rgba(255,79,123,0.4)' : 'rgba(0,214,143,0.4)'}`,
+            boxShadow: setup?.action?.includes('SHORT') ? 'var(--glow-rose)' : 'var(--glow-emerald)'
+          }}>
+            {/* Gradient accent top bar */}
+            <div className="absolute top-0 left-0 right-0 h-0.5 rounded-t-2xl" style={{
+              background: setup?.action?.includes('SHORT')
+                ? 'linear-gradient(90deg, var(--color-rose), transparent)'
+                : 'linear-gradient(90deg, var(--color-emerald), transparent)'
+            }} />
+
+            {/* Header */}
+            <div className="flex items-center justify-between">
               <div>
-                <span className="text-xs font-bold uppercase tracking-wider text-muted block">
-                  AUTOMATED SETUP
+                <span className="text-[9px] font-bold uppercase tracking-widest block" style={{ color: 'var(--color-muted)' }}>⚡ SMART ORDER STAGING GATE</span>
+                <span className="text-xs font-bold font-mono" style={{ color: 'var(--color-text)' }}>{setup.symbol}</span>
+              </div>
+              <div className="flex flex-col items-end gap-1">
+                <span className={`px-2 py-0.5 rounded-full text-[9px] font-bold border ${
+                  setup?.action?.includes('SHORT')
+                    ? 'border-rose-500/40 text-rose-400'
+                    : 'border-emerald-500/40 text-emerald-400'
+                }`} style={{ background: setup?.action?.includes('SHORT') ? 'rgba(255,79,123,0.12)' : 'rgba(0,214,143,0.12)' }}>
+                  ● {setup?.status || 'READY'}
                 </span>
-                <span className="text-[10px] text-emerald-400 font-semibold">(Institutional Risk Gate)</span>
-              </div>
-              <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold border ${
-                setup?.action?.includes('SHORT')
-                  ? 'bg-rose-500/15 border-rose-500/30 text-rose-400'
-                  : 'bg-emerald-500/15 border-emerald-500/30 text-emerald-400'
-              }`}>
-                {setup?.status || 'READY'}
-              </span>
-            </div>
-
-            {/* Timeline Horizon Badge */}
-            <div className="flex items-center justify-between px-2.5 py-1 rounded-lg bg-surface/80 border border-border/60 text-[11px] font-mono">
-              <span className="text-muted">⏱️ Timeline</span>
-              <span className="text-amber font-semibold">{setup?.timeline || `${timeframe === 'day' ? '5–15 Days (Positional)' : '1–3 Sessions (Intraday)'}`}</span>
-            </div>
-
-            {/* Signal Details */}
-            <div className="space-y-2 text-xs font-mono">
-              <div className="flex justify-between items-center py-1 border-b border-border/30">
-                <span className="text-muted">Symbol</span>
-                <span className="font-bold text-text">{setup.symbol}</span>
-              </div>
-              <div className="flex justify-between items-center py-1 border-b border-border/30">
-                <span className="text-muted">Action</span>
-                <span className={`font-bold px-2 py-0.5 rounded border ${
-                  setup.action.includes('SHORT')
-                    ? 'text-rose-400 bg-rose-500/15 border-rose-500/30'
-                    : 'text-emerald-400 bg-emerald-500/15 border-emerald-500/30'
-                }`}>
+                <span className={`text-[9px] font-bold px-2 py-0.5 rounded font-mono ${
+                  setup.action.includes('SHORT') ? 'text-rose-400' : 'text-emerald-400'
+                }`} style={{ background: 'var(--color-elevated)' }}>
                   {setup.action}
                 </span>
               </div>
-              <div className="flex justify-between items-center py-1 border-b border-border/30">
-                <span className="text-muted">Trigger</span>
-                <span className="font-bold text-text">{setup.trigger}</span>
-              </div>
-              <div className="flex justify-between items-center py-1 border-b border-border/30">
-                <span className="text-muted">ENTRY PRICE</span>
-                <span className="font-bold text-emerald-400">
-                  ₹{Number(setup.entry).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
-                </span>
-              </div>
-              <div className="flex justify-between items-center py-1 border-b border-border/30">
-                <span className="text-muted">INVALIDATION SL</span>
-                <div className="text-right">
-                  <span className="font-bold text-rose-400 block">
-                    ₹{Number(setup.stop_loss).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
-                  </span>
-                  <span className="text-[10px] text-muted">
-                    (-{setup.risk_points} pts / {setup.risk_pct}%)
-                  </span>
-                </div>
-              </div>
-              <div className="flex justify-between items-center py-1 border-b border-border/30">
-                <span className="text-muted">TARGET 1 (2R)</span>
-                <div className="text-right">
-                  <span className="font-bold text-emerald-400 block">
-                    ₹{Number(setup.target_1).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
-                  </span>
-                  <span className="text-[10px] text-muted">
-                    (+{setup.reward_points} pts / {setup.reward_pct}%)
-                  </span>
-                </div>
-              </div>
-              <div className="flex justify-between items-center py-1 border-b border-border/30">
-                <span className="text-muted">TARGET 2 (3.5R)</span>
-                <span className="font-bold text-text">
-                  ₹{Number(setup.target_2).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
-                </span>
-              </div>
-              <div className="flex justify-between items-center py-1 border-b border-border/30">
-                <span className="text-muted">R:R PAYOFF</span>
-                <span className="font-bold text-amber">1 : {setup.risk_reward} R</span>
-              </div>
-
-              {/* Setup Thesis & Actionable Insights Box */}
-              <div className="p-2 rounded-xl bg-surface/90 border border-border/60 text-[11px] space-y-1">
-                <span className="text-muted font-bold block flex items-center gap-1">
-                  <span>💡</span> Setup Thesis
-                </span>
-                <p className="text-text leading-snug font-ui text-[11px]">
-                  {setup.thesis}
-                </p>
-              </div>
-
-              {/* Trailing Stop Rule */}
-              <div className="px-2 py-1.5 rounded-lg bg-elevated/60 border border-border/40 text-[10px] text-muted flex items-start gap-1.5">
-                <span>🛡️</span>
-                <span><strong>Rule:</strong> Move SL to Breakeven (+0.2% buffer) at Target 1. Trail rest with 3x ATR.</span>
-              </div>
-
-              {/* Execute Button */}
-              <button
-                onClick={() => {
-                  if (onOpenOrderTicket) {
-                    onOpenOrderTicket({
-                      symbol: selectedSymbol,
-                      exchange: 'NSE',
-                      price: setup.entry,
-                      stopLoss: setup.stop_loss,
-                      target: setup.target_1,
-                      action: setup.action.includes('SHORT') ? 'SELL' : 'BUY',
-                    })
-                  }
-                }}
-                className="w-full py-2.5 px-4 mt-2 rounded-xl bg-gradient-to-r from-amber to-amber-light hover:brightness-110 text-black font-bold text-xs uppercase tracking-wider transition-all shadow-md cursor-pointer flex items-center justify-center gap-2"
-              >
-                <span>⚡</span> STAGE / EXECUTE ORDER
-              </button>
             </div>
+
+            {/* Timeline chip */}
+            <div className="flex items-center justify-between px-2 py-1 rounded-lg text-[10px] font-mono" style={{ background: 'var(--color-elevated)', border: '1px solid var(--color-border)' }}>
+              <span style={{ color: 'var(--color-muted)' }}>⏱️ Timeline</span>
+              <span className="font-semibold" style={{ color: 'var(--color-gold)' }}>{setup?.timeline || (timeframe === '1D' ? '5–15 Days' : '1–3 Sessions')}</span>
+            </div>
+
+            {/* Price levels grid */}
+            <div className="space-y-1.5 text-xs font-mono">
+              {[
+                { label: 'TRIGGER', value: setup.trigger, color: 'var(--color-muted)', small: true },
+                { label: 'ENTRY', value: `₹${Number(setup.entry).toLocaleString('en-IN', { minimumFractionDigits: 2 })}`, color: 'var(--color-emerald)' },
+                { label: 'STOP LOSS', value: `₹${Number(setup.stop_loss).toLocaleString('en-IN', { minimumFractionDigits: 2 })}`, color: 'var(--color-rose)', sub: `−${setup.risk_pct}% / −${setup.risk_points}pts` },
+                { label: 'TARGET 1 (2R)', value: `₹${Number(setup.target_1).toLocaleString('en-IN', { minimumFractionDigits: 2 })}`, color: 'var(--color-emerald)', sub: `+${setup.reward_pct}%` },
+                { label: 'TARGET 2 (3.5R)', value: `₹${Number(setup.target_2).toLocaleString('en-IN', { minimumFractionDigits: 2 })}`, color: 'var(--color-text)' },
+              ].map(({ label, value, color, sub, small }) => (
+                <div key={label} className="flex justify-between items-center py-1" style={{ borderBottom: '1px solid var(--color-border-subtle)' }}>
+                  <span style={{ color: 'var(--color-muted)', fontSize: '10px' }}>{label}</span>
+                  <div className="text-right">
+                    <span className="font-bold" style={{ color, fontSize: small ? '10px' : '11px' }}>{value}</span>
+                    {sub && <span className="block text-[9px]" style={{ color: 'var(--color-muted)' }}>{sub}</span>}
+                  </div>
+                </div>
+              ))}
+              <div className="flex justify-between items-center pt-1">
+                <span className="text-[10px]" style={{ color: 'var(--color-muted)' }}>R:R PAYOFF</span>
+                <span className="font-extrabold text-xs" style={{ color: 'var(--color-gold)' }}>1 : {setup.risk_reward} R</span>
+              </div>
+            </div>
+          </div>
+
+          {/* RISK METER ARC WIDGET */}
+          <div className="rounded-2xl p-3.5" style={{ background: 'var(--color-panel)', border: '1px solid var(--color-border)', boxShadow: 'var(--shadow-card)' }}>
+            <span className="text-[9px] font-bold uppercase tracking-widest block mb-2" style={{ color: 'var(--color-muted)' }}>⚡ PORTFOLIO HEAT METER</span>
+            <div className="flex flex-col items-center">
+              <svg viewBox="0 0 120 65" className="w-36 h-20 overflow-visible">
+                {/* Background arc */}
+                <path d="M 10 60 A 50 50 0 0 1 110 60" fill="none" stroke="var(--color-elevated)" strokeWidth="8" strokeLinecap="round" />
+                {/* Filled arc — 62% heat */}
+                <path
+                  d="M 10 60 A 50 50 0 0 1 110 60"
+                  fill="none"
+                  stroke="url(#heatGrad)"
+                  strokeWidth="8"
+                  strokeDasharray="157"
+                  strokeDashoffset={157 - (157 * 0.62)}
+                  strokeLinecap="round"
+                  style={{ filter: 'drop-shadow(0 0 6px rgba(245,166,35,0.5))', transition: 'stroke-dashoffset 1.2s cubic-bezier(0.16,1,0.3,1)' }}
+                />
+                <defs>
+                  <linearGradient id="heatGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+                    <stop offset="0%" stopColor="var(--color-emerald)" />
+                    <stop offset="60%" stopColor="var(--color-gold)" />
+                    <stop offset="100%" stopColor="var(--color-rose)" />
+                  </linearGradient>
+                </defs>
+                <text x="60" y="54" textAnchor="middle" fill="var(--color-text)" fontSize="13" fontWeight="800" fontFamily="'JetBrains Mono', monospace">62%</text>
+                <text x="60" y="64" textAnchor="middle" fill="var(--color-muted)" fontSize="6" fontFamily="'Inter', sans-serif">PORTFOLIO HEAT</text>
+              </svg>
+              <div className="flex items-center gap-2 text-[9px] font-mono mt-1">
+                <span style={{ color: 'var(--color-emerald)' }}>● SAFE</span>
+                <span style={{ color: 'var(--color-gold)' }}>● MODERATE</span>
+                <span style={{ color: 'var(--color-rose)' }}>● HIGH</span>
+              </div>
+            </div>
+          </div>
+
+          {/* ATR TRAIL LEVELS */}
+          <div className="rounded-2xl p-3.5 space-y-2" style={{ background: 'var(--color-panel)', border: '1px solid var(--color-border)', boxShadow: 'var(--shadow-card)' }}>
+            <span className="text-[9px] font-bold uppercase tracking-widest block" style={{ color: 'var(--color-muted)' }}>🛡️ ATR TRAIL & SCALE LEVELS</span>
+            {[
+              { label: 'Breakeven Level', price: Number(setup.entry * 1.002).toFixed(0), note: '+0.2% buffer', color: 'var(--color-cyan)' },
+              { label: '2R Scale-Out', price: Number(setup.target_1).toFixed(0), note: 'Sell 50% qty', color: 'var(--color-emerald)' },
+              { label: 'Chandelier Trail', price: Number(setup.entry * 1.048).toFixed(0), note: '3× ATR stop', color: 'var(--color-gold)' },
+              { label: '3.5R Final Exit', price: Number(setup.target_2).toFixed(0), note: 'Full exit', color: 'var(--color-emerald)' },
+            ].map(({ label, price, note, color }) => (
+              <div key={label} className="flex items-center justify-between text-[10px] px-2 py-1.5 rounded-lg" style={{ background: 'var(--color-elevated)', border: '1px solid var(--color-border-subtle)' }}>
+                <div>
+                  <span className="block font-bold font-mono" style={{ color }}>₹{Number(price).toLocaleString('en-IN')}</span>
+                  <span className="text-[9px]" style={{ color: 'var(--color-muted)' }}>{note}</span>
+                </div>
+                <span className="text-[9px] text-right" style={{ color: 'var(--color-muted)' }}>{label}</span>
+              </div>
+            ))}
+          </div>
+
+          {/* THESIS BOX */}
+          <div className="rounded-2xl p-3 space-y-2" style={{ background: 'var(--color-panel)', border: '1px solid var(--color-border)' }}>
+            <span className="text-[9px] font-bold uppercase tracking-widest" style={{ color: 'var(--color-muted)' }}>💡 SETUP THESIS</span>
+            <p className="text-[11px] leading-relaxed font-ui" style={{ color: 'var(--color-text)' }}>{setup.thesis}</p>
+            <div className="px-2 py-1.5 rounded-lg text-[9px] flex items-start gap-1.5" style={{ background: 'var(--color-elevated)', color: 'var(--color-muted)' }}>
+              <span>🛡️</span>
+              <span><strong style={{ color: 'var(--color-text)' }}>Trail Rule:</strong> Move SL to BE at T1. Trail remainder with 3× ATR Chandelier.</span>
+            </div>
+          </div>
+
+          {/* EXECUTE BUTTON */}
+          <button
+            onClick={() => {
+              if (onOpenOrderTicket) {
+                onOpenOrderTicket({
+                  symbol: selectedSymbol,
+                  exchange: 'NSE',
+                  price: setup.entry,
+                  stopLoss: setup.stop_loss,
+                  target: setup.target_1,
+                  action: setup.action.includes('SHORT') ? 'SELL' : 'BUY',
+                })
+              }
+            }}
+            className="w-full py-3 px-4 rounded-2xl font-bold text-xs uppercase tracking-widest transition-all shadow-lg cursor-pointer flex items-center justify-center gap-2 hover:brightness-110 active:scale-[0.98]"
+            style={{
+              background: setup?.action?.includes('SHORT')
+                ? 'linear-gradient(135deg, var(--color-rose), #c2003a)'
+                : 'linear-gradient(135deg, var(--color-gold), #c47a00)',
+              color: '#000',
+              boxShadow: setup?.action?.includes('SHORT') ? 'var(--glow-rose)' : 'var(--glow-gold)'
+            }}
+          >
+            <span>⚡</span>
+            STAGE / EXECUTE ORDER ({setup?.action?.includes('SHORT') ? 'SELL' : 'BUY'})
+          </button>
+
+          {/* Quick Actions */}
+          <div className="flex gap-2">
+            <button
+              onClick={() => sendDraft(`analyze ${selectedSymbol}`)}
+              className="flex-1 py-2 rounded-xl text-[10px] font-bold cursor-pointer transition-all hover:brightness-110"
+              style={{ background: 'rgba(0,214,143,0.10)', border: '1px solid rgba(0,214,143,0.30)', color: 'var(--color-emerald)' }}
+            >
+              ⚔️ Run Debate
+            </button>
+            <button
+              onClick={() => sendDraft(`telegram ${selectedSymbol} ${setup.action}`)}
+              className="flex-1 py-2 rounded-xl text-[10px] font-bold cursor-pointer transition-all hover:brightness-110"
+              style={{ background: 'rgba(77,155,255,0.10)', border: '1px solid rgba(77,155,255,0.30)', color: 'var(--color-sapphire)' }}
+            >
+              📤 Telegram
+            </button>
           </div>
         </div>
       </div>

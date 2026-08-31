@@ -107,33 +107,37 @@ export default function OrderTicketModal({ isOpen, onClose, initialData = {} }) 
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-md p-4 select-none animate-in fade-in duration-200"
+      className="modal-backdrop"
       onClick={onClose}
     >
       <div
-        className="bg-panel border border-border rounded-2xl w-full max-w-lg overflow-hidden shadow-2xl font-mono animate-in zoom-in-95 duration-200"
+        className="modal-container w-full max-w-lg font-ui"
+        style={{ maxWidth: '520px' }}
         onClick={(e) => e.stopPropagation()}
       >
 
         {/* Modal Header */}
-        <div className="flex items-center justify-between px-5 py-4 border-b border-border/50 bg-panel/40">
-          <div className="flex items-center gap-2">
-            <span className="text-amber text-lg">{step === 1 ? '⚡' : '🛡️'}</span>
+        <div className="flex items-center justify-between px-5 py-4 border-b" style={{ borderColor: 'var(--color-border)', background: 'var(--color-elevated)' }}>
+          <div className="flex items-center gap-3">
+            <div
+              className="w-9 h-9 rounded-xl flex items-center justify-center text-lg"
+              style={{ background: step === 1 ? 'rgba(0,214,143,0.15)' : 'rgba(245,166,35,0.15)', border: `1px solid ${step === 1 ? 'rgba(0,214,143,0.4)' : 'rgba(245,166,35,0.4)'}` }}
+            >
+              {step === 1 ? '⚡' : '🛡️'}
+            </div>
             <div>
-              <p className="text-text text-sm font-semibold font-ui">
+              <p className="text-sm font-bold" style={{ color: 'var(--color-text)', fontFamily: 'Inter, sans-serif' }}>
                 {step === 1 ? 'Smart Order Staging' : 'Double Confirmation Gate'}
               </p>
-              <p className="text-muted text-[10px] uppercase font-ui">
+              <p className="text-[10px] uppercase tracking-wider" style={{ color: 'var(--color-muted)' }}>
                 {step === 1 ? 'Default Role: DATA ONLY (Protected)' : 'Step 2 of 2: Verify & Transmit'}
               </p>
             </div>
           </div>
           <button
-            onClick={() => {
-              setStep(1)
-              onClose()
-            }}
-            className="text-muted hover:text-text p-1 rounded transition-colors text-base cursor-pointer"
+            onClick={() => { setStep(1); onClose() }}
+            className="w-7 h-7 flex items-center justify-center rounded-lg text-xs font-bold cursor-pointer transition-colors"
+            style={{ background: 'var(--color-elevated)', border: '1px solid var(--color-border)', color: 'var(--color-muted)' }}
           >
             ✕
           </button>
@@ -147,24 +151,22 @@ export default function OrderTicketModal({ isOpen, onClose, initialData = {} }) 
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <span className="text-muted text-[10px] uppercase font-ui block mb-1">Direction</span>
-                  <div className="grid grid-cols-2 gap-1 bg-panel p-1 rounded-lg border border-border/60">
+                  <div className="grid grid-cols-2 gap-1 p-1 rounded-xl" style={{ background: 'var(--color-elevated)', border: '1px solid var(--color-border)' }}>
                     <button
                       type="button"
                       onClick={() => setAction('BUY')}
-                      className={`py-1 rounded font-semibold text-center transition-all cursor-pointer ${
-                        action === 'BUY' ? 'bg-green text-black shadow-xs' : 'text-muted hover:text-text'
-                      }`}
+                      className="py-2 rounded-lg font-bold text-center transition-all cursor-pointer text-xs"
+                      style={action === 'BUY' ? { background: 'var(--color-emerald)', color: '#000', fontWeight: 800 } : { color: 'var(--color-muted)' }}
                     >
-                      BUY
+                      ▲ BUY
                     </button>
                     <button
                       type="button"
                       onClick={() => setAction('SELL')}
-                      className={`py-1 rounded font-semibold text-center transition-all cursor-pointer ${
-                        action === 'SELL' ? 'bg-red text-white shadow-xs' : 'text-muted hover:text-text'
-                      }`}
+                      className="py-2 rounded-lg font-bold text-center transition-all cursor-pointer text-xs"
+                      style={action === 'SELL' ? { background: 'var(--color-rose)', color: '#fff', fontWeight: 800 } : { color: 'var(--color-muted)' }}
                     >
-                      SELL
+                      ▼ SELL
                     </button>
                   </div>
                 </div>
@@ -183,17 +185,17 @@ export default function OrderTicketModal({ isOpen, onClose, initialData = {} }) 
               {/* Price, Stop-Loss, Target */}
               <div className="grid grid-cols-3 gap-2">
                 <div className="space-y-1">
-                  <span className="text-muted text-[10px] uppercase font-ui">Entry Price</span>
+                  <span className="text-[10px] uppercase font-bold" style={{ color: 'var(--color-muted)' }}>Entry Price</span>
                   <input
                     type="number"
                     step="0.05"
                     value={price}
                     onChange={(e) => setPrice(Number(e.target.value))}
-                    className="w-full bg-panel border border-border/60 rounded px-2.5 py-1.5 text-text font-mono"
+                    className="input-field text-xs"
                   />
                 </div>
                 <div className="space-y-1">
-                  <span className="text-red text-[10px] uppercase font-ui font-semibold">Stop Loss</span>
+                  <span className="text-[10px] uppercase font-bold" style={{ color: 'var(--color-rose)' }}>Stop Loss</span>
                   <input
                     type="number"
                     step="0.05"

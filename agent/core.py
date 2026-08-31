@@ -96,8 +96,7 @@ GEMINI_DEFAULT_MODEL = "gemini-3.5-flash-lite"
 OLLAMA_DEFAULT_MODEL = "llama3.1"
 NVIDIA_DEFAULT_MODEL = "meta/llama-3.2-11b-vision-instruct"
 GROQ_DEFAULT_MODEL = (
-    "openai/gpt-oss-120b,qwen/qwen3.8-27b,openai/gpt-oss-20b,"
-    "qwen/qwen3.6-27b,groq/compound-mini"
+    "openai/gpt-oss-120b,qwen/qwen3.8-27b,openai/gpt-oss-20b,qwen/qwen3.6-27b,groq/compound-mini"
 )
 
 DEEPSEEK_DEFAULT_MODEL = "deepseek-chat"
