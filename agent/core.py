@@ -95,9 +95,15 @@ OPENAI_DEFAULT_MODEL = "gpt-4o"
 GEMINI_DEFAULT_MODEL = "gemini-3.5-flash-lite"
 OLLAMA_DEFAULT_MODEL = "llama3.1"
 NVIDIA_DEFAULT_MODEL = "meta/llama-3.2-11b-vision-instruct"
-GROQ_DEFAULT_MODEL = "qwen/qwen3.8-27b"
+GROQ_DEFAULT_MODEL = "llama-3.3-70b-versatile"
 DEEPSEEK_DEFAULT_MODEL = "deepseek-chat"
 OPENROUTER_DEFAULT_MODEL = "deepseek/deepseek-chat"
+CEREBRAS_DEFAULT_MODEL = "llama-3.3-70b"
+SAMBANOVA_DEFAULT_MODEL = "Meta-Llama-3.3-70B-Instruct"
+GITHUB_DEFAULT_MODEL = "gpt-4o"
+DEEPINFRA_DEFAULT_MODEL = "meta-llama/Meta-Llama-3.3-70B-Instruct"
+TOGETHER_DEFAULT_MODEL = "meta-llama/Llama-3.3-70B-Instruct-Turbo"
+CLOUDFLARE_DEFAULT_MODEL = "@cf/meta/llama-3.3-70b-instruct"
 
 MAX_TOOL_ROUNDS = 10  # agentic loop safety cap
 
@@ -110,6 +116,12 @@ PROVIDER_NVIDIA = "nvidia"
 PROVIDER_GROQ = "groq"
 PROVIDER_DEEPSEEK = "deepseek"
 PROVIDER_OPENROUTER = "openrouter"
+PROVIDER_CEREBRAS = "cerebras"
+PROVIDER_SAMBANOVA = "sambanova"
+PROVIDER_GITHUB = "github"
+PROVIDER_DEEPINFRA = "deepinfra"
+PROVIDER_TOGETHER = "together"
+PROVIDER_CLOUDFLARE = "cloudflare"
 PROVIDER_GEMINI = "gemini"
 PROVIDER_CLAUDE_CLI = "claude_subscription"
 PROVIDER_OPENAI_SUB = "openai_subscription"
@@ -124,6 +136,12 @@ ALL_PROVIDERS = [
     PROVIDER_GROQ,
     PROVIDER_DEEPSEEK,
     PROVIDER_OPENROUTER,
+    PROVIDER_CEREBRAS,
+    PROVIDER_SAMBANOVA,
+    PROVIDER_GITHUB,
+    PROVIDER_DEEPINFRA,
+    PROVIDER_TOGETHER,
+    PROVIDER_CLOUDFLARE,
     PROVIDER_CLAUDE_CLI,
     PROVIDER_OPENAI_SUB,
     PROVIDER_GEMINI_SUB,
@@ -417,6 +435,7 @@ class OpenAIProvider(LLMProvider):
         resolved_model = model or os.environ.get("OPENAI_MODEL") or OPENAI_DEFAULT_MODEL
         super().__init__(resolved_model, registry, system_prompt)
         try:
+            import re
             import openai as _sdk
 
             self._sdk = _sdk
@@ -433,10 +452,15 @@ class OpenAIProvider(LLMProvider):
                 else:
                     resolved_key = get_credential("OPENAI_API_KEY", "OpenAI API Key", secret=True)
 
-            self._client = _sdk.OpenAI(
-                api_key=resolved_key,
-                base_url=resolved_base,
-            )
+            raw_keys = resolved_key or ""
+            self._api_keys = [k.strip() for k in re.split(r"[,;\n\r]+", raw_keys) if k.strip()]
+            if not self._api_keys:
+                self._api_keys = ["not-needed"] if resolved_base else [""]
+
+            self._clients = [_sdk.OpenAI(api_key=k, base_url=resolved_base) for k in self._api_keys]
+            self._client_idx = 0
+            self._client_cooldowns: dict[int, float] = {}
+            self._client = self._clients[0]
             self._base_url = resolved_base
         except ImportError:
             raise RuntimeError(
@@ -446,11 +470,39 @@ class OpenAIProvider(LLMProvider):
 
     @property
     def provider_name(self) -> str:
+        key_count = len(self._api_keys) if hasattr(self, "_api_keys") else 1
+        pool_str = f" ({key_count} keys pooled)" if key_count > 1 else ""
         if self._base_url:
             # Show the endpoint for custom providers
             host = self._base_url.replace("https://", "").replace("http://", "").split("/")[0]
-            return f"{host} / {self.model}"
-        return f"OpenAI / {self.model}"
+            return f"{host} / {self.model}{pool_str}"
+        return f"OpenAI / {self.model}{pool_str}"
+
+    def _get_active_client(self) -> tuple[int, Any]:
+        """Return (key_index, Client) using round-robin rotation, skipping rate-limited keys."""
+        import time
+
+        now = time.time()
+        n = len(self._clients)
+        for i in range(n):
+            idx = (self._client_idx + i) % n
+            cooldown_until = self._client_cooldowns.get(idx, 0.0)
+            if now >= cooldown_until:
+                self._client_idx = (idx + 1) % n
+                return idx, self._clients[idx]
+
+        earliest_idx = (
+            min(self._client_cooldowns, key=self._client_cooldowns.get)
+            if self._client_cooldowns
+            else 0
+        )
+        return earliest_idx, self._clients[earliest_idx]
+
+    def _mark_key_cooldown(self, key_idx: int, cooldown_seconds: float = 45.0) -> None:
+        """Mark a specific key index as temporarily in cooldown."""
+        import time
+
+        self._client_cooldowns[key_idx] = time.time() + cooldown_seconds
 
     def chat(
         self,
@@ -543,65 +595,96 @@ class OpenAIProvider(LLMProvider):
             current_model = chunk[0]
             extra_body = {"models": chunk} if (is_openrouter and len(chunk) > 1) else None
 
-            try:
-                kwargs = {
-                    "model": current_model,
-                    "messages": messages,
-                    "tools": tools if tools else None,
-                }
-                if extra_body:
-                    kwargs["extra_body"] = extra_body
-                r = _retry_api_call(self._client.chat.completions.create, **kwargs)
-                msg = r.choices[0].message
-                tcs = []
-                if msg.tool_calls:
-                    for tc in msg.tool_calls:
+            key_attempts = max(1, len(self._clients))
+            for _ in range(key_attempts):
+                client_idx, client = self._get_active_client()
+                try:
+                    kwargs = {
+                        "model": current_model,
+                        "messages": messages,
+                        "tools": tools if tools else None,
+                    }
+                    if extra_body:
+                        kwargs["extra_body"] = extra_body
+                    r = _retry_api_call(client.chat.completions.create, **kwargs)
+                    msg = r.choices[0].message
+                    tcs = []
+                    if msg.tool_calls:
+                        for tc in msg.tool_calls:
+                            try:
+                                args = json.loads(tc.function.arguments)
+                            except json.JSONDecodeError:
+                                args = {}
+                            tcs.append({"id": tc.id, "name": tc.function.name, "input": args})
+                    return msg.content or "", tcs
+                except Exception as e:
+                    err_str = str(e).lower()
+                    if any(
+                        r in err_str
+                        for r in (
+                            "rate_limit",
+                            "resource_exhausted",
+                            "429",
+                            "503",
+                            "tokens per minute",
+                            "tpm",
+                            "quota",
+                        )
+                    ):
+                        self._mark_key_cooldown(client_idx, cooldown_seconds=45.0)
                         try:
-                            args = json.loads(tc.function.arguments)
-                        except json.JSONDecodeError:
-                            args = {}
-                        tcs.append({"id": tc.id, "name": tc.function.name, "input": args})
-                return msg.content or "", tcs
-            except Exception as e:
-                err_str = str(e).lower()
-                if any(
-                    c in err_str
-                    for c in (
-                        "single tool-call",
-                        "tool_call",
-                        "parallel tool",
-                        "tools at once",
-                        "400",
-                        "404",
-                        "413",
-                        "not supported",
-                        "tokens per minute",
-                        "tpm",
-                        "rate_limit_exceeded",
-                        "request too large",
-                    )
-                ):
-                    try:
-                        flat = self._flatten_messages(messages)
-                        kwargs = {"model": current_model, "messages": flat}
-                        if extra_body:
-                            kwargs["extra_body"] = extra_body
-                        r = _retry_api_call(self._client.chat.completions.create, **kwargs)
-                        msg = r.choices[0].message
-                        tcs = []
-                        if msg.tool_calls:
-                            for tc in msg.tool_calls:
-                                try:
-                                    args = json.loads(tc.function.arguments)
-                                except json.JSONDecodeError:
-                                    args = {}
-                                tcs.append({"id": tc.id, "name": tc.function.name, "input": args})
-                        return msg.content or "", tcs
-                    except Exception as e2:
-                        last_exc = e2
-                        continue
-                last_exc = e
-                continue
+                            from engine.telemetry import record_event, EVENT_LLM_COOLDOWN
+
+                            record_event(
+                                event_type=EVENT_LLM_COOLDOWN,
+                                component="openai_provider",
+                                action_taken=f"Marked API key #{client_idx + 1} on 45s cooldown",
+                                reason=err_str[:120],
+                                details={"model": current_model, "key_index": client_idx},
+                                severity="WARNING",
+                            )
+                        except Exception:
+                            pass
+                        if len(self._clients) > 1:
+                            continue
+
+                    if any(
+                        c in err_str
+                        for c in (
+                            "single tool-call",
+                            "tool_call",
+                            "parallel tool",
+                            "tools at once",
+                            "400",
+                            "404",
+                            "413",
+                            "not supported",
+                            "request too large",
+                        )
+                    ):
+                        try:
+                            flat = self._flatten_messages(messages)
+                            kwargs = {"model": current_model, "messages": flat}
+                            if extra_body:
+                                kwargs["extra_body"] = extra_body
+                            r = _retry_api_call(client.chat.completions.create, **kwargs)
+                            msg = r.choices[0].message
+                            tcs = []
+                            if msg.tool_calls:
+                                for tc in msg.tool_calls:
+                                    try:
+                                        args = json.loads(tc.function.arguments)
+                                    except json.JSONDecodeError:
+                                        args = {}
+                                    tcs.append(
+                                        {"id": tc.id, "name": tc.function.name, "input": args}
+                                    )
+                            return msg.content or "", tcs
+                        except Exception as e2:
+                            last_exc = e2
+                            continue
+                    last_exc = e
+                    break
 
         if last_exc:
             raise last_exc
@@ -618,91 +701,142 @@ class OpenAIProvider(LLMProvider):
             current_model = chunk[0]
             extra_body = {"models": chunk} if (is_openrouter and len(chunk) > 1) else None
 
-            try:
-                kwargs = {
-                    "model": current_model,
-                    "messages": messages,
-                    "tools": tools if tools else None,
-                    "stream": True,
-                }
-                if extra_body:
-                    kwargs["extra_body"] = extra_body
-                stream = _retry_api_call(self._client.chat.completions.create, **kwargs)
-                text = ""
-                tc_acc: dict[int, dict] = {}
-                for chunk_item in stream:
-                    if not chunk_item.choices:
-                        continue
-                    delta = chunk_item.choices[0].delta
-                    if delta.content:
-                        text += delta.content
-                        console.print(delta.content, end="", markup=False, highlight=False)
-                    if delta.tool_calls:
-                        for d in delta.tool_calls:
-                            idx = d.index
-                            if idx not in tc_acc:
-                                tc_acc[idx] = {"id": "", "name": "", "args": ""}
-                            if d.id:
-                                tc_acc[idx]["id"] += d.id
-                            if d.function:
-                                if d.function.name:
-                                    tc_acc[idx]["name"] += d.function.name
-                                if d.function.arguments:
-                                    tc_acc[idx]["args"] += d.function.arguments
-                if text:
-                    console.print()
+            key_attempts = max(1, len(self._clients))
+            for _ in range(key_attempts):
+                client_idx, client = self._get_active_client()
+                try:
+                    kwargs = {
+                        "model": current_model,
+                        "messages": messages,
+                        "tools": tools if tools else None,
+                        "stream": True,
+                    }
+                    if extra_body:
+                        kwargs["extra_body"] = extra_body
+                    stream = _retry_api_call(client.chat.completions.create, **kwargs)
+                    text = ""
+                    tc_acc: dict[int, dict] = {}
+                    for chunk_item in stream:
+                        if not chunk_item.choices:
+                            continue
+                        delta = chunk_item.choices[0].delta
+                        if delta.content:
+                            text += delta.content
+                            console.print(delta.content, end="", markup=False, highlight=False)
+                        if delta.tool_calls:
+                            for d in delta.tool_calls:
+                                idx = d.index
+                                if idx not in tc_acc:
+                                    tc_acc[idx] = {"id": "", "name": "", "args": ""}
+                                if d.id:
+                                    tc_acc[idx]["id"] += d.id
+                                if d.function:
+                                    if d.function.name:
+                                        tc_acc[idx]["name"] += d.function.name
+                                    if d.function.arguments:
+                                        tc_acc[idx]["args"] += d.function.arguments
+                    if text:
+                        console.print()
 
-                tcs = []
-                for idx in sorted(tc_acc):
-                    tc = tc_acc[idx]
-                    try:
-                        args = json.loads(tc["args"]) if tc["args"] else {}
-                    except json.JSONDecodeError:
-                        args = {}
-                    tcs.append({"id": tc["id"], "name": tc["name"], "input": args})
-                return text, tcs
-            except Exception as e:
-                err_str = str(e).lower()
-                if any(
-                    c in err_str
-                    for c in (
-                        "single tool-call",
-                        "tool_call",
-                        "parallel tool",
-                        "tools at once",
-                        "400",
-                        "404",
-                        "413",
-                        "not supported",
-                        "tokens per minute",
-                        "tpm",
-                        "rate_limit_exceeded",
-                        "request too large",
-                    )
-                ):
-                    try:
-                        flat = self._flatten_messages(messages)
-                        kwargs = {"model": current_model, "messages": flat, "stream": True}
-                        if extra_body:
-                            kwargs["extra_body"] = extra_body
-                        stream = _retry_api_call(self._client.chat.completions.create, **kwargs)
-                        text = ""
-                        tc_acc = {}
-                        for chunk_item in stream:
-                            if not chunk_item.choices:
-                                continue
-                            delta = chunk_item.choices[0].delta
-                            if delta.content:
-                                text += delta.content
-                                console.print(delta.content, end="", markup=False, highlight=False)
-                        if text:
-                            console.print()
-                        return text, []
-                    except Exception as e2:
-                        last_exc = e2
-                        continue
-                last_exc = e
-                continue
+                    tcs = []
+                    for idx in sorted(tc_acc):
+                        tc = tc_acc[idx]
+                        try:
+                            args = json.loads(tc["args"]) if tc["args"] else {}
+                        except json.JSONDecodeError:
+                            args = {}
+                        tcs.append({"id": tc["id"], "name": tc["name"], "input": args})
+                    return text, tcs
+                except Exception as e:
+                    err_str = str(e).lower()
+                    if any(
+                        r in err_str
+                        for r in (
+                            "rate_limit",
+                            "resource_exhausted",
+                            "429",
+                            "503",
+                            "tokens per minute",
+                            "tpm",
+                            "quota",
+                        )
+                    ):
+                        self._mark_key_cooldown(client_idx, cooldown_seconds=45.0)
+                        try:
+                            from engine.telemetry import record_event, EVENT_LLM_COOLDOWN
+
+                            record_event(
+                                event_type=EVENT_LLM_COOLDOWN,
+                                component="openai_provider",
+                                action_taken=f"Marked API key #{client_idx + 1} on 45s cooldown",
+                                reason=err_str[:120],
+                                details={"model": current_model, "key_index": client_idx},
+                                severity="WARNING",
+                            )
+                        except Exception:
+                            pass
+                        if len(self._clients) > 1:
+                            continue
+
+                    if any(
+                        c in err_str
+                        for c in (
+                            "single tool-call",
+                            "tool_call",
+                            "parallel tool",
+                            "tools at once",
+                            "400",
+                            "404",
+                            "413",
+                            "not supported",
+                            "request too large",
+                        )
+                    ):
+                        try:
+                            flat = self._flatten_messages(messages)
+                            kwargs = {"model": current_model, "messages": flat, "stream": True}
+                            if extra_body:
+                                kwargs["extra_body"] = extra_body
+                            stream = _retry_api_call(client.chat.completions.create, **kwargs)
+                            text = ""
+                            tc_acc = {}
+                            for chunk_item in stream:
+                                if not chunk_item.choices:
+                                    continue
+                                delta = chunk_item.choices[0].delta
+                                if delta.content:
+                                    text += delta.content
+                                    console.print(
+                                        delta.content, end="", markup=False, highlight=False
+                                    )
+                                if delta.tool_calls:
+                                    for d in delta.tool_calls:
+                                        idx = d.index
+                                        if idx not in tc_acc:
+                                            tc_acc[idx] = {"id": "", "name": "", "args": ""}
+                                        if d.id:
+                                            tc_acc[idx]["id"] += d.id
+                                        if d.function:
+                                            if d.function.name:
+                                                tc_acc[idx]["name"] += d.function.name
+                                            if d.function.arguments:
+                                                tc_acc[idx]["args"] += d.function.arguments
+                            if text:
+                                console.print()
+                            tcs = []
+                            for idx in sorted(tc_acc):
+                                tc = tc_acc[idx]
+                                try:
+                                    args = json.loads(tc["args"]) if tc["args"] else {}
+                                except json.JSONDecodeError:
+                                    args = {}
+                                tcs.append({"id": tc["id"], "name": tc["name"], "input": args})
+                            return text, tcs
+                        except Exception as e2:
+                            last_exc = e2
+                            continue
+                    last_exc = e
+                    break
 
         if last_exc:
             raise last_exc
@@ -1760,10 +1894,10 @@ class GeminiProvider(LLMProvider):
         candidate_models = [active_model] + [
             m
             for m in [
+                "gemini-3.7-flash",
                 "gemini-3.6-flash",
                 "gemini-3.5-flash",
                 "gemini-3.5-flash-lite",
-                "gemini-2.5-flash",
                 "gemini-flash-latest",
             ]
             if m != active_model
@@ -2167,6 +2301,42 @@ def _build_custom_openai_provider(
         key = os.environ.get("OPENROUTER_API_KEY") or os.environ.get("OPENAI_API_KEY", "")
         mdl = model or os.environ.get("OPENROUTER_MODEL", OPENROUTER_DEFAULT_MODEL)
         return OpenAIProvider(mdl, registry, sys_prompt, base_url=base, api_key=key)
+    if prov_name == PROVIDER_CEREBRAS:
+        base = os.environ.get("CEREBRAS_BASE_URL", "https://api.cerebras.ai/v1")
+        key = os.environ.get("CEREBRAS_API_KEY") or os.environ.get("OPENAI_API_KEY", "")
+        mdl = model or os.environ.get("CEREBRAS_MODEL", CEREBRAS_DEFAULT_MODEL)
+        return OpenAIProvider(mdl, registry, sys_prompt, base_url=base, api_key=key)
+    if prov_name == PROVIDER_SAMBANOVA:
+        base = os.environ.get("SAMBANOVA_BASE_URL", "https://api.sambanova.ai/v1")
+        key = os.environ.get("SAMBANOVA_API_KEY") or os.environ.get("OPENAI_API_KEY", "")
+        mdl = model or os.environ.get("SAMBANOVA_MODEL", SAMBANOVA_DEFAULT_MODEL)
+        return OpenAIProvider(mdl, registry, sys_prompt, base_url=base, api_key=key)
+    if prov_name == PROVIDER_GITHUB:
+        base = os.environ.get("GITHUB_BASE_URL", "https://models.inference.ai.azure.com")
+        key = os.environ.get("GITHUB_TOKEN") or os.environ.get("GITHUB_API_KEY", "")
+        mdl = model or os.environ.get("GITHUB_MODEL", GITHUB_DEFAULT_MODEL)
+        return OpenAIProvider(mdl, registry, sys_prompt, base_url=base, api_key=key)
+    if prov_name == PROVIDER_DEEPINFRA:
+        base = os.environ.get("DEEPINFRA_BASE_URL", "https://api.deepinfra.com/v1/openai")
+        key = os.environ.get("DEEPINFRA_API_KEY") or os.environ.get("OPENAI_API_KEY", "")
+        mdl = model or os.environ.get("DEEPINFRA_MODEL", DEEPINFRA_DEFAULT_MODEL)
+        return OpenAIProvider(mdl, registry, sys_prompt, base_url=base, api_key=key)
+    if prov_name == PROVIDER_TOGETHER:
+        base = os.environ.get("TOGETHER_BASE_URL", "https://api.together.xyz/v1")
+        key = os.environ.get("TOGETHER_API_KEY") or os.environ.get("OPENAI_API_KEY", "")
+        mdl = model or os.environ.get("TOGETHER_MODEL", TOGETHER_DEFAULT_MODEL)
+        return OpenAIProvider(mdl, registry, sys_prompt, base_url=base, api_key=key)
+    if prov_name == PROVIDER_CLOUDFLARE:
+        account_id = os.environ.get("CLOUDFLARE_ACCOUNT_ID", "")
+        base = os.environ.get(
+            "CLOUDFLARE_BASE_URL",
+            f"https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/v1"
+            if account_id
+            else "https://api.cloudflare.com/client/v4/ai/v1",
+        )
+        key = os.environ.get("CLOUDFLARE_API_TOKEN") or os.environ.get("CLOUDFLARE_API_KEY", "")
+        mdl = model or os.environ.get("CLOUDFLARE_MODEL", CLOUDFLARE_DEFAULT_MODEL)
+        return OpenAIProvider(mdl, registry, sys_prompt, base_url=base, api_key=key)
     return None
 
 
@@ -2443,7 +2613,25 @@ def _auto_detect_provider() -> str:
     env = os.environ
     from config.credentials import get_credential
 
-    # Explicit API keys first (env + keychain)
+    # Explicit API keys first (env + keychain) — prioritizing high-speed/specialized keys
+    if env.get("GROQ_API_KEY") or get_credential("GROQ_API_KEY", required=False):
+        return PROVIDER_GROQ
+    if env.get("DEEPSEEK_API_KEY") or get_credential("DEEPSEEK_API_KEY", required=False):
+        return PROVIDER_DEEPSEEK
+    if env.get("NVIDIA_API_KEY") or get_credential("NVIDIA_API_KEY", required=False):
+        return PROVIDER_NVIDIA
+    if env.get("OPENROUTER_API_KEY") or get_credential("OPENROUTER_API_KEY", required=False):
+        return PROVIDER_OPENROUTER
+    if env.get("CEREBRAS_API_KEY") or get_credential("CEREBRAS_API_KEY", required=False):
+        return PROVIDER_CEREBRAS
+    if env.get("SAMBANOVA_API_KEY") or get_credential("SAMBANOVA_API_KEY", required=False):
+        return PROVIDER_SAMBANOVA
+    if env.get("DEEPINFRA_API_KEY") or get_credential("DEEPINFRA_API_KEY", required=False):
+        return PROVIDER_DEEPINFRA
+    if env.get("TOGETHER_API_KEY") or get_credential("TOGETHER_API_KEY", required=False):
+        return PROVIDER_TOGETHER
+    if env.get("CLOUDFLARE_API_TOKEN") or env.get("CLOUDFLARE_API_KEY"):
+        return PROVIDER_CLOUDFLARE
     if env.get("ANTHROPIC_API_KEY") or get_credential("ANTHROPIC_API_KEY", required=False):
         return PROVIDER_ANTHROPIC
     if env.get("OPENAI_API_KEY") or get_credential("OPENAI_API_KEY", required=False):
@@ -2454,14 +2642,6 @@ def _auto_detect_provider() -> str:
         or get_credential("GEMINI_API_KEY", required=False)
     ):
         return PROVIDER_GEMINI
-    if env.get("GROQ_API_KEY") or get_credential("GROQ_API_KEY", required=False):
-        return PROVIDER_GROQ
-    if env.get("NVIDIA_API_KEY") or get_credential("NVIDIA_API_KEY", required=False):
-        return PROVIDER_NVIDIA
-    if env.get("DEEPSEEK_API_KEY") or get_credential("DEEPSEEK_API_KEY", required=False):
-        return PROVIDER_DEEPSEEK
-    if env.get("OPENROUTER_API_KEY") or get_credential("OPENROUTER_API_KEY", required=False):
-        return PROVIDER_OPENROUTER
 
     # Ollama: check if OLLAMA_BASE_URL is set or if ollama is running locally
     if env.get("OLLAMA_BASE_URL") or env.get("OLLAMA_MODEL"):
@@ -2496,6 +2676,18 @@ def _default_model(provider: str) -> str:
         return os.environ.get("DEEPSEEK_MODEL", DEEPSEEK_DEFAULT_MODEL)
     if provider == PROVIDER_OPENROUTER:
         return os.environ.get("OPENROUTER_MODEL", OPENROUTER_DEFAULT_MODEL)
+    if provider == PROVIDER_CEREBRAS:
+        return os.environ.get("CEREBRAS_MODEL", CEREBRAS_DEFAULT_MODEL)
+    if provider == PROVIDER_SAMBANOVA:
+        return os.environ.get("SAMBANOVA_MODEL", SAMBANOVA_DEFAULT_MODEL)
+    if provider == PROVIDER_GITHUB:
+        return os.environ.get("GITHUB_MODEL", GITHUB_DEFAULT_MODEL)
+    if provider == PROVIDER_DEEPINFRA:
+        return os.environ.get("DEEPINFRA_MODEL", DEEPINFRA_DEFAULT_MODEL)
+    if provider == PROVIDER_TOGETHER:
+        return os.environ.get("TOGETHER_MODEL", TOGETHER_DEFAULT_MODEL)
+    if provider == PROVIDER_CLOUDFLARE:
+        return os.environ.get("CLOUDFLARE_MODEL", CLOUDFLARE_DEFAULT_MODEL)
     if provider in (PROVIDER_GEMINI, PROVIDER_GEMINI_SUB):
         return os.environ.get("GEMINI_MODEL") or os.environ.get("AI_MODEL") or GEMINI_DEFAULT_MODEL
     if provider == PROVIDER_OLLAMA:

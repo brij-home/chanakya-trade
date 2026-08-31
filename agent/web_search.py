@@ -109,7 +109,7 @@ def web_search(
         ("tavily", "TAVILY_API_KEY"),
         ("perplexity", "PERPLEXITY_API_KEY"),
     ]:
-        if os.environ.get(key_env):
+        if (not provider or name != provider.lower()) and os.environ.get(key_env):
             try:
                 results = _dispatch(name, query, limit)
                 if results:
