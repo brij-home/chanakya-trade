@@ -168,6 +168,8 @@ class TestRunRiskDebate:
         analyzer = MultiAgentAnalyzer.__new__(MultiAgentAnalyzer)
         analyzer.registry = mock_registry
         analyzer.llm = mock_llm
+        analyzer.fast_llm = mock_llm
+        analyzer.parallel = False
         analyzer.verbose = False
         analyzer.progress_callback = None
         return analyzer, mock_llm
@@ -352,6 +354,8 @@ class TestSynthesisReceivesRiskDebate:
         analyzer = MultiAgentAnalyzer.__new__(MultiAgentAnalyzer)
         analyzer.registry = mock_registry
         analyzer.llm = mock_llm
+        analyzer.fast_llm = mock_llm
+        analyzer.parallel = False
         analyzer.verbose = False
         analyzer.progress_callback = None
         return analyzer
