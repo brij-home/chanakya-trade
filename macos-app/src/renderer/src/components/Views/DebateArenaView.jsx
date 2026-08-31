@@ -618,63 +618,93 @@ export default function DebateArenaView({ onOpenOrderTicket }) {
               const isSigSell = sig.verdict?.includes('SELL')
               const isExpanded = expandedMember === pid
 
+              const verdictColor = isSigBuy
+                ? { bg: 'rgba(0,214,143,0.12)', border: 'rgba(0,214,143,0.35)', text: 'var(--color-emerald)' }
+                : isSigSell
+                ? { bg: 'rgba(255,79,123,0.12)', border: 'rgba(255,79,123,0.35)', text: 'var(--color-rose)' }
+                : { bg: 'rgba(245,166,35,0.12)', border: 'rgba(245,166,35,0.35)', text: 'var(--color-gold)' }
+
+              const PERSONA_ICONS = {
+                buffett: '🏛️', munger: '🔭', lynch: '🎯', jhunjhunwala: '🦁',
+                kedia: '💡', minervini: '🚀', wyckoff: '📊', oneil: '📈',
+                taleb: '🌊', simons: '🤖', smc: '🎪', forensic: '🔍', soros: '🌐',
+              }
+
               return (
-                <div
-                  key={pid}
-                  className="p-3.5 rounded-xl bg-surface border border-border/70 hover:border-amber/40 transition-all space-y-2"
-                >
-                  <div
-                    className="flex items-center justify-between cursor-pointer"
-                    onClick={() => setExpandedMember(isExpanded ? null : pid)}
-                  >
-                    <div className="flex items-center gap-2">
-                      <span className="text-base">🧠</span>
-                      <span className="font-bold text-xs text-text">{pName}</span>
-                      <span className="text-[10px] text-muted font-mono">({sig.confidence}% conf)</span>
-                      <span className="text-[9px] font-mono font-bold bg-amber/15 text-amber border border-amber/30 px-1.5 py-0.5 rounded hidden sm:inline-block">
-                        ⚖️ Calibrated Weight
-                      </span>
+                <div key={pid} className="persona-card-container" style={{ height: '160px' }}>
+                  <div className="persona-card-inner">
+
+                    {/* FRONT: Identity + Verdict + Confidence */}
+                    <div
+                      className="persona-card-front p-4 flex flex-col justify-between"
+                      style={{ background: 'var(--color-elevated)', border: `1px solid ${verdictColor.border}` }}
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="flex items-center gap-2.5">
+                          <span className="text-2xl">{PERSONA_ICONS[pid] || '🧠'}</span>
+                          <div>
+                            <div className="font-black text-xs" style={{ color: 'var(--color-text)' }}>{pName}</div>
+                            <div className="text-[9px] mt-0.5 font-mono" style={{ color: 'var(--color-muted)' }}>
+                              {sig.confidence}% confidence
+                            </div>
+                          </div>
+                        </div>
+                        <span
+                          className="text-[9px] px-2 py-0.5 rounded-md font-black"
+                          style={{ background: verdictColor.bg, color: verdictColor.text, border: `1px solid ${verdictColor.border}` }}
+                        >
+                          {sig.verdict}
+                        </span>
+                      </div>
+
+                      {/* Confidence bar */}
+                      <div className="mt-2">
+                        <div className="h-1 rounded-full overflow-hidden" style={{ background: 'var(--color-border)' }}>
+                          <div
+                            className="h-full rounded-full transition-all"
+                            style={{ width: `${sig.confidence || 0}%`, background: verdictColor.text }}
+                          />
+                        </div>
+                      </div>
+
+                      {sig.rationale?.[0] && (
+                        <p className="text-[10px] mt-2 leading-relaxed line-clamp-2" style={{ color: 'var(--color-muted)' }}>
+                          {sig.rationale[0]}
+                        </p>
+                      )}
+
+                      <div className="text-[8px] mt-2 text-center" style={{ color: 'var(--color-muted)' }}>
+                        Hover to see full analysis ↻
+                      </div>
                     </div>
 
-                    <div className="flex items-center gap-2">
-                      <span className={`px-2 py-0.5 rounded-md text-[10px] font-bold ${
-                        isSigBuy ? 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/30' : isSigSell ? 'bg-rose-500/15 text-rose-400 border border-rose-500/30' : 'bg-amber/15 text-amber border border-amber/30'
-                      }`}>
-                        {sig.verdict}
-                      </span>
-                      <span className="text-xs text-muted">{isExpanded ? '▲' : '▼'}</span>
-                    </div>
-                  </div>
-
-                  {sig.rationale && sig.rationale.length > 0 && !isExpanded && (
-                    <p className="text-[11px] text-muted font-ui truncate pl-6">
-                      • {sig.rationale[0]}
-                    </p>
-                  )}
-
-                  {isExpanded && (
-                    <div className="pl-6 pt-2 border-t border-border/40 space-y-2 font-ui text-xs animate-fade-slide">
+                    {/* BACK: Full rationale + key metrics */}
+                    <div
+                      className="persona-card-back p-3.5 overflow-y-auto flex flex-col gap-2"
+                      style={{ background: 'var(--color-panel)', border: `1px solid ${verdictColor.border}` }}
+                    >
+                      <div className="text-[9px] font-black uppercase tracking-widest mb-1" style={{ color: verdictColor.text }}>
+                        {PERSONA_ICONS[pid] || '🧠'} {pName} — Signals
+                      </div>
                       <div className="space-y-1">
-                        <span className="text-[10px] uppercase font-bold text-muted block">Signals & Checklist:</span>
-                        {sig.rationale?.map((r, i) => (
-                          <div key={i} className="flex items-start gap-1.5 text-text/90 text-[11px]">
-                            <span className="text-amber">•</span>
-                            <span>{r}</span>
+                        {(sig.rationale || []).slice(0, 4).map((r, i) => (
+                          <div key={i} className="flex items-start gap-1.5 text-[10px]" style={{ color: 'var(--color-text)' }}>
+                            <span style={{ color: verdictColor.text }}>•</span>
+                            <span className="leading-snug">{r}</span>
                           </div>
                         ))}
                       </div>
-
-                      {sig.key_metrics && typeof sig.key_metrics === 'object' && !Array.isArray(sig.key_metrics) && Object.keys(sig.key_metrics).length > 0 && (
-                        <div className="pt-1 flex flex-wrap gap-1.5">
-                          {Object.entries(sig.key_metrics).map(([k, v]) => (
-                            <span key={k} className="px-2 py-0.5 rounded-md bg-elevated border border-border/50 text-[10px] text-muted font-mono">
-                              {k}: <strong className="text-text">{String(v)}</strong>
+                      {sig.key_metrics && typeof sig.key_metrics === 'object' && Object.keys(sig.key_metrics).length > 0 && (
+                        <div className="flex flex-wrap gap-1 pt-1">
+                          {Object.entries(sig.key_metrics).slice(0, 4).map(([k, v]) => (
+                            <span key={k} className="px-1.5 py-0.5 rounded text-[8px] font-mono" style={{ background: 'var(--color-elevated)', border: '1px solid var(--color-border)', color: 'var(--color-muted)' }}>
+                              {k}: <strong style={{ color: 'var(--color-text)' }}>{String(v)}</strong>
                             </span>
                           ))}
                         </div>
                       )}
                     </div>
-                  )}
+                  </div>
                 </div>
               )
             })}

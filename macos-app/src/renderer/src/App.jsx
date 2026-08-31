@@ -22,6 +22,7 @@ import SectorDrilldownModal from './components/Modals/SectorDrilldownModal'
 import MetricExplainerModal from './components/Modals/MetricExplainerModal'
 import ActivityHUD from './components/Common/ActivityHUD'
 import ToastContainer from './components/Toast/ToastContainer'
+import HotkeyPanel from './components/UI/HotkeyPanel'
 import ErrorBoundary from './components/ErrorBoundary'
 
 /* ── Theme hook ─────────────────────────────────────────────────────────── */
@@ -409,8 +410,8 @@ export default function App() {
         <ActivityHUD />
       </ErrorBoundary>
 
-      {/* ── Hotkey Reference Overlay ─────────────────────────────────────── */}
-      {showHotkeyRef && <HotkeyReference onClose={() => setShowHotkeyRef(false)} />}
+      {/* ── Hotkey Reference Overlay (premium panel) ─────────────────────── */}
+      <HotkeyPanel open={showHotkeyRef} onClose={() => setShowHotkeyRef(false)} />
 
       {/* ── Toast Notifications ──────────────────────────────────────────── */}
       <ToastContainer />
