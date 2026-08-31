@@ -49,7 +49,10 @@ jobs:
 
       - name: Print Failed Tests Summary
         if: always()
-        run: python scripts/print_failures.py junit.xml
+        run: |
+          python scripts/print_failures.py junit.xml
+          echo "=== JUNIT XML OUTPUT ==="
+          cat junit.xml || true
 
       - name: Upload test report
         if: always()
