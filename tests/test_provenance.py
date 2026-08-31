@@ -4,7 +4,7 @@ tests/test_provenance.py
 Unit tests for Universal Data Provenance Engine.
 """
 
-from engine.provenance import create_provenance, attach_provenance, DataProvenance
+from engine.provenance import create_provenance, attach_provenance
 
 
 def test_create_provenance_defaults():
@@ -17,7 +17,9 @@ def test_create_provenance_defaults():
 
 
 def test_create_provenance_proxy():
-    prov = create_provenance("SYNTHETIC_PROXY", is_proxy=True, fallback_reason="Simulated Black-Scholes chain")
+    prov = create_provenance(
+        "SYNTHETIC_PROXY", is_proxy=True, fallback_reason="Simulated Black-Scholes chain"
+    )
     assert prov.data_source == "SYNTHETIC_PROXY"
     assert prov.is_indicative_proxy is True
     assert prov.fallback_reason == "Simulated Black-Scholes chain"

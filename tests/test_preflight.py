@@ -6,9 +6,7 @@ Unit tests for system preflight diagnostics and environment masking.
 
 from __future__ import annotations
 
-import os
-import pytest
-from scripts.preflight import (
+from engine.preflight import (
     run_preflight,
     mask_secret,
     is_port_available,

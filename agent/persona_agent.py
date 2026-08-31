@@ -180,6 +180,15 @@ def _fetch_data_brief(
     if fund:
         brief["fundamentals"] = fund if isinstance(fund, dict) else vars(fund)
 
+    # Forensic snapshot
+    forensic = _safe_call("audit_forensics", symbol=symbol)
+    if forensic:
+        brief["forensics"] = (
+            forensic
+            if isinstance(forensic, dict)
+            else (forensic.as_dict() if hasattr(forensic, "as_dict") else vars(forensic))
+        )
+
     # FII/DII data
     fii = _safe_call("get_fii_dii_data")
     if fii:
@@ -220,6 +229,13 @@ def _build_prompt(symbol: str, exchange: str, brief: dict[str, Any]) -> str:
             lines.append(f"  {k}: {v}")
         lines.append("")
 
+    forensic = brief.get("forensics", {})
+    if forensic:
+        lines.append("--- Forensic & Governance Audit ---")
+        for k, v in list(forensic.items())[:12]:
+            lines.append(f"  {k}: {v}")
+        lines.append("")
+
     macro = brief.get("macro", {})
     if macro:
         lines.append("--- Macro Data ---")
@@ -242,6 +258,11 @@ def _build_prompt(symbol: str, exchange: str, brief: dict[str, Any]) -> str:
         lines.append("")
 
     lines += [
+        "=== MANDATORY INSTRUCTION FOR AI PERSONA ===",
+        "1. You MUST ALWAYS evaluate the stock strictly based on the provided technical, fundamental, and forensic metrics.",
+        "2. NEVER decline to answer, never say you lack real-time access, and NEVER ask questions or ask the user for manual data.",
+        "3. You must ALWAYS output valid structured output matching the format below.",
+        "",
         "=== Required Output Format ===",
         "VERDICT: <STRONG_BUY|BUY|HOLD|SELL|STRONG_SELL>",
         "CONFIDENCE: <0-100>",
@@ -305,6 +326,30 @@ def _score_dimension(dimension: str, brief: dict[str, Any]) -> float:
                 score += 10 if fcf_yield > 5 else (-5 if fcf_yield < 2 else 0)
             except (TypeError, ValueError):
                 pass
+
+        # Forensic indicators
+        forensic = brief.get("forensics", {})
+        if forensic:
+            piotroski = forensic.get("piotroski_score")
+            if piotroski is not None:
+                try:
+                    p = float(piotroski)
+                    score += 15 if p >= 7 else (-15 if p <= 4 else 0)
+                except (TypeError, ValueError):
+                    pass
+            altman = forensic.get("altman_zone")
+            if altman:
+                if "SAFE" in str(altman).upper():
+                    score += 10
+                elif "DISTRESS" in str(altman).upper():
+                    score -= 20
+            pledge = forensic.get("promoter_pledge_pct")
+            if pledge is not None:
+                try:
+                    pl = float(pledge)
+                    score += 5 if pl < 5 else (-15 if pl > 20 else 0)
+                except (TypeError, ValueError):
+                    pass
 
         return max(0.0, min(100.0, score))
 
@@ -500,10 +545,26 @@ def run_persona_analysis(
     # Validate persona (raises ValueError for unknown ids)
     persona = get_persona(persona_id)
 
-    # 1. Fetch data
+    # 1. Initialize ToolRegistry and LLM Provider if explicitly requested as 'auto'
+    if llm_provider == "auto":
+        if registry is None:
+            try:
+                from agent.core import ToolRegistry
+
+                registry = ToolRegistry()
+            except Exception:
+                registry = None
+        try:
+            from agent.core import get_provider
+
+            llm_provider = get_provider(registry=registry)
+        except Exception:
+            llm_provider = None
+
+    # 2. Fetch data
     brief = _fetch_data_brief(symbol, exchange, registry)
 
-    # 2. LLM path
+    # 3. LLM path
     if llm_provider is not None:
         prompt = _build_prompt(symbol, exchange, brief)
         response_text = _call_llm(
@@ -513,17 +574,31 @@ def run_persona_analysis(
         )
         if response_text and not any(
             err in response_text.lower()
-            for err in ("llm call failed", "gemini error", "503 unavailable", "resource_exhausted", "[gemini error")
+            for err in (
+                "llm call failed",
+                "gemini error",
+                "503 unavailable",
+                "resource_exhausted",
+                "[gemini error",
+                "i do not have access",
+                "would you like me to",
+                "please provide",
+                "cannot evaluate",
+                "insufficient financial data",
+            )
         ):
             sig = parse_persona_response(response_text, persona_id)
             if sig and sig.rationale and not any("error" in r.lower() for r in sig.rationale):
-                sig.key_metrics["Analysis Engine"] = f"AI Multi-Agent ({getattr(llm_provider, 'model', 'LLM')})"
+                sig.key_metrics["Analysis Engine"] = (
+                    f"AI Multi-Agent ({getattr(llm_provider, 'model', 'LLM')})"
+                )
                 return sig
-        # Fall through to rule-based if LLM failed
+        # Fall through to rule-based if LLM failed or refused
 
     # 3. Rule-based fallback
     try:
         from engine.telemetry import record_event, EVENT_QUANT_FALLBACK
+
         record_event(
             event_type=EVENT_QUANT_FALLBACK,
             component="persona_agent",
@@ -547,7 +622,7 @@ def run_debate(
     llm_provider: Any = None,
 ) -> list[PersonaSignal]:
     """
-    Run all 5 personas and return their signals.
+    Run all defined personas and return their signals.
 
     Parameters
     ----------
@@ -574,3 +649,118 @@ def run_debate(
         signals.append(signal)
 
     return signals
+
+
+# ── Council Ensembles ─────────────────────────────────────────
+
+COUNCIL_PRESETS: dict[str, list[str]] = {
+    "breakout": ["minervini", "wyckoff", "oneil", "forensic"],
+    "options_sniper": ["smc", "taleb", "simons"],
+    "multibagger": ["kedia", "buffett", "munger", "jhunjhunwala", "forensic"],
+    "macro_regime": ["soros", "jhunjhunwala", "simons", "forensic"],
+    "core_value": ["buffett", "munger", "lynch", "forensic"],
+}
+
+
+def run_council(
+    council_name: str,
+    symbol: str,
+    exchange: str = "NSE",
+    registry: Any = None,
+    llm_provider: Any = None,
+) -> dict[str, Any]:
+    """
+    Run a specialized council ensemble of personas and synthesize a consensus recommendation.
+    """
+    c_key = council_name.lower().replace("-", "_").replace(" ", "_")
+    persona_ids = COUNCIL_PRESETS.get(c_key)
+    if not persona_ids:
+        # Match closest or fallback to breakout
+        persona_ids = COUNCIL_PRESETS.get("breakout", ["minervini", "wyckoff", "oneil", "forensic"])
+
+    signals = [
+        run_persona_analysis(pid, symbol, exchange, registry, llm_provider) for pid in persona_ids
+    ]
+
+    verdict_scores = {
+        "STRONG_BUY": 100,
+        "BUY": 75,
+        "HOLD": 50,
+        "SELL": 25,
+        "STRONG_SELL": 0,
+    }
+    total_score = sum(verdict_scores.get(s.verdict, 50) * (s.confidence / 100.0) for s in signals)
+    weight_sum = sum(s.confidence / 100.0 for s in signals) or 1.0
+    consensus_score = total_score / weight_sum
+
+    if consensus_score >= 80:
+        consensus_verdict = "STRONG_BUY"
+    elif consensus_score >= 65:
+        consensus_verdict = "BUY"
+    elif consensus_score >= 40:
+        consensus_verdict = "HOLD"
+    elif consensus_score >= 25:
+        consensus_verdict = "SELL"
+    else:
+        consensus_verdict = "STRONG_SELL"
+
+    return {
+        "council": council_name,
+        "symbol": symbol.upper(),
+        "exchange": exchange.upper(),
+        "consensus_verdict": consensus_verdict,
+        "consensus_score": round(consensus_score, 1),
+        "signals": signals,
+        "member_count": len(signals),
+    }
+
+
+def print_council_verdict(res: dict[str, Any]) -> None:
+    """Print high-density Rich visualization of council signals."""
+    from rich.console import Console
+    from rich.panel import Panel
+    from rich.table import Table
+
+    console = Console()
+
+    v_color = {
+        "STRONG_BUY": "bold green",
+        "BUY": "green",
+        "HOLD": "yellow",
+        "SELL": "red",
+        "STRONG_SELL": "bold red",
+    }.get(res["consensus_verdict"], "cyan")
+
+    table = Table(
+        title=f"🏛️ Council: {res['council'].upper()} — {res['symbol']} ({res['exchange']})",
+        border_style="cyan",
+    )
+    table.add_column("Persona", style="bold white", width=22)
+    table.add_column("Verdict", width=14)
+    table.add_column("Confidence", justify="right", width=12)
+    table.add_column("Key Rationale / Checklist", style="dim")
+
+    for s in res["signals"]:
+        pv_color = "green" if "BUY" in s.verdict else ("red" if "SELL" in s.verdict else "yellow")
+        rationale_snip = s.rationale[0] if s.rationale else "No rationale provided"
+        table.add_row(
+            s.persona.title(),
+            f"[{pv_color}]{s.verdict}[/{pv_color}]",
+            f"{s.confidence}%",
+            rationale_snip,
+        )
+
+    summary_text = (
+        f"Consensus Verdict: [{v_color}]{res['consensus_verdict']}[/{v_color}]  "
+        f"(Conviction Score: [bold]{res['consensus_score']}/100[/bold])\n"
+        f"Council Members: {res['member_count']} Specialist Personas Polled"
+    )
+
+    console.print(table)
+    console.print(
+        Panel(
+            summary_text,
+            title="🎯 Council Decision Synthesis",
+            border_style="green" if "BUY" in res["consensus_verdict"] else "yellow",
+        )
+    )

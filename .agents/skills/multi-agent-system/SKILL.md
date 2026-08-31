@@ -17,16 +17,29 @@ The AI layer in `chanakya-trade` uses a multi-tier pipeline designed to maximize
    - Discards unqualified stocks with explicit rejection reasons before invoking any LLMs.
 2. **Stage 2 — Shared Macro Context**:
    - Injects India VIX, NIFTY 50 breadth, FII/DII institutional flows, USD/INR, Crude oil, Gold, and Sector RRG rotation matrix into a shared context object.
-3. **Stage 3 — Adversarial Multi-Agent Debate & Persona Roster** ([`agent/multi_agent.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/agent/multi_agent.py), [`agent/personas.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/agent/personas.py)):
+3. **Stage 3 — Adversarial Multi-Agent Debate & Persona Roster** ([`agent/multi_agent.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/agent/multi_agent.py), [`agent/personas.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/agent/personas.py), [`agent/persona_agent.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/agent/persona_agent.py)):
    - **Bull Analyst**: Argues long thesis, catalysts, and support levels.
    - **Bear Analyst**: Argues short/risk thesis, overhead resistance, and tail risks.
-   - **6 Named Persona Analysts**:
-     - `buffett` (Value, Moat, High ROE)
-     - `jhunjhunwala` (Growth-Value, India Macro Mega-trends)
-     - `lynch` (GARP, PEG Ratio, Margin Expansion)
-     - `soros` (Global Macro, Reflexivity, Currency/Commodity)
-     - `munger` (Quality, Inversion, Lollapalooza Risks)
+   - **13 Named Specialist Personas**:
+     - `buffett` (Value, Durable Moats, Free Cash Flow, ROE > 15%)
+     - `jhunjhunwala` (Growth-Value, India Macro Mega-trends, Domestic Scale)
+     - `lynch` (GARP, PEG Ratio < 1.0, Ground-level Demand Insights)
+     - `soros` (Global Macro, Reflexivity, Currency/Commodity/FII Flows)
+     - `munger` (Quality, Inversion, Multi-Disciplinary Mental Models)
      - `forensic` (Forensic Auditor: Beneish M-Score, Altman Z''-Score, Piotroski F-Score, Promoter Pledge)
+     - `minervini` (Mark Minervini: SEPA, 8-Point Trend Template, Stage 2 Markup, VCP Patterns)
+     - `wyckoff` (Richard Wyckoff: VSA, Accumulation Phase C Spring, Sign of Strength, Absorption)
+     - `oneil` (William O'Neil: CAN SLIM, Institutional Sponsorship Surge, Base Breakouts)
+     - `taleb` (Nassim Nicholas Taleb: Antifragile Convexity, Tail Risk, Defined-Risk Spreads)
+     - `kedia` (Vijay Kedia: SMILE Framework for Indian Multibagger Discovery)
+     - `simons` (Jim Simons: Statistical Arbitrage, Volatility Regimes, Mathematical EV)
+     - `smc` (Smart Money Concepts / ICT: Liquidity Sweeps, Order Blocks, FVGs, Optimal Trade Entry)
+   - **Specialist Council Ensembles** ([`agent/persona_agent.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/agent/persona_agent.py)):
+     - `breakout`: `[minervini, wyckoff, oneil, forensic]`
+     - `options_sniper`: `[smc, taleb, simons]`
+     - `multibagger`: `[kedia, buffett, munger, jhunjhunwala, forensic]`
+     - `macro_regime`: `[soros, jhunjhunwala, simons, forensic]`
+     - `core_value`: `[buffett, munger, lynch, forensic]`
    - **Debate Facilitator**: Mediates points of contention across rounds.
    - **Fund Manager / Risk Gate**: Synthesizes the final verdict (`BUY`, `STRONG_BUY`, `HOLD`, `SELL`, `STRONG_SELL`, `AVOID`), confidence score, entry, stop-loss, target, and volatility risk-parity position size.
 4. **DAG Orchestration** ([`agent/dag_orchestrator.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/agent/dag_orchestrator.py)):
@@ -62,6 +75,10 @@ All tools exposed to LLM agents are defined in [`agent/tools.py`](file:///c:/Use
 - `get_macro_snapshot` & `get_stock_macro_linkages`: Global macro metrics & sensitivities.
 - `calculate_position_size`: Volatility risk-parity, Half-Kelly, and F&O lot sizing.
 - `get_quote`, `get_options_chain`, `get_pcr`, `get_dcf_valuation`, `search_web`.
+- `scan_multibagger_template`: Mark Minervini 8-point Trend Template, Stan Weinstein Stage 2 Markup & VCP.
+- `magic_trend_3axis`: 3-Axis (X: Moat/Forensics, Y: Growth/Value Migration, Z: Timing/Weinstein Stage 2) Super-Investor scoring and ATR trade tickets.
+- `scan_thematic_baskets`: 6 Institutional Baskets (100-Baggers, Lynch GARP, Capex Surge, CAN SLIM, Order Books, Value Migration).
+- `audit_portfolio_health`: Broker Portfolio Doctor for Stage 4 dead-money detection, HHI concentration, and STCG tax-loss harvesting.
 
 ---
 

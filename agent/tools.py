@@ -120,6 +120,11 @@ class ToolRegistry:
             if t.get("permission") != "deny" and (inc is None or name in inc)
         ]
 
+    def get_fn(self, name: str) -> Any:
+        """Return the underlying callable for a tool if registered."""
+        tool = self._tools.get(name)
+        return tool["fn"] if tool else None
+
     def execute(self, name: str, arguments: dict) -> Any:
         """Run a tool by name with given arguments. Returns JSON-serialisable result."""
         if name not in self._tools:
@@ -1385,7 +1390,10 @@ def build_registry() -> ToolRegistry:
         parameters={
             "type": "object",
             "properties": {
-                "symbol": {"type": "string", "description": "Stock symbol e.g. 'TATASTEEL', 'INFY'"},
+                "symbol": {
+                    "type": "string",
+                    "description": "Stock symbol e.g. 'TATASTEEL', 'INFY'",
+                },
             },
             "required": ["symbol"],
         },
@@ -1410,9 +1418,11 @@ def build_registry() -> ToolRegistry:
             },
             "required": ["symbol"],
         },
-        fn=lambda symbol: __import__(
-            "analysis.forensic", fromlist=["audit_forensics"]
-        ).audit_forensics(symbol).as_dict(),
+        fn=lambda symbol: (
+            __import__("analysis.forensic", fromlist=["audit_forensics"])
+            .audit_forensics(symbol)
+            .as_dict()
+        ),
     )
 
     # ── Macro Snapshots & Linkages ────────────────────────────
@@ -1424,9 +1434,11 @@ def build_registry() -> ToolRegistry:
             "Gold spot price (USD/oz), US 10-Year Treasury Yield (^TNX), and US Dollar Index (DXY)."
         ),
         parameters={"type": "object", "properties": {}},
-        fn=lambda: __import__(
-            "market.macro", fromlist=["get_macro_snapshot"]
-        ).get_macro_snapshot().__dict__,
+        fn=lambda: (
+            __import__("market.macro", fromlist=["get_macro_snapshot"])
+            .get_macro_snapshot()
+            .__dict__
+        ),
     )
 
     reg.register(
@@ -1438,7 +1450,10 @@ def build_registry() -> ToolRegistry:
         parameters={
             "type": "object",
             "properties": {
-                "symbol": {"type": "string", "description": "Stock symbol e.g. 'INFY', 'ASIANPAINT'"},
+                "symbol": {
+                    "type": "string",
+                    "description": "Stock symbol e.g. 'INFY', 'ASIANPAINT'",
+                },
             },
             "required": ["symbol"],
         },
@@ -1462,9 +1477,17 @@ def build_registry() -> ToolRegistry:
                 "symbol": {"type": "string", "description": "Stock symbol e.g. 'RELIANCE'"},
                 "entry_price": {"type": "number", "description": "Planned entry price"},
                 "stop_loss": {"type": "number", "description": "Technical stop-loss price"},
-                "capital": {"type": "number", "default": 100000.0, "description": "Total trading capital"},
+                "capital": {
+                    "type": "number",
+                    "default": 100000.0,
+                    "description": "Total trading capital",
+                },
                 "target_price": {"type": "number", "description": "Target profit price (optional)"},
-                "max_risk_pct": {"type": "number", "default": 1.5, "description": "Max account risk % (default 1.5%)"},
+                "max_risk_pct": {
+                    "type": "number",
+                    "default": 1.5,
+                    "description": "Max account risk % (default 1.5%)",
+                },
                 "sizing_model": {
                     "type": "string",
                     "enum": ["atr_volatility", "fixed_fractional", "half_kelly"],
@@ -1473,17 +1496,19 @@ def build_registry() -> ToolRegistry:
             },
             "required": ["symbol", "entry_price", "stop_loss"],
         },
-        fn=lambda symbol, entry_price, stop_loss, capital=100000.0, target_price=None, max_risk_pct=1.5, sizing_model="atr_volatility": __import__(
-            "engine.position_sizer", fromlist=["calculate_position_size"]
-        ).calculate_position_size(
-            symbol=symbol,
-            entry_price=entry_price,
-            stop_loss=stop_loss,
-            capital=capital,
-            target_price=target_price,
-            max_risk_pct=max_risk_pct,
-            sizing_model=sizing_model,
-        ).as_dict(),
+        fn=lambda symbol, entry_price, stop_loss, capital=100000.0, target_price=None, max_risk_pct=1.5, sizing_model="atr_volatility": (
+            __import__("engine.position_sizer", fromlist=["calculate_position_size"])
+            .calculate_position_size(
+                symbol=symbol,
+                entry_price=entry_price,
+                stop_loss=stop_loss,
+                capital=capital,
+                target_price=target_price,
+                max_risk_pct=max_risk_pct,
+                sizing_model=sizing_model,
+            )
+            .as_dict()
+        ),
     )
 
     # ── Market Structure & Smart Money Concepts (SMC) ─────────
@@ -1504,9 +1529,11 @@ def build_registry() -> ToolRegistry:
             },
             "required": ["symbol"],
         },
-        fn=lambda symbol, exchange="NSE", timeframe="day": __import__(
-            "analysis.market_structure", fromlist=["analyze_market_structure"]
-        ).analyze_market_structure(symbol=symbol, exchange=exchange, timeframe=timeframe).to_dict(),
+        fn=lambda symbol, exchange="NSE", timeframe="day": (
+            __import__("analysis.market_structure", fromlist=["analyze_market_structure"])
+            .analyze_market_structure(symbol=symbol, exchange=exchange, timeframe=timeframe)
+            .to_dict()
+        ),
     )
 
     # ── Volume Profile & VPA ──────────────────────────────────
@@ -1526,9 +1553,11 @@ def build_registry() -> ToolRegistry:
             },
             "required": ["symbol"],
         },
-        fn=lambda symbol, exchange="NSE", timeframe="day": __import__(
-            "analysis.volume_profile", fromlist=["analyze_volume_profile"]
-        ).analyze_volume_profile(symbol=symbol, exchange=exchange, timeframe=timeframe).to_dict(),
+        fn=lambda symbol, exchange="NSE", timeframe="day": (
+            __import__("analysis.volume_profile", fromlist=["analyze_volume_profile"])
+            .analyze_volume_profile(symbol=symbol, exchange=exchange, timeframe=timeframe)
+            .to_dict()
+        ),
     )
 
     # ── Multibagger & Trend Template Screener ─────────────────
@@ -1547,9 +1576,11 @@ def build_registry() -> ToolRegistry:
             },
             "required": ["symbol"],
         },
-        fn=lambda symbol, exchange="NSE": __import__(
-            "analysis.multibagger", fromlist=["scan_multibagger_opportunity"]
-        ).scan_multibagger_opportunity(symbol=symbol, exchange=exchange).to_dict(),
+        fn=lambda symbol, exchange="NSE": (
+            __import__("analysis.multibagger", fromlist=["scan_multibagger_opportunity"])
+            .scan_multibagger_opportunity(symbol=symbol, exchange=exchange)
+            .to_dict()
+        ),
     )
 
     # ── Active Trade Lifecycle & Trailing Stop ────────────────
@@ -1571,15 +1602,17 @@ def build_registry() -> ToolRegistry:
             },
             "required": ["symbol", "entry_price", "initial_stop_loss"],
         },
-        fn=lambda symbol, entry_price, initial_stop_loss, current_ltp=None, position_type="LONG": __import__(
-            "engine.trade_lifecycle", fromlist=["audit_position_lifecycle"]
-        ).audit_position_lifecycle(
-            symbol=symbol,
-            entry_price=entry_price,
-            initial_stop_loss=initial_stop_loss,
-            current_ltp=current_ltp,
-            position_type=position_type,
-        ).to_dict(),
+        fn=lambda symbol, entry_price, initial_stop_loss, current_ltp=None, position_type="LONG": (
+            __import__("engine.trade_lifecycle", fromlist=["audit_position_lifecycle"])
+            .audit_position_lifecycle(
+                symbol=symbol,
+                entry_price=entry_price,
+                initial_stop_loss=initial_stop_loss,
+                current_ltp=current_ltp,
+                position_type=position_type,
+            )
+            .to_dict()
+        ),
     )
 
     # ── High-Conviction Opportunity Screener ──────────────────
@@ -1594,13 +1627,23 @@ def build_registry() -> ToolRegistry:
         parameters={
             "type": "object",
             "properties": {
-                "universe": {"type": "string", "default": "auto_market_aware", "description": "Preset watchlist or sector"},
-                "top_n": {"type": "integer", "default": 10, "description": "Number of top opportunities to return"},
+                "universe": {
+                    "type": "string",
+                    "default": "auto_market_aware",
+                    "description": "Preset watchlist or sector",
+                },
+                "top_n": {
+                    "type": "integer",
+                    "default": 10,
+                    "description": "Number of top opportunities to return",
+                },
             },
         },
-        fn=lambda universe="auto_market_aware", top_n=10: __import__(
-            "analysis.high_conviction", fromlist=["scan_high_conviction_opportunities"]
-        ).scan_high_conviction_opportunities(universe=universe, top_n=top_n).to_dict(),
+        fn=lambda universe="auto_market_aware", top_n=10: (
+            __import__("analysis.high_conviction", fromlist=["scan_high_conviction_opportunities"])
+            .scan_high_conviction_opportunities(universe=universe, top_n=top_n)
+            .to_dict()
+        ),
     )
 
     # ── High-Probability Big Move & Squeeze Direction ──────────
@@ -1614,14 +1657,23 @@ def build_registry() -> ToolRegistry:
         parameters={
             "type": "object",
             "properties": {
-                "symbol": {"type": "string", "description": "Stock symbol e.g. 'TATASTEEL' or 'NIFTY'"},
-                "exchange": {"type": "string", "default": "NSE", "description": "Exchange ('NSE', 'NFO', 'BSE')"},
+                "symbol": {
+                    "type": "string",
+                    "description": "Stock symbol e.g. 'TATASTEEL' or 'NIFTY'",
+                },
+                "exchange": {
+                    "type": "string",
+                    "default": "NSE",
+                    "description": "Exchange ('NSE', 'NFO', 'BSE')",
+                },
             },
             "required": ["symbol"],
         },
-        fn=lambda symbol, exchange="NSE": __import__(
-            "analysis.big_move", fromlist=["predict_large_move"]
-        ).predict_large_move(symbol=symbol, exchange=exchange).to_dict(),
+        fn=lambda symbol, exchange="NSE": (
+            __import__("analysis.big_move", fromlist=["predict_large_move"])
+            .predict_large_move(symbol=symbol, exchange=exchange)
+            .to_dict()
+        ),
     )
 
     # ── Two-Tier Execution Gate & Telegram Alerts ──────────────
@@ -1641,9 +1693,13 @@ def build_registry() -> ToolRegistry:
             },
             "required": ["symbol"],
         },
-        fn=lambda symbol, exchange="NSE", notify_telegram=False: __import__(
-            "analysis.execution_gate", fromlist=["evaluate_execution_gate"]
-        ).evaluate_execution_gate(symbol=symbol, exchange=exchange, notify_telegram=notify_telegram).to_dict(),
+        fn=lambda symbol, exchange="NSE", notify_telegram=False: (
+            __import__("analysis.execution_gate", fromlist=["evaluate_execution_gate"])
+            .evaluate_execution_gate(
+                symbol=symbol, exchange=exchange, notify_telegram=notify_telegram
+            )
+            .to_dict()
+        ),
     )
 
     reg.register(
@@ -1660,10 +1716,207 @@ def build_registry() -> ToolRegistry:
             },
         },
         fn=lambda universe="auto_market_aware", top_n=5, notify_telegram=True: [
-            c.to_dict() for c in __import__(
+            c.to_dict()
+            for c in __import__(
                 "analysis.execution_gate", fromlist=["scan_and_alert_execution_candidates"]
-            ).scan_and_alert_execution_candidates(universe=universe, top_n=top_n, notify_telegram=notify_telegram)
+            ).scan_and_alert_execution_candidates(
+                universe=universe, top_n=top_n, notify_telegram=notify_telegram
+            )
         ],
+    )
+
+    # ── Retail Protection & Wealth Enablement Tools ───────────
+
+    reg.register(
+        name="audit_portfolio_health",
+        description=(
+            "Audit portfolio health, concentration risk (HHI index), cash drag, forensic red flags across active equity holdings, "
+            "and core-satellite wealth allocation pyramid."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {},
+        },
+        fn=lambda: (
+            __import__("engine.portfolio", fromlist=["audit_portfolio_health"])
+            .audit_portfolio_health()
+            .to_dict()
+        ),
+    )
+
+    reg.register(
+        name="calculate_capital_gains_tax",
+        description=(
+            "Estimate post-budget Indian capital gains tax for an equity or F&O trade: "
+            "STCG 20% (Section 111A), LTCG 12.5% (Section 112A with ₹1.25L exemption), or F&O Section 43(5) business income."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "gross_pnl": {"type": "number", "description": "Gross P&L in INR"},
+                "holding_period_days": {
+                    "type": "integer",
+                    "default": 30,
+                    "description": "Holding period in days",
+                },
+                "segment": {
+                    "type": "string",
+                    "default": "EQUITY_DELIVERY",
+                    "description": "EQUITY_DELIVERY, EQUITY_INTRADAY, FUTURES, or OPTIONS",
+                },
+                "prior_accumulated_ltcg": {
+                    "type": "number",
+                    "default": 0.0,
+                    "description": "Prior LTCG gains used this fiscal year",
+                },
+            },
+            "required": ["gross_pnl"],
+        },
+        fn=lambda gross_pnl, holding_period_days=30, segment="EQUITY_DELIVERY", prior_accumulated_ltcg=0.0: (
+            __import__("engine.charges", fromlist=["calculate_capital_gains_tax"])
+            .calculate_capital_gains_tax(
+                gross_pnl=gross_pnl,
+                holding_period_days=holding_period_days,
+                segment=segment,
+                prior_accumulated_ltcg=prior_accumulated_ltcg,
+            )
+            .to_dict()
+        ),
+    )
+
+    reg.register(
+        name="suggest_tax_loss_harvesting",
+        description=(
+            "Identify equity holdings with unrealized short-term capital losses that can be harvested "
+            "to offset realized short-term capital gains before fiscal year-end (March 31)."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {},
+        },
+        fn=lambda: __import__(
+            "engine.charges", fromlist=["suggest_tax_loss_harvesting"]
+        ).suggest_tax_loss_harvesting(
+            [
+                {
+                    "symbol": getattr(h, "symbol", ""),
+                    "qty": getattr(h, "qty", 0),
+                    "ltp": getattr(h, "ltp", 0.0),
+                    "pnl": getattr(h, "pnl", 0.0),
+                    "days_held": 90,
+                }
+                for h in __import__("engine.portfolio", fromlist=["get_portfolio_summary"])
+                .get_portfolio_summary()
+                .holdings
+            ]
+        ),
+    )
+
+    reg.register(
+        name="build_defined_risk_spread",
+        description=(
+            "Construct a defined-risk multi-leg options spread (Bull Call Spread, Bear Put Spread, Bull Put Spread, "
+            "Bear Call Spread, or Iron Condor) to cap maximum loss and eliminate Theta bleed for Indian F&O contracts."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "underlying": {
+                    "type": "string",
+                    "description": "Underlying symbol e.g. 'NIFTY' or 'RELIANCE'",
+                },
+                "strategy": {
+                    "type": "string",
+                    "description": "BULL_CALL_SPREAD, BEAR_PUT_SPREAD, BULL_PUT_SPREAD, BEAR_CALL_SPREAD, or IRON_CONDOR",
+                },
+                "spot_price": {"type": "number", "description": "Optional underlying spot price"},
+                "dte": {"type": "integer", "default": 7, "description": "Days to expiry"},
+                "num_lots": {
+                    "type": "integer",
+                    "default": 1,
+                    "description": "Number of contracts/lots",
+                },
+            },
+            "required": ["underlying", "strategy"],
+        },
+        fn=lambda underlying, strategy, spot_price=None, dte=7, num_lots=1: (
+            __import__("engine.defined_risk_spreads", fromlist=["build_defined_risk_spread"])
+            .build_defined_risk_spread(
+                underlying=underlying,
+                spot_price=spot_price or (24500.0 if "NIFTY" in underlying.upper() else 1500.0),
+                strategy=strategy,
+                dte=dte,
+                num_lots=num_lots,
+            )
+            .to_dict()
+        ),
+    )
+
+    reg.register(
+        name="run_persona_council",
+        description=(
+            "Run a specialized Council Ensemble of legendary investor & quant personas "
+            "(e.g. 'breakout' [Minervini, Wyckoff, O'Neil, Forensic], 'options_sniper' [SMC, Taleb, Simons], "
+            "'multibagger' [Kedia, Buffett, Munger, Jhunjhunwala, Forensic]) on a stock ticker to synthesize high-conviction consensus."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "symbol": {
+                    "type": "string",
+                    "description": "NSE/BSE stock ticker e.g. 'RELIANCE' or 'TATAMOTORS'",
+                },
+                "council": {
+                    "type": "string",
+                    "default": "breakout",
+                    "description": "Council preset name: 'breakout', 'options_sniper', 'multibagger', 'macro_regime', or 'core_value'",
+                },
+                "exchange": {
+                    "type": "string",
+                    "default": "NSE",
+                    "description": "Exchange ('NSE' or 'BSE')",
+                },
+            },
+            "required": ["symbol"],
+        },
+        fn=lambda symbol, council="breakout", exchange="NSE": __import__(
+            "agent.persona_agent", fromlist=["run_council"]
+        ).run_council(
+            council_name=council,
+            symbol=symbol,
+            exchange=exchange,
+            registry=reg,
+        ),
+    )
+
+    reg.register(
+        name="analyze_persona",
+        description=(
+            "Run a specific legendary investor/trader persona analysis "
+            "('buffett', 'jhunjhunwala', 'lynch', 'soros', 'munger', 'forensic', 'minervini', 'wyckoff', 'oneil', 'taleb', 'kedia', 'simons', 'smc') on a stock ticker."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "symbol": {"type": "string", "description": "Stock ticker e.g. 'INFY'"},
+                "persona_id": {
+                    "type": "string",
+                    "description": "Persona identifier e.g. 'minervini', 'kedia', 'taleb', 'smc', 'buffett'",
+                },
+                "exchange": {"type": "string", "default": "NSE"},
+            },
+            "required": ["symbol", "persona_id"],
+        },
+        fn=lambda symbol, persona_id, exchange="NSE": (
+            __import__("agent.persona_agent", fromlist=["run_persona_analysis"])
+            .run_persona_analysis(
+                persona_id=persona_id,
+                symbol=symbol,
+                exchange=exchange,
+                registry=reg,
+            )
+            .to_dict()
+        ),
     )
 
     # ── Tag all registered tools as read-only + concurrency-safe ──
@@ -1676,5 +1929,3 @@ def build_registry() -> ToolRegistry:
         tool["permission"] = "auto"
 
     return reg
-
-

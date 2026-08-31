@@ -20,6 +20,7 @@ def test_repl_ast_syntax():
 def test_repl_import_smoke():
     """Verify app.repl imports cleanly without error."""
     import app.repl
+
     assert hasattr(app.repl, "COMMANDS")
     assert "funnel" in app.repl.COMMANDS
     assert "cache" in app.repl.COMMANDS

@@ -16,9 +16,7 @@ Provides structured self-learning summaries and actionable architectural recomme
 from __future__ import annotations
 
 import json
-import os
 import threading
-import time
 from collections import Counter, deque
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -55,9 +53,7 @@ class TelemetryEvent:
     component: str
     action_taken: str
     reason: str
-    timestamp: str = field(
-        default_factory=lambda: datetime.now(timezone.utc).isoformat()
-    )
+    timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     details: dict[str, Any] = field(default_factory=dict)
     severity: str = "INFO"  # "INFO", "WARNING", "ERROR", "CRITICAL"
 
@@ -177,7 +173,9 @@ def get_telemetry_summary() -> dict[str, Any]:
             f"Deterministic quantitative fallback executed {type_counts[EVENT_QUANT_FALLBACK]} time(s): Protected user experience from LLM network timeout."
         )
     if not recommendations:
-        recommendations.append("System running smoothly. All telemetry indicators within normal operational bounds.")
+        recommendations.append(
+            "System running smoothly. All telemetry indicators within normal operational bounds."
+        )
 
     return {
         "status": "HEALTHY" if severity_counts.get("CRITICAL", 0) == 0 else "DEGRADED",

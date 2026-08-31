@@ -406,12 +406,18 @@ def _make_broker(choice: str) -> tuple[str, BrokerAPI]:
     elif key == "stoxkart":
         from .stoxkart import StoxkartAPI
 
-        api_key = get_credential("STOXKART_API_KEY", "Stoxkart API Key", secret=False, required=False)
-        api_secret = get_credential("STOXKART_API_SECRET", "Stoxkart API Secret", secret=True, required=False)
+        api_key = get_credential(
+            "STOXKART_API_KEY", "Stoxkart API Key", secret=False, required=False
+        )
+        api_secret = get_credential(
+            "STOXKART_API_SECRET", "Stoxkart API Secret", secret=True, required=False
+        )
         client_code = get_credential(
             "STOXKART_CLIENT_CODE", "Stoxkart Client Code (Login ID)", secret=False, required=False
         )
-        password = get_credential("STOXKART_PASSWORD", "Stoxkart Trading Password", secret=True, required=False)
+        password = get_credential(
+            "STOXKART_PASSWORD", "Stoxkart Trading Password", secret=True, required=False
+        )
         totp_secret = get_credential(
             "STOXKART_TOTP_SECRET", "Stoxkart TOTP Secret", secret=True, required=False
         )
@@ -602,7 +608,9 @@ def _do_auth(key: str, broker: BrokerAPI) -> BrokerAPI:
 
     # Angel One & Stoxkart: automated TOTP login — no browser redirect needed
     if key in _TOTP_BROKERS:
-        console.print(f"\n[bold cyan]🔐 Logging in to {key.title()} via credentials/TOTP…[/bold cyan]")
+        console.print(
+            f"\n[bold cyan]🔐 Logging in to {key.title()} via credentials/TOTP…[/bold cyan]"
+        )
         if hasattr(broker, "complete_login"):
             broker.complete_login()
         elif hasattr(broker, "authenticate"):

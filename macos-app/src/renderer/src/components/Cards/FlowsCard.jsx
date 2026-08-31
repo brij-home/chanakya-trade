@@ -2,14 +2,6 @@ import { useEffect, useState } from 'react'
 import { useAPI } from '../../hooks/useAPI'
 
 export default function FlowsCard({ data }) {
-  if (!data) return null
-
-  const d = data?.data ?? data ?? {}
-  const fii = Number(d.fii_net_today ?? 0)
-  const dii = Number(d.dii_net_today ?? 0)
-  const fii5 = Number(d.fii_5d_net ?? 0)
-  const dii5 = Number(d.dii_5d_net ?? 0)
-
   const { call } = useAPI()
   const [history, setHistory] = useState([])
   const [loadingHist, setLoadingHist] = useState(false)
@@ -35,6 +27,14 @@ export default function FlowsCard({ data }) {
       unmounted = true
     }
   }, [])
+
+  if (!data) return null
+
+  const d = data?.data ?? data ?? {}
+  const fii = Number(d.fii_net_today ?? 0)
+  const dii = Number(d.dii_net_today ?? 0)
+  const fii5 = Number(d.fii_5d_net ?? 0)
+  const dii5 = Number(d.dii_5d_net ?? 0)
 
   return (
     <div className="bg-elevated border border-border rounded-xl p-4 max-w-xl w-full space-y-4 font-mono shadow-sm">

@@ -153,7 +153,7 @@ export default function PositionSizerCard({ data }) {
             <button
               onClick={() => setModel('atr_volatility')}
               className={`px-2.5 py-1 rounded transition-colors cursor-pointer ${
-                model === 'atr_volatility' ? 'bg-amber text-surface font-bold' : 'text-muted hover:text-text'
+                model === 'atr_volatility' ? 'bg-amber text-black font-extrabold shadow-xs' : 'text-muted hover:text-text'
               }`}
             >
               ATR Volatility
@@ -168,7 +168,7 @@ export default function PositionSizerCard({ data }) {
             <button
               onClick={() => setModel('fixed_fractional')}
               className={`px-2.5 py-1 rounded transition-colors cursor-pointer ${
-                model === 'fixed_fractional' ? 'bg-amber text-surface font-bold' : 'text-muted hover:text-text'
+                model === 'fixed_fractional' ? 'bg-amber text-black font-extrabold shadow-xs' : 'text-muted hover:text-text'
               }`}
             >
               Fixed Stop %
@@ -183,7 +183,7 @@ export default function PositionSizerCard({ data }) {
             <button
               onClick={() => setModel('half_kelly')}
               className={`px-2.5 py-1 rounded transition-colors cursor-pointer ${
-                model === 'half_kelly' ? 'bg-amber text-surface font-bold' : 'text-muted hover:text-text'
+                model === 'half_kelly' ? 'bg-amber text-black font-extrabold shadow-xs' : 'text-muted hover:text-text'
               }`}
             >
               Half-Kelly

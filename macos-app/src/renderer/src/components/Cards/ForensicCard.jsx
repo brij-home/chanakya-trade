@@ -2,17 +2,17 @@ import { useInspectorStore } from '../../store/inspectorStore'
 import Tooltip, { InfoBadge } from '../UI/Tooltip'
 
 const RATING_COLORS = {
-  'A+': { bg: 'bg-green/15 text-green border-green/40', badge: 'bg-green text-surface' },
-  'A':  { bg: 'bg-green/10 text-green border-green/30', badge: 'bg-green/90 text-surface' },
-  'B':  { bg: 'bg-blue/10 text-blue border-blue/30',   badge: 'bg-blue text-surface' },
-  'C':  { bg: 'bg-amber/10 text-amber border-amber/30', badge: 'bg-amber text-surface' },
-  'D':  { bg: 'bg-red/10 text-red border-red/30',     badge: 'bg-red text-surface' },
+  'A+': { bg: 'bg-green/15 text-green border-green/40', badge: 'bg-green text-black font-bold' },
+  'A':  { bg: 'bg-green/10 text-green border-green/30', badge: 'bg-green/90 text-black font-bold' },
+  'B':  { bg: 'bg-blue/10 text-blue border-blue/30',   badge: 'bg-blue text-white font-bold' },
+  'C':  { bg: 'bg-amber/10 text-amber border-amber/30', badge: 'bg-amber text-black font-bold' },
+  'D':  { bg: 'bg-red/10 text-red border-red/30',     badge: 'bg-red text-white font-bold' },
 }
 
 export default function ForensicCard({ data }) {
+  const openInspector = useInspectorStore((s) => s.openInspector)
   if (!data) return null
   const d = data?.data ?? data ?? {}
-  const openInspector = useInspectorStore((s) => s.openInspector)
 
   const rating = d.quality_rating || 'B'
   const ratingStyle = RATING_COLORS[rating] || RATING_COLORS['B']

@@ -6,30 +6,36 @@ export default function OrderTicketModal({ isOpen, onClose, initialData = {} }) 
 
   const [symbol, setSymbol] = useState(initialData.symbol || 'RELIANCE')
   const [exchange, setExchange] = useState(initialData.exchange || 'NSE')
-  const [action, setAction] = useState(initialData.action || 'BUY')
+  const [action, setAction] = useState(initialData.action || initialData.side || initialData.orderType || 'BUY')
   const [orderType, setOrderType] = useState('LIMIT')
   const [product, setProduct] = useState('MIS') // MIS (Intraday) | CNC (Delivery) | NRML (F&O)
   const [price, setPrice] = useState(initialData.price || 2800)
-  const [stopLoss, setStopLoss] = useState(initialData.stopLoss || 2760)
-  const [target, setTarget] = useState(initialData.target || 2890)
+  const [stopLoss, setStopLoss] = useState(initialData.stopLoss || initialData.stop_loss || 2760)
+  const [target, setTarget] = useState(initialData.target || initialData.target_1 || 2890)
   const [capital, setCapital] = useState(200000)
   const [riskPct, setRiskPct] = useState(1.0)
-  const [qty, setQty] = useState(initialData.qty || 50)
+  const [qty, setQty] = useState(initialData.qty || initialData.quantity || 50)
   const [step, setStep] = useState(1) // 1: Edit/Stage, 2: Double Confirm
   const [confirmedRisk, setConfirmedRisk] = useState(false)
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [statusMsg, setStatusMsg] = useState(null)
+  const [preflightInfo, setPreflightInfo] = useState(null)
+  const [isValidatingRisk, setIsValidatingRisk] = useState(false)
 
   // Sync state whenever modal opens or initialData changes
   useEffect(() => {
     if (isOpen) {
       if (initialData.symbol) setSymbol(initialData.symbol)
       if (initialData.exchange) setExchange(initialData.exchange)
-      if (initialData.action) setAction(initialData.action)
+      const act = initialData.action || initialData.side || initialData.orderType
+      if (act) setAction(act)
       if (initialData.price) setPrice(Number(initialData.price))
-      if (initialData.stopLoss) setStopLoss(Number(initialData.stopLoss))
-      if (initialData.target) setTarget(Number(initialData.target))
-      if (initialData.qty) setQty(Number(initialData.qty))
+      const sl = initialData.stopLoss ?? initialData.stop_loss
+      if (sl != null) setStopLoss(Number(sl))
+      const tgt = initialData.target ?? initialData.target_1 ?? initialData.target_2
+      if (tgt != null) setTarget(Number(tgt))
+      const q = initialData.qty ?? initialData.quantity
+      if (q != null) setQty(Number(q))
       setStep(1)
       setStatusMsg(null)
       setConfirmedRisk(false)
@@ -46,22 +52,35 @@ export default function OrderTicketModal({ isOpen, onClose, initialData = {} }) 
     }
   }, [price, stopLoss, capital, riskPct])
 
-  if (!isOpen) return null
-
   const riskAmount = Math.abs(price - stopLoss) * qty
   const rewardAmount = Math.abs(target - price) * qty
   const riskRewardRatio = riskAmount > 0 ? (rewardAmount / riskAmount).toFixed(2) : 0
   const orderValue = price * qty
 
-  const handleProceedToConfirm = () => {
+  const handleProceedToConfirm = async () => {
     setStatusMsg(null)
     setConfirmedRisk(false)
-    setStep(2)
+    setIsValidatingRisk(true)
+    try {
+      const res = await call('/api/risk/preflight', {
+        symbol,
+        action,
+        quantity: qty,
+        price,
+        allow_override: true,
+      })
+      setPreflightInfo(res?.data ?? res)
+    } catch {
+      setPreflightInfo(null)
+    } finally {
+      setIsValidatingRisk(false)
+      setStep(2)
+    }
   }
 
   const handlePlaceOrder = async () => {
     if (!confirmedRisk) {
-      setStatusMsg({ type: 'error', text: 'Please check the confirmation box to verify order risk.' })
+      setStatusMsg({ type: 'error', text: 'Please check the confirmation box to acknowledge risk.' })
       return
     }
     setIsSubmitting(true)
@@ -71,7 +90,7 @@ export default function OrderTicketModal({ isOpen, onClose, initialData = {} }) 
       await new Promise((r) => setTimeout(r, 600))
       setStatusMsg({
         type: 'success',
-        text: `✓ Order Executed: ${action} ${qty} ${symbol} @ ₹${price.toFixed(2)} [SL: ₹${stopLoss}, TGT: ₹${target}]`,
+        text: `✓ Order Executed: ${action} ${qty} ${symbol} @ ₹${Number(price).toFixed(2)} [SL: ₹${stopLoss}, TGT: ₹${target}]`,
       })
       setTimeout(() => {
         setStep(1)
@@ -84,9 +103,11 @@ export default function OrderTicketModal({ isOpen, onClose, initialData = {} }) 
     }
   }
 
+  if (!isOpen) return null
+
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-xs p-4 select-none animate-in fade-in duration-200"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-md p-4 select-none animate-in fade-in duration-200"
       onClick={onClose}
     >
       <div
@@ -252,10 +273,38 @@ export default function OrderTicketModal({ isOpen, onClose, initialData = {} }) 
             <>
               {/* Step 2: Double Confirmation Screen */}
               <div className="bg-elevated border border-amber/30 rounded-xl p-4 space-y-3">
-                <div className="flex items-center gap-2 text-amber font-ui font-semibold text-xs">
-                  <span>⚠</span>
-                  <span>Execution Review & Risk Guardrails</span>
+                <div className="flex items-center justify-between text-amber font-ui font-semibold text-xs">
+                  <div className="flex items-center gap-2">
+                    <span>🛡️</span>
+                    <span>Execution Review & Risk Guardrails</span>
+                  </div>
+                  {preflightInfo?.flags?.length > 0 && (
+                    <span className="bg-amber/20 text-amber text-[10px] px-2 py-0.5 rounded-full border border-amber/40">
+                      Advisory Active ({preflightInfo.flags.length})
+                    </span>
+                  )}
                 </div>
+
+                {/* Behavioral Tilt & Risk Advisory Box if flags detected */}
+                {preflightInfo?.flags?.length > 0 && (
+                  <div className="bg-amber/10 border border-amber/40 rounded-lg p-3 space-y-2 text-left">
+                    <div className="flex items-center gap-1.5 text-amber font-bold text-[11px]">
+                      <span>🧠</span>
+                      <span>Behavioral Risk & Tilt Advisory (Co-Pilot)</span>
+                    </div>
+                    {preflightInfo.disclaimers?.map((d, i) => (
+                      <p key={i} className="text-amber/90 text-[11px] leading-relaxed">
+                        • {d}
+                      </p>
+                    ))}
+                    {preflightInfo.coaching_recommendations?.map((c, i) => (
+                      <div key={i} className="bg-panel/80 rounded p-2 text-[10px] text-text font-mono border border-border/40">
+                        <span className="text-amber font-bold">Coaching Tip: </span>
+                        {c}
+                      </div>
+                    ))}
+                  </div>
+                )}
 
                 <div className="space-y-2 font-mono text-[11px] bg-panel p-3 rounded-lg border border-border/50">
                   <div className="flex justify-between">
@@ -290,7 +339,9 @@ export default function OrderTicketModal({ isOpen, onClose, initialData = {} }) 
                     className="mt-0.5 accent-amber rounded"
                   />
                   <span className="text-muted text-[11px] font-ui leading-tight">
-                    I confirm that I have reviewed the order parameters, stop loss, and position sizing.
+                    {preflightInfo?.flags?.length > 0
+                      ? 'I acknowledge the behavioral risk advisory and choose to proceed with conscious awareness.'
+                      : 'I confirm that I have reviewed the order parameters, stop loss, and position sizing.'}
                   </span>
                 </label>
               </div>
@@ -325,7 +376,11 @@ export default function OrderTicketModal({ isOpen, onClose, initialData = {} }) 
                     action === 'BUY' ? 'bg-green hover:bg-green/90 text-black' : 'bg-red hover:bg-red/90 text-white'
                   }`}
                 >
-                  {isSubmitting ? 'Transmitting Order…' : `Double Confirm & Transmit ${action}`}
+                  {isSubmitting
+                    ? 'Transmitting Order…'
+                    : preflightInfo?.flags?.length > 0
+                    ? `⚡ Acknowledge & Execute ${action}`
+                    : `Double Confirm & Transmit ${action}`}
                 </button>
               </div>
             </>

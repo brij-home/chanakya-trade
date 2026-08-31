@@ -101,10 +101,10 @@ export default function ChatArea() {
   ]
 
   return (
-    <div className="flex-1 overflow-y-auto px-4 md:px-8 py-6 space-y-5 bg-surface text-text">
-      {/* Active Navigation Header (when in Chat / Cards view) */}
+    <div className="flex-1 flex flex-col h-full overflow-hidden bg-surface text-text">
+      {/* Active Navigation Header (Fixed at the top, solid opaque background, zero scroll overlap) */}
       {!isDashboardVisible && (
-        <div className="sticky top-0 z-10 flex items-center justify-between gap-3 bg-surface/90 backdrop-blur border-b border-border/60 pb-3 mb-2 text-xs font-ui">
+        <div className="flex-shrink-0 flex items-center justify-between gap-3 px-4 md:px-8 py-2.5 bg-surface border-b border-border/80 text-xs font-ui shadow-2xs z-20">
           <div className="flex items-center gap-2">
             <button
               onClick={() => setShowDashboard(true)}
@@ -165,130 +165,133 @@ export default function ChatArea() {
         </div>
       )}
 
-      {/* Welcome Dashboard Overview */}
-      {isDashboardVisible && (
-        <div className="max-w-4xl mx-auto flex flex-col items-center justify-center min-h-[75vh] py-8 text-center space-y-6 animate-fade-slide">
-          {/* If there are existing messages in session, show resume button */}
-          {messages.length > 0 && (
-            <div className="w-full flex items-center justify-between bg-elevated/80 border border-border px-4 py-2.5 rounded-xl shadow-xs">
-              <div className="flex items-center gap-2 text-xs font-ui text-left">
-                <span className="w-2 h-2 rounded-full bg-green animate-pulse" />
-                <span className="text-text font-semibold">{sessions[activeSessionId]?.title || 'Active Session'}</span>
-                <span className="text-muted">({messages.length} analysis cards loaded)</span>
-              </div>
-              <button
-                onClick={() => setShowDashboard(false)}
-                className="px-3 py-1.5 bg-amber hover:bg-amber-light text-black font-bold rounded-lg text-xs font-ui cursor-pointer transition-colors shadow-xs"
-              >
-                ← Return to Active View
-              </button>
-            </div>
-          )}
-
-          {/* Logo & Headline */}
-          <div className="space-y-2">
-            <div className="inline-flex items-center justify-center w-12 h-12 rounded-2xl bg-amber/10 border border-amber/30 text-amber text-2xl shadow-sm mb-1">
-              ◆
-            </div>
-            <h1 className="text-2xl sm:text-3xl font-bold font-ui tracking-tight text-text">
-              Institutional Trading &amp; AI Intelligence
-            </h1>
-            <p className="text-sm font-ui text-muted max-w-xl mx-auto leading-relaxed">
-              Real-time Indian market analytics, multi-agent quant debates, options payoff simulation, and institutional flow tracking.
-            </p>
-          </div>
-
-          {/* Dynamic Trending / Market Movers Bar (1-Click Instant Execution) */}
-          <div className="flex flex-wrap items-center justify-center gap-2 pt-1 max-w-3xl">
-            <span className="text-xs text-muted font-ui mr-1 flex items-center gap-1.5">
-              <span className="w-2 h-2 rounded-full bg-amber animate-pulse" />
-              <span className="font-semibold text-text">Trending Movers:</span>
-            </span>
-            {trendingTickers.map((ticker) => {
-              const label = ticker.symbol || ticker.label
-              const cmd = ticker.cmd || `analyze ${label}`
-              const ltp = ticker.ltp
-              const changePct = ticker.change_pct
-              const tag = ticker.tag
-
-              return (
-                <button
-                  key={label}
-                  onClick={() => sendDraft(cmd)}
-                  className="group inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-mono bg-panel hover:bg-elevated text-text border border-border/80 hover:border-amber/50 transition-all cursor-pointer shadow-xs hover:scale-102"
-                  title={`Instant 1-click execution: ${cmd}`}
-                >
-                  <span className="font-bold text-amber group-hover:text-amber-light">{label}</span>
-                  {ltp > 0 && (
-                    <span className="text-[10px] text-muted hidden sm:inline">₹{Number(ltp).toLocaleString('en-IN')}</span>
-                  )}
-                  {changePct !== undefined && changePct !== 0 && (
-                    <span className={`text-[10px] font-semibold ${Number(changePct) >= 0 ? 'text-green' : 'text-red'}`}>
-                      {Number(changePct) >= 0 ? '+' : ''}{Number(changePct).toFixed(1)}%
-                    </span>
-                  )}
-                  {tag && (
-                    <span className="text-[9px] px-1.5 py-0.2 rounded-full bg-amber/10 text-amber border border-amber/20 hidden md:inline font-semibold">
-                      {tag}
-                    </span>
-                  )}
-                </button>
-              )
-            })}
-          </div>
-
-          {/* Quick Action Grid (1-Click Instant Execution) */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3 w-full text-left pt-2">
-            {quickPrompts.map((item) => (
-              <button
-                key={item.title}
-                onClick={() => sendDraft(item.cmd)}
-                className="group relative p-4 rounded-xl bg-panel hover:bg-elevated border border-border/80 hover:border-amber/40 transition-all duration-200 shadow-xs hover:shadow-md cursor-pointer flex flex-col justify-between"
-                title={`Launch ${item.title}`}
-              >
-                <div>
-                  <div className="flex items-center justify-between mb-2">
-                    <span className="text-xl p-2 rounded-lg bg-surface border border-border/50">{item.icon}</span>
-                    <span className="text-[10px] font-mono text-muted group-hover:text-amber transition-colors flex items-center gap-0.5">
-                      <span>{item.cmd}</span>
-                      <span>⚡</span>
-                    </span>
-                  </div>
-                  <h3 className="text-sm font-semibold font-ui text-text group-hover:text-amber transition-colors">
-                    {item.title}
-                  </h3>
-                  <p className="text-xs text-muted font-ui mt-1 leading-relaxed">
-                    {item.desc}
-                  </p>
+      {/* Scrollable Container for Dashboard Overview and Analysis Cards */}
+      <div className="flex-1 overflow-y-auto px-4 md:px-8 py-6 space-y-5">
+        {/* Welcome Dashboard Overview */}
+        {isDashboardVisible && (
+          <div className="max-w-4xl mx-auto flex flex-col items-center justify-center min-h-[75vh] py-8 text-center space-y-6 animate-fade-slide">
+            {/* If there are existing messages in session, show resume button */}
+            {messages.length > 0 && (
+              <div className="w-full flex items-center justify-between bg-elevated/80 border border-border px-4 py-2.5 rounded-xl shadow-xs">
+                <div className="flex items-center gap-2 text-xs font-ui text-left">
+                  <span className="w-2 h-2 rounded-full bg-green animate-pulse" />
+                  <span className="text-text font-semibold">{sessions[activeSessionId]?.title || 'Active Session'}</span>
+                  <span className="text-muted">({messages.length} analysis cards loaded)</span>
                 </div>
-              </button>
-            ))}
+                <button
+                  onClick={() => setShowDashboard(false)}
+                  className="px-3 py-1.5 bg-amber hover:bg-amber-light text-black font-bold rounded-lg text-xs font-ui cursor-pointer transition-colors shadow-xs"
+                >
+                  ← Return to Active View
+                </button>
+              </div>
+            )}
+
+            {/* Logo & Headline */}
+            <div className="space-y-2">
+              <div className="inline-flex items-center justify-center w-12 h-12 rounded-2xl bg-amber/10 border border-amber/30 text-amber text-2xl shadow-sm mb-1">
+                ◆
+              </div>
+              <h1 className="text-2xl sm:text-3xl font-bold font-ui tracking-tight text-text">
+                Institutional Trading &amp; AI Intelligence
+              </h1>
+              <p className="text-sm font-ui text-muted max-w-xl mx-auto leading-relaxed">
+                Real-time Indian market analytics, multi-agent quant debates, options payoff simulation, and institutional flow tracking.
+              </p>
+            </div>
+
+            {/* Dynamic Trending / Market Movers Bar (1-Click Instant Execution) */}
+            <div className="flex flex-wrap items-center justify-center gap-2 pt-1 max-w-3xl">
+              <span className="text-xs text-muted font-ui mr-1 flex items-center gap-1.5">
+                <span className="w-2 h-2 rounded-full bg-amber animate-pulse" />
+                <span className="font-semibold text-text">Trending Movers:</span>
+              </span>
+              {trendingTickers.map((ticker) => {
+                const label = ticker.symbol || ticker.label
+                const cmd = ticker.cmd || `analyze ${label}`
+                const ltp = ticker.ltp
+                const changePct = ticker.change_pct
+                const tag = ticker.tag
+
+                return (
+                  <button
+                    key={label}
+                    onClick={() => sendDraft(cmd)}
+                    className="group inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-mono bg-panel hover:bg-elevated text-text border border-border/80 hover:border-amber/50 transition-all cursor-pointer shadow-xs hover:scale-102"
+                    title={`Instant 1-click execution: ${cmd}`}
+                  >
+                    <span className="font-bold text-amber group-hover:text-amber-light">{label}</span>
+                    {ltp > 0 && (
+                      <span className="text-[10px] text-muted hidden sm:inline">₹{Number(ltp).toLocaleString('en-IN')}</span>
+                    )}
+                    {changePct !== undefined && changePct !== 0 && (
+                      <span className={`text-[10px] font-semibold ${Number(changePct) >= 0 ? 'text-green' : 'text-red'}`}>
+                        {Number(changePct) >= 0 ? '+' : ''}{Number(changePct).toFixed(1)}%
+                      </span>
+                    )}
+                    {tag && (
+                      <span className="text-[9px] px-1.5 py-0.2 rounded-full bg-amber/10 text-amber border border-amber/20 hidden md:inline font-semibold">
+                        {tag}
+                      </span>
+                    )}
+                  </button>
+                )
+              })}
+            </div>
+
+            {/* Quick Action Grid (1-Click Instant Execution) */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3 w-full text-left pt-2">
+              {quickPrompts.map((item) => (
+                <button
+                  key={item.title}
+                  onClick={() => sendDraft(item.cmd)}
+                  className="group relative p-4 rounded-xl bg-panel hover:bg-elevated border border-border/80 hover:border-amber/40 transition-all duration-200 shadow-xs hover:shadow-md cursor-pointer flex flex-col justify-between"
+                  title={`Launch ${item.title}`}
+                >
+                  <div>
+                    <div className="flex items-center justify-between mb-2">
+                      <span className="text-xl p-2 rounded-lg bg-surface border border-border/50">{item.icon}</span>
+                      <span className="text-[10px] font-mono text-muted group-hover:text-amber transition-colors flex items-center gap-0.5">
+                        <span>{item.cmd}</span>
+                        <span>⚡</span>
+                      </span>
+                    </div>
+                    <h3 className="text-sm font-semibold font-ui text-text group-hover:text-amber transition-colors">
+                      {item.title}
+                    </h3>
+                    <p className="text-xs text-muted font-ui mt-1 leading-relaxed">
+                      {item.desc}
+                    </p>
+                  </div>
+                </button>
+              ))}
+            </div>
+
+            {/* Status Note */}
+            {sidecarError ? (
+              <p className="text-red text-xs font-ui max-w-sm mt-4 bg-red/10 border border-red/20 px-3 py-1.5 rounded-lg">
+                {sidecarError}
+              </p>
+            ) : (
+              <p className="text-muted text-xs font-ui pt-2">
+                Tip: Press <kbd className="px-1.5 py-0.5 rounded bg-panel border border-border font-mono text-amber font-semibold">Ctrl + K</kbd> to search any of the 2,000+ NSE stocks or commands.
+              </p>
+            )}
           </div>
+        )}
 
-          {/* Status Note */}
-          {sidecarError ? (
-            <p className="text-red text-xs font-ui max-w-sm mt-4 bg-red/10 border border-red/20 px-3 py-1.5 rounded-lg">
-              {sidecarError}
-            </p>
-          ) : (
-            <p className="text-muted text-xs font-ui pt-2">
-              Tip: Press <kbd className="px-1.5 py-0.5 rounded bg-panel border border-border font-mono text-amber font-semibold">Ctrl + K</kbd> to search any of the 2,000+ NSE stocks or commands.
-            </p>
-          )}
-        </div>
-      )}
+        {/* Message list (when in chat view) */}
+        {!isDashboardVisible && messages.map((msg) => (
+          <Message key={msg.id} message={msg} />
+        ))}
 
-      {/* Message list (when in chat view) */}
-      {!isDashboardVisible && messages.map((msg) => (
-        <Message key={msg.id} message={msg} />
-      ))}
+        {/* Loading indicator */}
+        {isLoading && !messages.some((m) => m.cardType === 'streaming_analysis') && (
+          <ThinkingIndicator />
+        )}
 
-      {/* Loading indicator */}
-      {isLoading && !messages.some((m) => m.cardType === 'streaming_analysis') && (
-        <ThinkingIndicator />
-      )}
-
-      <div ref={bottomRef} />
+        <div ref={bottomRef} />
+      </div>
     </div>
   )
 }

@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
-from typing import Any, Literal, Optional
+from typing import Any, Literal
 
 ReconciliationStatus = Literal[
     "COMPLETE",
@@ -37,7 +37,9 @@ class PositionDiscrepancy:
     internal_avg_price: float
     broker_avg_price: float
     price_diff: float
-    discrepancy_type: str  # "QTY_MISMATCH", "PRICE_MISMATCH", "MISSING_IN_BROKER", "MISSING_IN_LEDGER"
+    discrepancy_type: (
+        str  # "QTY_MISMATCH", "PRICE_MISMATCH", "MISSING_IN_BROKER", "MISSING_IN_LEDGER"
+    )
     severity: str  # "HIGH", "MEDIUM", "LOW"
     actionable_fix: str
 
@@ -188,7 +190,10 @@ def reconcile_ledger(
         verdict = "🔄 RECONCILING: Position sync in progress."
 
     import hashlib
-    audit_hash = hashlib.sha256(f"{now_str}:{status}:{len(all_symbols)}:{cash_diff}".encode()).hexdigest()[:16]
+
+    audit_hash = hashlib.sha256(
+        f"{now_str}:{status}:{len(all_symbols)}:{cash_diff}".encode()
+    ).hexdigest()[:16]
 
     return ReconciliationReport(
         timestamp=now_str,

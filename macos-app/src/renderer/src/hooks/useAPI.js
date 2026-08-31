@@ -12,13 +12,14 @@ export function useAPI() {
   // In web mode, include credentials (cookies) with every request
   const fetchOpts = window.__CHANAKYA_TRADE_WEB__ ? { credentials: 'include' } : {}
 
-  const call = async (endpoint, body = {}) => {
+  const call = async (endpoint, body = {}, options = {}) => {
     if (!base) throw new Error('API not ready — sidecar is still starting')
     const res = await fetch(`${base}${endpoint}`, {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
       body:    JSON.stringify(body),
       ...fetchOpts,
+      ...options,
     })
     if (!res.ok) {
       if (res.status === 401 && window.__CHANAKYA_TRADE_WEB__) {
@@ -31,9 +32,12 @@ export function useAPI() {
     return res.json()
   }
 
-  const get = async (endpoint) => {
+  const get = async (endpoint, options = {}) => {
     if (!base) throw new Error('API not ready')
-    const res = await fetch(`${base}${endpoint}`, fetchOpts)
+    const res = await fetch(`${base}${endpoint}`, {
+      ...fetchOpts,
+      ...options,
+    })
     if (!res.ok) {
       if (res.status === 401 && window.__CHANAKYA_TRADE_WEB__) {
         window.location.href = '/'

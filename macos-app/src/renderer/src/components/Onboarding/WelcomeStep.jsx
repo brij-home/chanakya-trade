@@ -11,8 +11,8 @@ export default function WelcomeStep({ onNext }) {
       </p>
       <button
         onClick={onNext}
-        className="mt-4 px-8 py-2.5 bg-amber text-surface font-ui font-semibold text-sm rounded-lg
-                   hover:brightness-110 transition-all active:scale-95"
+        className="mt-4 px-8 py-2.5 bg-amber text-black font-ui font-extrabold text-sm rounded-lg
+                   hover:brightness-110 transition-all active:scale-95 shadow-sm cursor-pointer"
       >
         Get Started
       </button>

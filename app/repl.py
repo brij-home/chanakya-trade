@@ -123,6 +123,15 @@ COMMANDS = [
     "provider",
     "risk-report",
     "risk-status",
+    "health",
+    "tax",
+    "harvest",
+    "turnover",
+    "spreads",
+    "charges",
+    "tilt",
+    "council",
+    "persona",
     "execute",
     "harness",
     "save-pdf",
@@ -1381,16 +1390,21 @@ def run_repl(broker: BrokerAPI) -> None:
 
             # ── Portfolio (unified multi-broker view) ─────────
             elif command == "portfolio":
-                _warn_if_mock(broker)
-                try:
-                    from engine.portfolio import get_multi_broker_summary
+                if args and args[0].lower() in ("health", "audit", "check"):
+                    from engine.portfolio import print_portfolio_health
 
-                    _cmd_portfolio(get_multi_broker_summary())
-                except Exception as e:
-                    console.print(f"[red]Portfolio fetch failed:[/red] {e}")
-                    console.print(
-                        "[dim]One or more broker sessions may have expired. Try: logout → login[/dim]"
-                    )
+                    print_portfolio_health()
+                else:
+                    _warn_if_mock(broker)
+                    try:
+                        from engine.portfolio import get_multi_broker_summary
+
+                        _cmd_portfolio(get_multi_broker_summary())
+                    except Exception as e:
+                        console.print(f"[red]Portfolio fetch failed:[/red] {e}")
+                        console.print(
+                            "[dim]One or more broker sessions may have expired. Try: logout → login[/dim]"
+                        )
 
             # ── AI-powered commands ───────────────────────────
             elif command == "morning-brief":
@@ -1646,6 +1660,21 @@ def run_repl(broker: BrokerAPI) -> None:
                     "Max Trades per Symbol",
                     f"{status['max_trades_per_symbol']}",
                 )
+                consec = status.get("consecutive_losses_today", 0)
+                max_consec = status.get("max_consecutive_losses", 3)
+                consec_style = (
+                    "bold red" if consec >= max_consec else ("yellow" if consec > 0 else "green")
+                )
+                table.add_row(
+                    "Consecutive Losses (Tilt)",
+                    f"[{consec_style}]{consec} / {max_consec}[/{consec_style}]",
+                )
+                tilt_active = status.get("tilt_lockout_active", False)
+                tilt_style = "bold red" if tilt_active else "green"
+                table.add_row(
+                    "Tilt Lockout",
+                    f"[{tilt_style}]{'ACTIVE (LOCKED)' if tilt_active else 'CLEAR'}[/{tilt_style}]",
+                )
                 limits_hit = status["limits_hit"]
                 limits_style = "bold red" if limits_hit else "bold green"
                 table.add_row(
@@ -1753,9 +1782,15 @@ def run_repl(broker: BrokerAPI) -> None:
                 # Usage: funnel [nifty_it | nifty50 | nifty_bank | SYM1 SYM2 ...] [--top 3]
                 if not args:
                     console.print("[dim]Usage: funnel <preset or symbols> [--top N][/dim]")
-                    console.print("[dim]  funnel nifty_it             → Screen IT sector, debate top 3[/dim]")
-                    console.print("[dim]  funnel nifty50 --top 5      → Screen NIFTY 50, debate top 5[/dim]")
-                    console.print("[dim]  funnel INFY TCS HDFC PERSIS → Screen specific watchlist[/dim]")
+                    console.print(
+                        "[dim]  funnel nifty_it             → Screen IT sector, debate top 3[/dim]"
+                    )
+                    console.print(
+                        "[dim]  funnel nifty50 --top 5      → Screen NIFTY 50, debate top 5[/dim]"
+                    )
+                    console.print(
+                        "[dim]  funnel INFY TCS HDFC PERSIS → Screen specific watchlist[/dim]"
+                    )
                 else:
                     from agent.smart_funnel import SmartFunnel
 
@@ -1767,10 +1802,16 @@ def run_repl(broker: BrokerAPI) -> None:
                                 top_n = int(args[i + 1])
                             except ValueError:
                                 pass
-                        elif not a.startswith("-") and (i == 0 or args[i - 1] not in ("--top", "-n")):
+                        elif not a.startswith("-") and (
+                            i == 0 or args[i - 1] not in ("--top", "-n")
+                        ):
                             clean_args.append(a.upper())
 
-                    target = clean_args if len(clean_args) > 1 else (clean_args[0] if clean_args else "nifty_it")
+                    target = (
+                        clean_args
+                        if len(clean_args) > 1
+                        else (clean_args[0] if clean_args else "nifty_it")
+                    )
                     funnel = SmartFunnel()
                     res = funnel.run(symbols=target, top_n=top_n)
                     funnel.print_summary(res)
@@ -1996,7 +2037,9 @@ def run_repl(broker: BrokerAPI) -> None:
 
                 if sub == "clear":
                     cleared = analysis_cache.invalidate()
-                    console.print(f"[green]✓ Analysis and macro cache cleared ({cleared} entries removed).[/green]")
+                    console.print(
+                        f"[green]✓ Analysis and macro cache cleared ({cleared} entries removed).[/green]"
+                    )
                 else:
                     stats = analysis_cache.get_stats()
                     lines = [
@@ -2004,7 +2047,7 @@ def run_repl(broker: BrokerAPI) -> None:
                         f"[bold]Total Cache Hits:[/bold] [green]{stats['total_cache_hits']}[/green]",
                         f"[bold]AI Tokens Saved :[/bold] [bold green]~{stats['total_tokens_saved']:,}[/bold green]",
                         f"[bold]Database Storage:[/bold] {stats['db_size_kb']:.1f} KB ({stats['db_path']})",
-                        f"[bold]Intraday TTL    :[/bold] 15 Minutes (or price drift > 1.0%)",
+                        "[bold]Intraday TTL    :[/bold] 15 Minutes (or price drift > 1.0%)",
                     ]
                     console.print(
                         Panel(
@@ -2469,6 +2512,264 @@ def run_repl(broker: BrokerAPI) -> None:
                         df = get_ohlcv(sym, days=250)
                         sig = ensemble_signal(df)
                     console.print(format_ensemble(sig, sym))
+
+            # ── Retail Protection & Wealth Enablement Commands ───────
+            elif command in ("health", "portfolio-health"):
+                from engine.portfolio import print_portfolio_health
+
+                print_portfolio_health()
+
+            elif command in ("tax", "capital-gains"):
+                # Usage: tax [pnl] [--days 180] [--segment DELIVERY|INTRADAY|FO]
+                from engine.charges import calculate_capital_gains_tax, print_tax_estimate
+
+                pnl = 50000.0
+                days = 90
+                segment = "EQUITY_DELIVERY"
+                if args and not args[0].startswith("-"):
+                    try:
+                        pnl = float(args[0].replace(",", ""))
+                    except ValueError:
+                        pass
+                if "--days" in args:
+                    try:
+                        days = int(args[args.index("--days") + 1])
+                    except (ValueError, IndexError):
+                        pass
+                if "--segment" in args:
+                    try:
+                        segment = args[args.index("--segment") + 1].upper()
+                    except (ValueError, IndexError):
+                        pass
+                est = calculate_capital_gains_tax(
+                    gross_pnl=pnl, holding_period_days=days, segment=segment
+                )  # type: ignore
+                print_tax_estimate(est)
+
+            elif command in ("harvest", "tax-harvest", "tax-harvesting"):
+                from engine.portfolio import get_portfolio_summary
+                from engine.charges import suggest_tax_loss_harvesting, print_tax_harvesting
+
+                try:
+                    summary = get_portfolio_summary()
+                    holdings_dicts = [
+                        {
+                            "symbol": h.symbol,
+                            "qty": h.qty,
+                            "ltp": h.ltp,
+                            "pnl": h.pnl,
+                            "days_held": 90,
+                        }
+                        for h in summary.holdings
+                    ]
+                except Exception:
+                    holdings_dicts = [
+                        {
+                            "symbol": "INFY",
+                            "qty": 40,
+                            "ltp": 1420.0,
+                            "pnl": -3200.0,
+                            "days_held": 90,
+                        },
+                        {
+                            "symbol": "WIPRO",
+                            "qty": 100,
+                            "ltp": 460.0,
+                            "pnl": -1500.0,
+                            "days_held": 120,
+                        },
+                        {
+                            "symbol": "RELIANCE",
+                            "qty": 50,
+                            "ltp": 2850.0,
+                            "pnl": 12500.0,
+                            "days_held": 150,
+                        },
+                    ]
+                opps = suggest_tax_loss_harvesting(holdings_dicts)
+                print_tax_harvesting(opps)
+
+            elif command in ("turnover", "fo-turnover"):
+                from engine.charges import calculate_fo_turnover, print_fo_turnover
+
+                # Demo trades or active trades
+                trades = [
+                    {
+                        "segment": "OPTIONS",
+                        "side": "SELL",
+                        "price": 120.0,
+                        "quantity": 75,
+                        "pnl": 4500.0,
+                    },
+                    {
+                        "segment": "OPTIONS",
+                        "side": "BUY",
+                        "price": 45.0,
+                        "quantity": 75,
+                        "pnl": -1200.0,
+                    },
+                    {
+                        "segment": "FUTURES",
+                        "side": "SELL",
+                        "price": 24500.0,
+                        "quantity": 75,
+                        "pnl": 15000.0,
+                    },
+                ]
+                to_summary = calculate_fo_turnover(trades)
+                print_fo_turnover(to_summary)
+
+            elif command in ("spreads", "spread", "defined-risk"):
+                # Usage: spreads [SYMBOL] [STRATEGY]
+                from engine.defined_risk_spreads import (
+                    build_defined_risk_spread,
+                    recommend_defined_risk_spreads,
+                    print_defined_risk_spread,
+                )
+
+                sym = args[0].upper() if args else "NIFTY"
+                strat = args[1].upper() if len(args) > 1 else None
+                if strat:
+                    spread = build_defined_risk_spread(
+                        underlying=sym,
+                        spot_price=24500.0 if "NIFTY" in sym else 1500.0,
+                        strategy=strat,
+                    )  # type: ignore
+                    print_defined_risk_spread(spread)
+                else:
+                    spreads = recommend_defined_risk_spreads(underlying=sym)
+                    for s in spreads[:3]:
+                        print_defined_risk_spread(s)
+
+            elif command in ("risk-status", "tilt", "tilt-status"):
+                from engine.risk_limits import risk_limits
+                from rich.panel import Panel
+
+                st = risk_limits.get_status()
+                tilt_style = "bold red" if st["tilt_lockout_active"] else "bold green"
+                tilt_text = (
+                    "ACTIVE (Order placement blocked)"
+                    if st["tilt_lockout_active"]
+                    else "NORMAL (Ready to trade)"
+                )
+                lines = [
+                    f"  [bold]Daily P&L[/bold]                 : ₹{st['daily_loss']:,.2f} (Limit: -₹{abs(st['max_daily_loss']):,.2f})",
+                    f"  [bold]Remaining Loss Room[/bold]       : ₹{st['remaining_loss_room']:,.2f}",
+                    f"  [bold]Trades Today[/bold]              : {st['trades_today']} / {st['max_daily_trades']}",
+                    f"  [bold]Consecutive Losses Today[/bold]  : {st['consecutive_losses_today']} (Max: {st['max_consecutive_losses']})",
+                    f"  [bold]Tilt Lockout Guard[/bold]        : [{tilt_style}]{tilt_text}[/{tilt_style}]",
+                ]
+                console.print()
+                console.print(
+                    Panel(
+                        "\n".join(lines),
+                        title="[bold cyan]🛡 Daily Risk & Tilt Lockout Status[/bold cyan]",
+                        border_style="cyan",
+                    )
+                )
+                console.print()
+
+            elif command == "charges":
+                # Usage: charges <PRICE> <QTY> [SEGMENT] [BUY|SELL]
+                if not args or len(args) < 2:
+                    console.print(
+                        "[red]Usage: charges <PRICE> <QTY> [EQUITY_DELIVERY|EQUITY_INTRADAY|FUTURES|OPTIONS] [BUY|SELL][/red]"
+                    )
+                else:
+                    from engine.charges import (
+                        calculate_transaction_charges,
+                        print_transaction_charges,
+                    )
+
+                    try:
+                        p = float(args[0].replace(",", ""))
+                        q = int(args[1])
+                        seg = args[2].upper() if len(args) > 2 else "EQUITY_DELIVERY"
+                        sd = args[3].upper() if len(args) > 3 else "BUY"
+                        bd = calculate_transaction_charges(
+                            price=p, quantity=q, segment=seg, side=sd
+                        )  # type: ignore
+                        print_transaction_charges(bd)
+                    except Exception as err:
+                        console.print(f"[red]Error computing charges:[/red] {err}")
+
+            elif command == "council":
+                # Usage: council [COUNCIL_NAME] <SYMBOL>
+                # e.g. council breakout RELIANCE, council multibagger TATAMOTORS, council options_sniper NIFTY
+                if not args:
+                    console.print(
+                        "[yellow]Usage: council [breakout|options_sniper|multibagger|macro_regime|core_value] <SYMBOL>[/yellow]"
+                    )
+                    console.print(
+                        "[dim]Available councils: breakout, options_sniper, multibagger, macro_regime, core_value[/dim]"
+                    )
+                else:
+                    council_name = "breakout"
+                    symbol = args[0].upper()
+                    if len(args) >= 2:
+                        council_name = args[0].lower()
+                        symbol = args[1].upper()
+                    elif args[0].lower() in (
+                        "breakout",
+                        "options_sniper",
+                        "multibagger",
+                        "macro_regime",
+                        "core_value",
+                        "options",
+                    ):
+                        console.print(
+                            f"[red]Please specify a symbol: council {args[0]} <SYMBOL>[/red]"
+                        )
+                        symbol = None
+
+                    if symbol:
+                        from agent.persona_agent import run_council, print_council_verdict
+
+                        with console.status(
+                            f"[cyan]Polling {council_name.upper()} council for {symbol}…[/cyan]"
+                        ):
+                            res = run_council(council_name=council_name, symbol=symbol)
+                        print_council_verdict(res)
+
+            elif command == "persona":
+                # Usage: persona <PERSONA_ID> <SYMBOL>
+                # e.g. persona minervini RELIANCE, persona kedia TATAMOTORS, persona taleb NIFTY
+                if len(args) < 2:
+                    console.print(
+                        "[yellow]Usage: persona <buffett|jhunjhunwala|lynch|soros|munger|forensic|minervini|wyckoff|oneil|taleb|kedia|simons|smc> <SYMBOL>[/yellow]"
+                    )
+                else:
+                    pid = args[0].lower()
+                    sym = args[1].upper()
+                    from agent.persona_agent import run_persona_analysis
+                    from rich.panel import Panel
+
+                    with console.status(f"[cyan]Consulting {pid.title()} on {sym}…[/cyan]"):
+                        sig = run_persona_analysis(persona_id=pid, symbol=sym)
+                    pv_color = (
+                        "green"
+                        if "BUY" in sig.verdict
+                        else ("red" if "SELL" in sig.verdict else "yellow")
+                    )
+                    lines = [
+                        f"[bold]Verdict[/bold]    : [{pv_color}]{sig.verdict}[/{pv_color}] (Confidence: {sig.confidence}%)",
+                        "[bold]Rationale[/bold]  :",
+                    ]
+                    for r in sig.rationale:
+                        lines.append(f"  • {r}")
+                    if sig.key_metrics:
+                        lines.append("[bold]Key Checkpoints[/bold]:")
+                        for k, v in sig.key_metrics.items():
+                            lines.append(f"  - {k}: {v}")
+                    console.print()
+                    console.print(
+                        Panel(
+                            "\n".join(lines),
+                            title=f"[bold cyan]🧠 Persona Analysis: {pid.title()} on {sym}[/bold cyan]",
+                            border_style=pv_color,
+                        )
+                    )
+                    console.print()
 
             else:
                 console.print(

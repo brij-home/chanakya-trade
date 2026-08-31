@@ -3,16 +3,16 @@ import { useInspectorStore } from '../../store/inspectorStore'
 import Tooltip, { InfoBadge } from '../UI/Tooltip'
 
 const HEALTH_CONFIG = {
-  'HEALTHY_ACCELERATING':  { label: '🚀 Accelerating Gain', color: 'bg-green/15 text-green border border-green/30' },
-  'HEALTHY_PULLBACK':      { label: '🔄 Healthy Pullback', color: 'bg-blue/15 text-blue border border-blue/30' },
-  'MOMENTUM_STALLING':     { label: '⚠️ Momentum Stalling', color: 'bg-amber/15 text-amber border border-amber/30' },
-  'STRUCTURAL_INVALIDATION': { label: '🛑 Structural Invalidation', color: 'bg-red text-surface font-bold' },
+  'HEALTHY_ACCELERATING':  { label: '🚀 Accelerating Gain', color: 'bg-green/15 text-green border border-green/30 font-bold' },
+  'HEALTHY_PULLBACK':      { label: '🔄 Healthy Pullback', color: 'bg-blue/15 text-blue border border-blue/30 font-bold' },
+  'MOMENTUM_STALLING':     { label: '⚠️ Momentum Stalling', color: 'bg-amber/15 text-amber border border-amber/30 font-bold' },
+  'STRUCTURAL_INVALIDATION': { label: '🛑 Structural Invalidation', color: 'bg-red text-white font-extrabold' },
 }
 
 export default function PositionTrackerCard({ data }) {
+  const openInspector = useInspectorStore((s) => s.openInspector)
   if (!data) return null
   const d = data?.data ?? data ?? {}
-  const openInspector = useInspectorStore((s) => s.openInspector)
 
   const healthCfg = HEALTH_CONFIG[d.health_status] || HEALTH_CONFIG['HEALTHY_ACCELERATING']
   const milestones = d.milestones || []

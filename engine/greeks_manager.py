@@ -58,7 +58,9 @@ class DeltaHedgeSuggestion:
     current_delta: float
     target_delta: float
     gap: float  # how much delta to add (positive) or remove (negative)
-    suggestions: list[dict]  # [{"action", "instrument", "lots", "delta_change", "why", "when", "how"}]
+    suggestions: list[
+        dict
+    ]  # [{"action", "instrument", "lots", "delta_change", "why", "when", "how"}]
     cost_estimate: float = 0.0
     lot_size: int = 75
     rupee_sensitivity: float = 0.0

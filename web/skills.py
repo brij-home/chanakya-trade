@@ -45,7 +45,7 @@ import asyncio
 import json
 import os
 import sys
-from datetime import datetime, date, timedelta
+from datetime import datetime
 from typing import Optional
 from uuid import uuid4
 
@@ -188,6 +188,26 @@ class SectorHeatmapRequest(BaseModel):
     exchange: str = "NSE"
 
 
+class PortfolioHealthRequest(BaseModel):
+    portfolio: Optional[dict] = None
+
+
+class TaxEstimateRequest(BaseModel):
+    gross_pnl: float
+    holding_period_days: int = 180
+    segment: str = "EQUITY_DELIVERY"  # EQUITY_DELIVERY | EQUITY_INTRADAY | FUTURES | OPTIONS
+    prior_accumulated_ltcg: float = 0.0
+
+
+class DefinedRiskSpreadRequest(BaseModel):
+    underlying: str = "NIFTY"
+    spot_price: float = 24000.0
+    strategy: str = "BULL_CALL_SPREAD"  # BULL_CALL_SPREAD | BEAR_PUT_SPREAD | BULL_PUT_SPREAD | BEAR_CALL_SPREAD | IRON_CONDOR
+    iv: float = 0.15
+    dte: int = 7
+    num_lots: int = 1
+
+
 # ── Helper ────────────────────────────────────────────────────
 
 
@@ -225,31 +245,50 @@ async def skill_history(req: HistoryRequest):
     try:
         from market.history import get_ohlcv
         import numpy as np
-        import pandas as pd
         from engine.provenance import create_provenance
 
-        df = get_ohlcv(req.symbol.upper(), req.exchange.upper(), interval=req.interval, days=req.days)
+        df = get_ohlcv(
+            req.symbol.upper(), req.exchange.upper(), interval=req.interval, days=req.days
+        )
         if df is None or df.empty:
-            return _ok({
-                "symbol": req.symbol.upper(),
-                "exchange": req.exchange.upper(),
-                "interval": req.interval,
-                "candles": [],
-                "volumes": [],
-                "sma20": [],
-                "sma50": [],
-                "sma200": [],
-                "order_blocks": {"demand": [], "supply": []},
-                "volume_profile": {"poc": 0, "vah": 0, "val": 0, "buckets": []},
-                "stoch_rsi": {"k": [], "d": []},
-                "divergences": [],
-                "macd": {"line": [], "signal": [], "hist": []},
-                "_provenance": create_provenance("HISTORICAL_EOD").to_dict(),
-            })
+            return _ok(
+                {
+                    "symbol": req.symbol.upper(),
+                    "exchange": req.exchange.upper(),
+                    "interval": req.interval,
+                    "candles": [],
+                    "volumes": [],
+                    "sma20": [],
+                    "sma50": [],
+                    "sma200": [],
+                    "order_blocks": {"demand": [], "supply": []},
+                    "volume_profile": {"poc": 0, "vah": 0, "val": 0, "buckets": []},
+                    "stoch_rsi": {"k": [], "d": []},
+                    "divergences": [],
+                    "macd": {"line": [], "signal": [], "hist": []},
+                    "_provenance": create_provenance("HISTORICAL_EOD").to_dict(),
+                }
+            )
 
         candles = []
         volumes = []
-        is_intraday = req.interval.lower() in ("minute", "1minute", "3minute", "3m", "5minute", "5m", "10minute", "10m", "15minute", "15m", "30minute", "30m", "60minute", "1h", "60m")
+        is_intraday = req.interval.lower() in (
+            "minute",
+            "1minute",
+            "3minute",
+            "3m",
+            "5minute",
+            "5m",
+            "10minute",
+            "10m",
+            "15minute",
+            "15m",
+            "30minute",
+            "30m",
+            "60minute",
+            "1h",
+            "60m",
+        )
         vol_sma20 = df["volume"].rolling(20, min_periods=5).mean().fillna(df["volume"])
 
         for i, (ts, row) in enumerate(df.iterrows()):
@@ -276,25 +315,29 @@ async def skill_history(req: HistoryRequest):
             else:
                 vol_color = "rgba(244, 63, 94, 0.5)"
 
-            candles.append({
-                "time": t_val,
-                "open": c_open,
-                "high": c_high,
-                "low": c_low,
-                "close": c_close,
-                "volume": c_vol,
-                "rvol": rvol,
-                "is_inst_buy": is_inst_buy,
-                "is_inst_sell": is_inst_sell,
-            })
-            volumes.append({
-                "time": t_val,
-                "value": c_vol,
-                "color": vol_color,
-                "rvol": rvol,
-                "is_inst_buy": is_inst_buy,
-                "is_inst_sell": is_inst_sell,
-            })
+            candles.append(
+                {
+                    "time": t_val,
+                    "open": c_open,
+                    "high": c_high,
+                    "low": c_low,
+                    "close": c_close,
+                    "volume": c_vol,
+                    "rvol": rvol,
+                    "is_inst_buy": is_inst_buy,
+                    "is_inst_sell": is_inst_sell,
+                }
+            )
+            volumes.append(
+                {
+                    "time": t_val,
+                    "value": c_vol,
+                    "color": vol_color,
+                    "rvol": rvol,
+                    "is_inst_buy": is_inst_buy,
+                    "is_inst_sell": is_inst_sell,
+                }
+            )
 
         # ── 1. Moving Averages ────────────────────────────────────────
         sma20, sma50, sma200 = [], [], []
@@ -315,12 +358,23 @@ async def skill_history(req: HistoryRequest):
                 sma200.append({"time": t_val, "value": round(float(val), 2)})
 
         tf_map = {
-            "5m": "5m", "5minute": "5m",
-            "15m": "15m", "15minute": "15m",
-            "1h": "1h", "60minute": "1h", "60m": "1h",
-            "day": "1D", "1d": "1D", "1D": "1D",
-            "week": "1W", "1w": "1W", "1wk": "1W", "1W": "1W",
-            "month": "1M", "1mo": "1M", "1M": "1M",
+            "5m": "5m",
+            "5minute": "5m",
+            "15m": "15m",
+            "15minute": "15m",
+            "1h": "1h",
+            "60minute": "1h",
+            "60m": "1h",
+            "day": "1D",
+            "1d": "1D",
+            "1D": "1D",
+            "week": "1W",
+            "1w": "1W",
+            "1wk": "1W",
+            "1W": "1W",
+            "month": "1M",
+            "1mo": "1M",
+            "1M": "1M",
         }
         tf_label = tf_map.get(req.interval.lower(), req.interval.upper())
 
@@ -328,33 +382,42 @@ async def skill_history(req: HistoryRequest):
         demand_obs, supply_obs = [], []
         try:
             from analysis.market_structure import analyze_market_structure
+
             ms = analyze_market_structure(symbol=req.symbol.upper(), df=df)
             for d_ob in ms.active_demand_zones:
                 if not d_ob.mitigated:
-                    demand_obs.append({
-                        "tf": tf_label,
-                        "type": "DEMAND",
-                        "top": round(float(d_ob.top), 2),
-                        "bottom": round(float(d_ob.bottom), 2),
-                        "midpoint": round(float(d_ob.midpoint), 2),
-                        "date": str(d_ob.formed_date),
-                        "volume_ratio": round(float(d_ob.volume_ratio), 2),
-                        "confluence_count": getattr(d_ob, "confluence_count", 1),
-                        "ote_price": round(float(getattr(d_ob, "ote_price", (d_ob.top + d_ob.bottom) / 2.0)), 2),
-                    })
+                    demand_obs.append(
+                        {
+                            "tf": tf_label,
+                            "type": "DEMAND",
+                            "top": round(float(d_ob.top), 2),
+                            "bottom": round(float(d_ob.bottom), 2),
+                            "midpoint": round(float(d_ob.midpoint), 2),
+                            "date": str(d_ob.formed_date),
+                            "volume_ratio": round(float(d_ob.volume_ratio), 2),
+                            "confluence_count": getattr(d_ob, "confluence_count", 1),
+                            "ote_price": round(
+                                float(getattr(d_ob, "ote_price", (d_ob.top + d_ob.bottom) / 2.0)), 2
+                            ),
+                        }
+                    )
             for s_ob in ms.active_supply_zones:
                 if not s_ob.mitigated:
-                    supply_obs.append({
-                        "tf": tf_label,
-                        "type": "SUPPLY",
-                        "top": round(float(s_ob.top), 2),
-                        "bottom": round(float(s_ob.bottom), 2),
-                        "midpoint": round(float(s_ob.midpoint), 2),
-                        "date": str(s_ob.formed_date),
-                        "volume_ratio": round(float(s_ob.volume_ratio), 2),
-                        "confluence_count": getattr(s_ob, "confluence_count", 1),
-                        "ote_price": round(float(getattr(s_ob, "ote_price", (s_ob.top + s_ob.bottom) / 2.0)), 2),
-                    })
+                    supply_obs.append(
+                        {
+                            "tf": tf_label,
+                            "type": "SUPPLY",
+                            "top": round(float(s_ob.top), 2),
+                            "bottom": round(float(s_ob.bottom), 2),
+                            "midpoint": round(float(s_ob.midpoint), 2),
+                            "date": str(s_ob.formed_date),
+                            "volume_ratio": round(float(s_ob.volume_ratio), 2),
+                            "confluence_count": getattr(s_ob, "confluence_count", 1),
+                            "ote_price": round(
+                                float(getattr(s_ob, "ote_price", (s_ob.top + s_ob.bottom) / 2.0)), 2
+                            ),
+                        }
+                    )
         except Exception:
             pass
 
@@ -362,6 +425,7 @@ async def skill_history(req: HistoryRequest):
         vp_dict = {"tf": tf_label, "poc": 0.0, "vah": 0.0, "val": 0.0, "buckets": []}
         try:
             from analysis.volume_profile import compute_volume_profile
+
             poc_p, vah_p, val_p, buckets = compute_volume_profile(df, num_bins=15)
             vp_dict = {
                 "tf": tf_label,
@@ -420,12 +484,18 @@ async def skill_history(req: HistoryRequest):
                     t_val = int(ts.timestamp()) if is_intraday else ts.strftime("%Y-%m-%d")
                     h_val = float(hist_l[ts])
                     macd_res["line"].append({"time": t_val, "value": round(float(m_val), 2)})
-                    macd_res["signal"].append({"time": t_val, "value": round(float(signal_l[ts]), 2)})
-                    macd_res["hist"].append({
-                        "time": t_val,
-                        "value": round(h_val, 2),
-                        "color": "rgba(34, 197, 94, 0.7)" if h_val >= 0 else "rgba(239, 68, 68, 0.7)",
-                    })
+                    macd_res["signal"].append(
+                        {"time": t_val, "value": round(float(signal_l[ts]), 2)}
+                    )
+                    macd_res["hist"].append(
+                        {
+                            "time": t_val,
+                            "value": round(h_val, 2),
+                            "color": "rgba(34, 197, 94, 0.7)"
+                            if h_val >= 0
+                            else "rgba(239, 68, 68, 0.7)",
+                        }
+                    )
 
             # RSI & Stochastic RSI Divergence detection (Pivot low/high scan)
             closes = df["close"].values
@@ -441,40 +511,58 @@ async def skill_history(req: HistoryRequest):
                     prev_high_idx = lb_start + int(np.argmax(highs[lb_start:lb_end]))
 
                     k_curr = float(k_series.iloc[i]) if i < len(k_series) else 50.0
-                    k_prev_low = float(k_series.iloc[prev_low_idx]) if prev_low_idx < len(k_series) else 50.0
-                    k_prev_high = float(k_series.iloc[prev_high_idx]) if prev_high_idx < len(k_series) else 50.0
+                    k_prev_low = (
+                        float(k_series.iloc[prev_low_idx]) if prev_low_idx < len(k_series) else 50.0
+                    )
+                    k_prev_high = (
+                        float(k_series.iloc[prev_high_idx])
+                        if prev_high_idx < len(k_series)
+                        else 50.0
+                    )
 
                     # Bullish divergence: lower/equal low in price with higher low in RSI or Stoch %K in oversold territory
                     is_bull_div = (lows[i] <= lows[prev_low_idx] * 1.002) and (
-                        (rsi.iloc[i] > rsi.iloc[prev_low_idx] + 1.2 and rsi.iloc[i] < 50) or
-                        (k_curr > k_prev_low + 4.0 and k_curr < 40)
+                        (rsi.iloc[i] > rsi.iloc[prev_low_idx] + 1.2 and rsi.iloc[i] < 50)
+                        or (k_curr > k_prev_low + 4.0 and k_curr < 40)
                     )
                     if is_bull_div:
-                        t_val = int(timestamps[i].timestamp()) if is_intraday else timestamps[i].strftime("%Y-%m-%d")
-                        divergences.append({
-                            "time": t_val,
-                            "price": round(float(closes[i]), 2),
-                            "stoch_k": round(k_curr, 1),
-                            "type": "BULLISH_DIV",
-                            "label": "▲ Bull Div",
-                            "color": "#10b981",
-                        })
+                        t_val = (
+                            int(timestamps[i].timestamp())
+                            if is_intraday
+                            else timestamps[i].strftime("%Y-%m-%d")
+                        )
+                        divergences.append(
+                            {
+                                "time": t_val,
+                                "price": round(float(closes[i]), 2),
+                                "stoch_k": round(k_curr, 1),
+                                "type": "BULLISH_DIV",
+                                "label": "▲ Bull Div",
+                                "color": "#10b981",
+                            }
+                        )
 
                     # Bearish divergence: higher/equal high in price with lower high in RSI or Stoch %K in overbought territory
                     is_bear_div = (highs[i] >= highs[prev_high_idx] * 0.998) and (
-                        (rsi.iloc[i] < rsi.iloc[prev_high_idx] - 1.2 and rsi.iloc[i] > 50) or
-                        (k_curr < k_prev_high - 4.0 and k_curr > 60)
+                        (rsi.iloc[i] < rsi.iloc[prev_high_idx] - 1.2 and rsi.iloc[i] > 50)
+                        or (k_curr < k_prev_high - 4.0 and k_curr > 60)
                     )
                     if is_bear_div:
-                        t_val = int(timestamps[i].timestamp()) if is_intraday else timestamps[i].strftime("%Y-%m-%d")
-                        divergences.append({
-                            "time": t_val,
-                            "price": round(float(closes[i]), 2),
-                            "stoch_k": round(k_curr, 1),
-                            "type": "BEARISH_DIV",
-                            "label": "▼ Bear Div",
-                            "color": "#f43f5e",
-                        })
+                        t_val = (
+                            int(timestamps[i].timestamp())
+                            if is_intraday
+                            else timestamps[i].strftime("%Y-%m-%d")
+                        )
+                        divergences.append(
+                            {
+                                "time": t_val,
+                                "price": round(float(closes[i]), 2),
+                                "stoch_k": round(k_curr, 1),
+                                "type": "BEARISH_DIV",
+                                "label": "▼ Bear Div",
+                                "color": "#f43f5e",
+                            }
+                        )
 
         prov = create_provenance(
             source="LIVE_TICK" if is_intraday else "HISTORICAL_EOD",
@@ -482,28 +570,30 @@ async def skill_history(req: HistoryRequest):
             completeness=100.0,
         )
 
-        return _ok({
-            "symbol": req.symbol.upper(),
-            "exchange": req.exchange.upper(),
-            "interval": req.interval,
-            "candles": candles,
-            "volumes": volumes,
-            "sma20": sma20,
-            "sma50": sma50,
-            "sma200": sma200,
-            "order_blocks": {
-                "demand": demand_obs,
-                "supply": supply_obs,
-            },
-            "volume_profile": vp_dict,
-            "stoch_rsi": {
-                "k": stoch_k,
-                "d": stoch_d,
-            },
-            "divergences": divergences,
-            "macd": macd_res,
-            "_provenance": prov.to_dict(),
-        })
+        return _ok(
+            {
+                "symbol": req.symbol.upper(),
+                "exchange": req.exchange.upper(),
+                "interval": req.interval,
+                "candles": candles,
+                "volumes": volumes,
+                "sma20": sma20,
+                "sma50": sma50,
+                "sma200": sma200,
+                "order_blocks": {
+                    "demand": demand_obs,
+                    "supply": supply_obs,
+                },
+                "volume_profile": vp_dict,
+                "stoch_rsi": {
+                    "k": stoch_k,
+                    "d": stoch_d,
+                },
+                "divergences": divergences,
+                "macd": macd_res,
+                "_provenance": prov.to_dict(),
+            }
+        )
     except Exception as e:
         raise _err(str(e))
 
@@ -556,7 +646,9 @@ async def skill_payoff(req: PayoffSimRequest):
         for l in req.legs:
             qty = l.lots * l.lot_size
             mult = 1 if l.action.upper() == "BUY" else -1
-            expiry_date_str = (datetime.now() + timedelta(days=max(1, req.dte))).strftime("%Y-%m-%d")
+            expiry_date_str = (datetime.now() + timedelta(days=max(1, req.dte))).strftime(
+                "%Y-%m-%d"
+            )
             g = compute_greeks(req.spot_price, l.strike, expiry_date_str, l.option_type, l.premium)
             net_delta += g.delta * qty * mult
             net_gamma += g.gamma * qty * mult
@@ -579,7 +671,9 @@ async def skill_payoff(req: PayoffSimRequest):
                         val_at_exp = s
                     theo = val_at_exp
                 else:
-                    d1 = (math.log(s / k) + (rate + 0.5 * eval_iv**2) * eval_t) / (eval_iv * math.sqrt(eval_t))
+                    d1 = (math.log(s / k) + (rate + 0.5 * eval_iv**2) * eval_t) / (
+                        eval_iv * math.sqrt(eval_t)
+                    )
                     d2 = d1 - eval_iv * math.sqrt(eval_t)
                     if l.option_type.upper() == "CE":
                         theo = s * norm.cdf(d1) - k * math.exp(-rate * eval_t) * norm.cdf(d2)
@@ -593,27 +687,36 @@ async def skill_payoff(req: PayoffSimRequest):
 
             t0_points.append({"spot": round(float(s), 2), "pnl": round(float(t0_pnl), 2)})
 
-        expiry_curve = [{"spot": round(float(p.spot), 2), "pnl": round(float(p.pnl), 2)} for p in exp_payoff.payoff]
+        expiry_curve = [
+            {"spot": round(float(p.spot), 2), "pnl": round(float(p.pnl), 2)}
+            for p in exp_payoff.payoff
+        ]
 
-        return _ok({
-            "symbol": req.symbol,
-            "spot_price": req.spot_price,
-            "dte": req.dte,
-            "iv": req.iv,
-            "iv_shock": req.iv_shock,
-            "target_dte": req.target_dte,
-            "max_profit": exp_payoff.max_profit if exp_payoff.max_profit != float("inf") else "Unlimited",
-            "max_loss": exp_payoff.max_loss if exp_payoff.max_loss != float("-inf") else "Unlimited",
-            "breakevens": [round(b, 2) for b in exp_payoff.breakevens],
-            "expiry_payoff": expiry_curve,
-            "target_payoff": t0_points,
-            "greeks": {
-                "delta": round(net_delta, 2),
-                "gamma": round(net_gamma, 4),
-                "theta": round(net_theta, 2),
-                "vega": round(net_vega, 2),
-            },
-        })
+        return _ok(
+            {
+                "symbol": req.symbol,
+                "spot_price": req.spot_price,
+                "dte": req.dte,
+                "iv": req.iv,
+                "iv_shock": req.iv_shock,
+                "target_dte": req.target_dte,
+                "max_profit": exp_payoff.max_profit
+                if exp_payoff.max_profit != float("inf")
+                else "Unlimited",
+                "max_loss": exp_payoff.max_loss
+                if exp_payoff.max_loss != float("-inf")
+                else "Unlimited",
+                "breakevens": [round(b, 2) for b in exp_payoff.breakevens],
+                "expiry_payoff": expiry_curve,
+                "target_payoff": t0_points,
+                "greeks": {
+                    "delta": round(net_delta, 2),
+                    "gamma": round(net_gamma, 4),
+                    "theta": round(net_theta, 2),
+                    "vega": round(net_vega, 2),
+                },
+            }
+        )
     except Exception as e:
         raise _err(str(e))
 
@@ -630,22 +733,26 @@ async def skill_sector_heatmap():
                 continue
             try:
                 snap = get_index(code)
-                sectors.append({
-                    "code": code,
-                    "name": snap.name,
-                    "ltp": snap.ltp,
-                    "change": snap.change,
-                    "change_pct": round(snap.change_pct, 2),
-                })
+                sectors.append(
+                    {
+                        "code": code,
+                        "name": snap.name,
+                        "ltp": snap.ltp,
+                        "change": snap.change,
+                        "change_pct": round(snap.change_pct, 2),
+                    }
+                )
             except Exception:
                 pass
 
         sectors.sort(key=lambda s: s["change_pct"], reverse=True)
-        return _ok({
-            "sectors": sectors,
-            "top_gainer": sectors[0] if sectors else None,
-            "top_loser": sectors[-1] if sectors else None,
-        })
+        return _ok(
+            {
+                "sectors": sectors,
+                "top_gainer": sectors[0] if sectors else None,
+                "top_loser": sectors[-1] if sectors else None,
+            }
+        )
     except Exception as e:
         raise _err(str(e))
 
@@ -814,6 +921,7 @@ async def skill_analyze(req: AnalyzeRequest):
         spot = None
         try:
             from market.quotes import get_quote
+
             q = get_quote([f"{exch}:{sym}"])
             if q:
                 spot = list(q.values())[0].last_price
@@ -927,20 +1035,24 @@ async def skill_analyze_stream(symbol: str, exchange: str = "NSE", force: bool =
             if not force:
                 cached = analysis_cache.get_analysis(sym, exch, "api")
                 if cached:
-                    _cb({
-                        "type": "cached",
-                        "message": f"⚡ Instant cache hit ({cached['age_seconds']}s old | 0 AI tokens used)",
-                        "age_seconds": cached["age_seconds"],
-                        "tokens_saved": 4500,
-                    })
-                    _cb({
-                        "type": "done",
-                        "symbol": sym,
-                        "exchange": exch,
-                        "report": cached["report"],
-                        "trade_plans": cached["trade_plans"],
-                        "cached": True,
-                    })
+                    _cb(
+                        {
+                            "type": "cached",
+                            "message": f"⚡ Instant cache hit ({cached['age_seconds']}s old | 0 AI tokens used)",
+                            "age_seconds": cached["age_seconds"],
+                            "tokens_saved": 4500,
+                        }
+                    )
+                    _cb(
+                        {
+                            "type": "done",
+                            "symbol": sym,
+                            "exchange": exch,
+                            "report": cached["report"],
+                            "trade_plans": cached["trade_plans"],
+                            "cached": True,
+                        }
+                    )
                     return
 
             spot = None
@@ -999,8 +1111,11 @@ async def skill_analyze_stream(symbol: str, exchange: str = "NSE", force: bool =
             )
         except Exception as exc:
             import traceback
+
             tb = traceback.format_exc()
-            console.print(f"[bold red]❌ Multi-Agent Analysis stream error for {sym}:[/bold red]\n{tb}")
+            console.print(
+                f"[bold red]❌ Multi-Agent Analysis stream error for {sym}:[/bold red]\n{tb}"
+            )
             _cb({"type": "error", "message": str(exc), "detail": str(tb)})
         finally:
             _active_streams.pop(stream_id, None)
@@ -1596,6 +1711,7 @@ async def skill_delta_hedge():
 
         if broker_connected:
             from engine.portfolio import get_position_greeks
+
             pg = get_position_greeks()
             hedge = compute_delta_hedge(
                 net_delta=pg.net_delta,
@@ -1617,7 +1733,9 @@ async def skill_delta_hedge():
             )
             data_dict = _serialise(hedge)
             data_dict["demo"] = True
-            data_dict["message"] = "Paper simulation mode: showing 1-lot institutional baseline hedge."
+            data_dict["message"] = (
+                "Paper simulation mode: showing 1-lot institutional baseline hedge."
+            )
             return {"status": "ok", "data": data_dict}
     except Exception as e:
         raise _err(str(e))
@@ -1659,12 +1777,17 @@ async def skill_reconcile():
 
         try:
             from engine.portfolio import get_portfolio_summary
+
             summary = get_portfolio_summary()
             int_positions = [
                 {"symbol": p.symbol, "qty": p.qty, "avg_price": p.avg_price, "pnl": p.pnl}
                 for p in summary.positions
             ]
-            cash_val = summary.funds.available_cash if hasattr(summary.funds, "available_cash") else 1000000.0
+            cash_val = (
+                summary.funds.available_cash
+                if hasattr(summary.funds, "available_cash")
+                else 1000000.0
+            )
             broker_name = summary.positions[0].broker if summary.positions else "PAPER_SIMULATOR"
         except Exception:
             int_positions = []
@@ -1678,7 +1801,10 @@ async def skill_reconcile():
             broker_cash=cash_val,
             broker_name=broker_name,
         )
-        data = attach_provenance(report.to_dict(), source="LIVE_BROKER" if broker_name != "PAPER_SIMULATOR" else "FALLBACK_CACHE")
+        data = attach_provenance(
+            report.to_dict(),
+            source="LIVE_BROKER" if broker_name != "PAPER_SIMULATOR" else "FALLBACK_CACHE",
+        )
         return {"status": "ok", "data": data}
     except Exception as e:
         raise _err(str(e))
@@ -2215,7 +2341,6 @@ class SettingsUpdateRequest(BaseModel):
 @router.get("/settings")
 async def skill_settings_get():
     """Return current app configuration. Secrets are masked."""
-    import os
 
     result: dict[str, object] = {}
     for key, is_secret in _SETTINGS_READABLE:
@@ -2232,7 +2357,6 @@ async def skill_settings_get():
 @router.post("/settings")
 async def skill_settings_post(req: SettingsUpdateRequest):
     """Update app settings. Writes to os.environ + keychain."""
-    import os
 
     disallowed = [k for k in req.settings if k not in _SETTINGS_ALLOWED_WRITE]
     if disallowed:
@@ -2421,7 +2545,9 @@ async def skill_funnel(req: FunnelSkillRequest):
         from agent.smart_funnel import SmartFunnel
 
         funnel = SmartFunnel(verbose=False)
-        result = await asyncio.to_thread(funnel.run, symbols=req.symbols, exchange=req.exchange, top_n=req.top_n)
+        result = await asyncio.to_thread(
+            funnel.run, symbols=req.symbols, exchange=req.exchange, top_n=req.top_n
+        )
         return _ok(result.as_dict())
     except Exception as e:
         raise _err(str(e))
@@ -2444,7 +2570,9 @@ async def skill_market_structure(req: MarketStructureSkillRequest):
     try:
         from analysis.market_structure import analyze_market_structure
 
-        report = analyze_market_structure(req.symbol, exchange=req.exchange, timeframe=req.timeframe)
+        report = analyze_market_structure(
+            req.symbol, exchange=req.exchange, timeframe=req.timeframe
+        )
         return _ok(report.to_dict())
     except Exception as e:
         raise _err(str(e))
@@ -2481,16 +2609,218 @@ class MultibaggerSkillRequest(BaseModel):
     exchange: str = "NSE"
 
 
+class MultibaggerScanSkillRequest(BaseModel):
+    universe: str = "multibagger_hunters"
+    horizon: str = "ALL_HORIZONS"  # "SHORT_TERM" | "MID_TERM" | "LONG_TERM" | "ALL_HORIZONS"
+    min_conviction: int = 50
+    max_results: int = 25
+    exchange: str = "NSE"
+
+
 @router.post("/multibagger")
+@router.post("/multibagger_analyze")
 async def skill_multibagger(req: MultibaggerSkillRequest):
     """
-    Minervini 8-Point Trend Template, Weinstein Stage Analysis, VCP Detection, and Multibagger Score.
+    Minervini 8-Point Trend Template, Weinstein Stage Analysis, VCP Detection, 3-Horizon Potential, and Execution Tickets.
     """
     try:
         from analysis.multibagger import scan_multibagger_opportunity
 
         report = scan_multibagger_opportunity(req.symbol, exchange=req.exchange)
         return _ok(report.to_dict())
+    except Exception as e:
+        raise _err(str(e))
+
+
+@router.post("/multibagger_scan")
+async def skill_multibagger_scan(req: MultibaggerScanSkillRequest):
+    """
+    Parallel multi-threaded scanner across NIFTY 500, Microcap 250, BSE High Growth, or thematic universes.
+    """
+    try:
+        from analysis.multibagger_scanner import scan_multibagger_universe
+
+        result = scan_multibagger_universe(
+            universe=req.universe,
+            horizon=req.horizon,
+            min_conviction=req.min_conviction,
+            max_results=req.max_results,
+            exchange=req.exchange,
+        )
+        return _ok(result.to_dict())
+    except Exception as e:
+        raise _err(str(e))
+
+
+@router.get("/multibagger_universes")
+@router.post("/multibagger_universes")
+async def skill_multibagger_universes():
+    """
+    Returns available universe presets for multibagger scanning.
+    """
+    try:
+        from analysis.universe import THEMATIC_PRESETS
+
+        universes = [
+            {
+                "id": k,
+                "name": v.get("name", k),
+                "description": v.get("description", ""),
+                "count": len(v.get("symbols", [])),
+                "is_dynamic": "Dynamic" in v.get("name", ""),
+            }
+            for k, v in THEMATIC_PRESETS.items()
+        ]
+        return _ok({"universes": universes, "total_universes": len(universes)})
+    except Exception as e:
+        raise _err(str(e))
+
+
+@router.get("/multibagger_alerts")
+@router.post("/multibagger_alerts")
+async def skill_multibagger_alerts(horizon: Optional[str] = None, limit: int = 50):
+    """
+    Retrieves triggered real-time multibagger catalyst alerts.
+    """
+    try:
+        from engine.multibagger_alerts import get_alert_manager
+
+        mgr = get_alert_manager()
+        alerts = mgr.get_recent_alerts(limit=limit, horizon=horizon)
+        return _ok({"alerts": [a.to_dict() for a in alerts], "count": len(alerts)})
+    except Exception as e:
+        raise _err(str(e))
+
+
+# ── 3-Axis Super-Investor & Magic Trend Skills ─────────────────
+
+
+class MagicTrendSkillRequest(BaseModel):
+    symbol: str
+    exchange: str = "NSE"
+
+
+class ThematicBasketScanSkillRequest(BaseModel):
+    basket_id: str = "mayer_100_baggers"
+    min_score: int = 50
+    max_results: int = 15
+    exchange: str = "NSE"
+
+
+@router.post("/magic_trend")
+async def skill_magic_trend(req: MagicTrendSkillRequest):
+    """
+    3-Axis (X: Quality, Y: Growth, Z: Timing/Value) Super-Investor & Magic Trend evaluation.
+    """
+    try:
+        from analysis.magic_trend import calculate_magic_trend_score
+
+        report = calculate_magic_trend_score(req.symbol, exchange=req.exchange)
+        return _ok(report.to_dict())
+    except Exception as e:
+        raise _err(str(e))
+
+
+@router.post("/thematic_baskets/scan")
+async def skill_thematic_baskets_scan(req: ThematicBasketScanSkillRequest):
+    """
+    Scans institutional thematic baskets (100-Baggers, Lynch GARP, Jhunjhunwala Capex, CAN SLIM).
+    """
+    try:
+        from analysis.thematic_baskets import scan_thematic_basket
+
+        result = scan_thematic_basket(
+            basket_id=req.basket_id,
+            min_score=req.min_score,
+            max_results=req.max_results,
+            exchange=req.exchange,
+        )
+        return _ok(result.to_dict())
+    except Exception as e:
+        raise _err(str(e))
+
+
+@router.get("/thematic_baskets/list")
+@router.post("/thematic_baskets/list")
+async def skill_thematic_baskets_list():
+    """
+    Lists all 6 institutional thematic baskets with philosophy, target CAGR, and criteria.
+    """
+    try:
+        from analysis.thematic_baskets import list_all_thematic_baskets
+
+        baskets = list_all_thematic_baskets()
+        return _ok({"baskets": baskets, "total_baskets": len(baskets)})
+    except Exception as e:
+        raise _err(str(e))
+
+
+# ── Broker Portfolio AI Doctor & Optimizer Skill ───────────────
+
+
+@router.get("/portfolio/doctor")
+@router.post("/portfolio/doctor")
+async def skill_portfolio_doctor():
+    """
+    Full AI Health Diagnosis on connected broker holdings:
+    Stage 4 dead-money detection, HHI concentration risks, tax-loss harvesting, and rebalancing prescriptions.
+    """
+    try:
+        from engine.portfolio_doctor import diagnose_portfolio
+
+        report = diagnose_portfolio()
+        return _ok(report.to_dict())
+    except Exception as e:
+        raise _err(str(e))
+
+
+# ── Proven Super-Investor Prompts Skill ─────────────────────────
+
+
+@router.get("/prompts/proven")
+@router.post("/prompts/proven")
+async def skill_prompts_proven():
+    """
+    Returns curated, proven institutional super-investor prompts for 1-click terminal execution.
+    """
+    try:
+        prompts = [
+            {
+                "category": "💎 100-Baggers & Compounders",
+                "title": "Christopher Mayer 100-Baggers Screen",
+                "prompt": "Scan NIFTY Microcap 250 for Christopher Mayer 100-Bagger candidates with ROCE > 20% and small market cap runway.",
+                "action": "thematic_baskets_scan",
+                "basket_id": "mayer_100_baggers",
+            },
+            {
+                "category": "🚀 Growth at Reasonable Price (GARP)",
+                "title": "Peter Lynch Fast-Growers",
+                "prompt": "Find top Peter Lynch GARP stocks with PEG < 1.0, EPS growth > 25%, and VCP pivot breakout.",
+                "action": "thematic_baskets_scan",
+                "basket_id": "lynch_garp_fast_growers",
+            },
+            {
+                "category": "🏗️ Capex & Order Books",
+                "title": "Mega Order-Book Titans",
+                "prompt": "Show companies with Order Book to Market Cap > 1.5x in Defence, Railways, and Power Grid with clean forensics.",
+                "action": "thematic_baskets_scan",
+                "basket_id": "order_book_powerhouses",
+            },
+            {
+                "category": "🛡️ Portfolio Optimization",
+                "title": "Run AI Portfolio Doctor",
+                "prompt": "Diagnose my connected broker portfolio for Stage 4 dead-money holdings, concentration risk, and tax-loss harvesting opportunities.",
+                "action": "portfolio_doctor",
+            },
+            {
+                "category": "📈 Momentum & Breakouts",
+                "title": "William O'Neil CAN SLIM Leaders",
+                "prompt": "Scan for CAN SLIM momentum leaders trading within 15% of 52-week new highs with institutional volume surges.",
+                "action": "thematic_baskets_scan",
+                "basket_id": "canslim_high_momentum",
+            },
+        ]
+        return _ok({"prompts": prompts, "total_prompts": len(prompts)})
     except Exception as e:
         raise _err(str(e))
 
@@ -2578,8 +2908,6 @@ async def skill_universe_categories():
         raise _err(str(e))
 
 
-
-
 # ── High-Probability Big Move & Squeeze Direction Skill ──────
 
 
@@ -2655,11 +2983,13 @@ async def skill_scan_and_alert(req: ScanAlertSkillRequest):
             exchange=req.exchange,
             notify_telegram=req.notify_telegram,
         )
-        return _ok({
-            "universe": req.universe,
-            "total_candidates": len(candidates),
-            "candidates": [c.to_dict() for c in candidates],
-        })
+        return _ok(
+            {
+                "universe": req.universe,
+                "total_candidates": len(candidates),
+                "candidates": [c.to_dict() for c in candidates],
+            }
+        )
     except Exception as e:
         raise _err(str(e))
 
@@ -2679,10 +3009,12 @@ async def skill_send_opportunity_telegram(req: SendOpportunityTelegramRequest):
         from bot.telegram_bot import push_execution_alert
 
         push_execution_alert(req.opportunity)
-        return _ok({
-            "status": "sent",
-            "symbol": req.opportunity.get("symbol"),
-        })
+        return _ok(
+            {
+                "status": "sent",
+                "symbol": req.opportunity.get("symbol"),
+            }
+        )
     except Exception as e:
         raise _err(str(e))
 
@@ -2706,7 +3038,7 @@ async def skill_sector_drilldown(req: SectorDrilldownSkillRequest):
     try:
         from analysis.high_conviction import scan_high_conviction_opportunities
         from analysis.sector_rotation import get_sector_rrg_matrix
-        from analysis.universe import SECTOR_TAXONOMY, resolve_sector_taxonomy
+        from analysis.universe import resolve_sector_taxonomy
 
         # Map input sector query to canonical taxonomy key
         canonical_key, sector_info = resolve_sector_taxonomy(req.sector)
@@ -2720,7 +3052,11 @@ async def skill_sector_drilldown(req: SectorDrilldownSkillRequest):
                 s_dict = s.as_dict() if hasattr(s, "as_dict") else s if isinstance(s, dict) else {}
                 sec_name = s_dict.get("sector", "").lower()
                 sec_sym = s_dict.get("symbol", "")
-                if sec_name == canonical_key or canonical_key in sec_name or sec_sym == sector_info.get("index_symbol"):
+                if (
+                    sec_name == canonical_key
+                    or canonical_key in sec_name
+                    or sec_sym == sector_info.get("index_symbol")
+                ):
                     sector_rrg = s_dict
                     break
 
@@ -2749,29 +3085,36 @@ async def skill_sector_drilldown(req: SectorDrilldownSkillRequest):
         total_stocks = len(opportunities)
         ready_count = sum(1 for o in opportunities if o.get("eligibility_status") == "READY")
         stalk_count = sum(1 for o in opportunities if o.get("eligibility_status") == "STALK")
-        stand_down_count = sum(1 for o in opportunities if o.get("eligibility_status") == "STAND_DOWN")
-        stage_2_count = sum(1 for o in opportunities if o.get("weinstein_stage") == "STAGE_2_MARKUP")
+        stand_down_count = sum(
+            1 for o in opportunities if o.get("eligibility_status") == "STAND_DOWN"
+        )
+        stage_2_count = sum(
+            1 for o in opportunities if o.get("weinstein_stage") == "STAGE_2_MARKUP"
+        )
         stage_2_pct = round((stage_2_count / max(1, total_stocks)) * 100, 1)
 
-        return _ok({
-            "sector_id": canonical_key,
-            "sector_name": sector_info["name"],
-            "sector_icon": sector_info.get("icon", "🏢"),
-            "index_symbol": sector_info.get("index_symbol", ""),
-            "description": sector_info.get("description", ""),
-            "rrg": sector_rrg,
-            "breadth": {
-                "total_stocks": total_stocks,
-                "ready_count": ready_count,
-                "stalk_count": stalk_count,
-                "stand_down_count": stand_down_count,
-                "stage_2_pct": stage_2_pct,
-            },
-            "data_source": scan_res.data_source,
-            "opportunities": opportunities,
-        })
+        return _ok(
+            {
+                "sector_id": canonical_key,
+                "sector_name": sector_info["name"],
+                "sector_icon": sector_info.get("icon", "🏢"),
+                "index_symbol": sector_info.get("index_symbol", ""),
+                "description": sector_info.get("description", ""),
+                "rrg": sector_rrg,
+                "breadth": {
+                    "total_stocks": total_stocks,
+                    "ready_count": ready_count,
+                    "stalk_count": stalk_count,
+                    "stand_down_count": stand_down_count,
+                    "stage_2_pct": stage_2_pct,
+                },
+                "data_source": scan_res.data_source,
+                "opportunities": opportunities,
+            }
+        )
     except Exception as e:
         import traceback
+
         traceback.print_exc()
         raise _err(str(e))
 
@@ -2805,14 +3148,70 @@ async def skill_trending(req: Optional[TrendingSkillRequest] = None):
 
         # 1. Candidate symbols list
         candidates_meta = [
-            {"symbol": "NIFTY", "inst": "NSE:NIFTY 50", "name": "NIFTY 50", "cmd": "quote NIFTY", "tag": "INDEX", "is_index": True},
-            {"symbol": "BANKNIFTY", "inst": "NSE:NIFTY BANK", "name": "BANK NIFTY", "cmd": "quote BANKNIFTY", "tag": "INDEX", "is_index": True},
-            {"symbol": "COFORGE", "inst": "NSE:COFORGE", "name": "Coforge", "cmd": "analyze COFORGE", "tag": "READY", "is_index": False},
-            {"symbol": "TRENT", "inst": "NSE:TRENT", "name": "Trent Ltd", "cmd": "analyze TRENT", "tag": "STAGE 2", "is_index": False},
-            {"symbol": "HCLTECH", "inst": "NSE:HCLTECH", "name": "HCL Tech", "cmd": "analyze HCLTECH", "tag": "RVOL 2.5x", "is_index": False},
-            {"symbol": "DIVISLAB", "inst": "NSE:DIVISLAB", "name": "Divis Labs", "cmd": "analyze DIVISLAB", "tag": "READY", "is_index": False},
-            {"symbol": "TECHM", "inst": "NSE:TECHM", "name": "Tech Mahindra", "cmd": "analyze TECHM", "tag": "LEADING", "is_index": False},
-            {"symbol": "RELIANCE", "inst": "NSE:RELIANCE", "name": "Reliance Ind", "cmd": "analyze RELIANCE", "tag": "LARGE CAP", "is_index": False},
+            {
+                "symbol": "NIFTY",
+                "inst": "NSE:NIFTY 50",
+                "name": "NIFTY 50",
+                "cmd": "quote NIFTY",
+                "tag": "INDEX",
+                "is_index": True,
+            },
+            {
+                "symbol": "BANKNIFTY",
+                "inst": "NSE:NIFTY BANK",
+                "name": "BANK NIFTY",
+                "cmd": "quote BANKNIFTY",
+                "tag": "INDEX",
+                "is_index": True,
+            },
+            {
+                "symbol": "COFORGE",
+                "inst": "NSE:COFORGE",
+                "name": "Coforge",
+                "cmd": "analyze COFORGE",
+                "tag": "READY",
+                "is_index": False,
+            },
+            {
+                "symbol": "TRENT",
+                "inst": "NSE:TRENT",
+                "name": "Trent Ltd",
+                "cmd": "analyze TRENT",
+                "tag": "STAGE 2",
+                "is_index": False,
+            },
+            {
+                "symbol": "HCLTECH",
+                "inst": "NSE:HCLTECH",
+                "name": "HCL Tech",
+                "cmd": "analyze HCLTECH",
+                "tag": "RVOL 2.5x",
+                "is_index": False,
+            },
+            {
+                "symbol": "DIVISLAB",
+                "inst": "NSE:DIVISLAB",
+                "name": "Divis Labs",
+                "cmd": "analyze DIVISLAB",
+                "tag": "READY",
+                "is_index": False,
+            },
+            {
+                "symbol": "TECHM",
+                "inst": "NSE:TECHM",
+                "name": "Tech Mahindra",
+                "cmd": "analyze TECHM",
+                "tag": "LEADING",
+                "is_index": False,
+            },
+            {
+                "symbol": "RELIANCE",
+                "inst": "NSE:RELIANCE",
+                "name": "Reliance Ind",
+                "cmd": "analyze RELIANCE",
+                "tag": "LARGE CAP",
+                "is_index": False,
+            },
         ]
 
         # 2. Parallel Batched Quotes Fetch (Instant via In-Memory Cache)
@@ -2828,15 +3227,17 @@ async def skill_trending(req: Optional[TrendingSkillRequest] = None):
             q = quotes.get(c["inst"])
             ltp = float(q.last_price) if q and q.last_price else 0.0
             chg_pct = float(q.change_pct) if q and q.change_pct is not None else 0.0
-            items.append({
-                "symbol": c["symbol"],
-                "name": c["name"],
-                "ltp": round(ltp, 2),
-                "change_pct": round(chg_pct, 2),
-                "tag": c["tag"],
-                "cmd": c["cmd"],
-                "is_index": c["is_index"],
-            })
+            items.append(
+                {
+                    "symbol": c["symbol"],
+                    "name": c["name"],
+                    "ltp": round(ltp, 2),
+                    "change_pct": round(chg_pct, 2),
+                    "tag": c["tag"],
+                    "cmd": c["cmd"],
+                    "is_index": c["is_index"],
+                }
+            )
 
         if items:
             cache_set("dynamic_trending_tickers", items, namespace="market", ttl_minutes=5)
@@ -2844,6 +3245,7 @@ async def skill_trending(req: Optional[TrendingSkillRequest] = None):
         return _ok({"items": items[:limit]})
     except Exception as e:
         import traceback
+
         traceback.print_exc()
         raise _err(str(e))
 
@@ -2866,12 +3268,11 @@ async def skill_dashboard_snapshot(req: Optional[DashboardSnapshotRequest] = Non
     Volume Profile (POC/VAH/VAL), daily FII/DII net flows, and 1D sector rotation matrix.
     """
     try:
-        from engine.analysis_cache import cache_get, cache_set
         from market.quotes import get_quote, get_ltp
         from analysis.market_structure import analyze_market_structure
         from analysis.volume_profile import analyze_volume_profile
         from market.sentiment import get_fii_dii_data
-        from market.indices import INDEX_INSTRUMENTS, get_index
+        from market.indices import get_index
         from market.history import get_historical_data
 
         sym = (req.symbol if req and req.symbol else "NIFTY").upper().strip()
@@ -2881,8 +3282,14 @@ async def skill_dashboard_snapshot(req: Optional[DashboardSnapshotRequest] = Non
         cache_key = f"dashboard_snapshot_v3_{sym}_{exch}_{tf}"
         try:
             from engine.analysis_cache import analysis_cache
+
             cached = analysis_cache.get_macro(cache_key)
-            if cached and isinstance(cached, dict) and cached.get("symbol") == sym and cached.get("multi_tf"):
+            if (
+                cached
+                and isinstance(cached, dict)
+                and cached.get("symbol") == sym
+                and cached.get("multi_tf")
+            ):
                 return _ok(cached)
         except Exception:
             pass
@@ -2910,25 +3317,49 @@ async def skill_dashboard_snapshot(req: Optional[DashboardSnapshotRequest] = Non
             ltp = float(q.last_price) if q and q.last_price else 0.0
             chg = float(q.change) if q and q.change is not None else 0.0
             chg_pct = float(q.change_pct) if q and q.change_pct is not None else 0.0
-            watchlist.append({
-                "symbol": w["symbol"],
-                "name": w["name"],
-                "tag": w["tag"],
-                "ltp": round(ltp, 2),
-                "change": round(chg, 2),
-                "change_pct": round(chg_pct, 2),
-            })
+            watchlist.append(
+                {
+                    "symbol": w["symbol"],
+                    "name": w["name"],
+                    "tag": w["tag"],
+                    "ltp": round(ltp, 2),
+                    "change": round(chg, 2),
+                    "change_pct": round(chg_pct, 2),
+                }
+            )
 
         # Target Setup calculation specifically for sym
         setup_sym = sym.replace(" 50", "").strip()
         quote_target = get_quote([f"{exch}:{setup_sym}"]) or {}
         q_obj = quote_target.get(f"{exch}:{setup_sym}")
-        cur_ltp = (float(q_obj.last_price) if q_obj and q_obj.last_price else 0.0) or get_ltp(f"{exch}:{setup_sym}")
+        cur_ltp = (float(q_obj.last_price) if q_obj and q_obj.last_price else 0.0) or get_ltp(
+            f"{exch}:{setup_sym}"
+        )
 
         # Fetch OHLCV data for setup_sym
         df = None
         tf_clean = str(tf).lower()
-        inv = "15m" if "15" in tf_clean else ("5m" if "5" in tf_clean else ("1h" if "1h" in tf_clean or "hour" in tf_clean else ("1w" if "w" in tf_clean else ("1m" if "m" in tf_clean and "15" not in tf_clean and "5" not in tf_clean else "1d"))))
+        inv = (
+            "15m"
+            if "15" in tf_clean
+            else (
+                "5m"
+                if "5" in tf_clean
+                else (
+                    "1h"
+                    if "1h" in tf_clean or "hour" in tf_clean
+                    else (
+                        "1w"
+                        if "w" in tf_clean
+                        else (
+                            "1m"
+                            if "m" in tf_clean and "15" not in tf_clean and "5" not in tf_clean
+                            else "1d"
+                        )
+                    )
+                )
+            )
+        )
         d_count = 15 if inv in ["5m", "15m"] else (90 if inv == "1h" else 365)
         try:
             df = get_historical_data(setup_sym, interval=inv, days=d_count, exchange=exch)
@@ -2939,10 +3370,13 @@ async def skill_dashboard_snapshot(req: Optional[DashboardSnapshotRequest] = Non
             if df is not None and not df.empty and "close" in df.columns:
                 cur_ltp = float(df["close"].iloc[-1])
             else:
-                idx = get_index(setup_sym)
-                if idx and idx.last_price > 0:
-                    cur_ltp = float(idx.last_price)
-                else:
+                try:
+                    idx = get_index(setup_sym)
+                    if idx and idx.last_price > 0:
+                        cur_ltp = float(idx.last_price)
+                except Exception:
+                    pass
+                if not cur_ltp or cur_ltp <= 0:
                     cur_ltp = 1000.0
 
         # Market Structure & Volume Profile for active symbol
@@ -2957,27 +3391,58 @@ async def skill_dashboard_snapshot(req: Optional[DashboardSnapshotRequest] = Non
         except Exception:
             pass
 
-        # Real quantitative analysis for setup_sym
+        # Real quantitative analysis for setup_sym (executed concurrently for instant response)
         fund_snap = None
         forensic_rep = None
         mb_rep = None
-        try:
-            from analysis.fundamental import analyse as analyse_fund
-            fund_snap = analyse_fund(setup_sym)
-        except Exception:
-            pass
 
-        try:
-            from analysis.forensic import audit_forensics
-            forensic_rep = audit_forensics(setup_sym)
-        except Exception:
-            pass
+        def _fetch_fund():
+            try:
+                from analysis.fundamental import analyse as analyse_fund
 
-        try:
-            from analysis.multibagger import scan_multibagger_opportunity
-            mb_rep = scan_multibagger_opportunity(setup_sym)
-        except Exception:
-            pass
+                return analyse_fund(setup_sym)
+            except Exception:
+                return None
+
+        def _fetch_forensic():
+            try:
+                from analysis.forensic import audit_forensics
+
+                return audit_forensics(setup_sym)
+            except Exception:
+                return None
+
+        def _fetch_mb():
+            try:
+                from analysis.multibagger import scan_multibagger_opportunity
+
+                return scan_multibagger_opportunity(setup_sym)
+            except Exception:
+                return None
+
+        import concurrent.futures
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+            fut_fund = executor.submit(_fetch_fund)
+            fut_forensic = executor.submit(_fetch_forensic)
+            fut_mb = executor.submit(_fetch_mb)
+
+            done, _ = concurrent.futures.wait([fut_fund, fut_forensic, fut_mb], timeout=1.8)
+            if fut_fund in done:
+                try:
+                    fund_snap = fut_fund.result()
+                except Exception:
+                    pass
+            if fut_forensic in done:
+                try:
+                    forensic_rep = fut_forensic.result()
+                except Exception:
+                    pass
+            if fut_mb in done:
+                try:
+                    mb_rep = fut_mb.result()
+                except Exception:
+                    pass
 
         # 2. Rich AI Personas with dynamically calculated quant metrics for setup_sym
         rvol_val = vp_report.rvol_20d if vp_report else 1.8
@@ -2987,10 +3452,20 @@ async def skill_dashboard_snapshot(req: Optional[DashboardSnapshotRequest] = Non
         # Extract real fundamentals & forensics
         roe_val = fund_snap.roe if (fund_snap and fund_snap.roe is not None) else 18.5
         roce_val = fund_snap.roce if (fund_snap and fund_snap.roce is not None) else 22.1
-        de_val = fund_snap.debt_equity if (fund_snap and fund_snap.debt_equity is not None) else 0.45
-        pe_val = fund_snap.pe if (fund_snap and fund_snap.pe is not None and fund_snap.pe > 0) else 24.5
-        sales_growth_val = fund_snap.sales_growth if (fund_snap and fund_snap.sales_growth is not None) else 16.5
-        profit_growth_val = fund_snap.profit_growth if (fund_snap and fund_snap.profit_growth is not None) else sales_growth_val
+        de_val = (
+            fund_snap.debt_equity if (fund_snap and fund_snap.debt_equity is not None) else 0.45
+        )
+        pe_val = (
+            fund_snap.pe if (fund_snap and fund_snap.pe is not None and fund_snap.pe > 0) else 24.5
+        )
+        sales_growth_val = (
+            fund_snap.sales_growth if (fund_snap and fund_snap.sales_growth is not None) else 16.5
+        )
+        profit_growth_val = (
+            fund_snap.profit_growth
+            if (fund_snap and fund_snap.profit_growth is not None)
+            else sales_growth_val
+        )
 
         m_score = forensic_rep.beneish_m_score if forensic_rep else -2.76
         f_score = forensic_rep.piotroski_f_score if forensic_rep else 8
@@ -3002,29 +3477,75 @@ async def skill_dashboard_snapshot(req: Optional[DashboardSnapshotRequest] = Non
 
         # Calculate distinct dynamic conviction scores for each persona
         # 1. Jhunjhunwala: Multibagger momentum + Topline growth
-        jh_conf = max(35, min(95, int((mb_score * 0.7) + (min(25.0, max(-10.0, sales_growth_val)) * 1.0))))
-        jh_verdict = "STRONG MULTIBAGGER" if jh_conf >= 75 else ("ACCUMULATE" if jh_conf >= 55 else ("WATCHLIST" if jh_conf >= 40 else "AVOID"))
+        jh_conf = max(
+            35, min(95, int((mb_score * 0.7) + (min(25.0, max(-10.0, sales_growth_val)) * 1.0)))
+        )
+        jh_verdict = (
+            "STRONG MULTIBAGGER"
+            if jh_conf >= 75
+            else ("ACCUMULATE" if jh_conf >= 55 else ("WATCHLIST" if jh_conf >= 40 else "AVOID"))
+        )
 
         # 2. Buffett: RoE + Low Debt/Equity + Forensic Health
-        buffett_conf = max(30, min(96, int((roe_val * 2.2) + (25 if de_val < 0.6 else (10 if de_val < 1.0 else -15)) + (f_score * 3))))
-        buffett_verdict = "WIDE MOAT BUY" if buffett_conf >= 75 else ("MODERATE MOAT (HOLD)" if buffett_conf >= 50 else "NO MOAT / LEVERAGED")
+        buffett_conf = max(
+            30,
+            min(
+                96,
+                int(
+                    (roe_val * 2.2)
+                    + (25 if de_val < 0.6 else (10 if de_val < 1.0 else -15))
+                    + (f_score * 3)
+                ),
+            ),
+        )
+        buffett_verdict = (
+            "WIDE MOAT BUY"
+            if buffett_conf >= 75
+            else ("MODERATE MOAT (HOLD)" if buffett_conf >= 50 else "NO MOAT / LEVERAGED")
+        )
 
         # 3. Forensic: Beneish M-Score + Piotroski F-Score + Altman Z
-        forensic_conf = max(25, min(98, int((f_score * 8) + (25 if m_score < -2.2 else (10 if m_score < -1.78 else -20)))))
-        forensic_verdict = "CLEAN (PASS)" if (m_score < -1.78 and f_score >= 5) else ("GREY ZONE" if f_score >= 4 else "RED FLAG / CAUTION")
+        forensic_conf = max(
+            25,
+            min(
+                98,
+                int((f_score * 8) + (25 if m_score < -2.2 else (10 if m_score < -1.78 else -20))),
+            ),
+        )
+        forensic_verdict = (
+            "CLEAN (PASS)"
+            if (m_score < -1.78 and f_score >= 5)
+            else ("GREY ZONE" if f_score >= 4 else "RED FLAG / CAUTION")
+        )
 
         # 4. Soros: Relative Volume + Market Structure Regime
         soros_conf = max(30, min(95, int(50 + (struct_score * 6) + (15 if rvol_val > 1.2 else -5))))
-        soros_verdict = "MOMENTUM EXPANSION" if struct_score >= 2 else ("RANGE REVERSAL" if struct_score >= -1 else "BEARISH BREAKDOWN")
+        soros_verdict = (
+            "MOMENTUM EXPANSION"
+            if struct_score >= 2
+            else ("RANGE REVERSAL" if struct_score >= -1 else "BEARISH BREAKDOWN")
+        )
 
         # 5. Lynch: PEG ratio
         peg_val = round(pe_val / max(5.0, profit_growth_val if profit_growth_val > 0 else 15.0), 2)
-        lynch_conf = max(30, min(92, int(85 - (peg_val * 18) + (10 if profit_growth_val > 15 else 0))))
-        lynch_verdict = "FAST GROWER (BUY)" if peg_val < 1.1 else ("STALWART (HOLD)" if peg_val < 1.8 else "EXPENSIVE / CYCLICAL")
+        lynch_conf = max(
+            30, min(92, int(85 - (peg_val * 18) + (10 if profit_growth_val > 15 else 0)))
+        )
+        lynch_verdict = (
+            "FAST GROWER (BUY)"
+            if peg_val < 1.1
+            else ("STALWART (HOLD)" if peg_val < 1.8 else "EXPENSIVE / CYCLICAL")
+        )
 
         # 6. Munger: ROCE + Balance Sheet Solvency
-        munger_conf = max(30, min(96, int((roce_val * 2.0) + (f_score * 4) + (10 if de_val < 0.5 else -10))))
-        munger_verdict = "COMPOUNDER" if roce_val >= 18 else ("FAIR VALUE" if roce_val >= 12 else "INVERSION RISK")
+        munger_conf = max(
+            30, min(96, int((roce_val * 2.0) + (f_score * 4) + (10 if de_val < 0.5 else -10)))
+        )
+        munger_verdict = (
+            "COMPOUNDER"
+            if roce_val >= 18
+            else ("FAIR VALUE" if roce_val >= 12 else "INVERSION RISK")
+        )
 
         personas = [
             {
@@ -3116,6 +3637,8 @@ async def skill_dashboard_snapshot(req: Optional[DashboardSnapshotRequest] = Non
         atr_val = cur_ltp * 0.012  # default 1.2% ATR
         if df is not None and len(df) >= 5:
             try:
+                import pandas as pd
+
                 hl = df["high"] - df["low"]
                 hc = (df["high"] - df["close"].shift()).abs()
                 lc = (df["low"] - df["close"].shift()).abs()
@@ -3140,12 +3663,14 @@ async def skill_dashboard_snapshot(req: Optional[DashboardSnapshotRequest] = Non
             # Strict bounds: Entry must be between 98.5% and 100.2% of LTP
             entry_val = max(cur_ltp * 0.985, min(cur_ltp * 1.002, raw_entry))
             # Stop loss must be below entry by at least 0.35% and at most 2.2% (or 1.2x ATR)
-            risk_unit = max(entry_val * 0.0035, min(entry_val * 0.022, entry_val - raw_sl, 1.2 * atr_val))
+            risk_unit = max(
+                entry_val * 0.0035, min(entry_val * 0.022, entry_val - raw_sl, 1.2 * atr_val)
+            )
             sl_val = entry_val - risk_unit
             tgt1_val = entry_val + (risk_unit * 2.0)
             tgt2_val = entry_val + (risk_unit * 3.5)
             rr_val = 2.0
-            thesis_txt = f"Bullish structure with unmitigated Demand Zone near ₹{entry_val:.2f}. Limit entry at 50% Mean Threshold (OTE) with {((risk_unit/entry_val)*100):.1f}% risk invalidation below swing support."
+            thesis_txt = f"Bullish structure with unmitigated Demand Zone near ₹{entry_val:.2f}. Limit entry at 50% Mean Threshold (OTE) with {((risk_unit / entry_val) * 100):.1f}% risk invalidation below swing support."
         else:
             # Bearish Short Entry: near Supply OTE or 0.2% above current LTP
             active_s = ms_report.active_supply_zones if ms_report else []
@@ -3158,12 +3683,14 @@ async def skill_dashboard_snapshot(req: Optional[DashboardSnapshotRequest] = Non
                 raw_sl = raw_entry + (1.1 * atr_val)
 
             entry_val = max(cur_ltp * 0.998, min(cur_ltp * 1.015, raw_entry))
-            risk_unit = max(entry_val * 0.0035, min(entry_val * 0.022, raw_sl - entry_val, 1.2 * atr_val))
+            risk_unit = max(
+                entry_val * 0.0035, min(entry_val * 0.022, raw_sl - entry_val, 1.2 * atr_val)
+            )
             sl_val = entry_val + risk_unit
             tgt1_val = entry_val - (risk_unit * 2.0)
             tgt2_val = entry_val - (risk_unit * 3.5)
             rr_val = 2.0
-            thesis_txt = f"Bearish structure with unmitigated Supply Zone near ₹{entry_val:.2f}. Short entry on liquidity rejection with {((risk_unit/entry_val)*100):.1f}% risk invalidation above swing resistance."
+            thesis_txt = f"Bearish structure with unmitigated Supply Zone near ₹{entry_val:.2f}. Short entry on liquidity rejection with {((risk_unit / entry_val) * 100):.1f}% risk invalidation above swing resistance."
 
         timeline_map = {
             "5m": "1–2 Trading Sessions (Scalp / Intraday)",
@@ -3181,9 +3708,17 @@ async def skill_dashboard_snapshot(req: Optional[DashboardSnapshotRequest] = Non
         ob_data = None
         if ms_report and ms_report.active_demand_zones:
             top_ob = ms_report.active_demand_zones[-1]
-            ob_data = {"bottom": round(top_ob.bottom, 2), "top": round(top_ob.top, 2), "type": "DEMAND"}
+            ob_data = {
+                "bottom": round(top_ob.bottom, 2),
+                "top": round(top_ob.top, 2),
+                "type": "DEMAND",
+            }
         else:
-            ob_data = {"bottom": round(cur_ltp * 0.995, 2), "top": round(cur_ltp * 0.998, 2), "type": "DEMAND"}
+            ob_data = {
+                "bottom": round(cur_ltp * 0.995, 2),
+                "top": round(cur_ltp * 0.998, 2),
+                "type": "DEMAND",
+            }
 
         vp_data = {
             "poc": round(vp_report.poc_price, 2) if vp_report else round(cur_ltp * 1.001, 2),
@@ -3248,45 +3783,134 @@ async def skill_dashboard_snapshot(req: Optional[DashboardSnapshotRequest] = Non
         rrg_sectors = []
         try:
             from analysis.sector_rotation import get_sector_rrg_matrix
+
             points = get_sector_rrg_matrix(use_cache=True)
             for p in points:
                 p_dict = p.as_dict()
                 rrg_sectors.append(p_dict)
-                sector_items.append({
-                    "code": p.sector,
-                    "name": p.sector,
-                    "full_name": f"NIFTY {p.sector}",
-                    "change_pct": p.day_change_pct,
-                    "rs_ratio": p.rs_ratio,
-                    "rs_momentum": p.rs_momentum,
-                    "quadrant": p.quadrant,
-                    "trail": p.trail,
-                    "top_stocks": p.top_stocks,
-                    "factor_drivers": p.factor_drivers,
-                })
+                sector_items.append(
+                    {
+                        "code": p.sector,
+                        "name": p.sector,
+                        "full_name": f"NIFTY {p.sector}",
+                        "change_pct": p.day_change_pct,
+                        "rs_ratio": p.rs_ratio,
+                        "rs_momentum": p.rs_momentum,
+                        "quadrant": p.quadrant,
+                        "trail": p.trail,
+                        "top_stocks": p.top_stocks,
+                        "factor_drivers": p.factor_drivers,
+                    }
+                )
         except Exception:
             pass
 
         if not sector_items:
             sector_items = [
-                {"code": "IT", "name": "IT", "full_name": "NIFTY IT", "change_pct": 1.2, "rs_ratio": 102.14, "rs_momentum": 115.67, "quadrant": "LEADING"},
-                {"code": "BANK", "name": "BANK", "full_name": "NIFTY BANK", "change_pct": 0.5, "rs_ratio": 99.53, "rs_momentum": 98.60, "quadrant": "LAGGING"},
-                {"code": "AUTO", "name": "AUTO", "full_name": "NIFTY AUTO", "change_pct": 0.8, "rs_ratio": 96.16, "rs_momentum": 96.89, "quadrant": "LAGGING"},
-                {"code": "PHARMA", "name": "PHARMA", "full_name": "NIFTY PHARMA", "change_pct": -0.4, "rs_ratio": 100.00, "rs_momentum": 104.05, "quadrant": "LEADING"},
-                {"code": "FMCG", "name": "FMCG", "full_name": "NIFTY FMCG", "change_pct": -0.2, "rs_ratio": 96.14, "rs_momentum": 100.99, "quadrant": "IMPROVING"},
-                {"code": "METAL", "name": "METAL", "full_name": "NIFTY METAL", "change_pct": 1.5, "rs_ratio": 102.21, "rs_momentum": 98.47, "quadrant": "WEAKENING"},
-                {"code": "REALTY", "name": "REALTY", "full_name": "NIFTY REALTY", "change_pct": 1.1, "rs_ratio": 103.17, "rs_momentum": 100.26, "quadrant": "LEADING"},
-                {"code": "ENERGY", "name": "ENERGY", "full_name": "NIFTY ENERGY", "change_pct": 0.6, "rs_ratio": 96.85, "rs_momentum": 100.83, "quadrant": "IMPROVING"},
+                {
+                    "code": "IT",
+                    "name": "IT",
+                    "full_name": "NIFTY IT",
+                    "change_pct": 1.2,
+                    "rs_ratio": 102.14,
+                    "rs_momentum": 115.67,
+                    "quadrant": "LEADING",
+                },
+                {
+                    "code": "BANK",
+                    "name": "BANK",
+                    "full_name": "NIFTY BANK",
+                    "change_pct": 0.5,
+                    "rs_ratio": 99.53,
+                    "rs_momentum": 98.60,
+                    "quadrant": "LAGGING",
+                },
+                {
+                    "code": "AUTO",
+                    "name": "AUTO",
+                    "full_name": "NIFTY AUTO",
+                    "change_pct": 0.8,
+                    "rs_ratio": 96.16,
+                    "rs_momentum": 96.89,
+                    "quadrant": "LAGGING",
+                },
+                {
+                    "code": "PHARMA",
+                    "name": "PHARMA",
+                    "full_name": "NIFTY PHARMA",
+                    "change_pct": -0.4,
+                    "rs_ratio": 100.00,
+                    "rs_momentum": 104.05,
+                    "quadrant": "LEADING",
+                },
+                {
+                    "code": "FMCG",
+                    "name": "FMCG",
+                    "full_name": "NIFTY FMCG",
+                    "change_pct": -0.2,
+                    "rs_ratio": 96.14,
+                    "rs_momentum": 100.99,
+                    "quadrant": "IMPROVING",
+                },
+                {
+                    "code": "METAL",
+                    "name": "METAL",
+                    "full_name": "NIFTY METAL",
+                    "change_pct": 1.5,
+                    "rs_ratio": 102.21,
+                    "rs_momentum": 98.47,
+                    "quadrant": "WEAKENING",
+                },
+                {
+                    "code": "REALTY",
+                    "name": "REALTY",
+                    "full_name": "NIFTY REALTY",
+                    "change_pct": 1.1,
+                    "rs_ratio": 103.17,
+                    "rs_momentum": 100.26,
+                    "quadrant": "LEADING",
+                },
+                {
+                    "code": "ENERGY",
+                    "name": "ENERGY",
+                    "full_name": "NIFTY ENERGY",
+                    "change_pct": 0.6,
+                    "rs_ratio": 96.85,
+                    "rs_momentum": 100.83,
+                    "quadrant": "IMPROVING",
+                },
             ]
 
         # 6. Multi-Timeframe Technical Confluence (15m, 1h, 1D)
         tf_15m_regime = "BULLISH" if (ms_report and ms_report.structure_score >= 0) else "BEARISH"
-        tf_15m_desc = "SMC Order Block Retest" if (ms_report and ms_report.active_demand_zones) else "Stage 2 Breakout"
+        tf_15m_desc = (
+            "SMC Order Block Retest"
+            if (ms_report and ms_report.active_demand_zones)
+            else "Stage 2 Breakout"
+        )
         tf_1h_regime = "BULLISH" if (ms_report and ms_report.structure_score >= 20) else "RANGING"
         tf_1d_regime = "BULLISH" if (mb_rep and mb_rep.multibagger_score >= 50) else "CONSOLIDATION"
 
-        confluence_score = int(min(98, max(35, 50 + (ms_report.structure_score * 0.3 if ms_report else 15) + (mb_rep.multibagger_score * 0.3 if mb_rep else 15))))
-        confluence_stance = "HIGH ALIGNMENT (STRONG LONG)" if confluence_score >= 75 else ("MODERATE ALIGNMENT (STALK)" if confluence_score >= 55 else "MIXED SIGNALS (STAND DOWN)")
+        confluence_score = int(
+            min(
+                98,
+                max(
+                    35,
+                    50
+                    + (ms_report.structure_score * 0.3 if ms_report else 15)
+                    + (mb_rep.multibagger_score * 0.3 if mb_rep else 15),
+                ),
+            )
+        )
+        confluence_stance = (
+            "HIGH ALIGNMENT (STRONG LONG)"
+            if confluence_score >= 75
+            else (
+                "MODERATE ALIGNMENT (STALK)"
+                if confluence_score >= 55
+                else "MIXED SIGNALS (STAND DOWN)"
+            )
+        )
 
         multi_tf = {
             "symbol": setup_sym,
@@ -3305,7 +3929,9 @@ async def skill_dashboard_snapshot(req: Optional[DashboardSnapshotRequest] = Non
                     "tf": "1h",
                     "label": "Swing Structure",
                     "bias": tf_1h_regime,
-                    "signal": "Higher Highs (HH) Structure" if tf_1h_regime == "BULLISH" else "Range Compression",
+                    "signal": "Higher Highs (HH) Structure"
+                    if tf_1h_regime == "BULLISH"
+                    else "Range Compression",
                     "rsi": 61.2 if tf_1h_regime == "BULLISH" else 46.5,
                     "key_level": f"EMA20 ₹{round(cur_ltp * 0.995, 1)}",
                 },
@@ -3341,6 +3967,7 @@ async def skill_dashboard_snapshot(req: Optional[DashboardSnapshotRequest] = Non
 
         try:
             from engine.analysis_cache import analysis_cache
+
             analysis_cache.save_macro(cache_key, payload, ttl_minutes=15)
         except Exception:
             pass
@@ -3348,6 +3975,7 @@ async def skill_dashboard_snapshot(req: Optional[DashboardSnapshotRequest] = Non
         return _ok(payload)
     except Exception as e:
         import traceback
+
         traceback.print_exc()
         raise _err(str(e))
 
@@ -3378,6 +4006,7 @@ async def skill_debate_snapshot(req: Optional[DebateSnapshotRequest] = None):
         cache_key = f"debate_snapshot_{sym}_{exch}"
         try:
             from engine.analysis_cache import analysis_cache
+
             cached = analysis_cache.get_macro(cache_key)
             if cached and isinstance(cached, dict) and cached.get("symbol") == sym:
                 return _ok(cached)
@@ -3385,14 +4014,20 @@ async def skill_debate_snapshot(req: Optional[DebateSnapshotRequest] = None):
             pass
 
         quote = get_quote(f"{exch}:{sym}") or {}
-        ltp = quote.get("ltp") or get_ltp(f"{exch}:{sym}") or (quote.get("last_price") if quote else 0.0)
+        ltp = (
+            quote.get("ltp")
+            or get_ltp(f"{exch}:{sym}")
+            or (quote.get("last_price") if quote else 0.0)
+        )
         if not ltp or ltp <= 0:
             from market.indices import get_index
+
             idx = get_index(sym)
             if idx and idx.last_price > 0:
                 ltp = float(idx.last_price)
             else:
                 from market.history import get_ohlcv
+
                 df_last = get_ohlcv(sym, exchange=exch, interval="day", days=5)
                 if df_last is not None and not df_last.empty and "close" in df_last.columns:
                     ltp = float(df_last["close"].iloc[-1])
@@ -3424,6 +4059,7 @@ async def skill_debate_snapshot(req: Optional[DebateSnapshotRequest] = None):
         mb = None
         try:
             from analysis.multibagger import calculate_multibagger_score
+
             mb = calculate_multibagger_score(sym)
         except Exception:
             pass
@@ -3432,6 +4068,7 @@ async def skill_debate_snapshot(req: Optional[DebateSnapshotRequest] = None):
         flows = None
         try:
             from market.sentiment import get_fii_dii_data
+
             flow_list = get_fii_dii_data(days=1)
             if flow_list:
                 flows = flow_list[0]
@@ -3462,7 +4099,7 @@ async def skill_debate_snapshot(req: Optional[DebateSnapshotRequest] = None):
             stage_str = mb.stage
             tech_desc = f"Stock is in {stage_str}. Passing {mb.passed_checks_count}/8 Minervini Trend Template criteria with expanding relative strength."
         else:
-            tech_desc = f"Constructive price action holding above 50-day moving average with positive trend momentum."
+            tech_desc = "Constructive price action holding above 50-day moving average with positive trend momentum."
 
         if fa and getattr(fa, "altman_z_score", 0) > 2.6:
             inst_desc = f"Institutional flows indicate {fii_verdict}. Altman Z-Score of {fa.altman_z_score:.2f} places company in safe credit zone with pristine balance sheet."
@@ -3470,9 +4107,24 @@ async def skill_debate_snapshot(req: Optional[DebateSnapshotRequest] = None):
             inst_desc = f"Institutional flows indicate {fii_verdict}. Capital efficiency metrics confirm solid balance sheet resilience."
 
         bull_case = [
-            {"category": "TECHNICAL", "title": "Technical Structure", "desc": tech_desc, "avatar": "robot-tech"},
-            {"category": "ORDER FLOW", "title": "Order Flow & OB", "desc": flow_desc, "avatar": "robot-flow"},
-            {"category": "INSTITUTIONAL", "title": "Quality & Flows", "desc": inst_desc, "avatar": "robot-inst"},
+            {
+                "category": "TECHNICAL",
+                "title": "Technical Structure",
+                "desc": tech_desc,
+                "avatar": "robot-tech",
+            },
+            {
+                "category": "ORDER FLOW",
+                "title": "Order Flow & OB",
+                "desc": flow_desc,
+                "avatar": "robot-flow",
+            },
+            {
+                "category": "INSTITUTIONAL",
+                "title": "Quality & Flows",
+                "desc": inst_desc,
+                "avatar": "robot-inst",
+            },
         ]
 
         # Dynamic Bear Case
@@ -3482,7 +4134,7 @@ async def skill_debate_snapshot(req: Optional[DebateSnapshotRequest] = None):
             m_risk = getattr(fa, "manipulation_risk", "LOW")
             forensic_desc = f"Beneish M-Score is {m_score:.2f} ({m_risk} manipulation risk). Promoter pledging stands at {pledged:.1f}%. Accruals quality monitored for working capital drag."
         else:
-            forensic_desc = f"Working capital accruals and receivables cycle require continuous tracking against forward revenue growth rates."
+            forensic_desc = "Working capital accruals and receivables cycle require continuous tracking against forward revenue growth rates."
 
         if vp:
             vah_val = vp.vah_price
@@ -3497,11 +4149,25 @@ async def skill_debate_snapshot(req: Optional[DebateSnapshotRequest] = None):
             sent_desc = f"Short-term momentum oscillator entering overbought region; trailing stop at ₹{round(ltp * 0.985, 2):,} protects downside."
 
         bear_case = [
-            {"category": "FORENSIC", "title": "Forensic Accruals", "desc": forensic_desc, "avatar": "robot-forensic"},
-            {"category": "VALUATION", "title": "Overhead Supply", "desc": val_desc, "avatar": "robot-val"},
-            {"category": "SENTIMENT", "title": "Invalidation Risk", "desc": sent_desc, "avatar": "robot-news"},
+            {
+                "category": "FORENSIC",
+                "title": "Forensic Accruals",
+                "desc": forensic_desc,
+                "avatar": "robot-forensic",
+            },
+            {
+                "category": "VALUATION",
+                "title": "Overhead Supply",
+                "desc": val_desc,
+                "avatar": "robot-val",
+            },
+            {
+                "category": "SENTIMENT",
+                "title": "Invalidation Risk",
+                "desc": sent_desc,
+                "avatar": "robot-news",
+            },
         ]
-
 
         # Consensus Trade Levels with Dynamic ATR-Bounded Calibration
         is_bull = bool(ms and ms.structure_score >= 0) if ms else (conviction_score >= 50)
@@ -3510,22 +4176,40 @@ async def skill_debate_snapshot(req: Optional[DebateSnapshotRequest] = None):
         if is_bull:
             raw_entry = ms.nearest_support if (ms and ms.nearest_support) else round(ltp * 0.998, 2)
             entry_px = max(ltp * 0.985, min(ltp * 1.002, raw_entry))
-            raw_sl = ms.invalidation_level if (ms and ms.invalidation_level) else (entry_px - 1.2 * atr_px)
+            raw_sl = (
+                ms.invalidation_level
+                if (ms and ms.invalidation_level)
+                else (entry_px - 1.2 * atr_px)
+            )
             risk_u = max(entry_px * 0.0035, min(entry_px * 0.022, entry_px - raw_sl, 1.2 * atr_px))
             sl_px = entry_px - risk_u
             tgt_px = entry_px + (risk_u * 2.0)
             rr_ratio = 2.0
-            verdict_str = "READY (BUY)" if conviction_score >= 75 else ("STALK (BUY)" if conviction_score >= 55 else "STAND DOWN")
+            verdict_str = (
+                "READY (BUY)"
+                if conviction_score >= 75
+                else ("STALK (BUY)" if conviction_score >= 55 else "STAND DOWN")
+            )
             verdict_bias = "BULLISH"
         else:
-            raw_entry = ms.nearest_resistance if (ms and ms.nearest_resistance) else round(ltp * 1.002, 2)
+            raw_entry = (
+                ms.nearest_resistance if (ms and ms.nearest_resistance) else round(ltp * 1.002, 2)
+            )
             entry_px = max(ltp * 0.998, min(ltp * 1.015, raw_entry))
-            raw_sl = ms.invalidation_level if (ms and ms.invalidation_level) else (entry_px + 1.2 * atr_px)
+            raw_sl = (
+                ms.invalidation_level
+                if (ms and ms.invalidation_level)
+                else (entry_px + 1.2 * atr_px)
+            )
             risk_u = max(entry_px * 0.0035, min(entry_px * 0.022, raw_sl - entry_px, 1.2 * atr_px))
             sl_px = entry_px + risk_u
             tgt_px = entry_px - (risk_u * 2.0)
             rr_ratio = 2.0
-            verdict_str = "READY (SELL)" if conviction_score >= 75 else ("STALK (SELL)" if conviction_score >= 55 else "STAND DOWN")
+            verdict_str = (
+                "READY (SELL)"
+                if conviction_score >= 75
+                else ("STALK (SELL)" if conviction_score >= 55 else "STAND DOWN")
+            )
             verdict_bias = "BEARISH"
 
         consensus = {
@@ -3545,7 +4229,9 @@ async def skill_debate_snapshot(req: Optional[DebateSnapshotRequest] = None):
             "exchange": exch,
             "ltp": round(ltp, 2),
             "conviction_score": conviction_score,
-            "conviction_tier": "HIGH" if conviction_score >= 75 else ("MODERATE" if conviction_score >= 55 else "LOW"),
+            "conviction_tier": "HIGH"
+            if conviction_score >= 75
+            else ("MODERATE" if conviction_score >= 55 else "LOW"),
             "bull_case": bull_case,
             "bear_case": bear_case,
             "facilitator_consensus": consensus,
@@ -3555,6 +4241,7 @@ async def skill_debate_snapshot(req: Optional[DebateSnapshotRequest] = None):
 
         try:
             from engine.analysis_cache import analysis_cache
+
             analysis_cache.save_macro(cache_key, payload, ttl_minutes=15)
         except Exception:
             pass
@@ -3562,6 +4249,7 @@ async def skill_debate_snapshot(req: Optional[DebateSnapshotRequest] = None):
         return _ok(payload)
     except Exception as e:
         import traceback
+
         traceback.print_exc()
         raise _err(str(e))
 
@@ -3581,8 +4269,7 @@ async def skill_gex_snapshot(req: Optional[GEXSnapshotRequest] = None):
     """
     try:
         from market.quotes import get_ltp, get_quote
-        from market.options import get_options_chain, get_expiries
-        from analysis.gex import get_gex_analysis
+        from market.options import get_expiries
 
         underlying = (req.underlying if req and req.underlying else "NIFTY").upper().strip()
         expiries = []
@@ -3591,21 +4278,20 @@ async def skill_gex_snapshot(req: Optional[GEXSnapshotRequest] = None):
         except Exception:
             pass
 
-        active_expiry = (req.expiry if req and req.expiry else (expiries[0] if expiries else "2026-09-04"))
+        active_expiry = (
+            req.expiry if req and req.expiry else (expiries[0] if expiries else "2026-09-04")
+        )
         spot = get_ltp(f"NSE:{underlying}") or (22068.75 if "NIFTY" in underlying else 48500.0)
 
-        # GEX analysis
-        gex_data = None
-        try:
-            gex_data = get_gex_analysis(underlying, active_expiry)
-        except Exception:
-            pass
-
-        # Dynamic Strike Step & Calculation
-        strike_step = 50 if underlying in ("NIFTY", "FINNIFTY") else (100 if underlying in ("BANKNIFTY", "SENSEX") else (20 if spot > 1000 else 10))
+        # Dynamic Strike Step & Calculation (Full Market Coverage: 41 strikes from ATM-20 to ATM+20)
+        strike_step = (
+            50
+            if underlying in ("NIFTY", "FINNIFTY")
+            else (100 if underlying in ("BANKNIFTY", "SENSEX") else (20 if spot > 1000 else 10))
+        )
         atm_strike = round(spot / strike_step) * strike_step
 
-        strikes = [atm_strike + i * strike_step for i in range(-6, 7)]
+        strikes = [atm_strike + i * strike_step for i in range(-20, 21)]
         gex_profile = []
         tot_call_oi = 0
         tot_put_oi = 0
@@ -3614,15 +4300,25 @@ async def skill_gex_snapshot(req: Optional[GEXSnapshotRequest] = None):
 
         for k in strikes:
             dist = (k - spot) / max(1.0, spot)
-            call_gex = max(0.2, round(18.0 * max(0.0, 1.0 - abs(dist * 18)), 1)) if k >= atm_strike else round(max(0.1, 4.0 - abs(dist * 10)), 1)
-            put_gex = -max(0.2, round(15.0 * max(0.0, 1.0 - abs(dist * 18)), 1)) if k <= atm_strike else -round(max(0.1, 3.0 - abs(dist * 10)), 1)
+            call_gex = (
+                max(0.2, round(18.0 * max(0.0, 1.0 - abs(dist * 18)), 1))
+                if k >= atm_strike
+                else round(max(0.1, 4.0 - abs(dist * 10)), 1)
+            )
+            put_gex = (
+                -max(0.2, round(15.0 * max(0.0, 1.0 - abs(dist * 18)), 1))
+                if k <= atm_strike
+                else -round(max(0.1, 3.0 - abs(dist * 10)), 1)
+            )
             net_gex = round(call_gex + put_gex, 2)
-            gex_profile.append({
-                "strike": k,
-                "call_gex": call_gex,
-                "put_gex": put_gex,
-                "net_gex": net_gex,
-            })
+            gex_profile.append(
+                {
+                    "strike": k,
+                    "call_gex": call_gex,
+                    "put_gex": put_gex,
+                    "net_gex": net_gex,
+                }
+            )
 
             # Tally simulated/live OI for PCR & Max Pain
             c_oi_num = int(max(15000, (2.2 - abs(dist) * 8.0) * 120000))
@@ -3639,13 +4335,16 @@ async def skill_gex_snapshot(req: Optional[GEXSnapshotRequest] = None):
 
         pcr_val = round(tot_put_oi / max(1, tot_call_oi), 2)
         pcr_sentiment = (
-            "BULLISH (Put Writing Support)" if pcr_val >= 1.10
-            else "BEARISH (Call Writing Resistance)" if pcr_val <= 0.85
+            "BULLISH (Put Writing Support)"
+            if pcr_val >= 1.10
+            else "BEARISH (Call Writing Resistance)"
+            if pcr_val <= 0.85
             else "NEUTRAL / BALANCED"
         )
 
         # Realistic Lot-Sized Delta Hedge & Why/When/How Rationale
         from engine.greeks_manager import LOT_SIZES
+
         u_sym = underlying.upper().replace("NSE:", "").replace("NFO:", "")
         lot_sz = LOT_SIZES.get(u_sym, 75)
         # Unit delta +0.42 on 1-lot position = 31.5 delta shares
@@ -3678,67 +4377,85 @@ async def skill_gex_snapshot(req: Optional[GEXSnapshotRequest] = None):
         iv_skew = []
         for k in strikes:
             m = (k - spot) / max(1.0, spot)
-            iv_val = round(13.8 + (m ** 2) * 260.0 + (-m * 10.0), 1)
-            iv_skew.append({
-                "strike": k,
-                "iv": iv_val,
-                "is_atm": k == atm_strike,
-            })
+            iv_val = round(13.8 + (m**2) * 260.0 + (-m * 10.0), 1)
+            iv_skew.append(
+                {
+                    "strike": k,
+                    "iv": iv_val,
+                    "is_atm": k == atm_strike,
+                }
+            )
 
         # Options Chain Matrix Rows
         chain_rows = []
         for k in strikes:
             dist = (k - spot) / max(1.0, spot)
             is_atm = k == atm_strike
-            chain_rows.append({
-                "calls_oi": f"{round(max(0.3, 1.8 - dist * 4), 1)}M",
-                "calls_oi_chg": f"{'+' if dist >= 0 else '-'}{round(abs(dist) * 2.5 + 0.3, 1)}B",
-                "calls_gex": f"{'+' if dist >= 0 else '-'}{round(max(0.1, 6.0 - abs(dist * 12)), 1)}B",
-                "calls_iv": f"{round(15.2 + dist * 8, 1)}%",
-                "calls_bid": round(max(2.0, (spot - k + 120.0)), 2) if k <= spot else round(max(5.0, 150.0 - (k - spot) * 0.8), 2),
-                "calls_ask": round(max(3.0, (spot - k + 122.0)), 2) if k <= spot else round(max(6.0, 152.0 - (k - spot) * 0.8), 2),
-                "strike": k,
-                "is_atm": is_atm,
-                "puts_bid": round(max(2.0, (k - spot + 120.0)), 2) if k >= spot else round(max(5.0, 150.0 - (spot - k) * 0.8), 2),
-                "puts_ask": round(max(3.0, (k - spot + 122.0)), 2) if k >= spot else round(max(6.0, 152.0 - (spot - k) * 0.8), 2),
-                "puts_iv": f"{round(14.8 - dist * 7, 1)}%",
-                "puts_eiv": f"{round(14.2 - dist * 6, 1)}%",
-                "puts_gex": f"-{round(max(0.1, 5.5 - abs(dist * 10)), 1)}B",
-                "puts_oi_chg": f"{'+' if dist <= 0 else '-'}{round(abs(dist) * 2.1 + 0.4, 1)}B",
-                "puts_oi": f"{round(max(0.4, 1.9 + dist * 4), 1)}M",
-            })
+            chain_rows.append(
+                {
+                    "calls_oi": f"{round(max(0.3, 1.8 - dist * 4), 1)}M",
+                    "calls_oi_chg": f"{'+' if dist >= 0 else '-'}{round(abs(dist) * 2.5 + 0.3, 1)}B",
+                    "calls_gex": f"{'+' if dist >= 0 else '-'}{round(max(0.1, 6.0 - abs(dist * 12)), 1)}B",
+                    "calls_iv": f"{round(15.2 + dist * 8, 1)}%",
+                    "calls_bid": round(max(2.0, (spot - k + 120.0)), 2)
+                    if k <= spot
+                    else round(max(5.0, 150.0 - (k - spot) * 0.8), 2),
+                    "calls_ask": round(max(3.0, (spot - k + 122.0)), 2)
+                    if k <= spot
+                    else round(max(6.0, 152.0 - (k - spot) * 0.8), 2),
+                    "strike": k,
+                    "is_atm": is_atm,
+                    "puts_bid": round(max(2.0, (k - spot + 120.0)), 2)
+                    if k >= spot
+                    else round(max(5.0, 150.0 - (spot - k) * 0.8), 2),
+                    "puts_ask": round(max(3.0, (k - spot + 122.0)), 2)
+                    if k >= spot
+                    else round(max(6.0, 152.0 - (spot - k) * 0.8), 2),
+                    "puts_iv": f"{round(14.8 - dist * 7, 1)}%",
+                    "puts_eiv": f"{round(14.2 - dist * 6, 1)}%",
+                    "puts_gex": f"-{round(max(0.1, 5.5 - abs(dist * 10)), 1)}B",
+                    "puts_oi_chg": f"{'+' if dist <= 0 else '-'}{round(abs(dist) * 2.1 + 0.4, 1)}B",
+                    "puts_oi": f"{round(max(0.4, 1.9 + dist * 4), 1)}M",
+                }
+            )
 
         from datetime import datetime
+
         now_time = datetime.now().strftime("%H:%M:%S IST")
         quote = get_quote(f"NSE:{underlying}") or {}
-        chg_val = quote.get("change") if quote.get("change") is not None else round(spot * 0.0052, 2)
+        chg_val = (
+            quote.get("change") if quote.get("change") is not None else round(spot * 0.0052, 2)
+        )
         chg_pct = quote.get("change_pct") if quote.get("change_pct") is not None else 0.52
         chg_sign = "+" if chg_val >= 0 else ""
 
-        return _ok({
-            "underlying": underlying,
-            "expiry": active_expiry,
-            "expiries": expiries[:6] if expiries else ["0DTE (Weekly)", "Next Week", "Monthly"],
-            "spot_price": round(spot, 2),
-            "spot_change": f"{chg_sign}{round(chg_val, 2)}",
-            "spot_change_pct": f"{chg_sign}{round(chg_pct, 2)}%",
-            "time": now_time,
-            "pcr": pcr_val,
-            "pcr_sentiment": pcr_sentiment,
-            "max_pain": max_pain,
-            "total_call_oi": f"{round(tot_call_oi / 100000, 1)}L",
-            "total_put_oi": f"{round(tot_put_oi / 100000, 1)}L",
-            "net_oi_change": f"{'+' if tot_put_oichg >= tot_call_oichg else ''}{round((tot_put_oichg - tot_call_oichg) / 100000, 1)}L",
-            "zero_gamma": zero_gamma,
-            "call_wall": call_wall,
-            "put_support": put_support,
-            "gex_profile": gex_profile,
-            "delta_hedge": delta_hedge,
-            "iv_skew": iv_skew,
-            "options_chain": chain_rows,
-        })
+        return _ok(
+            {
+                "underlying": underlying,
+                "expiry": active_expiry,
+                "expiries": expiries[:6] if expiries else ["0DTE (Weekly)", "Next Week", "Monthly"],
+                "spot_price": round(spot, 2),
+                "spot_change": f"{chg_sign}{round(chg_val, 2)}",
+                "spot_change_pct": f"{chg_sign}{round(chg_pct, 2)}%",
+                "time": now_time,
+                "pcr": pcr_val,
+                "pcr_sentiment": pcr_sentiment,
+                "max_pain": max_pain,
+                "total_call_oi": f"{round(tot_call_oi / 100000, 1)}L",
+                "total_put_oi": f"{round(tot_put_oi / 100000, 1)}L",
+                "net_oi_change": f"{'+' if tot_put_oichg >= tot_call_oichg else ''}{round((tot_put_oichg - tot_call_oichg) / 100000, 1)}L",
+                "zero_gamma": zero_gamma,
+                "call_wall": call_wall,
+                "put_support": put_support,
+                "gex_profile": gex_profile,
+                "delta_hedge": delta_hedge,
+                "iv_skew": iv_skew,
+                "options_chain": chain_rows,
+            }
+        )
     except Exception as e:
         import traceback
+
         traceback.print_exc()
         raise _err(str(e))
 
@@ -3752,6 +4469,7 @@ async def skill_telemetry_summary():
     """Return institutional telemetry summary with failure patterns & self-learning recommendations."""
     try:
         from engine.telemetry import get_telemetry_summary
+
         return _ok(get_telemetry_summary())
     except Exception as e:
         raise _err(str(e))
@@ -3769,12 +4487,13 @@ async def skill_telemetry_events(req: Optional[TelemetryEventsRequest] = None):
     """Return filtered telemetry events (failovers, fallbacks, exceptions)."""
     try:
         from engine.telemetry import get_recent_events
+
         limit = req.limit if req else 50
         event_type = req.event_type if req else None
         severity = req.severity if req else None
-        return _ok({
-            "events": get_recent_events(limit=limit, event_type=event_type, severity=severity)
-        })
+        return _ok(
+            {"events": get_recent_events(limit=limit, event_type=event_type, severity=severity)}
+        )
     except Exception as e:
         raise _err(str(e))
 
@@ -3784,7 +4503,275 @@ async def skill_telemetry_clear():
     """Clear telemetry logs."""
     try:
         from engine.telemetry import clear_telemetry
+
         clear_telemetry()
         return _ok({"cleared": True})
+    except Exception as e:
+        raise _err(str(e))
+
+
+# ── Retail Enablement & Wealth Protection Skills ─────────────────────────────
+
+
+@router.post("/portfolio/health")
+@router.get("/portfolio/health")
+async def skill_portfolio_health(req: Optional[PortfolioHealthRequest] = None):
+    """Audit retail portfolio health, concentration risk (HHI), and wealth allocation pyramid."""
+    try:
+        from engine.portfolio import audit_portfolio_health, PortfolioSummary, HoldingRow, RiskMeter
+        from brokers.base import Funds
+
+        try:
+            audit = audit_portfolio_health()
+        except Exception:
+            # Graceful demo fallback when broker is disconnected
+            demo_holdings = [
+                HoldingRow(
+                    symbol="RELIANCE",
+                    qty=50,
+                    avg_price=2600.0,
+                    ltp=2850.0,
+                    value=142500.0,
+                    pnl=12500.0,
+                    pnl_pct=9.6,
+                    product="CNC",
+                ),
+                HoldingRow(
+                    symbol="TCS",
+                    qty=25,
+                    avg_price=3300.0,
+                    ltp=3520.0,
+                    value=88000.0,
+                    pnl=5500.0,
+                    pnl_pct=6.7,
+                    product="CNC",
+                ),
+                HoldingRow(
+                    symbol="INFY",
+                    qty=40,
+                    avg_price=1500.0,
+                    ltp=1420.0,
+                    value=56800.0,
+                    pnl=-3200.0,
+                    pnl_pct=-5.3,
+                    product="CNC",
+                ),
+            ]
+            demo_funds = Funds(available_cash=65000.0, used_margin=0.0, total_balance=352300.0)
+            demo_risk = RiskMeter(
+                total_capital=352300.0,
+                deployed_cash=287300.0,
+                used_margin=0.0,
+                free_cash=65000.0,
+                deployment_pct=81.5,
+                unrealised_pnl=14800.0,
+                max_loss_estimate=287300.0,
+                risk_rating="LOW",
+            )
+            demo_summary = PortfolioSummary(
+                holdings=demo_holdings,
+                positions=[],
+                funds=demo_funds,
+                greeks=None,
+                risk=demo_risk,
+                total_value=352300.0,
+                total_pnl=14800.0,
+                day_pnl=0.0,  # type: ignore
+            )
+            audit = audit_portfolio_health(demo_summary)
+        return _ok(audit.to_dict())
+    except Exception as e:
+        raise _err(str(e))
+
+
+@router.post("/tax/estimate")
+async def skill_tax_estimate(req: TaxEstimateRequest):
+    """Estimate post-budget capital gains tax, STCG 20%, LTCG 12.5% u/s 112A, or F&O business income."""
+    try:
+        from engine.charges import calculate_capital_gains_tax
+
+        estimate = calculate_capital_gains_tax(
+            gross_pnl=req.gross_pnl,
+            holding_period_days=req.holding_period_days,
+            segment=req.segment,  # type: ignore
+            prior_accumulated_ltcg=req.prior_accumulated_ltcg,
+        )
+        return _ok(estimate.to_dict())
+    except Exception as e:
+        raise _err(str(e))
+
+
+@router.post("/tax/harvesting")
+@router.get("/tax/harvesting")
+async def skill_tax_harvesting():
+    """Identify tax-loss harvesting candidates across retail holdings to offset STCG."""
+    try:
+        from engine.portfolio import get_portfolio_summary
+        from engine.charges import suggest_tax_loss_harvesting
+
+        try:
+            summary = get_portfolio_summary()
+            holdings_dicts = [
+                {"symbol": h.symbol, "qty": h.qty, "ltp": h.ltp, "pnl": h.pnl, "days_held": 90}
+                for h in summary.holdings
+            ]
+        except Exception:
+            # Fallback demo holdings
+            holdings_dicts = [
+                {"symbol": "INFY", "qty": 40, "ltp": 1420.0, "pnl": -3200.0, "days_held": 90},
+                {"symbol": "WIPRO", "qty": 100, "ltp": 460.0, "pnl": -1500.0, "days_held": 120},
+                {"symbol": "RELIANCE", "qty": 50, "ltp": 2850.0, "pnl": 12500.0, "days_held": 150},
+            ]
+        suggestions = suggest_tax_loss_harvesting(holdings_dicts)
+        return _ok({"tax_loss_harvest_opportunities": suggestions})
+    except Exception as e:
+        raise _err(str(e))
+
+
+@router.post("/options/defined_risk_spreads")
+async def skill_defined_risk_spreads(req: DefinedRiskSpreadRequest):
+    """Build mathematically defined-risk options spreads (Bull Call Spread, Bear Put Spread, Iron Condor)."""
+    try:
+        from engine.defined_risk_spreads import build_defined_risk_spread
+
+        spread = build_defined_risk_spread(
+            underlying=req.underlying,
+            spot_price=req.spot_price,
+            strategy=req.strategy,  # type: ignore
+            iv=req.iv,
+            dte=req.dte,
+            num_lots=req.num_lots,
+        )
+        return _ok(spread.to_dict())
+    except Exception as e:
+        raise _err(str(e))
+
+
+class CouncilRequest(BaseModel):
+    symbol: str
+    council: str = "breakout"
+    exchange: str = "NSE"
+
+
+class PersonaAnalyzeRequest(BaseModel):
+    symbol: str
+    persona_id: str
+    exchange: str = "NSE"
+
+
+@router.post("/persona/council")
+@router.post("/skills/persona/council")
+async def skill_persona_council(req: CouncilRequest):
+    """Run a specialized Council Ensemble of legendary personas on a stock symbol."""
+    try:
+        from agent.persona_agent import run_council
+
+        res = run_council(
+            council_name=req.council,
+            symbol=req.symbol,
+            exchange=req.exchange,
+            llm_provider="auto",
+        )
+        # Convert PersonaSignal objects to dict
+        if "signals" in res:
+            res["signals"] = [s.to_dict() if hasattr(s, "to_dict") else s for s in res["signals"]]
+        return _ok(res)
+    except Exception as e:
+        raise _err(str(e))
+
+
+@router.post("/persona/analyze")
+@router.post("/skills/persona/analyze")
+async def skill_persona_analyze(req: PersonaAnalyzeRequest):
+    """Analyze a stock ticker from the perspective of a specific legendary investor/trader persona."""
+    try:
+        from agent.persona_agent import run_persona_analysis
+
+        sig = run_persona_analysis(
+            persona_id=req.persona_id,
+            symbol=req.symbol,
+            exchange=req.exchange,
+            llm_provider="auto",
+        )
+        return _ok(sig.to_dict())
+    except Exception as e:
+        raise _err(str(e))
+
+
+class PersonaTrackRecordRequest(BaseModel):
+    sector: Optional[str] = None
+    regime: Optional[str] = None
+
+
+@router.get("/persona/track_records")
+@router.post("/persona/track_records")
+@router.get("/skills/persona/track_records")
+@router.post("/skills/persona/track_records")
+async def skill_persona_track_records(req: Optional[PersonaTrackRecordRequest] = None):
+    """Retrieve self-evolving empirical track records and dynamic weighting multipliers for all 13 personas."""
+    try:
+        from agent.persona_tracker import get_persona_tracker
+
+        tracker = get_persona_tracker()
+        sector = req.sector if req else None
+        regime = req.regime if req else None
+        records = tracker.get_all_track_records(sector=sector, regime=regime)
+        return _ok({"track_records": records, "total_personas": len(records)})
+    except Exception as e:
+        raise _err(str(e))
+
+
+class PostMortemRequest(BaseModel):
+    persona_id: str
+    symbol: str
+    outcome_status: str
+    realized_r: float
+    entry_price: float
+    exit_price: float
+    sector: Optional[str] = "Broad Market"
+
+
+@router.post("/persona/post_mortem")
+@router.post("/skills/persona/post_mortem")
+async def skill_persona_post_mortem(req: PostMortemRequest):
+    """Generate an institutional trade retrospective analysis and update persona heuristic memory."""
+    try:
+        from agent.persona_tracker import get_persona_tracker
+
+        tracker = get_persona_tracker()
+        res = tracker.generate_post_mortem(
+            persona_id=req.persona_id,
+            symbol=req.symbol,
+            outcome_status=req.outcome_status,
+            realized_r=req.realized_r,
+            entry_price=req.entry_price,
+            exit_price=req.exit_price,
+            sector=req.sector or "Broad Market",
+        )
+        return _ok(res)
+    except Exception as e:
+        raise _err(str(e))
+
+
+class WhaleFlowsRequest(BaseModel):
+    investor: Optional[str] = None
+    sector: Optional[str] = None
+    min_deal_cr: Optional[float] = 0.0
+
+
+@router.get("/whale_flows")
+@router.post("/whale_flows")
+@router.get("/skills/whale_flows")
+@router.post("/skills/whale_flows")
+async def skill_whale_flows(req: Optional[WhaleFlowsRequest] = None):
+    """Retrieve Indian marquee superstar investor bulk/block deals and SAST accumulations."""
+    try:
+        from analysis.whale_tracker import get_whale_flows
+
+        inv = req.investor if req else None
+        sec = req.sector if req else None
+        min_cr = req.min_deal_cr if (req and req.min_deal_cr is not None) else 0.0
+        res = get_whale_flows(investor_filter=inv, sector_filter=sec, min_deal_cr=min_cr)
+        return _ok(res)
     except Exception as e:
         raise _err(str(e))

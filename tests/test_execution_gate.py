@@ -1,7 +1,6 @@
-import numpy as np
 import pandas as pd
 import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 from analysis.execution_gate import (
     evaluate_execution_gate,
@@ -17,18 +16,24 @@ def bullish_breakout_df():
     base_closes = [500.0 + i * 2.5 for i in range(215)]
     surge_closes = [1040.0, 1060.0, 1085.0, 1110.0, 1140.0]
     all_closes = base_closes + surge_closes
-    return pd.DataFrame({
-        "open": all_closes,
-        "high": [c + 15.0 for c in all_closes],
-        "low": [c - 5.0 for c in all_closes],
-        "close": all_closes,
-        "volume": [100000] * 215 + [700000] * 5,
-    }, index=dates)
+    return pd.DataFrame(
+        {
+            "open": all_closes,
+            "high": [c + 15.0 for c in all_closes],
+            "low": [c - 5.0 for c in all_closes],
+            "close": all_closes,
+            "volume": [100000] * 215 + [700000] * 5,
+        },
+        index=dates,
+    )
 
 
 def test_evaluate_execution_gate_ready(bullish_breakout_df):
     with (
-        patch("analysis.sector_rotation.get_stock_sector_alignment", return_value={"sector": "METALS", "quadrant": "LEADING"}),
+        patch(
+            "analysis.sector_rotation.get_stock_sector_alignment",
+            return_value={"sector": "METALS", "quadrant": "LEADING"},
+        ),
         patch("bot.telegram_bot.push_execution_alert") as mock_push,
     ):
         rep = evaluate_execution_gate("JSWSTEEL", df=bullish_breakout_df, notify_telegram=True)
@@ -39,7 +44,6 @@ def test_evaluate_execution_gate_ready(bullish_breakout_df):
         assert rep.target_1 > rep.ltp
         assert rep.stop_loss < rep.ltp
         assert mock_push.called is True
-
 
 
 def test_format_execution_alert_message():
@@ -96,7 +100,9 @@ def test_scan_and_alert_execution_candidates():
             action_summary="Execute now",
             telegram_sent=True,
         )
-        candidates = scan_and_alert_execution_candidates(universe="auto_market_aware", top_n=1, notify_telegram=False)
+        candidates = scan_and_alert_execution_candidates(
+            universe="auto_market_aware", top_n=1, notify_telegram=False
+        )
         assert len(candidates) == 1
         assert candidates[0].symbol == "JSWSTEEL"
         assert candidates[0].execution_status == "READY"

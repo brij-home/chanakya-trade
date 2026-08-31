@@ -3,25 +3,25 @@ import { useInspectorStore } from '../../store/inspectorStore'
 import Tooltip, { InfoBadge } from '../UI/Tooltip'
 
 const VERDICT_STYLES = {
-  'STRONG_BUY':  'bg-green text-surface font-bold',
-  'BUY':         'bg-green/15 text-green border border-green/30 font-semibold',
-  'HOLD':        'bg-amber/15 text-amber border border-amber/30 font-semibold',
-  'SELL':        'bg-red/15 text-red border border-red/30 font-semibold',
-  'STRONG_SELL': 'bg-red text-surface font-bold',
+  'STRONG_BUY':  'bg-green text-black font-extrabold',
+  'BUY':         'bg-green/15 text-green border border-green/30 font-bold',
+  'HOLD':        'bg-amber/15 text-amber border border-amber/30 font-bold',
+  'SELL':        'bg-red/15 text-red border border-red/30 font-bold',
+  'STRONG_SELL': 'bg-red text-white font-extrabold',
   'AVOID':       'bg-panel text-muted border border-border font-semibold',
 }
 
 export default function FunnelCard({ data }) {
+  const openInspector = useInspectorStore((s) => s.openInspector)
+  const [activeTab, setActiveTab] = useState('plans') // 'plans' | 'screen' | 'macro'
+
   if (!data) return null
   const d = data?.data ?? data ?? {}
-  const openInspector = useInspectorStore((s) => s.openInspector)
 
   const reports = d.pre_filter_reports || []
   const plans = d.trade_plans || []
   const qualified = reports.filter(r => r.qualified)
   const filtered = reports.filter(r => !r.qualified)
-
-  const [activeTab, setActiveTab] = useState('plans') // 'plans' | 'screen' | 'macro'
 
   return (
     <div className="bg-elevated border border-border rounded-xl p-4 max-w-2xl w-full space-y-4 font-mono shadow-sm">
@@ -68,24 +68,24 @@ export default function FunnelCard({ data }) {
       <div className="flex items-center gap-2 border-b border-border/40 pb-2 text-xs font-ui">
         <button
           onClick={() => setActiveTab('plans')}
-          className={`px-3 py-1 rounded-lg transition-colors cursor-pointer ${
-            activeTab === 'plans' ? 'bg-amber text-surface font-bold' : 'text-muted hover:text-text'
+          className={`px-3 py-1.5 rounded-lg transition-colors cursor-pointer ${
+            activeTab === 'plans' ? 'bg-amber text-black font-extrabold shadow-xs' : 'text-muted hover:text-text'
           }`}
         >
           ⚔️ Synthesized Trade Plans ({plans.length})
         </button>
         <button
           onClick={() => setActiveTab('screen')}
-          className={`px-3 py-1 rounded-lg transition-colors cursor-pointer ${
-            activeTab === 'screen' ? 'bg-amber text-surface font-bold' : 'text-muted hover:text-text'
+          className={`px-3 py-1.5 rounded-lg transition-colors cursor-pointer ${
+            activeTab === 'screen' ? 'bg-amber text-black font-extrabold shadow-xs' : 'text-muted hover:text-text'
           }`}
         >
           ⚡ Stage 1 Pre-Filter ({reports.length})
         </button>
         <button
           onClick={() => setActiveTab('macro')}
-          className={`px-3 py-1 rounded-lg transition-colors cursor-pointer ${
-            activeTab === 'macro' ? 'bg-amber text-surface font-bold' : 'text-muted hover:text-text'
+          className={`px-3 py-1.5 rounded-lg transition-colors cursor-pointer ${
+            activeTab === 'macro' ? 'bg-amber text-black font-extrabold shadow-xs' : 'text-muted hover:text-text'
           }`}
         >
           🌐 Macro & VIX Context

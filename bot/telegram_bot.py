@@ -1045,8 +1045,14 @@ def format_execution_alert_message(d: dict) -> str:
     t1_pct = abs((t1 - entry) / entry * 100) if entry else 0.0
     t2_pct = abs((t2 - entry) / entry * 100) if entry else 0.0
 
-    status_badge = "🚀 <b>READY TO EXECUTE</b>" if status == "READY" else "🎯 <b>STALK ON RETEST</b>"
-    cat_text = "\n".join([f"• {c}" for c in catalysts[:3]]) if catalysts else "• Confirmed Institutional Structure"
+    status_badge = (
+        "🚀 <b>READY TO EXECUTE</b>" if status == "READY" else "🎯 <b>STALK ON RETEST</b>"
+    )
+    cat_text = (
+        "\n".join([f"• {c}" for c in catalysts[:3]])
+        if catalysts
+        else "• Confirmed Institutional Structure"
+    )
 
     # Breakeven price with +0.2% cost buffer
     be_price = entry * 1.002
@@ -1088,7 +1094,6 @@ def push_execution_alert(report_dict: dict) -> None:
         send_push(msg, parse_mode="HTML")
     except Exception:
         pass
-
 
 
 # ── Alert Integration ────────────────────────────────────────

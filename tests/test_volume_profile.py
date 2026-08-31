@@ -5,7 +5,6 @@ Unit tests for Volume Profile, RVOL & Volume Spread Analysis (VSA) engine.
 Runs offline using deterministic synthetic OHLCV data.
 """
 
-import numpy as np
 import pandas as pd
 import pytest
 

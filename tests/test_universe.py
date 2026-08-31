@@ -1,9 +1,7 @@
-import pytest
 from unittest.mock import patch
 
 from analysis.universe import (
     SECTOR_TAXONOMY,
-    THEMATIC_PRESETS,
     get_stock_sector,
     get_taxonomy_categories,
     resolve_dynamic_universe,
@@ -13,7 +11,18 @@ from analysis.sector_rotation import SectorRRGPoint
 
 def test_sector_taxonomy_completeness():
     assert len(SECTOR_TAXONOMY) >= 10
-    required_sectors = ["banking", "it", "auto", "defence", "energy", "metals", "pharma", "fmcg", "infra", "chemicals"]
+    required_sectors = [
+        "banking",
+        "it",
+        "auto",
+        "defence",
+        "energy",
+        "metals",
+        "pharma",
+        "fmcg",
+        "infra",
+        "chemicals",
+    ]
     for sec in required_sectors:
         assert sec in SECTOR_TAXONOMY
         assert len(SECTOR_TAXONOMY[sec]["symbols"]) >= 8
@@ -68,9 +77,19 @@ def test_resolve_dynamic_universe_sector_and_presets():
 
 def test_resolve_dynamic_universe_auto_market_aware():
     fake_rrg = [
-        SectorRRGPoint(sector="DEFENCE", symbol="^CNXDEFENCE", rs_ratio=105.0, rs_momentum=108.0, quadrant="LEADING"),
-        SectorRRGPoint(sector="IT", symbol="^CNXIT", rs_ratio=102.0, rs_momentum=103.0, quadrant="LEADING"),
-        SectorRRGPoint(sector="BANK", symbol="^NSEBANK", rs_ratio=98.0, rs_momentum=95.0, quadrant="LAGGING"),
+        SectorRRGPoint(
+            sector="DEFENCE",
+            symbol="^CNXDEFENCE",
+            rs_ratio=105.0,
+            rs_momentum=108.0,
+            quadrant="LEADING",
+        ),
+        SectorRRGPoint(
+            sector="IT", symbol="^CNXIT", rs_ratio=102.0, rs_momentum=103.0, quadrant="LEADING"
+        ),
+        SectorRRGPoint(
+            sector="BANK", symbol="^NSEBANK", rs_ratio=98.0, rs_momentum=95.0, quadrant="LAGGING"
+        ),
     ]
 
     with patch("analysis.sector_rotation.get_sector_rrg_matrix", return_value=fake_rrg):

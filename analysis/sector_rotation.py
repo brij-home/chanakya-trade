@@ -203,10 +203,22 @@ SECTOR_DRIVERS: dict[str, list[str]] = {
     "BANK": ["Credit Growth (>14% YoY)", "NIM Normalization", "FII Sector Allocation"],
     "PSU_BANK": ["NPA Cleanups", "High RoA (>1.1%)", "Capex Disbursals"],
     "AUTO": ["Festive Channel Filling", "PV & 2W Volume Rebound", "EV Fleet Expansion"],
-    "PHARMA": ["US Generics Pricing Stability", "Domestic Formulation Outperformance", "Biotech R&D"],
+    "PHARMA": [
+        "US Generics Pricing Stability",
+        "Domestic Formulation Outperformance",
+        "Biotech R&D",
+    ],
     "FMCG": ["Rural Demand Recovery", "Raw Material Margin Expansion", "Volume Growth"],
-    "METAL": ["Global Commodity Pricing", "China Stimulus Expectations", "Domestic Infra Consumption"],
-    "REALTY": ["Residential Pre-Sales Velocity", "Commercial Office Absorption", "Inventory Contraction"],
+    "METAL": [
+        "Global Commodity Pricing",
+        "China Stimulus Expectations",
+        "Domestic Infra Consumption",
+    ],
+    "REALTY": [
+        "Residential Pre-Sales Velocity",
+        "Commercial Office Absorption",
+        "Inventory Contraction",
+    ],
     "ENERGY": ["Refining GRM Spreads", "Power Transmission Capex", "Renewable Energy Capacity"],
     "INFRA": ["National Rail / Highway Orders", "Defence Indigenisation", "Private Capex Cycle"],
 }
@@ -237,7 +249,9 @@ def _classify_quadrant(rs_ratio: float, rs_momentum: float) -> str:
         return "IMPROVING"
 
 
-def compute_rrg_point_at(sec_closes: list[float], bm_closes: list[float], period: int = 14) -> tuple[float, float]:
+def compute_rrg_point_at(
+    sec_closes: list[float], bm_closes: list[float], period: int = 14
+) -> tuple[float, float]:
     """Compute single (rs_ratio, rs_momentum) point for a slice of closing prices."""
     if len(sec_closes) < period or len(bm_closes) < period:
         return 100.0, 100.0
@@ -261,9 +275,7 @@ def compute_rrg_point_at(sec_closes: list[float], bm_closes: list[float], period
         sub_past = rs_series[-period - 4 : -4] if len(rs_series) >= period + 4 else sub_rs
         past_mean = sum(sub_past) / len(sub_past) if sub_past else mean_rs
         past_ratio = (
-            100.0 + ((past_rs - past_mean) / past_mean) * 100.0 * 2.5
-            if past_mean > 0
-            else 100.0
+            100.0 + ((past_rs - past_mean) / past_mean) * 100.0 * 2.5 if past_mean > 0 else 100.0
         )
         diff = ratio - past_ratio
         momentum = 100.0 + diff * 1.8
@@ -319,6 +331,7 @@ def get_sector_rrg_matrix(use_cache: bool = True) -> list[SectorRRGPoint]:
 
     try:
         from market.history import get_ohlcv
+
         bm_df = get_ohlcv("NIFTY 50", interval="day", days=60)
         if not bm_df.empty and len(bm_df) >= 15:
             bm_closes = bm_df["close"].tolist()
@@ -351,6 +364,7 @@ def get_sector_rrg_matrix(use_cache: bool = True) -> list[SectorRRGPoint]:
         if len(bm_closes) >= 15:
             try:
                 from market.history import get_ohlcv
+
                 proxy_df = get_ohlcv(proxy_sym, interval="day", days=60)
                 if not proxy_df.empty and len(proxy_df) >= 15:
                     p_closes = proxy_df["close"].tolist()
@@ -358,7 +372,9 @@ def get_sector_rrg_matrix(use_cache: bool = True) -> list[SectorRRGPoint]:
                     for offset in [6, 4, 2, 0]:
                         idx = len(p_closes) - offset
                         b_idx = len(bm_closes) - offset
-                        r_pt, m_pt = compute_rrg_point_at(p_closes[:idx], bm_closes[:b_idx], period=14)
+                        r_pt, m_pt = compute_rrg_point_at(
+                            p_closes[:idx], bm_closes[:b_idx], period=14
+                        )
                         trail.append({"rs_ratio": r_pt, "rs_momentum": m_pt})
 
                     if trail:
@@ -401,9 +417,7 @@ def get_sector_rrg_matrix(use_cache: bool = True) -> list[SectorRRGPoint]:
         try:
             from engine.analysis_cache import analysis_cache
 
-            analysis_cache.save_macro(
-                cache_key, [p.as_dict() for p in points], ttl_minutes=15
-            )
+            analysis_cache.save_macro(cache_key, [p.as_dict() for p in points], ttl_minutes=15)
         except Exception:
             pass
 
@@ -457,7 +471,9 @@ def get_stock_sector_alignment(symbol: str) -> dict[str, Any]:
         desc = f"Parent sector {sector} is in IMPROVING quadrant and gaining relative strength vs Nifty."
     elif final_score >= 40:
         alignment = "NEUTRAL"
-        desc = f"Parent sector {sector} is in WEAKENING quadrant; outperformance momentum is slowing."
+        desc = (
+            f"Parent sector {sector} is in WEAKENING quadrant; outperformance momentum is slowing."
+        )
     else:
         alignment = "HEADWIND"
         desc = f"Parent sector {sector} is in LAGGING quadrant; institutional outflows present."

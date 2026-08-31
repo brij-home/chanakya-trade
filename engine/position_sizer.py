@@ -117,7 +117,7 @@ def calculate_position_size(
         is_fno: True if trading F&O derivative contracts with lot multipliers
     """
     clean_sym = symbol.upper().replace(".NS", "").replace("NSE:", "").strip()
-    
+
     # Auto-detect indices as F&O derivatives
     if is_fno or clean_sym in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"):
         lot_size = get_lot_size(clean_sym)
@@ -163,7 +163,9 @@ def calculate_position_size(
 
     else:  # fixed_fractional
         raw_shares = int(risk_budget / stop_distance)
-        notes = f"Sized strictly on stop distance ({stop_distance:.2f} pts) at {max_risk_pct}% risk."
+        notes = (
+            f"Sized strictly on stop distance ({stop_distance:.2f} pts) at {max_risk_pct}% risk."
+        )
 
     # 2. Apply Capital Ceiling if configured
     if max_capital_pct is not None and max_capital_pct > 0:

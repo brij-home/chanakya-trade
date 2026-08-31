@@ -111,8 +111,8 @@ export default function TradingSettingsStep({ formData, setFormData, onNext }) {
       <div className="flex justify-end max-w-md mx-auto w-full mt-auto">
         <button
           onClick={handleNext}
-          className="px-6 py-2 bg-amber text-surface font-ui font-semibold text-sm rounded-lg
-                     hover:brightness-110 transition-all active:scale-95"
+          className="px-6 py-2 bg-amber text-black font-ui font-extrabold text-sm rounded-lg
+                     hover:brightness-110 transition-all active:scale-95 shadow-sm cursor-pointer"
         >
           Next
         </button>

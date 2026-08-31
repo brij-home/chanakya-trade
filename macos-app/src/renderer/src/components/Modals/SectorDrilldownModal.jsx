@@ -34,7 +34,7 @@ const ELIGIBILITY_CONFIG = {
   },
 }
 
-export default function SectorDrilldownModal({ isOpen, sector, onClose }) {
+export default function SectorDrilldownModal({ isOpen, sector, onClose, onOpenOrderTicket }) {
   const [data, setData] = useState(null)
   const [loading, setLoading] = useState(false)
   const [filter, setFilter] = useState('ALL')
@@ -463,7 +463,26 @@ export default function SectorDrilldownModal({ isOpen, sector, onClose }) {
 
                       {/* Action Bar */}
                       <div className="flex items-center justify-between pt-1">
-                        <div className="flex items-center gap-2">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          {onOpenOrderTicket && (
+                            <button
+                              onClick={() => {
+                                onClose()
+                                onOpenOrderTicket({
+                                  symbol: opp.symbol,
+                                  exchange: 'NSE',
+                                  price: opp.entry_price || opp.ltp,
+                                  stopLoss: opp.stop_loss,
+                                  target: opp.target_1,
+                                  action: opp.setup?.toLowerCase().includes('short') ? 'SELL' : 'BUY',
+                                })
+                              }}
+                              className="bg-emerald-500 hover:bg-emerald-400 text-black px-3 py-1.5 rounded-lg text-xs font-bold transition-colors cursor-pointer shadow-xs"
+                              title="Stage smart order ticket directly"
+                            >
+                              ⚡ Stage Order
+                            </button>
+                          )}
                           <button
                             onClick={() => {
                               onClose()
@@ -472,14 +491,14 @@ export default function SectorDrilldownModal({ isOpen, sector, onClose }) {
                             className="bg-amber/15 hover:bg-amber/25 text-amber border border-amber/30 px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors cursor-pointer"
                             title="Size position with volatility risk parity"
                           >
-                            ⚡ Size Position
+                            ⚖️ Size Position
                           </button>
                           <button
                             onClick={() => {
                               onClose()
                               sendDraft(`analyze ${opp.symbol}`)
                             }}
-                            className="bg-amber hover:bg-amber/90 text-black px-3 py-1.5 rounded-lg text-xs font-bold transition-colors cursor-pointer shadow-xs"
+                            className="bg-panel hover:bg-elevated text-text border border-border px-3 py-1.5 rounded-lg text-xs font-bold transition-colors cursor-pointer shadow-xs"
                             title="Launch Full Multi-Agent AI Debate"
                           >
                             🤖 AI Debate

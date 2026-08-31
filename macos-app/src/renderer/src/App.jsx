@@ -92,12 +92,17 @@ export default function App() {
 
   useEffect(() => {
     // Web mode — no Electron IPC, just check if server is ready
-    if (window.__CHANAKYA_TRADE_WEB__) {
+    const isWeb = typeof window !== 'undefined' && (window.__CHANAKYA_TRADE_WEB__ || !window.electronAPI)
+
+    if (isWeb) {
       const checkReady = async () => {
+        const currentPort =
+          parseInt(window.location.port, 10) === 5173
+            ? 8765
+            : parseInt(window.location.port, 10) || 8765
+        setPort(currentPort)
         try {
-          const res = await fetch('/api/onboarding/status')
-          const currentPort = parseInt(window.location.port, 10) || 8765
-          setPort(currentPort)
+          const res = await fetch(`${getBaseUrl(currentPort)}/api/onboarding/status`)
           if (res.ok) {
             const data = await res.json()
             if (data.onboarding_complete) {
@@ -109,14 +114,17 @@ export default function App() {
             setSetupPhase('ready')
           }
         } catch {
-          const currentPort = parseInt(window.location.port, 10) || 8765
-          setPort(currentPort)
           setSetupPhase('ready')
         }
       }
       checkReady()
       return
     }
+
+    // Safety fallback timer so Electron startup never hangs indefinitely on a blank/initializing screen
+    const safetyTimer = setTimeout(() => {
+      setSetupPhase((prev) => (prev === 'initializing' ? 'ready' : prev))
+    }, 2000)
 
     window.electronAPI?.onSetupProgress((data) => {
       setSetupPhase('progress')
@@ -129,6 +137,7 @@ export default function App() {
     })
 
     window.electronAPI?.onSidecarReady(async ({ port }) => {
+      clearTimeout(safetyTimer)
       setPort(port)
       try {
         const res = await fetch(`${getBaseUrl(port)}/api/onboarding/status`)
@@ -144,6 +153,7 @@ export default function App() {
     })
 
     window.electronAPI?.onSidecarError(({ message, details }) => {
+      clearTimeout(safetyTimer)
       setSidecarError(message)
       if (setupPhase !== 'ready') {
         setSetupPhase('error')
@@ -151,8 +161,9 @@ export default function App() {
       }
     })
 
-    window.electronAPI?.getPort().then(async (port) => {
+    window.electronAPI?.getPort?.()?.then(async (port) => {
       if (port) {
+        clearTimeout(safetyTimer)
         setPort(port)
         try {
           const res = await fetch(`${getBaseUrl(port)}/api/onboarding/status`)
@@ -167,6 +178,8 @@ export default function App() {
         }
       }
     })
+
+    return () => clearTimeout(safetyTimer)
   }, [])
 
   // Poll /api/status every 8s once sidecar is up
@@ -233,23 +246,23 @@ export default function App() {
   return (
     <div className="flex flex-col h-full bg-surface">
       {/* Top Main Navigation Bar */}
-      <div className="drag flex items-center justify-between h-[56px] bg-panel border-b border-border flex-shrink-0 px-4 gap-3">
+      <div className="drag flex items-center justify-between h-[56px] bg-panel/95 border-b border-border flex-shrink-0 px-4 gap-3 backdrop-blur-md">
         {/* Brand & Logo */}
         <div className="flex items-center gap-2.5 flex-shrink-0">
-          <span className="text-amber text-lg font-bold">◆</span>
-          <span className="text-text text-sm font-bold tracking-wide font-ui hidden sm:inline">
+          <span className="text-amber text-lg font-bold drop-shadow-[0_0_8px_rgba(245,158,11,0.5)]">◆</span>
+          <span className="text-text text-sm font-extrabold tracking-wide font-ui hidden sm:inline">
             ChanakyaTrade
           </span>
         </div>
 
         {/* Center: Workspace Switcher Tabs */}
-        <div className="no-drag flex items-center bg-elevated/80 border border-border/80 rounded-xl p-1 text-xs font-ui shadow-inner">
+        <div className="no-drag flex items-center bg-elevated/90 border border-border rounded-xl p-1 text-xs font-ui shadow-inner">
           <button
             type="button"
             onClick={() => setActiveView('terminal')}
-            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg font-semibold transition-all cursor-pointer ${
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg font-bold transition-all cursor-pointer ${
               activeView === 'terminal'
-                ? 'bg-amber text-black shadow-xs'
+                ? 'bg-amber text-black shadow-sm ring-1 ring-amber/50 font-extrabold'
                 : 'text-muted hover:text-text hover:bg-panel'
             }`}
             title="Strategic Quant Terminal (Ctrl+1)"
@@ -261,9 +274,9 @@ export default function App() {
           <button
             type="button"
             onClick={() => setActiveView('debate')}
-            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg font-semibold transition-all cursor-pointer ${
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg font-bold transition-all cursor-pointer ${
               activeView === 'debate'
-                ? 'bg-emerald-500 text-black shadow-xs'
+                ? 'bg-green text-black shadow-sm ring-1 ring-green/50 font-extrabold'
                 : 'text-muted hover:text-text hover:bg-panel'
             }`}
             title="Multi-Agent Debate Arena (Ctrl+2)"
@@ -275,9 +288,9 @@ export default function App() {
           <button
             type="button"
             onClick={() => setActiveView('options')}
-            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg font-semibold transition-all cursor-pointer ${
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg font-bold transition-all cursor-pointer ${
               activeView === 'options'
-                ? 'bg-cyan-400 text-black shadow-xs'
+                ? 'bg-cyan text-black shadow-sm ring-1 ring-cyan/50 font-extrabold'
                 : 'text-muted hover:text-text hover:bg-panel'
             }`}
             title="Quant & Options GEX Desk (Ctrl+3)"
@@ -289,9 +302,9 @@ export default function App() {
           <button
             type="button"
             onClick={() => setActiveView('copilot')}
-            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg font-semibold transition-all cursor-pointer ${
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg font-bold transition-all cursor-pointer ${
               activeView === 'copilot'
-                ? 'bg-amber-light text-black shadow-xs'
+                ? 'bg-blue text-white shadow-sm ring-1 ring-blue/50 font-extrabold'
                 : 'text-muted hover:text-text hover:bg-panel'
             }`}
             title="AI Copilot Stream & Custom Quant (Ctrl+4)"
@@ -307,10 +320,10 @@ export default function App() {
           <button
             type="button"
             onClick={() => setIsCommandPaletteOpen(true)}
-            className="hidden lg:flex items-center gap-2 bg-elevated/70 hover:bg-elevated text-muted hover:text-text border border-border/60 px-2.5 py-1.5 rounded-lg text-xs font-ui transition-all shadow-xs cursor-pointer"
+            className="hidden lg:flex items-center gap-2 bg-elevated/80 hover:bg-elevated text-muted hover:text-text border border-border px-2.5 py-1.5 rounded-lg text-xs font-ui transition-all shadow-xs cursor-pointer"
           >
             <span>🔍 Search…</span>
-            <kbd className="text-[10px] bg-panel border border-border px-1 rounded text-amber font-mono font-bold">
+            <kbd className="text-[10px] bg-panel border border-border px-1.5 py-0.5 rounded text-amber font-mono font-bold">
               ^K
             </kbd>
           </button>
@@ -318,7 +331,7 @@ export default function App() {
           <button
             type="button"
             onClick={() => setIsTopOppsOpen(true)}
-            className="hidden sm:flex items-center gap-1 bg-amber/15 hover:bg-amber/25 text-amber border border-amber/30 px-2.5 py-1 rounded-lg text-xs font-ui font-bold transition-colors cursor-pointer shadow-xs"
+            className="hidden sm:flex items-center gap-1 bg-amber/15 hover:bg-amber/25 text-amber border border-amber/40 px-2.5 py-1 rounded-lg text-xs font-ui font-bold transition-colors cursor-pointer shadow-xs"
             title="Open Top 10 High-Conviction Opportunities Radar (Ctrl+O)"
           >
             <span>🎯</span> Radar
@@ -327,7 +340,7 @@ export default function App() {
           <button
             type="button"
             onClick={() => handleOpenOrderTicket()}
-            className="hidden sm:flex items-center gap-1 bg-green/10 hover:bg-green/20 text-green border border-green/30 px-2.5 py-1 rounded-lg text-xs font-ui font-semibold transition-colors cursor-pointer"
+            className="hidden sm:flex items-center gap-1 bg-green/15 hover:bg-green/25 text-green border border-green/40 px-2.5 py-1 rounded-lg text-xs font-ui font-bold transition-colors cursor-pointer shadow-xs"
           >
             <span>⚡</span> Order
           </button>
@@ -368,31 +381,50 @@ export default function App() {
         </div>
       </div>
 
-      {/* Global Modals */}
-      <CommandPalette
-        isOpen={isCommandPaletteOpen}
-        onClose={() => setIsCommandPaletteOpen(false)}
-        onOpenOrderTicket={() => {
-          setIsCommandPaletteOpen(false)
-          setIsOrderTicketOpen(true)
-        }}
-      />
-      <OrderTicketModal
-        isOpen={isOrderTicketOpen}
-        onClose={() => setIsOrderTicketOpen(false)}
-        initialData={orderTicketData}
-      />
-      <TopOpportunitiesModal
-        isOpen={isTopOppsOpen}
-        onClose={() => setIsTopOppsOpen(false)}
-      />
-      <SectorDrilldownModal
-        isOpen={sectorDrilldown.isOpen}
-        sector={sectorDrilldown.sector}
-        onClose={() => setSectorDrilldown({ isOpen: false, sector: null })}
-      />
-      <MetricExplainerModal />
-      <ActivityHUD />
+      {/* Global Modals protected with Error Boundaries */}
+      <ErrorBoundary title="Command Palette">
+        <CommandPalette
+          isOpen={isCommandPaletteOpen}
+          onClose={() => setIsCommandPaletteOpen(false)}
+          onOpenOrderTicket={(data) => {
+            setIsCommandPaletteOpen(false)
+            handleOpenOrderTicket(data)
+          }}
+        />
+      </ErrorBoundary>
+
+      <ErrorBoundary title="Smart Order Staging Gate">
+        <OrderTicketModal
+          isOpen={isOrderTicketOpen}
+          onClose={() => setIsOrderTicketOpen(false)}
+          initialData={orderTicketData}
+        />
+      </ErrorBoundary>
+
+      <ErrorBoundary title="High-Conviction Opportunities Radar">
+        <TopOpportunitiesModal
+          isOpen={isTopOppsOpen}
+          onClose={() => setIsTopOppsOpen(false)}
+          onOpenOrderTicket={handleOpenOrderTicket}
+        />
+      </ErrorBoundary>
+
+      <ErrorBoundary title="Sector & Thematic Drilldown">
+        <SectorDrilldownModal
+          isOpen={sectorDrilldown.isOpen}
+          sector={sectorDrilldown.sector}
+          onClose={() => setSectorDrilldown({ isOpen: false, sector: null })}
+          onOpenOrderTicket={handleOpenOrderTicket}
+        />
+      </ErrorBoundary>
+
+      <ErrorBoundary title="Metric Explainer">
+        <MetricExplainerModal />
+      </ErrorBoundary>
+
+      <ErrorBoundary title="Activity Monitor">
+        <ActivityHUD />
+      </ErrorBoundary>
     </div>
   )
 }

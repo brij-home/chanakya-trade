@@ -34,8 +34,15 @@ from agent.core import (
 def clean_model_env(monkeypatch):
     """Ensure local .env model configurations do not contaminate default model unit tests."""
     for var in [
-        "AI_MODEL", "AI_FAST_MODEL", "AI_DEEP_MODEL", "AI_FAST_PROVIDER", "AI_DEEP_PROVIDER",
-        "ANTHROPIC_MODEL", "GEMINI_MODEL", "OPENAI_MODEL", "OLLAMA_MODEL",
+        "AI_MODEL",
+        "AI_FAST_MODEL",
+        "AI_DEEP_MODEL",
+        "AI_FAST_PROVIDER",
+        "AI_DEEP_PROVIDER",
+        "ANTHROPIC_MODEL",
+        "GEMINI_MODEL",
+        "OPENAI_MODEL",
+        "OLLAMA_MODEL",
     ]:
         monkeypatch.delenv(var, raising=False)
 
@@ -183,6 +190,28 @@ class TestOpenAIProvider:
                 base_url="http://localhost:11434/v1",
             )
             assert "localhost" in p.provider_name
+
+    def test_multi_key_pooling(self, monkeypatch):
+        """OpenAIProvider should support multiple comma-separated keys and show pooled count."""
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-key1, sk-key2, sk-key3")
+        mock_sdk = MagicMock()
+        with patch.dict("sys.modules", {"openai": mock_sdk}):
+            from agent.core import OpenAIProvider
+            from agent.tools import build_registry
+
+            reg = build_registry()
+            p = OpenAIProvider(
+                model="gpt-4o",
+                registry=reg,
+                system_prompt="test",
+            )
+            assert len(p._api_keys) == 3
+            assert "3 keys pooled" in p.provider_name
+
+            # Test round-robin client retrieval
+            idx1, _ = p._get_active_client()
+            idx2, _ = p._get_active_client()
+            assert idx1 != idx2
 
 
 # ── Anthropic provider (mocked) ──────────────────────────────

@@ -10,10 +10,11 @@
     "prebuild": "cd .. && python3 -m build --wheel -o macos-app/dist",
     "build": "electron-vite build && electron-builder --mac",
     "preview": "electron-vite preview",
+    "lint:hooks": "node scripts/audit-react-hooks.js",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:ui": "vitest --ui",
-    "build:web": "electron-vite build && node scripts/build-web.js"
+    "build:web": "node scripts/audit-react-hooks.js && electron-vite build && node scripts/build-web.js"
   },
   "dependencies": {
     "lightweight-charts": "^5.2.1",
@@ -22,6 +23,8 @@
     "zustand": "^5.0.2"
   },
   "devDependencies": {
+    "@babel/parser": "^7.29.8",
+    "@babel/traverse": "^7.29.8",
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.2",
     "@vitejs/plugin-react": "^4.7.0",

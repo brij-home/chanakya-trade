@@ -2,10 +2,10 @@ import { useState } from 'react'
 import { useChatStore } from '../../store/chatStore'
 
 export default function BacktestCard({ data }) {
+  const sendDraft = useChatStore((s) => s.sendDraft)
   if (!data) return null
 
   const r = data?.data ?? data ?? {}
-  const sendDraft = useChatStore((s) => s.sendDraft)
 
   const returnVal = Number(r.total_return ?? r.return_pct ?? 0)
   const isPositive = returnVal >= 0

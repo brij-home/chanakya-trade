@@ -304,7 +304,9 @@ def audit_forensics(
         red_flags.append(f"High Leverage (Debt/Equity {de:.2f}x)")
 
     if is_manipulator:
-        red_flags.append(f"Elevated Beneish M-Score ({m_score:.2f} > -1.78) — potential accruals distortion")
+        red_flags.append(
+            f"Elevated Beneish M-Score ({m_score:.2f} > -1.78) — potential accruals distortion"
+        )
 
     if distress_zone == "DISTRESS":
         red_flags.append(f"Altman Z''-Score ({z_score:.2f}) in DISTRESS zone")
@@ -346,9 +348,7 @@ def audit_forensics(
         try:
             from engine.analysis_cache import analysis_cache
 
-            analysis_cache.save_fundamental(
-                cache_key, result.as_dict(), ttl_hours=24
-            )
+            analysis_cache.save_fundamental(cache_key, result.as_dict(), ttl_hours=24)
         except Exception:
             pass
 

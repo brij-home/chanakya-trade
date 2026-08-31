@@ -4,8 +4,6 @@ tests/test_broker_stoxkart.py
 Unit tests for Stoxkart broker integration.
 """
 
-import pytest
-from unittest.mock import patch, MagicMock
 from brokers.stoxkart import StoxkartAPI
 from brokers.base import OrderRequest
 

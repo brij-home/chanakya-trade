@@ -1,6 +1,8 @@
 import { useState, useRef, useEffect } from 'react'
 import { useChatStore, getBaseUrl, getActiveSymbol } from '../../store/chatStore'
 import { useAPI } from '../../hooks/useAPI'
+import SmartTypeahead from '../Common/SmartTypeahead'
+import { fuzzySearchUniverse } from '../../data/universeData'
 
 // Maps typed commands → API endpoint + card type
 function parseCommand(input, contextSymbol = null) {
@@ -224,6 +226,48 @@ function parseCommand(input, contextSymbol = null) {
       return { endpoint: '/skills/big_move', body: { symbol: sym }, cardType: 'big_move' }
     }
 
+    case 'council': case 'councils': {
+      let cName = 'breakout'
+      let sym = contextSymbol || 'RELIANCE'
+      if (args.length >= 2) {
+        cName = args[0].toLowerCase()
+        sym = args[1].toUpperCase()
+      } else if (args.length === 1) {
+        if (['breakout', 'options_sniper', 'options', 'multibagger', 'macro_regime', 'core_value'].includes(args[0].toLowerCase())) {
+          cName = args[0].toLowerCase() === 'options' ? 'options_sniper' : args[0].toLowerCase()
+        } else {
+          sym = args[0].toUpperCase()
+        }
+      }
+      return { endpoint: '/skills/persona/council', body: { symbol: sym, council: cName }, cardType: 'council' }
+    }
+
+    case 'persona': case 'personas': {
+      const pId = args[0]?.toLowerCase() || 'buffett'
+      const sym = args[1]?.toUpperCase() || contextSymbol || 'RELIANCE'
+      return { endpoint: '/skills/persona/analyze', body: { symbol: sym, persona_id: pId }, cardType: 'persona' }
+    }
+
+    case 'spread': case 'spreads': case 'spread_builder': {
+      const sym = (args[0] || contextSymbol || 'NIFTY').toUpperCase()
+      const strat = (args[1] || 'BULL_CALL_SPREAD').toUpperCase()
+      return { endpoint: '/skills/options/defined_risk_spreads', body: { underlying: sym, strategy: strat }, cardType: 'defined_risk_spread' }
+    }
+
+    case 'tax': {
+      const pnl = parseFloat(args[0]) || 50000
+      const days = parseInt(args[1]) || 90
+      return { endpoint: '/skills/tax/calculate', body: { gross_pnl: pnl, holding_period_days: days }, cardType: 'markdown' }
+    }
+
+    case 'harvest': case 'tax-harvest': {
+      return { endpoint: '/skills/tax/harvesting', body: {}, cardType: 'markdown' }
+    }
+
+    case 'tilt': case 'risk-status': {
+      return { endpoint: '/api/risk/preflight', body: { action: 'BUY', symbol: contextSymbol || 'NIFTY', qty: 50, price: 24500 }, cardType: 'markdown' }
+    }
+
     default:
       // Fall through to AI chat — session_id injected in submit()
       return { endpoint: '/skills/chat', body: { message: input }, cardType: 'markdown' }
@@ -278,6 +322,7 @@ export default function InputBar() {
       title: `Multi-Agent Debate (${symbol})`,
       details: 'Connecting to multi-agent intelligence pipeline...',
       type: 'debate',
+      targetView: 'copilot',
       cancelFn: () => {
         if (es) es.close()
         setStreamCancel(null)
@@ -339,6 +384,15 @@ export default function InputBar() {
         setStreamCancel(null)
         finalizeStreamingMessage(msgId)
         stopActivity()
+
+        const curView = useChatStore.getState().activeView
+        if (curView !== 'copilot') {
+          useChatStore.getState().notifyCompletedActivity({
+            title: `Multi-Agent Debate (${symbol}) Complete`,
+            message: `Consensus synthesis & trade plan for ${symbol} are ready.`,
+            targetView: 'copilot',
+          })
+        }
       } else if (event.type === 'error') {
         es.close()
         setStreamCancel(null)
@@ -427,12 +481,16 @@ export default function InputBar() {
       return
     }
 
+    const abortController = new AbortController()
+
     try {
       startActivity({
-        title: `Quant Engine (${parsed.cardType?.toUpperCase() || 'QUERY'})`,
+        title: `Quant Intelligence (${parsed.cardType?.toUpperCase() || 'QUERY'})`,
         details: `Computing ${text}...`,
         type: 'quant',
+        targetView: 'copilot',
         cancelFn: () => {
+          try { abortController.abort() } catch (e) {}
           stopActivity()
         },
       })
@@ -442,19 +500,71 @@ export default function InputBar() {
         body = { ...body, session_id: activeSessionId }
       }
       const result = parsed.method === 'GET'
-        ? await get(parsed.endpoint)
-        : await call(parsed.endpoint, body)
+        ? await get(parsed.endpoint, { signal: abortController.signal })
+        : await call(parsed.endpoint, body, { signal: abortController.signal })
       addResponse({ cardType: parsed.cardType, data: result.data ?? result })
+
+      const curView = useChatStore.getState().activeView
+      if (curView !== 'copilot') {
+        useChatStore.getState().notifyCompletedActivity({
+          title: `${parsed.cardType?.toUpperCase() || 'Quant'} Analysis Ready`,
+          message: `Results for "${text}" are available in AI Copilot.`,
+          targetView: 'copilot',
+        })
+      }
     } catch (e) {
-      addError(e.message)
+      if (e.name !== 'AbortError') {
+        addError(e.message)
+      }
     } finally {
       stopActivity()
     }
   }
 
+  const [showTypeahead, setShowTypeahead] = useState(false)
+  const [selectedIndex, setSelectedIndex] = useState(0)
+
+  const typeaheadItems = fuzzySearchUniverse(value, activeSymbol, 10)
+
   function onKeyDown(e) {
+    if (showTypeahead && typeaheadItems.length > 0) {
+      if (e.key === 'ArrowDown') {
+        e.preventDefault()
+        setSelectedIndex((prev) => (prev + 1) % typeaheadItems.length)
+        return
+      }
+      if (e.key === 'ArrowUp') {
+        e.preventDefault()
+        setSelectedIndex((prev) => (prev - 1 + typeaheadItems.length) % typeaheadItems.length)
+        return
+      }
+      if (e.key === 'Tab') {
+        e.preventDefault()
+        const selected = typeaheadItems[selectedIndex]
+        if (selected) {
+          setValue(selected.command || selected.symbol || selected.text || selected.label || '')
+        }
+        return
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault()
+        setShowTypeahead(false)
+        return
+      }
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault()
+        const selected = typeaheadItems[selectedIndex]
+        if (selected) {
+          setShowTypeahead(false)
+          submit(selected.command || (selected.symbol ? `analyze ${selected.symbol}` : selected.text || selected.label))
+          return
+        }
+      }
+    }
+
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
+      setShowTypeahead(false)
       submit()
     }
   }
@@ -480,7 +590,24 @@ export default function InputBar() {
     : ['analyze RELIANCE', 'radar', 'flows', 'scan', 'brief', 'funnel nifty_50']
 
   return (
-    <div className="flex-shrink-0 border-t border-border bg-panel px-4 py-3 shadow-lg">
+    <div className="flex-shrink-0 border-t border-border bg-panel px-4 py-3 shadow-lg relative">
+      {/* Smart Typeahead Floating Autocomplete Overlay */}
+      <div className="relative max-w-4xl mx-auto">
+        <SmartTypeahead
+          query={value}
+          activeSymbol={activeSymbol}
+          isOpen={showTypeahead && value.trim().length > 0}
+          onSelect={(item) => {
+            setShowTypeahead(false)
+            submit(item.command || (item.symbol ? `analyze ${item.symbol}` : item.text || item.label))
+          }}
+          onClose={() => setShowTypeahead(false)}
+          position="above"
+          selectedIndex={selectedIndex}
+          setSelectedIndex={setSelectedIndex}
+        />
+      </div>
+
       {/* #113 banner — visible while streaming */}
       {isStreaming && (
         <div className="mb-2 px-1 flex items-center gap-2">
@@ -502,7 +629,14 @@ export default function InputBar() {
           ref={inputRef}
           type="text"
           value={value}
-          onChange={(e) => setValue(e.target.value)}
+          onChange={(e) => {
+            setValue(e.target.value)
+            setShowTypeahead(true)
+            setSelectedIndex(0)
+          }}
+          onFocus={() => {
+            if (value.trim()) setShowTypeahead(true)
+          }}
           onKeyDown={onKeyDown}
           placeholder={placeholder}
           disabled={!ready || (isLoading && !isStreaming)}
@@ -511,31 +645,37 @@ export default function InputBar() {
         />
         {value && (
           <button
-            onClick={() => setValue('')}
-            className="text-muted hover:text-text text-xs p-1 rounded transition-colors"
-            title="Clear"
+            onClick={() => {
+              setValue('')
+              setShowTypeahead(false)
+            }}
+            className="text-muted hover:text-text text-xs p-1 rounded transition-colors cursor-pointer"
+            title="Clear input"
           >
             ✕
           </button>
         )}
         <button
-          onClick={submit}
+          onClick={() => {
+            setShowTypeahead(false)
+            submit()
+          }}
           disabled={!value.trim() || (isLoading && !isStreaming) || !ready}
-          className="px-2.5 py-1 rounded-lg bg-amber hover:bg-amber/90 text-black font-ui font-bold text-xs shadow-xs disabled:opacity-30 disabled:hover:bg-amber transition-all cursor-pointer"
+          className="px-3 py-1.5 rounded-lg bg-amber hover:bg-amber/90 text-black font-ui font-extrabold text-xs shadow-xs disabled:opacity-30 disabled:hover:bg-amber transition-all cursor-pointer"
         >
           Send ↵
         </button>
       </div>
-      <div className="flex items-center justify-between mt-2 px-1 text-[11px] font-ui text-muted">
+      <div className="flex items-center justify-between mt-2.5 px-1 text-[11px] font-ui text-muted">
         <div className="flex items-center gap-1.5 overflow-x-auto truncate">
-          <span className="text-[10px] uppercase tracking-wider text-muted/70 font-semibold">
-            {activeSymbol ? `Active (${activeSymbol}):` : 'Try:'}
+          <span className="text-[10px] uppercase tracking-wider text-muted font-bold">
+            {activeSymbol ? `Active (${activeSymbol}):` : 'Quick Actions:'}
           </span>
           {quickCommands.map((cmd) => (
             <button
               key={cmd}
-              onClick={() => setValue(cmd)}
-              className="text-muted hover:text-amber text-[10px] font-mono bg-elevated hover:bg-panel px-1.5 py-0.5 rounded border border-border/40 transition-colors cursor-pointer"
+              onClick={() => useChatStore.getState().sendDraft(cmd)}
+              className="text-text hover:text-amber text-[10px] font-mono bg-elevated hover:bg-panel px-2 py-0.5 rounded-md border border-border transition-colors cursor-pointer shadow-xs"
             >
               {cmd}
             </button>

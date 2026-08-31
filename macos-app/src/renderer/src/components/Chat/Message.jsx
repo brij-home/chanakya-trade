@@ -39,24 +39,15 @@ import MultibaggerCard from '../Cards/MultibaggerCard'
 import PositionTrackerCard from '../Cards/PositionTrackerCard'
 import HighConvictionCard from '../Cards/HighConvictionCard'
 import BigMoveCard from '../Cards/BigMoveCard'
+import CouncilCard from '../Cards/CouncilCard'
+import PersonaCard from '../Cards/PersonaCard'
+import DefinedRiskSpreadCard from '../Cards/DefinedRiskSpreadCard'
+import MagicTrendCard from '../Cards/MagicTrendCard'
+import ThematicBasketsCard from '../Cards/ThematicBasketsCard'
+import PortfolioDoctorCard from '../Cards/PortfolioDoctorCard'
+import ErrorBoundary from '../ErrorBoundary'
 
-
-export default function Message({ message }) {
-  const { role, text, cardType, data } = message
-
-  if (role === 'user') {
-    return (
-      <div className="flex justify-end">
-        <div className="max-w-lg bg-elevated border border-border rounded-xl px-4 py-2.5
-                        text-text text-sm font-mono">
-          {text}
-        </div>
-      </div>
-    )
-  }
-
-  if (role === 'error') return <ErrorCard text={text} />
-
+function renderCardContent(cardType, data) {
   switch (cardType) {
     case 'quote':              return <QuoteCard data={data} />
     case 'analysis':           return <AnalysisCard data={data} />
@@ -97,6 +88,19 @@ export default function Message({ message }) {
     case 'multibagger':
     case 'vcp':
     case 'stage2':             return <MultibaggerCard data={data} />
+    case 'magic_trend':
+    case '3axis':
+    case 'super_investor':
+    case 'magictrend':         return <MagicTrendCard data={data} />
+    case 'thematic_baskets':
+    case 'baskets':
+    case '100baggers':
+    case 'lynch_garp':
+    case 'jhunjhunwala_capex':
+    case 'canslim_basket':     return <ThematicBasketsCard data={data} />
+    case 'portfolio_doctor':
+    case 'portfolio_health':
+    case 'doctor':             return <PortfolioDoctorCard data={data} />
     case 'lifecycle':
     case 'trade_lifecycle':
     case 'trailing_sl':        return <PositionTrackerCard data={data} />
@@ -104,6 +108,14 @@ export default function Message({ message }) {
     case 'conviction':
     case 'top10':
     case 'radar':              return <HighConvictionCard data={data} />
+    case 'council':
+    case 'persona_council':    return <CouncilCard data={data} />
+    case 'persona':
+    case 'persona_analyze':    return <PersonaCard data={data} />
+    case 'spread':
+    case 'spreads':
+    case 'defined_risk_spread':
+    case 'defined_risk_spreads': return <DefinedRiskSpreadCard data={data} />
     case 'big_move':
     case 'bigmove':
     case 'squeeze':            return <BigMoveCard data={data} />
@@ -116,5 +128,27 @@ export default function Message({ message }) {
     case 'markdown':
     default:                   return <MarkdownCard data={data} />
   }
+}
+
+export default function Message({ message }) {
+  const { role, text, cardType, data } = message
+
+  if (role === 'user') {
+    return (
+      <div className="flex justify-end">
+        <div className="max-w-lg bg-elevated border border-border rounded-xl px-4 py-2.5 text-text text-sm font-mono">
+          {text}
+        </div>
+      </div>
+    )
+  }
+
+  if (role === 'error') return <ErrorCard text={text} />
+
+  return (
+    <ErrorBoundary title={cardType ? `${cardType.toUpperCase()} Card` : 'Message Content'}>
+      {renderCardContent(cardType, data)}
+    </ErrorBoundary>
+  )
 }
 

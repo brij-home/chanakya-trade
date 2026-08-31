@@ -712,8 +712,12 @@ class TestSkillRRGAndForensics:
             qualified_count=1,
             filtered_count=1,
             pre_filter_reports=[
-                PreFilterReport(symbol="TCS", score=82.0, qualified=True, pass_reason="High quality"),
-                PreFilterReport(symbol="XYZ", score=40.0, qualified=False, rejection_reason="Low momentum"),
+                PreFilterReport(
+                    symbol="TCS", score=82.0, qualified=True, pass_reason="High quality"
+                ),
+                PreFilterReport(
+                    symbol="XYZ", score=40.0, qualified=False, rejection_reason="Low momentum"
+                ),
             ],
             qualified_symbols=["TCS"],
             trade_plans=[],
@@ -733,13 +737,9 @@ class TestSkillRRGAndForensics:
 
 class TestSkillSMCAndLifecycle:
     def test_skill_market_structure(self, client):
-        import pandas as pd
-        dates = pd.date_range("2025-01-01", periods=30, freq="D")
-        closes = [100 + i * 2 for i in range(30)]
-        fake_df = pd.DataFrame({"date": dates, "open": closes, "high": [c + 2 for c in closes], "low": [c - 2 for c in closes], "close": closes, "volume": [10000]*30})
-
         with patch("analysis.market_structure.analyze_market_structure") as mock_ms:
             from analysis.market_structure import MarketStructureReport
+
             mock_ms.return_value = MarketStructureReport(
                 symbol="RELIANCE",
                 ltp=2400.0,
@@ -755,6 +755,7 @@ class TestSkillSMCAndLifecycle:
     def test_skill_volume_profile(self, client):
         with patch("analysis.volume_profile.analyze_volume_profile") as mock_vp:
             from analysis.volume_profile import VolumeProfileReport
+
             mock_vp.return_value = VolumeProfileReport(
                 symbol="NIFTY",
                 ltp=24000.0,
@@ -775,6 +776,7 @@ class TestSkillSMCAndLifecycle:
     def test_skill_multibagger(self, client):
         with patch("analysis.multibagger.scan_multibagger_opportunity") as mock_mb:
             from analysis.multibagger import MultibaggerReport
+
             mock_mb.return_value = MultibaggerReport(
                 symbol="TRENT",
                 ltp=6500.0,
@@ -791,6 +793,7 @@ class TestSkillSMCAndLifecycle:
     def test_skill_lifecycle(self, client):
         with patch("engine.trade_lifecycle.audit_position_lifecycle") as mock_lc:
             from engine.trade_lifecycle import PositionLifecycleReport
+
             mock_lc.return_value = PositionLifecycleReport(
                 symbol="INFY",
                 ltp=1650.0,
@@ -815,6 +818,7 @@ class TestSkillSMCAndLifecycle:
     def test_skill_top_conviction(self, client):
         with patch("analysis.high_conviction.scan_high_conviction_opportunities") as mock_scan:
             from analysis.high_conviction import HighConvictionScanResult, HighConvictionOpportunity
+
             fake_opp = HighConvictionOpportunity(
                 rank=1,
                 symbol="TRENT",
@@ -868,6 +872,7 @@ class TestSkillSMCAndLifecycle:
     def test_skill_big_move(self, client):
         with patch("analysis.big_move.predict_large_move") as mock_pred:
             from analysis.big_move import BigMovePrediction, SqueezeState, OptionsFlowBias
+
             mock_pred.return_value = BigMovePrediction(
                 symbol="NIFTY",
                 ltp=24500.0,
@@ -880,8 +885,20 @@ class TestSkillSMCAndLifecycle:
                 target_price=24850.0,
                 invalidation_price=24300.0,
                 risk_reward_ratio=1.75,
-                squeeze=SqueezeState(False, True, 3, 45.2, "BULLISH_EXPANSION", 24600, 24300, 24550, 24350),
-                options_flow=OptionsFlowBias(True, 1.35, 24500, "LONG_BUILDUP", 100000, 135000, 24800, 24300, "AGGRESSIVE_BULLISH"),
+                squeeze=SqueezeState(
+                    False, True, 3, 45.2, "BULLISH_EXPANSION", 24600, 24300, 24550, 24350
+                ),
+                options_flow=OptionsFlowBias(
+                    True,
+                    1.35,
+                    24500,
+                    "LONG_BUILDUP",
+                    100000,
+                    135000,
+                    24800,
+                    24300,
+                    "AGGRESSIVE_BULLISH",
+                ),
                 catalysts=["Squeeze Fired", "Aggressive Long Buildup"],
                 action_plan="Enter Bullish Breakout",
             )
@@ -895,6 +912,7 @@ class TestSkillSMCAndLifecycle:
     def test_skill_execution_gate(self, client):
         with patch("analysis.execution_gate.evaluate_execution_gate") as mock_eval:
             from analysis.execution_gate import ExecutionGateReport
+
             mock_eval.return_value = ExecutionGateReport(
                 symbol="JSWSTEEL",
                 sector="Metals",
@@ -917,7 +935,9 @@ class TestSkillSMCAndLifecycle:
                 action_summary="Execute now",
                 telegram_sent=False,
             )
-            r = client.post("/skills/execution_gate", json={"symbol": "JSWSTEEL", "notify_telegram": False})
+            r = client.post(
+                "/skills/execution_gate", json={"symbol": "JSWSTEEL", "notify_telegram": False}
+            )
             assert r.status_code == 200
             d = r.json()["data"]
             assert d["execution_status"] == "READY"
@@ -927,6 +947,7 @@ class TestSkillSMCAndLifecycle:
     def test_skill_scan_and_alert(self, client):
         with patch("analysis.execution_gate.scan_and_alert_execution_candidates") as mock_scan:
             from analysis.execution_gate import ExecutionGateReport
+
             mock_scan.return_value = [
                 ExecutionGateReport(
                     symbol="JSWSTEEL",
@@ -951,14 +972,11 @@ class TestSkillSMCAndLifecycle:
                     telegram_sent=True,
                 )
             ]
-            r = client.post("/skills/scan_and_alert", json={"universe": "auto_market_aware", "notify_telegram": True})
+            r = client.post(
+                "/skills/scan_and_alert",
+                json={"universe": "auto_market_aware", "notify_telegram": True},
+            )
             assert r.status_code == 200
             d = r.json()["data"]
             assert d["total_candidates"] == 1
             assert d["candidates"][0]["symbol"] == "JSWSTEEL"
-
-
-
-
-
-

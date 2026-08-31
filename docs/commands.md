@@ -4,15 +4,41 @@ Full list of REPL commands. Run `help` inside the REPL for a live summary.
 
 ---
 
-## Analysis
+## Analysis & Multi-Agent Intelligence
 
 | Command | Description |
 |---------|-------------|
 | `analyze RELIANCE` | 7 analyst agents + bull-bear debate + 3 risk-profiled trade plans (8 LLM calls) |
 | `deep-analyze INFY` | Full LLM mode — every analyst AI-powered (11 calls) |
+| `council breakout RELIANCE` | Poll **Breakout Council** (Minervini + Wyckoff + O'Neil + Forensic Auditor) |
+| `council options_sniper NIFTY` | Poll **Options Sniper Council** (SMC + Taleb + Simons) |
+| `council multibagger TATAMOTORS` | Poll **Multibagger Council** (Kedia + Buffett + Munger + Jhunjhunwala + Forensic) |
+| `council macro_regime HDFCBANK` | Poll **Macro Regime Council** (Soros + Jhunjhunwala + Simons + Forensic) |
+| `council core_value INFY` | Poll **Core Value Council** (Buffett + Munger + Lynch + Forensic) |
+| `persona minervini INFY` | Consult **Mark Minervini** (SEPA, 8-Point Trend Template, VCP contractions) |
+| `persona wyckoff RELIANCE` | Consult **Richard Wyckoff** (VSA, Accumulation Phase C Spring, Sign of Strength) |
+| `persona oneil TATAMOTORS` | Consult **William O'Neil** (CAN SLIM, 25%+ EPS growth, base breakouts) |
+| `persona taleb NIFTY` | Consult **Nassim Taleb** (Antifragile Convexity, Tail-Risk Defense, Defined-Risk Spreads) |
+| `persona kedia POLYCAB` | Consult **Vijay Kedia** (SMILE Framework for Indian Multibaggers) |
+| `persona simons TCS` | Consult **Jim Simons** (Statistical Arbitrage, Volatility Regimes, Mathematical EV) |
+| `persona smc BANKNIFTY` | Consult **Smart Money Concepts** (Liquidity Sweeps, Order Blocks, FVGs, OTE) |
 | `morning-brief` | Daily market context + AI narrative |
 | `mtf RELIANCE` | Multi-timeframe confluence (weekly / daily / hourly) |
 | `ai <message>` | Chat with the trading agent — context-aware follow-ups |
+
+---
+
+## Defined-Risk Options & Retail Protection
+
+| Command | Description |
+|---------|-------------|
+| `spreads NIFTY BULL_CALL_SPREAD` | Build defined-risk hedged options spread (caps max loss, eliminates Theta bleed) |
+| `spreads BANKNIFTY IRON_CONDOR` | Build delta-neutral rangebound Iron Condor with defined risk |
+| `charges 2850 50 EQUITY_DELIVERY BUY` | Calculate exact Zerodha/Angel STT, exchange turnover, SEBI, stamp duty & GST charges |
+| `tilt` | Check behavioral risk, loss streak, and emotional coaching advisory status |
+| `health` | Audit portfolio diversification, single-stock concentration, and sector beta risk |
+| `tax` | Calculate post-budget FY24-25 STCG (20%), LTCG (12.5%), or F&O business income tax |
+| `harvest` | Scan portfolio for tax-loss harvesting candidates to offset STCG |
 
 ---
 

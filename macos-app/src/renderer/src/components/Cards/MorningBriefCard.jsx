@@ -1,9 +1,9 @@
 import { useChatStore } from '../../store/chatStore'
 
 export default function MorningBriefCard({ data }) {
+  const sendDraft = useChatStore((s) => s.sendDraft)
   if (!data) return null
   const { market_snapshot, institutional_flows, top_news, market_breadth } = data
-  const sendDraft = useChatStore((s) => s.sendDraft)
 
   // Build contextual chips from actual brief data
   const posture    = market_snapshot?.posture ?? null

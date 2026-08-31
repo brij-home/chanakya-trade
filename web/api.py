@@ -83,6 +83,7 @@ from contextlib import asynccontextmanager
 
 async def _background_cache_warmer():
     """Background task to pre-warm quotes, OHLCV, and RRG matrix in memory for lightning fast UI response."""
+
     def _warm_sync():
         try:
             from market.quotes import get_quote
@@ -90,11 +91,24 @@ async def _background_cache_warmer():
             from analysis.sector_rotation import get_sector_rrg_matrix
 
             # 1. Warm top index & mover quotes in parallel
-            get_quote([
-                "NSE:NIFTY 50", "NSE:NIFTY BANK", "NSE:INDIA VIX", "BSE:SENSEX",
-                "NSE:RELIANCE", "NSE:TCS", "NSE:INFY", "NSE:HDFCBANK", "NSE:ICICIBANK",
-                "NSE:COFORGE", "NSE:TRENT", "NSE:HCLTECH", "NSE:DIVISLAB", "NSE:TECHM",
-            ])
+            get_quote(
+                [
+                    "NSE:NIFTY 50",
+                    "NSE:NIFTY BANK",
+                    "NSE:INDIA VIX",
+                    "BSE:SENSEX",
+                    "NSE:RELIANCE",
+                    "NSE:TCS",
+                    "NSE:INFY",
+                    "NSE:HDFCBANK",
+                    "NSE:ICICIBANK",
+                    "NSE:COFORGE",
+                    "NSE:TRENT",
+                    "NSE:HCLTECH",
+                    "NSE:DIVISLAB",
+                    "NSE:TECHM",
+                ]
+            )
             # 2. Warm OHLCV for benchmark indices
             get_ohlcv("NIFTY", days=250)
             get_ohlcv("BANKNIFTY", days=250)
@@ -126,7 +140,13 @@ async def lifespan(app: FastAPI):
     warmer_task.cancel()
 
 
-app = FastAPI(title="ChanakyaTrade", docs_url="/docs", redoc_url="/redoc", openapi_url="/openapi.json", lifespan=lifespan)
+app = FastAPI(
+    title="ChanakyaTrade",
+    docs_url="/docs",
+    redoc_url="/redoc",
+    openapi_url="/openapi.json",
+    lifespan=lifespan,
+)
 
 # ── CORS — allow Electron renderer (Vite dev + packaged file://) ──────────
 from fastapi.middleware.cors import CORSMiddleware
@@ -152,8 +172,10 @@ async def auth_middleware(request: _Request, call_next):
     if (
         path.startswith("/auth/")
         or path == "/health"
-        or path in (
+        or path
+        in (
             "/api/preflight",
+            "/api/risk/preflight",
             "/api/mode",
             "/api/charges/calculate",
             "/api/reconciliation",
@@ -171,16 +193,16 @@ async def auth_middleware(request: _Request, call_next):
     ):
         return await call_next(request)
 
-    # Localhost requests skip auth (Electron app, CLI, local dev, testclient)
-    # Auth only enforced for remote/web access
-    client_host = request.client.host if request.client else ""
-    if client_host in ("127.0.0.1", "::1", "localhost", "testclient"):
-        return await call_next(request)
-
-    # Self-hosted mode: skip auth if no users exist yet
+    # Self-hosted mode: skip auth if no users exist yet (first-time onboarding)
     deploy_mode = os.environ.get("DEPLOY_MODE", "")
-    if deploy_mode == "self-hosted" and user_count() == 0:
-        return await call_next(request)
+    if deploy_mode == "self-hosted":
+        if user_count() == 0:
+            return await call_next(request)
+    else:
+        # Local desktop mode: skip auth for localhost (Electron app, CLI, local dev, testclient)
+        client_host = request.client.host if request.client else ""
+        if client_host in ("127.0.0.1", "::1", "localhost", "testclient"):
+            return await call_next(request)
 
     # Check session cookie
     session_id = request.cookies.get("session_id")
@@ -1150,7 +1172,15 @@ async def status_page():
         ),
         ("upstox", "Upstox", "badge-upstox", "/upstox/login", "#c4b5fd", _has_upstox, _upstox_auth),
         ("fyers", "Fyers", "badge-fyers", "/fyers/login", "#fed7aa", _has_fyers, _fyers_auth),
-        ("stoxkart", "Stoxkart", "badge-stoxkart", "/stoxkart/login", "#06b6d4", _has_stoxkart, _stoxkart_auth),
+        (
+            "stoxkart",
+            "Stoxkart",
+            "badge-stoxkart",
+            "/stoxkart/login",
+            "#06b6d4",
+            _has_stoxkart,
+            _stoxkart_auth,
+        ),
     ]
     rows = []
     for bkey, bname, badge_cls, login_path, color, has_fn, auth_fn in _BROKERS:
@@ -1811,6 +1841,7 @@ async def api_portfolio(request: Request):
 
 # ── Institutional Analysis & Quant Endpoints ─────────────────────
 
+
 @app.get("/api/v1/market/rrg", tags=["Analysis"])
 async def get_market_rrg():
     """
@@ -1971,10 +2002,11 @@ async def stream_alerts():
 
 # ── Institutional Preflight, Mode & Charges Endpoints ───────────
 
+
 @app.get("/api/preflight", tags=["System"])
 async def get_preflight_diagnostics():
     """Return system readiness, port status, and masked environment report."""
-    from scripts.preflight import run_preflight
+    from engine.preflight import run_preflight
 
     report = run_preflight(verbose=False)
     return JSONResponse(report.to_dict())
@@ -2041,6 +2073,7 @@ async def api_calculate_charges(req: CalculateChargesRequest):
 
 # ── Order Lifecycle & Idempotency Endpoints ─────────────────────
 
+
 class OrderPreviewRequest(BaseModel):
     symbol: str
     side: str = "BUY"
@@ -2092,7 +2125,33 @@ async def api_order_execute(req: OrderExecuteRequest):
         raise _HTTPException(500, str(e))
 
 
+class RiskPreflightRequest(BaseModel):
+    symbol: str
+    action: str = "BUY"
+    quantity: int = 1
+    price: float = 0.0
+    current_position: Optional[dict] = None
+    allow_override: bool = False
+
+
+@app.post("/api/risk/preflight")
+async def api_risk_preflight(req: RiskPreflightRequest):
+    """Evaluate order against risk limits, returning structured behavioral guidance & double confirmation requirements."""
+    from engine.risk_limits import risk_limits
+
+    res = risk_limits.evaluate_preflight(
+        symbol=req.symbol,
+        action=req.action,
+        quantity=max(1, req.quantity),
+        price=max(0.0, req.price),
+        current_position=req.current_position,
+        allow_override=req.allow_override,
+    )
+    return JSONResponse(res.to_dict())
+
+
 # ── Reconciliation & Security Audit Endpoints ───────────────────
+
 
 @app.get("/api/reconciliation")
 async def api_reconciliation():
@@ -2101,13 +2160,16 @@ async def api_reconciliation():
 
     # Retrieve internal active positions & broker positions
     try:
-        from engine.portfolio import get_position_greeks, get_portfolio_summary
+        from engine.portfolio import get_portfolio_summary
+
         summary = get_portfolio_summary()
         int_positions = [
             {"symbol": p.symbol, "qty": p.qty, "avg_price": p.avg_price, "pnl": p.pnl}
             for p in summary.positions
         ]
-        cash_val = summary.funds.available_cash if hasattr(summary.funds, "available_cash") else 1000000.0
+        cash_val = (
+            summary.funds.available_cash if hasattr(summary.funds, "available_cash") else 1000000.0
+        )
     except Exception:
         int_positions = []
         cash_val = 1000000.0
@@ -2126,6 +2188,7 @@ async def api_reconciliation():
 async def api_audit_logs(limit: int = 50, event_type: Optional[str] = None):
     """Retrieve immutable security and financial audit trail."""
     from engine.security_audit import get_audit_logs
+
     logs = get_audit_logs(limit=min(200, max(1, limit)), event_type=event_type)
     return JSONResponse({"status": "ok", "count": len(logs), "logs": logs})
 
@@ -2134,9 +2197,9 @@ async def api_audit_logs(limit: int = 50, event_type: Optional[str] = None):
 async def api_audit_verify():
     """Verify SHA-256 cryptographic chain integrity across audit records."""
     from engine.security_audit import verify_audit_integrity
+
     res = verify_audit_integrity()
     return JSONResponse(res)
-
 
 
 # ── Static file serving (web mode) ──────────────────────────────

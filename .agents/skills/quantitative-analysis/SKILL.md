@@ -179,9 +179,23 @@ When generating automated trade tickets:
 
 ---
 
-## 11. Testing & Verification
+## 11. Retail Protection, Behavioral Coaching Advisory & Defined-Risk Spreads
+
+1. **Behavioral Tilt & Anti-Overtrading Guardrails (`engine/risk_limits.py`, `engine/risk_gate.py`)**:
+   - `evaluate_preflight()` computes risk flags (`TILT_LOCKOUT`, `PYRAMID_INTO_LOSER`, `DAILY_LOSS_CAP`) without hard-blocking arbitrarily.
+   - Prompts the user with quantitative failure probabilities and coaching alternatives (e.g. reducing risk to 0.5% or cooling off).
+   - Allows conscious user execution when double-confirmed (`allow_override=True`).
+2. **Defined-Risk Option Spreads (`engine/defined_risk_spreads.py`)**:
+   - Hedged multi-leg strategies (`BULL_CALL_SPREAD`, `BEAR_PUT_SPREAD`, `BULL_PUT_SPREAD`, `BEAR_CALL_SPREAD`, `IRON_CONDOR`) with quantized payoff, breakevens, and margin requirements.
+3. **Statutory Taxes & F&O Turnover (`engine/charges.py`)**:
+   - STCG 20% (Section 111A), LTCG 12.5% (Section 112A with ₹1.25L exemption), Section 43(5) & 44AB ₹10 Cr audit turnover, and tax-loss harvesting.
+
+---
+
+## 12. Testing & Verification
 
 ```powershell
-# Run quantitative and structural test suites
-.venv\Scripts\pytest.exe tests/test_market_structure.py tests/test_volume_profile.py tests/test_multibagger.py tests/test_trade_lifecycle.py tests/test_execution_gate.py -v
+# Run quantitative, retail protection and structural test suites
+.venv\Scripts\pytest.exe tests/test_market_structure.py tests/test_volume_profile.py tests/test_multibagger.py tests/test_trade_lifecycle.py tests/test_execution_gate.py tests/test_retail_protection.py -v
 ```
+

@@ -14,12 +14,12 @@ from __future__ import annotations
 import os
 import sys
 
-if sys.platform == 'win32':
+if sys.platform == "win32":
     try:
-        if sys.stdout and hasattr(sys.stdout, 'reconfigure'):
-            sys.stdout.reconfigure(encoding='utf-8', errors='replace')
-        if sys.stderr and hasattr(sys.stderr, 'reconfigure'):
-            sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+        if sys.stdout and hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        if sys.stderr and hasattr(sys.stderr, "reconfigure"):
+            sys.stderr.reconfigure(encoding="utf-8", errors="replace")
     except Exception:
         pass
 import socket
@@ -77,7 +77,7 @@ def main() -> None:
 
     # ── Check for flags ───────────────────────────────────────
     if "--preflight" in sys.argv:
-        from scripts.preflight import run_preflight
+        from engine.preflight import run_preflight
 
         rep = run_preflight(verbose=True)
         sys.exit(0 if rep.healthy else 1)

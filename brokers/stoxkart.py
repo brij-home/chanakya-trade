@@ -21,9 +21,9 @@ from __future__ import annotations
 import json
 import os
 import time
-from datetime import datetime, date
+from datetime import datetime
 from pathlib import Path
-from typing import Optional, Any
+from typing import Optional
 
 import httpx
 
@@ -168,6 +168,7 @@ class StoxkartAPI(BrokerAPI):
         if totp_s:
             try:
                 import pyotp
+
                 totp_code = pyotp.TOTP(totp_s.strip()).now()
             except ImportError:
                 pass
@@ -366,6 +367,7 @@ class StoxkartAPI(BrokerAPI):
 
         # Seamless fallback to market quote engine
         from market.quotes import get_quote as _mkt_quote
+
         return _mkt_quote(f"{exch}:{sym}")
 
     def get_options_chain(
@@ -374,6 +376,7 @@ class StoxkartAPI(BrokerAPI):
         expiry: Optional[str] = None,
     ) -> list[OptionsContract]:
         from market.options import get_options_chain as _mkt_options
+
         return _mkt_options(underlying, expiry=expiry)
 
     # ── Order Execution ───────────────────────────────────────
@@ -414,7 +417,7 @@ class StoxkartAPI(BrokerAPI):
             pass
 
         # Fallback simulation ID
-        order_id = f"STOX_SIM_{int(time.time()*1000)}"
+        order_id = f"STOX_SIM_{int(time.time() * 1000)}"
         return OrderResponse(
             order_id=order_id,
             status="PLACED",

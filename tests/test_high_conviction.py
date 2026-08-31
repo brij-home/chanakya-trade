@@ -4,13 +4,12 @@ tests/test_high_conviction.py
 Deterministic unit tests for high-conviction opportunity ranking engine.
 """
 
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 import pandas as pd
 import pytest
 
 from analysis.high_conviction import (
     HighConvictionOpportunity,
-    HighConvictionScanResult,
     _evaluate_single_stock,
     scan_high_conviction_opportunities,
 )
@@ -24,14 +23,16 @@ from analysis.forensic import ForensicAuditResult
 def fake_ohlcv_df():
     dates = pd.date_range("2025-01-01", periods=100, freq="D")
     closes = [100.0 + i * 1.5 for i in range(100)]
-    return pd.DataFrame({
-        "date": dates,
-        "open": closes,
-        "high": [c + 2.0 for c in closes],
-        "low": [c - 2.0 for c in closes],
-        "close": closes,
-        "volume": [500000] * 100,
-    })
+    return pd.DataFrame(
+        {
+            "date": dates,
+            "open": closes,
+            "high": [c + 2.0 for c in closes],
+            "low": [c - 2.0 for c in closes],
+            "close": closes,
+            "volume": [500000] * 100,
+        }
+    )
 
 
 def test_evaluate_single_stock_bullish_breakout():

@@ -338,7 +338,9 @@ def execute_trade_plan(
         )
         step2 = Prompt.ask("  Double Confirmation", default="CANCEL")
         if step2.strip().upper() != "CONFIRM":
-            console.print("[dim]Execution cancelled: Did not match 'CONFIRM'. No orders were sent.[/dim]")
+            console.print(
+                "[dim]Execution cancelled: Did not match 'CONFIRM'. No orders were sent.[/dim]"
+            )
             return []
 
     # ── Paper override warning ────────────────────────────────

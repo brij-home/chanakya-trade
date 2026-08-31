@@ -616,28 +616,40 @@ class NewsMacroAnalyst(BaseAnalyst):
             from concurrent.futures import ThreadPoolExecutor
 
             def _fetch_stock_news():
-                try: return self.registry.execute("get_stock_news", {"symbol": symbol, "n": 8})
-                except Exception: return []
+                try:
+                    return self.registry.execute("get_stock_news", {"symbol": symbol, "n": 8})
+                except Exception:
+                    return []
 
             def _fetch_market_news():
-                try: return self.registry.execute("get_market_news", {"n": 5})
-                except Exception: return []
+                try:
+                    return self.registry.execute("get_market_news", {"n": 5})
+                except Exception:
+                    return []
 
             def _fetch_fii_dii():
-                try: return self.registry.execute("get_fii_dii_data", {"days": 3})
-                except Exception: return []
+                try:
+                    return self.registry.execute("get_fii_dii_data", {"days": 3})
+                except Exception:
+                    return []
 
             def _fetch_deals():
-                try: return self.registry.execute("get_bulk_block_deals", {"symbol": symbol})
-                except Exception: return {}
+                try:
+                    return self.registry.execute("get_bulk_block_deals", {"symbol": symbol})
+                except Exception:
+                    return {}
 
             def _fetch_breadth():
-                try: return self.registry.execute("get_market_breadth", {})
-                except Exception: return {}
+                try:
+                    return self.registry.execute("get_market_breadth", {})
+                except Exception:
+                    return {}
 
             def _fetch_events():
-                try: return self.registry.execute("get_upcoming_events", {"days": 7})
-                except Exception: return {}
+                try:
+                    return self.registry.execute("get_upcoming_events", {"days": 7})
+                except Exception:
+                    return {}
 
             with ThreadPoolExecutor(max_workers=6) as executor:
                 f_news = executor.submit(_fetch_stock_news)
@@ -1624,7 +1636,9 @@ class MultiAgentAnalyzer:
 
         if self.verbose:
             console.print()
-            console.print(f"[bold]Analyst Team[/bold] — running {len(self.analysts)} analysts in parallel...")
+            console.print(
+                f"[bold]Analyst Team[/bold] — running {len(self.analysts)} analysts in parallel..."
+            )
 
         with ThreadPoolExecutor(max_workers=len(self.analysts)) as executor:
             futures = {executor.submit(a.analyze, symbol, exchange): a for a in self.analysts}
@@ -1813,7 +1827,11 @@ class MultiAgentAnalyzer:
         res = float(raw_res) if raw_res is not None else (round(ltp * 1.06, 1) if ltp else 0.0)
         sl = sup if sup > 0 else (round(ltp * 0.95, 1) if ltp else 0.0)
         tgt1 = res if res > 0 else (round(ltp * 1.05, 1) if ltp else 0.0)
-        tgt2 = round(ltp + (tgt1 - ltp) * 1.5, 1) if (ltp and tgt1 > ltp) else (round(ltp * 1.10, 1) if ltp else 0.0)
+        tgt2 = (
+            round(ltp + (tgt1 - ltp) * 1.5, 1)
+            if (ltp and tgt1 > ltp)
+            else (round(ltp * 1.10, 1) if ltp else 0.0)
+        )
 
         v_label = scorecard.verdict
         if v_label in ("STRONG_BUY", "BUY"):
@@ -1839,8 +1857,12 @@ class MultiAgentAnalyzer:
             "TRADE SETUP:",
             f"  • Entry Level:  ₹{ltp:,.2f}" if ltp else "  • Entry Level:  At Market",
             f"  • Stop Loss:    ₹{sl:,.2f}" if sl else "  • Stop Loss:    Support Level (-3.5%)",
-            f"  • Target 1:     ₹{tgt1:,.2f} (2R)" if tgt1 else "  • Target 1:     Resistance (+5%)",
-            f"  • Target 2:     ₹{tgt2:,.2f} (3.5R)" if tgt2 else "  • Target 2:     Expansion (+10%)",
+            f"  • Target 1:     ₹{tgt1:,.2f} (2R)"
+            if tgt1
+            else "  • Target 1:     Resistance (+5%)",
+            f"  • Target 2:     ₹{tgt2:,.2f} (3.5R)"
+            if tgt2
+            else "  • Target 2:     Expansion (+10%)",
             f"  • Strategy:     {strategy}",
             "",
             "RATIONALE:",
@@ -1909,7 +1931,9 @@ class MultiAgentAnalyzer:
 
         scorecard = compute_scorecard(reports)
         bull_fallback = f"Bull Thesis: {symbol} maintains positive structure with quantitative score {scorecard.total_score:+.1f}."
-        bear_fallback = f"Bear Counter: Downside risks include valuation multiples and macro headwinds."
+        bear_fallback = (
+            "Bear Counter: Downside risks include valuation multiples and macro headwinds."
+        )
 
         # Emit immediate progress signal for UI responsiveness
         if self.progress_callback:
@@ -1928,7 +1952,9 @@ class MultiAgentAnalyzer:
         # ── Round 1: Opening arguments (Concurrent) ───────────────────────
         if self.verbose:
             console.print("\n[bold]Round 1[/bold]")
-            console.print("[green]Bull Researcher[/green] & [red]Bear Researcher[/red] building opening cases in parallel...")
+            console.print(
+                "[green]Bull Researcher[/green] & [red]Bear Researcher[/red] building opening cases in parallel..."
+            )
 
         bull_prompt = BULL_RESEARCHER_PROMPT.format(
             symbol=symbol,
@@ -1982,7 +2008,9 @@ class MultiAgentAnalyzer:
         # ── Round 2: Rebuttals (Concurrent) ───────────────────────────────
         if self.verbose:
             console.print("\n[bold]Round 2[/bold]")
-            console.print("[green]Bull Researcher[/green] & [red]Bear Researcher[/red] generating rebuttals in parallel...")
+            console.print(
+                "[green]Bull Researcher[/green] & [red]Bear Researcher[/red] generating rebuttals in parallel..."
+            )
 
         bull_rebuttal_prompt = BULL_REBUTTAL_PROMPT.format(
             symbol=symbol,
@@ -1997,11 +2025,17 @@ class MultiAgentAnalyzer:
             bull_case=bull_argument,
         )
 
-        bull_reb_fallback = f"Bull Rebuttal: Technical support levels and momentum metrics counter downside claims."
-        bear_reb_fallback = f"Bear Rebuttal: Maintain defensive invalidation stop to mitigate execution risk."
+        bull_reb_fallback = (
+            "Bull Rebuttal: Technical support levels and momentum metrics counter downside claims."
+        )
+        bear_reb_fallback = (
+            "Bear Rebuttal: Maintain defensive invalidation stop to mitigate execution risk."
+        )
 
         def _run_bull_r2():
-            res = self._safe_chat(bull_rebuttal_prompt, bull_reb_fallback, timeout=18.0, llm=fast_llm)
+            res = self._safe_chat(
+                bull_rebuttal_prompt, bull_reb_fallback, timeout=18.0, llm=fast_llm
+            )
             if self.progress_callback:
                 self.progress_callback(
                     {
@@ -2014,7 +2048,9 @@ class MultiAgentAnalyzer:
             return res
 
         def _run_bear_r2():
-            res = self._safe_chat(bear_rebuttal_prompt, bear_reb_fallback, timeout=18.0, llm=fast_llm)
+            res = self._safe_chat(
+                bear_rebuttal_prompt, bear_reb_fallback, timeout=18.0, llm=fast_llm
+            )
             if self.progress_callback:
                 self.progress_callback(
                     {
@@ -2050,10 +2086,18 @@ class MultiAgentAnalyzer:
         if self.verbose:
             console.print("\n[cyan]Facilitator[/cyan] summarizing debate...")
 
-        fac_winner_hint = "BULL" if scorecard.total_score >= 10 else "BEAR" if scorecard.total_score <= -10 else "NEUTRAL"
+        fac_winner_hint = (
+            "BULL"
+            if scorecard.total_score >= 10
+            else "BEAR"
+            if scorecard.total_score <= -10
+            else "NEUTRAL"
+        )
         fac_fallback = f"FACILITATOR SUMMARY:\nWINNER: {fac_winner_hint}\nDebate concluded in favor of {fac_winner_hint} based on quantitative scorecard (+{scorecard.total_score:.1f})."
 
-        facilitator_summary = self._safe_chat(facilitator_prompt, fac_fallback, timeout=20.0, llm=deep_llm)
+        facilitator_summary = self._safe_chat(
+            facilitator_prompt, fac_fallback, timeout=20.0, llm=deep_llm
+        )
         if self.progress_callback:
             self.progress_callback(
                 {
@@ -2136,28 +2180,38 @@ class MultiAgentAnalyzer:
 
         # Aggressive & Conservative debaters in parallel
         if self.verbose:
-            console.print("[bold red]Aggressive[/bold red] & [bold blue]Conservative[/bold blue] debaters arguing perspectives in parallel...")
+            console.print(
+                "[bold red]Aggressive[/bold red] & [bold blue]Conservative[/bold blue] debaters arguing perspectives in parallel..."
+            )
 
         agg_prompt = AGGRESSIVE_DEBATER_PROMPT.format(**shared_context)
         cons_prompt = CONSERVATIVE_DEBATER_PROMPT.format(**shared_context)
 
         agg_fallback = "Aggressive View: Maximize position size with standard 2% capital risk."
-        cons_fallback = "Conservative View: Preserve capital with 1% risk budget and strict stop loss."
+        cons_fallback = (
+            "Conservative View: Preserve capital with 1% risk budget and strict stop loss."
+        )
 
         fast_llm = getattr(self, "fast_llm", None) or getattr(self, "llm", None)
         deep_llm = getattr(self, "llm", None)
 
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            f_agg = executor.submit(self._safe_chat, agg_prompt, agg_fallback, 18.0, fast_llm)
-            f_cons = executor.submit(self._safe_chat, cons_prompt, cons_fallback, 18.0, fast_llm)
-            try:
-                aggressive_view = f_agg.result(timeout=18.0)
-            except Exception:
-                aggressive_view = agg_fallback
-            try:
-                conservative_view = f_cons.result(timeout=18.0)
-            except Exception:
-                conservative_view = cons_fallback
+        if getattr(self, "parallel", True):
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                f_agg = executor.submit(self._safe_chat, agg_prompt, agg_fallback, 18.0, fast_llm)
+                f_cons = executor.submit(
+                    self._safe_chat, cons_prompt, cons_fallback, 18.0, fast_llm
+                )
+                try:
+                    aggressive_view = f_agg.result(timeout=18.0)
+                except Exception:
+                    aggressive_view = agg_fallback
+                try:
+                    conservative_view = f_cons.result(timeout=18.0)
+                except Exception:
+                    conservative_view = cons_fallback
+        else:
+            aggressive_view = self._safe_chat(agg_prompt, agg_fallback, 18.0, fast_llm)
+            conservative_view = self._safe_chat(cons_prompt, cons_fallback, 18.0, fast_llm)
 
         # Neutral debater
         if self.verbose:
@@ -2309,7 +2363,9 @@ class MultiAgentAnalyzer:
                 console.print(f"\n[blue]◆ User context injected: {_hint}[/blue]")
             console.print("\nSynthesizing final verdict...")
 
-        synth_fallback = self._build_deterministic_synthesis(symbol, exchange, reports, debate.winner)
+        synth_fallback = self._build_deterministic_synthesis(
+            symbol, exchange, reports, debate.winner
+        )
         synthesis = self._safe_chat(synthesis_prompt, synth_fallback, timeout=12.0)
 
         if self.progress_callback:

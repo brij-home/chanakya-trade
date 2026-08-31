@@ -4,13 +4,10 @@ tests/test_smart_funnel.py
 Unit tests for the Institutional Smart Funnel 3-stage screener and debate pipeline.
 """
 
-import pytest
 from unittest.mock import MagicMock, patch
 from agent.smart_funnel import (
     SmartFunnel,
     PreFilterReport,
-    TradePlanSummary,
-    SmartFunnelResult,
     WATCHLIST_PRESETS,
 )
 
@@ -59,7 +56,9 @@ class TestQuantPreFilter:
         assert report.qualified is True
         assert report.score >= 75.0
         assert "RSI" in report.pass_reason
-        assert report.metrics["roe"] == 25.0 and ("ROE" in report.pass_reason or "RSI" in report.pass_reason)
+        assert report.metrics["roe"] == 25.0 and (
+            "ROE" in report.pass_reason or "RSI" in report.pass_reason
+        )
 
     def test_evaluate_stock_quant_rejected_overbought_and_overleveraged(self):
         mock_registry = MagicMock()
@@ -75,7 +74,7 @@ class TestQuantPreFilter:
             },
             "fundamental_analyse": {
                 "pe": 120.0,  # Extreme
-                "roe": 2.0,   # Anemic
+                "roe": 2.0,  # Anemic
                 "debt_to_equity": 3.5,  # Overleveraged
             },
         }.get(tool, {})
@@ -85,7 +84,11 @@ class TestQuantPreFilter:
 
         assert report.qualified is False
         assert report.score < 40.0
-        assert "overbought" in report.rejection_reason or "200-DMA" in report.rejection_reason or "D/E" in report.rejection_reason
+        assert (
+            "overbought" in report.rejection_reason
+            or "200-DMA" in report.rejection_reason
+            or "D/E" in report.rejection_reason
+        )
 
     def test_run_pre_filter_batch_sorting(self):
         mock_registry = MagicMock()
@@ -94,10 +97,20 @@ class TestQuantPreFilter:
             sym = args.get("symbol", "")
             if sym == "GOOD":
                 return {
-                    "rsi": 52.0, "ema20": 100, "ema50": 90, "sma200": 80, "roe": 20.0, "debt_to_equity": 0.1
+                    "rsi": 52.0,
+                    "ema20": 100,
+                    "ema50": 90,
+                    "sma200": 80,
+                    "roe": 20.0,
+                    "debt_to_equity": 0.1,
                 }
             return {
-                "rsi": 85.0, "ema20": 50, "ema50": 60, "sma200": 80, "roe": 1.0, "debt_to_equity": 4.0
+                "rsi": 85.0,
+                "ema20": 50,
+                "ema50": 60,
+                "sma200": 80,
+                "roe": 1.0,
+                "debt_to_equity": 4.0,
             }
 
         mock_registry.execute.side_effect = side_effect
@@ -111,7 +124,12 @@ class TestQuantPreFilter:
     def test_fallback_selection_when_zero_qualified(self):
         mock_registry = MagicMock()
         mock_registry.execute.side_effect = lambda tool, args: {
-            "rsi": 85.0, "ema20": 50, "ema50": 60, "sma200": 80, "roe": 1.0, "debt_to_equity": 4.0
+            "rsi": 85.0,
+            "ema20": 50,
+            "ema50": 60,
+            "sma200": 80,
+            "roe": 1.0,
+            "debt_to_equity": 4.0,
         }
         with patch.object(SmartFunnel, "_get_providers", return_value=(None, None)):
             funnel = SmartFunnel(registry=mock_registry, verbose=False)

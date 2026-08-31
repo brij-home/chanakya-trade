@@ -16,11 +16,16 @@ import sqlite3
 import uuid
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Optional
 
 from config.paths import app_data_path
 
-DB_PATH = app_data_path("audit.db")
+
+def _get_db_path() -> Path:
+    p = app_data_path("audit.db")
+    p.parent.mkdir(parents=True, exist_ok=True)
+    return p
 
 
 @dataclass
@@ -40,7 +45,8 @@ class AuditRecord:
 
 def _init_audit_db():
     """Ensure audit database schema exists."""
-    with sqlite3.connect(DB_PATH) as conn:
+    db_path = _get_db_path()
+    with sqlite3.connect(db_path, timeout=30.0) as conn:
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS security_audit_log (
@@ -56,8 +62,12 @@ def _init_audit_db():
             )
             """
         )
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON security_audit_log(timestamp)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_event_type ON security_audit_log(event_type)")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON security_audit_log(timestamp)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_audit_event_type ON security_audit_log(event_type)"
+        )
         conn.commit()
 
 
@@ -84,7 +94,7 @@ def record_audit_event(
     event_id = str(uuid.uuid4())
     now_iso = datetime.now(timezone.utc).isoformat()
 
-    with sqlite3.connect(DB_PATH) as conn:
+    with sqlite3.connect(_get_db_path(), timeout=30.0) as conn:
         cursor = conn.execute("SELECT record_hash FROM security_audit_log ORDER BY id DESC LIMIT 1")
         row = cursor.fetchone()
         prev_hash = row[0] if row else "GENESIS_BLOCK_00000000000000000000000000000000"
@@ -118,7 +128,7 @@ def record_audit_event(
 def get_audit_logs(limit: int = 50, event_type: Optional[str] = None) -> list[dict[str, Any]]:
     """Retrieve recent audit logs."""
     _init_audit_db()
-    with sqlite3.connect(DB_PATH) as conn:
+    with sqlite3.connect(_get_db_path(), timeout=30.0) as conn:
         conn.row_factory = sqlite3.Row
         if event_type:
             cursor = conn.execute(
@@ -126,7 +136,9 @@ def get_audit_logs(limit: int = 50, event_type: Optional[str] = None) -> list[di
                 (event_type, limit),
             )
         else:
-            cursor = conn.execute("SELECT * FROM security_audit_log ORDER BY id DESC LIMIT ?", (limit,))
+            cursor = conn.execute(
+                "SELECT * FROM security_audit_log ORDER BY id DESC LIMIT ?", (limit,)
+            )
         rows = cursor.fetchall()
         return [dict(r) for r in rows]
 
@@ -134,7 +146,7 @@ def get_audit_logs(limit: int = 50, event_type: Optional[str] = None) -> list[di
 def verify_audit_integrity() -> dict[str, Any]:
     """Verify hash chain integrity across all audit records."""
     _init_audit_db()
-    with sqlite3.connect(DB_PATH) as conn:
+    with sqlite3.connect(_get_db_path(), timeout=30.0) as conn:
         conn.row_factory = sqlite3.Row
         cursor = conn.execute("SELECT * FROM security_audit_log ORDER BY id ASC")
         rows = cursor.fetchall()

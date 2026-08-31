@@ -96,11 +96,12 @@ trade = "app.main:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["brokers*", "market*", "analysis*", "agent*", "engine*", "ui*", "app*", "web*", "config*", "bot*"]
+include = ["brokers*", "market*", "analysis*", "agent*", "engine*", "ui*", "app*", "web*", "config*", "bot*", "scripts*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-v --tb=short -m 'not network and not slow' -n auto"
+pythonpath = ["."]
+addopts = "-v --tb=short"
 markers = [
     "network: tests that require network access (yfinance, NSE API, etc.)",
     "slow: tests slow by design — SSE stream connections, MC simulations (run nightly, not on every push)",

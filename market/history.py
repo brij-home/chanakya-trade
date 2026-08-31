@@ -92,6 +92,7 @@ def get_ohlcv(
     if kite_interval == "day":
         try:
             from engine.analysis_cache import cache_get
+
             cached_rows = cache_get(f"ohlcv_{cache_key}", namespace="history", max_age_seconds=900)
             if cached_rows and isinstance(cached_rows, list) and len(cached_rows) >= 10:
                 raw = cached_rows
@@ -133,6 +134,7 @@ def get_ohlcv(
     if raw and kite_interval == "day" and len(raw) >= 10:
         try:
             from engine.analysis_cache import cache_set
+
             cache_set(f"ohlcv_{cache_key}", raw, namespace="history", ttl_minutes=15)
         except Exception:
             pass
@@ -164,7 +166,9 @@ def get_ohlcv(
         with _df_memory_cache_lock:
             if len(_df_memory_cache) > 500:
                 # Prune entries older than _DF_TTL_SECONDS
-                expired = [k for k, (t, _) in _df_memory_cache.items() if now_ts - t > _DF_TTL_SECONDS]
+                expired = [
+                    k for k, (t, _) in _df_memory_cache.items() if now_ts - t > _DF_TTL_SECONDS
+                ]
                 for k in expired:
                     _df_memory_cache.pop(k, None)
                 # If still over 500, drop oldest 100 entries
@@ -203,13 +207,15 @@ def inject_live_tick(
 
         if df.empty:
             new_row = pd.DataFrame(
-                [{
-                    "open": q.open or q.last_price,
-                    "high": q.high or q.last_price,
-                    "low": q.low or q.last_price,
-                    "close": q.last_price,
-                    "volume": q.volume or 0.0,
-                }],
+                [
+                    {
+                        "open": q.open or q.last_price,
+                        "high": q.high or q.last_price,
+                        "low": q.low or q.last_price,
+                        "close": q.last_price,
+                        "volume": q.volume or 0.0,
+                    }
+                ],
                 index=[today_date],
             )
             return new_row
@@ -233,13 +239,15 @@ def inject_live_tick(
         else:
             # Append today's active bar
             new_row = pd.DataFrame(
-                [{
-                    "open": float(q.open or q.last_price),
-                    "high": float(q.high or q.last_price),
-                    "low": float(q.low or q.last_price),
-                    "close": float(q.last_price),
-                    "volume": float(q.volume or 0.0),
-                }],
+                [
+                    {
+                        "open": float(q.open or q.last_price),
+                        "high": float(q.high or q.last_price),
+                        "low": float(q.low or q.last_price),
+                        "close": float(q.last_price),
+                        "volume": float(q.volume or 0.0),
+                    }
+                ],
                 index=[today_date],
             )
             df = pd.concat([df, new_row])
@@ -257,7 +265,6 @@ def save_ohlcv_cache(key: str, data: list) -> None:
     from market.disk_cache import save_cache
 
     save_cache(key, data)
-
 
 
 def load_ohlcv_cache(key: str) -> tuple[list, None]:

@@ -49,7 +49,20 @@
 ### AI Multi-Agent & Smart Funnel Pipeline
 1. **Stage 1 (Pure Quant Pre-Filter)**: 0-token deterministic screening on technicals, valuation, sector RRG momentum, forensic accounting flags, and Minervini Stage 2 status before any LLM is called.
 2. **Stage 2 (Macro & Sector Context)**: India VIX, NIFTY 50 breadth, FII/DII institutional flows, and Sector RRG rotation matrix.
-3. **Stage 3 (Adversarial Multi-Agent Debate)**: Bull vs Bear analysts + 6 Persona Analysts (`buffett`, `jhunjhunwala`, `lynch`, `soros`, `munger`, `forensic`) + Facilitator + Fund Manager verdict synthesis.
+3. **Stage 3 (Adversarial Multi-Agent Debate & Persona Councils)**:
+   - Bull vs Bear analysts + 13 Specialist Personas:
+     - *Value & Moat*: `buffett`, `munger`, `lynch`
+     - *Indian Growth & Multibaggers*: `jhunjhunwala`, `kedia` (SMILE Framework)
+     - *Momentum & Breakouts*: `minervini` (SEPA/VCP), `wyckoff` (VSA/Spring), `oneil` (CAN SLIM)
+     - *Macro, Quant & Convexity*: `soros`, `simons` (Statistical Arbitrage), `taleb` (Defined-Risk Asymmetry)
+     - *Price Action & Liquidity*: `smc` (ICT Order Blocks & Sweeps)
+     - *Forensic Quality*: `forensic` (Beneish M-Score, Altman Z''-Score, Pledging)
+   - Specialized **Council Ensembles**:
+     - `breakout`: Minervini + Wyckoff + O'Neil + Forensic Auditor
+     - `options_sniper`: SMC + Taleb + Simons
+     - `multibagger`: Kedia + Buffett + Munger + Jhunjhunwala + Forensic Auditor
+     - `macro_regime`: Soros + Jhunjhunwala + Simons + Forensic Auditor
+     - `core_value`: Buffett + Munger + Lynch + Forensic Auditor
 4. **Dual-LLM Routing**:
    - Fast extraction layer (`AI_FAST_PROVIDER` e.g. Gemini Flash / Groq) for high-speed parallel extraction.
    - Deep reasoning layer (`AI_DEEP_PROVIDER` e.g. NVIDIA NIM / Claude / OpenAI / DeepSeek R1) for synthesis & risk gating.
@@ -91,7 +104,9 @@
 7. **Modal UI/UX Standards**:
    - All overlay dialogs must support backdrop click dismiss (`onClick={onClose}` on the fixed container) and prevent event bubbling on the modal card (`onClick={(e) => e.stopPropagation()}`).
    - Never use blocking browser `alert(...)` popups; use non-blocking in-modal toast banners with auto-dismiss timers.
-8. **Git Commits & Push ("Always Ask First")**:
+8. **Git Commits & Push ("Always Validate First, Always Ask First")**:
+   - **MANDATORY AUTOMATED PRE-PUSH GATE**: Before proposing or executing any git commit or push, you MUST run `.venv\Scripts\python.exe scripts/validate_all.py` (or execute the equivalent: `ruff check .`, `ruff format --check .`, `node macos-app/scripts/audit-react-hooks.js`, `npm test` inside `macos-app`, and `pytest -m "not network and not slow" -n 4`).
+   - If any step fails, diagnose the root cause, fix it, and re-run until all gates pass 100% green before creating the commit.
    - **ALWAYS** request explicit user confirmation before executing any `git commit` or `git push` to GitHub.
    - Follow Conventional Commits format (`feat:`, `fix:`, `refactor:`, `test:`, `docs:`, `perf:`).
    - **Do NOT** add `Co-Authored-By: Claude` or any AI attribution headers in commit messages.
@@ -124,7 +139,7 @@
     - Treat external API limits, rate throttles, model deprecations, and network transient states (e.g. `503 UNAVAILABLE`, `429 RESOURCE_EXHAUSTED`, `high demand`) as expected operational realities.
     - Build self-healing multi-tier resilience: (1) Comma-separated API key pools with automatic round-robin cooldown rotation, (2) Validated fallback model chains (`gemini-3.6-flash` -> `gemini-3.5-flash-lite` -> `gemini-3.5-flash`), and (3) Rich deterministic quantitative engine fallback (VIX + FII/DII + Minervini + SMC) so the terminal NEVER presents raw error strings or blank cards to the user.
 16. **Holistic Automated Validation & Regression Gates**:
-    - Whenever modifications are made to any core module (`agent/`, `analysis/`, `engine/`, `web/`, `ui/`, `macos-app/`), execute thorough automated validation suites to ensure cross-module integrity.
+    - Whenever modifications are made to any core module (`agent/`, `analysis/`, `engine/`, `web/`, `ui/`, `macos-app/`), execute `.venv\Scripts\python.exe scripts/validate_all.py` to ensure complete cross-module and CI pipeline integrity.
     - Rebuild and test both ends of the bridge: verify the Vite bundle (`npm run build:web`), restart daemon processes, and validate API HTTP contracts end-to-end.
 17. **Explicit Fallback Observability & Self-Healing Telemetry Loop**:
     - Whenever any fallback is triggered (`LLM_FAILOVER`, `LLM_COOLDOWN`, `QUANT_FALLBACK`, `DATA_FALLBACK`, `BROKER_FAILOVER`, `EXCEPTION`), the system MUST record a structured telemetry event via [`engine/telemetry.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/telemetry.py).
@@ -144,6 +159,63 @@
     - All modal overlay charts and fullscreen displays must dynamically calculate available viewport heights (`Math.max(520, window.innerHeight * 0.92 - 95)`) so that secondary sub-panes (such as Stochastic RSI or MACD) are guaranteed dedicated vertical space without scroll cutoffs or clipping.
     - Order Block (OB) ribbons must use ultra-sheer background fills ($1.5\%\text{--}2.5\%$ alpha) with dashed boundaries and semi-translucent glass chip badges to ensure candlesticks and wicks remain 100% visible and uncluttered.
     - Charts must provide a dedicated 1-click `⟲ Reset View` button that calls `fitContent()`, restores price autoscale, and recalculates DOM overlay coordinates at 60fps.
+22. **Advisory Risk Friction & Double-Confirmation Principle (Co-Pilot, Not Police)**:
+    - Trading platforms must act as an empowering institutional risk co-pilot rather than a paternalistic police. Never hard-block user actions without providing a clear escape path.
+    - When behavioral flags (consecutive loss streak $\ge 3$, anti-pyramiding into underwater positions, daily loss threshold) are triggered, present **mindful friction**:
+      1. High-visibility **Behavioral Risk & Coaching Advisory** displaying psychological context and statistical probabilities (e.g. 78% failure rate on immediate tilt re-entries).
+      2. Actionable coaching alternatives (e.g. reducing position risk to 0.5% or taking a 15-minute breather).
+      3. Explicit **Double Confirmation** (`[x] I acknowledge the heightened risk and choose to proceed with conscious awareness`).
+    - The backend engine must evaluate preflight (`evaluate_preflight`) and allow execution with user acknowledgment (`allow_override=True`), logging an immutable audit record.
+23. **Specialist Personas & Council Ensemble Consensus Architecture**:
+    - The terminal supports 13 specialist market personas across value, momentum, price action, quantitative statistics, macro flows, and forensic accounting:
+      - `buffett`, `jhunjhunwala`, `lynch`, `soros`, `munger`, `forensic`, `minervini`, `wyckoff`, `oneil`, `taleb`, `kedia`, `simons`, `smc`.
+    - Always provide predefined high-conviction **Council Ensembles** (`breakout`, `options_sniper`, `multibagger`, `macro_regime`, `core_value`) combining complementary minds to eliminate false positives and synthesize conviction scores (0-100).
+    - Every persona must support both AI multi-agent LLM execution and deterministic quantitative rule-based fallback so the terminal never fails or renders blank cards.
+24. **Dynamic UI Intelligence Deck Synchronization & Multi-Persona Ergonomics**:
+    - The terminal overview dashboard and debate views must maintain full bidirectional synchronization between left panel navigation controls (`councils` vs `personas` vs `watchlist`) and center intelligence cards.
+    - The center intelligence deck directly below the primary chart must dynamically display: (1) Full Council Ensemble Consensus with individual specialist member signal breakdowns, confidence scores, and thesis confluences, or (2) 13 Specialist Personas in a high-density carousel with authentic checklist verification, evaluated dimension metrics, and 1-click execution staging.
+25. **Strict React Hook Invariants, Modal Isolation & Multi-Layer Test Automation Gates**:
+    - **React Rule of Hooks Purity**: In all React components and custom hooks, hooks (`useState`, `useEffect`, `useCallback`, `useMemo`, `useRef`, `useAPI`, `useChatStore`, `useInspectorStore`) MUST ALWAYS be declared unconditionally at the very top of the component function. Never place `if (!data) return null`, `if (!isOpen) return null`, or any conditional statement before any hook declaration. React strictly requires identical hook invocation order on every render; violating this causes fatal crashes (`Rendered more/fewer hooks than during previous render`) when asynchronous data streams or modal visibilities change.
+    - **Global Modal & Card Error Boundaries**: Every global modal (`OrderTicketModal`, `TopOpportunitiesModal`, `SectorDrilldownModal`, `CommandPalette`, `MetricExplainerModal`) in `App.jsx` and all dynamic cards in `Message.jsx` must be wrapped in isolated `<ErrorBoundary>` components with graceful fallback recovery to guarantee that an error in any individual component can never crash the workspace or render a blank screen.
+    - **Automated Hook AST Linting**: The static AST linter (`node scripts/audit-react-hooks.js`) is integrated into both `npm test` and `npm run build:web`. All pull requests and code modifications must pass 0 hook violations across all files.
+26. **LLM Provider Lifecycle, Keyring Precedence & Model Resolution Isolation**:
+    - **Module Root Auto-loading**: Always execute `load_dotenv()` and `config.credentials.load_all()` at module root in [`agent/core.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/agent/core.py) and [`agent/persona_agent.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/agent/persona_agent.py). This ensures headless workers, background daemon threads, and FastAPI sidecar subprocesses always inherit valid credentials from `.env`.
+    - **Keyring Precedence Guard**: Never allow stale or dummy test keys saved in the Windows Credential Manager / OS Keychain (`keyring`) to override active `.env` keys. Always filter out placeholders (`_is_placeholder`) and verify key health before prioritizing keychain tokens.
+    - **Provider-Specific Model Isolation**: When constructing providers in `get_provider(provider, model)`, never let a global `AI_MODEL` override provider-specific model configurations (`f"{provider.upper()}_MODEL"`). Groq, NVIDIA NIM, OpenRouter, and Gemini must each resolve to their own dedicated, verified active model IDs without crosstalk.
+    - **ToolRegistry Callable Contract**: `ToolRegistry` in [`agent/tools.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/agent/tools.py) must always expose `.get_fn(name)` alongside `.execute(name, args)` so that analytical data bridges (e.g. `_fetch_data_brief`) can seamlessly query tools without `AttributeError` exceptions.
+27. **Super-Investor 3-Axis Engine, Thematic Baskets & Portfolio Doctor**:
+    - **3-Axis (X, Y, Z) Magic Trend Engine** ([`analysis/magic_trend.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/analysis/magic_trend.py)):
+      - *Axis X (Moat & Quality — 35 pts)*: ROCE $\ge 20\%$, Low D/E, Pristine Forensics (Beneish $<-1.78$, Altman $Z'' > 2.60$), CFO conversion $\ge 80\%$.
+      - *Axis Y (Growth & Value Migration — 35 pts)*: Sales/PAT CAGR $\ge 25\%$, Small/Mid runway, High Reinvestment rate.
+      - *Axis Z (Timing & Asymmetry — 30 pts)*: Weinstein Stage 2 Markup, Minervini 8/8 Trend Template, VCP pivot, PEG $\le 1.0$.
+      - *Dynamic ATR Risk Ticket*: Always generates dynamic Entry, Invalidation Stop-Loss ($1.2\times\text{ATR}$), Target 1 ($2R$), Target 2 ($3.5R$), and Trailing Stop rules (`2R Breakeven`, `Chandelier 3x ATR`).
+    - **6 Curated Institutional Thematic Baskets** ([`analysis/thematic_baskets.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/analysis/thematic_baskets.py)):
+      - `mayer_100_baggers`, `lynch_garp_fast_growers`, `jhunjhunwala_operating_leverage`, `canslim_high_momentum`, `order_book_powerhouses`, `value_migration_leaders`. Supports parallel multi-threaded batch scanning with caching.
+    - **Broker Portfolio AI Doctor & Wealth Optimizer** ([`engine/portfolio_doctor.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/portfolio_doctor.py)):
+      - Stan Weinstein Stage 4 Dead-Money detection, HHI concentration risk gauge, Tax-Loss Harvesting optimizer ($20\%$ STCG offset), and actionable switching prescriptions.
+28. **High-Density Terminal Ergonomics, Spacing & Vertical Rhythm Standards**:
+    - Layout padding, card gaps, and vertical rhythm must follow institutional Bloomberg/TradingView density standards.
+    - Use compact outer padding (`p-2.5 sm:p-3.5 space-y-2.5`), slim status header strips (`px-3 py-1.5 rounded-xl`), and tight 3-column grid gaps (`gap-2.5`).
+    - Maximize vertical viewport for primary data structures (candlestick charts, order books, and options chains).
+    - In institutional data tables (Option Chains, Watchlists, RRG Matrix), use compact cell padding (`py-1 px-2`), crisp monospace numerals, and micro-metric badges to eliminate unnecessary scroll fatigue.
+29. **Mathematically Guaranteed Strike Filter & Options Chain Coverage**:
+    - Option chain filters (`ATM ±5`, `ATM ±10`, `ATM ±15`, `All Strikes`) must never rely on fragile boolean presence (`is_atm`). Always calculate the true closest strike index mathematically (`min(abs(strike - spot))`) to guarantee exact strike window slices.
+    - Backend options chain endpoints (`/skills/gex_snapshot`) must generate comprehensive strike coverage ($\ge 41$ strikes, `range(-20, 21)` around ATM) to provide realistic deep ITM and far OTM liquidity across indices and high-beta equities.
+30. **Smart Typeahead, Search Ergonomics & Viewport Boundary Invariants**:
+    - Ticker search dropdowns and command palette typeaheads must dynamically calculate available viewport space, anchoring cleanly without clipping against left or right screen boundaries.
+    - Support full keyboard ergonomics (`↑`/`↓` selection, `Enter` submission, `Tab` auto-completion, `Escape` dismissal).
+31. **Unified Multi-Agent Execution Lifecycle & Zero-Latency Interruption**:
+    - In asynchronous AI multi-agent debate views and radar scanners, every trigger action (ticker chips, council mode switches, search inputs, Run buttons) must route through a unified execution pipeline.
+    - Always dispatch in-page progressive stage indicators (`⚡ Initializing...`, `🔍 Technicals & Patterns...`, `🔬 Cross-Examination...`, `⚖️ Consensus...`) and synchronize with floating `ActivityHUD`.
+    - Always wire zero-latency `⛔ Stop / Cancel` buttons using `AbortController` to allow instant user cancellation and multitasking.
+32. **Root Error Boundary & Web/Electron State Machine Invariance**:
+    - Always wrap the root application in `<ErrorBoundary title="...">` in [`macos-app/src/renderer/src/main.jsx`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/macos-app/src/renderer/src/main.jsx) to eliminate white/blank screens from unhandled rendering errors.
+    - Web mode detection in [`macos-app/src/renderer/src/App.jsx`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/macos-app/src/renderer/src/App.jsx) must support standalone browser access (`window.__CHANAKYA_TRADE_WEB__ || !window.electronAPI`) with automatic fallback port resolution (`8765`).
+    - Every setup/initialization state machine must incorporate a safety fallback timer (e.g. 2.0s) so the user interface never hangs on an uninitialized or loading progress screen.
+33. **Python Linting & Formatting CI Contract (`ruff` Rules)**:
+    - Always run `ruff check .` and `ruff format --check .` before proposing commits.
+    - Guarantee zero undefined variable names (including typing imports `Any`, `Literal` and library imports `pd`, `os`).
+    - Guard cache storage blocks: never do an early `return { ... }` that bypasses caching locks; assign `res = { ... }`, acquire lock, write cache, and return `res`.
 
 ---
 

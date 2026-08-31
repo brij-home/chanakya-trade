@@ -169,18 +169,22 @@ def get_macro_snapshot() -> MacroSnapshot:
         try:
             from engine.analysis_cache import analysis_cache
 
-            analysis_cache.save_macro("macro_snapshot", {
-                "usdinr": snap.usdinr,
-                "usdinr_change": snap.usdinr_change,
-                "crude_oil": snap.crude_oil,
-                "crude_change": snap.crude_change,
-                "gold": snap.gold,
-                "gold_change": snap.gold_change,
-                "us_10y": snap.us_10y,
-                "us_10y_change": snap.us_10y_change,
-                "dxy": snap.dxy,
-                "dxy_change": snap.dxy_change,
-            }, ttl_minutes=15)
+            analysis_cache.save_macro(
+                "macro_snapshot",
+                {
+                    "usdinr": snap.usdinr,
+                    "usdinr_change": snap.usdinr_change,
+                    "crude_oil": snap.crude_oil,
+                    "crude_change": snap.crude_change,
+                    "gold": snap.gold,
+                    "gold_change": snap.gold_change,
+                    "us_10y": snap.us_10y,
+                    "us_10y_change": snap.us_10y_change,
+                    "dxy": snap.dxy,
+                    "dxy_change": snap.dxy_change,
+                },
+                ttl_minutes=15,
+            )
         except Exception:
             pass
 

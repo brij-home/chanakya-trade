@@ -62,24 +62,26 @@ class PositionLifecycleReport:
     entry_price: float
     initial_stop_loss: float
     initial_risk_per_share: float
-    
+
     # Live Payoff
     current_pnl_pts: float
     current_pnl_pct: float
     current_r_multiple: float  # e.g. +2.4R or -0.8R
-    
+
     # Health & Alignment
     health_status: str  # "HEALTHY_ACCELERATING" | "HEALTHY_PULLBACK" | "MOMENTUM_STALLING" | "STRUCTURAL_INVALIDATION"
     health_score: int  # 0 to 100
-    
+
     # Milestones & Profit Booking
     breakeven_reached: bool
-    recommended_action: str  # "HOLD_RUNNER" | "SCALE_OUT_50_PCT" | "TRAIL_SL_TIGHT" | "EXIT_IMMEDIATELY"
+    recommended_action: (
+        str  # "HOLD_RUNNER" | "SCALE_OUT_50_PCT" | "TRAIL_SL_TIGHT" | "EXIT_IMMEDIATELY"
+    )
     milestones: list[ProfitMilestone] = field(default_factory=list)
-    
+
     # Trailing Stops
     trailing_stops: Optional[TrailingStopLevels] = None
-    
+
     summary: str = ""
     diagnostic_bullet_points: list[str] = field(default_factory=list)
 
@@ -118,7 +120,7 @@ def audit_position_lifecycle(
         ltp = float(entry_price * 1.03 if current_ltp is None else current_ltp)
 
     initial_risk = max(0.01, abs(entry_price - initial_stop_loss))
-    
+
     if position_type.upper() == "LONG":
         pnl_pts = ltp - entry_price
         pnl_pct = (pnl_pts / entry_price) * 100 if entry_price > 0 else 0
@@ -130,7 +132,6 @@ def audit_position_lifecycle(
 
     # 1. Trailing Stops Calculation
     highest_price = ltp
-    lowest_price = ltp
     atr = initial_risk * 0.8
     ema20 = entry_price
     recent_hl = initial_stop_loss
@@ -139,23 +140,27 @@ def audit_position_lifecycle(
         closes = df["close"].values
         highs = df["high"].values
         lows = df["low"].values
-        
+
         # ATR 14
-        tr = np.maximum(highs[1:] - lows[1:], np.maximum(abs(highs[1:] - closes[:-1]), abs(lows[1:] - closes[:-1])))
+        tr = np.maximum(
+            highs[1:] - lows[1:],
+            np.maximum(abs(highs[1:] - closes[:-1]), abs(lows[1:] - closes[:-1])),
+        )
         atr = float(np.mean(tr[-14:])) if len(tr) >= 14 else float(np.mean(tr))
-        
+
         highest_price = float(np.max(highs[-20:]))
-        lowest_price = float(np.min(lows[-20:]))
-        
+
         # EMA 20
         ema20 = float(pd.Series(closes).ewm(span=20, adjust=False).mean().iloc[-1])
-        
+
         # Find highest swing low in recent bars
         try:
             from analysis.market_structure import find_swing_points
 
             swings = find_swing_points(df, window=2)
-            low_swings = [s.price for s in swings if s.type == "LOW" and s.price > initial_stop_loss]
+            low_swings = [
+                s.price for s in swings if s.type == "LOW" and s.price > initial_stop_loss
+            ]
             if low_swings:
                 recent_hl = float(low_swings[-1])
         except Exception:
@@ -230,7 +235,9 @@ def audit_position_lifecycle(
         health_score = 85
         action = "SCALE_OUT_50_PCT"
         diagnostics.append(f"Reached 2R Milestone (+{r_multiple:.2f}R, +{pnl_pct:.2f}%).")
-        diagnostics.append("Lock in 33-50% partial profit and move SL to breakeven (Risk-Free Trade).")
+        diagnostics.append(
+            "Lock in 33-50% partial profit and move SL to breakeven (Risk-Free Trade)."
+        )
     elif r_multiple >= 0.5:
         health_status = "HEALTHY_PULLBACK" if ltp < highest_price * 0.98 else "HEALTHY_ACCELERATING"
         health_score = 75
@@ -247,7 +254,9 @@ def audit_position_lifecycle(
         health_status = "STRUCTURAL_INVALIDATION"
         health_score = 25
         action = "EXIT_IMMEDIATELY" if ltp <= initial_stop_loss else "TRAIL_SL_TIGHT"
-        diagnostics.append(f"Trade experiencing adverse excursion ({r_multiple:.2f}R, {pnl_pct:.2f}%).")
+        diagnostics.append(
+            f"Trade experiencing adverse excursion ({r_multiple:.2f}R, {pnl_pct:.2f}%)."
+        )
         diagnostics.append(f"Strictly honor Stop Loss at ₹{initial_stop_loss:.2f}.")
 
     summary = f"{symbol} Position Health: {health_status} (Score: {health_score}/100, Payoff: {r_multiple:+.2f}R / {pnl_pct:+.2f}%). Recommended Stop: ₹{recommended_stop:.2f} ({stop_method})."

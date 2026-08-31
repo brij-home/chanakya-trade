@@ -4,19 +4,19 @@ import Tooltip, { InfoBadge } from '../UI/Tooltip'
 
 const VERDICT_STYLES = {
   EXPLOSIVE_BULLISH_EXPANSION: {
-    badge: 'bg-green text-surface font-bold',
+    badge: 'bg-green text-black font-extrabold',
     label: '🚀 Explosive Bullish Expansion',
     icon: '🚀',
     border: 'border-green/40',
   },
   EXPLOSIVE_BEARISH_BREAKDOWN: {
-    badge: 'bg-red text-surface font-bold',
+    badge: 'bg-red text-white font-extrabold',
     label: '🚨 Explosive Bearish Breakdown',
     icon: '🚨',
     border: 'border-red/40',
   },
   COILING_SQUEEZE_PENDING: {
-    badge: 'bg-amber text-surface font-bold',
+    badge: 'bg-amber text-black font-extrabold',
     label: '🔴 Energy Coiling (Squeeze Pending)',
     icon: '🔴',
     border: 'border-amber/40',
@@ -37,13 +37,12 @@ const TIMING_BADGES = {
 }
 
 export default function BigMoveCard({ data, onOpenOrderTicket }) {
+  const openInspector = useInspectorStore((s) => s.openInspector)
+  const sendDraft = useChatStore((s) => s.sendDraft)
   if (!data) return null
   const d = data?.data ?? data ?? {}
   const sq = d.squeeze || {}
   const opt = d.options_flow || {}
-
-  const openInspector = useInspectorStore((s) => s.openInspector)
-  const sendDraft = useChatStore((s) => s.sendDraft)
 
   const verdict = VERDICT_STYLES[d.prediction_verdict] || VERDICT_STYLES.CHOPPY_RANGE
   const timing = TIMING_BADGES[d.timing_trigger] || TIMING_BADGES.WAIT_FOR_CONFIRMATION
