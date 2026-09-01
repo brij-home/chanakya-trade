@@ -3328,9 +3328,9 @@ async def skill_trending(req: Optional[TrendingSkillRequest] = None):
 # ── High-Fidelity Workspace Snapshots ──────────────────────────
 
 
-class DashboardSnapshotRequest(BaseModel):
-    symbol: Optional[str] = "NIFTY"
-    exchange: Optional[str] = "NSE"
+class DashboardSnapshotRequest(InstrumentBaseRequest):
+    symbol: str = "NIFTY"
+    exchange: str = "NSE"
     timeframe: Optional[str] = "15m"
 
 
@@ -3354,7 +3354,13 @@ async def skill_dashboard_snapshot(req: Optional[DashboardSnapshotRequest] = Non
         exch = (req.exchange if req and req.exchange else "NSE").upper().strip()
         tf = req.timeframe if req and req.timeframe else "15m"
 
-        cache_key = f"dashboard_snapshot_v3_{sym}_{exch}_{tf}"
+        # Belt-and-suspenders: re-normalize in case caller didn't pass exchange
+        # (e.g. CRUDEOIL with no exchange → auto-detects MCX)
+        from analysis.universe import normalize_symbol_exchange
+
+        sym, exch = normalize_symbol_exchange(sym, exch)
+
+        cache_key = f"dashboard_snapshot_v5_{sym}_{exch}_{tf}"
         try:
             from engine.analysis_cache import analysis_cache
 
@@ -3364,31 +3370,135 @@ async def skill_dashboard_snapshot(req: Optional[DashboardSnapshotRequest] = Non
                 and isinstance(cached, dict)
                 and cached.get("symbol") == sym
                 and cached.get("multi_tf")
+                and len(cached.get("watchlist", [])) >= 20
             ):
                 return _ok(cached)
         except Exception:
             pass
 
-        # 1. Watchlist Quotes
+        # 1. Watchlist Quotes — comprehensive institutional universe (Equities, Indices, MCX Commodities, ETFs, Forex)
         watch_meta = [
+            # Benchmark Indices
             {"symbol": "NIFTY 50", "inst": "NSE:NIFTY 50", "name": "NIFTY 50", "tag": "INDEX"},
             {"symbol": "BANKNIFTY", "inst": "NSE:NIFTY BANK", "name": "BANK NIFTY", "tag": "INDEX"},
-            {"symbol": "RELIANCE", "inst": "NSE:RELIANCE", "name": "Reliance Ind", "tag": "READY"},
-            {"symbol": "HDFCBANK", "inst": "NSE:HDFCBANK", "name": "HDFC Bank", "tag": "VALUE"},
+            {
+                "symbol": "FINNIFTY",
+                "inst": "NSE:NIFTY FIN SERVICE",
+                "name": "FIN NIFTY",
+                "tag": "INDEX",
+            },
+            # Banking & Financial Heavyweights
+            {"symbol": "HDFCBANK", "inst": "NSE:HDFCBANK", "name": "HDFC Bank", "tag": "BANK"},
+            {"symbol": "ICICIBANK", "inst": "NSE:ICICIBANK", "name": "ICICI Bank", "tag": "BANK"},
+            {"symbol": "SBIN", "inst": "NSE:SBIN", "name": "State Bank of India", "tag": "BANK"},
+            {
+                "symbol": "KOTAKBANK",
+                "inst": "NSE:KOTAKBANK",
+                "name": "Kotak Mahindra",
+                "tag": "BANK",
+            },
+            {"symbol": "AXISBANK", "inst": "NSE:AXISBANK", "name": "Axis Bank", "tag": "BANK"},
+            {
+                "symbol": "BAJFINANCE",
+                "inst": "NSE:BAJFINANCE",
+                "name": "Bajaj Finance",
+                "tag": "FINANCE",
+            },
+            # Core Blue-Chips & Energy
+            {"symbol": "RELIANCE", "inst": "NSE:RELIANCE", "name": "Reliance Ind", "tag": "ENERGY"},
+            {"symbol": "LT", "inst": "NSE:LT", "name": "Larsen & Toubro", "tag": "INFRA"},
+            {"symbol": "ITC", "inst": "NSE:ITC", "name": "ITC Ltd", "tag": "FMCG"},
+            # Technology Leaders
             {"symbol": "INFY", "inst": "NSE:INFY", "name": "Infosys", "tag": "TECH"},
             {"symbol": "TCS", "inst": "NSE:TCS", "name": "Tata Consultancy", "tag": "TECH"},
+            {"symbol": "HCLTECH", "inst": "NSE:HCLTECH", "name": "HCL Tech", "tag": "TECH"},
+            {"symbol": "WIPRO", "inst": "NSE:WIPRO", "name": "Wipro Ltd", "tag": "TECH"},
             {"symbol": "COFORGE", "inst": "NSE:COFORGE", "name": "Coforge", "tag": "STAGE 2"},
-            {"symbol": "TRENT", "inst": "NSE:TRENT", "name": "Trent Ltd", "tag": "MOMENTUM"},
+            # Auto & Mobility
+            {"symbol": "MARUTI", "inst": "NSE:MARUTI", "name": "Maruti Suzuki", "tag": "AUTO"},
+            {"symbol": "M&M", "inst": "NSE:M&M", "name": "Mahindra & Mahindra", "tag": "AUTO"},
+            # Telecom, Pharma, Consumer & Defense
+            {
+                "symbol": "BHARTIARTL",
+                "inst": "NSE:BHARTIARTL",
+                "name": "Bharti Airtel",
+                "tag": "TELECOM",
+            },
+            {"symbol": "SUNPHARMA", "inst": "NSE:SUNPHARMA", "name": "Sun Pharma", "tag": "PHARMA"},
+            {"symbol": "TITAN", "inst": "NSE:TITAN", "name": "Titan Company", "tag": "CONSUMER"},
+            {"symbol": "TRENT", "inst": "NSE:TRENT", "name": "Trent Ltd", "tag": "STAGE 2"},
+            {"symbol": "HAL", "inst": "NSE:HAL", "name": "Hindustan Aero", "tag": "DEFENSE"},
+            {"symbol": "BEL", "inst": "NSE:BEL", "name": "Bharat Electronics", "tag": "DEFENSE"},
+            {
+                "symbol": "ADANIENT",
+                "inst": "NSE:ADANIENT",
+                "name": "Adani Enterprises",
+                "tag": "STAGE 2",
+            },
+            # MCX Commodities (auto-converted to INR with quotation unit multipliers)
+            {"symbol": "GOLD", "inst": "MCX:GOLD", "name": "MCX Gold Futures", "tag": "COMMODITY"},
+            {
+                "symbol": "SILVER",
+                "inst": "MCX:SILVER",
+                "name": "MCX Silver Futures",
+                "tag": "COMMODITY",
+            },
+            {
+                "symbol": "CRUDEOIL",
+                "inst": "MCX:CRUDEOIL",
+                "name": "MCX Crude Oil",
+                "tag": "COMMODITY",
+            },
+            {
+                "symbol": "NATURALGAS",
+                "inst": "MCX:NATURALGAS",
+                "name": "MCX Natural Gas",
+                "tag": "COMMODITY",
+            },
+            {"symbol": "COPPER", "inst": "MCX:COPPER", "name": "MCX Copper", "tag": "COMMODITY"},
+            # Benchmark ETFs
+            {
+                "symbol": "NIFTYBEES",
+                "inst": "NSE:NIFTYBEES",
+                "name": "Nippon Nifty ETF",
+                "tag": "ETF",
+            },
+            {"symbol": "GOLDBEES", "inst": "NSE:GOLDBEES", "name": "Gold BeES ETF", "tag": "ETF"},
+            {"symbol": "BANKBEES", "inst": "NSE:BANKBEES", "name": "Bank BeES ETF", "tag": "ETF"},
+            # CDS Forex
+            {"symbol": "USDINR", "inst": "CDS:USDINR", "name": "USD/INR", "tag": "FOREX"},
         ]
+        # Dynamically inject the active symbol if not already covered
+        setup_sym = sym.replace(" 50", "").strip()
+        active_inst = f"{exch}:{setup_sym}"
+        if not any(w["symbol"] == setup_sym or w["inst"] == active_inst for w in watch_meta):
+            watch_meta.append(
+                {"symbol": setup_sym, "inst": active_inst, "name": setup_sym, "tag": exch}
+            )
+
         quotes_map = {}
         try:
             quotes_map = get_quote([w["inst"] for w in watch_meta])
         except Exception:
             pass
 
+        def _resolve_quote(w: dict):
+            """Try all key variants: inst → symbol → short symbol → stripped symbol."""
+            for key in (
+                w["inst"],
+                w["symbol"],
+                w["inst"].split(":")[-1],
+                w["symbol"].replace(" 50", ""),
+                w["symbol"].replace(" BANK", ""),
+            ):
+                q = quotes_map.get(key)
+                if q and q.last_price:
+                    return q
+            return None
+
         watchlist = []
         for w in watch_meta:
-            q = quotes_map.get(w["inst"])
+            q = _resolve_quote(w)
             ltp = float(q.last_price) if q and q.last_price else 0.0
             chg = float(q.change) if q and q.change is not None else 0.0
             chg_pct = float(q.change_pct) if q and q.change_pct is not None else 0.0
@@ -3403,13 +3513,39 @@ async def skill_dashboard_snapshot(req: Optional[DashboardSnapshotRequest] = Non
                 }
             )
 
-        # Target Setup calculation specifically for sym
-        setup_sym = sym.replace(" 50", "").strip()
-        quote_target = get_quote([f"{exch}:{setup_sym}"]) or {}
-        q_obj = quote_target.get(f"{exch}:{setup_sym}")
-        cur_ltp = (float(q_obj.last_price) if q_obj and q_obj.last_price else 0.0) or get_ltp(
-            f"{exch}:{setup_sym}"
+        # Target Setup — quote specifically for the active sym (reuse from batch if already fetched)
+        q_obj = (
+            quotes_map.get(active_inst)
+            or quotes_map.get(setup_sym)
+            or (get_quote([active_inst]) or {}).get(active_inst)
         )
+        cur_ltp = float(q_obj.last_price) if q_obj and q_obj.last_price else 0.0
+        if not cur_ltp:
+            cur_ltp = get_ltp(active_inst)
+
+        # Upsert active symbol into watchlist so frontend always gets live price
+        # (handles non-standard symbols like MCX commodities that may not be in the fixed list)
+        cur_chg_pct = float(q_obj.change_pct) if q_obj and q_obj.change_pct is not None else 0.0
+        existing_idx = next((i for i, w in enumerate(watchlist) if w["symbol"] == setup_sym), None)
+        active_entry = {
+            "symbol": setup_sym,
+            "name": setup_sym,
+            "tag": exch,
+            "ltp": round(cur_ltp, 2),
+            "change": round(float(q_obj.change) if q_obj and q_obj.change is not None else 0.0, 2),
+            "change_pct": round(cur_chg_pct, 2),
+        }
+        if existing_idx is not None:
+            # Update in-place, preserving name/tag from watch_meta if we already have it
+            existing = watchlist[existing_idx]
+            watchlist[existing_idx] = {
+                **existing,
+                "ltp": active_entry["ltp"],
+                "change": active_entry["change"],
+                "change_pct": active_entry["change_pct"],
+            }
+        else:
+            watchlist.append(active_entry)
 
         # Fetch OHLCV data for setup_sym
         df = None

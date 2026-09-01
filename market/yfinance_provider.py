@@ -206,11 +206,61 @@ _quote_cache_lock = threading.Lock()
 _quote_cache: dict[str, tuple[float, Quote]] = {}  # key -> (timestamp, Quote)
 _QUOTE_TTL_SECONDS = 20.0
 
+# USD-denominated yfinance futures tickers mapped to their MCX contract quotation factor
+# COMEX/NYMEX futures are quoted in US units (troy oz, lbs, barrels), whereas MCX quotes in Indian standard units:
+# - GOLD: COMEX USD/troy oz (31.1035g) → MCX ₹ per 10 grams (factor = 10 / 31.1034768 ≈ 0.3215)
+# - SILVER: COMEX USD/troy oz (31.1035g) → MCX ₹ per 1 kilogram (factor = 1000 / 31.1034768 ≈ 32.1507)
+# - COPPER: COMEX USD/lb → MCX ₹ per 1 kilogram (1 kg = 2.20462 lbs, factor = 2.20462262)
+# - CRUDEOIL: WTI USD/barrel → MCX ₹ per 1 barrel (factor = 1.0)
+# - BRENT: Brent USD/barrel → MCX ₹ per 1 barrel (factor = 1.0)
+# - NATURALGAS: NYMEX USD/MMBtu → MCX ₹ per 1 MMBtu (factor = 1.0)
+_USD_COMMODITY_FACTORS: dict[str, float] = {
+    "GC=F": 10.0 / 31.1034768,  # GOLD (USD/troy oz → ₹/10 grams)
+    "SI=F": 1000.0 / 31.1034768,  # SILVER (USD/troy oz → ₹/1 kg)
+    "HG=F": 2.20462262,  # COPPER (USD/lb → ₹/1 kg)
+    "CL=F": 1.0,  # CRUDE OIL (USD/bbl → ₹/bbl)
+    "BZ=F": 1.0,  # BRENT CRUDE OIL (USD/bbl → ₹/bbl)
+    "NG=F": 1.0,  # NATURAL GAS (USD/MMBtu → ₹/MMBtu)
+    "ZNC=F": 2.20462262,  # ZINC (USD/lb → ₹/1 kg)
+    "ALI=F": 2.20462262,  # ALUMINIUM (USD/lb → ₹/1 kg)
+    "LED=F": 2.20462262,  # LEAD (USD/lb → ₹/1 kg)
+    "CT=F": 3.74786,  # COTTON (cents/lb → ₹/bale)
+}
+
+_usdinr_cache: dict[str, tuple[float, float]] = {}  # key -> (timestamp, rate)
+_usdinr_lock = threading.Lock()
+_USDINR_TTL = 60.0  # seconds
+
+
+def _get_usdinr_rate() -> float:
+    """Fetch live USD/INR exchange rate, cached for 60s to avoid hammering yfinance."""
+    with _usdinr_lock:
+        if "rate" in _usdinr_cache:
+            ts, rate = _usdinr_cache["rate"]
+            if time.time() - ts < _USDINR_TTL:
+                return rate
+    try:
+        yf = _get_yf()
+        t = yf.Ticker("INR=X")
+        info = t.fast_info
+        rate = float(info.get("lastPrice", 0) or info.get("last_price", 0) or 0)
+        if not rate or rate < 60:
+            # Fallback: try 1-day history
+            hist = t.history(period="1d")
+            rate = float(hist["Close"].iloc[-1]) if not hist.empty else 0.0
+        rate = rate if rate > 60 else 84.0  # defensive fallback
+    except Exception:
+        rate = 84.0  # safe fallback when network is unavailable
+    with _usdinr_lock:
+        _usdinr_cache["rate"] = (time.time(), rate)
+    return rate
+
 
 def yf_get_quote(symbol: str, exchange: str = "NSE") -> Quote:
     """
     Get a live quote for a single stock/index with in-memory caching.
     ~15 min delayed for Indian markets when no broker is connected.
+    MCX commodity prices are converted from USD to INR automatically.
     """
     cache_key = f"{exchange.upper()}:{symbol.upper()}"
     now = time.time()
@@ -245,6 +295,18 @@ def yf_get_quote(symbol: str, exchange: str = "NSE") -> Quote:
                 day_high = float(row.get("High", 0))
                 day_low = float(row.get("Low", 0))
                 volume = int(row.get("Volume", 0))
+
+        # ── MCX Commodity USD → INR conversion with unit multiplier ────
+        # yfinance returns USD-denominated prices for commodity futures
+        # (CL=F, GC=F, etc.). MCX prices these in INR with standard Indian quotation units.
+        if ticker in _USD_COMMODITY_FACTORS and last_price > 0:
+            fx = _get_usdinr_rate() * _USD_COMMODITY_FACTORS[ticker]
+            last_price = round(last_price * fx, 2)
+            prev_close = round(prev_close * fx, 2) if prev_close else 0.0
+            open_price = round(open_price * fx, 2) if open_price else 0.0
+            day_high = round(day_high * fx, 2) if day_high else 0.0
+            day_low = round(day_low * fx, 2) if day_low else 0.0
+        # ─────────────────────────────────────────────────────────────────
 
         change = round(last_price - prev_close, 2) if prev_close else 0
         change_pct = round((change / prev_close) * 100, 2) if prev_close else 0
@@ -415,15 +477,20 @@ def yf_get_ohlcv(
         if hist.empty:
             return []
 
+        # ── MCX Commodity USD → INR conversion for OHLCV ────────────────
+        needs_inr = ticker in _USD_COMMODITY_FACTORS
+        fx = (_get_usdinr_rate() * _USD_COMMODITY_FACTORS[ticker]) if needs_inr else 1.0
+        # ─────────────────────────────────────────────────────────────────
+
         rows = []
         for idx, row in hist.iterrows():
             rows.append(
                 {
                     "date": idx.to_pydatetime() if hasattr(idx, "to_pydatetime") else idx,
-                    "open": float(row["Open"]),
-                    "high": float(row["High"]),
-                    "low": float(row["Low"]),
-                    "close": float(row["Close"]),
+                    "open": round(float(row["Open"]) * fx, 2),
+                    "high": round(float(row["High"]) * fx, 2),
+                    "low": round(float(row["Low"]) * fx, 2),
+                    "close": round(float(row["Close"]) * fx, 2),
                     "volume": int(row["Volume"]),
                 }
             )

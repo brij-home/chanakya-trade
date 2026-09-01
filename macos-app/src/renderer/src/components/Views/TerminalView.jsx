@@ -84,6 +84,7 @@ export default function TerminalView({
         if (isInitial) setLoading(true)
         const res = await call('/skills/dashboard_snapshot', {
           symbol: selectedSymbol,
+          exchange: getSymbolExchange(selectedSymbol),
           timeframe: timeframe,
         })
         const snapshot = res?.data ?? res
@@ -146,9 +147,23 @@ export default function TerminalView({
 
   // Universe stock metadata for instant 0ms optimistic calibration
   const universeStock = INDIAN_UNIVERSE.find((u) => u.symbol === selectedSymbol)
-  const fallbackLtp = universeStock?.type === 'index' 
-    ? 24150.0 
-    : (universeStock?.symbol === 'HAL' ? 4650.0 : (universeStock?.lotSize ? 1200.0 : 1000.0))
+  // Resolved exchange for this symbol (MCX for commodities, CDS for forex, NSE otherwise)
+  const resolvedExchange = getSymbolExchange(selectedSymbol)
+  // Seed prices for pre-fetch calibration — keyed by symbol for O(1) lookup
+  const COMMODITY_SEED_LTP = {
+    // MCX — Sep 2026 approximate price levels
+    GOLD: 73500, GOLDM: 73500, GOLDPETAL: 7350, SILVER: 88500, SILVERM: 88500, SILVERMIC: 88500,
+    CRUDEOIL: 8200, CRUDEOILM: 820, BRENT: 8600,
+    NATURALGAS: 230, NATGASMINI: 230, NATGAS: 230,
+    COPPER: 890, ZINC: 280, ALUMINIUM: 225, LEAD: 195, COTTON: 29000,
+    // CDS Forex
+    USDINR: 84.02, EURINR: 92.5, GBPINR: 107.5, JPYINR: 56.5,
+  }
+  const fallbackLtp = COMMODITY_SEED_LTP[selectedSymbol] != null
+    ? COMMODITY_SEED_LTP[selectedSymbol]
+    : universeStock?.type === 'index'
+    ? 24150.0
+    : 1000.0
   const curLtp = isDataMatching ? (data?.ltp || setupRaw?.entry || fallbackLtp) : fallbackLtp
 
   const isShort = isDataMatching ? Boolean(setupRaw?.action && setupRaw.action.includes('SHORT')) : false
@@ -170,7 +185,7 @@ export default function TerminalView({
   const rewPct = isDataMatching && setupRaw?.reward_pct != null ? setupRaw.reward_pct : ((rewPts / safeEntry) * 100).toFixed(2)
 
   const setup = {
-    symbol: `${selectedSymbol} (NSE)`,
+    symbol: `${selectedSymbol} (${resolvedExchange})`,
     action: (isDataMatching && setupRaw?.action) ? setupRaw.action : (isShort ? 'SHORT (SELL)' : 'LONG (BUY)'),
     trigger: (isDataMatching && setupRaw?.trigger) ? setupRaw.trigger : (isShort ? 'Supply OB Rejection' : 'Demand OB Retest'),
     entry: safeEntry || 1000,
@@ -518,64 +533,81 @@ export default function TerminalView({
 
   // Master Indian Equities & Indices Universe for Instant Search & Watchlist
   const MASTER_WATCHLIST = [
-    { symbol: 'NIFTY', name: 'NIFTY 50', cat: 'INDEX', ltp: 24175.65, change_pct: 0.45 },
-    { symbol: 'BANKNIFTY', name: 'BANK NIFTY', cat: 'INDEX', ltp: 57496.30, change_pct: 0.62 },
-    { symbol: 'FINNIFTY', name: 'FIN NIFTY', cat: 'INDEX', ltp: 24850.00, change_pct: 0.38 },
-    { symbol: 'RELIANCE', name: 'Reliance Ind', cat: 'ENERGY', ltp: 1287.00, change_pct: 0.85 },
-    { symbol: 'HDFCBANK', name: 'HDFC Bank', cat: 'BANK', ltp: 720.30, change_pct: 0.42 },
-    { symbol: 'ICICIBANK', name: 'ICICI Bank', cat: 'BANK', ltp: 1245.50, change_pct: 0.78 },
-    { symbol: 'SBIN', name: 'State Bank of India', cat: 'BANK', ltp: 812.40, change_pct: 1.15 },
-    { symbol: 'KOTAKBANK', name: 'Kotak Mahindra', cat: 'BANK', ltp: 1785.00, change_pct: -0.25 },
-    { symbol: 'AXISBANK', name: 'Axis Bank', cat: 'BANK', ltp: 1195.00, change_pct: 0.55 },
-    { symbol: 'INFY', name: 'Infosys', cat: 'TECH', ltp: 1750.00, change_pct: 1.25 },
-    { symbol: 'TCS', name: 'Tata Consultancy', cat: 'TECH', ltp: 2342.00, change_pct: 0.90 },
-    { symbol: 'HCLTECH', name: 'HCL Tech', cat: 'TECH', ltp: 1780.00, change_pct: 1.45 },
-    { symbol: 'WIPRO', name: 'Wipro Ltd', cat: 'TECH', ltp: 545.00, change_pct: 0.35 },
-    { symbol: 'COFORGE', name: 'Coforge', cat: 'TECH', ltp: 7850.00, change_pct: 2.15 },
-    { symbol: 'TATAMOTORS', name: 'Tata Motors', cat: 'AUTO', ltp: 985.60, change_pct: 1.65 },
-    { symbol: 'MARUTI', name: 'Maruti Suzuki', cat: 'AUTO', ltp: 12450.00, change_pct: 0.80 },
-    { symbol: 'M&M', name: 'Mahindra & Mahindra', cat: 'AUTO', ltp: 2890.00, change_pct: 1.30 },
-    { symbol: 'BAJFINANCE', name: 'Bajaj Finance', cat: 'FINANCE', ltp: 7120.00, change_pct: 0.65 },
-    { symbol: 'LT', name: 'Larsen & Toubro', cat: 'INFRA', ltp: 3680.00, change_pct: 0.95 },
-    { symbol: 'ITC', name: 'ITC Ltd', cat: 'FMCG', ltp: 505.40, change_pct: 0.20 },
-    { symbol: 'BHARTIARTL', name: 'Bharti Airtel', cat: 'TELECOM', ltp: 1650.00, change_pct: 1.10 },
-    { symbol: 'SUNPHARMA', name: 'Sun Pharma', cat: 'PHARMA', ltp: 1895.00, change_pct: 0.40 },
-    { symbol: 'TITAN', name: 'Titan Company', cat: 'CONSUMER', ltp: 3450.00, change_pct: 0.75 },
-    { symbol: 'TRENT', name: 'Trent Ltd', cat: 'STAGE 2', ltp: 7150.00, change_pct: 2.45 },
-    { symbol: 'ZOMATO', name: 'Zomato Ltd', cat: 'STAGE 2', ltp: 275.00, change_pct: 3.10 },
-    { symbol: 'HAL', name: 'Hindustan Aeronautics', cat: 'DEFENSE', ltp: 4680.00, change_pct: 1.85 },
-    { symbol: 'BEL', name: 'Bharat Electronics', cat: 'DEFENSE', ltp: 312.00, change_pct: 2.10 },
-    { symbol: 'ADANIENT', name: 'Adani Enterprises', cat: 'STAGE 2', ltp: 3045.00, change_pct: 1.40 },
-    // MCX Commodities
-    { symbol: 'GOLD', name: 'MCX Gold Futures', cat: 'COMMODITY', ltp: 72450.00, change_pct: 0.45 },
-    { symbol: 'SILVER', name: 'MCX Silver Futures', cat: 'COMMODITY', ltp: 84200.00, change_pct: 0.82 },
-    { symbol: 'CRUDEOIL', name: 'MCX Crude Oil', cat: 'COMMODITY', ltp: 6350.00, change_pct: 1.25 },
-    { symbol: 'NATURALGAS', name: 'MCX Natural Gas', cat: 'COMMODITY', ltp: 245.00, change_pct: -1.10 },
-    { symbol: 'COPPER', name: 'MCX Copper Futures', cat: 'COMMODITY', ltp: 835.00, change_pct: 0.65 },
+    // NSE Indices
+    { symbol: 'NIFTY',     name: 'NIFTY 50',           cat: 'INDEX',    ltp: 24890.00, change_pct: 0.45 },
+    { symbol: 'BANKNIFTY', name: 'BANK NIFTY',          cat: 'INDEX',    ltp: 53250.00, change_pct: 0.62 },
+    { symbol: 'FINNIFTY',  name: 'FIN NIFTY',           cat: 'INDEX',    ltp: 23950.00, change_pct: 0.38 },
+    // NSE Blue-Chips
+    { symbol: 'RELIANCE',  name: 'Reliance Ind',        cat: 'ENERGY',   ltp: 1312.00,  change_pct: 0.85 },
+    { symbol: 'HDFCBANK',  name: 'HDFC Bank',           cat: 'BANK',     ltp: 1820.00,  change_pct: 0.42 },
+    { symbol: 'ICICIBANK', name: 'ICICI Bank',          cat: 'BANK',     ltp: 1385.00,  change_pct: 0.78 },
+    { symbol: 'SBIN',      name: 'State Bank of India', cat: 'BANK',     ltp: 820.00,   change_pct: 1.15 },
+    { symbol: 'KOTAKBANK', name: 'Kotak Mahindra',      cat: 'BANK',     ltp: 2100.00,  change_pct: -0.25 },
+    { symbol: 'AXISBANK',  name: 'Axis Bank',           cat: 'BANK',     ltp: 1290.00,  change_pct: 0.55 },
+    { symbol: 'INFY',      name: 'Infosys',             cat: 'TECH',     ltp: 1890.00,  change_pct: 1.25 },
+    { symbol: 'TCS',       name: 'Tata Consultancy',    cat: 'TECH',     ltp: 4250.00,  change_pct: 0.90 },
+    { symbol: 'HCLTECH',   name: 'HCL Tech',            cat: 'TECH',     ltp: 1960.00,  change_pct: 1.45 },
+    { symbol: 'WIPRO',     name: 'Wipro Ltd',           cat: 'TECH',     ltp: 590.00,   change_pct: 0.35 },
+    { symbol: 'COFORGE',   name: 'Coforge',             cat: 'TECH',     ltp: 9250.00,  change_pct: 2.15 },
+    { symbol: 'TATAMOTORS',name: 'Tata Motors',         cat: 'AUTO',     ltp: 1120.00,  change_pct: 1.65 },
+    { symbol: 'MARUTI',    name: 'Maruti Suzuki',       cat: 'AUTO',     ltp: 13800.00, change_pct: 0.80 },
+    { symbol: 'M&M',       name: 'Mahindra & Mahindra', cat: 'AUTO',     ltp: 3250.00,  change_pct: 1.30 },
+    { symbol: 'BAJFINANCE',name: 'Bajaj Finance',       cat: 'FINANCE',  ltp: 8950.00,  change_pct: 0.65 },
+    { symbol: 'LT',        name: 'Larsen & Toubro',     cat: 'INFRA',    ltp: 4100.00,  change_pct: 0.95 },
+    { symbol: 'ITC',       name: 'ITC Ltd',             cat: 'FMCG',     ltp: 545.00,   change_pct: 0.20 },
+    { symbol: 'BHARTIARTL',name: 'Bharti Airtel',       cat: 'TELECOM',  ltp: 1820.00,  change_pct: 1.10 },
+    { symbol: 'SUNPHARMA', name: 'Sun Pharma',          cat: 'PHARMA',   ltp: 1980.00,  change_pct: 0.40 },
+    { symbol: 'TITAN',     name: 'Titan Company',       cat: 'CONSUMER', ltp: 3650.00,  change_pct: 0.75 },
+    { symbol: 'TRENT',     name: 'Trent Ltd',           cat: 'STAGE 2',  ltp: 8450.00,  change_pct: 2.45 },
+    { symbol: 'ZOMATO',    name: 'Zomato Ltd',          cat: 'STAGE 2',  ltp: 310.00,   change_pct: 3.10 },
+    { symbol: 'HAL',       name: 'Hindustan Aeronautics',cat: 'DEFENSE', ltp: 5200.00,  change_pct: 1.85 },
+    { symbol: 'BEL',       name: 'Bharat Electronics',  cat: 'DEFENSE',  ltp: 345.00,   change_pct: 2.10 },
+    { symbol: 'ADANIENT',  name: 'Adani Enterprises',   cat: 'STAGE 2',  ltp: 3250.00,  change_pct: 1.40 },
+    // MCX Commodities — seeds updated Sep 2026
+    { symbol: 'GOLD',       name: 'MCX Gold Futures',   cat: 'COMMODITY', ltp: 73500.00, change_pct: 0.45 },
+    { symbol: 'SILVER',     name: 'MCX Silver Futures', cat: 'COMMODITY', ltp: 88500.00, change_pct: 0.82 },
+    { symbol: 'CRUDEOIL',   name: 'MCX Crude Oil',      cat: 'COMMODITY', ltp: 8200.00,  change_pct: 0.33 },
+    { symbol: 'NATURALGAS', name: 'MCX Natural Gas',    cat: 'COMMODITY', ltp: 230.00,   change_pct: -1.10 },
+    { symbol: 'COPPER',     name: 'MCX Copper Futures', cat: 'COMMODITY', ltp: 890.00,   change_pct: 0.65 },
     // Leading ETFs
-    { symbol: 'NIFTYBEES', name: 'Nippon Nifty 50 ETF', cat: 'ETF', ltp: 265.50, change_pct: 0.45 },
-    { symbol: 'GOLDBEES', name: 'Nippon Gold BeES ETF', cat: 'ETF', ltp: 64.20, change_pct: 0.35 },
-    { symbol: 'BANKBEES', name: 'Nippon Bank BeES ETF', cat: 'ETF', ltp: 540.00, change_pct: 0.60 },
+    { symbol: 'NIFTYBEES',  name: 'Nippon Nifty 50 ETF',cat: 'ETF',       ltp: 295.00,   change_pct: 0.45 },
+    { symbol: 'GOLDBEES',   name: 'Nippon Gold BeES ETF',cat: 'ETF',      ltp: 73.50,    change_pct: 0.35 },
+    { symbol: 'BANKBEES',   name: 'Nippon Bank BeES ETF',cat: 'ETF',      ltp: 580.00,   change_pct: 0.60 },
     // Forex / Currency
-    { symbol: 'USDINR', name: 'USD / INR Rupee', cat: 'FOREX', ltp: 83.95, change_pct: -0.05 },
+    { symbol: 'USDINR',     name: 'USD / INR Rupee',    cat: 'FOREX',     ltp: 84.02,    change_pct: -0.05 },
   ]
 
   // Combined Watchlist: server items merged with master universe
   const combinedWatchlist = (() => {
     const map = new Map()
+    // Layer 1: static seeds (immediate render, no flash)
     for (const item of MASTER_WATCHLIST) {
       map.set(item.symbol, item)
     }
+    // Layer 2: server watchlist (live prices from backend batch fetch)
     for (const item of watchlist) {
       const clean = item.symbol.replace(' 50', '').trim()
       map.set(clean, {
         ...map.get(clean),
         symbol: clean,
-        name: item.name || clean,
-        ltp: item.ltp || map.get(clean)?.ltp || 1000,
+        name: item.name || map.get(clean)?.name || clean,
+        ltp: item.ltp > 0 ? item.ltp : (map.get(clean)?.ltp || 0),
         change_pct: item.change_pct != null ? item.change_pct : (map.get(clean)?.change_pct || 0),
         cat: item.tag || map.get(clean)?.cat || 'EQUITY',
       })
+    }
+    // Layer 3: always inject data.ltp for the active symbol (belt-and-suspenders)
+    // This guarantees the selected symbol's watchlist row shows live price even if
+    // it was not in the server watchlist or the batch fetch failed for that row.
+    if (data?.ltp > 0) {
+      const existing = map.get(selectedSymbol)
+      if (existing) {
+        map.set(selectedSymbol, {
+          ...existing,
+          ltp: data.ltp,
+          change_pct: data.change_pct ?? existing.change_pct,
+        })
+      }
     }
     return Array.from(map.values())
   })()
@@ -633,7 +665,9 @@ export default function TerminalView({
       ? 'NIFTY 50 (NSE)'
       : selectedSymbol === 'BANKNIFTY'
       ? 'BANK NIFTY (NSE)'
-      : `${selectedSymbol} (NSE)`
+      : selectedSymbol === 'FINNIFTY'
+      ? 'FIN NIFTY (NSE)'
+      : `${selectedSymbol} (${resolvedExchange})`
 
   const activeWatchItem = combinedWatchlist.find(
     (w) => w.symbol === selectedSymbol || w.name === selectedSymbol || w.symbol.startsWith(selectedSymbol)
@@ -1273,18 +1307,18 @@ export default function TerminalView({
                     <div className="flex items-center justify-between px-1">
                       <span className="text-[11px] font-bold text-amber font-mono">⚡ 15m Intraday Structure (SMC)</span>
                     </div>
-                    <CandlestickChart symbol={selectedSymbol} timeframe="15m" height={320} />
+                    <CandlestickChart symbol={selectedSymbol} exchange={resolvedExchange} timeframe="15m" height={320} />
                   </div>
                   <div className="rounded-xl overflow-hidden bg-surface/50 border border-border/60 p-2 space-y-1">
                     <div className="flex items-center justify-between px-1">
                       <span className="text-[11px] font-bold text-emerald-500 font-mono">💎 1D Positional Markup (Stage 2)</span>
                     </div>
-                    <CandlestickChart symbol={selectedSymbol} timeframe="1D" height={320} />
+                    <CandlestickChart symbol={selectedSymbol} exchange={resolvedExchange} timeframe="1D" height={320} />
                   </div>
                 </div>
               ) : (
                 <div className="w-full rounded-xl overflow-hidden bg-surface/50 border border-border/60">
-                  <CandlestickChart symbol={selectedSymbol} timeframe={timeframe} height={280} />
+                  <CandlestickChart symbol={selectedSymbol} exchange={resolvedExchange} timeframe={timeframe} height={280} />
                 </div>
               )}
 

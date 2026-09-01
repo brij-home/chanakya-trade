@@ -149,6 +149,14 @@
     - BSE Indices (`SENSEX`, `BANKEX`) → `BSE:`
     - Equities & benchmark indices → `NSE:`
   - Dual-key quote dictionary lookup ensures queries for `GOLD` or `MCX:GOLD` resolve without KeyError.
+- **MCX Commodity Quotation Unit Normalization** ([`market/yfinance_provider.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/market/yfinance_provider.py)):
+  - COMEX/NYMEX futures on `yfinance` quote in US physical units (`GC=F` in USD/troy oz, `SI=F` in USD/troy oz, `HG=F` in USD/lb, `CL=F` in USD/bbl).
+  - For MCX display, multiply by USD/INR rate AND standard physical quotation unit multipliers:
+    - **Gold (`GC=F`)**: $\times \text{USDINR} \times (10 / 31.1034768)$ (₹ per 10 grams)
+    - **Silver (`SI=F`)**: $\times \text{USDINR} \times (1000 / 31.1034768)$ (₹ per 1 kg)
+    - **Copper (`HG=F`)**: $\times \text{USDINR} \times 2.20462262$ (₹ per 1 kg)
+    - **Crude Oil (`CL=F`) / Natural Gas (`NG=F`)**: $\times \text{USDINR} \times 1.0$ (₹ per bbl / MMBtu)
+  - Applied uniformly to both live quotes and historical OHLCV chart feeds.
 - **Zero Static / False Data Policy**: Macro indicators and quotes MUST be fetched dynamically from real live feeds (`yfinance` fast_info, Fyers WebSocket, NSE IFSC). Static mock fallbacks are strictly prohibited in production pathways.
 
 ---
