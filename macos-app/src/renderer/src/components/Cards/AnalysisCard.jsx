@@ -1,10 +1,12 @@
 import { useState } from 'react'
+import { getSymbolExchange } from '../../data/universeData'
 
 export default function AnalysisCard({ data }) {
   const [showPlans, setShowPlans] = useState(false)
   if (!data) return null
 
   const { symbol, exchange, report, trade_plans } = data
+  const resolvedExchange = (!exchange || exchange === 'NSE') ? getSymbolExchange(symbol) : exchange
   // Filter out null/empty plans
   const plans = trade_plans
     ? Object.entries(trade_plans).filter(([, v]) => v != null)
@@ -18,7 +20,7 @@ export default function AnalysisCard({ data }) {
         <div>
           <p className="text-muted text-[11px] uppercase tracking-widest font-ui">Analysis</p>
           <p className="text-text text-lg font-semibold font-mono mt-0.5">
-            {symbol} <span className="text-muted text-sm font-ui">{exchange}</span>
+            {symbol} <span className="text-muted text-sm font-ui">{resolvedExchange}</span>
           </p>
         </div>
         <span className="text-blue text-xl">🔬</span>

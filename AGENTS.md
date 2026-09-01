@@ -256,6 +256,27 @@
 18. **Self-Healing Resilience**: Multi-key pools → model failover chains → deterministic quant fallback. Terminal never shows raw errors.
 19. **Python Linting**: `ruff check .` + `ruff format --check .` before commits. Zero undefined variable names.
 
+### 7.6 Holistic Invariant Architecture & Zero-Patchwork Engineering Standard
+20. **Single Source of Truth (SSOT) at Ingress Boundaries**:
+    - Never write localized `if (symbol === '...')` or `exchange || 'NSE'` ternary expressions inside individual UI cards or individual route handlers.
+    - All incoming instruments MUST pass through canonical normalizers at architectural boundaries:
+      - **Backend**: Inherit from `InstrumentBaseRequest(BaseModel)` in [`web/skills.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/web/skills.py) which auto-resolves `(symbol, exchange)` via `analysis.universe.normalize_symbol_exchange()`.
+      - **Frontend**: Call `resolveInstrument(rawSymbol, rawExchange)` in [`universeData.js`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/macos-app/src/renderer/src/data/universeData.js) across stores, input bars, typeaheads, and cards.
+21. **Full Blast-Radius Auditing Protocol (No Piecemeal Fixes)**:
+    - Whenever a domain rule or invariant is added/modified (e.g. multi-asset exchange mapping, formatting, risk rules, date handling), the agent MUST audit ALL 6 layers of the stack in the same pass:
+      1. Schemas & Type Contracts (`web/skills.py`, `renderer/src/types/`)
+      2. Core Logic & Analyzers (`agent/multi_agent.py`, `engine/`, `analysis/`)
+      3. Backend APIs & Daemons (`web/api.py`, `web/skills.py`)
+      4. Store & State Layer (`chatStore.js`, `inspectorStore.js`)
+      5. Ingress & OmniSearch Routing (`InputBar.jsx`, `CommandPalette.jsx`, `SmartTypeahead.jsx`, `universeData.js`)
+      6. Output Presentation & Views (`StreamingAnalysisCard.jsx`, `AnalysisCard.jsx`, `QuoteCard.jsx`, Workspace Views)
+22. **Cross-Asset Taxonomy Matrix Testing**:
+    - Every change touching symbols, quotes, or cards MUST be tested against the full asset taxonomy matrix:
+      `[Equity (RELIANCE), Commodity (GOLD, CRUDEOIL), Forex (USDINR), Index (NIFTY50, SENSEX), ETF (GOLDBEES)]`
+    - Test suites ([`tests/test_taxonomy_matrix.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/tests/test_taxonomy_matrix.py) and [`macos-app/src/__tests__/taxonomyMatrix.test.js`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/macos-app/src/__tests__/taxonomyMatrix.test.js)) must verify zero fallback leakage of default values (`NSE`) to non-NSE assets.
+23. **Zero Legacy Drift**:
+    - Purge hardcoded fallback defaults at the root instead of layering defensive wrappers over stale code.
+
 ---
 
 ## 8. Environment & Common Commands

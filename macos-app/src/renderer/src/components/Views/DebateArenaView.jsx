@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react'
 import { useChatStore } from '../../store/chatStore'
 import { useAPI } from '../../hooks/useAPI'
 import SmartTypeahead from '../Common/SmartTypeahead'
-import { fuzzySearchUniverse } from '../../data/universeData'
+import { fuzzySearchUniverse, getSymbolExchange } from '../../data/universeData'
 
 const COUNCIL_MODES = [
   { id: 'debate', name: 'Bull vs Bear Debate', icon: '⚔️', desc: 'Adversarial Thesis & Anti-Thesis' },
@@ -84,12 +84,13 @@ export default function DebateArenaView({ onOpenOrderTicket }) {
     const t3 = setTimeout(() => updateActivity({ details: `⚖️ Synthesizing high-conviction consensus score...` }), 1200)
 
     try {
+      const targetExchange = getSymbolExchange(targetSymbol)
       if (targetCouncil === 'debate') {
-        const res = await call('/skills/debate_snapshot', { symbol: targetSymbol, exchange: 'NSE' }, { signal: abortController.signal })
+        const res = await call('/skills/debate_snapshot', { symbol: targetSymbol, exchange: targetExchange }, { signal: abortController.signal })
         const snapshot = res?.data ?? res
         if (snapshot) setData(snapshot)
       } else {
-        const res = await call('/skills/persona/council', { symbol: targetSymbol, council: targetCouncil, exchange: 'NSE' }, { signal: abortController.signal })
+        const res = await call('/skills/persona/council', { symbol: targetSymbol, council: targetCouncil, exchange: targetExchange }, { signal: abortController.signal })
         const cSnapshot = res?.data ?? res
         if (cSnapshot) setCouncilData(cSnapshot)
       }
@@ -527,7 +528,7 @@ export default function DebateArenaView({ onOpenOrderTicket }) {
                     const tgtVal = consensus?.target != null ? Number(consensus.target) : (ltp > 0 ? Number((isBear ? ltp * 0.976 : ltp * 1.024)).toFixed(2) : 0)
                     onOpenOrderTicket({
                       symbol,
-                      exchange: 'NSE',
+                      exchange: getSymbolExchange(symbol),
                       action: isBear ? 'SELL' : 'BUY',
                       price: entryVal,
                       stopLoss: slVal,
@@ -597,7 +598,7 @@ export default function DebateArenaView({ onOpenOrderTicket }) {
                   if (onOpenOrderTicket) {
                     onOpenOrderTicket({
                       symbol,
-                      exchange: 'NSE',
+                      exchange: getSymbolExchange(symbol),
                       action: isCouncilSell ? 'SELL' : 'BUY',
                     })
                   }

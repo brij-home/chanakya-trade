@@ -3,7 +3,7 @@ import { useAPI } from '../../hooks/useAPI'
 import { useChatStore } from '../../store/chatStore'
 import { formatINR, formatINRFull, formatPct } from '../../utils/formatINR'
 import SmartTypeahead from '../Common/SmartTypeahead'
-import { fuzzySearchUniverse } from '../../data/universeData'
+import { fuzzySearchUniverse, getSymbolExchange } from '../../data/universeData'
 
 const STRATEGY_PRESETS = [
   { id: 'rsi', name: 'RSI Mean Reversion', icon: '📉', desc: 'RSI(14) oversold <30 buy, overbought >70 exit' },
@@ -447,7 +447,7 @@ export default function BacktestStudioView({ onOpenOrderTicket }) {
                 if (onOpenOrderTicket) {
                   onOpenOrderTicket({
                     symbol,
-                    exchange: 'NSE',
+                    exchange: getSymbolExchange(symbol),
                     action: isPos ? 'BUY' : 'SELL',
                   })
                 }
@@ -457,7 +457,10 @@ export default function BacktestStudioView({ onOpenOrderTicket }) {
               ⚡ Stage Active Strategy Setup
             </button>
             <button
-              onClick={() => sendDraft(`analyze ${symbol}`)}
+              onClick={() => {
+                const exch = getSymbolExchange(symbol)
+                sendDraft(`analyze ${symbol}${exch !== 'NSE' ? ' ' + exch : ''}`)
+              }}
               className="w-full py-2 rounded-xl bg-elevated hover:bg-elevated/80 border border-border text-text font-bold text-xs transition-all cursor-pointer"
             >
               🔍 Open Deep AI Copilot Analysis

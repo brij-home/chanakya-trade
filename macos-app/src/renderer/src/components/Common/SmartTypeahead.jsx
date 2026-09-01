@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
-import { fuzzySearchUniverse, saveRecentSearch } from '../../data/universeData'
+import { fuzzySearchUniverse, saveRecentSearch, getSymbolExchange } from '../../data/universeData'
 
 /**
  * SmartTypeahead - Institutional OmniSearch Autocomplete Popover
@@ -70,8 +70,9 @@ export default function SmartTypeahead({
   if (!isOpen || items.length === 0) return null
 
   const handleSelect = (item, customAction = null) => {
+    const exch = item.exchange || (item.symbol ? getSymbolExchange(item.symbol) : 'NSE')
     saveRecentSearch({
-      text: item.command || (item.symbol ? `analyze ${item.symbol}` : item.text || item.label),
+      text: item.command || (item.symbol ? `analyze ${item.symbol}${exch !== 'NSE' ? ' ' + exch : ''}` : item.text || item.label),
       symbol: item.symbol || null,
       label: item.symbol ? `${item.symbol} (${item.name || item.sector})` : (item.label || item.name),
       icon: item.icon || '🔍',

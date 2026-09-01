@@ -1456,3 +1456,34 @@ def resolve_dynamic_universe(
 
     # Default fallback
     return THEMATIC_PRESETS["nifty50"]["symbols"][:max_stocks], "Default NIFTY 50 Universe"
+
+
+def normalize_symbol_exchange(symbol: str, exchange: str | None = None) -> tuple[str, str]:
+    """
+    Canonical Single Source of Truth (SSOT) for Indian market instrument resolution.
+
+    Transforms any raw input (e.g. 'crudeoil', 'GOLD', 'MCX:SILVER', 'USDINR', 'SENSEX', 'NSE:RELIANCE')
+    into a normalized (clean_symbol, canonical_exchange) tuple.
+    """
+    if not symbol:
+        return "", (exchange or "NSE").upper().strip()
+
+    sym = str(symbol).upper().strip()
+    exch = (exchange or "NSE").upper().strip() if exchange else "NSE"
+
+    if ":" in sym:
+        prefix, clean_sym = sym.split(":", 1)
+        exch = prefix.upper().strip()
+        sym = clean_sym.upper().strip()
+    elif exch == "NSE":
+        from market.quotes import _BSE_SYMBOLS, _CDS_SYMBOLS, _MCX_SYMBOLS
+
+        if sym in _MCX_SYMBOLS:
+            exch = "MCX"
+        elif sym in _CDS_SYMBOLS:
+            exch = "CDS"
+        elif sym in _BSE_SYMBOLS:
+            exch = "BSE"
+
+    clean_sym = sym.replace("_", "-")
+    return clean_sym, exch

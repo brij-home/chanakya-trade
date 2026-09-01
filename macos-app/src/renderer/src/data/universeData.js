@@ -259,29 +259,29 @@ export const INDIAN_UNIVERSE = [
   // ─────────────────────────────────────────────────────────────
   // 5. MCX COMMODITIES DERIVATIVES
   // ─────────────────────────────────────────────────────────────
-  { symbol: 'GOLD', name: 'MCX Gold Futures (1kg / 10g Base)', sector: 'Commodities', subIndustry: 'Precious Metals', type: 'commodity', capTier: 'LARGE', lotSize: 1, isFO: true, aliases: ['gold', 'mcx gold', 'sona', 'bullion', 'yellow metal'] },
-  { symbol: 'GOLDM', name: 'MCX Gold Mini Futures (100g)', sector: 'Commodities', subIndustry: 'Precious Metals Mini', type: 'commodity', capTier: 'LARGE', lotSize: 1, isFO: true, aliases: ['gold mini', 'goldm', 'mini gold'] },
-  { symbol: 'GOLDPETAL', name: 'MCX Gold Petal (1g Contract)', sector: 'Commodities', subIndustry: 'Micro Gold', type: 'commodity', capTier: 'SMALL', lotSize: 1, isFO: true, aliases: ['gold petal', '1g gold'] },
-  { symbol: 'SILVER', name: 'MCX Silver Futures (30kg Contract)', sector: 'Commodities', subIndustry: 'Industrial & Precious Metals', type: 'commodity', capTier: 'LARGE', lotSize: 1, isFO: true, aliases: ['silver', 'mcx silver', 'chandi', 'white metal'] },
-  { symbol: 'SILVERM', name: 'MCX Silver Mini Futures (5kg)', sector: 'Commodities', subIndustry: 'Silver Mini', type: 'commodity', capTier: 'LARGE', lotSize: 1, isFO: true, aliases: ['silver mini', 'silverm'] },
-  { symbol: 'SILVERMIC', name: 'MCX Silver Micro Futures (1kg)', sector: 'Commodities', subIndustry: 'Silver Micro', type: 'commodity', capTier: 'SMALL', lotSize: 1, isFO: true, aliases: ['silver micro', 'silvermic'] },
-  { symbol: 'CRUDEOIL', name: 'MCX WTI/Brent Crude Oil Futures (100 bbl)', sector: 'Commodities', subIndustry: 'Energy & Petroleum', type: 'commodity', capTier: 'LARGE', lotSize: 100, isFO: true, aliases: ['crude', 'crude oil', 'mcx crude', 'petroleum', 'wti', 'brent'] },
-  { symbol: 'CRUDEOILM', name: 'MCX Crude Oil Mini Futures (10 bbl)', sector: 'Commodities', subIndustry: 'Energy Mini', type: 'commodity', capTier: 'LARGE', lotSize: 10, isFO: true, aliases: ['crude mini', 'crudeoilm'] },
-  { symbol: 'NATURALGAS', name: 'MCX Natural Gas Futures (1250 mmBtu)', sector: 'Commodities', subIndustry: 'Energy & Heating Gas', type: 'commodity', capTier: 'LARGE', lotSize: 1250, isFO: true, aliases: ['nat gas', 'natural gas', 'mcx gas', 'henry hub'] },
-  { symbol: 'NATGASMINI', name: 'MCX Natural Gas Mini (250 mmBtu)', sector: 'Commodities', subIndustry: 'Natural Gas Mini', type: 'commodity', capTier: 'MID', lotSize: 250, isFO: true, aliases: ['nat gas mini', 'natgasmini'] },
-  { symbol: 'COPPER', name: 'MCX Copper High Grade Futures (2500 kg)', sector: 'Commodities', subIndustry: 'Base Metals & Electrification', type: 'commodity', capTier: 'LARGE', lotSize: 2500, isFO: true, aliases: ['copper', 'mcx copper', 'tamba', 'red metal'] },
-  { symbol: 'ZINC', name: 'MCX Zinc Futures (5000 kg)', sector: 'Commodities', subIndustry: 'Base Metals Galvanization', type: 'commodity', capTier: 'LARGE', lotSize: 5000, isFO: true, aliases: ['zinc', 'mcx zinc', 'jasta'] },
-  { symbol: 'ALUMINIUM', name: 'MCX Aluminium Futures (5000 kg)', sector: 'Commodities', subIndustry: 'Lightweight Base Metals', type: 'commodity', capTier: 'LARGE', lotSize: 5000, isFO: true, aliases: ['aluminium', 'mcx aluminium', 'aluminum'] },
-  { symbol: 'LEAD', name: 'MCX Lead Futures (5000 kg)', sector: 'Commodities', subIndustry: 'Battery Heavy Metals', type: 'commodity', capTier: 'LARGE', lotSize: 5000, isFO: true, aliases: ['lead', 'mcx lead', 'seesa'] },
-  { symbol: 'COTTON', name: 'MCX Cotton Candy (25 Bales)', sector: 'Commodities', subIndustry: 'Agri Commodity', type: 'commodity', capTier: 'MID', lotSize: 25, isFO: true, aliases: ['cotton', 'mcx cotton', 'kapas'] },
+  { symbol: 'GOLD', name: 'MCX Gold Futures (1kg / 10g Base)', sector: 'Commodities', subIndustry: 'Precious Metals', type: 'commodity', exchange: 'MCX', capTier: 'LARGE', lotSize: 1, isFO: true, aliases: ['gold', 'mcx gold', 'sona', 'bullion', 'yellow metal'] },
+  { symbol: 'GOLDM', name: 'MCX Gold Mini Futures (100g)', sector: 'Commodities', subIndustry: 'Precious Metals Mini', type: 'commodity', exchange: 'MCX', capTier: 'LARGE', lotSize: 1, isFO: true, aliases: ['gold mini', 'goldm', 'mini gold'] },
+  { symbol: 'GOLDPETAL', name: 'MCX Gold Petal (1g Contract)', sector: 'Commodities', subIndustry: 'Micro Gold', type: 'commodity', exchange: 'MCX', capTier: 'SMALL', lotSize: 1, isFO: true, aliases: ['gold petal', '1g gold'] },
+  { symbol: 'SILVER', name: 'MCX Silver Futures (30kg Contract)', sector: 'Commodities', subIndustry: 'Industrial & Precious Metals', type: 'commodity', exchange: 'MCX', capTier: 'LARGE', lotSize: 1, isFO: true, aliases: ['silver', 'mcx silver', 'chandi', 'white metal'] },
+  { symbol: 'SILVERM', name: 'MCX Silver Mini Futures (5kg)', sector: 'Commodities', subIndustry: 'Silver Mini', type: 'commodity', exchange: 'MCX', capTier: 'LARGE', lotSize: 1, isFO: true, aliases: ['silver mini', 'silverm'] },
+  { symbol: 'SILVERMIC', name: 'MCX Silver Micro Futures (1kg)', sector: 'Commodities', subIndustry: 'Silver Micro', type: 'commodity', exchange: 'MCX', capTier: 'SMALL', lotSize: 1, isFO: true, aliases: ['silver micro', 'silvermic'] },
+  { symbol: 'CRUDEOIL', name: 'MCX WTI/Brent Crude Oil Futures (100 bbl)', sector: 'Commodities', subIndustry: 'Energy & Petroleum', type: 'commodity', exchange: 'MCX', capTier: 'LARGE', lotSize: 100, isFO: true, aliases: ['crude', 'crude oil', 'mcx crude', 'petroleum', 'wti', 'brent'] },
+  { symbol: 'CRUDEOILM', name: 'MCX Crude Oil Mini Futures (10 bbl)', sector: 'Commodities', subIndustry: 'Energy Mini', type: 'commodity', exchange: 'MCX', capTier: 'LARGE', lotSize: 10, isFO: true, aliases: ['crude mini', 'crudeoilm'] },
+  { symbol: 'NATURALGAS', name: 'MCX Natural Gas Futures (1250 mmBtu)', sector: 'Commodities', subIndustry: 'Energy & Heating Gas', type: 'commodity', exchange: 'MCX', capTier: 'LARGE', lotSize: 1250, isFO: true, aliases: ['nat gas', 'natural gas', 'mcx gas', 'henry hub'] },
+  { symbol: 'NATGASMINI', name: 'MCX Natural Gas Mini (250 mmBtu)', sector: 'Commodities', subIndustry: 'Natural Gas Mini', type: 'commodity', exchange: 'MCX', capTier: 'MID', lotSize: 250, isFO: true, aliases: ['nat gas mini', 'natgasmini'] },
+  { symbol: 'COPPER', name: 'MCX Copper High Grade Futures (2500 kg)', sector: 'Commodities', subIndustry: 'Base Metals & Electrification', type: 'commodity', exchange: 'MCX', capTier: 'LARGE', lotSize: 2500, isFO: true, aliases: ['copper', 'mcx copper', 'tamba', 'red metal'] },
+  { symbol: 'ZINC', name: 'MCX Zinc Futures (5000 kg)', sector: 'Commodities', subIndustry: 'Base Metals Galvanization', type: 'commodity', exchange: 'MCX', capTier: 'LARGE', lotSize: 5000, isFO: true, aliases: ['zinc', 'mcx zinc', 'jasta'] },
+  { symbol: 'ALUMINIUM', name: 'MCX Aluminium Futures (5000 kg)', sector: 'Commodities', subIndustry: 'Lightweight Base Metals', type: 'commodity', exchange: 'MCX', capTier: 'LARGE', lotSize: 5000, isFO: true, aliases: ['aluminium', 'mcx aluminium', 'aluminum'] },
+  { symbol: 'LEAD', name: 'MCX Lead Futures (5000 kg)', sector: 'Commodities', subIndustry: 'Battery Heavy Metals', type: 'commodity', exchange: 'MCX', capTier: 'LARGE', lotSize: 5000, isFO: true, aliases: ['lead', 'mcx lead', 'seesa'] },
+  { symbol: 'COTTON', name: 'MCX Cotton Candy (25 Bales)', sector: 'Commodities', subIndustry: 'Agri Commodity', type: 'commodity', exchange: 'MCX', capTier: 'MID', lotSize: 25, isFO: true, aliases: ['cotton', 'mcx cotton', 'kapas'] },
 
   // ─────────────────────────────────────────────────────────────
   // 6. CURRENCY DERIVATIVES (CDS)
   // ─────────────────────────────────────────────────────────────
-  { symbol: 'USDINR', name: 'US Dollar / Indian Rupee (USD/INR)', sector: 'Forex & Currencies', subIndustry: 'Major Currency Pair', type: 'currency', capTier: 'LARGE', lotSize: 1000, isFO: true, aliases: ['usdinr', 'dollar', 'usd', 'forex', 'rupee dollar'] },
-  { symbol: 'EURINR', name: 'Euro / Indian Rupee (EUR/INR)', sector: 'Forex & Currencies', subIndustry: 'European Currency Pair', type: 'currency', capTier: 'LARGE', lotSize: 1000, isFO: true, aliases: ['eurinr', 'euro', 'eur'] },
-  { symbol: 'GBPINR', name: 'British Pound / Indian Rupee (GBP/INR)', sector: 'Forex & Currencies', subIndustry: 'Sterling Currency Pair', type: 'currency', capTier: 'LARGE', lotSize: 1000, isFO: true, aliases: ['gbpinr', 'pound', 'gbp', 'sterling'] },
-  { symbol: 'JPYINR', name: 'Japanese Yen / 100 Indian Rupee (JPY/INR)', sector: 'Forex & Currencies', subIndustry: 'Asian FX Pair', type: 'currency', capTier: 'LARGE', lotSize: 1000, isFO: true, aliases: ['jpyinr', 'yen', 'jpy'] },
+  { symbol: 'USDINR', name: 'US Dollar / Indian Rupee (USD/INR)', sector: 'Forex & Currencies', subIndustry: 'Major Currency Pair', type: 'currency', exchange: 'CDS', capTier: 'LARGE', lotSize: 1000, isFO: true, aliases: ['usdinr', 'dollar', 'usd', 'forex', 'rupee dollar'] },
+  { symbol: 'EURINR', name: 'Euro / Indian Rupee (EUR/INR)', sector: 'Forex & Currencies', subIndustry: 'European Currency Pair', type: 'currency', exchange: 'CDS', capTier: 'LARGE', lotSize: 1000, isFO: true, aliases: ['eurinr', 'euro', 'eur'] },
+  { symbol: 'GBPINR', name: 'British Pound / Indian Rupee (GBP/INR)', sector: 'Forex & Currencies', subIndustry: 'Sterling Currency Pair', type: 'currency', exchange: 'CDS', capTier: 'LARGE', lotSize: 1000, isFO: true, aliases: ['gbpinr', 'pound', 'gbp', 'sterling'] },
+  { symbol: 'JPYINR', name: 'Japanese Yen / 100 Indian Rupee (JPY/INR)', sector: 'Forex & Currencies', subIndustry: 'Asian FX Pair', type: 'currency', exchange: 'CDS', capTier: 'LARGE', lotSize: 1000, isFO: true, aliases: ['jpyinr', 'yen', 'jpy'] },
 ]
 
 export const COUNCIL_REGISTRY = [
@@ -390,6 +390,83 @@ export function getAssetIcon(type) {
   }
 }
 
+// ── EXCHANGE RESOLUTION HELPER ────────────────────────────────
+export function getSymbolExchange(symbol) {
+  if (!symbol) return 'NSE'
+  const clean = symbol.toUpperCase().trim()
+  if (clean.startsWith('MCX:')) return 'MCX'
+  if (clean.startsWith('CDS:') || clean.startsWith('FX:') || clean.startsWith('FOREX:')) return 'CDS'
+  if (clean.startsWith('BSE:')) return 'BSE'
+  if (clean.startsWith('NSE:')) return 'NSE'
+
+  const mcxSymbols = new Set([
+    'GOLD', 'GOLDM', 'GOLDPETAL',
+    'SILVER', 'SILVERM', 'SILVERMIC',
+    'CRUDEOIL', 'CRUDEOILM', 'CRUDE', 'BRENT',
+    'NATURALGAS', 'NATGASMINI', 'NATGAS',
+    'COPPER', 'ZINC', 'ALUMINIUM', 'ALUMINUM', 'LEAD', 'COTTON',
+  ])
+  if (mcxSymbols.has(clean)) return 'MCX'
+
+  const cdsSymbols = new Set(['USDINR', 'EURINR', 'GBPINR', 'JPYINR'])
+  if (cdsSymbols.has(clean)) return 'CDS'
+
+  const bseSymbols = new Set(['SENSEX', 'BANKEX'])
+  if (bseSymbols.has(clean)) return 'BSE'
+
+  const found = INDIAN_UNIVERSE.find((i) => i.symbol === clean)
+  if (found) {
+    if (found.exchange) return found.exchange
+    if (found.type === 'commodity') return 'MCX'
+    if (found.type === 'currency') return 'CDS'
+    if (found.type === 'index' && (found.symbol === 'SENSEX' || found.symbol === 'BANKEX')) return 'BSE'
+  }
+
+  return 'NSE'
+}
+
+// ── CANONICAL INSTRUMENT RESOLVER (SINGLE SOURCE OF TRUTH) ─────
+export function resolveInstrument(rawSymbol, rawExchange = null) {
+  if (!rawSymbol) {
+    return {
+      symbol: '',
+      exchange: rawExchange || 'NSE',
+      formatted: '',
+      prefixKey: '',
+      type: 'equity',
+      name: '',
+      sector: 'Equity',
+    }
+  }
+
+  let sym = String(rawSymbol).toUpperCase().trim()
+  let exch = rawExchange ? String(rawExchange).toUpperCase().trim() : null
+
+  if (sym.includes(':')) {
+    const [prefix, s] = sym.split(':')
+    exch = prefix.toUpperCase().trim()
+    sym = s.toUpperCase().trim()
+  }
+
+  if (!exch || exch === 'NSE') {
+    exch = getSymbolExchange(sym)
+  }
+
+  const cleanSymbol = sym.replace(/_/g, '-')
+  const found = INDIAN_UNIVERSE.find((i) => i.symbol === cleanSymbol)
+  const itemType = found?.type || (exch === 'MCX' ? 'commodity' : exch === 'CDS' ? 'currency' : 'equity')
+
+  return {
+    symbol: cleanSymbol,
+    exchange: exch,
+    formatted: `${cleanSymbol} ${exch}`,
+    prefixKey: `${exch}:${cleanSymbol}`,
+    type: itemType,
+    name: found?.name || cleanSymbol,
+    sector: found?.sector || (exch === 'MCX' ? 'Commodities' : exch === 'CDS' ? 'Forex' : 'Equity'),
+  }
+}
+
 // ── HIGH-PERFORMANCE FUZZY SEARCH MATCHING WITH CATEGORIES ────
 export function fuzzySearchUniverse(query, activeSymbol = null, limit = 12, categoryFilter = 'all') {
   const rawClean = (query || '').trim().toLowerCase()
@@ -414,21 +491,25 @@ export function fuzzySearchUniverse(query, activeSymbol = null, limit = 12, cate
       const filtered = INDIAN_UNIVERSE.filter((item) => {
         if (categoryFilter === 'symbols') return true
         return item.type === categoryFilter
-      }).map((item) => ({
-        type: 'symbol',
-        symbol: item.symbol,
-        name: item.name,
-        sector: item.sector,
-        subIndustry: item.subIndustry,
-        stockType: item.type,
-        capTier: item.capTier,
-        lotSize: item.lotSize,
-        isFO: item.isFO,
-        category: item.type,
-        icon: getAssetIcon(item.type),
-        command: `analyze ${item.symbol}`,
-        score: 100,
-      }))
+      }).map((item) => {
+        const exch = item.exchange || getSymbolExchange(item.symbol)
+        return {
+          type: 'symbol',
+          symbol: item.symbol,
+          name: item.name,
+          sector: item.sector,
+          subIndustry: item.subIndustry,
+          stockType: item.type,
+          exchange: exch,
+          capTier: item.capTier,
+          lotSize: item.lotSize,
+          isFO: item.isFO,
+          category: item.type,
+          icon: getAssetIcon(item.type),
+          command: `analyze ${item.symbol}${exch !== 'NSE' ? ' ' + exch : ''}`,
+          score: 100,
+        }
+      })
       return filtered.slice(0, limit)
     }
 
@@ -539,6 +620,7 @@ export function fuzzySearchUniverse(query, activeSymbol = null, limit = 12, cate
       }
 
       if (score > 0) {
+        const exch = item.exchange || getSymbolExchange(item.symbol)
         results.push({
           type: 'symbol',
           symbol: item.symbol,
@@ -546,12 +628,13 @@ export function fuzzySearchUniverse(query, activeSymbol = null, limit = 12, cate
           sector: item.sector,
           subIndustry: item.subIndustry,
           stockType: item.type,
+          exchange: exch,
           capTier: item.capTier,
           lotSize: item.lotSize,
           isFO: item.isFO,
           category: item.type,
           icon: getAssetIcon(item.type),
-          command: `analyze ${item.symbol}`,
+          command: `analyze ${item.symbol}${exch !== 'NSE' ? ' ' + exch : ''}`,
           score,
         })
       }

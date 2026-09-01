@@ -46,7 +46,7 @@ import json
 import os
 import sys
 from datetime import datetime
-from typing import Optional
+from typing import Any, Optional
 from uuid import uuid4
 
 # Fix Windows charmap / cp1252 codec errors for unicode console prints
@@ -64,7 +64,7 @@ if sys.platform == "win32":
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 from rich.console import Console
 
 from agent.tools import _serialise
@@ -86,16 +86,34 @@ _active_streams: dict[str, object] = {}
 # ── Request models ────────────────────────────────────────────
 
 
-class SymbolRequest(BaseModel):
+class InstrumentBaseRequest(BaseModel):
+    """Canonical Single Source of Truth (SSOT) request model that normalizes (symbol, exchange) at API ingress."""
+
     symbol: str
     exchange: str = "NSE"
 
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_instrument(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            sym = data.get("symbol")
+            exch = data.get("exchange")
+            if sym:
+                from analysis.universe import normalize_symbol_exchange
 
-class BacktestRequest(BaseModel):
-    symbol: str
+                clean_sym, clean_exch = normalize_symbol_exchange(sym, exch)
+                data["symbol"] = clean_sym
+                data["exchange"] = clean_exch
+        return data
+
+
+class SymbolRequest(InstrumentBaseRequest):
+    pass
+
+
+class BacktestRequest(InstrumentBaseRequest):
     strategy: str = "rsi"
     period: str = "1y"
-    exchange: str = "NSE"
     capital: Optional[float] = None
     initial_capital: Optional[float] = None
     timeframe: Optional[str] = "1d"
@@ -121,9 +139,7 @@ class DealsRequest(BaseModel):
     days: int = 5
 
 
-class AnalyzeRequest(BaseModel):
-    symbol: str
-    exchange: str = "NSE"
+class AnalyzeRequest(InstrumentBaseRequest):
     channel: str = "api"  # cli | electron | api | whatsapp (#179)
     force: bool = False  # True -> bypass cache and force fresh LLM run
 
@@ -133,9 +149,7 @@ class ChatRequest(BaseModel):
     session_id: str = "default"  # use different IDs for separate conversations
 
 
-class AlertAddRequest(BaseModel):
-    symbol: str
-    exchange: str = "NSE"
+class AlertAddRequest(InstrumentBaseRequest):
     # Price alert fields
     condition: Optional[str] = None  # ABOVE | BELOW | CROSSES
     threshold: Optional[float] = None
@@ -158,9 +172,7 @@ class HintRequest(BaseModel):
     hint: str
 
 
-class HistoryRequest(BaseModel):
-    symbol: str
-    exchange: str = "NSE"
+class HistoryRequest(InstrumentBaseRequest):
     interval: str = "day"  # day, 1h, 15m, 5m, 1m
     days: int = 180
 
@@ -904,7 +916,18 @@ async def skill_analyze(req: AnalyzeRequest):
         from engine.analysis_cache import analysis_cache
 
         sym = req.symbol.upper().strip()
-        exch = req.exchange.upper().strip()
+        exch = req.exchange.upper().strip() if req.exchange else "NSE"
+        if ":" in sym:
+            exch, sym = sym.split(":", 1)
+        elif exch == "NSE":
+            from market.quotes import _MCX_SYMBOLS, _CDS_SYMBOLS, _BSE_SYMBOLS
+
+            if sym in _MCX_SYMBOLS:
+                exch = "MCX"
+            elif sym in _CDS_SYMBOLS:
+                exch = "CDS"
+            elif sym in _BSE_SYMBOLS:
+                exch = "BSE"
 
         # Check cache immediately if not forcing fresh run (0 tokens, <1ms)
         if not req.force:
@@ -1022,7 +1045,18 @@ async def skill_analyze_stream(symbol: str, exchange: str = "NSE", force: bool =
     loop = asyncio.get_running_loop()
     queue: asyncio.Queue = asyncio.Queue()
     sym = symbol.upper().strip()
-    exch = exchange.upper().strip()
+    exch = exchange.upper().strip() if exchange else "NSE"
+    if ":" in sym:
+        exch, sym = sym.split(":", 1)
+    elif exch == "NSE":
+        from market.quotes import _MCX_SYMBOLS, _CDS_SYMBOLS, _BSE_SYMBOLS
+
+        if sym in _MCX_SYMBOLS:
+            exch = "MCX"
+        elif sym in _CDS_SYMBOLS:
+            exch = "CDS"
+        elif sym in _BSE_SYMBOLS:
+            exch = "BSE"
     stream_id = f"{sym}_{exch}_{uuid4().hex[:8]}"
 
     def _cb(event: dict):
@@ -1184,16 +1218,30 @@ async def skill_deep_analyze(req: AnalyzeRequest):
         from agent.core import get_provider
         from agent.deep_agent import DeepAnalyzer
 
+        sym = req.symbol.upper().strip()
+        exch = req.exchange.upper().strip() if req.exchange else "NSE"
+        if ":" in sym:
+            exch, sym = sym.split(":", 1)
+        elif exch == "NSE":
+            from market.quotes import _MCX_SYMBOLS, _CDS_SYMBOLS, _BSE_SYMBOLS
+
+            if sym in _MCX_SYMBOLS:
+                exch = "MCX"
+            elif sym in _CDS_SYMBOLS:
+                exch = "CDS"
+            elif sym in _BSE_SYMBOLS:
+                exch = "BSE"
+
         registry = build_registry()
         provider = get_provider(registry=registry)
         analyzer = DeepAnalyzer(registry, provider, verbose=False)
-        report = analyzer.analyze(req.symbol.upper(), req.exchange.upper())
+        report = analyzer.analyze(sym, exch)
 
         return {
             "status": "ok",
             "data": {
-                "symbol": req.symbol.upper(),
-                "exchange": req.exchange.upper(),
+                "symbol": sym,
+                "exchange": exch,
                 "report": report,
             },
         }

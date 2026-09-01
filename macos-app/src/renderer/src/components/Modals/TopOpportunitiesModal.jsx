@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import { useAPI } from '../../hooks/useAPI'
 import { useChatStore } from '../../store/chatStore'
+import { getSymbolExchange } from '../../data/universeData'
 
 export default function TopOpportunitiesModal({ isOpen, onClose, onOpenOrderTicket }) {
   const [data, setData] = useState(null)
@@ -379,7 +380,19 @@ export default function TopOpportunitiesModal({ isOpen, onClose, onOpenOrderTick
                           {/* Quick actions */}
                           <div className="flex gap-1.5">
                             <button
-                              onClick={() => { if (onOpenOrderTicket) onOpenOrderTicket({ symbol, exchange: 'NSE', price: entry, stopLoss: sl, target: t1, action: action.includes('SHORT') ? 'SELL' : 'BUY' }); onClose(); }}
+                              onClick={() => {
+                                if (onOpenOrderTicket) {
+                                  onOpenOrderTicket({
+                                    symbol,
+                                    exchange: getSymbolExchange(symbol),
+                                    price: entry,
+                                    stopLoss: sl,
+                                    target: t1,
+                                    action: action.includes('SHORT') ? 'SELL' : 'BUY',
+                                  })
+                                }
+                                onClose()
+                              }}
                               className="flex-1 py-1.5 rounded-xl text-[9px] font-bold cursor-pointer transition-all hover:brightness-110"
                               style={{ background: `rgba(${isReady ? '0,214,143' : '245,166,35'},0.12)`, border: `1px solid ${borderColor}`, color: accentColor }}
                             >
@@ -387,7 +400,8 @@ export default function TopOpportunitiesModal({ isOpen, onClose, onOpenOrderTick
                             </button>
                             <button
                               onClick={() => {
-                                sendDraft(`analyze ${symbol}`)
+                                const exch = getSymbolExchange(symbol)
+                                sendDraft(`analyze ${symbol}${exch !== 'NSE' ? ' ' + exch : ''}`)
                                 onClose()
                               }}
                               className="flex-1 py-1.5 rounded-xl text-[9px] font-bold cursor-pointer transition-all hover:brightness-110"

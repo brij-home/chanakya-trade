@@ -1,4 +1,5 @@
 import { create } from 'zustand'
+import { getSymbolExchange } from '../data/universeData'
 
 /** Get the API base URL — works in both Electron and web mode. */
 export function getBaseUrl(port) {
@@ -281,11 +282,13 @@ export const useChatStore = create((set, get) => ({
 
   // Streaming support — used by analyze SSE
   startStreamingMessage: (id, symbol, exchange) => set((s) => {
+    const sym = symbol ? String(symbol).toUpperCase().trim() : symbol
+    const resolvedExch = (!exchange || exchange === 'NSE') ? getSymbolExchange(sym) : exchange
     const newMessages = [...s.messages, {
       id,
       role: 'assistant',
       cardType: 'streaming_analysis',
-      data: { symbol, exchange, analysts: [], debate_steps: [], synthesis_text: null, phase: 'analysts', report: null, trade_plans: null },
+      data: { symbol: sym, exchange: resolvedExch, analysts: [], debate_steps: [], synthesis_text: null, phase: 'analysts', report: null, trade_plans: null },
     }]
     const session = s.sessions[s.activeSessionId]
     let sessions = s.sessions

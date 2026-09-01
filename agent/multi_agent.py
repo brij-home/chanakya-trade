@@ -329,6 +329,27 @@ class FundamentalAnalyst(BaseAnalyst):
     name = "Fundamental"
 
     def analyze(self, symbol: str, exchange: str = "NSE") -> AnalystReport:
+        sym_upper = symbol.upper().strip()
+        exch_upper = exchange.upper().strip() if exchange else "NSE"
+
+        # ── Non-equity / Commodity / Currency / Index Fundamentals ───────
+        from market.quotes import _BSE_SYMBOLS, _CDS_SYMBOLS, _MCX_SYMBOLS
+
+        if exch_upper == "MCX" or sym_upper in _MCX_SYMBOLS:
+            return self._commodity_fundamentals(sym_upper)
+        if exch_upper in ("CDS", "FX", "FOREX") or sym_upper in _CDS_SYMBOLS:
+            return self._currency_fundamentals(sym_upper)
+        if sym_upper in _BSE_SYMBOLS or sym_upper in (
+            "NIFTY",
+            "NIFTY50",
+            "NIFTY 50",
+            "BANKNIFTY",
+            "FINNIFTY",
+            "MIDCPNIFTY",
+            "INDIAVIX",
+        ):
+            return self._index_fundamentals(sym_upper)
+
         try:
             result = self.registry.execute("fundamental_analyse", {"symbol": symbol})
             if isinstance(result, dict) and "error" in result:
@@ -377,6 +398,100 @@ class FundamentalAnalyst(BaseAnalyst):
         except Exception as e:
             # Fallback chain: yfinance (free) → Perplexity Finance (optional)
             return self._fundamentals_fallback(symbol, fallback_error=str(e))
+
+    def _commodity_fundamentals(self, symbol: str) -> AnalystReport:
+        """Fundamental analysis for physical / derivative commodities (MCX / WTI / Brent / Bullion)."""
+        sym = symbol.upper()
+        if sym in ("CRUDEOIL", "CRUDEOILM", "CRUDE", "BRENT"):
+            points = [
+                "Asset: Global Crude Oil Continuous Benchmark (WTI/Brent Futures)",
+                "Supply/Demand: OPEC+ voluntary production quotas & compliance levels",
+                "Inventories: US Commercial Crude & Strategic Petroleum Reserve (SPR) stocks",
+                "Macro Transmission: USD (DXY) inverse relationship & global manufacturing PMI",
+                "Valuation: Physical equilibrium pricing model (no corporate P/E multiples)",
+            ]
+        elif sym in ("GOLD", "GOLDM", "GOLDPETAL"):
+            points = [
+                "Asset: MCX Gold Bullion & Sovereign Reserve Asset",
+                "Macro Drivers: US 10-Year Real Yields, Fed interest rate path & CPI inflation",
+                "Central Bank Demand: Global central bank physical bullion accumulation",
+                "Safe-Haven: Geopolitical risk premium & systemic currency debasement hedge",
+                "Valuation: Monetary reserve store-of-value pricing model",
+            ]
+        elif sym in ("SILVER", "SILVERM", "SILVERMIC"):
+            points = [
+                "Asset: MCX Silver Dual Industrial & Monetary Metal",
+                "Green Energy Demand: Solar PV manufacturing & EV electrical conductivity",
+                "Gold/Silver Ratio: Historical mean-reversion relative valuation metric",
+                "Inventories: London Bullion Market & COMEX registered warehouse stocks",
+                "Valuation: Hybrid industrial fabrication & monetary demand model",
+            ]
+        elif sym in ("NATURALGAS", "NATGASMINI", "NATGAS"):
+            points = [
+                "Asset: MCX Natural Gas Continuous Futures (Henry Hub Linked)",
+                "Seasonality: Winter heating degree days (HDD) & summer cooling demand",
+                "Storage Cycles: EIA weekly natural gas working underground storage reports",
+                "LNG Exports: Global LNG export terminal capacity & pipeline flows",
+                "Valuation: Weather-driven physical storage & supply-demand equilibrium",
+            ]
+        elif sym in ("COPPER", "ZINC", "ALUMINIUM", "ALUMINUM", "LEAD"):
+            points = [
+                f"Asset: MCX {sym} Base & Industrial Metal Futures",
+                "Global Growth: Global manufacturing PMI & infrastructure electrification demand",
+                "Supply Side: LME registered warehouse inventories & smelter output",
+                "Valuation: Global industrial capex & physical supply chain pricing",
+            ]
+        else:
+            points = [
+                f"Asset: MCX {sym} Commodity Derivative Contract",
+                "Macro Drivers: Global physical commodity supply/demand balance",
+                "Valuation: Physical cash-and-carry commodity pricing model",
+            ]
+
+        return AnalystReport(
+            analyst=self.name,
+            verdict="NEUTRAL",
+            confidence=65,
+            score=50.0,
+            key_points=points,
+            data={"asset_type": "commodity", "symbol": symbol, "source": "macro_commodity_model"},
+        )
+
+    def _currency_fundamentals(self, symbol: str) -> AnalystReport:
+        """Fundamental analysis for currency pairs (CDS / Forex)."""
+        points = [
+            f"Asset: {symbol} Foreign Exchange Currency Derivative",
+            "Macro Drivers: Foreign Institutional Investor (FII) equity & debt capital flows",
+            "Monetary Policy: RBI interest rate path vs US Federal Reserve / ECB / BoE",
+            "External Balance: India Current Account Deficit (CAD) & Trade Balance",
+            "Central Bank: RBI foreign exchange reserve buffer & intervention band",
+        ]
+        return AnalystReport(
+            analyst=self.name,
+            verdict="NEUTRAL",
+            confidence=65,
+            score=50.0,
+            key_points=points,
+            data={"asset_type": "currency", "symbol": symbol, "source": "macro_fx_model"},
+        )
+
+    def _index_fundamentals(self, symbol: str) -> AnalystReport:
+        """Fundamental analysis for benchmark and sectoral indices."""
+        points = [
+            f"Asset: {symbol} Benchmark Index",
+            "Institutional Flows: FII & DII aggregate daily turnover & net liquidity",
+            "Valuation: Index trailing P/E vs historical 5-year mean (fair value band)",
+            "Earnings Breadth: NIFTY 50 corporate earnings growth (EPS trajectory)",
+            "Volatility Regime: India VIX fear gauge alignment",
+        ]
+        return AnalystReport(
+            analyst=self.name,
+            verdict="NEUTRAL",
+            confidence=65,
+            score=50.0,
+            key_points=points,
+            data={"asset_type": "index", "symbol": symbol, "source": "macro_index_model"},
+        )
 
     def _fundamentals_fallback(self, symbol: str, fallback_error: str = "") -> AnalystReport:
         """

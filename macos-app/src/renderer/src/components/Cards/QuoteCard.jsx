@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import CandlestickChart from '../Charts/CandlestickChart'
 import { useChatStore } from '../../store/chatStore'
+import { getSymbolExchange } from '../../data/universeData'
 
 export default function QuoteCard({ data }) {
   const [showChart, setShowChart] = useState(false)
@@ -12,7 +13,7 @@ export default function QuoteCard({ data }) {
   const change = data.change ?? data.net_change ?? 0
   const changePct = data.change_pct ?? data.pct_change ?? 0
   const symbol = data.symbol ?? data.tradingsymbol ?? '—'
-  const exchange = data.exchange ?? 'NSE'
+  const exchange = data.exchange && data.exchange !== 'NSE' ? data.exchange : getSymbolExchange(symbol)
   const positive = change >= 0
 
   return (

@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { useChatStore, getActiveSymbol } from '../../store/chatStore'
-import { fuzzySearchUniverse, saveRecentSearch } from '../../data/universeData'
+import { fuzzySearchUniverse, saveRecentSearch, getSymbolExchange } from '../../data/universeData'
 
 export default function CommandPalette({ isOpen, onClose, onOpenOrderTicket }) {
   const [query, setQuery] = useState('')
@@ -41,7 +41,8 @@ export default function CommandPalette({ isOpen, onClose, onOpenOrderTicket }) {
   }
 
   const selectItem = (item) => {
-    const cmdToRun = item.command || (item.symbol ? `analyze ${item.symbol}` : item.text || item.label)
+    const exch = item.exchange || (item.symbol ? getSymbolExchange(item.symbol) : 'NSE')
+    const cmdToRun = item.command || (item.symbol ? `analyze ${item.symbol}${exch !== 'NSE' ? ' ' + exch : ''}` : item.text || item.label)
     saveRecentSearch({
       text: cmdToRun,
       symbol: item.symbol || null,
@@ -338,8 +339,9 @@ export default function CommandPalette({ isOpen, onClose, onOpenOrderTicket }) {
                     <>
                       <button
                         onClick={() => {
+                          const exch = selectedItem.exchange || getSymbolExchange(selectedItem.symbol)
                           if (onOpenOrderTicket) {
-                            onOpenOrderTicket({ symbol: selectedItem.symbol, action: 'BUY', exchange: 'NSE' })
+                            onOpenOrderTicket({ symbol: selectedItem.symbol, action: 'BUY', exchange: exch })
                           }
                           onClose()
                         }}
@@ -351,7 +353,8 @@ export default function CommandPalette({ isOpen, onClose, onOpenOrderTicket }) {
 
                       <button
                         onClick={() => {
-                          sendDraft(`debate ${selectedItem.symbol}`)
+                          const exch = selectedItem.exchange || getSymbolExchange(selectedItem.symbol)
+                          sendDraft(`analyze ${selectedItem.symbol}${exch !== 'NSE' ? ' ' + exch : ''}`)
                           onClose()
                         }}
                         className="w-full py-1.5 px-3 rounded-lg bg-elevated hover:bg-elevated/80 border border-border text-text font-bold text-xs flex items-center justify-between cursor-pointer transition-all"
@@ -362,7 +365,8 @@ export default function CommandPalette({ isOpen, onClose, onOpenOrderTicket }) {
 
                       <button
                         onClick={() => {
-                          sendDraft(`backtest ${selectedItem.symbol}`)
+                          const exch = selectedItem.exchange || getSymbolExchange(selectedItem.symbol)
+                          sendDraft(`backtest ${selectedItem.symbol}${exch !== 'NSE' ? ' ' + exch : ''}`)
                           onClose()
                         }}
                         className="w-full py-1.5 px-3 rounded-lg bg-elevated hover:bg-elevated/80 border border-border text-text font-bold text-xs flex items-center justify-between cursor-pointer transition-all"

@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest'
+import { getSymbolExchange } from '../renderer/src/data/universeData'
 
 // Copied verbatim from src/renderer/src/components/Input/InputBar.jsx
 // so we can test it as a pure function without importing the React component.
@@ -12,9 +13,21 @@ function parseCommand(input) {
       if (!args[0]) return { error: 'Usage: quote SYMBOL' }
       return { endpoint: '/skills/quote', body: { symbol: args[0].toUpperCase() }, cardType: 'quote' }
 
-    case 'analyze': case 'analyse': case 'a':
+    case 'analyze': case 'analyse': case 'a': {
       if (!args[0]) return { error: 'Usage: analyze SYMBOL' }
-      return { stream: true, symbol: args[0].toUpperCase(), exchange: args[1]?.toUpperCase() ?? 'NSE' }
+      let sym = args[0].toUpperCase()
+      let exch = args[1]?.toUpperCase()
+      if (!exch) {
+        if (sym.includes(':')) {
+          const [prefix, s] = sym.split(':')
+          exch = prefix
+          sym = s
+        } else {
+          exch = getSymbolExchange(sym)
+        }
+      }
+      return { stream: true, symbol: sym, exchange: exch }
+    }
 
     case 'morning-brief': case 'brief': case 'mb':
       return { endpoint: '/skills/morning_brief', body: {}, cardType: 'morning_brief' }
@@ -203,6 +216,23 @@ describe('parseCommand', () => {
     expect(result.stream).toBe(true)
     expect(result.symbol).toBe('NIFTY')
     expect(result.exchange).toBe('NSE')
+  })
+
+  it('auto-resolves exchange for commodities and currencies', () => {
+    const gold = parseCommand('analyze GOLD')
+    expect(gold.stream).toBe(true)
+    expect(gold.symbol).toBe('GOLD')
+    expect(gold.exchange).toBe('MCX')
+
+    const crude = parseCommand('analyze CRUDEOIL')
+    expect(crude.stream).toBe(true)
+    expect(crude.symbol).toBe('CRUDEOIL')
+    expect(crude.exchange).toBe('MCX')
+
+    const usd = parseCommand('analyze USDINR')
+    expect(usd.stream).toBe(true)
+    expect(usd.symbol).toBe('USDINR')
+    expect(usd.exchange).toBe('CDS')
   })
 
   it('analyze with explicit exchange uppercases it', () => {

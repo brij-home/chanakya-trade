@@ -7,6 +7,7 @@ import {
   PERSONA_REGISTRY,
   QUANT_COMMANDS,
   fuzzySearchUniverse,
+  getSymbolExchange,
   normalizeQuery,
   getRecentSearches,
   saveRecentSearch,
@@ -17,6 +18,22 @@ import SmartTypeahead from '../renderer/src/components/Common/SmartTypeahead'
 describe('Indian Market Universe & Fuzzy Search Engine', () => {
   beforeEach(() => {
     clearRecentSearches()
+  })
+
+  it('resolves market exchange accurately across asset classes', () => {
+    expect(getSymbolExchange('CRUDEOIL')).toBe('MCX')
+    expect(getSymbolExchange('GOLD')).toBe('MCX')
+    expect(getSymbolExchange('SILVER')).toBe('MCX')
+    expect(getSymbolExchange('NATURALGAS')).toBe('MCX')
+    expect(getSymbolExchange('USDINR')).toBe('CDS')
+    expect(getSymbolExchange('EURINR')).toBe('CDS')
+    expect(getSymbolExchange('SENSEX')).toBe('BSE')
+    expect(getSymbolExchange('BANKEX')).toBe('BSE')
+    expect(getSymbolExchange('RELIANCE')).toBe('NSE')
+    expect(getSymbolExchange('NIFTY50')).toBe('NSE')
+    expect(getSymbolExchange('MCX:CRUDEOIL')).toBe('MCX')
+    expect(getSymbolExchange('CDS:USDINR')).toBe('CDS')
+    expect(getSymbolExchange('BSE:SENSEX')).toBe('BSE')
   })
 
   it('contains comprehensive institutional Indian market universe across all asset classes', () => {

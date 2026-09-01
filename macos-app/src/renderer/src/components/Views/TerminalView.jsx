@@ -6,7 +6,7 @@ import WhaleFlowsCard from '../Cards/WhaleFlowsCard'
 import PersonaTrackRecordCard from '../Cards/PersonaTrackRecordCard'
 import GlobalMacroCard from '../Cards/GlobalMacroCard'
 import SmartTypeahead from '../Common/SmartTypeahead'
-import { INDIAN_UNIVERSE, fuzzySearchUniverse } from '../../data/universeData'
+import { INDIAN_UNIVERSE, fuzzySearchUniverse, getSymbolExchange } from '../../data/universeData'
 
 export default function TerminalView({
   onSelectSymbol,
@@ -1730,7 +1730,7 @@ export default function TerminalView({
               if (onOpenOrderTicket) {
                 onOpenOrderTicket({
                   symbol: selectedSymbol,
-                  exchange: 'NSE',
+                  exchange: getSymbolExchange(selectedSymbol),
                   price: setup.entry,
                   stopLoss: setup.stop_loss,
                   target: setup.target_1,

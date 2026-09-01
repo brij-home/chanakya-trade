@@ -2,7 +2,7 @@ import { useState, useRef, useEffect } from 'react'
 import { useChatStore, getBaseUrl, getActiveSymbol } from '../../store/chatStore'
 import { useAPI } from '../../hooks/useAPI'
 import SmartTypeahead from '../Common/SmartTypeahead'
-import { fuzzySearchUniverse } from '../../data/universeData'
+import { fuzzySearchUniverse, getSymbolExchange } from '../../data/universeData'
 
 // Maps typed commands → API endpoint + card type
 function parseCommand(input, contextSymbol = null) {
@@ -18,9 +18,19 @@ function parseCommand(input, contextSymbol = null) {
     }
 
     case 'analyze': case 'analyse': case 'debate': case 'a': {
-      const sym = args[0]?.toUpperCase() || contextSymbol
+      let sym = args[0]?.toUpperCase() || contextSymbol
       if (!sym) return { error: 'Please specify a stock symbol to analyze (e.g. analyze INFY)' }
-      return { stream: true, symbol: sym, exchange: args[1]?.toUpperCase() ?? 'NSE' }
+      let exch = args[1]?.toUpperCase()
+      if (!exch) {
+        if (sym.includes(':')) {
+          const [prefix, s] = sym.split(':')
+          exch = prefix
+          sym = s
+        } else {
+          exch = getSymbolExchange(sym)
+        }
+      }
+      return { stream: true, symbol: sym, exchange: exch }
     }
 
     case 'morning-brief': case 'brief': case 'mb':
@@ -56,9 +66,10 @@ function parseCommand(input, contextSymbol = null) {
     case 'deep-analyze': case 'deep-analyse': case 'da': {
       const sym = args[0]?.toUpperCase() || contextSymbol
       if (!sym) return { error: 'Please specify a stock symbol (e.g. deep-analyze INFY)' }
+      const exch = args[1]?.toUpperCase() || getSymbolExchange(sym)
       return {
         endpoint: '/skills/deep_analyze',
-        body: { symbol: sym, exchange: args[1]?.toUpperCase() ?? 'NSE' },
+        body: { symbol: sym, exchange: exch },
         cardType: 'markdown',
       }
     }
@@ -95,9 +106,10 @@ function parseCommand(input, contextSymbol = null) {
 
     case 'oi': {
       const sym = args[0]?.toUpperCase() || contextSymbol || 'NIFTY'
+      const exch = args[1]?.toUpperCase() || getSymbolExchange(sym)
       return {
         endpoint: '/skills/oi_profile',
-        body: { symbol: sym, exchange: args[1]?.toUpperCase() ?? 'NSE' },
+        body: { symbol: sym, exchange: exch },
         cardType: 'oi',
       }
     }
@@ -269,10 +281,27 @@ function parseCommand(input, contextSymbol = null) {
     }
 
     default: {
-      // Check if the user typed a single symbol name like 'Bajaj-Auto', 'BAJAJ_AUTO', 'RELIANCE', 'NSE:TRENT'
-      const cleanSingle = input.trim().toUpperCase().replace(/^NSE:|^BSE:/, '').replace(/_/g, '-')
+      // Check if the user typed a single symbol name like 'Bajaj-Auto', 'BAJAJ_AUTO', 'RELIANCE', 'MCX:CRUDEOIL', 'CRUDEOIL'
+      let rawSym = input.trim().toUpperCase()
+      let exch = 'NSE'
+      if (rawSym.startsWith('MCX:')) {
+        exch = 'MCX'
+        rawSym = rawSym.slice(4)
+      } else if (rawSym.startsWith('CDS:') || rawSym.startsWith('FX:') || rawSym.startsWith('FOREX:')) {
+        exch = 'CDS'
+        rawSym = rawSym.split(':')[1]
+      } else if (rawSym.startsWith('BSE:')) {
+        exch = 'BSE'
+        rawSym = rawSym.slice(4)
+      } else if (rawSym.startsWith('NSE:')) {
+        exch = 'NSE'
+        rawSym = rawSym.slice(4)
+      } else {
+        exch = getSymbolExchange(rawSym)
+      }
+      const cleanSingle = rawSym.replace(/_/g, '-')
       if (/^[A-Z0-9&-]{2,15}$/.test(cleanSingle) && !['HELLO', 'HI', 'HELP', 'CLEAR', 'RESET', 'YES', 'NO', 'CANCEL'].includes(cleanSingle)) {
-        return { stream: true, symbol: cleanSingle, exchange: 'NSE' }
+        return { stream: true, symbol: cleanSingle, exchange: exch }
       }
       // Fall through to AI chat — session_id injected in submit()
       return { endpoint: '/skills/chat', body: { message: input }, cardType: 'markdown' }
@@ -321,11 +350,13 @@ export default function InputBar() {
   }, [draft, autoSubmit])
 
   function runStreaming(symbol, exchange) {
+    const rawSym = (symbol || '').toUpperCase().trim()
+    const resolvedExch = (!exchange || exchange === 'NSE') ? getSymbolExchange(rawSym) : exchange
     const msgId = Date.now() + 1
-    startStreamingMessage(msgId, symbol, exchange)
+    startStreamingMessage(msgId, rawSym, resolvedExch)
 
     startActivity({
-      title: `Multi-Agent Debate (${symbol})`,
+      title: `Multi-Agent Debate (${rawSym})`,
       details: 'Connecting to multi-agent intelligence pipeline...',
       type: 'debate',
       targetView: 'copilot',
@@ -337,13 +368,18 @@ export default function InputBar() {
       },
     })
 
-    const url = `${getBaseUrl(port)}/skills/analyze/stream?symbol=${symbol}&exchange=${exchange}`
+    const url = `${getBaseUrl(port)}/skills/analyze/stream?symbol=${rawSym}&exchange=${resolvedExch}`
     const es  = new EventSource(url)
 
     function applyEvent(event) {
       if (event.type === 'started') {
-        updateStreamingMessage(msgId, (d) => ({ ...d, phase: 'started' }))
-        updateActivity({ details: `Evaluating quantitative models for ${symbol}...` })
+        updateStreamingMessage(msgId, (d) => ({
+          ...d,
+          phase: 'started',
+          symbol: event.symbol || d.symbol,
+          exchange: event.exchange || d.exchange,
+        }))
+        updateActivity({ details: `Evaluating quantitative models for ${rawSym}...` })
         // Track stream_id for mid-stream context injection (#113)
         if (event.stream_id) setActiveStreamId(event.stream_id)
       } else if (event.type === 'hint_ack') {
@@ -384,7 +420,12 @@ export default function InputBar() {
         updateActivity({ details: 'Synthesizing final institutional trade plan...' })
       } else if (event.type === 'done') {
         updateStreamingMessage(msgId, (d) => ({
-          ...d, phase: 'done', report: event.report, trade_plans: event.trade_plans,
+          ...d,
+          phase: 'done',
+          symbol: event.symbol || d.symbol,
+          exchange: event.exchange || d.exchange,
+          report: event.report,
+          trade_plans: event.trade_plans,
         }))
         es.close()
         setStreamCancel(null)
@@ -394,8 +435,8 @@ export default function InputBar() {
         const curView = useChatStore.getState().activeView
         if (curView !== 'copilot') {
           useChatStore.getState().notifyCompletedActivity({
-            title: `Multi-Agent Debate (${symbol}) Complete`,
-            message: `Consensus synthesis & trade plan for ${symbol} are ready.`,
+            title: `Multi-Agent Debate (${rawSym}) Complete`,
+            message: `Consensus synthesis & trade plan for ${rawSym} are ready.`,
             targetView: 'copilot',
           })
         }
