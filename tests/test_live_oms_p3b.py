@@ -592,3 +592,197 @@ def test_oms_terminal_states_have_no_transitions():
     """Terminal states must have no outgoing transitions."""
     for ts in TERMINAL_STATES:
         assert VALID_TRANSITIONS[ts] == set(), f"{ts} should have no transitions"
+
+
+# ── Gap 1: execute_order_intent safety gate tests ─────────────────────────────
+
+import sqlite3
+from engine.order_lifecycle import execute_order_intent, preview_order_intent
+
+
+@pytest.fixture
+def paper_order(tmp_path, monkeypatch):
+    """Create a PREVIEW-state paper order in a temp DB for test."""
+    monkeypatch.setenv("TRADING_MODE", "PAPER")
+    # Redirect the orders DB to a temp path
+    monkeypatch.setattr(
+        "engine.order_lifecycle._get_db_path",
+        lambda: tmp_path / "orders.db",
+    )
+    # Use a minimal kill switch registry
+    from engine import kill_switch as ks_module
+
+    ks_module._registry = KillSwitchRegistry(data_dir=tmp_path)
+
+    order = preview_order_intent(
+        symbol="RELIANCE",
+        side="BUY",
+        quantity=10,
+        price=2900.0,
+        order_type="LIMIT",
+    )
+    return order
+
+
+def test_paper_broker_error_yields_rejected_not_filled(tmp_path, monkeypatch):
+    """
+    When PaperBroker raises an exception during execute_order_intent,
+    the order status MUST be REJECTED with the real error as rejection_reason.
+    It MUST NOT be FILLED_PAPER with a fabricated broker_order_id.
+    """
+    monkeypatch.setenv("TRADING_MODE", "SIMULATE")
+
+    from engine import kill_switch as ks_module
+
+    ks_module._registry = KillSwitchRegistry(data_dir=tmp_path)
+
+    db_path = tmp_path / "orders.db"
+    monkeypatch.setattr("engine.order_lifecycle._get_db_path", lambda: db_path)
+
+    # Create a preview order
+    order = preview_order_intent(
+        symbol="TCS",
+        side="BUY",
+        quantity=5,
+        price=4000.0,
+    )
+
+    # Make PaperBroker always raise
+    class _BrokenPaperBroker:
+        def place_order(self, req):
+            raise RuntimeError("Simulated disk failure")
+
+    monkeypatch.setattr(
+        "engine.order_lifecycle.PaperBroker",
+        _BrokenPaperBroker,
+        raising=False,
+    )
+    # Ensure the import path inside execute_order_intent resolves to our broken broker
+    import engine.paper as paper_mod
+
+    monkeypatch.setattr(paper_mod, "PaperBroker", _BrokenPaperBroker)
+
+    result = execute_order_intent(order.order_id)
+
+    assert result.status == "REJECTED", (
+        f"Expected REJECTED, got {result.status}. "
+        "Paper broker errors must never produce FILLED_PAPER."
+    )
+    assert result.broker_order_id is None, (
+        "broker_order_id must be None when PaperBroker raised — never fabricate an ID."
+    )
+    assert result.rejection_reason is not None
+    assert "PaperBroker error" in result.rejection_reason
+
+
+def test_execute_order_blocks_without_live_flag(tmp_path, monkeypatch):
+    """
+    In EXECUTE mode without ALLOW_LIVE_TRADING=1,
+    execute_order_intent must raise PermissionError — never fabricate an order.
+    """
+    monkeypatch.setenv("TRADING_MODE", "EXECUTE")
+    monkeypatch.setenv("ALLOW_LIVE_TRADING", "0")
+
+    from engine import kill_switch as ks_module
+
+    ks_module._registry = KillSwitchRegistry(data_dir=tmp_path)
+
+    db_path = tmp_path / "orders.db"
+    monkeypatch.setattr("engine.order_lifecycle._get_db_path", lambda: db_path)
+
+    order = preview_order_intent(
+        symbol="INFY",
+        side="BUY",
+        quantity=10,
+        price=1800.0,
+    )
+
+    with pytest.raises(PermissionError, match="ALLOW_LIVE_TRADING"):
+        execute_order_intent(order.order_id)
+
+
+def test_execute_order_calls_pretrade_and_blocks_stale_data(tmp_path, monkeypatch):
+    """
+    In EXECUTE mode with ALLOW_LIVE_TRADING=1, execute_order_intent must run
+    validate_pretrade. Stale quote data (quote_age_seconds=None) must block
+    the order and raise ValueError — never fabricate a live order.
+    """
+    monkeypatch.setenv("TRADING_MODE", "EXECUTE")
+    monkeypatch.setenv("ALLOW_LIVE_TRADING", "1")
+
+    from engine import kill_switch as ks_module
+
+    ks_module._registry = KillSwitchRegistry(data_dir=tmp_path)
+
+    db_path = tmp_path / "orders.db"
+    monkeypatch.setattr("engine.order_lifecycle._get_db_path", lambda: db_path)
+
+    order = preview_order_intent(
+        symbol="HDFCBANK",
+        side="BUY",
+        quantity=5,
+        price=1600.0,
+    )
+
+    # validate_pretrade will block because quote_age_seconds is None (unknown freshness)
+    # No need to mock the broker — pretrade must block before reaching it.
+    with pytest.raises(ValueError, match="Pre-trade validation blocked"):
+        execute_order_intent(order.order_id)
+
+
+def test_execute_order_broker_timeout_transitions_to_unknown_freeze(tmp_path, monkeypatch):
+    """
+    When the live broker raises an exception (e.g. timeout), the order must
+    transition to UNKNOWN_FREEZE — never to OPEN with a fabricated ID.
+    """
+    monkeypatch.setenv("TRADING_MODE", "EXECUTE")
+    monkeypatch.setenv("ALLOW_LIVE_TRADING", "1")
+
+    from engine import kill_switch as ks_module
+
+    ks_module._registry = KillSwitchRegistry(data_dir=tmp_path)
+
+    db_path = tmp_path / "orders.db"
+    monkeypatch.setattr("engine.order_lifecycle._get_db_path", lambda: db_path)
+
+    order = preview_order_intent(
+        symbol="SBIN",
+        side="BUY",
+        quantity=10,
+        price=600.0,
+    )
+
+    # Patch validate_pretrade at its source module so the lazy import picks it up
+    class _PassResult:
+        is_eligible = True
+        blocking_reasons = []
+
+    monkeypatch.setattr("engine.pretrade.validate_pretrade", lambda **kw: _PassResult())
+
+    # Patch get_broker at its source module (brokers.session)
+    class _TimeoutBroker:
+        account_id = "TEST_ACCOUNT"
+
+        def place_order(self, req):
+            raise TimeoutError("Broker TCP connection timed out after 30s")
+
+    monkeypatch.setattr("brokers.session.get_broker", lambda: _TimeoutBroker())
+
+    with pytest.raises(RuntimeError, match="UNKNOWN_FREEZE"):
+        execute_order_intent(order.order_id)
+
+    # Verify the DB reflects UNKNOWN_FREEZE — not OPEN and not a fabricated ID
+    with sqlite3.connect(str(db_path)) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT status, broker_order_id FROM orders_ledger WHERE order_id = ?",
+            (order.order_id,),
+        ).fetchone()
+
+    assert row["status"] == "UNKNOWN_FREEZE", (
+        f"Expected UNKNOWN_FREEZE, got {row['status']}. "
+        "Broker timeout must never produce a fabricated OPEN order."
+    )
+    assert row["broker_order_id"] is None, (
+        "broker_order_id must be None on broker timeout — never fabricate an ID."
+    )
