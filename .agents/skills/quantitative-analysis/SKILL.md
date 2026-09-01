@@ -21,7 +21,9 @@ description: >-
 - [9. 3-Axis Magic Trend Engine](#9-3-axis-magic-trend-engine)
 - [10. Dynamic ATR Trade Level Calibration](#10-dynamic-atr-trade-level-calibration)
 - [11. Retail Protection & Behavioral Coaching](#11-retail-protection--behavioral-coaching)
-- [12. Testing](#12-testing)
+- [12. Global Macro Correlation & Sector Transmission](#12-global-macro-correlation--sector-transmission)
+- [13. Institutional Security 360 Truthfulness Contract](#13-institutional-security-360-truthfulness-contract)
+- [14. Testing](#14-testing)
 <!-- /TOC -->
 
 ---
@@ -234,9 +236,32 @@ report = fetch_global_macro_report(nifty_spot=24150.0)
 
 ---
 
-## 13. Testing
+## 13. Institutional Security 360 Truthfulness Contract
+
+[`engine/security_360.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/security_360.py) — Enforces zero-fabrication standards across all institutional equity dossiers:
+
+- **Live Quote Truthfulness**: If current price is missing or quote fetch fails, returns `_status="UNAVAILABLE"`, `current_price=0.0`, `decision=None`, and `methodology_lenses=[]`. Hardcoded price fallbacks are strictly prohibited.
+- **Valuation Integrity**: Returns `valuation_status="UNAVAILABLE"` and `valuation_fair_value=None` until real DCF computation is wired. Never returns static price multiplier approximations (`price × 1.15`).
+- **Forensic Status**: Directly calls `analysis.forensic.audit_company_forensics()`. Returns `UNAVAILABLE` on database/network exception; never defaults or hardcodes `"CLEAN"`.
+- **Methodology Lenses**: Emits `[]` until real multi-factor quantitative lenses are calculated. Lenses are never pre-populated with synthetic `BULLISH` verdicts.
+- **Decision Summary**: `decision` is set to `None` when lenses are empty or quote is unavailable. No trade levels or stop-loss recommendations are generated without verified live data.
+
+```python
+from engine.security_360 import build_security_360_dossier
+
+dossier = build_security_360_dossier("RELIANCE")
+# If live quote fails: dossier._status -> "UNAVAILABLE", dossier.decision -> None
+# If live quote succeeds: dossier._status -> "PARTIAL", dossier.forensic_status -> "CLEAN" | "FLAGGED"
+```
+
+---
+
+## 14. Testing
 
 ```powershell
+# Security 360 truthfulness & unavailable status verification
+.venv\Scripts\pytest.exe tests/test_security_360_unavailable.py -v
+
 # Quantitative, global macro, retail protection & structural test suites
 .venv\Scripts\pytest.exe tests/test_global_macro.py tests/test_market_structure.py tests/test_volume_profile.py tests/test_multibagger.py tests/test_trade_lifecycle.py tests/test_execution_gate.py tests/test_retail_protection.py -v
 

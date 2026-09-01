@@ -49,16 +49,28 @@ Fyers (data) → Zerodha/Angel One (execution) → yfinance (fallback) → Mock 
 ## Critical Rules
 
 1. **Default Paper Mode**: All tests and automated scripts MUST use `TRADING_MODE=PAPER` or Mock broker. Never execute real orders without explicit user confirmation.
-2. **SEBI IPv4 Binding**: Indian broker APIs enforce whitelisted static IPv4 addresses. Keep the `socket.getaddrinfo` override in `app/main.py`.
-3. **Credential Safety**: Never commit API keys, TOTP secrets, or tokens. Use OS keychain via `config.credentials`.
-4. **Graceful Degradation**: Always fall back through the broker chain → `yfinance` → Mock when live brokers are disconnected.
-5. **Connection Lifecycle**: Wrap `httpx.Client` in `with` context managers to prevent TCP socket leaks.
+2. **Live Execution Gate (`ALLOW_LIVE_TRADING=1`)**:
+   - Live order submission via `execute_order_intent()` MUST enforce `assert_live_execution_allowed()` followed by `validate_pretrade()`.
+   - The order status transitions to `SUBMITTING` in the internal ledger prior to contacting the broker.
+   - Ambiguous broker responses, TCP timeouts, or transport exceptions transition fail-closed to `UNKNOWN_FREEZE` with `broker_order_id=None` — never fabricate live order IDs.
+   - Paper broker exceptions transition to `REJECTED` with the underlying reason rather than fabricating `FILLED_PAPER`.
+3. **Honest Broker Reconciliation (`/api/reconciliation`)**:
+   - Must query `get_broker().get_positions()` and `get_broker().get_funds()` directly.
+   - If no authenticated broker session exists, returns `status="UNAVAILABLE"` immediately — never compares the internal ledger against itself.
+   - Always includes `broker_account_id`, `broker_snapshot_at`, and `correlation_id` in valid reports.
+4. **SEBI IPv4 Binding**: Indian broker APIs enforce whitelisted static IPv4 addresses. Keep the `socket.getaddrinfo` override in `app/main.py`.
+5. **Credential Safety**: Never commit API keys, TOTP secrets, or tokens. Use OS keychain via `config.credentials`.
+6. **Graceful Degradation**: Always fall back through the broker chain → `yfinance` → Mock when live brokers are disconnected.
+7. **Connection Lifecycle**: Wrap `httpx.Client` in `with` context managers to prevent TCP socket leaks.
 
 ---
 
 ## Testing
 
 ```powershell
+# Live OMS, pre-trade gates & execution safety
+.venv\Scripts\pytest.exe tests/test_live_oms_p3b.py tests/test_mode_banner_mapping.py tests/test_reconciliation_unavailable.py -v
+
 # Broker routing and roles
 .venv\Scripts\pytest.exe tests/test_broker_roles.py -v
 
