@@ -29,6 +29,7 @@ def test_api_openapi_spec_generation(client):
     assert "/api/mode" in paths
     assert "/api/preflight" in paths
     assert "/api/orders/preview" in paths
+    assert "/api/orders/confirm" in paths
     assert "/api/orders/execute" in paths
     assert "/api/risk/preflight" in paths
     assert "/skills/market_overview" in paths

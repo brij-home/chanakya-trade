@@ -452,11 +452,17 @@ async def api_mode():
         "SIMULATE": "PAPER",
         "EXECUTE": "LIVE",
     }
-    ui_mode = _UI_MODE_MAP.get(mode_info.mode.value, "PAPER")
+    try:
+        ui_mode = _UI_MODE_MAP[mode_info.mode.value]
+    except KeyError as exc:
+        raise RuntimeError(
+            f"Unsupported backend trading mode '{mode_info.mode.value}'. Refusing to mislabel it as PAPER."
+        ) from exc
     return JSONResponse(
         {
             "mode": ui_mode,
             "backend_mode": mode_info.mode.value,
+            "allowed_modes": list(_UI_MODE_MAP.values()),
             "description": mode_info.description,
         }
     )
@@ -1436,7 +1442,7 @@ async def api_cache_clear(request: Request):
 
 # ── Onboarding API ───────────────────────────────────────────
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 
 @app.get("/api/onboarding/status")
@@ -2220,6 +2226,8 @@ async def api_calculate_charges(req: CalculateChargesRequest):
 
 
 class OrderPreviewRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     symbol: str
     side: str = "BUY"
     quantity: int = 1
@@ -2229,13 +2237,14 @@ class OrderPreviewRequest(BaseModel):
     idempotency_key: Optional[str] = None
 
 
-class OrderConfirmRequest(BaseModel):
-    order_id: str
-    preview_hash: Optional[str] = None
-
-
 class OrderExecuteRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     order_id: str
+
+
+class OrderConfirmRequest(OrderExecuteRequest):
+    preview_hash: str
 
 
 @app.get("/api/csrf-token", tags=["Security"])
@@ -2301,7 +2310,7 @@ async def api_order_preview(req: OrderPreviewRequest, request: _Request):
 
 @app.post("/api/orders/confirm")
 async def api_order_confirm(req: OrderConfirmRequest, request: _Request):
-    """Explicitly confirm an order intent, transitioning PREVIEW -> CONFIRMED."""
+    """Record the user's final confirmation before an intent can execute."""
     from engine.order_lifecycle import confirm_order_intent
     from engine.security_audit import record_audit_event
 
@@ -2310,24 +2319,20 @@ async def api_order_confirm(req: OrderConfirmRequest, request: _Request):
         actor = request.state.user.get("username", request.state.user.get("user_id", "UNKNOWN"))
 
     try:
-        order = confirm_order_intent(order_id=req.order_id, preview_hash=req.preview_hash)
-        record_audit_event(
-            event_type="ORDER_CONFIRMED",
-            mode=order.mode,
-            actor=actor,
-            details={
-                "order_id": order.order_id,
-                "status": order.status,
-                "preview_hash": order.preview_hash,
-            },
-        )
-        return JSONResponse(order.to_dict())
-    except PermissionError as e:
-        raise _HTTPException(403, str(e))
-    except ValueError as e:
-        raise _HTTPException(409, str(e))
-    except Exception as e:
-        raise _HTTPException(500, str(e))
+        order = confirm_order_intent(req.order_id, req.preview_hash)
+    except PermissionError as exc:
+        raise _HTTPException(403, str(exc)) from exc
+    except ValueError as exc:
+        status_code = 404 if "not found" in str(exc).lower() else 409
+        raise _HTTPException(status_code, str(exc)) from exc
+
+    record_audit_event(
+        event_type="ORDER_CONFIRMED_BY_USER",
+        mode=order.mode,
+        actor=actor,
+        details={"order_id": order.order_id, "preview_hash": order.preview_hash},
+    )
+    return JSONResponse(order.to_dict())
 
 
 @app.post("/api/orders/execute")
@@ -2354,12 +2359,11 @@ async def api_order_execute(req: OrderExecuteRequest, request: _Request):
             },
         )
         return JSONResponse(order.to_dict())
-    except PermissionError as e:
-        raise _HTTPException(403, str(e))
-    except ValueError as e:
-        raise _HTTPException(409, str(e))
-    except Exception as e:
-        raise _HTTPException(500, str(e))
+    except PermissionError as exc:
+        raise _HTTPException(403, str(exc)) from exc
+    except ValueError as exc:
+        status_code = 404 if "not found" in str(exc).lower() else 409
+        raise _HTTPException(status_code, str(exc)) from exc
 
 
 class RiskPreflightRequest(BaseModel):

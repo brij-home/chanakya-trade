@@ -10,7 +10,7 @@ Tests for P0-B Paper Order Management System (OMS):
 """
 
 import pytest
-from engine.order_lifecycle import preview_order_intent, execute_order_intent
+from engine.order_lifecycle import confirm_order_intent, execute_order_intent, preview_order_intent
 
 
 @pytest.fixture(autouse=True)
@@ -20,6 +20,11 @@ def clean_order_db(tmp_path, monkeypatch):
     monkeypatch.setenv("APP_DATA_DIR", str(tmp_path))
     monkeypatch.setattr("engine.order_lifecycle._get_db_path", lambda: db_file)
     yield
+
+
+def confirm(intent):
+    """Mirror the required server-side confirmation before execution."""
+    return confirm_order_intent(intent.order_id, intent.preview_hash)
 
 
 def test_order_preview_generation_and_charges():
@@ -62,6 +67,49 @@ def test_order_preview_idempotency():
     assert intent1.idempotency_key == intent2.idempotency_key
 
 
+def test_identical_orders_without_a_retry_key_remain_distinct_intents():
+    """Two intentional, identical orders must not collapse into one ledger record."""
+    first = preview_order_intent(symbol="INFY", side="BUY", quantity=20, price=1800.0)
+    second = preview_order_intent(symbol="INFY", side="BUY", quantity=20, price=1800.0)
+
+    assert first.order_id != second.order_id
+    assert first.idempotency_key != second.idempotency_key
+
+
+def test_client_cannot_override_authoritative_instrument_metadata():
+    """Direct-call compatibility arguments never change canonical metadata."""
+    gold = preview_order_intent(
+        symbol="MCX:GOLD", side="BUY", quantity=1, price=72000.0, exchange="NSE"
+    )
+    currency = preview_order_intent(
+        symbol="USDINR", side="BUY", quantity=1, price=83.5, segment="EQUITY_INTRADAY"
+    )
+    assert (gold.exchange, gold.segment) == ("MCX", "COMMODITY")
+    assert (currency.exchange, currency.segment) == ("CDS", "CURRENCY")
+
+
+def test_execution_requires_server_confirmation(monkeypatch):
+    """A preview alone is never executable, even when the mode permits paper trading."""
+    from engine.modes import ModeInfo, TradingMode
+
+    monkeypatch.setattr(
+        "engine.order_lifecycle.get_trading_mode",
+        lambda: ModeInfo(
+            mode=TradingMode.SIMULATE,
+            is_observe=False,
+            is_simulate=True,
+            is_execute=False,
+            description="Simulate",
+        ),
+    )
+    intent = preview_order_intent(symbol="TCS", side="BUY", quantity=1, price=3500.0)
+
+    with pytest.raises(ValueError, match="must be CONFIRMED before execution"):
+        execute_order_intent(intent.order_id)
+    with pytest.raises(ValueError, match="preview hash"):
+        confirm_order_intent(intent.order_id, "tampered")
+
+
 def test_order_execution_paper_flow(monkeypatch):
     """Verify execution transitions to FILLED_PAPER with PAPER-EXEC ID."""
     from engine.modes import ModeInfo, TradingMode
@@ -85,6 +133,7 @@ def test_order_execution_paper_flow(monkeypatch):
         order_type="MARKET",
     )
 
+    confirm(intent)
     executed = execute_order_intent(intent.order_id)
     assert executed.order_id == intent.order_id
     assert executed.status == "FILLED_PAPER"
@@ -113,6 +162,7 @@ def test_order_execution_blocked_in_observe_mode(monkeypatch):
         price=1600.0,
     )
 
+    confirm(intent)
     executed = execute_order_intent(intent.order_id)
     assert executed.status == "REJECTED"
     assert "OBSERVE" in executed.rejection_reason
@@ -164,6 +214,7 @@ def test_paper_order_uses_real_paper_broker(tmp_path, monkeypatch):
     assert intent.order_id.startswith("PAPER-"), "Preview must produce a PAPER- order ID"
     assert intent.status == "PREVIEW"
 
+    confirm(intent)
     executed = execute_order_intent(intent.order_id)
 
     assert executed.order_id == intent.order_id
@@ -305,6 +356,7 @@ def test_double_submit_rejected(monkeypatch, tmp_path):
     )
 
     # First execution succeeds
+    confirm(intent)
     first_exec = execute_order_intent(intent.order_id)
     assert first_exec.status == "FILLED_PAPER"
 

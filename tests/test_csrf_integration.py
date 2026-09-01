@@ -6,6 +6,7 @@ Integration tests for CSRF token generation, strength validation, and self-hoste
 
 import hashlib
 import hmac
+import uuid
 import pytest
 from starlette.testclient import TestClient
 
@@ -117,3 +118,60 @@ def test_csrf_token_endpoint_and_validation(tmp_path, monkeypatch):
     )
     assert res_valid_csrf.status_code == 200
     assert "order_id" in res_valid_csrf.json()
+
+
+def test_order_confirmation_is_required_and_request_metadata_is_not_client_controlled(
+    tmp_path, monkeypatch
+):
+    """Live-capable endpoints reject direct execute and venue/segment overrides."""
+    from web.api import app
+    from web.auth import create_session, create_user, init_db
+
+    monkeypatch.setenv("AUTH_DB_PATH", str(tmp_path / "auth.db"))
+    monkeypatch.setenv("DEPLOY_MODE", "self-hosted")
+    monkeypatch.setenv("CSRF_SECRET", "a" * 64)
+    init_db()
+    create_user("confirm@example.com", "password123")
+    session_id = create_session(user_id=1, email="confirm@example.com")
+    client = TestClient(app)
+    token = client.get("/api/csrf-token", cookies={"session_id": session_id}).json()["csrf_token"]
+    headers = {"X-CSRF-Token": token}
+    cookies = {"session_id": session_id}
+
+    override = client.post(
+        "/api/orders/preview",
+        json={"symbol": "MCX:GOLD", "price": 72000, "exchange": "NSE"},
+        headers=headers,
+        cookies=cookies,
+    )
+    assert override.status_code == 422
+
+    preview = client.post(
+        "/api/orders/preview",
+        json={
+            "symbol": "RELIANCE",
+            "price": 2800,
+            "idempotency_key": f"confirm-test-{uuid.uuid4()}",
+        },
+        headers=headers,
+        cookies=cookies,
+    )
+    assert preview.status_code == 200
+    intent = preview.json()
+
+    direct_execute = client.post(
+        "/api/orders/execute",
+        json={"order_id": intent["order_id"]},
+        headers=headers,
+        cookies=cookies,
+    )
+    assert direct_execute.status_code == 409
+
+    confirmed = client.post(
+        "/api/orders/confirm",
+        json={"order_id": intent["order_id"], "preview_hash": intent["preview_hash"]},
+        headers=headers,
+        cookies=cookies,
+    )
+    assert confirmed.status_code == 200
+    assert confirmed.json()["status"] == "CONFIRMED"

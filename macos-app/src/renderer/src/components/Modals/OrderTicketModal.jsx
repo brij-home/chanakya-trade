@@ -1,12 +1,22 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { useAPI } from '../../hooks/useAPI'
 
+function createOrderIntentKey() {
+  if (globalThis.crypto?.randomUUID) return `ORDER-${globalThis.crypto.randomUUID()}`
+  if (globalThis.crypto?.getRandomValues) {
+    const values = new Uint32Array(4)
+    globalThis.crypto.getRandomValues(values)
+    return `ORDER-${Array.from(values, value => value.toString(16)).join('')}`
+  }
+  throw new Error('Secure random order IDs are unavailable. Order preview is blocked.')
+}
+
 /**
  * OrderTicketModal — Paper / Live Order Management System (OMS)
  *
  * Transitions:
  *   Step 1 (Edit/Stage)  → Calls /api/risk/preflight & /api/orders/preview
- *   Step 2 (Double Confirm) → Calls /api/orders/execute with real order ID
+ *   Step 2 (Double Confirm) → Confirms server intent, then calls /api/orders/execute
  *
  * Truthful guarantees:
  *   - No fake timer client simulations
@@ -20,6 +30,7 @@ export default function OrderTicketModal({ isOpen, onClose, initialData = {}, ap
   const isLiveMode = appMode === 'LIVE'
   const { call } = useAPI()
   const modalRef = useRef(null)
+  const pendingPreviewRef = useRef(null)
 
   const [symbol, setSymbol] = useState(initialData.symbol || 'RELIANCE')
   const [exchange, setExchange] = useState(initialData.exchange || 'NSE')
@@ -39,7 +50,6 @@ export default function OrderTicketModal({ isOpen, onClose, initialData = {}, ap
   const [preflightInfo, setPreflightInfo] = useState(null)
   const [previewOrder, setPreviewOrder] = useState(null)
   const [isValidatingRisk, setIsValidatingRisk] = useState(false)
-  const [intentKey, setIntentKey] = useState('')
 
   // Sync state whenever modal opens or initialData changes
   useEffect(() => {
@@ -60,11 +70,7 @@ export default function OrderTicketModal({ isOpen, onClose, initialData = {}, ap
       setConfirmedRisk(false)
       setPreviewOrder(null)
       setPreflightInfo(null)
-      const freshKey =
-        typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
-          ? crypto.randomUUID()
-          : `intent-${Date.now()}-${Math.random().toString(36).slice(2)}`
-      setIntentKey(freshKey)
+      pendingPreviewRef.current = null
     }
   }, [isOpen, initialData])
 
@@ -101,6 +107,14 @@ export default function OrderTicketModal({ isOpen, onClose, initialData = {}, ap
     setConfirmedRisk(false)
     setIsValidatingRisk(true)
 
+    const requestSignature = [symbol, action, qty, price, orderType, product].join('|')
+    if (pendingPreviewRef.current?.signature !== requestSignature) {
+      pendingPreviewRef.current = {
+        signature: requestSignature,
+        key: createOrderIntentKey(),
+      }
+    }
+
     try {
       // 1. Evaluate risk gate limits & behavioral advisory and fetch preview with intentKey
       const [riskRes, previewRes] = await Promise.allSettled([
@@ -118,7 +132,7 @@ export default function OrderTicketModal({ isOpen, onClose, initialData = {}, ap
           price,
           order_type: orderType,
           product,
-          idempotency_key: intentKey,
+          idempotency_key: pendingPreviewRef.current.key,
         }),
       ])
 
@@ -140,6 +154,7 @@ export default function OrderTicketModal({ isOpen, onClose, initialData = {}, ap
           return // Stay on Step 1
         }
         setPreviewOrder(preview)
+        pendingPreviewRef.current = null
         setStep(2)
       } else {
         // Preview call failed — stay on Step 1, never advance
@@ -182,13 +197,24 @@ export default function OrderTicketModal({ isOpen, onClose, initialData = {}, ap
         return
       }
 
-      // Step 2A: Explicitly confirm the order intent on backend
-      await call('/api/orders/confirm', {
+      if (!previewOrder?.preview_hash) {
+        setStatusMsg({
+          type: 'error',
+          text: 'Order preview is incomplete and cannot be confirmed. Please retry preview.',
+        })
+        return
+      }
+
+      const confirmed = await call('/api/orders/confirm', {
         order_id: orderId,
         preview_hash: previewOrder.preview_hash,
       })
+      const confirmedData = confirmed?.data ?? confirmed
+      if (confirmedData?.status !== 'CONFIRMED') {
+        throw new Error('Server did not confirm the order. Execution has been blocked.')
+      }
 
-      // Step 2B: Execute confirmed order through the real OMS backend
+      // Execute through the real OMS backend
       const res = await call('/api/orders/execute', { order_id: orderId })
       const executedData = res?.data ?? res
       const status = executedData.status ?? 'UNKNOWN'

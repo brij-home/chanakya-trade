@@ -597,7 +597,12 @@ def test_oms_terminal_states_have_no_transitions():
 # ── Gap 1: execute_order_intent safety gate tests ─────────────────────────────
 
 import sqlite3
-from engine.order_lifecycle import execute_order_intent, preview_order_intent
+from engine.order_lifecycle import confirm_order_intent, execute_order_intent, preview_order_intent
+
+
+def confirm_lifecycle_order(order):
+    """All execution tests must cross the real server confirmation boundary."""
+    return confirm_order_intent(order.order_id, order.preview_hash)
 
 
 @pytest.fixture
@@ -662,6 +667,7 @@ def test_paper_broker_error_yields_rejected_not_filled(tmp_path, monkeypatch):
 
     monkeypatch.setattr(paper_mod, "PaperBroker", _BrokenPaperBroker)
 
+    confirm_lifecycle_order(order)
     result = execute_order_intent(order.order_id)
 
     assert result.status == "REJECTED", (
@@ -701,6 +707,7 @@ def test_execute_order_blocks_without_live_flag(tmp_path, monkeypatch):
     )
     confirm_order_intent(order.order_id, preview_hash=order.preview_hash)
 
+    confirm_lifecycle_order(order)
     with pytest.raises(PermissionError, match="ALLOW_LIVE_TRADING"):
         execute_order_intent(order.order_id)
 
@@ -751,6 +758,7 @@ def test_execute_order_calls_pretrade_and_blocks_stale_data(tmp_path, monkeypatc
 
     monkeypatch.setattr("engine.pretrade.validate_pretrade", lambda **kw: _BlockedResult())
 
+    confirm_lifecycle_order(order)
     with pytest.raises(ValueError, match="Pre-trade validation blocked"):
         execute_order_intent(order.order_id)
 
@@ -806,6 +814,7 @@ def test_execute_order_broker_timeout_transitions_to_unknown_freeze(tmp_path, mo
 
     monkeypatch.setattr("brokers.session.get_broker", lambda: _TimeoutBroker())
 
+    confirm_lifecycle_order(order)
     with pytest.raises(RuntimeError, match="UNKNOWN_FREEZE"):
         execute_order_intent(order.order_id)
 
@@ -899,6 +908,7 @@ def test_order_intent_double_submit_fails(tmp_path, monkeypatch):
     )
 
     # First execution succeeds
+    confirm_lifecycle_order(order)
     first_res = execute_order_intent(order.order_id)
     assert first_res.status == "FILLED_PAPER"
 

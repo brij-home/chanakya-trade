@@ -103,6 +103,7 @@ global.fetch = vi.fn().mockImplementation((url) => {
           quantity: 50,
           price: 980,
           status: 'PREVIEW',
+          preview_hash: 'paper-preview-hash',
           charges: { total_charges: 18.5, stt: 12.0, gst: 2.5, sebi_charges: 0.1, stamp_duty: 3.9 },
         }
       }),
@@ -131,6 +132,14 @@ global.fetch = vi.fn().mockImplementation((url) => {
             broker_order_id: 'PAPER-EXEC-A1B2C3D4',
           },
         }),
+    })
+  }
+  if (urlStr.includes('/api/orders/confirm')) {
+    return Promise.resolve({
+      ok: true,
+      json: () => Promise.resolve({
+        data: { order_id: 'PAPER-TEST1234', status: 'CONFIRMED', preview_hash: 'paper-preview-hash' },
+      }),
     })
   }
   if (urlStr.includes('/api/risk/preflight')) {
@@ -607,6 +616,7 @@ describe('React Component Rendering & Hook Invariant Gates', () => {
                 charges: { total_charges: 45.2 },
                 status: 'PREVIEW',
                 mode: 'EXECUTE',
+                preview_hash: 'live-preview-hash',
               },
             }),
           })
@@ -635,6 +645,14 @@ describe('React Component Rendering & Hook Invariant Gates', () => {
                   mode: 'EXECUTE',
                 },
               }),
+          })
+        }
+        if (urlStr.includes('/api/orders/confirm')) {
+          return Promise.resolve({
+            ok: true,
+            json: () => Promise.resolve({
+              data: { order_id: 'LIVE-EXEC-1234', status: 'CONFIRMED', preview_hash: 'live-preview-hash' },
+            }),
           })
         }
         return Promise.resolve({ ok: true, json: () => Promise.resolve({}) })
