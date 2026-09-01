@@ -43,6 +43,7 @@ def test_api_openapi_spec_generation(client):
     assert "/skills/journal/list" in paths
     assert "/skills/journal/add" in paths
     assert "/skills/journal/stats" in paths
+    assert "/skills/security_360" in paths
 
 
 def test_mode_endpoint_contract(client):
@@ -176,3 +177,18 @@ def test_reconcile_and_journal_endpoints_contract(client):
     assert res_stats.status_code == 200
     assert res_stats.json()["status"] == "ok"
     assert "win_rate_pct" in res_stats.json()["data"]
+
+
+def test_security_360_endpoint_contract(client):
+    """Verify /skills/security_360 returns comprehensive multi-lens intelligence dossier."""
+    res = client.post("/skills/security_360", json={"symbol": "INFY", "current_price": 1850.0})
+    assert res.status_code == 200
+    data = res.json()
+    assert data["status"] == "ok"
+    dossier = data["data"]
+    assert dossier["symbol"] == "INFY"
+    assert dossier["canonical_symbol"] == "NSE:INFY:EQUITY"
+    assert len(dossier["methodology_lenses"]) >= 4
+    assert dossier["decision"]["action_eligibility"] == "ELIGIBLE"
+    assert dossier["_status"] == "READY"
+    assert "_as_of" in dossier

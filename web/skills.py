@@ -5301,3 +5301,24 @@ async def skill_journal_stats():
         return _ok(stats.to_dict())
     except Exception as e:
         raise _err(str(e))
+
+
+class Security360Request(BaseModel):
+    symbol: str = "RELIANCE"
+    current_price: Optional[float] = None
+
+
+@router.api_route("/security_360", methods=["GET", "POST"])
+async def skill_security_360(
+    req: Optional[Security360Request] = None, symbol: Optional[str] = None
+):
+    """Compile comprehensive 360-degree security intelligence dossier with methodology lenses."""
+    try:
+        from engine.security_360 import build_security_360_dossier
+
+        sym = (req.symbol if req and req.symbol else symbol) or "RELIANCE"
+        px = req.current_price if req and req.current_price else None
+        dossier = build_security_360_dossier(symbol=sym, current_price=px)
+        return _ok(dossier.to_dict())
+    except Exception as e:
+        raise _err(str(e))
