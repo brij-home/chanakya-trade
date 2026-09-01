@@ -4,17 +4,16 @@ tests/test_strategy_lab_p2c.py
 P2-C unit tests: Immutable Strategy Run Manifest and Options Chain Integrity Gate.
 """
 
-import pytest
 from engine.strategy_manifest import (
     create_run_manifest,
     verify_manifest_integrity,
     CostAssumptions,
-    ExecutionAssumptions,
 )
 from engine.options_chain_integrity import validate_options_chain
 
 
 # ── Strategy Manifest Tests ─────────────────────────────────────────────────
+
 
 def test_manifest_creation_and_hash_binding():
     """Verify manifest is created with deterministic hash and bias guard flags."""
@@ -33,7 +32,7 @@ def test_manifest_creation_and_hash_binding():
     assert manifest.strategy_version == "1.0.0"
     assert manifest.universe == sorted(["RELIANCE", "TCS", "INFY"])
     assert len(manifest.manifest_hash) == 64  # SHA-256 hex
-    assert len(manifest.run_id) == 36         # UUID4
+    assert len(manifest.run_id) == 36  # UUID4
     assert manifest.bias_prevention["look_ahead_guard_active"] is True
     assert manifest.bias_prevention["survivorship_bias_guard_active"] is True
     assert manifest.bias_prevention["corporate_action_adjusted"] is True
@@ -68,9 +67,11 @@ def test_manifest_cost_assumptions_are_realistic():
     round_trip_bps = costs.total_round_trip_bps()
 
     # Real round-trip for Indian equity delivery should be ~25–80 bps
-    assert 15.0 <= round_trip_bps <= 150.0, f"Round-trip cost {round_trip_bps} bps seems unrealistic"
-    assert costs.stt_delivery_pct == 0.001       # 0.1% STT on sell side
-    assert costs.gst_on_brokerage_pct == 0.18    # 18% GST
+    assert 15.0 <= round_trip_bps <= 150.0, (
+        f"Round-trip cost {round_trip_bps} bps seems unrealistic"
+    )
+    assert costs.stt_delivery_pct == 0.001  # 0.1% STT on sell side
+    assert costs.gst_on_brokerage_pct == 0.18  # 18% GST
 
 
 def test_manifest_reproducibility_same_inputs_same_hash():
@@ -94,21 +95,24 @@ def test_manifest_reproducibility_same_inputs_same_hash():
 
 # ── Options Chain Integrity Tests ───────────────────────────────────────────
 
+
 def _sample_chain(n_strikes: int = 21, base_price: float = 22000.0) -> list[dict]:
     """Generate synthetic clean options chain rows around a spot price."""
     rows = []
     for i in range(-(n_strikes // 2), n_strikes // 2 + 1):
         strike = base_price + (i * 50)
         for opt_type in ("CE", "PE"):
-            rows.append({
-                "strike": strike,
-                "option_type": opt_type,
-                "bid": 100.0 + i * 5,
-                "ask": 102.0 + i * 5,
-                "iv_pct": 15.5 + abs(i) * 0.3,
-                "oi": 50000 + i * 1000,
-                "volume": 5000,
-            })
+            rows.append(
+                {
+                    "strike": strike,
+                    "option_type": opt_type,
+                    "bid": 100.0 + i * 5,
+                    "ask": 102.0 + i * 5,
+                    "iv_pct": 15.5 + abs(i) * 0.3,
+                    "oi": 50000 + i * 1000,
+                    "volume": 5000,
+                }
+            )
     return rows
 
 

@@ -331,9 +331,8 @@ async def _auto_restore_brokers() -> None:
             logging.warning("[startup] Could not restore Upstox: %s", exc)
 
 
-
-
 # ── P3-A: Correlation ID Middleware ─────────────────────────────────────────
+
 
 @app.middleware("http")
 async def correlation_id_middleware(request: _Request, call_next):
@@ -357,6 +356,7 @@ async def correlation_id_middleware(request: _Request, call_next):
 
 # ── P3-A: Health Probes ──────────────────────────────────────────────────────
 
+
 @app.get("/health", tags=["System"])
 async def health():
     """
@@ -366,6 +366,7 @@ async def health():
     for more detailed Kubernetes-compatible liveness and readiness probes.
     """
     from engine.observability import get_registry
+
     return get_registry().get_liveness()
 
 
@@ -376,6 +377,7 @@ async def health_liveness():
     Returns 200 if alive, 503 if not (for load-balancer/Kubernetes).
     """
     from engine.observability import get_registry
+
     result = get_registry().get_liveness()
     return JSONResponse(result, status_code=200)
 
@@ -387,6 +389,7 @@ async def health_readiness():
     Checks provider health. Returns 200 if ready, 503 if not.
     """
     from engine.observability import get_registry
+
     result = get_registry().get_readiness()
     status_code = 200 if result.get("status") == "ready" else 503
     return JSONResponse(result, status_code=status_code)
@@ -401,6 +404,7 @@ async def get_slo_report(journey_id: str = None):
     and SLO breach flags for each instrumented journey.
     """
     from engine.observability import get_registry
+
     return get_registry().get_slo_report(journey_id=journey_id)
 
 
@@ -413,6 +417,7 @@ async def get_provider_health():
     and HEALTHY/DEGRADED/UNHEALTHY status.
     """
     from engine.observability import get_registry
+
     return get_registry().get_provider_health()
 
 
@@ -422,9 +427,8 @@ async def get_correlation_ids(limit: int = 20):
     P3-A Correlation IDs: Recent request correlation IDs for tracing.
     """
     from engine.observability import get_registry
+
     return {"correlation_ids": get_registry().recent_correlation_ids(limit=limit)}
-
-
 
 
 @app.get("/api/mode", tags=["System"])

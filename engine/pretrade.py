@@ -27,7 +27,6 @@ Returns a structured PreTradeValidationResult with:
 
 from __future__ import annotations
 
-import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Optional
@@ -39,33 +38,35 @@ from engine.observability import new_correlation_id
 # ── Constants ─────────────────────────────────────────────────────────────────
 
 # NSE price band defaults (circuit filter %)
-NSE_DEFAULT_PRICE_BAND_PCT = 20.0   # ±20% from prev close
+NSE_DEFAULT_PRICE_BAND_PCT = 20.0  # ±20% from prev close
 
 # Data freshness — reject orders if quote is older than this
 MAX_QUOTE_AGE_SECONDS = 60.0
 
 # Portfolio concentration limits
-MAX_SINGLE_SYMBOL_CONCENTRATION_PCT = 20.0    # Max 20% of portfolio in one symbol
-MAX_DAILY_LOSS_CAP_PCT = 3.0                  # Max 3% daily drawdown triggers advisory
+MAX_SINGLE_SYMBOL_CONCENTRATION_PCT = 20.0  # Max 20% of portfolio in one symbol
+MAX_DAILY_LOSS_CAP_PCT = 3.0  # Max 3% daily drawdown triggers advisory
 
 # Tick size defaults (paisa) for equities on NSE
-DEFAULT_TICK_SIZE = 0.05   # ₹0.05
+DEFAULT_TICK_SIZE = 0.05  # ₹0.05
 
 # Segment → standard lot sizes
 SEGMENT_LOT_SIZES: dict[str, int] = {
     "EQ": 1,
-    "FUT": 1,     # Varies by contract — actual lot from instrument master
+    "FUT": 1,  # Varies by contract — actual lot from instrument master
     "OPT": 1,
     "CDS": 1000,  # Currency futures/options: 1000 units
-    "MCX": 1,     # Commodity: varies by contract
+    "MCX": 1,  # Commodity: varies by contract
 }
 
 
 # ── Result Types ──────────────────────────────────────────────────────────────
 
+
 @dataclass
 class GateResult:
     """Result for a single pre-trade validation gate."""
+
     gate: str
     passed: bool
     reason: Optional[str] = None
@@ -84,13 +85,14 @@ class PreTradeValidationResult:
     is_eligible=True only when ALL mandatory gates pass.
     Warnings are non-blocking advisories (e.g. high concentration).
     """
+
     correlation_id: str
     symbol: str
-    side: str                               # "BUY" or "SELL"
+    side: str  # "BUY" or "SELL"
     quantity: int
-    price: Optional[float]                  # None for MARKET orders
-    order_type: str                         # "MARKET" / "LIMIT" / "SL" / "SL-M"
-    segment: str                            # "EQ" / "FUT" / "OPT" / "CDS" / "MCX"
+    price: Optional[float]  # None for MARKET orders
+    order_type: str  # "MARKET" / "LIMIT" / "SL" / "SL-M"
+    segment: str  # "EQ" / "FUT" / "OPT" / "CDS" / "MCX"
     broker: Optional[str]
     account: Optional[str]
     user: Optional[str]
@@ -100,9 +102,7 @@ class PreTradeValidationResult:
     blocking_reasons: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     gate_results: dict[str, GateResult] = field(default_factory=dict)
-    validated_at: str = field(
-        default_factory=lambda: datetime.now(timezone.utc).isoformat()
-    )
+    validated_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -131,6 +131,7 @@ class PreTradeValidationResult:
 
 
 # ── Individual Gate Implementations ──────────────────────────────────────────
+
 
 def _gate_kill_switch(
     broker: Optional[str],
@@ -181,7 +182,7 @@ def _gate_market_session(segment: str) -> GateResult:
 
         ist = zoneinfo.ZoneInfo("Asia/Kolkata")
         now_ist = datetime.now(tz=ist)
-        weekday = now_ist.weekday()   # 0=Mon, 6=Sun
+        weekday = now_ist.weekday()  # 0=Mon, 6=Sun
         now_time = now_ist.time()
 
         # Weekend check
@@ -262,7 +263,9 @@ def _gate_tick_size(
 ) -> GateResult:
     """Gate 4b: Verify limit price is aligned to tick size."""
     if order_type == "MARKET" or price is None:
-        return GateResult(gate="tick_size", passed=True, reason="Market order — no price to validate")
+        return GateResult(
+            gate="tick_size", passed=True, reason="Market order — no price to validate"
+        )
     # Allow ±0.01 tolerance for floating-point
     remainder = round(price % tick_size, 4)
     if remainder < 0.01 or remainder > (tick_size - 0.01):
@@ -300,7 +303,7 @@ def _gate_price_band(
         gate="price_band",
         passed=False,
         reason=f"Price ₹{price} outside ±{band_pct}% circuit band "
-               f"[₹{lower:.2f}–₹{upper:.2f}] from prev close ₹{prev_close}",
+        f"[₹{lower:.2f}–₹{upper:.2f}] from prev close ₹{prev_close}",
         details={"lower": round(lower, 2), "upper": round(upper, 2), "band_pct": band_pct},
     )
 
@@ -315,7 +318,9 @@ def _gate_buying_power(
 ) -> GateResult:
     """Gate 6: Verify buying power / margin sufficiency for BUY orders."""
     if side.upper() != "BUY":
-        return GateResult(gate="buying_power", passed=True, reason="SELL order — buying power not checked")
+        return GateResult(
+            gate="buying_power", passed=True, reason="SELL order — buying power not checked"
+        )
     if available_cash is None:
         return GateResult(
             gate="buying_power",
@@ -334,7 +339,7 @@ def _gate_buying_power(
     # Apply margin multipliers
     seg = segment.upper()
     if seg == "EQ":
-        margin_fraction = 1.0   # CNC: full value
+        margin_fraction = 1.0  # CNC: full value
     elif seg in ("FUT", "OPT"):
         margin_fraction = 0.15  # ~15% SPAN+exposure margin (conservative estimate)
     elif seg == "CDS":
@@ -386,7 +391,10 @@ def _gate_data_freshness(
         gate="data_freshness",
         passed=False,
         reason=f"Quote is stale: {quote_age_seconds:.0f}s old (max allowed: {MAX_QUOTE_AGE_SECONDS}s)",
-        details={"quote_age_seconds": round(quote_age_seconds, 1), "max_allowed": MAX_QUOTE_AGE_SECONDS},
+        details={
+            "quote_age_seconds": round(quote_age_seconds, 1),
+            "max_allowed": MAX_QUOTE_AGE_SECONDS,
+        },
     )
 
 
@@ -430,6 +438,7 @@ def _gate_portfolio_risk(
 
 # ── Main Validation Entry Point ───────────────────────────────────────────────
 
+
 def validate_pretrade(
     symbol: str,
     side: str,
@@ -454,7 +463,7 @@ def validate_pretrade(
     tick_size: float = DEFAULT_TICK_SIZE,
     price_band_pct: float = NSE_DEFAULT_PRICE_BAND_PCT,
     # Control
-    skip_session_check: bool = False,    # Set True in tests / after-hours paper
+    skip_session_check: bool = False,  # Set True in tests / after-hours paper
     correlation_id: Optional[str] = None,
 ) -> PreTradeValidationResult:
     """

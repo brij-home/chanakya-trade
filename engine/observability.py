@@ -30,12 +30,13 @@ from typing import Any, Optional
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
-MAX_METRIC_HISTORY = 1000   # Rolling window of metric events
-MAX_CORRELATION_IDS = 500   # Recent correlation IDs to retain for tracing
-STALE_THRESHOLD_SECONDS = 120.0   # Consistent with options_chain_integrity
+MAX_METRIC_HISTORY = 1000  # Rolling window of metric events
+MAX_CORRELATION_IDS = 500  # Recent correlation IDs to retain for tracing
+STALE_THRESHOLD_SECONDS = 120.0  # Consistent with options_chain_integrity
 
 
 # ── Correlation ID ────────────────────────────────────────────────────────────
+
 
 def new_correlation_id(prefix: str = "req") -> str:
     """
@@ -51,16 +52,18 @@ def new_correlation_id(prefix: str = "req") -> str:
 
 # ── SLO Target Definitions ────────────────────────────────────────────────────
 
+
 @dataclass
 class SLOTarget:
     """Service Level Objective target for a critical user journey."""
+
     journey_id: str
     description: str
     # Latency SLO
-    p95_latency_ms: float = 2000.0   # 95th-percentile target in ms
-    p99_latency_ms: float = 5000.0   # 99th-percentile target in ms
+    p95_latency_ms: float = 2000.0  # 95th-percentile target in ms
+    p99_latency_ms: float = 5000.0  # 99th-percentile target in ms
     # Availability SLO
-    availability_pct: float = 99.5   # % of requests that must succeed
+    availability_pct: float = 99.5  # % of requests that must succeed
     # Error budget: percentage of requests that may fail per rolling window
     error_budget_pct: float = 0.5
 
@@ -107,18 +110,18 @@ CRITICAL_JOURNEY_SLOS: dict[str, SLOTarget] = {
 
 # ── Metric Event ─────────────────────────────────────────────────────────────
 
+
 @dataclass
 class MetricEvent:
     """A single measured performance/availability event for a journey."""
+
     journey_id: str
     correlation_id: str
     latency_ms: float
     success: bool
     error_type: Optional[str] = None
     provider: Optional[str] = None
-    timestamp: str = field(
-        default_factory=lambda: datetime.now(timezone.utc).isoformat()
-    )
+    timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -127,12 +130,14 @@ class MetricEvent:
 
 # ── Data Source Freshness Tracker ────────────────────────────────────────────
 
+
 @dataclass
 class ProviderFreshnessRecord:
     """Per-provider freshness tracking."""
+
     provider: str
-    last_success_at: Optional[float] = None    # epoch seconds
-    last_failure_at: Optional[float] = None    # epoch seconds
+    last_success_at: Optional[float] = None  # epoch seconds
+    last_failure_at: Optional[float] = None  # epoch seconds
     total_requests: int = 0
     stale_count: int = 0
     error_count: int = 0
@@ -164,8 +169,11 @@ class ProviderFreshnessRecord:
     def to_dict(self) -> dict[str, Any]:
         return {
             "provider": self.provider,
-            "last_success_at": datetime.fromtimestamp(self.last_success_at, tz=timezone.utc).isoformat()
-            if self.last_success_at else None,
+            "last_success_at": datetime.fromtimestamp(
+                self.last_success_at, tz=timezone.utc
+            ).isoformat()
+            if self.last_success_at
+            else None,
             "age_seconds": self.age_seconds,
             "is_stale": self.is_stale,
             "total_requests": self.total_requests,
@@ -174,13 +182,16 @@ class ProviderFreshnessRecord:
             "error_count": self.error_count,
             "error_rate_pct": self.error_rate_pct,
             "consecutive_errors": self.consecutive_errors,
-            "health": "HEALTHY" if not self.is_stale and self.consecutive_errors == 0
-                     else "DEGRADED" if self.consecutive_errors < 3
-                     else "UNHEALTHY",
+            "health": "HEALTHY"
+            if not self.is_stale and self.consecutive_errors == 0
+            else "DEGRADED"
+            if self.consecutive_errors < 3
+            else "UNHEALTHY",
         }
 
 
 # ── Observability Registry (singleton) ───────────────────────────────────────
+
 
 class ObservabilityRegistry:
     """
@@ -277,7 +288,13 @@ class ObservabilityRegistry:
                 slo_breach = False
                 if slo:
                     error_budget_consumed = round(
-                        max(0.0, (slo.availability_pct - availability_actual) / slo.error_budget_pct * 100), 1
+                        max(
+                            0.0,
+                            (slo.availability_pct - availability_actual)
+                            / slo.error_budget_pct
+                            * 100,
+                        ),
+                        1,
                     )
                     slo_breach = availability_actual < slo.availability_pct or (
                         p95 is not None and p95 > slo.p95_latency_ms
@@ -302,9 +319,9 @@ class ObservabilityRegistry:
                 "as_of": datetime.now(timezone.utc).isoformat(),
                 "uptime_seconds": round(time.time() - self._startup_time, 1),
                 "journeys": reports,
-                "overall_status": "BREACHED" if any(
-                    r.get("slo_breach") for r in reports.values()
-                ) else "OK",
+                "overall_status": "BREACHED"
+                if any(r.get("slo_breach") for r in reports.values())
+                else "OK",
             }
         except Exception as exc:
             return {"error": str(exc), "status": "ERROR"}
@@ -348,11 +365,11 @@ class ObservabilityRegistry:
             return {
                 "as_of": datetime.now(timezone.utc).isoformat(),
                 "providers": records,
-                "overall_health": "HEALTHY" if all(
-                    r.get("health") == "HEALTHY" for r in records.values()
-                ) else "DEGRADED" if any(
-                    r.get("health") == "UNHEALTHY" for r in records.values()
-                ) else "DEGRADED",
+                "overall_health": "HEALTHY"
+                if all(r.get("health") == "HEALTHY" for r in records.values())
+                else "DEGRADED"
+                if any(r.get("health") == "UNHEALTHY" for r in records.values())
+                else "DEGRADED",
             }
         except Exception as exc:
             return {"error": str(exc), "overall_health": "UNKNOWN"}

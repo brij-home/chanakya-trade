@@ -38,6 +38,7 @@ from config.paths import app_data_path
 
 # ── Order States ──────────────────────────────────────────────────────────────
 
+
 class OrderState(str, Enum):
     """
     Complete OMS order state machine.
@@ -50,6 +51,7 @@ class OrderState(str, Enum):
                     → EXPIRED (terminal)
                     → UNKNOWN → RECONCILIATION_REQUIRED (terminal)
     """
+
     DRAFT = "DRAFT"
     PREVIEWED = "PREVIEWED"
     USER_CONFIRMED = "USER_CONFIRMED"
@@ -106,7 +108,7 @@ VALID_TRANSITIONS: dict[OrderState, set[OrderState]] = {
     },
     OrderState.CANCEL_PENDING: {
         OrderState.CANCELLED,
-        OrderState.FILLED,      # Race: filled before cancel processed
+        OrderState.FILLED,  # Race: filled before cancel processed
         OrderState.UNKNOWN,
     },
     OrderState.UNKNOWN: {OrderState.RECONCILIATION_REQUIRED},
@@ -121,24 +123,25 @@ VALID_TRANSITIONS: dict[OrderState, set[OrderState]] = {
 
 # ── Order Event ───────────────────────────────────────────────────────────────
 
+
 @dataclass
 class OrderEvent:
     """An immutable audit event in the order lifecycle."""
-    event_type: str                         # e.g. "STATE_TRANSITION", "FILL", "BROKER_RESPONSE"
+
+    event_type: str  # e.g. "STATE_TRANSITION", "FILL", "BROKER_RESPONSE"
     from_state: Optional[str]
     to_state: Optional[str]
-    actor: str                              # user_id, "SYSTEM", "BROKER", "AUTOMATED"
+    actor: str  # user_id, "SYSTEM", "BROKER", "AUTOMATED"
     reason: Optional[str] = None
     details: dict[str, Any] = field(default_factory=dict)
-    timestamp: str = field(
-        default_factory=lambda: datetime.now(timezone.utc).isoformat()
-    )
+    timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
 
 # ── Order ─────────────────────────────────────────────────────────────────────
+
 
 @dataclass
 class Order:
@@ -148,43 +151,40 @@ class Order:
     The order_id is server-generated. The idempotency_key is client-supplied
     and used to prevent duplicate submissions.
     """
+
     order_id: str
     idempotency_key: str
-    preview_hash: str                       # SHA-256 of order intent (prevents tamper between preview and submit)
-    actor: str                              # User/system that created the order
+    preview_hash: str  # SHA-256 of order intent (prevents tamper between preview and submit)
+    actor: str  # User/system that created the order
 
     # Instrument
     symbol: str
     exchange: str
-    segment: str                            # "EQ", "FUT", "OPT", "CDS", "MCX"
+    segment: str  # "EQ", "FUT", "OPT", "CDS", "MCX"
 
     # Order intent
-    side: str                               # "BUY" or "SELL"
-    order_type: str                         # "MARKET", "LIMIT", "SL", "SL-M"
-    product: str                            # "CNC", "MIS", "NRML"
+    side: str  # "BUY" or "SELL"
+    order_type: str  # "MARKET", "LIMIT", "SL", "SL-M"
+    product: str  # "CNC", "MIS", "NRML"
     quantity: int
-    price: Optional[float]                  # None for MARKET
-    trigger_price: Optional[float]          # For SL/SL-M
-    validity: str = "DAY"                   # "DAY" or "IOC"
+    price: Optional[float]  # None for MARKET
+    trigger_price: Optional[float]  # For SL/SL-M
+    validity: str = "DAY"  # "DAY" or "IOC"
 
     # Mode isolation
-    mode: str = "PAPER"                     # "PAPER" or "LIVE" — enforced at OMS level
+    mode: str = "PAPER"  # "PAPER" or "LIVE" — enforced at OMS level
 
     # State
     state: str = OrderState.DRAFT.value
-    created_at: str = field(
-        default_factory=lambda: datetime.now(timezone.utc).isoformat()
-    )
-    updated_at: str = field(
-        default_factory=lambda: datetime.now(timezone.utc).isoformat()
-    )
+    created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    updated_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
     # Fill tracking
     filled_quantity: int = 0
     average_fill_price: Optional[float] = None
-    broker_order_id: Optional[str] = None      # Broker-assigned order ID
-    broker_request_id: Optional[str] = None    # Our request ID sent to broker
-    broker_response_id: Optional[str] = None   # Broker confirmation ID
+    broker_order_id: Optional[str] = None  # Broker-assigned order ID
+    broker_request_id: Optional[str] = None  # Our request ID sent to broker
+    broker_response_id: Optional[str] = None  # Broker confirmation ID
 
     # Risk context
     pre_trade_correlation_id: Optional[str] = None
@@ -213,6 +213,7 @@ class Order:
 
 
 # ── Preview Hash ──────────────────────────────────────────────────────────────
+
 
 def compute_preview_hash(
     symbol: str,
@@ -248,6 +249,7 @@ def compute_preview_hash(
 
 # ── Order Book ────────────────────────────────────────────────────────────────
 
+
 class OrderBook:
     """
     Thread-safe, persistent OMS order book.
@@ -262,7 +264,7 @@ class OrderBook:
         self._data_dir.mkdir(parents=True, exist_ok=True)
         self._log_file = self._data_dir / "orders.jsonl"
         self._index_file = self._data_dir / "order_index.json"
-        self._idempotency_index: dict[str, str] = {}   # idem_key → order_id
+        self._idempotency_index: dict[str, str] = {}  # idem_key → order_id
         self._orders: dict[str, Order] = {}
         self._load_index()
 
@@ -271,10 +273,9 @@ class OrderBook:
             if self._index_file.exists():
                 data = json.loads(self._index_file.read_text(encoding="utf-8"))
                 for order_dict in data.get("orders", {}).values():
-                    order = Order(**{
-                        k: v for k, v in order_dict.items()
-                        if k in Order.__dataclass_fields__
-                    })
+                    order = Order(
+                        **{k: v for k, v in order_dict.items() if k in Order.__dataclass_fields__}
+                    )
                     self._orders[order.order_id] = order
                     self._idempotency_index[order.idempotency_key] = order.order_id
         except Exception:
@@ -297,9 +298,7 @@ class OrderBook:
                 "as_of": datetime.now(timezone.utc).isoformat(),
                 "orders": {oid: o.to_dict() for oid, o in self._orders.items()},
             }
-            self._index_file.write_text(
-                json.dumps(index_data, indent=2), encoding="utf-8"
-            )
+            self._index_file.write_text(json.dumps(index_data, indent=2), encoding="utf-8")
         except Exception:
             pass
 
@@ -425,8 +424,8 @@ class OrderBook:
             order = self._get_or_raise(order_id)
             if preview_hash_check and preview_hash_check != order.preview_hash:
                 raise ValueError(
-                    f"Preview hash mismatch — order details changed since preview. "
-                    f"Re-preview before confirming."
+                    "Preview hash mismatch — order details changed since preview. "
+                    "Re-preview before confirming."
                 )
             self._transition(order, OrderState.USER_CONFIRMED, actor, "User confirmed order")
         return order
@@ -458,7 +457,9 @@ class OrderBook:
             order.broker_order_id = broker_order_id
             order.broker_response_id = broker_response_id
             self._transition(
-                order, OrderState.BROKER_ACCEPTED, actor,
+                order,
+                OrderState.BROKER_ACCEPTED,
+                actor,
                 details={"broker_order_id": broker_order_id},
             )
         return order
@@ -492,12 +493,16 @@ class OrderBook:
             if order.average_fill_price is None:
                 order.average_fill_price = fill_price
             else:
-                total_filled_value = (prev_filled * order.average_fill_price) + (filled_qty * fill_price)
+                total_filled_value = (prev_filled * order.average_fill_price) + (
+                    filled_qty * fill_price
+                )
                 order.average_fill_price = round(total_filled_value / order.filled_quantity, 4)
 
             to_state = OrderState.PARTIAL if partial else OrderState.FILLED
             self._transition(
-                order, to_state, actor,
+                order,
+                to_state,
+                actor,
                 details={
                     "filled_qty": filled_qty,
                     "fill_price": fill_price,
@@ -588,10 +593,7 @@ class OrderBook:
         """Get all non-terminal orders."""
         with self._lock:
             orders = list(self._orders.values())
-        non_terminal = [
-            o for o in orders
-            if OrderState(o.state) not in TERMINAL_STATES
-        ]
+        non_terminal = [o for o in orders if OrderState(o.state) not in TERMINAL_STATES]
         if mode:
             non_terminal = [o for o in non_terminal if o.mode == mode.upper()]
         return non_terminal
@@ -600,8 +602,10 @@ class OrderBook:
         """Get all orders in UNKNOWN or RECONCILIATION_REQUIRED state — these need human attention."""
         with self._lock:
             return [
-                o for o in self._orders.values()
-                if o.state in (
+                o
+                for o in self._orders.values()
+                if o.state
+                in (
                     OrderState.UNKNOWN.value,
                     OrderState.RECONCILIATION_REQUIRED.value,
                 )

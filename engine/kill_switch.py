@@ -36,6 +36,7 @@ from config.paths import app_data_path
 
 # ── Kill Switch Level ─────────────────────────────────────────────────────────
 
+
 class KillSwitchLevel(str, Enum):
     SYSTEM = "SYSTEM"
     BROKER = "BROKER"
@@ -47,17 +48,17 @@ class KillSwitchLevel(str, Enum):
 
 # ── Kill Switch Record ────────────────────────────────────────────────────────
 
+
 @dataclass
 class KillSwitchRecord:
     """An active kill switch with full audit trail."""
-    level: str                          # KillSwitchLevel value
-    key: str                            # broker_id, account_id, user_id, strategy_id, symbol, or "ALL"
-    reason: str                         # Human-readable reason for activation
-    actor: str                          # Who activated it (user_id, "SYSTEM", "AUTOMATED")
-    activated_at: str = field(
-        default_factory=lambda: datetime.now(timezone.utc).isoformat()
-    )
-    expires_at: Optional[str] = None    # ISO timestamp, None = no expiry
+
+    level: str  # KillSwitchLevel value
+    key: str  # broker_id, account_id, user_id, strategy_id, symbol, or "ALL"
+    reason: str  # Human-readable reason for activation
+    actor: str  # Who activated it (user_id, "SYSTEM", "AUTOMATED")
+    activated_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    expires_at: Optional[str] = None  # ISO timestamp, None = no expiry
     deactivated_at: Optional[str] = None
     deactivated_by: Optional[str] = None
     deactivation_reason: Optional[str] = None
@@ -72,6 +73,7 @@ class KillSwitchRecord:
 
 
 # ── Kill Switch Registry ──────────────────────────────────────────────────────
+
 
 class KillSwitchRegistry:
     """
@@ -109,9 +111,7 @@ class KillSwitchRegistry:
                 "as_of": datetime.now(timezone.utc).isoformat(),
                 "active_switches": [r.to_dict() for r in self._active.values() if r.active],
             }
-            self._state_file.write_text(
-                json.dumps(state, indent=2), encoding="utf-8"
-            )
+            self._state_file.write_text(json.dumps(state, indent=2), encoding="utf-8")
         except Exception:
             pass  # Never crash the caller
 
@@ -251,8 +251,7 @@ class KillSwitchRegistry:
         return {
             "total_active": len(active),
             "system_halted": any(
-                r.level == KillSwitchLevel.SYSTEM.value and r.key == "ALL"
-                for r in active
+                r.level == KillSwitchLevel.SYSTEM.value and r.key == "ALL" for r in active
             ),
             "active_switches": [r.to_dict() for r in active],
         }

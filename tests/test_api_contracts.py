@@ -215,7 +215,7 @@ def test_strategy_manifest_endpoint_contract(client):
     manifest = data["data"]
     assert manifest["strategy_id"] == "rsi_reversal_v1"
     assert len(manifest["manifest_hash"]) == 64  # SHA-256 hex
-    assert len(manifest["run_id"]) == 36          # UUID4
+    assert len(manifest["run_id"]) == 36  # UUID4
     assert manifest["bias_prevention"]["look_ahead_guard_active"] is True
     assert manifest["bias_prevention"]["survivorship_bias_guard_active"] is True
     # Reproducibility: same inputs must produce same manifest_hash
@@ -242,15 +242,17 @@ def test_options_chain_integrity_eligible_chain(client):
     for i in range(-12, 13):
         strike = 22000 + i * 50
         for opt_type in ("CE", "PE"):
-            chain_rows.append({
-                "strike": strike,
-                "option_type": opt_type,
-                "bid": max(1.0, 100.0 + i * 5),
-                "ask": max(2.0, 102.0 + i * 5),
-                "iv_pct": 15.5 + abs(i) * 0.3,
-                "oi": 50000,
-                "volume": 5000,
-            })
+            chain_rows.append(
+                {
+                    "strike": strike,
+                    "option_type": opt_type,
+                    "bid": max(1.0, 100.0 + i * 5),
+                    "ask": max(2.0, 102.0 + i * 5),
+                    "iv_pct": 15.5 + abs(i) * 0.3,
+                    "oi": 50000,
+                    "volume": 5000,
+                }
+            )
 
     res = client.post(
         "/skills/options_chain_integrity",
@@ -277,10 +279,17 @@ def test_options_chain_integrity_stale_chain_blocked(client):
     chain_rows = []
     for i in range(-12, 13):
         strike = 22000 + i * 50
-        chain_rows.append({
-            "strike": strike, "option_type": "CE",
-            "bid": 100.0, "ask": 102.0, "iv_pct": 15.0, "oi": 50000, "volume": 5000,
-        })
+        chain_rows.append(
+            {
+                "strike": strike,
+                "option_type": "CE",
+                "bid": 100.0,
+                "ask": 102.0,
+                "iv_pct": 15.0,
+                "oi": 50000,
+                "volume": 5000,
+            }
+        )
 
     res = client.post(
         "/skills/options_chain_integrity",
@@ -298,4 +307,3 @@ def test_options_chain_integrity_stale_chain_blocked(client):
     report = data["data"]
     assert report["is_actionable"] is False
     assert report["action_eligibility"] in ("UNAVAILABLE", "RESTRICTED")
-

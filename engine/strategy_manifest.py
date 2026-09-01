@@ -27,15 +27,16 @@ from typing import Any, Optional
 @dataclass
 class CostAssumptions:
     """Realistic statutory and execution cost model for Indian equity markets."""
-    brokerage_pct: float = 0.0003            # 0.03% per leg (typical flat-fee broker)
-    stt_delivery_pct: float = 0.001          # 0.1% on sell side for equity delivery
-    stt_intraday_pct: float = 0.00025        # 0.025% on sell side intraday
-    stt_fno_options_pct: float = 0.0625      # ₹62.5 per ₹1L premium (sold options)
-    exchange_txn_charge_pct: float = 0.0000297   # NSE transaction charge
-    sebi_turnover_fee_pct: float = 0.000001       # ₹10 per crore
-    gst_on_brokerage_pct: float = 0.18           # 18% GST on brokerage + txn charges
-    slippage_bps: float = 5.0                # Worst-case 5 basis point slippage per side
-    stamp_duty_pct: float = 0.00015          # 0.015% on buy side equity delivery
+
+    brokerage_pct: float = 0.0003  # 0.03% per leg (typical flat-fee broker)
+    stt_delivery_pct: float = 0.001  # 0.1% on sell side for equity delivery
+    stt_intraday_pct: float = 0.00025  # 0.025% on sell side intraday
+    stt_fno_options_pct: float = 0.0625  # ₹62.5 per ₹1L premium (sold options)
+    exchange_txn_charge_pct: float = 0.0000297  # NSE transaction charge
+    sebi_turnover_fee_pct: float = 0.000001  # ₹10 per crore
+    gst_on_brokerage_pct: float = 0.18  # 18% GST on brokerage + txn charges
+    slippage_bps: float = 5.0  # Worst-case 5 basis point slippage per side
+    stamp_duty_pct: float = 0.00015  # 0.015% on buy side equity delivery
     segment: str = "EQUITY_DELIVERY"
 
     def total_round_trip_bps(self) -> float:
@@ -50,11 +51,12 @@ class CostAssumptions:
 @dataclass
 class ExecutionAssumptions:
     """Execution realism constraints for the backtest engine."""
-    fill_delay_bars: int = 1            # Execute at open of next bar (no look-ahead)
-    order_type: str = "MARKET_OPEN"     # MARKET_OPEN | VWAP_APPROXIMATION | LIMIT
-    lot_rounding: bool = True           # Round position to instrument lot size
+
+    fill_delay_bars: int = 1  # Execute at open of next bar (no look-ahead)
+    order_type: str = "MARKET_OPEN"  # MARKET_OPEN | VWAP_APPROXIMATION | LIMIT
+    lot_rounding: bool = True  # Round position to instrument lot size
     min_lot_size: int = 1
-    partial_fill_pct: float = 1.0       # Assume full fill
+    partial_fill_pct: float = 1.0  # Assume full fill
     volume_participation_max_pct: float = 0.05  # Max 5% of daily volume per order
     survivorship_bias_guard: bool = True
     look_ahead_guard: bool = True
@@ -69,12 +71,13 @@ class StrategyRunManifest:
     Once created, the manifest hash seals the run. Any alteration of inputs
     must produce a new manifest with a new run_id.
     """
+
     run_id: str
     strategy_id: str
     strategy_name: str
     strategy_version: str
-    code_hash: str           # SHA-256 of strategy source for reproducibility
-    universe: list[str]      # Instrument universe (symbols)
+    code_hash: str  # SHA-256 of strategy source for reproducibility
+    universe: list[str]  # Instrument universe (symbols)
     data_snapshot_start: str
     data_snapshot_end: str
     benchmark: str
@@ -82,7 +85,7 @@ class StrategyRunManifest:
     cost_assumptions: CostAssumptions
     execution_assumptions: ExecutionAssumptions
     created_at: str
-    manifest_hash: str       # SHA-256 over canonical identity fields (tamper-evidence)
+    manifest_hash: str  # SHA-256 over canonical identity fields (tamper-evidence)
     bias_prevention: dict[str, bool] = field(default_factory=dict)
     notes: str = ""
 

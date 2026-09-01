@@ -4,7 +4,7 @@ engine/options_chain_integrity.py
 P2-C: Options Chain Integrity and Liquidity Gate.
 
 Validates an options chain snapshot against strict data quality invariants
-before permitting any downstream analytics or order execution. 
+before permitting any downstream analytics or order execution.
 
 Quality gates enforced:
 1. Chain freshness: chain must not be older than MAX_CHAIN_AGE_SECONDS
@@ -20,23 +20,23 @@ If any gate fails, the chain is marked UNAVAILABLE and action eligibility is RES
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from typing import Any, Optional
 
 # Institutional integrity thresholds
-MAX_CHAIN_AGE_SECONDS = 120.0       # 2 minutes — options data older than this is stale
-MAX_SPREAD_PCT = 0.10               # Max 10% bid/ask spread as fraction of mid-price
-MIN_STRIKES_REQUIRED = 21           # At least 21 strikes (10 ITM + ATM + 10 OTM)
-MIN_IV_PCT = 1.0                    # Minimum realistic IV ≥ 1%
-MAX_IV_PCT = 500.0                  # Maximum plausible IV ≤ 500%
-MIN_OI = 0                          # Open Interest must be non-negative
+MAX_CHAIN_AGE_SECONDS = 120.0  # 2 minutes — options data older than this is stale
+MAX_SPREAD_PCT = 0.10  # Max 10% bid/ask spread as fraction of mid-price
+MIN_STRIKES_REQUIRED = 21  # At least 21 strikes (10 ITM + ATM + 10 OTM)
+MIN_IV_PCT = 1.0  # Minimum realistic IV ≥ 1%
+MAX_IV_PCT = 500.0  # Maximum plausible IV ≤ 500%
+MIN_OI = 0  # Open Interest must be non-negative
 
 
 @dataclass
 class OptionStrikeIntegrityCheck:
     """Per-strike validation result."""
+
     strike: float
     option_type: str  # "CE" | "PE"
     iv_pct: Optional[float]
@@ -57,6 +57,7 @@ class ChainIntegrityReport:
     If is_actionable is False, all downstream analytics and order execution
     must be blocked — no exception path for stale/degraded chains.
     """
+
     symbol: str
     expiry: str
     underlying_price: float
@@ -65,9 +66,9 @@ class ChainIntegrityReport:
     valid_strikes: int
     flagged_strikes: int
     chain_age_seconds: float
-    is_actionable: bool             # True only if ALL quality gates pass
-    action_eligibility: str         # "ELIGIBLE" | "RESTRICTED" | "UNAVAILABLE"
-    quality_score: float            # 0.0–100.0
+    is_actionable: bool  # True only if ALL quality gates pass
+    action_eligibility: str  # "ELIGIBLE" | "RESTRICTED" | "UNAVAILABLE"
+    quality_score: float  # 0.0–100.0
     gate_results: dict[str, bool] = field(default_factory=dict)
     issues: list[str] = field(default_factory=list)
     strike_checks: list[OptionStrikeIntegrityCheck] = field(default_factory=list)
@@ -197,13 +198,13 @@ def validate_options_chain(
         if spread_pct is None:
             row_issues.append(f"INVALID_SPREAD: bid={bid}, ask={ask}")
         elif spread_pct > MAX_SPREAD_PCT:
-            row_issues.append(
-                f"WIDE_SPREAD: {spread_pct:.1%} > {MAX_SPREAD_PCT:.1%} threshold"
-            )
+            row_issues.append(f"WIDE_SPREAD: {spread_pct:.1%} > {MAX_SPREAD_PCT:.1%} threshold")
 
         if iv_pct is not None:
             if not (MIN_IV_PCT <= iv_pct <= MAX_IV_PCT):
-                row_issues.append(f"IV_ANOMALY: {iv_pct:.1f}% outside [{MIN_IV_PCT}, {MAX_IV_PCT}]%")
+                row_issues.append(
+                    f"IV_ANOMALY: {iv_pct:.1f}% outside [{MIN_IV_PCT}, {MAX_IV_PCT}]%"
+                )
 
         if oi < MIN_OI:
             row_issues.append(f"NEGATIVE_OI: {oi}")
@@ -212,27 +213,29 @@ def validate_options_chain(
         if not is_valid:
             flagged += 1
 
-        strike_checks.append(OptionStrikeIntegrityCheck(
-            strike=strike,
-            option_type=opt_type,
-            iv_pct=iv_pct,
-            bid=bid,
-            ask=ask,
-            oi=oi,
-            volume=volume,
-            spread_pct=spread_pct,
-            issues=row_issues,
-            is_valid=is_valid,
-        ))
+        strike_checks.append(
+            OptionStrikeIntegrityCheck(
+                strike=strike,
+                option_type=opt_type,
+                iv_pct=iv_pct,
+                bid=bid,
+                ask=ask,
+                oi=oi,
+                volume=volume,
+                spread_pct=spread_pct,
+                issues=row_issues,
+                is_valid=is_valid,
+            )
+        )
 
     total_checked = len(strike_checks)
     valid_strikes = total_checked - flagged
     flagged_pct = flagged / total_checked if total_checked > 0 else 1.0
 
-    gate_results["spread_integrity"] = flagged_pct <= 0.25  # Allow up to 25% strikes with wide spread
-    gate_results["iv_sanity"] = not any(
-        "IV_ANOMALY" in " ".join(sc.issues) for sc in strike_checks
-    )
+    gate_results["spread_integrity"] = (
+        flagged_pct <= 0.25
+    )  # Allow up to 25% strikes with wide spread
+    gate_results["iv_sanity"] = not any("IV_ANOMALY" in " ".join(sc.issues) for sc in strike_checks)
 
     if not gate_results["spread_integrity"]:
         issues.append(
@@ -243,9 +246,7 @@ def validate_options_chain(
     gates_passed = sum(1 for v in gate_results.values() if v)
     total_gates = len(gate_results)
     strike_quality = valid_strikes / max(total_checked, 1)
-    quality_score = round(
-        (gates_passed / max(total_gates, 1)) * 50.0 + strike_quality * 50.0, 1
-    )
+    quality_score = round((gates_passed / max(total_gates, 1)) * 50.0 + strike_quality * 50.0, 1)
 
     # Determine overall action eligibility
     all_gates_pass = all(gate_results.values())

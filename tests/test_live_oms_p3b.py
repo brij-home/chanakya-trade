@@ -5,8 +5,6 @@ P3-B unit tests: OMS State Machine, Pre-Trade Validation, and Kill Switch System
 """
 
 import pytest
-import tempfile
-from pathlib import Path
 
 # ── Kill Switch Tests ─────────────────────────────────────────────────────────
 
@@ -50,7 +48,9 @@ def test_kill_switch_deactivation(ks_registry):
     ks_registry.activate(KillSwitchLevel.SYSTEM, "ALL", "Test halt", "ADMIN")
     assert ks_registry.is_blocked()[0] is True
 
-    result = ks_registry.deactivate(KillSwitchLevel.SYSTEM, "ALL", actor="ADMIN", reason="All clear")
+    result = ks_registry.deactivate(
+        KillSwitchLevel.SYSTEM, "ALL", actor="ADMIN", reason="All clear"
+    )
     assert result is True
     assert ks_registry.is_blocked()[0] is False
 
@@ -110,6 +110,7 @@ def test_pretrade_valid_market_order_passes(tmp_path, monkeypatch):
     """A clean market order with no kill switches, fresh data, and sufficient cash passes."""
     # Monkeypatch kill switch registry to use temp dir
     from engine import kill_switch as ks_module
+
     ks_module._registry = KillSwitchRegistry(data_dir=tmp_path)
 
     result = validate_pretrade(
@@ -130,6 +131,7 @@ def test_pretrade_valid_market_order_passes(tmp_path, monkeypatch):
 def test_pretrade_system_kill_switch_blocks(tmp_path, monkeypatch):
     """System-level kill switch blocks the order."""
     from engine import kill_switch as ks_module
+
     reg = KillSwitchRegistry(data_dir=tmp_path)
     reg.activate(KillSwitchLevel.SYSTEM, "ALL", "Circuit breaker", "ADMIN")
     ks_module._registry = reg
@@ -153,6 +155,7 @@ def test_pretrade_system_kill_switch_blocks(tmp_path, monkeypatch):
 def test_pretrade_stale_data_blocks(tmp_path, monkeypatch):
     """Quote older than 60 seconds blocks the order."""
     from engine import kill_switch as ks_module
+
     ks_module._registry = KillSwitchRegistry(data_dir=tmp_path)
 
     result = validate_pretrade(
@@ -171,6 +174,7 @@ def test_pretrade_stale_data_blocks(tmp_path, monkeypatch):
 def test_pretrade_insufficient_cash_blocks(tmp_path, monkeypatch):
     """Insufficient buying power blocks the order."""
     from engine import kill_switch as ks_module
+
     ks_module._registry = KillSwitchRegistry(data_dir=tmp_path)
 
     result = validate_pretrade(
@@ -189,12 +193,13 @@ def test_pretrade_insufficient_cash_blocks(tmp_path, monkeypatch):
 def test_pretrade_lot_size_violation_blocks(tmp_path, monkeypatch):
     """Non-lot-size-aligned quantity blocks the order."""
     from engine import kill_switch as ks_module
+
     ks_module._registry = KillSwitchRegistry(data_dir=tmp_path)
 
     result = validate_pretrade(
         symbol="NIFTY24SEP25000CE",
         side="BUY",
-        quantity=3,        # Not a multiple of lot size 50
+        quantity=3,  # Not a multiple of lot size 50
         lot_size=50,
         segment="OPT",
         ltp=250.0,
@@ -209,6 +214,7 @@ def test_pretrade_lot_size_violation_blocks(tmp_path, monkeypatch):
 def test_pretrade_price_band_violation_blocks(tmp_path, monkeypatch):
     """Limit price outside circuit band blocks the order."""
     from engine import kill_switch as ks_module
+
     ks_module._registry = KillSwitchRegistry(data_dir=tmp_path)
 
     result = validate_pretrade(
@@ -216,7 +222,7 @@ def test_pretrade_price_band_violation_blocks(tmp_path, monkeypatch):
         side="BUY",
         quantity=10,
         order_type="LIMIT",
-        price=5000.0,      # > 20% above prev_close=2500 → outside band
+        price=5000.0,  # > 20% above prev_close=2500 → outside band
         prev_close=2500.0,
         quote_age_seconds=5.0,
         available_cash=500_000.0,
@@ -229,6 +235,7 @@ def test_pretrade_price_band_violation_blocks(tmp_path, monkeypatch):
 def test_pretrade_missing_quote_age_blocks(tmp_path, monkeypatch):
     """Missing quote age (unknown freshness) blocks the order."""
     from engine import kill_switch as ks_module
+
     ks_module._registry = KillSwitchRegistry(data_dir=tmp_path)
 
     result = validate_pretrade(
@@ -241,13 +248,16 @@ def test_pretrade_missing_quote_age_blocks(tmp_path, monkeypatch):
         skip_session_check=True,
     )
     assert result.is_eligible is False
-    assert any("fresh" in r.lower() or "age" in r.lower() or "unknown" in r.lower()
-               for r in result.blocking_reasons)
+    assert any(
+        "fresh" in r.lower() or "age" in r.lower() or "unknown" in r.lower()
+        for r in result.blocking_reasons
+    )
 
 
 def test_pretrade_sell_bypasses_buying_power(tmp_path, monkeypatch):
     """SELL orders skip buying power check."""
     from engine import kill_switch as ks_module
+
     ks_module._registry = KillSwitchRegistry(data_dir=tmp_path)
 
     result = validate_pretrade(
@@ -256,7 +266,7 @@ def test_pretrade_sell_bypasses_buying_power(tmp_path, monkeypatch):
         quantity=10,
         ltp=4000.0,
         quote_age_seconds=5.0,
-        available_cash=0.0,   # Zero cash — but SELL doesn't need margin
+        available_cash=0.0,  # Zero cash — but SELL doesn't need margin
         skip_session_check=True,
     )
     # Sell should pass buying_power gate
@@ -266,13 +276,14 @@ def test_pretrade_sell_bypasses_buying_power(tmp_path, monkeypatch):
 def test_pretrade_concentration_warning_non_blocking(tmp_path, monkeypatch):
     """High portfolio concentration generates warning but doesn't block."""
     from engine import kill_switch as ks_module
+
     ks_module._registry = KillSwitchRegistry(data_dir=tmp_path)
 
     result = validate_pretrade(
         symbol="RELIANCE",
         side="BUY",
         quantity=100,
-        ltp=3000.0,          # ₹3L order
+        ltp=3000.0,  # ₹3L order
         quote_age_seconds=5.0,
         available_cash=5_000_000.0,
         portfolio_value=500_000.0,  # ₹3L / ₹5L = 60% → > 20% limit
@@ -285,7 +296,10 @@ def test_pretrade_concentration_warning_non_blocking(tmp_path, monkeypatch):
 # ── OMS State Machine Tests ───────────────────────────────────────────────────
 
 from engine.oms import (
-    OrderBook, OrderState, VALID_TRANSITIONS, TERMINAL_STATES,
+    OrderBook,
+    OrderState,
+    VALID_TRANSITIONS,
+    TERMINAL_STATES,
     compute_preview_hash,
 )
 
@@ -299,8 +313,12 @@ def book(tmp_path):
 def test_oms_create_order_draft(book):
     """Creating an order starts in DRAFT state."""
     order = book.create(
-        symbol="RELIANCE", exchange="NSE", side="BUY",
-        order_type="MARKET", quantity=10, actor="user1",
+        symbol="RELIANCE",
+        exchange="NSE",
+        side="BUY",
+        order_type="MARKET",
+        quantity=10,
+        actor="user1",
     )
     assert order.state == OrderState.DRAFT.value
     assert order.order_id.startswith("ORD-")
@@ -311,8 +329,14 @@ def test_oms_create_order_draft(book):
 def test_oms_full_happy_path_paper(book):
     """Full lifecycle: DRAFT → PREVIEWED → CONFIRMED → SUBMITTING → BROKER_ACCEPTED → OPEN → FILLED."""
     order = book.create(
-        symbol="TCS", exchange="NSE", side="BUY",
-        order_type="LIMIT", quantity=5, price=4000.0, actor="user1", mode="PAPER"
+        symbol="TCS",
+        exchange="NSE",
+        side="BUY",
+        order_type="LIMIT",
+        quantity=5,
+        price=4000.0,
+        actor="user1",
+        mode="PAPER",
     )
     assert order.state == OrderState.DRAFT.value
 
@@ -347,8 +371,12 @@ def test_oms_full_happy_path_paper(book):
 def test_oms_partial_fill_then_fill(book):
     """Partial fill updates quantities correctly; then FILLED on completion."""
     order = book.create(
-        symbol="INFY", exchange="NSE", side="BUY",
-        order_type="MARKET", quantity=100, actor="trader",
+        symbol="INFY",
+        exchange="NSE",
+        side="BUY",
+        order_type="MARKET",
+        quantity=100,
+        actor="trader",
     )
     book.preview(order.order_id, "trader")
     book.confirm(order.order_id, "trader")
@@ -374,8 +402,12 @@ def test_oms_partial_fill_then_fill(book):
 def test_oms_rejection_path(book):
     """Rejected orders are terminal."""
     order = book.create(
-        symbol="SBIN", exchange="NSE", side="BUY",
-        order_type="MARKET", quantity=50, actor="user2",
+        symbol="SBIN",
+        exchange="NSE",
+        side="BUY",
+        order_type="MARKET",
+        quantity=50,
+        actor="user2",
     )
     book.preview(order.order_id, "user2")
     book.confirm(order.order_id, "user2")
@@ -390,8 +422,12 @@ def test_oms_rejection_path(book):
 def test_oms_unknown_state_and_reconciliation(book):
     """UNKNOWN → RECONCILIATION_REQUIRED path for broker timeout."""
     order = book.create(
-        symbol="HDFCBANK", exchange="NSE", side="SELL",
-        order_type="MARKET", quantity=20, actor="system",
+        symbol="HDFCBANK",
+        exchange="NSE",
+        side="SELL",
+        order_type="MARKET",
+        quantity=20,
+        actor="system",
     )
     book.preview(order.order_id, "system")
     book.confirm(order.order_id, "system")
@@ -413,13 +449,21 @@ def test_oms_idempotency_same_key_returns_same_order(book):
     """Creating two orders with the same idempotency_key returns the same order."""
     idem = "unique-idem-key-abc"
     order1 = book.create(
-        symbol="WIPRO", exchange="NSE", side="BUY",
-        order_type="MARKET", quantity=10, actor="user1",
+        symbol="WIPRO",
+        exchange="NSE",
+        side="BUY",
+        order_type="MARKET",
+        quantity=10,
+        actor="user1",
         idempotency_key=idem,
     )
     order2 = book.create(
-        symbol="WIPRO", exchange="NSE", side="BUY",
-        order_type="MARKET", quantity=10, actor="user1",
+        symbol="WIPRO",
+        exchange="NSE",
+        side="BUY",
+        order_type="MARKET",
+        quantity=10,
+        actor="user1",
         idempotency_key=idem,
     )
     assert order1.order_id == order2.order_id
@@ -428,8 +472,13 @@ def test_oms_idempotency_same_key_returns_same_order(book):
 def test_oms_preview_hash_tamper_detection(book):
     """Tampered preview hash is rejected on confirm."""
     order = book.create(
-        symbol="RELIANCE", exchange="NSE", side="BUY",
-        order_type="LIMIT", quantity=5, price=3000.0, actor="user1",
+        symbol="RELIANCE",
+        exchange="NSE",
+        side="BUY",
+        order_type="LIMIT",
+        quantity=5,
+        price=3000.0,
+        actor="user1",
     )
     book.preview(order.order_id, "user1")
 
@@ -440,8 +489,12 @@ def test_oms_preview_hash_tamper_detection(book):
 def test_oms_terminal_state_blocks_further_transitions(book):
     """Orders in terminal states cannot be transitioned further."""
     order = book.create(
-        symbol="LTIM", exchange="NSE", side="BUY",
-        order_type="MARKET", quantity=5, actor="user1",
+        symbol="LTIM",
+        exchange="NSE",
+        side="BUY",
+        order_type="MARKET",
+        quantity=5,
+        actor="user1",
     )
     book.preview(order.order_id, "user1")
     book.confirm(order.order_id, "user1")
@@ -457,20 +510,30 @@ def test_oms_terminal_state_blocks_further_transitions(book):
 def test_oms_invalid_transition_raises(book):
     """Invalid state transitions raise ValueError."""
     order = book.create(
-        symbol="COFORGE", exchange="NSE", side="BUY",
-        order_type="MARKET", quantity=10, actor="u1",
+        symbol="COFORGE",
+        exchange="NSE",
+        side="BUY",
+        order_type="MARKET",
+        quantity=10,
+        actor="u1",
     )
     # DRAFT → FILLED is not a valid transition
     with pytest.raises(ValueError, match="Invalid transition"):
         from engine.oms import OrderState as OS
+
         book._transition(order, OS.FILLED, "u1", "Attempted invalid jump")
 
 
 def test_oms_cancel_flow(book):
     """OPEN → CANCEL_PENDING → CANCELLED flow."""
     order = book.create(
-        symbol="DRREDDY", exchange="NSE", side="BUY",
-        order_type="LIMIT", quantity=5, price=6000.0, actor="user1",
+        symbol="DRREDDY",
+        exchange="NSE",
+        side="BUY",
+        order_type="LIMIT",
+        quantity=5,
+        price=6000.0,
+        actor="user1",
     )
     book.preview(order.order_id, "user1")
     book.confirm(order.order_id, "user1")
@@ -491,8 +554,12 @@ def test_oms_cancel_flow(book):
 def test_oms_get_unreconciled(book):
     """get_unreconciled returns UNKNOWN and RECONCILIATION_REQUIRED orders."""
     order = book.create(
-        symbol="AXISBANK", exchange="NSE", side="BUY",
-        order_type="MARKET", quantity=10, actor="u1",
+        symbol="AXISBANK",
+        exchange="NSE",
+        side="BUY",
+        order_type="MARKET",
+        quantity=10,
+        actor="u1",
     )
     book.preview(order.order_id, "u1")
     book.confirm(order.order_id, "u1")
@@ -508,7 +575,9 @@ def test_oms_preview_hash_computation():
     """Preview hash is deterministic for same inputs."""
     h1 = compute_preview_hash("RELIANCE", "NSE", "BUY", "LIMIT", 10, 2900.0, "CNC", "PAPER")
     h2 = compute_preview_hash("RELIANCE", "NSE", "BUY", "LIMIT", 10, 2900.0, "CNC", "PAPER")
-    h3 = compute_preview_hash("RELIANCE", "NSE", "BUY", "LIMIT", 10, 2901.0, "CNC", "PAPER")  # Different price
+    h3 = compute_preview_hash(
+        "RELIANCE", "NSE", "BUY", "LIMIT", 10, 2901.0, "CNC", "PAPER"
+    )  # Different price
     assert h1 == h2
     assert h1 != h3
 

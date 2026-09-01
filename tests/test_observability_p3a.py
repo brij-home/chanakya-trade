@@ -4,12 +4,10 @@ tests/test_observability_p3a.py
 P3-A unit tests: Structured Observability, SLO Metrics, and Provider Health.
 """
 
-import time
 import pytest
 from engine.observability import (
     new_correlation_id,
     ObservabilityRegistry,
-    get_registry,
     CRITICAL_JOURNEY_SLOS,
 )
 from fastapi.testclient import TestClient
@@ -28,6 +26,7 @@ def obs():
 
 
 # ── Correlation ID Tests ─────────────────────────────────────────────────────
+
 
 def test_correlation_id_format():
     """Verify generated correlation IDs have the correct structure."""
@@ -64,6 +63,7 @@ def test_registry_stores_correlation_ids(obs):
 
 # ── SLO Metric Tests ─────────────────────────────────────────────────────────
 
+
 def test_slo_report_empty_registry(obs):
     """Empty registry returns OK status and empty journeys."""
     report = obs.get_slo_report()
@@ -76,8 +76,9 @@ def test_slo_report_records_and_computes_availability(obs):
     for i in range(90):
         obs.record_metric("quote_fetch", latency_ms=100.0, success=True)
     for i in range(10):
-        obs.record_metric("quote_fetch", latency_ms=100.0, success=False,
-                          error_type="PROVIDER_TIMEOUT")
+        obs.record_metric(
+            "quote_fetch", latency_ms=100.0, success=False, error_type="PROVIDER_TIMEOUT"
+        )
 
     report = obs.get_slo_report(journey_id="quote_fetch")
     journey = report["journeys"]["quote_fetch"]
@@ -87,7 +88,8 @@ def test_slo_report_records_and_computes_availability(obs):
 
 def test_slo_breach_when_below_target(obs):
     """SLO breach is flagged when availability falls below target."""
-    slo = CRITICAL_JOURNEY_SLOS["paper_order_submit"]
+    target = CRITICAL_JOURNEY_SLOS["paper_order_submit"]
+    assert target.availability_pct == 99.9
     # paper_order_submit needs 99.9% availability — inject enough failures
     for i in range(980):
         obs.record_metric("paper_order_submit", latency_ms=50.0, success=True)
@@ -126,6 +128,7 @@ def test_critical_journey_slos_are_defined():
 
 
 # ── Provider Freshness Tests ─────────────────────────────────────────────────
+
 
 def test_provider_health_empty_registry(obs):
     """Empty provider registry returns healthy status."""
@@ -180,6 +183,7 @@ def test_provider_unhealthy_after_many_errors(obs):
 
 # ── Liveness / Readiness Tests ───────────────────────────────────────────────
 
+
 def test_liveness_always_alive(obs):
     """Liveness probe returns 'alive' status."""
     result = obs.get_liveness()
@@ -205,6 +209,7 @@ def test_readiness_not_ready_with_unhealthy_provider(obs):
 
 
 # ── API Contract Tests ────────────────────────────────────────────────────────
+
 
 def test_health_endpoint_returns_alive(client):
     """GET /health returns alive status."""
