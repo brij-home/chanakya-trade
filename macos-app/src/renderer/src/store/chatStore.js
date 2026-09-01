@@ -1,4 +1,5 @@
 import { create } from 'zustand'
+import { getSymbolExchange } from '../data/universeData'
 
 /** Get the API base URL — works in both Electron and web mode. */
 export function getBaseUrl(port) {
@@ -158,6 +159,13 @@ export const useChatStore = create((set, get) => ({
   streamCancel:  null,   // () => void — closes the active EventSource
   activeStreamId: null,  // stream_id from SSE started event (#113)
 
+  // ── Server-authoritative application mode (P0-A) ──────────
+  // PAPER: real data, simulated execution (default for new installs)
+  // DEMO:  synthetic fixtures, isolated from paper/live stores
+  // LIVE:  real data + real execution (requires explicit activation)
+  appMode:     'PAPER',   // 'PAPER' | 'DEMO' | 'LIVE'
+  modeLoading: false,     // true while fetching mode from /api/mode
+
   setPort:         (port)   => set({ port, sidecarError: null }),
   setSidecarError: (msg)    => set({ sidecarError: msg }),
   setBrokerStatus:   (status)   => set({ brokerStatus: status }),
@@ -168,6 +176,10 @@ export const useChatStore = create((set, get) => ({
     const name      = broker ? ({ zerodha: 'Zerodha', groww: 'Groww', angel_one: 'Angel One', upstox: 'Upstox', fyers: 'Fyers' }[broker] ?? broker) : null
     set({ brokerStatuses: statuses, brokerStatus: { connected, broker: name } })
   },
+
+  // Set server-authoritative app mode (PAPER / DEMO / LIVE)
+  setAppMode: (mode) => set({ appMode: mode, modeLoading: false }),
+  setModeLoading: (loading) => set({ modeLoading: loading }),
 
   // ── Session management ────────────────────────────────────
 
@@ -281,11 +293,13 @@ export const useChatStore = create((set, get) => ({
 
   // Streaming support — used by analyze SSE
   startStreamingMessage: (id, symbol, exchange) => set((s) => {
+    const sym = symbol ? String(symbol).toUpperCase().trim() : symbol
+    const resolvedExch = (!exchange || exchange === 'NSE') ? getSymbolExchange(sym) : exchange
     const newMessages = [...s.messages, {
       id,
       role: 'assistant',
       cardType: 'streaming_analysis',
-      data: { symbol, exchange, analysts: [], debate_steps: [], synthesis_text: null, phase: 'analysts', report: null, trade_plans: null },
+      data: { symbol: sym, exchange: resolvedExch, analysts: [], debate_steps: [], synthesis_text: null, phase: 'analysts', report: null, trade_plans: null },
     }]
     const session = s.sessions[s.activeSessionId]
     let sessions = s.sessions

@@ -98,3 +98,49 @@ def test_resolve_dynamic_universe_auto_market_aware():
         assert "Top-down routed to leading sectors" in reason
         # Should include symbols from leading sectors (defence or it)
         assert any(sym in ["HAL", "BEL", "TCS", "INFY"] for sym in resolved)
+
+
+def test_resolve_dynamic_universe_multi_asset_presets():
+    # Commodities preset
+    comm_syms, comm_reason = resolve_dynamic_universe("commodities")
+    assert "GOLD" in comm_syms
+    assert "CRUDEOIL" in comm_syms
+    assert "Thematic preset" in comm_reason
+    assert get_stock_sector("GOLD")[0] == "commodity"
+
+    # ETF preset
+    etf_syms, etf_reason = resolve_dynamic_universe("etfs")
+    assert "NIFTYBEES" in etf_syms
+    assert "GOLDBEES" in etf_syms
+    assert "Thematic preset" in etf_reason
+    assert get_stock_sector("NIFTYBEES")[0] == "etf"
+
+    # Currency preset
+    curr_syms, curr_reason = resolve_dynamic_universe("currencies")
+    assert "USDINR" in curr_syms
+    assert "Thematic preset" in curr_reason
+    assert get_stock_sector("USDINR")[0] == "currency"
+
+    # Index preset
+    idx_syms, idx_reason = resolve_dynamic_universe("indices")
+    assert "NIFTY50" in idx_syms
+    assert "BANKNIFTY" in idx_syms
+    assert "Thematic preset" in idx_reason
+
+    # Single ticker resolution
+    gold_single, r1 = resolve_dynamic_universe("MCX:GOLD")
+    assert gold_single == ["GOLD"]
+    assert "Single ticker" in r1
+
+    usd_single, r2 = resolve_dynamic_universe("CDS:USDINR")
+    assert usd_single == ["USDINR"]
+    assert "Single ticker" in r2
+
+
+def test_resolve_dynamic_universe_auto_sector():
+    # Ensure "auto" resolves to Automobile sector taxonomy, NOT auto_market_aware
+    auto_syms, reason = resolve_dynamic_universe("auto")
+    assert "TATAMOTORS" in auto_syms
+    assert "MARUTI" in auto_syms
+    assert "M&M" in auto_syms
+    assert "Sector watchlist: Automobiles & Mobility" in reason

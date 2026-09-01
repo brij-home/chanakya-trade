@@ -503,7 +503,7 @@ def _wizard_ai_provider(items: list[tuple[str, str, bool]]) -> None:
             "    AI_PROVIDER=openai\n"
             "    OPENAI_BASE_URL=https://api.groq.com/openai/v1\n"
             "    OPENAI_API_KEY=<key from console.groq.com>\n"
-            "    OPENAI_MODEL=llama-3.3-70b-versatile\n\n"
+            "    OPENAI_MODEL=qwen/qwen3.8-27b\n\n"
             "  Select option [bold]7[/bold] (Custom OpenAI-compatible) to configure these.\n"
         )
 
@@ -540,7 +540,7 @@ def _wizard_ai_provider(items: list[tuple[str, str, bool]]) -> None:
         console.print(
             "\n  [dim]Model name depends on your provider. Examples:[/dim]\n"
             "    OpenRouter:   [cyan]anthropic/claude-sonnet-4[/cyan]  or  [cyan]google/gemini-2.5-pro[/cyan]\n"
-            "    Groq:         [cyan]llama-3.3-70b-versatile[/cyan]\n"
+            "    Groq:         [cyan]qwen/qwen3.8-27b[/cyan]\n"
             "    PaleDotBlue:  check your provider's model list\n"
             "    [dim]Default: gpt-4o (only works with OpenAI itself)[/dim]\n"
         )

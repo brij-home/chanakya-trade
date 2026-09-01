@@ -144,12 +144,8 @@ def get_ohlcv(
 
     df = pd.DataFrame(raw)
     df.rename(columns={"date": "date"}, inplace=True)
-    df["date"] = pd.to_datetime(df["date"])
-    if hasattr(df["date"].dt, "tz") and df["date"].dt.tz is not None:
-        df["date"] = df["date"].dt.tz_localize(None)
+    df["date"] = pd.to_datetime(df["date"], utc=True).dt.tz_localize(None)
     df.set_index("date", inplace=True)
-    if hasattr(df.index, "tz") and df.index.tz is not None:
-        df.index = df.index.tz_localize(None)
     df = df[["open", "high", "low", "close", "volume"]].astype(float)
     df = df[~df.index.duplicated(keep="last")]
     df.sort_index(inplace=True)
@@ -157,9 +153,6 @@ def get_ohlcv(
     # Overlay latest live real-time tick
     if kite_interval == "day" and not df.empty:
         df = inject_live_tick(df, symbol=symbol, exchange=exchange)
-
-    if hasattr(df.index, "tz") and df.index.tz is not None:
-        df.index = df.index.tz_localize(None)
 
     # Save into Tier 1 In-Memory Cache (bounded to 500 entries)
     if kite_interval == "day" and not df.empty:

@@ -312,7 +312,10 @@ class TestWalkForward:
         # Walk-forward slides by test_months so 36/3 - 12/3 = more windows
         pnls = [TWENTY_TRADES] * 20  # plenty of results
 
-        with patch("engine.backtest_advanced.Backtester") as mock_bt_cls:
+        with (
+            patch("engine.backtest_advanced.Backtester") as mock_bt_cls,
+            patch("market.history.get_ohlcv", return_value=None),
+        ):
             call_count = {"n": 0}
             results = [make_result(p) for p in pnls]
 
@@ -329,7 +332,10 @@ class TestWalkForward:
         assert len(wf_result.windows) >= 2
 
     def test_consistency_ratio_in_range(self):
-        with patch("engine.backtest_advanced.Backtester") as mock_bt_cls:
+        with (
+            patch("engine.backtest_advanced.Backtester") as mock_bt_cls,
+            patch("market.history.get_ohlcv", return_value=None),
+        ):
             call_count = {"n": 0}
             # Alternate profitable and losing windows
             pnl_sets = [[5.0, 3.0, -1.0], [-2.0, -3.0, 1.0]] * 10
@@ -348,7 +354,10 @@ class TestWalkForward:
         assert 0.0 <= wf_result.consistency_ratio <= 1.0
 
     def test_overfitting_ratio_computed(self):
-        with patch("engine.backtest_advanced.Backtester") as mock_bt_cls:
+        with (
+            patch("engine.backtest_advanced.Backtester") as mock_bt_cls,
+            patch("market.history.get_ohlcv", return_value=None),
+        ):
             call_count = {"n": 0}
             results = [make_result(TWENTY_TRADES)] * 20
 
@@ -368,7 +377,10 @@ class TestWalkForward:
             assert abs(wf_result.overfitting_ratio - expected) < 1e-6
 
     def test_avg_test_return_is_mean_of_windows(self):
-        with patch("engine.backtest_advanced.Backtester") as mock_bt_cls:
+        with (
+            patch("engine.backtest_advanced.Backtester") as mock_bt_cls,
+            patch("market.history.get_ohlcv", return_value=None),
+        ):
             call_count = {"n": 0}
             results = [make_result(TWENTY_TRADES)] * 20
 
@@ -388,7 +400,10 @@ class TestWalkForward:
             assert abs(wf_result.avg_test_return - manual_avg) < 1e-6
 
     def test_window_fields_populated(self):
-        with patch("engine.backtest_advanced.Backtester") as mock_bt_cls:
+        with (
+            patch("engine.backtest_advanced.Backtester") as mock_bt_cls,
+            patch("market.history.get_ohlcv", return_value=None),
+        ):
             call_count = {"n": 0}
             results = [make_result(TWENTY_TRADES)] * 20
 
@@ -411,7 +426,10 @@ class TestWalkForward:
             assert 0.0 <= w.test_win_rate <= 100.0
 
     def test_print_summary_does_not_crash(self, capsys):
-        with patch("engine.backtest_advanced.Backtester") as mock_bt_cls:
+        with (
+            patch("engine.backtest_advanced.Backtester") as mock_bt_cls,
+            patch("market.history.get_ohlcv", return_value=None),
+        ):
             call_count = {"n": 0}
             results = [make_result(TWENTY_TRADES)] * 20
 

@@ -130,6 +130,7 @@ class TestDCF:
         assert with_debt.intrinsic_value < no_debt.intrinsic_value
 
 
+@pytest.mark.network
 class TestDCFFromSymbol:
     def test_dcf_for_symbol_returns_result(self):
         from analysis.dcf import dcf_for_symbol

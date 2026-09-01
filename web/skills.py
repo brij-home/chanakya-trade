@@ -46,7 +46,7 @@ import json
 import os
 import sys
 from datetime import datetime
-from typing import Optional
+from typing import Any, Optional
 from uuid import uuid4
 
 # Fix Windows charmap / cp1252 codec errors for unicode console prints
@@ -64,7 +64,7 @@ if sys.platform == "win32":
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 from rich.console import Console
 
 from agent.tools import _serialise
@@ -86,16 +86,38 @@ _active_streams: dict[str, object] = {}
 # ── Request models ────────────────────────────────────────────
 
 
-class SymbolRequest(BaseModel):
+class InstrumentBaseRequest(BaseModel):
+    """Canonical Single Source of Truth (SSOT) request model that normalizes (symbol, exchange) at API ingress."""
+
     symbol: str
     exchange: str = "NSE"
 
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_instrument(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            sym = data.get("symbol")
+            exch = data.get("exchange")
+            if sym:
+                from analysis.universe import normalize_symbol_exchange
 
-class BacktestRequest(BaseModel):
-    symbol: str
+                clean_sym, clean_exch = normalize_symbol_exchange(sym, exch)
+                data["symbol"] = clean_sym
+                data["exchange"] = clean_exch
+        return data
+
+
+class SymbolRequest(InstrumentBaseRequest):
+    pass
+
+
+class BacktestRequest(InstrumentBaseRequest):
     strategy: str = "rsi"
     period: str = "1y"
-    exchange: str = "NSE"
+    capital: Optional[float] = None
+    initial_capital: Optional[float] = None
+    timeframe: Optional[str] = "1d"
+    risk_pct: Optional[float] = 1.0
     fast: bool = False  # True → vectorized engine (<1s, no slippage sim)
 
 
@@ -117,9 +139,7 @@ class DealsRequest(BaseModel):
     days: int = 5
 
 
-class AnalyzeRequest(BaseModel):
-    symbol: str
-    exchange: str = "NSE"
+class AnalyzeRequest(InstrumentBaseRequest):
     channel: str = "api"  # cli | electron | api | whatsapp (#179)
     force: bool = False  # True -> bypass cache and force fresh LLM run
 
@@ -129,9 +149,7 @@ class ChatRequest(BaseModel):
     session_id: str = "default"  # use different IDs for separate conversations
 
 
-class AlertAddRequest(BaseModel):
-    symbol: str
-    exchange: str = "NSE"
+class AlertAddRequest(InstrumentBaseRequest):
     # Price alert fields
     condition: Optional[str] = None  # ABOVE | BELOW | CROSSES
     threshold: Optional[float] = None
@@ -154,9 +172,7 @@ class HintRequest(BaseModel):
     hint: str
 
 
-class HistoryRequest(BaseModel):
-    symbol: str
-    exchange: str = "NSE"
+class HistoryRequest(InstrumentBaseRequest):
     interval: str = "day"  # day, 1h, 15m, 5m, 1m
     days: int = 180
 
@@ -861,7 +877,10 @@ async def skill_backtest(req: BacktestRequest):
         else:
             from engine.backtest import run_backtest
 
-            result = run_backtest(req.symbol.upper(), req.strategy, period=req.period)
+            kwargs = {"period": req.period}
+            if cap := (req.capital or req.initial_capital):
+                kwargs["capital"] = cap
+            result = run_backtest(req.symbol.upper(), req.strategy, **kwargs)
         return _ok(result)
     except Exception as e:
         raise _err(str(e))
@@ -897,7 +916,18 @@ async def skill_analyze(req: AnalyzeRequest):
         from engine.analysis_cache import analysis_cache
 
         sym = req.symbol.upper().strip()
-        exch = req.exchange.upper().strip()
+        exch = req.exchange.upper().strip() if req.exchange else "NSE"
+        if ":" in sym:
+            exch, sym = sym.split(":", 1)
+        elif exch == "NSE":
+            from market.quotes import _MCX_SYMBOLS, _CDS_SYMBOLS, _BSE_SYMBOLS
+
+            if sym in _MCX_SYMBOLS:
+                exch = "MCX"
+            elif sym in _CDS_SYMBOLS:
+                exch = "CDS"
+            elif sym in _BSE_SYMBOLS:
+                exch = "BSE"
 
         # Check cache immediately if not forcing fresh run (0 tokens, <1ms)
         if not req.force:
@@ -1015,7 +1045,18 @@ async def skill_analyze_stream(symbol: str, exchange: str = "NSE", force: bool =
     loop = asyncio.get_running_loop()
     queue: asyncio.Queue = asyncio.Queue()
     sym = symbol.upper().strip()
-    exch = exchange.upper().strip()
+    exch = exchange.upper().strip() if exchange else "NSE"
+    if ":" in sym:
+        exch, sym = sym.split(":", 1)
+    elif exch == "NSE":
+        from market.quotes import _MCX_SYMBOLS, _CDS_SYMBOLS, _BSE_SYMBOLS
+
+        if sym in _MCX_SYMBOLS:
+            exch = "MCX"
+        elif sym in _CDS_SYMBOLS:
+            exch = "CDS"
+        elif sym in _BSE_SYMBOLS:
+            exch = "BSE"
     stream_id = f"{sym}_{exch}_{uuid4().hex[:8]}"
 
     def _cb(event: dict):
@@ -1177,16 +1218,30 @@ async def skill_deep_analyze(req: AnalyzeRequest):
         from agent.core import get_provider
         from agent.deep_agent import DeepAnalyzer
 
+        sym = req.symbol.upper().strip()
+        exch = req.exchange.upper().strip() if req.exchange else "NSE"
+        if ":" in sym:
+            exch, sym = sym.split(":", 1)
+        elif exch == "NSE":
+            from market.quotes import _MCX_SYMBOLS, _CDS_SYMBOLS, _BSE_SYMBOLS
+
+            if sym in _MCX_SYMBOLS:
+                exch = "MCX"
+            elif sym in _CDS_SYMBOLS:
+                exch = "CDS"
+            elif sym in _BSE_SYMBOLS:
+                exch = "BSE"
+
         registry = build_registry()
         provider = get_provider(registry=registry)
         analyzer = DeepAnalyzer(registry, provider, verbose=False)
-        report = analyzer.analyze(req.symbol.upper(), req.exchange.upper())
+        report = analyzer.analyze(sym, exch)
 
         return {
             "status": "ok",
             "data": {
-                "symbol": req.symbol.upper(),
-                "exchange": req.exchange.upper(),
+                "symbol": sym,
+                "exchange": exch,
                 "report": report,
             },
         }
@@ -1243,6 +1298,7 @@ async def skill_chat(req: ChatRequest):
         {"message": "What does the options chain say?", "session_id": "user-123"}
     """
     try:
+        import asyncio
         from agent.core import TradingAgent
 
         if req.session_id not in _chat_sessions:
@@ -1250,10 +1306,10 @@ async def skill_chat(req: ChatRequest):
                 # Evict oldest registered session
                 oldest_key = next(iter(_chat_sessions))
                 _chat_sessions.pop(oldest_key, None)
-            _chat_sessions[req.session_id] = TradingAgent(stream=False)
+            _chat_sessions[req.session_id] = await asyncio.to_thread(TradingAgent, stream=False)
 
         agent = _chat_sessions[req.session_id]
-        response = agent.chat(req.message)
+        response = await asyncio.to_thread(agent.chat, req.message)
 
         return {
             "status": "ok",
@@ -1264,7 +1320,26 @@ async def skill_chat(req: ChatRequest):
             },
         }
     except Exception as e:
-        raise _err(str(e))
+        # Fallback to direct quantitative response
+        try:
+            from agent.core import TradingAgent
+
+            fallback_agent = TradingAgent(stream=False)
+            fallback_response = fallback_agent._fallback_chat(req.message, str(e))
+        except Exception:
+            fallback_response = (
+                f"> ⚠️ **AI Assistant Notice**\n\n"
+                f"Encountered temporary issue: `{str(e)}`\n\n"
+                f"Please verify your AI API key in Settings or try a specific command like `analyze {req.message.upper()}`."
+            )
+        return {
+            "status": "ok",
+            "data": {
+                "session_id": req.session_id,
+                "response": fallback_response,
+                "history_length": 1,
+            },
+        }
 
 
 class ChatResetRequest(BaseModel):
@@ -1768,37 +1843,61 @@ async def skill_risk_report():
 # ── Broker Statement Reconciliation ───────────────────────────
 
 
-@router.post("/reconcile")
-async def skill_reconcile():
+class ReconcileRequest(BaseModel):
+    internal_positions: Optional[list[dict[str, Any]]] = None
+    broker_positions: Optional[list[dict[str, Any]]] = None
+    internal_cash: Optional[float] = None
+    broker_cash: Optional[float] = None
+    broker_name: Optional[str] = None
+
+
+@router.post("/reconcile", operation_id="skill_reconcile_post")
+@router.get("/reconcile", operation_id="skill_reconcile_get")
+async def skill_reconcile(req: Optional[ReconcileRequest] = None):
     """Reconcile internal position ledger against broker statement snapshot."""
     try:
-        from engine.reconciliation import reconcile_ledger
         from engine.provenance import attach_provenance
+        from engine.reconciliation import reconcile_ledger
 
-        try:
-            from engine.portfolio import get_portfolio_summary
-
-            summary = get_portfolio_summary()
-            int_positions = [
-                {"symbol": p.symbol, "qty": p.qty, "avg_price": p.avg_price, "pnl": p.pnl}
-                for p in summary.positions
-            ]
-            cash_val = (
-                summary.funds.available_cash
-                if hasattr(summary.funds, "available_cash")
-                else 1000000.0
+        if req and req.internal_positions is not None:
+            int_positions = req.internal_positions
+            brk_positions = (
+                req.broker_positions if req.broker_positions is not None else int_positions
             )
-            broker_name = summary.positions[0].broker if summary.positions else "PAPER_SIMULATOR"
-        except Exception:
-            int_positions = []
-            cash_val = 1000000.0
-            broker_name = "PAPER_SIMULATOR"
+            cash_val = req.internal_cash if req.internal_cash is not None else 1000000.0
+            brk_cash = req.broker_cash if req.broker_cash is not None else cash_val
+            broker_name = req.broker_name or "PAPER_SIMULATOR"
+        else:
+            try:
+                from engine.portfolio import get_portfolio_summary
+
+                summary = get_portfolio_summary()
+                int_positions = [
+                    {"symbol": p.symbol, "qty": p.qty, "avg_price": p.avg_price, "pnl": p.pnl}
+                    for p in summary.positions
+                ]
+                cash_val = (
+                    summary.funds.available_cash
+                    if hasattr(summary.funds, "available_cash")
+                    else 1000000.0
+                )
+                brk_cash = cash_val
+                brk_positions = int_positions
+                broker_name = (
+                    summary.positions[0].broker if summary.positions else "PAPER_SIMULATOR"
+                )
+            except Exception:
+                int_positions = []
+                brk_positions = []
+                cash_val = 1000000.0
+                brk_cash = 1000000.0
+                broker_name = "PAPER_SIMULATOR"
 
         report = reconcile_ledger(
             internal_positions=int_positions,
-            broker_positions=int_positions,
+            broker_positions=brk_positions,
             internal_cash=cash_val,
-            broker_cash=cash_val,
+            broker_cash=brk_cash,
             broker_name=broker_name,
         )
         data = attach_provenance(
@@ -3253,9 +3352,9 @@ async def skill_trending(req: Optional[TrendingSkillRequest] = None):
 # ── High-Fidelity Workspace Snapshots ──────────────────────────
 
 
-class DashboardSnapshotRequest(BaseModel):
-    symbol: Optional[str] = "NIFTY"
-    exchange: Optional[str] = "NSE"
+class DashboardSnapshotRequest(InstrumentBaseRequest):
+    symbol: str = "NIFTY"
+    exchange: str = "NSE"
     timeframe: Optional[str] = "15m"
 
 
@@ -3279,7 +3378,13 @@ async def skill_dashboard_snapshot(req: Optional[DashboardSnapshotRequest] = Non
         exch = (req.exchange if req and req.exchange else "NSE").upper().strip()
         tf = req.timeframe if req and req.timeframe else "15m"
 
-        cache_key = f"dashboard_snapshot_v3_{sym}_{exch}_{tf}"
+        # Belt-and-suspenders: re-normalize in case caller didn't pass exchange
+        # (e.g. CRUDEOIL with no exchange → auto-detects MCX)
+        from analysis.universe import normalize_symbol_exchange
+
+        sym, exch = normalize_symbol_exchange(sym, exch)
+
+        cache_key = f"dashboard_snapshot_v5_{sym}_{exch}_{tf}"
         try:
             from engine.analysis_cache import analysis_cache
 
@@ -3289,31 +3394,135 @@ async def skill_dashboard_snapshot(req: Optional[DashboardSnapshotRequest] = Non
                 and isinstance(cached, dict)
                 and cached.get("symbol") == sym
                 and cached.get("multi_tf")
+                and len(cached.get("watchlist", [])) >= 20
             ):
                 return _ok(cached)
         except Exception:
             pass
 
-        # 1. Watchlist Quotes
+        # 1. Watchlist Quotes — comprehensive institutional universe (Equities, Indices, MCX Commodities, ETFs, Forex)
         watch_meta = [
+            # Benchmark Indices
             {"symbol": "NIFTY 50", "inst": "NSE:NIFTY 50", "name": "NIFTY 50", "tag": "INDEX"},
             {"symbol": "BANKNIFTY", "inst": "NSE:NIFTY BANK", "name": "BANK NIFTY", "tag": "INDEX"},
-            {"symbol": "RELIANCE", "inst": "NSE:RELIANCE", "name": "Reliance Ind", "tag": "READY"},
-            {"symbol": "HDFCBANK", "inst": "NSE:HDFCBANK", "name": "HDFC Bank", "tag": "VALUE"},
+            {
+                "symbol": "FINNIFTY",
+                "inst": "NSE:NIFTY FIN SERVICE",
+                "name": "FIN NIFTY",
+                "tag": "INDEX",
+            },
+            # Banking & Financial Heavyweights
+            {"symbol": "HDFCBANK", "inst": "NSE:HDFCBANK", "name": "HDFC Bank", "tag": "BANK"},
+            {"symbol": "ICICIBANK", "inst": "NSE:ICICIBANK", "name": "ICICI Bank", "tag": "BANK"},
+            {"symbol": "SBIN", "inst": "NSE:SBIN", "name": "State Bank of India", "tag": "BANK"},
+            {
+                "symbol": "KOTAKBANK",
+                "inst": "NSE:KOTAKBANK",
+                "name": "Kotak Mahindra",
+                "tag": "BANK",
+            },
+            {"symbol": "AXISBANK", "inst": "NSE:AXISBANK", "name": "Axis Bank", "tag": "BANK"},
+            {
+                "symbol": "BAJFINANCE",
+                "inst": "NSE:BAJFINANCE",
+                "name": "Bajaj Finance",
+                "tag": "FINANCE",
+            },
+            # Core Blue-Chips & Energy
+            {"symbol": "RELIANCE", "inst": "NSE:RELIANCE", "name": "Reliance Ind", "tag": "ENERGY"},
+            {"symbol": "LT", "inst": "NSE:LT", "name": "Larsen & Toubro", "tag": "INFRA"},
+            {"symbol": "ITC", "inst": "NSE:ITC", "name": "ITC Ltd", "tag": "FMCG"},
+            # Technology Leaders
             {"symbol": "INFY", "inst": "NSE:INFY", "name": "Infosys", "tag": "TECH"},
             {"symbol": "TCS", "inst": "NSE:TCS", "name": "Tata Consultancy", "tag": "TECH"},
+            {"symbol": "HCLTECH", "inst": "NSE:HCLTECH", "name": "HCL Tech", "tag": "TECH"},
+            {"symbol": "WIPRO", "inst": "NSE:WIPRO", "name": "Wipro Ltd", "tag": "TECH"},
             {"symbol": "COFORGE", "inst": "NSE:COFORGE", "name": "Coforge", "tag": "STAGE 2"},
-            {"symbol": "TRENT", "inst": "NSE:TRENT", "name": "Trent Ltd", "tag": "MOMENTUM"},
+            # Auto & Mobility
+            {"symbol": "MARUTI", "inst": "NSE:MARUTI", "name": "Maruti Suzuki", "tag": "AUTO"},
+            {"symbol": "M&M", "inst": "NSE:M&M", "name": "Mahindra & Mahindra", "tag": "AUTO"},
+            # Telecom, Pharma, Consumer & Defense
+            {
+                "symbol": "BHARTIARTL",
+                "inst": "NSE:BHARTIARTL",
+                "name": "Bharti Airtel",
+                "tag": "TELECOM",
+            },
+            {"symbol": "SUNPHARMA", "inst": "NSE:SUNPHARMA", "name": "Sun Pharma", "tag": "PHARMA"},
+            {"symbol": "TITAN", "inst": "NSE:TITAN", "name": "Titan Company", "tag": "CONSUMER"},
+            {"symbol": "TRENT", "inst": "NSE:TRENT", "name": "Trent Ltd", "tag": "STAGE 2"},
+            {"symbol": "HAL", "inst": "NSE:HAL", "name": "Hindustan Aero", "tag": "DEFENSE"},
+            {"symbol": "BEL", "inst": "NSE:BEL", "name": "Bharat Electronics", "tag": "DEFENSE"},
+            {
+                "symbol": "ADANIENT",
+                "inst": "NSE:ADANIENT",
+                "name": "Adani Enterprises",
+                "tag": "STAGE 2",
+            },
+            # MCX Commodities (auto-converted to INR with quotation unit multipliers)
+            {"symbol": "GOLD", "inst": "MCX:GOLD", "name": "MCX Gold Futures", "tag": "COMMODITY"},
+            {
+                "symbol": "SILVER",
+                "inst": "MCX:SILVER",
+                "name": "MCX Silver Futures",
+                "tag": "COMMODITY",
+            },
+            {
+                "symbol": "CRUDEOIL",
+                "inst": "MCX:CRUDEOIL",
+                "name": "MCX Crude Oil",
+                "tag": "COMMODITY",
+            },
+            {
+                "symbol": "NATURALGAS",
+                "inst": "MCX:NATURALGAS",
+                "name": "MCX Natural Gas",
+                "tag": "COMMODITY",
+            },
+            {"symbol": "COPPER", "inst": "MCX:COPPER", "name": "MCX Copper", "tag": "COMMODITY"},
+            # Benchmark ETFs
+            {
+                "symbol": "NIFTYBEES",
+                "inst": "NSE:NIFTYBEES",
+                "name": "Nippon Nifty ETF",
+                "tag": "ETF",
+            },
+            {"symbol": "GOLDBEES", "inst": "NSE:GOLDBEES", "name": "Gold BeES ETF", "tag": "ETF"},
+            {"symbol": "BANKBEES", "inst": "NSE:BANKBEES", "name": "Bank BeES ETF", "tag": "ETF"},
+            # CDS Forex
+            {"symbol": "USDINR", "inst": "CDS:USDINR", "name": "USD/INR", "tag": "FOREX"},
         ]
+        # Dynamically inject the active symbol if not already covered
+        setup_sym = sym.replace(" 50", "").strip()
+        active_inst = f"{exch}:{setup_sym}"
+        if not any(w["symbol"] == setup_sym or w["inst"] == active_inst for w in watch_meta):
+            watch_meta.append(
+                {"symbol": setup_sym, "inst": active_inst, "name": setup_sym, "tag": exch}
+            )
+
         quotes_map = {}
         try:
             quotes_map = get_quote([w["inst"] for w in watch_meta])
         except Exception:
             pass
 
+        def _resolve_quote(w: dict):
+            """Try all key variants: inst → symbol → short symbol → stripped symbol."""
+            for key in (
+                w["inst"],
+                w["symbol"],
+                w["inst"].split(":")[-1],
+                w["symbol"].replace(" 50", ""),
+                w["symbol"].replace(" BANK", ""),
+            ):
+                q = quotes_map.get(key)
+                if q and q.last_price:
+                    return q
+            return None
+
         watchlist = []
         for w in watch_meta:
-            q = quotes_map.get(w["inst"])
+            q = _resolve_quote(w)
             ltp = float(q.last_price) if q and q.last_price else 0.0
             chg = float(q.change) if q and q.change is not None else 0.0
             chg_pct = float(q.change_pct) if q and q.change_pct is not None else 0.0
@@ -3328,13 +3537,39 @@ async def skill_dashboard_snapshot(req: Optional[DashboardSnapshotRequest] = Non
                 }
             )
 
-        # Target Setup calculation specifically for sym
-        setup_sym = sym.replace(" 50", "").strip()
-        quote_target = get_quote([f"{exch}:{setup_sym}"]) or {}
-        q_obj = quote_target.get(f"{exch}:{setup_sym}")
-        cur_ltp = (float(q_obj.last_price) if q_obj and q_obj.last_price else 0.0) or get_ltp(
-            f"{exch}:{setup_sym}"
+        # Target Setup — quote specifically for the active sym (reuse from batch if already fetched)
+        q_obj = (
+            quotes_map.get(active_inst)
+            or quotes_map.get(setup_sym)
+            or (get_quote([active_inst]) or {}).get(active_inst)
         )
+        cur_ltp = float(q_obj.last_price) if q_obj and q_obj.last_price else 0.0
+        if not cur_ltp:
+            cur_ltp = get_ltp(active_inst)
+
+        # Upsert active symbol into watchlist so frontend always gets live price
+        # (handles non-standard symbols like MCX commodities that may not be in the fixed list)
+        cur_chg_pct = float(q_obj.change_pct) if q_obj and q_obj.change_pct is not None else 0.0
+        existing_idx = next((i for i, w in enumerate(watchlist) if w["symbol"] == setup_sym), None)
+        active_entry = {
+            "symbol": setup_sym,
+            "name": setup_sym,
+            "tag": exch,
+            "ltp": round(cur_ltp, 2),
+            "change": round(float(q_obj.change) if q_obj and q_obj.change is not None else 0.0, 2),
+            "change_pct": round(cur_chg_pct, 2),
+        }
+        if existing_idx is not None:
+            # Update in-place, preserving name/tag from watch_meta if we already have it
+            existing = watchlist[existing_idx]
+            watchlist[existing_idx] = {
+                **existing,
+                "ltp": active_entry["ltp"],
+                "change": active_entry["change"],
+                "change_pct": active_entry["change_pct"],
+            }
+        else:
+            watchlist.append(active_entry)
 
         # Fetch OHLCV data for setup_sym
         df = None
@@ -3946,6 +4181,19 @@ async def skill_dashboard_snapshot(req: Optional[DashboardSnapshotRequest] = Non
             ],
         }
 
+        # Global Macro Correlation Report
+        global_macro_data = None
+        try:
+            from market.global_macro import fetch_global_macro_report
+
+            global_macro_rep = fetch_global_macro_report(
+                nifty_spot=cur_ltp if "NIFTY" in sym else None
+            )
+            if global_macro_rep:
+                global_macro_data = global_macro_rep.to_dict()
+        except Exception:
+            pass
+
         payload = {
             "symbol": sym,
             "exchange": exch,
@@ -3958,6 +4206,7 @@ async def skill_dashboard_snapshot(req: Optional[DashboardSnapshotRequest] = Non
             "sector_matrix": sector_items,
             "rrg_sectors": rrg_sectors or sector_items,
             "multi_tf": multi_tf,
+            "global_macro": global_macro_data,
             "provenance": {
                 "data_source": "LIVE_TICK" if quotes_map else "EOD_HISTORICAL",
                 "as_of": f"{datetime.now().strftime('%d %b %Y, %I:%M %p IST')} • Live Market Context",
@@ -3977,6 +4226,146 @@ async def skill_dashboard_snapshot(req: Optional[DashboardSnapshotRequest] = Non
         import traceback
 
         traceback.print_exc()
+        raise _err(str(e))
+
+
+class GlobalMacroRequest(BaseModel):
+    nifty_spot: Optional[float] = None
+    use_cache: Optional[bool] = True
+
+
+@router.get("/global_macro")
+@router.post("/global_macro")
+async def skill_global_macro(req: Optional[GlobalMacroRequest] = None):
+    """
+    Evaluates institutional Global Macro Correlation & Transmission Channels:
+    GIFT NIFTY, NASDAQ 100, S&P 500, US Dollar Index (DXY), USD/INR, Brent Crude Oil,
+    US 10-Year Treasury Yield, and CBOE VIX vs India VIX, with sector impact attribution.
+    """
+    try:
+        from market.global_macro import fetch_global_macro_report
+
+        spot = req.nifty_spot if req else None
+        use_cache = req.use_cache if req is not None and req.use_cache is not None else True
+        report = fetch_global_macro_report(nifty_spot=spot, use_cache=use_cache)
+        return _ok(report.to_dict())
+    except Exception as e:
+        import traceback
+
+        traceback.print_exc()
+        raise _err(str(e))
+
+
+# ── P0-A: market_overview — aggregates VIX, FII/DII, breadth, sector RRG ──
+# Fixes T-06: OverviewView.jsx calls /skills/market_overview but this route
+# was missing. Returns null for unavailable fields — never fabricated defaults.
+
+
+@router.get("/market_overview")
+@router.post("/market_overview")
+async def skill_market_overview():
+    """
+    P0-A: Market overview snapshot — India VIX, FII/DII flows, sector RRG.
+    Returns null for unavailable fields per DataEnvelope truthful data contract.
+    """
+    import datetime as _dt
+
+    result = {
+        "_status": "unavailable",
+        "_source_name": None,
+        "_as_of": None,
+        "vix": None,
+        "fii_net": None,
+        "dii_net": None,
+        "advancers": None,
+        "decliners": None,
+        "unchanged": None,
+        "sectors": [],
+    }
+
+    fetched_any = False
+
+    # India VIX
+    try:
+        from market.quotes import get_quote
+
+        vix_quote = get_quote(["NSE:INDIA VIX"])
+        if vix_quote:
+            raw = list(vix_quote.values())[0]
+            ltp = raw.get("ltp") or raw.get("last_price")
+            if ltp and float(ltp) > 0:
+                result["vix"] = round(float(ltp), 2)
+                fetched_any = True
+    except Exception:
+        pass
+
+    # FII/DII Flows
+    try:
+        from market.sentiment import get_fii_dii_flows
+
+        flows = get_fii_dii_flows()
+        if flows:
+            result["fii_net"] = flows.get("fii_net")
+            result["dii_net"] = flows.get("dii_net")
+            fetched_any = True
+    except Exception:
+        pass
+
+    # Sector RRG (cached)
+    try:
+        from analysis.sector_rotation import get_sector_rrg_matrix
+
+        rrg = get_sector_rrg_matrix(use_cache=True)
+        if rrg and len(rrg) > 0:
+            sectors = []
+            for entry in rrg:
+                if isinstance(entry, dict):
+                    name = entry.get("sector", "")
+                    phase = entry.get("quadrant")
+                    chg = entry.get("change_pct") or entry.get("momentum")
+                else:
+                    name = getattr(entry, "sector", "") or ""
+                    phase = getattr(entry, "quadrant", None)
+                    chg = getattr(entry, "change_pct", None) or getattr(entry, "momentum", None)
+                if name:
+                    sectors.append(
+                        {
+                            "name": str(name),
+                            "phase": str(phase) if phase else None,
+                            "change_pct": round(float(chg), 2) if chg is not None else None,
+                        }
+                    )
+            result["sectors"] = sectors
+            fetched_any = True
+    except Exception:
+        pass
+
+    if fetched_any:
+        result["_status"] = "cached_fresh"
+        result["_source_name"] = "yfinance (research proxy)"
+        result["_as_of"] = _dt.datetime.now(_dt.timezone.utc).isoformat()
+
+    return _ok(result)
+
+
+# ── P0-A: /skills/tax/calculate alias — fixes T-06 frontend route mismatch ──
+# InputBar.jsx calls /skills/tax/calculate; backend has /skills/tax/estimate.
+
+
+@router.post("/tax/calculate")
+async def skill_tax_calculate(req: TaxEstimateRequest):
+    """P0-A Alias: /skills/tax/calculate → /skills/tax/estimate (T-06 mismatch fix)."""
+    try:
+        from engine.charges import calculate_capital_gains_tax
+
+        estimate = calculate_capital_gains_tax(
+            gross_pnl=req.gross_pnl,
+            holding_period_days=req.holding_period_days,
+            segment=req.segment,
+            prior_accumulated_ltcg=req.prior_accumulated_ltcg,
+        )
+        return _ok(estimate)
+    except Exception as e:
         raise _err(str(e))
 
 
@@ -4773,5 +5162,247 @@ async def skill_whale_flows(req: Optional[WhaleFlowsRequest] = None):
         min_cr = req.min_deal_cr if (req and req.min_deal_cr is not None) else 0.0
         res = get_whale_flows(investor_filter=inv, sector_filter=sec, min_deal_cr=min_cr)
         return _ok(res)
+    except Exception as e:
+        raise _err(str(e))
+
+
+class InstrumentResolveRequest(BaseModel):
+    query: str = "NIFTY"
+
+
+class MarketSessionRequest(BaseModel):
+    exchange: Optional[str] = "NSE"
+
+
+@router.get("/instruments/resolve")
+@router.post("/instruments/resolve")
+async def skill_instruments_resolve(
+    req: Optional[InstrumentResolveRequest] = None, query: Optional[str] = None
+):
+    """Resolve and normalize any symbol or user query into a CanonicalInstrument master record."""
+    try:
+        from market.instruments import resolve_canonical_instrument
+
+        q = (req.query if req and req.query else query) or "NIFTY"
+        instr = resolve_canonical_instrument(q)
+        return _ok(instr.to_dict())
+    except Exception as e:
+        raise _err(str(e))
+
+
+@router.get("/market_session")
+@router.post("/market_session")
+async def skill_market_session(
+    req: Optional[MarketSessionRequest] = None, exchange: Optional[str] = "NSE"
+):
+    """Evaluate live exchange operational session state (PRE_OPEN, OPEN, POST_CLOSE, CLOSED)."""
+    try:
+        from market.instruments import get_market_session_state
+
+        exch = (req.exchange if req and req.exchange else exchange) or "NSE"
+        state = get_market_session_state(exchange=exch)  # type: ignore
+        return _ok(state.to_dict())
+    except Exception as e:
+        raise _err(str(e))
+
+
+class ModelManifestRequest(BaseModel):
+    model_id: str = "macro.transmission.v1"
+
+
+@router.get("/models/list")
+@router.post("/models/list")
+async def skill_models_list():
+    """Retrieve all registered quantitative and macro model specifications and versions."""
+    try:
+        from engine.model_governance import list_all_models
+
+        models = list_all_models()
+        return _ok({"models": models, "total_models": len(models)})
+    except Exception as e:
+        raise _err(str(e))
+
+
+@router.get("/models/manifest")
+@router.post("/models/manifest")
+async def skill_models_manifest(
+    req: Optional[ModelManifestRequest] = None, model_id: Optional[str] = None
+):
+    """Retrieve detailed model manifest including assumptions, applicability limits, and methodology."""
+    try:
+        from engine.model_governance import get_model_manifest
+
+        m_id = (req.model_id if req and req.model_id else model_id) or "macro.transmission.v1"
+        manifest = get_model_manifest(m_id)
+        if not manifest:
+            raise HTTPException(status_code=404, detail=f"Model manifest not found: {m_id}")
+        return _ok(manifest.to_dict())
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise _err(str(e))
+
+
+class JournalAddRequest(BaseModel):
+    symbol: str
+    direction: str = "BUY"
+    entry_price: float
+    qty: int
+    stop_loss: float
+    target: float
+    setup_type: Optional[str] = "SYSTEMATIC_BREAKOUT"
+    thesis: Optional[str] = ""
+    order_id: Optional[str] = None
+
+
+@router.post("/journal/list", operation_id="skill_journal_list_post")
+@router.get("/journal/list", operation_id="skill_journal_list_get")
+async def skill_journal_list(status: Optional[str] = None):
+    """Retrieve all trade journal records and analytical payoff status."""
+    try:
+        from engine.journal import get_trade_journal
+
+        mgr = get_trade_journal()
+        entries = mgr.list_entries(status=status)
+        return _ok({"entries": entries, "total_entries": len(entries)})
+    except Exception as e:
+        raise _err(str(e))
+
+
+@router.post("/journal/add")
+async def skill_journal_add(req: JournalAddRequest):
+    """Record a trade entry in the authoritative trade journal."""
+    try:
+        from engine.journal import get_trade_journal
+
+        mgr = get_trade_journal()
+        entry = mgr.add_entry(
+            symbol=req.symbol,
+            direction=req.direction.upper(),  # type: ignore
+            entry_price=req.entry_price,
+            qty=req.qty,
+            stop_loss=req.stop_loss,
+            target=req.target,
+            setup_type=req.setup_type or "SYSTEMATIC_BREAKOUT",
+            thesis=req.thesis or "",
+            order_id=req.order_id,
+        )
+        return _ok(entry.to_dict())
+    except Exception as e:
+        raise _err(str(e))
+
+
+@router.post("/journal/stats", operation_id="skill_journal_stats_post")
+@router.get("/journal/stats", operation_id="skill_journal_stats_get")
+async def skill_journal_stats():
+    """Compute institutional performance analytics (Win Rate, Profit Factor, Expectancy R)."""
+    try:
+        from engine.journal import get_trade_journal
+
+        mgr = get_trade_journal()
+        stats = mgr.compute_statistics()
+        return _ok(stats.to_dict())
+    except Exception as e:
+        raise _err(str(e))
+
+
+class Security360Request(BaseModel):
+    symbol: str = "RELIANCE"
+    current_price: Optional[float] = None
+
+
+@router.post("/security_360", operation_id="skill_security_360_post")
+@router.get("/security_360", operation_id="skill_security_360_get")
+async def skill_security_360(
+    req: Optional[Security360Request] = None, symbol: Optional[str] = None
+):
+    """Compile comprehensive 360-degree security intelligence dossier with methodology lenses."""
+    try:
+        from engine.security_360 import build_security_360_dossier
+
+        sym = (req.symbol if req and req.symbol else symbol) or "RELIANCE"
+        px = req.current_price if req and req.current_price else None
+        dossier = build_security_360_dossier(symbol=sym, current_price=px)
+        return _ok(dossier.to_dict())
+    except Exception as e:
+        raise _err(str(e))
+
+
+# ── P2-C: Strategy Lab & Options Lab Integrity ───────────────────────────────
+
+
+class StrategyManifestRequest(BaseModel):
+    strategy_id: str = "strategy_v1"
+    strategy_name: str = "Custom Strategy"
+    strategy_version: str = "1.0.0"
+    universe: list[str] = ["RELIANCE", "TCS"]
+    data_snapshot_start: str = "2022-01-01"
+    data_snapshot_end: str = "2024-01-01"
+    benchmark: str = "NIFTY50"
+    parameters: dict = {}
+    notes: str = ""
+
+
+@router.post("/strategy_manifest")
+async def skill_strategy_manifest(req: StrategyManifestRequest):
+    """
+    Create an immutable, cryptographically-sealed Strategy Run Manifest.
+
+    The manifest captures strategy identity, universe, data snapshot, cost assumptions,
+    and bias-prevention flags. The same inputs always produce the same manifest_hash
+    (deterministic). Use this before every backtest run to guarantee reproducibility.
+    """
+    try:
+        from engine.strategy_manifest import create_run_manifest
+
+        manifest = create_run_manifest(
+            strategy_id=req.strategy_id,
+            strategy_name=req.strategy_name,
+            strategy_version=req.strategy_version,
+            universe=req.universe,
+            data_snapshot_start=req.data_snapshot_start,
+            data_snapshot_end=req.data_snapshot_end,
+            benchmark=req.benchmark,
+            parameters=req.parameters,
+            notes=req.notes,
+        )
+        return _ok(manifest.to_dict())
+    except Exception as e:
+        raise _err(str(e))
+
+
+class ChainIntegrityRequest(BaseModel):
+    symbol: str = "NIFTY"
+    expiry: str = "2027-09-25"
+    underlying_price: float = 22000.0
+    chain_rows: list[dict] = []
+    chain_timestamp_utc: Optional[str] = None
+
+
+@router.post("/options_chain_integrity")
+async def skill_options_chain_integrity(req: ChainIntegrityRequest):
+    """
+    Validate an options chain snapshot against institutional data quality standards.
+
+    Returns a ChainIntegrityReport with is_actionable=True only if ALL quality gates pass:
+    - Chain freshness (< 120s stale)
+    - Bid/ask spread integrity (<= 10% of mid)
+    - Strike coverage (>= 21 strikes around ATM)
+    - IV surface sanity (1%-500% range)
+    - Expiry validity (must be in the future)
+
+    If is_actionable=False, downstream analytics and order execution are blocked.
+    """
+    try:
+        from engine.options_chain_integrity import validate_options_chain
+
+        report = validate_options_chain(
+            symbol=req.symbol,
+            expiry=req.expiry,
+            underlying_price=req.underlying_price,
+            chain_rows=req.chain_rows,
+            chain_timestamp_utc=req.chain_timestamp_utc,
+        )
+        return _ok(report.to_dict())
     except Exception as e:
         raise _err(str(e))

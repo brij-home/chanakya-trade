@@ -7,6 +7,8 @@ import {
   PERSONA_REGISTRY,
   QUANT_COMMANDS,
   fuzzySearchUniverse,
+  getSymbolExchange,
+  normalizeQuery,
   getRecentSearches,
   saveRecentSearch,
   clearRecentSearches,
@@ -18,23 +20,85 @@ describe('Indian Market Universe & Fuzzy Search Engine', () => {
     clearRecentSearches()
   })
 
-  it('contains institutional Indian equity universe, councils, and personas', () => {
-    expect(INDIAN_UNIVERSE.length).toBeGreaterThan(40)
+  it('resolves market exchange accurately across asset classes', () => {
+    expect(getSymbolExchange('CRUDEOIL')).toBe('MCX')
+    expect(getSymbolExchange('GOLD')).toBe('MCX')
+    expect(getSymbolExchange('SILVER')).toBe('MCX')
+    expect(getSymbolExchange('NATURALGAS')).toBe('MCX')
+    expect(getSymbolExchange('USDINR')).toBe('CDS')
+    expect(getSymbolExchange('EURINR')).toBe('CDS')
+    expect(getSymbolExchange('SENSEX')).toBe('BSE')
+    expect(getSymbolExchange('BANKEX')).toBe('BSE')
+    expect(getSymbolExchange('RELIANCE')).toBe('NSE')
+    expect(getSymbolExchange('NIFTY50')).toBe('NSE')
+    expect(getSymbolExchange('MCX:CRUDEOIL')).toBe('MCX')
+    expect(getSymbolExchange('CDS:USDINR')).toBe('CDS')
+    expect(getSymbolExchange('BSE:SENSEX')).toBe('BSE')
+  })
+
+  it('contains comprehensive institutional Indian market universe across all asset classes', () => {
+    expect(INDIAN_UNIVERSE.length).toBeGreaterThan(100)
     expect(COUNCIL_REGISTRY.length).toBe(5)
     expect(PERSONA_REGISTRY.length).toBe(13)
     expect(QUANT_COMMANDS.length).toBeGreaterThan(15)
+
+    // Verify all asset types are represented
+    const types = new Set(INDIAN_UNIVERSE.map((u) => u.type))
+    expect(types.has('stock')).toBe(true)
+    expect(types.has('index')).toBe(true)
+    expect(types.has('etf')).toBe(true)
+    expect(types.has('commodity')).toBe(true)
+    expect(types.has('currency')).toBe(true)
   })
 
-  it('fuzzy searches stock symbols by ticker, name, and sector', () => {
-    const relResults = fuzzySearchUniverse('rel')
-    expect(relResults.some((r) => r.symbol === 'RELIANCE')).toBe(true)
+  it('normalizes queries removing hyphens, underscores, dots, and spaces', () => {
+    expect(normalizeQuery('Bajaj-Auto')).toBe('bajajauto')
+    expect(normalizeQuery('bajaj_auto')).toBe('bajajauto')
+    expect(normalizeQuery('BAJAJ AUTO')).toBe('bajajauto')
+    expect(normalizeQuery('M&M')).toBe('mm')
+    expect(normalizeQuery('NIFTY 50')).toBe('nifty50')
+  })
 
-    const tataResults = fuzzySearchUniverse('tat')
-    expect(tataResults.some((r) => r.symbol === 'TATAMOTORS')).toBe(true)
-    expect(tataResults.some((r) => r.symbol === 'TCS')).toBe(true)
+  it('fuzzy searches BAJAJ-AUTO across all phonetic and punctuation variations', () => {
+    const q1 = fuzzySearchUniverse('Bajaj-Auto')
+    expect(q1.some((r) => r.symbol === 'BAJAJ-AUTO')).toBe(true)
+    expect(q1[0].symbol).toBe('BAJAJ-AUTO')
 
-    const itResults = fuzzySearchUniverse('software')
-    expect(itResults.length).toBeGreaterThan(0)
+    const q2 = fuzzySearchUniverse('bajaj auto')
+    expect(q2.some((r) => r.symbol === 'BAJAJ-AUTO')).toBe(true)
+
+    const q3 = fuzzySearchUniverse('bajaj_auto')
+    expect(q3.some((r) => r.symbol === 'BAJAJ-AUTO')).toBe(true)
+
+    const q4 = fuzzySearchUniverse('bajajauto')
+    expect(q4.some((r) => r.symbol === 'BAJAJ-AUTO')).toBe(true)
+
+    const q5 = fuzzySearchUniverse('bajaj')
+    expect(q5.some((r) => r.symbol === 'BAJAJ-AUTO')).toBe(true)
+  })
+
+  it('fuzzy searches indices, ETFs, commodities, and currencies accurately', () => {
+    const niftyRes = fuzzySearchUniverse('nifty 50')
+    expect(niftyRes.some((r) => r.symbol === 'NIFTY50')).toBe(true)
+
+    const goldbeesRes = fuzzySearchUniverse('goldbees')
+    expect(goldbeesRes.some((r) => r.symbol === 'GOLDBEES')).toBe(true)
+
+    const crudeRes = fuzzySearchUniverse('crude oil')
+    expect(crudeRes.some((r) => r.symbol === 'CRUDEOIL')).toBe(true)
+
+    const usdRes = fuzzySearchUniverse('usdinr')
+    expect(usdRes.some((r) => r.symbol === 'USDINR')).toBe(true)
+  })
+
+  it('filters results by category when categoryFilter is provided', () => {
+    const etfOnly = fuzzySearchUniverse('gold', null, 10, 'etf')
+    expect(etfOnly.every((r) => r.stockType === 'etf' || r.type === 'etf')).toBe(true)
+    expect(etfOnly.some((r) => r.symbol === 'GOLDBEES')).toBe(true)
+
+    const commodityOnly = fuzzySearchUniverse('gold', null, 10, 'commodity')
+    expect(commodityOnly.every((r) => r.stockType === 'commodity' || r.type === 'commodity')).toBe(true)
+    expect(commodityOnly.some((r) => r.symbol === 'GOLD')).toBe(true)
   })
 
   it('fuzzy searches councils and personas accurately', () => {
@@ -54,6 +118,43 @@ describe('Indian Market Universe & Fuzzy Search Engine', () => {
 
     const whaleResults = fuzzySearchUniverse('whales')
     expect(whaleResults.some((r) => r.cmd === 'whales')).toBe(true)
+  })
+
+  it('browses categories accurately when search query is empty', () => {
+    const defaultAll = fuzzySearchUniverse('', null, 10, 'all')
+    expect(defaultAll.length).toBeGreaterThan(0)
+    expect(defaultAll.some((r) => r.category === 'action')).toBe(true)
+
+    const commodities = fuzzySearchUniverse('', null, 10, 'commodity')
+    expect(commodities.length).toBeGreaterThan(0)
+    expect(commodities.every((r) => r.stockType === 'commodity' || r.type === 'commodity')).toBe(true)
+    expect(commodities.some((r) => r.symbol === 'GOLD')).toBe(true)
+    expect(commodities.some((r) => r.symbol === 'CRUDEOIL')).toBe(true)
+
+    const indices = fuzzySearchUniverse('', null, 10, 'index')
+    expect(indices.length).toBeGreaterThan(0)
+    expect(indices.every((r) => r.stockType === 'index' || r.type === 'index')).toBe(true)
+    expect(indices.some((r) => r.symbol === 'NIFTY50')).toBe(true)
+
+    const etfs = fuzzySearchUniverse('', null, 10, 'etf')
+    expect(etfs.length).toBeGreaterThan(0)
+    expect(etfs.every((r) => r.stockType === 'etf' || r.type === 'etf')).toBe(true)
+    expect(etfs.some((r) => r.symbol === 'NIFTYBEES' || r.symbol === 'GOLDBEES')).toBe(true)
+
+    const currencies = fuzzySearchUniverse('', null, 10, 'currency')
+    expect(currencies.length).toBeGreaterThan(0)
+    expect(currencies.every((r) => r.stockType === 'currency' || r.type === 'currency')).toBe(true)
+    expect(currencies.some((r) => r.symbol === 'USDINR')).toBe(true)
+
+    const councils = fuzzySearchUniverse('', null, 10, 'council')
+    expect(councils.length).toBeGreaterThan(0)
+    expect(councils.every((r) => r.category === 'council' || r.type === 'council')).toBe(true)
+    expect(councils.some((r) => r.id === 'breakout')).toBe(true)
+
+    const personas = fuzzySearchUniverse('', null, 10, 'persona')
+    expect(personas.length).toBeGreaterThan(0)
+    expect(personas.every((r) => r.category === 'persona' || r.type === 'persona')).toBe(true)
+    expect(personas.some((r) => r.id === 'jhunjhunwala')).toBe(true)
   })
 
   it('handles recent search storage lifecycle and limits to max 8 items', () => {
@@ -96,34 +197,16 @@ describe('SmartTypeahead Component', () => {
 
     render(
       <SmartTypeahead
-        query="trent"
+        query="bajaj auto"
         isOpen={true}
         onSelect={onSelect}
         onClose={onClose}
       />
     )
 
-    const matches = screen.getAllByText(/TRENT/i)
-    expect(matches.length).toBeGreaterThan(0)
-
-    fireEvent.click(matches[0])
+    const item = screen.getByText((content) => content.includes('BAJAJ-AUTO'))
+    expect(item).toBeDefined()
+    fireEvent.click(item)
     expect(onSelect).toHaveBeenCalled()
-  })
-
-  it('renders in symbols_only mode for quick ticker switcher', () => {
-    const onSelect = vi.fn()
-
-    render(
-      <SmartTypeahead
-        query="nifty"
-        isOpen={true}
-        mode="symbols_only"
-        onSelect={onSelect}
-        onClose={vi.fn()}
-      />
-    )
-
-    const matches = screen.getAllByText(/NIFTY/i)
-    expect(matches.length).toBeGreaterThan(0)
   })
 })

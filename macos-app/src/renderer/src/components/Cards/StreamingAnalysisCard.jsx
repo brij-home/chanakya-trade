@@ -8,6 +8,7 @@
  */
 import React, { useEffect, useRef, useState } from 'react'
 import { useChatStore, getBaseUrl } from '../../store/chatStore'
+import { getSymbolExchange } from '../../data/universeData'
 
 // These must match the `name` class attribute on each analyst in multi_agent.py
 const ANALYSTS = [
@@ -77,6 +78,8 @@ export default function StreamingAnalysisCard({ data }) {
     hint_applied = null,    // #113 — hint injected into synthesis
   } = data ?? {}
 
+  const resolvedExchange = (!exchange || exchange === 'NSE') ? getSymbolExchange(symbol) : exchange
+
   const done     = phase === 'done'
   const debating = phase === 'debate' || phase === 'synthesis' || done
   const synth    = phase === 'synthesis' || done
@@ -105,7 +108,7 @@ export default function StreamingAnalysisCard({ data }) {
             {statusLabel}
           </p>
           <p className="text-text text-lg font-semibold font-mono mt-0.5">
-            {symbol} <span className="text-muted text-sm font-ui">{exchange}</span>
+            {symbol} <span className="text-muted text-sm font-ui">{resolvedExchange}</span>
           </p>
         </div>
         <div className="flex items-center gap-3">
@@ -260,7 +263,7 @@ export default function StreamingAnalysisCard({ data }) {
       {done && (
         <FollowupChat
           symbol={symbol}
-          exchange={exchange}
+          exchange={resolvedExchange}
           analysts={analysts}
           synthesisText={synthesis_text}
           report={report}

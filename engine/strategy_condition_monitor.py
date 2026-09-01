@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import json
 import threading
-import time
 import uuid
 from dataclasses import asdict, dataclass
 from datetime import datetime
@@ -226,6 +225,7 @@ class StrategyConditionMonitor:
         self._alerts: list[StrategyAlert] = []
         self._polling: bool = False
         self._poller_thread: Optional[threading.Thread] = None
+        self._stop_event = threading.Event()
         self._load()
 
     # ── Public API ────────────────────────────────────────────
@@ -333,6 +333,9 @@ class StrategyConditionMonitor:
         if self._polling:
             return
         self._polling = True
+        if not hasattr(self, "_stop_event") or self._stop_event is None:
+            self._stop_event = threading.Event()
+        self._stop_event.clear()
         self._poller_thread = threading.Thread(
             target=self._poll_loop,
             args=(interval_seconds,),
@@ -341,18 +344,26 @@ class StrategyConditionMonitor:
         self._poller_thread.start()
 
     def stop_polling(self) -> None:
-        """Signal the polling thread to stop."""
+        """Signal the polling thread to stop immediately and join cleanly."""
         self._polling = False
+        self._stop_event.set()
+        if self._poller_thread and self._poller_thread.is_alive():
+            try:
+                self._poller_thread.join(timeout=1.0)
+            except Exception:
+                pass
+        self._poller_thread = None
 
     # ── Private ───────────────────────────────────────────────
 
     def _poll_loop(self, interval_seconds: int) -> None:
-        while self._polling:
+        while self._polling and not self._stop_event.is_set():
             try:
                 self.check_all()
             except Exception:
                 pass
-            time.sleep(interval_seconds)
+            if self._stop_event.wait(timeout=interval_seconds):
+                break
 
     @staticmethod
     def _fetch_adx(symbol: str, exchange: str) -> float:

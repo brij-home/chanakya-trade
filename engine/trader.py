@@ -997,10 +997,13 @@ class TraderAgent:
         t1_distance = sl_distance * self.profile.t1_rr
         if is_long:
             t1 = ltp + t1_distance
-            if resistance and t1 > resistance:
-                t1 = resistance  # cap at resistance
+            # Only cap at resistance if resistance allows at least 1.5x R:R; never collapse T1 into minor overhead pivot
+            if resistance and resistance > ltp and (resistance - ltp) >= (sl_distance * 1.5):
+                t1 = min(t1, resistance)
         else:
             t1 = ltp - t1_distance
+            if support and support < ltp and (ltp - support) >= (sl_distance * 1.5):
+                t1 = max(t1, support)
 
         t1_pct = (t1 - ltp) / ltp * 100
 

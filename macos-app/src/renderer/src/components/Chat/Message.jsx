@@ -1,3 +1,5 @@
+import { useState, useCallback } from 'react'
+import { useChatStore } from '../../store/chatStore'
 import QuoteCard          from '../Cards/QuoteCard'
 import AnalysisCard       from '../Cards/AnalysisCard'
 import StreamingAnalysisCard from '../Cards/StreamingAnalysisCard'
@@ -45,6 +47,7 @@ import DefinedRiskSpreadCard from '../Cards/DefinedRiskSpreadCard'
 import MagicTrendCard from '../Cards/MagicTrendCard'
 import ThematicBasketsCard from '../Cards/ThematicBasketsCard'
 import PortfolioDoctorCard from '../Cards/PortfolioDoctorCard'
+import GlobalMacroCard from '../Cards/GlobalMacroCard'
 import ErrorBoundary from '../ErrorBoundary'
 
 function renderCardContent(cardType, data) {
@@ -55,6 +58,10 @@ function renderCardContent(cardType, data) {
     case 'backtest':           return <BacktestCard data={data} />
     case 'flows':              return <FlowsCard data={data} />
     case 'morning_brief':      return <MorningBriefCard data={data} />
+    case 'global_macro':
+    case 'global_pulse':
+    case 'macro_correlation':
+    case 'gift_nifty':         return <GlobalMacroCard data={data} />
     case 'holdings':           return <HoldingsCard data={data} />
     case 'funds':              return <FundsCard data={data} />
     case 'profile':            return <ProfileCard data={data} />
@@ -130,14 +137,98 @@ function renderCardContent(cardType, data) {
   }
 }
 
+
+function MessageActions({ text, onRerun }) {
+  const [copied, setCopied] = useState(false)
+  const [thumbed, setThumbed] = useState(null) // 'up' | 'down' | null
+
+  const handleCopy = useCallback(() => {
+    try {
+      navigator.clipboard.writeText(text || '')
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1800)
+    } catch {}
+  }, [text])
+
+  return (
+    <div
+      className="message-actions flex items-center gap-1 mt-1.5 opacity-0 group-hover:opacity-100 transition-opacity duration-150"
+      style={{ fontSize: '11px' }}
+    >
+      {/* Copy */}
+      <button
+        title="Copy message"
+        onClick={handleCopy}
+        className="flex items-center gap-1 px-2 py-0.5 rounded-md transition-all cursor-pointer"
+        style={{
+          background: copied ? 'rgba(0,214,143,0.15)' : 'var(--color-elevated)',
+          border: '1px solid var(--color-border)',
+          color: copied ? 'var(--color-emerald)' : 'var(--color-muted)',
+        }}
+      >
+        {copied ? '✓' : '📋'}
+      </button>
+
+      {/* Thumbs up */}
+      <button
+        title="Helpful"
+        onClick={() => setThumbed(thumbed === 'up' ? null : 'up')}
+        className="px-2 py-0.5 rounded-md transition-all cursor-pointer"
+        style={{
+          background: thumbed === 'up' ? 'rgba(0,214,143,0.15)' : 'var(--color-elevated)',
+          border: `1px solid ${thumbed === 'up' ? 'rgba(0,214,143,0.4)' : 'var(--color-border)'}`,
+          color: thumbed === 'up' ? 'var(--color-emerald)' : 'var(--color-muted)',
+        }}
+      >
+        👍
+      </button>
+
+      {/* Thumbs down */}
+      <button
+        title="Not helpful"
+        onClick={() => setThumbed(thumbed === 'down' ? null : 'down')}
+        className="px-2 py-0.5 rounded-md transition-all cursor-pointer"
+        style={{
+          background: thumbed === 'down' ? 'rgba(255,79,123,0.15)' : 'var(--color-elevated)',
+          border: `1px solid ${thumbed === 'down' ? 'rgba(255,79,123,0.4)' : 'var(--color-border)'}`,
+          color: thumbed === 'down' ? 'var(--color-rose)' : 'var(--color-muted)',
+        }}
+      >
+        👎
+      </button>
+
+      {/* Re-run */}
+      {onRerun && (
+        <button
+          title="Re-run analysis"
+          onClick={onRerun}
+          className="px-2 py-0.5 rounded-md transition-all cursor-pointer"
+          style={{
+            background: 'var(--color-elevated)',
+            border: '1px solid var(--color-border)',
+            color: 'var(--color-muted)',
+          }}
+        >
+          🔄
+        </button>
+      )}
+    </div>
+  )
+}
+
 export default function Message({ message }) {
   const { role, text, cardType, data } = message
+  const sendDraft = useChatStore((s) => s.sendDraft)
 
   if (role === 'user') {
     return (
-      <div className="flex justify-end">
-        <div className="max-w-lg bg-elevated border border-border rounded-xl px-4 py-2.5 text-text text-sm font-mono">
+      <div className="flex justify-end group">
+        <div
+          className="max-w-lg bg-elevated border border-border rounded-xl px-4 py-2.5 text-text text-sm font-mono relative"
+        >
           {text}
+          {/* Copy action for user messages (top-right on hover) */}
+          <CopyBubble text={text} />
         </div>
       </div>
     )
@@ -145,10 +236,40 @@ export default function Message({ message }) {
 
   if (role === 'error') return <ErrorCard text={text} />
 
+  const handleRerun = text
+    ? () => sendDraft(text, { autoSubmit: true })
+    : undefined
+
   return (
-    <ErrorBoundary title={cardType ? `${cardType.toUpperCase()} Card` : 'Message Content'}>
-      {renderCardContent(cardType, data)}
-    </ErrorBoundary>
+    <div className="group">
+      <ErrorBoundary title={cardType ? `${cardType.toUpperCase()} Card` : 'Message Content'}>
+        {renderCardContent(cardType, data)}
+      </ErrorBoundary>
+      <MessageActions text={text} onRerun={handleRerun} />
+    </div>
+  )
+}
+
+/* Tiny inline copy bubble for user messages */
+function CopyBubble({ text }) {
+  const [copied, setCopied] = useState(false)
+  return (
+    <button
+      title="Copy"
+      onClick={() => {
+        try { navigator.clipboard.writeText(text || '') } catch {}
+        setCopied(true)
+        setTimeout(() => setCopied(false), 1500)
+      }}
+      className="absolute -top-2 -right-2 w-6 h-6 flex items-center justify-center rounded-full opacity-0 group-hover:opacity-100 transition-opacity text-[10px] cursor-pointer"
+      style={{
+        background: 'var(--color-elevated)',
+        border: '1px solid var(--color-border)',
+        color: copied ? 'var(--color-emerald)' : 'var(--color-muted)',
+      }}
+    >
+      {copied ? '✓' : '⎘'}
+    </button>
   )
 }
 

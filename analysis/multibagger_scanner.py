@@ -115,11 +115,15 @@ def scan_multibagger_universe(
     timestamp_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
     # 1. Resolve symbols from universe
-    symbols, universe_desc = resolve_dynamic_universe(universe, max_stocks=120)
-    if not symbols:
-        symbols = THEMATIC_PRESETS.get("multibagger_hunters", {}).get(
-            "symbols", ["TRENT", "DIXON", "HAL", "BEL", "BSE"]
-        )
+    if df_cache:
+        symbols = list(df_cache.keys())
+        universe_desc = "Cached Universe"
+    else:
+        symbols, universe_desc = resolve_dynamic_universe(universe, max_stocks=120)
+        if not symbols:
+            symbols = THEMATIC_PRESETS.get("multibagger_hunters", {}).get(
+                "symbols", ["TRENT", "DIXON", "HAL", "BEL", "BSE"]
+            )
 
     u_name = THEMATIC_PRESETS.get(universe.lower(), {}).get("name", universe_desc)
     norm_horizon = horizon.upper().strip()

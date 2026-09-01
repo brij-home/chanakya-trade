@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react'
 import { useChatStore } from '../../store/chatStore'
 import { useAPI } from '../../hooks/useAPI'
 import SmartTypeahead from '../Common/SmartTypeahead'
-import { fuzzySearchUniverse } from '../../data/universeData'
+import { fuzzySearchUniverse, getSymbolExchange } from '../../data/universeData'
 
 const COUNCIL_MODES = [
   { id: 'debate', name: 'Bull vs Bear Debate', icon: '⚔️', desc: 'Adversarial Thesis & Anti-Thesis' },
@@ -84,12 +84,13 @@ export default function DebateArenaView({ onOpenOrderTicket }) {
     const t3 = setTimeout(() => updateActivity({ details: `⚖️ Synthesizing high-conviction consensus score...` }), 1200)
 
     try {
+      const targetExchange = getSymbolExchange(targetSymbol)
       if (targetCouncil === 'debate') {
-        const res = await call('/skills/debate_snapshot', { symbol: targetSymbol, exchange: 'NSE' }, { signal: abortController.signal })
+        const res = await call('/skills/debate_snapshot', { symbol: targetSymbol, exchange: targetExchange }, { signal: abortController.signal })
         const snapshot = res?.data ?? res
         if (snapshot) setData(snapshot)
       } else {
-        const res = await call('/skills/persona/council', { symbol: targetSymbol, council: targetCouncil, exchange: 'NSE' }, { signal: abortController.signal })
+        const res = await call('/skills/persona/council', { symbol: targetSymbol, council: targetCouncil, exchange: targetExchange }, { signal: abortController.signal })
         const cSnapshot = res?.data ?? res
         if (cSnapshot) setCouncilData(cSnapshot)
       }
@@ -148,22 +149,24 @@ export default function DebateArenaView({ onOpenOrderTicket }) {
   const isCouncilSell = councilVerdict.includes('SELL')
 
   return (
-    <div className="flex-1 overflow-y-auto p-2.5 sm:p-3.5 bg-surface text-text space-y-2.5 font-ui relative">
+    <div className="flex-1 overflow-y-auto p-2.5 sm:p-3.5 font-ui relative" style={{ background: 'var(--color-surface)', color: 'var(--color-text)' }}>
       {/* Top Header & Stock Switcher */}
-      <div className="relative z-30 flex flex-wrap items-center justify-between gap-2.5 bg-panel border border-border/80 rounded-xl px-3.5 py-2 shadow-xs">
+      <div className="relative z-30 flex flex-wrap items-center justify-between gap-2.5 rounded-2xl px-3.5 py-2 mb-2.5" style={{ background: 'var(--color-panel)', border: '1px solid var(--color-border)', boxShadow: 'var(--shadow-card)' }}>
         <div className="flex items-center gap-2.5">
-          <span className="text-amber text-base">◆</span>
+          <span className="text-base animate-gold-pulse" style={{ color: 'var(--color-gold)', filter: 'drop-shadow(0 0 8px rgba(245,166,35,0.5))' }}>◆</span>
           <div>
-            <h1 className="text-sm font-bold font-mono text-text flex items-center gap-2">
+            <h1 className="text-sm font-bold font-mono flex items-center gap-2" style={{ color: 'var(--color-text)' }}>
               <span>{symbol} (NSE)</span>
-              <span className="text-[10px] px-2 py-0.5 rounded-full bg-green/15 text-green font-bold border border-green/30">
-                {ltp > 0 ? `₹${Number(ltp).toLocaleString('en-IN', { minimumFractionDigits: 2 })}` : 'Live Stream'}
-              </span>
+              {ltp > 0 && (
+                <span className="text-[10px] px-2 py-0.5 rounded-full font-bold" style={{ background: 'rgba(0,214,143,0.12)', color: 'var(--color-emerald)', border: '1px solid rgba(0,214,143,0.3)' }}>
+                  ₹{Number(ltp).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                </span>
+              )}
             </h1>
-            <div className="flex items-center gap-2 text-[10px] text-muted">
-              <span>Institutional Multi-Agent Intelligence Hub</span>
-              <span>•</span>
-              <span className="text-emerald-400 font-mono font-semibold">13 Specialist Personas</span>
+            <div className="flex items-center gap-2 text-[10px]" style={{ color: 'var(--color-muted)' }}>
+              <span>Multi-Agent Intelligence Hub</span>
+              <span style={{ color: 'var(--color-border)' }}>•</span>
+              <span className="font-mono font-semibold" style={{ color: 'var(--color-emerald)' }}>13 Specialist Personas</span>
             </div>
           </div>
         </div>
@@ -270,7 +273,7 @@ export default function DebateArenaView({ onOpenOrderTicket }) {
           <button
             onClick={startLiveDebate}
             disabled={isStreaming}
-            className="flex items-center gap-2 px-4 py-2 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-500 hover:brightness-110 text-black font-bold text-xs transition-all shadow-md cursor-pointer"
+            className="btn btn-sm btn-emerald"
           >
             <span>{isStreaming ? '🔄' : '⚡'}</span>
             <span>{isStreaming ? 'Agents Polling...' : 'Run Analysis'}</span>
@@ -279,21 +282,17 @@ export default function DebateArenaView({ onOpenOrderTicket }) {
       </div>
 
       {/* Council Ensemble & Debate Mode Selector Bar */}
-      <div className="flex items-center gap-2 overflow-x-auto pb-1 bg-panel/70 p-1.5 rounded-2xl border border-border/70 text-xs">
+      <div className="tab-bar mb-2.5" style={{ gap: '4px', overflowX: 'auto' }}>
         {COUNCIL_MODES.map((mode) => {
           const isActive = selectedCouncil === mode.id
           return (
             <button
               key={mode.id}
               onClick={() => setSelectedCouncil(mode.id)}
-              className={`flex items-center gap-2 px-3.5 py-2 rounded-xl font-bold transition-all cursor-pointer whitespace-nowrap ${
-                isActive
-                  ? 'bg-amber text-black shadow-md'
-                  : 'text-muted hover:text-text hover:bg-elevated border border-transparent'
-              }`}
+              className={`tab-item whitespace-nowrap ${isActive ? 'active' : ''}`}
             >
               <span>{mode.icon}</span>
-              <span>{mode.name}</span>
+              <span className="hidden sm:inline">{mode.name}</span>
             </button>
           )
         })}
@@ -301,101 +300,141 @@ export default function DebateArenaView({ onOpenOrderTicket }) {
 
       {/* Dynamic Multi-Agent Live Reasoning Banner */}
       {(isStreaming || loading) && (
-        <div className="bg-panel/98 border border-amber/50 rounded-2xl p-5 shadow-2xl backdrop-blur-xl animate-fade-slide space-y-3 ring-1 ring-amber/25">
-          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border/60 pb-3">
+        <div className="rounded-2xl p-4 animate-slide-up-fade space-y-4" style={{ background: 'var(--color-panel)', border: '1px solid rgba(245,166,35,0.5)', boxShadow: 'var(--glow-gold)' }}>
+          {/* Header */}
+          <div className="flex flex-wrap items-center justify-between gap-3" style={{ borderBottom: '1px solid var(--color-border)', paddingBottom: '12px' }}>
             <div className="flex items-center gap-2.5">
               <span className="relative flex h-3 w-3">
-                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber opacity-75" />
-                <span className="relative inline-flex rounded-full h-3 w-3 bg-amber" />
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full" style={{ background: 'var(--color-gold)', opacity: 0.75 }} />
+                <span className="relative inline-flex rounded-full h-3 w-3" style={{ background: 'var(--color-gold)' }} />
               </span>
               <div>
-                <h3 className="text-sm font-bold font-mono text-text">
-                  Polling {COUNCIL_MODES.find((c) => c.id === selectedCouncil)?.name || 'Council'} for {symbol} (NSE)
+                <h3 className="text-sm font-bold font-mono" style={{ color: 'var(--color-text)' }}>
+                  Polling {COUNCIL_MODES.find((c) => c.id === selectedCouncil)?.name || 'Council'} for {symbol}
                 </h3>
-                <span className="text-[11px] text-muted font-ui">
-                  Dual-LLM Multi-Agent Pipeline & Quantitative Edge Synthesis
+                <span className="text-[11px]" style={{ color: 'var(--color-muted)' }}>
+                  Dual-LLM Pipeline · Quantitative Edge Synthesis
                 </span>
               </div>
             </div>
+            <button
+              onClick={() => {
+                useChatStore.getState().cancelActiveActivity()
+                setIsStreaming(false)
+                setLoading(false)
+              }}
+              className="btn btn-sm btn-rose"
+            >
+              ⛔ Stop
+            </button>
+          </div>
 
-            <div className="flex items-center gap-2">
-              <button
-                onClick={() => {
-                  useChatStore.getState().cancelActiveActivity()
-                  setIsStreaming(false)
-                  setLoading(false)
-                }}
-                className="flex items-center gap-1 px-3 py-1.5 rounded-xl bg-rose-500/15 hover:bg-rose-500 hover:text-white border border-rose-500/30 text-rose-400 text-xs font-mono font-bold transition-all shadow-xs cursor-pointer"
-                title="Immediately stop/cancel the current analysis"
-              >
-                <span>⛔</span> Stop / Cancel
-              </button>
+          {/* ══ CINEMATIC HORIZONTAL PIPELINE STEPPER ══ */}
+          <div className="relative">
+            {/* Connector line */}
+            <div className="absolute top-4 left-0 right-0 h-px" style={{ background: 'var(--color-border)' }} />
+            <div
+              className="absolute top-4 left-0 h-px animate-rotate-gradient"
+              style={{
+                background: 'linear-gradient(90deg, var(--color-gold), var(--color-emerald), var(--color-cyan))',
+                width: `${Math.min(100, ((streamingSteps.length) / 4) * 100)}%`,
+                transition: 'width 0.8s cubic-bezier(0.16,1,0.3,1)',
+                boxShadow: '0 0 8px rgba(245,166,35,0.6)'
+              }}
+            />
+            <div className="relative flex items-start justify-between gap-1">
+              {[
+                { id: 'init', icon: '⚡', label: 'INITIALIZE', sub: 'Pipeline start' },
+                { id: 'quant', icon: '🔍', label: 'QUANTITATIVE', sub: 'VCP · SMC · OB' },
+                { id: 'debate', icon: '🤖', label: 'DEBATE', sub: 'Bull ⚔ Bear' },
+                { id: 'consensus', icon: '⚖️', label: 'CONSENSUS', sub: 'Fund Manager' },
+              ].map((stage, idx) => {
+                const stepCount = streamingSteps.length
+                const isDone = idx < stepCount
+                const isActive = idx === stepCount - 1
+                return (
+                  <div key={stage.id} className="flex flex-col items-center gap-1.5 flex-1 min-w-0">
+                    {/* Stage dot */}
+                    <div
+                      className="w-8 h-8 rounded-full flex items-center justify-center text-sm relative z-10 transition-all duration-500"
+                      style={{
+                        background: isDone
+                          ? 'linear-gradient(135deg, var(--color-gold), #c47a00)'
+                          : isActive
+                          ? 'rgba(245,166,35,0.2)'
+                          : 'var(--color-elevated)',
+                        border: isDone
+                          ? '2px solid var(--color-gold)'
+                          : isActive
+                          ? '2px solid rgba(245,166,35,0.6)'
+                          : '2px solid var(--color-border)',
+                        boxShadow: isDone ? 'var(--glow-gold)' : isActive ? '0 0 12px rgba(245,166,35,0.3)' : 'none',
+                      }}
+                    >
+                      {isActive && !isDone ? (
+                        <span className="w-2 h-2 rounded-full animate-ping" style={{ background: 'var(--color-gold)' }} />
+                      ) : (
+                        <span>{isDone ? '✓' : stage.icon}</span>
+                      )}
+                    </div>
+                    <div className="text-center min-w-0 px-0.5">
+                      <span
+                        className="text-[9px] font-extrabold uppercase tracking-wider block truncate"
+                        style={{ color: isDone || isActive ? 'var(--color-gold)' : 'var(--color-muted)' }}
+                      >
+                        {stage.label}
+                      </span>
+                      <span className="text-[8px] truncate block" style={{ color: 'var(--color-muted)' }}>
+                        {isDone ? stage.sub : '...'}
+                      </span>
+                    </div>
+                  </div>
+                )
+              })}
             </div>
           </div>
 
-          {/* Progressive Step Progression */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 font-mono text-xs text-text/90 pt-1">
-            {streamingSteps.map((step, idx) => (
-              <div key={idx} className="flex items-center gap-2 bg-surface/80 border border-border/60 rounded-xl px-3 py-2">
-                <span className="text-emerald-400 font-bold">✓</span>
-                <span className="truncate">{step}</span>
-              </div>
-            ))}
-          </div>
-
-          {/* Multitasking Advisory Note */}
-          <div className="flex items-center gap-2 px-3 py-2 rounded-xl bg-amber/10 border border-amber/20 text-amber text-xs font-ui">
+          {/* Advisory */}
+          <div className="flex items-center gap-2 px-3 py-2 rounded-xl text-xs" style={{ background: 'rgba(245,166,35,0.08)', border: '1px solid rgba(245,166,35,0.2)', color: 'var(--color-gold)' }}>
             <span>💡</span>
-            <span>
-              Background process running — you can freely navigate to <strong>Terminal</strong>, inspect <strong>Options</strong>, or view live charts without interrupting analysis.
-            </span>
+            <span>Background running — navigate freely without interrupting analysis.</span>
           </div>
 
-          {/* Progress Shimmer Bar */}
-          <div className="relative h-1.5 w-full bg-surface rounded-full overflow-hidden border border-border/40">
-            <div className="absolute inset-0 bg-gradient-to-r from-amber via-emerald-400 to-cyan-400 animate-[pulse_1.5s_ease-in-out_infinite] w-full" />
+          {/* Animated shimmer bar */}
+          <div className="relative h-0.5 w-full rounded-full overflow-hidden" style={{ background: 'var(--color-border)' }}>
+            <div className="absolute inset-0 rounded-full animate-rotate-gradient" style={{ background: 'linear-gradient(90deg, var(--color-gold), var(--color-emerald), var(--color-cyan), var(--color-gold))', backgroundSize: '200% 100%', width: '100%' }} />
           </div>
         </div>
       )}
 
       {/* Conviction Gauge Banner (Top Center) */}
-      <div className="flex flex-col items-center justify-center pt-1">
+      <div className="flex flex-col items-center justify-center py-2">
         <div className="relative w-48 h-28 flex flex-col items-center justify-end">
-          {/* Semicircular Arc SVG */}
           <svg className="w-48 h-28 overflow-visible" viewBox="0 0 160 90">
+            <path d="M 15 80 A 65 65 0 0 1 145 80" fill="none" stroke="var(--color-border)" strokeWidth="10" strokeLinecap="round" />
             <path
               d="M 15 80 A 65 65 0 0 1 145 80"
               fill="none"
-              stroke="currentColor"
-              className="text-border"
-              strokeWidth="12"
-              strokeLinecap="round"
-            />
-            <path
-              d="M 15 80 A 65 65 0 0 1 145 80"
-              fill="none"
-              stroke="url(#convictionGradient)"
-              strokeWidth="12"
+              stroke="url(#convictionGradient2)"
+              strokeWidth="10"
               strokeDasharray="204"
               strokeDashoffset={204 - (204 * score) / 100}
               strokeLinecap="round"
-              className="transition-all duration-1000 ease-out"
+              style={{ transition: 'stroke-dashoffset 1s cubic-bezier(0.16,1,0.3,1)', filter: score >= 75 ? 'drop-shadow(0 0 8px rgba(0,214,143,0.6))' : score >= 55 ? 'drop-shadow(0 0 8px rgba(245,166,35,0.6))' : 'drop-shadow(0 0 8px rgba(255,79,123,0.6))' }}
             />
             <defs>
-              <linearGradient id="convictionGradient" x1="0%" y1="0%" x2="100%" y2="0%">
-                <stop offset="0%" stopColor="#ef4444" />
-                <stop offset="50%" stopColor="#f59e0b" />
-                <stop offset="100%" stopColor="#10b981" />
+              <linearGradient id="convictionGradient2" x1="0%" y1="0%" x2="100%" y2="0%">
+                <stop offset="0%" stopColor="var(--color-rose)" />
+                <stop offset="50%" stopColor="var(--color-gold)" />
+                <stop offset="100%" stopColor="var(--color-emerald)" />
               </linearGradient>
             </defs>
           </svg>
-
-          {/* Center Score Text */}
           <div className="absolute top-8 flex flex-col items-center justify-center">
-            <span className="text-3xl font-extrabold font-mono text-text tracking-tight">
-              {score}<span className="text-sm font-normal text-muted">/100</span>
+            <span className="text-3xl font-extrabold font-mono tabular-nums" style={{ color: 'var(--color-text)' }}>
+              {score}<span className="text-sm font-normal" style={{ color: 'var(--color-muted)' }}>/100</span>
             </span>
-            <span className={`text-[10px] font-bold tracking-wider uppercase ${score >= 75 ? 'text-emerald-400' : score >= 55 ? 'text-amber' : 'text-rose-400'}`}>
+            <span className="text-[10px] font-bold tracking-wider uppercase" style={{ color: score >= 75 ? 'var(--color-emerald)' : score >= 55 ? 'var(--color-gold)' : 'var(--color-rose)' }}>
               {score >= 75 ? 'HIGH CONVICTION' : score >= 55 ? 'MODERATE' : 'LOW CONVICTION'}
             </span>
           </div>
@@ -489,7 +528,7 @@ export default function DebateArenaView({ onOpenOrderTicket }) {
                     const tgtVal = consensus?.target != null ? Number(consensus.target) : (ltp > 0 ? Number((isBear ? ltp * 0.976 : ltp * 1.024)).toFixed(2) : 0)
                     onOpenOrderTicket({
                       symbol,
-                      exchange: 'NSE',
+                      exchange: getSymbolExchange(symbol),
                       action: isBear ? 'SELL' : 'BUY',
                       price: entryVal,
                       stopLoss: slVal,
@@ -559,7 +598,7 @@ export default function DebateArenaView({ onOpenOrderTicket }) {
                   if (onOpenOrderTicket) {
                     onOpenOrderTicket({
                       symbol,
-                      exchange: 'NSE',
+                      exchange: getSymbolExchange(symbol),
                       action: isCouncilSell ? 'SELL' : 'BUY',
                     })
                   }
@@ -580,63 +619,93 @@ export default function DebateArenaView({ onOpenOrderTicket }) {
               const isSigSell = sig.verdict?.includes('SELL')
               const isExpanded = expandedMember === pid
 
+              const verdictColor = isSigBuy
+                ? { bg: 'rgba(0,214,143,0.12)', border: 'rgba(0,214,143,0.35)', text: 'var(--color-emerald)' }
+                : isSigSell
+                ? { bg: 'rgba(255,79,123,0.12)', border: 'rgba(255,79,123,0.35)', text: 'var(--color-rose)' }
+                : { bg: 'rgba(245,166,35,0.12)', border: 'rgba(245,166,35,0.35)', text: 'var(--color-gold)' }
+
+              const PERSONA_ICONS = {
+                buffett: '🏛️', munger: '🔭', lynch: '🎯', jhunjhunwala: '🦁',
+                kedia: '💡', minervini: '🚀', wyckoff: '📊', oneil: '📈',
+                taleb: '🌊', simons: '🤖', smc: '🎪', forensic: '🔍', soros: '🌐',
+              }
+
               return (
-                <div
-                  key={pid}
-                  className="p-3.5 rounded-xl bg-surface border border-border/70 hover:border-amber/40 transition-all space-y-2"
-                >
-                  <div
-                    className="flex items-center justify-between cursor-pointer"
-                    onClick={() => setExpandedMember(isExpanded ? null : pid)}
-                  >
-                    <div className="flex items-center gap-2">
-                      <span className="text-base">🧠</span>
-                      <span className="font-bold text-xs text-text">{pName}</span>
-                      <span className="text-[10px] text-muted font-mono">({sig.confidence}% conf)</span>
-                      <span className="text-[9px] font-mono font-bold bg-amber/15 text-amber border border-amber/30 px-1.5 py-0.5 rounded hidden sm:inline-block">
-                        ⚖️ Calibrated Weight
-                      </span>
+                <div key={pid} className="persona-card-container" style={{ height: '160px' }}>
+                  <div className="persona-card-inner">
+
+                    {/* FRONT: Identity + Verdict + Confidence */}
+                    <div
+                      className="persona-card-front p-4 flex flex-col justify-between"
+                      style={{ background: 'var(--color-elevated)', border: `1px solid ${verdictColor.border}` }}
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="flex items-center gap-2.5">
+                          <span className="text-2xl">{PERSONA_ICONS[pid] || '🧠'}</span>
+                          <div>
+                            <div className="font-black text-xs" style={{ color: 'var(--color-text)' }}>{pName}</div>
+                            <div className="text-[9px] mt-0.5 font-mono" style={{ color: 'var(--color-muted)' }}>
+                              {sig.confidence}% confidence
+                            </div>
+                          </div>
+                        </div>
+                        <span
+                          className="text-[9px] px-2 py-0.5 rounded-md font-black"
+                          style={{ background: verdictColor.bg, color: verdictColor.text, border: `1px solid ${verdictColor.border}` }}
+                        >
+                          {sig.verdict}
+                        </span>
+                      </div>
+
+                      {/* Confidence bar */}
+                      <div className="mt-2">
+                        <div className="h-1 rounded-full overflow-hidden" style={{ background: 'var(--color-border)' }}>
+                          <div
+                            className="h-full rounded-full transition-all"
+                            style={{ width: `${sig.confidence || 0}%`, background: verdictColor.text }}
+                          />
+                        </div>
+                      </div>
+
+                      {sig.rationale?.[0] && (
+                        <p className="text-[10px] mt-2 leading-relaxed line-clamp-2" style={{ color: 'var(--color-muted)' }}>
+                          {sig.rationale[0]}
+                        </p>
+                      )}
+
+                      <div className="text-[8px] mt-2 text-center" style={{ color: 'var(--color-muted)' }}>
+                        Hover to see full analysis ↻
+                      </div>
                     </div>
 
-                    <div className="flex items-center gap-2">
-                      <span className={`px-2 py-0.5 rounded-md text-[10px] font-bold ${
-                        isSigBuy ? 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/30' : isSigSell ? 'bg-rose-500/15 text-rose-400 border border-rose-500/30' : 'bg-amber/15 text-amber border border-amber/30'
-                      }`}>
-                        {sig.verdict}
-                      </span>
-                      <span className="text-xs text-muted">{isExpanded ? '▲' : '▼'}</span>
-                    </div>
-                  </div>
-
-                  {sig.rationale && sig.rationale.length > 0 && !isExpanded && (
-                    <p className="text-[11px] text-muted font-ui truncate pl-6">
-                      • {sig.rationale[0]}
-                    </p>
-                  )}
-
-                  {isExpanded && (
-                    <div className="pl-6 pt-2 border-t border-border/40 space-y-2 font-ui text-xs animate-fade-slide">
+                    {/* BACK: Full rationale + key metrics */}
+                    <div
+                      className="persona-card-back p-3.5 overflow-y-auto flex flex-col gap-2"
+                      style={{ background: 'var(--color-panel)', border: `1px solid ${verdictColor.border}` }}
+                    >
+                      <div className="text-[9px] font-black uppercase tracking-widest mb-1" style={{ color: verdictColor.text }}>
+                        {PERSONA_ICONS[pid] || '🧠'} {pName} — Signals
+                      </div>
                       <div className="space-y-1">
-                        <span className="text-[10px] uppercase font-bold text-muted block">Signals & Checklist:</span>
-                        {sig.rationale?.map((r, i) => (
-                          <div key={i} className="flex items-start gap-1.5 text-text/90 text-[11px]">
-                            <span className="text-amber">•</span>
-                            <span>{r}</span>
+                        {(sig.rationale || []).slice(0, 4).map((r, i) => (
+                          <div key={i} className="flex items-start gap-1.5 text-[10px]" style={{ color: 'var(--color-text)' }}>
+                            <span style={{ color: verdictColor.text }}>•</span>
+                            <span className="leading-snug">{r}</span>
                           </div>
                         ))}
                       </div>
-
-                      {sig.key_metrics && typeof sig.key_metrics === 'object' && !Array.isArray(sig.key_metrics) && Object.keys(sig.key_metrics).length > 0 && (
-                        <div className="pt-1 flex flex-wrap gap-1.5">
-                          {Object.entries(sig.key_metrics).map(([k, v]) => (
-                            <span key={k} className="px-2 py-0.5 rounded-md bg-elevated border border-border/50 text-[10px] text-muted font-mono">
-                              {k}: <strong className="text-text">{String(v)}</strong>
+                      {sig.key_metrics && typeof sig.key_metrics === 'object' && Object.keys(sig.key_metrics).length > 0 && (
+                        <div className="flex flex-wrap gap-1 pt-1">
+                          {Object.entries(sig.key_metrics).slice(0, 4).map(([k, v]) => (
+                            <span key={k} className="px-1.5 py-0.5 rounded text-[8px] font-mono" style={{ background: 'var(--color-elevated)', border: '1px solid var(--color-border)', color: 'var(--color-muted)' }}>
+                              {k}: <strong style={{ color: 'var(--color-text)' }}>{String(v)}</strong>
                             </span>
                           ))}
                         </div>
                       )}
                     </div>
-                  )}
+                  </div>
                 </div>
               )
             })}

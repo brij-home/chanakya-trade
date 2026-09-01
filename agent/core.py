@@ -82,8 +82,9 @@ from agent.tools import build_registry, ToolRegistry
 from config.credentials import get_credential, load_all
 
 # Ensure .env and OS keychain credentials are fully loaded
-load_dotenv()
-load_all()
+if not os.environ.get("CHANAKYA_TESTING"):
+    load_dotenv()
+    load_all()
 
 console = Console(legacy_windows=False)
 
@@ -95,7 +96,10 @@ OPENAI_DEFAULT_MODEL = "gpt-4o"
 GEMINI_DEFAULT_MODEL = "gemini-3.5-flash-lite"
 OLLAMA_DEFAULT_MODEL = "llama3.1"
 NVIDIA_DEFAULT_MODEL = "meta/llama-3.2-11b-vision-instruct"
-GROQ_DEFAULT_MODEL = "llama-3.3-70b-versatile"
+GROQ_DEFAULT_MODEL = (
+    "openai/gpt-oss-120b,qwen/qwen3.8-27b,openai/gpt-oss-20b,qwen/qwen3.6-27b,groq/compound-mini"
+)
+
 DEEPSEEK_DEFAULT_MODEL = "deepseek-chat"
 OPENROUTER_DEFAULT_MODEL = "deepseek/deepseek-chat"
 CEREBRAS_DEFAULT_MODEL = "llama-3.3-70b"
@@ -603,6 +607,7 @@ class OpenAIProvider(LLMProvider):
                         "model": current_model,
                         "messages": messages,
                         "tools": tools if tools else None,
+                        "timeout": 25.0,
                     }
                     if extra_body:
                         kwargs["extra_body"] = extra_body
@@ -648,6 +653,33 @@ class OpenAIProvider(LLMProvider):
                         if len(self._clients) > 1:
                             continue
 
+                    # If model is not found / retired on the endpoint, immediately fail over to next model candidate
+                    if any(
+                        m_err in err_str
+                        for m_err in (
+                            "model_not_found",
+                            "does not exist",
+                            "do not have access",
+                            "not found",
+                            "404",
+                        )
+                    ):
+                        try:
+                            from engine.telemetry import EVENT_LLM_FAILOVER, record_event
+
+                            record_event(
+                                event_type=EVENT_LLM_FAILOVER,
+                                component="openai_provider",
+                                action_taken=f"Failing over from {current_model} to next candidate model",
+                                reason=err_str[:120],
+                                details={"failed_model": current_model, "base_url": self._base_url},
+                                severity="WARNING",
+                            )
+                        except Exception:
+                            pass
+                        last_exc = e
+                        break
+
                     if any(
                         c in err_str
                         for c in (
@@ -656,7 +688,6 @@ class OpenAIProvider(LLMProvider):
                             "parallel tool",
                             "tools at once",
                             "400",
-                            "404",
                             "413",
                             "not supported",
                             "request too large",
@@ -710,6 +741,7 @@ class OpenAIProvider(LLMProvider):
                         "messages": messages,
                         "tools": tools if tools else None,
                         "stream": True,
+                        "timeout": 25.0,
                     }
                     if extra_body:
                         kwargs["extra_body"] = extra_body
@@ -778,6 +810,33 @@ class OpenAIProvider(LLMProvider):
                         if len(self._clients) > 1:
                             continue
 
+                    # If model is not found / retired on the endpoint, immediately fail over to next model candidate
+                    if any(
+                        m_err in err_str
+                        for m_err in (
+                            "model_not_found",
+                            "does not exist",
+                            "do not have access",
+                            "not found",
+                            "404",
+                        )
+                    ):
+                        try:
+                            from engine.telemetry import EVENT_LLM_FAILOVER, record_event
+
+                            record_event(
+                                event_type=EVENT_LLM_FAILOVER,
+                                component="openai_provider",
+                                action_taken=f"Failing over from {current_model} to next candidate model",
+                                reason=err_str[:120],
+                                details={"failed_model": current_model, "base_url": self._base_url},
+                                severity="WARNING",
+                            )
+                        except Exception:
+                            pass
+                        last_exc = e
+                        break
+
                     if any(
                         c in err_str
                         for c in (
@@ -786,7 +845,6 @@ class OpenAIProvider(LLMProvider):
                             "parallel tool",
                             "tools at once",
                             "400",
-                            "404",
                             "413",
                             "not supported",
                             "request too large",
@@ -1358,6 +1416,9 @@ class ClaudeCLIProvider(LLMProvider):
         "adani ent": "ADANIENT",
         "lt": "LT",
         "larsen": "LT",
+        "bajaj auto": "BAJAJ-AUTO",
+        "bajaj_auto": "BAJAJ-AUTO",
+        "bajaj-auto": "BAJAJ-AUTO",
         "bajaj finance": "BAJFINANCE",
         "bajaj finserv": "BAJFINSV",
         "bajaj": "BAJFINANCE",
@@ -1584,12 +1645,12 @@ class ClaudeCLIProvider(LLMProvider):
             "PATTERN",
         }
         m = re.search(
-            r"(?:NSE:|BSE:)?([A-Z][A-Z0-9&]{1,19})"
+            r"(?:NSE:|BSE:)?([A-Z][A-Z0-9&_-]{1,19})"
             r'(?=[\s"\'.,;:\]\)—?!]|$)',
             text,
         )
-        if m and m.group(1) not in _noise:
-            return m.group(1)
+        if m and m.group(1).replace("_", "").replace("-", "") not in _noise:
+            return m.group(1).replace("_", "-")
 
         return ""
 
@@ -1624,7 +1685,7 @@ class OpenAISubscriptionProvider(LLMProvider):
       AI_PROVIDER=openai
       OPENAI_BASE_URL=https://api.groq.com/openai/v1
       OPENAI_API_KEY=gsk_...           (from console.groq.com)
-      OPENAI_MODEL=llama-3.3-70b-versatile
+      OPENAI_MODEL=qwen/qwen3.8-27b
     ──────────────────────────────────────────────────────────────────────────
     """
 
@@ -1642,7 +1703,7 @@ class OpenAISubscriptionProvider(LLMProvider):
         "      AI_PROVIDER=openai\n"
         "      OPENAI_BASE_URL=https://api.groq.com/openai/v1\n"
         "      OPENAI_API_KEY=<key from console.groq.com>\n"
-        "      OPENAI_MODEL=llama-3.3-70b-versatile\n\n"
+        "      OPENAI_MODEL=qwen/qwen3.8-27b\n\n"
         "  • OpenAI API key: AI_PROVIDER=openai, OPENAI_API_KEY=sk-...\n"
         "    (platform.openai.com → usage-based billing)\n"
     )
@@ -2290,6 +2351,19 @@ def _build_custom_openai_provider(
         base = os.environ.get("GROQ_BASE_URL", "https://api.groq.com/openai/v1")
         key = os.environ.get("GROQ_API_KEY") or os.environ.get("OPENAI_API_KEY", "")
         mdl = model or os.environ.get("GROQ_MODEL", GROQ_DEFAULT_MODEL)
+        # Ensure active Groq candidate models are in the fallback chain
+        fallbacks = [
+            "openai/gpt-oss-120b",
+            "qwen/qwen3.8-27b",
+            "openai/gpt-oss-20b",
+            "qwen/qwen3.6-27b",
+            "groq/compound-mini",
+        ]
+        models_list = [m.strip() for m in mdl.split(",") if m.strip()]
+        for fb in fallbacks:
+            if fb not in models_list:
+                models_list.append(fb)
+        mdl = ",".join(models_list)
         return OpenAIProvider(mdl, registry, sys_prompt, base_url=base, api_key=key)
     if prov_name == PROVIDER_DEEPSEEK:
         base = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1")
@@ -2601,7 +2675,7 @@ def _first_time_provider_setup() -> str:
 
 def _auto_detect_provider() -> str:
     """
-    Infer provider from environment — whichever credentials are present.
+    Infer provider from environment — whichever credentials are present and valid.
 
     Priority order (most explicit intent first):
       1. Explicit API keys — user clearly set these for this app
@@ -2611,37 +2685,39 @@ def _auto_detect_provider() -> str:
          even without user intent to use Gemini), so it's last
     """
     env = os.environ
-    from config.credentials import get_credential
+    from config.credentials import _is_placeholder, get_credential
 
-    # Explicit API keys first (env + keychain) — prioritizing high-speed/specialized keys
-    if env.get("GROQ_API_KEY") or get_credential("GROQ_API_KEY", required=False):
+    def _has_key(k: str) -> bool:
+        v = env.get(k) or get_credential(k, required=False)
+        return bool(v and v.strip() and not _is_placeholder(v))
+
+    # Gemini native key is high-priority institutional multimodal engine
+    if _has_key("GEMINI_API_KEY") or _has_key("GEMINI_API_KEYS") or _has_key("GOOGLE_API_KEY"):
+        return PROVIDER_GEMINI
+
+    # High-speed specialized & frontier providers
+    if _has_key("ANTHROPIC_API_KEY"):
+        return PROVIDER_ANTHROPIC
+    if _has_key("OPENAI_API_KEY"):
+        return PROVIDER_OPENAI
+    if _has_key("GROQ_API_KEY"):
         return PROVIDER_GROQ
-    if env.get("DEEPSEEK_API_KEY") or get_credential("DEEPSEEK_API_KEY", required=False):
+    if _has_key("DEEPSEEK_API_KEY"):
         return PROVIDER_DEEPSEEK
-    if env.get("NVIDIA_API_KEY") or get_credential("NVIDIA_API_KEY", required=False):
+    if _has_key("NVIDIA_API_KEY"):
         return PROVIDER_NVIDIA
-    if env.get("OPENROUTER_API_KEY") or get_credential("OPENROUTER_API_KEY", required=False):
+    if _has_key("OPENROUTER_API_KEY"):
         return PROVIDER_OPENROUTER
-    if env.get("CEREBRAS_API_KEY") or get_credential("CEREBRAS_API_KEY", required=False):
+    if _has_key("CEREBRAS_API_KEY"):
         return PROVIDER_CEREBRAS
-    if env.get("SAMBANOVA_API_KEY") or get_credential("SAMBANOVA_API_KEY", required=False):
+    if _has_key("SAMBANOVA_API_KEY"):
         return PROVIDER_SAMBANOVA
-    if env.get("DEEPINFRA_API_KEY") or get_credential("DEEPINFRA_API_KEY", required=False):
+    if _has_key("DEEPINFRA_API_KEY"):
         return PROVIDER_DEEPINFRA
-    if env.get("TOGETHER_API_KEY") or get_credential("TOGETHER_API_KEY", required=False):
+    if _has_key("TOGETHER_API_KEY"):
         return PROVIDER_TOGETHER
     if env.get("CLOUDFLARE_API_TOKEN") or env.get("CLOUDFLARE_API_KEY"):
         return PROVIDER_CLOUDFLARE
-    if env.get("ANTHROPIC_API_KEY") or get_credential("ANTHROPIC_API_KEY", required=False):
-        return PROVIDER_ANTHROPIC
-    if env.get("OPENAI_API_KEY") or get_credential("OPENAI_API_KEY", required=False):
-        return PROVIDER_OPENAI
-    if (
-        env.get("GEMINI_API_KEY")
-        or env.get("GOOGLE_API_KEY")
-        or get_credential("GEMINI_API_KEY", required=False)
-    ):
-        return PROVIDER_GEMINI
 
     # Ollama: check if OLLAMA_BASE_URL is set or if ollama is running locally
     if env.get("OLLAMA_BASE_URL") or env.get("OLLAMA_MODEL"):
@@ -2725,10 +2801,13 @@ class TradingAgent:
 
         self._provider = get_provider(provider=provider, model=model, registry=self._registry)
 
-        console.print(
-            f"\n[dim]🤖  AI: {self._provider.provider_name}[/dim]",
-            highlight=False,
-        )
+        try:
+            console.print(
+                f"\n[dim]🤖  AI: {self._provider.provider_name}[/dim]",
+                highlight=False,
+            )
+        except Exception:
+            pass
 
     # ── Public API ────────────────────────────────────────────
 
@@ -2739,20 +2818,185 @@ class TradingAgent:
         """
         self._history.append(_user_msg(user_message))
 
-        console.print()
-        console.rule("[bold cyan]Agent[/bold cyan]", style="cyan dim")
+        try:
+            console.print()
+            console.rule("[bold cyan]Agent[/bold cyan]", style="cyan dim")
+        except Exception:
+            pass
 
-        response = self._provider.chat(
-            messages=self._history,
-            stream=self._stream,
-        )
+        try:
+            response = self._provider.chat(
+                messages=self._history,
+                stream=self._stream,
+            )
+            # If the provider returned an internal error message string
+            if response.startswith("[") and (
+                "error" in response.lower() or "failed" in response.lower()
+            ):
+                raise RuntimeError(response)
+        except Exception as exc:
+            try:
+                from engine.telemetry import EVENT_LLM_FAILOVER, record_event
+
+                record_event(
+                    event_type=EVENT_LLM_FAILOVER,
+                    component="trading_agent",
+                    action_taken="Falling back to deterministic quantitative analysis engine",
+                    reason=str(exc)[:120],
+                    severity="WARNING",
+                )
+            except Exception:
+                pass
+            response = self._fallback_chat(user_message, str(exc))
 
         self._history.append(_assistant_msg(response))
 
-        console.rule(style="cyan dim")
-        console.print()
+        try:
+            console.rule(style="cyan dim")
+            console.print()
+        except Exception:
+            pass
 
         return response
+
+    def _fallback_chat(self, user_message: str, error_reason: str = "") -> str:
+        """
+        Deterministic quantitative fallback when LLMs are unavailable or encountering errors.
+        Extracts stock symbols or market context and generates institutional real-market data.
+        """
+        import re
+
+        # Extract symbol
+        symbol = ""
+        # 1. Match common natural names / tickers
+        for name, sym in [
+            ("bajaj-auto", "BAJAJ-AUTO"),
+            ("bajaj auto", "BAJAJ-AUTO"),
+            ("bajaj_auto", "BAJAJ-AUTO"),
+            ("reliance", "RELIANCE"),
+            ("tcs", "TCS"),
+            ("infy", "INFY"),
+            ("infosys", "INFY"),
+            ("hdfc bank", "HDFCBANK"),
+            ("hdfc", "HDFCBANK"),
+            ("icici bank", "ICICIBANK"),
+            ("icici", "ICICIBANK"),
+            ("tata motors", "TATAMOTORS"),
+            ("tatamotors", "TATAMOTORS"),
+            ("trent", "TRENT"),
+            ("coforge", "COFORGE"),
+            ("hcl tech", "HCLTECH"),
+            ("divi", "DIVISLAB"),
+            ("sbi", "SBIN"),
+            ("state bank", "SBIN"),
+        ]:
+            if name in user_message.lower():
+                symbol = sym
+                break
+
+        if not symbol:
+            m = re.search(r"(?:NSE:|BSE:)?([A-Z][A-Z0-9&_-]{1,19})", user_message.upper())
+            if m and m.group(1) not in {
+                "AI",
+                "CHAT",
+                "BUY",
+                "SELL",
+                "HOLD",
+                "HELP",
+                "STOCK",
+                "TRADE",
+                "PRICE",
+                "ANALYZE",
+            }:
+                symbol = m.group(1).replace("_", "-")
+
+        if symbol:
+            # Fetch live market data
+            q_res = self._registry.execute("get_quote", {"instruments": [f"NSE:{symbol}"]})
+            quote = q_res.get(f"NSE:{symbol}") or q_res.get(symbol) or {}
+            ltp = float(quote.get("last_price") or quote.get("close") or 0.0)
+            chg = float(quote.get("change") or 0.0)
+            chg_pct = float(quote.get("change_pct") or 0.0)
+            vol = int(quote.get("volume") or 0)
+
+            # Fetch technical analysis
+            t_res = self._registry.execute(
+                "technical_analyse", {"symbol": symbol, "exchange": "NSE"}
+            )
+            rsi = t_res.get("rsi")
+            sup = float(t_res.get("support") or (round(ltp * 0.97, 2) if ltp else 0.0))
+            res = float(t_res.get("resistance") or (round(ltp * 1.03, 2) if ltp else 0.0))
+            ema20 = t_res.get("ema_20")
+            ema50 = t_res.get("ema_50")
+
+            # Determine posture
+            is_bullish = bool((rsi and rsi >= 50) or (ema20 and ltp >= ema20) or chg >= 0)
+            verdict = "BUY" if is_bullish else "SELL"
+            posture = (
+                "BULLISH MARKUP / ACCUMULATION" if is_bullish else "BEARISH PRESSURE / DISTRIBUTION"
+            )
+
+            # Compute mathematically verified R-multiples
+            if is_bullish:
+                sl = sup if (0 < sup < ltp) else round(ltp * 0.98, 2)
+                risk = round(ltp - sl, 2) if ltp > sl else round(ltp * 0.02, 2)
+                t1 = round(ltp + 2.0 * risk, 2)
+                t2 = round(ltp + 3.5 * risk, 2)
+                strat = "SWING_DELIVERY (MOMENTUM)"
+            else:
+                sl = res if res > ltp else round(ltp * 1.02, 2)
+                risk = round(sl - ltp, 2) if sl > ltp else round(ltp * 0.02, 2)
+                t1 = round(ltp - 2.0 * risk, 2)
+                t2 = round(ltp - 3.5 * risk, 2)
+                strat = "INTRADAY / F&O SHORT"
+
+            pct_1 = round(((t1 - ltp) / ltp) * 100, 2) if ltp else 0.0
+            pct_2 = round(((t2 - ltp) / ltp) * 100, 2) if ltp else 0.0
+
+            clean_err = (
+                error_reason.split(":")[-1].strip() if error_reason else "LLM Provider Unavailable"
+            )
+
+            return (
+                f"> ℹ️ **Quantitative Intelligence Engine (Real-Time Fallback)**\n"
+                f"> *Note: AI reasoning provider fallback triggered ({clean_err}). Instant quantitative analysis computed below from live market feeds.*\n\n"
+                f"### 📊 Institutional Market Briefing: **{symbol}**\n\n"
+                f"**Market Snapshot**:\n"
+                f"- **Last Traded Price (LTP)**: ₹{ltp:,.2f} ({chg:+.2f} / {chg_pct:+.2f}%)\n"
+                f"- **Daily Volume**: {vol:,} shares\n"
+                f"- **RSI (14)**: {f'{rsi:.1f}' if rsi else 'N/A'}\n"
+                f"- **Key Moving Averages**: EMA 20 = {f'₹{ema20:,.2f}' if ema20 else 'N/A'}, EMA 50 = {f'₹{ema50:,.2f}' if ema50 else 'N/A'}\n"
+                f"- **Quantitative Posture**: `{posture}`\n\n"
+                f"### 🎯 Quant Trade Setup ({verdict}):\n"
+                f"- **Strategy**: `{strat}`\n"
+                f"- **Entry Level**: ₹{ltp:,.2f}\n"
+                f"- **Stop Loss**: ₹{sl:,.2f} (Risk $1R = ₹{risk:,.2f}$)\n"
+                f"- **Target 1 (2.0R)**: ₹{t1:,.2f} ({pct_1:+.2f}%)\n"
+                f"- **Target 2 (3.5R)**: ₹{t2:,.2f} ({pct_2:+.2f}%)\n"
+                f"- **Risk : Reward**: `1 : 2.0` (T1) / `1 : 3.5` (T2)\n\n"
+                f"**Key Levels & Structure**:\n"
+                f"- Major Structural Support: ₹{sup:,.2f}\n"
+                f"- Major Overhead Resistance: ₹{res:,.2f}\n"
+            )
+
+        # General market overview fallback
+        snap = self._registry.execute("get_market_snapshot", {})
+        nifty = snap.get("nifty") or {}
+        banknifty = snap.get("banknifty") or {}
+        vix = snap.get("vix") or {}
+
+        return (
+            f"> ℹ️ **Quantitative Intelligence Engine**\n\n"
+            f"**Market Status Overview**:\n"
+            f"- **NIFTY 50**: ₹{nifty.get('last_price', 'N/A')} ({nifty.get('change_pct', 0.0):+.2f}%)\n"
+            f"- **BANK NIFTY**: ₹{banknifty.get('last_price', 'N/A')} ({banknifty.get('change_pct', 0.0):+.2f}%)\n"
+            f"- **INDIA VIX**: {vix.get('last_price', 'N/A')} ({vix.get('change_pct', 0.0):+.2f}%)\n\n"
+            f"Type any command to run instant deep analysis:\n"
+            f"- `analyze BAJAJ-AUTO` — Full Multi-Agent Debate\n"
+            f"- `structure RELIANCE` — Smart Money Concepts & Order Blocks\n"
+            f"- `top10` — Institutional Conviction Radar\n"
+            f"- `rrg` — Sector Rotation Matrix\n"
+        )
 
     def run_command(self, command: str, **template_vars) -> str:
         """

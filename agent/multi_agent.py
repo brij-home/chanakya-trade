@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import json
 import queue as _queue_mod
+import re
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -328,6 +329,27 @@ class FundamentalAnalyst(BaseAnalyst):
     name = "Fundamental"
 
     def analyze(self, symbol: str, exchange: str = "NSE") -> AnalystReport:
+        sym_upper = symbol.upper().strip()
+        exch_upper = exchange.upper().strip() if exchange else "NSE"
+
+        # ── Non-equity / Commodity / Currency / Index Fundamentals ───────
+        from market.quotes import _BSE_SYMBOLS, _CDS_SYMBOLS, _MCX_SYMBOLS
+
+        if exch_upper == "MCX" or sym_upper in _MCX_SYMBOLS:
+            return self._commodity_fundamentals(sym_upper)
+        if exch_upper in ("CDS", "FX", "FOREX") or sym_upper in _CDS_SYMBOLS:
+            return self._currency_fundamentals(sym_upper)
+        if sym_upper in _BSE_SYMBOLS or sym_upper in (
+            "NIFTY",
+            "NIFTY50",
+            "NIFTY 50",
+            "BANKNIFTY",
+            "FINNIFTY",
+            "MIDCPNIFTY",
+            "INDIAVIX",
+        ):
+            return self._index_fundamentals(sym_upper)
+
         try:
             result = self.registry.execute("fundamental_analyse", {"symbol": symbol})
             if isinstance(result, dict) and "error" in result:
@@ -376,6 +398,100 @@ class FundamentalAnalyst(BaseAnalyst):
         except Exception as e:
             # Fallback chain: yfinance (free) → Perplexity Finance (optional)
             return self._fundamentals_fallback(symbol, fallback_error=str(e))
+
+    def _commodity_fundamentals(self, symbol: str) -> AnalystReport:
+        """Fundamental analysis for physical / derivative commodities (MCX / WTI / Brent / Bullion)."""
+        sym = symbol.upper()
+        if sym in ("CRUDEOIL", "CRUDEOILM", "CRUDE", "BRENT"):
+            points = [
+                "Asset: Global Crude Oil Continuous Benchmark (WTI/Brent Futures)",
+                "Supply/Demand: OPEC+ voluntary production quotas & compliance levels",
+                "Inventories: US Commercial Crude & Strategic Petroleum Reserve (SPR) stocks",
+                "Macro Transmission: USD (DXY) inverse relationship & global manufacturing PMI",
+                "Valuation: Physical equilibrium pricing model (no corporate P/E multiples)",
+            ]
+        elif sym in ("GOLD", "GOLDM", "GOLDPETAL"):
+            points = [
+                "Asset: MCX Gold Bullion & Sovereign Reserve Asset",
+                "Macro Drivers: US 10-Year Real Yields, Fed interest rate path & CPI inflation",
+                "Central Bank Demand: Global central bank physical bullion accumulation",
+                "Safe-Haven: Geopolitical risk premium & systemic currency debasement hedge",
+                "Valuation: Monetary reserve store-of-value pricing model",
+            ]
+        elif sym in ("SILVER", "SILVERM", "SILVERMIC"):
+            points = [
+                "Asset: MCX Silver Dual Industrial & Monetary Metal",
+                "Green Energy Demand: Solar PV manufacturing & EV electrical conductivity",
+                "Gold/Silver Ratio: Historical mean-reversion relative valuation metric",
+                "Inventories: London Bullion Market & COMEX registered warehouse stocks",
+                "Valuation: Hybrid industrial fabrication & monetary demand model",
+            ]
+        elif sym in ("NATURALGAS", "NATGASMINI", "NATGAS"):
+            points = [
+                "Asset: MCX Natural Gas Continuous Futures (Henry Hub Linked)",
+                "Seasonality: Winter heating degree days (HDD) & summer cooling demand",
+                "Storage Cycles: EIA weekly natural gas working underground storage reports",
+                "LNG Exports: Global LNG export terminal capacity & pipeline flows",
+                "Valuation: Weather-driven physical storage & supply-demand equilibrium",
+            ]
+        elif sym in ("COPPER", "ZINC", "ALUMINIUM", "ALUMINUM", "LEAD"):
+            points = [
+                f"Asset: MCX {sym} Base & Industrial Metal Futures",
+                "Global Growth: Global manufacturing PMI & infrastructure electrification demand",
+                "Supply Side: LME registered warehouse inventories & smelter output",
+                "Valuation: Global industrial capex & physical supply chain pricing",
+            ]
+        else:
+            points = [
+                f"Asset: MCX {sym} Commodity Derivative Contract",
+                "Macro Drivers: Global physical commodity supply/demand balance",
+                "Valuation: Physical cash-and-carry commodity pricing model",
+            ]
+
+        return AnalystReport(
+            analyst=self.name,
+            verdict="NEUTRAL",
+            confidence=65,
+            score=50.0,
+            key_points=points,
+            data={"asset_type": "commodity", "symbol": symbol, "source": "macro_commodity_model"},
+        )
+
+    def _currency_fundamentals(self, symbol: str) -> AnalystReport:
+        """Fundamental analysis for currency pairs (CDS / Forex)."""
+        points = [
+            f"Asset: {symbol} Foreign Exchange Currency Derivative",
+            "Macro Drivers: Foreign Institutional Investor (FII) equity & debt capital flows",
+            "Monetary Policy: RBI interest rate path vs US Federal Reserve / ECB / BoE",
+            "External Balance: India Current Account Deficit (CAD) & Trade Balance",
+            "Central Bank: RBI foreign exchange reserve buffer & intervention band",
+        ]
+        return AnalystReport(
+            analyst=self.name,
+            verdict="NEUTRAL",
+            confidence=65,
+            score=50.0,
+            key_points=points,
+            data={"asset_type": "currency", "symbol": symbol, "source": "macro_fx_model"},
+        )
+
+    def _index_fundamentals(self, symbol: str) -> AnalystReport:
+        """Fundamental analysis for benchmark and sectoral indices."""
+        points = [
+            f"Asset: {symbol} Benchmark Index",
+            "Institutional Flows: FII & DII aggregate daily turnover & net liquidity",
+            "Valuation: Index trailing P/E vs historical 5-year mean (fair value band)",
+            "Earnings Breadth: NIFTY 50 corporate earnings growth (EPS trajectory)",
+            "Volatility Regime: India VIX fear gauge alignment",
+        ]
+        return AnalystReport(
+            analyst=self.name,
+            verdict="NEUTRAL",
+            confidence=65,
+            score=50.0,
+            key_points=points,
+            data={"asset_type": "index", "symbol": symbol, "source": "macro_index_model"},
+        )
 
     def _fundamentals_fallback(self, symbol: str, fallback_error: str = "") -> AnalystReport:
         """
@@ -1811,76 +1927,258 @@ class MultiAgentAnalyzer:
         reports: list[AnalystReport],
         winner: str = "NEUTRAL",
     ) -> str:
-        """Construct an institutional quantitative synthesis when LLM is unavailable or times out."""
+        """Construct an institutional quantitative synthesis with mathematically rigorous 2.0R / 3.5R levels."""
         scorecard = compute_scorecard(reports)
         ltp = 0.0
-        tech_data = {}
+        tech_data: dict[str, Any] = {}
         for r in reports:
-            if r.analyst == "Technical" and not r.error:
-                ltp = r.data.get("ltp", 0.0) or r.data.get("close", 0.0) or 0.0
+            if r.analyst == "Technical" and not r.error and isinstance(r.data, dict):
+                ltp = float(r.data.get("ltp", 0.0) or r.data.get("close", 0.0) or 0.0)
                 tech_data = r.data
                 break
 
+        # Fallback search for LTP across all reports
+        if ltp <= 0.0:
+            for r in reports:
+                if not r.error and isinstance(r.data, dict):
+                    cand = float(
+                        r.data.get("ltp", 0.0)
+                        or r.data.get("close", 0.0)
+                        or r.data.get("price", 0.0)
+                        or 0.0
+                    )
+                    if cand > 0:
+                        ltp = cand
+                        break
+
         raw_sup = tech_data.get("support")
         raw_res = tech_data.get("resistance")
-        sup = float(raw_sup) if raw_sup is not None else (round(ltp * 0.96, 1) if ltp else 0.0)
-        res = float(raw_res) if raw_res is not None else (round(ltp * 1.06, 1) if ltp else 0.0)
-        sl = sup if sup > 0 else (round(ltp * 0.95, 1) if ltp else 0.0)
-        tgt1 = res if res > 0 else (round(ltp * 1.05, 1) if ltp else 0.0)
-        tgt2 = (
-            round(ltp + (tgt1 - ltp) * 1.5, 1)
-            if (ltp and tgt1 > ltp)
-            else (round(ltp * 1.10, 1) if ltp else 0.0)
+        atr_val = float(tech_data.get("atr") or (ltp * 0.02 if ltp else 0.0))
+        if atr_val <= 0.0 and ltp > 0:
+            atr_val = ltp * 0.02
+
+        sup = (
+            float(raw_sup)
+            if raw_sup is not None and float(raw_sup) > 0
+            else (round(ltp - 1.5 * atr_val, 2) if ltp else 0.0)
+        )
+        res = (
+            float(raw_res)
+            if raw_res is not None and float(raw_res) > 0
+            else (round(ltp + 1.5 * atr_val, 2) if ltp else 0.0)
         )
 
         v_label = scorecard.verdict
+        confidence = max(int(scorecard.agreement), 65)
+
         if v_label in ("STRONG_BUY", "BUY"):
-            action = "LONG_BIAS"
-            strategy = "SWING_DELIVERY"
+            strategy = "SWING_DELIVERY (Positional Markup)"
             dec_winner = "BULL"
+            # Risk & Stop loss calculation for Long
+            if 0 < sup < ltp and (ltp - sup) >= (0.0035 * ltp):
+                sl = sup
+                risk = ltp - sl
+            else:
+                risk = max(ltp * 0.005, 1.2 * atr_val) if ltp else 1.0
+                sl = round(ltp - risk, 2)
+
+            risk = max(0.5, ltp - sl)
+            sl = round(ltp - risk, 2)
+            risk_pct = round((risk / ltp) * 100, 2) if ltp else 0.0
+
+            tgt1 = round(ltp + (2.0 * risk), 2)
+            tgt1_pct = round((2.0 * risk / ltp) * 100, 2) if ltp else 0.0
+            tgt2 = round(ltp + (3.5 * risk), 2)
+            tgt2_pct = round((3.5 * risk / ltp) * 100, 2) if ltp else 0.0
+            rr_str = "1:2.0 (Target 1) / 1:3.5 (Target 2)"
+            pos_str = "Volatility Risk-Parity (1.5% capital risk budget)"
+
         elif v_label in ("STRONG_SELL", "SELL"):
-            action = "SHORT_OR_DEFENSIVE"
-            strategy = "HEDGE_OR_EXIT"
+            strategy = "HEDGE_OR_SHORT (Defined Risk)"
             dec_winner = "BEAR"
-        else:
-            action = "NEUTRAL_WAIT"
-            strategy = "RANGE_BOUND"
+            # Risk & Stop loss calculation for Short (Stop Loss MUST be ABOVE Entry)
+            if res > ltp and (res - ltp) >= (0.0035 * ltp):
+                sl = res
+                risk = sl - ltp
+            else:
+                risk = max(ltp * 0.005, 1.2 * atr_val) if ltp else 1.0
+                sl = round(ltp + risk, 2)
+
+            risk = max(0.5, sl - ltp)
+            sl = round(ltp + risk, 2)
+            risk_pct = round((risk / ltp) * 100, 2) if ltp else 0.0
+
+            tgt1 = round(ltp - (2.0 * risk), 2)
+            tgt1_pct = round((2.0 * risk / ltp) * 100, 2) if ltp else 0.0
+            tgt2 = round(ltp - (3.5 * risk), 2)
+            tgt2_pct = round((3.5 * risk / ltp) * 100, 2) if ltp else 0.0
+            rr_str = "1:2.0 (Target 1) / 1:3.5 (Target 2)"
+            pos_str = "Defensive Sizing (0.5% - 1.0% capital allocation)"
+
+        else:  # HOLD / NEUTRAL
+            strategy = "RANGE_BOUND / STAND_DOWN"
             dec_winner = "NEUTRAL"
+            sl_val = sup if (0 < sup < ltp) else round(ltp * 0.97, 2)
+            res_val = res if (res > ltp) else round(ltp * 1.03, 2)
+            sl = sl_val
+            tgt1 = res_val
+            tgt2 = round(res_val * 1.02, 2) if res_val else 0.0
+            risk_pct = round(abs(ltp - sl_val) / ltp * 100, 2) if ltp else 0.0
+            tgt1_pct = round(abs(res_val - ltp) / ltp * 100, 2) if ltp else 0.0
+            rr_str = "Unfavorable / Rangebound"
+            pos_str = "0 shares (Stand down until breakout confirmation)"
 
         final_winner = winner if winner in ("BULL", "BEAR") else dec_winner
 
+        if v_label in ("STRONG_BUY", "BUY", "STRONG_SELL", "SELL"):
+            trade_rec_block = [
+                "TRADE RECOMMENDATION:",
+                f"Strategy  : {strategy}",
+                f"Entry     : ₹{ltp:,.2f}" if ltp else "Entry     : At Market",
+                f"Stop-Loss : ₹{sl:,.2f} ({'-' if v_label in ('BUY', 'STRONG_BUY') else '+'}{risk_pct:.2f}%)"
+                if ltp
+                else f"Stop-Loss : ₹{sl:,.2f}",
+                f"Target 1  : ₹{tgt1:,.2f} ({'+' if v_label in ('BUY', 'STRONG_BUY') else '-'}{tgt1_pct:.2f}% | 2.0R)"
+                if ltp
+                else f"Target 1  : ₹{tgt1:,.2f} (2.0R)",
+                f"Target 2  : ₹{tgt2:,.2f} ({'+' if v_label in ('BUY', 'STRONG_BUY') else '-'}{tgt2_pct:.2f}% | 3.5R)"
+                if ltp
+                else f"Target 2  : ₹{tgt2:,.2f} (3.5R)",
+                f"R:R Ratio : {rr_str}",
+                f"Position  : {pos_str}",
+            ]
+        else:
+            trade_rec_block = [
+                "TRADE RECOMMENDATION:",
+                f"Strategy  : {strategy}",
+                f"Entry     : Await Breakout above ₹{res:,.2f} or Breakdown below ₹{sup:,.2f}",
+                f"Stop-Loss : ₹{sl:,.2f} (Range Support)",
+                f"Target 1  : ₹{tgt1:,.2f} (Range Resistance)",
+                f"R:R Ratio : {rr_str}",
+                f"Position  : {pos_str}",
+            ]
+
         lines = [
-            f"RECOMMENDATION: {v_label} ({action})",
-            f"CONFIDENCE: {max(int(scorecard.agreement), 65)}%",
+            f"VERDICT: {v_label}",
+            f"CONFIDENCE: {confidence}%",
             f"WINNER: {final_winner}",
             "",
-            "TRADE SETUP:",
-            f"  • Entry Level:  ₹{ltp:,.2f}" if ltp else "  • Entry Level:  At Market",
-            f"  • Stop Loss:    ₹{sl:,.2f}" if sl else "  • Stop Loss:    Support Level (-3.5%)",
-            f"  • Target 1:     ₹{tgt1:,.2f} (2R)"
-            if tgt1
-            else "  • Target 1:     Resistance (+5%)",
-            f"  • Target 2:     ₹{tgt2:,.2f} (3.5R)"
-            if tgt2
-            else "  • Target 2:     Expansion (+10%)",
-            f"  • Strategy:     {strategy}",
-            "",
-            "RATIONALE:",
-            f"  • Overall quantitative score: {scorecard.total_score:+.1f} with {scorecard.agreement:.0f}% analyst agreement.",
         ]
+        lines.extend(trade_rec_block)
+        lines.extend(
+            [
+                "",
+                "RATIONALE (3 bullets):",
+                f"- Quantitative multi-factor score: {scorecard.total_score:+.1f} with {scorecard.agreement:.0f}% analyst consensus agreement.",
+            ]
+        )
+
+        valid_pts = []
         for r in reports:
             if not r.error and r.key_points:
-                lines.append(f"  • {r.analyst}: {r.verdict} — {r.key_points[0]}")
+                valid_pts.append(f"- {r.analyst}: {r.verdict} — {r.key_points[0]}")
+        if valid_pts:
+            lines.extend(valid_pts[:2])
+        else:
+            lines.append(
+                f"- Confluence of trend and momentum indicators confirms {v_label} posture."
+            )
+            lines.append(f"- Volatility regime calibrated with ATR at ₹{atr_val:,.2f}.")
 
         lines.extend(
             [
                 "",
-                "RISK FACTORS:",
-                "  • Respect invalidation stop loss strictly on daily close.",
-                "  • Align position sizing with current NIFTY regime and sector momentum.",
+                "RISKS (2 bullets):",
+                f"- Invalidation: Exit immediately if price closes beyond Stop-Loss level (₹{sl:,.2f}).",
+                "- Volatility/Macro: Align position sizing with broader market regime and sector momentum.",
             ]
         )
         return "\n".join(lines)
+
+    def _validate_and_calibrate_synthesis(
+        self,
+        text: str,
+        symbol: str,
+        exchange: str,
+        reports: list[AnalystReport],
+        winner: str = "NEUTRAL",
+    ) -> str:
+        """
+        Validate synthesis text for mathematical accuracy, non-inverted stops, and valid R:R targets.
+        If an LLM response is corrupt, inverted, or missing critical trade levels, re-calibrate
+        or fall back to deterministic synthesis to prevent presenting hallucinated math.
+        """
+        if not text or not text.strip():
+            return self._build_deterministic_synthesis(symbol, exchange, reports, winner)
+
+        from agent.schema_parser import parse_synthesis_output
+
+        parsed = parse_synthesis_output(text)
+
+        # If verdict is completely missing or UNKNOWN, use deterministic synthesis
+        if parsed.verdict not in ("STRONG_BUY", "BUY", "HOLD", "SELL", "STRONG_SELL"):
+            return self._build_deterministic_synthesis(symbol, exchange, reports, winner)
+
+        # Extract numeric LTP from reports for sanity comparison
+        ltp = 0.0
+        for r in reports:
+            if r.analyst == "Technical" and not r.error and isinstance(r.data, dict):
+                ltp = float(r.data.get("ltp", 0.0) or r.data.get("close", 0.0) or 0.0)
+                break
+        if ltp <= 0.0:
+            for r in reports:
+                if not r.error and isinstance(r.data, dict):
+                    cand = float(
+                        r.data.get("ltp", 0.0)
+                        or r.data.get("close", 0.0)
+                        or r.data.get("price", 0.0)
+                        or 0.0
+                    )
+                    if cand > 0:
+                        ltp = cand
+                        break
+
+        if ltp > 0:
+            # Extract digits from stop_loss and target
+            def _extract_num(val_str: str) -> float | None:
+                if not val_str:
+                    return None
+                cleaned = re.sub(r"[^\d.]", "", val_str.split("(")[0])
+                try:
+                    return float(cleaned) if cleaned else None
+                except ValueError:
+                    return None
+
+            sl_num = _extract_num(parsed.stop_loss)
+            tgt_num = _extract_num(parsed.target)
+
+            is_corrupt = False
+            if parsed.verdict in ("BUY", "STRONG_BUY"):
+                # For long: Stop loss must be < ltp, Target must be > ltp
+                if sl_num is not None and sl_num >= ltp:
+                    is_corrupt = True
+                if tgt_num is not None and tgt_num <= ltp:
+                    is_corrupt = True
+                if sl_num is not None and tgt_num is not None:
+                    risk = ltp - sl_num
+                    if risk > 0 and (tgt_num - ltp) < (0.5 * risk):
+                        is_corrupt = True
+            elif parsed.verdict in ("SELL", "STRONG_SELL"):
+                # For short: Stop loss must be > ltp, Target must be < ltp
+                if sl_num is not None and sl_num <= ltp:
+                    is_corrupt = True
+                if tgt_num is not None and tgt_num >= ltp:
+                    is_corrupt = True
+                if sl_num is not None and tgt_num is not None:
+                    risk = sl_num - ltp
+                    if risk > 0 and (ltp - tgt_num) < (0.5 * risk):
+                        is_corrupt = True
+
+            if is_corrupt:
+                # Corrupt LLM numbers detected — replace with deterministic synthesis
+                return self._build_deterministic_synthesis(symbol, exchange, reports, winner)
+
+        return text
 
     # ── Phase 2: Bull/Bear Debate ────────────────────────────
 
@@ -2366,7 +2664,10 @@ class MultiAgentAnalyzer:
         synth_fallback = self._build_deterministic_synthesis(
             symbol, exchange, reports, debate.winner
         )
-        synthesis = self._safe_chat(synthesis_prompt, synth_fallback, timeout=12.0)
+        synthesis = self._safe_chat(synthesis_prompt, synth_fallback, timeout=18.0)
+        synthesis = self._validate_and_calibrate_synthesis(
+            synthesis, symbol, exchange, reports, debate.winner
+        )
 
         if self.progress_callback:
             self.progress_callback({"type": "synthesis_text", "text": synthesis})
@@ -2541,6 +2842,12 @@ Weigh the bull and bear arguments against the analyst data. Consider:
 Every debate has a stronger side — identify it and commit to that stance.
 HOLD is only correct when the evidence is genuinely split AND the risk/reward is unfavourable.
 
+**Mathematical Rigor (Zero Hallucinations)**:
+- All trade levels must be derived strictly from the real-time LTP (current market price) and technical levels in the Analyst Reports.
+- For LONG (`BUY` / `STRONG_BUY`): Stop-Loss must be BELOW Entry (typically 1.0–1.5x ATR or swing support). Target 1 MUST be strictly Entry + 2.0*(Entry - Stop-Loss) (2.0R). Target 2 MUST be strictly Entry + 3.5*(Entry - Stop-Loss) (3.5R).
+- For SHORT (`SELL` / `STRONG_SELL`): Stop-Loss must be ABOVE Entry (swing resistance). Target 1 MUST be strictly Entry - 2.0*(Stop-Loss - Entry) (2.0R). Target 2 MUST be strictly Entry - 3.5*(Stop-Loss - Entry) (3.5R).
+- For `HOLD`: Do not recommend buy orders. State rangebound support/resistance boundaries and wait conditions.
+
 Provide your FINAL VERDICT in this exact format:
 
 VERDICT: [STRONG_BUY / BUY / HOLD / SELL / STRONG_SELL]
@@ -2551,8 +2858,9 @@ TRADE RECOMMENDATION:
 Strategy  : [specific strategy name]
 Entry     : [price or "at market"]
 Stop-Loss : [price] ([% from entry]%)
-Target    : [price] ([% from entry]%)
-R:R Ratio : [reward:risk]
+Target 1  : [price] (+2.0R | [% from entry]%)
+Target 2  : [price] (+3.5R | [% from entry]%)
+R:R Ratio : 1:2.0 (Target 1) / 1:3.5 (Target 2)
 Position  : [lots/shares and sizing rationale]
 
 RATIONALE (3 bullets):
@@ -2567,7 +2875,7 @@ RISKS (2-3 bullets):
 Keep the output concise and terminal-friendly. Use bullets. All prices in INR.
 
 Alternatively, if you prefer structured output, you MAY return a single JSON object instead of the text format above. Use these exact keys:
-{{"verdict": "BUY", "confidence": 72, "winner": "BULL", "strategy": "Buy on dip", "entry": "₹2,850", "stop_loss": "₹2,700 (5.3%)", "target": "₹3,100 (8.8%)", "risk_reward": "1.7:1", "position": "12 shares", "rationale": ["reason 1", "reason 2", "reason 3"], "risks": ["risk 1", "risk 2"]}}
+{{"verdict": "BUY", "confidence": 72, "winner": "BULL", "strategy": "Buy on dip", "entry": "₹2,850", "stop_loss": "₹2,700 (5.3%)", "target": "₹3,150 (10.5%)", "risk_reward": "1:2.0 / 1:3.5", "position": "12 shares", "rationale": ["reason 1", "reason 2", "reason 3"], "risks": ["risk 1", "risk 2"]}}
 The text format above is always acceptable and preferred for readability. JSON is optional."""
 
 AGGRESSIVE_DEBATER_PROMPT = """You are the AGGRESSIVE RISK MANAGER at an Indian trading firm.

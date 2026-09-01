@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import { useAPI } from '../../hooks/useAPI'
+import { formatINR, formatINRFull } from '../../utils/formatINR'
 
 const PRESETS = {
   'Bull Call Spread': (spot) => {
@@ -130,6 +131,30 @@ export default function PayoffSimulatorCard({ initialSymbol = 'NIFTY', initialSp
     setLegs((prev) => prev.filter((_, i) => i !== index))
   }
 
+  // Duplicate leg
+  const duplicateLeg = (index) => {
+    setLegs((prev) => {
+      const item = prev[index]
+      if (!item) return prev
+      return [...prev.slice(0, index + 1), { ...item }, ...prev.slice(index + 1)]
+    })
+  }
+
+  // Flip leg (BUY <-> SELL, CE <-> PE)
+  const flipLeg = (index) => {
+    setLegs((prev) => {
+      const next = [...prev]
+      const cur = next[index]
+      if (!cur) return prev
+      next[index] = {
+        ...cur,
+        action: cur.action === 'BUY' ? 'SELL' : 'BUY',
+        option_type: cur.option_type === 'CE' ? 'PE' : 'CE',
+      }
+      return next
+    })
+  }
+
   // Add leg
   const addLeg = () => {
     const s = Math.round(spotPrice / 50) * 50
@@ -149,12 +174,13 @@ export default function PayoffSimulatorCard({ initialSymbol = 'NIFTY', initialSp
       {/* Header */}
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border/50 pb-3">
         <div>
-          <p className="text-muted text-[10px] uppercase tracking-widest font-ui">Strategy Simulator</p>
+          <p className="text-muted text-[10px] uppercase tracking-widest font-ui">Strategy Payoff Builder</p>
           <div className="flex items-center gap-2 mt-0.5">
-            <span className="text-text text-lg font-semibold">{symbol}</span>
-            <span className="text-amber text-xs bg-amber/10 border border-amber/30 px-1.5 py-0.5 rounded font-ui">
-              ₹{spotPrice.toLocaleString('en-IN')}
+            <span className="text-text text-lg font-bold">{symbol}</span>
+            <span className="text-amber text-xs bg-amber/10 border border-amber/30 px-2 py-0.5 rounded-md font-ui font-bold">
+              {formatINRFull(spotPrice)}
             </span>
+            {loading && <span className="text-[10px] text-muted animate-pulse font-ui">⚡ Calculating...</span>}
           </div>
         </div>
 
@@ -164,9 +190,9 @@ export default function PayoffSimulatorCard({ initialSymbol = 'NIFTY', initialSp
             <button
               key={p}
               onClick={() => handlePresetSelect(p)}
-              className={`px-2 py-1 rounded transition-all whitespace-nowrap ${
+              className={`px-2.5 py-1 rounded-lg transition-all whitespace-nowrap cursor-pointer ${
                 selectedPreset === p
-                  ? 'bg-amber text-black font-semibold'
+                  ? 'bg-amber text-black font-extrabold shadow-sm'
                   : 'bg-panel text-muted hover:text-text border border-border/40'
               }`}
             >
@@ -179,34 +205,34 @@ export default function PayoffSimulatorCard({ initialSymbol = 'NIFTY', initialSp
       {/* Metrics Row */}
       {simData && (
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">
-          <div className="bg-panel/80 border border-border/60 rounded-lg p-2">
-            <p className="text-muted text-[10px] uppercase font-ui">Max Profit</p>
-            <p className="text-green font-semibold mt-0.5">
+          <div className="bg-panel/80 border border-border/60 rounded-xl p-2.5">
+            <p className="text-muted text-[10px] uppercase font-ui font-semibold">Max Profit</p>
+            <p className="text-green font-bold text-sm mt-0.5">
               {typeof simData.max_profit === 'number'
-                ? `₹${simData.max_profit.toLocaleString('en-IN')}`
+                ? formatINR(simData.max_profit)
                 : simData.max_profit}
             </p>
           </div>
-          <div className="bg-panel/80 border border-border/60 rounded-lg p-2">
-            <p className="text-muted text-[10px] uppercase font-ui">Max Loss</p>
-            <p className="text-red font-semibold mt-0.5">
+          <div className="bg-panel/80 border border-border/60 rounded-xl p-2.5">
+            <p className="text-muted text-[10px] uppercase font-ui font-semibold">Max Loss</p>
+            <p className="text-red font-bold text-sm mt-0.5">
               {typeof simData.max_loss === 'number'
-                ? `₹${simData.max_loss.toLocaleString('en-IN')}`
+                ? formatINR(simData.max_loss)
                 : simData.max_loss}
             </p>
           </div>
-          <div className="bg-panel/80 border border-border/60 rounded-lg p-2">
-            <p className="text-muted text-[10px] uppercase font-ui">Breakevens</p>
-            <p className="text-text font-semibold mt-0.5 truncate">
+          <div className="bg-panel/80 border border-border/60 rounded-xl p-2.5">
+            <p className="text-muted text-[10px] uppercase font-ui font-semibold">Breakevens</p>
+            <p className="text-text font-bold text-xs mt-0.5 truncate">
               {simData.breakevens?.length > 0
-                ? simData.breakevens.map((b) => `₹${b.toLocaleString('en-IN')}`).join(', ')
+                ? simData.breakevens.map((b) => formatINR(b, 0)).join(', ')
                 : '—'}
             </p>
           </div>
-          <div className="bg-panel/80 border border-border/60 rounded-lg p-2">
-            <p className="text-muted text-[10px] uppercase font-ui">Estimated P&L</p>
-            <p className={`font-semibold mt-0.5 ${currentPnlPoint.pnl >= 0 ? 'text-green' : 'text-red'}`}>
-              {currentPnlPoint.pnl >= 0 ? '+' : ''}₹{currentPnlPoint.pnl.toLocaleString('en-IN')}
+          <div className="bg-panel/80 border border-border/60 rounded-xl p-2.5">
+            <p className="text-muted text-[10px] uppercase font-ui font-semibold">Estimated P&L</p>
+            <p className={`font-bold text-sm mt-0.5 ${currentPnlPoint.pnl >= 0 ? 'text-green' : 'text-red'}`}>
+              {currentPnlPoint.pnl >= 0 ? '+' : ''}{formatINR(currentPnlPoint.pnl)}
             </p>
           </div>
         </div>
@@ -214,7 +240,7 @@ export default function PayoffSimulatorCard({ initialSymbol = 'NIFTY', initialSp
 
       {/* Interactive Payoff SVG Graph */}
       {simData?.expiry_payoff && simData.expiry_payoff.length > 0 && (
-        <div className="relative bg-surface border border-border/60 rounded-lg p-2 overflow-hidden">
+        <div className="relative bg-surface border border-border/60 rounded-xl p-2.5 overflow-hidden">
           <PayoffSVG
             expiryData={simData.expiry_payoff}
             targetData={simData.target_payoff}
@@ -234,18 +260,18 @@ export default function PayoffSimulatorCard({ initialSymbol = 'NIFTY', initialSp
                 <span className="w-1.5 h-1.5 bg-amber rounded-full inline-block" /> Spot Marker
               </span>
             </div>
-            <span>Crosshair: ₹{sliderSpot.toLocaleString('en-IN')}</span>
+            <span>Crosshair: <strong>{formatINRFull(sliderSpot)}</strong></span>
           </div>
         </div>
       )}
 
       {/* Dynamic Interactive Sliders */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-3 bg-panel/40 border border-border/50 rounded-lg p-3 text-xs">
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-3 bg-panel/40 border border-border/50 rounded-xl p-3 text-xs">
         {/* Slider 1: Spot Price */}
         <div className="space-y-1">
           <div className="flex justify-between">
             <span className="text-muted font-ui">Spot Price:</span>
-            <span className="text-amber font-semibold">₹{sliderSpot.toLocaleString('en-IN')}</span>
+            <span className="text-amber font-bold">{formatINRFull(sliderSpot)}</span>
           </div>
           <input
             type="range"
@@ -262,7 +288,7 @@ export default function PayoffSimulatorCard({ initialSymbol = 'NIFTY', initialSp
         <div className="space-y-1">
           <div className="flex justify-between">
             <span className="text-muted font-ui">Target Evaluation:</span>
-            <span className="text-blue font-semibold">T+{targetDte} ({dte - targetDte}d left)</span>
+            <span className="text-blue font-bold">T+{targetDte} ({dte - targetDte}d left)</span>
           </div>
           <input
             type="range"
@@ -279,7 +305,7 @@ export default function PayoffSimulatorCard({ initialSymbol = 'NIFTY', initialSp
         <div className="space-y-1">
           <div className="flex justify-between">
             <span className="text-muted font-ui">IV Shock:</span>
-            <span className={ivShock >= 0 ? 'text-green font-semibold' : 'text-red font-semibold'}>
+            <span className={ivShock >= 0 ? 'text-green font-bold' : 'text-red font-bold'}>
               {ivShock >= 0 ? '+' : ''}{ivShock}% (IV: {iv + ivShock}%)
             </span>
           </div>
@@ -297,105 +323,182 @@ export default function PayoffSimulatorCard({ initialSymbol = 'NIFTY', initialSp
 
       {/* Aggregate Greeks Banner */}
       {simData?.greeks && (
-        <div className="flex flex-wrap items-center justify-between gap-3 bg-panel/60 border border-border/40 rounded-lg px-3 py-2 text-[11px]">
-          <span className="text-muted uppercase tracking-wider font-ui text-[10px]">Net Greeks</span>
+        <div className="flex flex-wrap items-center justify-between gap-3 bg-panel/60 border border-border/40 rounded-xl px-3 py-2 text-[11px]">
+          <span className="text-muted uppercase tracking-wider font-ui text-[10px] font-bold">Net Portfolio Greeks</span>
           <div className="flex items-center gap-4">
-            <span>Delta: <strong className="text-text">{simData.greeks.delta}</strong></span>
-            <span>Gamma: <strong className="text-text">{simData.greeks.gamma}</strong></span>
-            <span>Theta: <strong className={simData.greeks.theta >= 0 ? 'text-green' : 'text-red'}>
-              ₹{simData.greeks.theta}/day
+            <span>Δ Delta: <strong className="text-text">{simData.greeks.delta}</strong></span>
+            <span>Γ Gamma: <strong className="text-text">{simData.greeks.gamma}</strong></span>
+            <span>Θ Theta: <strong className={simData.greeks.theta >= 0 ? 'text-green' : 'text-red'}>
+              {formatINR(simData.greeks.theta)}/day
             </strong></span>
-            <span>Vega: <strong className="text-text">₹{simData.greeks.vega}</strong></span>
+            <span>ν Vega: <strong className="text-text">{formatINR(simData.greeks.vega)}</strong></span>
           </div>
         </div>
       )}
 
-      {/* Interactive Payoff SVG Chart */}
-      <div className="bg-surface border border-border rounded-xl p-3.5 space-y-2">
+      {/* Interactive Payoff Legs Container */}
+      <div className="bg-surface border border-border rounded-xl p-3.5 space-y-2.5">
         <div className="flex items-center justify-between text-xs">
-          <span className="text-muted text-[10px] uppercase tracking-wider font-ui">Strategy Legs ({legs.length})</span>
+          <span className="text-muted text-[10px] uppercase tracking-wider font-ui font-bold">
+            Strategy Legs ({legs.length})
+          </span>
           <button
             onClick={addLeg}
-            className="text-amber text-xs font-ui hover:underline flex items-center gap-1"
+            className="text-amber hover:text-amber/80 text-xs font-ui font-bold flex items-center gap-1 cursor-pointer"
           >
             + Add Custom Leg
           </button>
         </div>
 
-        <div className="space-y-1.5">
-          {legs.map((leg, idx) => (
-            <div
-              key={idx}
-              className="flex items-center gap-2 bg-panel border border-border/40 rounded p-2 text-xs flex-wrap"
-            >
-              {/* Buy / Sell toggle */}
-              <select
-                value={leg.action}
-                onChange={(e) => updateLeg(idx, 'action', e.target.value)}
-                className={`bg-elevated border rounded px-2 py-1 font-semibold ${
-                  leg.action === 'BUY' ? 'text-green border-green/30' : 'text-red border-red/30'
-                }`}
+        <div className="space-y-2">
+          {legs.map((leg, idx) => {
+            const isBuy = leg.action === 'BUY'
+            const isCall = leg.option_type === 'CE'
+            const legCost = (leg.lots || 1) * (leg.lot_size || 25) * (leg.premium || 0)
+
+            return (
+              <div
+                key={idx}
+                className="flex items-center gap-2 bg-panel border border-border/60 hover:border-amber/30 rounded-xl p-2.5 text-xs flex-wrap transition-all"
               >
-                <option value="BUY">BUY</option>
-                <option value="SELL">SELL</option>
-              </select>
+                {/* Buy / Sell toggle */}
+                <select
+                  value={leg.action}
+                  onChange={(e) => updateLeg(idx, 'action', e.target.value)}
+                  className={`bg-elevated border rounded-lg px-2.5 py-1 font-bold cursor-pointer ${
+                    isBuy ? 'text-green border-green/30 bg-green/10' : 'text-red border-red/30 bg-red/10'
+                  }`}
+                >
+                  <option value="BUY">BUY</option>
+                  <option value="SELL">SELL</option>
+                </select>
 
-              {/* CE / PE */}
-              <select
-                value={leg.option_type}
-                onChange={(e) => updateLeg(idx, 'option_type', e.target.value)}
-                className="bg-elevated border border-border rounded px-2 py-1 text-text font-semibold"
-              >
-                <option value="CE">CE (Call)</option>
-                <option value="PE">PE (Put)</option>
-              </select>
+                {/* CE / PE */}
+                <select
+                  value={leg.option_type}
+                  onChange={(e) => updateLeg(idx, 'option_type', e.target.value)}
+                  className={`bg-elevated border rounded-lg px-2 py-1 font-bold cursor-pointer ${
+                    isCall ? 'text-cyan-400 border-cyan-500/30' : 'text-purple-400 border-purple-500/30'
+                  }`}
+                >
+                  <option value="CE">CE (Call)</option>
+                  <option value="PE">PE (Put)</option>
+                </select>
 
-              {/* Strike */}
-              <div className="flex items-center gap-1">
-                <span className="text-muted text-[10px]">Strike:</span>
-                <input
-                  type="number"
-                  step={50}
-                  value={leg.strike}
-                  onChange={(e) => updateLeg(idx, 'strike', Number(e.target.value))}
-                  className="bg-elevated border border-border rounded px-2 py-1 w-20 text-text font-mono"
-                />
+                {/* Strike with Steppers */}
+                <div className="flex items-center gap-1">
+                  <span className="text-muted text-[10px] uppercase font-bold">Strike</span>
+                  <button
+                    type="button"
+                    onClick={() => updateLeg(idx, 'strike', Math.max(50, leg.strike - 50))}
+                    className="w-5 h-5 rounded bg-elevated border border-border flex items-center justify-center text-[10px] text-muted hover:text-text cursor-pointer"
+                  >
+                    −
+                  </button>
+                  <input
+                    type="number"
+                    step={50}
+                    value={leg.strike}
+                    onChange={(e) => updateLeg(idx, 'strike', Number(e.target.value))}
+                    className="bg-elevated border border-border rounded-md px-2 py-1 w-20 text-text font-mono text-center font-bold"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => updateLeg(idx, 'strike', leg.strike + 50)}
+                    className="w-5 h-5 rounded bg-elevated border border-border flex items-center justify-center text-[10px] text-muted hover:text-text cursor-pointer"
+                  >
+                    +
+                  </button>
+                </div>
+
+                {/* Premium with Steppers */}
+                <div className="flex items-center gap-1">
+                  <span className="text-muted text-[10px] uppercase font-bold">Prem</span>
+                  <button
+                    type="button"
+                    onClick={() => updateLeg(idx, 'premium', Math.max(0.5, Number((leg.premium - 5).toFixed(1))))}
+                    className="w-5 h-5 rounded bg-elevated border border-border flex items-center justify-center text-[10px] text-muted hover:text-text cursor-pointer"
+                  >
+                    −
+                  </button>
+                  <input
+                    type="number"
+                    step={0.5}
+                    value={leg.premium}
+                    onChange={(e) => updateLeg(idx, 'premium', Number(e.target.value))}
+                    className="bg-elevated border border-border rounded-md px-2 py-1 w-16 text-text font-mono text-center font-bold"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => updateLeg(idx, 'premium', Number((leg.premium + 5).toFixed(1)))}
+                    className="w-5 h-5 rounded bg-elevated border border-border flex items-center justify-center text-[10px] text-muted hover:text-text cursor-pointer"
+                  >
+                    +
+                  </button>
+                </div>
+
+                {/* Lots */}
+                <div className="flex items-center gap-1">
+                  <span className="text-muted text-[10px] uppercase font-bold">Lots</span>
+                  <button
+                    type="button"
+                    onClick={() => updateLeg(idx, 'lots', Math.max(1, leg.lots - 1))}
+                    className="w-5 h-5 rounded bg-elevated border border-border flex items-center justify-center text-[10px] text-muted hover:text-text cursor-pointer"
+                  >
+                    −
+                  </button>
+                  <input
+                    type="number"
+                    min={1}
+                    max={50}
+                    value={leg.lots}
+                    onChange={(e) => updateLeg(idx, 'lots', Number(e.target.value))}
+                    className="bg-elevated border border-border rounded-md px-1.5 py-1 w-11 text-text font-mono text-center font-bold"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => updateLeg(idx, 'lots', leg.lots + 1)}
+                    className="w-5 h-5 rounded bg-elevated border border-border flex items-center justify-center text-[10px] text-muted hover:text-text cursor-pointer"
+                  >
+                    +
+                  </button>
+                </div>
+
+                {/* Net Outlay Tag */}
+                <span className="text-[10px] font-mono px-2 py-1 rounded bg-elevated border border-border text-muted hidden sm:inline-block">
+                  {isBuy ? 'Debit' : 'Credit'}: <strong className="text-text">{formatINR(legCost)}</strong>
+                </span>
+
+                {/* Action buttons: Duplicate, Flip, Delete */}
+                <div className="ml-auto flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => duplicateLeg(idx)}
+                    title="Duplicate Leg"
+                    className="px-1.5 py-0.5 rounded bg-elevated border border-border text-[10px] text-muted hover:text-text cursor-pointer"
+                  >
+                    ⎘
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => flipLeg(idx)}
+                    title="Flip Action / Type"
+                    className="px-1.5 py-0.5 rounded bg-elevated border border-border text-[10px] text-muted hover:text-amber cursor-pointer"
+                  >
+                    🔄
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => removeLeg(idx)}
+                    className="text-muted hover:text-red px-1.5 py-0.5 rounded bg-elevated border border-border text-[10px] cursor-pointer"
+                    title="Remove leg"
+                  >
+                    ✕
+                  </button>
+                </div>
               </div>
-
-              {/* Premium */}
-              <div className="flex items-center gap-1">
-                <span className="text-muted text-[10px]">Premium:</span>
-                <input
-                  type="number"
-                  step={1}
-                  value={leg.premium}
-                  onChange={(e) => updateLeg(idx, 'premium', Number(e.target.value))}
-                  className="bg-elevated border border-border rounded px-2 py-1 w-16 text-text font-mono"
-                />
-              </div>
-
-              {/* Lots */}
-              <div className="flex items-center gap-1">
-                <span className="text-muted text-[10px]">Lots:</span>
-                <input
-                  type="number"
-                  min={1}
-                  max={50}
-                  value={leg.lots}
-                  onChange={(e) => updateLeg(idx, 'lots', Number(e.target.value))}
-                  className="bg-elevated border border-border rounded px-2 py-1 w-12 text-text font-mono"
-                />
-              </div>
-
-              <button
-                onClick={() => removeLeg(idx)}
-                className="ml-auto text-muted hover:text-red px-1 text-xs"
-                title="Remove leg"
-              >
-                ✕
-              </button>
-            </div>
-          ))}
+            )
+          })}
         </div>
       </div>
     </div>

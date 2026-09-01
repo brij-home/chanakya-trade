@@ -61,7 +61,7 @@ class GiftNiftySnapshot:
 
 
 # yfinance tickers to try in order
-_YF_TICKERS = ["^NSEIFSC", "NIFTY50.NS"]
+_YF_TICKERS = ["^NSEI", "NIFTY.NS", "^BSESN"]
 
 
 def get_gift_nifty(nifty_spot: Optional[float] = None) -> Optional[GiftNiftySnapshot]:

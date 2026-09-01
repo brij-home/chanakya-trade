@@ -424,12 +424,39 @@ def get_sector_rrg_matrix(use_cache: bool = True) -> list[SectorRRGPoint]:
     return points
 
 
-def get_stock_sector_alignment(symbol: str) -> dict[str, Any]:
-    """
-    Get a stock's parent sector, its RRG quadrant, and alignment tailwind score.
+@dataclass
+class StockTailwind:
+    symbol: str
+    sector: str
+    quadrant: str
+    rs_ratio: float
+    rs_momentum: float
+    tailwind_score: int
+    alignment: str
+    analysis: str
 
-    Returns:
-        Dict with sector details, quadrant, tailwind score (0-100), and institutional stance.
+    def __getitem__(self, item: str) -> Any:
+        return getattr(self, item)
+
+    def get(self, item: str, default: Any = None) -> Any:
+        return getattr(self, item, default)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "symbol": self.symbol,
+            "sector": self.sector,
+            "quadrant": self.quadrant,
+            "rs_ratio": self.rs_ratio,
+            "rs_momentum": self.rs_momentum,
+            "tailwind_score": self.tailwind_score,
+            "alignment": self.alignment,
+            "analysis": self.analysis,
+        }
+
+
+def get_stock_tailwind(symbol: str) -> StockTailwind:
+    """
+    Get a stock's parent sector, its RRG quadrant, and alignment tailwind score (0-100).
     """
     clean_sym = symbol.upper().replace(".NS", "").replace("NSE:", "").strip()
     sector = STOCK_SECTOR_MAP.get(clean_sym, "BROAD_MARKET")
@@ -438,20 +465,18 @@ def get_stock_sector_alignment(symbol: str) -> dict[str, Any]:
     sector_point = matrix.get(sector)
 
     if not sector_point:
-        # Default neutral for unclassified broad market stock
-        return {
-            "symbol": clean_sym,
-            "sector": sector,
-            "quadrant": "LEADING",
-            "rs_ratio": 100.0,
-            "rs_momentum": 100.0,
-            "tailwind_score": 50,
-            "alignment": "NEUTRAL",
-            "analysis": f"{clean_sym} is evaluated against the broad market index.",
-        }
+        return StockTailwind(
+            symbol=clean_sym,
+            sector=sector,
+            quadrant="LEADING",
+            rs_ratio=100.0,
+            rs_momentum=100.0,
+            tailwind_score=50,
+            alignment="NEUTRAL",
+            analysis=f"{clean_sym} is evaluated against the broad market index.",
+        )
 
     quad = sector_point.quadrant
-    # Score 0-100 based on quadrant and momentum
     quadrant_scores = {
         "LEADING": 85,
         "IMPROVING": 70,
@@ -459,7 +484,6 @@ def get_stock_sector_alignment(symbol: str) -> dict[str, Any]:
         "LAGGING": 25,
     }
     base_score = quadrant_scores.get(quad, 50)
-    # Adjust score with exact momentum
     momentum_adj = int((sector_point.rs_momentum - 100.0) * 0.5)
     final_score = max(10, min(95, base_score + momentum_adj))
 
@@ -478,13 +502,23 @@ def get_stock_sector_alignment(symbol: str) -> dict[str, Any]:
         alignment = "HEADWIND"
         desc = f"Parent sector {sector} is in LAGGING quadrant; institutional outflows present."
 
-    return {
-        "symbol": clean_sym,
-        "sector": sector,
-        "quadrant": quad,
-        "rs_ratio": round(sector_point.rs_ratio, 2),
-        "rs_momentum": round(sector_point.rs_momentum, 2),
-        "tailwind_score": final_score,
-        "alignment": alignment,
-        "analysis": desc,
-    }
+    return StockTailwind(
+        symbol=clean_sym,
+        sector=sector,
+        quadrant=quad,
+        rs_ratio=round(sector_point.rs_ratio, 2),
+        rs_momentum=round(sector_point.rs_momentum, 2),
+        tailwind_score=final_score,
+        alignment=alignment,
+        analysis=desc,
+    )
+
+
+def get_stock_sector_alignment(symbol: str) -> dict[str, Any] | StockTailwind:
+    """
+    Get a stock's parent sector, its RRG quadrant, and alignment tailwind score.
+
+    Returns:
+        StockTailwind object (compatible with dict access and attribute access).
+    """
+    return get_stock_tailwind(symbol)

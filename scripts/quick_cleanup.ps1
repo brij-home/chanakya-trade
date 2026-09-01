@@ -9,24 +9,25 @@ Write-Host "=======================================================" -Foreground
 $currentPid = $PID
 $killedCount = 0
 
-$zombieProcs = Get-Process -Name python, pytest, uvicorn, node -ErrorAction SilentlyContinue | 
-    Where-Object { 
-        $_.Id -ne $currentPid -and 
-        $_.MainWindowHandle -eq 0 -and
-        ($_.CommandLine -match "chanakya-trade" -or $_.CommandLine -match "pytest" -or $_.CommandLine -match "uvicorn" -or $_.CommandLine -match "validate_all" -or $_.CommandLine -eq $null)
-    }
-
-foreach ($proc in $zombieProcs) {
-    try {
-        # Only kill if not an active IDE parent process
-        if ($proc.ProcessName -match "python|pytest|uvicorn") {
-            Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
-            Write-Host " [+] Terminated orphaned background process: $($proc.ProcessName) (PID $($proc.Id))" -ForegroundColor Yellow
-            $killedCount++
+try {
+    $zombieProcs = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | 
+        Where-Object { 
+            $_.ProcessId -ne $currentPid -and 
+            ($_.Name -match "python|pytest|uvicorn") -and
+            ($_.CommandLine -match "chanakya-trade" -or $_.CommandLine -match "pytest" -or $_.CommandLine -match "uvicorn" -or $_.CommandLine -match "validate_all" -or $_.CommandLine -match "exec\(eval")
         }
-    } catch {
-        # Silently ignore protected processes
+
+    foreach ($proc in $zombieProcs) {
+        try {
+            Stop-Process -Id $proc.ProcessId -Force -ErrorAction SilentlyContinue
+            Write-Host " [+] Terminated orphaned background process: $($proc.Name) (PID $($proc.ProcessId))" -ForegroundColor Yellow
+            $killedCount++
+        } catch {
+            # Silently ignore protected processes
+        }
     }
+} catch {
+    # Fallback to Get-Process if CIM unavailable
 }
 
 if ($killedCount -eq 0) {

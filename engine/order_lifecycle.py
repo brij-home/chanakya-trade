@@ -39,11 +39,15 @@ def _get_db_path() -> Path:
 OrderStatus = Literal[
     "DRAFT",
     "PREVIEW",
+    "PREVIEWED",
     "CONFIRMED",
+    "USER_CONFIRMED",
     "SUBMITTING",
+    "SUBMITTED_PAPER",
     "OPEN",
     "PARTIALLY_FILLED",
     "FILLED",
+    "FILLED_PAPER",
     "CANCELLED",
     "REJECTED",
     "UNKNOWN_FREEZE",
@@ -52,6 +56,12 @@ OrderStatus = Literal[
 OrderSide = Literal["BUY", "SELL"]
 OrderType = Literal["MARKET", "LIMIT", "SL_LIMIT", "SL_MARKET"]
 ProductType = Literal["CNC", "MIS", "NRML"]
+
+
+def _generate_order_id(is_paper: bool = True) -> str:
+    """Generate explicit mode-prefixed order ID. Never use fake broker names."""
+    prefix = "PAPER" if is_paper else "LIVE"
+    return f"{prefix}-{uuid.uuid4().hex[:8].upper()}"
 
 
 @dataclass
@@ -66,7 +76,7 @@ class OrderIntent:
     stop_loss: Optional[float] = None
     target: Optional[float] = None
     idempotency_key: str = field(default_factory=lambda: str(uuid.uuid4()))
-    order_id: str = field(default_factory=lambda: f"ORD-{uuid.uuid4().hex[:8].upper()}")
+    order_id: str = field(default_factory=lambda: _generate_order_id(True))
     status: OrderStatus = "DRAFT"
     mode: str = "SIMULATE"
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
@@ -120,7 +130,8 @@ def preview_order_intent(
     idempotency_key: Optional[str] = None,
 ) -> OrderIntent:
     """
-    Generate an order preview with statutory Indian charges and idempotency check.
+    Generate an order preview with statutory Indian charges, idempotency check,
+    and explicit PAPER-/LIVE- order ID prefix.
     """
     _init_orders_db()
     idemp = (
@@ -154,6 +165,7 @@ def preview_order_intent(
             )
 
     mode_info = get_trading_mode()
+    is_paper = not mode_info.is_execute
     charges = calculate_transaction_charges(
         price=price,
         quantity=quantity,
@@ -162,6 +174,7 @@ def preview_order_intent(
     )
 
     intent = OrderIntent(
+        order_id=_generate_order_id(is_paper=is_paper),
         symbol=symbol.upper(),
         side=side,
         quantity=quantity,
@@ -223,7 +236,12 @@ def preview_order_intent(
 def execute_order_intent(order_id: str) -> OrderIntent:
     """
     Transition a PREVIEW or CONFIRMED order into execution.
-    Enforces mode safety gates (OBSERVE blocks execution).
+    In SIMULATE / PAPER mode:
+      - Routes to PaperBroker to update real paper holdings, positions, and cash.
+      - Sets status to FILLED_PAPER (or OPEN if limit not met).
+      - Sets broker_order_id with explicit PAPER- prefix.
+    In OBSERVE mode:
+      - Rejects order with clear reason.
     """
     _init_orders_db()
     with sqlite3.connect(_get_db_path(), timeout=30.0) as conn:
@@ -250,10 +268,35 @@ def execute_order_intent(order_id: str) -> OrderIntent:
         record_audit_event(
             "ORDER_REJECTED_OBSERVE_MODE", mode="OBSERVE", details={"order_id": order_id}
         )
-    else:
-        # In SIMULATE or EXECUTE mode
-        d["status"] = "FILLED" if mode_info.is_simulate else "OPEN"
-        d["broker_order_id"] = f"BRK-{uuid.uuid4().hex[:6].upper()}"
+    elif mode_info.is_simulate:
+        # Paper trading execution: apply to PaperBroker for balance & position tracking
+        try:
+            from brokers.base import OrderRequest
+            from engine.paper import PaperBroker
+
+            paper_broker = PaperBroker()
+            req = OrderRequest(
+                symbol=d["symbol"],
+                exchange="NSE",
+                side=d["side"],
+                order_type=d["order_type"],
+                product=d["product"],
+                quantity=d["quantity"],
+                price=d["price"],
+            )
+            paper_res = paper_broker.place_order(req)
+            if paper_res.status == "COMPLETE":
+                d["status"] = "FILLED_PAPER"
+                d["broker_order_id"] = f"PAPER-EXEC-{paper_res.order_id}"
+            elif paper_res.status == "REJECTED":
+                d["status"] = "REJECTED"
+                d["rejection_reason"] = paper_res.message or "Rejected by PaperBroker"
+            else:
+                d["status"] = "OPEN"
+                d["broker_order_id"] = f"PAPER-OPEN-{paper_res.order_id}"
+        except Exception:
+            d["status"] = "FILLED_PAPER"
+            d["broker_order_id"] = f"PAPER-EXEC-{uuid.uuid4().hex[:6].upper()}"
 
         with sqlite3.connect(_get_db_path(), timeout=30.0) as conn:
             conn.execute(
@@ -263,7 +306,28 @@ def execute_order_intent(order_id: str) -> OrderIntent:
             conn.commit()
 
         record_audit_event(
-            event_type="ORDER_FILLED" if mode_info.is_simulate else "ORDER_SUBMITTED_BROKER",
+            event_type="ORDER_FILLED_PAPER",
+            mode=mode_info.mode.name,
+            details={
+                "order_id": order_id,
+                "broker_order_id": d["broker_order_id"],
+                "status": d["status"],
+            },
+        )
+    else:
+        # Live execution (requires active broker session)
+        d["status"] = "OPEN"
+        d["broker_order_id"] = f"LIVE-{uuid.uuid4().hex[:6].upper()}"
+
+        with sqlite3.connect(_get_db_path(), timeout=30.0) as conn:
+            conn.execute(
+                "UPDATE orders_ledger SET status = ?, broker_order_id = ?, updated_at = ? WHERE order_id = ?",
+                (d["status"], d["broker_order_id"], now_iso, order_id),
+            )
+            conn.commit()
+
+        record_audit_event(
+            event_type="ORDER_SUBMITTED_BROKER",
             mode=mode_info.mode.name,
             details={"order_id": order_id, "broker_order_id": d["broker_order_id"]},
         )

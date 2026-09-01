@@ -1,0 +1,89 @@
+# ==============================================================================
+# .ignore — Ripgrep, File Finders (fd), & AI Workspace Context Indexing
+# Rules here instruct search/indexing engines to skip noisy, binary, or generated
+# files without altering git commit rules.
+# ==============================================================================
+
+# ── Build & Bundle Outputs ───────────────────────────────────────────────────
+build/
+dist/
+out/
+.vite/
+macos-app/build/
+macos-app/dist/
+macos-app/out/
+macos-app/release/
+web/static/assets/
+web/static/index.html
+*.egg-info/
+.eggs/
+
+# ── Dependencies & Virtual Environments ──────────────────────────────────────
+node_modules/
+**/node_modules/
+.venv/
+venv/
+env/
+ENV/
+
+# ── Package Lock Files ───────────────────────────────────────────────────────
+package-lock.json
+**/package-lock.json
+pnpm-lock.yaml
+yarn.lock
+poetry.lock
+
+# ── Media & Binary Assets ────────────────────────────────────────────────────
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.ico
+*.webp
+*.bmp
+*.tiff
+*.mp4
+*.mov
+*.webm
+*.avi
+*.mkv
+*.mp3
+*.wav
+*.flac
+*.woff
+*.woff2
+*.ttf
+*.eot
+*.otf
+docs/images/
+
+# ── Documents & Office Formats ───────────────────────────────────────────────
+*.pdf
+*.docx
+*.doc
+*.xlsx
+*.xls
+*.pptx
+
+# ── Local Databases, Dumps & Caches ──────────────────────────────────────────
+*.db
+*.sqlite
+*.sqlite3
+*.csv
+*.parquet
+*.dmp
+*.tmp
+*.temp
+.cache/
+.pytest_cache/
+.pytest_trading_platform/
+.ruff_cache/
+.mypy_cache/
+__pycache__/
+**/__pycache__/
+*.py[cod]
+
+# ── Logs & Debugging Output ──────────────────────────────────────────────────
+*.log
+logs/
+uvicorn_*.log

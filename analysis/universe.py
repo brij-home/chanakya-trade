@@ -893,6 +893,297 @@ THEMATIC_PRESETS: dict[str, dict[str, Any]] = {
             "BRIGADE",
         ],
     },
+    "commodities": {
+        "name": "🛢️ MCX Commodities Futures",
+        "description": "Precious metals, energy, base metals and agricultural continuous contracts.",
+        "symbols": [
+            "GOLD",
+            "SILVER",
+            "CRUDEOIL",
+            "NATURALGAS",
+            "COPPER",
+            "ZINC",
+            "ALUMINIUM",
+            "LEAD",
+            "COTTON",
+        ],
+    },
+    "etfs": {
+        "name": "📊 Leading Exchange Traded Funds (ETFs)",
+        "description": "Benchmark equity indices, sectoral baskets, gold/silver bullion, and global tech ETFs.",
+        "symbols": [
+            "NIFTYBEES",
+            "GOLDBEES",
+            "SILVERBEES",
+            "BANKBEES",
+            "ITBEES",
+            "AUTOBEES",
+            "PHARMABEES",
+            "CPSEETF",
+            "JUNIORBEES",
+            "MID150BEES",
+            "MON100",
+            "MAFANG",
+            "LIQUIDBEES",
+        ],
+    },
+    "currencies": {
+        "name": "💱 Currency Derivatives (CDS / Forex)",
+        "description": "Active currency pairs tracking the Indian Rupee against global major currencies.",
+        "symbols": [
+            "USDINR",
+            "EURINR",
+            "GBPINR",
+            "JPYINR",
+        ],
+    },
+    "indices": {
+        "name": "📈 Benchmark & Sectoral Market Indices",
+        "description": "Core broad market benchmarks and key sectoral rotation gauges.",
+        "symbols": [
+            "NIFTY50",
+            "BANKNIFTY",
+            "FINNIFTY",
+            "MIDCPNIFTY",
+            "SENSEX",
+            "NIFTYIT",
+            "NIFTYAUTO",
+            "NIFTYPHARMA",
+            "NIFTYFMCG",
+            "NIFTYMETAL",
+            "NIFTYREALTY",
+            "NIFTYENERGY",
+            "NIFTYINFRA",
+            "NIFTYPSE",
+            "NIFTYPSU",
+            "NIFTYPVTBANK",
+            "INDIAVIX",
+        ],
+    },
+    "fno_universe": {
+        "name": "⚡ Complete Liquid F&O Universe",
+        "description": "All ~180+ liquid derivatives contracts eligible for single-stock futures & options.",
+        "symbols": [
+            "RELIANCE",
+            "TCS",
+            "HDFCBANK",
+            "INFY",
+            "ICICIBANK",
+            "SBIN",
+            "BHARTIARTL",
+            "ITC",
+            "LT",
+            "KOTAKBANK",
+            "AXISBANK",
+            "TATAMOTORS",
+            "MARUTI",
+            "SUNPHARMA",
+            "BAJFINANCE",
+            "TITAN",
+            "HINDUNILVR",
+            "NTPC",
+            "ONGC",
+            "POWERGRID",
+            "TATASTEEL",
+            "COALINDIA",
+            "ASIANPAINT",
+            "M&M",
+            "ADANIENT",
+            "ADANIPORTS",
+            "TECHM",
+            "HCLTECH",
+            "WIPRO",
+            "ULTRACEMCO",
+            "JSWSTEEL",
+            "GRASIM",
+            "HEROMOTOCO",
+            "EICHERMOT",
+            "BAJAJ-AUTO",
+            "APOLLOHOSP",
+            "DRREDDY",
+            "CIPLA",
+            "TRENT",
+            "BEL",
+            "HAL",
+            "ZOMATO",
+            "NESTLEIND",
+            "BRITANNIA",
+            "DIVISLAB",
+            "HINDALCO",
+            "BPCL",
+            "SHRIRAMFIN",
+            "TATACONSUM",
+            "INDUSINDBK",
+            "DLF",
+            "GODREJPROP",
+            "OBEROIRLTY",
+            "PRESTIGE",
+            "POLYCAB",
+            "KEI",
+            "DIXON",
+            "BSE",
+            "MCX",
+            "PERSISTENT",
+            "COFORGE",
+            "KPITTECH",
+            "TATAELXSI",
+            "OFSS",
+            "MAXHEALTH",
+            "MANKIND",
+            "CHOLAFIN",
+            "MUTHOOTFIN",
+            "JIOFIN",
+            "SUZLON",
+            "INOXWIND",
+            "IREDA",
+            "PFC",
+            "REC",
+            "NHPC",
+            "SJVN",
+            "TORNTPOWER",
+            "SOLARINDS",
+            "MAZDOCK",
+            "COCHINSHIP",
+            "BDL",
+            "DATAPATTNS",
+            "ZENTEC",
+            "MTARTECH",
+            "CYIENTDLM",
+            "RADICO",
+            "MEDANTA",
+            "LALPATHLAB",
+            "FORTIS",
+            "SYNGENE",
+            "GLENMARK",
+            "BIOCON",
+            "AUROPHARMA",
+            "IPCALAB",
+            "ZYDUSLIFE",
+            "TORNTPHARM",
+            "LUPIN",
+            "ALKEM",
+            "PIIND",
+            "SRF",
+            "NAVINFLUOR",
+            "DEEPAKNTR",
+            "ATUL",
+            "COROMANDEL",
+            "UPL",
+            "TATACHEM",
+            "ABB",
+            "SIEMENS",
+            "CGPOWER",
+            "BHEL",
+            "THERMAX",
+            "VOLTAS",
+            "HAVELLS",
+            "KAYNES",
+            "MOTHERSON",
+            "SONACOMS",
+            "EXIDEIND",
+            "MRF",
+            "APOLLOTYRE",
+            "BALKRISIND",
+            "BOSCHLTD",
+            "ASHOKLEY",
+            "BHARATFORG",
+            "TVSMOTOR",
+            "CONCOR",
+            "INDIGO",
+            "PVRINOX",
+            "CDSL",
+            "ANGELONE",
+            "HDFCAMC",
+            "FEDERALBNK",
+            "AUBANK",
+            "BANDHANBNK",
+            "IDFCFIRSTB",
+            "BANKBARODA",
+            "PNB",
+            "CANBK",
+            "UNIONBANK",
+            "SAIL",
+            "NMDC",
+            "NATIONALUM",
+            "HINDZINC",
+            "JINDALSTEL",
+            "VBL",
+            "DMART",
+            "JUBLFOOD",
+            "DEVYANI",
+            "PAGEIND",
+            "BATAINDIA",
+            "DABUR",
+            "MARICO",
+            "GODREJCP",
+            "COLPAL",
+            "NAUKRI",
+            "POLICYBZR",
+            "MPHASIS",
+            "LTTS",
+            "CYIENT",
+            "TITAGARH",
+            "RVNL",
+            "IRFC",
+            "CUMMINSIND",
+        ],
+    },
+}
+
+# ── Multi-Asset Taxonomies ──────────────────────────────────────────
+
+COMMODITY_TAXONOMY: dict[str, dict[str, Any]] = {
+    "precious_metals": {
+        "name": "Precious Metals",
+        "icon": "🪙",
+        "symbols": ["GOLD", "GOLDM", "GOLDPETAL", "SILVER", "SILVERM", "SILVERMIC"],
+    },
+    "energy_commodities": {
+        "name": "Energy Commodities",
+        "icon": "🛢️",
+        "symbols": ["CRUDEOIL", "CRUDEOILM", "NATURALGAS", "NATGASMINI"],
+    },
+    "base_metals": {
+        "name": "Industrial Base Metals",
+        "icon": "🏗️",
+        "symbols": ["COPPER", "ZINC", "ALUMINIUM", "LEAD"],
+    },
+    "agri_commodities": {
+        "name": "Agricultural Contracts",
+        "icon": "🌾",
+        "symbols": ["COTTON"],
+    },
+}
+
+ETF_TAXONOMY: dict[str, dict[str, Any]] = {
+    "equity_etfs": {
+        "name": "Equity Index ETFs",
+        "icon": "📊",
+        "symbols": ["NIFTYBEES", "BANKBEES", "JUNIORBEES", "MID150BEES", "CPSEETF"],
+    },
+    "gold_silver_etfs": {
+        "name": "Gold & Silver Bullion ETFs",
+        "icon": "✨",
+        "symbols": ["GOLDBEES", "SILVERBEES"],
+    },
+    "sector_etfs": {
+        "name": "Sectoral ETFs",
+        "icon": "💼",
+        "symbols": ["ITBEES", "AUTOBEES", "PHARMABEES"],
+    },
+    "global_etfs": {
+        "name": "Global & US Tech ETFs",
+        "icon": "🌐",
+        "symbols": ["MON100", "MAFANG"],
+    },
+}
+
+CURRENCY_TAXONOMY: dict[str, dict[str, Any]] = {
+    "fx_pairs": {
+        "name": "Currency Derivatives (CDS)",
+        "icon": "💱",
+        "symbols": ["USDINR", "EURINR", "GBPINR", "JPYINR"],
+    },
 }
 
 
@@ -904,13 +1195,33 @@ for sec_id, data in SECTOR_TAXONOMY.items():
     for sym in data["symbols"]:
         _STOCK_TO_SECTOR[sym.upper().strip()] = (sec_id, sec_name)
 
+for com_group in COMMODITY_TAXONOMY.values():
+    for sym in com_group["symbols"]:
+        _STOCK_TO_SECTOR[sym.upper().strip()] = ("commodity", "MCX Commodities")
+
+for etf_group in ETF_TAXONOMY.values():
+    for sym in etf_group["symbols"]:
+        _STOCK_TO_SECTOR[sym.upper().strip()] = ("etf", "Exchange Traded Funds")
+
+for fx_group in CURRENCY_TAXONOMY.values():
+    for sym in fx_group["symbols"]:
+        _STOCK_TO_SECTOR[sym.upper().strip()] = ("currency", "Currency Derivatives")
+
 
 def get_stock_sector(symbol: str) -> tuple[str, str]:
     """
     Returns (sector_id, sector_name) for a given symbol.
     Defaults to ("broad_market", "Broad Market") if unclassified.
     """
-    clean = symbol.upper().replace(".NS", "").replace("NSE:", "").strip()
+    clean = (
+        symbol.upper()
+        .replace(".NS", "")
+        .replace("NSE:", "")
+        .replace("MCX:", "")
+        .replace("CDS:", "")
+        .replace("BSE:", "")
+        .strip()
+    )
     return _STOCK_TO_SECTOR.get(clean, ("broad_market", "Broad Market"))
 
 
@@ -1044,7 +1355,7 @@ def resolve_dynamic_universe(
     key = universe.lower().strip()
 
     # 1. Dynamic Auto Market-Aware Mode
-    if key in ("auto_market_aware", "auto", "dynamic", "leading_sectors"):
+    if key in ("auto_market_aware", "dynamic", "leading_sectors", "market_aware"):
         try:
             from analysis.sector_rotation import get_sector_rrg_matrix
 
@@ -1099,10 +1410,27 @@ def resolve_dynamic_universe(
                 :max_stocks
             ], f"Fallback to NIFTY 50 ({e})"
 
-    # 2. Thematic Presets
-    if key in THEMATIC_PRESETS:
-        symbols = THEMATIC_PRESETS[key]["symbols"]
-        return symbols, f"Thematic preset: {THEMATIC_PRESETS[key]['name']}"
+    # 2. Thematic Presets & Aliases
+    preset_alias = {
+        "commodity": "commodities",
+        "commodities": "commodities",
+        "mcx": "commodities",
+        "etf": "etfs",
+        "etfs": "etfs",
+        "forex": "currencies",
+        "currency": "currencies",
+        "currencies": "currencies",
+        "cds": "currencies",
+        "index": "indices",
+        "indices": "indices",
+        "fno": "fno_universe",
+        "fno_universe": "fno_universe",
+        "derivatives": "fno_universe",
+    }
+    canon_preset = preset_alias.get(key, key)
+    if canon_preset in THEMATIC_PRESETS:
+        symbols = THEMATIC_PRESETS[canon_preset]["symbols"]
+        return symbols, f"Thematic preset: {THEMATIC_PRESETS[canon_preset]['name']}"
 
     # 3. Sector Categories
     if key in SECTOR_TAXONOMY:
@@ -1114,8 +1442,48 @@ def resolve_dynamic_universe(
         syms = [s.strip().upper() for s in universe.split(",") if s.strip()]
         return syms, f"Custom watchlist ({len(syms)} tickers)"
 
-    if universe.upper() in _STOCK_TO_SECTOR:
-        return [universe.upper()], f"Single ticker: {universe.upper()}"
+    clean_u = (
+        universe.upper()
+        .replace(".NS", "")
+        .replace("NSE:", "")
+        .replace("MCX:", "")
+        .replace("CDS:", "")
+        .replace("BSE:", "")
+        .strip()
+    )
+    if clean_u in _STOCK_TO_SECTOR:
+        return [clean_u], f"Single ticker: {clean_u}"
 
     # Default fallback
     return THEMATIC_PRESETS["nifty50"]["symbols"][:max_stocks], "Default NIFTY 50 Universe"
+
+
+def normalize_symbol_exchange(symbol: str, exchange: str | None = None) -> tuple[str, str]:
+    """
+    Canonical Single Source of Truth (SSOT) for Indian market instrument resolution.
+
+    Transforms any raw input (e.g. 'crudeoil', 'GOLD', 'MCX:SILVER', 'USDINR', 'SENSEX', 'NSE:RELIANCE')
+    into a normalized (clean_symbol, canonical_exchange) tuple.
+    """
+    if not symbol:
+        return "", (exchange or "NSE").upper().strip()
+
+    sym = str(symbol).upper().strip()
+    exch = (exchange or "NSE").upper().strip() if exchange else "NSE"
+
+    if ":" in sym:
+        prefix, clean_sym = sym.split(":", 1)
+        exch = prefix.upper().strip()
+        sym = clean_sym.upper().strip()
+    elif exch == "NSE":
+        from market.quotes import _BSE_SYMBOLS, _CDS_SYMBOLS, _MCX_SYMBOLS
+
+        if sym in _MCX_SYMBOLS:
+            exch = "MCX"
+        elif sym in _CDS_SYMBOLS:
+            exch = "CDS"
+        elif sym in _BSE_SYMBOLS:
+            exch = "BSE"
+
+    clean_sym = sym.replace("_", "-")
+    return clean_sym, exch

@@ -43,6 +43,43 @@ from brokers.base import Quote
 
 # ── Symbol mapping ───────────────────────────────────────────
 
+# ── Symbol mapping ───────────────────────────────────────────
+
+# Commodities continuous futures mapping for MCX / commodity tickers
+_COMMODITY_MAP = {
+    "GOLD": "GC=F",
+    "GOLDM": "GC=F",
+    "GOLDPETAL": "GC=F",
+    "SILVER": "SI=F",
+    "SILVERM": "SI=F",
+    "SILVERMIC": "SI=F",
+    "CRUDEOIL": "CL=F",
+    "CRUDEOILM": "CL=F",
+    "CRUDE": "CL=F",
+    "BRENT": "BZ=F",
+    "NATURALGAS": "NG=F",
+    "NATGASMINI": "NG=F",
+    "NATGAS": "NG=F",
+    "COPPER": "HG=F",
+    "ZINC": "ZNC=F",
+    "ALUMINIUM": "ALI=F",
+    "ALUMINUM": "ALI=F",
+    "LEAD": "LED=F",
+    "COTTON": "CT=F",
+}
+
+# CDS / Forex currency derivatives mapping
+_CURRENCY_MAP = {
+    "USDINR": "INR=X",
+    "USD/INR": "INR=X",
+    "EURINR": "EURINR=X",
+    "EUR/INR": "EURINR=X",
+    "GBPINR": "GBPINR=X",
+    "GBP/INR": "GBPINR=X",
+    "JPYINR": "JPYINR=X",
+    "JPY/INR": "JPYINR=X",
+}
+
 # Index symbols that don't follow the .NS convention
 _INDEX_MAP = {
     "NIFTY 50": "^NSEI",
@@ -50,8 +87,21 @@ _INDEX_MAP = {
     "NIFTY": "^NSEI",
     "NIFTY BANK": "^NSEBANK",
     "BANKNIFTY": "^NSEBANK",
+    "FINNIFTY": "^CNXFIN",
+    "NIFTY FIN SERVICE": "^CNXFIN",
+    "NIFTY FINANCIAL SERVICES": "^CNXFIN",
+    "MIDCPNIFTY": "^CNXMIDCAP",
+    "NIFTY MIDCAP 100": "^CNXMIDCAP",
+    "NIFTY MIDCAP 50": "^NSEMDCP50",
+    "NIFTY NEXT 50": "^NSMIDCP",
+    "NIFTY 100": "^CNX100",
+    "NIFTY 200": "^CNX200",
+    "NIFTY 500": "^CRSLDX",
+    "NIFTY SMALLCAP 100": "^CNXSC",
     "SENSEX": "^BSESN",
+    "BSE SENSEX": "^BSESN",
     "INDIA VIX": "^INDIAVIX",
+    "INDIAVIX": "^INDIAVIX",
     "VIX": "^INDIAVIX",
     "NIFTY IT": "^CNXIT",
     "NIFTY PHARMA": "^CNXPHARMA",
@@ -60,39 +110,67 @@ _INDEX_MAP = {
     "NIFTY REALTY": "^CNXREALTY",
     "NIFTY METAL": "^CNXMETAL",
     "NIFTY ENERGY": "^CNXENERGY",
-    "NIFTY FIN SERVICE": "^CNXFIN",
-    "NIFTY MIDCAP 100": "^CNXMIDCAP",
+    "NIFTY INFRA": "^CNXINFRA",
+    "NIFTY COMMODITIES": "^CNXCOMMODITIES",
+    "NIFTY PSE": "^CNXPSE",
+    "NIFTY PSU BANK": "^CNXPSUBANK",
+    "NIFTY PRIVATE BANK": "^CNXPVTBANK",
 }
 
 
 def _to_yf_symbol(symbol: str, exchange: str = "NSE") -> str:
-    """Convert NSE/BSE symbol to Yahoo Finance ticker."""
-    # Strip exchange prefix if present (e.g. "NSE:RELIANCE" → "RELIANCE")
+    """Convert NSE/BSE/MCX symbol to Yahoo Finance ticker."""
+    # Strip exchange prefix if present (e.g. "MCX:GOLD" → "GOLD", "NSE:RELIANCE" → "RELIANCE")
     if ":" in symbol:
         exchange, symbol = symbol.split(":", 1)
 
-    upper = symbol.upper()
+    upper = symbol.upper().strip()
 
-    # Strip Fyers-specific suffixes before index/stock lookup
+    # Strip Fyers-specific suffixes before lookup
     if upper.endswith("-EQ"):
         upper = upper[:-3]
         symbol = symbol[:-3]
     elif upper.endswith("-INDEX"):
         upper = upper[:-6]
         symbol = symbol[:-6]
+    elif upper.endswith("-FUT") or upper.endswith("FUT"):
+        # Match base commodity if derivative contract e.g. GOLD24NOVFUT
+        for c in _COMMODITY_MAP:
+            if upper.startswith(c):
+                return _COMMODITY_MAP[c]
 
-    # Check index map first
+    # 1. Check Commodity Map (Gold, Silver, Crude Oil, Natural Gas, Copper, etc.)
+    if upper in _COMMODITY_MAP:
+        return _COMMODITY_MAP[upper]
+
+    # 2. Check Currency Map (USD/INR, EUR/INR, GBP/INR, JPY/INR)
+    if upper in _CURRENCY_MAP:
+        return _CURRENCY_MAP[upper]
+
+    # 3. Check Index Map (NIFTY, BANKNIFTY, FINNIFTY, SENSEX, sectoral indices)
     if upper in _INDEX_MAP:
         return _INDEX_MAP[upper]
 
-    # Regular stocks
-    if exchange.upper() == "BSE":
+    # 4. Check exchange overrides
+    exch_upper = (exchange or "NSE").upper().strip()
+    if exch_upper == "MCX":
+        for c in _COMMODITY_MAP:
+            if upper.startswith(c):
+                return _COMMODITY_MAP[c]
+        return upper
+
+    if exch_upper in ("CDS", "FX", "FOREX"):
+        if f"{upper}=X" in ("INR=X", "USDINR=X", "EURINR=X", "GBPINR=X", "JPYINR=X"):
+            return f"{upper}=X"
+        return upper
+
+    if exch_upper == "BSE":
         return f"{symbol}.BO"
     return f"{symbol}.NS"
 
 
 def _from_instrument(instrument: str) -> str:
-    """Convert 'NSE:RELIANCE' or 'NSE:RELIANCE-EQ' format to yfinance ticker."""
+    """Convert 'NSE:RELIANCE', 'MCX:GOLD', or 'NSE:RELIANCE-EQ' format to yfinance ticker."""
     if ":" in instrument:
         exchange, symbol = instrument.split(":", 1)
         if symbol.endswith("-EQ"):
@@ -128,11 +206,61 @@ _quote_cache_lock = threading.Lock()
 _quote_cache: dict[str, tuple[float, Quote]] = {}  # key -> (timestamp, Quote)
 _QUOTE_TTL_SECONDS = 20.0
 
+# USD-denominated yfinance futures tickers mapped to their MCX contract quotation factor
+# COMEX/NYMEX futures are quoted in US units (troy oz, lbs, barrels), whereas MCX quotes in Indian standard units:
+# - GOLD: COMEX USD/troy oz (31.1035g) → MCX ₹ per 10 grams (factor = 10 / 31.1034768 ≈ 0.3215)
+# - SILVER: COMEX USD/troy oz (31.1035g) → MCX ₹ per 1 kilogram (factor = 1000 / 31.1034768 ≈ 32.1507)
+# - COPPER: COMEX USD/lb → MCX ₹ per 1 kilogram (1 kg = 2.20462 lbs, factor = 2.20462262)
+# - CRUDEOIL: WTI USD/barrel → MCX ₹ per 1 barrel (factor = 1.0)
+# - BRENT: Brent USD/barrel → MCX ₹ per 1 barrel (factor = 1.0)
+# - NATURALGAS: NYMEX USD/MMBtu → MCX ₹ per 1 MMBtu (factor = 1.0)
+_USD_COMMODITY_FACTORS: dict[str, float] = {
+    "GC=F": 10.0 / 31.1034768,  # GOLD (USD/troy oz → ₹/10 grams)
+    "SI=F": 1000.0 / 31.1034768,  # SILVER (USD/troy oz → ₹/1 kg)
+    "HG=F": 2.20462262,  # COPPER (USD/lb → ₹/1 kg)
+    "CL=F": 1.0,  # CRUDE OIL (USD/bbl → ₹/bbl)
+    "BZ=F": 1.0,  # BRENT CRUDE OIL (USD/bbl → ₹/bbl)
+    "NG=F": 1.0,  # NATURAL GAS (USD/MMBtu → ₹/MMBtu)
+    "ZNC=F": 2.20462262,  # ZINC (USD/lb → ₹/1 kg)
+    "ALI=F": 2.20462262,  # ALUMINIUM (USD/lb → ₹/1 kg)
+    "LED=F": 2.20462262,  # LEAD (USD/lb → ₹/1 kg)
+    "CT=F": 3.74786,  # COTTON (cents/lb → ₹/bale)
+}
+
+_usdinr_cache: dict[str, tuple[float, float]] = {}  # key -> (timestamp, rate)
+_usdinr_lock = threading.Lock()
+_USDINR_TTL = 60.0  # seconds
+
+
+def _get_usdinr_rate() -> float:
+    """Fetch live USD/INR exchange rate, cached for 60s to avoid hammering yfinance."""
+    with _usdinr_lock:
+        if "rate" in _usdinr_cache:
+            ts, rate = _usdinr_cache["rate"]
+            if time.time() - ts < _USDINR_TTL:
+                return rate
+    try:
+        yf = _get_yf()
+        t = yf.Ticker("INR=X")
+        info = t.fast_info
+        rate = float(info.get("lastPrice", 0) or info.get("last_price", 0) or 0)
+        if not rate or rate < 60:
+            # Fallback: try 1-day history
+            hist = t.history(period="1d")
+            rate = float(hist["Close"].iloc[-1]) if not hist.empty else 0.0
+        rate = rate if rate > 60 else 84.0  # defensive fallback
+    except Exception:
+        rate = 84.0  # safe fallback when network is unavailable
+    with _usdinr_lock:
+        _usdinr_cache["rate"] = (time.time(), rate)
+    return rate
+
 
 def yf_get_quote(symbol: str, exchange: str = "NSE") -> Quote:
     """
     Get a live quote for a single stock/index with in-memory caching.
     ~15 min delayed for Indian markets when no broker is connected.
+    MCX commodity prices are converted from USD to INR automatically.
     """
     cache_key = f"{exchange.upper()}:{symbol.upper()}"
     now = time.time()
@@ -167,6 +295,18 @@ def yf_get_quote(symbol: str, exchange: str = "NSE") -> Quote:
                 day_high = float(row.get("High", 0))
                 day_low = float(row.get("Low", 0))
                 volume = int(row.get("Volume", 0))
+
+        # ── MCX Commodity USD → INR conversion with unit multiplier ────
+        # yfinance returns USD-denominated prices for commodity futures
+        # (CL=F, GC=F, etc.). MCX prices these in INR with standard Indian quotation units.
+        if ticker in _USD_COMMODITY_FACTORS and last_price > 0:
+            fx = _get_usdinr_rate() * _USD_COMMODITY_FACTORS[ticker]
+            last_price = round(last_price * fx, 2)
+            prev_close = round(prev_close * fx, 2) if prev_close else 0.0
+            open_price = round(open_price * fx, 2) if open_price else 0.0
+            day_high = round(day_high * fx, 2) if day_high else 0.0
+            day_low = round(day_low * fx, 2) if day_low else 0.0
+        # ─────────────────────────────────────────────────────────────────
 
         change = round(last_price - prev_close, 2) if prev_close else 0
         change_pct = round((change / prev_close) * 100, 2) if prev_close else 0
@@ -299,30 +439,58 @@ def yf_get_ohlcv(
     }
     yf_interval = interval_map.get(interval, interval)
 
+    now = datetime.now()
     try:
         t = yf.Ticker(ticker)
 
         if from_date:
+            clamped_from = from_date
+            if yf_interval == "1m" and (now - from_date).days > 6:
+                from datetime import timedelta
+
+                clamped_from = now - timedelta(days=6)
+            elif yf_interval in ("5m", "15m", "30m", "1h", "60m") and (now - from_date).days > 58:
+                from datetime import timedelta
+
+                clamped_from = now - timedelta(days=58)
+
             hist = t.history(
-                start=from_date.strftime("%Y-%m-%d"),
-                end=(to_date or datetime.now()).strftime("%Y-%m-%d"),
+                start=clamped_from.strftime("%Y-%m-%d"),
+                end=(to_date or now).strftime("%Y-%m-%d"),
                 interval=yf_interval,
             )
         else:
-            hist = t.history(period=period, interval=yf_interval)
+            p = period
+            if yf_interval == "1m" and p in ("1mo", "3mo", "6mo", "1y", "2y", "5y", "max"):
+                p = "7d"
+            elif yf_interval in ("5m", "15m", "30m", "1h", "60m") and p in (
+                "3mo",
+                "6mo",
+                "1y",
+                "2y",
+                "5y",
+                "max",
+            ):
+                p = "60d"
+            hist = t.history(period=p, interval=yf_interval)
 
         if hist.empty:
             return []
+
+        # ── MCX Commodity USD → INR conversion for OHLCV ────────────────
+        needs_inr = ticker in _USD_COMMODITY_FACTORS
+        fx = (_get_usdinr_rate() * _USD_COMMODITY_FACTORS[ticker]) if needs_inr else 1.0
+        # ─────────────────────────────────────────────────────────────────
 
         rows = []
         for idx, row in hist.iterrows():
             rows.append(
                 {
                     "date": idx.to_pydatetime() if hasattr(idx, "to_pydatetime") else idx,
-                    "open": float(row["Open"]),
-                    "high": float(row["High"]),
-                    "low": float(row["Low"]),
-                    "close": float(row["Close"]),
+                    "open": round(float(row["Open"]) * fx, 2),
+                    "high": round(float(row["High"]) * fx, 2),
+                    "low": round(float(row["Low"]) * fx, 2),
+                    "close": round(float(row["Close"]) * fx, 2),
                     "volume": int(row["Volume"]),
                 }
             )

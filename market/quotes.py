@@ -62,6 +62,55 @@ def _yf_fallback_quotes(instruments: list[str]) -> dict[str, Quote]:
     return {}
 
 
+_MCX_SYMBOLS = {
+    "GOLD",
+    "GOLDM",
+    "GOLDPETAL",
+    "SILVER",
+    "SILVERM",
+    "SILVERMIC",
+    "CRUDEOIL",
+    "CRUDEOILM",
+    "CRUDE",
+    "BRENT",
+    "NATURALGAS",
+    "NATGASMINI",
+    "NATGAS",
+    "COPPER",
+    "ZINC",
+    "ALUMINIUM",
+    "ALUMINUM",
+    "LEAD",
+    "COTTON",
+}
+_CDS_SYMBOLS = {
+    "USDINR",
+    "USD/INR",
+    "EURINR",
+    "EUR/INR",
+    "GBPINR",
+    "GBP/INR",
+    "JPYINR",
+    "JPY/INR",
+}
+_BSE_SYMBOLS = {"SENSEX", "BANKEX", "BSE SENSEX", "BSE BANKEX"}
+
+
+def normalize_instrument(inst: str) -> str:
+    """Intelligently prefix EXCHANGE: if omitted."""
+    s = inst.strip()
+    if ":" in s:
+        return s
+    upper = s.upper()
+    if upper in _MCX_SYMBOLS:
+        return f"MCX:{upper}"
+    if upper in _CDS_SYMBOLS:
+        return f"CDS:{upper}"
+    if upper in _BSE_SYMBOLS:
+        return f"BSE:{upper}"
+    return f"NSE:{upper}"
+
+
 def get_quote(instruments: list[str] | str) -> dict[str, Quote]:
     """
     Live quotes for one or more instruments.
@@ -70,7 +119,7 @@ def get_quote(instruments: list[str] | str) -> dict[str, Quote]:
 
     Args:
         instruments: List of "EXCHANGE:SYMBOL" strings, or a single instrument string.
-                     e.g. ["NSE:RELIANCE", "NSE:NIFTY 50", "NFO:NIFTY24APR22900CE"]
+                     e.g. ["NSE:RELIANCE", "NSE:NIFTY 50", "NFO:NIFTY24APR22900CE", "GOLD", "USDINR"]
 
     Returns:
         Dict keyed by instrument string → Quote dataclass.
@@ -78,26 +127,39 @@ def get_quote(instruments: list[str] | str) -> dict[str, Quote]:
     if isinstance(instruments, str):
         instruments = [instruments]
 
+    # Map raw input to normalized canonical format
+    input_to_canonical = {raw: normalize_instrument(raw) for raw in instruments}
+    canonical_instruments = list(set(input_to_canonical.values()))
+
     # 1. Try WebSocket cache (instant)
-    result = _ws_quotes(instruments)
-    missing = [i for i in instruments if i not in result]
-    if not missing:
-        return result
+    result = _ws_quotes(canonical_instruments)
+    missing = [i for i in canonical_instruments if i not in result]
 
     # 2. Try broker REST API
-    try:
-        broker_quotes = get_data_broker().get_quote(missing)
-        result.update(broker_quotes)
-        missing = [i for i in instruments if i not in result]
-    except (RuntimeError, Exception):
-        pass
+    if missing:
+        try:
+            broker_quotes = get_data_broker().get_quote(missing)
+            result.update(broker_quotes)
+            missing = [i for i in canonical_instruments if i not in result]
+        except (RuntimeError, Exception):
+            pass
 
     # 3. yfinance fallback
     if missing:
         yf_quotes = _yf_fallback_quotes(missing)
         result.update(yf_quotes)
 
-    return result
+    # 4. Populate raw aliases so quotes["GOLD"] and quotes["MCX:GOLD"] both resolve
+    final_result: dict[str, Quote] = dict(result)
+    for raw_key, canon_key in input_to_canonical.items():
+        if canon_key in result:
+            final_result[raw_key] = result[canon_key]
+            # Also ensure short symbol key without exchange is accessible
+            sym_part = raw_key.split(":")[-1]
+            if sym_part not in final_result:
+                final_result[sym_part] = result[canon_key]
+
+    return final_result
 
 
 def get_ltp(instrument: str) -> float:
@@ -105,18 +167,25 @@ def get_ltp(instrument: str) -> float:
     Last traded price for a single instrument.
 
     Args:
-        instrument: "EXCHANGE:SYMBOL"  e.g. "NSE:INFY"
+        instrument: "EXCHANGE:SYMBOL" or "SYMBOL"  e.g. "NSE:INFY", "GOLD", "USDINR"
 
     Returns:
         Last traded price as float.
     """
+    canon = normalize_instrument(instrument)
     try:
-        return get_data_broker().get_ltp(instrument)
+        val = get_data_broker().get_ltp(canon)
+        if val and val > 0:
+            return float(val)
     except (RuntimeError, Exception):
-        quotes = _yf_fallback_quotes([instrument])
-        if instrument in quotes:
-            return quotes[instrument].last_price
-        return 0.0
+        pass
+
+    quotes = _yf_fallback_quotes([canon])
+    if canon in quotes and quotes[canon].last_price > 0:
+        return quotes[canon].last_price
+    if instrument in quotes and quotes[instrument].last_price > 0:
+        return quotes[instrument].last_price
+    return 0.0
 
 
 def get_ltp_many(instruments: list[str]) -> dict[str, float]:

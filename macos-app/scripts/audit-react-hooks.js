@@ -22,7 +22,7 @@ function scanDirectory(dir) {
     const fullPath = path.join(dir, entry.name);
     if (entry.isDirectory()) {
       scanDirectory(fullPath);
-    } else if (entry.isFile() && (entry.name.endsWith('.jsx') || entry.name.endsWith('.js'))) {
+    } else if (entry.isFile() && (entry.name.endsWith('.jsx') || entry.name.endsWith('.js') || entry.name.endsWith('.tsx') || entry.name.endsWith('.ts'))) {
       auditFile(fullPath);
     }
   }

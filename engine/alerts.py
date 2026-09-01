@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import json
 import threading
-import time
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
@@ -107,6 +106,7 @@ class AlertManager:
         self._alerts: list[Alert] = []
         self._poller_thread: Optional[threading.Thread] = None
         self._polling = False
+        self._stop_event = threading.Event()
         self._lock = threading.Lock()  # protects triggered flag against tick races
         self._load()
 
@@ -361,6 +361,7 @@ class AlertManager:
         if self._polling:
             return
         self._polling = True
+        self._stop_event.clear()
         self._poller_thread = threading.Thread(
             target=self._poll_loop,
             args=(interval,),
@@ -369,7 +370,15 @@ class AlertManager:
         self._poller_thread.start()
 
     def stop_polling(self) -> None:
+        """Stop background alert checking immediately and join cleanly."""
         self._polling = False
+        self._stop_event.set()
+        if self._poller_thread and self._poller_thread.is_alive():
+            try:
+                self._poller_thread.join(timeout=1.0)
+            except Exception:
+                pass
+        self._poller_thread = None
 
     def check_alerts(self) -> list[Alert]:
         """Check all active alerts and return any that just triggered."""
@@ -401,12 +410,13 @@ class AlertManager:
             pass
 
     def _poll_loop(self, interval: int) -> None:
-        while self._polling:
+        while self._polling and not self._stop_event.is_set():
             if self.active_count() > 0 and _is_market_hours():
                 triggered = self.check_alerts()
                 for alert in triggered:
                     self._notify(alert)
-            time.sleep(interval)
+            if self._stop_event.wait(timeout=interval):
+                break
 
     def _notify(self, alert: Alert, ltp: Optional[float] = None) -> None:
         """

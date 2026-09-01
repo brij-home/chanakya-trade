@@ -191,6 +191,9 @@ def _to_fyers_symbol(instrument: str) -> str:
         clean = sym_upper.replace(" ", "")
         return f"{exch}:{clean}-INDEX"
 
+    if exch.upper() in ("MCX", "CDS", "FX", "FOREX"):
+        return f"{exch}:{sym}"
+
     return f"{exch}:{sym}-EQ"
 
 

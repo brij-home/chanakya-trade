@@ -319,8 +319,124 @@ export default function SectorDrilldownModal({ isOpen, sector, onClose, onOpenOr
           </div>
         </div>
 
-        {/* Modal Body: Stock Cards with Contributing Factors & Rationale */}
-        <div className="flex-1 overflow-y-auto p-6 space-y-3">
+        {/* Modal Body: RRG Chart + Stock Cards */}
+        <div className="flex-1 overflow-y-auto p-4 sm:p-5 space-y-3">
+
+          {/* ══ RRG QUADRANT CHART ══ */}
+          {!loading && data && (
+            <div
+              className="rounded-2xl p-4 animate-slide-up-fade"
+              style={{ background: 'var(--color-panel)', border: '1px solid var(--color-border)' }}
+            >
+              <div className="flex items-center justify-between mb-3">
+                <div className="text-[10px] font-bold uppercase tracking-widest" style={{ color: 'var(--color-muted)' }}>
+                  📡 Relative Rotation Graph — JdK RS-Ratio × RS-Momentum
+                </div>
+                <div
+                  className="text-[9px] px-2 py-0.5 rounded font-bold"
+                  style={{ background: `rgba(${rrg.quadrant === 'LEADING' ? '0,214,143' : rrg.quadrant === 'IMPROVING' ? '77,155,255' : rrg.quadrant === 'WEAKENING' ? '245,166,35' : '255,79,123'},0.15)`, color: `${rrg.quadrant === 'LEADING' ? 'var(--color-emerald)' : rrg.quadrant === 'IMPROVING' ? 'var(--color-sapphire)' : rrg.quadrant === 'WEAKENING' ? 'var(--color-gold)' : 'var(--color-rose)'}` }}
+                >
+                  {quadCfg.icon} {quadCfg.label}
+                </div>
+              </div>
+
+              {/* SVG RRG quadrant plot */}
+              <div className="flex flex-col sm:flex-row gap-4 items-center">
+                <svg
+                  width="240" height="220" viewBox="0 0 240 220"
+                  className="flex-shrink-0"
+                  style={{ fontFamily: "'JetBrains Mono', monospace" }}
+                >
+                  {/* Background quadrants */}
+                  {/* Q1: LEADING (top-right) — emerald */}
+                  <rect x="120" y="10" width="110" height="100" rx="6" fill="rgba(0,214,143,0.06)" stroke="rgba(0,214,143,0.15)" strokeWidth="0.5" />
+                  {/* Q2: WEAKENING (top-left) — gold */}
+                  <rect x="10" y="10" width="110" height="100" rx="6" fill="rgba(245,166,35,0.06)" stroke="rgba(245,166,35,0.15)" strokeWidth="0.5" />
+                  {/* Q3: LAGGING (bottom-left) — rose */}
+                  <rect x="10" y="110" width="110" height="100" rx="6" fill="rgba(255,79,123,0.06)" stroke="rgba(255,79,123,0.15)" strokeWidth="0.5" />
+                  {/* Q4: IMPROVING (bottom-right) — sapphire */}
+                  <rect x="120" y="110" width="110" height="100" rx="6" fill="rgba(77,155,255,0.06)" stroke="rgba(77,155,255,0.15)" strokeWidth="0.5" />
+
+                  {/* Quadrant labels */}
+                  <text x="175" y="28" textAnchor="middle" fontSize="8" fontWeight="700" fill="rgba(0,214,143,0.8)">🚀 LEADING</text>
+                  <text x="65" y="28" textAnchor="middle" fontSize="8" fontWeight="700" fill="rgba(245,166,35,0.8)">⚠️ WEAKENING</text>
+                  <text x="65" y="128" textAnchor="middle" fontSize="8" fontWeight="700" fill="rgba(255,79,123,0.8)">📉 LAGGING</text>
+                  <text x="175" y="128" textAnchor="middle" fontSize="8" fontWeight="700" fill="rgba(77,155,255,0.8)">🔄 IMPROVING</text>
+
+                  {/* Axis lines */}
+                  <line x1="10" y1="110" x2="230" y2="110" stroke="rgba(255,255,255,0.12)" strokeWidth="1" />
+                  <line x1="120" y1="10" x2="120" y2="210" stroke="rgba(255,255,255,0.12)" strokeWidth="1" />
+
+                  {/* Axis labels */}
+                  <text x="120" y="218" textAnchor="middle" fontSize="7" fill="rgba(255,255,255,0.35)">RS-Ratio →</text>
+                  <text x="4" y="110" textAnchor="middle" fontSize="7" fill="rgba(255,255,255,0.35)" transform="rotate(-90 4 110)">RS-Momentum →</text>
+
+                  {/* Sector dot — compute position from rrg data */}
+                  {(() => {
+                    const rsRatio = Number(rrg.rs_ratio || 100)
+                    const rsMom   = Number(rrg.rs_momentum || 100)
+                    // Map rs_ratio: 95–105 → 10–230, rs_mom: 95–105 → 210–10 (inverted Y)
+                    const clampedR = Math.max(95, Math.min(105, rsRatio))
+                    const clampedM = Math.max(95, Math.min(105, rsMom))
+                    const dotX = ((clampedR - 95) / 10) * 220 + 10
+                    const dotY = 210 - ((clampedM - 95) / 10) * 200
+                    const dotColor = rrg.quadrant === 'LEADING' ? '#00d68f' : rrg.quadrant === 'IMPROVING' ? '#4d9bff' : rrg.quadrant === 'WEAKENING' ? '#f5a623' : '#ff4f7b'
+                    const sectorName = (data?.sector_name || 'SECTOR').toUpperCase().slice(0, 10)
+                    return (
+                      <>
+                        {/* Tail trail */}
+                        <circle cx={Math.max(14, dotX - 14)} cy={dotY + 8} r="3.5" fill={dotColor} opacity="0.25" />
+                        <circle cx={Math.max(12, dotX - 8)} cy={dotY + 4} r="4.5" fill={dotColor} opacity="0.45" />
+                        {/* Main dot with glow */}
+                        <circle cx={dotX} cy={dotY} r="8" fill={dotColor} opacity="0.2" />
+                        <circle cx={dotX} cy={dotY} r="5.5" fill={dotColor}
+                          style={{ filter: `drop-shadow(0 0 8px ${dotColor})` }} />
+                        {/* Label */}
+                        <text x={dotX} y={dotY - 11} textAnchor="middle" fontSize="8" fontWeight="800" fill="#fff">
+                          {sectorName}
+                        </text>
+                        {/* Coordinates */}
+                        <text x={dotX} y={dotY + 19} textAnchor="middle" fontSize="6.5" fill={dotColor} opacity="0.9">
+                          {rsRatio.toFixed(1)} / {rsMom.toFixed(1)}
+                        </text>
+                      </>
+                    )
+                  })()}
+                </svg>
+
+                {/* Legend + rotation cycle */}
+                <div className="flex flex-col gap-2 text-xs min-w-0">
+                  <div className="text-[10px] font-bold uppercase tracking-wider mb-1" style={{ color: 'var(--color-muted)' }}>Rotation Cycle</div>
+                  {[
+                    { q: 'IMPROVING', icon: '🔄', color: 'var(--color-sapphire)', desc: 'Gaining momentum' },
+                    { q: 'LEADING', icon: '🚀', color: 'var(--color-emerald)', desc: 'Outperforming + strong velocity' },
+                    { q: 'WEAKENING', icon: '⚠️', color: 'var(--color-gold)', desc: 'Slowing relative strength' },
+                    { q: 'LAGGING', icon: '📉', color: 'var(--color-rose)', desc: 'Underperforming, avoid' },
+                  ].map(({ q, icon, color, desc }) => (
+                    <div
+                      key={q}
+                      className="flex items-center gap-2 px-2.5 py-1.5 rounded-xl transition-all"
+                      style={{
+                        background: rrg.quadrant === q ? `rgba(${color === 'var(--color-emerald)' ? '0,214,143' : color === 'var(--color-sapphire)' ? '77,155,255' : color === 'var(--color-gold)' ? '245,166,35' : '255,79,123'},0.12)` : 'var(--color-elevated)',
+                        border: rrg.quadrant === q ? `1px solid ${color}` : '1px solid transparent',
+                      }}
+                    >
+                      <span className="text-sm">{icon}</span>
+                      <div>
+                        <span className="text-[9px] font-extrabold uppercase block" style={{ color }}>{q}</span>
+                        <span className="text-[8px]" style={{ color: 'var(--color-muted)' }}>{desc}</span>
+                      </div>
+                      {rrg.quadrant === q && (
+                        <span className="ml-auto text-[8px] font-bold" style={{ color }}>← NOW</span>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
+
+
           {loading && opportunities.length === 0 ? (
             <div className="flex flex-col items-center justify-center p-12 space-y-3">
               <span className="text-3xl animate-spin">⏳</span>

@@ -29,11 +29,25 @@ def bullish_breakout_df():
 
 
 def test_evaluate_execution_gate_ready(bullish_breakout_df):
+    from analysis.big_move import OptionsFlowBias
+
+    mock_flow = OptionsFlowBias(
+        has_options=True,
+        pcr=1.2,
+        max_pain_strike=1300.0,
+        dominant_regime="LONG_BUILDUP",
+        call_oi_total=100000,
+        put_oi_total=120000,
+        highest_call_oi_strike=1400.0,
+        highest_put_oi_strike=1200.0,
+        institutional_sentiment="AGGRESSIVE_BULLISH",
+    )
     with (
         patch(
             "analysis.sector_rotation.get_stock_sector_alignment",
             return_value={"sector": "METALS", "quadrant": "LEADING"},
         ),
+        patch("analysis.execution_gate.analyze_options_flow", return_value=mock_flow),
         patch("bot.telegram_bot.push_execution_alert") as mock_push,
     ):
         rep = evaluate_execution_gate("JSWSTEEL", df=bullish_breakout_df, notify_telegram=True)

@@ -196,7 +196,7 @@ class PaperBroker(BrokerAPI):
         ]
 
     def place_order(self, req: OrderRequest) -> OrderResponse:
-        order_id = str(uuid.uuid4())[:16]
+        order_id = f"PAPER-{uuid.uuid4().hex[:8].upper()}"
         ltp = self._ltp(req.symbol)
         fill_price = self._fill_price(req, ltp)
 

@@ -1,11 +1,12 @@
 import { useState, useEffect, useRef } from 'react'
-import { fuzzySearchUniverse, saveRecentSearch } from '../../data/universeData'
+import { fuzzySearchUniverse, saveRecentSearch, getSymbolExchange } from '../../data/universeData'
 
 /**
  * SmartTypeahead - Institutional OmniSearch Autocomplete Popover
  * - 100% Solid High-Contrast Background (Clean slate in Light Mode, Obsidian in Dark Mode)
  * - Zero underlying text bleed-through (Solid opacity)
  * - Adaptive Viewport Collision Detection (No clipping on left or right edges)
+ * - Categorized filtering: All, Stocks, Indices, ETFs, Commodities, Councils, Personas, Quant
  * - Crystal clear typography, badges, and 1-click action buttons
  */
 export default function SmartTypeahead({
@@ -19,14 +20,23 @@ export default function SmartTypeahead({
   align = 'auto', // 'auto' | 'left' | 'right'
   selectedIndex = 0,
   setSelectedIndex,
+  results = null,
 }) {
   const containerRef = useRef(null)
   const [popoverAlign, setPopoverAlign] = useState('left')
+  const [activeCategory, setActiveCategory] = useState('all')
 
-  const rawResults = fuzzySearchUniverse(query, activeSymbol, mode === 'symbols_only' ? 8 : 10)
-  const items = mode === 'symbols_only' 
-    ? rawResults.filter((r) => r.type === 'symbol') 
-    : rawResults
+  const rawResults = results || fuzzySearchUniverse(
+    query,
+    activeSymbol,
+    mode === 'symbols_only' ? 10 : 12,
+    activeCategory
+  )
+  const items = results 
+    ? results 
+    : (mode === 'symbols_only' 
+        ? rawResults.filter((r) => r.type === 'symbol') 
+        : rawResults)
 
   // Calculate boundary positioning to prevent screen clipping
   useEffect(() => {
@@ -39,11 +49,11 @@ export default function SmartTypeahead({
     const parent = containerRef.current.parentElement
     if (!parent) return
     const rect = parent.getBoundingClientRect()
-    const popoverWidth = Math.min(440, window.innerWidth - 32)
+    const popoverWidth = Math.min(480, window.innerWidth - 32)
 
     if (rect.left + popoverWidth > window.innerWidth - 16 && rect.right - popoverWidth >= 8) {
       setPopoverAlign('right')
-    } else {
+      } else {
       setPopoverAlign('left')
     }
   }, [isOpen, query, position, align])
@@ -60,8 +70,9 @@ export default function SmartTypeahead({
   if (!isOpen || items.length === 0) return null
 
   const handleSelect = (item, customAction = null) => {
+    const exch = item.exchange || (item.symbol ? getSymbolExchange(item.symbol) : 'NSE')
     saveRecentSearch({
-      text: item.command || (item.symbol ? `analyze ${item.symbol}` : item.text || item.label),
+      text: item.command || (item.symbol ? `analyze ${item.symbol}${exch !== 'NSE' ? ' ' + exch : ''}` : item.text || item.label),
       symbol: item.symbol || null,
       label: item.symbol ? `${item.symbol} (${item.name || item.sector})` : (item.label || item.name),
       icon: item.icon || '🔍',
@@ -83,15 +94,16 @@ export default function SmartTypeahead({
   // Highlight matching characters in query with solid amber badge
   const highlightMatch = (text, q) => {
     if (!text || !q) return text
-    const idx = text.toLowerCase().indexOf(q.toLowerCase())
+    const cleanQ = q.trim().toLowerCase()
+    const idx = text.toLowerCase().indexOf(cleanQ)
     if (idx === -1) return text
     return (
       <>
         {text.slice(0, idx)}
         <span className="bg-amber/30 text-amber-800 dark:text-amber-300 font-black px-1 py-0.5 rounded underline decoration-amber">
-          {text.slice(idx, idx + q.length)}
+          {text.slice(idx, idx + cleanQ.length)}
         </span>
-        {text.slice(idx + q.length)}
+        {text.slice(idx + cleanQ.length)}
       </>
     )
   }
@@ -99,16 +111,36 @@ export default function SmartTypeahead({
   const dynamicStyle = position === 'below' 
     ? {
         [popoverAlign === 'right' ? 'right' : 'left']: 0,
-        width: 'min(440px, calc(100vw - 32px))',
+        width: 'min(480px, calc(100vw - 32px))',
         maxWidth: 'calc(100vw - 32px)',
       }
     : {}
+
+  const categories = mode === 'symbols_only'
+    ? [
+        { id: 'all', label: 'All' },
+        { id: 'stock', label: 'Stocks' },
+        { id: 'index', label: 'Indices' },
+        { id: 'etf', label: 'ETFs' },
+        { id: 'commodity', label: 'Commodities' },
+        { id: 'currency', label: 'Currencies' },
+      ]
+    : [
+        { id: 'all', label: 'All' },
+        { id: 'stock', label: 'Stocks' },
+        { id: 'index', label: 'Indices' },
+        { id: 'etf', label: 'ETFs' },
+        { id: 'commodity', label: 'Commodities' },
+        { id: 'currency', label: 'Currencies' },
+        { id: 'council', label: 'Councils' },
+        { id: 'persona', label: 'Personas' },
+      ]
 
   return (
     <div
       ref={containerRef}
       style={dynamicStyle}
-      className={`absolute z-50 max-h-[390px] overflow-y-auto bg-white dark:bg-[#0f1218] border-2 border-amber shadow-[0_20px_50px_rgba(0,0,0,0.35)] dark:shadow-[0_25px_60px_rgba(0,0,0,0.85)] rounded-2xl p-2 space-y-1.5 animate-fade-slide ring-2 ring-amber/20 select-none ${
+      className={`absolute z-50 max-h-[440px] overflow-y-auto bg-white dark:bg-[#0f1218] border-2 border-amber shadow-[0_20px_50px_rgba(0,0,0,0.35)] dark:shadow-[0_25px_60px_rgba(0,0,0,0.85)] rounded-2xl p-2 space-y-1.5 animate-fade-slide ring-2 ring-amber/20 select-none ${
         position === 'above' 
           ? 'left-0 right-0 w-full bottom-full mb-2' 
           : 'top-full mt-2'
@@ -119,12 +151,36 @@ export default function SmartTypeahead({
       <div className="flex items-center justify-between px-3 py-1.5 bg-slate-100 dark:bg-[#161b24] border border-slate-200 dark:border-slate-800 rounded-xl text-[11px] uppercase font-extrabold text-slate-800 dark:text-slate-200 tracking-wider">
         <span className="flex items-center gap-1.5">
           <span className="w-2 h-2 rounded-full bg-amber animate-pulse" />
-          <span>{query ? `OmniSearch Matches (${items.length})` : '🕒 Recent Searches & Recommendations'}</span>
+          <span>{query ? `OmniSearch Matches (${items.length})` : (activeCategory !== 'all' ? `${categories.find((c) => c.id === activeCategory)?.label || activeCategory} (${items.length})` : '🕒 Recent Searches & Recommendations')}</span>
         </span>
         <span className="font-mono text-[10px] font-extrabold px-2 py-0.5 rounded bg-amber text-black shadow-xs">
-          Pro Terminals ⚡
+          Indian Markets 🇮🇳
         </span>
       </div>
+
+      {/* Category Quick Filter Bar */}
+      {!results && (
+        <div className="flex items-center gap-1 overflow-x-auto py-1 px-1 no-scrollbar border-b border-slate-200 dark:border-slate-800">
+          {categories.map((cat) => (
+            <button
+              key={cat.id}
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation()
+                setActiveCategory(cat.id)
+                setSelectedIndex && setSelectedIndex(0)
+              }}
+              className={`px-2 py-0.5 rounded-lg text-[10px] font-mono font-bold tracking-tight whitespace-nowrap cursor-pointer transition-all ${
+                activeCategory === cat.id
+                  ? 'bg-amber text-black shadow-xs font-black'
+                  : 'bg-slate-100 dark:bg-slate-800/80 text-slate-700 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700'
+              }`}
+            >
+              {cat.label}
+            </button>
+          ))}
+        </div>
+      )}
 
       {/* Results List */}
       <div className="space-y-1">
@@ -134,6 +190,7 @@ export default function SmartTypeahead({
           const isCouncil = item.type === 'council'
           const isPersona = item.type === 'persona'
           const isRecent = item.category === 'recent'
+          const stockType = item.stockType || item.category
 
           return (
             <div
@@ -175,9 +232,27 @@ export default function SmartTypeahead({
                       </span>
                     )}
 
-                    {isStock && item.stockType === 'index' && (
+                    {isStock && stockType === 'index' && (
                       <span className="text-[9px] px-1.5 py-0.5 rounded font-mono font-extrabold bg-emerald-500 text-black shadow-xs">
                         INDEX
+                      </span>
+                    )}
+
+                    {isStock && stockType === 'etf' && (
+                      <span className="text-[9px] px-1.5 py-0.5 rounded font-mono font-extrabold bg-sky-500 text-black shadow-xs">
+                        ETF
+                      </span>
+                    )}
+
+                    {isStock && stockType === 'commodity' && (
+                      <span className="text-[9px] px-1.5 py-0.5 rounded font-mono font-extrabold bg-amber-500 text-black shadow-xs">
+                        MCX
+                      </span>
+                    )}
+
+                    {isStock && stockType === 'currency' && (
+                      <span className="text-[9px] px-1.5 py-0.5 rounded font-mono font-extrabold bg-violet-500 text-white shadow-xs">
+                        FOREX
                       </span>
                     )}
 

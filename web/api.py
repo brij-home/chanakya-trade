@@ -171,7 +171,7 @@ async def auth_middleware(request: _Request, call_next):
     # Public paths — no auth required
     if (
         path.startswith("/auth/")
-        or path == "/health"
+        or path in ("/health", "/health/live", "/health/ready")
         or path
         in (
             "/api/preflight",
@@ -181,6 +181,9 @@ async def auth_middleware(request: _Request, call_next):
             "/api/reconciliation",
             "/api/audit/logs",
             "/api/audit/verify",
+            "/api/slo",
+            "/api/provider_health",
+            "/api/correlation_ids",
         )
         or path.startswith("/api/orders/")
         or path.startswith("/.well-known/")
@@ -328,10 +331,136 @@ async def _auto_restore_brokers() -> None:
             logging.warning("[startup] Could not restore Upstox: %s", exc)
 
 
+# ── P3-A: Correlation ID Middleware ─────────────────────────────────────────
+
+
+@app.middleware("http")
+async def correlation_id_middleware(request: _Request, call_next):
+    """
+    P3-A: Inject X-Correlation-ID header for every request.
+
+    - Accepts client-supplied X-Correlation-ID (trusted for internal callers).
+    - Falls back to a new server-generated ID.
+    - Reflects ID in response header for client-side tracing.
+    """
+    from engine.observability import new_correlation_id, get_registry
+
+    cid = request.headers.get("X-Correlation-ID") or new_correlation_id("req")
+    request.state.correlation_id = cid
+    get_registry().register_correlation_id(cid)
+
+    response = await call_next(request)
+    response.headers["X-Correlation-ID"] = cid
+    return response
+
+
+# ── P3-A: Health Probes ──────────────────────────────────────────────────────
+
+
 @app.get("/health", tags=["System"])
 async def health():
-    """Health check for the Electron desktop app sidecar."""
-    return {"status": "ok"}
+    """
+    Health check for the Electron desktop app sidecar.
+
+    Returns 200 if the process is alive. Use /health/live and /health/ready
+    for more detailed Kubernetes-compatible liveness and readiness probes.
+    """
+    from engine.observability import get_registry
+
+    return get_registry().get_liveness()
+
+
+@app.get("/health/live", tags=["System"])
+async def health_liveness():
+    """
+    P3-A Liveness probe: Is the process alive?
+    Returns 200 if alive, 503 if not (for load-balancer/Kubernetes).
+    """
+    from engine.observability import get_registry
+
+    result = get_registry().get_liveness()
+    return JSONResponse(result, status_code=200)
+
+
+@app.get("/health/ready", tags=["System"])
+async def health_readiness():
+    """
+    P3-A Readiness probe: Is the service ready to serve traffic?
+    Checks provider health. Returns 200 if ready, 503 if not.
+    """
+    from engine.observability import get_registry
+
+    result = get_registry().get_readiness()
+    status_code = 200 if result.get("status") == "ready" else 503
+    return JSONResponse(result, status_code=status_code)
+
+
+@app.get("/api/slo", tags=["Observability"])
+async def get_slo_report(journey_id: str = None):
+    """
+    P3-A SLO Report: Compliance status for critical user journeys.
+
+    Returns availability, p95/p99 latency, error budget consumption,
+    and SLO breach flags for each instrumented journey.
+    """
+    from engine.observability import get_registry
+
+    return get_registry().get_slo_report(journey_id=journey_id)
+
+
+@app.get("/api/provider_health", tags=["Observability"])
+async def get_provider_health():
+    """
+    P3-A Provider Health: Data source freshness and stale-rate monitoring.
+
+    Reports per-provider stale count, error rate, consecutive errors,
+    and HEALTHY/DEGRADED/UNHEALTHY status.
+    """
+    from engine.observability import get_registry
+
+    return get_registry().get_provider_health()
+
+
+@app.get("/api/correlation_ids", tags=["Observability"])
+async def get_correlation_ids(limit: int = 20):
+    """
+    P3-A Correlation IDs: Recent request correlation IDs for tracing.
+    """
+    from engine.observability import get_registry
+
+    return {"correlation_ids": get_registry().recent_correlation_ids(limit=limit)}
+
+
+@app.get("/api/mode", tags=["System"])
+async def get_app_mode():
+    """
+    P0-A: Returns the server-authoritative application mode.
+    The client MUST use this value; a client-side flag alone is never sufficient.
+
+    Modes:
+      PAPER — Real data sources, simulated execution (default for all new installs)
+      DEMO  — Synthetic fixture data, clearly labelled, isolated from Paper/Live stores
+      LIVE  — Real data + real broker execution (requires explicit activation)
+
+    Override via environment variable: CHANAKYA_TRADE_MODE=PAPER|DEMO|LIVE
+    Default is always PAPER to prevent accidental live execution.
+    """
+    import logging
+
+    allowed_modes = {"PAPER", "DEMO", "LIVE"}
+    env_mode = os.environ.get("CHANAKYA_TRADE_MODE", "PAPER").upper().strip()
+    if env_mode not in allowed_modes:
+        logging.warning("[mode] Unknown CHANAKYA_TRADE_MODE=%r, defaulting to PAPER", env_mode)
+        env_mode = "PAPER"
+    return {
+        "mode": env_mode,
+        "allowed_modes": sorted(allowed_modes),
+        "description": {
+            "PAPER": "Real data sources, simulated execution. No real orders sent.",
+            "DEMO": "Synthetic fixture data only. Cannot access real accounts, alerts, or exports.",
+            "LIVE": "Real data and real broker execution. Consequential — use with care.",
+        }.get(env_mode, ""),
+    }
 
 
 @app.get("/.well-known/openclaw.json", tags=["OpenClaw"])

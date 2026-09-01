@@ -31,6 +31,19 @@ class ForensicAuditResult:
     strengths: list[str] = field(default_factory=list)
     summary_text: str = ""
 
+    @property
+    def overall_forensic_verdict(self) -> str:
+        """Categorize overall forensic risk: CLEAN_PASS | MILD_WARNING | RED_FLAG."""
+        if (
+            self.is_manipulator_risk
+            or self.distress_zone == "DISTRESS"
+            or len(self.governance_red_flags) >= 2
+        ):
+            return "RED_FLAG"
+        elif len(self.governance_red_flags) == 1 or self.distress_zone == "GREY":
+            return "MILD_WARNING"
+        return "CLEAN_PASS"
+
     def as_dict(self) -> dict[str, Any]:
         return {
             "symbol": self.symbol,
@@ -43,6 +56,7 @@ class ForensicAuditResult:
             "governance_red_flags": self.governance_red_flags,
             "strengths": self.strengths,
             "summary_text": self.summary_text,
+            "overall_forensic_verdict": self.overall_forensic_verdict,
         }
 
 
@@ -353,3 +367,7 @@ def audit_forensics(
             pass
 
     return result
+
+
+# Canonical alias for cross-module integration (multibagger, magic_trend, portfolio)
+audit_company_forensics = audit_forensics

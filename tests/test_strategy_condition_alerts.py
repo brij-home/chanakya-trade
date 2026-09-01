@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import threading
 from unittest.mock import patch
 
 import numpy as np
@@ -61,9 +62,10 @@ def make_monitor(tmp_path: Path) -> StrategyConditionMonitor:
     """Create a StrategyConditionMonitor using a temp JSON file."""
     monitor = StrategyConditionMonitor.__new__(StrategyConditionMonitor)
     monitor._alerts_file = tmp_path / "strategy_alerts.json"
-    monitor._alerts: list[StrategyAlert] = []
+    monitor._alerts = []
     monitor._polling = False
     monitor._poller_thread = None
+    monitor._stop_event = threading.Event()
     return monitor
 
 

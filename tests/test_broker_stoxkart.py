@@ -26,8 +26,15 @@ def test_stoxkart_profile():
     assert profile.broker == "STOXKART"
 
 
+from unittest.mock import MagicMock
+
+
 def test_stoxkart_auth_flow():
     broker = StoxkartAPI(api_key="key", api_secret="sec", client_code="C123")
+    mock_resp = MagicMock(status_code=200)
+    mock_resp.json.return_value = {"result": {"token": "dummy_token"}}
+    broker._client.post = MagicMock(return_value=mock_resp)
+
     res = broker.authenticate(api_key="key", api_secret="sec", client_code="C123")
     assert res is True
     assert broker.is_authenticated is True
@@ -35,6 +42,15 @@ def test_stoxkart_auth_flow():
 
 def test_stoxkart_funds_and_order():
     broker = StoxkartAPI(client_code="STOX789")
+    mock_post_resp = MagicMock(status_code=200)
+    mock_post_resp.json.return_value = {
+        "result": {"token": "dummy_token", "orderId": "STOX_ORD_101"}
+    }
+    mock_get_resp = MagicMock(status_code=200)
+    mock_get_resp.json.return_value = {"result": {"availableMargin": 150000.0, "usedMargin": 0.0}}
+
+    broker._client.post = MagicMock(return_value=mock_post_resp)
+    broker._client.get = MagicMock(return_value=mock_get_resp)
     broker.authenticate(api_key="k", api_secret="s", client_code="STOX789")
 
     funds = broker.get_funds()
