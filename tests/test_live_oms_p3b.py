@@ -704,8 +704,8 @@ def test_execute_order_blocks_without_live_flag(tmp_path, monkeypatch):
 def test_execute_order_calls_pretrade_and_blocks_stale_data(tmp_path, monkeypatch):
     """
     In EXECUTE mode with ALLOW_LIVE_TRADING=1, execute_order_intent must run
-    validate_pretrade. Stale quote data (quote_age_seconds=None) must block
-    the order and raise ValueError — never fabricate a live order.
+    validate_pretrade. If pretrade validation blocks, the order must be rejected
+    with ValueError — never fabricate a live order.
     """
     monkeypatch.setenv("TRADING_MODE", "EXECUTE")
     monkeypatch.setenv("ALLOW_LIVE_TRADING", "1")
@@ -724,16 +724,34 @@ def test_execute_order_calls_pretrade_and_blocks_stale_data(tmp_path, monkeypatc
         price=1600.0,
     )
 
-    # validate_pretrade will block because quote_age_seconds is None (unknown freshness)
-    # No need to mock the broker — pretrade must block before reaching it.
+    # Provide a minimal context broker so the pretrade context fetch doesn't UNKNOWN_FREEZE.
+    # The broker returns an empty quote dict — quote_age_seconds will be ~0 (fresh fetch).
+    class _ContextOnlyBroker:
+        account_id = "CTX_TEST"
+
+        def get_quote(self, instruments):
+            return {}  # Empty — _ltp stays None, but quote_age_seconds is set
+
+        def get_funds(self):
+            return {"available_cash": 50_000.0}
+
+    monkeypatch.setattr("brokers.session.get_broker", lambda: _ContextOnlyBroker())
+
+    # Stub validate_pretrade to block due to stale/missing quote
+    class _BlockedResult:
+        is_eligible = False
+        blocking_reasons = ["data_freshness: LTP unavailable (quote_age_seconds=0.0, ltp=None)"]
+
+    monkeypatch.setattr("engine.pretrade.validate_pretrade", lambda **kw: _BlockedResult())
+
     with pytest.raises(ValueError, match="Pre-trade validation blocked"):
         execute_order_intent(order.order_id)
 
 
 def test_execute_order_broker_timeout_transitions_to_unknown_freeze(tmp_path, monkeypatch):
     """
-    When the live broker raises an exception (e.g. timeout), the order must
-    transition to UNKNOWN_FREEZE — never to OPEN with a fabricated ID.
+    When the live broker raises an exception (e.g. timeout) at place_order,
+    the order must transition to UNKNOWN_FREEZE — never to OPEN with a fabricated ID.
     """
     monkeypatch.setenv("TRADING_MODE", "EXECUTE")
     monkeypatch.setenv("ALLOW_LIVE_TRADING", "1")
@@ -760,8 +778,18 @@ def test_execute_order_broker_timeout_transitions_to_unknown_freeze(tmp_path, mo
     monkeypatch.setattr("engine.pretrade.validate_pretrade", lambda **kw: _PassResult())
 
     # Patch get_broker at its source module (brokers.session)
+    # _TimeoutBroker must implement get_quote + get_funds so the pretrade context
+    # fetch succeeds; the timeout only fires at place_order.
     class _TimeoutBroker:
         account_id = "TEST_ACCOUNT"
+
+        def get_quote(self, instruments):
+            """Return a minimal quote so context fetch completes."""
+            return {}
+
+        def get_funds(self):
+            """Return minimal funds so context fetch completes."""
+            return {"available_cash": 100_000.0}
 
         def place_order(self, req):
             raise TimeoutError("Broker TCP connection timed out after 30s")

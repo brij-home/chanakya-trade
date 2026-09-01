@@ -184,8 +184,10 @@ async def auth_middleware(request: _Request, call_next):
             "/api/slo",
             "/api/provider_health",
             "/api/correlation_ids",
+            "/api/csrf-token",
         )
-        or path.startswith("/api/orders/")
+        # NOTE: /api/orders/* is intentionally NOT listed here — order endpoints
+        # require an authenticated session to attach actor identity to audit events.
         or path.startswith("/.well-known/")
         or path.startswith("/fyers/")  # OAuth callbacks
         or path.startswith("/zerodha/")  # OAuth callbacks
@@ -196,8 +198,20 @@ async def auth_middleware(request: _Request, call_next):
     ):
         return await call_next(request)
 
-    # Self-hosted mode: skip auth if no users exist yet (first-time onboarding)
+    # Self-hosted mode: CSRF protection for mutating methods
     deploy_mode = os.environ.get("DEPLOY_MODE", "")
+    if deploy_mode == "self-hosted" and request.method in ("POST", "PUT", "DELETE", "PATCH"):
+        csrf_token = request.headers.get("X-CSRF-Token", "")
+        session_id_for_csrf = request.cookies.get("session_id", "")
+        import hmac, hashlib
+        _csrf_secret = os.environ.get("CSRF_SECRET", "chanakya-csrf-secret-change-in-production")
+        expected = hmac.new(
+            _csrf_secret.encode(), session_id_for_csrf.encode(), hashlib.sha256
+        ).hexdigest()
+        if not hmac.compare_digest(csrf_token, expected):
+            return JSONResponse({"detail": "CSRF token invalid or missing"}, status_code=403)
+
+    # Self-hosted mode: skip auth if no users exist yet (first-time onboarding)
     if deploy_mode == "self-hosted":
         if user_count() == 0:
             return await call_next(request)
@@ -466,38 +480,6 @@ async def get_correlation_ids(limit: int = 20):
     from engine.observability import get_registry
 
     return {"correlation_ids": get_registry().recent_correlation_ids(limit=limit)}
-
-
-@app.get("/api/mode", tags=["System"])
-async def get_app_mode():
-    """
-    P0-A: Returns the server-authoritative application mode.
-    The client MUST use this value; a client-side flag alone is never sufficient.
-
-    Modes:
-      PAPER — Real data sources, simulated execution (default for all new installs)
-      DEMO  — Synthetic fixture data, clearly labelled, isolated from Paper/Live stores
-      LIVE  — Real data + real broker execution (requires explicit activation)
-
-    Override via environment variable: CHANAKYA_TRADE_MODE=PAPER|DEMO|LIVE
-    Default is always PAPER to prevent accidental live execution.
-    """
-    import logging
-
-    allowed_modes = {"PAPER", "DEMO", "LIVE"}
-    env_mode = os.environ.get("CHANAKYA_TRADE_MODE", "PAPER").upper().strip()
-    if env_mode not in allowed_modes:
-        logging.warning("[mode] Unknown CHANAKYA_TRADE_MODE=%r, defaulting to PAPER", env_mode)
-        env_mode = "PAPER"
-    return {
-        "mode": env_mode,
-        "allowed_modes": sorted(allowed_modes),
-        "description": {
-            "PAPER": "Real data sources, simulated execution. No real orders sent.",
-            "DEMO": "Synthetic fixture data only. Cannot access real accounts, alerts, or exports.",
-            "LIVE": "Real data and real broker execution. Consequential — use with care.",
-        }.get(env_mode, ""),
-    }
 
 
 @app.get("/.well-known/openclaw.json", tags=["OpenClaw"])
@@ -2178,25 +2160,6 @@ async def get_preflight_diagnostics():
     return JSONResponse(report.to_dict())
 
 
-@app.get("/api/mode", tags=["System"])
-async def get_operating_mode():
-    """Return the authoritative operating mode (OBSERVE, SIMULATE, EXECUTE)."""
-    from engine.modes import get_current_mode
-
-    mode = get_current_mode()
-    return {
-        "mode": mode.value,
-        "is_observe": mode.value == "OBSERVE",
-        "is_simulate": mode.value == "SIMULATE",
-        "is_execute": mode.value == "EXECUTE",
-        "description": {
-            "OBSERVE": "Read-only market and research exploration. Mutating actions blocked.",
-            "SIMULATE": "Paper trading and backtest sandbox. Zero live capital risk.",
-            "EXECUTE": "High-assurance live execution with strict pre-order confirmation.",
-        }.get(mode.value, ""),
-    }
-
-
 from pydantic import BaseModel
 from typing import Optional
 
@@ -2255,10 +2218,31 @@ class OrderExecuteRequest(BaseModel):
     order_id: str
 
 
+@app.get("/api/csrf-token", tags=["Security"])
+async def api_csrf_token(request: _Request):
+    """
+    Issue a CSRF token for the current session (self-hosted mode only).
+    The client must send this in the X-CSRF-Token header for all mutating requests.
+    """
+    import hmac, hashlib
+    session_id = request.cookies.get("session_id", "")
+    _csrf_secret = os.environ.get("CSRF_SECRET", "chanakya-csrf-secret-change-in-production")
+    token = hmac.new(
+        _csrf_secret.encode(), session_id.encode(), hashlib.sha256
+    ).hexdigest()
+    return JSONResponse({"csrf_token": token})
+
+
 @app.post("/api/orders/preview")
-async def api_order_preview(req: OrderPreviewRequest):
+async def api_order_preview(req: OrderPreviewRequest, request: _Request):
     """Generate order preview with statutory Indian charges and idempotency key."""
     from engine.order_lifecycle import preview_order_intent
+    from engine.security_audit import record_audit_event
+
+    # Resolve actor identity — falls back to LOCAL in desktop/Electron mode
+    actor = "LOCAL"
+    if hasattr(request.state, "user") and request.state.user:
+        actor = request.state.user.get("username", request.state.user.get("user_id", "UNKNOWN"))
 
     side = req.side.upper()
     if side not in ("BUY", "SELL"):
@@ -2274,16 +2258,44 @@ async def api_order_preview(req: OrderPreviewRequest):
         segment=req.segment,
         idempotency_key=req.idempotency_key,
     )
+
+    record_audit_event(
+        event_type="ORDER_PREVIEW_REQUESTED",
+        mode=order.mode,
+        actor=actor,
+        details={
+            "order_id": order.order_id,
+            "symbol": order.symbol,
+            "side": order.side,
+            "qty": order.quantity,
+        },
+    )
     return JSONResponse(order.to_dict())
 
 
 @app.post("/api/orders/execute")
-async def api_order_execute(req: OrderExecuteRequest):
+async def api_order_execute(req: OrderExecuteRequest, request: _Request):
     """Execute order intent with mode gate validation."""
     from engine.order_lifecycle import execute_order_intent
+    from engine.security_audit import record_audit_event
+
+    # Resolve actor identity
+    actor = "LOCAL"
+    if hasattr(request.state, "user") and request.state.user:
+        actor = request.state.user.get("username", request.state.user.get("user_id", "UNKNOWN"))
 
     try:
         order = execute_order_intent(order_id=req.order_id)
+        record_audit_event(
+            event_type="ORDER_EXECUTE_REQUESTED",
+            mode=order.mode,
+            actor=actor,
+            details={
+                "order_id": order.order_id,
+                "status": order.status,
+                "broker_order_id": order.broker_order_id,
+            },
+        )
         return JSONResponse(order.to_dict())
     except ValueError as e:
         raise _HTTPException(404, str(e))
@@ -2368,20 +2380,31 @@ async def api_reconciliation():
             or "UNKNOWN"
         )
 
-        # Normalise broker positions to the same dict schema as internal_positions
-        broker_positions = [
-            {
-                "symbol": p.get("symbol") or p.get("tradingsymbol", ""),
-                "qty": int(p.get("quantity", p.get("qty", 0))),
-                "avg_price": float(p.get("average_price", p.get("avg_price", 0.0))),
+        # Normalise broker positions — handles both typed Position dataclasses
+        # (returned by real brokers) and raw dicts (returned by mock/test brokers).
+        def _pos_to_dict(p) -> dict:
+            if isinstance(p, dict):
+                return {
+                    "symbol": p.get("symbol") or p.get("tradingsymbol", ""),
+                    "qty": int(p.get("quantity", p.get("qty", 0))),
+                    "avg_price": float(p.get("average_price", p.get("avg_price", 0.0))),
+                }
+            # Typed Position dataclass (BrokerAPI contract)
+            return {
+                "symbol": getattr(p, "symbol", ""),
+                "qty": int(getattr(p, "quantity", 0)),
+                "avg_price": float(getattr(p, "avg_price", 0.0)),
             }
-            for p in (broker_positions_raw or [])
-        ]
-        broker_cash = float(
-            broker_funds_raw.get("available_cash", broker_funds_raw.get("net", 0.0))
-            if isinstance(broker_funds_raw, dict)
-            else 0.0
-        )
+
+        def _funds_cash(f) -> float:
+            """Extract available_cash from a Funds dataclass or a raw dict."""
+            if isinstance(f, dict):
+                return float(f.get("available_cash", f.get("net", 0.0)))
+            # Typed Funds dataclass (BrokerAPI contract)
+            return float(getattr(f, "available_cash", 0.0))
+
+        broker_positions = [_pos_to_dict(p) for p in (broker_positions_raw or [])]
+        broker_cash = _funds_cash(broker_funds_raw)
 
     except Exception as broker_exc:
         # No authenticated broker session — cannot reconcile honestly

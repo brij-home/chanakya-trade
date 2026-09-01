@@ -289,7 +289,7 @@ def execute_order_intent(order_id: str) -> OrderIntent:
             req = OrderRequest(
                 symbol=d["symbol"],
                 exchange="NSE",
-                side=d["side"],
+                transaction_type=d["side"],
                 order_type=d["order_type"],
                 product=d["product"],
                 quantity=d["quantity"],
@@ -337,18 +337,98 @@ def execute_order_intent(order_id: str) -> OrderIntent:
 
         assert_live_execution_allowed()  # raises PermissionError if not EXECUTE + ALLOW_LIVE_TRADING=1
 
-        # Safety gate 2: pre-trade validation
+        # Safety gate 2: pre-trade validation with live market context
         from engine.pretrade import validate_pretrade
         from engine.observability import new_correlation_id
+        # datetime and timezone are imported at module level — do NOT re-import here
+        # as a local `from datetime import datetime` would shadow the module-level name
+        # across the entire function scope in Python 3.12+ (UnboundLocalError).
 
         pretrade_correlation_id = new_correlation_id("live_order")
+
+        # Fetch live quote + broker funds BEFORE calling validate_pretrade.
+        # Gate 8 (data_freshness) fails-closed when quote_age_seconds is None,
+        # so we MUST supply a fresh quote here or the order will be correctly rejected.
+        _ltp: float | None = None
+        _quote_age_seconds: float | None = None
+        _available_cash: float | None = None
+        _account: str | None = None
+
+        try:
+            from brokers.session import get_broker as _get_broker_inner
+            _ctx_broker = _get_broker_inner()
+            if _ctx_broker is None:
+                raise RuntimeError("No authenticated broker session for pretrade context fetch.")
+
+            _account = (
+                getattr(_ctx_broker, "account_id", None)
+                or getattr(_ctx_broker, "client_id", None)
+            )
+
+            # Fetch live quote and record the fetch timestamp immediately
+            _instrument = f"NSE:{d['symbol']}"
+            _quote_fetched_at = datetime.now(timezone.utc)
+            _quotes = _ctx_broker.get_quote([_instrument])
+            _q = _quotes.get(_instrument) if isinstance(_quotes, dict) else (
+                next((q for q in _quotes if getattr(q, "symbol", None) in (_instrument, d["symbol"])), None)
+                if _quotes else None
+            )
+            if _q is not None:
+                _ltp = getattr(_q, "last_price", None)
+            _quote_age_seconds = (datetime.now(timezone.utc) - _quote_fetched_at).total_seconds()
+
+            # Fetch funds for buying-power gate
+            _funds = _ctx_broker.get_funds()
+            _available_cash = (
+                _funds.available_cash
+                if hasattr(_funds, "available_cash")
+                else float(_funds.get("available_cash", 0.0))
+                if isinstance(_funds, dict)
+                else None
+            )
+
+        except Exception as _ctx_exc:
+            # Fail-closed: if context fetch fails, freeze the order before pretrade.
+            d["status"] = "UNKNOWN_FREEZE"
+            d["rejection_reason"] = (
+                f"Live pretrade context fetch failed: {_ctx_exc}. "
+                "Order frozen for manual reconciliation."
+            )
+            with sqlite3.connect(_get_db_path(), timeout=30.0) as conn:
+                conn.execute(
+                    "UPDATE orders_ledger SET status = ?, rejection_reason = ?, updated_at = ? WHERE order_id = ?",
+                    (d["status"], d["rejection_reason"], now_iso, order_id),
+                )
+                conn.commit()
+            record_audit_event(
+                event_type="ORDER_UNKNOWN_FREEZE",
+                mode=mode_info.mode.name,
+                details={
+                    "order_id": order_id,
+                    "correlation_id": pretrade_correlation_id,
+                    "exception": str(_ctx_exc),
+                    "stage": "pretrade_context_fetch",
+                },
+            )
+            raise RuntimeError(
+                f"Live order {order_id} frozen (pretrade context fetch failed): {_ctx_exc}"
+            ) from _ctx_exc
+
+        # Resolve segment from product for lot-size and session checks
+        _product = d.get("product", "MIS").upper()
+        _segment = "FUT" if _product == "NRML" else "EQ"
+
         pretrade = validate_pretrade(
             symbol=d["symbol"],
             side=d["side"],
             quantity=d["quantity"],
             order_type=d["order_type"],
             price=d["price"] if d["price"] else None,
-            segment="EQ",  # Caller may extend to pass segment; EQ is the safe default
+            segment=_segment,
+            account=_account,
+            ltp=_ltp,
+            quote_age_seconds=_quote_age_seconds,
+            available_cash=_available_cash,
             correlation_id=pretrade_correlation_id,
         )
         if not pretrade.is_eligible:
@@ -384,7 +464,7 @@ def execute_order_intent(order_id: str) -> OrderIntent:
             broker_req = OrderRequest(
                 symbol=d["symbol"],
                 exchange="NSE",
-                side=d["side"],
+                transaction_type=d["side"],
                 order_type=d["order_type"],
                 product=d["product"],
                 quantity=d["quantity"],
