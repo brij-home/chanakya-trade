@@ -133,6 +133,9 @@ async def _background_cache_warmer():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan context manager for startup and shutdown events."""
+    if os.environ.get("DEPLOY_MODE", "") == "self-hosted":
+        get_csrf_secret()
+
     init_auth_db()
     await _auto_restore_brokers()
     warmer_task = asyncio.create_task(_background_cache_warmer())
@@ -2223,9 +2226,12 @@ class OrderPreviewRequest(BaseModel):
     price: float = 100.0
     order_type: str = "LIMIT"
     product: str = "MIS"
-    exchange: Optional[str] = None
-    segment: Optional[str] = None
     idempotency_key: Optional[str] = None
+
+
+class OrderConfirmRequest(BaseModel):
+    order_id: str
+    preview_hash: Optional[str] = None
 
 
 class OrderExecuteRequest(BaseModel):
@@ -2262,35 +2268,71 @@ async def api_order_preview(req: OrderPreviewRequest, request: _Request):
     if side not in ("BUY", "SELL"):
         side = "BUY"
 
-    order = preview_order_intent(
-        symbol=req.symbol,
-        side=side,  # type: ignore
-        quantity=max(1, req.quantity),
-        price=max(0.05, req.price),
-        order_type=req.order_type.upper(),  # type: ignore
-        product=req.product.upper(),  # type: ignore
-        exchange=req.exchange,
-        segment=req.segment,
-        idempotency_key=req.idempotency_key,
-    )
+    try:
+        order = preview_order_intent(
+            symbol=req.symbol,
+            side=side,  # type: ignore
+            quantity=max(1, req.quantity),
+            price=max(0.05, req.price),
+            order_type=req.order_type.upper(),  # type: ignore
+            product=req.product.upper(),  # type: ignore
+            idempotency_key=req.idempotency_key,
+        )
 
-    record_audit_event(
-        event_type="ORDER_PREVIEW_REQUESTED",
-        mode=order.mode,
-        actor=actor,
-        details={
-            "order_id": order.order_id,
-            "symbol": order.symbol,
-            "side": order.side,
-            "qty": order.quantity,
-        },
-    )
-    return JSONResponse(order.to_dict())
+        record_audit_event(
+            event_type="ORDER_PREVIEW_REQUESTED",
+            mode=order.mode,
+            actor=actor,
+            details={
+                "order_id": order.order_id,
+                "symbol": order.symbol,
+                "side": order.side,
+                "qty": order.quantity,
+            },
+        )
+        return JSONResponse(order.to_dict())
+    except PermissionError as e:
+        raise _HTTPException(403, str(e))
+    except ValueError as e:
+        raise _HTTPException(422, str(e))
+    except Exception as e:
+        raise _HTTPException(500, str(e))
+
+
+@app.post("/api/orders/confirm")
+async def api_order_confirm(req: OrderConfirmRequest, request: _Request):
+    """Explicitly confirm an order intent, transitioning PREVIEW -> CONFIRMED."""
+    from engine.order_lifecycle import confirm_order_intent
+    from engine.security_audit import record_audit_event
+
+    actor = "LOCAL"
+    if hasattr(request.state, "user") and request.state.user:
+        actor = request.state.user.get("username", request.state.user.get("user_id", "UNKNOWN"))
+
+    try:
+        order = confirm_order_intent(order_id=req.order_id, preview_hash=req.preview_hash)
+        record_audit_event(
+            event_type="ORDER_CONFIRMED",
+            mode=order.mode,
+            actor=actor,
+            details={
+                "order_id": order.order_id,
+                "status": order.status,
+                "preview_hash": order.preview_hash,
+            },
+        )
+        return JSONResponse(order.to_dict())
+    except PermissionError as e:
+        raise _HTTPException(403, str(e))
+    except ValueError as e:
+        raise _HTTPException(409, str(e))
+    except Exception as e:
+        raise _HTTPException(500, str(e))
 
 
 @app.post("/api/orders/execute")
 async def api_order_execute(req: OrderExecuteRequest, request: _Request):
-    """Execute order intent with mode gate validation."""
+    """Execute order intent with mode gate and double-confirmation validation."""
     from engine.order_lifecycle import execute_order_intent
     from engine.security_audit import record_audit_event
 
@@ -2312,8 +2354,10 @@ async def api_order_execute(req: OrderExecuteRequest, request: _Request):
             },
         )
         return JSONResponse(order.to_dict())
+    except PermissionError as e:
+        raise _HTTPException(403, str(e))
     except ValueError as e:
-        raise _HTTPException(404, str(e))
+        raise _HTTPException(409, str(e))
     except Exception as e:
         raise _HTTPException(500, str(e))
 

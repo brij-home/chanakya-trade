@@ -256,6 +256,7 @@ def test_live_preview_cannot_execute_in_paper_mode(monkeypatch):
         quantity=10,
         price=1850.0,
         order_type="LIMIT",
+        idempotency_key="LIVE-IDEMP-CROSS-1",
     )
     assert intent.mode == "EXECUTE"
 

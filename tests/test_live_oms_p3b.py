@@ -690,12 +690,16 @@ def test_execute_order_blocks_without_live_flag(tmp_path, monkeypatch):
     db_path = tmp_path / "orders.db"
     monkeypatch.setattr("engine.order_lifecycle._get_db_path", lambda: db_path)
 
+    from engine.order_lifecycle import confirm_order_intent
+
     order = preview_order_intent(
         symbol="INFY",
         side="BUY",
         quantity=10,
         price=1800.0,
+        idempotency_key="LIVE-IDEMP-BLOCK-1",
     )
+    confirm_order_intent(order.order_id, preview_hash=order.preview_hash)
 
     with pytest.raises(PermissionError, match="ALLOW_LIVE_TRADING"):
         execute_order_intent(order.order_id)
@@ -711,6 +715,7 @@ def test_execute_order_calls_pretrade_and_blocks_stale_data(tmp_path, monkeypatc
     monkeypatch.setenv("ALLOW_LIVE_TRADING", "1")
 
     from engine import kill_switch as ks_module
+    from engine.order_lifecycle import confirm_order_intent
 
     ks_module._registry = KillSwitchRegistry(data_dir=tmp_path)
 
@@ -722,7 +727,9 @@ def test_execute_order_calls_pretrade_and_blocks_stale_data(tmp_path, monkeypatc
         side="BUY",
         quantity=5,
         price=1600.0,
+        idempotency_key="LIVE-IDEMP-BLOCK-2",
     )
+    confirm_order_intent(order.order_id, preview_hash=order.preview_hash)
 
     # Provide a minimal context broker so the pretrade context fetch doesn't UNKNOWN_FREEZE.
     # The broker returns an empty quote dict — quote_age_seconds will be ~0 (fresh fetch).
@@ -757,6 +764,7 @@ def test_execute_order_broker_timeout_transitions_to_unknown_freeze(tmp_path, mo
     monkeypatch.setenv("ALLOW_LIVE_TRADING", "1")
 
     from engine import kill_switch as ks_module
+    from engine.order_lifecycle import confirm_order_intent
 
     ks_module._registry = KillSwitchRegistry(data_dir=tmp_path)
 
@@ -768,7 +776,9 @@ def test_execute_order_broker_timeout_transitions_to_unknown_freeze(tmp_path, mo
         side="BUY",
         quantity=10,
         price=600.0,
+        idempotency_key="LIVE-IDEMP-TIMEOUT-1",
     )
+    confirm_order_intent(order.order_id, preview_hash=order.preview_hash)
 
     # Patch validate_pretrade at its source module so the lazy import picks it up
     class _PassResult:
@@ -938,3 +948,124 @@ def test_multi_asset_canonical_instrument_resolution(tmp_path, monkeypatch):
     )
     assert equity_order.exchange == "NSE"
     assert equity_order.segment == "EQUITY_DELIVERY"
+
+
+def test_live_order_requires_confirmed_status(tmp_path, monkeypatch):
+    """
+    P0 Double Confirmation Gate: In EXECUTE (Live) mode, direct execution of an order
+    in PREVIEW status MUST be rejected. The order must first be explicitly CONFIRMED.
+    """
+    from engine.order_lifecycle import (
+        preview_order_intent,
+        confirm_order_intent,
+        execute_order_intent,
+    )
+
+    db_path = tmp_path / "orders.db"
+    monkeypatch.setattr("engine.order_lifecycle._get_db_path", lambda: db_path)
+    monkeypatch.setenv("TRADING_MODE", "EXECUTE")
+    monkeypatch.setenv("ALLOW_LIVE_TRADING", "1")
+
+    # 1. Preview order
+    order = preview_order_intent(
+        symbol="RELIANCE",
+        side="BUY",
+        quantity=5,
+        price=2900.0,
+        idempotency_key="LIVE-IDEMP-CONFIRM-1",
+    )
+    assert order.status == "PREVIEW"
+
+    # 2. Direct execute from PREVIEW must fail
+    with pytest.raises(ValueError, match="must be CONFIRMED before live execution"):
+        execute_order_intent(order.order_id)
+
+    # 3. Explicitly confirm intent
+    confirmed_order = confirm_order_intent(order.order_id, preview_hash=order.preview_hash)
+    assert confirmed_order.status == "CONFIRMED"
+
+
+def test_client_exchange_segment_override_ignored(tmp_path, monkeypatch):
+    """
+    Authoritative Resolution: Client attempts to pass crafted exchange or segment
+    overrides are strictly ignored in favor of canonical instrument metadata.
+    """
+    from engine.order_lifecycle import preview_order_intent
+
+    db_path = tmp_path / "orders.db"
+    monkeypatch.setattr("engine.order_lifecycle._get_db_path", lambda: db_path)
+    monkeypatch.setenv("TRADING_MODE", "SIMULATE")
+
+    order = preview_order_intent(
+        symbol="MCX:GOLD",
+        side="BUY",
+        quantity=1,
+        price=74000.0,
+        exchange="BSE",  # Malicious/bogus client override
+        segment="EQUITY_INTRADAY",  # Malicious/bogus client override
+    )
+    assert order.exchange == "MCX"
+    assert order.segment == "COMMODITY"
+
+
+def test_duplicate_intentional_orders_with_distinct_keys(tmp_path, monkeypatch):
+    """
+    Concurrency & Usability: Placing two intentional duplicate orders with distinct
+    client UUID keys generates two separate orders in the ledger cleanly.
+    Reusing the exact same idempotency key returns the existing order.
+    """
+    from engine.order_lifecycle import preview_order_intent
+
+    db_path = tmp_path / "orders.db"
+    monkeypatch.setattr("engine.order_lifecycle._get_db_path", lambda: db_path)
+    monkeypatch.setenv("TRADING_MODE", "SIMULATE")
+
+    # Order 1 with key A
+    order1 = preview_order_intent(
+        symbol="RELIANCE",
+        side="BUY",
+        quantity=10,
+        price=2900.0,
+        idempotency_key="INTENT-UUID-A",
+    )
+
+    # Order 2 with identical parameters but key B -> must succeed as separate order
+    order2 = preview_order_intent(
+        symbol="RELIANCE",
+        side="BUY",
+        quantity=10,
+        price=2900.0,
+        idempotency_key="INTENT-UUID-B",
+    )
+    assert order1.order_id != order2.order_id
+    assert order1.idempotency_key != order2.idempotency_key
+
+    # Retry of Order 1 with key A -> must return order 1
+    retry_order1 = preview_order_intent(
+        symbol="RELIANCE",
+        side="BUY",
+        quantity=10,
+        price=2900.0,
+        idempotency_key="INTENT-UUID-A",
+    )
+    assert retry_order1.order_id == order1.order_id
+
+
+def test_live_preview_requires_explicit_idempotency_key(tmp_path, monkeypatch):
+    """
+    P0 Safety: Live order previews must require an explicit client idempotency key.
+    """
+    from engine.order_lifecycle import preview_order_intent
+
+    db_path = tmp_path / "orders.db"
+    monkeypatch.setattr("engine.order_lifecycle._get_db_path", lambda: db_path)
+    monkeypatch.setenv("TRADING_MODE", "EXECUTE")
+
+    with pytest.raises(ValueError, match="idempotency_key is required for live order preview"):
+        preview_order_intent(
+            symbol="RELIANCE",
+            side="BUY",
+            quantity=10,
+            price=2900.0,
+            idempotency_key=None,
+        )

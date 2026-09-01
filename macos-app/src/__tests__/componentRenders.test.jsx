@@ -108,16 +108,29 @@ global.fetch = vi.fn().mockImplementation((url) => {
       }),
     })
   }
+  if (urlStr.includes('/api/orders/confirm')) {
+    return Promise.resolve({
+      ok: true,
+      json: () =>
+        Promise.resolve({
+          data: {
+            order_id: 'PAPER-TEST1234',
+            status: 'CONFIRMED',
+          },
+        }),
+    })
+  }
   if (urlStr.includes('/api/orders/execute')) {
     return Promise.resolve({
       ok: true,
-      json: () => Promise.resolve({
-        data: {
-          order_id: 'PAPER-TEST1234',
-          status: 'FILLED_PAPER',
-          broker_order_id: 'PAPER-EXEC-A1B2C3D4',
-        }
-      }),
+      json: () =>
+        Promise.resolve({
+          data: {
+            order_id: 'PAPER-TEST1234',
+            status: 'FILLED_PAPER',
+            broker_order_id: 'PAPER-EXEC-A1B2C3D4',
+          },
+        }),
     })
   }
   if (urlStr.includes('/api/risk/preflight')) {
@@ -598,16 +611,30 @@ describe('React Component Rendering & Hook Invariant Gates', () => {
             }),
           })
         }
+        if (urlStr.includes('/api/orders/confirm')) {
+          return Promise.resolve({
+            ok: true,
+            json: () =>
+              Promise.resolve({
+                data: {
+                  order_id: 'LIVE-EXEC-1234',
+                  status: 'CONFIRMED',
+                  mode: 'EXECUTE',
+                },
+              }),
+          })
+        }
         if (urlStr.includes('/api/orders/execute')) {
           return Promise.resolve({
             ok: true,
-            json: () => Promise.resolve({
-              data: {
-                order_id: 'LIVE-EXEC-1234',
-                status: 'FILLED',
-                mode: 'EXECUTE',
-              },
-            }),
+            json: () =>
+              Promise.resolve({
+                data: {
+                  order_id: 'LIVE-EXEC-1234',
+                  status: 'FILLED',
+                  mode: 'EXECUTE',
+                },
+              }),
           })
         }
         return Promise.resolve({ ok: true, json: () => Promise.resolve({}) })

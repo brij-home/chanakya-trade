@@ -95,7 +95,7 @@ def _init_orders_db():
             """
             CREATE TABLE IF NOT EXISTS orders_ledger (
                 order_id TEXT PRIMARY KEY,
-                idempotency_key TEXT UNIQUE NOT NULL,
+                idempotency_key TEXT NOT NULL UNIQUE,
                 symbol TEXT NOT NULL,
                 exchange TEXT NOT NULL DEFAULT 'NSE',
                 segment TEXT NOT NULL DEFAULT 'EQUITY_INTRADAY',
@@ -129,7 +129,7 @@ def _init_orders_db():
         if "preview_hash" not in existing_cols:
             conn.execute("ALTER TABLE orders_ledger ADD COLUMN preview_hash TEXT")
         conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_orders_idemp ON orders_ledger(idempotency_key)"
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_idemp ON orders_ledger(idempotency_key)"
         )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_orders_status ON orders_ledger(status)")
         conn.commit()
@@ -142,34 +142,42 @@ def preview_order_intent(
     price: float,
     order_type: OrderType = "LIMIT",
     product: ProductType = "MIS",
-    segment: Optional[str] = None,
-    exchange: Optional[str] = None,
     idempotency_key: Optional[str] = None,
+    *args,
+    **kwargs,
 ) -> OrderIntent:
     """
-    Generate an order preview with statutory Indian charges, idempotency check,
+    Generate an order preview with statutory Indian charges, concurrency-safe idempotency check,
     authoritative multi-asset instrument resolution, and explicit PAPER-/LIVE- order ID prefix.
+
+    Note: Any client-supplied exchange/segment overrides are strictly ignored;
+    exchange and segment are resolved authoritatively from symbol metadata.
     """
+    import uuid
+
     _init_orders_db()
     from market.instruments import resolve_canonical_instrument
 
     inst = resolve_canonical_instrument(symbol)
-    resolved_exchange = exchange or inst.exchange
+    resolved_exchange = inst.exchange
 
-    if segment:
-        resolved_segment = segment
-    elif inst.segment == "EQUITY":
-        resolved_segment = "EQUITY_DELIVERY" if product == "CNC" else "EQUITY_INTRADAY"
-    elif inst.segment == "COMMODITY":
+    if inst.segment == "COMMODITY":
         resolved_segment = "COMMODITY"
     elif inst.segment == "CURRENCY":
         resolved_segment = "CURRENCY"
-    elif inst.segment == "FNO" or inst.instrument_type in ("OPTION", "FUTURE"):
+    elif inst.segment in ("FNO", "OPTIONS", "FUTURES") or inst.instrument_type in (
+        "OPTION",
+        "FUTURE",
+    ):
         resolved_segment = (
             "OPTIONS"
-            if (inst.instrument_type == "OPTION" or "CE" in symbol or "PE" in symbol)
+            if (
+                inst.instrument_type == "OPTION" or "CE" in symbol.upper() or "PE" in symbol.upper()
+            )
             else "FUTURES"
         )
+    elif inst.segment == "EQUITY" or not inst.segment:
+        resolved_segment = "EQUITY_DELIVERY" if product == "CNC" else "EQUITY_INTRADAY"
     else:
         resolved_segment = inst.segment
 
@@ -177,52 +185,18 @@ def preview_order_intent(
     mode_name = mode_info.mode.name
     is_paper = not mode_info.is_execute
 
+    if mode_info.is_execute and not idempotency_key:
+        raise ValueError("idempotency_key is required for live order preview")
+
+    # For non-live orders without client key, generate random UUID to allow distinct intentional orders
+    idemp = idempotency_key or f"IDEMP-{uuid.uuid4().hex}"
+
     # Canonical request string that cryptographically binds ALL structural parameters and active mode
     canonical_str = (
         f"{resolved_exchange}:{symbol.upper()}:{resolved_segment}:{side}:"
         f"{quantity}:{price:.4f}:{order_type}:{product}:{mode_name}"
     )
     computed_preview_hash = hashlib.sha256(canonical_str.encode()).hexdigest()
-    idemp = idempotency_key or f"IDEMP-{computed_preview_hash[:16]}"
-
-    # Check for existing idempotency key
-    with sqlite3.connect(_get_db_path(), timeout=30.0) as conn:
-        conn.row_factory = sqlite3.Row
-        cursor = conn.execute("SELECT * FROM orders_ledger WHERE idempotency_key = ?", (idemp,))
-        row = cursor.fetchone()
-        if row:
-            d = dict(row)
-            # Refuse cross-mode idempotency reuse
-            if d["mode"] != mode_name:
-                raise PermissionError(
-                    f"Idempotency key '{idemp}' was created under mode {d['mode']}, but active mode is {mode_name}. "
-                    "Cross-mode order intent reuse is strictly prohibited."
-                )
-            # Verify parameter hash integrity
-            if d.get("preview_hash") and d["preview_hash"] != computed_preview_hash:
-                raise ValueError(
-                    f"Idempotency key '{idemp}' matches an existing order with mismatched parameters."
-                )
-            return OrderIntent(
-                order_id=d["order_id"],
-                idempotency_key=d["idempotency_key"],
-                symbol=d["symbol"],
-                exchange=d.get("exchange", resolved_exchange),
-                segment=d.get("segment", resolved_segment),
-                side=d["side"],  # type: ignore
-                quantity=d["quantity"],
-                price=d["price"],
-                order_type=d["order_type"],  # type: ignore
-                product=d["product"],  # type: ignore
-                status=d["status"],  # type: ignore
-                mode=d["mode"],
-                broker_order_id=d["broker_order_id"],
-                charges=json.loads(d["charges_json"] or "{}"),
-                rejection_reason=d["rejection_reason"],
-                preview_hash=d.get("preview_hash", computed_preview_hash),
-                created_at=d["created_at"],
-                updated_at=d["updated_at"],
-            )
 
     charges = calculate_transaction_charges(
         price=price,
@@ -248,16 +222,18 @@ def preview_order_intent(
         charges=charges.to_dict(),
     )
 
-    # Persist in DB
+    # Concurrency-safe atomic insert: INSERT ... ON CONFLICT(idempotency_key) DO NOTHING
     now_iso = datetime.now(timezone.utc).isoformat()
     with sqlite3.connect(_get_db_path(), timeout=30.0) as conn:
+        conn.row_factory = sqlite3.Row
         conn.execute(
             """
-            INSERT OR REPLACE INTO orders_ledger (
+            INSERT INTO orders_ledger (
                 order_id, idempotency_key, symbol, exchange, segment, side, quantity, price,
                 order_type, product, status, mode, broker_order_id, charges_json,
                 rejection_reason, preview_hash, created_at, updated_at
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(idempotency_key) DO NOTHING
             """,
             (
                 intent.order_id,
@@ -282,27 +258,71 @@ def preview_order_intent(
         )
         conn.commit()
 
+        # Authoritatively re-read the row (either just inserted or previously existing)
+        row = conn.execute(
+            "SELECT * FROM orders_ledger WHERE idempotency_key = ?", (idemp,)
+        ).fetchone()
+        if not row:
+            raise RuntimeError(
+                f"Failed to persist or fetch order intent for idempotency key '{idemp}'."
+            )
+        d = dict(row)
+
+    # Refuse cross-mode idempotency reuse
+    if d["mode"] != mode_name:
+        raise PermissionError(
+            f"Idempotency key '{idemp}' was created under mode {d['mode']}, but active mode is {mode_name}. "
+            "Cross-mode order intent reuse is strictly prohibited."
+        )
+
+    # Verify parameter hash integrity
+    if d.get("preview_hash") and d["preview_hash"] != computed_preview_hash:
+        raise ValueError(
+            f"Idempotency key '{idemp}' matches an existing order with mismatched parameters."
+        )
+
+    saved_intent = OrderIntent(
+        order_id=d["order_id"],
+        idempotency_key=d["idempotency_key"],
+        symbol=d["symbol"],
+        exchange=d.get("exchange", resolved_exchange),
+        segment=d.get("segment", resolved_segment),
+        side=d["side"],  # type: ignore
+        quantity=d["quantity"],
+        price=d["price"],
+        order_type=d["order_type"],  # type: ignore
+        product=d["product"],  # type: ignore
+        status=d["status"],  # type: ignore
+        mode=d["mode"],
+        broker_order_id=d["broker_order_id"],
+        charges=json.loads(d["charges_json"] or "{}"),
+        rejection_reason=d["rejection_reason"],
+        preview_hash=d.get("preview_hash", computed_preview_hash),
+        created_at=d["created_at"],
+        updated_at=d["updated_at"],
+    )
+
     record_audit_event(
         event_type="ORDER_PREVIEW_GENERATED",
-        mode=intent.mode,
+        mode=saved_intent.mode,
         actor="SYSTEM",
         details={
-            "order_id": intent.order_id,
-            "symbol": intent.symbol,
-            "exchange": intent.exchange,
-            "segment": intent.segment,
-            "side": intent.side,
-            "qty": intent.quantity,
-            "preview_hash": intent.preview_hash,
+            "order_id": saved_intent.order_id,
+            "symbol": saved_intent.symbol,
+            "exchange": saved_intent.exchange,
+            "segment": saved_intent.segment,
+            "side": saved_intent.side,
+            "qty": saved_intent.quantity,
+            "preview_hash": saved_intent.preview_hash,
         },
     )
 
-    return intent
+    return saved_intent
 
 
-def confirm_order_intent(order_id: str) -> OrderIntent:
+def confirm_order_intent(order_id: str, preview_hash: Optional[str] = None) -> OrderIntent:
     """
-    Transition a PREVIEW order to CONFIRMED state.
+    Transition a PREVIEW order to CONFIRMED state with mode and preview hash validation.
     """
     _init_orders_db()
     mode_info = get_trading_mode()
@@ -321,6 +341,17 @@ def confirm_order_intent(order_id: str) -> OrderIntent:
                 f"{mode_info.mode.name} mode. Cross-mode confirmation is strictly prohibited."
             )
 
+        if preview_hash and d.get("preview_hash") and d["preview_hash"] != preview_hash:
+            raise ValueError("preview_hash mismatch: order parameters have changed since preview.")
+
+        if d["status"] == "CONFIRMED":
+            return _row_to_intent(d)
+
+        if d["status"] != "PREVIEW":
+            raise ValueError(
+                f"Order {order_id} cannot be confirmed because current status is '{d['status']}'."
+            )
+
         cursor = conn.execute(
             """
             UPDATE orders_ledger
@@ -330,14 +361,16 @@ def confirm_order_intent(order_id: str) -> OrderIntent:
             (now_iso, order_id, mode_info.mode.name),
         )
         conn.commit()
-        if cursor.rowcount == 0 and d["status"] != "CONFIRMED":
-            raise ValueError(
-                f"Order {order_id} cannot be confirmed because current status is '{d['status']}'."
-            )
+        if cursor.rowcount == 0:
+            raise ValueError(f"Concurrent state conflict confirming order {order_id}.")
 
-        d["status"] = "CONFIRMED"
-        d["updated_at"] = now_iso
+        updated_row = conn.execute(
+            "SELECT * FROM orders_ledger WHERE order_id = ?", (order_id,)
+        ).fetchone()
+        return _row_to_intent(dict(updated_row))
 
+
+def _row_to_intent(d: dict) -> OrderIntent:
     return OrderIntent(
         order_id=d["order_id"],
         idempotency_key=d["idempotency_key"],
@@ -349,33 +382,33 @@ def confirm_order_intent(order_id: str) -> OrderIntent:
         price=d["price"],
         order_type=d["order_type"],  # type: ignore
         product=d["product"],  # type: ignore
-        status="CONFIRMED",
+        status=d["status"],  # type: ignore
         mode=d["mode"],
         broker_order_id=d.get("broker_order_id"),
         charges=json.loads(d.get("charges_json") or "{}"),
         rejection_reason=d.get("rejection_reason"),
         preview_hash=d.get("preview_hash"),
-        created_at=d.get("created_at", now_iso),
-        updated_at=now_iso,
+        created_at=d.get("created_at"),
+        updated_at=d.get("updated_at"),
     )
 
 
 def execute_order_intent(order_id: str) -> OrderIntent:
     """
-    Transition a PREVIEW or CONFIRMED order into execution.
+    Transition an order into execution.
 
     P0 Safety & Guardrail Contracts:
       1. Cross-Mode Protection: Refuses execution if current global runtime mode does not
          match the exact mode in which the preview was generated. Prevents paper previews
          from executing live capital upon mode switch.
-      2. Anti-Replay & State Guard: Only permits orders in PREVIEW or CONFIRMED state.
-         Re-execution of terminal (FILLED, REJECTED, UNKNOWN_FREEZE) or in-flight orders raises ValueError.
-      3. Single Atomic Transition: Performs an atomic DB status lock (PREVIEW/CONFIRMED -> SUBMITTING)
-         bound to active mode to guarantee exactly-once execution even under concurrent dispatches.
-      4. Preview Hash Integrity: Cryptographically verifies stored preview_hash against canonical
+      2. Double Confirmation Gate: Live execution (EXECUTE mode) strictly requires CONFIRMED status.
+         Orders in PREVIEW status cannot be executed without prior explicit confirmation.
+      3. Anti-Replay & State Guard: Re-execution of terminal (FILLED, REJECTED, UNKNOWN_FREEZE)
+         or already in-flight orders raises ValueError / conflict.
+      4. Single Atomic Transition: Performs an atomic DB status lock (CONFIRMED -> SUBMITTING in live,
+         PREVIEW/CONFIRMED -> SUBMITTING in paper) bound to active mode.
+      5. Preview Hash Integrity: Cryptographically verifies stored preview_hash against canonical
          recomputed parameters before initiating any broker submission.
-      5. Authoritative Instrument Resolution: Exchange and segment are resolved authoritatively
-         for equities, commodities (MCX), currencies (CDS), and F&O derivatives.
       6. Fail-Closed Live OMS: Live execution requires ALLOW_LIVE_TRADING=1, fresh quote context,
          passing pretrade risk gates, and never fabricates mock orders or IDs on timeout.
     """
@@ -399,12 +432,22 @@ def execute_order_intent(order_id: str) -> OrderIntent:
             f"{mode_info.mode.name} mode. Cross-mode order execution is strictly prohibited."
         )
 
-    # ── P0 Invariant 2: State Guard & Anti-Replay ──────────────────────────
-    if d["status"] not in ("PREVIEW", "CONFIRMED"):
-        raise ValueError(
-            f"Order {order_id} cannot be executed because its current status is '{d['status']}'. "
-            "Re-execution of terminal or already active/submitted orders is strictly prohibited."
-        )
+    # ── P0 Invariant 2: Double Confirmation Gate for Live Execution ───────
+    if mode_info.is_execute:
+        if d["status"] == "PREVIEW":
+            raise ValueError(
+                f"Order {order_id} must be CONFIRMED before live execution. Direct execution from PREVIEW is prohibited."
+            )
+        if d["status"] != "CONFIRMED":
+            raise ValueError(
+                f"Order {order_id} cannot be executed because its current status is '{d['status']}'."
+            )
+    else:
+        if d["status"] not in ("PREVIEW", "CONFIRMED"):
+            raise ValueError(
+                f"Order {order_id} cannot be executed because its current status is '{d['status']}'. "
+                "Re-execution of terminal or already active/submitted orders is strictly prohibited."
+            )
 
     # ── P0 Invariant 3: Preview Hash Integrity Verification ────────────────
     canonical_str = (
@@ -417,20 +460,22 @@ def execute_order_intent(order_id: str) -> OrderIntent:
             f"Order {order_id} preview hash verification failed (intent parameters were tampered with or corrupted)."
         )
 
-    # ── P0 Invariant 4: Single Atomic Transition (PREVIEW/CONFIRMED -> SUBMITTING) ──
+    # ── P0 Invariant 4: Single Atomic Transition to SUBMITTING ───────────
+    allowed_statuses = ("CONFIRMED",) if mode_info.is_execute else ("PREVIEW", "CONFIRMED")
+    placeholders = ",".join("?" for _ in allowed_statuses)
     with sqlite3.connect(_get_db_path(), timeout=30.0) as conn:
         cursor = conn.execute(
-            """
+            f"""
             UPDATE orders_ledger
             SET status = 'SUBMITTING', updated_at = ?
-            WHERE order_id = ? AND status IN ('PREVIEW', 'CONFIRMED') AND mode = ?
+            WHERE order_id = ? AND status IN ({placeholders}) AND mode = ?
             """,
-            (now_iso, order_id, mode_info.mode.name),
+            (now_iso, order_id, *allowed_statuses, mode_info.mode.name),
         )
         conn.commit()
         if cursor.rowcount == 0:
             raise ValueError(
-                f"Order {order_id} state transition to SUBMITTING failed (order is not in PREVIEW/CONFIRMED state, mode mismatch, or already submitted)."
+                f"Order {order_id} state transition to SUBMITTING failed (order is not in required state {allowed_statuses}, mode mismatch, or already submitted)."
             )
 
     d["status"] = "SUBMITTING"

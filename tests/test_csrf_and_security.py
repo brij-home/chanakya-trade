@@ -172,3 +172,96 @@ def test_real_reconciliation_endpoint_with_typed_broker(monkeypatch, client):
     assert data["broker_account_id"] == "ACC-TEST-999"
     assert data["correlation_id"] is not None
     assert "discrepancies" in data
+
+
+def test_orders_confirm_endpoint_integration(tmp_path, monkeypatch, client):
+    """
+    POST /api/orders/confirm transitions PREVIEW to CONFIRMED.
+    Returns HTTP 409 on state/hash mismatch, HTTP 403 on mode violation.
+    """
+    orders_db = tmp_path / "orders.db"
+    monkeypatch.setattr("engine.order_lifecycle._get_db_path", lambda: orders_db)
+    monkeypatch.delenv("DEPLOY_MODE", raising=False)
+    monkeypatch.setenv("TRADING_MODE", "SIMULATE")
+
+    # 1. Create order preview
+    res_prev = client.post(
+        "/api/orders/preview",
+        json={"symbol": "RELIANCE", "side": "BUY", "quantity": 10, "price": 2850.0},
+    )
+    assert res_prev.status_code == 200
+    prev_data = res_prev.json()
+    order_id = prev_data["order_id"]
+    preview_hash = prev_data["preview_hash"]
+
+    # 2. Confirm with bad hash -> 409
+    res_bad_hash = client.post(
+        "/api/orders/confirm",
+        json={"order_id": order_id, "preview_hash": "wrong-hash-1234"},
+    )
+    assert res_bad_hash.status_code == 409
+
+    # 3. Confirm with valid hash -> 200 & CONFIRMED status
+    res_confirm = client.post(
+        "/api/orders/confirm",
+        json={"order_id": order_id, "preview_hash": preview_hash},
+    )
+    assert res_confirm.status_code == 200
+    assert res_confirm.json()["status"] == "CONFIRMED"
+
+
+def test_orders_execute_endpoint_error_codes(tmp_path, monkeypatch, client):
+    """
+    POST /api/orders/execute returns 409 for unconfirmed live orders and 403 for mode mismatches.
+    """
+    orders_db = tmp_path / "orders.db"
+    monkeypatch.setattr("engine.order_lifecycle._get_db_path", lambda: orders_db)
+    monkeypatch.delenv("DEPLOY_MODE", raising=False)
+    monkeypatch.setenv("TRADING_MODE", "EXECUTE")
+    monkeypatch.setenv("ALLOW_LIVE_TRADING", "1")
+
+    # 1. Preview order under EXECUTE mode
+    res_prev = client.post(
+        "/api/orders/preview",
+        json={
+            "symbol": "INFY",
+            "side": "BUY",
+            "quantity": 5,
+            "price": 1800.0,
+            "idempotency_key": "IDEMP-LIVE-TEST-1",
+        },
+    )
+    assert res_prev.status_code == 200
+    order_id = res_prev.json()["order_id"]
+
+    # 2. Direct execute without confirm -> 409 Conflict
+    res_exec_unconfirmed = client.post(
+        "/api/orders/execute",
+        json={"order_id": order_id},
+    )
+    assert res_exec_unconfirmed.status_code == 409
+    assert "must be CONFIRMED before live execution" in res_exec_unconfirmed.json()["detail"]
+
+    # 3. Switch mode to SIMULATE -> execution of LIVE order returns 403 Forbidden
+    monkeypatch.setenv("TRADING_MODE", "SIMULATE")
+    res_cross_mode = client.post(
+        "/api/orders/execute",
+        json={"order_id": order_id},
+    )
+    assert res_cross_mode.status_code == 403
+    assert "Cross-mode" in res_cross_mode.json()["detail"]
+
+
+@pytest.mark.anyio
+async def test_lifespan_startup_csrf_secret_validation(monkeypatch):
+    """
+    FastAPI lifespan startup strictly validates CSRF_SECRET in self-hosted mode.
+    """
+    from web.api import lifespan, app
+
+    monkeypatch.setenv("DEPLOY_MODE", "self-hosted")
+    monkeypatch.delenv("CSRF_SECRET", raising=False)
+
+    with pytest.raises(RuntimeError, match="cryptographically strong CSRF_SECRET"):
+        async with lifespan(app):
+            pass

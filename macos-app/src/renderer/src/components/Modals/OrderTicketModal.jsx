@@ -39,6 +39,7 @@ export default function OrderTicketModal({ isOpen, onClose, initialData = {}, ap
   const [preflightInfo, setPreflightInfo] = useState(null)
   const [previewOrder, setPreviewOrder] = useState(null)
   const [isValidatingRisk, setIsValidatingRisk] = useState(false)
+  const [intentKey, setIntentKey] = useState('')
 
   // Sync state whenever modal opens or initialData changes
   useEffect(() => {
@@ -59,6 +60,11 @@ export default function OrderTicketModal({ isOpen, onClose, initialData = {}, ap
       setConfirmedRisk(false)
       setPreviewOrder(null)
       setPreflightInfo(null)
+      const freshKey =
+        typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+          ? crypto.randomUUID()
+          : `intent-${Date.now()}-${Math.random().toString(36).slice(2)}`
+      setIntentKey(freshKey)
     }
   }, [isOpen, initialData])
 
@@ -96,7 +102,7 @@ export default function OrderTicketModal({ isOpen, onClose, initialData = {}, ap
     setIsValidatingRisk(true)
 
     try {
-      // 1. Evaluate risk gate limits & behavioral advisory
+      // 1. Evaluate risk gate limits & behavioral advisory and fetch preview with intentKey
       const [riskRes, previewRes] = await Promise.allSettled([
         call('/api/risk/preflight', {
           symbol,
@@ -112,7 +118,7 @@ export default function OrderTicketModal({ isOpen, onClose, initialData = {}, ap
           price,
           order_type: orderType,
           product,
-          segment: product === 'CNC' ? 'EQUITY_DELIVERY' : 'EQUITY_INTRADAY',
+          idempotency_key: intentKey,
         }),
       ])
 
@@ -131,7 +137,7 @@ export default function OrderTicketModal({ isOpen, onClose, initialData = {}, ap
             text: 'Server did not return a valid order preview. Please retry.',
           })
           setPreviewOrder(null)
-          return  // Stay on Step 1
+          return // Stay on Step 1
         }
         setPreviewOrder(preview)
         setStep(2)
@@ -176,7 +182,13 @@ export default function OrderTicketModal({ isOpen, onClose, initialData = {}, ap
         return
       }
 
-      // Execute through the real OMS backend
+      // Step 2A: Explicitly confirm the order intent on backend
+      await call('/api/orders/confirm', {
+        order_id: orderId,
+        preview_hash: previewOrder.preview_hash,
+      })
+
+      // Step 2B: Execute confirmed order through the real OMS backend
       const res = await call('/api/orders/execute', { order_id: orderId })
       const executedData = res?.data ?? res
       const status = executedData.status ?? 'UNKNOWN'
