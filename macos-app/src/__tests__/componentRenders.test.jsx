@@ -92,6 +92,46 @@ global.fetch = vi.fn().mockImplementation((url) => {
       }),
     })
   }
+  if (urlStr.includes('/api/orders/preview')) {
+    return Promise.resolve({
+      ok: true,
+      json: () => Promise.resolve({
+        data: {
+          order_id: 'PAPER-TEST1234',
+          symbol: 'TATAMOTORS',
+          side: 'BUY',
+          quantity: 50,
+          price: 980,
+          status: 'PREVIEW',
+          charges: { total_charges: 18.5, stt: 12.0, gst: 2.5, sebi_charges: 0.1, stamp_duty: 3.9 },
+        }
+      }),
+    })
+  }
+  if (urlStr.includes('/api/orders/execute')) {
+    return Promise.resolve({
+      ok: true,
+      json: () => Promise.resolve({
+        data: {
+          order_id: 'PAPER-TEST1234',
+          status: 'FILLED_PAPER',
+          broker_order_id: 'PAPER-EXEC-A1B2C3D4',
+        }
+      }),
+    })
+  }
+  if (urlStr.includes('/api/risk/preflight')) {
+    return Promise.resolve({
+      ok: true,
+      json: () => Promise.resolve({
+        data: {
+          flags: [],
+          disclaimers: [],
+          coaching_recommendations: [],
+        }
+      }),
+    })
+  }
   return Promise.resolve({
     ok: true,
     json: () => Promise.resolve({ data: {}, status: 'ok' }),
@@ -454,7 +494,7 @@ describe('React Component Rendering & Hook Invariant Gates', () => {
       fireEvent.click(checkbox)
 
       // Click Confirm & Transmit
-      const confirmBtn = screen.getByText(/Double Confirm & Transmit BUY/i)
+      const confirmBtn = await screen.findByText(/Double Confirm & Transmit BUY/i)
       expect(confirmBtn).toBeTruthy()
       fireEvent.click(confirmBtn)
     })
