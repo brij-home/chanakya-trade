@@ -25,7 +25,7 @@ def test_api_openapi_spec_generation(client):
     assert "openapi" in schema
     paths = schema["paths"]
 
-    # Critical P0-A & P0-B API Endpoints must be present in schema
+    # Critical P0-A, P0-B & P1-A API Endpoints must be present in schema
     assert "/api/mode" in paths
     assert "/api/preflight" in paths
     assert "/api/orders/preview" in paths
@@ -35,6 +35,8 @@ def test_api_openapi_spec_generation(client):
     assert "/skills/global_macro" in paths
     assert "/skills/tax/estimate" in paths
     assert "/skills/tax/calculate" in paths
+    assert "/skills/instruments/resolve" in paths
+    assert "/skills/market_session" in paths
 
 
 def test_mode_endpoint_contract(client):
@@ -81,3 +83,31 @@ def test_tax_calculate_alias_contract(client):
     assert payload["tax_type"] == "STCG"
     assert payload["tax_rate_pct"] == 20.0
     assert payload["estimated_tax"] == 10000.0
+
+
+def test_instruments_resolve_contract(client):
+    """Verify /skills/instruments/resolve normalizes symbol queries into CanonicalInstrument."""
+    res = client.post("/skills/instruments/resolve", json={"query": "RELIANCE"})
+    assert res.status_code == 200
+    data = res.json()
+    assert data["status"] == "ok"
+    instr = data["data"]
+    assert instr["instrument_id"] == "NSE:RELIANCE:EQUITY"
+    assert instr["exchange"] == "NSE"
+    assert instr["segment"] == "EQUITY"
+    assert instr["lot_size"] == 1
+    assert instr["tick_size"] == 0.05
+
+
+def test_market_session_contract(client):
+    """Verify /skills/market_session returns live operational session state."""
+    res = client.get("/skills/market_session?exchange=NSE")
+    assert res.status_code == 200
+    data = res.json()
+    assert data["status"] == "ok"
+    session_info = data["data"]
+    assert "exchange" in session_info
+    assert "session_state" in session_info
+    assert session_info["session_state"] in ("PRE_OPEN", "OPEN", "POST_CLOSE", "CLOSED")
+    assert "current_time_ist" in session_info
+    assert "IST" in session_info["current_time_ist"]

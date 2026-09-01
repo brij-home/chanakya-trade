@@ -5140,3 +5140,47 @@ async def skill_whale_flows(req: Optional[WhaleFlowsRequest] = None):
         return _ok(res)
     except Exception as e:
         raise _err(str(e))
+
+
+class InstrumentResolveRequest(BaseModel):
+    query: str = "NIFTY"
+
+
+class MarketSessionRequest(BaseModel):
+    exchange: Optional[str] = "NSE"
+
+
+@router.get("/instruments/resolve")
+@router.post("/instruments/resolve")
+@router.get("/skills/instruments/resolve")
+@router.post("/skills/instruments/resolve")
+async def skill_instruments_resolve(
+    req: Optional[InstrumentResolveRequest] = None, query: Optional[str] = None
+):
+    """Resolve and normalize any symbol or user query into a CanonicalInstrument master record."""
+    try:
+        from market.instruments import resolve_canonical_instrument
+
+        q = (req.query if req and req.query else query) or "NIFTY"
+        instr = resolve_canonical_instrument(q)
+        return _ok(instr.to_dict())
+    except Exception as e:
+        raise _err(str(e))
+
+
+@router.get("/market_session")
+@router.post("/market_session")
+@router.get("/skills/market_session")
+@router.post("/skills/market_session")
+async def skill_market_session(
+    req: Optional[MarketSessionRequest] = None, exchange: Optional[str] = "NSE"
+):
+    """Evaluate live exchange operational session state (PRE_OPEN, OPEN, POST_CLOSE, CLOSED)."""
+    try:
+        from market.instruments import get_market_session_state
+
+        exch = (req.exchange if req and req.exchange else exchange) or "NSE"
+        state = get_market_session_state(exchange=exch)  # type: ignore
+        return _ok(state.to_dict())
+    except Exception as e:
+        raise _err(str(e))
