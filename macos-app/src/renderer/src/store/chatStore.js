@@ -159,6 +159,13 @@ export const useChatStore = create((set, get) => ({
   streamCancel:  null,   // () => void — closes the active EventSource
   activeStreamId: null,  // stream_id from SSE started event (#113)
 
+  // ── Server-authoritative application mode (P0-A) ──────────
+  // PAPER: real data, simulated execution (default for new installs)
+  // DEMO:  synthetic fixtures, isolated from paper/live stores
+  // LIVE:  real data + real execution (requires explicit activation)
+  appMode:     'PAPER',   // 'PAPER' | 'DEMO' | 'LIVE'
+  modeLoading: false,     // true while fetching mode from /api/mode
+
   setPort:         (port)   => set({ port, sidecarError: null }),
   setSidecarError: (msg)    => set({ sidecarError: msg }),
   setBrokerStatus:   (status)   => set({ brokerStatus: status }),
@@ -169,6 +176,10 @@ export const useChatStore = create((set, get) => ({
     const name      = broker ? ({ zerodha: 'Zerodha', groww: 'Groww', angel_one: 'Angel One', upstox: 'Upstox', fyers: 'Fyers' }[broker] ?? broker) : null
     set({ brokerStatuses: statuses, brokerStatus: { connected, broker: name } })
   },
+
+  // Set server-authoritative app mode (PAPER / DEMO / LIVE)
+  setAppMode: (mode) => set({ appMode: mode, modeLoading: false }),
+  setModeLoading: (loading) => set({ modeLoading: loading }),
 
   // ── Session management ────────────────────────────────────
 

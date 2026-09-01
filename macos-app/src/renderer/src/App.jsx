@@ -23,6 +23,7 @@ import TopOpportunitiesModal from './components/Modals/TopOpportunitiesModal'
 import SectorDrilldownModal from './components/Modals/SectorDrilldownModal'
 import MetricExplainerModal from './components/Modals/MetricExplainerModal'
 import ActivityHUD from './components/Common/ActivityHUD'
+import ModeBanner from './components/Common/ModeBanner'
 import ToastContainer from './components/Toast/ToastContainer'
 import HotkeyPanel from './components/UI/HotkeyPanel'
 import ErrorBoundary from './components/ErrorBoundary'
@@ -49,6 +50,10 @@ export default function App() {
   const { setPort, setSidecarError, setBrokerStatuses, activeView, setActiveView } = useChatStore()
   const createSession = useChatStore((s) => s.createSession)
   const port = useChatStore((s) => s.port)
+  const appMode = useChatStore((s) => s.appMode)
+  const modeLoading = useChatStore((s) => s.modeLoading)
+  const setAppMode = useChatStore((s) => s.setAppMode)
+  const setModeLoading = useChatStore((s) => s.setModeLoading)
   const { theme, toggle: toggleTheme } = useTheme()
 
   // Setup phase state machine
@@ -163,6 +168,25 @@ export default function App() {
     return () => clearInterval(t)
   }, [port])
 
+  // ── Fetch server-authoritative app mode (P0-A) ───────────────────────────────
+  useEffect(() => {
+    if (!port && port !== 0) return
+    const fetchMode = async () => {
+      setModeLoading(true)
+      try {
+        const res = await fetch(`${getBaseUrl(port)}/api/mode`)
+        if (res.ok) {
+          const data = await res.json()
+          setAppMode(data.mode ?? 'PAPER')
+        }
+      } catch {
+        // If endpoint is unavailable, keep default PAPER mode
+        setModeLoading(false)
+      }
+    }
+    fetchMode()
+  }, [port]) // eslint-disable-line
+
   // ── Global keybindings ───────────────────────────────────────────────────
   useEffect(() => {
     function onKeyDown(e) {
@@ -218,6 +242,9 @@ export default function App() {
 
   return (
     <div className="flex flex-col h-full" style={{ background: 'var(--color-surface)' }}>
+
+      {/* ── P0-A: Persistent Mode Banner ───────────────────────────── */}
+      <ModeBanner mode={appMode} loading={modeLoading} />
 
       {/* ── Tier 1: Top Navigation Bar ──────────────────────────────────── */}
       <div

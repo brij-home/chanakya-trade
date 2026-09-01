@@ -28,13 +28,19 @@ def test_api_preflight_endpoint(client):
 
 
 def test_api_mode_endpoint(client):
+    """P0-A: /api/mode returns server-authoritative mode with allowed_modes and description."""
     res = client.get("/api/mode")
     assert res.status_code == 200
     data = res.json()
+    # P0-A schema: mode, allowed_modes, description
     assert "mode" in data
-    assert "is_observe" in data
-    assert "is_simulate" in data
-    assert "is_execute" in data
+    assert data["mode"] in ("PAPER", "DEMO", "LIVE")
+    assert "allowed_modes" in data
+    assert isinstance(data["allowed_modes"], list)
+    assert set(data["allowed_modes"]) == {"PAPER", "DEMO", "LIVE"}
+    assert "description" in data
+    # Default (no CHANAKYA_TRADE_MODE env) must be PAPER for safety
+    assert data["mode"] == "PAPER"
 
 
 def test_api_calculate_charges_delivery(client):

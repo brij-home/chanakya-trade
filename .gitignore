@@ -91,3 +91,4 @@ docs/package.json
 # Test-run artifacts (PDF exports written by the suite)
 .pytest_trading_platform/
 scratch/
+docs/implementation_plan_codex/chanakya-trade-final-agent-implementation-plan.md

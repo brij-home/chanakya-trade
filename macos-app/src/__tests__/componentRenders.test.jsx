@@ -475,5 +475,128 @@ describe('React Component Rendering & Hook Invariant Gates', () => {
       expect(title).toBeTruthy()
     })
   })
-})
 
+  // ── P0-A: Truthful Data Envelope Component Tests ─────────────────────────
+  describe('P0-A Truthful Data Envelope Components', () => {
+    it('DataStateBadge renders all status types without crashing', async () => {
+      const DataStateBadge = (await import('../renderer/src/components/Common/DataStateBadge')).default
+      const statuses = ['live', 'delayed', 'cached_fresh', 'stale', 'derived_proxy', 'estimated', 'unavailable', 'demo']
+      for (const status of statuses) {
+        const { unmount } = render(
+          <DataStateBadge status={status} sourceName="yfinance" asOf="2026-09-01T10:00:00Z" />
+        )
+        unmount()
+      }
+    })
+
+    it('DataStateBadge compact mode renders pill without label text', async () => {
+      const DataStateBadge = (await import('../renderer/src/components/Common/DataStateBadge')).default
+      render(<DataStateBadge status="live" compact={true} />)
+      expect(screen.getByRole('status')).toBeTruthy()
+      expect(screen.getByText('L')).toBeTruthy()
+      expect(screen.queryByText('Live')).toBeNull()
+    })
+
+    it('DataStateBadge shows NON-TRADABLE warning when tradable=false', async () => {
+      const DataStateBadge = (await import('../renderer/src/components/Common/DataStateBadge')).default
+      render(<DataStateBadge status="derived_proxy" tradable={false} />)
+      expect(screen.getByText(/NON-TRADABLE/i)).toBeTruthy()
+    })
+
+    it('UnavailableState renders all size variants without crashing', async () => {
+      const UnavailableState = (await import('../renderer/src/components/Common/UnavailableState')).default
+      for (const size of ['sm', 'md', 'lg']) {
+        const { unmount } = render(
+          <UnavailableState
+            title="India VIX unavailable"
+            reason="No data from provider"
+            hint="Check connection"
+            size={size}
+          />
+        )
+        unmount()
+      }
+    })
+
+    it('UnavailableState shows Retry button and fires onRetry callback', async () => {
+      const UnavailableState = (await import('../renderer/src/components/Common/UnavailableState')).default
+      const { fireEvent: fe } = await import('@testing-library/react')
+      const onRetry = vi.fn()
+      render(
+        <UnavailableState
+          title="FII/DII unavailable"
+          reason="API timeout"
+          onRetry={onRetry}
+        />
+      )
+      const btn = screen.getByRole('button', { name: /retry/i })
+      expect(btn).toBeTruthy()
+      btn.click()
+      expect(onRetry).toHaveBeenCalledOnce()
+    })
+
+    it('ModeBanner renders PAPER mode with correct label', async () => {
+      const ModeBanner = (await import('../renderer/src/components/Common/ModeBanner')).default
+      render(<ModeBanner mode="PAPER" />)
+      expect(screen.getByText(/PAPER MODE/i)).toBeTruthy()
+    })
+
+    it('ModeBanner renders DEMO mode with synthetic data warning', async () => {
+      const ModeBanner = (await import('../renderer/src/components/Common/ModeBanner')).default
+      render(<ModeBanner mode="DEMO" />)
+      expect(screen.getByText(/DEMO MODE/i)).toBeTruthy()
+      expect(screen.getByText(/DATA IS SYNTHETIC/i)).toBeTruthy()
+    })
+
+    it('ModeBanner renders LIVE mode with real execution warning', async () => {
+      const ModeBanner = (await import('../renderer/src/components/Common/ModeBanner')).default
+      render(<ModeBanner mode="LIVE" />)
+      expect(screen.getByText(/LIVE MODE/i)).toBeTruthy()
+    })
+
+    it('ModeBanner does not render while loading', async () => {
+      const ModeBanner = (await import('../renderer/src/components/Common/ModeBanner')).default
+      const { container } = render(<ModeBanner mode="PAPER" loading={true} />)
+      expect(container.firstChild).toBeNull()
+    })
+
+    it('OverviewView renders UnavailableState when fetch returns null data', async () => {
+      // Set fetch to return unavailable status (no real data)
+      global.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ status: 'ok', data: { _status: 'unavailable', vix: null, fii_net: null, dii_net: null, sectors: [] } }),
+      })
+
+      const OverviewView = (await import('../renderer/src/components/Views/OverviewView')).default
+      const { findAllByText } = render(<OverviewView />)
+
+      // P0-A: when data fields are null, UnavailableState should render per section
+      // The OverviewView should NOT show hardcoded numbers
+      const unavailableTexts = await findAllByText(/unavailable/i)
+      expect(unavailableTexts.length).toBeGreaterThan(0)
+    })
+
+    it('GlobalMacroCard shows proxy disclosure when items have is_proxy=true', async () => {
+      const GlobalMacroCard = (await import('../renderer/src/components/Cards/GlobalMacroCard')).default
+      useChatStore.setState({ sendDraft: vi.fn() })
+      const mockData = {
+        composite_score: 30,
+        global_posture: 'NEUTRAL',
+        posture_title: 'Balanced',
+        summary: 'Test summary',
+        implied_nifty_gap_pct: 0.25,
+        implied_nifty_gap_pts: 62.5,
+        items: {
+          gold: { key: 'gold', name: 'MCX Gold', ltp: 74000, unit: '₹/10g', change_pct: 0.42, impact_bias: 'BULLISH', is_proxy: true, data_status: 'derived_proxy' },
+        },
+        sector_impacts: [],
+        as_of: '2026-09-01T10:00:00Z',
+        _status: 'derived_proxy',
+        _source_name: 'yfinance (COMEX proxy)',
+      }
+      render(<GlobalMacroCard data={mockData} />)
+      // P0-A: proxy disclosure should be present
+      expect(screen.getByText(/Research Proxy/i) || screen.getByText(/Modelled Overnight/i)).toBeTruthy()
+    })
+  })
+})

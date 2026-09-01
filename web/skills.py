@@ -4232,6 +4232,118 @@ async def skill_global_macro(req: Optional[GlobalMacroRequest] = None):
         raise _err(str(e))
 
 
+
+# ── P0-A: market_overview — aggregates VIX, FII/DII, breadth, sector RRG ──
+# Fixes T-06: OverviewView.jsx calls /skills/market_overview but this route
+# was missing. Returns null for unavailable fields — never fabricated defaults.
+
+
+@router.get("/market_overview")
+@router.post("/market_overview")
+async def skill_market_overview():
+    """
+    P0-A: Market overview snapshot — India VIX, FII/DII flows, sector RRG.
+    Returns null for unavailable fields per DataEnvelope truthful data contract.
+    """
+    import datetime as _dt
+
+    result = {
+        "_status": "unavailable",
+        "_source_name": None,
+        "_as_of": None,
+        "vix": None,
+        "fii_net": None,
+        "dii_net": None,
+        "advancers": None,
+        "decliners": None,
+        "unchanged": None,
+        "sectors": [],
+    }
+
+    fetched_any = False
+
+    # India VIX
+    try:
+        from market.quotes import get_quote
+
+        vix_quote = get_quote(["NSE:INDIA VIX"])
+        if vix_quote:
+            raw = list(vix_quote.values())[0]
+            ltp = raw.get("ltp") or raw.get("last_price")
+            if ltp and float(ltp) > 0:
+                result["vix"] = round(float(ltp), 2)
+                fetched_any = True
+    except Exception:
+        pass
+
+    # FII/DII Flows
+    try:
+        from market.sentiment import get_fii_dii_flows
+
+        flows = get_fii_dii_flows()
+        if flows:
+            result["fii_net"] = flows.get("fii_net")
+            result["dii_net"] = flows.get("dii_net")
+            fetched_any = True
+    except Exception:
+        pass
+
+    # Sector RRG (cached)
+    try:
+        from analysis.sector_rotation import get_sector_rrg_matrix
+
+        rrg = get_sector_rrg_matrix(use_cache=True)
+        if rrg and len(rrg) > 0:
+            sectors = []
+            for entry in rrg:
+                if isinstance(entry, dict):
+                    name = entry.get("sector", "")
+                    phase = entry.get("quadrant")
+                    chg = entry.get("change_pct") or entry.get("momentum")
+                else:
+                    name = getattr(entry, "sector", "") or ""
+                    phase = getattr(entry, "quadrant", None)
+                    chg = getattr(entry, "change_pct", None) or getattr(entry, "momentum", None)
+                if name:
+                    sectors.append({
+                        "name": str(name),
+                        "phase": str(phase) if phase else None,
+                        "change_pct": round(float(chg), 2) if chg is not None else None,
+                    })
+            result["sectors"] = sectors
+            fetched_any = True
+    except Exception:
+        pass
+
+    if fetched_any:
+        result["_status"] = "cached_fresh"
+        result["_source_name"] = "yfinance (research proxy)"
+        result["_as_of"] = _dt.datetime.now(_dt.timezone.utc).isoformat()
+
+    return _ok(result)
+
+
+# ── P0-A: /skills/tax/calculate alias — fixes T-06 frontend route mismatch ──
+# InputBar.jsx calls /skills/tax/calculate; backend has /skills/tax/estimate.
+
+
+@router.post("/tax/calculate")
+async def skill_tax_calculate(req: TaxEstimateRequest):
+    """P0-A Alias: /skills/tax/calculate → /skills/tax/estimate (T-06 mismatch fix)."""
+    try:
+        from engine.charges import calculate_capital_gains_tax
+
+        estimate = calculate_capital_gains_tax(
+            gross_pnl=req.gross_pnl,
+            holding_period_days=req.holding_period_days,
+            segment=req.segment,
+            prior_accumulated_ltcg=req.prior_accumulated_ltcg,
+        )
+        return _ok(estimate)
+    except Exception as e:
+        raise _err(str(e))
+
+
 class DebateSnapshotRequest(BaseModel):
     symbol: Optional[str] = "RELIANCE"
     exchange: Optional[str] = "NSE"

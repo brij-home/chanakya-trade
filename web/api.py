@@ -334,6 +334,39 @@ async def health():
     return {"status": "ok"}
 
 
+@app.get("/api/mode", tags=["System"])
+async def get_app_mode():
+    """
+    P0-A: Returns the server-authoritative application mode.
+    The client MUST use this value; a client-side flag alone is never sufficient.
+
+    Modes:
+      PAPER — Real data sources, simulated execution (default for all new installs)
+      DEMO  — Synthetic fixture data, clearly labelled, isolated from Paper/Live stores
+      LIVE  — Real data + real broker execution (requires explicit activation)
+
+    Override via environment variable: CHANAKYA_TRADE_MODE=PAPER|DEMO|LIVE
+    Default is always PAPER to prevent accidental live execution.
+    """
+    import logging
+    allowed_modes = {"PAPER", "DEMO", "LIVE"}
+    env_mode = os.environ.get("CHANAKYA_TRADE_MODE", "PAPER").upper().strip()
+    if env_mode not in allowed_modes:
+        logging.warning(
+            "[mode] Unknown CHANAKYA_TRADE_MODE=%r, defaulting to PAPER", env_mode
+        )
+        env_mode = "PAPER"
+    return {
+        "mode": env_mode,
+        "allowed_modes": sorted(allowed_modes),
+        "description": {
+            "PAPER": "Real data sources, simulated execution. No real orders sent.",
+            "DEMO": "Synthetic fixture data only. Cannot access real accounts, alerts, or exports.",
+            "LIVE": "Real data and real broker execution. Consequential — use with care.",
+        }.get(env_mode, ""),
+    }
+
+
 @app.get("/.well-known/openclaw.json", tags=["OpenClaw"])
 async def openclaw_manifest(request: Request):
     """OpenClaw skill discovery manifest — lists all available skills and their input schemas."""

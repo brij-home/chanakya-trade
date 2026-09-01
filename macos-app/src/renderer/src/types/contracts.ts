@@ -4,6 +4,94 @@
  * Provides static type safety for mixed TS/JS codebase.
  */
 
+// ── Data Envelope & Mode Contracts (P0-A) ────────────────────────────────────
+
+/**
+ * Server-authoritative application mode.
+ * Mode is set server-side; a client flag alone is never sufficient.
+ *   PAPER — real data, simulated execution (default for new installs)
+ *   DEMO  — synthetic fixture data, clearly labelled, isolated from Paper/Live stores
+ *   LIVE  — real data, real execution (requires explicit activation + broker certification)
+ */
+export type AppMode = 'PAPER' | 'DEMO' | 'LIVE'
+
+/**
+ * Field-level data quality status for every decision-relevant value.
+ *   live            — fresh, directly from licensed/verified source
+ *   delayed          — from source, but beyond expected freshness window
+ *   cached_fresh     — from local/shared cache, within acceptable TTL
+ *   stale            — cache expired or provider lag exceeded threshold
+ *   derived_proxy    — computed/converted from a non-primary source (e.g. yfinance COMEX for MCX display)
+ *   estimated        — model-derived inference, not a direct observation
+ *   unavailable      — data cannot be fetched; source is down or not entitled
+ *   demo             — synthetic fixture data; only valid in DEMO mode
+ */
+export type DataStatus =
+  | 'live'
+  | 'delayed'
+  | 'cached_fresh'
+  | 'stale'
+  | 'derived_proxy'
+  | 'estimated'
+  | 'unavailable'
+  | 'demo'
+
+/**
+ * Full data envelope wrapping any decision-relevant value.
+ * Every API response field that influences a trade/recommendation MUST include this.
+ */
+export interface DataEnvelope<T = unknown> {
+  /** The actual value; null when status is unavailable/demo with no safe fallback */
+  value: T | null
+  /** SI or display unit string (e.g. 'INR', '%', 'pts', '₹/10g') */
+  unit?: string
+  /** Current quality status of this specific field */
+  status: DataStatus
+  /** Human-readable source name (e.g. 'yfinance (COMEX proxy)', 'Fyers WebSocket') */
+  source_name?: string
+  /** Machine-readable source identifier */
+  source_id?: string
+  /** Exchange/venue where this data originates */
+  venue?: string
+  /** ISO-8601 timestamp of the exchange/provider event */
+  exchange_timestamp?: string
+  /** ISO-8601 timestamp when the server received this value */
+  received_at?: string
+  /** Age of value in milliseconds at time of API response */
+  freshness_ms?: number
+  /** Whether this value is tradable on the user's actual instrument/venue */
+  tradable?: boolean
+  /** For derived_proxy: the actual source ticker used (e.g. 'GC=F' for MCX Gold) */
+  proxy_source_ticker?: string
+  /** For derived_proxy: the actual source venue (e.g. 'COMEX') */
+  proxy_source_venue?: string
+  /** For derived_proxy: FX pair used in conversion (e.g. 'USD/INR') */
+  proxy_fx_pair?: string
+  /** For derived_proxy: FX rate applied */
+  proxy_fx_rate?: number
+  /** For derived_proxy: conversion formula description */
+  proxy_conversion_formula?: string
+  /** Opaque lineage/audit ID for tracing back to raw observation */
+  lineage_id?: string
+  /** Why the value is unavailable/stale (user-displayable, no credentials) */
+  unavailable_reason?: string
+}
+
+/**
+ * Determines whether a consequential action (order draft, recommendation, alert)
+ * is eligible based on data quality.
+ */
+export interface ActionEligibility {
+  /** Whether the action can proceed */
+  eligible: boolean
+  /** Current app mode context */
+  mode: AppMode
+  /** List of human-readable reasons why eligibility is blocked */
+  blocked_reasons: string[]
+  /** Minimum data status required for this action */
+  required_status: DataStatus[]
+}
+
 // ── Market & Trading Types ───────────────────────────────────────────────────
 
 export type TradeAction = 'BUY' | 'SELL' | 'STAND_DOWN'
