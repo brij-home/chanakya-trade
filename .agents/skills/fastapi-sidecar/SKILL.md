@@ -37,6 +37,12 @@ The FastAPI sidecar (`web.api:app`) runs on `http://127.0.0.1:8765`:
 | `/skills/gex_snapshot` | `POST` | Options chain with GEX/DIX |
 | `/skills/payoff` | `POST` | Multi-leg option payoff simulation & metrics |
 | `/skills/global_macro` | `GET` / `POST` | High-Correlation 6 macro report, GIFT NIFTY gap & sector transmission |
+| `/skills/thematic_baskets/list` | `GET` / `POST` | List 6 institutional super-investor thematic baskets |
+| `/skills/thematic_baskets/scan` | `POST` | Scan and rank basket candidates via 3-Axis Magic Trend |
+| `/skills/portfolio/doctor` | `GET` / `POST` | Full AI Health Diagnosis on connected broker portfolio |
+| `/skills/prompts/proven` | `GET` / `POST` | Curated institutional super-investor prompts |
+| `/skills/export-pdf` | `POST` | Export analysis report as clean PDF |
+| `/skills/explain` | `POST` | Simplify quant analysis into plain language |
 | `/skills/market_overview` | `GET` | Combined India VIX, FII/DII, breadth & sector RRG |
 | `/skills/backtest` | `POST` | Quantitative vectorized backtest engine |
 | `/skills/telemetry/summary` | `GET` | Fallback & error telemetry |
@@ -80,8 +86,10 @@ The frontend must always display the current feed mode so the user knows their d
 13. **Options Coverage**: Generate ≥41 strikes (`range(-20, 21)`) in `/skills/gex_snapshot`.
 14. **Typeahead Safety**: Dynamically calculate viewport boundaries to prevent overflow/clipping.
 
-### CI/CD
-15. **Pre-Commit Gate**: Run `.venv\Scripts\python.exe scripts/validate_all.py` before proposing any commit. Covers ruff, hook audits, Vitest, pytest, and web bundle.
+### CI/CD & Tiered Validation
+15. **Pre-Commit Gate**: Run `.venv\Scripts\python.exe scripts/validate_all.py --fast` (< 20s) before any commit.
+16. **Pre-Push Gate**: Run `.venv\Scripts\python.exe scripts/validate_all.py --full` (< 40s) for full 2,188+ test matrix.
+17. **Cleanup Utility**: Run `.venv\Scripts\python.exe scripts/cleanup.py` to kill orphaned workers and free port 8765.
 
 ---
 
@@ -90,6 +98,9 @@ The frontend must always display the current feed mode so the user knows their d
 ```powershell
 # Start sidecar with auto-reload
 .venv\Scripts\python.exe -m uvicorn web.api:app --host 127.0.0.1 --port 8765 --reload
+
+# Fast pre-commit validation (< 20s)
+.venv\Scripts\python.exe scripts/validate_all.py --fast
 
 # Test authentication & endpoints
 .venv\Scripts\pytest.exe tests/test_api_broker.py -v

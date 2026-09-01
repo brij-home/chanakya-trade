@@ -2,14 +2,14 @@
 
 # 🏛️ ChanakyaTrade
 ### Institutional-Grade AI Quant Terminal & Multi-Agent Intelligence for Indian Markets
-**NSE • BSE • NFO • MCX**
+**NSE • BSE • NFO • MCX • CDS**
 
 [![CI](https://github.com/brij-home/chanakya-trade/actions/workflows/ci.yml/badge.svg)](https://github.com/brij-home/chanakya-trade/actions/workflows/ci.yml)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-blue.svg)](https://www.python.org/downloads/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-009688.svg?logo=fastapi)](https://fastapi.tiangolo.com)
 [![React 19](https://img.shields.io/badge/React-19.0-61DAFB.svg?logo=react)](https://react.dev)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Tests: 2160+ Passing](https://img.shields.io/badge/tests-2160%2B%20passed-brightgreen.svg)](tests/)
+[![Tests: 2188+ Passing](https://img.shields.io/badge/tests-2188%2B%20passed-brightgreen.svg)](tests/)
 
 <br />
 
@@ -17,7 +17,7 @@
   <img src="docs/images/chanakya-dashboard.png" alt="ChanakyaTrade — Institutional AI Trading Dashboard" width="900" style="border-radius: 12px; box-shadow: 0 8px 24px rgba(0,0,0,0.4);" />
 </p>
 
-*Institutional Quantitative Screening • Smart Money Concepts (SMC) • 13 Specialist Personas • 5 Council Ensembles • Defined-Risk Options • Retail Loss-Streak Shield*
+*Institutional Quantitative Screening • Global Macro Transmission • Smart Money Concepts (SMC) • 13 Specialist Personas • 5 Council Ensembles • 3-Axis Magic Trend • Portfolio Doctor • Defined-Risk Options • Retail Loss-Streak Shield*
 
 </div>
 
@@ -25,72 +25,102 @@
 
 ## 📖 Table of Contents
 - [🌟 Platform Overview](#-platform-overview)
-- [📸 Visual Workspaces & Previews](#-visual-workspaces--previews)
-- [🧠 Multi-Agent Architecture & The 13 Specialist Personas](#-multi-agent-architecture--the-13-specialist-personas)
+- [🌐 9-Workspace Navigational Architecture](#-9-workspace-navigational-architecture)
+- [🌍 Global Macro Transmission & The High-Correlation 6](#-global-macro-transmission--the-high-correlation-6)
+- [🧠 Multi-Agent Intelligence & The 13 Specialist Personas](#-multi-agent-intelligence--the-13-specialist-personas)
 - [🏛️ High-Conviction Council Ensembles](#️-high-conviction-council-ensembles)
+- [💎 3-Axis Magic Trend & Super-Investor Thematic Baskets](#-3-axis-magic-trend--super-investor-thematic-baskets)
+- [🩺 Broker Portfolio AI Doctor & Wealth Optimizer](#-broker-portfolio-ai-doctor--wealth-optimizer)
 - [🛡️ Defined-Risk Options & Retail Protection Shield](#️-defined-risk-options--retail-protection-shield)
 - [⚡ Complete Quant & Technical Capabilities](#-complete-quant--technical-capabilities)
 - [🕹️ Command & Skill Quick Reference](#️-command--skill-quick-reference)
 - [🚀 Quickstart & Installation](#-quickstart--installation)
 - [🔌 Broker Connectivity & Safety Defaults](#-broker-connectivity--safety-defaults)
-- [🧪 Testing & Verification](#-testing--verification)
+- [🧪 Tiered Validation & Verification](#-tiered-validation--verification)
 - [📄 License & Disclaimer](#-license--disclaimer)
 
 ---
 
 ## 🌟 Platform Overview
 
-**ChanakyaTrade** is an institutional-grade strategic quant terminal designed specifically for Indian markets. By unifying **deterministic quantitative pre-filtering (0-token cost)**, **Smart Money Concepts (SMC)**, **Volume Price Analysis (VPA)**, **Dual-LLM AI Multi-Agent Debates**, and **Specialist Personas**, ChanakyaTrade synthesizes raw market noise into high-conviction, risk-calibrated trade setups with mathematically verified entries, invalidation stop-losses, and structured targets.
+**ChanakyaTrade** is an institutional-grade strategic quant terminal designed specifically for Indian capital markets (**NSE, BSE, NFO, MCX, CDS**). By unifying **deterministic quantitative pre-filtering (0-token cost)**, **Global Macro transmission**, **Smart Money Concepts (SMC)**, **Volume Price Analysis (VPA)**, **Dual-LLM AI Multi-Agent Debates**, and **13 Specialist Personas**, ChanakyaTrade synthesizes raw market noise into high-conviction, risk-calibrated trade setups with mathematically verified entries, invalidation stop-losses, and structured targets.
 
 ```mermaid
 flowchart TD
-    subgraph S1["Stage 1: Deterministic 0-Token Quant Filter"]
-        A[NSE/BSE 500+ Universe] --> B[Minervini 8-Pt Trend Template]
+    subgraph S1["Stage 1: Deterministic 0-Token Quant Pre-Filter"]
+        A[Multi-Asset Universe: Equities, Indices, MCX, CDS] --> B[Minervini 8-Pt Trend Template]
         B --> C[Stan Weinstein Stage 2 Markup]
         C --> D[Sector RRG RS-Ratio Momentum]
         D --> E[Forensic Red Flags Beneish / Altman / Pledge]
     end
 
-    subgraph S2["Stage 2: Macro & Context Engine"]
-        E --> F[India VIX & Volatility Regime]
-        F --> G[FII / DII Institutional Net Flows]
-        G --> H[Derivatives Options Skew & PCR]
+    subgraph S2["Stage 2: Global Macro & Context Engine"]
+        E --> F[GIFT NIFTY Implied Gap Engine]
+        F --> G["The High-Correlation 6 (NASDAQ, DXY, Brent, US 10Y, VIX)"]
+        G --> H[FII / DII Institutional Net Flows]
+        H --> I[Derivatives Options Skew & Gamma Exposure]
     end
 
     subgraph S3["Stage 3: Multi-Agent AI & Specialist Councils"]
-        H --> I["⚡ Fast LLM Parallel Extraction (Groq / Gemini Flash)"]
-        I --> J["Bull Analyst vs Bear Analyst Debate"]
-        I --> K["13 Specialist Personas (Minervini, Kedia, Taleb, Wyckoff, etc.)"]
-        K --> L["5 Specialist Council Ensembles"]
-        J & L --> M["🧠 Deep Reasoning Synthesis (NVIDIA NIM / DeepSeek / Claude / GPT-4o)"]
+        I --> J["⚡ Fast LLM Parallel Extraction (Groq / Gemini Flash)"]
+        J --> K["Bull Analyst vs Bear Analyst Debate"]
+        J --> L["13 Specialist Personas (Minervini, Kedia, Taleb, Wyckoff, etc.)"]
+        L --> M["5 Specialist Council Ensembles"]
+        K & M --> N["🧠 Deep Reasoning Synthesis (OpenAI / Claude / Groq / Gemini)"]
     end
 
     subgraph S4["Stage 4: Risk Gate & Execution"]
-        M --> N[Volatility Risk-Parity Sizing 1.5x ATR]
-        N --> O[Defined-Risk Options Spreads & Trailing SL Engine]
-        O --> P[Multi-Broker Execution: Zerodha / Angel / Groww / Upstox / Paper]
+        N --> O[Volatility Risk-Parity Sizing 1.5x ATR]
+        O --> P[Defined-Risk Options Spreads & Trailing SL Engine]
+        P --> Q[Multi-Broker Execution: Zerodha / Angel / Groww / Upstox / Dhan / Paper]
     end
 ```
 
 ---
 
-## 📸 Visual Workspaces & Previews
+## 🌐 9-Workspace Navigational Architecture
 
-| 📊 Strategic Quant Terminal | ⚔️ Multi-Agent Debate Arena |
-|:---:|:---:|
-| <img src="docs/images/chanakya-dashboard.png" width="440" /> | <img src="docs/images/chanakya-debate.png" width="440" /> |
-| *Real-time candlesticks, unmitigated SMC Order Blocks, Volume Profile POC/VAH/VAL, and synchronized 13 Personas Deck.* | *Adversarial Bull vs Bear research, 5 Council Presets, Facilitator consensus, and 1-click order staging.* |
+ChanakyaTrade features a keyboard-indexed **48px Persistent ActivityBar Rail** for instantaneous workspace switching:
 
-| ⚡ Quant Options & GEX Desk | 🎯 Defined-Risk Spread Simulator |
-|:---:|:---:|
-| <img src="docs/images/chanakya-gex.png" width="440" /> | <img src="docs/images/chanakya-dashboard.png" width="440" /> |
-| *Gamma Exposure (GEX) flip levels, 0DTE Volatility Skew smile, Delta hedging, and strike-by-strike open interest.* | *Multi-leg options payoff curves, capped risk profiles, zero Theta bleed, and margin requirements.* |
+| Shortcut | Workspace | Core Capabilities & Views |
+| :---: | :--- | :--- |
+| `^1` | **Strategic Quant Terminal** | 4-column layout with Symbol header, Lightweight Charts, Volume Profile, and Trade Desk Rail. |
+| `^2` | **Multi-Agent Debate Arena** | 4-stage pipeline stepper + 13-member 3D flippable council cards with live adversarial turns. |
+| `^3` | **Options & GEX Desk** | Bloomberg-style options chain, Gamma Exposure (GEX) flips, and multi-leg Payoff Simulator. |
+| `^4` | **AI Copilot** | Progressive typing wave + chronological date-grouped chat sessions with tool auto-execution. |
+| `^5` | **Market Overview** | India VIX gauge, Global Macro Transmission cards, Sector RRG mini-map, and FII/DII tracker. |
+| `^6` | **Portfolio Doctor Pro** | Stage 4 dead-money detection, HHI concentration audits, and tax-loss harvesting optimizer. |
+| `^7` | **Alerts Manager** | Real-time price threshold and technical indicator condition monitor with Telegram alerts. |
+| `^8` | **Trade Journal** | GitHub-style Win/Loss Calendar Heatmap + realized P&L statistics and execution ledger. |
+| `^9` | **Backtest Studio** | Interactive equity progression vs NIFTY 50 benchmark + trade drawdown diagnostics. |
 
 ---
 
-## 🧠 Multi-Agent Architecture & The 13 Specialist Personas
+## 🌍 Global Macro Transmission & The High-Correlation 6
 
-ChanakyaTrade embeds **13 authentic, battle-tested market minds** across technical momentum, structural value, price action, quantitative statistics, macro liquidity, and forensic accounting. Every persona supports both **deep AI reasoning** and **deterministic rule-based fallback**:
+Indian markets do not operate in a vacuum. ChanakyaTrade models global macro transmission into domestic sector indices and single stocks in real time:
+
+```
+┌──────────────────────────────────────────────────────────────────────────────────────────┐
+│                             🌍 THE HIGH-CORRELATION 6 ENGINE                             │
+├─────────────────────┬──────────────┬─────────────────────────────────────────────────────┤
+│ Global Macro Asset  │ Correlation  │ Domestic Sector & Stock Transmission                │
+├─────────────────────┼──────────────┼─────────────────────────────────────────────────────┤
+│ 🇮🇳 GIFT NIFTY       │ ~0.96        │ Computes implied NIFTY opening gap (% and pts)      │
+│ 🇺🇸 NASDAQ 100 / S&P │ ~0.82        │ Indian IT Services (TCS, INFY, HCLTECH, COFORGE)    │
+│ 💵 DXY & USD/INR    │ -0.74        │ FII Foreign Inflows & Indian Rupee purchasing power │
+│ 🛢️ Brent Crude Oil  │ Bipolar      │ Bearish (-0.78): Paints, Aviation, Tyres, OMCs      │
+│                     │              │ Bullish (+0.82): ONGC, OIL, Upstream Exploration   │
+│ 📈 US 10Y Yield     │ -0.70        │ Multiple compression on high-PE growth stocks       │
+│ ⚡ US VIX vs IN VIX │ Contagion    │ Global volatility contagion & options writing risk  │
+└─────────────────────┴──────────────┴─────────────────────────────────────────────────────┘
+```
+
+---
+
+## 🧠 Multi-Agent Intelligence & The 13 Specialist Personas
+
+ChanakyaTrade embeds **13 authentic, battle-tested market minds** across technical momentum, structural value, price action, quantitative statistics, macro liquidity, and forensic accounting:
 
 | Persona | Master Mind / Framework | Authentic Methodology | Primary Domain | Horizon |
 |:---|:---|:---|:---|:---|
@@ -130,6 +160,36 @@ To eliminate cognitive bias and false positives, ChanakyaTrade groups complement
 
 ---
 
+## 💎 3-Axis Magic Trend & Super-Investor Thematic Baskets
+
+The **3-Axis (X, Y, Z) Magic Trend Engine** quantifies fundamental quality, growth migration, and market timing into a unified 0–100 composite score:
+
+- **Axis X: Quality of Business (35 Pts)**: Economic moat, ROCE $\ge 18\%$, Beneish M-Score $< -1.78$, Altman Z'' $> 2.60$, Promoter pledge $< 5\%$, CFO/PAT $\ge 0.8$.
+- **Axis Y: Growth & Value Migration (35 Pts)**: Consecutive quarterly sales & PAT growth $\ge 25\%$, high retained earnings reinvestment rate, operating leverage.
+- **Axis Z: Value & Timing / Structure (30 Pts)**: Stan Weinstein Stage 2 markup, Minervini 8/8 Trend Template, VCP pivot tightness, RS Rating $\ge 80$, PEG $< 1.5$.
+
+### Curated Thematic Baskets
+- 💎 **Christopher Mayer 100-Baggers**: Smallcap base with high ROCE (>20%) and long growth runway.
+- 🚀 **Peter Lynch Fast-Growers**: High-growth stalwarts with PEG < 1.0 and earnings acceleration.
+- 🏗️ **Mega Order-Book Titans**: Defense, railway, and capex leaders with Order Book / Market Cap $\ge 1.5\text{x}$.
+- 📈 **William O'Neil CAN SLIM Leaders**: Breakouts to 52-week new highs backed by institutional volume surges.
+- 🏰 **Buffett-Munger Moat Compounders**: Durable competitive advantages with high ROIC and pricing power.
+- 🔬 **High-RoCE Microcaps**: NIFTY Microcap 250 compounders with low debt and expanding margins.
+
+---
+
+## 🩺 Broker Portfolio AI Doctor & Wealth Optimizer
+
+Connect your active broker account to run comprehensive institutional diagnostics:
+
+1. **Stan Weinstein Stage 4 Dead-Money Detection**: Flags capital trapped in markdown phases below declining 50/200 SMAs and quantifies opportunity cost vs Stage 2 leaders.
+2. **Herfindahl-Hirschman Index (HHI)**: Mathematical evaluation of single-stock and single-sector concentration risk.
+3. **Sector Rotation & RRG Alignment**: Audits holding allocations against JdK RRG Leading vs Lagging quadrants.
+4. **Post-Budget Tax-Loss Harvesting**: Identifies underwater holdings to offset FY24-25 STCG (20%) and LTCG (12.5%) before financial year-end.
+5. **1-Click Pragmatic Rebalancing**: Actionable, risk-calibrated switches ("Trim 5% from Stage 4 XYZ $\rightarrow$ Reallocate to Stage 2 Leading ABC").
+
+---
+
 ## 🛡️ Defined-Risk Options & Retail Protection Shield
 
 1. **Strictly Defined-Risk Strategies**:
@@ -140,7 +200,6 @@ To eliminate cognitive bias and false positives, ChanakyaTrade groups complement
    - Presents probabilistic psychological context with coaching alternatives and explicit **Double Confirmation** rather than rigid blocking.
 3. **Post-Budget FY24-25 Tax & Cost Optimization**:
    - Accurate calculation of updated **STCG (20%)**, **LTCG (12.5%)**, STT turnover charges, GST, and SEBI turnover levies.
-   - 1-click **Tax-Loss Harvesting Scanner** (`harvest`) identifying loss positions to offset taxable short-term gains before financial year-end.
 
 ---
 
@@ -156,7 +215,7 @@ To eliminate cognitive bias and false positives, ChanakyaTrade groups complement
 
 ## 🕹️ Command & Skill Quick Reference
 
-ChanakyaTrade provides instant access via the **Interactive Terminal REPL**, **Web Input Bar**, and **`Ctrl+K` Command Palette**:
+Access all capabilities instantly via the **Interactive Terminal REPL**, **Web Input Bar**, or **`Ctrl+K` Command Palette**:
 
 ### 🏛️ Council & Specialist Personas
 ```bash
@@ -171,19 +230,22 @@ persona wyckoff RELIANCE        # Consult Richard Wyckoff (VSA Accumulation Spri
 persona smc BANKNIFTY           # Consult Smart Money Concepts (Liquidity Sweeps & Order Blocks)
 ```
 
-### 📊 Technical & Quantitative Analysis
+### 📊 Technical, Fundamental & Thematic Analysis
 ```bash
 structure INFY                  # Run full Smart Money Concepts (SMC) & Order Block scan
 multibagger TRENT               # Scan Minervini 8-point trend template & Stage 2 markup
+magictrend DIXON                # Run 3-Axis (X, Y, Z) Super-Investor scoring
+macro                           # High-Correlation 6 Global Macro Transmission report
+baskets                         # List and scan institutional thematic investment baskets
+doctor                          # Full AI Health Diagnosis on connected broker portfolio
 forensic RELIANCE               # Audit Beneish M-Score, Altman Z-Score & promoter pledging
 rrg                             # Render 2D Relative Rotation Graph for all NSE sectors
 size NIFTY 24150 23800          # Calculate volatility risk-parity lot size & Half-Kelly sizing
 lifecycle INFY 1800 1740        # Track active position trailing stop & 2R breakeven rule
 radar                           # Top 10 High-Conviction Opportunity Radar across NSE universe
-bigmove NIFTY                   # Predict high-probability squeeze expansions
 ```
 
-### 🛡️ Options & Risk Shield
+### 🛡️ Options, Risk Shield & Export
 ```bash
 spreads NIFTY BULL_CALL_SPREAD  # Build defined-risk multi-leg options spread
 gex NIFTY                       # Gamma Exposure (GEX) profile & zero-gamma flip points
@@ -191,6 +253,8 @@ iv-smile NIFTY                  # Real-time implied volatility skew smile curve
 tax 50000 90                    # Estimate FY24-25 STCG/LTCG capital gains tax
 harvest                         # Scan portfolio for tax-loss harvesting candidates
 tilt                            # Check behavioral coaching advisory & loss streak shield
+export-pdf                      # Export analysis report as clean PDF
+explain                         # Translate quant jargon into plain English
 ```
 
 ---
@@ -223,7 +287,7 @@ pip install -e ".[dev]"
 ```bash
 cp .env.example .env
 ```
-*(ChanakyaTrade includes deterministic fallbacks and operates immediately out-of-the-box in demo / paper mode even without live broker API keys).*
+*(ChanakyaTrade includes deterministic quantitative fallbacks and operates immediately out-of-the-box in demo/paper mode even without live broker API keys).*
 
 ### 4. Launch Options
 
@@ -259,16 +323,29 @@ python -m app.main --tui
 
 ---
 
-## 🧪 Testing & Verification
+## 🧪 Tiered Validation & Verification
 
-The codebase includes a deterministic test suite containing **2,160+ unit and integration tests** executing in $<90$ seconds without external network dependencies:
+ChanakyaTrade provides a **Tiered Validation Architecture** so you run only what is needed during development:
 
-```bash
-# Run complete test suite with 4 worker threads
-.venv\Scripts\pytest.exe -n 4
+```powershell
+# 1. Fast local pre-commit check (< 20s)
+# Runs Ruff lint + Format + React Hook AST audit + Vitest + Fast Pytest Smoke Matrix
+.venv\Scripts\python.exe scripts/validate_all.py --fast
 
-# Run persona and council test suites
-.venv\Scripts\pytest.exe tests/test_personas.py tests/test_persona_debate.py -v
+# 2. Full CI/CD pre-push gate (< 40s)
+# Runs all linters + Vitest + Web Bundle Build + Full 2,188+ Pytest Matrix with 4 parallel workers
+.venv\Scripts\python.exe scripts/validate_all.py --full
+
+# 3. Daily / Nightly deep regression & simulation runner
+# Runs full test suite + 500-iteration Monte Carlo & options stress tests + Live network integration
+.venv\Scripts\python.exe scripts/validate_daily.py
+
+# 4. Universal environment & process cleanup
+# Kills orphaned worker processes, frees port 8765, removes temp sqlite databases
+.venv\Scripts\python.exe scripts/cleanup.py
+
+# 5. Auto-fix Python lint & formatting errors
+.venv\Scripts\python.exe scripts/validate_all.py --fix
 ```
 
 ---
