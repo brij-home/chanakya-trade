@@ -395,18 +395,92 @@ export function fuzzySearchUniverse(query, activeSymbol = null, limit = 12, cate
   const rawClean = (query || '').trim().toLowerCase()
   const normQuery = normalizeQuery(rawClean)
 
-  // 1. If query is empty, return Recent Searches + Top Actions
+  // 1. If query is empty, return category items if filtered, or Recent Searches + Top Actions if 'all'
   if (!rawClean) {
-    const recents = getRecentSearches().map((r) => ({ ...r, category: 'recent' }))
-    const defaultActions = [
-      { type: 'command', text: activeSymbol ? `analyze ${activeSymbol}` : 'brief', label: activeSymbol ? `⚡ AI Multi-Agent (${activeSymbol})` : '🌅 Morning Market Brief', icon: '⚡', category: 'action' },
-      { type: 'command', text: activeSymbol ? `council breakout ${activeSymbol}` : 'radar', label: activeSymbol ? `🚀 Breakout Council (${activeSymbol})` : '🎯 Top 10 High-Conviction Radar', icon: '🚀', category: 'action' },
-      { type: 'command', text: activeSymbol ? `multibagger ${activeSymbol}` : 'whales', label: activeSymbol ? `💎 Minervini Stage 2 (${activeSymbol})` : '🐋 Marquee Whale Flows', icon: '💎', category: 'action' },
-      { type: 'command', text: activeSymbol ? `forensic ${activeSymbol}` : 'flows', label: activeSymbol ? `🛡️ Forensic Audit (${activeSymbol})` : '🌊 FII / DII Institutional Flows', icon: '🛡️', category: 'action' },
-      { type: 'command', text: activeSymbol ? `structure ${activeSymbol}` : 'accuracy', label: activeSymbol ? `🏛️ SMC Order Blocks (${activeSymbol})` : '🏆 AI Persona Accuracy Matrix', icon: '🏛️', category: 'action' },
-    ]
+    if (categoryFilter === 'all') {
+      const recents = getRecentSearches().map((r) => ({ ...r, category: 'recent' }))
+      const defaultActions = [
+        { type: 'command', text: activeSymbol ? `analyze ${activeSymbol}` : 'brief', label: activeSymbol ? `⚡ AI Multi-Agent (${activeSymbol})` : '🌅 Morning Market Brief', icon: '⚡', category: 'action' },
+        { type: 'command', text: activeSymbol ? `council breakout ${activeSymbol}` : 'radar', label: activeSymbol ? `🚀 Breakout Council (${activeSymbol})` : '🎯 Top 10 High-Conviction Radar', icon: '🚀', category: 'action' },
+        { type: 'command', text: activeSymbol ? `multibagger ${activeSymbol}` : 'whales', label: activeSymbol ? `💎 Minervini Stage 2 (${activeSymbol})` : '🐋 Marquee Whale Flows', icon: '💎', category: 'action' },
+        { type: 'command', text: activeSymbol ? `forensic ${activeSymbol}` : 'flows', label: activeSymbol ? `🛡️ Forensic Audit (${activeSymbol})` : '🌊 FII / DII Institutional Flows', icon: '🛡️', category: 'action' },
+        { type: 'command', text: activeSymbol ? `structure ${activeSymbol}` : 'accuracy', label: activeSymbol ? `🏛️ SMC Order Blocks (${activeSymbol})` : '🏆 AI Persona Accuracy Matrix', icon: '🏛️', category: 'action' },
+      ]
 
-    return [...recents, ...defaultActions].slice(0, limit)
+      return [...recents, ...defaultActions].slice(0, limit)
+    }
+
+    if (['stock', 'index', 'etf', 'commodity', 'currency', 'symbols'].includes(categoryFilter)) {
+      const filtered = INDIAN_UNIVERSE.filter((item) => {
+        if (categoryFilter === 'symbols') return true
+        return item.type === categoryFilter
+      }).map((item) => ({
+        type: 'symbol',
+        symbol: item.symbol,
+        name: item.name,
+        sector: item.sector,
+        subIndustry: item.subIndustry,
+        stockType: item.type,
+        capTier: item.capTier,
+        lotSize: item.lotSize,
+        isFO: item.isFO,
+        category: item.type,
+        icon: getAssetIcon(item.type),
+        command: `analyze ${item.symbol}`,
+        score: 100,
+      }))
+      return filtered.slice(0, limit)
+    }
+
+    if (categoryFilter === 'council') {
+      const targetSym = activeSymbol || 'BAJAJ-AUTO'
+      return COUNCIL_REGISTRY.map((c) => ({
+        type: 'council',
+        id: c.id,
+        name: c.name,
+        desc: c.desc,
+        icon: c.icon,
+        category: 'council',
+        command: `council ${c.id} ${targetSym}`,
+        label: `${c.name} (${targetSym})`,
+        score: 100,
+      })).slice(0, limit)
+    }
+
+    if (categoryFilter === 'persona') {
+      const targetSym = activeSymbol || 'BAJAJ-AUTO'
+      return PERSONA_REGISTRY.map((p) => ({
+        type: 'persona',
+        id: p.id,
+        name: p.name,
+        style: p.style,
+        icon: p.icon,
+        category: 'persona',
+        command: `persona ${p.id} ${targetSym}`,
+        label: `${p.name} • ${p.style}`,
+        score: 100,
+      })).slice(0, limit)
+    }
+
+    if (categoryFilter === 'command') {
+      return QUANT_COMMANDS.map((cmd) => {
+        let finalCmd = cmd.cmd
+        if (cmd.usage.includes('[SYMBOL]')) {
+          finalCmd = `${cmd.cmd} ${activeSymbol || 'BAJAJ-AUTO'}`
+        }
+        return {
+          type: 'command',
+          cmd: cmd.cmd,
+          label: cmd.label,
+          desc: cmd.desc,
+          usage: cmd.usage,
+          icon: cmd.icon,
+          category: 'command',
+          command: finalCmd,
+          score: 100,
+        }
+      }).slice(0, limit)
+    }
   }
 
   const results = []

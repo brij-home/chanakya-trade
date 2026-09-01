@@ -32,6 +32,7 @@ Usage:
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
+import os
 from typing import Any, Optional
 
 import numpy as np
@@ -352,23 +353,6 @@ def calculate_magic_trend_score(
     sector_tailwind = 65
     forensic_safe = True
 
-    try:
-        from analysis.sector_rotation import get_stock_tailwind
-
-        align = get_stock_tailwind(clean_sym)
-        sector = align.sector
-        sector_tailwind = align.tailwind_score
-    except Exception:
-        pass
-
-    try:
-        from analysis.forensic import audit_company_forensics
-
-        f_audit = audit_company_forensics(clean_sym)
-        forensic_safe = f_audit.overall_forensic_verdict in ("CLEAN_PASS", "MILD_WARNING")
-    except Exception:
-        pass
-
     # 3. Extract Fundamental Data
     roce = 24.5
     debt_equity = 0.25
@@ -380,27 +364,45 @@ def calculate_magic_trend_score(
     pe_ratio = 28.0
     reinvestment_rate = 0.75
 
-    try:
-        from analysis.fundamental import analyse
+    if not os.environ.get("CHANAKYA_TESTING"):
+        try:
+            from analysis.sector_rotation import get_stock_tailwind
 
-        snap = analyse(clean_sym)
-        if snap:
-            if snap.roce is not None:
-                roce = snap.roce
-            if snap.debt_equity is not None:
-                debt_equity = snap.debt_equity
-            if snap.pledged_pct is not None:
-                pledge_pct = snap.pledged_pct
-            if snap.sales_growth is not None:
-                sales_growth = snap.sales_growth
-            if snap.profit_growth is not None:
-                profit_growth = snap.profit_growth
-            if snap.market_cap is not None:
-                market_cap = snap.market_cap
-            if snap.pe is not None:
-                pe_ratio = snap.pe
-    except Exception:
-        pass
+            align = get_stock_tailwind(clean_sym)
+            sector = align.sector
+            sector_tailwind = align.tailwind_score
+        except Exception:
+            pass
+
+        try:
+            from analysis.forensic import audit_company_forensics
+
+            f_audit = audit_company_forensics(clean_sym)
+            forensic_safe = f_audit.overall_forensic_verdict in ("CLEAN_PASS", "MILD_WARNING")
+        except Exception:
+            pass
+
+        try:
+            from analysis.fundamental import analyse
+
+            snap = analyse(clean_sym)
+            if snap:
+                if snap.roce is not None:
+                    roce = snap.roce
+                if snap.debt_equity is not None:
+                    debt_equity = snap.debt_equity
+                if snap.pledged_pct is not None:
+                    pledge_pct = snap.pledged_pct
+                if snap.sales_growth is not None:
+                    sales_growth = snap.sales_growth
+                if snap.profit_growth is not None:
+                    profit_growth = snap.profit_growth
+                if snap.market_cap is not None:
+                    market_cap = snap.market_cap
+                if snap.pe is not None:
+                    pe_ratio = snap.pe
+        except Exception:
+            pass
 
     # 4. Compute 3-Axis Scores
     score_x, ax_x = _evaluate_axis_x_quality(

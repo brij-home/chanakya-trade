@@ -31,6 +31,7 @@ Usage:
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
+import os
 from typing import Any, Optional
 
 import numpy as np
@@ -463,19 +464,20 @@ def evaluate_long_term_horizon(
     }
 
     # Extract dynamic fundamentals if available
-    try:
-        from analysis.fundamental import analyse
+    if not os.environ.get("CHANAKYA_TESTING"):
+        try:
+            from analysis.fundamental import analyse
 
-        snap = analyse(symbol)
-        if snap:
-            if snap.roce is not None:
-                details["roce_pct"] = snap.roce
-            if snap.debt_equity is not None:
-                details["debt_equity"] = snap.debt_equity
-            if snap.pledged_pct is not None:
-                details["promoter_pledging_pct"] = snap.pledged_pct
-    except Exception:
-        pass
+            snap = analyse(symbol)
+            if snap:
+                if snap.roce is not None:
+                    details["roce_pct"] = snap.roce
+                if snap.debt_equity is not None:
+                    details["debt_equity"] = snap.debt_equity
+                if snap.pledged_pct is not None:
+                    details["promoter_pledging_pct"] = snap.pledged_pct
+        except Exception:
+            pass
 
     # 1. ROCE & ROE Check
     roce = details["roce_pct"]
@@ -630,22 +632,23 @@ def scan_multibagger_opportunity(
     sector_tailwind = 65
     forensic_safe = True
 
-    try:
-        from analysis.sector_rotation import get_stock_tailwind
+    if not os.environ.get("CHANAKYA_TESTING"):
+        try:
+            from analysis.sector_rotation import get_stock_tailwind
 
-        align = get_stock_tailwind(clean_sym)
-        sector = align.sector
-        sector_tailwind = align.tailwind_score
-    except Exception:
-        pass
+            align = get_stock_tailwind(clean_sym)
+            sector = align.sector
+            sector_tailwind = align.tailwind_score
+        except Exception:
+            pass
 
-    try:
-        from analysis.forensic import audit_company_forensics
+        try:
+            from analysis.forensic import audit_company_forensics
 
-        f_audit = audit_company_forensics(clean_sym)
-        forensic_safe = f_audit.overall_forensic_verdict in ("CLEAN_PASS", "MILD_WARNING")
-    except Exception:
-        pass
+            f_audit = audit_company_forensics(clean_sym)
+            forensic_safe = f_audit.overall_forensic_verdict in ("CLEAN_PASS", "MILD_WARNING")
+        except Exception:
+            pass
 
     # 5. Evaluate 3 Distinct Horizons
     st_score, st_verdict, st_details = evaluate_short_term_horizon(

@@ -294,7 +294,7 @@ def scan_thematic_basket(
     if not meta:
         meta = THEMATIC_BASKETS["mayer_100_baggers"]
 
-    symbols = meta.symbols
+    symbols = [s for s in meta.symbols if s in df_cache] if df_cache else meta.symbols
 
     reports: list[MagicTrendReport] = []
 

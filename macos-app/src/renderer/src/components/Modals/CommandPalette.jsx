@@ -224,9 +224,21 @@ export default function CommandPalette({ isOpen, onClose, onOpenOrderTicket }) {
                           </span>
                         )}
 
+                        {isStock && stockType === 'etf' && (
+                          <span className="text-[9px] px-1.5 py-0.2 rounded font-mono font-bold bg-sky-500/15 border border-sky-500/30 text-sky-400">
+                            ETF
+                          </span>
+                        )}
+
                         {isStock && stockType === 'commodity' && (
                           <span className="text-[9px] px-1.5 py-0.2 rounded font-mono font-bold bg-amber-500/15 border border-amber-500/30 text-amber">
                             MCX
+                          </span>
+                        )}
+
+                        {isStock && stockType === 'currency' && (
+                          <span className="text-[9px] px-1.5 py-0.2 rounded font-mono font-bold bg-violet-500/15 border border-violet-500/30 text-violet-400">
+                            FOREX
                           </span>
                         )}
                       </div>

@@ -103,6 +103,43 @@ describe('Indian Market Universe & Fuzzy Search Engine', () => {
     expect(whaleResults.some((r) => r.cmd === 'whales')).toBe(true)
   })
 
+  it('browses categories accurately when search query is empty', () => {
+    const defaultAll = fuzzySearchUniverse('', null, 10, 'all')
+    expect(defaultAll.length).toBeGreaterThan(0)
+    expect(defaultAll.some((r) => r.category === 'action')).toBe(true)
+
+    const commodities = fuzzySearchUniverse('', null, 10, 'commodity')
+    expect(commodities.length).toBeGreaterThan(0)
+    expect(commodities.every((r) => r.stockType === 'commodity' || r.type === 'commodity')).toBe(true)
+    expect(commodities.some((r) => r.symbol === 'GOLD')).toBe(true)
+    expect(commodities.some((r) => r.symbol === 'CRUDEOIL')).toBe(true)
+
+    const indices = fuzzySearchUniverse('', null, 10, 'index')
+    expect(indices.length).toBeGreaterThan(0)
+    expect(indices.every((r) => r.stockType === 'index' || r.type === 'index')).toBe(true)
+    expect(indices.some((r) => r.symbol === 'NIFTY50')).toBe(true)
+
+    const etfs = fuzzySearchUniverse('', null, 10, 'etf')
+    expect(etfs.length).toBeGreaterThan(0)
+    expect(etfs.every((r) => r.stockType === 'etf' || r.type === 'etf')).toBe(true)
+    expect(etfs.some((r) => r.symbol === 'NIFTYBEES' || r.symbol === 'GOLDBEES')).toBe(true)
+
+    const currencies = fuzzySearchUniverse('', null, 10, 'currency')
+    expect(currencies.length).toBeGreaterThan(0)
+    expect(currencies.every((r) => r.stockType === 'currency' || r.type === 'currency')).toBe(true)
+    expect(currencies.some((r) => r.symbol === 'USDINR')).toBe(true)
+
+    const councils = fuzzySearchUniverse('', null, 10, 'council')
+    expect(councils.length).toBeGreaterThan(0)
+    expect(councils.every((r) => r.category === 'council' || r.type === 'council')).toBe(true)
+    expect(councils.some((r) => r.id === 'breakout')).toBe(true)
+
+    const personas = fuzzySearchUniverse('', null, 10, 'persona')
+    expect(personas.length).toBeGreaterThan(0)
+    expect(personas.every((r) => r.category === 'persona' || r.type === 'persona')).toBe(true)
+    expect(personas.some((r) => r.id === 'jhunjhunwala')).toBe(true)
+  })
+
   it('handles recent search storage lifecycle and limits to max 8 items', () => {
     expect(getRecentSearches()).toEqual([])
 

@@ -125,10 +125,32 @@ export default function BacktestStudioView({ onOpenOrderTicket }) {
   const finalValue = equityCurve[equityCurve.length - 1]?.value || initialCapital
   const netPnL = finalValue - initialCapital
 
-  // Trade logs (synthetic if empty)
-  const allTrades = r.trades && r.trades.length > 0
+  // Trade logs (synthetic if empty) with robust normalization
+  const rawTrades = (r.trades && r.trades.length > 0)
     ? r.trades
     : generateSyntheticTrades(symbol, totalTrades, winRate)
+
+  const allTrades = rawTrades.map((t, i) => {
+    const pnlVal = Number(t.pnl ?? 0)
+    const pnlPct = Number(t.pnl_pct ?? t.pct ?? 0)
+    const entryVal = Number(t.entry_price ?? t.entry ?? 0)
+    const exitVal = Number(t.exit_price ?? t.exit ?? 0)
+    const direction = String(t.direction || t.type || 'LONG').toUpperCase()
+    const rMultiple = t.r != null ? Number(t.r) : (pnlPct !== 0 ? pnlPct / 0.8 : 0)
+    const tradeDate = t.entry_date || t.date || `Day ${i + 1}`
+    const exitReason = t.signal || t.reason || 'Target / Trailing exit'
+
+    return {
+      date: tradeDate,
+      type: direction,
+      entry: entryVal,
+      exit: exitVal,
+      pnl: pnlVal,
+      pct: pnlPct,
+      r: Number.isFinite(rMultiple) ? rMultiple : 0,
+      reason: exitReason,
+    }
+  })
 
   const filteredTrades = allTrades.filter((t) => {
     if (tradeFilter === 'WIN') return t.pnl > 0
@@ -198,16 +220,21 @@ export default function BacktestStudioView({ onOpenOrderTicket }) {
               className="w-full bg-elevated border border-border rounded-xl px-3 py-2 text-text font-bold font-mono uppercase focus:border-amber outline-none"
             />
 
-            {showTypeahead && typeaheadResults.length > 0 && (
+            {showTypeahead && (
               <SmartTypeahead
+                query={inputSymbol}
+                isOpen={showTypeahead}
                 results={typeaheadResults}
                 selectedIndex={typeaheadIndex}
+                setSelectedIndex={setTypeaheadIndex}
                 onSelect={(item) => {
                   setSymbol(item.symbol)
                   setInputSymbol('')
                   setShowTypeahead(false)
                   executeBacktest(item.symbol, strategy)
                 }}
+                onClose={() => setShowTypeahead(false)}
+                position="below"
               />
             )}
           </div>

@@ -14,6 +14,7 @@ import PortfolioView from './components/Views/PortfolioView'
 import JournalView from './components/Views/JournalView'
 import AlertsView from './components/Views/AlertsView'
 import BacktestStudioView from './components/Views/BacktestStudioView'
+import SettingsPanel from './components/Sidebar/SettingsPanel'
 import SetupScreen from './components/SetupScreen'
 import OnboardingWizard from './components/Onboarding/OnboardingWizard'
 import CommandPalette from './components/Modals/CommandPalette'
@@ -367,6 +368,7 @@ export default function App() {
             {activeView === 'journal'    && <JournalView />}
             {activeView === 'alerts'     && <AlertsView onOpenOrderTicket={handleOpenOrderTicket} />}
             {activeView === 'backtest'   && <BacktestStudioView onOpenOrderTicket={handleOpenOrderTicket} />}
+            {activeView === 'settings'   && <SettingsPanel onClose={() => setActiveView('terminal')} />}
 
           </ErrorBoundary>
         </div>

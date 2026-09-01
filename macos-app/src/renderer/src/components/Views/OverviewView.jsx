@@ -1,31 +1,7 @@
 import { useState, useEffect } from 'react'
 import { useAPI } from '../../hooks/useAPI'
+import { useChatStore } from '../../store/chatStore'
 import SkeletonCard from '../Loading/SkeletonCard'
-
-/* ── Data ─────────────────────────────────────────────────────────────── */
-const GLOBAL_MARKETS = [
-  { label: 'SGX Nifty',  value: 24190, change: +0.38, flag: '🇸🇬' },
-  { label: 'Dow Jones',  value: 44089, change: +0.22, flag: '🇺🇸' },
-  { label: 'NASDAQ',     value: 19350, change: +0.55, flag: '🇺🇸' },
-  { label: 'USD/INR',    value: 83.82,  change: -0.05, flag: '💱' },
-  { label: 'Crude Oil',  value: 78.4,  change: -0.80, flag: '🛢️' },
-  { label: 'Gold',       value: 2618,  change: +0.40, flag: '🥇' },
-]
-
-const SECTORS_MOCK = [
-  { name: 'IT',          rsi: 71, change: +2.1, phase: 'LEADING' },
-  { name: 'Banking',     rsi: 58, change: +0.8, phase: 'LEADING' },
-  { name: 'FMCG',        rsi: 48, change: -0.3, phase: 'WEAKENING' },
-  { name: 'Auto',        rsi: 63, change: +1.5, phase: 'LEADING' },
-  { name: 'Pharma',      rsi: 54, change: +0.2, phase: 'IMPROVING' },
-  { name: 'Realty',      rsi: 44, change: -0.9, phase: 'LAGGING' },
-  { name: 'Energy',      rsi: 67, change: +1.2, phase: 'LEADING' },
-  { name: 'Metal',       rsi: 41, change: -1.4, phase: 'LAGGING' },
-  { name: 'Defence',     rsi: 72, change: +2.8, phase: 'LEADING' },
-  { name: 'PSU Bank',    rsi: 62, change: +1.1, phase: 'IMPROVING' },
-  { name: 'Infra',       rsi: 56, change: +0.5, phase: 'IMPROVING' },
-  { name: 'Chemical',    rsi: 49, change: -0.2, phase: 'WEAKENING' },
-]
 
 const PHASE_STYLE = {
   LEADING:    { color: 'var(--color-emerald)', bg: 'rgba(0,214,143,0.12)', label: '▲ LEADING' },
@@ -37,7 +13,7 @@ const PHASE_STYLE = {
 /* ── Sub-components ─────────────────────────────────────────────────────── */
 
 /** India VIX arc gauge */
-function VIXGauge({ value = 12.8 }) {
+function VIXGauge({ value = 11.2 }) {
   const max = 40
   const pct = Math.min(value / max, 1)
   const circumference = 2 * Math.PI * 40
@@ -73,7 +49,7 @@ function VIXGauge({ value = 12.8 }) {
 
 /** Breadth indicator bar */
 function BreadthBar({ advancing = 285, declining = 165, unchanged = 50 }) {
-  const total = advancing + declining + unchanged
+  const total = Math.max(1, advancing + declining + unchanged)
   const aP = (advancing / total * 100).toFixed(0)
   const dP = (declining / total * 100).toFixed(0)
   const uP = (unchanged / total * 100).toFixed(0)
@@ -97,24 +73,23 @@ function BreadthBar({ advancing = 285, declining = 165, unchanged = 50 }) {
 /** FII/DII flow chart bar */
 function FlowBar({ label, value, max = 3000 }) {
   const isPos = value >= 0
-  const pct = Math.abs(value) / max * 100
-  const color = isPos ? 'var(--color-emerald)' : 'var(--color-rose)'
+  const pct = Math.min(100, Math.abs(value) / Math.max(1, max) * 100)
   return (
-    <div className="flex items-center gap-3">
-      <span className="text-[10px] font-mono w-16 text-right flex-shrink-0" style={{ color: 'var(--color-muted)' }}>{label}</span>
-      <div className="flex-1 relative h-5 rounded-lg overflow-hidden" style={{ background: 'var(--color-elevated)' }}>
+    <div className="space-y-1">
+      <div className="flex justify-between text-[10px] font-mono">
+        <span style={{ color: 'var(--color-muted)' }}>{label}</span>
+        <span style={{ color: isPos ? 'var(--color-emerald)' : 'var(--color-rose)', fontWeight: 700 }}>
+          {isPos ? '+' : ''}₹{Math.abs(value).toLocaleString('en-IN')} Cr
+        </span>
+      </div>
+      <div className="h-1.5 rounded-full overflow-hidden" style={{ background: 'var(--color-subtle)' }}>
         <div
-          className="absolute top-0 bottom-0 rounded-lg transition-all"
+          className="h-full rounded-full transition-all"
           style={{
             width: `${pct}%`,
-            background: color,
-            opacity: 0.8,
-            left: isPos ? '50%' : `${50 - pct}%`,
+            background: isPos ? 'var(--color-emerald)' : 'var(--color-rose)',
           }}
         />
-        <div className="absolute inset-0 flex items-center justify-center text-[10px] font-mono font-bold" style={{ color: 'var(--color-text)' }}>
-          {isPos ? '+' : ''}₹{Math.abs(value).toLocaleString('en-IN')} Cr
-        </div>
       </div>
     </div>
   )
@@ -123,7 +98,9 @@ function FlowBar({ label, value, max = 3000 }) {
 /* ── Main View ───────────────────────────────────────────────────────────── */
 export default function OverviewView() {
   const { call } = useAPI()
+  const sendDraft = useChatStore((s) => s.sendDraft)
   const [data, setData] = useState(null)
+  const [globalMacro, setGlobalMacro] = useState(null)
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
@@ -131,9 +108,22 @@ export default function OverviewView() {
     const fetchData = async () => {
       try {
         setLoading(true)
-        const res = await call('/skills/market_overview')
-        if (!unmounted && res) setData(res?.data ?? res)
-      } catch { /* use mock data */ } finally {
+        const [resOverview, resMacro] = await Promise.allSettled([
+          call('/skills/market_overview'),
+          call('/skills/global_macro'),
+        ])
+
+        if (!unmounted) {
+          if (resOverview.status === 'fulfilled' && resOverview.value) {
+            setData(resOverview.value?.data ?? resOverview.value)
+          }
+          if (resMacro.status === 'fulfilled' && resMacro.value) {
+            setGlobalMacro(resMacro.value?.data ?? resMacro.value)
+          }
+        }
+      } catch {
+        /* defensive fallback */
+      } finally {
         if (!unmounted) setLoading(false)
       }
     }
@@ -141,22 +131,46 @@ export default function OverviewView() {
     return () => { unmounted = true }
   }, [])
 
-  const vix = data?.vix ?? 12.8
+  const vix = data?.vix ?? 11.2
   const fiiNet = data?.fii_net ?? -1240
   const diiNet = data?.dii_net ?? 1840
   const advancers = data?.advancers ?? 285
   const decliners = data?.decliners ?? 165
   const unchanged = data?.unchanged ?? 50
+  const sectorList = data?.sectors && data.sectors.length > 0 ? data.sectors : [
+    { name: 'IT', rsi: 65, change: +0.8, phase: 'LEADING' },
+    { name: 'Banking', rsi: 58, change: +0.4, phase: 'IMPROVING' },
+    { name: 'Pharma', rsi: 62, change: +0.7, phase: 'LEADING' },
+    { name: 'Auto', rsi: 61, change: +0.6, phase: 'LEADING' },
+    { name: 'Metal', rsi: 44, change: -0.9, phase: 'WEAKENING' },
+    { name: 'Energy', rsi: 56, change: +0.3, phase: 'IMPROVING' },
+    { name: 'Realty', rsi: 49, change: -0.4, phase: 'LAGGING' },
+    { name: 'FMCG', rsi: 52, change: +0.1, phase: 'IMPROVING' },
+    { name: 'Defence', rsi: 68, change: +1.8, phase: 'LEADING' },
+    { name: 'Infra', rsi: 54, change: +0.2, phase: 'IMPROVING' },
+  ]
+
+  const macroItems = globalMacro?.items ? Object.values(globalMacro.items) : [
+    { name: 'NASDAQ 100', ltp: 26370.89, change_pct: -0.12, unit: 'pts', impact_bias: 'NEUTRAL' },
+    { name: 'S&P 500', ltp: 7686.14, change_pct: -0.33, unit: 'pts', impact_bias: 'NEUTRAL' },
+    { name: 'US Dollar Index', ltp: 99.51, change_pct: +0.02, unit: 'idx', impact_bias: 'NEUTRAL' },
+    { name: 'USD / INR', ltp: 94.89, change_pct: -0.28, unit: '₹', impact_bias: 'NEUTRAL' },
+    { name: 'Brent Crude', ltp: 88.90, change_pct: -0.10, unit: '$/bbl', impact_bias: 'NEUTRAL' },
+    { name: 'US 10Y Yield', ltp: 4.76, change_pct: +0.81, unit: '%', impact_bias: 'BEARISH' },
+  ]
+
+  const impliedGap = globalMacro?.implied_nifty_gap_pct ?? -0.29
+  const impliedGapPts = globalMacro?.implied_nifty_gap_pts ?? -70.0
+  const sectorImpacts = globalMacro?.sector_impacts ?? []
 
   return (
     <div className="flex-1 overflow-y-auto p-3 space-y-3 font-ui" style={{ background: 'var(--color-surface)' }}>
-
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-lg font-black" style={{ color: 'var(--color-text)' }}>🌐 Market Overview</h1>
+          <h1 className="text-lg font-black" style={{ color: 'var(--color-text)' }}>🌐 Market Overview & Global Macro</h1>
           <p className="text-xs" style={{ color: 'var(--color-muted)' }}>
-            India VIX • FII/DII Flows • Breadth • Sector Rotation • Global Markets
+            GIFT NIFTY Gap • High-Correlation Global 6 • India VIX • FII/DII Flows • Sector RRG
           </p>
         </div>
         <div
@@ -164,7 +178,7 @@ export default function OverviewView() {
           style={{ background: 'rgba(0,214,143,0.12)', border: '1px solid rgba(0,214,143,0.3)', color: 'var(--color-emerald)' }}
         >
           <span className="w-1.5 h-1.5 rounded-full animate-pulse" style={{ background: 'var(--color-emerald)' }} />
-          Live Market Context
+          Live Institutional Feeds
         </div>
       </div>
 
@@ -174,7 +188,80 @@ export default function OverviewView() {
         </div>
       ) : (
         <>
-          {/* Row 1: VIX + Breadth + FII/DII */}
+          {/* Row 1: Global Macro Transmission & GIFT NIFTY Opening Gap */}
+          <div
+            className="rounded-2xl p-4 animate-slide-up-fade"
+            style={{ background: 'var(--color-panel)', border: '1px solid var(--color-border)', boxShadow: 'var(--shadow-card)' }}
+          >
+            <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
+              <div className="flex items-center gap-2">
+                <span className="text-xl">🌍</span>
+                <span className="text-[11px] font-mono font-bold uppercase tracking-wider text-text">
+                  Global Macro Transmission & GIFT NIFTY Implied Open
+                </span>
+              </div>
+              <div className="flex items-center gap-2 text-xs font-mono">
+                <span className="text-muted text-[10px]">Implied Open:</span>
+                <span className={`font-black px-2 py-0.5 rounded-md border ${impliedGap >= 0 ? 'bg-emerald-500/15 border-emerald-500/30 text-emerald-400' : 'bg-rose-500/15 border-rose-500/30 text-rose-400'}`}>
+                  {impliedGap >= 0 ? `+${impliedGap.toFixed(2)}%` : `${impliedGap.toFixed(2)}%`} ({impliedGapPts >= 0 ? `+${impliedGapPts.toFixed(1)}` : impliedGapPts.toFixed(1)} pts)
+                </span>
+                <span className="text-[10px] px-2 py-0.5 rounded bg-surface border border-border text-amber font-bold">
+                  {globalMacro?.global_posture ?? 'BALANCED'}
+                </span>
+              </div>
+            </div>
+
+            {/* Global Tickers Grid */}
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2.5">
+              {macroItems.slice(0, 6).map((m) => {
+                const isPos = m.change_pct > 0
+                return (
+                  <div
+                    key={m.name}
+                    className="rounded-xl p-2.5 space-y-1 transition-all hover:scale-105"
+                    style={{
+                      background: 'var(--color-elevated)',
+                      border: `1px solid ${isPos ? 'rgba(0,214,143,0.25)' : 'rgba(255,79,123,0.25)'}`,
+                    }}
+                  >
+                    <div className="text-[10px] font-bold truncate" style={{ color: 'var(--color-muted)' }}>
+                      {m.name}
+                    </div>
+                    <div className="text-xs font-mono font-bold" style={{ color: 'var(--color-text)' }}>
+                      {Number(m.ltp).toLocaleString('en-IN', { maximumFractionDigits: 2 })}
+                      <span className="text-[9px] font-normal text-muted ml-0.5">{m.unit}</span>
+                    </div>
+                    <div
+                      className="text-[10px] font-mono font-bold flex items-center justify-between"
+                      style={{ color: isPos ? 'var(--color-emerald)' : 'var(--color-rose)' }}
+                    >
+                      <span>{isPos ? '+' : ''}{Number(m.change_pct).toFixed(2)}%</span>
+                      <span className="text-[8px] opacity-80 uppercase">{m.impact_bias || 'NEUTRAL'}</span>
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+
+            {/* Sector Impact Attribution Summary */}
+            {sectorImpacts.length > 0 && (
+              <div className="mt-3 pt-3 border-t border-border/40 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
+                {sectorImpacts.slice(0, 3).map((sec) => (
+                  <div key={sec.sector_id} className="p-2 rounded-lg bg-surface/60 border border-border/50 text-[10px] font-ui space-y-0.5">
+                    <div className="flex items-center justify-between font-bold">
+                      <span className="text-text">{sec.sector_name}</span>
+                      <span className={sec.bias.includes('TAILWIND') ? 'text-emerald-400' : sec.bias.includes('HEADWIND') ? 'text-rose-400' : 'text-muted'}>
+                        {sec.bias.includes('TAILWIND') ? '🚀 TAILWIND' : sec.bias.includes('HEADWIND') ? '⚠️ HEADWIND' : '⚖️ NEUTRAL'}
+                      </span>
+                    </div>
+                    <p className="text-muted leading-tight truncate">{sec.rationale}</p>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Row 2: VIX + Breadth + FII/DII */}
           <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
             {/* VIX Gauge */}
             <div
@@ -235,7 +322,7 @@ export default function OverviewView() {
             </div>
           </div>
 
-          {/* Row 2: Sector Rotation Grid */}
+          {/* Row 3: Sector Rotation Grid */}
           <div
             className="rounded-2xl p-4 animate-slide-up-fade"
             style={{ background: 'var(--color-panel)', border: '1px solid var(--color-border)', boxShadow: 'var(--shadow-card)', animationDelay: '150ms' }}
@@ -250,61 +337,26 @@ export default function OverviewView() {
                 ))}
               </div>
             </div>
-            <div className="grid grid-cols-3 sm:grid-cols-4 lg:grid-cols-6 gap-2">
-              {SECTORS_MOCK.map((s) => {
-                const cfg = PHASE_STYLE[s.phase]
+            <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-5 gap-2">
+              {sectorList.map((s) => {
+                const phaseKey = s.phase || (s.quadrant ? s.quadrant.toUpperCase() : 'LEADING')
+                const cfg = PHASE_STYLE[phaseKey] || PHASE_STYLE.LEADING
+                const chgVal = s.change_pct ?? s.change ?? 0
                 return (
                   <div
-                    key={s.name}
+                    key={s.name || s.sector}
                     className="rounded-xl p-2.5 text-center space-y-1 transition-all cursor-pointer hover:scale-105"
                     style={{ background: cfg.bg, border: `1px solid ${cfg.color}33` }}
-                    onClick={() => window.dispatchEvent(new CustomEvent('open-sector-drilldown', { detail: { sector: s.name } }))}
+                    onClick={() => sendDraft(`funnel sector ${(s.name || s.sector).toLowerCase()}`)}
                   >
-                    <div className="text-xs font-bold" style={{ color: 'var(--color-text)' }}>{s.name}</div>
+                    <div className="text-xs font-bold truncate" style={{ color: 'var(--color-text)' }}>{s.name || s.sector}</div>
                     <div className="text-[10px] font-bold" style={{ color: cfg.color }}>{cfg.label.split(' ')[0]}</div>
-                    <div className="text-[11px] font-mono font-bold" style={{ color: s.change >= 0 ? 'var(--color-emerald)' : 'var(--color-rose)' }}>
-                      {s.change >= 0 ? '+' : ''}{s.change}%
+                    <div className="text-[11px] font-mono font-bold" style={{ color: chgVal >= 0 ? 'var(--color-emerald)' : 'var(--color-rose)' }}>
+                      {chgVal >= 0 ? '+' : ''}{Number(chgVal).toFixed(1)}%
                     </div>
-                    <div className="text-[9px]" style={{ color: 'var(--color-muted)' }}>RSI {s.rsi}</div>
                   </div>
                 )
               })}
-            </div>
-          </div>
-
-          {/* Row 3: Global Markets */}
-          <div
-            className="rounded-2xl p-4 animate-slide-up-fade"
-            style={{ background: 'var(--color-panel)', border: '1px solid var(--color-border)', boxShadow: 'var(--shadow-card)', animationDelay: '200ms' }}
-          >
-            <div className="text-[10px] font-bold uppercase tracking-wider mb-3" style={{ color: 'var(--color-muted)' }}>
-              🌍 Global Markets
-            </div>
-            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
-              {GLOBAL_MARKETS.map((m) => (
-                <div
-                  key={m.label}
-                  className="rounded-xl p-3 space-y-1 transition-all hover:scale-105"
-                  style={{
-                    background: 'var(--color-elevated)',
-                    border: `1px solid ${m.change >= 0 ? 'rgba(0,214,143,0.25)' : 'rgba(255,79,123,0.25)'}`,
-                  }}
-                >
-                  <div className="flex items-center gap-1.5">
-                    <span className="text-base">{m.flag}</span>
-                    <span className="text-[10px] font-bold" style={{ color: 'var(--color-muted)' }}>{m.label}</span>
-                  </div>
-                  <div className="text-sm font-mono font-bold" style={{ color: 'var(--color-text)' }}>
-                    {m.value.toLocaleString('en-IN')}
-                  </div>
-                  <div
-                    className="text-[11px] font-mono font-bold"
-                    style={{ color: m.change >= 0 ? 'var(--color-emerald)' : 'var(--color-rose)' }}
-                  >
-                    {m.change >= 0 ? '+' : ''}{m.change}%
-                  </div>
-                </div>
-              ))}
             </div>
           </div>
         </>

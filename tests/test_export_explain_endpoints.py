@@ -59,7 +59,8 @@ class TestExportPdfEndpoint:
 
 
 class TestExplainEndpoint:
-    def test_endpoint_exists(self, client):
+    def test_endpoint_exists(self, client, mocker):
+        mocker.patch("engine.output.explain_simply", return_value="Simplified text")
         resp = client.post(
             "/skills/explain",
             json={"content": "INFY analysis: RSI 54, PE 18x, BULLISH verdict."},

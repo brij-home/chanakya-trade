@@ -209,11 +209,35 @@ When generating automated trade tickets:
 
 ---
 
-## 12. Testing
+## 12. Global Macro Correlation & Sector Transmission
+
+[`market/global_macro.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/market/global_macro.py) — Evaluates the High-Correlation 6 global drivers that directly move Dalal Street:
+
+| Global Indicator | Correlation | Sector / Market Transmission Channel |
+| :--- | :---: | :--- |
+| **GIFT NIFTY** (`^NSEIFSC`) | ~0.96 | Pre-market opening gap predictor (`implied_nifty_gap_pct`, `pts`) |
+| **NASDAQ 100** (`^IXIC`) | ~0.82 | Overnight sentiment for Indian IT Services (`TCS`, `INFY`, `HCLTECH`, `COFORGE`) |
+| **US Dollar Index** (DXY) | -0.74 | FII foreign equity flows; DXY surge triggers EM outflows in Largecap Banks |
+| **Brent Crude Oil** (`BZ=F`) | -0.78 / +0.82 | Negative for Paints (`ASIANPAINT`), Aviation (`INDIGO`), OMCs; Positive for Upstream (`ONGC`, `OIL`) |
+| **US 10Y Yield** (`^TNX`) | -0.70 | Global hurdle rate & multiple contraction across High-PE growth compounders |
+| **US VIX vs India VIX** | ~0.68 | Volatility contagion, options writing risk-parity & ATR band calibration |
+
+```python
+from market.global_macro import fetch_global_macro_report
+
+report = fetch_global_macro_report(nifty_spot=24150.0)
+# report.composite_score -> -100 to +100
+# report.global_posture -> "RISK_ON" | "NEUTRAL" | "RISK_OFF" | "VOLATILE_CAUTION"
+# report.implied_nifty_gap_pct, report.sector_impacts
+```
+
+---
+
+## 13. Testing
 
 ```powershell
-# Quantitative, retail protection & structural test suites
-.venv\Scripts\pytest.exe tests/test_market_structure.py tests/test_volume_profile.py tests/test_multibagger.py tests/test_trade_lifecycle.py tests/test_execution_gate.py tests/test_retail_protection.py -v
+# Quantitative, global macro, retail protection & structural test suites
+.venv\Scripts\pytest.exe tests/test_global_macro.py tests/test_market_structure.py tests/test_volume_profile.py tests/test_multibagger.py tests/test_trade_lifecycle.py tests/test_execution_gate.py tests/test_retail_protection.py -v
 
 # Complete fast suite
 .venv\Scripts\pytest.exe -n 4

@@ -17,7 +17,7 @@ function parseCommand(input, contextSymbol = null) {
       return { endpoint: '/skills/quote', body: { symbol: sym }, cardType: 'quote' }
     }
 
-    case 'analyze': case 'analyse': case 'a': {
+    case 'analyze': case 'analyse': case 'debate': case 'a': {
       const sym = args[0]?.toUpperCase() || contextSymbol
       if (!sym) return { error: 'Please specify a stock symbol to analyze (e.g. analyze INFY)' }
       return { stream: true, symbol: sym, exchange: args[1]?.toUpperCase() ?? 'NSE' }
@@ -176,7 +176,7 @@ function parseCommand(input, contextSymbol = null) {
       }
       return { endpoint: '/skills/provider', body: {}, cardType: 'provider' }
     }
-    case 'rrg': case 'sector-rotation': case 'rotation': {
+    case 'rrg': case 'sector-rotation': case 'rotation': case 'sector': case 'sectors': {
       const sym = args[0]?.toUpperCase() || contextSymbol || null
       return { endpoint: '/skills/rrg', body: { symbol: sym }, cardType: 'rrg' }
     }

@@ -24,10 +24,11 @@ Usage:
 from __future__ import annotations
 
 import concurrent.futures
+import os
 import re
+import sys
 import time
 from dataclasses import dataclass, field
-import sys
 from typing import Any, Callable, Optional
 
 # Fix Windows charmap / cp1252 codec errors for unicode console prints
@@ -325,10 +326,12 @@ class SmartFunnel:
     def _get_providers(self):
         if not self._deep_provider or not self._fast_provider:
             try:
+                import os
                 from pathlib import Path
                 from dotenv import load_dotenv
 
-                load_dotenv(Path(__file__).parent.parent / ".env")
+                if not os.environ.get("CHANAKYA_TESTING"):
+                    load_dotenv(Path(__file__).parent.parent / ".env")
 
                 from agent.core import get_deep_provider, build_fast_provider_from_env
 
@@ -464,35 +467,36 @@ class SmartFunnel:
             rejection_flags.append(f"Extreme valuation multiple (P/E {pe:.1f}x)")
 
         # ── Sector Rotation & RRG Alignment ──
-        try:
-            from analysis.sector_rotation import get_stock_sector_alignment
+        if not os.environ.get("CHANAKYA_TESTING"):
+            try:
+                from analysis.sector_rotation import get_stock_sector_alignment
 
-            sec_info = get_stock_sector_alignment(symbol)
-            quad = sec_info.get("quadrant")
-            if quad == "LEADING":
-                score += 5.0
-                positive_flags.append(f"Sector {sec_info.get('sector')} is LEADING benchmark")
-            elif quad == "IMPROVING":
-                score += 3.0
-                positive_flags.append(f"Sector {sec_info.get('sector')} is IMPROVING momentum")
-            elif quad == "LAGGING":
-                score -= 5.0
-        except Exception:
-            pass
+                sec_info = get_stock_sector_alignment(symbol)
+                quad = sec_info.get("quadrant")
+                if quad == "LEADING":
+                    score += 5.0
+                    positive_flags.append(f"Sector {sec_info.get('sector')} is LEADING benchmark")
+                elif quad == "IMPROVING":
+                    score += 3.0
+                    positive_flags.append(f"Sector {sec_info.get('sector')} is IMPROVING momentum")
+                elif quad == "LAGGING":
+                    score -= 5.0
+            except Exception:
+                pass
 
-        # ── Forensic & Governance Quality Check ──
-        try:
-            from analysis.forensic import audit_forensics
+            # ── Forensic & Governance Quality Check ──
+            try:
+                from analysis.forensic import audit_forensics
 
-            audit = audit_forensics(symbol)
-            if audit.governance_red_flags:
-                score -= 15.0
-                rejection_flags.append(f"Forensic flag: {audit.governance_red_flags[0]}")
-            elif audit.quality_rating in ("A+", "A"):
-                score += 5.0
-                positive_flags.append(f"Forensic Quality Rating: {audit.quality_rating}")
-        except Exception:
-            pass
+                audit = audit_forensics(symbol)
+                if audit.governance_red_flags:
+                    score -= 15.0
+                    rejection_flags.append(f"Forensic flag: {audit.governance_red_flags[0]}")
+                elif audit.quality_rating in ("A+", "A"):
+                    score += 5.0
+                    positive_flags.append(f"Forensic Quality Rating: {audit.quality_rating}")
+            except Exception:
+                pass
 
         final_score = max(0.0, min(100.0, score))
         qualified = final_score >= 60.0 and len(rejection_flags) <= 1

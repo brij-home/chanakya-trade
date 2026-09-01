@@ -96,6 +96,10 @@ class BacktestRequest(BaseModel):
     strategy: str = "rsi"
     period: str = "1y"
     exchange: str = "NSE"
+    capital: Optional[float] = None
+    initial_capital: Optional[float] = None
+    timeframe: Optional[str] = "1d"
+    risk_pct: Optional[float] = 1.0
     fast: bool = False  # True → vectorized engine (<1s, no slippage sim)
 
 
@@ -861,7 +865,10 @@ async def skill_backtest(req: BacktestRequest):
         else:
             from engine.backtest import run_backtest
 
-            result = run_backtest(req.symbol.upper(), req.strategy, period=req.period)
+            kwargs = {"period": req.period}
+            if cap := (req.capital or req.initial_capital):
+                kwargs["capital"] = cap
+            result = run_backtest(req.symbol.upper(), req.strategy, **kwargs)
         return _ok(result)
     except Exception as e:
         raise _err(str(e))
@@ -3966,6 +3973,19 @@ async def skill_dashboard_snapshot(req: Optional[DashboardSnapshotRequest] = Non
             ],
         }
 
+        # Global Macro Correlation Report
+        global_macro_data = None
+        try:
+            from market.global_macro import fetch_global_macro_report
+
+            global_macro_rep = fetch_global_macro_report(
+                nifty_spot=cur_ltp if "NIFTY" in sym else None
+            )
+            if global_macro_rep:
+                global_macro_data = global_macro_rep.to_dict()
+        except Exception:
+            pass
+
         payload = {
             "symbol": sym,
             "exchange": exch,
@@ -3978,6 +3998,7 @@ async def skill_dashboard_snapshot(req: Optional[DashboardSnapshotRequest] = Non
             "sector_matrix": sector_items,
             "rrg_sectors": rrg_sectors or sector_items,
             "multi_tf": multi_tf,
+            "global_macro": global_macro_data,
             "provenance": {
                 "data_source": "LIVE_TICK" if quotes_map else "EOD_HISTORICAL",
                 "as_of": f"{datetime.now().strftime('%d %b %Y, %I:%M %p IST')} • Live Market Context",
@@ -3993,6 +4014,33 @@ async def skill_dashboard_snapshot(req: Optional[DashboardSnapshotRequest] = Non
             pass
 
         return _ok(payload)
+    except Exception as e:
+        import traceback
+
+        traceback.print_exc()
+        raise _err(str(e))
+
+
+class GlobalMacroRequest(BaseModel):
+    nifty_spot: Optional[float] = None
+    use_cache: Optional[bool] = True
+
+
+@router.get("/global_macro")
+@router.post("/global_macro")
+async def skill_global_macro(req: Optional[GlobalMacroRequest] = None):
+    """
+    Evaluates institutional Global Macro Correlation & Transmission Channels:
+    GIFT NIFTY, NASDAQ 100, S&P 500, US Dollar Index (DXY), USD/INR, Brent Crude Oil,
+    US 10-Year Treasury Yield, and CBOE VIX vs India VIX, with sector impact attribution.
+    """
+    try:
+        from market.global_macro import fetch_global_macro_report
+
+        spot = req.nifty_spot if req else None
+        use_cache = req.use_cache if req is not None and req.use_cache is not None else True
+        report = fetch_global_macro_report(nifty_spot=spot, use_cache=use_cache)
+        return _ok(report.to_dict())
     except Exception as e:
         import traceback
 

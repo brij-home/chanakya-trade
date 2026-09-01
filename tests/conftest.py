@@ -13,14 +13,37 @@ import numpy as np
 import pandas as pd
 import pytest
 
-_TEST_DATA_DIR = Path(__file__).parent.parent / ".pytest_trading_platform"
+worker_id = os.environ.get("PYTEST_XDIST_WORKER", "")
+if worker_id:
+    _TEST_DATA_DIR = Path(__file__).parent.parent / f".pytest_trading_platform_{worker_id}"
+else:
+    _TEST_DATA_DIR = Path(__file__).parent.parent / ".pytest_trading_platform"
+
 _TEST_DATA_DIR.mkdir(parents=True, exist_ok=True)
 (_TEST_DATA_DIR / "pdf").mkdir(parents=True, exist_ok=True)
-os.environ.setdefault("TRADING_PLATFORM_HOME", str(_TEST_DATA_DIR))
-os.environ.setdefault("TRADING_PLATFORM_DATA", str(_TEST_DATA_DIR))
-os.environ.setdefault("TRADING_PLATFORM_PDF_DIR", str(_TEST_DATA_DIR / "pdf"))
+os.environ["TRADING_PLATFORM_HOME"] = str(_TEST_DATA_DIR)
+os.environ["TRADING_PLATFORM_DATA"] = str(_TEST_DATA_DIR)
+os.environ["TRADING_PLATFORM_PDF_DIR"] = str(_TEST_DATA_DIR / "pdf")
+os.environ["CHANAKYA_TESTING"] = "1"
+os.environ["TRADING_MODE"] = "PAPER"
 os.environ.setdefault("KEYRING_DISABLE", "1")
 os.environ.setdefault("PYTHONKEYRING_BACKEND", "keyring.backends.null.Keyring")
+
+
+@pytest.fixture(autouse=True)
+def sanitize_test_env(monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest):
+    """Ensure no unit test accidentally inherits live AI credentials or makes live LLM calls."""
+    if "network" not in request.keywords:
+        monkeypatch.setenv("CHANAKYA_TESTING", "1")
+        monkeypatch.setenv("AI_FAST_PROVIDER", "")
+        monkeypatch.setenv("AI_FAST_MODEL", "")
+        monkeypatch.setenv("AI_DEEP_PROVIDER", "")
+        monkeypatch.setenv("GROQ_API_KEY", "")
+        monkeypatch.setenv("GEMINI_API_KEY", "")
+        monkeypatch.setenv("OPENAI_API_KEY", "")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "")
+        monkeypatch.setenv("NVIDIA_API_KEY", "")
+        monkeypatch.setenv("OPENROUTER_API_KEY", "")
 
 
 @pytest.fixture

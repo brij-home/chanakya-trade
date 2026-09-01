@@ -9,6 +9,7 @@ import pytest
 class TestSectorFallback:
     """59b: Sector rotation should have yfinance fallback when NSE returns zeros."""
 
+    @pytest.mark.network
     def test_get_sector_snapshot_returns_list(self):
         """Should return list of IndexSnapshot."""
         from market.indices import get_sector_snapshot

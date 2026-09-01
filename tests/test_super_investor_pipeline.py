@@ -152,6 +152,9 @@ def test_portfolio_doctor_diagnosis():
 
 
 def test_fastapi_super_investor_endpoints():
+    from unittest.mock import patch
+    from engine.portfolio_doctor import PortfolioDoctorReport
+
     client = TestClient(app)
 
     # 1. Thematic baskets list
@@ -160,12 +163,28 @@ def test_fastapi_super_investor_endpoints():
     data_b = res_b.json()
     assert data_b["data"]["total_baskets"] == 6
 
-    # 2. Portfolio doctor
-    res_d = client.get("/skills/portfolio/doctor")
-    assert res_d.status_code == 200
-    data_d = res_d.json()
-    assert "total_net_worth" in data_d["data"]
-    assert "action_prescriptions" in data_d["data"]
+    # 2. Portfolio doctor (mocked report)
+    mock_rep = PortfolioDoctorReport(
+        total_net_worth=350000.0,
+        total_equity_value=300000.0,
+        liquid_cash=50000.0,
+        cash_drag_pct=14.2,
+        holdings_count=3,
+        herfindahl_index=1800.0,
+        concentration_risk="LOW",
+        top_3_concentration_pct=80.0,
+        top_holding_symbol="TRENT",
+        top_holding_pct=40.0,
+        dead_money_holdings=[],
+        tax_harvest_candidates=[],
+        action_prescriptions=["Maintain current risk allocation."],
+    )
+    with patch("engine.portfolio_doctor.diagnose_portfolio", return_value=mock_rep):
+        res_d = client.get("/skills/portfolio/doctor")
+        assert res_d.status_code == 200
+        data_d = res_d.json()
+        assert "total_net_worth" in data_d["data"]
+        assert "action_prescriptions" in data_d["data"]
 
     # 3. Proven prompts
     res_p = client.get("/skills/prompts/proven")

@@ -52,6 +52,7 @@ ENV/
 
 # ── Data / cache ─────────────────────────────────────────────
 .pytest_trading_platform/
+.pytest_trading_platform*/
 *.csv
 *.parquet
 .cache/

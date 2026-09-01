@@ -36,6 +36,8 @@ The FastAPI sidecar (`web.api:app`) runs on `http://127.0.0.1:8765`:
 | `/skills/high_conviction` | `POST` | Top conviction radar scan |
 | `/skills/gex_snapshot` | `POST` | Options chain with GEX/DIX |
 | `/skills/payoff` | `POST` | Multi-leg option payoff simulation & metrics |
+| `/skills/global_macro` | `GET` / `POST` | High-Correlation 6 macro report, GIFT NIFTY gap & sector transmission |
+| `/skills/market_overview` | `GET` | Combined India VIX, FII/DII, breadth & sector RRG |
 | `/skills/backtest` | `POST` | Quantitative vectorized backtest engine |
 | `/skills/telemetry/summary` | `GET` | Fallback & error telemetry |
 

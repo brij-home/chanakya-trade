@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import { useAPI } from '../../hooks/useAPI'
+import { useChatStore } from '../../store/chatStore'
 
 export default function TopOpportunitiesModal({ isOpen, onClose, onOpenOrderTicket }) {
   const [data, setData] = useState(null)
@@ -8,6 +9,7 @@ export default function TopOpportunitiesModal({ isOpen, onClose, onOpenOrderTick
   const [categories, setCategories] = useState([])
   const [tgNotification, setTgNotification] = useState(null)
   const { call } = useAPI()
+  const sendDraft = useChatStore((s) => s.sendDraft)
 
   // Fetch taxonomy categories on mount
   useEffect(() => {
@@ -384,7 +386,10 @@ export default function TopOpportunitiesModal({ isOpen, onClose, onOpenOrderTick
                               ⚡ Order
                             </button>
                             <button
-                              onClick={() => onClose()}
+                              onClick={() => {
+                                sendDraft(`analyze ${symbol}`)
+                                onClose()
+                              }}
                               className="flex-1 py-1.5 rounded-xl text-[9px] font-bold cursor-pointer transition-all hover:brightness-110"
                               style={{ background: 'rgba(77,155,255,0.10)', border: '1px solid rgba(77,155,255,0.25)', color: 'var(--color-sapphire)' }}
                             >

@@ -318,6 +318,10 @@ STRATEGIES = {
     "dual_momentum": lambda args: DualMomentumStrategy(
         lookback=int(args[0]) if args else 90,
     ),
+    "smc": lambda args: SMCStrategy(
+        swing_lookback=int(args[0]) if args else 5,
+    ),
+    "market_structure": lambda args: SMCStrategy(),
 }
 
 
@@ -604,6 +608,40 @@ class DualMomentumStrategy(Strategy):
         return signals
 
 
+class SMCStrategy(Strategy):
+    """Smart Money Concepts (SMC): Break of Structure (BOS), Order Block & Liquidity Sweep."""
+
+    def __init__(self, swing_lookback: int = 5, ob_lookback: int = 15):
+        self.swing_lookback = swing_lookback
+        self.ob_lookback = ob_lookback
+
+    def generate_signals(self, df: pd.DataFrame) -> pd.Series:
+        signals = pd.Series(0, index=df.index)
+        if len(df) < self.ob_lookback + 5:
+            return signals
+
+        high = df["high"]
+        low = df["low"]
+        close = df["close"]
+
+        # 5-bar swing highs / lows
+        swing_high = high.rolling(window=self.swing_lookback, center=True).max()
+        swing_low = low.rolling(window=self.swing_lookback, center=True).min()
+
+        for i in range(self.ob_lookback, len(df)):
+            prev_high = swing_high.iloc[i - 1]
+            prev_low = swing_low.iloc[i - 1]
+            curr_close = close.iloc[i]
+            prev_close = close.iloc[i - 1]
+
+            if pd.notna(prev_high) and curr_close > prev_high and prev_close <= prev_high:
+                signals.iloc[i] = 1  # Bullish BOS Breakout / Order Block demand tap
+            elif pd.notna(prev_low) and curr_close < prev_low and prev_close >= prev_low:
+                signals.iloc[i] = -1  # Bearish MSS Breakdown / Supply tap
+
+        return signals
+
+
 # ── Backtester Engine ────────────────────────────────────────
 
 
@@ -634,16 +672,21 @@ class Backtester:
 
         from market.history import get_ohlcv
 
+        norm_period = str(self.period or "1y").lower().strip()
         period_days = {
             "1mo": 30,
+            "1m": 30,
             "3mo": 90,
+            "3m": 90,
             "6mo": 180,
+            "6m": 180,
+            "ytd": 240,
             "1y": 365,
             "2y": 730,
             "3y": 1095,
             "5y": 1825,
         }
-        days = period_days.get(self.period, 365)
+        days = period_days.get(norm_period, 365)
 
         df = get_ohlcv(
             symbol=self.symbol,

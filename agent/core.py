@@ -82,8 +82,9 @@ from agent.tools import build_registry, ToolRegistry
 from config.credentials import get_credential, load_all
 
 # Ensure .env and OS keychain credentials are fully loaded
-load_dotenv()
-load_all()
+if not os.environ.get("CHANAKYA_TESTING"):
+    load_dotenv()
+    load_all()
 
 console = Console(legacy_windows=False)
 

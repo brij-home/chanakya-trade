@@ -30,7 +30,7 @@
 | **`analysis/`** | Quantitative sector rotation, forensic accounting, DCF, SMC & Multibagger | [`sector_rotation.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/analysis/sector_rotation.py), [`market_structure.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/analysis/market_structure.py), [`volume_profile.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/analysis/volume_profile.py), [`multibagger.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/analysis/multibagger.py), [`forensic.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/analysis/forensic.py), [`dcf.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/analysis/dcf.py) |
 | **`brokers/`** | Broker unified abstraction (data vs execution) | [`session.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/brokers/session.py), [`fyers.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/brokers/fyers.py) *(data)*, [`zerodha.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/brokers/zerodha.py) *(execution)*, [`angelone.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/brokers/angelone.py), [`groww.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/brokers/groww.py), [`upstox.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/brokers/upstox.py), [`mock.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/brokers/mock.py) |
 | **`engine/`** | Backtesting, risk gate, execution, sizing, lifecycle & cache | [`backtest.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/backtest.py), [`trade_lifecycle.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/trade_lifecycle.py), [`position_sizer.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/position_sizer.py), [`risk_gate.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/risk_gate.py), [`analysis_cache.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/analysis_cache.py), [`paper.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/paper.py), [`trader.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/trader.py) |
-| **`market/`** | Market feeds, options chain, quotes & sentiment | [`quotes.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/market/quotes.py), [`options.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/market/options.py), [`indices.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/market/indices.py), [`websocket.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/market/websocket.py), [`sentiment.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/market/sentiment.py) |
+| **`market/`** | Market feeds, options chain, quotes, sentiment & global macro | [`quotes.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/market/quotes.py), [`global_macro.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/market/global_macro.py), [`gift_nifty.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/market/gift_nifty.py), [`options.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/market/options.py), [`indices.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/market/indices.py), [`websocket.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/market/websocket.py), [`sentiment.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/market/sentiment.py) |
 | **`web/`** | FastAPI sidecar API (port `8765`), OAuth & SSE | [`api.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/web/api.py), [`auth.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/web/auth.py), [`sse.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/web/sse.py), [`openclaw.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/web/openclaw.py), [`skills.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/web/skills.py) |
 | **`app/`** | Interactive REPL, CLI commands & launcher | [`main.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/app/main.py), [`repl.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/app/repl.py), [`commands/`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/app/commands) |
 | **`ui/`** | Rich terminal TUI & Textual widgets | [`app.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/ui/app.py), [`widgets/`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/ui/widgets) |
@@ -133,6 +133,24 @@
 - **Fallback**: REST polling at 60s intervals when WebSocket is unavailable.
 - **UI Indicator**: Display `🟢 Live` badge when WebSocket is connected, `🟡 Polling` when using REST fallback. User must always know their data source.
 
+### 4.5 Global Macro Transmission & Multi-Asset Universe Taxonomy
+
+- **The High-Correlation 6** ([`market/global_macro.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/market/global_macro.py)):
+  - **GIFT NIFTY (NSE IFSC)**: ~0.96 Correlation to NIFTY 50 opening price. Computes `implied_nifty_gap_pct` and `implied_nifty_gap_pts`.
+  - **NASDAQ 100 (`^IXIC`) & S&P 500 (`^GSPC`)**: ~0.82 Correlation to Indian IT Services (`TCS`, `INFY`, `HCLTECH`, `COFORGE`).
+  - **US Dollar Index (DXY) & USD/INR (`INR=X`)**: -0.74 Correlation with FII foreign equity flows.
+  - **Brent Crude Oil (`BZ=F`)**: Bipolar correlation — Negative (-0.78) for Paints (`ASIANPAINT`), Aviation (`INDIGO`), Tyres, OMCs; Positive (+0.82) for Upstream Exploration (`ONGC`, `OIL`, `RELIANCE`).
+  - **US 10-Year Treasury Yield (`^TNX`)**: -0.70 Correlation to High-PE growth valuations and multiple compression.
+  - **US VIX vs India VIX**: Volatility contagion and options writing risk-parity.
+- **Multi-Asset Universe Segmentation** ([`analysis/universe.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/analysis/universe.py)):
+  - Intelligent auto-exchange prefix resolution:
+    - Commodities (`GOLD`, `SILVER`, `CRUDEOIL`, `NATURALGAS`, `COPPER`) → `MCX:`
+    - Currency pairs (`USDINR`, `EURINR`, `GBPINR`, `JPYINR`) → `CDS:`
+    - BSE Indices (`SENSEX`, `BANKEX`) → `BSE:`
+    - Equities & benchmark indices → `NSE:`
+  - Dual-key quote dictionary lookup ensures queries for `GOLD` or `MCX:GOLD` resolve without KeyError.
+- **Zero Static / False Data Policy**: Macro indicators and quotes MUST be fetched dynamically from real live feeds (`yfinance` fast_info, Fyers WebSocket, NSE IFSC). Static mock fallbacks are strictly prohibited in production pathways.
+
 ---
 
 ## 5. Data Pipeline & Quality Standards
@@ -206,36 +224,56 @@
 ## 7. Operational Invariants & Lessons Learned
 
 ### 7.1 Testing & CI
-1. **Deterministic Test Isolation**: All unit tests run in <1s with synthetic data — no live HTTP calls.
-2. **Windows Concurrency**: Use `.venv\Scripts\pytest.exe -n 4` to prevent thread pool exhaustion.
-3. **Pre-Push Gate**: MANDATORY — run `.venv\Scripts\python.exe scripts/validate_all.py` (ruff check, ruff format, hook audit, npm test, pytest) before any commit/push.
+1. **Deterministic Test Isolation**: All unit tests run in <1s with synthetic data — no live HTTP calls. Enforced via `CHANAKYA_TESTING=1` and `sanitize_test_env` in `conftest.py`.
+2. **Windows Concurrency**: Use `.venv\Scripts\pytest.exe -n 4` with cooperative thread teardowns to prevent worker accumulation.
+3. **Tiered Validation Gates**:
+   - **Fast Pre-Commit Gate (< 8s)**: `.venv\Scripts\python.exe scripts/validate_all.py --fast` (Ruff lint + Format + React Hook AST audit + Vitest + Fast smoke matrix).
+   - **Full Pre-Push Gate (< 30s)**: `.venv\Scripts\python.exe scripts/validate_all.py --full` (All linters + Vitest + Web build + Full 2,188+ test matrix with 4 workers).
+   - **Daily / Nightly Deep Regression**: `.venv\Scripts\python.exe scripts/validate_daily.py` (Full matrix + Monte Carlo & options stress tests + Live network integration).
+   - **Environment & Process Cleanup**: `.venv\Scripts\python.exe scripts/cleanup.py` (Purges orphaned workers, frees port 8765, removes temp sqlite lock files).
 4. **Conventional Commits**: `feat:`, `fix:`, `refactor:`, `test:`, `docs:`, `perf:`. No AI attribution headers.
 5. **Always request explicit user confirmation** before executing `git commit` or `git push`.
 
 ### 7.2 Server & Daemon Lifecycle
-6. **Hot-Reload Awareness**: Background daemons (`uvicorn web.api:app`) cache imports. Always restart after backend code edits.
-7. **API Route Aliasing**: Register aliases (`/high_conviction` + `/top_conviction`, `/taxonomy` + `/universe_categories`) with both GET and POST to prevent 404s.
+6. **Thread Lifecycle & Cooperative Cancellation**: All background pollers in `engine/` MUST use `self._stop_event = threading.Event()`, wait on `self._stop_event.wait(timeout=...)` instead of blocking `time.sleep()`, and provide clean `.join(timeout=1.0)` in `stop_polling()`.
+7. **Hot-Reload Awareness**: Background daemons (`uvicorn web.api:app`) cache imports. Always restart after backend code edits.
+8. **API Route Aliasing**: Register aliases (`/high_conviction` + `/top_conviction`, `/taxonomy` + `/universe_categories`) with both GET and POST to prevent 404s.
 
 ### 7.3 LLM Provider Management
-8. **Module Root Auto-loading**: Execute `load_dotenv()` and `config.credentials.load_all()` at module root in [`agent/core.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/agent/core.py) and [`agent/persona_agent.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/agent/persona_agent.py).
-9. **Keyring Precedence**: Never let stale keychain tokens override active `.env` keys. Filter out placeholders.
-10. **Provider-Specific Model Isolation**: Groq, NVIDIA NIM, OpenRouter, and Gemini must each resolve to their own model IDs — no global `AI_MODEL` crosstalk.
-11. **ToolRegistry Contract**: Always expose `.get_fn(name)` alongside `.execute(name, args)`.
+9. **Module Root Auto-loading**: Execute `load_dotenv()` and `config.credentials.load_all()` at module root in [`agent/core.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/agent/core.py) and [`agent/persona_agent.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/agent/persona_agent.py), guarded by `if not os.environ.get("CHANAKYA_TESTING"):`.
+10. **Keyring Precedence**: Never let stale keychain tokens override active `.env` keys. Filter out placeholders.
+11. **Provider-Specific Model Isolation**: Groq, NVIDIA NIM, OpenRouter, and Gemini must each resolve to their own model IDs — no global `AI_MODEL` crosstalk.
+12. **ToolRegistry Contract**: Always expose `.get_fn(name)` alongside `.execute(name, args)`.
 
 ### 7.4 Quantitative Engine
-12. **Dynamic Risk Calibration**: Never use static legacy price levels. Compute levels from live price + ATR.
-13. **Directional Integrity**: Trade actions must match market structure score. Never default `LONG` when bearish.
-14. **Trade Ticket Completeness**: Every setup must include: timeline horizon, thesis, trailing stop rules.
+13. **Dynamic Risk Calibration**: Never use static legacy price levels. Compute levels from live price + ATR.
+14. **Directional Integrity**: Trade actions must match market structure score. Never default `LONG` when bearish.
+15. **Trade Ticket Completeness**: Every setup must include: timeline horizon, thesis, trailing stop rules.
 
 ### 7.5 Architecture Principles
-15. **RCA First**: Diagnose root causes across the full stack. No surface-level band-aids.
-16. **Living Documentation**: Update `AGENTS.md` and skill runbooks when new invariants are discovered.
-17. **Self-Healing Resilience**: Multi-key pools → model failover chains → deterministic quant fallback. Terminal never shows raw errors.
-18. **Python Linting**: `ruff check .` + `ruff format --check .` before commits. Zero undefined variable names.
+16. **RCA First**: Diagnose root causes across the full stack. No surface-level band-aids.
+17. **Living Documentation**: Update `AGENTS.md` and skill runbooks when new invariants are discovered.
+18. **Self-Healing Resilience**: Multi-key pools → model failover chains → deterministic quant fallback. Terminal never shows raw errors.
+19. **Python Linting**: `ruff check .` + `ruff format --check .` before commits. Zero undefined variable names.
 
 ---
 
 ## 8. Environment & Common Commands
+
+### Running Validation Gates
+```powershell
+# Fast local pre-commit check (< 8s)
+.venv\Scripts\python.exe scripts/validate_all.py --fast
+
+# Full CI/CD pre-push gate (2,188+ tests + Web build, < 30s)
+.venv\Scripts\python.exe scripts/validate_all.py --full
+
+# Daily/Nightly deep regression & simulation runner
+.venv\Scripts\python.exe scripts/validate_daily.py
+
+# Universal process & resource cleanup
+.venv\Scripts\python.exe scripts/cleanup.py
+```
 
 ### Running Tests
 ```powershell
@@ -259,9 +297,6 @@
 
 # FastAPI Sidecar Web Server on port 8765
 .venv\Scripts\python.exe -m uvicorn web.api:app --host 127.0.0.1 --port 8765 --reload
-
-# Full validation gate (pre-commit/pre-push)
-.venv\Scripts\python.exe scripts/validate_all.py
 ```
 
 ---

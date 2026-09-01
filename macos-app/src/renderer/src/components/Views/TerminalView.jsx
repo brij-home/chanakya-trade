@@ -4,21 +4,67 @@ import { useAPI } from '../../hooks/useAPI'
 import CandlestickChart from '../Charts/CandlestickChart'
 import WhaleFlowsCard from '../Cards/WhaleFlowsCard'
 import PersonaTrackRecordCard from '../Cards/PersonaTrackRecordCard'
+import GlobalMacroCard from '../Cards/GlobalMacroCard'
 import SmartTypeahead from '../Common/SmartTypeahead'
 import { INDIAN_UNIVERSE, fuzzySearchUniverse } from '../../data/universeData'
 
-export default function TerminalView({ onSelectSymbol, onOpenOrderTicket }) {
+export default function TerminalView({
+  onSelectSymbol,
+  onOpenOrderTicket,
+  externalSymbol,
+  onSymbolChange,
+  externalTimeframe,
+  onTimeframeChange,
+  externalLayout,
+  onLayoutChange,
+}) {
   const { call } = useAPI()
   const sendDraft = useChatStore((s) => s.sendDraft)
-  const [selectedSymbol, setSelectedSymbol] = useState('NIFTY')
-  const [timeframe, setTimeframe] = useState('15m')
+  const [selectedSymbol, setSelectedSymbolState] = useState(externalSymbol || 'NIFTY')
+  const [timeframe, setTimeframeState] = useState(externalTimeframe || '15m')
+  const [layoutMode, setLayoutModeState] = useState(externalLayout || 'single')
+
+  // Synchronize with parent ContextBar props
+  useEffect(() => {
+    if (externalSymbol && externalSymbol !== selectedSymbol) {
+      setSelectedSymbolState(externalSymbol)
+    }
+  }, [externalSymbol])
+
+  useEffect(() => {
+    if (externalTimeframe && externalTimeframe !== timeframe) {
+      setTimeframeState(externalTimeframe)
+    }
+  }, [externalTimeframe])
+
+  useEffect(() => {
+    if (externalLayout && externalLayout !== layoutMode) {
+      setLayoutModeState(externalLayout)
+    }
+  }, [externalLayout])
+
+  const setSelectedSymbol = (sym) => {
+    setSelectedSymbolState(sym)
+    onSymbolChange?.(sym)
+    onSelectSymbol?.(sym)
+  }
+
+  const setTimeframe = (tf) => {
+    setTimeframeState(tf)
+    onTimeframeChange?.(tf)
+  }
+
+  const setLayoutMode = (lm) => {
+    setLayoutModeState(lm)
+    onLayoutChange?.(lm)
+  }
+
   const [symbolSearchQuery, setSymbolSearchQuery] = useState('')
   const [showSymbolTypeahead, setShowSymbolTypeahead] = useState(false)
   const [typeaheadIndex, setTypeaheadIndex] = useState(0)
   const searchInputRef = useRef(null)
   const [leftTab, setLeftTab] = useState('councils') // 'councils' | 'personas' | 'whales' | 'accuracy' | 'watchlist'
   const [intelligenceMode, setIntelligenceMode] = useState('councils') // 'councils' | 'personas'
-  const [layoutMode, setLayoutMode] = useState('single') // 'single' | 'dual' | 'whales' | 'accuracy'
   const [selectedCouncil, setSelectedCouncil] = useState('breakout')
   const [selectedPersona, setSelectedPersona] = useState('minervini')
   const [data, setData] = useState(null)
@@ -500,6 +546,18 @@ export default function TerminalView({ onSelectSymbol, onOpenOrderTicket }) {
     { symbol: 'HAL', name: 'Hindustan Aeronautics', cat: 'DEFENSE', ltp: 4680.00, change_pct: 1.85 },
     { symbol: 'BEL', name: 'Bharat Electronics', cat: 'DEFENSE', ltp: 312.00, change_pct: 2.10 },
     { symbol: 'ADANIENT', name: 'Adani Enterprises', cat: 'STAGE 2', ltp: 3045.00, change_pct: 1.40 },
+    // MCX Commodities
+    { symbol: 'GOLD', name: 'MCX Gold Futures', cat: 'COMMODITY', ltp: 72450.00, change_pct: 0.45 },
+    { symbol: 'SILVER', name: 'MCX Silver Futures', cat: 'COMMODITY', ltp: 84200.00, change_pct: 0.82 },
+    { symbol: 'CRUDEOIL', name: 'MCX Crude Oil', cat: 'COMMODITY', ltp: 6350.00, change_pct: 1.25 },
+    { symbol: 'NATURALGAS', name: 'MCX Natural Gas', cat: 'COMMODITY', ltp: 245.00, change_pct: -1.10 },
+    { symbol: 'COPPER', name: 'MCX Copper Futures', cat: 'COMMODITY', ltp: 835.00, change_pct: 0.65 },
+    // Leading ETFs
+    { symbol: 'NIFTYBEES', name: 'Nippon Nifty 50 ETF', cat: 'ETF', ltp: 265.50, change_pct: 0.45 },
+    { symbol: 'GOLDBEES', name: 'Nippon Gold BeES ETF', cat: 'ETF', ltp: 64.20, change_pct: 0.35 },
+    { symbol: 'BANKBEES', name: 'Nippon Bank BeES ETF', cat: 'ETF', ltp: 540.00, change_pct: 0.60 },
+    // Forex / Currency
+    { symbol: 'USDINR', name: 'USD / INR Rupee', cat: 'FOREX', ltp: 83.95, change_pct: -0.05 },
   ]
 
   // Combined Watchlist: server items merged with master universe
@@ -527,7 +585,10 @@ export default function TerminalView({ onSelectSymbol, onOpenOrderTicket }) {
     const matchesCategory =
       watchlistCategory === 'ALL' ||
       w.cat === watchlistCategory ||
-      (watchlistCategory === 'INDEX' && (w.symbol === 'NIFTY' || w.symbol === 'BANKNIFTY' || w.symbol === 'FINNIFTY')) ||
+      (watchlistCategory === 'COMMODITY' && (w.cat === 'COMMODITY' || ['GOLD', 'SILVER', 'CRUDEOIL', 'NATURALGAS', 'COPPER'].includes(w.symbol))) ||
+      (watchlistCategory === 'ETF' && (w.cat === 'ETF' || w.symbol.includes('BEES') || w.symbol.includes('ETF'))) ||
+      (watchlistCategory === 'FOREX' && (w.cat === 'FOREX' || ['USDINR', 'EURINR', 'GBPINR', 'JPYINR'].includes(w.symbol))) ||
+      (watchlistCategory === 'INDEX' && (w.symbol === 'NIFTY' || w.symbol === 'BANKNIFTY' || w.symbol === 'FINNIFTY' || w.cat === 'INDEX')) ||
       (watchlistCategory === 'STAGE 2' && (w.cat === 'STAGE 2' || w.change_pct > 1.5))
 
     const matchesSearch =
@@ -806,6 +867,16 @@ export default function TerminalView({ onSelectSymbol, onOpenOrderTicket }) {
               🏆 Stats
             </button>
             <button
+              onClick={() => handleLeftTabChange('macro')}
+              className={`flex-1 py-1.5 px-1 rounded-xl font-bold transition-all cursor-pointer text-center text-[10px] ${
+                leftTab === 'macro'
+                  ? 'bg-amber text-black shadow-xs font-extrabold'
+                  : 'text-muted hover:text-text'
+              }`}
+            >
+              🌍 Macro
+            </button>
+            <button
               onClick={() => handleLeftTabChange('watchlist')}
               className={`flex-1 py-1.5 px-1 rounded-xl font-bold transition-all cursor-pointer text-center text-[10px] ${
                 leftTab === 'watchlist'
@@ -946,7 +1017,7 @@ export default function TerminalView({ onSelectSymbol, onOpenOrderTicket }) {
 
               {/* Category Filter Chips */}
               <div className="flex items-center gap-1 overflow-x-auto pb-1 text-[10px] font-mono">
-                {['ALL', 'INDEX', 'BANK', 'TECH', 'AUTO', 'STAGE 2'].map((cat) => (
+                {['ALL', 'INDEX', 'COMMODITY', 'ETF', 'FOREX', 'BANK', 'TECH', 'AUTO', 'STAGE 2'].map((cat) => (
                   <button
                     key={cat}
                     onClick={() => {
@@ -1086,6 +1157,13 @@ export default function TerminalView({ onSelectSymbol, onOpenOrderTicket }) {
               <PersonaTrackRecordCard />
             </div>
           )}
+
+          {/* TAB 5: GLOBAL MACRO & CORRELATION */}
+          {leftTab === 'macro' && (
+            <div className="animate-fade-slide">
+              <GlobalMacroCard data={data?.global_macro} />
+            </div>
+          )}
         </div>
 
         {/* Center Column (6 Cols): Chart + Dynamic Intelligence Hub (Councils & Personas) */}
@@ -1170,11 +1248,17 @@ export default function TerminalView({ onSelectSymbol, onOpenOrderTicket }) {
                     ATR: ₹{Number(curLtp * 0.016).toFixed(0)}
                   </span>
                   <span className="text-[10px] font-mono px-2 py-0.5 rounded" style={{ background: 'var(--color-elevated)', color: 'var(--color-muted)' }}>
-                    VIX: 13.2
+                    VIX: {data?.vix || '11.2'}
                   </span>
-                  <span className="text-[10px] font-mono px-2 py-0.5 rounded" style={{ background: 'var(--color-elevated)', color: 'var(--color-text)' }}>
-                    OI: +8.4% ↑
-                  </span>
+                  {data?.global_macro?.implied_nifty_gap_pct != null && (
+                    <span
+                      onClick={() => handleLeftTabChange('macro')}
+                      className="text-[10px] font-mono px-2 py-0.5 rounded border border-amber/30 bg-amber/10 text-amber font-bold cursor-pointer hover:bg-amber/20 transition-all"
+                      title="GIFT NIFTY Implied Open Gap"
+                    >
+                      🌍 GIFT Gap: {data.global_macro.implied_nifty_gap_pct > 0 ? '+' : ''}{Number(data.global_macro.implied_nifty_gap_pct).toFixed(2)}%
+                    </span>
+                  )}
                   <div className="live-badge ml-auto">
                     <span className="w-1.5 h-1.5 rounded-full animate-pulse" style={{ background: 'var(--color-emerald)' }} />
                     <span>LIVE TICK</span>

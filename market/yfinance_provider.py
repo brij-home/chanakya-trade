@@ -43,6 +43,43 @@ from brokers.base import Quote
 
 # ── Symbol mapping ───────────────────────────────────────────
 
+# ── Symbol mapping ───────────────────────────────────────────
+
+# Commodities continuous futures mapping for MCX / commodity tickers
+_COMMODITY_MAP = {
+    "GOLD": "GC=F",
+    "GOLDM": "GC=F",
+    "GOLDPETAL": "GC=F",
+    "SILVER": "SI=F",
+    "SILVERM": "SI=F",
+    "SILVERMIC": "SI=F",
+    "CRUDEOIL": "CL=F",
+    "CRUDEOILM": "CL=F",
+    "CRUDE": "CL=F",
+    "BRENT": "BZ=F",
+    "NATURALGAS": "NG=F",
+    "NATGASMINI": "NG=F",
+    "NATGAS": "NG=F",
+    "COPPER": "HG=F",
+    "ZINC": "ZNC=F",
+    "ALUMINIUM": "ALI=F",
+    "ALUMINUM": "ALI=F",
+    "LEAD": "LED=F",
+    "COTTON": "CT=F",
+}
+
+# CDS / Forex currency derivatives mapping
+_CURRENCY_MAP = {
+    "USDINR": "INR=X",
+    "USD/INR": "INR=X",
+    "EURINR": "EURINR=X",
+    "EUR/INR": "EURINR=X",
+    "GBPINR": "GBPINR=X",
+    "GBP/INR": "GBPINR=X",
+    "JPYINR": "JPYINR=X",
+    "JPY/INR": "JPYINR=X",
+}
+
 # Index symbols that don't follow the .NS convention
 _INDEX_MAP = {
     "NIFTY 50": "^NSEI",
@@ -50,8 +87,21 @@ _INDEX_MAP = {
     "NIFTY": "^NSEI",
     "NIFTY BANK": "^NSEBANK",
     "BANKNIFTY": "^NSEBANK",
+    "FINNIFTY": "^CNXFIN",
+    "NIFTY FIN SERVICE": "^CNXFIN",
+    "NIFTY FINANCIAL SERVICES": "^CNXFIN",
+    "MIDCPNIFTY": "^CNXMIDCAP",
+    "NIFTY MIDCAP 100": "^CNXMIDCAP",
+    "NIFTY MIDCAP 50": "^NSEMDCP50",
+    "NIFTY NEXT 50": "^NSMIDCP",
+    "NIFTY 100": "^CNX100",
+    "NIFTY 200": "^CNX200",
+    "NIFTY 500": "^CRSLDX",
+    "NIFTY SMALLCAP 100": "^CNXSC",
     "SENSEX": "^BSESN",
+    "BSE SENSEX": "^BSESN",
     "INDIA VIX": "^INDIAVIX",
+    "INDIAVIX": "^INDIAVIX",
     "VIX": "^INDIAVIX",
     "NIFTY IT": "^CNXIT",
     "NIFTY PHARMA": "^CNXPHARMA",
@@ -60,39 +110,67 @@ _INDEX_MAP = {
     "NIFTY REALTY": "^CNXREALTY",
     "NIFTY METAL": "^CNXMETAL",
     "NIFTY ENERGY": "^CNXENERGY",
-    "NIFTY FIN SERVICE": "^CNXFIN",
-    "NIFTY MIDCAP 100": "^CNXMIDCAP",
+    "NIFTY INFRA": "^CNXINFRA",
+    "NIFTY COMMODITIES": "^CNXCOMMODITIES",
+    "NIFTY PSE": "^CNXPSE",
+    "NIFTY PSU BANK": "^CNXPSUBANK",
+    "NIFTY PRIVATE BANK": "^CNXPVTBANK",
 }
 
 
 def _to_yf_symbol(symbol: str, exchange: str = "NSE") -> str:
-    """Convert NSE/BSE symbol to Yahoo Finance ticker."""
-    # Strip exchange prefix if present (e.g. "NSE:RELIANCE" → "RELIANCE")
+    """Convert NSE/BSE/MCX symbol to Yahoo Finance ticker."""
+    # Strip exchange prefix if present (e.g. "MCX:GOLD" → "GOLD", "NSE:RELIANCE" → "RELIANCE")
     if ":" in symbol:
         exchange, symbol = symbol.split(":", 1)
 
-    upper = symbol.upper()
+    upper = symbol.upper().strip()
 
-    # Strip Fyers-specific suffixes before index/stock lookup
+    # Strip Fyers-specific suffixes before lookup
     if upper.endswith("-EQ"):
         upper = upper[:-3]
         symbol = symbol[:-3]
     elif upper.endswith("-INDEX"):
         upper = upper[:-6]
         symbol = symbol[:-6]
+    elif upper.endswith("-FUT") or upper.endswith("FUT"):
+        # Match base commodity if derivative contract e.g. GOLD24NOVFUT
+        for c in _COMMODITY_MAP:
+            if upper.startswith(c):
+                return _COMMODITY_MAP[c]
 
-    # Check index map first
+    # 1. Check Commodity Map (Gold, Silver, Crude Oil, Natural Gas, Copper, etc.)
+    if upper in _COMMODITY_MAP:
+        return _COMMODITY_MAP[upper]
+
+    # 2. Check Currency Map (USD/INR, EUR/INR, GBP/INR, JPY/INR)
+    if upper in _CURRENCY_MAP:
+        return _CURRENCY_MAP[upper]
+
+    # 3. Check Index Map (NIFTY, BANKNIFTY, FINNIFTY, SENSEX, sectoral indices)
     if upper in _INDEX_MAP:
         return _INDEX_MAP[upper]
 
-    # Regular stocks
-    if exchange.upper() == "BSE":
+    # 4. Check exchange overrides
+    exch_upper = (exchange or "NSE").upper().strip()
+    if exch_upper == "MCX":
+        for c in _COMMODITY_MAP:
+            if upper.startswith(c):
+                return _COMMODITY_MAP[c]
+        return upper
+
+    if exch_upper in ("CDS", "FX", "FOREX"):
+        if f"{upper}=X" in ("INR=X", "USDINR=X", "EURINR=X", "GBPINR=X", "JPYINR=X"):
+            return f"{upper}=X"
+        return upper
+
+    if exch_upper == "BSE":
         return f"{symbol}.BO"
     return f"{symbol}.NS"
 
 
 def _from_instrument(instrument: str) -> str:
-    """Convert 'NSE:RELIANCE' or 'NSE:RELIANCE-EQ' format to yfinance ticker."""
+    """Convert 'NSE:RELIANCE', 'MCX:GOLD', or 'NSE:RELIANCE-EQ' format to yfinance ticker."""
     if ":" in instrument:
         exchange, symbol = instrument.split(":", 1)
         if symbol.endswith("-EQ"):
@@ -299,17 +377,40 @@ def yf_get_ohlcv(
     }
     yf_interval = interval_map.get(interval, interval)
 
+    now = datetime.now()
     try:
         t = yf.Ticker(ticker)
 
         if from_date:
+            clamped_from = from_date
+            if yf_interval == "1m" and (now - from_date).days > 6:
+                from datetime import timedelta
+
+                clamped_from = now - timedelta(days=6)
+            elif yf_interval in ("5m", "15m", "30m", "1h", "60m") and (now - from_date).days > 58:
+                from datetime import timedelta
+
+                clamped_from = now - timedelta(days=58)
+
             hist = t.history(
-                start=from_date.strftime("%Y-%m-%d"),
-                end=(to_date or datetime.now()).strftime("%Y-%m-%d"),
+                start=clamped_from.strftime("%Y-%m-%d"),
+                end=(to_date or now).strftime("%Y-%m-%d"),
                 interval=yf_interval,
             )
         else:
-            hist = t.history(period=period, interval=yf_interval)
+            p = period
+            if yf_interval == "1m" and p in ("1mo", "3mo", "6mo", "1y", "2y", "5y", "max"):
+                p = "7d"
+            elif yf_interval in ("5m", "15m", "30m", "1h", "60m") and p in (
+                "3mo",
+                "6mo",
+                "1y",
+                "2y",
+                "5y",
+                "max",
+            ):
+                p = "60d"
+            hist = t.history(period=p, interval=yf_interval)
 
         if hist.empty:
             return []

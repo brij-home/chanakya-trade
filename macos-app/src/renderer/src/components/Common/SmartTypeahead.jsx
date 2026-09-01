@@ -20,20 +20,23 @@ export default function SmartTypeahead({
   align = 'auto', // 'auto' | 'left' | 'right'
   selectedIndex = 0,
   setSelectedIndex,
+  results = null,
 }) {
   const containerRef = useRef(null)
   const [popoverAlign, setPopoverAlign] = useState('left')
   const [activeCategory, setActiveCategory] = useState('all')
 
-  const rawResults = fuzzySearchUniverse(
+  const rawResults = results || fuzzySearchUniverse(
     query,
     activeSymbol,
     mode === 'symbols_only' ? 10 : 12,
     activeCategory
   )
-  const items = mode === 'symbols_only' 
-    ? rawResults.filter((r) => r.type === 'symbol') 
-    : rawResults
+  const items = results 
+    ? results 
+    : (mode === 'symbols_only' 
+        ? rawResults.filter((r) => r.type === 'symbol') 
+        : rawResults)
 
   // Calculate boundary positioning to prevent screen clipping
   useEffect(() => {
@@ -50,7 +53,7 @@ export default function SmartTypeahead({
 
     if (rect.left + popoverWidth > window.innerWidth - 16 && rect.right - popoverWidth >= 8) {
       setPopoverAlign('right')
-    } else {
+      } else {
       setPopoverAlign('left')
     }
   }, [isOpen, query, position, align])
@@ -112,15 +115,25 @@ export default function SmartTypeahead({
       }
     : {}
 
-  const categories = [
-    { id: 'all', label: 'All' },
-    { id: 'stock', label: 'Stocks' },
-    { id: 'index', label: 'Indices' },
-    { id: 'etf', label: 'ETFs' },
-    { id: 'commodity', label: 'Commodities' },
-    { id: 'council', label: 'Councils' },
-    { id: 'persona', label: 'Personas' },
-  ]
+  const categories = mode === 'symbols_only'
+    ? [
+        { id: 'all', label: 'All' },
+        { id: 'stock', label: 'Stocks' },
+        { id: 'index', label: 'Indices' },
+        { id: 'etf', label: 'ETFs' },
+        { id: 'commodity', label: 'Commodities' },
+        { id: 'currency', label: 'Currencies' },
+      ]
+    : [
+        { id: 'all', label: 'All' },
+        { id: 'stock', label: 'Stocks' },
+        { id: 'index', label: 'Indices' },
+        { id: 'etf', label: 'ETFs' },
+        { id: 'commodity', label: 'Commodities' },
+        { id: 'currency', label: 'Currencies' },
+        { id: 'council', label: 'Councils' },
+        { id: 'persona', label: 'Personas' },
+      ]
 
   return (
     <div
@@ -137,7 +150,7 @@ export default function SmartTypeahead({
       <div className="flex items-center justify-between px-3 py-1.5 bg-slate-100 dark:bg-[#161b24] border border-slate-200 dark:border-slate-800 rounded-xl text-[11px] uppercase font-extrabold text-slate-800 dark:text-slate-200 tracking-wider">
         <span className="flex items-center gap-1.5">
           <span className="w-2 h-2 rounded-full bg-amber animate-pulse" />
-          <span>{query ? `OmniSearch Matches (${items.length})` : '🕒 Recent Searches & Recommendations'}</span>
+          <span>{query ? `OmniSearch Matches (${items.length})` : (activeCategory !== 'all' ? `${categories.find((c) => c.id === activeCategory)?.label || activeCategory} (${items.length})` : '🕒 Recent Searches & Recommendations')}</span>
         </span>
         <span className="font-mono text-[10px] font-extrabold px-2 py-0.5 rounded bg-amber text-black shadow-xs">
           Indian Markets 🇮🇳
@@ -145,7 +158,7 @@ export default function SmartTypeahead({
       </div>
 
       {/* Category Quick Filter Bar */}
-      {query.trim().length > 0 && mode === 'full' && (
+      {!results && (
         <div className="flex items-center gap-1 overflow-x-auto py-1 px-1 no-scrollbar border-b border-slate-200 dark:border-slate-800">
           {categories.map((cat) => (
             <button
@@ -154,7 +167,7 @@ export default function SmartTypeahead({
               onClick={(e) => {
                 e.stopPropagation()
                 setActiveCategory(cat.id)
-                setSelectedIndex(0)
+                setSelectedIndex && setSelectedIndex(0)
               }}
               className={`px-2 py-0.5 rounded-lg text-[10px] font-mono font-bold tracking-tight whitespace-nowrap cursor-pointer transition-all ${
                 activeCategory === cat.id

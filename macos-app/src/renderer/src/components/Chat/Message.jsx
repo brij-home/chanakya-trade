@@ -1,5 +1,6 @@
 import { useState, useCallback } from 'react'
 import { useChatStore } from '../../store/chatStore'
+import QuoteCard          from '../Cards/QuoteCard'
 import AnalysisCard       from '../Cards/AnalysisCard'
 import StreamingAnalysisCard from '../Cards/StreamingAnalysisCard'
 import BacktestCard       from '../Cards/BacktestCard'
@@ -46,6 +47,7 @@ import DefinedRiskSpreadCard from '../Cards/DefinedRiskSpreadCard'
 import MagicTrendCard from '../Cards/MagicTrendCard'
 import ThematicBasketsCard from '../Cards/ThematicBasketsCard'
 import PortfolioDoctorCard from '../Cards/PortfolioDoctorCard'
+import GlobalMacroCard from '../Cards/GlobalMacroCard'
 import ErrorBoundary from '../ErrorBoundary'
 
 function renderCardContent(cardType, data) {
@@ -56,6 +58,10 @@ function renderCardContent(cardType, data) {
     case 'backtest':           return <BacktestCard data={data} />
     case 'flows':              return <FlowsCard data={data} />
     case 'morning_brief':      return <MorningBriefCard data={data} />
+    case 'global_macro':
+    case 'global_pulse':
+    case 'macro_correlation':
+    case 'gift_nifty':         return <GlobalMacroCard data={data} />
     case 'holdings':           return <HoldingsCard data={data} />
     case 'funds':              return <FundsCard data={data} />
     case 'profile':            return <ProfileCard data={data} />
