@@ -105,7 +105,14 @@ def main():
         )
         steps.append(
             (
-                "4. Frontend Vitest Component & Store Tests",
+                "4. TypeScript Typecheck (tsc --noEmit)",
+                "cmd /c npm run typecheck" if os.name == "nt" else "npm run typecheck",
+                macos_app_dir,
+            )
+        )
+        steps.append(
+            (
+                "5. Frontend Vitest Component & Store Tests",
                 "cmd /c npm test" if os.name == "nt" else "npm test",
                 macos_app_dir,
             )

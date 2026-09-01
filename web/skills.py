@@ -4232,7 +4232,6 @@ async def skill_global_macro(req: Optional[GlobalMacroRequest] = None):
         raise _err(str(e))
 
 
-
 # ── P0-A: market_overview — aggregates VIX, FII/DII, breadth, sector RRG ──
 # Fixes T-06: OverviewView.jsx calls /skills/market_overview but this route
 # was missing. Returns null for unavailable fields — never fabricated defaults.
@@ -4305,11 +4304,13 @@ async def skill_market_overview():
                     phase = getattr(entry, "quadrant", None)
                     chg = getattr(entry, "change_pct", None) or getattr(entry, "momentum", None)
                 if name:
-                    sectors.append({
-                        "name": str(name),
-                        "phase": str(phase) if phase else None,
-                        "change_pct": round(float(chg), 2) if chg is not None else None,
-                    })
+                    sectors.append(
+                        {
+                            "name": str(name),
+                            "phase": str(phase) if phase else None,
+                            "change_pct": round(float(chg), 2) if chg is not None else None,
+                        }
+                    )
             result["sectors"] = sectors
             fetched_any = True
     except Exception:

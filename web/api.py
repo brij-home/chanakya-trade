@@ -349,12 +349,11 @@ async def get_app_mode():
     Default is always PAPER to prevent accidental live execution.
     """
     import logging
+
     allowed_modes = {"PAPER", "DEMO", "LIVE"}
     env_mode = os.environ.get("CHANAKYA_TRADE_MODE", "PAPER").upper().strip()
     if env_mode not in allowed_modes:
-        logging.warning(
-            "[mode] Unknown CHANAKYA_TRADE_MODE=%r, defaulting to PAPER", env_mode
-        )
+        logging.warning("[mode] Unknown CHANAKYA_TRADE_MODE=%r, defaulting to PAPER", env_mode)
         env_mode = "PAPER"
     return {
         "mode": env_mode,

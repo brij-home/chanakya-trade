@@ -202,6 +202,7 @@ LOGIN_WINDOW_SECONDS = 60.0
 def check_rate_limit(key: str) -> bool:
     """Check if the key (IP or email) is within allowed login attempt limits."""
     import time
+
     now = time.time()
     attempts = _login_attempts.get(key, [])
     # Filter attempts within window
@@ -213,6 +214,7 @@ def check_rate_limit(key: str) -> bool:
 def record_login_failure(key: str) -> None:
     """Record a failed login attempt for rate limiting."""
     import time
+
     now = time.time()
     attempts = _login_attempts.setdefault(key, [])
     attempts.append(now)
@@ -371,4 +373,3 @@ async def require_auth(request: Request) -> dict:
     if not session:
         raise HTTPException(401, "Session expired")
     return session
-

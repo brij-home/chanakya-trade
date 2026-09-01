@@ -17,12 +17,9 @@ from web.auth import (
     verify_user,
     create_session,
     get_session,
-    delete_session,
     check_rate_limit,
     record_login_failure,
     reset_login_failures,
-    _hash_password,
-    _verify_password,
     _get_conn,
 )
 
@@ -33,6 +30,7 @@ def clean_auth_state(tmp_path, monkeypatch):
     db_file = tmp_path / "test_users.db"
     monkeypatch.setenv("AUTH_DB_PATH", str(db_file))
     from web.auth import init_db, _sessions, _login_attempts
+
     init_db()
     _sessions.clear()
     _login_attempts.clear()
@@ -79,7 +77,11 @@ def test_lazy_hash_migration_from_legacy_sha256():
     """Verify that a legacy salt:sha256 hash is upgraded to PBKDF2 on successful login."""
     # Insert a legacy user directly with salt:sha256 format
     legacy_salt = secrets.token_hex(16)
-    legacy_hash = legacy_salt + ":" + hashlib.sha256((legacy_salt + "LegacyPassword123").encode("utf-8")).hexdigest()
+    legacy_hash = (
+        legacy_salt
+        + ":"
+        + hashlib.sha256((legacy_salt + "LegacyPassword123").encode("utf-8")).hexdigest()
+    )
 
     conn = _get_conn()
     cursor = conn.execute(

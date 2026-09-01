@@ -18,7 +18,6 @@ def clean_order_db(tmp_path, monkeypatch):
     """Use isolated orders.db per test."""
     db_file = tmp_path / "test_orders.db"
     monkeypatch.setenv("APP_DATA_DIR", str(tmp_path))
-    from config.paths import app_data_path
     monkeypatch.setattr("engine.order_lifecycle._get_db_path", lambda: db_file)
     yield
 
@@ -66,9 +65,16 @@ def test_order_preview_idempotency():
 def test_order_execution_paper_flow(monkeypatch):
     """Verify execution transitions to FILLED_PAPER with PAPER-EXEC ID."""
     from engine.modes import ModeInfo, TradingMode
+
     monkeypatch.setattr(
         "engine.order_lifecycle.get_trading_mode",
-        lambda: ModeInfo(mode=TradingMode.SIMULATE, is_observe=False, is_simulate=True, is_execute=False, description="Simulate"),
+        lambda: ModeInfo(
+            mode=TradingMode.SIMULATE,
+            is_observe=False,
+            is_simulate=True,
+            is_execute=False,
+            description="Simulate",
+        ),
     )
 
     intent = preview_order_intent(
@@ -88,9 +94,16 @@ def test_order_execution_paper_flow(monkeypatch):
 def test_order_execution_blocked_in_observe_mode(monkeypatch):
     """Verify execution is rejected when system is in OBSERVE mode."""
     from engine.modes import ModeInfo, TradingMode
+
     monkeypatch.setattr(
         "engine.order_lifecycle.get_trading_mode",
-        lambda: ModeInfo(mode=TradingMode.OBSERVE, is_observe=True, is_simulate=False, is_execute=False, description="Observe"),
+        lambda: ModeInfo(
+            mode=TradingMode.OBSERVE,
+            is_observe=True,
+            is_simulate=False,
+            is_execute=False,
+            description="Observe",
+        ),
     )
 
     intent = preview_order_intent(

@@ -294,7 +294,7 @@ def execute_order_intent(order_id: str) -> OrderIntent:
             else:
                 d["status"] = "OPEN"
                 d["broker_order_id"] = f"PAPER-OPEN-{paper_res.order_id}"
-        except Exception as e:
+        except Exception:
             d["status"] = "FILLED_PAPER"
             d["broker_order_id"] = f"PAPER-EXEC-{uuid.uuid4().hex[:6].upper()}"
 
@@ -308,7 +308,11 @@ def execute_order_intent(order_id: str) -> OrderIntent:
         record_audit_event(
             event_type="ORDER_FILLED_PAPER",
             mode=mode_info.mode.name,
-            details={"order_id": order_id, "broker_order_id": d["broker_order_id"], "status": d["status"]},
+            details={
+                "order_id": order_id,
+                "broker_order_id": d["broker_order_id"],
+                "status": d["status"],
+            },
         )
     else:
         # Live execution (requires active broker session)
@@ -345,4 +349,3 @@ def execute_order_intent(order_id: str) -> OrderIntent:
         created_at=d["created_at"],
         updated_at=now_iso,
     )
-

@@ -105,16 +105,25 @@ jobs:
           cache: "npm"
           cache-dependency-path: macos-app/package-lock.json
 
-      - name: Install frontend dependencies
+      - name: Install frontend dependencies (clean, fail-closed)
         working-directory: macos-app
-        run: npm install
+        run: npm ci
 
-      - name: Run frontend tests
+      - name: Run React Hook AST audit
         working-directory: macos-app
-        run: |
-          node scripts/audit-react-hooks.js
-          npx vitest run --passWithNoTests || true
-          node scripts/build-web.js || true
+        run: npm run lint:hooks
+
+      - name: Run TypeScript typecheck
+        working-directory: macos-app
+        run: npm run typecheck
+
+      - name: Run frontend unit & component tests
+        working-directory: macos-app
+        run: npm test
+
+      - name: Run production web bundle build
+        working-directory: macos-app
+        run: npm run build:web
 
   lint:
     runs-on: ubuntu-latest
