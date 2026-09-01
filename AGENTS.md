@@ -171,6 +171,7 @@
 6. **Bounded In-Memory Caches**: All dicts (`_df_memory_cache`, `_chat_sessions`, `_sessions`) must have LRU eviction and TTL to prevent memory growth.
 7. **Connection Hygiene**: Wrap `httpx.Client` in `with` context managers. No dangling TCP sockets.
 8. **Telemetry Observability**: Every fallback (`LLM_FAILOVER`, `LLM_COOLDOWN`, `QUANT_FALLBACK`, `DATA_FALLBACK`, `BROKER_FAILOVER`, `EXCEPTION`) emits structured telemetry via [`engine/telemetry.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/telemetry.py).
+9. **Dynamic Cross-Module Pipeline Invariants**: Cross-module analytical interfaces (`get_stock_tailwind` in [`analysis/sector_rotation.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/analysis/sector_rotation.py), `audit_company_forensics` in [`analysis/forensic.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/analysis/forensic.py), and `get_options_chain` in [`market/options.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/market/options.py)) MUST always return structured objects with uniform attribute & dictionary compatibility (`StockTailwind`, `ForensicAuditResult`) and dynamic fallback chains without ever returning static mock fallbacks in production pathways.
 
 ---
 

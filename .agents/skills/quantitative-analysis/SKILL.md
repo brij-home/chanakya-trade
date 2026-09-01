@@ -43,11 +43,11 @@ description: >-
 | `IMPROVING` | <100 | ≥100 | Early recovery phase |
 
 ```python
-from analysis.sector_rotation import get_sector_rrg_matrix, get_stock_sector_alignment
+from analysis.sector_rotation import get_sector_rrg_matrix, get_stock_tailwind
 
 matrix = get_sector_rrg_matrix()
-alignment = get_stock_sector_alignment("INFY")
-# → {"quadrant": "LEADING", "tailwind_score": 85, "alignment": "STRONG_TAILWIND"}
+tailwind = get_stock_tailwind("INFY")
+# tailwind.quadrant → "LEADING", tailwind.tailwind_score → 95, tailwind.alignment → "STRONG_TAILWIND"
 ```
 
 ---
@@ -64,10 +64,11 @@ alignment = get_stock_sector_alignment("INFY")
 | **Promoter Pledge** | >10% / >20% | Warning / Critical margin call risk |
 
 ```python
-from analysis.forensic import audit_forensics
+from analysis.forensic import audit_company_forensics
 
-report = audit_forensics("RELIANCE")
+report = audit_company_forensics("RELIANCE")
 # report.quality_rating → "A+" | "A" | "B" | "C" | "D"
+# report.overall_forensic_verdict → "CLEAN_PASS" | "MILD_WARNING" | "RED_FLAG"
 # report.beneish_m_score, report.altman_z_score, report.piotroski_f_score
 ```
 
