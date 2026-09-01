@@ -49,6 +49,25 @@
 3. **SEBI IPv4 Network Binding**: Indian broker APIs enforce whitelisted IPv4 addresses. Keep the `socket.getaddrinfo` override intact in [`app/main.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/app/main.py).
 4. **Market Hours & IST**: Equity & F&O: 09:15–15:30 IST. MCX: up to 23:30/23:55 IST. Handle market-closed edge cases gracefully.
 5. **Advisory Risk Friction (Co-Pilot, Not Police)**: When behavioral flags (loss streak ≥3, pyramiding into losers, daily loss cap) trigger, present mindful friction with coaching alternatives and double-confirmation — never hard-block without an escape path.
+6. **Live Execution Pipeline — Fail-Closed Contract** (enforced in [`engine/order_lifecycle.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/order_lifecycle.py)):
+   - `execute_order_intent()` MUST call `assert_live_execution_allowed()` → `validate_pretrade()` → real `get_broker().place_order()` in that order. Any short-circuit is a safety violation.
+   - A paper broker exception MUST yield `status=REJECTED` with the real error as `rejection_reason`. It MUST NOT fabricate a `FILLED_PAPER` result.
+   - An ambiguous or timed-out live broker response MUST yield `status=UNKNOWN_FREEZE` with `broker_order_id=None`. It MUST NOT fabricate a `LIVE-XXXXXX` ID or set `status=OPEN`.
+   - `TRADING_MODE=EXECUTE` is gated by `ALLOW_LIVE_TRADING=1`. Absent that env var, `execute_order_intent()` raises `PermissionError`.
+7. **Mode Banner Truthfulness** (`GET /api/mode` in [`web/api.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/web/api.py)):
+   - The canonical mapping is: `OBSERVE → DEMO`, `SIMULATE → PAPER`, `EXECUTE → LIVE`.
+   - Do NOT add a fourth mode or let an unknown backend mode silently default to `PAPER`. Add it to the map or raise.
+   - ModeBanner.jsx reads exclusively from `/api/mode`; never infer mode client-side from other signals.
+8. **Security 360 Truthfulness Contract** ([`engine/security_360.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/security_360.py)):
+   - If the live quote is unavailable or zero, return `_status="UNAVAILABLE"`, `decision=None`, empty lenses. Never use a hardcoded price fallback.
+   - `valuation_fair_value` MUST come from a real DCF computation. Never return `price × 1.15`. Until DCF is wired, set to `None` with `valuation_status="UNAVAILABLE"`.
+   - `forensic_status` MUST be the result of `audit_company_forensics(symbol)`. Never hardcode `"CLEAN"`.
+   - `methodology_lenses` MUST be empty `[]` until real per-lens computation is wired. Never hardcode four BULLISH verdicts.
+   - `decision` MUST be `None` when `methodology_lenses` is empty.
+9. **Reconciliation Honesty Contract** (`GET /api/reconciliation` in [`web/api.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/web/api.py)):
+   - MUST call `get_broker().get_positions()` and `get_broker().get_funds()` for the broker side. Never pass `internal_positions` as `broker_positions`.
+   - If `get_broker()` returns `None` or raises, return `{"status": "UNAVAILABLE"}`. Never fabricate a clean reconciliation report.
+   - A successful reconciliation response MUST include `broker_account_id`, `broker_snapshot_at`, and `correlation_id` for auditability.
 
 ---
 
@@ -240,8 +259,13 @@
    - **Full Pre-Push Gate (< 30s)**: `.venv\Scripts\python.exe scripts/validate_all.py --full` (All linters + Vitest + Web build + Full 2,188+ test matrix with 4 workers).
    - **Daily / Nightly Deep Regression**: `.venv\Scripts\python.exe scripts/validate_daily.py` (Full matrix + Monte Carlo & options stress tests + Live network integration).
    - **Environment & Process Cleanup**: `.venv\Scripts\python.exe scripts/cleanup.py` (Purges orphaned workers, frees port 8765, removes temp sqlite lock files).
-4. **Conventional Commits**: `feat:`, `fix:`, `refactor:`, `test:`, `docs:`, `perf:`. No AI attribution headers.
-5. **Always request explicit user confirmation** before executing `git commit` or `git push`.
+4. **New Execution & Truthfulness Test Suites** (must stay green at all times):
+   - [`tests/test_live_oms_p3b.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/tests/test_live_oms_p3b.py) — Kill switch, pre-trade gate, OMS state machine, and live execution safety gates (REJECTED on paper error, UNKNOWN_FREEZE on broker timeout).
+   - [`tests/test_mode_banner_mapping.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/tests/test_mode_banner_mapping.py) — `GET /api/mode` canonical mapping (`OBSERVE/SIMULATE/EXECUTE` → `DEMO/PAPER/LIVE`).
+   - [`tests/test_security_360_unavailable.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/tests/test_security_360_unavailable.py) — Security 360 truthfulness (no hardcoded price, valuation, forensic status, or lenses).
+   - [`tests/test_reconciliation_unavailable.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/tests/test_reconciliation_unavailable.py) — Reconciliation returns `UNAVAILABLE` without a real broker snapshot; never self-compares.
+5. **Conventional Commits**: `feat:`, `fix:`, `refactor:`, `test:`, `docs:`, `perf:`. No AI attribution headers.
+6. **Always request explicit user confirmation** before executing `git commit` or `git push`.
 
 ### 7.2 Server & Daemon Lifecycle
 6. **Thread Lifecycle & Cooperative Cancellation**: All background pollers in `engine/` MUST use `self._stop_event = threading.Event()`, wait on `self._stop_event.wait(timeout=...)` instead of blocking `time.sleep()`, and provide clean `.join(timeout=1.0)` in `stop_polling()`.
