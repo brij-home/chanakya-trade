@@ -452,7 +452,7 @@ export default function OrderTicketModal({ isOpen, onClose, initialData = {}, ap
                   </div>
                   {previewOrder?.order_id && (
                     <div className="flex justify-between text-[10px]">
-                      <span className="text-muted">Paper Intent ID:</span>
+                      <span className="text-muted">{isLiveMode ? 'Live Intent ID:' : 'Paper Intent ID:'}</span>
                       <span className="text-violet-400 font-bold">{previewOrder.order_id}</span>
                     </div>
                   )}
@@ -474,6 +474,8 @@ export default function OrderTicketModal({ isOpen, onClose, initialData = {}, ap
                     <span className="text-muted">Execution Venue:</span>
                     {isLiveMode ? (
                       <span className="text-rose-400 font-bold">LIVE BROKER (Real execution — real capital at risk)</span>
+                    ) : appMode === 'DEMO' ? (
+                      <span className="text-amber-400 font-bold">DEMO OMS (Synthetic Sandbox — No Broker Connected)</span>
                     ) : (
                       <span className="text-blue font-bold">PAPER OMS (Simulated — No Real Money at Risk)</span>
                     )}
@@ -491,6 +493,8 @@ export default function OrderTicketModal({ isOpen, onClose, initialData = {}, ap
                   <span className="text-muted text-[11px] font-ui leading-tight">
                     {preflightInfo?.flags?.length > 0
                       ? 'I acknowledge the behavioral risk advisory and choose to proceed with conscious awareness.'
+                      : isLiveMode
+                      ? 'I confirm that I have reviewed the order parameters, statutory costs, and acknowledge REAL CAPITAL is at risk on the live exchange.'
                       : 'I confirm that I have reviewed the order parameters, statutory costs, and paper execution role.'}
                   </span>
                 </label>
@@ -528,9 +532,13 @@ export default function OrderTicketModal({ isOpen, onClose, initialData = {}, ap
                   }`}
                 >
                   {isSubmitting
-                    ? 'Transmitting Paper Order…'
+                    ? isLiveMode
+                      ? 'Transmitting Live Order to Broker…'
+                      : 'Transmitting Paper Order…'
                     : preflightInfo?.flags?.length > 0
-                    ? `⚡ Acknowledge & Transmit ${action}`
+                    ? `⚡ Acknowledge & Transmit ${action} ${isLiveMode ? '(LIVE ⚠️)' : ''}`
+                    : isLiveMode
+                    ? `Double Confirm & Transmit ${action} (LIVE ⚠️)`
                     : `Double Confirm & Transmit ${action}`}
                 </button>
               </div>

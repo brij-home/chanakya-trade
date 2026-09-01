@@ -814,3 +814,127 @@ def test_execute_order_broker_timeout_transitions_to_unknown_freeze(tmp_path, mo
     assert row["broker_order_id"] is None, (
         "broker_order_id must be None on broker timeout — never fabricate an ID."
     )
+
+
+def test_paper_preview_cannot_execute_in_live_mode(tmp_path, monkeypatch):
+    """
+    P0 Safety: An order previewed in SIMULATE (Paper) mode must NEVER be executable
+    if the system switches to EXECUTE (Live) mode. execute_order_intent must raise PermissionError.
+    """
+    import sqlite3
+    from engine.order_lifecycle import preview_order_intent, execute_order_intent
+
+    db_path = tmp_path / "orders.db"
+    monkeypatch.setattr("engine.order_lifecycle._get_db_path", lambda: db_path)
+
+    # 1. Preview order under SIMULATE mode
+    monkeypatch.setenv("TRADING_MODE", "SIMULATE")
+    paper_order = preview_order_intent(
+        symbol="RELIANCE",
+        side="BUY",
+        quantity=10,
+        price=2850.0,
+        order_type="LIMIT",
+        product="MIS",
+    )
+    assert paper_order.mode == "SIMULATE"
+    assert paper_order.order_id.startswith("PAPER-")
+
+    # 2. Switch mode to EXECUTE (with live permission flag)
+    monkeypatch.setenv("ALLOW_LIVE_TRADING", "1")
+    monkeypatch.setenv("TRADING_MODE", "EXECUTE")
+
+    # 3. Attempt to execute the paper preview in EXECUTE mode -> MUST fail with PermissionError
+    with pytest.raises(PermissionError, match="Cross-mode order execution is strictly prohibited"):
+        execute_order_intent(paper_order.order_id)
+
+    # Verify order was not executed or changed to LIVE
+    with sqlite3.connect(str(db_path)) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT status, mode FROM orders_ledger WHERE order_id = ?",
+            (paper_order.order_id,),
+        ).fetchone()
+
+    assert row["status"] == "PREVIEW"
+    assert row["mode"] == "SIMULATE"
+
+
+def test_order_intent_double_submit_fails(tmp_path, monkeypatch):
+    """
+    P0 Safety: Submitting an already executed or submitted order intent must fail atomically.
+    Second execute_order_intent call must raise ValueError.
+    """
+    from engine.order_lifecycle import preview_order_intent, execute_order_intent
+    from brokers.base import OrderResponse
+
+    db_path = tmp_path / "orders.db"
+    monkeypatch.setattr("engine.order_lifecycle._get_db_path", lambda: db_path)
+
+    monkeypatch.setenv("TRADING_MODE", "SIMULATE")
+
+    class _MockPaperBroker:
+        def place_order(self, req):
+            return OrderResponse(order_id="PAPER-9999", status="COMPLETE", message="Filled")
+
+    monkeypatch.setattr("engine.paper.PaperBroker", lambda: _MockPaperBroker())
+
+    order = preview_order_intent(
+        symbol="INFY",
+        side="BUY",
+        quantity=5,
+        price=1800.0,
+        order_type="LIMIT",
+        product="MIS",
+    )
+
+    # First execution succeeds
+    first_res = execute_order_intent(order.order_id)
+    assert first_res.status == "FILLED_PAPER"
+
+    # Second execution must raise ValueError
+    with pytest.raises(ValueError, match="cannot be executed"):
+        execute_order_intent(order.order_id)
+
+
+def test_multi_asset_canonical_instrument_resolution(tmp_path, monkeypatch):
+    """
+    Authoritative Instrument Resolution: preview_order_intent must resolve exchange and segment
+    accurately for equities, commodities (MCX), and currencies (CDS).
+    """
+    from engine.order_lifecycle import preview_order_intent
+
+    db_path = tmp_path / "orders.db"
+    monkeypatch.setattr("engine.order_lifecycle._get_db_path", lambda: db_path)
+    monkeypatch.setenv("TRADING_MODE", "SIMULATE")
+
+    # 1. Commodity
+    gold_order = preview_order_intent(
+        symbol="MCX:GOLD",
+        side="BUY",
+        quantity=1,
+        price=74000.0,
+    )
+    assert gold_order.exchange == "MCX"
+    assert gold_order.segment == "COMMODITY"
+
+    # 2. Currency
+    usd_order = preview_order_intent(
+        symbol="USDINR",
+        side="BUY",
+        quantity=1000,
+        price=86.5,
+    )
+    assert usd_order.exchange == "CDS"
+    assert usd_order.segment == "CURRENCY"
+
+    # 3. Equity Delivery
+    equity_order = preview_order_intent(
+        symbol="TCS",
+        side="BUY",
+        quantity=10,
+        price=3900.0,
+        product="CNC",
+    )
+    assert equity_order.exchange == "NSE"
+    assert equity_order.segment == "EQUITY_DELIVERY"

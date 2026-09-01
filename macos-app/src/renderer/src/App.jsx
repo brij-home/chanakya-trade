@@ -445,6 +445,7 @@ export default function App() {
             isOpen={isOrderTicketOpen}
             onClose={() => setIsOrderTicketOpen(false)}
             initialData={orderTicketData}
+            appMode={appMode}
           />
         </ErrorBoundary>
 

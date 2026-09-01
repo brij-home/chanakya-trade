@@ -164,30 +164,41 @@ app.add_middleware(
 app.include_router(auth_router)
 
 
+# ── CSRF Secret Resolution & Enforcement ─────────────────────────
+def get_csrf_secret() -> str:
+    deploy_mode = os.environ.get("DEPLOY_MODE", "")
+    secret = os.environ.get("CSRF_SECRET", "")
+    insecure_defaults = {
+        "chanakya-csrf-secret-change-in-production",
+        "chanakya-local-csrf-dev-secret-key-64bytes-minimum-length-for-hmac",
+        "secret",
+        "change-me",
+        "12345678901234567890123456789012",
+    }
+    if deploy_mode == "self-hosted":
+        if not secret or len(secret) < 32 or secret in insecure_defaults:
+            raise RuntimeError(
+                "DEPLOY_MODE=self-hosted requires a cryptographically strong CSRF_SECRET "
+                "environment variable (minimum 32 characters, high entropy). Refusing to operate with missing or insecure secret."
+            )
+    return secret or "chanakya-local-csrf-dev-secret-key-64bytes-minimum-length-for-hmac"
+
+
 # ── Auth middleware for /api/* and /skills/* ──────────────────────
 @app.middleware("http")
 async def auth_middleware(request: _Request, call_next):
     path = request.url.path
-    # Public paths — no auth required
+    # Public paths — no auth required (health, mode, CSRF token, OAuth callbacks)
     if (
         path.startswith("/auth/")
         or path in ("/health", "/health/live", "/health/ready")
         or path
         in (
-            "/api/preflight",
-            "/api/risk/preflight",
             "/api/mode",
-            "/api/charges/calculate",
-            "/api/reconciliation",
-            "/api/audit/logs",
-            "/api/audit/verify",
-            "/api/slo",
-            "/api/provider_health",
-            "/api/correlation_ids",
             "/api/csrf-token",
         )
-        # NOTE: /api/orders/* is intentionally NOT listed here — order endpoints
-        # require an authenticated session to attach actor identity to audit events.
+        # NOTE: /api/orders/*, /api/reconciliation, /api/portfolio, /api/risk/*, and /api/audit/*
+        # are strictly NOT public and require authenticated sessions to protect customer capital, holdings, and logs.
         or path.startswith("/.well-known/")
         or path.startswith("/fyers/")  # OAuth callbacks
         or path.startswith("/zerodha/")  # OAuth callbacks
@@ -198,40 +209,42 @@ async def auth_middleware(request: _Request, call_next):
     ):
         return await call_next(request)
 
-    # Self-hosted mode: CSRF protection for mutating methods
+    # Self-hosted mode: authentication & CSRF enforcement
     deploy_mode = os.environ.get("DEPLOY_MODE", "")
-    if deploy_mode == "self-hosted" and request.method in ("POST", "PUT", "DELETE", "PATCH"):
-        csrf_token = request.headers.get("X-CSRF-Token", "")
-        session_id_for_csrf = request.cookies.get("session_id", "")
-        import hmac, hashlib
-        _csrf_secret = os.environ.get("CSRF_SECRET", "chanakya-csrf-secret-change-in-production")
-        expected = hmac.new(
-            _csrf_secret.encode(), session_id_for_csrf.encode(), hashlib.sha256
-        ).hexdigest()
-        if not hmac.compare_digest(csrf_token, expected):
-            return JSONResponse({"detail": "CSRF token invalid or missing"}, status_code=403)
-
-    # Self-hosted mode: skip auth if no users exist yet (first-time onboarding)
     if deploy_mode == "self-hosted":
         if user_count() == 0:
             return await call_next(request)
+
+        session_id = request.cookies.get("session_id")
+        if not session_id or not get_session(session_id):
+            return JSONResponse({"detail": "Not authenticated"}, status_code=401)
+
+        # CSRF protection for authenticated mutating methods
+        if request.method in ("POST", "PUT", "DELETE", "PATCH"):
+            csrf_token = request.headers.get("X-CSRF-Token", "")
+            import hashlib
+            import hmac
+
+            _csrf_secret = get_csrf_secret()
+            expected = hmac.new(
+                _csrf_secret.encode(), session_id.encode(), hashlib.sha256
+            ).hexdigest()
+            if not csrf_token or not hmac.compare_digest(csrf_token, expected):
+                return JSONResponse({"detail": "CSRF token invalid or missing"}, status_code=403)
+
+        return await call_next(request)
     else:
         # Local desktop mode: skip auth for localhost (Electron app, CLI, local dev, testclient)
         client_host = request.client.host if request.client else ""
         if client_host in ("127.0.0.1", "::1", "localhost", "testclient"):
             return await call_next(request)
 
-    # Check session cookie
-    session_id = request.cookies.get("session_id")
-    if not session_id:
-        return JSONResponse({"detail": "Not authenticated"}, status_code=401)
+        # Check session cookie
+        session_id = request.cookies.get("session_id")
+        if not session_id or not get_session(session_id):
+            return JSONResponse({"detail": "Not authenticated"}, status_code=401)
 
-    session = get_session(session_id)
-    if not session:
-        return JSONResponse({"detail": "Session expired"}, status_code=401)
-
-    request.state.user = session
-    return await call_next(request)
+        return await call_next(request)
 
 
 # ── OpenClaw Skills ───────────────────────────────────────────
@@ -2210,7 +2223,8 @@ class OrderPreviewRequest(BaseModel):
     price: float = 100.0
     order_type: str = "LIMIT"
     product: str = "MIS"
-    segment: str = "EQUITY_INTRADAY"
+    exchange: Optional[str] = None
+    segment: Optional[str] = None
     idempotency_key: Optional[str] = None
 
 
@@ -2224,12 +2238,12 @@ async def api_csrf_token(request: _Request):
     Issue a CSRF token for the current session (self-hosted mode only).
     The client must send this in the X-CSRF-Token header for all mutating requests.
     """
-    import hmac, hashlib
+    import hashlib
+    import hmac
+
     session_id = request.cookies.get("session_id", "")
-    _csrf_secret = os.environ.get("CSRF_SECRET", "chanakya-csrf-secret-change-in-production")
-    token = hmac.new(
-        _csrf_secret.encode(), session_id.encode(), hashlib.sha256
-    ).hexdigest()
+    _csrf_secret = get_csrf_secret()
+    token = hmac.new(_csrf_secret.encode(), session_id.encode(), hashlib.sha256).hexdigest()
     return JSONResponse({"csrf_token": token})
 
 
@@ -2255,6 +2269,7 @@ async def api_order_preview(req: OrderPreviewRequest, request: _Request):
         price=max(0.05, req.price),
         order_type=req.order_type.upper(),  # type: ignore
         product=req.product.upper(),  # type: ignore
+        exchange=req.exchange,
         segment=req.segment,
         idempotency_key=req.idempotency_key,
     )

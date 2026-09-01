@@ -132,7 +132,7 @@ def calculate_transaction_charges(
         rate = Decimal("0.0003") if brokerage_rate is None else Decimal(str(brokerage_rate))
         brokerage = min(turnover * rate, Decimal(str(broker_flat_fee)))
 
-    # 2. Securities Transaction Tax (STT)
+    # 2. Securities Transaction Tax (STT / CTT)
     stt = Decimal("0.00")
     if segment == "EQUITY_DELIVERY":
         # 0.1% on both Buy and Sell
@@ -141,22 +141,35 @@ def calculate_transaction_charges(
         # 0.025% on Sell only
         if side == "SELL":
             stt = turnover * Decimal("0.00025")
-    elif segment == "FUTURES":
+    elif segment in ("FUTURES", "FUT"):
         # 0.02% on Sell only
         if side == "SELL":
             stt = turnover * Decimal("0.0002")
-    elif segment == "OPTIONS":
+    elif segment in ("OPTIONS", "OPT"):
         # 0.1% on Sell premium turnover
         if side == "SELL":
             stt = turnover * Decimal("0.001")
+    elif segment == "COMMODITY":
+        # CTT on Commodity Futures: 0.01% on Sell
+        if side == "SELL":
+            stt = turnover * Decimal("0.0001")
+    elif segment == "CURRENCY":
+        # No STT on Currency Futures
+        stt = Decimal("0.00")
 
-    # 3. Exchange Turnover Charges (NSE rates)
-    if segment in ("EQUITY_DELIVERY", "EQUITY_INTRADAY"):
+    # 3. Exchange Turnover Charges (NSE, MCX, CDS rates)
+    if segment in ("EQUITY_DELIVERY", "EQUITY_INTRADAY", "EQUITY"):
         exchange_charges = turnover * Decimal("0.0000297")  # 0.00297%
-    elif segment == "FUTURES":
+    elif segment in ("FUTURES", "FUT"):
         exchange_charges = turnover * Decimal("0.0000173")  # 0.00173%
-    elif segment == "OPTIONS":
+    elif segment in ("OPTIONS", "OPT"):
         exchange_charges = turnover * Decimal("0.0003503")  # 0.03503% on premium
+    elif segment == "COMMODITY":
+        exchange_charges = turnover * Decimal("0.000021")  # MCX ~0.0021%
+    elif segment == "CURRENCY":
+        exchange_charges = turnover * Decimal("0.000009")  # CDS ~0.0009%
+    else:
+        exchange_charges = turnover * Decimal("0.0000297")
 
     # 4. GST (18% on Brokerage + Exchange Charges)
     gst = (brokerage + exchange_charges) * Decimal("0.18")
@@ -166,12 +179,18 @@ def calculate_transaction_charges(
     if side == "BUY":
         if segment == "EQUITY_DELIVERY":
             stamp_duty = turnover * Decimal("0.00015")  # 0.015%
-        elif segment == "EQUITY_INTRADAY":
+        elif segment in ("EQUITY_INTRADAY", "EQUITY"):
             stamp_duty = turnover * Decimal("0.00003")  # 0.003%
-        elif segment == "FUTURES":
+        elif segment in ("FUTURES", "FUT"):
             stamp_duty = turnover * Decimal("0.00002")  # 0.002%
-        elif segment == "OPTIONS":
+        elif segment in ("OPTIONS", "OPT"):
             stamp_duty = turnover * Decimal("0.00003")  # 0.003% on premium
+        elif segment == "COMMODITY":
+            stamp_duty = turnover * Decimal("0.00002")  # 0.002%
+        elif segment == "CURRENCY":
+            stamp_duty = turnover * Decimal("0.000001")  # 0.0001%
+        else:
+            stamp_duty = turnover * Decimal("0.00003")
 
     # 6. SEBI Turnover Charges (₹10 / crore = 0.0001%)
     sebi_charges = turnover * Decimal("0.000001")

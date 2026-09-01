@@ -66,19 +66,19 @@ def _generate_order_id(is_paper: bool = True) -> str:
 
 @dataclass
 class OrderIntent:
+    order_id: str
+    idempotency_key: str
     symbol: str
     side: OrderSide
     quantity: int
     price: float
     order_type: OrderType = "LIMIT"
     product: ProductType = "MIS"
-    trigger_price: Optional[float] = None
-    stop_loss: Optional[float] = None
-    target: Optional[float] = None
-    idempotency_key: str = field(default_factory=lambda: str(uuid.uuid4()))
-    order_id: str = field(default_factory=lambda: _generate_order_id(True))
+    exchange: str = "NSE"
+    segment: str = "EQUITY_INTRADAY"
     status: OrderStatus = "DRAFT"
     mode: str = "SIMULATE"
+    preview_hash: Optional[str] = None
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     updated_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     broker_order_id: Optional[str] = None
@@ -97,6 +97,8 @@ def _init_orders_db():
                 order_id TEXT PRIMARY KEY,
                 idempotency_key TEXT UNIQUE NOT NULL,
                 symbol TEXT NOT NULL,
+                exchange TEXT NOT NULL DEFAULT 'NSE',
+                segment TEXT NOT NULL DEFAULT 'EQUITY_INTRADAY',
                 side TEXT NOT NULL,
                 quantity INTEGER NOT NULL,
                 price REAL NOT NULL,
@@ -107,11 +109,25 @@ def _init_orders_db():
                 broker_order_id TEXT,
                 charges_json TEXT,
                 rejection_reason TEXT,
+                preview_hash TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             )
             """
         )
+        existing_cols = {
+            row[1] for row in conn.execute("PRAGMA table_info(orders_ledger)").fetchall()
+        }
+        if "exchange" not in existing_cols:
+            conn.execute(
+                "ALTER TABLE orders_ledger ADD COLUMN exchange TEXT NOT NULL DEFAULT 'NSE'"
+            )
+        if "segment" not in existing_cols:
+            conn.execute(
+                "ALTER TABLE orders_ledger ADD COLUMN segment TEXT NOT NULL DEFAULT 'EQUITY_INTRADAY'"
+            )
+        if "preview_hash" not in existing_cols:
+            conn.execute("ALTER TABLE orders_ledger ADD COLUMN preview_hash TEXT")
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_orders_idemp ON orders_ledger(idempotency_key)"
         )
@@ -126,18 +142,48 @@ def preview_order_intent(
     price: float,
     order_type: OrderType = "LIMIT",
     product: ProductType = "MIS",
-    segment: str = "EQUITY_INTRADAY",
+    segment: Optional[str] = None,
+    exchange: Optional[str] = None,
     idempotency_key: Optional[str] = None,
 ) -> OrderIntent:
     """
     Generate an order preview with statutory Indian charges, idempotency check,
-    and explicit PAPER-/LIVE- order ID prefix.
+    authoritative multi-asset instrument resolution, and explicit PAPER-/LIVE- order ID prefix.
     """
     _init_orders_db()
-    idemp = (
-        idempotency_key
-        or hashlib.sha256(f"{symbol}:{side}:{quantity}:{price}:{product}".encode()).hexdigest()[:16]
+    from market.instruments import resolve_canonical_instrument
+
+    inst = resolve_canonical_instrument(symbol)
+    resolved_exchange = exchange or inst.exchange
+
+    if segment:
+        resolved_segment = segment
+    elif inst.segment == "EQUITY":
+        resolved_segment = "EQUITY_DELIVERY" if product == "CNC" else "EQUITY_INTRADAY"
+    elif inst.segment == "COMMODITY":
+        resolved_segment = "COMMODITY"
+    elif inst.segment == "CURRENCY":
+        resolved_segment = "CURRENCY"
+    elif inst.segment == "FNO" or inst.instrument_type in ("OPTION", "FUTURE"):
+        resolved_segment = (
+            "OPTIONS"
+            if (inst.instrument_type == "OPTION" or "CE" in symbol or "PE" in symbol)
+            else "FUTURES"
+        )
+    else:
+        resolved_segment = inst.segment
+
+    mode_info = get_trading_mode()
+    mode_name = mode_info.mode.name
+    is_paper = not mode_info.is_execute
+
+    # Canonical request string that cryptographically binds ALL structural parameters and active mode
+    canonical_str = (
+        f"{resolved_exchange}:{symbol.upper()}:{resolved_segment}:{side}:"
+        f"{quantity}:{price:.4f}:{order_type}:{product}:{mode_name}"
     )
+    computed_preview_hash = hashlib.sha256(canonical_str.encode()).hexdigest()
+    idemp = idempotency_key or f"IDEMP-{computed_preview_hash[:16]}"
 
     # Check for existing idempotency key
     with sqlite3.connect(_get_db_path(), timeout=30.0) as conn:
@@ -146,10 +192,23 @@ def preview_order_intent(
         row = cursor.fetchone()
         if row:
             d = dict(row)
+            # Refuse cross-mode idempotency reuse
+            if d["mode"] != mode_name:
+                raise PermissionError(
+                    f"Idempotency key '{idemp}' was created under mode {d['mode']}, but active mode is {mode_name}. "
+                    "Cross-mode order intent reuse is strictly prohibited."
+                )
+            # Verify parameter hash integrity
+            if d.get("preview_hash") and d["preview_hash"] != computed_preview_hash:
+                raise ValueError(
+                    f"Idempotency key '{idemp}' matches an existing order with mismatched parameters."
+                )
             return OrderIntent(
                 order_id=d["order_id"],
                 idempotency_key=d["idempotency_key"],
                 symbol=d["symbol"],
+                exchange=d.get("exchange", resolved_exchange),
+                segment=d.get("segment", resolved_segment),
                 side=d["side"],  # type: ignore
                 quantity=d["quantity"],
                 price=d["price"],
@@ -160,22 +219,23 @@ def preview_order_intent(
                 broker_order_id=d["broker_order_id"],
                 charges=json.loads(d["charges_json"] or "{}"),
                 rejection_reason=d["rejection_reason"],
+                preview_hash=d.get("preview_hash", computed_preview_hash),
                 created_at=d["created_at"],
                 updated_at=d["updated_at"],
             )
 
-    mode_info = get_trading_mode()
-    is_paper = not mode_info.is_execute
     charges = calculate_transaction_charges(
         price=price,
         quantity=quantity,
-        segment=segment,  # type: ignore
+        segment=resolved_segment,  # type: ignore
         side=side,  # type: ignore
     )
 
     intent = OrderIntent(
         order_id=_generate_order_id(is_paper=is_paper),
         symbol=symbol.upper(),
+        exchange=resolved_exchange,
+        segment=resolved_segment,
         side=side,
         quantity=quantity,
         price=price,
@@ -183,7 +243,8 @@ def preview_order_intent(
         product=product,
         idempotency_key=idemp,
         status="PREVIEW",
-        mode=mode_info.mode.name,
+        mode=mode_name,
+        preview_hash=computed_preview_hash,
         charges=charges.to_dict(),
     )
 
@@ -193,15 +254,17 @@ def preview_order_intent(
         conn.execute(
             """
             INSERT OR REPLACE INTO orders_ledger (
-                order_id, idempotency_key, symbol, side, quantity, price,
+                order_id, idempotency_key, symbol, exchange, segment, side, quantity, price,
                 order_type, product, status, mode, broker_order_id, charges_json,
-                rejection_reason, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                rejection_reason, preview_hash, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 intent.order_id,
                 intent.idempotency_key,
                 intent.symbol,
+                intent.exchange,
+                intent.segment,
                 intent.side,
                 intent.quantity,
                 intent.price,
@@ -212,6 +275,7 @@ def preview_order_intent(
                 intent.broker_order_id,
                 json.dumps(intent.charges),
                 intent.rejection_reason,
+                intent.preview_hash,
                 now_iso,
                 now_iso,
             ),
@@ -225,34 +289,95 @@ def preview_order_intent(
         details={
             "order_id": intent.order_id,
             "symbol": intent.symbol,
+            "exchange": intent.exchange,
+            "segment": intent.segment,
             "side": intent.side,
             "qty": intent.quantity,
+            "preview_hash": intent.preview_hash,
         },
     )
 
     return intent
 
 
+def confirm_order_intent(order_id: str) -> OrderIntent:
+    """
+    Transition a PREVIEW order to CONFIRMED state.
+    """
+    _init_orders_db()
+    mode_info = get_trading_mode()
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    with sqlite3.connect(_get_db_path(), timeout=30.0) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT * FROM orders_ledger WHERE order_id = ?", (order_id,)).fetchone()
+        if not row:
+            raise ValueError(f"Order {order_id} not found.")
+        d = dict(row)
+
+        if d["mode"] != mode_info.mode.name:
+            raise PermissionError(
+                f"Order {order_id} was generated in {d['mode']} mode but confirmation was attempted in "
+                f"{mode_info.mode.name} mode. Cross-mode confirmation is strictly prohibited."
+            )
+
+        cursor = conn.execute(
+            """
+            UPDATE orders_ledger
+            SET status = 'CONFIRMED', updated_at = ?
+            WHERE order_id = ? AND status = 'PREVIEW' AND mode = ?
+            """,
+            (now_iso, order_id, mode_info.mode.name),
+        )
+        conn.commit()
+        if cursor.rowcount == 0 and d["status"] != "CONFIRMED":
+            raise ValueError(
+                f"Order {order_id} cannot be confirmed because current status is '{d['status']}'."
+            )
+
+        d["status"] = "CONFIRMED"
+        d["updated_at"] = now_iso
+
+    return OrderIntent(
+        order_id=d["order_id"],
+        idempotency_key=d["idempotency_key"],
+        symbol=d["symbol"],
+        exchange=d.get("exchange", "NSE"),
+        segment=d.get("segment", "EQUITY_INTRADAY"),
+        side=d["side"],  # type: ignore
+        quantity=d["quantity"],
+        price=d["price"],
+        order_type=d["order_type"],  # type: ignore
+        product=d["product"],  # type: ignore
+        status="CONFIRMED",
+        mode=d["mode"],
+        broker_order_id=d.get("broker_order_id"),
+        charges=json.loads(d.get("charges_json") or "{}"),
+        rejection_reason=d.get("rejection_reason"),
+        preview_hash=d.get("preview_hash"),
+        created_at=d.get("created_at", now_iso),
+        updated_at=now_iso,
+    )
+
+
 def execute_order_intent(order_id: str) -> OrderIntent:
     """
     Transition a PREVIEW or CONFIRMED order into execution.
 
-    In OBSERVE mode:
-      - Immediately REJECTED — no mutations allowed.
-
-    In SIMULATE / PAPER mode:
-      - Routes to PaperBroker to update real paper holdings, positions, and cash.
-      - Sets status to FILLED_PAPER (or OPEN if limit not met).
-      - Sets broker_order_id with explicit PAPER- prefix.
-      - On PaperBroker error: sets status to REJECTED with the real exception message.
-        NEVER fabricates a filled status on error.
-
-    In EXECUTE (live) mode:
-      - Calls assert_live_execution_allowed() — raises PermissionError if mode/flag not met.
-      - Calls validate_pretrade() — raises ValueError if any gate blocks.
-      - Submits to the real broker adapter obtained from brokers.session.get_broker().
-      - On ambiguous/timeout broker response: transitions to UNKNOWN_FREEZE.
-        NEVER fabricates a broker order ID.
+    P0 Safety & Guardrail Contracts:
+      1. Cross-Mode Protection: Refuses execution if current global runtime mode does not
+         match the exact mode in which the preview was generated. Prevents paper previews
+         from executing live capital upon mode switch.
+      2. Anti-Replay & State Guard: Only permits orders in PREVIEW or CONFIRMED state.
+         Re-execution of terminal (FILLED, REJECTED, UNKNOWN_FREEZE) or in-flight orders raises ValueError.
+      3. Single Atomic Transition: Performs an atomic DB status lock (PREVIEW/CONFIRMED -> SUBMITTING)
+         bound to active mode to guarantee exactly-once execution even under concurrent dispatches.
+      4. Preview Hash Integrity: Cryptographically verifies stored preview_hash against canonical
+         recomputed parameters before initiating any broker submission.
+      5. Authoritative Instrument Resolution: Exchange and segment are resolved authoritatively
+         for equities, commodities (MCX), currencies (CDS), and F&O derivatives.
+      6. Fail-Closed Live OMS: Live execution requires ALLOW_LIVE_TRADING=1, fresh quote context,
+         passing pretrade risk gates, and never fabricates mock orders or IDs on timeout.
     """
     _init_orders_db()
     with sqlite3.connect(_get_db_path(), timeout=30.0) as conn:
@@ -266,6 +391,49 @@ def execute_order_intent(order_id: str) -> OrderIntent:
 
     mode_info = get_trading_mode()
     now_iso = datetime.now(timezone.utc).isoformat()
+
+    # ── P0 Invariant 1: Cross-Mode Protection ──────────────────────────────
+    if d["mode"] != mode_info.mode.name:
+        raise PermissionError(
+            f"Order {order_id} was generated in {d['mode']} mode but execution was attempted in "
+            f"{mode_info.mode.name} mode. Cross-mode order execution is strictly prohibited."
+        )
+
+    # ── P0 Invariant 2: State Guard & Anti-Replay ──────────────────────────
+    if d["status"] not in ("PREVIEW", "CONFIRMED"):
+        raise ValueError(
+            f"Order {order_id} cannot be executed because its current status is '{d['status']}'. "
+            "Re-execution of terminal or already active/submitted orders is strictly prohibited."
+        )
+
+    # ── P0 Invariant 3: Preview Hash Integrity Verification ────────────────
+    canonical_str = (
+        f"{d.get('exchange', 'NSE')}:{d['symbol'].upper()}:{d.get('segment', 'EQUITY_INTRADAY')}:{d['side']}:"
+        f"{d['quantity']}:{float(d['price']):.4f}:{d['order_type']}:{d['product']}:{d['mode']}"
+    )
+    expected_hash = hashlib.sha256(canonical_str.encode()).hexdigest()
+    if d.get("preview_hash") and d["preview_hash"] != expected_hash:
+        raise ValueError(
+            f"Order {order_id} preview hash verification failed (intent parameters were tampered with or corrupted)."
+        )
+
+    # ── P0 Invariant 4: Single Atomic Transition (PREVIEW/CONFIRMED -> SUBMITTING) ──
+    with sqlite3.connect(_get_db_path(), timeout=30.0) as conn:
+        cursor = conn.execute(
+            """
+            UPDATE orders_ledger
+            SET status = 'SUBMITTING', updated_at = ?
+            WHERE order_id = ? AND status IN ('PREVIEW', 'CONFIRMED') AND mode = ?
+            """,
+            (now_iso, order_id, mode_info.mode.name),
+        )
+        conn.commit()
+        if cursor.rowcount == 0:
+            raise ValueError(
+                f"Order {order_id} state transition to SUBMITTING failed (order is not in PREVIEW/CONFIRMED state, mode mismatch, or already submitted)."
+            )
+
+    d["status"] = "SUBMITTING"
 
     if mode_info.is_observe:
         d["status"] = "REJECTED"
@@ -284,11 +452,15 @@ def execute_order_intent(order_id: str) -> OrderIntent:
         try:
             from brokers.base import OrderRequest
             from engine.paper import PaperBroker
+            from market.instruments import resolve_canonical_instrument
+
+            inst = resolve_canonical_instrument(d["symbol"])
+            _paper_exchange = d.get("exchange") or inst.exchange
 
             paper_broker = PaperBroker()
             req = OrderRequest(
                 symbol=d["symbol"],
-                exchange="NSE",
+                exchange=_paper_exchange,
                 transaction_type=d["side"],
                 order_type=d["order_type"],
                 product=d["product"],
@@ -306,9 +478,6 @@ def execute_order_intent(order_id: str) -> OrderIntent:
                 d["status"] = "OPEN"
                 d["broker_order_id"] = f"PAPER-OPEN-{paper_res.order_id}"
         except Exception as paper_exc:
-            # PaperBroker raised — do NOT fabricate a FILLED status.
-            # Record the real exception as a rejected order so the ledger
-            # and audit trail reflect the actual outcome.
             d["status"] = "REJECTED"
             d["rejection_reason"] = f"PaperBroker error: {paper_exc}"
             d["broker_order_id"] = None
@@ -332,7 +501,6 @@ def execute_order_intent(order_id: str) -> OrderIntent:
         )
     else:
         # ── Live broker execution ───────────────────────────────────────────
-        # Safety gate 1: mode + server feature flag
         from engine.modes import assert_live_execution_allowed
 
         assert_live_execution_allowed()  # raises PermissionError if not EXECUTE + ALLOW_LIVE_TRADING=1
@@ -340,15 +508,14 @@ def execute_order_intent(order_id: str) -> OrderIntent:
         # Safety gate 2: pre-trade validation with live market context
         from engine.pretrade import validate_pretrade
         from engine.observability import new_correlation_id
-        # datetime and timezone are imported at module level — do NOT re-import here
-        # as a local `from datetime import datetime` would shadow the module-level name
-        # across the entire function scope in Python 3.12+ (UnboundLocalError).
+        from market.instruments import resolve_canonical_instrument
 
         pretrade_correlation_id = new_correlation_id("live_order")
+        inst = resolve_canonical_instrument(d["symbol"])
+        _live_exchange = d.get("exchange") or inst.exchange
+        _live_segment = d.get("segment") or inst.segment
 
         # Fetch live quote + broker funds BEFORE calling validate_pretrade.
-        # Gate 8 (data_freshness) fails-closed when quote_age_seconds is None,
-        # so we MUST supply a fresh quote here or the order will be correctly rejected.
         _ltp: float | None = None
         _quote_age_seconds: float | None = None
         _available_cash: float | None = None
@@ -356,28 +523,39 @@ def execute_order_intent(order_id: str) -> OrderIntent:
 
         try:
             from brokers.session import get_broker as _get_broker_inner
+
             _ctx_broker = _get_broker_inner()
             if _ctx_broker is None:
                 raise RuntimeError("No authenticated broker session for pretrade context fetch.")
 
-            _account = (
-                getattr(_ctx_broker, "account_id", None)
-                or getattr(_ctx_broker, "client_id", None)
+            _account = getattr(_ctx_broker, "account_id", None) or getattr(
+                _ctx_broker, "client_id", None
             )
 
-            # Fetch live quote and record the fetch timestamp immediately
-            _instrument = f"NSE:{d['symbol']}"
+            # Fetch live quote using authoritative exchange prefix
+            _instrument = f"{_live_exchange}:{d['symbol']}"
             _quote_fetched_at = datetime.now(timezone.utc)
             _quotes = _ctx_broker.get_quote([_instrument])
-            _q = _quotes.get(_instrument) if isinstance(_quotes, dict) else (
-                next((q for q in _quotes if getattr(q, "symbol", None) in (_instrument, d["symbol"])), None)
-                if _quotes else None
+            _q = (
+                _quotes.get(_instrument)
+                if isinstance(_quotes, dict)
+                else (
+                    next(
+                        (
+                            q
+                            for q in _quotes
+                            if getattr(q, "symbol", None) in (_instrument, d["symbol"])
+                        ),
+                        None,
+                    )
+                    if _quotes
+                    else None
+                )
             )
             if _q is not None:
                 _ltp = getattr(_q, "last_price", None)
             _quote_age_seconds = (datetime.now(timezone.utc) - _quote_fetched_at).total_seconds()
 
-            # Fetch funds for buying-power gate
             _funds = _ctx_broker.get_funds()
             _available_cash = (
                 _funds.available_cash
@@ -388,35 +566,17 @@ def execute_order_intent(order_id: str) -> OrderIntent:
             )
 
         except Exception as _ctx_exc:
-            # Fail-closed: if context fetch fails, freeze the order before pretrade.
             d["status"] = "UNKNOWN_FREEZE"
-            d["rejection_reason"] = (
-                f"Live pretrade context fetch failed: {_ctx_exc}. "
-                "Order frozen for manual reconciliation."
-            )
+            d["rejection_reason"] = f"Live pretrade context fetch failed: {_ctx_exc}."
             with sqlite3.connect(_get_db_path(), timeout=30.0) as conn:
                 conn.execute(
                     "UPDATE orders_ledger SET status = ?, rejection_reason = ?, updated_at = ? WHERE order_id = ?",
                     (d["status"], d["rejection_reason"], now_iso, order_id),
                 )
                 conn.commit()
-            record_audit_event(
-                event_type="ORDER_UNKNOWN_FREEZE",
-                mode=mode_info.mode.name,
-                details={
-                    "order_id": order_id,
-                    "correlation_id": pretrade_correlation_id,
-                    "exception": str(_ctx_exc),
-                    "stage": "pretrade_context_fetch",
-                },
-            )
             raise RuntimeError(
                 f"Live order {order_id} frozen (pretrade context fetch failed): {_ctx_exc}"
             ) from _ctx_exc
-
-        # Resolve segment from product for lot-size and session checks
-        _product = d.get("product", "MIS").upper()
-        _segment = "FUT" if _product == "NRML" else "EQ"
 
         pretrade = validate_pretrade(
             symbol=d["symbol"],
@@ -424,7 +584,7 @@ def execute_order_intent(order_id: str) -> OrderIntent:
             quantity=d["quantity"],
             order_type=d["order_type"],
             price=d["price"] if d["price"] else None,
-            segment=_segment,
+            segment=_live_segment,
             account=_account,
             ltp=_ltp,
             quote_age_seconds=_quote_age_seconds,
@@ -441,15 +601,6 @@ def execute_order_intent(order_id: str) -> OrderIntent:
                     (d["status"], d["rejection_reason"], now_iso, order_id),
                 )
                 conn.commit()
-            record_audit_event(
-                event_type="ORDER_REJECTED_PRETRADE",
-                mode=mode_info.mode.name,
-                details={
-                    "order_id": order_id,
-                    "correlation_id": pretrade_correlation_id,
-                    "blocking_reasons": pretrade.blocking_reasons,
-                },
-            )
             raise ValueError(f"Pre-trade validation blocked: {reasons}")
 
         # Safety gate 3: submit to real broker adapter
@@ -463,7 +614,7 @@ def execute_order_intent(order_id: str) -> OrderIntent:
 
             broker_req = OrderRequest(
                 symbol=d["symbol"],
-                exchange="NSE",
+                exchange=_live_exchange,
                 transaction_type=d["side"],
                 order_type=d["order_type"],
                 product=d["product"],
@@ -471,20 +622,10 @@ def execute_order_intent(order_id: str) -> OrderIntent:
                 price=d["price"],
             )
 
-            # Mark SUBMITTING before we call the broker so a crash mid-call
-            # leaves an auditable state rather than staying CONFIRMED.
-            with sqlite3.connect(_get_db_path(), timeout=30.0) as conn:
-                conn.execute(
-                    "UPDATE orders_ledger SET status = 'SUBMITTING', updated_at = ? WHERE order_id = ?",
-                    (now_iso, order_id),
-                )
-                conn.commit()
-
             broker_res = live_broker.place_order(broker_req)
 
             if broker_res.status == "COMPLETE" or broker_res.status == "OPEN":
                 d["status"] = "OPEN" if broker_res.status == "OPEN" else "FILLED"
-                # Use the real broker-assigned order ID — never fabricate
                 d["broker_order_id"] = broker_res.order_id
 
                 with sqlite3.connect(_get_db_path(), timeout=30.0) as conn:
@@ -493,17 +634,6 @@ def execute_order_intent(order_id: str) -> OrderIntent:
                         (d["status"], d["broker_order_id"], now_iso, order_id),
                     )
                     conn.commit()
-
-                record_audit_event(
-                    event_type="ORDER_SUBMITTED_LIVE",
-                    mode=mode_info.mode.name,
-                    details={
-                        "order_id": order_id,
-                        "broker_order_id": d["broker_order_id"],
-                        "correlation_id": pretrade_correlation_id,
-                        "status": d["status"],
-                    },
-                )
 
             elif broker_res.status == "REJECTED":
                 d["status"] = "REJECTED"
@@ -515,30 +645,25 @@ def execute_order_intent(order_id: str) -> OrderIntent:
                         (d["status"], d["rejection_reason"], now_iso, order_id),
                     )
                     conn.commit()
-
-                record_audit_event(
-                    event_type="ORDER_REJECTED_LIVE_BROKER",
-                    mode=mode_info.mode.name,
-                    details={
-                        "order_id": order_id,
-                        "correlation_id": pretrade_correlation_id,
-                        "rejection_reason": d["rejection_reason"],
-                    },
-                )
-
             else:
-                # Ambiguous broker response — transition to UNKNOWN_FREEZE.
-                # NEVER fabricate a broker order ID for an unknown outcome.
+                # Ambiguous state -> freeze
                 d["status"] = "UNKNOWN_FREEZE"
+                d["broker_order_id"] = None
                 d["rejection_reason"] = (
-                    f"Broker returned ambiguous status '{broker_res.status}'. "
+                    f"Ambiguous broker response status: {broker_res.status}. "
                     "Order frozen for manual reconciliation."
                 )
 
                 with sqlite3.connect(_get_db_path(), timeout=30.0) as conn:
                     conn.execute(
-                        "UPDATE orders_ledger SET status = ?, rejection_reason = ?, updated_at = ? WHERE order_id = ?",
-                        (d["status"], d["rejection_reason"], now_iso, order_id),
+                        "UPDATE orders_ledger SET status = ?, broker_order_id = ?, rejection_reason = ?, updated_at = ? WHERE order_id = ?",
+                        (
+                            d["status"],
+                            d["broker_order_id"],
+                            d["rejection_reason"],
+                            now_iso,
+                            order_id,
+                        ),
                     )
                     conn.commit()
 
@@ -548,25 +673,23 @@ def execute_order_intent(order_id: str) -> OrderIntent:
                     details={
                         "order_id": order_id,
                         "correlation_id": pretrade_correlation_id,
-                        "broker_status": broker_res.status,
+                        "broker_response_status": broker_res.status,
                     },
                 )
 
-        except (PermissionError, ValueError):
-            raise  # Already handled above — propagate without wrapping
         except Exception as live_exc:
-            # Network error, timeout, or unknown broker exception.
-            # Transition to UNKNOWN_FREEZE — do NOT fabricate any status or ID.
+            # Ambiguous or timed-out broker call: MUST NOT fabricate order ID or set OPEN.
             d["status"] = "UNKNOWN_FREEZE"
+            d["broker_order_id"] = None
             d["rejection_reason"] = (
-                f"Live broker submission failed with exception: {live_exc}. "
-                "Order frozen for manual reconciliation."
+                f"Live broker call raised {type(live_exc).__name__}: {live_exc}. "
+                "Order status ambiguous; frozen for manual reconciliation."
             )
 
             with sqlite3.connect(_get_db_path(), timeout=30.0) as conn:
                 conn.execute(
-                    "UPDATE orders_ledger SET status = ?, rejection_reason = ?, updated_at = ? WHERE order_id = ?",
-                    (d["status"], d["rejection_reason"], now_iso, order_id),
+                    "UPDATE orders_ledger SET status = ?, broker_order_id = ?, rejection_reason = ?, updated_at = ? WHERE order_id = ?",
+                    (d["status"], d["broker_order_id"], d["rejection_reason"], now_iso, order_id),
                 )
                 conn.commit()
 
@@ -580,13 +703,15 @@ def execute_order_intent(order_id: str) -> OrderIntent:
                 },
             )
             raise RuntimeError(
-                f"Live order {order_id} transitioned to UNKNOWN_FREEZE due to: {live_exc}"
+                f"Live order {order_id} frozen in UNKNOWN_FREEZE state due to broker exception: {live_exc}"
             ) from live_exc
 
     return OrderIntent(
         order_id=d["order_id"],
         idempotency_key=d["idempotency_key"],
         symbol=d["symbol"],
+        exchange=d.get("exchange", "NSE"),
+        segment=d.get("segment", "EQUITY_INTRADAY"),
         side=d["side"],  # type: ignore
         quantity=d["quantity"],
         price=d["price"],
@@ -594,9 +719,10 @@ def execute_order_intent(order_id: str) -> OrderIntent:
         product=d["product"],  # type: ignore
         status=d["status"],  # type: ignore
         mode=d["mode"],
-        broker_order_id=d["broker_order_id"],
-        charges=json.loads(d["charges_json"] or "{}"),
-        rejection_reason=d["rejection_reason"],
-        created_at=d["created_at"],
+        broker_order_id=d.get("broker_order_id"),
+        charges=json.loads(d.get("charges_json") or "{}"),
+        rejection_reason=d.get("rejection_reason"),
+        preview_hash=d.get("preview_hash"),
+        created_at=d.get("created_at", now_iso),
         updated_at=now_iso,
     )

@@ -1,8 +1,9 @@
-﻿"""
+"""
 tests/test_reconciliation_typed.py
 Tests that the reconciliation normalizer handles both typed Position/Funds
 dataclasses (returned by real brokers) and raw dicts (returned by mocks).
 """
+
 import pytest
 from brokers.base import Position, Funds
 
@@ -28,8 +29,15 @@ def _funds_cash(f) -> float:
 
 
 def test_pos_to_dict_from_dataclass():
-    pos = Position(symbol="RELIANCE", exchange="NSE", product="MIS",
-                   quantity=10, avg_price=2800.50, last_price=2810.00, pnl=95.0)
+    pos = Position(
+        symbol="RELIANCE",
+        exchange="NSE",
+        product="MIS",
+        quantity=10,
+        avg_price=2800.50,
+        last_price=2810.00,
+        pnl=95.0,
+    )
     result = _pos_to_dict(pos)
     assert result["symbol"] == "RELIANCE"
     assert result["qty"] == 10
@@ -37,8 +45,15 @@ def test_pos_to_dict_from_dataclass():
 
 
 def test_pos_to_dict_from_dataclass_zero_qty():
-    pos = Position(symbol="TCS", exchange="NSE", product="CNC",
-                   quantity=0, avg_price=3500.0, last_price=3510.0, pnl=0.0)
+    pos = Position(
+        symbol="TCS",
+        exchange="NSE",
+        product="CNC",
+        quantity=0,
+        avg_price=3500.0,
+        last_price=3510.0,
+        pnl=0.0,
+    )
     result = _pos_to_dict(pos)
     assert result["qty"] == 0
     assert result["symbol"] == "TCS"
