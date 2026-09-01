@@ -236,12 +236,23 @@ def preview_order_intent(
 def execute_order_intent(order_id: str) -> OrderIntent:
     """
     Transition a PREVIEW or CONFIRMED order into execution.
+
+    In OBSERVE mode:
+      - Immediately REJECTED — no mutations allowed.
+
     In SIMULATE / PAPER mode:
       - Routes to PaperBroker to update real paper holdings, positions, and cash.
       - Sets status to FILLED_PAPER (or OPEN if limit not met).
       - Sets broker_order_id with explicit PAPER- prefix.
-    In OBSERVE mode:
-      - Rejects order with clear reason.
+      - On PaperBroker error: sets status to REJECTED with the real exception message.
+        NEVER fabricates a filled status on error.
+
+    In EXECUTE (live) mode:
+      - Calls assert_live_execution_allowed() — raises PermissionError if mode/flag not met.
+      - Calls validate_pretrade() — raises ValueError if any gate blocks.
+      - Submits to the real broker adapter obtained from brokers.session.get_broker().
+      - On ambiguous/timeout broker response: transitions to UNKNOWN_FREEZE.
+        NEVER fabricates a broker order ID.
     """
     _init_orders_db()
     with sqlite3.connect(_get_db_path(), timeout=30.0) as conn:
@@ -294,43 +305,203 @@ def execute_order_intent(order_id: str) -> OrderIntent:
             else:
                 d["status"] = "OPEN"
                 d["broker_order_id"] = f"PAPER-OPEN-{paper_res.order_id}"
-        except Exception:
-            d["status"] = "FILLED_PAPER"
-            d["broker_order_id"] = f"PAPER-EXEC-{uuid.uuid4().hex[:6].upper()}"
+        except Exception as paper_exc:
+            # PaperBroker raised — do NOT fabricate a FILLED status.
+            # Record the real exception as a rejected order so the ledger
+            # and audit trail reflect the actual outcome.
+            d["status"] = "REJECTED"
+            d["rejection_reason"] = f"PaperBroker error: {paper_exc}"
+            d["broker_order_id"] = None
 
         with sqlite3.connect(_get_db_path(), timeout=30.0) as conn:
             conn.execute(
-                "UPDATE orders_ledger SET status = ?, broker_order_id = ?, updated_at = ? WHERE order_id = ?",
-                (d["status"], d["broker_order_id"], now_iso, order_id),
+                "UPDATE orders_ledger SET status = ?, broker_order_id = ?, rejection_reason = ?, updated_at = ? WHERE order_id = ?",
+                (d["status"], d["broker_order_id"], d["rejection_reason"], now_iso, order_id),
             )
             conn.commit()
 
         record_audit_event(
-            event_type="ORDER_FILLED_PAPER",
+            event_type="ORDER_FILLED_PAPER" if d["status"] == "FILLED_PAPER" else "ORDER_REJECTED",
             mode=mode_info.mode.name,
             details={
                 "order_id": order_id,
                 "broker_order_id": d["broker_order_id"],
                 "status": d["status"],
+                "rejection_reason": d.get("rejection_reason"),
             },
         )
     else:
-        # Live execution (requires active broker session)
-        d["status"] = "OPEN"
-        d["broker_order_id"] = f"LIVE-{uuid.uuid4().hex[:6].upper()}"
+        # ── Live broker execution ───────────────────────────────────────────
+        # Safety gate 1: mode + server feature flag
+        from engine.modes import assert_live_execution_allowed
 
-        with sqlite3.connect(_get_db_path(), timeout=30.0) as conn:
-            conn.execute(
-                "UPDATE orders_ledger SET status = ?, broker_order_id = ?, updated_at = ? WHERE order_id = ?",
-                (d["status"], d["broker_order_id"], now_iso, order_id),
-            )
-            conn.commit()
+        assert_live_execution_allowed()  # raises PermissionError if not EXECUTE + ALLOW_LIVE_TRADING=1
 
-        record_audit_event(
-            event_type="ORDER_SUBMITTED_BROKER",
-            mode=mode_info.mode.name,
-            details={"order_id": order_id, "broker_order_id": d["broker_order_id"]},
+        # Safety gate 2: pre-trade validation
+        from engine.pretrade import validate_pretrade
+        from engine.observability import new_correlation_id
+
+        pretrade_correlation_id = new_correlation_id("live_order")
+        pretrade = validate_pretrade(
+            symbol=d["symbol"],
+            side=d["side"],
+            quantity=d["quantity"],
+            order_type=d["order_type"],
+            price=d["price"] if d["price"] else None,
+            segment="EQ",  # Caller may extend to pass segment; EQ is the safe default
+            correlation_id=pretrade_correlation_id,
         )
+        if not pretrade.is_eligible:
+            reasons = "; ".join(pretrade.blocking_reasons)
+            d["status"] = "REJECTED"
+            d["rejection_reason"] = f"Pre-trade validation blocked: {reasons}"
+            with sqlite3.connect(_get_db_path(), timeout=30.0) as conn:
+                conn.execute(
+                    "UPDATE orders_ledger SET status = ?, rejection_reason = ?, updated_at = ? WHERE order_id = ?",
+                    (d["status"], d["rejection_reason"], now_iso, order_id),
+                )
+                conn.commit()
+            record_audit_event(
+                event_type="ORDER_REJECTED_PRETRADE",
+                mode=mode_info.mode.name,
+                details={
+                    "order_id": order_id,
+                    "correlation_id": pretrade_correlation_id,
+                    "blocking_reasons": pretrade.blocking_reasons,
+                },
+            )
+            raise ValueError(f"Pre-trade validation blocked: {reasons}")
+
+        # Safety gate 3: submit to real broker adapter
+        try:
+            from brokers.session import get_broker
+            from brokers.base import OrderRequest
+
+            live_broker = get_broker()
+            if live_broker is None:
+                raise RuntimeError("No authenticated broker session available for live execution.")
+
+            broker_req = OrderRequest(
+                symbol=d["symbol"],
+                exchange="NSE",
+                side=d["side"],
+                order_type=d["order_type"],
+                product=d["product"],
+                quantity=d["quantity"],
+                price=d["price"],
+            )
+
+            # Mark SUBMITTING before we call the broker so a crash mid-call
+            # leaves an auditable state rather than staying CONFIRMED.
+            with sqlite3.connect(_get_db_path(), timeout=30.0) as conn:
+                conn.execute(
+                    "UPDATE orders_ledger SET status = 'SUBMITTING', updated_at = ? WHERE order_id = ?",
+                    (now_iso, order_id),
+                )
+                conn.commit()
+
+            broker_res = live_broker.place_order(broker_req)
+
+            if broker_res.status == "COMPLETE" or broker_res.status == "OPEN":
+                d["status"] = "OPEN" if broker_res.status == "OPEN" else "FILLED"
+                # Use the real broker-assigned order ID — never fabricate
+                d["broker_order_id"] = broker_res.order_id
+
+                with sqlite3.connect(_get_db_path(), timeout=30.0) as conn:
+                    conn.execute(
+                        "UPDATE orders_ledger SET status = ?, broker_order_id = ?, updated_at = ? WHERE order_id = ?",
+                        (d["status"], d["broker_order_id"], now_iso, order_id),
+                    )
+                    conn.commit()
+
+                record_audit_event(
+                    event_type="ORDER_SUBMITTED_LIVE",
+                    mode=mode_info.mode.name,
+                    details={
+                        "order_id": order_id,
+                        "broker_order_id": d["broker_order_id"],
+                        "correlation_id": pretrade_correlation_id,
+                        "status": d["status"],
+                    },
+                )
+
+            elif broker_res.status == "REJECTED":
+                d["status"] = "REJECTED"
+                d["rejection_reason"] = broker_res.message or "Rejected by live broker"
+
+                with sqlite3.connect(_get_db_path(), timeout=30.0) as conn:
+                    conn.execute(
+                        "UPDATE orders_ledger SET status = ?, rejection_reason = ?, updated_at = ? WHERE order_id = ?",
+                        (d["status"], d["rejection_reason"], now_iso, order_id),
+                    )
+                    conn.commit()
+
+                record_audit_event(
+                    event_type="ORDER_REJECTED_LIVE_BROKER",
+                    mode=mode_info.mode.name,
+                    details={
+                        "order_id": order_id,
+                        "correlation_id": pretrade_correlation_id,
+                        "rejection_reason": d["rejection_reason"],
+                    },
+                )
+
+            else:
+                # Ambiguous broker response — transition to UNKNOWN_FREEZE.
+                # NEVER fabricate a broker order ID for an unknown outcome.
+                d["status"] = "UNKNOWN_FREEZE"
+                d["rejection_reason"] = (
+                    f"Broker returned ambiguous status '{broker_res.status}'. "
+                    "Order frozen for manual reconciliation."
+                )
+
+                with sqlite3.connect(_get_db_path(), timeout=30.0) as conn:
+                    conn.execute(
+                        "UPDATE orders_ledger SET status = ?, rejection_reason = ?, updated_at = ? WHERE order_id = ?",
+                        (d["status"], d["rejection_reason"], now_iso, order_id),
+                    )
+                    conn.commit()
+
+                record_audit_event(
+                    event_type="ORDER_UNKNOWN_FREEZE",
+                    mode=mode_info.mode.name,
+                    details={
+                        "order_id": order_id,
+                        "correlation_id": pretrade_correlation_id,
+                        "broker_status": broker_res.status,
+                    },
+                )
+
+        except (PermissionError, ValueError):
+            raise  # Already handled above — propagate without wrapping
+        except Exception as live_exc:
+            # Network error, timeout, or unknown broker exception.
+            # Transition to UNKNOWN_FREEZE — do NOT fabricate any status or ID.
+            d["status"] = "UNKNOWN_FREEZE"
+            d["rejection_reason"] = (
+                f"Live broker submission failed with exception: {live_exc}. "
+                "Order frozen for manual reconciliation."
+            )
+
+            with sqlite3.connect(_get_db_path(), timeout=30.0) as conn:
+                conn.execute(
+                    "UPDATE orders_ledger SET status = ?, rejection_reason = ?, updated_at = ? WHERE order_id = ?",
+                    (d["status"], d["rejection_reason"], now_iso, order_id),
+                )
+                conn.commit()
+
+            record_audit_event(
+                event_type="ORDER_UNKNOWN_FREEZE",
+                mode=mode_info.mode.name,
+                details={
+                    "order_id": order_id,
+                    "correlation_id": pretrade_correlation_id,
+                    "exception": str(live_exc),
+                },
+            )
+            raise RuntimeError(
+                f"Live order {order_id} transitioned to UNKNOWN_FREEZE due to: {live_exc}"
+            ) from live_exc
 
     return OrderIntent(
         order_id=d["order_id"],

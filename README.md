@@ -316,6 +316,17 @@ python -m app.main --tui
 ## 🔌 Broker Connectivity & Safety Defaults
 
 - **Safety First (`TRADING_MODE=PAPER`)**: By default, all orders, test suites, and backtesting run in simulated paper mode with realistic execution slippage and SEBI/STT statutory levies.
+- **Fail-Closed Live Execution Pipeline** ([`engine/order_lifecycle.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/order_lifecycle.py)):
+  - Live execution in `EXECUTE` mode is strictly gated behind `ALLOW_LIVE_TRADING=1` and `assert_live_execution_allowed()`.
+  - All orders MUST pass through `validate_pretrade()` before reaching broker adapters.
+  - Live order requests transition to `SUBMITTING` in the internal ledger before placement. Ambiguous responses or network timeouts transition fail-closed to `UNKNOWN_FREEZE` with zero fabricated IDs.
+  - Paper mode exceptions produce `REJECTED` status with explicit error context rather than fabricated fills.
+- **Canonical Mode Normalization** (`GET /api/mode` in [`web/api.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/web/api.py)):
+  - Centralized server-authoritative translation: `OBSERVE → DEMO`, `SIMULATE → PAPER`, `EXECUTE → LIVE`. Prevents execution mode from ever silently displaying as paper trading.
+- **Truthful Decision Dossiers** ([`engine/security_360.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/security_360.py)):
+  - Multi-dimensional equity intelligence returns transparent `UNAVAILABLE` and `PARTIAL` states when live data or valuation metrics are absent, completely eliminating hardcoded price fallbacks, fake DCF targets, or synthetic bull-case biases.
+- **Auditable Reconciliation Engine** (`GET /api/reconciliation` in [`web/api.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/web/api.py)):
+  - Audits live broker positions and funds against the internal ledger. Returns `UNAVAILABLE` when no authenticated session is present (never compares internal ledger against itself) and supplies `broker_account_id`, `broker_snapshot_at`, and `correlation_id`.
 - **Dual-Broker Separation**:
   - **Data Feeds**: Free live ticks & options chains via **Fyers API v3**.
   - **Execution**: Seamless order routing via **Zerodha Kite Connect**, **Angel One SmartAPI**, **Groww**, **Upstox**, **Dhan**, or **Mock Broker**.
@@ -336,15 +347,18 @@ ChanakyaTrade provides a **Tiered Validation Architecture** so you run only what
 # Runs all linters + Vitest + Web Bundle Build + Full 2,188+ Pytest Matrix with 4 parallel workers
 .venv\Scripts\python.exe scripts/validate_all.py --full
 
-# 3. Daily / Nightly deep regression & simulation runner
+# 3. New Execution & Truthfulness Regression Suites
+.venv\Scripts\pytest.exe tests/test_live_oms_p3b.py tests/test_mode_banner_mapping.py tests/test_security_360_unavailable.py tests/test_reconciliation_unavailable.py -v
+
+# 4. Daily / Nightly deep regression & simulation runner
 # Runs full test suite + 500-iteration Monte Carlo & options stress tests + Live network integration
 .venv\Scripts\python.exe scripts/validate_daily.py
 
-# 4. Universal environment & process cleanup
+# 5. Universal environment & process cleanup
 # Kills orphaned worker processes, frees port 8765, removes temp sqlite databases
 .venv\Scripts\python.exe scripts/cleanup.py
 
-# 5. Auto-fix Python lint & formatting errors
+# 6. Auto-fix Python lint & formatting errors
 .venv\Scripts\python.exe scripts/validate_all.py --fix
 ```
 

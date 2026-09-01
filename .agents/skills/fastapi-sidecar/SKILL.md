@@ -28,6 +28,8 @@ The FastAPI sidecar (`web.api:app`) runs on `http://127.0.0.1:8765`:
 | `/` | `GET` | HTML broker login dashboard |
 | `/<broker>/login` | `GET` | Initiate OAuth flow |
 | `/<broker>/callback` | `GET` | Receive auth code/token from broker |
+| `/api/mode` | `GET` | Canonical server-authoritative mode (`DEMO`, `PAPER`, `LIVE`) |
+| `/api/reconciliation` | `GET` | Live broker vs internal ledger reconciliation (`UNAVAILABLE` if disconnected) |
 | `/api/status` | `GET` | Active broker session status |
 | `/api/portfolio` | `GET` | Combined positions & holdings |
 | `/api/stream/events` | `GET` | SSE real-time market updates & agent output |

@@ -395,6 +395,43 @@ async def health_readiness():
     return JSONResponse(result, status_code=status_code)
 
 
+# ── P0-B: Canonical Mode Endpoint ────────────────────────────────────────────
+
+
+@app.get("/api/mode", tags=["System"])
+async def api_mode():
+    """
+    Server-authoritative operating mode.
+
+    Returns the current TradingMode normalised to the canonical UI enum so that
+    ModeBanner.jsx (which only understands PAPER | DEMO | LIVE) always receives
+    a value it can display correctly.
+
+    Mapping:
+        OBSERVE   → DEMO   (read-only; no data mutations)
+        SIMULATE  → PAPER  (paper trading sandbox; default)
+        EXECUTE   → LIVE   (real broker execution; real risk)
+
+    The raw backend_mode is also returned for diagnostics.
+    """
+    from engine.modes import get_trading_mode
+
+    mode_info = get_trading_mode()
+    _UI_MODE_MAP = {
+        "OBSERVE": "DEMO",
+        "SIMULATE": "PAPER",
+        "EXECUTE": "LIVE",
+    }
+    ui_mode = _UI_MODE_MAP.get(mode_info.mode.value, "PAPER")
+    return JSONResponse(
+        {
+            "mode": ui_mode,
+            "backend_mode": mode_info.mode.value,
+            "description": mode_info.description,
+        }
+    )
+
+
 @app.get("/api/slo", tags=["Observability"])
 async def get_slo_report(journey_id: str = None):
     """
@@ -2284,10 +2321,21 @@ async def api_risk_preflight(req: RiskPreflightRequest):
 
 @app.get("/api/reconciliation")
 async def api_reconciliation():
-    """Run ledger vs broker reconciliation and return discrepancy report."""
-    from engine.reconciliation import reconcile_ledger
+    """
+    Ledger vs broker reconciliation.
 
-    # Retrieve internal active positions & broker positions
+    Requires a live, authenticated broker snapshot.  If no broker session is
+    available the endpoint returns status='UNAVAILABLE' — it does NOT compare
+    the internal ledger against itself, which would always report a clean
+    reconciliation and mask real discrepancies.
+    """
+    from engine.reconciliation import reconcile_ledger
+    from engine.observability import new_correlation_id
+    from datetime import datetime, timezone
+
+    correlation_id = new_correlation_id("reconciliation")
+
+    # 1. Fetch internal ledger positions
     try:
         from engine.portfolio import get_portfolio_summary
 
@@ -2296,21 +2344,77 @@ async def api_reconciliation():
             {"symbol": p.symbol, "qty": p.qty, "avg_price": p.avg_price, "pnl": p.pnl}
             for p in summary.positions
         ]
-        cash_val = (
-            summary.funds.available_cash if hasattr(summary.funds, "available_cash") else 1000000.0
-        )
+        cash_val = summary.funds.available_cash if hasattr(summary.funds, "available_cash") else 0.0
     except Exception:
         int_positions = []
-        cash_val = 1000000.0
+        cash_val = 0.0
 
+    # 2. Fetch REAL broker snapshot — never use internal positions as broker positions
+    try:
+        from brokers.session import get_broker
+
+        live_broker = get_broker()
+        if live_broker is None:
+            raise RuntimeError("No authenticated broker session.")
+
+        broker_positions_raw = live_broker.get_positions()
+        broker_funds_raw = live_broker.get_funds()
+
+        # Validate snapshot freshness
+        snapshot_at = datetime.now(timezone.utc).isoformat()
+        broker_account_id = (
+            getattr(live_broker, "account_id", None)
+            or getattr(live_broker, "client_id", None)
+            or "UNKNOWN"
+        )
+
+        # Normalise broker positions to the same dict schema as internal_positions
+        broker_positions = [
+            {
+                "symbol": p.get("symbol") or p.get("tradingsymbol", ""),
+                "qty": int(p.get("quantity", p.get("qty", 0))),
+                "avg_price": float(p.get("average_price", p.get("avg_price", 0.0))),
+            }
+            for p in (broker_positions_raw or [])
+        ]
+        broker_cash = float(
+            broker_funds_raw.get("available_cash", broker_funds_raw.get("net", 0.0))
+            if isinstance(broker_funds_raw, dict)
+            else 0.0
+        )
+
+    except Exception as broker_exc:
+        # No authenticated broker session — cannot reconcile honestly
+        return JSONResponse(
+            {
+                "status": "UNAVAILABLE",
+                "reason": (
+                    f"Reconciliation requires an authenticated broker snapshot. "
+                    f"No broker session available: {broker_exc}"
+                ),
+                "broker_positions": None,
+                "broker_cash": None,
+                "internal_positions": int_positions,
+                "internal_cash": cash_val,
+                "broker_account_id": None,
+                "broker_snapshot_at": None,
+                "correlation_id": correlation_id,
+            }
+        )
+
+    # 3. Run reconciliation against the real broker snapshot
     report = reconcile_ledger(
         internal_positions=int_positions,
-        broker_positions=int_positions,
+        broker_positions=broker_positions,
         internal_cash=cash_val,
-        broker_cash=cash_val,
-        broker_name="INTERNAL_ACTIVE_LEDGER",
+        broker_cash=broker_cash,
+        broker_name=broker_account_id,
     )
-    return JSONResponse(report.to_dict())
+    result = report.to_dict()
+    result["broker_account_id"] = broker_account_id
+    result["broker_snapshot_at"] = snapshot_at
+    result["correlation_id"] = correlation_id
+    return JSONResponse(result)
 
 
 @app.get("/api/audit/logs")
