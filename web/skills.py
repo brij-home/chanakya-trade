@@ -1851,7 +1851,8 @@ class ReconcileRequest(BaseModel):
     broker_name: Optional[str] = None
 
 
-@router.api_route("/reconcile", methods=["GET", "POST"])
+@router.post("/reconcile", operation_id="skill_reconcile_post")
+@router.get("/reconcile", operation_id="skill_reconcile_get")
 async def skill_reconcile(req: Optional[ReconcileRequest] = None):
     """Reconcile internal position ledger against broker statement snapshot."""
     try:
@@ -5254,7 +5255,8 @@ class JournalAddRequest(BaseModel):
     order_id: Optional[str] = None
 
 
-@router.api_route("/journal/list", methods=["GET", "POST"])
+@router.post("/journal/list", operation_id="skill_journal_list_post")
+@router.get("/journal/list", operation_id="skill_journal_list_get")
 async def skill_journal_list(status: Optional[str] = None):
     """Retrieve all trade journal records and analytical payoff status."""
     try:
@@ -5290,7 +5292,8 @@ async def skill_journal_add(req: JournalAddRequest):
         raise _err(str(e))
 
 
-@router.api_route("/journal/stats", methods=["GET", "POST"])
+@router.post("/journal/stats", operation_id="skill_journal_stats_post")
+@router.get("/journal/stats", operation_id="skill_journal_stats_get")
 async def skill_journal_stats():
     """Compute institutional performance analytics (Win Rate, Profit Factor, Expectancy R)."""
     try:
@@ -5308,7 +5311,8 @@ class Security360Request(BaseModel):
     current_price: Optional[float] = None
 
 
-@router.api_route("/security_360", methods=["GET", "POST"])
+@router.post("/security_360", operation_id="skill_security_360_post")
+@router.get("/security_360", operation_id="skill_security_360_get")
 async def skill_security_360(
     req: Optional[Security360Request] = None, symbol: Optional[str] = None
 ):
