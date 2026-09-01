@@ -25,7 +25,7 @@ def test_api_openapi_spec_generation(client):
     assert "openapi" in schema
     paths = schema["paths"]
 
-    # Critical P0-A, P0-B, P1-A & P1-B API Endpoints must be present in schema
+    # Critical P0-A, P0-B, P1-A, P1-B & P1-C API Endpoints must be present in schema
     assert "/api/mode" in paths
     assert "/api/preflight" in paths
     assert "/api/orders/preview" in paths
@@ -39,6 +39,10 @@ def test_api_openapi_spec_generation(client):
     assert "/skills/market_session" in paths
     assert "/skills/models/list" in paths
     assert "/skills/models/manifest" in paths
+    assert "/skills/reconcile" in paths
+    assert "/skills/journal/list" in paths
+    assert "/skills/journal/add" in paths
+    assert "/skills/journal/stats" in paths
 
 
 def test_mode_endpoint_contract(client):
@@ -131,3 +135,44 @@ def test_models_list_and_manifest_contract(client):
     assert manifest["model_id"] == "options.black_scholes.v1"
     assert manifest["version"] == "1.1.0"
     assert len(manifest["assumptions"]) > 0
+
+
+def test_reconcile_and_journal_endpoints_contract(client):
+    """Verify /skills/reconcile, /skills/journal/list, /skills/journal/add, and /skills/journal/stats contracts."""
+    res_rec = client.post(
+        "/skills/reconcile",
+        json={
+            "internal_positions": [{"symbol": "TCS", "qty": 10, "avg_price": 4000.0}],
+            "broker_positions": [{"symbol": "TCS", "qty": 10, "avg_price": 4000.0}],
+            "internal_cash": 100000.0,
+            "broker_cash": 100000.0,
+        },
+    )
+    assert res_rec.status_code == 200
+    assert res_rec.json()["status"] == "ok"
+    rec_data = res_rec.json()["data"]
+    assert rec_data["status"] == "COMPLETE"
+    assert rec_data["is_reconciled"] is True
+    assert rec_data["allow_trading"] is True
+
+    # Test Journal Add & List & Stats
+    res_add = client.post(
+        "/skills/journal/add",
+        json={
+            "symbol": "BAJFINANCE",
+            "direction": "BUY",
+            "entry_price": 7200.0,
+            "qty": 5,
+            "stop_loss": 7000.0,
+            "target": 7600.0,
+            "thesis": "Earnings acceleration",
+        },
+    )
+    assert res_add.status_code == 200
+    assert res_add.json()["status"] == "ok"
+    assert res_add.json()["data"]["symbol"] == "BAJFINANCE"
+
+    res_stats = client.get("/skills/journal/stats")
+    assert res_stats.status_code == 200
+    assert res_stats.json()["status"] == "ok"
+    assert "win_rate_pct" in res_stats.json()["data"]

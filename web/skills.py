@@ -1843,37 +1843,60 @@ async def skill_risk_report():
 # ── Broker Statement Reconciliation ───────────────────────────
 
 
-@router.post("/reconcile")
-async def skill_reconcile():
+class ReconcileRequest(BaseModel):
+    internal_positions: Optional[list[dict[str, Any]]] = None
+    broker_positions: Optional[list[dict[str, Any]]] = None
+    internal_cash: Optional[float] = None
+    broker_cash: Optional[float] = None
+    broker_name: Optional[str] = None
+
+
+@router.api_route("/reconcile", methods=["GET", "POST"])
+async def skill_reconcile(req: Optional[ReconcileRequest] = None):
     """Reconcile internal position ledger against broker statement snapshot."""
     try:
-        from engine.reconciliation import reconcile_ledger
         from engine.provenance import attach_provenance
+        from engine.reconciliation import reconcile_ledger
 
-        try:
-            from engine.portfolio import get_portfolio_summary
-
-            summary = get_portfolio_summary()
-            int_positions = [
-                {"symbol": p.symbol, "qty": p.qty, "avg_price": p.avg_price, "pnl": p.pnl}
-                for p in summary.positions
-            ]
-            cash_val = (
-                summary.funds.available_cash
-                if hasattr(summary.funds, "available_cash")
-                else 1000000.0
+        if req and req.internal_positions is not None:
+            int_positions = req.internal_positions
+            brk_positions = (
+                req.broker_positions if req.broker_positions is not None else int_positions
             )
-            broker_name = summary.positions[0].broker if summary.positions else "PAPER_SIMULATOR"
-        except Exception:
-            int_positions = []
-            cash_val = 1000000.0
-            broker_name = "PAPER_SIMULATOR"
+            cash_val = req.internal_cash if req.internal_cash is not None else 1000000.0
+            brk_cash = req.broker_cash if req.broker_cash is not None else cash_val
+            broker_name = req.broker_name or "PAPER_SIMULATOR"
+        else:
+            try:
+                from engine.portfolio import get_portfolio_summary
+
+                summary = get_portfolio_summary()
+                int_positions = [
+                    {"symbol": p.symbol, "qty": p.qty, "avg_price": p.avg_price, "pnl": p.pnl}
+                    for p in summary.positions
+                ]
+                cash_val = (
+                    summary.funds.available_cash
+                    if hasattr(summary.funds, "available_cash")
+                    else 1000000.0
+                )
+                brk_cash = cash_val
+                brk_positions = int_positions
+                broker_name = (
+                    summary.positions[0].broker if summary.positions else "PAPER_SIMULATOR"
+                )
+            except Exception:
+                int_positions = []
+                brk_positions = []
+                cash_val = 1000000.0
+                brk_cash = 1000000.0
+                broker_name = "PAPER_SIMULATOR"
 
         report = reconcile_ledger(
             internal_positions=int_positions,
-            broker_positions=int_positions,
+            broker_positions=brk_positions,
             internal_cash=cash_val,
-            broker_cash=cash_val,
+            broker_cash=brk_cash,
             broker_name=broker_name,
         )
         data = attach_provenance(
@@ -5152,8 +5175,6 @@ class MarketSessionRequest(BaseModel):
 
 @router.get("/instruments/resolve")
 @router.post("/instruments/resolve")
-@router.get("/skills/instruments/resolve")
-@router.post("/skills/instruments/resolve")
 async def skill_instruments_resolve(
     req: Optional[InstrumentResolveRequest] = None, query: Optional[str] = None
 ):
@@ -5170,8 +5191,6 @@ async def skill_instruments_resolve(
 
 @router.get("/market_session")
 @router.post("/market_session")
-@router.get("/skills/market_session")
-@router.post("/skills/market_session")
 async def skill_market_session(
     req: Optional[MarketSessionRequest] = None, exchange: Optional[str] = "NSE"
 ):
@@ -5192,8 +5211,6 @@ class ModelManifestRequest(BaseModel):
 
 @router.get("/models/list")
 @router.post("/models/list")
-@router.get("/skills/models/list")
-@router.post("/skills/models/list")
 async def skill_models_list():
     """Retrieve all registered quantitative and macro model specifications and versions."""
     try:
@@ -5207,8 +5224,6 @@ async def skill_models_list():
 
 @router.get("/models/manifest")
 @router.post("/models/manifest")
-@router.get("/skills/models/manifest")
-@router.post("/skills/models/manifest")
 async def skill_models_manifest(
     req: Optional[ModelManifestRequest] = None, model_id: Optional[str] = None
 ):
@@ -5223,5 +5238,66 @@ async def skill_models_manifest(
         return _ok(manifest.to_dict())
     except HTTPException:
         raise
+    except Exception as e:
+        raise _err(str(e))
+
+
+class JournalAddRequest(BaseModel):
+    symbol: str
+    direction: str = "BUY"
+    entry_price: float
+    qty: int
+    stop_loss: float
+    target: float
+    setup_type: Optional[str] = "SYSTEMATIC_BREAKOUT"
+    thesis: Optional[str] = ""
+    order_id: Optional[str] = None
+
+
+@router.api_route("/journal/list", methods=["GET", "POST"])
+async def skill_journal_list(status: Optional[str] = None):
+    """Retrieve all trade journal records and analytical payoff status."""
+    try:
+        from engine.journal import get_trade_journal
+
+        mgr = get_trade_journal()
+        entries = mgr.list_entries(status=status)
+        return _ok({"entries": entries, "total_entries": len(entries)})
+    except Exception as e:
+        raise _err(str(e))
+
+
+@router.post("/journal/add")
+async def skill_journal_add(req: JournalAddRequest):
+    """Record a trade entry in the authoritative trade journal."""
+    try:
+        from engine.journal import get_trade_journal
+
+        mgr = get_trade_journal()
+        entry = mgr.add_entry(
+            symbol=req.symbol,
+            direction=req.direction.upper(),  # type: ignore
+            entry_price=req.entry_price,
+            qty=req.qty,
+            stop_loss=req.stop_loss,
+            target=req.target,
+            setup_type=req.setup_type or "SYSTEMATIC_BREAKOUT",
+            thesis=req.thesis or "",
+            order_id=req.order_id,
+        )
+        return _ok(entry.to_dict())
+    except Exception as e:
+        raise _err(str(e))
+
+
+@router.api_route("/journal/stats", methods=["GET", "POST"])
+async def skill_journal_stats():
+    """Compute institutional performance analytics (Win Rate, Profit Factor, Expectancy R)."""
+    try:
+        from engine.journal import get_trade_journal
+
+        mgr = get_trade_journal()
+        stats = mgr.compute_statistics()
+        return _ok(stats.to_dict())
     except Exception as e:
         raise _err(str(e))

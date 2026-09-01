@@ -16,7 +16,6 @@ and assigns formal institutional accounting statuses:
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
-from datetime import datetime
 from typing import Any, Literal
 
 ReconciliationStatus = Literal[
@@ -55,6 +54,8 @@ class ReconciliationReport:
     total_positions_checked: int
     matched_positions_count: int
     discrepancies_count: int
+    is_reconciled: bool = True
+    allow_trading: bool = True
     discrepancies: list[PositionDiscrepancy] = field(default_factory=list)
     cash_internal: float = 0.0
     cash_broker: float = 0.0
@@ -89,7 +90,9 @@ def reconcile_ledger(
     Returns:
         Structured ReconciliationReport with accounting classification.
     """
-    now_str = datetime.now().strftime("%d %b %Y, %H:%M:%S IST")
+    from market.instruments import get_current_ist_time
+
+    now_str = get_current_ist_time().strftime("%d %b %Y, %H:%M:%S IST")
     internal_map = {p.get("symbol", "").upper(): p for p in internal_positions if p.get("symbol")}
     broker_map = {p.get("symbol", "").upper(): p for p in broker_positions if p.get("symbol")}
 
@@ -195,6 +198,9 @@ def reconcile_ledger(
         f"{now_str}:{status}:{len(all_symbols)}:{cash_diff}".encode()
     ).hexdigest()[:16]
 
+    is_reconciled = status == "COMPLETE"
+    allow_trading = status in ("COMPLETE", "PARTIAL")
+
     return ReconciliationReport(
         timestamp=now_str,
         status=status,
@@ -202,6 +208,8 @@ def reconcile_ledger(
         total_positions_checked=len(all_symbols),
         matched_positions_count=matched_count,
         discrepancies_count=len(discrepancies),
+        is_reconciled=is_reconciled,
+        allow_trading=allow_trading,
         discrepancies=discrepancies,
         cash_internal=internal_cash,
         cash_broker=broker_cash,
