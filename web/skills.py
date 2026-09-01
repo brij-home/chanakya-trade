@@ -5322,3 +5322,84 @@ async def skill_security_360(
         return _ok(dossier.to_dict())
     except Exception as e:
         raise _err(str(e))
+
+
+# ── P2-C: Strategy Lab & Options Lab Integrity ───────────────────────────────
+
+
+class StrategyManifestRequest(BaseModel):
+    strategy_id: str = "strategy_v1"
+    strategy_name: str = "Custom Strategy"
+    strategy_version: str = "1.0.0"
+    universe: list[str] = ["RELIANCE", "TCS"]
+    data_snapshot_start: str = "2022-01-01"
+    data_snapshot_end: str = "2024-01-01"
+    benchmark: str = "NIFTY50"
+    parameters: dict = {}
+    notes: str = ""
+
+
+@router.post("/strategy_manifest")
+async def skill_strategy_manifest(req: StrategyManifestRequest):
+    """
+    Create an immutable, cryptographically-sealed Strategy Run Manifest.
+
+    The manifest captures strategy identity, universe, data snapshot, cost assumptions,
+    and bias-prevention flags. The same inputs always produce the same manifest_hash
+    (deterministic). Use this before every backtest run to guarantee reproducibility.
+    """
+    try:
+        from engine.strategy_manifest import create_run_manifest
+
+        manifest = create_run_manifest(
+            strategy_id=req.strategy_id,
+            strategy_name=req.strategy_name,
+            strategy_version=req.strategy_version,
+            universe=req.universe,
+            data_snapshot_start=req.data_snapshot_start,
+            data_snapshot_end=req.data_snapshot_end,
+            benchmark=req.benchmark,
+            parameters=req.parameters,
+            notes=req.notes,
+        )
+        return _ok(manifest.to_dict())
+    except Exception as e:
+        raise _err(str(e))
+
+
+class ChainIntegrityRequest(BaseModel):
+    symbol: str = "NIFTY"
+    expiry: str = "2027-09-25"
+    underlying_price: float = 22000.0
+    chain_rows: list[dict] = []
+    chain_timestamp_utc: Optional[str] = None
+
+
+@router.post("/options_chain_integrity")
+async def skill_options_chain_integrity(req: ChainIntegrityRequest):
+    """
+    Validate an options chain snapshot against institutional data quality standards.
+
+    Returns a ChainIntegrityReport with is_actionable=True only if ALL quality gates pass:
+    - Chain freshness (< 120s stale)
+    - Bid/ask spread integrity (<= 10% of mid)
+    - Strike coverage (>= 21 strikes around ATM)
+    - IV surface sanity (1%-500% range)
+    - Expiry validity (must be in the future)
+
+    If is_actionable=False, downstream analytics and order execution are blocked.
+    """
+    try:
+        from engine.options_chain_integrity import validate_options_chain
+
+        report = validate_options_chain(
+            symbol=req.symbol,
+            expiry=req.expiry,
+            underlying_price=req.underlying_price,
+            chain_rows=req.chain_rows,
+            chain_timestamp_utc=req.chain_timestamp_utc,
+        )
+        return _ok(report.to_dict())
+    except Exception as e:
+        raise _err(str(e))
+

@@ -192,3 +192,110 @@ def test_security_360_endpoint_contract(client):
     assert dossier["decision"]["action_eligibility"] == "ELIGIBLE"
     assert dossier["_status"] == "READY"
     assert "_as_of" in dossier
+
+
+def test_strategy_manifest_endpoint_contract(client):
+    """Verify /skills/strategy_manifest creates an immutable sealed run manifest."""
+    res = client.post(
+        "/skills/strategy_manifest",
+        json={
+            "strategy_id": "rsi_reversal_v1",
+            "strategy_name": "RSI Reversal",
+            "strategy_version": "1.0.0",
+            "universe": ["RELIANCE", "TCS"],
+            "data_snapshot_start": "2022-01-01",
+            "data_snapshot_end": "2024-01-01",
+            "benchmark": "NIFTY50",
+            "parameters": {"rsi_buy": 30, "rsi_sell": 70},
+        },
+    )
+    assert res.status_code == 200
+    data = res.json()
+    assert data["status"] == "ok"
+    manifest = data["data"]
+    assert manifest["strategy_id"] == "rsi_reversal_v1"
+    assert len(manifest["manifest_hash"]) == 64  # SHA-256 hex
+    assert len(manifest["run_id"]) == 36          # UUID4
+    assert manifest["bias_prevention"]["look_ahead_guard_active"] is True
+    assert manifest["bias_prevention"]["survivorship_bias_guard_active"] is True
+    # Reproducibility: same inputs must produce same manifest_hash
+    res2 = client.post(
+        "/skills/strategy_manifest",
+        json={
+            "strategy_id": "rsi_reversal_v1",
+            "strategy_name": "RSI Reversal",
+            "strategy_version": "1.0.0",
+            "universe": ["RELIANCE", "TCS"],
+            "data_snapshot_start": "2022-01-01",
+            "data_snapshot_end": "2024-01-01",
+            "benchmark": "NIFTY50",
+            "parameters": {"rsi_buy": 30, "rsi_sell": 70},
+        },
+    )
+    assert res2.json()["data"]["manifest_hash"] == manifest["manifest_hash"]
+
+
+def test_options_chain_integrity_eligible_chain(client):
+    """Verify /skills/options_chain_integrity approves a valid, fresh chain."""
+    # Build a synthetic 25-strike clean chain
+    chain_rows = []
+    for i in range(-12, 13):
+        strike = 22000 + i * 50
+        for opt_type in ("CE", "PE"):
+            chain_rows.append({
+                "strike": strike,
+                "option_type": opt_type,
+                "bid": max(1.0, 100.0 + i * 5),
+                "ask": max(2.0, 102.0 + i * 5),
+                "iv_pct": 15.5 + abs(i) * 0.3,
+                "oi": 50000,
+                "volume": 5000,
+            })
+
+    res = client.post(
+        "/skills/options_chain_integrity",
+        json={
+            "symbol": "NIFTY",
+            "expiry": "2027-09-25",
+            "underlying_price": 22000.0,
+            "chain_rows": chain_rows,
+            "chain_timestamp_utc": None,
+        },
+    )
+    assert res.status_code == 200
+    data = res.json()
+    assert data["status"] == "ok"
+    report = data["data"]
+    assert report["is_actionable"] is True
+    assert report["action_eligibility"] == "ELIGIBLE"
+    assert report["quality_score"] >= 70.0
+    assert report["atm_strike"] == 22000.0
+
+
+def test_options_chain_integrity_stale_chain_blocked(client):
+    """Verify /skills/options_chain_integrity blocks stale chain."""
+    chain_rows = []
+    for i in range(-12, 13):
+        strike = 22000 + i * 50
+        chain_rows.append({
+            "strike": strike, "option_type": "CE",
+            "bid": 100.0, "ask": 102.0, "iv_pct": 15.0, "oi": 50000, "volume": 5000,
+        })
+
+    res = client.post(
+        "/skills/options_chain_integrity",
+        json={
+            "symbol": "NIFTY",
+            "expiry": "2027-09-25",
+            "underlying_price": 22000.0,
+            "chain_rows": chain_rows,
+            "chain_timestamp_utc": "2020-01-01T00:00:00Z",  # artificially stale
+        },
+    )
+    assert res.status_code == 200
+    data = res.json()
+    assert data["status"] == "ok"
+    report = data["data"]
+    assert report["is_actionable"] is False
+    assert report["action_eligibility"] in ("UNAVAILABLE", "RESTRICTED")
+
