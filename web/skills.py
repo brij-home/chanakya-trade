@@ -5184,3 +5184,44 @@ async def skill_market_session(
         return _ok(state.to_dict())
     except Exception as e:
         raise _err(str(e))
+
+
+class ModelManifestRequest(BaseModel):
+    model_id: str = "macro.transmission.v1"
+
+
+@router.get("/models/list")
+@router.post("/models/list")
+@router.get("/skills/models/list")
+@router.post("/skills/models/list")
+async def skill_models_list():
+    """Retrieve all registered quantitative and macro model specifications and versions."""
+    try:
+        from engine.model_governance import list_all_models
+
+        models = list_all_models()
+        return _ok({"models": models, "total_models": len(models)})
+    except Exception as e:
+        raise _err(str(e))
+
+
+@router.get("/models/manifest")
+@router.post("/models/manifest")
+@router.get("/skills/models/manifest")
+@router.post("/skills/models/manifest")
+async def skill_models_manifest(
+    req: Optional[ModelManifestRequest] = None, model_id: Optional[str] = None
+):
+    """Retrieve detailed model manifest including assumptions, applicability limits, and methodology."""
+    try:
+        from engine.model_governance import get_model_manifest
+
+        m_id = (req.model_id if req and req.model_id else model_id) or "macro.transmission.v1"
+        manifest = get_model_manifest(m_id)
+        if not manifest:
+            raise HTTPException(status_code=404, detail=f"Model manifest not found: {m_id}")
+        return _ok(manifest.to_dict())
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise _err(str(e))

@@ -25,7 +25,7 @@ def test_api_openapi_spec_generation(client):
     assert "openapi" in schema
     paths = schema["paths"]
 
-    # Critical P0-A, P0-B & P1-A API Endpoints must be present in schema
+    # Critical P0-A, P0-B, P1-A & P1-B API Endpoints must be present in schema
     assert "/api/mode" in paths
     assert "/api/preflight" in paths
     assert "/api/orders/preview" in paths
@@ -37,6 +37,8 @@ def test_api_openapi_spec_generation(client):
     assert "/skills/tax/calculate" in paths
     assert "/skills/instruments/resolve" in paths
     assert "/skills/market_session" in paths
+    assert "/skills/models/list" in paths
+    assert "/skills/models/manifest" in paths
 
 
 def test_mode_endpoint_contract(client):
@@ -111,3 +113,21 @@ def test_market_session_contract(client):
     assert session_info["session_state"] in ("PRE_OPEN", "OPEN", "POST_CLOSE", "CLOSED")
     assert "current_time_ist" in session_info
     assert "IST" in session_info["current_time_ist"]
+
+
+def test_models_list_and_manifest_contract(client):
+    """Verify /skills/models/list and /skills/models/manifest return registered model specs."""
+    res_list = client.get("/skills/models/list")
+    assert res_list.status_code == 200
+    data_list = res_list.json()
+    assert data_list["status"] == "ok"
+    assert data_list["data"]["total_models"] >= 5
+
+    res_manifest = client.get("/skills/models/manifest?model_id=options.black_scholes.v1")
+    assert res_manifest.status_code == 200
+    data_m = res_manifest.json()
+    assert data_m["status"] == "ok"
+    manifest = data_m["data"]
+    assert manifest["model_id"] == "options.black_scholes.v1"
+    assert manifest["version"] == "1.1.0"
+    assert len(manifest["assumptions"]) > 0
