@@ -202,16 +202,24 @@ class PersonaTrackerEngine:
         avg_r = sum(realized_rs) / total_calls
         compound_r = sum(realized_rs)
         # Brier score compares the recorded conviction with the observed binary outcome.
-        brier_score = sum(
-            ((max(0.0, min(100.0, float(row["conviction_score"]))) / 100.0)
-             - (1.0 if float(row["realized_r"]) > 0 else 0.0)) ** 2
-            for row in rows
-        ) / total_calls
+        brier_score = (
+            sum(
+                (
+                    (max(0.0, min(100.0, float(row["conviction_score"]))) / 100.0)
+                    - (1.0 if float(row["realized_r"]) > 0 else 0.0)
+                )
+                ** 2
+                for row in rows
+            )
+            / total_calls
+        )
 
         sector_affinity = self._context_affinity(rows, "sector")
         regime_affinity = self._context_affinity(rows, "regime")
         data_status = (
-            "ESTABLISHED" if total_calls >= MINIMUM_RESOLVED_CALLS_FOR_WEIGHTING else "INSUFFICIENT_SAMPLE"
+            "ESTABLISHED"
+            if total_calls >= MINIMUM_RESOLVED_CALLS_FOR_WEIGHTING
+            else "INSUFFICIENT_SAMPLE"
         )
         final_multiplier = 1.0
         if data_status == "ESTABLISHED":

@@ -93,7 +93,7 @@ console = Console(legacy_windows=False)
 
 ANTHROPIC_DEFAULT_MODEL = "claude-opus-4-5"
 OPENAI_DEFAULT_MODEL = "gpt-4o"
-GEMINI_DEFAULT_MODEL = "gemini-3.5-flash-lite"
+GEMINI_DEFAULT_MODEL = "gemini-3.8-flash"
 OLLAMA_DEFAULT_MODEL = "llama3.1"
 NVIDIA_DEFAULT_MODEL = "meta/llama-3.2-11b-vision-instruct"
 GROQ_DEFAULT_MODEL = (
@@ -1955,10 +1955,11 @@ class GeminiProvider(LLMProvider):
         candidate_models = [active_model] + [
             m
             for m in [
+                "gemini-3.8-flash",
                 "gemini-3.7-flash",
                 "gemini-3.6-flash",
-                "gemini-3.5-flash",
                 "gemini-3.5-flash-lite",
+                "gemini-3.5-flash",
                 "gemini-flash-latest",
             ]
             if m != active_model

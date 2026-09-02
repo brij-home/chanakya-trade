@@ -99,7 +99,7 @@
 
 | Provider | Env Var | Use Case |
 | :--- | :--- | :--- |
-| **Gemini** | `GEMINI_API_KEY` | Fast-LLM (`gemini-3.7-flash`, `gemini-3.6-flash`) |
+| **Gemini** | `GEMINI_API_KEY` | Fast-LLM & Deep (`gemini-3.8-flash`, `gemini-3.7-flash`, `gemini-3.6-flash`, `gemini-3.5-flash-lite`) |
 | **NVIDIA NIM** | `NVIDIA_API_KEY` | Deep reasoning (`meta/llama-3.3-70b-instruct`) |
 | **OpenRouter** | `OPENROUTER_API_KEY` | Multi-model gateway fallback |
 | **Anthropic** | `ANTHROPIC_API_KEY` | Deep reasoning (`claude-sonnet-4`) |

@@ -419,7 +419,9 @@ class StoxkartAPI(BrokerAPI):
         except Exception as exc:
             raise RuntimeError(f"Stoxkart order submission failed: {exc}") from exc
 
-        raise RuntimeError("Stoxkart order submission failed: broker returned an unexpected response.")
+        raise RuntimeError(
+            "Stoxkart order submission failed: broker returned an unexpected response."
+        )
 
     def cancel_order(self, order_id: str) -> bool:
         if not self._token:
