@@ -1,5 +1,6 @@
 import { useInspectorStore } from '../../store/inspectorStore'
 import Tooltip, { InfoBadge } from '../UI/Tooltip'
+import UnavailableState from '../Common/UnavailableState'
 
 const RATING_COLORS = {
   'A+': { bg: 'bg-green/15 text-green border-green/40', badge: 'bg-green text-black font-bold' },
@@ -13,16 +14,25 @@ export default function ForensicCard({ data }) {
   const openInspector = useInspectorStore((s) => s.openInspector)
   if (!data) return null
   const d = data?.data ?? data ?? {}
+  if (d.available === false) {
+    return (
+      <UnavailableState
+        title={`${d.symbol || 'Forensic'} audit unavailable`}
+        reason={d.summary_text || 'The required reported accounting inputs were not available.'}
+        hint="No accounting score or investment-quality verdict has been inferred."
+      />
+    )
+  }
 
-  const rating = d.quality_rating || 'B'
+  const rating = d.quality_rating || 'UNAVAILABLE'
   const ratingStyle = RATING_COLORS[rating] || RATING_COLORS['B']
-  const mScore = Number(d.beneish_m_score ?? -2.5)
-  const isMScoreSafe = !d.is_beneish_flagged
-  const zScore = Number(d.altman_z_score ?? 3.5)
-  const zZone = d.distress_zone || 'SAFE'
-  const fScore = Number(d.piotroski_f_score ?? 7)
+  const mScore = Number(d.beneish_m_score)
+  const isMScoreSafe = !d.is_manipulator_risk
+  const zScore = Number(d.altman_z_score)
+  const zZone = d.distress_zone || 'UNAVAILABLE'
+  const fScore = Number(d.piotroski_f_score)
   const redFlags = d.governance_red_flags || []
-  const strengths = d.piotroski_strengths || []
+  const strengths = d.strengths || []
 
   return (
     <div className="bg-elevated border border-border rounded-xl p-4 max-w-2xl w-full space-y-4 font-mono shadow-sm">

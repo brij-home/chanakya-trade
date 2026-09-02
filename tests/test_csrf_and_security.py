@@ -127,6 +127,29 @@ def test_reconciliation_and_audit_routes_require_auth_in_self_hosted(monkeypatch
     assert res_audit.status_code == 401, f"Expected 401, got {res_audit.status_code}"
 
 
+def test_self_hosted_setup_fails_closed_until_initial_account_exists(monkeypatch, client):
+    monkeypatch.setenv("DEPLOY_MODE", "self-hosted")
+    monkeypatch.setenv("CSRF_SECRET", "s" * 64)
+
+    res = client.get("/api/reconciliation")
+    assert res.status_code == 503
+    assert "setup" in res.json()["detail"].lower()
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"symbol": "INFY", "side": "HOLD", "quantity": 1, "price": 1800},
+        {"symbol": "INFY", "side": "BUY", "quantity": 0, "price": 1800},
+        {"symbol": "INFY", "side": "SELL", "quantity": 1, "price": 0},
+        {"symbol": "INFY", "side": "BUY", "quantity": 1, "price": 1800, "order_type": "GUESS"},
+    ],
+)
+def test_malformed_order_preview_is_rejected_not_coerced(client, payload):
+    res = client.post("/api/orders/preview", json=payload)
+    assert res.status_code == 422
+
+
 def test_real_reconciliation_endpoint_with_typed_broker(monkeypatch, client):
     """
     Follow-up Invariant: Real /api/reconciliation endpoint execution with

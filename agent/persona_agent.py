@@ -39,7 +39,7 @@ def parse_persona_response(text: str, persona_id: str) -> PersonaSignal:
     Handles:
       - Full structured responses
       - Partial responses (missing some fields)
-      - Empty or error responses (returns HOLD with 30% confidence)
+      - Empty or error responses (returns UNAVAILABLE with 0% confidence)
 
     Expected loose format in the response:
         VERDICT: BUY
@@ -54,27 +54,27 @@ def parse_persona_response(text: str, persona_id: str) -> PersonaSignal:
     if not text or not text.strip():
         return PersonaSignal(
             persona=persona_id,
-            verdict="HOLD",
-            confidence=30,
+            verdict="UNAVAILABLE",
+            confidence=0,
             rationale=["Insufficient data for analysis"],
             key_metrics={},
         )
 
-    verdict = "HOLD"
-    confidence = 50
+    verdict = "UNAVAILABLE"
+    confidence = 0
     rationale: list[str] = []
     key_metrics: dict[str, str] = {}
 
     # ── Verdict ──────────────────────────────────────────────
     verdict_match = re.search(
-        r"VERDICT\s*[:=]\s*(STRONG_BUY|STRONG_SELL|BUY|SELL|HOLD)",
+        r"VERDICT\s*[:=]\s*(STRONG_BUY|STRONG_SELL|BUY|SELL|HOLD|UNAVAILABLE)",
         text,
         re.IGNORECASE,
     )
     if verdict_match:
         verdict_raw = verdict_match.group(1).upper().replace(" ", "_")
         # Normalise: "STRONG BUY" → "STRONG_BUY"
-        valid = {"STRONG_BUY", "BUY", "HOLD", "SELL", "STRONG_SELL"}
+        valid = {"STRONG_BUY", "BUY", "HOLD", "SELL", "STRONG_SELL", "UNAVAILABLE"}
         if verdict_raw in valid:
             verdict = verdict_raw
 
@@ -85,6 +85,12 @@ def parse_persona_response(text: str, persona_id: str) -> PersonaSignal:
             confidence = max(0, min(100, int(conf_match.group(1))))
         except ValueError:
             pass
+
+    # A response without a machine-readable verdict or confidence is not an
+    # auditable recommendation. Keep its commentary, but make it non-actionable.
+    if not verdict_match or not conf_match or verdict == "UNAVAILABLE":
+        verdict = "UNAVAILABLE" if not verdict_match else verdict
+        confidence = 0
 
     # ── Rationale (bullet points) ─────────────────────────────
     rationale_section = re.search(
@@ -106,7 +112,7 @@ def parse_persona_response(text: str, persona_id: str) -> PersonaSignal:
 
     # Guarantee at least one rationale item
     if not rationale:
-        rationale = ["Analysis based on available data"]
+        rationale = ["The model did not provide an auditable rationale."]
 
     # ── Key metrics ───────────────────────────────────────────
     metrics_section = re.search(
@@ -260,11 +266,11 @@ def _build_prompt(symbol: str, exchange: str, brief: dict[str, Any]) -> str:
     lines += [
         "=== MANDATORY INSTRUCTION FOR AI PERSONA ===",
         "1. You MUST ALWAYS evaluate the stock strictly based on the provided technical, fundamental, and forensic metrics.",
-        "2. NEVER decline to answer, never say you lack real-time access, and NEVER ask questions or ask the user for manual data.",
-        "3. You must ALWAYS output valid structured output matching the format below.",
+        "2. Do not invent unavailable data. If the evidence is insufficient, return UNAVAILABLE with CONFIDENCE: 0 and state what is missing.",
+        "3. Always output valid structured output matching the format below.",
         "",
         "=== Required Output Format ===",
-        "VERDICT: <STRONG_BUY|BUY|HOLD|SELL|STRONG_SELL>",
+        "VERDICT: <STRONG_BUY|BUY|HOLD|SELL|STRONG_SELL|UNAVAILABLE>",
         "CONFIDENCE: <0-100>",
         "RATIONALE:",
         "- <checklist item 1>",
@@ -282,11 +288,12 @@ def _build_prompt(symbol: str, exchange: str, brief: dict[str, Any]) -> str:
 # ── Rule-based fallback scorer ────────────────────────────────
 
 
-def _score_dimension(dimension: str, brief: dict[str, Any]) -> float:
+def _score_dimension(dimension: str, brief: dict[str, Any]) -> float | None:
     """
     Score a single dimension 0–100 using simple heuristics on available data.
 
-    Returns 50 (neutral) when data is unavailable.
+    Returns None when the dimension has no evidence.  A neutral-looking score
+    is still a fabricated recommendation when no underlying data was supplied.
     """
     tech = brief.get("technicals", {})
     fund = brief.get("fundamentals", {})
@@ -294,6 +301,25 @@ def _score_dimension(dimension: str, brief: dict[str, Any]) -> float:
     fii = brief.get("fii_dii", {})
 
     if dimension == "fundamentals":
+        forensic = brief.get("forensics", {})
+        if not any(
+            value is not None
+            for value in (
+                fund.get("roe"),
+                fund.get("ROE"),
+                fund.get("debt_equity"),
+                fund.get("de"),
+                fund.get("D/E"),
+                fund.get("pe"),
+                fund.get("PE"),
+                fund.get("fcf_yield"),
+                fund.get("FCF_yield"),
+                forensic.get("piotroski_score"),
+                forensic.get("altman_zone"),
+                forensic.get("promoter_pledge_pct"),
+            )
+        ):
+            return None
         score = 50.0
         roe = fund.get("roe") or fund.get("ROE")
         if roe is not None:
@@ -328,7 +354,6 @@ def _score_dimension(dimension: str, brief: dict[str, Any]) -> float:
                 pass
 
         # Forensic indicators
-        forensic = brief.get("forensics", {})
         if forensic:
             piotroski = forensic.get("piotroski_score")
             if piotroski is not None:
@@ -354,6 +379,16 @@ def _score_dimension(dimension: str, brief: dict[str, Any]) -> float:
         return max(0.0, min(100.0, score))
 
     elif dimension == "technicals":
+        if not any(
+            value is not None
+            for value in (
+                tech.get("rsi"),
+                tech.get("RSI"),
+                tech.get("trend"),
+                tech.get("price_trend"),
+            )
+        ):
+            return None
         score = 50.0
         rsi = tech.get("rsi") or tech.get("RSI")
         if rsi is not None:
@@ -379,6 +414,18 @@ def _score_dimension(dimension: str, brief: dict[str, Any]) -> float:
         return max(0.0, min(100.0, score))
 
     elif dimension == "macro":
+        if not any(
+            value is not None
+            for value in (
+                fii.get("net"),
+                fii.get("fii_net"),
+                fii.get("FII_net"),
+                macro.get("india_vix"),
+                macro.get("VIX"),
+                macro.get("vix"),
+            )
+        ):
+            return None
         score = 50.0
         # FII flows
         fii_net = fii.get("net") or fii.get("fii_net") or fii.get("FII_net")
@@ -401,6 +448,8 @@ def _score_dimension(dimension: str, brief: dict[str, Any]) -> float:
         return max(0.0, min(100.0, score))
 
     elif dimension == "sentiment":
+        if not brief.get("news"):
+            return None
         score = 50.0
         # Use news count or FII direction as a proxy for sentiment
         news = brief.get("news", [])
@@ -410,6 +459,8 @@ def _score_dimension(dimension: str, brief: dict[str, Any]) -> float:
         return max(0.0, min(100.0, score))
 
     elif dimension == "options":
+        if not any(value is not None for value in (tech.get("pcr"), tech.get("put_call_ratio"))):
+            return None
         score = 50.0
         pcr = tech.get("pcr") or tech.get("put_call_ratio")
         if pcr is not None:
@@ -424,7 +475,7 @@ def _score_dimension(dimension: str, brief: dict[str, Any]) -> float:
                 pass
         return max(0.0, min(100.0, score))
 
-    return 50.0
+    return None
 
 
 def _rule_based_signal(
@@ -441,12 +492,18 @@ def _rule_based_signal(
     persona = get_persona(persona_id)
 
     weighted_sum = 0.0
+    applied_weight = 0.0
     checklist_results: list[str] = []
     key_metrics: dict[str, str] = {}
 
     for dimension, weight in persona.weights.items():
         dim_score = _score_dimension(dimension, brief)
+        if dim_score is None:
+            checklist_results.append(f"— {dimension.title()}: unavailable (no verified evidence)")
+            key_metrics[dimension.title()] = "UNAVAILABLE"
+            continue
         weighted_sum += dim_score * weight
+        applied_weight += weight
 
         # Produce a checklist entry for each dimension
         level = "strong" if dim_score >= 65 else ("weak" if dim_score <= 40 else "neutral")
@@ -460,8 +517,18 @@ def _rule_based_signal(
     for item in persona.checklist[:3]:
         checklist_results.append(f"~ {item} (data insufficient for precise check)")
 
-    # Map score to verdict
-    score = weighted_sum
+    if applied_weight <= 0:
+        return PersonaSignal(
+            persona=persona_id,
+            verdict="UNAVAILABLE",
+            confidence=0,
+            rationale=checklist_results[:6]
+            or ["No verified evidence was available for this analysis."],
+            key_metrics=key_metrics,
+        )
+
+    # Normalize only over dimensions with actual evidence.
+    score = weighted_sum / applied_weight
     if score >= 80:
         verdict = "STRONG_BUY"
     elif score >= 65:
@@ -473,7 +540,8 @@ def _rule_based_signal(
     else:
         verdict = "STRONG_SELL"
 
-    confidence = max(30, min(90, int(score)))
+    coverage = min(1.0, applied_weight)
+    confidence = max(0, min(90, int(score * coverage)))
 
     return PersonaSignal(
         persona=persona_id,
@@ -689,8 +757,22 @@ def run_council(
         "SELL": 25,
         "STRONG_SELL": 0,
     }
-    total_score = sum(verdict_scores.get(s.verdict, 50) * (s.confidence / 100.0) for s in signals)
-    weight_sum = sum(s.confidence / 100.0 for s in signals) or 1.0
+    available_signals = [s for s in signals if s.verdict != "UNAVAILABLE" and s.confidence > 0]
+    if not available_signals:
+        return {
+            "council": council_name,
+            "symbol": symbol.upper(),
+            "exchange": exchange.upper(),
+            "consensus_verdict": "UNAVAILABLE",
+            "consensus_score": None,
+            "signals": signals,
+            "member_count": len(signals),
+            "available_member_count": 0,
+            "reason": "No council member had enough verified evidence to form a recommendation.",
+        }
+
+    total_score = sum(verdict_scores[s.verdict] * (s.confidence / 100.0) for s in available_signals)
+    weight_sum = sum(s.confidence / 100.0 for s in available_signals)
     consensus_score = total_score / weight_sum
 
     if consensus_score >= 80:
@@ -712,6 +794,7 @@ def run_council(
         "consensus_score": round(consensus_score, 1),
         "signals": signals,
         "member_count": len(signals),
+        "available_member_count": len(available_signals),
     }
 
 

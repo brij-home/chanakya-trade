@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import sqlite3
 import uuid
 from dataclasses import asdict, dataclass, field
@@ -153,6 +154,34 @@ def _resolve_order_instrument(symbol: str, product: ProductType):
     return inst, inst.exchange, segment
 
 
+def _validate_preview_inputs(
+    symbol: str,
+    side: str,
+    quantity: int,
+    price: float,
+    order_type: str,
+    product: str,
+) -> None:
+    """Defend the lifecycle boundary for callers that bypass the HTTP schema."""
+    if not isinstance(symbol, str) or not symbol.strip():
+        raise ValueError("symbol must be a non-empty string")
+    if side not in ("BUY", "SELL"):
+        raise ValueError(f"Unsupported side: {side!r}")
+    if isinstance(quantity, bool) or not isinstance(quantity, int) or quantity < 1:
+        raise ValueError("quantity must be a positive integer")
+    if (
+        isinstance(price, bool)
+        or not isinstance(price, (int, float))
+        or not math.isfinite(price)
+        or price <= 0
+    ):
+        raise ValueError("price must be a finite positive number")
+    if order_type not in ("MARKET", "LIMIT", "SL_LIMIT", "SL_MARKET"):
+        raise ValueError(f"Unsupported order_type: {order_type!r}")
+    if product not in ("CNC", "MIS", "NRML"):
+        raise ValueError(f"Unsupported product: {product!r}")
+
+
 def _intent_from_ledger_row(row: sqlite3.Row | dict[str, Any], expected_hash: str) -> OrderIntent:
     """Return a typed intent while refusing legacy or mismatched idempotency records."""
     d = dict(row)
@@ -202,12 +231,22 @@ def preview_order_intent(
     Generate an order preview with statutory Indian charges, concurrency-safe idempotency check,
     authoritative multi-asset instrument resolution, and explicit PAPER-/LIVE- order ID prefix.
 
-    Exchange and segment are resolved authoritatively from symbol metadata.  Any
-    direct-call overrides are ignored for backward compatibility; public API
-    requests reject those fields entirely.
+    Exchange and segment are resolved authoritatively from symbol metadata.
+    Explicit direct-call values must match that resolution; conflicting values
+    are rejected rather than silently rewritten.
     """
     _init_orders_db()
+    _validate_preview_inputs(symbol, side, quantity, price, order_type, product)
     _, resolved_exchange, resolved_segment = _resolve_order_instrument(symbol, product)
+
+    if exchange is not None and exchange.upper() != resolved_exchange:
+        raise ValueError(
+            f"exchange override {exchange!r} conflicts with canonical exchange {resolved_exchange!r}"
+        )
+    if segment is not None and segment.upper() != resolved_segment:
+        raise ValueError(
+            f"segment override {segment!r} conflicts with canonical segment {resolved_segment!r}"
+        )
 
     mode_info = get_trading_mode()
     mode_name = mode_info.mode.name

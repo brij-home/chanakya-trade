@@ -8,6 +8,7 @@ const VERDICT_STYLES = {
   HOLD: 'bg-amber-500/15 text-amber-400 border border-amber-500/30 font-bold',
   SELL: 'bg-rose-500/15 text-rose-400 border border-rose-500/30 font-bold',
   STRONG_SELL: 'bg-rose-500 text-white font-extrabold shadow-rose-500/20 shadow-lg',
+  UNAVAILABLE: 'bg-slate-500/15 text-slate-300 border border-slate-500/30 font-bold',
 }
 
 const COUNCIL_ICONS = {
@@ -44,7 +45,7 @@ export default function CouncilCard({ data }) {
   const symbol = d.symbol || 'NIFTY'
   const exchange = d.exchange || 'NSE'
   const consensusVerdict = d.consensus_verdict || 'HOLD'
-  const consensusScore = Number(d.consensus_score || 50)
+  const consensusScore = Number(d.consensus_score ?? 0)
   const signals = d.signals || []
 
   const icon = COUNCIL_ICONS[council.toLowerCase()] || '🏛️'

@@ -105,6 +105,20 @@ class TestForensicAuditFull:
             "promoter_holding": 52.0,
             "pledged_pct": 0.0,
             "market_cap": 50000.0,
+            "dsri": 1.0,
+            "gmi": 1.0,
+            "aqi": 1.0,
+            "sgi": 1.1,
+            "depi": 1.0,
+            "sgai": 1.0,
+            "lvgi": 1.0,
+            "tata": 0.01,
+            "working_capital": 5000.0,
+            "total_assets": 20000.0,
+            "retained_earnings": 8000.0,
+            "ebit": 3000.0,
+            "book_value_equity": 12000.0,
+            "total_liabilities": 8000.0,
         }
         res = audit_forensics("INFY", data=synthetic_data, use_cache=False)
         assert isinstance(res, ForensicAuditResult)
@@ -129,6 +143,20 @@ class TestForensicAuditFull:
             "promoter_holding": 50.0,
             "pledged_pct": 2.0,
             "market_cap": 150000.0,
+            "dsri": 1.0,
+            "gmi": 1.0,
+            "aqi": 1.0,
+            "sgi": 1.15,
+            "depi": 1.0,
+            "sgai": 1.0,
+            "lvgi": 1.0,
+            "tata": 0.01,
+            "working_capital": 15000.0,
+            "total_assets": 60000.0,
+            "retained_earnings": 24000.0,
+            "ebit": 9000.0,
+            "book_value_equity": 36000.0,
+            "total_liabilities": 24000.0,
         }
         res = audit_forensics("RELIANCE", data=synthetic_data, use_cache=False)
         d = res.as_dict()
@@ -136,3 +164,10 @@ class TestForensicAuditFull:
         assert "altman_z_score" in d
         assert "piotroski_f_score" in d
         assert "quality_rating" in d
+
+    def test_missing_reported_inputs_returns_explicit_unavailable_result(self):
+        res = audit_forensics("INFY", data={"roe": 20.0}, use_cache=False)
+        assert res.available is False
+        assert res.overall_forensic_verdict == "UNAVAILABLE"
+        assert res.beneish_m_score is None
+        assert res.quality_rating == "UNAVAILABLE"

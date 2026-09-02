@@ -995,10 +995,10 @@ def test_live_order_requires_confirmed_status(tmp_path, monkeypatch):
     assert confirmed_order.status == "CONFIRMED"
 
 
-def test_client_exchange_segment_override_ignored(tmp_path, monkeypatch):
+def test_client_exchange_segment_override_rejected(tmp_path, monkeypatch):
     """
     Authoritative Resolution: Client attempts to pass crafted exchange or segment
-    overrides are strictly ignored in favor of canonical instrument metadata.
+    overrides are rejected rather than silently rewritten.
     """
     from engine.order_lifecycle import preview_order_intent
 
@@ -1006,16 +1006,15 @@ def test_client_exchange_segment_override_ignored(tmp_path, monkeypatch):
     monkeypatch.setattr("engine.order_lifecycle._get_db_path", lambda: db_path)
     monkeypatch.setenv("TRADING_MODE", "SIMULATE")
 
-    order = preview_order_intent(
-        symbol="MCX:GOLD",
-        side="BUY",
-        quantity=1,
-        price=74000.0,
-        exchange="BSE",  # Malicious/bogus client override
-        segment="EQUITY_INTRADAY",  # Malicious/bogus client override
-    )
-    assert order.exchange == "MCX"
-    assert order.segment == "COMMODITY"
+    with pytest.raises(ValueError, match="conflicts with canonical"):
+        preview_order_intent(
+            symbol="MCX:GOLD",
+            side="BUY",
+            quantity=1,
+            price=74000.0,
+            exchange="BSE",  # Malicious/bogus client override
+            segment="EQUITY_INTRADAY",  # Malicious/bogus client override
+        )
 
 
 def test_duplicate_intentional_orders_with_distinct_keys(tmp_path, monkeypatch):

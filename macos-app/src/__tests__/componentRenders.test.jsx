@@ -53,6 +53,30 @@ if (typeof window !== 'undefined') {
 // Global fetch mock to prevent network calls in tests
 global.fetch = vi.fn().mockImplementation((url) => {
   const urlStr = String(url)
+  if (urlStr.includes('/skills/dashboard_snapshot')) {
+    return Promise.resolve({
+      ok: true,
+      json: () => Promise.resolve({
+        data: {
+          terminal_contract_version: 2,
+          symbol: 'NIFTY',
+          exchange: 'NSE',
+          ltp: 24500,
+          automated_setup: {
+            symbol: 'NIFTY (NSE)', action: 'LONG (BUY)', trigger: 'Verified demand zone',
+            entry: 24480, stop_loss: 24360, target_1: 24720, target_2: 24900,
+            risk_reward: 2, risk_points: 120, risk_pct: 0.49, reward_points: 240,
+            reward_pct: 0.98, status: 'READY', status_label: 'Verified test setup',
+          },
+          provenance: { data_source: 'TEST_VERIFIED', is_real_time: false },
+          watchlist: [{ symbol: 'NIFTY', name: 'NIFTY 50', tag: 'INDEX', ltp: 24500, change_pct: 0.2 }],
+          flows: { fii_net: 0, dii_net: 0, net_total: 0, label: 'TEST', verdict: 'UNAVAILABLE' },
+          sector_matrix: [], rrg_sectors: [], personas: [], multi_tf: null, global_macro: null,
+        },
+        status: 'ok',
+      }),
+    })
+  }
   if (urlStr.includes('/skills/whale_flows')) {
     return Promise.resolve({
       ok: true,

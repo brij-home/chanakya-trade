@@ -64,7 +64,7 @@ if sys.platform == "win32":
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from rich.console import Console
 
 from agent.tools import _serialise
@@ -1385,10 +1385,11 @@ async def skill_alerts_add(req: AlertAddRequest):
     Alerts persist across server restarts (saved to ~/.trading_platform/alerts.json).
     """
     try:
-        from engine.alerts import alert_manager
+        from engine.alerts import alert_manager, validate_webhook_url
 
         sym = req.symbol.upper()
         exch = req.exchange.upper()
+        webhook_url = validate_webhook_url(req.webhook_url) if req.webhook_url else None
 
         # Conditional alert
         if req.conditions:
@@ -1396,7 +1397,7 @@ async def skill_alerts_add(req: AlertAddRequest):
                 symbol=sym,
                 conditions=req.conditions,
                 exchange=exch,
-                webhook_url=req.webhook_url,
+                webhook_url=webhook_url,
             )
 
         # Technical alert
@@ -1409,7 +1410,7 @@ async def skill_alerts_add(req: AlertAddRequest):
                 condition=req.condition,
                 threshold=req.threshold,
                 exchange=exch,
-                webhook_url=req.webhook_url,
+                webhook_url=webhook_url,
             )
 
         # Price alert
@@ -1419,7 +1420,7 @@ async def skill_alerts_add(req: AlertAddRequest):
                 condition=req.condition,
                 threshold=req.threshold,
                 exchange=exch,
-                webhook_url=req.webhook_url,
+                webhook_url=webhook_url,
             )
 
         else:
@@ -1432,7 +1433,12 @@ async def skill_alerts_add(req: AlertAddRequest):
         # Start polling if not already running
         alert_manager.start_polling(interval=60)
 
-        return {"status": "ok", "data": _serialise(alert)}
+        public_alert = alert_manager.public_dict(alert)
+        # The receiver needs this secret to verify the HMAC header.  It is
+        # intentionally shown only on successful creation, never in lists.
+        if alert.webhook_secret:
+            public_alert["webhook_signing_secret"] = alert.webhook_secret
+        return {"status": "ok", "data": public_alert}
 
     except HTTPException:
         raise
@@ -1492,9 +1498,9 @@ async def skill_positions():
         try:
             broker = get_broker()
         except RuntimeError:
-            return {"status": "ok", "data": {"holdings": [], "demo": True}}
+            return {"status": "ok", "data": {"positions": [], "demo": True}}
         positions = broker.get_positions()
-        return {"status": "ok", "data": {"holdings": _serialise(positions)}}
+        return {"status": "ok", "data": {"positions": _serialise(positions)}}
     except Exception as e:
         raise _err(str(e))
 
@@ -3163,12 +3169,14 @@ async def skill_sector_drilldown(req: SectorDrilldownSkillRequest):
             sector_rrg = {
                 "sector": sector_info["name"],
                 "symbol": sector_info.get("index_symbol", "^NSEI"),
-                "rs_ratio": 102.5,
-                "rs_momentum": 101.0,
-                "quadrant": "LEADING",
-                "day_change_pct": 0.85,
-                "benchmark_change_pct": 0.35,
-                "relative_strength": 105.2,
+                "rs_ratio": None,
+                "rs_momentum": None,
+                "quadrant": "UNAVAILABLE",
+                "day_change_pct": None,
+                "benchmark_change_pct": None,
+                "relative_strength": None,
+                "available": False,
+                "reason": "Sufficient benchmark and sector price history was not available.",
             }
 
         # Run scan for all stocks in this sector
@@ -3612,7 +3620,25 @@ async def skill_dashboard_snapshot(req: Optional[DashboardSnapshotRequest] = Non
                 except Exception:
                     pass
                 if not cur_ltp or cur_ltp <= 0:
-                    cur_ltp = 1000.0
+                    return _ok(
+                        {
+                            "_status": "UNAVAILABLE",
+                            "reason": "No current quote or verified historical close is available for this symbol.",
+                            "symbol": sym,
+                            "exchange": exch,
+                            "timeframe": tf,
+                            "ltp": 0.0,
+                            "watchlist": watchlist,
+                            "personas": [],
+                            "automated_setup": None,
+                            "flows": None,
+                            "sector_matrix": [],
+                            "rrg_sectors": [],
+                            "multi_tf": None,
+                            "global_macro": None,
+                            "provenance": {"data_source": "UNAVAILABLE", "is_real_time": False},
+                        }
+                    )
 
         # Market Structure & Volume Profile for active symbol
         ms_report = None
@@ -3679,36 +3705,76 @@ async def skill_dashboard_snapshot(req: Optional[DashboardSnapshotRequest] = Non
                 except Exception:
                     pass
 
+        # This endpoint feeds a trade-oriented terminal.  Its old fallbacks
+        # manufactured personas, order blocks and target levels when any of
+        # these analyses timed out.  Withhold the decision layer as a whole;
+        # raw quote/watchlist data remains available elsewhere in the UI.
+        structure_has_zone = bool(
+            ms_report
+            and (
+                getattr(ms_report, "active_demand_zones", None)
+                or getattr(ms_report, "active_supply_zones", None)
+            )
+        )
+        required_fundamentals = fund_snap and all(
+            getattr(fund_snap, name, None) is not None
+            for name in ("roe", "roce", "debt_equity", "pe", "sales_growth", "profit_growth")
+        )
+        required_forensics = forensic_rep and all(
+            getattr(forensic_rep, name, None) is not None
+            for name in ("beneish_m_score", "piotroski_f_score", "altman_z_score")
+        )
+        required_multibagger = mb_rep and getattr(mb_rep, "multibagger_score", None) is not None
+        if not (
+            df is not None
+            and not df.empty
+            and ms_report
+            and vp_report
+            and structure_has_zone
+            and required_fundamentals
+            and required_forensics
+            and required_multibagger
+        ):
+            return _ok(
+                {
+                    "_status": "UNAVAILABLE",
+                    "reason": "The verified analysis inputs required for a trade setup are incomplete. No setup or signal has been generated.",
+                    "symbol": sym,
+                    "exchange": exch,
+                    "timeframe": tf,
+                    "ltp": round(cur_ltp, 2),
+                    "watchlist": watchlist,
+                    "personas": [],
+                    "automated_setup": None,
+                    "flows": None,
+                    "sector_matrix": [],
+                    "rrg_sectors": [],
+                    "multi_tf": None,
+                    "global_macro": None,
+                    "provenance": {"data_source": "PARTIAL", "is_real_time": False},
+                }
+            )
+
         # 2. Rich AI Personas with dynamically calculated quant metrics for setup_sym
-        rvol_val = vp_report.rvol_20d if vp_report else 1.8
-        structure_dir = ms_report.regime if ms_report else "BULLISH"
-        struct_score = ms_report.structure_score if ms_report else 2
+        rvol_val = vp_report.rvol_20d
+        structure_dir = ms_report.regime
+        struct_score = ms_report.structure_score
 
         # Extract real fundamentals & forensics
-        roe_val = fund_snap.roe if (fund_snap and fund_snap.roe is not None) else 18.5
-        roce_val = fund_snap.roce if (fund_snap and fund_snap.roce is not None) else 22.1
-        de_val = (
-            fund_snap.debt_equity if (fund_snap and fund_snap.debt_equity is not None) else 0.45
-        )
-        pe_val = (
-            fund_snap.pe if (fund_snap and fund_snap.pe is not None and fund_snap.pe > 0) else 24.5
-        )
-        sales_growth_val = (
-            fund_snap.sales_growth if (fund_snap and fund_snap.sales_growth is not None) else 16.5
-        )
-        profit_growth_val = (
-            fund_snap.profit_growth
-            if (fund_snap and fund_snap.profit_growth is not None)
-            else sales_growth_val
-        )
+        roe_val = fund_snap.roe
+        roce_val = fund_snap.roce
+        de_val = fund_snap.debt_equity
+        pe_val = fund_snap.pe
+        sales_growth_val = fund_snap.sales_growth
+        profit_growth_val = fund_snap.profit_growth
 
-        m_score = forensic_rep.beneish_m_score if forensic_rep else -2.76
-        f_score = forensic_rep.piotroski_f_score if forensic_rep else 8
-        z_score = forensic_rep.altman_z_score if forensic_rep else 3.45
+        m_score = forensic_rep.beneish_m_score
+        f_score = forensic_rep.piotroski_f_score
+        z_score = forensic_rep.altman_z_score
 
-        mb_score = mb_rep.multibagger_score if mb_rep else 68
-        stage_str = mb_rep.weinstein_stage.replace("_", " ") if mb_rep else "STAGE 2 MARKUP"
-        minervini_passed = mb_rep.trend_template_passed if mb_rep else 6
+        mb_score = mb_rep.multibagger_score
+        stage_str = mb_rep.weinstein_stage.replace("_", " ")
+        minervini_passed = mb_rep.trend_template_passed
 
         # Calculate distinct dynamic conviction scores for each persona
         # 1. Jhunjhunwala: Multibagger momentum + Topline growth
@@ -4907,68 +4973,12 @@ async def skill_telemetry_clear():
 async def skill_portfolio_health(req: Optional[PortfolioHealthRequest] = None):
     """Audit retail portfolio health, concentration risk (HHI), and wealth allocation pyramid."""
     try:
-        from engine.portfolio import audit_portfolio_health, PortfolioSummary, HoldingRow, RiskMeter
-        from brokers.base import Funds
+        from engine.portfolio import audit_portfolio_health
 
-        try:
-            audit = audit_portfolio_health()
-        except Exception:
-            # Graceful demo fallback when broker is disconnected
-            demo_holdings = [
-                HoldingRow(
-                    symbol="RELIANCE",
-                    qty=50,
-                    avg_price=2600.0,
-                    ltp=2850.0,
-                    value=142500.0,
-                    pnl=12500.0,
-                    pnl_pct=9.6,
-                    product="CNC",
-                ),
-                HoldingRow(
-                    symbol="TCS",
-                    qty=25,
-                    avg_price=3300.0,
-                    ltp=3520.0,
-                    value=88000.0,
-                    pnl=5500.0,
-                    pnl_pct=6.7,
-                    product="CNC",
-                ),
-                HoldingRow(
-                    symbol="INFY",
-                    qty=40,
-                    avg_price=1500.0,
-                    ltp=1420.0,
-                    value=56800.0,
-                    pnl=-3200.0,
-                    pnl_pct=-5.3,
-                    product="CNC",
-                ),
-            ]
-            demo_funds = Funds(available_cash=65000.0, used_margin=0.0, total_balance=352300.0)
-            demo_risk = RiskMeter(
-                total_capital=352300.0,
-                deployed_cash=287300.0,
-                used_margin=0.0,
-                free_cash=65000.0,
-                deployment_pct=81.5,
-                unrealised_pnl=14800.0,
-                max_loss_estimate=287300.0,
-                risk_rating="LOW",
-            )
-            demo_summary = PortfolioSummary(
-                holdings=demo_holdings,
-                positions=[],
-                funds=demo_funds,
-                greeks=None,
-                risk=demo_risk,
-                total_value=352300.0,
-                total_pnl=14800.0,
-                day_pnl=0.0,  # type: ignore
-            )
-            audit = audit_portfolio_health(demo_summary)
+        audit = audit_portfolio_health()
         return _ok(audit.to_dict())
+    except RuntimeError as e:
+        return _ok({"_status": "UNAVAILABLE", "reason": str(e), "actionable": False})
     except Exception as e:
         raise _err(str(e))
 
@@ -4998,21 +5008,15 @@ async def skill_tax_harvesting():
         from engine.portfolio import get_portfolio_summary
         from engine.charges import suggest_tax_loss_harvesting
 
-        try:
-            summary = get_portfolio_summary()
-            holdings_dicts = [
-                {"symbol": h.symbol, "qty": h.qty, "ltp": h.ltp, "pnl": h.pnl, "days_held": 90}
-                for h in summary.holdings
-            ]
-        except Exception:
-            # Fallback demo holdings
-            holdings_dicts = [
-                {"symbol": "INFY", "qty": 40, "ltp": 1420.0, "pnl": -3200.0, "days_held": 90},
-                {"symbol": "WIPRO", "qty": 100, "ltp": 460.0, "pnl": -1500.0, "days_held": 120},
-                {"symbol": "RELIANCE", "qty": 50, "ltp": 2850.0, "pnl": 12500.0, "days_held": 150},
-            ]
+        summary = get_portfolio_summary()
+        holdings_dicts = [
+            {"symbol": h.symbol, "qty": h.qty, "ltp": h.ltp, "pnl": h.pnl, "days_held": 90}
+            for h in summary.holdings
+        ]
         suggestions = suggest_tax_loss_harvesting(holdings_dicts)
         return _ok({"tax_loss_harvest_opportunities": suggestions})
+    except RuntimeError as e:
+        return _ok({"_status": "UNAVAILABLE", "reason": str(e), "actionable": False})
     except Exception as e:
         raise _err(str(e))
 
@@ -5307,8 +5311,10 @@ async def skill_journal_stats():
 
 
 class Security360Request(BaseModel):
-    symbol: str = "RELIANCE"
-    current_price: Optional[float] = None
+    """Security-360 input. Prices always come from a server-side quote provider."""
+
+    model_config = ConfigDict(extra="forbid")
+    symbol: str = Field(default="RELIANCE", min_length=1, max_length=32)
 
 
 @router.post("/security_360", operation_id="skill_security_360_post")
@@ -5321,8 +5327,9 @@ async def skill_security_360(
         from engine.security_360 import build_security_360_dossier
 
         sym = (req.symbol if req and req.symbol else symbol) or "RELIANCE"
-        px = req.current_price if req and req.current_price else None
-        dossier = build_security_360_dossier(symbol=sym, current_price=px)
+        # A browser must not be able to influence trade-facing valuation or
+        # levels with a stale or manipulated price.
+        dossier = build_security_360_dossier(symbol=sym)
         return _ok(dossier.to_dict())
     except Exception as e:
         raise _err(str(e))

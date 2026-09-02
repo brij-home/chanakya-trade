@@ -192,7 +192,7 @@ def test_security_360_endpoint_contract(client):
       - decision MUST be None when methodology_lenses is empty.
       - _status MUST be 'UNAVAILABLE' when the live quote is unavailable or zero.
     """
-    res = client.post("/skills/security_360", json={"symbol": "INFY", "current_price": 1850.0})
+    res = client.post("/skills/security_360", json={"symbol": "INFY"})
     assert res.status_code == 200
     data = res.json()
     assert data["status"] == "ok"
@@ -209,6 +209,12 @@ def test_security_360_endpoint_contract(client):
         assert dossier.get("decision") is None, (
             "decision must be None when methodology_lenses is empty (AGENTS.md §8)"
         )
+
+
+def test_security_360_rejects_client_supplied_price(client):
+    """A browser cannot inject a quote into a trade-facing dossier."""
+    res = client.post("/skills/security_360", json={"symbol": "INFY", "current_price": 1850.0})
+    assert res.status_code == 422
 
 
 def test_strategy_manifest_endpoint_contract(client):

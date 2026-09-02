@@ -151,16 +151,26 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# ── CORS — allow Electron renderer (Vite dev + packaged file://) ──────────
+# ── CORS ──────────────────────────────────────────────────────────────────
 from fastapi.middleware.cors import CORSMiddleware
+
+
+def _cors_origins() -> list[str]:
+    """Return explicit browser origins; packaged Electron uses IPC, not CORS."""
+    configured = os.environ.get("CORS_ALLOWED_ORIGINS", "")
+    if configured:
+        return [origin.strip() for origin in configured.split(",") if origin.strip()]
+    if os.environ.get("DEPLOY_MODE", "") == "self-hosted":
+        return []
+    return ["http://localhost:5173", "http://127.0.0.1:5173"]
+
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173", "file://"],
-    allow_origin_regex=r"(http://localhost:\d+|file://.*)",
+    allow_origins=_cors_origins(),
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
+    allow_headers=["Content-Type", "X-CSRF-Token"],
 )
 
 # ── Auth router ──────────────────────────────────────────────────
@@ -216,11 +226,18 @@ async def auth_middleware(request: _Request, call_next):
     deploy_mode = os.environ.get("DEPLOY_MODE", "")
     if deploy_mode == "self-hosted":
         if user_count() == 0:
-            return await call_next(request)
+            return JSONResponse(
+                {
+                    "detail": "Initial account setup is required before protected endpoints can be used."
+                },
+                status_code=503,
+            )
 
         session_id = request.cookies.get("session_id")
-        if not session_id or not get_session(session_id):
+        session = get_session(session_id) if session_id else None
+        if not session:
             return JSONResponse({"detail": "Not authenticated"}, status_code=401)
+        request.state.user = session
 
         # CSRF protection for authenticated mutating methods
         if request.method in ("POST", "PUT", "DELETE", "PATCH"):
@@ -244,8 +261,10 @@ async def auth_middleware(request: _Request, call_next):
 
         # Check session cookie
         session_id = request.cookies.get("session_id")
-        if not session_id or not get_session(session_id):
+        session = get_session(session_id) if session_id else None
+        if not session:
             return JSONResponse({"detail": "Not authenticated"}, status_code=401)
+        request.state.user = session
 
         return await call_next(request)
 
@@ -1959,38 +1978,13 @@ async def api_portfolio(request: Request):
 
         _try("fyers", lambda: FyersAPI(_env("FYERS_APP_ID"), _env("FYERS_SECRET_KEY")))
 
-    # Fallback: demo data if no broker authenticated
+    # Portfolio data is decision-critical.  Do not replace a disconnected
+    # broker with a realistic-looking mock account in a production pathway.
     if not active_brokers:
-        from brokers.mock import MockBrokerAPI
-
-        m = MockBrokerAPI()
-        m.complete_login()
-        active_brokers.append("mock (demo)")
-        f = m.get_funds()
-        total_cash, total_margin, total_balance = f.available_cash, f.used_margin, f.total_balance
-        for h in m.get_holdings():
-            holdings.append(
-                {
-                    "broker": "mock",
-                    "symbol": h.symbol,
-                    "qty": h.quantity,
-                    "avg_price": h.avg_price,
-                    "ltp": h.last_price,
-                    "pnl": h.pnl,
-                    "current_value": h.current_value,
-                }
-            )
-        for p in m.get_positions():
-            positions.append(
-                {
-                    "broker": "mock",
-                    "symbol": p.symbol,
-                    "qty": p.quantity,
-                    "avg_price": p.avg_price,
-                    "ltp": p.last_price,
-                    "pnl": p.pnl,
-                }
-            )
+        raise _HTTPException(
+            status_code=503,
+            detail="Portfolio unavailable: connect an authenticated broker to view account data.",
+        )
 
     total_pnl = sum(h["pnl"] for h in holdings) + sum(p["pnl"] for p in positions)
     return {
@@ -2182,20 +2176,33 @@ async def get_preflight_diagnostics():
     return JSONResponse(report.to_dict())
 
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
 from typing import Optional
 
 
 class CalculateChargesRequest(BaseModel):
-    price: float
-    quantity: int
+    model_config = ConfigDict(extra="forbid")
+
+    price: float = Field(gt=0)
+    quantity: int = Field(ge=1)
     segment: str = "EQUITY_DELIVERY"
     side: str = "BUY"
-    brokerage_rate: Optional[float] = None
-    broker_flat_fee: float = 20.0
+    brokerage_rate: Optional[float] = Field(default=None, ge=0)
+    broker_flat_fee: float = Field(default=20.0, ge=0)
 
-
-CalculateChargesRequest.model_rebuild()
+    @field_validator("segment", "side")
+    @classmethod
+    def normalize_choice(cls, value: str, info):
+        if not isinstance(value, str):
+            raise ValueError(f"{info.field_name} must be a string")
+        normalized = value.strip().upper()
+        allowed = {
+            "segment": {"EQUITY_DELIVERY", "EQUITY_INTRADAY", "FUTURES", "OPTIONS"},
+            "side": {"BUY", "SELL"},
+        }[info.field_name]
+        if normalized not in allowed:
+            raise ValueError(f"Unsupported {info.field_name}: {value!r}")
+        return normalized
 
 
 @app.post("/api/charges/calculate", tags=["Trading Engine"])
@@ -2203,19 +2210,11 @@ async def api_calculate_charges(req: CalculateChargesRequest):
     """Calculate exact statutory Indian transaction costs for an order leg."""
     from engine.charges import calculate_transaction_charges
 
-    seg = req.segment.upper()
-    if seg not in ("EQUITY_DELIVERY", "EQUITY_INTRADAY", "FUTURES", "OPTIONS"):
-        seg = "EQUITY_DELIVERY"
-
-    sd = req.side.upper()
-    if sd not in ("BUY", "SELL"):
-        sd = "BUY"
-
     breakdown = calculate_transaction_charges(
         price=req.price,
         quantity=req.quantity,
-        segment=seg,  # type: ignore
-        side=sd,  # type: ignore
+        segment=req.segment,  # type: ignore
+        side=req.side,  # type: ignore
         brokerage_rate=req.brokerage_rate,
         broker_flat_fee=req.broker_flat_fee,
     )
@@ -2228,13 +2227,36 @@ async def api_calculate_charges(req: CalculateChargesRequest):
 class OrderPreviewRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    symbol: str
-    side: str = "BUY"
-    quantity: int = 1
-    price: float = 100.0
+    symbol: str = Field(min_length=1, max_length=64)
+    side: str
+    quantity: int = Field(ge=1)
+    price: float = Field(gt=0)
     order_type: str = "LIMIT"
     product: str = "MIS"
     idempotency_key: Optional[str] = None
+
+    @field_validator("symbol")
+    @classmethod
+    def normalize_symbol(cls, value: str) -> str:
+        normalized = value.strip().upper()
+        if not normalized:
+            raise ValueError("symbol must not be blank")
+        return normalized
+
+    @field_validator("side", "order_type", "product")
+    @classmethod
+    def normalize_order_choices(cls, value: str, info):
+        if not isinstance(value, str):
+            raise ValueError(f"{info.field_name} must be a string")
+        normalized = value.strip().upper()
+        allowed = {
+            "side": {"BUY", "SELL"},
+            "order_type": {"MARKET", "LIMIT", "SL_LIMIT", "SL_MARKET"},
+            "product": {"CNC", "MIS", "NRML"},
+        }[info.field_name]
+        if normalized not in allowed:
+            raise ValueError(f"Unsupported {info.field_name}: {value!r}")
+        return normalized
 
 
 class OrderExecuteRequest(BaseModel):
@@ -2273,18 +2295,14 @@ async def api_order_preview(req: OrderPreviewRequest, request: _Request):
     if hasattr(request.state, "user") and request.state.user:
         actor = request.state.user.get("username", request.state.user.get("user_id", "UNKNOWN"))
 
-    side = req.side.upper()
-    if side not in ("BUY", "SELL"):
-        side = "BUY"
-
     try:
         order = preview_order_intent(
             symbol=req.symbol,
-            side=side,  # type: ignore
-            quantity=max(1, req.quantity),
-            price=max(0.05, req.price),
-            order_type=req.order_type.upper(),  # type: ignore
-            product=req.product.upper(),  # type: ignore
+            side=req.side,  # type: ignore
+            quantity=req.quantity,
+            price=req.price,
+            order_type=req.order_type,  # type: ignore
+            product=req.product,  # type: ignore
             idempotency_key=req.idempotency_key,
         )
 

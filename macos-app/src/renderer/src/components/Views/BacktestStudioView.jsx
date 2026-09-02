@@ -3,6 +3,7 @@ import { useAPI } from '../../hooks/useAPI'
 import { useChatStore } from '../../store/chatStore'
 import { formatINR, formatINRFull, formatPct } from '../../utils/formatINR'
 import SmartTypeahead from '../Common/SmartTypeahead'
+import UnavailableState from '../Common/UnavailableState'
 import { fuzzySearchUniverse, getSymbolExchange } from '../../data/universeData'
 
 const STRATEGY_PRESETS = [
@@ -101,34 +102,45 @@ export default function BacktestStudioView({ onOpenOrderTicket }) {
 
   // Normalized summary metrics
   const r = data?.data ?? data ?? {}
-  const totalReturn = Number(r.total_return ?? r.return_pct ?? 28.4)
-  const cagr = Number(r.cagr ?? 14.2)
-  const sharpe = Number(r.sharpe_ratio ?? r.sharpe ?? 1.48)
-  const maxDd = Number(r.max_drawdown ?? -8.6)
-  const winRate = Number(r.win_rate ?? 62.5)
-  const totalTrades = Number(r.total_trades ?? 48)
-  const profitFactor = Number(r.profit_factor ?? 2.15)
+  const requiredMetrics = ['total_return', 'cagr', 'sharpe_ratio', 'max_drawdown', 'win_rate', 'total_trades', 'profit_factor']
+  const hasBacktestData = requiredMetrics.every((key) => Number.isFinite(Number(r[key]))) && Array.isArray(r.equity_curve) && r.equity_curve.length > 1
+
+  if (!loading && !hasBacktestData) {
+    return (
+      <div className="flex h-full items-center justify-center p-6" style={{ background: 'var(--color-surface)' }}>
+        <UnavailableState
+          title="Backtest results unavailable"
+          reason="The backtest did not return a complete, reproducible result set. No performance figures or simulated trades are shown."
+          hint="Check the historical-data provider, then run the backtest again."
+          onRetry={() => executeBacktest()}
+          size="lg"
+        />
+      </div>
+    )
+  }
+
+  const totalReturn = Number(r.total_return)
+  const cagr = Number(r.cagr)
+  const sharpe = Number(r.sharpe_ratio)
+  const maxDd = Number(r.max_drawdown)
+  const winRate = Number(r.win_rate)
+  const totalTrades = Number(r.total_trades)
+  const profitFactor = Number(r.profit_factor)
   const isPos = totalReturn >= 0
 
-  // Mock synthetic equity progression if not populated
-  const rawCurve = (r.equity_curve && r.equity_curve.length > 0)
-    ? r.equity_curve
-    : generateSyntheticCurve(initialCapital, totalReturn, totalTrades)
+  const rawCurve = Array.isArray(r.equity_curve) ? r.equity_curve : []
 
   const equityCurve = rawCurve.map((p, i) => ({
     step: i,
-    value: typeof p === 'number' ? p : Number(p?.value ?? initialCapital),
-    benchmark: initialCapital * (1 + (i / rawCurve.length) * (totalReturn * 0.45) / 100),
+    value: typeof p === 'number' ? p : Number(p?.value),
+    benchmark: typeof p === 'object' && Number.isFinite(Number(p?.benchmark)) ? Number(p.benchmark) : null,
   }))
 
-  const peakValue = Math.max(...equityCurve.map((p) => p.value))
+  const peakValue = equityCurve.length ? Math.max(...equityCurve.map((p) => p.value)) : initialCapital
   const finalValue = equityCurve[equityCurve.length - 1]?.value || initialCapital
   const netPnL = finalValue - initialCapital
 
-  // Trade logs (synthetic if empty) with robust normalization
-  const rawTrades = (r.trades && r.trades.length > 0)
-    ? r.trades
-    : generateSyntheticTrades(symbol, totalTrades, winRate)
+  const rawTrades = Array.isArray(r.trades) ? r.trades : []
 
   const allTrades = rawTrades.map((t, i) => {
     const pnlVal = Number(t.pnl ?? 0)
@@ -444,20 +456,6 @@ export default function BacktestStudioView({ onOpenOrderTicket }) {
           <div className="space-y-2 pt-4 border-t border-border/50">
             <button
               onClick={() => {
-                if (onOpenOrderTicket) {
-                  onOpenOrderTicket({
-                    symbol,
-                    exchange: getSymbolExchange(symbol),
-                    action: isPos ? 'BUY' : 'SELL',
-                  })
-                }
-              }}
-              className="w-full py-2.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-black font-extrabold text-xs uppercase tracking-wider transition-all shadow-md cursor-pointer"
-            >
-              ⚡ Stage Active Strategy Setup
-            </button>
-            <button
-              onClick={() => {
                 const exch = getSymbolExchange(symbol)
                 sendDraft(`analyze ${symbol}${exch !== 'NSE' ? ' ' + exch : ''}`)
               }}
@@ -584,7 +582,6 @@ export default function BacktestStudioView({ onOpenOrderTicket }) {
     </div>
   )
 }
-
 /* Interactive SVG Equity Curve */
 function InteractiveEquityChart({ curve = [], isPositive = true }) {
   if (curve.length === 0) return null
@@ -594,7 +591,7 @@ function InteractiveEquityChart({ curve = [], isPositive = true }) {
   const pad = { top: 20, right: 30, bottom: 30, left: 65 }
 
   const values = curve.map((c) => c.value)
-  const benchValues = curve.map((c) => c.benchmark)
+  const benchValues = curve.map((c) => c.benchmark).filter((value) => value != null)
   const all = [...values, ...benchValues]
 
   const minVal = Math.min(...all) * 0.98
@@ -604,7 +601,10 @@ function InteractiveEquityChart({ curve = [], isPositive = true }) {
   const scaleY = (v) => pad.top + ((maxVal - v) / (maxVal - minVal || 1)) * (height - pad.top - pad.bottom)
 
   const stratPath = curve.map((p, i) => `${i === 0 ? 'M' : 'L'} ${scaleX(i)} ${scaleY(p.value)}`).join(' ')
-  const benchPath = curve.map((p, i) => `${i === 0 ? 'M' : 'L'} ${scaleX(i)} ${scaleY(p.benchmark)}`).join(' ')
+  const hasBenchmark = benchValues.length === curve.length
+  const benchPath = hasBenchmark
+    ? curve.map((p, i) => `${i === 0 ? 'M' : 'L'} ${scaleX(i)} ${scaleY(p.benchmark)}`).join(' ')
+    : ''
 
   const areaPath = `${stratPath} L ${scaleX(curve.length - 1)} ${scaleY(minVal)} L ${scaleX(0)} ${scaleY(minVal)} Z`
 
@@ -635,7 +635,7 @@ function InteractiveEquityChart({ curve = [], isPositive = true }) {
       <path d={areaPath} fill="url(#equityGrad)" />
 
       {/* Benchmark Line */}
-      <path d={benchPath} fill="none" stroke="var(--color-muted)" strokeWidth="1.5" strokeDasharray="4 4" opacity="0.6" />
+      {hasBenchmark && <path d={benchPath} fill="none" stroke="var(--color-muted)" strokeWidth="1.5" strokeDasharray="4 4" opacity="0.6" />}
 
       {/* Strategy Line */}
       <path
@@ -660,46 +660,4 @@ function InteractiveEquityChart({ curve = [], isPositive = true }) {
       )}
     </svg>
   )
-}
-
-/* Helpers to generate realistic synthetic data when backend returns light payload */
-function generateSyntheticCurve(initial, returnPct, numTrades) {
-  const points = [initial]
-  let current = initial
-  const stepReturn = (returnPct / 100) / (numTrades || 30)
-
-  for (let i = 1; i <= (numTrades || 30); i++) {
-    const randomFactor = (Math.sin(i * 0.7) * 0.4 + Math.random() * 0.8)
-    const change = current * stepReturn * randomFactor
-    current = Math.max(initial * 0.8, current + change)
-    points.push(Math.round(current))
-  }
-  return points
-}
-
-function generateSyntheticTrades(symbol, count = 20, winRate = 60) {
-  const dates = ['14 Aug 2026', '18 Aug 2026', '21 Aug 2026', '24 Aug 2026', '27 Aug 2026', '29 Aug 2026']
-  const reasons = ['Target 1 (2R hit)', 'Trailing ATR Exit', 'Signal Flip', 'Stop Loss Hit', 'Time Stop Exit']
-  const basePrice = 2800
-
-  const trades = []
-  for (let i = 0; i < Math.min(30, count); i++) {
-    const isWin = (i % 10) < (winRate / 10)
-    const pnlPct = isWin ? (1.5 + (i % 5) * 0.8) : -(0.8 + (i % 3) * 0.4)
-    const entry = basePrice + (i * 12)
-    const exit = entry * (1 + pnlPct / 100)
-    const pnl = (exit - entry) * 100
-
-    trades.push({
-      date: dates[i % dates.length],
-      type: (i % 3 === 0) ? 'SHORT' : 'LONG',
-      entry,
-      exit,
-      pnl,
-      pct: pnlPct,
-      r: isWin ? (pnlPct / 0.8) : -1.0,
-      reason: isWin ? reasons[i % 2] : reasons[3],
-    })
-  }
-  return trades
 }

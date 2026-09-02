@@ -384,16 +384,9 @@ def get_sector_rrg_matrix(use_cache: bool = True) -> list[SectorRRGPoint]:
                 pass
 
         if not trail:
-            # Fallback based on relative 1D differential with synthetic realistic momentum
-            rel_diff = day_change - benchmark_change
-            rs_ratio = round(max(80.0, min(120.0, 100.0 + rel_diff * 3.5)), 2)
-            rs_momentum = round(max(80.0, min(120.0, 100.0 + rel_diff * 2.0)), 2)
-            trail = [
-                {"rs_ratio": round(rs_ratio - 1.2, 2), "rs_momentum": round(rs_momentum - 0.8, 2)},
-                {"rs_ratio": round(rs_ratio - 0.6, 2), "rs_momentum": round(rs_momentum - 0.4, 2)},
-                {"rs_ratio": round(rs_ratio - 0.2, 2), "rs_momentum": round(rs_momentum + 0.1, 2)},
-                {"rs_ratio": rs_ratio, "rs_momentum": rs_momentum},
-            ]
+            # An RRG requires the benchmark and sector history. A 1-day move
+            # cannot truthfully stand in for a rotation trail.
+            continue
 
         quadrant = _classify_quadrant(rs_ratio, rs_momentum)
 
@@ -468,12 +461,15 @@ def get_stock_tailwind(symbol: str) -> StockTailwind:
         return StockTailwind(
             symbol=clean_sym,
             sector=sector,
-            quadrant="LEADING",
-            rs_ratio=100.0,
-            rs_momentum=100.0,
-            tailwind_score=50,
-            alignment="NEUTRAL",
-            analysis=f"{clean_sym} is evaluated against the broad market index.",
+            quadrant="UNAVAILABLE",
+            rs_ratio=0.0,
+            rs_momentum=0.0,
+            tailwind_score=0,
+            alignment="UNAVAILABLE",
+            analysis=(
+                f"Sector rotation data for {sector} is unavailable because sufficient benchmark and "
+                "sector price history could not be retrieved."
+            ),
         )
 
     quad = sector_point.quadrant

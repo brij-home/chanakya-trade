@@ -4,6 +4,11 @@ let cachedCsrfToken = null
 
 export async function fetchCsrfToken(baseUrl) {
   try {
+    if (!window.__CHANAKYA_TRADE_WEB__ && window.electronAPI?.sidecarRequest) {
+      const res = await window.electronAPI.sidecarRequest({ endpoint: '/api/csrf-token' })
+      cachedCsrfToken = res.ok ? (res.data?.csrf_token || null) : null
+      return cachedCsrfToken
+    }
     const fetchOpts = window.__CHANAKYA_TRADE_WEB__ ? { credentials: 'include' } : {}
     const res = await fetch(`${baseUrl}/api/csrf-token`, { ...fetchOpts })
     if (res.ok) {
@@ -30,6 +35,7 @@ export function useAPI() {
 
   // In web mode, include credentials (cookies) with every request
   const fetchOpts = window.__CHANAKYA_TRADE_WEB__ ? { credentials: 'include' } : {}
+  const useSidecarIpc = !window.__CHANAKYA_TRADE_WEB__ && Boolean(window.electronAPI?.sidecarRequest)
 
   const call = async (endpoint, body = {}, options = {}) => {
     if (!base) throw new Error('API not ready — sidecar is still starting')
@@ -45,6 +51,17 @@ export function useAPI() {
       'Content-Type': 'application/json',
       ...(cachedCsrfToken ? { 'X-CSRF-Token': cachedCsrfToken } : {}),
       ...(options.headers || {}),
+    }
+
+    if (useSidecarIpc) {
+      const response = await window.electronAPI.sidecarRequest({
+        endpoint,
+        method,
+        headers,
+        body: options.body !== undefined ? options.body : body,
+      })
+      if (!response.ok) throw new Error(`API ${response.status}: ${JSON.stringify(response.data)}`)
+      return response.data
     }
 
     let res = await fetch(`${base}${endpoint}`, {
@@ -85,6 +102,11 @@ export function useAPI() {
 
   const get = async (endpoint, options = {}) => {
     if (!base) throw new Error('API not ready')
+    if (useSidecarIpc) {
+      const response = await window.electronAPI.sidecarRequest({ endpoint, method: 'GET', headers: options.headers })
+      if (!response.ok) throw new Error(`API ${response.status}`)
+      return response.data
+    }
     const res = await fetch(`${base}${endpoint}`, {
       ...fetchOpts,
       ...options,

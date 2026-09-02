@@ -6,6 +6,7 @@ import WhaleFlowsCard from '../Cards/WhaleFlowsCard'
 import PersonaTrackRecordCard from '../Cards/PersonaTrackRecordCard'
 import GlobalMacroCard from '../Cards/GlobalMacroCard'
 import SmartTypeahead from '../Common/SmartTypeahead'
+import UnavailableState from '../Common/UnavailableState'
 import { INDIAN_UNIVERSE, fuzzySearchUniverse, getSymbolExchange } from '../../data/universeData'
 
 export default function TerminalView({
@@ -144,6 +145,37 @@ export default function TerminalView({
       (setupRaw?.symbol && setupRaw.symbol.toUpperCase().startsWith(selectedSymbol.toUpperCase()))
     )
   )
+
+  // The terminal is decision-support and may stage an order.  Do not render
+  // its rich setup, council, or target UI until the snapshot supplies a
+  // current quote and complete server-calculated levels for this symbol.
+  // This deliberately prevents static presentation values from looking live.
+  const requiredSetupFields = ['entry', 'stop_loss', 'target_1', 'target_2']
+  // Version 2 is reserved for the rewritten, source-attributed terminal
+  // contract.  Legacy snapshots may contain presentation defaults, so they
+  // must never unlock the decision or order-staging surface.
+  const hasValidatedSetup = data?.terminal_contract_version === 2
+    && isDataMatching
+    && Number.isFinite(Number(data?.ltp))
+    && Number(data?.ltp) > 0
+    && requiredSetupFields.every((field) => Number.isFinite(Number(setupRaw?.[field])) && Number(setupRaw?.[field]) > 0)
+
+  if (!hasValidatedSetup) {
+    return (
+      <div className="flex-1 overflow-y-auto p-3 font-ui" style={{ background: 'var(--color-surface)' }}>
+        <div className="max-w-2xl mx-auto mt-12 rounded-2xl" style={{ background: 'var(--color-panel)', border: '1px solid var(--color-border)' }}>
+          <UnavailableState
+            title={loading ? 'Preparing the terminal' : 'Validated market setup unavailable'}
+            reason={loading
+              ? 'Fetching the current quote and server-calculated risk levels.'
+              : `No complete, current setup is available for ${selectedSymbol}. The terminal will refresh automatically.`}
+            hint="No indicative price, target, or order action is shown until data quality checks pass."
+            size="lg"
+          />
+        </div>
+      </div>
+    )
+  }
 
   // Universe stock metadata for instant 0ms optimistic calibration
   const universeStock = INDIAN_UNIVERSE.find((u) => u.symbol === selectedSymbol)

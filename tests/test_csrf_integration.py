@@ -140,7 +140,13 @@ def test_order_confirmation_is_required_and_request_metadata_is_not_client_contr
 
     override = client.post(
         "/api/orders/preview",
-        json={"symbol": "MCX:GOLD", "price": 72000, "exchange": "NSE"},
+        json={
+            "symbol": "MCX:GOLD",
+            "side": "BUY",
+            "quantity": 1,
+            "price": 72000,
+            "exchange": "NSE",
+        },
         headers=headers,
         cookies=cookies,
     )
@@ -150,6 +156,8 @@ def test_order_confirmation_is_required_and_request_metadata_is_not_client_contr
         "/api/orders/preview",
         json={
             "symbol": "RELIANCE",
+            "side": "BUY",
+            "quantity": 1,
             "price": 2800,
             "idempotency_key": f"confirm-test-{uuid.uuid4()}",
         },

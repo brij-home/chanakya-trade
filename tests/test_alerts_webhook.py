@@ -14,10 +14,13 @@ import json
 import time
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from engine.alerts import (
     Alert,
     AlertManager,
     _webhook_notify,
+    validate_webhook_url,
 )
 
 
@@ -47,6 +50,19 @@ class TestAlertDataclass:
             webhook_url="https://agent.example.com/callback",
         )
         assert a.webhook_url == "https://agent.example.com/callback"
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "http://example.com/hook",
+            "https://localhost/hook",
+            "https://127.0.0.1/hook",
+            "https://10.0.0.1/hook",
+        ],
+    )
+    def test_private_or_non_https_webhook_is_rejected(self, url):
+        with pytest.raises(ValueError):
+            validate_webhook_url(url)
 
     def test_backward_compat_load_without_webhook_url(self, tmp_path):
         """Alerts saved before webhook_url existed should load without error."""
@@ -198,7 +214,10 @@ class TestWebhookNotify:
             )
             return FakeResponse()
 
-        with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+        with (
+            patch("engine.alerts._resolves_to_public_address", return_value=True),
+            patch("urllib.request.urlopen", side_effect=fake_urlopen),
+        ):
             _webhook_notify(alert, ltp=2855.0)
             time.sleep(0.1)  # let background thread finish
 
@@ -229,7 +248,10 @@ class TestWebhookNotify:
             captured_headers.append(req.get_header("Content-type"))
             return MagicMock()
 
-        with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+        with (
+            patch("engine.alerts._resolves_to_public_address", return_value=True),
+            patch("urllib.request.urlopen", side_effect=fake_urlopen),
+        ):
             _webhook_notify(alert)
             time.sleep(0.1)
 
@@ -248,7 +270,10 @@ class TestWebhookNotify:
             triggered_at="2026-04-03T12:00:00",
             webhook_url="https://unreachable.invalid/cb",
         )
-        with patch("urllib.request.urlopen", side_effect=Exception("connection refused")):
+        with (
+            patch("engine.alerts._resolves_to_public_address", return_value=True),
+            patch("urllib.request.urlopen", side_effect=Exception("connection refused")),
+        ):
             _webhook_notify(alert)  # must not raise
             time.sleep(0.1)
 
