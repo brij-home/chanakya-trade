@@ -233,7 +233,7 @@ _USDINR_TTL = 60.0  # seconds
 
 
 def _get_usdinr_rate() -> float:
-    """Fetch live USD/INR exchange rate, cached for 60s to avoid hammering yfinance."""
+    """Fetch a live USD/INR exchange rate, or fail rather than inventing one."""
     with _usdinr_lock:
         if "rate" in _usdinr_cache:
             ts, rate = _usdinr_cache["rate"]
@@ -248,9 +248,10 @@ def _get_usdinr_rate() -> float:
             # Fallback: try 1-day history
             hist = t.history(period="1d")
             rate = float(hist["Close"].iloc[-1]) if not hist.empty else 0.0
-        rate = rate if rate > 60 else 84.0  # defensive fallback
-    except Exception:
-        rate = 84.0  # safe fallback when network is unavailable
+        if rate <= 60:
+            raise RuntimeError("Live USD/INR rate is unavailable")
+    except Exception as exc:
+        raise RuntimeError("Live USD/INR rate is unavailable") from exc
     with _usdinr_lock:
         _usdinr_cache["rate"] = (time.time(), rate)
     return rate

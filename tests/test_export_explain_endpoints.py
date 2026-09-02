@@ -13,16 +13,24 @@ def patch_env(monkeypatch):
 
 
 @pytest.fixture
-def client(mocker):
+def client(mocker, tmp_path, monkeypatch):
     mocker.patch("config.credentials.load_all", return_value={})
     mocker.patch("dotenv.load_dotenv")
     mocker.patch("web.api._require_localhost")
-    mocker.patch("web.api.user_count", return_value=0)
+    monkeypatch.setenv("AUTH_DB_PATH", str(tmp_path / "users.db"))
 
     from fastapi.testclient import TestClient
     from web.api import app
+    from web.auth import create_session, create_user, init_db
 
-    return TestClient(app)
+    init_db()
+    user = create_user("export@test.com", "password123")
+    session_id = create_session(user["id"], user["email"])
+    test_client = TestClient(app)
+    test_client.cookies.set("session_id", session_id)
+    token = test_client.get("/api/csrf-token").json()["csrf_token"]
+    test_client.headers.update({"X-CSRF-Token": token})
+    return test_client
 
 
 class TestExportPdfEndpoint:

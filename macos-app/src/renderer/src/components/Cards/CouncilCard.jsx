@@ -8,6 +8,7 @@ const VERDICT_STYLES = {
   HOLD: 'bg-amber-500/15 text-amber-400 border border-amber-500/30 font-bold',
   SELL: 'bg-rose-500/15 text-rose-400 border border-rose-500/30 font-bold',
   STRONG_SELL: 'bg-rose-500 text-white font-extrabold shadow-rose-500/20 shadow-lg',
+  UNAVAILABLE: 'bg-slate-500/15 text-slate-300 border border-slate-500/30 font-bold',
 }
 
 const COUNCIL_ICONS = {
@@ -40,11 +41,12 @@ export default function CouncilCard({ data }) {
 
   if (!data) return null
   const d = data?.data ?? data ?? {}
-  const council = d.council || 'breakout'
-  const symbol = d.symbol || 'NIFTY'
-  const exchange = d.exchange || 'NSE'
-  const consensusVerdict = d.consensus_verdict || 'HOLD'
-  const consensusScore = Number(d.consensus_score || 50)
+  const council = d.council || 'unavailable'
+  const symbol = d.symbol || '—'
+  const exchange = d.exchange || '—'
+  const consensusVerdict = d.consensus_verdict || 'UNAVAILABLE'
+  const hasConsensusScore = d.consensus_score != null && Number.isFinite(Number(d.consensus_score))
+  const consensusScore = hasConsensusScore ? Number(d.consensus_score) : null
   const signals = d.signals || []
 
   const icon = COUNCIL_ICONS[council.toLowerCase()] || '🏛️'
@@ -62,11 +64,11 @@ export default function CouncilCard({ data }) {
           <div>
             <div className="flex items-center gap-2">
               <span className="text-[10px] uppercase font-bold tracking-widest text-muted font-ui">
-                High-Conviction Council Consensus
+                Council Research Summary
               </span>
               <InfoBadge
                 title={`${council.toUpperCase()} Council Ensemble`}
-                content="Combines specialized market minds into a single consensus score to eliminate false positives."
+                content="Research perspectives are shown with their available evidence. A council result never stages or submits an order."
                 metricKey="persona_councils"
               />
             </div>
@@ -85,13 +87,13 @@ export default function CouncilCard({ data }) {
             {consensusVerdict}
           </span>
           <span className="text-[10px] text-muted block mt-1 font-mono">
-            Conviction: <strong className="text-text">{consensusScore}/100</strong>
+            Conviction: <strong className="text-text">{hasConsensusScore ? `${consensusScore}/100` : 'Unavailable'}</strong>
           </span>
         </div>
       </div>
 
       {/* Conviction Progress Bar */}
-      <div className="space-y-1.5">
+      {hasConsensusScore && <div className="space-y-1.5">
         <div className="flex items-center justify-between text-xs font-ui">
           <span className="text-muted">Council Consensus Strength</span>
           <span className={`font-bold ${isBuy ? 'text-emerald-400' : isSell ? 'text-rose-400' : 'text-amber'}`}>
@@ -106,7 +108,7 @@ export default function CouncilCard({ data }) {
             style={{ width: `${Math.max(5, Math.min(100, consensusScore))}%` }}
           />
         </div>
-      </div>
+      </div>}
 
       {/* Polled Specialist Members Grid */}
       <div className="space-y-2">
@@ -193,42 +195,27 @@ export default function CouncilCard({ data }) {
       <div className="flex flex-wrap items-center justify-between gap-2 border-t border-border/50 pt-3">
         <div className="flex items-center gap-2">
           <button
+            disabled={symbol === '—'}
             onClick={() => sendDraft(`structure ${symbol}`)}
             className="px-2.5 py-1 rounded-lg bg-surface hover:bg-surface/80 border border-border/60 text-xs text-text font-ui transition-all cursor-pointer"
           >
             🏛️ SMC Structure
           </button>
           <button
+            disabled={symbol === '—'}
             onClick={() => sendDraft(`multibagger ${symbol}`)}
             className="px-2.5 py-1 rounded-lg bg-surface hover:bg-surface/80 border border-border/60 text-xs text-text font-ui transition-all cursor-pointer"
           >
             💎 Stage 2 VCP
           </button>
           <button
+            disabled={symbol === '—'}
             onClick={() => sendDraft(`forensic ${symbol}`)}
             className="px-2.5 py-1 rounded-lg bg-surface hover:bg-surface/80 border border-border/60 text-xs text-text font-ui transition-all cursor-pointer"
           >
             🛡️ Forensic Audit
           </button>
         </div>
-
-        <button
-          onClick={() => {
-            window.dispatchEvent(
-              new CustomEvent('open-order-ticket-preset', {
-                detail: {
-                  symbol,
-                  exchange,
-                  action: isSell ? 'SELL' : 'BUY',
-                },
-              })
-            )
-          }}
-          className="px-4 py-1.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-black font-bold text-xs uppercase tracking-wide transition-all shadow-md cursor-pointer flex items-center gap-1.5"
-        >
-          <span>⚡</span>
-          <span>Stage Order Ticket</span>
-        </button>
       </div>
     </div>
   )

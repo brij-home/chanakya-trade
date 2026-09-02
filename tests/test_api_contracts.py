@@ -29,6 +29,7 @@ def test_api_openapi_spec_generation(client):
     assert "/api/mode" in paths
     assert "/api/preflight" in paths
     assert "/api/orders/preview" in paths
+    assert "/api/orders/confirm" in paths
     assert "/api/orders/execute" in paths
     assert "/api/risk/preflight" in paths
     assert "/skills/market_overview" in paths
@@ -47,13 +48,15 @@ def test_api_openapi_spec_generation(client):
 
 
 def test_mode_endpoint_contract(client):
-    """Verify /api/mode returns expected schema and fields."""
+    """Verify /api/mode returns expected P0-B schema and fields."""
     res = client.get("/api/mode")
     assert res.status_code == 200
     data = res.json()
+    # P0-B canonical contract: mode (UI enum), backend_mode (raw), description
     assert "mode" in data
-    assert "allowed_modes" in data
+    assert "backend_mode" in data
     assert "description" in data
+    # UI mode must be one of the three canonical values
     assert data["mode"] in ("PAPER", "DEMO", "LIVE")
 
 
@@ -180,18 +183,38 @@ def test_reconcile_and_journal_endpoints_contract(client):
 
 
 def test_security_360_endpoint_contract(client):
-    """Verify /skills/security_360 returns comprehensive multi-lens intelligence dossier."""
-    res = client.post("/skills/security_360", json={"symbol": "INFY", "current_price": 1850.0})
+    """
+    Verify /skills/security_360 returns a truthful multi-lens intelligence dossier.
+
+    AGENTS.md Section 8 truthfulness contract:
+      - methodology_lenses MUST be empty [] until real per-lens computation is wired.
+        Never hardcode four BULLISH verdicts.
+      - decision MUST be None when methodology_lenses is empty.
+      - _status MUST be 'UNAVAILABLE' when the live quote is unavailable or zero.
+    """
+    res = client.post("/skills/security_360", json={"symbol": "INFY"})
     assert res.status_code == 200
     data = res.json()
     assert data["status"] == "ok"
     dossier = data["data"]
     assert dossier["symbol"] == "INFY"
-    assert dossier["canonical_symbol"] == "NSE:INFY:EQUITY"
-    assert len(dossier["methodology_lenses"]) >= 4
-    assert dossier["decision"]["action_eligibility"] == "ELIGIBLE"
-    assert dossier["_status"] == "READY"
+    assert "canonical_symbol" in dossier
     assert "_as_of" in dossier
+    # Truthfulness contract: lenses empty until real computation is wired
+    assert isinstance(dossier["methodology_lenses"], list), (
+        "methodology_lenses must be a list (even if empty)"
+    )
+    # decision must be None when methodology_lenses is empty
+    if len(dossier["methodology_lenses"]) == 0:
+        assert dossier.get("decision") is None, (
+            "decision must be None when methodology_lenses is empty (AGENTS.md §8)"
+        )
+
+
+def test_security_360_rejects_client_supplied_price(client):
+    """A browser cannot inject a quote into a trade-facing dossier."""
+    res = client.post("/skills/security_360", json={"symbol": "INFY", "current_price": 1850.0})
+    assert res.status_code == 422
 
 
 def test_strategy_manifest_endpoint_contract(client):

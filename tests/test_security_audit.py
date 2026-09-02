@@ -5,12 +5,20 @@ Unit tests for Immutable Security Audit Trail.
 """
 
 import sqlite3
+import pytest
 from engine.security_audit import (
     record_audit_event,
     get_audit_logs,
     verify_audit_integrity,
-    _get_db_path,
 )
+
+
+@pytest.fixture(autouse=True)
+def isolated_audit_db(tmp_path, monkeypatch):
+    """Keep append-only/tamper tests isolated when xdist reorders test cases."""
+    db_path = tmp_path / "audit.db"
+    monkeypatch.setattr("engine.security_audit._get_db_path", lambda: db_path)
+    return db_path
 
 
 def test_record_audit_event():
@@ -59,7 +67,7 @@ def test_verify_audit_integrity():
     assert "latest_hash" in res
 
 
-def test_verify_audit_integrity_tamper_detection():
+def test_verify_audit_integrity_tamper_detection(isolated_audit_db):
     # Record an event
     rec = record_audit_event(
         event_type="TAMPER_TEST_EVENT",
@@ -71,8 +79,7 @@ def test_verify_audit_integrity_tamper_detection():
     assert res_before["valid"] is True
 
     # Intentionally tamper with a record in the database
-    db_path = _get_db_path()
-    with sqlite3.connect(db_path) as conn:
+    with sqlite3.connect(isolated_audit_db) as conn:
         conn.execute(
             "UPDATE security_audit_log SET payload_json = ? WHERE event_id = ?",
             ('{"value": 999999}', rec.event_id),

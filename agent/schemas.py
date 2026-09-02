@@ -51,7 +51,7 @@ class PersonaSignal(BaseModel):
     """Signal from a named investor persona (Buffett, Jhunjhunwala, etc.)."""
 
     persona: str
-    verdict: Literal["STRONG_BUY", "BUY", "HOLD", "SELL", "STRONG_SELL"]
+    verdict: Literal["STRONG_BUY", "BUY", "HOLD", "SELL", "STRONG_SELL", "UNAVAILABLE"]
     confidence: int = Field(ge=0, le=100)
     rationale: list[str] = Field(default_factory=list)
     key_metrics: dict[str, str] = Field(default_factory=dict)  # metric_name -> value string

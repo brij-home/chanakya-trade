@@ -135,9 +135,7 @@ def test_s360_forensic_status_reflects_real_audit_flagged():
                 "engine.security_360.audit_company_forensics",
                 return_value=mock_forensic,
             ):
-                with patch("engine.security_360.evaluate_action_eligibility") as mock_elig:
-                    mock_elig.return_value = MagicMock()
-                    dossier = build_security_360_dossier("RELIANCE", current_price=2900.0)
+                dossier = build_security_360_dossier("RELIANCE", current_price=2900.0)
 
     assert dossier.forensic_status == "FLAGGED", (
         f"forensic_status should be 'FLAGGED', got {dossier.forensic_status!r}. "
@@ -160,9 +158,7 @@ def test_s360_forensic_status_clean_when_audit_clean():
                 "engine.security_360.audit_company_forensics",
                 return_value=mock_forensic,
             ):
-                with patch("engine.security_360.evaluate_action_eligibility") as mock_elig:
-                    mock_elig.return_value = MagicMock()
-                    dossier = build_security_360_dossier("TCS", current_price=3000.0)
+                dossier = build_security_360_dossier("TCS", current_price=3000.0)
 
     assert dossier.forensic_status == "CLEAN"
 
@@ -182,9 +178,7 @@ def test_s360_forensic_unavailable_when_audit_raises():
                 "engine.security_360.audit_company_forensics",
                 side_effect=RuntimeError("DB offline"),
             ):
-                with patch("engine.security_360.evaluate_action_eligibility") as mock_elig:
-                    mock_elig.return_value = MagicMock()
-                    dossier = build_security_360_dossier("INFY", current_price=1800.0)
+                dossier = build_security_360_dossier("INFY", current_price=1800.0)
 
     assert dossier.forensic_status == "UNAVAILABLE", (
         f"forensic_status should be 'UNAVAILABLE' on exception, got {dossier.forensic_status!r}."
@@ -209,10 +203,7 @@ def test_s360_valuation_fair_value_not_hardcoded():
                 "engine.security_360.audit_company_forensics",
                 return_value=MagicMock(overall_flag="CLEAN"),
             ):
-                with patch(
-                    "engine.security_360.evaluate_action_eligibility", return_value=MagicMock()
-                ):
-                    dossier = build_security_360_dossier("RELIANCE", current_price=2500.0)
+                dossier = build_security_360_dossier("RELIANCE", current_price=2500.0)
 
     fabricated_fair_value = round(2500.0 * 1.15, 2)
     assert dossier.valuation_fair_value != fabricated_fair_value, (

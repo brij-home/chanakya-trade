@@ -183,7 +183,7 @@ export interface GEXLevel {
 
 // ── Multi-Agent Personas & Councils ─────────────────────────────────────────
 
-export type PersonaVerdict = 'STRONG_BUY' | 'BUY' | 'HOLD' | 'SELL' | 'STRONG_SELL' | 'STAND_DOWN'
+export type PersonaVerdict = 'STRONG_BUY' | 'BUY' | 'HOLD' | 'SELL' | 'STRONG_SELL' | 'UNAVAILABLE' | 'STAND_DOWN'
 
 export type PersonaId =
   | 'buffett'

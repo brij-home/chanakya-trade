@@ -6,10 +6,10 @@ export default function DefinedRiskSpreadCard({ data }) {
   const sendDraft = useChatStore((s) => s.sendDraft)
   if (!data) return null
   const d = data?.data ?? data ?? {}
-  const underlying = d.underlying || 'NIFTY'
-  const strategy = d.strategy_name || d.strategy || 'BULL_CALL_SPREAD'
-  const spotPrice = Number(d.spot_price || 24500)
-  const netCashflow = Number(d.net_cashflow || 0)
+  const underlying = d.underlying || '—'
+  const strategy = d.strategy_name || d.strategy || 'UNAVAILABLE'
+  const spotPrice = d.spot_price != null ? Number(d.spot_price) : null
+  const netCashflow = d.net_cashflow != null ? Number(d.net_cashflow) : null
   const maxProfit = d.max_profit != null ? Number(d.max_profit) : null
   const maxLoss = d.max_loss != null ? Number(d.max_loss) : null
   const rrRatio = d.risk_reward_ratio != null ? Number(d.risk_reward_ratio) : null
@@ -17,8 +17,8 @@ export default function DefinedRiskSpreadCard({ data }) {
   const legs = d.legs || []
   const marginReq = Number(d.margin_required || 0)
 
-  const isDebit = netCashflow < 0
-  const isCredit = netCashflow > 0
+  const isDebit = netCashflow != null && netCashflow < 0
+  const isCredit = netCashflow != null && netCashflow > 0
 
   return (
     <div className="bg-elevated/90 border border-border/80 rounded-2xl p-5 max-w-2xl w-full space-y-4 font-mono shadow-md backdrop-blur-md">
@@ -52,7 +52,7 @@ export default function DefinedRiskSpreadCard({ data }) {
         <div className="text-right">
           <span className="text-xs text-muted block font-ui">Spot Price</span>
           <span className="text-sm font-bold text-text font-mono">
-            ₹{spotPrice.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+            {spotPrice != null ? `₹${spotPrice.toLocaleString('en-IN', { minimumFractionDigits: 2 })}` : '—'}
           </span>
         </div>
       </div>
@@ -74,13 +74,13 @@ export default function DefinedRiskSpreadCard({ data }) {
         <div>
           <span className="text-[10px] text-muted block uppercase font-ui">Net Cashflow</span>
           <span className={`text-xs sm:text-sm font-bold ${isCredit ? 'text-emerald-400' : 'text-amber'}`}>
-            {isCredit ? `+₹${netCashflow.toFixed(0)} (Cr)` : `-₹${Math.abs(netCashflow).toFixed(0)} (Dr)`}
+            {netCashflow == null ? '—' : isCredit ? `+₹${netCashflow.toFixed(0)} (Cr)` : `-₹${Math.abs(netCashflow).toFixed(0)} (Dr)`}
           </span>
         </div>
         <div>
           <span className="text-[10px] text-muted block uppercase font-ui">Risk:Reward</span>
           <span className="text-xs sm:text-sm font-bold text-cyan-400">
-            {rrRatio != null ? `1 : ${rrRatio.toFixed(2)}` : '1 : 2.0+'}
+            {rrRatio != null ? `1 : ${rrRatio.toFixed(2)}` : '—'}
           </span>
         </div>
       </div>
@@ -140,24 +140,6 @@ export default function DefinedRiskSpreadCard({ data }) {
             </>
           )}
         </div>
-
-        <button
-          onClick={() => {
-            window.dispatchEvent(
-              new CustomEvent('open-order-ticket-preset', {
-                detail: {
-                  symbol: underlying,
-                  exchange: 'NFO',
-                  action: 'BUY',
-                },
-              })
-            )
-          }}
-          className="px-4 py-1.5 rounded-xl bg-cyan-500 hover:bg-cyan-400 text-black font-bold text-xs uppercase tracking-wide transition-all shadow-md cursor-pointer flex items-center gap-1.5"
-        >
-          <span>⚡</span>
-          <span>Deploy Spread</span>
-        </button>
       </div>
     </div>
   )

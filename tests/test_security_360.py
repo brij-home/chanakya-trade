@@ -17,26 +17,17 @@ def test_build_security_360_dossier_equity():
     assert dossier.segment == "EQUITY"
     assert dossier.lot_size == 1
     assert dossier.current_price == 2800.0
-    assert dossier.valuation_fair_value is not None
-    assert dossier.valuation_fair_value > 2800.0
-    assert dossier._status == "READY"
+    # Truthfulness contract: without a live DCF + all methodology lenses,
+    # the dossier must expose an unavailable state rather than invent advice.
+    assert dossier.valuation_fair_value is None
+    assert dossier._status == "PARTIAL"
     assert "IST" in dossier._as_of or "+05:30" in dossier._as_of
 
     # Check Methodology Lenses
-    assert len(dossier.methodology_lenses) >= 4
-    lens_ids = [l.lens_id for l in dossier.methodology_lenses]
-    assert "minervini_sepa" in lens_ids
-    assert "buffett_moat" in lens_ids
-    assert "smc_liquidity" in lens_ids
-    assert "taleb_convexity" in lens_ids
+    assert dossier.methodology_lenses == []
 
     # Check Decision Summary
-    assert dossier.decision is not None
-    assert dossier.decision.action_eligibility == "ELIGIBLE"
-    assert dossier.decision.invalidation_level < 2800.0
-    assert dossier.decision.target_1 > 2800.0
-    assert dossier.decision.target_2 > dossier.decision.target_1
-    assert dossier.decision.max_planned_loss > 0
+    assert dossier.decision is None
 
 
 def test_security_360_to_dict_serializability():
@@ -46,5 +37,5 @@ def test_security_360_to_dict_serializability():
 
     assert isinstance(data, dict)
     assert data["symbol"] == "TCS"
-    assert data["decision"]["action_eligibility"] == "ELIGIBLE"
+    assert data["decision"] is None
     assert isinstance(data["methodology_lenses"], list)

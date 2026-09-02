@@ -4,8 +4,17 @@ tests/test_broker_stoxkart.py
 Unit tests for Stoxkart broker integration.
 """
 
+import pytest
+
+from brokers import stoxkart
 from brokers.stoxkart import StoxkartAPI
 from brokers.base import OrderRequest
+
+
+@pytest.fixture(autouse=True)
+def isolated_stoxkart_token_file(tmp_path, monkeypatch):
+    """Keep mocked authentication from reading or writing a real broker session."""
+    monkeypatch.setattr(stoxkart, "TOKEN_FILE", tmp_path / "stoxkart.json")
 
 
 def test_stoxkart_init():
@@ -40,6 +49,16 @@ def test_stoxkart_auth_flow():
     assert broker.is_authenticated is True
 
 
+def test_stoxkart_auth_failure_never_creates_a_session():
+    broker = StoxkartAPI(api_key="key", api_secret="sec", client_code="C123")
+    broker._client.post = MagicMock(side_effect=OSError("network unavailable"))
+
+    assert broker.authenticate() is False
+    assert broker.is_authenticated is False
+    with pytest.raises(RuntimeError, match="no live or simulated broker session"):
+        broker.complete_login()
+
+
 def test_stoxkart_funds_and_order():
     broker = StoxkartAPI(client_code="STOX789")
     mock_post_resp = MagicMock(status_code=200)
@@ -68,3 +87,21 @@ def test_stoxkart_funds_and_order():
     resp = broker.place_order(req)
     assert resp.status == "PLACED"
     assert resp.order_id != ""
+
+
+def test_stoxkart_order_failure_is_not_reported_as_a_simulated_order():
+    broker = StoxkartAPI(client_code="STOX789")
+    broker._token = "verified-token"
+    broker._client.post = MagicMock(side_effect=OSError("network unavailable"))
+
+    req = OrderRequest(
+        symbol="RELIANCE",
+        exchange="NSE",
+        transaction_type="BUY",
+        order_type="LIMIT",
+        product="MIS",
+        quantity=10,
+        price=2800.0,
+    )
+    with pytest.raises(RuntimeError, match="order submission failed"):
+        broker.place_order(req)

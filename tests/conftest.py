@@ -26,6 +26,7 @@ os.environ["TRADING_PLATFORM_DATA"] = str(_TEST_DATA_DIR)
 os.environ["TRADING_PLATFORM_PDF_DIR"] = str(_TEST_DATA_DIR / "pdf")
 os.environ["CHANAKYA_TESTING"] = "1"
 os.environ["TRADING_MODE"] = "PAPER"
+os.environ.setdefault("CSRF_SECRET", "test-strong-csrf-secret-1234567890-32chars")
 os.environ.setdefault("KEYRING_DISABLE", "1")
 os.environ.setdefault("PYTHONKEYRING_BACKEND", "keyring.backends.null.Keyring")
 

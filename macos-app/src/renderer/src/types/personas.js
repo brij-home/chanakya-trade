@@ -5,7 +5,7 @@
  */
 
 /**
- * @typedef {'STRONG_BUY' | 'BUY' | 'HOLD' | 'SELL' | 'STRONG_SELL' | 'STAND_DOWN'} PersonaVerdict
+ * @typedef {'STRONG_BUY' | 'BUY' | 'HOLD' | 'SELL' | 'STRONG_SELL' | 'UNAVAILABLE' | 'STAND_DOWN'} PersonaVerdict
  */
 
 /**

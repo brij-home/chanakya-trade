@@ -106,7 +106,7 @@ class TestRunDebate:
     def test_each_signal_has_valid_verdict(self):
         from agent.persona_agent import run_debate
 
-        valid_verdicts = {"STRONG_BUY", "BUY", "HOLD", "SELL", "STRONG_SELL"}
+        valid_verdicts = {"STRONG_BUY", "BUY", "HOLD", "SELL", "STRONG_SELL", "UNAVAILABLE"}
         signals = run_debate(symbol="TCS", exchange="NSE", registry=None, llm_provider=None)
         for sig in signals:
             assert sig.verdict in valid_verdicts
@@ -250,12 +250,12 @@ class TestParsePersonaResponse:
         sig = parse_persona_response(text, "soros")
         assert sig.verdict == "STRONG_SELL"
 
-    def test_empty_text_returns_hold(self):
+    def test_empty_text_returns_unavailable(self):
         from agent.persona_agent import parse_persona_response
 
         sig = parse_persona_response("", "munger")
-        assert sig.verdict == "HOLD"
-        assert sig.confidence == 30
+        assert sig.verdict == "UNAVAILABLE"
+        assert sig.confidence == 0
 
     def test_persona_id_preserved(self):
         from agent.persona_agent import parse_persona_response

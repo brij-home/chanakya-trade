@@ -6,6 +6,7 @@ import WhaleFlowsCard from '../Cards/WhaleFlowsCard'
 import PersonaTrackRecordCard from '../Cards/PersonaTrackRecordCard'
 import GlobalMacroCard from '../Cards/GlobalMacroCard'
 import SmartTypeahead from '../Common/SmartTypeahead'
+import UnavailableState from '../Common/UnavailableState'
 import { INDIAN_UNIVERSE, fuzzySearchUniverse, getSymbolExchange } from '../../data/universeData'
 
 export default function TerminalView({
@@ -144,6 +145,37 @@ export default function TerminalView({
       (setupRaw?.symbol && setupRaw.symbol.toUpperCase().startsWith(selectedSymbol.toUpperCase()))
     )
   )
+
+  // The terminal is decision-support and may stage an order.  Do not render
+  // its rich setup, council, or target UI until the snapshot supplies a
+  // current quote and complete server-calculated levels for this symbol.
+  // This deliberately prevents static presentation values from looking live.
+  const requiredSetupFields = ['entry', 'stop_loss', 'target_1', 'target_2']
+  // Version 2 is reserved for the rewritten, source-attributed terminal
+  // contract.  Legacy snapshots may contain presentation defaults, so they
+  // must never unlock the decision or order-staging surface.
+  const hasValidatedSetup = data?.terminal_contract_version === 2
+    && isDataMatching
+    && Number.isFinite(Number(data?.ltp))
+    && Number(data?.ltp) > 0
+    && requiredSetupFields.every((field) => Number.isFinite(Number(setupRaw?.[field])) && Number(setupRaw?.[field]) > 0)
+
+  if (!hasValidatedSetup) {
+    return (
+      <div className="flex-1 overflow-y-auto p-3 font-ui" style={{ background: 'var(--color-surface)' }}>
+        <div className="max-w-2xl mx-auto mt-12 rounded-2xl" style={{ background: 'var(--color-panel)', border: '1px solid var(--color-border)' }}>
+          <UnavailableState
+            title={loading ? 'Preparing the terminal' : 'Validated market setup unavailable'}
+            reason={loading
+              ? 'Fetching the current quote and server-calculated risk levels.'
+              : `No complete, current setup is available for ${selectedSymbol}. The terminal will refresh automatically.`}
+            hint="No indicative price, target, or order action is shown until data quality checks pass."
+            size="lg"
+          />
+        </div>
+      </div>
+    )
+  }
 
   // Universe stock metadata for instant 0ms optimistic calibration
   const universeStock = INDIAN_UNIVERSE.find((u) => u.symbol === selectedSymbol)
@@ -1857,16 +1889,12 @@ export default function TerminalView({
               <span>⚡</span> MULTI-TF CONFLUENCE
             </span>
             <span className="text-[10px] font-bold font-mono px-2 py-0.5 rounded-full bg-emerald-500/15 border border-emerald-500/30 text-emerald-400">
-              {data?.multi_tf?.confluence_score || 88}% CONFLUENCE
+              {data?.multi_tf?.confluence_score != null ? `${data.multi_tf.confluence_score}% CONFLUENCE` : 'CONFLUENCE UNAVAILABLE'}
             </span>
           </div>
 
           <div className="space-y-1.5 text-xs font-mono">
-            {(data?.multi_tf?.timeframes || [
-              { tf: '15m', label: 'Intraday', bias: 'BULLISH', signal: 'SMC Order Block Retest', rsi: 58.4, key_level: 'OB ₹24,120' },
-              { tf: '1h', label: 'Swing', bias: 'BULLISH', signal: 'Higher Highs Structure', rsi: 61.2, key_level: 'EMA20 ₹24,050' },
-              { tf: '1D', label: 'Trend', bias: 'BULLISH', signal: 'Stage 2 Markup (Minervini)', rsi: 64.8, key_level: '50-SMA ₹23,800' },
-            ]).map((tfItem) => {
+            {(data?.multi_tf?.timeframes || []).map((tfItem) => {
               const isBull = tfItem.bias === 'BULLISH'
               return (
                 <div
@@ -1892,6 +1920,9 @@ export default function TerminalView({
                 </div>
               )
             })}
+            {(!data?.multi_tf?.timeframes || data.multi_tf.timeframes.length === 0) && (
+              <p className="rounded-xl border border-border/50 bg-surface/80 p-3 text-[11px] text-muted">Verified multi-timeframe data is unavailable.</p>
+            )}
           </div>
         </div>
 

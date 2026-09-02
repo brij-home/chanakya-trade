@@ -6,6 +6,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   onSidecarError:      (cb) => ipcRenderer.on('sidecar-error', (_, data) => cb(data)),
   getPort:             ()   => ipcRenderer.invoke('get-port'),
   openExternal:        (url) => ipcRenderer.invoke('open-external', url),
+  sidecarRequest:      (request) => ipcRenderer.invoke('sidecar-request', request),
   updateTray:          (data) => ipcRenderer.send('update-tray', data),
 
   // Setup / bootstrap

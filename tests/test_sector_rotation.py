@@ -47,6 +47,8 @@ class TestSectorMatrix:
         from market.indices import IndexSnapshot
         import market.indices as ind_mod
         import market.quotes as q_mod
+        import market.history as h_mod
+        import pandas as pd
 
         fake_snaps = [
             IndexSnapshot(
@@ -74,15 +76,10 @@ class TestSectorMatrix:
         ]
         monkeypatch.setattr(ind_mod, "get_sector_snapshot", lambda: fake_snaps)
         monkeypatch.setattr(q_mod, "get_quote", lambda _: {})
+        monkeypatch.setattr(h_mod, "get_ohlcv", lambda *args, **kwargs: pd.DataFrame())
 
         matrix = get_sector_rrg_matrix(use_cache=False)
-        assert len(matrix) >= 8
-        sector_names = [p.sector for p in matrix]
-        assert "BANK" in sector_names
-        assert "IT" in sector_names
-        assert "PHARMA" in sector_names
-        assert "AUTO" in sector_names
-        assert "METAL" in sector_names
+        assert matrix == []
 
     def test_sector_rrg_point_dict(self):
         p = SectorRRGPoint(
@@ -120,13 +117,14 @@ class TestStockSectorAlignment:
             )
         ]
         monkeypatch.setattr(ind_mod, "get_sector_snapshot", lambda: fake_snaps)
+        monkeypatch.setattr("analysis.sector_rotation.get_sector_rrg_matrix", lambda: [])
 
         res = get_stock_sector_alignment("INFY")
         assert res["symbol"] == "INFY"
         assert res["sector"] == "IT"
-        assert res["quadrant"] in ("LEADING", "WEAKENING", "LAGGING", "IMPROVING")
-        assert 0 <= res["tailwind_score"] <= 100
-        assert res["alignment"] in ("STRONG_TAILWIND", "MODERATE_TAILWIND", "NEUTRAL", "HEADWIND")
+        assert res["quadrant"] == "UNAVAILABLE"
+        assert res["tailwind_score"] == 0
+        assert res["alignment"] == "UNAVAILABLE"
 
     def test_known_stock_metal(self, monkeypatch):
         from market.indices import IndexSnapshot
@@ -150,8 +148,9 @@ class TestStockSectorAlignment:
         assert res["symbol"] == "TATASTEEL"
         assert res["sector"] == "METAL"
 
-    def test_unknown_stock_defaults_to_broad_market(self):
+    def test_unknown_stock_reports_unavailable_without_rrg_history(self, monkeypatch):
+        monkeypatch.setattr("analysis.sector_rotation.get_sector_rrg_matrix", lambda: [])
         res = get_stock_sector_alignment("UNKNOWN_TICKER_XYZ")
         assert res["sector"] == "BROAD_MARKET"
-        assert res["alignment"] == "NEUTRAL"
-        assert res["tailwind_score"] == 50
+        assert res["alignment"] == "UNAVAILABLE"
+        assert res["tailwind_score"] == 0

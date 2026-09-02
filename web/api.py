@@ -133,6 +133,9 @@ async def _background_cache_warmer():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan context manager for startup and shutdown events."""
+    if os.environ.get("DEPLOY_MODE", "") == "self-hosted":
+        get_csrf_secret()
+
     init_auth_db()
     await _auto_restore_brokers()
     warmer_task = asyncio.create_task(_background_cache_warmer())
@@ -148,44 +151,67 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# ── CORS — allow Electron renderer (Vite dev + packaged file://) ──────────
+# ── CORS ──────────────────────────────────────────────────────────────────
 from fastapi.middleware.cors import CORSMiddleware
+
+
+def _cors_origins() -> list[str]:
+    """Return explicit browser origins; packaged Electron uses IPC, not CORS."""
+    configured = os.environ.get("CORS_ALLOWED_ORIGINS", "")
+    if configured:
+        return [origin.strip() for origin in configured.split(",") if origin.strip()]
+    if os.environ.get("DEPLOY_MODE", "") == "self-hosted":
+        return []
+    return ["http://localhost:5173", "http://127.0.0.1:5173"]
+
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173", "file://"],
-    allow_origin_regex=r"(http://localhost:\d+|file://.*)",
+    allow_origins=_cors_origins(),
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
+    allow_headers=["Content-Type", "X-CSRF-Token"],
 )
 
 # ── Auth router ──────────────────────────────────────────────────
 app.include_router(auth_router)
 
 
+# ── CSRF Secret Resolution & Enforcement ─────────────────────────
+def get_csrf_secret() -> str:
+    deploy_mode = os.environ.get("DEPLOY_MODE", "")
+    secret = os.environ.get("CSRF_SECRET", "")
+    insecure_defaults = {
+        "chanakya-csrf-secret-change-in-production",
+        "chanakya-local-csrf-dev-secret-key-64bytes-minimum-length-for-hmac",
+        "secret",
+        "change-me",
+        "12345678901234567890123456789012",
+    }
+    if deploy_mode == "self-hosted":
+        if not secret or len(secret) < 32 or secret in insecure_defaults:
+            raise RuntimeError(
+                "DEPLOY_MODE=self-hosted requires a cryptographically strong CSRF_SECRET "
+                "environment variable (minimum 32 characters, high entropy). Refusing to operate with missing or insecure secret."
+            )
+    return secret or "chanakya-local-csrf-dev-secret-key-64bytes-minimum-length-for-hmac"
+
+
 # ── Auth middleware for /api/* and /skills/* ──────────────────────
 @app.middleware("http")
 async def auth_middleware(request: _Request, call_next):
     path = request.url.path
-    # Public paths — no auth required
+    # Public paths — no auth required (health, mode, CSRF token, OAuth callbacks)
     if (
         path.startswith("/auth/")
         or path in ("/health", "/health/live", "/health/ready")
         or path
         in (
-            "/api/preflight",
-            "/api/risk/preflight",
             "/api/mode",
-            "/api/charges/calculate",
-            "/api/reconciliation",
-            "/api/audit/logs",
-            "/api/audit/verify",
-            "/api/slo",
-            "/api/provider_health",
-            "/api/correlation_ids",
+            "/api/csrf-token",
         )
-        or path.startswith("/api/orders/")
+        # NOTE: /api/orders/*, /api/reconciliation, /api/portfolio, /api/risk/*, and /api/audit/*
+        # are strictly NOT public and require authenticated sessions to protect customer capital, holdings, and logs.
         or path.startswith("/.well-known/")
         or path.startswith("/fyers/")  # OAuth callbacks
         or path.startswith("/zerodha/")  # OAuth callbacks
@@ -196,28 +222,51 @@ async def auth_middleware(request: _Request, call_next):
     ):
         return await call_next(request)
 
-    # Self-hosted mode: skip auth if no users exist yet (first-time onboarding)
+    # Self-hosted mode: authentication & CSRF enforcement
     deploy_mode = os.environ.get("DEPLOY_MODE", "")
     if deploy_mode == "self-hosted":
         if user_count() == 0:
-            return await call_next(request)
+            return JSONResponse(
+                {
+                    "detail": "Initial account setup is required before protected endpoints can be used."
+                },
+                status_code=503,
+            )
+
+        session_id = request.cookies.get("session_id")
+        session = get_session(session_id) if session_id else None
+        if not session:
+            return JSONResponse({"detail": "Not authenticated"}, status_code=401)
+        request.state.user = session
+
+        # CSRF protection for authenticated mutating methods
+        if request.method in ("POST", "PUT", "DELETE", "PATCH"):
+            csrf_token = request.headers.get("X-CSRF-Token", "")
+            import hashlib
+            import hmac
+
+            _csrf_secret = get_csrf_secret()
+            expected = hmac.new(
+                _csrf_secret.encode(), session_id.encode(), hashlib.sha256
+            ).hexdigest()
+            if not csrf_token or not hmac.compare_digest(csrf_token, expected):
+                return JSONResponse({"detail": "CSRF token invalid or missing"}, status_code=403)
+
+        return await call_next(request)
     else:
         # Local desktop mode: skip auth for localhost (Electron app, CLI, local dev, testclient)
         client_host = request.client.host if request.client else ""
         if client_host in ("127.0.0.1", "::1", "localhost", "testclient"):
             return await call_next(request)
 
-    # Check session cookie
-    session_id = request.cookies.get("session_id")
-    if not session_id:
-        return JSONResponse({"detail": "Not authenticated"}, status_code=401)
+        # Check session cookie
+        session_id = request.cookies.get("session_id")
+        session = get_session(session_id) if session_id else None
+        if not session:
+            return JSONResponse({"detail": "Not authenticated"}, status_code=401)
+        request.state.user = session
 
-    session = get_session(session_id)
-    if not session:
-        return JSONResponse({"detail": "Session expired"}, status_code=401)
-
-    request.state.user = session
-    return await call_next(request)
+        return await call_next(request)
 
 
 # ── OpenClaw Skills ───────────────────────────────────────────
@@ -422,11 +471,17 @@ async def api_mode():
         "SIMULATE": "PAPER",
         "EXECUTE": "LIVE",
     }
-    ui_mode = _UI_MODE_MAP.get(mode_info.mode.value, "PAPER")
+    try:
+        ui_mode = _UI_MODE_MAP[mode_info.mode.value]
+    except KeyError as exc:
+        raise RuntimeError(
+            f"Unsupported backend trading mode '{mode_info.mode.value}'. Refusing to mislabel it as PAPER."
+        ) from exc
     return JSONResponse(
         {
             "mode": ui_mode,
             "backend_mode": mode_info.mode.value,
+            "allowed_modes": list(_UI_MODE_MAP.values()),
             "description": mode_info.description,
         }
     )
@@ -466,38 +521,6 @@ async def get_correlation_ids(limit: int = 20):
     from engine.observability import get_registry
 
     return {"correlation_ids": get_registry().recent_correlation_ids(limit=limit)}
-
-
-@app.get("/api/mode", tags=["System"])
-async def get_app_mode():
-    """
-    P0-A: Returns the server-authoritative application mode.
-    The client MUST use this value; a client-side flag alone is never sufficient.
-
-    Modes:
-      PAPER — Real data sources, simulated execution (default for all new installs)
-      DEMO  — Synthetic fixture data, clearly labelled, isolated from Paper/Live stores
-      LIVE  — Real data + real broker execution (requires explicit activation)
-
-    Override via environment variable: CHANAKYA_TRADE_MODE=PAPER|DEMO|LIVE
-    Default is always PAPER to prevent accidental live execution.
-    """
-    import logging
-
-    allowed_modes = {"PAPER", "DEMO", "LIVE"}
-    env_mode = os.environ.get("CHANAKYA_TRADE_MODE", "PAPER").upper().strip()
-    if env_mode not in allowed_modes:
-        logging.warning("[mode] Unknown CHANAKYA_TRADE_MODE=%r, defaulting to PAPER", env_mode)
-        env_mode = "PAPER"
-    return {
-        "mode": env_mode,
-        "allowed_modes": sorted(allowed_modes),
-        "description": {
-            "PAPER": "Real data sources, simulated execution. No real orders sent.",
-            "DEMO": "Synthetic fixture data only. Cannot access real accounts, alerts, or exports.",
-            "LIVE": "Real data and real broker execution. Consequential — use with care.",
-        }.get(env_mode, ""),
-    }
 
 
 @app.get("/.well-known/openclaw.json", tags=["OpenClaw"])
@@ -1438,7 +1461,7 @@ async def api_cache_clear(request: Request):
 
 # ── Onboarding API ───────────────────────────────────────────
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 
 @app.get("/api/onboarding/status")
@@ -1955,38 +1978,13 @@ async def api_portfolio(request: Request):
 
         _try("fyers", lambda: FyersAPI(_env("FYERS_APP_ID"), _env("FYERS_SECRET_KEY")))
 
-    # Fallback: demo data if no broker authenticated
+    # Portfolio data is decision-critical.  Do not replace a disconnected
+    # broker with a realistic-looking mock account in a production pathway.
     if not active_brokers:
-        from brokers.mock import MockBrokerAPI
-
-        m = MockBrokerAPI()
-        m.complete_login()
-        active_brokers.append("mock (demo)")
-        f = m.get_funds()
-        total_cash, total_margin, total_balance = f.available_cash, f.used_margin, f.total_balance
-        for h in m.get_holdings():
-            holdings.append(
-                {
-                    "broker": "mock",
-                    "symbol": h.symbol,
-                    "qty": h.quantity,
-                    "avg_price": h.avg_price,
-                    "ltp": h.last_price,
-                    "pnl": h.pnl,
-                    "current_value": h.current_value,
-                }
-            )
-        for p in m.get_positions():
-            positions.append(
-                {
-                    "broker": "mock",
-                    "symbol": p.symbol,
-                    "qty": p.quantity,
-                    "avg_price": p.avg_price,
-                    "ltp": p.last_price,
-                    "pnl": p.pnl,
-                }
-            )
+        raise _HTTPException(
+            status_code=503,
+            detail="Portfolio unavailable: connect an authenticated broker to view account data.",
+        )
 
     total_pnl = sum(h["pnl"] for h in holdings) + sum(p["pnl"] for p in positions)
     return {
@@ -2178,39 +2176,33 @@ async def get_preflight_diagnostics():
     return JSONResponse(report.to_dict())
 
 
-@app.get("/api/mode", tags=["System"])
-async def get_operating_mode():
-    """Return the authoritative operating mode (OBSERVE, SIMULATE, EXECUTE)."""
-    from engine.modes import get_current_mode
-
-    mode = get_current_mode()
-    return {
-        "mode": mode.value,
-        "is_observe": mode.value == "OBSERVE",
-        "is_simulate": mode.value == "SIMULATE",
-        "is_execute": mode.value == "EXECUTE",
-        "description": {
-            "OBSERVE": "Read-only market and research exploration. Mutating actions blocked.",
-            "SIMULATE": "Paper trading and backtest sandbox. Zero live capital risk.",
-            "EXECUTE": "High-assurance live execution with strict pre-order confirmation.",
-        }.get(mode.value, ""),
-    }
-
-
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
 from typing import Optional
 
 
 class CalculateChargesRequest(BaseModel):
-    price: float
-    quantity: int
+    model_config = ConfigDict(extra="forbid")
+
+    price: float = Field(gt=0)
+    quantity: int = Field(ge=1)
     segment: str = "EQUITY_DELIVERY"
     side: str = "BUY"
-    brokerage_rate: Optional[float] = None
-    broker_flat_fee: float = 20.0
+    brokerage_rate: Optional[float] = Field(default=None, ge=0)
+    broker_flat_fee: float = Field(default=20.0, ge=0)
 
-
-CalculateChargesRequest.model_rebuild()
+    @field_validator("segment", "side")
+    @classmethod
+    def normalize_choice(cls, value: str, info):
+        if not isinstance(value, str):
+            raise ValueError(f"{info.field_name} must be a string")
+        normalized = value.strip().upper()
+        allowed = {
+            "segment": {"EQUITY_DELIVERY", "EQUITY_INTRADAY", "FUTURES", "OPTIONS"},
+            "side": {"BUY", "SELL"},
+        }[info.field_name]
+        if normalized not in allowed:
+            raise ValueError(f"Unsupported {info.field_name}: {value!r}")
+        return normalized
 
 
 @app.post("/api/charges/calculate", tags=["Trading Engine"])
@@ -2218,19 +2210,11 @@ async def api_calculate_charges(req: CalculateChargesRequest):
     """Calculate exact statutory Indian transaction costs for an order leg."""
     from engine.charges import calculate_transaction_charges
 
-    seg = req.segment.upper()
-    if seg not in ("EQUITY_DELIVERY", "EQUITY_INTRADAY", "FUTURES", "OPTIONS"):
-        seg = "EQUITY_DELIVERY"
-
-    sd = req.side.upper()
-    if sd not in ("BUY", "SELL"):
-        sd = "BUY"
-
     breakdown = calculate_transaction_charges(
         price=req.price,
         quantity=req.quantity,
-        segment=seg,  # type: ignore
-        side=sd,  # type: ignore
+        segment=req.segment,  # type: ignore
+        side=req.side,  # type: ignore
         brokerage_rate=req.brokerage_rate,
         broker_flat_fee=req.broker_flat_fee,
     )
@@ -2241,54 +2225,163 @@ async def api_calculate_charges(req: CalculateChargesRequest):
 
 
 class OrderPreviewRequest(BaseModel):
-    symbol: str
-    side: str = "BUY"
-    quantity: int = 1
-    price: float = 100.0
+    model_config = ConfigDict(extra="forbid")
+
+    symbol: str = Field(min_length=1, max_length=64)
+    side: str
+    quantity: int = Field(ge=1)
+    price: float = Field(gt=0)
     order_type: str = "LIMIT"
     product: str = "MIS"
-    segment: str = "EQUITY_INTRADAY"
     idempotency_key: Optional[str] = None
+
+    @field_validator("symbol")
+    @classmethod
+    def normalize_symbol(cls, value: str) -> str:
+        normalized = value.strip().upper()
+        if not normalized:
+            raise ValueError("symbol must not be blank")
+        return normalized
+
+    @field_validator("side", "order_type", "product")
+    @classmethod
+    def normalize_order_choices(cls, value: str, info):
+        if not isinstance(value, str):
+            raise ValueError(f"{info.field_name} must be a string")
+        normalized = value.strip().upper()
+        allowed = {
+            "side": {"BUY", "SELL"},
+            "order_type": {"MARKET", "LIMIT", "SL_LIMIT", "SL_MARKET"},
+            "product": {"CNC", "MIS", "NRML"},
+        }[info.field_name]
+        if normalized not in allowed:
+            raise ValueError(f"Unsupported {info.field_name}: {value!r}")
+        return normalized
 
 
 class OrderExecuteRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     order_id: str
 
 
+class OrderConfirmRequest(OrderExecuteRequest):
+    preview_hash: str
+
+
+@app.get("/api/csrf-token", tags=["Security"])
+async def api_csrf_token(request: _Request):
+    """
+    Issue a CSRF token for the current session (self-hosted mode only).
+    The client must send this in the X-CSRF-Token header for all mutating requests.
+    """
+    import hashlib
+    import hmac
+
+    session_id = request.cookies.get("session_id", "")
+    _csrf_secret = get_csrf_secret()
+    token = hmac.new(_csrf_secret.encode(), session_id.encode(), hashlib.sha256).hexdigest()
+    return JSONResponse({"csrf_token": token})
+
+
 @app.post("/api/orders/preview")
-async def api_order_preview(req: OrderPreviewRequest):
+async def api_order_preview(req: OrderPreviewRequest, request: _Request):
     """Generate order preview with statutory Indian charges and idempotency key."""
     from engine.order_lifecycle import preview_order_intent
+    from engine.security_audit import record_audit_event
 
-    side = req.side.upper()
-    if side not in ("BUY", "SELL"):
-        side = "BUY"
+    # Resolve actor identity — falls back to LOCAL in desktop/Electron mode
+    actor = "LOCAL"
+    if hasattr(request.state, "user") and request.state.user:
+        actor = request.state.user.get("username", request.state.user.get("user_id", "UNKNOWN"))
 
-    order = preview_order_intent(
-        symbol=req.symbol,
-        side=side,  # type: ignore
-        quantity=max(1, req.quantity),
-        price=max(0.05, req.price),
-        order_type=req.order_type.upper(),  # type: ignore
-        product=req.product.upper(),  # type: ignore
-        segment=req.segment,
-        idempotency_key=req.idempotency_key,
+    try:
+        order = preview_order_intent(
+            symbol=req.symbol,
+            side=req.side,  # type: ignore
+            quantity=req.quantity,
+            price=req.price,
+            order_type=req.order_type,  # type: ignore
+            product=req.product,  # type: ignore
+            idempotency_key=req.idempotency_key,
+        )
+
+        record_audit_event(
+            event_type="ORDER_PREVIEW_REQUESTED",
+            mode=order.mode,
+            actor=actor,
+            details={
+                "order_id": order.order_id,
+                "symbol": order.symbol,
+                "side": order.side,
+                "qty": order.quantity,
+            },
+        )
+        return JSONResponse(order.to_dict())
+    except PermissionError as e:
+        raise _HTTPException(403, str(e))
+    except ValueError as e:
+        raise _HTTPException(422, str(e))
+    except Exception as e:
+        raise _HTTPException(500, str(e))
+
+
+@app.post("/api/orders/confirm")
+async def api_order_confirm(req: OrderConfirmRequest, request: _Request):
+    """Record the user's final confirmation before an intent can execute."""
+    from engine.order_lifecycle import confirm_order_intent
+    from engine.security_audit import record_audit_event
+
+    actor = "LOCAL"
+    if hasattr(request.state, "user") and request.state.user:
+        actor = request.state.user.get("username", request.state.user.get("user_id", "UNKNOWN"))
+
+    try:
+        order = confirm_order_intent(req.order_id, req.preview_hash)
+    except PermissionError as exc:
+        raise _HTTPException(403, str(exc)) from exc
+    except ValueError as exc:
+        status_code = 404 if "not found" in str(exc).lower() else 409
+        raise _HTTPException(status_code, str(exc)) from exc
+
+    record_audit_event(
+        event_type="ORDER_CONFIRMED_BY_USER",
+        mode=order.mode,
+        actor=actor,
+        details={"order_id": order.order_id, "preview_hash": order.preview_hash},
     )
     return JSONResponse(order.to_dict())
 
 
 @app.post("/api/orders/execute")
-async def api_order_execute(req: OrderExecuteRequest):
-    """Execute order intent with mode gate validation."""
+async def api_order_execute(req: OrderExecuteRequest, request: _Request):
+    """Execute order intent with mode gate and double-confirmation validation."""
     from engine.order_lifecycle import execute_order_intent
+    from engine.security_audit import record_audit_event
+
+    # Resolve actor identity
+    actor = "LOCAL"
+    if hasattr(request.state, "user") and request.state.user:
+        actor = request.state.user.get("username", request.state.user.get("user_id", "UNKNOWN"))
 
     try:
         order = execute_order_intent(order_id=req.order_id)
+        record_audit_event(
+            event_type="ORDER_EXECUTE_REQUESTED",
+            mode=order.mode,
+            actor=actor,
+            details={
+                "order_id": order.order_id,
+                "status": order.status,
+                "broker_order_id": order.broker_order_id,
+            },
+        )
         return JSONResponse(order.to_dict())
-    except ValueError as e:
-        raise _HTTPException(404, str(e))
-    except Exception as e:
-        raise _HTTPException(500, str(e))
+    except PermissionError as exc:
+        raise _HTTPException(403, str(exc)) from exc
+    except ValueError as exc:
+        status_code = 404 if "not found" in str(exc).lower() else 409
+        raise _HTTPException(status_code, str(exc)) from exc
 
 
 class RiskPreflightRequest(BaseModel):
@@ -2368,20 +2461,31 @@ async def api_reconciliation():
             or "UNKNOWN"
         )
 
-        # Normalise broker positions to the same dict schema as internal_positions
-        broker_positions = [
-            {
-                "symbol": p.get("symbol") or p.get("tradingsymbol", ""),
-                "qty": int(p.get("quantity", p.get("qty", 0))),
-                "avg_price": float(p.get("average_price", p.get("avg_price", 0.0))),
+        # Normalise broker positions — handles both typed Position dataclasses
+        # (returned by real brokers) and raw dicts (returned by mock/test brokers).
+        def _pos_to_dict(p) -> dict:
+            if isinstance(p, dict):
+                return {
+                    "symbol": p.get("symbol") or p.get("tradingsymbol", ""),
+                    "qty": int(p.get("quantity", p.get("qty", 0))),
+                    "avg_price": float(p.get("average_price", p.get("avg_price", 0.0))),
+                }
+            # Typed Position dataclass (BrokerAPI contract)
+            return {
+                "symbol": getattr(p, "symbol", ""),
+                "qty": int(getattr(p, "quantity", 0)),
+                "avg_price": float(getattr(p, "avg_price", 0.0)),
             }
-            for p in (broker_positions_raw or [])
-        ]
-        broker_cash = float(
-            broker_funds_raw.get("available_cash", broker_funds_raw.get("net", 0.0))
-            if isinstance(broker_funds_raw, dict)
-            else 0.0
-        )
+
+        def _funds_cash(f) -> float:
+            """Extract available_cash from a Funds dataclass or a raw dict."""
+            if isinstance(f, dict):
+                return float(f.get("available_cash", f.get("net", 0.0)))
+            # Typed Funds dataclass (BrokerAPI contract)
+            return float(getattr(f, "available_cash", 0.0))
+
+        broker_positions = [_pos_to_dict(p) for p in (broker_positions_raw or [])]
+        broker_cash = _funds_cash(broker_funds_raw)
 
     except Exception as broker_exc:
         # No authenticated broker session — cannot reconcile honestly

@@ -12,7 +12,9 @@ that directly impact NSE/BSE institutional liquidity, pre-market gaps, and secto
   5. US 10-Year Treasury Yield — -0.70 Correlation with High-PE Valuation multiples
   6. Global Volatility (CBOE VIX vs India VIX) — Global De-risking & Contagion
 
-All data is fetched from live feeds with automated caching and defensive fallbacks.
+All data is fetched from live feeds.  A report is unavailable when the required
+cross-asset observations cannot be obtained; it must never be assembled from
+plausible-looking static prices.
 """
 
 from __future__ import annotations
@@ -195,7 +197,12 @@ def fetch_global_macro_report(
             from engine.analysis_cache import analysis_cache
 
             cached = analysis_cache.get_macro(cache_key)
-            if cached and isinstance(cached, dict) and cached.get("items"):
+            if (
+                cached
+                and isinstance(cached, dict)
+                and cached.get("items")
+                and cached.get("data_contract_version") == 2
+            ):
                 items_dict = {k: GlobalMacroItem(**v) for k, v in cached["items"].items()}
                 impacts = [SectorImpactItem(**s) for s in cached.get("sector_impacts", [])]
                 return GlobalMacroReport(
@@ -213,16 +220,17 @@ def fetch_global_macro_report(
         except Exception:
             pass
 
-    # Resolve NIFTY 50 spot price for gap math if not provided
+    # Resolve NIFTY 50 spot price for gap math if not provided.  A modelled
+    # point estimate is not useful without an actual NIFTY reference price.
     if not nifty_spot or nifty_spot <= 0:
         try:
             from market.quotes import get_ltp
 
             nifty_spot = get_ltp("NSE:NIFTY 50")
             if not nifty_spot or nifty_spot <= 0:
-                nifty_spot = 24150.0
+                nifty_spot = None
         except Exception:
-            nifty_spot = 24150.0
+            nifty_spot = None
 
     # 1. Fetch live ticks for global instruments via yfinance fast_info
     raw_data: dict[str, tuple[float, float, float]] = {}  # key -> (ltp, change, change_pct)
@@ -248,24 +256,14 @@ def fetch_global_macro_report(
     except Exception as e:
         logger.warning(f"Error fetching global macro ticks from yfinance: {e}")
 
-    # Fallback sensible defaults if network fails
-    default_fallbacks = {
-        "nasdaq": (26370.0, 45.0, 0.17),
-        "sp500": (7685.0, 12.0, 0.15),
-        "dxy": (99.50, -0.05, -0.05),
-        "usdinr": (94.90, -0.10, -0.11),
-        "brent": (88.90, -0.20, -0.22),
-        "crude_wti": (86.65, -0.15, -0.17),
-        "us10y": (4.75, 0.02, 0.42),
-        "us_vix": (14.90, 0.30, 2.05),
-        "india_vix": (11.25, 0.15, 1.35),
-        "nikkei": (66240.0, -15.0, -0.02),
-        "hangseng": (25310.0, -120.0, -0.47),
-        "gold": (4480.0, 5.0, 0.11),
-    }
-    for k, default_tuple in default_fallbacks.items():
-        if k not in raw_data or raw_data[k][0] <= 0:
-            raw_data[k] = default_tuple
+    missing = sorted(set(_GLOBAL_TICKERS) - set(raw_data))
+    if missing or not nifty_spot:
+        details = []
+        if missing:
+            details.append(f"missing observations: {', '.join(missing)}")
+        if not nifty_spot:
+            details.append("NIFTY spot quote unavailable")
+        raise RuntimeError("Global macro report unavailable — " + "; ".join(details))
 
     # 2. Build GlobalMacroItem entities
     items: dict[str, GlobalMacroItem] = {}
@@ -530,7 +528,9 @@ def fetch_global_macro_report(
     try:
         from engine.analysis_cache import analysis_cache
 
-        analysis_cache.save_macro(cache_key, report.to_dict(), ttl_minutes=5)
+        cache_payload = report.to_dict()
+        cache_payload["data_contract_version"] = 2
+        analysis_cache.save_macro(cache_key, cache_payload, ttl_minutes=5)
     except Exception:
         pass
 

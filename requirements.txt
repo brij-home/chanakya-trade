@@ -1,47 +1,57 @@
 # ── Broker APIs ──────────────────────────────────────────────
-kiteconnect>=4.2.0          # Zerodha Kite Connect
-httpx>=0.27.0               # Groww REST API + general HTTP
-fyers-apiv3>=3.1.0          # Fyers broker (official SDK)
+# Optional broker SDKs (install only for the broker you explicitly use):
+# kiteconnect>=5.2.1        # Zerodha Kite Connect
+httpx>=0.28.0               # Groww REST API + general HTTP
+# fyers-apiv3>=3.1.16       # Fyers broker (official SDK)
 
 # ── AI Brain ─────────────────────────────────────────────────
 anthropic>=0.40.0           # Claude API
+pydantic>=2.10.0            # Schema validation
 openai>=1.40.0              # OpenAI GPT API
 google-genai>=1.0.0         # Google Gemini API (unified GenAI SDK)
 google-cloud-aiplatform>=1.60.0  # Vertex AI (Gemini for GCP/Workspace)
 
 # ── Terminal UI ──────────────────────────────────────────────
-rich>=13.7.0                # Tables, panels, styled output
+rich>=14.0.0                # Tables, panels, styled output
 textual>=0.80.0             # TUI framework (split panels)
 prompt_toolkit>=3.0.0       # REPL with tab-complete
 
 # ── Data & Analysis ──────────────────────────────────────────
 pandas>=2.2.0               # OHLCV data manipulation
 numpy>=1.26.0               # Numerical computations
+scikit-learn>=1.3.0         # Statistical learning and clustering
+scipy>=1.13.0               # Scientific computing
 # py_vollib>=1.0.1          # Black-Scholes, Greeks (optional: pip install py_vollib)
-yfinance>=0.2.40            # Free market data (NSE/BSE) — no broker needed
+yfinance>=0.2.50            # Free market data (NSE/BSE) — no broker needed
 
 # ── News & Events ────────────────────────────────────────────
 feedparser>=6.0.11          # RSS feed parsing
 newsapi-python>=0.2.7       # NewsAPI.org client
 
+# ── Web Search ───────────────────────────────────────────────
+exa-py>=1.0.0               # Exa neural search API
+tavily-python>=0.3.0        # Tavily search API
+
 # ── Web ──────────────────────────────────────────────────────
-fastapi>=0.110.0            # Web API framework
-uvicorn>=0.29.0             # ASGI server (with --reload for dev)
+fastapi>=0.115.0            # Web API framework
+uvicorn>=0.30.0             # ASGI server (with --reload for dev)
 
 # ── Output ───────────────────────────────────────────────────
 fpdf2>=2.7.0                # PDF export for --pdf flag
 
 # ── Bot ──────────────────────────────────────────────────────
-python-telegram-bot>=21.0    # Telegram bot (free, official API)
+python-telegram-bot>=21.0   # Telegram bot (free, official API)
 
-# ── Utilities ────────────────────────────────────────────────
+# ── Auth & Utilities ─────────────────────────────────────────
 python-dotenv>=1.0.0        # .env file loading
+pyyaml>=6.0                 # YAML parsing for presets & personas
 keyring>=25.2.0             # Secure OS token storage
 pyotp>=2.9.0                # TOTP 2FA (Angel One auto-login)
 python-dateutil>=2.9.0      # Date parsing helpers
 pytz>=2024.1                # Timezone handling (IST)
 
-# ── Testing ─────────────────────────────────────────────────
+# ── Testing & Quality (Dev) ──────────────────────────────────
 pytest>=7.0.0               # Test framework
 pytest-mock>=3.10.0         # Mocking helpers
-scipy>=1.17.1
+pytest-xdist>=3.0.0         # Parallel test execution
+ruff>=0.9.0                 # Fast Python linter & formatter

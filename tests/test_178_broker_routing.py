@@ -56,7 +56,7 @@ def client():
     """TestClient with all broker/keychain loading suppressed."""
     import os
 
-    os.environ["DEPLOY_MODE"] = "self-hosted"
+    os.environ["DEPLOY_MODE"] = "desktop"
     os.environ["AUTH_DB_PATH"] = str(Path(tempfile.mkdtemp()) / "test.db")
     with (
         patch("config.credentials.load_all", return_value=None),

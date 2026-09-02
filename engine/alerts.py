@@ -15,13 +15,19 @@ Usage:
 
 from __future__ import annotations
 
+import hashlib
+import hmac
+import ipaddress
 import json
+import secrets
+import socket
 import threading
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlparse
 
 from rich.console import Console
 from rich.panel import Panel
@@ -30,6 +36,40 @@ from rich.table import Table
 console = Console()
 
 ALERTS_FILE = Path.home() / ".trading_platform" / "alerts.json"
+
+
+def validate_webhook_url(url: str) -> str:
+    """Accept only an HTTPS callback with a non-local hostname.
+
+    DNS is checked again immediately before delivery to mitigate callbacks that
+    resolve to a private address after registration.
+    """
+    parsed = urlparse(url.strip())
+    host = parsed.hostname or ""
+    if parsed.scheme != "https" or not host or parsed.username or parsed.password:
+        raise ValueError("Webhook URL must be an HTTPS URL without credentials")
+    try:
+        ip = ipaddress.ip_address(host)
+        if not ip.is_global:
+            raise ValueError("Webhook URL must not target a local or private address")
+    except ValueError as exc:
+        if "must not target" in str(exc):
+            raise
+    if host.lower() in {"localhost", "localhost.localdomain"} or host.lower().endswith(".local"):
+        raise ValueError("Webhook URL must not target a local hostname")
+    return url.strip()
+
+
+def _resolves_to_public_address(url: str) -> bool:
+    """Return true only when every current DNS answer is publicly routable."""
+    parsed = urlparse(url)
+    try:
+        addresses = socket.getaddrinfo(parsed.hostname, parsed.port or 443, type=socket.SOCK_STREAM)
+        return bool(addresses) and all(
+            ipaddress.ip_address(item[4][0]).is_global for item in addresses
+        )
+    except (OSError, ValueError):
+        return False
 
 
 # ── Data model ────────────────────────────────────────────────
@@ -67,6 +107,8 @@ class Alert:
     conditions: list[dict] = field(default_factory=list)
     # OpenClaw / external callback: POST alert payload here when triggered
     webhook_url: Optional[str] = None
+    # Generated per alert.  Persisted locally, never returned by alert lists.
+    webhook_secret: Optional[str] = None
 
     def describe(self) -> str:
         if self.alert_type == "CONDITIONAL" and self.conditions:
@@ -150,6 +192,7 @@ class AlertManager:
             threshold=thr,
             created_at=datetime.now().isoformat(timespec="seconds"),
             webhook_url=webhook_url,
+            webhook_secret=secrets.token_urlsafe(32) if webhook_url else None,
         )
         alert.message = alert.describe()
         self._alerts.append(alert)
@@ -199,6 +242,7 @@ class AlertManager:
             indicator=ind,
             created_at=datetime.now().isoformat(timespec="seconds"),
             webhook_url=webhook_url,
+            webhook_secret=secrets.token_urlsafe(32) if webhook_url else None,
         )
         alert.message = alert.describe()
         self._alerts.append(alert)
@@ -238,6 +282,7 @@ class AlertManager:
             conditions=conditions,
             created_at=datetime.now().isoformat(timespec="seconds"),
             webhook_url=webhook_url,
+            webhook_secret=secrets.token_urlsafe(32) if webhook_url else None,
         )
         alert.message = alert.describe()
         self._alerts.append(alert)
@@ -254,7 +299,14 @@ class AlertManager:
 
     def list_alerts(self) -> list[dict]:
         """Return all active (non-triggered) alerts as dicts."""
-        return [asdict(a) for a in self._alerts if not a.triggered]
+        return [self.public_dict(a) for a in self._alerts if not a.triggered]
+
+    @staticmethod
+    def public_dict(alert: Alert) -> dict:
+        """Serialize an alert without exposing its callback signing secret."""
+        payload = asdict(alert)
+        payload.pop("webhook_secret", None)
+        return payload
 
     def active_count(self) -> int:
         return sum(1 for a in self._alerts if not a.triggered)
@@ -654,6 +706,11 @@ def _webhook_notify(alert: Alert, ltp: Optional[float] = None) -> None:
         try:
             import urllib.request
 
+            # Resolve at send time as well as validating the supplied URL.
+            # This blocks localhost, RFC1918 and cloud-metadata destinations.
+            if not _resolves_to_public_address(alert.webhook_url):
+                return
+
             payload = {
                 "event": "alert_triggered",
                 "alert_id": alert.id,
@@ -665,10 +722,17 @@ def _webhook_notify(alert: Alert, ltp: Optional[float] = None) -> None:
                 "ltp": ltp,
             }
             body = _json.dumps(payload).encode()
+            signature_secret = getattr(alert, "webhook_secret", None)
+            headers = {"Content-Type": "application/json"}
+            if signature_secret:
+                headers["X-Chanakya-Signature"] = (
+                    "sha256="
+                    + hmac.new(signature_secret.encode(), body, hashlib.sha256).hexdigest()
+                )
             req = urllib.request.Request(
                 alert.webhook_url,
                 data=body,
-                headers={"Content-Type": "application/json"},
+                headers=headers,
                 method="POST",
             )
             urllib.request.urlopen(req, timeout=10)

@@ -8,6 +8,7 @@ const VERDICT_STYLES = {
   HOLD: 'bg-amber-500/15 text-amber-400 border border-amber-500/30 font-bold',
   SELL: 'bg-rose-500/15 text-rose-400 border border-rose-500/30 font-bold',
   STRONG_SELL: 'bg-rose-500 text-white font-extrabold shadow-rose-500/20 shadow-lg',
+  UNAVAILABLE: 'bg-slate-500/15 text-slate-300 border border-slate-500/30 font-bold',
 }
 
 const PERSONA_DETAILS = {
@@ -32,7 +33,7 @@ export default function PersonaCard({ data }) {
   const d = data?.data ?? data ?? {}
   const personaId = (d.persona || 'buffett').toLowerCase()
   const verdict = d.verdict || 'HOLD'
-  const confidence = Number(d.confidence || 50)
+  const confidence = Number(d.confidence ?? 0)
   const rationale = d.rationale || []
   const keyMetrics = d.key_metrics || {}
 

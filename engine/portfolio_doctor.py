@@ -25,7 +25,7 @@ from typing import Any, Literal, Optional
 
 import pandas as pd
 
-from engine.portfolio import HoldingRow, PortfolioSummary, get_portfolio_summary
+from engine.portfolio import PortfolioSummary, get_portfolio_summary
 
 
 @dataclass
@@ -134,61 +134,9 @@ def diagnose_portfolio(
             summary = None
 
     if summary is None or not summary.holdings:
-        # Fallback demo portfolio for preview
-        demo_holdings = [
-            HoldingRow(
-                symbol="RELIANCE",
-                qty=50,
-                avg_price=2600.0,
-                ltp=2850.0,
-                value=142500.0,
-                pnl=12500.0,
-                pnl_pct=9.6,
-                product="CNC",
-            ),
-            HoldingRow(
-                symbol="TRENT",
-                qty=20,
-                avg_price=5200.0,
-                ltp=6950.0,
-                value=139000.0,
-                pnl=35000.0,
-                pnl_pct=33.6,
-                product="CNC",
-            ),
-            HoldingRow(
-                symbol="INFY",
-                qty=40,
-                avg_price=1650.0,
-                ltp=1420.0,
-                value=56800.0,
-                pnl=-9200.0,
-                pnl_pct=-13.9,
-                product="CNC",
-            ),
-            HoldingRow(
-                symbol="HAL",
-                qty=15,
-                avg_price=4100.0,
-                ltp=4650.0,
-                value=69750.0,
-                pnl=8250.0,
-                pnl_pct=13.4,
-                product="CNC",
-            ),
-            HoldingRow(
-                symbol="IDEA",
-                qty=1000,
-                avg_price=14.5,
-                ltp=8.2,
-                value=8200.0,
-                pnl=-6300.0,
-                pnl_pct=-43.4,
-                product="CNC",
-            ),
-        ]
-        total_eq = sum(h.value for h in demo_holdings)
-        cash = 45000.0
+        raise RuntimeError(
+            "Portfolio diagnosis is unavailable until an authenticated broker returns holdings."
+        )
     else:
         demo_holdings = summary.holdings
         total_eq = sum(h.value for h in demo_holdings)

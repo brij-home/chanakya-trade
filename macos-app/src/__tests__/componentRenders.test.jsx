@@ -53,6 +53,30 @@ if (typeof window !== 'undefined') {
 // Global fetch mock to prevent network calls in tests
 global.fetch = vi.fn().mockImplementation((url) => {
   const urlStr = String(url)
+  if (urlStr.includes('/skills/dashboard_snapshot')) {
+    return Promise.resolve({
+      ok: true,
+      json: () => Promise.resolve({
+        data: {
+          terminal_contract_version: 2,
+          symbol: 'NIFTY',
+          exchange: 'NSE',
+          ltp: 24500,
+          automated_setup: {
+            symbol: 'NIFTY (NSE)', action: 'LONG (BUY)', trigger: 'Verified demand zone',
+            entry: 24480, stop_loss: 24360, target_1: 24720, target_2: 24900,
+            risk_reward: 2, risk_points: 120, risk_pct: 0.49, reward_points: 240,
+            reward_pct: 0.98, status: 'READY', status_label: 'Verified test setup',
+          },
+          provenance: { data_source: 'TEST_VERIFIED', is_real_time: false },
+          watchlist: [{ symbol: 'NIFTY', name: 'NIFTY 50', tag: 'INDEX', ltp: 24500, change_pct: 0.2 }],
+          flows: { fii_net: 0, dii_net: 0, net_total: 0, label: 'TEST', verdict: 'UNAVAILABLE' },
+          sector_matrix: [], rrg_sectors: [], personas: [], multi_tf: null, global_macro: null,
+        },
+        status: 'ok',
+      }),
+    })
+  }
   if (urlStr.includes('/skills/whale_flows')) {
     return Promise.resolve({
       ok: true,
@@ -103,20 +127,42 @@ global.fetch = vi.fn().mockImplementation((url) => {
           quantity: 50,
           price: 980,
           status: 'PREVIEW',
+          preview_hash: 'paper-preview-hash',
           charges: { total_charges: 18.5, stt: 12.0, gst: 2.5, sebi_charges: 0.1, stamp_duty: 3.9 },
         }
       }),
     })
   }
+  if (urlStr.includes('/api/orders/confirm')) {
+    return Promise.resolve({
+      ok: true,
+      json: () =>
+        Promise.resolve({
+          data: {
+            order_id: 'PAPER-TEST1234',
+            status: 'CONFIRMED',
+          },
+        }),
+    })
+  }
   if (urlStr.includes('/api/orders/execute')) {
     return Promise.resolve({
       ok: true,
+      json: () =>
+        Promise.resolve({
+          data: {
+            order_id: 'PAPER-TEST1234',
+            status: 'FILLED_PAPER',
+            broker_order_id: 'PAPER-EXEC-A1B2C3D4',
+          },
+        }),
+    })
+  }
+  if (urlStr.includes('/api/orders/confirm')) {
+    return Promise.resolve({
+      ok: true,
       json: () => Promise.resolve({
-        data: {
-          order_id: 'PAPER-TEST1234',
-          status: 'FILLED_PAPER',
-          broker_order_id: 'PAPER-EXEC-A1B2C3D4',
-        }
+        data: { order_id: 'PAPER-TEST1234', status: 'CONFIRMED', preview_hash: 'paper-preview-hash' },
       }),
     })
   }
@@ -194,6 +240,47 @@ describe('React Component Rendering & Hook Invariant Gates', () => {
         />
       )
       expect(screen.getByDisplayValue('RELIANCE')).toBeTruthy()
+    })
+
+    it('visibly renders LIVE mode indicators and forbids paper-success messaging when appMode is LIVE', () => {
+      render(
+        <OrderTicketModal
+          isOpen={true}
+          onClose={vi.fn()}
+          appMode="LIVE"
+          initialData={{
+            symbol: 'TRENT',
+            price: 5200,
+            stopLoss: 5080,
+            target: 5440,
+            action: 'BUY',
+          }}
+        />
+      )
+
+      expect(screen.getByText(/⚠️ LIVE OMS · Real Capital at Risk/i)).toBeTruthy()
+      expect(screen.queryByText(/Paper OMS · 0 Real Broker Risk/i)).toBeNull()
+      expect(screen.queryByText(/Paper Order Placed/i)).toBeNull()
+    })
+
+    it('visibly renders PAPER sandbox indicators when appMode is PAPER', () => {
+      render(
+        <OrderTicketModal
+          isOpen={true}
+          onClose={vi.fn()}
+          appMode="PAPER"
+          initialData={{
+            symbol: 'TRENT',
+            price: 5200,
+            stopLoss: 5080,
+            target: 5440,
+            action: 'BUY',
+          }}
+        />
+      )
+
+      expect(screen.getByText(/Paper OMS · 0 Real Broker Risk/i)).toBeTruthy()
+      expect(screen.queryByText(/⚠️ LIVE OMS · Real Capital at Risk/i)).toBeNull()
     })
   })
 
@@ -363,27 +450,32 @@ describe('React Component Rendering & Hook Invariant Gates', () => {
       expect(screen.getByText(/88%/i)).toBeTruthy()
     })
 
-    it('renders FlowsCard and MorningBriefCard', () => {
-      render(
-        <FlowsCard
-          data={{
-            fii_net_today: 1450.5,
-            dii_net_today: 1210.0,
-            fii_5d_net: 4200.0,
-            dii_5d_net: 5100.0,
-          }}
-        />
-      )
-      expect(screen.getByText(/FII \/ DII Flow Intelligence/i)).toBeTruthy()
+    it('renders FlowsCard and MorningBriefCard', async () => {
+      const { act } = await import('@testing-library/react')
+      await act(async () => {
+        render(
+          <FlowsCard
+            data={{
+              fii_net_today: 1450.5,
+              dii_net_today: 1210.0,
+              fii_5d_net: 4200.0,
+              dii_5d_net: 5100.0,
+            }}
+          />
+        )
+      })
+      expect(await screen.findByText(/FII \/ DII Flow Intelligence/i)).toBeTruthy()
 
-      render(
-        <MorningBriefCard
-          data={{
-            market_snapshot: { posture: 'BULLISH_EXPANSION', nifty: { ltp: 24500, change_pct: 0.8 } },
-            institutional_flows: { fii_net_today: 1200 },
-          }}
-        />
-      )
+      await act(async () => {
+        render(
+          <MorningBriefCard
+            data={{
+              market_snapshot: { posture: 'BULLISH_EXPANSION', nifty: { ltp: 24500, change_pct: 0.8 } },
+              institutional_flows: { fii_net_today: 1200 },
+            }}
+          />
+        )
+      })
       expect(screen.getAllByText(/Morning Brief/i).length).toBeGreaterThan(0)
     })
 
@@ -412,12 +504,17 @@ describe('React Component Rendering & Hook Invariant Gates', () => {
       expect(screen.getByText(/Institutional Screening Pipeline/i)).toBeTruthy()
     })
 
-    it('renders WhaleFlowsCard and PersonaTrackRecordCard cleanly', () => {
-      render(<WhaleFlowsCard />)
-      expect(screen.getByText(/Indian Marquee Whale & SAST Flow Tracker/i)).toBeTruthy()
+    it('renders WhaleFlowsCard and PersonaTrackRecordCard cleanly', async () => {
+      const { act } = await import('@testing-library/react')
+      await act(async () => {
+        render(<WhaleFlowsCard />)
+      })
+      expect(await screen.findByText(/Indian Marquee Whale & SAST Flow Tracker/i)).toBeTruthy()
 
-      render(<PersonaTrackRecordCard />)
-      expect(screen.getByText(/AI Persona Accuracy & Dynamic Weighting Matrix/i)).toBeTruthy()
+      await act(async () => {
+        render(<PersonaTrackRecordCard />)
+      })
+      expect(await screen.findByText(/AI Persona Accuracy & Dynamic Weighting Matrix/i)).toBeTruthy()
     })
   })
 
@@ -426,12 +523,17 @@ describe('React Component Rendering & Hook Invariant Gates', () => {
       const onOpenOrderTicket = vi.fn()
       const TerminalView = (await import('../renderer/src/components/Views/TerminalView')).default
 
-      const { fireEvent } = await import('@testing-library/react')
-      const { findByText } = render(<TerminalView onOpenOrderTicket={onOpenOrderTicket} />)
+      const { fireEvent, act } = await import('@testing-library/react')
+      let res
+      await act(async () => {
+        res = render(<TerminalView onOpenOrderTicket={onOpenOrderTicket} />)
+      })
 
-      const stageBtn = await findByText(/STAGE \/ EXECUTE ORDER/i)
+      const stageBtn = await res.findByText(/STAGE \/ EXECUTE ORDER/i)
       expect(stageBtn).toBeTruthy()
-      fireEvent.click(stageBtn)
+      await act(async () => {
+        fireEvent.click(stageBtn)
+      })
 
       expect(onOpenOrderTicket).toHaveBeenCalledTimes(1)
       const payload = onOpenOrderTicket.mock.calls[0][0]
@@ -446,57 +548,197 @@ describe('React Component Rendering & Hook Invariant Gates', () => {
       const onOpenOrderTicket = vi.fn()
       const DebateArenaView = (await import('../renderer/src/components/Views/DebateArenaView')).default
 
-      const { fireEvent } = await import('@testing-library/react')
-      const { findByText } = render(<DebateArenaView onOpenOrderTicket={onOpenOrderTicket} />)
+      const { fireEvent, act } = await import('@testing-library/react')
+      let res
+      await act(async () => {
+        res = render(<DebateArenaView onOpenOrderTicket={onOpenOrderTicket} />)
+      })
 
-      const breakoutTab = await findByText(/Breakout Council/i)
+      const breakoutTab = await res.findByText(/Breakout Council/i)
       expect(breakoutTab).toBeTruthy()
-      fireEvent.click(breakoutTab)
+      await act(async () => {
+        fireEvent.click(breakoutTab)
+      })
     })
 
     it('OptionsDeskView renders and allows clicking Call/Put strikes to stage order', async () => {
       const onOpenOrderTicket = vi.fn()
       const OptionsDeskView = (await import('../renderer/src/components/Views/OptionsDeskView')).default
 
-      const { fireEvent } = await import('@testing-library/react')
-      const { findAllByText } = render(<OptionsDeskView onOpenOrderTicket={onOpenOrderTicket} />)
+      const { act } = await import('@testing-library/react')
+      let res
+      await act(async () => {
+        res = render(<OptionsDeskView onOpenOrderTicket={onOpenOrderTicket} />)
+      })
 
-      const nfoBadges = await findAllByText(/NIFTY/i)
+      const nfoBadges = await res.findAllByText(/NIFTY/i)
       expect(nfoBadges.length).toBeGreaterThan(0)
     })
 
     it('OrderTicketModal completes full Staging -> Double Confirmation -> Submit flow cleanly', async () => {
       const onClose = vi.fn()
-      const { fireEvent } = await import('@testing-library/react')
+      const { fireEvent, act } = await import('@testing-library/react')
 
-      const { rerender } = render(
-        <OrderTicketModal
-          isOpen={true}
-          onClose={onClose}
-          initialData={{
-            symbol: 'TATAMOTORS',
-            price: 980,
-            stopLoss: 960,
-            target: 1020,
-            action: 'BUY',
-          }}
-        />
-      )
+      await act(async () => {
+        render(
+          <OrderTicketModal
+            isOpen={true}
+            onClose={onClose}
+            initialData={{
+              symbol: 'TATAMOTORS',
+              price: 980,
+              stopLoss: 960,
+              target: 1020,
+              action: 'BUY',
+            }}
+          />
+        )
+      })
 
       // Step 1: Click Review & Confirm
       const reviewBtn = screen.getByText(/Review & Confirm BUY/i)
       expect(reviewBtn).toBeTruthy()
-      fireEvent.click(reviewBtn)
+      await act(async () => {
+        fireEvent.click(reviewBtn)
+      })
 
       // Step 2: Now on Double Confirmation Gate
       const checkbox = await screen.findByRole('checkbox')
       expect(checkbox).toBeTruthy()
-      fireEvent.click(checkbox)
+      await act(async () => {
+        fireEvent.click(checkbox)
+      })
 
       // Click Confirm & Transmit
       const confirmBtn = await screen.findByText(/Double Confirm & Transmit BUY/i)
       expect(confirmBtn).toBeTruthy()
-      fireEvent.click(confirmBtn)
+      await act(async () => {
+        fireEvent.click(confirmBtn)
+      })
+      expect(await screen.findByText(/✓/i)).toBeTruthy()
+    })
+
+    it('OrderTicketModal in LIVE mode renders LIVE warnings, LIVE button, and LIVE success text (no paper labels)', async () => {
+      const onClose = vi.fn()
+      const { fireEvent, act } = await import('@testing-library/react')
+
+      const originalFetch = global.fetch
+      global.fetch = vi.fn().mockImplementation((url) => {
+        const urlStr = String(url)
+        if (urlStr.includes('/api/risk/preflight')) {
+          return Promise.resolve({
+            ok: true,
+            json: () => Promise.resolve({ data: { is_eligible: true, flags: [] } }),
+          })
+        }
+        if (urlStr.includes('/api/orders/preview')) {
+          return Promise.resolve({
+            ok: true,
+            json: () => Promise.resolve({
+              data: {
+                order_id: 'LIVE-EXEC-1234',
+                charges: { total_charges: 45.2 },
+                status: 'PREVIEW',
+                mode: 'EXECUTE',
+                preview_hash: 'live-preview-hash',
+              },
+            }),
+          })
+        }
+        if (urlStr.includes('/api/orders/confirm')) {
+          return Promise.resolve({
+            ok: true,
+            json: () =>
+              Promise.resolve({
+                data: {
+                  order_id: 'LIVE-EXEC-1234',
+                  status: 'CONFIRMED',
+                  mode: 'EXECUTE',
+                },
+              }),
+          })
+        }
+        if (urlStr.includes('/api/orders/execute')) {
+          return Promise.resolve({
+            ok: true,
+            json: () =>
+              Promise.resolve({
+                data: {
+                  order_id: 'LIVE-EXEC-1234',
+                  status: 'FILLED',
+                  mode: 'EXECUTE',
+                },
+              }),
+          })
+        }
+        if (urlStr.includes('/api/orders/confirm')) {
+          return Promise.resolve({
+            ok: true,
+            json: () => Promise.resolve({
+              data: { order_id: 'LIVE-EXEC-1234', status: 'CONFIRMED', preview_hash: 'live-preview-hash' },
+            }),
+          })
+        }
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({}) })
+      })
+
+      try {
+        await act(async () => {
+          render(
+            <OrderTicketModal
+              isOpen={true}
+              onClose={onClose}
+              appMode="LIVE"
+              initialData={{
+                symbol: 'RELIANCE',
+                price: 2850,
+                stopLoss: 2800,
+                target: 2950,
+                action: 'BUY',
+              }}
+            />
+          )
+        })
+
+        // Step 1: Subtitle must visibly state LIVE OMS and real capital
+        expect(screen.getByText(/LIVE OMS · Real Capital at Risk/i)).toBeTruthy()
+        expect(screen.queryByText(/Paper OMS/i)).toBeNull()
+
+        // Proceed to Step 2
+        const reviewBtn = screen.getByText(/Review & Confirm BUY/i)
+        await act(async () => {
+          fireEvent.click(reviewBtn)
+        })
+
+        // Step 2: Heading / Subtitle must say LIVE ⚠️
+        expect(await screen.findByText(/Verify & Transmit \(LIVE ⚠️\)/i)).toBeTruthy()
+        expect(screen.getByText(/Live Intent ID:/i)).toBeTruthy()
+        expect(screen.getByText(/LIVE BROKER \(Real execution — real capital at risk\)/i)).toBeTruthy()
+        expect(screen.queryByText(/Paper Intent ID:/i)).toBeNull()
+        expect(screen.queryByText(/PAPER OMS/i)).toBeNull()
+
+        // Check risk box
+        const checkbox = await screen.findByRole('checkbox')
+        await act(async () => {
+          fireEvent.click(checkbox)
+        })
+
+        // Live button text
+        const confirmBtn = await screen.findByText(/Double Confirm & Transmit BUY \(LIVE ⚠️\)/i)
+        expect(confirmBtn).toBeTruthy()
+
+        // Click transmit
+        await act(async () => {
+          fireEvent.click(confirmBtn)
+        })
+
+        // Status message must show Live Order Placed and NOT Paper
+        const successMsg = await screen.findByText(/✓ Live Order Placed/i)
+        expect(successMsg).toBeTruthy()
+        expect(screen.queryByText(/Paper Order Placed/i)).toBeNull()
+      } finally {
+        global.fetch = originalFetch
+      }
     })
 
     it('BacktestStudioView renders and shows quantitative simulation controls', async () => {

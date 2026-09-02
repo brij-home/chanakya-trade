@@ -54,6 +54,9 @@
    - A paper broker exception MUST yield `status=REJECTED` with the real error as `rejection_reason`. It MUST NOT fabricate a `FILLED_PAPER` result.
    - An ambiguous or timed-out live broker response MUST yield `status=UNKNOWN_FREEZE` with `broker_order_id=None`. It MUST NOT fabricate a `LIVE-XXXXXX` ID or set `status=OPEN`.
    - `TRADING_MODE=EXECUTE` is gated by `ALLOW_LIVE_TRADING=1`. Absent that env var, `execute_order_intent()` raises `PermissionError`.
+   - **Confirmation Boundary**: A `PREVIEW` is not executable. The client must submit the exact server-generated `preview_hash` to transition it to `CONFIRMED`; only `CONFIRMED → SUBMITTING` is permitted, atomically.
+   - **Idempotency Semantics**: Each user order intent has a cryptographically random idempotency key. Reuse a key only to retry the same request; never derive it from order fields or use `INSERT OR REPLACE` on the order ledger.
+   - **Instrument Authority**: Exchange and segment are resolved from the canonical instrument master at the server boundary. Client-provided venue/segment overrides must be rejected, not trusted.
 7. **Mode Banner Truthfulness** (`GET /api/mode` in [`web/api.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/web/api.py)):
    - The canonical mapping is: `OBSERVE → DEMO`, `SIMULATE → PAPER`, `EXECUTE → LIVE`.
    - Do NOT add a fourth mode or let an unknown backend mode silently default to `PAPER`. Add it to the map or raise.

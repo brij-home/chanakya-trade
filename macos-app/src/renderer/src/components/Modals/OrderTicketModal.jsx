@@ -1,34 +1,48 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { useAPI } from '../../hooks/useAPI'
 
+function createOrderIntentKey() {
+  if (globalThis.crypto?.randomUUID) return `ORDER-${globalThis.crypto.randomUUID()}`
+  if (globalThis.crypto?.getRandomValues) {
+    const values = new Uint32Array(4)
+    globalThis.crypto.getRandomValues(values)
+    return `ORDER-${Array.from(values, value => value.toString(16)).join('')}`
+  }
+  throw new Error('Secure random order IDs are unavailable. Order preview is blocked.')
+}
+
 /**
- * OrderTicketModal — P0-B Paper Order Management System (OMS)
+ * OrderTicketModal — Paper / Live Order Management System (OMS)
  *
  * Transitions:
  *   Step 1 (Edit/Stage)  → Calls /api/risk/preflight & /api/orders/preview
- *   Step 2 (Double Confirm) → Calls /api/orders/execute with real order ID
+ *   Step 2 (Double Confirm) → Confirms server intent, then calls /api/orders/execute
  *
  * Truthful guarantees:
  *   - No fake timer client simulations
  *   - Real statutory charge computation (STT, GST, SEBI turnover, Stamp Duty)
- *   - Real PAPER- order ID prefixing and state tracking
+ *   - Real PAPER- / LIVE- order ID prefixing and state tracking
  *   - Accessible modal semantics (role="dialog", aria-modal, focus trap, Escape)
+ *   - Modal NEVER shows success if preview was not server-confirmed
+ *   - Mode-aware copy: Paper OMS vs Live OMS with distinct styling
  */
-export default function OrderTicketModal({ isOpen, onClose, initialData = {} }) {
+export default function OrderTicketModal({ isOpen, onClose, initialData = {}, appMode = 'PAPER' }) {
+  const isLiveMode = appMode === 'LIVE'
   const { call } = useAPI()
   const modalRef = useRef(null)
+  const pendingPreviewRef = useRef(null)
 
-  const [symbol, setSymbol] = useState(initialData.symbol || 'RELIANCE')
+  const [symbol, setSymbol] = useState(initialData.symbol || '')
   const [exchange, setExchange] = useState(initialData.exchange || 'NSE')
   const [action, setAction] = useState(initialData.action || initialData.side || initialData.orderType || 'BUY')
   const [orderType, setOrderType] = useState('LIMIT')
   const [product, setProduct] = useState('MIS') // MIS (Intraday) | CNC (Delivery) | NRML (F&O)
-  const [price, setPrice] = useState(initialData.price || 2800)
-  const [stopLoss, setStopLoss] = useState(initialData.stopLoss || initialData.stop_loss || 2760)
-  const [target, setTarget] = useState(initialData.target || initialData.target_1 || 2890)
+  const [price, setPrice] = useState(initialData.price ?? '')
+  const [stopLoss, setStopLoss] = useState(initialData.stopLoss ?? initialData.stop_loss ?? '')
+  const [target, setTarget] = useState(initialData.target ?? initialData.target_1 ?? '')
   const [capital, setCapital] = useState(200000)
   const [riskPct, setRiskPct] = useState(1.0)
-  const [qty, setQty] = useState(initialData.qty || initialData.quantity || 50)
+  const [qty, setQty] = useState(initialData.qty ?? initialData.quantity ?? '')
   const [step, setStep] = useState(1) // 1: Edit/Stage, 2: Double Confirm
   const [confirmedRisk, setConfirmedRisk] = useState(false)
   const [isSubmitting, setIsSubmitting] = useState(false)
@@ -40,22 +54,23 @@ export default function OrderTicketModal({ isOpen, onClose, initialData = {} }) 
   // Sync state whenever modal opens or initialData changes
   useEffect(() => {
     if (isOpen) {
-      if (initialData.symbol) setSymbol(initialData.symbol)
-      if (initialData.exchange) setExchange(initialData.exchange)
+      setSymbol(initialData.symbol || '')
+      setExchange(initialData.exchange || 'NSE')
       const act = initialData.action || initialData.side || initialData.orderType
-      if (act) setAction(act)
-      if (initialData.price) setPrice(Number(initialData.price))
+      setAction(act || 'BUY')
+      setPrice(initialData.price ?? '')
       const sl = initialData.stopLoss ?? initialData.stop_loss
-      if (sl != null) setStopLoss(Number(sl))
+      setStopLoss(sl ?? '')
       const tgt = initialData.target ?? initialData.target_1 ?? initialData.target_2
-      if (tgt != null) setTarget(Number(tgt))
+      setTarget(tgt ?? '')
       const q = initialData.qty ?? initialData.quantity
-      if (q != null) setQty(Number(q))
+      setQty(q ?? '')
       setStep(1)
       setStatusMsg(null)
       setConfirmedRisk(false)
       setPreviewOrder(null)
       setPreflightInfo(null)
+      pendingPreviewRef.current = null
     }
   }, [isOpen, initialData])
 
@@ -90,10 +105,25 @@ export default function OrderTicketModal({ isOpen, onClose, initialData = {} }) 
   const handleProceedToConfirm = async () => {
     setStatusMsg(null)
     setConfirmedRisk(false)
+    if (!symbol.trim() || !Number.isFinite(Number(price)) || Number(price) <= 0 || !Number.isInteger(Number(qty)) || Number(qty) <= 0) {
+      setStatusMsg({
+        type: 'error',
+        text: 'Enter a verified symbol, limit price, and whole quantity before requesting an order preview.',
+      })
+      return
+    }
     setIsValidatingRisk(true)
 
+    const requestSignature = [symbol, action, qty, price, orderType, product].join('|')
+    if (pendingPreviewRef.current?.signature !== requestSignature) {
+      pendingPreviewRef.current = {
+        signature: requestSignature,
+        key: createOrderIntentKey(),
+      }
+    }
+
     try {
-      // 1. Evaluate risk gate limits & behavioral advisory
+      // 1. Evaluate risk gate limits & behavioral advisory and fetch preview with intentKey
       const [riskRes, previewRes] = await Promise.allSettled([
         call('/api/risk/preflight', {
           symbol,
@@ -109,7 +139,7 @@ export default function OrderTicketModal({ isOpen, onClose, initialData = {} }) 
           price,
           order_type: orderType,
           product,
-          segment: product === 'CNC' ? 'EQUITY_DELIVERY' : 'EQUITY_INTRADAY',
+          idempotency_key: pendingPreviewRef.current.key,
         }),
       ])
 
@@ -120,16 +150,38 @@ export default function OrderTicketModal({ isOpen, onClose, initialData = {} }) 
       }
 
       if (previewRes.status === 'fulfilled') {
-        setPreviewOrder(previewRes.value?.data ?? previewRes.value)
+        const preview = previewRes.value?.data ?? previewRes.value
+        // Only advance to Step 2 when the server returned a valid order ID
+        if (!preview?.order_id) {
+          setStatusMsg({
+            type: 'error',
+            text: 'Server did not return a valid order preview. Please retry.',
+          })
+          setPreviewOrder(null)
+          return // Stay on Step 1
+        }
+        setPreviewOrder(preview)
+        pendingPreviewRef.current = null
+        setStep(2)
       } else {
+        // Preview call failed — stay on Step 1, never advance
         setPreviewOrder(null)
+        setStatusMsg({
+          type: 'error',
+          text: `Order preview failed: ${previewRes.reason?.message ?? 'server error'}. Cannot proceed.`,
+        })
+        // Intentionally no setStep(2) — user must see the error and retry
       }
-    } catch {
+    } catch (err) {
       setPreflightInfo(null)
       setPreviewOrder(null)
+      setStatusMsg({
+        type: 'error',
+        text: `Unexpected error during preview: ${err.message ?? 'unknown error'}`,
+      })
     } finally {
       setIsValidatingRisk(false)
-      setStep(2)
+      // NOTE: setStep(2) is called only inside the success branch above, not here
     }
   }
 
@@ -142,25 +194,44 @@ export default function OrderTicketModal({ isOpen, onClose, initialData = {} }) 
     setStatusMsg(null)
 
     try {
-      // Execute through the real Paper OMS backend
       const orderId = previewOrder?.order_id
-      if (orderId) {
-        const res = await call('/api/orders/execute', { order_id: orderId })
-        const executedData = res?.data ?? res
-        const status = executedData.status ?? 'FILLED_PAPER'
-        const orderIdDisplay = executedData.order_id || orderId
-
+      if (!orderId) {
+        // Preview was never server-confirmed — never show a fake success
         setStatusMsg({
-          type: 'success',
-          text: `✓ Paper Order Placed [${orderIdDisplay}]: ${status.replace('_', ' ')} @ ₹${Number(price).toFixed(2)} [SL: ₹${stopLoss}, TGT: ₹${target}]`,
+          type: 'error',
+          text: 'No valid server-generated order preview exists. Please go back and retry preview.',
         })
-      } else {
-        // Fallback execution if preview failed to initialize
-        setStatusMsg({
-          type: 'success',
-          text: `✓ Paper Order Placed: ${action} ${qty} ${symbol} @ ₹${Number(price).toFixed(2)} [SL: ₹${stopLoss}, TGT: ₹${target}]`,
-        })
+        return
       }
+
+      if (!previewOrder?.preview_hash) {
+        setStatusMsg({
+          type: 'error',
+          text: 'Order preview is incomplete and cannot be confirmed. Please retry preview.',
+        })
+        return
+      }
+
+      const confirmed = await call('/api/orders/confirm', {
+        order_id: orderId,
+        preview_hash: previewOrder.preview_hash,
+      })
+      const confirmedData = confirmed?.data ?? confirmed
+      if (confirmedData?.status !== 'CONFIRMED') {
+        throw new Error('Server did not confirm the order. Execution has been blocked.')
+      }
+
+      // Execute through the real OMS backend
+      const res = await call('/api/orders/execute', { order_id: orderId })
+      const executedData = res?.data ?? res
+      const status = executedData.status ?? 'UNKNOWN'
+      const orderIdDisplay = executedData.order_id || orderId
+      const modeLabel = isLiveMode ? 'Live Order' : 'Paper Order'
+
+      setStatusMsg({
+        type: 'success',
+        text: `✓ ${modeLabel} Placed [${orderIdDisplay}]: ${status.replace('_', ' ')} @ ₹${Number(price).toFixed(2)} [SL: ₹${stopLoss}, TGT: ₹${target}]`,
+      })
 
       setTimeout(() => {
         setStep(1)
@@ -212,12 +283,18 @@ export default function OrderTicketModal({ isOpen, onClose, initialData = {} }) 
               <h2
                 id="order-ticket-title"
                 className="text-sm font-bold"
-                style={{ color: 'var(--color-text)', fontFamily: 'Inter, sans-serif' }}
+                style={{ color: isLiveMode ? 'var(--color-rose)' : 'var(--color-text)', fontFamily: 'Inter, sans-serif' }}
               >
                 {step === 1 ? 'Smart Order Staging' : 'Double Confirmation Gate'}
               </h2>
               <p className="text-[10px] uppercase tracking-wider" style={{ color: 'var(--color-muted)' }}>
-                {step === 1 ? 'Paper OMS · 0 Real Broker Risk' : 'Step 2 of 2: Verify & Transmit (Paper)'}
+                {step === 1
+                  ? isLiveMode
+                    ? '⚠️ LIVE OMS · Real Capital at Risk'
+                    : 'Paper OMS · 0 Real Broker Risk'
+                  : isLiveMode
+                  ? 'Step 2 of 2: Verify & Transmit (LIVE ⚠️)'
+                  : 'Step 2 of 2: Verify & Transmit (Paper)'}
               </p>
             </div>
           </div>
@@ -420,7 +497,7 @@ export default function OrderTicketModal({ isOpen, onClose, initialData = {} }) 
                   </div>
                   {previewOrder?.order_id && (
                     <div className="flex justify-between text-[10px]">
-                      <span className="text-muted">Paper Intent ID:</span>
+                      <span className="text-muted">{isLiveMode ? 'Live Intent ID:' : 'Paper Intent ID:'}</span>
                       <span className="text-violet-400 font-bold">{previewOrder.order_id}</span>
                     </div>
                   )}
@@ -440,7 +517,13 @@ export default function OrderTicketModal({ isOpen, onClose, initialData = {} }) 
                   </div>
                   <div className="flex justify-between pt-1 border-t border-border/30 text-[10px]">
                     <span className="text-muted">Execution Venue:</span>
-                    <span className="text-blue font-bold">PAPER OMS (Simulated — No Real Money at Risk)</span>
+                    {isLiveMode ? (
+                      <span className="text-rose-400 font-bold">LIVE BROKER (Real execution — real capital at risk)</span>
+                    ) : appMode === 'DEMO' ? (
+                      <span className="text-amber-400 font-bold">DEMO OMS (Synthetic Sandbox — No Broker Connected)</span>
+                    ) : (
+                      <span className="text-blue font-bold">PAPER OMS (Simulated — No Real Money at Risk)</span>
+                    )}
                   </div>
                 </div>
 
@@ -455,6 +538,8 @@ export default function OrderTicketModal({ isOpen, onClose, initialData = {} }) 
                   <span className="text-muted text-[11px] font-ui leading-tight">
                     {preflightInfo?.flags?.length > 0
                       ? 'I acknowledge the behavioral risk advisory and choose to proceed with conscious awareness.'
+                      : isLiveMode
+                      ? 'I confirm that I have reviewed the order parameters, statutory costs, and acknowledge REAL CAPITAL is at risk on the live exchange.'
                       : 'I confirm that I have reviewed the order parameters, statutory costs, and paper execution role.'}
                   </span>
                 </label>
@@ -492,9 +577,13 @@ export default function OrderTicketModal({ isOpen, onClose, initialData = {} }) 
                   }`}
                 >
                   {isSubmitting
-                    ? 'Transmitting Paper Order…'
+                    ? isLiveMode
+                      ? 'Transmitting Live Order to Broker…'
+                      : 'Transmitting Paper Order…'
                     : preflightInfo?.flags?.length > 0
-                    ? `⚡ Acknowledge & Transmit ${action}`
+                    ? `⚡ Acknowledge & Transmit ${action} ${isLiveMode ? '(LIVE ⚠️)' : ''}`
+                    : isLiveMode
+                    ? `Double Confirm & Transmit ${action} (LIVE ⚠️)`
                     : `Double Confirm & Transmit ${action}`}
                 </button>
               </div>

@@ -1391,7 +1391,10 @@ def resolve_dynamic_universe(
 
             target_sectors = (leading_ids + improving_ids)[:top_n_sectors]
             if not target_sectors:
-                target_sectors = ["metals", "it", "pharma"]  # safe leading fallback
+                return (
+                    [],
+                    "Market-aware universe unavailable: no live leading or improving sector evidence.",
+                )
 
             symbols_set = set()
             for s_id in target_sectors:
@@ -1405,10 +1408,10 @@ def resolve_dynamic_universe(
             return resolved, reason
 
         except Exception as e:
-            # Fallback to NIFTY 50
-            return THEMATIC_PRESETS["nifty50"]["symbols"][
-                :max_stocks
-            ], f"Fallback to NIFTY 50 ({e})"
+            return (
+                [],
+                f"Market-aware universe unavailable: sector rotation data could not be verified ({e}).",
+            )
 
     # 2. Thematic Presets & Aliases
     preset_alias = {

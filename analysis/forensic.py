@@ -21,19 +21,23 @@ class ForensicAuditResult:
     """Institutional forensic and governance audit report."""
 
     symbol: str
-    beneish_m_score: float
+    beneish_m_score: Optional[float]
     is_manipulator_risk: bool
-    altman_z_score: float
-    distress_zone: str  # "SAFE" | "GREY" | "DISTRESS"
-    piotroski_f_score: int  # 0 to 9
-    quality_rating: str  # "A+" | "A" | "B" | "C" | "D"
+    altman_z_score: Optional[float]
+    distress_zone: str  # "SAFE" | "GREY" | "DISTRESS" | "UNAVAILABLE"
+    piotroski_f_score: Optional[int]  # 0 to 9
+    quality_rating: str  # "A+" | "A" | "B" | "C" | "D" | "UNAVAILABLE"
     governance_red_flags: list[str] = field(default_factory=list)
     strengths: list[str] = field(default_factory=list)
     summary_text: str = ""
+    available: bool = True
+    unavailable_reasons: list[str] = field(default_factory=list)
 
     @property
     def overall_forensic_verdict(self) -> str:
         """Categorize overall forensic risk: CLEAN_PASS | MILD_WARNING | RED_FLAG."""
+        if not self.available:
+            return "UNAVAILABLE"
         if (
             self.is_manipulator_risk
             or self.distress_zone == "DISTRESS"
@@ -47,15 +51,21 @@ class ForensicAuditResult:
     def as_dict(self) -> dict[str, Any]:
         return {
             "symbol": self.symbol,
-            "beneish_m_score": round(self.beneish_m_score, 2),
+            "beneish_m_score": round(self.beneish_m_score, 2)
+            if self.beneish_m_score is not None
+            else None,
             "is_manipulator_risk": self.is_manipulator_risk,
-            "altman_z_score": round(self.altman_z_score, 2),
+            "altman_z_score": round(self.altman_z_score, 2)
+            if self.altman_z_score is not None
+            else None,
             "distress_zone": self.distress_zone,
             "piotroski_f_score": self.piotroski_f_score,
             "quality_rating": self.quality_rating,
             "governance_red_flags": self.governance_red_flags,
             "strengths": self.strengths,
             "summary_text": self.summary_text,
+            "available": self.available,
+            "unavailable_reasons": self.unavailable_reasons,
             "overall_forensic_verdict": self.overall_forensic_verdict,
         }
 
@@ -151,56 +161,56 @@ def compute_piotroski_f_score(data: dict[str, Any]) -> tuple[int, list[str]]:
     checks = []
 
     # 1. Positive Net Income / ROA
-    roe = data.get("roe") or 0.0
-    if roe > 0:
+    roe = data.get("roe")
+    if roe is not None and roe > 0:
         score += 1
         checks.append("Positive Profitability (ROE/ROA > 0)")
 
     # 2. Positive Operating Cash Flow
-    fcf = data.get("free_cash_flow") or 0.0
-    npm = data.get("npm") or 0.0
-    if fcf > 0 or npm > 0:
+    fcf = data.get("free_cash_flow")
+    npm = data.get("npm")
+    if (fcf is not None and fcf > 0) or (npm is not None and npm > 0):
         score += 1
         checks.append("Positive Cash Flow Generation")
 
     # 3. Profit growth
-    profit_growth = data.get("profit_growth") or 0.0
-    if profit_growth > 0:
+    profit_growth = data.get("profit_growth")
+    if profit_growth is not None and profit_growth > 0:
         score += 1
         checks.append("Expanding Year-on-Year Earnings")
 
     # 4. Cash Flow Quality (CFO > Net Income)
-    if fcf >= 0:
+    if fcf is not None and fcf >= 0:
         score += 1
         checks.append("Clean Accruals (Cash Flow aligns with Net Profit)")
 
     # 5. Low / Declining Debt
-    de = data.get("debt_equity") or 0.0
-    if de <= 1.0:
+    de = data.get("debt_equity")
+    if de is not None and de <= 1.0:
         score += 1
         checks.append("Prudent Leverage (D/E <= 1.0)")
 
     # 6. Healthy Liquidity
-    cr = data.get("current_ratio") or 1.2
-    if cr >= 1.1:
+    cr = data.get("current_ratio")
+    if cr is not None and cr >= 1.1:
         score += 1
         checks.append("Sound Liquidity (Current Ratio >= 1.1)")
 
     # 7. Low / Zero Promoter Pledge
-    pledged = data.get("pledged_pct") or 0.0
-    if pledged < 5.0:
+    pledged = data.get("pledged_pct")
+    if pledged is not None and pledged < 5.0:
         score += 1
         checks.append("Zero / Negligible Promoter Share Pledge (<5%)")
 
     # 8. Sales Growth
-    sales_growth = data.get("sales_growth") or 0.0
-    if sales_growth > 5.0:
+    sales_growth = data.get("sales_growth")
+    if sales_growth is not None and sales_growth > 5.0:
         score += 1
         checks.append("Strong Topline Revenue Growth (>5%)")
 
     # 9. Return on Capital (ROCE > 12%)
-    roce = data.get("roce") or 0.0
-    if roce >= 12.0:
+    roce = data.get("roce")
+    if roce is not None and roce >= 12.0:
         score += 1
         checks.append("High Capital Efficiency (ROCE >= 12%)")
 
@@ -217,7 +227,9 @@ def audit_forensics(
     Persists results in analysis_cache with 24-hour TTL.
     """
     clean_sym = symbol.upper().replace(".NS", "").replace("NSE:", "").strip()
-    cache_key = f"forensic_audit_{clean_sym}"
+    # Versioned cache prevents historical synthetic-score entries from being
+    # reused after the truthful-input contract was introduced.
+    cache_key = f"forensic_audit_v2_{clean_sym}"
 
     if use_cache and data is None:
         try:
@@ -225,6 +237,8 @@ def audit_forensics(
 
             cached = analysis_cache.get_fundamental(cache_key)
             if cached and isinstance(cached, dict):
+                cached = dict(cached)
+                cached.pop("overall_forensic_verdict", None)
                 return ForensicAuditResult(**cached)
         except Exception:
             pass
@@ -257,54 +271,69 @@ def audit_forensics(
         except Exception:
             data = {}
 
+    # These models require their published inputs.  Summary ratios cannot be
+    # reverse-engineered into an accounting score without inventing figures.
+    required_inputs = {
+        "Beneish M-Score": {"dsri", "gmi", "aqi", "sgi", "depi", "sgai", "lvgi", "tata"},
+        "Altman Z''-Score": {
+            "working_capital",
+            "total_assets",
+            "retained_earnings",
+            "ebit",
+            "book_value_equity",
+            "total_liabilities",
+        },
+        "Piotroski F-Score": {
+            "roe",
+            "free_cash_flow",
+            "profit_growth",
+            "debt_equity",
+            "current_ratio",
+            "pledged_pct",
+            "sales_growth",
+            "roce",
+        },
+    }
+    missing = {
+        model: sorted(key for key in keys if data.get(key) is None)
+        for model, keys in required_inputs.items()
+    }
+    missing = {model: keys for model, keys in missing.items() if keys}
+    if missing:
+        reasons = [f"{model}: missing {', '.join(keys)}" for model, keys in missing.items()]
+        return ForensicAuditResult(
+            symbol=clean_sym,
+            beneish_m_score=None,
+            is_manipulator_risk=False,
+            altman_z_score=None,
+            distress_zone="UNAVAILABLE",
+            piotroski_f_score=None,
+            quality_rating="UNAVAILABLE",
+            summary_text=(
+                f"Forensic audit for {clean_sym} is unavailable because the required reported accounting inputs "
+                "were not supplied. No score or investment-quality verdict has been inferred."
+            ),
+            available=False,
+            unavailable_reasons=reasons,
+        )
+
     # 1. Compute Piotroski F-Score
     f_score, strengths = compute_piotroski_f_score(data)
 
     # 2. Compute Beneish M-Score
-    # Estimate indices from fundamental inputs
-    sales_growth = data.get("sales_growth") or 0.0
-    sgi = 1.0 + (sales_growth / 100.0)
-    de = data.get("debt_equity") or 0.5
-    lvgi = 1.0 + min(0.5, max(-0.5, (de - 0.5) * 0.2))
-
-    # Check for accrual red flags
-    fcf = data.get("free_cash_flow") or 100.0
-    mcap = data.get("market_cap") or 1000.0
-    tata = 0.02 if fcf > 0 else 0.08  # higher accruals when FCF is negative
-
     m_score = compute_beneish_m_score(
-        dsri=1.02,
-        gmi=1.01,
-        aqi=1.00,
-        sgi=max(0.8, min(1.5, sgi)),
-        depi=1.0,
-        sgai=1.0,
-        lvgi=max(0.8, min(1.5, lvgi)),
-        tata=tata,
+        **{key: float(data[key]) for key in required_inputs["Beneish M-Score"]}
     )
     is_manipulator = m_score > -1.78
 
     # 3. Compute Altman Z-Score
-    # Synthetic asset breakdown based on market cap and D/E
-    total_assets = max(100.0, mcap * 0.8)
-    working_cap = total_assets * (0.25 if (data.get("current_ratio") or 1.2) >= 1.2 else 0.05)
-    retained_earnings = total_assets * 0.35
-    ebit = total_assets * ((data.get("roce") or 12.0) / 100.0)
-    book_val_eq = total_assets / (1.0 + de)
-    total_liab = total_assets - book_val_eq
-
     z_score, distress_zone = compute_altman_z_score(
-        working_capital=working_cap,
-        total_assets=total_assets,
-        retained_earnings=retained_earnings,
-        ebit=ebit,
-        book_value_equity=book_val_eq,
-        total_liabilities=total_liab,
+        **{key: float(data[key]) for key in required_inputs["Altman Z''-Score"]}
     )
 
     # 4. Indian Governance Red Flags Scanner
     red_flags = []
-    pledged = data.get("pledged_pct") or 0.0
+    pledged = float(data.get("pledged_pct") or 0.0)
     if pledged >= 20.0:
         red_flags.append(f"High Promoter Pledge ({pledged:.1f}% of holding pledged as collateral)")
     elif pledged >= 10.0:
@@ -314,8 +343,9 @@ def audit_forensics(
     if ic is not None and ic < 2.0 and ic >= 0:
         red_flags.append(f"Weak Interest Coverage ({ic:.1f}x) — debt servicing vulnerability")
 
-    if de > 2.0:
-        red_flags.append(f"High Leverage (Debt/Equity {de:.2f}x)")
+    debt_equity = float(data["debt_equity"])
+    if debt_equity > 2.0:
+        red_flags.append(f"High Leverage (Debt/Equity {debt_equity:.2f}x)")
 
     if is_manipulator:
         red_flags.append(

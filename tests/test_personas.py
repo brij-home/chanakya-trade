@@ -303,7 +303,7 @@ class TestPersonaSignal:
         assert sig.confidence == 75
 
     def test_all_verdict_values_accepted(self):
-        for verdict in ("STRONG_BUY", "BUY", "HOLD", "SELL", "STRONG_SELL"):
+        for verdict in ("STRONG_BUY", "BUY", "HOLD", "SELL", "STRONG_SELL", "UNAVAILABLE"):
             sig = PersonaSignal(
                 persona="test",
                 verdict=verdict,
@@ -416,26 +416,26 @@ D/E: 0.3
         sig = parse_persona_response(text, "soros")
         assert sig.verdict == "STRONG_SELL"
 
-    def test_empty_text_returns_hold(self):
+    def test_empty_text_returns_unavailable(self):
         sig = parse_persona_response("", "buffett")
-        assert sig.verdict == "HOLD"
-        assert sig.confidence == 30
+        assert sig.verdict == "UNAVAILABLE"
+        assert sig.confidence == 0
 
-    def test_none_like_text_returns_hold(self):
+    def test_none_like_text_returns_unavailable(self):
         sig = parse_persona_response("   ", "lynch")
-        assert sig.verdict == "HOLD"
+        assert sig.verdict == "UNAVAILABLE"
 
     def test_partial_response_no_confidence(self):
         text = "VERDICT: SELL\nThis stock looks bad."
         sig = parse_persona_response(text, "munger")
         assert sig.verdict == "SELL"
-        assert sig.confidence == 50  # default
+        assert sig.confidence == 0  # incomplete output is non-actionable
 
     def test_partial_response_no_verdict(self):
         text = "CONFIDENCE: 65\nRATIONALE:\n- Item one\n- Item two"
         sig = parse_persona_response(text, "jhunjhunwala")
-        assert sig.verdict == "HOLD"  # default
-        assert sig.confidence == 65
+        assert sig.verdict == "UNAVAILABLE"
+        assert sig.confidence == 0
 
     def test_confidence_clamped_to_100(self):
         text = "VERDICT: BUY\nCONFIDENCE: 999\nRATIONALE:\n- bullet"
@@ -444,10 +444,10 @@ D/E: 0.3
 
     def test_confidence_invalid_negative_falls_back_to_default(self):
         # Negative confidence values can't be captured by \d+ regex,
-        # so the parser uses the default (50).
+        # so the parser marks the incomplete output as non-actionable.
         text = "VERDICT: SELL\nRATIONALE:\n- bullet"
         sig = parse_persona_response(text, "buffett")
-        assert sig.confidence == 50  # default when no valid confidence present
+        assert sig.confidence == 0
 
     def test_rationale_items_extracted(self):
         text = """VERDICT: HOLD
@@ -490,15 +490,14 @@ RATIONALE:
         assert sig.confidence == 65
         assert len(sig.rationale) >= 1
 
-    def test_non_standard_response_no_verdict_key_defaults_hold(self):
-        """Response without a VERDICT: key should default to HOLD."""
+    def test_non_standard_response_no_verdict_key_is_unavailable(self):
+        """Response without a VERDICT: key cannot be treated as a signal."""
         text = """This stock looks interesting.
 • Strong brand presence
 • Growing revenue
 I would rate this a BUY."""
         sig = parse_persona_response(text, "lynch")
-        # No VERDICT: tag → defaults to HOLD
-        assert sig.verdict == "HOLD"
+        assert sig.verdict == "UNAVAILABLE"
         assert len(sig.rationale) >= 1
 
 
@@ -529,7 +528,7 @@ class TestRuleBasedFallback:
             registry=None,
             llm_provider=None,
         )
-        assert sig.verdict in ("STRONG_BUY", "BUY", "HOLD", "SELL", "STRONG_SELL")
+        assert sig.verdict in ("STRONG_BUY", "BUY", "HOLD", "SELL", "STRONG_SELL", "UNAVAILABLE")
 
     @pytest.mark.parametrize("persona_id", ["buffett", "jhunjhunwala", "lynch", "soros", "munger"])
     def test_confidence_in_valid_range(self, persona_id: str):
@@ -560,8 +559,8 @@ class TestRuleBasedFallback:
                 symbol="RELIANCE",
             )
 
-    def test_no_data_defaults_to_hold_zone(self):
-        """With no data / empty brief, scores default to 50 → HOLD range."""
+    def test_no_data_is_unavailable(self):
+        """An empty brief must not masquerade as a neutral recommendation."""
         brief: dict = {
             "symbol": "RELIANCE",
             "exchange": "NSE",
@@ -572,8 +571,19 @@ class TestRuleBasedFallback:
             "fii_dii": {},
         }
         sig = _rule_based_signal("buffett", brief)
-        # With all-neutral data, weighted score ~50 → HOLD
-        assert sig.verdict == "HOLD"
+        assert sig.verdict == "UNAVAILABLE"
+        assert sig.confidence == 0
+
+    def test_llm_cannot_issue_verdict_without_primary_evidence(self):
+        """A confident model response must not bypass the evidence gate."""
+        sig = run_persona_analysis(
+            persona_id="buffett",
+            symbol="RELIANCE",
+            registry=None,
+            llm_provider=lambda *_args, **_kwargs: "VERDICT: BUY\nCONFIDENCE: 99",
+        )
+        assert sig.verdict == "UNAVAILABLE"
+        assert sig.confidence == 0
 
     def test_rule_based_signal_direct(self):
         """_rule_based_signal works with empty brief."""
@@ -588,7 +598,7 @@ class TestRuleBasedFallback:
         }
         sig = _rule_based_signal("buffett", brief)
         assert isinstance(sig, PersonaSignal)
-        assert sig.verdict in ("STRONG_BUY", "BUY", "HOLD", "SELL", "STRONG_SELL")
+        assert sig.verdict in ("STRONG_BUY", "BUY", "HOLD", "SELL", "STRONG_SELL", "UNAVAILABLE")
 
     def test_good_fundamentals_increase_score(self):
         """Strong fundamentals should raise the score for Buffett."""
@@ -619,7 +629,7 @@ class TestRuleBasedFallback:
 
 
 class TestScoreDimension:
-    def test_neutral_data_returns_near_50(self):
+    def test_missing_data_returns_none(self):
         brief: dict = {
             "technicals": {},
             "fundamentals": {},
@@ -628,7 +638,7 @@ class TestScoreDimension:
             "news": [],
         }
         score = _score_dimension("fundamentals", brief)
-        assert score == pytest.approx(50.0)
+        assert score is None
 
     def test_high_roe_increases_fundamentals_score(self):
         brief: dict = {
@@ -674,7 +684,7 @@ class TestScoreDimension:
         score = _score_dimension("macro", brief)
         assert score > 50.0
 
-    def test_unknown_dimension_returns_50(self):
+    def test_unknown_dimension_returns_none(self):
         brief: dict = {
             "technicals": {},
             "fundamentals": {},
@@ -683,7 +693,7 @@ class TestScoreDimension:
             "news": [],
         }
         score = _score_dimension("unknown_dimension_xyz", brief)
-        assert score == pytest.approx(50.0)
+        assert score is None
 
     def test_score_always_in_range(self):
         """Score must always be within 0-100 regardless of extreme inputs."""
@@ -706,7 +716,7 @@ class TestScoreDimension:
         for brief in briefs:
             for dim in ("fundamentals", "technicals", "macro", "sentiment", "options"):
                 score = _score_dimension(dim, brief)
-                assert 0 <= score <= 100, f"{dim} score {score} out of range"
+                assert score is None or 0 <= score <= 100, f"{dim} score {score} out of range"
 
 
 class TestCouncilEnsembles:
@@ -735,8 +745,22 @@ class TestCouncilEnsembles:
         res = run_council("breakout", "RELIANCE")
         assert res["council"] == "breakout"
         assert res["symbol"] == "RELIANCE"
-        assert res["consensus_verdict"] in ("STRONG_BUY", "BUY", "HOLD", "SELL", "STRONG_SELL")
-        assert 0 <= res["consensus_score"] <= 100
+        assert res["consensus_verdict"] in (
+            "STRONG_BUY",
+            "BUY",
+            "HOLD",
+            "SELL",
+            "STRONG_SELL",
+            "UNAVAILABLE",
+        )
+        assert res["consensus_score"] is None or 0 <= res["consensus_score"] <= 100
+        assert res["actionable"] is False
         assert len(res["signals"]) == 4
         for sig in res["signals"]:
             assert isinstance(sig, PersonaSignal)
+
+    def test_unknown_council_is_rejected(self):
+        from agent.persona_agent import run_council
+
+        with pytest.raises(ValueError, match="Unknown council"):
+            run_council("typoed_council", "RELIANCE")

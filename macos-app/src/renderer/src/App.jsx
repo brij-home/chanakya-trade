@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState, useCallback, lazy, Suspense } from 'react'
 import { useChatStore, getBaseUrl } from './store/chatStore'
 import { useMarketClock } from './hooks/useMarketClock'
 import ActivityBar from './components/Shell/ActivityBar'
@@ -6,27 +6,52 @@ import ContextBar, { MarketClock } from './components/Shell/ContextBar'
 import Sidebar from './components/Sidebar'
 import ChatArea from './components/Chat/ChatArea'
 import InputBar from './components/Input/InputBar'
-import TerminalView from './components/Views/TerminalView'
-import DebateArenaView from './components/Views/DebateArenaView'
-import OptionsDeskView from './components/Views/OptionsDeskView'
-import OverviewView from './components/Views/OverviewView'
-import PortfolioView from './components/Views/PortfolioView'
-import JournalView from './components/Views/JournalView'
-import AlertsView from './components/Views/AlertsView'
-import BacktestStudioView from './components/Views/BacktestStudioView'
 import SettingsPanel from './components/Sidebar/SettingsPanel'
 import SetupScreen from './components/SetupScreen'
-import OnboardingWizard from './components/Onboarding/OnboardingWizard'
-import CommandPalette from './components/Modals/CommandPalette'
-import OrderTicketModal from './components/Modals/OrderTicketModal'
-import TopOpportunitiesModal from './components/Modals/TopOpportunitiesModal'
-import SectorDrilldownModal from './components/Modals/SectorDrilldownModal'
-import MetricExplainerModal from './components/Modals/MetricExplainerModal'
 import ActivityHUD from './components/Common/ActivityHUD'
 import ModeBanner from './components/Common/ModeBanner'
 import ToastContainer from './components/Toast/ToastContainer'
 import HotkeyPanel from './components/UI/HotkeyPanel'
 import ErrorBoundary from './components/ErrorBoundary'
+
+// ── Lazy-loaded Workspace Views (Code-Split Chunks) ─────────────────────────
+const TerminalView = lazy(() => import('./components/Views/TerminalView'))
+const DebateArenaView = lazy(() => import('./components/Views/DebateArenaView'))
+const OptionsDeskView = lazy(() => import('./components/Views/OptionsDeskView'))
+const OverviewView = lazy(() => import('./components/Views/OverviewView'))
+const PortfolioView = lazy(() => import('./components/Views/PortfolioView'))
+const JournalView = lazy(() => import('./components/Views/JournalView'))
+const AlertsView = lazy(() => import('./components/Views/AlertsView'))
+const BacktestStudioView = lazy(() => import('./components/Views/BacktestStudioView'))
+const OnboardingWizard = lazy(() => import('./components/Onboarding/OnboardingWizard'))
+
+// ── Lazy-loaded Heavyweight Modals (Loaded on Demand) ────────────────────────
+const CommandPalette = lazy(() => import('./components/Modals/CommandPalette'))
+const OrderTicketModal = lazy(() => import('./components/Modals/OrderTicketModal'))
+const TopOpportunitiesModal = lazy(() => import('./components/Modals/TopOpportunitiesModal'))
+const SectorDrilldownModal = lazy(() => import('./components/Modals/SectorDrilldownModal'))
+const MetricExplainerModal = lazy(() => import('./components/Modals/MetricExplainerModal'))
+
+/* ── View Loading Skeleton ─────────────────────────────────────────────────── */
+function ViewLoader({ label = 'Loading Workspace...' }) {
+  return (
+    <div
+      className="flex flex-col items-center justify-center flex-1 h-full p-8 text-center"
+      style={{ background: 'var(--color-surface)' }}
+    >
+      <div
+        className="w-7 h-7 rounded-full border-2 border-t-transparent animate-spin mb-3"
+        style={{ borderColor: 'var(--color-gold)', borderTopColor: 'transparent' }}
+      />
+      <span
+        className="text-[11px] font-semibold tracking-wider font-mono uppercase"
+        style={{ color: 'var(--color-muted)' }}
+      >
+        {label}
+      </span>
+    </div>
+  )
+}
 
 /* ── Theme hook ─────────────────────────────────────────────────────────── */
 function useTheme() {
@@ -231,7 +256,11 @@ export default function App() {
 
   // ── Phase gates ──────────────────────────────────────────────────────────
   if (setupPhase === 'onboarding') {
-    return <OnboardingWizard port={port} onComplete={() => setSetupPhase('ready')} />
+    return (
+      <Suspense fallback={<ViewLoader label="Loading Setup..." />}>
+        <OnboardingWizard port={port} onComplete={() => setSetupPhase('ready')} />
+      </Suspense>
+    )
   }
   if (setupPhase !== 'ready') {
     return <SetupScreen phase={setupPhase} data={setupData} />
@@ -362,82 +391,85 @@ export default function App() {
         {/* View Container */}
         <div className="flex flex-col flex-1 overflow-hidden">
           <ErrorBoundary title="Workspace View">
+            <Suspense fallback={<ViewLoader label={`Loading ${activeView}...`} />}>
+              {activeView === 'terminal' && (
+                <TerminalView
+                  onOpenOrderTicket={handleOpenOrderTicket}
+                  externalSymbol={ctxSymbol}
+                  onSymbolChange={setCtxSymbol}
+                  externalTimeframe={ctxTimeframe}
+                  onTimeframeChange={setCtxTimeframe}
+                  externalLayout={ctxLayout}
+                  onLayoutChange={setCtxLayout}
+                />
+              )}
 
-            {activeView === 'terminal' && (
-              <TerminalView
-                onOpenOrderTicket={handleOpenOrderTicket}
-                externalSymbol={ctxSymbol}
-                onSymbolChange={setCtxSymbol}
-                externalTimeframe={ctxTimeframe}
-                onTimeframeChange={setCtxTimeframe}
-                externalLayout={ctxLayout}
-                onLayoutChange={setCtxLayout}
-              />
-            )}
+              {activeView === 'debate' && (
+                <DebateArenaView onOpenOrderTicket={handleOpenOrderTicket} />
+              )}
 
-            {activeView === 'debate' && (
-              <DebateArenaView onOpenOrderTicket={handleOpenOrderTicket} />
-            )}
+              {activeView === 'options' && (
+                <OptionsDeskView onOpenOrderTicket={handleOpenOrderTicket} />
+              )}
 
-            {activeView === 'options' && (
-              <OptionsDeskView onOpenOrderTicket={handleOpenOrderTicket} />
-            )}
+              {activeView === 'copilot' && (
+                <>
+                  <ChatArea />
+                  <InputBar />
+                </>
+              )}
 
-            {activeView === 'copilot' && (
-              <>
-                <ChatArea />
-                <InputBar />
-              </>
-            )}
-
-            {activeView === 'overview'   && <OverviewView />}
-            {activeView === 'portfolio'  && <PortfolioView onOpenOrderTicket={handleOpenOrderTicket} />}
-            {activeView === 'journal'    && <JournalView />}
-            {activeView === 'alerts'     && <AlertsView onOpenOrderTicket={handleOpenOrderTicket} />}
-            {activeView === 'backtest'   && <BacktestStudioView onOpenOrderTicket={handleOpenOrderTicket} />}
-            {activeView === 'settings'   && <SettingsPanel onClose={() => setActiveView('terminal')} />}
-
+              {activeView === 'overview'   && <OverviewView />}
+              {activeView === 'portfolio'  && <PortfolioView onOpenOrderTicket={handleOpenOrderTicket} />}
+              {activeView === 'journal'    && <JournalView />}
+              {activeView === 'alerts'     && <AlertsView onOpenOrderTicket={handleOpenOrderTicket} />}
+              {activeView === 'backtest'   && <BacktestStudioView onOpenOrderTicket={handleOpenOrderTicket} />}
+              {activeView === 'settings'   && <SettingsPanel onClose={() => setActiveView('terminal')} />}
+            </Suspense>
           </ErrorBoundary>
         </div>
       </div>
 
-      {/* ── Global Modals ────────────────────────────────────────────────── */}
-      <ErrorBoundary title="Command Palette">
-        <CommandPalette
-          isOpen={isCommandPaletteOpen}
-          onClose={() => setIsCommandPaletteOpen(false)}
-          onOpenOrderTicket={(data) => { setIsCommandPaletteOpen(false); handleOpenOrderTicket(data) }}
-        />
-      </ErrorBoundary>
+      {/* ── Global Modals (Lazy Loaded on Demand) ────────────────────────── */}
+      <Suspense fallback={null}>
+        <ErrorBoundary title="Command Palette">
+          <CommandPalette
+            isOpen={isCommandPaletteOpen}
+            onClose={() => setIsCommandPaletteOpen(false)}
+            onOpenOrderTicket={(data) => { setIsCommandPaletteOpen(false); handleOpenOrderTicket(data) }}
+          />
+        </ErrorBoundary>
 
-      <ErrorBoundary title="Order Ticket">
-        <OrderTicketModal
-          isOpen={isOrderTicketOpen}
-          onClose={() => setIsOrderTicketOpen(false)}
-          initialData={orderTicketData}
-        />
-      </ErrorBoundary>
+        <ErrorBoundary title="Order Ticket">
+          <OrderTicketModal
+            isOpen={isOrderTicketOpen}
+            onClose={() => setIsOrderTicketOpen(false)}
+            initialData={orderTicketData}
+            appMode={appMode}
+          />
+        </ErrorBoundary>
 
-      <ErrorBoundary title="Opportunities Radar">
-        <TopOpportunitiesModal
-          isOpen={isTopOppsOpen}
-          onClose={() => setIsTopOppsOpen(false)}
-          onOpenOrderTicket={handleOpenOrderTicket}
-        />
-      </ErrorBoundary>
+        <ErrorBoundary title="Opportunities Radar">
+          <TopOpportunitiesModal
+            isOpen={isTopOppsOpen}
+            onClose={() => setIsTopOppsOpen(false)}
+            onOpenOrderTicket={handleOpenOrderTicket}
+          />
+        </ErrorBoundary>
 
-      <ErrorBoundary title="Sector Drilldown">
-        <SectorDrilldownModal
-          isOpen={sectorDrilldown.isOpen}
-          sector={sectorDrilldown.sector}
-          onClose={() => setSectorDrilldown({ isOpen: false, sector: null })}
-          onOpenOrderTicket={handleOpenOrderTicket}
-        />
-      </ErrorBoundary>
+        <ErrorBoundary title="Sector Drilldown">
+          <SectorDrilldownModal
+            isOpen={sectorDrilldown.isOpen}
+            sector={sectorDrilldown.sector}
+            onClose={() => setSectorDrilldown({ isOpen: false, sector: null })}
+            onOpenOrderTicket={handleOpenOrderTicket}
+          />
+        </ErrorBoundary>
 
-      <ErrorBoundary title="Metric Explainer">
-        <MetricExplainerModal />
-      </ErrorBoundary>
+        <ErrorBoundary title="Metric Explainer">
+          <MetricExplainerModal />
+        </ErrorBoundary>
+      </Suspense>
 
       <ErrorBoundary title="Activity Monitor">
         <ActivityHUD />

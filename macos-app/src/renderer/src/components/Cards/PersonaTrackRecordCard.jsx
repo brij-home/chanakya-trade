@@ -61,8 +61,8 @@ export default function PersonaTrackRecordCard() {
   }, [])
 
   const sortedRecords = [...(records || [])].sort((a, b) => {
-    if (sortBy === 'win_rate_desc') return (b.win_rate || 0) - (a.win_rate || 0)
-    if (sortBy === 'r_desc') return (b.compound_r || 0) - (a.compound_r || 0)
+    if (sortBy === 'win_rate_desc') return (b.win_rate ?? -Infinity) - (a.win_rate ?? -Infinity)
+    if (sortBy === 'r_desc') return (b.compound_r ?? -Infinity) - (a.compound_r ?? -Infinity)
     if (sortBy === 'weight_desc') return (b.dynamic_weight_multiplier || 0) - (a.dynamic_weight_multiplier || 0)
     return (a?.name || '').localeCompare(b?.name || '')
   })
@@ -83,7 +83,7 @@ export default function PersonaTrackRecordCard() {
               </span>
             </div>
             <p className="text-xs text-muted font-ui">
-              Self-evolving empirical track records, Brier calibration scores, and real-time council vote weighting
+              Metrics are calculated only from resolved, locally recorded outcomes. New personas remain neutral until the sample is adequate.
             </p>
           </div>
         </div>
@@ -114,7 +114,8 @@ export default function PersonaTrackRecordCard() {
         {sortedRecords.map((p) => {
           const icon = PERSONA_ICONS[p.persona_id] || '🏛️'
           const style = PERSONA_STYLES[p.persona_id] || 'Quantitative Analysis'
-          const isHighWeight = p.dynamic_weight_multiplier >= 1.15
+          const isEstablished = p.data_status === 'ESTABLISHED'
+          const isHighWeight = isEstablished && p.dynamic_weight_multiplier >= 1.15
 
           return (
             <div
@@ -142,7 +143,7 @@ export default function PersonaTrackRecordCard() {
                         : 'bg-elevated text-muted border-border/60'
                     }`}
                   >
-                    ⚖️ {p.dynamic_weight_multiplier}x Weight
+                    {isEstablished ? `⚖️ ${p.dynamic_weight_multiplier}x Weight` : '○ Cold start'}
                   </span>
                 </div>
               </div>
@@ -151,21 +152,22 @@ export default function PersonaTrackRecordCard() {
               <div className="grid grid-cols-3 gap-2 bg-elevated/70 p-2 rounded-lg border border-border/40 text-xs font-mono">
                 <div>
                   <span className="text-[10px] text-muted uppercase font-ui">Win Rate</span>
-                  <p className="text-xs font-bold text-green mt-0.5">{p.win_rate}%</p>
+                  <p className="text-xs font-bold text-green mt-0.5">{p.win_rate != null ? `${p.win_rate}%` : '—'}</p>
                 </div>
                 <div>
                   <span className="text-[10px] text-muted uppercase font-ui">Payoff</span>
-                  <p className="text-xs font-bold text-amber mt-0.5">+{p.compound_r}R</p>
+                  <p className="text-xs font-bold text-amber mt-0.5">{p.compound_r != null ? `${p.compound_r >= 0 ? '+' : ''}${p.compound_r}R` : '—'}</p>
                 </div>
                 <div>
                   <span className="text-[10px] text-muted uppercase font-ui">Brier Score</span>
-                  <p className="text-xs font-bold text-cyan mt-0.5">{p.brier_score}</p>
+                  <p className="text-xs font-bold text-cyan mt-0.5">{p.brier_score != null ? p.brier_score : '—'}</p>
                 </div>
               </div>
 
               {/* Sector Affinity Tags & Consultation Button */}
               <div className="flex items-center justify-between gap-2 pt-1 border-t border-border/30">
-                <div className="flex flex-wrap gap-1">
+                <div className="flex flex-wrap gap-1 items-center">
+                  <span className="text-[9px] text-muted font-ui">{p.total_calls} resolved</span>
                   {Object.keys(p.sector_affinity || {}).slice(0, 2).map((sec) => (
                     <span
                       key={sec}

@@ -155,6 +155,35 @@ def create_user(email: str, password: str) -> dict:
         conn.close()
 
 
+def create_initial_user(email: str, password: str) -> dict:
+    """Atomically create the one account allowed during self-hosted setup."""
+    email = email.strip().lower()
+    if not _EMAIL_RE.match(email):
+        raise ValueError("Invalid email format")
+    if len(password) < 8:
+        raise ValueError("Password must be at least 8 characters")
+
+    now = datetime.now(timezone.utc).isoformat()
+    conn = _get_conn()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        if conn.execute("SELECT COUNT(*) FROM users").fetchone()[0] > 0:
+            raise PermissionError(
+                "Initial setup is already complete. Sign in with an existing account."
+            )
+        cursor = conn.execute(
+            "INSERT INTO users (email, password_hash, created_at) VALUES (?, ?, ?)",
+            (email, _hash_password(password), now),
+        )
+        conn.commit()
+        return {"id": cursor.lastrowid, "email": email, "created_at": now}
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
 def verify_user(email: str, password: str) -> dict | None:
     """
     Verify credentials and lazily upgrade legacy password hashes.
@@ -295,7 +324,12 @@ async def signup(body: AuthBody, response: Response, request: Request):
         raise HTTPException(400, "Password must be at least 8 characters")
 
     try:
-        user = create_user(body.email, body.password)
+        if os.environ.get("DEPLOY_MODE", "") == "self-hosted":
+            user = create_initial_user(body.email, body.password)
+        else:
+            user = create_user(body.email, body.password)
+    except PermissionError as e:
+        raise HTTPException(403, str(e))
     except ValueError as e:
         raise HTTPException(400, str(e))
 

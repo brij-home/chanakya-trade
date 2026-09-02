@@ -18,18 +18,31 @@ export default function DeltaHedgeCard({ data, onOpenOrderTicket }) {
   const [activeRecipeTab, setActiveRecipeTab] = useState('FUTURES') // FUTURES vs OPTIONS vs COLLAR
   const [activeExplainerTab, setActiveExplainerTab] = useState('WHY') // WHY vs WHEN vs HOW
 
-  const underlying = (d.underlying || d.symbol || 'NIFTY').toUpperCase().replace('NSE:', '').replace('NFO:', '')
-  const spotPrice = Number(d.spot_price || d.spot || 24250)
-  
-  // Standard Indian F&O Lot Sizes
-  const lotSizeMap = { NIFTY: 75, BANKNIFTY: 15, FINNIFTY: 40, MIDCPNIFTY: 50, SENSEX: 10, BANKEX: 15 }
-  const lotSize = Number(d.lot_size || lotSizeMap[underlying] || 75)
+  const hasVerifiedInputs = !demo
+    && Boolean(d.underlying || d.symbol)
+    && (d.spot_price ?? d.spot) != null
+    && d.net_delta != null
+    && d.target_delta != null
+    && d.lot_size != null
 
-  // Base unit delta (default to +0.42 unit delta if not provided)
-  const baseUnitDelta = Number(d.net_delta ?? 0.42)
+  if (!hasVerifiedInputs) {
+    return (
+      <div className="bg-panel border border-border/90 rounded-2xl p-5 max-w-2xl w-full space-y-2 shadow-xl font-ui text-text">
+        <h3 className="text-sm font-bold tracking-wide font-mono uppercase">Delta Hedging &amp; Risk Control</h3>
+        <p className="text-xs text-muted">Live position delta, verified spot, target delta, and contract lot size are required before a hedge can be calculated. No hedge has been staged.</p>
+      </div>
+    )
+  }
+
+  const underlying = (d.underlying || d.symbol).toUpperCase().replace('NSE:', '').replace('NFO:', '')
+  const spotPrice = Number(d.spot_price ?? d.spot)
+  
+  const lotSize = Number(d.lot_size)
+
+  const baseUnitDelta = Number(d.net_delta)
   const totalUnitDelta = baseUnitDelta * posMultiplier
   const currentDeltaQty = totalUnitDelta * lotSize
-  const targetDeltaQty = Number(d.target_delta ?? 0.0) * lotSize
+  const targetDeltaQty = Number(d.target_delta) * lotSize
   
   const rawGapQty = currentDeltaQty - targetDeltaQty
   const gapQty = rawGapQty * hedgeRatio

@@ -103,6 +103,13 @@ function createTray() {
 // ---------------------------------------------------------------------------
 let mainWindow = null
 
+function validateExternalUrl(rawUrl) {
+  let parsed
+  try { parsed = new URL(String(rawUrl)) } catch { throw new Error('Invalid external URL') }
+  if (parsed.protocol !== 'https:') throw new Error('Only HTTPS links can be opened externally')
+  return parsed.toString()
+}
+
 function createWindow() {
   const appIcon = nativeImage.createFromPath(join(__dirname, '../../build/icon.iconset/icon_512x512.png'))
   if (process.platform === 'darwin' && appIcon && !appIcon.isEmpty()) {
@@ -122,7 +129,7 @@ function createWindow() {
       preload: join(__dirname, '../preload/index.js'),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false,
+      sandbox: true,
     },
     show: false,
   })
@@ -139,7 +146,10 @@ function createWindow() {
   })
 
   mainWindow.on('closed', () => { mainWindow = null })
-  mainWindow.webContents.setWindowOpenHandler(({ url }) => { shell.openExternal(url); return { action: 'deny' } })
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    try { shell.openExternal(validateExternalUrl(url)) } catch (_) {}
+    return { action: 'deny' }
+  })
 }
 
 // ---------------------------------------------------------------------------
@@ -148,7 +158,34 @@ function createWindow() {
 let _readyPort = null
 
 ipcMain.handle('get-port', () => _readyPort)
-ipcMain.handle('open-external', (_, url) => shell.openExternal(url))
+ipcMain.handle('open-external', (_, url) => shell.openExternal(validateExternalUrl(url)))
+ipcMain.handle('sidecar-request', async (_, request = {}) => {
+  const method = String(request.method || 'GET').toUpperCase()
+  const endpoint = String(request.endpoint || '')
+  if (!['GET', 'POST', 'PUT', 'PATCH', 'DELETE'].includes(method)) {
+    throw new Error('Unsupported API method')
+  }
+  if (!endpoint.startsWith('/') || endpoint.startsWith('//') || endpoint.includes('://')) {
+    throw new Error('Invalid API endpoint')
+  }
+  if (!_readyPort) throw new Error('API is not ready')
+  const allowedHeaders = {}
+  for (const [key, value] of Object.entries(request.headers || {})) {
+    if (['content-type', 'x-csrf-token'].includes(String(key).toLowerCase())) allowedHeaders[key] = String(value)
+  }
+  const body = request.body === undefined || method === 'GET' ? undefined : JSON.stringify(request.body)
+  if (body && Buffer.byteLength(body, 'utf8') > 1_000_000) throw new Error('Request body exceeds 1 MB limit')
+
+  const response = await fetch(`http://127.0.0.1:${_readyPort}${endpoint}`, {
+    method,
+    headers: { 'Content-Type': 'application/json', ...allowedHeaders },
+    body,
+  })
+  const text = await response.text()
+  let data = null
+  try { data = text ? JSON.parse(text) : null } catch { data = text }
+  return { ok: response.ok, status: response.status, data }
+})
 
 ipcMain.on('update-tray', (_, { label }) => {
   if (tray) tray.setTitle(label ? ` ${label}` : '◆')
