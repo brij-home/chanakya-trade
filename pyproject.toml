@@ -28,9 +28,10 @@ classifiers = [
 
 dependencies = [
     # ── Brokers ──────────────────────────────────────────────────────
-    "kiteconnect>=4.2.0",
+    # Zerodha Kite and Fyers SDKs are intentionally optional. Their latest
+    # releases pin legacy transitive HTTP packages with published advisories.
+    # The broker adapters lazy-import these SDKs only when explicitly used.
     "httpx>=0.28.0",
-    "fyers-apiv3>=3.1.0",
     # ── AI ───────────────────────────────────────────────────────────
     "anthropic>=0.40.0",
     "pydantic>=2.10.0",
@@ -86,6 +87,8 @@ dev = [
 ]
 
 # ── Optional broker SDKs (install separately if needed) ─────────────
+# Zerodha Kite:  pip install kiteconnect>=5.2.1
+# Fyers:         pip install fyers-apiv3>=3.1.16
 # Angel One SmartAPI:  pip install smartapi-python logzero
 # Note: smartapi-python is not on PyPI's standard index; install with:
 #   pip install smartapi-python
