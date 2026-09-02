@@ -5,14 +5,28 @@ const IV_FLOOR = 0.5
 
 export default function IVSmileCard({ data, onOpenOrderTicket }) {
   const d = data?.data ?? data ?? {}
-  const symbol = d.symbol ?? 'NIFTY'
-  const expiry = d.expiry ?? '0DTE'
-  const spot = Number(d.spot_price || 24250)
+  const symbol = d.symbol
+  const expiry = d.expiry
+  const spot = Number(d.spot_price ?? d.spot)
   const rows = (d.rows ?? []).slice().sort((a, b) => Number(a.strike) - Number(b.strike))
   const sendDraft = useChatStore((s) => s.sendDraft)
 
   const [selectedStrike, setSelectedStrike] = useState(null)
   const [activeTab, setActiveTab] = useState('CURVE') // CURVE vs TABLE
+
+  const hasVerifiedChain = Boolean(symbol && expiry)
+    && (d.spot_price ?? d.spot) != null
+    && Array.isArray(d.rows)
+    && d.rows.length > 0
+
+  if (!hasVerifiedChain) {
+    return (
+      <div className="bg-panel border border-border/90 rounded-2xl p-5 max-w-2xl w-full space-y-2 shadow-xl font-ui text-text">
+        <h3 className="text-sm font-bold tracking-wide font-mono uppercase">Implied Volatility Smile</h3>
+        <p className="text-xs text-muted">A fresh option chain with symbol, expiry, and spot price is required. Synthetic IV curves and trade ideas are disabled.</p>
+      </div>
+    )
+  }
 
   function ivValid(v) {
     return Number(v ?? 0) >= IV_FLOOR

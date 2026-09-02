@@ -37,9 +37,11 @@ def test_persona_tracker_lifecycle(tmp_path: Path):
     # 3. Retrieve track record
     rec = tracker.get_track_record("minervini", sector="Retail", regime="TRENDING")
     assert rec.persona_id == "minervini"
-    assert rec.win_rate > 70.0
-    assert rec.dynamic_weight_multiplier >= 1.0
-    assert rec.brier_score <= 0.20
+    assert rec.win_rate == 100.0
+    assert rec.total_calls == 1
+    assert rec.data_status == "INSUFFICIENT_SAMPLE"
+    assert rec.dynamic_weight_multiplier == 1.0
+    assert rec.brier_score is not None
 
     # 4. Get all 13 track records
     all_recs = tracker.get_all_track_records()

@@ -194,22 +194,20 @@ class StoxkartAPI(BrokerAPI):
                     self._save_token(token)
                     return True
         except Exception:
-            pass
-
-        # If credentials provided but live auth unreachable, fallback gracefully in offline/mock
-        if ak and cc:
-            self._token = f"stoxkart_sess_{cc}_{int(time.time())}"
-            self._client_code = cc
-            self._save_token(self._token)
-            return True
-
+            # Authentication failures must not create a local-looking session.
+            # Explicit paper mode is the only supported simulation path.
+            return False
         return False
 
     def get_login_url(self) -> str:
         return f"{STOXKART_BASE_URL}/login"
 
     def complete_login(self, **kwargs) -> UserProfile:
-        self.authenticate()
+        if not self.authenticate():
+            raise RuntimeError(
+                "Stoxkart authentication failed; no live or simulated broker session was created. "
+                "Verify credentials and connectivity, or use paper mode explicitly."
+            )
         return self.get_profile()
 
     def logout(self) -> None:
@@ -250,7 +248,10 @@ class StoxkartAPI(BrokerAPI):
             if resp.status_code == 200:
                 data = resp.json()
                 res = data.get("result", data)
-                avail = float(res.get("availableMargin", res.get("cash", 150000.0)))
+                available = res.get("availableMargin", res.get("cash"))
+                if available is None:
+                    raise RuntimeError("Stoxkart funds response omitted available margin.")
+                avail = float(available)
                 used = float(res.get("usedMargin", res.get("marginUsed", 0.0)))
                 return Funds(
                     available_cash=avail,
@@ -258,10 +259,10 @@ class StoxkartAPI(BrokerAPI):
                     total_balance=avail + used,
                     currency="INR",
                 )
-        except Exception:
-            pass
+        except Exception as exc:
+            raise RuntimeError(f"Stoxkart funds request failed: {exc}") from exc
 
-        return Funds(available_cash=150000.0, used_margin=0.0, total_balance=150000.0)
+        raise RuntimeError("Stoxkart funds request failed: broker returned an unexpected response.")
 
     def get_holdings(self) -> list[Holding]:
         if not self._token:
@@ -407,22 +408,18 @@ class StoxkartAPI(BrokerAPI):
             resp = self._client.post(url, json=payload, headers=headers)
             if resp.status_code in (200, 201):
                 res = resp.json().get("result", resp.json())
-                order_id = str(res.get("orderId", f"STOX_{int(time.time())}"))
+                order_id = str(res.get("orderId", ""))
+                if not order_id:
+                    raise RuntimeError("Stoxkart order response omitted an order ID.")
                 return OrderResponse(
                     order_id=order_id,
                     status="PLACED",
                     message="Order submitted successfully via Stoxkart",
                 )
-        except Exception:
-            pass
+        except Exception as exc:
+            raise RuntimeError(f"Stoxkart order submission failed: {exc}") from exc
 
-        # Fallback simulation ID
-        order_id = f"STOX_SIM_{int(time.time() * 1000)}"
-        return OrderResponse(
-            order_id=order_id,
-            status="PLACED",
-            message="Stoxkart paper simulation order accepted",
-        )
+        raise RuntimeError("Stoxkart order submission failed: broker returned an unexpected response.")
 
     def cancel_order(self, order_id: str) -> bool:
         if not self._token:
@@ -433,7 +430,7 @@ class StoxkartAPI(BrokerAPI):
             resp = self._client.delete(url, headers=headers)
             return resp.status_code in (200, 204)
         except Exception:
-            return True
+            return False
 
     def get_orders(self) -> list[Order]:
         if not self._token:

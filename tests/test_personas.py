@@ -574,6 +574,17 @@ class TestRuleBasedFallback:
         assert sig.verdict == "UNAVAILABLE"
         assert sig.confidence == 0
 
+    def test_llm_cannot_issue_verdict_without_primary_evidence(self):
+        """A confident model response must not bypass the evidence gate."""
+        sig = run_persona_analysis(
+            persona_id="buffett",
+            symbol="RELIANCE",
+            registry=None,
+            llm_provider=lambda *_args, **_kwargs: "VERDICT: BUY\nCONFIDENCE: 99",
+        )
+        assert sig.verdict == "UNAVAILABLE"
+        assert sig.confidence == 0
+
     def test_rule_based_signal_direct(self):
         """_rule_based_signal works with empty brief."""
         brief: dict = {
@@ -743,6 +754,13 @@ class TestCouncilEnsembles:
             "UNAVAILABLE",
         )
         assert res["consensus_score"] is None or 0 <= res["consensus_score"] <= 100
+        assert res["actionable"] is False
         assert len(res["signals"]) == 4
         for sig in res["signals"]:
             assert isinstance(sig, PersonaSignal)
+
+    def test_unknown_council_is_rejected(self):
+        from agent.persona_agent import run_council
+
+        with pytest.raises(ValueError, match="Unknown council"):
+            run_council("typoed_council", "RELIANCE")

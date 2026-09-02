@@ -1889,16 +1889,12 @@ export default function TerminalView({
               <span>⚡</span> MULTI-TF CONFLUENCE
             </span>
             <span className="text-[10px] font-bold font-mono px-2 py-0.5 rounded-full bg-emerald-500/15 border border-emerald-500/30 text-emerald-400">
-              {data?.multi_tf?.confluence_score || 88}% CONFLUENCE
+              {data?.multi_tf?.confluence_score != null ? `${data.multi_tf.confluence_score}% CONFLUENCE` : 'CONFLUENCE UNAVAILABLE'}
             </span>
           </div>
 
           <div className="space-y-1.5 text-xs font-mono">
-            {(data?.multi_tf?.timeframes || [
-              { tf: '15m', label: 'Intraday', bias: 'BULLISH', signal: 'SMC Order Block Retest', rsi: 58.4, key_level: 'OB ₹24,120' },
-              { tf: '1h', label: 'Swing', bias: 'BULLISH', signal: 'Higher Highs Structure', rsi: 61.2, key_level: 'EMA20 ₹24,050' },
-              { tf: '1D', label: 'Trend', bias: 'BULLISH', signal: 'Stage 2 Markup (Minervini)', rsi: 64.8, key_level: '50-SMA ₹23,800' },
-            ]).map((tfItem) => {
+            {(data?.multi_tf?.timeframes || []).map((tfItem) => {
               const isBull = tfItem.bias === 'BULLISH'
               return (
                 <div
@@ -1924,6 +1920,9 @@ export default function TerminalView({
                 </div>
               )
             })}
+            {(!data?.multi_tf?.timeframes || data.multi_tf.timeframes.length === 0) && (
+              <p className="rounded-xl border border-border/50 bg-surface/80 p-3 text-[11px] text-muted">Verified multi-timeframe data is unavailable.</p>
+            )}
           </div>
         </div>
 

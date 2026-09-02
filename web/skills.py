@@ -5055,7 +5055,7 @@ class PersonaAnalyzeRequest(BaseModel):
 @router.post("/persona/council")
 @router.post("/skills/persona/council")
 async def skill_persona_council(req: CouncilRequest):
-    """Run a specialized Council Ensemble of legendary personas on a stock symbol."""
+    """Run a specialized council of research-framework lenses on a stock symbol."""
     try:
         from agent.persona_agent import run_council
 
@@ -5076,7 +5076,7 @@ async def skill_persona_council(req: CouncilRequest):
 @router.post("/persona/analyze")
 @router.post("/skills/persona/analyze")
 async def skill_persona_analyze(req: PersonaAnalyzeRequest):
-    """Analyze a stock ticker from the perspective of a specific legendary investor/trader persona."""
+    """Analyze a stock through a selected research-framework lens."""
     try:
         from agent.persona_agent import run_persona_analysis
 

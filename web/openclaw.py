@@ -857,7 +857,7 @@ MANIFEST: dict = {
             "name": "persona_council",
             "path": "/skills/persona/council",
             "method": "POST",
-            "description": "Run a specialized Council Ensemble of legendary personas (Breakout, Options Sniper, Multibagger, Macro Regime) on a stock symbol.",
+            "description": "Run a specialized council of research-framework lenses (Breakout, Options Sniper, Multibagger, Macro Regime) on a stock symbol.",
             "input_schema": {
                 "type": "object",
                 "properties": {
@@ -877,7 +877,7 @@ MANIFEST: dict = {
             "name": "persona_analyze",
             "path": "/skills/persona/analyze",
             "method": "POST",
-            "description": "Analyze a stock from the perspective of a specific legendary investor/trader persona (Buffett, Minervini, Kedia, Taleb, Wyckoff, O'Neil, Simons, SMC, etc.).",
+            "description": "Analyze a stock through a selected research-framework lens (value, momentum, macro, forensic, quantitative, or market-structure).",
             "input_schema": {
                 "type": "object",
                 "properties": {

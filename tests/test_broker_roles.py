@@ -192,9 +192,16 @@ def test_invalid_role_raises():
 @pytest.fixture(scope="module")
 def client():
     """FastAPI TestClient with auth suppressed."""
-    os.environ["DEPLOY_MODE"] = "self-hosted"
-    os.environ["AUTH_DB_PATH"] = str(Path(tempfile.mkdtemp()) / "test.db")
     with (
+        patch.dict(
+            os.environ,
+            {
+                # Broker routing is tested separately from self-hosted auth.
+                # Scope it so the mode cannot leak into later test modules.
+                "DEPLOY_MODE": "desktop",
+                "AUTH_DB_PATH": str(Path(tempfile.mkdtemp()) / "test.db"),
+            },
+        ),
         patch("config.credentials.load_all", return_value=None),
         patch("dotenv.load_dotenv", return_value=None),
     ):

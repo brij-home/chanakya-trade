@@ -25,9 +25,16 @@ def client():
     """TestClient with all broker/keychain loading suppressed."""
     import os
 
-    os.environ["DEPLOY_MODE"] = "self-hosted"
-    os.environ["AUTH_DB_PATH"] = str(Path(tempfile.mkdtemp()) / "test.db")
     with (
+        patch.dict(
+            os.environ,
+            {
+                # This fixture exercises broker management, not authentication.
+                # Scope it so the mode cannot leak into other API tests.
+                "DEPLOY_MODE": "desktop",
+                "AUTH_DB_PATH": str(Path(tempfile.mkdtemp()) / "test.db"),
+            },
+        ),
         patch("config.credentials.load_all", return_value=None),
         patch("dotenv.load_dotenv", return_value=None),
     ):

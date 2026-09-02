@@ -53,7 +53,11 @@ dependencies = [
     "feedparser>=6.0.11",
     "newsapi-python>=0.2.7",
     # ── Web Search ───────────────────────────────────────────────────
-    "exa-py>=1.0.0",
+    # Fyers currently pins requests==2.31.0.  Newer Exa releases require a
+    # newer requests version, so keep this compatible until either SDK relaxes
+    # its constraint.  This also makes a clean `pip install -e '.[dev]'`
+    # deterministic rather than invoking lengthy resolver backtracking.
+    "exa-py==1.8.9",
     "tavily-python>=0.3.0",
     # ── Web ──────────────────────────────────────────────────────────
     "fastapi>=0.115.0",

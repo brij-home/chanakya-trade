@@ -18,117 +18,27 @@ from typing import Any
 
 from config.paths import app_data_path
 
-# Baseline institutional priors for initial cold-start weighting
-DEFAULT_PERSONA_PRIORS: dict[str, dict[str, Any]] = {
-    "minervini": {
-        "win_rate": 76.5,
-        "total_calls": 42,
-        "brier_score": 0.14,
-        "avg_r": 2.4,
-        "top_sectors": ["Technology", "Capital Goods", "Auto"],
-    },
-    "wyckoff": {
-        "win_rate": 72.0,
-        "total_calls": 38,
-        "brier_score": 0.16,
-        "avg_r": 2.1,
-        "top_sectors": ["Metals", "Energy", "Banking"],
-    },
-    "smc": {
-        "win_rate": 78.4,
-        "total_calls": 55,
-        "brier_score": 0.12,
-        "avg_r": 2.8,
-        "top_sectors": ["Banking", "IT", "F&O Heavyweights"],
-    },
-    "oneil": {
-        "win_rate": 74.0,
-        "total_calls": 35,
-        "brier_score": 0.15,
-        "avg_r": 2.3,
-        "top_sectors": ["Pharma", "FMCG", "IT"],
-    },
-    "kedia": {
-        "win_rate": 81.2,
-        "total_calls": 28,
-        "brier_score": 0.11,
-        "avg_r": 3.6,
-        "top_sectors": ["Smallcap Infra", "Manufacturing", "Chemicals"],
-    },
-    "buffett": {
-        "win_rate": 84.0,
-        "total_calls": 25,
-        "brier_score": 0.09,
-        "avg_r": 3.1,
-        "top_sectors": ["Banking", "FMCG", "Consumer"],
-    },
-    "jhunjhunwala": {
-        "win_rate": 79.5,
-        "total_calls": 32,
-        "brier_score": 0.13,
-        "avg_r": 3.2,
-        "top_sectors": ["Financials", "Consumer Discretionary", "Real Estate"],
-    },
-    "munger": {
-        "win_rate": 85.0,
-        "total_calls": 20,
-        "brier_score": 0.08,
-        "avg_r": 3.0,
-        "top_sectors": ["Monopolies", "Financials", "Technology"],
-    },
-    "lynch": {
-        "win_rate": 77.0,
-        "total_calls": 31,
-        "brier_score": 0.14,
-        "avg_r": 2.6,
-        "top_sectors": ["Retail", "Auto Ancillaries", "Healthcare"],
-    },
-    "taleb": {
-        "win_rate": 68.0,
-        "total_calls": 29,
-        "brier_score": 0.18,
-        "avg_r": 4.2,
-        "top_sectors": ["High Beta F&O", "Commodities", "Defensive Hedges"],
-    },
-    "simons": {
-        "win_rate": 75.8,
-        "total_calls": 48,
-        "brier_score": 0.13,
-        "avg_r": 2.2,
-        "top_sectors": ["Index Arbitrage", "Liquid Equities", "Options GEX"],
-    },
-    "soros": {
-        "win_rate": 71.5,
-        "total_calls": 26,
-        "brier_score": 0.17,
-        "avg_r": 2.9,
-        "top_sectors": ["Macro Themes", "Currency Sensitive", "Energy"],
-    },
-    "forensic": {
-        "win_rate": 88.0,
-        "total_calls": 45,
-        "brier_score": 0.07,
-        "avg_r": 2.5,
-        "top_sectors": ["Governance Audit", "Midcaps", "Smallcaps"],
-    },
-}
+MINIMUM_RESOLVED_CALLS_FOR_WEIGHTING = 30
+MINIMUM_RESOLVED_CALLS_FOR_CONTEXT = 10
 
 
 @dataclass
 class PersonaTrackRecord:
     persona_id: str
     name: str
-    win_rate: float
+    win_rate: float | None
     total_calls: int
     winning_calls: int
     losing_calls: int
-    brier_score: float
-    avg_r_multiple: float
-    compound_r: float
+    brier_score: float | None
+    avg_r_multiple: float | None
+    compound_r: float | None
     dynamic_weight_multiplier: float = 1.0
     sector_affinity: dict[str, float] = field(default_factory=dict)
     regime_affinity: dict[str, float] = field(default_factory=dict)
     last_updated: str = ""
+    data_status: str = "COLD_START"
+    minimum_sample_size: int = MINIMUM_RESOLVED_CALLS_FOR_WEIGHTING
 
 
 class PersonaTrackerEngine:
@@ -253,64 +163,99 @@ class PersonaTrackerEngine:
         sector: str | None = None,
         regime: str | None = None,
     ) -> PersonaTrackRecord:
-        """Retrieve aggregated track record with context-aware dynamic weighting."""
+        """Return metrics calculated solely from recorded, resolved recommendations.
+
+        Until enough outcomes exist, the record deliberately remains in COLD_START
+        with a neutral weight.  A named persona is not evidence of historical
+        accuracy, and unverified priors must never influence a council vote.
+        """
         pid = persona_id.lower()
-        prior = DEFAULT_PERSONA_PRIORS.get(
-            pid,
-            {
-                "win_rate": 70.0,
-                "total_calls": 20,
-                "brier_score": 0.15,
-                "avg_r": 2.0,
-                "top_sectors": [],
-            },
-        )
+        with self._get_connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT conviction_score, realized_r, sector, regime, timestamp
+                FROM persona_calls
+                WHERE persona_id = ? AND status != 'PENDING' AND realized_r IS NOT NULL
+                """,
+                (pid,),
+            ).fetchall()
 
-        # Calculate base empirical metrics
-        win_rate = prior["win_rate"]
-        total_calls = prior["total_calls"]
-        winning_calls = int(round(total_calls * (win_rate / 100.0)))
+        total_calls = len(rows)
+        winning_calls = sum(1 for row in rows if float(row["realized_r"]) > 0)
         losing_calls = total_calls - winning_calls
-        brier_score = prior["brier_score"]
-        avg_r = prior["avg_r"]
-        compound_r = round(winning_calls * avg_r - losing_calls * 1.0, 1)
+        if not total_calls:
+            return PersonaTrackRecord(
+                persona_id=pid,
+                name=pid.replace("_", " ").title(),
+                win_rate=None,
+                total_calls=0,
+                winning_calls=0,
+                losing_calls=0,
+                brier_score=None,
+                avg_r_multiple=None,
+                compound_r=None,
+                last_updated="No resolved outcomes recorded",
+            )
 
-        # Dynamic weight multiplier calculation:
-        # Base: (win_rate / 70.0) adjusted for Brier score calibration
-        base_multiplier = (win_rate / 70.0) * (1.0 - (brier_score - 0.10))
+        realized_rs = [float(row["realized_r"]) for row in rows]
+        win_rate = 100.0 * winning_calls / total_calls
+        avg_r = sum(realized_rs) / total_calls
+        compound_r = sum(realized_rs)
+        # Brier score compares the recorded conviction with the observed binary outcome.
+        brier_score = sum(
+            ((max(0.0, min(100.0, float(row["conviction_score"]))) / 100.0)
+             - (1.0 if float(row["realized_r"]) > 0 else 0.0)) ** 2
+            for row in rows
+        ) / total_calls
 
-        # Sector boost (+18% if sector matches persona expertise)
-        sector_boost = 1.0
-        if sector and any(s.lower() in sector.lower() for s in prior.get("top_sectors", [])):
-            sector_boost = 1.18
-
-        # Regime boost
-        regime_boost = 1.0
-        if regime:
-            if "HIGH_VIX" in regime.upper() and pid in ["taleb", "soros", "forensic"]:
-                regime_boost = 1.20
-            elif "TRENDING" in regime.upper() and pid in ["minervini", "oneil", "smc"]:
-                regime_boost = 1.15
-
-        final_multiplier = round(
-            max(0.6, min(1.6, base_multiplier * sector_boost * regime_boost)), 2
+        sector_affinity = self._context_affinity(rows, "sector")
+        regime_affinity = self._context_affinity(rows, "regime")
+        data_status = (
+            "ESTABLISHED" if total_calls >= MINIMUM_RESOLVED_CALLS_FOR_WEIGHTING else "INSUFFICIENT_SAMPLE"
         )
+        final_multiplier = 1.0
+        if data_status == "ESTABLISHED":
+            # Accuracy and calibration are empirical, clipped to avoid one model
+            # dominating a diversified council. Context boosts require their own
+            # minimum sample size and are only applied when requested.
+            base_multiplier = (win_rate / 50.0) * (1.0 - min(0.5, brier_score))
+            context_multiplier = 1.0
+            if sector and sector in sector_affinity:
+                context_multiplier *= 0.9 + (sector_affinity[sector] * 0.2)
+            if regime and regime in regime_affinity:
+                context_multiplier *= 0.9 + (regime_affinity[regime] * 0.2)
+            final_multiplier = round(max(0.75, min(1.25, base_multiplier * context_multiplier)), 2)
 
         return PersonaTrackRecord(
             persona_id=pid,
-            name=pid.capitalize(),
+            name=pid.replace("_", " ").title(),
             win_rate=round(win_rate, 1),
             total_calls=total_calls,
             winning_calls=winning_calls,
             losing_calls=losing_calls,
             brier_score=round(brier_score, 3),
             avg_r_multiple=round(avg_r, 2),
-            compound_r=compound_r,
+            compound_r=round(compound_r, 2),
             dynamic_weight_multiplier=final_multiplier,
-            sector_affinity={s: 0.82 for s in prior.get("top_sectors", [])},
-            regime_affinity={"TRENDING": 0.78, "HIGH_VIX": 0.72},
-            last_updated=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
+            sector_affinity=sector_affinity,
+            regime_affinity=regime_affinity,
+            last_updated=max(row["timestamp"] for row in rows),
+            data_status=data_status,
         )
+
+    @staticmethod
+    def _context_affinity(rows: list[sqlite3.Row], field_name: str) -> dict[str, float]:
+        """Return empirical win rates only for contexts with adequate outcomes."""
+        grouped: dict[str, list[float]] = {}
+        for row in rows:
+            context = row[field_name]
+            if context:
+                grouped.setdefault(str(context), []).append(float(row["realized_r"]))
+        return {
+            context: round(sum(1 for result in outcomes if result > 0) / len(outcomes), 2)
+            for context, outcomes in grouped.items()
+            if len(outcomes) >= MINIMUM_RESOLVED_CALLS_FOR_CONTEXT
+        }
 
     def get_all_track_records(
         self,

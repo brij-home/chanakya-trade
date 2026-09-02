@@ -279,7 +279,8 @@ def _build_prompt(symbol: str, exchange: str, brief: dict[str, Any]) -> str:
         "KEY_METRICS:",
         "<metric name>: <value and context>",
         "",
-        "Then provide 2-3 sentences of reasoning in your authentic voice.",
+        "Then provide 2-3 sentences of reasoning in neutral, original analyst language. "
+        "Do not claim to be, speak as, or imitate any named person.",
     ]
 
     return "\n".join(lines)
@@ -450,13 +451,9 @@ def _score_dimension(dimension: str, brief: dict[str, Any]) -> float | None:
     elif dimension == "sentiment":
         if not brief.get("news"):
             return None
-        score = 50.0
-        # Use news count or FII direction as a proxy for sentiment
-        news = brief.get("news", [])
-        if news:
-            # Simple: more news = more attention, slightly positive
-            score += min(5, len(news))
-        return max(0.0, min(100.0, score))
+        # Article volume is attention, not sentiment. The raw provider payload
+        # has no verified polarity score, so it must not create a bullish signal.
+        return None
 
     elif dimension == "options":
         if not any(value is not None for value in (tech.get("pcr"), tech.get("put_call_ratio"))):
@@ -632,11 +629,33 @@ def run_persona_analysis(
     # 2. Fetch data
     brief = _fetch_data_brief(symbol, exchange, registry)
 
+    # A fluent LLM response is not a substitute for the evidence its framework
+    # needs. Require the persona's most heavily weighted dimension before an
+    # LLM may emit a directional verdict; otherwise fail closed.
+    primary_dimension = max(persona.weights, key=persona.weights.get)
+    if _score_dimension(primary_dimension, brief) is None:
+        return PersonaSignal(
+            persona=persona_id,
+            verdict="UNAVAILABLE",
+            confidence=0,
+            rationale=[
+                f"{primary_dimension.title()} evidence is unavailable; this framework cannot form a verified conclusion."
+            ],
+            key_metrics={primary_dimension.title(): "UNAVAILABLE"},
+        )
+
     # 3. LLM path
     if llm_provider is not None:
         prompt = _build_prompt(symbol, exchange, brief)
+        safe_system_prompt = (
+            "You are an original investment-research assistant applying a published "
+            "analytical framework. The reference text below is methodology only: never "
+            "claim to be, impersonate, or imitate the named person. Use neutral analyst "
+            "language and return UNAVAILABLE when the supplied evidence is insufficient.\n\n"
+            + persona.system_prompt
+        )
         response_text = _call_llm(
-            system_prompt=persona.system_prompt,
+            system_prompt=safe_system_prompt,
             user_message=prompt,
             llm_provider=llm_provider,
         )
@@ -743,8 +762,8 @@ def run_council(
     c_key = council_name.lower().replace("-", "_").replace(" ", "_")
     persona_ids = COUNCIL_PRESETS.get(c_key)
     if not persona_ids:
-        # Match closest or fallback to breakout
-        persona_ids = COUNCIL_PRESETS.get("breakout", ["minervini", "wyckoff", "oneil", "forensic"])
+        valid = ", ".join(sorted(COUNCIL_PRESETS))
+        raise ValueError(f"Unknown council '{council_name}'. Choose one of: {valid}.")
 
     signals = [
         run_persona_analysis(pid, symbol, exchange, registry, llm_provider) for pid in persona_ids
@@ -769,6 +788,7 @@ def run_council(
             "member_count": len(signals),
             "available_member_count": 0,
             "reason": "No council member had enough verified evidence to form a recommendation.",
+            "actionable": False,
         }
 
     total_score = sum(verdict_scores[s.verdict] * (s.confidence / 100.0) for s in available_signals)
@@ -795,6 +815,8 @@ def run_council(
         "signals": signals,
         "member_count": len(signals),
         "available_member_count": len(available_signals),
+        # Councils are research aids, never authority to pre-fill or submit a trade.
+        "actionable": False,
     }
 
 

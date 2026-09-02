@@ -29,7 +29,7 @@ const PERSONA_NAMES = {
   soros: 'George Soros',
 }
 
-export default function DebateArenaView({ onOpenOrderTicket }) {
+export default function DebateArenaView() {
   const { call } = useAPI()
   const sendDraft = useChatStore((s) => s.sendDraft)
   const [symbol, setSymbol] = useState('RELIANCE')
@@ -136,15 +136,16 @@ export default function DebateArenaView({ onOpenOrderTicket }) {
   }
 
   const score = selectedCouncil === 'debate'
-    ? (data?.conviction_score || 88)
-    : (councilData?.consensus_score || 78)
+    ? data?.conviction_score
+    : councilData?.consensus_score
+  const hasScore = score != null && Number.isFinite(Number(score))
   const bullCase = data?.bull_case || []
   const bearCase = data?.bear_case || []
   const consensus = data?.facilitator_consensus
   const ltp = data?.ltp || 0
 
   const councilSignals = councilData?.signals || []
-  const councilVerdict = councilData?.consensus_verdict || 'HOLD'
+  const councilVerdict = councilData?.consensus_verdict || 'UNAVAILABLE'
   const isCouncilBuy = councilVerdict.includes('BUY')
   const isCouncilSell = councilVerdict.includes('SELL')
 
@@ -408,7 +409,7 @@ export default function DebateArenaView({ onOpenOrderTicket }) {
       )}
 
       {/* Conviction Gauge Banner (Top Center) */}
-      <div className="flex flex-col items-center justify-center py-2">
+      {hasScore ? <div className="flex flex-col items-center justify-center py-2">
         <div className="relative w-48 h-28 flex flex-col items-center justify-end">
           <svg className="w-48 h-28 overflow-visible" viewBox="0 0 160 90">
             <path d="M 15 80 A 65 65 0 0 1 145 80" fill="none" stroke="var(--color-border)" strokeWidth="10" strokeLinecap="round" />
@@ -439,7 +440,9 @@ export default function DebateArenaView({ onOpenOrderTicket }) {
             </span>
           </div>
         </div>
-      </div>
+      </div> : <div className="mx-auto my-3 max-w-md rounded-xl border border-border/60 bg-panel px-4 py-3 text-center text-xs text-muted">
+        Evidence is unavailable or incomplete. No conviction score has been calculated.
+      </div>}
 
       {/* VIEW MODE 1: ADVERSARIAL BULL VS BEAR DEBATE */}
       {selectedCouncil === 'debate' && (
@@ -483,7 +486,7 @@ export default function DebateArenaView({ onOpenOrderTicket }) {
               <div>
                 <span className="text-[10px] text-muted uppercase font-bold block mb-1">FINAL TRADE VERDICT</span>
                 <span className="text-base font-black text-emerald-400 tracking-wide bg-emerald-500/10 px-3 py-1 rounded-xl border border-emerald-500/30 block">
-                  {consensus?.verdict || 'READY (BUY)'}
+                  {consensus?.verdict || 'UNAVAILABLE'}
                 </span>
               </div>
 
@@ -494,7 +497,7 @@ export default function DebateArenaView({ onOpenOrderTicket }) {
                   <span className="font-bold text-emerald-400">
                     {consensus?.entry != null
                       ? `₹${Number(consensus.entry).toLocaleString('en-IN', { minimumFractionDigits: 2 })}`
-                      : (ltp > 0 ? `₹${Number(ltp * 0.998).toLocaleString('en-IN', { minimumFractionDigits: 2 })}` : '—')}
+                      : '—'}
                   </span>
                 </div>
                 <div className="flex justify-between">
@@ -502,7 +505,7 @@ export default function DebateArenaView({ onOpenOrderTicket }) {
                   <span className="font-bold text-red">
                     {consensus?.stop_loss != null
                       ? `₹${Number(consensus.stop_loss).toLocaleString('en-IN', { minimumFractionDigits: 2 })}`
-                      : (ltp > 0 ? `₹${Number(ltp * 0.988).toLocaleString('en-IN', { minimumFractionDigits: 2 })}` : '—')}
+                      : '—'}
                   </span>
                 </div>
                 <div className="flex justify-between">
@@ -510,36 +513,15 @@ export default function DebateArenaView({ onOpenOrderTicket }) {
                   <span className="font-bold text-text">
                     {consensus?.target != null
                       ? `₹${Number(consensus.target).toLocaleString('en-IN', { minimumFractionDigits: 2 })}`
-                      : (ltp > 0 ? `₹${Number(ltp * 1.024).toLocaleString('en-IN', { minimumFractionDigits: 2 })}` : '—')}
+                      : '—'}
                   </span>
                 </div>
                 <div className="flex justify-between border-t border-border/50 pt-1 text-[11px]">
                   <span className="text-muted">R:R RATIO:</span>
-                  <span className="font-bold text-amber">{consensus?.risk_reward ? `${consensus.risk_reward} R` : '2.0 R'}</span>
+                  <span className="font-bold text-amber">{consensus?.risk_reward ? `${consensus.risk_reward} R` : '—'}</span>
                 </div>
               </div>
 
-              <button
-                onClick={() => {
-                  if (onOpenOrderTicket) {
-                    const isBear = consensus?.verdict_bias === 'BEARISH' || (consensus?.verdict && consensus.verdict.includes('SELL'))
-                    const entryVal = consensus?.entry != null ? Number(consensus.entry) : (ltp > 0 ? Number((ltp * (isBear ? 1.002 : 0.998)).toFixed(2)) : 0)
-                    const slVal = consensus?.stop_loss != null ? Number(consensus.stop_loss) : (ltp > 0 ? Number((isBear ? ltp * 1.012 : ltp * 0.988)).toFixed(2) : 0)
-                    const tgtVal = consensus?.target != null ? Number(consensus.target) : (ltp > 0 ? Number((isBear ? ltp * 0.976 : ltp * 1.024)).toFixed(2) : 0)
-                    onOpenOrderTicket({
-                      symbol,
-                      exchange: getSymbolExchange(symbol),
-                      action: isBear ? 'SELL' : 'BUY',
-                      price: entryVal,
-                      stopLoss: slVal,
-                      target: tgtVal,
-                    })
-                  }
-                }}
-                className="w-full py-2 px-3 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-black font-bold text-xs uppercase tracking-wide transition-all shadow-md cursor-pointer"
-              >
-                ⚡ Stage Ticket
-              </button>
             </div>
           </div>
 
@@ -593,20 +575,6 @@ export default function DebateArenaView({ onOpenOrderTicket }) {
               }`}>
                 {councilVerdict}
               </span>
-              <button
-                onClick={() => {
-                  if (onOpenOrderTicket) {
-                    onOpenOrderTicket({
-                      symbol,
-                      exchange: getSymbolExchange(symbol),
-                      action: isCouncilSell ? 'SELL' : 'BUY',
-                    })
-                  }
-                }}
-                className="px-4 py-1.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-black font-bold text-xs uppercase tracking-wide transition-all shadow-md cursor-pointer"
-              >
-                ⚡ Stage Order Ticket
-              </button>
             </div>
           </div>
 

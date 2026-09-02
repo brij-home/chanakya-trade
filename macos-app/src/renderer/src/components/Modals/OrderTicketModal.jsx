@@ -32,17 +32,17 @@ export default function OrderTicketModal({ isOpen, onClose, initialData = {}, ap
   const modalRef = useRef(null)
   const pendingPreviewRef = useRef(null)
 
-  const [symbol, setSymbol] = useState(initialData.symbol || 'RELIANCE')
+  const [symbol, setSymbol] = useState(initialData.symbol || '')
   const [exchange, setExchange] = useState(initialData.exchange || 'NSE')
   const [action, setAction] = useState(initialData.action || initialData.side || initialData.orderType || 'BUY')
   const [orderType, setOrderType] = useState('LIMIT')
   const [product, setProduct] = useState('MIS') // MIS (Intraday) | CNC (Delivery) | NRML (F&O)
-  const [price, setPrice] = useState(initialData.price || 2800)
-  const [stopLoss, setStopLoss] = useState(initialData.stopLoss || initialData.stop_loss || 2760)
-  const [target, setTarget] = useState(initialData.target || initialData.target_1 || 2890)
+  const [price, setPrice] = useState(initialData.price ?? '')
+  const [stopLoss, setStopLoss] = useState(initialData.stopLoss ?? initialData.stop_loss ?? '')
+  const [target, setTarget] = useState(initialData.target ?? initialData.target_1 ?? '')
   const [capital, setCapital] = useState(200000)
   const [riskPct, setRiskPct] = useState(1.0)
-  const [qty, setQty] = useState(initialData.qty || initialData.quantity || 50)
+  const [qty, setQty] = useState(initialData.qty ?? initialData.quantity ?? '')
   const [step, setStep] = useState(1) // 1: Edit/Stage, 2: Double Confirm
   const [confirmedRisk, setConfirmedRisk] = useState(false)
   const [isSubmitting, setIsSubmitting] = useState(false)
@@ -54,17 +54,17 @@ export default function OrderTicketModal({ isOpen, onClose, initialData = {}, ap
   // Sync state whenever modal opens or initialData changes
   useEffect(() => {
     if (isOpen) {
-      if (initialData.symbol) setSymbol(initialData.symbol)
-      if (initialData.exchange) setExchange(initialData.exchange)
+      setSymbol(initialData.symbol || '')
+      setExchange(initialData.exchange || 'NSE')
       const act = initialData.action || initialData.side || initialData.orderType
-      if (act) setAction(act)
-      if (initialData.price) setPrice(Number(initialData.price))
+      setAction(act || 'BUY')
+      setPrice(initialData.price ?? '')
       const sl = initialData.stopLoss ?? initialData.stop_loss
-      if (sl != null) setStopLoss(Number(sl))
+      setStopLoss(sl ?? '')
       const tgt = initialData.target ?? initialData.target_1 ?? initialData.target_2
-      if (tgt != null) setTarget(Number(tgt))
+      setTarget(tgt ?? '')
       const q = initialData.qty ?? initialData.quantity
-      if (q != null) setQty(Number(q))
+      setQty(q ?? '')
       setStep(1)
       setStatusMsg(null)
       setConfirmedRisk(false)
@@ -105,6 +105,13 @@ export default function OrderTicketModal({ isOpen, onClose, initialData = {}, ap
   const handleProceedToConfirm = async () => {
     setStatusMsg(null)
     setConfirmedRisk(false)
+    if (!symbol.trim() || !Number.isFinite(Number(price)) || Number(price) <= 0 || !Number.isInteger(Number(qty)) || Number(qty) <= 0) {
+      setStatusMsg({
+        type: 'error',
+        text: 'Enter a verified symbol, limit price, and whole quantity before requesting an order preview.',
+      })
+      return
+    }
     setIsValidatingRisk(true)
 
     const requestSignature = [symbol, action, qty, price, orderType, product].join('|')
