@@ -54,6 +54,9 @@ def get_ohlcv(
     from_date: Optional[datetime] = None,
     to_date: Optional[datetime] = None,
     days: int = 365,
+    *,
+    as_of: Optional[datetime] = None,
+    include_live_candle: bool = False,
 ) -> pd.DataFrame:
     """
     Fetch historical OHLCV data as a DataFrame.
@@ -65,6 +68,9 @@ def get_ohlcv(
         from_date: Start date (default: today - days)
         to_date:   End date (default: today)
         days:      Lookback in days if from_date not given (max 2000 for day)
+        as_of:     Explicit historical cutoff for a reproducible research run.
+        include_live_candle: Explicitly add/refresh today's incomplete candle.
+            This is disabled by default so backtests never blend live and EOD data.
 
     Returns:
         DataFrame with columns: date, open, high, low, close, volume
@@ -73,7 +79,9 @@ def get_ohlcv(
     # Normalize interval alias
     kite_interval = INTERVAL_MAP.get(interval, interval)
     clean_sym = symbol.upper().replace(".NS", "").replace("NSE:", "").strip()
-    cache_key = f"{clean_sym}_{exchange.upper()}_{kite_interval}_{days}"
+    effective_to = as_of or to_date
+    cutoff_key = effective_to.strftime("%Y%m%d%H%M%S") if effective_to else "latest"
+    cache_key = f"{clean_sym}_{exchange.upper()}_{kite_interval}_{days}_{cutoff_key}_{int(include_live_candle)}"
     now_ts = time.time()
 
     # Tier 1: Instant In-Memory DataFrame Cache (0.1ms latency)
@@ -84,7 +92,7 @@ def get_ohlcv(
                 if now_ts - stored_ts < _DF_TTL_SECONDS and not cached_df.empty:
                     return cached_df.copy()
 
-    to_date = to_date or datetime.now()
+    to_date = effective_to or datetime.now()
     from_date = from_date or (to_date - timedelta(days=days))
 
     # Tier 2: Fast SQLite analysis_cache for recent daily candles (15m TTL)
@@ -99,12 +107,35 @@ def get_ohlcv(
         except Exception:
             pass
 
-    # Tier 3: Data cascade: broker API → yfinance → disk cache.
+    provider_name = "cache"
+    snapshot_id: Optional[str] = None
+
+    # A requested as-of daily analysis must replay a stored snapshot if one is
+    # available.  It must not silently re-fetch changed vendor history.
+    canonical_id = None
+    if kite_interval == "day":
+        try:
+            from market.eod_store import load_eod_snapshot
+            from market.instruments import resolve_canonical_instrument
+
+            canonical_id = resolve_canonical_instrument(f"{exchange}:{clean_sym}").instrument_id
+            snapshot = load_eod_snapshot(
+                canonical_id,
+                as_of_date=to_date.date().isoformat() if as_of else None,
+            )
+            if snapshot and as_of:
+                raw = snapshot["rows"]
+                provider_name = snapshot["provider"]
+                snapshot_id = snapshot["snapshot_id"]
+        except Exception:
+            pass
+
+    # Tier 3: explicit data-provider API → yfinance → disk cache.
     if not raw:
         try:
-            from brokers.session import get_broker
+            from brokers.session import get_data_broker, get_data_broker_key
 
-            broker = get_broker()
+            broker = get_data_broker()
             # Only use broker for real data — skip if it's the mock broker
             if not getattr(broker, "_is_mock", False):
                 raw = broker.get_historical_data(
@@ -114,14 +145,17 @@ def get_ohlcv(
                     from_date=from_date,
                     to_date=to_date,
                 )
+                provider_name = get_data_broker_key() or broker.__class__.__name__.lower()
             else:
                 # Mock broker: use yfinance
                 raw = _yfinance_fallback(symbol, exchange, kite_interval, from_date, to_date)
+                provider_name = "yfinance"
         except Exception:
             pass
 
     if not raw:
         raw = _yfinance_fallback(symbol, exchange, kite_interval, from_date, to_date)
+        provider_name = "yfinance"
         # Cache successful daily fetches to disk for offline fallback
         if raw and kite_interval == "day":
             save_ohlcv_cache(f"ohlcv_{symbol}", raw)
@@ -129,6 +163,7 @@ def get_ohlcv(
     if not raw:
         # Tier 4: disk cache — last-resort when both broker and yfinance fail
         raw, _ = load_ohlcv_cache(f"ohlcv_{symbol}")
+        provider_name = "disk_cache"
 
     # Persist in SQLite cache for 15 minutes
     if raw and kite_interval == "day" and len(raw) >= 10:
@@ -136,6 +171,28 @@ def get_ohlcv(
             from engine.analysis_cache import cache_set
 
             cache_set(f"ohlcv_{cache_key}", raw, namespace="history", ttl_minutes=15)
+        except Exception:
+            pass
+
+        # Persist an immutable local EOD snapshot for later reproducible runs.
+        try:
+            from market.eod_store import save_eod_snapshot
+            from market.instruments import resolve_canonical_instrument
+
+            canonical_id = (
+                canonical_id
+                or resolve_canonical_instrument(f"{exchange}:{clean_sym}").instrument_id
+            )
+            snapshot_id = save_eod_snapshot(
+                canonical_instrument_id=canonical_id,
+                provider=provider_name,
+                provider_symbol=f"{exchange}:{clean_sym}",
+                as_of_date=to_date.date().isoformat(),
+                rows=raw,
+                data_quality="DELAYED"
+                if provider_name in {"yfinance", "disk_cache"}
+                else "VERIFIED",
+            )
         except Exception:
             pass
 
@@ -150,9 +207,17 @@ def get_ohlcv(
     df = df[~df.index.duplicated(keep="last")]
     df.sort_index(inplace=True)
 
-    # Overlay latest live real-time tick
-    if kite_interval == "day" and not df.empty:
+    # Live/incomplete candle enrichment is opt-in and is never cached as EOD.
+    if include_live_candle and kite_interval == "day" and not df.empty:
         df = inject_live_tick(df, symbol=symbol, exchange=exchange)
+
+    df.attrs["provenance"] = {
+        "data_source": "LIVE_ENRICHED" if include_live_candle else "HISTORICAL_EOD",
+        "provider": provider_name,
+        "as_of": to_date.isoformat(),
+        "snapshot_id": snapshot_id,
+        "reproducible": bool(snapshot_id) and not include_live_candle,
+    }
 
     # Save into Tier 1 In-Memory Cache (bounded to 500 entries)
     if kite_interval == "day" and not df.empty:

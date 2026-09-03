@@ -17,6 +17,7 @@ Supported brokers:
     Angel One — TOTP auto-login (free, no redirect needed)
     Upstox    — OAuth2 redirect (API v3, free)
     Fyers     — OAuth2 redirect (API v3, free, great options data)
+    Shoonya   — Finvasia/Noren TOTP auto-login (optional)
 
 Endpoints:
     GET  /                       → Login page (all brokers)
@@ -29,6 +30,7 @@ Endpoints:
     GET  /upstox/callback        → Handle auth_code, complete login
     GET  /fyers/login            → Redirect to Fyers auth URL
     GET  /fyers/callback         → Handle auth_code, complete login
+    GET  /shoonya/login          → Auto-login via TOTP (no redirect)
     GET  /demo                   → Demo / mock mode
     GET  /status                 → HTML: which brokers are authenticated
     GET  /api/status             → JSON: broker auth status
@@ -210,6 +212,11 @@ async def auth_middleware(request: _Request, call_next):
             "/api/mode",
             "/api/csrf-token",
         )
+        # A self-hosted install has no authenticated user until its first
+        # administrator completes setup. Keeping the onboarding flow public is
+        # necessary to make that first-run state recoverable; protected trading
+        # and analysis routes remain unavailable until an account exists.
+        or path.startswith("/api/onboarding/")
         # NOTE: /api/orders/*, /api/reconciliation, /api/portfolio, /api/risk/*, and /api/audit/*
         # are strictly NOT public and require authenticated sessions to protect customer capital, holdings, and logs.
         or path.startswith("/.well-known/")
@@ -218,6 +225,7 @@ async def auth_middleware(request: _Request, call_next):
         or path.startswith("/groww/")
         or path.startswith("/upstox/")
         or path.startswith("/angelone/")
+        or path.startswith("/shoonya/")
         or not (path.startswith("/api/") or path.startswith("/skills/"))
     ):
         return await call_next(request)
@@ -378,6 +386,19 @@ async def _auto_restore_brokers() -> None:
                     logging.info("[startup] Upstox session restored")
         except Exception as exc:
             logging.warning("[startup] Could not restore Upstox: %s", exc)
+
+    # Shoonya / Finvasia
+    if _has_shoonya():
+        try:
+            from brokers.shoonya import ShoonyaAPI, TOKEN_FILE as _ST
+
+            if _ST.exists():
+                b = ShoonyaAPI()
+                if b.is_authenticated():
+                    register_broker("shoonya", b)
+                    logging.info("[startup] Shoonya session restored")
+        except Exception as exc:
+            logging.warning("[startup] Could not restore Shoonya: %s", exc)
 
 
 # ── P3-A: Correlation ID Middleware ─────────────────────────────────────────
@@ -564,6 +585,10 @@ h2       { font-size: 1rem; color: #8b949e; margin-bottom: 1.5rem; text-align: c
 .btn-upstox:hover   { background: #6d28d9; transform: translateY(-1px); }
 .btn-fyers    { background: #c2410c; color: #fff; }
 .btn-fyers:hover    { background: #9a3412; transform: translateY(-1px); }
+.btn-shoonya  { background: #16a34a; color: #fff; }
+.btn-shoonya:hover  { background: #15803d; transform: translateY(-1px); }
+.btn-stoxkart { background: #0891b2; color: #fff; }
+.btn-stoxkart:hover { background: #0e7490; transform: translateY(-1px); }
 .btn-demo     { background: #21262d; color: #8b949e; border: 1px solid #30363d; }
 .btn-demo:hover     { background: #30363d; color: #e6edf3; }
 .btn-back     { background: #21262d; color: #8b949e; border: 1px solid #30363d; margin-top: 1.25rem; }
@@ -579,6 +604,7 @@ h2       { font-size: 1rem; color: #8b949e; margin-bottom: 1.5rem; text-align: c
 .badge-angel   { background: #3d1a00; color: #ff6b35; }
 .badge-upstox  { background: #2e1065; color: #c4b5fd; }
 .badge-fyers   { background: #431407; color: #fed7aa; }
+.badge-shoonya { background: #14532d; color: #86efac; }
 .badge-mock    { background: #2d2016; color: #d29922; }
 .success-icon  { font-size: 3rem; text-align: center; margin-bottom: 1rem; }
 .account-box {
@@ -819,6 +845,32 @@ def _stoxkart_auth() -> bool:
     return _cached_auth("stoxkart", _check)
 
 
+# Shoonya / Finvasia
+def _has_shoonya() -> bool:
+    return bool(
+        _env("SHOONYA_USER_ID")
+        and _env("SHOONYA_PASSWORD")
+        and _env("SHOONYA_API_KEY")
+        and _env("SHOONYA_VENDOR_CODE")
+        and _env("SHOONYA_TOTP_SECRET")
+    )
+
+
+def _shoonya_auth() -> bool:
+    def _check():
+        try:
+            if not _has_shoonya():
+                return False
+            from brokers.shoonya import ShoonyaAPI
+
+            b = ShoonyaAPI()
+            return b.is_authenticated()
+        except Exception:
+            return False
+
+    return _cached_auth("shoonya", _check)
+
+
 # ── Shared success card ───────────────────────────────────────
 
 
@@ -873,6 +925,8 @@ async def index():
             _has_angelone(),
             _has_upstox(),
             _has_fyers(),
+            _has_stoxkart(),
+            _has_shoonya(),
         ]
     )
 
@@ -919,6 +973,26 @@ async def index():
             "/fyers/login",
             _has_fyers(),
             _fyers_auth(),
+        )
+    }
+      {
+        _broker_btn(
+            "Login with Shoonya (Free)",
+            "🟢",
+            "btn-shoonya",
+            "/shoonya/login",
+            _has_shoonya(),
+            _shoonya_auth(),
+        )
+    }
+      {
+        _broker_btn(
+            "Login with Stoxkart (Free)",
+            "🔷",
+            "btn-stoxkart",
+            "/stoxkart/login",
+            _has_stoxkart(),
+            _stoxkart_auth(),
         )
     }
       <div class="section-header">Premium Brokers</div>
@@ -1299,6 +1373,54 @@ async def stoxkart_login():
     )
 
 
+# ── Shoonya / Finvasia (Noren — TOTP) ────────────────────────
+
+
+@app.get("/shoonya/login", response_class=HTMLResponse)
+async def shoonya_login():
+    if not _has_shoonya():
+        body = """<div class="card">
+          <div class="info-box">
+            <strong>Shoonya (Finvasia) API</strong> — Noren REST/WebSocket integration.<br><br>
+            Set these values in <code>.env</code> or run <code>credentials setup</code>:<br>
+            <code>SHOONYA_USER_ID</code>, <code>SHOONYA_PASSWORD</code>,
+            <code>SHOONYA_API_KEY</code>, <code>SHOONYA_VENDOR_CODE</code>, and
+            <code>SHOONYA_TOTP_SECRET</code>.<br><br>
+            The TOTP secret must be the base32 seed, not a one-time code.
+          </div>
+          <a href="/" class="btn btn-back">← Back</a>
+        </div>"""
+        return HTMLResponse(_page("Shoonya Setup", body), status_code=400)
+    try:
+        from brokers.shoonya import ShoonyaAPI
+        from brokers.session import register_broker
+
+        b = ShoonyaAPI()
+        profile = b.complete_login()
+        funds = b.get_funds()
+        register_broker("shoonya", b)
+        _invalidate_auth_cache("shoonya")
+    except Exception as e:
+        body = f"""<div class="card"><div class="err-box">
+          ❌ Shoonya login failed: {e}<br><br>
+          Check SHOONYA_USER_ID, SHOONYA_PASSWORD, SHOONYA_API_KEY,
+          SHOONYA_VENDOR_CODE, and SHOONYA_TOTP_SECRET.
+        </div><a href="/" class="btn btn-back">← Try again</a></div>"""
+        return HTMLResponse(_page("Error", body), status_code=500)
+    return HTMLResponse(
+        _page(
+            "Connected",
+            _success_card(
+                "Shoonya",
+                "btn-shoonya",
+                profile,
+                funds,
+                "Finvasia Noren — TOTP login, live data, history, options, and execution.",
+            ),
+        )
+    )
+
+
 # ── Demo mode ─────────────────────────────────────────────────
 
 
@@ -1370,6 +1492,15 @@ async def status_page():
             _has_stoxkart,
             _stoxkart_auth,
         ),
+        (
+            "shoonya",
+            "Shoonya",
+            "badge-shoonya",
+            "/shoonya/login",
+            "#86efac",
+            _has_shoonya,
+            _shoonya_auth,
+        ),
     ]
     rows = []
     for bkey, bname, badge_cls, login_path, color, has_fn, auth_fn in _BROKERS:
@@ -1436,6 +1567,11 @@ async def api_status(request: Request):
             "authenticated": _stoxkart_auth(),
             "role": get_broker_role("stoxkart"),
         },
+        "shoonya": {
+            "configured": _has_shoonya(),
+            "authenticated": _shoonya_auth(),
+            "role": get_broker_role("shoonya"),
+        },
     }
 
 
@@ -1461,7 +1597,7 @@ async def api_cache_clear(request: Request):
 
 # ── Onboarding API ───────────────────────────────────────────
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 @app.get("/api/onboarding/status")
@@ -1830,6 +1966,8 @@ async def set_broker_role_endpoint(req: BrokerRoleRequest, request: Request):
         "angel_one": "angelone",
         "upstox": "upstox",
         "fyers": "fyers",
+        "stoxkart": "stoxkart",
+        "shoonya": "shoonya",
     }
     session_key = _API_TO_SESSION.get(req.broker, req.broker)
 
@@ -1855,6 +1993,8 @@ _BROKER_SESSION_FILES = {
     "angel_one": app_data_path("angelone.json"),
     "upstox": app_data_path("upstox.json"),
     "fyers": app_data_path("fyers.json"),
+    "stoxkart": app_data_path("stoxkart.json"),
+    "shoonya": app_data_path("shoonya.json"),
 }
 
 
@@ -1879,6 +2019,8 @@ async def broker_disconnect(broker_key: str, request: Request):
         "angel_one": "angelone",
         "upstox": "upstox",
         "fyers": "fyers",
+        "stoxkart": "stoxkart",
+        "shoonya": "shoonya",
     }
     session_key = _SESSION_KEY_MAP.get(broker_key, broker_key)
     unregister_broker(session_key)
@@ -1927,7 +2069,9 @@ async def api_portfolio(request: Request):
                         "avg_price": h.avg_price,
                         "ltp": h.last_price,
                         "pnl": h.pnl,
-                        "current_value": h.current_value,
+                        # Holding has no provider-specific current_value field;
+                        # derive it from the normalized quantity and LTP.
+                        "current_value": round(h.last_price * h.quantity, 2),
                     }
                 )
             for p in b.get_positions():
@@ -1977,6 +2121,11 @@ async def api_portfolio(request: Request):
         from brokers.fyers import FyersAPI
 
         _try("fyers", lambda: FyersAPI(_env("FYERS_APP_ID"), _env("FYERS_SECRET_KEY")))
+
+    if _has_shoonya():
+        from brokers.shoonya import ShoonyaAPI
+
+        _try("shoonya", ShoonyaAPI)
 
     # Portfolio data is decision-critical.  Do not replace a disconnected
     # broker with a realistic-looking mock account in a production pathway.
@@ -2176,7 +2325,7 @@ async def get_preflight_diagnostics():
     return JSONResponse(report.to_dict())
 
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, field_validator
 from typing import Optional
 
 
@@ -2428,25 +2577,12 @@ async def api_reconciliation():
 
     correlation_id = new_correlation_id("reconciliation")
 
-    # 1. Fetch internal ledger positions
+    # 1. Fetch the selected execution-broker snapshot — never use the primary
+    # broker implicitly when data and execution roles differ.
     try:
-        from engine.portfolio import get_portfolio_summary
+        from brokers.session import get_execution_broker
 
-        summary = get_portfolio_summary()
-        int_positions = [
-            {"symbol": p.symbol, "qty": p.qty, "avg_price": p.avg_price, "pnl": p.pnl}
-            for p in summary.positions
-        ]
-        cash_val = summary.funds.available_cash if hasattr(summary.funds, "available_cash") else 0.0
-    except Exception:
-        int_positions = []
-        cash_val = 0.0
-
-    # 2. Fetch REAL broker snapshot — never use internal positions as broker positions
-    try:
-        from brokers.session import get_broker
-
-        live_broker = get_broker()
+        live_broker = get_execution_broker()
         if live_broker is None:
             raise RuntimeError("No authenticated broker session.")
 
@@ -2498,19 +2634,52 @@ async def api_reconciliation():
                 ),
                 "broker_positions": None,
                 "broker_cash": None,
-                "internal_positions": int_positions,
-                "internal_cash": cash_val,
+                "internal_positions": None,
+                "internal_cash": None,
                 "broker_account_id": None,
                 "broker_snapshot_at": None,
                 "correlation_id": correlation_id,
             }
         )
 
-    # 3. Run reconciliation against the real broker snapshot
+    # 2. Build the independent local ledger.  A baseline is deliberately
+    # explicit; copying the just-fetched broker balance would self-compare.
+    try:
+        from engine.order_lifecycle import get_internal_ledger_snapshot, sync_execution_orders
+
+        # Refresh known lifecycle states before comparing positions.  Failure is
+        # visible below as a degraded reconciliation, never silently ignored.
+        sync_execution_orders()
+        internal = get_internal_ledger_snapshot(broker_account_id)
+    except Exception as ledger_exc:
+        internal = None
+        ledger_reason = str(ledger_exc)
+    else:
+        ledger_reason = ""
+
+    if internal is None:
+        return JSONResponse(
+            {
+                "status": "UNAVAILABLE",
+                "reason": (
+                    "Reconciliation requires an explicit local opening-cash baseline and persisted "
+                    f"execution ledger for account {broker_account_id}. {ledger_reason}"
+                ).strip(),
+                "broker_positions": broker_positions,
+                "broker_cash": broker_cash,
+                "internal_positions": None,
+                "internal_cash": None,
+                "broker_account_id": broker_account_id,
+                "broker_snapshot_at": snapshot_at,
+                "correlation_id": correlation_id,
+            }
+        )
+
+    # 3. Run reconciliation against independent local ledger + real broker snapshot.
     report = reconcile_ledger(
-        internal_positions=int_positions,
+        internal_positions=internal["positions"],
         broker_positions=broker_positions,
-        internal_cash=cash_val,
+        internal_cash=float(internal["cash"]),
         broker_cash=broker_cash,
         broker_name=broker_account_id,
     )
@@ -2519,6 +2688,51 @@ async def api_reconciliation():
     result["broker_snapshot_at"] = snapshot_at
     result["correlation_id"] = correlation_id
     return JSONResponse(result)
+
+
+class ReconciliationBaselineRequest(BaseModel):
+    """User-declared opening cash for the immutable local execution ledger."""
+
+    opening_cash: float = Field(..., ge=0)
+
+
+@app.post("/api/reconciliation/baseline")
+async def api_reconciliation_baseline(req: ReconciliationBaselineRequest):
+    """Establish or deliberately reset the local reconciliation baseline.
+
+    The amount is entered by the account owner from a known starting point; it
+    is never copied from the current broker snapshot.
+    """
+    from brokers.session import get_execution_broker
+    from engine.order_lifecycle import set_ledger_cash_baseline
+
+    broker = get_execution_broker()
+    account_id = getattr(broker, "account_id", None) or getattr(broker, "client_id", None)
+    if not account_id:
+        raise _HTTPException(
+            status_code=503, detail="An authenticated execution broker is required."
+        )
+    set_ledger_cash_baseline(str(account_id), req.opening_cash, actor="USER_API")
+    return {
+        "status": "ok",
+        "account_id": str(account_id),
+        "opening_cash": req.opening_cash,
+        "message": "Independent ledger baseline saved. Run reconciliation to compare it with the broker.",
+    }
+
+
+@app.get("/api/pilot/status")
+async def api_pilot_status():
+    """Return the active pilot guardrails for an honest, visible UI banner."""
+    from brokers.session import get_data_broker_key, get_execution_broker_key
+    from engine.pilot_safety import get_pilot_safety_profile
+
+    return {
+        "status": "ok",
+        "profile": get_pilot_safety_profile().to_dict(),
+        "data_provider": get_data_broker_key() or None,
+        "execution_provider": get_execution_broker_key() or None,
+    }
 
 
 @app.get("/api/audit/logs")

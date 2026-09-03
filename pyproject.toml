@@ -37,7 +37,6 @@ dependencies = [
     "pydantic>=2.10.0",
     "openai>=1.40.0",
     "google-genai>=1.0.0",
-    "google-cloud-aiplatform>=1.60.0",
     # ── Terminal UI ───────────────────────────────────────────────────
     "rich>=14.0.0",
     "textual>=0.80.0",
@@ -78,6 +77,11 @@ dependencies = [
 
 [project.optional-dependencies]
 vollib = ["py_vollib>=1.0.1"]
+shoonya = ["websocket-client>=1.8.0"]
+# Vertex AI is only needed for a Google Cloud / Workspace deployment. The
+# standard Gemini API uses google-genai above, so keeping this opt-in makes the
+# personal-pilot bootstrap materially faster and lighter.
+vertex = ["google-cloud-aiplatform>=1.60.0"]
 dev = [
     "pytest>=7.0.0",
     "pytest-mock>=3.10.0",
@@ -90,6 +94,7 @@ dev = [
 # Zerodha Kite:  pip install kiteconnect>=5.2.1
 # Fyers:         pip install fyers-apiv3>=3.1.16
 # Angel One SmartAPI:  pip install smartapi-python logzero
+# Shoonya streaming:      pip install -e '.[shoonya]'
 # Note: smartapi-python is not on PyPI's standard index; install with:
 #   pip install smartapi-python
 # The brokers/angelone.py gracefully imports it at call-time.

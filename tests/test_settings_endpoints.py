@@ -9,7 +9,9 @@ import pytest
 
 @pytest.fixture(autouse=True)
 def patch_env(monkeypatch):
-    monkeypatch.setenv("DEPLOY_MODE", "self-hosted")
+    # Settings serialization is tested independently of the self-hosted auth
+    # boundary; auth has dedicated coverage in test_web_auth.py.
+    monkeypatch.setenv("DEPLOY_MODE", "test")
 
 
 @pytest.fixture

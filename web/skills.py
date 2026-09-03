@@ -1860,44 +1860,37 @@ class ReconcileRequest(BaseModel):
 @router.post("/reconcile", operation_id="skill_reconcile_post")
 @router.get("/reconcile", operation_id="skill_reconcile_get")
 async def skill_reconcile(req: Optional[ReconcileRequest] = None):
-    """Reconcile internal position ledger against broker statement snapshot."""
+    """Reconcile two explicitly supplied, independently sourced snapshots.
+
+    This skill is intentionally not a convenience self-comparison.  The normal
+    application flow is ``GET /api/reconciliation``, which uses the persisted
+    order ledger and selected execution broker.
+    """
     try:
         from engine.provenance import attach_provenance
         from engine.reconciliation import reconcile_ledger
 
-        if req and req.internal_positions is not None:
-            int_positions = req.internal_positions
-            brk_positions = (
-                req.broker_positions if req.broker_positions is not None else int_positions
-            )
-            cash_val = req.internal_cash if req.internal_cash is not None else 1000000.0
-            brk_cash = req.broker_cash if req.broker_cash is not None else cash_val
-            broker_name = req.broker_name or "PAPER_SIMULATOR"
-        else:
-            try:
-                from engine.portfolio import get_portfolio_summary
+        required = (
+            req is not None
+            and req.internal_positions is not None
+            and req.broker_positions is not None
+            and req.internal_cash is not None
+            and req.broker_cash is not None
+        )
+        if not required:
+            return {
+                "status": "UNAVAILABLE",
+                "reason": (
+                    "Provide independent internal_positions, broker_positions, internal_cash, and broker_cash. "
+                    "The reconciliation skill never duplicates one input as the other."
+                ),
+            }
 
-                summary = get_portfolio_summary()
-                int_positions = [
-                    {"symbol": p.symbol, "qty": p.qty, "avg_price": p.avg_price, "pnl": p.pnl}
-                    for p in summary.positions
-                ]
-                cash_val = (
-                    summary.funds.available_cash
-                    if hasattr(summary.funds, "available_cash")
-                    else 1000000.0
-                )
-                brk_cash = cash_val
-                brk_positions = int_positions
-                broker_name = (
-                    summary.positions[0].broker if summary.positions else "PAPER_SIMULATOR"
-                )
-            except Exception:
-                int_positions = []
-                brk_positions = []
-                cash_val = 1000000.0
-                brk_cash = 1000000.0
-                broker_name = "PAPER_SIMULATOR"
+        int_positions = req.internal_positions
+        brk_positions = req.broker_positions
+        cash_val = req.internal_cash
+        brk_cash = req.broker_cash
+        broker_name = req.broker_name or "EXTERNAL_BROKER_SNAPSHOT"
 
         report = reconcile_ledger(
             internal_positions=int_positions,

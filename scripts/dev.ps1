@@ -26,18 +26,11 @@ Write-Host "   Local-First Greenfield Bootstrap (Windows Environment)" -Foregrou
 Write-Host "==================================================================" -ForegroundColor Cyan
 Write-Host ""
 
-# 1. Resolve Python Executable
-$PythonExe = $null
-if (Test-Path "$RootDir\.venv\Scripts\python.exe") {
-    $PythonExe = "$RootDir\.venv\Scripts\python.exe"
-} elseif (Get-Command python -ErrorAction SilentlyContinue) {
-    $PythonExe = (Get-Command python).Source
-} elseif (Get-Command py -ErrorAction SilentlyContinue) {
-    $PythonExe = "py"
-} else {
-    Write-Error "Python 3.11+ is required but was not found in PATH or .venv."
-    exit 1
-}
+# 1. Repair/create the environment before resolving its interpreter. A venv
+# can exist while still being unusable because its source Python was removed.
+& (Join-Path $ScriptDir "bootstrap.ps1")
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+$PythonExe = Join-Path $RootDir ".venv\Scripts\python.exe"
 
 Write-Host "[+] Python Executable: $PythonExe" -ForegroundColor Green
 

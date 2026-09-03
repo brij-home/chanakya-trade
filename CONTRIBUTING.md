@@ -7,18 +7,24 @@ Thanks for your interest in contributing! This document explains how to get star
 1. Fork the repo
 2. Clone your fork: `git clone https://github.com/<your-username>/chanakya-trade.git`
 3. Create a feature branch: `git checkout -b feature/my-feature`
-4. Install in development mode: `pip install -e .`
+4. Bootstrap the self-healing development environment: `bash scripts/bootstrap.sh` (or `./scripts/bootstrap.ps1` on Windows)
 
 ## Development Setup
 
 **Requires Python 3.11+.** CI tests against 3.11, 3.12, and 3.13.
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -e .
-pip install pytest pytest-mock ruff
+# macOS / Linux
+bash scripts/bootstrap.sh
+
+# Windows PowerShell
+.\scripts\bootstrap.ps1
 ```
+
+The bootstrap checks that `.venv` can actually start. If its original Python
+installation was removed, it moves the stale environment to a recoverable
+`.venv.broken-<timestamp>` directory, creates a fresh one, and installs
+`.[dev]`. Set `CHANAKYA_PYTHON` when Python is installed outside PATH.
 
 Test without a broker account:
 
@@ -29,14 +35,22 @@ trade --no-broker
 ## Running Tests
 
 ```bash
-pytest
+# Windows PowerShell (also works when .venv is stale or missing)
+.\scripts\test.ps1
+
+# macOS / Linux
+bash scripts/test.sh
 ```
+
+The wrappers default to unit/fast tests (`not network and not slow`) and pass
+additional arguments through to pytest. Use `--all`, `--network`, or `--slow`
+when those tiers are explicitly needed.
 
 By default, tests that require network access (yfinance, NSE API) are **excluded**. To run the full suite including network tests:
 
 ```bash
-pytest -m ""           # all tests (needs network)
-pytest -m network      # only network tests
+bash scripts/test.sh --all            # all tests (needs network)
+bash scripts/test.sh --network        # only network tests
 ```
 
 ## Code Style

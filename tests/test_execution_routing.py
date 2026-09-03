@@ -192,8 +192,8 @@ class TestAutoRoleAssignment:
         assert get_data_broker() is mock
         assert get_execution_broker() is mock
 
-    def test_connect_moves_exec_pointer_only(self, monkeypatch):
-        """connect() moves _exec_key; _data_key stays on the login broker."""
+    def test_connect_does_not_change_explicit_roles(self, monkeypatch):
+        """A newly connected broker remains unrouted until the user assigns a role."""
         from brokers.session import get_data_broker, get_execution_broker
 
         fyers_mock = MockBrokerAPI()
@@ -209,8 +209,8 @@ class TestAutoRoleAssignment:
         monkeypatch.setattr(session_mod, "_print_welcome", lambda *a, **kw: None)
 
         session_mod.connect_broker("1")
-        assert get_data_broker() is fyers_mock  # data unchanged
-        assert get_execution_broker() is zerodha_mock  # exec moved
+        assert get_data_broker() is fyers_mock
+        assert get_execution_broker() is fyers_mock
 
     def test_register_broker_fills_empty_slots(self):
         from brokers.session import register_broker, get_data_broker, get_execution_broker
@@ -221,8 +221,8 @@ class TestAutoRoleAssignment:
         assert get_data_broker() is mock
         assert get_execution_broker() is mock
 
-    def test_dual_broker_routing_after_login_and_connect(self, monkeypatch):
-        """After fyers login + zerodha connect, routing resolves correctly."""
+    def test_dual_broker_routing_requires_explicit_assignment(self, monkeypatch):
+        """Connecting a second broker cannot silently redirect live execution."""
         from brokers.session import get_data_broker, get_execution_broker
 
         fyers_mock = MockBrokerAPI()
@@ -239,6 +239,9 @@ class TestAutoRoleAssignment:
         session_mod.connect_broker("1")
 
         assert get_data_broker() is fyers_mock
+        assert get_execution_broker() is fyers_mock
+
+        session_mod.set_exec_broker("zerodha")
         assert get_execution_broker() is zerodha_mock
 
 

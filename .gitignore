@@ -39,6 +39,7 @@ dist/
 
 # ── Virtual environments ──────────────────────────────────────
 .venv/
+.venv.broken-*/
 venv/
 env/
 ENV/

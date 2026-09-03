@@ -80,6 +80,7 @@ export default function App() {
   const setAppMode = useChatStore((s) => s.setAppMode)
   const setModeLoading = useChatStore((s) => s.setModeLoading)
   const { theme, toggle: toggleTheme } = useTheme()
+  const [pilotSafety, setPilotSafety] = useState(null)
 
   // Setup phase state machine
   const [setupPhase, setSetupPhase] = useState('initializing')
@@ -212,6 +213,19 @@ export default function App() {
     fetchMode()
   }, [port]) // eslint-disable-line
 
+  // ── Pilot guardrail visibility ────────────────────────────────────────────
+  useEffect(() => {
+    if (!port && port !== 0) return
+    const fetchPilotSafety = () =>
+      fetch(`${getBaseUrl(port)}/api/pilot/status`)
+        .then((res) => (res.ok ? res.json() : null))
+        .then(setPilotSafety)
+        .catch(() => setPilotSafety(null))
+    fetchPilotSafety()
+    const timer = setInterval(fetchPilotSafety, 15000)
+    return () => clearInterval(timer)
+  }, [port])
+
   // ── Global keybindings ───────────────────────────────────────────────────
   useEffect(() => {
     function onKeyDown(e) {
@@ -273,7 +287,7 @@ export default function App() {
     <div className="flex flex-col h-full" style={{ background: 'var(--color-surface)' }}>
 
       {/* ── P0-A: Persistent Mode Banner ───────────────────────────── */}
-      <ModeBanner mode={appMode} loading={modeLoading} />
+      <ModeBanner mode={appMode} loading={modeLoading} pilotSafety={pilotSafety?.profile} />
 
       {/* ── Tier 1: Top Navigation Bar ──────────────────────────────────── */}
       <div

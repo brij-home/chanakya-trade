@@ -148,7 +148,7 @@ class TestQuickScannerScan:
 class TestQuickScanEndpoint:
     @pytest.fixture(autouse=True)
     def patch_env(self, monkeypatch):
-        monkeypatch.setenv("DEPLOY_MODE", "self-hosted")
+        monkeypatch.setenv("DEPLOY_MODE", "test")
 
     def test_quick_analyze_returns_ok(self, mocker):
         mocker.patch("config.credentials.load_all", return_value={})

@@ -81,6 +81,9 @@ _BROKER_NAMES = {
     "fyers": "fyers",
     "6": "stoxkart",
     "stoxkart": "stoxkart",
+    "7": "shoonya",
+    "shoonya": "shoonya",
+    "finvasia": "shoonya",
 }
 
 _BROKER_LABELS = {
@@ -91,10 +94,11 @@ _BROKER_LABELS = {
     "upstox": "[magenta]Upstox[/magenta]",
     "fyers": "[blue]Fyers[/blue]",
     "stoxkart": "[bold cyan]Stoxkart (SMC)[/bold cyan]",
+    "shoonya": "[bold green]Shoonya (Finvasia)[/bold green]",
 }
 
 # Brokers that use TOTP auto-login (no browser redirect)
-_TOTP_BROKERS = {"angelone", "stoxkart"}
+_TOTP_BROKERS = {"angelone", "stoxkart", "shoonya"}
 
 # Broker menu display items (number, label, description)
 _BROKER_MENU = [
@@ -105,6 +109,7 @@ _BROKER_MENU = [
     ("4", "Upstox", "API v3 — redirect login"),
     ("5", "Fyers", "API v3 — redirect login"),
     ("6", "Stoxkart", "SMC API — free, live data & execution"),
+    ("7", "Shoonya", "Finvasia Noren API — TOTP, live data & execution"),
 ]
 
 
@@ -229,6 +234,13 @@ def get_data_broker() -> BrokerAPI:
     return get_broker()
 
 
+def get_data_broker_key() -> str:
+    """Return the selected data-provider key without exposing mutable state."""
+    if _data_key and _data_key in _brokers:
+        return _data_key
+    return _primary_key
+
+
 def get_execution_broker() -> BrokerAPI:
     """Return the current execution broker. Falls back to primary if unset."""
     if _exec_key and _exec_key in _brokers:
@@ -236,20 +248,20 @@ def get_execution_broker() -> BrokerAPI:
     return get_broker()
 
 
+def get_execution_broker_key() -> str:
+    """Return the selected execution-provider key without exposing mutable state."""
+    if _exec_key and _exec_key in _brokers:
+        return _exec_key
+    return _primary_key
+
+
 def auto_assign_roles() -> bool:
-    """Auto-assign Fyers as data broker and Zerodha as execution broker.
+    """Deprecated compatibility hook; roles are always an explicit user choice.
 
-    Called automatically after connect_broker() when both are present.
-
-    Returns:
-        True if auto-assignment was performed (both brokers present), False otherwise.
+    A newly connected broker must never silently become the execution route.
+    Keeping this no-op avoids surprising existing callers while removing the
+    previous hard-coded Fyers/Zerodha policy.
     """
-    global _data_key, _exec_key
-    if "fyers" in _brokers and "zerodha" in _brokers:
-        _data_key = "fyers"
-        _exec_key = "zerodha"
-        console.print("[cyan]Auto-assigned:[/cyan] Fyers → DATA, Zerodha → EXECUTION")
-        return True
     return False
 
 
@@ -318,6 +330,13 @@ def set_data_broker(key: str) -> None:
         console.print(f"[red]Could not connect {key.title()}.[/red]")
         return
     _data_key = key
+    if key == "shoonya":
+        try:
+            from market.streaming import start_shoonya_stream
+
+            start_shoonya_stream(_brokers[key])
+        except Exception as exc:
+            console.print(f"[yellow]Shoonya stream is not active yet: {exc}[/yellow]")
     console.print(f"[green]✓ Data broker → {key.title()}[/green]")
 
 
@@ -429,6 +448,20 @@ def _make_broker(choice: str) -> tuple[str, BrokerAPI]:
             totp_secret=totp_secret,
         )
 
+    elif key == "shoonya":
+        from .shoonya import ShoonyaAPI
+
+        return key, ShoonyaAPI(
+            user_id=get_credential("SHOONYA_USER_ID", "Shoonya User ID", secret=False),
+            password=get_credential("SHOONYA_PASSWORD", "Shoonya Password", secret=True),
+            api_key=get_credential("SHOONYA_API_KEY", "Shoonya API Key", secret=True),
+            vendor_code=get_credential("SHOONYA_VENDOR_CODE", "Shoonya Vendor Code", secret=False),
+            totp_secret=get_credential(
+                "SHOONYA_TOTP_SECRET", "Shoonya TOTP Secret (Base32)", secret=True
+            ),
+            imei=os.environ.get("SHOONYA_IMEI", "chanakya-trade"),
+        )
+
     else:  # fyers
         from .fyers import FyersAPI
 
@@ -471,6 +504,7 @@ def _poll_sidecar_auth(broker_key: str, port: int, timeout: int = 180) -> dict[s
         "angelone": "angel_one",
         "upstox": "upstox",
         "stoxkart": "stoxkart",
+        "shoonya": "shoonya",
     }
     status_key = _STATUS_KEYS.get(broker_key, broker_key)
     deadline = time.time() + timeout
@@ -595,6 +629,13 @@ def _recreate_broker_from_token(key: str):
             if TOKEN_FILE.exists():
                 b = StoxkartAPI()
                 if b.is_authenticated:
+                    return b
+        elif key == "shoonya":
+            from brokers.shoonya import ShoonyaAPI, TOKEN_FILE
+
+            if TOKEN_FILE.exists():
+                b = ShoonyaAPI()
+                if b.is_authenticated():
                     return b
     except Exception:
         pass
@@ -760,7 +801,8 @@ def login(choice: Optional[str] = None) -> BrokerAPI:
 
     Args:
         choice: "0"/"demo", "1"/"zerodha", "2"/"groww", "3"/"angelone",
-                "4"/"upstox", "5"/"fyers". If None, the user is prompted.
+                "4"/"upstox", "5"/"fyers", "6"/"stoxkart", "7"/"shoonya".
+                If None, the user is prompted.
 
     Returns:
         Authenticated BrokerAPI instance.
@@ -813,6 +855,14 @@ def login(choice: Optional[str] = None) -> BrokerAPI:
         import threading
 
         threading.Thread(target=_start_websocket, args=(broker,), daemon=True).start()
+    elif key == "shoonya" and _data_key == "shoonya":
+        try:
+            from market.streaming import start_shoonya_stream
+
+            start_shoonya_stream(broker)
+        except Exception:
+            # REST remains available and the UI will surface stream degradation.
+            pass
 
     if len(_brokers) > 1:
         console.print(
@@ -830,7 +880,8 @@ def connect_broker(choice: Optional[str] = None) -> BrokerAPI:
     The primary broker (used for market data) does not change.
 
     Args:
-        choice: "1"/"zerodha" or "2"/"groww". Prompted if None.
+        choice: Any supported broker name/number (for example "7"/"shoonya").
+                Prompted if None.
 
     Returns:
         The newly connected BrokerAPI instance.
@@ -867,11 +918,13 @@ def connect_broker(choice: Optional[str] = None) -> BrokerAPI:
             _do_auth(key, broker)
 
     _brokers[key] = broker
-    _exec_key = key
+    # Do not silently reroute orders to a newly connected account.  A user must
+    # call set_broker_role()/set_exec_broker() and see the corresponding UI state.
     if not _data_key:
         _data_key = key
-    auto_assign_roles()
-    _print_welcome(broker, role="execution")
+    if not _exec_key:
+        _exec_key = key
+    _print_welcome(broker, role="connected")
 
     console.print(
         f"\n[green]✓  {len(_brokers)} broker(s) now active.[/green]  "

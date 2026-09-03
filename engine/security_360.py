@@ -170,8 +170,18 @@ def build_security_360_dossier(
             _get_quote = get_quote
             if _get_quote is None:
                 raise ImportError("market.quotes.get_quote not available")
-            q = _get_quote(canon.symbol)
-            fetched = float(q.get("price", 0.0)) if isinstance(q, dict) else 0.0
+            q = _get_quote(f"{canon.exchange}:{canon.symbol}")
+            # market.quotes returns {instrument: Quote}; retain compatibility
+            # with tests/legacy providers that return {"price": number}.
+            if isinstance(q, dict):
+                quote_obj = q.get(f"{canon.exchange}:{canon.symbol}") or q.get(canon.symbol)
+                fetched = (
+                    float(getattr(quote_obj, "last_price", 0.0) or 0.0)
+                    if quote_obj is not None
+                    else float(q.get("price", 0.0) or 0.0)
+                )
+            else:
+                fetched = float(getattr(q, "last_price", 0.0) or 0.0)
             if fetched <= 0:
                 raise ValueError(f"Quote returned non-positive price: {fetched}")
             price = fetched
