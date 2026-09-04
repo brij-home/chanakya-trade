@@ -581,3 +581,28 @@ class TestOpenClawManifest:
     def test_manifest_base_url_is_set(self, client):
         r = client.get("/.well-known/openclaw.json")
         assert r.json()["base_url"] != ""
+
+
+class TestSectorHeatmapSkill:
+    def test_sector_heatmap_returns_deduplicated_canonical_sectors(self, client):
+        from unittest.mock import MagicMock
+
+        fake_quote = MagicMock()
+        fake_quote.last_price = 15000.0
+        fake_quote.change = 120.0
+        fake_quote.change_pct = 0.8
+
+        with patch("market.quotes.get_quote", return_value={"NSE:NIFTY AUTO": fake_quote, "NSE:NIFTY METAL": fake_quote}):
+            r = client.post("/skills/sector_heatmap")
+        assert r.status_code == 200
+        data = r.json()["data"]
+        assert "sectors" in data
+        codes = [s["code"] for s in data["sectors"]]
+        assert len(codes) == len(set(codes)), "Sectors must not contain duplicate codes"
+        names = [s["name"] for s in data["sectors"]]
+        assert len(names) == len(set(names)), "Sectors must not contain duplicate names"
+        # Broad market indices must not be present
+        assert "NIFTY50" not in codes
+        assert "50" not in names
+        assert "Nifty" not in names
+

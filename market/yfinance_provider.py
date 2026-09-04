@@ -507,16 +507,35 @@ def yf_get_ohlcv(
         fx = (_get_usdinr_rate() * _USD_COMMODITY_FACTORS[ticker]) if needs_inr else 1.0
         # ─────────────────────────────────────────────────────────────────
 
+        import math
+
         rows = []
         for idx, row in hist.iterrows():
+            c_val = row.get("Close")
+            o_val = row.get("Open")
+            h_val = row.get("High")
+            l_val = row.get("Low")
+            if (
+                c_val is None
+                or o_val is None
+                or h_val is None
+                or l_val is None
+                or math.isnan(float(c_val))
+                or math.isnan(float(o_val))
+                or math.isnan(float(h_val))
+                or math.isnan(float(l_val))
+            ):
+                continue
+            v_val = row.get("Volume", 0)
+            vol_int = int(v_val) if (v_val is not None and not math.isnan(float(v_val))) else 0
             rows.append(
                 {
                     "date": idx.to_pydatetime() if hasattr(idx, "to_pydatetime") else idx,
-                    "open": round(float(row["Open"]) * fx, 2),
-                    "high": round(float(row["High"]) * fx, 2),
-                    "low": round(float(row["Low"]) * fx, 2),
-                    "close": round(float(row["Close"]) * fx, 2),
-                    "volume": int(row["Volume"]),
+                    "open": round(float(o_val) * fx, 2),
+                    "high": round(float(h_val) * fx, 2),
+                    "low": round(float(l_val) * fx, 2),
+                    "close": round(float(c_val) * fx, 2),
+                    "volume": vol_int,
                 }
             )
         return rows

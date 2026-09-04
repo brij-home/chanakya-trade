@@ -205,6 +205,7 @@ def get_ohlcv(
     df.set_index("date", inplace=True)
     df = df[["open", "high", "low", "close", "volume"]].astype(float)
     df = df[~df.index.duplicated(keep="last")]
+    df.dropna(subset=["open", "high", "low", "close"], inplace=True)
     df.sort_index(inplace=True)
 
     # Live/incomplete candle enrichment is opt-in and is never cached as EOD.

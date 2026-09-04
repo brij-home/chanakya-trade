@@ -542,19 +542,35 @@ export default function SectorDrilldownModal({ isOpen, sector, onClose, onOpenOr
                       <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 bg-elevated/90 p-3 rounded-lg border border-border/60 font-mono">
                         <div>
                           <span className="text-[10px] text-muted uppercase font-ui">Entry Zone</span>
-                          <p className="font-bold text-text text-sm">₹{Number(opp.entry_price).toFixed(2)}</p>
+                          <p className="font-bold text-text text-sm">
+                            {opp.entry_price && Number(opp.entry_price) > 0
+                              ? `₹${Number(opp.entry_price).toFixed(2)}`
+                              : opp.ltp && Number(opp.ltp) > 0
+                              ? `₹${Number(opp.ltp).toFixed(2)}`
+                              : '—'}
+                          </p>
                         </div>
                         <div>
                           <span className="text-[10px] text-muted uppercase font-ui">Invalidation SL</span>
-                          <p className="font-bold text-red text-sm">₹{Number(opp.stop_loss).toFixed(2)}</p>
+                          <p className="font-bold text-red text-sm">
+                            {opp.stop_loss && Number(opp.stop_loss) > 0
+                              ? `₹${Number(opp.stop_loss).toFixed(2)}`
+                              : '—'}
+                          </p>
                         </div>
                         <div>
                           <span className="text-[10px] text-muted uppercase font-ui">Target 1 (+2R)</span>
-                          <p className="font-bold text-green text-sm">₹{Number(opp.target_1).toFixed(2)}</p>
+                          <p className="font-bold text-green text-sm">
+                            {opp.target_1 && Number(opp.target_1) > 0
+                              ? `₹${Number(opp.target_1).toFixed(2)}`
+                              : '—'}
+                          </p>
                         </div>
                         <div>
                           <span className="text-[10px] text-muted uppercase font-ui">Risk : Reward</span>
-                          <p className="font-bold text-amber text-sm">1:{opp.risk_reward_ratio} R:R</p>
+                          <p className="font-bold text-amber text-sm">
+                            {opp.risk_reward_ratio ? `1:${opp.risk_reward_ratio} R:R` : '1:2.0 R:R'}
+                          </p>
                         </div>
                       </div>
 
@@ -602,7 +618,9 @@ export default function SectorDrilldownModal({ isOpen, sector, onClose, onOpenOr
                           <button
                             onClick={() => {
                               onClose()
-                              sendDraft(`size ${opp.symbol} ${Number(opp.entry_price).toFixed(2)} ${Number(opp.stop_loss).toFixed(2)}`)
+                              const safeE = opp.entry_price && Number(opp.entry_price) > 0 ? Number(opp.entry_price) : Number(opp.ltp || 0)
+                              const safeS = opp.stop_loss && Number(opp.stop_loss) > 0 ? Number(opp.stop_loss) : Number((safeE * 0.98).toFixed(2))
+                              sendDraft(`size ${opp.symbol} ${safeE.toFixed(2)} ${safeS.toFixed(2)}`)
                             }}
                             className="bg-amber/15 hover:bg-amber/25 text-amber border border-amber/30 px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors cursor-pointer"
                             title="Size position with volatility risk parity"

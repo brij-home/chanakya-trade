@@ -753,27 +753,40 @@ async def skill_payoff(req: PayoffSimRequest):
 
 @router.post("/sector_heatmap")
 async def skill_sector_heatmap():
-    """Live Sector performance & breadth across NSE indices."""
+    """Live Sector performance & breadth across canonical NSE sector indices."""
     try:
-        from market.indices import INDEX_INSTRUMENTS, get_index
+        from market.quotes import get_quote
+
+        canonical_sectors = [
+            ("METAL", "NSE:NIFTY METAL", "Nifty Metal"),
+            ("AUTO", "NSE:NIFTY AUTO", "Nifty Auto"),
+            ("BANK", "NSE:NIFTY BANK", "Nifty Bank"),
+            ("FIN_SERVICE", "NSE:NIFTY FIN SERVICE", "Nifty Financial Services"),
+            ("IT", "NSE:NIFTY IT", "Nifty IT"),
+            ("PHARMA", "NSE:NIFTY PHARMA", "Nifty Pharma"),
+            ("FMCG", "NSE:NIFTY FMCG", "Nifty FMCG"),
+            ("ENERGY", "NSE:NIFTY ENERGY", "Nifty Energy"),
+            ("REALTY", "NSE:NIFTY REALTY", "Nifty Realty"),
+            ("INFRA", "NSE:NIFTY INFRA", "Nifty Infra"),
+            ("PSU_BANK", "NSE:NIFTY PSU BANK", "Nifty PSU Bank"),
+        ]
+
+        instruments = [inst for _, inst, _ in canonical_sectors]
+        quotes = get_quote(instruments)
 
         sectors = []
-        for code, inst in INDEX_INSTRUMENTS.items():
-            if code in ("NIFTY50", "VIX", "SENSEX", "MIDCAP"):
-                continue
-            try:
-                snap = get_index(code)
+        for code, inst, name in canonical_sectors:
+            q = quotes.get(inst)
+            if q and q.last_price > 0:
                 sectors.append(
                     {
                         "code": code,
-                        "name": snap.name,
-                        "ltp": snap.ltp,
-                        "change": snap.change,
-                        "change_pct": round(snap.change_pct, 2),
+                        "name": name,
+                        "ltp": round(float(q.last_price), 2),
+                        "change": round(float(q.change or 0.0), 2),
+                        "change_pct": round(float(q.change_pct or 0.0), 2),
                     }
                 )
-            except Exception:
-                pass
 
         sectors.sort(key=lambda s: s["change_pct"], reverse=True)
         return _ok(
@@ -4237,25 +4250,72 @@ def _compute_dashboard_snapshot_sync(req: Optional[DashboardSnapshotRequest] = N
             },
         }
 
-        # 4. Institutional Flows (DLY)
-        fii_dii = None
+        # 4. Institutional Flows (DLY + Multi-Day Intelligence)
+        flow_ana = None
         try:
-            flow_recs = get_fii_dii_data(days=1)
-            if flow_recs:
-                fii_dii = flow_recs[0]
+            from market.flow_intel import get_flow_analysis
+
+            flow_ana = get_flow_analysis()
         except Exception:
             pass
 
-        fii_net = fii_dii.fii_net if fii_dii else -1450.0
-        dii_net = fii_dii.dii_net if fii_dii else 1120.0
+        fii_net = flow_ana.fii_net_today if flow_ana else -1450.0
+        dii_net = flow_ana.dii_net_today if flow_ana else 1120.0
         total_net = round(fii_net + dii_net, 2)
+
+        # Absorption rate computation
+        absorption_pct = 0.0
+        if fii_net < 0 and dii_net > 0:
+            absorption_pct = round((dii_net / abs(fii_net)) * 100, 1)
+        elif fii_net >= 0 and dii_net >= 0:
+            absorption_pct = 100.0
+
+        # Institutional regime classification
+        if fii_net > 500 and dii_net > 500:
+            regime = "TWIN_BUYING"
+            regime_label = "Twin Institutional Inflow"
+        elif fii_net < -500 and dii_net < -500:
+            regime = "TWIN_SELLING"
+            regime_label = "Institutional Risk-Off Exit"
+        elif fii_net < 0 and dii_net > abs(fii_net):
+            regime = "DII_ABSORPTION"
+            regime_label = "DII Shielding FII Selling"
+        elif fii_net < 0 and dii_net > 0:
+            regime = "PARTIAL_ABSORPTION"
+            regime_label = "Partial DII Absorption"
+        elif fii_net > 0 and dii_net < 0:
+            regime = "FII_ACCUMULATION"
+            regime_label = "FII Accumulating / DII Profit-Booking"
+        else:
+            regime = "BALANCED"
+            regime_label = "Institutional Balance"
 
         flows = {
             "fii_net": round(fii_net, 2),
             "dii_net": round(dii_net, 2),
             "net_total": total_net,
-            "label": "DLY",
-            "verdict": fii_dii.verdict if fii_dii else "FII SELLING / DII BUYING",
+            "label": "DLY + 5D",
+            "fii_streak": flow_ana.fii_streak if flow_ana else -1,
+            "dii_streak": flow_ana.dii_streak if flow_ana else 1,
+            "fii_streak_total": round(flow_ana.fii_streak_total, 2) if flow_ana else round(fii_net, 2),
+            "dii_streak_total": round(flow_ana.dii_streak_total, 2) if flow_ana else round(dii_net, 2),
+            "fii_5d_net": round(flow_ana.fii_5d_net, 2) if flow_ana else round(fii_net, 2),
+            "dii_5d_net": round(flow_ana.dii_5d_net, 2) if flow_ana else round(dii_net, 2),
+            "fii_momentum": flow_ana.fii_momentum if flow_ana else "STEADY",
+            "absorption_pct": absorption_pct,
+            "regime": regime,
+            "regime_label": regime_label,
+            "signal": flow_ana.signal if flow_ana else "NEUTRAL",
+            "signal_reason": (
+                flow_ana.signal_reason
+                if flow_ana and flow_ana.signal_reason
+                else f"DII absorbed {absorption_pct}% of foreign outflows."
+            ),
+            "verdict": (
+                flow_ana.signal_reason
+                if flow_ana and flow_ana.signal_reason
+                else f"{regime_label} ({'+' if total_net >= 0 else ''}₹{total_net:,.0f} Cr)"
+            ),
         }
 
         # 5. Sector Rotation Matrix & RRG 2D Momentum
