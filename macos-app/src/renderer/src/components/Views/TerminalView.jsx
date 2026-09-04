@@ -78,33 +78,36 @@ export default function TerminalView({
   const watchlistPageSize = 7
 
   // Fetch terminal snapshot data
-  useEffect(() => {
-    let unmounted = false
-    const fetchSnapshot = async (isInitial = false) => {
-      try {
-        if (isInitial) setLoading(true)
-        const res = await call('/skills/dashboard_snapshot', {
-          symbol: selectedSymbol,
-          exchange: getSymbolExchange(selectedSymbol),
-          timeframe: timeframe,
-        })
-        const snapshot = res?.data ?? res
-        if (!unmounted && snapshot) {
-          setData(snapshot)
-        }
-      } catch (err) {
-        console.error('Failed to load dashboard snapshot:', err)
-      } finally {
-        if (!unmounted && isInitial) setLoading(false)
-      }
-    }
+  const isFetchingRef = useRef(false)
+  const fetchSnapshotRef = useRef(null)
 
+  const fetchSnapshot = async (isInitial = false) => {
+    if (isFetchingRef.current) return
+    isFetchingRef.current = true
+    try {
+      if (isInitial) setLoading(true)
+      const res = await call('/skills/dashboard_snapshot', {
+        symbol: selectedSymbol,
+        exchange: getSymbolExchange(selectedSymbol),
+        timeframe: timeframe,
+      })
+      const snapshot = res?.data ?? res
+      if (snapshot) {
+        setData(snapshot)
+      }
+    } catch (err) {
+      console.error('Failed to load dashboard snapshot:', err)
+    } finally {
+      isFetchingRef.current = false
+      if (isInitial) setLoading(false)
+    }
+  }
+  fetchSnapshotRef.current = fetchSnapshot
+
+  useEffect(() => {
     fetchSnapshot(true)
     const interval = setInterval(() => fetchSnapshot(false), 8000)
-    return () => {
-      unmounted = true
-      clearInterval(interval)
-    }
+    return () => clearInterval(interval)
   }, [selectedSymbol, timeframe])
 
   // Pro Trader Hotkeys ('/' search focus, '1'/'5'/'D' timeframes)
@@ -139,10 +142,11 @@ export default function TerminalView({
 
   const setupRaw = data?.automated_setup
   // Check if data matches current selectedSymbol
+  const cleanSym = (s) => (s || '').replace(/^(NSE:|BSE:|MCX:|CDS:)/i, '').replace(/ 50$/i, '').trim().toUpperCase()
   const isDataMatching = Boolean(
     data && (
-      data.symbol === selectedSymbol ||
-      (setupRaw?.symbol && setupRaw.symbol.toUpperCase().startsWith(selectedSymbol.toUpperCase()))
+      cleanSym(data.symbol) === cleanSym(selectedSymbol) ||
+      (setupRaw?.symbol && cleanSym(setupRaw.symbol).startsWith(cleanSym(selectedSymbol)))
     )
   )
 
@@ -171,6 +175,7 @@ export default function TerminalView({
               : `No complete, current setup is available for ${selectedSymbol}. The terminal will refresh automatically.`}
             hint="No indicative price, target, or order action is shown until data quality checks pass."
             size="lg"
+            onRetry={!loading ? () => fetchSnapshot(true) : undefined}
           />
         </div>
       </div>

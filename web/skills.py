@@ -4248,6 +4248,10 @@ def _compute_dashboard_snapshot_sync(req: Optional[DashboardSnapshotRequest] = N
         raise _err(str(e))
 
 
+_in_flight_snapshots: Dict[str, asyncio.Task] = {}
+_in_flight_snapshots_lock = asyncio.Lock()
+
+
 @router.get("/dashboard_snapshot")
 @router.post("/dashboard_snapshot")
 async def skill_dashboard_snapshot(req: Optional[DashboardSnapshotRequest] = None):
@@ -4280,7 +4284,21 @@ async def skill_dashboard_snapshot(req: Optional[DashboardSnapshotRequest] = Non
         except Exception:
             pass
 
-        payload = await asyncio.to_thread(_compute_dashboard_snapshot_sync, req)
+        async with _in_flight_snapshots_lock:
+            existing_task = _in_flight_snapshots.get(cache_key)
+            if existing_task is None or existing_task.done():
+                existing_task = asyncio.create_task(
+                    asyncio.to_thread(_compute_dashboard_snapshot_sync, req)
+                )
+                _in_flight_snapshots[cache_key] = existing_task
+
+        try:
+            payload = await existing_task
+        finally:
+            async with _in_flight_snapshots_lock:
+                if _in_flight_snapshots.get(cache_key) is existing_task:
+                    _in_flight_snapshots.pop(cache_key, None)
+
         if isinstance(payload, dict) and "status" in payload and "data" in payload:
             return payload
         return _ok(payload)

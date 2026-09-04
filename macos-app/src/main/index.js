@@ -212,6 +212,7 @@ ipcMain.handle('sidecar-request', async (_, request = {}) => {
     method,
     headers: { 'Content-Type': 'application/json', ...allowedHeaders },
     body,
+    signal: AbortSignal.timeout(15000),
   })
   const text = await response.text()
   let data = null
