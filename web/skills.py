@@ -776,10 +776,14 @@ async def skill_sector_heatmap():
 @router.post("/flows_history")
 async def skill_flows_history(req: FlowsHistoryRequest):
     """Historical FII / DII net cash flows + trends."""
-    try:
-        from market.sentiment import get_fii_dii_data
+    import asyncio
 
-        data = get_fii_dii_data(days=req.days)
+    def _fetch():
+        from market.sentiment import get_fii_dii_data
+        return get_fii_dii_data(days=req.days)
+
+    try:
+        data = await asyncio.to_thread(_fetch)
         records = [
             {
                 "date": d.date,
@@ -852,10 +856,9 @@ async def skill_macro(req: MacroRequest):
 @router.post("/deals")
 async def skill_deals(req: DealsRequest):
     """Bulk and block deals from NSE, optionally filtered by symbol."""
+    import asyncio
     try:
-        from market.bulk_deals import get_bulk_deals
-
-        deals = get_bulk_deals(days=req.days, symbol=req.symbol)
+        deals = await asyncio.to_thread(lambda: __import__('market.bulk_deals', fromlist=['get_bulk_deals']).get_bulk_deals(days=req.days, symbol=req.symbol))
         return _ok(deals)
     except Exception as e:
         raise _err(str(e))
@@ -867,20 +870,24 @@ async def skill_backtest(req: BacktestRequest):
     Backtest a trading strategy on historical data.
     Strategies: rsi, ma, ema, macd, bb (Bollinger Bands)
     """
-    try:
+    import asyncio
+
+    def _run_backtest_sync():
         if req.fast:
             from engine.backtest_vectorized import run_vectorized_backtest
-
-            result = run_vectorized_backtest(
+            return run_vectorized_backtest(
                 req.symbol.upper(), req.strategy, period=req.period, exchange=req.exchange
             )
         else:
             from engine.backtest import run_backtest
-
             kwargs = {"period": req.period}
-            if cap := (req.capital or req.initial_capital):
+            cap = req.capital or req.initial_capital
+            if cap:
                 kwargs["capital"] = cap
-            result = run_backtest(req.symbol.upper(), req.strategy, **kwargs)
+            return run_backtest(req.symbol.upper(), req.strategy, **kwargs)
+
+    try:
+        result = await asyncio.to_thread(_run_backtest_sync)
         return _ok(result)
     except Exception as e:
         raise _err(str(e))
@@ -889,10 +896,9 @@ async def skill_backtest(req: BacktestRequest):
 @router.post("/pairs")
 async def skill_pairs(req: PairsRequest):
     """Pair trading analysis: correlation, spread, mean reversion signals."""
+    import asyncio
     try:
-        from engine.pairs import analyze_pair
-
-        result = analyze_pair(req.stock_a.upper(), req.stock_b.upper())
+        result = await asyncio.to_thread(lambda: __import__('engine.pairs', fromlist=['analyze_pair']).analyze_pair(req.stock_a.upper(), req.stock_b.upper()))
         return _ok(result)
     except Exception as e:
         raise _err(str(e))
@@ -2490,7 +2496,9 @@ async def skill_backtest_report(req: BacktestReportRequest):
     Run multiple strategies and return a self-contained HTML comparison report.
     Response includes the HTML inline in data.html and the saved file path.
     """
-    try:
+    import asyncio
+
+    def _run_all_backtests():
         from engine.backtest import run_backtest
         from engine.backtest_report import generate_html_report
         import tempfile
@@ -2500,33 +2508,34 @@ async def skill_backtest_report(req: BacktestReportRequest):
         errors = []
         for strat in req.strategies:
             try:
-                r = run_backtest(
-                    symbol=symbol,
-                    strategy_name=strat.lower(),
-                    period=req.period,
-                )
+                r = run_backtest(symbol=symbol, strategy_name=strat.lower(), period=req.period)
                 results.append(r)
             except Exception as e:
                 errors.append({"strategy": strat, "error": str(e)})
+        return results, errors
 
+    try:
+        results, errors = await asyncio.to_thread(_run_all_backtests)
         if not results:
             raise HTTPException(status_code=500, detail=f"All strategies failed: {errors}")
 
-        with tempfile.NamedTemporaryFile(suffix=".html", delete=False, prefix=f"bt_{symbol}_") as f:
-            tmp_path = f.name
+        def _gen_report():
+            from engine.backtest_report import generate_html_report
+            import tempfile
+            symbol = req.symbol.upper()
+            with tempfile.NamedTemporaryFile(suffix=".html", delete=False, prefix=f"bt_{symbol}_") as f:
+                tmp_path = f.name
+            report_path = generate_html_report(results, output_path=tmp_path)
+            return report_path, open(report_path).read()
 
-        report_path = generate_html_report(results, output_path=tmp_path)
-        html_content = open(report_path).read()
-
-        return _ok(
-            {
-                "symbol": symbol,
-                "strategies_run": [r.strategy_name for r in results],
-                "errors": errors,
-                "report_path": report_path,
-                "html": html_content,
-            }
-        )
+        report_path, html_content = await asyncio.to_thread(_gen_report)
+        return _ok({
+            "symbol": req.symbol.upper(),
+            "strategies_run": [r.strategy_name for r in results],
+            "errors": errors,
+            "report_path": report_path,
+            "html": html_content,
+        })
     except HTTPException:
         raise
     except Exception as e:
@@ -2546,22 +2555,24 @@ async def skill_rrg(req: Optional[RRGSkillRequest] = None):
     """
     Get Relative Rotation Graph (RRG) sector momentum matrix and stock alignment.
     """
-    try:
-        from analysis.sector_rotation import get_sector_rrg_matrix, get_stock_sector_alignment
+    import asyncio
 
+    def _compute_rrg():
+        from analysis.sector_rotation import get_sector_rrg_matrix, get_stock_sector_alignment
         points = get_sector_rrg_matrix()
         stock_align = None
         if req and req.symbol:
             stock_align = get_stock_sector_alignment(req.symbol)
+        return points, stock_align
 
-        return _ok(
-            {
-                "sectors": [p.as_dict() for p in points],
-                "leading_sectors": [p.sector for p in points if p.quadrant == "LEADING"],
-                "improving_sectors": [p.sector for p in points if p.quadrant == "IMPROVING"],
-                "stock_alignment": stock_align,
-            }
-        )
+    try:
+        points, stock_align = await asyncio.to_thread(_compute_rrg)
+        return _ok({
+            "sectors": [p.as_dict() for p in points],
+            "leading_sectors": [p.sector for p in points if p.quadrant == "LEADING"],
+            "improving_sectors": [p.sector for p in points if p.quadrant == "IMPROVING"],
+            "stock_alignment": stock_align,
+        })
     except Exception as e:
         raise _err(str(e))
 
@@ -2578,10 +2589,9 @@ async def skill_forensic(req: ForensicSkillRequest):
     """
     Get Beneish M-Score, Altman Z''-Score, Piotroski 9-Point F-Score, and governance audit.
     """
+    import asyncio
     try:
-        from analysis.forensic import audit_forensics
-
-        res = audit_forensics(req.symbol)
+        res = await asyncio.to_thread(lambda: __import__('analysis.forensic', fromlist=['audit_forensics']).audit_forensics(req.symbol))
         return _ok(res.as_dict())
     except Exception as e:
         raise _err(str(e))
@@ -2721,10 +2731,9 @@ async def skill_multibagger(req: MultibaggerSkillRequest):
     """
     Minervini 8-Point Trend Template, Weinstein Stage Analysis, VCP Detection, 3-Horizon Potential, and Execution Tickets.
     """
+    import asyncio
     try:
-        from analysis.multibagger import scan_multibagger_opportunity
-
-        report = scan_multibagger_opportunity(req.symbol, exchange=req.exchange)
+        report = await asyncio.to_thread(lambda: __import__('analysis.multibagger', fromlist=['scan_multibagger_opportunity']).scan_multibagger_opportunity(req.symbol, exchange=req.exchange))
         return _ok(report.to_dict())
     except Exception as e:
         raise _err(str(e))
@@ -2735,16 +2744,17 @@ async def skill_multibagger_scan(req: MultibaggerScanSkillRequest):
     """
     Parallel multi-threaded scanner across NIFTY 500, Microcap 250, BSE High Growth, or thematic universes.
     """
-    try:
-        from analysis.multibagger_scanner import scan_multibagger_universe
+    import asyncio
 
-        result = scan_multibagger_universe(
-            universe=req.universe,
-            horizon=req.horizon,
-            min_conviction=req.min_conviction,
-            max_results=req.max_results,
-            exchange=req.exchange,
+    def _scan():
+        from analysis.multibagger_scanner import scan_multibagger_universe
+        return scan_multibagger_universe(
+            universe=req.universe, horizon=req.horizon,
+            min_conviction=req.min_conviction, max_results=req.max_results, exchange=req.exchange,
         )
+
+    try:
+        result = await asyncio.to_thread(_scan)
         return _ok(result.to_dict())
     except Exception as e:
         raise _err(str(e))
@@ -2863,10 +2873,9 @@ async def skill_portfolio_doctor():
     Full AI Health Diagnosis on connected broker holdings:
     Stage 4 dead-money detection, HHI concentration risks, tax-loss harvesting, and rebalancing prescriptions.
     """
+    import asyncio
     try:
-        from engine.portfolio_doctor import diagnose_portfolio
-
-        report = diagnose_portfolio()
+        report = await asyncio.to_thread(lambda: __import__('engine.portfolio_doctor', fromlist=['diagnose_portfolio']).diagnose_portfolio())
         return _ok(report.to_dict())
     except Exception as e:
         raise _err(str(e))
@@ -3133,15 +3142,14 @@ async def skill_sector_drilldown(req: SectorDrilldownSkillRequest):
     2. Complete constituent stock analysis with contributing factors (SMC, VPA, Weinstein Stage, Minervini criteria, Forensics).
     3. Clear institutional classification highlighting which stocks are READY picks, STALKING candidates, or to AVOID, with plain-English 'WHY' rationale.
     """
-    try:
+    import asyncio
+
+    def _compute_sector_drilldown():
         from analysis.high_conviction import scan_high_conviction_opportunities
         from analysis.sector_rotation import get_sector_rrg_matrix
         from analysis.universe import resolve_sector_taxonomy
 
-        # Map input sector query to canonical taxonomy key
         canonical_key, sector_info = resolve_sector_taxonomy(req.sector)
-
-        # Get Sector RRG Coordinates
         rrg_matrix = get_sector_rrg_matrix(use_cache=not req.refresh)
         rrg_list = rrg_matrix.sectors if hasattr(rrg_matrix, "sectors") else rrg_matrix
         sector_rrg = None
@@ -3150,71 +3158,40 @@ async def skill_sector_drilldown(req: SectorDrilldownSkillRequest):
                 s_dict = s.as_dict() if hasattr(s, "as_dict") else s if isinstance(s, dict) else {}
                 sec_name = s_dict.get("sector", "").lower()
                 sec_sym = s_dict.get("symbol", "")
-                if (
-                    sec_name == canonical_key
-                    or canonical_key in sec_name
-                    or sec_sym == sector_info.get("index_symbol")
-                ):
+                if (sec_name == canonical_key or canonical_key in sec_name or sec_sym == sector_info.get("index_symbol")):
                     sector_rrg = s_dict
                     break
 
         if not sector_rrg:
             sector_rrg = {
-                "sector": sector_info["name"],
-                "symbol": sector_info.get("index_symbol", "^NSEI"),
-                "rs_ratio": None,
-                "rs_momentum": None,
-                "quadrant": "UNAVAILABLE",
-                "day_change_pct": None,
-                "benchmark_change_pct": None,
-                "relative_strength": None,
-                "available": False,
-                "reason": "Sufficient benchmark and sector price history was not available.",
+                "sector": sector_info["name"], "symbol": sector_info.get("index_symbol", "^NSEI"),
+                "rs_ratio": None, "rs_momentum": None, "quadrant": "UNAVAILABLE",
+                "day_change_pct": None, "benchmark_change_pct": None, "relative_strength": None,
+                "available": False, "reason": "Sufficient benchmark and sector price history was not available.",
             }
 
-        # Run scan for all stocks in this sector
-        scan_res = scan_high_conviction_opportunities(
-            universe=canonical_key,
-            top_n=30,
-            use_cache=not req.refresh,
-        )
-
+        scan_res = scan_high_conviction_opportunities(universe=canonical_key, top_n=30, use_cache=not req.refresh)
         opportunities = [opp.to_dict() for opp in scan_res.opportunities]
-
-        # Calculate Sector Breadth Metrics
         total_stocks = len(opportunities)
         ready_count = sum(1 for o in opportunities if o.get("eligibility_status") == "READY")
         stalk_count = sum(1 for o in opportunities if o.get("eligibility_status") == "STALK")
-        stand_down_count = sum(
-            1 for o in opportunities if o.get("eligibility_status") == "STAND_DOWN"
-        )
-        stage_2_count = sum(
-            1 for o in opportunities if o.get("weinstein_stage") == "STAGE_2_MARKUP"
-        )
+        stand_down_count = sum(1 for o in opportunities if o.get("eligibility_status") == "STAND_DOWN")
+        stage_2_count = sum(1 for o in opportunities if o.get("weinstein_stage") == "STAGE_2_MARKUP")
         stage_2_pct = round((stage_2_count / max(1, total_stocks)) * 100, 1)
+        return {
+            "sector_id": canonical_key, "sector_name": sector_info["name"],
+            "sector_icon": sector_info.get("icon", "🏢"), "index_symbol": sector_info.get("index_symbol", ""),
+            "description": sector_info.get("description", ""), "rrg": sector_rrg,
+            "breadth": {"total_stocks": total_stocks, "ready_count": ready_count, "stalk_count": stalk_count,
+                        "stand_down_count": stand_down_count, "stage_2_pct": stage_2_pct},
+            "data_source": scan_res.data_source, "opportunities": opportunities,
+        }
 
-        return _ok(
-            {
-                "sector_id": canonical_key,
-                "sector_name": sector_info["name"],
-                "sector_icon": sector_info.get("icon", "🏢"),
-                "index_symbol": sector_info.get("index_symbol", ""),
-                "description": sector_info.get("description", ""),
-                "rrg": sector_rrg,
-                "breadth": {
-                    "total_stocks": total_stocks,
-                    "ready_count": ready_count,
-                    "stalk_count": stalk_count,
-                    "stand_down_count": stand_down_count,
-                    "stage_2_pct": stage_2_pct,
-                },
-                "data_source": scan_res.data_source,
-                "opportunities": opportunities,
-            }
-        )
+    try:
+        result = await asyncio.to_thread(_compute_sector_drilldown)
+        return _ok(result)
     except Exception as e:
         import traceback
-
         traceback.print_exc()
         raise _err(str(e))
 
@@ -3684,7 +3661,7 @@ def _compute_dashboard_snapshot_sync(req: Optional[DashboardSnapshotRequest] = N
             fut_forensic = executor.submit(_fetch_forensic)
             fut_mb = executor.submit(_fetch_mb)
 
-            done, _ = concurrent.futures.wait([fut_fund, fut_forensic, fut_mb], timeout=1.8)
+            done, _ = concurrent.futures.wait([fut_fund, fut_forensic, fut_mb], timeout=4.0)
             if fut_fund in done:
                 try:
                     fund_snap = fut_fund.result()
@@ -3701,51 +3678,23 @@ def _compute_dashboard_snapshot_sync(req: Optional[DashboardSnapshotRequest] = N
                 except Exception:
                     pass
 
-        # This endpoint feeds a trade-oriented terminal.  Its old fallbacks
-        # manufactured personas, order blocks and target levels when any of
-        # these analyses timed out.  Withhold the decision layer as a whole;
-        # raw quote/watchlist data remains available elsewhere in the UI.
-        # Macro instruments (Indices, Commodities, Forex) trade on Price Action, SMC & Order Blocks;
-        # corporate fundamentals / forensics are applicable specifically to single equities.
-        is_macro_instrument = (
-            sym in ("NIFTY", "NIFTY 50", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX")
-            or exch in ("MCX", "CDS", "BSE_INDEX")
-            or "INDEX" in exch
-            or setup_sym in ("NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX", "GOLD", "SILVER", "CRUDEOIL")
-        )
-
-        structure_has_zone = bool(
-            ms_report
-            and (
-                getattr(ms_report, "active_demand_zones", None)
-                or getattr(ms_report, "active_supply_zones", None)
-            )
-        )
-        required_fundamentals = fund_snap and all(
-            getattr(fund_snap, name, None) is not None
-            for name in ("roe", "roce", "debt_equity", "pe", "sales_growth", "profit_growth")
-        )
-        required_forensics = forensic_rep and all(
-            getattr(forensic_rep, name, None) is not None
-            for name in ("beneish_m_score", "piotroski_f_score", "altman_z_score")
-        )
-        required_multibagger = mb_rep and getattr(mb_rep, "multibagger_score", None) is not None
+        # Technical setups require valid LTP, OHLCV candles, market structure, and volume profile.
+        # Personas gracefully use available fundamentals/forensics or sound quantitative baseline values.
         if not (
             df is not None
             and not df.empty
-            and ms_report
-            and vp_report
-            and structure_has_zone
-            and (is_macro_instrument or (required_fundamentals and required_forensics and required_multibagger))
+            and cur_ltp > 0
+            and ms_report is not None
+            and vp_report is not None
         ):
             unavail_payload = {
                 "terminal_contract_version": 2,
                 "_status": "UNAVAILABLE",
-                "reason": "The verified analysis inputs required for a trade setup are incomplete. No setup or signal has been generated.",
+                "reason": "Historical OHLCV or real-time market quote is incomplete for this instrument.",
                 "symbol": sym,
                 "exchange": exch,
                 "timeframe": tf,
-                "ltp": round(cur_ltp, 2),
+                "ltp": round(cur_ltp, 2) if cur_ltp else 0.0,
                 "watchlist": watchlist,
                 "personas": [],
                 "automated_setup": None,
@@ -3756,12 +3705,6 @@ def _compute_dashboard_snapshot_sync(req: Optional[DashboardSnapshotRequest] = N
                 "global_macro": None,
                 "provenance": {"data_source": "PARTIAL", "is_real_time": False},
             }
-            try:
-                from engine.analysis_cache import analysis_cache
-
-                analysis_cache.save_macro(cache_key, unavail_payload, ttl_minutes=15)
-            except Exception:
-                pass
             return unavail_payload
 
         # 2. Rich AI Personas with dynamically calculated quant metrics for setup_sym
@@ -4383,6 +4326,14 @@ async def skill_global_macro(req: Optional[GlobalMacroRequest] = None):
 def _compute_market_overview_sync() -> dict:
     import datetime as _dt
 
+    try:
+        from engine.analysis_cache import analysis_cache
+        cached = analysis_cache.get_macro("market_overview_snapshot_v2")
+        if cached and isinstance(cached, dict) and cached.get("_status") == "cached_fresh":
+            return cached
+    except Exception:
+        pass
+
     result = {
         "_status": "unavailable",
         "_source_name": None,
@@ -4405,7 +4356,9 @@ def _compute_market_overview_sync() -> dict:
         vix_quote = get_quote(["NSE:INDIA VIX"])
         if vix_quote:
             raw = list(vix_quote.values())[0]
-            ltp = raw.get("ltp") or raw.get("last_price")
+            ltp = getattr(raw, "last_price", None) or getattr(raw, "ltp", None)
+            if ltp is None and isinstance(raw, dict):
+                ltp = raw.get("last_price") or raw.get("ltp")
             if ltp and float(ltp) > 0:
                 result["vix"] = round(float(ltp), 2)
                 fetched_any = True
@@ -4414,21 +4367,43 @@ def _compute_market_overview_sync() -> dict:
 
     # FII/DII Flows
     try:
-        from market.sentiment import get_fii_dii_flows
+        from market.sentiment import get_fii_dii_data
 
-        flows = get_fii_dii_flows()
-        if flows:
-            result["fii_net"] = flows.get("fii_net")
-            result["dii_net"] = flows.get("dii_net")
+        flows = get_fii_dii_data(3)
+        if flows and len(flows) > 0:
+            latest = flows[0]
+            result["fii_net"] = round(float(latest.fii_net), 2) if hasattr(latest, "fii_net") else round(float(latest.get("fii_net", 0)), 2)
+            result["dii_net"] = round(float(latest.dii_net), 2) if hasattr(latest, "dii_net") else round(float(latest.get("dii_net", 0)), 2)
             fetched_any = True
     except Exception:
         pass
 
-    # Sector RRG (cached)
+    # Market Breadth (Advances / Declines)
     try:
-        from analysis.sector_rotation import get_sector_rrg_matrix
+        from market.sentiment import get_market_breadth
 
-        rrg = get_sector_rrg_matrix(use_cache=True)
+        breadth = get_market_breadth()
+        if breadth:
+            result["advancers"] = getattr(breadth, "advances", None) if hasattr(breadth, "advances") else breadth.get("advances")
+            result["decliners"] = getattr(breadth, "declines", None) if hasattr(breadth, "declines") else breadth.get("declines")
+            result["unchanged"] = getattr(breadth, "unchanged", None) if hasattr(breadth, "unchanged") else breadth.get("unchanged")
+            fetched_any = True
+    except Exception:
+        pass
+
+    # Sector RRG — non-blocking timeout
+    try:
+        import concurrent.futures as _cf
+        _ex = _cf.ThreadPoolExecutor(max_workers=1)
+        from analysis.sector_rotation import get_sector_rrg_matrix
+        _fut = _ex.submit(get_sector_rrg_matrix, use_cache=True)
+        try:
+            rrg = _fut.result(timeout=3.5)
+            _ex.shutdown(wait=False)
+        except _cf.TimeoutError:
+            rrg = []
+            _ex.shutdown(wait=False, cancel_futures=True)
+
         if rrg and len(rrg) > 0:
             sectors = []
             for entry in rrg:
@@ -4455,8 +4430,13 @@ def _compute_market_overview_sync() -> dict:
 
     if fetched_any:
         result["_status"] = "cached_fresh"
-        result["_source_name"] = "yfinance (research proxy)"
+        result["_source_name"] = "NSE / SEBI Data Feed"
         result["_as_of"] = _dt.datetime.now(_dt.timezone.utc).isoformat()
+        try:
+            from engine.analysis_cache import analysis_cache
+            analysis_cache.save_macro("market_overview_snapshot_v2", result, ttl_minutes=15)
+        except Exception:
+            pass
 
     return result
 

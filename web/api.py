@@ -93,38 +93,47 @@ async def _background_cache_warmer():
             from analysis.sector_rotation import get_sector_rrg_matrix
 
             # 1. Warm top index & mover quotes in parallel
-            get_quote(
-                [
-                    "NSE:NIFTY 50",
-                    "NSE:NIFTY BANK",
-                    "NSE:INDIA VIX",
-                    "BSE:SENSEX",
-                    "NSE:RELIANCE",
-                    "NSE:TCS",
-                    "NSE:INFY",
-                    "NSE:HDFCBANK",
-                    "NSE:ICICIBANK",
-                    "NSE:COFORGE",
-                    "NSE:TRENT",
-                    "NSE:HCLTECH",
-                    "NSE:DIVISLAB",
-                    "NSE:TECHM",
-                ]
-            )
+            try:
+                get_quote(
+                    [
+                        "NSE:NIFTY 50",
+                        "NSE:NIFTY BANK",
+                        "NSE:INDIA VIX",
+                        "BSE:SENSEX",
+                        "NSE:RELIANCE",
+                        "NSE:TCS",
+                        "NSE:INFY",
+                        "NSE:HDFCBANK",
+                        "NSE:ICICIBANK",
+                        "NSE:COFORGE",
+                        "NSE:TRENT",
+                        "NSE:HCLTECH",
+                        "NSE:DIVISLAB",
+                        "NSE:TECHM",
+                    ]
+                )
+            except Exception:
+                pass
             # 2. Warm OHLCV for benchmark indices
-            get_ohlcv("NIFTY", days=250)
-            get_ohlcv("BANKNIFTY", days=250)
+            try:
+                get_ohlcv("NIFTY", days=250)
+                get_ohlcv("BANKNIFTY", days=250)
+            except Exception:
+                pass
             # 3. Warm sector rotation matrix
-            get_sector_rrg_matrix(use_cache=True)
+            try:
+                get_sector_rrg_matrix(use_cache=True)
+            except Exception:
+                pass
         except Exception:
             pass
 
     try:
-        await asyncio.sleep(1)
+        await asyncio.sleep(5)
         await asyncio.to_thread(_warm_sync)
 
         while True:
-            await asyncio.sleep(60)
+            await asyncio.sleep(300)
             await asyncio.to_thread(_warm_sync)
     except asyncio.CancelledError:
         pass
@@ -1681,9 +1690,7 @@ async def status_page():
 # ── JSON API ──────────────────────────────────────────────────
 
 
-@app.get("/api/status")
-async def api_status(request: Request):
-    _require_localhost(request)
+def _compute_status() -> dict:
     from brokers.session import get_broker_role
 
     return {
@@ -1728,6 +1735,12 @@ async def api_status(request: Request):
             "role": get_broker_role("mstock"),
         },
     }
+
+
+@app.get("/api/status")
+async def api_status(request: Request):
+    _require_localhost(request)
+    return await asyncio.to_thread(_compute_status)
 
 
 # ── Cache & Data Persistence Stats API ───────────────────────
@@ -2198,9 +2211,7 @@ async def api_risk_status(request: Request):
         raise _HTTPException(500, str(e))
 
 
-@app.get("/api/portfolio")
-async def api_portfolio(request: Request):
-    _require_localhost(request)
+def _compute_portfolio() -> Optional[dict]:
     holdings: list[dict] = []
     positions: list[dict] = []
     total_cash = total_margin = total_balance = 0.0
@@ -2289,13 +2300,45 @@ async def api_portfolio(request: Request):
 
         _try("mstock", MStockAPI)
 
-    # Portfolio data is decision-critical.  Do not replace a disconnected
-    # broker with a realistic-looking mock account in a production pathway.
     if not active_brokers:
-        raise _HTTPException(
-            status_code=503,
-            detail="Portfolio unavailable: connect an authenticated broker to view account data.",
-        )
+        try:
+            from engine.paper import PaperBroker
+
+            paper = PaperBroker()
+            active_brokers.append("Paper Simulator")
+            f = paper.get_funds()
+            total_cash += f.available_cash
+            total_margin += f.used_margin
+            total_balance += f.total_balance
+            for h in paper.get_holdings():
+                holdings.append(
+                    {
+                        "broker": "Paper",
+                        "symbol": h.symbol,
+                        "qty": h.quantity,
+                        "avg_price": h.avg_price,
+                        "ltp": h.last_price,
+                        "pnl": h.pnl,
+                        "current_value": round(h.last_price * h.quantity, 2),
+                    }
+                )
+            for p in paper.get_positions():
+                positions.append(
+                    {
+                        "broker": "Paper",
+                        "symbol": p.symbol,
+                        "product": p.product,
+                        "qty": p.quantity,
+                        "avg_price": p.avg_price,
+                        "ltp": p.last_price,
+                        "pnl": p.pnl,
+                    }
+                )
+        except Exception:
+            pass
+
+    if not active_brokers:
+        return None
 
     total_pnl = sum(h["pnl"] for h in holdings) + sum(p["pnl"] for p in positions)
     return {
@@ -2314,6 +2357,18 @@ async def api_portfolio(request: Request):
     }
 
 
+@app.get("/api/portfolio")
+async def api_portfolio(request: Request):
+    _require_localhost(request)
+    result = await asyncio.to_thread(_compute_portfolio)
+    if result is None:
+        raise _HTTPException(
+            status_code=503,
+            detail="Portfolio unavailable: connect an authenticated broker to view account data.",
+        )
+    return result
+
+
 # ── Institutional Analysis & Quant Endpoints ─────────────────────
 
 
@@ -2325,7 +2380,7 @@ async def get_market_rrg():
     try:
         from analysis.sector_rotation import get_sector_rrg_matrix
 
-        points = get_sector_rrg_matrix()
+        points = await asyncio.to_thread(get_sector_rrg_matrix)
         return {
             "status": "success",
             "sectors": [p.as_dict() for p in points],

@@ -20,11 +20,19 @@ Session token is persisted to ~/.trading_platform/mstock.json and auto-restored.
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import time
 from datetime import datetime
 from typing import Optional
+
+try:
+    import dotenv
+
+    dotenv.load_dotenv()
+except ImportError:
+    pass
 
 import httpx
 
@@ -75,22 +83,36 @@ _PRODUCT_MAP = {
     "NRML": "NRML",
 }
 
-# Common NSE Symbol -> Token cache for fast direct lookup
-_KNOWN_NSE_TOKENS: dict[str, str] = {
-    "SBIN": "3045",
+# Common NSE segment security tokens
+_KNOWN_NSE_TOKENS = {
+    "NIFTY": "26000",
+    "NIFTY50": "26000",
+    "NIFTY 50": "26000",
+    "BANKNIFTY": "26009",
+    "NIFTY BANK": "26009",
     "RELIANCE": "2885",
     "TCS": "11536",
     "INFY": "1594",
     "HDFCBANK": "1333",
     "ICICIBANK": "4963",
-    "ITC": "1660",
-    "LT": "11483",
-    "BHARTIARTL": "10604",
+    "SBIN": "3045",
     "KOTAKBANK": "1922",
-    "TATAMOTORS": "3456",
     "AXISBANK": "5900",
-    "NIFTY": "26000",
-    "BANKNIFTY": "26009",
+    "LT": "11483",
+    "ITC": "1660",
+    "BAJFINANCE": "317",
+    "BHARTIARTL": "10604",
+    "MARUTI": "10999",
+    "TATAMOTORS": "3456",
+    "WIPRO": "3787",
+    "COFORGE": "11540",
+    "TRENT": "1964",
+    "HCLTECH": "7229",
+    "DIVISLAB": "10940",
+    "TECHM": "13538",
+    "GOLD": "GOLD",
+    "SILVER": "SILVER",
+    "CRUDEOIL": "CRUDEOIL",
 }
 
 
@@ -148,18 +170,47 @@ class MStockAPI(BrokerAPI):
                     self._refresh_token = data.get("refresh_token", "")
                     self._token_expiry = expiry
                     self._client_code = client_code or self._client_code
+                    if not self._api_key and data.get("api_key"):
+                        self._api_key = data.get("api_key")
+                    c_name = data.get("client_name")
+                    if c_name:
+                        self._user_profile = UserProfile(
+                            user_id=self._client_code or "MSTOCK_USER",
+                            name=c_name,
+                            email="",
+                            broker="MSTOCK",
+                        )
                     return True
         except Exception:
             pass
         return False
 
-    def _save_token(self, token: str, expiry_seconds: int = 86400, refresh_token: str = "") -> None:
+    def _save_token(
+        self, token: str, expiry_seconds: int = 28800, refresh_token: str = ""
+    ) -> None:
         try:
             TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
+            # Parse real JWT exp claim if present
+            try:
+                parts = token.split(".")
+                if len(parts) >= 2:
+                    padded = parts[1] + "=" * ((4 - len(parts[1]) % 4) % 4)
+                    jwt_payload = json.loads(
+                        base64.urlsafe_b64decode(padded.encode()).decode("utf-8")
+                    )
+                    jwt_exp = jwt_payload.get("exp")
+                    if jwt_exp:
+                        expiry_seconds = max(60, int(jwt_exp - time.time() - 120))
+            except Exception:
+                pass
+
+            client_name = self._user_profile.name if self._user_profile else "m.Stock Trader"
             payload = {
                 "token": token,
                 "refresh_token": refresh_token,
                 "client_code": self._client_code,
+                "client_name": client_name,
+                "api_key": self._api_key,
                 "expiry": time.time() + expiry_seconds,
                 "updated_at": datetime.now().isoformat(),
             }
@@ -184,17 +235,21 @@ class MStockAPI(BrokerAPI):
         client_code: str = "",
         password: str = "",
         totp_secret: str = "",
+        force: bool = False,
     ) -> bool:
         """
         Authenticate with m.Stock Type B REST API.
-        If already authenticated via active token, returns True.
+        If already authenticated via active token and not forced, returns True.
         Performs official 2-step TOTP handshake:
           Step 1: POST /openapi/typeb/connect/login
           Step 2: POST /openapi/typeb/session/verifytotp
         Also gracefully supports single-step direct token mock responses for unit tests.
         """
-        if self.is_authenticated():
+        if not force and self.is_authenticated():
             return True
+        if force:
+            self._token = ""
+            self._token_expiry = 0
 
         ak = api_key or self._api_key
         cc = client_code or self._client_code
@@ -211,6 +266,8 @@ class MStockAPI(BrokerAPI):
                 "X-Mirae-Version": "1",
                 "Content-Type": "application/json",
             }
+            if ak:
+                headers["X-PrivateKey"] = ak
             payload = {
                 "clientcode": cc,
                 "password": pwd,
@@ -259,7 +316,11 @@ class MStockAPI(BrokerAPI):
                             self._token = jwt_token
                             self._client_code = cc
                             self._token_expiry = time.time() + 86400
-                            client_name = v_res.get("ClientName") or "m.Stock Trader"
+                            client_name = (
+                                v_res.get("ClientName")
+                                or v_res.get("CLIENTNAME")
+                                or "m.Stock Trader"
+                            )
                             self._user_profile = UserProfile(
                                 user_id=cc,
                                 name=client_name,
@@ -280,7 +341,7 @@ class MStockAPI(BrokerAPI):
                     self._save_token(direct_token, refresh_token=refresh_token)
                     return True
         except Exception:
-            return False
+            pass
         return False
 
     def get_login_url(self) -> str:
@@ -341,6 +402,31 @@ class MStockAPI(BrokerAPI):
             headers["X-PrivateKey"] = self._api_key
         return headers
 
+    def _fetch_authed(self, method: str, url: str, **kwargs) -> httpx.Response:
+        """Execute request with automatic transparent re-auth retry on 401/403."""
+        headers = self._headers()
+        if "headers" in kwargs:
+            headers.update(kwargs.pop("headers"))
+
+        m = method.upper()
+        if m == "GET":
+            resp = self._client.get(url, headers=headers, **kwargs)
+        elif m == "POST":
+            resp = self._client.post(url, headers=headers, **kwargs)
+        else:
+            resp = self._client.request(method, url, headers=headers, **kwargs)
+
+        if resp.status_code in (401, 403) and self._client_code and self._password and self._totp_secret:
+            if self.authenticate(force=True):
+                headers = self._headers()
+                if m == "GET":
+                    resp = self._client.get(url, headers=headers, **kwargs)
+                elif m == "POST":
+                    resp = self._client.post(url, headers=headers, **kwargs)
+                else:
+                    resp = self._client.request(method, url, headers=headers, **kwargs)
+        return resp
+
     # ── User Profile & Funds ──────────────────────────────────
 
     def get_profile(self) -> UserProfile:
@@ -367,7 +453,7 @@ class MStockAPI(BrokerAPI):
 
         try:
             url = f"{MSTOCK_BASE_URL}/openapi/typeb/user/fundsummary"
-            resp = self._client.get(url, headers=self._headers())
+            resp = self._fetch_authed("GET", url)
             if resp.status_code == 200:
                 data = resp.json()
                 items = data.get("data") or data.get("result") or data
@@ -406,7 +492,7 @@ class MStockAPI(BrokerAPI):
 
         try:
             url = f"{MSTOCK_BASE_URL}/openapi/typeb/portfolio/holdings"
-            resp = self._client.get(url, headers=self._headers())
+            resp = self._fetch_authed("GET", url)
             if resp.status_code == 200:
                 data = resp.json()
                 items = data.get("data") or data.get("result") or data
@@ -448,6 +534,7 @@ class MStockAPI(BrokerAPI):
                 return holdings
         except Exception:
             pass
+
         return []
 
     def get_positions(self) -> list[Position]:
@@ -457,7 +544,7 @@ class MStockAPI(BrokerAPI):
 
         try:
             url = f"{MSTOCK_BASE_URL}/openapi/typeb/portfolio/positions"
-            resp = self._client.get(url, headers=self._headers())
+            resp = self._fetch_authed("GET", url)
             if resp.status_code == 200:
                 data = resp.json()
                 items = data.get("data") or data.get("result") or data

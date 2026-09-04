@@ -3,8 +3,8 @@ import { getSymbolExchange } from '../data/universeData'
 
 /** Get the API base URL — works in both Electron and web mode. */
 export function getBaseUrl(port) {
-  if (window.__CHANAKYA_TRADE_WEB__) return window.location.origin
-  return port ? `http://127.0.0.1:${port}` : null
+  if (window.__CHANAKYA_TRADE_WEB__ && window.location.port !== '5173') return window.location.origin
+  return port ? `http://127.0.0.1:${port}` : 'http://127.0.0.1:8765'
 }
 
 /** Generate a UUID-like id for sessions. */

@@ -16,12 +16,13 @@ import { app } from 'electron'
 
 // ── Paths ────────────────────────────────────────────────────────
 
+const isWin = process.platform === 'win32'
 const PLATFORM_DIR = join(homedir(), '.trading_platform')
 const VENV_PATH    = join(PLATFORM_DIR, 'venv')
-const VENV_BIN     = join(VENV_PATH, 'bin')
-const VENV_PYTHON  = join(VENV_BIN, 'python')
-const VENV_PIP     = join(VENV_BIN, 'pip')
-const VENV_UVICORN = join(VENV_BIN, 'uvicorn')
+const VENV_BIN     = join(VENV_PATH, isWin ? 'Scripts' : 'bin')
+const VENV_PYTHON  = join(VENV_BIN, isWin ? 'python.exe' : 'python')
+const VENV_PIP     = join(VENV_BIN, isWin ? 'pip.exe' : 'pip')
+const VENV_UVICORN = join(VENV_BIN, isWin ? 'uvicorn.exe' : 'uvicorn')
 const VERSION_STAMP = join(VENV_PATH, '.app-version')
 
 // Minimum Python version required
@@ -31,6 +32,8 @@ const MIN_PYTHON_MINOR = 11
 // ── Python Detection ─────────────────────────────────────────────
 
 const PYTHON_CANDIDATES = [
+  'python',
+  'py',
   'python3',
   '/opt/homebrew/bin/python3',
   '/usr/local/bin/python3',
@@ -230,11 +233,12 @@ export async function ensurePythonEnv(onProgress) {
   // Dev mode shortcut: use repo .venv if it exists
   if (!app.isPackaged) {
     const devRoot = join(__dirname, '../../..')
-    const devVenvPython = join(devRoot, '.venv', 'bin', 'python')
+    const devVenvBin = join(devRoot, '.venv', isWin ? 'Scripts' : 'bin')
+    const devVenvPython = join(devVenvBin, isWin ? 'python.exe' : 'python')
     if (existsSync(devVenvPython)) {
       onProgress?.({ stage: 'starting', message: 'Using development environment...' })
       return {
-        venvBin: join(devRoot, '.venv', 'bin'),
+        venvBin: devVenvBin,
         sourceRoot: devRoot,
       }
     }
