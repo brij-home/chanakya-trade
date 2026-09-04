@@ -16,6 +16,7 @@ export default function WhaleFlowsCard({ onOpenOrderTicket }) {
   const [searchQuery, setSearchQuery] = useState('')
   const { call } = useAPI()
   const sendDraft = useChatStore((s) => s.sendDraft)
+  const isLoading = useChatStore((s) => s.isLoading)
 
   const fetchWhaleFlows = async () => {
     setLoading(true)
@@ -218,10 +219,17 @@ export default function WhaleFlowsCard({ onOpenOrderTicket }) {
 
                   <div className="flex items-center gap-2 flex-shrink-0">
                     <button
-                      onClick={() => {
-                        sendDraft(`analyze ${deal.symbol}`, { autoSubmit: true, showDashboard: false })
+                      disabled={isLoading}
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        if (isLoading) return
+                        sendDraft(`analyze ${deal.symbol}`)
                       }}
-                      className="px-3 py-1 rounded-lg bg-amber/15 hover:bg-amber hover:text-black border border-amber/30 text-amber text-xs font-ui font-bold transition-all cursor-pointer shadow-xs"
+                      className={`px-3 py-1 rounded-lg border text-xs font-ui font-bold transition-all shadow-xs ${
+                        isLoading
+                          ? 'opacity-50 cursor-not-allowed bg-elevated border-border text-muted'
+                          : 'bg-amber/15 hover:bg-amber hover:text-black border-amber/30 text-amber cursor-pointer'
+                      }`}
                     >
                       ⚡ AI Council Analyze
                     </button>

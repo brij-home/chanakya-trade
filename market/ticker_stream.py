@@ -318,17 +318,27 @@ class MarketTickerStream:
         # Publish to web.sse event_bus
         try:
             from web.sse import event_bus
+            from web.skills import _compute_live_tickers_sync
 
-            # Run on active event loop if available
-            try:
-                loop = asyncio.get_running_loop()
-                loop.create_task(
-                    event_bus.publish("ticker", {"type": "ticker_update", "items": all_items})
-                )
-            except RuntimeError:
-                pass
-        except Exception:
-            pass
+            ribbon_tickers = getattr(self, "_cached_ribbon_tickers", None)
+            if not ribbon_tickers:
+                try:
+                    ribbon_tickers = _compute_live_tickers_sync()
+                    self._cached_ribbon_tickers = ribbon_tickers
+                except Exception:
+                    ribbon_tickers = []
+
+            event_bus.publish_sync(
+                "ticker",
+                {
+                    "type": "ticker_update",
+                    "tickers": ribbon_tickers,
+                    "items": all_items,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                },
+            )
+        except Exception as exc:
+            logger.debug(f"Ticker publish error: {exc}")
 
     def refresh_indices_sync(self) -> None:
         """Fetch latest quotes for Indian and Global indices via REST feeds."""
@@ -440,6 +450,13 @@ class MarketTickerStream:
         except Exception as e:
             logger.debug(f"Global macro refresh error: {e}")
 
+        # 3. Ribbon Tickers (NIFTY, BANKNIFTY, SENSEX, FINNIFTY, INDIA VIX, CRUDEOIL, GOLD, SILVER, BTC)
+        try:
+            from web.skills import _compute_live_tickers_sync
+            self._cached_ribbon_tickers = _compute_live_tickers_sync()
+        except Exception as e:
+            logger.debug(f"Ribbon tickers refresh error: {e}")
+
         self._notify_listeners()
 
     def get_snapshot(self) -> dict[str, Any]:
@@ -454,16 +471,19 @@ class MarketTickerStream:
         ws_live = any("WS" in item["source"] for item in indian)
         status = "LIVE_STREAMING" if ws_live else "REST_FEED"
 
+        tickers = getattr(self, "_cached_ribbon_tickers", []) or []
+
         return {
             "status": status,
             "as_of": datetime.now(timezone.utc).isoformat(),
             "indian": indian,
             "global": global_indices,
             "commodities": commodities,
+            "tickers": tickers or [],
             "all": all_items,
         }
 
-    def start(self, poll_interval_seconds: float = 10.0) -> None:
+    def start(self, poll_interval_seconds: float = 3.0) -> None:
         """Start background polling thread for global/macro tickers."""
         if self._running:
             return

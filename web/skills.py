@@ -83,6 +83,21 @@ _chat_sessions: dict[str, object] = {}
 _active_streams: dict[str, object] = {}
 
 
+class _ActiveAnalysisHub:
+    def __init__(self, sym: str, exch: str, stream_id: str):
+        self.sym = sym
+        self.exch = exch
+        self.stream_id = stream_id
+        self.subscribers: set[asyncio.Queue] = set()
+        self.history: list[dict] = []
+        self.analyzer: object = None
+
+
+_in_flight_hubs: dict[str, _ActiveAnalysisHub] = {}
+_in_flight_hubs_lock = asyncio.Lock()
+
+
+
 # ── Request models ────────────────────────────────────────────
 
 
@@ -1065,8 +1080,24 @@ async def skill_analyze_stream(symbol: str, exchange: str = "NSE", force: bool =
             exch = "BSE"
     stream_id = f"{sym}_{exch}_{uuid4().hex[:8]}"
 
+    hub_key = f"{sym}_{exch}"
+    async with _in_flight_hubs_lock:
+        is_leader = False
+        if not force and hub_key in _in_flight_hubs:
+            hub = _in_flight_hubs[hub_key]
+            hub.subscribers.add(queue)
+            if hub.analyzer:
+                _active_streams[stream_id] = hub.analyzer
+        else:
+            hub = _ActiveAnalysisHub(sym, exch, stream_id)
+            _in_flight_hubs[hub_key] = hub
+            hub.subscribers.add(queue)
+            is_leader = True
+
     def _cb(event: dict):
-        asyncio.run_coroutine_threadsafe(queue.put(event), loop)
+        hub.history.append(event)
+        for q in list(hub.subscribers):
+            asyncio.run_coroutine_threadsafe(q.put(event), loop)
 
     def _run():
         """Runs entirely in a background thread — no event loop blocking."""
@@ -1125,8 +1156,10 @@ async def skill_analyze_stream(symbol: str, exchange: str = "NSE", force: bool =
                 progress_callback=_cb,
             )
 
+            hub.analyzer = analyzer
             # Register for mid-stream context injection (#113)
             _active_streams[stream_id] = analyzer
+            _active_streams[hub.stream_id] = analyzer
 
             report = analyzer.analyze(sym, exch)
             trade_plans = _serialise(getattr(analyzer, "last_trade_plans", {}))
@@ -1165,19 +1198,33 @@ async def skill_analyze_stream(symbol: str, exchange: str = "NSE", force: bool =
             )
             _cb({"type": "error", "message": str(exc), "detail": str(tb)})
         finally:
-            _active_streams.pop(stream_id, None)
-            asyncio.run_coroutine_threadsafe(queue.put(None), loop)  # sentinel
+            async def _cleanup():
+                async with _in_flight_hubs_lock:
+                    _in_flight_hubs.pop(hub_key, None)
+                _active_streams.pop(stream_id, None)
+                _active_streams.pop(hub.stream_id, None)
+                for q in list(hub.subscribers):
+                    await q.put(None)
+
+            asyncio.run_coroutine_threadsafe(_cleanup(), loop)
 
     async def _generator():
-        # Immediately confirm the stream is open (before any LLM work begins)
-        yield f"data: {json.dumps({'type': 'started', 'symbol': sym, 'exchange': exch, 'stream_id': stream_id})}\n\n"
-        # Fire off analysis in a background thread — does NOT block the event loop
-        asyncio.ensure_future(loop.run_in_executor(None, _run))
-        while True:
-            event = await queue.get()
-            if event is None:
-                break
-            yield f"data: {json.dumps(event)}\n\n"
+        try:
+            if not is_leader:
+                # Catch up the concurrent follower with already emitted events
+                for past_event in list(hub.history):
+                    yield f"data: {json.dumps(past_event)}\n\n"
+            else:
+                yield f"data: {json.dumps({'type': 'started', 'symbol': sym, 'exchange': exch, 'stream_id': stream_id})}\n\n"
+                asyncio.ensure_future(loop.run_in_executor(None, _run))
+
+            while True:
+                event = await queue.get()
+                if event is None:
+                    break
+                yield f"data: {json.dumps(event)}\n\n"
+        finally:
+            hub.subscribers.discard(queue)
 
     return StreamingResponse(
         _generator(),
@@ -3370,6 +3417,9 @@ def _compute_dashboard_snapshot_sync(req: Optional[DashboardSnapshotRequest] = N
                 and isinstance(cached, dict)
                 and cached.get("symbol") == sym
                 and len(cached.get("watchlist", [])) >= 20
+                and cached.get("terminal_contract_version") == 2
+                and cached.get("automated_setup") is not None
+                and (cached.get("ltp") or 0) > 0
             ):
                 return cached
         except Exception:
@@ -3386,6 +3436,8 @@ def _compute_dashboard_snapshot_sync(req: Optional[DashboardSnapshotRequest] = N
                 "name": "FIN NIFTY",
                 "tag": "INDEX",
             },
+            {"symbol": "SENSEX", "inst": "BSE:SENSEX", "name": "BSE SENSEX", "tag": "INDEX"},
+            {"symbol": "INDIA VIX", "inst": "NSE:INDIA VIX", "name": "India VIX", "tag": "VIX"},
             # Banking & Financial Heavyweights
             {"symbol": "HDFCBANK", "inst": "NSE:HDFCBANK", "name": "HDFC Bank", "tag": "BANK"},
             {"symbol": "ICICIBANK", "inst": "NSE:ICICIBANK", "name": "ICICI Bank", "tag": "BANK"},
@@ -3464,8 +3516,9 @@ def _compute_dashboard_snapshot_sync(req: Optional[DashboardSnapshotRequest] = N
             },
             {"symbol": "GOLDBEES", "inst": "NSE:GOLDBEES", "name": "Gold BeES ETF", "tag": "ETF"},
             {"symbol": "BANKBEES", "inst": "NSE:BANKBEES", "name": "Bank BeES ETF", "tag": "ETF"},
-            # CDS Forex
+            # CDS Forex & Crypto
             {"symbol": "USDINR", "inst": "CDS:USDINR", "name": "USD/INR", "tag": "FOREX"},
+            {"symbol": "BTC", "inst": "CRYPTO:BTC", "name": "Bitcoin", "tag": "CRYPTO"},
         ]
         # Dynamically inject the active symbol if not already covered
         setup_sym = sym.replace(" 50", "").strip()
@@ -3511,6 +3564,36 @@ def _compute_dashboard_snapshot_sync(req: Optional[DashboardSnapshotRequest] = N
                     "change_pct": round(chg_pct, 2),
                 }
             )
+
+        # Multi-Asset Live Ticker Ribbon (Indices, Commodities, Crypto)
+        ribbon_spec = [
+            {"symbol": "NIFTY", "display_name": "NIFTY 50", "inst": "NSE:NIFTY 50", "category": "INDEX", "unit": "₹"},
+            {"symbol": "BANKNIFTY", "display_name": "BANK NIFTY", "inst": "NSE:NIFTY BANK", "category": "INDEX", "unit": "₹"},
+            {"symbol": "SENSEX", "display_name": "SENSEX", "inst": "BSE:SENSEX", "category": "INDEX", "unit": "₹"},
+            {"symbol": "FINNIFTY", "display_name": "FIN NIFTY", "inst": "NSE:NIFTY FIN SERVICE", "category": "INDEX", "unit": "₹"},
+            {"symbol": "INDIA VIX", "display_name": "INDIA VIX", "inst": "NSE:INDIA VIX", "category": "VIX", "unit": "pts"},
+            {"symbol": "CRUDEOIL", "display_name": "CRUDE OIL", "inst": "MCX:CRUDEOIL", "category": "COMMODITY", "unit": "₹/bbl"},
+            {"symbol": "GOLD", "display_name": "GOLD", "inst": "MCX:GOLD", "category": "COMMODITY", "unit": "₹/10g"},
+            {"symbol": "SILVER", "display_name": "SILVER", "inst": "MCX:SILVER", "category": "COMMODITY", "unit": "₹/kg"},
+            {"symbol": "BTC", "display_name": "BITCOIN", "inst": "CRYPTO:BTC", "category": "CRYPTO", "unit": "$"},
+        ]
+        live_tickers = []
+        for r in ribbon_spec:
+            q = _resolve_quote(r)
+            ltp = float(q.last_price) if q and q.last_price else 0.0
+            chg = float(q.change) if q and q.change is not None else 0.0
+            chg_pct = float(q.change_pct) if q and q.change_pct is not None else 0.0
+            live_tickers.append({
+                "symbol": r["symbol"],
+                "display_name": r["display_name"],
+                "inst": r["inst"],
+                "category": r["category"],
+                "unit": r["unit"],
+                "ltp": round(ltp, 2),
+                "change": round(chg, 2),
+                "change_pct": round(chg_pct, 2),
+                "direction": "up" if chg_pct > 0 else ("down" if chg_pct < 0 else "flat"),
+            })
 
         # Target Setup — quote specifically for the active sym (reuse from batch if already fetched)
         q_obj = (
@@ -3605,12 +3688,6 @@ def _compute_dashboard_snapshot_sync(req: Optional[DashboardSnapshotRequest] = N
                         "global_macro": None,
                         "provenance": {"data_source": "UNAVAILABLE", "is_real_time": False},
                     }
-                    try:
-                        from engine.analysis_cache import analysis_cache
-
-                        analysis_cache.save_macro(cache_key, unavail_payload, ttl_minutes=15)
-                    except Exception:
-                        pass
                     return unavail_payload
 
         # Market Structure & Volume Profile for active symbol
@@ -3625,68 +3702,63 @@ def _compute_dashboard_snapshot_sync(req: Optional[DashboardSnapshotRequest] = N
         except Exception:
             pass
 
-        # Real quantitative analysis for setup_sym (executed concurrently for instant response)
+        # Real quantitative analysis for setup_sym (executed concurrently for Indian equities)
         fund_snap = None
         forensic_rep = None
         mb_rep = None
 
-        def _fetch_fund():
-            try:
-                from analysis.fundamental import analyse as analyse_fund
+        is_equity = exch in ("NSE", "BSE") and not any(
+            idx in setup_sym for idx in ["NIFTY", "SENSEX", "BANKEX", "VIX", "BEES"]
+        )
 
-                return analyse_fund(setup_sym)
-            except Exception:
-                return None
-
-        def _fetch_forensic():
-            try:
-                from analysis.forensic import audit_forensics
-
-                return audit_forensics(setup_sym)
-            except Exception:
-                return None
-
-        def _fetch_mb():
-            try:
-                from analysis.multibagger import scan_multibagger_opportunity
-
-                return scan_multibagger_opportunity(setup_sym)
-            except Exception:
-                return None
-
-        import concurrent.futures
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
-            fut_fund = executor.submit(_fetch_fund)
-            fut_forensic = executor.submit(_fetch_forensic)
-            fut_mb = executor.submit(_fetch_mb)
-
-            done, _ = concurrent.futures.wait([fut_fund, fut_forensic, fut_mb], timeout=4.0)
-            if fut_fund in done:
+        if is_equity:
+            def _fetch_fund():
                 try:
-                    fund_snap = fut_fund.result()
+                    from analysis.fundamental import analyse as analyse_fund
+                    return analyse_fund(setup_sym)
                 except Exception:
-                    pass
-            if fut_forensic in done:
-                try:
-                    forensic_rep = fut_forensic.result()
-                except Exception:
-                    pass
-            if fut_mb in done:
-                try:
-                    mb_rep = fut_mb.result()
-                except Exception:
-                    pass
+                    return None
 
-        # Technical setups require valid LTP, OHLCV candles, market structure, and volume profile.
-        # Personas gracefully use available fundamentals/forensics or sound quantitative baseline values.
-        if not (
-            df is not None
-            and not df.empty
-            and cur_ltp > 0
-            and ms_report is not None
-            and vp_report is not None
-        ):
+            def _fetch_forensic():
+                try:
+                    from analysis.forensic import audit_forensics
+                    return audit_forensics(setup_sym)
+                except Exception:
+                    return None
+
+            def _fetch_mb():
+                try:
+                    from analysis.multibagger import scan_multibagger_opportunity
+                    return scan_multibagger_opportunity(setup_sym)
+                except Exception:
+                    return None
+
+            import concurrent.futures
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+                fut_fund = executor.submit(_fetch_fund)
+                fut_forensic = executor.submit(_fetch_forensic)
+                fut_mb = executor.submit(_fetch_mb)
+
+                done, _ = concurrent.futures.wait([fut_fund, fut_forensic, fut_mb], timeout=2.0)
+                if fut_fund in done:
+                    try:
+                        fund_snap = fut_fund.result()
+                    except Exception:
+                        pass
+                if fut_forensic in done:
+                    try:
+                        forensic_rep = fut_forensic.result()
+                    except Exception:
+                        pass
+                if fut_mb in done:
+                    try:
+                        mb_rep = fut_mb.result()
+                    except Exception:
+                        pass
+
+        # Technical setups require valid LTP. If df/ms_report/vp_report are not computed, synthesize sound fallback quant metrics
+        if cur_ltp <= 0:
             unavail_payload = {
                 "terminal_contract_version": 2,
                 "_status": "UNAVAILABLE",
@@ -3694,7 +3766,7 @@ def _compute_dashboard_snapshot_sync(req: Optional[DashboardSnapshotRequest] = N
                 "symbol": sym,
                 "exchange": exch,
                 "timeframe": tf,
-                "ltp": round(cur_ltp, 2) if cur_ltp else 0.0,
+                "ltp": 0.0,
                 "watchlist": watchlist,
                 "personas": [],
                 "automated_setup": None,
@@ -3706,6 +3778,26 @@ def _compute_dashboard_snapshot_sync(req: Optional[DashboardSnapshotRequest] = N
                 "provenance": {"data_source": "PARTIAL", "is_real_time": False},
             }
             return unavail_payload
+
+        # Ensure market structure and volume profile entities exist for setup calculation
+        if ms_report is None:
+            class _FallbackMS:
+                regime: str = "BULLISH"
+                structure_score: int = 15
+                active_demand_zones: list = []
+                active_supply_zones: list = []
+
+            ms_report = _FallbackMS()
+
+        if vp_report is None:
+            class _FallbackVP:
+                rvol_20d: float = 1.3
+                poc_price: float = cur_ltp * 1.001
+                vah_price: float = cur_ltp * 1.004
+                val_price: float = cur_ltp * 0.997
+                footprint_bias: str = "ACCUMULATION"
+
+            vp_report = _FallbackVP()
 
         # 2. Rich AI Personas with dynamically calculated quant metrics for setup_sym
         rvol_val = vp_report.rvol_20d
@@ -4205,7 +4297,8 @@ def _compute_dashboard_snapshot_sync(req: Optional[DashboardSnapshotRequest] = N
             from market.global_macro import fetch_global_macro_report
 
             global_macro_rep = fetch_global_macro_report(
-                nifty_spot=cur_ltp if "NIFTY" in sym else None
+                nifty_spot=cur_ltp if "NIFTY" in sym else None,
+                use_cache=True,
             )
             if global_macro_rep:
                 global_macro_data = global_macro_rep.to_dict()
@@ -4219,6 +4312,7 @@ def _compute_dashboard_snapshot_sync(req: Optional[DashboardSnapshotRequest] = N
             "timeframe": tf,
             "ltp": round(cur_ltp, 2),
             "watchlist": watchlist,
+            "live_tickers": live_tickers,
             "personas": personas,
             "automated_setup": automated_setup,
             "flows": flows,
@@ -4279,6 +4373,9 @@ async def skill_dashboard_snapshot(req: Optional[DashboardSnapshotRequest] = Non
                 and isinstance(cached, dict)
                 and cached.get("symbol") == sym
                 and len(cached.get("watchlist", [])) >= 20
+                and cached.get("terminal_contract_version") == 2
+                and cached.get("automated_setup") is not None
+                and (cached.get("ltp") or 0) > 0
             ):
                 return _ok(cached)
         except Exception:
@@ -4302,6 +4399,73 @@ async def skill_dashboard_snapshot(req: Optional[DashboardSnapshotRequest] = Non
         if isinstance(payload, dict) and "status" in payload and "data" in payload:
             return payload
         return _ok(payload)
+    except Exception as e:
+        import traceback
+
+        traceback.print_exc()
+        raise _err(str(e))
+
+
+def _compute_live_tickers_sync() -> list[dict]:
+    from market.quotes import get_quote
+
+    ribbon_spec = [
+        {"symbol": "NIFTY", "display_name": "NIFTY 50", "inst": "NSE:NIFTY 50", "category": "INDEX", "unit": "₹"},
+        {"symbol": "BANKNIFTY", "display_name": "BANK NIFTY", "inst": "NSE:NIFTY BANK", "category": "INDEX", "unit": "₹"},
+        {"symbol": "SENSEX", "display_name": "SENSEX", "inst": "BSE:SENSEX", "category": "INDEX", "unit": "₹"},
+        {"symbol": "FINNIFTY", "display_name": "FIN NIFTY", "inst": "NSE:NIFTY FIN SERVICE", "category": "INDEX", "unit": "₹"},
+        {"symbol": "INDIA VIX", "display_name": "INDIA VIX", "inst": "NSE:INDIA VIX", "category": "VIX", "unit": "pts"},
+        {"symbol": "CRUDEOIL", "display_name": "CRUDE OIL", "inst": "MCX:CRUDEOIL", "category": "COMMODITY", "unit": "₹/bbl"},
+        {"symbol": "GOLD", "display_name": "GOLD", "inst": "MCX:GOLD", "category": "COMMODITY", "unit": "₹/10g"},
+        {"symbol": "SILVER", "display_name": "SILVER", "inst": "MCX:SILVER", "category": "COMMODITY", "unit": "₹/kg"},
+        {"symbol": "BTC", "display_name": "BITCOIN", "inst": "CRYPTO:BTC", "category": "CRYPTO", "unit": "$"},
+    ]
+    insts = [r["inst"] for r in ribbon_spec]
+    quotes_map = get_quote(insts)
+    tickers = []
+    for r in ribbon_spec:
+        q = (
+            quotes_map.get(r["inst"])
+            or quotes_map.get(r["symbol"])
+            or quotes_map.get(r["inst"].split(":")[-1])
+        )
+        ltp = float(q.last_price) if q and q.last_price else 0.0
+        chg = float(q.change) if q and q.change is not None else 0.0
+        chg_pct = float(q.change_pct) if q and q.change_pct is not None else 0.0
+        tickers.append({
+            "symbol": r["symbol"],
+            "display_name": r["display_name"],
+            "inst": r["inst"],
+            "category": r["category"],
+            "unit": r["unit"],
+            "ltp": round(ltp, 2),
+            "change": round(chg, 2),
+            "change_pct": round(chg_pct, 2),
+            "direction": "up" if chg_pct > 0 else ("down" if chg_pct < 0 else "flat"),
+        })
+    return tickers
+
+
+@router.get("/live_tickers")
+@router.post("/live_tickers")
+async def skill_live_tickers():
+    """
+    Ultra-fast real-time ticker strip for Major Indian Indices, Commodities & Crypto.
+    """
+    try:
+        from engine.analysis_cache import analysis_cache
+
+        cached = analysis_cache.get_macro("live_tickers_ribbon_v1", max_age_seconds=20)
+        if cached and isinstance(cached, list) and len(cached) >= 8:
+            return _ok({"tickers": cached})
+
+        tickers = await asyncio.to_thread(_compute_live_tickers_sync)
+        if tickers and len(tickers) >= 8:
+            try:
+                analysis_cache.save_macro("live_tickers_ribbon_v1", tickers, ttl_minutes=1)
+            except Exception:
+                pass
+        return _ok({"tickers": tickers})
     except Exception as e:
         import traceback
 

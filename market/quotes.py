@@ -165,6 +165,16 @@ _CDS_SYMBOLS = {
     "JPY/INR",
 }
 _BSE_SYMBOLS = {"SENSEX", "BANKEX", "BSE SENSEX", "BSE BANKEX"}
+_CRYPTO_SYMBOLS = {
+    "BTC",
+    "BITCOIN",
+    "BTCUSD",
+    "BTC-USD",
+    "BTCINR",
+    "ETH",
+    "ETHEREUM",
+    "SOL",
+}
 
 
 def normalize_instrument(inst: str) -> str:
@@ -173,6 +183,8 @@ def normalize_instrument(inst: str) -> str:
     if ":" in s:
         return s
     upper = s.upper()
+    if upper in _CRYPTO_SYMBOLS:
+        return f"CRYPTO:{upper}"
     if upper in _MCX_SYMBOLS:
         return f"MCX:{upper}"
     if upper in _CDS_SYMBOLS:

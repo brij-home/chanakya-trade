@@ -7,6 +7,7 @@ import PersonaTrackRecordCard from '../Cards/PersonaTrackRecordCard'
 import GlobalMacroCard from '../Cards/GlobalMacroCard'
 import SmartTypeahead from '../Common/SmartTypeahead'
 import UnavailableState from '../Common/UnavailableState'
+import LiveTickerRibbon from '../Common/LiveTickerRibbon'
 import { INDIAN_UNIVERSE, fuzzySearchUniverse, getSymbolExchange } from '../../data/universeData'
 
 export default function TerminalView({
@@ -141,8 +142,21 @@ export default function TerminalView({
   }
 
   const setupRaw = data?.automated_setup
-  // Check if data matches current selectedSymbol
-  const cleanSym = (s) => (s || '').replace(/^(NSE:|BSE:|MCX:|CDS:)/i, '').replace(/ 50$/i, '').trim().toUpperCase()
+  // Canonical symbol normalization for robust cross-exchange matching
+  const cleanSym = (s) => {
+    if (!s) return ''
+    let str = String(s)
+      .replace(/^(NSE:|BSE:|MCX:|CDS:|CRYPTO:|BINANCE:|FX:|FOREX:)/i, '')
+      .replace(/\s*\(.*?\)/g, '')
+      .trim()
+      .toUpperCase()
+    if (str.includes('BANK') && str.includes('NIFTY')) return 'BANKNIFTY'
+    if (str.includes('FIN') && str.includes('NIFTY')) return 'FINNIFTY'
+    if (str.includes('MID') && str.includes('NIFTY')) return 'MIDCPNIFTY'
+    if (str.includes('VIX')) return 'INDIA VIX'
+    if (str === 'NIFTY 50' || str === 'NIFTY50') return 'NIFTY'
+    return str.replace(/\s+/g, '')
+  }
   const isDataMatching = Boolean(
     data && (
       cleanSym(data.symbol) === cleanSym(selectedSymbol) ||
@@ -167,6 +181,9 @@ export default function TerminalView({
   if (!hasValidatedSetup) {
     return (
       <div className="flex-1 overflow-y-auto p-3 font-ui" style={{ background: 'var(--color-surface)' }}>
+        <div className="mb-3">
+          <LiveTickerRibbon onSelectSymbol={(sym) => setSelectedSymbol(sym)} />
+        </div>
         <div className="max-w-2xl mx-auto mt-12 rounded-2xl" style={{ background: 'var(--color-panel)', border: '1px solid var(--color-border)' }}>
           <UnavailableState
             title={loading ? 'Preparing the terminal' : 'Validated market setup unavailable'}
@@ -188,13 +205,15 @@ export default function TerminalView({
   const resolvedExchange = getSymbolExchange(selectedSymbol)
   // Seed prices for pre-fetch calibration — keyed by symbol for O(1) lookup
   const COMMODITY_SEED_LTP = {
-    // MCX — Sep 2026 approximate price levels
+    // MCX — approximate price levels
     GOLD: 73500, GOLDM: 73500, GOLDPETAL: 7350, SILVER: 88500, SILVERM: 88500, SILVERMIC: 88500,
     CRUDEOIL: 8200, CRUDEOILM: 820, BRENT: 8600,
     NATURALGAS: 230, NATGASMINI: 230, NATGAS: 230,
     COPPER: 890, ZINC: 280, ALUMINIUM: 225, LEAD: 195, COTTON: 29000,
     // CDS Forex
     USDINR: 84.02, EURINR: 92.5, GBPINR: 107.5, JPYINR: 56.5,
+    // Crypto
+    BTC: 81000, BITCOIN: 81000, BTCUSD: 81000, 'BTC-USD': 81000, ETH: 2800, ETHEREUM: 2800, SOL: 140,
   }
   const fallbackLtp = COMMODITY_SEED_LTP[selectedSymbol] != null
     ? COMMODITY_SEED_LTP[selectedSymbol]
@@ -610,8 +629,11 @@ export default function TerminalView({
     { symbol: 'NIFTYBEES',  name: 'Nippon Nifty 50 ETF',cat: 'ETF',       ltp: 295.00,   change_pct: 0.45 },
     { symbol: 'GOLDBEES',   name: 'Nippon Gold BeES ETF',cat: 'ETF',      ltp: 73.50,    change_pct: 0.35 },
     { symbol: 'BANKBEES',   name: 'Nippon Bank BeES ETF',cat: 'ETF',      ltp: 580.00,   change_pct: 0.60 },
-    // Forex / Currency
+    // Forex / Currency & Crypto
     { symbol: 'USDINR',     name: 'USD / INR Rupee',    cat: 'FOREX',     ltp: 84.02,    change_pct: -0.05 },
+    { symbol: 'BTC',        name: 'Bitcoin Spot ($)',    cat: 'CRYPTO',    ltp: 79420.00, change_pct: -2.28 },
+    { symbol: 'SENSEX',     name: 'BSE SENSEX 30',      cat: 'INDEX',     ltp: 76515.00, change_pct: 0.48 },
+    { symbol: 'INDIA VIX',  name: 'India Volatility VIX',cat: 'VIX',      ltp: 10.68,    change_pct: -6.07 },
   ]
 
   // Combined Watchlist: server items merged with master universe
@@ -890,6 +912,13 @@ export default function TerminalView({
           </button>
         </div>
       </div>
+
+      {/* Real-Time Multi-Asset Ticker Ribbon (Indices, Commodities, Crypto) */}
+      <LiveTickerRibbon
+        tickers={data?.live_tickers}
+        selectedSymbol={selectedSymbol}
+        onSelectSymbol={setSelectedSymbol}
+      />
 
       {/* Main 3-Column Terminal Layout */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">

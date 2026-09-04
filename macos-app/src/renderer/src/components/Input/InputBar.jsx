@@ -358,6 +358,7 @@ export default function InputBar() {
   // True when an analysis is actively streaming — input stays active in "context mode"
   const isStreaming = isLoading && !!streamCancel
   const inputRef = useRef(null)
+  const isSubmittingRef = useRef(false)
 
   // When a card pre-fills the draft or triggers auto-execution
   useEffect(() => {
@@ -369,9 +370,10 @@ export default function InputBar() {
       clearAutoSubmit()
       inputRef.current?.focus()
       if (shouldAuto) {
-        setTimeout(() => {
+        const timer = setTimeout(() => {
           submit(textToRun)
         }, 20)
+        return () => clearTimeout(timer)
       }
     }
   }, [draft, autoSubmit])
@@ -379,6 +381,23 @@ export default function InputBar() {
   function runStreaming(symbol, exchange) {
     const rawSym = (symbol || '').toUpperCase().trim()
     const resolvedExch = (!exchange || exchange === 'NSE') ? getSymbolExchange(rawSym) : exchange
+
+    // Concurrency Deduplication Guard: Never run multiple concurrent analyses for the same symbol
+    const activeMessages = useChatStore.getState().messages || []
+    const isAlreadyStreamingThis = activeMessages.some(
+      (m) => m.cardType === 'streaming_analysis' && m.data?.symbol === rawSym && m.data?.phase !== 'done' && !m.data?.error
+    )
+    if (isAlreadyStreamingThis) {
+      console.warn(`[InputBar] Analysis for ${rawSym} is already actively in progress. Suppressing duplicate execution.`)
+      return
+    }
+
+    // If another analysis is active on a different symbol, cancel previous stream before starting new one
+    const existingCancel = useChatStore.getState().streamCancel
+    if (existingCancel) {
+      existingCancel()
+    }
+
     const msgId = Date.now() + 1
     startStreamingMessage(msgId, rawSym, resolvedExch)
 
@@ -535,7 +554,13 @@ export default function InputBar() {
       return
     }
 
-    if (isLoading) return
+    const store = useChatStore.getState()
+    if (store.isLoading || isSubmittingRef.current) {
+      console.warn('[InputBar] Submission suppressed: previous action still in progress.')
+      return
+    }
+    isSubmittingRef.current = true
+    setTimeout(() => { isSubmittingRef.current = false }, 350)
 
     useChatStore.getState().setShowDashboard(false)
     setValue('')

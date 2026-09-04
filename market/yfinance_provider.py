@@ -118,9 +118,22 @@ _INDEX_MAP = {
 }
 
 
+# Crypto benchmark mapping
+_CRYPTO_MAP = {
+    "BTC": "BTC-USD",
+    "BITCOIN": "BTC-USD",
+    "BTCUSD": "BTC-USD",
+    "BTC-USD": "BTC-USD",
+    "BTCINR": "BTC-INR",
+    "ETH": "ETH-USD",
+    "ETHEREUM": "ETH-USD",
+    "SOL": "SOL-USD",
+}
+
+
 def _to_yf_symbol(symbol: str, exchange: str = "NSE") -> str:
-    """Convert NSE/BSE/MCX symbol to Yahoo Finance ticker."""
-    # Strip exchange prefix if present (e.g. "MCX:GOLD" → "GOLD", "NSE:RELIANCE" → "RELIANCE")
+    """Convert NSE/BSE/MCX/Crypto symbol to Yahoo Finance ticker."""
+    # Strip exchange prefix if present (e.g. "MCX:GOLD" → "GOLD", "NSE:RELIANCE" → "RELIANCE", "CRYPTO:BTC" → "BTC")
     if ":" in symbol:
         exchange, symbol = symbol.split(":", 1)
 
@@ -139,6 +152,10 @@ def _to_yf_symbol(symbol: str, exchange: str = "NSE") -> str:
             if upper.startswith(c):
                 return _COMMODITY_MAP[c]
 
+    # 0. Check Crypto Map (BTC, ETH, SOL)
+    if upper in _CRYPTO_MAP:
+        return _CRYPTO_MAP[upper]
+
     # 1. Check Commodity Map (Gold, Silver, Crude Oil, Natural Gas, Copper, etc.)
     if upper in _COMMODITY_MAP:
         return _COMMODITY_MAP[upper]
@@ -153,6 +170,13 @@ def _to_yf_symbol(symbol: str, exchange: str = "NSE") -> str:
 
     # 4. Check exchange overrides
     exch_upper = (exchange or "NSE").upper().strip()
+    if exch_upper in ("CRYPTO", "BINANCE", "COINBASE"):
+        if upper in _CRYPTO_MAP:
+            return _CRYPTO_MAP[upper]
+        if not upper.endswith("-USD") and not upper.endswith("-INR"):
+            return f"{upper}-USD"
+        return upper
+
     if exch_upper == "MCX":
         for c in _COMMODITY_MAP:
             if upper.startswith(c):
@@ -370,7 +394,7 @@ def yf_get_quotes(instruments: list[str]) -> dict[str, Quote]:
         except Exception:
             return inst_str, None
 
-    max_workers = min(12, len(missing))
+    max_workers = min(32, len(missing))
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {executor.submit(_fetch_single, inst): inst for inst in missing}
         for fut in as_completed(futures):

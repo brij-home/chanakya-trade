@@ -64,7 +64,7 @@ if sys.platform == "win32":
         except Exception:
             pass
 
-from fastapi import FastAPI, Request as _Request
+from fastapi import FastAPI, Request as _Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse, StreamingResponse
 
 from web.auth import auth_router, init_db as init_auth_db, get_session, user_count
@@ -150,9 +150,19 @@ async def lifespan(app: FastAPI):
 
     init_auth_db()
     await _auto_restore_brokers()
+
+    # Record main event loop for threadsafe SSE publishing
+    from web.sse import event_bus
+    event_bus._main_loop = asyncio.get_running_loop()
+
+    # Start the continuous real-time market ticker stream engine (3s loop)
+    from market.ticker_stream import ticker_stream
+    ticker_stream.start(poll_interval_seconds=3.0)
+
     warmer_task = asyncio.create_task(_background_cache_warmer())
     yield
     warmer_task.cancel()
+    ticker_stream.stop()
 
 
 app = FastAPI(
@@ -2555,13 +2565,13 @@ async def stream_ticker():
     """
     from market.ticker_stream import ticker_stream
 
-    # Ensure background worker is running
-    ticker_stream.start()
+    ticker_stream.start(poll_interval_seconds=3.0)
 
     async def _ticker_generator():
-        # 1. Send initial snapshot immediately
+        # 1. Send initial snapshot immediately with ribbon tickers
         snap = ticker_stream.get_snapshot()
-        yield f"data: {json.dumps({'type': 'ticker_snapshot', 'data': snap})}\n\n"
+        tickers = snap.get("tickers", [])
+        yield f"data: {json.dumps({'type': 'ticker_snapshot', 'data': snap, 'tickers': tickers})}\n\n"
 
         # 2. Stream subsequent updates
         async for chunk in _event_bus.subscribe("ticker"):
@@ -2575,6 +2585,36 @@ async def stream_ticker():
             "X-Accel-Buffering": "no",
         },
     )
+
+
+@app.websocket("/ws/ticker")
+@app.websocket("/api/ticker/ws")
+async def websocket_ticker(ws: WebSocket):
+    """
+    WebSocket endpoint for sub-second real-time market ticks
+    (Indices, MCX Commodities, Crypto).
+    """
+    await ws.accept()
+    from market.ticker_stream import ticker_stream
+
+    ticker_stream.start(poll_interval_seconds=3.0)
+    snap = ticker_stream.get_snapshot()
+    tickers = snap.get("tickers", [])
+    await ws.send_text(
+        json.dumps({"type": "ticker_snapshot", "data": snap, "tickers": tickers})
+    )
+
+    try:
+        async for chunk in _event_bus.subscribe("ticker"):
+            if chunk.startswith("data: "):
+                raw = chunk[6:].strip()
+                await ws.send_text(raw)
+            elif not chunk.startswith(":"):
+                await ws.send_text(chunk)
+    except WebSocketDisconnect:
+        pass
+    except Exception:
+        pass
 
 
 # ── Institutional Preflight, Mode & Charges Endpoints ───────────

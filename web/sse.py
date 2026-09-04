@@ -91,6 +91,14 @@ class SSEEventBus:
 
     def publish_sync(self, channel: str, data: dict) -> None:
         """Thread-safe publish from sync code (e.g. polling threads)."""
+        target_loop = getattr(self, "_main_loop", None)
+        if target_loop and target_loop.is_running():
+            try:
+                asyncio.run_coroutine_threadsafe(self.publish(channel, data), target_loop)
+                return
+            except Exception:
+                pass
+
         try:
             loop = asyncio.get_running_loop()
             asyncio.run_coroutine_threadsafe(self.publish(channel, data), loop)

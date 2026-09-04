@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import { useChatStore, getBaseUrl } from '../../store/chatStore'
 import { useMarketClock } from '../../hooks/useMarketClock'
+import { useAPI } from '../../hooks/useAPI'
 import SmartTypeahead from '../Common/SmartTypeahead'
 import { fuzzySearchUniverse } from '../../data/universeData'
 
@@ -63,41 +64,78 @@ export function MarketClock() {
 }
 
 /**
- * LiveIndexTicker — compact NIFTY / BankNifty strip
+ * LiveIndexTicker — dynamic real-time ticker strip for Indices, Commodities & Crypto
  */
-export function LiveIndexTicker() {
-  const { nifty, status } = useMarketClock()
-  const [bnifty] = useState(57496)
+export function LiveIndexTicker({ onSymbolChange }) {
+  const { call } = useAPI()
+  const [tickers, setTickers] = useState([])
 
-  const indices = [
-    { label: 'NIFTY', value: nifty || 24175, change: 0.45 },
-    { label: 'BKNIFTY', value: bnifty, change: 0.62 },
-  ]
+  useEffect(() => {
+    let mounted = true
+    const fetchTickers = async () => {
+      try {
+        const res = await call('/skills/live_tickers', {}, { method: 'GET' })
+        const list = res?.data?.tickers || res?.tickers
+        if (mounted && Array.isArray(list) && list.length > 0) {
+          setTickers(list)
+        }
+      } catch {
+        // Fallback gracefully without console spam
+      }
+    }
+
+    fetchTickers()
+    const interval = setInterval(fetchTickers, 10000)
+    return () => {
+      mounted = false
+      clearInterval(interval)
+    }
+  }, [])
+
+  // Curated indices for non-terminal views
+  const displayItems = tickers.length > 0
+    ? tickers.filter((t) => ['NIFTY', 'BANKNIFTY', 'INDIA VIX'].includes(t.symbol))
+    : [
+        { symbol: 'NIFTY', display_name: 'NIFTY', ltp: 23897.70, change_pct: 0.10, unit: '₹' },
+        { symbol: 'BANKNIFTY', display_name: 'BKNIFTY', ltp: 57369.65, change_pct: -0.02, unit: '₹' },
+        { symbol: 'INDIA VIX', display_name: 'INDIA VIX', ltp: 10.68, change_pct: -6.07, unit: 'pts' },
+      ]
 
   return (
-    <div className="hidden lg:flex items-center gap-3 no-drag">
-      {indices.map((idx) => (
-        <div key={idx.label} className="flex items-center gap-1.5">
-          <span
-            className="text-[9px] font-bold tracking-wider"
-            style={{ color: 'var(--color-subtle)' }}
+    <div className="hidden lg:flex items-center gap-2 no-drag overflow-x-auto no-scrollbar max-w-[620px]">
+      {displayItems.map((idx) => {
+        const isUp = (idx.direction === 'up') || (idx.change_pct > 0)
+        const isDown = (idx.direction === 'down') || (idx.change_pct < 0)
+        const changeColor = isUp ? 'var(--color-emerald)' : isDown ? 'var(--color-rose)' : 'var(--color-subtle)'
+
+        return (
+          <button
+            key={idx.symbol}
+            onClick={() => onSymbolChange?.(idx.symbol)}
+            className="flex items-center gap-1.5 px-2 py-0.5 rounded-lg hover:bg-elevated/90 transition-all cursor-pointer text-left flex-shrink-0"
+            title={`Switch view to ${idx.display_name || idx.symbol}`}
           >
-            {idx.label}
-          </span>
-          <span
-            className="text-xs font-mono font-bold tabular-nums"
-            style={{ color: 'var(--color-text)' }}
-          >
-            {Number(idx.value).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
-          </span>
-          <span
-            className="text-[10px] font-semibold font-mono tabular-nums"
-            style={{ color: idx.change >= 0 ? 'var(--color-emerald)' : 'var(--color-rose)' }}
-          >
-            {idx.change >= 0 ? '+' : ''}{idx.change.toFixed(2)}%
-          </span>
-        </div>
-      ))}
+            <span
+              className="text-[9px] font-bold tracking-wider font-mono"
+              style={{ color: 'var(--color-subtle)' }}
+            >
+              {idx.display_name?.replace(' 50', '') || idx.symbol}
+            </span>
+            <span
+              className="text-xs font-mono font-bold tabular-nums"
+              style={{ color: 'var(--color-text)' }}
+            >
+              {idx.unit === '$' ? '$' : ''}{Number(idx.ltp || 0).toLocaleString(idx.unit === '$' ? 'en-US' : 'en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+            </span>
+            <span
+              className="text-[10px] font-semibold font-mono tabular-nums"
+              style={{ color: changeColor }}
+            >
+              {isUp ? '+' : ''}{Number(idx.change_pct || 0).toFixed(2)}%
+            </span>
+          </button>
+        )
+      })}
     </div>
   )
 }
@@ -252,14 +290,16 @@ export default function ContextBar({
         </div>
       )}
 
-      {/* Divider */}
-      <div
-        className="hidden md:block h-4 w-px flex-shrink-0"
-        style={{ background: 'var(--color-border)' }}
-      />
-
-      {/* Key market metrics strip */}
-      <LiveIndexTicker />
+      {/* Key market metrics strip — only shown in non-terminal views to eliminate duplication */}
+      {activeView !== 'terminal' && (
+        <>
+          <div
+            className="hidden md:block h-4 w-px flex-shrink-0"
+            style={{ background: 'var(--color-border)' }}
+          />
+          <LiveIndexTicker onSymbolChange={onSymbolChange} />
+        </>
+      )}
     </div>
   )
 }
