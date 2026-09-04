@@ -667,17 +667,29 @@ class OptionsAnalyst(BaseAnalyst):
                     else:
                         points.append(f"IV Rank: {iv_rank} (low — good for buying options)")
 
-            # If no options data was available, report clearly
+            # If no options data was available, report clearly with F&O status awareness
             if not has_data:
+                from engine.position_sizer import is_fno_symbol, get_lot_size
+
+                is_fno = is_fno_symbol(clean_sym)
+                if is_fno:
+                    lot_size = get_lot_size(clean_sym)
+                    msg = (
+                        f"F&O Stock: {clean_sym} is an active NSE derivative (Lot: {lot_size}). "
+                        f"Live options feed unavailable (market closed or broker disconnected)."
+                    )
+                else:
+                    msg = (
+                        f"Cash Equity Stock: {clean_sym} is cash equity only (not in NSE F&O segment). "
+                        f"Options PCR & Max Pain N/A."
+                    )
                 return AnalystReport(
                     analyst=self.name,
                     verdict="UNAVAILABLE",
                     confidence=0,
                     score=0,
-                    key_points=[
-                        f"Non-F&O Stock: {clean_sym} is cash equity only (no NSE derivative contracts). Options PCR & Max Pain N/A."
-                    ],
-                    data={"options_available": False, "pcr": None, "max_pain": None},
+                    key_points=[msg],
+                    data={"options_available": False, "is_fno": is_fno, "pcr": None, "max_pain": None},
                 )
 
             # Derive verdict from PCR

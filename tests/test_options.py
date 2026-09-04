@@ -119,17 +119,27 @@ class TestPCRAndMaxPain:
         max_pain = mo.get_max_pain("NIFTY")
         assert max_pain == 24000.0
 
-    def test_options_analyst_reports_unavailable_for_non_fno(self):
-        """OptionsAnalyst should report UNAVAILABLE with 0 score and clear message for non-F&O stocks."""
+    def test_options_analyst_reports_unavailable_with_fno_awareness(self):
+        """OptionsAnalyst should report UNAVAILABLE with 0 score, recognizing F&O vs Cash Equity status."""
         from agent.tools import build_registry
         from agent.multi_agent import OptionsAnalyst
 
         reg = build_registry()
-        # Ensure get_pcr and get_max_pain return None for KAYNES
-        report = OptionsAnalyst(reg).analyze("KAYNES")
-        assert report.verdict == "UNAVAILABLE"
-        assert report.score == 0
-        assert report.confidence == 0
-        assert any("Non-F&O Stock" in pt for pt in report.key_points)
-        assert report.data.get("options_available") is False
+        # 1. F&O stock without active live feed (e.g. KAYNES)
+        report_fno = OptionsAnalyst(reg).analyze("KAYNES")
+        assert report_fno.verdict == "UNAVAILABLE"
+        assert report_fno.score == 0
+        assert report_fno.confidence == 0
+        assert any("F&O Stock" in pt for pt in report_fno.key_points)
+        assert report_fno.data.get("is_fno") is True
+        assert report_fno.data.get("options_available") is False
+
+        # 2. Pure cash equity stock (not in F&O)
+        report_cash = OptionsAnalyst(reg).analyze("MRPL")
+        assert report_cash.verdict == "UNAVAILABLE"
+        assert report_cash.score == 0
+        assert report_cash.confidence == 0
+        assert any("Cash Equity Stock" in pt for pt in report_cash.key_points)
+        assert report_cash.data.get("is_fno") is False
+        assert report_cash.data.get("options_available") is False
 
