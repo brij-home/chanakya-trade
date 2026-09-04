@@ -82,8 +82,15 @@ export default function App() {
   const { theme, toggle: toggleTheme } = useTheme()
   const [pilotSafety, setPilotSafety] = useState(null)
 
-  // Setup phase state machine
-  const [setupPhase, setSetupPhase] = useState('initializing')
+  // Setup phase state machine — fast path: if terminal was already initialized, skip full boot screen
+  const [setupPhase, setSetupPhase] = useState(() => {
+    try {
+      if (typeof window !== 'undefined' && localStorage.getItem('chanakya_setup_ready') === 'true') {
+        return 'ready'
+      }
+    } catch (_) {}
+    return 'initializing'
+  })
   const [setupData, setSetupData] = useState(null)
 
   // Modal state
@@ -133,14 +140,24 @@ export default function App() {
           : parseInt(window.location.port, 10) || 8765
         setPort(currentPort)
         try {
-          const res = await fetch(`${getBaseUrl(currentPort)}/api/onboarding/status`)
+          const res = await fetch(`${getBaseUrl(currentPort)}/api/onboarding/status`, {
+            signal: AbortSignal.timeout(2000),
+          })
           if (res.ok) {
             const data = await res.json()
-            setSetupPhase(data.onboarding_complete ? 'ready' : 'onboarding')
+            if (data?.onboarding_complete === false) {
+              setSetupPhase('onboarding')
+              try { localStorage.removeItem('chanakya_setup_ready') } catch (_) {}
+            } else {
+              setSetupPhase('ready')
+              try { localStorage.setItem('chanakya_setup_ready', 'true') } catch (_) {}
+            }
           } else {
             setSetupPhase('ready')
           }
-        } catch { setSetupPhase('ready') }
+        } catch {
+          setSetupPhase('ready')
+        }
       }
       checkReady()
       return
@@ -148,25 +165,44 @@ export default function App() {
 
     const safetyTimer = setTimeout(() => {
       setSetupPhase((prev) => (prev === 'initializing' ? 'ready' : prev))
-    }, 2000)
+    }, 600)
 
-    window.electronAPI?.onSetupProgress((data) => { setSetupPhase('progress'); setSetupData(data) })
-    window.electronAPI?.onSetupPythonMissing((data) => { setSetupPhase('python_missing'); setSetupData(data) })
+    window.electronAPI?.onSetupProgress((data) => {
+      setSetupPhase('progress')
+      setSetupData(data)
+    })
+    window.electronAPI?.onSetupPythonMissing((data) => {
+      setSetupPhase('python_missing')
+      setSetupData(data)
+    })
 
     window.electronAPI?.onSidecarReady(async ({ port: p }) => {
       clearTimeout(safetyTimer)
       setPort(p)
       try {
-        const res = await fetch(`${getBaseUrl(p)}/api/onboarding/status`)
+        const res = await fetch(`${getBaseUrl(p)}/api/onboarding/status`, {
+          signal: AbortSignal.timeout(2000),
+        })
         const data = await res.json()
-        setSetupPhase(data.onboarding_complete ? 'ready' : 'onboarding')
-      } catch { setSetupPhase('ready') }
+        if (data?.onboarding_complete === false) {
+          setSetupPhase('onboarding')
+          try { localStorage.removeItem('chanakya_setup_ready') } catch (_) {}
+        } else {
+          setSetupPhase('ready')
+          try { localStorage.setItem('chanakya_setup_ready', 'true') } catch (_) {}
+        }
+      } catch {
+        setSetupPhase('ready')
+      }
     })
 
     window.electronAPI?.onSidecarError(({ message, details }) => {
       clearTimeout(safetyTimer)
       setSidecarError(message)
-      if (setupPhase !== 'ready') { setSetupPhase('error'); setSetupData({ message, details }) }
+      if (setupPhase !== 'ready') {
+        setSetupPhase('error')
+        setSetupData({ message, details })
+      }
     })
 
     window.electronAPI?.getPort?.()?.then(async (p) => {
@@ -174,10 +210,20 @@ export default function App() {
         clearTimeout(safetyTimer)
         setPort(p)
         try {
-          const res = await fetch(`${getBaseUrl(p)}/api/onboarding/status`)
+          const res = await fetch(`${getBaseUrl(p)}/api/onboarding/status`, {
+            signal: AbortSignal.timeout(2000),
+          })
           const data = await res.json()
-          setSetupPhase(data.onboarding_complete ? 'ready' : 'onboarding')
-        } catch { setSetupPhase('ready') }
+          if (data?.onboarding_complete === false) {
+            setSetupPhase('onboarding')
+            try { localStorage.removeItem('chanakya_setup_ready') } catch (_) {}
+          } else {
+            setSetupPhase('ready')
+            try { localStorage.setItem('chanakya_setup_ready', 'true') } catch (_) {}
+          }
+        } catch {
+          setSetupPhase('ready')
+        }
       }
     })
 
@@ -272,7 +318,13 @@ export default function App() {
   if (setupPhase === 'onboarding') {
     return (
       <Suspense fallback={<ViewLoader label="Loading Setup..." />}>
-        <OnboardingWizard port={port} onComplete={() => setSetupPhase('ready')} />
+        <OnboardingWizard
+          port={port}
+          onComplete={() => {
+            try { localStorage.setItem('chanakya_setup_ready', 'true') } catch (_) {}
+            setSetupPhase('ready')
+          }}
+        />
       </Suspense>
     )
   }

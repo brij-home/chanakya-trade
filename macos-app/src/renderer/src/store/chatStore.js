@@ -73,6 +73,19 @@ export function getActiveSymbol(messages) {
 // Create the default initial session
 const defaultId = uuid()
 
+const initialPort = (() => {
+  try {
+    if (typeof window !== 'undefined') {
+      const saved = localStorage.getItem('chanakya_sidecar_port')
+      if (saved) return parseInt(saved, 10)
+      if (window.location?.port && window.location.port !== '5173') {
+        return parseInt(window.location.port, 10) || 8765
+      }
+    }
+  } catch (_) {}
+  return 8765
+})()
+
 export const useChatStore = create((set, get) => ({
   // ── Multi-session state ───────────────────────────────────
   sessions: {
@@ -81,8 +94,11 @@ export const useChatStore = create((set, get) => ({
   activeSessionId: defaultId,
 
   // ── High-Fidelity Workspace Views ('terminal' | 'debate' | 'options' | 'copilot') ──
-  activeView: 'terminal',
-  setActiveView: (view) => set({ activeView: view }),
+  activeView: (typeof window !== 'undefined' && localStorage.getItem('chanakya_active_view')) || 'terminal',
+  setActiveView: (view) => {
+    try { localStorage.setItem('chanakya_active_view', view) } catch (_) {}
+    set({ activeView: view })
+  },
 
   // ── Global In-Flight Activity & Progress HUD State ─────────
   activeActivity: null, // { id, title, details, progress, type, targetView, cancelFn, startedAt }
@@ -152,7 +168,7 @@ export const useChatStore = create((set, get) => ({
   // ── Backward-compatible flat messages (swapped on session switch) ──
   messages:      [],
   isLoading:     false,
-  port:          null,
+  port:          initialPort,
   sidecarError:  null,
   brokerStatus:   { connected: false, broker: null },
   brokerStatuses: {},   // full /api/status response
@@ -166,7 +182,10 @@ export const useChatStore = create((set, get) => ({
   appMode:     'PAPER',   // 'PAPER' | 'DEMO' | 'LIVE'
   modeLoading: false,     // true while fetching mode from /api/mode
 
-  setPort:         (port)   => set({ port, sidecarError: null }),
+  setPort:         (port)   => {
+    try { if (port) localStorage.setItem('chanakya_sidecar_port', String(port)) } catch (_) {}
+    set({ port, sidecarError: null })
+  },
   setSidecarError: (msg)    => set({ sidecarError: msg }),
   setBrokerStatus:   (status)   => set({ brokerStatus: status }),
   setBrokerStatuses: (statuses) => {

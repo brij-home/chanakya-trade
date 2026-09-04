@@ -183,7 +183,15 @@ function createWindow() {
 // ---------------------------------------------------------------------------
 let _readyPort = null
 
-ipcMain.handle('get-port', () => _readyPort)
+ipcMain.handle('get-port', async () => {
+  if (!_readyPort) {
+    try {
+      const check = await fetch(`http://127.0.0.1:${PORT}/health`)
+      if (check.ok) _readyPort = PORT
+    } catch (_) {}
+  }
+  return _readyPort || PORT
+})
 ipcMain.handle('open-external', (_, url) => shell.openExternal(validateExternalUrl(url)))
 ipcMain.handle('sidecar-request', async (_, request = {}) => {
   const method = String(request.method || 'GET').toUpperCase()
