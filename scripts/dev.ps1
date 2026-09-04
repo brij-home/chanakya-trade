@@ -10,6 +10,7 @@
 [CmdletBinding()]
 param (
     [switch]$NoFrontend,
+    [string]$ApiHost = $(if ($env:API_HOST) { $env:API_HOST } else { "127.0.0.1" }),
     [int]$ApiPort = 8765,
     [int]$VitePort = 5173,
     [switch]$SkipPreflight
@@ -75,7 +76,7 @@ try {
     # Start Backend
     $BackendStartInfo = New-Object System.Diagnostics.ProcessStartInfo
     $BackendStartInfo.FileName = $PythonExe
-    $BackendStartInfo.Arguments = "-m uvicorn web.api:app --host 127.0.0.1 --port $ApiPort --reload"
+    $BackendStartInfo.Arguments = "-m uvicorn web.api:app --host $ApiHost --port $ApiPort --reload"
     $BackendStartInfo.WorkingDirectory = $RootDir
     $BackendStartInfo.UseShellExecute = $false
     $BackendProcess = [System.Diagnostics.Process]::Start($BackendStartInfo)

@@ -83,6 +83,13 @@ KNOWN_CREDENTIALS: list[tuple[str, str, bool]] = [
     ("SHOONYA_VENDOR_CODE", "Shoonya Vendor Code", False),
     ("SHOONYA_TOTP_SECRET", "Shoonya TOTP Secret (Base32)", True),
     ("SHOONYA_IMEI", "Shoonya Device/IMEI identifier", False),
+    # ── m.Stock (Mirae Asset) ────────────────────────────────
+    ("MSTOCK_API_KEY", "m.Stock API Key / Platform Key", False),
+    ("MSTOCK_API_SECRET", "m.Stock API Secret", True),
+    ("MSTOCK_CLIENT_CODE", "m.Stock Client Code (Login ID)", False),
+    ("MSTOCK_PASSWORD", "m.Stock Trading Password", True),
+    ("MSTOCK_TOTP_SECRET", "m.Stock TOTP Secret (Base32)", True),
+    ("MSTOCK_REDIRECT_URL", "m.Stock Redirect / Callback URL", False),
     # ── AI Provider selection ─────────────────────────────────
     (
         "AI_PROVIDER",
@@ -401,6 +408,14 @@ def run_setup_wizard(keys: Optional[list[str]] = None) -> None:
         "SHOONYA_TOTP_SECRET",
         "SHOONYA_IMEI",
     }
+    _MSTOCK_KEYS = {
+        "MSTOCK_API_KEY",
+        "MSTOCK_API_SECRET",
+        "MSTOCK_CLIENT_CODE",
+        "MSTOCK_PASSWORD",
+        "MSTOCK_TOTP_SECRET",
+        "MSTOCK_REDIRECT_URL",
+    }
     _AI_KEYS = {
         "AI_PROVIDER",
         "ANTHROPIC_API_KEY",
@@ -421,6 +436,7 @@ def run_setup_wizard(keys: Optional[list[str]] = None) -> None:
         "Fyers": [(k, l, s) for k, l, s in targets if k in _FYERS_KEYS],
         "Stoxkart": [(k, l, s) for k, l, s in targets if k in _STOXKART_KEYS],
         "Shoonya (Finvasia Noren)": [(k, l, s) for k, l, s in targets if k in _SHOONYA_KEYS],
+        "m.Stock (Mirae Asset — free)": [(k, l, s) for k, l, s in targets if k in _MSTOCK_KEYS],
         "AI Provider": [(k, l, s) for k, l, s in targets if k in _AI_KEYS],
         "Market Data": [(k, l, s) for k, l, s in targets if "NEWSAPI" in k],
         "Notifications (Telegram)": [(k, l, s) for k, l, s in targets if k in _TELEGRAM_KEYS],

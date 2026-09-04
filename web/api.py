@@ -226,6 +226,7 @@ async def auth_middleware(request: _Request, call_next):
         or path.startswith("/upstox/")
         or path.startswith("/angelone/")
         or path.startswith("/shoonya/")
+        or path.startswith("/mstock/")
         or not (path.startswith("/api/") or path.startswith("/skills/"))
     ):
         return await call_next(request)
@@ -399,6 +400,19 @@ async def _auto_restore_brokers() -> None:
                     logging.info("[startup] Shoonya session restored")
         except Exception as exc:
             logging.warning("[startup] Could not restore Shoonya: %s", exc)
+
+    # m.Stock (Mirae Asset)
+    if _has_mstock():
+        try:
+            from brokers.mstock import MStockAPI, TOKEN_FILE as _MT
+
+            if _MT.exists():
+                b = MStockAPI()
+                if b.is_authenticated:
+                    register_broker("mstock", b)
+                    logging.info("[startup] m.Stock session restored")
+        except Exception as exc:
+            logging.warning("[startup] Could not restore m.Stock: %s", exc)
 
 
 # ── P3-A: Correlation ID Middleware ─────────────────────────────────────────
@@ -589,6 +603,8 @@ h2       { font-size: 1rem; color: #8b949e; margin-bottom: 1.5rem; text-align: c
 .btn-shoonya:hover  { background: #15803d; transform: translateY(-1px); }
 .btn-stoxkart { background: #0891b2; color: #fff; }
 .btn-stoxkart:hover { background: #0e7490; transform: translateY(-1px); }
+.btn-mstock   { background: #1d4ed8; color: #fff; }
+.btn-mstock:hover   { background: #1e40af; transform: translateY(-1px); }
 .btn-demo     { background: #21262d; color: #8b949e; border: 1px solid #30363d; }
 .btn-demo:hover     { background: #30363d; color: #e6edf3; }
 .btn-back     { background: #21262d; color: #8b949e; border: 1px solid #30363d; margin-top: 1.25rem; }
@@ -605,6 +621,7 @@ h2       { font-size: 1rem; color: #8b949e; margin-bottom: 1.5rem; text-align: c
 .badge-upstox  { background: #2e1065; color: #c4b5fd; }
 .badge-fyers   { background: #431407; color: #fed7aa; }
 .badge-shoonya { background: #14532d; color: #86efac; }
+.badge-mstock  { background: #1e3a8a; color: #93c5fd; }
 .badge-mock    { background: #2d2016; color: #d29922; }
 .success-icon  { font-size: 3rem; text-align: center; margin-bottom: 1rem; }
 .account-box {
@@ -871,6 +888,26 @@ def _shoonya_auth() -> bool:
     return _cached_auth("shoonya", _check)
 
 
+# m.Stock (Mirae Asset)
+def _has_mstock() -> bool:
+    return bool(_env("MSTOCK_API_KEY") or _env("MSTOCK_CLIENT_CODE"))
+
+
+def _mstock_auth() -> bool:
+    def _check():
+        try:
+            if not _has_mstock():
+                return False
+            from brokers.mstock import MStockAPI
+
+            b = MStockAPI()
+            return b.is_authenticated()
+        except Exception:
+            return False
+
+    return _cached_auth("mstock", _check)
+
+
 # ── Shared success card ───────────────────────────────────────
 
 
@@ -927,6 +964,7 @@ async def index():
             _has_fyers(),
             _has_stoxkart(),
             _has_shoonya(),
+            _has_mstock(),
         ]
     )
 
@@ -993,6 +1031,16 @@ async def index():
             "/stoxkart/login",
             _has_stoxkart(),
             _stoxkart_auth(),
+        )
+    }
+      {
+        _broker_btn(
+            "Login with m.Stock (Free)",
+            "🔷",
+            "btn-mstock",
+            "/mstock/login",
+            _has_mstock(),
+            _mstock_auth(),
         )
     }
       <div class="section-header">Premium Brokers</div>
@@ -1421,6 +1469,96 @@ async def shoonya_login():
     )
 
 
+# ── m.Stock (Mirae Asset Capital Markets — Free API) ─────────────
+
+
+@app.get("/mstock/login", response_class=HTMLResponse)
+async def mstock_login():
+    if not _has_mstock():
+        body = """<div class="card">
+          <div class="info-box">
+            <strong>m.Stock API (Mirae Asset)</strong> — free trading API.<br><br>
+            Set credentials in <code>.env</code> or run <code>credentials setup</code>:<br>
+            1. <code>MSTOCK_API_KEY</code> &amp; <code>MSTOCK_API_SECRET</code><br>
+            2. <code>MSTOCK_CLIENT_CODE</code> &amp; <code>MSTOCK_PASSWORD</code><br>
+            3. (Optional) <code>MSTOCK_TOTP_SECRET</code> for 2FA auto-login.<br>
+            4. <code>MSTOCK_REDIRECT_URL</code> (default: http://103.149.127.88:8765/mstock/callback)<br>
+          </div>
+          <a href="/" class="btn btn-back">← Back</a>
+        </div>"""
+        return HTMLResponse(_page("m.Stock Setup", body), status_code=400)
+    try:
+        from brokers.mstock import MStockAPI
+
+        redirect = _env("MSTOCK_REDIRECT_URL") or "http://103.149.127.88:8765/mstock/callback"
+        b = MStockAPI(
+            api_key=_env("MSTOCK_API_KEY"),
+            api_secret=_env("MSTOCK_API_SECRET"),
+            client_code=_env("MSTOCK_CLIENT_CODE"),
+            redirect_uri=redirect,
+        )
+        url = b.get_login_url()
+    except Exception as e:
+        body = f"""<div class="card"><div class="err-box">❌ Could not generate m.Stock login URL: {e}</div>
+        <a href="/" class="btn btn-back">← Back</a></div>"""
+        return HTMLResponse(_page("Error", body), status_code=500)
+    return RedirectResponse(url)
+
+
+@app.api_route("/mstock/callback", methods=["GET", "POST"], response_class=HTMLResponse)
+async def mstock_callback(request: Request):
+    params = dict(request.query_params)
+    token = (
+        params.get("token")
+        or params.get("auth_token")
+        or params.get("jwt")
+        or params.get("request_token")
+        or params.get("code")
+        or ""
+    )
+    error = params.get("error") or (
+        "" if token else "No authentication token received from m.Stock callback"
+    )
+    if error:
+        body = f"""<div class="card"><div class="err-box">❌ m.Stock login failed: {error}.<br><br>
+        Check MSTOCK_API_KEY, MSTOCK_API_SECRET, and whitelisted IP (103.149.127.88).
+        </div><a href="/" class="btn btn-back">← Try again</a></div>"""
+        return HTMLResponse(_page("Failed", body), status_code=400)
+    try:
+        from brokers.mstock import MStockAPI
+        from brokers.session import register_broker
+
+        redirect = _env("MSTOCK_REDIRECT_URL") or "http://103.149.127.88:8765/mstock/callback"
+        b = MStockAPI(
+            api_key=_env("MSTOCK_API_KEY"),
+            api_secret=_env("MSTOCK_API_SECRET"),
+            client_code=_env("MSTOCK_CLIENT_CODE"),
+            redirect_uri=redirect,
+        )
+        cb_params = dict(params)
+        cb_params.pop("token", None)
+        profile = b.complete_login(token=token, **cb_params)
+        funds = b.get_funds()
+        register_broker("mstock", b)
+        _invalidate_auth_cache("mstock")
+    except Exception as e:
+        body = f"""<div class="card"><div class="err-box">❌ {e}</div>
+        <a href="/" class="btn btn-back">← Try again</a></div>"""
+        return HTMLResponse(_page("Error", body), status_code=500)
+    return HTMLResponse(
+        _page(
+            "Connected",
+            _success_card(
+                "m.Stock",
+                "btn-mstock",
+                profile,
+                funds,
+                "Redirect URL: http://103.149.127.88:8765/mstock/callback",
+            ),
+        )
+    )
+
+
 # ── Demo mode ─────────────────────────────────────────────────
 
 
@@ -1501,6 +1639,15 @@ async def status_page():
             _has_shoonya,
             _shoonya_auth,
         ),
+        (
+            "mstock",
+            "m.Stock",
+            "badge-mstock",
+            "/mstock/login",
+            "#2563eb",
+            _has_mstock,
+            _mstock_auth,
+        ),
     ]
     rows = []
     for bkey, bname, badge_cls, login_path, color, has_fn, auth_fn in _BROKERS:
@@ -1571,6 +1718,11 @@ async def api_status(request: Request):
             "configured": _has_shoonya(),
             "authenticated": _shoonya_auth(),
             "role": get_broker_role("shoonya"),
+        },
+        "mstock": {
+            "configured": _has_mstock(),
+            "authenticated": _mstock_auth(),
+            "role": get_broker_role("mstock"),
         },
     }
 
@@ -1995,6 +2147,7 @@ _BROKER_SESSION_FILES = {
     "fyers": app_data_path("fyers.json"),
     "stoxkart": app_data_path("stoxkart.json"),
     "shoonya": app_data_path("shoonya.json"),
+    "mstock": app_data_path("mstock.json"),
 }
 
 
@@ -2021,6 +2174,7 @@ async def broker_disconnect(broker_key: str, request: Request):
         "fyers": "fyers",
         "stoxkart": "stoxkart",
         "shoonya": "shoonya",
+        "mstock": "mstock",
     }
     session_key = _SESSION_KEY_MAP.get(broker_key, broker_key)
     unregister_broker(session_key)

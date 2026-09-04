@@ -84,6 +84,9 @@ _BROKER_NAMES = {
     "7": "shoonya",
     "shoonya": "shoonya",
     "finvasia": "shoonya",
+    "8": "mstock",
+    "mstock": "mstock",
+    "m.stock": "mstock",
 }
 
 _BROKER_LABELS = {
@@ -95,6 +98,7 @@ _BROKER_LABELS = {
     "fyers": "[blue]Fyers[/blue]",
     "stoxkart": "[bold cyan]Stoxkart (SMC)[/bold cyan]",
     "shoonya": "[bold green]Shoonya (Finvasia)[/bold green]",
+    "mstock": "[bold blue]m.Stock (Mirae Asset)[/bold blue]",
 }
 
 # Brokers that use TOTP auto-login (no browser redirect)
@@ -110,6 +114,7 @@ _BROKER_MENU = [
     ("5", "Fyers", "API v3 — redirect login"),
     ("6", "Stoxkart", "SMC API — free, live data & execution"),
     ("7", "Shoonya", "Finvasia Noren API — TOTP, live data & execution"),
+    ("8", "m.Stock", "Mirae Asset — free API, live data & execution"),
 ]
 
 
@@ -462,6 +467,30 @@ def _make_broker(choice: str) -> tuple[str, BrokerAPI]:
             imei=os.environ.get("SHOONYA_IMEI", "chanakya-trade"),
         )
 
+    elif key == "mstock":
+        from .mstock import MStockAPI
+
+        return key, MStockAPI(
+            api_key=get_credential(
+                "MSTOCK_API_KEY", "m.Stock API Key", secret=False, required=False
+            ),
+            api_secret=get_credential(
+                "MSTOCK_API_SECRET", "m.Stock API Secret", secret=True, required=False
+            ),
+            client_code=get_credential(
+                "MSTOCK_CLIENT_CODE", "m.Stock Client Code", secret=False, required=False
+            ),
+            password=get_credential(
+                "MSTOCK_PASSWORD", "m.Stock Trading Password", secret=True, required=False
+            ),
+            totp_secret=get_credential(
+                "MSTOCK_TOTP_SECRET", "m.Stock TOTP Secret", secret=True, required=False
+            ),
+            redirect_uri=os.environ.get(
+                "MSTOCK_REDIRECT_URL", "http://103.149.127.88:8765/mstock/callback"
+            ),
+        )
+
     else:  # fyers
         from .fyers import FyersAPI
 
@@ -505,6 +534,7 @@ def _poll_sidecar_auth(broker_key: str, port: int, timeout: int = 180) -> dict[s
         "upstox": "upstox",
         "stoxkart": "stoxkart",
         "shoonya": "shoonya",
+        "mstock": "mstock",
     }
     status_key = _STATUS_KEYS.get(broker_key, broker_key)
     deadline = time.time() + timeout
@@ -637,6 +667,13 @@ def _recreate_broker_from_token(key: str):
                 b = ShoonyaAPI()
                 if b.is_authenticated():
                     return b
+        elif key == "mstock":
+            from brokers.mstock import MStockAPI, TOKEN_FILE
+
+            if TOKEN_FILE.exists():
+                b = MStockAPI()
+                if b.is_authenticated:
+                    return b
     except Exception:
         pass
     return None
@@ -678,6 +715,13 @@ def _do_auth(key: str, broker: BrokerAPI) -> BrokerAPI:
         _path = urlparse(redirect).path
         _port = urlparse(redirect).port or 8765
         _params = ("code",)
+    elif key == "mstock":
+        redirect = os.environ.get(
+            "MSTOCK_REDIRECT_URL", "http://103.149.127.88:8765/mstock/callback"
+        )
+        _path = urlparse(redirect).path
+        _port = urlparse(redirect).port or 8765
+        _params = ("token", "auth_token", "jwt", "request_token", "code")
     else:  # upstox
         redirect = os.environ.get("UPSTOX_REDIRECT_URL", "http://localhost:8765/upstox/callback")
         _path = urlparse(redirect).path
@@ -714,6 +758,16 @@ def _do_auth(key: str, broker: BrokerAPI) -> BrokerAPI:
             broker.complete_login(auth_code=captured["auth_code"])
         elif key == "zerodha":
             broker.complete_login(request_token=captured["request_token"])
+        elif key == "mstock":
+            t_val = (
+                captured.get("token")
+                or captured.get("auth_token")
+                or captured.get("jwt")
+                or captured.get("code")
+                or captured.get("request_token")
+                or ""
+            )
+            broker.complete_login(token=t_val)
         else:  # groww / upstox
             broker.complete_login(auth_code=captured["code"])
     else:
@@ -734,6 +788,10 @@ def _do_auth(key: str, broker: BrokerAPI) -> BrokerAPI:
             )
             token = Prompt.ask("[bold]Paste the [cyan]request_token[/cyan] here[/bold]")
             broker.complete_login(request_token=token)
+        elif key == "mstock":
+            console.print(f"[dim]  {redirect}?[bold]token=XXXXXX[/bold][/dim]\n")
+            token = Prompt.ask("[bold]Paste the [cyan]token / code[/cyan] here[/bold]")
+            broker.complete_login(token=token)
         else:
             console.print(f"[dim]  {redirect}?[bold]code=XXXXXX[/bold][/dim]\n")
             code = Prompt.ask("[bold]Paste the [cyan]auth_code[/cyan] here[/bold]")
