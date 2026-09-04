@@ -297,17 +297,28 @@ def _fetch_data_brief(
         pcr_data = _safe_call("get_pcr", symbol=symbol)
     if pcr_data is not None:
         if isinstance(pcr_data, dict):
-            brief["options"] = pcr_data
-            if "pcr" in pcr_data and "pcr" not in brief["technicals"]:
-                brief["technicals"]["pcr"] = pcr_data["pcr"]
-        elif isinstance(pcr_data, (int, float)):
+            pcr_val = pcr_data.get("pcr")
+            if pcr_val is not None and pcr_val > 0:
+                brief["options"] = pcr_data
+                if "pcr" not in brief["technicals"]:
+                    brief["technicals"]["pcr"] = pcr_val
+            else:
+                brief["options"] = {"pcr": None, "fno_available": False}
+        elif isinstance(pcr_data, (int, float)) and pcr_data > 0:
             brief["options"] = {"pcr": float(pcr_data)}
             if "pcr" not in brief["technicals"]:
                 brief["technicals"]["pcr"] = float(pcr_data)
         elif hasattr(pcr_data, "__dict__"):
-            brief["options"] = vars(pcr_data)
-            if hasattr(pcr_data, "pcr") and "pcr" not in brief["technicals"]:
-                brief["technicals"]["pcr"] = getattr(pcr_data, "pcr")
+            pcr_dict = vars(pcr_data)
+            pcr_val = pcr_dict.get("pcr")
+            if pcr_val is not None and pcr_val > 0:
+                brief["options"] = pcr_dict
+                if "pcr" not in brief["technicals"]:
+                    brief["technicals"]["pcr"] = pcr_val
+            else:
+                brief["options"] = {"pcr": None, "fno_available": False}
+    else:
+        brief["options"] = {"pcr": None, "fno_available": False}
 
     # News
     news = _safe_call("get_stock_news", symbol=symbol)
@@ -586,7 +597,7 @@ def _score_dimension(dimension: str, brief: dict[str, Any]) -> float | None:
             if opt.get("pcr") is not None
             else (tech.get("pcr") if tech.get("pcr") is not None else tech.get("put_call_ratio"))
         )
-        if pcr_val is None:
+        if pcr_val is None or pcr_val <= 0:
             if (
                 opt.get("atm_iv") is not None
                 or opt.get("gex") is not None

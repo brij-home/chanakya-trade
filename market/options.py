@@ -140,30 +140,38 @@ def get_atm_strike(underlying: str, spot: float) -> float:
     return min(strikes, key=lambda s: abs(s - spot))
 
 
-def get_pcr(underlying: str, expiry: Optional[str] = None) -> float:
+def get_pcr(underlying: str, expiry: Optional[str] = None) -> Optional[float]:
     """
     Put-Call Ratio by Open Interest for the given expiry.
     PCR > 1.2 → bearish sentiment; PCR < 0.8 → bullish.
+    Returns None if no options contracts exist for this underlying.
     """
     chain = get_options_chain(underlying, expiry)
+    if not chain:
+        return None
     ce_oi = sum(c.oi for c in chain if c.option_type == "CE")
     pe_oi = sum(c.oi for c in chain if c.option_type == "PE")
+    if ce_oi == 0 and pe_oi == 0:
+        return None
     if ce_oi == 0:
-        return 0.0
+        return 999.0
     return round(pe_oi / ce_oi, 3)
 
 
-def get_max_pain(underlying: str, expiry: Optional[str] = None) -> float:
+def get_max_pain(underlying: str, expiry: Optional[str] = None) -> Optional[float]:
     """
     Max pain strike — the strike where total options losses for buyers
     are maximised (i.e. where writers profit most).
 
     Calculated by summing ITM losses across all strikes for CE + PE.
+    Returns None if no options contracts exist for this underlying.
     """
     chain = get_options_chain(underlying, expiry)
+    if not chain:
+        return None
     strikes = sorted({c.strike for c in chain})
     if not strikes:
-        return 0.0
+        return None
 
     # Build quick lookup: strike → {CE: contract, PE: contract}
     lookup: dict[float, dict[str, OptionsContract]] = {}
@@ -185,3 +193,4 @@ def get_max_pain(underlying: str, expiry: Optional[str] = None) -> float:
         pain[test_strike] = total_pain
 
     return min(pain, key=pain.get)  # type: ignore[arg-type]
+

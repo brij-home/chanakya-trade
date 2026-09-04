@@ -90,7 +90,7 @@ def build_compact_signals(
         if len(metric) > 38:
             metric = metric[:35] + "..."
 
-        verdict_icon = {"BULLISH": "▲", "BEARISH": "▼", "NEUTRAL": "─"}.get(r.verdict, "?")
+        verdict_icon = {"BULLISH": "▲", "BEARISH": "▼", "NEUTRAL": "─", "UNAVAILABLE": "○"}.get(r.verdict, "?")
         lines.append(
             f"  {r.analyst:<{col_w}} {verdict_icon} {r.verdict:<8} "
             f"score:{r.score:+.0f}  conf:{r.confidence}%  {metric}"

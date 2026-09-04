@@ -623,6 +623,7 @@ class OptionsAnalyst(BaseAnalyst):
 
     def analyze(self, symbol: str, exchange: str = "NSE") -> AnalystReport:
         try:
+            clean_sym = symbol.upper().replace(".NS", "").replace("NSE:", "").strip()
             points = []
             data: dict[str, Any] = {}
             has_data = False  # track if we got any real options data
@@ -631,30 +632,36 @@ class OptionsAnalyst(BaseAnalyst):
             pcr_result = self.registry.execute("get_pcr", {"underlying": symbol})
             if isinstance(pcr_result, dict) and "error" not in pcr_result and "pcr" in pcr_result:
                 pcr = pcr_result["pcr"]
-                data["pcr"] = pcr
-                has_data = True
-                if pcr is not None:
+                if pcr is not None and pcr > 0:
+                    data["pcr"] = pcr
+                    has_data = True
                     if pcr > 1.2:
                         points.append(f"PCR: {pcr:.2f} (bearish — heavy put writing)")
                     elif pcr < 0.8:
                         points.append(f"PCR: {pcr:.2f} (bullish — heavy call writing)")
                     else:
                         points.append(f"PCR: {pcr:.2f} (neutral)")
+                else:
+                    data["pcr"] = None
 
             # Max Pain
             mp_result = self.registry.execute("get_max_pain", {"underlying": symbol})
             if isinstance(mp_result, dict) and "error" not in mp_result and "max_pain" in mp_result:
-                data["max_pain"] = mp_result["max_pain"]
-                has_data = True
-                points.append(f"Max Pain: {mp_result['max_pain']}")
+                max_pain = mp_result["max_pain"]
+                if max_pain is not None and max_pain > 0:
+                    data["max_pain"] = max_pain
+                    has_data = True
+                    points.append(f"Max Pain: ₹{max_pain:,.0f}" if max_pain >= 100 else f"Max Pain: {max_pain}")
+                else:
+                    data["max_pain"] = None
 
-            # IV Rank (note: mock_iv_rank is synthetic — don't count as real data)
+            # IV Rank (note: mock_iv_rank is synthetic — only relevant if options exist)
             iv_result = self.registry.execute("get_iv_rank", {"symbol": symbol})
             if isinstance(iv_result, dict) and "error" not in iv_result and "iv_rank" in iv_result:
                 iv_rank = iv_result["iv_rank"]
                 data["iv_rank"] = iv_rank
-                # Don't set has_data — IV rank is always mock, not from real options market
-                if iv_rank is not None:
+                # Only include IV rank in key_points if real options contracts exist
+                if has_data and iv_rank is not None:
                     if iv_rank > 50:
                         points.append(f"IV Rank: {iv_rank} (elevated — good for selling premium)")
                     else:
@@ -668,9 +675,9 @@ class OptionsAnalyst(BaseAnalyst):
                     confidence=0,
                     score=0,
                     key_points=[
-                        "Options data unavailable for this symbol (no broker or no F&O segment)"
+                        f"Non-F&O Stock: {clean_sym} is cash equity only (no NSE derivative contracts). Options PCR & Max Pain N/A."
                     ],
-                    data={"options_available": False},
+                    data={"options_available": False, "pcr": None, "max_pain": None},
                 )
 
             # Derive verdict from PCR
