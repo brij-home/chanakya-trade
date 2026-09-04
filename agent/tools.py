@@ -463,10 +463,11 @@ def build_registry() -> ToolRegistry:
             "type": "object",
             "properties": {
                 "symbol": {"type": "string", "description": "NSE symbol e.g. 'HDFCBANK'"},
+                "fast": {"type": "boolean", "description": "If true, skips statement scraping for sub-second quant evaluation", "default": False},
             },
             "required": ["symbol"],
         },
-        fn=lambda symbol: fund_analyse(symbol),
+        fn=lambda symbol, fast=False, **kwargs: fund_analyse(symbol, fast=fast),
     )
 
     reg.register(

@@ -699,10 +699,8 @@ class MStockAPI(BrokerAPI):
         underlying: str,
         expiry: Optional[str] = None,
     ) -> list[OptionsContract]:
-        """Return options chain for an underlying, falling back to market options engine."""
-        from market.options import get_options_chain as _mkt_options
-
-        return _mkt_options(underlying, expiry=expiry)
+        """m.Stock Type B does not have a dedicated options chain endpoint; fall back to market engine."""
+        raise NotImplementedError("m.Stock Type B does not provide options chain API; use market scraper")
 
     def get_history(
         self,

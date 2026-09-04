@@ -503,19 +503,24 @@ class FundamentalAnalyst(BaseAnalyst):
         Tier 2 (optional, requires PERPLEXITY_API_KEY): Perplexity Finance
           Agent API — licensed NSE/BSE data with citations.
         """
-        # ── Tier 1: yfinance (free, no API key needed) ────────────
+        # ── Tier 1: analysis.fundamental (cached via AnalysisCache SQLite, free) ──
         try:
-            import yfinance as yf
+            from analysis.fundamental import fundamental_analyse
 
-            ns_symbol = symbol if symbol.endswith(".NS") else f"{symbol}.NS"
-            info = yf.Ticker(ns_symbol).info or {}
-
-            pe = info.get("trailingPE") or info.get("forwardPE")
-            roe = info.get("returnOnEquity")  # decimal e.g. 0.28 = 28%
-            pb = info.get("priceToBook")
-            d_e = info.get("debtToEquity")
-            rev_growth = info.get("revenueGrowth")  # decimal
-            profit_margin = info.get("profitMargins")
+            fund_data = fundamental_analyse(symbol, fast=True) or {}
+            pe = fund_data.get("pe") or fund_data.get("pe_ratio")
+            roe = fund_data.get("roe")
+            if roe is not None and roe > 1.0:
+                # If roe is given as percentage e.g. 28.0, normalize to decimal 0.28
+                roe = roe / 100.0
+            pb = fund_data.get("pb") or fund_data.get("pb_ratio")
+            d_e = fund_data.get("debt_to_equity") or fund_data.get("debt_equity")
+            rev_growth = fund_data.get("revenue_growth_3y") or fund_data.get("revenue_growth")
+            if rev_growth is not None and rev_growth > 1.0:
+                rev_growth = rev_growth / 100.0
+            profit_margin = fund_data.get("profit_margin") or fund_data.get("net_margin")
+            if profit_margin is not None and profit_margin > 1.0:
+                profit_margin = profit_margin / 100.0
 
             if pe is not None or roe is not None:
                 points: list[str] = []

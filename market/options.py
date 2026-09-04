@@ -20,6 +20,12 @@ from market.nse_scraper import nse_get_options_chain
 from market.source_tracker import record_source, warn_fallback
 
 
+import time
+
+_CHAIN_CACHE: dict[str, tuple[float, list[OptionsContract]]] = {}
+_CHAIN_CACHE_TTL = 180.0  # 3 minutes for valid chains, 60s for empty
+
+
 def get_options_chain(
     underlying: str,
     expiry: Optional[str] = None,
@@ -39,18 +45,29 @@ def get_options_chain(
     Returns:
         List of OptionsContract sorted by strike then type (CE/PE).
     """
+    cache_key = f"{underlying.upper()}:{expiry or 'nearest'}"
+    now = time.time()
+    if cache_key in _CHAIN_CACHE:
+        cached_at, cached_chain = _CHAIN_CACHE[cache_key]
+        ttl = _CHAIN_CACHE_TTL if cached_chain else 60.0
+        if (now - cached_at) < ttl:
+            return cached_chain
+
     # Tier 1: data broker
     try:
         chain = get_data_broker().get_options_chain(underlying, expiry)
         record_source("options", "broker")
-        return chain
+        if chain:
+            _CHAIN_CACHE[cache_key] = (now, chain)
+            return chain
     except Exception as e:
         warn_fallback("options", str(e), "nse_scraper")
 
     # Tier 2: NSE scraper
     chain = nse_get_options_chain(underlying, expiry)
     record_source("options", "nse_scraper" if chain else "none")
-    return chain
+    _CHAIN_CACHE[cache_key] = (now, chain or [])
+    return chain or []
 
 
 def get_expiries(underlying: str) -> list[str]:

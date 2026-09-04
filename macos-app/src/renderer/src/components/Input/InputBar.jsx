@@ -204,8 +204,35 @@ function parseCommand(input, contextSymbol = null) {
       return { endpoint: '/skills/position_size', body: { symbol: sym, entry_price: entry, stop_loss: sl }, cardType: 'size' }
     }
     case 'funnel': case 'smart-funnel': case 'smartfunnel': {
-      const syms = args[0] || (contextSymbol ? contextSymbol : 'nifty_50')
-      return { endpoint: '/skills/funnel', body: { symbols: syms, top_n: 2 }, cardType: 'funnel' }
+      let topN = 2
+      const filteredArgs = []
+      for (let i = 0; i < args.length; i++) {
+        const a = args[i]
+        if (a === '--top' || a === '-n' || a === 'top') {
+          const next = parseInt(args[i + 1], 10)
+          if (!isNaN(next)) { topN = next; i++; continue }
+        } else if (a && a.startsWith('--top=')) {
+          const val = parseInt(a.split('=')[1], 10)
+          if (!isNaN(val)) { topN = val; continue }
+        } else {
+          filteredArgs.push(a)
+        }
+      }
+
+      let syms = 'nifty_50'
+      if (filteredArgs.length > 0) {
+        if (filteredArgs[0].toLowerCase() === 'sector' || filteredArgs[0].toLowerCase() === 'sec') {
+          const sectorName = filteredArgs.slice(1).join('_').toLowerCase()
+          syms = sectorName || 'nifty_50'
+        } else if (filteredArgs.length === 1) {
+          syms = filteredArgs[0]
+        } else {
+          syms = filteredArgs.join(',')
+        }
+      } else if (contextSymbol) {
+        syms = contextSymbol
+      }
+      return { endpoint: '/skills/funnel', body: { symbols: syms, top_n: topN }, cardType: 'funnel' }
     }
     case 'structure': case 'market-structure': case 'smc': {
       const sym = args[0]?.toUpperCase() || contextSymbol
@@ -531,9 +558,10 @@ export default function InputBar() {
     const abortController = new AbortController()
 
     try {
+      const isFunnel = parsed.cardType === 'funnel'
       startActivity({
-        title: `Quant Intelligence (${parsed.cardType?.toUpperCase() || 'QUERY'})`,
-        details: `Computing ${text}...`,
+        title: isFunnel ? 'Smart Funnel Intelligence' : `Quant Intelligence (${parsed.cardType?.toUpperCase() || 'QUERY'})`,
+        details: isFunnel ? `Screening ${parsed.body?.symbols || 'watchlist'} & evaluating top setups...` : `Computing ${text}...`,
         type: 'quant',
         targetView: 'copilot',
         cancelFn: () => {
