@@ -162,6 +162,7 @@ def _fetch_data_brief(
         "macro": {},
         "news": [],
         "fii_dii": {},
+        "options": {},
     }
 
     if registry is None:
@@ -179,12 +180,18 @@ def _fetch_data_brief(
     # Technical snapshot
     tech = _safe_call("technical_analyse", symbol=symbol, exchange=exchange)
     if tech:
-        brief["technicals"] = tech if isinstance(tech, dict) else vars(tech)
+        t_dict = tech if isinstance(tech, dict) else (tech.as_dict() if hasattr(tech, "as_dict") else vars(tech))
+        if "verdict" in t_dict and "trend" not in t_dict:
+            t_dict["trend"] = t_dict["verdict"]
+        if "rsi" in t_dict and "RSI" not in t_dict:
+            t_dict["RSI"] = t_dict["rsi"]
+        brief["technicals"] = t_dict
 
     # Fundamental snapshot
     fund = _safe_call("fundamental_analyse", symbol=symbol)
     if fund:
-        brief["fundamentals"] = fund if isinstance(fund, dict) else vars(fund)
+        f_dict = fund if isinstance(fund, dict) else (fund.as_dict() if hasattr(fund, "as_dict") else vars(fund))
+        brief["fundamentals"] = f_dict
 
     # Forensic snapshot
     forensic = _safe_call("audit_forensics", symbol=symbol)
@@ -198,12 +205,45 @@ def _fetch_data_brief(
     # FII/DII data
     fii = _safe_call("get_fii_dii_data")
     if fii:
-        brief["fii_dii"] = fii if isinstance(fii, dict) else vars(fii)
+        if isinstance(fii, dict):
+            brief["fii_dii"] = fii
+        elif isinstance(fii, list) and len(fii) > 0:
+            first = fii[0]
+            brief["fii_dii"] = first if isinstance(first, dict) else (first.as_dict() if hasattr(first, "as_dict") else (vars(first) if hasattr(first, "__dict__") else {"raw": str(first)}))
+        elif hasattr(fii, "as_dict"):
+            brief["fii_dii"] = fii.as_dict()
+        elif hasattr(fii, "__dict__"):
+            brief["fii_dii"] = vars(fii)
 
     # Market snapshot
     macro = _safe_call("get_market_snapshot")
     if macro:
-        brief["macro"] = macro if isinstance(macro, dict) else vars(macro)
+        if isinstance(macro, dict):
+            brief["macro"] = macro
+        elif hasattr(macro, "as_dict"):
+            brief["macro"] = macro.as_dict()
+        elif hasattr(macro, "__dict__"):
+            brief["macro"] = vars(macro)
+        if hasattr(macro, "vix") and macro.vix and "india_vix" not in brief["macro"]:
+            brief["macro"]["india_vix"] = getattr(macro.vix, "ltp", None) or getattr(macro.vix, "price", None)
+
+    # Options snapshot
+    pcr_data = _safe_call("get_pcr", underlying=symbol)
+    if pcr_data is None:
+        pcr_data = _safe_call("get_pcr", symbol=symbol)
+    if pcr_data is not None:
+        if isinstance(pcr_data, dict):
+            brief["options"] = pcr_data
+            if "pcr" in pcr_data and "pcr" not in brief["technicals"]:
+                brief["technicals"]["pcr"] = pcr_data["pcr"]
+        elif isinstance(pcr_data, (int, float)):
+            brief["options"] = {"pcr": float(pcr_data)}
+            if "pcr" not in brief["technicals"]:
+                brief["technicals"]["pcr"] = float(pcr_data)
+        elif hasattr(pcr_data, "__dict__"):
+            brief["options"] = vars(pcr_data)
+            if hasattr(pcr_data, "pcr") and "pcr" not in brief["technicals"]:
+                brief["technicals"]["pcr"] = getattr(pcr_data, "pcr")
 
     # News
     news = _safe_call("get_stock_news", symbol=symbol)
@@ -315,6 +355,8 @@ def _score_dimension(dimension: str, brief: dict[str, Any]) -> float | None:
                 fund.get("PE"),
                 fund.get("fcf_yield"),
                 fund.get("FCF_yield"),
+                fund.get("score"),
+                fund.get("verdict"),
                 forensic.get("piotroski_score"),
                 forensic.get("altman_zone"),
                 forensic.get("promoter_pledge_pct"),
@@ -354,6 +396,14 @@ def _score_dimension(dimension: str, brief: dict[str, Any]) -> float | None:
             except (TypeError, ValueError):
                 pass
 
+        f_score = fund.get("score")
+        if f_score is not None:
+            try:
+                fs = float(f_score)
+                score = (score + fs) / 2.0
+            except (TypeError, ValueError):
+                pass
+
         # Forensic indicators
         if forensic:
             piotroski = forensic.get("piotroski_score")
@@ -387,11 +437,13 @@ def _score_dimension(dimension: str, brief: dict[str, Any]) -> float | None:
                 tech.get("RSI"),
                 tech.get("trend"),
                 tech.get("price_trend"),
+                tech.get("verdict"),
+                tech.get("score"),
             )
         ):
             return None
         score = 50.0
-        rsi = tech.get("rsi") or tech.get("RSI")
+        rsi = tech.get("rsi") if tech.get("rsi") is not None else tech.get("RSI")
         if rsi is not None:
             try:
                 rsi = float(rsi)
@@ -404,13 +456,21 @@ def _score_dimension(dimension: str, brief: dict[str, Any]) -> float | None:
             except (TypeError, ValueError):
                 pass
 
-        trend = tech.get("trend") or tech.get("price_trend")
+        trend = tech.get("trend") or tech.get("price_trend") or tech.get("verdict")
         if trend:
             trend_str = str(trend).upper()
             if "BULL" in trend_str or "UP" in trend_str:
                 score += 10
             elif "BEAR" in trend_str or "DOWN" in trend_str:
                 score -= 10
+
+        t_score = tech.get("score")
+        if t_score is not None:
+            try:
+                ts = float(t_score)
+                score = (score + ts) / 2.0
+            except (TypeError, ValueError):
+                pass
 
         return max(0.0, min(100.0, score))
 
@@ -456,20 +516,29 @@ def _score_dimension(dimension: str, brief: dict[str, Any]) -> float | None:
         return None
 
     elif dimension == "options":
-        if not any(value is not None for value in (tech.get("pcr"), tech.get("put_call_ratio"))):
-            return None
+        opt = brief.get("options", {})
+        pcr_val = (
+            opt.get("pcr")
+            if opt.get("pcr") is not None
+            else (tech.get("pcr") if tech.get("pcr") is not None else tech.get("put_call_ratio"))
+        )
+        if pcr_val is None:
+            if opt.get("atm_iv") is not None or opt.get("gex") is not None or opt.get("iv") is not None:
+                pcr_val = 1.0
+            else:
+                return None
         score = 50.0
-        pcr = tech.get("pcr") or tech.get("put_call_ratio")
-        if pcr is not None:
-            try:
-                pcr = float(pcr)
-                # PCR > 1.5 → bullish contrarian signal; PCR < 0.5 → bearish contrarian
-                if pcr > 1.5:
-                    score += 15
-                elif pcr < 0.5:
-                    score -= 10
-            except (TypeError, ValueError):
-                pass
+        try:
+            pcr = float(pcr_val)
+            # PCR > 1.5 → bullish contrarian signal; PCR < 0.5 → bearish contrarian
+            if pcr > 1.5:
+                score += 15
+            elif 0 < pcr < 0.5:
+                score -= 10
+            elif pcr >= 0.5:
+                score += 5
+        except (TypeError, ValueError):
+            pass
         return max(0.0, min(100.0, score))
 
     return None
@@ -614,9 +683,9 @@ def run_persona_analysis(
     if llm_provider == "auto":
         if registry is None:
             try:
-                from agent.core import ToolRegistry
+                from agent.tools import build_registry
 
-                registry = ToolRegistry()
+                registry = build_registry()
             except Exception:
                 registry = None
         try:
@@ -722,6 +791,14 @@ def run_debate(
     -------
     list[PersonaSignal] — one per persona, in stable order
     """
+    if registry is None:
+        try:
+            from agent.tools import build_registry
+
+            registry = build_registry()
+        except Exception:
+            registry = None
+
     personas = list_personas()
     signals: list[PersonaSignal] = []
 
@@ -764,6 +841,15 @@ def run_council(
     if not persona_ids:
         valid = ", ".join(sorted(COUNCIL_PRESETS))
         raise ValueError(f"Unknown council '{council_name}'. Choose one of: {valid}.")
+
+    # Build platform tool registry once for all council members
+    if registry is None:
+        try:
+            from agent.tools import build_registry
+
+            registry = build_registry()
+        except Exception:
+            registry = None
 
     signals = [
         run_persona_analysis(pid, symbol, exchange, registry, llm_provider) for pid in persona_ids

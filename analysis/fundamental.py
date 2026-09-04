@@ -24,6 +24,12 @@ from typing import Optional
 import httpx
 
 
+# In-memory snapshot cache (5-minute TTL)
+_fund_cache: dict[str, tuple[float, "FundamentalSnapshot"]] = {}
+_fund_cache_lock = threading.Lock()
+_FUND_TTL_SECONDS = 300.0
+
+
 # ── Result dataclass ─────────────────────────────────────────
 
 
