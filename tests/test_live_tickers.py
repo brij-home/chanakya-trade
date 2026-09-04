@@ -2,6 +2,7 @@
 Unit and API integration tests for Multi-Asset Live Ticker Ribbon
 (Indices, Commodities, Crypto).
 """
+
 import pytest
 from fastapi.testclient import TestClient
 from web.skills import _compute_live_tickers_sync
@@ -83,5 +84,3 @@ def test_websocket_ticker_endpoint():
         payload = json.loads(data)
         assert payload.get("type") == "ticker_snapshot"
         assert "data" in payload
-
-

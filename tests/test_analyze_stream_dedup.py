@@ -1,7 +1,6 @@
 import pytest
 import asyncio
-from unittest.mock import patch, MagicMock
-from web.skills import _ActiveAnalysisHub, _in_flight_hubs, _in_flight_hubs_lock, skill_analyze_stream
+from web.skills import _ActiveAnalysisHub, _in_flight_hubs, skill_analyze_stream
 
 
 @pytest.mark.anyio

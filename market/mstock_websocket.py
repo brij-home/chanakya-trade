@@ -18,8 +18,7 @@ import struct
 import threading
 import time
 from dataclasses import dataclass, field
-from datetime import datetime
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
+from typing import Any, Callable, Optional, Union
 
 logger = logging.getLogger(__name__)
 
@@ -69,9 +68,7 @@ KNOWN_TOKENS: dict[str, str] = {
 }
 
 # Reverse mapping: symbol -> token
-SYMBOL_TO_TOKEN: dict[str, str] = {
-    sym.upper(): tok for tok, sym in KNOWN_TOKENS.items()
-}
+SYMBOL_TO_TOKEN: dict[str, str] = {sym.upper(): tok for tok, sym in KNOWN_TOKENS.items()}
 for tok, sym in KNOWN_TOKENS.items():
     clean = sym.split(":")[-1].upper()
     SYMBOL_TO_TOKEN[clean] = tok
@@ -80,6 +77,7 @@ for tok, sym in KNOWN_TOKENS.items():
 @dataclass
 class MarketDepthLevel:
     """Single level of market depth (bid or ask)."""
+
     flag: int
     quantity: int
     price: float
@@ -89,6 +87,7 @@ class MarketDepthLevel:
 @dataclass
 class MStockTick:
     """Parsed real-time quote packet from m.Stock WebSocket."""
+
     mode: int
     exchange_type: int
     token: str
@@ -140,14 +139,8 @@ class MStockTick:
             "oi": self.open_interest,
             "oi_pct": self.open_interest_pct,
             "timestamp": self.timestamp,
-            "bids": [
-                {"price": b.price, "qty": b.quantity, "orders": b.orders}
-                for b in self.bids
-            ],
-            "asks": [
-                {"price": a.price, "qty": a.quantity, "orders": a.orders}
-                for a in self.asks
-            ],
+            "bids": [{"price": b.price, "qty": b.quantity, "orders": b.orders} for b in self.bids],
+            "asks": [{"price": a.price, "qty": a.quantity, "orders": a.orders} for a in self.asks],
             "upper_circuit": self.upper_circuit,
             "lower_circuit": self.lower_circuit,
             "fifty_two_week_high": self.fifty_two_week_high,
@@ -173,17 +166,23 @@ def parse_market_depth(depth_bytes: bytes) -> tuple[list[MarketDepthLevel], list
     for i in range(5):
         offset = i * 20
         flag, qty, raw_price, orders = struct.unpack_from(_DEPTH_ITEM_FMT, depth_bytes, offset)
-        bids.append(MarketDepthLevel(flag=flag, quantity=qty, price=raw_price / 100.0, orders=orders))
+        bids.append(
+            MarketDepthLevel(flag=flag, quantity=qty, price=raw_price / 100.0, orders=orders)
+        )
 
     for i in range(5):
         offset = 100 + i * 20
         flag, qty, raw_price, orders = struct.unpack_from(_DEPTH_ITEM_FMT, depth_bytes, offset)
-        asks.append(MarketDepthLevel(flag=flag, quantity=qty, price=raw_price / 100.0, orders=orders))
+        asks.append(
+            MarketDepthLevel(flag=flag, quantity=qty, price=raw_price / 100.0, orders=orders)
+        )
 
     return bids, asks
 
 
-def parse_quote_packet(data: bytes, token_map: Optional[dict[str, str]] = None) -> Optional[MStockTick]:
+def parse_quote_packet(
+    data: bytes, token_map: Optional[dict[str, str]] = None
+) -> Optional[MStockTick]:
     """Parse a single 379-byte m.Stock quote packet."""
     if len(data) < 379:
         return None
@@ -251,7 +250,9 @@ def parse_quote_packet(data: bytes, token_map: Optional[dict[str, str]] = None) 
         return None
 
 
-def parse_ltp_packet(data: bytes, token_map: Optional[dict[str, str]] = None) -> Optional[MStockTick]:
+def parse_ltp_packet(
+    data: bytes, token_map: Optional[dict[str, str]] = None
+) -> Optional[MStockTick]:
     """Parse a 51-byte mode 1 LTP packet."""
     if len(data) < 51:
         return None
@@ -456,7 +457,9 @@ class MStockWebSocket:
 
             except Exception as e:
                 self._connected = False
-                logger.warning(f"m.Stock WebSocket connection dropped ({e}), retrying in {reconnect_delay:.1f}s...")
+                logger.warning(
+                    f"m.Stock WebSocket connection dropped ({e}), retrying in {reconnect_delay:.1f}s..."
+                )
                 await asyncio.sleep(reconnect_delay)
                 reconnect_delay = min(30.0, reconnect_delay * 1.5)
 
@@ -557,9 +560,7 @@ class MStockWebSocket:
                     ],
                 },
             }
-            asyncio.run_coroutine_threadsafe(
-                self._ws.send(json.dumps(payload)), self._loop
-            )
+            asyncio.run_coroutine_threadsafe(self._ws.send(json.dumps(payload)), self._loop)
 
     def unsubscribe(
         self,
@@ -597,9 +598,7 @@ class MStockWebSocket:
                     ],
                 },
             }
-            asyncio.run_coroutine_threadsafe(
-                self._ws.send(json.dumps(payload)), self._loop
-            )
+            asyncio.run_coroutine_threadsafe(self._ws.send(json.dumps(payload)), self._loop)
 
     def _resubscribe_all(self) -> None:
         """Resubscribe to all tokens on reconnect or initial connect."""
@@ -622,9 +621,7 @@ class MStockWebSocket:
                         ],
                     },
                 }
-                asyncio.run_coroutine_threadsafe(
-                    self._ws.send(json.dumps(payload)), self._loop
-                )
+                asyncio.run_coroutine_threadsafe(self._ws.send(json.dumps(payload)), self._loop)
 
 
 # Global singleton instance

@@ -60,6 +60,7 @@ export function useAPI() {
           method,
           headers,
           body: options.body !== undefined ? options.body : body,
+          timeoutMs: options.timeoutMs,
         })
         if (!response.ok) throw new Error(`API ${response.status}: ${JSON.stringify(response.data)}`)
         return response.data
@@ -108,8 +109,13 @@ export function useAPI() {
     if (!base) throw new Error('API not ready')
     if (useSidecarIpc) {
       try {
-        const response = await window.electronAPI.sidecarRequest({ endpoint, method: 'GET', headers: options.headers })
-        if (!response.ok) throw new Error(`API ${response.status}`)
+        const response = await window.electronAPI.sidecarRequest({
+          endpoint,
+          method: 'GET',
+          headers: options.headers,
+          timeoutMs: options.timeoutMs,
+        })
+        if (!response.ok) throw new Error(`API ${response.status}: ${JSON.stringify(response.data)}`)
         return response.data
       } catch (ipcErr) {
         if (!ipcErr.message?.includes('API is not ready')) throw ipcErr

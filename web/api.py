@@ -153,10 +153,12 @@ async def lifespan(app: FastAPI):
 
     # Record main event loop for threadsafe SSE publishing
     from web.sse import event_bus
+
     event_bus._main_loop = asyncio.get_running_loop()
 
     # Start the continuous real-time market ticker stream engine (3s loop)
     from market.ticker_stream import ticker_stream
+
     ticker_stream.start(poll_interval_seconds=3.0)
 
     warmer_task = asyncio.create_task(_background_cache_warmer())
@@ -194,6 +196,11 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
     allow_headers=["Content-Type", "X-CSRF-Token"],
 )
+
+# ── GZip compression (50-80% bandwidth reduction on JSON payloads) ────────────
+from fastapi.middleware.gzip import GZipMiddleware
+
+app.add_middleware(GZipMiddleware, minimum_size=1024)
 
 # ── Auth router ──────────────────────────────────────────────────
 app.include_router(auth_router)
@@ -2550,10 +2557,14 @@ async def get_ticker_snapshot():
     Get current snapshot of major Indian (NIFTY, BANKNIFTY, SENSEX, VIX, FINNIFTY)
     and Global indices (GIFT NIFTY, NASDAQ, S&P 500, DOW, DXY, US 10Y, Crude, Gold, Silver).
     """
-    from market.ticker_stream import ticker_stream
+    from market.ticker_stream import ticker_stream, compute_ribbon_tickers
 
-    ticker_stream.refresh_indices_sync()
-    return ticker_stream.get_snapshot()
+    snap = ticker_stream.get_snapshot()
+    if not snap.get("tickers"):
+        tickers = await asyncio.to_thread(compute_ribbon_tickers)
+        ticker_stream._cached_ribbon_tickers = tickers
+        snap["tickers"] = tickers
+    return snap
 
 
 @app.get("/api/ticker/stream", tags=["SSE"])
@@ -2571,6 +2582,16 @@ async def stream_ticker():
         # 1. Send initial snapshot immediately with ribbon tickers
         snap = ticker_stream.get_snapshot()
         tickers = snap.get("tickers", [])
+        if not tickers:
+            try:
+                from market.ticker_stream import compute_ribbon_tickers
+
+                tickers = await asyncio.to_thread(compute_ribbon_tickers)
+                ticker_stream._cached_ribbon_tickers = tickers
+                snap["tickers"] = tickers
+            except Exception:
+                pass
+
         yield f"data: {json.dumps({'type': 'ticker_snapshot', 'data': snap, 'tickers': tickers})}\n\n"
 
         # 2. Stream subsequent updates
@@ -2600,9 +2621,7 @@ async def websocket_ticker(ws: WebSocket):
     ticker_stream.start(poll_interval_seconds=3.0)
     snap = ticker_stream.get_snapshot()
     tickers = snap.get("tickers", [])
-    await ws.send_text(
-        json.dumps({"type": "ticker_snapshot", "data": snap, "tickers": tickers})
-    )
+    await ws.send_text(json.dumps({"type": "ticker_snapshot", "data": snap, "tickers": tickers}))
 
     try:
         async for chunk in _event_bus.subscribe("ticker"):
@@ -2615,6 +2634,199 @@ async def websocket_ticker(ws: WebSocket):
         pass
     except Exception:
         pass
+
+
+# ── System Status SSE Stream ──────────────────────────────────────────────────
+
+
+@app.get("/api/system/stream", tags=["SSE"])
+async def stream_system_status():
+    """
+    SSE stream that replaces three separate polling intervals in the frontend:
+      - /api/status  (broker auth status) — was polled every 8s
+      - /api/mode    (trading mode)        — was fetched once
+      - /api/pilot/status                  — was polled every 15s
+
+    Sends an initial full snapshot on connect, then pushes delta updates
+    whenever broker auth state, mode, or pilot status changes.
+
+    Event format:
+        data: {"type": "system_status", "broker_statuses": {...},
+               "mode": "PAPER", "pilot": {...}, "ts": "..."}
+    """
+    import time as _time
+
+    async def _system_generator():
+        # 1. Send immediate full snapshot on connect
+        try:
+            from brokers.session import get_registered_brokers
+            from engine.modes import get_trading_mode
+
+            brokers = get_registered_brokers()
+            broker_statuses = {
+                name: {
+                    "authenticated": b.is_authenticated()
+                    if hasattr(b, "is_authenticated")
+                    else True,
+                    "broker": name,
+                }
+                for name, b in brokers.items()
+            }
+            mode_info = get_trading_mode()
+            _UI_MODE_MAP = {"OBSERVE": "DEMO", "SIMULATE": "PAPER", "EXECUTE": "LIVE"}
+            ui_mode = _UI_MODE_MAP.get(mode_info.mode.value, "PAPER")
+
+            # Pilot status
+            pilot = None
+            try:
+                from engine.pilot import get_pilot_status
+
+                pilot = get_pilot_status()
+                if hasattr(pilot, "__dict__"):
+                    pilot = vars(pilot)
+            except Exception:
+                pass
+
+            snapshot = {
+                "type": "system_status",
+                "broker_statuses": broker_statuses,
+                "mode": ui_mode,
+                "backend_mode": mode_info.mode.value,
+                "pilot": pilot,
+                "ts": _time.time(),
+            }
+            yield f"data: {json.dumps(snapshot)}\n\n"
+        except Exception:
+            yield ": system_stream_ready\n\n"
+
+        # 2. Stream updates from the system channel
+        async for chunk in _event_bus.subscribe("system"):
+            yield chunk
+
+    return StreamingResponse(
+        _system_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+# ── Dashboard Snapshot SSE Stream ──────────────────────────────────────────────
+
+
+@app.get("/api/dashboard/stream", tags=["SSE"])
+async def stream_dashboard_snapshot(symbol: str = "NIFTY", exchange: str = ""):
+    """
+    Symbol-keyed SSE stream for the Strategic Quant Terminal.
+    Replaces the 8-second setInterval poll in TerminalView.jsx.
+
+    Sends an initial dashboard snapshot on connect, then pushes updates
+    when the symbol's price changes by > 0.1% or every 30s as a keepalive.
+
+    Query params:
+        symbol   - Instrument symbol (e.g. NIFTY, RELIANCE)
+        exchange - Exchange prefix (e.g. NSE, MCX); auto-resolved if omitted
+
+    Event format:
+        data: {"type": "dashboard_snapshot", "symbol": "NIFTY", "ltp": 24500.0, ...}
+    """
+    import asyncio as _asyncio
+    import time as _time
+
+    # Resolve canonical exchange
+    _resolved_exchange = exchange or ""
+    if not _resolved_exchange:
+        try:
+            from analysis.universe import normalize_symbol_exchange
+
+            _resolved_exchange = normalize_symbol_exchange(symbol).exchange
+        except Exception:
+            _resolved_exchange = "NSE"
+
+    async def _dashboard_generator():
+        last_ltp = None
+        last_push_ts = 0.0
+        PRICE_THRESHOLD = 0.001  # 0.1% change triggers push
+        KEEPALIVE_INTERVAL = 30.0  # seconds
+
+        # 1. Send initial snapshot immediately on connect
+        try:
+            from web.skills import _get_dashboard_snapshot_data
+
+            snap = await _asyncio.to_thread(
+                _get_dashboard_snapshot_data, symbol, _resolved_exchange, "15m"
+            )
+            if snap:
+                snap["type"] = "dashboard_snapshot"
+                last_ltp = snap.get("ltp")
+                last_push_ts = _time.time()
+                yield f"data: {json.dumps(snap)}\n\n"
+            else:
+                yield f": dashboard_stream_ready symbol={symbol}\n\n"
+        except Exception:
+            yield f": dashboard_stream_ready symbol={symbol}\n\n"
+
+        # 2. Subscribe to ticker updates and push when price moves > threshold
+        try:
+            async for raw_chunk in _event_bus.subscribe("ticker"):
+                if raw_chunk.startswith("data: "):
+                    try:
+                        payload = json.loads(raw_chunk[6:])
+                        tickers = payload.get(
+                            "tickers", payload.get("data", {}).get("tickers", [])
+                        )
+                        target = next(
+                            (
+                                t
+                                for t in tickers
+                                if t.get("symbol", "").upper() == symbol.upper()
+                            ),
+                            None,
+                        )
+                        if target:
+                            new_ltp = target.get("ltp")
+                            now = _time.time()
+                            should_push = new_ltp and (
+                                last_ltp is None
+                                or abs(new_ltp - last_ltp) / max(last_ltp, 1) >= PRICE_THRESHOLD
+                                or now - last_push_ts >= KEEPALIVE_INTERVAL
+                            )
+                            if should_push:
+                                # Fetch fresh full snapshot and push
+                                try:
+                                    from web.skills import _get_dashboard_snapshot_data
+
+                                    snap = await _asyncio.to_thread(
+                                        _get_dashboard_snapshot_data,
+                                        symbol,
+                                        _resolved_exchange,
+                                        "15m",
+                                    )
+                                    if snap:
+                                        snap["type"] = "dashboard_snapshot"
+                                        last_ltp = snap.get("ltp", new_ltp)
+                                        last_push_ts = now
+                                        yield f"data: {json.dumps(snap)}\n\n"
+                                except Exception:
+                                    pass
+                    except (json.JSONDecodeError, Exception):
+                        pass
+                elif raw_chunk.startswith(":"):
+                    # Keepalive heartbeat
+                    yield f": keepalive symbol={symbol}\n\n"
+        except _asyncio.CancelledError:
+            pass
+
+    return StreamingResponse(
+        _dashboard_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 # ── Institutional Preflight, Mode & Charges Endpoints ───────────

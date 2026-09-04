@@ -480,6 +480,7 @@ def _get_analysis_cache():
     """Lazy loader for persistent SQLite cache."""
     try:
         from engine.analysis_cache import AnalysisCache
+
         return AnalysisCache()
     except Exception:
         return None
@@ -581,7 +582,9 @@ def _fetch_yfinance(symbol: str, fast: bool = False) -> dict:
                 "npm": round(npm_raw * 100, 1) if npm_raw else None,
                 "sales_growth": round(rev_growth_raw * 100, 1) if rev_growth_raw else None,
                 "profit_growth": round(earn_growth_raw * 100, 1) if earn_growth_raw else None,
-                "debt_equity": round(info.get("debtToEquity", 0) / 100, 2) if info.get("debtToEquity") else None,
+                "debt_equity": round(info.get("debtToEquity", 0) / 100, 2)
+                if info.get("debtToEquity")
+                else None,
                 "current_ratio": info.get("currentRatio"),
                 "interest_coverage": None,
                 "free_cash_flow": None,
@@ -611,11 +614,21 @@ def _fetch_yfinance(symbol: str, fast: bool = False) -> dict:
                 "overall_risk": info.get("overallRisk"),
                 "audit_risk": info.get("auditRisk"),
                 "board_risk": info.get("boardRisk"),
-                "operating_margin": round(info["operatingMargins"] * 100, 1) if info.get("operatingMargins") else None,
-                "gross_margin": round(info["grossMargins"] * 100, 1) if info.get("grossMargins") else None,
-                "ebitda_margin": round(info["ebitdaMargins"] * 100, 1) if info.get("ebitdaMargins") else None,
-                "total_cash_cr": round(info["totalCash"] / 1e7, 0) if info.get("totalCash") else None,
-                "total_debt_cr": round(info["totalDebt"] / 1e7, 0) if info.get("totalDebt") else None,
+                "operating_margin": round(info["operatingMargins"] * 100, 1)
+                if info.get("operatingMargins")
+                else None,
+                "gross_margin": round(info["grossMargins"] * 100, 1)
+                if info.get("grossMargins")
+                else None,
+                "ebitda_margin": round(info["ebitdaMargins"] * 100, 1)
+                if info.get("ebitdaMargins")
+                else None,
+                "total_cash_cr": round(info["totalCash"] / 1e7, 0)
+                if info.get("totalCash")
+                else None,
+                "total_debt_cr": round(info["totalDebt"] / 1e7, 0)
+                if info.get("totalDebt")
+                else None,
                 "price_to_sales": info.get("priceToSalesTrailing12Months"),
                 "ev_to_revenue": info.get("enterpriseToRevenue"),
                 "payout_ratio": info.get("payoutRatio"),
@@ -1270,7 +1283,9 @@ def analyse(symbol: str, fast: bool = False, **_kwargs) -> FundamentalSnapshot:
 
     if cache:
         try:
-            cache.save_macro(f"fund_snap_{sym_upper}", _snapshot_to_dict(snapshot), ttl_minutes=1440)
+            cache.save_macro(
+                f"fund_snap_{sym_upper}", _snapshot_to_dict(snapshot), ttl_minutes=1440
+            )
         except Exception:
             pass
 

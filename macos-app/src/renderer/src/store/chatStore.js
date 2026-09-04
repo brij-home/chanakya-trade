@@ -73,6 +73,18 @@ export function getActiveSymbol(messages) {
 // Create the default initial session
 const defaultId = uuid()
 
+/**
+ * Build an O(1) Map<id, arrayIndex> from the messages array.
+ * Rebuilt on mutations that add/remove messages (not per SSE update).
+ * @param {Array} msgs
+ * @returns {Map<number|string, number>}
+ */
+function _buildMsgIndex(msgs) {
+  const m = new Map()
+  for (let i = 0; i < msgs.length; i++) m.set(msgs[i].id, i)
+  return m
+}
+
 const initialPort = (() => {
   try {
     if (typeof window !== 'undefined') {
@@ -167,6 +179,9 @@ export const useChatStore = create((set, get) => ({
 
   // ── Backward-compatible flat messages (swapped on session switch) ──
   messages:      [],
+  // ── O(1) message index: Map<id, index> kept in sync with messages array ──
+  // Eliminates O(N) scan in updateStreamingMessage (called per SSE chunk).
+  _msgIndex:     new Map(),
   isLoading:     false,
   port:          initialPort,
   sidecarError:  null,
@@ -211,7 +226,7 @@ export const useChatStore = create((set, get) => ({
     }
     const id = uuid()
     updated[id] = { id, title: 'New Session', messages: [], createdAt: Date.now() }
-    set({ sessions: updated, activeSessionId: id, messages: [], isLoading: false })
+    set({ sessions: updated, activeSessionId: id, messages: [], _msgIndex: new Map(), isLoading: false })
   },
 
   switchSession: (id) => {
@@ -224,7 +239,7 @@ export const useChatStore = create((set, get) => ({
     }
     const target = updated[id]
     if (!target) return
-    set({ sessions: updated, activeSessionId: id, messages: target.messages, isLoading: false })
+    set({ sessions: updated, activeSessionId: id, messages: target.messages, _msgIndex: _buildMsgIndex(target.messages), isLoading: false })
   },
 
   deleteSession: (id) => {
@@ -277,7 +292,7 @@ export const useChatStore = create((set, get) => ({
         [s.activeSessionId]: { ...session, messages: newMessages },
       }
     }
-    return { messages: newMessages, isLoading: true, sessions }
+    return { messages: newMessages, _msgIndex: _buildMsgIndex(newMessages), isLoading: true, sessions }
   }),
 
   addResponse: (card) => set((s) => {
@@ -287,7 +302,7 @@ export const useChatStore = create((set, get) => ({
     if (session) {
       sessions = { ...s.sessions, [s.activeSessionId]: { ...session, messages: newMessages } }
     }
-    return { messages: newMessages, isLoading: false, sessions }
+    return { messages: newMessages, _msgIndex: _buildMsgIndex(newMessages), isLoading: false, sessions }
   }),
 
   addError: (text) => set((s) => {
@@ -297,7 +312,7 @@ export const useChatStore = create((set, get) => ({
     if (session) {
       sessions = { ...s.sessions, [s.activeSessionId]: { ...session, messages: newMessages } }
     }
-    return { messages: newMessages, isLoading: false, sessions }
+    return { messages: newMessages, _msgIndex: _buildMsgIndex(newMessages), isLoading: false, sessions }
   }),
 
   setLoading: (v) => set({ isLoading: v }),
@@ -325,16 +340,28 @@ export const useChatStore = create((set, get) => ({
     if (session) {
       sessions = { ...s.sessions, [s.activeSessionId]: { ...session, messages: newMessages } }
     }
-    return { messages: newMessages, isLoading: true, sessions }
+    return { messages: newMessages, _msgIndex: _buildMsgIndex(newMessages), isLoading: true, sessions }
   }),
 
+  // ── O(1) streaming update — replaces O(N) messages.map ────────────────────
+  // Called per SSE chunk (up to 200× per analysis). Critical hot path.
   updateStreamingMessage: (id, updater) => set((s) => {
-    const newMessages = s.messages.map((m) => m.id === id ? { ...m, data: updater(m.data) } : m)
+    const idx = s._msgIndex.get(id)
+    if (idx === undefined) return {} // message not found — no-op
+    const msg = s.messages[idx]
+    if (!msg) return {}
+    // Splice the single updated message — no full array scan
+    const newMessages = [
+      ...s.messages.slice(0, idx),
+      { ...msg, data: updater(msg.data) },
+      ...s.messages.slice(idx + 1),
+    ]
     const session = s.sessions[s.activeSessionId]
     let sessions = s.sessions
     if (session) {
       sessions = { ...s.sessions, [s.activeSessionId]: { ...session, messages: newMessages } }
     }
+    // Index doesn't change since we only mutated in-place at same index
     return { messages: newMessages, sessions }
   }),
 

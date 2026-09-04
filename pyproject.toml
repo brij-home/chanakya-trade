@@ -114,7 +114,11 @@ include = ["brokers*", "market*", "analysis*", "agent*", "engine*", "ui*", "app*
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
-addopts = "-v --tb=short"
+# -m "not slow and not network" excludes:
+#   slow:    live-uvicorn SSE integration tests, Monte Carlo simulations (run nightly)
+#   network: tests requiring real yfinance/NSE/broker connectivity
+# Run explicitly with: pytest -m slow   or   pytest -m network
+addopts = "-v --tb=short -m \"not slow and not network\""
 markers = [
     "network: tests that require network access (yfinance, NSE API, etc.)",
     "slow: tests slow by design — SSE stream connections, MC simulations (run nightly, not on every push)",

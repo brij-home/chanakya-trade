@@ -97,7 +97,6 @@ _in_flight_hubs: dict[str, _ActiveAnalysisHub] = {}
 _in_flight_hubs_lock = asyncio.Lock()
 
 
-
 # ── Request models ────────────────────────────────────────────
 
 
@@ -795,6 +794,7 @@ async def skill_flows_history(req: FlowsHistoryRequest):
 
     def _fetch():
         from market.sentiment import get_fii_dii_data
+
         return get_fii_dii_data(days=req.days)
 
     try:
@@ -872,8 +872,13 @@ async def skill_macro(req: MacroRequest):
 async def skill_deals(req: DealsRequest):
     """Bulk and block deals from NSE, optionally filtered by symbol."""
     import asyncio
+
     try:
-        deals = await asyncio.to_thread(lambda: __import__('market.bulk_deals', fromlist=['get_bulk_deals']).get_bulk_deals(days=req.days, symbol=req.symbol))
+        deals = await asyncio.to_thread(
+            lambda: __import__("market.bulk_deals", fromlist=["get_bulk_deals"]).get_bulk_deals(
+                days=req.days, symbol=req.symbol
+            )
+        )
         return _ok(deals)
     except Exception as e:
         raise _err(str(e))
@@ -890,11 +895,13 @@ async def skill_backtest(req: BacktestRequest):
     def _run_backtest_sync():
         if req.fast:
             from engine.backtest_vectorized import run_vectorized_backtest
+
             return run_vectorized_backtest(
                 req.symbol.upper(), req.strategy, period=req.period, exchange=req.exchange
             )
         else:
             from engine.backtest import run_backtest
+
             kwargs = {"period": req.period}
             cap = req.capital or req.initial_capital
             if cap:
@@ -912,8 +919,13 @@ async def skill_backtest(req: BacktestRequest):
 async def skill_pairs(req: PairsRequest):
     """Pair trading analysis: correlation, spread, mean reversion signals."""
     import asyncio
+
     try:
-        result = await asyncio.to_thread(lambda: __import__('engine.pairs', fromlist=['analyze_pair']).analyze_pair(req.stock_a.upper(), req.stock_b.upper()))
+        result = await asyncio.to_thread(
+            lambda: __import__("engine.pairs", fromlist=["analyze_pair"]).analyze_pair(
+                req.stock_a.upper(), req.stock_b.upper()
+            )
+        )
         return _ok(result)
     except Exception as e:
         raise _err(str(e))
@@ -1198,6 +1210,7 @@ async def skill_analyze_stream(symbol: str, exchange: str = "NSE", force: bool =
             )
             _cb({"type": "error", "message": str(exc), "detail": str(tb)})
         finally:
+
             async def _cleanup():
                 async with _in_flight_hubs_lock:
                     _in_flight_hubs.pop(hub_key, None)
@@ -2547,8 +2560,6 @@ async def skill_backtest_report(req: BacktestReportRequest):
 
     def _run_all_backtests():
         from engine.backtest import run_backtest
-        from engine.backtest_report import generate_html_report
-        import tempfile
 
         symbol = req.symbol.upper()
         results = []
@@ -2569,20 +2580,25 @@ async def skill_backtest_report(req: BacktestReportRequest):
         def _gen_report():
             from engine.backtest_report import generate_html_report
             import tempfile
+
             symbol = req.symbol.upper()
-            with tempfile.NamedTemporaryFile(suffix=".html", delete=False, prefix=f"bt_{symbol}_") as f:
+            with tempfile.NamedTemporaryFile(
+                suffix=".html", delete=False, prefix=f"bt_{symbol}_"
+            ) as f:
                 tmp_path = f.name
             report_path = generate_html_report(results, output_path=tmp_path)
             return report_path, open(report_path).read()
 
         report_path, html_content = await asyncio.to_thread(_gen_report)
-        return _ok({
-            "symbol": req.symbol.upper(),
-            "strategies_run": [r.strategy_name for r in results],
-            "errors": errors,
-            "report_path": report_path,
-            "html": html_content,
-        })
+        return _ok(
+            {
+                "symbol": req.symbol.upper(),
+                "strategies_run": [r.strategy_name for r in results],
+                "errors": errors,
+                "report_path": report_path,
+                "html": html_content,
+            }
+        )
     except HTTPException:
         raise
     except Exception as e:
@@ -2606,6 +2622,7 @@ async def skill_rrg(req: Optional[RRGSkillRequest] = None):
 
     def _compute_rrg():
         from analysis.sector_rotation import get_sector_rrg_matrix, get_stock_sector_alignment
+
         points = get_sector_rrg_matrix()
         stock_align = None
         if req and req.symbol:
@@ -2614,12 +2631,14 @@ async def skill_rrg(req: Optional[RRGSkillRequest] = None):
 
     try:
         points, stock_align = await asyncio.to_thread(_compute_rrg)
-        return _ok({
-            "sectors": [p.as_dict() for p in points],
-            "leading_sectors": [p.sector for p in points if p.quadrant == "LEADING"],
-            "improving_sectors": [p.sector for p in points if p.quadrant == "IMPROVING"],
-            "stock_alignment": stock_align,
-        })
+        return _ok(
+            {
+                "sectors": [p.as_dict() for p in points],
+                "leading_sectors": [p.sector for p in points if p.quadrant == "LEADING"],
+                "improving_sectors": [p.sector for p in points if p.quadrant == "IMPROVING"],
+                "stock_alignment": stock_align,
+            }
+        )
     except Exception as e:
         raise _err(str(e))
 
@@ -2637,8 +2656,13 @@ async def skill_forensic(req: ForensicSkillRequest):
     Get Beneish M-Score, Altman Z''-Score, Piotroski 9-Point F-Score, and governance audit.
     """
     import asyncio
+
     try:
-        res = await asyncio.to_thread(lambda: __import__('analysis.forensic', fromlist=['audit_forensics']).audit_forensics(req.symbol))
+        res = await asyncio.to_thread(
+            lambda: __import__("analysis.forensic", fromlist=["audit_forensics"]).audit_forensics(
+                req.symbol
+            )
+        )
         return _ok(res.as_dict())
     except Exception as e:
         raise _err(str(e))
@@ -2779,8 +2803,13 @@ async def skill_multibagger(req: MultibaggerSkillRequest):
     Minervini 8-Point Trend Template, Weinstein Stage Analysis, VCP Detection, 3-Horizon Potential, and Execution Tickets.
     """
     import asyncio
+
     try:
-        report = await asyncio.to_thread(lambda: __import__('analysis.multibagger', fromlist=['scan_multibagger_opportunity']).scan_multibagger_opportunity(req.symbol, exchange=req.exchange))
+        report = await asyncio.to_thread(
+            lambda: __import__(
+                "analysis.multibagger", fromlist=["scan_multibagger_opportunity"]
+            ).scan_multibagger_opportunity(req.symbol, exchange=req.exchange)
+        )
         return _ok(report.to_dict())
     except Exception as e:
         raise _err(str(e))
@@ -2795,9 +2824,13 @@ async def skill_multibagger_scan(req: MultibaggerScanSkillRequest):
 
     def _scan():
         from analysis.multibagger_scanner import scan_multibagger_universe
+
         return scan_multibagger_universe(
-            universe=req.universe, horizon=req.horizon,
-            min_conviction=req.min_conviction, max_results=req.max_results, exchange=req.exchange,
+            universe=req.universe,
+            horizon=req.horizon,
+            min_conviction=req.min_conviction,
+            max_results=req.max_results,
+            exchange=req.exchange,
         )
 
     try:
@@ -2921,8 +2954,13 @@ async def skill_portfolio_doctor():
     Stage 4 dead-money detection, HHI concentration risks, tax-loss harvesting, and rebalancing prescriptions.
     """
     import asyncio
+
     try:
-        report = await asyncio.to_thread(lambda: __import__('engine.portfolio_doctor', fromlist=['diagnose_portfolio']).diagnose_portfolio())
+        report = await asyncio.to_thread(
+            lambda: __import__(
+                "engine.portfolio_doctor", fromlist=["diagnose_portfolio"]
+            ).diagnose_portfolio()
+        )
         return _ok(report.to_dict())
     except Exception as e:
         raise _err(str(e))
@@ -3205,33 +3243,58 @@ async def skill_sector_drilldown(req: SectorDrilldownSkillRequest):
                 s_dict = s.as_dict() if hasattr(s, "as_dict") else s if isinstance(s, dict) else {}
                 sec_name = s_dict.get("sector", "").lower()
                 sec_sym = s_dict.get("symbol", "")
-                if (sec_name == canonical_key or canonical_key in sec_name or sec_sym == sector_info.get("index_symbol")):
+                if (
+                    sec_name == canonical_key
+                    or canonical_key in sec_name
+                    or sec_sym == sector_info.get("index_symbol")
+                ):
                     sector_rrg = s_dict
                     break
 
         if not sector_rrg:
             sector_rrg = {
-                "sector": sector_info["name"], "symbol": sector_info.get("index_symbol", "^NSEI"),
-                "rs_ratio": None, "rs_momentum": None, "quadrant": "UNAVAILABLE",
-                "day_change_pct": None, "benchmark_change_pct": None, "relative_strength": None,
-                "available": False, "reason": "Sufficient benchmark and sector price history was not available.",
+                "sector": sector_info["name"],
+                "symbol": sector_info.get("index_symbol", "^NSEI"),
+                "rs_ratio": None,
+                "rs_momentum": None,
+                "quadrant": "UNAVAILABLE",
+                "day_change_pct": None,
+                "benchmark_change_pct": None,
+                "relative_strength": None,
+                "available": False,
+                "reason": "Sufficient benchmark and sector price history was not available.",
             }
 
-        scan_res = scan_high_conviction_opportunities(universe=canonical_key, top_n=30, use_cache=not req.refresh)
+        scan_res = scan_high_conviction_opportunities(
+            universe=canonical_key, top_n=30, use_cache=not req.refresh
+        )
         opportunities = [opp.to_dict() for opp in scan_res.opportunities]
         total_stocks = len(opportunities)
         ready_count = sum(1 for o in opportunities if o.get("eligibility_status") == "READY")
         stalk_count = sum(1 for o in opportunities if o.get("eligibility_status") == "STALK")
-        stand_down_count = sum(1 for o in opportunities if o.get("eligibility_status") == "STAND_DOWN")
-        stage_2_count = sum(1 for o in opportunities if o.get("weinstein_stage") == "STAGE_2_MARKUP")
+        stand_down_count = sum(
+            1 for o in opportunities if o.get("eligibility_status") == "STAND_DOWN"
+        )
+        stage_2_count = sum(
+            1 for o in opportunities if o.get("weinstein_stage") == "STAGE_2_MARKUP"
+        )
         stage_2_pct = round((stage_2_count / max(1, total_stocks)) * 100, 1)
         return {
-            "sector_id": canonical_key, "sector_name": sector_info["name"],
-            "sector_icon": sector_info.get("icon", "🏢"), "index_symbol": sector_info.get("index_symbol", ""),
-            "description": sector_info.get("description", ""), "rrg": sector_rrg,
-            "breadth": {"total_stocks": total_stocks, "ready_count": ready_count, "stalk_count": stalk_count,
-                        "stand_down_count": stand_down_count, "stage_2_pct": stage_2_pct},
-            "data_source": scan_res.data_source, "opportunities": opportunities,
+            "sector_id": canonical_key,
+            "sector_name": sector_info["name"],
+            "sector_icon": sector_info.get("icon", "🏢"),
+            "index_symbol": sector_info.get("index_symbol", ""),
+            "description": sector_info.get("description", ""),
+            "rrg": sector_rrg,
+            "breadth": {
+                "total_stocks": total_stocks,
+                "ready_count": ready_count,
+                "stalk_count": stalk_count,
+                "stand_down_count": stand_down_count,
+                "stage_2_pct": stage_2_pct,
+            },
+            "data_source": scan_res.data_source,
+            "opportunities": opportunities,
         }
 
     try:
@@ -3239,6 +3302,7 @@ async def skill_sector_drilldown(req: SectorDrilldownSkillRequest):
         return _ok(result)
     except Exception as e:
         import traceback
+
         traceback.print_exc()
         raise _err(str(e))
 
@@ -3381,6 +3445,15 @@ class DashboardSnapshotRequest(InstrumentBaseRequest):
     symbol: str = "NIFTY"
     exchange: str = "NSE"
     timeframe: Optional[str] = "15m"
+
+
+def _get_dashboard_snapshot_data(symbol: str, exchange: str, timeframe: str = "15m") -> dict:
+    """
+    Positional-arg bridge called by /api/dashboard/stream SSE endpoint in api.py.
+    Constructs a DashboardSnapshotRequest and delegates to the sync compute function.
+    """
+    req = DashboardSnapshotRequest(symbol=symbol, exchange=exchange, timeframe=timeframe)
+    return _compute_dashboard_snapshot_sync(req)
 
 
 def _compute_dashboard_snapshot_sync(req: Optional[DashboardSnapshotRequest] = None) -> dict:
@@ -3567,15 +3640,69 @@ def _compute_dashboard_snapshot_sync(req: Optional[DashboardSnapshotRequest] = N
 
         # Multi-Asset Live Ticker Ribbon (Indices, Commodities, Crypto)
         ribbon_spec = [
-            {"symbol": "NIFTY", "display_name": "NIFTY 50", "inst": "NSE:NIFTY 50", "category": "INDEX", "unit": "₹"},
-            {"symbol": "BANKNIFTY", "display_name": "BANK NIFTY", "inst": "NSE:NIFTY BANK", "category": "INDEX", "unit": "₹"},
-            {"symbol": "SENSEX", "display_name": "SENSEX", "inst": "BSE:SENSEX", "category": "INDEX", "unit": "₹"},
-            {"symbol": "FINNIFTY", "display_name": "FIN NIFTY", "inst": "NSE:NIFTY FIN SERVICE", "category": "INDEX", "unit": "₹"},
-            {"symbol": "INDIA VIX", "display_name": "INDIA VIX", "inst": "NSE:INDIA VIX", "category": "VIX", "unit": "pts"},
-            {"symbol": "CRUDEOIL", "display_name": "CRUDE OIL", "inst": "MCX:CRUDEOIL", "category": "COMMODITY", "unit": "₹/bbl"},
-            {"symbol": "GOLD", "display_name": "GOLD", "inst": "MCX:GOLD", "category": "COMMODITY", "unit": "₹/10g"},
-            {"symbol": "SILVER", "display_name": "SILVER", "inst": "MCX:SILVER", "category": "COMMODITY", "unit": "₹/kg"},
-            {"symbol": "BTC", "display_name": "BITCOIN", "inst": "CRYPTO:BTC", "category": "CRYPTO", "unit": "$"},
+            {
+                "symbol": "NIFTY",
+                "display_name": "NIFTY 50",
+                "inst": "NSE:NIFTY 50",
+                "category": "INDEX",
+                "unit": "₹",
+            },
+            {
+                "symbol": "BANKNIFTY",
+                "display_name": "BANK NIFTY",
+                "inst": "NSE:NIFTY BANK",
+                "category": "INDEX",
+                "unit": "₹",
+            },
+            {
+                "symbol": "SENSEX",
+                "display_name": "SENSEX",
+                "inst": "BSE:SENSEX",
+                "category": "INDEX",
+                "unit": "₹",
+            },
+            {
+                "symbol": "FINNIFTY",
+                "display_name": "FIN NIFTY",
+                "inst": "NSE:NIFTY FIN SERVICE",
+                "category": "INDEX",
+                "unit": "₹",
+            },
+            {
+                "symbol": "INDIA VIX",
+                "display_name": "INDIA VIX",
+                "inst": "NSE:INDIA VIX",
+                "category": "VIX",
+                "unit": "pts",
+            },
+            {
+                "symbol": "CRUDEOIL",
+                "display_name": "CRUDE OIL",
+                "inst": "MCX:CRUDEOIL",
+                "category": "COMMODITY",
+                "unit": "₹/bbl",
+            },
+            {
+                "symbol": "GOLD",
+                "display_name": "GOLD",
+                "inst": "MCX:GOLD",
+                "category": "COMMODITY",
+                "unit": "₹/10g",
+            },
+            {
+                "symbol": "SILVER",
+                "display_name": "SILVER",
+                "inst": "MCX:SILVER",
+                "category": "COMMODITY",
+                "unit": "₹/kg",
+            },
+            {
+                "symbol": "BTC",
+                "display_name": "BITCOIN",
+                "inst": "CRYPTO:BTC",
+                "category": "CRYPTO",
+                "unit": "$",
+            },
         ]
         live_tickers = []
         for r in ribbon_spec:
@@ -3583,17 +3710,19 @@ def _compute_dashboard_snapshot_sync(req: Optional[DashboardSnapshotRequest] = N
             ltp = float(q.last_price) if q and q.last_price else 0.0
             chg = float(q.change) if q and q.change is not None else 0.0
             chg_pct = float(q.change_pct) if q and q.change_pct is not None else 0.0
-            live_tickers.append({
-                "symbol": r["symbol"],
-                "display_name": r["display_name"],
-                "inst": r["inst"],
-                "category": r["category"],
-                "unit": r["unit"],
-                "ltp": round(ltp, 2),
-                "change": round(chg, 2),
-                "change_pct": round(chg_pct, 2),
-                "direction": "up" if chg_pct > 0 else ("down" if chg_pct < 0 else "flat"),
-            })
+            live_tickers.append(
+                {
+                    "symbol": r["symbol"],
+                    "display_name": r["display_name"],
+                    "inst": r["inst"],
+                    "category": r["category"],
+                    "unit": r["unit"],
+                    "ltp": round(ltp, 2),
+                    "change": round(chg, 2),
+                    "change_pct": round(chg_pct, 2),
+                    "direction": "up" if chg_pct > 0 else ("down" if chg_pct < 0 else "flat"),
+                }
+            )
 
         # Target Setup — quote specifically for the active sym (reuse from batch if already fetched)
         q_obj = (
@@ -3712,9 +3841,11 @@ def _compute_dashboard_snapshot_sync(req: Optional[DashboardSnapshotRequest] = N
         )
 
         if is_equity:
+
             def _fetch_fund():
                 try:
                     from analysis.fundamental import analyse as analyse_fund
+
                     return analyse_fund(setup_sym)
                 except Exception:
                     return None
@@ -3722,6 +3853,7 @@ def _compute_dashboard_snapshot_sync(req: Optional[DashboardSnapshotRequest] = N
             def _fetch_forensic():
                 try:
                     from analysis.forensic import audit_forensics
+
                     return audit_forensics(setup_sym)
                 except Exception:
                     return None
@@ -3729,6 +3861,7 @@ def _compute_dashboard_snapshot_sync(req: Optional[DashboardSnapshotRequest] = N
             def _fetch_mb():
                 try:
                     from analysis.multibagger import scan_multibagger_opportunity
+
                     return scan_multibagger_opportunity(setup_sym)
                 except Exception:
                     return None
@@ -3781,6 +3914,7 @@ def _compute_dashboard_snapshot_sync(req: Optional[DashboardSnapshotRequest] = N
 
         # Ensure market structure and volume profile entities exist for setup calculation
         if ms_report is None:
+
             class _FallbackMS:
                 regime: str = "BULLISH"
                 structure_score: int = 15
@@ -3790,6 +3924,7 @@ def _compute_dashboard_snapshot_sync(req: Optional[DashboardSnapshotRequest] = N
             ms_report = _FallbackMS()
 
         if vp_report is None:
+
             class _FallbackVP:
                 rvol_20d: float = 1.3
                 poc_price: float = cur_ltp * 1.001
@@ -4342,7 +4477,7 @@ def _compute_dashboard_snapshot_sync(req: Optional[DashboardSnapshotRequest] = N
         raise _err(str(e))
 
 
-_in_flight_snapshots: Dict[str, asyncio.Task] = {}
+_in_flight_snapshots: dict[str, asyncio.Task] = {}
 _in_flight_snapshots_lock = asyncio.Lock()
 
 
@@ -4406,44 +4541,7 @@ async def skill_dashboard_snapshot(req: Optional[DashboardSnapshotRequest] = Non
         raise _err(str(e))
 
 
-def _compute_live_tickers_sync() -> list[dict]:
-    from market.quotes import get_quote
-
-    ribbon_spec = [
-        {"symbol": "NIFTY", "display_name": "NIFTY 50", "inst": "NSE:NIFTY 50", "category": "INDEX", "unit": "₹"},
-        {"symbol": "BANKNIFTY", "display_name": "BANK NIFTY", "inst": "NSE:NIFTY BANK", "category": "INDEX", "unit": "₹"},
-        {"symbol": "SENSEX", "display_name": "SENSEX", "inst": "BSE:SENSEX", "category": "INDEX", "unit": "₹"},
-        {"symbol": "FINNIFTY", "display_name": "FIN NIFTY", "inst": "NSE:NIFTY FIN SERVICE", "category": "INDEX", "unit": "₹"},
-        {"symbol": "INDIA VIX", "display_name": "INDIA VIX", "inst": "NSE:INDIA VIX", "category": "VIX", "unit": "pts"},
-        {"symbol": "CRUDEOIL", "display_name": "CRUDE OIL", "inst": "MCX:CRUDEOIL", "category": "COMMODITY", "unit": "₹/bbl"},
-        {"symbol": "GOLD", "display_name": "GOLD", "inst": "MCX:GOLD", "category": "COMMODITY", "unit": "₹/10g"},
-        {"symbol": "SILVER", "display_name": "SILVER", "inst": "MCX:SILVER", "category": "COMMODITY", "unit": "₹/kg"},
-        {"symbol": "BTC", "display_name": "BITCOIN", "inst": "CRYPTO:BTC", "category": "CRYPTO", "unit": "$"},
-    ]
-    insts = [r["inst"] for r in ribbon_spec]
-    quotes_map = get_quote(insts)
-    tickers = []
-    for r in ribbon_spec:
-        q = (
-            quotes_map.get(r["inst"])
-            or quotes_map.get(r["symbol"])
-            or quotes_map.get(r["inst"].split(":")[-1])
-        )
-        ltp = float(q.last_price) if q and q.last_price else 0.0
-        chg = float(q.change) if q and q.change is not None else 0.0
-        chg_pct = float(q.change_pct) if q and q.change_pct is not None else 0.0
-        tickers.append({
-            "symbol": r["symbol"],
-            "display_name": r["display_name"],
-            "inst": r["inst"],
-            "category": r["category"],
-            "unit": r["unit"],
-            "ltp": round(ltp, 2),
-            "change": round(chg, 2),
-            "change_pct": round(chg_pct, 2),
-            "direction": "up" if chg_pct > 0 else ("down" if chg_pct < 0 else "flat"),
-        })
-    return tickers
+from market.ticker_stream import compute_ribbon_tickers as _compute_live_tickers_sync
 
 
 @router.get("/live_tickers")
@@ -4510,6 +4608,7 @@ def _compute_market_overview_sync() -> dict:
 
     try:
         from engine.analysis_cache import analysis_cache
+
         cached = analysis_cache.get_macro("market_overview_snapshot_v2")
         if cached and isinstance(cached, dict) and cached.get("_status") == "cached_fresh":
             return cached
@@ -4554,8 +4653,16 @@ def _compute_market_overview_sync() -> dict:
         flows = get_fii_dii_data(3)
         if flows and len(flows) > 0:
             latest = flows[0]
-            result["fii_net"] = round(float(latest.fii_net), 2) if hasattr(latest, "fii_net") else round(float(latest.get("fii_net", 0)), 2)
-            result["dii_net"] = round(float(latest.dii_net), 2) if hasattr(latest, "dii_net") else round(float(latest.get("dii_net", 0)), 2)
+            result["fii_net"] = (
+                round(float(latest.fii_net), 2)
+                if hasattr(latest, "fii_net")
+                else round(float(latest.get("fii_net", 0)), 2)
+            )
+            result["dii_net"] = (
+                round(float(latest.dii_net), 2)
+                if hasattr(latest, "dii_net")
+                else round(float(latest.get("dii_net", 0)), 2)
+            )
             fetched_any = True
     except Exception:
         pass
@@ -4566,9 +4673,21 @@ def _compute_market_overview_sync() -> dict:
 
         breadth = get_market_breadth()
         if breadth:
-            result["advancers"] = getattr(breadth, "advances", None) if hasattr(breadth, "advances") else breadth.get("advances")
-            result["decliners"] = getattr(breadth, "declines", None) if hasattr(breadth, "declines") else breadth.get("declines")
-            result["unchanged"] = getattr(breadth, "unchanged", None) if hasattr(breadth, "unchanged") else breadth.get("unchanged")
+            result["advancers"] = (
+                getattr(breadth, "advances", None)
+                if hasattr(breadth, "advances")
+                else breadth.get("advances")
+            )
+            result["decliners"] = (
+                getattr(breadth, "declines", None)
+                if hasattr(breadth, "declines")
+                else breadth.get("declines")
+            )
+            result["unchanged"] = (
+                getattr(breadth, "unchanged", None)
+                if hasattr(breadth, "unchanged")
+                else breadth.get("unchanged")
+            )
             fetched_any = True
     except Exception:
         pass
@@ -4576,8 +4695,10 @@ def _compute_market_overview_sync() -> dict:
     # Sector RRG — non-blocking timeout
     try:
         import concurrent.futures as _cf
+
         _ex = _cf.ThreadPoolExecutor(max_workers=1)
         from analysis.sector_rotation import get_sector_rrg_matrix
+
         _fut = _ex.submit(get_sector_rrg_matrix, use_cache=True)
         try:
             rrg = _fut.result(timeout=3.5)
@@ -4616,6 +4737,7 @@ def _compute_market_overview_sync() -> dict:
         result["_as_of"] = _dt.datetime.now(_dt.timezone.utc).isoformat()
         try:
             from engine.analysis_cache import analysis_cache
+
             analysis_cache.save_macro("market_overview_snapshot_v2", result, ttl_minutes=15)
         except Exception:
             pass
@@ -4670,6 +4792,7 @@ class DebateSnapshotRequest(BaseModel):
 @router.post("/debate_snapshot")
 async def skill_debate_snapshot(req: Optional[DebateSnapshotRequest] = None):
     import asyncio
+
     return await asyncio.to_thread(_debate_snapshot_sync, req)
 
 
@@ -4764,7 +4887,7 @@ def _debate_snapshot_sync(req: Optional[DebateSnapshotRequest] = None):
         # Compute dynamic conviction score
         base_score = 65
         if ms:
-            ms_score = getattr(ms, 'structure_score', None)
+            ms_score = getattr(ms, "structure_score", None)
             if ms_score is not None:
                 base_score += int(ms_score * 0.25)
         if fa and (getattr(fa, "manipulation_risk", "") or "") == "LOW":
@@ -4776,11 +4899,15 @@ def _debate_snapshot_sync(req: Optional[DebateSnapshotRequest] = None):
         conviction_score = max(20, min(95, base_score))
 
         # Dynamic Bull Case
-        fii_verdict = (getattr(flows, 'verdict', None) or "Institutional accumulation") if flows else "Institutional accumulation"
+        fii_verdict = (
+            (getattr(flows, "verdict", None) or "Institutional accumulation")
+            if flows
+            else "Institutional accumulation"
+        )
         if ms and ms.active_demand_zones:
             top_ob = ms.active_demand_zones[0]
-            ob_bot = getattr(top_ob, 'bottom', None)
-            ob_top = getattr(top_ob, 'top', None)
+            ob_bot = getattr(top_ob, "bottom", None)
+            ob_top = getattr(top_ob, "top", None)
             if ob_bot is not None and ob_top is not None:
                 flow_desc = f"Unmitigated Demand Order Block at ₹{ob_bot:.2f}-₹{ob_top:.2f} confirms strong smart money buying interest. Volume absorption noted."
             else:
@@ -4789,8 +4916,8 @@ def _debate_snapshot_sync(req: Optional[DebateSnapshotRequest] = None):
             flow_desc = "Accumulation base observed with healthy volume absorption near key exponential moving average support."
 
         if mb:
-            stage_str = getattr(mb, 'stage', 'Stage 1/2') or 'Stage 1/2'
-            passed_count = getattr(mb, 'passed_checks_count', 0) or 0
+            stage_str = getattr(mb, "stage", "Stage 1/2") or "Stage 1/2"
+            passed_count = getattr(mb, "passed_checks_count", 0) or 0
             tech_desc = f"Stock is in {stage_str}. Passing {passed_count}/8 Minervini Trend Template criteria with expanding relative strength."
         else:
             tech_desc = "Constructive price action holding above 50-day moving average with positive trend momentum."
@@ -4836,7 +4963,7 @@ def _debate_snapshot_sync(req: Optional[DebateSnapshotRequest] = None):
             forensic_desc = "Working capital accruals and receivables cycle require continuous tracking against forward revenue growth rates."
 
         if vp:
-            vah_val = getattr(vp, 'vah_price', None)
+            vah_val = getattr(vp, "vah_price", None)
             if vah_val is not None:
                 val_desc = f"Value Area High (VAH) overhead supply at ₹{vah_val:,.2f} presents potential resistance as price approaches distribution ceiling."
             else:
@@ -4845,7 +4972,7 @@ def _debate_snapshot_sync(req: Optional[DebateSnapshotRequest] = None):
             val_desc = f"Historic supply zone near ₹{round(ltp * 1.045, 2):,} represents potential multi-week profit-taking boundary."
 
         if ms:
-            sl_val = getattr(ms, 'invalidation_level', None)
+            sl_val = getattr(ms, "invalidation_level", None)
             if sl_val is not None:
                 sent_desc = f"Structural invalidation level at ₹{sl_val:,.2f}. A clean breakdown below this pivot would invalidate the bullish thesis and trigger trailing stops."
             else:
@@ -4875,17 +5002,23 @@ def _debate_snapshot_sync(req: Optional[DebateSnapshotRequest] = None):
         ]
 
         # Consensus Trade Levels with Dynamic ATR-Bounded Calibration
-        ms_structure_score = getattr(ms, 'structure_score', None) if ms else None
-        is_bull = bool(ms_structure_score is not None and ms_structure_score >= 0) if ms else (conviction_score >= 50)
+        ms_structure_score = getattr(ms, "structure_score", None) if ms else None
+        is_bull = (
+            bool(ms_structure_score is not None and ms_structure_score >= 0)
+            if ms
+            else (conviction_score >= 50)
+        )
         atr_px = ltp * 0.012
 
         if is_bull:
-            ms_support = getattr(ms, 'nearest_support', None) if ms else None
+            ms_support = getattr(ms, "nearest_support", None) if ms else None
             raw_entry = float(ms_support) if ms_support is not None else round(ltp * 0.998, 2)
             entry_px = max(ltp * 0.985, min(ltp * 1.002, raw_entry))
-            ms_inv = getattr(ms, 'invalidation_level', None) if ms else None
+            ms_inv = getattr(ms, "invalidation_level", None) if ms else None
             raw_sl = float(ms_inv) if ms_inv is not None else (entry_px - 1.2 * atr_px)
-            risk_u = max(entry_px * 0.0035, min(entry_px * 0.022, abs(entry_px - raw_sl), 1.2 * atr_px))
+            risk_u = max(
+                entry_px * 0.0035, min(entry_px * 0.022, abs(entry_px - raw_sl), 1.2 * atr_px)
+            )
             sl_px = entry_px - risk_u
             tgt_px = entry_px + (risk_u * 2.0)
             rr_ratio = 2.0
@@ -4896,12 +5029,14 @@ def _debate_snapshot_sync(req: Optional[DebateSnapshotRequest] = None):
             )
             verdict_bias = "BULLISH"
         else:
-            ms_resistance = getattr(ms, 'nearest_resistance', None) if ms else None
+            ms_resistance = getattr(ms, "nearest_resistance", None) if ms else None
             raw_entry = float(ms_resistance) if ms_resistance is not None else round(ltp * 1.002, 2)
             entry_px = max(ltp * 0.998, min(ltp * 1.015, raw_entry))
-            ms_inv = getattr(ms, 'invalidation_level', None) if ms else None
+            ms_inv = getattr(ms, "invalidation_level", None) if ms else None
             raw_sl = float(ms_inv) if ms_inv is not None else (entry_px + 1.2 * atr_px)
-            risk_u = max(entry_px * 0.0035, min(entry_px * 0.022, abs(raw_sl - entry_px), 1.2 * atr_px))
+            risk_u = max(
+                entry_px * 0.0035, min(entry_px * 0.022, abs(raw_sl - entry_px), 1.2 * atr_px)
+            )
             sl_px = entry_px + risk_u
             tgt_px = entry_px - (risk_u * 2.0)
             rr_ratio = 2.0

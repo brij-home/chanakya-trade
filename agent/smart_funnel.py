@@ -742,27 +742,43 @@ class SmartFunnel:
             raw_synthesis=text,
         )
 
-    def _build_quant_fallback_trade_plan(self, symbol: str, exchange: str = "NSE") -> TradePlanSummary:
+    def _build_quant_fallback_trade_plan(
+        self, symbol: str, exchange: str = "NSE"
+    ) -> TradePlanSummary:
         """Deterministic quantitative trade plan fallback when LLM times out (>18s) or fails."""
         reg = self._get_registry()
         ltp, sl, tgt, verdict = 0.0, "—", "—", "HOLD"
         confidence = 65
         if reg:
             try:
-                tech = reg.execute("technical_analyse", {"symbol": symbol, "exchange": exchange}) or {}
+                tech = (
+                    reg.execute("technical_analyse", {"symbol": symbol, "exchange": exchange}) or {}
+                )
                 ltp = float(tech.get("ltp") or tech.get("close") or 0.0)
                 atr = float(tech.get("atr") or (ltp * 0.015))
                 verdict = str(tech.get("verdict") or "BULLISH")
                 if verdict == "BULLISH":
                     sl_val = round(ltp - (1.5 * atr), 1)
                     tgt_val = round(ltp + (3.0 * atr), 1)
-                    sl = f"₹{sl_val:,.1f} (-{((ltp-sl_val)/ltp)*100:.1f}%)" if ltp > 0 else "—"
-                    tgt = f"₹{tgt_val:,.1f} (+{((tgt_val-ltp)/ltp)*100:.1f}%)" if ltp > 0 else "—"
+                    sl = (
+                        f"₹{sl_val:,.1f} (-{((ltp - sl_val) / ltp) * 100:.1f}%)" if ltp > 0 else "—"
+                    )
+                    tgt = (
+                        f"₹{tgt_val:,.1f} (+{((tgt_val - ltp) / ltp) * 100:.1f}%)"
+                        if ltp > 0
+                        else "—"
+                    )
                 else:
                     sl_val = round(ltp + (1.5 * atr), 1)
                     tgt_val = round(ltp - (3.0 * atr), 1)
-                    sl = f"₹{sl_val:,.1f} (+{((sl_val-ltp)/ltp)*100:.1f}%)" if ltp > 0 else "—"
-                    tgt = f"₹{tgt_val:,.1f} (-{((ltp-tgt_val)/ltp)*100:.1f}%)" if ltp > 0 else "—"
+                    sl = (
+                        f"₹{sl_val:,.1f} (+{((sl_val - ltp) / ltp) * 100:.1f}%)" if ltp > 0 else "—"
+                    )
+                    tgt = (
+                        f"₹{tgt_val:,.1f} (-{((ltp - tgt_val) / ltp) * 100:.1f}%)"
+                        if ltp > 0
+                        else "—"
+                    )
             except Exception:
                 pass
 
@@ -770,14 +786,22 @@ class SmartFunnel:
             symbol=symbol,
             verdict=verdict,
             confidence=confidence,
-            winner="BULLS" if verdict == "BULLISH" else "BEARS" if verdict == "BEARISH" else "NEUTRAL",
+            winner="BULLS"
+            if verdict == "BULLISH"
+            else "BEARS"
+            if verdict == "BEARISH"
+            else "NEUTRAL",
             strategy="Quantitative Volatility Risk-Parity Plan (Fast Fallback)",
             entry=f"₹{ltp:,.2f}" if ltp > 0 else "At market",
             stop_loss=sl,
             target=tgt,
             risk_reward="2.0",
             position_size="ATR risk-parity sized",
-            rationale=["Stage 1 Quant pre-filter qualified top setup", f"Technical bias: {verdict}", "ATR-based volatility trailing stop"],
+            rationale=[
+                "Stage 1 Quant pre-filter qualified top setup",
+                f"Technical bias: {verdict}",
+                "ATR-based volatility trailing stop",
+            ],
             risks=["Market regime volatility", "Options expiry liquidity shifts"],
             raw_synthesis="Deterministic Quantitative Sizing Plan applied.",
         )
@@ -815,7 +839,9 @@ class SmartFunnel:
             elif clean_str in ("nifty", "nifty_50", "nifty50"):
                 sym_list = list(WATCHLIST_PRESETS["nifty_50"])
             else:
-                sym_list = [s.strip().upper() for s in symbols.replace(" ", ",").split(",") if s.strip()]
+                sym_list = [
+                    s.strip().upper() for s in symbols.replace(" ", ",").split(",") if s.strip()
+                ]
         else:
             sym_list = [s.strip().upper() for s in symbols if s.strip()]
 
@@ -857,10 +883,12 @@ class SmartFunnel:
         if qualified_reports:
             target_candidates = qualified_reports[:top_n]
         else:
-            # Fallback candidates: ONLY pick reports that actually have valid data (score > 0 and not UNAVAILABLE)
-            valid_fallback = [
-                r for r in filter_reports if r.score > 0 and r.status_label != "UNAVAILABLE"
-            ]
+            # Fallback candidates: pick from stocks that have actual data (not UNAVAILABLE)
+            # even if all scores are 0 — we still pick the least-bad option.
+            valid_fallback = [r for r in filter_reports if r.status_label != "UNAVAILABLE"]
+            # If everything is UNAVAILABLE, fall back to all reports sorted by score
+            if not valid_fallback:
+                valid_fallback = filter_reports
             target_candidates = valid_fallback[:top_n]
             is_fallback = True
             if self.verbose and target_candidates:
@@ -928,11 +956,15 @@ class SmartFunnel:
                             trade_plans.append(f.result(timeout=15.0))
                         except Exception as e:
                             if self.verbose:
-                                console.print(f"[dim yellow]Candidate {sym} synthesis failed ({e}), applying fast quantitative fallback.[/dim yellow]")
+                                console.print(
+                                    f"[dim yellow]Candidate {sym} synthesis failed ({e}), applying fast quantitative fallback.[/dim yellow]"
+                                )
                             trade_plans.append(self._build_quant_fallback_trade_plan(sym, exchange))
                 except concurrent.futures.TimeoutError:
                     if self.verbose:
-                        console.print("[dim yellow]Candidate synthesis batch reached 22s timeout boundary, filling remaining with fast quantitative plans.[/dim yellow]")
+                        console.print(
+                            "[dim yellow]Candidate synthesis batch reached 22s timeout boundary, filling remaining with fast quantitative plans.[/dim yellow]"
+                        )
 
                 # Guarantee every candidate has a valid trade plan
                 existing_syms = {p.symbol for p in trade_plans}

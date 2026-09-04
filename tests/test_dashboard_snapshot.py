@@ -1,6 +1,7 @@
 import pytest
 from web.skills import skill_dashboard_snapshot, DashboardSnapshotRequest
 
+
 @pytest.mark.anyio
 async def test_dashboard_snapshot_contract():
     req = DashboardSnapshotRequest(symbol="NIFTY", exchange="NSE", timeframe="15m")

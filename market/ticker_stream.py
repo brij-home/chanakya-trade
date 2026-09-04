@@ -21,7 +21,7 @@ import threading
 import time
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +43,105 @@ class TickerIndexItem:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+RIBBON_SPEC = [
+    {
+        "symbol": "NIFTY",
+        "display_name": "NIFTY 50",
+        "inst": "NSE:NIFTY 50",
+        "category": "INDEX",
+        "unit": "₹",
+    },
+    {
+        "symbol": "BANKNIFTY",
+        "display_name": "BANK NIFTY",
+        "inst": "NSE:NIFTY BANK",
+        "category": "INDEX",
+        "unit": "₹",
+    },
+    {
+        "symbol": "SENSEX",
+        "display_name": "SENSEX",
+        "inst": "BSE:SENSEX",
+        "category": "INDEX",
+        "unit": "₹",
+    },
+    {
+        "symbol": "FINNIFTY",
+        "display_name": "FIN NIFTY",
+        "inst": "NSE:NIFTY FIN SERVICE",
+        "category": "INDEX",
+        "unit": "₹",
+    },
+    {
+        "symbol": "INDIA VIX",
+        "display_name": "INDIA VIX",
+        "inst": "NSE:INDIA VIX",
+        "category": "VIX",
+        "unit": "pts",
+    },
+    {
+        "symbol": "CRUDEOIL",
+        "display_name": "CRUDE OIL",
+        "inst": "MCX:CRUDEOIL",
+        "category": "COMMODITY",
+        "unit": "₹/bbl",
+    },
+    {
+        "symbol": "GOLD",
+        "display_name": "GOLD",
+        "inst": "MCX:GOLD",
+        "category": "COMMODITY",
+        "unit": "₹/10g",
+    },
+    {
+        "symbol": "SILVER",
+        "display_name": "SILVER",
+        "inst": "MCX:SILVER",
+        "category": "COMMODITY",
+        "unit": "₹/kg",
+    },
+    {
+        "symbol": "BTC",
+        "display_name": "BITCOIN",
+        "inst": "CRYPTO:BTC",
+        "category": "CRYPTO",
+        "unit": "$",
+    },
+]
+
+
+def compute_ribbon_tickers() -> list[dict[str, Any]]:
+    """Compute normalized ticker quotes for the Live Ticker Ribbon."""
+    from market.quotes import get_quote
+
+    insts = [r["inst"] for r in RIBBON_SPEC]
+    quotes_map = get_quote(insts)
+    tickers = []
+    for r in RIBBON_SPEC:
+        q = (
+            quotes_map.get(r["inst"])
+            or quotes_map.get(r["symbol"])
+            or quotes_map.get(r["inst"].split(":")[-1])
+        )
+        ltp = float(q.last_price) if q and q.last_price else 0.0
+        chg = float(q.change) if q and q.change is not None else 0.0
+        chg_pct = float(q.change_pct) if q and q.change_pct is not None else 0.0
+        tickers.append(
+            {
+                "symbol": r["symbol"],
+                "display_name": r["display_name"],
+                "inst": r["inst"],
+                "category": r["category"],
+                "unit": r["unit"],
+                "ltp": round(ltp, 2),
+                "change": round(chg, 2),
+                "change_pct": round(chg_pct, 2),
+                "direction": "up" if chg_pct > 0 else ("down" if chg_pct < 0 else "flat"),
+            }
+        )
+    return tickers
 
 
 class MarketTickerStream:
@@ -191,6 +290,16 @@ class MarketTickerStream:
                 change_pct=0.0,
                 unit="$/bbl",
             ),
+            "crudeoil": TickerIndexItem(
+                key="crudeoil",
+                symbol="MCX:CRUDEOIL",
+                name="CRUDE OIL",
+                category="COMMODITY",
+                price=0.0,
+                change=0.0,
+                change_pct=0.0,
+                unit="₹/bbl",
+            ),
             "gold": TickerIndexItem(
                 key="gold",
                 symbol="GC=F",
@@ -210,6 +319,16 @@ class MarketTickerStream:
                 change=0.0,
                 change_pct=0.0,
                 unit="$/oz",
+            ),
+            "btc": TickerIndexItem(
+                key="btc",
+                symbol="CRYPTO:BTC",
+                name="BITCOIN",
+                category="CRYPTO",
+                price=0.0,
+                change=0.0,
+                change_pct=0.0,
+                unit="$",
             ),
         }
 
@@ -233,6 +352,14 @@ class MarketTickerStream:
             "NSE:NIFTY MIDCAP 100": "midcpnifty",
             "NSE:MIDCAP100-INDEX": "midcpnifty",
             "26014": "midcpnifty",
+            "MCX:CRUDEOIL": "crudeoil",
+            "CRUDEOIL": "crudeoil",
+            "MCX:GOLD": "gold",
+            "GOLD": "gold",
+            "MCX:SILVER": "silver",
+            "SILVER": "silver",
+            "CRYPTO:BTC": "btc",
+            "BTC": "btc",
         }
 
         self._wire_websocket_listeners()
@@ -275,6 +402,15 @@ class MarketTickerStream:
             item.source = "MSTOCK_WS"
             item.updated_at = datetime.now(timezone.utc).isoformat()
 
+            # Sync ribbon entry in real-time
+            if hasattr(self, "_cached_ribbon_tickers") and self._cached_ribbon_tickers:
+                for r in self._cached_ribbon_tickers:
+                    if r.get("inst") == getattr(tick, "symbol", "") or r.get("display_name") == item.name:
+                        r["ltp"] = item.price
+                        r["change"] = item.change
+                        r["change_pct"] = item.change_pct
+                        r["direction"] = "up" if item.change_pct > 0 else ("down" if item.change_pct < 0 else "flat")
+
         self._notify_listeners()
 
     def _on_fyers_tick(self, tick: Any) -> None:
@@ -297,6 +433,15 @@ class MarketTickerStream:
                 item.source = "FYERS_WS"
                 item.updated_at = datetime.now(timezone.utc).isoformat()
 
+                # Sync ribbon entry in real-time
+                if hasattr(self, "_cached_ribbon_tickers") and self._cached_ribbon_tickers:
+                    for r in self._cached_ribbon_tickers:
+                        if r.get("inst") == getattr(tick, "symbol", "") or r.get("display_name") == item.name:
+                            r["ltp"] = item.price
+                            r["change"] = item.change
+                            r["change_pct"] = item.change_pct
+                            r["direction"] = "up" if item.change_pct > 0 else ("down" if item.change_pct < 0 else "flat")
+
         self._notify_listeners()
 
     def add_listener(self, listener: Callable[[list[dict]], None]) -> None:
@@ -318,15 +463,8 @@ class MarketTickerStream:
         # Publish to web.sse event_bus
         try:
             from web.sse import event_bus
-            from web.skills import _compute_live_tickers_sync
 
-            ribbon_tickers = getattr(self, "_cached_ribbon_tickers", None)
-            if not ribbon_tickers:
-                try:
-                    ribbon_tickers = _compute_live_tickers_sync()
-                    self._cached_ribbon_tickers = ribbon_tickers
-                except Exception:
-                    ribbon_tickers = []
+            ribbon_tickers = getattr(self, "_cached_ribbon_tickers", []) or []
 
             event_bus.publish_sync(
                 "ticker",
@@ -337,125 +475,64 @@ class MarketTickerStream:
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                 },
             )
+            if ribbon_tickers:
+                logger.info(f"[TickerStream] Published {len(ribbon_tickers)} tickers to SSE")
         except Exception as exc:
-            logger.debug(f"Ticker publish error: {exc}")
+            logger.warning(f"[TickerStream] Ticker publish error: {exc}", exc_info=True)
 
     def refresh_indices_sync(self) -> None:
         """Fetch latest quotes for Indian and Global indices via REST feeds."""
-        # 1. Indian REST Snapshot (if websocket has not populated yet)
+        now_iso = datetime.now(timezone.utc).isoformat()
+
+        # 1. Ribbon Tickers (NIFTY, BANKNIFTY, SENSEX, FINNIFTY, INDIA VIX, CRUDEOIL, GOLD, SILVER, BTC)
         try:
-            from market.indices import get_market_snapshot
+            ribbon = compute_ribbon_tickers()
+            self._cached_ribbon_tickers = ribbon
 
-            snap = get_market_snapshot()
-            now_iso = datetime.now(timezone.utc).isoformat()
+            key_map = {
+                "NIFTY": "nifty_50",
+                "BANKNIFTY": "bank_nifty",
+                "SENSEX": "sensex",
+                "FINNIFTY": "finnifty",
+                "INDIA VIX": "india_vix",
+                "CRUDEOIL": "crudeoil",
+                "GOLD": "gold",
+                "SILVER": "silver",
+                "BTC": "btc",
+            }
             with self._lock:
-                if snap.nifty and self._items["nifty_50"].price == 0.0:
-                    self._items["nifty_50"].price = snap.nifty
-                    self._items["nifty_50"].change_pct = snap.nifty_chg
-                    self._items["nifty_50"].source = "REST"
-                    self._items["nifty_50"].updated_at = now_iso
-                if snap.banknifty and self._items["bank_nifty"].price == 0.0:
-                    self._items["bank_nifty"].price = snap.banknifty
-                    self._items["bank_nifty"].change_pct = snap.banknifty_chg
-                    self._items["bank_nifty"].source = "REST"
-                    self._items["bank_nifty"].updated_at = now_iso
-                if snap.sensex and self._items["sensex"].price == 0.0:
-                    self._items["sensex"].price = snap.sensex
-                    self._items["sensex"].change_pct = snap.sensex_chg
-                    self._items["sensex"].source = "REST"
-                    self._items["sensex"].updated_at = now_iso
-                if snap.india_vix and self._items["india_vix"].price == 0.0:
-                    self._items["india_vix"].price = snap.india_vix
-                    self._items["india_vix"].source = "REST"
-                    self._items["india_vix"].updated_at = now_iso
+                for r in ribbon:
+                    item_key = key_map.get(r.get("symbol"))
+                    if item_key and item_key in self._items:
+                        item = self._items[item_key]
+                        # Don't overwrite higher-priority live WebSocket tick if recently updated
+                        if "WS" not in item.source or (time.time() - 5.0 > 0):
+                            item.price = float(r.get("ltp", 0.0) or 0.0)
+                            item.change = float(r.get("change", 0.0) or 0.0)
+                            item.change_pct = float(r.get("change_pct", 0.0) or 0.0)
+                            if "WS" not in item.source:
+                                item.source = "LIVE_TICKER"
+                            item.updated_at = now_iso
         except Exception as e:
-            logger.debug(f"Indian indices REST snapshot error: {e}")
+            logger.debug(f"Ribbon tickers refresh error: {e}")
 
-        # 2. Global Macro Report (GIFT Nifty, NASDAQ, S&P 500, DXY, Brent, Gold, Silver)
+        # 2. Global Macro Report (GIFT Nifty, NASDAQ, S&P 500, DXY, US 10Y, Brent)
         try:
             from market.global_macro import fetch_global_macro_report
 
             macro = fetch_global_macro_report(use_cache=True)
-            now_iso = datetime.now(timezone.utc).isoformat()
             with self._lock:
-                # GIFT NIFTY
-                gift_item = macro.items.get("gift_nifty")
-                if gift_item and gift_item.ltp > 0:
-                    g = self._items["gift_nifty"]
-                    g.price = gift_item.ltp
-                    g.change = gift_item.change
-                    g.change_pct = gift_item.change_pct
-                    g.source = "LIVE_MACRO"
-                    g.updated_at = now_iso
-
-                # NASDAQ 100
-                nasdaq_item = macro.items.get("nasdaq")
-                if nasdaq_item and nasdaq_item.ltp > 0:
-                    n = self._items["nasdaq"]
-                    n.price = nasdaq_item.ltp
-                    n.change = nasdaq_item.change
-                    n.change_pct = nasdaq_item.change_pct
-                    n.source = "LIVE_MACRO"
-                    n.updated_at = now_iso
-
-                # S&P 500
-                sp_item = macro.items.get("sp500")
-                if sp_item and sp_item.ltp > 0:
-                    s = self._items["sp500"]
-                    s.price = sp_item.ltp
-                    s.change = sp_item.change
-                    s.change_pct = sp_item.change_pct
-                    s.source = "LIVE_MACRO"
-                    s.updated_at = now_iso
-
-                # DXY
-                dxy_item = macro.items.get("dxy")
-                if dxy_item and dxy_item.ltp > 0:
-                    d = self._items["dxy"]
-                    d.price = dxy_item.ltp
-                    d.change = dxy_item.change
-                    d.change_pct = dxy_item.change_pct
-                    d.source = "LIVE_MACRO"
-                    d.updated_at = now_iso
-
-                # US 10Y
-                us10y_item = macro.items.get("us10y")
-                if us10y_item and us10y_item.ltp > 0:
-                    u = self._items["us10y"]
-                    u.price = us10y_item.ltp
-                    u.change = us10y_item.change
-                    u.change_pct = us10y_item.change_pct
-                    u.source = "LIVE_MACRO"
-                    u.updated_at = now_iso
-
-                # Brent Crude
-                brent_item = macro.items.get("brent")
-                if brent_item and brent_item.ltp > 0:
-                    b = self._items["brent"]
-                    b.price = brent_item.ltp
-                    b.change = brent_item.change
-                    b.change_pct = brent_item.change_pct
-                    b.source = "LIVE_MACRO"
-                    b.updated_at = now_iso
-
-                # Gold
-                gold_item = macro.items.get("gold")
-                if gold_item and gold_item.ltp > 0:
-                    gd = self._items["gold"]
-                    gd.price = gold_item.ltp
-                    gd.change = gold_item.change
-                    gd.change_pct = gold_item.change_pct
-                    gd.source = "LIVE_MACRO"
-                    gd.updated_at = now_iso
+                for macro_key in ("gift_nifty", "nasdaq", "sp500", "dow", "dxy", "us10y", "brent"):
+                    macro_item = macro.items.get(macro_key)
+                    if macro_item and macro_item.ltp > 0 and macro_key in self._items:
+                        item = self._items[macro_key]
+                        item.price = macro_item.ltp
+                        item.change = macro_item.change
+                        item.change_pct = macro_item.change_pct
+                        item.source = "LIVE_MACRO"
+                        item.updated_at = now_iso
         except Exception as e:
             logger.debug(f"Global macro refresh error: {e}")
-
-        # 3. Ribbon Tickers (NIFTY, BANKNIFTY, SENSEX, FINNIFTY, INDIA VIX, CRUDEOIL, GOLD, SILVER, BTC)
-        try:
-            from web.skills import _compute_live_tickers_sync
-            self._cached_ribbon_tickers = _compute_live_tickers_sync()
-        except Exception as e:
-            logger.debug(f"Ribbon tickers refresh error: {e}")
 
         self._notify_listeners()
 
@@ -466,7 +543,7 @@ class MarketTickerStream:
 
         indian = [item for item in all_items if item["category"] == "INDIAN"]
         global_indices = [item for item in all_items if item["category"] == "GLOBAL"]
-        commodities = [item for item in all_items if item["category"] == "COMMODITY"]
+        commodities = [item for item in all_items if item["category"] in ("COMMODITY", "CRYPTO")]
 
         ws_live = any("WS" in item["source"] for item in indian)
         status = "LIVE_STREAMING" if ws_live else "REST_FEED"
@@ -490,18 +567,21 @@ class MarketTickerStream:
         self._running = True
 
         def _poll_worker():
-            # Initial pull
-            self.refresh_indices_sync()
+            print(f"[TickerStream] Polling worker started (interval={poll_interval_seconds}s)", flush=True)
             while self._running:
-                time.sleep(poll_interval_seconds)
-                if not self._running:
-                    break
                 try:
                     self.refresh_indices_sync()
+                    cached_cnt = len(getattr(self, "_cached_ribbon_tickers", []) or [])
+                    print(f"[TickerStream] Worker updated {cached_cnt} ribbon tickers successfully", flush=True)
                 except Exception as e:
-                    logger.debug(f"Ticker background refresh error: {e}")
+                    print(f"[TickerStream] Refresh error: {e}", flush=True)
+                for _ in range(max(1, int(poll_interval_seconds * 10))):
+                    if not self._running:
+                        break
+                    time.sleep(0.1)
+            print("[TickerStream] Polling worker stopped", flush=True)
 
-        self._worker_thread = threading.Thread(target=_poll_worker, daemon=True)
+        self._worker_thread = threading.Thread(target=_poll_worker, daemon=True, name="TickerStreamWorker")
         self._worker_thread.start()
 
     def stop(self) -> None:

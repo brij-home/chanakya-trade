@@ -1,6 +1,7 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import { useAPI } from '../../hooks/useAPI'
 import { useChatStore, getBaseUrl } from '../../store/chatStore'
+import { useSSEStream } from '../../hooks/useSSEStream'
 
 /**
  * LiveTickerRibbon — High-density, institutional-grade real-time ticker ribbon
@@ -27,11 +28,12 @@ export default function LiveTickerRibbon({
 
   const [tickers, setTickers] = useState(initialTickers || [])
   const [loading, setLoading] = useState(!initialTickers || initialTickers.length === 0)
-  const [isStreaming, setIsStreaming] = useState(false)
   const [lastUpdated, setLastUpdated] = useState(new Date())
   const [isRefreshing, setIsRefreshing] = useState(false)
   const [flashMap, setFlashMap] = useState({}) // { [symbol]: 'up' | 'down' }
   const scrollContainerRef = useRef(null)
+  // Ref-tracked flash timers — cleared on unmount, never fire on unmounted component
+  const flashTimersRef = useRef([])
 
   // Sync initial tickers from parent if passed
   useEffect(() => {
@@ -42,12 +44,21 @@ export default function LiveTickerRibbon({
     }
   }, [initialTickers])
 
-  // Fallback REST fetcher
+  // Fallback REST fetcher with dual-endpoint resilience
   const fetchLiveTickers = async (showPulse = false) => {
     try {
       if (showPulse) setIsRefreshing(true)
-      const res = await call('/skills/live_tickers', {}, { method: 'GET' })
-      const list = res?.data?.tickers || res?.tickers
+      let list = null
+      try {
+        const res = await call('/skills/live_tickers', {}, { method: 'GET' })
+        list = res?.data?.tickers || res?.tickers
+      } catch {}
+      if (!Array.isArray(list) || list.length === 0) {
+        try {
+          const snapRes = await call('/api/ticker/snapshot', {}, { method: 'GET' })
+          list = snapRes?.tickers || snapRes?.data?.tickers
+        } catch {}
+      }
       if (Array.isArray(list) && list.length > 0) {
         setTickers(list)
         setLastUpdated(new Date())
@@ -62,86 +73,62 @@ export default function LiveTickerRibbon({
     }
   }
 
-  // ── REAL-TIME SSE STREAMING (Server-Sent Events) ──────────────────────────
+  // ── REAL-TIME SSE STREAMING via useSSEStream ─────────────────────────────
+  // Fix: useSSEStream uses internal refs — no stale closure, no spurious reconnects.
+  // The fallback REST poll is driven by a ref, not stale state.
+  const handleSSEMessage = useCallback((payload) => {
+    const incomingTickers = payload?.tickers || payload?.data?.tickers
+    if (!Array.isArray(incomingTickers) || incomingTickers.length === 0) return
+
+    setTickers((prev) => {
+      const flashes = {}
+      for (const inc of incomingTickers) {
+        const old = prev.find((p) => p.symbol === inc.symbol)
+        if (old && typeof inc.ltp === 'number' && typeof old.ltp === 'number' && inc.ltp !== old.ltp) {
+          flashes[inc.symbol] = inc.ltp > old.ltp ? 'up' : 'down'
+        }
+      }
+      if (Object.keys(flashes).length > 0) {
+        setFlashMap(flashes)
+        // Fix: use ref-tracked timer so it won't fire after unmount
+        const t = setTimeout(() => setFlashMap({}), 700)
+        flashTimersRef.current.push(t)
+      }
+      return incomingTickers
+    })
+    setLoading(false)
+    setLastUpdated(new Date())
+  }, [])
+
+  const { connectionState } = useSSEStream(`${baseUrl}/api/ticker/stream`, {
+    onMessage: handleSSEMessage,
+    onOpen: () => {
+      setLoading(false)
+      setLastUpdated(new Date())
+    },
+    enabled: !!baseUrl,
+  })
+
+  const isStreaming = connectionState === 'live'
+
+  // Clear all pending flash timers on unmount
   useEffect(() => {
-    let es = null
-    let active = true
-
-    const connectSSE = () => {
-      try {
-        const streamUrl = `${baseUrl}/api/ticker/stream`
-        es = new EventSource(streamUrl)
-
-        es.onopen = () => {
-          if (active) {
-            setIsStreaming(true)
-            setLoading(false)
-          }
-        }
-
-        es.onmessage = (event) => {
-          if (!active || !event.data) return
-          try {
-            const payload = JSON.parse(event.data)
-            const incomingTickers = payload.tickers || payload.data?.tickers
-
-            if (Array.isArray(incomingTickers) && incomingTickers.length > 0) {
-              setTickers((prev) => {
-                // Compute price flashes
-                const flashes = {}
-                for (const inc of incomingTickers) {
-                  const old = prev.find((p) => p.symbol === inc.symbol)
-                  if (old && typeof inc.ltp === 'number' && typeof old.ltp === 'number' && inc.ltp !== old.ltp) {
-                    flashes[inc.symbol] = inc.ltp > old.ltp ? 'up' : 'down'
-                  }
-                }
-
-                if (Object.keys(flashes).length > 0) {
-                  setFlashMap(flashes)
-                  setTimeout(() => {
-                    if (active) setFlashMap({})
-                  }, 700)
-                }
-
-                return incomingTickers
-              })
-              setLoading(false)
-              setLastUpdated(new Date())
-            }
-          } catch (e) {
-            // Ignore heartbeat or non-json frame
-          }
-        }
-
-        es.onerror = () => {
-          if (active) {
-            setIsStreaming(false)
-          }
-        }
-      } catch (err) {
-        if (active) setIsStreaming(false)
-      }
-    }
-
-    connectSSE()
-
-    // Resilient fallback polling when SSE is disconnected
-    const fallbackTimer = setInterval(() => {
-      if (!isStreaming) {
-        fetchLiveTickers(false)
-      }
-    }, 4000)
-
     return () => {
-      active = false
-      clearInterval(fallbackTimer)
-      if (es) {
-        try {
-          es.close()
-        } catch {}
-      }
+      flashTimersRef.current.forEach(clearTimeout)
+      flashTimersRef.current = []
     }
-  }, [baseUrl, isStreaming])
+  }, [])
+
+  // Resilient fallback REST poll ONLY when SSE is not live.
+  // Fix: uses connectionState (current render value) not a stale closure variable.
+  useEffect(() => {
+    if (!tickers || tickers.length === 0) {
+      fetchLiveTickers(false)
+    }
+    if (isStreaming) return // SSE is live — no polling needed
+    const fallbackTimer = setInterval(() => fetchLiveTickers(false), 5000)
+    return () => clearInterval(fallbackTimer)
+  }, [isStreaming])
 
   const scrollLeft = () => {
     if (scrollContainerRef.current) {

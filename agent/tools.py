@@ -463,7 +463,11 @@ def build_registry() -> ToolRegistry:
             "type": "object",
             "properties": {
                 "symbol": {"type": "string", "description": "NSE symbol e.g. 'HDFCBANK'"},
-                "fast": {"type": "boolean", "description": "If true, skips statement scraping for sub-second quant evaluation", "default": False},
+                "fast": {
+                    "type": "boolean",
+                    "description": "If true, skips statement scraping for sub-second quant evaluation",
+                    "default": False,
+                },
             },
             "required": ["symbol"],
         },

@@ -8,10 +8,8 @@ import struct
 import time
 from unittest.mock import MagicMock, patch
 
-import pytest
 
 from market.mstock_websocket import (
-    KNOWN_TOKENS,
     MStockTick,
     MStockWebSocket,
     _DEPTH_ITEM_FMT,

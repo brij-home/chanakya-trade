@@ -121,7 +121,9 @@ class MarketTickerWidget(Static):
 
             # 2. Global & Macro Indices
             lines.append("[bold magenta]── Global & Macro ─[/bold magenta]")
-            glob_map = {item["key"]: item for item in snap.get("global", []) + snap.get("commodities", [])}
+            glob_map = {
+                item["key"]: item for item in snap.get("global", []) + snap.get("commodities", [])
+            }
             if "gift_nifty" in glob_map and glob_map["gift_nifty"]["price"] > 0:
                 it = glob_map["gift_nifty"]
                 lines.append(_fmt_row("GIFT NIFTY", it["price"], it["change_pct"], is_int=True))

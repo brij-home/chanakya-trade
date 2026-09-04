@@ -216,16 +216,21 @@ ipcMain.handle('sidecar-request', async (_, request = {}) => {
   const body = request.body === undefined || method === 'GET' ? undefined : JSON.stringify(request.body)
   if (body && Buffer.byteLength(body, 'utf8') > 1_000_000) throw new Error('Request body exceeds 1 MB limit')
 
-  const response = await fetch(`http://127.0.0.1:${_readyPort}${endpoint}`, {
-    method,
-    headers: { 'Content-Type': 'application/json', ...allowedHeaders },
-    body,
-    signal: AbortSignal.timeout(15000),
-  })
-  const text = await response.text()
-  let data = null
-  try { data = text ? JSON.parse(text) : null } catch { data = text }
-  return { ok: response.ok, status: response.status, data }
+  const timeoutMs = Math.max(1000, Number(request.timeoutMs || request.timeout || 90000))
+  try {
+    const response = await fetch(`http://127.0.0.1:${_readyPort}${endpoint}`, {
+      method,
+      headers: { 'Content-Type': 'application/json', ...allowedHeaders },
+      body,
+      signal: AbortSignal.timeout(timeoutMs),
+    })
+    const text = await response.text()
+    let data = null
+    try { data = text ? JSON.parse(text) : null } catch { data = text }
+    return { ok: response.ok, status: response.status, data }
+  } catch (err) {
+    return { ok: false, status: 504, data: { error: err.message || 'Request failed or timed out' } }
+  }
 })
 
 ipcMain.on('update-tray', (_, { label }) => {

@@ -97,6 +97,7 @@ class TestQuantPreFilter:
             sym = args.get("symbol", "")
             if sym == "GOOD":
                 return {
+                    "ltp": 100.0,  # price above sma200=80 → +10
                     "rsi": 52.0,
                     "ema20": 100,
                     "ema50": 90,
@@ -105,6 +106,7 @@ class TestQuantPreFilter:
                     "debt_to_equity": 0.1,
                 }
             return {
+                "ltp": 50.0,  # price below sma200=80 → -25 (>12% below)
                 "rsi": 85.0,
                 "ema20": 50,
                 "ema50": 60,
@@ -124,6 +126,7 @@ class TestQuantPreFilter:
     def test_fallback_selection_when_zero_qualified(self):
         mock_registry = MagicMock()
         mock_registry.execute.side_effect = lambda tool, args: {
+            "ltp": 50.0,  # provide a price so ltp guard passes
             "rsi": 85.0,
             "ema20": 50,
             "ema50": 60,

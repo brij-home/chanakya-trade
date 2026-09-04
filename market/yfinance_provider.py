@@ -228,7 +228,7 @@ import threading
 
 _quote_cache_lock = threading.Lock()
 _quote_cache: dict[str, tuple[float, Quote]] = {}  # key -> (timestamp, Quote)
-_QUOTE_TTL_SECONDS = 300.0
+_QUOTE_TTL_SECONDS = 5.0
 
 # USD-denominated yfinance futures tickers mapped to their MCX contract quotation factor
 # COMEX/NYMEX futures are quoted in US units (troy oz, lbs, barrels), whereas MCX quotes in Indian standard units:

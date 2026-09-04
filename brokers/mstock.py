@@ -185,9 +185,7 @@ class MStockAPI(BrokerAPI):
             pass
         return False
 
-    def _save_token(
-        self, token: str, expiry_seconds: int = 28800, refresh_token: str = ""
-    ) -> None:
+    def _save_token(self, token: str, expiry_seconds: int = 28800, refresh_token: str = "") -> None:
         try:
             TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
             # Parse real JWT exp claim if present
@@ -420,7 +418,12 @@ class MStockAPI(BrokerAPI):
         else:
             resp = self._client.request(method, url, headers=headers, **kwargs)
 
-        if resp.status_code in (401, 403) and self._client_code and self._password and self._totp_secret:
+        if (
+            resp.status_code in (401, 403)
+            and self._client_code
+            and self._password
+            and self._totp_secret
+        ):
             if self.authenticate(force=True):
                 headers = self._headers()
                 if m == "GET":
@@ -610,46 +613,60 @@ class MStockAPI(BrokerAPI):
         inst_list = [instruments] if is_single else list(instruments)
 
         quotes: dict[str, Quote] = {}
+        if not self._token:
+            return quotes.get(instruments) or Quote(symbol=str(instruments), last_price=0.0, open=0.0, high=0.0, low=0.0, close=0.0, volume=0) if is_single else quotes
+
         for inst in inst_list:
+            # Fast filter: mStock only supports Indian NSE/BSE equities & indices
+            if any(inst.startswith(p) for p in ("MCX:", "CRYPTO:", "CDS:", "GIFT:", "US:", "FX:", "INDEX:GIFT")):
+                continue
+
             clean_sym = inst.replace("NSE:", "").replace("BSE:", "")
             exchange = "BSE" if inst.startswith("BSE:") else "NSE"
             quote_obj = None
 
             token = _KNOWN_NSE_TOKENS.get(clean_sym, "")
-            if self._token:
-                try:
-                    url = f"{MSTOCK_BASE_URL}/openapi/typeb/instruments/quote"
-                    resp = None
-                    if token:
-                        q_payload = json.dumps(
-                            {"mode": "OHLC", "exchangeTokens": {exchange: [token]}}
+            try:
+                url = f"{MSTOCK_BASE_URL}/openapi/typeb/instruments/quote"
+                resp = None
+                if token:
+                    q_payload = json.dumps(
+                        {"mode": "OHLC", "exchangeTokens": {exchange: [token]}}
+                    )
+                    try:
+                        resp = self._client.request(
+                            "GET", url, content=q_payload, headers=self._headers(), timeout=2.5
                         )
-                        try:
-                            resp = self._client.request(
-                                "GET", url, content=q_payload, headers=self._headers()
-                            )
-                        except Exception:
-                            resp = None
-                    if resp is None or resp.status_code != 200:
+                    except Exception:
+                        resp = None
+                if (resp is None or resp.status_code != 200) and not clean_sym.startswith("MCX"):
+                    try:
                         resp = self._client.get(
                             url,
                             params={"symbol": clean_sym, "exchange": exchange},
                             headers=self._headers(),
+                            timeout=2.5,
                         )
+                    except Exception:
+                        resp = None
 
-                    if resp is not None and resp.status_code == 200:
+                if resp is not None and resp.status_code == 200:
+                    try:
                         data = resp.json()
-                        fetched = (
-                            data.get("data", {}).get("fetched", [])
-                            if isinstance(data.get("data"), dict)
-                            else []
-                        )
-                        if fetched:
-                            item = fetched[0]
-                            ltp = float(item.get("ltp") or 0.0)
-                            close = float(item.get("close") or ltp)
-                            change = ltp - close
-                            change_pct = (change / close * 100.0) if close else 0.0
+                    except Exception:
+                        data = {}
+                    fetched = (
+                        data.get("data", {}).get("fetched", [])
+                        if isinstance(data.get("data"), dict)
+                        else []
+                    )
+                    if fetched:
+                        item = fetched[0]
+                        ltp = float(item.get("ltp") or 0.0)
+                        close = float(item.get("close") or ltp)
+                        change = ltp - close
+                        change_pct = (change / close * 100.0) if close else 0.0
+                        if ltp > 0:
                             quote_obj = Quote(
                                 symbol=clean_sym,
                                 last_price=ltp,
@@ -661,13 +678,14 @@ class MStockAPI(BrokerAPI):
                                 change=round(change, 2),
                                 change_pct=round(change_pct, 2),
                             )
-                        else:
-                            res = data.get("result") or data.get("data") or data
-                            if isinstance(res, dict) and (res.get("ltp") or res.get("lastPrice")):
-                                ltp = float(res.get("ltp") or res.get("lastPrice") or 0.0)
-                                close = float(res.get("close") or res.get("prevClose") or ltp)
-                                change = ltp - close
-                                change_pct = (change / close * 100.0) if close else 0.0
+                    else:
+                        res = data.get("result") or data.get("data") or data
+                        if isinstance(res, dict) and (res.get("ltp") or res.get("lastPrice")):
+                            ltp = float(res.get("ltp") or res.get("lastPrice") or 0.0)
+                            close = float(res.get("close") or res.get("prevClose") or ltp)
+                            change = ltp - close
+                            change_pct = (change / close * 100.0) if close else 0.0
+                            if ltp > 0:
                                 quote_obj = Quote(
                                     symbol=clean_sym,
                                     last_price=ltp,
@@ -679,27 +697,14 @@ class MStockAPI(BrokerAPI):
                                     change=round(change, 2),
                                     change_pct=round(change_pct, 2),
                                 )
-                except Exception:
-                    pass
+            except Exception:
+                pass
 
-            if quote_obj is None:
-                from market.quotes import get_quote as _mkt_quote
-
-                raw_q = _mkt_quote(f"{exchange}:{clean_sym}")
-                if isinstance(raw_q, dict):
-                    quote_obj = raw_q.get(f"{exchange}:{clean_sym}") or (
-                        next(iter(raw_q.values())) if raw_q else None
-                    )
-                elif isinstance(raw_q, Quote):
-                    quote_obj = raw_q
-
-            if quote_obj is None:
-                quote_obj = Quote(symbol=clean_sym, last_price=0.0)
-
-            quotes[inst] = quote_obj
+            if quote_obj is not None:
+                quotes[inst] = quote_obj
 
         if is_single:
-            return quotes[instruments]
+            return quotes.get(instruments) or Quote(symbol=instruments, last_price=0.0, open=0.0, high=0.0, low=0.0, close=0.0, volume=0)
         return quotes
 
     # ── Option Chain APIs ─────────────────────────────────────
@@ -878,12 +883,19 @@ class MStockAPI(BrokerAPI):
                                     q_url = f"{MSTOCK_BASE_URL}/openapi/typeb/instruments/quote"
                                     # Query first 50 contracts to remain within typical REST quota
                                     batch_tokens = tokens_to_quote[:50]
-                                    q_body = json.dumps({"mode": "LTP", "exchangeTokens": {"NFO": batch_tokens}})
-                                    q_resp = self._client.request("GET", q_url, content=q_body, headers=self._headers())
+                                    q_body = json.dumps(
+                                        {"mode": "LTP", "exchangeTokens": {"NFO": batch_tokens}}
+                                    )
+                                    q_resp = self._client.request(
+                                        "GET", q_url, content=q_body, headers=self._headers()
+                                    )
                                     if q_resp.status_code == 200:
                                         q_data = q_resp.json()
                                         fetched = q_data.get("data", {}).get("fetched", [])
-                                        ltp_map = {item.get("symbolToken"): float(item.get("ltp") or 0.0) for item in fetched}
+                                        ltp_map = {
+                                            item.get("symbolToken"): float(item.get("ltp") or 0.0)
+                                            for item in fetched
+                                        }
                                         for idx, c in enumerate(contracts[:50]):
                                             tok = tokens_to_quote[idx]
                                             if tok in ltp_map:
@@ -900,7 +912,6 @@ class MStockAPI(BrokerAPI):
         from market.nse_scraper import nse_get_options_chain
 
         return nse_get_options_chain(underlying, expiry)
-
 
     def get_history(
         self,
@@ -972,11 +983,13 @@ class MStockAPI(BrokerAPI):
             except Exception:
                 pass
 
-        from market.quotes import get_historical_data
+        try:
+            from market.history import get_history
 
-        return get_historical_data(
-            symbol, resolution=resolution, from_date=from_date, to_date=to_date
-        )
+            return get_history(symbol, resolution=resolution, from_date=from_date, to_date=to_date)
+        except Exception:
+            import pandas as pd
+            return pd.DataFrame()
 
     # ── Order Execution ───────────────────────────────────────
 
@@ -1357,4 +1370,3 @@ class MStockAPI(BrokerAPI):
         except Exception:
             pass
         return ""
-

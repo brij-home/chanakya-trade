@@ -13,7 +13,7 @@ import pytest
 from starlette.testclient import TestClient
 
 from market.mstock_websocket import MStockTick
-from market.ticker_stream import MarketTickerStream, TickerIndexItem
+from market.ticker_stream import MarketTickerStream
 
 
 def test_ticker_stream_initialization():

@@ -140,7 +140,53 @@ def parse_persona_response(text: str, persona_id: str) -> PersonaSignal:
     )
 
 
-# ── Data fetcher ──────────────────────────────────────────────
+# ── Data fetcher ────────────────────────────────────────────────────────────────
+
+# ── Shared Data Brief Cache ───────────────────────────────────────────────────
+# When run_debate() or run_council() runs N personas on the same symbol,
+# data is fetched ONCE and shared across all personas (big token savings).
+# TTL is intentionally short (5min) — intraday prices change rapidly.
+import time as _time
+
+_BRIEF_CACHE: dict[str, tuple[dict, float]] = {}  # key -> (brief, timestamp)
+_BRIEF_CACHE_TTL = 300.0  # 5 minutes
+_BRIEF_CACHE_MAX = 20  # max symbols in cache to prevent memory growth
+
+
+def _get_shared_brief(
+    symbol: str,
+    exchange: str,
+    registry: Any,
+    force_refresh: bool = False,
+) -> dict[str, Any]:
+    """
+    Get a data brief for (symbol, exchange), using a module-level cache.
+    All personas for the same symbol in the same analysis run share this brief.
+    """
+    key = f"{symbol.upper()}:{exchange.upper()}"
+    now = _time.monotonic()
+
+    if not force_refresh and key in _BRIEF_CACHE:
+        cached_brief, cached_ts = _BRIEF_CACHE[key]
+        if now - cached_ts < _BRIEF_CACHE_TTL:
+            return cached_brief
+
+    # Evict oldest if at capacity
+    if len(_BRIEF_CACHE) >= _BRIEF_CACHE_MAX:
+        oldest_key = min(_BRIEF_CACHE, key=lambda k: _BRIEF_CACHE[k][1])
+        _BRIEF_CACHE.pop(oldest_key, None)
+
+    brief = _fetch_data_brief(symbol, exchange, registry)
+    _BRIEF_CACHE[key] = (brief, now)
+    return brief
+
+
+def invalidate_brief_cache(symbol: str, exchange: str = "") -> None:
+    """Invalidate cached brief for a symbol (call after portfolio changes or force-refresh)."""
+    prefix = symbol.upper()
+    to_remove = [k for k in _BRIEF_CACHE if k.startswith(prefix)]
+    for k in to_remove:
+        _BRIEF_CACHE.pop(k, None)
 
 
 def _fetch_data_brief(
@@ -180,7 +226,11 @@ def _fetch_data_brief(
     # Technical snapshot
     tech = _safe_call("technical_analyse", symbol=symbol, exchange=exchange)
     if tech:
-        t_dict = tech if isinstance(tech, dict) else (tech.as_dict() if hasattr(tech, "as_dict") else vars(tech))
+        t_dict = (
+            tech
+            if isinstance(tech, dict)
+            else (tech.as_dict() if hasattr(tech, "as_dict") else vars(tech))
+        )
         if "verdict" in t_dict and "trend" not in t_dict:
             t_dict["trend"] = t_dict["verdict"]
         if "rsi" in t_dict and "RSI" not in t_dict:
@@ -190,7 +240,11 @@ def _fetch_data_brief(
     # Fundamental snapshot
     fund = _safe_call("fundamental_analyse", symbol=symbol)
     if fund:
-        f_dict = fund if isinstance(fund, dict) else (fund.as_dict() if hasattr(fund, "as_dict") else vars(fund))
+        f_dict = (
+            fund
+            if isinstance(fund, dict)
+            else (fund.as_dict() if hasattr(fund, "as_dict") else vars(fund))
+        )
         brief["fundamentals"] = f_dict
 
     # Forensic snapshot
@@ -209,7 +263,15 @@ def _fetch_data_brief(
             brief["fii_dii"] = fii
         elif isinstance(fii, list) and len(fii) > 0:
             first = fii[0]
-            brief["fii_dii"] = first if isinstance(first, dict) else (first.as_dict() if hasattr(first, "as_dict") else (vars(first) if hasattr(first, "__dict__") else {"raw": str(first)}))
+            brief["fii_dii"] = (
+                first
+                if isinstance(first, dict)
+                else (
+                    first.as_dict()
+                    if hasattr(first, "as_dict")
+                    else (vars(first) if hasattr(first, "__dict__") else {"raw": str(first)})
+                )
+            )
         elif hasattr(fii, "as_dict"):
             brief["fii_dii"] = fii.as_dict()
         elif hasattr(fii, "__dict__"):
@@ -225,7 +287,9 @@ def _fetch_data_brief(
         elif hasattr(macro, "__dict__"):
             brief["macro"] = vars(macro)
         if hasattr(macro, "vix") and macro.vix and "india_vix" not in brief["macro"]:
-            brief["macro"]["india_vix"] = getattr(macro.vix, "ltp", None) or getattr(macro.vix, "price", None)
+            brief["macro"]["india_vix"] = getattr(macro.vix, "ltp", None) or getattr(
+                macro.vix, "price", None
+            )
 
     # Options snapshot
     pcr_data = _safe_call("get_pcr", underlying=symbol)
@@ -523,7 +587,11 @@ def _score_dimension(dimension: str, brief: dict[str, Any]) -> float | None:
             else (tech.get("pcr") if tech.get("pcr") is not None else tech.get("put_call_ratio"))
         )
         if pcr_val is None:
-            if opt.get("atm_iv") is not None or opt.get("gex") is not None or opt.get("iv") is not None:
+            if (
+                opt.get("atm_iv") is not None
+                or opt.get("gex") is not None
+                or opt.get("iv") is not None
+            ):
                 pcr_val = 1.0
             else:
                 return None
@@ -660,21 +728,21 @@ def run_persona_analysis(
     exchange: str = "NSE",
     registry: Any = None,
     llm_provider: Any = None,
+    precomputed_brief: dict | None = None,
 ) -> PersonaSignal:
     """
     Run a single persona analysis on a symbol.
 
     Parameters
     ----------
-    persona_id:    One of 'buffett', 'jhunjhunwala', 'lynch', 'soros', 'munger'
-    symbol:        Stock ticker, e.g. 'RELIANCE'
-    exchange:      'NSE' or 'BSE'
-    registry:      ToolRegistry for live data; if None, analysis uses empty data
-    llm_provider:  LLM provider instance; if None, uses deterministic fallback
-
-    Returns
-    -------
-    PersonaSignal
+    persona_id:         One of 'buffett', 'jhunjhunwala', 'lynch', 'soros', 'munger'
+    symbol:             Stock ticker, e.g. 'RELIANCE'
+    exchange:           'NSE' or 'BSE'
+    registry:           ToolRegistry for live data; if None, analysis uses empty data
+    llm_provider:       LLM provider instance; if None, uses deterministic fallback
+    precomputed_brief:  If provided, skip the data fetch and use this brief directly.
+                        Used by run_debate() and run_council() to share one data fetch
+                        across all persona agents (eliminates N×tool calls).
     """
     # Validate persona (raises ValueError for unknown ids)
     persona = get_persona(persona_id)
@@ -695,8 +763,12 @@ def run_persona_analysis(
         except Exception:
             llm_provider = None
 
-    # 2. Fetch data
-    brief = _fetch_data_brief(symbol, exchange, registry)
+    # 2. Fetch data (or use precomputed brief if caller supplies one)
+    brief = (
+        precomputed_brief
+        if precomputed_brief is not None
+        else _fetch_data_brief(symbol, exchange, registry)
+    )
 
     # A fluent LLM response is not a substitute for the evidence its framework
     # needs. Require the persona's most heavily weighted dimension before an
@@ -799,6 +871,11 @@ def run_debate(
         except Exception:
             registry = None
 
+    # ── OPTIMIZATION: fetch data ONCE and share across all 13 personas ───────────
+    # Before this change: 13 personas × 7 tool calls = 91 tool calls per analysis.
+    # After: 7 tool calls shared + 13 LLM calls. Token savings ~4,000 per run.
+    shared_brief = _get_shared_brief(symbol, exchange, registry)
+
     personas = list_personas()
     signals: list[PersonaSignal] = []
 
@@ -809,6 +886,7 @@ def run_debate(
             exchange=exchange,
             registry=registry,
             llm_provider=llm_provider,
+            precomputed_brief=shared_brief,  # <─ shared, not re-fetched
         )
         signals.append(signal)
 
@@ -851,8 +929,14 @@ def run_council(
         except Exception:
             registry = None
 
+    # ── OPTIMIZATION: fetch data ONCE and share across all council personas ───────────
+    shared_brief = _get_shared_brief(symbol, exchange, registry)
+
     signals = [
-        run_persona_analysis(pid, symbol, exchange, registry, llm_provider) for pid in persona_ids
+        run_persona_analysis(
+            pid, symbol, exchange, registry, llm_provider, precomputed_brief=shared_brief
+        )
+        for pid in persona_ids
     ]
 
     verdict_scores = {

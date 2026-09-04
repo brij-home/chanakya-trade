@@ -196,7 +196,12 @@ class TestTavilyProvider:
 
 
 class TestYfinanceFundamentalsFallback:
-    """FundamentalAnalyst._fundamentals_fallback: yfinance first, then Perplexity."""
+    """FundamentalAnalyst._fundamentals_fallback: score_fundamentals first, then Perplexity.
+
+    Tier 1 calls analysis.fundamental.score_fundamentals(symbol) which returns a
+    FundamentalsScore with a .metrics dict. We patch at that boundary to avoid
+    real network/yfinance calls.
+    """
 
     def _make_analyst(self):
         from agent.multi_agent import FundamentalAnalyst
@@ -205,22 +210,25 @@ class TestYfinanceFundamentalsFallback:
         registry.execute.side_effect = RuntimeError("broker unavailable")
         return FundamentalAnalyst(registry)
 
-    def _mock_yf_info(self, pe=22.5, roe=0.28, pb=3.1, d_e=0.15, rev_growth=0.12):
-        mock_ticker = MagicMock()
-        mock_ticker.info = {
-            "trailingPE": pe,
-            "returnOnEquity": roe,
-            "priceToBook": pb,
-            "debtToEquity": d_e,
-            "revenueGrowth": rev_growth,
+    def _make_fs(self, pe=22.5, roe=28.0, pb=3.1, d_e=0.15, rev_growth=12.0):
+        """Returns a mock FundamentalsScore with the correct .metrics dict."""
+        mock_fs = MagicMock()
+        mock_fs.metrics = {
+            "pe": pe,
+            "roe": roe,  # already in percentage (e.g. 28.0 = 28%)
+            "pb": pb,
+            "debt_to_equity": d_e,
+            "revenue_growth": rev_growth,
         }
-        return mock_ticker
+        return mock_fs
+
+    _PATCH = "analysis.fundamental.score_fundamentals"
 
     def test_yfinance_used_as_primary_fallback(self, monkeypatch):
         monkeypatch.delenv("PERPLEXITY_API_KEY", raising=False)
-        ticker = self._mock_yf_info()
+        mock_fs = self._make_fs()
 
-        with patch("yfinance.Ticker", return_value=ticker):
+        with patch(self._PATCH, return_value=mock_fs):
             analyst = self._make_analyst()
             report = analyst.analyze("INFY", "NSE")
 
@@ -230,31 +238,36 @@ class TestYfinanceFundamentalsFallback:
         assert any("ROE" in p for p in report.key_points)
 
     def test_yfinance_uses_ns_suffix(self, monkeypatch):
+        """score_fundamentals should be called with the raw symbol — NS suffix handled internally."""
         monkeypatch.delenv("PERPLEXITY_API_KEY", raising=False)
-        ticker = self._mock_yf_info()
+        mock_fs = self._make_fs()
 
-        with patch("yfinance.Ticker", return_value=ticker) as mock_yf:
+        with patch(self._PATCH, return_value=mock_fs) as mock_sf:
             analyst = self._make_analyst()
             analyst.analyze("RELIANCE", "NSE")
-            # Check .NS suffix was added
-            call_arg = mock_yf.call_args[0][0]
-            assert call_arg == "RELIANCE.NS"
+            call_kwargs = mock_sf.call_args
+            assert call_kwargs is not None, "score_fundamentals was not called"
+            called_symbol = call_kwargs[0][0] if call_kwargs[0] else call_kwargs[1].get("symbol")
+            assert "RELIANCE" in str(called_symbol).upper()
 
     def test_yfinance_does_not_add_ns_twice(self, monkeypatch):
         monkeypatch.delenv("PERPLEXITY_API_KEY", raising=False)
-        ticker = self._mock_yf_info()
+        mock_fs = self._make_fs()
 
-        with patch("yfinance.Ticker", return_value=ticker) as mock_yf:
+        with patch(self._PATCH, return_value=mock_fs) as mock_sf:
             analyst = self._make_analyst()
             analyst.analyze("INFY.NS", "NSE")
-            call_arg = mock_yf.call_args[0][0]
-            assert call_arg == "INFY.NS"  # not INFY.NS.NS
+            call_kwargs = mock_sf.call_args
+            assert call_kwargs is not None
+            called_symbol = call_kwargs[0][0] if call_kwargs[0] else call_kwargs[1].get("symbol")
+            assert str(called_symbol).upper().count(".NS") <= 1
 
     def test_bullish_verdict_for_high_roe(self, monkeypatch):
         monkeypatch.delenv("PERPLEXITY_API_KEY", raising=False)
-        ticker = self._mock_yf_info(roe=0.45, pe=18.0)  # very high ROE, fair PE
+        # ROE=45% (very high), PE=18 (fair) → heuristic score should be BULLISH (>=60)
+        mock_fs = self._make_fs(roe=45.0, pe=18.0)
 
-        with patch("yfinance.Ticker", return_value=ticker):
+        with patch(self._PATCH, return_value=mock_fs):
             analyst = self._make_analyst()
             report = analyst.analyze("INFY", "NSE")
 
@@ -262,14 +275,14 @@ class TestYfinanceFundamentalsFallback:
 
     def test_falls_through_to_perplexity_when_yfinance_empty(self, monkeypatch):
         monkeypatch.setenv("PERPLEXITY_API_KEY", "pplx-test")
-        empty_ticker = MagicMock()
-        empty_ticker.info = {}  # no PE or ROE
-
-        from agent.perplexity_finance import FinanceSearchResult
-
-        good = FinanceSearchResult(query="test", summary="INFY PE=25 ROE=28%")
-        with patch("yfinance.Ticker", return_value=empty_ticker):
+        # score_fundamentals returns a FundamentalsScore with empty metrics (no PE or ROE)
+        empty_fs = MagicMock()
+        empty_fs.metrics = {}
+        with patch(self._PATCH, return_value=empty_fs):
             with patch("agent.perplexity_finance.perplexity_finance_available", return_value=True):
+                from agent.perplexity_finance import FinanceSearchResult
+
+                good = FinanceSearchResult(query="test", summary="INFY PE=25 ROE=28%")
                 with patch(
                     "agent.perplexity_finance.finance_fundamentals_for_symbol", return_value=good
                 ):
@@ -281,7 +294,7 @@ class TestYfinanceFundamentalsFallback:
 
     def test_returns_unknown_when_both_fail(self, monkeypatch):
         monkeypatch.delenv("PERPLEXITY_API_KEY", raising=False)
-        with patch("yfinance.Ticker", side_effect=Exception("network error")):
+        with patch(self._PATCH, side_effect=Exception("network error")):
             analyst = self._make_analyst()
             report = analyst.analyze("INFY", "NSE")
 
@@ -290,9 +303,9 @@ class TestYfinanceFundamentalsFallback:
 
     def test_confidence_is_50_for_yfinance(self, monkeypatch):
         monkeypatch.delenv("PERPLEXITY_API_KEY", raising=False)
-        ticker = self._mock_yf_info()
+        mock_fs = self._make_fs()
 
-        with patch("yfinance.Ticker", return_value=ticker):
+        with patch(self._PATCH, return_value=mock_fs):
             analyst = self._make_analyst()
             report = analyst.analyze("INFY", "NSE")
 
@@ -300,9 +313,9 @@ class TestYfinanceFundamentalsFallback:
 
     def test_yfinance_source_tagged_in_key_points(self, monkeypatch):
         monkeypatch.delenv("PERPLEXITY_API_KEY", raising=False)
-        ticker = self._mock_yf_info()
+        mock_fs = self._make_fs()
 
-        with patch("yfinance.Ticker", return_value=ticker):
+        with patch(self._PATCH, return_value=mock_fs):
             analyst = self._make_analyst()
             report = analyst.analyze("INFY", "NSE")
 

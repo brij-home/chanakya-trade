@@ -366,10 +366,7 @@ class StoxkartAPI(BrokerAPI):
             except Exception:
                 pass
 
-        # Seamless fallback to market quote engine
-        from market.quotes import get_quote as _mkt_quote
-
-        return _mkt_quote(f"{exch}:{sym}")
+        return Quote(symbol=sym, last_price=0.0, open=0.0, high=0.0, low=0.0, close=0.0, volume=0)
 
     def get_options_chain(
         self,

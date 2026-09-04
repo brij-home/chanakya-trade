@@ -424,15 +424,9 @@ def test_mstock_basket_orders():
         status_code=200,
         json=lambda: {"status": True, "data": [{"BaskName": "TestBasket"}]},
     )
-    rb_mock = MagicMock(
-        status_code=200, json=lambda: {"status": True, "message": "Basket Renamed"}
-    )
-    db_mock = MagicMock(
-        status_code=200, json=lambda: {"status": True, "message": "Basket Deleted"}
-    )
-    calc_mock = MagicMock(
-        status_code=200, json=lambda: {"status": True, "data": {"margin": 50000}}
-    )
+    rb_mock = MagicMock(status_code=200, json=lambda: {"status": True, "message": "Basket Renamed"})
+    db_mock = MagicMock(status_code=200, json=lambda: {"status": True, "message": "Basket Deleted"})
+    calc_mock = MagicMock(status_code=200, json=lambda: {"status": True, "data": {"margin": 50000}})
 
     with (
         patch.object(broker._client, "post", side_effect=[cb_mock, db_mock]),
@@ -484,4 +478,3 @@ def test_mstock_convert_position(monkeypatch):
     with patch.object(broker._client, "post", return_value=mock_resp):
         res = broker.convert_position("NSE", "RELIANCE", "MIS", "CNC", 10)
         assert res.get("status") is True
-
