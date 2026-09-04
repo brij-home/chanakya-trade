@@ -102,7 +102,7 @@ _BROKER_LABELS = {
 }
 
 # Brokers that use TOTP auto-login (no browser redirect)
-_TOTP_BROKERS = {"angelone", "stoxkart", "shoonya"}
+_TOTP_BROKERS = {"angelone", "stoxkart", "shoonya", "mstock"}
 
 # Broker menu display items (number, label, description)
 _BROKER_MENU = [
@@ -672,7 +672,7 @@ def _recreate_broker_from_token(key: str):
 
             if TOKEN_FILE.exists():
                 b = MStockAPI()
-                if b.is_authenticated:
+                if b.is_authenticated():
                     return b
     except Exception:
         pass

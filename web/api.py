@@ -404,13 +404,14 @@ async def _auto_restore_brokers() -> None:
     # m.Stock (Mirae Asset)
     if _has_mstock():
         try:
-            from brokers.mstock import MStockAPI, TOKEN_FILE as _MT
+            from brokers.mstock import MStockAPI
 
-            if _MT.exists():
-                b = MStockAPI()
-                if b.is_authenticated:
-                    register_broker("mstock", b)
-                    logging.info("[startup] m.Stock session restored")
+            b = MStockAPI()
+            if not b.is_authenticated():
+                b.authenticate()
+            if b.is_authenticated():
+                register_broker("mstock", b)
+                logging.info("[startup] m.Stock session active & registered")
         except Exception as exc:
             logging.warning("[startup] Could not restore m.Stock: %s", exc)
 
@@ -901,6 +902,8 @@ def _mstock_auth() -> bool:
             from brokers.mstock import MStockAPI
 
             b = MStockAPI()
+            if not b.is_authenticated():
+                b.authenticate()
             return b.is_authenticated()
         except Exception:
             return False
@@ -2280,6 +2283,11 @@ async def api_portfolio(request: Request):
         from brokers.shoonya import ShoonyaAPI
 
         _try("shoonya", ShoonyaAPI)
+
+    if _has_mstock():
+        from brokers.mstock import MStockAPI
+
+        _try("mstock", MStockAPI)
 
     # Portfolio data is decision-critical.  Do not replace a disconnected
     # broker with a realistic-looking mock account in a production pathway.
