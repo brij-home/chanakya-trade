@@ -46,6 +46,7 @@ Register these redirect URIs in your broker developer consoles:
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 from pathlib import Path
@@ -2522,6 +2523,52 @@ async def stream_alerts():
     """
     return StreamingResponse(
         _event_bus.subscribe("alert"),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+# ── Real-Time Market Ticker Stream (Indian & Global) ───────────
+
+
+@app.get("/api/ticker/snapshot", tags=["Market Data"])
+async def get_ticker_snapshot():
+    """
+    Get current snapshot of major Indian (NIFTY, BANKNIFTY, SENSEX, VIX, FINNIFTY)
+    and Global indices (GIFT NIFTY, NASDAQ, S&P 500, DOW, DXY, US 10Y, Crude, Gold, Silver).
+    """
+    from market.ticker_stream import ticker_stream
+
+    ticker_stream.refresh_indices_sync()
+    return ticker_stream.get_snapshot()
+
+
+@app.get("/api/ticker/stream", tags=["SSE"])
+@app.get("/stream/ticker", tags=["SSE"])
+async def stream_ticker():
+    """
+    SSE stream of real-time Indian & Global market index updates.
+    Yields initial snapshot immediately upon connect, then streams real-time updates.
+    """
+    from market.ticker_stream import ticker_stream
+
+    # Ensure background worker is running
+    ticker_stream.start()
+
+    async def _ticker_generator():
+        # 1. Send initial snapshot immediately
+        snap = ticker_stream.get_snapshot()
+        yield f"data: {json.dumps({'type': 'ticker_snapshot', 'data': snap})}\n\n"
+
+        # 2. Stream subsequent updates
+        async for chunk in _event_bus.subscribe("ticker"):
+            yield chunk
+
+    return StreamingResponse(
+        _ticker_generator(),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

@@ -801,8 +801,17 @@ def _do_auth(key: str, broker: BrokerAPI) -> BrokerAPI:
 
 
 def _start_websocket(broker: BrokerAPI) -> None:
-    """Start WebSocket for real-time quotes (Fyers only)."""
+    """Start WebSocket for real-time quotes (Fyers or m.Stock)."""
     try:
+        if getattr(broker, "name", "") == "mstock":
+            from market.mstock_websocket import mstock_ws
+
+            api_key = getattr(broker, "_api_key", "")
+            token = getattr(broker, "_token", "")
+            if api_key and token:
+                mstock_ws.start(api_key=api_key, access_token=token)
+            return
+
         from market.websocket import ws_manager
 
         # Access Fyers internal token and app_id

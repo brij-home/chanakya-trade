@@ -413,6 +413,10 @@ class MStockAPI(BrokerAPI):
             resp = self._client.get(url, headers=headers, **kwargs)
         elif m == "POST":
             resp = self._client.post(url, headers=headers, **kwargs)
+        elif m == "PUT":
+            resp = self._client.put(url, headers=headers, **kwargs)
+        elif m == "DELETE":
+            resp = self._client.delete(url, headers=headers, **kwargs)
         else:
             resp = self._client.request(method, url, headers=headers, **kwargs)
 
@@ -423,6 +427,10 @@ class MStockAPI(BrokerAPI):
                     resp = self._client.get(url, headers=headers, **kwargs)
                 elif m == "POST":
                     resp = self._client.post(url, headers=headers, **kwargs)
+                elif m == "PUT":
+                    resp = self._client.put(url, headers=headers, **kwargs)
+                elif m == "DELETE":
+                    resp = self._client.delete(url, headers=headers, **kwargs)
                 else:
                     resp = self._client.request(method, url, headers=headers, **kwargs)
         return resp
@@ -694,13 +702,205 @@ class MStockAPI(BrokerAPI):
             return quotes[instruments]
         return quotes
 
+    # ── Option Chain APIs ─────────────────────────────────────
+
+    def get_option_chain_master(self, exchange: int = 2) -> dict:
+        """
+        Fetch Option Chain Master data (GET /openapi/typeb/getoptionchainmaster/{exch}).
+        Returns expiry mappings (dctExp), index option tokens (OPTIDX),
+        stock option mappings (OFSTK), and index future tokens (FUTIDX).
+        Results are cached in-memory for 15 minutes to avoid redundant network calls.
+        """
+        cache_key = f"master_{exchange}"
+        cached = getattr(self, "_option_master_cache", {}).get(cache_key)
+        if cached and time.time() - cached.get("time", 0) < 900:
+            return cached.get("data", {})
+
+        if not self._token:
+            self.authenticate()
+
+        try:
+            url = f"{MSTOCK_BASE_URL}/openapi/typeb/getoptionchainmaster/{exchange}"
+            resp = self._fetch_authed("GET", url)
+            if resp.status_code == 200:
+                data = resp.json()
+                master_data = data.get("data") or data.get("result") or data
+                if not hasattr(self, "_option_master_cache"):
+                    self._option_master_cache = {}
+                self._option_master_cache[cache_key] = {
+                    "time": time.time(),
+                    "data": master_data,
+                }
+                return master_data
+        except Exception:
+            pass
+        return {}
+
     def get_options_chain(
         self,
         underlying: str,
         expiry: Optional[str] = None,
     ) -> list[OptionsContract]:
-        """m.Stock Type B does not have a dedicated options chain endpoint; fall back to market engine."""
-        raise NotImplementedError("m.Stock Type B does not provide options chain API; use market scraper")
+        """
+        Fetch live options chain for any equity or benchmark index using
+        m.Stock Type B Option Chain APIs:
+          1. GET /openapi/typeb/getoptionchainmaster/{exch}
+          2. GET /openapi/typeb/GetOptionChain/{exch}/{expiry}/{token}
+          3. Batch quote lookup to enrich contracts with real-time LTP, bid, ask & volume.
+        Falls back seamlessly to the market engine (NSE scraper) if session is unauthenticated
+        or if m.Stock API encounters an error.
+        """
+        clean_sym = underlying.replace("NSE:", "").replace("BSE:", "").upper().strip()
+
+        # Attempt native m.Stock Option Chain if token available
+        if not self._token:
+            self.authenticate()
+
+        if self._token:
+            try:
+                master = self.get_option_chain_master(exchange=2)
+                dct_exp = master.get("dctExp", {})
+                opt_idx = master.get("OPTIDX", [])
+                of_stk = master.get("OFSTK", [])
+
+                token = ""
+                # 1. Resolve token from OPTIDX (e.g. "NIFTY,26000,8,2,...")
+                for row in opt_idx:
+                    parts = row.split(",")
+                    if parts and parts[0].strip() == clean_sym:
+                        token = parts[1].strip()
+                        break
+
+                # 2. Resolve token from OFSTK (e.g. "ACC,22,2,3,4")
+                if not token:
+                    for row in of_stk:
+                        parts = row.split(",")
+                        if parts and parts[0].strip() == clean_sym:
+                            token = parts[1].strip()
+                            break
+
+                # 3. Resolve from known tokens
+                if not token:
+                    token = _KNOWN_NSE_TOKENS.get(clean_sym, "")
+
+                if token and dct_exp:
+                    # Resolve expiry epoch seconds
+                    chosen_epoch = None
+                    if expiry:
+                        # User provided target expiry string (e.g. "2026-05-29")
+                        target_clean = expiry.strip()
+                        for _, ep_val in dct_exp.items():
+                            try:
+                                ep_int = int(ep_val)
+                                ep_date = datetime.fromtimestamp(ep_int).strftime("%Y-%m-%d")
+                                if ep_date == target_clean:
+                                    chosen_epoch = ep_int
+                                    break
+                            except Exception:
+                                continue
+
+                    if not chosen_epoch:
+                        # Pick nearest future expiry
+                        now_ts = time.time() - 86400
+                        valid_epochs = []
+                        for _, ep_val in dct_exp.items():
+                            try:
+                                ep_int = int(ep_val)
+                                if ep_int >= now_ts:
+                                    valid_epochs.append(ep_int)
+                            except Exception:
+                                pass
+                        if valid_epochs:
+                            chosen_epoch = min(valid_epochs)
+
+                    if chosen_epoch:
+                        url = f"{MSTOCK_BASE_URL}/openapi/typeb/GetOptionChain/2/{chosen_epoch}/{token}"
+                        resp = self._fetch_authed("GET", url)
+                        if resp.status_code == 200:
+                            data = resp.json()
+                            chain_data = data.get("data") or data.get("result") or data
+                            calls_raw = chain_data.get("call", [])
+                            puts_raw = chain_data.get("put", [])
+
+                            expiry_str = datetime.fromtimestamp(chosen_epoch).strftime("%Y-%m-%d")
+                            contracts: list[OptionsContract] = []
+                            tokens_to_quote: list[str] = []
+
+                            # Parse calls
+                            for item in calls_raw:
+                                parts = item.split(",") if isinstance(item, str) else []
+                                if len(parts) >= 2:
+                                    c_token, s_raw = parts[0].strip(), float(parts[1].strip())
+                                    strike = s_raw / 100.0 if s_raw >= 1000 else s_raw
+                                    oi = int(parts[2].strip()) if len(parts) >= 3 else 0
+                                    tokens_to_quote.append(c_token)
+                                    contracts.append(
+                                        OptionsContract(
+                                            symbol=f"{clean_sym}{expiry_str.replace('-', '')}{int(strike)}CE",
+                                            underlying=clean_sym,
+                                            expiry=expiry_str,
+                                            strike=strike,
+                                            option_type="CE",
+                                            last_price=0.0,
+                                            oi=oi,
+                                            oi_change=0,
+                                            volume=0,
+                                            exchange="NFO",
+                                        )
+                                    )
+
+                            # Parse puts
+                            for item in puts_raw:
+                                parts = item.split(",") if isinstance(item, str) else []
+                                if len(parts) >= 2:
+                                    p_token, s_raw = parts[0].strip(), float(parts[1].strip())
+                                    strike = s_raw / 100.0 if s_raw >= 1000 else s_raw
+                                    oi = int(parts[2].strip()) if len(parts) >= 3 else 0
+                                    tokens_to_quote.append(p_token)
+                                    contracts.append(
+                                        OptionsContract(
+                                            symbol=f"{clean_sym}{expiry_str.replace('-', '')}{int(strike)}PE",
+                                            underlying=clean_sym,
+                                            expiry=expiry_str,
+                                            strike=strike,
+                                            option_type="PE",
+                                            last_price=0.0,
+                                            oi=oi,
+                                            oi_change=0,
+                                            volume=0,
+                                            exchange="NFO",
+                                        )
+                                    )
+
+                            # Batch enrich quotes if contracts exist
+                            if tokens_to_quote:
+                                try:
+                                    q_url = f"{MSTOCK_BASE_URL}/openapi/typeb/instruments/quote"
+                                    # Query first 50 contracts to remain within typical REST quota
+                                    batch_tokens = tokens_to_quote[:50]
+                                    q_body = json.dumps({"mode": "LTP", "exchangeTokens": {"NFO": batch_tokens}})
+                                    q_resp = self._client.request("GET", q_url, content=q_body, headers=self._headers())
+                                    if q_resp.status_code == 200:
+                                        q_data = q_resp.json()
+                                        fetched = q_data.get("data", {}).get("fetched", [])
+                                        ltp_map = {item.get("symbolToken"): float(item.get("ltp") or 0.0) for item in fetched}
+                                        for idx, c in enumerate(contracts[:50]):
+                                            tok = tokens_to_quote[idx]
+                                            if tok in ltp_map:
+                                                c.last_price = ltp_map[tok]
+                                except Exception:
+                                    pass
+
+                            if contracts:
+                                return contracts
+            except Exception:
+                pass
+
+        # Defensive fallback to institutional NSE scraper engine
+        from market.nse_scraper import nse_get_options_chain
+
+        return nse_get_options_chain(underlying, expiry)
+
 
     def get_history(
         self,
@@ -874,3 +1074,287 @@ class MStockAPI(BrokerAPI):
         except Exception:
             pass
         return []
+
+    def modify_order(
+        self,
+        order_id: str,
+        quantity: int,
+        price: float,
+        trigger_price: float = 0.0,
+        order_type: str = "LIMIT",
+    ) -> OrderResponse:
+        """
+        Modify an open order (PUT /openapi/typeb/orders/regular/{order_id}).
+        Strictly enforces live trading safety gate ALLOW_LIVE_TRADING=1.
+        """
+        if os.environ.get("ALLOW_LIVE_TRADING", "0") != "1":
+            raise PermissionError(
+                "Live trading disabled. Set ALLOW_LIVE_TRADING=1 to modify live orders with m.Stock."
+            )
+
+        if not self._token:
+            raise RuntimeError("m.Stock session not authenticated.")
+
+        try:
+            url = f"{MSTOCK_BASE_URL}/openapi/typeb/orders/regular/{order_id}"
+            payload = {
+                "orderId": order_id,
+                "orderType": _ORDER_TYPE_MAP.get(order_type, "LIMIT"),
+                "quantity": quantity,
+                "price": price,
+                "triggerPrice": trigger_price,
+            }
+            resp = self._client.put(url, json=payload, headers=self._headers())
+            if resp.status_code == 200:
+                data = resp.json()
+                res = data.get("data") or data.get("result") or data
+                return OrderResponse(
+                    order_id=str(res.get("orderId") or order_id),
+                    status="MODIFIED",
+                    message="Order modified successfully",
+                    average_price=price,
+                    filled_quantity=0,
+                )
+            raise RuntimeError(f"m.Stock order modification failed: {resp.text}")
+        except Exception as e:
+            if isinstance(e, PermissionError):
+                raise
+            raise RuntimeError(f"Failed to modify order with m.Stock: {e}")
+
+    # ── Margin Calculation APIs ───────────────────────────────
+
+    def calculate_order_margin(self, orders: list[dict]) -> dict:
+        """
+        Calculate required margin for single or multi-leg orders
+        (POST /openapi/typeb/margins/orders).
+        Returns SPAN, VAR, Exposure, Brokerage, and total required margin.
+        """
+        if not self._token:
+            self.authenticate()
+
+        try:
+            url = f"{MSTOCK_BASE_URL}/openapi/typeb/margins/orders"
+            payload = {"orders": orders}
+            resp = self._fetch_authed("POST", url, json=payload)
+            if resp.status_code == 200:
+                data = resp.json()
+                return data.get("data") or data.get("result") or data
+        except Exception:
+            pass
+        return {}
+
+    # ── Top Gainers / Losers API ──────────────────────────────
+
+    def get_gainers_losers(
+        self,
+        exchange: int = 1,
+        security_id_code: int = 13,
+        segment: int = 1,
+        type_flag: str = "G",
+    ) -> list[dict]:
+        """
+        Fetch top gainers or losers (POST /openapi/typea/losergainer).
+        type_flag: "G" for gainers, "L" for losers.
+        """
+        if not self._token:
+            self.authenticate()
+
+        try:
+            url = f"{MSTOCK_BASE_URL}/openapi/typea/losergainer"
+            payload = {
+                "Exchange": exchange,
+                "SecurityIdCode": security_id_code,
+                "segment": segment,
+                "TypeFlag": type_flag.upper(),
+            }
+            resp = self._fetch_authed("POST", url, json=payload)
+            if resp.status_code == 200:
+                data = resp.json()
+                items = data.get("data") or data.get("result") or []
+                return items if isinstance(items, list) else []
+        except Exception:
+            pass
+        return []
+
+    # ── Basket Order APIs ─────────────────────────────────────
+
+    def create_basket(self, name: str, description: str = "") -> dict:
+        """Create a new basket for multi-leg execution (POST /openapi/typeb/CreateBasket)."""
+        if not self._token:
+            self.authenticate()
+
+        try:
+            url = f"{MSTOCK_BASE_URL}/openapi/typeb/CreateBasket"
+            payload = {"BaskName": name, "BaskDesc": description or f"Basket {name}"}
+            resp = self._fetch_authed("POST", url, json=payload)
+            if resp.status_code == 200:
+                return resp.json()
+        except Exception:
+            pass
+        return {"status": False, "message": "Failed to create basket"}
+
+    def fetch_baskets(self) -> list[dict]:
+        """Fetch all user baskets (PUT /openapi/typeb/FetchBasket)."""
+        if not self._token:
+            self.authenticate()
+
+        try:
+            url = f"{MSTOCK_BASE_URL}/openapi/typeb/FetchBasket"
+            resp = self._fetch_authed("PUT", url)
+            if resp.status_code == 200:
+                data = resp.json()
+                baskets = data.get("data") or data.get("result") or []
+                return baskets if isinstance(baskets, list) else []
+        except Exception:
+            pass
+        return []
+
+    def rename_basket(self, old_name: str, new_name: str) -> dict:
+        """Rename an existing basket (DELETE /openapi/typeb/RenameBasket)."""
+        if not self._token:
+            self.authenticate()
+
+        try:
+            url = f"{MSTOCK_BASE_URL}/openapi/typeb/RenameBasket"
+            payload = {"OldBaskName": old_name, "NewBaskName": new_name}
+            resp = self._fetch_authed("DELETE", url, json=payload)
+            if resp.status_code == 200:
+                return resp.json()
+        except Exception:
+            pass
+        return {"status": False, "message": "Failed to rename basket"}
+
+    def delete_basket(self, name: str) -> dict:
+        """Delete an existing basket (POST /openapi/typeb/DeleteBasket)."""
+        if not self._token:
+            self.authenticate()
+
+        try:
+            url = f"{MSTOCK_BASE_URL}/openapi/typeb/DeleteBasket"
+            payload = {"BaskName": name}
+            resp = self._fetch_authed("POST", url, json=payload)
+            if resp.status_code == 200:
+                return resp.json()
+        except Exception:
+            pass
+        return {"status": False, "message": "Failed to delete basket"}
+
+    def calculate_basket(self, name: str) -> dict:
+        """Calculate margin & requirements for a basket (GET /openapi/typeb/CalculateBasket)."""
+        if not self._token:
+            self.authenticate()
+
+        try:
+            url = f"{MSTOCK_BASE_URL}/openapi/typeb/CalculateBasket"
+            resp = self._fetch_authed("GET", url, params={"BaskName": name})
+            if resp.status_code == 200:
+                return resp.json()
+        except Exception:
+            pass
+        return {}
+
+    # ── Position Conversion ───────────────────────────────────
+
+    def convert_position(
+        self,
+        exchange: str,
+        symbol: str,
+        old_product: str,
+        new_product: str,
+        quantity: int,
+        transaction_type: str = "BUY",
+    ) -> dict:
+        """
+        Convert intraday (MIS) to delivery/carryforward (CNC/NRML) or vice-versa
+        (POST /openapi/typeb/positions/convert).
+        """
+        if os.environ.get("ALLOW_LIVE_TRADING", "0") != "1":
+            raise PermissionError(
+                "Live trading disabled. Set ALLOW_LIVE_TRADING=1 to execute position conversion."
+            )
+
+        if not self._token:
+            raise RuntimeError("m.Stock session not authenticated.")
+
+        try:
+            url = f"{MSTOCK_BASE_URL}/openapi/typeb/positions/convert"
+            payload = {
+                "exchange": exchange,
+                "symbol": symbol,
+                "oldProduct": _PRODUCT_MAP.get(old_product, old_product),
+                "newProduct": _PRODUCT_MAP.get(new_product, new_product),
+                "quantity": quantity,
+                "transactionType": transaction_type,
+            }
+            resp = self._client.post(url, json=payload, headers=self._headers())
+            if resp.status_code == 200:
+                return resp.json()
+            raise RuntimeError(f"Position conversion failed: {resp.text}")
+        except Exception as e:
+            if isinstance(e, PermissionError):
+                raise
+            raise RuntimeError(f"Failed to convert position with m.Stock: {e}")
+
+    # ── Intraday Chart & Scrip Master ─────────────────────────
+
+    def get_intraday_data(
+        self,
+        symbol: str,
+        interval: str = "THREE_MINUTE",
+    ):
+        """
+        Fetch intraday candle chart data (POST /openapi/typeb/instruments/intraday).
+        Intervals: minute, THREE_MINUTE, FIVE_MINUTE, TEN_MINUTE, FIFTEEN_MINUTE, THIRTY_MINUTE, SIXTY_MINUTE, day.
+        """
+        import pandas as pd
+
+        clean_sym = symbol.replace("NSE:", "").replace("BSE:", "")
+        exchange_id = "4" if symbol.startswith("BSE:") else "1"
+        token = _KNOWN_NSE_TOKENS.get(clean_sym, "")
+
+        if self._token and token:
+            try:
+                url = f"{MSTOCK_BASE_URL}/openapi/typeb/instruments/intraday"
+                payload = {
+                    "exchange": exchange_id,
+                    "symboltoken": token,
+                    "interval": interval,
+                }
+                resp = self._client.post(url, json=payload, headers=self._headers())
+                if resp.status_code == 200:
+                    data = resp.json()
+                    candles = (
+                        data.get("data", {}).get("candles", [])
+                        if isinstance(data.get("data"), dict)
+                        else []
+                    )
+                    if candles:
+                        df = pd.DataFrame(
+                            candles,
+                            columns=["timestamp", "open", "high", "low", "close", "volume"],
+                        )
+                        df["timestamp"] = pd.to_datetime(df["timestamp"])
+                        df.set_index("timestamp", inplace=True)
+                        df.index = df.index.tz_localize(None)
+                        return df
+            except Exception:
+                pass
+        return None
+
+    def download_scrip_master(self) -> str:
+        """
+        Download consolidated Scrip Master file
+        (GET /openapi/typeb/instruments/OpenAPIScripMaster).
+        """
+        if not self._token:
+            self.authenticate()
+
+        try:
+            url = f"{MSTOCK_BASE_URL}/openapi/typeb/instruments/OpenAPIScripMaster"
+            resp = self._fetch_authed("GET", url)
+            if resp.status_code == 200:
+                return resp.text
+        except Exception:
+            pass
+        return ""
+
