@@ -81,6 +81,12 @@ _BROKER_NAMES = {
     "fyers": "fyers",
     "6": "stoxkart",
     "stoxkart": "stoxkart",
+    "7": "shoonya",
+    "shoonya": "shoonya",
+    "finvasia": "shoonya",
+    "8": "mstock",
+    "mstock": "mstock",
+    "m.stock": "mstock",
 }
 
 _BROKER_LABELS = {
@@ -91,10 +97,12 @@ _BROKER_LABELS = {
     "upstox": "[magenta]Upstox[/magenta]",
     "fyers": "[blue]Fyers[/blue]",
     "stoxkart": "[bold cyan]Stoxkart (SMC)[/bold cyan]",
+    "shoonya": "[bold green]Shoonya (Finvasia)[/bold green]",
+    "mstock": "[bold blue]m.Stock (Mirae Asset)[/bold blue]",
 }
 
 # Brokers that use TOTP auto-login (no browser redirect)
-_TOTP_BROKERS = {"angelone", "stoxkart"}
+_TOTP_BROKERS = {"angelone", "stoxkart", "shoonya", "mstock"}
 
 # Broker menu display items (number, label, description)
 _BROKER_MENU = [
@@ -105,6 +113,8 @@ _BROKER_MENU = [
     ("4", "Upstox", "API v3 — redirect login"),
     ("5", "Fyers", "API v3 — redirect login"),
     ("6", "Stoxkart", "SMC API — free, live data & execution"),
+    ("7", "Shoonya", "Finvasia Noren API — TOTP, live data & execution"),
+    ("8", "m.Stock", "Mirae Asset — free API, live data & execution"),
 ]
 
 
@@ -229,6 +239,13 @@ def get_data_broker() -> BrokerAPI:
     return get_broker()
 
 
+def get_data_broker_key() -> str:
+    """Return the selected data-provider key without exposing mutable state."""
+    if _data_key and _data_key in _brokers:
+        return _data_key
+    return _primary_key
+
+
 def get_execution_broker() -> BrokerAPI:
     """Return the current execution broker. Falls back to primary if unset."""
     if _exec_key and _exec_key in _brokers:
@@ -236,20 +253,20 @@ def get_execution_broker() -> BrokerAPI:
     return get_broker()
 
 
+def get_execution_broker_key() -> str:
+    """Return the selected execution-provider key without exposing mutable state."""
+    if _exec_key and _exec_key in _brokers:
+        return _exec_key
+    return _primary_key
+
+
 def auto_assign_roles() -> bool:
-    """Auto-assign Fyers as data broker and Zerodha as execution broker.
+    """Deprecated compatibility hook; roles are always an explicit user choice.
 
-    Called automatically after connect_broker() when both are present.
-
-    Returns:
-        True if auto-assignment was performed (both brokers present), False otherwise.
+    A newly connected broker must never silently become the execution route.
+    Keeping this no-op avoids surprising existing callers while removing the
+    previous hard-coded Fyers/Zerodha policy.
     """
-    global _data_key, _exec_key
-    if "fyers" in _brokers and "zerodha" in _brokers:
-        _data_key = "fyers"
-        _exec_key = "zerodha"
-        console.print("[cyan]Auto-assigned:[/cyan] Fyers → DATA, Zerodha → EXECUTION")
-        return True
     return False
 
 
@@ -318,6 +335,13 @@ def set_data_broker(key: str) -> None:
         console.print(f"[red]Could not connect {key.title()}.[/red]")
         return
     _data_key = key
+    if key == "shoonya":
+        try:
+            from market.streaming import start_shoonya_stream
+
+            start_shoonya_stream(_brokers[key])
+        except Exception as exc:
+            console.print(f"[yellow]Shoonya stream is not active yet: {exc}[/yellow]")
     console.print(f"[green]✓ Data broker → {key.title()}[/green]")
 
 
@@ -429,6 +453,44 @@ def _make_broker(choice: str) -> tuple[str, BrokerAPI]:
             totp_secret=totp_secret,
         )
 
+    elif key == "shoonya":
+        from .shoonya import ShoonyaAPI
+
+        return key, ShoonyaAPI(
+            user_id=get_credential("SHOONYA_USER_ID", "Shoonya User ID", secret=False),
+            password=get_credential("SHOONYA_PASSWORD", "Shoonya Password", secret=True),
+            api_key=get_credential("SHOONYA_API_KEY", "Shoonya API Key", secret=True),
+            vendor_code=get_credential("SHOONYA_VENDOR_CODE", "Shoonya Vendor Code", secret=False),
+            totp_secret=get_credential(
+                "SHOONYA_TOTP_SECRET", "Shoonya TOTP Secret (Base32)", secret=True
+            ),
+            imei=os.environ.get("SHOONYA_IMEI", "chanakya-trade"),
+        )
+
+    elif key == "mstock":
+        from .mstock import MStockAPI
+
+        return key, MStockAPI(
+            api_key=get_credential(
+                "MSTOCK_API_KEY", "m.Stock API Key", secret=False, required=False
+            ),
+            api_secret=get_credential(
+                "MSTOCK_API_SECRET", "m.Stock API Secret", secret=True, required=False
+            ),
+            client_code=get_credential(
+                "MSTOCK_CLIENT_CODE", "m.Stock Client Code", secret=False, required=False
+            ),
+            password=get_credential(
+                "MSTOCK_PASSWORD", "m.Stock Trading Password", secret=True, required=False
+            ),
+            totp_secret=get_credential(
+                "MSTOCK_TOTP_SECRET", "m.Stock TOTP Secret", secret=True, required=False
+            ),
+            redirect_uri=os.environ.get(
+                "MSTOCK_REDIRECT_URL", "http://103.149.127.88:8765/mstock/callback"
+            ),
+        )
+
     else:  # fyers
         from .fyers import FyersAPI
 
@@ -471,6 +533,8 @@ def _poll_sidecar_auth(broker_key: str, port: int, timeout: int = 180) -> dict[s
         "angelone": "angel_one",
         "upstox": "upstox",
         "stoxkart": "stoxkart",
+        "shoonya": "shoonya",
+        "mstock": "mstock",
     }
     status_key = _STATUS_KEYS.get(broker_key, broker_key)
     deadline = time.time() + timeout
@@ -596,6 +660,20 @@ def _recreate_broker_from_token(key: str):
                 b = StoxkartAPI()
                 if b.is_authenticated:
                     return b
+        elif key == "shoonya":
+            from brokers.shoonya import ShoonyaAPI, TOKEN_FILE
+
+            if TOKEN_FILE.exists():
+                b = ShoonyaAPI()
+                if b.is_authenticated():
+                    return b
+        elif key == "mstock":
+            from brokers.mstock import MStockAPI, TOKEN_FILE
+
+            if TOKEN_FILE.exists():
+                b = MStockAPI()
+                if b.is_authenticated():
+                    return b
     except Exception:
         pass
     return None
@@ -637,6 +715,13 @@ def _do_auth(key: str, broker: BrokerAPI) -> BrokerAPI:
         _path = urlparse(redirect).path
         _port = urlparse(redirect).port or 8765
         _params = ("code",)
+    elif key == "mstock":
+        redirect = os.environ.get(
+            "MSTOCK_REDIRECT_URL", "http://103.149.127.88:8765/mstock/callback"
+        )
+        _path = urlparse(redirect).path
+        _port = urlparse(redirect).port or 8765
+        _params = ("token", "auth_token", "jwt", "request_token", "code")
     else:  # upstox
         redirect = os.environ.get("UPSTOX_REDIRECT_URL", "http://localhost:8765/upstox/callback")
         _path = urlparse(redirect).path
@@ -673,6 +758,16 @@ def _do_auth(key: str, broker: BrokerAPI) -> BrokerAPI:
             broker.complete_login(auth_code=captured["auth_code"])
         elif key == "zerodha":
             broker.complete_login(request_token=captured["request_token"])
+        elif key == "mstock":
+            t_val = (
+                captured.get("token")
+                or captured.get("auth_token")
+                or captured.get("jwt")
+                or captured.get("code")
+                or captured.get("request_token")
+                or ""
+            )
+            broker.complete_login(token=t_val)
         else:  # groww / upstox
             broker.complete_login(auth_code=captured["code"])
     else:
@@ -693,6 +788,10 @@ def _do_auth(key: str, broker: BrokerAPI) -> BrokerAPI:
             )
             token = Prompt.ask("[bold]Paste the [cyan]request_token[/cyan] here[/bold]")
             broker.complete_login(request_token=token)
+        elif key == "mstock":
+            console.print(f"[dim]  {redirect}?[bold]token=XXXXXX[/bold][/dim]\n")
+            token = Prompt.ask("[bold]Paste the [cyan]token / code[/cyan] here[/bold]")
+            broker.complete_login(token=token)
         else:
             console.print(f"[dim]  {redirect}?[bold]code=XXXXXX[/bold][/dim]\n")
             code = Prompt.ask("[bold]Paste the [cyan]auth_code[/cyan] here[/bold]")
@@ -702,8 +801,17 @@ def _do_auth(key: str, broker: BrokerAPI) -> BrokerAPI:
 
 
 def _start_websocket(broker: BrokerAPI) -> None:
-    """Start WebSocket for real-time quotes (Fyers only)."""
+    """Start WebSocket for real-time quotes (Fyers or m.Stock)."""
     try:
+        if getattr(broker, "name", "") == "mstock":
+            from market.mstock_websocket import mstock_ws
+
+            api_key = getattr(broker, "_api_key", "")
+            token = getattr(broker, "_token", "")
+            if api_key and token:
+                mstock_ws.start(api_key=api_key, access_token=token)
+            return
+
         from market.websocket import ws_manager
 
         # Access Fyers internal token and app_id
@@ -760,7 +868,8 @@ def login(choice: Optional[str] = None) -> BrokerAPI:
 
     Args:
         choice: "0"/"demo", "1"/"zerodha", "2"/"groww", "3"/"angelone",
-                "4"/"upstox", "5"/"fyers". If None, the user is prompted.
+                "4"/"upstox", "5"/"fyers", "6"/"stoxkart", "7"/"shoonya".
+                If None, the user is prompted.
 
     Returns:
         Authenticated BrokerAPI instance.
@@ -813,6 +922,14 @@ def login(choice: Optional[str] = None) -> BrokerAPI:
         import threading
 
         threading.Thread(target=_start_websocket, args=(broker,), daemon=True).start()
+    elif key == "shoonya" and _data_key == "shoonya":
+        try:
+            from market.streaming import start_shoonya_stream
+
+            start_shoonya_stream(broker)
+        except Exception:
+            # REST remains available and the UI will surface stream degradation.
+            pass
 
     if len(_brokers) > 1:
         console.print(
@@ -830,7 +947,8 @@ def connect_broker(choice: Optional[str] = None) -> BrokerAPI:
     The primary broker (used for market data) does not change.
 
     Args:
-        choice: "1"/"zerodha" or "2"/"groww". Prompted if None.
+        choice: Any supported broker name/number (for example "7"/"shoonya").
+                Prompted if None.
 
     Returns:
         The newly connected BrokerAPI instance.
@@ -867,11 +985,13 @@ def connect_broker(choice: Optional[str] = None) -> BrokerAPI:
             _do_auth(key, broker)
 
     _brokers[key] = broker
-    _exec_key = key
+    # Do not silently reroute orders to a newly connected account.  A user must
+    # call set_broker_role()/set_exec_broker() and see the corresponding UI state.
     if not _data_key:
         _data_key = key
-    auto_assign_roles()
-    _print_welcome(broker, role="execution")
+    if not _exec_key:
+        _exec_key = key
+    _print_welcome(broker, role="connected")
 
     console.print(
         f"\n[green]✓  {len(_brokers)} broker(s) now active.[/green]  "
@@ -917,21 +1037,38 @@ def disconnect_broker(choice: Optional[str] = None) -> None:
         return
 
     try:
-        _brokers[key].logout()
+        if hasattr(_brokers[key], "stop_websocket"):
+            _brokers[key].stop_websocket()
+        if hasattr(_brokers[key], "close"):
+            _brokers[key].close()
+        elif hasattr(_brokers[key], "logout"):
+            _brokers[key].logout()
     except Exception:
         pass
     del _brokers[key]
     console.print(f"[yellow]{key.title()} disconnected.[/yellow]")
 
 
-def logout() -> None:
-    """Logout ALL connected brokers and clear all sessions."""
-    global _brokers, _primary_key
+def close_all_brokers() -> None:
+    """Gracefully close all active broker sessions, HTTP clients, and WebSockets."""
+    global _brokers, _primary_key, _data_key, _exec_key
     for key, broker in list(_brokers.items()):
         try:
-            broker.logout()
+            if hasattr(broker, "stop_websocket"):
+                broker.stop_websocket()
+            if hasattr(broker, "close"):
+                broker.close()
+            elif hasattr(broker, "logout"):
+                broker.logout()
         except Exception:
             pass
     _brokers = {}
     _primary_key = ""
+    _data_key = ""
+    _exec_key = ""
+
+
+def logout() -> None:
+    """Logout ALL connected brokers and clear all sessions."""
+    close_all_brokers()
     console.print("[yellow]All brokers logged out.[/yellow]")

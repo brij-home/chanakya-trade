@@ -3,8 +3,8 @@ import { getSymbolExchange } from '../data/universeData'
 
 /** Get the API base URL — works in both Electron and web mode. */
 export function getBaseUrl(port) {
-  if (window.__CHANAKYA_TRADE_WEB__) return window.location.origin
-  return port ? `http://127.0.0.1:${port}` : null
+  if (window.__CHANAKYA_TRADE_WEB__ && window.location.port !== '5173') return window.location.origin
+  return port ? `http://127.0.0.1:${port}` : 'http://127.0.0.1:8765'
 }
 
 /** Generate a UUID-like id for sessions. */
@@ -73,6 +73,31 @@ export function getActiveSymbol(messages) {
 // Create the default initial session
 const defaultId = uuid()
 
+/**
+ * Build an O(1) Map<id, arrayIndex> from the messages array.
+ * Rebuilt on mutations that add/remove messages (not per SSE update).
+ * @param {Array} msgs
+ * @returns {Map<number|string, number>}
+ */
+function _buildMsgIndex(msgs) {
+  const m = new Map()
+  for (let i = 0; i < msgs.length; i++) m.set(msgs[i].id, i)
+  return m
+}
+
+const initialPort = (() => {
+  try {
+    if (typeof window !== 'undefined') {
+      const saved = localStorage.getItem('chanakya_sidecar_port')
+      if (saved) return parseInt(saved, 10)
+      if (window.location?.port && window.location.port !== '5173') {
+        return parseInt(window.location.port, 10) || 8765
+      }
+    }
+  } catch (_) {}
+  return 8765
+})()
+
 export const useChatStore = create((set, get) => ({
   // ── Multi-session state ───────────────────────────────────
   sessions: {
@@ -81,8 +106,11 @@ export const useChatStore = create((set, get) => ({
   activeSessionId: defaultId,
 
   // ── High-Fidelity Workspace Views ('terminal' | 'debate' | 'options' | 'copilot') ──
-  activeView: 'terminal',
-  setActiveView: (view) => set({ activeView: view }),
+  activeView: (typeof window !== 'undefined' && localStorage.getItem('chanakya_active_view')) || 'terminal',
+  setActiveView: (view) => {
+    try { localStorage.setItem('chanakya_active_view', view) } catch (_) {}
+    set({ activeView: view })
+  },
 
   // ── Global In-Flight Activity & Progress HUD State ─────────
   activeActivity: null, // { id, title, details, progress, type, targetView, cancelFn, startedAt }
@@ -151,8 +179,11 @@ export const useChatStore = create((set, get) => ({
 
   // ── Backward-compatible flat messages (swapped on session switch) ──
   messages:      [],
+  // ── O(1) message index: Map<id, index> kept in sync with messages array ──
+  // Eliminates O(N) scan in updateStreamingMessage (called per SSE chunk).
+  _msgIndex:     new Map(),
   isLoading:     false,
-  port:          null,
+  port:          initialPort,
   sidecarError:  null,
   brokerStatus:   { connected: false, broker: null },
   brokerStatuses: {},   // full /api/status response
@@ -166,7 +197,10 @@ export const useChatStore = create((set, get) => ({
   appMode:     'PAPER',   // 'PAPER' | 'DEMO' | 'LIVE'
   modeLoading: false,     // true while fetching mode from /api/mode
 
-  setPort:         (port)   => set({ port, sidecarError: null }),
+  setPort:         (port)   => {
+    try { if (port) localStorage.setItem('chanakya_sidecar_port', String(port)) } catch (_) {}
+    set({ port, sidecarError: null })
+  },
   setSidecarError: (msg)    => set({ sidecarError: msg }),
   setBrokerStatus:   (status)   => set({ brokerStatus: status }),
   setBrokerStatuses: (statuses) => {
@@ -192,7 +226,7 @@ export const useChatStore = create((set, get) => ({
     }
     const id = uuid()
     updated[id] = { id, title: 'New Session', messages: [], createdAt: Date.now() }
-    set({ sessions: updated, activeSessionId: id, messages: [], isLoading: false })
+    set({ sessions: updated, activeSessionId: id, messages: [], _msgIndex: new Map(), isLoading: false })
   },
 
   switchSession: (id) => {
@@ -205,7 +239,7 @@ export const useChatStore = create((set, get) => ({
     }
     const target = updated[id]
     if (!target) return
-    set({ sessions: updated, activeSessionId: id, messages: target.messages, isLoading: false })
+    set({ sessions: updated, activeSessionId: id, messages: target.messages, _msgIndex: _buildMsgIndex(target.messages), isLoading: false })
   },
 
   deleteSession: (id) => {
@@ -258,7 +292,7 @@ export const useChatStore = create((set, get) => ({
         [s.activeSessionId]: { ...session, messages: newMessages },
       }
     }
-    return { messages: newMessages, isLoading: true, sessions }
+    return { messages: newMessages, _msgIndex: _buildMsgIndex(newMessages), isLoading: true, sessions }
   }),
 
   addResponse: (card) => set((s) => {
@@ -268,7 +302,7 @@ export const useChatStore = create((set, get) => ({
     if (session) {
       sessions = { ...s.sessions, [s.activeSessionId]: { ...session, messages: newMessages } }
     }
-    return { messages: newMessages, isLoading: false, sessions }
+    return { messages: newMessages, _msgIndex: _buildMsgIndex(newMessages), isLoading: false, sessions }
   }),
 
   addError: (text) => set((s) => {
@@ -278,7 +312,7 @@ export const useChatStore = create((set, get) => ({
     if (session) {
       sessions = { ...s.sessions, [s.activeSessionId]: { ...session, messages: newMessages } }
     }
-    return { messages: newMessages, isLoading: false, sessions }
+    return { messages: newMessages, _msgIndex: _buildMsgIndex(newMessages), isLoading: false, sessions }
   }),
 
   setLoading: (v) => set({ isLoading: v }),
@@ -306,16 +340,28 @@ export const useChatStore = create((set, get) => ({
     if (session) {
       sessions = { ...s.sessions, [s.activeSessionId]: { ...session, messages: newMessages } }
     }
-    return { messages: newMessages, isLoading: true, sessions }
+    return { messages: newMessages, _msgIndex: _buildMsgIndex(newMessages), isLoading: true, sessions }
   }),
 
+  // ── O(1) streaming update — replaces O(N) messages.map ────────────────────
+  // Called per SSE chunk (up to 200× per analysis). Critical hot path.
   updateStreamingMessage: (id, updater) => set((s) => {
-    const newMessages = s.messages.map((m) => m.id === id ? { ...m, data: updater(m.data) } : m)
+    const idx = s._msgIndex.get(id)
+    if (idx === undefined) return {} // message not found — no-op
+    const msg = s.messages[idx]
+    if (!msg) return {}
+    // Splice the single updated message — no full array scan
+    const newMessages = [
+      ...s.messages.slice(0, idx),
+      { ...msg, data: updater(msg.data) },
+      ...s.messages.slice(idx + 1),
+    ]
     const session = s.sessions[s.activeSessionId]
     let sessions = s.sessions
     if (session) {
       sessions = { ...s.sessions, [s.activeSessionId]: { ...session, messages: newMessages } }
     }
+    // Index doesn't change since we only mutated in-place at same index
     return { messages: newMessages, sessions }
   }),
 

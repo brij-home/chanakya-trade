@@ -76,6 +76,20 @@ KNOWN_CREDENTIALS: list[tuple[str, str, bool]] = [
     ("STOXKART_CLIENT_CODE", "Stoxkart Client Code (Login ID)", False),
     ("STOXKART_PASSWORD", "Stoxkart Trading Password", True),
     ("STOXKART_TOTP_SECRET", "Stoxkart TOTP Secret (Base32)", True),
+    # ── Shoonya / Finvasia (Noren) ───────────────────────────
+    ("SHOONYA_USER_ID", "Shoonya User ID", False),
+    ("SHOONYA_PASSWORD", "Shoonya Trading Password", True),
+    ("SHOONYA_API_KEY", "Shoonya API Key (Prism appkey)", True),
+    ("SHOONYA_VENDOR_CODE", "Shoonya Vendor Code", False),
+    ("SHOONYA_TOTP_SECRET", "Shoonya TOTP Secret (Base32)", True),
+    ("SHOONYA_IMEI", "Shoonya Device/IMEI identifier", False),
+    # ── m.Stock (Mirae Asset) ────────────────────────────────
+    ("MSTOCK_API_KEY", "m.Stock API Key / Platform Key", False),
+    ("MSTOCK_API_SECRET", "m.Stock API Secret", True),
+    ("MSTOCK_CLIENT_CODE", "m.Stock Client Code (Login ID)", False),
+    ("MSTOCK_PASSWORD", "m.Stock Trading Password", True),
+    ("MSTOCK_TOTP_SECRET", "m.Stock TOTP Secret (Base32)", True),
+    ("MSTOCK_REDIRECT_URL", "m.Stock Redirect / Callback URL", False),
     # ── AI Provider selection ─────────────────────────────────
     (
         "AI_PROVIDER",
@@ -379,6 +393,29 @@ def run_setup_wizard(keys: Optional[list[str]] = None) -> None:
     _ANGEL_KEYS = {"ANGEL_API_KEY", "ANGEL_CLIENT_CODE", "ANGEL_PASSWORD", "ANGEL_TOTP_SECRET"}
     _UPSTOX_KEYS = {"UPSTOX_API_KEY", "UPSTOX_API_SECRET"}
     _FYERS_KEYS = {"FYERS_APP_ID", "FYERS_SECRET_KEY"}
+    _STOXKART_KEYS = {
+        "STOXKART_API_KEY",
+        "STOXKART_API_SECRET",
+        "STOXKART_CLIENT_CODE",
+        "STOXKART_PASSWORD",
+        "STOXKART_TOTP_SECRET",
+    }
+    _SHOONYA_KEYS = {
+        "SHOONYA_USER_ID",
+        "SHOONYA_PASSWORD",
+        "SHOONYA_API_KEY",
+        "SHOONYA_VENDOR_CODE",
+        "SHOONYA_TOTP_SECRET",
+        "SHOONYA_IMEI",
+    }
+    _MSTOCK_KEYS = {
+        "MSTOCK_API_KEY",
+        "MSTOCK_API_SECRET",
+        "MSTOCK_CLIENT_CODE",
+        "MSTOCK_PASSWORD",
+        "MSTOCK_TOTP_SECRET",
+        "MSTOCK_REDIRECT_URL",
+    }
     _AI_KEYS = {
         "AI_PROVIDER",
         "ANTHROPIC_API_KEY",
@@ -397,6 +434,9 @@ def run_setup_wizard(keys: Optional[list[str]] = None) -> None:
         "Angel One (SmartAPI — free)": [(k, l, s) for k, l, s in targets if k in _ANGEL_KEYS],
         "Upstox": [(k, l, s) for k, l, s in targets if k in _UPSTOX_KEYS],
         "Fyers": [(k, l, s) for k, l, s in targets if k in _FYERS_KEYS],
+        "Stoxkart": [(k, l, s) for k, l, s in targets if k in _STOXKART_KEYS],
+        "Shoonya (Finvasia Noren)": [(k, l, s) for k, l, s in targets if k in _SHOONYA_KEYS],
+        "m.Stock (Mirae Asset — free)": [(k, l, s) for k, l, s in targets if k in _MSTOCK_KEYS],
         "AI Provider": [(k, l, s) for k, l, s in targets if k in _AI_KEYS],
         "Market Data": [(k, l, s) for k, l, s in targets if "NEWSAPI" in k],
         "Notifications (Telegram)": [(k, l, s) for k, l, s in targets if k in _TELEGRAM_KEYS],

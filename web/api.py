@@ -17,6 +17,7 @@ Supported brokers:
     Angel One — TOTP auto-login (free, no redirect needed)
     Upstox    — OAuth2 redirect (API v3, free)
     Fyers     — OAuth2 redirect (API v3, free, great options data)
+    Shoonya   — Finvasia/Noren TOTP auto-login (optional)
 
 Endpoints:
     GET  /                       → Login page (all brokers)
@@ -29,6 +30,7 @@ Endpoints:
     GET  /upstox/callback        → Handle auth_code, complete login
     GET  /fyers/login            → Redirect to Fyers auth URL
     GET  /fyers/callback         → Handle auth_code, complete login
+    GET  /shoonya/login          → Auto-login via TOTP (no redirect)
     GET  /demo                   → Demo / mock mode
     GET  /status                 → HTML: which brokers are authenticated
     GET  /api/status             → JSON: broker auth status
@@ -44,6 +46,7 @@ Register these redirect URIs in your broker developer consoles:
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 from pathlib import Path
@@ -61,7 +64,7 @@ if sys.platform == "win32":
         except Exception:
             pass
 
-from fastapi import FastAPI, Request as _Request
+from fastapi import FastAPI, Request as _Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse, StreamingResponse
 
 from web.auth import auth_router, init_db as init_auth_db, get_session, user_count
@@ -91,43 +94,71 @@ async def _background_cache_warmer():
             from analysis.sector_rotation import get_sector_rrg_matrix
 
             # 1. Warm top index & mover quotes in parallel
-            get_quote(
-                [
-                    "NSE:NIFTY 50",
-                    "NSE:NIFTY BANK",
-                    "NSE:INDIA VIX",
-                    "BSE:SENSEX",
-                    "NSE:RELIANCE",
-                    "NSE:TCS",
-                    "NSE:INFY",
-                    "NSE:HDFCBANK",
-                    "NSE:ICICIBANK",
-                    "NSE:COFORGE",
-                    "NSE:TRENT",
-                    "NSE:HCLTECH",
-                    "NSE:DIVISLAB",
-                    "NSE:TECHM",
-                ]
-            )
+            try:
+                get_quote(
+                    [
+                        "NSE:NIFTY 50",
+                        "NSE:NIFTY BANK",
+                        "NSE:INDIA VIX",
+                        "BSE:SENSEX",
+                        "NSE:RELIANCE",
+                        "NSE:TCS",
+                        "NSE:INFY",
+                        "NSE:HDFCBANK",
+                        "NSE:ICICIBANK",
+                        "NSE:COFORGE",
+                        "NSE:TRENT",
+                        "NSE:HCLTECH",
+                        "NSE:DIVISLAB",
+                        "NSE:TECHM",
+                    ]
+                )
+            except Exception:
+                pass
             # 2. Warm OHLCV for benchmark indices
-            get_ohlcv("NIFTY", days=250)
-            get_ohlcv("BANKNIFTY", days=250)
+            try:
+                get_ohlcv("NIFTY", days=250)
+                get_ohlcv("BANKNIFTY", days=250)
+            except Exception:
+                pass
             # 3. Warm sector rotation matrix
-            get_sector_rrg_matrix(use_cache=True)
+            try:
+                get_sector_rrg_matrix(use_cache=True)
+            except Exception:
+                pass
+            # 4. Check memory headroom and trim in-memory caches if approaching limits
+            try:
+                from engine.memory_guard import trim_memory_if_needed
+                trim_memory_if_needed()
+            except Exception:
+                pass
         except Exception:
             pass
 
     try:
-        await asyncio.sleep(1)
+        await asyncio.sleep(5)
         await asyncio.to_thread(_warm_sync)
 
         while True:
-            await asyncio.sleep(60)
+            await asyncio.sleep(300)
             await asyncio.to_thread(_warm_sync)
     except asyncio.CancelledError:
         pass
     except Exception:
         pass
+
+
+async def _background_maintenance_scheduler():
+    """Background task to run periodic storage maintenance and purge every 6 hours."""
+    while True:
+        try:
+            await asyncio.sleep(21600)  # 6 hours
+            from engine.maintenance import run_maintenance_purge
+            await asyncio.to_thread(run_maintenance_purge)
+        except asyncio.CancelledError:
+            break
+        except Exception:
+            pass
 
 
 @asynccontextmanager
@@ -138,9 +169,62 @@ async def lifespan(app: FastAPI):
 
     init_auth_db()
     await _auto_restore_brokers()
+
+    # Record main event loop for threadsafe SSE publishing
+    from web.sse import event_bus
+
+    event_bus._main_loop = asyncio.get_running_loop()
+
+    # Start the continuous real-time market ticker stream engine (3s loop)
+    from market.ticker_stream import ticker_stream
+
+    ticker_stream.start(poll_interval_seconds=3.0)
+
     warmer_task = asyncio.create_task(_background_cache_warmer())
+    maintenance_task = asyncio.create_task(_background_maintenance_scheduler())
     yield
     warmer_task.cancel()
+    maintenance_task.cancel()
+    try:
+        ticker_stream.stop(timeout=1.5)
+    except Exception:
+        pass
+    try:
+        from market.tick_store import tick_archive
+
+        tick_archive.stop(timeout=1.5)
+    except Exception:
+        pass
+    try:
+        from brokers.session import close_all_brokers
+
+        close_all_brokers()
+    except Exception:
+        pass
+    try:
+        from engine.search import analysis_search
+
+        analysis_search.close()
+    except Exception:
+        pass
+    try:
+        from market.http_pool import close_http_pools
+
+        close_http_pools()
+    except Exception:
+        pass
+    try:
+        from engine.analysis_cache import analysis_cache
+
+        analysis_cache.close()
+    except Exception:
+        pass
+    try:
+        from market.instrument_master import close_db
+
+        close_db()
+    except Exception:
+        pass
 
 
 app = FastAPI(
@@ -173,6 +257,11 @@ app.add_middleware(
     allow_headers=["Content-Type", "X-CSRF-Token"],
 )
 
+# ── GZip compression (50-80% bandwidth reduction on JSON payloads) ────────────
+from fastapi.middleware.gzip import GZipMiddleware
+
+app.add_middleware(GZipMiddleware, minimum_size=1024)
+
 # ── Auth router ──────────────────────────────────────────────────
 app.include_router(auth_router)
 
@@ -197,11 +286,57 @@ def get_csrf_secret() -> str:
     return secret or "chanakya-local-csrf-dev-secret-key-64bytes-minimum-length-for-hmac"
 
 
+# ── Global Exception Middleware (Captures unhandled errors with incident_id) ────
+@app.middleware("http")
+async def global_exception_middleware(request: _Request, call_next):
+    try:
+        return await call_next(request)
+    except Exception as exc:
+        try:
+            from engine.telemetry import record_exception
+
+            clean_headers = {
+                k: v
+                for k, v in request.headers.items()
+                if k.lower() not in ("authorization", "cookie", "x-csrf-token")
+            }
+            context = {
+                "method": request.method,
+                "url": str(request.url),
+                "path": request.url.path,
+                "client": request.client.host if request.client else "unknown",
+                "headers": clean_headers,
+            }
+            incident = record_exception(
+                component="web.api",
+                error=exc,
+                action_taken="Intercepted by global exception middleware",
+                context=context,
+                severity="ERROR",
+            )
+            incident_id = incident["incident_id"]
+        except Exception:
+            incident_id = "ERR-UNKNOWN"
+
+        from datetime import datetime, timezone
+        from starlette.responses import JSONResponse
+
+        return JSONResponse(
+            status_code=500,
+            content={
+                "error": "Internal server error",
+                "incident_id": incident_id,
+                "message": str(exc),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            },
+        )
+
+
 # ── Auth middleware for /api/* and /skills/* ──────────────────────
 @app.middleware("http")
 async def auth_middleware(request: _Request, call_next):
     path = request.url.path
-    # Public paths — no auth required (health, mode, CSRF token, OAuth callbacks)
+    # Public paths — no auth required (health, mode, CSRF token, OAuth callbacks, diagnostics, maintenance)
     if (
         path.startswith("/auth/")
         or path in ("/health", "/health/live", "/health/ready")
@@ -210,6 +345,13 @@ async def auth_middleware(request: _Request, call_next):
             "/api/mode",
             "/api/csrf-token",
         )
+        or path.startswith("/api/diagnostics")
+        or path.startswith("/api/maintenance")
+        # A self-hosted install has no authenticated user until its first
+        # administrator completes setup. Keeping the onboarding flow public is
+        # necessary to make that first-run state recoverable; protected trading
+        # and analysis routes remain unavailable until an account exists.
+        or path.startswith("/api/onboarding/")
         # NOTE: /api/orders/*, /api/reconciliation, /api/portfolio, /api/risk/*, and /api/audit/*
         # are strictly NOT public and require authenticated sessions to protect customer capital, holdings, and logs.
         or path.startswith("/.well-known/")
@@ -218,6 +360,8 @@ async def auth_middleware(request: _Request, call_next):
         or path.startswith("/groww/")
         or path.startswith("/upstox/")
         or path.startswith("/angelone/")
+        or path.startswith("/shoonya/")
+        or path.startswith("/mstock/")
         or not (path.startswith("/api/") or path.startswith("/skills/"))
     ):
         return await call_next(request)
@@ -379,6 +523,33 @@ async def _auto_restore_brokers() -> None:
         except Exception as exc:
             logging.warning("[startup] Could not restore Upstox: %s", exc)
 
+    # Shoonya / Finvasia
+    if _has_shoonya():
+        try:
+            from brokers.shoonya import ShoonyaAPI, TOKEN_FILE as _ST
+
+            if _ST.exists():
+                b = ShoonyaAPI()
+                if b.is_authenticated():
+                    register_broker("shoonya", b)
+                    logging.info("[startup] Shoonya session restored")
+        except Exception as exc:
+            logging.warning("[startup] Could not restore Shoonya: %s", exc)
+
+    # m.Stock (Mirae Asset)
+    if _has_mstock():
+        try:
+            from brokers.mstock import MStockAPI
+
+            b = MStockAPI()
+            if not b.is_authenticated():
+                b.authenticate()
+            if b.is_authenticated():
+                register_broker("mstock", b)
+                logging.info("[startup] m.Stock session active & registered")
+        except Exception as exc:
+            logging.warning("[startup] Could not restore m.Stock: %s", exc)
+
 
 # ── P3-A: Correlation ID Middleware ─────────────────────────────────────────
 
@@ -500,6 +671,88 @@ async def get_slo_report(journey_id: str = None):
     return get_registry().get_slo_report(journey_id=journey_id)
 
 
+# ── System Diagnostics & Storage Maintenance ─────────────────────────────────
+
+
+@app.get("/api/diagnostics", tags=["Observability"])
+async def get_system_diagnostics():
+    """
+    Comprehensive System Diagnostics & Health Report for ChanakyaTrade.
+    Includes hardware memory metrics (8 GB RAM profile), dedicated 100 GB SSD storage breakdown,
+    SQLite database health checks, preflight findings, and telemetry event statistics.
+    """
+    from engine.preflight import run_preflight
+    from engine.memory_guard import get_memory_status
+    from engine.maintenance import get_storage_breakdown
+    from engine.telemetry import get_telemetry_summary
+
+    preflight_rep = run_preflight(verbose=False)
+    mem_status = get_memory_status()
+    storage_bd = get_storage_breakdown()
+    telem_summary = get_telemetry_summary()
+
+    return JSONResponse(
+        {
+            "status": "HEALTHY" if preflight_rep.healthy else "DEGRADED",
+            "mode": preflight_rep.mode,
+            "memory": mem_status.to_dict(),
+            "storage": storage_bd.to_dict(),
+            "telemetry": telem_summary,
+            "preflight": preflight_rep.to_dict(),
+        }
+    )
+
+
+@app.get("/api/diagnostics/errors", tags=["Observability"])
+async def get_error_logs(limit: int = 50):
+    """
+    Retrieve recent structured error and exception incidents with incident IDs,
+    tracebacks, request context, and host memory vitals for troubleshooting.
+    """
+    from engine.telemetry import get_error_incidents
+
+    incidents = get_error_incidents(limit=limit)
+    return JSONResponse(
+        {
+            "total": len(incidents),
+            "incidents": incidents,
+        }
+    )
+
+
+@app.post("/api/maintenance/purge", tags=["Maintenance"])
+async def trigger_maintenance_purge(
+    raw_tick_retention_days: int = 7,
+    disk_cache_retention_days: int = 7,
+    export_retention_days: int = 14,
+    vacuum_databases: bool = False,
+):
+    """
+    Execute storage maintenance purge across ephemeral and diagnostic tiers,
+    preserving all business-critical order/audit data. Checkpoints SQLite WAL logs.
+    """
+    from engine.maintenance import run_maintenance_purge
+
+    report = run_maintenance_purge(
+        raw_tick_retention_days=raw_tick_retention_days,
+        disk_cache_retention_days=disk_cache_retention_days,
+        export_retention_days=export_retention_days,
+        vacuum_databases=vacuum_databases,
+    )
+    return JSONResponse(report.to_dict())
+
+
+@app.get("/api/maintenance/storage-breakdown", tags=["Maintenance"])
+async def get_storage_allocation():
+    """
+    Retrieve real-time storage footprint across Business, Market Data,
+    Analytical Cache, Disk Cache, and Telemetry tiers, along with SSD free space.
+    """
+    from engine.maintenance import get_storage_breakdown
+
+    return JSONResponse(get_storage_breakdown().to_dict())
+
+
 @app.get("/api/provider_health", tags=["Observability"])
 async def get_provider_health():
     """
@@ -564,6 +817,12 @@ h2       { font-size: 1rem; color: #8b949e; margin-bottom: 1.5rem; text-align: c
 .btn-upstox:hover   { background: #6d28d9; transform: translateY(-1px); }
 .btn-fyers    { background: #c2410c; color: #fff; }
 .btn-fyers:hover    { background: #9a3412; transform: translateY(-1px); }
+.btn-shoonya  { background: #16a34a; color: #fff; }
+.btn-shoonya:hover  { background: #15803d; transform: translateY(-1px); }
+.btn-stoxkart { background: #0891b2; color: #fff; }
+.btn-stoxkart:hover { background: #0e7490; transform: translateY(-1px); }
+.btn-mstock   { background: #1d4ed8; color: #fff; }
+.btn-mstock:hover   { background: #1e40af; transform: translateY(-1px); }
 .btn-demo     { background: #21262d; color: #8b949e; border: 1px solid #30363d; }
 .btn-demo:hover     { background: #30363d; color: #e6edf3; }
 .btn-back     { background: #21262d; color: #8b949e; border: 1px solid #30363d; margin-top: 1.25rem; }
@@ -579,6 +838,8 @@ h2       { font-size: 1rem; color: #8b949e; margin-bottom: 1.5rem; text-align: c
 .badge-angel   { background: #3d1a00; color: #ff6b35; }
 .badge-upstox  { background: #2e1065; color: #c4b5fd; }
 .badge-fyers   { background: #431407; color: #fed7aa; }
+.badge-shoonya { background: #14532d; color: #86efac; }
+.badge-mstock  { background: #1e3a8a; color: #93c5fd; }
 .badge-mock    { background: #2d2016; color: #d29922; }
 .success-icon  { font-size: 3rem; text-align: center; margin-bottom: 1rem; }
 .account-box {
@@ -819,6 +1080,54 @@ def _stoxkart_auth() -> bool:
     return _cached_auth("stoxkart", _check)
 
 
+# Shoonya / Finvasia
+def _has_shoonya() -> bool:
+    return bool(
+        _env("SHOONYA_USER_ID")
+        and _env("SHOONYA_PASSWORD")
+        and _env("SHOONYA_API_KEY")
+        and _env("SHOONYA_VENDOR_CODE")
+        and _env("SHOONYA_TOTP_SECRET")
+    )
+
+
+def _shoonya_auth() -> bool:
+    def _check():
+        try:
+            if not _has_shoonya():
+                return False
+            from brokers.shoonya import ShoonyaAPI
+
+            b = ShoonyaAPI()
+            return b.is_authenticated()
+        except Exception:
+            return False
+
+    return _cached_auth("shoonya", _check)
+
+
+# m.Stock (Mirae Asset)
+def _has_mstock() -> bool:
+    return bool(_env("MSTOCK_API_KEY") or _env("MSTOCK_CLIENT_CODE"))
+
+
+def _mstock_auth() -> bool:
+    def _check():
+        try:
+            if not _has_mstock():
+                return False
+            from brokers.mstock import MStockAPI
+
+            b = MStockAPI()
+            if not b.is_authenticated():
+                b.authenticate()
+            return b.is_authenticated()
+        except Exception:
+            return False
+
+    return _cached_auth("mstock", _check)
+
+
 # ── Shared success card ───────────────────────────────────────
 
 
@@ -873,6 +1182,9 @@ async def index():
             _has_angelone(),
             _has_upstox(),
             _has_fyers(),
+            _has_stoxkart(),
+            _has_shoonya(),
+            _has_mstock(),
         ]
     )
 
@@ -919,6 +1231,36 @@ async def index():
             "/fyers/login",
             _has_fyers(),
             _fyers_auth(),
+        )
+    }
+      {
+        _broker_btn(
+            "Login with Shoonya (Free)",
+            "🟢",
+            "btn-shoonya",
+            "/shoonya/login",
+            _has_shoonya(),
+            _shoonya_auth(),
+        )
+    }
+      {
+        _broker_btn(
+            "Login with Stoxkart (Free)",
+            "🔷",
+            "btn-stoxkart",
+            "/stoxkart/login",
+            _has_stoxkart(),
+            _stoxkart_auth(),
+        )
+    }
+      {
+        _broker_btn(
+            "Login with m.Stock (Free)",
+            "🔷",
+            "btn-mstock",
+            "/mstock/login",
+            _has_mstock(),
+            _mstock_auth(),
         )
     }
       <div class="section-header">Premium Brokers</div>
@@ -1299,6 +1641,144 @@ async def stoxkart_login():
     )
 
 
+# ── Shoonya / Finvasia (Noren — TOTP) ────────────────────────
+
+
+@app.get("/shoonya/login", response_class=HTMLResponse)
+async def shoonya_login():
+    if not _has_shoonya():
+        body = """<div class="card">
+          <div class="info-box">
+            <strong>Shoonya (Finvasia) API</strong> — Noren REST/WebSocket integration.<br><br>
+            Set these values in <code>.env</code> or run <code>credentials setup</code>:<br>
+            <code>SHOONYA_USER_ID</code>, <code>SHOONYA_PASSWORD</code>,
+            <code>SHOONYA_API_KEY</code>, <code>SHOONYA_VENDOR_CODE</code>, and
+            <code>SHOONYA_TOTP_SECRET</code>.<br><br>
+            The TOTP secret must be the base32 seed, not a one-time code.
+          </div>
+          <a href="/" class="btn btn-back">← Back</a>
+        </div>"""
+        return HTMLResponse(_page("Shoonya Setup", body), status_code=400)
+    try:
+        from brokers.shoonya import ShoonyaAPI
+        from brokers.session import register_broker
+
+        b = ShoonyaAPI()
+        profile = b.complete_login()
+        funds = b.get_funds()
+        register_broker("shoonya", b)
+        _invalidate_auth_cache("shoonya")
+    except Exception as e:
+        body = f"""<div class="card"><div class="err-box">
+          ❌ Shoonya login failed: {e}<br><br>
+          Check SHOONYA_USER_ID, SHOONYA_PASSWORD, SHOONYA_API_KEY,
+          SHOONYA_VENDOR_CODE, and SHOONYA_TOTP_SECRET.
+        </div><a href="/" class="btn btn-back">← Try again</a></div>"""
+        return HTMLResponse(_page("Error", body), status_code=500)
+    return HTMLResponse(
+        _page(
+            "Connected",
+            _success_card(
+                "Shoonya",
+                "btn-shoonya",
+                profile,
+                funds,
+                "Finvasia Noren — TOTP login, live data, history, options, and execution.",
+            ),
+        )
+    )
+
+
+# ── m.Stock (Mirae Asset Capital Markets — Free API) ─────────────
+
+
+@app.get("/mstock/login", response_class=HTMLResponse)
+async def mstock_login():
+    if not _has_mstock():
+        body = """<div class="card">
+          <div class="info-box">
+            <strong>m.Stock API (Mirae Asset)</strong> — free trading API.<br><br>
+            Set credentials in <code>.env</code> or run <code>credentials setup</code>:<br>
+            1. <code>MSTOCK_API_KEY</code> &amp; <code>MSTOCK_API_SECRET</code><br>
+            2. <code>MSTOCK_CLIENT_CODE</code> &amp; <code>MSTOCK_PASSWORD</code><br>
+            3. (Optional) <code>MSTOCK_TOTP_SECRET</code> for 2FA auto-login.<br>
+            4. <code>MSTOCK_REDIRECT_URL</code> (default: http://103.149.127.88:8765/mstock/callback)<br>
+          </div>
+          <a href="/" class="btn btn-back">← Back</a>
+        </div>"""
+        return HTMLResponse(_page("m.Stock Setup", body), status_code=400)
+    try:
+        from brokers.mstock import MStockAPI
+
+        redirect = _env("MSTOCK_REDIRECT_URL") or "http://103.149.127.88:8765/mstock/callback"
+        b = MStockAPI(
+            api_key=_env("MSTOCK_API_KEY"),
+            api_secret=_env("MSTOCK_API_SECRET"),
+            client_code=_env("MSTOCK_CLIENT_CODE"),
+            redirect_uri=redirect,
+        )
+        url = b.get_login_url()
+    except Exception as e:
+        body = f"""<div class="card"><div class="err-box">❌ Could not generate m.Stock login URL: {e}</div>
+        <a href="/" class="btn btn-back">← Back</a></div>"""
+        return HTMLResponse(_page("Error", body), status_code=500)
+    return RedirectResponse(url)
+
+
+@app.api_route("/mstock/callback", methods=["GET", "POST"], response_class=HTMLResponse)
+async def mstock_callback(request: Request):
+    params = dict(request.query_params)
+    token = (
+        params.get("token")
+        or params.get("auth_token")
+        or params.get("jwt")
+        or params.get("request_token")
+        or params.get("code")
+        or ""
+    )
+    error = params.get("error") or (
+        "" if token else "No authentication token received from m.Stock callback"
+    )
+    if error:
+        body = f"""<div class="card"><div class="err-box">❌ m.Stock login failed: {error}.<br><br>
+        Check MSTOCK_API_KEY, MSTOCK_API_SECRET, and whitelisted IP (103.149.127.88).
+        </div><a href="/" class="btn btn-back">← Try again</a></div>"""
+        return HTMLResponse(_page("Failed", body), status_code=400)
+    try:
+        from brokers.mstock import MStockAPI
+        from brokers.session import register_broker
+
+        redirect = _env("MSTOCK_REDIRECT_URL") or "http://103.149.127.88:8765/mstock/callback"
+        b = MStockAPI(
+            api_key=_env("MSTOCK_API_KEY"),
+            api_secret=_env("MSTOCK_API_SECRET"),
+            client_code=_env("MSTOCK_CLIENT_CODE"),
+            redirect_uri=redirect,
+        )
+        cb_params = dict(params)
+        cb_params.pop("token", None)
+        profile = b.complete_login(token=token, **cb_params)
+        funds = b.get_funds()
+        register_broker("mstock", b)
+        _invalidate_auth_cache("mstock")
+    except Exception as e:
+        body = f"""<div class="card"><div class="err-box">❌ {e}</div>
+        <a href="/" class="btn btn-back">← Try again</a></div>"""
+        return HTMLResponse(_page("Error", body), status_code=500)
+    return HTMLResponse(
+        _page(
+            "Connected",
+            _success_card(
+                "m.Stock",
+                "btn-mstock",
+                profile,
+                funds,
+                "Redirect URL: http://103.149.127.88:8765/mstock/callback",
+            ),
+        )
+    )
+
+
 # ── Demo mode ─────────────────────────────────────────────────
 
 
@@ -1370,6 +1850,24 @@ async def status_page():
             _has_stoxkart,
             _stoxkart_auth,
         ),
+        (
+            "shoonya",
+            "Shoonya",
+            "badge-shoonya",
+            "/shoonya/login",
+            "#86efac",
+            _has_shoonya,
+            _shoonya_auth,
+        ),
+        (
+            "mstock",
+            "m.Stock",
+            "badge-mstock",
+            "/mstock/login",
+            "#2563eb",
+            _has_mstock,
+            _mstock_auth,
+        ),
     ]
     rows = []
     for bkey, bname, badge_cls, login_path, color, has_fn, auth_fn in _BROKERS:
@@ -1400,9 +1898,7 @@ async def status_page():
 # ── JSON API ──────────────────────────────────────────────────
 
 
-@app.get("/api/status")
-async def api_status(request: Request):
-    _require_localhost(request)
+def _compute_status() -> dict:
     from brokers.session import get_broker_role
 
     return {
@@ -1436,7 +1932,23 @@ async def api_status(request: Request):
             "authenticated": _stoxkart_auth(),
             "role": get_broker_role("stoxkart"),
         },
+        "shoonya": {
+            "configured": _has_shoonya(),
+            "authenticated": _shoonya_auth(),
+            "role": get_broker_role("shoonya"),
+        },
+        "mstock": {
+            "configured": _has_mstock(),
+            "authenticated": _mstock_auth(),
+            "role": get_broker_role("mstock"),
+        },
     }
+
+
+@app.get("/api/status")
+async def api_status(request: Request):
+    _require_localhost(request)
+    return await asyncio.to_thread(_compute_status)
 
 
 # ── Cache & Data Persistence Stats API ───────────────────────
@@ -1461,7 +1973,7 @@ async def api_cache_clear(request: Request):
 
 # ── Onboarding API ───────────────────────────────────────────
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 @app.get("/api/onboarding/status")
@@ -1830,6 +2342,8 @@ async def set_broker_role_endpoint(req: BrokerRoleRequest, request: Request):
         "angel_one": "angelone",
         "upstox": "upstox",
         "fyers": "fyers",
+        "stoxkart": "stoxkart",
+        "shoonya": "shoonya",
     }
     session_key = _API_TO_SESSION.get(req.broker, req.broker)
 
@@ -1855,6 +2369,9 @@ _BROKER_SESSION_FILES = {
     "angel_one": app_data_path("angelone.json"),
     "upstox": app_data_path("upstox.json"),
     "fyers": app_data_path("fyers.json"),
+    "stoxkart": app_data_path("stoxkart.json"),
+    "shoonya": app_data_path("shoonya.json"),
+    "mstock": app_data_path("mstock.json"),
 }
 
 
@@ -1879,6 +2396,9 @@ async def broker_disconnect(broker_key: str, request: Request):
         "angel_one": "angelone",
         "upstox": "upstox",
         "fyers": "fyers",
+        "stoxkart": "stoxkart",
+        "shoonya": "shoonya",
+        "mstock": "mstock",
     }
     session_key = _SESSION_KEY_MAP.get(broker_key, broker_key)
     unregister_broker(session_key)
@@ -1899,9 +2419,7 @@ async def api_risk_status(request: Request):
         raise _HTTPException(500, str(e))
 
 
-@app.get("/api/portfolio")
-async def api_portfolio(request: Request):
-    _require_localhost(request)
+def _compute_portfolio() -> Optional[dict]:
     holdings: list[dict] = []
     positions: list[dict] = []
     total_cash = total_margin = total_balance = 0.0
@@ -1927,7 +2445,9 @@ async def api_portfolio(request: Request):
                         "avg_price": h.avg_price,
                         "ltp": h.last_price,
                         "pnl": h.pnl,
-                        "current_value": h.current_value,
+                        # Holding has no provider-specific current_value field;
+                        # derive it from the normalized quantity and LTP.
+                        "current_value": round(h.last_price * h.quantity, 2),
                     }
                 )
             for p in b.get_positions():
@@ -1978,13 +2498,55 @@ async def api_portfolio(request: Request):
 
         _try("fyers", lambda: FyersAPI(_env("FYERS_APP_ID"), _env("FYERS_SECRET_KEY")))
 
-    # Portfolio data is decision-critical.  Do not replace a disconnected
-    # broker with a realistic-looking mock account in a production pathway.
+    if _has_shoonya():
+        from brokers.shoonya import ShoonyaAPI
+
+        _try("shoonya", ShoonyaAPI)
+
+    if _has_mstock():
+        from brokers.mstock import MStockAPI
+
+        _try("mstock", MStockAPI)
+
     if not active_brokers:
-        raise _HTTPException(
-            status_code=503,
-            detail="Portfolio unavailable: connect an authenticated broker to view account data.",
-        )
+        try:
+            from engine.paper import PaperBroker
+
+            paper = PaperBroker()
+            active_brokers.append("Paper Simulator")
+            f = paper.get_funds()
+            total_cash += f.available_cash
+            total_margin += f.used_margin
+            total_balance += f.total_balance
+            for h in paper.get_holdings():
+                holdings.append(
+                    {
+                        "broker": "Paper",
+                        "symbol": h.symbol,
+                        "qty": h.quantity,
+                        "avg_price": h.avg_price,
+                        "ltp": h.last_price,
+                        "pnl": h.pnl,
+                        "current_value": round(h.last_price * h.quantity, 2),
+                    }
+                )
+            for p in paper.get_positions():
+                positions.append(
+                    {
+                        "broker": "Paper",
+                        "symbol": p.symbol,
+                        "product": p.product,
+                        "qty": p.quantity,
+                        "avg_price": p.avg_price,
+                        "ltp": p.last_price,
+                        "pnl": p.pnl,
+                    }
+                )
+        except Exception:
+            pass
+
+    if not active_brokers:
+        return None
 
     total_pnl = sum(h["pnl"] for h in holdings) + sum(p["pnl"] for p in positions)
     return {
@@ -2003,6 +2565,18 @@ async def api_portfolio(request: Request):
     }
 
 
+@app.get("/api/portfolio")
+async def api_portfolio(request: Request):
+    _require_localhost(request)
+    result = await asyncio.to_thread(_compute_portfolio)
+    if result is None:
+        raise _HTTPException(
+            status_code=503,
+            detail="Portfolio unavailable: connect an authenticated broker to view account data.",
+        )
+    return result
+
+
 # ── Institutional Analysis & Quant Endpoints ─────────────────────
 
 
@@ -2014,7 +2588,7 @@ async def get_market_rrg():
     try:
         from analysis.sector_rotation import get_sector_rrg_matrix
 
-        points = get_sector_rrg_matrix()
+        points = await asyncio.to_thread(get_sector_rrg_matrix)
         return {
             "status": "success",
             "sectors": [p.as_dict() for p in points],
@@ -2164,6 +2738,287 @@ async def stream_alerts():
     )
 
 
+# ── Real-Time Market Ticker Stream (Indian & Global) ───────────
+
+
+@app.get("/api/ticker/snapshot", tags=["Market Data"])
+async def get_ticker_snapshot():
+    """
+    Get current snapshot of major Indian (NIFTY, BANKNIFTY, SENSEX, VIX, FINNIFTY)
+    and Global indices (GIFT NIFTY, NASDAQ, S&P 500, DOW, DXY, US 10Y, Crude, Gold, Silver).
+    """
+    from market.ticker_stream import ticker_stream, compute_ribbon_tickers
+
+    snap = ticker_stream.get_snapshot()
+    if not snap.get("tickers"):
+        tickers = await asyncio.to_thread(compute_ribbon_tickers)
+        ticker_stream._cached_ribbon_tickers = tickers
+        snap["tickers"] = tickers
+    return snap
+
+
+@app.get("/api/ticker/stream", tags=["SSE"])
+@app.get("/stream/ticker", tags=["SSE"])
+async def stream_ticker():
+    """
+    SSE stream of real-time Indian & Global market index updates.
+    Yields initial snapshot immediately upon connect, then streams real-time updates.
+    """
+    from market.ticker_stream import ticker_stream
+
+    ticker_stream.start(poll_interval_seconds=3.0)
+
+    async def _ticker_generator():
+        # 1. Send initial snapshot immediately with ribbon tickers
+        snap = ticker_stream.get_snapshot()
+        tickers = snap.get("tickers", [])
+        if not tickers:
+            try:
+                from market.ticker_stream import compute_ribbon_tickers
+
+                tickers = await asyncio.to_thread(compute_ribbon_tickers)
+                ticker_stream._cached_ribbon_tickers = tickers
+                snap["tickers"] = tickers
+            except Exception:
+                pass
+
+        yield f"data: {json.dumps({'type': 'ticker_snapshot', 'data': snap, 'tickers': tickers})}\n\n"
+
+        # 2. Stream subsequent updates
+        async for chunk in _event_bus.subscribe("ticker"):
+            yield chunk
+
+    return StreamingResponse(
+        _ticker_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@app.websocket("/ws/ticker")
+@app.websocket("/api/ticker/ws")
+async def websocket_ticker(ws: WebSocket):
+    """
+    WebSocket endpoint for sub-second real-time market ticks
+    (Indices, MCX Commodities, Crypto).
+    """
+    await ws.accept()
+    from market.ticker_stream import ticker_stream
+
+    ticker_stream.start(poll_interval_seconds=3.0)
+    snap = ticker_stream.get_snapshot()
+    tickers = snap.get("tickers", [])
+    await ws.send_text(json.dumps({"type": "ticker_snapshot", "data": snap, "tickers": tickers}))
+
+    try:
+        async for chunk in _event_bus.subscribe("ticker"):
+            if chunk.startswith("data: "):
+                raw = chunk[6:].strip()
+                await ws.send_text(raw)
+            elif not chunk.startswith(":"):
+                await ws.send_text(chunk)
+    except WebSocketDisconnect:
+        pass
+    except Exception:
+        pass
+
+
+# ── System Status SSE Stream ──────────────────────────────────────────────────
+
+
+@app.get("/api/system/stream", tags=["SSE"])
+async def stream_system_status():
+    """
+    SSE stream that replaces three separate polling intervals in the frontend:
+      - /api/status  (broker auth status) — was polled every 8s
+      - /api/mode    (trading mode)        — was fetched once
+      - /api/pilot/status                  — was polled every 15s
+
+    Sends an initial full snapshot on connect, then pushes delta updates
+    whenever broker auth state, mode, or pilot status changes.
+
+    Event format:
+        data: {"type": "system_status", "broker_statuses": {...},
+               "mode": "PAPER", "pilot": {...}, "ts": "..."}
+    """
+    import time as _time
+
+    async def _system_generator():
+        # 1. Send immediate full snapshot on connect
+        try:
+            from brokers.session import get_registered_brokers
+            from engine.modes import get_trading_mode
+
+            brokers = get_registered_brokers()
+            broker_statuses = {
+                name: {
+                    "authenticated": b.is_authenticated()
+                    if hasattr(b, "is_authenticated")
+                    else True,
+                    "broker": name,
+                }
+                for name, b in brokers.items()
+            }
+            mode_info = get_trading_mode()
+            _UI_MODE_MAP = {"OBSERVE": "DEMO", "SIMULATE": "PAPER", "EXECUTE": "LIVE"}
+            ui_mode = _UI_MODE_MAP.get(mode_info.mode.value, "PAPER")
+
+            # Pilot status
+            pilot = None
+            try:
+                from engine.pilot import get_pilot_status
+
+                pilot = get_pilot_status()
+                if hasattr(pilot, "__dict__"):
+                    pilot = vars(pilot)
+            except Exception:
+                pass
+
+            snapshot = {
+                "type": "system_status",
+                "broker_statuses": broker_statuses,
+                "mode": ui_mode,
+                "backend_mode": mode_info.mode.value,
+                "pilot": pilot,
+                "ts": _time.time(),
+            }
+            yield f"data: {json.dumps(snapshot)}\n\n"
+        except Exception:
+            yield ": system_stream_ready\n\n"
+
+        # 2. Stream updates from the system channel
+        async for chunk in _event_bus.subscribe("system"):
+            yield chunk
+
+    return StreamingResponse(
+        _system_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+# ── Dashboard Snapshot SSE Stream ──────────────────────────────────────────────
+
+
+@app.get("/api/dashboard/stream", tags=["SSE"])
+async def stream_dashboard_snapshot(symbol: str = "NIFTY", exchange: str = ""):
+    """
+    Symbol-keyed SSE stream for the Strategic Quant Terminal.
+    Replaces the 8-second setInterval poll in TerminalView.jsx.
+
+    Sends an initial dashboard snapshot on connect, then pushes updates
+    when the symbol's price changes by > 0.1% or every 30s as a keepalive.
+
+    Query params:
+        symbol   - Instrument symbol (e.g. NIFTY, RELIANCE)
+        exchange - Exchange prefix (e.g. NSE, MCX); auto-resolved if omitted
+
+    Event format:
+        data: {"type": "dashboard_snapshot", "symbol": "NIFTY", "ltp": 24500.0, ...}
+    """
+    import asyncio as _asyncio
+    import time as _time
+
+    # Resolve canonical exchange
+    _resolved_exchange = exchange or ""
+    if not _resolved_exchange:
+        try:
+            from analysis.universe import normalize_symbol_exchange
+
+            _resolved_exchange = normalize_symbol_exchange(symbol).exchange
+        except Exception:
+            _resolved_exchange = "NSE"
+
+    async def _dashboard_generator():
+        last_ltp = None
+        last_push_ts = 0.0
+        PRICE_THRESHOLD = 0.001  # 0.1% change triggers push
+        KEEPALIVE_INTERVAL = 30.0  # seconds
+
+        # 1. Send initial snapshot immediately on connect
+        try:
+            from web.skills import _get_dashboard_snapshot_data
+
+            snap = await _asyncio.to_thread(
+                _get_dashboard_snapshot_data, symbol, _resolved_exchange, "15m"
+            )
+            if snap:
+                snap["type"] = "dashboard_snapshot"
+                last_ltp = snap.get("ltp")
+                last_push_ts = _time.time()
+                yield f"data: {json.dumps(snap)}\n\n"
+            else:
+                yield f": dashboard_stream_ready symbol={symbol}\n\n"
+        except Exception:
+            yield f": dashboard_stream_ready symbol={symbol}\n\n"
+
+        # 2. Subscribe to ticker updates and push when price moves > threshold
+        try:
+            async for raw_chunk in _event_bus.subscribe("ticker"):
+                if raw_chunk.startswith("data: "):
+                    try:
+                        payload = json.loads(raw_chunk[6:])
+                        tickers = payload.get(
+                            "tickers", payload.get("data", {}).get("tickers", [])
+                        )
+                        target = next(
+                            (
+                                t
+                                for t in tickers
+                                if t.get("symbol", "").upper() == symbol.upper()
+                            ),
+                            None,
+                        )
+                        if target:
+                            new_ltp = target.get("ltp")
+                            now = _time.time()
+                            should_push = new_ltp and (
+                                last_ltp is None
+                                or abs(new_ltp - last_ltp) / max(last_ltp, 1) >= PRICE_THRESHOLD
+                                or now - last_push_ts >= KEEPALIVE_INTERVAL
+                            )
+                            if should_push:
+                                # Fetch fresh full snapshot and push
+                                try:
+                                    from web.skills import _get_dashboard_snapshot_data
+
+                                    snap = await _asyncio.to_thread(
+                                        _get_dashboard_snapshot_data,
+                                        symbol,
+                                        _resolved_exchange,
+                                        "15m",
+                                    )
+                                    if snap:
+                                        snap["type"] = "dashboard_snapshot"
+                                        last_ltp = snap.get("ltp", new_ltp)
+                                        last_push_ts = now
+                                        yield f"data: {json.dumps(snap)}\n\n"
+                                except Exception:
+                                    pass
+                    except (json.JSONDecodeError, Exception):
+                        pass
+                elif raw_chunk.startswith(":"):
+                    # Keepalive heartbeat
+                    yield f": keepalive symbol={symbol}\n\n"
+        except _asyncio.CancelledError:
+            pass
+
+    return StreamingResponse(
+        _dashboard_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
 # ── Institutional Preflight, Mode & Charges Endpoints ───────────
 
 
@@ -2176,7 +3031,7 @@ async def get_preflight_diagnostics():
     return JSONResponse(report.to_dict())
 
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, field_validator
 from typing import Optional
 
 
@@ -2428,25 +3283,12 @@ async def api_reconciliation():
 
     correlation_id = new_correlation_id("reconciliation")
 
-    # 1. Fetch internal ledger positions
+    # 1. Fetch the selected execution-broker snapshot — never use the primary
+    # broker implicitly when data and execution roles differ.
     try:
-        from engine.portfolio import get_portfolio_summary
+        from brokers.session import get_execution_broker
 
-        summary = get_portfolio_summary()
-        int_positions = [
-            {"symbol": p.symbol, "qty": p.qty, "avg_price": p.avg_price, "pnl": p.pnl}
-            for p in summary.positions
-        ]
-        cash_val = summary.funds.available_cash if hasattr(summary.funds, "available_cash") else 0.0
-    except Exception:
-        int_positions = []
-        cash_val = 0.0
-
-    # 2. Fetch REAL broker snapshot — never use internal positions as broker positions
-    try:
-        from brokers.session import get_broker
-
-        live_broker = get_broker()
+        live_broker = get_execution_broker()
         if live_broker is None:
             raise RuntimeError("No authenticated broker session.")
 
@@ -2498,19 +3340,52 @@ async def api_reconciliation():
                 ),
                 "broker_positions": None,
                 "broker_cash": None,
-                "internal_positions": int_positions,
-                "internal_cash": cash_val,
+                "internal_positions": None,
+                "internal_cash": None,
                 "broker_account_id": None,
                 "broker_snapshot_at": None,
                 "correlation_id": correlation_id,
             }
         )
 
-    # 3. Run reconciliation against the real broker snapshot
+    # 2. Build the independent local ledger.  A baseline is deliberately
+    # explicit; copying the just-fetched broker balance would self-compare.
+    try:
+        from engine.order_lifecycle import get_internal_ledger_snapshot, sync_execution_orders
+
+        # Refresh known lifecycle states before comparing positions.  Failure is
+        # visible below as a degraded reconciliation, never silently ignored.
+        sync_execution_orders()
+        internal = get_internal_ledger_snapshot(broker_account_id)
+    except Exception as ledger_exc:
+        internal = None
+        ledger_reason = str(ledger_exc)
+    else:
+        ledger_reason = ""
+
+    if internal is None:
+        return JSONResponse(
+            {
+                "status": "UNAVAILABLE",
+                "reason": (
+                    "Reconciliation requires an explicit local opening-cash baseline and persisted "
+                    f"execution ledger for account {broker_account_id}. {ledger_reason}"
+                ).strip(),
+                "broker_positions": broker_positions,
+                "broker_cash": broker_cash,
+                "internal_positions": None,
+                "internal_cash": None,
+                "broker_account_id": broker_account_id,
+                "broker_snapshot_at": snapshot_at,
+                "correlation_id": correlation_id,
+            }
+        )
+
+    # 3. Run reconciliation against independent local ledger + real broker snapshot.
     report = reconcile_ledger(
-        internal_positions=int_positions,
+        internal_positions=internal["positions"],
         broker_positions=broker_positions,
-        internal_cash=cash_val,
+        internal_cash=float(internal["cash"]),
         broker_cash=broker_cash,
         broker_name=broker_account_id,
     )
@@ -2519,6 +3394,51 @@ async def api_reconciliation():
     result["broker_snapshot_at"] = snapshot_at
     result["correlation_id"] = correlation_id
     return JSONResponse(result)
+
+
+class ReconciliationBaselineRequest(BaseModel):
+    """User-declared opening cash for the immutable local execution ledger."""
+
+    opening_cash: float = Field(..., ge=0)
+
+
+@app.post("/api/reconciliation/baseline")
+async def api_reconciliation_baseline(req: ReconciliationBaselineRequest):
+    """Establish or deliberately reset the local reconciliation baseline.
+
+    The amount is entered by the account owner from a known starting point; it
+    is never copied from the current broker snapshot.
+    """
+    from brokers.session import get_execution_broker
+    from engine.order_lifecycle import set_ledger_cash_baseline
+
+    broker = get_execution_broker()
+    account_id = getattr(broker, "account_id", None) or getattr(broker, "client_id", None)
+    if not account_id:
+        raise _HTTPException(
+            status_code=503, detail="An authenticated execution broker is required."
+        )
+    set_ledger_cash_baseline(str(account_id), req.opening_cash, actor="USER_API")
+    return {
+        "status": "ok",
+        "account_id": str(account_id),
+        "opening_cash": req.opening_cash,
+        "message": "Independent ledger baseline saved. Run reconciliation to compare it with the broker.",
+    }
+
+
+@app.get("/api/pilot/status")
+async def api_pilot_status():
+    """Return the active pilot guardrails for an honest, visible UI banner."""
+    from brokers.session import get_data_broker_key, get_execution_broker_key
+    from engine.pilot_safety import get_pilot_safety_profile
+
+    return {
+        "status": "ok",
+        "profile": get_pilot_safety_profile().to_dict(),
+        "data_provider": get_data_broker_key() or None,
+        "execution_provider": get_execution_broker_key() or None,
+    }
 
 
 @app.get("/api/audit/logs")

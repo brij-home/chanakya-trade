@@ -36,6 +36,13 @@ export const INDIAN_UNIVERSE = [
   { symbol: 'NIFTYCONSUMPTION', name: 'NIFTY India Consumption Index', sector: 'Consumption', subIndustry: 'Sectoral Index', type: 'index', capTier: 'LARGE', lotSize: null, isFO: false, aliases: ['consumption', 'retail', 'nifty consumption'] },
   { symbol: 'NIFTYMEDIA', name: 'NIFTY Media Entertainment Index', sector: 'Media', subIndustry: 'Sectoral Index', type: 'index', capTier: 'LARGE', lotSize: null, isFO: false, aliases: ['media', 'entertainment', 'nifty media'] },
 
+  // Key Commodities & Crypto Benchmarks
+  { symbol: 'CRUDEOIL', name: 'MCX Crude Oil Futures (₹/bbl)', sector: 'Commodities', subIndustry: 'Energy Futures', type: 'commodity', exchange: 'MCX', capTier: 'COMMODITY', lotSize: 100, isFO: true, aliases: ['crude', 'oil', 'crudeoil', 'brent', 'wti', 'energy'] },
+  { symbol: 'GOLD', name: 'MCX Gold Futures (₹/10g)', sector: 'Commodities', subIndustry: 'Precious Metals', type: 'commodity', exchange: 'MCX', capTier: 'COMMODITY', lotSize: 100, isFO: true, aliases: ['gold', 'mcx gold', 'bullion', 'sona', 'goldm'] },
+  { symbol: 'SILVER', name: 'MCX Silver Futures (₹/kg)', sector: 'Commodities', subIndustry: 'Precious Metals', type: 'commodity', exchange: 'MCX', capTier: 'COMMODITY', lotSize: 30, isFO: true, aliases: ['silver', 'mcx silver', 'bullion', 'chandi', 'silverm'] },
+  { symbol: 'NATURALGAS', name: 'MCX Natural Gas Futures', sector: 'Commodities', subIndustry: 'Energy Futures', type: 'commodity', exchange: 'MCX', capTier: 'COMMODITY', lotSize: 1250, isFO: true, aliases: ['natgas', 'natural gas', 'gas'] },
+  { symbol: 'BTC', name: 'Bitcoin Spot Benchmark ($ / USD)', sector: 'Crypto', subIndustry: 'Digital Assets', type: 'crypto', exchange: 'CRYPTO', capTier: 'CRYPTO', lotSize: 1, isFO: false, aliases: ['btc', 'bitcoin', 'crypto', 'btc-usd', 'btcusd', 'digital gold'] },
+
   // ─────────────────────────────────────────────────────────────
   // 2. NIFTY 50 & BLUECHIP EQUITIES (ALL CONSTITUENTS)
   // ─────────────────────────────────────────────────────────────
@@ -383,7 +390,8 @@ export function getAssetIcon(type) {
   switch (type) {
     case 'index': return '📊'
     case 'etf': return '📦'
-    case 'commodity': return '🪙'
+    case 'commodity': return '🛢️'
+    case 'crypto': return '₿'
     case 'currency': return '💱'
     case 'stock':
     default: return '🏢'
@@ -397,6 +405,7 @@ export function getSymbolExchange(symbol) {
   if (clean.startsWith('MCX:')) return 'MCX'
   if (clean.startsWith('CDS:') || clean.startsWith('FX:') || clean.startsWith('FOREX:')) return 'CDS'
   if (clean.startsWith('BSE:')) return 'BSE'
+  if (clean.startsWith('CRYPTO:') || clean.startsWith('BINANCE:')) return 'CRYPTO'
   if (clean.startsWith('NSE:')) return 'NSE'
 
   const mcxSymbols = new Set([
@@ -414,10 +423,14 @@ export function getSymbolExchange(symbol) {
   const bseSymbols = new Set(['SENSEX', 'BANKEX'])
   if (bseSymbols.has(clean)) return 'BSE'
 
+  const cryptoSymbols = new Set(['BTC', 'BITCOIN', 'BTCUSD', 'BTC-USD', 'BTCINR', 'ETH', 'ETHEREUM', 'SOL'])
+  if (cryptoSymbols.has(clean)) return 'CRYPTO'
+
   const found = INDIAN_UNIVERSE.find((i) => i.symbol === clean)
   if (found) {
     if (found.exchange) return found.exchange
     if (found.type === 'commodity') return 'MCX'
+    if (found.type === 'crypto') return 'CRYPTO'
     if (found.type === 'currency') return 'CDS'
     if (found.type === 'index' && (found.symbol === 'SENSEX' || found.symbol === 'BANKEX')) return 'BSE'
   }
@@ -487,7 +500,7 @@ export function fuzzySearchUniverse(query, activeSymbol = null, limit = 12, cate
       return [...recents, ...defaultActions].slice(0, limit)
     }
 
-    if (['stock', 'index', 'etf', 'commodity', 'currency', 'symbols'].includes(categoryFilter)) {
+    if (['stock', 'index', 'etf', 'commodity', 'currency', 'crypto', 'symbols'].includes(categoryFilter)) {
       const filtered = INDIAN_UNIVERSE.filter((item) => {
         if (categoryFilter === 'symbols') return true
         return item.type === categoryFilter
@@ -567,7 +580,7 @@ export function fuzzySearchUniverse(query, activeSymbol = null, limit = 12, cate
   const results = []
 
   // 2. Search Symbols (Stocks, Indices, ETFs, Commodities, Currencies)
-  if (categoryFilter === 'all' || ['stock', 'index', 'etf', 'commodity', 'currency', 'symbols'].includes(categoryFilter)) {
+  if (categoryFilter === 'all' || ['stock', 'index', 'etf', 'commodity', 'currency', 'crypto', 'symbols'].includes(categoryFilter)) {
     for (const item of INDIAN_UNIVERSE) {
       if (categoryFilter !== 'all' && categoryFilter !== 'symbols' && item.type !== categoryFilter) {
         continue

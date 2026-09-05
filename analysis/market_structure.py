@@ -25,6 +25,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import Any, Optional
 
+import math
 import numpy as np
 import pandas as pd
 
@@ -514,6 +515,9 @@ def analyze_market_structure(
         except Exception:
             df = None
 
+    if df is not None and not df.empty:
+        df = df.dropna(subset=["close"]).copy()
+
     if df is None or len(df) < 10:
         # Fallback safe report
         return MarketStructureReport(
@@ -527,7 +531,17 @@ def analyze_market_structure(
             actionable_trade_idea="Wait for sufficient data before taking structural entries.",
         )
 
-    ltp = float(df["close"].iloc[-1])
+    ltp_raw = float(df["close"].iloc[-1])
+    if math.isnan(ltp_raw) or ltp_raw <= 0:
+        try:
+            from market.quotes import get_ltp
+
+            live_p = get_ltp(f"{exchange}:{symbol}")
+            ltp = float(live_p) if (live_p and not math.isnan(live_p) and live_p > 0) else 1000.0
+        except Exception:
+            ltp = 1000.0
+    else:
+        ltp = ltp_raw
 
     # 1. Swings (adaptive window based on sample length)
     swing_win = 2 if len(df) <= 60 else 3
@@ -555,21 +569,28 @@ def analyze_market_structure(
 
     # Fast trend slope check
     closes = df["close"].values
-    short_slope = (closes[-1] - closes[-min(10, len(closes))]) / closes[-min(10, len(closes))]
+    short_denom = closes[-min(10, len(closes))]
+    if short_denom and not math.isnan(short_denom) and short_denom > 0:
+        short_slope = (closes[-1] - short_denom) / short_denom
+        if math.isnan(short_slope) or not math.isfinite(short_slope):
+            short_slope = 0.0
+    else:
+        short_slope = 0.0
 
     structure_score = 0
     regime = "RANGING"
+    slope_int = int(short_slope * 200) if (not math.isnan(short_slope) and math.isfinite(short_slope)) else 0
 
     if (hh_count + hl_count) >= (lh_count + ll_count) + 2 or (
         short_slope > 0.05 and ltp > last_swing_high * 0.98
     ):
         regime = "BULLISH"
-        structure_score = min(90, 40 + (hh_count + hl_count) * 12 + int(short_slope * 200))
+        structure_score = min(90, 40 + (hh_count + hl_count) * 12 + slope_int)
     elif (lh_count + ll_count) >= (hh_count + hl_count) + 2 or (
         short_slope < -0.05 and ltp < last_swing_low * 1.02
     ):
         regime = "BEARISH"
-        structure_score = max(-90, -40 - (lh_count + ll_count) * 12 + int(short_slope * 200))
+        structure_score = max(-90, -40 - (lh_count + ll_count) * 12 + slope_int)
     else:
         regime = "RANGING"
         structure_score = int((hh_count + hl_count - lh_count - ll_count) * 10)
@@ -659,16 +680,16 @@ def analyze_market_structure(
 
     if structure_score >= 0:
         invalidation = nearest_support * 0.99
-        risk = max(0.01, ltp - invalidation)
+        risk = max(0.01, ltp - invalidation) if not math.isnan(ltp) else max(0.01, invalidation * 0.015)
         target_1 = ltp + (risk * 2.0)
         target_2 = ltp + (risk * 3.5)
-        rr = round((target_1 - ltp) / risk, 2)
+        rr = round((target_1 - ltp) / risk, 2) if risk > 0 else 2.0
     else:
         invalidation = nearest_resistance * 1.01
-        risk = max(0.01, invalidation - ltp)
+        risk = max(0.01, invalidation - ltp) if not math.isnan(ltp) else max(0.01, invalidation * 0.015)
         target_1 = ltp - (risk * 2.0)
         target_2 = ltp - (risk * 3.5)
-        rr = round((ltp - target_1) / risk, 2)
+        rr = round((ltp - target_1) / risk, 2) if risk > 0 else 2.0
 
     # 7. Summary Synthesis
     summary_parts = [f"Structure is {regime} (Score: {structure_score:+d}/100)."]

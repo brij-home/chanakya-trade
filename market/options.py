@@ -20,6 +20,12 @@ from market.nse_scraper import nse_get_options_chain
 from market.source_tracker import record_source, warn_fallback
 
 
+import time
+
+_CHAIN_CACHE: dict[str, tuple[float, list[OptionsContract]]] = {}
+_CHAIN_CACHE_TTL = 180.0  # 3 minutes for valid chains, 60s for empty
+
+
 def get_options_chain(
     underlying: str,
     expiry: Optional[str] = None,
@@ -39,18 +45,29 @@ def get_options_chain(
     Returns:
         List of OptionsContract sorted by strike then type (CE/PE).
     """
+    cache_key = f"{underlying.upper()}:{expiry or 'nearest'}"
+    now = time.time()
+    if cache_key in _CHAIN_CACHE:
+        cached_at, cached_chain = _CHAIN_CACHE[cache_key]
+        ttl = _CHAIN_CACHE_TTL if cached_chain else 60.0
+        if (now - cached_at) < ttl:
+            return cached_chain
+
     # Tier 1: data broker
     try:
         chain = get_data_broker().get_options_chain(underlying, expiry)
         record_source("options", "broker")
-        return chain
+        if chain:
+            _CHAIN_CACHE[cache_key] = (now, chain)
+            return chain
     except Exception as e:
         warn_fallback("options", str(e), "nse_scraper")
 
     # Tier 2: NSE scraper
     chain = nse_get_options_chain(underlying, expiry)
     record_source("options", "nse_scraper" if chain else "none")
-    return chain
+    _CHAIN_CACHE[cache_key] = (now, chain or [])
+    return chain or []
 
 
 def get_expiries(underlying: str) -> list[str]:
@@ -123,30 +140,38 @@ def get_atm_strike(underlying: str, spot: float) -> float:
     return min(strikes, key=lambda s: abs(s - spot))
 
 
-def get_pcr(underlying: str, expiry: Optional[str] = None) -> float:
+def get_pcr(underlying: str, expiry: Optional[str] = None) -> Optional[float]:
     """
     Put-Call Ratio by Open Interest for the given expiry.
     PCR > 1.2 → bearish sentiment; PCR < 0.8 → bullish.
+    Returns None if no options contracts exist for this underlying.
     """
     chain = get_options_chain(underlying, expiry)
+    if not chain:
+        return None
     ce_oi = sum(c.oi for c in chain if c.option_type == "CE")
     pe_oi = sum(c.oi for c in chain if c.option_type == "PE")
+    if ce_oi == 0 and pe_oi == 0:
+        return None
     if ce_oi == 0:
-        return 0.0
+        return 999.0
     return round(pe_oi / ce_oi, 3)
 
 
-def get_max_pain(underlying: str, expiry: Optional[str] = None) -> float:
+def get_max_pain(underlying: str, expiry: Optional[str] = None) -> Optional[float]:
     """
     Max pain strike — the strike where total options losses for buyers
     are maximised (i.e. where writers profit most).
 
     Calculated by summing ITM losses across all strikes for CE + PE.
+    Returns None if no options contracts exist for this underlying.
     """
     chain = get_options_chain(underlying, expiry)
+    if not chain:
+        return None
     strikes = sorted({c.strike for c in chain})
     if not strikes:
-        return 0.0
+        return None
 
     # Build quick lookup: strike → {CE: contract, PE: contract}
     lookup: dict[float, dict[str, OptionsContract]] = {}
@@ -168,3 +193,4 @@ def get_max_pain(underlying: str, expiry: Optional[str] = None) -> float:
         pain[test_strike] = total_pain
 
     return min(pain, key=pain.get)  # type: ignore[arg-type]
+

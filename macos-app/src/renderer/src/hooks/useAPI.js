@@ -29,7 +29,7 @@ export function useAPI() {
 
   // Web mode: use same origin (no port needed)
   // Electron mode: use port from IPC with fallback to default 8765
-  const base = window.__CHANAKYA_TRADE_WEB__
+  const base = (window.__CHANAKYA_TRADE_WEB__ && window.location.port !== '5173')
     ? window.location.origin
     : (port ? `http://127.0.0.1:${port}` : 'http://127.0.0.1:8765')
 
@@ -54,14 +54,19 @@ export function useAPI() {
     }
 
     if (useSidecarIpc) {
-      const response = await window.electronAPI.sidecarRequest({
-        endpoint,
-        method,
-        headers,
-        body: options.body !== undefined ? options.body : body,
-      })
-      if (!response.ok) throw new Error(`API ${response.status}: ${JSON.stringify(response.data)}`)
-      return response.data
+      try {
+        const response = await window.electronAPI.sidecarRequest({
+          endpoint,
+          method,
+          headers,
+          body: options.body !== undefined ? options.body : body,
+          timeoutMs: options.timeoutMs,
+        })
+        if (!response.ok) throw new Error(`API ${response.status}: ${JSON.stringify(response.data)}`)
+        return response.data
+      } catch (ipcErr) {
+        if (!ipcErr.message?.includes('API is not ready')) throw ipcErr
+      }
     }
 
     let res = await fetch(`${base}${endpoint}`, {
@@ -103,9 +108,18 @@ export function useAPI() {
   const get = async (endpoint, options = {}) => {
     if (!base) throw new Error('API not ready')
     if (useSidecarIpc) {
-      const response = await window.electronAPI.sidecarRequest({ endpoint, method: 'GET', headers: options.headers })
-      if (!response.ok) throw new Error(`API ${response.status}`)
-      return response.data
+      try {
+        const response = await window.electronAPI.sidecarRequest({
+          endpoint,
+          method: 'GET',
+          headers: options.headers,
+          timeoutMs: options.timeoutMs,
+        })
+        if (!response.ok) throw new Error(`API ${response.status}: ${JSON.stringify(response.data)}`)
+        return response.data
+      } catch (ipcErr) {
+        if (!ipcErr.message?.includes('API is not ready')) throw ipcErr
+      }
     }
     const res = await fetch(`${base}${endpoint}`, {
       ...fetchOpts,

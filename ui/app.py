@@ -77,7 +77,7 @@ class MarketTickerWidget(Static):
     """
 
     def compose(self) -> ComposeResult:
-        yield Label("Market")
+        yield Label("Market Pulse")
         yield Static(id="ticker-body", markup=True)
 
     def on_mount(self) -> None:
@@ -86,35 +86,66 @@ class MarketTickerWidget(Static):
 
     def refresh_data(self) -> None:
         try:
-            from market.indices import get_market_snapshot
+            from market.ticker_stream import ticker_stream
 
-            snap = get_market_snapshot()
-            now = datetime.now(IST).strftime("%H:%M")
+            snap = ticker_stream.get_snapshot()
+            now = datetime.now(IST).strftime("%H:%M:%S")
 
-            def _row(name, val, chg):
+            is_live = snap.get("status") == "LIVE_STREAMING"
+            status_badge = "[bold green]● LIVE WS[/bold green]" if is_live else "[dim]● REST[/dim]"
+
+            def _fmt_row(name: str, val: float, chg: float, is_int: bool = False, prefix: str = ""):
                 c = "green" if chg >= 0 else "red"
-                s = "+" if chg >= 0 else ""
-                return f"{name:<12} [bold]{val:>8,.0f}[/bold]  [{c}]{s}{chg:.2f}%[/{c}]"
+                sign = "+" if chg >= 0 else ""
+                val_str = f"{prefix}{val:>8,.0f}" if is_int else f"{prefix}{val:>8,.2f}"
+                return f"{name:<11} [bold]{val_str}[/bold] [{c}]{sign}{chg:.2f}%[/{c}]"
 
-            lines = [f"[dim]{now} IST[/dim]"]
-            if snap.nifty:
-                lines.append(_row("NIFTY 50", snap.nifty, snap.nifty_chg))
-            if snap.banknifty:
-                lines.append(_row("BANKNIFTY", snap.banknifty, snap.banknifty_chg))
-            if snap.sensex:
-                lines.append(_row("SENSEX", snap.sensex, snap.sensex_chg))
-            if snap.india_vix:
-                vc = "red" if snap.india_vix > 20 else "yellow" if snap.india_vix > 15 else "green"
-                lines.append(f"India VIX    [{vc}]{snap.india_vix:>8.2f}[/{vc}]")
+            lines = [f"[dim]{now} IST[/dim]  {status_badge}"]
 
-            posture_color = {"BULLISH": "green", "BEARISH": "red", "VOLATILE": "yellow"}.get(
-                snap.posture, "white"
-            )
-            lines.append(f"\n[{posture_color}]{snap.posture}[/{posture_color}]")
+            # 1. Indian Benchmarks
+            lines.append("[bold cyan]── Domestic ──────[/bold cyan]")
+            ind_map = {item["key"]: item for item in snap.get("indian", [])}
+            if "nifty_50" in ind_map and ind_map["nifty_50"]["price"] > 0:
+                it = ind_map["nifty_50"]
+                lines.append(_fmt_row("NIFTY 50", it["price"], it["change_pct"], is_int=True))
+            if "bank_nifty" in ind_map and ind_map["bank_nifty"]["price"] > 0:
+                it = ind_map["bank_nifty"]
+                lines.append(_fmt_row("BANK NIFTY", it["price"], it["change_pct"], is_int=True))
+            if "sensex" in ind_map and ind_map["sensex"]["price"] > 0:
+                it = ind_map["sensex"]
+                lines.append(_fmt_row("SENSEX", it["price"], it["change_pct"], is_int=True))
+            if "india_vix" in ind_map and ind_map["india_vix"]["price"] > 0:
+                it = ind_map["india_vix"]
+                vc = "red" if it["price"] > 20 else "yellow" if it["price"] > 15 else "green"
+                lines.append(f"India VIX   [{vc}]{it['price']:>8.2f}[/{vc}]")
+
+            # 2. Global & Macro Indices
+            lines.append("[bold magenta]── Global & Macro ─[/bold magenta]")
+            glob_map = {
+                item["key"]: item for item in snap.get("global", []) + snap.get("commodities", [])
+            }
+            if "gift_nifty" in glob_map and glob_map["gift_nifty"]["price"] > 0:
+                it = glob_map["gift_nifty"]
+                lines.append(_fmt_row("GIFT NIFTY", it["price"], it["change_pct"], is_int=True))
+            if "nasdaq" in glob_map and glob_map["nasdaq"]["price"] > 0:
+                it = glob_map["nasdaq"]
+                lines.append(_fmt_row("NASDAQ 100", it["price"], it["change_pct"], is_int=True))
+            if "sp500" in glob_map and glob_map["sp500"]["price"] > 0:
+                it = glob_map["sp500"]
+                lines.append(_fmt_row("S&P 500", it["price"], it["change_pct"], is_int=True))
+            if "dxy" in glob_map and glob_map["dxy"]["price"] > 0:
+                it = glob_map["dxy"]
+                lines.append(_fmt_row("DXY (USD)", it["price"], it["change_pct"]))
+            if "brent" in glob_map and glob_map["brent"]["price"] > 0:
+                it = glob_map["brent"]
+                lines.append(_fmt_row("BRENT OIL", it["price"], it["change_pct"], prefix="$"))
+            if "gold" in glob_map and glob_map["gold"]["price"] > 0:
+                it = glob_map["gold"]
+                lines.append(_fmt_row("GOLD", it["price"], it["change_pct"], prefix="$"))
 
             self.query_one("#ticker-body", Static).update("\n".join(lines))
         except Exception:
-            self.query_one("#ticker-body", Static).update("[dim]Fetching...[/dim]")
+            self.query_one("#ticker-body", Static).update("[dim]Fetching market pulse...[/dim]")
 
 
 class ChatPanel(RichLog):

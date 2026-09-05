@@ -34,9 +34,11 @@ class TestBrokerNames:
         assert _BROKER_NAMES["zerodha"] == "zerodha"
         assert _BROKER_NAMES["fyers"] == "fyers"
         assert _BROKER_NAMES["angel"] == "angelone"
+        assert _BROKER_NAMES["7"] == "shoonya"
+        assert _BROKER_NAMES["finvasia"] == "shoonya"
 
     def test_all_labels_exist(self):
-        for key in ("mock", "zerodha", "groww", "angelone", "upstox", "fyers"):
+        for key in ("mock", "zerodha", "groww", "angelone", "upstox", "fyers", "shoonya"):
             assert key in _BROKER_LABELS
 
     def test_menu_has_supported_brokers(self):

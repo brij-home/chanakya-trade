@@ -232,6 +232,23 @@ _chat_id: Optional[int] = None
 # Background bot thread — kept here to prevent starting duplicates
 _bot_thread: Optional[threading.Thread] = None
 
+# Bounded push notification executor to prevent thread explosion on alert storms
+_push_executor: Optional[Any] = None
+_push_lock = threading.Lock()
+
+
+def _get_push_executor() -> Any:
+    global _push_executor
+    with _push_lock:
+        if _push_executor is None:
+            import concurrent.futures
+
+            _push_executor = concurrent.futures.ThreadPoolExecutor(
+                max_workers=3, thread_name_prefix="tg-push"
+            )
+        return _push_executor
+
+
 # Thread-local flag: set to True on any thread that should produce no output.
 # Used to silence executor threads spawned by run_in_executor during analysis,
 # which have a different name from "telegram-bot" and would otherwise bypass
@@ -998,7 +1015,7 @@ def send_push(message: str, parse_mode: str = "HTML") -> None:
         except Exception:
             pass
 
-    threading.Thread(target=_send, daemon=True).start()
+    _get_push_executor().submit(_send)
 
 
 def push_alert(alert_desc: str) -> None:

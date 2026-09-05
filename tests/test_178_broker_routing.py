@@ -2,9 +2,8 @@
 Tests for GitHub issue #178: Intelligent broker routing.
 
 Covers:
-  - auto_assign_roles(): both fyers+zerodha → auto-assigns correctly
-  - auto_assign_roles(): only zerodha → no assignment, returns False
-  - auto_assign_roles(): after assignment, get_data_broker() returns fyers mock
+  - auto_assign_roles(): never silently reroutes a connected account
+  - explicit role selection controls data/execution routing
   - POST /api/broker/role: valid body → 200 OK
   - POST /api/broker/role: invalid role → 400
   - POST /api/broker/role: unknown broker → 404
@@ -71,8 +70,8 @@ def client():
 
 
 class TestAutoAssignRoles:
-    def test_both_fyers_and_zerodha_auto_assigns(self):
-        """When both fyers and zerodha are connected, auto_assign_roles sets them correctly."""
+    def test_both_fyers_and_zerodha_never_auto_assigns(self):
+        """A second account must not silently become a data or execution route."""
         import brokers.session as sess
         from brokers.session import auto_assign_roles
 
@@ -84,9 +83,9 @@ class TestAutoAssignRoles:
 
         result = auto_assign_roles()
 
-        assert result is True
-        assert sess._data_key == "fyers"
-        assert sess._exec_key == "zerodha"
+        assert result is False
+        assert sess._data_key == ""
+        assert sess._exec_key == ""
 
     def test_only_zerodha_returns_false(self):
         """When only zerodha is connected (no fyers), auto_assign_roles returns False."""
@@ -125,10 +124,10 @@ class TestAutoAssignRoles:
 
         assert result is False
 
-    def test_after_assignment_get_data_broker_returns_fyers(self):
-        """After auto_assign_roles(), get_data_broker() returns the fyers instance."""
+    def test_explicit_assignment_get_data_broker_returns_fyers(self):
+        """Only an explicit role assignment changes the market-data route."""
         import brokers.session as sess
-        from brokers.session import auto_assign_roles, get_data_broker
+        from brokers.session import get_data_broker, set_broker_role
 
         fyers_mock = _make_mock()
         zerodha_mock = _make_mock()
@@ -136,15 +135,15 @@ class TestAutoAssignRoles:
         sess._brokers["zerodha"] = zerodha_mock
         sess._primary_key = "zerodha"
 
-        auto_assign_roles()
+        set_broker_role("fyers", "data")
 
         broker = get_data_broker()
         assert broker is fyers_mock
 
-    def test_after_assignment_get_execution_broker_returns_zerodha(self):
-        """After auto_assign_roles(), get_execution_broker() returns the zerodha instance."""
+    def test_explicit_assignment_get_execution_broker_returns_zerodha(self):
+        """Only an explicit role assignment changes the execution route."""
         import brokers.session as sess
-        from brokers.session import auto_assign_roles, get_execution_broker
+        from brokers.session import get_execution_broker, set_broker_role
 
         fyers_mock = _make_mock()
         zerodha_mock = _make_mock()
@@ -152,7 +151,7 @@ class TestAutoAssignRoles:
         sess._brokers["zerodha"] = zerodha_mock
         sess._primary_key = "zerodha"
 
-        auto_assign_roles()
+        set_broker_role("zerodha", "execution")
 
         broker = get_execution_broker()
         assert broker is zerodha_mock

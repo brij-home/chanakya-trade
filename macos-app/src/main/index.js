@@ -22,13 +22,28 @@ async function waitForReady(port, ms = 15000) {
 }
 
 async function startSidecar(venvBin, sourceRoot) {
-  const uvicorn = join(venvBin, 'uvicorn')
-  if (!existsSync(uvicorn)) throw new Error(`uvicorn not found at ${uvicorn}`)
-
-  uvicornProcess = spawn(uvicorn, ['web.api:app', '--host', '127.0.0.1', '--port', String(PORT), '--log-level', 'warning'], {
-    cwd: sourceRoot,
-    env: { ...process.env, PYTHONPATH: sourceRoot, PATH: `${venvBin}:${process.env.PATH}` },
-  })
+  const isWin = process.platform === 'win32'
+  const uvicornExec = isWin ? 'uvicorn.exe' : 'uvicorn'
+  let uvicorn = join(venvBin, uvicornExec)
+  if (!existsSync(uvicorn)) {
+    uvicorn = join(venvBin, 'uvicorn')
+  }
+  
+  if (!existsSync(uvicorn)) {
+    // Fallback: run via python -m uvicorn
+    const pyExec = isWin ? 'python.exe' : 'python'
+    const py = join(venvBin, pyExec)
+    if (!existsSync(py)) throw new Error(`uvicorn and python not found at ${venvBin}`)
+    uvicornProcess = spawn(py, ['-m', 'uvicorn', 'web.api:app', '--host', '127.0.0.1', '--port', String(PORT), '--log-level', 'warning'], {
+      cwd: sourceRoot,
+      env: { ...process.env, PYTHONPATH: sourceRoot, PATH: `${venvBin}${isWin ? ';' : ':'}${process.env.PATH}` },
+    })
+  } else {
+    uvicornProcess = spawn(uvicorn, ['web.api:app', '--host', '127.0.0.1', '--port', String(PORT), '--log-level', 'warning'], {
+      cwd: sourceRoot,
+      env: { ...process.env, PYTHONPATH: sourceRoot, PATH: `${venvBin}${isWin ? ';' : ':'}${process.env.PATH}` },
+    })
+  }
 
   uvicornProcess.stderr.on('data', d => process.stdout.write(`[uvicorn] ${d}`))
   uvicornProcess.on('error', e => { throw new Error(e.message) })
@@ -46,6 +61,17 @@ function stopSidecar() {
 // ---------------------------------------------------------------------------
 async function bootstrapAndStart() {
   const sendProgress = (data) => mainWindow?.webContents.send('setup-progress', data)
+
+  // Fast-path: If sidecar is ALREADY running on PORT (e.g. launched manually or background service), use it!
+  try {
+    const isAlreadyAlive = await waitForReady(PORT, 1200)
+    if (isAlreadyAlive) {
+      console.log(`[sidecar] Server already active on port ${PORT}`)
+      _readyPort = PORT
+      mainWindow?.webContents.send('sidecar-ready', { port: PORT })
+      return
+    }
+  } catch (_) {}
 
   try {
     const { venvBin, sourceRoot } = await ensurePythonEnv((progress) => {
@@ -157,7 +183,15 @@ function createWindow() {
 // ---------------------------------------------------------------------------
 let _readyPort = null
 
-ipcMain.handle('get-port', () => _readyPort)
+ipcMain.handle('get-port', async () => {
+  if (!_readyPort) {
+    try {
+      const check = await fetch(`http://127.0.0.1:${PORT}/health`)
+      if (check.ok) _readyPort = PORT
+    } catch (_) {}
+  }
+  return _readyPort || PORT
+})
 ipcMain.handle('open-external', (_, url) => shell.openExternal(validateExternalUrl(url)))
 ipcMain.handle('sidecar-request', async (_, request = {}) => {
   const method = String(request.method || 'GET').toUpperCase()
@@ -168,6 +202,12 @@ ipcMain.handle('sidecar-request', async (_, request = {}) => {
   if (!endpoint.startsWith('/') || endpoint.startsWith('//') || endpoint.includes('://')) {
     throw new Error('Invalid API endpoint')
   }
+  if (!_readyPort) {
+    try {
+      const check = await fetch(`http://127.0.0.1:${PORT}/health`)
+      if (check.ok) _readyPort = PORT
+    } catch (_) {}
+  }
   if (!_readyPort) throw new Error('API is not ready')
   const allowedHeaders = {}
   for (const [key, value] of Object.entries(request.headers || {})) {
@@ -176,15 +216,21 @@ ipcMain.handle('sidecar-request', async (_, request = {}) => {
   const body = request.body === undefined || method === 'GET' ? undefined : JSON.stringify(request.body)
   if (body && Buffer.byteLength(body, 'utf8') > 1_000_000) throw new Error('Request body exceeds 1 MB limit')
 
-  const response = await fetch(`http://127.0.0.1:${_readyPort}${endpoint}`, {
-    method,
-    headers: { 'Content-Type': 'application/json', ...allowedHeaders },
-    body,
-  })
-  const text = await response.text()
-  let data = null
-  try { data = text ? JSON.parse(text) : null } catch { data = text }
-  return { ok: response.ok, status: response.status, data }
+  const timeoutMs = Math.max(1000, Number(request.timeoutMs || request.timeout || 90000))
+  try {
+    const response = await fetch(`http://127.0.0.1:${_readyPort}${endpoint}`, {
+      method,
+      headers: { 'Content-Type': 'application/json', ...allowedHeaders },
+      body,
+      signal: AbortSignal.timeout(timeoutMs),
+    })
+    const text = await response.text()
+    let data = null
+    try { data = text ? JSON.parse(text) : null } catch { data = text }
+    return { ok: response.ok, status: response.status, data }
+  } catch (err) {
+    return { ok: false, status: 504, data: { error: err.message || 'Request failed or timed out' } }
+  }
 })
 
 ipcMain.on('update-tray', (_, { label }) => {

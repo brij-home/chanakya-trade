@@ -118,9 +118,22 @@ _INDEX_MAP = {
 }
 
 
+# Crypto benchmark mapping
+_CRYPTO_MAP = {
+    "BTC": "BTC-USD",
+    "BITCOIN": "BTC-USD",
+    "BTCUSD": "BTC-USD",
+    "BTC-USD": "BTC-USD",
+    "BTCINR": "BTC-INR",
+    "ETH": "ETH-USD",
+    "ETHEREUM": "ETH-USD",
+    "SOL": "SOL-USD",
+}
+
+
 def _to_yf_symbol(symbol: str, exchange: str = "NSE") -> str:
-    """Convert NSE/BSE/MCX symbol to Yahoo Finance ticker."""
-    # Strip exchange prefix if present (e.g. "MCX:GOLD" → "GOLD", "NSE:RELIANCE" → "RELIANCE")
+    """Convert NSE/BSE/MCX/Crypto symbol to Yahoo Finance ticker."""
+    # Strip exchange prefix if present (e.g. "MCX:GOLD" → "GOLD", "NSE:RELIANCE" → "RELIANCE", "CRYPTO:BTC" → "BTC")
     if ":" in symbol:
         exchange, symbol = symbol.split(":", 1)
 
@@ -139,6 +152,10 @@ def _to_yf_symbol(symbol: str, exchange: str = "NSE") -> str:
             if upper.startswith(c):
                 return _COMMODITY_MAP[c]
 
+    # 0. Check Crypto Map (BTC, ETH, SOL)
+    if upper in _CRYPTO_MAP:
+        return _CRYPTO_MAP[upper]
+
     # 1. Check Commodity Map (Gold, Silver, Crude Oil, Natural Gas, Copper, etc.)
     if upper in _COMMODITY_MAP:
         return _COMMODITY_MAP[upper]
@@ -153,6 +170,13 @@ def _to_yf_symbol(symbol: str, exchange: str = "NSE") -> str:
 
     # 4. Check exchange overrides
     exch_upper = (exchange or "NSE").upper().strip()
+    if exch_upper in ("CRYPTO", "BINANCE", "COINBASE"):
+        if upper in _CRYPTO_MAP:
+            return _CRYPTO_MAP[upper]
+        if not upper.endswith("-USD") and not upper.endswith("-INR"):
+            return f"{upper}-USD"
+        return upper
+
     if exch_upper == "MCX":
         for c in _COMMODITY_MAP:
             if upper.startswith(c):
@@ -204,7 +228,7 @@ import threading
 
 _quote_cache_lock = threading.Lock()
 _quote_cache: dict[str, tuple[float, Quote]] = {}  # key -> (timestamp, Quote)
-_QUOTE_TTL_SECONDS = 20.0
+_QUOTE_TTL_SECONDS = 5.0
 
 # USD-denominated yfinance futures tickers mapped to their MCX contract quotation factor
 # COMEX/NYMEX futures are quoted in US units (troy oz, lbs, barrels), whereas MCX quotes in Indian standard units:
@@ -370,7 +394,7 @@ def yf_get_quotes(instruments: list[str]) -> dict[str, Quote]:
         except Exception:
             return inst_str, None
 
-    max_workers = min(12, len(missing))
+    max_workers = min(32, len(missing))
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {executor.submit(_fetch_single, inst): inst for inst in missing}
         for fut in as_completed(futures):
@@ -483,16 +507,35 @@ def yf_get_ohlcv(
         fx = (_get_usdinr_rate() * _USD_COMMODITY_FACTORS[ticker]) if needs_inr else 1.0
         # ─────────────────────────────────────────────────────────────────
 
+        import math
+
         rows = []
         for idx, row in hist.iterrows():
+            c_val = row.get("Close")
+            o_val = row.get("Open")
+            h_val = row.get("High")
+            l_val = row.get("Low")
+            if (
+                c_val is None
+                or o_val is None
+                or h_val is None
+                or l_val is None
+                or math.isnan(float(c_val))
+                or math.isnan(float(o_val))
+                or math.isnan(float(h_val))
+                or math.isnan(float(l_val))
+            ):
+                continue
+            v_val = row.get("Volume", 0)
+            vol_int = int(v_val) if (v_val is not None and not math.isnan(float(v_val))) else 0
             rows.append(
                 {
                     "date": idx.to_pydatetime() if hasattr(idx, "to_pydatetime") else idx,
-                    "open": round(float(row["Open"]) * fx, 2),
-                    "high": round(float(row["High"]) * fx, 2),
-                    "low": round(float(row["Low"]) * fx, 2),
-                    "close": round(float(row["Close"]) * fx, 2),
-                    "volume": int(row["Volume"]),
+                    "open": round(float(o_val) * fx, 2),
+                    "high": round(float(h_val) * fx, 2),
+                    "low": round(float(l_val) * fx, 2),
+                    "close": round(float(c_val) * fx, 2),
+                    "volume": vol_int,
                 }
             )
         return rows

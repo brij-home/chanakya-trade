@@ -503,19 +503,26 @@ class FundamentalAnalyst(BaseAnalyst):
         Tier 2 (optional, requires PERPLEXITY_API_KEY): Perplexity Finance
           Agent API — licensed NSE/BSE data with citations.
         """
-        # ── Tier 1: yfinance (free, no API key needed) ────────────
+        # ── Tier 1: analysis.fundamental (cached via AnalysisCache SQLite, free) ──
         try:
-            import yfinance as yf
+            from analysis.fundamental import score_fundamentals
 
-            ns_symbol = symbol if symbol.endswith(".NS") else f"{symbol}.NS"
-            info = yf.Ticker(ns_symbol).info or {}
-
-            pe = info.get("trailingPE") or info.get("forwardPE")
-            roe = info.get("returnOnEquity")  # decimal e.g. 0.28 = 28%
-            pb = info.get("priceToBook")
-            d_e = info.get("debtToEquity")
-            rev_growth = info.get("revenueGrowth")  # decimal
-            profit_margin = info.get("profitMargins")
+            fs = score_fundamentals(symbol)
+            # FundamentalsScore.metrics is a dict with keys like pe, roe, debt_to_equity, etc.
+            fund_data = fs.metrics if fs and fs.metrics else {}
+            pe = fund_data.get("pe") or fund_data.get("pe_ratio")
+            roe = fund_data.get("roe")
+            if roe is not None and roe > 1.0:
+                # If roe is given as percentage e.g. 28.0, normalize to decimal 0.28
+                roe = roe / 100.0
+            pb = fund_data.get("pb") or fund_data.get("pb_ratio")
+            d_e = fund_data.get("debt_to_equity") or fund_data.get("debt_equity")
+            rev_growth = fund_data.get("revenue_growth_3y") or fund_data.get("revenue_growth")
+            if rev_growth is not None and rev_growth > 1.0:
+                rev_growth = rev_growth / 100.0
+            profit_margin = fund_data.get("profit_margin") or fund_data.get("net_margin")
+            if profit_margin is not None and profit_margin > 1.0:
+                profit_margin = profit_margin / 100.0
 
             if pe is not None or roe is not None:
                 points: list[str] = []
@@ -616,6 +623,7 @@ class OptionsAnalyst(BaseAnalyst):
 
     def analyze(self, symbol: str, exchange: str = "NSE") -> AnalystReport:
         try:
+            clean_sym = symbol.upper().replace(".NS", "").replace("NSE:", "").strip()
             points = []
             data: dict[str, Any] = {}
             has_data = False  # track if we got any real options data
@@ -624,46 +632,64 @@ class OptionsAnalyst(BaseAnalyst):
             pcr_result = self.registry.execute("get_pcr", {"underlying": symbol})
             if isinstance(pcr_result, dict) and "error" not in pcr_result and "pcr" in pcr_result:
                 pcr = pcr_result["pcr"]
-                data["pcr"] = pcr
-                has_data = True
-                if pcr is not None:
+                if pcr is not None and pcr > 0:
+                    data["pcr"] = pcr
+                    has_data = True
                     if pcr > 1.2:
                         points.append(f"PCR: {pcr:.2f} (bearish — heavy put writing)")
                     elif pcr < 0.8:
                         points.append(f"PCR: {pcr:.2f} (bullish — heavy call writing)")
                     else:
                         points.append(f"PCR: {pcr:.2f} (neutral)")
+                else:
+                    data["pcr"] = None
 
             # Max Pain
             mp_result = self.registry.execute("get_max_pain", {"underlying": symbol})
             if isinstance(mp_result, dict) and "error" not in mp_result and "max_pain" in mp_result:
-                data["max_pain"] = mp_result["max_pain"]
-                has_data = True
-                points.append(f"Max Pain: {mp_result['max_pain']}")
+                max_pain = mp_result["max_pain"]
+                if max_pain is not None and max_pain > 0:
+                    data["max_pain"] = max_pain
+                    has_data = True
+                    points.append(f"Max Pain: ₹{max_pain:,.0f}" if max_pain >= 100 else f"Max Pain: {max_pain}")
+                else:
+                    data["max_pain"] = None
 
-            # IV Rank (note: mock_iv_rank is synthetic — don't count as real data)
+            # IV Rank (note: mock_iv_rank is synthetic — only relevant if options exist)
             iv_result = self.registry.execute("get_iv_rank", {"symbol": symbol})
             if isinstance(iv_result, dict) and "error" not in iv_result and "iv_rank" in iv_result:
                 iv_rank = iv_result["iv_rank"]
                 data["iv_rank"] = iv_rank
-                # Don't set has_data — IV rank is always mock, not from real options market
-                if iv_rank is not None:
+                # Only include IV rank in key_points if real options contracts exist
+                if has_data and iv_rank is not None:
                     if iv_rank > 50:
                         points.append(f"IV Rank: {iv_rank} (elevated — good for selling premium)")
                     else:
                         points.append(f"IV Rank: {iv_rank} (low — good for buying options)")
 
-            # If no options data was available, report clearly
+            # If no options data was available, report clearly with F&O status awareness
             if not has_data:
+                from engine.position_sizer import is_fno_symbol, get_lot_size
+
+                is_fno = is_fno_symbol(clean_sym)
+                if is_fno:
+                    lot_size = get_lot_size(clean_sym)
+                    msg = (
+                        f"F&O Stock: {clean_sym} is an active NSE derivative (Lot: {lot_size}). "
+                        f"Live options feed unavailable (market closed or broker disconnected)."
+                    )
+                else:
+                    msg = (
+                        f"Cash Equity Stock: {clean_sym} is cash equity only (not in NSE F&O segment). "
+                        f"Options PCR & Max Pain N/A."
+                    )
                 return AnalystReport(
                     analyst=self.name,
                     verdict="UNAVAILABLE",
                     confidence=0,
                     score=0,
-                    key_points=[
-                        "Options data unavailable for this symbol (no broker or no F&O segment)"
-                    ],
-                    data={"options_available": False},
+                    key_points=[msg],
+                    data={"options_available": False, "is_fno": is_fno, "pcr": None, "max_pain": None},
                 )
 
             # Derive verdict from PCR
@@ -2688,296 +2714,17 @@ class MultiAgentAnalyzer:
 
 
 # ── Debate & Synthesis Prompt Templates ──────────────────────
-
-BULL_RESEARCHER_PROMPT = """You are a BULLISH stock researcher at an Indian trading firm.
-Your job: build the strongest possible investment case for {symbol} ({exchange}).
-
-You have received the following analyst reports from your team:
-
-{analyst_data}
-
-Based on this data, construct a compelling BULL CASE for investing in {symbol}:
-
-1. Highlight every positive signal from the analyst reports
-2. Identify growth catalysts and upside potential
-3. Explain why any negative signals are temporary or manageable
-4. Suggest optimal entry timing based on technical levels
-5. Propose a specific strategy (delivery, options, etc.)
-
-Keep it concise (200-300 words). Cite specific numbers from the data.
-This is for an Indian market context (NSE/BSE). Use INR for all prices."""
-
-BEAR_RESEARCHER_OPENING_PROMPT = """You are a BEARISH stock researcher at an Indian trading firm.
-Your job: identify all risks and build a compelling counter-case against investing in {symbol} ({exchange}).
-
-You have received the following analyst reports from your team:
-
-{analyst_data}
-
-Build a compelling BEAR CASE against {symbol}:
-
-1. Highlight all risk factors: valuation, technical weakness, macro headwinds, overbought RSI, overhead supply
-2. Identify what could go wrong in the short and medium term
-3. Point out any red flags in fundamentals, forensic flags, or options OI buildup
-4. If the setup is high risk, argue for standing down, hedging, or strict invalidation stops
-
-Keep it concise (200-300 words). Cite specific numbers from the data.
-Be skeptical but fair — this is about protecting capital, not being contrarian for its own sake."""
-
-BEAR_RESEARCHER_PROMPT = """You are a BEARISH stock researcher at an Indian trading firm.
-Your job: identify all risks and build a counter-argument against investing in {symbol} ({exchange}).
-
-You have received the following analyst reports from your team:
-
-{analyst_data}
-
-The BULL researcher has made this case:
-{bull_case}
-
-Build a compelling BEAR CASE against {symbol}:
-
-1. Challenge every bullish claim with counter-evidence from the data
-2. Highlight all risk factors: valuation, technical weakness, macro headwinds
-3. Identify what could go wrong in the short and medium term
-4. Point out any red flags in fundamentals or options data
-5. If the trade idea has merit, argue for a more conservative approach
-
-Keep it concise (200-300 words). Cite specific numbers from the data.
-Be skeptical but fair — this is about protecting capital, not being contrarian for its own sake."""
-
-BULL_REBUTTAL_PROMPT = """You are the BULLISH researcher. The BEAR researcher has countered your case for {symbol} ({exchange}).
-
-Your original bull case:
-{bull_case}
-
-Bear's counter-argument:
-{bear_case}
-
-Respond to the bear's strongest points. For each bear argument:
-1. Acknowledge valid concerns (don't dismiss legitimate risks)
-2. Provide counter-evidence or explain why the risk is overstated
-3. Reinforce the strongest parts of your bull case that weren't adequately challenged
-4. Address the timing question: even if bear is right long-term, is the short-term setup favorable?
-
-Keep it concise (150-200 words). This is Round 2 — be surgical, not repetitive."""
-
-BEAR_REBUTTAL_PROMPT = """You are the BEARISH researcher. The BULL researcher has presented their investment case for {symbol} ({exchange}).
-
-Your original bear case:
-{bear_case}
-
-Bull's case / rebuttal:
-{bull_case}
-
-Respond to the bull's strongest points:
-1. Point out any circular reasoning, wishful thinking, or overlooked risks in the bull case
-2. Highlight unmitigated resistance levels, high valuation multiples, or supply zones
-3. If the bull made valid points, concede them honestly
-4. State your final position: should this trade be taken, avoided, or taken with strict defensive sizing?
-
-Keep it concise (150-200 words). This is Round 2 — be surgical and protect capital."""
-
-FACILITATOR_PROMPT = """You are the DEBATE FACILITATOR reviewing the {symbol} ({exchange}) investment debate.
-
-## Round 1 — Opening Arguments
-Bull: {bull_r1}
-Bear: {bear_r1}
-
-## Round 2 — Rebuttals
-Bull Rebuttal: {bull_r2}
-Bear Rebuttal: {bear_r2}
-
-Summarize the debate outcome. Provide:
-
-AGREEMENTS:
-- [points both sides agree on]
-
-DISAGREEMENTS:
-- [unresolved points of contention]
-
-KEY INSIGHT: [the single most important takeaway from this debate]
-
-WINNER: [BULL / BEAR] — which researcher presented the stronger, more evidence-backed case?
-
-VERDICT MODIFIER: [Should the fund manager lean more bullish or bearish based on debate quality? Any conditions?]
-
-Keep it to 100-150 words. Be objective."""
-
-SYNTHESIS_PROMPT = """You are the FUND MANAGER at an Indian trading firm.
-You must make the final call on {symbol} ({exchange}) after reviewing all evidence.
-
-## Analyst Reports
-{analyst_data}
-
-## Research Debate (2 Rounds)
-{debate_text}
-
-## Risk Team Debate (Aggressive / Conservative / Neutral)
-{risk_debate_text}
-
-## Risk Parameters
-{risk_context}
-
-## Risk Gate Constraints (HARD — pre-computed before LLM)
-{risk_gate_context}
-
-HARD CONSTRAINTS from risk gate — your recommendation MUST respect these limits.
-Do not recommend a position larger than the max_qty shown above.
-Do not recommend the blocked direction if direction is restricted.
-
-## Trade Memory (Past Analyses)
-{memory_context}
-
-## Active Market Patterns (India-Specific)
-{pattern_context}
-
-## Your Task
-Weigh the bull and bear arguments against the analyst data. Consider:
-- Which side has stronger evidence?
-- What does the risk profile suggest?
-- Is the timing right (technicals, events, VIX)?
-- Where do the three risk views (aggressive/conservative/neutral) converge on sizing?
-
-**Decisiveness rule**: Do NOT default to HOLD simply because both sides raised valid points.
-Every debate has a stronger side — identify it and commit to that stance.
-HOLD is only correct when the evidence is genuinely split AND the risk/reward is unfavourable.
-
-**Mathematical Rigor (Zero Hallucinations)**:
-- All trade levels must be derived strictly from the real-time LTP (current market price) and technical levels in the Analyst Reports.
-- For LONG (`BUY` / `STRONG_BUY`): Stop-Loss must be BELOW Entry (typically 1.0–1.5x ATR or swing support). Target 1 MUST be strictly Entry + 2.0*(Entry - Stop-Loss) (2.0R). Target 2 MUST be strictly Entry + 3.5*(Entry - Stop-Loss) (3.5R).
-- For SHORT (`SELL` / `STRONG_SELL`): Stop-Loss must be ABOVE Entry (swing resistance). Target 1 MUST be strictly Entry - 2.0*(Stop-Loss - Entry) (2.0R). Target 2 MUST be strictly Entry - 3.5*(Stop-Loss - Entry) (3.5R).
-- For `HOLD`: Do not recommend buy orders. State rangebound support/resistance boundaries and wait conditions.
-
-Provide your FINAL VERDICT in this exact format:
-
-VERDICT: [STRONG_BUY / BUY / HOLD / SELL / STRONG_SELL]
-CONFIDENCE: [0-100]%
-WINNER: [BULL / BEAR] — which researcher had the stronger argument
-
-TRADE RECOMMENDATION:
-Strategy  : [specific strategy name]
-Entry     : [price or "at market"]
-Stop-Loss : [price] ([% from entry]%)
-Target 1  : [price] (+2.0R | [% from entry]%)
-Target 2  : [price] (+3.5R | [% from entry]%)
-R:R Ratio : 1:2.0 (Target 1) / 1:3.5 (Target 2)
-Position  : [lots/shares and sizing rationale]
-
-RATIONALE (3 bullets):
-- [why this trade]
-- [key supporting evidence]
-- [timing justification]
-
-RISKS (2-3 bullets):
-- [primary risk]
-- [secondary risk]
-
-Keep the output concise and terminal-friendly. Use bullets. All prices in INR.
-
-Alternatively, if you prefer structured output, you MAY return a single JSON object instead of the text format above. Use these exact keys:
-{{"verdict": "BUY", "confidence": 72, "winner": "BULL", "strategy": "Buy on dip", "entry": "₹2,850", "stop_loss": "₹2,700 (5.3%)", "target": "₹3,150 (10.5%)", "risk_reward": "1:2.0 / 1:3.5", "position": "12 shares", "rationale": ["reason 1", "reason 2", "reason 3"], "risks": ["risk 1", "risk 2"]}}
-The text format above is always acceptable and preferred for readability. JSON is optional."""
-
-AGGRESSIVE_DEBATER_PROMPT = """You are the AGGRESSIVE RISK MANAGER at an Indian trading firm.
-The investment team has decided to trade {symbol} ({exchange}).
-
-## Scorecard
-{scorecard}
-
-## Investment Debate Outcome
-{debate_summary}
-
-## Risk Parameters
-{risk_params}
-
-Your role: argue for the most aggressive but still rational position sizing.
-
-Make the case for:
-1. **Position size**: Why should we deploy maximum permitted capital (up to 20% of portfolio)?
-2. **Stop-loss**: Argue for a tighter stop — we have conviction, don't give back too much if wrong
-3. **Strategy**: Prefer higher-leverage instruments (options, futures) over delivery if the setup warrants it
-4. **Hedging**: Minimal or no hedge — hedges cost premium and dilute returns when we're right
-
-Be specific: suggest a concrete position size (% of capital or lot count), stop level, and strategy.
-Cite the strongest signals from the scorecard and debate to justify maximum aggression.
-Keep it to 150-200 words. All prices in INR."""
-
-CONSERVATIVE_DEBATER_PROMPT = """You are the CONSERVATIVE RISK MANAGER at an Indian trading firm.
-The investment team has decided to trade {symbol} ({exchange}).
-
-## Scorecard
-{scorecard}
-
-## Investment Debate Outcome
-{debate_summary}
-
-## Risk Parameters
-{risk_params}
-
-Your role: argue for a cautious, capital-preserving approach to this trade.
-
-Make the case for:
-1. **Position size**: Why should we start small (3-5% of capital) and add only on confirmation?
-2. **Stop-loss**: Argue for a wider stop — avoid being shaken out by normal volatility
-3. **Strategy**: Prefer defined-risk structures (spreads, delivery) over naked options or futures
-4. **Hedging**: Recommend a protective hedge — the cost is worth the downside protection given market conditions
-
-Be specific: suggest a concrete position size, stop level, hedge instrument, and entry approach (phased or single).
-Cite the weakest signals or biggest risks from the scorecard and debate to justify caution.
-Keep it to 150-200 words. All prices in INR."""
-
-NEUTRAL_DEBATER_PROMPT = """You are the NEUTRAL RISK ARBITRATOR at an Indian trading firm.
-You have heard two positions on how to size the {symbol} ({exchange}) trade.
-
-## Scorecard
-{scorecard}
-
-## Investment Debate Outcome
-{debate_summary}
-
-## Risk Parameters
-{risk_params}
-
-## Aggressive View
-{aggressive_view}
-
-## Conservative View
-{conservative_view}
-
-Your role: synthesise a calibrated, evidence-based position between the two extremes.
-
-Provide:
-1. **Recommended position size**: A specific % of capital or lot count — not a range, a number
-2. **Stop-loss level**: One specific price or % from entry
-3. **Strategy**: The single best instrument/structure for this setup
-4. **Hedge (if any)**: Only if VIX is elevated or conviction is below 65%
-5. **Entry approach**: All-in at market, or phased entry with levels
-
-Acknowledge the strongest point from each side, then commit to one calibrated recommendation.
-Keep it to 150-200 words. All prices in INR."""
-
-
-NEWS_SENTIMENT_PROMPT = """You are a NEWS & SENTIMENT ANALYST at an Indian trading firm.
-Analyze the following news headlines and macro data for {symbol} ({exchange}).
-
-## Recent Headlines
-{headlines}
-
-## Macro Context
-{macro_data}
-
-Provide a structured sentiment assessment. Consider:
-- Is the news flow positive, negative, or mixed for this stock?
-- Are there sector-wide or macro tailwinds/headwinds?
-- Any upcoming catalysts or risks (earnings, policy, expiry)?
-- How might FII/DII flows impact sentiment?
-- Distinguish between noise and signal — not every headline matters.
-
-Respond in EXACTLY this format (no extra text before or after):
-
-SENTIMENT: [BULLISH / BEARISH / NEUTRAL]
-SCORE: [number from -100 to +100]
-CONFIDENCE: [0-100]%
-- [key insight 1 — most important finding]
-- [key insight 2 — second finding]
-- [key insight 3 — third finding, if relevant]"""
+# Modular templates imported from agent.prompts for maintainability
+
+from agent.prompts import (
+    AGGRESSIVE_DEBATER_PROMPT,
+    BEAR_REBUTTAL_PROMPT,
+    BEAR_RESEARCHER_OPENING_PROMPT,
+    BULL_REBUTTAL_PROMPT,
+    BULL_RESEARCHER_PROMPT,
+    CONSERVATIVE_DEBATER_PROMPT,
+    FACILITATOR_PROMPT,
+    NEUTRAL_DEBATER_PROMPT,
+    NEWS_SENTIMENT_PROMPT,
+    SYNTHESIS_PROMPT,
+)

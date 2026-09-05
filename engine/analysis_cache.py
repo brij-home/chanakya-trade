@@ -18,11 +18,15 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Generator
 
-DEFAULT_DB_PATH = Path.home() / ".trading_platform" / "analysis_cache.db"
+from engine.db_pool import SQLiteConnectionPool
+from config.paths import app_data_path
+
+DEFAULT_DB_PATH = app_data_path("analysis_cache.db")
 DEFAULT_TTL_MINUTES = 15
 DEFAULT_MAX_PRICE_DRIFT_PCT = 1.0
 DEFAULT_MAX_RECORDS = 500
@@ -34,19 +38,18 @@ class AnalysisCache:
     def __init__(self, db_path: Path | None = None, max_records: int = DEFAULT_MAX_RECORDS):
         self.db_path = db_path or DEFAULT_DB_PATH
         self.max_records = max_records
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._pool = SQLiteConnectionPool(str(self.db_path), max_conns=5)
         self._init_db()
 
-    def _get_conn(self) -> sqlite3.Connection:
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(str(self.db_path), timeout=30.0, check_same_thread=False)
-        conn.row_factory = sqlite3.Row
-        try:
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("PRAGMA synchronous=NORMAL")
-            conn.execute("PRAGMA busy_timeout=30000")
-        except Exception:
-            pass
-        return conn
+    @contextmanager
+    def _get_conn(self) -> Generator[sqlite3.Connection, None, None]:
+        with self._pool.acquire() as conn:
+            yield conn
+
+    def close(self) -> None:
+        """Close pooled connections."""
+        self._pool.close()
 
     def _init_db(self) -> None:
         with self._get_conn() as conn:
@@ -278,7 +281,7 @@ class AnalysisCache:
             deleted += cur.rowcount
             conn.execute("DELETE FROM macro_cache WHERE expires_at <= ?", (now,))
 
-            # 2. Enforce max records
+            # 2. Enforce max records on analysis_cache
             count_row = conn.execute("SELECT COUNT(*) as c FROM analysis_cache").fetchone()
             total = count_row["c"] if count_row else 0
             if total > self.max_records:
@@ -294,7 +297,32 @@ class AnalysisCache:
                     (overflow,),
                 )
                 deleted += cur2.rowcount
+
+            # 3. Enforce max records on macro_cache
+            macro_count_row = conn.execute("SELECT COUNT(*) as c FROM macro_cache").fetchone()
+            macro_total = macro_count_row["c"] if macro_count_row else 0
+            if macro_total > self.max_records:
+                macro_overflow = macro_total - self.max_records
+                cur3 = conn.execute(
+                    """
+                    DELETE FROM macro_cache
+                    WHERE rowid IN (
+                        SELECT rowid FROM macro_cache
+                        ORDER BY created_at ASC LIMIT ?
+                    )
+                    """,
+                    (macro_overflow,),
+                )
+                deleted += cur3.rowcount
+
             conn.commit()
+
+            # Passive WAL checkpoint if items deleted to recycle WAL frames
+            if deleted > 0:
+                try:
+                    conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
+                except Exception:
+                    pass
         return deleted
 
     def get_stats(self) -> dict[str, Any]:

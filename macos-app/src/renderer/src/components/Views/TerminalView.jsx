@@ -7,6 +7,7 @@ import PersonaTrackRecordCard from '../Cards/PersonaTrackRecordCard'
 import GlobalMacroCard from '../Cards/GlobalMacroCard'
 import SmartTypeahead from '../Common/SmartTypeahead'
 import UnavailableState from '../Common/UnavailableState'
+import LiveTickerRibbon from '../Common/LiveTickerRibbon'
 import { INDIAN_UNIVERSE, fuzzySearchUniverse, getSymbolExchange } from '../../data/universeData'
 
 export default function TerminalView({
@@ -78,33 +79,36 @@ export default function TerminalView({
   const watchlistPageSize = 7
 
   // Fetch terminal snapshot data
-  useEffect(() => {
-    let unmounted = false
-    const fetchSnapshot = async (isInitial = false) => {
-      try {
-        if (isInitial) setLoading(true)
-        const res = await call('/skills/dashboard_snapshot', {
-          symbol: selectedSymbol,
-          exchange: getSymbolExchange(selectedSymbol),
-          timeframe: timeframe,
-        })
-        const snapshot = res?.data ?? res
-        if (!unmounted && snapshot) {
-          setData(snapshot)
-        }
-      } catch (err) {
-        console.error('Failed to load dashboard snapshot:', err)
-      } finally {
-        if (!unmounted && isInitial) setLoading(false)
-      }
-    }
+  const isFetchingRef = useRef(false)
+  const fetchSnapshotRef = useRef(null)
 
+  const fetchSnapshot = async (isInitial = false) => {
+    if (isFetchingRef.current) return
+    isFetchingRef.current = true
+    try {
+      if (isInitial) setLoading(true)
+      const res = await call('/skills/dashboard_snapshot', {
+        symbol: selectedSymbol,
+        exchange: getSymbolExchange(selectedSymbol),
+        timeframe: timeframe,
+      })
+      const snapshot = res?.data ?? res
+      if (snapshot) {
+        setData(snapshot)
+      }
+    } catch (err) {
+      console.error('Failed to load dashboard snapshot:', err)
+    } finally {
+      isFetchingRef.current = false
+      if (isInitial) setLoading(false)
+    }
+  }
+  fetchSnapshotRef.current = fetchSnapshot
+
+  useEffect(() => {
     fetchSnapshot(true)
     const interval = setInterval(() => fetchSnapshot(false), 8000)
-    return () => {
-      unmounted = true
-      clearInterval(interval)
-    }
+    return () => clearInterval(interval)
   }, [selectedSymbol, timeframe])
 
   // Pro Trader Hotkeys ('/' search focus, '1'/'5'/'D' timeframes)
@@ -138,11 +142,25 @@ export default function TerminalView({
   }
 
   const setupRaw = data?.automated_setup
-  // Check if data matches current selectedSymbol
+  // Canonical symbol normalization for robust cross-exchange matching
+  const cleanSym = (s) => {
+    if (!s) return ''
+    let str = String(s)
+      .replace(/^(NSE:|BSE:|MCX:|CDS:|CRYPTO:|BINANCE:|FX:|FOREX:)/i, '')
+      .replace(/\s*\(.*?\)/g, '')
+      .trim()
+      .toUpperCase()
+    if (str.includes('BANK') && str.includes('NIFTY')) return 'BANKNIFTY'
+    if (str.includes('FIN') && str.includes('NIFTY')) return 'FINNIFTY'
+    if (str.includes('MID') && str.includes('NIFTY')) return 'MIDCPNIFTY'
+    if (str.includes('VIX')) return 'INDIA VIX'
+    if (str === 'NIFTY 50' || str === 'NIFTY50') return 'NIFTY'
+    return str.replace(/\s+/g, '')
+  }
   const isDataMatching = Boolean(
     data && (
-      data.symbol === selectedSymbol ||
-      (setupRaw?.symbol && setupRaw.symbol.toUpperCase().startsWith(selectedSymbol.toUpperCase()))
+      cleanSym(data.symbol) === cleanSym(selectedSymbol) ||
+      (setupRaw?.symbol && cleanSym(setupRaw.symbol).startsWith(cleanSym(selectedSymbol)))
     )
   )
 
@@ -163,6 +181,9 @@ export default function TerminalView({
   if (!hasValidatedSetup) {
     return (
       <div className="flex-1 overflow-y-auto p-3 font-ui" style={{ background: 'var(--color-surface)' }}>
+        <div className="mb-3">
+          <LiveTickerRibbon onSelectSymbol={(sym) => setSelectedSymbol(sym)} />
+        </div>
         <div className="max-w-2xl mx-auto mt-12 rounded-2xl" style={{ background: 'var(--color-panel)', border: '1px solid var(--color-border)' }}>
           <UnavailableState
             title={loading ? 'Preparing the terminal' : 'Validated market setup unavailable'}
@@ -171,6 +192,7 @@ export default function TerminalView({
               : `No complete, current setup is available for ${selectedSymbol}. The terminal will refresh automatically.`}
             hint="No indicative price, target, or order action is shown until data quality checks pass."
             size="lg"
+            onRetry={!loading ? () => fetchSnapshot(true) : undefined}
           />
         </div>
       </div>
@@ -183,13 +205,15 @@ export default function TerminalView({
   const resolvedExchange = getSymbolExchange(selectedSymbol)
   // Seed prices for pre-fetch calibration — keyed by symbol for O(1) lookup
   const COMMODITY_SEED_LTP = {
-    // MCX — Sep 2026 approximate price levels
+    // MCX — approximate price levels
     GOLD: 73500, GOLDM: 73500, GOLDPETAL: 7350, SILVER: 88500, SILVERM: 88500, SILVERMIC: 88500,
     CRUDEOIL: 8200, CRUDEOILM: 820, BRENT: 8600,
     NATURALGAS: 230, NATGASMINI: 230, NATGAS: 230,
     COPPER: 890, ZINC: 280, ALUMINIUM: 225, LEAD: 195, COTTON: 29000,
     // CDS Forex
     USDINR: 84.02, EURINR: 92.5, GBPINR: 107.5, JPYINR: 56.5,
+    // Crypto
+    BTC: 81000, BITCOIN: 81000, BTCUSD: 81000, 'BTC-USD': 81000, ETH: 2800, ETHEREUM: 2800, SOL: 140,
   }
   const fallbackLtp = COMMODITY_SEED_LTP[selectedSymbol] != null
     ? COMMODITY_SEED_LTP[selectedSymbol]
@@ -605,8 +629,11 @@ export default function TerminalView({
     { symbol: 'NIFTYBEES',  name: 'Nippon Nifty 50 ETF',cat: 'ETF',       ltp: 295.00,   change_pct: 0.45 },
     { symbol: 'GOLDBEES',   name: 'Nippon Gold BeES ETF',cat: 'ETF',      ltp: 73.50,    change_pct: 0.35 },
     { symbol: 'BANKBEES',   name: 'Nippon Bank BeES ETF',cat: 'ETF',      ltp: 580.00,   change_pct: 0.60 },
-    // Forex / Currency
+    // Forex / Currency & Crypto
     { symbol: 'USDINR',     name: 'USD / INR Rupee',    cat: 'FOREX',     ltp: 84.02,    change_pct: -0.05 },
+    { symbol: 'BTC',        name: 'Bitcoin Spot ($)',    cat: 'CRYPTO',    ltp: 79420.00, change_pct: -2.28 },
+    { symbol: 'SENSEX',     name: 'BSE SENSEX 30',      cat: 'INDEX',     ltp: 76515.00, change_pct: 0.48 },
+    { symbol: 'INDIA VIX',  name: 'India Volatility VIX',cat: 'VIX',      ltp: 10.68,    change_pct: -6.07 },
   ]
 
   // Combined Watchlist: server items merged with master universe
@@ -709,6 +736,10 @@ export default function TerminalView({
 
   const fiiVal = Number(flows?.fii_net ?? -1450)
   const diiVal = Number(flows?.dii_net ?? 1120)
+  const netTotal = Number(flows?.net_total ?? (fiiVal + diiVal))
+  const absorptionPct = Number(flows?.absorption_pct ?? (fiiVal < 0 && diiVal > 0 ? Math.round((diiVal / Math.abs(fiiVal)) * 100) : 0))
+  const fiiStreak = Number(flows?.fii_streak ?? -1)
+  const diiStreak = Number(flows?.dii_streak ?? 1)
 
   return (
     <div className="flex-1 overflow-y-auto p-2 sm:p-3 font-ui space-y-2.5" style={{ background: 'var(--color-surface)', color: 'var(--color-text)' }}>
@@ -885,6 +916,13 @@ export default function TerminalView({
           </button>
         </div>
       </div>
+
+      {/* Real-Time Multi-Asset Ticker Ribbon (Indices, Commodities, Crypto) */}
+      <LiveTickerRibbon
+        tickers={data?.live_tickers}
+        selectedSymbol={selectedSymbol}
+        onSelectSymbol={setSelectedSymbol}
+      />
 
       {/* Main 3-Column Terminal Layout */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
@@ -1839,47 +1877,126 @@ export default function TerminalView({
 
       {/* Bottom Row: 3-Card High Impact Analytics Grid */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
-        {/* Card 1: Institutional Flows & Macro Pulse (3 Cols) */}
-        <div className="lg:col-span-3 bg-panel border border-border/80 rounded-2xl p-4 shadow-sm space-y-2.5 flex flex-col justify-between">
-          <div>
+        {/* Card 1: Institutional Flows & Flow Intelligence (3 Cols) */}
+        <div className="lg:col-span-3 bg-panel border border-border/80 rounded-2xl p-3.5 shadow-sm space-y-2.5 flex flex-col justify-between group hover:border-amber/40 transition-all">
+          <div className="space-y-2.5">
+            {/* Header with Regime Tag */}
             <div className="flex items-center justify-between border-b border-border/50 pb-2">
               <span className="text-xs font-bold uppercase tracking-wider text-muted flex items-center gap-1.5">
                 <span>🌊</span> INSTITUTIONAL FLOWS
               </span>
-              <span className="text-[9px] px-1.5 py-0.2 rounded bg-surface border border-border text-muted font-mono">
-                {flows?.label || 'DLY CASH'}
+              <span
+                className={`text-[9px] font-bold px-2 py-0.5 rounded-full border font-mono ${
+                  flows?.regime === 'DII_ABSORPTION'
+                    ? 'bg-emerald-500/15 border-emerald-500/30 text-emerald-400'
+                    : flows?.regime === 'TWIN_BUYING'
+                    ? 'bg-emerald-500/15 border-emerald-500/30 text-emerald-400'
+                    : flows?.regime === 'TWIN_SELLING'
+                    ? 'bg-rose-500/15 border-rose-500/30 text-rose-400'
+                    : 'bg-amber/15 border-amber/30 text-amber'
+                }`}
+              >
+                {flows?.regime === 'DII_ABSORPTION'
+                  ? `🛡️ DII ABSORPTION`
+                  : flows?.regime === 'TWIN_BUYING'
+                  ? `🚀 TWIN INFLOW`
+                  : flows?.regime_label || 'DLY CASH'}
               </span>
             </div>
 
-            <div className="space-y-2 pt-2 text-xs font-mono">
-              <div className="flex items-center justify-between bg-surface/80 p-2 rounded-xl border border-border/50">
-                <span className="text-muted text-[11px]">FII Net Cash</span>
-                <span className={`font-bold ${fiiVal >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
-                  {fiiVal >= 0 ? '+' : ''}₹{Number(fiiVal).toLocaleString('en-IN')} Cr
+            {/* Net Total Hero Inflow/Outflow */}
+            <div className="bg-surface/80 p-2.5 rounded-xl border border-border/50">
+              <div className="flex items-center justify-between">
+                <span className="text-muted text-[11px]">Net Institutional Flow</span>
+                <span className={`font-bold font-mono text-sm ${netTotal >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                  {netTotal >= 0 ? '+' : ''}₹{Math.abs(Math.round(netTotal)).toLocaleString('en-IN')} Cr
                 </span>
               </div>
-
-              <div className="flex items-center justify-between bg-surface/80 p-2 rounded-xl border border-border/50">
-                <span className="text-muted text-[11px]">DII Net Cash</span>
-                <span className={`font-bold ${diiVal >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
-                  {diiVal >= 0 ? '+' : ''}₹{Number(diiVal).toLocaleString('en-IN')} Cr
-                </span>
-              </div>
-
-              <div className="flex items-center justify-between bg-surface/80 p-2 rounded-xl border border-border/50">
-                <span className="text-muted text-[11px]">Net Cash Flow</span>
-                <span className={`font-bold text-sm ${Number(flows?.net_total || 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
-                  {Number(flows?.net_total || 0) >= 0 ? '+' : ''}₹{Number(flows?.net_total || 0).toLocaleString('en-IN')} Cr
+              <div className="text-[10px] text-muted flex items-center justify-between mt-1 pt-1 border-t border-border/30">
+                <span>Combined FII + DII</span>
+                <span className={netTotal >= 0 ? 'text-emerald-400 font-medium' : 'text-rose-400 font-medium'}>
+                  {netTotal >= 0 ? '🟢 Net Cash Inflow' : '🔴 Net Cash Outflow'}
                 </span>
               </div>
             </div>
+
+            {/* FII & DII Breakdown with Streaks */}
+            <div className="grid grid-cols-2 gap-2 text-xs font-mono">
+              <div className="bg-surface/80 p-2 rounded-xl border border-border/50">
+                <div className="flex items-center justify-between text-[10px] text-muted">
+                  <span>FII Net</span>
+                  <span
+                    className={`text-[9px] px-1 rounded ${
+                      fiiVal >= 0 ? 'text-emerald-400 bg-emerald-500/10' : 'text-rose-400 bg-rose-500/10'
+                    }`}
+                  >
+                    {fiiStreak < 0 ? `${Math.abs(fiiStreak)}d Sell` : `${fiiStreak}d Buy`}
+                  </span>
+                </div>
+                <div className={`font-bold mt-1 text-[13px] ${fiiVal >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                  {fiiVal >= 0 ? '+' : ''}₹{Math.round(fiiVal).toLocaleString('en-IN')} Cr
+                </div>
+              </div>
+
+              <div className="bg-surface/80 p-2 rounded-xl border border-border/50">
+                <div className="flex items-center justify-between text-[10px] text-muted">
+                  <span>DII Net</span>
+                  <span
+                    className={`text-[9px] px-1 rounded ${
+                      diiVal >= 0 ? 'text-emerald-400 bg-emerald-500/10' : 'text-rose-400 bg-rose-500/10'
+                    }`}
+                  >
+                    {diiStreak > 0 ? `${diiStreak}d Buy` : `${Math.abs(diiStreak)}d Sell`}
+                  </span>
+                </div>
+                <div className={`font-bold mt-1 text-[13px] ${diiVal >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                  {diiVal >= 0 ? '+' : ''}₹{Math.round(diiVal).toLocaleString('en-IN')} Cr
+                </div>
+              </div>
+            </div>
+
+            {/* DII Absorption Rate & Progress Bar */}
+            {absorptionPct > 0 && fiiVal < 0 && (
+              <div className="bg-surface/80 p-2 rounded-xl border border-border/50 space-y-1 text-xs">
+                <div className="flex items-center justify-between text-[10px] font-mono">
+                  <span className="text-muted">DII Absorption Ratio</span>
+                  <span className="font-bold text-emerald-400">{absorptionPct}%</span>
+                </div>
+                <div className="w-full bg-surface h-1.5 rounded-full overflow-hidden border border-border/40">
+                  <div
+                    className={`h-full rounded-full transition-all duration-500 ${
+                      absorptionPct >= 100 ? 'bg-emerald-400' : absorptionPct >= 60 ? 'bg-amber' : 'bg-rose-400'
+                    }`}
+                    style={{ width: `${Math.min(100, (absorptionPct / 200) * 100)}%` }}
+                  />
+                </div>
+                <div className="text-[9px] text-muted font-sans">
+                  {absorptionPct >= 100
+                    ? '🛡️ Domestic institutions absorbed all foreign outflows'
+                    : '⚠️ Foreign selling exceeding domestic absorption'}
+                </div>
+              </div>
+            )}
+
+            {/* Strategic Takeaway / Rationale */}
+            <div className="bg-amber/10 border border-amber/25 rounded-xl p-2 text-[11px] font-sans leading-relaxed text-text/90">
+              <span className="text-amber font-bold text-[10px] uppercase tracking-wide block mb-0.5">
+                💡 Institutional Takeaway
+              </span>
+              <p className="line-clamp-2 text-muted text-[10.5px]">
+                {flows?.signal_reason || flows?.verdict || 'Institutional positioning balanced across cash and derivatives.'}
+              </p>
+            </div>
           </div>
 
-          <div className="pt-1">
-            <span className="text-[10px] font-bold text-amber font-mono block truncate bg-amber/10 border border-amber/30 px-2 py-1 rounded-lg text-center">
-              {flows?.verdict || 'FII / DII INSTITUTIONAL BALANCE'}
-            </span>
-          </div>
+          <button
+            onClick={() => sendDraft('flows')}
+            className="w-full mt-2 py-1 px-2 rounded-lg bg-surface hover:bg-elevated border border-border/60 hover:border-amber/50 text-[10px] font-mono text-muted hover:text-amber transition-all cursor-pointer flex items-center justify-center gap-1"
+            title="Inspect 10-day historical flows breakdown, trends and F&O data"
+          >
+            <span>📊 Detailed Flow Timeline</span>
+            <span>→</span>
+          </button>
         </div>
 
         {/* Card 2: Multi-Timeframe Technical Confluence (4 Cols) */}
@@ -1956,66 +2073,146 @@ export default function TerminalView({
           {sectorViewMode === '2D' ? (
             <div className="grid grid-cols-2 gap-2 text-xs font-mono">
               {/* LEADING (Top Right) */}
-              <div className="bg-emerald-500/10 border border-emerald-500/30 rounded-xl p-2.5 space-y-1">
+              <div className="bg-emerald-500/10 border border-emerald-500/30 rounded-xl p-2.5 space-y-1.5">
                 <span className="text-[10px] font-bold text-emerald-400 uppercase tracking-wider block flex items-center justify-between">
                   <span>🟢 LEADING</span>
                   <span className="text-[9px] text-muted">RS &gt; 100, Mom &gt; 100</span>
                 </span>
-                <div className="space-y-0.5">
-                  {(sectors.filter((s) => s.quadrant === 'LEADING' || s.name?.includes('AUTO') || s.name?.includes('METALS') || s.name?.includes('DEFENSE')).slice(0, 2)).map((s, idx) => (
-                    <div key={idx} className="flex justify-between text-[11px]">
-                      <span className="font-bold text-text">{s.name || 'NIFTY AUTO'}</span>
-                      <span className="text-emerald-400 font-semibold">+{s.rs_ratio || 102.4}</span>
-                    </div>
-                  ))}
+                <div className="space-y-1">
+                  {(() => {
+                    const items = sectors.filter((s) => s.quadrant === 'LEADING' || (s.rs_ratio >= 100 && s.rs_momentum >= 100))
+                    const displayItems = items.length > 0 ? items.slice(0, 3) : [
+                      { name: 'AUTO', rs_ratio: 102.4 },
+                      { name: 'METALS', rs_ratio: 101.9 },
+                    ]
+                    return displayItems.map((s, idx) => {
+                      const cleanName = (s.name || s.code || '').replace(/^NIFTY\s*/i, '').trim()
+                      return (
+                        <button
+                          key={idx}
+                          onClick={() => window.dispatchEvent(new CustomEvent('open-sector-drilldown', { detail: { sector: cleanName } }))}
+                          className="w-full flex items-center justify-between text-[11px] p-1 rounded-lg hover:bg-emerald-500/20 border border-transparent hover:border-emerald-500/40 transition-all cursor-pointer group text-left"
+                          title={`Click to drill down on ${cleanName} constituent stocks & metrics`}
+                        >
+                          <span className="font-bold text-text group-hover:text-emerald-300 transition-colors truncate">
+                            {cleanName}
+                          </span>
+                          <div className="flex items-center gap-1 font-mono shrink-0">
+                            <span className="text-emerald-400 font-semibold">{s.rs_ratio ? s.rs_ratio.toFixed(1) : '102.4'}</span>
+                            <span className="text-[10px] text-muted group-hover:text-emerald-300 transition-colors">→</span>
+                          </div>
+                        </button>
+                      )
+                    })
+                  })()}
                 </div>
               </div>
 
               {/* IMPROVING (Bottom Right) */}
-              <div className="bg-cyan-500/10 border border-cyan-500/30 rounded-xl p-2.5 space-y-1">
+              <div className="bg-cyan-500/10 border border-cyan-500/30 rounded-xl p-2.5 space-y-1.5">
                 <span className="text-[10px] font-bold text-cyan-400 uppercase tracking-wider block flex items-center justify-between">
                   <span>🔵 IMPROVING</span>
                   <span className="text-[9px] text-muted">Mom &gt; 100</span>
                 </span>
-                <div className="space-y-0.5">
-                  {(sectors.filter((s) => s.quadrant === 'IMPROVING' || s.name?.includes('PHARMA') || s.name?.includes('IT') || s.name?.includes('TECH')).slice(0, 2)).map((s, idx) => (
-                    <div key={idx} className="flex justify-between text-[11px]">
-                      <span className="font-bold text-text">{s.name || 'NIFTY IT'}</span>
-                      <span className="text-cyan-400 font-semibold">+{s.rs_ratio || 99.8}</span>
-                    </div>
-                  ))}
+                <div className="space-y-1">
+                  {(() => {
+                    const items = sectors.filter((s) => s.quadrant === 'IMPROVING' || (s.rs_ratio < 100 && s.rs_momentum >= 100))
+                    const displayItems = items.length > 0 ? items.slice(0, 3) : [
+                      { name: 'IT', rs_ratio: 99.8 },
+                      { name: 'PHARMA', rs_ratio: 98.9 },
+                    ]
+                    return displayItems.map((s, idx) => {
+                      const cleanName = (s.name || s.code || '').replace(/^NIFTY\s*/i, '').trim()
+                      return (
+                        <button
+                          key={idx}
+                          onClick={() => window.dispatchEvent(new CustomEvent('open-sector-drilldown', { detail: { sector: cleanName } }))}
+                          className="w-full flex items-center justify-between text-[11px] p-1 rounded-lg hover:bg-cyan-500/20 border border-transparent hover:border-cyan-500/40 transition-all cursor-pointer group text-left"
+                          title={`Click to drill down on ${cleanName} constituent stocks & metrics`}
+                        >
+                          <span className="font-bold text-text group-hover:text-cyan-300 transition-colors truncate">
+                            {cleanName}
+                          </span>
+                          <div className="flex items-center gap-1 font-mono shrink-0">
+                            <span className="text-cyan-400 font-semibold">{s.rs_ratio ? s.rs_ratio.toFixed(1) : '99.8'}</span>
+                            <span className="text-[10px] text-muted group-hover:text-cyan-300 transition-colors">→</span>
+                          </div>
+                        </button>
+                      )
+                    })
+                  })()}
                 </div>
               </div>
 
               {/* WEAKENING (Top Left) */}
-              <div className="bg-amber/10 border border-amber/30 rounded-xl p-2.5 space-y-1">
+              <div className="bg-amber/10 border border-amber/30 rounded-xl p-2.5 space-y-1.5">
                 <span className="text-[10px] font-bold text-amber uppercase tracking-wider block flex items-center justify-between">
                   <span>🟡 WEAKENING</span>
                   <span className="text-[9px] text-muted">Mom &lt; 100</span>
                 </span>
-                <div className="space-y-0.5">
-                  {(sectors.filter((s) => s.quadrant === 'WEAKENING' || s.name?.includes('BANK') || s.name?.includes('FIN')).slice(0, 2)).map((s, idx) => (
-                    <div key={idx} className="flex justify-between text-[11px]">
-                      <span className="font-bold text-text">{s.name || 'NIFTY BANK'}</span>
-                      <span className="text-amber font-semibold">{s.rs_ratio || 101.1}</span>
-                    </div>
-                  ))}
+                <div className="space-y-1">
+                  {(() => {
+                    const items = sectors.filter((s) => s.quadrant === 'WEAKENING' || (s.rs_ratio >= 100 && s.rs_momentum < 100))
+                    const displayItems = items.length > 0 ? items.slice(0, 3) : [
+                      { name: 'BANK', rs_ratio: 101.1 },
+                      { name: 'FIN SERVICE', rs_ratio: 100.8 },
+                    ]
+                    return displayItems.map((s, idx) => {
+                      const cleanName = (s.name || s.code || '').replace(/^NIFTY\s*/i, '').trim()
+                      return (
+                        <button
+                          key={idx}
+                          onClick={() => window.dispatchEvent(new CustomEvent('open-sector-drilldown', { detail: { sector: cleanName } }))}
+                          className="w-full flex items-center justify-between text-[11px] p-1 rounded-lg hover:bg-amber/20 border border-transparent hover:border-amber/40 transition-all cursor-pointer group text-left"
+                          title={`Click to drill down on ${cleanName} constituent stocks & metrics`}
+                        >
+                          <span className="font-bold text-text group-hover:text-amber transition-colors truncate">
+                            {cleanName}
+                          </span>
+                          <div className="flex items-center gap-1 font-mono shrink-0">
+                            <span className="text-amber font-semibold">{s.rs_ratio ? s.rs_ratio.toFixed(1) : '101.1'}</span>
+                            <span className="text-[10px] text-muted group-hover:text-amber transition-colors">→</span>
+                          </div>
+                        </button>
+                      )
+                    })
+                  })()}
                 </div>
               </div>
 
               {/* LAGGING (Bottom Left) */}
-              <div className="bg-rose-500/10 border border-rose-500/30 rounded-xl p-2.5 space-y-1">
+              <div className="bg-rose-500/10 border border-rose-500/30 rounded-xl p-2.5 space-y-1.5">
                 <span className="text-[10px] font-bold text-rose-400 uppercase tracking-wider block flex items-center justify-between">
                   <span>🔴 LAGGING</span>
                   <span className="text-[9px] text-muted">RS &lt; 100, Mom &lt; 100</span>
                 </span>
-                <div className="space-y-0.5">
-                  {(sectors.filter((s) => s.quadrant === 'LAGGING' || s.name?.includes('FMCG') || s.name?.includes('MEDIA') || s.name?.includes('REALTY')).slice(0, 2)).map((s, idx) => (
-                    <div key={idx} className="flex justify-between text-[11px]">
-                      <span className="font-bold text-text">{s.name || 'NIFTY FMCG'}</span>
-                      <span className="text-rose-400 font-semibold">{s.rs_ratio || 97.5}</span>
-                    </div>
-                  ))}
+                <div className="space-y-1">
+                  {(() => {
+                    const items = sectors.filter((s) => s.quadrant === 'LAGGING' || (s.rs_ratio < 100 && s.rs_momentum < 100))
+                    const displayItems = items.length > 0 ? items.slice(0, 3) : [
+                      { name: 'FMCG', rs_ratio: 97.5 },
+                      { name: 'REALTY', rs_ratio: 96.8 },
+                    ]
+                    return displayItems.map((s, idx) => {
+                      const cleanName = (s.name || s.code || '').replace(/^NIFTY\s*/i, '').trim()
+                      return (
+                        <button
+                          key={idx}
+                          onClick={() => window.dispatchEvent(new CustomEvent('open-sector-drilldown', { detail: { sector: cleanName } }))}
+                          className="w-full flex items-center justify-between text-[11px] p-1 rounded-lg hover:bg-rose-500/20 border border-transparent hover:border-rose-500/40 transition-all cursor-pointer group text-left"
+                          title={`Click to drill down on ${cleanName} constituent stocks & metrics`}
+                        >
+                          <span className="font-bold text-text group-hover:text-rose-300 transition-colors truncate">
+                            {cleanName}
+                          </span>
+                          <div className="flex items-center gap-1 font-mono shrink-0">
+                            <span className="text-rose-400 font-semibold">{s.rs_ratio ? s.rs_ratio.toFixed(1) : '97.5'}</span>
+                            <span className="text-[10px] text-muted group-hover:text-rose-300 transition-colors">→</span>
+                          </div>
+                        </button>
+                      )
+                    })
+                  })()}
                 </div>
               </div>
             </div>
@@ -2023,14 +2220,14 @@ export default function TerminalView({
             /* Structured List View */
             <div className="space-y-1.5 text-xs font-mono max-h-[148px] overflow-y-auto pr-1">
               {(sectors.length > 0 ? sectors : [
-                { name: 'NIFTY AUTO', quadrant: 'LEADING', rs_ratio: 102.4, rs_momentum: 101.8 },
-                { name: 'NIFTY METALS', quadrant: 'LEADING', rs_ratio: 101.9, rs_momentum: 102.3 },
-                { name: 'NIFTY IT', quadrant: 'IMPROVING', rs_ratio: 99.8, rs_momentum: 102.1 },
-                { name: 'NIFTY PHARMA', quadrant: 'IMPROVING', rs_ratio: 98.9, rs_momentum: 101.4 },
-                { name: 'NIFTY BANK', quadrant: 'WEAKENING', rs_ratio: 101.1, rs_momentum: 98.6 },
-                { name: 'NIFTY FIN SERVICE', quadrant: 'WEAKENING', rs_ratio: 100.8, rs_momentum: 97.9 },
-                { name: 'NIFTY FMCG', quadrant: 'LAGGING', rs_ratio: 97.5, rs_momentum: 98.1 },
-                { name: 'NIFTY REALTY', quadrant: 'LAGGING', rs_ratio: 96.8, rs_momentum: 97.4 },
+                { name: 'AUTO', quadrant: 'LEADING', rs_ratio: 102.4, rs_momentum: 101.8 },
+                { name: 'METALS', quadrant: 'LEADING', rs_ratio: 101.9, rs_momentum: 102.3 },
+                { name: 'IT', quadrant: 'IMPROVING', rs_ratio: 99.8, rs_momentum: 102.1 },
+                { name: 'PHARMA', quadrant: 'IMPROVING', rs_ratio: 98.9, rs_momentum: 101.4 },
+                { name: 'BANK', quadrant: 'WEAKENING', rs_ratio: 101.1, rs_momentum: 98.6 },
+                { name: 'FIN SERVICE', quadrant: 'WEAKENING', rs_ratio: 100.8, rs_momentum: 97.9 },
+                { name: 'FMCG', quadrant: 'LAGGING', rs_ratio: 97.5, rs_momentum: 98.1 },
+                { name: 'REALTY', quadrant: 'LAGGING', rs_ratio: 96.8, rs_momentum: 97.4 },
               ]).map((s, idx) => {
                 const quad = s.quadrant || (s.rs_ratio >= 100 && s.rs_momentum >= 100 ? 'LEADING' : s.rs_ratio < 100 && s.rs_momentum >= 100 ? 'IMPROVING' : s.rs_ratio >= 100 ? 'WEAKENING' : 'LAGGING')
                 const isLeading = quad === 'LEADING'
@@ -2044,18 +2241,19 @@ export default function TerminalView({
                   ? 'text-amber bg-amber/15 border-amber/30'
                   : 'text-rose-400 bg-rose-500/15 border-rose-500/30'
                 const badgeIcon = isLeading ? '🟢' : isImproving ? '🔵' : isWeakening ? '🟡' : '🔴'
+                const cleanName = (s.name || s.symbol || s.code || '').replace(/^NIFTY\s*/i, '').trim()
 
                 return (
                   <div
                     key={idx}
-                    onClick={() => sendDraft(`sector ${s.name || s.symbol}`)}
+                    onClick={() => window.dispatchEvent(new CustomEvent('open-sector-drilldown', { detail: { sector: cleanName } }))}
                     className="flex items-center justify-between p-2 rounded-xl bg-surface/80 border border-border/50 hover:border-amber/40 hover:bg-elevated transition-all cursor-pointer group"
-                    title={`Click to drill down on ${s.name || 'sector'}`}
+                    title={`Click to drill down on ${cleanName}`}
                   >
                     <div className="flex items-center gap-2">
                       <span className="text-xs">{badgeIcon}</span>
                       <span className="font-bold text-text group-hover:text-amber transition-colors">
-                        {s.name || s.symbol || 'SECTOR'}
+                        {cleanName || 'SECTOR'}
                       </span>
                       <span className={`text-[9px] font-bold px-1.5 py-0.2 rounded border ${badgeColor}`}>
                         {quad}
@@ -2063,10 +2261,10 @@ export default function TerminalView({
                     </div>
                     <div className="flex items-center gap-3 font-mono">
                       <span className="text-[10px] text-muted">
-                        RS: <strong className="text-text">{s.rs_ratio || 100.0}</strong>
+                        RS: <strong className="text-text">{s.rs_ratio ? s.rs_ratio.toFixed(1) : '100.0'}</strong>
                       </span>
                       <span className="text-[10px] text-muted">
-                        Mom: <strong className="text-text">{s.rs_momentum || 100.0}</strong>
+                        Mom: <strong className="text-text">{s.rs_momentum ? s.rs_momentum.toFixed(1) : '100.0'}</strong>
                       </span>
                       <span className="text-amber text-xs group-hover:translate-x-0.5 transition-transform">→</span>
                     </div>

@@ -39,6 +39,8 @@ const VERDICT_COLOR = {
   BEARISH: 'text-red border-red/40 bg-red/5',
   NEUTRAL: 'text-amber border-amber/40 bg-amber/5',
   UNKNOWN: 'text-muted border-border/40',
+  UNAVAILABLE: 'text-muted border-border/40 bg-elevated/20',
+  'N/A':   'text-muted border-border/40 bg-elevated/20',
 }
 
 const STEP_META = {
@@ -309,7 +311,7 @@ function AnalystPill({ result, name, idx, cls }) {
         <span className="text-[11px] font-ui font-semibold">{DISPLAY_NAMES[name]}</span>
         {!result.error && (
           <span className="opacity-60 text-[10px] font-ui">
-            {result.verdict} {result.confidence}%
+            {result.verdict}{result.confidence > 0 ? ` ${result.confidence}%` : ''}
           </span>
         )}
         {result.error && (

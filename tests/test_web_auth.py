@@ -57,8 +57,10 @@ class TestSignup:
             "/auth/signup",
             json={"email": "dup@example.com", "password": "password456"},
         )
-        assert r.status_code == 400
-        assert "exists" in r.json()["detail"].lower()
+        # Self-hosted pilot mode permits exactly one initial administrator;
+        # the generic response avoids revealing whether an email exists.
+        assert r.status_code == 403
+        assert "setup" in r.json()["detail"].lower()
 
     def test_signup_rejects_short_password(self, client):
         r = client.post(
@@ -150,8 +152,7 @@ class TestAuthMiddleware:
         assert r.status_code == 200
 
     def test_protected_route_requires_auth_after_signup(self, client):
-        """Once a user exists, auth is enforced."""
-        # Create a user so the bypass no longer applies
+        """Once a user exists, trading data routes require authentication."""
         client.post(
             "/auth/signup",
             json={"email": "first@test.com", "password": "mypassword"},
@@ -159,7 +160,7 @@ class TestAuthMiddleware:
         # Logout to clear session
         client.post("/auth/logout")
         # Now unauthenticated requests should fail
-        r = client.get("/api/onboarding/status")
+        r = client.get("/api/reconciliation")
         assert r.status_code == 401
 
     def test_protected_route_works_with_auth(self, client):

@@ -10,6 +10,7 @@
 [CmdletBinding()]
 param (
     [switch]$NoFrontend,
+    [string]$ApiHost = $(if ($env:API_HOST) { $env:API_HOST } else { "127.0.0.1" }),
     [int]$ApiPort = 8765,
     [int]$VitePort = 5173,
     [switch]$SkipPreflight
@@ -26,18 +27,11 @@ Write-Host "   Local-First Greenfield Bootstrap (Windows Environment)" -Foregrou
 Write-Host "==================================================================" -ForegroundColor Cyan
 Write-Host ""
 
-# 1. Resolve Python Executable
-$PythonExe = $null
-if (Test-Path "$RootDir\.venv\Scripts\python.exe") {
-    $PythonExe = "$RootDir\.venv\Scripts\python.exe"
-} elseif (Get-Command python -ErrorAction SilentlyContinue) {
-    $PythonExe = (Get-Command python).Source
-} elseif (Get-Command py -ErrorAction SilentlyContinue) {
-    $PythonExe = "py"
-} else {
-    Write-Error "Python 3.11+ is required but was not found in PATH or .venv."
-    exit 1
-}
+# 1. Repair/create the environment before resolving its interpreter. A venv
+# can exist while still being unusable because its source Python was removed.
+& (Join-Path $ScriptDir "bootstrap.ps1")
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+$PythonExe = Join-Path $RootDir ".venv\Scripts\python.exe"
 
 Write-Host "[+] Python Executable: $PythonExe" -ForegroundColor Green
 
@@ -82,7 +76,7 @@ try {
     # Start Backend
     $BackendStartInfo = New-Object System.Diagnostics.ProcessStartInfo
     $BackendStartInfo.FileName = $PythonExe
-    $BackendStartInfo.Arguments = "-m uvicorn web.api:app --host 127.0.0.1 --port $ApiPort --reload"
+    $BackendStartInfo.Arguments = "-m uvicorn web.api:app --host $ApiHost --port $ApiPort --reload"
     $BackendStartInfo.WorkingDirectory = $RootDir
     $BackendStartInfo.UseShellExecute = $false
     $BackendProcess = [System.Diagnostics.Process]::Start($BackendStartInfo)

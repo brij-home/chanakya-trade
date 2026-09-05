@@ -204,8 +204,35 @@ function parseCommand(input, contextSymbol = null) {
       return { endpoint: '/skills/position_size', body: { symbol: sym, entry_price: entry, stop_loss: sl }, cardType: 'size' }
     }
     case 'funnel': case 'smart-funnel': case 'smartfunnel': {
-      const syms = args[0] || (contextSymbol ? contextSymbol : 'nifty_50')
-      return { endpoint: '/skills/funnel', body: { symbols: syms, top_n: 2 }, cardType: 'funnel' }
+      let topN = 2
+      const filteredArgs = []
+      for (let i = 0; i < args.length; i++) {
+        const a = args[i]
+        if (a === '--top' || a === '-n' || a === 'top') {
+          const next = parseInt(args[i + 1], 10)
+          if (!isNaN(next)) { topN = next; i++; continue }
+        } else if (a && a.startsWith('--top=')) {
+          const val = parseInt(a.split('=')[1], 10)
+          if (!isNaN(val)) { topN = val; continue }
+        } else {
+          filteredArgs.push(a)
+        }
+      }
+
+      let syms = 'nifty_50'
+      if (filteredArgs.length > 0) {
+        if (filteredArgs[0].toLowerCase() === 'sector' || filteredArgs[0].toLowerCase() === 'sec') {
+          const sectorName = filteredArgs.slice(1).join('_').toLowerCase()
+          syms = sectorName || 'nifty_50'
+        } else if (filteredArgs.length === 1) {
+          syms = filteredArgs[0]
+        } else {
+          syms = filteredArgs.join(',')
+        }
+      } else if (contextSymbol) {
+        syms = contextSymbol
+      }
+      return { endpoint: '/skills/funnel', body: { symbols: syms, top_n: topN }, cardType: 'funnel' }
     }
     case 'structure': case 'market-structure': case 'smc': {
       const sym = args[0]?.toUpperCase() || contextSymbol
@@ -331,6 +358,7 @@ export default function InputBar() {
   // True when an analysis is actively streaming — input stays active in "context mode"
   const isStreaming = isLoading && !!streamCancel
   const inputRef = useRef(null)
+  const isSubmittingRef = useRef(false)
 
   // When a card pre-fills the draft or triggers auto-execution
   useEffect(() => {
@@ -342,9 +370,10 @@ export default function InputBar() {
       clearAutoSubmit()
       inputRef.current?.focus()
       if (shouldAuto) {
-        setTimeout(() => {
+        const timer = setTimeout(() => {
           submit(textToRun)
         }, 20)
+        return () => clearTimeout(timer)
       }
     }
   }, [draft, autoSubmit])
@@ -352,6 +381,23 @@ export default function InputBar() {
   function runStreaming(symbol, exchange) {
     const rawSym = (symbol || '').toUpperCase().trim()
     const resolvedExch = (!exchange || exchange === 'NSE') ? getSymbolExchange(rawSym) : exchange
+
+    // Concurrency Deduplication Guard: Never run multiple concurrent analyses for the same symbol
+    const activeMessages = useChatStore.getState().messages || []
+    const isAlreadyStreamingThis = activeMessages.some(
+      (m) => m.cardType === 'streaming_analysis' && m.data?.symbol === rawSym && m.data?.phase !== 'done' && !m.data?.error
+    )
+    if (isAlreadyStreamingThis) {
+      console.warn(`[InputBar] Analysis for ${rawSym} is already actively in progress. Suppressing duplicate execution.`)
+      return
+    }
+
+    // If another analysis is active on a different symbol, cancel previous stream before starting new one
+    const existingCancel = useChatStore.getState().streamCancel
+    if (existingCancel) {
+      existingCancel()
+    }
+
     const msgId = Date.now() + 1
     startStreamingMessage(msgId, rawSym, resolvedExch)
 
@@ -508,7 +554,13 @@ export default function InputBar() {
       return
     }
 
-    if (isLoading) return
+    const store = useChatStore.getState()
+    if (store.isLoading || isSubmittingRef.current) {
+      console.warn('[InputBar] Submission suppressed: previous action still in progress.')
+      return
+    }
+    isSubmittingRef.current = true
+    setTimeout(() => { isSubmittingRef.current = false }, 350)
 
     useChatStore.getState().setShowDashboard(false)
     setValue('')
@@ -531,9 +583,10 @@ export default function InputBar() {
     const abortController = new AbortController()
 
     try {
+      const isFunnel = parsed.cardType === 'funnel'
       startActivity({
-        title: `Quant Intelligence (${parsed.cardType?.toUpperCase() || 'QUERY'})`,
-        details: `Computing ${text}...`,
+        title: isFunnel ? 'Smart Funnel Intelligence' : `Quant Intelligence (${parsed.cardType?.toUpperCase() || 'QUERY'})`,
+        details: isFunnel ? `Screening ${parsed.body?.symbols || 'watchlist'} & evaluating top setups...` : `Computing ${text}...`,
         type: 'quant',
         targetView: 'copilot',
         cancelFn: () => {

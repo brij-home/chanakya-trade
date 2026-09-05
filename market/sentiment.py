@@ -14,6 +14,7 @@ from dataclasses import dataclass
 
 import httpx
 
+from market.http_pool import get_nse_client
 from market.news import NewsItem
 
 
@@ -54,16 +55,10 @@ def get_fii_dii_data(days: int = 5, use_cache: bool = True) -> list[FIIDIIData]:
             pass
 
     try:
-        headers = {
-            "User-Agent": "Mozilla/5.0",
-            "Accept": "application/json",
-            "Referer": "https://www.nseindia.com",
-        }
-        with httpx.Client(follow_redirects=True) as session:
-            session.get("https://www.nseindia.com", headers=headers, timeout=5)
-            r = session.get(NSE_FIIDII_URL, headers=headers, timeout=8)
-            r.raise_for_status()
-            data = r.json()
+        session = get_nse_client()
+        r = session.get(NSE_FIIDII_URL, timeout=8)
+        r.raise_for_status()
+        data = r.json()
 
         if not isinstance(data, list):
             return []
@@ -293,21 +288,14 @@ def get_market_breadth() -> MarketBreadth:
     Falls back to mock if NSE unavailable.
     """
     try:
-        headers = {
-            "User-Agent": "Mozilla/5.0",
-            "Accept": "application/json",
-            "Referer": "https://www.nseindia.com",
-        }
-        with httpx.Client(follow_redirects=True) as session:
-            session.get("https://www.nseindia.com", headers=headers, timeout=5)
-            r = session.get(
-                "https://www.nseindia.com/api/allIndices",
-                headers=headers,
-                timeout=8,
-            )
-            r.raise_for_status()
-            # Parse NIFTY 500 advances/declines
-            data = r.json().get("data", [])
+        session = get_nse_client()
+        r = session.get(
+            "https://www.nseindia.com/api/allIndices",
+            timeout=8,
+        )
+        r.raise_for_status()
+        # Parse NIFTY 500 advances/declines
+        data = r.json().get("data", [])
         nifty500 = next((d for d in data if "500" in d.get("index", "")), None)
         if nifty500:
             adv = int(nifty500.get("advances", 0))

@@ -916,3 +916,132 @@
   animation: card-shine 3s ease-in-out infinite;
   pointer-events: none;
 }
+
+/* ══════════════════════════════════════════════════════════════════════════
+   VIEW TRANSITIONS API — Smooth workspace crossfade
+   Used by ActivityBar.jsx via document.startViewTransition()
+   Browsers without support skip these rules gracefully.
+══════════════════════════════════════════════════════════════════════════ */
+@layer base {
+  /* Define view transition name for the main workspace area */
+  .workspace-content {
+    view-transition-name: workspace-main;
+  }
+
+  /* Smooth 200ms crossfade when switching workspace views */
+  ::view-transition-old(workspace-main) {
+    animation: 200ms cubic-bezier(0.16, 1, 0.3, 1) both fade-out-view;
+  }
+  ::view-transition-new(workspace-main) {
+    animation: 250ms cubic-bezier(0.16, 1, 0.3, 1) both fade-in-view;
+  }
+
+  @keyframes fade-out-view {
+    from { opacity: 1; transform: translateY(0) scale(1); }
+    to   { opacity: 0; transform: translateY(-4px) scale(0.99); }
+  }
+  @keyframes fade-in-view {
+    from { opacity: 0; transform: translateY(6px) scale(0.99); }
+    to   { opacity: 1; transform: translateY(0) scale(1); }
+  }
+
+  /* @starting-style — entry animations for newly mounted cards.
+     Browsers without support skip gracefully. */
+  .card-panel {
+    transition: opacity 0.2s var(--ease-out), transform 0.2s var(--ease-out);
+  }
+  @starting-style {
+    .card-panel {
+      opacity: 0;
+      transform: translateY(8px);
+    }
+  }
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   PANEL & CARD UTILITY CLASSES
+   Replaces common inline style patterns in card components.
+   Always use these — never write inline background/border/shadow styles.
+══════════════════════════════════════════════════════════════════════════ */
+@layer utilities {
+  /* Standard institutional card panel */
+  .card-panel {
+    background: var(--color-panel);
+    border: 1px solid var(--color-border);
+    border-radius: 14px;
+    box-shadow: var(--shadow-card);
+  }
+
+  /* Elevated card (within a panel) */
+  .card-elevated {
+    background: var(--color-elevated);
+    border: 1px solid var(--color-border-subtle);
+    border-radius: 10px;
+  }
+
+  /* Dense stat row (label + value side by side) */
+  .stat-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    padding: 0.25rem 0;
+    font-size: 0.75rem;
+    border-bottom: 1px solid var(--color-border-subtle);
+  }
+  .stat-row:last-child {
+    border-bottom: none;
+  }
+  .stat-row__label {
+    color: var(--color-muted);
+    font-weight: 500;
+  }
+  .stat-row__value {
+    font-family: 'JetBrains Mono', 'Fira Code', Menlo, monospace;
+    font-weight: 600;
+    color: var(--color-text);
+    text-align: right;
+    tabular-nums: ;
+  }
+
+  /* Signal badge — used for BUY/SELL/HOLD/STRONG_BUY verdicts */
+  .badge-signal {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+    padding: 0.15rem 0.5rem;
+    border-radius: 9999px;
+    font-size: 0.65rem;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    font-family: 'JetBrains Mono', monospace;
+    border: 1px solid transparent;
+  }
+  .badge-signal--buy       { background: rgba(16, 185, 129, 0.15); color: var(--color-emerald); border-color: rgba(16, 185, 129, 0.3); }
+  .badge-signal--strong-buy{ background: rgba(16, 185, 129, 0.25); color: var(--color-emerald-bright); border-color: rgba(16, 185, 129, 0.5); }
+  .badge-signal--sell      { background: rgba(244, 63, 94, 0.15);  color: var(--color-rose);    border-color: rgba(244, 63, 94, 0.3); }
+  .badge-signal--strong-sell{ background: rgba(244, 63, 94, 0.25); color: var(--color-rose-bright); border-color: rgba(244, 63, 94, 0.5); }
+  .badge-signal--hold      { background: rgba(245, 166, 35, 0.15); color: var(--color-amber);   border-color: rgba(245, 166, 35, 0.3); }
+  .badge-signal--unavail   { background: rgba(255,255,255, 0.05);  color: var(--color-muted);   border-color: var(--color-border); }
+
+  /* Scrollable card list with content-visibility for off-screen rendering savings */
+  .data-card-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    overflow-y: auto;
+  }
+  .data-card-list > * {
+    /* Defer rendering of off-screen children — ~40% layout cost reduction on long lists */
+    content-visibility: auto;
+    contain-intrinsic-size: 0 120px;
+  }
+  .data-card-list > *:first-child,
+  .data-card-list > *:nth-child(2),
+  .data-card-list > *:nth-child(3) {
+    /* Never defer first 3 visible items */
+    content-visibility: visible;
+  }
+}
+

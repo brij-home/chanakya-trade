@@ -29,9 +29,10 @@ from __future__ import annotations
 
 import os
 import sqlite3
+from contextlib import contextmanager
 from datetime import date, datetime
 from pathlib import Path
-from typing import Optional
+from typing import Generator, Optional
 
 
 from dataclasses import dataclass, field
@@ -130,8 +131,13 @@ class RiskLimits:
                 ON daily_trades (trade_date)
             """)
 
-    def _connect(self) -> sqlite3.Connection:
-        return sqlite3.connect(str(self._db))
+    @contextmanager
+    def _connect(self) -> Generator[sqlite3.Connection, None, None]:
+        conn = sqlite3.connect(str(self._db), timeout=30.0)
+        try:
+            yield conn
+        finally:
+            conn.close()
 
     def _today(self) -> str:
         return date.today().isoformat()
