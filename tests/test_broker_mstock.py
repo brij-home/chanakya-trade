@@ -167,6 +167,7 @@ def test_mstock_quote():
             "volume": 123456,
         }
     }
+    broker._client.post = MagicMock(return_value=mock_quote)
     broker._client.get = MagicMock(return_value=mock_quote)
 
     quote = broker.get_quote("RELIANCE")
@@ -346,6 +347,7 @@ def test_mstock_options_chain_live():
     with (
         patch.object(broker, "get_option_chain_master", return_value=master_mock),
         patch.object(broker._client, "get", return_value=chain_mock),
+        patch.object(broker._client, "post", return_value=quote_mock),
         patch.object(broker._client, "request", return_value=quote_mock),
     ):
         contracts = broker.get_options_chain("NIFTY")
@@ -429,10 +431,10 @@ def test_mstock_basket_orders():
     calc_mock = MagicMock(status_code=200, json=lambda: {"status": True, "data": {"margin": 50000}})
 
     with (
-        patch.object(broker._client, "post", side_effect=[cb_mock, db_mock]),
-        patch.object(broker._client, "put", return_value=fb_mock),
-        patch.object(broker._client, "delete", return_value=rb_mock),
-        patch.object(broker._client, "get", return_value=calc_mock),
+        patch.object(broker._client, "post", side_effect=[cb_mock, calc_mock]),
+        patch.object(broker._client, "get", return_value=fb_mock),
+        patch.object(broker._client, "put", return_value=rb_mock),
+        patch.object(broker._client, "delete", return_value=db_mock),
     ):
         created = broker.create_basket("TestBasket", "Desc")
         assert created.get("status") is True
@@ -441,10 +443,10 @@ def test_mstock_basket_orders():
         assert len(baskets) == 1
         assert baskets[0]["BaskName"] == "TestBasket"
 
-        renamed = broker.rename_basket("TestBasket", "NewBasket")
+        renamed = broker.rename_basket("101", "NewBasket")
         assert renamed.get("status") is True
 
-        deleted = broker.delete_basket("NewBasket")
+        deleted = broker.delete_basket("101")
         assert deleted.get("status") is True
 
         calc = broker.calculate_basket("TestBasket")
@@ -478,3 +480,116 @@ def test_mstock_convert_position(monkeypatch):
     with patch.object(broker._client, "post", return_value=mock_resp):
         res = broker.convert_position("NSE", "RELIANCE", "MIS", "CNC", 10)
         assert res.get("status") is True
+
+
+def test_mstock_place_order_list_response(monkeypatch):
+    monkeypatch.setenv("ALLOW_LIVE_TRADING", "1")
+    broker = MStockAPI(client_code="M404")
+    broker._token = "valid_token"
+
+    req = OrderRequest(
+        symbol="TCS",
+        exchange="NSE",
+        transaction_type="BUY",
+        order_type="MARKET",
+        product="CNC",
+        quantity=10,
+        price=3800.0,
+    )
+
+    mock_resp = MagicMock(status_code=200)
+    mock_resp.json.return_value = [{"status": "success", "data": {"order_id": "1111250206114"}}]
+    broker._client.post = MagicMock(return_value=mock_resp)
+
+    resp = broker.place_order(req)
+    assert resp.status == "PLACED"
+    assert resp.order_id == "1111250206114"
+
+
+def test_mstock_cancel_all(monkeypatch):
+    monkeypatch.setenv("ALLOW_LIVE_TRADING", "1")
+    broker = MStockAPI(client_code="M404")
+    broker._token = "valid_token"
+
+    mock_resp = MagicMock(status_code=200)
+    mock_resp.json.return_value = {"status": "True", "message": "SUCCESS"}
+    broker._client.post = MagicMock(return_value=mock_resp)
+
+    res = broker.cancel_all()
+    assert res.get("status") == "True"
+
+
+def test_mstock_order_details():
+    broker = MStockAPI(client_code="M404")
+    broker._token = "valid_token"
+
+    mock_resp = MagicMock(status_code=200)
+    mock_resp.json.return_value = {
+        "status": "True",
+        "data": {"order_no": "1151250207119", "orderstatus": "Complete"},
+    }
+    broker._client.post = MagicMock(return_value=mock_resp)
+
+    res = broker.get_order_details("1151250207119")
+    assert res.get("order_no") == "1151250207119"
+    assert res.get("orderstatus") == "Complete"
+
+
+def test_mstock_trade_book_and_history():
+    broker = MStockAPI(client_code="M404")
+    broker._token = "valid_token"
+
+    tb_mock = MagicMock(status_code=200)
+    tb_mock.json.return_value = {
+        "status": "True",
+        "data": [{"trade_id": "T123", "symbol": "INFY", "qty": 10}],
+    }
+    th_mock = MagicMock(status_code=200)
+    th_mock.json.return_value = {
+        "status": "True",
+        "data": [{"trade_id": "T099", "symbol": "TCS", "qty": 5}],
+    }
+
+    broker._client.get = MagicMock(return_value=tb_mock)
+    broker._client.post = MagicMock(return_value=th_mock)
+
+    tb = broker.get_trade_book()
+    assert len(tb) == 1
+    assert tb[0]["trade_id"] == "T123"
+
+    th = broker.get_trade_history("2026-01-01", "2026-01-10")
+    assert len(th) == 1
+    assert th[0]["trade_id"] == "T099"
+
+
+def test_mstock_health_statistics():
+    broker = MStockAPI(client_code="M404")
+    mock_resp = MagicMock(status_code=200)
+    mock_resp.json.return_value = {"status": "Healthy", "uptime": 99.9}
+    broker._client.get = MagicMock(return_value=mock_resp)
+
+    health = broker.get_health_statistics()
+    assert health.get("status") == "Healthy"
+
+
+def test_mstock_generate_session():
+    broker = MStockAPI(client_code="M404")
+    mock_resp = MagicMock(status_code=200)
+    mock_resp.json.return_value = {"data": {"jwtToken": "session_token_xyz"}}
+    broker._client.post = MagicMock(return_value=mock_resp)
+
+    ok = broker.generate_session(request_token="req_token", otp="123456")
+    assert ok is True
+    assert broker._token == "session_token_xyz"
+
+
+def test_mstock_server_logout():
+    broker = MStockAPI(client_code="M404")
+    broker._token = "active_jwt"
+    mock_resp = MagicMock(status_code=200)
+    broker._client.get = MagicMock(return_value=mock_resp)
+
+    broker.logout()
+    assert broker._token == ""
+    assert broker._user_profile is None
+

@@ -76,12 +76,26 @@ _ORDER_TYPE_MAP = {
     "SL-M": "SL-M",
 }
 
-# Product Type mapping
+# Product Type mapping (Maps standard Chanakya types to official mStock Type B API values)
 _PRODUCT_MAP = {
+    "CNC": "DELIVERY",
+    "MIS": "INTRADAY",
+    "NRML": "MARGIN",
+    "DELIVERY": "DELIVERY",
+    "INTRADAY": "INTRADAY",
+    "MARGIN": "MARGIN",
+}
+
+# Reverse mapping from mStock product types back to Chanakya standard
+_REV_PRODUCT_MAP = {
+    "DELIVERY": "CNC",
+    "INTRADAY": "MIS",
+    "MARGIN": "NRML",
     "CNC": "CNC",
     "MIS": "MIS",
     "NRML": "NRML",
 }
+
 
 # Common NSE segment security tokens
 _KNOWN_NSE_TOKENS = {
@@ -148,10 +162,48 @@ class MStockAPI(BrokerAPI):
         self._refresh_token: str = ""
         self._token_expiry: float = 0.0
         self._user_profile: Optional[UserProfile] = None
+        self._scrip_token_cache: dict[str, str] = {}
         self._client = httpx.Client(timeout=10.0)
 
         # Restore saved token session if valid
         self._load_token()
+
+    # ── Token Resolution Helper ──────────────────────────────
+
+    def get_symbol_token(self, symbol: str, exchange: str = "NSE") -> str:
+        """Resolve security token for symbol via known tokens or cached scrip master."""
+        clean_sym = symbol.replace("NSE:", "").replace("BSE:", "").replace("-EQ", "").strip().upper()
+        if clean_sym in _KNOWN_NSE_TOKENS:
+            return _KNOWN_NSE_TOKENS[clean_sym]
+
+        cache_key = f"{exchange}:{clean_sym}"
+        if cache_key in self._scrip_token_cache:
+            return self._scrip_token_cache[cache_key]
+
+        try:
+            self._ensure_scrip_cache()
+            if cache_key in self._scrip_token_cache:
+                return self._scrip_token_cache[cache_key]
+        except Exception:
+            pass
+        return clean_sym
+
+    def _ensure_scrip_cache(self) -> None:
+        """Parse instruments from Scrip Master if not yet loaded."""
+        if self._scrip_token_cache or not self._token:
+            return
+        scrip_txt = self.download_scrip_master()
+        if not scrip_txt:
+            return
+        for line in scrip_txt.splitlines():
+            parts = [p.strip() for p in line.split(",")]
+            if len(parts) >= 3:
+                tok, sym = parts[0], parts[1].upper()
+                exch = parts[2].upper() if len(parts) > 2 else "NSE"
+                self._scrip_token_cache[f"{exch}:{sym}"] = tok
+                if sym.endswith("-EQ"):
+                    self._scrip_token_cache[f"{exch}:{sym[:-3]}"] = tok
+
 
     # ── Token persistence ─────────────────────────────────────
 
@@ -376,8 +428,42 @@ class MStockAPI(BrokerAPI):
 
         return self.get_profile()
 
+    def generate_session(self, request_token: str, otp: str, api_key: str = "") -> bool:
+        """
+        Generate session access token using request/refresh token and SMS/email OTP
+        (POST /openapi/typeb/session/token).
+        """
+        ak = api_key or self._api_key
+        url = f"{MSTOCK_BASE_URL}/openapi/typeb/session/token"
+        headers = self._headers()
+        if ak:
+            headers["X-PrivateKey"] = ak
+        payload = {"refreshToken": request_token, "otp": str(otp)}
+        try:
+            resp = self._client.post(url, json=payload, headers=headers)
+            if resp.status_code == 200:
+                data = resp.json()
+                res = data.get("data") or data.get("result") or data
+                if isinstance(res, list) and res:
+                    res = res[0]
+                jwt_token = res.get("jwtToken") or res.get("token") or res.get("accessToken")
+                if jwt_token:
+                    self._token = jwt_token
+                    self._token_expiry = time.time() + 86400
+                    self._save_token(jwt_token, refresh_token=request_token)
+                    return True
+        except Exception:
+            pass
+        return False
+
     def logout(self) -> None:
-        """Clear active token and unlink saved session file."""
+        """Terminate active session on m.Stock server and clear local session file."""
+        if self._token:
+            try:
+                url = f"{MSTOCK_BASE_URL}/openapi/typeb/logout"
+                self._fetch_authed("GET", url)
+            except Exception:
+                pass
         self._token = ""
         self._user_profile = None
         if TOKEN_FILE.exists():
@@ -607,7 +693,8 @@ class MStockAPI(BrokerAPI):
     def get_quote(self, instruments: list[str] | str) -> dict[str, Quote] | Quote:
         """
         Fetch live quote(s). Accepts either a single symbol string or a list of instruments.
-        Utilizes m.Stock Type B quote API when symbol token is mapped, falling back to market quote engine.
+        Utilizes m.Stock Type B quote API (POST /openapi/typeb/instruments/quote),
+        falling back to market quote engine if unauthenticated or token not found.
         """
         is_single = isinstance(instruments, str)
         inst_list = [instruments] if is_single else list(instruments)
@@ -621,21 +708,19 @@ class MStockAPI(BrokerAPI):
             if any(inst.startswith(p) for p in ("MCX:", "CRYPTO:", "CDS:", "GIFT:", "US:", "FX:", "INDEX:GIFT")):
                 continue
 
-            clean_sym = inst.replace("NSE:", "").replace("BSE:", "")
+            clean_sym = inst.replace("NSE:", "").replace("BSE:", "").strip()
             exchange = "BSE" if inst.startswith("BSE:") else "NSE"
             quote_obj = None
 
-            token = _KNOWN_NSE_TOKENS.get(clean_sym, "")
+            token = self.get_symbol_token(clean_sym, exchange)
             try:
                 url = f"{MSTOCK_BASE_URL}/openapi/typeb/instruments/quote"
                 resp = None
-                if token:
-                    q_payload = json.dumps(
-                        {"mode": "OHLC", "exchangeTokens": {exchange: [token]}}
-                    )
+                if token and token != clean_sym:
+                    q_payload = {"mode": "OHLC", "exchangeTokens": {exchange: [str(token)]}}
                     try:
-                        resp = self._client.request(
-                            "GET", url, content=q_payload, headers=self._headers(), timeout=2.5
+                        resp = self._client.post(
+                            url, json=q_payload, headers=self._headers(), timeout=2.5
                         )
                     except Exception:
                         resp = None
@@ -655,6 +740,8 @@ class MStockAPI(BrokerAPI):
                         data = resp.json()
                     except Exception:
                         data = {}
+                    if isinstance(data, list) and data:
+                        data = data[0]
                     fetched = (
                         data.get("data", {}).get("fetched", [])
                         if isinstance(data.get("data"), dict)
@@ -680,6 +767,8 @@ class MStockAPI(BrokerAPI):
                             )
                     else:
                         res = data.get("result") or data.get("data") or data
+                        if isinstance(res, list) and res:
+                            res = res[0]
                         if isinstance(res, dict) and (res.get("ltp") or res.get("lastPrice")):
                             ltp = float(res.get("ltp") or res.get("lastPrice") or 0.0)
                             close = float(res.get("close") or res.get("prevClose") or ltp)
@@ -883,11 +972,8 @@ class MStockAPI(BrokerAPI):
                                     q_url = f"{MSTOCK_BASE_URL}/openapi/typeb/instruments/quote"
                                     # Query first 50 contracts to remain within typical REST quota
                                     batch_tokens = tokens_to_quote[:50]
-                                    q_body = json.dumps(
-                                        {"mode": "LTP", "exchangeTokens": {"NFO": batch_tokens}}
-                                    )
-                                    q_resp = self._client.request(
-                                        "GET", q_url, content=q_body, headers=self._headers()
+                                    q_resp = self._client.post(
+                                        q_url, json={"mode": "LTP", "exchangeTokens": {"NFO": batch_tokens}}, headers=self._headers()
                                     )
                                     if q_resp.status_code == 200:
                                         q_data = q_resp.json()
@@ -954,16 +1040,14 @@ class MStockAPI(BrokerAPI):
                     if to_date
                     else datetime.now().strftime("%Y-%m-%d %H:%M")
                 )
-                h_payload = json.dumps(
-                    {
-                        "exchange": exchange,
-                        "symboltoken": token,
-                        "interval": interval,
-                        "fromdate": f_date,
-                        "todate": t_date,
-                    }
-                )
-                resp = self._client.request("GET", url, content=h_payload, headers=self._headers())
+                h_payload = {
+                    "exchange": exchange,
+                    "symboltoken": str(token),
+                    "interval": interval,
+                    "fromdate": f_date,
+                    "todate": t_date,
+                }
+                resp = self._client.post(url, json=h_payload, headers=self._headers())
                 if resp.status_code == 200:
                     data = resp.json()
                     candles = (
@@ -995,7 +1079,7 @@ class MStockAPI(BrokerAPI):
 
     def place_order(self, order: OrderRequest) -> OrderResponse:
         """
-        Place an order through m.Stock.
+        Place an order through m.Stock (POST /openapi/typeb/orders/regular).
         Strictly enforces the live trading gate ALLOW_LIVE_TRADING=1.
         """
         if os.environ.get("ALLOW_LIVE_TRADING", "0") != "1":
@@ -1010,21 +1094,49 @@ class MStockAPI(BrokerAPI):
 
         try:
             url = f"{MSTOCK_BASE_URL}/openapi/typeb/orders/regular"
+            clean_sym = order.symbol.replace("NSE:", "").replace("BSE:", "").strip()
+            exchange = _EXCHANGE_MAP.get(order.exchange, "NSE")
+            token = self.get_symbol_token(clean_sym, exchange)
+            product = _PRODUCT_MAP.get(order.product, order.product)
+            order_type = _ORDER_TYPE_MAP.get(order.order_type, "MARKET")
+
+            # Trading symbol format (e.g. ACC-EQ for NSE equity)
+            trading_symbol = clean_sym
+            if exchange == "NSE" and not clean_sym.endswith("-EQ") and not any(p in clean_sym for p in ("-INDEX", "NIFTY", "BANKNIFTY", "VIX")):
+                trading_symbol = f"{clean_sym}-EQ"
+
             payload = {
-                "symbol": order.symbol,
-                "exchange": _EXCHANGE_MAP.get(order.exchange, "NSE"),
-                "transactionType": order.transaction_type,
-                "orderType": _ORDER_TYPE_MAP.get(order.order_type, "MARKET"),
-                "product": _PRODUCT_MAP.get(order.product, "CNC"),
-                "quantity": order.quantity,
-                "price": order.price,
-                "triggerPrice": order.trigger_price or 0.0,
+                "variety": "NORMAL",
+                "tradingsymbol": trading_symbol,
+                "symboltoken": str(token),
+                "exchange": exchange,
+                "transactiontype": order.transaction_type.upper(),
+                "ordertype": order_type,
+                "quantity": str(order.quantity),
+                "producttype": product,
+                "price": str(order.price if order_type != "MARKET" else "0"),
+                "triggerprice": str(order.trigger_price or "0"),
+                "squareoff": "0",
+                "stoploss": "0",
+                "trailingStopLoss": "",
+                "disclosedquantity": "0",
+                "duration": "DAY",
+                "ordertag": "",
             }
             resp = self._client.post(url, json=payload, headers=self._headers())
             if resp.status_code == 200:
                 data = resp.json()
+                if isinstance(data, list) and data:
+                    data = data[0]
                 res = data.get("data") or data.get("result") or data
-                order_id = str(res.get("orderId") or res.get("order_id") or "")
+                if isinstance(res, list) and res:
+                    res = res[0]
+                order_id = str(
+                    res.get("orderId")
+                    or res.get("order_id")
+                    or res.get("orderid")
+                    or ""
+                )
                 if order_id:
                     return OrderResponse(
                         order_id=order_id,
@@ -1039,8 +1151,8 @@ class MStockAPI(BrokerAPI):
                 raise
             raise RuntimeError(f"Failed to place order with m.Stock: {e}")
 
-    def cancel_order(self, order_id: str) -> bool:
-        """Cancel an open order."""
+    def cancel_order(self, order_id: str, variety: str = "NORMAL") -> bool:
+        """Cancel an open order (DELETE /openapi/typeb/orders/regular/{order_id})."""
         if os.environ.get("ALLOW_LIVE_TRADING", "0") != "1":
             raise PermissionError("Live trading disabled. Set ALLOW_LIVE_TRADING=1.")
 
@@ -1049,38 +1161,135 @@ class MStockAPI(BrokerAPI):
 
         try:
             url = f"{MSTOCK_BASE_URL}/openapi/typeb/orders/regular/{order_id}"
-            resp = self._client.delete(url, headers=self._headers())
+            payload = {"variety": variety, "orderid": str(order_id)}
+            resp = self._client.request("DELETE", url, json=payload, headers=self._headers())
             return resp.status_code in (200, 204)
         except Exception:
             return False
 
+    def cancel_all(self) -> dict:
+        """Cancel all open orders at once (POST /openapi/typeb/orders/cancelall)."""
+        if os.environ.get("ALLOW_LIVE_TRADING", "0") != "1":
+            raise PermissionError("Live trading disabled. Set ALLOW_LIVE_TRADING=1.")
+        if not self._token:
+            raise RuntimeError("m.Stock session not authenticated.")
+        try:
+            url = f"{MSTOCK_BASE_URL}/openapi/typeb/orders/cancelall"
+            resp = self._client.post(url, headers=self._headers())
+            if resp.status_code == 200:
+                data = resp.json()
+                return data.get("data") or data.get("result") or data
+            raise RuntimeError(f"Cancel all orders failed: {resp.text}")
+        except Exception as e:
+            if isinstance(e, PermissionError):
+                raise
+            raise RuntimeError(f"Failed to cancel all orders with m.Stock: {e}")
+
+    def get_order_details(self, order_id: str) -> dict:
+        """Retrieve individual order status details by order ID (POST /openapi/typeb/order/details)."""
+        if not self._token:
+            return {}
+        try:
+            url = f"{MSTOCK_BASE_URL}/openapi/typeb/order/details"
+            payload = {"order_no": str(order_id)}
+            resp = self._client.post(url, json=payload, headers=self._headers())
+            if resp.status_code == 200:
+                data = resp.json()
+                if isinstance(data, list) and data:
+                    data = data[0]
+                return data.get("data") or data.get("result") or data
+        except Exception:
+            pass
+        return {}
+
+    def get_trade_book(self) -> list[dict]:
+        """Fetch trade executions for today (GET /openapi/typeb/tradebook)."""
+        if not self._token:
+            return []
+        try:
+            url = f"{MSTOCK_BASE_URL}/openapi/typeb/tradebook"
+            resp = self._client.get(url, headers=self._headers())
+            if resp.status_code == 200:
+                data = resp.json()
+                items = data.get("data") or data.get("result") or []
+                return items if isinstance(items, list) else []
+        except Exception:
+            pass
+        return []
+
+    def get_trade_history(self, from_date: str, to_date: str) -> list[dict]:
+        """Fetch trade history within date range (POST /openapi/typeb/trades)."""
+        if not self._token:
+            return []
+        try:
+            url = f"{MSTOCK_BASE_URL}/openapi/typeb/trades"
+            payload = {"fromdate": from_date, "todate": to_date}
+            resp = self._client.post(url, json=payload, headers=self._headers())
+            if resp.status_code == 200:
+                data = resp.json()
+                items = data.get("data") or data.get("result") or []
+                return items if isinstance(items, list) else []
+        except Exception:
+            pass
+        return []
+
+    def get_health_statistics(self) -> dict:
+        """Fetch m.Stock API server health statistics (GET /openapi/typeb/Health/GetHealthStatistics)."""
+        try:
+            url = f"{MSTOCK_BASE_URL}/openapi/typeb/Health/GetHealthStatistics"
+            resp = self._client.get(url, headers=self._headers())
+            if resp.status_code == 200:
+                return resp.json()
+        except Exception:
+            pass
+        return {}
+
     def get_orders(self) -> list[Order]:
-        """Return orders placed today."""
+        """Return orders placed today (GET /openapi/typeb/orders)."""
         if not self._token:
             return []
         try:
             url = f"{MSTOCK_BASE_URL}/openapi/typeb/orders"
             resp = self._client.get(url, headers=self._headers())
             if resp.status_code == 200:
-                raw = resp.json().get("data") or resp.json().get("result", resp.json())
+                raw_json = resp.json()
+                if isinstance(raw_json, list) and raw_json:
+                    raw = raw_json
+                else:
+                    raw = raw_json.get("data") or raw_json.get("result", raw_json)
                 if isinstance(raw, dict):
                     raw = raw.get("orders", [])
                 if not isinstance(raw, list):
                     raw = []
                 orders = []
                 for o in raw:
+                    if not isinstance(o, dict):
+                        continue
+                    raw_st = str(o.get("status") or o.get("orderstatus") or "OPEN").upper()
+                    st_map = {
+                        "TRANSIT": "OPEN",
+                        "PENDING": "PENDING",
+                        "COMPLETE": "FILLED",
+                        "EXECUTED": "FILLED",
+                        "CANCELLED": "CANCELLED",
+                        "CANCELED": "CANCELLED",
+                        "REJECTED": "REJECTED",
+                        "OPEN": "OPEN",
+                    }
+                    status = st_map.get(raw_st, raw_st)
+                    prod = _REV_PRODUCT_MAP.get(o.get("producttype") or o.get("product") or "DELIVERY", "CNC")
                     orders.append(
                         Order(
-                            order_id=str(o.get("orderId") or o.get("order_id")),
-                            symbol=o.get("symbol", ""),
-                            exchange=o.get("exchange", "NSE"),
-                            transaction_type=o.get("transactionType", "BUY"),
-                            order_type=o.get("orderType", "LIMIT"),
-                            product=o.get("product", "CNC"),
-                            quantity=int(o.get("quantity", 0)),
-                            price=float(o.get("price", 0.0)),
-                            status=o.get("status", "OPEN"),
-                            filled_quantity=int(o.get("filledQuantity", 0)),
+                            order_id=str(o.get("orderid") or o.get("orderId") or o.get("order_id")),
+                            symbol=str(o.get("tradingsymbol") or o.get("symbol") or ""),
+                            exchange=str(o.get("exchange") or "NSE"),
+                            transaction_type=str(o.get("transactiontype") or o.get("transactionType") or "BUY"),
+                            order_type=str(o.get("ordertype") or o.get("orderType") or "LIMIT"),
+                            product=prod,
+                            quantity=int(o.get("quantity") or 0),
+                            price=float(o.get("price") or 0.0),
+                            status=status,
+                            filled_quantity=int(o.get("filledshares") or o.get("filledQuantity") or 0),
                         )
                     )
                 return orders
@@ -1095,6 +1304,12 @@ class MStockAPI(BrokerAPI):
         price: float,
         trigger_price: float = 0.0,
         order_type: str = "LIMIT",
+        product_type: str = "DELIVERY",
+        duration: str = "DAY",
+        trading_symbol: str = "",
+        symbol_token: str = "",
+        exchange: str = "NSE",
+        variety: str = "NORMAL",
     ) -> OrderResponse:
         """
         Modify an open order (PUT /openapi/typeb/orders/regular/{order_id}).
@@ -1110,19 +1325,31 @@ class MStockAPI(BrokerAPI):
 
         try:
             url = f"{MSTOCK_BASE_URL}/openapi/typeb/orders/regular/{order_id}"
+            prod = _PRODUCT_MAP.get(product_type, product_type)
+            ot = _ORDER_TYPE_MAP.get(order_type, order_type)
             payload = {
-                "orderId": order_id,
-                "orderType": _ORDER_TYPE_MAP.get(order_type, "LIMIT"),
-                "quantity": quantity,
-                "price": price,
-                "triggerPrice": trigger_price,
+                "variety": variety,
+                "orderid": str(order_id),
+                "ordertype": ot,
+                "producttype": prod,
+                "duration": duration,
+                "price": str(price),
+                "quantity": str(quantity),
+                "tradingsymbol": trading_symbol,
+                "symboltoken": str(symbol_token),
+                "exchange": _EXCHANGE_MAP.get(exchange, exchange),
+                "triggerprice": str(trigger_price),
             }
             resp = self._client.put(url, json=payload, headers=self._headers())
             if resp.status_code == 200:
                 data = resp.json()
+                if isinstance(data, list) and data:
+                    data = data[0]
                 res = data.get("data") or data.get("result") or data
+                if isinstance(res, list) and res:
+                    res = res[0]
                 return OrderResponse(
-                    order_id=str(res.get("orderId") or order_id),
+                    order_id=str(res.get("orderId") or res.get("orderid") or order_id),
                     status="MODIFIED",
                     message="Order modified successfully",
                     average_price=price,
@@ -1166,14 +1393,14 @@ class MStockAPI(BrokerAPI):
         type_flag: str = "G",
     ) -> list[dict]:
         """
-        Fetch top gainers or losers (POST /openapi/typea/losergainer).
+        Fetch top gainers or losers (POST /openapi/typeb/losergainer).
         type_flag: "G" for gainers, "L" for losers.
         """
         if not self._token:
             self.authenticate()
 
         try:
-            url = f"{MSTOCK_BASE_URL}/openapi/typea/losergainer"
+            url = f"{MSTOCK_BASE_URL}/openapi/typeb/losergainer"
             payload = {
                 "Exchange": exchange,
                 "SecurityIdCode": security_id_code,
@@ -1207,13 +1434,13 @@ class MStockAPI(BrokerAPI):
         return {"status": False, "message": "Failed to create basket"}
 
     def fetch_baskets(self) -> list[dict]:
-        """Fetch all user baskets (PUT /openapi/typeb/FetchBasket)."""
+        """Fetch all user baskets (GET /openapi/typeb/FetchBasket)."""
         if not self._token:
             self.authenticate()
 
         try:
             url = f"{MSTOCK_BASE_URL}/openapi/typeb/FetchBasket"
-            resp = self._fetch_authed("PUT", url)
+            resp = self._fetch_authed("GET", url)
             if resp.status_code == 200:
                 data = resp.json()
                 baskets = data.get("data") or data.get("result") or []
@@ -1222,44 +1449,69 @@ class MStockAPI(BrokerAPI):
             pass
         return []
 
-    def rename_basket(self, old_name: str, new_name: str) -> dict:
-        """Rename an existing basket (DELETE /openapi/typeb/RenameBasket)."""
+    def rename_basket(self, basket_id: str, new_name: str) -> dict:
+        """Rename an existing basket (PUT /openapi/typeb/RenameBasket)."""
         if not self._token:
             self.authenticate()
 
         try:
             url = f"{MSTOCK_BASE_URL}/openapi/typeb/RenameBasket"
-            payload = {"OldBaskName": old_name, "NewBaskName": new_name}
-            resp = self._fetch_authed("DELETE", url, json=payload)
+            payload = {"basketName": new_name, "BasketId": str(basket_id)}
+            resp = self._fetch_authed("PUT", url, json=payload)
             if resp.status_code == 200:
                 return resp.json()
         except Exception:
             pass
         return {"status": False, "message": "Failed to rename basket"}
 
-    def delete_basket(self, name: str) -> dict:
-        """Delete an existing basket (POST /openapi/typeb/DeleteBasket)."""
+    def delete_basket(self, basket_id: str) -> dict:
+        """Delete an existing basket by ID (DELETE /openapi/typeb/DeleteBasket)."""
         if not self._token:
             self.authenticate()
 
         try:
             url = f"{MSTOCK_BASE_URL}/openapi/typeb/DeleteBasket"
-            payload = {"BaskName": name}
-            resp = self._fetch_authed("POST", url, json=payload)
+            payload = {"BasketId": str(basket_id)}
+            resp = self._fetch_authed("DELETE", url, json=payload)
             if resp.status_code == 200:
                 return resp.json()
         except Exception:
             pass
         return {"status": False, "message": "Failed to delete basket"}
 
-    def calculate_basket(self, name: str) -> dict:
-        """Calculate margin & requirements for a basket (GET /openapi/typeb/CalculateBasket)."""
+    def calculate_basket(self, params_or_name: dict | str) -> dict:
+        """
+        Calculate margin & requirements for a basket (POST /openapi/typeb/CalculateBasket).
+        Accepts full parameter dict or basket name string for basic margin calc.
+        """
         if not self._token:
             self.authenticate()
 
         try:
             url = f"{MSTOCK_BASE_URL}/openapi/typeb/CalculateBasket"
-            resp = self._fetch_authed("GET", url, params={"BaskName": name})
+            if isinstance(params_or_name, dict):
+                payload = params_or_name
+            else:
+                payload = {
+                    "basket_name": str(params_or_name),
+                    "include_exist_pos": "0",
+                    "ord_product": "DELIVERY",
+                    "disc_qty": "0",
+                    "segment": "1",
+                    "trigger_price": "0",
+                    "scriptcode": "",
+                    "ord_type": "MARKET",
+                    "operation": "A",
+                    "order_validity": "DAY",
+                    "order_qty": "1",
+                    "script_stat": "0",
+                    "buy_sell_indi": "B",
+                    "basket_priority": "1",
+                    "order_price": "0",
+                    "basket_id": "",
+                    "exch_id": "1",
+                }
+            resp = self._fetch_authed("POST", url, json=payload)
             if resp.status_code == 200:
                 return resp.json()
         except Exception:
@@ -1276,10 +1528,12 @@ class MStockAPI(BrokerAPI):
         new_product: str,
         quantity: int,
         transaction_type: str = "BUY",
+        symbol_token: str = "",
+        **kwargs,
     ) -> dict:
         """
-        Convert intraday (MIS) to delivery/carryforward (CNC/NRML) or vice-versa
-        (POST /openapi/typeb/positions/convert).
+        Convert position between DELIVERY (CNC) and INTRADAY (MIS)
+        (POST /openapi/typeb/portfolio/convertposition).
         """
         if os.environ.get("ALLOW_LIVE_TRADING", "0") != "1":
             raise PermissionError(
@@ -1289,16 +1543,36 @@ class MStockAPI(BrokerAPI):
         if not self._token:
             raise RuntimeError("m.Stock session not authenticated.")
 
+        clean_sym = symbol.replace("NSE:", "").replace("BSE:", "").strip()
+        token = symbol_token or kwargs.get("symboltoken") or self.get_symbol_token(clean_sym, exchange)
+        old_p = _PRODUCT_MAP.get(old_product, old_product)
+        new_p = _PRODUCT_MAP.get(new_product, new_product)
+
+        payload = {
+            "exchange": _EXCHANGE_MAP.get(exchange, exchange),
+            "symboltoken": str(token),
+            "oldproducttype": old_p,
+            "newproducttype": new_p,
+            "tradingsymbol": kwargs.get("tradingsymbol") or (f"{clean_sym}-EQ" if exchange == "NSE" else clean_sym),
+            "symbolname": kwargs.get("symbolname") or clean_sym,
+            "instrumenttype": kwargs.get("instrumenttype") or "EQ",
+            "priceden": str(kwargs.get("priceden", "1")),
+            "pricenum": str(kwargs.get("pricenum", "1")),
+            "genden": str(kwargs.get("genden", "1")),
+            "gennum": str(kwargs.get("gennum", "1")),
+            "precision": str(kwargs.get("precision", "2")),
+            "multiplier": str(kwargs.get("multiplier", "1")),
+            "boardlotsize": str(kwargs.get("boardlotsize", "1")),
+            "buyqty": str(kwargs.get("buyqty", quantity if transaction_type.upper() == "BUY" else "0")),
+            "sellqty": str(kwargs.get("sellqty", quantity if transaction_type.upper() == "SELL" else "0")),
+            "buyamount": str(kwargs.get("buyamount", "0")),
+            "sellamount": str(kwargs.get("sellamount", "0")),
+            "transactiontype": transaction_type.upper(),
+            "quantity": str(quantity),
+            "type": str(kwargs.get("type", "DAY")),
+        }
         try:
-            url = f"{MSTOCK_BASE_URL}/openapi/typeb/positions/convert"
-            payload = {
-                "exchange": exchange,
-                "symbol": symbol,
-                "oldProduct": _PRODUCT_MAP.get(old_product, old_product),
-                "newProduct": _PRODUCT_MAP.get(new_product, new_product),
-                "quantity": quantity,
-                "transactionType": transaction_type,
-            }
+            url = f"{MSTOCK_BASE_URL}/openapi/typeb/portfolio/convertposition"
             resp = self._client.post(url, json=payload, headers=self._headers())
             if resp.status_code == 200:
                 return resp.json()

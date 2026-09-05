@@ -28,6 +28,7 @@ description: >-
 | **Groww** | OAuth2 Partner | ✅ Internal | ✅ | `/groww/callback` | Partner API integration |
 | **Dhan** | Access Token | ✅ Free API v2 | ✅ | — (direct token) | Simple token-based auth |
 | **Stoxkart** | OAuth2 | ✅ Free REST + WS | ✅ | `/stoxkart/callback` | Free API for algo trading |
+| **m.Stock** | TOTP Auto / OAuth2 | ✅ Free Type B API | ✅ | `/mstock/callback` | Mirae Asset Capital Markets official API & WS |
 | **Mock** | In-Memory | ✅ Synthetic | ✅ Paper | — | **Default fallback** — offline & tests |
 
 ### Broker Routing Priority

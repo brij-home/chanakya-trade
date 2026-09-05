@@ -13,10 +13,12 @@ from market.mstock_websocket import (
     MStockTick,
     MStockWebSocket,
     _DEPTH_ITEM_FMT,
+    _QUOTE_123_FMT,
     _QUOTE_379_FMT,
     parse_binary_frame,
     parse_ltp_packet,
     parse_market_depth,
+    parse_quote_123_packet,
     parse_quote_packet,
 )
 
@@ -89,6 +91,41 @@ def _build_synthetic_379_packet(
     )
 
 
+def _build_synthetic_123_packet(
+    mode: int = 2,
+    exchange_type: int = 1,
+    token: str = "26000",
+    sequence: int = 102,
+    timestamp: int = 1756980000,
+    ltp: float = 24500.50,
+    volume: int = 1500000,
+    open_p: float = 24400.0,
+    high_p: float = 24550.0,
+    low_p: float = 24350.0,
+    close_p: float = 24420.0,
+) -> bytes:
+    """Build a valid 123-byte m.Stock quote packet (MODE_QUOTE)."""
+    raw_token = token.encode("utf-8").ljust(25, b"\x00")
+    return struct.pack(
+        _QUOTE_123_FMT,
+        mode,
+        exchange_type,
+        raw_token,
+        sequence,
+        timestamp,
+        int(ltp * 100),
+        50,  # last_traded_qty
+        int(ltp * 100),  # atp
+        volume,
+        500000.0,  # buy qty
+        450000.0,  # sell qty
+        int(open_p * 100),
+        int(high_p * 100),
+        int(low_p * 100),
+        int(close_p * 100),
+    )
+
+
 def test_parse_market_depth():
     depth_bytes = _build_synthetic_depth_bytes()
     assert len(depth_bytes) == 200
@@ -123,6 +160,32 @@ def test_parse_quote_packet():
     assert tick.fifty_two_week_high == 25000.0
 
 
+def test_parse_quote_123_packet():
+    data = _build_synthetic_123_packet(
+        token="26000",
+        ltp=24550.75,
+        volume=987654,
+        close_p=24500.0,
+    )
+    assert len(data) == 123
+
+    tick = parse_quote_123_packet(data)
+    assert tick is not None
+    assert tick.token == "26000"
+    assert tick.symbol == "NSE:NIFTY 50"
+    assert tick.ltp == 24550.75
+    assert tick.change == 50.75
+    assert tick.change_pct == 0.21
+    assert tick.volume == 987654
+    assert tick.open == 24400.0
+    assert tick.high == 24550.0
+    assert tick.low == 24350.0
+    assert tick.close == 24500.0
+    assert tick.total_buy_qty == 500000.0
+    assert tick.total_sell_qty == 450000.0
+
+
+
 def test_parse_ltp_packet():
     token_bytes = b"26009".ljust(25, b"\x00")
     data = struct.pack(
@@ -154,6 +217,29 @@ def test_parse_binary_frame_multiple_packets():
     assert ticks[0].ltp == 24500.0
     assert ticks[1].token == "26009"
     assert ticks[1].ltp == 52000.0
+
+
+def test_parse_binary_frame_123_packets():
+    p1 = _build_synthetic_123_packet(token="26000", ltp=24550.0)
+    p2 = _build_synthetic_123_packet(token="26009", ltp=52100.0)
+    frame = p1 + p2
+    assert len(frame) == 123 * 2
+
+    ticks = parse_binary_frame(frame)
+    assert len(ticks) == 2
+    assert ticks[0].token == "26000"
+    assert ticks[0].ltp == 24550.0
+    assert ticks[1].token == "26009"
+    assert ticks[1].ltp == 52100.0
+
+
+def test_parse_binary_frame_single_123():
+    p = _build_synthetic_123_packet(token="26000", ltp=24500.0)
+    ticks = parse_binary_frame(p)
+    assert len(ticks) == 1
+    assert ticks[0].token == "26000"
+    assert ticks[0].ltp == 24500.0
+
 
 
 def test_mstock_websocket_tick_processing_and_ws_manager_sync():
