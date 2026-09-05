@@ -13,6 +13,8 @@ from typing import Optional
 
 import httpx
 
+from market.http_pool import get_nse_client
+
 try:
     import feedparser
 
@@ -132,16 +134,10 @@ def get_earnings_calendar(
         days:    Look ahead this many days.
     """
     try:
-        headers = {
-            "User-Agent": "Mozilla/5.0",
-            "Accept": "application/json",
-            "Referer": "https://www.nseindia.com",
-        }
-        with httpx.Client(follow_redirects=True) as session:
-            session.get("https://www.nseindia.com", headers=headers, timeout=5)
-            r = session.get(NSE_CORP_CALENDAR_URL, headers=headers, timeout=8)
-            r.raise_for_status()
-            data = r.json()
+        session = get_nse_client()
+        r = session.get(NSE_CORP_CALENDAR_URL, timeout=8)
+        r.raise_for_status()
+        data = r.json()
 
         today = date.today()
         cutoff = today + timedelta(days=days)
@@ -216,20 +212,13 @@ def get_corporate_actions(symbol: str, n: int = 5) -> list[CorporateAction]:
     Recent dividends, splits, bonuses from NSE for a given symbol.
     """
     try:
-        headers = {
-            "User-Agent": "Mozilla/5.0",
-            "Accept": "application/json",
-            "Referer": "https://www.nseindia.com",
-        }
-        with httpx.Client(follow_redirects=True) as session:
-            session.get("https://www.nseindia.com", headers=headers, timeout=5)
-            r = session.get(
-                NSE_CORP_ACTIONS_URL.format(symbol=symbol.upper()),
-                headers=headers,
-                timeout=8,
-            )
-            r.raise_for_status()
-            data = r.json()
+        session = get_nse_client()
+        r = session.get(
+            NSE_CORP_ACTIONS_URL.format(symbol=symbol.upper()),
+            timeout=8,
+        )
+        r.raise_for_status()
+        data = r.json()
         actions = []
         for item in data[:n]:
             actions.append(

@@ -216,13 +216,20 @@ def run_maintenance_purge(
 
     for db_file in databases:
         if db_file.exists():
+            conn = None
             try:
-                with sqlite3.connect(str(db_file), timeout=10.0) as conn:
-                    conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
-                    if vacuum_databases:
-                        conn.execute("VACUUM")
+                conn = sqlite3.connect(str(db_file), timeout=10.0)
+                conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
+                if vacuum_databases:
+                    conn.execute("VACUUM")
             except Exception:
                 pass
+            finally:
+                if conn is not None:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
 
     after_breakdown = get_storage_breakdown()
     bytes_reclaimed = max(

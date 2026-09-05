@@ -485,19 +485,41 @@ class MStockWebSocket:
                 break
             time.sleep(0.2)
 
-    def stop(self) -> None:
+    def stop(self, timeout: float = 2.0) -> None:
         """Disconnect and stop background thread."""
         self._running = False
         self._connected = False
+        if self._ws:
+            try:
+                if self._loop and self._loop.is_running():
+                    asyncio.run_coroutine_threadsafe(self._ws.close(), self._loop)
+            except Exception:
+                pass
         if self._loop and self._loop.is_running():
             self._loop.call_soon_threadsafe(self._loop.stop)
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=timeout)
         self._ws = None
+        self._thread = None
 
     def _run_loop(self) -> None:
         """Event loop thread target."""
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
-        self._loop.run_until_complete(self._connect_and_listen())
+        try:
+            self._loop.run_until_complete(self._connect_and_listen())
+        except Exception as e:
+            logger.debug(f"m.Stock event loop terminated: {e}")
+        finally:
+            try:
+                self._loop.run_until_complete(self._loop.shutdown_asyncgens())
+            except Exception:
+                pass
+            try:
+                self._loop.close()
+            except Exception:
+                pass
+            self._loop = None
 
     async def _connect_and_listen(self) -> None:
         """Async connection loop with exponential reconnect backoff."""

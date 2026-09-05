@@ -18,10 +18,12 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Generator
 
+from engine.db_pool import SQLiteConnectionPool
 from config.paths import app_data_path
 
 DEFAULT_DB_PATH = app_data_path("analysis_cache.db")
@@ -36,21 +38,18 @@ class AnalysisCache:
     def __init__(self, db_path: Path | None = None, max_records: int = DEFAULT_MAX_RECORDS):
         self.db_path = db_path or DEFAULT_DB_PATH
         self.max_records = max_records
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._pool = SQLiteConnectionPool(str(self.db_path), max_conns=5)
         self._init_db()
 
-    def _get_conn(self) -> sqlite3.Connection:
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(str(self.db_path), timeout=30.0, check_same_thread=False)
-        conn.row_factory = sqlite3.Row
-        try:
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("PRAGMA synchronous=NORMAL")
-            conn.execute("PRAGMA busy_timeout=30000")
-            conn.execute("PRAGMA cache_size=-32000")  # 32 MB page cache per connection
-            conn.execute("PRAGMA mmap_size=134217728")  # 128 MB memory-mapped SSD I/O
-        except Exception:
-            pass
-        return conn
+    @contextmanager
+    def _get_conn(self) -> Generator[sqlite3.Connection, None, None]:
+        with self._pool.acquire() as conn:
+            yield conn
+
+    def close(self) -> None:
+        """Close pooled connections."""
+        self._pool.close()
 
     def _init_db(self) -> None:
         with self._get_conn() as conn:

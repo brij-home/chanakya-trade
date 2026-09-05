@@ -1037,21 +1037,38 @@ def disconnect_broker(choice: Optional[str] = None) -> None:
         return
 
     try:
-        _brokers[key].logout()
+        if hasattr(_brokers[key], "stop_websocket"):
+            _brokers[key].stop_websocket()
+        if hasattr(_brokers[key], "close"):
+            _brokers[key].close()
+        elif hasattr(_brokers[key], "logout"):
+            _brokers[key].logout()
     except Exception:
         pass
     del _brokers[key]
     console.print(f"[yellow]{key.title()} disconnected.[/yellow]")
 
 
-def logout() -> None:
-    """Logout ALL connected brokers and clear all sessions."""
-    global _brokers, _primary_key
+def close_all_brokers() -> None:
+    """Gracefully close all active broker sessions, HTTP clients, and WebSockets."""
+    global _brokers, _primary_key, _data_key, _exec_key
     for key, broker in list(_brokers.items()):
         try:
-            broker.logout()
+            if hasattr(broker, "stop_websocket"):
+                broker.stop_websocket()
+            if hasattr(broker, "close"):
+                broker.close()
+            elif hasattr(broker, "logout"):
+                broker.logout()
         except Exception:
             pass
     _brokers = {}
     _primary_key = ""
+    _data_key = ""
+    _exec_key = ""
+
+
+def logout() -> None:
+    """Logout ALL connected brokers and clear all sessions."""
+    close_all_brokers()
     console.print("[yellow]All brokers logged out.[/yellow]")

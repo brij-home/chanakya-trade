@@ -7,9 +7,11 @@ import os
 import queue
 import sqlite3
 import threading
+import time
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Optional
 
 from config.paths import app_data_path
 from market.data_events import MarketDataEvent
@@ -32,8 +34,10 @@ class TickArchive:
     """A bounded producer queue so storage never delays broker stream callbacks."""
 
     def __init__(self, max_queue_size: int = 10_000) -> None:
-        self._queue: queue.Queue[MarketDataEvent] = queue.Queue(maxsize=max_queue_size)
+        self._queue: queue.Queue[Optional[MarketDataEvent]] = queue.Queue(maxsize=max_queue_size)
         self._started = False
+        self._running = False
+        self._worker_thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
         self.dropped_events = 0
 
@@ -49,7 +53,27 @@ class TickArchive:
             if self._started:
                 return
             self._started = True
-            threading.Thread(target=self._run, daemon=True, name="market-tick-archive").start()
+            self._running = True
+            self._worker_thread = threading.Thread(
+                target=self._run, daemon=True, name="market-tick-archive"
+            )
+            self._worker_thread.start()
+
+    def stop(self, timeout: float = 2.0) -> None:
+        """Signal worker thread to stop, drain queue, and join cleanly."""
+        with self._lock:
+            if not self._started or not self._running:
+                return
+            self._running = False
+        try:
+            self._queue.put_nowait(None)  # Sentinel to unblock queue.get()
+        except Exception:
+            pass
+        if self._worker_thread and self._worker_thread.is_alive():
+            self._worker_thread.join(timeout=timeout)
+        with self._lock:
+            self._started = False
+            self._worker_thread = None
 
     def _init_db(self, conn: sqlite3.Connection) -> None:
         try:
@@ -83,57 +107,75 @@ class TickArchive:
         conn.commit()
 
     def _run(self) -> None:
+        conn = None
         try:
-            with sqlite3.connect(_db_path(), timeout=30.0) as conn:
-                self._init_db(conn)
-                last_prune_time = time.time()
-                while True:
-                    first = self._queue.get()
-                    batch = [first]
-                    while len(batch) < 250:
-                        try:
-                            batch.append(self._queue.get_nowait())
-                        except queue.Empty:
+            conn = sqlite3.connect(_db_path(), timeout=30.0)
+            self._init_db(conn)
+            last_prune_time = time.time()
+            while self._running:
+                try:
+                    first = self._queue.get(timeout=1.0)
+                except queue.Empty:
+                    continue
+                if first is None:
+                    break
+                batch = [first]
+                while len(batch) < 250:
+                    try:
+                        item = self._queue.get_nowait()
+                        if item is None:
+                            self._running = False
                             break
-                    conn.executemany(
-                        """
-                        INSERT INTO raw_market_ticks(
-                            received_at, canonical_instrument_id, provider, provider_symbol,
-                            source, data_state, last_price, payload_json
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                        """,
-                        [
-                            (
-                                event.received_at,
-                                event.canonical_instrument_id,
-                                event.provider,
-                                event.provider_symbol,
-                                event.source,
-                                event.data_state,
-                                event.last_price,
-                                json.dumps(asdict(event), sort_keys=True, default=str),
-                            )
-                            for event in batch
-                        ],
-                    )
+                        batch.append(item)
+                    except queue.Empty:
+                        break
+                conn.executemany(
+                    """
+                    INSERT INTO raw_market_ticks(
+                        received_at, canonical_instrument_id, provider, provider_symbol,
+                        source, data_state, last_price, payload_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    [
+                        (
+                            event.received_at,
+                            event.canonical_instrument_id,
+                            event.provider,
+                            event.provider_symbol,
+                            event.source,
+                            event.data_state,
+                            event.last_price,
+                            json.dumps(asdict(event), sort_keys=True, default=str),
+                        )
+                        for event in batch
+                    ],
+                )
 
-                    # Decoupled periodic prune (runs at most once every 30 minutes, not every 250 ticks)
-                    now_ts = time.time()
-                    if now_ts - last_prune_time > 1800.0:
-                        last_prune_time = now_ts
-                        cutoff = (
-                            datetime.now(timezone.utc) - timedelta(days=_retention_days())
-                        ).isoformat()
-                        conn.execute("DELETE FROM raw_market_ticks WHERE received_at < ?", (cutoff,))
-                        try:
-                            conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
-                        except Exception:
-                            pass
-                    conn.commit()
+                # Decoupled periodic prune (runs at most once every 30 minutes, not every 250 ticks)
+                now_ts = time.time()
+                if now_ts - last_prune_time > 1800.0:
+                    last_prune_time = now_ts
+                    cutoff = (
+                        datetime.now(timezone.utc) - timedelta(days=_retention_days())
+                    ).isoformat()
+                    conn.execute("DELETE FROM raw_market_ticks WHERE received_at < ?", (cutoff,))
+                    try:
+                        conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
+                    except Exception:
+                        pass
+                conn.commit()
         except Exception:
             # Archival is diagnostic; the live path remains available if disk is full or locked.
+            pass
+        finally:
             with self._lock:
                 self._started = False
+                self._running = False
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
 
 
 def prune_tick_archive(retention_days: Optional[int] = None, max_rows: int = 500_000) -> int:
@@ -141,28 +183,35 @@ def prune_tick_archive(retention_days: Optional[int] = None, max_rows: int = 500
     days = retention_days or _retention_days()
     cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
     deleted = 0
+    conn = None
     try:
-        with sqlite3.connect(_db_path(), timeout=30.0) as conn:
-            conn.execute("PRAGMA busy_timeout=30000")
-            cur = conn.execute("DELETE FROM raw_market_ticks WHERE received_at < ?", (cutoff,))
-            deleted += cur.rowcount
+        conn = sqlite3.connect(_db_path(), timeout=30.0)
+        conn.execute("PRAGMA busy_timeout=30000")
+        cur = conn.execute("DELETE FROM raw_market_ticks WHERE received_at < ?", (cutoff,))
+        deleted += cur.rowcount
 
-            # Enforce max rows ceiling if needed
-            count_row = conn.execute("SELECT COUNT(*) FROM raw_market_ticks").fetchone()
-            total = count_row[0] if count_row else 0
-            if total > max_rows:
-                overflow = total - max_rows
-                cur2 = conn.execute(
-                    "DELETE FROM raw_market_ticks WHERE rowid IN (SELECT rowid FROM raw_market_ticks ORDER BY received_at ASC LIMIT ?)",
-                    (overflow,),
-                )
-                deleted += cur2.rowcount
+        # Enforce max rows ceiling if needed
+        count_row = conn.execute("SELECT COUNT(*) FROM raw_market_ticks").fetchone()
+        total = count_row[0] if count_row else 0
+        if total > max_rows:
+            overflow = total - max_rows
+            cur2 = conn.execute(
+                "DELETE FROM raw_market_ticks WHERE rowid IN (SELECT rowid FROM raw_market_ticks ORDER BY received_at ASC LIMIT ?)",
+                (overflow,),
+            )
+            deleted += cur2.rowcount
 
-            conn.commit()
-            if deleted > 0:
-                conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
+        conn.commit()
+        if deleted > 0:
+            conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
     except Exception:
         pass
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
     return deleted
 
 

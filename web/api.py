@@ -185,7 +185,46 @@ async def lifespan(app: FastAPI):
     yield
     warmer_task.cancel()
     maintenance_task.cancel()
-    ticker_stream.stop()
+    try:
+        ticker_stream.stop(timeout=1.5)
+    except Exception:
+        pass
+    try:
+        from market.tick_store import tick_archive
+
+        tick_archive.stop(timeout=1.5)
+    except Exception:
+        pass
+    try:
+        from brokers.session import close_all_brokers
+
+        close_all_brokers()
+    except Exception:
+        pass
+    try:
+        from engine.search import analysis_search
+
+        analysis_search.close()
+    except Exception:
+        pass
+    try:
+        from market.http_pool import close_http_pools
+
+        close_http_pools()
+    except Exception:
+        pass
+    try:
+        from engine.analysis_cache import analysis_cache
+
+        analysis_cache.close()
+    except Exception:
+        pass
+    try:
+        from market.instrument_master import close_db
+
+        close_db()
+    except Exception:
+        pass
 
 
 app = FastAPI(

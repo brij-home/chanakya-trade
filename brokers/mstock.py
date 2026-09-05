@@ -471,6 +471,15 @@ class MStockAPI(BrokerAPI):
                 TOKEN_FILE.unlink()
             except Exception:
                 pass
+        if hasattr(self, "_client") and self._client is not None:
+            try:
+                self._client.close()
+            except Exception:
+                pass
+
+    def close(self) -> None:
+        """Alias for logout to conform to standard resource close protocol."""
+        self.logout()
 
     # ── Headers Helper ────────────────────────────────────────
 

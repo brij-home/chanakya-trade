@@ -4,15 +4,21 @@ from __future__ import annotations
 
 import re
 import sqlite3
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+import threading
+from typing import Any, Generator, Optional
 
+from engine.db_pool import SQLiteConnectionPool
 from config.paths import app_data_path
 
 # Option symbols conventionally end in a numeric strike followed by CE/PE.
 # Requiring the strike avoids misclassifying cash equities such as RELIANCE.
 _DERIVATIVE_PATTERN = re.compile(r"\d(?:CE|PE)$", re.IGNORECASE)
+
+_POOL: Optional[SQLiteConnectionPool] = None
+_POOL_LOCK = threading.Lock()
 
 
 def is_derivative_query(symbol: str) -> bool:
@@ -26,8 +32,32 @@ def _db_path() -> Path:
     return path
 
 
+def _get_pool() -> SQLiteConnectionPool:
+    global _POOL
+    if _POOL is None or _POOL._closed:
+        with _POOL_LOCK:
+            if _POOL is None or _POOL._closed:
+                _POOL = SQLiteConnectionPool(str(_db_path()), max_conns=5)
+    return _POOL
+
+
+@contextmanager
+def _get_db() -> Generator[sqlite3.Connection, None, None]:
+    with _get_pool().acquire() as conn:
+        yield conn
+
+
+def close_db() -> None:
+    """Close all pooled connections for instrument master."""
+    global _POOL
+    with _POOL_LOCK:
+        if _POOL is not None:
+            _POOL.close()
+            _POOL = None
+
+
 def _init_db() -> None:
-    with sqlite3.connect(_db_path(), timeout=30.0) as conn:
+    with _get_db() as conn:
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS verified_contracts (
@@ -65,7 +95,7 @@ def upsert_verified_contract(
             "Verified contract requires symbol, token, positive lot size and tick size"
         )
     _init_db()
-    with sqlite3.connect(_db_path(), timeout=30.0) as conn:
+    with _get_db() as conn:
         conn.execute(
             """
             INSERT INTO verified_contracts(
@@ -98,7 +128,7 @@ def upsert_verified_contract(
 def get_verified_contract(symbol: str) -> Optional[dict[str, Any]]:
     """Return recently persisted contract metadata; never synthesize an F&O lot."""
     _init_db()
-    with sqlite3.connect(_db_path(), timeout=30.0) as conn:
+    with _get_db() as conn:
         conn.row_factory = sqlite3.Row
         row = conn.execute(
             "SELECT * FROM verified_contracts WHERE lookup_symbol = ?", ((symbol or "").upper(),)

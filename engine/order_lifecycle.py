@@ -20,10 +20,11 @@ import json
 import math
 import sqlite3
 import uuid
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Literal, Optional
+from typing import Any, Generator, Literal, Optional
 
 from config.paths import app_data_path
 from engine.charges import calculate_transaction_charges
@@ -35,6 +36,15 @@ def _get_db_path() -> Path:
     p = app_data_path("orders.db")
     p.parent.mkdir(parents=True, exist_ok=True)
     return p
+
+
+@contextmanager
+def _get_orders_db() -> Generator[sqlite3.Connection, None, None]:
+    conn = sqlite3.connect(_get_db_path(), timeout=30.0)
+    try:
+        yield conn
+    finally:
+        conn.close()
 
 
 OrderStatus = Literal[
@@ -91,7 +101,7 @@ class OrderIntent:
 
 
 def _init_orders_db():
-    with sqlite3.connect(_get_db_path(), timeout=30.0) as conn:
+    with _get_orders_db() as conn:
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS orders_ledger (
@@ -179,7 +189,7 @@ def _record_order_event(
         _init_orders_db()
         occurred_at = datetime.now(timezone.utc).isoformat()
         body = json.dumps(payload or {}, sort_keys=True, separators=(",", ":"), default=str)
-        with sqlite3.connect(_get_db_path(), timeout=30.0) as conn:
+        with _get_orders_db() as conn:
             previous = conn.execute(
                 "SELECT event_hash FROM order_events WHERE order_id = ? ORDER BY occurred_at DESC LIMIT 1",
                 (order_id,),
@@ -393,7 +403,7 @@ def preview_order_intent(
 
     # Concurrency-safe atomic insert: INSERT ... ON CONFLICT(idempotency_key) DO NOTHING
     now_iso = datetime.now(timezone.utc).isoformat()
-    with sqlite3.connect(_get_db_path(), timeout=30.0) as conn:
+    with _get_orders_db() as conn:
         conn.row_factory = sqlite3.Row
         cursor = conn.execute(
             """
@@ -493,7 +503,7 @@ def confirm_order_intent(order_id: str, preview_hash: str) -> OrderIntent:
     mode_info = get_trading_mode()
     now_iso = datetime.now(timezone.utc).isoformat()
 
-    with sqlite3.connect(_get_db_path(), timeout=30.0) as conn:
+    with _get_orders_db() as conn:
         conn.row_factory = sqlite3.Row
         row = conn.execute("SELECT * FROM orders_ledger WHERE order_id = ?", (order_id,)).fetchone()
         if not row:
@@ -578,7 +588,7 @@ def execute_order_intent(order_id: str) -> OrderIntent:
          passing pretrade risk gates, and never fabricates mock orders or IDs on timeout.
     """
     _init_orders_db()
-    with sqlite3.connect(_get_db_path(), timeout=30.0) as conn:
+    with _get_orders_db() as conn:
         conn.row_factory = sqlite3.Row
         cursor = conn.execute("SELECT * FROM orders_ledger WHERE order_id = ?", (order_id,))
         row = cursor.fetchone()
@@ -626,7 +636,7 @@ def execute_order_intent(order_id: str) -> OrderIntent:
         raise ValueError(
             f"Order {order_id} instrument metadata does not match the authoritative instrument master."
         )
-    with sqlite3.connect(_get_db_path(), timeout=30.0) as conn:
+    with _get_orders_db() as conn:
         cursor = conn.execute(
             """
             UPDATE orders_ledger
@@ -646,7 +656,7 @@ def execute_order_intent(order_id: str) -> OrderIntent:
     if mode_info.is_observe:
         d["status"] = "REJECTED"
         d["rejection_reason"] = "Mutation blocked: System is operating in OBSERVE mode."
-        with sqlite3.connect(_get_db_path(), timeout=30.0) as conn:
+        with _get_orders_db() as conn:
             conn.execute(
                 "UPDATE orders_ledger SET status = ?, rejection_reason = ?, updated_at = ? WHERE order_id = ?",
                 (d["status"], d["rejection_reason"], now_iso, order_id),
@@ -690,7 +700,7 @@ def execute_order_intent(order_id: str) -> OrderIntent:
             d["rejection_reason"] = f"PaperBroker error: {paper_exc}"
             d["broker_order_id"] = None
 
-        with sqlite3.connect(_get_db_path(), timeout=30.0) as conn:
+        with _get_orders_db() as conn:
             conn.execute(
                 "UPDATE orders_ledger SET status = ?, broker_order_id = ?, rejection_reason = ?, updated_at = ? WHERE order_id = ?",
                 (d["status"], d["broker_order_id"], d["rejection_reason"], now_iso, order_id),
@@ -780,7 +790,7 @@ def execute_order_intent(order_id: str) -> OrderIntent:
         except Exception as _ctx_exc:
             d["status"] = "UNKNOWN_FREEZE"
             d["rejection_reason"] = f"Live pretrade context fetch failed: {_ctx_exc}."
-            with sqlite3.connect(_get_db_path(), timeout=30.0) as conn:
+            with _get_orders_db() as conn:
                 conn.execute(
                     "UPDATE orders_ledger SET status = ?, rejection_reason = ?, updated_at = ? WHERE order_id = ?",
                     (d["status"], d["rejection_reason"], now_iso, order_id),
@@ -807,7 +817,7 @@ def execute_order_intent(order_id: str) -> OrderIntent:
             reasons = "; ".join(pretrade.blocking_reasons)
             d["status"] = "REJECTED"
             d["rejection_reason"] = f"Pre-trade validation blocked: {reasons}"
-            with sqlite3.connect(_get_db_path(), timeout=30.0) as conn:
+            with _get_orders_db() as conn:
                 conn.execute(
                     "UPDATE orders_ledger SET status = ?, rejection_reason = ?, updated_at = ? WHERE order_id = ?",
                     (d["status"], d["rejection_reason"], now_iso, order_id),
@@ -843,7 +853,7 @@ def execute_order_intent(order_id: str) -> OrderIntent:
                 d["status"] = "OPEN" if broker_res.status == "OPEN" else "FILLED"
                 d["broker_order_id"] = broker_res.order_id
 
-                with sqlite3.connect(_get_db_path(), timeout=30.0) as conn:
+                with _get_orders_db() as conn:
                     conn.execute(
                         "UPDATE orders_ledger SET status = ?, broker_order_id = ?, updated_at = ? WHERE order_id = ?",
                         (d["status"], d["broker_order_id"], now_iso, order_id),
@@ -865,7 +875,7 @@ def execute_order_intent(order_id: str) -> OrderIntent:
                 d["status"] = "REJECTED"
                 d["rejection_reason"] = broker_res.message or "Rejected by live broker"
 
-                with sqlite3.connect(_get_db_path(), timeout=30.0) as conn:
+                with _get_orders_db() as conn:
                     conn.execute(
                         "UPDATE orders_ledger SET status = ?, rejection_reason = ?, updated_at = ? WHERE order_id = ?",
                         (d["status"], d["rejection_reason"], now_iso, order_id),
@@ -887,7 +897,7 @@ def execute_order_intent(order_id: str) -> OrderIntent:
                     "Order frozen for manual reconciliation."
                 )
 
-                with sqlite3.connect(_get_db_path(), timeout=30.0) as conn:
+                with _get_orders_db() as conn:
                     conn.execute(
                         "UPDATE orders_ledger SET status = ?, broker_order_id = ?, rejection_reason = ?, updated_at = ? WHERE order_id = ?",
                         (
@@ -926,7 +936,7 @@ def execute_order_intent(order_id: str) -> OrderIntent:
                 "Order status ambiguous; frozen for manual reconciliation."
             )
 
-            with sqlite3.connect(_get_db_path(), timeout=30.0) as conn:
+            with _get_orders_db() as conn:
                 conn.execute(
                     "UPDATE orders_ledger SET status = ?, broker_order_id = ?, rejection_reason = ?, updated_at = ? WHERE order_id = ?",
                     (d["status"], d["broker_order_id"], d["rejection_reason"], now_iso, order_id),
@@ -989,7 +999,7 @@ def set_ledger_cash_baseline(account_id: str, opening_cash: float, *, actor: str
     ):
         raise ValueError("opening_cash must be a finite non-negative amount")
     _init_orders_db()
-    with sqlite3.connect(_get_db_path(), timeout=30.0) as conn:
+    with _get_orders_db() as conn:
         conn.execute(
             """
             INSERT INTO ledger_cash_baselines(account_id, opening_cash, established_at, established_by)
@@ -1018,7 +1028,7 @@ def get_internal_ledger_snapshot(account_id: str) -> Optional[dict[str, Any]]:
     if not account_id:
         return None
     _init_orders_db()
-    with sqlite3.connect(_get_db_path(), timeout=30.0) as conn:
+    with _get_orders_db() as conn:
         conn.row_factory = sqlite3.Row
         baseline = conn.execute(
             "SELECT * FROM ledger_cash_baselines WHERE account_id = ?", (account_id,)
@@ -1106,7 +1116,7 @@ def sync_execution_orders() -> dict[str, Any]:
         "REJECTED": "REJECTED",
     }
     events_to_record: list[tuple[str, str, int]] = []
-    with sqlite3.connect(_get_db_path(), timeout=30.0) as conn:
+    with _get_orders_db() as conn:
         conn.row_factory = sqlite3.Row
         known_rows = conn.execute(
             "SELECT order_id, broker_order_id, status FROM orders_ledger WHERE broker_order_id IS NOT NULL"

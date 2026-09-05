@@ -188,8 +188,8 @@ class WebSocketManager:
         else:
             logger.warning("WebSocket connection timed out — will use REST fallback")
 
-    def stop(self) -> None:
-        """Disconnect the WebSocket."""
+    def stop(self, timeout: float = 2.0) -> None:
+        """Disconnect the WebSocket and join background thread."""
         if self._ws:
             try:
                 self._ws.close_connection()
@@ -197,6 +197,9 @@ class WebSocketManager:
                 pass
         self._connected = False
         self._ws = None
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=timeout)
+        self._thread = None
 
     def subscribe(self, symbols: list[str]) -> None:
         """Subscribe to symbols for real-time ticks."""

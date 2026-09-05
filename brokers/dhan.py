@@ -142,6 +142,15 @@ class DhanBroker(BrokerAPI):
         self.access_token = ""
         self.client_id = ""
         self._session.headers.pop("access-token", None)
+        if hasattr(self, "_session") and self._session is not None:
+            try:
+                self._session.close()
+            except Exception:
+                pass
+
+    def close(self) -> None:
+        """Alias for logout to conform to standard resource close protocol."""
+        self.logout()
 
     # ── Account ──────────────────────────────────────────────
 

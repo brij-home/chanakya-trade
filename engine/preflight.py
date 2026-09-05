@@ -270,13 +270,20 @@ def run_preflight(verbose: bool = True) -> PreflightReport:
         for db_name in dbs_to_check:
             db_p = app_data_path(db_name)
             if db_p.exists():
+                conn = None
                 try:
-                    with sqlite3.connect(str(db_p), timeout=5.0) as conn:
-                        row = conn.execute("PRAGMA quick_check").fetchone()
-                        if not row or row[0] != "ok":
-                            corrupt_dbs.append(f"{db_name}: {row[0] if row else 'empty'}")
+                    conn = sqlite3.connect(str(db_p), timeout=5.0)
+                    row = conn.execute("PRAGMA quick_check").fetchone()
+                    if not row or row[0] != "ok":
+                        corrupt_dbs.append(f"{db_name}: {row[0] if row else 'empty'}")
                 except Exception as err:
                     corrupt_dbs.append(f"{db_name}: {err}")
+                finally:
+                    if conn is not None:
+                        try:
+                            conn.close()
+                        except Exception:
+                            pass
 
         if corrupt_dbs:
             checks.append(

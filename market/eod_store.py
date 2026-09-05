@@ -5,9 +5,10 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Generator, Optional
 
 from config.paths import app_data_path
 
@@ -18,8 +19,17 @@ def _db_path() -> Path:
     return path
 
 
+@contextmanager
+def _get_db() -> Generator[sqlite3.Connection, None, None]:
+    conn = sqlite3.connect(_db_path(), timeout=30.0)
+    try:
+        yield conn
+    finally:
+        conn.close()
+
+
 def _init_db() -> None:
-    with sqlite3.connect(_db_path(), timeout=30.0) as conn:
+    with _get_db() as conn:
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS eod_snapshots (
@@ -65,7 +75,7 @@ def save_eod_snapshot(
     snapshot_id = hashlib.sha256(
         f"{canonical_instrument_id}|{provider}|{as_of_date}|{checksum}".encode("utf-8")
     ).hexdigest()[:32]
-    with sqlite3.connect(_db_path(), timeout=30.0) as conn:
+    with _get_db() as conn:
         conn.execute(
             """
             INSERT OR IGNORE INTO eod_snapshots (
@@ -101,7 +111,7 @@ def load_eod_snapshot(
         sql += " AND as_of_date = ?"
         params.append(as_of_date)
     sql += " ORDER BY retrieved_at DESC LIMIT 1"
-    with sqlite3.connect(_db_path(), timeout=30.0) as conn:
+    with _get_db() as conn:
         conn.row_factory = sqlite3.Row
         row = conn.execute(sql, params).fetchone()
     if not row:

@@ -584,9 +584,15 @@ class MarketTickerStream:
         self._worker_thread = threading.Thread(target=_poll_worker, daemon=True, name="TickerStreamWorker")
         self._worker_thread.start()
 
-    def stop(self) -> None:
-        """Stop background worker."""
+    def stop(self, timeout: float = 2.0) -> None:
+        """Stop background worker and join cleanly."""
         self._running = False
+        if self._worker_thread and self._worker_thread.is_alive():
+            try:
+                self._worker_thread.join(timeout=timeout)
+            except Exception:
+                pass
+        self._worker_thread = None
 
 
 # Global singleton

@@ -2374,6 +2374,9 @@ async def analyze_followup(req: AnalyzeFollowupRequest):
                 ctx_lines.append("\nUse the analysis above as your primary source of truth.")
 
             system_msg = "\n".join(ctx_lines)
+            if len(_chat_sessions) >= 200:
+                oldest_key = next(iter(_chat_sessions))
+                _chat_sessions.pop(oldest_key, None)
             # Store session as dict with system prompt and message history
             _chat_sessions[session_key] = {
                 "system": system_msg,
@@ -2384,6 +2387,8 @@ async def analyze_followup(req: AnalyzeFollowupRequest):
 
         # Build messages: system + history + new question
         session["history"].append({"role": "user", "content": req.question})
+        if len(session["history"]) > 20:
+            session["history"] = session["history"][-20:]
 
         # Direct LLM call — empty registry so NO tools are available
         from agent.core import ToolRegistry
@@ -2396,6 +2401,8 @@ async def analyze_followup(req: AnalyzeFollowupRequest):
         response = provider.chat(messages=messages, stream=False)
 
         session["history"].append({"role": "assistant", "content": response})
+        if len(session["history"]) > 20:
+            session["history"] = session["history"][-20:]
 
         return {
             "status": "ok",
@@ -4759,12 +4766,13 @@ def _compute_market_overview_sync() -> dict:
         _ex = _cf.ThreadPoolExecutor(max_workers=1)
         from analysis.sector_rotation import get_sector_rrg_matrix
 
-        _fut = _ex.submit(get_sector_rrg_matrix, use_cache=True)
         try:
-            rrg = _fut.result(timeout=3.5)
-            _ex.shutdown(wait=False)
-        except _cf.TimeoutError:
-            rrg = []
+            _fut = _ex.submit(get_sector_rrg_matrix, use_cache=True)
+            try:
+                rrg = _fut.result(timeout=3.5)
+            except Exception:
+                rrg = []
+        finally:
             _ex.shutdown(wait=False, cancel_futures=True)
 
         if rrg and len(rrg) > 0:
