@@ -41,10 +41,29 @@ INTERVAL_MAP = {
 
 import time
 import threading
+from collections import OrderedDict
 
 _df_memory_cache_lock = threading.Lock()
-_df_memory_cache: dict[str, tuple[float, pd.DataFrame]] = {}
+MAX_MEMORY_DFS = 64  # Bounded for 8 GB RAM profile (<25 MB footprint)
+_df_memory_cache: OrderedDict[str, tuple[float, pd.DataFrame]] = OrderedDict()
 _DF_TTL_SECONDS = 300.0  # 5 minutes in-memory cache
+
+
+def clear_df_memory_cache() -> int:
+    """Evict all cached DataFrames from memory. Used by memory_guard under memory pressure."""
+    with _df_memory_cache_lock:
+        count = len(_df_memory_cache)
+        _df_memory_cache.clear()
+        return count
+
+
+# Register with memory guard sentinel
+try:
+    from engine.memory_guard import register_trim_callback
+    register_trim_callback(clear_df_memory_cache)
+except Exception:
+    pass
+
 
 
 def get_ohlcv(
@@ -90,6 +109,7 @@ def get_ohlcv(
             if cache_key in _df_memory_cache:
                 stored_ts, cached_df = _df_memory_cache[cache_key]
                 if now_ts - stored_ts < _DF_TTL_SECONDS and not cached_df.empty:
+                    _df_memory_cache.move_to_end(cache_key)
                     return cached_df.copy()
 
     to_date = effective_to or datetime.now()
@@ -220,21 +240,12 @@ def get_ohlcv(
         "reproducible": bool(snapshot_id) and not include_live_candle,
     }
 
-    # Save into Tier 1 In-Memory Cache (bounded to 500 entries)
+    # Save into Tier 1 In-Memory Cache (bounded LRU max MAX_MEMORY_DFS)
     if kite_interval == "day" and not df.empty:
         with _df_memory_cache_lock:
-            if len(_df_memory_cache) > 500:
-                # Prune entries older than _DF_TTL_SECONDS
-                expired = [
-                    k for k, (t, _) in _df_memory_cache.items() if now_ts - t > _DF_TTL_SECONDS
-                ]
-                for k in expired:
-                    _df_memory_cache.pop(k, None)
-                # If still over 500, drop oldest 100 entries
-                if len(_df_memory_cache) > 500:
-                    sorted_by_time = sorted(_df_memory_cache.items(), key=lambda item: item[1][0])
-                    for k, _ in sorted_by_time[:100]:
-                        _df_memory_cache.pop(k, None)
+            # Enforce max limit by evicting oldest item
+            while len(_df_memory_cache) >= MAX_MEMORY_DFS:
+                _df_memory_cache.popitem(last=False)
             _df_memory_cache[cache_key] = (now_ts, df.copy())
 
     return df

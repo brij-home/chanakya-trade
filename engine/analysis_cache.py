@@ -22,7 +22,9 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-DEFAULT_DB_PATH = Path.home() / ".trading_platform" / "analysis_cache.db"
+from config.paths import app_data_path
+
+DEFAULT_DB_PATH = app_data_path("analysis_cache.db")
 DEFAULT_TTL_MINUTES = 15
 DEFAULT_MAX_PRICE_DRIFT_PCT = 1.0
 DEFAULT_MAX_RECORDS = 500
@@ -44,6 +46,8 @@ class AnalysisCache:
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA synchronous=NORMAL")
             conn.execute("PRAGMA busy_timeout=30000")
+            conn.execute("PRAGMA cache_size=-32000")  # 32 MB page cache per connection
+            conn.execute("PRAGMA mmap_size=134217728")  # 128 MB memory-mapped SSD I/O
         except Exception:
             pass
         return conn
@@ -278,7 +282,7 @@ class AnalysisCache:
             deleted += cur.rowcount
             conn.execute("DELETE FROM macro_cache WHERE expires_at <= ?", (now,))
 
-            # 2. Enforce max records
+            # 2. Enforce max records on analysis_cache
             count_row = conn.execute("SELECT COUNT(*) as c FROM analysis_cache").fetchone()
             total = count_row["c"] if count_row else 0
             if total > self.max_records:
@@ -294,7 +298,32 @@ class AnalysisCache:
                     (overflow,),
                 )
                 deleted += cur2.rowcount
+
+            # 3. Enforce max records on macro_cache
+            macro_count_row = conn.execute("SELECT COUNT(*) as c FROM macro_cache").fetchone()
+            macro_total = macro_count_row["c"] if macro_count_row else 0
+            if macro_total > self.max_records:
+                macro_overflow = macro_total - self.max_records
+                cur3 = conn.execute(
+                    """
+                    DELETE FROM macro_cache
+                    WHERE rowid IN (
+                        SELECT rowid FROM macro_cache
+                        ORDER BY created_at ASC LIMIT ?
+                    )
+                    """,
+                    (macro_overflow,),
+                )
+                deleted += cur3.rowcount
+
             conn.commit()
+
+            # Passive WAL checkpoint if items deleted to recycle WAL frames
+            if deleted > 0:
+                try:
+                    conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
+                except Exception:
+                    pass
         return deleted
 
     def get_stats(self) -> dict[str, Any]:

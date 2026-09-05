@@ -126,6 +126,12 @@ async def _background_cache_warmer():
                 get_sector_rrg_matrix(use_cache=True)
             except Exception:
                 pass
+            # 4. Check memory headroom and trim in-memory caches if approaching limits
+            try:
+                from engine.memory_guard import trim_memory_if_needed
+                trim_memory_if_needed()
+            except Exception:
+                pass
         except Exception:
             pass
 
@@ -140,6 +146,19 @@ async def _background_cache_warmer():
         pass
     except Exception:
         pass
+
+
+async def _background_maintenance_scheduler():
+    """Background task to run periodic storage maintenance and purge every 6 hours."""
+    while True:
+        try:
+            await asyncio.sleep(21600)  # 6 hours
+            from engine.maintenance import run_maintenance_purge
+            await asyncio.to_thread(run_maintenance_purge)
+        except asyncio.CancelledError:
+            break
+        except Exception:
+            pass
 
 
 @asynccontextmanager
@@ -162,8 +181,10 @@ async def lifespan(app: FastAPI):
     ticker_stream.start(poll_interval_seconds=3.0)
 
     warmer_task = asyncio.create_task(_background_cache_warmer())
+    maintenance_task = asyncio.create_task(_background_maintenance_scheduler())
     yield
     warmer_task.cancel()
+    maintenance_task.cancel()
     ticker_stream.stop()
 
 
@@ -226,11 +247,57 @@ def get_csrf_secret() -> str:
     return secret or "chanakya-local-csrf-dev-secret-key-64bytes-minimum-length-for-hmac"
 
 
+# ── Global Exception Middleware (Captures unhandled errors with incident_id) ────
+@app.middleware("http")
+async def global_exception_middleware(request: _Request, call_next):
+    try:
+        return await call_next(request)
+    except Exception as exc:
+        try:
+            from engine.telemetry import record_exception
+
+            clean_headers = {
+                k: v
+                for k, v in request.headers.items()
+                if k.lower() not in ("authorization", "cookie", "x-csrf-token")
+            }
+            context = {
+                "method": request.method,
+                "url": str(request.url),
+                "path": request.url.path,
+                "client": request.client.host if request.client else "unknown",
+                "headers": clean_headers,
+            }
+            incident = record_exception(
+                component="web.api",
+                error=exc,
+                action_taken="Intercepted by global exception middleware",
+                context=context,
+                severity="ERROR",
+            )
+            incident_id = incident["incident_id"]
+        except Exception:
+            incident_id = "ERR-UNKNOWN"
+
+        from datetime import datetime, timezone
+        from starlette.responses import JSONResponse
+
+        return JSONResponse(
+            status_code=500,
+            content={
+                "error": "Internal server error",
+                "incident_id": incident_id,
+                "message": str(exc),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            },
+        )
+
+
 # ── Auth middleware for /api/* and /skills/* ──────────────────────
 @app.middleware("http")
 async def auth_middleware(request: _Request, call_next):
     path = request.url.path
-    # Public paths — no auth required (health, mode, CSRF token, OAuth callbacks)
+    # Public paths — no auth required (health, mode, CSRF token, OAuth callbacks, diagnostics, maintenance)
     if (
         path.startswith("/auth/")
         or path in ("/health", "/health/live", "/health/ready")
@@ -239,6 +306,8 @@ async def auth_middleware(request: _Request, call_next):
             "/api/mode",
             "/api/csrf-token",
         )
+        or path.startswith("/api/diagnostics")
+        or path.startswith("/api/maintenance")
         # A self-hosted install has no authenticated user until its first
         # administrator completes setup. Keeping the onboarding flow public is
         # necessary to make that first-run state recoverable; protected trading
@@ -561,6 +630,88 @@ async def get_slo_report(journey_id: str = None):
     from engine.observability import get_registry
 
     return get_registry().get_slo_report(journey_id=journey_id)
+
+
+# ── System Diagnostics & Storage Maintenance ─────────────────────────────────
+
+
+@app.get("/api/diagnostics", tags=["Observability"])
+async def get_system_diagnostics():
+    """
+    Comprehensive System Diagnostics & Health Report for ChanakyaTrade.
+    Includes hardware memory metrics (8 GB RAM profile), dedicated 100 GB SSD storage breakdown,
+    SQLite database health checks, preflight findings, and telemetry event statistics.
+    """
+    from engine.preflight import run_preflight
+    from engine.memory_guard import get_memory_status
+    from engine.maintenance import get_storage_breakdown
+    from engine.telemetry import get_telemetry_summary
+
+    preflight_rep = run_preflight(verbose=False)
+    mem_status = get_memory_status()
+    storage_bd = get_storage_breakdown()
+    telem_summary = get_telemetry_summary()
+
+    return JSONResponse(
+        {
+            "status": "HEALTHY" if preflight_rep.healthy else "DEGRADED",
+            "mode": preflight_rep.mode,
+            "memory": mem_status.to_dict(),
+            "storage": storage_bd.to_dict(),
+            "telemetry": telem_summary,
+            "preflight": preflight_rep.to_dict(),
+        }
+    )
+
+
+@app.get("/api/diagnostics/errors", tags=["Observability"])
+async def get_error_logs(limit: int = 50):
+    """
+    Retrieve recent structured error and exception incidents with incident IDs,
+    tracebacks, request context, and host memory vitals for troubleshooting.
+    """
+    from engine.telemetry import get_error_incidents
+
+    incidents = get_error_incidents(limit=limit)
+    return JSONResponse(
+        {
+            "total": len(incidents),
+            "incidents": incidents,
+        }
+    )
+
+
+@app.post("/api/maintenance/purge", tags=["Maintenance"])
+async def trigger_maintenance_purge(
+    raw_tick_retention_days: int = 7,
+    disk_cache_retention_days: int = 7,
+    export_retention_days: int = 14,
+    vacuum_databases: bool = False,
+):
+    """
+    Execute storage maintenance purge across ephemeral and diagnostic tiers,
+    preserving all business-critical order/audit data. Checkpoints SQLite WAL logs.
+    """
+    from engine.maintenance import run_maintenance_purge
+
+    report = run_maintenance_purge(
+        raw_tick_retention_days=raw_tick_retention_days,
+        disk_cache_retention_days=disk_cache_retention_days,
+        export_retention_days=export_retention_days,
+        vacuum_databases=vacuum_databases,
+    )
+    return JSONResponse(report.to_dict())
+
+
+@app.get("/api/maintenance/storage-breakdown", tags=["Maintenance"])
+async def get_storage_allocation():
+    """
+    Retrieve real-time storage footprint across Business, Market Data,
+    Analytical Cache, Disk Cache, and Telemetry tiers, along with SSD free space.
+    """
+    from engine.maintenance import get_storage_breakdown
+
+    return JSONResponse(get_storage_breakdown().to_dict())
 
 
 @app.get("/api/provider_health", tags=["Observability"])
