@@ -154,3 +154,13 @@ class TestStockSectorAlignment:
         assert res["sector"] == "BROAD_MARKET"
         assert res["alignment"] == "UNAVAILABLE"
         assert res["tailwind_score"] == 0
+
+    def test_titagarh_railways_sector_alignment(self):
+        from analysis.sector_rotation import get_stock_tailwind
+        tw = get_stock_tailwind("TITAGARH")
+        assert tw.symbol == "TITAGARH"
+        assert tw.sector == "INFRA"
+        assert tw.quadrant in ("LEADING", "IMPROVING", "WEAKENING", "LAGGING")
+        assert tw.tailwind_score > 0
+        assert tw.alignment != "UNAVAILABLE"
+        assert "INFRA" in tw.analysis or "railway" in tw.analysis.lower()

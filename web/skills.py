@@ -2651,12 +2651,19 @@ async def skill_rrg(req: Optional[RRGSkillRequest] = None):
 
     try:
         points, stock_align = await asyncio.to_thread(_compute_rrg)
+        stock_align_dict = None
+        if stock_align:
+            stock_align_dict = (
+                stock_align.to_dict()
+                if hasattr(stock_align, "to_dict")
+                else (stock_align.as_dict() if hasattr(stock_align, "as_dict") else stock_align)
+            )
         return _ok(
             {
                 "sectors": [p.as_dict() for p in points],
                 "leading_sectors": [p.sector for p in points if p.quadrant == "LEADING"],
                 "improving_sectors": [p.sector for p in points if p.quadrant == "IMPROVING"],
-                "stock_alignment": stock_align,
+                "stock_alignment": stock_align_dict,
             }
         )
     except Exception as e:
@@ -2896,6 +2903,122 @@ async def skill_multibagger_alerts(horizon: Optional[str] = None, limit: int = 5
         mgr = get_alert_manager()
         alerts = mgr.get_recent_alerts(limit=limit, horizon=horizon)
         return _ok({"alerts": [a.to_dict() for a in alerts], "count": len(alerts)})
+    except Exception as e:
+        raise _err(str(e))
+
+
+# ── Inflection Point & Multibagger Screener Suite ──────────────
+
+
+class InflectionScanSkillRequest(BaseModel):
+    universe: str = "multibagger_hunters"
+    archetype: str = "ALL"
+    timing: str = "ALL"
+    min_score: int = 40
+    max_results: int = 30
+    exchange: str = "NSE"
+    refresh: bool = False
+
+
+class InflectionDecisionSkillRequest(BaseModel):
+    symbol: str
+    exchange: str = "NSE"
+    force_refresh: bool = False
+
+
+class InflectionChatSkillRequest(BaseModel):
+    symbol: str
+    question: str
+    exchange: str = "NSE"
+    matrix: Optional[dict[str, Any]] = None
+
+
+@router.post("/inflection_scan")
+@router.post("/scan_inflections")
+async def skill_inflection_scan(req: InflectionScanSkillRequest):
+    """
+    Scan universe for stocks at high-asymmetry inflection points across VCP pivots,
+    TTM squeezes, Stage 1->2 breakouts, SMC springs, and Sector RRG rotation.
+    """
+    import asyncio
+
+    def _scan():
+        from analysis.inflection_scanner import scan_inflections_universe
+
+        return scan_inflections_universe(
+            universe=req.universe,
+            archetype_filter=req.archetype,
+            timing_filter=req.timing,
+            min_score=req.min_score,
+            max_results=req.max_results,
+            exchange=req.exchange,
+        )
+
+    try:
+        res = await asyncio.to_thread(_scan)
+        return _ok(res.to_dict())
+    except Exception as e:
+        raise _err(str(e))
+
+
+@router.get("/inflection_universes")
+@router.post("/inflection_universes")
+async def skill_inflection_universes():
+    """
+    Returns available universe presets for inflection scanning with stock counts.
+    """
+    try:
+        from analysis.inflection_scanner import get_inflection_universes
+
+        universes = get_inflection_universes()
+        return _ok({"universes": universes, "total_universes": len(universes)})
+    except Exception as e:
+        raise _err(str(e))
+
+
+@router.post("/inflection_decision")
+async def skill_inflection_decision(req: InflectionDecisionSkillRequest):
+    """
+    Generate the AI 5W+H Conclusive Decision Matrix for a stock at an inflection point.
+    """
+    import asyncio
+
+    def _decision():
+        from analysis.inflection_ai import generate_inflection_decision
+
+        return generate_inflection_decision(
+            symbol=req.symbol,
+            exchange=req.exchange,
+            force_refresh=req.force_refresh,
+        )
+
+    try:
+        res = await asyncio.to_thread(_decision)
+        return _ok(res.to_dict())
+    except Exception as e:
+        raise _err(str(e))
+
+
+@router.post("/inflection_chat")
+async def skill_inflection_chat(req: InflectionChatSkillRequest):
+    """
+    Ask follow-up questions connecting macro, fundamental, and microstructural dots.
+    """
+    import asyncio
+
+    def _chat():
+        from analysis.inflection_ai import answer_inflection_chat
+
+        return answer_inflection_chat(
+            symbol=req.symbol,
+            question=req.question,
+            matrix_data=req.matrix,
+            exchange=req.exchange,
+        )
+
+    try:
+        res = await asyncio.to_thread(_chat)
+        return _ok(res)
     except Exception as e:
         raise _err(str(e))
 

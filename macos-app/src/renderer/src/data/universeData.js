@@ -490,6 +490,7 @@ export function fuzzySearchUniverse(query, activeSymbol = null, limit = 12, cate
     if (categoryFilter === 'all') {
       const recents = getRecentSearches().map((r) => ({ ...r, category: 'recent' }))
       const defaultActions = [
+        { type: 'command', text: 'scanner', label: '🎯 Inflection & Multibagger Radar', icon: '🎯', category: 'action' },
         { type: 'command', text: activeSymbol ? `analyze ${activeSymbol}` : 'brief', label: activeSymbol ? `⚡ AI Multi-Agent (${activeSymbol})` : '🌅 Morning Market Brief', icon: '⚡', category: 'action' },
         { type: 'command', text: activeSymbol ? `council breakout ${activeSymbol}` : 'radar', label: activeSymbol ? `🚀 Breakout Council (${activeSymbol})` : '🎯 Top 10 High-Conviction Radar', icon: '🚀', category: 'action' },
         { type: 'command', text: activeSymbol ? `multibagger ${activeSymbol}` : 'whales', label: activeSymbol ? `💎 Minervini Stage 2 (${activeSymbol})` : '🐋 Marquee Whale Flows', icon: '💎', category: 'action' },

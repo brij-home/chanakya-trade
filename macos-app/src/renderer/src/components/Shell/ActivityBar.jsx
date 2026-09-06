@@ -16,6 +16,14 @@ const WORKSPACE_ITEMS = [
     accentBg: 'rgba(245, 166, 35, 0.15)',
   },
   {
+    id: 'scanner',
+    icon: '🎯',
+    label: 'Inflection & Multibagger Radar',
+    shortcut: '^0',
+    accentColor: '#f59e0b',
+    accentBg: 'rgba(245, 158, 11, 0.15)',
+  },
+  {
     id: 'debate',
     icon: '⚔️',
     label: 'Multi-Agent Debate Arena',

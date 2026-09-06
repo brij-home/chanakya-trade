@@ -7,6 +7,7 @@ export default function CommandPalette({ isOpen, onClose, onOpenOrderTicket }) {
   const [selectedIndex, setSelectedIndex] = useState(0)
   const [categoryFilter, setCategoryFilter] = useState('all')
   const sendDraft = useChatStore((s) => s.sendDraft)
+  const setActiveView = useChatStore((s) => s.setActiveView)
   const messages = useChatStore((s) => s.messages)
   const activeSymbol = getActiveSymbol(messages)
   const inputRef = useRef(null)
@@ -30,6 +31,11 @@ export default function CommandPalette({ isOpen, onClose, onOpenOrderTicket }) {
   const executeQuery = (text) => {
     const cleanText = (text || query).trim()
     if (!cleanText) return
+    if (cleanText.toLowerCase() === 'scanner' || cleanText.toLowerCase() === 'radar') {
+      setActiveView('scanner')
+      onClose()
+      return
+    }
     saveRecentSearch({
       text: cleanText,
       symbol: activeSymbol || null,
@@ -43,6 +49,11 @@ export default function CommandPalette({ isOpen, onClose, onOpenOrderTicket }) {
   const selectItem = (item) => {
     const exch = item.exchange || (item.symbol ? getSymbolExchange(item.symbol) : 'NSE')
     const cmdToRun = item.command || (item.symbol ? `analyze ${item.symbol}${exch !== 'NSE' ? ' ' + exch : ''}` : item.text || item.label)
+    if (cmdToRun === 'scanner') {
+      setActiveView('scanner')
+      onClose()
+      return
+    }
     saveRecentSearch({
       text: cmdToRun,
       symbol: item.symbol || null,

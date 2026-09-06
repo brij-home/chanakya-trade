@@ -17,6 +17,7 @@ import ErrorBoundary from './components/ErrorBoundary'
 
 // ── Lazy-loaded Workspace Views (Code-Split Chunks) ─────────────────────────
 const TerminalView = lazy(() => import('./components/Views/TerminalView'))
+const InflectionScannerView = lazy(() => import('./components/Views/InflectionScannerView'))
 const DebateArenaView = lazy(() => import('./components/Views/DebateArenaView'))
 const OptionsDeskView = lazy(() => import('./components/Views/OptionsDeskView'))
 const OverviewView = lazy(() => import('./components/Views/OverviewView'))
@@ -311,6 +312,7 @@ export default function App() {
       if (e.metaKey || e.ctrlKey) {
         const handlers = {
           '1': () => setActiveView('terminal'),
+          '0': () => setActiveView('scanner'),
           '2': () => setActiveView('debate'),
           '3': () => setActiveView('options'),
           '4': () => setActiveView('copilot'),
@@ -394,6 +396,7 @@ export default function App() {
           style={{ background: 'var(--color-elevated)', border: '1px solid var(--color-border)' }}
         >
           <WorkspaceTab id="terminal"  icon="📊" label="Terminal"    active={activeView === 'terminal'}  color="gold"     onClick={() => document.startViewTransition?.(() => setActiveView('terminal'))  ?? setActiveView('terminal')} shortcut="^1" />
+          <WorkspaceTab id="scanner"   icon="🎯" label="Inflection"  active={activeView === 'scanner'}   color="amber"    onClick={() => document.startViewTransition?.(() => setActiveView('scanner'))   ?? setActiveView('scanner')} shortcut="^0" />
           <WorkspaceTab id="debate"    icon="⚔️" label="Debate"      active={activeView === 'debate'}    color="emerald"  onClick={() => document.startViewTransition?.(() => setActiveView('debate'))    ?? setActiveView('debate')} shortcut="^2" />
           <WorkspaceTab id="options"   icon="⚡" label="Options"     active={activeView === 'options'}   color="violet"   onClick={() => document.startViewTransition?.(() => setActiveView('options'))   ?? setActiveView('options')} shortcut="^3" />
           <WorkspaceTab id="copilot"   icon="💬" label="Copilot"     active={activeView === 'copilot'}   color="sapphire" onClick={() => document.startViewTransition?.(() => setActiveView('copilot'))   ?? setActiveView('copilot')} shortcut="^4" />
@@ -494,6 +497,19 @@ export default function App() {
                   onTimeframeChange={setCtxTimeframe}
                   externalLayout={ctxLayout}
                   onLayoutChange={setCtxLayout}
+                />
+              )}
+
+              {activeView === 'scanner' && (
+                <InflectionScannerView
+                  onOpenOrderTicket={handleOpenOrderTicket}
+                  onNavigateToTerminal={(sym) => {
+                    setCtxSymbol(sym)
+                    setActiveView('terminal')
+                  }}
+                  onNavigateToDebate={(sym) => {
+                    setActiveView('debate')
+                  }}
                 />
               )}
 
