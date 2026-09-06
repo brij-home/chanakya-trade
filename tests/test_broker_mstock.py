@@ -592,4 +592,3 @@ def test_mstock_server_logout():
     broker.logout()
     assert broker._token == ""
     assert broker._user_profile is None
-

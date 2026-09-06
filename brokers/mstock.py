@@ -172,7 +172,9 @@ class MStockAPI(BrokerAPI):
 
     def get_symbol_token(self, symbol: str, exchange: str = "NSE") -> str:
         """Resolve security token for symbol via known tokens or cached scrip master."""
-        clean_sym = symbol.replace("NSE:", "").replace("BSE:", "").replace("-EQ", "").strip().upper()
+        clean_sym = (
+            symbol.replace("NSE:", "").replace("BSE:", "").replace("-EQ", "").strip().upper()
+        )
         if clean_sym in _KNOWN_NSE_TOKENS:
             return _KNOWN_NSE_TOKENS[clean_sym]
 
@@ -203,7 +205,6 @@ class MStockAPI(BrokerAPI):
                 self._scrip_token_cache[f"{exch}:{sym}"] = tok
                 if sym.endswith("-EQ"):
                     self._scrip_token_cache[f"{exch}:{sym[:-3]}"] = tok
-
 
     # ── Token persistence ─────────────────────────────────────
 
@@ -710,11 +711,27 @@ class MStockAPI(BrokerAPI):
 
         quotes: dict[str, Quote] = {}
         if not self._token:
-            return quotes.get(instruments) or Quote(symbol=str(instruments), last_price=0.0, open=0.0, high=0.0, low=0.0, close=0.0, volume=0) if is_single else quotes
+            return (
+                quotes.get(instruments)
+                or Quote(
+                    symbol=str(instruments),
+                    last_price=0.0,
+                    open=0.0,
+                    high=0.0,
+                    low=0.0,
+                    close=0.0,
+                    volume=0,
+                )
+                if is_single
+                else quotes
+            )
 
         for inst in inst_list:
             # Fast filter: mStock only supports Indian NSE/BSE equities & indices
-            if any(inst.startswith(p) for p in ("MCX:", "CRYPTO:", "CDS:", "GIFT:", "US:", "FX:", "INDEX:GIFT")):
+            if any(
+                inst.startswith(p)
+                for p in ("MCX:", "CRYPTO:", "CDS:", "GIFT:", "US:", "FX:", "INDEX:GIFT")
+            ):
                 continue
 
             clean_sym = inst.replace("NSE:", "").replace("BSE:", "").strip()
@@ -802,7 +819,9 @@ class MStockAPI(BrokerAPI):
                 quotes[inst] = quote_obj
 
         if is_single:
-            return quotes.get(instruments) or Quote(symbol=instruments, last_price=0.0, open=0.0, high=0.0, low=0.0, close=0.0, volume=0)
+            return quotes.get(instruments) or Quote(
+                symbol=instruments, last_price=0.0, open=0.0, high=0.0, low=0.0, close=0.0, volume=0
+            )
         return quotes
 
     # ── Option Chain APIs ─────────────────────────────────────
@@ -982,7 +1001,12 @@ class MStockAPI(BrokerAPI):
                                     # Query first 50 contracts to remain within typical REST quota
                                     batch_tokens = tokens_to_quote[:50]
                                     q_resp = self._client.post(
-                                        q_url, json={"mode": "LTP", "exchangeTokens": {"NFO": batch_tokens}}, headers=self._headers()
+                                        q_url,
+                                        json={
+                                            "mode": "LTP",
+                                            "exchangeTokens": {"NFO": batch_tokens},
+                                        },
+                                        headers=self._headers(),
                                     )
                                     if q_resp.status_code == 200:
                                         q_data = q_resp.json()
@@ -1082,6 +1106,7 @@ class MStockAPI(BrokerAPI):
             return get_history(symbol, resolution=resolution, from_date=from_date, to_date=to_date)
         except Exception:
             import pandas as pd
+
             return pd.DataFrame()
 
     # ── Order Execution ───────────────────────────────────────
@@ -1111,7 +1136,11 @@ class MStockAPI(BrokerAPI):
 
             # Trading symbol format (e.g. ACC-EQ for NSE equity)
             trading_symbol = clean_sym
-            if exchange == "NSE" and not clean_sym.endswith("-EQ") and not any(p in clean_sym for p in ("-INDEX", "NIFTY", "BANKNIFTY", "VIX")):
+            if (
+                exchange == "NSE"
+                and not clean_sym.endswith("-EQ")
+                and not any(p in clean_sym for p in ("-INDEX", "NIFTY", "BANKNIFTY", "VIX"))
+            ):
                 trading_symbol = f"{clean_sym}-EQ"
 
             payload = {
@@ -1141,10 +1170,7 @@ class MStockAPI(BrokerAPI):
                 if isinstance(res, list) and res:
                     res = res[0]
                 order_id = str(
-                    res.get("orderId")
-                    or res.get("order_id")
-                    or res.get("orderid")
-                    or ""
+                    res.get("orderId") or res.get("order_id") or res.get("orderid") or ""
                 )
                 if order_id:
                     return OrderResponse(
@@ -1286,19 +1312,25 @@ class MStockAPI(BrokerAPI):
                         "OPEN": "OPEN",
                     }
                     status = st_map.get(raw_st, raw_st)
-                    prod = _REV_PRODUCT_MAP.get(o.get("producttype") or o.get("product") or "DELIVERY", "CNC")
+                    prod = _REV_PRODUCT_MAP.get(
+                        o.get("producttype") or o.get("product") or "DELIVERY", "CNC"
+                    )
                     orders.append(
                         Order(
                             order_id=str(o.get("orderid") or o.get("orderId") or o.get("order_id")),
                             symbol=str(o.get("tradingsymbol") or o.get("symbol") or ""),
                             exchange=str(o.get("exchange") or "NSE"),
-                            transaction_type=str(o.get("transactiontype") or o.get("transactionType") or "BUY"),
+                            transaction_type=str(
+                                o.get("transactiontype") or o.get("transactionType") or "BUY"
+                            ),
                             order_type=str(o.get("ordertype") or o.get("orderType") or "LIMIT"),
                             product=prod,
                             quantity=int(o.get("quantity") or 0),
                             price=float(o.get("price") or 0.0),
                             status=status,
-                            filled_quantity=int(o.get("filledshares") or o.get("filledQuantity") or 0),
+                            filled_quantity=int(
+                                o.get("filledshares") or o.get("filledQuantity") or 0
+                            ),
                         )
                     )
                 return orders
@@ -1553,7 +1585,9 @@ class MStockAPI(BrokerAPI):
             raise RuntimeError("m.Stock session not authenticated.")
 
         clean_sym = symbol.replace("NSE:", "").replace("BSE:", "").strip()
-        token = symbol_token or kwargs.get("symboltoken") or self.get_symbol_token(clean_sym, exchange)
+        token = (
+            symbol_token or kwargs.get("symboltoken") or self.get_symbol_token(clean_sym, exchange)
+        )
         old_p = _PRODUCT_MAP.get(old_product, old_product)
         new_p = _PRODUCT_MAP.get(new_product, new_product)
 
@@ -1562,7 +1596,8 @@ class MStockAPI(BrokerAPI):
             "symboltoken": str(token),
             "oldproducttype": old_p,
             "newproducttype": new_p,
-            "tradingsymbol": kwargs.get("tradingsymbol") or (f"{clean_sym}-EQ" if exchange == "NSE" else clean_sym),
+            "tradingsymbol": kwargs.get("tradingsymbol")
+            or (f"{clean_sym}-EQ" if exchange == "NSE" else clean_sym),
             "symbolname": kwargs.get("symbolname") or clean_sym,
             "instrumenttype": kwargs.get("instrumenttype") or "EQ",
             "priceden": str(kwargs.get("priceden", "1")),
@@ -1572,8 +1607,12 @@ class MStockAPI(BrokerAPI):
             "precision": str(kwargs.get("precision", "2")),
             "multiplier": str(kwargs.get("multiplier", "1")),
             "boardlotsize": str(kwargs.get("boardlotsize", "1")),
-            "buyqty": str(kwargs.get("buyqty", quantity if transaction_type.upper() == "BUY" else "0")),
-            "sellqty": str(kwargs.get("sellqty", quantity if transaction_type.upper() == "SELL" else "0")),
+            "buyqty": str(
+                kwargs.get("buyqty", quantity if transaction_type.upper() == "BUY" else "0")
+            ),
+            "sellqty": str(
+                kwargs.get("sellqty", quantity if transaction_type.upper() == "SELL" else "0")
+            ),
             "buyamount": str(kwargs.get("buyamount", "0")),
             "sellamount": str(kwargs.get("sellamount", "0")),
             "transactiontype": transaction_type.upper(),

@@ -592,7 +592,10 @@ class TestSectorHeatmapSkill:
         fake_quote.change = 120.0
         fake_quote.change_pct = 0.8
 
-        with patch("market.quotes.get_quote", return_value={"NSE:NIFTY AUTO": fake_quote, "NSE:NIFTY METAL": fake_quote}):
+        with patch(
+            "market.quotes.get_quote",
+            return_value={"NSE:NIFTY AUTO": fake_quote, "NSE:NIFTY METAL": fake_quote},
+        ):
             r = client.post("/skills/sector_heatmap")
         assert r.status_code == 200
         data = r.json()["data"]
@@ -605,4 +608,3 @@ class TestSectorHeatmapSkill:
         assert "NIFTY50" not in codes
         assert "50" not in names
         assert "Nifty" not in names
-

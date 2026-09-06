@@ -271,12 +271,6 @@ class AnalysisSearch:
             parts.append(line)
         return "\n".join(parts)
 
-    def close(self) -> None:
-        """Close the database connection."""
-        if self._conn:
-            self._conn.close()
-            self._conn = None
-
     def clear(self) -> None:
         """Remove all indexed records."""
         conn = self._get_conn()

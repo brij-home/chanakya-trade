@@ -18,7 +18,7 @@ import os
 import sys
 import threading
 from dataclasses import dataclass
-from typing import Callable, List, Optional
+from typing import Callable, List
 
 logger = logging.getLogger(__name__)
 
@@ -155,7 +155,9 @@ def get_memory_status() -> MemoryStatus:
     # Classification boundaries for 8 GB RAM profile
     if avail_mb < 500.0 or rss_mb > 1400.0:
         level = "CRITICAL"
-        rec = "Memory pressure is severe. Aggressive cache trimming and garbage collection required."
+        rec = (
+            "Memory pressure is severe. Aggressive cache trimming and garbage collection required."
+        )
     elif avail_mb < 900.0 or rss_mb > 1000.0:
         level = "MODERATE"
         rec = "Memory usage approaching limits for 8 GB RAM. Trimming expired in-memory items."

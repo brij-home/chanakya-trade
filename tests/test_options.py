@@ -142,4 +142,3 @@ class TestPCRAndMaxPain:
         assert any("Cash Equity Stock" in pt for pt in report_cash.key_points)
         assert report_cash.data.get("is_fno") is False
         assert report_cash.data.get("options_available") is False
-

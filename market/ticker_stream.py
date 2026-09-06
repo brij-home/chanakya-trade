@@ -405,11 +405,18 @@ class MarketTickerStream:
             # Sync ribbon entry in real-time
             if hasattr(self, "_cached_ribbon_tickers") and self._cached_ribbon_tickers:
                 for r in self._cached_ribbon_tickers:
-                    if r.get("inst") == getattr(tick, "symbol", "") or r.get("display_name") == item.name:
+                    if (
+                        r.get("inst") == getattr(tick, "symbol", "")
+                        or r.get("display_name") == item.name
+                    ):
                         r["ltp"] = item.price
                         r["change"] = item.change
                         r["change_pct"] = item.change_pct
-                        r["direction"] = "up" if item.change_pct > 0 else ("down" if item.change_pct < 0 else "flat")
+                        r["direction"] = (
+                            "up"
+                            if item.change_pct > 0
+                            else ("down" if item.change_pct < 0 else "flat")
+                        )
 
         self._notify_listeners()
 
@@ -436,11 +443,18 @@ class MarketTickerStream:
                 # Sync ribbon entry in real-time
                 if hasattr(self, "_cached_ribbon_tickers") and self._cached_ribbon_tickers:
                     for r in self._cached_ribbon_tickers:
-                        if r.get("inst") == getattr(tick, "symbol", "") or r.get("display_name") == item.name:
+                        if (
+                            r.get("inst") == getattr(tick, "symbol", "")
+                            or r.get("display_name") == item.name
+                        ):
                             r["ltp"] = item.price
                             r["change"] = item.change
                             r["change_pct"] = item.change_pct
-                            r["direction"] = "up" if item.change_pct > 0 else ("down" if item.change_pct < 0 else "flat")
+                            r["direction"] = (
+                                "up"
+                                if item.change_pct > 0
+                                else ("down" if item.change_pct < 0 else "flat")
+                            )
 
         self._notify_listeners()
 
@@ -567,12 +581,18 @@ class MarketTickerStream:
         self._running = True
 
         def _poll_worker():
-            print(f"[TickerStream] Polling worker started (interval={poll_interval_seconds}s)", flush=True)
+            print(
+                f"[TickerStream] Polling worker started (interval={poll_interval_seconds}s)",
+                flush=True,
+            )
             while self._running:
                 try:
                     self.refresh_indices_sync()
                     cached_cnt = len(getattr(self, "_cached_ribbon_tickers", []) or [])
-                    print(f"[TickerStream] Worker updated {cached_cnt} ribbon tickers successfully", flush=True)
+                    print(
+                        f"[TickerStream] Worker updated {cached_cnt} ribbon tickers successfully",
+                        flush=True,
+                    )
                 except Exception as e:
                     print(f"[TickerStream] Refresh error: {e}", flush=True)
                 for _ in range(max(1, int(poll_interval_seconds * 10))):
@@ -581,7 +601,9 @@ class MarketTickerStream:
                     time.sleep(0.1)
             print("[TickerStream] Polling worker stopped", flush=True)
 
-        self._worker_thread = threading.Thread(target=_poll_worker, daemon=True, name="TickerStreamWorker")
+        self._worker_thread = threading.Thread(
+            target=_poll_worker, daemon=True, name="TickerStreamWorker"
+        )
         self._worker_thread.start()
 
     def stop(self, timeout: float = 2.0) -> None:

@@ -16,7 +16,6 @@ Provides structured self-learning summaries and actionable architectural recomme
 from __future__ import annotations
 
 import json
-import os
 import threading
 import traceback
 import uuid
@@ -187,6 +186,7 @@ def record_exception(
     vitals = {}
     try:
         from engine.memory_guard import get_memory_status
+
         vitals = get_memory_status().to_dict()
     except Exception:
         pass
@@ -233,7 +233,6 @@ def get_error_incidents(limit: int = 50) -> list[dict[str, Any]]:
             if len(incidents) >= limit:
                 break
     return incidents
-
 
 
 def get_recent_events(

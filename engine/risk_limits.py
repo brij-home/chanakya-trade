@@ -135,7 +135,8 @@ class RiskLimits:
     def _connect(self) -> Generator[sqlite3.Connection, None, None]:
         conn = sqlite3.connect(str(self._db), timeout=30.0)
         try:
-            yield conn
+            with conn:
+                yield conn
         finally:
             conn.close()
 

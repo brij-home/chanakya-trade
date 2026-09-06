@@ -193,4 +193,3 @@ def get_max_pain(underlying: str, expiry: Optional[str] = None) -> Optional[floa
         pain[test_strike] = total_pain
 
     return min(pain, key=pain.get)  # type: ignore[arg-type]
-

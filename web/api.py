@@ -129,6 +129,7 @@ async def _background_cache_warmer():
             # 4. Check memory headroom and trim in-memory caches if approaching limits
             try:
                 from engine.memory_guard import trim_memory_if_needed
+
                 trim_memory_if_needed()
             except Exception:
                 pass
@@ -154,6 +155,7 @@ async def _background_maintenance_scheduler():
         try:
             await asyncio.sleep(21600)  # 6 hours
             from engine.maintenance import run_maintenance_purge
+
             await asyncio.to_thread(run_maintenance_purge)
         except asyncio.CancelledError:
             break
@@ -2964,15 +2966,9 @@ async def stream_dashboard_snapshot(symbol: str = "NIFTY", exchange: str = ""):
                 if raw_chunk.startswith("data: "):
                     try:
                         payload = json.loads(raw_chunk[6:])
-                        tickers = payload.get(
-                            "tickers", payload.get("data", {}).get("tickers", [])
-                        )
+                        tickers = payload.get("tickers", payload.get("data", {}).get("tickers", []))
                         target = next(
-                            (
-                                t
-                                for t in tickers
-                                if t.get("symbol", "").upper() == symbol.upper()
-                            ),
+                            (t for t in tickers if t.get("symbol", "").upper() == symbol.upper()),
                             None,
                         )
                         if target:

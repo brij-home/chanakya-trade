@@ -325,6 +325,7 @@ def run_preflight(verbose: bool = True) -> PreflightReport:
                 return False
             try:
                 import json
+
                 data = json.loads(p.read_text(encoding="utf-8"))
                 tok = str(data.get("token", "")).strip()
                 return bool(tok and tok != "dummy_token" and not tok.startswith("dummy"))
@@ -332,7 +333,9 @@ def run_preflight(verbose: bool = True) -> PreflightReport:
                 return False
 
         # m.Stock (Current active primary)
-        if _has_valid_token("mstock.json") or (os.environ.get("MSTOCK_API_KEY") and os.environ.get("MSTOCK_CLIENT_CODE")):
+        if _has_valid_token("mstock.json") or (
+            os.environ.get("MSTOCK_API_KEY") and os.environ.get("MSTOCK_CLIENT_CODE")
+        ):
             active_configured.append("mstock (Mirae Asset)")
         # Fyers (Planned primary data feed)
         if _has_valid_token("fyers.json") or os.environ.get("FYERS_APP_ID"):

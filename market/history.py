@@ -60,10 +60,10 @@ def clear_df_memory_cache() -> int:
 # Register with memory guard sentinel
 try:
     from engine.memory_guard import register_trim_callback
+
     register_trim_callback(clear_df_memory_cache)
 except Exception:
     pass
-
 
 
 def get_ohlcv(

@@ -16,7 +16,6 @@ Usage:
 from __future__ import annotations
 
 import json
-import os
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
@@ -132,4 +131,3 @@ def load_cache(key: str, cache_dir: Optional[Path] = None) -> tuple[list, Option
         return payload["data"], cached_at
     except Exception:
         return [], None
-

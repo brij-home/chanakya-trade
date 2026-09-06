@@ -11,7 +11,6 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Optional
 
-import httpx
 
 from market.http_pool import get_nse_client
 

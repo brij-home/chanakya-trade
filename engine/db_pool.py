@@ -23,7 +23,7 @@ logger = logging.getLogger("chanakya.db_pool")
 class SQLiteConnectionPool:
     """
     Thread-safe bounded SQLite connection pool.
-    
+
     Attributes:
         db_path: Filesystem path to the SQLite database.
         max_conns: Maximum number of persistent connections to create.

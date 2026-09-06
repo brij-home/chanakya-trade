@@ -579,7 +579,11 @@ def analyze_market_structure(
 
     structure_score = 0
     regime = "RANGING"
-    slope_int = int(short_slope * 200) if (not math.isnan(short_slope) and math.isfinite(short_slope)) else 0
+    slope_int = (
+        int(short_slope * 200)
+        if (not math.isnan(short_slope) and math.isfinite(short_slope))
+        else 0
+    )
 
     if (hh_count + hl_count) >= (lh_count + ll_count) + 2 or (
         short_slope > 0.05 and ltp > last_swing_high * 0.98
@@ -680,13 +684,21 @@ def analyze_market_structure(
 
     if structure_score >= 0:
         invalidation = nearest_support * 0.99
-        risk = max(0.01, ltp - invalidation) if not math.isnan(ltp) else max(0.01, invalidation * 0.015)
+        risk = (
+            max(0.01, ltp - invalidation)
+            if not math.isnan(ltp)
+            else max(0.01, invalidation * 0.015)
+        )
         target_1 = ltp + (risk * 2.0)
         target_2 = ltp + (risk * 3.5)
         rr = round((target_1 - ltp) / risk, 2) if risk > 0 else 2.0
     else:
         invalidation = nearest_resistance * 1.01
-        risk = max(0.01, invalidation - ltp) if not math.isnan(ltp) else max(0.01, invalidation * 0.015)
+        risk = (
+            max(0.01, invalidation - ltp)
+            if not math.isnan(ltp)
+            else max(0.01, invalidation * 0.015)
+        )
         target_1 = ltp - (risk * 2.0)
         target_2 = ltp - (risk * 3.5)
         rr = round((ltp - target_1) / risk, 2) if risk > 0 else 2.0

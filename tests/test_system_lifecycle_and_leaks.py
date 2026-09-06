@@ -9,14 +9,9 @@ Institutional-grade test suite to verify:
 - ThreadPoolExecutor exception handling and process reaping
 """
 
-import os
 import sqlite3
-import tempfile
 import time
-from pathlib import Path
 from unittest.mock import MagicMock, patch
-
-import pytest
 
 
 def test_analysis_cache_connection_closed(tmp_path):
@@ -252,7 +247,9 @@ def test_sqlite_connection_pool_concurrency_and_reuse(tmp_path):
     # Test concurrent acquisition across 10 tasks on 3 pooled connections
     def insert_worker(worker_id):
         with pool.acquire() as conn:
-            conn.execute("INSERT INTO test (id, val) VALUES (?, ?)", (worker_id, f"val_{worker_id}"))
+            conn.execute(
+                "INSERT INTO test (id, val) VALUES (?, ?)", (worker_id, f"val_{worker_id}")
+            )
         return worker_id
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
@@ -278,7 +275,7 @@ def test_sqlite_connection_pool_concurrency_and_reuse(tmp_path):
 
 def test_shared_http_pool_lifecycle():
     """Verify market.http_pool singleton creation, configuration, and teardown."""
-    from market.http_pool import get_shared_client, get_nse_client, close_http_pools
+    from market.http_pool import get_shared_client, close_http_pools
 
     # Reset any existing pool
     close_http_pools()

@@ -185,7 +185,6 @@ def test_parse_quote_123_packet():
     assert tick.total_sell_qty == 450000.0
 
 
-
 def test_parse_ltp_packet():
     token_bytes = b"26009".ljust(25, b"\x00")
     data = struct.pack(
@@ -239,7 +238,6 @@ def test_parse_binary_frame_single_123():
     assert len(ticks) == 1
     assert ticks[0].token == "26000"
     assert ticks[0].ltp == 24500.0
-
 
 
 def test_mstock_websocket_tick_processing_and_ws_manager_sync():

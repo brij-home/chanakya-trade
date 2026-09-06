@@ -7,12 +7,8 @@ log rotation, and system diagnostics on 8 GB RAM / 100 GB SSD hardware profile.
 
 import json
 import sqlite3
-import time
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
+from datetime import datetime, timedelta
 
-import pandas as pd
-import pytest
 from fastapi.testclient import TestClient
 
 from engine.memory_guard import (
@@ -21,12 +17,9 @@ from engine.memory_guard import (
     trim_memory_if_needed,
     unregister_trim_callback,
 )
-from engine.maintenance import get_storage_breakdown, run_maintenance_purge
+from engine.maintenance import run_maintenance_purge
 from engine.telemetry import (
-    EVENT_EXCEPTION,
     get_error_incidents,
-    get_recent_events,
-    record_event,
     record_exception,
     sanitize_sensitive_data,
 )
@@ -64,7 +57,12 @@ def test_history_df_memory_cache_bounded(monkeypatch):
         {"date": "2026-09-01", "open": 100, "high": 105, "low": 95, "close": 102, "volume": 1000},
         {"date": "2026-09-02", "open": 102, "high": 108, "low": 101, "close": 106, "volume": 1200},
     ]
-    monkeypatch.setattr("brokers.session.get_data_broker", lambda: type("B", (), {"_is_mock": False, "get_historical_data": lambda *a, **kw: fake_data})())
+    monkeypatch.setattr(
+        "brokers.session.get_data_broker",
+        lambda: type(
+            "B", (), {"_is_mock": False, "get_historical_data": lambda *a, **kw: fake_data}
+        )(),
+    )
 
     # Fetch multiple symbols
     df1 = get_ohlcv("STOCK1")
@@ -87,8 +85,11 @@ def test_disk_cache_prune(tmp_path):
     # 2. Stale file (8 days old)
     stale_file = cache_dir / "stale.json"
     old_time = (datetime.now() - timedelta(days=8)).timestamp()
-    stale_file.write_text(json.dumps({"saved_at": (datetime.now() - timedelta(days=8)).isoformat(), "data": []}))
+    stale_file.write_text(
+        json.dumps({"saved_at": (datetime.now() - timedelta(days=8)).isoformat(), "data": []})
+    )
     import os
+
     os.utime(stale_file, (old_time, old_time))
 
     deleted = prune_disk_cache(cache_dir=cache_dir, max_age_days=7)
@@ -214,4 +215,3 @@ def test_global_exception_middleware():
     assert "incident_id" in body
     assert body["incident_id"].startswith("ERR-")
     assert "Intentional diagnostic crash" in body["message"]
-

@@ -12,7 +12,6 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-import httpx
 
 from market.http_pool import get_nse_client
 from market.news import NewsItem

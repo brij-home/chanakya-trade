@@ -17,11 +17,10 @@ import logging
 import os
 import shutil
 import sqlite3
-import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import List
 
 from config.paths import app_data_dir, app_data_path
 
@@ -92,7 +91,7 @@ def _file_or_dir_size_bytes(path: Path) -> int:
 def get_storage_breakdown() -> StorageBreakdown:
     """Analyze current storage allocation across tiers and SSD free space."""
     root = app_data_dir()
-    
+
     # Business files
     business_files = [
         root / "orders.db",
@@ -106,10 +105,14 @@ def get_storage_breakdown() -> StorageBreakdown:
     b_bytes = sum(_file_or_dir_size_bytes(f) for f in business_files)
 
     # Market data
-    m_bytes = _file_or_dir_size_bytes(root / "market_data.db") + _file_or_dir_size_bytes(root / "persona_track_records.db")
+    m_bytes = _file_or_dir_size_bytes(root / "market_data.db") + _file_or_dir_size_bytes(
+        root / "persona_track_records.db"
+    )
 
     # Analysis Cache
-    ac_bytes = _file_or_dir_size_bytes(root / "analysis_cache.db") + _file_or_dir_size_bytes(root / "analysis_search.db")
+    ac_bytes = _file_or_dir_size_bytes(root / "analysis_cache.db") + _file_or_dir_size_bytes(
+        root / "analysis_search.db"
+    )
 
     # Disk Cache JSON files
     dc_bytes = _file_or_dir_size_bytes(root / "cache")
@@ -122,8 +125,8 @@ def get_storage_breakdown() -> StorageBreakdown:
     # Free SSD space
     try:
         usage = shutil.disk_usage(root)
-        free_ssd_gb = usage.free / (1024 ** 3)
-        total_ssd_gb = usage.total / (1024 ** 3)
+        free_ssd_gb = usage.free / (1024**3)
+        total_ssd_gb = usage.total / (1024**3)
     except Exception:
         free_ssd_gb = 0.0
         total_ssd_gb = 0.0
@@ -161,7 +164,9 @@ def run_maintenance_purge(
 
         deleted_ticks = prune_tick_archive(retention_days=raw_tick_retention_days, max_rows=250_000)
         if deleted_ticks > 0:
-            actions.append(f"Pruned {deleted_ticks} ephemeral market ticks older than {raw_tick_retention_days} days.")
+            actions.append(
+                f"Pruned {deleted_ticks} ephemeral market ticks older than {raw_tick_retention_days} days."
+            )
             items_deleted += deleted_ticks
     except Exception as e:
         logger.warning(f"Error pruning market ticks: {e}")
@@ -172,7 +177,9 @@ def run_maintenance_purge(
 
         deleted_files = prune_disk_cache(max_age_days=disk_cache_retention_days, max_total_mb=150.0)
         if deleted_files > 0:
-            actions.append(f"Purged {deleted_files} stale OHLCV JSON cache files from ~/.trading_platform/cache/.")
+            actions.append(
+                f"Purged {deleted_files} stale OHLCV JSON cache files from ~/.trading_platform/cache/."
+            )
             items_deleted += deleted_files
     except Exception as e:
         logger.warning(f"Error pruning disk cache: {e}")
@@ -183,7 +190,9 @@ def run_maintenance_purge(
 
         deleted_analyses = analysis_cache.prune()
         if deleted_analyses > 0:
-            actions.append(f"Pruned {deleted_analyses} expired AI multi-agent & macro analyses from analysis_cache.db.")
+            actions.append(
+                f"Pruned {deleted_analyses} expired AI multi-agent & macro analyses from analysis_cache.db."
+            )
             items_deleted += deleted_analyses
     except Exception as e:
         logger.warning(f"Error pruning analysis cache: {e}")
@@ -199,7 +208,9 @@ def run_maintenance_purge(
                     f.unlink(missing_ok=True)
                     deleted_exports += 1
             if deleted_exports > 0:
-                actions.append(f"Purged {deleted_exports} exported reports older than {export_retention_days} days.")
+                actions.append(
+                    f"Purged {deleted_exports} exported reports older than {export_retention_days} days."
+                )
                 items_deleted += deleted_exports
     except Exception as e:
         logger.warning(f"Error pruning exports: {e}")

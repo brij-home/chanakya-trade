@@ -651,7 +651,11 @@ class OptionsAnalyst(BaseAnalyst):
                 if max_pain is not None and max_pain > 0:
                     data["max_pain"] = max_pain
                     has_data = True
-                    points.append(f"Max Pain: ₹{max_pain:,.0f}" if max_pain >= 100 else f"Max Pain: {max_pain}")
+                    points.append(
+                        f"Max Pain: ₹{max_pain:,.0f}"
+                        if max_pain >= 100
+                        else f"Max Pain: {max_pain}"
+                    )
                 else:
                     data["max_pain"] = None
 
@@ -689,7 +693,12 @@ class OptionsAnalyst(BaseAnalyst):
                     confidence=0,
                     score=0,
                     key_points=[msg],
-                    data={"options_available": False, "is_fno": is_fno, "pcr": None, "max_pain": None},
+                    data={
+                        "options_available": False,
+                        "is_fno": is_fno,
+                        "pcr": None,
+                        "max_pain": None,
+                    },
                 )
 
             # Derive verdict from PCR

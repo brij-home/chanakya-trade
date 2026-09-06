@@ -60,7 +60,9 @@ class SSEEventBus:
             except Exception:
                 pass
         if count > 0 or queues:
-            logger.debug(f"[SSEEventBus] Dispatched {channel} event to {count}/{len(queues)} queues")
+            logger.debug(
+                f"[SSEEventBus] Dispatched {channel} event to {count}/{len(queues)} queues"
+            )
         return count
 
     async def publish(self, channel: str, data: dict) -> int:
@@ -71,7 +73,9 @@ class SSEEventBus:
         """Yield SSE-formatted strings: 'data: {...}\\n\\n'"""
         q: asyncio.Queue = asyncio.Queue(maxsize=self.MAX_QUEUE_SIZE)
         self._channels[channel].append(q)
-        logger.info(f"[SSEEventBus] Subscriber connected to '{channel}' (total={len(self._channels[channel])})")
+        logger.info(
+            f"[SSEEventBus] Subscriber connected to '{channel}' (total={len(self._channels[channel])})"
+        )
 
         try:
             while True:
@@ -83,7 +87,9 @@ class SSEEventBus:
         finally:
             try:
                 self._channels[channel].remove(q)
-                logger.info(f"[SSEEventBus] Subscriber disconnected from '{channel}' (remaining={len(self._channels[channel])})")
+                logger.info(
+                    f"[SSEEventBus] Subscriber disconnected from '{channel}' (remaining={len(self._channels[channel])})"
+                )
             except ValueError:
                 pass
 
@@ -105,4 +111,3 @@ class SSEEventBus:
 
 
 event_bus = SSEEventBus()  # module-level singleton
-

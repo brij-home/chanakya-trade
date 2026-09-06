@@ -84,8 +84,8 @@ class TestBrokerPrimaryOverwrite:
 class TestFIIDIISorting:
     """get_fii_dii_data should sort by date descending so today != cumulative."""
 
-    @patch("market.sentiment.httpx.Client")
-    def test_today_is_most_recent_date(self, mock_client_cls):
+    @patch("market.sentiment.get_nse_client")
+    def test_today_is_most_recent_date(self, mock_get_client):
         """The first entry should be the most recent date, not arbitrary order."""
         # Build mock API response with dates out of order
         mock_response = MagicMock()
@@ -138,8 +138,7 @@ class TestFIIDIISorting:
 
         mock_session = MagicMock()
         mock_session.get.return_value = mock_response
-        mock_client_cls.return_value = mock_session
-        mock_client_cls.return_value.__enter__.return_value = mock_session
+        mock_get_client.return_value = mock_session
 
         from market.sentiment import get_fii_dii_data
 
@@ -153,8 +152,8 @@ class TestFIIDIISorting:
         # Second entry should be 02-Apr
         assert result[1].date == "02-Apr-2026"
 
-    @patch("market.sentiment.httpx.Client")
-    def test_today_not_equal_to_5day_cumulative(self, mock_client_cls):
+    @patch("market.sentiment.get_nse_client")
+    def test_today_not_equal_to_5day_cumulative(self, mock_get_client):
         """Today's FII net should be just today, not the 5-day sum."""
         mock_response = MagicMock()
         mock_response.status_code = 200
@@ -192,8 +191,7 @@ class TestFIIDIISorting:
 
         mock_session = MagicMock()
         mock_session.get.return_value = mock_response
-        mock_client_cls.return_value = mock_session
-        mock_client_cls.return_value.__enter__.return_value = mock_session
+        mock_get_client.return_value = mock_session
 
         from market.sentiment import get_fii_dii_data
 

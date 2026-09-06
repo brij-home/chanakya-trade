@@ -41,7 +41,7 @@ _NSE_HEADERS = {
 def get_shared_client() -> httpx.Client:
     """
     Get or create the singleton shared HTTP connection pool.
-    
+
     Reuses TCP/TLS connections with keep-alive, avoiding 150-300ms handshake overhead
     per request and preventing socket exhaustion.
     """
@@ -65,7 +65,7 @@ def get_shared_client() -> httpx.Client:
 def get_nse_client() -> httpx.Client:
     """
     Get or create the singleton NSE client with cookie warming.
-    
+
     Ensures that session cookies from nseindia.com are retained across requests,
     eliminating redundant homepage visits on every API call.
     """

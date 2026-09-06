@@ -3486,7 +3486,6 @@ def _compute_dashboard_snapshot_sync(req: Optional[DashboardSnapshotRequest] = N
         from market.quotes import get_quote, get_ltp
         from analysis.market_structure import analyze_market_structure
         from analysis.volume_profile import analyze_volume_profile
-        from market.sentiment import get_fii_dii_data
         from market.indices import get_index
         from market.history import get_historical_data
 
@@ -4304,8 +4303,12 @@ def _compute_dashboard_snapshot_sync(req: Optional[DashboardSnapshotRequest] = N
             "label": "DLY + 5D",
             "fii_streak": flow_ana.fii_streak if flow_ana else -1,
             "dii_streak": flow_ana.dii_streak if flow_ana else 1,
-            "fii_streak_total": round(flow_ana.fii_streak_total, 2) if flow_ana else round(fii_net, 2),
-            "dii_streak_total": round(flow_ana.dii_streak_total, 2) if flow_ana else round(dii_net, 2),
+            "fii_streak_total": round(flow_ana.fii_streak_total, 2)
+            if flow_ana
+            else round(fii_net, 2),
+            "dii_streak_total": round(flow_ana.dii_streak_total, 2)
+            if flow_ana
+            else round(dii_net, 2),
             "fii_5d_net": round(flow_ana.fii_5d_net, 2) if flow_ana else round(fii_net, 2),
             "dii_5d_net": round(flow_ana.dii_5d_net, 2) if flow_ana else round(dii_net, 2),
             "fii_momentum": flow_ana.fii_momentum if flow_ana else "STEADY",
