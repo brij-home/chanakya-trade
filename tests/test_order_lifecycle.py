@@ -77,15 +77,15 @@ def test_identical_orders_without_a_retry_key_remain_distinct_intents():
 
 
 def test_client_cannot_override_authoritative_instrument_metadata():
-    """Direct-call compatibility arguments never change canonical metadata."""
-    gold = preview_order_intent(
-        symbol="MCX:GOLD", side="BUY", quantity=1, price=72000.0, exchange="NSE"
-    )
-    currency = preview_order_intent(
-        symbol="USDINR", side="BUY", quantity=1, price=83.5, segment="EQUITY_INTRADAY"
-    )
-    assert (gold.exchange, gold.segment) == ("MCX", "COMMODITY")
-    assert (currency.exchange, currency.segment) == ("CDS", "CURRENCY")
+    """Client metadata cannot override—and is rejected against—canonical routing."""
+    with pytest.raises(ValueError, match="conflicts with canonical exchange"):
+        preview_order_intent(
+            symbol="MCX:GOLD", side="BUY", quantity=1, price=72000.0, exchange="NSE"
+        )
+    with pytest.raises(ValueError, match="conflicts with canonical segment"):
+        preview_order_intent(
+            symbol="USDINR", side="BUY", quantity=1, price=83.5, segment="EQUITY_INTRADAY"
+        )
 
 
 def test_execution_requires_server_confirmation(monkeypatch):

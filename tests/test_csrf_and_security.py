@@ -182,7 +182,7 @@ def test_real_reconciliation_endpoint_with_typed_broker(monkeypatch, client):
         def get_funds(self):
             return MockFunds(available_cash=500000.0)
 
-    monkeypatch.setattr("brokers.session.get_broker", lambda: MockLiveBroker())
+    monkeypatch.setattr("brokers.session.get_execution_broker", lambda: MockLiveBroker())
 
     # Call endpoint directly in local desktop mode (auth bypassed for localhost)
     monkeypatch.delenv("DEPLOY_MODE", raising=False)
@@ -191,10 +191,13 @@ def test_real_reconciliation_endpoint_with_typed_broker(monkeypatch, client):
 
     data = res.json()
     assert "status" in data
-    assert data["status"] in ("COMPLETE", "PARTIAL", "DISPUTED")
+    # A broker snapshot alone is intentionally insufficient: the pilot must
+    # establish its independent local opening balance before reconciliation.
+    assert data["status"] == "UNAVAILABLE"
+    assert "baseline" in data["reason"].lower()
     assert data["broker_account_id"] == "ACC-TEST-999"
     assert data["correlation_id"] is not None
-    assert "discrepancies" in data
+    assert data["broker_positions"] is not None
 
 
 def test_orders_confirm_endpoint_integration(tmp_path, monkeypatch, client):

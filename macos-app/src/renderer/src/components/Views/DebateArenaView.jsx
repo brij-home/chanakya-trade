@@ -440,9 +440,16 @@ export default function DebateArenaView() {
             </span>
           </div>
         </div>
-      </div> : <div className="mx-auto my-3 max-w-md rounded-xl border border-border/60 bg-panel px-4 py-3 text-center text-xs text-muted">
-        Evidence is unavailable or incomplete. No conviction score has been calculated.
-      </div>}
+      </div> : loading ? (
+        <div className="mx-auto my-3 max-w-md rounded-xl border border-amber/40 bg-panel px-4 py-3 text-center text-xs text-amber flex items-center justify-center gap-2">
+          <span className="w-2 h-2 rounded-full bg-amber animate-ping" />
+          <span>Synthesizing multi-agent specialist consensus for {symbol}...</span>
+        </div>
+      ) : (
+        <div className="mx-auto my-3 max-w-md rounded-xl border border-border/60 bg-panel px-4 py-3 text-center text-xs text-muted">
+          Evidence is unavailable or incomplete. No conviction score has been calculated.
+        </div>
+      )}
 
       {/* VIEW MODE 1: ADVERSARIAL BULL VS BEAR DEBATE */}
       {selectedCouncil === 'debate' && (

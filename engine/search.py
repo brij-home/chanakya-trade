@@ -62,6 +62,15 @@ class AnalysisSearch:
             self._init_schema()
         return self._conn
 
+    def close(self) -> None:
+        """Close persistent FTS connection if open."""
+        if self._conn is not None:
+            try:
+                self._conn.close()
+            except Exception:
+                pass
+            self._conn = None
+
     def _init_schema(self) -> None:
         """Create FTS5 virtual table and metadata table if they don't exist."""
         conn = self._conn
@@ -261,12 +270,6 @@ class AnalysisSearch:
                 line += f" | {r.snippet[:80]}"
             parts.append(line)
         return "\n".join(parts)
-
-    def close(self) -> None:
-        """Close the database connection."""
-        if self._conn:
-            self._conn.close()
-            self._conn = None
 
     def clear(self) -> None:
         """Remove all indexed records."""

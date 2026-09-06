@@ -14,10 +14,11 @@ import hashlib
 import json
 import sqlite3
 import uuid
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Generator, Optional
 
 from config.paths import app_data_path
 
@@ -26,6 +27,15 @@ def _get_db_path() -> Path:
     p = app_data_path("audit.db")
     p.parent.mkdir(parents=True, exist_ok=True)
     return p
+
+
+@contextmanager
+def _get_audit_db() -> Generator[sqlite3.Connection, None, None]:
+    conn = sqlite3.connect(_get_db_path(), timeout=30.0)
+    try:
+        yield conn
+    finally:
+        conn.close()
 
 
 @dataclass
@@ -45,8 +55,7 @@ class AuditRecord:
 
 def _init_audit_db():
     """Ensure audit database schema exists."""
-    db_path = _get_db_path()
-    with sqlite3.connect(db_path, timeout=30.0) as conn:
+    with _get_audit_db() as conn:
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS security_audit_log (
@@ -94,7 +103,7 @@ def record_audit_event(
     event_id = str(uuid.uuid4())
     now_iso = datetime.now(timezone.utc).isoformat()
 
-    with sqlite3.connect(_get_db_path(), timeout=30.0) as conn:
+    with _get_audit_db() as conn:
         cursor = conn.execute("SELECT record_hash FROM security_audit_log ORDER BY id DESC LIMIT 1")
         row = cursor.fetchone()
         prev_hash = row[0] if row else "GENESIS_BLOCK_00000000000000000000000000000000"
@@ -128,7 +137,7 @@ def record_audit_event(
 def get_audit_logs(limit: int = 50, event_type: Optional[str] = None) -> list[dict[str, Any]]:
     """Retrieve recent audit logs."""
     _init_audit_db()
-    with sqlite3.connect(_get_db_path(), timeout=30.0) as conn:
+    with _get_audit_db() as conn:
         conn.row_factory = sqlite3.Row
         if event_type:
             cursor = conn.execute(
@@ -146,7 +155,7 @@ def get_audit_logs(limit: int = 50, event_type: Optional[str] = None) -> list[di
 def verify_audit_integrity() -> dict[str, Any]:
     """Verify hash chain integrity across all audit records."""
     _init_audit_db()
-    with sqlite3.connect(_get_db_path(), timeout=30.0) as conn:
+    with _get_audit_db() as conn:
         conn.row_factory = sqlite3.Row
         cursor = conn.execute("SELECT * FROM security_audit_log ORDER BY id ASC")
         rows = cursor.fetchall()

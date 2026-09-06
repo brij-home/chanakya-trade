@@ -46,18 +46,10 @@ echo -e "\033[1;36m   Local-First Greenfield Bootstrap (POSIX Environment)\033[0
 echo -e "\033[1;36m==================================================================\033[0m"
 echo ""
 
-# 1. Resolve Python
-PYTHON_EXE=""
-if [[ -f "${ROOT_DIR}/.venv/bin/python" ]]; then
-    PYTHON_EXE="${ROOT_DIR}/.venv/bin/python"
-elif command -v python3 &>/dev/null; then
-    PYTHON_EXE="$(command -v python3)"
-elif command -v python &>/dev/null; then
-    PYTHON_EXE="$(command -v python)"
-else
-    echo -e "\033[1;31m[-] Python 3.11+ is required but not found.\033[0m"
-    exit 1
-fi
+# 1. Repair/create the environment before resolving its interpreter. A venv
+# can exist while still being unusable because its source Python was removed.
+bash "${SCRIPT_DIR}/bootstrap.sh"
+PYTHON_EXE="${ROOT_DIR}/.venv/bin/python"
 
 echo -e "\033[1;32m[+] Python Executable: ${PYTHON_EXE}\033[0m"
 

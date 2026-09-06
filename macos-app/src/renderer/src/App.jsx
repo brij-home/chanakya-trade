@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback, lazy, Suspense } from 'react'
 import { useChatStore, getBaseUrl } from './store/chatStore'
+import { useSSEStream } from './hooks/useSSEStream'
 import { useMarketClock } from './hooks/useMarketClock'
 import ActivityBar from './components/Shell/ActivityBar'
 import ContextBar, { MarketClock } from './components/Shell/ContextBar'
@@ -80,9 +81,20 @@ export default function App() {
   const setAppMode = useChatStore((s) => s.setAppMode)
   const setModeLoading = useChatStore((s) => s.setModeLoading)
   const { theme, toggle: toggleTheme } = useTheme()
+  const [pilotSafety, setPilotSafety] = useState(null)
 
-  // Setup phase state machine
-  const [setupPhase, setSetupPhase] = useState('initializing')
+  // System status SSE URL — connects when port is known
+  const systemStreamUrl = port ? `${getBaseUrl(port)}/api/system/stream` : null
+
+  // Setup phase state machine — fast path: if terminal was already initialized, skip full boot screen
+  const [setupPhase, setSetupPhase] = useState(() => {
+    try {
+      if (typeof window !== 'undefined' && localStorage.getItem('chanakya_setup_ready') === 'true') {
+        return 'ready'
+      }
+    } catch (_) {}
+    return 'initializing'
+  })
   const [setupData, setSetupData] = useState(null)
 
   // Modal state
@@ -132,14 +144,24 @@ export default function App() {
           : parseInt(window.location.port, 10) || 8765
         setPort(currentPort)
         try {
-          const res = await fetch(`${getBaseUrl(currentPort)}/api/onboarding/status`)
+          const res = await fetch(`${getBaseUrl(currentPort)}/api/onboarding/status`, {
+            signal: AbortSignal.timeout(2000),
+          })
           if (res.ok) {
             const data = await res.json()
-            setSetupPhase(data.onboarding_complete ? 'ready' : 'onboarding')
+            if (data?.onboarding_complete === false) {
+              setSetupPhase('onboarding')
+              try { localStorage.removeItem('chanakya_setup_ready') } catch (_) {}
+            } else {
+              setSetupPhase('ready')
+              try { localStorage.setItem('chanakya_setup_ready', 'true') } catch (_) {}
+            }
           } else {
             setSetupPhase('ready')
           }
-        } catch { setSetupPhase('ready') }
+        } catch {
+          setSetupPhase('ready')
+        }
       }
       checkReady()
       return
@@ -147,25 +169,44 @@ export default function App() {
 
     const safetyTimer = setTimeout(() => {
       setSetupPhase((prev) => (prev === 'initializing' ? 'ready' : prev))
-    }, 2000)
+    }, 600)
 
-    window.electronAPI?.onSetupProgress((data) => { setSetupPhase('progress'); setSetupData(data) })
-    window.electronAPI?.onSetupPythonMissing((data) => { setSetupPhase('python_missing'); setSetupData(data) })
+    window.electronAPI?.onSetupProgress((data) => {
+      setSetupPhase('progress')
+      setSetupData(data)
+    })
+    window.electronAPI?.onSetupPythonMissing((data) => {
+      setSetupPhase('python_missing')
+      setSetupData(data)
+    })
 
     window.electronAPI?.onSidecarReady(async ({ port: p }) => {
       clearTimeout(safetyTimer)
       setPort(p)
       try {
-        const res = await fetch(`${getBaseUrl(p)}/api/onboarding/status`)
+        const res = await fetch(`${getBaseUrl(p)}/api/onboarding/status`, {
+          signal: AbortSignal.timeout(2000),
+        })
         const data = await res.json()
-        setSetupPhase(data.onboarding_complete ? 'ready' : 'onboarding')
-      } catch { setSetupPhase('ready') }
+        if (data?.onboarding_complete === false) {
+          setSetupPhase('onboarding')
+          try { localStorage.removeItem('chanakya_setup_ready') } catch (_) {}
+        } else {
+          setSetupPhase('ready')
+          try { localStorage.setItem('chanakya_setup_ready', 'true') } catch (_) {}
+        }
+      } catch {
+        setSetupPhase('ready')
+      }
     })
 
     window.electronAPI?.onSidecarError(({ message, details }) => {
       clearTimeout(safetyTimer)
       setSidecarError(message)
-      if (setupPhase !== 'ready') { setSetupPhase('error'); setSetupData({ message, details }) }
+      if (setupPhase !== 'ready') {
+        setSetupPhase('error')
+        setSetupData({ message, details })
+      }
     })
 
     window.electronAPI?.getPort?.()?.then(async (p) => {
@@ -173,27 +214,59 @@ export default function App() {
         clearTimeout(safetyTimer)
         setPort(p)
         try {
-          const res = await fetch(`${getBaseUrl(p)}/api/onboarding/status`)
+          const res = await fetch(`${getBaseUrl(p)}/api/onboarding/status`, {
+            signal: AbortSignal.timeout(2000),
+          })
           const data = await res.json()
-          setSetupPhase(data.onboarding_complete ? 'ready' : 'onboarding')
-        } catch { setSetupPhase('ready') }
+          if (data?.onboarding_complete === false) {
+            setSetupPhase('onboarding')
+            try { localStorage.removeItem('chanakya_setup_ready') } catch (_) {}
+          } else {
+            setSetupPhase('ready')
+            try { localStorage.setItem('chanakya_setup_ready', 'true') } catch (_) {}
+          }
+        } catch {
+          setSetupPhase('ready')
+        }
       }
     })
 
     return () => clearTimeout(safetyTimer)
   }, []) // eslint-disable-line
 
-  // ── Status polling ───────────────────────────────────────────────────────
+  // ── System Status: Single SSE stream replaces 3 polling intervals ───────────
+  // Handles: broker status (was 8s poll), app mode (was one-shot fetch), pilot (was 15s poll)
+  // Falls back to REST polling if /api/system/stream is unavailable.
+  const handleSystemMessage = useCallback((payload) => {
+    if (!payload || payload.type !== 'system_status') return
+    if (payload.broker_statuses) setBrokerStatuses(payload.broker_statuses)
+    if (payload.mode) setAppMode(payload.mode)
+    if (payload.pilot !== undefined) setPilotSafety(payload.pilot)
+  }, [setBrokerStatuses, setAppMode])
+
+  useSSEStream(systemStreamUrl, {
+    onMessage: handleSystemMessage,
+    onOpen: () => setModeLoading(false),
+    enabled: !!(port || port === 0) && setupPhase === 'ready',
+  })
+
+  // Fallback REST polling for broker status when SSE is not available
+  // (older backend versions without /api/system/stream)
   useEffect(() => {
     if (!port && port !== 0) return
+    // Initial fetch to ensure broker status is populated immediately
     const fetchStatus = () =>
-      fetch(`${getBaseUrl(port)}/api/status`).then((r) => r.json()).then(setBrokerStatuses).catch(() => {})
+      fetch(`${getBaseUrl(port)}/api/status`)
+        .then((r) => r.json())
+        .then(setBrokerStatuses)
+        .catch(() => {})
     fetchStatus()
-    const t = setInterval(fetchStatus, 8000)
+    // Keep slower 30s fallback poll — SSE will be primary
+    const t = setInterval(fetchStatus, 30000)
     return () => clearInterval(t)
   }, [port])
 
-  // ── Fetch server-authoritative app mode (P0-A) ───────────────────────────────
+  // ── Initial mode fetch as fast-path before SSE delivers snapshot ────────────
   useEffect(() => {
     if (!port && port !== 0) return
     const fetchMode = async () => {
@@ -206,11 +279,25 @@ export default function App() {
         }
       } catch {
         // If endpoint is unavailable, keep default PAPER mode
+      } finally {
         setModeLoading(false)
       }
     }
     fetchMode()
   }, [port]) // eslint-disable-line
+
+  // ── Pilot guardrail visibility ────────────────────────────────────────────
+  useEffect(() => {
+    if (!port && port !== 0) return
+    const fetchPilotSafety = () =>
+      fetch(`${getBaseUrl(port)}/api/pilot/status`)
+        .then((res) => (res.ok ? res.json() : null))
+        .then(setPilotSafety)
+        .catch(() => setPilotSafety(null))
+    fetchPilotSafety()
+    const timer = setInterval(fetchPilotSafety, 15000)
+    return () => clearInterval(timer)
+  }, [port])
 
   // ── Global keybindings ───────────────────────────────────────────────────
   useEffect(() => {
@@ -258,7 +345,13 @@ export default function App() {
   if (setupPhase === 'onboarding') {
     return (
       <Suspense fallback={<ViewLoader label="Loading Setup..." />}>
-        <OnboardingWizard port={port} onComplete={() => setSetupPhase('ready')} />
+        <OnboardingWizard
+          port={port}
+          onComplete={() => {
+            try { localStorage.setItem('chanakya_setup_ready', 'true') } catch (_) {}
+            setSetupPhase('ready')
+          }}
+        />
       </Suspense>
     )
   }
@@ -273,7 +366,7 @@ export default function App() {
     <div className="flex flex-col h-full" style={{ background: 'var(--color-surface)' }}>
 
       {/* ── P0-A: Persistent Mode Banner ───────────────────────────── */}
-      <ModeBanner mode={appMode} loading={modeLoading} />
+      <ModeBanner mode={appMode} loading={modeLoading} pilotSafety={pilotSafety?.profile} />
 
       {/* ── Tier 1: Top Navigation Bar ──────────────────────────────────── */}
       <div
@@ -300,10 +393,10 @@ export default function App() {
           className="no-drag flex items-center p-1 rounded-xl gap-0.5 text-xs"
           style={{ background: 'var(--color-elevated)', border: '1px solid var(--color-border)' }}
         >
-          <WorkspaceTab id="terminal"  icon="📊" label="Terminal"    active={activeView === 'terminal'}  color="gold"     onClick={() => setActiveView('terminal')} shortcut="^1" />
-          <WorkspaceTab id="debate"    icon="⚔️" label="Debate"      active={activeView === 'debate'}    color="emerald"  onClick={() => setActiveView('debate')} shortcut="^2" />
-          <WorkspaceTab id="options"   icon="⚡" label="Options"     active={activeView === 'options'}   color="violet"   onClick={() => setActiveView('options')} shortcut="^3" />
-          <WorkspaceTab id="copilot"   icon="💬" label="Copilot"     active={activeView === 'copilot'}   color="sapphire" onClick={() => setActiveView('copilot')} shortcut="^4" />
+          <WorkspaceTab id="terminal"  icon="📊" label="Terminal"    active={activeView === 'terminal'}  color="gold"     onClick={() => document.startViewTransition?.(() => setActiveView('terminal'))  ?? setActiveView('terminal')} shortcut="^1" />
+          <WorkspaceTab id="debate"    icon="⚔️" label="Debate"      active={activeView === 'debate'}    color="emerald"  onClick={() => document.startViewTransition?.(() => setActiveView('debate'))    ?? setActiveView('debate')} shortcut="^2" />
+          <WorkspaceTab id="options"   icon="⚡" label="Options"     active={activeView === 'options'}   color="violet"   onClick={() => document.startViewTransition?.(() => setActiveView('options'))   ?? setActiveView('options')} shortcut="^3" />
+          <WorkspaceTab id="copilot"   icon="💬" label="Copilot"     active={activeView === 'copilot'}   color="sapphire" onClick={() => document.startViewTransition?.(() => setActiveView('copilot'))   ?? setActiveView('copilot')} shortcut="^4" />
         </div>
 
         {/* Right: Status cluster */}
@@ -389,7 +482,7 @@ export default function App() {
         {isCopilot && <Sidebar />}
 
         {/* View Container */}
-        <div className="flex flex-col flex-1 overflow-hidden">
+        <div className="workspace-content flex flex-col flex-1 overflow-hidden">
           <ErrorBoundary title="Workspace View">
             <Suspense fallback={<ViewLoader label={`Loading ${activeView}...`} />}>
               {activeView === 'terminal' && (

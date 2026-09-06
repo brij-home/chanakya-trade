@@ -720,6 +720,12 @@ def test_execute_order_calls_pretrade_and_blocks_stale_data(tmp_path, monkeypatc
     """
     monkeypatch.setenv("TRADING_MODE", "EXECUTE")
     monkeypatch.setenv("ALLOW_LIVE_TRADING", "1")
+    # Exercise the downstream pre-trade path only after deliberately opening
+    # the otherwise fail-closed personal-pilot guardrails.
+    monkeypatch.setenv("PILOT_ALLOW_LIVE_EXECUTION", "1")
+    monkeypatch.setenv("PILOT_ALLOWED_SEGMENTS", "EQUITY_INTRADAY")
+    monkeypatch.setenv("PILOT_ALLOWED_PRODUCTS", "MIS")
+    monkeypatch.setenv("PILOT_MAX_ORDER_NOTIONAL", "1000000")
 
     from engine import kill_switch as ks_module
     from engine.order_lifecycle import confirm_order_intent
@@ -738,18 +744,30 @@ def test_execute_order_calls_pretrade_and_blocks_stale_data(tmp_path, monkeypatc
     )
     confirm_order_intent(order.order_id, preview_hash=order.preview_hash)
 
-    # Provide a minimal context broker so the pretrade context fetch doesn't UNKNOWN_FREEZE.
-    # The broker returns an empty quote dict — quote_age_seconds will be ~0 (fresh fetch).
+    # Provide the execution account separately from a timestamped market-data
+    # quote; live routing deliberately does not use the execution broker feed.
     class _ContextOnlyBroker:
         account_id = "CTX_TEST"
-
-        def get_quote(self, instruments):
-            return {}  # Empty — _ltp stays None, but quote_age_seconds is set
 
         def get_funds(self):
             return {"available_cash": 50_000.0}
 
-    monkeypatch.setattr("brokers.session.get_broker", lambda: _ContextOnlyBroker())
+    from brokers.base import Quote
+
+    quote = Quote(
+        symbol="NSE:HDFCBANK",
+        last_price=1600.0,
+        open=1600.0,
+        high=1600.0,
+        low=1600.0,
+        close=1600.0,
+        volume=1,
+        provider="test",
+        source="REST",
+        data_state="LIVE",
+    )
+    monkeypatch.setattr("brokers.session.get_execution_broker", lambda: _ContextOnlyBroker())
+    monkeypatch.setattr("market.quotes.get_quote", lambda instruments: {instruments[0]: quote})
 
     # Stub validate_pretrade to block due to stale/missing quote
     class _BlockedResult:
@@ -770,6 +788,10 @@ def test_execute_order_broker_timeout_transitions_to_unknown_freeze(tmp_path, mo
     """
     monkeypatch.setenv("TRADING_MODE", "EXECUTE")
     monkeypatch.setenv("ALLOW_LIVE_TRADING", "1")
+    monkeypatch.setenv("PILOT_ALLOW_LIVE_EXECUTION", "1")
+    monkeypatch.setenv("PILOT_ALLOWED_SEGMENTS", "EQUITY_INTRADAY")
+    monkeypatch.setenv("PILOT_ALLOWED_PRODUCTS", "MIS")
+    monkeypatch.setenv("PILOT_MAX_ORDER_NOTIONAL", "1000000")
 
     from engine import kill_switch as ks_module
     from engine.order_lifecycle import confirm_order_intent
@@ -795,15 +817,10 @@ def test_execute_order_broker_timeout_transitions_to_unknown_freeze(tmp_path, mo
 
     monkeypatch.setattr("engine.pretrade.validate_pretrade", lambda **kw: _PassResult())
 
-    # Patch get_broker at its source module (brokers.session)
-    # _TimeoutBroker must implement get_quote + get_funds so the pretrade context
-    # fetch succeeds; the timeout only fires at place_order.
+    # The execution adapter supplies account funds and submits the order; a
+    # timestamped quote is supplied through the independent market boundary.
     class _TimeoutBroker:
         account_id = "TEST_ACCOUNT"
-
-        def get_quote(self, instruments):
-            """Return a minimal quote so context fetch completes."""
-            return {}
 
         def get_funds(self):
             """Return minimal funds so context fetch completes."""
@@ -812,7 +829,22 @@ def test_execute_order_broker_timeout_transitions_to_unknown_freeze(tmp_path, mo
         def place_order(self, req):
             raise TimeoutError("Broker TCP connection timed out after 30s")
 
-    monkeypatch.setattr("brokers.session.get_broker", lambda: _TimeoutBroker())
+    from brokers.base import Quote
+
+    quote = Quote(
+        symbol="NSE:SBIN",
+        last_price=600.0,
+        open=600.0,
+        high=600.0,
+        low=600.0,
+        close=600.0,
+        volume=1,
+        provider="test",
+        source="REST",
+        data_state="LIVE",
+    )
+    monkeypatch.setattr("brokers.session.get_execution_broker", lambda: _TimeoutBroker())
+    monkeypatch.setattr("market.quotes.get_quote", lambda instruments: {instruments[0]: quote})
 
     confirm_lifecycle_order(order)
     with pytest.raises(RuntimeError, match="UNKNOWN_FREEZE"):

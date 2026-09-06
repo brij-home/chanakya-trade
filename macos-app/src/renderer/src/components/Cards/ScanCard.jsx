@@ -117,15 +117,15 @@ export default function ScanCard({ data }) {
 
         {sectors.length > 0 ? (
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-            {sectors.map((sec) => {
+            {Array.from(new Map(sectors.map((s) => [s.code, s])).values()).map((sec) => {
               const chg = sec.change_pct ?? 0
               const isUp = chg >= 0
+              const displayName = sec.name.replace(/^NIFTY\s*/i, '') || sec.code
               return (
                 <button
                   key={sec.code}
                   onClick={() => {
-                    const secName = sec.name.replace('NIFTY ', '') || sec.code
-                    window.dispatchEvent(new CustomEvent('open-sector-drilldown', { detail: { sector: secName } }))
+                    window.dispatchEvent(new CustomEvent('open-sector-drilldown', { detail: { sector: displayName } }))
                   }}
                   className={`p-2 rounded-lg border text-left transition-all hover:scale-102 cursor-pointer group ${
                     isUp
@@ -135,7 +135,7 @@ export default function ScanCard({ data }) {
                   title={`Click to view all constituent stocks & contributing factors in ${sec.name}`}
                 >
                   <div className="flex items-center justify-between">
-                    <p className="text-[11px] font-semibold font-ui truncate group-hover:text-amber">{sec.name.replace('NIFTY ', '')}</p>
+                    <p className="text-[11px] font-semibold font-ui truncate group-hover:text-amber">{displayName}</p>
                     <span className="text-[10px] opacity-70 group-hover:opacity-100 group-hover:text-amber">→</span>
                   </div>
                   <p className="text-[12px] font-bold mt-0.5 font-mono">

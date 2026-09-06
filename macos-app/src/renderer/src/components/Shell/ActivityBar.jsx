@@ -142,7 +142,16 @@ function ActivityBarIcon({ item, isActive, onClick, badge }) {
 export default function ActivityBar({ alertCount = 0 }) {
   const { activeView, setActiveView } = useChatStore()
 
-  const handleNav = (id) => setActiveView(id)
+  // View Transitions API — smooth crossfade between workspaces.
+  // Gracefully degrades: browsers without support just switch instantly.
+  const handleNav = (id) => {
+    if (id === activeView) return
+    if (typeof document !== 'undefined' && document.startViewTransition) {
+      document.startViewTransition(() => setActiveView(id))
+    } else {
+      setActiveView(id)
+    }
+  }
 
   return (
     <div

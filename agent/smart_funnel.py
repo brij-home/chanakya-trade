@@ -231,6 +231,97 @@ WATCHLIST_PRESETS: dict[str, list[str]] = {
         "COLPAL",
         "VBL",
     ],
+    "nifty_energy": [
+        "RELIANCE",
+        "ONGC",
+        "NTPC",
+        "POWERGRID",
+        "BPCL",
+        "IOC",
+        "COALINDIA",
+        "GAIL",
+        "TATAPOWER",
+        "ADANIGREEN",
+    ],
+    "nifty_finance": [
+        "HDFCBANK",
+        "ICICIBANK",
+        "SBIN",
+        "BAJFINANCE",
+        "KOTAKBANK",
+        "AXISBANK",
+        "BAJAJFINSV",
+        "HDFCLIFE",
+        "SBILIFE",
+        "SHRIRAMFIN",
+    ],
+    "nifty_infra": [
+        "LT",
+        "ULTRACEMCO",
+        "GRASIM",
+        "ADANIPORTS",
+        "POWERGRID",
+        "NTPC",
+        "BHARTIARTL",
+        "DLF",
+        "SIEMENS",
+        "ABB",
+    ],
+    "nifty_realty": [
+        "DLF",
+        "GODREJPROP",
+        "OBEROIRLTY",
+        "PHOENIXLTD",
+        "PRESTIGE",
+        "BRIGADE",
+        "SOBHA",
+    ],
+}
+
+SECTOR_NAME_MAP: dict[str, str] = {
+    "bank": "nifty_bank",
+    "banking": "nifty_bank",
+    "banks": "nifty_bank",
+    "niftybank": "nifty_bank",
+    "nifty_bank": "nifty_bank",
+    "it": "nifty_it",
+    "tech": "nifty_it",
+    "technology": "nifty_it",
+    "niftyit": "nifty_it",
+    "nifty_it": "nifty_it",
+    "auto": "nifty_auto",
+    "automobile": "nifty_auto",
+    "automobiles": "nifty_auto",
+    "niftyauto": "nifty_auto",
+    "nifty_auto": "nifty_auto",
+    "metal": "nifty_metal",
+    "metals": "nifty_metal",
+    "niftymetal": "nifty_metal",
+    "nifty_metal": "nifty_metal",
+    "pharma": "nifty_pharma",
+    "healthcare": "nifty_pharma",
+    "health": "nifty_pharma",
+    "niftypharma": "nifty_pharma",
+    "nifty_pharma": "nifty_pharma",
+    "fmcg": "nifty_fmcg",
+    "consumer": "nifty_fmcg",
+    "niftyfmcg": "nifty_fmcg",
+    "nifty_fmcg": "nifty_fmcg",
+    "energy": "nifty_energy",
+    "oil": "nifty_energy",
+    "niftyenergy": "nifty_energy",
+    "nifty_energy": "nifty_energy",
+    "finance": "nifty_finance",
+    "financial": "nifty_finance",
+    "finserv": "nifty_finance",
+    "financial_services": "nifty_finance",
+    "realty": "nifty_realty",
+    "realestate": "nifty_realty",
+    "infra": "nifty_infra",
+    "infrastructure": "nifty_infra",
+    "nifty50": "nifty_50",
+    "nifty_50": "nifty_50",
+    "nifty": "nifty_50",
 }
 
 
@@ -368,15 +459,28 @@ class SmartFunnel:
         except Exception:
             pass
 
-        # 2. Fundamental Signals
+        ltp = float(tech.get("ltp") or tech.get("close") or 0.0)
+        # Immediate guard: if no price or ltp <= 0, stock is invalid/unavailable
+        if ltp <= 0.0:
+            return PreFilterReport(
+                symbol=symbol,
+                exchange=exchange,
+                score=0.0,
+                qualified=False,
+                status_label="UNAVAILABLE",
+                pass_reason="",
+                rejection_reason="No quote or historical price data available",
+                metrics={},
+            )
+
+        # 2. Fundamental Signals (use fast mode for 0.1s quant screening)
         fund = {}
         try:
-            fund = reg.execute("fundamental_analyse", {"symbol": symbol}) or {}
+            fund = reg.execute("fundamental_analyse", {"symbol": symbol, "fast": True}) or {}
         except Exception:
             pass
 
         # Extract parameters
-        ltp = float(tech.get("ltp") or tech.get("close") or 0.0)
         rsi = float(tech.get("rsi") or 50.0)
         ema20 = float(tech.get("ema20") or tech.get("sma20") or 0.0)
         ema50 = float(tech.get("ema50") or tech.get("sma50") or 0.0)
@@ -638,6 +742,70 @@ class SmartFunnel:
             raw_synthesis=text,
         )
 
+    def _build_quant_fallback_trade_plan(
+        self, symbol: str, exchange: str = "NSE"
+    ) -> TradePlanSummary:
+        """Deterministic quantitative trade plan fallback when LLM times out (>18s) or fails."""
+        reg = self._get_registry()
+        ltp, sl, tgt, verdict = 0.0, "—", "—", "HOLD"
+        confidence = 65
+        if reg:
+            try:
+                tech = (
+                    reg.execute("technical_analyse", {"symbol": symbol, "exchange": exchange}) or {}
+                )
+                ltp = float(tech.get("ltp") or tech.get("close") or 0.0)
+                atr = float(tech.get("atr") or (ltp * 0.015))
+                verdict = str(tech.get("verdict") or "BULLISH")
+                if verdict == "BULLISH":
+                    sl_val = round(ltp - (1.5 * atr), 1)
+                    tgt_val = round(ltp + (3.0 * atr), 1)
+                    sl = (
+                        f"₹{sl_val:,.1f} (-{((ltp - sl_val) / ltp) * 100:.1f}%)" if ltp > 0 else "—"
+                    )
+                    tgt = (
+                        f"₹{tgt_val:,.1f} (+{((tgt_val - ltp) / ltp) * 100:.1f}%)"
+                        if ltp > 0
+                        else "—"
+                    )
+                else:
+                    sl_val = round(ltp + (1.5 * atr), 1)
+                    tgt_val = round(ltp - (3.0 * atr), 1)
+                    sl = (
+                        f"₹{sl_val:,.1f} (+{((sl_val - ltp) / ltp) * 100:.1f}%)" if ltp > 0 else "—"
+                    )
+                    tgt = (
+                        f"₹{tgt_val:,.1f} (-{((ltp - tgt_val) / ltp) * 100:.1f}%)"
+                        if ltp > 0
+                        else "—"
+                    )
+            except Exception:
+                pass
+
+        return TradePlanSummary(
+            symbol=symbol,
+            verdict=verdict,
+            confidence=confidence,
+            winner="BULLS"
+            if verdict == "BULLISH"
+            else "BEARS"
+            if verdict == "BEARISH"
+            else "NEUTRAL",
+            strategy="Quantitative Volatility Risk-Parity Plan (Fast Fallback)",
+            entry=f"₹{ltp:,.2f}" if ltp > 0 else "At market",
+            stop_loss=sl,
+            target=tgt,
+            risk_reward="2.0",
+            position_size="ATR risk-parity sized",
+            rationale=[
+                "Stage 1 Quant pre-filter qualified top setup",
+                f"Technical bias: {verdict}",
+                "ATR-based volatility trailing stop",
+            ],
+            risks=["Market regime volatility", "Options expiry liquidity shifts"],
+            raw_synthesis="Deterministic Quantitative Sizing Plan applied.",
+        )
+
     # ── Main Funnel Pipeline Execution ────────────────────────────────────────
 
     def run(
@@ -652,29 +820,33 @@ class SmartFunnel:
         """
         t0 = time.time()
 
+        if isinstance(symbols, list):
+            # Check if list starts with 'sector' or 'sec'
+            if len(symbols) > 1 and str(symbols[0]).strip().lower() in ("sector", "sec"):
+                symbols = symbols[1:]
+            if len(symbols) == 1:
+                symbols = symbols[0]
+
         if isinstance(symbols, str):
             clean_str = symbols.strip().lower().replace("-", "_").replace(" ", "_")
+            if clean_str.startswith("sector_"):
+                clean_str = clean_str[7:]
+            if clean_str in SECTOR_NAME_MAP:
+                clean_str = SECTOR_NAME_MAP[clean_str]
+
             if clean_str in WATCHLIST_PRESETS:
                 sym_list = list(WATCHLIST_PRESETS[clean_str])
             elif clean_str in ("nifty", "nifty_50", "nifty50"):
                 sym_list = list(WATCHLIST_PRESETS["nifty_50"])
-            elif clean_str in ("nifty_it", "niftyit", "it"):
-                sym_list = list(WATCHLIST_PRESETS["nifty_it"])
-            elif clean_str in ("nifty_bank", "niftybank", "bank"):
-                sym_list = list(WATCHLIST_PRESETS["nifty_bank"])
-            elif clean_str in ("nifty_auto", "niftyauto", "auto"):
-                sym_list = list(WATCHLIST_PRESETS["nifty_auto"])
-            elif clean_str in ("nifty_metal", "niftymetal", "metal"):
-                sym_list = list(WATCHLIST_PRESETS["nifty_metal"])
-            elif clean_str in ("nifty_pharma", "niftypharma", "pharma"):
-                sym_list = list(WATCHLIST_PRESETS["nifty_pharma"])
-            elif clean_str in ("nifty_fmcg", "niftyfmcg", "fmcg"):
-                sym_list = list(WATCHLIST_PRESETS["nifty_fmcg"])
             else:
-                sym_list = [s.strip().upper() for s in symbols.split(",") if s.strip()]
+                sym_list = [
+                    s.strip().upper() for s in symbols.replace(" ", ",").split(",") if s.strip()
+                ]
         else:
             sym_list = [s.strip().upper() for s in symbols if s.strip()]
 
+        # Filter out accidental keywords like "SECTOR"
+        sym_list = [s for s in sym_list if s not in ("SECTOR", "SEC", "ALL", "")]
         if not sym_list:
             sym_list = list(WATCHLIST_PRESETS["nifty_50"])
 
@@ -711,9 +883,15 @@ class SmartFunnel:
         if qualified_reports:
             target_candidates = qualified_reports[:top_n]
         else:
-            target_candidates = filter_reports[:top_n]
+            # Fallback candidates: pick from stocks that have actual data (not UNAVAILABLE)
+            # even if all scores are 0 — we still pick the least-bad option.
+            valid_fallback = [r for r in filter_reports if r.status_label != "UNAVAILABLE"]
+            # If everything is UNAVAILABLE, fall back to all reports sorted by score
+            if not valid_fallback:
+                valid_fallback = filter_reports
+            target_candidates = valid_fallback[:top_n]
             is_fallback = True
-            if self.verbose:
+            if self.verbose and target_candidates:
                 console.print(
                     "[dim yellow]  (0 stocks met strict qualification; evaluating top relative scorers)[/dim yellow]"
                 )
@@ -764,14 +942,37 @@ class SmartFunnel:
                         risks=["API/Timeout error"],
                     )
 
-            with concurrent.futures.ThreadPoolExecutor(
+            executor = concurrent.futures.ThreadPoolExecutor(
                 max_workers=min(len(candidate_symbols), 3)
-            ) as executor:
+            )
+            try:
                 future_to_sym = {
                     executor.submit(_analyze_candidate, sym): sym for sym in candidate_symbols
                 }
-                for f in concurrent.futures.as_completed(future_to_sym):
-                    trade_plans.append(f.result())
+                try:
+                    for f in concurrent.futures.as_completed(future_to_sym, timeout=22.0):
+                        sym = future_to_sym[f]
+                        try:
+                            trade_plans.append(f.result(timeout=15.0))
+                        except Exception as e:
+                            if self.verbose:
+                                console.print(
+                                    f"[dim yellow]Candidate {sym} synthesis failed ({e}), applying fast quantitative fallback.[/dim yellow]"
+                                )
+                            trade_plans.append(self._build_quant_fallback_trade_plan(sym, exchange))
+                except concurrent.futures.TimeoutError:
+                    if self.verbose:
+                        console.print(
+                            "[dim yellow]Candidate synthesis batch reached 22s timeout boundary, filling remaining with fast quantitative plans.[/dim yellow]"
+                        )
+
+                # Guarantee every candidate has a valid trade plan
+                existing_syms = {p.symbol for p in trade_plans}
+                for sym in candidate_symbols:
+                    if sym not in existing_syms:
+                        trade_plans.append(self._build_quant_fallback_trade_plan(sym, exchange))
+            finally:
+                executor.shutdown(wait=False, cancel_futures=True)
 
             # Sort trade_plans to match candidate_symbols ranking
             trade_plans.sort(

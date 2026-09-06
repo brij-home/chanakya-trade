@@ -9,8 +9,9 @@ which broker is active.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
-from datetime import datetime
+import time
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Optional
 
 
@@ -67,7 +68,11 @@ class Position:
 
 @dataclass
 class Quote:
-    """Live market snapshot for a single instrument."""
+    """Market snapshot with source and freshness evidence.
+
+    Existing adapters can populate only price fields, but the market boundary
+    enriches every quote before it reaches decision or execution code.
+    """
 
     symbol: str
     last_price: float
@@ -81,6 +86,28 @@ class Quote:
     ask: Optional[float] = None
     change: float = 0.0  # Change from prev close in INR
     change_pct: float = 0.0  # Change as %
+    provider: str = "UNKNOWN"
+    source: str = "UNKNOWN"  # STREAM | REST | EOD_SNAPSHOT | FALLBACK | CACHE
+    data_state: str = "UNAVAILABLE"  # LIVE | DELAYED | EOD | DEGRADED | UNAVAILABLE
+    canonical_instrument_id: Optional[str] = None
+    provider_symbol: Optional[str] = None
+    exchange_timestamp: Optional[str] = None
+    received_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    received_monotonic_ns: int = field(default_factory=time.monotonic_ns)
+    sequence: Optional[str] = None
+    quality_flags: tuple[str, ...] = ()
+    correlation_id: Optional[str] = None
+
+    @property
+    def age_seconds(self) -> Optional[float]:
+        """Age since local receipt, never request round-trip duration."""
+        try:
+            received = datetime.fromisoformat(self.received_at.replace("Z", "+00:00"))
+            if received.tzinfo is None:
+                received = received.replace(tzinfo=timezone.utc)
+            return max(0.0, (datetime.now(timezone.utc) - received).total_seconds())
+        except (AttributeError, TypeError, ValueError):
+            return None
 
 
 @dataclass

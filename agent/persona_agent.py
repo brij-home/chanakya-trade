@@ -140,7 +140,53 @@ def parse_persona_response(text: str, persona_id: str) -> PersonaSignal:
     )
 
 
-# ── Data fetcher ──────────────────────────────────────────────
+# ── Data fetcher ────────────────────────────────────────────────────────────────
+
+# ── Shared Data Brief Cache ───────────────────────────────────────────────────
+# When run_debate() or run_council() runs N personas on the same symbol,
+# data is fetched ONCE and shared across all personas (big token savings).
+# TTL is intentionally short (5min) — intraday prices change rapidly.
+import time as _time
+
+_BRIEF_CACHE: dict[str, tuple[dict, float]] = {}  # key -> (brief, timestamp)
+_BRIEF_CACHE_TTL = 300.0  # 5 minutes
+_BRIEF_CACHE_MAX = 20  # max symbols in cache to prevent memory growth
+
+
+def _get_shared_brief(
+    symbol: str,
+    exchange: str,
+    registry: Any,
+    force_refresh: bool = False,
+) -> dict[str, Any]:
+    """
+    Get a data brief for (symbol, exchange), using a module-level cache.
+    All personas for the same symbol in the same analysis run share this brief.
+    """
+    key = f"{symbol.upper()}:{exchange.upper()}"
+    now = _time.monotonic()
+
+    if not force_refresh and key in _BRIEF_CACHE:
+        cached_brief, cached_ts = _BRIEF_CACHE[key]
+        if now - cached_ts < _BRIEF_CACHE_TTL:
+            return cached_brief
+
+    # Evict oldest if at capacity
+    if len(_BRIEF_CACHE) >= _BRIEF_CACHE_MAX:
+        oldest_key = min(_BRIEF_CACHE, key=lambda k: _BRIEF_CACHE[k][1])
+        _BRIEF_CACHE.pop(oldest_key, None)
+
+    brief = _fetch_data_brief(symbol, exchange, registry)
+    _BRIEF_CACHE[key] = (brief, now)
+    return brief
+
+
+def invalidate_brief_cache(symbol: str, exchange: str = "") -> None:
+    """Invalidate cached brief for a symbol (call after portfolio changes or force-refresh)."""
+    prefix = symbol.upper()
+    to_remove = [k for k in _BRIEF_CACHE if k.startswith(prefix)]
+    for k in to_remove:
+        _BRIEF_CACHE.pop(k, None)
 
 
 def _fetch_data_brief(
@@ -162,6 +208,7 @@ def _fetch_data_brief(
         "macro": {},
         "news": [],
         "fii_dii": {},
+        "options": {},
     }
 
     if registry is None:
@@ -179,12 +226,26 @@ def _fetch_data_brief(
     # Technical snapshot
     tech = _safe_call("technical_analyse", symbol=symbol, exchange=exchange)
     if tech:
-        brief["technicals"] = tech if isinstance(tech, dict) else vars(tech)
+        t_dict = (
+            tech
+            if isinstance(tech, dict)
+            else (tech.as_dict() if hasattr(tech, "as_dict") else vars(tech))
+        )
+        if "verdict" in t_dict and "trend" not in t_dict:
+            t_dict["trend"] = t_dict["verdict"]
+        if "rsi" in t_dict and "RSI" not in t_dict:
+            t_dict["RSI"] = t_dict["rsi"]
+        brief["technicals"] = t_dict
 
     # Fundamental snapshot
     fund = _safe_call("fundamental_analyse", symbol=symbol)
     if fund:
-        brief["fundamentals"] = fund if isinstance(fund, dict) else vars(fund)
+        f_dict = (
+            fund
+            if isinstance(fund, dict)
+            else (fund.as_dict() if hasattr(fund, "as_dict") else vars(fund))
+        )
+        brief["fundamentals"] = f_dict
 
     # Forensic snapshot
     forensic = _safe_call("audit_forensics", symbol=symbol)
@@ -198,12 +259,66 @@ def _fetch_data_brief(
     # FII/DII data
     fii = _safe_call("get_fii_dii_data")
     if fii:
-        brief["fii_dii"] = fii if isinstance(fii, dict) else vars(fii)
+        if isinstance(fii, dict):
+            brief["fii_dii"] = fii
+        elif isinstance(fii, list) and len(fii) > 0:
+            first = fii[0]
+            brief["fii_dii"] = (
+                first
+                if isinstance(first, dict)
+                else (
+                    first.as_dict()
+                    if hasattr(first, "as_dict")
+                    else (vars(first) if hasattr(first, "__dict__") else {"raw": str(first)})
+                )
+            )
+        elif hasattr(fii, "as_dict"):
+            brief["fii_dii"] = fii.as_dict()
+        elif hasattr(fii, "__dict__"):
+            brief["fii_dii"] = vars(fii)
 
     # Market snapshot
     macro = _safe_call("get_market_snapshot")
     if macro:
-        brief["macro"] = macro if isinstance(macro, dict) else vars(macro)
+        if isinstance(macro, dict):
+            brief["macro"] = macro
+        elif hasattr(macro, "as_dict"):
+            brief["macro"] = macro.as_dict()
+        elif hasattr(macro, "__dict__"):
+            brief["macro"] = vars(macro)
+        if hasattr(macro, "vix") and macro.vix and "india_vix" not in brief["macro"]:
+            brief["macro"]["india_vix"] = getattr(macro.vix, "ltp", None) or getattr(
+                macro.vix, "price", None
+            )
+
+    # Options snapshot
+    pcr_data = _safe_call("get_pcr", underlying=symbol)
+    if pcr_data is None:
+        pcr_data = _safe_call("get_pcr", symbol=symbol)
+    if pcr_data is not None:
+        if isinstance(pcr_data, dict):
+            pcr_val = pcr_data.get("pcr")
+            if pcr_val is not None and pcr_val > 0:
+                brief["options"] = pcr_data
+                if "pcr" not in brief["technicals"]:
+                    brief["technicals"]["pcr"] = pcr_val
+            else:
+                brief["options"] = {"pcr": None, "fno_available": False}
+        elif isinstance(pcr_data, (int, float)) and pcr_data > 0:
+            brief["options"] = {"pcr": float(pcr_data)}
+            if "pcr" not in brief["technicals"]:
+                brief["technicals"]["pcr"] = float(pcr_data)
+        elif hasattr(pcr_data, "__dict__"):
+            pcr_dict = vars(pcr_data)
+            pcr_val = pcr_dict.get("pcr")
+            if pcr_val is not None and pcr_val > 0:
+                brief["options"] = pcr_dict
+                if "pcr" not in brief["technicals"]:
+                    brief["technicals"]["pcr"] = pcr_val
+            else:
+                brief["options"] = {"pcr": None, "fno_available": False}
+    else:
+        brief["options"] = {"pcr": None, "fno_available": False}
 
     # News
     news = _safe_call("get_stock_news", symbol=symbol)
@@ -315,6 +430,8 @@ def _score_dimension(dimension: str, brief: dict[str, Any]) -> float | None:
                 fund.get("PE"),
                 fund.get("fcf_yield"),
                 fund.get("FCF_yield"),
+                fund.get("score"),
+                fund.get("verdict"),
                 forensic.get("piotroski_score"),
                 forensic.get("altman_zone"),
                 forensic.get("promoter_pledge_pct"),
@@ -354,6 +471,14 @@ def _score_dimension(dimension: str, brief: dict[str, Any]) -> float | None:
             except (TypeError, ValueError):
                 pass
 
+        f_score = fund.get("score")
+        if f_score is not None:
+            try:
+                fs = float(f_score)
+                score = (score + fs) / 2.0
+            except (TypeError, ValueError):
+                pass
+
         # Forensic indicators
         if forensic:
             piotroski = forensic.get("piotroski_score")
@@ -387,11 +512,13 @@ def _score_dimension(dimension: str, brief: dict[str, Any]) -> float | None:
                 tech.get("RSI"),
                 tech.get("trend"),
                 tech.get("price_trend"),
+                tech.get("verdict"),
+                tech.get("score"),
             )
         ):
             return None
         score = 50.0
-        rsi = tech.get("rsi") or tech.get("RSI")
+        rsi = tech.get("rsi") if tech.get("rsi") is not None else tech.get("RSI")
         if rsi is not None:
             try:
                 rsi = float(rsi)
@@ -404,13 +531,21 @@ def _score_dimension(dimension: str, brief: dict[str, Any]) -> float | None:
             except (TypeError, ValueError):
                 pass
 
-        trend = tech.get("trend") or tech.get("price_trend")
+        trend = tech.get("trend") or tech.get("price_trend") or tech.get("verdict")
         if trend:
             trend_str = str(trend).upper()
             if "BULL" in trend_str or "UP" in trend_str:
                 score += 10
             elif "BEAR" in trend_str or "DOWN" in trend_str:
                 score -= 10
+
+        t_score = tech.get("score")
+        if t_score is not None:
+            try:
+                ts = float(t_score)
+                score = (score + ts) / 2.0
+            except (TypeError, ValueError):
+                pass
 
         return max(0.0, min(100.0, score))
 
@@ -456,20 +591,33 @@ def _score_dimension(dimension: str, brief: dict[str, Any]) -> float | None:
         return None
 
     elif dimension == "options":
-        if not any(value is not None for value in (tech.get("pcr"), tech.get("put_call_ratio"))):
-            return None
+        opt = brief.get("options", {})
+        pcr_val = (
+            opt.get("pcr")
+            if opt.get("pcr") is not None
+            else (tech.get("pcr") if tech.get("pcr") is not None else tech.get("put_call_ratio"))
+        )
+        if pcr_val is None or pcr_val <= 0:
+            if (
+                opt.get("atm_iv") is not None
+                or opt.get("gex") is not None
+                or opt.get("iv") is not None
+            ):
+                pcr_val = 1.0
+            else:
+                return None
         score = 50.0
-        pcr = tech.get("pcr") or tech.get("put_call_ratio")
-        if pcr is not None:
-            try:
-                pcr = float(pcr)
-                # PCR > 1.5 → bullish contrarian signal; PCR < 0.5 → bearish contrarian
-                if pcr > 1.5:
-                    score += 15
-                elif pcr < 0.5:
-                    score -= 10
-            except (TypeError, ValueError):
-                pass
+        try:
+            pcr = float(pcr_val)
+            # PCR > 1.5 → bullish contrarian signal; PCR < 0.5 → bearish contrarian
+            if pcr > 1.5:
+                score += 15
+            elif 0 < pcr < 0.5:
+                score -= 10
+            elif pcr >= 0.5:
+                score += 5
+        except (TypeError, ValueError):
+            pass
         return max(0.0, min(100.0, score))
 
     return None
@@ -591,21 +739,21 @@ def run_persona_analysis(
     exchange: str = "NSE",
     registry: Any = None,
     llm_provider: Any = None,
+    precomputed_brief: dict | None = None,
 ) -> PersonaSignal:
     """
     Run a single persona analysis on a symbol.
 
     Parameters
     ----------
-    persona_id:    One of 'buffett', 'jhunjhunwala', 'lynch', 'soros', 'munger'
-    symbol:        Stock ticker, e.g. 'RELIANCE'
-    exchange:      'NSE' or 'BSE'
-    registry:      ToolRegistry for live data; if None, analysis uses empty data
-    llm_provider:  LLM provider instance; if None, uses deterministic fallback
-
-    Returns
-    -------
-    PersonaSignal
+    persona_id:         One of 'buffett', 'jhunjhunwala', 'lynch', 'soros', 'munger'
+    symbol:             Stock ticker, e.g. 'RELIANCE'
+    exchange:           'NSE' or 'BSE'
+    registry:           ToolRegistry for live data; if None, analysis uses empty data
+    llm_provider:       LLM provider instance; if None, uses deterministic fallback
+    precomputed_brief:  If provided, skip the data fetch and use this brief directly.
+                        Used by run_debate() and run_council() to share one data fetch
+                        across all persona agents (eliminates N×tool calls).
     """
     # Validate persona (raises ValueError for unknown ids)
     persona = get_persona(persona_id)
@@ -614,9 +762,9 @@ def run_persona_analysis(
     if llm_provider == "auto":
         if registry is None:
             try:
-                from agent.core import ToolRegistry
+                from agent.tools import build_registry
 
-                registry = ToolRegistry()
+                registry = build_registry()
             except Exception:
                 registry = None
         try:
@@ -626,8 +774,12 @@ def run_persona_analysis(
         except Exception:
             llm_provider = None
 
-    # 2. Fetch data
-    brief = _fetch_data_brief(symbol, exchange, registry)
+    # 2. Fetch data (or use precomputed brief if caller supplies one)
+    brief = (
+        precomputed_brief
+        if precomputed_brief is not None
+        else _fetch_data_brief(symbol, exchange, registry)
+    )
 
     # A fluent LLM response is not a substitute for the evidence its framework
     # needs. Require the persona's most heavily weighted dimension before an
@@ -722,6 +874,19 @@ def run_debate(
     -------
     list[PersonaSignal] — one per persona, in stable order
     """
+    if registry is None:
+        try:
+            from agent.tools import build_registry
+
+            registry = build_registry()
+        except Exception:
+            registry = None
+
+    # ── OPTIMIZATION: fetch data ONCE and share across all 13 personas ───────────
+    # Before this change: 13 personas × 7 tool calls = 91 tool calls per analysis.
+    # After: 7 tool calls shared + 13 LLM calls. Token savings ~4,000 per run.
+    shared_brief = _get_shared_brief(symbol, exchange, registry)
+
     personas = list_personas()
     signals: list[PersonaSignal] = []
 
@@ -732,6 +897,7 @@ def run_debate(
             exchange=exchange,
             registry=registry,
             llm_provider=llm_provider,
+            precomputed_brief=shared_brief,  # <─ shared, not re-fetched
         )
         signals.append(signal)
 
@@ -765,8 +931,23 @@ def run_council(
         valid = ", ".join(sorted(COUNCIL_PRESETS))
         raise ValueError(f"Unknown council '{council_name}'. Choose one of: {valid}.")
 
+    # Build platform tool registry once for all council members
+    if registry is None:
+        try:
+            from agent.tools import build_registry
+
+            registry = build_registry()
+        except Exception:
+            registry = None
+
+    # ── OPTIMIZATION: fetch data ONCE and share across all council personas ───────────
+    shared_brief = _get_shared_brief(symbol, exchange, registry)
+
     signals = [
-        run_persona_analysis(pid, symbol, exchange, registry, llm_provider) for pid in persona_ids
+        run_persona_analysis(
+            pid, symbol, exchange, registry, llm_provider, precomputed_brief=shared_brief
+        )
+        for pid in persona_ids
     ]
 
     verdict_scores = {

@@ -11,6 +11,8 @@ import json
 from datetime import datetime
 from unittest.mock import MagicMock
 
+import pytest
+
 from brokers.base import OptionsContract
 
 
@@ -194,6 +196,14 @@ class TestNseScraper:
 
 
 class TestOptionsChainFallback:
+    @pytest.fixture(autouse=True)
+    def clear_chain_cache(self):
+        from market import options as options_mod
+
+        options_mod._CHAIN_CACHE.clear()
+        yield
+        options_mod._CHAIN_CACHE.clear()
+
     def test_uses_broker_when_available(self, monkeypatch):
         """Happy path: broker works → returns broker data, source=broker."""
         from market import options as options_mod

@@ -272,15 +272,16 @@ explain                         # Translate quant jargon into plain English
 git clone https://github.com/brij-home/chanakya-trade.git
 cd chanakya-trade
 
-# Create and activate virtual environment
-python -m venv .venv
+# Create/repair the virtual environment and install dependencies
 # Windows PowerShell:
-.venv\Scripts\activate
+.\scripts\bootstrap.ps1
 # macOS / Linux:
-source .venv/bin/activate
+bash scripts/bootstrap.sh
 
-# Install dependencies in editable mode
-pip install -e ".[dev]"
+# The bootstrap is safe to rerun. It detects a venv whose original Python was
+# removed, preserves it as .venv.broken-<timestamp>, and recreates .venv.
+# Google Vertex AI is optional; the normal Gemini API needs no GCP setup.
+# Install it only when required: .venv\Scripts\python.exe -m pip install -e ".[vertex]"
 ```
 
 ### 3. Configure Credentials (Optional)
@@ -326,10 +327,17 @@ python -m app.main --tui
 - **Truthful Decision Dossiers** ([`engine/security_360.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/security_360.py)):
   - Multi-dimensional equity intelligence returns transparent `UNAVAILABLE` and `PARTIAL` states when live data or valuation metrics are absent, completely eliminating hardcoded price fallbacks, fake DCF targets, or synthetic bull-case biases.
 - **Auditable Reconciliation Engine** (`GET /api/reconciliation` in [`web/api.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/web/api.py)):
-  - Audits live broker positions and funds against the internal ledger. Returns `UNAVAILABLE` when no authenticated session is present (never compares internal ledger against itself) and supplies `broker_account_id`, `broker_snapshot_at`, and `correlation_id`.
+  - Audits the selected execution broker against locally persisted fills and a user-declared opening-cash baseline. It returns `UNAVAILABLE` until both independent sides exist—never compares a broker response to itself—and supplies `broker_account_id`, `broker_snapshot_at`, and `correlation_id`.
+- **EOD-First Pilot Workflow**:
+  - Daily OHLCV is stored as a versioned local SQLite snapshot with a content checksum. Backtests can replay a fixed `as_of` snapshot and never inject a current tick unless live-candle enrichment is explicitly requested.
+  - Every quote carries provider, source (`STREAM` / `REST` / `FALLBACK`), local receipt time and honest data state (`LIVE` / `DELAYED` / `EOD` / `DEGRADED` / `UNAVAILABLE`).
+- **Personal Pilot Guardrails**:
+  - Default `.env` settings keep execution locked. If live use is deliberately enabled later, it remains restricted to small cash-equity delivery orders (`CNC`), a configurable per-order cap, fresh live data, explicit order confirmation, and the selected execution broker.
+  - F&O execution stays blocked until the broker provides and stores verified contract token, lot size and tick size; no static lot-size table is trusted for live orders.
 - **Dual-Broker Separation**:
-  - **Data Feeds**: Free live ticks & options chains via **Fyers API v3**.
-  - **Execution**: Seamless order routing via **Zerodha Kite Connect**, **Angel One SmartAPI**, **Groww**, **Upstox**, **Dhan**, or **Mock Broker**.
+  - **Data Feeds**: Free live ticks & options chains via **Fyers API v3** or **Shoonya/Finvasia Noren** (optional account credentials).
+  - **Execution**: Seamless order routing via **Zerodha Kite Connect**, **Angel One SmartAPI**, **Groww**, **Upstox**, **Dhan**, **Shoonya**, **Stoxkart**, or **Mock Broker**.
+  - Connecting another broker never changes either role. Select data and execution roles explicitly in the app.
 - **SEBI IPv4 Network Binding**: Preserves registered static IPv4 socket overrides for Indian broker order placements.
 
 ---
@@ -339,26 +347,29 @@ python -m app.main --tui
 ChanakyaTrade provides a **Tiered Validation Architecture** so you run only what is needed during development:
 
 ```powershell
-# 1. Fast local pre-commit check (< 20s)
+# 1. Repair the environment and run the default fast/unit test tier
+.\scripts\test.ps1
+
+# 2. Fast local pre-commit check (< 20s)
 # Runs Ruff lint + Format + React Hook AST audit + Vitest + Fast Pytest Smoke Matrix
 .venv\Scripts\python.exe scripts/validate_all.py --fast
 
-# 2. Full CI/CD pre-push gate (< 40s)
+# 3. Full CI/CD pre-push gate (< 40s)
 # Runs all linters + Vitest + Web Bundle Build + Full 2,188+ Pytest Matrix with 4 parallel workers
 .venv\Scripts\python.exe scripts/validate_all.py --full
 
-# 3. New Execution & Truthfulness Regression Suites
-.venv\Scripts\pytest.exe tests/test_live_oms_p3b.py tests/test_mode_banner_mapping.py tests/test_security_360_unavailable.py tests/test_reconciliation_unavailable.py -v
+# 4. New Execution & Truthfulness Regression Suites
+.venv\Scripts\python.exe -m pytest tests/test_live_oms_p3b.py tests/test_mode_banner_mapping.py tests/test_security_360_unavailable.py tests/test_reconciliation_unavailable.py -v
 
-# 4. Daily / Nightly deep regression & simulation runner
+# 5. Daily / Nightly deep regression & simulation runner
 # Runs full test suite + 500-iteration Monte Carlo & options stress tests + Live network integration
 .venv\Scripts\python.exe scripts/validate_daily.py
 
-# 5. Universal environment & process cleanup
+# 6. Universal environment & process cleanup
 # Kills orphaned worker processes, frees port 8765, removes temp sqlite databases
 .venv\Scripts\python.exe scripts/cleanup.py
 
-# 6. Auto-fix Python lint & formatting errors
+# 7. Auto-fix Python lint & formatting errors
 .venv\Scripts\python.exe scripts/validate_all.py --fix
 ```
 

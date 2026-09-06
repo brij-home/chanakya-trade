@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { useChatStore } from '../../store/chatStore'
 import { useAPI } from '../../hooks/useAPI'
 import PayoffSimulatorCard from '../Cards/PayoffSimulatorCard'
@@ -49,43 +49,59 @@ export default function OptionsDeskView({ onOpenOrderTicket }) {
   const [selectedExpiry, setSelectedExpiry] = useState('')
   const [data, setData] = useState(null)
   const [loading, setLoading] = useState(true)
+  const [isLiveActive, setIsLiveActive] = useState(true)
+  const [lastUpdated, setLastUpdated] = useState(null)
+  const [isRefreshing, setIsRefreshing] = useState(false)
   const [isPayoffModalOpen, setIsPayoffModalOpen] = useState(false)
   const [strikeFilter, setStrikeFilter] = useState('ATM_10')
   const [chainSort, setChainSort] = useState('strike_asc')
   const [chainPage, setChainPage] = useState(1)
-  const [chainPageSize, setPageSize] = useState(10)
+  const [chainPageSize, setPageSize] = useState(25) // Default 25 so ATM window (±10 = 21 strikes) is fully visible centered
   const [chainViewMode, setChainViewMode] = useState('STANDARD') // 'STANDARD' | 'GREEKS'
   const [showVisualBars, setShowVisualBars] = useState(true)
   const [deskPosScale, setDeskPosScale] = useState(1)
   const [showDeskWhy, setShowDeskWhy] = useState(false)
 
-  useEffect(() => {
-    let unmounted = false
-    const fetchGex = async () => {
-      try {
-        setLoading(true)
-        const res = await call('/skills/gex_snapshot', {
-          underlying,
-          expiry: selectedExpiry || undefined,
-        })
-        const snapshot = res?.data ?? res
-        if (!unmounted && snapshot) {
-          setData(snapshot)
-          if (!selectedExpiry && snapshot.expiry) {
-            setSelectedExpiry(snapshot.expiry)
-          }
+  const atmRowRef = useRef(null)
+  const tableContainerRef = useRef(null)
+
+  const fetchGex = async (isSilent = false) => {
+    try {
+      if (!isSilent) setLoading(true)
+      else setIsRefreshing(true)
+      const res = await call('/skills/gex_snapshot', {
+        underlying,
+        expiry: selectedExpiry || undefined,
+      })
+      const snapshot = res?.data ?? res
+      if (snapshot) {
+        setData(snapshot)
+        setLastUpdated(new Date())
+        if (!selectedExpiry && snapshot.expiry) {
+          setSelectedExpiry(snapshot.expiry)
         }
-      } catch (err) {
-        console.error('Failed to load GEX snapshot:', err)
-      } finally {
-        if (!unmounted) setLoading(false)
       }
+    } catch (err) {
+      console.error('Failed to load GEX snapshot:', err)
+    } finally {
+      if (!isSilent) setLoading(false)
+      setIsRefreshing(false)
     }
-    fetchGex()
-    return () => {
-      unmounted = true
-    }
+  }
+
+  // Initial & underlying/expiry change fetch
+  useEffect(() => {
+    fetchGex(false)
   }, [underlying, selectedExpiry])
+
+  // Real-time background auto-update (every 4s when live mode active)
+  useEffect(() => {
+    if (!isLiveActive) return
+    const interval = setInterval(() => {
+      fetchGex(true)
+    }, 4000)
+    return () => clearInterval(interval)
+  }, [underlying, selectedExpiry, isLiveActive])
 
   const spot = data?.spot_price || 22068.75
   const gexProfile = data?.gex_profile || []
@@ -161,12 +177,47 @@ export default function OptionsDeskView({ onOpenOrderTicket }) {
     return Number(a.strike) - Number(b.strike)
   })
 
-  const totalChainPages = Math.max(1, Math.ceil(sortedChain.length / chainPageSize))
-  const safeChainPage = Math.min(chainPage, totalChainPages)
-  const paginatedChain = sortedChain.slice(
-    (safeChainPage - 1) * chainPageSize,
-    safeChainPage * chainPageSize
+  const atmTargetStrike = optionsChain[atmIdx]?.strike
+  const atmSortedIndex = sortedChain.findIndex(
+    (r) => Number(r.strike) === Number(atmTargetStrike) || r.is_atm
   )
+  const isPageSizeAll = chainPageSize === 'ALL'
+  const pageSizeNum = isPageSizeAll ? sortedChain.length : Number(chainPageSize)
+  const totalChainPages = isPageSizeAll ? 1 : Math.max(1, Math.ceil(sortedChain.length / pageSizeNum))
+  const safeChainPage = isPageSizeAll ? 1 : Math.min(chainPage, totalChainPages)
+  const paginatedChain = isPageSizeAll
+    ? sortedChain
+    : sortedChain.slice(
+        (safeChainPage - 1) * pageSizeNum,
+        safeChainPage * pageSizeNum
+      )
+
+  const scrollToATM = () => {
+    if (atmRowRef.current) {
+      atmRowRef.current.scrollIntoView({
+        behavior: 'smooth',
+        block: 'center',
+        inline: 'nearest',
+      })
+    }
+  }
+
+  // When data loads or filter/underlying changes, land on the page with ATM and center it
+  useEffect(() => {
+    if (atmIdx >= 0 && sortedChain.length > 0 && !isPageSizeAll) {
+      const atmSortedIdx = sortedChain.findIndex(
+        (r) => Number(r.strike) === Number(atmTargetStrike) || r.is_atm
+      )
+      if (atmSortedIdx >= 0) {
+        const atmPage = Math.max(1, Math.ceil((atmSortedIdx + 1) / pageSizeNum))
+        setChainPage(atmPage)
+      }
+    }
+    const timer = setTimeout(() => {
+      scrollToATM()
+    }, 120)
+    return () => clearTimeout(timer)
+  }, [spot, underlying, strikeFilter, chainPageSize])
 
   return (
     <div className="flex-1 overflow-y-auto p-2.5 sm:p-3.5 bg-surface text-text space-y-2.5 font-ui">
@@ -188,10 +239,36 @@ export default function OptionsDeskView({ onOpenOrderTicket }) {
           </div>
 
           <div className="flex items-center gap-2">
-            <div className="flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-emerald-500/15 border border-emerald-500/30 text-emerald-400 text-[11px] font-semibold">
-              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
-              <span>Active Desk</span>
-            </div>
+            {/* Live Auto-Refresh Indicator & Pause/Resume */}
+            <button
+              onClick={() => setIsLiveActive((prev) => !prev)}
+              className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg border text-[11px] font-semibold transition-all cursor-pointer ${
+                isLiveActive
+                  ? 'bg-emerald-500/15 border-emerald-500/30 text-emerald-400 hover:bg-emerald-500/25'
+                  : 'bg-surface border-border/70 text-muted hover:text-text'
+              }`}
+              title={isLiveActive ? 'Live real-time 4s feed active (Click to pause)' : 'Feed paused (Click to resume real-time updates)'}
+            >
+              <span className={`w-1.5 h-1.5 rounded-full ${isLiveActive ? 'bg-emerald-500 animate-pulse' : 'bg-muted'}`} />
+              <span>{isLiveActive ? 'LIVE (4s)' : 'PAUSED'}</span>
+              {lastUpdated && (
+                <span className="text-[9px] opacity-75 font-mono ml-0.5">
+                  {lastUpdated.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+                </span>
+              )}
+            </button>
+
+            {/* Quick Refresh Button */}
+            <button
+              onClick={() => fetchGex(true)}
+              disabled={isRefreshing}
+              className="px-2 py-1 rounded-lg bg-surface hover:bg-elevated border border-border/60 text-muted hover:text-amber text-xs font-bold transition-all cursor-pointer flex items-center gap-1"
+              title="Refresh options chain now"
+            >
+              <span className={`inline-block ${isRefreshing ? 'animate-spin' : ''}`}>↻</span>
+              <span className="text-[10px]">Refresh</span>
+            </button>
+
             <button
               onClick={() => setIsPayoffModalOpen(true)}
               className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-gradient-to-r from-amber to-amber-light hover:brightness-110 text-black text-xs font-bold transition-all shadow-xs cursor-pointer"
@@ -628,6 +705,22 @@ export default function OptionsDeskView({ onOpenOrderTicket }) {
                   🔥 Depth Bars: {showVisualBars ? 'ON' : 'OFF'}
                 </button>
 
+                {/* Center on ATM Button */}
+                <button
+                  onClick={() => {
+                    if (atmSortedIndex >= 0 && !isPageSizeAll) {
+                      const targetPage = Math.max(1, Math.ceil((atmSortedIndex + 1) / pageSizeNum))
+                      setChainPage(targetPage)
+                    }
+                    setTimeout(scrollToATM, 50)
+                  }}
+                  className="flex items-center gap-1 px-2 py-0.5 rounded bg-amber/20 hover:bg-amber hover:text-black text-amber border border-amber/50 font-bold text-[10px] transition-all cursor-pointer shadow-xs"
+                  title="Jump to and center on At-The-Money (Spot) strike"
+                >
+                  <span>🎯</span>
+                  <span>Center on ATM</span>
+                </button>
+
                 {/* Strike Filter Chips */}
                 <div className="flex items-center gap-0.5 bg-surface border border-border/60 p-0.5 rounded-lg text-[10px]">
                   {[
@@ -670,7 +763,7 @@ export default function OptionsDeskView({ onOpenOrderTicket }) {
 
                 {/* Page Size Selector */}
                 <div className="flex items-center gap-1">
-                  {[10, 20, 50].map((sz) => (
+                  {[15, 25, 50, 'ALL'].map((sz) => (
                     <button
                       key={sz}
                       onClick={() => {
@@ -688,10 +781,10 @@ export default function OptionsDeskView({ onOpenOrderTicket }) {
               </div>
             </div>
 
-            {/* Matrix Table */}
-            <div className="overflow-x-auto rounded-xl border border-border/50">
+            {/* Matrix Table with sticky headers and ref */}
+            <div ref={tableContainerRef} className="overflow-x-auto rounded-xl border border-border/50 max-h-[620px] overflow-y-auto relative scrollbar-thin">
               <table className="w-full text-xs font-mono text-left border-collapse">
-                <thead>
+                <thead className="sticky top-0 z-20 bg-surface shadow-xs">
                   {/* Category Super-Headers */}
                   <tr className="bg-elevated/80 text-[10px] uppercase font-bold tracking-wider border-b border-border/70">
                     <th colSpan={chainViewMode === 'STANDARD' ? 6 : 6} className="py-1 px-3 text-cyan-400 text-center border-r border-border/60 bg-cyan-950/20">
@@ -774,9 +867,10 @@ export default function OptionsDeskView({ onOpenOrderTicket }) {
                     return (
                       <tr
                         key={row.strike}
+                        ref={isATM ? atmRowRef : null}
                         className={`transition-colors group ${
                           isATM
-                            ? 'bg-amber/15 border-y-2 border-amber/70 font-bold'
+                            ? 'bg-amber/20 border-y-2 border-amber font-bold shadow-xs'
                             : 'hover:bg-elevated/70'
                         }`}
                       >
@@ -914,19 +1008,19 @@ export default function OptionsDeskView({ onOpenOrderTicket }) {
                           onClick={() => setIsPayoffModalOpen(true)}
                           className={`py-2 px-3 text-center font-bold border-x border-border/80 cursor-pointer transition-all ${
                             isATM
-                              ? 'bg-amber text-black font-extrabold shadow-sm'
+                              ? 'bg-amber text-black font-extrabold shadow-sm ring-2 ring-amber/60'
                               : 'bg-elevated/90 text-text hover:text-amber hover:bg-elevated'
                           }`}
                           title="Click to simulate multi-leg payoff centered at this strike"
                         >
                           <div className="flex flex-col items-center justify-center">
-                            <span className="text-xs font-mono tracking-tight">
+                            <span className="text-xs font-mono tracking-tight font-black">
                               {Number(row.strike).toLocaleString('en-IN')}
                             </span>
                             {/* Key Level Indicators */}
                             {isATM && (
-                              <span className="text-[8px] uppercase tracking-wider font-extrabold bg-black text-amber px-1 rounded-sm mt-0.5">
-                                ⚡ ATM (Spot)
+                              <span className="text-[8px] uppercase tracking-wider font-black bg-black text-amber px-1.5 py-0.5 rounded-sm mt-0.5 shadow-xs flex items-center gap-0.5">
+                                <span>⚡</span> ATM (Spot: ₹{Number(spot).toFixed(0)})
                               </span>
                             )}
                             {isCallWall && !isATM && (
@@ -1086,7 +1180,7 @@ export default function OptionsDeskView({ onOpenOrderTicket }) {
             {totalChainPages > 1 && (
               <div className="flex items-center justify-between pt-2 border-t border-border/40 text-[11px] font-mono text-muted">
                 <span>
-                  Showing {(safeChainPage - 1) * chainPageSize + 1}–{Math.min(safeChainPage * chainPageSize, sortedChain.length)} of {sortedChain.length} strikes
+                  Showing {(safeChainPage - 1) * pageSizeNum + 1}–{Math.min(safeChainPage * pageSizeNum, sortedChain.length)} of {sortedChain.length} strikes
                 </span>
                 <div className="flex items-center gap-1">
                   <button

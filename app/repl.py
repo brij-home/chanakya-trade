@@ -1263,11 +1263,56 @@ def run_repl(broker: BrokerAPI) -> None:
         try:
             # ── Session ───────────────────────────────────────
             if command in ("quit", "exit", "q"):
+                console.print("[dim]Shutting down platform cleanly...[/dim]")
+                try:
+                    from engine.alerts import alert_manager
+
+                    alert_manager.stop_polling()
+                except Exception:
+                    pass
+                try:
+                    from market.ticker_stream import ticker_stream
+
+                    ticker_stream.stop(timeout=1.0)
+                except Exception:
+                    pass
+                try:
+                    from market.tick_store import tick_archive
+
+                    tick_archive.stop(timeout=1.0)
+                except Exception:
+                    pass
+                try:
+                    from brokers.session import close_all_brokers
+
+                    close_all_brokers()
+                except Exception:
+                    pass
+                try:
+                    from engine.search import analysis_search
+
+                    analysis_search.close()
+                except Exception:
+                    pass
+                try:
+                    from market.http_pool import close_http_pools
+
+                    close_http_pools()
+                except Exception:
+                    pass
+                try:
+                    from engine.analysis_cache import analysis_cache
+
+                    analysis_cache.close()
+                except Exception:
+                    pass
+                try:
+                    from market.instrument_master import close_db
+
+                    close_db()
+                except Exception:
+                    pass
                 console.print("[dim]Goodbye.[/dim]")
-                # Force-exit immediately. Background threads (Telegram bot,
-                # websocket, executor pool) are non-daemon and would keep the
-                # process alive indefinitely.  os._exit() is the only reliable
-                # way to terminate without waiting for them.
                 import os as _os
 
                 _os._exit(0)

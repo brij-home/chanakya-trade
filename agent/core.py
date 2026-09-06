@@ -93,7 +93,7 @@ console = Console(legacy_windows=False)
 
 ANTHROPIC_DEFAULT_MODEL = "claude-opus-4-5"
 OPENAI_DEFAULT_MODEL = "gpt-4o"
-GEMINI_DEFAULT_MODEL = "gemini-3.5-flash-lite"
+GEMINI_DEFAULT_MODEL = "gemini-3.8-flash"
 OLLAMA_DEFAULT_MODEL = "llama3.1"
 NVIDIA_DEFAULT_MODEL = "meta/llama-3.2-11b-vision-instruct"
 GROQ_DEFAULT_MODEL = (
@@ -1194,6 +1194,7 @@ class ClaudeCLIProvider(LLMProvider):
             "WebFetch",
         ]
 
+        proc = None
         try:
             proc = subprocess.Popen(
                 cmd,
@@ -1202,51 +1203,62 @@ class ClaudeCLIProvider(LLMProvider):
                 stderr=subprocess.PIPE,
                 text=True,
             )
-            # Write prompt via stdin then close so the CLI knows input is done
-            proc.stdin.write(prompt)
-            proc.stdin.close()
+            try:
+                # Write prompt via stdin then close so the CLI knows input is done
+                if proc.stdin:
+                    proc.stdin.write(prompt)
+                    proc.stdin.close()
 
-            out_buf: list[str] = []
-            err_buf: list[str] = []
+                out_buf: list[str] = []
+                err_buf: list[str] = []
 
-            def _read_out() -> None:
-                for line in proc.stdout:
-                    out_buf.append(line)
+                def _read_out() -> None:
+                    if proc and proc.stdout:
+                        for line in proc.stdout:
+                            out_buf.append(line)
 
-            def _read_err() -> None:
-                for line in proc.stderr:
-                    err_buf.append(line)
+                def _read_err() -> None:
+                    if proc and proc.stderr:
+                        for line in proc.stderr:
+                            err_buf.append(line)
 
-            t_out = threading.Thread(target=_read_out, daemon=True)
-            t_err = threading.Thread(target=_read_err, daemon=True)
-            t_out.start()
-            t_err.start()
+                t_out = threading.Thread(target=_read_out, daemon=True)
+                t_err = threading.Thread(target=_read_err, daemon=True)
+                t_out.start()
+                t_err.start()
 
-            with Live(
-                Spinner("dots", text=f" {label}… (may take 1–2 min)"),
-                console=console,
-                transient=True,
-                refresh_per_second=8,
-            ):
-                try:
-                    proc.wait(timeout=timeout)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
-                    t_out.join(timeout=2)
-                    t_err.join(timeout=2)
-                    mins = timeout // 60
-                    return f"[Claude CLI timed out after {mins} min — try a simpler request]"
+                with Live(
+                    Spinner("dots", text=f" {label}… (may take 1–2 min)"),
+                    console=console,
+                    transient=True,
+                    refresh_per_second=8,
+                ):
+                    try:
+                        proc.wait(timeout=timeout)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                        t_out.join(timeout=2)
+                        t_err.join(timeout=2)
+                        mins = timeout // 60
+                        return f"[Claude CLI timed out after {mins} min — try a simpler request]"
 
-            t_out.join(timeout=5)
-            t_err.join(timeout=5)
+                t_out.join(timeout=5)
+                t_err.join(timeout=5)
 
-            stderr_text = "".join(err_buf).strip()
+                stderr_text = "".join(err_buf).strip()
 
-            if proc.returncode != 0:
-                err = stderr_text or "".join(out_buf).strip() or "non-zero exit"
-                return f"[Claude CLI error: {err}]"
+                if proc.returncode != 0:
+                    err = stderr_text or "".join(out_buf).strip() or "non-zero exit"
+                    return f"[Claude CLI error: {err}]"
 
-            return "".join(out_buf).strip()
+                return "".join(out_buf).strip()
+            finally:
+                if proc and proc.poll() is None:
+                    try:
+                        proc.kill()
+                        proc.wait(timeout=2)
+                    except Exception:
+                        pass
 
         except FileNotFoundError:
             return (
@@ -1955,10 +1967,11 @@ class GeminiProvider(LLMProvider):
         candidate_models = [active_model] + [
             m
             for m in [
+                "gemini-3.8-flash",
                 "gemini-3.7-flash",
                 "gemini-3.6-flash",
-                "gemini-3.5-flash",
                 "gemini-3.5-flash-lite",
+                "gemini-3.5-flash",
                 "gemini-flash-latest",
             ]
             if m != active_model

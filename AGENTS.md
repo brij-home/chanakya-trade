@@ -28,7 +28,7 @@
 | :--- | :--- | :--- |
 | **`agent/`** | Multi-agent reasoning, smart funnel, screening & debates | [`smart_funnel.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/agent/smart_funnel.py), [`multi_agent.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/agent/multi_agent.py), [`dag_orchestrator.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/agent/dag_orchestrator.py), [`personas.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/agent/personas.py), [`tools.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/agent/tools.py) |
 | **`analysis/`** | Quantitative sector rotation, forensic accounting, DCF, SMC & Multibagger | [`sector_rotation.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/analysis/sector_rotation.py), [`market_structure.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/analysis/market_structure.py), [`volume_profile.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/analysis/volume_profile.py), [`multibagger.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/analysis/multibagger.py), [`forensic.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/analysis/forensic.py), [`dcf.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/analysis/dcf.py) |
-| **`brokers/`** | Broker unified abstraction (data vs execution) | [`session.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/brokers/session.py), [`fyers.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/brokers/fyers.py) *(data)*, [`zerodha.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/brokers/zerodha.py) *(execution)*, [`angelone.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/brokers/angelone.py), [`groww.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/brokers/groww.py), [`upstox.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/brokers/upstox.py), [`mock.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/brokers/mock.py) |
+| **`brokers/`** | Broker unified abstraction (data vs execution) | [`session.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/brokers/session.py), [`fyers.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/brokers/fyers.py) *(data)*, [`shoonya.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/brokers/shoonya.py) *(Noren data/execution)*, [`zerodha.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/brokers/zerodha.py) *(execution)*, [`angelone.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/brokers/angelone.py), [`groww.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/brokers/groww.py), [`upstox.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/brokers/upstox.py), [`mock.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/brokers/mock.py) |
 | **`engine/`** | Backtesting, risk gate, execution, sizing, lifecycle & cache | [`backtest.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/backtest.py), [`trade_lifecycle.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/trade_lifecycle.py), [`position_sizer.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/position_sizer.py), [`risk_gate.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/risk_gate.py), [`analysis_cache.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/analysis_cache.py), [`paper.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/paper.py), [`trader.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/trader.py) |
 | **`market/`** | Market feeds, options chain, quotes, sentiment & global macro | [`quotes.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/market/quotes.py), [`global_macro.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/market/global_macro.py), [`gift_nifty.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/market/gift_nifty.py), [`options.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/market/options.py), [`indices.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/market/indices.py), [`websocket.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/market/websocket.py), [`sentiment.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/market/sentiment.py) |
 | **`web/`** | FastAPI sidecar API (port `8765`), OAuth & SSE | [`api.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/web/api.py), [`auth.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/web/auth.py), [`sse.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/web/sse.py), [`openclaw.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/web/openclaw.py), [`skills.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/web/skills.py) |
@@ -50,7 +50,7 @@
 4. **Market Hours & IST**: Equity & F&O: 09:15–15:30 IST. MCX: up to 23:30/23:55 IST. Handle market-closed edge cases gracefully.
 5. **Advisory Risk Friction (Co-Pilot, Not Police)**: When behavioral flags (loss streak ≥3, pyramiding into losers, daily loss cap) trigger, present mindful friction with coaching alternatives and double-confirmation — never hard-block without an escape path.
 6. **Live Execution Pipeline — Fail-Closed Contract** (enforced in [`engine/order_lifecycle.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/order_lifecycle.py)):
-   - `execute_order_intent()` MUST call `assert_live_execution_allowed()` → `validate_pretrade()` → real `get_broker().place_order()` in that order. Any short-circuit is a safety violation.
+   - `execute_order_intent()` MUST call `assert_live_execution_allowed()` → pilot safety gate → `validate_pretrade()` → real `get_execution_broker().place_order()` in that order. Any short-circuit is a safety violation.
    - A paper broker exception MUST yield `status=REJECTED` with the real error as `rejection_reason`. It MUST NOT fabricate a `FILLED_PAPER` result.
    - An ambiguous or timed-out live broker response MUST yield `status=UNKNOWN_FREEZE` with `broker_order_id=None`. It MUST NOT fabricate a `LIVE-XXXXXX` ID or set `status=OPEN`.
    - `TRADING_MODE=EXECUTE` is gated by `ALLOW_LIVE_TRADING=1`. Absent that env var, `execute_order_intent()` raises `PermissionError`.
@@ -68,8 +68,9 @@
    - `methodology_lenses` MUST be empty `[]` until real per-lens computation is wired. Never hardcode four BULLISH verdicts.
    - `decision` MUST be `None` when `methodology_lenses` is empty.
 9. **Reconciliation Honesty Contract** (`GET /api/reconciliation` in [`web/api.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/web/api.py)):
-   - MUST call `get_broker().get_positions()` and `get_broker().get_funds()` for the broker side. Never pass `internal_positions` as `broker_positions`.
-   - If `get_broker()` returns `None` or raises, return `{"status": "UNAVAILABLE"}`. Never fabricate a clean reconciliation report.
+   - MUST call `get_execution_broker().get_positions()` and `get_execution_broker().get_funds()` for the broker side. Never pass `internal_positions` as `broker_positions`.
+   - The internal side MUST come from persisted local fills plus an explicit opening-cash baseline; never from the same broker portfolio response.
+   - If the execution broker or independent ledger baseline is unavailable, return `{"status": "UNAVAILABLE"}`. Never fabricate a clean reconciliation report.
    - A successful reconciliation response MUST include `broker_account_id`, `broker_snapshot_at`, and `correlation_id` for auditability.
 
 ---
@@ -99,7 +100,7 @@
 
 | Provider | Env Var | Use Case |
 | :--- | :--- | :--- |
-| **Gemini** | `GEMINI_API_KEY` | Fast-LLM (`gemini-3.7-flash`, `gemini-3.6-flash`) |
+| **Gemini** | `GEMINI_API_KEY` | Fast-LLM & Deep (`gemini-3.8-flash`, `gemini-3.7-flash`, `gemini-3.6-flash`, `gemini-3.5-flash-lite`) |
 | **NVIDIA NIM** | `NVIDIA_API_KEY` | Deep reasoning (`meta/llama-3.3-70b-instruct`) |
 | **OpenRouter** | `OPENROUTER_API_KEY` | Multi-model gateway fallback |
 | **Anthropic** | `ANTHROPIC_API_KEY` | Deep reasoning (`claude-sonnet-4`) |
@@ -145,15 +146,15 @@
 
 ### 4.3 Broker Routing
 
-- **Fyers**: Primary for market data & options chains (free API v3).
+- **Fyers / Shoonya**: Primary candidates for market data & options chains; select through measured health/capability routing, never by hard-coded assumptions.
 - **Zerodha / Angel One / Groww / Upstox / Dhan / Stoxkart**: Execution & account management.
-- Always use fallback chain (`brokers.session.get_broker()`) with graceful degradation to `yfinance` or mock.
+- Use `get_data_broker()` only for market/historical data and `get_execution_broker()` only for accounts/orders. Role changes are explicit; connecting a broker must never reroute orders.
 
 ### 4.4 Real-Time Data Feed Strategy
 
-- **Primary**: WebSocket via Fyers SDK ([`market/websocket.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/market/websocket.py)) for instant tick data.
-- **Fallback**: REST polling at 60s intervals when WebSocket is unavailable.
-- **UI Indicator**: Display `🟢 Live` badge when WebSocket is connected, `🟡 Polling` when using REST fallback. User must always know their data source.
+- **Canonical event boundary**: Every stream/REST snapshot carries provider, provider symbol/token, source, exchange timestamp (when supplied), local receive timestamp, sequence (when supplied), quality flags, and data state.
+- **Fallback**: REST polling or delayed yfinance data must be marked `LIVE`, `DELAYED`, `EOD`, `DEGRADED`, or `UNAVAILABLE` accurately; no UI may imply live data without evidence.
+- **Pilot failover**: A degraded feed pauses new position increases but retains cancellation/user-controlled exits. Never auto-route an order to another broker.
 
 ### 4.5 Global Macro Transmission & Multi-Asset Universe Taxonomy
 
@@ -185,7 +186,7 @@
 
 ## 5. Data Pipeline & Quality Standards
 
-1. **Transparent Provenance**: Every payload must include `data_source` (`LIVE_TICK` / `HISTORICAL_EOD`), `as_of_date`, and `dataset_timeline`.
+1. **Transparent Provenance**: Every market payload must include source/provider, data state, receipt time, canonical instrument identity, and quality flags. EOD analysis also carries a replayable snapshot ID and as-of cutoff.
 2. **Cache Architecture**: SQLite `analysis_cache` with TTL (5min live quotes, 15min RRG/macro, 24h fundamentals).
 3. **Never Cache Empty Results**: Guard `cache_set` with `if len(results) > 0:`. Treat empty cache reads as misses.
 4. **Single-Source OHLCV**: Fetch 250D Daily OHLCV once, pass in-memory to all analyzers (66% network reduction).
@@ -194,6 +195,8 @@
 7. **Connection Hygiene**: Wrap `httpx.Client` in `with` context managers. No dangling TCP sockets.
 8. **Telemetry Observability**: Every fallback (`LLM_FAILOVER`, `LLM_COOLDOWN`, `QUANT_FALLBACK`, `DATA_FALLBACK`, `BROKER_FAILOVER`, `EXCEPTION`) emits structured telemetry via [`engine/telemetry.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/telemetry.py).
 9. **Dynamic Cross-Module Pipeline Invariants**: Cross-module analytical interfaces (`get_stock_tailwind` in [`analysis/sector_rotation.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/analysis/sector_rotation.py), `audit_company_forensics` in [`analysis/forensic.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/analysis/forensic.py), and `get_options_chain` in [`market/options.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/market/options.py)) MUST always return structured objects with uniform attribute & dictionary compatibility (`StockTailwind`, `ForensicAuditResult`) and dynamic fallback chains without ever returning static mock fallbacks in production pathways.
+10. **Pilot data retention**: Retain EOD snapshots long term; retain raw real-time events for 7–30 days and order/fill/audit evidence for at least 90 days. Use local SQLite/JSONL before adding external infrastructure.
+11. **Derivative authority**: F&O execution requires a current provider-verified instrument master record with token, lot and tick size. Static contract assumptions are never executable authority.
 
 ---
 
@@ -256,8 +259,9 @@
 
 ### 7.1 Testing & CI
 1. **Deterministic Test Isolation**: All unit tests run in <1s with synthetic data — no live HTTP calls. Enforced via `CHANAKYA_TESTING=1` and `sanitize_test_env` in `conftest.py`.
-2. **Windows Concurrency**: Use `.venv\Scripts\pytest.exe -n 4` with cooperative thread teardowns to prevent worker accumulation.
+2. **Windows Concurrency**: Use `scripts\test.ps1` (or `.venv\Scripts\python.exe -m pytest`) with cooperative thread teardowns to prevent worker accumulation. The bootstrap wrapper repairs stale venvs before tests.
 3. **Tiered Validation Gates**:
+   - **Environment Bootstrap**: `scripts\bootstrap.ps1` (Windows) or `scripts/bootstrap.sh` (POSIX) creates/repairs `.venv` and installs `.[dev]`; it never trusts an unusable venv.
    - **Fast Pre-Commit Gate (< 8s)**: `.venv\Scripts\python.exe scripts/validate_all.py --fast` (Ruff lint + Format + React Hook AST audit + Vitest + Fast smoke matrix).
    - **Full Pre-Push Gate (< 30s)**: `.venv\Scripts\python.exe scripts/validate_all.py --full` (All linters + Vitest + Web build + Full 2,188+ test matrix with 4 workers).
    - **Daily / Nightly Deep Regression**: `.venv\Scripts\python.exe scripts/validate_daily.py` (Full matrix + Monte Carlo & options stress tests + Live network integration).

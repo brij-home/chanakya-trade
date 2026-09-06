@@ -141,6 +141,19 @@ class TestStartupAutoRestore:
     spinning up a full server.
     """
 
+    @pytest.fixture(autouse=True)
+    def disable_other_brokers(self, monkeypatch):
+        """Ensure other brokers do not attempt auto-restore during Fyers tests."""
+        for fn in [
+            "_has_zerodha",
+            "_has_groww",
+            "_has_angelone",
+            "_has_upstox",
+            "_has_shoonya",
+            "_has_mstock",
+        ]:
+            monkeypatch.setattr(f"web.api.{fn}", lambda: False)
+
     def _run(self, coro):
         """Helper: run an async coroutine synchronously."""
         return asyncio.run(coro)

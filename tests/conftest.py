@@ -26,14 +26,35 @@ os.environ["TRADING_PLATFORM_DATA"] = str(_TEST_DATA_DIR)
 os.environ["TRADING_PLATFORM_PDF_DIR"] = str(_TEST_DATA_DIR / "pdf")
 os.environ["CHANAKYA_TESTING"] = "1"
 os.environ["TRADING_MODE"] = "PAPER"
+# Test runs must not inherit deployment authentication policy from a developer's
+# local .env file. Individual auth tests explicitly opt into self-hosted mode
+# with monkeypatch, while the rest of the suite exercises endpoints without a
+# real user setup.
+os.environ["DEPLOY_MODE"] = "test"
 os.environ.setdefault("CSRF_SECRET", "test-strong-csrf-secret-1234567890-32chars")
 os.environ.setdefault("KEYRING_DISABLE", "1")
 os.environ.setdefault("PYTHONKEYRING_BACKEND", "keyring.backends.null.Keyring")
 
 
+def pytest_configure(config: pytest.Config) -> None:
+    """Keep pytest's temporary files inside the checkout by default.
+
+    Some managed Windows workspaces deny access to the user's global
+    ``%TEMP%\\pytest-of-*`` directory and to a pre-existing ``.pytest_cache``.
+    A local, worker-specific directory makes direct ``pytest`` invocations as
+    reliable as the CI command while still respecting explicit CLI overrides.
+    """
+    if config.option.basetemp is None:
+        config.option.basetemp = str(_TEST_DATA_DIR / "pytest-tmp")
+
+
 @pytest.fixture(autouse=True)
 def sanitize_test_env(monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest):
     """Ensure no unit test accidentally inherits live AI credentials or makes live LLM calls."""
+    # Several legacy module-scoped clients mutate DEPLOY_MODE directly. Reset
+    # the default for every test so a self-hosted test cannot leak its auth
+    # policy into unrelated endpoint tests. Auth tests opt in explicitly.
+    monkeypatch.setenv("DEPLOY_MODE", "test")
     if "network" not in request.keywords:
         monkeypatch.setenv("CHANAKYA_TESTING", "1")
         monkeypatch.setenv("AI_FAST_PROVIDER", "")

@@ -1479,7 +1479,7 @@ def normalize_symbol_exchange(symbol: str, exchange: str | None = None) -> tuple
         exch = prefix.upper().strip()
         sym = clean_sym.upper().strip()
     elif exch == "NSE":
-        from market.quotes import _BSE_SYMBOLS, _CDS_SYMBOLS, _MCX_SYMBOLS
+        from market.quotes import _BSE_SYMBOLS, _CDS_SYMBOLS, _MCX_SYMBOLS, _CRYPTO_SYMBOLS
 
         if sym in _MCX_SYMBOLS:
             exch = "MCX"
@@ -1487,6 +1487,8 @@ def normalize_symbol_exchange(symbol: str, exchange: str | None = None) -> tuple
             exch = "CDS"
         elif sym in _BSE_SYMBOLS:
             exch = "BSE"
+        elif sym in _CRYPTO_SYMBOLS:
+            exch = "CRYPTO"
 
     clean_sym = sym.replace("_", "-")
     return clean_sym, exch

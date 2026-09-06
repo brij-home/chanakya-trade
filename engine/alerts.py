@@ -735,7 +735,8 @@ def _webhook_notify(alert: Alert, ltp: Optional[float] = None) -> None:
                 headers=headers,
                 method="POST",
             )
-            urllib.request.urlopen(req, timeout=10)
+            with urllib.request.urlopen(req, timeout=10) as _:
+                pass
         except Exception:
             pass
 

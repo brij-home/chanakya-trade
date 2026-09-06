@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import datetime
+import math
 import sys
 from dataclasses import asdict, dataclass, field, fields
 from typing import Any, Optional
@@ -146,10 +147,10 @@ def _evaluate_single_stock(
 
         # 1. Price Action & Market Structure
         ms = analyze_market_structure(symbol, exchange=exchange, df=df)
-        if not ms or ms.ltp <= 0:
+        if not ms or ms.ltp is None or math.isnan(ms.ltp) or ms.ltp <= 0:
             return None
 
-        ltp = ms.ltp
+        ltp = float(ms.ltp)
 
         # 2. Volume Profile & RVOL
         vp = analyze_volume_profile(symbol, exchange=exchange, df=df)
@@ -271,34 +272,33 @@ def _evaluate_single_stock(
             tags.append(f"{sector_name} Sector")
 
         # ── Price Targets & Levels ───────────────────────────────────
-        entry_price = ltp
-        stop_loss = ms.invalidation_level
-        target_1 = ms.target_1
-        target_2 = ms.target_2
+        entry_price = float(ltp)
+        raw_sl = getattr(ms, "invalidation_level", 0.0)
+        stop_loss = float(raw_sl) if (raw_sl is not None and not math.isnan(float(raw_sl))) else 0.0
+        raw_t1 = getattr(ms, "target_1", 0.0)
+        target_1 = float(raw_t1) if (raw_t1 is not None and not math.isnan(float(raw_t1))) else 0.0
+        raw_t2 = getattr(ms, "target_2", 0.0)
+        target_2 = float(raw_t2) if (raw_t2 is not None and not math.isnan(float(raw_t2))) else 0.0
 
-        # Sanity check stop loss
+        # Sanity check stop loss & targets
         if trade_bias == "LONG":
-            if stop_loss >= entry_price or stop_loss <= 0:
+            if stop_loss >= entry_price or stop_loss <= 0 or math.isnan(stop_loss):
                 stop_loss = round(entry_price * 0.965, 2)
-            risk_pts = round(entry_price - stop_loss, 2)
-            reward_pts = round(
-                (target_1 - entry_price) if target_1 > entry_price else risk_pts * 2.0, 2
-            )
-            if target_1 <= entry_price:
+            risk_pts = max(0.05, round(entry_price - stop_loss, 2))
+            if target_1 <= entry_price or math.isnan(target_1):
                 target_1 = round(entry_price + risk_pts * 2.0, 2)
-            if target_2 <= target_1:
+            if target_2 <= target_1 or math.isnan(target_2):
                 target_2 = round(entry_price + risk_pts * 3.5, 2)
+            reward_pts = max(0.1, round(target_1 - entry_price, 2))
         else:
-            if stop_loss <= entry_price or stop_loss <= 0:
+            if stop_loss <= entry_price or stop_loss <= 0 or math.isnan(stop_loss):
                 stop_loss = round(entry_price * 1.035, 2)
-            risk_pts = round(stop_loss - entry_price, 2)
-            reward_pts = round(
-                (entry_price - target_1) if target_1 < entry_price else risk_pts * 2.0, 2
-            )
-            if target_1 >= entry_price:
+            risk_pts = max(0.05, round(stop_loss - entry_price, 2))
+            if target_1 >= entry_price or math.isnan(target_1) or target_1 <= 0:
                 target_1 = round(entry_price - risk_pts * 2.0, 2)
-            if target_2 >= target_1:
+            if target_2 >= target_1 or math.isnan(target_2) or target_2 <= 0:
                 target_2 = round(entry_price - risk_pts * 3.5, 2)
+            reward_pts = max(0.1, round(entry_price - target_1, 2))
 
         rr_ratio = round(reward_pts / max(1.0, risk_pts), 1)
 

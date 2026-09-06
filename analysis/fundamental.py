@@ -24,6 +24,12 @@ from typing import Optional
 import httpx
 
 
+# In-memory snapshot cache (5-minute TTL)
+_fund_cache: dict[str, tuple[float, "FundamentalSnapshot"]] = {}
+_fund_cache_lock = threading.Lock()
+_FUND_TTL_SECONDS = 300.0
+
+
 # ── Result dataclass ─────────────────────────────────────────
 
 
@@ -470,9 +476,20 @@ _yf_data_cache: dict[str, tuple[float, dict]] = {}
 _yf_data_lock = threading.Lock()
 
 
-def _fetch_yfinance(symbol: str) -> dict:
+def _get_analysis_cache():
+    """Lazy loader for persistent SQLite cache."""
+    try:
+        from engine.analysis_cache import AnalysisCache
+
+        return AnalysisCache()
+    except Exception:
+        return None
+
+
+def _fetch_yfinance(symbol: str, fast: bool = False) -> dict:
     """
-    Fetch comprehensive fundamentals from Yahoo Finance in parallel with 2h in-memory caching.
+    Fetch comprehensive fundamentals from Yahoo Finance with persistent SQLite caching.
+    When fast=True, skips downloading 4 heavy statements and parses metrics directly from info.
     """
     # Indices don't have fundamentals (no P/E, ROE, etc.)
     _INDEX_KEYWORDS = {
@@ -497,6 +514,15 @@ def _fetch_yfinance(symbol: str) -> dict:
             ts, cached_dict = _yf_data_cache[sym_clean]
             if now - ts < 7200.0:
                 return cached_dict.copy()
+
+    # Tier 2: Check persistent SQLite cache (24-hour TTL)
+    cache = _get_analysis_cache()
+    if cache:
+        cached_sql = cache.get_macro(f"yf_fund_{sym_clean}")
+        if cached_sql and isinstance(cached_sql, dict):
+            with _yf_data_lock:
+                _yf_data_cache[sym_clean] = (now, cached_sql)
+            return cached_sql.copy()
 
     try:
         import yfinance as yf
@@ -525,6 +551,97 @@ def _fetch_yfinance(symbol: str) -> dict:
         rev_growth_raw = info.get("revenueGrowth")
         earn_growth_raw = info.get("earningsGrowth")
         div_yield_raw = info.get("dividendYield")
+
+        ltp = info.get("regularMarketPrice") or info.get("currentPrice") or 0
+        w52_high = info.get("fiftyTwoWeekHigh")
+        w52_low = info.get("fiftyTwoWeekLow")
+        pct_from_high = round((ltp - w52_high) / w52_high * 100, 1) if w52_high and ltp else None
+        mcap = info.get("marketCap")
+        mcap_cr = round(mcap / 1e7, 0) if mcap else None
+
+        insider_pct = info.get("heldPercentInsiders")
+        inst_pct = info.get("heldPercentInstitutions")
+        promoter = round(insider_pct * 100, 1) if insider_pct else None
+        institutional = round(inst_pct * 100, 1) if inst_pct else None
+
+        analyst_count = info.get("numberOfAnalystOpinions")
+        analyst_rating = info.get("recommendationKey")
+        target_mean = info.get("targetMeanPrice")
+        target_high = info.get("targetHighPrice")
+        target_low = info.get("targetLowPrice")
+        target_upside = round((target_mean - ltp) / ltp * 100, 1) if target_mean and ltp else None
+
+        if fast:
+            # Ultra-fast mode: construct result directly from ticker.info without statement downloads
+            res = {
+                "name": info.get("longName") or info.get("shortName") or symbol,
+                "pe": info.get("trailingPE"),
+                "pb": info.get("priceToBook"),
+                "roe": round(roe_raw * 100, 1) if roe_raw else None,
+                "roce": None,
+                "npm": round(npm_raw * 100, 1) if npm_raw else None,
+                "sales_growth": round(rev_growth_raw * 100, 1) if rev_growth_raw else None,
+                "profit_growth": round(earn_growth_raw * 100, 1) if earn_growth_raw else None,
+                "debt_equity": round(info.get("debtToEquity", 0) / 100, 2)
+                if info.get("debtToEquity")
+                else None,
+                "current_ratio": info.get("currentRatio"),
+                "interest_coverage": None,
+                "free_cash_flow": None,
+                "promoter_holding": promoter,
+                "institutional_holding": institutional,
+                "pledged_pct": None,
+                "dividend_yield": round(div_yield_raw * 100, 1) if div_yield_raw else None,
+                "ev_ebitda": info.get("enterpriseToEbitda"),
+                "market_cap": mcap_cr,
+                "week52_high": w52_high,
+                "week52_low": w52_low,
+                "pct_from_52w_high": pct_from_high,
+                "avg_50d": info.get("fiftyDayAverage"),
+                "avg_200d": info.get("twoHundredDayAverage"),
+                "beta": info.get("beta"),
+                "analyst_count": analyst_count,
+                "analyst_rating": analyst_rating,
+                "target_price_mean": target_mean,
+                "target_price_high": target_high,
+                "target_price_low": target_low,
+                "target_upside_pct": target_upside,
+                "sector": info.get("sector"),
+                "industry": info.get("industry"),
+                "forward_pe": info.get("forwardPE"),
+                "next_earnings_date": None,
+                "earnings_estimate": None,
+                "overall_risk": info.get("overallRisk"),
+                "audit_risk": info.get("auditRisk"),
+                "board_risk": info.get("boardRisk"),
+                "operating_margin": round(info["operatingMargins"] * 100, 1)
+                if info.get("operatingMargins")
+                else None,
+                "gross_margin": round(info["grossMargins"] * 100, 1)
+                if info.get("grossMargins")
+                else None,
+                "ebitda_margin": round(info["ebitdaMargins"] * 100, 1)
+                if info.get("ebitdaMargins")
+                else None,
+                "total_cash_cr": round(info["totalCash"] / 1e7, 0)
+                if info.get("totalCash")
+                else None,
+                "total_debt_cr": round(info["totalDebt"] / 1e7, 0)
+                if info.get("totalDebt")
+                else None,
+                "price_to_sales": info.get("priceToSalesTrailing12Months"),
+                "ev_to_revenue": info.get("enterpriseToRevenue"),
+                "payout_ratio": info.get("payoutRatio"),
+                "five_yr_avg_div_yield": info.get("fiveYearAvgDividendYield"),
+                "insider_transactions": [],
+                "quarterly_revenue": [],
+                "_data_source": "yfinance_fast",
+            }
+            with _yf_data_lock:
+                _yf_data_cache[sym_clean] = (now, res)
+            if cache:
+                cache.save_macro(f"yf_fund_{sym_clean}", res, ttl_minutes=1440)
+            return res
 
         # Fetch financial statements concurrently
         bs, inc, cf, q_inc = None, None, None, None
@@ -910,25 +1027,37 @@ def _fetch_nse_announcements(symbol: str, limit: int = 5) -> list[dict]:
         return []
 
 
-import threading
+def _snapshot_to_dict(snap: FundamentalSnapshot) -> dict:
+    d = {k: getattr(snap, k) for k in snap.__dataclass_fields__}
+    d["flags"] = [
+        {"metric": f.metric, "value": f.value, "verdict": f.verdict, "detail": f.detail}
+        for f in snap.flags
+    ]
+    return d
 
-_fund_cache_lock = threading.Lock()
-_fund_cache: dict[str, tuple[float, FundamentalSnapshot]] = {}
-_FUND_TTL_SECONDS = 7200.0  # 2 hours in-memory TTL
+
+def _snapshot_from_dict(d: dict) -> FundamentalSnapshot:
+    data = d.copy()
+    data["flags"] = [FundamentalFlag(**f) for f in data.get("flags", [])]
+    # Filter only known fields
+    known_fields = set(FundamentalSnapshot.__dataclass_fields__.keys())
+    filtered = {k: v for k, v in data.items() if k in known_fields}
+    return FundamentalSnapshot(**filtered)
 
 
-def analyse(symbol: str, **_kwargs) -> FundamentalSnapshot:
+def analyse(symbol: str, fast: bool = False, **_kwargs) -> FundamentalSnapshot:
     """
     Full fundamental analysis for a stock symbol with fast in-memory & persistent caching.
 
     Data cascade (real data only, no mocks):
       1. In-memory & SQLite cache (instant 0.01ms)
-      2. Screener.in (best: PE, PB, ROE, ROCE, promoter holding, pledging)
-      3. yfinance / Yahoo Finance (good: PE, PB, D/E, margins, growth)
+      2. yfinance fast extraction (when fast=True, ~1.5s)
+      3. Screener.in + deep yfinance (when fast=False)
       4. None values if both fail (prevents hallucinated analysis)
 
     Args:
         symbol:   NSE/BSE trading symbol e.g. "RELIANCE", "HDFCBANK"
+        fast:     If True, skips scraping 4 statements and uses fast ticker info
     """
     sym_upper = symbol.upper().strip()
     now_ts = time.time()
@@ -940,28 +1069,46 @@ def analyse(symbol: str, **_kwargs) -> FundamentalSnapshot:
             if now_ts - ts < _FUND_TTL_SECONDS:
                 return snap
 
+    # Tier 2: Persistent SQLite cache (24-hour TTL)
+    cache = _get_analysis_cache()
+    if cache:
+        cached_sql = cache.get_macro(f"fund_snap_{sym_upper}")
+        if cached_sql and isinstance(cached_sql, dict):
+            try:
+                snap = _snapshot_from_dict(cached_sql)
+                with _fund_cache_lock:
+                    _fund_cache[sym_upper] = (now_ts, snap)
+                return snap
+            except Exception:
+                pass
+
     parsed = None
 
-    # 1. Screener.in (best: PE, PB, ROE, ROCE, promoter holding, pledging)
-    try:
-        raw = _fetch_screener(symbol)
-        parsed = _parse_screener(raw)
-    except Exception:
-        pass
-
-    # 2. yfinance — either primary source or supplement for missing Screener fields
-    yf_data = _fetch_yfinance(symbol)
-
-    if not parsed:
-        # Screener.in failed entirely — use yfinance as primary
+    if fast:
+        # Fast path for Stage 1 quant screening
+        yf_data = _fetch_yfinance(symbol, fast=True)
         parsed = yf_data or _unavailable(symbol)
-    elif yf_data:
-        # Screener.in worked but may have gaps — fill from yfinance
-        for key, val in yf_data.items():
-            if key.startswith("_"):
-                continue  # skip _data_source etc.
-            if val is not None and parsed.get(key) is None:
-                parsed[key] = val
+    else:
+        # 1. Screener.in (best: PE, PB, ROE, ROCE, promoter holding, pledging)
+        try:
+            raw = _fetch_screener(symbol)
+            parsed = _parse_screener(raw)
+        except Exception:
+            pass
+
+        # 2. yfinance — either primary source or supplement for missing Screener fields
+        yf_data = _fetch_yfinance(symbol, fast=False)
+
+        if not parsed:
+            # Screener.in failed entirely — use yfinance as primary
+            parsed = yf_data or _unavailable(symbol)
+        elif yf_data:
+            # Screener.in worked but may have gaps — fill from yfinance
+            for key, val in yf_data.items():
+                if key.startswith("_"):
+                    continue  # skip _data_source etc.
+                if val is not None and parsed.get(key) is None:
+                    parsed[key] = val
 
     # 3. No fake data — return None values so LLM knows data is unavailable
     if not parsed:
@@ -1133,6 +1280,14 @@ def analyse(symbol: str, **_kwargs) -> FundamentalSnapshot:
 
     with _fund_cache_lock:
         _fund_cache[sym_upper] = (now_ts, snapshot)
+
+    if cache:
+        try:
+            cache.save_macro(
+                f"fund_snap_{sym_upper}", _snapshot_to_dict(snapshot), ttl_minutes=1440
+            )
+        except Exception:
+            pass
 
     return snapshot
 

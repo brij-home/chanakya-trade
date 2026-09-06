@@ -3,13 +3,15 @@
 # kiteconnect>=5.2.1        # Zerodha Kite Connect
 httpx>=0.28.0               # Groww REST API + general HTTP
 # fyers-apiv3>=3.1.16       # Fyers broker (official SDK)
+# websocket-client>=1.8.0  # Shoonya WebSocket streaming (optional)
 
 # ── AI Brain ─────────────────────────────────────────────────
 anthropic>=0.40.0           # Claude API
 pydantic>=2.10.0            # Schema validation
 openai>=1.40.0              # OpenAI GPT API
 google-genai>=1.0.0         # Google Gemini API (unified GenAI SDK)
-google-cloud-aiplatform>=1.60.0  # Vertex AI (Gemini for GCP/Workspace)
+# Vertex AI is optional for a GCP/Workspace deployment; install with:
+# pip install -e ".[vertex]"
 
 # ── Terminal UI ──────────────────────────────────────────────
 rich>=14.0.0                # Tables, panels, styled output

@@ -217,6 +217,15 @@ class StoxkartAPI(BrokerAPI):
                 TOKEN_FILE.unlink()
             except Exception:
                 pass
+        if hasattr(self, "_client") and self._client is not None:
+            try:
+                self._client.close()
+            except Exception:
+                pass
+
+    def close(self) -> None:
+        """Alias for logout to conform to standard resource close protocol."""
+        self.logout()
 
     @property
     def is_authenticated(self) -> bool:
@@ -366,10 +375,7 @@ class StoxkartAPI(BrokerAPI):
             except Exception:
                 pass
 
-        # Seamless fallback to market quote engine
-        from market.quotes import get_quote as _mkt_quote
-
-        return _mkt_quote(f"{exch}:{sym}")
+        return Quote(symbol=sym, last_price=0.0, open=0.0, high=0.0, low=0.0, close=0.0, volume=0)
 
     def get_options_chain(
         self,
@@ -419,7 +425,9 @@ class StoxkartAPI(BrokerAPI):
         except Exception as exc:
             raise RuntimeError(f"Stoxkart order submission failed: {exc}") from exc
 
-        raise RuntimeError("Stoxkart order submission failed: broker returned an unexpected response.")
+        raise RuntimeError(
+            "Stoxkart order submission failed: broker returned an unexpected response."
+        )
 
     def cancel_order(self, order_id: str) -> bool:
         if not self._token:
