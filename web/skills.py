@@ -189,6 +189,7 @@ class HintRequest(BaseModel):
 class HistoryRequest(InstrumentBaseRequest):
     interval: str = "day"  # day, 1h, 15m, 5m, 1m
     days: int = 180
+    include_live: bool = True  # Include active live candle on charts
 
 
 class OptionLegItem(BaseModel):
@@ -278,7 +279,11 @@ async def skill_history(req: HistoryRequest):
         from engine.provenance import create_provenance
 
         df = get_ohlcv(
-            req.symbol.upper(), req.exchange.upper(), interval=req.interval, days=req.days
+            req.symbol.upper(),
+            req.exchange.upper(),
+            interval=req.interval,
+            days=req.days,
+            include_live_candle=req.include_live,
         )
         if df is None or df.empty:
             return _ok(
