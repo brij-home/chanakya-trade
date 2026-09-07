@@ -613,9 +613,9 @@ def test_target_milestone_latching_and_ratchet_dedup(monkeypatch):
     updated_final = engine.check_and_alert_targets_and_trailing()
     assert len(updated_final) == 1
     assert "TARGET_ACHIEVED" in alert.achieved_milestones
-    assert alert.stage == "TARGET_ACHIEVED"
+    assert alert.stage in ("TARGET_ACHIEVED", "COMPLETED")
 
-    # 4. Immediate next tick with price 3608.0: Latched! Must NOT alert again!
+    # 4. Immediate next tick with price 3608.0: Latched & retired! Must NOT alert again!
     updated_final_again = engine.check_and_alert_targets_and_trailing()
     assert len(updated_final_again) == 0
 
@@ -654,5 +654,147 @@ def test_create_test_target_alert():
     assert trail_test.trailing_stop == 2950.0
 
     engine.clear_alerts()
+
+
+def test_active_alert_deduplication_and_in_place_upgrade():
+    """Verify that recording alerts for the same symbol does not duplicate active alerts, and upgrades early warnings."""
+    engine = AutoAlertEngine(max_buffer=50)
+    engine.clear_alerts()
+
+    early = AutoAlert(
+        alert_id="titan-sqz-1",
+        alert_type="SQUEEZE_BREAKOUT",
+        stage="EARLY_WARNING",
+        symbol="TITAN",
+        exchange="NSE",
+        direction="BULLISH",
+        headline="Squeeze Coiling: TITAN",
+        summary="Coiled below pivot",
+        ltp=3420.0,
+        trigger_level=3440.0,
+        target_level=3650.0,
+        stop_loss=3380.0,
+        confidence=82,
+    )
+    assert engine.record_alert(early) is True
+    assert len(engine.get_alerts(alert_type="SQUEEZE_BREAKOUT")) == 1
+
+    # Incoming IGNITED breakout should upgrade existing alert in place
+    ignited = AutoAlert(
+        alert_id="titan-sqz-2",
+        alert_type="SQUEEZE_BREAKOUT",
+        stage="IGNITED",
+        symbol="TITAN",
+        exchange="NSE",
+        direction="BULLISH",
+        headline="Breakout Ignited: TITAN",
+        summary="Volume expansion",
+        ltp=3445.0,
+        trigger_level=3440.0,
+        target_level=3650.0,
+        stop_loss=3390.0,
+        confidence=90,
+    )
+    assert engine.record_alert(ignited) is True
+    alerts = engine.get_alerts(alert_type="SQUEEZE_BREAKOUT")
+    assert len(alerts) == 1
+    assert alerts[0].stage == "IGNITED"
+    assert alerts[0].confidence == 90
+
+    # Another duplicate breakout alert while one is already active must be suppressed
+    assert engine.record_alert(ignited) is False
+    assert len(engine.get_alerts(alert_type="SQUEEZE_BREAKOUT")) == 1
+
+    engine.clear_alerts()
+
+
+def test_decisive_telegram_formatting_and_one_shot_dispatch(monkeypatch):
+    """Verify that Telegram messages contain distinct, decisive actions and are dispatched at most once per milestone."""
+    engine = AutoAlertEngine(max_buffer=50)
+    engine.clear_alerts()
+
+    dispatched_messages = []
+    monkeypatch.setattr("engine.alerts._telegram_notify", lambda msg: dispatched_messages.append(msg))
+
+    alert = AutoAlert(
+        alert_id="decisive-test-1",
+        alert_type="SQUEEZE_BREAKOUT",
+        stage="IGNITED",
+        symbol="TITAN",
+        exchange="NSE",
+        direction="BULLISH",
+        headline="Breakout: TITAN",
+        summary="Breakout ignited",
+        ltp=3400.0,
+        trigger_level=3400.0,
+        target_level=3600.0,
+        stop_loss=3350.0,
+        is_live=True,
+        environment="LIVE",
+    )
+    engine._alerts.append(alert)
+
+    # 1. T1 Hit
+    monkeypatch.setattr("market.quotes.get_ltp", lambda sym: 3495.0)
+    engine.check_and_alert_targets_and_trailing()
+    assert len(dispatched_messages) == 1
+    t1_msg = dispatched_messages[0]
+    assert "TARGET 1 ACHIEVED" in t1_msg
+    assert "BOOK 50% PROFIT NOW & HOLD RUNNER" in t1_msg
+    assert "100% risk-free" in t1_msg.lower()
+
+    # Next cycle at T1: Dispatch gate blocks duplicate
+    engine.check_and_alert_targets_and_trailing()
+    assert len(dispatched_messages) == 1  # Still 1, not duplicate!
+
+    # 2. Final Target Hit
+    monkeypatch.setattr("market.quotes.get_ltp", lambda sym: 3605.0)
+    engine.check_and_alert_targets_and_trailing()
+    assert len(dispatched_messages) == 2
+    final_msg = dispatched_messages[1]
+    assert "FINAL TARGET REACHED" in final_msg
+    assert "CLOSE ALL POSITIONS (BOOK FULL PROFIT)" in final_msg
+
+    # Next cycle: Dispatch gate and completed status block duplicate
+    engine.check_and_alert_targets_and_trailing()
+    assert len(dispatched_messages) == 2  # No duplicate final target alert
+
+    engine.clear_alerts()
+
+
+@pytest.mark.live_telegram
+def test_telegram_bot_send_push_deduplication_buffer(monkeypatch):
+    """Verify bot.telegram_bot.send_push deduplication buffer suppresses identical messages within 5 minutes."""
+    from bot.telegram_bot import send_push, _recent_push_digests, _push_dedup_lock
+    import bot.telegram_bot as tb_module
+
+    sent_calls = []
+
+    class DummyExecutor:
+        def submit(self, fn):
+            sent_calls.append(True)
+            return None
+
+    monkeypatch.setattr(tb_module, "_load_chat_id", lambda: "12345678")
+    monkeypatch.setattr(tb_module, "_get_bot_token", lambda: "fake-bot-token")
+    monkeypatch.setattr(tb_module, "_get_push_executor", lambda: DummyExecutor())
+
+    with _push_dedup_lock:
+        _recent_push_digests.clear()
+
+    # First send should succeed
+    msg = "🎯 <b>[REAL / LIVE TARGET 1 HIT]</b>\n\n🏆 <b>TITAN (SQUEEZE BREAKOUT) — TARGET 1 ACHIEVED</b>\n\n🕒 2026-09-07 15:45:00 IST"
+    send_push(msg)
+    assert len(sent_calls) == 1
+
+    # Exact duplicate send within 5 minutes (even if timestamp shifts slightly) should be suppressed
+    msg2 = "🎯 <b>[REAL / LIVE TARGET 1 HIT]</b>\n\n🏆 <b>TITAN (SQUEEZE BREAKOUT) — TARGET 1 ACHIEVED</b>\n\n🕒 2026-09-07 15:45:10 IST"
+    send_push(msg2)
+    assert len(sent_calls) == 1  # Suppressed!
+
+    # Different message content should be allowed
+    msg3 = "🏁 <b>[REAL / LIVE FINAL TARGET ACHIEVED]</b>\n\n🏆 <b>TITAN (SQUEEZE BREAKOUT) — FINAL TARGET REACHED</b>\n\n🕒 2026-09-07 15:48:00 IST"
+    send_push(msg3)
+    assert len(sent_calls) == 2
 
 

@@ -995,15 +995,35 @@ def run_setup_wizard() -> None:
     )
 
 
-# ── Push Notifications ───────────────────────────────────────
+# ── Push Notifications & Anti-Duplicate Buffer ────────────────
+_recent_push_digests: dict[str, float] = {}
+_push_dedup_lock = threading.Lock()
+_PUSH_DEDUP_WINDOW_SEC = 300.0  # 5 minutes suppression for duplicate messages
 
 
-def send_push(message: str, parse_mode: str = "HTML") -> None:
+def _normalize_push_message(msg: str) -> str:
+    """Strips timestamps, tags, and dynamic spacing for canonical deduplication hashing."""
+    import re
+
+    # Remove timestamps like 2026-09-07 15:45:00, 15:45:00 IST, etc.
+    s = re.sub(r"\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}(\s+IST)?", "", msg)
+    s = re.sub(r"\d{2}:\d{2}:\d{2}(\s+IST)?", "", s)
+    # Remove HTML tags
+    s = re.sub(r"<[^>]+>", "", s)
+    # Collapse whitespace
+    return " ".join(s.split()).strip().lower()
+
+
+def send_push(message: str, parse_mode: str = "HTML", bypass_dedup: bool = False) -> None:
     """
     Send a push notification to the configured Telegram chat.
     Called from alerts, morning brief scheduler, execution gate, etc.
     Non-blocking — runs in a background thread.
+    Includes a 5-minute anti-flood message deduplication guard.
     """
+    import hashlib
+    import time
+
     chat_id = _load_chat_id()
     if not chat_id:
         return
@@ -1012,6 +1032,25 @@ def send_push(message: str, parse_mode: str = "HTML") -> None:
         token = _get_bot_token()
     except Exception:
         return
+
+    now = time.time()
+    if not bypass_dedup:
+        normalized = _normalize_push_message(message)
+        digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+        with _push_dedup_lock:
+            # Clean expired items if buffer is growing
+            if len(_recent_push_digests) > 200:
+                expired = [k for k, ts in _recent_push_digests.items() if now - ts > _PUSH_DEDUP_WINDOW_SEC]
+                for k in expired:
+                    del _recent_push_digests[k]
+
+            last_sent = _recent_push_digests.get(digest, 0.0)
+            if (now - last_sent) < _PUSH_DEDUP_WINDOW_SEC:
+                logger.debug(f"[TelegramPush] Suppressed duplicate push notification (hash={digest[:8]})")
+                return
+
+            _recent_push_digests[digest] = now
 
     def _send():
         try:

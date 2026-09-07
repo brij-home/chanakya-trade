@@ -30,6 +30,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import os
 import threading
 import time
 import uuid
@@ -44,7 +45,14 @@ import pandas as pd
 logger = logging.getLogger("engine.auto_alert_engine")
 
 IST = timezone(timedelta(hours=5, minutes=30))
-AUTO_ALERTS_FILE = Path.home() / ".trading_platform" / "auto_alerts.json"
+
+
+def get_auto_alerts_file() -> Path:
+    base = Path(os.environ.get("TRADING_PLATFORM_DATA") or (Path.home() / ".trading_platform"))
+    return base / "auto_alerts.json"
+
+
+AUTO_ALERTS_FILE = get_auto_alerts_file()
 
 
 # ── Data Models ─────────────────────────────────────────────────────────────
@@ -211,7 +219,7 @@ def evaluate_alert_targets_and_trailing(
       2. Clear, decisive trailing stop recommendation: WHETHER TO TRAIL OR NOT.
       3. Exact price level to trail stop loss to and profit locked.
     """
-    if alert.is_invalidated or alert.stage == "INVALIDATED":
+    if alert.is_invalidated or alert.stage in ("INVALIDATED", "COMPLETED"):
         return None
 
     if current_ltp is None or current_ltp <= 0:
@@ -358,7 +366,7 @@ def evaluate_alert_targets_and_trailing(
         )
 
     # 3. Trailing Stop Ratchet Higher (Dynamic Trail)
-    if alert.trailing_stop and alert.trailing_stop > 0:
+    if alert.should_trail and alert.trailing_stop and alert.trailing_stop > 0 and alert.stage != "COMPLETED":
         if is_bullish:
             higher_trail = round(max(alert.trailing_stop, current_ltp - (initial_risk * 1.8)), 2)
             # Must ratchet higher by at least 0.75% and at least 2 pts
@@ -726,7 +734,7 @@ def detect_squeeze_breakout(
             )
 
         # ── IGNITED: Squeeze Fired + Fresh Breakout above pivot ───
-        if ltp >= pivot_high and (ltp - pivot_high) / pivot_high <= 0.025 and rvol >= 1.4:
+        if ltp >= pivot_high and (ltp - pivot_high) / pivot_high <= 0.025 and rvol >= 1.4 and ltp > sma20:
             target = round(ltp * 1.08, 1)
             sl = round(pivot_high * 0.985, 1)
             return AutoAlert(
@@ -840,11 +848,13 @@ class AutoAlertEngine:
     """
 
     def __init__(self, max_buffer: int = 150) -> None:
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._max_buffer = max_buffer
         self._alerts: list[AutoAlert] = []
         self._cooldowns: dict[str, float] = {}  # signature -> timestamp
         self._cooldown_ttl = 900.0  # 15 minutes anti-spam per signature
+        self._dispatched_milestones: set[str] = set()
+        self._dispatch_cooldowns: dict[str, float] = {}
         self._stop_event = threading.Event()
         self._poller_thread: Optional[threading.Thread] = None
         self._is_running = False
@@ -862,30 +872,68 @@ class AutoAlertEngine:
     def record_alert(self, alert: AutoAlert) -> bool:
         """
         Records alert if not within cooldown window. Dispatches to SSE and multi-channels.
+        Strictly prevents duplicate active alerts for the same symbol & alert_type.
         """
-        sig = f"{alert.symbol}:{alert.alert_type}:{alert.direction}:{alert.stage}:{round(alert.ltp, -1)}"
         now = time.time()
+        to_dispatch = None
 
         with self._lock:
-            last_time = self._cooldowns.get(sig, 0.0)
-            if (now - last_time) < self._cooldown_ttl:
-                return False  # Cooldown active, suppress repetitive spam
+            # 1. Active Alert Uniqueness Guard:
+            # Check for existing active (in-flight) alert on the same symbol and strategy
+            existing_active = next(
+                (
+                    a for a in self._alerts
+                    if a.symbol == alert.symbol
+                    and a.alert_type == alert.alert_type
+                    and not a.is_invalidated
+                    and a.stage not in ("INVALIDATED", "COMPLETED")
+                ),
+                None,
+            )
+            if existing_active:
+                # If existing is EARLY_WARNING and incoming is IGNITED, upgrade it!
+                if existing_active.stage == "EARLY_WARNING" and alert.stage == "IGNITED":
+                    existing_active.stage = "IGNITED"
+                    existing_active.headline = alert.headline
+                    existing_active.summary = alert.summary
+                    existing_active.ltp = alert.ltp
+                    existing_active.trigger_level = alert.trigger_level
+                    existing_active.target_level = alert.target_level
+                    existing_active.stop_loss = alert.stop_loss
+                    existing_active.metrics = alert.metrics
+                    existing_active.actionable_plan = alert.actionable_plan
+                    existing_active.confidence = max(existing_active.confidence, alert.confidence)
+                    self._save()
+                    to_dispatch = existing_active
+                else:
+                    # Existing alert is already active/ignited/tracking targets -> suppress duplicate insertion!
+                    return False
+            else:
+                # 2. Signature-based cooldown check (removed volatile price noise from signature)
+                sig = f"{alert.symbol}:{alert.alert_type}:{alert.direction}:{alert.stage}"
+                last_time = self._cooldowns.get(sig, 0.0)
+                if (now - last_time) < self._cooldown_ttl:
+                    return False  # Cooldown active, suppress repetitive spam
 
-            self._cooldowns[sig] = now
-            self._alerts.insert(0, alert)
-            if len(self._alerts) > self._max_buffer:
-                self._alerts.pop()
-            self._save()
+                self._cooldowns[sig] = now
+                self._alerts.insert(0, alert)
+                if len(self._alerts) > self._max_buffer:
+                    self._alerts.pop()
+                self._save()
+                to_dispatch = alert
 
-        # Multi-channel notification
-        self._dispatch(alert)
-        return True
+        # Multi-channel notification outside lock
+        if to_dispatch:
+            self._dispatch(to_dispatch)
+            return True
+        return False
 
     def _dispatch(self, alert: AutoAlert) -> None:
         """Broadcasts alert across all communication channels with clear REAL/LIVE vs TEST tagging."""
         is_test = (alert.environment == "TEST") or (not alert.is_live)
         env_tag = "[TEST]" if is_test else "[REAL/LIVE]"
-        is_target = alert.stage in ("T1_ACHIEVED", "TARGET_ACHIEVED")
+        is_t1 = "T1" in (alert.target_status or "") or alert.stage == "T1_ACHIEVED"
+        is_target = is_t1 or alert.stage in ("TARGET_ACHIEVED", "COMPLETED") or "TARGET" in (alert.target_status or "")
         is_trail = alert.stage == "TRAILING_UPDATE"
 
         alert_dict = alert.to_dict()
@@ -905,6 +953,8 @@ class AutoAlertEngine:
             sys_type = "market_alert"
             if alert.is_invalidated:
                 sys_type = "invalidation_alert"
+            elif is_t1:
+                sys_type = "target_1_achieved"
             elif is_target:
                 sys_type = "target_achieved"
             elif is_trail:
@@ -930,8 +980,11 @@ class AutoAlertEngine:
             if alert.is_invalidated:
                 desktop_title = f"⚠️ {env_tag} [{ts_short}] VIEW INVALIDATED: {alert.symbol}"
                 desktop_msg = alert.invalidation_reason or alert.summary
+            elif is_t1:
+                desktop_title = f"🎯 {env_tag} [{ts_short}] TARGET 1 HIT: {alert.symbol}"
+                desktop_msg = f"{alert.trailing_decision or 'BOOK 50% & TRAIL TO BREAKEVEN'}: {alert.trailing_rationale or alert.summary}"
             elif is_target:
-                desktop_title = f"🎯 {env_tag} [{ts_short}] TARGET HIT: {alert.symbol}"
+                desktop_title = f"🏁 {env_tag} [{ts_short}] FINAL TARGET HIT: {alert.symbol}"
                 desktop_msg = f"{alert.trailing_decision or 'TARGET ACHIEVED'}: {alert.trailing_rationale or alert.summary}"
             elif is_trail:
                 desktop_title = f"📈 {env_tag} [{ts_short}] TRAIL STOP: {alert.symbol} → ₹{alert.trailing_stop or 0:,.2f}"
@@ -947,9 +1000,55 @@ class AutoAlertEngine:
         except Exception:
             pass
 
-        # 3. Telegram push (if bot token configured)
+        # 3. Telegram push with multi-layer deduplication & decisive institutional formatting
         try:
             from engine.alerts import _telegram_notify
+
+            # Anti-flood / deduplication filter for Telegram channel
+            now_ts = time.time()
+            with self._lock:
+                if alert.is_invalidated or alert.stage == "INVALIDATED":
+                    m_key = f"{alert.symbol}:{alert.alert_type}:INVALIDATED"
+                    if m_key in self._dispatched_milestones:
+                        return
+                    self._dispatched_milestones.add(m_key)
+
+                elif is_t1:
+                    m_key = f"{alert.symbol}:{alert.alert_type}:T1"
+                    if m_key in self._dispatched_milestones:
+                        return
+                    self._dispatched_milestones.add(m_key)
+
+                elif is_target:
+                    m_key = f"{alert.symbol}:{alert.alert_type}:FINAL"
+                    if m_key in self._dispatched_milestones:
+                        return
+                    self._dispatched_milestones.add(m_key)
+
+                elif is_trail:
+                    m_key = f"{alert.symbol}:{alert.alert_type}:TRAIL"
+                    last_t = self._dispatch_cooldowns.get(m_key, 0.0)
+                    if (now_ts - last_t) < 900.0:  # 15 min cooldown
+                        return
+                    self._dispatch_cooldowns[m_key] = now_ts
+
+                elif alert.stage == "EARLY_WARNING":
+                    # Early warnings are preliminary coiling signals -> keep in SSE / Terminal,
+                    # do not buzz Telegram unless exceptionally high confidence (>= 90)
+                    if alert.confidence < 90:
+                        return
+                    m_key = f"{alert.symbol}:{alert.alert_type}:EARLY"
+                    last_e = self._dispatch_cooldowns.get(m_key, 0.0)
+                    if (now_ts - last_e) < 1800.0:
+                        return
+                    self._dispatch_cooldowns[m_key] = now_ts
+
+                elif alert.stage == "IGNITED":
+                    m_key = f"{alert.symbol}:{alert.alert_type}:IGNITED"
+                    last_i = self._dispatch_cooldowns.get(m_key, 0.0)
+                    if (now_ts - last_i) < 1800.0:
+                        return
+                    self._dispatch_cooldowns[m_key] = now_ts
 
             if alert.is_invalidated:
                 tg_msg = (
@@ -957,32 +1056,51 @@ class AutoAlertEngine:
                     f"🚨 <b>{alert.symbol} ({alert.alert_type.replace('_', ' ')})</b> is <b>NO LONGER VALID</b>!\n\n"
                     f"🛑 <b>Reason:</b> {alert.invalidation_reason or alert.summary}\n"
                     f"🕒 <b>Invalidated At:</b> {alert.invalidated_at or alert.created_at}\n\n"
-                    f"<i>Action: Manage risk, cancel pending orders, or close active positions.</i>"
+                    f"⚡ <b>DECISIVE ACTION:</b> <code>CANCEL PENDING ORDERS & CLOSE POSITIONS</code>"
                 )
-            elif is_target:
-                tg_header = "🎯 <b>[TEST TARGET ACHIEVED]</b>" if is_test else "🎯 <b>[REAL / LIVE TARGET ACHIEVED]</b>"
-                trail_str = (
-                    f"🛑 <b>Recommended Trail SL:</b> ₹{alert.trailing_stop:,.2f} (+{alert.locked_profit_pct or 0:.1f}% locked)\n"
-                    if alert.trailing_stop and alert.should_trail else "🛑 <b>Trailing:</b> DO NOT TRAIL (Book Full Profit)\n"
-                )
+            elif is_t1:
+                tg_header = "🎯 <b>[TEST TARGET 1 HIT]</b>" if is_test else "🎯 <b>[REAL / LIVE TARGET 1 HIT]</b>"
+                trail_stop_val = alert.trailing_stop or alert.stop_loss or (alert.trigger_level * 1.002)
                 tg_msg = (
                     f"{tg_header}\n\n"
-                    f"🏆 <b>{alert.symbol} ({alert.alert_type.replace('_', ' ')})</b> reached target milestone!\n\n"
-                    f"💰 <b>LTP:</b> ₹{alert.ltp:,.2f} | <b>Target:</b> ₹{alert.target_level:,.2f}\n"
-                    f"{trail_str}"
-                    f"⚡ <b>DECISION:</b> <code>{alert.trailing_decision or 'PROFIT_BOOKING'}</code>\n\n"
-                    f"💡 <b>Actionable Guidance:</b> {alert.trailing_rationale or alert.summary}\n\n"
+                    f"🏆 <b>{alert.symbol} ({alert.alert_type.replace('_', ' ')}) — TARGET 1 ACHIEVED</b>\n\n"
+                    f"💰 <b>LTP:</b> ₹{alert.ltp:,.2f} | <b>Target 1:</b> ₹{alert.target_level:,.2f}\n"
+                    f"🛡️ <b>Trail Stop:</b> ₹{trail_stop_val:,.2f} (+{alert.locked_profit_pct or 0.2:.1f}% Breakeven Lock)\n"
+                    f"⚡ <b>DECISIVE ACTION:</b> <code>BOOK 50% PROFIT NOW & HOLD RUNNER</code>\n\n"
+                    f"💡 <b>Institutional Guidance:</b> {alert.trailing_rationale or alert.summary}\n\n"
                     f"🕒 <b>Timestamp:</b> {now_ts_str}"
                 )
+            elif is_target:
+                if alert.should_trail:
+                    tg_header = "🚀 <b>[TEST RUNNER EXTENSION]</b>" if is_test else "🚀 <b>[REAL / LIVE RUNNER EXTENSION]</b>"
+                    tg_msg = (
+                        f"{tg_header}\n\n"
+                        f"🏆 <b>{alert.symbol} ({alert.alert_type.replace('_', ' ')}) — INSTITUTIONAL RUNAWAY</b>\n\n"
+                        f"💰 <b>LTP:</b> ₹{alert.ltp:,.2f} | <b>Primary Target:</b> ₹{alert.target_level:,.2f}\n"
+                        f"🛡️ <b>Chandelier Trail SL:</b> ₹{alert.trailing_stop:,.2f} (+{alert.locked_profit_pct or 0:.1f}% locked)\n"
+                        f"⚡ <b>DECISIVE ACTION:</b> <code>LET RUNNER RIDE (TRAIL SL)</code>\n\n"
+                        f"💡 <b>Institutional Guidance:</b> {alert.trailing_rationale or alert.summary}\n\n"
+                        f"🕒 <b>Timestamp:</b> {now_ts_str}"
+                    )
+                else:
+                    tg_header = "🏁 <b>[TEST FINAL TARGET ACHIEVED]</b>" if is_test else "🏁 <b>[REAL / LIVE FINAL TARGET ACHIEVED]</b>"
+                    tg_msg = (
+                        f"{tg_header}\n\n"
+                        f"🏆 <b>{alert.symbol} ({alert.alert_type.replace('_', ' ')}) — FINAL TARGET REACHED</b>\n\n"
+                        f"💰 <b>LTP:</b> ₹{alert.ltp:,.2f} | <b>Final Target:</b> ₹{alert.target_level:,.2f}\n"
+                        f"⚡ <b>DECISIVE ACTION:</b> <code>CLOSE ALL POSITIONS (BOOK FULL PROFIT)</code>\n\n"
+                        f"💡 <b>Institutional Guidance:</b> {alert.trailing_rationale or alert.summary}\n\n"
+                        f"🕒 <b>Timestamp:</b> {now_ts_str}"
+                    )
             elif is_trail:
-                tg_header = "📈 <b>[TEST TRAILING STOP UPDATE]</b>" if is_test else "📈 <b>[REAL / LIVE TRAILING STOP UPDATE]</b>"
+                tg_header = "📈 <b>[TEST TRAILING STOP RATCHET]</b>" if is_test else "📈 <b>[REAL / LIVE TRAILING STOP RATCHET]</b>"
                 tg_msg = (
                     f"{tg_header}\n\n"
-                    f"🚀 <b>{alert.symbol} Trailing Stop Ratcheted Higher!</b>\n\n"
+                    f"🛡️ <b>{alert.symbol} Trailing Stop Ratcheted Higher!</b>\n\n"
                     f"💰 <b>LTP:</b> ₹{alert.ltp:,.2f}\n"
                     f"🛡️ <b>New Stop-Loss:</b> ₹{alert.trailing_stop:,.2f}\n"
                     f"🔒 <b>Guaranteed Profit:</b> +₹{alert.locked_profit_pts or 0:,.2f}/sh (+{alert.locked_profit_pct or 0:.1f}% locked)\n"
-                    f"⚡ <b>DECISION:</b> <code>{alert.trailing_decision or 'TRAIL_STOP'}</code>\n\n"
+                    f"⚡ <b>DECISIVE ACTION:</b> <code>UPDATE SL ORDER TO ₹{alert.trailing_stop:,.2f}</code>\n\n"
                     f"💡 <i>{alert.trailing_rationale or alert.summary}</i>\n\n"
                     f"🕒 <b>Timestamp:</b> {now_ts_str}"
                 )
@@ -995,7 +1113,7 @@ class AutoAlertEngine:
                     sl = alert.actionable_plan.get("stop_loss", f"₹{alert.stop_loss}")
                     plan_str = f"\n\n⚡ <b>Trade Plan:</b> {action} @ {entry}\n🎯 <b>Target:</b> {target} | 🛑 <b>SL:</b> {sl}"
 
-                tg_header = "🧪 <b>[TEST ALERT - SIMULATED]</b>" if is_test else "🟢 <b>[REAL / LIVE ALERT]</b>"
+                tg_header = "🧪 <b>[TEST BREAKOUT IGNITED]</b>" if is_test else "🟢 <b>[REAL / LIVE BREAKOUT IGNITED]</b>"
                 tg_msg = (
                     f"{tg_header}\n"
                     f"🚨 <b>{alert.headline}</b>\n\n"
@@ -1106,7 +1224,7 @@ class AutoAlertEngine:
 
     def check_and_alert_targets_and_trailing(self) -> list[AutoAlert]:
         """
-        Scans all active (non-invalidated) alerts against live quotes to evaluate:
+        Scans all active (non-invalidated, non-completed) alerts against live quotes to evaluate:
           1. Target milestones (Target 1 / Breakeven vs Final Target).
           2. Trailing stop ratchets.
         Dispatches high-priority target & trailing alerts with strict deduplication.
@@ -1115,11 +1233,26 @@ class AutoAlertEngine:
         now_ts = time.time()
 
         with self._lock:
-            active_alerts = [a for a in self._alerts if not a.is_invalidated and a.stage != "INVALIDATED"]
+            active_alerts = [
+                a for a in self._alerts
+                if not a.is_invalidated and a.stage not in ("INVALIDATED", "COMPLETED")
+            ]
 
         for alert in active_alerts:
             try:
-                eval_res = evaluate_alert_targets_and_trailing(alert)
+                # Refresh current quote LTP
+                lookup_sym = alert.contract_symbol or (
+                    f"{alert.exchange}:{alert.symbol}" if ":" not in alert.symbol else alert.symbol
+                )
+                from market.quotes import get_ltp
+                try:
+                    cur_quote_ltp = get_ltp(lookup_sym)
+                    if cur_quote_ltp and cur_quote_ltp > 0:
+                        alert.ltp = cur_quote_ltp
+                except Exception:
+                    cur_quote_ltp = None
+
+                eval_res = evaluate_alert_targets_and_trailing(alert, current_ltp=cur_quote_ltp)
                 if not eval_res or not eval_res.new_milestone:
                     continue
 
@@ -1143,11 +1276,16 @@ class AutoAlertEngine:
                     if eval_res.new_milestone in ("T1_ACHIEVED", "TARGET_ACHIEVED"):
                         if eval_res.new_milestone not in alert.achieved_milestones:
                             alert.achieved_milestones.append(eval_res.new_milestone)
-                        alert.stage = eval_res.new_milestone
 
                         if eval_res.new_milestone == "TARGET_ACHIEVED":
-                            alert.headline = f"🎯 {env_tag} FINAL TARGET ACHIEVED: {alert.symbol} (₹{eval_res.recommended_stop:,.2f})"
+                            if not eval_res.should_trail:
+                                alert.stage = "COMPLETED"
+                                alert.headline = f"🏁 {env_tag} FINAL TARGET ACHIEVED: {alert.symbol} (₹{eval_res.recommended_stop:,.2f})"
+                            else:
+                                alert.stage = "TARGET_ACHIEVED"
+                                alert.headline = f"🎯 {env_tag} FINAL TARGET ACHIEVED: {alert.symbol} (₹{eval_res.recommended_stop:,.2f})"
                         else:
+                            alert.stage = "T1_ACHIEVED"
                             alert.headline = f"🎯 {env_tag} TARGET 1 ACHIEVED: {alert.symbol} (₹{eval_res.recommended_stop:,.2f})"
                         alert.summary = eval_res.trailing_rationale
 
@@ -1424,18 +1562,22 @@ class AutoAlertEngine:
 
         return found
 
-    def scan_all_now(self) -> list[AutoAlert]:
-        """Executes full diagnostic scan across all detectors and returns new alerts."""
+    def scan_fresh_signals_now(self) -> list[AutoAlert]:
+        """Scans watched universe for fresh market signals across all detectors."""
         results: list[AutoAlert] = []
-        # 1. Check invalidations on existing alerts first
-        self.check_and_alert_invalidations()
-        # 2. Check target milestones & trailing stop updates on existing alerts
-        self.check_and_alert_targets_and_trailing()
-
         results.extend(self.scan_gamma_blasts())
         results.extend(self.scan_squeeze_breakouts())
         results.extend(self.scan_circuits())
         return results
+
+    def scan_all_now(self) -> list[AutoAlert]:
+        """Executes full diagnostic scan across all detectors and returns new alerts."""
+        # 1. Check invalidations on existing alerts first
+        self.check_and_alert_invalidations()
+        # 2. Check target milestones & trailing stop updates on existing alerts
+        self.check_and_alert_targets_and_trailing()
+        # 3. Check for fresh market signals
+        return self.scan_fresh_signals_now()
 
     # ── Daemon Thread Poller ────────────────────────────────────
 
@@ -1479,7 +1621,7 @@ class AutoAlertEngine:
                 from engine.alerts import _is_market_hours
 
                 if _is_market_hours():
-                    self.scan_all_now()
+                    self.scan_fresh_signals_now()
             except Exception as e:
                 logger.warning(f"[AutoAlertEngine] Error in poll cycle: {e}")
 
@@ -1516,26 +1658,30 @@ class AutoAlertEngine:
         return res[:limit]
 
     def clear_alerts(self) -> None:
-        """Clears all buffered alerts and cooldown signatures."""
+        """Clears all buffered alerts, cooldown signatures, and dispatch milestone latches."""
         with self._lock:
             self._alerts.clear()
             self._cooldowns.clear()
+            self._dispatched_milestones.clear()
+            self._dispatch_cooldowns.clear()
             self._save()
 
     # ── Persistence ─────────────────────────────────────────────
 
     def _save(self) -> None:
         try:
-            AUTO_ALERTS_FILE.parent.mkdir(parents=True, exist_ok=True)
+            target_path = get_auto_alerts_file()
+            target_path.parent.mkdir(parents=True, exist_ok=True)
             data = [a.to_dict() for a in self._alerts]
-            AUTO_ALERTS_FILE.write_text(json.dumps(data, indent=2))
+            target_path.write_text(json.dumps(data, indent=2))
         except Exception as e:
             logger.debug(f"[AutoAlertEngine] _save error: {e}")
 
     def _load(self) -> None:
         try:
-            if AUTO_ALERTS_FILE.exists():
-                data = json.loads(AUTO_ALERTS_FILE.read_text())
+            target_path = get_auto_alerts_file()
+            if target_path.exists():
+                data = json.loads(target_path.read_text())
                 alerts = []
                 for d in data:
                     if isinstance(d, dict):

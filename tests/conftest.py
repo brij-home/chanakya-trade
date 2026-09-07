@@ -68,6 +68,24 @@ def sanitize_test_env(monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRe
         monkeypatch.setenv("OPENROUTER_API_KEY", "")
 
 
+@pytest.fixture(autouse=True)
+def isolate_test_notifications(monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest):
+    """Ensure tests never emit real-world Telegram pushes or desktop popups."""
+    if "live_telegram" not in request.keywords:
+        try:
+            monkeypatch.setattr("engine.alerts._telegram_notify", lambda msg: None)
+        except Exception:
+            pass
+        try:
+            monkeypatch.setattr("engine.alerts._desktop_notify", lambda **kwargs: None)
+        except Exception:
+            pass
+        try:
+            monkeypatch.setattr("bot.telegram_bot.send_push", lambda *args, **kwargs: None)
+        except Exception:
+            pass
+
+
 @pytest.fixture
 def ohlcv_df() -> pd.DataFrame:
     """200-row OHLCV DataFrame with deterministic prices.
