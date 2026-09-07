@@ -172,8 +172,40 @@ def unregister_broker(key: str) -> None:
         _exec_key = _primary_key
 
 
+def _try_auto_restore_sessions() -> None:
+    """Attempt to restore persisted broker sessions (mStock, Shoonya, etc.) when _brokers is empty."""
+    global _brokers, _primary_key, _data_key, _exec_key
+    if _brokers:
+        return
+    # 1. m.Stock
+    try:
+        import os
+        from brokers.mstock import MStockAPI, TOKEN_FILE as _MT
+        if os.path.exists(_MT):
+            b = MStockAPI()
+            if b.is_authenticated():
+                register_broker("mstock", b, role="both")
+                return
+    except Exception:
+        pass
+
+    # 2. Shoonya
+    try:
+        import os
+        from brokers.shoonya import ShoonyaAPI, TOKEN_FILE as _ST
+        if os.path.exists(_ST):
+            b = ShoonyaAPI()
+            if b.is_authenticated():
+                register_broker("shoonya", b, role="both")
+                return
+    except Exception:
+        pass
+
+
 def get_broker() -> BrokerAPI:
     """Return the primary broker. Raises if login() has not been called."""
+    if not _primary_key or _primary_key not in _brokers:
+        _try_auto_restore_sessions()
     if not _primary_key or _primary_key not in _brokers:
         raise RuntimeError(
             "No broker is connected. Run the 'login' command to connect your broker."
@@ -183,6 +215,8 @@ def get_broker() -> BrokerAPI:
 
 def get_all_brokers() -> dict[str, BrokerAPI]:
     """Return all connected broker instances, keyed by broker name."""
+    if not _brokers:
+        _try_auto_restore_sessions()
     return dict(_brokers)
 
 
@@ -234,6 +268,8 @@ def set_broker_role(key: str, role: str) -> None:
 
 def get_data_broker() -> BrokerAPI:
     """Return the current data broker. Falls back to primary if unset."""
+    if not _brokers:
+        _try_auto_restore_sessions()
     if _data_key and _data_key in _brokers:
         return _brokers[_data_key]
     return get_broker()
@@ -241,6 +277,8 @@ def get_data_broker() -> BrokerAPI:
 
 def get_data_broker_key() -> str:
     """Return the selected data-provider key without exposing mutable state."""
+    if not _brokers:
+        _try_auto_restore_sessions()
     if _data_key and _data_key in _brokers:
         return _data_key
     return _primary_key

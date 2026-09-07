@@ -2753,13 +2753,27 @@ async def stream_alerts():
 
 
 @app.get("/api/alerts/auto", tags=["Alerts"])
-async def get_auto_alerts(limit: int = 50, alert_type: Optional[str] = None, stage: Optional[str] = None):
+async def get_auto_alerts(
+    limit: int = 50,
+    alert_type: Optional[str] = None,
+    stage: Optional[str] = None,
+    environment: Optional[str] = None,
+    is_invalidated: Optional[bool] = None,
+    target_status: Optional[str] = None,
+):
     """
     Get real-time auto-detected alerts (Gamma Blasts, Squeeze Breakouts, Circuit Warnings, SMC).
     """
     from engine.auto_alert_engine import auto_alert_engine
 
-    alerts = auto_alert_engine.get_alerts(limit=limit, alert_type=alert_type, stage=stage)
+    alerts = auto_alert_engine.get_alerts(
+        limit=limit,
+        alert_type=alert_type,
+        stage=stage,
+        environment=environment,
+        is_invalidated=is_invalidated,
+        target_status=target_status,
+    )
     return {"status": "ok", "data": [a.to_dict() for a in alerts]}
 
 

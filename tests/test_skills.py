@@ -528,6 +528,48 @@ class TestAlertsSkills:
         assert len(triggered) == 1
         assert triggered[0]["symbol"] == "RELIANCE"
 
+    def test_skill_auto_alerts_test(self, client):
+        r = client.post(
+            "/skills/alerts/auto/test",
+            json={"alert_type": "GAMMA_BLAST", "symbol": "NIFTY", "is_invalidation": False},
+        )
+        assert r.status_code == 200
+        data = r.json()["data"]
+        assert data["environment"] == "TEST"
+        assert data["is_live"] is False
+        assert data["is_invalidated"] is False
+        assert "[TEST]" in data["headline"]
+
+    def test_skill_auto_alerts_test_invalidation(self, client):
+        r = client.post(
+            "/skills/alerts/auto/test",
+            json={"alert_type": "SQUEEZE_BREAKOUT", "symbol": "RELIANCE", "is_invalidation": True},
+        )
+        assert r.status_code == 200
+        data = r.json()["data"]
+        assert data["environment"] == "TEST"
+        assert data["is_live"] is False
+        assert data["is_invalidated"] is True
+        assert data["stage"] == "INVALIDATED"
+        assert "VIEW INVALIDATED" in data["headline"]
+
+    def test_skill_auto_alerts_check_invalidations(self, client):
+        r = client.post("/skills/alerts/auto/check_invalidations")
+        assert r.status_code == 200
+        data = r.json()["data"]
+        assert "invalidated_count" in data
+        assert isinstance(data["invalidated"], list)
+
+    def test_skill_manual_alerts_test(self, client):
+        r = client.post(
+            "/skills/alerts/test",
+            json={"symbol": "INFY", "condition": "ABOVE", "threshold": 1850.0},
+        )
+        assert r.status_code == 200
+        data = r.json()["data"]
+        assert data["environment"] == "TEST"
+        assert data["is_live"] is False
+
 
 # ── /.well-known/openclaw.json ────────────────────────────────
 
@@ -608,3 +650,56 @@ class TestSectorHeatmapSkill:
         assert "NIFTY50" not in codes
         assert "50" not in names
         assert "Nifty" not in names
+
+
+class TestAutoAlertSkills:
+    def test_auto_alerts_check_targets(self, client):
+        r = client.post("/skills/alerts/auto/check_targets")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["status"] == "ok"
+        assert "updated_count" in data["data"]
+        assert isinstance(data["data"]["updated"], list)
+
+    def test_auto_alerts_test_target_t1_breakeven(self, client):
+        r = client.post(
+            "/skills/alerts/auto/test_target",
+            json={"milestone": "T1", "should_trail": True, "symbol": "RELIANCE"},
+        )
+        assert r.status_code == 200
+        data = r.json()
+        assert data["status"] == "ok"
+        alert = data["data"]
+        assert alert["environment"] == "TEST"
+        assert alert["is_live"] is False
+        assert alert["stage"] == "T1_ACHIEVED"
+        assert alert["should_trail"] is True
+        assert alert["trailing_decision"] == "BOOK_50_TRAIL_BREAKEVEN"
+        assert "[TEST]" in alert["headline"]
+        assert alert["trailing_stop"] == 2865.0
+
+    def test_auto_alerts_test_target_final_no_trail(self, client):
+        r = client.post(
+            "/skills/alerts/auto/test_target",
+            json={"milestone": "FINAL", "should_trail": False, "symbol": "TCS"},
+        )
+        assert r.status_code == 200
+        data = r.json()
+        assert data["status"] == "ok"
+        alert = data["data"]
+        assert alert["environment"] == "TEST"
+        assert alert["stage"] == "TARGET_ACHIEVED"
+        assert alert["should_trail"] is False
+        assert alert["trailing_decision"] == "BOOK_FULL_PROFIT_NO_TRAIL"
+        assert "DO NOT TRAIL FURTHER" in alert["trailing_rationale"]
+
+    def test_auto_alerts_list_with_target_status(self, client):
+        r = client.post(
+            "/skills/alerts/auto/list",
+            json={"target_status": "T1_ACHIEVED"},
+        )
+        assert r.status_code == 200
+        data = r.json()
+        assert data["status"] == "ok"
+        assert isinstance(data["data"], list)
+

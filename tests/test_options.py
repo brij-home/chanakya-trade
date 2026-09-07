@@ -119,11 +119,13 @@ class TestPCRAndMaxPain:
         max_pain = mo.get_max_pain("NIFTY")
         assert max_pain == 24000.0
 
-    def test_options_analyst_reports_unavailable_with_fno_awareness(self):
+    def test_options_analyst_reports_unavailable_with_fno_awareness(self, monkeypatch):
         """OptionsAnalyst should report UNAVAILABLE with 0 score, recognizing F&O vs Cash Equity status."""
+        import market.options as mo
         from agent.tools import build_registry
         from agent.multi_agent import OptionsAnalyst
 
+        monkeypatch.setattr(mo, "get_options_chain", lambda *args, **kwargs: [])
         reg = build_registry()
         # 1. F&O stock without active live feed (e.g. KAYNES)
         report_fno = OptionsAnalyst(reg).analyze("KAYNES")

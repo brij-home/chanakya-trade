@@ -54,7 +54,7 @@ AUTO_ALERTS_FILE = Path.home() / ".trading_platform" / "auto_alerts.json"
 class AutoAlert:
     alert_id: str
     alert_type: str  # GAMMA_BLAST | SQUEEZE_BREAKOUT | CIRCUIT_WARNING | SMC_SWEEP | CONFLUENCE_INFLECTION
-    stage: str  # "EARLY_WARNING" (coiling before move) | "IGNITED" (active move underway)
+    stage: str  # "EARLY_WARNING" | "IGNITED" | "INVALIDATED"
     symbol: str
     exchange: str
     direction: str  # "BULLISH" | "BEARISH" | "NEUTRAL"
@@ -72,9 +72,363 @@ class AutoAlert:
     confidence: int = 75  # 0 - 100
     created_at: str = ""
     read: bool = False
+    is_live: bool = True  # True if generated from real live market data; False if TEST/simulation
+    environment: str = "LIVE"  # "LIVE" | "TEST"
+    is_invalidated: bool = False
+    invalidation_reason: Optional[str] = None
+    invalidated_at: Optional[str] = None
+    achieved_milestones: list[str] = field(default_factory=list)
+    target_status: str = "PENDING"  # "PENDING" | "T1_ACHIEVED" | "T2_ACHIEVED" | "TARGET_ACHIEVED"
+    should_trail: bool = False  # Explicit recommendation: whether to trail or not
+    trailing_decision: Optional[str] = None  # "BOOK_50_TRAIL_BREAKEVEN" | "TRAIL_DYNAMIC_ATR" | "BOOK_FULL_PROFIT_NO_TRAIL" | "DO_NOT_TRAIL_HOLD_STOP"
+    trailing_stop: Optional[float] = None  # Exact rupee level recommended for trailing stop-loss
+    trailing_rationale: Optional[str] = None  # Institutional rationale explaining trailing decision
+    locked_profit_pts: Optional[float] = None
+    locked_profit_pct: Optional[float] = None
+    last_trail_alert_time: Optional[float] = None
+
+    def __post_init__(self) -> None:
+        if not self.created_at:
+            self.created_at = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        d = asdict(self)
+        d["timestamp"] = self.invalidated_at or self.created_at or datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
+        return d
+
+
+# ── Invalidation Evaluator ──────────────────────────────────────────────────
+
+
+def evaluate_alert_invalidation(
+    alert: AutoAlert,
+    current_ltp: Optional[float] = None,
+    current_vwap: Optional[float] = None,
+) -> Optional[str]:
+    """
+    Evaluates if an active AutoAlert has become invalidated.
+    Returns the specific invalidation reason string if invalidated, or None if still valid.
+    """
+    if alert.is_invalidated or alert.stage == "INVALIDATED":
+        return None
+
+    # Determine current LTP if not provided
+    if current_ltp is None or current_ltp <= 0:
+        try:
+            from market.quotes import get_ltp
+
+            lookup_sym = alert.contract_symbol or (
+                f"{alert.exchange}:{alert.symbol}" if ":" not in alert.symbol else alert.symbol
+            )
+            current_ltp = get_ltp(lookup_sym)
+        except Exception:
+            current_ltp = None
+
+    if current_ltp is None or current_ltp <= 0:
+        return None  # Cannot evaluate without live price quote
+
+    # 1. Stop-Loss Invalidation
+    if alert.stop_loss and alert.stop_loss > 0:
+        if alert.direction == "BULLISH" and current_ltp < alert.stop_loss:
+            if alert.option_type:
+                return (
+                    f"Option premium collapsed to ₹{current_ltp:.1f} "
+                    f"(breached stop-loss ₹{alert.stop_loss:.1f}). Call gamma thesis invalidated."
+                )
+            return (
+                f"Price dropped to ₹{current_ltp:,.1f} "
+                f"(breached stop-loss ₹{alert.stop_loss:,.1f}). Bullish thesis invalidated."
+            )
+        elif alert.direction == "BEARISH" and current_ltp > alert.stop_loss:
+            if alert.option_type:
+                return (
+                    f"Option premium collapsed to ₹{current_ltp:.1f} "
+                    f"(breached stop-loss ₹{alert.stop_loss:.1f}). Put gamma thesis invalidated."
+                )
+            return (
+                f"Price surged to ₹{current_ltp:,.1f} "
+                f"(breached stop-loss ₹{alert.stop_loss:,.1f}). Bearish thesis invalidated."
+            )
+
+    # 2. Detector-Specific Structural Breakdown
+    if alert.alert_type == "SQUEEZE_BREAKOUT":
+        if alert.trigger_level > 0 and current_ltp < (alert.trigger_level * 0.965):
+            retreat_pct = round(((alert.trigger_level - current_ltp) / alert.trigger_level) * 100, 1)
+            return (
+                f"Price retreated {retreat_pct}% below breakout pivot ₹{alert.trigger_level:,.1f} "
+                f"(LTP ₹{current_ltp:,.1f}). Squeeze compression lost momentum."
+            )
+        sma20 = alert.metrics.get("sma20") if alert.metrics else None
+        if sma20 and current_ltp < sma20:
+            return f"Price broke down below 20-SMA base support ₹{sma20:,.1f} (LTP ₹{current_ltp:,.1f}). Squeeze invalidated."
+
+    elif alert.alert_type == "CIRCUIT_WARNING":
+        upper_circuit = alert.trigger_level or (alert.metrics.get("upper_circuit", 0.0) if alert.metrics else 0.0)
+        if upper_circuit > 0:
+            dist_to_uc = ((upper_circuit - current_ltp) / upper_circuit) * 100.0
+            if dist_to_uc > 3.0:
+                return (
+                    f"Price backed off {dist_to_uc:.1f}% from upper circuit ceiling ₹{upper_circuit:,.1f} "
+                    f"(LTP ₹{current_ltp:,.1f}). Circuit lock threat subsided."
+                )
+
+    elif alert.alert_type == "GAMMA_BLAST":
+        if current_vwap and current_vwap > 0:
+            if alert.direction == "BULLISH" and current_ltp < (current_vwap * 0.992):
+                return f"Underlying broke below intraday VWAP ₹{current_vwap:,.1f}. Long gamma setup invalidated."
+            elif alert.direction == "BEARISH" and current_ltp > (current_vwap * 1.008):
+                return f"Underlying reclaimed above intraday VWAP ₹{current_vwap:,.1f}. Short gamma setup invalidated."
+
+    return None
+
+
+# ── Target Progression & Decisive Trailing Evaluator ────────────────────────
+
+
+@dataclass
+class TargetTrailingEvaluation:
+    new_milestone: Optional[str] = None  # "T1_ACHIEVED" | "TARGET_ACHIEVED" | "TRAILING_UPDATE" | None
+    target_status: str = "PENDING"
+    should_trail: bool = False
+    trailing_decision: str = "DO_NOT_TRAIL_HOLD_STOP"
+    recommended_stop: float = 0.0
+    trailing_rationale: str = ""
+    locked_profit_pts: float = 0.0
+    locked_profit_pct: float = 0.0
+    r_multiple: float = 0.0
+    pnl_pct: float = 0.0
+    is_superperforming: bool = False
+
+
+def evaluate_alert_targets_and_trailing(
+    alert: AutoAlert,
+    current_ltp: Optional[float] = None,
+    current_volume_ratio: Optional[float] = None,
+) -> Optional[TargetTrailingEvaluation]:
+    """
+    Evaluates an active AutoAlert against current market price to determine:
+      1. Target milestones reached (Target 1 / 2R Breakeven vs Final Target).
+      2. Clear, decisive trailing stop recommendation: WHETHER TO TRAIL OR NOT.
+      3. Exact price level to trail stop loss to and profit locked.
+    """
+    if alert.is_invalidated or alert.stage == "INVALIDATED":
+        return None
+
+    if current_ltp is None or current_ltp <= 0:
+        try:
+            from market.quotes import get_ltp
+
+            lookup_sym = alert.contract_symbol or (
+                f"{alert.exchange}:{alert.symbol}" if ":" not in alert.symbol else alert.symbol
+            )
+            current_ltp = get_ltp(lookup_sym)
+        except Exception:
+            current_ltp = None
+
+    if current_ltp is None or current_ltp <= 0:
+        return None
+
+    entry = alert.trigger_level if alert.trigger_level > 0 else alert.ltp
+    if entry <= 0:
+        entry = current_ltp
+
+    is_bullish = alert.direction.upper() != "BEARISH"
+
+    # Reference stop loss
+    if alert.stop_loss and alert.stop_loss > 0:
+        stop = alert.stop_loss
+    else:
+        stop = round(entry * 0.98 if is_bullish else entry * 1.02, 2)
+
+    initial_risk = max(0.01, abs(entry - stop))
+
+    # PnL & R-multiple
+    if is_bullish:
+        pnl_pts = current_ltp - entry
+        pnl_pct = (pnl_pts / entry) * 100 if entry > 0 else 0.0
+        r_multiple = pnl_pts / initial_risk
+    else:
+        pnl_pts = entry - current_ltp
+        pnl_pct = (pnl_pts / entry) * 100 if entry > 0 else 0.0
+        r_multiple = pnl_pts / initial_risk
+
+    # Target levels
+    target_final = alert.target_level if alert.target_level > 0 else (
+        round(entry + (initial_risk * 3.0) if is_bullish else entry - (initial_risk * 3.0), 2)
+    )
+
+    # Target 1 (T1) calculation: 1.8R milestone or midpoint towards target
+    if is_bullish:
+        t1_level = round(entry + (initial_risk * 1.8), 2)
+        if target_final > entry:
+            t1_level = min(t1_level, round(entry + (target_final - entry) * 0.5, 2))
+    else:
+        t1_level = round(entry - (initial_risk * 1.8), 2)
+        if target_final < entry:
+            t1_level = max(t1_level, round(entry - (entry - target_final) * 0.5, 2))
+
+    achieved = set(alert.achieved_milestones or [])
+
+    # Volume / Momentum check for extension
+    vol_ratio = current_volume_ratio or (
+        alert.metrics.get("vol_oi_ratio", alert.metrics.get("rvol", 1.0)) if alert.metrics else 1.0
+    )
+    is_superperforming = (vol_ratio >= 2.0) or (alert.confidence >= 88 and r_multiple >= 2.5)
+
+    # 1. Final Target Check
+    is_final_hit = (current_ltp >= target_final) if is_bullish else (current_ltp <= target_final)
+    if is_final_hit and "TARGET_ACHIEVED" not in achieved:
+        if is_superperforming:
+            # Superperforming momentum: do NOT exit all, trail runner with Chandelier ATR
+            if is_bullish:
+                rec_stop = max(t1_level, round(current_ltp - (initial_risk * 1.5), 2))
+                locked_pts = rec_stop - entry
+            else:
+                rec_stop = min(t1_level, round(current_ltp + (initial_risk * 1.5), 2))
+                locked_pts = entry - rec_stop
+
+            locked_pct = round((locked_pts / entry) * 100, 2)
+            rationale = (
+                f"Primary target ₹{target_final:,.2f} reached (+{pnl_pct:.1f}%, +{r_multiple:.1f}R) with runaway volume ({vol_ratio:.1f}x). "
+                f"DECISION: TRAIL STOP-LOSS TO ₹{rec_stop:,.2f} (Chandelier ATR Trail). "
+                f"DO NOT FULLY EXIT RUNNER — Heavy institutional flow is extending breakout. Let runners ride!"
+            )
+            return TargetTrailingEvaluation(
+                new_milestone="TARGET_ACHIEVED",
+                target_status="TARGET_ACHIEVED",
+                should_trail=True,
+                trailing_decision="TRAIL_DYNAMIC_ATR",
+                recommended_stop=rec_stop,
+                trailing_rationale=rationale,
+                locked_profit_pts=round(locked_pts, 2),
+                locked_profit_pct=locked_pct,
+                r_multiple=round(r_multiple, 2),
+                pnl_pct=round(pnl_pct, 2),
+                is_superperforming=True,
+            )
+        else:
+            # Normal target hit: resistance reached, book full profit! Do not trail.
+            rec_stop = current_ltp
+            locked_pts = pnl_pts
+            locked_pct = round(pnl_pct, 2)
+            rationale = (
+                f"Final target ₹{target_final:,.2f} reached (+{pnl_pct:.1f}%, +{r_multiple:.1f}R). "
+                f"DECISION: FULL PROFIT BOOKING RECOMMENDED. Close all open positions at market. "
+                f"DO NOT TRAIL FURTHER — high probability of mean-reversion exhaustion at major resistance."
+            )
+            return TargetTrailingEvaluation(
+                new_milestone="TARGET_ACHIEVED",
+                target_status="TARGET_ACHIEVED",
+                should_trail=False,
+                trailing_decision="BOOK_FULL_PROFIT_NO_TRAIL",
+                recommended_stop=rec_stop,
+                trailing_rationale=rationale,
+                locked_profit_pts=round(locked_pts, 2),
+                locked_profit_pct=locked_pct,
+                r_multiple=round(r_multiple, 2),
+                pnl_pct=round(pnl_pct, 2),
+                is_superperforming=False,
+            )
+
+    # 2. Target 1 (T1) Check
+    is_t1_hit = (current_ltp >= t1_level) if is_bullish else (current_ltp <= t1_level)
+    if is_t1_hit and "T1_ACHIEVED" not in achieved and "TARGET_ACHIEVED" not in achieved:
+        # T1 reached -> Book 50% & Trail SL to Breakeven (+0.2% buffer)
+        be_stop = round(entry * 1.002 if is_bullish else entry * 0.998, 2)
+        rec_stop = be_stop
+        locked_pts = abs(rec_stop - entry)
+        locked_pct = 0.2
+        rationale = (
+            f"Target 1 reached at ₹{current_ltp:,.2f} (+{pnl_pct:.1f}%, +{r_multiple:.1f}R). "
+            f"DECISION: BOOK 50% PARTIAL PROFIT NOW & TRAIL STOP-LOSS TO BREAKEVEN (₹{rec_stop:,.2f}). "
+            f"Trade is now 100% risk-free. Hold remaining 50% runner for Target 2 (₹{target_final:,.2f})."
+        )
+        return TargetTrailingEvaluation(
+            new_milestone="T1_ACHIEVED",
+            target_status="T1_ACHIEVED",
+            should_trail=True,
+            trailing_decision="BOOK_50_TRAIL_BREAKEVEN",
+            recommended_stop=rec_stop,
+            trailing_rationale=rationale,
+            locked_profit_pts=round(locked_pts, 2),
+            locked_profit_pct=locked_pct,
+            r_multiple=round(r_multiple, 2),
+            pnl_pct=round(pnl_pct, 2),
+            is_superperforming=is_superperforming,
+        )
+
+    # 3. Trailing Stop Ratchet Higher (Dynamic Trail)
+    if alert.trailing_stop and alert.trailing_stop > 0:
+        if is_bullish:
+            higher_trail = round(max(alert.trailing_stop, current_ltp - (initial_risk * 1.8)), 2)
+            # Must ratchet higher by at least 0.75% and at least 2 pts
+            if higher_trail >= round(alert.trailing_stop * 1.0075, 2) and (higher_trail - alert.trailing_stop) >= 2.0:
+                locked_pts = higher_trail - entry
+                locked_pct = round((locked_pts / entry) * 100, 2)
+                rationale = (
+                    f"Price expanded to ₹{current_ltp:,.2f}. "
+                    f"DECISION: RATCHET TRAILING STOP HIGHER from ₹{alert.trailing_stop:,.2f} to ₹{higher_trail:,.2f}. "
+                    f"Guaranteed locked profit increased to +₹{locked_pts:,.2f}/sh (+{locked_pct:.1f}%)."
+                )
+                return TargetTrailingEvaluation(
+                    new_milestone="TRAILING_UPDATE",
+                    target_status=alert.target_status or "T1_ACHIEVED",
+                    should_trail=True,
+                    trailing_decision="TRAIL_DYNAMIC_ATR",
+                    recommended_stop=higher_trail,
+                    trailing_rationale=rationale,
+                    locked_profit_pts=round(locked_pts, 2),
+                    locked_profit_pct=locked_pct,
+                    r_multiple=round(r_multiple, 2),
+                    pnl_pct=round(pnl_pct, 2),
+                    is_superperforming=is_superperforming,
+                )
+        else:
+            lower_trail = round(min(alert.trailing_stop, current_ltp + (initial_risk * 1.8)), 2)
+            if lower_trail <= round(alert.trailing_stop * 0.9925, 2) and (alert.trailing_stop - lower_trail) >= 2.0:
+                locked_pts = entry - lower_trail
+                locked_pct = round((locked_pts / entry) * 100, 2)
+                rationale = (
+                    f"Price dropped to ₹{current_ltp:,.2f}. "
+                    f"DECISION: RATCHET TRAILING STOP LOWER from ₹{alert.trailing_stop:,.2f} to ₹{lower_trail:,.2f}. "
+                    f"Guaranteed locked profit increased to +₹{locked_pts:,.2f}/sh (+{locked_pct:.1f}%)."
+                )
+                return TargetTrailingEvaluation(
+                    new_milestone="TRAILING_UPDATE",
+                    target_status=alert.target_status or "T1_ACHIEVED",
+                    should_trail=True,
+                    trailing_decision="TRAIL_DYNAMIC_ATR",
+                    recommended_stop=lower_trail,
+                    trailing_rationale=rationale,
+                    locked_profit_pts=round(locked_pts, 2),
+                    locked_profit_pct=locked_pct,
+                    r_multiple=round(r_multiple, 2),
+                    pnl_pct=round(pnl_pct, 2),
+                    is_superperforming=is_superperforming,
+                )
+
+    # 4. Early Sub-Target Phase (< 1.5R)
+    if r_multiple < 1.5:
+        rationale = (
+            f"Payoff is +{r_multiple:.1f}R (+{pnl_pct:.1f}%). "
+            f"DECISION: DO NOT TRAIL YET. Maintain initial Stop Loss at ₹{stop:,.2f}. "
+            f"Premature trailing in early stage causes whipsaws and unnecessary shakeouts."
+        )
+        return TargetTrailingEvaluation(
+            new_milestone=None,
+            target_status=alert.target_status or "PENDING",
+            should_trail=False,
+            trailing_decision="DO_NOT_TRAIL_HOLD_STOP",
+            recommended_stop=stop,
+            trailing_rationale=rationale,
+            locked_profit_pts=0.0,
+            locked_profit_pct=0.0,
+            r_multiple=round(r_multiple, 2),
+            pnl_pct=round(pnl_pct, 2),
+            is_superperforming=False,
+        )
+
+    return None
 
 
 # ── Detector 1: Gamma Blast (Early Warning & Ignited) ───────────────────────
@@ -528,16 +882,42 @@ class AutoAlertEngine:
         return True
 
     def _dispatch(self, alert: AutoAlert) -> None:
-        """Broadcasts alert across all communication channels."""
+        """Broadcasts alert across all communication channels with clear REAL/LIVE vs TEST tagging."""
+        is_test = (alert.environment == "TEST") or (not alert.is_live)
+        env_tag = "[TEST]" if is_test else "[REAL/LIVE]"
+        is_target = alert.stage in ("T1_ACHIEVED", "TARGET_ACHIEVED")
+        is_trail = alert.stage == "TRAILING_UPDATE"
+
         alert_dict = alert.to_dict()
+        alert_dict["env_tag"] = env_tag
+        alert_dict["is_live"] = not is_test
+        alert_dict["environment"] = "TEST" if is_test else "LIVE"
+        alert_dict["is_target"] = is_target
+        alert_dict["is_trail"] = is_trail
+
+        now_ts_str = alert.invalidated_at or alert.created_at or datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
+        alert_dict["timestamp"] = now_ts_str
 
         # 1. Server-Sent Events (SSE) stream -> pushes to React UI Toast & Alerts View
         try:
             from web.sse import event_bus
+
+            sys_type = "market_alert"
+            if alert.is_invalidated:
+                sys_type = "invalidation_alert"
+            elif is_target:
+                sys_type = "target_achieved"
+            elif is_trail:
+                sys_type = "trailing_update"
+
             event_bus.publish_sync("alert", alert_dict)
             event_bus.publish_sync("system", {
-                "type": "market_alert",
+                "type": sys_type,
                 "alert": alert_dict,
+                "is_invalidated": alert.is_invalidated,
+                "is_target": is_target,
+                "is_trail": is_trail,
+                "environment": alert.environment,
             })
         except Exception as e:
             logger.debug(f"[AutoAlertEngine] SSE publish error: {e}")
@@ -545,9 +925,24 @@ class AutoAlertEngine:
         # 2. Desktop notification
         try:
             from engine.alerts import _desktop_notify
+
+            ts_short = now_ts_str.split(" ")[-2] if " " in now_ts_str else now_ts_str
+            if alert.is_invalidated:
+                desktop_title = f"⚠️ {env_tag} [{ts_short}] VIEW INVALIDATED: {alert.symbol}"
+                desktop_msg = alert.invalidation_reason or alert.summary
+            elif is_target:
+                desktop_title = f"🎯 {env_tag} [{ts_short}] TARGET HIT: {alert.symbol}"
+                desktop_msg = f"{alert.trailing_decision or 'TARGET ACHIEVED'}: {alert.trailing_rationale or alert.summary}"
+            elif is_trail:
+                desktop_title = f"📈 {env_tag} [{ts_short}] TRAIL STOP: {alert.symbol} → ₹{alert.trailing_stop or 0:,.2f}"
+                desktop_msg = alert.trailing_rationale or alert.summary
+            else:
+                desktop_title = f"{env_tag} [{ts_short}] {alert.headline}"
+                desktop_msg = alert.summary
+
             _desktop_notify(
-                title=f"{alert.headline}",
-                message=alert.summary,
+                title=desktop_title,
+                message=desktop_msg,
             )
         except Exception:
             pass
@@ -556,23 +951,408 @@ class AutoAlertEngine:
         try:
             from engine.alerts import _telegram_notify
 
-            plan_str = ""
-            if alert.actionable_plan:
-                action = alert.actionable_plan.get("action", "")
-                entry = alert.actionable_plan.get("recommended_entry") or alert.actionable_plan.get("entry_range", "")
-                target = alert.actionable_plan.get("target", f"₹{alert.target_level}")
-                sl = alert.actionable_plan.get("stop_loss", f"₹{alert.stop_loss}")
-                plan_str = f"\n\n⚡ <b>Trade Plan:</b> {action} @ {entry}\n🎯 <b>Target:</b> {target} | 🛑 <b>SL:</b> {sl}"
+            if alert.is_invalidated:
+                tg_msg = (
+                    f"⚠️ <b>{env_tag} VIEW INVALIDATED</b>\n\n"
+                    f"🚨 <b>{alert.symbol} ({alert.alert_type.replace('_', ' ')})</b> is <b>NO LONGER VALID</b>!\n\n"
+                    f"🛑 <b>Reason:</b> {alert.invalidation_reason or alert.summary}\n"
+                    f"🕒 <b>Invalidated At:</b> {alert.invalidated_at or alert.created_at}\n\n"
+                    f"<i>Action: Manage risk, cancel pending orders, or close active positions.</i>"
+                )
+            elif is_target:
+                tg_header = "🎯 <b>[TEST TARGET ACHIEVED]</b>" if is_test else "🎯 <b>[REAL / LIVE TARGET ACHIEVED]</b>"
+                trail_str = (
+                    f"🛑 <b>Recommended Trail SL:</b> ₹{alert.trailing_stop:,.2f} (+{alert.locked_profit_pct or 0:.1f}% locked)\n"
+                    if alert.trailing_stop and alert.should_trail else "🛑 <b>Trailing:</b> DO NOT TRAIL (Book Full Profit)\n"
+                )
+                tg_msg = (
+                    f"{tg_header}\n\n"
+                    f"🏆 <b>{alert.symbol} ({alert.alert_type.replace('_', ' ')})</b> reached target milestone!\n\n"
+                    f"💰 <b>LTP:</b> ₹{alert.ltp:,.2f} | <b>Target:</b> ₹{alert.target_level:,.2f}\n"
+                    f"{trail_str}"
+                    f"⚡ <b>DECISION:</b> <code>{alert.trailing_decision or 'PROFIT_BOOKING'}</code>\n\n"
+                    f"💡 <b>Actionable Guidance:</b> {alert.trailing_rationale or alert.summary}\n\n"
+                    f"🕒 <b>Timestamp:</b> {now_ts_str}"
+                )
+            elif is_trail:
+                tg_header = "📈 <b>[TEST TRAILING STOP UPDATE]</b>" if is_test else "📈 <b>[REAL / LIVE TRAILING STOP UPDATE]</b>"
+                tg_msg = (
+                    f"{tg_header}\n\n"
+                    f"🚀 <b>{alert.symbol} Trailing Stop Ratcheted Higher!</b>\n\n"
+                    f"💰 <b>LTP:</b> ₹{alert.ltp:,.2f}\n"
+                    f"🛡️ <b>New Stop-Loss:</b> ₹{alert.trailing_stop:,.2f}\n"
+                    f"🔒 <b>Guaranteed Profit:</b> +₹{alert.locked_profit_pts or 0:,.2f}/sh (+{alert.locked_profit_pct or 0:.1f}% locked)\n"
+                    f"⚡ <b>DECISION:</b> <code>{alert.trailing_decision or 'TRAIL_STOP'}</code>\n\n"
+                    f"💡 <i>{alert.trailing_rationale or alert.summary}</i>\n\n"
+                    f"🕒 <b>Timestamp:</b> {now_ts_str}"
+                )
+            else:
+                plan_str = ""
+                if alert.actionable_plan:
+                    action = alert.actionable_plan.get("action", "")
+                    entry = alert.actionable_plan.get("recommended_entry") or alert.actionable_plan.get("entry_range", "")
+                    target = alert.actionable_plan.get("target", f"₹{alert.target_level}")
+                    sl = alert.actionable_plan.get("stop_loss", f"₹{alert.stop_loss}")
+                    plan_str = f"\n\n⚡ <b>Trade Plan:</b> {action} @ {entry}\n🎯 <b>Target:</b> {target} | 🛑 <b>SL:</b> {sl}"
 
-            tg_msg = (
-                f"🚨 <b>{alert.headline}</b>\n\n"
-                f"{alert.summary}"
-                f"{plan_str}\n\n"
-                f"📊 <b>Confidence:</b> {alert.confidence}% | 🕒 {alert.created_at or 'Live'}"
-            )
+                tg_header = "🧪 <b>[TEST ALERT - SIMULATED]</b>" if is_test else "🟢 <b>[REAL / LIVE ALERT]</b>"
+                tg_msg = (
+                    f"{tg_header}\n"
+                    f"🚨 <b>{alert.headline}</b>\n\n"
+                    f"{alert.summary}"
+                    f"{plan_str}\n\n"
+                    f"📊 <b>Confidence:</b> {alert.confidence}% | 🕒 <b>Timestamp:</b> {now_ts_str}"
+                )
             _telegram_notify(tg_msg)
         except Exception:
             pass
+
+        # 4. Terminal Notification (Rich Panel)
+        try:
+            from rich.console import Console
+            from rich.panel import Panel
+
+            _console = Console()
+            if alert.is_invalidated:
+                panel_title = f"[bold red]⚠️ {env_tag} ALERT / VIEW INVALIDATED[/bold red]"
+                border_color = "red"
+            elif is_target:
+                panel_title = f"[bold cyan]🎯 {env_tag} TARGET ACHIEVED[/bold cyan]"
+                border_color = "cyan"
+            elif is_trail:
+                panel_title = f"[bold blue]📈 {env_tag} TRAILING STOP UPDATE[/bold blue]"
+                border_color = "blue"
+            else:
+                panel_title = f"[bold {'magenta' if is_test else 'green'}]🔔 {env_tag} ALERT TRIGGERED[/bold {'magenta' if is_test else 'green'}]"
+                border_color = "magenta" if is_test else "green"
+
+            _console.print()
+            _console.print(
+                Panel(
+                    f"[bold white]{alert.headline}[/bold white]\n"
+                    f"{alert.summary}\n\n"
+                    f"[bold yellow]DECISION:[/bold yellow] {alert.trailing_decision or 'MONITOR_SETUP'} | "
+                    f"[bold yellow]TRAIL SL:[/bold yellow] ₹{alert.trailing_stop or alert.stop_loss:,.2f}\n"
+                    f"[dim]🕒 Timestamp: {now_ts_str}[/dim]",
+                    title=panel_title,
+                    border_style=border_color,
+                )
+            )
+            print("\a", end="", flush=True)  # Audio chime
+        except Exception:
+            pass
+
+    # ── Invalidation Monitoring & Alerting ──────────────────────
+
+    def check_and_alert_invalidations(self) -> list[AutoAlert]:
+        """
+        Scans all active (non-invalidated) alerts to check if their trade thesis
+        or levels have been invalidated by recent market price action.
+        Dispatches high-priority Invalidation Alerts across all channels.
+        """
+        now_iso = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
+        invalidated_alerts: list[AutoAlert] = []
+
+        with self._lock:
+            active_alerts = [a for a in self._alerts if not a.is_invalidated and a.stage != "INVALIDATED"]
+
+        for alert in active_alerts:
+            reason = evaluate_alert_invalidation(alert)
+            if reason:
+                with self._lock:
+                    alert.is_invalidated = True
+                    alert.invalidation_reason = reason
+                    alert.invalidated_at = now_iso
+                    alert.stage = "INVALIDATED"
+                    is_test = (alert.environment == "TEST") or (not alert.is_live)
+                    tag = "[TEST]" if is_test else "[REAL/LIVE]"
+                    alert.headline = f"⚠️ {tag} VIEW INVALIDATED: {alert.symbol} {alert.alert_type.replace('_', ' ')}"
+                    alert.summary = reason
+                    self._save()
+
+                # Dispatch the invalidation notification immediately!
+                self._dispatch(alert)
+                invalidated_alerts.append(alert)
+                logger.warning(f"[AutoAlertEngine] Alert {alert.alert_id} INVALIDATED: {reason}")
+
+        return invalidated_alerts
+
+    def invalidate_alert_by_id(self, alert_id: str, reason: str = "Manually invalidated by user") -> Optional[AutoAlert]:
+        """Manually invalidates an alert and broadcasts the invalidation warning."""
+        now_iso = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
+        target_alert: Optional[AutoAlert] = None
+
+        with self._lock:
+            for alert in self._alerts:
+                if alert.alert_id == alert_id and not alert.is_invalidated:
+                    alert.is_invalidated = True
+                    alert.invalidation_reason = reason
+                    alert.invalidated_at = now_iso
+                    alert.stage = "INVALIDATED"
+                    is_test = (alert.environment == "TEST") or (not alert.is_live)
+                    tag = "[TEST]" if is_test else "[REAL/LIVE]"
+                    alert.headline = f"⚠️ {tag} VIEW INVALIDATED: {alert.symbol} {alert.alert_type.replace('_', ' ')}"
+                    alert.summary = reason
+                    target_alert = alert
+                    break
+            if target_alert:
+                self._save()
+
+        if target_alert:
+            self._dispatch(target_alert)
+        return target_alert
+
+    # ── Target & Trailing Monitoring & Alerting ─────────────────
+
+    def check_and_alert_targets_and_trailing(self) -> list[AutoAlert]:
+        """
+        Scans all active (non-invalidated) alerts against live quotes to evaluate:
+          1. Target milestones (Target 1 / Breakeven vs Final Target).
+          2. Trailing stop ratchets.
+        Dispatches high-priority target & trailing alerts with strict deduplication.
+        """
+        updated_alerts: list[AutoAlert] = []
+        now_ts = time.time()
+
+        with self._lock:
+            active_alerts = [a for a in self._alerts if not a.is_invalidated and a.stage != "INVALIDATED"]
+
+        for alert in active_alerts:
+            try:
+                eval_res = evaluate_alert_targets_and_trailing(alert)
+                if not eval_res or not eval_res.new_milestone:
+                    continue
+
+                # Cooldown check for trailing updates (suppress repeat within 5 minutes)
+                if eval_res.new_milestone == "TRAILING_UPDATE":
+                    last_alert_time = alert.last_trail_alert_time or 0.0
+                    if (now_ts - last_alert_time) < 300.0:
+                        continue  # Cooldown active
+
+                with self._lock:
+                    alert.should_trail = eval_res.should_trail
+                    alert.trailing_decision = eval_res.trailing_decision
+                    alert.trailing_stop = eval_res.recommended_stop
+                    alert.trailing_rationale = eval_res.trailing_rationale
+                    alert.locked_profit_pts = eval_res.locked_profit_pts
+                    alert.locked_profit_pct = eval_res.locked_profit_pct
+                    alert.target_status = eval_res.target_status
+
+                    env_tag = "[TEST]" if (alert.environment == "TEST" or not alert.is_live) else "[REAL/LIVE]"
+
+                    if eval_res.new_milestone in ("T1_ACHIEVED", "TARGET_ACHIEVED"):
+                        if eval_res.new_milestone not in alert.achieved_milestones:
+                            alert.achieved_milestones.append(eval_res.new_milestone)
+                        alert.stage = eval_res.new_milestone
+
+                        if eval_res.new_milestone == "TARGET_ACHIEVED":
+                            alert.headline = f"🎯 {env_tag} FINAL TARGET ACHIEVED: {alert.symbol} (₹{eval_res.recommended_stop:,.2f})"
+                        else:
+                            alert.headline = f"🎯 {env_tag} TARGET 1 ACHIEVED: {alert.symbol} (₹{eval_res.recommended_stop:,.2f})"
+                        alert.summary = eval_res.trailing_rationale
+
+                    elif eval_res.new_milestone == "TRAILING_UPDATE":
+                        alert.last_trail_alert_time = now_ts
+                        alert.stage = "TRAILING_UPDATE"
+                        alert.headline = f"📈 {env_tag} TRAILING STOP UPDATED: {alert.symbol} → ₹{eval_res.recommended_stop:,.2f}"
+                        alert.summary = eval_res.trailing_rationale
+
+                    self._save()
+
+                self._dispatch(alert)
+                updated_alerts.append(alert)
+                logger.info(f"[AutoAlertEngine] Alert {alert.alert_id} milestone {eval_res.new_milestone}: {eval_res.trailing_decision}")
+
+            except Exception as e:
+                logger.debug(f"[AutoAlertEngine] Target eval error for {alert.symbol}: {e}")
+
+        return updated_alerts
+
+    def create_test_target_alert(
+        self,
+        milestone: str = "T1",  # "T1" | "FINAL" | "TRAIL"
+        should_trail: bool = True,
+        symbol: str = "RELIANCE",
+    ) -> AutoAlert:
+        """
+        Generates a simulated test Target Achieved or Trailing Stop alert clearly tagged as [TEST].
+        Verifies notifications, toasts, and UI cards for target progression and trailing guidance.
+        """
+        now_iso = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
+        alert_id = f"test-target-{uuid.uuid4().hex[:6]}"
+
+        if milestone.upper() == "T1":
+            stage = "T1_ACHIEVED"
+            headline = f"🎯 [TEST] TARGET 1 ACHIEVED: {symbol} (₹2,920.00, +2.0R)"
+            decision = "BOOK_50_TRAIL_BREAKEVEN"
+            trail_sl = 2865.0
+            locked_pts = 5.0
+            locked_pct = 0.2
+            rationale = (
+                f"Target 1 reached at ₹2,920.00 (+2.1%, +2.0R). "
+                f"DECISION: BOOK 50% PARTIAL PROFIT NOW & TRAIL STOP-LOSS TO BREAKEVEN (₹{trail_sl:,.2f}). "
+                f"Trade is now 100% risk-free. Hold remaining 50% runner for Target 2."
+            )
+            achieved = ["T1_ACHIEVED"]
+        elif milestone.upper() == "TRAIL":
+            stage = "TRAILING_UPDATE"
+            trail_sl = 2950.0
+            headline = f"📈 [TEST] TRAILING STOP UPDATED: {symbol} → ₹{trail_sl:,.2f}"
+            decision = "TRAIL_DYNAMIC_ATR"
+            locked_pts = 90.0
+            locked_pct = 3.1
+            rationale = (
+                f"Price expanded to ₹2,990.00 (+4.5%, +3.8R). "
+                f"DECISION: RATCHET TRAILING STOP HIGHER to ₹{trail_sl:,.2f} (Chandelier ATR Trail). "
+                f"Guaranteed locked profit increased to +₹{locked_pts:,.2f}/sh (+{locked_pct:.1f}%)."
+            )
+            achieved = ["T1_ACHIEVED"]
+        else:  # FINAL
+            stage = "TARGET_ACHIEVED"
+            headline = f"🏁 [TEST] FINAL TARGET ACHIEVED: {symbol} (₹3,050.00, +6.6%)"
+            if should_trail:
+                decision = "TRAIL_DYNAMIC_ATR"
+                trail_sl = 2980.0
+                locked_pts = 120.0
+                locked_pct = 4.2
+                rationale = (
+                    f"Primary target reached with runaway volume (+2.4x). "
+                    f"DECISION: TRAIL STOP-LOSS TO ₹{trail_sl:,.2f} (Chandelier ATR Trail). "
+                    f"DO NOT FULLY EXIT RUNNER — Let runners ride!"
+                )
+            else:
+                decision = "BOOK_FULL_PROFIT_NO_TRAIL"
+                trail_sl = 3050.0
+                locked_pts = 190.0
+                locked_pct = 6.6
+                rationale = (
+                    f"Final target reached at major resistance. "
+                    f"DECISION: FULL PROFIT BOOKING RECOMMENDED. Close all positions at market. "
+                    f"DO NOT TRAIL FURTHER — high probability of mean-reversion exhaustion."
+                )
+            achieved = ["T1_ACHIEVED", "TARGET_ACHIEVED"]
+
+        alert = AutoAlert(
+            alert_id=alert_id,
+            alert_type="SQUEEZE_BREAKOUT",
+            stage=stage,
+            symbol=symbol,
+            exchange="NSE",
+            direction="BULLISH",
+            headline=headline,
+            summary=rationale,
+            ltp=2920.0 if milestone.upper() == "T1" else (2990.0 if milestone.upper() == "TRAIL" else 3050.0),
+            trigger_level=2860.0,
+            target_level=3050.0,
+            stop_loss=2820.0,
+            confidence=92,
+            created_at=now_iso,
+            is_live=False,
+            environment="TEST",
+            is_invalidated=False,
+            achieved_milestones=achieved,
+            target_status=stage if stage in ("T1_ACHIEVED", "TARGET_ACHIEVED") else "T1_ACHIEVED",
+            should_trail=should_trail if milestone.upper() != "T1" else True,
+            trailing_decision=decision,
+            trailing_stop=trail_sl,
+            trailing_rationale=rationale,
+            locked_profit_pts=locked_pts,
+            locked_profit_pct=locked_pct,
+            metrics={"is_test": True, "rvol": 2.4, "vol_oi_ratio": 2.2},
+            actionable_plan={"action": decision, "recommended_stop": trail_sl},
+        )
+
+        with self._lock:
+            self._alerts.insert(0, alert)
+            if len(self._alerts) > self._max_buffer:
+                self._alerts.pop()
+            self._save()
+
+        self._dispatch(alert)
+        return alert
+
+    # ── Test Alert Generator ────────────────────────────────────
+
+    def create_test_alert(
+        self,
+        alert_type: str = "GAMMA_BLAST",
+        stage: str = "EARLY_WARNING",
+        symbol: str = "RELIANCE",
+        is_invalidation: bool = False,
+    ) -> AutoAlert:
+        """
+        Generates an explicit TEST alert to verify notifications, Toasts, and SSE streams.
+        Always clearly tagged as [TEST] so it can never be mistaken for real live market action.
+        """
+        now_iso = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
+        alert_id = f"test-alert-{uuid.uuid4().hex[:6]}"
+
+        if is_invalidation:
+            alert = AutoAlert(
+                alert_id=alert_id,
+                alert_type=alert_type,
+                stage="INVALIDATED",
+                symbol=symbol,
+                exchange="NSE",
+                direction="BULLISH",
+                headline=f"⚠️ [TEST] VIEW INVALIDATED: {symbol} {alert_type.replace('_', ' ')}",
+                summary=(
+                    f"Stop-loss level breached at ₹2,840.00 (LTP ₹2,835.00). "
+                    f"Squeeze breakout thesis is no longer valid. Close active positions."
+                ),
+                ltp=2835.0,
+                trigger_level=2880.0,
+                target_level=3020.0,
+                stop_loss=2840.0,
+                confidence=90,
+                created_at=now_iso,
+                is_live=False,
+                environment="TEST",
+                is_invalidated=True,
+                invalidation_reason=(
+                    f"Stop-loss level breached at ₹2,840.00 (LTP ₹2,835.00). "
+                    f"Trade setup invalidated."
+                ),
+                invalidated_at=now_iso,
+                metrics={"is_test": True, "test_mode": "invalidation_simulation"},
+            )
+        else:
+            alert = AutoAlert(
+                alert_id=alert_id,
+                alert_type=alert_type,
+                stage=stage,
+                symbol=symbol,
+                exchange="NSE",
+                direction="BULLISH",
+                headline=f"🧪 [TEST] ⚡ {alert_type.replace('_', ' ')} {stage.replace('_', ' ')}: {symbol}",
+                summary=(
+                    f"Call writers shedding 14.5% OI with 2.4x turnover holding intraday VWAP. "
+                    f"Coiling for momentum expansion."
+                ),
+                ltp=2860.0,
+                trigger_level=2880.0,
+                target_level=3050.0,
+                stop_loss=2820.0,
+                confidence=88,
+                created_at=now_iso,
+                is_live=False,
+                environment="TEST",
+                is_invalidated=False,
+                metrics={"is_test": True, "vol_oi_ratio": 2.4, "oi_change_pct": -14.5, "rvol": 1.8},
+                actionable_plan={
+                    "action": "TEST_ONLY",
+                    "note": "SIMULATED TEST ALERT - DO NOT PLACE REAL ORDER",
+                },
+            )
+
+        with self._lock:
+            self._alerts.insert(0, alert)
+            if len(self._alerts) > self._max_buffer:
+                self._alerts.pop()
+            self._save()
+
+        self._dispatch(alert)
+        return alert
 
     # ── Scanning Loops ──────────────────────────────────────────
 
@@ -647,6 +1427,11 @@ class AutoAlertEngine:
     def scan_all_now(self) -> list[AutoAlert]:
         """Executes full diagnostic scan across all detectors and returns new alerts."""
         results: list[AutoAlert] = []
+        # 1. Check invalidations on existing alerts first
+        self.check_and_alert_invalidations()
+        # 2. Check target milestones & trailing stop updates on existing alerts
+        self.check_and_alert_targets_and_trailing()
+
         results.extend(self.scan_gamma_blasts())
         results.extend(self.scan_squeeze_breakouts())
         results.extend(self.scan_circuits())
@@ -684,7 +1469,15 @@ class AutoAlertEngine:
     def _run_loop(self, interval: int) -> None:
         while self._is_running and not self._stop_event.is_set():
             try:
+                # 1. Proactively check for invalidated trade views/alerts
+                self.check_and_alert_invalidations()
+
+                # 2. Proactively check for target achievements & trailing stop ratchets
+                self.check_and_alert_targets_and_trailing()
+
+                # 3. Check for fresh market signals during market hours
                 from engine.alerts import _is_market_hours
+
                 if _is_market_hours():
                     self.scan_all_now()
             except Exception as e:
@@ -700,6 +1493,9 @@ class AutoAlertEngine:
         limit: int = 50,
         alert_type: Optional[str] = None,
         stage: Optional[str] = None,
+        environment: Optional[str] = None,
+        is_invalidated: Optional[bool] = None,
+        target_status: Optional[str] = None,
     ) -> list[AutoAlert]:
         """Returns buffered alerts with optional filtering."""
         with self._lock:
@@ -710,6 +1506,12 @@ class AutoAlertEngine:
             res = [a for a in res if a.alert_type.upper() == alert_type.upper()]
         if stage:
             res = [a for a in res if a.stage.upper() == stage.upper()]
+        if environment:
+            res = [a for a in res if a.environment.upper() == environment.upper()]
+        if is_invalidated is not None:
+            res = [a for a in res if a.is_invalidated == is_invalidated]
+        if target_status:
+            res = [a for a in res if a.target_status.upper() == target_status.upper()]
 
         return res[:limit]
 
@@ -734,7 +1536,46 @@ class AutoAlertEngine:
         try:
             if AUTO_ALERTS_FILE.exists():
                 data = json.loads(AUTO_ALERTS_FILE.read_text())
-                self._alerts = [AutoAlert(**d) for d in data if isinstance(d, dict)]
+                alerts = []
+                for d in data:
+                    if isinstance(d, dict):
+                        alerts.append(AutoAlert(
+                            alert_id=d.get("alert_id", ""),
+                            alert_type=d.get("alert_type", "GENERAL"),
+                            stage=d.get("stage", "EARLY_WARNING"),
+                            symbol=d.get("symbol", ""),
+                            exchange=d.get("exchange", "NSE"),
+                            direction=d.get("direction", "NEUTRAL"),
+                            headline=d.get("headline", ""),
+                            summary=d.get("summary", ""),
+                            ltp=float(d.get("ltp", 0.0)),
+                            trigger_level=float(d.get("trigger_level", 0.0)),
+                            target_level=float(d.get("target_level", 0.0)),
+                            stop_loss=float(d.get("stop_loss", 0.0)),
+                            strike=d.get("strike"),
+                            option_type=d.get("option_type"),
+                            contract_symbol=d.get("contract_symbol"),
+                            metrics=d.get("metrics", {}),
+                            actionable_plan=d.get("actionable_plan", {}),
+                            confidence=int(d.get("confidence", 75)),
+                            created_at=d.get("created_at", ""),
+                            read=d.get("read", False),
+                            is_live=d.get("is_live", True),
+                            environment=d.get("environment", "LIVE"),
+                            is_invalidated=d.get("is_invalidated", False),
+                            invalidation_reason=d.get("invalidation_reason"),
+                            invalidated_at=d.get("invalidated_at"),
+                            achieved_milestones=d.get("achieved_milestones", []),
+                            target_status=d.get("target_status", "PENDING"),
+                            should_trail=d.get("should_trail", False),
+                            trailing_decision=d.get("trailing_decision"),
+                            trailing_stop=d.get("trailing_stop"),
+                            trailing_rationale=d.get("trailing_rationale"),
+                            locked_profit_pts=d.get("locked_profit_pts"),
+                            locked_profit_pct=d.get("locked_profit_pct"),
+                            last_trail_alert_time=d.get("last_trail_alert_time"),
+                        ))
+                self._alerts = alerts
         except Exception as e:
             logger.debug(f"[AutoAlertEngine] _load error: {e}")
             self._alerts = []
@@ -742,3 +1583,4 @@ class AutoAlertEngine:
 
 # Module-level singleton instance
 auto_alert_engine = AutoAlertEngine()
+

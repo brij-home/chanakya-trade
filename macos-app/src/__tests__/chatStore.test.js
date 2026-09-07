@@ -240,4 +240,17 @@ describe('chatStore', () => {
     // Falls through to `broker ?? broker` which returns the raw key
     expect(brokerStatus.broker).toBe('newbroker')
   })
+
+  // ── selectedSymbol ────────────────────────────────────────────────────────
+  it('selectedSymbol defaults to NIFTY and setSelectedSymbol normalizes and updates', () => {
+    expect(useChatStore.getState().selectedSymbol).toBe('NIFTY')
+    act(() => {
+      useChatStore.getState().setSelectedSymbol('NSE:RELIANCE')
+    })
+    expect(useChatStore.getState().selectedSymbol).toBe('RELIANCE')
+    act(() => {
+      useChatStore.getState().setSelectedSymbol('  banknifty  ')
+    })
+    expect(useChatStore.getState().selectedSymbol).toBe('BANKNIFTY')
+  })
 })

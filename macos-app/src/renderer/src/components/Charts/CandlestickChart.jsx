@@ -9,6 +9,7 @@ function CandlestickChartComponent({
   timeframe = '15m',
   onCloseFullscreen = null,
   isModalView = false,
+  livePrice = null,
 }) {
   const chartContainerRef = useRef(null)
   const stochContainerRef = useRef(null)
@@ -46,7 +47,7 @@ function CandlestickChartComponent({
     volume: true,
     orderBlocks: true,     // SMC Unmitigated Demand & Supply Order Blocks
     volumeProfile: true,   // POC, VAH, VAL levels
-    stochRSI: true,        // Stochastic RSI sub-pane (Active by default)
+    stochRSI: false,       // Stochastic RSI sub-pane (Disabled by default as requested)
     divergences: true,     // RSI Bull/Bear Divergence markers (Active by default)
   })
 
@@ -166,6 +167,26 @@ function CandlestickChartComponent({
       unmounted = true
     }
   }, [symbol, exchange, interval])
+
+  // Real-time live tick synchronization: Update latest candle when livePrice prop arrives
+  useEffect(() => {
+    if (!livePrice || !candleSeriesRef.current || !lastCandleRef.current) return
+    const priceNum = Number(livePrice)
+    if (isNaN(priceNum) || priceNum <= 0) return
+
+    const last = lastCandleRef.current
+    const updatedCandle = {
+      ...last,
+      close: priceNum,
+      high: Math.max(Number(last.high ?? priceNum), priceNum),
+      low: Math.min(Number(last.low ?? priceNum), priceNum),
+    }
+    try {
+      candleSeriesRef.current.update(updatedCandle)
+      lastCandleRef.current = updatedCandle
+      updateLegendDOM(updatedCandle)
+    } catch (e) {}
+  }, [livePrice])
 
   // 2. Recalculate Order Block pixel zones when chart scrolls/scales
   const recalculateOBZones = useCallback(() => {

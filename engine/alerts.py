@@ -109,6 +109,23 @@ class Alert:
     webhook_url: Optional[str] = None
     # Generated per alert.  Persisted locally, never returned by alert lists.
     webhook_secret: Optional[str] = None
+    is_live: bool = True  # True if Live market alert, False if TEST
+    environment: str = "LIVE"  # "LIVE" | "TEST"
+    is_invalidated: bool = False
+    invalidation_reason: Optional[str] = None
+    invalidated_at: Optional[str] = None
+    invalidation_threshold: Optional[float] = None
+    target_price: Optional[float] = None
+    target_achieved: bool = False
+    trailing_stop: Optional[float] = None
+    should_trail: bool = False
+    trailing_decision: Optional[str] = None
+    trailing_rationale: Optional[str] = None
+    achieved_milestones: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if not self.created_at:
+            self.created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S IST")
 
     def describe(self) -> str:
         if self.alert_type == "CONDITIONAL" and self.conditions:
@@ -306,6 +323,7 @@ class AlertManager:
         """Serialize an alert without exposing its callback signing secret."""
         payload = asdict(alert)
         payload.pop("webhook_secret", None)
+        payload["timestamp"] = alert.triggered_at or alert.invalidated_at or alert.created_at or datetime.now().strftime("%Y-%m-%d %H:%M:%S IST")
         return payload
 
     def active_count(self) -> int:
@@ -464,42 +482,169 @@ class AlertManager:
     def _poll_loop(self, interval: int) -> None:
         while self._polling and not self._stop_event.is_set():
             if self.active_count() > 0 and _is_market_hours():
+                # Check for triggered alerts
                 triggered = self.check_alerts()
                 for alert in triggered:
                     self._notify(alert)
+                # Check for invalidated alerts
+                self.check_invalidations()
             if self._stop_event.wait(timeout=interval):
                 break
 
+    def check_invalidations(self) -> list[Alert]:
+        """Check active alerts for invalidations (e.g. stop-loss floor/ceiling reached)."""
+        from market.quotes import get_ltp
+
+        invalidated: list[Alert] = []
+        now_iso = datetime.now().isoformat(timespec="seconds")
+
+        with self._lock:
+            for alert in self._alerts:
+                if alert.triggered or alert.is_invalidated:
+                    continue
+                if alert.invalidation_threshold is None:
+                    continue
+
+                try:
+                    current_ltp = get_ltp(f"{alert.exchange}:{alert.symbol}")
+                    if not current_ltp or current_ltp <= 0:
+                        continue
+
+                    # If watching ABOVE (bullish), invalidation is drop BELOW invalidation_threshold
+                    if alert.condition == "ABOVE" and current_ltp <= alert.invalidation_threshold:
+                        alert.is_invalidated = True
+                        alert.invalidated_at = now_iso
+                        alert.invalidation_reason = (
+                            f"Price dropped to ₹{current_ltp:,.2f} (below invalidation floor ₹{alert.invalidation_threshold:,.2f}). "
+                            f"Breakout alert above ₹{alert.threshold:,.2f} is invalidated."
+                        )
+                        invalidated.append(alert)
+                    # If watching BELOW (bearish), invalidation is surge ABOVE invalidation_threshold
+                    elif alert.condition == "BELOW" and current_ltp >= alert.invalidation_threshold:
+                        alert.is_invalidated = True
+                        alert.invalidated_at = now_iso
+                        alert.invalidation_reason = (
+                            f"Price surged to ₹{current_ltp:,.2f} (above invalidation ceiling ₹{alert.invalidation_threshold:,.2f}). "
+                            f"Breakdown alert below ₹{alert.threshold:,.2f} is invalidated."
+                        )
+                        invalidated.append(alert)
+                except Exception:
+                    pass
+
+        if invalidated:
+            self._save()
+            for a in invalidated:
+                self._notify(a)
+        return invalidated
+
+    def create_test_alert(
+        self,
+        symbol: str = "INFY",
+        condition: str = "ABOVE",
+        threshold: float = 1850.0,
+        is_invalidation: bool = False,
+    ) -> Alert:
+        """Create and trigger a simulated test alert clearly marked [TEST]."""
+        now_iso = datetime.now().isoformat(timespec="seconds")
+        alert = Alert(
+            id=f"test-{uuid.uuid4().hex[:6]}",
+            alert_type="PRICE",
+            symbol=symbol.upper(),
+            exchange="NSE",
+            condition=condition.upper(),
+            threshold=float(threshold),
+            created_at=now_iso,
+            triggered=not is_invalidation,
+            triggered_at=now_iso if not is_invalidation else None,
+            is_live=False,
+            environment="TEST",
+            is_invalidated=is_invalidation,
+            invalidation_reason="[TEST SIMULATION] Stop level breached. Alert setup is invalidated." if is_invalidation else None,
+            invalidated_at=now_iso if is_invalidation else None,
+        )
+        alert.message = f"[TEST] {alert.describe()}"
+        with self._lock:
+            self._alerts.append(alert)
+            self._save()
+        self._notify(alert, ltp=threshold)
+        return alert
+
     def _notify(self, alert: Alert, ltp: Optional[float] = None) -> None:
         """
-        Multi-channel alert notification:
-          1. Terminal (Rich panel + system bell)
-          2. macOS desktop notification
-          3. Telegram push (if bot is configured)
+        Multi-channel alert notification with explicit REAL/LIVE vs TEST tagging
+        and prominent Invalidation warning if the view/alert is no longer valid.
         """
         desc = alert.describe()
         ltp_str = f"  LTP: ₹{ltp:,.2f}" if ltp else ""
+        is_test = (alert.environment == "TEST") or (not alert.is_live)
+        env_tag = "[TEST]" if is_test else "[REAL/LIVE]"
+
+        if alert.is_invalidated:
+            panel_title = f"[bold red]⚠️ {env_tag} ALERT / VIEW INVALIDATED[/bold red]"
+            desktop_title = f"⚠️ {env_tag} VIEW INVALIDATED: {alert.symbol}"
+            desktop_msg = alert.invalidation_reason or f"{desc} is no longer valid."
+            tg_msg = (
+                f"⚠️ <b>{env_tag} VIEW INVALIDATED</b>\n\n"
+                f"🚨 <b>{alert.symbol} {alert.alert_type} Alert</b> is <b>NO LONGER VALID</b>!\n\n"
+                f"🛑 <b>Reason:</b> {alert.invalidation_reason or desc}\n"
+                f"🕒 <b>Invalidated at:</b> {alert.invalidated_at or 'Just now'}\n\n"
+                f"<i>Level or technical setup was invalidated by opposing price movement.</i>"
+            )
+            headline = f"⚠️ {env_tag} VIEW INVALIDATED: {alert.symbol} {alert.alert_type}"
+            summary = alert.invalidation_reason or f"{desc} is no longer valid."
+            border_style = "red"
+            sys_type = "invalidation_alert"
+        elif alert.target_achieved:
+            panel_title = f"[bold cyan]🎯 {env_tag} TARGET ACHIEVED[/bold cyan]"
+            desktop_title = f"🎯 {env_tag} TARGET HIT: {alert.symbol}"
+            desktop_msg = alert.trailing_rationale or f"{desc} reached target price ₹{alert.target_price or alert.threshold:,.2f}!"
+            trail_str = f"\n🛑 <b>Recommended Trail SL:</b> ₹{alert.trailing_stop:,.2f}" if alert.trailing_stop and alert.should_trail else "\n🛑 <b>Trailing:</b> DO NOT TRAIL (Book Full Profit)"
+            tg_msg = (
+                f"🎯 <b>{env_tag} TARGET ACHIEVED</b>\n\n"
+                f"🏆 <b>{alert.symbol} {alert.alert_type} Alert</b> reached target!\n\n"
+                f"💰 <b>LTP:</b> ₹{ltp or alert.threshold:,.2f} | <b>Target:</b> ₹{alert.target_price or alert.threshold:,.2f}"
+                f"{trail_str}\n"
+                f"⚡ <b>DECISION:</b> <code>{alert.trailing_decision or 'BOOK_50_TRAIL_BREAKEVEN'}</code>\n\n"
+                f"💡 <b>Action:</b> {alert.trailing_rationale or desc}\n\n"
+                f"🕒 {alert.triggered_at or 'Live'}"
+            )
+            headline = f"🎯 {env_tag} TARGET ACHIEVED: {alert.symbol} {alert.alert_type}"
+            summary = alert.trailing_rationale or f"{desc} hit target price!"
+            border_style = "cyan"
+            sys_type = "target_achieved"
+        else:
+            panel_title = f"[bold {'magenta' if is_test else 'green'}]🔔 {env_tag} ALERT TRIGGERED[/bold {'magenta' if is_test else 'green'}]"
+            desktop_title = f"{env_tag} Alert Triggered: {alert.symbol}"
+            desktop_msg = f"{desc}{ltp_str}"
+            tg_prefix = "🧪 <b>[TEST ALERT - SIMULATED]</b>" if is_test else "🟢 <b>[REAL / LIVE ALERT TRIGGERED]</b>"
+            tg_msg = f"{tg_prefix}\n\n🔔 <b>{alert.symbol}</b>: {desc}{ltp_str}"
+            headline = f"{'🧪 [TEST]' if is_test else '🟢 [REAL/LIVE]'} 🔔 {alert.symbol} {alert.alert_type} Alert Triggered"
+            summary = f"{desc}{ltp_str}"
+            border_style = "magenta" if is_test else "green"
+            sys_type = "market_alert"
+
+        now_stamp = alert.triggered_at or alert.invalidated_at or alert.created_at or datetime.now().strftime("%Y-%m-%d %H:%M:%S IST")
 
         # 1. Terminal
         console.print()
         console.print(
             Panel(
-                f"[bold white]{desc}[/bold white]{ltp_str}\n"
-                f"[dim]Triggered at {alert.triggered_at}[/dim]",
-                title="[bold yellow]🔔 ALERT TRIGGERED[/bold yellow]",
-                border_style="yellow",
+                f"[bold white]{desc}[/bold white]{ltp_str}\n\n"
+                f"[dim]🕒 Timestamp: {now_stamp}[/dim]",
+                title=panel_title,
+                border_style=border_style,
             )
         )
         print("\a", end="", flush=True)  # system bell
 
         # 2. macOS desktop notification
         _desktop_notify(
-            title="Alert Triggered",
-            message=f"{desc}{ltp_str}",
+            title=desktop_title,
+            message=desktop_msg,
         )
 
         # 3. Telegram push
-        _telegram_notify(f"🔔 ALERT TRIGGERED\n\n{desc}{ltp_str}")
+        _telegram_notify(tg_msg)
 
         # 4. Webhook (OpenClaw / external agents)
         if alert.webhook_url:
@@ -508,30 +653,37 @@ class AlertManager:
         # 5. Real-time SSE dispatch to React UI
         try:
             from web.sse import event_bus
-            event_bus.publish_sync("alert", {
+
+            alert_payload = {
                 "alert_id": alert.id,
                 "alert_type": alert.alert_type,
                 "symbol": alert.symbol,
                 "exchange": alert.exchange,
-                "headline": f"🔔 {alert.symbol} {alert.alert_type} Alert Triggered",
+                "headline": headline,
                 "description": desc,
-                "summary": f"{desc}{ltp_str}",
-                "triggered_at": alert.triggered_at,
+                "summary": summary,
+                "timestamp": now_stamp,
+                "created_at": alert.created_at or now_stamp,
+                "triggered_at": alert.triggered_at or alert.invalidated_at,
                 "ltp": ltp or alert.threshold,
-                "stage": "TRIGGERED",
-            })
+                "stage": "INVALIDATED" if alert.is_invalidated else ("TARGET_ACHIEVED" if alert.target_achieved else "TRIGGERED"),
+                "is_live": not is_test,
+                "environment": "TEST" if is_test else "LIVE",
+                "env_tag": env_tag,
+                "is_invalidated": alert.is_invalidated,
+                "invalidation_reason": alert.invalidation_reason,
+                "target_achieved": alert.target_achieved,
+                "trailing_stop": alert.trailing_stop,
+                "should_trail": alert.should_trail,
+                "trailing_decision": alert.trailing_decision,
+                "trailing_rationale": alert.trailing_rationale,
+            }
+            event_bus.publish_sync("alert", alert_payload)
             event_bus.publish_sync("system", {
-                "type": "market_alert",
-                "alert": {
-                    "alert_id": alert.id,
-                    "alert_type": alert.alert_type,
-                    "symbol": alert.symbol,
-                    "exchange": alert.exchange,
-                    "headline": f"🔔 {alert.symbol} Alert",
-                    "summary": f"{desc}{ltp_str}",
-                    "triggered_at": alert.triggered_at,
-                    "ltp": ltp or alert.threshold,
-                }
+                "type": sys_type,
+                "alert": alert_payload,
+                "is_invalidated": alert.is_invalidated,
+                "environment": alert.environment,
             })
         except Exception:
             pass
@@ -671,7 +823,12 @@ class AlertManager:
         try:
             if ALERTS_FILE.exists():
                 data = json.loads(ALERTS_FILE.read_text())
-                self._alerts = [Alert(**d) for d in data]
+                valid_keys = set(Alert.__dataclass_fields__.keys())
+                self._alerts = [
+                    Alert(**{k: v for k, v in d.items() if k in valid_keys})
+                    for d in data
+                    if isinstance(d, dict)
+                ]
         except Exception:
             self._alerts = []
 

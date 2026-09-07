@@ -49,11 +49,18 @@ function ToastItem({ toast }) {
 
       {/* Content */}
       <div className="flex-1 min-w-0 pr-6">
-        {toast.title && (
-          <div className="text-xs font-bold text-text leading-tight mb-0.5 truncate">
-            {toast.title}
-          </div>
-        )}
+        <div className="flex items-center justify-between gap-1.5 mb-0.5">
+          {toast.title && (
+            <div className="text-xs font-bold text-text leading-tight truncate">
+              {toast.title}
+            </div>
+          )}
+          {toast.timestamp && (
+            <span className="text-[9px] font-mono font-semibold text-muted/90 flex-shrink-0 px-1.5 py-0.2 rounded bg-surface/80 border border-border/50">
+              🕒 {toast.timestamp}
+            </span>
+          )}
+        </div>
         {toast.message && (
           <div className="text-[11px] text-muted leading-snug">
             {toast.message}

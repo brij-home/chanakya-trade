@@ -173,6 +173,8 @@ class AlertAddRequest(InstrumentBaseRequest):
     conditions: Optional[list[dict]] = None
     # Webhook: POST here when alert fires
     webhook_url: Optional[str] = None
+    # Invalidation threshold: opposite level that invalidates this alert
+    invalidation_threshold: Optional[float] = None
 
 
 class AlertRemoveRequest(BaseModel):
@@ -184,6 +186,38 @@ class AutoAlertsListRequest(BaseModel):
     limit: int = 50
     alert_type: Optional[str] = None
     stage: Optional[str] = None
+    environment: Optional[str] = None
+    is_invalidated: Optional[bool] = None
+    target_status: Optional[str] = None
+
+
+class AutoAlertTestRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    alert_type: str = "GAMMA_BLAST"
+    stage: str = "EARLY_WARNING"
+    symbol: str = "RELIANCE"
+    is_invalidation: bool = False
+
+
+class AutoAlertTargetTestRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    milestone: str = "T1"  # "T1" | "FINAL" | "TRAIL"
+    should_trail: bool = True
+    symbol: str = "RELIANCE"
+
+
+class AlertInvalidateRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    alert_id: str
+    reason: str = "Manually invalidated by user"
+
+
+class ManualAlertTestRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    symbol: str = "INFY"
+    condition: str = "ABOVE"
+    threshold: float = 1850.0
+    is_invalidation: bool = False
 
 
 class HintRequest(BaseModel):
@@ -1521,6 +1555,10 @@ async def skill_alerts_add(req: AlertAddRequest):
                 400,
             )
 
+        if req.invalidation_threshold is not None:
+            alert.invalidation_threshold = float(req.invalidation_threshold)
+            alert_manager._save()
+
         # Start polling if not already running
         alert_manager.start_polling(interval=60)
 
@@ -1573,7 +1611,17 @@ async def skill_auto_alerts_list(req: Optional[AutoAlertsListRequest] = None):
         limit = req.limit if req else 50
         alert_type = req.alert_type if req else None
         stage = req.stage if req else None
-        alerts = auto_alert_engine.get_alerts(limit=limit, alert_type=alert_type, stage=stage)
+        environment = req.environment if req else None
+        is_invalidated = req.is_invalidated if req else None
+        target_status = req.target_status if req else None
+        alerts = auto_alert_engine.get_alerts(
+            limit=limit,
+            alert_type=alert_type,
+            stage=stage,
+            environment=environment,
+            is_invalidated=is_invalidated,
+            target_status=target_status,
+        )
         return {"status": "ok", "data": [a.to_dict() for a in alerts]}
     except Exception as e:
         raise _err(str(e))
@@ -1607,6 +1655,128 @@ async def skill_auto_alerts_clear():
 
         auto_alert_engine.clear_alerts()
         return {"status": "ok", "data": {"cleared": True}}
+    except Exception as e:
+        raise _err(str(e))
+
+
+@router.post("/alerts/auto/test")
+async def skill_auto_alerts_test(req: Optional[AutoAlertTestRequest] = None):
+    """
+    Trigger a simulated test alert clearly tagged as [TEST].
+    Can simulate a regular early-warning/ignited alert or an invalidation alert.
+    """
+    try:
+        from engine.auto_alert_engine import auto_alert_engine
+
+        alert_type = req.alert_type if req else "GAMMA_BLAST"
+        stage = req.stage if req else "EARLY_WARNING"
+        symbol = req.symbol if req else "RELIANCE"
+        is_invalidation = req.is_invalidation if req else False
+
+        alert = auto_alert_engine.create_test_alert(
+            alert_type=alert_type,
+            stage=stage,
+            symbol=symbol,
+            is_invalidation=is_invalidation,
+        )
+        return {"status": "ok", "data": alert.to_dict()}
+    except Exception as e:
+        raise _err(str(e))
+
+
+@router.post("/alerts/auto/test_target")
+async def skill_auto_alerts_test_target(req: Optional[AutoAlertTargetTestRequest] = None):
+    """
+    Trigger a simulated test target achieved or trailing stop alert clearly tagged as [TEST].
+    Valid milestones: 'T1' (50% booking & breakeven trail), 'FINAL' (full profit exit vs ATR trail), 'TRAIL' (ratchet).
+    """
+    try:
+        from engine.auto_alert_engine import auto_alert_engine
+
+        milestone = req.milestone if req else "T1"
+        should_trail = req.should_trail if req else True
+        symbol = req.symbol if req else "RELIANCE"
+
+        alert = auto_alert_engine.create_test_target_alert(
+            milestone=milestone,
+            should_trail=should_trail,
+            symbol=symbol,
+        )
+        return {"status": "ok", "data": alert.to_dict()}
+    except Exception as e:
+        raise _err(str(e))
+
+
+@router.post("/alerts/auto/check_invalidations")
+async def skill_auto_alerts_check_invalidations():
+    """Check active alerts for structural or stop-loss invalidations and broadcast warnings."""
+    try:
+        from engine.auto_alert_engine import auto_alert_engine
+
+        invalidated = auto_alert_engine.check_and_alert_invalidations()
+        return {
+            "status": "ok",
+            "data": {
+                "invalidated_count": len(invalidated),
+                "invalidated": [a.to_dict() for a in invalidated],
+            },
+        }
+    except Exception as e:
+        raise _err(str(e))
+
+
+@router.post("/alerts/auto/check_targets")
+async def skill_auto_alerts_check_targets():
+    """Check active alerts for target milestone progression and dynamic trailing stop updates."""
+    try:
+        from engine.auto_alert_engine import auto_alert_engine
+
+        updated = auto_alert_engine.check_and_alert_targets_and_trailing()
+        return {
+            "status": "ok",
+            "data": {
+                "updated_count": len(updated),
+                "updated": [a.to_dict() for a in updated],
+            },
+        }
+    except Exception as e:
+        raise _err(str(e))
+
+
+@router.post("/alerts/auto/invalidate")
+async def skill_auto_alerts_invalidate(req: AlertInvalidateRequest):
+    """Manually invalidate an active alert by ID and broadcast the invalidation warning."""
+    try:
+        from engine.auto_alert_engine import auto_alert_engine
+
+        alert = auto_alert_engine.invalidate_alert_by_id(req.alert_id, reason=req.reason)
+        if not alert:
+            raise _err(f"Alert {req.alert_id} not found or already invalidated", 404)
+        return {"status": "ok", "data": alert.to_dict()}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise _err(str(e))
+
+
+@router.post("/alerts/test")
+async def skill_manual_alerts_test(req: Optional[ManualAlertTestRequest] = None):
+    """Trigger a simulated test manual price alert clearly tagged as [TEST]."""
+    try:
+        from engine.alerts import alert_manager
+
+        symbol = req.symbol if req else "INFY"
+        condition = req.condition if req else "ABOVE"
+        threshold = req.threshold if req else 1850.0
+        is_invalidation = req.is_invalidation if req else False
+
+        alert = alert_manager.create_test_alert(
+            symbol=symbol,
+            condition=condition,
+            threshold=threshold,
+            is_invalidation=is_invalidation,
+        )
+        return {"status": "ok", "data": alert_manager.public_dict(alert)}
     except Exception as e:
         raise _err(str(e))
 
@@ -5414,6 +5584,7 @@ def _debate_snapshot_sync(req: Optional[DebateSnapshotRequest] = None):
 
 class GEXSnapshotRequest(BaseModel):
     underlying: Optional[str] = "NIFTY"
+    symbol: Optional[str] = None
     expiry: Optional[str] = None
 
 
@@ -5421,77 +5592,111 @@ class GEXSnapshotRequest(BaseModel):
 @router.post("/gex_snapshot")
 async def skill_gex_snapshot(req: Optional[GEXSnapshotRequest] = None):
     """
-    Snapshot for the Quant & Options Desk (chanakya-gex.png):
-    Returns Gamma Exposure Profile (GEX) histogram, Delta Hedging Recommendations,
-    IV Smile & Skew curve, and formatted Options Chain matrix.
+    Snapshot for the Quant & Options Desk:
+    Returns genuine Gamma Exposure Profile (GEX), Delta Hedging Recommendations,
+    real-time IV Smile/Skew, authentic Options Chain with bid/ask depth,
+    live PCR, and Blast Radar explosive opportunities.
     """
     try:
-        from market.quotes import get_ltp, get_quote
-        from market.options import get_expiries
+        import math
+        from datetime import datetime
+        from market.quotes import get_ltp, get_quote, normalize_instrument
+        from market.options import get_options_snapshot, get_expiries
+        from engine.greeks_manager import LOT_SIZES
 
-        underlying = (req.underlying if req and req.underlying else "NIFTY").upper().strip()
-        expiries = []
-        try:
-            expiries = get_expiries(underlying)
-        except Exception:
-            pass
+        raw_in = None
+        if req:
+            raw_in = req.symbol or req.underlying
+        clean_raw = (raw_in if raw_in else "NIFTY").strip().upper()
+        clean_sym = clean_raw.replace("NSE:", "").replace("BSE:", "").replace("NFO:", "").replace("MCX:", "").replace("CDS:", "").strip()
+        norm_inst = normalize_instrument(clean_sym)
 
-        active_expiry = (
-            req.expiry if req and req.expiry else (expiries[0] if expiries else "2026-09-04")
-        )
-        spot = get_ltp(f"NSE:{underlying}") or (22068.75 if "NIFTY" in underlying else 48500.0)
+        # 1. Fetch authentic live spot quote
+        quote_map = get_quote([norm_inst, clean_sym])
+        quote = quote_map.get(norm_inst) or quote_map.get(clean_sym)
 
-        # Dynamic Strike Step & Calculation (Full Market Coverage: 41 strikes from ATM-20 to ATM+20)
-        strike_step = (
-            50
-            if underlying in ("NIFTY", "FINNIFTY")
-            else (100 if underlying in ("BANKNIFTY", "SENSEX") else (20 if spot > 1000 else 10))
-        )
-        atm_strike = round(spot / strike_step) * strike_step
+        req_exp = (req.expiry.strip() if req and req.expiry else None)
+        contracts, chain_spot, expiries, source_info = get_options_snapshot(clean_sym, req_exp)
 
-        strikes = [atm_strike + i * strike_step for i in range(-20, 21)]
-        gex_profile = []
+        spot = 0.0
+        if quote and quote.last_price and quote.last_price > 0:
+            spot = float(quote.last_price)
+        elif chain_spot and chain_spot > 0:
+            spot = float(chain_spot)
+        else:
+            ltp = get_ltp(norm_inst) or get_ltp(clean_sym)
+            if ltp and ltp > 0:
+                spot = float(ltp)
+
+        chg_val = float(quote.change) if quote and quote.change is not None else 0.0
+        chg_pct = float(quote.change_pct) if quote and quote.change_pct is not None else 0.0
+        chg_sign = "+" if chg_val >= 0 else ""
+        now_time = source_info.get("as_of_display") or datetime.now().strftime("%I:%M:%S %p IST")
+        active_expiry = req_exp or (expiries[0] if expiries else "")
+
+        lot_sz = LOT_SIZES.get(clean_sym, 75 if "NIFTY" in clean_sym else (20 if clean_sym == "SENSEX" else 250))
+
+        # Venue-specific check if no contracts exist
+        if not contracts:
+            is_bse = clean_sym in ("SENSEX", "BANKEX")
+            return _ok(
+                {
+                    "underlying": clean_sym,
+                    "exchange": "BSE" if is_bse else "NSE",
+                    "expiry": active_expiry,
+                    "expiries": expiries,
+                    "spot_price": round(spot, 2),
+                    "spot_change": f"{chg_sign}{round(chg_val, 2)}",
+                    "spot_change_pct": f"{chg_sign}{round(chg_pct, 2)}%",
+                    "time": now_time,
+                    "as_of": source_info.get("as_of"),
+                    "as_of_display": now_time,
+                    "data_state": source_info.get("data_state", "BROKER_REQUIRED" if is_bse else "UNAVAILABLE"),
+                    "data_source": source_info.get("provider", "bse_live" if is_bse else "none"),
+                    "source_label": source_info.get("source_label", "Broker Required for BFO" if is_bse else "Data Unavailable"),
+                    "is_realtime": source_info.get("is_realtime", False),
+                    "message": (
+                        f"Option chain for BSE {clean_sym} requires a connected broker (Zerodha, Dhan, Shoonya, Fyers) with BSE Derivatives (BFO) permissions. Spot price and candlestick chart are streaming live."
+                        if is_bse
+                        else f"Live option chain for {clean_sym} is currently unavailable outside market hours or contract refresh window. Spot price and candlestick chart are live."
+                    ),
+                    "pcr": None,
+                    "pcr_sentiment": "UNAVAILABLE",
+                    "max_pain": None,
+                    "total_call_oi": "0",
+                    "total_put_oi": "0",
+                    "net_oi_change": "0",
+                    "zero_gamma": None,
+                    "call_wall": None,
+                    "put_support": None,
+                    "gex_profile": [],
+                    "delta_hedge": None,
+                    "iv_skew": [],
+                    "options_chain": [],
+                    "blast_radar": [],
+                }
+            )
+
+        # 2. Group contracts by strike & tally real OI
+        strike_map: dict[float, dict[str, Any]] = {}
         tot_call_oi = 0
         tot_put_oi = 0
         tot_call_oichg = 0
         tot_put_oichg = 0
 
-        for k in strikes:
-            dist = (k - spot) / max(1.0, spot)
-            call_gex = (
-                max(0.2, round(18.0 * max(0.0, 1.0 - abs(dist * 18)), 1))
-                if k >= atm_strike
-                else round(max(0.1, 4.0 - abs(dist * 10)), 1)
-            )
-            put_gex = (
-                -max(0.2, round(15.0 * max(0.0, 1.0 - abs(dist * 18)), 1))
-                if k <= atm_strike
-                else -round(max(0.1, 3.0 - abs(dist * 10)), 1)
-            )
-            net_gex = round(call_gex + put_gex, 2)
-            gex_profile.append(
-                {
-                    "strike": k,
-                    "call_gex": call_gex,
-                    "put_gex": put_gex,
-                    "net_gex": net_gex,
-                }
-            )
+        for c in contracts:
+            stk = float(c.strike)
+            if stk not in strike_map:
+                strike_map[stk] = {}
+            strike_map[stk][c.option_type] = c
+            if c.option_type == "CE":
+                tot_call_oi += c.oi
+                tot_call_oichg += c.oi_change
+            elif c.option_type == "PE":
+                tot_put_oi += c.oi
+                tot_put_oichg += c.oi_change
 
-            # Tally simulated/live OI for PCR & Max Pain
-            c_oi_num = int(max(15000, (2.2 - abs(dist) * 8.0) * 120000))
-            p_oi_num = int(max(18000, (2.4 - abs(dist) * 8.0) * 130000))
-            tot_call_oi += c_oi_num
-            tot_put_oi += p_oi_num
-            tot_call_oichg += int(c_oi_num * 0.12 * (1 if dist >= 0 else -0.5))
-            tot_put_oichg += int(p_oi_num * 0.15 * (1 if dist <= 0 else -0.4))
-
-        zero_gamma = atm_strike - strike_step
-        call_wall = atm_strike + (strike_step * 3)
-        put_support = atm_strike - (strike_step * 3)
-        max_pain = atm_strike
-
-        pcr_val = round(tot_put_oi / max(1, tot_call_oi), 2)
+        pcr_val = round(tot_put_oi / max(1, tot_call_oi), 3)
         pcr_sentiment = (
             "BULLISH (Put Writing Support)"
             if pcr_val >= 1.10
@@ -5499,13 +5704,175 @@ async def skill_gex_snapshot(req: Optional[GEXSnapshotRequest] = None):
             if pcr_val <= 0.85
             else "NEUTRAL / BALANCED"
         )
+        if pcr_val > 1.40:
+            pcr_sentiment = "EXTREME BULLISH / SHORT SQUEEZE ALERT"
+        elif pcr_val < 0.60:
+            pcr_sentiment = "EXTREME BEARISH / GAMMA BLAST ALERT"
 
-        # Realistic Lot-Sized Delta Hedge & Why/When/How Rationale
-        from engine.greeks_manager import LOT_SIZES
+        strikes = sorted(strike_map.keys())
+        atm_strike = min(strikes, key=lambda k: abs(k - spot)) if strikes and spot > 0 else (strikes[len(strikes)//2] if strikes else 22000)
 
-        u_sym = underlying.upper().replace("NSE:", "").replace("NFO:", "")
-        lot_sz = LOT_SIZES.get(u_sym, 75)
-        # Unit delta +0.42 on 1-lot position = 31.5 delta shares
+        # Calculate DTE
+        dte_days = 4.0
+        try:
+            exp_dt = datetime.strptime(active_expiry, "%Y-%m-%d")
+            diff = (exp_dt.date() - datetime.now().date()).days
+            dte_days = max(1.0, float(diff))
+        except Exception:
+            pass
+        T = dte_days / 365.0
+        sqrtT = math.sqrt(T)
+        r = 0.065
+
+        gex_profile = []
+        chain_rows = []
+        blast_candidates = []
+        iv_skew = []
+
+        for k in strikes:
+            row_legs = strike_map[k]
+            ce = row_legs.get("CE")
+            pe = row_legs.get("PE")
+
+            ce_iv = (ce.iv if ce and ce.iv and ce.iv > 0 else 15.0) / 100.0
+            pe_iv = (pe.iv if pe and pe.iv and pe.iv > 0 else 15.0) / 100.0
+            avg_iv = (ce_iv + pe_iv) / 2.0
+
+            # Black-Scholes d1 & gamma
+            sigma = max(0.01, avg_iv)
+            d1 = (math.log(max(1.0, spot) / max(1.0, k)) + (r + 0.5 * sigma * sigma) * T) / (sigma * sqrtT)
+            pdf_d1 = math.exp(-0.5 * d1 * d1) / math.sqrt(2.0 * math.pi)
+            gamma = pdf_d1 / (spot * sigma * sqrtT) if (spot * sigma * sqrtT) > 0 else 0.0
+
+            c_oi = ce.oi if ce else 0
+            p_oi = pe.oi if pe else 0
+
+            # GEX in Crores (₹ 10M)
+            call_gex = 0.5 * gamma * (spot**2) * c_oi * lot_sz / 1e7
+            put_gex = -0.5 * gamma * (spot**2) * p_oi * lot_sz / 1e7
+            net_gex = call_gex + put_gex
+
+            gex_profile.append({
+                "strike": k,
+                "call_gex": round(call_gex, 2),
+                "put_gex": round(put_gex, 2),
+                "net_gex": round(net_gex, 2),
+            })
+
+            iv_skew.append({
+                "strike": k,
+                "iv": round(avg_iv * 100, 1),
+                "is_atm": (k == atm_strike),
+            })
+
+            # Detect Buyer/Seller Aggression & Blast Signals
+            ce_buy_q = getattr(ce, "total_buy_qty", 0) or 0
+            ce_sell_q = getattr(ce, "total_sell_qty", 0) or 0
+            ce_vol = getattr(ce, "volume", 0) or 0
+            ce_oi = getattr(ce, "oi", 0) or 0
+            ce_bid = getattr(ce, "bid", None) or getattr(ce, "last_price", 0.0)
+            ce_ask = getattr(ce, "ask", None) or getattr(ce, "last_price", 0.0)
+
+            pe_buy_q = getattr(pe, "total_buy_qty", 0) or 0
+            pe_sell_q = getattr(pe, "total_sell_qty", 0) or 0
+            pe_vol = getattr(pe, "volume", 0) or 0
+            pe_oi = getattr(pe, "oi", 0) or 0
+            pe_bid = getattr(pe, "bid", None) or getattr(pe, "last_price", 0.0)
+            pe_ask = getattr(pe, "ask", None) or getattr(pe, "last_price", 0.0)
+
+            ce_imbalance = (ce_buy_q / max(1, ce_sell_q)) if ce_sell_q > 0 else 1.0
+            pe_imbalance = (pe_buy_q / max(1, pe_sell_q)) if pe_sell_q > 0 else 1.0
+
+            ce_vol_surge = (ce_vol > 1.2 * ce_oi and ce_vol > 15000) if ce_oi > 0 else False
+            pe_vol_surge = (pe_vol > 1.2 * pe_oi and pe_vol > 15000) if pe_oi > 0 else False
+
+            ce_blast = (ce_imbalance >= 1.6 and ce_vol > 10000) or ce_vol_surge
+            pe_blast = (pe_imbalance >= 1.6 and pe_vol > 10000) or pe_vol_surge
+
+            if ce_blast and abs(k - spot) <= (spot * 0.035):
+                blast_candidates.append({
+                    "strike": k,
+                    "type": "CE",
+                    "score": min(98, int(60 + ce_imbalance * 8 + (20 if ce_vol_surge else 0))),
+                    "title": f"₹{int(k):,} CE • Call Momentum Blast",
+                    "reason": f"Heavy Buy Aggression ({ce_imbalance:.1f}× Bids) • {ce_vol:,} Vol Spike",
+                    "action": "BUY",
+                    "bid": round(ce_bid, 2) if ce_bid else 0.0,
+                    "ask": round(ce_ask, 2) if ce_ask else 0.0,
+                    "spread": round(abs((ce_ask or 0) - (ce_bid or 0)), 2),
+                })
+
+            if pe_blast and abs(k - spot) <= (spot * 0.035):
+                blast_candidates.append({
+                    "strike": k,
+                    "type": "PE",
+                    "score": min(98, int(60 + pe_imbalance * 8 + (20 if pe_vol_surge else 0))),
+                    "title": f"₹{int(k):,} PE • Put Shock / Breakdown",
+                    "reason": f"Heavy Put Demand ({pe_imbalance:.1f}× Bids) • {pe_vol:,} Vol Spike",
+                    "action": "BUY",
+                    "bid": round(pe_bid, 2) if pe_bid else 0.0,
+                    "ask": round(pe_ask, 2) if pe_ask else 0.0,
+                    "spread": round(abs((pe_ask or 0) - (pe_bid or 0)), 2),
+                })
+
+            is_atm = (k == atm_strike)
+            chain_rows.append({
+                "strike": k,
+                "is_atm": is_atm,
+                "calls_oi": f"{round(ce_oi / 100000, 2)}L" if ce_oi >= 100000 else f"{round(ce_oi / 1000, 1)}k",
+                "calls_oi_num": ce_oi,
+                "calls_oi_chg": f"{'+' if (ce and ce.oi_change >= 0) else ''}{round((ce.oi_change if ce else 0) / 1000, 1)}k",
+                "calls_gex": f"{'+' if call_gex >= 0 else ''}{round(call_gex, 1)}Cr",
+                "calls_iv": f"{round((ce.iv if ce and ce.iv else 15.0), 1)}%",
+                "calls_bid": round(ce_bid, 2) if ce_bid else 0.0,
+                "calls_ask": round(ce_ask, 2) if ce_ask else 0.0,
+                "calls_bid_qty": getattr(ce, "bid_qty", 0),
+                "calls_ask_qty": getattr(ce, "ask_qty", 0),
+                "calls_buy_aggression": round(ce_imbalance, 2),
+                "calls_blast": ce_blast,
+                "puts_bid": round(pe_bid, 2) if pe_bid else 0.0,
+                "puts_ask": round(pe_ask, 2) if pe_ask else 0.0,
+                "puts_bid_qty": getattr(pe, "bid_qty", 0),
+                "puts_ask_qty": getattr(pe, "ask_qty", 0),
+                "puts_buy_aggression": round(pe_imbalance, 2),
+                "puts_blast": pe_blast,
+                "puts_iv": f"{round((pe.iv if pe and pe.iv else 15.0), 1)}%",
+                "puts_gex": f"{round(put_gex, 1)}Cr",
+                "puts_oi_chg": f"{'+' if (pe and pe.oi_change >= 0) else ''}{round((pe.oi_change if pe else 0) / 1000, 1)}k",
+                "puts_oi": f"{round(pe_oi / 100000, 2)}L" if pe_oi >= 100000 else f"{round(pe_oi / 1000, 1)}k",
+                "puts_oi_num": pe_oi,
+            })
+
+        # Top 3 Blast Opportunities
+        blast_candidates.sort(key=lambda x: x["score"], reverse=True)
+        top_blast = blast_candidates[:3]
+
+        # Key Structural Walls
+        call_wall_strike = max(strikes, key=lambda k: strike_map[k].get("CE").oi if strike_map[k].get("CE") else 0) if strikes else atm_strike
+        put_wall_strike = max(strikes, key=lambda k: strike_map[k].get("PE").oi if strike_map[k].get("PE") else 0) if strikes else atm_strike
+
+        # Zero Gamma Level
+        zero_gamma = atm_strike
+        for i in range(len(gex_profile) - 1):
+            if gex_profile[i]["net_gex"] <= 0 and gex_profile[i + 1]["net_gex"] > 0:
+                zero_gamma = gex_profile[i]["strike"]
+                break
+
+        # Max Pain
+        pain_by_strike = {}
+        for test_k in strikes:
+            tot_loss = 0.0
+            for s, legs in strike_map.items():
+                ce = legs.get("CE")
+                pe = legs.get("PE")
+                if ce and test_k < s:
+                    tot_loss += (s - test_k) * ce.oi
+                if pe and test_k > s:
+                    tot_loss += (test_k - s) * pe.oi
+            pain_by_strike[test_k] = tot_loss
+        max_pain = min(pain_by_strike, key=pain_by_strike.get) if pain_by_strike else atm_strike
+
+        # Delta Hedge Blueprint
         unit_delta = 0.42
         pos_delta = round(unit_delta * lot_sz, 2)
         pts_1pct = round(spot * 0.01, 1)
@@ -5520,95 +5887,47 @@ async def skill_gex_snapshot(req: Optional[GEXSnapshotRequest] = None):
             "lot_size": lot_sz,
             "hedge_lots": 1,
             "hedge_action": "SELL",
-            "hedge_instrument": f"{underlying} FUT",
+            "hedge_instrument": f"{clean_sym} FUT",
             "actionable_state": "HEDGE REQUIRED: NEUTRAL",
-            "recommendation": f"SELL 1 Lot ({lot_sz} Qty) {underlying} FUT at ₹{round(spot - 2.50, 2):,}",
+            "recommendation": f"SELL 1 Lot ({lot_sz} Qty) {clean_sym} FUT at ₹{round(spot - 2.50, 2):,}",
             "rebalance_trigger": f"When Spot drifts > ±0.75% (±{round(spot * 0.0075)} pts) or Net Delta > ±0.15",
             "cash_sensitivity": cash_sens,
             "margin_estimate": margin_est,
-            "why": f"Portfolio has long directional exposure (+{pos_delta} shares). A 1% drop in {underlying} (~₹{pts_1pct} pts) generates an immediate ~₹{abs(cash_sens):,} loss from delta drift before volatility benefits.",
-            "when": f"Execute rebalance when {underlying} breaks support (₹{round(spot - 50)}) or during the 03:15 PM IST closing window.",
-            "how": f"Place a LIMIT SELL order for 1 Lot ({lot_sz} Qty) of nearest {underlying} Futures at ₹{round(spot - 2.50, 2):,} with an invalidation stop at ₹{round(spot + 45)} (Margin: ₹{margin_est:,}).",
+            "why": f"Portfolio directional exposure (+{pos_delta} shares). A 1% drop in {clean_sym} (~₹{pts_1pct} pts) generates ~₹{abs(cash_sens):,} delta loss before volatility benefits.",
+            "when": f"Execute rebalance when {clean_sym} breaks support (₹{round(spot - 50)}) or during the 03:15 PM IST window.",
+            "how": f"Place LIMIT SELL order for 1 Lot ({lot_sz} Qty) of {clean_sym} Futures at ₹{round(spot - 2.50, 2):,} (Margin: ₹{margin_est:,}).",
         }
-
-        # Dynamic IV Smile & Skew Curve Points
-        iv_skew = []
-        for k in strikes:
-            m = (k - spot) / max(1.0, spot)
-            iv_val = round(13.8 + (m**2) * 260.0 + (-m * 10.0), 1)
-            iv_skew.append(
-                {
-                    "strike": k,
-                    "iv": iv_val,
-                    "is_atm": k == atm_strike,
-                }
-            )
-
-        # Options Chain Matrix Rows
-        chain_rows = []
-        for k in strikes:
-            dist = (k - spot) / max(1.0, spot)
-            is_atm = k == atm_strike
-            chain_rows.append(
-                {
-                    "calls_oi": f"{round(max(0.3, 1.8 - dist * 4), 1)}M",
-                    "calls_oi_chg": f"{'+' if dist >= 0 else '-'}{round(abs(dist) * 2.5 + 0.3, 1)}B",
-                    "calls_gex": f"{'+' if dist >= 0 else '-'}{round(max(0.1, 6.0 - abs(dist * 12)), 1)}B",
-                    "calls_iv": f"{round(15.2 + dist * 8, 1)}%",
-                    "calls_bid": round(max(2.0, (spot - k + 120.0)), 2)
-                    if k <= spot
-                    else round(max(5.0, 150.0 - (k - spot) * 0.8), 2),
-                    "calls_ask": round(max(3.0, (spot - k + 122.0)), 2)
-                    if k <= spot
-                    else round(max(6.0, 152.0 - (k - spot) * 0.8), 2),
-                    "strike": k,
-                    "is_atm": is_atm,
-                    "puts_bid": round(max(2.0, (k - spot + 120.0)), 2)
-                    if k >= spot
-                    else round(max(5.0, 150.0 - (spot - k) * 0.8), 2),
-                    "puts_ask": round(max(3.0, (k - spot + 122.0)), 2)
-                    if k >= spot
-                    else round(max(6.0, 152.0 - (spot - k) * 0.8), 2),
-                    "puts_iv": f"{round(14.8 - dist * 7, 1)}%",
-                    "puts_eiv": f"{round(14.2 - dist * 6, 1)}%",
-                    "puts_gex": f"-{round(max(0.1, 5.5 - abs(dist * 10)), 1)}B",
-                    "puts_oi_chg": f"{'+' if dist <= 0 else '-'}{round(abs(dist) * 2.1 + 0.4, 1)}B",
-                    "puts_oi": f"{round(max(0.4, 1.9 + dist * 4), 1)}M",
-                }
-            )
-
-        from datetime import datetime
-
-        now_time = datetime.now().strftime("%H:%M:%S IST")
-        quote = get_quote(f"NSE:{underlying}") or {}
-        chg_val = (
-            quote.get("change") if quote.get("change") is not None else round(spot * 0.0052, 2)
-        )
-        chg_pct = quote.get("change_pct") if quote.get("change_pct") is not None else 0.52
-        chg_sign = "+" if chg_val >= 0 else ""
 
         return _ok(
             {
-                "underlying": underlying,
+                "underlying": clean_sym,
+                "exchange": "BSE" if clean_sym in ("SENSEX", "BANKEX") else "NSE",
                 "expiry": active_expiry,
-                "expiries": expiries[:6] if expiries else ["0DTE (Weekly)", "Next Week", "Monthly"],
+                "expiries": expiries[:8] if expiries else [],
                 "spot_price": round(spot, 2),
                 "spot_change": f"{chg_sign}{round(chg_val, 2)}",
                 "spot_change_pct": f"{chg_sign}{round(chg_pct, 2)}%",
                 "time": now_time,
+                "as_of": source_info.get("as_of"),
+                "as_of_display": now_time,
+                "data_state": source_info.get("data_state", "LIVE"),
+                "data_source": source_info.get("provider", "broker"),
+                "source_label": source_info.get("source_label", "Direct Real-Time Feed"),
+                "is_realtime": source_info.get("is_realtime", True),
                 "pcr": pcr_val,
                 "pcr_sentiment": pcr_sentiment,
                 "max_pain": max_pain,
-                "total_call_oi": f"{round(tot_call_oi / 100000, 1)}L",
-                "total_put_oi": f"{round(tot_put_oi / 100000, 1)}L",
-                "net_oi_change": f"{'+' if tot_put_oichg >= tot_call_oichg else ''}{round((tot_put_oichg - tot_call_oichg) / 100000, 1)}L",
+                "total_call_oi": f"{round(tot_call_oi / 100000, 2)}L" if tot_call_oi >= 100000 else f"{tot_call_oi:,}",
+                "total_put_oi": f"{round(tot_put_oi / 100000, 2)}L" if tot_put_oi >= 100000 else f"{tot_put_oi:,}",
+                "net_oi_change": f"{'+' if tot_put_oichg >= tot_call_oichg else ''}{round((tot_put_oichg - tot_call_oichg) / 100000, 2)}L",
                 "zero_gamma": zero_gamma,
-                "call_wall": call_wall,
-                "put_support": put_support,
+                "call_wall": call_wall_strike,
+                "put_support": put_wall_strike,
                 "gex_profile": gex_profile,
                 "delta_hedge": delta_hedge,
                 "iv_skew": iv_skew,
                 "options_chain": chain_rows,
+                "blast_radar": top_blast,
             }
         )
     except Exception as e:

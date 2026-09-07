@@ -272,6 +272,22 @@ def _load_chat_id() -> Optional[int]:
     global _chat_id
     if _chat_id:
         return _chat_id
+    env_id = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+    if env_id:
+        try:
+            _chat_id = int(env_id)
+            return _chat_id
+        except ValueError:
+            pass
+    try:
+        from config.credentials import _kr_get
+
+        kr_id = _kr_get("TELEGRAM_CHAT_ID")
+        if kr_id:
+            _chat_id = int(kr_id.strip())
+            return _chat_id
+    except Exception:
+        pass
     try:
         with open(_CHAT_ID_FILE) as f:
             _chat_id = int(f.read().strip())

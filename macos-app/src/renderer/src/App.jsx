@@ -102,6 +102,8 @@ export default function App() {
   const modeLoading = useChatStore((s) => s.modeLoading)
   const setAppMode = useChatStore((s) => s.setAppMode)
   const setModeLoading = useChatStore((s) => s.setModeLoading)
+  const selectedSymbol = useChatStore((s) => s.selectedSymbol)
+  const setSelectedSymbol = useChatStore((s) => s.setSelectedSymbol)
   const { theme, toggle: toggleTheme } = useTheme()
   const [pilotSafety, setPilotSafety] = useState(null)
   const [unreadAlertCount, setUnreadAlertCount] = useState(0)
@@ -131,10 +133,17 @@ export default function App() {
   const [sectorDrilldown, setSectorDrilldown] = useState({ isOpen: false, sector: null })
   const [showHotkeyRef, setShowHotkeyRef] = useState(false)
 
-  // Per-view context state (passed to ContextBar)
-  const [ctxSymbol, setCtxSymbol] = useState('NIFTY')
+  // Per-view context state (passed to ContextBar and synchronized with global selectedSymbol)
+  const [ctxSymbol, setCtxSymbol] = useState(selectedSymbol || 'NIFTY')
   const [ctxTimeframe, setCtxTimeframe] = useState('15m')
   const [ctxLayout, setCtxLayout] = useState('single')
+
+  const handleSymbolChange = (sym) => {
+    if (!sym) return
+    const clean = String(sym).trim().toUpperCase().replace(/^(NSE:|BSE:|MCX:|CDS:)/i, '')
+    setCtxSymbol(clean)
+    setSelectedSymbol(clean)
+  }
 
   // ── Event listeners ──────────────────────────────────────────────────────
   useEffect(() => {
@@ -274,23 +283,54 @@ export default function App() {
     enabled: !!(port || port === 0) && setupPhase === 'ready',
   })
 
-  // ── Real-Time Auto-Alert Stream (Gamma Blasts, Squeezes, Circuits) ─────────
+  // ── Real-Time Auto-Alert Stream (Gamma Blasts, Squeezes, Circuits, Targets, Invalidation) ─────────
   const handleAlertMessage = useCallback((payload) => {
     if (!payload) return
     setUnreadAlertCount((prev) => prev + 1)
     playAlertChime()
 
-    const headline = payload.headline || `${payload.symbol} ${payload.alert_type || 'Alert'}`
-    const summary = payload.summary || payload.description || payload.message || ''
+    const isTest = payload.environment === 'TEST' || payload.is_live === false
+    const isInvalidated = payload.is_invalidated === true || payload.stage === 'INVALIDATED'
+    const isTarget = payload.is_target === true || payload.stage === 'T1_ACHIEVED' || payload.stage === 'TARGET_ACHIEVED' || payload.target_achieved === true
+    const isTrail = payload.is_trail === true || payload.stage === 'TRAILING_UPDATE'
+    const envBadge = isTest ? '🧪 [TEST]' : '🟢 [REAL/LIVE]'
+
+    let headline = payload.headline || `${payload.symbol} ${payload.alert_type || 'Alert'}`
+    if (!headline.includes('[TEST]') && !headline.includes('[REAL/LIVE]')) {
+      if (isInvalidated) {
+        headline = `⚠️ ${envBadge} VIEW INVALIDATED: ${payload.symbol}`
+      } else if (isTarget) {
+        headline = `🎯 ${envBadge} TARGET ACHIEVED: ${payload.symbol}`
+      } else if (isTrail) {
+        headline = `📈 ${envBadge} TRAILING STOP: ${payload.symbol}`
+      } else {
+        headline = `${envBadge} ${headline}`
+      }
+    }
+
+    const decision = payload.trailing_decision ? `⚡ ${payload.trailing_decision}: ` : ''
+    const summary = payload.invalidation_reason || payload.trailing_rationale || payload.summary || payload.description || payload.message || ''
     const isGamma = payload.alert_type === 'GAMMA_BLAST'
     const isCircuit = payload.alert_type === 'CIRCUIT_WARNING'
 
+    const rawTime = payload.timestamp || payload.invalidated_at || payload.triggered_at || payload.created_at || ''
+    let timeStr = ''
+    if (rawTime) {
+      timeStr = rawTime.includes(' ') ? rawTime.split(' ').slice(-2).join(' ') : rawTime
+    } else {
+      timeStr = new Date().toLocaleTimeString('en-IN', { hour12: false }) + ' IST'
+    }
+
     useToastStore.getState().addToast({
-      type: isGamma ? 'trade' : isCircuit ? 'warning' : 'info',
+      type: isInvalidated ? 'error' : isTarget ? 'trade' : isTrail ? 'info' : isGamma ? 'trade' : isCircuit ? 'warning' : 'info',
       title: headline,
-      message: summary,
-      duration: 8000,
+      message: `${decision}${summary}`,
+      timestamp: timeStr,
+      duration: isInvalidated ? 12000 : (isTarget ? 10000 : 8000),
     })
+
+    // Notify Alerts Manager and other active screens that an alert arrived
+    window.dispatchEvent(new CustomEvent('new-market-alert', { detail: payload }))
   }, [])
 
   useSSEStream(alertStreamUrl, {
@@ -545,8 +585,8 @@ export default function App() {
               {activeView === 'terminal' && (
                 <TerminalView
                   onOpenOrderTicket={handleOpenOrderTicket}
-                  externalSymbol={ctxSymbol}
-                  onSymbolChange={setCtxSymbol}
+                  externalSymbol={selectedSymbol || ctxSymbol}
+                  onSymbolChange={handleSymbolChange}
                   externalTimeframe={ctxTimeframe}
                   onTimeframeChange={setCtxTimeframe}
                   externalLayout={ctxLayout}
@@ -558,7 +598,7 @@ export default function App() {
                 <InflectionScannerView
                   onOpenOrderTicket={handleOpenOrderTicket}
                   onNavigateToTerminal={(sym) => {
-                    setCtxSymbol(sym)
+                    handleSymbolChange(sym)
                     setActiveView('terminal')
                   }}
                   onNavigateToDebate={(sym) => {
@@ -572,7 +612,11 @@ export default function App() {
               )}
 
               {activeView === 'options' && (
-                <OptionsDeskView onOpenOrderTicket={handleOpenOrderTicket} />
+                <OptionsDeskView
+                  onOpenOrderTicket={handleOpenOrderTicket}
+                  selectedSymbol={selectedSymbol || ctxSymbol}
+                  onSelectSymbol={handleSymbolChange}
+                />
               )}
 
               {activeView === 'copilot' && (
