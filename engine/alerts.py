@@ -505,6 +505,37 @@ class AlertManager:
         if alert.webhook_url:
             _webhook_notify(alert, ltp=ltp)
 
+        # 5. Real-time SSE dispatch to React UI
+        try:
+            from web.sse import event_bus
+            event_bus.publish_sync("alert", {
+                "alert_id": alert.id,
+                "alert_type": alert.alert_type,
+                "symbol": alert.symbol,
+                "exchange": alert.exchange,
+                "headline": f"🔔 {alert.symbol} {alert.alert_type} Alert Triggered",
+                "description": desc,
+                "summary": f"{desc}{ltp_str}",
+                "triggered_at": alert.triggered_at,
+                "ltp": ltp or alert.threshold,
+                "stage": "TRIGGERED",
+            })
+            event_bus.publish_sync("system", {
+                "type": "market_alert",
+                "alert": {
+                    "alert_id": alert.id,
+                    "alert_type": alert.alert_type,
+                    "symbol": alert.symbol,
+                    "exchange": alert.exchange,
+                    "headline": f"🔔 {alert.symbol} Alert",
+                    "summary": f"{desc}{ltp_str}",
+                    "triggered_at": alert.triggered_at,
+                    "ltp": ltp or alert.threshold,
+                }
+            })
+        except Exception:
+            pass
+
     def _evaluate(self, alert: Alert) -> bool:
         """Check if an alert's condition is met right now."""
         if alert.alert_type == "PRICE":

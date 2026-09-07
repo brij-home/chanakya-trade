@@ -182,11 +182,23 @@ async def lifespan(app: FastAPI):
 
     ticker_stream.start(poll_interval_seconds=3.0)
 
+    # Start the autonomous real-time auto alert engine (45s loop)
+    try:
+        from engine.auto_alert_engine import auto_alert_engine
+        auto_alert_engine.start_polling(interval_seconds=45)
+    except Exception:
+        pass
+
     warmer_task = asyncio.create_task(_background_cache_warmer())
     maintenance_task = asyncio.create_task(_background_maintenance_scheduler())
     yield
     warmer_task.cancel()
     maintenance_task.cancel()
+    try:
+        from engine.auto_alert_engine import auto_alert_engine
+        auto_alert_engine.stop_polling()
+    except Exception:
+        pass
     try:
         ticker_stream.stop(timeout=1.5)
     except Exception:
@@ -2738,6 +2750,17 @@ async def stream_alerts():
             "X-Accel-Buffering": "no",
         },
     )
+
+
+@app.get("/api/alerts/auto", tags=["Alerts"])
+async def get_auto_alerts(limit: int = 50, alert_type: Optional[str] = None, stage: Optional[str] = None):
+    """
+    Get real-time auto-detected alerts (Gamma Blasts, Squeeze Breakouts, Circuit Warnings, SMC).
+    """
+    from engine.auto_alert_engine import auto_alert_engine
+
+    alerts = auto_alert_engine.get_alerts(limit=limit, alert_type=alert_type, stage=stage)
+    return {"status": "ok", "data": [a.to_dict() for a in alerts]}
 
 
 # ── Real-Time Market Ticker Stream (Indian & Global) ───────────

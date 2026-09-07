@@ -14,6 +14,7 @@ import ModeBanner from './components/Common/ModeBanner'
 import ToastContainer from './components/Toast/ToastContainer'
 import HotkeyPanel from './components/UI/HotkeyPanel'
 import ErrorBoundary from './components/ErrorBoundary'
+import { useToastStore } from './hooks/useToast'
 
 // ── Lazy-loaded Workspace Views (Code-Split Chunks) ─────────────────────────
 const TerminalView = lazy(() => import('./components/Views/TerminalView'))
@@ -72,6 +73,26 @@ function useTheme() {
   return { theme, toggle }
 }
 
+/* ── Web Audio Chime (Institutional 2-tone chime) ────────────────────────── */
+function playAlertChime() {
+  try {
+    const AudioContext = window.AudioContext || window.webkitAudioContext
+    if (!AudioContext) return
+    const ctx = new AudioContext()
+    const osc = ctx.createOscillator()
+    const gain = ctx.createGain()
+    osc.type = 'sine'
+    osc.frequency.setValueAtTime(587.33, ctx.currentTime) // D5
+    osc.frequency.exponentialRampToValueAtTime(880, ctx.currentTime + 0.15) // A5
+    gain.gain.setValueAtTime(0.12, ctx.currentTime)
+    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.35)
+    osc.connect(gain)
+    gain.connect(ctx.destination)
+    osc.start()
+    osc.stop(ctx.currentTime + 0.35)
+  } catch (_) {}
+}
+
 /* ── Main App ───────────────────────────────────────────────────────────── */
 export default function App() {
   const { setPort, setSidecarError, setBrokerStatuses, activeView, setActiveView } = useChatStore()
@@ -83,9 +104,11 @@ export default function App() {
   const setModeLoading = useChatStore((s) => s.setModeLoading)
   const { theme, toggle: toggleTheme } = useTheme()
   const [pilotSafety, setPilotSafety] = useState(null)
+  const [unreadAlertCount, setUnreadAlertCount] = useState(0)
 
   // System status SSE URL — connects when port is known
   const systemStreamUrl = port ? `${getBaseUrl(port)}/api/system/stream` : null
+  const alertStreamUrl = port ? `${getBaseUrl(port)}/stream/alerts` : null
 
   // Setup phase state machine — fast path: if terminal was already initialized, skip full boot screen
   const [setupPhase, setSetupPhase] = useState(() => {
@@ -250,6 +273,37 @@ export default function App() {
     onOpen: () => setModeLoading(false),
     enabled: !!(port || port === 0) && setupPhase === 'ready',
   })
+
+  // ── Real-Time Auto-Alert Stream (Gamma Blasts, Squeezes, Circuits) ─────────
+  const handleAlertMessage = useCallback((payload) => {
+    if (!payload) return
+    setUnreadAlertCount((prev) => prev + 1)
+    playAlertChime()
+
+    const headline = payload.headline || `${payload.symbol} ${payload.alert_type || 'Alert'}`
+    const summary = payload.summary || payload.description || payload.message || ''
+    const isGamma = payload.alert_type === 'GAMMA_BLAST'
+    const isCircuit = payload.alert_type === 'CIRCUIT_WARNING'
+
+    useToastStore.getState().addToast({
+      type: isGamma ? 'trade' : isCircuit ? 'warning' : 'info',
+      title: headline,
+      message: summary,
+      duration: 8000,
+    })
+  }, [])
+
+  useSSEStream(alertStreamUrl, {
+    onMessage: handleAlertMessage,
+    enabled: !!(port || port === 0) && setupPhase === 'ready',
+  })
+
+  // Clear unread count when user views the alerts manager
+  useEffect(() => {
+    if (activeView === 'alerts') {
+      setUnreadAlertCount(0)
+    }
+  }, [activeView])
 
   // Fallback REST polling for broker status when SSE is not available
   // (older backend versions without /api/system/stream)
@@ -479,7 +533,7 @@ export default function App() {
       <div className="flex flex-1 overflow-hidden">
 
         {/* Left Activity Bar — always present */}
-        <ActivityBar alertCount={0} />
+        <ActivityBar alertCount={unreadAlertCount} />
 
         {/* Copilot Sidebar */}
         {isCopilot && <Sidebar />}

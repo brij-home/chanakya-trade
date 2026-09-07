@@ -179,6 +179,13 @@ class AlertRemoveRequest(BaseModel):
     alert_id: str
 
 
+class AutoAlertsListRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    limit: int = 50
+    alert_type: Optional[str] = None
+    stage: Optional[str] = None
+
+
 class HintRequest(BaseModel):
     """Mid-stream context injection (#113)."""
 
@@ -1553,6 +1560,53 @@ async def skill_alerts_remove(req: AlertRemoveRequest):
         return {"status": "ok", "data": {"alert_id": req.alert_id, "removed": True}}
     except HTTPException:
         raise
+    except Exception as e:
+        raise _err(str(e))
+
+
+@router.post("/alerts/auto/list")
+async def skill_auto_alerts_list(req: Optional[AutoAlertsListRequest] = None):
+    """List auto-detected real-time alerts (Gamma Blasts, Squeeze Breakouts, Circuits, SMC)."""
+    try:
+        from engine.auto_alert_engine import auto_alert_engine
+
+        limit = req.limit if req else 50
+        alert_type = req.alert_type if req else None
+        stage = req.stage if req else None
+        alerts = auto_alert_engine.get_alerts(limit=limit, alert_type=alert_type, stage=stage)
+        return {"status": "ok", "data": [a.to_dict() for a in alerts]}
+    except Exception as e:
+        raise _err(str(e))
+
+
+@router.post("/alerts/auto/scan_now")
+async def skill_auto_alerts_scan_now():
+    """Trigger immediate diagnostic scan across all detectors and return fresh alerts."""
+    try:
+        from engine.auto_alert_engine import auto_alert_engine
+
+        new_alerts = auto_alert_engine.scan_all_now()
+        all_alerts = auto_alert_engine.get_alerts(limit=50)
+        return {
+            "status": "ok",
+            "data": {
+                "newly_detected": [a.to_dict() for a in new_alerts],
+                "all_recent": [a.to_dict() for a in all_alerts],
+                "count": len(all_alerts),
+            },
+        }
+    except Exception as e:
+        raise _err(str(e))
+
+
+@router.post("/alerts/auto/clear")
+async def skill_auto_alerts_clear():
+    """Clear auto-detected alert history and reset anti-spam cooldowns."""
+    try:
+        from engine.auto_alert_engine import auto_alert_engine
+
+        auto_alert_engine.clear_alerts()
+        return {"status": "ok", "data": {"cleared": True}}
     except Exception as e:
         raise _err(str(e))
 
