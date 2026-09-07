@@ -555,12 +555,22 @@ class AutoAlertEngine:
         # 3. Telegram push (if bot token configured)
         try:
             from engine.alerts import _telegram_notify
-            _telegram_notify(
-                f"🚨 {alert.headline}\n\n"
-                f"{alert.summary}\n\n"
-                f"🎯 Target: ₹{alert.target_level} | 🛑 SL: ₹{alert.stop_loss}\n"
-                f"Confidence: {alert.confidence}%"
+
+            plan_str = ""
+            if alert.actionable_plan:
+                action = alert.actionable_plan.get("action", "")
+                entry = alert.actionable_plan.get("recommended_entry") or alert.actionable_plan.get("entry_range", "")
+                target = alert.actionable_plan.get("target", f"₹{alert.target_level}")
+                sl = alert.actionable_plan.get("stop_loss", f"₹{alert.stop_loss}")
+                plan_str = f"\n\n⚡ <b>Trade Plan:</b> {action} @ {entry}\n🎯 <b>Target:</b> {target} | 🛑 <b>SL:</b> {sl}"
+
+            tg_msg = (
+                f"🚨 <b>{alert.headline}</b>\n\n"
+                f"{alert.summary}"
+                f"{plan_str}\n\n"
+                f"📊 <b>Confidence:</b> {alert.confidence}% | 🕒 {alert.created_at or 'Live'}"
             )
+            _telegram_notify(tg_msg)
         except Exception:
             pass
 
