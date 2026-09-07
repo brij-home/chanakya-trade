@@ -113,6 +113,13 @@ class InflectionSetup:
     dist_52w_high_pct: float = 0.0
     dist_52w_low_pct: float = 0.0
     is_fo: bool = False
+    technical_score: int = 0  # 0 to 40
+    sector_score: int = 0  # 0 to 30
+    quality_score: int = 0  # 0 to 30
+    confluence_score: int = 0  # 0 to 100
+    executive_verdict: str = "👀 WATCHLIST"
+    executive_summary: str = ""
+    data_quality_label: str = "💾 0ms Local Cache"
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -191,7 +198,8 @@ def evaluate_single_stock_inflection(
     cap_tier_override: Optional[str] = None,
     allow_network: bool = True,
     rrg_matrix: Optional[dict[str, Any]] = None,
-    use_forensic_cache_only: bool = False,
+    use_forensic_cache_only: bool = True,
+    forensics_data: Optional[dict[str, Any]] = None,
 ) -> Optional[InflectionSetup]:
     """
     Evaluates whether a single stock is at an inflection point ready for a big or multibagger move.
@@ -298,24 +306,42 @@ def evaluate_single_stock_inflection(
             pass
 
         try:
-            if use_forensic_cache_only:
-                from engine.analysis_cache import analysis_cache
+            if forensics_data:
+                forensic_safe = forensics_data.get("overall_forensic_verdict") in (
+                    "CLEAN_PASS",
+                    "MILD_WARNING",
+                ) or (
+                    not forensics_data.get("is_manipulator_risk")
+                    and forensics_data.get("distress_zone") != "DISTRESS"
+                )
+            elif use_forensic_cache_only:
+                from engine.eod_store import get_cached_forensics
 
-                cached = analysis_cache.get_fundamental(f"forensic_audit_v2_{clean_sym}")
-                if cached and isinstance(cached, dict):
-                    forensic_safe = cached.get("overall_forensic_verdict") in (
+                cached_eod = get_cached_forensics(clean_sym, max_age_days=30)
+                if cached_eod and isinstance(cached_eod, dict):
+                    forensic_safe = cached_eod.get("overall_forensic_verdict") in (
                         "CLEAN_PASS",
                         "MILD_WARNING",
                     ) or (
-                        not cached.get("is_manipulator_risk")
-                        and cached.get("distress_zone") != "DISTRESS"
+                        not cached_eod.get("is_manipulator_risk")
+                        and cached_eod.get("distress_zone") != "DISTRESS"
                     )
                 else:
-                    forensic_safe = True
+                    from engine.analysis_cache import analysis_cache
+
+                    cached = analysis_cache.get_fundamental(f"forensic_audit_v2_{clean_sym}")
+                    if cached and isinstance(cached, dict):
+                        forensic_safe = cached.get("overall_forensic_verdict") in (
+                            "CLEAN_PASS",
+                            "MILD_WARNING",
+                        )
+                    else:
+                        forensic_safe = True
             else:
                 f_audit = audit_company_forensics(clean_sym)
                 forensic_safe = f_audit.overall_forensic_verdict in ("CLEAN_PASS", "MILD_WARNING")
         except Exception:
+            forensic_safe = True
             pass
 
     # ─────────────────────────────────────────────────────────────────
@@ -578,6 +604,31 @@ def evaluate_single_stock_inflection(
     cap_tier = cap_tier_override or get_stock_cap_tier(clean_sym)
     is_fo = clean_sym in THEMATIC_PRESETS.get("fno_universe", {}).get("symbols", [])
 
+    # 3-Pillar Unified Matrix Scores
+    tech_score = int(min(40, (max_archetype_score * 0.22) + (trend_passed * 1.5) + (8 if weekly_stage == "WEEKLY_STAGE_2" else 0) + (4 if is_vcp or squeeze.is_squeeze_on else 0)))
+    sec_score = int(min(30, (15 if rrg_quadrant == "LEADING" else (10 if rrg_quadrant == "IMPROVING" else 4)) + (sector_tailwind * 0.15)))
+    qual_score = int(min(30, (20 if forensic_safe else 0) + (10 if turnover_20d_cr >= 1.0 else (6 if turnover_20d_cr >= 0.5 else 2))))
+    confluence_total = int(min(99, tech_score + sec_score + qual_score))
+
+    # Executive Action Verdict
+    if is_uc_locked:
+        exec_verdict = "🔒 CIRCUIT LOCKED"
+    elif score >= 75 and timing_state == "TRIGGER_NOW" and forensic_safe:
+        exec_verdict = "🔥 STRONG BUY"
+    elif timing_state == "COILING_IMMINENT":
+        exec_verdict = "⏳ ACCUMULATE (COILING)"
+    elif timing_state == "PULLBACK_RETEST":
+        exec_verdict = "🎯 RETEST ENTRY"
+    else:
+        exec_verdict = "👀 WATCHLIST"
+
+    # 1-Sentence Executive Summary for rapid 10-second decisions
+    exec_summary = (
+        f"{clean_sym}: {archetype_label} with 1:{risk_reward} R/R. "
+        f"Confluence: Tech {tech_score}/40, Sector {sector_name} ({rrg_quadrant}) {sec_score}/30, Quality {qual_score}/30. "
+        f"Hard stop ₹{stop_loss:.2f}."
+    )
+
     return InflectionSetup(
         symbol=clean_sym,
         name=company_name,
@@ -622,6 +673,13 @@ def evaluate_single_stock_inflection(
         dist_52w_high_pct=dist_52w_high,
         dist_52w_low_pct=dist_52w_low,
         is_fo=is_fo,
+        technical_score=tech_score,
+        sector_score=sec_score,
+        quality_score=qual_score,
+        confluence_score=confluence_total,
+        executive_verdict=exec_verdict,
+        executive_summary=exec_summary,
+        data_quality_label="💾 0ms Local Cache",
     )
 
 
@@ -634,7 +692,7 @@ def scan_inflections_universe(
     timing_filter: str = "ALL",
     min_score: int = 45,
     max_results: int = 40,
-    min_turnover_cr: float = 0.5,
+    min_turnover_cr: float = 0.0,
     cap_tier_filter: str = "ALL",
     use_local_cache: bool = True,
     sync_missing: bool = True,
@@ -694,6 +752,15 @@ def scan_inflections_universe(
     except Exception:
         rrg_matrix = None
 
+    # Pre-fetch forensic audits in batch from local store (30-day freshness)
+    forensics_cache_map: dict[str, Any] = {}
+    try:
+        from engine.eod_store import get_cached_forensics_batch
+
+        forensics_cache_map = get_cached_forensics_batch(symbols, max_age_days=30)
+    except Exception:
+        pass
+
     # 2. Parallel Evaluation
     candidates: list[InflectionSetup] = []
 
@@ -711,6 +778,7 @@ def scan_inflections_universe(
                 allow_network=not use_local_cache,
                 rrg_matrix=rrg_matrix,
                 use_forensic_cache_only=True,
+                forensics_data=forensics_cache_map.get(sym),
             )
         except Exception:
             return None

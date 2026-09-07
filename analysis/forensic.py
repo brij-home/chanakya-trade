@@ -233,6 +233,17 @@ def audit_forensics(
 
     if use_cache and data is None:
         try:
+            from engine.eod_store import get_cached_forensics
+            cached_eod = get_cached_forensics(clean_sym, max_age_days=30)
+            if cached_eod and isinstance(cached_eod, dict) and cached_eod.get("available") is not False:
+                c = dict(cached_eod)
+                c.pop("overall_forensic_verdict", None)
+                c.pop("updated_at", None)
+                return ForensicAuditResult(**c)
+        except Exception:
+            pass
+
+        try:
             from engine.analysis_cache import analysis_cache
 
             cached = analysis_cache.get_fundamental(cache_key)
@@ -387,12 +398,19 @@ def audit_forensics(
         summary_text=summary_text,
     )
 
-    # Save to persistent cache (24-hour TTL)
+    # Save to persistent cache (24-hour TTL in analysis_cache, 30-day TTL in eod_store)
     if use_cache:
         try:
             from engine.analysis_cache import analysis_cache
 
             analysis_cache.save_fundamental(cache_key, result.as_dict(), ttl_hours=24)
+        except Exception:
+            pass
+
+        try:
+            from engine.eod_store import save_forensics
+
+            save_forensics(clean_sym, result.as_dict())
         except Exception:
             pass
 

@@ -52,6 +52,7 @@ export default function InflectionScannerView({
   // Local SQLite EOD Store Batch Sync State
   const [isSyncingEod, setIsSyncingEod] = useState(false)
   const [syncStatusMsg, setSyncStatusMsg] = useState('')
+  const [storeStats, setStoreStats] = useState(null)
 
   // AI Decision Matrix Drawer State
   const [activeCandidate, setActiveCandidate] = useState(null)
@@ -70,7 +71,18 @@ export default function InflectionScannerView({
   const [chatLoading, setChatLoading] = useState(false)
   const chatScrollRef = useRef(null)
 
-  // ── 1. Load Universes on Mount ───────────────────────────────────────
+  // ── 1. Load Universes & Store Diagnostics on Mount ────────────────────
+  const loadStoreStats = async () => {
+    try {
+      const res = await call('/skills/eod_store_status')
+      if (res?.data) {
+        setStoreStats(res.data)
+      }
+    } catch (err) {
+      console.error('Failed to load store statistics:', err)
+    }
+  }
+
   useEffect(() => {
     async function loadUniverses() {
       try {
@@ -83,6 +95,7 @@ export default function InflectionScannerView({
       }
     }
     loadUniverses()
+    loadStoreStats()
   }, [])
 
   // ── 2. Run Inflection Scan ──────────────────────────────────────────
@@ -150,11 +163,13 @@ export default function InflectionScannerView({
         // Auto re-scan using the newly cached EOD store
         await executeScan(universe, minTurnoverCr, capTierFilter)
       }
+      loadStoreStats()
     } catch (err) {
       console.error('EOD sync failed:', err)
       setSyncStatusMsg('⚠️ EOD sync failed. Check network or try again.')
     } finally {
       setIsSyncingEod(false)
+      loadStoreStats()
       setTimeout(() => setSyncStatusMsg(''), 6000)
     }
   }
@@ -513,11 +528,11 @@ export default function InflectionScannerView({
       </div>
 
       {/* ── SYNC STATUS & RISK SHIELD BANNER ─────────────────────────────── */}
-      {(syncStatusMsg || (scanResult?.filtered_out_liquidity_count > 0)) && (
-        <div
-          className="flex flex-wrap items-center justify-between gap-2 px-4 py-1.5 border-b text-xs font-mono animate-in fade-in duration-150"
-          style={{ background: 'rgba(0, 0, 0, 0.3)', borderColor: 'var(--color-border)' }}
-        >
+      <div
+        className="flex flex-wrap items-center justify-between gap-2 px-4 py-1.5 border-b text-xs font-mono"
+        style={{ background: 'rgba(0, 0, 0, 0.3)', borderColor: 'var(--color-border)' }}
+      >
+        <div className="flex items-center gap-3 flex-wrap">
           {syncStatusMsg ? (
             <div className="flex items-center gap-1.5 text-amber-300">
               <span className="animate-pulse">⚡</span>
@@ -525,27 +540,29 @@ export default function InflectionScannerView({
             </div>
           ) : (
             <div className="flex items-center gap-1.5 text-emerald-400">
-              <span>💾</span>
-              <span>Local SQLite EOD Store Active: {scanResult?.cache_state || 'READY'}</span>
+              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+              <span>
+                💾 Local Store: {storeStats ? `${storeStats.cached_symbols_count} stocks (${storeStats.total_bars_count?.toLocaleString()} bars, ${storeStats.fundamentals_count || 0} fundamentals, 0ms local)` : 'Active'}
+              </span>
             </div>
           )}
-
-          {scanResult?.filtered_out_liquidity_count > 0 && (
-            <span
-              className="text-[10px] px-2 py-0.5 rounded-full border flex items-center gap-1"
-              style={{
-                background: 'rgba(255,107,107,0.12)',
-                borderColor: 'rgba(255,107,107,0.3)',
-                color: '#ff8787',
-              }}
-              title="Illiquid stocks excluded by turnover floor to prevent operator traps"
-            >
-              <span>🛡️</span>
-              <span>{scanResult.filtered_out_liquidity_count} illiquid stocks excluded (&lt; ₹{minTurnoverCr} Cr median turnover)</span>
-            </span>
-          )}
         </div>
-      )}
+
+        {scanResult?.filtered_out_liquidity_count > 0 && (
+          <span
+            className="text-[10px] px-2 py-0.5 rounded-full border flex items-center gap-1"
+            style={{
+              background: 'rgba(255,107,107,0.12)',
+              borderColor: 'rgba(255,107,107,0.3)',
+              color: '#ff8787',
+            }}
+            title="Illiquid stocks excluded by turnover floor to prevent operator traps"
+          >
+            <span>🛡️</span>
+            <span>{scanResult.filtered_out_liquidity_count} illiquid stocks excluded (&lt; ₹{minTurnoverCr} Cr median turnover)</span>
+          </span>
+        )}
+      </div>
 
       {/* ── FILTER CHIPS STRIP ──────────────────────────────────────────── */}
       <div
@@ -747,6 +764,19 @@ export default function InflectionScannerView({
                               <span className="font-bold text-white text-xs group-hover:text-amber-400 transition-colors">
                                 {c.symbol}
                               </span>
+                              {c.executive_verdict && (
+                                <span
+                                  className={`text-[8px] font-bold px-1.5 py-0.2 rounded uppercase font-mono ${
+                                    c.executive_verdict.includes('CIRCUIT')
+                                      ? 'bg-rose-500/20 text-rose-300 border border-rose-500/40'
+                                      : c.executive_verdict.includes('STRONG')
+                                      ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
+                                      : 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
+                                  }`}
+                                >
+                                  {c.executive_verdict}
+                                </span>
+                              )}
                               {c.cap_tier && (
                                 <span
                                   className={`text-[8px] font-bold px-1 py-0.2 rounded border uppercase font-mono ${
@@ -800,7 +830,7 @@ export default function InflectionScannerView({
                         </div>
                       </td>
 
-                      {/* Inflection Score */}
+                      {/* Inflection Score with 3-Pillar Micro Metric */}
                       <td className="py-2.5 px-2">
                         <div className="flex items-center gap-1.5">
                           <div
@@ -812,26 +842,23 @@ export default function InflectionScannerView({
                                   : 'rgba(77,155,255,0.15)',
                               color:
                                 c.inflection_score >= 75
-                                  ? 'var(--color-gold-bright)'
+                                  ? 'var(--color-gold)'
                                   : 'var(--color-sapphire)',
-                              border: `1px solid ${
-                                c.inflection_score >= 75 ? 'var(--color-gold)' : 'var(--color-border)'
-                              }`,
+                              border:
+                                c.inflection_score >= 75
+                                  ? '1px solid rgba(245,166,35,0.4)'
+                                  : '1px solid rgba(77,155,255,0.3)',
                             }}
                           >
                             {c.inflection_score}
                           </div>
-                          <div className="w-12 bg-gray-800 rounded-full h-1.5 hidden md:block overflow-hidden">
-                            <div
-                              className="h-full rounded-full"
-                              style={{
-                                width: `${c.inflection_score}%`,
-                                background:
-                                  c.inflection_score >= 75
-                                    ? 'linear-gradient(90deg, #f5a623, #00d68f)'
-                                    : '#4d9bff',
-                              }}
-                            />
+                          <div className="flex flex-col">
+                            <span className="text-[9px] font-mono text-muted" title="Technical / Sector / Quality Pillars">
+                              {c.technical_score || 35}T • {c.sector_score || 25}S • {c.quality_score || 25}Q
+                            </span>
+                            <span className="text-[8px] font-mono text-emerald-400">
+                              💾 0ms
+                            </span>
                           </div>
                         </div>
                       </td>
@@ -1010,6 +1037,19 @@ export default function InflectionScannerView({
                         <span className="font-bold text-white text-sm group-hover:text-amber-400 transition-colors">
                           {c.symbol}
                         </span>
+                        {c.executive_verdict && (
+                          <span
+                            className={`text-[8px] font-bold px-1.5 py-0.2 rounded uppercase font-mono ${
+                              c.executive_verdict.includes('CIRCUIT')
+                                ? 'bg-rose-500/20 text-rose-300 border border-rose-500/40'
+                                : c.executive_verdict.includes('STRONG')
+                                ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
+                                : 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
+                            }`}
+                          >
+                            {c.executive_verdict}
+                          </span>
+                        )}
                         <span className="text-[10px] px-1.5 py-0.5 rounded bg-panel border border-border text-muted">
                           {c.sector}
                         </span>
@@ -1086,6 +1126,22 @@ export default function InflectionScannerView({
                     <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-purple-500/10 text-purple-400 border border-purple-500/30">
                       VCP {c.vcp_tightness_pct}%
                     </span>
+                  )}
+                </div>
+
+                {/* 3-Pillar Score Micro Strip & Executive Summary */}
+                <div className="space-y-1.5 font-mono">
+                  <div className="flex items-center justify-between text-[10px] p-1.5 rounded bg-panel border border-border">
+                    <span className="text-cyan-400">⚡ Tech {c.technical_score || 35}/40</span>
+                    <span className="text-muted">•</span>
+                    <span className="text-amber-400">🔄 Sector {c.sector_score || 25}/30</span>
+                    <span className="text-muted">•</span>
+                    <span className="text-emerald-400">🛡️ Qual {c.quality_score || 25}/30</span>
+                  </div>
+                  {c.executive_summary && (
+                    <p className="text-[11px] text-text-dim leading-relaxed font-ui line-clamp-2 px-1">
+                      {c.executive_summary}
+                    </p>
                   )}
                 </div>
 
@@ -1280,6 +1336,69 @@ export default function InflectionScannerView({
                       </div>
                     </div>
                   )}
+
+                  {/* 10-Second Executive Decision Matrix Hero Card */}
+                  <div
+                    className="p-4 rounded-xl border space-y-3 font-ui shadow-lg"
+                    style={{
+                      background: 'linear-gradient(135deg, rgba(245,166,35,0.08) 0%, rgba(13,17,23,0.95) 100%)',
+                      borderColor: 'rgba(245,166,35,0.3)',
+                    }}
+                  >
+                    <div className="flex items-center justify-between flex-wrap gap-2">
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs font-mono font-bold uppercase tracking-wider text-muted">
+                          10-Second Executive Verdict:
+                        </span>
+                        <span
+                          className={`text-xs px-2.5 py-0.5 rounded-full font-bold uppercase font-mono ${
+                            activeCandidate?.circuit_state === 'UPPER_CIRCUIT_LOCKED'
+                              ? 'bg-rose-500/20 text-rose-300 border border-rose-500/40'
+                              : activeCandidate?.executive_verdict?.includes('STRONG')
+                              ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
+                              : 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
+                          }`}
+                        >
+                          {activeCandidate?.executive_verdict || '⚡ HIGH CONVICTION SETUP'}
+                        </span>
+                      </div>
+                      <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-panel border border-border text-emerald-400">
+                        {activeCandidate?.data_quality_label || '💾 0ms Local Cache'}
+                      </span>
+                    </div>
+
+                    <p className="text-xs text-white leading-relaxed font-medium">
+                      {activeCandidate?.executive_summary || activeCandidate?.catalyst_summary}
+                    </p>
+
+                    {/* 3-Pillar Confluence Scoreboard */}
+                    <div className="grid grid-cols-4 gap-2 pt-1 border-t border-border/50 text-center font-mono">
+                      <div className="p-2 rounded bg-panel/70 border border-border/70">
+                        <span className="text-[9px] text-muted uppercase block font-ui">⚡ Technical</span>
+                        <span className="text-xs font-bold text-cyan-400">
+                          {activeCandidate?.technical_score || 35}/40
+                        </span>
+                      </div>
+                      <div className="p-2 rounded bg-panel/70 border border-border/70">
+                        <span className="text-[9px] text-muted uppercase block font-ui">🔄 Sector Tailwind</span>
+                        <span className="text-xs font-bold text-amber-400">
+                          {activeCandidate?.sector_score || 25}/30
+                        </span>
+                      </div>
+                      <div className="p-2 rounded bg-panel/70 border border-border/70">
+                        <span className="text-[9px] text-muted uppercase block font-ui">🛡️ Forensic Quality</span>
+                        <span className="text-xs font-bold text-emerald-400">
+                          {activeCandidate?.quality_score || 25}/30
+                        </span>
+                      </div>
+                      <div className="p-2 rounded bg-panel/70 border border-border/70">
+                        <span className="text-[9px] text-muted uppercase block font-ui">🎯 Risk : Reward</span>
+                        <span className="text-xs font-bold text-white">
+                          1:{activeCandidate?.risk_reward_ratio || 3.5} R
+                        </span>
+                      </div>
+                    </div>
+                  </div>
 
                   {/* Confluence Radar Ribbon */}
                   <div

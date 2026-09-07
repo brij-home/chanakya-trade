@@ -3016,6 +3016,21 @@ async def skill_inflection_sync(req: InflectionSyncSkillRequest):
         raise _err(str(e))
 
 
+@router.get("/eod_store_status")
+@router.post("/eod_store_status")
+async def skill_eod_store_status():
+    """
+    Returns high-level statistics and health of the local SQLite EOD & Fundamentals store.
+    """
+    try:
+        from engine.eod_store import get_store_statistics
+
+        stats = get_store_statistics()
+        return _ok(stats)
+    except Exception as e:
+        raise _err(str(e))
+
+
 @router.get("/inflection_universes")
 @router.post("/inflection_universes")
 async def skill_inflection_universes():

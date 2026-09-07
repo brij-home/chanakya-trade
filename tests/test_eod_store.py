@@ -1,7 +1,8 @@
 """
 tests/test_eod_store.py
 ───────────────────────
-Unit tests for the High-Performance Local SQLite EOD Store and Liquidity/Circuit controls.
+Unit tests for the High-Performance Multi-Tier Local SQLite EOD Store,
+Delta Sync, Fundamentals/Forensics Caching, and Liquidity/Circuit controls.
 """
 
 from __future__ import annotations
@@ -19,6 +20,17 @@ from engine.eod_store import (
     get_cached_ohlcv_batch,
     get_symbol_meta,
     get_stale_symbols,
+    get_stale_symbols_detailed,
+    save_fundamentals,
+    save_fundamentals_batch,
+    get_cached_fundamentals,
+    get_cached_fundamentals_batch,
+    save_forensics,
+    save_forensics_batch,
+    get_cached_forensics,
+    get_cached_forensics_batch,
+    get_store_statistics,
+    clear_l1_caches,
 )
 from analysis.inflection_scanner import (
     evaluate_single_stock_inflection,
@@ -28,11 +40,15 @@ from analysis.inflection_scanner import (
 
 @pytest.fixture(autouse=True)
 def temp_eod_db(tmp_path, monkeypatch):
+    from engine.eod_store import reset_store_connections
+
+    reset_store_connections()
     test_db = tmp_path / "test_eod_bars.db"
     monkeypatch.setenv("CHANAKYA_EOD_DB_PATH", str(test_db))
     monkeypatch.setenv("CHANAKYA_TESTING", "1")
     init_eod_store()
-    return test_db
+    yield test_db
+    reset_store_connections()
 
 
 def _generate_synthetic_df(
@@ -41,8 +57,9 @@ def _generate_synthetic_df(
     base_price: float = 100.0,
     daily_volume: int = 500000,
     is_uc: bool = False,
+    end_date: str = "2026-09-04",
 ) -> pd.DataFrame:
-    dates = pd.date_range(end="2026-09-04", periods=days, freq="B")
+    dates = pd.date_range(end=end_date, periods=days, freq="B")
     trend = np.linspace(0, 50, days)
     noise = np.sin(np.linspace(0, 10, days)) * 2
 
@@ -81,7 +98,7 @@ def test_eod_store_crud_and_metadata():
     saved = save_ohlcv_batch({"TEST_TRENT": df_trent, "TEST_DIXON": df_dixon})
     assert saved == 320
 
-    # Test single retrieval
+    # Test single retrieval (hits L1 cache or SQLite)
     cached_trent = get_cached_ohlcv("TEST_TRENT")
     assert cached_trent is not None
     assert len(cached_trent) == 160
@@ -101,12 +118,77 @@ def test_eod_store_crud_and_metadata():
     assert meta["high_52w"] >= meta["low_52w"]
 
 
-def test_eod_store_stale_detection():
-    df = _generate_synthetic_df("TRENT", days=50)
-    save_ohlcv_batch({"TRENT": df})
+def test_delta_append_and_metadata_integrity():
+    # Initial 100 days
+    df_base = _generate_synthetic_df("TEST_RELIANCE", days=100, end_date="2026-08-28")
+    save_ohlcv_batch({"TEST_RELIANCE": df_base})
 
-    stale = get_stale_symbols(["TRENT", "MISSING_SYM"])
-    assert "MISSING_SYM" in stale
+    meta1 = get_symbol_meta("TEST_RELIANCE")
+    assert meta1["bar_count"] == 100
+
+    # Append 5 new delta days
+    df_delta = _generate_synthetic_df("TEST_RELIANCE", days=5, end_date="2026-09-04", base_price=160.0)
+    save_ohlcv_batch({"TEST_RELIANCE": df_delta})
+
+    meta2 = get_symbol_meta("TEST_RELIANCE")
+    assert meta2["bar_count"] == 105
+    assert meta2["last_date"] == "2026-09-04"
+
+    # Verify cached retrieval contains full merged 105 bars
+    full_cached = get_cached_ohlcv("TEST_RELIANCE")
+    assert len(full_cached) == 105
+
+
+def test_stale_detection_detailed():
+    df = _generate_synthetic_df("TEST_TRENT", days=50, end_date="2026-08-01")
+    save_ohlcv_batch({"TEST_TRENT": df})
+
+    new_syms, delta_syms = get_stale_symbols_detailed(["TEST_TRENT", "TEST_MISSING"])
+    assert "TEST_MISSING" in new_syms
+    assert "TEST_TRENT" in delta_syms
+
+
+def test_fundamentals_and_forensics_caching():
+    fund_sample = {
+        "pe": 24.5,
+        "pb": 4.2,
+        "roe": 18.5,
+        "roce": 22.0,
+        "debt_equity": 0.35,
+        "promoter_holding": 52.0,
+        "pledged_pct": 0.0,
+        "market_cap": 125000.0,
+        "sector": "Information Technology",
+    }
+    save_fundamentals("TEST_INFY", fund_sample)
+
+    cached_fund = get_cached_fundamentals("TEST_INFY", max_age_days=30)
+    assert cached_fund is not None
+    assert cached_fund["roe"] == 18.5
+    assert cached_fund["sector"] == "Information Technology"
+
+    forensic_sample = {
+        "beneish_m_score": -2.45,
+        "is_manipulator_risk": False,
+        "altman_z_score": 4.8,
+        "distress_zone": "SAFE",
+        "piotroski_f_score": 8,
+        "quality_rating": "A+",
+        "overall_forensic_verdict": "CLEAN_PASS",
+        "governance_red_flags": [],
+        "strengths": ["Clean earnings", "Strong liquidity"],
+    }
+    save_forensics("TEST_INFY", forensic_sample)
+
+    cached_for = get_cached_forensics("TEST_INFY", max_age_days=30)
+    assert cached_for is not None
+    assert cached_for["quality_rating"] == "A+"
+    assert cached_for["piotroski_f_score"] == 8
+
+    # Verify store diagnostics
+    stats = get_store_statistics()
+    assert stats["fundamentals_count"] >= 1
+    assert stats["forensics_count"] >= 1
 
 
 def test_liquidity_filter_control():
