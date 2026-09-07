@@ -673,7 +673,10 @@ class StockTailwind:
         return self.as_dict()
 
 
-def get_stock_tailwind(symbol: str) -> StockTailwind:
+def get_stock_tailwind(
+    symbol: str,
+    rrg_matrix: Optional[dict[str, Any]] = None,
+) -> StockTailwind:
     """
     Get a stock's parent sector, its RRG quadrant, and alignment tailwind score (0-100).
     Uses STOCK_SECTOR_MAP with dynamic taxonomy fallback to SECTOR_TAXONOMY in analysis.universe.
@@ -714,7 +717,10 @@ def get_stock_tailwind(symbol: str) -> StockTailwind:
         except Exception:
             sector = "BROAD_MARKET"
 
-    matrix = {p.sector: p for p in get_sector_rrg_matrix()}
+    if rrg_matrix is not None:
+        matrix = rrg_matrix
+    else:
+        matrix = {p.sector: p for p in get_sector_rrg_matrix()}
     sector_point = matrix.get(sector)
 
     if not sector_point and matrix:

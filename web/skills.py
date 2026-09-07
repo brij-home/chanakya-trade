@@ -2915,9 +2915,19 @@ class InflectionScanSkillRequest(BaseModel):
     archetype: str = "ALL"
     timing: str = "ALL"
     min_score: int = 40
-    max_results: int = 30
+    max_results: int = 40
+    min_turnover_cr: float = 0.5
+    cap_tier: str = "ALL"
+    use_local_cache: bool = True
+    sync_missing: bool = True
     exchange: str = "NSE"
     refresh: bool = False
+
+
+class InflectionSyncSkillRequest(BaseModel):
+    universe: str = "nifty500"
+    force: bool = False
+    exchange: str = "NSE"
 
 
 class InflectionDecisionSkillRequest(BaseModel):
@@ -2939,24 +2949,69 @@ async def skill_inflection_scan(req: InflectionScanSkillRequest):
     """
     Scan universe for stocks at high-asymmetry inflection points across VCP pivots,
     TTM squeezes, Stage 1->2 breakouts, SMC springs, and Sector RRG rotation.
+    Uses local SQLite EOD store for zero-latency scanning.
     """
     import asyncio
 
     def _scan():
         from analysis.inflection_scanner import scan_inflections_universe
 
-        return scan_inflections_universe(
+        res = scan_inflections_universe(
             universe=req.universe,
             archetype_filter=req.archetype,
             timing_filter=req.timing,
             min_score=req.min_score,
             max_results=req.max_results,
+            min_turnover_cr=req.min_turnover_cr,
+            cap_tier_filter=req.cap_tier,
+            use_local_cache=req.use_local_cache,
+            sync_missing=req.sync_missing,
             exchange=req.exchange,
         )
+
+        # Optional: Enrich top qualified candidates with live broker quotes if active
+        try:
+            from brokers.session import get_data_broker
+
+            dbroker = get_data_broker()
+            if dbroker and getattr(dbroker, "is_authenticated", lambda: False)():
+                top_syms = [c.symbol for c in res.candidates[:15]]
+                quotes = dbroker.get_quotes(top_syms)
+                for c in res.candidates[:15]:
+                    q = quotes.get(c.symbol) or quotes.get(f"NSE:{c.symbol}")
+                    if q and getattr(q, "last_price", 0) > 0:
+                        c.ltp = round(float(q.last_price), 2)
+                        if hasattr(q, "change_pct") and q.change_pct is not None:
+                            c.day_change_pct = round(float(q.change_pct), 2)
+        except Exception:
+            pass
+
+        return res
 
     try:
         res = await asyncio.to_thread(_scan)
         return _ok(res.to_dict())
+    except Exception as e:
+        raise _err(str(e))
+
+
+@router.post("/inflection_sync")
+async def skill_inflection_sync(req: InflectionSyncSkillRequest):
+    """
+    Synchronize EOD daily historical data for a universe into the local SQLite store.
+    """
+    import asyncio
+
+    def _sync():
+        from analysis.universe import resolve_dynamic_universe
+        from engine.eod_store import sync_universe_eod
+
+        symbols, _ = resolve_dynamic_universe(req.universe, max_stocks=3000)
+        return sync_universe_eod(symbols, force=req.force, exchange=req.exchange)
+
+    try:
+        res = await asyncio.to_thread(_sync)
+        return _ok(res)
     except Exception as e:
         raise _err(str(e))
 

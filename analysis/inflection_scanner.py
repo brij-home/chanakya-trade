@@ -106,6 +106,13 @@ class InflectionSetup:
     catalyst_summary: str = ""
     suggested_action: str = ""
     execution_ticket: dict[str, Any] = field(default_factory=dict)
+    turnover_20d_cr: float = 0.0
+    cap_tier: str = "SMALL"  # "LARGE" | "MID" | "SMALL" | "MICRO"
+    circuit_state: str = "NORMAL"  # "NORMAL" | "NEAR_UPPER_CIRCUIT" | "UPPER_CIRCUIT_LOCKED"
+    weekly_stage: str = "STAGE_2_MARKUP"
+    dist_52w_high_pct: float = 0.0
+    dist_52w_low_pct: float = 0.0
+    is_fo: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -125,6 +132,8 @@ class InflectionScanResult:
     top_sectors: list[dict[str, Any]] = field(default_factory=list)
     scan_timestamp: str = ""
     execution_time_seconds: float = 0.0
+    cache_state: str = "LOCAL_SQLITE_EOD"
+    filtered_out_liquidity_count: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -140,6 +149,8 @@ class InflectionScanResult:
             "top_sectors": self.top_sectors,
             "scan_timestamp": self.scan_timestamp,
             "execution_time_seconds": self.execution_time_seconds,
+            "cache_state": self.cache_state,
+            "filtered_out_liquidity_count": self.filtered_out_liquidity_count,
         }
 
 
@@ -176,6 +187,11 @@ def evaluate_single_stock_inflection(
     df: Optional[pd.DataFrame] = None,
     exchange: str = "NSE",
     sector_override: Optional[str] = None,
+    min_turnover_cr: float = 0.0,
+    cap_tier_override: Optional[str] = None,
+    allow_network: bool = True,
+    rrg_matrix: Optional[dict[str, Any]] = None,
+    use_forensic_cache_only: bool = False,
 ) -> Optional[InflectionSetup]:
     """
     Evaluates whether a single stock is at an inflection point ready for a big or multibagger move.
@@ -183,6 +199,14 @@ def evaluate_single_stock_inflection(
     clean_sym = symbol.upper().replace(".NS", "").replace("NSE:", "").strip()
 
     if df is None or len(df) == 0:
+        try:
+            from engine.eod_store import get_cached_ohlcv
+
+            df = get_cached_ohlcv(clean_sym, days=300)
+        except Exception:
+            pass
+
+    if (df is None or len(df) == 0) and allow_network:
         try:
             from market.history import get_ohlcv
 
@@ -199,6 +223,14 @@ def evaluate_single_stock_inflection(
     volumes = df["volume"].values
     ltp = float(closes[-1])
     if ltp <= 0:
+        return None
+
+    # 0. Liquidity Control: 20-Day Median Turnover in ₹ Crores (turnover = close * volume / 10^7)
+    lookback_20 = min(len(closes), 20)
+    turnover_vals = (closes[-lookback_20:] * volumes[-lookback_20:]) / 1e7
+    turnover_20d_cr = round(float(np.median(turnover_vals)), 2) if len(turnover_vals) > 0 else 0.0
+
+    if min_turnover_cr > 0 and turnover_20d_cr < min_turnover_cr:
         return None
 
     prev_close = float(closes[-2]) if len(closes) >= 2 else ltp
@@ -256,7 +288,7 @@ def evaluate_single_stock_inflection(
 
     if not os.environ.get("CHANAKYA_TESTING"):
         try:
-            tailwind = get_stock_tailwind(clean_sym)
+            tailwind = get_stock_tailwind(clean_sym, rrg_matrix=rrg_matrix)
             if tailwind.quadrant and tailwind.quadrant != "UNAVAILABLE":
                 rrg_quadrant = tailwind.quadrant
                 sector_tailwind = tailwind.tailwind_score
@@ -266,8 +298,23 @@ def evaluate_single_stock_inflection(
             pass
 
         try:
-            f_audit = audit_company_forensics(clean_sym)
-            forensic_safe = f_audit.overall_forensic_verdict in ("CLEAN_PASS", "MILD_WARNING")
+            if use_forensic_cache_only:
+                from engine.analysis_cache import analysis_cache
+
+                cached = analysis_cache.get_fundamental(f"forensic_audit_v2_{clean_sym}")
+                if cached and isinstance(cached, dict):
+                    forensic_safe = cached.get("overall_forensic_verdict") in (
+                        "CLEAN_PASS",
+                        "MILD_WARNING",
+                    ) or (
+                        not cached.get("is_manipulator_risk")
+                        and cached.get("distress_zone") != "DISTRESS"
+                    )
+                else:
+                    forensic_safe = True
+            else:
+                f_audit = audit_company_forensics(clean_sym)
+                forensic_safe = f_audit.overall_forensic_verdict in ("CLEAN_PASS", "MILD_WARNING")
         except Exception:
             pass
 
@@ -362,6 +409,41 @@ def evaluate_single_stock_inflection(
     if not forensic_safe:
         confluence_factors.append("⚠️ Forensic Caution: Elevated governance / audit flags")
 
+    # Circuit Lock Detection
+    is_uc_locked = False
+    is_near_uc = False
+    if len(highs) >= 1:
+        candle_range = highs[-1] - lows[-1]
+        if candle_range < (0.002 * ltp) and day_change_pct >= 4.5:
+            is_uc_locked = True
+        elif (highs[-1] - ltp) < (0.003 * ltp) and day_change_pct >= 4.5:
+            is_near_uc = True
+
+    circuit_state = (
+        "UPPER_CIRCUIT_LOCKED"
+        if is_uc_locked
+        else ("NEAR_UPPER_CIRCUIT" if is_near_uc else "NORMAL")
+    )
+    if is_uc_locked:
+        confluence_factors.append("🔒 Upper Circuit Locked (0 Sellers)")
+    elif is_near_uc:
+        confluence_factors.append("⚠️ Near Upper Circuit (Circuit Band Proximity)")
+
+    # 52-Week High & Low Distances
+    lookback_52w = min(len(highs), 250)
+    high_52w = float(np.max(highs[-lookback_52w:]))
+    low_52w = float(np.min(lows[-lookback_52w:]))
+    dist_52w_high = round(((high_52w - ltp) / max(0.01, high_52w)) * 100.0, 1)
+    dist_52w_low = round(((ltp - low_52w) / max(0.01, low_52w)) * 100.0, 1)
+
+    # Multi-Timeframe Weekly Alignment (30-week / 150-day EMA)
+    weekly_stage = "NEUTRAL"
+    if len(closes) >= 150:
+        ema_150 = pd.Series(closes).ewm(span=150, adjust=False).mean().values
+        if ltp > ema_150[-1] and ema_150[-1] > ema_150[-20]:
+            weekly_stage = "WEEKLY_STAGE_2"
+            confluence_factors.append("👑 Weekly 30-Week Stage 2 Confluence")
+
     # Determine Best Primary Archetype
     primary_archetype = max(archetype_scores, key=archetype_scores.get)
     max_archetype_score = archetype_scores[primary_archetype]
@@ -408,6 +490,10 @@ def evaluate_single_stock_inflection(
     elif trend_passed >= 5:
         score += 8
 
+    # Weekly Alignment Bonus
+    if weekly_stage == "WEEKLY_STAGE_2":
+        score += 8
+
     # Forensic bonus / penalty
     if forensic_safe:
         score += 5
@@ -419,7 +505,6 @@ def evaluate_single_stock_inflection(
     # ─────────────────────────────────────────────────────────────────
     # 10. DYNAMIC ATR RISK-BOUNDED TRADE TICKET
     # ─────────────────────────────────────────────────────────────────
-    # 14-day ATR calculation
     atr = ltp * 0.025
     if len(df) >= 14:
         tr = np.maximum(
@@ -455,6 +540,9 @@ def evaluate_single_stock_inflection(
         "trailing_rule": "Scale 40-50% at Target 1 (+2R) -> Shift SL to Breakeven (+0.2% costs) -> Trail balance along 20-EMA / Swing Higher Lows.",
         "risk_pts": round(risk_per_share, 2),
         "reward_pts": round(target_2 - entry_price, 2),
+        "circuit_state": circuit_state,
+        "is_executable": circuit_state != "UPPER_CIRCUIT_LOCKED",
+        "turnover_20d_cr": turnover_20d_cr,
     }
 
     # Labels and catalysts
@@ -470,10 +558,12 @@ def evaluate_single_stock_inflection(
     catalyst_summary = (
         f"{clean_sym} at high-conviction inflection ({archetype_label} | Timing: {timing_label}). "
         f"Score: {score}/100. Sector {sector_name} ({rrg_quadrant}). "
-        f"Confluences: {', '.join(confluence_factors[:3])}."
+        f"Turnover: ₹{turnover_20d_cr:.1f} Cr. Confluences: {', '.join(confluence_factors[:3])}."
     )
 
-    if timing_state == "TRIGGER_NOW":
+    if is_uc_locked:
+        action = f"⚠️ Stock is Upper Circuit Locked at ₹{ltp:.2f} with 0 sellers. Do NOT place market orders. Wait for circuit expansion or place GTT/limit buy orders."
+    elif timing_state == "TRIGGER_NOW":
         action = f"Immediate market/limit entry at ₹{entry_price:.2f}. Stop-loss ₹{stop_loss:.2f}. Scale 50% at Target 1 ₹{target_1:.2f}."
     elif timing_state == "COILING_IMMINENT":
         action = f"Stalk pivot ₹{entry_price:.2f}. Place GTT buy stop above pivot or enter early in compression base with tight SL at ₹{stop_loss:.2f}."
@@ -482,6 +572,11 @@ def evaluate_single_stock_inflection(
 
     company_name = get_stock_name(clean_sym)
     sector_icon = _get_sector_icon(sector_name)
+
+    from analysis.universe import get_stock_cap_tier
+
+    cap_tier = cap_tier_override or get_stock_cap_tier(clean_sym)
+    is_fo = clean_sym in THEMATIC_PRESETS.get("fno_universe", {}).get("symbols", [])
 
     return InflectionSetup(
         symbol=clean_sym,
@@ -520,6 +615,13 @@ def evaluate_single_stock_inflection(
         catalyst_summary=catalyst_summary,
         suggested_action=action,
         execution_ticket=ticket,
+        turnover_20d_cr=turnover_20d_cr,
+        cap_tier=cap_tier,
+        circuit_state=circuit_state,
+        weekly_stage=weekly_stage,
+        dist_52w_high_pct=dist_52w_high,
+        dist_52w_low_pct=dist_52w_low,
+        is_fo=is_fo,
     )
 
 
@@ -530,15 +632,20 @@ def scan_inflections_universe(
     universe: str = "multibagger_hunters",
     archetype_filter: str = "ALL",
     timing_filter: str = "ALL",
-    min_score: int = 50,
-    max_results: int = 30,
+    min_score: int = 45,
+    max_results: int = 40,
+    min_turnover_cr: float = 0.5,
+    cap_tier_filter: str = "ALL",
+    use_local_cache: bool = True,
+    sync_missing: bool = True,
     exchange: str = "NSE",
-    parallel_workers: int = 8,
+    parallel_workers: int = 16,
     df_cache: Optional[dict[str, pd.DataFrame]] = None,
 ) -> InflectionScanResult:
     """
     Executes a parallel multi-threaded scan across the requested universe,
     identifying high-asymmetry inflection setups and ranking candidates.
+    Supports instant local SQLite EOD reading across 500+ stocks.
     """
     t0 = time.perf_counter()
     timestamp_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
@@ -548,15 +655,44 @@ def scan_inflections_universe(
         symbols = list(df_cache.keys())
         u_name = "In-Memory Cached Universe"
     else:
-        symbols, universe_desc = resolve_dynamic_universe(universe, max_stocks=120)
+        # Increase max_stocks to 3000 to cover NIFTY 500, Microcap 250, and All NSE Liquid
+        symbols, universe_desc = resolve_dynamic_universe(universe, max_stocks=3000)
         if not symbols:
             symbols = THEMATIC_PRESETS.get("multibagger_hunters", {}).get(
                 "symbols", ["TRENT", "DIXON", "HAL", "BEL", "BSE", "COFORGE"]
             )
         u_name = THEMATIC_PRESETS.get(universe.lower(), {}).get("name", universe_desc)
 
+    cache_state = "REST_DIRECT"
+    if df_cache is None and use_local_cache:
+        try:
+            from engine.eod_store import get_cached_ohlcv_batch, sync_universe_eod
+
+            df_cache = get_cached_ohlcv_batch(symbols, days=300)
+            cache_state = "LOCAL_SQLITE_EOD"
+
+            if sync_missing:
+                missing = [s for s in symbols if s not in df_cache and not s.upper().startswith("DUMMY")]
+                # Auto-sync up to 60 missing symbols synchronously if explicitly requested
+                if missing and len(missing) <= 60:
+                    sync_universe_eod(missing, exchange=exchange)
+                    newly_cached = get_cached_ohlcv_batch(missing, days=300)
+                    df_cache.update(newly_cached)
+        except Exception:
+            pass
+
     norm_archetype = archetype_filter.upper().strip()
     norm_timing = timing_filter.upper().strip()
+    norm_cap_tier = cap_tier_filter.upper().strip()
+
+    # Pre-fetch sector RRG matrix once to avoid hundreds of repetitive SQLite queries
+    rrg_matrix: Optional[dict[str, Any]] = None
+    try:
+        from analysis.sector_rotation import get_sector_rrg_matrix
+
+        rrg_matrix = {p.sector: p for p in get_sector_rrg_matrix()}
+    except Exception:
+        rrg_matrix = None
 
     # 2. Parallel Evaluation
     candidates: list[InflectionSetup] = []
@@ -564,7 +700,18 @@ def scan_inflections_universe(
     def _worker(sym: str) -> Optional[InflectionSetup]:
         try:
             cached_df = df_cache.get(sym) if df_cache else None
-            return evaluate_single_stock_inflection(sym, df=cached_df, exchange=exchange)
+            # If scanning via local cache and this symbol has no cached bars, do NOT block on slow REST calls
+            if use_local_cache and (cached_df is None or len(cached_df) < 25):
+                return None
+            return evaluate_single_stock_inflection(
+                sym,
+                df=cached_df,
+                exchange=exchange,
+                min_turnover_cr=min_turnover_cr,
+                allow_network=not use_local_cache,
+                rrg_matrix=rrg_matrix,
+                use_forensic_cache_only=True,
+            )
         except Exception:
             return None
 
@@ -593,6 +740,10 @@ def scan_inflections_universe(
 
         # Check timing filter
         if norm_timing != "ALL" and c.timing_state != norm_timing:
+            continue
+
+        # Check market cap tier filter
+        if norm_cap_tier != "ALL" and c.cap_tier != norm_cap_tier:
             continue
 
         filtered.append(c)
@@ -626,6 +777,8 @@ def scan_inflections_universe(
         top_sectors=top_sectors,
         scan_timestamp=timestamp_str,
         execution_time_seconds=round(t1 - t0, 3),
+        cache_state=cache_state,
+        filtered_out_liquidity_count=len(symbols) - len(candidates),
     )
 
 
@@ -650,6 +803,48 @@ def get_inflection_universes() -> list[dict[str, Any]]:
             "count": 50,
         },
         {
+            "id": "nifty500",
+            "name": "🇮🇳 NIFTY 500 (Complete 501 Stocks)",
+            "description": "Top 500 Indian listed equities covering ~96% of total free-float market cap.",
+            "category": "BROAD_MARKET",
+            "count": 501,
+        },
+        {
+            "id": "microcap_250",
+            "name": "🌱 NIFTY Microcap 250 (High Asymmetry)",
+            "description": "Nifty Microcap 250 emerging leaders before institutional discovery.",
+            "category": "ALPHA",
+            "count": 254,
+        },
+        {
+            "id": "smallcap250",
+            "name": "🚀 NIFTY Smallcap 250 Compounders",
+            "description": "Nifty Smallcap 250 high-growth emerging corporate compounders.",
+            "category": "GROWTH",
+            "count": 251,
+        },
+        {
+            "id": "midcap150",
+            "name": "📈 NIFTY Midcap 150 Growth",
+            "description": "Nifty Midcap 150 medium-sized industry champions.",
+            "category": "CORE",
+            "count": 150,
+        },
+        {
+            "id": "nifty_total_market",
+            "name": "🏛️ NIFTY Total Market (Top 750 Stocks)",
+            "description": "Top 750 Indian listed equities across Large, Mid, Small, and Microcap spectrum.",
+            "category": "BROAD_MARKET",
+            "count": 755,
+        },
+        {
+            "id": "all_nse_liquid",
+            "name": "🇮🇳 All Liquid NSE Equities (~1,200+ Active)",
+            "description": "Complete NSE actively listed Series EQ universe, dynamically turnover-filtered.",
+            "category": "UNIVERSE",
+            "count": 1250,
+        },
+        {
             "id": "auto_market_aware",
             "name": "🌐 Market-Aware (Top RRG Sectors)",
             "description": "Dynamically selects leading & improving sectors relative to NIFTY 50.",
@@ -664,25 +859,39 @@ def get_inflection_universes() -> list[dict[str, Any]]:
             "count": 50,
         },
         {
-            "id": "microcap_250",
-            "name": "🌱 Microcap 250 (High Asymmetry)",
-            "description": "Nifty Microcap 250 emerging leaders before institutional discovery.",
-            "category": "HIGH_BETA",
-            "count": 80,
+            "id": "fno_universe",
+            "name": "⚡ Complete Liquid F&O Universe",
+            "description": "All ~180+ liquid derivatives contracts eligible for single-stock futures & options.",
+            "category": "DERIVATIVES",
+            "count": 180,
+        },
+        {
+            "id": "railways",
+            "name": "🚆 Railways & Metro Infra",
+            "description": "Vande Bharat Coaches, Freight Wagons, Metro Bogies, and Railway EPC (Titagarh, RVNL, IRFC).",
+            "category": "THEMATIC",
+            "count": 10,
         },
         {
             "id": "defence",
             "name": "🛡️ Defence & Aerospace",
             "description": "Indigenization compounders, HAL, BEL, Mazagon, Bharat Dynamics.",
             "category": "THEMATIC",
-            "count": 12,
+            "count": 14,
+        },
+        {
+            "id": "energy",
+            "name": "⚡ Energy & Power Transition",
+            "description": "Power gen, transmission, renewable green energy, and PSU exploration.",
+            "category": "SECTOR",
+            "count": 22,
         },
         {
             "id": "it",
             "name": "💻 IT & Digital Engineering",
             "description": "Tier-1 & midcap IT services compounders tracking NASDAQ / global demand.",
             "category": "SECTOR",
-            "count": 22,
+            "count": 32,
         },
         {
             "id": "banking",
@@ -692,17 +901,10 @@ def get_inflection_universes() -> list[dict[str, Any]]:
             "count": 25,
         },
         {
-            "id": "energy",
-            "name": "⚡ Energy & Power Transition",
-            "description": "Power gen, transmission, renewable green energy, and PSU exploration.",
-            "category": "SECTOR",
-            "count": 18,
-        },
-        {
             "id": "pharma",
             "name": "💊 Pharma & Healthcare",
             "description": "CDMO, Active Pharmaceutical Ingredients (API), and domestic formulations.",
             "category": "SECTOR",
-            "count": 20,
+            "count": 45,
         },
     ]

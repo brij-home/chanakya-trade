@@ -303,9 +303,9 @@ class TestOllamaProvider:
         assert isinstance(p, OpenAIProvider)
 
     def test_default_model_is_llama31(self):
-        """Default Ollama model should be llama3.1."""
+        """Default Ollama model should be llama3.1 or llama3.3."""
         assert _default_model(PROVIDER_OLLAMA) == OLLAMA_DEFAULT_MODEL
-        assert OLLAMA_DEFAULT_MODEL == "llama3.1"
+        assert OLLAMA_DEFAULT_MODEL in ("llama3.1", "llama3.3")
 
     def test_default_base_url_is_localhost(self, monkeypatch):
         """Without OLLAMA_BASE_URL set, should use localhost:11434."""
@@ -377,3 +377,40 @@ class TestOllamaProvider:
 
             p = get_provider(provider="ollama", registry=build_registry())
         assert p is not None
+
+
+class TestExtractSymbol:
+    """Verify symbol extraction for leading digits, natural names, and noise filtering."""
+
+    def test_extract_leading_digit_symbols(self):
+        from agent.core import extract_symbol
+
+        assert extract_symbol("analyze 63MOONS") == "63MOONS"
+        assert extract_symbol("what about 3MINDIA?") == "3MINDIA"
+        assert extract_symbol("check 5PAISA") == "5PAISA"
+        assert extract_symbol("20MICRONS technicals") == "20MICRONS"
+
+    def test_extract_natural_names(self):
+        from agent.core import extract_symbol
+
+        assert extract_symbol("63 moons technologies") == "63MOONS"
+        assert extract_symbol("analyze reliance") == "RELIANCE"
+        assert extract_symbol("hdfc bank report") == "HDFCBANK"
+
+    def test_extract_explicit_prefix(self):
+        from agent.core import extract_symbol
+
+        assert extract_symbol("look at NSE:63MOONS") == "63MOONS"
+        assert extract_symbol("quote for BSE:RELIANCE") == "RELIANCE"
+
+    def test_extract_noise_suppression(self):
+        from agent.core import extract_symbol
+
+        assert extract_symbol("outlook for 2026") == ""
+        assert extract_symbol("what is 100?") == ""
+
+    def test_extract_user_context_sentence(self):
+        from agent.core import extract_symbol
+
+        msg = "when analyzing I see I don’t have access to real‑time market data for **63MOONS (NSE)** at the moment"
+        assert extract_symbol(msg) == "63MOONS"

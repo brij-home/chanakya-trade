@@ -17,6 +17,8 @@ Features:
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
+from pathlib import Path
 from typing import Any
 
 
@@ -447,6 +449,44 @@ SECTOR_TAXONOMY: dict[str, dict[str, Any]] = {
     },
 }
 
+
+def _load_bundled_universe_symbols(filename: str, fallback_symbols: list[str]) -> list[str]:
+    """Loads official index constituent symbols from bundled data/universes JSON, falling back to static list."""
+    try:
+        p = Path("data/universes") / filename
+        if p.exists():
+            data = json.loads(p.read_text(encoding="utf-8"))
+            if isinstance(data, list) and len(data) > 0:
+                syms = [
+                    d["symbol"].strip().upper()
+                    for d in data
+                    if isinstance(d, dict) and d.get("symbol")
+                ]
+                if syms:
+                    return syms
+    except Exception:
+        pass
+    return fallback_symbols
+
+
+def _load_bundled_company_names() -> dict[str, str]:
+    """Loads comprehensive company names from bundled JSON files."""
+    names = {}
+    for fn in ("nse_all_eq.json", "nifty_total_market.json", "nifty500.json"):
+        p = Path("data/universes") / fn
+        if p.exists():
+            try:
+                data = json.loads(p.read_text(encoding="utf-8"))
+                for d in data:
+                    sym = d.get("symbol", "").strip().upper()
+                    name = d.get("name", "").strip()
+                    if sym and name:
+                        names[sym] = name
+            except Exception:
+                pass
+    return names
+
+
 # ── Thematic Universe Presets ───────────────────────────────────────
 
 THEMATIC_PRESETS: dict[str, dict[str, Any]] = {
@@ -569,7 +609,9 @@ THEMATIC_PRESETS: dict[str, dict[str, Any]] = {
     "nifty500": {
         "name": "🇮🇳 NIFTY 500 Comprehensive Universe",
         "description": "Top 500 Indian listed equities across Large, Mid, and Smallcap spectrum.",
-        "symbols": [
+        "symbols": _load_bundled_universe_symbols(
+            "nifty500.json",
+            [
             "RELIANCE",
             "TCS",
             "HDFCBANK",
@@ -835,66 +877,171 @@ THEMATIC_PRESETS: dict[str, dict[str, Any]] = {
             "AARTIDRUGS",
             "RPGPHILIFE",
             "BLISSGVS",
-        ],
+        ]),
     },
     "microcap250": {
-        "name": "🌱 NIFTY Microcap & Emerging High-Beta",
-        "description": "Fast-growing high-beta small and microcaps with institutional volume surges.",
-        "symbols": [
-            "KAYNES",
-            "SYRMA",
-            "DATAPATTNS",
-            "ZENTEC",
-            "MTARTECH",
-            "CYIENTDLM",
-            "PARAS",
-            "ASTRA",
-            "TITAGARH",
-            "TEXRAIL",
-            "JUPITERWAG",
-            "PREMIERENE",
-            "WAAREEENER",
-            "SWANENERGY",
-            "RATEGAIN",
-            "NEWGEN",
-            "MAPMYINDIA",
-            "CEINFO",
-            "LATENTVIEW",
-            "HAPPSTMNDS",
-            "AETHER",
-            "TATVA",
-            "FINEORG",
-            "MEDANTA",
-            "KIMS",
-            "YATHARTH",
-            "RAINBOW",
-            "VIJAYA",
-            "THYROCARE",
-            "SHYAMMETL",
-            "GALLANTT",
-            "SARDAEN",
-            "JINDALSAW",
-            "WELCORP",
-            "ELECTCAST",
-            "RAMASTEEL",
-            "GRAVITA",
-            "DREAMFOLKS",
-            "ETHOSLTD",
-            "LANDMARK",
-            "CAMPUS",
-            "MANYAVAR",
-            "SAPPHIRE",
-            "WESTLIFE",
-            "KIMS",
-            "AVANTIFEED",
-            "APOLLOPIPE",
-            "PRINCEPIPE",
-            "FINPIPE",
-            "ASTRAL",
-            "SUPREMEIND",
-            "RESPONIND",
-            "CARYSIL",
-        ],
+        "name": "🌱 NIFTY Microcap 250 (High Asymmetry)",
+        "description": "Nifty Microcap 250 emerging leaders before institutional discovery.",
+        "symbols": _load_bundled_universe_symbols(
+            "nifty_microcap250.json",
+            [
+                "KAYNES",
+                "SYRMA",
+                "DATAPATTNS",
+                "ZENTEC",
+                "MTARTECH",
+                "CYIENTDLM",
+                "PARAS",
+                "ASTRA",
+                "TITAGARH",
+                "TEXRAIL",
+                "JUPITERWAG",
+                "PREMIERENE",
+                "WAAREEENER",
+                "SWANENERGY",
+                "RATEGAIN",
+                "NEWGEN",
+                "MAPMYINDIA",
+                "CEINFO",
+                "LATENTVIEW",
+                "HAPPSTMNDS",
+                "AETHER",
+                "TATVA",
+                "FINEORG",
+                "MEDANTA",
+                "KIMS",
+                "YATHARTH",
+                "RAINBOW",
+                "VIJAYA",
+                "THYROCARE",
+                "SHYAMMETL",
+                "GALLANTT",
+                "SARDAEN",
+                "JINDALSAW",
+                "WELCORP",
+                "ELECTCAST",
+                "RAMASTEEL",
+                "GRAVITA",
+                "DREAMFOLKS",
+                "ETHOSLTD",
+                "LANDMARK",
+                "CAMPUS",
+                "MANYAVAR",
+                "SAPPHIRE",
+                "WESTLIFE",
+                "AVANTIFEED",
+                "APOLLOPIPE",
+                "PRINCEPIPE",
+                "FINPIPE",
+                "ASTRAL",
+                "SUPREMEIND",
+                "RESPONIND",
+                "CARYSIL",
+            ],
+        ),
+    },
+    "smallcap250": {
+        "name": "🚀 NIFTY Smallcap 250 Compounders",
+        "description": "Nifty Smallcap 250 high-growth emerging corporate compounders.",
+        "symbols": _load_bundled_universe_symbols(
+            "nifty_smallcap250.json",
+            [
+                "KAYNES",
+                "SYRMA",
+                "DATAPATTNS",
+                "ZENTEC",
+                "MTARTECH",
+                "CYIENTDLM",
+                "PARAS",
+                "ASTRA",
+                "TITAGARH",
+                "TEXRAIL",
+                "JUPITERWAG",
+                "PREMIERENE",
+                "WAAREEENER",
+                "SWANENERGY",
+                "RATEGAIN",
+                "NEWGEN",
+                "MAPMYINDIA",
+                "CEINFO",
+                "LATENTVIEW",
+                "HAPPSTMNDS",
+                "AETHER",
+                "TATVA",
+                "FINEORG",
+                "MEDANTA",
+                "KIMS",
+                "YATHARTH",
+                "RAINBOW",
+                "VIJAYA",
+                "THYROCARE",
+                "SHYAMMETL",
+                "GALLANTT",
+                "SARDAEN",
+                "JINDALSAW",
+                "WELCORP",
+                "ELECTCAST",
+                "RAMASTEEL",
+                "GRAVITA",
+                "DREAMFOLKS",
+                "ETHOSLTD",
+                "LANDMARK",
+                "CAMPUS",
+                "MANYAVAR",
+                "SAPPHIRE",
+                "WESTLIFE",
+                "AVANTIFEED",
+                "APOLLOPIPE",
+                "PRINCEPIPE",
+                "FINPIPE",
+                "ASTRAL",
+                "SUPREMEIND",
+                "RESPONIND",
+                "CARYSIL",
+            ],
+        ),
+    },
+    "midcap150": {
+        "name": "📈 NIFTY Midcap 150 Growth",
+        "description": "Nifty Midcap 150 high-conviction medium-sized industry champions.",
+        "symbols": _load_bundled_universe_symbols(
+            "nifty_midcap150.json",
+            [
+                "DIXON",
+                "POLYCAB",
+                "KEI",
+                "COFORGE",
+                "PERSISTENT",
+                "KPITTECH",
+                "TATAELXSI",
+                "HAL",
+                "BEL",
+                "BSE",
+                "MCX",
+                "MAXHEALTH",
+                "MANKIND",
+                "CHOLAFIN",
+                "SUZLON",
+                "IREDA",
+                "SOLARINDS",
+                "MAZDOCK",
+                "COCHINSHIP",
+                "BDL",
+                "MEDANTA",
+                "AUROPHARMA",
+                "LUPIN",
+            ],
+        ),
+    },
+    "nifty_total_market": {
+        "name": "🏛️ NIFTY Total Market (750 Equities)",
+        "description": "Top 750 Indian listed equities (Large 100 + Mid 150 + Small 250 + Micro 250).",
+        "symbols": _load_bundled_universe_symbols("nifty_total_market.json", []),
+    },
+    "all_nse_liquid": {
+        "name": "🇮🇳 All Liquid NSE Equities (~1,200+ Active)",
+        "description": "Complete NSE actively listed Series EQ universe, dynamically turnover-filtered.",
+        "symbols": _load_bundled_universe_symbols("nse_all_eq.json", []),
     },
     "bse_high_growth": {
         "name": "🚀 BSE & Turnaround Super-Cycles",
@@ -1428,6 +1575,36 @@ COMPANY_NAMES: dict[str, str] = {
     "BDL": "Bharat Dynamics Ltd",
 }
 
+# Update company names from bundled official index constituent datasets
+COMPANY_NAMES.update(_load_bundled_company_names())
+
+_LARGE_CAP_SET = set(THEMATIC_PRESETS.get("nifty50", {}).get("symbols", []))
+_MID_CAP_SET = set(THEMATIC_PRESETS.get("midcap150", {}).get("symbols", []))
+_SMALL_CAP_SET = set(THEMATIC_PRESETS.get("smallcap250", {}).get("symbols", []))
+_MICRO_CAP_SET = set(THEMATIC_PRESETS.get("microcap250", {}).get("symbols", []))
+
+
+def get_stock_cap_tier(symbol: str) -> str:
+    """Classifies stock as LARGE, MID, SMALL, or MICRO based on canonical constituent lists."""
+    clean = (
+        symbol.upper()
+        .replace(".NS", "")
+        .replace("NSE:", "")
+        .replace("MCX:", "")
+        .replace("CDS:", "")
+        .replace("BSE:", "")
+        .strip()
+    )
+    if clean in _LARGE_CAP_SET:
+        return "LARGE"
+    if clean in _MID_CAP_SET:
+        return "MID"
+    if clean in _SMALL_CAP_SET:
+        return "SMALL"
+    if clean in _MICRO_CAP_SET:
+        return "MICRO"
+    return "SMALL"
+
 
 def get_stock_name(symbol: str) -> str:
     """Returns human-readable company name for symbol, or formatted symbol if unlisted."""
@@ -1647,6 +1824,27 @@ def resolve_dynamic_universe(
         "fno": "fno_universe",
         "fno_universe": "fno_universe",
         "derivatives": "fno_universe",
+        "nifty_500": "nifty500",
+        "nifty500": "nifty500",
+        "microcap": "microcap250",
+        "microcap250": "microcap250",
+        "nifty_microcap": "microcap250",
+        "nifty_microcap250": "microcap250",
+        "microcap_250": "microcap250",
+        "smallcap": "smallcap250",
+        "smallcap250": "smallcap250",
+        "nifty_smallcap": "smallcap250",
+        "nifty_smallcap250": "smallcap250",
+        "midcap": "midcap150",
+        "midcap150": "midcap150",
+        "nifty_midcap": "midcap150",
+        "nifty_midcap150": "midcap150",
+        "total_market": "nifty_total_market",
+        "nifty_total_market": "nifty_total_market",
+        "all_nse": "all_nse_liquid",
+        "all_nse_liquid": "all_nse_liquid",
+        "nse_all": "all_nse_liquid",
+        "all_stocks": "all_nse_liquid",
     }
     canon_preset = preset_alias.get(key, key)
     if canon_preset in THEMATIC_PRESETS:

@@ -36,6 +36,8 @@ export default function InflectionScannerView({
   const [universesList, setUniversesList] = useState([])
   const [archetypeFilter, setArchetypeFilter] = useState('ALL')
   const [timingFilter, setTimingFilter] = useState('ALL')
+  const [minTurnoverCr, setMinTurnoverCr] = useState(0.5) // ₹50L median 20D turnover floor
+  const [capTierFilter, setCapTierFilter] = useState('ALL') // 'ALL' | 'LARGE' | 'MID' | 'SMALL' | 'MICRO'
   const [minScore, setMinScore] = useState(50)
   const [searchQuery, setSearchQuery] = useState('')
   const [viewMode, setViewMode] = useState('table') // 'table' | 'cards'
@@ -46,6 +48,10 @@ export default function InflectionScannerView({
   const [isScanning, setIsScanning] = useState(false)
   const [scanResult, setScanResult] = useState(null)
   const [lastScanTime, setLastScanTime] = useState('')
+
+  // Local SQLite EOD Store Batch Sync State
+  const [isSyncingEod, setIsSyncingEod] = useState(false)
+  const [syncStatusMsg, setSyncStatusMsg] = useState('')
 
   // AI Decision Matrix Drawer State
   const [activeCandidate, setActiveCandidate] = useState(null)
@@ -80,13 +86,17 @@ export default function InflectionScannerView({
   }, [])
 
   // ── 2. Run Inflection Scan ──────────────────────────────────────────
-  const executeScan = async (targetUniverse = universe) => {
+  const executeScan = async (
+    targetUniverse = universe,
+    overrideTurnover = minTurnoverCr,
+    overrideCap = capTierFilter
+  ) => {
     setIsScanning(true)
     const abortCtrl = new AbortController()
 
     startActivity({
       title: 'Inflection & Multibagger Radar',
-      details: `Screening ${targetUniverse} across 5 quantitative inflection engines...`,
+      details: `Screening ${targetUniverse} across quantitative engines (Floor: ₹${overrideTurnover} Cr)...`,
       type: 'quant',
       targetView: 'scanner',
       cancelFn: () => {
@@ -102,7 +112,11 @@ export default function InflectionScannerView({
         archetype: archetypeFilter,
         timing: timingFilter,
         min_score: minScore,
-        max_results: 40,
+        max_results: 60,
+        min_turnover_cr: overrideTurnover,
+        cap_tier: overrideCap,
+        use_local_cache: true,
+        sync_missing: false,
       })
       const resultData = res?.data ?? res
       setScanResult(resultData)
@@ -115,10 +129,40 @@ export default function InflectionScannerView({
     }
   }
 
-  // Trigger scan when universe, archetype, or timing changes
+  // ── 2b. Local SQLite EOD Batch Sync ─────────────────────────────────
+  const executeEodSync = async () => {
+    if (isSyncingEod) return
+    setIsSyncingEod(true)
+    setSyncStatusMsg(`Syncing historical daily bars for ${universe} into local SQLite store...`)
+
+    try {
+      const res = await call('/skills/inflection_sync', {
+        universe: universe,
+        force: false,
+      })
+      const data = res?.data ?? res
+      if (data.status === 'UP_TO_DATE') {
+        setSyncStatusMsg(`✓ Local EOD store already up-to-date (${data.already_cached || 0} stocks)`)
+      } else {
+        setSyncStatusMsg(
+          `✓ Synced ${data.synced_count || 0} stocks (${data.failed_count || 0} failed) in ${data.duration_sec || 0}s`
+        )
+        // Auto re-scan using the newly cached EOD store
+        await executeScan(universe, minTurnoverCr, capTierFilter)
+      }
+    } catch (err) {
+      console.error('EOD sync failed:', err)
+      setSyncStatusMsg('⚠️ EOD sync failed. Check network or try again.')
+    } finally {
+      setIsSyncingEod(false)
+      setTimeout(() => setSyncStatusMsg(''), 6000)
+    }
+  }
+
+  // Trigger scan when universe, archetype, timing, minScore, minTurnoverCr, or capTierFilter changes
   useEffect(() => {
-    executeScan(universe)
-  }, [universe, archetypeFilter, timingFilter, minScore])
+    executeScan(universe, minTurnoverCr, capTierFilter)
+  }, [universe, archetypeFilter, timingFilter, minScore, minTurnoverCr, capTierFilter])
 
   // ── 3. Open AI Decision Matrix Drawer ───────────────────────────────
   const openDecisionDrawer = async (candidate) => {
@@ -332,12 +376,58 @@ export default function InflectionScannerView({
                   <option value="momentum_breakouts">⚡ Momentum & Squeeze (50)</option>
                   <option value="auto_market_aware">🌐 Market-Aware RRG (60)</option>
                   <option value="nifty50">🏛️ NIFTY 50 (50)</option>
-                  <option value="microcap_250">🌱 Microcap 250 (80)</option>
-                  <option value="defence">🛡️ Defence & Aerospace (12)</option>
-                  <option value="it">💻 IT Services (22)</option>
-                  <option value="banking">🏦 Banking & Financials (25)</option>
+                  <option value="nifty500">🏢 NIFTY 500 (501)</option>
+                  <option value="smallcap_250">🚀 Smallcap 250 (251)</option>
+                  <option value="microcap_250">🌱 Microcap 250 (254)</option>
+                  <option value="all_nse_liquid">🌊 All Liquid NSE Series EQ (1,200+)</option>
                 </>
               )}
+            </select>
+          </div>
+
+          {/* Liquidity Floor (20D Median Turnover) */}
+          <div className="flex items-center gap-1.5">
+            <span className="text-[11px] text-muted font-mono uppercase" title="Minimum 20-Day Median Turnover (Cr) to exclude illiquid operator traps">
+              Min Liq:
+            </span>
+            <select
+              value={minTurnoverCr}
+              onChange={(e) => setMinTurnoverCr(Number(e.target.value))}
+              className="text-xs font-semibold px-2 py-1.5 rounded-lg border cursor-pointer outline-none transition-all font-mono"
+              style={{
+                background: 'var(--color-elevated)',
+                borderColor: 'var(--color-border)',
+                color: 'var(--color-text)',
+              }}
+              title="20-Day Median Turnover filter"
+            >
+              <option value={0}>All (₹0)</option>
+              <option value={0.25}>₹25 L</option>
+              <option value={0.5}>₹50 L (Rec)</option>
+              <option value={1.0}>₹1.0 Cr</option>
+              <option value={2.0}>₹2.0 Cr</option>
+              <option value={5.0}>₹5.0 Cr</option>
+            </select>
+          </div>
+
+          {/* Market Cap Tier Selector */}
+          <div className="flex items-center gap-1.5">
+            <span className="text-[11px] text-muted font-mono uppercase">Cap:</span>
+            <select
+              value={capTierFilter}
+              onChange={(e) => setCapTierFilter(e.target.value)}
+              className="text-xs font-semibold px-2 py-1.5 rounded-lg border cursor-pointer outline-none transition-all"
+              style={{
+                background: 'var(--color-elevated)',
+                borderColor: 'var(--color-border)',
+                color: 'var(--color-text)',
+              }}
+            >
+              <option value="ALL">All Caps</option>
+              <option value="LARGE">🏛️ Large</option>
+              <option value="MID">⚡ Mid</option>
+              <option value="SMALL">🚀 Small</option>
+              <option value="MICRO">🌱 Micro</option>
             </select>
           </div>
 
@@ -348,7 +438,7 @@ export default function InflectionScannerView({
               placeholder="Search symbol/sector..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              className="text-xs px-2.5 py-1.5 pl-7 rounded-lg border outline-none w-36 sm:w-44 focus:w-52 transition-all"
+              className="text-xs px-2.5 py-1.5 pl-7 rounded-lg border outline-none w-32 sm:w-40 focus:w-48 transition-all"
               style={{
                 background: 'var(--color-elevated)',
                 borderColor: 'var(--color-border)',
@@ -387,6 +477,23 @@ export default function InflectionScannerView({
             </button>
           </div>
 
+          {/* Local SQLite EOD Store Sync Button */}
+          <button
+            type="button"
+            onClick={executeEodSync}
+            disabled={isSyncingEod || isScanning}
+            className="flex items-center gap-1.5 text-xs font-semibold px-2.5 py-1.5 rounded-lg border transition-all cursor-pointer"
+            style={{
+              background: isSyncingEod ? 'rgba(77,155,255,0.2)' : 'var(--color-elevated)',
+              borderColor: isSyncingEod ? 'var(--color-sapphire)' : 'var(--color-border)',
+              color: isSyncingEod ? 'var(--color-sapphire)' : 'var(--color-text-dim)',
+            }}
+            title="Bulk sync daily bars into local SQLite store to avoid future API hits"
+          >
+            <span className={isSyncingEod ? 'animate-spin' : ''}>{isSyncingEod ? '⏳' : '⚡'}</span>
+            <span>{isSyncingEod ? 'Syncing...' : 'Sync EOD'}</span>
+          </button>
+
           {/* Refresh Scan Button */}
           <button
             type="button"
@@ -404,6 +511,41 @@ export default function InflectionScannerView({
           </button>
         </div>
       </div>
+
+      {/* ── SYNC STATUS & RISK SHIELD BANNER ─────────────────────────────── */}
+      {(syncStatusMsg || (scanResult?.filtered_out_liquidity_count > 0)) && (
+        <div
+          className="flex flex-wrap items-center justify-between gap-2 px-4 py-1.5 border-b text-xs font-mono animate-in fade-in duration-150"
+          style={{ background: 'rgba(0, 0, 0, 0.3)', borderColor: 'var(--color-border)' }}
+        >
+          {syncStatusMsg ? (
+            <div className="flex items-center gap-1.5 text-amber-300">
+              <span className="animate-pulse">⚡</span>
+              <span>{syncStatusMsg}</span>
+            </div>
+          ) : (
+            <div className="flex items-center gap-1.5 text-emerald-400">
+              <span>💾</span>
+              <span>Local SQLite EOD Store Active: {scanResult?.cache_state || 'READY'}</span>
+            </div>
+          )}
+
+          {scanResult?.filtered_out_liquidity_count > 0 && (
+            <span
+              className="text-[10px] px-2 py-0.5 rounded-full border flex items-center gap-1"
+              style={{
+                background: 'rgba(255,107,107,0.12)',
+                borderColor: 'rgba(255,107,107,0.3)',
+                color: '#ff8787',
+              }}
+              title="Illiquid stocks excluded by turnover floor to prevent operator traps"
+            >
+              <span>🛡️</span>
+              <span>{scanResult.filtered_out_liquidity_count} illiquid stocks excluded (&lt; ₹{minTurnoverCr} Cr median turnover)</span>
+            </span>
+          )}
+        </div>
+      )}
 
       {/* ── FILTER CHIPS STRIP ──────────────────────────────────────────── */}
       <div
@@ -601,17 +743,57 @@ export default function InflectionScannerView({
                         <div className="flex items-center gap-2">
                           <span className="text-base">{c.sector_icon || '🏢'}</span>
                           <div>
-                            <div className="flex items-center gap-1.5">
+                            <div className="flex items-center gap-1.5 flex-wrap">
                               <span className="font-bold text-white text-xs group-hover:text-amber-400 transition-colors">
                                 {c.symbol}
                               </span>
+                              {c.cap_tier && (
+                                <span
+                                  className={`text-[8px] font-bold px-1 py-0.2 rounded border uppercase font-mono ${
+                                    c.cap_tier === 'LARGE'
+                                      ? 'bg-blue-500/15 text-blue-300 border-blue-500/30'
+                                      : c.cap_tier === 'MID'
+                                      ? 'bg-amber-500/15 text-amber-300 border-amber-500/30'
+                                      : c.cap_tier === 'SMALL'
+                                      ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
+                                      : 'bg-purple-500/15 text-purple-300 border-purple-500/30'
+                                  }`}
+                                  title={`Market Cap Tier: ${c.cap_tier}`}
+                                >
+                                  {c.cap_tier}
+                                </span>
+                              )}
+                              {c.circuit_state === 'UPPER_CIRCUIT_LOCKED' && (
+                                <span
+                                  className="text-[8px] font-bold px-1 py-0.2 rounded bg-rose-500/20 text-rose-300 border border-rose-500/40 animate-pulse"
+                                  title="Upper Circuit Locked (No Sellers Available)"
+                                >
+                                  🔒 UC LOCKED
+                                </span>
+                              )}
+                              {c.circuit_state === 'NEAR_UPPER_CIRCUIT' && (
+                                <span
+                                  className="text-[8px] font-bold px-1 py-0.2 rounded bg-amber-500/20 text-amber-300 border border-amber-500/40"
+                                  title="Within 1.5% of Upper Circuit Ceiling"
+                                >
+                                  ⚠️ NEAR UC
+                                </span>
+                              )}
+                              {c.weekly_stage === 'STAGE_2_UPTREND' && (
+                                <span
+                                  className="text-[8px] font-bold px-1 py-0.2 rounded bg-yellow-500/15 text-yellow-300 border border-yellow-500/30"
+                                  title="Aligned with Weekly 30-week EMA Stage 2 Uptrend"
+                                >
+                                  👑 W-S2
+                                </span>
+                              )}
                               {c.rrg_quadrant === 'LEADING' && (
                                 <span className="text-[9px] px-1 rounded bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
                                   LEADING
                                 </span>
                               )}
                             </div>
-                            <span className="text-[10px] text-muted font-ui block truncate max-w-[130px]">
+                            <span className="text-[10px] text-muted font-ui block truncate max-w-[140px]">
                               {c.name}
                             </span>
                           </div>
@@ -697,27 +879,42 @@ export default function InflectionScannerView({
                         {formatPct(c.day_change_pct).text}
                       </td>
 
-                      {/* RVOL 20D */}
+                      {/* RVOL 20D & Median Turnover */}
                       <td className="py-2.5 px-2 text-center">
-                        <span
-                          className={`px-1.5 py-0.5 rounded text-[11px] font-semibold ${
-                            c.rvol_20d >= 1.8
-                              ? 'bg-emerald-500/20 text-emerald-400 font-bold'
-                              : c.rvol_20d < 0.6
-                              ? 'text-cyan-400'
-                              : 'text-muted'
-                          }`}
-                        >
-                          {c.rvol_20d}x
-                        </span>
+                        <div className="flex flex-col items-center">
+                          <span
+                            className={`px-1.5 py-0.5 rounded text-[11px] font-semibold ${
+                              c.rvol_20d >= 1.8
+                                ? 'bg-emerald-500/20 text-emerald-400 font-bold'
+                                : c.rvol_20d < 0.6
+                                ? 'text-cyan-400'
+                                : 'text-muted'
+                            }`}
+                          >
+                            {c.rvol_20d}x
+                          </span>
+                          <span className="text-[9px] text-muted font-mono mt-0.5" title="20-Day Median Turnover">
+                            ₹{c.turnover_20d_cr > 0 ? c.turnover_20d_cr.toFixed(2) : '0.00'} Cr
+                          </span>
+                        </div>
                       </td>
 
-                      {/* Stage / Minervini */}
+                      {/* Stage / Minervini & 52W High Proximity */}
                       <td className="py-2.5 px-2 text-center font-ui text-[11px]">
-                        <span className="text-white font-medium">{c.trend_template_passed}/8</span>
-                        <span className="text-muted text-[10px] ml-1">
-                          ({c.weinstein_stage.replace('STAGE_', 'S')})
-                        </span>
+                        <div className="flex flex-col items-center">
+                          <span className="text-white font-medium">{c.trend_template_passed}/8</span>
+                          <div className="flex items-center gap-1 text-[10px] text-muted font-mono">
+                            <span>({c.weinstein_stage.replace('STAGE_', 'S')})</span>
+                            {c.dist_52w_high_pct !== null && c.dist_52w_high_pct !== undefined && (
+                              <span
+                                className={c.dist_52w_high_pct >= -5 ? 'text-emerald-400' : 'text-muted'}
+                                title="Distance to 52-Week High"
+                              >
+                                {c.dist_52w_high_pct.toFixed(0)}%
+                              </span>
+                            )}
+                          </div>
+                        </div>
                       </td>
 
                       {/* Trade Levels */}
@@ -837,6 +1034,38 @@ export default function InflectionScannerView({
 
                 {/* Badges Strip */}
                 <div className="flex flex-wrap items-center gap-1.5">
+                  {c.cap_tier && (
+                    <span
+                      className={`text-[9px] font-bold px-1.5 py-0.5 rounded border uppercase font-mono ${
+                        c.cap_tier === 'LARGE'
+                          ? 'bg-blue-500/15 text-blue-300 border-blue-500/30'
+                          : c.cap_tier === 'MID'
+                          ? 'bg-amber-500/15 text-amber-300 border-amber-500/30'
+                          : c.cap_tier === 'SMALL'
+                          ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
+                          : 'bg-purple-500/15 text-purple-300 border-purple-500/30'
+                      }`}
+                      title={`Market Cap Tier: ${c.cap_tier}`}
+                    >
+                      {c.cap_tier}
+                    </span>
+                  )}
+                  {c.circuit_state === 'UPPER_CIRCUIT_LOCKED' && (
+                    <span
+                      className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-rose-500/20 text-rose-300 border border-rose-500/40 animate-pulse"
+                      title="Upper Circuit Locked"
+                    >
+                      🔒 UC LOCKED
+                    </span>
+                  )}
+                  {c.weekly_stage === 'STAGE_2_UPTREND' && (
+                    <span
+                      className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-yellow-500/15 text-yellow-300 border border-yellow-500/30"
+                      title="Aligned with Weekly 30-week EMA Stage 2 Uptrend"
+                    >
+                      👑 W-S2
+                    </span>
+                  )}
                   <span className="text-[10px] font-semibold px-2 py-0.5 rounded bg-amber-500/10 text-amber-400 border border-amber-500/30">
                     {c.archetype_label}
                   </span>
@@ -846,6 +1075,11 @@ export default function InflectionScannerView({
                   {c.squeeze_state === 'COILING' && (
                     <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-cyan-500/10 text-cyan-400 border border-cyan-500/30">
                       Coiling ({c.squeeze_duration}b)
+                    </span>
+                  )}
+                  {c.turnover_20d_cr > 0 && (
+                    <span className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-panel border border-border text-muted">
+                      ₹{c.turnover_20d_cr.toFixed(1)} Cr/d
                     </span>
                   )}
                   {c.vcp_detected && (
@@ -981,7 +1215,9 @@ export default function InflectionScannerView({
                   </div>
                   <p className="text-[11px] text-muted">
                     LTP: ₹{activeCandidate?.ltp} ({formatPct(activeCandidate?.day_change_pct).text}) •{' '}
-                    {activeCandidate?.sector}
+                    {activeCandidate?.sector} •{' '}
+                    <span className="text-white font-mono">{activeCandidate?.cap_tier} CAP</span> •{' '}
+                    <span className="font-mono">Turnover: ₹{activeCandidate?.turnover_20d_cr ? activeCandidate.turnover_20d_cr.toFixed(2) : '0.00'} Cr/d</span>
                   </p>
                 </div>
               </div>
@@ -1000,13 +1236,14 @@ export default function InflectionScannerView({
                       })
                     }
                   }}
-                  className="text-xs font-bold px-3 py-1.5 rounded-lg border text-emerald-400 transition-all cursor-pointer"
-                  style={{
-                    background: 'rgba(0,214,143,0.12)',
-                    borderColor: 'rgba(0,214,143,0.3)',
-                  }}
+                  className={`text-xs font-bold px-3 py-1.5 rounded-lg border transition-all cursor-pointer ${
+                    activeCandidate?.circuit_state === 'UPPER_CIRCUIT_LOCKED'
+                      ? 'bg-rose-500/10 text-rose-400 border-rose-500/30'
+                      : 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30 hover:bg-emerald-500/20'
+                  }`}
+                  title={activeCandidate?.circuit_state === 'UPPER_CIRCUIT_LOCKED' ? 'Stock is Upper Circuit Locked' : 'Open Order Ticket'}
                 >
-                  ⚡ Order Ticket
+                  {activeCandidate?.circuit_state === 'UPPER_CIRCUIT_LOCKED' ? '🔒 Circuit Ticket (Limit)' : '⚡ Order Ticket'}
                 </button>
                 <button
                   type="button"
@@ -1029,9 +1266,24 @@ export default function InflectionScannerView({
                 </div>
               ) : (
                 <>
+                  {/* Upper Circuit Locked Warning Shield */}
+                  {activeCandidate?.circuit_state === 'UPPER_CIRCUIT_LOCKED' && (
+                    <div className="p-3.5 rounded-xl bg-rose-500/15 border border-rose-500/40 text-rose-200 text-xs flex items-start gap-2.5 shadow-lg">
+                      <span className="text-xl">🔒</span>
+                      <div className="space-y-1">
+                        <span className="font-bold text-rose-300 block text-xs tracking-wide uppercase font-mono">
+                          Upper Circuit Locked (100% Buyers / Zero Sellers)
+                        </span>
+                        <p className="text-[11px] leading-relaxed text-rose-200/90 font-ui">
+                          Stock is frozen at upper price band. Immediate Market buy orders will be REJECTED by exchange matching engines. Place a Limit GTT order at the circuit band or wait for volatility unlocks before entering.
+                        </p>
+                      </div>
+                    </div>
+                  )}
+
                   {/* Confluence Radar Ribbon */}
                   <div
-                    className="p-3.5 rounded-xl border grid grid-cols-2 sm:grid-cols-4 gap-2.5 text-center font-mono"
+                    className="p-3 rounded-xl border grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2 text-center font-mono"
                     style={{ background: 'var(--color-surface)', borderColor: 'var(--color-border)' }}
                   >
                     <div>
@@ -1060,6 +1312,18 @@ export default function InflectionScannerView({
                       <span className="text-[10px] text-muted uppercase block">Sector Momentum</span>
                       <span className="text-xs font-bold text-amber-400">
                         {activeCandidate?.rrg_quadrant} ({activeCandidate?.sector_tailwind_score}/100)
+                      </span>
+                    </div>
+                    <div>
+                      <span className="text-[10px] text-muted uppercase block">20D Median Liq</span>
+                      <span className="text-xs font-bold text-white">
+                        ₹{activeCandidate?.turnover_20d_cr ? activeCandidate.turnover_20d_cr.toFixed(1) : '0.0'} Cr
+                      </span>
+                    </div>
+                    <div>
+                      <span className="text-[10px] text-muted uppercase block">Weekly Trend</span>
+                      <span className={`text-xs font-bold ${activeCandidate?.weekly_stage === 'STAGE_2_UPTREND' ? 'text-yellow-400' : 'text-muted'}`}>
+                        {activeCandidate?.weekly_stage === 'STAGE_2_UPTREND' ? '👑 W-Stage 2' : 'Neutral'}
                       </span>
                     </div>
                   </div>
