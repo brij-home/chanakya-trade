@@ -142,9 +142,12 @@ class Alert:
 # ── Alert Manager ─────────────────────────────────────────────
 
 
-def _is_market_hours() -> bool:
+def _is_market_hours(exchange: str = "NSE") -> bool:
     """
-    Returns True only during NSE trading hours: Mon–Fri, 9:15–15:30 IST.
+    Returns True only during active trading hours for the given exchange:
+      - NSE / BSE / NFO: Mon–Fri, 09:15–15:30 IST.
+      - CDS (Currency Derivatives): Mon–Fri, 09:00–17:00 IST.
+      - MCX (Commodities): Mon–Fri, 09:00–23:30 IST (or 23:55 in winter).
     Prevents alerts firing on stale prices outside market hours.
     """
     from datetime import timezone, timedelta
@@ -153,8 +156,18 @@ def _is_market_hours() -> bool:
     now = datetime.now(IST)
     if now.weekday() >= 5:  # Saturday=5, Sunday=6
         return False
-    market_open = now.replace(hour=9, minute=15, second=0, microsecond=0)
-    market_close = now.replace(hour=15, minute=30, second=0, microsecond=0)
+
+    exch = (exchange or "NSE").upper()
+    if exch == "MCX":
+        market_open = now.replace(hour=9, minute=0, second=0, microsecond=0)
+        market_close = now.replace(hour=23, minute=30, second=0, microsecond=0)
+    elif exch in ("CDS", "CURRENCY"):
+        market_open = now.replace(hour=9, minute=0, second=0, microsecond=0)
+        market_close = now.replace(hour=17, minute=0, second=0, microsecond=0)
+    else:  # NSE, BSE, NFO, default
+        market_open = now.replace(hour=9, minute=15, second=0, microsecond=0)
+        market_close = now.replace(hour=15, minute=30, second=0, microsecond=0)
+
     return market_open <= now <= market_close
 
 
@@ -577,7 +590,14 @@ class AlertManager:
         desc = alert.describe()
         ltp_str = f"  LTP: ₹{ltp:,.2f}" if ltp else ""
         is_test = (alert.environment == "TEST") or (not alert.is_live)
-        env_tag = "[TEST]" if is_test else "[REAL/LIVE]"
+        in_market = _is_market_hours(alert.exchange)
+
+        if is_test:
+            env_tag = "[TEST]"
+        elif not in_market:
+            env_tag = "[OFF-MARKET]"
+        else:
+            env_tag = "[REAL/LIVE]"
 
         if alert.is_invalidated:
             panel_title = f"[bold red]⚠️ {env_tag} ALERT / VIEW INVALIDATED[/bold red]"
@@ -613,14 +633,21 @@ class AlertManager:
             border_style = "cyan"
             sys_type = "target_achieved"
         else:
-            panel_title = f"[bold {'magenta' if is_test else 'green'}]🔔 {env_tag} ALERT TRIGGERED[/bold {'magenta' if is_test else 'green'}]"
+            panel_title = f"[bold {'magenta' if is_test else ('yellow' if not in_market else 'green')}]🔔 {env_tag} ALERT TRIGGERED[/bold {'magenta' if is_test else ('yellow' if not in_market else 'green')}]"
             desktop_title = f"{env_tag} Alert Triggered: {alert.symbol}"
             desktop_msg = f"{desc}{ltp_str}"
-            tg_prefix = "🧪 <b>[TEST ALERT - SIMULATED]</b>" if is_test else "🟢 <b>[REAL / LIVE ALERT TRIGGERED]</b>"
-            tg_msg = f"{tg_prefix}\n\n🔔 <b>{alert.symbol}</b>: {desc}{ltp_str}"
-            headline = f"{'🧪 [TEST]' if is_test else '🟢 [REAL/LIVE]'} 🔔 {alert.symbol} {alert.alert_type} Alert Triggered"
+            if is_test:
+                tg_prefix = "🧪 <b>[TEST ALERT - SIMULATED]</b>"
+            elif not in_market:
+                tg_prefix = "⏸️ <b>[OFF-MARKET ALERT TRIGGERED]</b>"
+            else:
+                tg_prefix = "🟢 <b>[REAL / LIVE ALERT TRIGGERED]</b>"
+
+            off_market_note = "\n\n⏸️ <i>Market is closed. Setup triggered from post-market settlement/EOD price.</i>" if not in_market and not is_test else ""
+            tg_msg = f"{tg_prefix}\n\n🔔 <b>{alert.symbol}</b>: {desc}{ltp_str}{off_market_note}"
+            headline = f"{env_tag} 🔔 {alert.symbol} {alert.alert_type} Alert Triggered"
             summary = f"{desc}{ltp_str}"
-            border_style = "magenta" if is_test else "green"
+            border_style = "magenta" if is_test else ("yellow" if not in_market else "green")
             sys_type = "market_alert"
 
         now_stamp = alert.triggered_at or alert.invalidated_at or alert.created_at or datetime.now().strftime("%Y-%m-%d %H:%M:%S IST")

@@ -930,8 +930,17 @@ class AutoAlertEngine:
 
     def _dispatch(self, alert: AutoAlert) -> None:
         """Broadcasts alert across all communication channels with clear REAL/LIVE vs TEST tagging."""
+        from engine.alerts import _is_market_hours
+
+        in_market = _is_market_hours(alert.exchange)
         is_test = (alert.environment == "TEST") or (not alert.is_live)
-        env_tag = "[TEST]" if is_test else "[REAL/LIVE]"
+        if is_test:
+            env_tag = "[TEST]"
+        elif not in_market:
+            env_tag = "[OFF-MARKET/EOD]"
+        else:
+            env_tag = "[REAL/LIVE]"
+
         is_t1 = "T1" in (alert.target_status or "") or alert.stage == "T1_ACHIEVED"
         is_target = is_t1 or alert.stage in ("TARGET_ACHIEVED", "COMPLETED") or "TARGET" in (alert.target_status or "")
         is_trail = alert.stage == "TRAILING_UPDATE"
@@ -939,7 +948,7 @@ class AutoAlertEngine:
         alert_dict = alert.to_dict()
         alert_dict["env_tag"] = env_tag
         alert_dict["is_live"] = not is_test
-        alert_dict["environment"] = "TEST" if is_test else "LIVE"
+        alert_dict["environment"] = "TEST" if is_test else ("EOD" if not in_market else "LIVE")
         alert_dict["is_target"] = is_target
         alert_dict["is_trail"] = is_trail
 
@@ -1059,8 +1068,9 @@ class AutoAlertEngine:
                     f"⚡ <b>DECISIVE ACTION:</b> <code>CANCEL PENDING ORDERS & CLOSE POSITIONS</code>"
                 )
             elif is_t1:
-                tg_header = "🎯 <b>[TEST TARGET 1 HIT]</b>" if is_test else "🎯 <b>[REAL / LIVE TARGET 1 HIT]</b>"
+                tg_header = "🎯 <b>[TEST TARGET 1 HIT]</b>" if is_test else ("🎯 <b>[OFF-MARKET TARGET 1 HIT]</b>" if not in_market else "🎯 <b>[REAL / LIVE TARGET 1 HIT]</b>")
                 trail_stop_val = alert.trailing_stop or alert.stop_loss or (alert.trigger_level * 1.002)
+                off_note = "\n\n⏸️ <i>Market is closed. Milestone triggered from post-market settlement/EOD price.</i>" if not in_market and not is_test else ""
                 tg_msg = (
                     f"{tg_header}\n\n"
                     f"🏆 <b>{alert.symbol} ({alert.alert_type.replace('_', ' ')}) — TARGET 1 ACHIEVED</b>\n\n"
@@ -1068,11 +1078,12 @@ class AutoAlertEngine:
                     f"🛡️ <b>Trail Stop:</b> ₹{trail_stop_val:,.2f} (+{alert.locked_profit_pct or 0.2:.1f}% Breakeven Lock)\n"
                     f"⚡ <b>DECISIVE ACTION:</b> <code>BOOK 50% PROFIT NOW & HOLD RUNNER</code>\n\n"
                     f"💡 <b>Institutional Guidance:</b> {alert.trailing_rationale or alert.summary}\n\n"
-                    f"🕒 <b>Timestamp:</b> {now_ts_str}"
+                    f"🕒 <b>Timestamp:</b> {now_ts_str}{off_note}"
                 )
             elif is_target:
+                off_note = "\n\n⏸️ <i>Market is closed. Milestone triggered from post-market settlement/EOD price.</i>" if not in_market and not is_test else ""
                 if alert.should_trail:
-                    tg_header = "🚀 <b>[TEST RUNNER EXTENSION]</b>" if is_test else "🚀 <b>[REAL / LIVE RUNNER EXTENSION]</b>"
+                    tg_header = "🚀 <b>[TEST RUNNER EXTENSION]</b>" if is_test else ("🚀 <b>[OFF-MARKET RUNNER EXTENSION]</b>" if not in_market else "🚀 <b>[REAL / LIVE RUNNER EXTENSION]</b>")
                     tg_msg = (
                         f"{tg_header}\n\n"
                         f"🏆 <b>{alert.symbol} ({alert.alert_type.replace('_', ' ')}) — INSTITUTIONAL RUNAWAY</b>\n\n"
@@ -1080,20 +1091,21 @@ class AutoAlertEngine:
                         f"🛡️ <b>Chandelier Trail SL:</b> ₹{alert.trailing_stop:,.2f} (+{alert.locked_profit_pct or 0:.1f}% locked)\n"
                         f"⚡ <b>DECISIVE ACTION:</b> <code>LET RUNNER RIDE (TRAIL SL)</code>\n\n"
                         f"💡 <b>Institutional Guidance:</b> {alert.trailing_rationale or alert.summary}\n\n"
-                        f"🕒 <b>Timestamp:</b> {now_ts_str}"
+                        f"🕒 <b>Timestamp:</b> {now_ts_str}{off_note}"
                     )
                 else:
-                    tg_header = "🏁 <b>[TEST FINAL TARGET ACHIEVED]</b>" if is_test else "🏁 <b>[REAL / LIVE FINAL TARGET ACHIEVED]</b>"
+                    tg_header = "🏁 <b>[TEST FINAL TARGET ACHIEVED]</b>" if is_test else ("🏁 <b>[OFF-MARKET FINAL TARGET]</b>" if not in_market else "🏁 <b>[REAL / LIVE FINAL TARGET ACHIEVED]</b>")
                     tg_msg = (
                         f"{tg_header}\n\n"
                         f"🏆 <b>{alert.symbol} ({alert.alert_type.replace('_', ' ')}) — FINAL TARGET REACHED</b>\n\n"
                         f"💰 <b>LTP:</b> ₹{alert.ltp:,.2f} | <b>Final Target:</b> ₹{alert.target_level:,.2f}\n"
                         f"⚡ <b>DECISIVE ACTION:</b> <code>CLOSE ALL POSITIONS (BOOK FULL PROFIT)</code>\n\n"
                         f"💡 <b>Institutional Guidance:</b> {alert.trailing_rationale or alert.summary}\n\n"
-                        f"🕒 <b>Timestamp:</b> {now_ts_str}"
+                        f"🕒 <b>Timestamp:</b> {now_ts_str}{off_note}"
                     )
             elif is_trail:
-                tg_header = "📈 <b>[TEST TRAILING STOP RATCHET]</b>" if is_test else "📈 <b>[REAL / LIVE TRAILING STOP RATCHET]</b>"
+                tg_header = "📈 <b>[TEST TRAILING STOP RATCHET]</b>" if is_test else ("📈 <b>[OFF-MARKET TRAILING STOP UPDATE]</b>" if not in_market else "📈 <b>[REAL / LIVE TRAILING STOP RATCHET]</b>")
+                off_note = "\n\n⏸️ <i>Market is closed. Trailing stop update computed from post-market settlement/EOD price.</i>" if not in_market and not is_test else ""
                 tg_msg = (
                     f"{tg_header}\n\n"
                     f"🛡️ <b>{alert.symbol} Trailing Stop Ratcheted Higher!</b>\n\n"
@@ -1102,7 +1114,7 @@ class AutoAlertEngine:
                     f"🔒 <b>Guaranteed Profit:</b> +₹{alert.locked_profit_pts or 0:,.2f}/sh (+{alert.locked_profit_pct or 0:.1f}% locked)\n"
                     f"⚡ <b>DECISIVE ACTION:</b> <code>UPDATE SL ORDER TO ₹{alert.trailing_stop:,.2f}</code>\n\n"
                     f"💡 <i>{alert.trailing_rationale or alert.summary}</i>\n\n"
-                    f"🕒 <b>Timestamp:</b> {now_ts_str}"
+                    f"🕒 <b>Timestamp:</b> {now_ts_str}{off_note}"
                 )
             else:
                 plan_str = ""
@@ -1113,13 +1125,14 @@ class AutoAlertEngine:
                     sl = alert.actionable_plan.get("stop_loss", f"₹{alert.stop_loss}")
                     plan_str = f"\n\n⚡ <b>Trade Plan:</b> {action} @ {entry}\n🎯 <b>Target:</b> {target} | 🛑 <b>SL:</b> {sl}"
 
-                tg_header = "🧪 <b>[TEST BREAKOUT IGNITED]</b>" if is_test else "🟢 <b>[REAL / LIVE BREAKOUT IGNITED]</b>"
+                tg_header = "🧪 <b>[TEST BREAKOUT IGNITED]</b>" if is_test else ("🌙 <b>[POST-MARKET EOD SETUP]</b>" if not in_market else "🟢 <b>[REAL / LIVE BREAKOUT IGNITED]</b>")
+                off_note = "\n\n⏸️ <i>Market is currently closed. Setup detected from post-market settlement/EOD data for the next trading session (09:15 IST).</i>" if not in_market and not is_test else ""
                 tg_msg = (
                     f"{tg_header}\n"
                     f"🚨 <b>{alert.headline}</b>\n\n"
                     f"{alert.summary}"
                     f"{plan_str}\n\n"
-                    f"📊 <b>Confidence:</b> {alert.confidence}% | 🕒 <b>Timestamp:</b> {now_ts_str}"
+                    f"📊 <b>Confidence:</b> {alert.confidence}% | 🕒 <b>Timestamp:</b> {now_ts_str}{off_note}"
                 )
             _telegram_notify(tg_msg)
         except Exception:
@@ -1611,16 +1624,18 @@ class AutoAlertEngine:
     def _run_loop(self, interval: int) -> None:
         while self._is_running and not self._stop_event.is_set():
             try:
-                # 1. Proactively check for invalidated trade views/alerts
-                self.check_and_alert_invalidations()
-
-                # 2. Proactively check for target achievements & trailing stop ratchets
-                self.check_and_alert_targets_and_trailing()
-
-                # 3. Check for fresh market signals during market hours
                 from engine.alerts import _is_market_hours
 
+                # During market hours (or when active trading session is open),
+                # evaluate price milestones, trailing stops, and new signal detections.
                 if _is_market_hours():
+                    # 1. Proactively check for invalidated trade views/alerts
+                    self.check_and_alert_invalidations()
+
+                    # 2. Proactively check for target achievements & trailing stop ratchets
+                    self.check_and_alert_targets_and_trailing()
+
+                    # 3. Check for fresh market signals during market hours
                     self.scan_fresh_signals_now()
             except Exception as e:
                 logger.warning(f"[AutoAlertEngine] Error in poll cycle: {e}")

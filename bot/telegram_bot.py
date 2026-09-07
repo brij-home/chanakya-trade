@@ -1053,6 +1053,9 @@ def send_push(message: str, parse_mode: str = "HTML", bypass_dedup: bool = False
             _recent_push_digests[digest] = now
 
     def _send():
+        if os.environ.get("CHANAKYA_TESTING") == "1":
+            logger.debug("[TelegramPush] Network call skipped during test execution (CHANAKYA_TESTING=1)")
+            return
         try:
             import httpx
             import re
