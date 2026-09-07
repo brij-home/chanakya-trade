@@ -1032,3 +1032,9 @@ def get_store_statistics() -> dict[str, Any]:
         },
         "latest_expected_trading_date": get_latest_expected_trading_date(),
     }
+
+
+# Convenience aliases for batch loading
+get_ohlcv_batch = get_cached_ohlcv_batch
+load_ohlcv_batch = get_cached_ohlcv_batch
+

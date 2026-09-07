@@ -115,6 +115,40 @@ def get_ohlcv(
     to_date = effective_to or datetime.now()
     from_date = from_date or (to_date - timedelta(days=days))
 
+    # Tier 1.5: Local SQLite EOD Store & L1 Process Cache (<1ms)
+    if kite_interval == "day" and not as_of:
+        try:
+            from engine.eod_store import get_ohlcv_batch
+
+            store_map = get_ohlcv_batch([clean_sym])
+            if clean_sym in store_map and not store_map[clean_sym].empty:
+                stored_df = store_map[clean_sym]
+                if from_date or to_date:
+                    start_dt = from_date or stored_df.index[0]
+                    end_dt = to_date or stored_df.index[-1]
+                    sliced = stored_df.loc[start_dt:end_dt]
+                else:
+                    sliced = stored_df.iloc[-days:] if len(stored_df) > days else stored_df
+
+                if not sliced.empty and len(sliced) >= min(days, 15):
+                    res_df = sliced.copy()
+                    if include_live_candle:
+                        res_df = inject_live_tick(res_df, symbol=symbol, exchange=exchange)
+                    res_df.attrs["provenance"] = {
+                        "data_source": "LIVE_ENRICHED" if include_live_candle else "LOCAL_SQLITE_EOD",
+                        "provider": "eod_store",
+                        "as_of": to_date.isoformat(),
+                        "snapshot_id": None,
+                        "reproducible": not include_live_candle,
+                    }
+                    with _df_memory_cache_lock:
+                        while len(_df_memory_cache) >= MAX_MEMORY_DFS:
+                            _df_memory_cache.popitem(last=False)
+                        _df_memory_cache[cache_key] = (now_ts, res_df.copy())
+                    return res_df
+        except Exception:
+            pass
+
     # Tier 2: Fast SQLite analysis_cache for recent daily candles (15m TTL)
     raw = None
     if kite_interval == "day":
@@ -239,6 +273,15 @@ def get_ohlcv(
         "snapshot_id": snapshot_id,
         "reproducible": bool(snapshot_id) and not include_live_candle,
     }
+
+    # Save into Local SQLite EOD Store for universe-wide reuse
+    if kite_interval == "day" and not df.empty and not as_of:
+        try:
+            from engine.eod_store import save_ohlcv_batch
+
+            save_ohlcv_batch({clean_sym: df.copy()})
+        except Exception:
+            pass
 
     # Save into Tier 1 In-Memory Cache (bounded LRU max MAX_MEMORY_DFS)
     if kite_interval == "day" and not df.empty:

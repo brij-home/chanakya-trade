@@ -315,16 +315,29 @@ def dcf_for_symbol(
         if not fcf or fcf <= 0:
             return {"error": f"No positive FCF available for {symbol} — DCF not applicable"}
 
-        # Get shares outstanding from yfinance
+        # Get shares outstanding & fundamentals from cached fundamental layer first
         shares = None
+        t = None
+        info = {}
         try:
-            import yfinance as yf
-            from market.yfinance_provider import _to_yf_symbol
+            from analysis.fundamental import _fetch_yfinance_data
 
-            t = yf.Ticker(_to_yf_symbol(symbol))
-            shares = t.info.get("sharesOutstanding")
+            fund_data = _fetch_yfinance_data(symbol, fast=True)
+            if fund_data and fund_data.get("shares_outstanding"):
+                shares = fund_data.get("shares_outstanding")
         except Exception:
             pass
+
+        if not shares:
+            try:
+                import yfinance as yf
+                from market.yfinance_provider import _to_yf_symbol
+
+                t = yf.Ticker(_to_yf_symbol(symbol))
+                info = t.info if t else {}
+                shares = info.get("sharesOutstanding")
+            except Exception:
+                pass
 
         if not shares:
             return {"error": f"Shares outstanding unavailable for {symbol}"}
@@ -332,11 +345,11 @@ def dcf_for_symbol(
         # Auto-detect growth rate — use best available forward estimate
         growth_source = "user-specified"
         if growth_rate is None:
-            info = {}
-            try:
-                info = t.info if t else {}
-            except Exception:
-                pass
+            if not info and t:
+                try:
+                    info = t.info if t else {}
+                except Exception:
+                    pass
 
             # Collect all available growth signals
             trailing_eps = info.get("trailingEps")

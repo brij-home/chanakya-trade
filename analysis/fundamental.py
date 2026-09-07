@@ -632,6 +632,7 @@ def _fetch_yfinance(symbol: str, fast: bool = False) -> dict:
                 "price_to_sales": info.get("priceToSalesTrailing12Months"),
                 "ev_to_revenue": info.get("enterpriseToRevenue"),
                 "payout_ratio": info.get("payoutRatio"),
+                "shares_outstanding": info.get("sharesOutstanding"),
                 "five_yr_avg_div_yield": info.get("fiveYearAvgDividendYield"),
                 "insider_transactions": [],
                 "quarterly_revenue": [],

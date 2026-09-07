@@ -9,6 +9,8 @@ is logged in or the broker call fails.
 from __future__ import annotations
 
 import time
+import threading
+from collections import OrderedDict
 from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Optional
@@ -17,6 +19,29 @@ from brokers.base import Quote
 from brokers.session import get_data_broker, get_data_broker_key
 from engine.observability import get_registry, new_correlation_id
 from market.data_events import classify_data_state, utc_now_iso
+
+_quote_cache_lock = threading.Lock()
+_QUOTE_CACHE: OrderedDict[str, tuple[float, Quote]] = OrderedDict()
+_QUOTE_TTL_SECONDS = 3.0  # 3.0-second coalescing cache window
+_MAX_QUOTE_CACHE_ITEMS = 1000
+
+
+def clear_quote_cache() -> int:
+    """Evict all cached live quotes from memory. Used by memory_guard under memory pressure."""
+    with _quote_cache_lock:
+        cnt = len(_QUOTE_CACHE)
+        _QUOTE_CACHE.clear()
+        return cnt
+
+
+# Register with memory guard sentinel
+try:
+    from engine.memory_guard import register_trim_callback
+
+    register_trim_callback(clear_quote_cache)
+except Exception:
+    pass
+
 
 
 def _enrich_quote(
@@ -194,15 +219,20 @@ def normalize_instrument(inst: str) -> str:
     return f"NSE:{upper}"
 
 
-def get_quote(instruments: list[str] | str) -> dict[str, Quote]:
+def get_quote(
+    instruments: list[str] | str,
+    *,
+    bypass_cache: bool = False,
+) -> dict[str, Quote]:
     """
     Live quotes for one or more instruments.
 
-    Priority: WebSocket cache (instant) → Broker REST API → yfinance fallback.
+    Priority: Short-TTL in-memory cache (3.0s) → WebSocket cache (instant) → Broker REST API → yfinance fallback.
 
     Args:
         instruments: List of "EXCHANGE:SYMBOL" strings, or a single instrument string.
                      e.g. ["NSE:RELIANCE", "NSE:NIFTY 50", "NFO:NIFTY24APR22900CE", "GOLD", "USDINR"]
+        bypass_cache: Explicitly bypass the 3.0s coalesced cache to force a fresh quote query.
 
     Returns:
         Dict keyed by instrument string → Quote dataclass.
@@ -212,16 +242,31 @@ def get_quote(instruments: list[str] | str) -> dict[str, Quote]:
 
     correlation_id = new_correlation_id("quote")
     started = time.monotonic()
+    now_wall = time.time()
 
     # Map raw input to normalized canonical format
     input_to_canonical = {raw: normalize_instrument(raw) for raw in instruments}
     canonical_instruments = list(set(input_to_canonical.values()))
 
-    # 1. Try WebSocket cache (instant)
-    result = _ws_quotes(canonical_instruments, correlation_id=correlation_id)
+    # 1. Try short-TTL in-memory cache (0.01ms) unless explicitly bypassed
+    result: dict[str, Quote] = {}
+    if not bypass_cache:
+        with _quote_cache_lock:
+            for inst in canonical_instruments:
+                if inst in _QUOTE_CACHE:
+                    ts, cached_q = _QUOTE_CACHE[inst]
+                    if now_wall - ts < _QUOTE_TTL_SECONDS and getattr(cached_q, "last_price", 0.0) > 0:
+                        result[inst] = cached_q
+
     missing = [i for i in canonical_instruments if i not in result]
 
-    # 2. Try broker REST API
+    # 2. Try WebSocket cache (instant)
+    if missing:
+        ws_quotes = _ws_quotes(missing, correlation_id=correlation_id)
+        result.update(ws_quotes)
+        missing = [i for i in canonical_instruments if i not in result]
+
+    # 3. Try broker REST API
     if missing:
         try:
             provider = get_data_broker_key() or "broker"
@@ -243,7 +288,7 @@ def get_quote(instruments: list[str] | str) -> dict[str, Quote]:
         except Exception:
             get_registry().record_provider_error(get_data_broker_key() or "broker")
 
-    # 3. yfinance fallback
+    # 4. yfinance fallback
     if missing:
         yf_quotes = _yf_fallback_quotes(missing, correlation_id=correlation_id)
         result.update(yf_quotes)
@@ -252,7 +297,17 @@ def get_quote(instruments: list[str] | str) -> dict[str, Quote]:
         else:
             get_registry().record_provider_error("yfinance", is_stale=True)
 
-    # 4. Populate raw aliases so quotes["GOLD"] and quotes["MCX:GOLD"] both resolve
+    # 5. Populate cache with newly fetched quotes
+    if result:
+        with _quote_cache_lock:
+            for k, q in result.items():
+                if q and getattr(q, "last_price", 0.0) > 0:
+                    _QUOTE_CACHE[k] = (now_wall, q)
+                    _QUOTE_CACHE.move_to_end(k)
+            while len(_QUOTE_CACHE) > _MAX_QUOTE_CACHE_ITEMS:
+                _QUOTE_CACHE.popitem(last=False)
+
+    # 6. Populate raw aliases so quotes["GOLD"] and quotes["MCX:GOLD"] both resolve
     final_result: dict[str, Quote] = dict(result)
     for raw_key, canon_key in input_to_canonical.items():
         if canon_key in result:
