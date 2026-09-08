@@ -6253,55 +6253,180 @@ async def skill_gex_snapshot(req: Optional[GEXSnapshotRequest] = None):
                 "is_atm": (k == atm_strike),
             })
 
-            # Detect Buyer/Seller Aggression & Blast Signals
-            ce_buy_q = getattr(ce, "total_buy_qty", 0) or 0
-            ce_sell_q = getattr(ce, "total_sell_qty", 0) or 0
+        # ── Institutional Gamma Blast & Squeeze Detection (Top Outliers Only) ───
+        raw_candidates_ce = []
+        raw_candidates_pe = []
+
+        # Institutional Liquidity Floor: Must have substantial base OI to avoid decaying ITM/OTM division artifacts
+        MIN_BASE_OI = 35000
+        MIN_BASE_VOL = 40000
+
+        for k in strikes:
+            # Active gamma territory: Gamma peaks strictly At-The-Money (ATM).
+            # Only strikes within +-1.2% of spot have meaningful gamma to ignite explosive moves.
+            if spot > 0 and abs(k - spot) > (spot * 0.012):
+                continue
+
+            row_legs = strike_map[k]
+            ce = row_legs.get("CE")
+            pe = row_legs.get("PE")
+
+            if ce:
+                # Calls: Only evaluate ATM and near-OTM calls (k >= spot * 0.992)
+                # Deep ITM calls have delta ~ 1.0 and near-zero gamma; they cannot create gamma squeeze cascades.
+                if spot > 0 and k < (spot * 0.992):
+                    pass
+                else:
+                    ce_vol = getattr(ce, "volume", 0) or 0
+                    ce_oi = getattr(ce, "oi", 0) or 0
+                    ce_oi_chg = getattr(ce, "oi_change", 0) or 0
+                    ce_buy_q = getattr(ce, "total_buy_qty", 0) or 0
+                    ce_sell_q = getattr(ce, "total_sell_qty", 0) or 0
+                    ce_imb = (ce_buy_q / max(1, ce_sell_q)) if ce_sell_q > 0 else 1.0
+                    vol_oi = round(ce_vol / max(1, ce_oi), 2)
+                    oi_chg_pct = round((ce_oi_chg / max(1, ce_oi - ce_oi_chg)) * 100.0, 1) if (ce_oi - ce_oi_chg) > 0 else 0.0
+
+                    if ce_oi >= MIN_BASE_OI and ce_vol >= MIN_BASE_VOL:
+                        is_panic = (ce_oi_chg < 0 and (oi_chg_pct <= -12.0 or abs(ce_oi_chg) >= 30000))
+                        is_imb = (ce_imb >= 2.5 and ce_vol >= 50000)
+
+                        if (is_panic or is_imb) and vol_oi >= 2.5:
+                            ce_bid = getattr(ce, "bid", None) or getattr(ce, "last_price", 0.0)
+                            ce_ask = getattr(ce, "ask", None) or getattr(ce, "last_price", 0.0)
+                            score = int(min(98, 60 + min(20, vol_oi * 3) + (min(18, abs(oi_chg_pct)) if is_panic else min(15, ce_imb * 3))))
+                            subtype = "SHORT_SQUEEZE" if is_panic else "BUY_AGGRESSION"
+                            reason = (
+                                f"Call writers shedding {abs(ce_oi_chg):,} OI ({oi_chg_pct:.1f}%) with {vol_oi:.1f}x Vol/OI turnover"
+                                if is_panic else
+                                f"Heavy Call Buy Aggression ({ce_imb:.1f}x Bids) with {vol_oi:.1f}x Vol/OI turnover"
+                            )
+                            raw_candidates_ce.append({
+                                "strike": k,
+                                "type": "CE",
+                                "option_type": "CE",
+                                "contract": f"{clean_sym} {int(k)} CE",
+                                "title": f"₹{int(k):,} CE • Call Gamma Squeeze",
+                                "score": score,
+                                "subtype": subtype,
+                                "blast_reason": reason,
+                                "reason": reason,
+                                "imbalance_ratio": round(ce_imb, 1),
+                                "side": "BUY",
+                                "action": "BUY",
+                                "bid": round(ce_bid, 2) if ce_bid else 0.0,
+                                "ask": round(ce_ask, 2) if ce_ask else 0.0,
+                                "volume": ce_vol,
+                                "oi": ce_oi,
+                                "oi_change": ce_oi_chg,
+                                "oi_change_pct": oi_chg_pct,
+                                "vol_oi_ratio": vol_oi,
+                                "impact_thesis": f"Call writers in retreat ({abs(ce_oi_chg):,} contracts liquidated). High probability of sharp gamma acceleration above {int(k):,}.",
+                            })
+
+            if pe:
+                # Puts: Only evaluate ATM and near-OTM puts (k <= spot * 1.008)
+                # Deep ITM puts (k >> spot) have delta ~ -1.0, low gamma, and naturally shed contracts during rolls.
+                if spot > 0 and k > (spot * 1.008):
+                    pass
+                else:
+                    pe_vol = getattr(pe, "volume", 0) or 0
+                    pe_oi = getattr(pe, "oi", 0) or 0
+                    pe_oi_chg = getattr(pe, "oi_change", 0) or 0
+                    pe_buy_q = getattr(pe, "total_buy_qty", 0) or 0
+                    pe_sell_q = getattr(pe, "total_sell_qty", 0) or 0
+                    pe_imb = (pe_buy_q / max(1, pe_sell_q)) if pe_sell_q > 0 else 1.0
+                    vol_oi = round(pe_vol / max(1, pe_oi), 2)
+                    oi_chg_pct = round((pe_oi_chg / max(1, pe_oi - pe_oi_chg)) * 100.0, 1) if (pe_oi - pe_oi_chg) > 0 else 0.0
+
+                    if pe_oi >= MIN_BASE_OI and pe_vol >= MIN_BASE_VOL:
+                        is_panic = (pe_oi_chg < 0 and (oi_chg_pct <= -12.0 or abs(pe_oi_chg) >= 30000))
+                        is_imb = (pe_imb >= 2.5 and pe_vol >= 50000)
+
+                        if (is_panic or is_imb) and vol_oi >= 2.5:
+                            pe_bid = getattr(pe, "bid", None) or getattr(pe, "last_price", 0.0)
+                            pe_ask = getattr(pe, "ask", None) or getattr(pe, "last_price", 0.0)
+                            score = int(min(98, 60 + min(20, vol_oi * 3) + (min(18, abs(oi_chg_pct)) if is_panic else min(15, pe_imb * 3))))
+                            subtype = "PANIC_UNWIND" if is_panic else "PUT_DEMAND"
+                            reason = (
+                                f"Put writers shedding {abs(pe_oi_chg):,} OI ({oi_chg_pct:.1f}%) with {vol_oi:.1f}x Vol/OI turnover"
+                                if is_panic else
+                                f"Heavy Put Buying Pressure ({pe_imb:.1f}x Bids) with {vol_oi:.1f}x Vol/OI turnover"
+                            )
+                            raw_candidates_pe.append({
+                                "strike": k,
+                                "type": "PE",
+                                "option_type": "PE",
+                                "contract": f"{clean_sym} {int(k)} PE",
+                                "title": f"₹{int(k):,} PE • Put Panic / Breakdown",
+                                "score": score,
+                                "subtype": subtype,
+                                "blast_reason": reason,
+                                "reason": reason,
+                                "imbalance_ratio": round(pe_imb, 1),
+                                "side": "BUY",
+                                "action": "BUY",
+                                "bid": round(pe_bid, 2) if pe_bid else 0.0,
+                                "ask": round(pe_ask, 2) if pe_ask else 0.0,
+                                "volume": pe_vol,
+                                "oi": pe_oi,
+                                "oi_change": pe_oi_chg,
+                                "oi_change_pct": oi_chg_pct,
+                                "vol_oi_ratio": vol_oi,
+                                "impact_thesis": f"Put support collapsing ({abs(pe_oi_chg):,} contracts liquidated). Downside breakdown risk if spot slips below {int(k):,}.",
+                            })
+
+        raw_candidates_ce.sort(key=lambda x: (x["score"], -abs(x["strike"] - spot)), reverse=True)
+        raw_candidates_pe.sort(key=lambda x: (x["score"], -abs(x["strike"] - spot)), reverse=True)
+
+        # Scarcity guarantee: flag only top 1 genuine institutional outlier strike per side (score >= 82)
+        top_ce_map: dict[float, dict[str, Any]] = {}
+        for c in raw_candidates_ce:
+            if c["score"] >= 82 and len(top_ce_map) == 0:
+                top_ce_map[c["strike"]] = c
+
+        top_pe_map: dict[float, dict[str, Any]] = {}
+        for p in raw_candidates_pe:
+            if p["score"] >= 82 and len(top_pe_map) == 0:
+                top_pe_map[p["strike"]] = p
+
+        blast_radar = list(top_ce_map.values()) + list(top_pe_map.values())
+        blast_radar.sort(key=lambda x: x["score"], reverse=True)
+
+        # Build clean option chain rows
+        for k in strikes:
+            row_legs = strike_map[k]
+            ce = row_legs.get("CE")
+            pe = row_legs.get("PE")
+
             ce_vol = getattr(ce, "volume", 0) or 0
             ce_oi = getattr(ce, "oi", 0) or 0
             ce_bid = getattr(ce, "bid", None) or getattr(ce, "last_price", 0.0)
             ce_ask = getattr(ce, "ask", None) or getattr(ce, "last_price", 0.0)
+            ce_buy_q = getattr(ce, "total_buy_qty", 0) or 0
+            ce_sell_q = getattr(ce, "total_sell_qty", 0) or 0
+            ce_imb = (ce_buy_q / max(1, ce_sell_q)) if ce_sell_q > 0 else 1.0
 
-            pe_buy_q = getattr(pe, "total_buy_qty", 0) or 0
-            pe_sell_q = getattr(pe, "total_sell_qty", 0) or 0
             pe_vol = getattr(pe, "volume", 0) or 0
             pe_oi = getattr(pe, "oi", 0) or 0
             pe_bid = getattr(pe, "bid", None) or getattr(pe, "last_price", 0.0)
             pe_ask = getattr(pe, "ask", None) or getattr(pe, "last_price", 0.0)
+            pe_buy_q = getattr(pe, "total_buy_qty", 0) or 0
+            pe_sell_q = getattr(pe, "total_sell_qty", 0) or 0
+            pe_imb = (pe_buy_q / max(1, pe_sell_q)) if pe_sell_q > 0 else 1.0
 
-            ce_imbalance = (ce_buy_q / max(1, ce_sell_q)) if ce_sell_q > 0 else 1.0
-            pe_imbalance = (pe_buy_q / max(1, pe_sell_q)) if pe_sell_q > 0 else 1.0
+            # GEX lookup
+            call_gex = 0.0
+            put_gex = 0.0
+            for gp in gex_profile:
+                if gp["strike"] == k:
+                    call_gex = gp["call_gex"]
+                    put_gex = gp["put_gex"]
+                    break
 
-            ce_vol_surge = (ce_vol > 1.2 * ce_oi and ce_vol > 15000) if ce_oi > 0 else False
-            pe_vol_surge = (pe_vol > 1.2 * pe_oi and pe_vol > 15000) if pe_oi > 0 else False
-
-            ce_blast = (ce_imbalance >= 1.6 and ce_vol > 10000) or ce_vol_surge
-            pe_blast = (pe_imbalance >= 1.6 and pe_vol > 10000) or pe_vol_surge
-
-            if ce_blast and abs(k - spot) <= (spot * 0.035):
-                blast_candidates.append({
-                    "strike": k,
-                    "type": "CE",
-                    "score": min(98, int(60 + ce_imbalance * 8 + (20 if ce_vol_surge else 0))),
-                    "title": f"Rs. {int(k):,} CE â€¢ Call Momentum Blast",
-                    "reason": f"Heavy Buy Aggression ({ce_imbalance:.1f}Ã— Bids) â€¢ {ce_vol:,} Vol Spike",
-                    "action": "BUY",
-                    "bid": round(ce_bid, 2) if ce_bid else 0.0,
-                    "ask": round(ce_ask, 2) if ce_ask else 0.0,
-                    "spread": round(abs((ce_ask or 0) - (ce_bid or 0)), 2),
-                })
-
-            if pe_blast and abs(k - spot) <= (spot * 0.035):
-                blast_candidates.append({
-                    "strike": k,
-                    "type": "PE",
-                    "score": min(98, int(60 + pe_imbalance * 8 + (20 if pe_vol_surge else 0))),
-                    "title": f"Rs. {int(k):,} PE â€¢ Put Shock / Breakdown",
-                    "reason": f"Heavy Put Demand ({pe_imbalance:.1f}Ã— Bids) â€¢ {pe_vol:,} Vol Spike",
-                    "action": "BUY",
-                    "bid": round(pe_bid, 2) if pe_bid else 0.0,
-                    "ask": round(pe_ask, 2) if pe_ask else 0.0,
-                    "spread": round(abs((pe_ask or 0) - (pe_bid or 0)), 2),
-                })
+            ce_blast = (k in top_ce_map)
+            pe_blast = (k in top_pe_map)
+            ce_meta = top_ce_map.get(k)
+            pe_meta = top_pe_map.get(k)
 
             is_atm = (k == atm_strike)
             chain_rows.append({
@@ -6316,24 +6441,26 @@ async def skill_gex_snapshot(req: Optional[GEXSnapshotRequest] = None):
                 "calls_ask": round(ce_ask, 2) if ce_ask else 0.0,
                 "calls_bid_qty": getattr(ce, "bid_qty", 0),
                 "calls_ask_qty": getattr(ce, "ask_qty", 0),
-                "calls_buy_aggression": round(ce_imbalance, 2),
+                "calls_buy_aggression": round(ce_imb, 2),
                 "calls_blast": ce_blast,
+                "calls_blast_reason": ce_meta["blast_reason"] if ce_meta else "",
+                "calls_blast_score": ce_meta["score"] if ce_meta else None,
+                "calls_blast_metric": f"{ce_meta['vol_oi_ratio']:.1f}x Vol/OI" if ce_meta else "",
                 "puts_bid": round(pe_bid, 2) if pe_bid else 0.0,
                 "puts_ask": round(pe_ask, 2) if pe_ask else 0.0,
                 "puts_bid_qty": getattr(pe, "bid_qty", 0),
                 "puts_ask_qty": getattr(pe, "ask_qty", 0),
-                "puts_buy_aggression": round(pe_imbalance, 2),
+                "puts_buy_aggression": round(pe_imb, 2),
                 "puts_blast": pe_blast,
+                "puts_blast_reason": pe_meta["blast_reason"] if pe_meta else "",
+                "puts_blast_score": pe_meta["score"] if pe_meta else None,
+                "puts_blast_metric": f"{pe_meta['vol_oi_ratio']:.1f}x Vol/OI" if pe_meta else "",
                 "puts_iv": f"{round((pe.iv if pe and pe.iv else 15.0), 1)}%",
                 "puts_gex": f"{round(put_gex, 1)}Cr",
                 "puts_oi_chg": f"{'+' if (pe and pe.oi_change >= 0) else ''}{round((pe.oi_change if pe else 0) / 1000, 1)}k",
                 "puts_oi": f"{round(pe_oi / 100000, 2)}L" if pe_oi >= 100000 else f"{round(pe_oi / 1000, 1)}k",
                 "puts_oi_num": pe_oi,
             })
-
-        # Top 3 Blast Opportunities
-        blast_candidates.sort(key=lambda x: x["score"], reverse=True)
-        top_blast = blast_candidates[:3]
 
         # Key Structural Walls
         call_wall_strike = max(strikes, key=lambda k: strike_map[k].get("CE").oi if strike_map[k].get("CE") else 0) if strikes else atm_strike
@@ -6415,7 +6542,7 @@ async def skill_gex_snapshot(req: Optional[GEXSnapshotRequest] = None):
                 "delta_hedge": delta_hedge,
                 "iv_skew": iv_skew,
                 "options_chain": chain_rows,
-                "blast_radar": top_blast,
+                "blast_radar": blast_radar,
             }
         )
     except Exception as e:

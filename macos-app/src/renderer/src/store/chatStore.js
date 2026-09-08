@@ -121,6 +121,15 @@ export const useChatStore = create((set, get) => ({
     set({ selectedSymbol: clean })
   },
 
+  // ── Terminal View Settings (Institutional Default: Chart Hidden) ─────────────
+  terminalShowChart: false,
+  setTerminalShowChart: (show) =>
+    set((s) => ({
+      terminalShowChart: typeof show === 'function' ? show(s.terminalShowChart) : Boolean(show),
+    })),
+  toggleTerminalShowChart: () =>
+    set((s) => ({ terminalShowChart: !s.terminalShowChart })),
+
   // ── Global In-Flight Activity & Progress HUD State ─────────
   activeActivity: null, // { id, title, details, progress, type, targetView, cancelFn, startedAt }
   completedNotification: null, // { id, title, message, targetView, actionLabel, timestamp }

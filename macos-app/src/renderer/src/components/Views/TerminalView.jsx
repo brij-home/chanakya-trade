@@ -25,6 +25,17 @@ export default function TerminalView({
 }) {
   const { call } = useAPI()
   const sendDraft = useChatStore((s) => s.sendDraft)
+  const terminalShowChart = useChatStore((s) => s.terminalShowChart ?? false)
+  const toggleTerminalShowChart = useChatStore((s) => s.toggleTerminalShowChart)
+  const [localShowChart, setLocalShowChart] = useState(false)
+  const showChart = toggleTerminalShowChart ? terminalShowChart : localShowChart
+  const toggleChart = () => {
+    if (toggleTerminalShowChart) {
+      toggleTerminalShowChart()
+    } else {
+      setLocalShowChart((p) => !p)
+    }
+  }
   const { getTicker } = useRealtimeMarket()
   const [selectedSymbol, setSelectedSymbolState] = useState(externalSymbol || 'NIFTY')
   const [timeframe, setTimeframeState] = useState(externalTimeframe || '15m')
@@ -906,6 +917,20 @@ export default function TerminalView({
             </button>
           </div>
 
+          {/* Chart on/off toggle button (Default: Hidden) */}
+          <button
+            onClick={toggleChart}
+            className={`flex items-center gap-1.5 px-2.5 py-1 rounded-xl text-xs font-bold transition-all cursor-pointer border shadow-xs ${
+              showChart
+                ? 'bg-amber/15 border-amber/40 text-amber hover:bg-amber/25'
+                : 'bg-elevated border-border/70 text-muted hover:text-text hover:border-amber/40'
+            }`}
+            title={showChart ? 'Candlestick Chart is Visible (Click to Hide)' : 'Candlestick Chart is Hidden (Click to Show)'}
+          >
+            <span>{showChart ? '📉' : '📊'}</span>
+            <span>{showChart ? 'Chart ON' : 'Chart OFF'}</span>
+          </button>
+
           <button
             onClick={() => sendDraft(`council ${selectedCouncil} ${selectedSymbol}`)}
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-amber/15 hover:bg-amber hover:text-black border border-amber/30 text-amber text-xs font-bold transition-all cursor-pointer shadow-xs"
@@ -1324,6 +1349,20 @@ export default function TerminalView({
 
                   {/* Right badges */}
                   <div className="flex items-center gap-1.5 flex-wrap">
+                    {/* Chart toggle button */}
+                    <button
+                      type="button"
+                      onClick={toggleChart}
+                      className={`px-2.5 py-1 rounded-md text-[10px] font-bold font-mono transition-all cursor-pointer flex items-center gap-1.5 border shadow-xs ${
+                        showChart
+                          ? 'bg-amber/15 border-amber/50 text-amber hover:bg-amber/25'
+                          : 'bg-elevated hover:bg-surface border-border text-muted hover:text-text'
+                      }`}
+                      title={showChart ? 'Click to hide candlestick chart' : 'Click to view candlestick chart'}
+                    >
+                      <span>{showChart ? '📉' : '📊'}</span>
+                      <span>{showChart ? 'HIDE CHART' : 'SHOW CHART'}</span>
+                    </button>
                     {data?.rvol != null ? (
                       <span className="px-2 py-0.5 rounded-md text-[10px] font-bold font-mono"
                         style={{ background: 'rgba(0,214,143,0.12)', border: '1px solid rgba(0,214,143,0.35)', color: 'var(--color-emerald)' }}>
@@ -1390,66 +1429,111 @@ export default function TerminalView({
                 </div>
               </div>
 
-              {/* Interactive Candlestick Chart (Single or Dual Split) */}
-              {layoutMode === 'dual' ? (
-                <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
-                  <div className="rounded-xl overflow-hidden bg-surface/50 border border-border/60 p-2 space-y-1">
-                    <div className="flex items-center justify-between px-1">
-                      <span className="text-[11px] font-bold text-amber font-mono">⚡ 15m Intraday Structure (SMC)</span>
+              {/* Interactive Candlestick Chart (Single or Dual Split) - Hidden by default */}
+              {showChart ? (
+                <div className="space-y-3">
+                  {layoutMode === 'dual' ? (
+                    <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+                      <div className="rounded-xl overflow-hidden bg-surface/50 border border-border/60 p-2 space-y-1">
+                        <div className="flex items-center justify-between px-1">
+                          <span className="text-[11px] font-bold text-amber font-mono">⚡ 15m Intraday Structure (SMC)</span>
+                        </div>
+                        <CandlestickChart key={`${selectedSymbol}-15m-${resolvedExchange}`} symbol={selectedSymbol} exchange={resolvedExchange} timeframe="15m" height={320} livePrice={curLtp} />
+                      </div>
+                      <div className="rounded-xl overflow-hidden bg-surface/50 border border-border/60 p-2 space-y-1">
+                        <div className="flex items-center justify-between px-1">
+                          <span className="text-[11px] font-bold text-emerald-500 font-mono">💎 1D Positional Markup (Stage 2)</span>
+                        </div>
+                        <CandlestickChart key={`${selectedSymbol}-1D-${resolvedExchange}`} symbol={selectedSymbol} exchange={resolvedExchange} timeframe="1D" height={320} livePrice={curLtp} />
+                      </div>
                     </div>
-                    <CandlestickChart key={`${selectedSymbol}-15m-${resolvedExchange}`} symbol={selectedSymbol} exchange={resolvedExchange} timeframe="15m" height={320} livePrice={curLtp} />
+                  ) : (
+                    <div className="w-full rounded-xl overflow-hidden bg-surface/50 border border-border/60">
+                      <CandlestickChart key={`${selectedSymbol}-${timeframe}-${resolvedExchange}`} symbol={selectedSymbol} exchange={resolvedExchange} timeframe={timeframe} height={280} livePrice={curLtp} />
+                    </div>
+                  )}
+
+                  {/* Overlay SMC Box Details (Order Block & Volume Profile) */}
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-2 border-t border-border/40 text-xs font-mono">
+                    <div className="bg-surface/80 p-2 rounded-lg border border-border/60">
+                      <span className="text-[10px] text-muted block">UNMITIGATED OB</span>
+                      <span className="font-bold text-emerald-400">
+                        {(data?.order_block?.bottom && data?.order_block?.top)
+                          ? `₹${data.order_block.bottom} – ₹${data.order_block.top}`
+                          : (setupRaw?.order_block?.bottom && setupRaw?.order_block?.top
+                              ? `₹${setupRaw.order_block.bottom} – ₹${setupRaw.order_block.top}`
+                              : '—')}
+                      </span>
+                    </div>
+                    <div className="bg-surface/80 p-2 rounded-lg border border-border/60">
+                      <span className="text-[10px] text-muted block">POC (Max Vol)</span>
+                      <span className="font-bold text-amber">
+                        {(data?.volume_profile?.poc || setupRaw?.volume_profile?.poc)
+                          ? `₹${data?.volume_profile?.poc || setupRaw?.volume_profile?.poc}`
+                          : '—'}
+                      </span>
+                    </div>
+                    <div className="bg-surface/80 p-2 rounded-lg border border-border/60">
+                      <span className="text-[10px] text-muted block">VAH (70% High)</span>
+                      <span className="font-bold text-blue-400">
+                        {(data?.volume_profile?.vah || setupRaw?.volume_profile?.vah)
+                          ? `₹${data?.volume_profile?.vah || setupRaw?.volume_profile?.vah}`
+                          : '—'}
+                      </span>
+                    </div>
+                    <div className="bg-surface/80 p-2 rounded-lg border border-border/60">
+                      <span className="text-[10px] text-muted block">VAL (70% Low)</span>
+                      <span className="font-bold text-purple-400">
+                        {(data?.volume_profile?.val || setupRaw?.volume_profile?.val)
+                          ? `₹${data?.volume_profile?.val || setupRaw?.volume_profile?.val}`
+                          : '—'}
+                      </span>
+                    </div>
                   </div>
-                  <div className="rounded-xl overflow-hidden bg-surface/50 border border-border/60 p-2 space-y-1">
-                    <div className="flex items-center justify-between px-1">
-                      <span className="text-[11px] font-bold text-emerald-500 font-mono">💎 1D Positional Markup (Stage 2)</span>
-                    </div>
-                    <CandlestickChart key={`${selectedSymbol}-1D-${resolvedExchange}`} symbol={selectedSymbol} exchange={resolvedExchange} timeframe="1D" height={320} livePrice={curLtp} />
+
+                  {/* Collapse footer button */}
+                  <div className="flex justify-end pt-0.5">
+                    <button
+                      type="button"
+                      onClick={toggleChart}
+                      className="text-[11px] font-mono text-muted hover:text-amber transition-colors flex items-center gap-1 cursor-pointer"
+                      title="Hide Candlestick Chart"
+                    >
+                      <span>▲</span>
+                      <span>Hide Chart</span>
+                    </button>
                   </div>
                 </div>
               ) : (
-                <div className="w-full rounded-xl overflow-hidden bg-surface/50 border border-border/60">
-                  <CandlestickChart key={`${selectedSymbol}-${timeframe}-${resolvedExchange}`} symbol={selectedSymbol} exchange={resolvedExchange} timeframe={timeframe} height={280} livePrice={curLtp} />
+                /* Collapsed Chart Banner (Hidden as default) */
+                <div
+                  onClick={toggleChart}
+                  className="w-full py-2.5 px-3.5 rounded-xl bg-surface/40 hover:bg-surface/75 border border-dashed border-border/80 hover:border-amber/50 flex items-center justify-between text-xs font-mono transition-all cursor-pointer group"
+                  title="Click to expand interactive candlestick chart"
+                >
+                  <div className="flex items-center gap-2.5 text-muted group-hover:text-text">
+                    <span className="text-amber text-base">📊</span>
+                    <div className="flex flex-col sm:flex-row sm:items-center sm:gap-2">
+                      <span className="font-bold text-text">Interactive Chart Hidden</span>
+                      <span className="text-[11px] text-muted font-normal">
+                        ({layoutMode === 'dual' ? '15m + 1D Dual-TF' : `${timeframe} Candlesticks`} · Default mode)
+                      </span>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      toggleChart()
+                    }}
+                    className="px-2.5 py-1 rounded-lg bg-amber/15 group-hover:bg-amber group-hover:text-black border border-amber/40 text-amber text-[11px] font-bold transition-all cursor-pointer flex items-center gap-1"
+                  >
+                    <span>Show Chart</span>
+                    <span>▾</span>
+                  </button>
                 </div>
               )}
-
-            {/* Overlay SMC Box Details (Order Block & Volume Profile) */}
-            <div className="mt-3 grid grid-cols-2 sm:grid-cols-4 gap-2 pt-2 border-t border-border/40 text-xs font-mono">
-              <div className="bg-surface/80 p-2 rounded-lg border border-border/60">
-                <span className="text-[10px] text-muted block">UNMITIGATED OB</span>
-                <span className="font-bold text-emerald-400">
-                  {(data?.order_block?.bottom && data?.order_block?.top)
-                    ? `₹${data.order_block.bottom} – ₹${data.order_block.top}`
-                    : (setupRaw?.order_block?.bottom && setupRaw?.order_block?.top
-                        ? `₹${setupRaw.order_block.bottom} – ₹${setupRaw.order_block.top}`
-                        : '—')}
-                </span>
-              </div>
-              <div className="bg-surface/80 p-2 rounded-lg border border-border/60">
-                <span className="text-[10px] text-muted block">POC (Max Vol)</span>
-                <span className="font-bold text-amber">
-                  {(data?.volume_profile?.poc || setupRaw?.volume_profile?.poc)
-                    ? `₹${data?.volume_profile?.poc || setupRaw?.volume_profile?.poc}`
-                    : '—'}
-                </span>
-              </div>
-              <div className="bg-surface/80 p-2 rounded-lg border border-border/60">
-                <span className="text-[10px] text-muted block">VAH (70% High)</span>
-                <span className="font-bold text-blue-400">
-                  {(data?.volume_profile?.vah || setupRaw?.volume_profile?.vah)
-                    ? `₹${data?.volume_profile?.vah || setupRaw?.volume_profile?.vah}`
-                    : '—'}
-                </span>
-              </div>
-              <div className="bg-surface/80 p-2 rounded-lg border border-border/60">
-                <span className="text-[10px] text-muted block">VAL (70% Low)</span>
-                <span className="font-bold text-purple-400">
-                  {(data?.volume_profile?.val || setupRaw?.volume_profile?.val)
-                    ? `₹${data?.volume_profile?.val || setupRaw?.volume_profile?.val}`
-                    : '—'}
-                </span>
-              </div>
             </div>
-          </div>
         )}
 
           {/* DYNAMIC INTELLIGENCE DECK: Synchronized with Left Nav selection */}

@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest'
+import { render, screen } from '@testing-library/react'
 import {
   formatLivePrice,
   formatLiveChange,
@@ -6,6 +7,7 @@ import {
   formatMetricOrUnavailable,
 } from '../renderer/src/utils/marketDataUtils'
 import { useRealtimeMarket } from '../renderer/src/hooks/useRealtimeMarket'
+import { LiveIndexTicker } from '../renderer/src/components/Shell/ContextBar'
 
 describe('Market Data Utilities & SSOT Guardrails', () => {
   describe('formatLivePrice', () => {
@@ -138,3 +140,26 @@ describe('useRealtimeMarket Hook & Store', () => {
     expect(state.dataSource).toBe('FALLBACK')
   })
 })
+
+describe('LiveIndexTicker Component', () => {
+  beforeEach(() => {
+    useRealtimeMarket.setState({
+      tickers: [
+        { symbol: 'NIFTY', display_name: 'NIFTY 50', ltp: 24350.25, change: 110.5, change_pct: 0.46, direction: 'up' },
+        { symbol: 'BANKNIFTY', display_name: 'BANK NIFTY', ltp: 52100.0, change: -120.0, change_pct: -0.23, direction: 'down' },
+        { symbol: 'INDIA VIX', display_name: 'INDIA VIX', unit: 'pts', ltp: 13.5, change: -0.5, change_pct: -3.57, direction: 'down' },
+      ],
+      connectionState: 'live',
+    })
+  })
+
+  it('renders without React child object error and formats percentage changes as text', () => {
+    render(<LiveIndexTicker onSymbolChange={() => {}} />)
+    expect(screen.getByText('+0.46%')).toBeInTheDocument()
+    expect(screen.getByText('-0.23%')).toBeInTheDocument()
+    expect(screen.getByText('-3.57%')).toBeInTheDocument()
+    expect(screen.getByText('₹24,350.25')).toBeInTheDocument()
+    expect(screen.getByText('13.50 pts')).toBeInTheDocument()
+  })
+})
+

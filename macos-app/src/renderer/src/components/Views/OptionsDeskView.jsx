@@ -694,7 +694,7 @@ export default function OptionsDeskView({
             <div className="flex items-center gap-2 mt-0.5 text-[11px] font-bold">
               <span className="text-cyan-400">C: {totalCallOI}</span>
               <span className="text-muted">|</span>
-              <span className="text-amber">P: {totalPutOI}</span>
+              <span className="text-rose-400">P: {totalPutOI}</span>
             </div>
           </div>
 
@@ -1265,16 +1265,16 @@ export default function OptionsDeskView({
                   className={`p-2.5 rounded-xl border transition-all ${
                     isCall
                       ? 'bg-cyan-950/20 border-cyan-500/40 hover:border-cyan-400'
-                      : 'bg-amber-950/20 border-amber-500/40 hover:border-amber-400'
+                      : 'bg-rose-950/20 border-rose-500/40 hover:border-rose-400'
                   }`}
                 >
                   <div className="flex items-center justify-between font-mono">
                     <span className="text-xs font-extrabold text-text flex items-center gap-1.5">
-                      <span className={isCall ? 'text-cyan-400' : 'text-amber'}>
+                      <span className={isCall ? 'text-cyan-400' : 'text-rose-400'}>
                         {pick.contract}
                       </span>
                       <span className={`text-[9px] px-1.5 py-0.2 rounded font-black ${
-                        isCall ? 'bg-cyan-500/20 text-cyan-300' : 'bg-amber/20 text-amber'
+                        isCall ? 'bg-cyan-500/20 text-cyan-300' : 'bg-rose-500/20 text-rose-300'
                       }`}>
                         {pick.option_type}
                       </span>
@@ -1306,7 +1306,11 @@ export default function OptionsDeskView({
                           segment: 'OPTIONS',
                         })
                       }
-                      className="px-2.5 py-1 rounded-lg bg-gradient-to-r from-amber to-amber-light hover:brightness-110 text-black font-extrabold text-[10px] transition-all shadow-xs cursor-pointer flex items-center gap-1"
+                      className={`px-2.5 py-1 rounded-lg font-extrabold text-[10px] transition-all shadow-xs cursor-pointer flex items-center gap-1 ${
+                        isCall
+                          ? 'bg-gradient-to-r from-cyan-400 to-cyan-500 hover:brightness-110 text-black'
+                          : 'bg-gradient-to-r from-rose-500 to-rose-600 hover:brightness-110 text-white'
+                      }`}
                     >
                       <span>🚀</span> Stage Order
                     </button>
@@ -1531,7 +1535,7 @@ export default function OptionsDeskView({
                       <th className="py-1 px-3 text-amber text-center bg-surface font-extrabold border-x border-border/80">
                         STRIKE
                       </th>
-                      <th colSpan={chainViewMode === 'STANDARD' ? 6 : 6} className="py-1 px-3 text-amber text-center border-l border-border/60 bg-amber-950/20">
+                      <th colSpan={chainViewMode === 'STANDARD' ? 6 : 6} className="py-1 px-3 text-rose-400 text-center border-l border-border/60 bg-rose-950/20">
                         PUT OPTIONS (PE) ►
                       </th>
                     </tr>
@@ -1564,21 +1568,21 @@ export default function OptionsDeskView({
 
                       {chainViewMode === 'STANDARD' ? (
                         <>
-                          <th className="py-2 px-2.5 text-amber border-l border-border/60 text-right">Bid</th>
-                          <th className="py-2 px-2 text-amber text-right">Ask</th>
-                          <th className="py-2 px-2 text-amber text-right">IV</th>
-                          <th className="py-2 px-2 text-amber text-right">GEX</th>
-                          <th className="py-2 px-2 text-amber text-right">OI Chg</th>
-                          <th className="py-2 px-2.5 text-amber text-right">OI (Depth)</th>
+                          <th className="py-2 px-2.5 text-rose-400 border-l border-border/60 text-right">Bid</th>
+                          <th className="py-2 px-2 text-rose-400 text-right">Ask</th>
+                          <th className="py-2 px-2 text-rose-400 text-right">IV</th>
+                          <th className="py-2 px-2 text-rose-400 text-right">GEX</th>
+                          <th className="py-2 px-2 text-rose-400 text-right">OI Chg</th>
+                          <th className="py-2 px-2.5 text-rose-400 text-right">OI (Depth)</th>
                         </>
                       ) : (
                         <>
-                          <th className="py-2 px-2.5 text-amber border-l border-border/60 text-right">Bid</th>
-                          <th className="py-2 px-2 text-amber text-right">Ask</th>
-                          <th className="py-2 px-2 text-amber text-right">Vega (ν)</th>
-                          <th className="py-2 px-2 text-amber text-right">Theta (Θ)</th>
-                          <th className="py-2 px-2 text-amber text-right">Gamma (Γ)</th>
-                          <th className="py-2 px-2.5 text-amber text-right">Delta (Δ)</th>
+                          <th className="py-2 px-2.5 text-rose-400 border-l border-border/60 text-right">Bid</th>
+                          <th className="py-2 px-2 text-rose-400 text-right">Ask</th>
+                          <th className="py-2 px-2 text-rose-400 text-right">Vega (ν)</th>
+                          <th className="py-2 px-2 text-rose-400 text-right">Theta (Θ)</th>
+                          <th className="py-2 px-2 text-rose-400 text-right">Gamma (Γ)</th>
+                          <th className="py-2 px-2.5 text-rose-400 text-right">Delta (Δ)</th>
                         </>
                       )}
                     </tr>
@@ -1671,14 +1675,14 @@ export default function OptionsDeskView({
                                   }
                                   className={`px-1.5 py-0.5 rounded border text-xs font-bold transition-all cursor-pointer flex items-center justify-between gap-1 w-full ${
                                     callIsBlast
-                                      ? 'bg-emerald-500/20 border-emerald-400 text-emerald-300 ring-2 ring-emerald-400/50 shadow-xs'
+                                      ? 'bg-cyan-500/20 border-cyan-400 text-cyan-300 ring-1 ring-cyan-400/50 shadow-xs'
                                       : 'bg-surface hover:bg-emerald-500 hover:text-black border-border/60 text-text'
                                   }`}
                                   title={callIsBlast ? `🚀 BLAST ALERT: ${row.calls_blast_reason || 'High order flow imbalance'}` : 'Click to stage BUY Call Order'}
                                 >
                                   <span>₹{row.calls_bid}</span>
                                   {callIsBlast && (
-                                    <span className="text-[7px] bg-emerald-500 text-black px-1 rounded-xs font-black animate-pulse">
+                                    <span className="text-[7px] bg-cyan-500 text-black px-1 rounded-xs font-black animate-pulse">
                                       BLAST
                                     </span>
                                   )}
@@ -1732,14 +1736,14 @@ export default function OptionsDeskView({
                                   }
                                   className={`px-1.5 py-0.5 rounded border text-xs font-bold transition-all cursor-pointer flex items-center justify-between gap-1 w-full ${
                                     callIsBlast
-                                      ? 'bg-emerald-500/20 border-emerald-400 text-emerald-300 ring-2 ring-emerald-400/50 shadow-xs'
+                                      ? 'bg-cyan-500/20 border-cyan-400 text-cyan-300 ring-1 ring-cyan-400/50 shadow-xs'
                                       : 'bg-surface hover:bg-emerald-500 hover:text-black border-border/60 text-text'
                                   }`}
                                   title={callIsBlast ? `🚀 BLAST ALERT: ${row.calls_blast_reason || 'High order flow imbalance'}` : 'Click to stage BUY Call Order'}
                                 >
                                   <span>₹{row.calls_bid}</span>
                                   {callIsBlast && (
-                                    <span className="text-[7px] bg-emerald-500 text-black px-1 rounded-xs font-black animate-pulse">
+                                    <span className="text-[7px] bg-cyan-500 text-black px-1 rounded-xs font-black animate-pulse">
                                       BLAST
                                     </span>
                                   )}
@@ -1806,7 +1810,7 @@ export default function OptionsDeskView({
                           {chainViewMode === 'STANDARD' ? (
                             <>
                               {/* Put Bid (Clickable to Buy) */}
-                              <td className={`py-2 px-2.5 border-l border-border/60 text-right ${isPutITM ? 'bg-amber-950/20' : ''}`}>
+                              <td className={`py-2 px-2.5 border-l border-border/60 text-right ${isPutITM ? 'bg-rose-950/15' : ''}`}>
                                 <button
                                   onClick={() =>
                                     onOpenOrderTicket &&
@@ -1819,13 +1823,13 @@ export default function OptionsDeskView({
                                   }
                                   className={`px-1.5 py-0.5 rounded border text-xs font-bold transition-all cursor-pointer flex items-center justify-between gap-1 w-full ${
                                     putIsBlast
-                                      ? 'bg-amber-500/20 border-amber-400 text-amber-300 ring-2 ring-amber-400/50 shadow-xs'
+                                      ? 'bg-rose-500/20 border-rose-400 text-rose-300 ring-1 ring-rose-400/50 shadow-xs'
                                       : 'bg-surface hover:bg-emerald-500 hover:text-black border-border/60 text-text'
                                   }`}
                                   title={putIsBlast ? `🚀 BLAST ALERT: ${row.puts_blast_reason || 'High order flow imbalance'}` : 'Click to stage BUY Put Order'}
                                 >
                                   {putIsBlast && (
-                                    <span className="text-[7px] bg-amber text-black px-1 rounded-xs font-black animate-pulse">
+                                    <span className="text-[7px] bg-rose-500 text-white px-1 rounded-xs font-black animate-pulse">
                                       BLAST
                                     </span>
                                   )}
@@ -1834,7 +1838,7 @@ export default function OptionsDeskView({
                               </td>
 
                               {/* Put Ask (Clickable to Sell) */}
-                              <td className={`py-2 px-2 text-right ${isPutITM ? 'bg-amber-950/20' : ''}`}>
+                              <td className={`py-2 px-2 text-right ${isPutITM ? 'bg-rose-950/15' : ''}`}>
                                 <button
                                   onClick={() =>
                                     onOpenOrderTicket &&
@@ -1853,19 +1857,19 @@ export default function OptionsDeskView({
                               </td>
 
                               {/* Put IV */}
-                              <td className={`py-2 px-2 text-right text-text/90 ${isPutITM ? 'bg-amber-950/20' : ''}`}>
+                              <td className={`py-2 px-2 text-right text-text/90 ${isPutITM ? 'bg-rose-950/15' : ''}`}>
                                 {row.puts_iv}
                               </td>
 
                               {/* Put GEX */}
-                              <td className={`py-2 px-2 text-right font-bold ${isPutITM ? 'bg-amber-950/20' : ''}`}>
+                              <td className={`py-2 px-2 text-right font-bold ${isPutITM ? 'bg-rose-950/15' : ''}`}>
                                 <span className={String(row.puts_gex || '').startsWith('-') ? 'text-rose-400' : 'text-emerald-400'}>
                                   {row.puts_gex}
                                 </span>
                               </td>
 
                               {/* Put OI Change */}
-                              <td className={`py-2 px-2 text-right ${isPutITM ? 'bg-amber-950/20' : ''}`}>
+                              <td className={`py-2 px-2 text-right ${isPutITM ? 'bg-rose-950/15' : ''}`}>
                                 <span
                                   className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${
                                     putOIChgIsPos
@@ -1878,14 +1882,14 @@ export default function OptionsDeskView({
                               </td>
 
                               {/* Put OI with Visual Depth Bar */}
-                              <td className={`py-2 px-2.5 relative text-right font-mono text-xs ${isPutITM ? 'bg-amber-950/20' : ''}`}>
+                              <td className={`py-2 px-2.5 relative text-right font-mono text-xs ${isPutITM ? 'bg-rose-950/15' : ''}`}>
                                 {showVisualBars && (
                                   <div
-                                    className="absolute inset-y-1 left-0 bg-amber/20 rounded-r border-l-2 border-amber/60 pointer-events-none transition-all duration-300"
+                                    className="absolute inset-y-1 left-0 bg-rose-500/15 rounded-r border-l-2 border-rose-500/50 pointer-events-none transition-all duration-300"
                                     style={{ width: `${putOIWidth}%` }}
                                   />
                                 )}
-                                <span className={`relative z-10 font-bold ${isPutWall ? 'text-amber-300 ring-1 ring-amber/40 px-1 rounded bg-amber-950/60' : 'text-text'}`}>
+                                <span className={`relative z-10 font-bold ${isPutWall ? 'text-rose-300 ring-1 ring-rose-500/40 px-1 rounded bg-rose-950/60' : 'text-text'}`}>
                                   {row.puts_oi}
                                 </span>
                               </td>
@@ -1893,7 +1897,7 @@ export default function OptionsDeskView({
                           ) : (
                             /* GREEKS VIEW - PUTS */
                             <>
-                              <td className={`py-2 px-2.5 border-l border-border/60 text-right ${isPutITM ? 'bg-amber-950/20' : ''}`}>
+                              <td className={`py-2 px-2.5 border-l border-border/60 text-right ${isPutITM ? 'bg-rose-950/15' : ''}`}>
                                 <button
                                   onClick={() =>
                                     onOpenOrderTicket &&
@@ -1906,20 +1910,20 @@ export default function OptionsDeskView({
                                   }
                                   className={`px-1.5 py-0.5 rounded border text-xs font-bold transition-all cursor-pointer flex items-center justify-between gap-1 w-full ${
                                     putIsBlast
-                                      ? 'bg-amber-500/20 border-amber-400 text-amber-300 ring-2 ring-amber-400/50 shadow-xs'
+                                      ? 'bg-rose-500/20 border-rose-400 text-rose-300 ring-1 ring-rose-400/50 shadow-xs'
                                       : 'bg-surface hover:bg-emerald-500 hover:text-black border-border/60 text-text'
                                   }`}
                                   title={putIsBlast ? `🚀 BLAST ALERT: ${row.puts_blast_reason || 'High order flow imbalance'}` : 'Click to stage BUY Put Order'}
                                 >
                                   {putIsBlast && (
-                                    <span className="text-[7px] bg-amber text-black px-1 rounded-xs font-black animate-pulse">
+                                    <span className="text-[7px] bg-rose-500 text-white px-1 rounded-xs font-black animate-pulse">
                                       BLAST
                                     </span>
                                   )}
                                   <span className="ml-auto">₹{row.puts_bid}</span>
                                 </button>
                               </td>
-                              <td className={`py-2 px-2 text-right ${isPutITM ? 'bg-amber-950/20' : ''}`}>
+                              <td className={`py-2 px-2 text-right ${isPutITM ? 'bg-rose-950/15' : ''}`}>
                                 <button
                                   onClick={() =>
                                     onOpenOrderTicket &&
@@ -1935,16 +1939,16 @@ export default function OptionsDeskView({
                                   ₹{row.puts_ask}
                                 </button>
                               </td>
-                              <td className={`py-2 px-2 text-right text-emerald-400 ${isPutITM ? 'bg-amber-950/20' : ''}`}>
+                              <td className={`py-2 px-2 text-right text-emerald-400 ${isPutITM ? 'bg-rose-950/15' : ''}`}>
                                 +{putGreeks.vega}
                               </td>
-                              <td className={`py-2 px-2 text-right text-rose-400 font-semibold ${isPutITM ? 'bg-amber-950/20' : ''}`}>
+                              <td className={`py-2 px-2 text-right text-rose-400 font-semibold ${isPutITM ? 'bg-rose-950/15' : ''}`}>
                                 {putGreeks.putTheta}
                               </td>
-                              <td className={`py-2 px-2 text-right text-muted ${isPutITM ? 'bg-amber-950/20' : ''}`}>
+                              <td className={`py-2 px-2 text-right text-muted ${isPutITM ? 'bg-rose-950/15' : ''}`}>
                                 {putGreeks.gamma}
                               </td>
-                              <td className={`py-2 px-2.5 text-right text-rose-400 font-bold ${isPutITM ? 'bg-amber-950/20' : ''}`}>
+                              <td className={`py-2 px-2.5 text-right text-rose-400 font-bold ${isPutITM ? 'bg-rose-950/15' : ''}`}>
                                 {putGreeks.putDelta}
                               </td>
                             </>

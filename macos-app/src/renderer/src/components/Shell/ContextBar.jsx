@@ -89,8 +89,9 @@ export function LiveIndexTicker({ onSymbolChange }) {
     <div className="hidden lg:flex items-center gap-2 no-drag overflow-x-auto no-scrollbar max-w-[620px]">
       {displayItems.map((idx) => {
         const rawPrice = idx.ltp != null ? idx.ltp : idx.price
-        const isUp = (idx.direction === 'up') || (idx.change_pct > 0)
-        const isDown = (idx.direction === 'down') || (idx.change_pct < 0)
+        const changeObj = formatLiveChange(idx.change, idx.change_pct)
+        const isUp = (idx.direction === 'up') || (idx.change_pct > 0) || changeObj.isPositive
+        const isDown = (idx.direction === 'down') || (idx.change_pct < 0) || (changeObj.direction === 'down')
         const changeColor = isUp ? 'var(--color-emerald)' : isDown ? 'var(--color-rose)' : 'var(--color-subtle)'
 
         return (
@@ -110,14 +111,13 @@ export function LiveIndexTicker({ onSymbolChange }) {
               className="text-xs font-mono font-bold tabular-nums"
               style={{ color: 'var(--color-text)' }}
             >
-              {idx.unit === '$' ? '$' : (idx.unit === 'pts' ? '' : '₹')}
-              {formatLivePrice(rawPrice, idx.unit === '$' ? '$' : '₹')}
+              {formatLivePrice(rawPrice, idx.unit || '₹')}
             </span>
             <span
               className="text-[10px] font-semibold font-mono tabular-nums"
               style={{ color: changeColor }}
             >
-              {formatLiveChange(idx.change_pct)}
+              {changeObj.pctText}
             </span>
           </button>
         )
@@ -139,7 +139,7 @@ export default function ContextBar({
   layoutMode,
   onLayoutChange,
 }) {
-  const { activeView } = useChatStore()
+  const { activeView, terminalShowChart, toggleTerminalShowChart } = useChatStore()
   const [searchQuery, setSearchQuery] = useState('')
   const [showTypeahead, setShowTypeahead] = useState(false)
   const [typeaheadIdx, setTypeaheadIdx] = useState(0)
@@ -274,6 +274,24 @@ export default function ContextBar({
             </button>
           ))}
         </div>
+      )}
+
+      {/* Terminal View: Chart visibility quick toggle */}
+      {activeView === 'terminal' && toggleTerminalShowChart && (
+        <button
+          type="button"
+          onClick={toggleTerminalShowChart}
+          title={terminalShowChart ? 'Hide Candlestick Chart' : 'Show Candlestick Chart (Default: Hidden)'}
+          className="flex items-center gap-1.5 px-2.5 py-1 rounded-xl text-xs font-bold transition-all cursor-pointer border shadow-xs"
+          style={
+            terminalShowChart
+              ? { background: 'rgba(245,166,35,0.15)', borderColor: 'rgba(245,166,35,0.5)', color: 'var(--color-gold)' }
+              : { background: 'var(--color-elevated)', borderColor: 'var(--color-border)', color: 'var(--color-muted)' }
+          }
+        >
+          <span>{terminalShowChart ? '📉' : '📊'}</span>
+          <span>{terminalShowChart ? 'Chart ON' : 'Chart OFF'}</span>
+        </button>
       )}
 
       {/* Key market metrics strip — only shown in non-terminal views to eliminate duplication */}

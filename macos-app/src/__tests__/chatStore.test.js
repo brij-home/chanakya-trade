@@ -253,4 +253,22 @@ describe('chatStore', () => {
     })
     expect(useChatStore.getState().selectedSymbol).toBe('BANKNIFTY')
   })
+
+  // ── terminalShowChart (Hidden by default) ──────────────────────────────────
+  it('terminalShowChart defaults to false and can be toggled on/off', () => {
+    expect(useChatStore.getState().terminalShowChart).toBe(false)
+    act(() => {
+      useChatStore.getState().toggleTerminalShowChart()
+    })
+    expect(useChatStore.getState().terminalShowChart).toBe(true)
+    act(() => {
+      useChatStore.getState().toggleTerminalShowChart()
+    })
+    expect(useChatStore.getState().terminalShowChart).toBe(false)
+    act(() => {
+      useChatStore.getState().setTerminalShowChart(true)
+    })
+    expect(useChatStore.getState().terminalShowChart).toBe(true)
+  })
 })
+
