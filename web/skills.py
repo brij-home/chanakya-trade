@@ -1,4 +1,4 @@
-﻿"""
+"""
 web/skills.py
 â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 OpenClaw skill endpoints for chanakya-trade.
@@ -1002,7 +1002,7 @@ async def skill_analyze(req: AnalyzeRequest):
       Phase 3 â€” Fund Manager synthesizes final verdict + recommendation
 
     Returns the full text report plus structured trade plans.
-    NOTE: Involves multiple LLM calls. Expect 30â€“90 seconds.
+    NOTE: Involves multiple LLM calls. Expect 30-90 seconds.
     """
     try:
         from engine.analysis_cache import analysis_cache
@@ -1336,7 +1336,7 @@ async def skill_deep_analyze(req: AnalyzeRequest):
     """
     11-LLM deep analysis â€” every analyst uses AI (not just Python rules).
     More thorough than /analyze but takes several minutes.
-    NOTE: 11+ LLM calls. Expect 3â€“8 minutes.
+    NOTE: 11+ LLM calls. Expect 3-8 minutes.
     """
     try:
         from agent.tools import build_registry
@@ -2593,7 +2593,7 @@ async def analyze_followup(req: AnalyzeFollowupRequest):
                         name = a.get("name", "")
                         ctx_lines.append(f"  â€¢ {name}: {verdict} ({conf}%)")
                         for pt in a.get("key_points") or []:
-                            ctx_lines.append(f"    â€“ {pt}")
+                            ctx_lines.append(f"    - {pt}")
                 if synthesis_text:
                     ctx_lines.append(f"\nFund Manager Synthesis:\n{synthesis_text}")
                 if report:
@@ -3921,7 +3921,7 @@ def _compute_dashboard_snapshot_sync(req: Optional[DashboardSnapshotRequest] = N
 
         sym, exch = normalize_symbol_exchange(sym, exch)
 
-        cache_key = f"dashboard_snapshot_v8_{sym}_{exch}_{tf}"
+        cache_key = f"dashboard_snapshot_v9_{sym}_{exch}_{tf}"
         force = bool(req and getattr(req, "force_refresh", False))
         if not force:
             try:
@@ -4091,28 +4091,28 @@ def _compute_dashboard_snapshot_sync(req: Optional[DashboardSnapshotRequest] = N
                 "display_name": "NIFTY 50",
                 "inst": "NSE:NIFTY 50",
                 "category": "INDEX",
-                "unit": "â‚¹",
+                "unit": "Rs. ",
             },
             {
                 "symbol": "BANKNIFTY",
                 "display_name": "BANK NIFTY",
                 "inst": "NSE:NIFTY BANK",
                 "category": "INDEX",
-                "unit": "â‚¹",
+                "unit": "Rs. ",
             },
             {
                 "symbol": "SENSEX",
                 "display_name": "SENSEX",
                 "inst": "BSE:SENSEX",
                 "category": "INDEX",
-                "unit": "â‚¹",
+                "unit": "Rs. ",
             },
             {
                 "symbol": "FINNIFTY",
                 "display_name": "FIN NIFTY",
                 "inst": "NSE:NIFTY FIN SERVICE",
                 "category": "INDEX",
-                "unit": "â‚¹",
+                "unit": "Rs. ",
             },
             {
                 "symbol": "INDIA VIX",
@@ -4126,21 +4126,21 @@ def _compute_dashboard_snapshot_sync(req: Optional[DashboardSnapshotRequest] = N
                 "display_name": "CRUDE OIL",
                 "inst": "MCX:CRUDEOIL",
                 "category": "COMMODITY",
-                "unit": "â‚¹/bbl",
+                "unit": "Rs. /bbl",
             },
             {
                 "symbol": "GOLD",
                 "display_name": "GOLD",
                 "inst": "MCX:GOLD",
                 "category": "COMMODITY",
-                "unit": "â‚¹/10g",
+                "unit": "Rs. /10g",
             },
             {
                 "symbol": "SILVER",
                 "display_name": "SILVER",
                 "inst": "MCX:SILVER",
                 "category": "COMMODITY",
-                "unit": "â‚¹/kg",
+                "unit": "Rs. /kg",
             },
             {
                 "symbol": "BTC",
@@ -4440,8 +4440,8 @@ def _compute_dashboard_snapshot_sync(req: Optional[DashboardSnapshotRequest] = N
             above50 = c_now > sma50
             minervini_conf = 68 if above50 else 42
             minervini_verdict = "ABOVE 50-DMA" if above50 else "BELOW 50-DMA"
-            minervini_thesis = f"{setup_sym} trading {'above' if above50 else 'below'} 50-DMA (â‚¹{sma50:.1f}). Full Minervini template screening pending."
-            minervini_metric = f"50-DMA: â‚¹{sma50:.1f}"
+            minervini_thesis = f"{setup_sym} trading {'above' if above50 else 'below'} 50-DMA (Rs. {sma50:.1f}). Full Minervini template screening pending."
+            minervini_metric = f"50-DMA: Rs. {sma50:.1f}"
         else:
             minervini_conf = 50
             minervini_verdict = "N/A (NON-EQUITY)" if not is_equity else "SCREENING PENDING"
@@ -4627,7 +4627,7 @@ def _compute_dashboard_snapshot_sync(req: Optional[DashboardSnapshotRequest] = N
                 "icon": "ðŸš€",
                 "style": "Momentum",
                 "verdict": minervini_verdict,
-                "horizon": "1â€“4 Weeks (Swing)",
+                "horizon": "1-4 Weeks (Swing)",
                 "thesis": minervini_thesis,
                 "key_metric": minervini_metric,
                 "quote": "Look for contraction in volatility accompanied by a distinct volume contraction before the breakout.",
@@ -4654,7 +4654,7 @@ def _compute_dashboard_snapshot_sync(req: Optional[DashboardSnapshotRequest] = N
                 "icon": "ðŸ’Ž",
                 "style": "Multibagger",
                 "verdict": kedia_verdict,
-                "horizon": "6â€“24 Months (Positional)",
+                "horizon": "6-24 Months (Positional)",
                 "thesis": kedia_thesis,
                 "key_metric": kedia_metric,
                 "quote": "Invest like a bull, sit like a sloth, and work like a hound to spot 10x opportunities.",
@@ -4681,7 +4681,7 @@ def _compute_dashboard_snapshot_sync(req: Optional[DashboardSnapshotRequest] = N
                 "icon": "ðŸ›¡ï¸",
                 "style": "Asymmetric Quant",
                 "verdict": taleb_verdict,
-                "horizon": "1â€“2 Expiries (Options)",
+                "horizon": "1-2 Expiries (Options)",
                 "thesis": taleb_thesis,
                 "key_metric": taleb_metric,
                 "quote": "Invest in asymmetric opportunities where your downside is bounded and upside is open-ended.",
@@ -4708,7 +4708,7 @@ def _compute_dashboard_snapshot_sync(req: Optional[DashboardSnapshotRequest] = N
                 "icon": "ðŸ“ˆ",
                 "style": "Volume Spread",
                 "verdict": wyckoff_verdict,
-                "horizon": "2â€“6 Weeks (Swing)",
+                "horizon": "2-6 Weeks (Swing)",
                 "thesis": wyckoff_thesis,
                 "key_metric": wyckoff_metric,
                 "quote": "When the composite operator has accumulated the floating supply, price must advance.",
@@ -4735,7 +4735,7 @@ def _compute_dashboard_snapshot_sync(req: Optional[DashboardSnapshotRequest] = N
                 "icon": "âš¡",
                 "style": "Growth",
                 "verdict": oneil_verdict,
-                "horizon": "3â€“8 Weeks (Swing)",
+                "horizon": "3-8 Weeks (Swing)",
                 "thesis": oneil_thesis,
                 "key_metric": oneil_metric,
                 "quote": "Whole truth: 90% of the biggest winners in the stock market were emerging growth leaders.",
@@ -4762,7 +4762,7 @@ def _compute_dashboard_snapshot_sync(req: Optional[DashboardSnapshotRequest] = N
                 "icon": "ðŸ§®",
                 "style": "Mathematical Quant",
                 "verdict": simons_verdict,
-                "horizon": "1â€“5 Days (Intraday/Swing)",
+                "horizon": "1-5 Days (Intraday/Swing)",
                 "thesis": simons_thesis,
                 "key_metric": simons_metric,
                 "quote": "We search for anomalies in historical price patterns that have statistical significance.",
@@ -4770,13 +4770,13 @@ def _compute_dashboard_snapshot_sync(req: Optional[DashboardSnapshotRequest] = N
                 "accent": "purple",
                 "checklist": [
                     simons_metric,
-                    f"Realized ATR: â‚¹{atr_val:.2f}",
+                    f"Realized ATR: Rs. {atr_val:.2f}",
                     f"Regime Direction: {structure_dir}",
                     "Kelly Risk-Parity Lot Quantization",
                 ],
                 "metrics": {
                     "Metric": simons_metric.split("|")[0].strip(),
-                    "ATR": f"â‚¹{atr_val:.2f}",
+                    "ATR": f"Rs. {atr_val:.2f}",
                     "Regime": structure_dir,
                     "Edge": "Quantitative",
                 },
@@ -4789,7 +4789,7 @@ def _compute_dashboard_snapshot_sync(req: Optional[DashboardSnapshotRequest] = N
                 "icon": "ðŸŽ¯",
                 "style": "ICT Price Action",
                 "verdict": smc_verdict,
-                "horizon": "1â€“3 Sessions (Intraday/Swing)",
+                "horizon": "1-3 Sessions (Intraday/Swing)",
                 "thesis": smc_thesis,
                 "key_metric": smc_metric,
                 "quote": "Follow institutional order flow and trade when unmitigated liquidity is tapped.",
@@ -4816,7 +4816,7 @@ def _compute_dashboard_snapshot_sync(req: Optional[DashboardSnapshotRequest] = N
                 "icon": "ðŸ‚",
                 "style": "Contrarian",
                 "verdict": jh_verdict,
-                "horizon": "2â€“3 Years",
+                "horizon": "2-3 Years",
                 "thesis": jh_thesis,
                 "key_metric": jh_metric,
                 "quote": "Ride the Indian economic supercycle; invest in market leaders with operating leverage.",
@@ -4843,7 +4843,7 @@ def _compute_dashboard_snapshot_sync(req: Optional[DashboardSnapshotRequest] = N
                 "icon": "ðŸ°",
                 "style": "Value Moat",
                 "verdict": buffett_verdict,
-                "horizon": "3â€“5+ Years",
+                "horizon": "3-5+ Years",
                 "thesis": buffett_thesis,
                 "key_metric": buffett_metric,
                 "quote": "It's far better to buy a wonderful company at a fair price than a fair company at a wonderful price.",
@@ -4897,7 +4897,7 @@ def _compute_dashboard_snapshot_sync(req: Optional[DashboardSnapshotRequest] = N
                 "icon": "ðŸŒŠ",
                 "style": "Global Macro",
                 "verdict": soros_verdict,
-                "horizon": "2â€“6 Weeks",
+                "horizon": "2-6 Weeks",
                 "thesis": soros_thesis,
                 "key_metric": soros_metric,
                 "quote": "Markets are constantly in a state of uncertainty and flux; identify the prevailing bias and ride it.",
@@ -4924,7 +4924,7 @@ def _compute_dashboard_snapshot_sync(req: Optional[DashboardSnapshotRequest] = N
                 "icon": "ðŸ›’",
                 "style": "GARP",
                 "verdict": lynch_verdict,
-                "horizon": "1â€“2 Years",
+                "horizon": "1-2 Years",
                 "thesis": lynch_thesis,
                 "key_metric": lynch_metric,
                 "quote": "Know what you own, and know why you own it. Look for earnings growth exceeding P/E.",
@@ -5058,17 +5058,17 @@ def _compute_dashboard_snapshot_sync(req: Optional[DashboardSnapshotRequest] = N
         action_type = "LONG (BUY)" if is_bullish else "SHORT (SELL)"
 
         timeline_map = {
-            "5m": "1â€“2 Trading Sessions (Scalp / Intraday)",
-            "15m": "1â€“3 Trading Sessions (Intraday Swing)",
-            "1h": "2â€“5 Trading Days (Swing Pivot)",
-            "day": "5â€“15 Trading Days (Positional Markup)",
-            "1D": "5â€“15 Trading Days (Positional Markup)",
-            "week": "3â€“8 Weeks (Trend Continuation)",
-            "1W": "3â€“8 Weeks (Trend Continuation)",
-            "month": "3â€“12 Months (Secular Macro Cycle)",
-            "1M": "3â€“12 Months (Secular Macro Cycle)",
+            "5m": "1-2 Trading Sessions (Scalp / Intraday)",
+            "15m": "1-3 Trading Sessions (Intraday Swing)",
+            "1h": "2-5 Trading Days (Swing Pivot)",
+            "day": "5-15 Trading Days (Positional Markup)",
+            "1D": "5-15 Trading Days (Positional Markup)",
+            "week": "3-8 Weeks (Trend Continuation)",
+            "1W": "3-8 Weeks (Trend Continuation)",
+            "month": "3-12 Months (Secular Macro Cycle)",
+            "1M": "3-12 Months (Secular Macro Cycle)",
         }
-        timeline_str = timeline_map.get(str(tf).lower(), "5â€“15 Trading Days (Positional Markup)")
+        timeline_str = timeline_map.get(str(tf).lower(), "5-15 Trading Days (Positional Markup)")
 
         vp_data = None
         if vp_report:
@@ -5103,51 +5103,93 @@ def _compute_dashboard_snapshot_sync(req: Optional[DashboardSnapshotRequest] = N
                 "type": "DEMAND",
             }
 
-        has_ob = False
         automated_setup = None
+        if cur_ltp > 0:
+            entry_val = round(cur_ltp, 2)
+            setup_type = getattr(ms_report, "setup_type", "CONSOLIDATION") if ms_report else "CONSOLIDATION"
+            struct_score = getattr(ms_report, "structure_score", 0) if ms_report else 0
 
-        if is_bullish and ms_report and getattr(ms_report, "active_demand_zones", None):
-            active_d = ms_report.active_demand_zones
-            # Demand zone must be below or retesting current price (within 3.5% range)
-            if active_d and active_d[-1].bottom < cur_ltp and cur_ltp <= active_d[-1].top * 1.035:
-                has_ob = True
-                top_ob = active_d[-1]
-                entry_val = float(getattr(top_ob, "ote_price", (top_ob.top + top_ob.bottom) / 2.0))
-                sl_val = float(top_ob.bottom * 0.998)
-                trigger_name = "Demand OB Retest"
-                ob_data = {
-                    "bottom": round(float(top_ob.bottom), 2),
-                    "top": round(float(top_ob.top), 2),
-                    "type": "DEMAND",
-                }
-                risk_unit = max(entry_val * 0.0035, entry_val - sl_val)
-                sl_val = entry_val - risk_unit
-                tgt1_val = entry_val + (risk_unit * 2.0)
-                tgt2_val = entry_val + (risk_unit * 3.5)
-                rr_val = 2.0
-                thesis_txt = f"Bullish structure with unmitigated Demand Zone near â‚¹{entry_val:.2f}. Limit entry at 50% Mean Threshold (OTE) with {((risk_unit / entry_val) * 100):.1f}% risk invalidation below swing support."
-        elif not is_bullish and ms_report and getattr(ms_report, "active_supply_zones", None):
-            active_s = ms_report.active_supply_zones
-            # Supply zone must be above or retesting current price (within 3.5% range)
-            if active_s and active_s[-1].top > cur_ltp and cur_ltp >= active_s[-1].bottom * 0.965:
-                has_ob = True
-                top_ob = active_s[-1]
-                entry_val = float(getattr(top_ob, "ote_price", (top_ob.top + top_ob.bottom) / 2.0))
-                sl_val = float(top_ob.top * 1.002)
-                trigger_name = "Supply OB Rejection"
-                ob_data = {
-                    "bottom": round(float(top_ob.bottom), 2),
-                    "top": round(float(top_ob.top), 2),
-                    "type": "SUPPLY",
-                }
-                risk_unit = max(entry_val * 0.0035, sl_val - entry_val)
-                sl_val = entry_val + risk_unit
-                tgt1_val = entry_val - (risk_unit * 2.0)
-                tgt2_val = entry_val - (risk_unit * 3.5)
-                rr_val = 2.0
-                thesis_txt = f"Bearish structure with unmitigated Supply Zone near â‚¹{entry_val:.2f}. Short entry on liquidity rejection with {((risk_unit / entry_val) * 100):.1f}% risk invalidation above swing resistance."
+            # Determine genuine trigger based on price location relative to Order Blocks & Market Structure
+            in_demand_ob = bool(
+                ms_report
+                and getattr(ms_report, "active_demand_zones", None)
+                and ms_report.active_demand_zones[-1].bottom <= cur_ltp <= ms_report.active_demand_zones[-1].top * 1.01
+            )
+            in_supply_ob = bool(
+                ms_report
+                and getattr(ms_report, "active_supply_zones", None)
+                and ms_report.active_supply_zones[-1].bottom * 0.99 <= cur_ltp <= ms_report.active_supply_zones[-1].top
+            )
 
-        if has_ob:
+            if is_bullish:
+                if in_demand_ob:
+                    trigger_name = "Demand OB Retest"
+                elif setup_type == "BREAKOUT_EXPANSION":
+                    trigger_name = "Bullish BOS Breakout"
+                elif setup_type == "BOTTOM_FISHING_SPRING":
+                    trigger_name = "Liquidity Sweep Spring"
+                elif setup_type == "PULLBACK_RETEST":
+                    trigger_name = "Pullback Retest"
+                else:
+                    trigger_name = "Structural Momentum (Bullish)"
+
+                # Structural stop loss below nearest support / swing low
+                supports = []
+                if ms_report and getattr(ms_report, "active_demand_zones", None):
+                    supports += [float(ob.top) for ob in ms_report.active_demand_zones if float(ob.top) < cur_ltp]
+                if df is not None and not df.empty and "low" in df.columns:
+                    supports += [float(l) for l in df["low"].tail(10).tolist() if float(l) < cur_ltp]
+                nearest_sup = max(supports) if supports else (cur_ltp - 1.5 * atr_val)
+
+                min_risk = max(cur_ltp * 0.0035, atr_val * 0.8)
+                max_risk = max(cur_ltp * 0.025, atr_val * 2.5)
+                raw_risk = max(cur_ltp - nearest_sup * 0.998, min_risk)
+                risk_unit = min(raw_risk, max_risk)
+
+                sl_val = round(cur_ltp - risk_unit, 2)
+                tgt1_val = round(cur_ltp + (risk_unit * 2.0), 2)
+                tgt2_val = round(cur_ltp + (risk_unit * 3.5), 2)
+                rr_val = 2.0
+                thesis_txt = f"Bullish market structure with invalidation below swing support at Rs. {sl_val:.2f}. Long entry near CMP (Rs. {cur_ltp:.2f}) with {((risk_unit / cur_ltp) * 100):.1f}% risk invalidation."
+            else:
+                if in_supply_ob:
+                    trigger_name = "Supply OB Rejection"
+                elif setup_type == "BREAKDOWN_EXPANSION":
+                    trigger_name = "Bearish BOS Breakdown"
+                elif setup_type == "TOP_FISHING_UTAD":
+                    trigger_name = "UTAD Liquidity Sweep"
+                elif setup_type == "PULLBACK_RETEST":
+                    trigger_name = "Pullback Retest"
+                else:
+                    trigger_name = "Structural Breakdown (Bearish)"
+
+                # Structural stop loss above nearest resistance / swing high
+                resistances = []
+                if ms_report and getattr(ms_report, "active_supply_zones", None):
+                    resistances += [float(ob.bottom) for ob in ms_report.active_supply_zones if float(ob.bottom) > cur_ltp]
+                if df is not None and not df.empty and "high" in df.columns:
+                    resistances += [float(h) for h in df["high"].tail(10).tolist() if float(h) > cur_ltp]
+                nearest_res = min(resistances) if resistances else (cur_ltp + 1.5 * atr_val)
+
+                min_risk = max(cur_ltp * 0.0035, atr_val * 0.8)
+                max_risk = max(cur_ltp * 0.025, atr_val * 2.5)
+                raw_risk = max(nearest_res * 1.002 - cur_ltp, min_risk)
+                risk_unit = min(raw_risk, max_risk)
+
+                sl_val = round(cur_ltp + risk_unit, 2)
+                tgt1_val = round(cur_ltp - (risk_unit * 2.0), 2)
+                tgt2_val = round(cur_ltp - (risk_unit * 3.5), 2)
+                rr_val = 2.0
+                thesis_txt = f"Bearish market structure with invalidation above swing resistance at Rs. {sl_val:.2f}. Short entry near CMP (Rs. {cur_ltp:.2f}) with {((risk_unit / cur_ltp) * 100):.1f}% risk invalidation."
+
+            is_ready = abs(struct_score) >= 20 or setup_type in (
+                "BREAKDOWN_EXPANSION",
+                "BREAKOUT_EXPANSION",
+                "PULLBACK_RETEST",
+                "BOTTOM_FISHING_SPRING",
+                "TOP_FISHING_UTAD",
+            ) or in_demand_ob or in_supply_ob
+
             q_src = getattr(q_obj, "source", None)
             q_prov = getattr(q_obj, "provider", None)
             q_state = getattr(q_obj, "data_state", None)
@@ -5168,17 +5210,10 @@ def _compute_dashboard_snapshot_sync(req: Optional[DashboardSnapshotRequest] = N
                 "reward_pct": round((abs(tgt1_val - entry_val) / entry_val) * 100, 2),
                 "timeline": timeline_str,
                 "thesis": thesis_txt,
-                "status": "READY",
-                "status_label": "High Conviction Institutional Setup",
-                # Setup progress: computed from real signals â€” never hardcoded.
-                # Base 45pts: SMC order block confirmed + price in OB range.
-                # +10pts: RVOL > 1.2 (above-avg volume confirms interest)
-                # +10pts: Volume profile bias aligns with trade direction
-                # +10pts: Market structure score strongly confirms direction
-                # +10pts: Council persona mean confidence â‰¥ 65
-                # +15pts: ATR-derived R:R â‰¥ 2.5 (extra edge)
+                "status": "READY" if is_ready else "MONITOR",
+                "status_label": "High Conviction Institutional Setup" if is_ready else "Awaiting Structural Expansion",
                 "progress": min(100, (
-                    45  # OB confirmed + price retesting (prerequisite for has_ob==True)
+                    45  # Baseline quant edge
                     + (10 if vp_report and float(vp_report.rvol_20d) >= 1.2 else 0)
                     + (10 if vp_report and getattr(vp_report, 'footprint_bias', '') == ('BULLISH' if is_bullish else 'BEARISH') else 0)
                     + (10 if ms_report and abs(float(ms_report.structure_score)) >= 3 else (5 if ms_report and abs(float(ms_report.structure_score)) >= 1 else 0))
@@ -5187,7 +5222,7 @@ def _compute_dashboard_snapshot_sync(req: Optional[DashboardSnapshotRequest] = N
                 )),
                 "order_block": ob_data,
                 "volume_profile": vp_data,
-                "trailing_stop": "2R Breakeven (+0.2% buffer), Chandelier ATR 3x",
+                "trailing_stop": "2R Breakeven (0.2% buffer), Chandelier ATR 3x",
                 "provenance": {
                     "data_source": q_prov or ("LIVE_TICK" if quotes_map else "EOD_HISTORICAL"),
                     "data_state": q_state or ("LIVE" if is_live else "DELAYED"),
@@ -5197,8 +5232,6 @@ def _compute_dashboard_snapshot_sync(req: Optional[DashboardSnapshotRequest] = N
                     "dataset_timeline": f"{'Real-Time Broker Stream' if is_live else 'Exchange Delayed Fallback'} & {timeline_str}",
                 },
             }
-        else:
-            automated_setup = None
 
         # 4. Institutional Flows (DLY + Multi-Day Intelligence)
         flow_ana = None
@@ -5265,7 +5298,7 @@ def _compute_dashboard_snapshot_sync(req: Optional[DashboardSnapshotRequest] = N
                 "verdict": (
                     flow_ana.signal_reason
                     if flow_ana and flow_ana.signal_reason
-                    else f"{regime_label} ({'+' if total_net >= 0 else ''}â‚¹{total_net:,.0f} Cr)"
+                    else f"{regime_label} ({'+' if total_net >= 0 else ''}Rs. {total_net:,.0f} Cr)"
                 ),
             }
 
@@ -5336,7 +5369,7 @@ def _compute_dashboard_snapshot_sync(req: Optional[DashboardSnapshotRequest] = N
             portfolio_heat = round(max(0.0, min(100.0, heat_raw * 100)), 1)
 
         # ATR-14 for the active symbol â€” computed earlier in the pipeline.
-        # Send as float (â‚¹ absolute, not %) for the frontend ATR trail widget.
+        # Send as float (Rs.  absolute, not %) for the frontend ATR trail widget.
         atr_14: Optional[float] = round(atr_val, 2) if atr_val and atr_val > 0 else None
 
         payload = {
@@ -5403,7 +5436,7 @@ async def skill_dashboard_snapshot(req: Optional[DashboardSnapshotRequest] = Non
 
         sym, exch = normalize_symbol_exchange(sym, exch)
 
-        cache_key = f"dashboard_snapshot_v8_{sym}_{exch}_{tf}"
+        cache_key = f"dashboard_snapshot_v9_{sym}_{exch}_{tf}"
         force = bool(req and getattr(req, "force_refresh", False))
         if not force:
             try:
@@ -5820,7 +5853,7 @@ def _debate_snapshot_sync(req: Optional[DebateSnapshotRequest] = None):
             ob_bot = getattr(top_ob, "bottom", None)
             ob_top = getattr(top_ob, "top", None)
             if ob_bot is not None and ob_top is not None:
-                flow_desc = f"Unmitigated Demand Order Block at â‚¹{ob_bot:.2f}-â‚¹{ob_top:.2f} confirms strong smart money buying interest. Volume absorption noted."
+                flow_desc = f"Unmitigated Demand Order Block at Rs. {ob_bot:.2f}-Rs. {ob_top:.2f} confirms strong smart money buying interest. Volume absorption noted."
             else:
                 flow_desc = "Unmitigated Demand Order Block identified; confirms strong smart money buying interest with volume absorption."
         else:
@@ -5876,20 +5909,20 @@ def _debate_snapshot_sync(req: Optional[DebateSnapshotRequest] = None):
         if vp:
             vah_val = getattr(vp, "vah_price", None)
             if vah_val is not None:
-                val_desc = f"Value Area High (VAH) overhead supply at â‚¹{vah_val:,.2f} presents potential resistance as price approaches distribution ceiling."
+                val_desc = f"Value Area High (VAH) overhead supply at Rs. {vah_val:,.2f} presents potential resistance as price approaches distribution ceiling."
             else:
-                val_desc = f"Historic supply zone near â‚¹{round(ltp * 1.045, 2):,} represents potential multi-week profit-taking boundary."
+                val_desc = f"Historic supply zone near Rs. {round(ltp * 1.045, 2):,} represents potential multi-week profit-taking boundary."
         else:
-            val_desc = f"Historic supply zone near â‚¹{round(ltp * 1.045, 2):,} represents potential multi-week profit-taking boundary."
+            val_desc = f"Historic supply zone near Rs. {round(ltp * 1.045, 2):,} represents potential multi-week profit-taking boundary."
 
         if ms:
             sl_val = getattr(ms, "invalidation_level", None)
             if sl_val is not None:
-                sent_desc = f"Structural invalidation level at â‚¹{sl_val:,.2f}. A clean breakdown below this pivot would invalidate the bullish thesis and trigger trailing stops."
+                sent_desc = f"Structural invalidation level at Rs. {sl_val:,.2f}. A clean breakdown below this pivot would invalidate the bullish thesis and trigger trailing stops."
             else:
-                sent_desc = f"Short-term momentum oscillator entering overbought region; trailing stop at â‚¹{round(ltp * 0.985, 2):,} protects downside."
+                sent_desc = f"Short-term momentum oscillator entering overbought region; trailing stop at Rs. {round(ltp * 0.985, 2):,} protects downside."
         else:
-            sent_desc = f"Short-term momentum oscillator entering overbought region; trailing stop at â‚¹{round(ltp * 0.985, 2):,} protects downside."
+            sent_desc = f"Short-term momentum oscillator entering overbought region; trailing stop at Rs. {round(ltp * 0.985, 2):,} protects downside."
 
         bear_case = [
             {
@@ -5965,7 +5998,7 @@ def _debate_snapshot_sync(req: Optional[DebateSnapshotRequest] = None):
             "stop_loss": round(sl_px, 2),
             "target": round(tgt_px, 2),
             "risk_reward": rr_ratio,
-            "summary": f"Institutional defense at â‚¹{sl_px:,.2f} yields a {rr_ratio}R asymmetric payoff targeting â‚¹{tgt_px:,.2f}.",
+            "summary": f"Institutional defense at Rs. {sl_px:,.2f} yields a {rr_ratio}R asymmetric payoff targeting Rs. {tgt_px:,.2f}.",
         }
 
         now_time = datetime.now().strftime("%H:%M:%S IST")
@@ -6165,7 +6198,7 @@ async def skill_gex_snapshot(req: Optional[GEXSnapshotRequest] = None):
             c_oi = ce.oi if ce else 0
             p_oi = pe.oi if pe else 0
 
-            # GEX in Crores (â‚¹ 10M)
+            # GEX in Crores (Rs.  10M)
             call_gex = 0.5 * gamma * (spot**2) * c_oi * lot_sz / 1e7
             put_gex = -0.5 * gamma * (spot**2) * p_oi * lot_sz / 1e7
             net_gex = call_gex + put_gex
@@ -6212,7 +6245,7 @@ async def skill_gex_snapshot(req: Optional[GEXSnapshotRequest] = None):
                     "strike": k,
                     "type": "CE",
                     "score": min(98, int(60 + ce_imbalance * 8 + (20 if ce_vol_surge else 0))),
-                    "title": f"â‚¹{int(k):,} CE â€¢ Call Momentum Blast",
+                    "title": f"Rs. {int(k):,} CE â€¢ Call Momentum Blast",
                     "reason": f"Heavy Buy Aggression ({ce_imbalance:.1f}Ã— Bids) â€¢ {ce_vol:,} Vol Spike",
                     "action": "BUY",
                     "bid": round(ce_bid, 2) if ce_bid else 0.0,
@@ -6225,7 +6258,7 @@ async def skill_gex_snapshot(req: Optional[GEXSnapshotRequest] = None):
                     "strike": k,
                     "type": "PE",
                     "score": min(98, int(60 + pe_imbalance * 8 + (20 if pe_vol_surge else 0))),
-                    "title": f"â‚¹{int(k):,} PE â€¢ Put Shock / Breakdown",
+                    "title": f"Rs. {int(k):,} PE â€¢ Put Shock / Breakdown",
                     "reason": f"Heavy Put Demand ({pe_imbalance:.1f}Ã— Bids) â€¢ {pe_vol:,} Vol Spike",
                     "action": "BUY",
                     "bid": round(pe_bid, 2) if pe_bid else 0.0,
@@ -6307,13 +6340,13 @@ async def skill_gex_snapshot(req: Optional[GEXSnapshotRequest] = None):
             "hedge_action": "SELL",
             "hedge_instrument": f"{clean_sym} FUT",
             "actionable_state": "HEDGE REQUIRED: NEUTRAL",
-            "recommendation": f"SELL 1 Lot ({lot_sz} Qty) {clean_sym} FUT at â‚¹{round(spot - 2.50, 2):,}",
+            "recommendation": f"SELL 1 Lot ({lot_sz} Qty) {clean_sym} FUT at Rs. {round(spot - 2.50, 2):,}",
             "rebalance_trigger": f"When Spot drifts > Â±0.75% (Â±{round(spot * 0.0075)} pts) or Net Delta > Â±0.15",
             "cash_sensitivity": cash_sens,
             "margin_estimate": margin_est,
-            "why": f"Portfolio directional exposure (+{pos_delta} shares). A 1% drop in {clean_sym} (~â‚¹{pts_1pct} pts) generates ~â‚¹{abs(cash_sens):,} delta loss before volatility benefits.",
-            "when": f"Execute rebalance when {clean_sym} breaks support (â‚¹{round(spot - 50)}) or during the 03:15 PM IST window.",
-            "how": f"Place LIMIT SELL order for 1 Lot ({lot_sz} Qty) of {clean_sym} Futures at â‚¹{round(spot - 2.50, 2):,} (Margin: â‚¹{margin_est:,}).",
+            "why": f"Portfolio directional exposure (+{pos_delta} shares). A 1% drop in {clean_sym} (~Rs. {pts_1pct} pts) generates ~Rs. {abs(cash_sens):,} delta loss before volatility benefits.",
+            "when": f"Execute rebalance when {clean_sym} breaks support (Rs. {round(spot - 50)}) or during the 03:15 PM IST window.",
+            "how": f"Place LIMIT SELL order for 1 Lot ({lot_sz} Qty) of {clean_sym} Futures at Rs. {round(spot - 2.50, 2):,} (Margin: Rs. {margin_est:,}).",
         }
 
         return _ok(

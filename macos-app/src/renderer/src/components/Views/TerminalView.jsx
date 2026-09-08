@@ -1812,29 +1812,34 @@ export default function TerminalView({
               </div>
 
               {/* Price levels grid */}
-              <div className="space-y-1.5 text-xs font-mono">
-                {[
-                  { label: 'TRIGGER', value: setup.trigger, color: 'var(--color-muted)', small: true },
-                  { label: 'ENTRY', value: setup.entry != null ? `₹${Number(setup.entry).toLocaleString('en-IN', { minimumFractionDigits: 2 })}` : '—', color: 'var(--color-emerald)' },
-                  { label: 'STOP LOSS', value: setup.stop_loss != null ? `₹${Number(setup.stop_loss).toLocaleString('en-IN', { minimumFractionDigits: 2 })}` : '—', color: 'var(--color-rose)', sub: setup.risk_pct !== '—' ? `−${setup.risk_pct}% / −${setup.risk_points}pts` : undefined },
-                  { label: 'TARGET 1 (2R)', value: setup.target_1 != null ? `₹${Number(setup.target_1).toLocaleString('en-IN', { minimumFractionDigits: 2 })}` : '—', color: 'var(--color-emerald)', sub: setup.reward_pct !== '—' ? `+${setup.reward_pct}%` : undefined },
-                  { label: 'TARGET 2 (3.5R)', value: setup.target_2 != null ? `₹${Number(setup.target_2).toLocaleString('en-IN', { minimumFractionDigits: 2 })}` : '—', color: 'var(--color-text)' },
-                ].map(({ label, value, color, sub, small }) => (
-                  <div key={label} className="flex justify-between items-center py-1" style={{ borderBottom: '1px solid var(--color-border-subtle)' }}>
-                    <span style={{ color: 'var(--color-muted)', fontSize: '10px' }}>{label}</span>
-                    <div className="text-right">
-                      <span className="font-bold" style={{ color, fontSize: small ? '10px' : '11px' }}>{value}</span>
-                      {sub && <span className="block text-[9px]" style={{ color: 'var(--color-muted)' }}>{sub}</span>}
+              {(() => {
+                const isShortOrder = Boolean(setup?.action && (String(setup.action).toUpperCase().includes('SHORT') || String(setup.action).toUpperCase().includes('SELL')))
+                return (
+                  <div className="space-y-1.5 text-xs font-mono">
+                    {[
+                      { label: 'TRIGGER', value: setup.trigger, color: 'var(--color-muted)', small: true },
+                      { label: 'ENTRY', value: setup.entry != null ? `₹${Number(setup.entry).toLocaleString('en-IN', { minimumFractionDigits: 2 })}` : '—', color: 'var(--color-emerald)' },
+                      { label: 'STOP LOSS', value: setup.stop_loss != null ? `₹${Number(setup.stop_loss).toLocaleString('en-IN', { minimumFractionDigits: 2 })}` : '—', color: 'var(--color-rose)', sub: setup.risk_pct != null && setup.risk_pct !== '—' ? `${isShortOrder ? '+' : '−'}${setup.risk_pct}% / ${isShortOrder ? '+' : '−'}${setup.risk_points}pts` : undefined },
+                      { label: 'TARGET 1 (2R)', value: setup.target_1 != null ? `₹${Number(setup.target_1).toLocaleString('en-IN', { minimumFractionDigits: 2 })}` : '—', color: 'var(--color-emerald)', sub: setup.reward_pct != null && setup.reward_pct !== '—' ? `${isShortOrder ? '−' : '+'}${setup.reward_pct}% / ${isShortOrder ? '−' : '+'}${setup.reward_points}pts` : undefined },
+                      { label: 'TARGET 2 (3.5R)', value: setup.target_2 != null ? `₹${Number(setup.target_2).toLocaleString('en-IN', { minimumFractionDigits: 2 })}` : '—', color: 'var(--color-text)' },
+                    ].map(({ label, value, color, sub, small }) => (
+                      <div key={label} className="flex justify-between items-center py-1" style={{ borderBottom: '1px solid var(--color-border-subtle)' }}>
+                        <span style={{ color: 'var(--color-muted)', fontSize: '10px' }}>{label}</span>
+                        <div className="text-right">
+                          <span className="font-bold" style={{ color, fontSize: small ? '10px' : '11px' }}>{value}</span>
+                          {sub && <span className="block text-[9px]" style={{ color: 'var(--color-muted)' }}>{sub}</span>}
+                        </div>
+                      </div>
+                    ))}
+                    <div className="flex justify-between items-center pt-1">
+                      <span className="text-[10px]" style={{ color: 'var(--color-muted)' }}>R:R PAYOFF</span>
+                      <span className="font-extrabold text-xs" style={{ color: 'var(--color-gold)' }}>
+                        {setup.risk_reward != null ? `1 : ${setup.risk_reward} R` : '—'}
+                      </span>
                     </div>
                   </div>
-                ))}
-                <div className="flex justify-between items-center pt-1">
-                  <span className="text-[10px]" style={{ color: 'var(--color-muted)' }}>R:R PAYOFF</span>
-                <span className="font-extrabold text-xs" style={{ color: 'var(--color-gold)' }}>
-                  {setup.risk_reward != null ? `1 : ${setup.risk_reward} R` : '—'}
-                </span>
-                </div>
-              </div>
+                )
+              })()}
             </div>
           ) : (
             <div className="rounded-2xl p-4 space-y-3" style={{ background: 'var(--color-panel)', border: '1px solid var(--color-border)', boxShadow: 'var(--shadow-card)' }}>
@@ -1971,10 +1976,10 @@ export default function TerminalView({
               : '—'
 
             const levels = [
-              { label: 'Breakeven Level', price: breakevenPrice, note: '+0.2% buffer', color: 'var(--color-cyan)' },
-              { label: '2R Scale-Out', price: setup.target_1, note: 'Sell 50% qty', color: 'var(--color-emerald)' },
+              { label: 'Breakeven Level', price: breakevenPrice, note: isShortSetup ? '−0.2% buffer' : '+0.2% buffer', color: 'var(--color-cyan)' },
+              { label: '2R Scale-Out', price: setup.target_1, note: isShortSetup ? 'Cover 50% qty' : 'Sell 50% qty', color: 'var(--color-emerald)' },
               { label: 'Chandelier Trail', price: chandelierPrice, note: atrProxy != null ? `3× ATR (₹${atrProxy.toFixed(0)})` : '3× ATR (pending)', color: 'var(--color-gold)' },
-              { label: '3.5R Final Exit', price: setup.target_2, note: 'Full exit', color: 'var(--color-emerald)' },
+              { label: '3.5R Final Exit', price: setup.target_2, note: isShortSetup ? 'Full cover exit' : 'Full exit', color: 'var(--color-emerald)' },
             ]
             return (
               <div className="rounded-2xl p-3.5 space-y-2" style={{ background: 'var(--color-panel)', border: '1px solid var(--color-border)', boxShadow: 'var(--shadow-card)' }}>

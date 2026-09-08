@@ -345,24 +345,53 @@ def inject_live_tick(
         last_date = pd.Timestamp(last_idx).date() if hasattr(last_idx, "date") else None
 
         if is_intraday:
-            if last_date == now.date():
+            # Determine interval duration in minutes
+            interval_mins = 15
+            low_inv = str(interval).lower()
+            if "1m" in low_inv or low_inv == "minute":
+                interval_mins = 1
+            elif "3m" in low_inv:
+                interval_mins = 3
+            elif "5m" in low_inv:
+                interval_mins = 5
+            elif "10m" in low_inv:
+                interval_mins = 10
+            elif "30m" in low_inv:
+                interval_mins = 30
+            elif "60m" in low_inv or "1h" in low_inv:
+                interval_mins = 60
+
+            from datetime import timezone
+            now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
+            mins_elapsed = (now_utc - last_idx).total_seconds() / 60.0
+
+            if mins_elapsed < interval_mins and last_date == now_utc.date():
+                # Still within the active candle: update high, low, close
                 df.loc[last_idx, "close"] = float(q.last_price)
                 df.loc[last_idx, "high"] = max(float(df.loc[last_idx, "high"]), float(q.last_price))
                 df.loc[last_idx, "low"] = min(float(df.loc[last_idx, "low"]), float(q.last_price))
             else:
-                new_row = pd.DataFrame(
-                    [
-                        {
-                            "open": float(q.open or q.last_price),
-                            "high": float(q.high or q.last_price),
-                            "low": float(q.low or q.last_price),
-                            "close": float(q.last_price),
-                            "volume": float(q.volume or 0.0),
-                        }
-                    ],
-                    index=[pd.Timestamp(now)],
-                )
-                df = pd.concat([df, new_row])
+                # Interval elapsed: start new bucketed bar
+                bucket_min = (now_utc.minute // interval_mins) * interval_mins
+                new_bar_time = now_utc.replace(minute=bucket_min, second=0, microsecond=0)
+                if new_bar_time > last_idx:
+                    new_row = pd.DataFrame(
+                        [
+                            {
+                                "open": float(q.open or q.last_price),
+                                "high": float(q.high or q.last_price),
+                                "low": float(q.low or q.last_price),
+                                "close": float(q.last_price),
+                                "volume": float(q.volume or 0.0),
+                            }
+                        ],
+                        index=[new_bar_time],
+                    )
+                    df = pd.concat([df, new_row])
+                else:
+                    df.loc[last_idx, "close"] = float(q.last_price)
+                    df.loc[last_idx, "high"] = max(float(df.loc[last_idx, "high"]), float(q.last_price))
+                    df.loc[last_idx, "low"] = min(float(df.loc[last_idx, "low"]), float(q.last_price))
         else:
             if last_date == now.date():
                 # Update today's existing candle with live tick
