@@ -532,18 +532,25 @@ def audit_forensics(
         except Exception:
             data = {}
 
-    # These models require their published inputs.  Summary ratios cannot be
+    # Determine if the entity belongs to Banking & Financial Services
+    is_banking_or_financial = False
+    try:
+        from analysis.universe import get_stock_sector
+
+        sec_id, _ = get_stock_sector(clean_sym)
+        if sec_id == "banking":
+            is_banking_or_financial = True
+    except Exception:
+        pass
+
+    # These models require their published inputs. Summary ratios cannot be
     # reverse-engineered into an accounting score without inventing figures.
+    # Note: Altman Z''-Score was developed for non-financial corporations (Altman 1968, 2000).
+    # Commercial banks operate under fractional reserve banking with deposit liabilities
+    # and unclassified balance sheets where working capital is structurally undefined.
+    # Regulated banks are prudentially assessed under RBI Basel III CRAR capital adequacy.
     required_inputs = {
         "Beneish M-Score": {"dsri", "gmi", "aqi", "sgi", "depi", "sgai", "lvgi", "tata"},
-        "Altman Z''-Score": {
-            "working_capital",
-            "total_assets",
-            "retained_earnings",
-            "ebit",
-            "book_value_equity",
-            "total_liabilities",
-        },
         "Piotroski F-Score": {
             "roe",
             "free_cash_flow",
@@ -555,6 +562,16 @@ def audit_forensics(
             "roce",
         },
     }
+    if not is_banking_or_financial:
+        required_inputs["Altman Z''-Score"] = {
+            "working_capital",
+            "total_assets",
+            "retained_earnings",
+            "ebit",
+            "book_value_equity",
+            "total_liabilities",
+        }
+
     missing = {
         model: sorted(key for key in keys if data.get(key) is None)
         for model, keys in required_inputs.items()
@@ -587,10 +604,17 @@ def audit_forensics(
     )
     is_manipulator = m_score > -1.78
 
-    # 3. Compute Altman Z-Score
-    z_score, distress_zone = compute_altman_z_score(
-        **{key: float(data[key]) for key in required_inputs["Altman Z''-Score"]}
-    )
+    # 3. Compute Altman Z-Score (Non-financial corporations only)
+    if is_banking_or_financial:
+        z_score = None
+        distress_zone = "NOT_APPLICABLE"
+        strengths.append(
+            "Standard manufacturing Altman Z'' model is not applicable to commercial banks (prudentially governed under RBI Basel III CRAR capital adequacy norms)."
+        )
+    else:
+        z_score, distress_zone = compute_altman_z_score(
+            **{key: float(data[key]) for key in required_inputs["Altman Z''-Score"]}
+        )
 
     # 4. Indian Governance Red Flags Scanner
     red_flags = []
@@ -600,13 +624,16 @@ def audit_forensics(
     elif pledged >= 10.0:
         red_flags.append(f"Moderate Promoter Pledge ({pledged:.1f}% pledged)")
 
-    ic = data.get("interest_coverage")
-    if ic is not None and ic < 2.0 and ic >= 0:
-        red_flags.append(f"Weak Interest Coverage ({ic:.1f}x) — debt servicing vulnerability")
+    # For banks, customer deposits are operating liabilities and interest is cost of funds,
+    # so industrial interest coverage and debt/equity do not apply as distress flags.
+    if not is_banking_or_financial:
+        ic = data.get("interest_coverage")
+        if ic is not None and ic < 2.0 and ic >= 0:
+            red_flags.append(f"Weak Interest Coverage ({ic:.1f}x) — debt servicing vulnerability")
 
-    debt_equity = float(data["debt_equity"])
-    if debt_equity > 2.0:
-        red_flags.append(f"High Leverage (Debt/Equity {debt_equity:.2f}x)")
+        debt_equity = float(data["debt_equity"])
+        if debt_equity > 2.0:
+            red_flags.append(f"High Leverage (Debt/Equity {debt_equity:.2f}x)")
 
     if is_manipulator:
         red_flags.append(
@@ -617,23 +644,42 @@ def audit_forensics(
         red_flags.append(f"Altman Z''-Score ({z_score:.2f}) in DISTRESS zone")
 
     # 5. Determine Overall Quality Rating
-    if f_score >= 8 and not red_flags and distress_zone == "SAFE":
-        rating = "A+"
-    elif f_score >= 6 and len(red_flags) <= 1 and distress_zone in ("SAFE", "GREY"):
-        rating = "A"
-    elif f_score >= 4 and len(red_flags) <= 2:
-        rating = "B"
-    elif f_score >= 3:
-        rating = "C"
-    else:
-        rating = "D"
+    if is_banking_or_financial:
+        if f_score >= 7 and not red_flags and not is_manipulator:
+            rating = "A+"
+        elif f_score >= 5 and len(red_flags) <= 1 and not is_manipulator:
+            rating = "A"
+        elif f_score >= 4 and len(red_flags) <= 2:
+            rating = "B"
+        elif f_score >= 3:
+            rating = "C"
+        else:
+            rating = "D"
 
-    summary_text = (
-        f"Forensic Audit for {clean_sym}: Quality Rating {rating} | "
-        f"Piotroski F-Score {f_score}/9 | Altman Z''-Score {z_score:.2f} ({distress_zone}) | "
-        f"Beneish M-Score {m_score:.2f} ({'Manipulator Risk' if is_manipulator else 'Clean Earnings'}). "
-        f"{len(red_flags)} red flag(s) identified."
-    )
+        summary_text = (
+            f"Forensic Audit for {clean_sym} (Banking & Financial Services): Quality Rating {rating} | "
+            f"Piotroski F-Score {f_score}/9 | Beneish M-Score {m_score:.2f} ({'Manipulator Risk' if is_manipulator else 'Clean Earnings'}). "
+            f"Altman Z'' model is not applicable to commercial banks governed under RBI Basel III capital adequacy. "
+            f"{len(red_flags)} governance flag(s) identified."
+        )
+    else:
+        if f_score >= 8 and not red_flags and distress_zone == "SAFE":
+            rating = "A+"
+        elif f_score >= 6 and len(red_flags) <= 1 and distress_zone in ("SAFE", "GREY"):
+            rating = "A"
+        elif f_score >= 4 and len(red_flags) <= 2:
+            rating = "B"
+        elif f_score >= 3:
+            rating = "C"
+        else:
+            rating = "D"
+
+        summary_text = (
+            f"Forensic Audit for {clean_sym}: Quality Rating {rating} | "
+            f"Piotroski F-Score {f_score}/9 | Altman Z''-Score {z_score:.2f} ({distress_zone}) | "
+            f"Beneish M-Score {m_score:.2f} ({'Manipulator Risk' if is_manipulator else 'Clean Earnings'}). "
+            f"{len(red_flags)} red flag(s) identified."
+        )
 
     result = ForensicAuditResult(
         symbol=clean_sym,

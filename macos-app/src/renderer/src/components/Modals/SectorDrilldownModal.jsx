@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useAPI } from '../../hooks/useAPI'
 import { useChatStore } from '../../store/chatStore'
+import { useRealtimeMarket } from '../../hooks/useRealtimeMarket'
 import Tooltip, { InfoBadge } from '../UI/Tooltip'
 
 const QUADRANT_CONFIG = {
@@ -45,6 +46,7 @@ export default function SectorDrilldownModal({ isOpen, sector, onClose, onOpenOr
   const [expandedSymbol, setExpandedSymbol] = useState(null)
   const [telegramStatus, setTelegramStatus] = useState({})
   const { call } = useAPI()
+  const { getTicker } = useRealtimeMarket()
   const sendDraft = useChatStore((s) => s.sendDraft)
 
   const fetchSectorDrilldown = async (secName, forceRefresh = false) => {
@@ -454,6 +456,9 @@ export default function SectorDrilldownModal({ isOpen, sector, onClose, onOpenOr
               const scoreColor = opp.conviction_score >= 80 ? 'text-green' : opp.conviction_score >= 60 ? 'text-amber' : 'text-blue'
               const tgState = telegramStatus[opp.symbol]
               const cf = opp.contributing_factors || {}
+              const liveTick = getTicker(opp.symbol)
+              const livePrice = liveTick?.ltp != null && liveTick.ltp > 0 ? liveTick.ltp : null
+              const displayLtp = livePrice ?? opp.ltp
 
               return (
                 <div
@@ -475,7 +480,18 @@ export default function SectorDrilldownModal({ isOpen, sector, onClose, onOpenOr
                       <div>
                         <div className="flex items-center gap-2">
                           <span className="text-base font-bold text-text tracking-wide font-ui">{opp.symbol}</span>
-                          <span className="text-xs text-muted font-ui">₹{Number(opp.ltp || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span>
+                          <span className="text-xs text-text font-ui font-bold">
+                            ₹{Number(displayLtp || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                          </span>
+                          {livePrice ? (
+                            <span className="text-[9px] px-1.5 py-0.2 rounded bg-green/15 text-green border border-green/30 font-bold font-mono">
+                              LIVE
+                            </span>
+                          ) : (
+                            <span className="text-[9px] px-1.5 py-0.2 rounded bg-elevated text-muted border border-border/60 font-mono">
+                              EOD
+                            </span>
+                          )}
                           <span className={`text-xs font-semibold px-2 py-0.5 rounded-full border ${elig.badgeColor}`}>
                             {opp.eligibility_label || elig.label}
                           </span>
@@ -531,7 +547,7 @@ export default function SectorDrilldownModal({ isOpen, sector, onClose, onOpenOr
                     </div>
                     <div className="bg-elevated/70 border border-border/40 px-2.5 py-1.5 rounded-lg flex flex-col justify-center">
                       <span className="text-[9px] text-muted uppercase font-ui">Forensic Safety</span>
-                      <span className="font-bold text-text text-[11px]">🛡️ {cf.forensic_grade || `Grade ${opp.forensic_quality || 'A'}`}</span>
+                      <span className="font-bold text-text text-[11px]">🛡️ {cf.forensic_grade ?? (opp.forensic_quality ? `Grade ${opp.forensic_quality}` : '—')}</span>
                     </div>
                   </div>
 
@@ -569,7 +585,7 @@ export default function SectorDrilldownModal({ isOpen, sector, onClose, onOpenOr
                         <div>
                           <span className="text-[10px] text-muted uppercase font-ui">Risk : Reward</span>
                           <p className="font-bold text-amber text-sm">
-                            {opp.risk_reward_ratio ? `1:${opp.risk_reward_ratio} R:R` : '1:2.0 R:R'}
+                            {opp.risk_reward_ratio ? `1:${opp.risk_reward_ratio} R:R` : '—'}
                           </p>
                         </div>
                       </div>
@@ -577,10 +593,10 @@ export default function SectorDrilldownModal({ isOpen, sector, onClose, onOpenOr
                       {/* Holding Timeline & Playbook Banner */}
                       <div className="flex flex-wrap items-center gap-2 text-[11px] bg-panel/70 border border-border/40 p-2 rounded-lg text-muted">
                         <span className="text-amber font-semibold">⏳ Horizon:</span>
-                        <span className="text-text font-mono font-medium">{opp.expected_timeline || '3–10 Trading Days'}</span>
+                        <span className="text-text font-mono font-medium">{opp.expected_timeline ?? '—'}</span>
                         <span className="text-border">|</span>
                         <span className="text-green font-semibold">Target 1:</span>
-                        <span className="text-text font-mono">{opp.target_1_timeline || '2–5 Days'}</span>
+                        <span className="text-text font-mono">{opp.target_1_timeline ?? '—'}</span>
                         <span className="text-border">|</span>
                         <span className="text-red font-semibold">Time Invalidation:</span>
                         <span className="text-text font-mono">{opp.time_stop_days || 10} sessions</span>
@@ -603,10 +619,11 @@ export default function SectorDrilldownModal({ isOpen, sector, onClose, onOpenOr
                                 onOpenOrderTicket({
                                   symbol: opp.symbol,
                                   exchange: 'NSE',
-                                  price: opp.entry_price || opp.ltp,
+                                  price: livePrice ?? opp.entry_price ?? opp.ltp,
                                   stopLoss: opp.stop_loss,
                                   target: opp.target_1,
                                   action: opp.setup?.toLowerCase().includes('short') ? 'SELL' : 'BUY',
+                                  _priceSource: livePrice ? 'LIVE' : 'EOD_ENTRY',
                                 })
                               }}
                               className="bg-emerald-500 hover:bg-emerald-400 text-black px-3 py-1.5 rounded-lg text-xs font-bold transition-colors cursor-pointer shadow-xs"

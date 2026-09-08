@@ -73,6 +73,9 @@ class InflectionDecisionMatrix:
     council_insights: list[dict[str, str]] = field(default_factory=list)
     generated_at: str = ""
     is_ai_synthesized: bool = True
+    live_ltp: Optional[float] = None
+    live_data_state: str = "UNAVAILABLE"
+    live_as_of: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -86,6 +89,9 @@ def _build_deterministic_5w_decision(
     macro_report: Any,
     forensic_rep: Any,
     options_flow: Any,
+    live_ltp: Optional[float] = None,
+    live_data_state: str = "UNAVAILABLE",
+    live_as_of: str = "",
 ) -> InflectionDecisionMatrix:
     """
     Deterministic quantitative 5W+H decision matrix conforming strictly to AGENTS.md.
@@ -113,20 +119,18 @@ def _build_deterministic_5w_decision(
 
     # 2. WHAT: Core Thesis
     b_score = getattr(forensic_rep, "beneish_m_score", None)
-    b_str = f"{b_score:.2f}" if b_score is not None else "-2.30"
+    b_str = f"{b_score:.2f}" if b_score is not None else "N/A"
     p_pledge = getattr(forensic_rep, "promoter_pledging_pct", None)
-    p_str = f"{p_pledge:.1f}" if p_pledge is not None else "0.0"
+    if p_pledge is None:
+        p_pledge = getattr(forensic_rep, "pledged_pct", None)
+    p_str = f"{float(p_pledge):.1f}" if p_pledge is not None else "0.0"
 
     what = {
         "thesis_title": f"{setup.archetype_label} Inflection Setup",
-        "primary_catalyst": (
-            f"{sym} exhibits volatility compression ({setup.squeeze_state}) "
-            f"with Minervini score {setup.trend_template_passed}/8 and {setup.weinstein_stage} markup structure. "
-            f"Institutional volume surge (RVOL {setup.rvol_20d}x) signals smart money accumulation."
-        ),
+        "primary_catalyst": setup.catalyst_summary,
         "false_breakout_checks": [
-            "Volume Confirmation: Volume expansion required on breakout bar (RVOL >= 1.5x)",
-            f"Governance Health: Beneish M-Score {b_str} (Clean < -1.78)",
+            f"Volume Confirmation: RVOL is {setup.rvol_20d}x (Threshold >= 1.25x for conviction)",
+            f"Forensic Integrity: Beneish M-Score {b_str} (Clean < -1.78)",
             f"Promoter Pledging: {p_str}% (Low Risk)",
             "Overhead Resistance: Check for unmitigated Fair Value Gaps or Supply Blocks within 5%",
         ],
@@ -142,6 +146,9 @@ def _build_deterministic_5w_decision(
         "target_moonshot": f"₹{moonshot:.2f} (+6.5R Multibagger Horizon)",
         "risk_reward_ratio": f"1:{rr} (T1) / 1:3.5 (T2) / 1:6.5 (Moonshot)",
         "sizing_guideline": "Allocate 1.0% to 1.5% maximum capital risk using ATR volatility sizing model.",
+        "current_market_price": live_ltp if live_ltp is not None else ltp,
+        "live_data_state": live_data_state,
+        "live_as_of": live_as_of,
     }
 
     # 4. WHEN: Inflection Timing & Horizon
@@ -261,7 +268,7 @@ def _build_deterministic_5w_decision(
         symbol=sym,
         name=setup.name,
         sector=setup.sector,
-        ltp=ltp,
+        ltp=live_ltp if live_ltp is not None else ltp,
         verdict=verdict,
         confidence_score=conf,
         archetype=setup.primary_archetype,
@@ -275,6 +282,9 @@ def _build_deterministic_5w_decision(
         council_insights=council_insights,
         generated_at=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
         is_ai_synthesized=False,
+        live_ltp=live_ltp,
+        live_data_state=live_data_state,
+        live_as_of=live_as_of,
     )
 
 
@@ -355,6 +365,22 @@ def generate_inflection_decision(
     except Exception:
         pass
 
+    # Live quote fetch for real-time truthfulness
+    live_ltp = None
+    live_data_state = "UNAVAILABLE"
+    live_as_of = ""
+    try:
+        from market.quotes import get_quotes
+        inst = f"{exchange}:{clean_sym}"
+        quotes = get_quotes([inst])
+        q = quotes.get(inst) or quotes.get(clean_sym)
+        if q and getattr(q, "last_price", 0.0) > 0:
+            live_ltp = float(q.last_price)
+            live_data_state = str(getattr(q, "data_state", "LIVE"))
+            live_as_of = str(getattr(q, "received_at", "") or datetime.now(timezone.utc).isoformat())
+    except Exception:
+        pass
+
     # 3. If testing or offline, return deterministic quantitative synthesis directly
     if os.environ.get("CHANAKYA_TESTING") or not (
         os.environ.get("GROQ_API_KEY")
@@ -363,7 +389,8 @@ def generate_inflection_decision(
         or os.environ.get("ANTHROPIC_API_KEY")
     ):
         return _build_deterministic_5w_decision(
-            setup, macro_report, forensic_rep, options_flow
+            setup, macro_report, forensic_rep, options_flow,
+            live_ltp=live_ltp, live_data_state=live_data_state, live_as_of=live_as_of,
         )
 
     # 4. LLM Synthesis Attempt
@@ -373,7 +400,8 @@ def generate_inflection_decision(
         provider = get_deep_provider()
         if not provider:
             return _build_deterministic_5w_decision(
-                setup, macro_report, forensic_rep, options_flow
+                setup, macro_report, forensic_rep, options_flow,
+                live_ltp=live_ltp, live_data_state=live_data_state, live_as_of=live_as_of,
             )
 
         system_prompt = (
@@ -480,17 +508,23 @@ Respond ONLY with a valid JSON object with these exact keys:
         json_match = re.search(r"\{.*\}", response_text, re.DOTALL)
         if json_match:
             data = json.loads(json_match.group(0))
+            where_dict = data.get("where", {})
+            if "current_market_price" not in where_dict:
+                where_dict["current_market_price"] = live_ltp if live_ltp is not None else setup.ltp
+                where_dict["live_data_state"] = live_data_state
+                where_dict["live_as_of"] = live_as_of
+
             return InflectionDecisionMatrix(
                 symbol=clean_sym,
                 name=setup.name,
                 sector=setup.sector,
-                ltp=setup.ltp,
+                ltp=live_ltp if live_ltp is not None else setup.ltp,
                 verdict=data.get("verdict", "🟢 HIGH_CONVICTION_BUY"),
                 confidence_score=int(data.get("confidence_score", setup.inflection_score)),
                 archetype=setup.primary_archetype,
                 timing_state=setup.timing_state,
                 what=data.get("what", {}),
-                where=data.get("where", {}),
+                where=where_dict,
                 when=data.get("when", {}),
                 how=data.get("how", {}),
                 correlations=data.get("correlations", {}),
@@ -498,12 +532,18 @@ Respond ONLY with a valid JSON object with these exact keys:
                 council_insights=data.get("council_insights", []),
                 generated_at=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
                 is_ai_synthesized=True,
+                live_ltp=live_ltp,
+                live_data_state=live_data_state,
+                live_as_of=live_as_of,
             )
     except Exception:
         pass
 
     # Fallback if parsing or call fails
-    return _build_deterministic_5w_decision(setup, macro_report, forensic_rep, options_flow)
+    return _build_deterministic_5w_decision(
+        setup, macro_report, forensic_rep, options_flow,
+        live_ltp=live_ltp, live_data_state=live_data_state, live_as_of=live_as_of,
+    )
 
 
 # ── Interactive Dot-Connecting Chat ──────────────────────────────────

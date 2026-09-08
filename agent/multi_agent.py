@@ -283,27 +283,44 @@ class TechnicalAnalyst(BaseAnalyst):
             confidence = min(abs(score), 100)
 
             points = []
+            timeframe = result.get("timeframe", "1D (Daily)")
+            as_of = result.get("as_of", "")
+            data_source = result.get("data_source", "NSE EOD")
+
             if result.get("rsi") is not None:
                 rsi = result["rsi"]
-                points.append(
-                    f"RSI: {rsi:.1f} ({'overbought' if rsi > 70 else 'oversold' if rsi < 30 else 'neutral'})"
-                )
+                zone = "overbought (>70)" if rsi > 70 else "oversold (<30)" if rsi < 30 else "neutral zone (30-70)"
+                points.append(f"RSI(14, {timeframe}): {rsi:.1f} ({zone})")
+
             if result.get("macd") is not None:
-                macd_signal = "bullish" if result.get("macd_signal") == "BUY" else "bearish"
-                points.append(f"MACD: {macd_signal} crossover")
+                macd_val = result["macd"]
+                macd_hist = result.get("macd_hist", 0.0)
+                macd_detail = result.get("macd_detail")
+                if not macd_detail:
+                    macd_detail = "Above signal line" if macd_hist > 0 else "Below signal line"
+                points.append(
+                    f"MACD(12,26,9, {timeframe}): {macd_val:.2f} (hist {macd_hist:+.2f}, {macd_detail})"
+                )
+
             if result.get("ema20") and result.get("ema50"):
                 trend = "above" if result["ema20"] > result["ema50"] else "below"
                 points.append(
-                    f"EMA20 {trend} EMA50 (short-term trend {'up' if trend == 'above' else 'down'})"
+                    f"Trend({timeframe}): EMA20 ({result['ema20']:.1f}) {trend} EMA50 ({result['ema50']:.1f})"
                 )
-            if result.get("support"):
-                points.append(f"Support: {result['support']}")
-            if result.get("resistance"):
-                points.append(f"Resistance: {result['resistance']}")
-            if result.get("volume_verdict"):
-                points.append(f"Volume: {result['volume_verdict']}")
-            if result.get("bollinger_position"):
-                points.append(f"Bollinger: {result['bollinger_position']}")
+
+            if result.get("sma200"):
+                ltp = result.get("ltp", 0.0)
+                sma_rel = "above" if ltp > result["sma200"] else "below"
+                points.append(f"DMA200({timeframe}): Price {sma_rel} 200 DMA ({result['sma200']:.1f})")
+
+            if result.get("support") and result.get("resistance"):
+                points.append(f"Levels({timeframe}): S1 ₹{result['support']:.1f} | R1 ₹{result['resistance']:.1f}")
+
+            if as_of:
+                points.append(f"Provenance: {data_source} as of {as_of}")
+
+            for note in result.get("anomaly_notes", []):
+                points.append(f"⚠️ Data Flag: {note}")
 
             return AnalystReport(
                 analyst=self.name,

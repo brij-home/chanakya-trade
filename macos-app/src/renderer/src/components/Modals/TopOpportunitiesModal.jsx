@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import { useAPI } from '../../hooks/useAPI'
 import { useChatStore } from '../../store/chatStore'
+import { useRealtimeMarket } from '../../hooks/useRealtimeMarket'
 import { getSymbolExchange } from '../../data/universeData'
 
 export default function TopOpportunitiesModal({ isOpen, onClose, onOpenOrderTicket }) {
@@ -10,6 +11,7 @@ export default function TopOpportunitiesModal({ isOpen, onClose, onOpenOrderTick
   const [categories, setCategories] = useState([])
   const [tgNotification, setTgNotification] = useState(null)
   const { call } = useAPI()
+  const { getTicker } = useRealtimeMarket()
   const sendDraft = useChatStore((s) => s.sendDraft)
 
   // Fetch taxonomy categories on mount
@@ -284,6 +286,11 @@ export default function TopOpportunitiesModal({ isOpen, onClose, onOpenOrderTick
                       const entry = opp?.entry || opp?.entry_price
                       const sl = opp?.stop_loss || opp?.stop
                       const t1 = opp?.target_1 || opp?.target
+                      // Live ticker resolution
+                      const liveTick = getTicker(symbol)
+                      const livePrice = liveTick?.ltp != null && liveTick.ltp > 0 ? liveTick.ltp : null
+                      const distPct = (livePrice && entry) ? ((livePrice - entry) / entry * 100) : null
+                      const isStopBreached = livePrice && sl && livePrice <= sl
                       // R:R and action: only show what the backend explicitly provides
                       const rr = opp?.risk_reward != null ? opp.risk_reward : null
                       const action = opp?.action ?? null
@@ -359,6 +366,30 @@ export default function TopOpportunitiesModal({ isOpen, onClose, onOpenOrderTick
                             </svg>
                           </div>
 
+                          {/* Live Market Price & Distance */}
+                          <div className="flex items-center justify-between px-2.5 py-1 rounded-lg text-[10px] font-mono" style={{ background: 'var(--color-elevated)', border: '1px solid var(--color-border)' }}>
+                            <div className="flex items-center gap-1.5">
+                              <span style={{ color: 'var(--color-muted)' }}>LTP:</span>
+                              <span className="font-bold font-mono" style={{ color: 'var(--color-text)' }}>
+                                {livePrice ? `₹${Number(livePrice).toLocaleString('en-IN', { minimumFractionDigits: 1, maximumFractionDigits: 2 })}` : (entry ? `₹${Number(entry).toLocaleString('en-IN', { minimumFractionDigits: 1, maximumFractionDigits: 2 })}` : '—')}
+                              </span>
+                              {livePrice ? (
+                                <span className="text-[8px] font-bold px-1 py-0.2 rounded" style={{ background: 'rgba(0,214,143,0.15)', color: 'var(--color-emerald)' }}>
+                                  LIVE
+                                </span>
+                              ) : (
+                                <span className="text-[8px] px-1 py-0.2 rounded" style={{ color: 'var(--color-muted)' }}>
+                                  EOD
+                                </span>
+                              )}
+                            </div>
+                            {distPct != null && (
+                              <span className="text-[9px] font-bold" style={{ color: isStopBreached ? 'var(--color-rose)' : Math.abs(distPct) <= 1 ? 'var(--color-emerald)' : distPct > 0 ? 'var(--color-gold)' : 'var(--color-rose)' }}>
+                                {isStopBreached ? '⚠️ STOP HIT' : distPct > 0 ? `+${distPct.toFixed(1)}% entry` : `${distPct.toFixed(1)}% entry`}
+                              </span>
+                            )}
+                          </div>
+
                           {/* Price levels */}
                           <div className="grid grid-cols-3 gap-1 text-[9px] font-mono">
                             {[
@@ -394,10 +425,11 @@ export default function TopOpportunitiesModal({ isOpen, onClose, onOpenOrderTick
                                   onOpenOrderTicket({
                                     symbol,
                                     exchange: getSymbolExchange(symbol),
-                                    price: entry,
+                                    price: livePrice ?? entry,
                                     stopLoss: sl,
                                     target: t1,
-                                    action: action.includes('SHORT') ? 'SELL' : 'BUY',
+                                    action: action && action.includes('SHORT') ? 'SELL' : 'BUY',
+                                    _priceSource: livePrice ? 'LIVE' : 'EOD_ENTRY',
                                   })
                                 }
                                 onClose()

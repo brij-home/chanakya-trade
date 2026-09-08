@@ -234,19 +234,21 @@ def compute_features(
         ema_slope_5d = 0.0
 
     # ── RSI ───────────────────────────────────────────────────
-    delta = close.diff()
-    gain = delta.clip(lower=0)
-    loss = (-delta).clip(lower=0)
-    avg_gain = gain.ewm(alpha=1 / 14, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1 / 14, min_periods=14).mean()
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    rsi_series = 100 - (100 / (1 + rs))
-    rsi_val = float(rsi_series.iloc[-1])
-    if np.isnan(rsi_val):
-        rsi_val = 50.0
+    from analysis.technical import rsi as calc_rsi
+
+    rsi_series = calc_rsi(close, period=14)
+    rsi_val = (
+        float(rsi_series.iloc[-1])
+        if not rsi_series.empty and not pd.isna(rsi_series.iloc[-1])
+        else 0.0
+    )
 
     # RSI slope: RSI[-1] - RSI[-3]
-    if len(rsi_series) >= 3 and not np.isnan(float(rsi_series.iloc[-3])):
+    if (
+        len(rsi_series) >= 3
+        and not pd.isna(rsi_series.iloc[-3])
+        and not pd.isna(rsi_series.iloc[-1])
+    ):
         rsi_slope_3d = float(rsi_series.iloc[-1]) - float(rsi_series.iloc[-3])
     else:
         rsi_slope_3d = 0.0

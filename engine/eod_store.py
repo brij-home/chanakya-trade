@@ -59,6 +59,10 @@ def _get_db_path() -> Path:
     p = os.environ.get("CHANAKYA_EOD_DB_PATH")
     if p:
         return Path(p)
+    if os.environ.get("CHANAKYA_TESTING") == "1":
+        test_dir = Path(os.environ.get("TRADING_PLATFORM_DATA", ".pytest_trading_platform"))
+        test_dir.mkdir(parents=True, exist_ok=True)
+        return test_dir / "test_eod_bars.db"
     return DEFAULT_EOD_DB_PATH
 
 
@@ -410,6 +414,9 @@ def save_ohlcv_batch(data: dict[str, pd.DataFrame]) -> int:
             continue
 
         clean_sym = symbol.upper().replace(".NS", "").replace("NSE:", "").strip()
+        # Guard: In production store, never save test symbols
+        if _get_db_path() == DEFAULT_EOD_DB_PATH and (clean_sym.startswith("TEST") or clean_sym.startswith("DUMMY")):
+            continue
         affected_symbols.add(clean_sym)
         df_sorted = df.sort_index()
 

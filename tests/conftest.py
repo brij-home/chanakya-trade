@@ -24,6 +24,7 @@ _TEST_DATA_DIR.mkdir(parents=True, exist_ok=True)
 os.environ["TRADING_PLATFORM_HOME"] = str(_TEST_DATA_DIR)
 os.environ["TRADING_PLATFORM_DATA"] = str(_TEST_DATA_DIR)
 os.environ["TRADING_PLATFORM_PDF_DIR"] = str(_TEST_DATA_DIR / "pdf")
+os.environ["CHANAKYA_EOD_DB_PATH"] = str(_TEST_DATA_DIR / "test_eod_bars.db")
 os.environ["CHANAKYA_TESTING"] = "1"
 os.environ["TRADING_MODE"] = "PAPER"
 # Test runs must not inherit deployment authentication policy from a developer's

@@ -537,11 +537,21 @@ def analyze_market_structure(
             from market.quotes import get_ltp
 
             live_p = get_ltp(f"{exchange}:{symbol}")
-            ltp = float(live_p) if (live_p and not math.isnan(live_p) and live_p > 0) else 1000.0
+            ltp = float(live_p) if (live_p and not math.isnan(live_p) and live_p > 0) else None
         except Exception:
-            ltp = 1000.0
+            ltp = None
     else:
         ltp = ltp_raw
+
+    if not ltp or ltp <= 0:
+        return MarketStructureReport(
+            symbol=symbol,
+            ltp=0.0,
+            regime="UNAVAILABLE",
+            structure_score=0,
+            summary=f"LTP unavailable for {symbol} to compute market structure.",
+            actionable_trade_idea="Awaiting market feed data.",
+        )
 
     # 1. Swings (adaptive window based on sample length)
     swing_win = 2 if len(df) <= 60 else 3

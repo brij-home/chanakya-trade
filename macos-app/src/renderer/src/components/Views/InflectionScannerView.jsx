@@ -1,6 +1,7 @@
 import { useState, useEffect, useMemo, useRef } from 'react'
 import { useAPI } from '../../hooks/useAPI'
 import { useChatStore } from '../../store/chatStore'
+import { useRealtimeMarket } from '../../hooks/useRealtimeMarket'
 import { formatINR, formatPct } from '../../utils/formatINR'
 import UnavailableState from '../Common/UnavailableState'
 import Badge from '../Common/Badge'
@@ -31,6 +32,8 @@ export default function InflectionScannerView({
   const setActiveView = useChatStore((s) => s.setActiveView)
   const startActivity = useChatStore((s) => s.startActivity)
   const stopActivity = useChatStore((s) => s.stopActivity)
+  const { getTicker, connectionState } = useRealtimeMarket()
+  const isLiveConnected = connectionState === 'live' || connectionState === 'connected'
 
   // Scanner State
   const [universe, setUniverse] = useState('multibagger_hunters')
@@ -520,10 +523,11 @@ export default function InflectionScannerView({
     const highConviction = list.filter((c) => c.inflection_score >= 75).length
     const coiling = list.filter((c) => c.squeeze_state === 'COILING').length
     const triggerNow = list.filter((c) => c.timing_state === 'TRIGGER_NOW').length
+    const rrList = list.filter((c) => c.risk_reward_ratio != null)
     const avgRR =
-      total > 0
-        ? (list.reduce((acc, c) => acc + (c.risk_reward_ratio || 2.0), 0) / total).toFixed(1)
-        : '0.0'
+      rrList.length > 0
+        ? (rrList.reduce((acc, c) => acc + c.risk_reward_ratio, 0) / rrList.length).toFixed(1)
+        : null
     const topSector = scanResult?.top_sectors?.[0]?.sector || 'Mixed'
 
     return { total, highConviction, coiling, triggerNow, avgRR, topSector }
@@ -746,6 +750,22 @@ export default function InflectionScannerView({
             </div>
           )}
         </div>
+        <div className="flex items-center gap-2">
+          {isLiveConnected ? (
+            <span className="flex items-center gap-1 text-[10px] text-emerald-600 dark:text-emerald-400 font-mono">
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+              LIVE TICKS
+            </span>
+          ) : (
+            <span className="flex items-center gap-1 text-[10px] text-amber-600 dark:text-amber-400 font-mono">
+              <span className="w-1.5 h-1.5 rounded-full bg-amber-500" />
+              EOD PRICES
+            </span>
+          )}
+          {lastScanTime && (
+            <span className="text-[10px] text-muted font-mono">Scan: {lastScanTime}</span>
+          )}
+        </div>
 
         {scanResult?.filtered_out_liquidity_count > 0 && (
           <Badge variant="rose" size="xs" title="Illiquid stocks excluded by turnover floor to prevent operator traps">
@@ -939,7 +959,7 @@ export default function InflectionScannerView({
           <span className="text-[10px] text-muted font-mono uppercase tracking-wider">Avg Risk/Reward</span>
           <div className="flex items-baseline gap-1 mt-0.5">
             <span className="text-base font-bold font-mono text-text">
-              1:{summaryMetrics.avgRR}
+              {summaryMetrics.avgRR != null ? `1:${summaryMetrics.avgRR}` : '—'}
             </span>
             <span className="text-[10px] text-muted">Payoff</span>
           </div>
@@ -1099,7 +1119,7 @@ export default function InflectionScannerView({
                           </div>
                           <div className="flex flex-col">
                             <span className="text-[9px] font-mono text-muted" title="Technical / Sector / Quality Pillars">
-                              {c.technical_score || 35}T • {c.sector_score || 25}S • {c.quality_score || 25}Q
+                              {c.technical_score != null ? c.technical_score : '—'}T • {c.sector_score != null ? c.sector_score : '—'}S • {c.quality_score != null ? c.quality_score : '—'}Q
                             </span>
                             <span className="text-[8px] font-mono text-emerald-600 dark:text-emerald-400 font-bold">
                               💾 0ms
@@ -1130,9 +1150,25 @@ export default function InflectionScannerView({
                         </span>
                       </td>
 
-                      {/* LTP */}
+                      {/* LTP — live tick overlay */}
                       <td className="py-2.5 px-2 text-right font-bold text-text">
-                        ₹{c.ltp.toLocaleString('en-IN', { minimumFractionDigits: 1 })}
+                        {(() => {
+                          const liveTick = getTicker(c.symbol)
+                          const livePrice = liveTick?.ltp != null && liveTick.ltp > 0 ? liveTick.ltp : null
+                          const displayLtp = livePrice ?? c.ltp
+                          return (
+                            <div className="flex flex-col items-end gap-0.5">
+                              <span>₹{displayLtp.toLocaleString('en-IN', { minimumFractionDigits: 1 })}</span>
+                              {livePrice ? (
+                                <span className="text-[8px] font-mono text-emerald-500 flex items-center gap-0.5">
+                                  <span className="w-1 h-1 rounded-full bg-emerald-500 animate-pulse" />LIVE
+                                </span>
+                              ) : (
+                                <span className="text-[8px] font-mono text-muted">EOD</span>
+                              )}
+                            </div>
+                          )
+                        })()}
                       </td>
 
                       {/* Day Change */}
@@ -1232,12 +1268,15 @@ export default function InflectionScannerView({
                             type="button"
                             onClick={() => {
                               if (onOpenOrderTicket) {
+                                const liveTick = getTicker(c.symbol)
+                                const livePrice = liveTick?.ltp != null && liveTick.ltp > 0 ? liveTick.ltp : null
                                 onOpenOrderTicket({
                                   symbol: c.symbol,
                                   exchange: 'NSE',
-                                  price: c.entry_price,
+                                  price: livePrice ?? c.entry_price,
                                   stopLoss: c.stop_loss,
                                   target: c.target_1,
+                                  _priceSource: livePrice ? 'LIVE' : 'EOD_ENTRY',
                                 })
                               }
                             }}
@@ -1362,11 +1401,11 @@ export default function InflectionScannerView({
                 {/* 3-Pillar Score Micro Strip & Executive Summary */}
                 <div className="space-y-1.5 font-mono">
                   <div className="flex items-center justify-between text-[10px] p-1.5 rounded bg-panel border border-border">
-                    <span className="text-cyan-700 dark:text-cyan-400 font-semibold">⚡ Tech {c.technical_score || 35}/40</span>
+                    <span className="text-cyan-700 dark:text-cyan-400 font-semibold">⚡ Tech {c.technical_score != null ? c.technical_score : '—'}/40</span>
                     <span className="text-muted">•</span>
-                    <span className="text-amber-700 dark:text-amber-400 font-semibold">🔄 Sector {c.sector_score || 25}/30</span>
+                    <span className="text-amber-700 dark:text-amber-400 font-semibold">🔄 Sector {c.sector_score != null ? c.sector_score : '—'}/30</span>
                     <span className="text-muted">•</span>
-                    <span className="text-emerald-700 dark:text-emerald-400 font-semibold">🛡️ Qual {c.quality_score || 25}/30</span>
+                    <span className="text-emerald-700 dark:text-emerald-400 font-semibold">🛡️ Qual {c.quality_score != null ? c.quality_score : '—'}/30</span>
                   </div>
                   {c.executive_summary && (
                     <p className="text-[11px] text-text-dim leading-relaxed font-ui line-clamp-2 px-1">
@@ -1375,8 +1414,25 @@ export default function InflectionScannerView({
                   )}
                 </div>
 
-                {/* Price & Levels Ribbon */}
+                {/* Price & Levels Ribbon with live LTP overlay */}
                 <div className="rounded-lg p-2.5 font-mono text-xs border border-border bg-panel flex items-center justify-between">
+                  {(() => {
+                    const liveTick = getTicker(c.symbol)
+                    const livePrice = liveTick?.ltp != null && liveTick.ltp > 0 ? liveTick.ltp : null
+                    const displayLtp = livePrice ?? c.ltp
+                    const entryDelta = c.entry_price > 0 ? ((displayLtp - c.entry_price) / c.entry_price * 100) : null
+                    return (
+                      <div className="flex flex-col">
+                        <span className="text-[10px] text-muted block">LTP {livePrice ? <span className="text-emerald-500 text-[8px] ml-0.5">● LIVE</span> : <span className="text-muted text-[8px] ml-0.5">EOD</span>}</span>
+                        <span className="font-bold text-text">₹{displayLtp.toLocaleString('en-IN', { minimumFractionDigits: 1 })}</span>
+                        {entryDelta != null && (
+                          <span className={`text-[9px] font-mono ${Math.abs(entryDelta) <= 1 ? 'text-emerald-600 dark:text-emerald-400' : entryDelta > 3 ? 'text-amber-600 dark:text-amber-400' : 'text-muted'}`}>
+                            {entryDelta >= 0 ? '+' : ''}{entryDelta.toFixed(1)}% vs entry
+                          </span>
+                        )}
+                      </div>
+                    )
+                  })()}
                   <div>
                     <span className="text-[10px] text-muted block">ENTRY</span>
                     <span className="font-bold text-text">₹{c.entry_price.toFixed(1)}</span>
@@ -1391,7 +1447,7 @@ export default function InflectionScannerView({
                   </div>
                   <div>
                     <span className="text-[10px] text-muted block">PAYOFF</span>
-                    <span className="font-bold text-amber-600 dark:text-amber-400">1:{c.risk_reward_ratio}</span>
+                    <span className="font-bold text-amber-600 dark:text-amber-400">1:{c.risk_reward_ratio ?? '—'}</span>
                   </div>
                 </div>
 
@@ -1421,12 +1477,15 @@ export default function InflectionScannerView({
                       type="button"
                       onClick={() => {
                         if (onOpenOrderTicket) {
+                          const liveTick = getTicker(c.symbol)
+                          const livePrice = liveTick?.ltp != null && liveTick.ltp > 0 ? liveTick.ltp : null
                           onOpenOrderTicket({
                             symbol: c.symbol,
                             exchange: 'NSE',
-                            price: c.entry_price,
+                            price: livePrice ?? c.entry_price,
                             stopLoss: c.stop_loss,
                             target: c.target_1,
+                            _priceSource: livePrice ? 'LIVE' : 'EOD_ENTRY',
                           })
                         }
                       }}
@@ -1459,23 +1518,38 @@ export default function InflectionScannerView({
                   {activeCandidate?.sector_icon || '🏢'}
                 </span>
                 <div>
-                  <div className="flex items-center gap-2">
-                    <h2 className="text-base font-bold text-text">{activeCandidate?.symbol}</h2>
-                    <span className="text-xs text-muted">| {activeCandidate?.name}</span>
-                    <Badge
-                      variant={decisionMatrix?.verdict?.includes('BUY') ? 'emerald' : 'gold'}
-                      size="sm"
-                    >
-                      {decisionMatrix?.verdict || 'ANALYZING...'}
-                    </Badge>
-                  </div>
-                  <p className="text-[11px] text-muted">
-                    LTP: ₹{activeCandidate?.ltp} ({formatPct(activeCandidate?.day_change_pct).text}) •{' '}
-                    {activeCandidate?.sector} •{' '}
-                    <span className="text-text font-mono font-bold">{activeCandidate?.cap_tier} CAP</span> •{' '}
-                    <span className="font-mono">Turnover: ₹{activeCandidate?.turnover_20d_cr ? activeCandidate.turnover_20d_cr.toFixed(2) : '0.00'} Cr/d</span>
-                  </p>
+                <div className="flex items-center gap-2">
+                  <h2 className="text-base font-bold text-text">{activeCandidate?.symbol}</h2>
+                  <span className="text-xs text-muted">| {activeCandidate?.name}</span>
+                  <Badge
+                    variant={decisionMatrix?.verdict?.includes('BUY') ? 'emerald' : 'gold'}
+                    size="sm"
+                  >
+                    {decisionMatrix?.verdict || 'ANALYZING...'}
+                  </Badge>
                 </div>
+                <p className="text-[11px] text-muted">
+                  {(() => {
+                    const liveTick = getTicker(activeCandidate?.symbol)
+                    const livePrice = liveTick?.ltp != null && liveTick.ltp > 0 ? liveTick.ltp : null
+                    const displayLtp = livePrice ?? activeCandidate?.ltp
+                    return (
+                      <>
+                        <span className="font-mono font-bold text-text">LTP: ₹{displayLtp}</span>
+                        {livePrice ? (
+                          <span className="ml-1 text-[9px] text-emerald-500 font-mono">● LIVE</span>
+                        ) : (
+                          <span className="ml-1 text-[9px] text-muted font-mono">EOD</span>
+                        )}
+                      </>
+                    )
+                  })()}
+                  {' '}({formatPct(activeCandidate?.day_change_pct).text}) •{' '}
+                  {activeCandidate?.sector} •{' '}
+                  <span className="text-text font-mono font-bold">{activeCandidate?.cap_tier} CAP</span> •{' '}
+                  <span className="font-mono">Turnover: ₹{activeCandidate?.turnover_20d_cr ? activeCandidate.turnover_20d_cr.toFixed(2) : '0.00'} Cr/d</span>
+                </p>
+              </div>
               </div>
 
               <div className="flex items-center gap-2">
@@ -1483,12 +1557,15 @@ export default function InflectionScannerView({
                   type="button"
                   onClick={() => {
                     if (onOpenOrderTicket && activeCandidate) {
+                      const liveTick = getTicker(activeCandidate.symbol)
+                      const livePrice = liveTick?.ltp != null && liveTick.ltp > 0 ? liveTick.ltp : null
                       onOpenOrderTicket({
                         symbol: activeCandidate.symbol,
                         exchange: 'NSE',
-                        price: activeCandidate.entry_price,
+                        price: livePrice ?? activeCandidate.entry_price,
                         stopLoss: activeCandidate.stop_loss,
                         target: activeCandidate.target_1,
+                        _priceSource: livePrice ? 'LIVE' : 'EOD_ENTRY',
                       })
                     }
                   }}
@@ -1570,25 +1647,25 @@ export default function InflectionScannerView({
                       <div className="p-2 rounded bg-panel/70 border border-border/70">
                         <span className="text-[9px] text-muted uppercase block font-ui">⚡ Technical</span>
                         <span className="text-xs font-bold text-cyan-700 dark:text-cyan-400">
-                          {activeCandidate?.technical_score || 35}/40
+                          {activeCandidate?.technical_score != null ? `${activeCandidate.technical_score}/40` : '—'}
                         </span>
                       </div>
                       <div className="p-2 rounded bg-panel/70 border border-border/70">
                         <span className="text-[9px] text-muted uppercase block font-ui">🔄 Sector Tailwind</span>
                         <span className="text-xs font-bold text-amber-700 dark:text-amber-400">
-                          {activeCandidate?.sector_score || 25}/30
+                          {activeCandidate?.sector_score != null ? `${activeCandidate.sector_score}/30` : '—'}
                         </span>
                       </div>
                       <div className="p-2 rounded bg-panel/70 border border-border/70">
                         <span className="text-[9px] text-muted uppercase block font-ui">🛡️ Forensic Quality</span>
                         <span className="text-xs font-bold text-emerald-700 dark:text-emerald-400">
-                          {activeCandidate?.quality_score || 25}/30
+                          {activeCandidate?.quality_score != null ? `${activeCandidate.quality_score}/30` : '—'}
                         </span>
                       </div>
                       <div className="p-2 rounded bg-panel/70 border border-border/70">
                         <span className="text-[9px] text-muted uppercase block font-ui">🎯 Risk : Reward</span>
                         <span className="text-xs font-bold text-text">
-                          1:{activeCandidate?.risk_reward_ratio || 3.5} R
+                          {activeCandidate?.risk_reward_ratio != null ? `1:${activeCandidate.risk_reward_ratio} R` : '—'}
                         </span>
                       </div>
                     </div>
@@ -1690,9 +1767,85 @@ export default function InflectionScannerView({
 
                     {activeDrawerTab === 'where' && (
                       <div className="space-y-3 font-mono">
-                        <h3 className="font-bold text-text text-sm font-ui">
-                          📍 Price Coordinates & Risk Boundaries
-                        </h3>
+                        <div className="flex items-center justify-between">
+                          <h3 className="font-bold text-text text-sm font-ui">
+                            📍 Price Coordinates & Risk Boundaries
+                          </h3>
+                          {(() => {
+                            const liveTick = getTicker(activeCandidate?.symbol)
+                            const livePrice = liveTick?.ltp != null && liveTick.ltp > 0 ? liveTick.ltp : null
+                            return livePrice ? (
+                              <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border border-emerald-500/30 flex items-center gap-1">
+                                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                                LIVE FEED ACTIVE
+                              </span>
+                            ) : (
+                              <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-amber-500/15 text-amber-600 dark:text-amber-400 border border-amber-500/30">
+                                EOD BENCHMARK
+                              </span>
+                            )
+                          })()}
+                        </div>
+
+                        {/* Live Price Context Strip */}
+                        {(() => {
+                          const liveTick = getTicker(activeCandidate?.symbol)
+                          const livePrice = liveTick?.ltp != null && liveTick.ltp > 0 ? liveTick.ltp : null
+                          const entryPrice = activeCandidate?.entry_price
+                          const stopPrice = activeCandidate?.stop_loss
+                          const t1Price = activeCandidate?.target_1
+                          const distFromEntryPct = (livePrice && entryPrice) ? ((livePrice - entryPrice) / entryPrice * 100) : null
+                          const isStopBreached = livePrice && stopPrice && livePrice <= stopPrice
+                          const isTargetReached = livePrice && t1Price && livePrice >= t1Price
+
+                          return (
+                            <div className="space-y-2">
+                              <div className="p-2.5 rounded-lg bg-panel border border-border flex flex-wrap items-center justify-between gap-2">
+                                <div className="flex items-center gap-2">
+                                  <span className="text-muted font-ui text-[11px]">Current Market Price:</span>
+                                  <span className="text-base font-bold text-text">
+                                    ₹{livePrice ? livePrice.toLocaleString('en-IN', { minimumFractionDigits: 2 }) : activeCandidate?.ltp?.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                                  </span>
+                                  {livePrice ? (
+                                    <span className="text-[9px] px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border border-emerald-500/30 font-bold">
+                                      LIVE
+                                    </span>
+                                  ) : (
+                                    <span className="text-[9px] px-1.5 py-0.5 rounded bg-elevated text-muted border border-border">
+                                      EOD
+                                    </span>
+                                  )}
+                                </div>
+                                {distFromEntryPct != null && (
+                                  <div className="flex items-center gap-1 font-ui text-[11px]">
+                                    <span className="text-muted">Distance to Entry:</span>
+                                    <span className={`font-bold font-mono ${Math.abs(distFromEntryPct) <= 1 ? 'text-emerald-600 dark:text-emerald-400' : distFromEntryPct > 1 ? 'text-amber-600 dark:text-amber-400' : 'text-rose-600 dark:text-rose-400'}`}>
+                                      {distFromEntryPct > 0 ? `+${distFromEntryPct.toFixed(2)}% above` : `${distFromEntryPct.toFixed(2)}% below`}
+                                    </span>
+                                  </div>
+                                )}
+                              </div>
+
+                              {isStopBreached && (
+                                <div className="p-2 rounded bg-rose-500/15 border border-rose-500/40 text-rose-700 dark:text-rose-300 text-xs font-ui flex items-center gap-2">
+                                  <span>⚠️</span>
+                                  <span>
+                                    <strong>STOP LOSS BREACHED:</strong> Live price (₹{livePrice}) is at or below stop loss (₹{stopPrice}). Setup invalidated.
+                                  </span>
+                                </div>
+                              )}
+
+                              {isTargetReached && (
+                                <div className="p-2 rounded bg-emerald-500/15 border border-emerald-500/40 text-emerald-700 dark:text-emerald-300 text-xs font-ui flex items-center gap-2">
+                                  <span>🎯</span>
+                                  <span>
+                                    <strong>TARGET 1 REACHED:</strong> Live price (₹{livePrice}) has hit Target 1 (₹{t1Price}). Consider partial scale-out.
+                                  </span>
+                                </div>
+                              )}
+                            </div>
+                          )
+                        })()}
                         <div className="grid grid-cols-2 gap-3 text-xs">
                           <div className="p-2.5 rounded bg-panel border border-border">
                             <span className="text-[10px] text-muted block font-ui">OPTIMAL ENTRY ZONE</span>

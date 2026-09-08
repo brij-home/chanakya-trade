@@ -239,32 +239,58 @@ def _analyze_timeframe(df: pd.DataFrame, label: str) -> TimeframeSignal:
     """Run basic technical indicators on a dataframe."""
     from analysis.technical import rsi as calc_rsi, ema as calc_ema
 
+    if df is None or len(df) < 14:
+        return TimeframeSignal(
+            timeframe=label,
+            verdict="UNAVAILABLE",
+            score=0.0,
+            rsi=0.0,
+            trend="UNKNOWN",
+            macd="UNAVAILABLE",
+            signal_type="Awaiting Data",
+            key_level="—",
+        )
+
     close = df["close"]
-    rsi_val = float(calc_rsi(close).iloc[-1]) if len(close) >= 14 else 50.0
-    ema20 = float(calc_ema(close, 20).iloc[-1]) if len(close) >= 20 else 0
-    ema50 = float(calc_ema(close, 50).iloc[-1]) if len(close) >= 50 else ema20
+    rsi_series = calc_rsi(close)
+    rsi_val = (
+        float(rsi_series.iloc[-1])
+        if not rsi_series.empty and not pd.isna(rsi_series.iloc[-1])
+        else 0.0
+    )
+    has_ema20 = len(close) >= 20
+    has_ema50 = len(close) >= 50
+    ema20 = float(calc_ema(close, 20).iloc[-1]) if has_ema20 else 0.0
+    ema50 = float(calc_ema(close, 50).iloc[-1]) if has_ema50 else 0.0
 
     # MACD
-    ema12 = calc_ema(close, 12)
-    ema26 = calc_ema(close, 26)
-    macd_line = ema12 - ema26
-    signal_line = calc_ema(macd_line, 9)
-    macd_hist = float((macd_line - signal_line).iloc[-1]) if len(close) >= 26 else 0
+    has_macd = len(close) >= 26
+    if has_macd:
+        ema12 = calc_ema(close, 12)
+        ema26 = calc_ema(close, 26)
+        macd_line = ema12 - ema26
+        signal_line = calc_ema(macd_line, 9)
+        macd_hist = float((macd_line - signal_line).iloc[-1])
+    else:
+        macd_hist = 0.0
 
-    # Score
+    # Score only available indicators without false penalties for missing data
     score = 0.0
-    if rsi_val < 30:
-        score += 20
-    elif rsi_val > 70:
-        score -= 20
-    if ema20 > ema50:
-        score += 15
-    else:
-        score -= 15
-    if macd_hist > 0:
-        score += 15
-    else:
-        score -= 15
+    if rsi_val > 0:
+        if rsi_val < 30:
+            score += 20
+        elif rsi_val > 70:
+            score -= 20
+    if has_ema20 and has_ema50:
+        if ema20 > ema50:
+            score += 15
+        elif ema20 < ema50:
+            score -= 15
+    if has_macd:
+        if macd_hist > 0:
+            score += 15
+        elif macd_hist < 0:
+            score -= 15
 
     verdict = "BULLISH" if score > 10 else "BEARISH" if score < -10 else "NEUTRAL"
 

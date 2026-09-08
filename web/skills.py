@@ -4390,18 +4390,16 @@ def _compute_dashboard_snapshot_sync(req: Optional[DashboardSnapshotRequest] = N
             vp_report = _DynamicVP()
 
         # Compute adaptive True Range / ATR from df for volatility risk models
-        atr_val = cur_ltp * 0.012  # default 1.2% ATR
-        if df is not None and len(df) >= 5:
+        atr_val = None
+        if df is not None and len(df) >= 14:
             try:
-                import pandas as pd
+                from analysis.technical import atr as calc_atr
 
-                hl = df["high"] - df["low"]
-                hc = (df["high"] - df["close"].shift()).abs()
-                lc = (df["low"] - df["close"].shift()).abs()
-                tr_series = pd.concat([hl, hc, lc], axis=1).max(axis=1)
-                computed_atr = float(tr_series.rolling(14, min_periods=3).mean().dropna().iloc[-1])
-                if computed_atr > 0:
-                    atr_val = computed_atr
+                atr_s = calc_atr(df, period=14)
+                if not atr_s.dropna().empty:
+                    val = float(atr_s.dropna().iloc[-1])
+                    if val > 0:
+                        atr_val = val
             except Exception:
                 pass
 
@@ -4466,11 +4464,17 @@ def _compute_dashboard_snapshot_sync(req: Optional[DashboardSnapshotRequest] = N
             kedia_metric = "SMILE: N/A"
 
         # 3. Taleb: Antifragile Convexity & Spreads
-        vol_pct = ((atr_val / cur_ltp) * 100) if cur_ltp > 0 else 1.5
-        taleb_conf = max(40, min(95, int(88 - (vol_pct * 8))))
-        taleb_verdict = "POSITIVE CONVEXITY" if vol_pct <= 2.8 else "HIGH VOLATILITY (SPREADS ONLY)"
-        taleb_thesis = f"Nassim Taleb convexity model on {setup_sym}: Realized ATR volatility is {vol_pct:.2f}%. Mandates strictly defined-risk spread structures to neutralize downside tail risk."
-        taleb_metric = f"ATR Vol: {vol_pct:.2f}% | Tail Risk: Defined"
+        if atr_val is not None and cur_ltp > 0:
+            vol_pct = (atr_val / cur_ltp) * 100
+            taleb_conf = max(40, min(95, int(88 - (vol_pct * 8))))
+            taleb_verdict = "POSITIVE CONVEXITY" if vol_pct <= 2.8 else "HIGH VOLATILITY (SPREADS ONLY)"
+            taleb_thesis = f"Nassim Taleb convexity model on {setup_sym}: Realized ATR(14, 1D (Daily)) volatility is {vol_pct:.2f}%. Mandates strictly defined-risk spread structures to neutralize downside tail risk."
+            taleb_metric = f"ATR Vol: {vol_pct:.2f}% | Tail Risk: Defined"
+        else:
+            taleb_conf = 50
+            taleb_verdict = "VOLATILITY PENDING"
+            taleb_thesis = f"Insufficient daily OHLCV bars to compute ATR volatility for {setup_sym}."
+            taleb_metric = "ATR Vol: Unavailable"
 
         # 4. Wyckoff: VSA & Phase Detection
         bias_str = vp_report.footprint_bias if vp_report else "NEUTRAL"
@@ -5784,8 +5788,12 @@ def _debate_snapshot_sync(req: Optional[DebateSnapshotRequest] = None):
                 df_last = get_ohlcv(sym, exchange=exch, interval="day", days=5)
                 if df_last is not None and not df_last.empty and "close" in df_last.columns:
                     ltp = float(df_last["close"].iloc[-1])
-                else:
-                    ltp = 1000.0
+
+        if not ltp or ltp <= 0:
+            return _err(
+                f"Market quote and price history unavailable for {exch}:{sym}. Real-time quote required.",
+                404,
+            )
 
         # 1. Market structure (SMC)
         ms = None
@@ -5895,34 +5903,28 @@ def _debate_snapshot_sync(req: Optional[DebateSnapshotRequest] = None):
 
         # Dynamic Bear Case
         if fa:
-            m_score = getattr(fa, "beneish_m_score", -2.45)
-            pledged = getattr(fa, "promoter_pledged_pct", 0.0)
-            m_risk = getattr(fa, "manipulation_risk", "LOW") or "LOW"
-            if m_score is None:
-                m_score = -2.45
-            if pledged is None:
-                pledged = 0.0
-            forensic_desc = f"Beneish M-Score is {float(m_score):.2f} ({m_risk} manipulation risk). Promoter pledging stands at {float(pledged):.1f}%. Accruals quality monitored for working capital drag."
-        else:
-            forensic_desc = "Working capital accruals and receivables cycle require continuous tracking against forward revenue growth rates."
-
-        if vp:
-            vah_val = getattr(vp, "vah_price", None)
-            if vah_val is not None:
-                val_desc = f"Value Area High (VAH) overhead supply at Rs. {vah_val:,.2f} presents potential resistance as price approaches distribution ceiling."
+            m_score = getattr(fa, "beneish_m_score", None)
+            pledged = getattr(fa, "promoter_pledged_pct", None)
+            m_risk = getattr(fa, "manipulation_risk", "UNKNOWN") or "UNKNOWN"
+            pledged_str = f"{float(pledged):.1f}%" if pledged is not None else "N/A"
+            if m_score is not None:
+                forensic_desc = f"Beneish M-Score is {float(m_score):.2f} ({m_risk} manipulation risk). Promoter pledging stands at {pledged_str}. Accruals quality monitored for working capital drag."
             else:
-                val_desc = f"Historic supply zone near Rs. {round(ltp * 1.045, 2):,} represents potential multi-week profit-taking boundary."
+                forensic_desc = f"Beneish M-Score unavailable for {sym}. Promoter pledging stands at {pledged_str}. Accruals quality monitored for working capital drag."
         else:
-            val_desc = f"Historic supply zone near Rs. {round(ltp * 1.045, 2):,} represents potential multi-week profit-taking boundary."
+            forensic_desc = f"Corporate accounting forensic audit data unavailable for {sym}. Caution advised on unverified financials."
 
-        if ms:
-            sl_val = getattr(ms, "invalidation_level", None)
-            if sl_val is not None:
-                sent_desc = f"Structural invalidation level at Rs. {sl_val:,.2f}. A clean breakdown below this pivot would invalidate the bullish thesis and trigger trailing stops."
-            else:
-                sent_desc = f"Short-term momentum oscillator entering overbought region; trailing stop at Rs. {round(ltp * 0.985, 2):,} protects downside."
+        if vp and getattr(vp, "vah_price", None) is not None:
+            vah_val = float(vp.vah_price)
+            val_desc = f"Value Area High (VAH) overhead supply at Rs. {vah_val:,.2f} presents potential resistance as price approaches distribution ceiling."
         else:
-            sent_desc = f"Short-term momentum oscillator entering overbought region; trailing stop at Rs. {round(ltp * 0.985, 2):,} protects downside."
+            val_desc = "Volume profile Value Area High (VAH) data unavailable; dynamic overhead supply level not established."
+
+        if ms and getattr(ms, "invalidation_level", None) is not None:
+            sl_val = float(ms.invalidation_level)
+            sent_desc = f"Structural invalidation level at Rs. {sl_val:,.2f}. A clean breakdown below this pivot would invalidate the bullish thesis and trigger trailing stops."
+        else:
+            sent_desc = "Structural invalidation pivot level not established from market structure; risk boundary pending clean swing low."
 
         bear_case = [
             {
@@ -5945,60 +5947,95 @@ def _debate_snapshot_sync(req: Optional[DebateSnapshotRequest] = None):
             },
         ]
 
-        # Consensus Trade Levels with Dynamic ATR-Bounded Calibration
+        # Consensus Trade Levels with Real Market Structure & ATR
+        atr_px = None
+        try:
+            from market.history import get_ohlcv
+            from analysis.technical import atr as calc_atr
+
+            df_hist = get_ohlcv(sym, exchange=exch, interval="day", days=30)
+            if df_hist is not None and len(df_hist) >= 14:
+                atr_s = calc_atr(df_hist, period=14)
+                if not atr_s.dropna().empty:
+                    val = float(atr_s.dropna().iloc[-1])
+                    if val > 0:
+                        atr_px = val
+        except Exception:
+            pass
+
         ms_structure_score = getattr(ms, "structure_score", None) if ms else None
         is_bull = (
             bool(ms_structure_score is not None and ms_structure_score >= 0)
             if ms
             else (conviction_score >= 50)
         )
-        atr_px = ltp * 0.012
+
+        entry_px = None
+        sl_px = None
+        tgt_px = None
+        rr_ratio = None
+        verdict_bias = "BULLISH" if is_bull else "BEARISH"
 
         if is_bull:
             ms_support = getattr(ms, "nearest_support", None) if ms else None
-            raw_entry = float(ms_support) if ms_support is not None else round(ltp * 0.998, 2)
-            entry_px = max(ltp * 0.985, min(ltp * 1.002, raw_entry))
             ms_inv = getattr(ms, "invalidation_level", None) if ms else None
-            raw_sl = float(ms_inv) if ms_inv is not None else (entry_px - 1.2 * atr_px)
-            risk_u = max(
-                entry_px * 0.0035, min(entry_px * 0.022, abs(entry_px - raw_sl), 1.2 * atr_px)
-            )
-            sl_px = entry_px - risk_u
-            tgt_px = entry_px + (risk_u * 2.0)
-            rr_ratio = 2.0
-            verdict_str = (
-                "READY (BUY)"
-                if conviction_score >= 75
-                else ("STALK (BUY)" if conviction_score >= 55 else "STAND DOWN")
-            )
-            verdict_bias = "BULLISH"
+            if ms_support is not None and ms_inv is not None and ms_support > ms_inv:
+                entry_px = float(ms_support)
+                sl_px = float(ms_inv)
+                risk_u = entry_px - sl_px
+                tgt_px = entry_px + (risk_u * 2.0)
+                rr_ratio = 2.0
+                verdict_str = (
+                    "READY (BUY)"
+                    if conviction_score >= 75
+                    else ("STALK (BUY)" if conviction_score >= 55 else "STAND DOWN")
+                )
+            elif atr_px is not None and ms_support is not None:
+                entry_px = float(ms_support)
+                sl_px = round(entry_px - (1.5 * atr_px), 2)
+                risk_u = entry_px - sl_px
+                tgt_px = round(entry_px + (risk_u * 2.0), 2)
+                rr_ratio = 2.0
+                verdict_str = "STALK (BUY)" if conviction_score >= 55 else "STAND DOWN"
+            else:
+                verdict_str = "STAND DOWN"
         else:
             ms_resistance = getattr(ms, "nearest_resistance", None) if ms else None
-            raw_entry = float(ms_resistance) if ms_resistance is not None else round(ltp * 1.002, 2)
-            entry_px = max(ltp * 0.998, min(ltp * 1.015, raw_entry))
             ms_inv = getattr(ms, "invalidation_level", None) if ms else None
-            raw_sl = float(ms_inv) if ms_inv is not None else (entry_px + 1.2 * atr_px)
-            risk_u = max(
-                entry_px * 0.0035, min(entry_px * 0.022, abs(raw_sl - entry_px), 1.2 * atr_px)
-            )
-            sl_px = entry_px + risk_u
-            tgt_px = entry_px - (risk_u * 2.0)
-            rr_ratio = 2.0
-            verdict_str = (
-                "READY (SELL)"
-                if conviction_score >= 75
-                else ("STALK (SELL)" if conviction_score >= 55 else "STAND DOWN")
-            )
-            verdict_bias = "BEARISH"
+            if ms_resistance is not None and ms_inv is not None and ms_inv > ms_resistance:
+                entry_px = float(ms_resistance)
+                sl_px = float(ms_inv)
+                risk_u = sl_px - entry_px
+                tgt_px = entry_px - (risk_u * 2.0)
+                rr_ratio = 2.0
+                verdict_str = (
+                    "READY (SELL)"
+                    if conviction_score >= 75
+                    else ("STALK (SELL)" if conviction_score >= 55 else "STAND DOWN")
+                )
+            elif atr_px is not None and ms_resistance is not None:
+                entry_px = float(ms_resistance)
+                sl_px = round(entry_px + (1.5 * atr_px), 2)
+                risk_u = sl_px - entry_px
+                tgt_px = round(entry_px - (risk_u * 2.0), 2)
+                rr_ratio = 2.0
+                verdict_str = "STALK (SELL)" if conviction_score >= 55 else "STAND DOWN"
+            else:
+                verdict_str = "STAND DOWN"
+
+        if entry_px is not None and sl_px is not None and tgt_px is not None:
+            summary_str = f"Institutional defense at Rs. {sl_px:,.2f} yields a {rr_ratio}R asymmetric payoff targeting Rs. {tgt_px:,.2f}."
+        else:
+            summary_str = "Clean structural levels not established from market structure. Stand down until verified order block or swing pivot forms."
 
         consensus = {
             "verdict": verdict_str,
-            "verdict_bias": verdict_bias,
-            "entry": round(entry_px, 2),
-            "stop_loss": round(sl_px, 2),
-            "target": round(tgt_px, 2),
+            "verdict_bias": verdict_bias if entry_px is not None else "NEUTRAL",
+            "entry": round(entry_px, 2) if entry_px is not None else None,
+            "stop_loss": round(sl_px, 2) if sl_px is not None else None,
+            "target": round(tgt_px, 2) if tgt_px is not None else None,
             "risk_reward": rr_ratio,
-            "summary": f"Institutional defense at Rs. {sl_px:,.2f} yields a {rr_ratio}R asymmetric payoff targeting Rs. {tgt_px:,.2f}.",
+            "summary": summary_str,
         }
 
         now_time = datetime.now().strftime("%H:%M:%S IST")
