@@ -46,6 +46,7 @@ Register these redirect URIs in your broker developer consoles:
 
 from __future__ import annotations
 
+from typing import Optional, Any, Dict, List
 import json
 import os
 import sys
@@ -2623,6 +2624,21 @@ async def get_forensic_audit(symbol: str):
 
         result = audit_forensics(symbol)
         return {"status": "success", "data": result.as_dict()}
+    except Exception as exc:
+        raise _HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/api/v1/market/stock-profile/{symbol}", tags=["Market"])
+async def get_stock_profile(symbol: str):
+    """
+    Get canonical multi-dimensional segment profile, sector mapping, cap tier, and F&O status
+    for any Indian equity, commodity, or currency.
+    """
+    try:
+        from analysis.universe import get_stock_segment_profile
+
+        profile = get_stock_segment_profile(symbol)
+        return {"status": "success", "data": profile}
     except Exception as exc:
         raise _HTTPException(status_code=500, detail=str(exc))
 

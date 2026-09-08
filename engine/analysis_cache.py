@@ -255,6 +255,14 @@ class AnalysisCache:
             )
             conn.commit()
 
+    def get_fundamental(self, key: str, max_age_seconds: int | None = None) -> Any | None:
+        """Get cached fundamental or forensic audit data if not expired."""
+        return self.get_macro(key, max_age_seconds=max_age_seconds)
+
+    def save_fundamental(self, key: str, data: Any, ttl_hours: int = 24) -> None:
+        """Save fundamental or forensic snapshot with TTL in hours."""
+        self.save_macro(key, data, ttl_minutes=ttl_hours * 60)
+
     def invalidate(self, symbol: str | None = None, exchange: str = "NSE") -> int:
         """Invalidate cache for a specific symbol or all entries."""
         with self._get_conn() as conn:

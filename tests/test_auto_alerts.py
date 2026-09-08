@@ -12,7 +12,6 @@ Verifies early-warning detection for:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
 import numpy as np
 import pandas as pd
 import pytest
@@ -25,7 +24,6 @@ from engine.auto_alert_engine import (
     detect_squeeze_breakout,
     evaluate_alert_invalidation,
     evaluate_alert_targets_and_trailing,
-    TargetTrailingEvaluation,
 )
 
 

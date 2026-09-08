@@ -63,47 +63,32 @@ export function MarketClock() {
   )
 }
 
+import { useRealtimeMarket } from '../../hooks/useRealtimeMarket'
+import { formatLivePrice, formatLiveChange } from '../../utils/marketDataUtils'
+
 /**
  * LiveIndexTicker — dynamic real-time ticker strip for Indices, Commodities & Crypto
  */
 export function LiveIndexTicker({ onSymbolChange }) {
-  const { call } = useAPI()
-  const [tickers, setTickers] = useState([])
+  const { tickers, connectionState } = useRealtimeMarket()
 
-  useEffect(() => {
-    let mounted = true
-    const fetchTickers = async () => {
-      try {
-        const res = await call('/skills/live_tickers', {}, { method: 'GET' })
-        const list = res?.data?.tickers || res?.tickers
-        if (mounted && Array.isArray(list) && list.length > 0) {
-          setTickers(list)
-        }
-      } catch {
-        // Fallback gracefully without console spam
-      }
-    }
+  // Curated indices for quick reference
+  const targetSymbols = ['NIFTY', 'BANKNIFTY', 'INDIA VIX']
+  const displayItems = tickers.filter((t) => targetSymbols.includes(t.symbol))
 
-    fetchTickers()
-    const interval = setInterval(fetchTickers, 10000)
-    return () => {
-      mounted = false
-      clearInterval(interval)
-    }
-  }, [])
-
-  // Curated indices for non-terminal views
-  const displayItems = tickers.length > 0
-    ? tickers.filter((t) => ['NIFTY', 'BANKNIFTY', 'INDIA VIX'].includes(t.symbol))
-    : [
-        { symbol: 'NIFTY', display_name: 'NIFTY', ltp: 23897.70, change_pct: 0.10, unit: '₹' },
-        { symbol: 'BANKNIFTY', display_name: 'BKNIFTY', ltp: 57369.65, change_pct: -0.02, unit: '₹' },
-        { symbol: 'INDIA VIX', display_name: 'INDIA VIX', ltp: 10.68, change_pct: -6.07, unit: 'pts' },
-      ]
+  if (displayItems.length === 0) {
+    return (
+      <div className="hidden lg:flex items-center gap-2 no-drag font-mono text-[10px]" style={{ color: 'var(--color-subtle)' }}>
+        <span className="w-1.5 h-1.5 rounded-full animate-pulse" style={{ background: connectionState === 'live' ? 'var(--color-emerald)' : 'var(--color-gold)' }} />
+        <span>{connectionState === 'live' ? 'Awaiting ticks...' : 'Connecting live market feed...'}</span>
+      </div>
+    )
+  }
 
   return (
     <div className="hidden lg:flex items-center gap-2 no-drag overflow-x-auto no-scrollbar max-w-[620px]">
       {displayItems.map((idx) => {
+        const rawPrice = idx.ltp != null ? idx.ltp : idx.price
         const isUp = (idx.direction === 'up') || (idx.change_pct > 0)
         const isDown = (idx.direction === 'down') || (idx.change_pct < 0)
         const changeColor = isUp ? 'var(--color-emerald)' : isDown ? 'var(--color-rose)' : 'var(--color-subtle)'
@@ -125,13 +110,14 @@ export function LiveIndexTicker({ onSymbolChange }) {
               className="text-xs font-mono font-bold tabular-nums"
               style={{ color: 'var(--color-text)' }}
             >
-              {idx.unit === '$' ? '$' : ''}{Number(idx.ltp || 0).toLocaleString(idx.unit === '$' ? 'en-US' : 'en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+              {idx.unit === '$' ? '$' : (idx.unit === 'pts' ? '' : '₹')}
+              {formatLivePrice(rawPrice, idx.unit === '$' ? '$' : '₹')}
             </span>
             <span
               className="text-[10px] font-semibold font-mono tabular-nums"
               style={{ color: changeColor }}
             >
-              {isUp ? '+' : ''}{Number(idx.change_pct || 0).toFixed(2)}%
+              {formatLiveChange(idx.change_pct)}
             </span>
           </button>
         )

@@ -276,7 +276,7 @@
 
 ### 7.2 Server & Daemon Lifecycle
 6. **Thread Lifecycle & Cooperative Cancellation**: All background pollers in `engine/` MUST use `self._stop_event = threading.Event()`, wait on `self._stop_event.wait(timeout=...)` instead of blocking `time.sleep()`, and provide clean `.join(timeout=1.0)` in `stop_polling()`.
-7. **Hot-Reload Awareness**: Background daemons (`uvicorn web.api:app`) cache imports. Always restart after backend code edits.
+7. **Hot-Reload Awareness & Clean Instance Restart Standard**: Never rely on partial hot-reload or in-memory state when restarting development services or verifying UI/backend behavior. Always terminate any old processes completely (`electron`, `node`/Vite, `uvicorn`/Python, and socket listeners on ports `8765` & `5173`) using `scripts/quick_cleanup.ps1` before launching a fresh, clean instance. This prevents stale in-memory bundles and saves debugging time.
 8. **API Route Aliasing**: Register aliases (`/high_conviction` + `/top_conviction`, `/taxonomy` + `/universe_categories`) with both GET and POST to prevent 404s.
 
 ### 7.3 LLM Provider Management

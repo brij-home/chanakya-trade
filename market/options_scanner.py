@@ -53,13 +53,60 @@ def filter_high_iv(stocks: list[dict], threshold: float = 60) -> list[dict]:
     return sorted(filtered, key=lambda x: x["iv_rank"], reverse=True)
 
 
-def filter_unusual_oi(strikes: list[dict], threshold: float = 100) -> list[dict]:
-    """Filter strikes with OI change % above threshold."""
-    return sorted(
-        [s for s in strikes if s.get("oi_change_pct", 0) >= threshold],
-        key=lambda x: x["oi_change_pct"],
-        reverse=True,
-    )
+def filter_unusual_oi(
+    strikes: list[dict],
+    threshold: float = 100,
+    min_oi: int = 0,
+    min_oi_change: int = 0,
+    dedup_by_symbol: bool = False,
+) -> list[dict]:
+    """
+    Filter strikes with OI change % above threshold.
+
+    Args:
+        strikes: list of strike dicts (with 'oi_change_pct', and optionally 'oi', 'oi_change', 'symbol')
+        threshold: minimum percentage OI increase (default 100%)
+        min_oi: minimum total contracts to avoid ghost strikes (default 0)
+        min_oi_change: minimum absolute OI increase (default 0)
+        dedup_by_symbol: if True, returns at most 1 peak spike per symbol
+    """
+    filtered = []
+    for s in strikes:
+        pct = s.get("oi_change_pct", 0)
+        if pct < threshold:
+            continue
+        if min_oi > 0 and s.get("oi") is not None and s["oi"] < min_oi:
+            continue
+        if min_oi_change > 0 and s.get("oi_change") is not None and s["oi_change"] < min_oi_change:
+            continue
+        filtered.append(s)
+
+    if not dedup_by_symbol:
+        return sorted(filtered, key=lambda x: x.get("oi_change_pct", 0), reverse=True)
+
+    # Group by symbol and keep the highest-conviction strike per underlying
+    by_symbol: dict[str, list[dict]] = {}
+    for s in filtered:
+        sym = s.get("symbol")
+        if not sym:
+            # Item without symbol: treat as distinct
+            by_symbol.setdefault(f"_anonymous_{len(by_symbol)}", []).append(s)
+        else:
+            by_symbol.setdefault(sym, []).append(s)
+
+    deduped = []
+    for sym, group in by_symbol.items():
+        # Sort group by oi_change_pct descending, then by absolute oi_change
+        sorted_group = sorted(
+            group,
+            key=lambda x: (x.get("oi_change_pct", 0), x.get("oi_change", 0)),
+            reverse=True,
+        )
+        peak = dict(sorted_group[0])
+        peak["spikes_count"] = len(sorted_group)
+        deduped.append(peak)
+
+    return sorted(deduped, key=lambda x: x.get("oi_change_pct", 0), reverse=True)
 
 
 # ── Scanner ──────────────────────────────────────────────────
@@ -74,7 +121,8 @@ def scan_options(
 
     Returns dict with keys:
       high_iv: stocks with IV rank > 60
-      unusual_oi: strikes with OI change > 100%
+      unusual_oi: unique symbols with peak OI change > 100% (deduplicated by symbol)
+      unusual_oi_contracts: top individual contract strikes
       high_put_writing: stocks with PCR > 1.0
       summary: text summary
     """
@@ -114,18 +162,29 @@ def scan_options(
 
                 chain = get_options_chain(sym)
                 if chain:
+                    is_idx = sym.upper() in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY")
+                    min_oi = 250 if is_idx else 100
+                    min_oi_change = 100 if is_idx else 50
+
                     for c in chain:
-                        if c.oi > 0 and c.oi_change > 0:
+                        # Apply institutional liquidity filter to prevent illiquid ghost strikes
+                        if c.oi >= min_oi and c.oi_change >= min_oi_change:
                             oi_chg_pct = (c.oi_change / max(c.oi - c.oi_change, 1)) * 100
-                            if oi_chg_pct > 100:
+                            if oi_chg_pct >= 100:
+                                contract_sym = getattr(
+                                    c, "symbol", f"{sym}{int(c.strike)}{c.option_type}"
+                                )
                                 unusual_oi.append(
                                     {
                                         "symbol": sym,
                                         "strike": c.strike,
                                         "option_type": c.option_type,
+                                        "contract": f"{sym} {int(c.strike)} {c.option_type}",
+                                        "tradingsymbol": contract_sym,
+                                        "expiry": getattr(c, "expiry", ""),
                                         "oi": c.oi,
                                         "oi_change": c.oi_change,
-                                        "oi_change_pct": round(oi_chg_pct, 0),
+                                        "oi_change_pct": round(oi_chg_pct, 1),
                                     }
                                 )
             except Exception:
@@ -134,15 +193,18 @@ def scan_options(
         except Exception:
             continue
 
+    # Deduplicate unusual_oi by symbol so each stock appears at most once with its peak spike
+    unique_unusual_oi = filter_unusual_oi(unusual_oi, threshold=100, dedup_by_symbol=True)
+    raw_contract_spikes = filter_unusual_oi(unusual_oi, threshold=100, dedup_by_symbol=False)
+
     return {
         "high_iv": filter_high_iv(high_iv),
-        "unusual_oi": sorted(unusual_oi, key=lambda x: x.get("oi_change_pct", 0), reverse=True)[
-            :10
-        ],
+        "unusual_oi": unique_unusual_oi[:10],
+        "unusual_oi_contracts": raw_contract_spikes[:15],
         "high_put_writing": high_put_writing,
         "summary": f"Scanned {len(universe)} symbols. "
         f"High IV: {len(filter_high_iv(high_iv))} | "
-        f"Unusual OI: {len(unusual_oi)} | "
+        f"Unusual OI: {len(unique_unusual_oi)} symbols ({len(unusual_oi)} strikes) | "
         f"Put writing: {len(high_put_writing)}",
     }
 
@@ -177,15 +239,17 @@ def print_scan_results(symbols: Optional[list[str]] = None, quick: bool = False)
     # Unusual OI table
     if results["unusual_oi"]:
         console.print()
-        table2 = Table(title="Unusual OI Buildup")
-        table2.add_column("Symbol", style="cyan")
+        table2 = Table(title="Unusual OI Buildup (Peak Spike per Symbol)")
+        table2.add_column("Symbol", style="cyan bold")
         table2.add_column("Strike", justify="right")
         table2.add_column("Type", width=4)
         table2.add_column("OI", justify="right")
         table2.add_column("OI Change", justify="right")
         table2.add_column("Change %", justify="right")
+        table2.add_column("Active Spikes", justify="right", style="dim")
 
         for s in results["unusual_oi"][:10]:
+            spikes_str = f"{s['spikes_count']} strikes" if s.get("spikes_count") else "1 strike"
             table2.add_row(
                 s["symbol"],
                 f"{s['strike']:,.0f}",
@@ -193,6 +257,7 @@ def print_scan_results(symbols: Optional[list[str]] = None, quick: bool = False)
                 f"{s['oi']:,}",
                 f"+{s['oi_change']:,}",
                 f"[yellow]+{s['oi_change_pct']:.0f}%[/yellow]",
+                spikes_str,
             )
         console.print(table2)
 

@@ -1477,28 +1477,109 @@ CURRENCY_TAXONOMY: dict[str, dict[str, Any]] = {
 # ── Stock to Sector Lookup Map (Fast Inverse Index) ─────────────────
 
 _STOCK_TO_SECTOR: dict[str, tuple[str, str]] = {}
+_STOCK_INDUSTRY: dict[str, str] = {}
+_STOCK_SECTOR_SOURCE: dict[str, str] = {}
+
 for sec_id, data in SECTOR_TAXONOMY.items():
     sec_name = data["name"]
     for sym in data["symbols"]:
-        _STOCK_TO_SECTOR[sym.upper().strip()] = (sec_id, sec_name)
+        sym_clean = sym.upper().strip()
+        _STOCK_TO_SECTOR[sym_clean] = (sec_id, sec_name)
+        _STOCK_SECTOR_SOURCE[sym_clean] = "INSTITUTIONAL_TAXONOMY"
 
 for com_group in COMMODITY_TAXONOMY.values():
     for sym in com_group["symbols"]:
-        _STOCK_TO_SECTOR[sym.upper().strip()] = ("commodity", "MCX Commodities")
+        sym_clean = sym.upper().strip()
+        _STOCK_TO_SECTOR[sym_clean] = ("commodity", "MCX Commodities")
+        _STOCK_SECTOR_SOURCE[sym_clean] = "COMMODITY_TAXONOMY"
 
 for etf_group in ETF_TAXONOMY.values():
     for sym in etf_group["symbols"]:
-        _STOCK_TO_SECTOR[sym.upper().strip()] = ("etf", "Exchange Traded Funds")
+        sym_clean = sym.upper().strip()
+        _STOCK_TO_SECTOR[sym_clean] = ("etf", "Exchange Traded Funds")
+        _STOCK_SECTOR_SOURCE[sym_clean] = "ETF_TAXONOMY"
 
 for fx_group in CURRENCY_TAXONOMY.values():
     for sym in fx_group["symbols"]:
-        _STOCK_TO_SECTOR[sym.upper().strip()] = ("currency", "Currency Derivatives")
+        sym_clean = sym.upper().strip()
+        _STOCK_TO_SECTOR[sym_clean] = ("currency", "Currency Derivatives")
+        _STOCK_SECTOR_SOURCE[sym_clean] = "CURRENCY_TAXONOMY"
+
+
+_NSE_INDUSTRY_TO_SECTOR: dict[str, tuple[str, str]] = {
+    "Automobile and Auto Components": ("auto", "Automobiles & Mobility"),
+    "Capital Goods": ("infra", "Infrastructure & Capital Goods"),
+    "Construction": ("infra", "Infrastructure & Capital Goods"),
+    "Construction Materials": ("infra", "Infrastructure & Capital Goods"),
+    "Chemicals": ("chemicals", "Specialty Chemicals & Agriculture"),
+    "Consumer Durables": ("fmcg", "FMCG, Retail & Consumption"),
+    "Consumer Services": ("fmcg", "FMCG, Retail & Consumption"),
+    "Diversified": ("infra", "Infrastructure & Capital Goods"),
+    "Fast Moving Consumer Goods": ("fmcg", "FMCG, Retail & Consumption"),
+    "Financial Services": ("banking", "Banking & Financial Services"),
+    "Forest Materials": ("fmcg", "FMCG, Retail & Consumption"),
+    "Healthcare": ("pharma", "Pharma & Healthcare"),
+    "Information Technology": ("it", "IT, Software & Technology"),
+    "Media Entertainment & Publication": ("telecom", "Telecom, Media & Logistics"),
+    "Metals & Mining": ("metals", "Metals & Mining"),
+    "Oil Gas & Consumable Fuels": ("energy", "Energy, Power & Green Transition"),
+    "Power": ("energy", "Energy, Power & Green Transition"),
+    "Realty": ("realty", "Real Estate & Housing"),
+    "Services": ("infra", "Infrastructure & Capital Goods"),
+    "Telecommunication": ("telecom", "Telecom, Ports & Logistics"),
+    "Textiles": ("fmcg", "FMCG, Retail & Consumption"),
+    "Utilities": ("energy", "Energy, Power & Green Transition"),
+}
+
+_GICS_SECTOR_TO_SECTOR: dict[str, tuple[str, str]] = {
+    "Real Estate": ("realty", "Real Estate & Housing"),
+    "Financial Services": ("banking", "Banking & Financial Services"),
+    "Financials": ("banking", "Banking & Financial Services"),
+    "Technology": ("it", "IT, Software & Technology"),
+    "Information Technology": ("it", "IT, Software & Technology"),
+    "Healthcare": ("pharma", "Pharma & Healthcare"),
+    "Consumer Defensive": ("fmcg", "FMCG, Retail & Consumption"),
+    "Consumer Cyclical": ("auto", "Automobiles & Mobility"),
+    "Industrials": ("infra", "Infrastructure & Capital Goods"),
+    "Basic Materials": ("metals", "Metals & Mining"),
+    "Energy": ("energy", "Energy, Power & Green Transition"),
+    "Utilities": ("energy", "Energy, Power & Green Transition"),
+    "Communication Services": ("telecom", "Telecom, Ports & Logistics"),
+}
+
+
+def _load_bundled_index_sectors() -> None:
+    """Ingests official constituent industry classifications from bundled Nifty datasets."""
+    for fn in ("nifty_total_market.json", "nifty500.json"):
+        p = Path("data/universes") / fn
+        if p.exists():
+            try:
+                data = json.loads(p.read_text(encoding="utf-8"))
+                for d in data:
+                    sym = d.get("symbol", "").strip().upper()
+                    ind = d.get("industry", "").strip()
+                    if sym and ind:
+                        if sym not in _STOCK_INDUSTRY:
+                            _STOCK_INDUSTRY[sym] = ind
+                        if sym not in _STOCK_TO_SECTOR:
+                            mapped = _NSE_INDUSTRY_TO_SECTOR.get(ind)
+                            if mapped:
+                                _STOCK_TO_SECTOR[sym] = mapped
+                                _STOCK_SECTOR_SOURCE[sym] = "NIFTY_TOTAL_MARKET"
+            except Exception:
+                pass
+
+
+_load_bundled_index_sectors()
 
 
 def get_stock_sector(symbol: str) -> tuple[str, str]:
     """
     Returns (sector_id, sector_name) for a given symbol.
-    Defaults to ("broad_market", "Broad Market") if unclassified.
+    Uses:
+      1. Institutional in-memory fast inverse index (NIFTY Total Market 755+ constituents).
+      2. Dynamic GICS/Industry metadata discovery for newly listed / BSE equities.
+      3. Defaults to ("broad_market", "Broad Market") if completely unclassified.
     """
     clean = (
         symbol.upper()
@@ -1509,7 +1590,60 @@ def get_stock_sector(symbol: str) -> tuple[str, str]:
         .replace("BSE:", "")
         .strip()
     )
-    return _STOCK_TO_SECTOR.get(clean, ("broad_market", "Broad Market"))
+    if clean in _STOCK_TO_SECTOR:
+        return _STOCK_TO_SECTOR[clean]
+
+    # Dynamic fallback: check cached fundamentals or yfinance metadata
+    try:
+        from engine.analysis_cache import cache_get, cache_set
+
+        cache_key = f"stock_sector:{clean}"
+        cached = cache_get(cache_key, namespace="universe", max_age_seconds=86400 * 7)
+        if cached and isinstance(cached, list) and len(cached) == 2:
+            _STOCK_TO_SECTOR[clean] = (cached[0], cached[1])
+            _STOCK_SECTOR_SOURCE[clean] = "CACHED_DYNAMIC_DISCOVERY"
+            return cached[0], cached[1]
+
+        # Inspect fundamental summary if available
+        from analysis.fundamental import analyse
+
+        fund = analyse(clean)
+        if fund and fund.sector:
+            gics_sec = fund.sector.strip()
+            gics_ind = (fund.industry or "").lower()
+            mapped = _GICS_SECTOR_TO_SECTOR.get(gics_sec)
+            if not mapped:
+                # Sub-industry heuristics
+                if "bank" in gics_ind or "finance" in gics_ind or "insurance" in gics_ind:
+                    mapped = ("banking", "Banking & Financial Services")
+                elif "software" in gics_ind or "tech" in gics_ind:
+                    mapped = ("it", "IT, Software & Technology")
+                elif "pharma" in gics_ind or "health" in gics_ind or "hospital" in gics_ind:
+                    mapped = ("pharma", "Pharma & Healthcare")
+                elif "auto" in gics_ind or "vehicle" in gics_ind:
+                    mapped = ("auto", "Automobiles & Mobility")
+                elif "real estate" in gics_ind or "realt" in gics_ind:
+                    mapped = ("realty", "Real Estate & Housing")
+                elif "steel" in gics_ind or "metal" in gics_ind or "mining" in gics_ind:
+                    mapped = ("metals", "Metals & Mining")
+                elif "power" in gics_ind or "energy" in gics_ind or "oil" in gics_ind or "solar" in gics_ind:
+                    mapped = ("energy", "Energy, Power & Green Transition")
+                elif "chemical" in gics_ind or "fertiliz" in gics_ind:
+                    mapped = ("chemicals", "Specialty Chemicals & Agriculture")
+                else:
+                    mapped = ("infra", "Infrastructure & Capital Goods")
+
+            if mapped:
+                _STOCK_TO_SECTOR[clean] = mapped
+                _STOCK_SECTOR_SOURCE[clean] = "DYNAMIC_METADATA_DISCOVERY"
+                if fund.industry:
+                    _STOCK_INDUSTRY[clean] = fund.industry
+                cache_set(cache_key, list(mapped), namespace="universe", ttl_minutes=60 * 24 * 7)
+                return mapped
+    except Exception:
+        pass
+
+    return ("broad_market", "Broad Market")
 
 
 COMPANY_NAMES: dict[str, str] = {
@@ -1578,14 +1712,20 @@ COMPANY_NAMES: dict[str, str] = {
 # Update company names from bundled official index constituent datasets
 COMPANY_NAMES.update(_load_bundled_company_names())
 
-_LARGE_CAP_SET = set(THEMATIC_PRESETS.get("nifty50", {}).get("symbols", []))
+_n500_symbols = set(THEMATIC_PRESETS.get("nifty500", {}).get("symbols", []))
 _MID_CAP_SET = set(THEMATIC_PRESETS.get("midcap150", {}).get("symbols", []))
 _SMALL_CAP_SET = set(THEMATIC_PRESETS.get("smallcap250", {}).get("symbols", []))
 _MICRO_CAP_SET = set(THEMATIC_PRESETS.get("microcap250", {}).get("symbols", []))
 
+# SEBI Categorization Standard: Top 100 Equities (Nifty 50 + Nifty Next 50) = Large Cap
+_LARGE_CAP_SET = (
+    set(THEMATIC_PRESETS.get("nifty50", {}).get("symbols", []))
+    | set(s for s in _n500_symbols if s not in _MID_CAP_SET and s not in _SMALL_CAP_SET)
+)
+
 
 def get_stock_cap_tier(symbol: str) -> str:
-    """Classifies stock as LARGE, MID, SMALL, or MICRO based on canonical constituent lists."""
+    """Classifies stock as LARGE, MID, SMALL, or MICRO based on SEBI canonical market-cap rules."""
     clean = (
         symbol.upper()
         .replace(".NS", "")
@@ -1603,7 +1743,67 @@ def get_stock_cap_tier(symbol: str) -> str:
         return "SMALL"
     if clean in _MICRO_CAP_SET:
         return "MICRO"
-    return "SMALL"
+    return "MICRO" if clean in COMPANY_NAMES else "SMALL"
+
+
+def get_stock_segment_profile(symbol: str) -> dict[str, Any]:
+    """
+    Unified multi-dimensional segment profile for any Indian equity, commodity, or currency:
+      1. Asset & Exchange Segment (NSE, BSE, MCX, CDS)
+      2. Market Capitalization Tier (LARGE, MID, SMALL, MICRO)
+      3. F&O Eligibility (is_fo)
+      4. Institutional Sector ID, Name, and Benchmark Index Symbol
+      5. Official Industry Classification
+      6. Data Authority Source
+    """
+    raw = symbol.strip().upper()
+    clean = (
+        raw.replace(".NS", "")
+        .replace("NSE:", "")
+        .replace("MCX:", "")
+        .replace("CDS:", "")
+        .replace("BSE:", "")
+        .strip()
+    )
+
+    sec_id, sec_name = get_stock_sector(clean)
+
+    # Determine Exchange & Asset Segment
+    if raw.startswith("MCX:") or sec_id == "commodity":
+        exchange = "MCX"
+        segment_type = "COMMODITY_FUTURES"
+    elif raw.startswith("CDS:") or sec_id == "currency":
+        exchange = "CDS"
+        segment_type = "CURRENCY_DERIVATIVES"
+    elif raw.startswith("BSE:"):
+        exchange = "BSE"
+        segment_type = "EQUITY_CASH"
+    else:
+        exchange = "NSE"
+        segment_type = "EQUITY_CASH"
+
+    # F&O contract eligibility
+    fno_set = set(THEMATIC_PRESETS.get("fno_universe", {}).get("symbols", []))
+    is_fo = clean in fno_set or exchange in ("MCX", "CDS")
+
+    # Sector benchmark index symbol
+    sec_info = SECTOR_TAXONOMY.get(sec_id, {})
+    sector_index = sec_info.get("index_symbol", "^CRSLDX")
+
+    return {
+        "symbol": clean,
+        "full_symbol": f"{exchange}:{clean}" if not raw.startswith(f"{exchange}:") else raw,
+        "company_name": get_stock_name(clean),
+        "exchange": exchange,
+        "segment_type": segment_type,
+        "cap_tier": get_stock_cap_tier(clean),
+        "is_fo": is_fo,
+        "sector_id": sec_id,
+        "sector_name": sec_name,
+        "sector_index": sector_index,
+        "industry": _STOCK_INDUSTRY.get(clean, sec_name),
+        "classification_source": _STOCK_SECTOR_SOURCE.get(clean, "BROAD_MARKET_DEFAULT"),
+    }
 
 
 def get_stock_name(symbol: str) -> str:
@@ -1665,8 +1865,10 @@ def resolve_sector_taxonomy(query: str) -> tuple[str, dict[str, Any]]:
         "consumption": "fmcg",
         "retail": "fmcg",
         "infra": "infra",
-        "realty": "infra",
-        "real estate": "infra",
+        "infrastructure": "infra",
+        "realty": "realty",
+        "real estate": "realty",
+        "housing": "realty",
         "capital goods": "infra",
         "chem": "chemicals",
         "chemical": "chemicals",
@@ -1675,6 +1877,10 @@ def resolve_sector_taxonomy(query: str) -> tuple[str, dict[str, Any]]:
         "media": "telecom",
         "ports": "telecom",
         "logistics": "telecom",
+        "railway": "railways",
+        "railways": "railways",
+        "rail": "railways",
+        "wagon": "railways",
     }
 
     if q in alias_map and alias_map[q] in SECTOR_TAXONOMY:

@@ -107,7 +107,6 @@ def get_options_snapshot(
     source_info conveys transparent provenance: provider, source, data_state, is_realtime, and as_of timestamps.
     """
     from datetime import datetime, timezone
-    from typing import Any
     from brokers.session import get_data_broker, get_data_broker_key
 
     clean_u = underlying.replace("NSE:", "").replace("BSE:", "").upper().strip()

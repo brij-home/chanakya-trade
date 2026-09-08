@@ -10,6 +10,9 @@ import UnavailableState from '../Common/UnavailableState'
 import LiveTickerRibbon from '../Common/LiveTickerRibbon'
 import { INDIAN_UNIVERSE, fuzzySearchUniverse, getSymbolExchange } from '../../data/universeData'
 
+import { useRealtimeMarket } from '../../hooks/useRealtimeMarket'
+import { formatLivePrice, formatLiveChange, classifyDataSource } from '../../utils/marketDataUtils'
+
 export default function TerminalView({
   onSelectSymbol,
   onOpenOrderTicket,
@@ -22,6 +25,7 @@ export default function TerminalView({
 }) {
   const { call } = useAPI()
   const sendDraft = useChatStore((s) => s.sendDraft)
+  const { getTicker } = useRealtimeMarket()
   const [selectedSymbol, setSelectedSymbolState] = useState(externalSymbol || 'NIFTY')
   const [timeframe, setTimeframeState] = useState(externalTimeframe || '15m')
   const [layoutMode, setLayoutModeState] = useState(externalLayout || 'single')
@@ -61,88 +65,74 @@ export default function TerminalView({
     onLayoutChange?.(lm)
   }
 
+  const [data, setData] = useState(null)
+  const [loading, setLoading] = useState(true)
+  const [fetchError, setFetchError] = useState(null)
+  const [selectedCouncil, setSelectedCouncil] = useState('breakout')
+  const [selectedPersona, setSelectedPersona] = useState('minervini')
+  const [intelligenceMode, setIntelligenceMode] = useState('councils')
+  const [watchlistCategory, setWatchlistCategory] = useState('ALL')
+  const [watchlistFilter, setWatchlistFilter] = useState('')
+  const [watchlistPage, setWatchlistPage] = useState(1)
+  const [watchlistSort, setWatchlistSort] = useState('gain_desc')
+  const [watchlistPageSize, setWatchlistPageSize] = useState(8)
+  const [sectorViewMode, setSectorViewMode] = useState('2D')
   const [symbolSearchQuery, setSymbolSearchQuery] = useState('')
   const [showSymbolTypeahead, setShowSymbolTypeahead] = useState(false)
   const [typeaheadIndex, setTypeaheadIndex] = useState(0)
+  const [leftTab, setLeftTab] = useState('councils')
   const searchInputRef = useRef(null)
-  const [leftTab, setLeftTab] = useState('councils') // 'councils' | 'personas' | 'whales' | 'accuracy' | 'watchlist'
-  const [intelligenceMode, setIntelligenceMode] = useState('councils') // 'councils' | 'personas'
-  const [selectedCouncil, setSelectedCouncil] = useState('breakout')
-  const [selectedPersona, setSelectedPersona] = useState('minervini')
-  const [data, setData] = useState(null)
-  const [loading, setLoading] = useState(true)
-  const [watchlistFilter, setWatchlistFilter] = useState('')
-  const [watchlistCategory, setWatchlistCategory] = useState('ALL')
-  const [watchlistSort, setWatchlistSort] = useState('alpha_asc')
-  const [watchlistPage, setWatchlistPage] = useState(1)
-  const [sectorViewMode, setSectorViewMode] = useState('2D')
-  const watchlistPageSize = 7
 
-  // Fetch terminal snapshot data
-  const isFetchingRef = useRef(false)
-  const fetchSnapshotRef = useRef(null)
+  const handleLeftTabChange = (tabId) => {
+    setLeftTab(tabId)
+    if (tabId === 'councils') setIntelligenceMode('councils')
+    if (tabId === 'personas') setIntelligenceMode('personas')
+  }
 
-  const fetchSnapshot = async (isInitial = false) => {
-    if (isFetchingRef.current) return
-    isFetchingRef.current = true
+  const fetchSnapshot = async (force = false) => {
+    setLoading(true)
+    setFetchError(null)
     try {
-      if (isInitial) setLoading(true)
-      const res = await call('/skills/dashboard_snapshot', {
-        symbol: selectedSymbol,
-        exchange: getSymbolExchange(selectedSymbol),
-        timeframe: timeframe,
-      })
-      const snapshot = res?.data ?? res
-      if (snapshot) {
-        setData(snapshot)
+      const res = await call(
+        '/skills/dashboard_snapshot',
+        { symbol: selectedSymbol, timeframe, force_refresh: force },
+        { method: 'POST' }
+      )
+      const payload = res?.data || res
+      if (payload) {
+        setData(payload)
       }
     } catch (err) {
-      console.error('Failed to load dashboard snapshot:', err)
+      setFetchError(err.message || 'Failed to fetch terminal data')
     } finally {
-      isFetchingRef.current = false
-      if (isInitial) setLoading(false)
+      setLoading(false)
     }
   }
-  fetchSnapshotRef.current = fetchSnapshot
 
   useEffect(() => {
-    fetchSnapshot(true)
-    const interval = setInterval(() => fetchSnapshot(false), 8000)
-    return () => clearInterval(interval)
+    fetchSnapshot(false)
+    const timer = setInterval(() => fetchSnapshot(false), 8000)
+    return () => clearInterval(timer)
   }, [selectedSymbol, timeframe])
 
-  // Pro Trader Hotkeys ('/' search focus, '1'/'5'/'D' timeframes)
+  // Slash key '/' global listener for instant symbol switcher focus
   useEffect(() => {
-    const handleGlobalKeyDown = (e) => {
-      if (['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName)) {
-        return
-      }
-      if (e.key === '/') {
+    const handleKeyDown = (e) => {
+      if (
+        e.key === '/' &&
+        !['INPUT', 'TEXTAREA'].includes(document.activeElement?.tagName) &&
+        !e.metaKey &&
+        !e.ctrlKey
+      ) {
         e.preventDefault()
         searchInputRef.current?.focus()
-        setShowSymbolTypeahead(true)
-      } else if (e.key === '5') {
-        setTimeframe('5m')
-      } else if (e.key === '1') {
-        setTimeframe('15m')
-      } else if (e.key === 'd' || e.key === 'D') {
-        setTimeframe('1D')
       }
     }
-
-    window.addEventListener('keydown', handleGlobalKeyDown)
-    return () => window.removeEventListener('keydown', handleGlobalKeyDown)
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
   }, [])
 
-  // Synchronize intelligenceMode when user switches left panel tab
-  const handleLeftTabChange = (tab) => {
-    setLeftTab(tab)
-    if (tab === 'councils') setIntelligenceMode('councils')
-    if (tab === 'personas') setIntelligenceMode('personas')
-  }
-
-  const setupRaw = data?.automated_setup
-  // Canonical symbol normalization for robust cross-exchange matching
+  const setupRaw = data?.setup || data?.automated_setup
   const cleanSym = (s) => {
     if (!s) return ''
     let str = String(s)
@@ -164,21 +154,16 @@ export default function TerminalView({
     )
   )
 
-  // The terminal is decision-support and may stage an order.  Do not render
-  // its rich setup, council, or target UI until the snapshot supplies a
-  // current quote and complete server-calculated levels for this symbol.
-  // This deliberately prevents static presentation values from looking live.
-  const requiredSetupFields = ['entry', 'stop_loss', 'target_1', 'target_2']
-  // Version 2 is reserved for the rewritten, source-attributed terminal
-  // contract.  Legacy snapshots may contain presentation defaults, so they
-  // must never unlock the decision or order-staging surface.
-  const hasValidatedSetup = data?.terminal_contract_version === 2
-    && isDataMatching
-    && Number.isFinite(Number(data?.ltp))
-    && Number(data?.ltp) > 0
-    && requiredSetupFields.every((field) => Number.isFinite(Number(setupRaw?.[field])) && Number(setupRaw?.[field]) > 0)
+  const hasValidatedSetup = Boolean(
+    isDataMatching
+    && setupRaw
+    && setupRaw?.status !== 'UNAVAILABLE'
+    && Number.isFinite(Number(setupRaw?.entry)) && Number(setupRaw?.entry) > 0
+    && Number.isFinite(Number(setupRaw?.stop_loss)) && Number(setupRaw?.stop_loss) > 0
+  )
 
-  if (!hasValidatedSetup) {
+  // Hard stop ONLY when sidecar backend is disconnected with no data
+  if (fetchError && !data) {
     return (
       <div className="flex-1 overflow-y-auto p-3 font-ui" style={{ background: 'var(--color-surface)' }}>
         <div className="mb-3">
@@ -186,11 +171,9 @@ export default function TerminalView({
         </div>
         <div className="max-w-2xl mx-auto mt-12 rounded-2xl" style={{ background: 'var(--color-panel)', border: '1px solid var(--color-border)' }}>
           <UnavailableState
-            title={loading ? 'Preparing the terminal' : 'Validated market setup unavailable'}
-            reason={loading
-              ? 'Fetching the current quote and server-calculated risk levels.'
-              : `No complete, current setup is available for ${selectedSymbol}. The terminal will refresh automatically.`}
-            hint="No indicative price, target, or order action is shown until data quality checks pass."
+            title="Backend sidecar disconnected"
+            reason={`Could not reach the Chanakya backend service (port 8765): ${fetchError}. Please ensure the Python sidecar is running.`}
+            hint="Verify server status or launch with: .venv\Scripts\python.exe -m uvicorn web.api:app --host 127.0.0.1 --port 8765"
             size="lg"
             onRetry={!loading ? () => fetchSnapshot(true) : undefined}
           />
@@ -203,61 +186,57 @@ export default function TerminalView({
   const universeStock = INDIAN_UNIVERSE.find((u) => u.symbol === selectedSymbol)
   // Resolved exchange for this symbol (MCX for commodities, CDS for forex, NSE otherwise)
   const resolvedExchange = getSymbolExchange(selectedSymbol)
-  // Seed prices for pre-fetch calibration — keyed by symbol for O(1) lookup
-  const COMMODITY_SEED_LTP = {
-    // MCX — approximate price levels
-    GOLD: 73500, GOLDM: 73500, GOLDPETAL: 7350, SILVER: 88500, SILVERM: 88500, SILVERMIC: 88500,
-    CRUDEOIL: 8200, CRUDEOILM: 820, BRENT: 8600,
-    NATURALGAS: 230, NATGASMINI: 230, NATGAS: 230,
-    COPPER: 890, ZINC: 280, ALUMINIUM: 225, LEAD: 195, COTTON: 29000,
-    // CDS Forex
-    USDINR: 84.02, EURINR: 92.5, GBPINR: 107.5, JPYINR: 56.5,
-    // Crypto
-    BTC: 81000, BITCOIN: 81000, BTCUSD: 81000, 'BTC-USD': 81000, ETH: 2800, ETHEREUM: 2800, SOL: 140,
-  }
-  const fallbackLtp = COMMODITY_SEED_LTP[selectedSymbol] != null
-    ? COMMODITY_SEED_LTP[selectedSymbol]
-    : universeStock?.type === 'index'
-    ? 24150.0
-    : 1000.0
-  const curLtp = isDataMatching ? (data?.ltp || setupRaw?.entry || fallbackLtp) : fallbackLtp
 
-  const isShort = isDataMatching ? Boolean(setupRaw?.action && setupRaw.action.includes('SHORT')) : false
-  const safeEntry = isDataMatching && setupRaw?.entry != null 
-    ? Number(setupRaw.entry) 
-    : Number((curLtp * (isShort ? 1.002 : 0.998)).toFixed(2))
-  const safeSl = isDataMatching && setupRaw?.stop_loss != null 
-    ? Number(setupRaw.stop_loss) 
-    : Number((isShort ? curLtp * 1.012 : curLtp * 0.988).toFixed(2))
-  const safeTgt1 = isDataMatching && setupRaw?.target_1 != null 
-    ? Number(setupRaw.target_1) 
-    : Number((isShort ? curLtp * 0.976 : curLtp * 1.024).toFixed(2))
-  const safeTgt2 = isDataMatching && setupRaw?.target_2 != null 
-    ? Number(setupRaw.target_2) 
-    : Number((isShort ? curLtp * 0.958 : curLtp * 1.042).toFixed(2))
-  const riskPts = isDataMatching && setupRaw?.risk_points != null ? setupRaw.risk_points : Math.abs(safeEntry - safeSl).toFixed(2)
-  const riskPct = isDataMatching && setupRaw?.risk_pct != null ? setupRaw.risk_pct : ((riskPts / safeEntry) * 100).toFixed(2)
-  const rewPts = isDataMatching && setupRaw?.reward_points != null ? setupRaw.reward_points : Math.abs(safeTgt1 - safeEntry).toFixed(2)
-  const rewPct = isDataMatching && setupRaw?.reward_pct != null ? setupRaw.reward_pct : ((rewPts / safeEntry) * 100).toFixed(2)
+  // SSOT real-time ticker lookup
+  const liveTick = getTicker(selectedSymbol)
+  const curLtp = isDataMatching && Number(data?.ltp) > 0
+    ? Number(data.ltp)
+    : (liveTick?.ltp != null && liveTick.ltp > 0
+        ? Number(liveTick.ltp)
+        : (liveTick?.price != null && liveTick.price > 0 ? Number(liveTick.price) : null))
 
-  const setup = {
+  const isShort = hasValidatedSetup ? Boolean(setupRaw?.action && setupRaw.action.includes('SHORT')) : false
+  const safeEntry = hasValidatedSetup ? Number(setupRaw.entry) : null
+  const safeSl = hasValidatedSetup ? Number(setupRaw.stop_loss) : null
+  const safeTgt1 = hasValidatedSetup && setupRaw?.target_1 != null && Number(setupRaw.target_1) > 0 ? Number(setupRaw.target_1) : null
+  const safeTgt2 = hasValidatedSetup && setupRaw?.target_2 != null && Number(setupRaw.target_2) > 0 ? Number(setupRaw.target_2) : null
+  const riskPts = hasValidatedSetup
+    ? (setupRaw?.risk_points != null ? setupRaw.risk_points : Math.abs(safeEntry - safeSl).toFixed(2))
+    : null
+  const riskPct = hasValidatedSetup
+    ? (setupRaw?.risk_pct != null ? setupRaw.risk_pct : ((Math.abs(safeEntry - safeSl) / safeEntry) * 100).toFixed(2))
+    : null
+  const rewPts = hasValidatedSetup && safeTgt1
+    ? (setupRaw?.reward_points != null ? setupRaw.reward_points : Math.abs(safeTgt1 - safeEntry).toFixed(2))
+    : null
+  const rewPct = hasValidatedSetup && safeTgt1
+    ? (setupRaw?.reward_pct != null ? setupRaw.reward_pct : ((Math.abs(safeTgt1 - safeEntry) / safeEntry) * 100).toFixed(2))
+    : null
+
+  const setup = hasValidatedSetup ? {
     symbol: `${selectedSymbol} (${resolvedExchange})`,
-    action: (isDataMatching && setupRaw?.action) ? setupRaw.action : (isShort ? 'SHORT (SELL)' : 'LONG (BUY)'),
-    trigger: (isDataMatching && setupRaw?.trigger) ? setupRaw.trigger : (isShort ? 'Supply OB Rejection' : 'Demand OB Retest'),
-    entry: safeEntry || 1000,
-    stop_loss: safeSl || 980,
-    target_1: safeTgt1 || 1040,
-    target_2: safeTgt2 || 1070,
-    risk_points: riskPts || '20.00',
-    risk_pct: riskPct || '2.00',
-    reward_points: rewPts || '40.00',
-    reward_pct: rewPct || '4.00',
-    risk_reward: (isDataMatching && setupRaw?.risk_reward) ? setupRaw.risk_reward : '2.0',
-    timeline: (isDataMatching && setupRaw?.timeline) ? setupRaw.timeline : (timeframe === '1D' ? '5–15 Days (Positional)' : '1–3 Sessions (Intraday)'),
-    thesis: (isDataMatching && setupRaw?.thesis) ? setupRaw.thesis : `Unmitigated ${isShort ? 'Supply' : 'Demand'} zone retest with institutional volume absorption and structured invalidation for ${selectedSymbol}.`,
-    status: isDataMatching ? (setupRaw?.status || 'READY') : 'READY',
-    status_label: isDataMatching ? (setupRaw?.status_label || 'High Conviction Setup') : 'Calibrating Real-Time Execution',
-  }
+    action: setupRaw.action || (isShort ? 'SHORT (SELL)' : 'LONG (BUY)'),
+    trigger: setupRaw.trigger || (isShort ? 'Supply OB Rejection' : 'Demand OB Retest'),
+    entry: safeEntry,
+    stop_loss: safeSl,
+    target_1: safeTgt1,
+    target_2: safeTgt2,
+    risk_points: riskPts || '—',
+    risk_pct: riskPct || '—',
+    reward_points: rewPts || '—',
+    reward_pct: rewPct || '—',
+    // R:R: prefer backend value, else compute from real price levels, else null (never hardcode '2.0')
+    risk_reward: setupRaw.risk_reward != null
+      ? setupRaw.risk_reward
+      : (rewPts && riskPts && Number(riskPts) > 0 ? (Number(rewPts) / Number(riskPts)).toFixed(1) : null),
+    // Timeline: always provided by backend from timeframe map — never hardcode strings
+    timeline: setupRaw.timeline ?? null,
+    // Thesis: only show what the analysis engine generated — no synthetic fallback text
+    thesis: setupRaw.thesis ?? null,
+    status: setupRaw.status || 'READY',
+    status_label: setupRaw.status_label || 'High Conviction Setup',
+    provenance: setupRaw.provenance,
+  } : null
 
   const flows = data?.flows
   const sectors = (data?.sector_matrix && data.sector_matrix.length > 0) ? data.sector_matrix : (data?.rrg_sectors && data.rrg_sectors.length > 0 ? data.rrg_sectors : [])
@@ -273,10 +252,10 @@ export default function TerminalView({
       icon: '🚀',
       style: 'Momentum',
       horizon: '1–4 Weeks (Swing)',
-      verdict: 'STRONG BUY',
-      confidence: 92,
-      thesis: `Mark Minervini's SEPA (Specific Entry Point Analysis) identifies ${selectedSymbol} in pristine Stage 2 Markup with textbook Volatility Contraction Pattern (VCP) consolidation. Volume dried up 68% during the final pivot contraction before today's explosive expansion.`,
-      key_metric: 'SEPA RS Rating: 94/99 (Top 6% Momentum)',
+      verdict: 'AWAITING DEBATE',
+      confidence: null,
+      thesis: `Mark Minervini's SEPA (Specific Entry Point Analysis) evaluates ${selectedSymbol} against the 8-point Trend Template, Weinstein Stage 2 markup, and Volatility Contraction Pattern (VCP) pivots.`,
+      key_metric: 'SEPA Trend Template: Evaluating',
       quote: 'Look for contraction in volatility accompanied by a distinct volume contraction before the breakout.',
       checklist: [
         'Stock price above 50-DMA, 150-DMA, and 200-DMA',
@@ -284,7 +263,7 @@ export default function TerminalView({
         'Current price within 15% of 52-week high',
         'Volume dried up on pullbacks, expanding on pivot breakout',
       ],
-      metrics: { 'RS Rank': '94/99', 'VCP Pivot': 'Tight (2.4%)', 'Stage': 'Stage 2 Markup', 'Volume Surge': '+185%' },
+      metrics: {},
     },
     {
       id: 'kedia',
@@ -293,10 +272,10 @@ export default function TerminalView({
       icon: '💎',
       style: 'Multibagger',
       horizon: '6–24 Months (Positional)',
-      verdict: 'BUY',
-      confidence: 88,
-      thesis: `Evaluated through Vijay Kedia's SMILE framework (Small market cap, Medium management quality, Increasing institutional interest, Large business opportunity, 5-Year Earnings visibility). High promoter holding with clean operating cashflow.`,
-      key_metric: 'SMILE Score: 89/100 (High Multibagger Potential)',
+      verdict: 'AWAITING DEBATE',
+      confidence: null,
+      thesis: `Evaluated through Vijay Kedia's SMILE framework (Small market cap, Medium management quality, Increasing institutional interest, Large business opportunity, 5-Year Earnings visibility).`,
+      key_metric: 'SMILE Framework: Evaluating',
       quote: 'Invest like a bull, sit like a sloth, and work like a hound to spot 10x opportunities.',
       checklist: [
         'Scalable addressable Indian domestic market',
@@ -304,7 +283,7 @@ export default function TerminalView({
         'Operating margin expansion (>18% EBITDA)',
         'Institutional FII/DII accumulation over past 2 quarters',
       ],
-      metrics: { 'SMILE Score': '89/100', 'Promoter Holding': '68.4%', 'FCF Yield': '4.8%', 'Target Upside': '2.8x–4.5x' },
+      metrics: {},
     },
     {
       id: 'taleb',
@@ -313,10 +292,10 @@ export default function TerminalView({
       icon: '🛡️',
       style: 'Asymmetric Quant',
       horizon: '1–2 Expiries (Options)',
-      verdict: 'STRONG BUY',
-      confidence: 94,
-      thesis: `Non-linear payoff architecture: Strictly capped downside via Defined-Risk spreads (Bull Call / Put Spread) with unmitigated positive convexity to capture right-tail upside surges while completely neutralizing Theta decay.`,
-      key_metric: 'Payoff Convexity Asymmetry: 1 : 3.8 Risk-Reward',
+      verdict: 'AWAITING DEBATE',
+      confidence: null,
+      thesis: `Non-linear payoff architecture: Strictly capped downside via Defined-Risk spreads (Bull Call / Put Spread) with positive convexity to capture tail surges while neutralizing Theta decay.`,
+      key_metric: 'Convexity Asymmetry: Evaluating',
       quote: 'Invest in asymmetric opportunities where your downside is bounded and upside is open-ended.',
       checklist: [
         'Zero naked short gamma exposure',
@@ -324,7 +303,7 @@ export default function TerminalView({
         'Strictly bounded maximum loss (< 1.5% portfolio risk)',
         'Theta bleed eliminated via credit/debit spread pairing',
       ],
-      metrics: { 'Max Loss': 'Capped', 'Payoff Skew': '+3.8R', 'Tail Hedge': 'Active', 'Theta Bleed': 'Neutralized' },
+      metrics: {},
     },
     {
       id: 'wyckoff',
@@ -333,10 +312,10 @@ export default function TerminalView({
       icon: '📈',
       style: 'Volume Spread',
       horizon: '2–6 Weeks (Swing)',
-      verdict: 'BUY',
-      confidence: 86,
-      thesis: `Wyckoff Volume Spread Analysis (VSA) confirms Phase C Accumulation with completed Spring shakeout below support, followed by immediate institutional absorption and Sign of Strength (SOS) price action.`,
-      key_metric: 'Wyckoff Phase: Phase D (Mark-Up Jump Across the Creek)',
+      verdict: 'AWAITING DEBATE',
+      confidence: null,
+      thesis: `Wyckoff Volume Spread Analysis (VSA) evaluates Phase Accumulation, Spring shakeouts below support, institutional absorption, and Sign of Strength (SOS) price action.`,
+      key_metric: 'Wyckoff Phase: Evaluating',
       quote: 'When the composite operator has accumulated the floating supply, price must advance.',
       checklist: [
         'Selling Climax (SC) and Secondary Test (ST) established',
@@ -344,7 +323,7 @@ export default function TerminalView({
         'Sign of Strength (SOS) bar crossing resistance',
         'Effort vs Result: High buying volume with wide spread',
       ],
-      metrics: { 'Wyckoff Phase': 'Phase D (SOS)', 'RVOL 20D': '2.4x', 'Supply Float': 'Absorbed', 'Spring Test': 'Clean' },
+      metrics: {},
     },
     {
       id: 'oneil',
@@ -353,10 +332,10 @@ export default function TerminalView({
       icon: '⚡',
       style: 'Growth',
       horizon: '3–8 Weeks (Swing)',
-      verdict: 'STRONG BUY',
-      confidence: 90,
-      thesis: `William O'Neil's CAN SLIM criteria fully satisfied: Accelerating quarterly EPS (>35% YoY), annual earnings growth, new product/catalyst momentum, and leading industry group rank with strong institutional backing.`,
-      key_metric: 'CAN SLIM Composite Rank: 96/99',
+      verdict: 'AWAITING DEBATE',
+      confidence: null,
+      thesis: `William O'Neil's CAN SLIM criteria evaluation: Accelerating quarterly EPS (>25% YoY), annual earnings growth, new catalyst momentum, and leading industry group rank.`,
+      key_metric: 'CAN SLIM Rank: Evaluating',
       quote: 'Whole truth: 90% of the biggest winners in the stock market were emerging growth leaders.',
       checklist: [
         'C: Current Quarterly EPS up > 25% YoY',
@@ -364,7 +343,7 @@ export default function TerminalView({
         'N: New high breakout from sound base',
         'I: Institutional Sponsorship increasing (Mutual Funds)',
       ],
-      metrics: { 'EPS Growth': '+42% YoY', 'Base Quality': 'Flat Base (5W)', 'Inst Count': '+14 Funds', 'Industry Rank': 'Top 8%' },
+      metrics: {},
     },
     {
       id: 'simons',
@@ -373,18 +352,18 @@ export default function TerminalView({
       icon: '🧮',
       style: 'Mathematical Quant',
       horizon: '1–5 Days (Intraday/Swing)',
-      verdict: 'BUY',
-      confidence: 91,
-      thesis: `Quantitative statistical edge: Mean reversion Z-score of -2.1 against 20-day regression channel combined with positive mathematical Expected Value (EV = +1.94R). Historical win-rate on identical setups is 73.4%.`,
-      key_metric: 'Mathematical EV: +1.94R | Kelly Sizing: 0.42 Half-Kelly',
+      verdict: 'AWAITING DEBATE',
+      confidence: null,
+      thesis: `Quantitative statistical edge: Mean reversion Z-score against 20-day regression channel combined with mathematical Expected Value and Volatility Risk-Parity.`,
+      key_metric: 'Statistical EV: Evaluating',
       quote: 'We search for anomalies in historical price patterns that have statistical significance.',
       checklist: [
-        'Mean reversion Z-score < -2.0 standard deviations',
-        'Expected Value (EV) > 1.5R with 70%+ edge',
+        'Mean reversion Z-score against regression channel',
+        'Expected Value (EV) calculation with positive expectancy',
         'Volatility Risk-Parity lot quantization',
-        'Cointegration stationary against sector index',
+        'Stationary mean reversion against benchmark index',
       ],
-      metrics: { 'Z-Score': '-2.14 σ', 'Hist Win Rate': '73.4%', 'Expected Value': '+1.94R', 'Sharpe Edge': '2.45' },
+      metrics: {},
     },
     {
       id: 'smc',
@@ -393,18 +372,18 @@ export default function TerminalView({
       icon: '🎯',
       style: 'ICT Price Action',
       horizon: '1–3 Sessions (Intraday/Swing)',
-      verdict: 'STRONG BUY',
-      confidence: 95,
-      thesis: `ICT Institutional Price Delivery: Asian session liquidity pool swept, unmitigated Demand Order Block (OB) tapped with Fair Value Gap (FVG) confluence, confirming Market Structure Shift (MSS/CHoCH) to the upside.`,
-      key_metric: 'SMC Confluence: Unmitigated Demand OB + FVG Retest',
+      verdict: 'AWAITING DEBATE',
+      confidence: null,
+      thesis: `ICT Institutional Price Delivery: Liquidity pool sweeps, unmitigated Order Block (OB) tests, Fair Value Gap (FVG) retests, and Market Structure Shift (MSS/CHoCH).`,
+      key_metric: 'SMC Confluence: Evaluating',
       quote: 'Smart money engineering liquidity before expanding price to institutional targets.',
       checklist: [
-        'Equal lows liquidity sweep completed',
-        'Change of Character (CHoCH) on 15m/1h timeframe',
-        'Unmitigated Bullish Order Block (OB) tapped cleanly',
-        'Fair Value Gap (FVG) imbalances being filled',
+        'Equal highs/lows liquidity sweep completed',
+        'Change of Character (CHoCH) on intraday structure',
+        'Unmitigated Order Block (OB) tapped cleanly',
+        'Fair Value Gap (FVG) imbalances identified',
       ],
-      metrics: { 'Structure': 'Bullish MSS/CHoCH', 'OB Zone': 'Demand OB ₹24,120', 'FVG Retest': 'Filled (100%)', 'Target': 'Buy-Side Liquidity' },
+      metrics: {},
     },
     {
       id: 'forensic',
@@ -413,10 +392,10 @@ export default function TerminalView({
       icon: '🔬',
       style: 'Governance & Quality',
       horizon: 'Fundamental Guardrail',
-      verdict: 'BUY (SAFE)',
-      confidence: 96,
-      thesis: `Beneish M-Score of -2.85 is well below the -1.78 manipulation threshold. Altman Z''-Score of 3.42 indicates strong solvency (Safe Zone). Promoter share pledge is 0.0%, and working capital accruals are pristine.`,
-      key_metric: 'Beneish M-Score: -2.85 (Pristine Non-Manipulator)',
+      verdict: 'AWAITING DEBATE',
+      confidence: null,
+      thesis: `Forensic accounting audit: Beneish M-Score manipulation detection, Altman Z''-Score distress zone classification, promoter pledging, and working capital accruals.`,
+      key_metric: 'Forensic Audit: Evaluating',
       quote: 'First eliminate the accounting landmines, then look for compounding alpha.',
       checklist: [
         'Beneish M-Score < -1.78 (No earnings manipulation)',
@@ -424,7 +403,7 @@ export default function TerminalView({
         'Piotroski F-Score >= 7/9 (Operational improvement)',
         'Promoter share pledge < 5% (Zero margin call risk)',
       ],
-      metrics: { 'Beneish M-Score': '-2.85 (SAFE)', 'Altman Z-Score': '3.42 (SAFE)', 'Piotroski F-Score': '8/9', 'Pledged Shares': '0.0%' },
+      metrics: {},
     },
     {
       id: 'buffett',
@@ -433,18 +412,18 @@ export default function TerminalView({
       icon: '🏰',
       style: 'Quality Value',
       horizon: '3–5+ Years (Compounding)',
-      verdict: 'BUY',
-      confidence: 89,
-      thesis: `Wide economic moat with pricing power, Return on Invested Capital (ROIC > 18%), and robust free cash flow compounding. Sustainable competitive advantage in the Indian consumption/industrial landscape.`,
-      key_metric: 'ROIC: 21.4% | FCF Conversion: 92%',
+      verdict: 'AWAITING DEBATE',
+      confidence: null,
+      thesis: `Economic moat evaluation: Pricing power, Return on Equity (ROE > 15%), Debt-to-Equity solvency, and durable Free Cash Flow generation.`,
+      key_metric: 'Moat Evaluation: Evaluating',
       quote: 'It is far better to buy a wonderful company at a fair price than a fair company at a wonderful price.',
       checklist: [
-        'High ROIC (>15%) sustained over 5 years',
-        'Durable competitive advantage / moat',
-        'Strong Free Cash Flow conversion (>85%)',
-        'Sensible capital allocation and reinvestment',
+        'High ROE/ROIC sustained over historical cycles',
+        'Durable competitive advantage / economic moat',
+        'Strong Free Cash Flow conversion (>80%)',
+        'Conservative capital structure and low debt',
       ],
-      metrics: { 'ROIC': '21.4%', 'FCF Conversion': '92%', 'Net Debt/EBITDA': '0.3x', 'Moat Rating': 'Wide Moat' },
+      metrics: {},
     },
     {
       id: 'munger',
@@ -453,18 +432,18 @@ export default function TerminalView({
       icon: '🧠',
       style: 'Mental Models',
       horizon: '3–5+ Years',
-      verdict: 'BUY',
-      confidence: 87,
-      thesis: `Inverted analysis: Evaluated what could kill this business (technological obsolescence, reckless leverage, dishonest management). Zero fatal risks identified. Lollapalooza compounding factors in play.`,
-      key_metric: 'Inversion Risk Score: 94/100 (Zero Fatal Flaws)',
+      verdict: 'AWAITING DEBATE',
+      confidence: null,
+      thesis: `Inverted analysis: Evaluating existential business threats (technological disruption, excessive leverage, capital misallocation, aggressive accounting).`,
+      key_metric: 'Inversion Solvency: Evaluating',
       quote: 'Invert, always invert: Turn a situation upside down. What happens if we do the opposite?',
       checklist: [
-        'Zero existential leverage risks',
-        'No technological obsolescence threat in 5Y',
-        'High return on incremental capital',
-        'Management with skin in the game',
+        'Zero existential balance sheet leverage risks',
+        'Defensible return on capital employed (ROCE > 18%)',
+        'Piotroski health score screening',
+        'Management integrity and capital allocation sanity',
       ],
-      metrics: { 'Inversion Score': '94/100', 'Leverage Risk': 'Near Zero', 'Governance': 'Top Tier', 'Lollapalooza': 'Present' },
+      metrics: {},
     },
     {
       id: 'jhunjhunwala',
@@ -473,18 +452,18 @@ export default function TerminalView({
       icon: '🐂',
       style: 'Megatrend Growth',
       horizon: '1–3 Years',
-      verdict: 'STRONG BUY',
-      confidence: 93,
-      thesis: `Riding the Mother of All Bull Runs in India. Megatrend expansion driven by domestic demographic dividend, formalization, and multi-year private sector CAPEX cycle. Market is vastly underestimating future earnings scale.`,
-      key_metric: 'Market Opportunity: 4.5x TAM Expansion',
-      quote: 'Respect the market. Have an open mind. Know what to stake. India is in a structural supercycle.',
+      verdict: 'AWAITING DEBATE',
+      confidence: null,
+      thesis: `Rakesh Jhunjhunwala framework: Secular Indian macroeconomic growth tailwinds, market share dominance, and operating leverage expansion.`,
+      key_metric: 'Secular Growth: Evaluating',
+      quote: 'Give your investments time to mature. Have conviction and ride the India supercycle.',
       checklist: [
-        'Secular domestic demand expansion in India',
-        'Market leader taking share from unorganized sector',
-        'Operating leverage driving 30%+ profit growth',
-        'Undervalued long-term earnings potential',
+        'Direct beneficiary of India domestic GDP expansion',
+        'Top 3 player in addressable market with pricing power',
+        'Operating leverage driving PAT growth faster than revenue',
+        'Secular sector migration tailwinds',
       ],
-      metrics: { 'TAM Growth': '24% CAGR', 'Market Share': '38% (#1)', 'EPS Growth': '+36%', 'India Tailwind': 'Strong' },
+      metrics: {},
     },
     {
       id: 'lynch',
@@ -493,18 +472,18 @@ export default function TerminalView({
       icon: '🛒',
       style: 'GARP',
       horizon: '6–18 Months',
-      verdict: 'BUY',
-      confidence: 85,
-      thesis: `Growth At a Reasonable Price (GARP): PEG ratio of 0.82 indicates market is underpricing high-growth fundamentals. Common-sense consumer demand visible across Indian retail and commercial channels.`,
-      key_metric: 'PEG Ratio: 0.82 (Undervalued Relative to Growth)',
+      verdict: 'AWAITING DEBATE',
+      confidence: null,
+      thesis: `Growth At a Reasonable Price (GARP): Price-to-Earnings relative to earnings growth (PEG ratio < 1.0) and understandable product demand.`,
+      key_metric: 'PEG Ratio: Evaluating',
       quote: 'Know what you own, and know why you own it. Look for companies with PEG < 1.0.',
       checklist: [
-        'PEG ratio < 1.0 (Fair price for rapid growth)',
-        'Fast-growing stalwart category',
-        'Inventories growing slower than revenue',
-        'Simple, understandable business model',
+        'PEG ratio < 1.2 (Fair valuation relative to EPS growth)',
+        'Fast-growing stalwart or turnaround category',
+        'Inventories growing slower than topline revenue',
+        'Simple, understandable commercial business model',
       ],
-      metrics: { 'PEG Ratio': '0.82', 'Revenue Growth': '+28%', 'Inventory Turns': '6.4x', 'Debt/Equity': '0.24' },
+      metrics: {},
     },
     {
       id: 'soros',
@@ -513,18 +492,18 @@ export default function TerminalView({
       icon: '🌊',
       style: 'Global Macro',
       horizon: '1–3 Months',
-      verdict: 'BUY',
-      confidence: 88,
-      thesis: `Soros Reflexivity Theory: Positive feedback loop between institutional capital inflows, credit expansion, and sector earnings revisions. FII/DII liquidity posture creating self-reinforcing upward trend.`,
-      key_metric: 'Reflexive Momentum Factor: +2.8σ Positive Feedback',
+      verdict: 'AWAITING DEBATE',
+      confidence: null,
+      thesis: `Soros Reflexivity Theory: Dynamic feedback loops between institutional capital flows, currency/commodity movements, and sector momentum.`,
+      key_metric: 'Reflexive Momentum: Evaluating',
       quote: 'Markets are constantly in a state of uncertainty and flux, and money is made by discounting the obvious and betting on the unexpected.',
       checklist: [
-        'Positive feedback loop between price and fundamentals',
-        'FII/DII institutional net buyers for > 5 sessions',
-        'India VIX regime stable (< 14.5)',
-        'Sector Relative Strength gaining against NIFTY 50',
+        'Prevailing market structure and bias alignment',
+        'Institutional volume expansion (RVOL > 1.2x)',
+        'Macro regime and sector relative strength',
+        'Volatility parity and feedback loop confirmation',
       ],
-      metrics: { 'Macro Regime': 'Expansionary', 'VIX Level': '12.8 (Low)', 'Flow Posture': '+₹1,840 Cr', 'Reflexivity': 'Positive' },
+      metrics: {},
     },
   ]
 
@@ -536,10 +515,10 @@ export default function TerminalView({
       icon: '🚀',
       desc: 'Minervini + Wyckoff + O\'Neil + Forensic Auditor',
       badge: 'MOMENTUM',
-      verdict: 'STRONG BUY',
-      score: 93,
+      verdict: 'AWAITING DEBATE',
+      score: null,
       members: ['minervini', 'wyckoff', 'oneil', 'forensic'],
-      thesis: `High-momentum confluence: Mark Minervini's SEPA Trend Template meets Wyckoff Phase D Volume Spread Analysis and CAN SLIM earnings acceleration, rigorously guarded by Forensic accounting audits.`,
+      thesis: `High-momentum confluence synthesizing Mark Minervini's SEPA Trend Template, Richard Wyckoff's VSA markup, William O'Neil's CAN SLIM growth, and Forensic accounting guardrails.`,
     },
     {
       id: 'options_sniper',
@@ -547,10 +526,10 @@ export default function TerminalView({
       icon: '🎯',
       desc: 'SMC + Taleb + Simons',
       badge: 'DEFINED-RISK',
-      verdict: 'STRONG BUY',
-      score: 95,
+      verdict: 'AWAITING DEBATE',
+      score: null,
       members: ['smc', 'taleb', 'simons'],
-      thesis: `Institutional asymmetry: ICT unmitigated Order Block execution paired with Jim Simons' mathematical Expected Value (+1.94R) and Nassim Taleb's Defined-Risk positive convexity options structures.`,
+      thesis: `Institutional defined-risk asymmetry pairing ICT Order Block execution, Nassim Taleb's positive convexity spreads, and Jim Simons' mathematical Expected Value.`,
     },
     {
       id: 'multibagger',
@@ -558,10 +537,10 @@ export default function TerminalView({
       icon: '💎',
       desc: 'Kedia + Buffett + Munger + Jhunjhunwala + Forensic',
       badge: 'COMPOUNDER',
-      verdict: 'BUY',
-      score: 90,
+      verdict: 'AWAITING DEBATE',
+      score: null,
       members: ['kedia', 'buffett', 'munger', 'jhunjhunwala', 'forensic'],
-      thesis: `Long-term Indian compounding powerhouse: Vijay Kedia's SMILE smallcap discovery engine merged with Warren Buffett's durable moat, Charlie Munger's inversion filter, and Jhunjhunwala's secular India supercycle.`,
+      thesis: `Long-term Indian compounding powerhouse merging Vijay Kedia's SMILE framework, Warren Buffett's durable moat, Charlie Munger's inversion filter, and Jhunjhunwala's secular India cycle.`,
     },
     {
       id: 'macro_regime',
@@ -569,10 +548,10 @@ export default function TerminalView({
       icon: '🌐',
       desc: 'Soros + Jhunjhunwala + Simons + Forensic',
       badge: 'INSTITUTIONAL',
-      verdict: 'BUY',
-      score: 89,
+      verdict: 'AWAITING DEBATE',
+      score: null,
       members: ['soros', 'jhunjhunwala', 'simons', 'forensic'],
-      thesis: `Macro intelligence matrix: George Soros' reflexivity theory coupled with domestic FII/DII institutional flows, Jim Simons' quantitative statistical arbitrage, and India demographic tailwinds.`,
+      thesis: `Macro intelligence matrix uniting George Soros' reflexivity, institutional FII/DII flow dynamics, Jim Simons' quantitative mean reversion, and Forensic solvency metrics.`,
     },
     {
       id: 'core_value',
@@ -580,93 +559,99 @@ export default function TerminalView({
       icon: '🏛️',
       desc: 'Buffett + Munger + Lynch + Forensic',
       badge: 'DEFENSIVE',
-      verdict: 'BUY',
-      score: 88,
+      verdict: 'AWAITING DEBATE',
+      score: null,
       members: ['buffett', 'munger', 'lynch', 'forensic'],
-      thesis: `Defensive capital compounder: Warren Buffett's pricing power moat, Charlie Munger's zero-leverage sanity filter, and Peter Lynch's low PEG ratio (<1.0) backed by pristine Forensic M-Scores.`,
+      thesis: `Defensive capital preservation evaluating Warren Buffett's pricing power moat, Charlie Munger's zero-leverage sanity filter, and Peter Lynch's PEG valuation.`,
     },
   ]
 
   // Master Indian Equities & Indices Universe for Instant Search & Watchlist
   const MASTER_WATCHLIST = [
     // NSE Indices
-    { symbol: 'NIFTY',     name: 'NIFTY 50',           cat: 'INDEX',    ltp: 24890.00, change_pct: 0.45 },
-    { symbol: 'BANKNIFTY', name: 'BANK NIFTY',          cat: 'INDEX',    ltp: 53250.00, change_pct: 0.62 },
-    { symbol: 'FINNIFTY',  name: 'FIN NIFTY',           cat: 'INDEX',    ltp: 23950.00, change_pct: 0.38 },
+    { symbol: 'NIFTY',     name: 'NIFTY 50',           cat: 'INDEX' },
+    { symbol: 'BANKNIFTY', name: 'BANK NIFTY',          cat: 'INDEX' },
+    { symbol: 'FINNIFTY',  name: 'FIN NIFTY',           cat: 'INDEX' },
     // NSE Blue-Chips
-    { symbol: 'RELIANCE',  name: 'Reliance Ind',        cat: 'ENERGY',   ltp: 1312.00,  change_pct: 0.85 },
-    { symbol: 'HDFCBANK',  name: 'HDFC Bank',           cat: 'BANK',     ltp: 1820.00,  change_pct: 0.42 },
-    { symbol: 'ICICIBANK', name: 'ICICI Bank',          cat: 'BANK',     ltp: 1385.00,  change_pct: 0.78 },
-    { symbol: 'SBIN',      name: 'State Bank of India', cat: 'BANK',     ltp: 820.00,   change_pct: 1.15 },
-    { symbol: 'KOTAKBANK', name: 'Kotak Mahindra',      cat: 'BANK',     ltp: 2100.00,  change_pct: -0.25 },
-    { symbol: 'AXISBANK',  name: 'Axis Bank',           cat: 'BANK',     ltp: 1290.00,  change_pct: 0.55 },
-    { symbol: 'INFY',      name: 'Infosys',             cat: 'TECH',     ltp: 1890.00,  change_pct: 1.25 },
-    { symbol: 'TCS',       name: 'Tata Consultancy',    cat: 'TECH',     ltp: 4250.00,  change_pct: 0.90 },
-    { symbol: 'HCLTECH',   name: 'HCL Tech',            cat: 'TECH',     ltp: 1960.00,  change_pct: 1.45 },
-    { symbol: 'WIPRO',     name: 'Wipro Ltd',           cat: 'TECH',     ltp: 590.00,   change_pct: 0.35 },
-    { symbol: 'COFORGE',   name: 'Coforge',             cat: 'TECH',     ltp: 9250.00,  change_pct: 2.15 },
-    { symbol: 'TATAMOTORS',name: 'Tata Motors',         cat: 'AUTO',     ltp: 1120.00,  change_pct: 1.65 },
-    { symbol: 'MARUTI',    name: 'Maruti Suzuki',       cat: 'AUTO',     ltp: 13800.00, change_pct: 0.80 },
-    { symbol: 'M&M',       name: 'Mahindra & Mahindra', cat: 'AUTO',     ltp: 3250.00,  change_pct: 1.30 },
-    { symbol: 'BAJFINANCE',name: 'Bajaj Finance',       cat: 'FINANCE',  ltp: 8950.00,  change_pct: 0.65 },
-    { symbol: 'LT',        name: 'Larsen & Toubro',     cat: 'INFRA',    ltp: 4100.00,  change_pct: 0.95 },
-    { symbol: 'ITC',       name: 'ITC Ltd',             cat: 'FMCG',     ltp: 545.00,   change_pct: 0.20 },
-    { symbol: 'BHARTIARTL',name: 'Bharti Airtel',       cat: 'TELECOM',  ltp: 1820.00,  change_pct: 1.10 },
-    { symbol: 'SUNPHARMA', name: 'Sun Pharma',          cat: 'PHARMA',   ltp: 1980.00,  change_pct: 0.40 },
-    { symbol: 'TITAN',     name: 'Titan Company',       cat: 'CONSUMER', ltp: 3650.00,  change_pct: 0.75 },
-    { symbol: 'TRENT',     name: 'Trent Ltd',           cat: 'STAGE 2',  ltp: 8450.00,  change_pct: 2.45 },
-    { symbol: 'ZOMATO',    name: 'Zomato Ltd',          cat: 'STAGE 2',  ltp: 310.00,   change_pct: 3.10 },
-    { symbol: 'HAL',       name: 'Hindustan Aeronautics',cat: 'DEFENSE', ltp: 5200.00,  change_pct: 1.85 },
-    { symbol: 'BEL',       name: 'Bharat Electronics',  cat: 'DEFENSE',  ltp: 345.00,   change_pct: 2.10 },
-    { symbol: 'ADANIENT',  name: 'Adani Enterprises',   cat: 'STAGE 2',  ltp: 3250.00,  change_pct: 1.40 },
-    // MCX Commodities — seeds updated Sep 2026
-    { symbol: 'GOLD',       name: 'MCX Gold Futures',   cat: 'COMMODITY', ltp: 73500.00, change_pct: 0.45 },
-    { symbol: 'SILVER',     name: 'MCX Silver Futures', cat: 'COMMODITY', ltp: 88500.00, change_pct: 0.82 },
-    { symbol: 'CRUDEOIL',   name: 'MCX Crude Oil',      cat: 'COMMODITY', ltp: 8200.00,  change_pct: 0.33 },
-    { symbol: 'NATURALGAS', name: 'MCX Natural Gas',    cat: 'COMMODITY', ltp: 230.00,   change_pct: -1.10 },
-    { symbol: 'COPPER',     name: 'MCX Copper Futures', cat: 'COMMODITY', ltp: 890.00,   change_pct: 0.65 },
+    { symbol: 'RELIANCE',  name: 'Reliance Ind',        cat: 'ENERGY' },
+    { symbol: 'HDFCBANK',  name: 'HDFC Bank',           cat: 'BANK' },
+    { symbol: 'ICICIBANK', name: 'ICICI Bank',          cat: 'BANK' },
+    { symbol: 'SBIN',      name: 'State Bank of India', cat: 'BANK' },
+    { symbol: 'KOTAKBANK', name: 'Kotak Mahindra',      cat: 'BANK' },
+    { symbol: 'AXISBANK',  name: 'Axis Bank',           cat: 'BANK' },
+    { symbol: 'INFY',      name: 'Infosys',             cat: 'TECH' },
+    { symbol: 'TCS',       name: 'Tata Consultancy',    cat: 'TECH' },
+    { symbol: 'HCLTECH',   name: 'HCL Tech',            cat: 'TECH' },
+    { symbol: 'WIPRO',     name: 'Wipro Ltd',           cat: 'TECH' },
+    { symbol: 'COFORGE',   name: 'Coforge',             cat: 'TECH' },
+    { symbol: 'TATAMOTORS',name: 'Tata Motors',         cat: 'AUTO' },
+    { symbol: 'MARUTI',    name: 'Maruti Suzuki',       cat: 'AUTO' },
+    { symbol: 'M&M',       name: 'Mahindra & Mahindra', cat: 'AUTO' },
+    { symbol: 'BAJFINANCE',name: 'Bajaj Finance',       cat: 'FINANCE' },
+    { symbol: 'LT',        name: 'Larsen & Toubro',     cat: 'INFRA' },
+    { symbol: 'ITC',       name: 'ITC Ltd',             cat: 'FMCG' },
+    { symbol: 'BHARTIARTL',name: 'Bharti Airtel',       cat: 'TELECOM' },
+    { symbol: 'SUNPHARMA', name: 'Sun Pharma',          cat: 'PHARMA' },
+    { symbol: 'TITAN',     name: 'Titan Company',       cat: 'CONSUMER' },
+    { symbol: 'TRENT',     name: 'Trent Ltd',           cat: 'STAGE 2' },
+    { symbol: 'ZOMATO',    name: 'Zomato Ltd',          cat: 'STAGE 2' },
+    { symbol: 'HAL',       name: 'Hindustan Aeronautics',cat: 'DEFENSE' },
+    { symbol: 'BEL',       name: 'Bharat Electronics',  cat: 'DEFENSE' },
+    { symbol: 'ADANIENT',  name: 'Adani Enterprises',   cat: 'STAGE 2' },
+    // MCX Commodities
+    { symbol: 'GOLD',       name: 'MCX Gold Futures',   cat: 'COMMODITY' },
+    { symbol: 'SILVER',     name: 'MCX Silver Futures', cat: 'COMMODITY' },
+    { symbol: 'CRUDEOIL',   name: 'MCX Crude Oil',      cat: 'COMMODITY' },
+    { symbol: 'NATURALGAS', name: 'MCX Natural Gas',    cat: 'COMMODITY' },
+    { symbol: 'COPPER',     name: 'MCX Copper Futures', cat: 'COMMODITY' },
     // Leading ETFs
-    { symbol: 'NIFTYBEES',  name: 'Nippon Nifty 50 ETF',cat: 'ETF',       ltp: 295.00,   change_pct: 0.45 },
-    { symbol: 'GOLDBEES',   name: 'Nippon Gold BeES ETF',cat: 'ETF',      ltp: 73.50,    change_pct: 0.35 },
-    { symbol: 'BANKBEES',   name: 'Nippon Bank BeES ETF',cat: 'ETF',      ltp: 580.00,   change_pct: 0.60 },
+    { symbol: 'NIFTYBEES',  name: 'Nippon Nifty 50 ETF',cat: 'ETF' },
+    { symbol: 'GOLDBEES',   name: 'Nippon Gold BeES ETF',cat: 'ETF' },
+    { symbol: 'BANKBEES',   name: 'Nippon Bank BeES ETF',cat: 'ETF' },
     // Forex / Currency & Crypto
-    { symbol: 'USDINR',     name: 'USD / INR Rupee',    cat: 'FOREX',     ltp: 84.02,    change_pct: -0.05 },
-    { symbol: 'BTC',        name: 'Bitcoin Spot ($)',    cat: 'CRYPTO',    ltp: 79420.00, change_pct: -2.28 },
-    { symbol: 'SENSEX',     name: 'BSE SENSEX 30',      cat: 'INDEX',     ltp: 76515.00, change_pct: 0.48 },
-    { symbol: 'INDIA VIX',  name: 'India Volatility VIX',cat: 'VIX',      ltp: 10.68,    change_pct: -6.07 },
+    { symbol: 'USDINR',     name: 'USD / INR Rupee',    cat: 'FOREX' },
+    { symbol: 'BTC',        name: 'Bitcoin Spot ($)',    cat: 'CRYPTO' },
+    { symbol: 'SENSEX',     name: 'BSE SENSEX 30',      cat: 'INDEX' },
+    { symbol: 'INDIA VIX',  name: 'India Volatility VIX',cat: 'VIX' },
   ]
 
-  // Combined Watchlist: server items merged with master universe
+  // Combined Watchlist: master symbols enriched with real-time ticker prices & backend watchlist
   const combinedWatchlist = (() => {
     const map = new Map()
-    // Layer 1: static seeds (immediate render, no flash)
     for (const item of MASTER_WATCHLIST) {
-      map.set(item.symbol, item)
-    }
-    // Layer 2: server watchlist (live prices from backend batch fetch)
-    for (const item of watchlist) {
-      const clean = item.symbol.replace(' 50', '').trim()
-      map.set(clean, {
-        ...map.get(clean),
-        symbol: clean,
-        name: item.name || map.get(clean)?.name || clean,
-        ltp: item.ltp > 0 ? item.ltp : (map.get(clean)?.ltp || 0),
-        change_pct: item.change_pct != null ? item.change_pct : (map.get(clean)?.change_pct || 0),
-        cat: item.tag || map.get(clean)?.cat || 'EQUITY',
+      const realTick = getTicker(item.symbol)
+      const rawPrice = realTick?.ltp != null && realTick.ltp > 0
+        ? realTick.ltp
+        : (realTick?.price != null && realTick.price > 0 ? realTick.price : null)
+      map.set(item.symbol, {
+        ...item,
+        ltp: rawPrice,
+        change_pct: realTick?.change_pct ?? null,
       })
     }
-    // Layer 3: always inject data.ltp for the active symbol (belt-and-suspenders)
-    // This guarantees the selected symbol's watchlist row shows live price even if
-    // it was not in the server watchlist or the batch fetch failed for that row.
+    // Layer 2: server watchlist
+    for (const item of watchlist) {
+      const clean = item.symbol.replace(' 50', '').trim()
+      const existing = map.get(clean) || {}
+      const validLtp = item.ltp > 0 ? item.ltp : (existing.ltp || null)
+      map.set(clean, {
+        ...existing,
+        symbol: clean,
+        name: item.name || existing.name || clean,
+        ltp: validLtp,
+        change_pct: item.change_pct != null ? item.change_pct : (existing.change_pct ?? null),
+        cat: item.tag || existing.cat || 'EQUITY',
+      })
+    }
+    // Layer 3: always inject data.ltp for the active symbol
     if (data?.ltp > 0) {
-      const existing = map.get(selectedSymbol)
-      if (existing) {
-        map.set(selectedSymbol, {
-          ...existing,
-          ltp: data.ltp,
-          change_pct: data.change_pct ?? existing.change_pct,
-        })
-      }
+      const existing = map.get(selectedSymbol) || {}
+      map.set(selectedSymbol, {
+        ...existing,
+        symbol: selectedSymbol,
+        ltp: data.ltp,
+        change_pct: data.change_pct ?? existing.change_pct ?? null,
+      })
     }
     return Array.from(map.values())
   })()
@@ -680,7 +665,7 @@ export default function TerminalView({
       (watchlistCategory === 'ETF' && (w.cat === 'ETF' || w.symbol.includes('BEES') || w.symbol.includes('ETF'))) ||
       (watchlistCategory === 'FOREX' && (w.cat === 'FOREX' || ['USDINR', 'EURINR', 'GBPINR', 'JPYINR'].includes(w.symbol))) ||
       (watchlistCategory === 'INDEX' && (w.symbol === 'NIFTY' || w.symbol === 'BANKNIFTY' || w.symbol === 'FINNIFTY' || w.cat === 'INDEX')) ||
-      (watchlistCategory === 'STAGE 2' && (w.cat === 'STAGE 2' || w.change_pct > 1.5))
+      (watchlistCategory === 'STAGE 2' && (w.cat === 'STAGE 2' || (w.change_pct != null && w.change_pct > 1.5)))
 
     const matchesSearch =
       !watchlistFilter ||
@@ -715,9 +700,24 @@ export default function TerminalView({
     }
   }
 
-  // Active Council & Active Persona Objects
-  const activeCouncilObj = MASTER_COUNCILS.find((c) => c.id === selectedCouncil) || MASTER_COUNCILS[0]
-  const activePersonaObj = MASTER_PERSONAS.find((p) => p.id === selectedPersona) || MASTER_PERSONAS[0]
+  // Active Council & Active Persona Objects (synthesized from dynamic backend evaluations)
+  const backendPersonaMap = (isDataMatching && Array.isArray(data?.personas) ? data.personas : []).reduce((acc, p) => {
+    if (p && p.id) acc[p.id] = p
+    return acc
+  }, {})
+
+  const backendCouncilMap = (isDataMatching && Array.isArray(data?.councils) ? data.councils : []).reduce((acc, c) => {
+    if (c && c.id) acc[c.id] = c
+    return acc
+  }, {})
+
+  const baseCouncil = MASTER_COUNCILS.find((c) => c.id === selectedCouncil) || MASTER_COUNCILS[0]
+  const dynamicCouncil = backendCouncilMap[baseCouncil.id]
+  const activeCouncilObj = dynamicCouncil ? { ...baseCouncil, ...dynamicCouncil } : baseCouncil
+
+  const basePersona = MASTER_PERSONAS.find((p) => p.id === selectedPersona) || MASTER_PERSONAS[0]
+  const dynamicPersona = backendPersonaMap[basePersona.id]
+  const activePersonaObj = dynamicPersona ? { ...basePersona, ...dynamicPersona } : basePersona
 
   const displaySymbolName =
     selectedSymbol === 'NIFTY'
@@ -731,15 +731,19 @@ export default function TerminalView({
   const activeWatchItem = combinedWatchlist.find(
     (w) => w.symbol === selectedSymbol || w.name === selectedSymbol || w.symbol.startsWith(selectedSymbol)
   )
-  const currentPct = activeWatchItem?.change_pct ?? (setup?.progress ? 0.45 : 0.35)
-  const isPos = Number(currentPct) >= 0
+  const currentPct = (isDataMatching && data?.change_pct != null)
+    ? data.change_pct
+    : (activeWatchItem?.change_pct != null
+        ? activeWatchItem.change_pct
+        : (liveTick?.change_pct != null ? liveTick.change_pct : null))
+  const isPos = currentPct != null ? Number(currentPct) >= 0 : true
 
-  const fiiVal = Number(flows?.fii_net ?? -1450)
-  const diiVal = Number(flows?.dii_net ?? 1120)
-  const netTotal = Number(flows?.net_total ?? (fiiVal + diiVal))
-  const absorptionPct = Number(flows?.absorption_pct ?? (fiiVal < 0 && diiVal > 0 ? Math.round((diiVal / Math.abs(fiiVal)) * 100) : 0))
-  const fiiStreak = Number(flows?.fii_streak ?? -1)
-  const diiStreak = Number(flows?.dii_streak ?? 1)
+  const fiiVal = flows?.fii_net != null ? Number(flows.fii_net) : null
+  const diiVal = flows?.dii_net != null ? Number(flows.dii_net) : null
+  const netTotal = flows?.net_total != null ? Number(flows.net_total) : (fiiVal != null && diiVal != null ? fiiVal + diiVal : null)
+  const absorptionPct = flows?.absorption_pct != null ? Number(flows.absorption_pct) : (fiiVal != null && diiVal != null && fiiVal < 0 && diiVal > 0 ? Math.round((diiVal / Math.abs(fiiVal)) * 100) : null)
+  const fiiStreak = flows?.fii_streak != null ? Number(flows.fii_streak) : null
+  const diiStreak = flows?.dii_streak != null ? Number(flows.dii_streak) : null
 
   return (
     <div className="flex-1 overflow-y-auto p-2 sm:p-3 font-ui space-y-2.5" style={{ background: 'var(--color-surface)', color: 'var(--color-text)' }}>
@@ -1195,13 +1199,16 @@ export default function TerminalView({
                       <MiniTrendSparkline symbol={item.symbol} isPositive={isPositive} />
 
                       <div className="text-right font-mono flex-shrink-0">
-                        <span className="text-xs font-bold text-text block">
-                          ₹{Number(item.ltp).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                        <span className="text-xs font-bold font-mono">
+                          {formatLivePrice(item.ltp, item.cat === 'CRYPTO' || item.symbol === 'BTC' ? '$' : item.cat === 'FOREX' ? '' : '₹')}
                         </span>
-                        <span className={`text-[10px] font-semibold ${isPositive ? 'text-green' : 'text-red'}`}>
-                          {isPositive ? '+' : ''}
-                          {Number(item.change_pct).toFixed(2)}%
-                        </span>
+                        {item.change_pct != null ? (
+                          <span className={`text-[10px] font-semibold ${Number(item.change_pct) >= 0 ? 'text-green' : 'text-red'}`}>
+                            {formatLiveChange(null, item.change_pct).pctText}
+                          </span>
+                        ) : (
+                          <span className="text-[10px] text-muted font-mono">—</span>
+                        )}
                       </div>
                     </button>
                   )
@@ -1299,14 +1306,14 @@ export default function TerminalView({
                           className="text-xl font-extrabold font-mono tabular-nums price-flash-target"
                           style={{ color: isPos ? 'var(--color-emerald)' : 'var(--color-rose)' }}
                         >
-                          ₹{Number(curLtp).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                          {formatLivePrice(curLtp, selectedSymbol === 'BTC' ? '$' : '₹')}
                         </span>
                         <span className={`text-xs px-2 py-0.5 rounded-full font-bold border ${
                           isPos
                             ? 'border-emerald-500/40 text-emerald-400'
                             : 'border-rose-500/40 text-rose-400'
                         }`} style={{ background: isPos ? 'rgba(0,214,143,0.10)' : 'rgba(255,79,123,0.10)' }}>
-                          {isPos ? '▲' : '▼'} {isPos ? '+' : ''}{Number(currentPct).toFixed(2)}%
+                          {currentPct != null ? formatLiveChange(null, currentPct).pctText : '—'}
                         </span>
                       </div>
                       <span className="text-[10px] font-mono" style={{ color: 'var(--color-muted)' }}>
@@ -1317,42 +1324,55 @@ export default function TerminalView({
 
                   {/* Right badges */}
                   <div className="flex items-center gap-1.5 flex-wrap">
-                    {/* RVOL Badge */}
-                    <span className="px-2 py-0.5 rounded-md text-[10px] font-bold font-mono"
-                      style={{ background: 'rgba(0,214,143,0.12)', border: '1px solid rgba(0,214,143,0.35)', color: 'var(--color-emerald)' }}>
-                      RVOL 2.4×
-                    </span>
-                    <span className="px-2 py-0.5 rounded-md bg-amber/10 border border-amber/30 text-amber text-[10px] font-bold">
-                      SMC DEMAND
-                    </span>
-                    <span className="px-2 py-0.5 rounded-md bg-violet/10 border border-violet/30 text-violet text-[10px] font-bold"
-                      style={{ color: 'var(--color-violet)', background: 'rgba(157,125,255,0.10)', borderColor: 'rgba(157,125,255,0.30)' }}>
-                      VOL PROFILE
-                    </span>
+                    {data?.rvol != null ? (
+                      <span className="px-2 py-0.5 rounded-md text-[10px] font-bold font-mono"
+                        style={{ background: 'rgba(0,214,143,0.12)', border: '1px solid rgba(0,214,143,0.35)', color: 'var(--color-emerald)' }}>
+                        RVOL {data.rvol}×
+                      </span>
+                    ) : null}
+                    {setupRaw?.order_block ? (
+                      <span className="px-2 py-0.5 rounded-md bg-amber/10 border border-amber/30 text-amber text-[10px] font-bold">
+                        SMC DEMAND
+                      </span>
+                    ) : null}
+                    {setupRaw?.volume_profile?.poc ? (
+                      <span className="px-2 py-0.5 rounded-md bg-violet/10 border border-violet/30 text-violet text-[10px] font-bold"
+                        style={{ color: 'var(--color-violet)', background: 'rgba(157,125,255,0.10)', borderColor: 'rgba(157,125,255,0.30)' }}>
+                        VOL PROFILE
+                      </span>
+                    ) : null}
                   </div>
                 </div>
 
                 {/* Row 2: 52-Week Range Bar */}
                 <div className="space-y-0.5">
                   <div className="flex items-center justify-between text-[10px] font-mono" style={{ color: 'var(--color-muted)' }}>
-                    <span>52W Low: ₹{Number(curLtp * 0.72).toLocaleString('en-IN', { maximumFractionDigits: 0 })}</span>
+                    <span>52W Low: {data?.low_52w != null && data.low_52w > 0 ? formatLivePrice(data.low_52w) : '—'}</span>
                     <span className="font-bold" style={{ color: 'var(--color-gold)' }}>52-WEEK RANGE</span>
-                    <span>52W High: ₹{Number(curLtp * 1.18).toLocaleString('en-IN', { maximumFractionDigits: 0 })}</span>
+                    <span>52W High: {data?.high_52w != null && data.high_52w > 0 ? formatLivePrice(data.high_52w) : '—'}</span>
                   </div>
-                  <div className="relative h-2 rounded-full overflow-hidden" style={{ background: 'var(--color-elevated)' }}>
-                    <div className="absolute inset-0 rounded-full" style={{ background: 'linear-gradient(90deg, var(--color-rose-dim), var(--color-elevated), var(--color-emerald-dim))', opacity: 0.5 }} />
-                    {/* Price marker at ~60% position representing current price in range */}
-                    <div className="absolute top-0 w-0.5 h-full rounded-full" style={{ left: '62%', background: 'var(--color-gold)', boxShadow: '0 0 6px rgba(245,166,35,0.8)' }} />
-                  </div>
+                  {data?.low_52w > 0 && data?.high_52w > 0 && curLtp > 0 ? (
+                    <div className="relative h-2 rounded-full overflow-hidden" style={{ background: 'var(--color-elevated)' }}>
+                      <div className="absolute inset-0 rounded-full" style={{ background: 'linear-gradient(90deg, var(--color-rose-dim), var(--color-elevated), var(--color-emerald-dim))', opacity: 0.5 }} />
+                      <div
+                        className="absolute top-0 w-0.5 h-full rounded-full"
+                        style={{
+                          left: `${Math.min(100, Math.max(0, ((curLtp - data.low_52w) / (data.high_52w - data.low_52w)) * 100))}%`,
+                          background: 'var(--color-gold)',
+                          boxShadow: '0 0 6px rgba(245,166,35,0.8)',
+                        }}
+                      />
+                    </div>
+                  ) : null}
                 </div>
 
                 {/* Row 3: Market data chips */}
                 <div className="flex items-center gap-2 flex-wrap">
                   <span className="text-[10px] font-mono px-2 py-0.5 rounded" style={{ background: 'var(--color-elevated)', color: 'var(--color-muted)' }}>
-                    ATR: ₹{Number(curLtp * 0.016).toFixed(0)}
+                    ATR: {data?.atr != null && data.atr > 0 ? `₹${Number(data.atr).toFixed(2)}` : '—'}
                   </span>
                   <span className="text-[10px] font-mono px-2 py-0.5 rounded" style={{ background: 'var(--color-elevated)', color: 'var(--color-muted)' }}>
-                    VIX: {data?.vix || '11.2'}
+                    VIX: {data?.vix != null ? data.vix : '—'}
                   </span>
                   {data?.global_macro?.implied_nifty_gap_pct != null && (
                     <span
@@ -1377,18 +1397,18 @@ export default function TerminalView({
                     <div className="flex items-center justify-between px-1">
                       <span className="text-[11px] font-bold text-amber font-mono">⚡ 15m Intraday Structure (SMC)</span>
                     </div>
-                    <CandlestickChart symbol={selectedSymbol} exchange={resolvedExchange} timeframe="15m" height={320} />
+                    <CandlestickChart key={`${selectedSymbol}-15m-${resolvedExchange}`} symbol={selectedSymbol} exchange={resolvedExchange} timeframe="15m" height={320} livePrice={curLtp} />
                   </div>
                   <div className="rounded-xl overflow-hidden bg-surface/50 border border-border/60 p-2 space-y-1">
                     <div className="flex items-center justify-between px-1">
                       <span className="text-[11px] font-bold text-emerald-500 font-mono">💎 1D Positional Markup (Stage 2)</span>
                     </div>
-                    <CandlestickChart symbol={selectedSymbol} exchange={resolvedExchange} timeframe="1D" height={320} />
+                    <CandlestickChart key={`${selectedSymbol}-1D-${resolvedExchange}`} symbol={selectedSymbol} exchange={resolvedExchange} timeframe="1D" height={320} livePrice={curLtp} />
                   </div>
                 </div>
               ) : (
                 <div className="w-full rounded-xl overflow-hidden bg-surface/50 border border-border/60">
-                  <CandlestickChart symbol={selectedSymbol} exchange={resolvedExchange} timeframe={timeframe} height={280} />
+                  <CandlestickChart key={`${selectedSymbol}-${timeframe}-${resolvedExchange}`} symbol={selectedSymbol} exchange={resolvedExchange} timeframe={timeframe} height={280} livePrice={curLtp} />
                 </div>
               )}
 
@@ -1397,20 +1417,36 @@ export default function TerminalView({
               <div className="bg-surface/80 p-2 rounded-lg border border-border/60">
                 <span className="text-[10px] text-muted block">UNMITIGATED OB</span>
                 <span className="font-bold text-emerald-400">
-                  ₹{setup?.order_block?.bottom || '24,120'} – ₹{setup?.order_block?.top || '24,180'}
+                  {(data?.order_block?.bottom && data?.order_block?.top)
+                    ? `₹${data.order_block.bottom} – ₹${data.order_block.top}`
+                    : (setupRaw?.order_block?.bottom && setupRaw?.order_block?.top
+                        ? `₹${setupRaw.order_block.bottom} – ₹${setupRaw.order_block.top}`
+                        : '—')}
                 </span>
               </div>
               <div className="bg-surface/80 p-2 rounded-lg border border-border/60">
                 <span className="text-[10px] text-muted block">POC (Max Vol)</span>
-                <span className="font-bold text-amber">₹{setup?.volume_profile?.poc || '24,165'}</span>
+                <span className="font-bold text-amber">
+                  {(data?.volume_profile?.poc || setupRaw?.volume_profile?.poc)
+                    ? `₹${data?.volume_profile?.poc || setupRaw?.volume_profile?.poc}`
+                    : '—'}
+                </span>
               </div>
               <div className="bg-surface/80 p-2 rounded-lg border border-border/60">
                 <span className="text-[10px] text-muted block">VAH (70% High)</span>
-                <span className="font-bold text-blue-400">₹{setup?.volume_profile?.vah || '24,240'}</span>
+                <span className="font-bold text-blue-400">
+                  {(data?.volume_profile?.vah || setupRaw?.volume_profile?.vah)
+                    ? `₹${data?.volume_profile?.vah || setupRaw?.volume_profile?.vah}`
+                    : '—'}
+                </span>
               </div>
               <div className="bg-surface/80 p-2 rounded-lg border border-border/60">
                 <span className="text-[10px] text-muted block">VAL (70% Low)</span>
-                <span className="font-bold text-purple-400">₹{setup?.volume_profile?.val || '24,080'}</span>
+                <span className="font-bold text-purple-400">
+                  {(data?.volume_profile?.val || setupRaw?.volume_profile?.val)
+                    ? `₹${data?.volume_profile?.val || setupRaw?.volume_profile?.val}`
+                    : '—'}
+                </span>
               </div>
             </div>
           </div>
@@ -1475,6 +1511,8 @@ export default function TerminalView({
                 <div className="flex items-center gap-1.5 overflow-x-auto pb-1 scrollbar-none">
                   {MASTER_COUNCILS.map((c) => {
                     const isSelected = selectedCouncil === c.id
+                    const dynC = backendCouncilMap[c.id]
+                    const cScore = dynC?.score ?? c.score
                     return (
                       <button
                         key={c.id}
@@ -1488,7 +1526,7 @@ export default function TerminalView({
                         <span>{c.icon}</span>
                         <span>{c.name}</span>
                         <span className="text-[10px] font-mono px-1 py-0.2 rounded bg-black/20 text-current font-bold">
-                          {c.score}
+                          {cScore != null ? cScore : '—'}
                         </span>
                       </button>
                     )
@@ -1503,11 +1541,17 @@ export default function TerminalView({
                       <span className="text-[11px] text-muted">{activeCouncilObj.desc}</span>
                     </div>
                     <div className="text-right">
-                      <span className="px-2.5 py-0.5 rounded-lg bg-emerald-500/15 border border-emerald-500/30 text-emerald-400 text-xs font-extrabold block">
-                        {activeCouncilObj.verdict}
+                      <span className={`px-2.5 py-0.5 rounded-lg text-xs font-extrabold block border ${
+                        (activeCouncilObj.verdict || '').includes('BULL') || (activeCouncilObj.verdict || '').includes('BUY')
+                          ? 'bg-emerald-500/15 border-emerald-500/30 text-emerald-400'
+                          : (activeCouncilObj.verdict || '').includes('BEAR') || (activeCouncilObj.verdict || '').includes('CAUTION')
+                            ? 'bg-rose-500/15 border-rose-500/30 text-rose-400'
+                            : 'bg-amber/15 border-amber/30 text-amber'
+                      }`}>
+                        {activeCouncilObj.verdict || 'AWAITING DEBATE'}
                       </span>
                       <span className="text-[10px] text-amber font-mono font-bold">
-                        Conviction: {activeCouncilObj.score}/100
+                        {activeCouncilObj.score != null ? `Conviction: ${activeCouncilObj.score}/100` : 'Conviction: —'}
                       </span>
                     </div>
                   </div>
@@ -1526,6 +1570,11 @@ export default function TerminalView({
                     {activeCouncilObj.members.map((memId) => {
                       const member = MASTER_PERSONAS.find((p) => p.id === memId)
                       if (!member) return null
+                      const dynMem = backendPersonaMap[memId]
+                      const memVerdict = dynMem?.verdict || member.verdict || 'AWAITING DEBATE'
+                      const memRule = dynMem?.checklist?.[0] || dynMem?.key_metric || member.checklist?.[0] || member.key_metric
+                      const isBull = memVerdict.includes('BUY') || memVerdict.includes('PASS') || memVerdict.includes('LEADER') || memVerdict.includes('STRENGTH') || memVerdict.includes('COMPOUNDER')
+                      const isBear = memVerdict.includes('SELL') || memVerdict.includes('CAUTION') || memVerdict.includes('RISK') || memVerdict.includes('FLAG') || memVerdict.includes('BELOW') || memVerdict.includes('BREAKDOWN')
                       return (
                         <div
                           key={memId}
@@ -1542,12 +1591,14 @@ export default function TerminalView({
                                 {member.name}
                               </span>
                             </div>
-                            <span className="text-[10px] font-bold text-emerald-400 bg-emerald-500/10 border border-emerald-500/30 px-1.5 py-0.2 rounded">
-                              {member.verdict}
+                            <span className={`text-[10px] font-bold px-1.5 py-0.2 rounded ${
+                              isBull ? 'text-emerald-400 bg-emerald-500/10 border border-emerald-500/30' : isBear ? 'text-rose-400 bg-rose-500/10 border border-rose-500/30' : 'text-amber bg-amber/10 border border-amber/30'
+                            }`}>
+                              {memVerdict}
                             </span>
                           </div>
                           <p className="text-[10px] text-muted leading-tight truncate">
-                            • {member.checklist[0]}
+                            • {memRule}
                           </p>
                         </div>
                       )
@@ -1582,6 +1633,8 @@ export default function TerminalView({
                 <div className="flex items-center gap-1.5 overflow-x-auto pb-1 scrollbar-none">
                   {MASTER_PERSONAS.map((p) => {
                     const isSelected = selectedPersona === p.id
+                    const dynP = backendPersonaMap[p.id]
+                    const pConf = dynP?.confidence ?? p.confidence
                     return (
                       <button
                         key={p.id}
@@ -1595,7 +1648,7 @@ export default function TerminalView({
                         <span>{p.icon}</span>
                         <span>{p.name}</span>
                         <span className="text-[10px] font-mono px-1 py-0.2 rounded bg-black/20 text-current font-bold">
-                          {p.confidence}%
+                          {pConf != null ? `${pConf}%` : '—'}
                         </span>
                       </button>
                     )
@@ -1621,11 +1674,17 @@ export default function TerminalView({
                     </div>
 
                     <div className="text-right">
-                      <span className="px-2.5 py-0.5 rounded-lg bg-emerald-500/15 border border-emerald-500/30 text-emerald-400 text-xs font-extrabold block">
-                        {activePersonaObj.verdict}
+                      <span className={`px-2.5 py-0.5 rounded-lg text-xs font-extrabold block border ${
+                        (activePersonaObj.verdict || '').includes('BUY') || (activePersonaObj.verdict || '').includes('PASS') || (activePersonaObj.verdict || '').includes('LEADER') || (activePersonaObj.verdict || '').includes('COMPOUNDER')
+                          ? 'bg-emerald-500/15 border-emerald-500/30 text-emerald-400'
+                          : (activePersonaObj.verdict || '').includes('SELL') || (activePersonaObj.verdict || '').includes('CAUTION') || (activePersonaObj.verdict || '').includes('RISK') || (activePersonaObj.verdict || '').includes('BELOW') || (activePersonaObj.verdict || '').includes('BREAKDOWN')
+                            ? 'bg-rose-500/15 border-rose-500/30 text-rose-400'
+                            : 'bg-amber/15 border-amber/30 text-amber'
+                      }`}>
+                        {activePersonaObj.verdict || 'AWAITING DEBATE'}
                       </span>
                       <span className="text-[10px] text-amber font-mono font-bold">
-                        {activePersonaObj.confidence}% Conviction
+                        {activePersonaObj.confidence != null ? `${activePersonaObj.confidence}% Conviction` : 'Conviction: —'}
                       </span>
                     </div>
                   </div>
@@ -1651,12 +1710,18 @@ export default function TerminalView({
                     <span className="text-[10px] uppercase font-bold text-muted tracking-wider block">
                       Verified Technical &amp; Fundamental Rules:
                     </span>
-                    {activePersonaObj.checklist.map((rule, idx) => (
-                      <div key={idx} className="flex items-start gap-1.5 text-xs text-text/90 font-ui leading-tight">
-                        <span className="text-emerald-400 font-bold">✓</span>
-                        <span>{rule}</span>
-                      </div>
-                    ))}
+                    {activePersonaObj.checklist && activePersonaObj.checklist.length > 0 ? (
+                      activePersonaObj.checklist.map((rule, idx) => (
+                        <div key={idx} className="flex items-start gap-1.5 text-xs text-text/90 font-ui leading-tight">
+                          <span className="text-emerald-400 font-bold">✓</span>
+                          <span>{rule}</span>
+                        </div>
+                      ))
+                    ) : (
+                      <span className="text-[10px] text-muted font-mono block py-2">
+                        Rule verification checklist pending multi-agent debate.
+                      </span>
+                    )}
                   </div>
 
                   {/* Dimension Metrics */}
@@ -1664,14 +1729,20 @@ export default function TerminalView({
                     <span className="text-[10px] uppercase font-bold text-muted tracking-wider block">
                       Evaluated Quant Scores:
                     </span>
-                    <div className="grid grid-cols-2 gap-1.5">
-                      {Object.entries(activePersonaObj.metrics).map(([k, v]) => (
-                        <div key={k} className="p-2 rounded-lg bg-elevated/70 border border-border/50 text-[11px] font-mono">
-                          <span className="text-muted text-[10px] block truncate">{k}</span>
-                          <span className="font-bold text-text">{v}</span>
-                        </div>
-                      ))}
-                    </div>
+                    {activePersonaObj.metrics && Object.keys(activePersonaObj.metrics).length > 0 ? (
+                      <div className="grid grid-cols-2 gap-1.5">
+                        {Object.entries(activePersonaObj.metrics).map(([k, v]) => (
+                          <div key={k} className="p-2 rounded-lg bg-elevated/70 border border-border/50 text-[11px] font-mono">
+                            <span className="text-muted text-[10px] block truncate">{k}</span>
+                            <span className="font-bold text-text">{v}</span>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <span className="text-[10px] text-muted font-mono block py-2">
+                        Quant metrics matrix pending multi-agent evaluation.
+                      </span>
+                    )}
                   </div>
                 </div>
 
@@ -1699,161 +1770,268 @@ export default function TerminalView({
         <div className="lg:col-span-3 space-y-3">
 
           {/* SIGNAL STATUS CARD */}
-          <div className="rounded-2xl p-3.5 space-y-2.5 relative overflow-hidden" style={{
-            background: 'var(--color-panel)',
-            border: `1px solid ${setup?.action?.includes('SHORT') ? 'rgba(255,79,123,0.4)' : 'rgba(0,214,143,0.4)'}`,
-            boxShadow: setup?.action?.includes('SHORT') ? 'var(--glow-rose)' : 'var(--glow-emerald)'
-          }}>
-            {/* Gradient accent top bar */}
-            <div className="absolute top-0 left-0 right-0 h-0.5 rounded-t-2xl" style={{
-              background: setup?.action?.includes('SHORT')
-                ? 'linear-gradient(90deg, var(--color-rose), transparent)'
-                : 'linear-gradient(90deg, var(--color-emerald), transparent)'
-            }} />
+          {setup ? (
+            <div className="rounded-2xl p-3.5 space-y-2.5 relative overflow-hidden" style={{
+              background: 'var(--color-panel)',
+              border: `1px solid ${setup?.action?.includes('SHORT') ? 'rgba(255,79,123,0.4)' : 'rgba(0,214,143,0.4)'}`,
+              boxShadow: setup?.action?.includes('SHORT') ? 'var(--glow-rose)' : 'var(--glow-emerald)'
+            }}>
+              {/* Gradient accent top bar */}
+              <div className="absolute top-0 left-0 right-0 h-0.5 rounded-t-2xl" style={{
+                background: setup?.action?.includes('SHORT')
+                  ? 'linear-gradient(90deg, var(--color-rose), transparent)'
+                  : 'linear-gradient(90deg, var(--color-emerald), transparent)'
+              }} />
 
-            {/* Header */}
-            <div className="flex items-center justify-between">
-              <div>
-                <span className="text-[9px] font-bold uppercase tracking-widest block" style={{ color: 'var(--color-muted)' }}>⚡ SMART ORDER STAGING GATE</span>
-                <span className="text-xs font-bold font-mono" style={{ color: 'var(--color-text)' }}>{setup.symbol}</span>
-              </div>
-              <div className="flex flex-col items-end gap-1">
-                <span className={`px-2 py-0.5 rounded-full text-[9px] font-bold border ${
-                  setup?.action?.includes('SHORT')
-                    ? 'border-rose-500/40 text-rose-400'
-                    : 'border-emerald-500/40 text-emerald-400'
-                }`} style={{ background: setup?.action?.includes('SHORT') ? 'rgba(255,79,123,0.12)' : 'rgba(0,214,143,0.12)' }}>
-                  ● {setup?.status || 'READY'}
-                </span>
-                <span className={`text-[9px] font-bold px-2 py-0.5 rounded font-mono ${
-                  setup.action.includes('SHORT') ? 'text-rose-400' : 'text-emerald-400'
-                }`} style={{ background: 'var(--color-elevated)' }}>
-                  {setup.action}
-                </span>
-              </div>
-            </div>
-
-            {/* Timeline chip */}
-            <div className="flex items-center justify-between px-2 py-1 rounded-lg text-[10px] font-mono" style={{ background: 'var(--color-elevated)', border: '1px solid var(--color-border)' }}>
-              <span style={{ color: 'var(--color-muted)' }}>⏱️ Timeline</span>
-              <span className="font-semibold" style={{ color: 'var(--color-gold)' }}>{setup?.timeline || (timeframe === '1D' ? '5–15 Days' : '1–3 Sessions')}</span>
-            </div>
-
-            {/* Price levels grid */}
-            <div className="space-y-1.5 text-xs font-mono">
-              {[
-                { label: 'TRIGGER', value: setup.trigger, color: 'var(--color-muted)', small: true },
-                { label: 'ENTRY', value: `₹${Number(setup.entry).toLocaleString('en-IN', { minimumFractionDigits: 2 })}`, color: 'var(--color-emerald)' },
-                { label: 'STOP LOSS', value: `₹${Number(setup.stop_loss).toLocaleString('en-IN', { minimumFractionDigits: 2 })}`, color: 'var(--color-rose)', sub: `−${setup.risk_pct}% / −${setup.risk_points}pts` },
-                { label: 'TARGET 1 (2R)', value: `₹${Number(setup.target_1).toLocaleString('en-IN', { minimumFractionDigits: 2 })}`, color: 'var(--color-emerald)', sub: `+${setup.reward_pct}%` },
-                { label: 'TARGET 2 (3.5R)', value: `₹${Number(setup.target_2).toLocaleString('en-IN', { minimumFractionDigits: 2 })}`, color: 'var(--color-text)' },
-              ].map(({ label, value, color, sub, small }) => (
-                <div key={label} className="flex justify-between items-center py-1" style={{ borderBottom: '1px solid var(--color-border-subtle)' }}>
-                  <span style={{ color: 'var(--color-muted)', fontSize: '10px' }}>{label}</span>
-                  <div className="text-right">
-                    <span className="font-bold" style={{ color, fontSize: small ? '10px' : '11px' }}>{value}</span>
-                    {sub && <span className="block text-[9px]" style={{ color: 'var(--color-muted)' }}>{sub}</span>}
-                  </div>
+              {/* Header */}
+              <div className="flex items-center justify-between">
+                <div>
+                  <span className="text-[9px] font-bold uppercase tracking-widest block" style={{ color: 'var(--color-muted)' }}>⚡ SMART ORDER STAGING GATE</span>
+                  <span className="text-xs font-bold font-mono" style={{ color: 'var(--color-text)' }}>{setup.symbol}</span>
                 </div>
-              ))}
-              <div className="flex justify-between items-center pt-1">
-                <span className="text-[10px]" style={{ color: 'var(--color-muted)' }}>R:R PAYOFF</span>
-                <span className="font-extrabold text-xs" style={{ color: 'var(--color-gold)' }}>1 : {setup.risk_reward} R</span>
+                <div className="flex flex-col items-end gap-1">
+                  <span className={`px-2 py-0.5 rounded-full text-[9px] font-bold border ${
+                    setup?.action?.includes('SHORT')
+                      ? 'border-rose-500/40 text-rose-400'
+                      : 'border-emerald-500/40 text-emerald-400'
+                  }`} style={{ background: setup?.action?.includes('SHORT') ? 'rgba(255,79,123,0.12)' : 'rgba(0,214,143,0.12)' }}>
+                    ● {setup?.status || 'READY'}
+                  </span>
+                  <span className={`text-[9px] font-bold px-2 py-0.5 rounded font-mono ${
+                    setup.action.includes('SHORT') ? 'text-rose-400' : 'text-emerald-400'
+                  }`} style={{ background: 'var(--color-elevated)' }}>
+                    {setup.action}
+                  </span>
+                </div>
+              </div>
+
+              {/* Timeline chip */}
+              <div className="flex items-center justify-between px-2 py-1 rounded-lg text-[10px] font-mono" style={{ background: 'var(--color-elevated)', border: '1px solid var(--color-border)' }}>
+                <span style={{ color: 'var(--color-muted)' }}>⏱️ Timeline</span>
+                <span className="font-semibold" style={{ color: 'var(--color-gold)' }}>{setup?.timeline ?? '—'}</span>
+              </div>
+
+              {/* Price levels grid */}
+              <div className="space-y-1.5 text-xs font-mono">
+                {[
+                  { label: 'TRIGGER', value: setup.trigger, color: 'var(--color-muted)', small: true },
+                  { label: 'ENTRY', value: setup.entry != null ? `₹${Number(setup.entry).toLocaleString('en-IN', { minimumFractionDigits: 2 })}` : '—', color: 'var(--color-emerald)' },
+                  { label: 'STOP LOSS', value: setup.stop_loss != null ? `₹${Number(setup.stop_loss).toLocaleString('en-IN', { minimumFractionDigits: 2 })}` : '—', color: 'var(--color-rose)', sub: setup.risk_pct !== '—' ? `−${setup.risk_pct}% / −${setup.risk_points}pts` : undefined },
+                  { label: 'TARGET 1 (2R)', value: setup.target_1 != null ? `₹${Number(setup.target_1).toLocaleString('en-IN', { minimumFractionDigits: 2 })}` : '—', color: 'var(--color-emerald)', sub: setup.reward_pct !== '—' ? `+${setup.reward_pct}%` : undefined },
+                  { label: 'TARGET 2 (3.5R)', value: setup.target_2 != null ? `₹${Number(setup.target_2).toLocaleString('en-IN', { minimumFractionDigits: 2 })}` : '—', color: 'var(--color-text)' },
+                ].map(({ label, value, color, sub, small }) => (
+                  <div key={label} className="flex justify-between items-center py-1" style={{ borderBottom: '1px solid var(--color-border-subtle)' }}>
+                    <span style={{ color: 'var(--color-muted)', fontSize: '10px' }}>{label}</span>
+                    <div className="text-right">
+                      <span className="font-bold" style={{ color, fontSize: small ? '10px' : '11px' }}>{value}</span>
+                      {sub && <span className="block text-[9px]" style={{ color: 'var(--color-muted)' }}>{sub}</span>}
+                    </div>
+                  </div>
+                ))}
+                <div className="flex justify-between items-center pt-1">
+                  <span className="text-[10px]" style={{ color: 'var(--color-muted)' }}>R:R PAYOFF</span>
+                <span className="font-extrabold text-xs" style={{ color: 'var(--color-gold)' }}>
+                  {setup.risk_reward != null ? `1 : ${setup.risk_reward} R` : '—'}
+                </span>
+                </div>
               </div>
             </div>
-          </div>
+          ) : (
+            <div className="rounded-2xl p-4 space-y-3" style={{ background: 'var(--color-panel)', border: '1px solid var(--color-border)', boxShadow: 'var(--shadow-card)' }}>
+              <div className="flex items-center justify-between">
+                <span className="text-[9px] font-bold uppercase tracking-widest" style={{ color: 'var(--color-muted)' }}>⚡ ORDER STAGING GATE</span>
+                <span className="text-[9px] font-mono px-2 py-0.5 rounded-full border border-amber/30 bg-amber/10 text-amber font-bold">
+                  ● AWAITING SETUP
+                </span>
+              </div>
+              <div className="text-center py-3 space-y-2">
+                <div className="text-2xl">🛡️</div>
+                <div className="text-xs font-bold font-mono" style={{ color: 'var(--color-text)' }}>
+                  No Active Trade Setup for {selectedSymbol}
+                </div>
+                <p className="text-[11px] leading-relaxed" style={{ color: 'var(--color-muted)' }}>
+                  {loading
+                    ? 'Fetching current market quote and calculating quantitative parameters...'
+                    : 'Institutional entry and stop levels are generated when volatility contraction and order blocks align. Run an AI debate or poll a specialist council to formulate a fresh trade plan.'}
+                </p>
+                <div className="flex flex-col gap-1.5 pt-2">
+                  <button
+                    onClick={() => {
+                      if (onOpenOrderTicket) {
+                        onOpenOrderTicket({
+                          symbol: selectedSymbol,
+                          exchange: resolvedExchange,
+                          price: curLtp || null,
+                          stopLoss: null,
+                          target: null,
+                          action: 'BUY',
+                        })
+                      }
+                    }}
+                    className="w-full py-2.5 px-3 rounded-xl bg-amber hover:brightness-110 text-black text-xs font-bold transition-all cursor-pointer shadow-md flex items-center justify-center gap-1.5"
+                  >
+                    <span>⚡</span>
+                    STAGE / EXECUTE ORDER (BUY)
+                  </button>
+                  <button
+                    onClick={() => sendDraft(`analyze ${selectedSymbol}`)}
+                    className="w-full py-2 px-3 rounded-xl bg-emerald-500/20 hover:bg-emerald-500 text-emerald-400 hover:text-black text-xs font-bold transition-all cursor-pointer"
+                  >
+                    ⚔️ Run AI Debate on {selectedSymbol}
+                  </button>
+                  <button
+                    onClick={() => sendDraft(`council breakout ${selectedSymbol}`)}
+                    className="w-full py-2 px-3 rounded-xl bg-amber/20 hover:bg-amber text-amber hover:text-black text-xs font-bold transition-all cursor-pointer"
+                  >
+                    🏛️ Poll Breakout Council
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
 
           {/* RISK METER ARC WIDGET */}
           <div className="rounded-2xl p-3.5" style={{ background: 'var(--color-panel)', border: '1px solid var(--color-border)', boxShadow: 'var(--shadow-card)' }}>
             <span className="text-[9px] font-bold uppercase tracking-widest block mb-2" style={{ color: 'var(--color-muted)' }}>⚡ PORTFOLIO HEAT METER</span>
             <div className="flex flex-col items-center">
-              <svg viewBox="0 0 120 65" className="w-36 h-20 overflow-visible">
-                {/* Background arc */}
-                <path d="M 10 60 A 50 50 0 0 1 110 60" fill="none" stroke="var(--color-elevated)" strokeWidth="8" strokeLinecap="round" />
-                {/* Filled arc — 62% heat */}
-                <path
-                  d="M 10 60 A 50 50 0 0 1 110 60"
-                  fill="none"
-                  stroke="url(#heatGrad)"
-                  strokeWidth="8"
-                  strokeDasharray="157"
-                  strokeDashoffset={157 - (157 * 0.62)}
-                  strokeLinecap="round"
-                  style={{ filter: 'drop-shadow(0 0 6px rgba(245,166,35,0.5))', transition: 'stroke-dashoffset 1.2s cubic-bezier(0.16,1,0.3,1)' }}
-                />
-                <defs>
-                  <linearGradient id="heatGrad" x1="0%" y1="0%" x2="100%" y2="0%">
-                    <stop offset="0%" stopColor="var(--color-emerald)" />
-                    <stop offset="60%" stopColor="var(--color-gold)" />
-                    <stop offset="100%" stopColor="var(--color-rose)" />
-                  </linearGradient>
-                </defs>
-                <text x="60" y="54" textAnchor="middle" fill="var(--color-text)" fontSize="13" fontWeight="800" fontFamily="'JetBrains Mono', monospace">62%</text>
-                <text x="60" y="64" textAnchor="middle" fill="var(--color-muted)" fontSize="6" fontFamily="'Inter', sans-serif">PORTFOLIO HEAT</text>
-              </svg>
+              {(() => {
+                // heat is 0–100 from backend (VIX-derived). null = VIX quote unavailable.
+                const heatPct = data?.portfolio_heat != null ? Number(data.portfolio_heat) : null
+                const arcLen = 157 // full half-circle path length
+                const filled = heatPct != null ? arcLen - (arcLen * heatPct / 100) : arcLen // empty when null
+                // glow colour shifts by heat level
+                const glowColor = heatPct == null ? 'transparent'
+                  : heatPct >= 70 ? 'rgba(255,79,123,0.5)'
+                  : heatPct >= 40 ? 'rgba(245,166,35,0.5)'
+                  : 'rgba(0,214,143,0.4)'
+                return (
+                  <svg viewBox="0 0 120 65" className="w-36 h-20 overflow-visible">
+                    {/* Background arc */}
+                    <path d="M 10 60 A 50 50 0 0 1 110 60" fill="none" stroke="var(--color-elevated)" strokeWidth="8" strokeLinecap="round" />
+                    {/* Filled arc — driven by real VIX-derived heat */}
+                    <path
+                      d="M 10 60 A 50 50 0 0 1 110 60"
+                      fill="none"
+                      stroke={heatPct != null ? 'url(#heatGrad)' : 'var(--color-border)'}
+                      strokeWidth="8"
+                      strokeDasharray={heatPct != null ? String(arcLen) : `${arcLen * 0.08} ${arcLen * 0.12}`}
+                      strokeDashoffset={filled}
+                      strokeLinecap="round"
+                      style={{ filter: `drop-shadow(0 0 6px ${glowColor})`, transition: 'stroke-dashoffset 1.2s cubic-bezier(0.16,1,0.3,1)' }}
+                    />
+                    <defs>
+                      <linearGradient id="heatGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+                        <stop offset="0%" stopColor="var(--color-emerald)" />
+                        <stop offset="60%" stopColor="var(--color-gold)" />
+                        <stop offset="100%" stopColor="var(--color-rose)" />
+                      </linearGradient>
+                    </defs>
+                    <text x="60" y="54" textAnchor="middle" fill="var(--color-text)" fontSize="13" fontWeight="800" fontFamily="'JetBrains Mono', monospace">
+                      {heatPct != null ? `${heatPct}%` : '—'}
+                    </text>
+                    <text x="60" y="64" textAnchor="middle" fill="var(--color-muted)" fontSize="6" fontFamily="'Inter', sans-serif">
+                      {heatPct != null ? 'INDIA VIX HEAT' : 'VIX UNAVAILABLE'}
+                    </text>
+                  </svg>
+                )
+              })()}
               <div className="flex items-center gap-2 text-[9px] font-mono mt-1">
-                <span style={{ color: 'var(--color-emerald)' }}>● SAFE</span>
-                <span style={{ color: 'var(--color-gold)' }}>● MODERATE</span>
-                <span style={{ color: 'var(--color-rose)' }}>● HIGH</span>
+                <span style={{ color: 'var(--color-emerald)' }}>● SAFE {'<'}40%</span>
+                <span style={{ color: 'var(--color-gold)' }}>● MOD 40–70%</span>
+                <span style={{ color: 'var(--color-rose)' }}>● HIGH {'>'}70%</span>
               </div>
             </div>
           </div>
 
           {/* ATR TRAIL LEVELS */}
-          <div className="rounded-2xl p-3.5 space-y-2" style={{ background: 'var(--color-panel)', border: '1px solid var(--color-border)', boxShadow: 'var(--shadow-card)' }}>
-            <span className="text-[9px] font-bold uppercase tracking-widest block" style={{ color: 'var(--color-muted)' }}>🛡️ ATR TRAIL & SCALE LEVELS</span>
-            {[
-              { label: 'Breakeven Level', price: Number(setup.entry * 1.002).toFixed(0), note: '+0.2% buffer', color: 'var(--color-cyan)' },
-              { label: '2R Scale-Out', price: Number(setup.target_1).toFixed(0), note: 'Sell 50% qty', color: 'var(--color-emerald)' },
-              { label: 'Chandelier Trail', price: Number(setup.entry * 1.048).toFixed(0), note: '3× ATR stop', color: 'var(--color-gold)' },
-              { label: '3.5R Final Exit', price: Number(setup.target_2).toFixed(0), note: 'Full exit', color: 'var(--color-emerald)' },
-            ].map(({ label, price, note, color }) => (
-              <div key={label} className="flex items-center justify-between text-[10px] px-2 py-1.5 rounded-lg" style={{ background: 'var(--color-elevated)', border: '1px solid var(--color-border-subtle)' }}>
-                <div>
-                  <span className="block font-bold font-mono" style={{ color }}>₹{Number(price).toLocaleString('en-IN')}</span>
-                  <span className="text-[9px]" style={{ color: 'var(--color-muted)' }}>{note}</span>
-                </div>
-                <span className="text-[9px] text-right" style={{ color: 'var(--color-muted)' }}>{label}</span>
-              </div>
-            ))}
-          </div>
+          {setup && (() => {
+            // Use backend-supplied atr_14 (₹ absolute ATR). Fall back to risk_points
+            // as a reasonable ATR proxy (risk_points ≈ 1×ATR at the entry). Never multiply
+            // entry by a hardcoded percentage — that would be false data.
+            const atr14 = data?.atr_14 != null && Number(data.atr_14) > 0 ? Number(data.atr_14) : null
+            const atrProxy = atr14 ?? (setup.risk_points && setup.risk_points !== '—' ? Number(setup.risk_points) : null)
+            const isShortSetup = setup?.action?.includes('SHORT')
 
-          {/* THESIS BOX */}
-          <div className="rounded-2xl p-3 space-y-2" style={{ background: 'var(--color-panel)', border: '1px solid var(--color-border)' }}>
-            <span className="text-[9px] font-bold uppercase tracking-widest" style={{ color: 'var(--color-muted)' }}>💡 SETUP THESIS</span>
-            <p className="text-[11px] leading-relaxed font-ui" style={{ color: 'var(--color-text)' }}>{setup.thesis}</p>
-            <div className="px-2 py-1.5 rounded-lg text-[9px] flex items-start gap-1.5" style={{ background: 'var(--color-elevated)', color: 'var(--color-muted)' }}>
-              <span>🛡️</span>
-              <span><strong style={{ color: 'var(--color-text)' }}>Trail Rule:</strong> Move SL to BE at T1. Trail remainder with 3× ATR Chandelier.</span>
+            // Breakeven: entry + small buffer beyond commission drag
+            const breakevenPrice = setup.entry != null
+              ? (isShortSetup
+                  ? Number(setup.entry) - Number(setup.entry) * 0.002
+                  : Number(setup.entry) + Number(setup.entry) * 0.002)
+              : null
+
+            // Chandelier: entry ± 3×ATR (standard Chandelier Exit formula)
+            const chandelierPrice = setup.entry != null && atrProxy != null
+              ? (isShortSetup
+                  ? Number(setup.entry) + atrProxy * 3
+                  : Number(setup.entry) - atrProxy * 3)
+              : null
+
+            const fmtPrice = (p) => p != null && Number.isFinite(p) && p > 0
+              ? `₹${Number(p.toFixed(0)).toLocaleString('en-IN')}`
+              : '—'
+
+            const levels = [
+              { label: 'Breakeven Level', price: breakevenPrice, note: '+0.2% buffer', color: 'var(--color-cyan)' },
+              { label: '2R Scale-Out', price: setup.target_1, note: 'Sell 50% qty', color: 'var(--color-emerald)' },
+              { label: 'Chandelier Trail', price: chandelierPrice, note: atrProxy != null ? `3× ATR (₹${atrProxy.toFixed(0)})` : '3× ATR (pending)', color: 'var(--color-gold)' },
+              { label: '3.5R Final Exit', price: setup.target_2, note: 'Full exit', color: 'var(--color-emerald)' },
+            ]
+            return (
+              <div className="rounded-2xl p-3.5 space-y-2" style={{ background: 'var(--color-panel)', border: '1px solid var(--color-border)', boxShadow: 'var(--shadow-card)' }}>
+                <span className="text-[9px] font-bold uppercase tracking-widest block" style={{ color: 'var(--color-muted)' }}>🛡️ ATR TRAIL &amp; SCALE LEVELS</span>
+                {levels.map(({ label, price, note, color }) => (
+                  <div key={label} className="flex items-center justify-between text-[10px] px-2 py-1.5 rounded-lg" style={{ background: 'var(--color-elevated)', border: '1px solid var(--color-border-subtle)' }}>
+                    <div>
+                      <span className="block font-bold font-mono" style={{ color }}>{fmtPrice(price)}</span>
+                      <span className="text-[9px]" style={{ color: 'var(--color-muted)' }}>{note}</span>
+                    </div>
+                    <span className="text-[9px] text-right" style={{ color: 'var(--color-muted)' }}>{label}</span>
+                  </div>
+                ))}
+              </div>
+            )
+          })()}
+
+          {/* THESIS BOX — only render if backend provided a real thesis */}
+          {setup && setup.thesis && (
+            <div className="rounded-2xl p-3 space-y-2" style={{ background: 'var(--color-panel)', border: '1px solid var(--color-border)' }}>
+              <span className="text-[9px] font-bold uppercase tracking-widest" style={{ color: 'var(--color-muted)' }}>💡 SETUP THESIS</span>
+              <p className="text-[11px] leading-relaxed font-ui" style={{ color: 'var(--color-text)' }}>{setup.thesis}</p>
+              <div className="px-2 py-1.5 rounded-lg text-[9px] flex items-start gap-1.5" style={{ background: 'var(--color-elevated)', color: 'var(--color-muted)' }}>
+                <span>🛡️</span>
+                <span><strong style={{ color: 'var(--color-text)' }}>Trail Rule:</strong> Move SL to BE at T1. Trail remainder with 3× ATR Chandelier.</span>
+              </div>
             </div>
-          </div>
+          )}
 
           {/* EXECUTE BUTTON */}
-          <button
-            onClick={() => {
-              if (onOpenOrderTicket) {
-                onOpenOrderTicket({
-                  symbol: selectedSymbol,
-                  exchange: getSymbolExchange(selectedSymbol),
-                  price: setup.entry,
-                  stopLoss: setup.stop_loss,
-                  target: setup.target_1,
-                  action: setup.action.includes('SHORT') ? 'SELL' : 'BUY',
-                })
-              }
-            }}
-            className="w-full py-3 px-4 rounded-2xl font-bold text-xs uppercase tracking-widest transition-all shadow-lg cursor-pointer flex items-center justify-center gap-2 hover:brightness-110 active:scale-[0.98]"
-            style={{
-              background: setup?.action?.includes('SHORT')
-                ? 'linear-gradient(135deg, var(--color-rose), #c2003a)'
-                : 'linear-gradient(135deg, var(--color-gold), #c47a00)',
-              color: '#000',
-              boxShadow: setup?.action?.includes('SHORT') ? 'var(--glow-rose)' : 'var(--glow-gold)'
-            }}
-          >
-            <span>⚡</span>
-            STAGE / EXECUTE ORDER ({setup?.action?.includes('SHORT') ? 'SELL' : 'BUY'})
-          </button>
+          {setup && (
+            <button
+              onClick={() => {
+                if (onOpenOrderTicket) {
+                  onOpenOrderTicket({
+                    symbol: selectedSymbol,
+                    exchange: getSymbolExchange(selectedSymbol),
+                    price: setup.entry,
+                    stopLoss: setup.stop_loss,
+                    target: setup.target_1,
+                    action: setup.action.includes('SHORT') ? 'SELL' : 'BUY',
+                  })
+                }
+              }}
+              className="w-full py-3 px-4 rounded-2xl font-bold text-xs uppercase tracking-widest transition-all shadow-lg cursor-pointer flex items-center justify-center gap-2 hover:brightness-110 active:scale-[0.98]"
+              style={{
+                background: setup?.action?.includes('SHORT')
+                  ? 'linear-gradient(135deg, var(--color-rose), #c2003a)'
+                  : 'linear-gradient(135deg, var(--color-gold), #c47a00)',
+                color: '#000',
+                boxShadow: setup?.action?.includes('SHORT') ? 'var(--glow-rose)' : 'var(--glow-gold)'
+              }}
+            >
+              <span>⚡</span>
+              STAGE / EXECUTE ORDER ({setup?.action?.includes('SHORT') ? 'SELL' : 'BUY'})
+            </button>
+          )}
 
           {/* Quick Actions */}
           <div className="flex gap-2">
@@ -1865,7 +2043,7 @@ export default function TerminalView({
               ⚔️ Run Debate
             </button>
             <button
-              onClick={() => sendDraft(`telegram ${selectedSymbol} ${setup.action}`)}
+              onClick={() => sendDraft(`telegram ${selectedSymbol} ${setup?.action || 'ANALYSIS'}`)}
               className="flex-1 py-2 rounded-xl text-[10px] font-bold cursor-pointer transition-all hover:brightness-110"
               style={{ background: 'rgba(77,155,255,0.10)', border: '1px solid rgba(77,155,255,0.30)', color: 'var(--color-sapphire)' }}
             >
@@ -1900,7 +2078,7 @@ export default function TerminalView({
                   ? `🛡️ DII ABSORPTION`
                   : flows?.regime === 'TWIN_BUYING'
                   ? `🚀 TWIN INFLOW`
-                  : flows?.regime_label || 'DLY CASH'}
+                  : flows?.regime_label || (flows ? 'DLY CASH' : 'AWAITING')}
               </span>
             </div>
 
@@ -1908,14 +2086,16 @@ export default function TerminalView({
             <div className="bg-surface/80 p-2.5 rounded-xl border border-border/50">
               <div className="flex items-center justify-between">
                 <span className="text-muted text-[11px]">Net Institutional Flow</span>
-                <span className={`font-bold font-mono text-sm ${netTotal >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
-                  {netTotal >= 0 ? '+' : ''}₹{Math.abs(Math.round(netTotal)).toLocaleString('en-IN')} Cr
+                <span className={`font-bold font-mono text-sm ${netTotal != null ? (netTotal >= 0 ? 'text-emerald-400' : 'text-rose-400') : 'text-muted'}`}>
+                  {netTotal != null
+                    ? `${netTotal >= 0 ? '+' : ''}₹${Math.abs(Math.round(netTotal)).toLocaleString('en-IN')} Cr`
+                    : '—'}
                 </span>
               </div>
               <div className="text-[10px] text-muted flex items-center justify-between mt-1 pt-1 border-t border-border/30">
                 <span>Combined FII + DII</span>
-                <span className={netTotal >= 0 ? 'text-emerald-400 font-medium' : 'text-rose-400 font-medium'}>
-                  {netTotal >= 0 ? '🟢 Net Cash Inflow' : '🔴 Net Cash Outflow'}
+                <span className={netTotal != null ? (netTotal >= 0 ? 'text-emerald-400 font-medium' : 'text-rose-400 font-medium') : 'text-muted'}>
+                  {netTotal != null ? (netTotal >= 0 ? '🟢 Net Cash Inflow' : '🔴 Net Cash Outflow') : 'Awaiting EOD Filing'}
                 </span>
               </div>
             </div>
@@ -1925,32 +2105,36 @@ export default function TerminalView({
               <div className="bg-surface/80 p-2 rounded-xl border border-border/50">
                 <div className="flex items-center justify-between text-[10px] text-muted">
                   <span>FII Net</span>
-                  <span
-                    className={`text-[9px] px-1 rounded ${
-                      fiiVal >= 0 ? 'text-emerald-400 bg-emerald-500/10' : 'text-rose-400 bg-rose-500/10'
-                    }`}
-                  >
-                    {fiiStreak < 0 ? `${Math.abs(fiiStreak)}d Sell` : `${fiiStreak}d Buy`}
-                  </span>
+                  {fiiStreak != null && (
+                    <span
+                      className={`text-[9px] px-1 rounded ${
+                        fiiVal >= 0 ? 'text-emerald-400 bg-emerald-500/10' : 'text-rose-400 bg-rose-500/10'
+                      }`}
+                    >
+                      {fiiStreak < 0 ? `${Math.abs(fiiStreak)}d Sell` : `${fiiStreak}d Buy`}
+                    </span>
+                  )}
                 </div>
-                <div className={`font-bold mt-1 text-[13px] ${fiiVal >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
-                  {fiiVal >= 0 ? '+' : ''}₹{Math.round(fiiVal).toLocaleString('en-IN')} Cr
+                <div className={`font-bold mt-1 text-[13px] ${fiiVal != null ? (fiiVal >= 0 ? 'text-emerald-400' : 'text-rose-400') : 'text-muted'}`}>
+                  {fiiVal != null ? `${fiiVal >= 0 ? '+' : ''}₹${Math.round(fiiVal).toLocaleString('en-IN')} Cr` : '—'}
                 </div>
               </div>
 
               <div className="bg-surface/80 p-2 rounded-xl border border-border/50">
                 <div className="flex items-center justify-between text-[10px] text-muted">
                   <span>DII Net</span>
-                  <span
-                    className={`text-[9px] px-1 rounded ${
-                      diiVal >= 0 ? 'text-emerald-400 bg-emerald-500/10' : 'text-rose-400 bg-rose-500/10'
-                    }`}
-                  >
-                    {diiStreak > 0 ? `${diiStreak}d Buy` : `${Math.abs(diiStreak)}d Sell`}
-                  </span>
+                  {diiStreak != null && (
+                    <span
+                      className={`text-[9px] px-1 rounded ${
+                        diiVal >= 0 ? 'text-emerald-400 bg-emerald-500/10' : 'text-rose-400 bg-rose-500/10'
+                      }`}
+                    >
+                      {diiStreak > 0 ? `${diiStreak}d Buy` : `${Math.abs(diiStreak)}d Sell`}
+                    </span>
+                  )}
                 </div>
-                <div className={`font-bold mt-1 text-[13px] ${diiVal >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
-                  {diiVal >= 0 ? '+' : ''}₹{Math.round(diiVal).toLocaleString('en-IN')} Cr
+                <div className={`font-bold mt-1 text-[13px] ${diiVal != null ? (diiVal >= 0 ? 'text-emerald-400' : 'text-rose-400') : 'text-muted'}`}>
+                  {diiVal != null ? `${diiVal >= 0 ? '+' : ''}₹${Math.round(diiVal).toLocaleString('en-IN')} Cr` : '—'}
                 </div>
               </div>
             </div>
@@ -1984,7 +2168,7 @@ export default function TerminalView({
                 💡 Institutional Takeaway
               </span>
               <p className="line-clamp-2 text-muted text-[10.5px]">
-                {flows?.signal_reason || flows?.verdict || 'Institutional positioning balanced across cash and derivatives.'}
+                {flows?.signal_reason || flows?.verdict || 'Provisional institutional figures are published by NSE daily after 18:00 IST. Awaiting EOD filing.'}
               </p>
             </div>
           </div>
@@ -2005,14 +2189,28 @@ export default function TerminalView({
             <span className="text-xs font-bold uppercase tracking-wider text-muted flex items-center gap-1.5">
               <span>⚡</span> MULTI-TF CONFLUENCE
             </span>
-            <span className="text-[10px] font-bold font-mono px-2 py-0.5 rounded-full bg-emerald-500/15 border border-emerald-500/30 text-emerald-400">
-              {data?.multi_tf?.confluence_score != null ? `${data.multi_tf.confluence_score}% CONFLUENCE` : 'CONFLUENCE UNAVAILABLE'}
-            </span>
+            <div className="flex items-center gap-1.5">
+              {data?.multi_tf?.stance && (
+                <span className="text-[10px] font-mono text-muted hidden sm:inline">
+                  {data.multi_tf.stance}
+                </span>
+              )}
+              <span className={`text-[10px] font-bold font-mono px-2 py-0.5 rounded-full border ${
+                data?.multi_tf?.confluence_score >= 60
+                  ? 'bg-emerald-500/15 border-emerald-500/30 text-emerald-400'
+                  : data?.multi_tf?.confluence_score <= 35
+                  ? 'bg-rose-500/15 border-rose-500/30 text-rose-400'
+                  : 'bg-amber/15 border-amber/30 text-amber'
+              }`}>
+                {data?.multi_tf?.confluence_score != null ? `${data.multi_tf.confluence_score}% CONFLUENCE` : 'CONFLUENCE UNAVAILABLE'}
+              </span>
+            </div>
           </div>
 
           <div className="space-y-1.5 text-xs font-mono">
             {(data?.multi_tf?.timeframes || []).map((tfItem) => {
               const isBull = tfItem.bias === 'BULLISH'
+              const isBear = tfItem.bias === 'BEARISH'
               return (
                 <div
                   key={tfItem.tf}
@@ -2023,22 +2221,32 @@ export default function TerminalView({
                       {tfItem.tf}
                     </span>
                     <div>
-                      <span className="font-semibold text-text text-xs block">{tfItem.signal}</span>
-                      <span className="text-[10px] text-muted">{tfItem.key_level}</span>
+                      <span className="font-semibold text-text text-xs block">{tfItem.signal || 'Analysis Pending'}</span>
+                      <span className="text-[10px] text-muted">{tfItem.key_level || '—'}</span>
                     </div>
                   </div>
 
                   <div className="text-right">
-                    <span className={`text-[10px] font-bold px-1.5 py-0.2 rounded ${isBull ? 'text-emerald-400 bg-emerald-500/10' : 'text-rose-400 bg-rose-500/10'}`}>
-                      {tfItem.bias}
+                    <span className={`text-[10px] font-bold px-1.5 py-0.2 rounded ${
+                      isBull ? 'text-emerald-400 bg-emerald-500/10' : isBear ? 'text-rose-400 bg-rose-500/10' : 'text-amber bg-amber/10'
+                    }`}>
+                      {tfItem.bias || 'NEUTRAL'}
                     </span>
-                    <span className="text-[10px] text-muted block font-mono">RSI {tfItem.rsi}</span>
+                    <span className="text-[10px] text-muted block font-mono">
+                      {tfItem.rsi != null && Number(tfItem.rsi) > 0 ? `RSI ${Number(tfItem.rsi).toFixed(1)}` : 'RSI —'}
+                    </span>
                   </div>
                 </div>
               )
             })}
             {(!data?.multi_tf?.timeframes || data.multi_tf.timeframes.length === 0) && (
-              <p className="rounded-xl border border-border/50 bg-surface/80 p-3 text-[11px] text-muted">Verified multi-timeframe data is unavailable.</p>
+              <p className="rounded-xl border border-border/50 bg-surface/80 p-3 text-[11px] text-muted">Verified multi-timeframe data is unavailable for {selectedSymbol}.</p>
+            )}
+            {data?.multi_tf?.recommendation && (
+              <div className="bg-surface/90 border border-border/60 rounded-xl p-2 text-[10.5px] font-sans leading-relaxed text-muted">
+                <span className="font-semibold text-text">💡 Synthesis: </span>
+                {data.multi_tf.recommendation}
+              </div>
             )}
           </div>
         </div>
@@ -2081,10 +2289,10 @@ export default function TerminalView({
                 <div className="space-y-1">
                   {(() => {
                     const items = sectors.filter((s) => s.quadrant === 'LEADING' || (s.rs_ratio >= 100 && s.rs_momentum >= 100))
-                    const displayItems = items.length > 0 ? items.slice(0, 3) : [
-                      { name: 'AUTO', rs_ratio: 102.4 },
-                      { name: 'METALS', rs_ratio: 101.9 },
-                    ]
+                    const displayItems = items.slice(0, 3)
+                    if (displayItems.length === 0) {
+                      return <span className="text-[10px] text-muted block py-1 font-mono">None in this quadrant</span>
+                    }
                     return displayItems.map((s, idx) => {
                       const cleanName = (s.name || s.code || '').replace(/^NIFTY\s*/i, '').trim()
                       return (
@@ -2098,7 +2306,7 @@ export default function TerminalView({
                             {cleanName}
                           </span>
                           <div className="flex items-center gap-1 font-mono shrink-0">
-                            <span className="text-emerald-400 font-semibold">{s.rs_ratio ? s.rs_ratio.toFixed(1) : '102.4'}</span>
+                            <span className="text-emerald-400 font-semibold">{s.rs_ratio ? s.rs_ratio.toFixed(1) : '—'}</span>
                             <span className="text-[10px] text-muted group-hover:text-emerald-300 transition-colors">→</span>
                           </div>
                         </button>
@@ -2117,10 +2325,10 @@ export default function TerminalView({
                 <div className="space-y-1">
                   {(() => {
                     const items = sectors.filter((s) => s.quadrant === 'IMPROVING' || (s.rs_ratio < 100 && s.rs_momentum >= 100))
-                    const displayItems = items.length > 0 ? items.slice(0, 3) : [
-                      { name: 'IT', rs_ratio: 99.8 },
-                      { name: 'PHARMA', rs_ratio: 98.9 },
-                    ]
+                    const displayItems = items.slice(0, 3)
+                    if (displayItems.length === 0) {
+                      return <span className="text-[10px] text-muted block py-1 font-mono">None in this quadrant</span>
+                    }
                     return displayItems.map((s, idx) => {
                       const cleanName = (s.name || s.code || '').replace(/^NIFTY\s*/i, '').trim()
                       return (
@@ -2134,7 +2342,7 @@ export default function TerminalView({
                             {cleanName}
                           </span>
                           <div className="flex items-center gap-1 font-mono shrink-0">
-                            <span className="text-cyan-400 font-semibold">{s.rs_ratio ? s.rs_ratio.toFixed(1) : '99.8'}</span>
+                            <span className="text-cyan-400 font-semibold">{s.rs_ratio ? s.rs_ratio.toFixed(1) : '—'}</span>
                             <span className="text-[10px] text-muted group-hover:text-cyan-300 transition-colors">→</span>
                           </div>
                         </button>
@@ -2153,10 +2361,10 @@ export default function TerminalView({
                 <div className="space-y-1">
                   {(() => {
                     const items = sectors.filter((s) => s.quadrant === 'WEAKENING' || (s.rs_ratio >= 100 && s.rs_momentum < 100))
-                    const displayItems = items.length > 0 ? items.slice(0, 3) : [
-                      { name: 'BANK', rs_ratio: 101.1 },
-                      { name: 'FIN SERVICE', rs_ratio: 100.8 },
-                    ]
+                    const displayItems = items.slice(0, 3)
+                    if (displayItems.length === 0) {
+                      return <span className="text-[10px] text-muted block py-1 font-mono">None in this quadrant</span>
+                    }
                     return displayItems.map((s, idx) => {
                       const cleanName = (s.name || s.code || '').replace(/^NIFTY\s*/i, '').trim()
                       return (
@@ -2170,7 +2378,7 @@ export default function TerminalView({
                             {cleanName}
                           </span>
                           <div className="flex items-center gap-1 font-mono shrink-0">
-                            <span className="text-amber font-semibold">{s.rs_ratio ? s.rs_ratio.toFixed(1) : '101.1'}</span>
+                            <span className="text-amber font-semibold">{s.rs_ratio ? s.rs_ratio.toFixed(1) : '—'}</span>
                             <span className="text-[10px] text-muted group-hover:text-amber transition-colors">→</span>
                           </div>
                         </button>
@@ -2189,10 +2397,10 @@ export default function TerminalView({
                 <div className="space-y-1">
                   {(() => {
                     const items = sectors.filter((s) => s.quadrant === 'LAGGING' || (s.rs_ratio < 100 && s.rs_momentum < 100))
-                    const displayItems = items.length > 0 ? items.slice(0, 3) : [
-                      { name: 'FMCG', rs_ratio: 97.5 },
-                      { name: 'REALTY', rs_ratio: 96.8 },
-                    ]
+                    const displayItems = items.slice(0, 3)
+                    if (displayItems.length === 0) {
+                      return <span className="text-[10px] text-muted block py-1 font-mono">None in this quadrant</span>
+                    }
                     return displayItems.map((s, idx) => {
                       const cleanName = (s.name || s.code || '').replace(/^NIFTY\s*/i, '').trim()
                       return (
@@ -2206,7 +2414,7 @@ export default function TerminalView({
                             {cleanName}
                           </span>
                           <div className="flex items-center gap-1 font-mono shrink-0">
-                            <span className="text-rose-400 font-semibold">{s.rs_ratio ? s.rs_ratio.toFixed(1) : '97.5'}</span>
+                            <span className="text-rose-400 font-semibold">{s.rs_ratio ? s.rs_ratio.toFixed(1) : '—'}</span>
                             <span className="text-[10px] text-muted group-hover:text-rose-300 transition-colors">→</span>
                           </div>
                         </button>
@@ -2219,58 +2427,53 @@ export default function TerminalView({
           ) : (
             /* Structured List View */
             <div className="space-y-1.5 text-xs font-mono max-h-[148px] overflow-y-auto pr-1">
-              {(sectors.length > 0 ? sectors : [
-                { name: 'AUTO', quadrant: 'LEADING', rs_ratio: 102.4, rs_momentum: 101.8 },
-                { name: 'METALS', quadrant: 'LEADING', rs_ratio: 101.9, rs_momentum: 102.3 },
-                { name: 'IT', quadrant: 'IMPROVING', rs_ratio: 99.8, rs_momentum: 102.1 },
-                { name: 'PHARMA', quadrant: 'IMPROVING', rs_ratio: 98.9, rs_momentum: 101.4 },
-                { name: 'BANK', quadrant: 'WEAKENING', rs_ratio: 101.1, rs_momentum: 98.6 },
-                { name: 'FIN SERVICE', quadrant: 'WEAKENING', rs_ratio: 100.8, rs_momentum: 97.9 },
-                { name: 'FMCG', quadrant: 'LAGGING', rs_ratio: 97.5, rs_momentum: 98.1 },
-                { name: 'REALTY', quadrant: 'LAGGING', rs_ratio: 96.8, rs_momentum: 97.4 },
-              ]).map((s, idx) => {
-                const quad = s.quadrant || (s.rs_ratio >= 100 && s.rs_momentum >= 100 ? 'LEADING' : s.rs_ratio < 100 && s.rs_momentum >= 100 ? 'IMPROVING' : s.rs_ratio >= 100 ? 'WEAKENING' : 'LAGGING')
-                const isLeading = quad === 'LEADING'
-                const isImproving = quad === 'IMPROVING'
-                const isWeakening = quad === 'WEAKENING'
-                const badgeColor = isLeading
-                  ? 'text-emerald-400 bg-emerald-500/15 border-emerald-500/30'
-                  : isImproving
-                  ? 'text-cyan-400 bg-cyan-500/15 border-cyan-500/30'
-                  : isWeakening
-                  ? 'text-amber bg-amber/15 border-amber/30'
-                  : 'text-rose-400 bg-rose-500/15 border-rose-500/30'
-                const badgeIcon = isLeading ? '🟢' : isImproving ? '🔵' : isWeakening ? '🟡' : '🔴'
-                const cleanName = (s.name || s.symbol || s.code || '').replace(/^NIFTY\s*/i, '').trim()
+              {sectors.length === 0 ? (
+                <p className="text-muted text-[11px] p-3 text-center">Sector rotation metrics are computing from 250D benchmark relative strength.</p>
+              ) : (
+                sectors.map((s, idx) => {
+                  const quad = s.quadrant || (s.rs_ratio >= 100 && s.rs_momentum >= 100 ? 'LEADING' : s.rs_ratio < 100 && s.rs_momentum >= 100 ? 'IMPROVING' : s.rs_ratio >= 100 ? 'WEAKENING' : 'LAGGING')
+                  const isLeading = quad === 'LEADING'
+                  const isImproving = quad === 'IMPROVING'
+                  const isWeakening = quad === 'WEAKENING'
+                  const badgeColor = isLeading
+                    ? 'text-emerald-400 bg-emerald-500/15 border-emerald-500/30'
+                    : isImproving
+                    ? 'text-cyan-400 bg-cyan-500/15 border-cyan-500/30'
+                    : isWeakening
+                    ? 'text-amber bg-amber/15 border-amber/30'
+                    : 'text-rose-400 bg-rose-500/15 border-rose-500/30'
+                  const badgeIcon = isLeading ? '🟢' : isImproving ? '🔵' : isWeakening ? '🟡' : '🔴'
+                  const cleanName = (s.name || s.symbol || s.code || '').replace(/^NIFTY\s*/i, '').trim()
 
-                return (
-                  <div
-                    key={idx}
-                    onClick={() => window.dispatchEvent(new CustomEvent('open-sector-drilldown', { detail: { sector: cleanName } }))}
-                    className="flex items-center justify-between p-2 rounded-xl bg-surface/80 border border-border/50 hover:border-amber/40 hover:bg-elevated transition-all cursor-pointer group"
-                    title={`Click to drill down on ${cleanName}`}
-                  >
-                    <div className="flex items-center gap-2">
-                      <span className="text-xs">{badgeIcon}</span>
-                      <span className="font-bold text-text group-hover:text-amber transition-colors">
-                        {cleanName || 'SECTOR'}
-                      </span>
-                      <span className={`text-[9px] font-bold px-1.5 py-0.2 rounded border ${badgeColor}`}>
-                        {quad}
-                      </span>
+                  return (
+                    <div
+                      key={idx}
+                      onClick={() => window.dispatchEvent(new CustomEvent('open-sector-drilldown', { detail: { sector: cleanName } }))}
+                      className="flex items-center justify-between p-2 rounded-xl bg-surface/80 border border-border/50 hover:border-amber/40 hover:bg-elevated transition-all cursor-pointer group"
+                      title={`Click to drill down on ${cleanName}`}
+                    >
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs">{badgeIcon}</span>
+                        <span className="font-bold text-text group-hover:text-amber transition-colors">
+                          {cleanName || 'SECTOR'}
+                        </span>
+                        <span className={`text-[9px] font-bold px-1.5 py-0.2 rounded border ${badgeColor}`}>
+                          {quad}
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-3 font-mono">
+                        <span className="text-[10px] text-muted">
+                          RS: <strong className="text-text">{s.rs_ratio ? s.rs_ratio.toFixed(1) : '100.0'}</strong>
+                        </span>
+                        <span className="text-[10px] text-muted">
+                          Mom: <strong className="text-text">{s.rs_momentum ? s.rs_momentum.toFixed(1) : '100.0'}</strong>
+                        </span>
+                        <span className="text-amber text-xs group-hover:translate-x-0.5 transition-transform">→</span>
+                      </div>
                     </div>
-                    <div className="flex items-center gap-3 font-mono">
-                      <span className="text-[10px] text-muted">
-                        RS: <strong className="text-text">{s.rs_ratio ? s.rs_ratio.toFixed(1) : '100.0'}</strong>
-                      </span>
-                      <span className="text-[10px] text-muted">
-                        Mom: <strong className="text-text">{s.rs_momentum ? s.rs_momentum.toFixed(1) : '100.0'}</strong>
-                      </span>
-                      <span className="text-amber text-xs group-hover:translate-x-0.5 transition-transform">→</span>
-                    </div>
-                  </div>
-                )
-              })}
+                  )
+                })
+              )}
             </div>
           )}
         </div>

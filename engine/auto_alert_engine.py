@@ -29,7 +29,6 @@ from __future__ import annotations
 
 import json
 import logging
-import math
 import os
 import threading
 import time
@@ -1377,9 +1376,9 @@ class AutoAlertEngine:
                 locked_pts = 190.0
                 locked_pct = 6.6
                 rationale = (
-                    f"Final target reached at major resistance. "
-                    f"DECISION: FULL PROFIT BOOKING RECOMMENDED. Close all positions at market. "
-                    f"DO NOT TRAIL FURTHER — high probability of mean-reversion exhaustion."
+                    "Final target reached at major resistance. "
+                    "DECISION: FULL PROFIT BOOKING RECOMMENDED. Close all positions at market. "
+                    "DO NOT TRAIL FURTHER — high probability of mean-reversion exhaustion."
                 )
             achieved = ["T1_ACHIEVED", "TARGET_ACHIEVED"]
 
@@ -1448,8 +1447,8 @@ class AutoAlertEngine:
                 direction="BULLISH",
                 headline=f"⚠️ [TEST] VIEW INVALIDATED: {symbol} {alert_type.replace('_', ' ')}",
                 summary=(
-                    f"Stop-loss level breached at ₹2,840.00 (LTP ₹2,835.00). "
-                    f"Squeeze breakout thesis is no longer valid. Close active positions."
+                    "Stop-loss level breached at ₹2,840.00 (LTP ₹2,835.00). "
+                    "Squeeze breakout thesis is no longer valid. Close active positions."
                 ),
                 ltp=2835.0,
                 trigger_level=2880.0,
@@ -1461,8 +1460,8 @@ class AutoAlertEngine:
                 environment="TEST",
                 is_invalidated=True,
                 invalidation_reason=(
-                    f"Stop-loss level breached at ₹2,840.00 (LTP ₹2,835.00). "
-                    f"Trade setup invalidated."
+                    "Stop-loss level breached at ₹2,840.00 (LTP ₹2,835.00). "
+                    "Trade setup invalidated."
                 ),
                 invalidated_at=now_iso,
                 metrics={"is_test": True, "test_mode": "invalidation_simulation"},
@@ -1477,8 +1476,8 @@ class AutoAlertEngine:
                 direction="BULLISH",
                 headline=f"🧪 [TEST] ⚡ {alert_type.replace('_', ' ')} {stage.replace('_', ' ')}: {symbol}",
                 summary=(
-                    f"Call writers shedding 14.5% OI with 2.4x turnover holding intraday VWAP. "
-                    f"Coiling for momentum expansion."
+                    "Call writers shedding 14.5% OI with 2.4x turnover holding intraday VWAP. "
+                    "Coiling for momentum expansion."
                 ),
                 ltp=2860.0,
                 trigger_level=2880.0,

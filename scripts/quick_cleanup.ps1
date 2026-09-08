@@ -5,16 +5,18 @@ Write-Host "=======================================================" -Foreground
 Write-Host "   Antigravity IDE & AI Agent Quick Environment Cleanup" -ForegroundColor Cyan
 Write-Host "=======================================================" -ForegroundColor Cyan
 
-# 1. Terminate orphaned headless Python/pytest/uvicorn worker processes
+# 1. Terminate orphaned headless Python/pytest/uvicorn and Electron/Vite worker processes
 $currentPid = $PID
 $killedCount = 0
 
 try {
     $zombieProcs = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | 
         Where-Object { 
-            $_.ProcessId -ne $currentPid -and 
-            ($_.Name -match "python|pytest|uvicorn") -and
-            ($_.CommandLine -match "chanakya-trade" -or $_.CommandLine -match "pytest" -or $_.CommandLine -match "uvicorn" -or $_.CommandLine -match "validate_all" -or $_.CommandLine -match "exec\(eval")
+            $_.ProcessId -ne $currentPid -and (
+                (($_.Name -match "python|pytest|uvicorn|electron") -and
+                 ($_.CommandLine -match "chanakya-trade" -or $_.CommandLine -match "pytest" -or $_.CommandLine -match "uvicorn" -or $_.CommandLine -match "validate_all" -or $_.CommandLine -match "exec\(eval")) -or
+                (($_.Name -match "node|electron") -and ($_.CommandLine -match "electron-vite|macos-app"))
+            )
         }
 
     foreach ($proc in $zombieProcs) {
@@ -31,18 +33,21 @@ try {
 }
 
 if ($killedCount -eq 0) {
-    Write-Host " [v] No orphaned Python/pytest/uvicorn processes found." -ForegroundColor Green
+    Write-Host " [v] No orphaned Python/uvicorn/Electron/Vite processes found." -ForegroundColor Green
 } else {
     Write-Host " [v] Successfully purged $killedCount orphaned worker process(es)." -ForegroundColor Green
 }
 
-# 2. Release stale local socket bindings & locks on port 8765 if stuck
+# 2. Release stale local socket bindings & locks on ports 8765 and 5173 if stuck
 try {
-    $portProcs = Get-NetTCPConnection -LocalPort 8765 -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique
-    foreach ($p in $portProcs) {
-        if ($p -and $p -ne 0) {
-            Stop-Process -Id $p -Force -ErrorAction SilentlyContinue
-            Write-Host " [+] Released stuck port 8765 listener (PID $p)" -ForegroundColor Yellow
+    $ports = @(8765, 5173)
+    foreach ($targetPort in $ports) {
+        $portProcs = Get-NetTCPConnection -LocalPort $targetPort -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique
+        foreach ($p in $portProcs) {
+            if ($p -and $p -ne 0 -and $p -ne $currentPid) {
+                Stop-Process -Id $p -Force -ErrorAction SilentlyContinue
+                Write-Host " [+] Released stuck port $targetPort listener (PID $p)" -ForegroundColor Yellow
+            }
         }
     }
 } catch {

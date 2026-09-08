@@ -2,7 +2,6 @@ import { useState, useEffect, useRef, useMemo } from 'react'
 import { useChatStore } from '../../store/chatStore'
 import { useAPI } from '../../hooks/useAPI'
 import PayoffSimulatorCard from '../Cards/PayoffSimulatorCard'
-import CandlestickChart from '../Charts/CandlestickChart'
 import { getSymbolExchange } from '../../data/universeData'
 
 // Cumulative standard normal distribution for Greeks
@@ -18,9 +17,30 @@ function normalPDF(x) {
 }
 
 function calculateGreeks(spot, strike, ivPct, isCall = true, daysToExpiry = 4, r = 0.065) {
-  const S = Number(spot) || 22000
-  const K = Number(strike) || 22000
-  const sigma = Math.max(0.01, (parseFloat(String(ivPct).replace(/[^0-9.-]/g, '')) || 15) / 100)
+  const S = Number(spot)
+  const K = Number(strike)
+  if (!S || S <= 0 || !K || K <= 0) {
+    return {
+      callDelta: '—',
+      putDelta: '—',
+      gamma: '—',
+      vega: '—',
+      callTheta: '—',
+      putTheta: '—',
+    }
+  }
+  const cleanIv = parseFloat(String(ivPct || '').replace(/[^0-9.-]/g, ''))
+  if (!cleanIv || cleanIv <= 0) {
+    return {
+      callDelta: '—',
+      putDelta: '—',
+      gamma: '—',
+      vega: '—',
+      callTheta: '—',
+      putTheta: '—',
+    }
+  }
+  const sigma = Math.max(0.01, cleanIv / 100)
   const T = Math.max(1 / 365, (daysToExpiry || 4) / 365)
   const sqrtT = Math.sqrt(T)
 
@@ -68,9 +88,6 @@ export default function OptionsDeskView({
   const [deskPosScale, setDeskPosScale] = useState(1)
   const [showDeskWhy, setShowDeskWhy] = useState(false)
 
-  // Real-Time Synced Candlestick Chart State
-  const [showChart, setShowChart] = useState(true)
-  const [chartTimeframe, setChartTimeframe] = useState('15m')
   const [customSymbolInput, setCustomSymbolInput] = useState('')
   const [showSymbolSearch, setShowSymbolSearch] = useState(false)
 
@@ -157,7 +174,7 @@ export default function OptionsDeskView({
   const pcrSentiment = data?.pcr_sentiment || (pcr !== '—' ? (Number(pcr) >= 1.0 ? 'BULLISH (Put Support)' : 'BEARISH (Call Overhead)') : 'Awaiting Data')
   const pcrBlast = Boolean(data?.pcr_blast)
   const pcrBlastMsg = data?.pcr_blast_msg || ''
-  const maxPain = data?.max_pain || (spot > 0 ? Math.round(spot) : 0)
+  const maxPain = data?.max_pain != null && Number(data.max_pain) > 0 ? Number(data.max_pain) : null
   const totalCallOI = data?.total_call_oi || '—'
   const totalPutOI = data?.total_put_oi || '—'
   const netOIChange = data?.net_oi_change || '—'
@@ -239,16 +256,20 @@ export default function OptionsDeskView({
       )
 
   const scrollToATM = () => {
-    if (atmRowRef.current && typeof atmRowRef.current.scrollIntoView === 'function') {
-      atmRowRef.current.scrollIntoView({
+    if (tableContainerRef.current && atmRowRef.current) {
+      const container = tableContainerRef.current
+      const row = atmRowRef.current
+      const rowTop = row.offsetTop
+      const rowHeight = row.offsetHeight
+      const containerHeight = container.clientHeight
+      container.scrollTo({
+        top: Math.max(0, rowTop - containerHeight / 2 + rowHeight / 2),
         behavior: 'smooth',
-        block: 'center',
-        inline: 'nearest',
       })
     }
   }
 
-  // When data loads or filter/underlying changes, land on the page with ATM and center it
+  // When filter or underlying changes, land on the page containing the ATM strike
   useEffect(() => {
     if (atmIdx >= 0 && sortedChain.length > 0 && !isPageSizeAll) {
       const atmSortedIdx = sortedChain.findIndex(
@@ -259,11 +280,7 @@ export default function OptionsDeskView({
         setChainPage(atmPage)
       }
     }
-    const timer = setTimeout(() => {
-      scrollToATM()
-    }, 120)
-    return () => clearTimeout(timer)
-  }, [spot, underlying, strikeFilter, chainPageSize])
+  }, [underlying, strikeFilter, chainPageSize])
 
   // Key structural walls derived from open interest distribution
   const callWallStrike = optionsChain.length > 0
@@ -305,10 +322,10 @@ export default function OptionsDeskView({
     }
 
     const isPosGamma = spot >= (data?.zero_gamma ?? spot - 50)
-    const distToPain = spot - maxPain
+    const distToPain = (spot > 0 && maxPain != null && maxPain > 0) ? spot - maxPain : 0
     const distToCallWall = callWallStrike ? Number(callWallStrike) - spot : 200
     const distToPutWall = putWallStrike ? spot - Number(putWallStrike) : 200
-    const isNearMaxPain = Math.abs(distToPain) <= (spot * 0.0075)
+    const isNearMaxPain = (maxPain != null && maxPain > 0) ? Math.abs(distToPain) <= (spot * 0.0075) : false
     const pcrNum = pcr !== '—' ? parseFloat(pcr) : 1.0
     const isPcrBullish = pcrNum >= 1.05
     const isPcrBearish = pcrNum <= 0.85
@@ -449,20 +466,6 @@ export default function OptionsDeskView({
           </div>
 
           <div className="flex items-center gap-2 flex-wrap">
-            {/* Real-Time Synced Chart Toggle */}
-            <button
-              onClick={() => setShowChart((prev) => !prev)}
-              className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg border text-[11px] font-semibold transition-all cursor-pointer ${
-                showChart
-                  ? 'bg-amber/15 border-amber/30 text-amber hover:bg-amber/25'
-                  : 'bg-surface border-border/70 text-muted hover:text-text'
-              }`}
-              title="Toggle Real-Time Synced Candlestick Chart"
-            >
-              <span>📊</span>
-              <span>Chart: {showChart ? 'ON' : 'OFF'}</span>
-            </button>
-
             {/* Live Auto-Refresh Indicator & Pause/Resume */}
             <button
               onClick={() => setIsLiveActive(!isLiveActive)}
@@ -706,56 +709,6 @@ export default function OptionsDeskView({
           </div>
         </div>
       </div>
-
-      {/* Real-Time Synced Candlestick Chart Panel */}
-      {showChart && (
-        <div className="bg-panel border border-border/80 rounded-xl p-3 shadow-xs space-y-2">
-          <div className="flex items-center justify-between border-b border-border/50 pb-2">
-            <div className="flex items-center gap-2">
-              <span className="text-amber font-bold">📊</span>
-              <span className="text-xs font-bold uppercase tracking-wider text-text font-mono">
-                {underlying} REAL-TIME SYNCED CHART ({chartTimeframe.toUpperCase()})
-              </span>
-              <span className="text-[10px] px-1.5 py-0.2 rounded bg-emerald-500/15 border border-emerald-500/30 text-emerald-400 font-mono font-bold flex items-center gap-1">
-                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
-                Live Sync
-              </span>
-            </div>
-            <div className="flex items-center gap-1.5">
-              {/* Timeframe selector */}
-              <div className="flex items-center gap-0.5 bg-surface border border-border/60 p-0.5 rounded-lg text-[10px] font-mono">
-                {['5m', '15m', '1h', '1D'].map((tf) => (
-                  <button
-                    key={tf}
-                    onClick={() => setChartTimeframe(tf)}
-                    className={`px-2 py-0.5 rounded font-bold cursor-pointer transition-all ${
-                      chartTimeframe === tf ? 'bg-amber text-black' : 'text-muted hover:text-text'
-                    }`}
-                  >
-                    {tf}
-                  </button>
-                ))}
-              </div>
-              <button
-                onClick={() => setShowChart(false)}
-                className="text-muted hover:text-text text-xs p-1 cursor-pointer"
-                title="Hide Chart"
-              >
-                ✕
-              </button>
-            </div>
-          </div>
-          <div className="w-full rounded-lg overflow-hidden border border-border/40 bg-surface">
-            <CandlestickChart
-              symbol={underlying}
-              exchange={resolvedExchange}
-              timeframe={chartTimeframe}
-              height={290}
-              livePrice={spot}
-            />
-          </div>
-        </div>
-      )}
 
       {/* Real-Time Institutional Options Decision Matrix Card */}
       <div className="bg-panel border border-border/80 rounded-xl p-3 shadow-md space-y-3">
@@ -1650,8 +1603,8 @@ export default function OptionsDeskView({
                       const callIsBlast = Boolean(row.calls_blast)
                       const putIsBlast = Boolean(row.puts_blast)
 
-                      const callGreeks = calculateGreeks(spot || row.strike, row.strike, row.calls_iv || '15%', true)
-                      const putGreeks = calculateGreeks(spot || row.strike, row.strike, row.puts_iv || '15%', false)
+                      const callGreeks = calculateGreeks(spot, row.strike, row.calls_iv, true)
+                      const putGreeks = calculateGreeks(spot, row.strike, row.puts_iv, false)
 
                       return (
                         <tr

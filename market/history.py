@@ -263,8 +263,8 @@ def get_ohlcv(
     df.sort_index(inplace=True)
 
     # Live/incomplete candle enrichment is opt-in and is never cached as EOD.
-    if include_live_candle and kite_interval == "day" and not df.empty:
-        df = inject_live_tick(df, symbol=symbol, exchange=exchange)
+    if include_live_candle and not df.empty:
+        df = inject_live_tick(df, symbol=symbol, exchange=exchange, interval=kite_interval)
 
     df.attrs["provenance"] = {
         "data_source": "LIVE_ENRICHED" if include_live_candle else "HISTORICAL_EOD",
@@ -298,10 +298,11 @@ def inject_live_tick(
     df: pd.DataFrame,
     symbol: str,
     exchange: str = "NSE",
+    interval: str = "day",
 ) -> pd.DataFrame:
     """
     Overlays the current second's live tick (LTP, Day High/Low, Volume) onto the OHLCV DataFrame.
-    Ensures all quantitative models evaluate the latest real-time market state.
+    Ensures all quantitative models evaluate the latest real-time market state for both daily and intraday charts.
     """
     try:
         from market.quotes import get_quote
@@ -318,7 +319,14 @@ def inject_live_tick(
         now = datetime.now()
         today_date = pd.Timestamp(now.date())
 
+        is_intraday = str(interval).lower() in {
+            "minute", "1minute", "3minute", "3m", "5minute", "5m",
+            "10minute", "10m", "15minute", "15m", "30minute", "30m",
+            "60minute", "1h", "60m"
+        }
+
         if df.empty:
+            bar_time = pd.Timestamp(now) if is_intraday else today_date
             new_row = pd.DataFrame(
                 [
                     {
@@ -329,41 +337,61 @@ def inject_live_tick(
                         "volume": q.volume or 0.0,
                     }
                 ],
-                index=[today_date],
+                index=[bar_time],
             )
             return new_row
 
         last_idx = df.index[-1]
         last_date = pd.Timestamp(last_idx).date() if hasattr(last_idx, "date") else None
 
-        if last_date == now.date():
-            # Update today's existing candle with live tick
-            df.loc[last_idx, "close"] = float(q.last_price)
-            if q.high and q.high > 0:
-                df.loc[last_idx, "high"] = max(float(df.loc[last_idx, "high"]), float(q.high))
-            else:
+        if is_intraday:
+            if last_date == now.date():
+                df.loc[last_idx, "close"] = float(q.last_price)
                 df.loc[last_idx, "high"] = max(float(df.loc[last_idx, "high"]), float(q.last_price))
-            if q.low and q.low > 0:
-                df.loc[last_idx, "low"] = min(float(df.loc[last_idx, "low"]), float(q.low))
-            else:
                 df.loc[last_idx, "low"] = min(float(df.loc[last_idx, "low"]), float(q.last_price))
-            if q.volume and q.volume > 0:
-                df.loc[last_idx, "volume"] = float(q.volume)
+            else:
+                new_row = pd.DataFrame(
+                    [
+                        {
+                            "open": float(q.open or q.last_price),
+                            "high": float(q.high or q.last_price),
+                            "low": float(q.low or q.last_price),
+                            "close": float(q.last_price),
+                            "volume": float(q.volume or 0.0),
+                        }
+                    ],
+                    index=[pd.Timestamp(now)],
+                )
+                df = pd.concat([df, new_row])
         else:
-            # Append today's active bar
-            new_row = pd.DataFrame(
-                [
-                    {
-                        "open": float(q.open or q.last_price),
-                        "high": float(q.high or q.last_price),
-                        "low": float(q.low or q.last_price),
-                        "close": float(q.last_price),
-                        "volume": float(q.volume or 0.0),
-                    }
-                ],
-                index=[today_date],
-            )
-            df = pd.concat([df, new_row])
+            if last_date == now.date():
+                # Update today's existing candle with live tick
+                df.loc[last_idx, "close"] = float(q.last_price)
+                if q.high and q.high > 0:
+                    df.loc[last_idx, "high"] = max(float(df.loc[last_idx, "high"]), float(q.high))
+                else:
+                    df.loc[last_idx, "high"] = max(float(df.loc[last_idx, "high"]), float(q.last_price))
+                if q.low and q.low > 0:
+                    df.loc[last_idx, "low"] = min(float(df.loc[last_idx, "low"]), float(q.low))
+                else:
+                    df.loc[last_idx, "low"] = min(float(df.loc[last_idx, "low"]), float(q.last_price))
+                if q.volume and q.volume > 0:
+                    df.loc[last_idx, "volume"] = float(q.volume)
+            else:
+                # Append today's active bar
+                new_row = pd.DataFrame(
+                    [
+                        {
+                            "open": float(q.open or q.last_price),
+                            "high": float(q.high or q.last_price),
+                            "low": float(q.low or q.last_price),
+                            "close": float(q.last_price),
+                            "volume": float(q.volume or 0.0),
+                        }
+                    ],
+                    index=[today_date],
+                )
+                df = pd.concat([df, new_row])
 
         if hasattr(df.index, "tz") and df.index.tz is not None:
             df.index = df.index.tz_localize(None)

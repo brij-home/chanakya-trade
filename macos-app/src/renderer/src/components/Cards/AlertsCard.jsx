@@ -35,8 +35,9 @@ export default function AlertsCard({ data }) {
         Alerts <span className="text-subtle">({alerts.length})</span>
       </p>
       <div className="space-y-2">
-        {alerts.map((a) => {
-          const id        = a.id ?? a.alert_id ?? String(Math.random())
+        {alerts.map((a, idx) => {
+          // Stable key: never use Math.random() — causes every alert to re-render on each tick.
+          const id = a.id ?? a.alert_id ?? `${a.symbol ?? 'unk'}-${a.triggered_at ?? a.created_at ?? a.timestamp ?? idx}`
           const symbol    = a.symbol ?? '—'
           const condition = a.condition ?? a.description ?? '—'
           const threshold = a.threshold != null ? `₹${Number(a.threshold).toLocaleString('en-IN')}` : ''

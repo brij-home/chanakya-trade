@@ -44,14 +44,12 @@ if sys.platform == "win32":
         except Exception:
             pass
 
-from analysis.big_move import analyze_options_flow, compute_ttm_squeeze
+from analysis.big_move import analyze_options_flow
 from analysis.forensic import audit_company_forensics
 from analysis.inflection_scanner import (
     InflectionSetup,
     evaluate_single_stock_inflection,
 )
-from analysis.market_structure import analyze_market_structure
-from analysis.sector_rotation import get_stock_tailwind
 from analysis.universe import get_stock_name, get_stock_sector
 from market.global_macro import fetch_global_macro_report
 

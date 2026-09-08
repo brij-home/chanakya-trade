@@ -2976,7 +2976,6 @@ class TradingAgent:
         Deterministic quantitative fallback when LLMs are unavailable or encountering errors.
         Extracts stock symbols or market context and generates institutional real-market data.
         """
-        import re
 
         # Extract symbol
         symbol = self._extract_symbol(user_message)

@@ -5,14 +5,12 @@ Unit tests validating architecture-wide data reuse, eliminating silos,
 quote coalescing caching, and cross-subsystem sharing.
 """
 
-import time
-import pytest
 import pandas as pd
 import numpy as np
 from unittest.mock import patch, MagicMock
 
 from brokers.base import Quote
-from market.quotes import get_quote, clear_quote_cache, _QUOTE_CACHE
+from market.quotes import get_quote, clear_quote_cache
 from market.history import get_ohlcv, clear_df_memory_cache
 from market.macro import get_macro_snapshot
 from engine.backtest_vectorized import _fetch_ohlcv

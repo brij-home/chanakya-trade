@@ -31,13 +31,16 @@ console = Console()
 class TimeframeSignal:
     """Signal from a single timeframe."""
 
-    timeframe: str  # "Daily" / "Hourly" / "Weekly"
+    timeframe: str  # "15m" / "1h" / "1D" / "Weekly"
     verdict: str  # BULLISH / BEARISH / NEUTRAL
     score: float
     rsi: float = 0.0
     macd_signal: str = ""  # "BULLISH_CROSS" / "BEARISH_CROSS" / "NEUTRAL"
     ema_trend: str = ""  # "ABOVE" (EMA20 > EMA50) / "BELOW"
     key_points: list[str] = field(default_factory=list)
+    signal_name: str = ""
+    key_level: str = ""
+    ema20: float = 0.0
 
 
 @dataclass
@@ -50,6 +53,60 @@ class MultiTimeframeResult:
     confluence_score: float
     alignment: str  # "ALIGNED" / "CONFLICTING" / "MIXED"
     recommendation: str
+
+    def to_dict(self) -> dict:
+        stance_str = (
+            "HIGH ALIGNMENT (STRONG LONG)"
+            if self.confluence in ("STRONG_BUY", "BUY") and self.alignment == "ALIGNED"
+            else (
+                "HIGH ALIGNMENT (STRONG SHORT)"
+                if self.confluence in ("STRONG_SELL", "SELL") and self.alignment == "ALIGNED"
+                else (
+                    "MODERATE ALIGNMENT (STALK)"
+                    if self.alignment == "ALIGNED"
+                    else "MIXED SIGNALS (STAND DOWN)"
+                )
+            )
+        )
+        conf_pct = int(min(98, max(20, int(self.confluence_score + 50))))
+        tf_items = []
+        for s in self.signals:
+            tf_tag = (
+                "15m"
+                if s.timeframe in ("15m", "15minute")
+                else (
+                    "1h"
+                    if s.timeframe in ("Hourly", "60minute", "1h")
+                    else ("1D" if s.timeframe in ("Daily", "day", "1D") else s.timeframe)
+                )
+            )
+            label_tag = (
+                "Intraday Execution"
+                if tf_tag == "15m"
+                else (
+                    "Swing Structure"
+                    if tf_tag == "1h"
+                    else ("Institutional Trend" if tf_tag == "1D" else f"{s.timeframe} Trend")
+                )
+            )
+            tf_items.append(
+                {
+                    "tf": tf_tag,
+                    "label": label_tag,
+                    "bias": s.verdict,
+                    "signal": s.signal_name or f"{s.verdict} Momentum",
+                    "rsi": round(s.rsi, 1) if s.rsi > 0 else None,
+                    "key_level": s.key_level or (f"EMA20 ₹{s.ema20:.1f}" if s.ema20 > 0 else "—"),
+                }
+            )
+        return {
+            "symbol": self.symbol,
+            "confluence_score": conf_pct,
+            "stance": stance_str,
+            "timeframes": tf_items,
+            "alignment": self.alignment,
+            "recommendation": self.recommendation,
+        }
 
     def print_analysis(self) -> None:
         table = Table(title=f"Multi-Timeframe: {self.symbol}", show_lines=True)
@@ -93,61 +150,36 @@ def multi_timeframe_analysis(
     exchange: str = "NSE",
 ) -> MultiTimeframeResult:
     """
-    Run technical analysis on multiple timeframes and check confluence.
+    Run technical analysis on multiple timeframes (15m, 1h, 1D) and check confluence.
     """
     from market.history import get_ohlcv
-    from analysis.technical import analyse
 
     signals = []
 
-    # ── Weekly ───────────────────────────────────────────────
+    # ── 15m Intraday ──────────────────────────────────────────
     try:
-        df_w = get_ohlcv(symbol, exchange, interval="day", days=365)
-        if not df_w.empty and len(df_w) >= 50:
-            # Resample to weekly
-            df_weekly = (
-                df_w.resample("W")
-                .agg(
-                    {
-                        "open": "first",
-                        "high": "max",
-                        "low": "min",
-                        "close": "last",
-                        "volume": "sum",
-                    }
-                )
-                .dropna()
-            )
-            if len(df_weekly) >= 20:
-                sig = _analyze_timeframe(df_weekly, "Weekly")
-                signals.append(sig)
+        df_15 = get_ohlcv(symbol, exchange, interval="15minute", days=10, include_live_candle=True)
+        if not df_15.empty and len(df_15) >= 15:
+            sig_15 = _analyze_timeframe(df_15, "15m")
+            signals.append(sig_15)
+    except Exception:
+        pass
+
+    # ── Hourly (60m) ──────────────────────────────────────────
+    try:
+        df_h = get_ohlcv(symbol, exchange, interval="60minute", days=30, include_live_candle=True)
+        if not df_h.empty and len(df_h) >= 20:
+            sig_h = _analyze_timeframe(df_h, "1h")
+            signals.append(sig_h)
     except Exception:
         pass
 
     # ── Daily ────────────────────────────────────────────────
     try:
-        snap = analyse(symbol, exchange)
-        daily = TimeframeSignal(
-            timeframe="Daily",
-            verdict=snap.verdict,
-            score=snap.score,
-            rsi=snap.rsi,
-            macd_signal="BULLISH_CROSS" if snap.macd_hist > 0 else "BEARISH_CROSS",
-            ema_trend="ABOVE" if snap.ema20 > snap.ema50 else "BELOW",
-            key_points=[s.description for s in snap.signals[:3]]
-            if hasattr(snap, "signals")
-            else [],
-        )
-        signals.append(daily)
-    except Exception:
-        pass
-
-    # ── Hourly (4h) ──────────────────────────────────────────
-    try:
-        df_h = get_ohlcv(symbol, exchange, interval="60minute", days=30)
-        if not df_h.empty and len(df_h) >= 20:
-            sig = _analyze_timeframe(df_h, "Hourly")
-            signals.append(sig)
+        df_d = get_ohlcv(symbol, exchange, interval="day", days=250, include_live_candle=True)
+        if not df_d.empty and len(df_d) >= 20:
+            sig_d = _analyze_timeframe(df_d, "1D")
+            signals.append(sig_d)
     except Exception:
         pass
 
@@ -236,6 +268,17 @@ def _analyze_timeframe(df: pd.DataFrame, label: str) -> TimeframeSignal:
 
     verdict = "BULLISH" if score > 10 else "BEARISH" if score < -10 else "NEUTRAL"
 
+    signal_desc = (
+        "Higher Highs (HH) Breakout"
+        if verdict == "BULLISH" and macd_hist > 0
+        else (
+            "Lower Lows (LL) Distribution"
+            if verdict == "BEARISH" and macd_hist < 0
+            else (f"{verdict} Momentum" if verdict != "NEUTRAL" else "Range Compression")
+        )
+    )
+    key_level_str = f"EMA20 ₹{ema20:.1f}" if ema20 > 0 else "—"
+
     return TimeframeSignal(
         timeframe=label,
         verdict=verdict,
@@ -243,4 +286,7 @@ def _analyze_timeframe(df: pd.DataFrame, label: str) -> TimeframeSignal:
         rsi=rsi_val,
         macd_signal="BULLISH_CROSS" if macd_hist > 0 else "BEARISH_CROSS",
         ema_trend="ABOVE" if ema20 > ema50 else "BELOW",
+        signal_name=signal_desc,
+        key_level=key_level_str,
+        ema20=ema20,
     )

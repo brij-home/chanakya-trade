@@ -200,7 +200,20 @@ def get_whale_flows(
     sector_filter: str | None = None,
     min_deal_cr: float = 0.0,
 ) -> dict[str, Any]:
-    """Return filtered whale transactions and marquee investor profiles."""
+    """Return filtered whale transactions and marquee investor profiles with dynamic LTP enrichment."""
+    # Attempt dynamic quote enrichment for whale symbols
+    live_quotes: dict[str, float] = {}
+    try:
+        from market.quotes import get_quote
+        needed_symbols = list({f"NSE:{d['symbol']}" for d in CURATED_WHALE_DEALS if "symbol" in d})
+        quotes_dict = get_quote(needed_symbols)
+        for sym_key, q in quotes_dict.items():
+            if q and getattr(q, "last_price", 0) > 0:
+                raw_sym = sym_key.split(":")[-1].upper()
+                live_quotes[raw_sym] = float(q.last_price)
+    except Exception:
+        live_quotes = {}
+
     filtered_deals = []
     total_capital_cr = 0.0
 
@@ -213,6 +226,13 @@ def get_whale_flows(
             continue
 
         deal_copy = dict(deal)
+        sym = deal_copy.get("symbol", "").upper()
+        if sym in live_quotes and live_quotes[sym] > 0:
+            deal_copy["current_ltp"] = round(live_quotes[sym], 2)
+            deal_copy["ltp_source"] = "LIVE"
+        else:
+            deal_copy["ltp_source"] = "HISTORICAL_FIXTURE"
+
         # Calculate real-time gain/loss since transaction
         p_diff = deal_copy["current_ltp"] - deal_copy["trade_price"]
         deal_copy["gain_pct_since_deal"] = round((p_diff / deal_copy["trade_price"]) * 100, 1)

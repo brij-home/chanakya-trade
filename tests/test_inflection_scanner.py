@@ -22,7 +22,6 @@ from analysis.inflection_ai import (
 )
 from analysis.inflection_scanner import (
     InflectionScanResult,
-    InflectionSetup,
     evaluate_single_stock_inflection,
     get_inflection_universes,
     scan_inflections_universe,

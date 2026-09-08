@@ -1,18 +1,33 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useInspectorStore } from '../../store/inspectorStore'
+import { useRealtimeMarket } from '../../hooks/useRealtimeMarket'
 import Tooltip, { InfoBadge } from '../UI/Tooltip'
 
 export default function PositionSizerCard({ data }) {
   const init = data?.data ?? data ?? {}
   const openInspector = useInspectorStore((s) => s.openInspector)
+  const { getTicker } = useRealtimeMarket()
 
   const [symbol, setSymbol] = useState(init.symbol || 'NIFTY')
-  const [entryPrice, setEntryPrice] = useState(Number(init.entry_price || 24000))
-  const [stopLoss, setStopLoss] = useState(Number(init.stop_loss || (init.entry_price ? init.entry_price * 0.98 : 23600)))
+  const liveTick = getTicker(symbol)
+  const liveLtp = liveTick?.ltp != null && liveTick.ltp > 0 ? Number(liveTick.ltp) : (liveTick?.price != null && liveTick.price > 0 ? Number(liveTick.price) : null)
+
+  const initialEntry = Number(init.entry_price || init.ltp || liveLtp || 0)
+  const [entryPrice, setEntryPrice] = useState(initialEntry)
+  const [stopLoss, setStopLoss] = useState(Number(init.stop_loss || (initialEntry > 0 ? initialEntry * 0.98 : 0)))
   const [capital, setCapital] = useState(Number(init.capital || 200000))
   const [riskPct, setRiskPct] = useState(Number(init.max_risk_pct || 1.5))
   const [model, setModel] = useState(init.sizing_model || 'atr_volatility')
   const [isFno, setIsFno] = useState(Boolean(init.is_fno || ['NIFTY', 'BANKNIFTY', 'FINNIFTY'].includes(symbol)))
+
+  useEffect(() => {
+    if (entryPrice === 0 && liveLtp && liveLtp > 0) {
+      setEntryPrice(liveLtp)
+      if (stopLoss === 0) {
+        setStopLoss(Math.round(liveLtp * 0.98 * 10) / 10)
+      }
+    }
+  }, [liveLtp])
 
   // Stop distance
   const stopDist = Math.max(0.01, Math.abs(entryPrice - stopLoss))

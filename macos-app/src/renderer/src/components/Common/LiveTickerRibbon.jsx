@@ -1,134 +1,42 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
-import { useAPI } from '../../hooks/useAPI'
-import { useChatStore, getBaseUrl } from '../../store/chatStore'
-import { useSSEStream } from '../../hooks/useSSEStream'
+import { useState, useRef } from 'react'
+import { useRealtimeMarket } from '../../hooks/useRealtimeMarket'
+import { formatLivePrice, formatLiveChange, classifyDataSource } from '../../utils/marketDataUtils'
 
 /**
  * LiveTickerRibbon — High-density, institutional-grade real-time ticker ribbon
  * for Major Indian Indices (NIFTY, BANK NIFTY, SENSEX, FIN NIFTY, INDIA VIX),
  * MCX Commodities (CRUDE OIL, GOLD, SILVER), and Crypto (BITCOIN).
  *
- * Real-Time Features:
- * - Direct SSE (Server-Sent Events) live streaming from /api/ticker/stream
- * - Sub-second visual flash animations on tick updates (emerald for up, rose for down)
- * - Automatic connection status indicator (● LIVE STREAM vs ● CONNECTING)
- * - Standard physical quotation unit badges (₹/bbl, ₹/10g, ₹/kg, $, pts)
- * - 1-Click symbol switching to sync active Terminal chart and multi-agent setup
- * - Smooth horizontal scroll controls and responsive touch/wheel panning
+ * Connected directly to useRealtimeMarket singleton SSOT stream.
  */
 export default function LiveTickerRibbon({
-  tickers: initialTickers = null,
+  tickers: propTickers = null,
   selectedSymbol = 'NIFTY',
   onSelectSymbol = () => {},
   className = '',
 }) {
-  const { call } = useAPI()
-  const port = useChatStore((s) => s.port)
-  const baseUrl = getBaseUrl(port)
+  const {
+    tickers: storeTickers,
+    flashMap,
+    connectionState,
+    isRealtime,
+    dataSource,
+    lastUpdated,
+    refresh,
+  } = useRealtimeMarket()
 
-  const [tickers, setTickers] = useState(initialTickers || [])
-  const [loading, setLoading] = useState(!initialTickers || initialTickers.length === 0)
-  const [lastUpdated, setLastUpdated] = useState(new Date())
   const [isRefreshing, setIsRefreshing] = useState(false)
-  const [flashMap, setFlashMap] = useState({}) // { [symbol]: 'up' | 'down' }
   const scrollContainerRef = useRef(null)
-  // Ref-tracked flash timers — cleared on unmount, never fire on unmounted component
-  const flashTimersRef = useRef([])
 
-  // Sync initial tickers from parent if passed
-  useEffect(() => {
-    if (initialTickers && initialTickers.length > 0 && tickers.length === 0) {
-      setTickers(initialTickers)
-      setLoading(false)
-      setLastUpdated(new Date())
-    }
-  }, [initialTickers])
-
-  // Fallback REST fetcher with dual-endpoint resilience
-  const fetchLiveTickers = async (showPulse = false) => {
-    try {
-      if (showPulse) setIsRefreshing(true)
-      let list = null
-      try {
-        const res = await call('/skills/live_tickers', {}, { method: 'GET' })
-        list = res?.data?.tickers || res?.tickers
-      } catch {}
-      if (!Array.isArray(list) || list.length === 0) {
-        try {
-          const snapRes = await call('/api/ticker/snapshot', {}, { method: 'GET' })
-          list = snapRes?.tickers || snapRes?.data?.tickers
-        } catch {}
-      }
-      if (Array.isArray(list) && list.length > 0) {
-        setTickers(list)
-        setLastUpdated(new Date())
-        setLoading(false)
-      }
-    } catch (err) {
-      console.warn('Live tickers fetch error:', err)
-    } finally {
-      if (showPulse) {
-        setTimeout(() => setIsRefreshing(false), 400)
-      }
-    }
-  }
-
-  // ── REAL-TIME SSE STREAMING via useSSEStream ─────────────────────────────
-  // Fix: useSSEStream uses internal refs — no stale closure, no spurious reconnects.
-  // The fallback REST poll is driven by a ref, not stale state.
-  const handleSSEMessage = useCallback((payload) => {
-    const incomingTickers = payload?.tickers || payload?.data?.tickers
-    if (!Array.isArray(incomingTickers) || incomingTickers.length === 0) return
-
-    setTickers((prev) => {
-      const flashes = {}
-      for (const inc of incomingTickers) {
-        const old = prev.find((p) => p.symbol === inc.symbol)
-        if (old && typeof inc.ltp === 'number' && typeof old.ltp === 'number' && inc.ltp !== old.ltp) {
-          flashes[inc.symbol] = inc.ltp > old.ltp ? 'up' : 'down'
-        }
-      }
-      if (Object.keys(flashes).length > 0) {
-        setFlashMap(flashes)
-        // Fix: use ref-tracked timer so it won't fire after unmount
-        const t = setTimeout(() => setFlashMap({}), 700)
-        flashTimersRef.current.push(t)
-      }
-      return incomingTickers
-    })
-    setLoading(false)
-    setLastUpdated(new Date())
-  }, [])
-
-  const { connectionState } = useSSEStream(`${baseUrl}/api/ticker/stream`, {
-    onMessage: handleSSEMessage,
-    onOpen: () => {
-      setLoading(false)
-      setLastUpdated(new Date())
-    },
-    enabled: !!baseUrl,
-  })
-
+  const tickers = (propTickers && propTickers.length > 0) ? propTickers : storeTickers
+  const loading = tickers.length === 0
   const isStreaming = connectionState === 'live'
 
-  // Clear all pending flash timers on unmount
-  useEffect(() => {
-    return () => {
-      flashTimersRef.current.forEach(clearTimeout)
-      flashTimersRef.current = []
-    }
-  }, [])
-
-  // Resilient fallback REST poll ONLY when SSE is not live.
-  // Fix: uses connectionState (current render value) not a stale closure variable.
-  useEffect(() => {
-    if (!tickers || tickers.length === 0) {
-      fetchLiveTickers(false)
-    }
-    if (isStreaming) return // SSE is live — no polling needed
-    const fallbackTimer = setInterval(() => fetchLiveTickers(false), 5000)
-    return () => clearInterval(fallbackTimer)
-  }, [isStreaming])
+  const handleManualRefresh = () => {
+    setIsRefreshing(true)
+    refresh()
+    setTimeout(() => setIsRefreshing(false), 500)
+  }
 
   const scrollLeft = () => {
     if (scrollContainerRef.current) {
@@ -180,7 +88,7 @@ export default function LiveTickerRibbon({
       {/* Live Streaming Indicator & Manual Refresh */}
       <div className="flex items-center gap-2 pl-1 pr-2 py-0.5 border-r flex-shrink-0" style={{ borderColor: 'var(--color-border)' }}>
         {isStreaming ? (
-          <div className="flex items-center gap-1.5" title={`Real-time SSE Stream Connected • Updated ${lastUpdated.toLocaleTimeString()}`}>
+          <div className="flex items-center gap-1.5" title={`Real-time SSE Stream Connected • Updated ${lastUpdated ? lastUpdated.toLocaleTimeString() : 'now'}`}>
             <span className="relative flex h-2 w-2">
               <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
               <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
@@ -198,7 +106,7 @@ export default function LiveTickerRibbon({
           </div>
         )}
         <button
-          onClick={() => fetchLiveTickers(true)}
+          onClick={handleManualRefresh}
           className={`text-[11px] p-1 rounded-md text-muted hover:text-text transition-all cursor-pointer ${isRefreshing ? 'animate-spin text-amber' : ''}`}
           title="Manual refresh"
           aria-label="Refresh live tickers"

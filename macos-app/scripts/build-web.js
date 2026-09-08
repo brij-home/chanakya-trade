@@ -36,11 +36,15 @@ function copyDir(s, d) {
   }
 }
 
-// Copy assets directory
+// Clean and copy assets directory
 const assetsDir = path.join(src, 'assets')
+const destAssetsDir = path.join(dest, 'assets')
+if (fs.existsSync(destAssetsDir)) {
+  fs.rmSync(destAssetsDir, { recursive: true, force: true })
+}
 if (fs.existsSync(assetsDir)) {
-  copyDir(assetsDir, path.join(dest, 'assets'))
-  console.log('  Copied assets/')
+  copyDir(assetsDir, destAssetsDir)
+  console.log('  Cleaned and copied assets/')
 }
 
 // Read the original index.html and inject electron stubs

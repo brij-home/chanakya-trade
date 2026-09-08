@@ -8,6 +8,7 @@ is logged in or the broker call fails.
 
 from __future__ import annotations
 
+import re
 import time
 import threading
 from collections import OrderedDict
@@ -19,6 +20,11 @@ from brokers.base import Quote
 from brokers.session import get_data_broker, get_data_broker_key
 from engine.observability import get_registry, new_correlation_id
 from market.data_events import classify_data_state, utc_now_iso
+
+_OPTION_PATTERN = re.compile(
+    r"^(?:NFO:|BFO:|NSE:|BSE:)?([A-Za-z]+?)(?:\d{2}[A-Z]{3})?(\d{4,6})(CE|PE)$",
+    re.IGNORECASE,
+)
 
 _quote_cache_lock = threading.Lock()
 _QUOTE_CACHE: OrderedDict[str, tuple[float, Quote]] = OrderedDict()
@@ -132,15 +138,74 @@ def _ws_quotes(instruments: list[str], *, correlation_id: str) -> dict[str, Quot
         return {}
 
 
+def _options_quotes(instruments: list[str], *, correlation_id: str) -> dict[str, Quote]:
+    """Resolve derivative option contract quotes directly from options snapshot (mStock / NSE scraper) without hitting yfinance."""
+    try:
+        from market.options import get_options_snapshot
+
+        res: dict[str, Quote] = {}
+        by_und: dict[str, list[tuple[str, str, float, str]]] = {}
+        for inst in instruments:
+            clean = inst.split(":")[-1].strip().upper()
+            m = _OPTION_PATTERN.match(clean)
+            if not m:
+                continue
+            und, strike_str, opt_type = m.groups()
+            by_und.setdefault(und.upper(), []).append((inst, clean, float(strike_str), opt_type.upper()))
+
+        for und, items in by_und.items():
+            try:
+                contracts, spot, expiries, src_info = get_options_snapshot(und)
+                for inst, clean, strike, opt_type in items:
+                    for c in contracts:
+                        if c.option_type == opt_type and abs(c.strike - strike) < 0.01:
+                            q = Quote(
+                                symbol=clean,
+                                last_price=c.last_price,
+                                open=c.open,
+                                high=c.high,
+                                low=c.low,
+                                close=c.close,
+                                volume=c.volume,
+                                change=c.change,
+                                change_pct=c.change_pct,
+                            )
+                            res[inst] = _enrich_quote(
+                                q,
+                                instrument=inst,
+                                provider=src_info.get("provider", "mstock"),
+                                source="REST",
+                                correlation_id=correlation_id,
+                            )
+                            break
+            except Exception:
+                pass
+        return res
+    except Exception:
+        return {}
+
+
 def _yf_fallback_quotes(
     instruments: list[str], *, correlation_id: Optional[str] = None
 ) -> dict[str, Quote]:
-    """Try yfinance when broker is unavailable."""
+    """Try yfinance when broker is unavailable (skips Indian options which yfinance does not host)."""
     try:
         from market.yfinance_provider import yf_get_quotes, yf_available
 
+        yf_eligible = [
+            i
+            for i in instruments
+            if not (
+                i.startswith("NFO:")
+                or i.startswith("BFO:")
+                or _OPTION_PATTERN.match(i.split(":")[-1])
+            )
+        ]
+        if not yf_eligible:
+            return {}
+
         if yf_available():
-            raw = yf_get_quotes(instruments)
+            raw = yf_get_quotes(yf_eligible)
             cid = correlation_id or new_correlation_id("quote")
             return {
                 instrument: _enrich_quote(

@@ -24,6 +24,7 @@ import ForensicCard from '../renderer/src/components/Cards/ForensicCard'
 import FunnelCard from '../renderer/src/components/Cards/FunnelCard'
 import WhaleFlowsCard from '../renderer/src/components/Cards/WhaleFlowsCard'
 import PersonaTrackRecordCard from '../renderer/src/components/Cards/PersonaTrackRecordCard'
+import ScanCard from '../renderer/src/components/Cards/ScanCard'
 import Message from '../renderer/src/components/Chat/Message'
 
 // Mock matchMedia and ResizeObserver for JSDOM test environment
@@ -588,17 +589,7 @@ describe('React Component Rendering & Hook Invariant Gates', () => {
       const pcrSentiment = await res.findAllByText(/2\. PCR SENTIMENT/i)
       expect(pcrSentiment.length).toBeGreaterThan(0)
 
-      // Chart Toggle button present and CandlestickChart is rendered
-      const chartToggleBtn = res.getByTitle(/Toggle Real-Time Synced Candlestick Chart/i)
-      expect(chartToggleBtn).toBeTruthy()
-      expect(chartToggleBtn.textContent).toContain('Chart: ON')
-      expect(res.getByTestId('mock-candlestick-chart')).toBeTruthy()
-
-      // Click to toggle chart OFF
-      await act(async () => {
-        fireEvent.click(chartToggleBtn)
-      })
-      expect(chartToggleBtn.textContent).toContain('Chart: OFF')
+      // CandlestickChart is completely excluded from Options Desk view
       expect(res.queryByTestId('mock-candlestick-chart')).toBeNull()
 
       // Switch underlying instrument to BANKNIFTY
@@ -1052,6 +1043,70 @@ describe('React Component Rendering & Hook Invariant Gates', () => {
       expect(await findByText(/BSE SENSEX Spot Streaming • Broker Required for BFO Chain/i)).toBeTruthy()
       const brokerReqBadges = await findAllByText(/BROKER CONNECTION REQUIRED/i)
       expect(brokerReqBadges.length).toBeGreaterThan(0)
+    })
+  })
+
+  describe('ScanCard Component', () => {
+    it('renders unusual open interest without duplicate symbol buttons and with contract badges', () => {
+      const mockScanData = {
+        summary: 'Scanned 2 symbols. High IV: 0 | Unusual OI: 2 symbols (4 strikes) | Put writing: 0',
+        high_iv: [],
+        unusual_oi: [
+          {
+            symbol: 'NIFTY',
+            strike: 23750,
+            option_type: 'CE',
+            contract: 'NIFTY 23750 CE',
+            oi: 81508,
+            oi_change: 74106,
+            oi_change_pct: 1001.2,
+            spikes_count: 3,
+          },
+          // Even if upstream passes a duplicate NIFTY strike:
+          {
+            symbol: 'NIFTY',
+            strike: 23800,
+            option_type: 'CE',
+            contract: 'NIFTY 23800 CE',
+            oi: 263307,
+            oi_change: 232579,
+            oi_change_pct: 756.9,
+          },
+          {
+            symbol: 'BANKNIFTY',
+            strike: 53800,
+            option_type: 'PE',
+            contract: 'BANKNIFTY 53800 PE',
+            oi: 511,
+            oi_change: 391,
+            oi_change_pct: 325.8,
+            spikes_count: 1,
+          },
+        ],
+        high_put_writing: [],
+      }
+
+      render(<ScanCard data={mockScanData} />)
+
+      // Section header exists
+      expect(screen.getByText(/Unusual Open Interest Spike/i)).toBeTruthy()
+
+      // Verify NIFTY is rendered exactly once in the unusual_oi section
+      const niftyButtons = screen
+        .getAllByRole('button')
+        .filter((b) => b.textContent.includes('NIFTY') && !b.textContent.includes('BANKNIFTY'))
+      expect(niftyButtons.length).toBe(1)
+
+      // Verify contract strike badge
+      expect(screen.getByText('23750 CE')).toBeTruthy()
+      expect(screen.getByText('53800 PE')).toBeTruthy()
+
+      // Verify correct percentage display
+      expect(screen.getByText('OI +1,001.2%')).toBeTruthy()
+      expect(screen.getByText('OI +325.8%')).toBeTruthy()
+
+      // Verify spikes badge
+      expect(screen.getByText('3⚡')).toBeTruthy()
     })
   })
 })

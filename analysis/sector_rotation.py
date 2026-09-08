@@ -650,6 +650,11 @@ class StockTailwind:
     tailwind_score: int
     alignment: str
     analysis: str
+    status: str = "AVAILABLE"
+
+    @property
+    def sector_name(self) -> str:
+        return self.sector
 
     def __getitem__(self, item: str) -> Any:
         return getattr(self, item)
@@ -661,12 +666,14 @@ class StockTailwind:
         return {
             "symbol": self.symbol,
             "sector": self.sector,
+            "sector_name": self.sector,
             "quadrant": self.quadrant,
             "rs_ratio": self.rs_ratio,
             "rs_momentum": self.rs_momentum,
             "tailwind_score": self.tailwind_score,
             "alignment": self.alignment,
             "analysis": self.analysis,
+            "status": self.status,
         }
 
     def to_dict(self) -> dict[str, Any]:
@@ -711,6 +718,9 @@ def get_stock_tailwind(
                 "chemicals": "PHARMA",
                 "telecom": "INFRA",
                 "railways": "INFRA",
+                "commodity": "METAL",
+                "currency": "BROAD_MARKET",
+                "etf": "BROAD_MARKET",
                 "broad_market": "BROAD_MARKET",
             }
             sector = taxonomy_map.get(sec_id, "BROAD_MARKET")

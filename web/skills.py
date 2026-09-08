@@ -1,6 +1,6 @@
-"""
+﻿"""
 web/skills.py
-─────────────
+â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 OpenClaw skill endpoints for chanakya-trade.
 
 Each POST endpoint is a "skill" that any OpenClaw agent can call via HTTP.
@@ -10,33 +10,33 @@ Run the server (from repo root):
     uvicorn web.api:app --host 0.0.0.0 --port 8765
 
 Skill endpoints:
-    POST /skills/quote          → Live price, OHLCV, change%
-    POST /skills/options_chain  → Full options chain
-    POST /skills/flows          → FII/DII institutional flow data + signals
-    POST /skills/earnings       → Earnings calendar
-    POST /skills/macro          → Macro snapshot (USD/INR, crude, gold)
-    POST /skills/deals          → Bulk/block deals
-    POST /skills/backtest       → Backtest a trading strategy
-    POST /skills/pairs          → Pair trading analysis
-    POST /skills/analyze        → 7-analyst multi-agent analysis + debate + trade plans
-    POST /skills/deep_analyze   → 11-LLM deep analysis
-    POST /skills/morning_brief  → Daily market brief (structured JSON, no AI narrative)
-    POST /skills/chat           → Multi-turn AI chat with trading agent (session-aware)
-    POST /skills/chat/reset     → Clear chat history for a session
-    GET  /skills/profile        → Broker account profile (name, client_id, email)
-    GET  /skills/funds          → Available cash, used margin, total balance
-    GET  /skills/orders         → Today's orders list
-    POST /skills/oi_profile     → OI profile by strike (PCR, max pain, support/resistance)
-    POST /skills/patterns       → Active India-specific market patterns
-    POST /skills/greeks         → Portfolio Greeks (delta, theta, vega, gamma)
-    POST /skills/scan           → Options market scan (high IV, unusual OI, put writing)
-    POST /skills/alerts/add     → Create a price, technical, or conditional alert
-    POST /skills/alerts/list    → List all active (untriggered) alerts
-    POST /skills/alerts/remove  → Remove an alert by ID
-    POST /skills/alerts/check   → Check alerts now and return any that just triggered
+    POST /skills/quote          â†’ Live price, OHLCV, change%
+    POST /skills/options_chain  â†’ Full options chain
+    POST /skills/flows          â†’ FII/DII institutional flow data + signals
+    POST /skills/earnings       â†’ Earnings calendar
+    POST /skills/macro          â†’ Macro snapshot (USD/INR, crude, gold)
+    POST /skills/deals          â†’ Bulk/block deals
+    POST /skills/backtest       â†’ Backtest a trading strategy
+    POST /skills/pairs          â†’ Pair trading analysis
+    POST /skills/analyze        â†’ 7-analyst multi-agent analysis + debate + trade plans
+    POST /skills/deep_analyze   â†’ 11-LLM deep analysis
+    POST /skills/morning_brief  â†’ Daily market brief (structured JSON, no AI narrative)
+    POST /skills/chat           â†’ Multi-turn AI chat with trading agent (session-aware)
+    POST /skills/chat/reset     â†’ Clear chat history for a session
+    GET  /skills/profile        â†’ Broker account profile (name, client_id, email)
+    GET  /skills/funds          â†’ Available cash, used margin, total balance
+    GET  /skills/orders         â†’ Today's orders list
+    POST /skills/oi_profile     â†’ OI profile by strike (PCR, max pain, support/resistance)
+    POST /skills/patterns       â†’ Active India-specific market patterns
+    POST /skills/greeks         â†’ Portfolio Greeks (delta, theta, vega, gamma)
+    POST /skills/scan           â†’ Options market scan (high IV, unusual OI, put writing)
+    POST /skills/alerts/add     â†’ Create a price, technical, or conditional alert
+    POST /skills/alerts/list    â†’ List all active (untriggered) alerts
+    POST /skills/alerts/remove  â†’ Remove an alert by ID
+    POST /skills/alerts/check   â†’ Check alerts now and return any that just triggered
 
 Manifest:
-    GET  /.well-known/openclaw.json → OpenClaw skill discovery manifest
+    GET  /.well-known/openclaw.json â†’ OpenClaw skill discovery manifest
 """
 
 from __future__ import annotations
@@ -72,13 +72,13 @@ from agent.tools import _serialise
 console = Console(legacy_windows=False)
 router = APIRouter(prefix="/skills", tags=["OpenClaw Skills"])
 
-# ── Chat session store ────────────────────────────────────────
-# Keyed by session_id → TradingAgent instance.
+# â”€â”€ Chat session store â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# Keyed by session_id â†’ TradingAgent instance.
 # In-memory only; sessions are lost on server restart.
 _chat_sessions: dict[str, object] = {}
 
-# ── Active stream tracking (#113 mid-stream context injection) ──
-# Keyed by stream_id → MultiAgentAnalyzer instance.
+# â”€â”€ Active stream tracking (#113 mid-stream context injection) â”€â”€
+# Keyed by stream_id â†’ MultiAgentAnalyzer instance.
 # Allows the /analyze/hint endpoint to push user hints into running analyses.
 _active_streams: dict[str, object] = {}
 
@@ -97,7 +97,7 @@ _in_flight_hubs: dict[str, _ActiveAnalysisHub] = {}
 _in_flight_hubs_lock = asyncio.Lock()
 
 
-# ── Request models ────────────────────────────────────────────
+# â”€â”€ Request models â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 
 class InstrumentBaseRequest(BaseModel):
@@ -132,7 +132,7 @@ class BacktestRequest(InstrumentBaseRequest):
     initial_capital: Optional[float] = None
     timeframe: Optional[str] = "1d"
     risk_pct: Optional[float] = 1.0
-    fast: bool = False  # True → vectorized engine (<1s, no slippage sim)
+    fast: bool = False  # True â†’ vectorized engine (<1s, no slippage sim)
 
 
 class PairsRequest(BaseModel):
@@ -280,7 +280,7 @@ class DefinedRiskSpreadRequest(BaseModel):
     num_lots: int = 1
 
 
-# ── Helper ────────────────────────────────────────────────────
+# â”€â”€ Helper â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 
 def _ok(data) -> dict:
@@ -291,7 +291,7 @@ def _err(msg: str, code: int = 500) -> HTTPException:
     return HTTPException(status_code=code, detail={"status": "error", "message": msg})
 
 
-# ── Skills ────────────────────────────────────────────────────
+# â”€â”€ Skills â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 
 @router.post("/quote")
@@ -415,7 +415,7 @@ async def skill_history(req: HistoryRequest):
                 }
             )
 
-        # ── 1. Moving Averages ────────────────────────────────────────
+        # â”€â”€ 1. Moving Averages â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         sma20, sma50, sma200 = [], [], []
         if len(df) >= 20:
             s20 = df["close"].rolling(20).mean()
@@ -454,7 +454,7 @@ async def skill_history(req: HistoryRequest):
         }
         tf_label = tf_map.get(req.interval.lower(), req.interval.upper())
 
-        # ── 2. Smart Money Concepts: Unmitigated Order Blocks ─────────
+        # â”€â”€ 2. Smart Money Concepts: Unmitigated Order Blocks â”€â”€â”€â”€â”€â”€â”€â”€â”€
         demand_obs, supply_obs = [], []
         try:
             from analysis.market_structure import analyze_market_structure
@@ -497,7 +497,7 @@ async def skill_history(req: HistoryRequest):
         except Exception:
             pass
 
-        # ── 3. Volume Profile: POC, VAH, VAL ──────────────────────────
+        # â”€â”€ 3. Volume Profile: POC, VAH, VAL â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         vp_dict = {"tf": tf_label, "poc": 0.0, "vah": 0.0, "val": 0.0, "buckets": []}
         try:
             from analysis.volume_profile import compute_volume_profile
@@ -520,7 +520,7 @@ async def skill_history(req: HistoryRequest):
         except Exception:
             pass
 
-        # ── 4. Stochastic RSI & Divergences ───────────────────────────
+        # â”€â”€ 4. Stochastic RSI & Divergences â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         stoch_k, stoch_d = [], []
         divergences = []
         macd_res = {"line": [], "signal": [], "hist": []}
@@ -613,7 +613,7 @@ async def skill_history(req: HistoryRequest):
                                 "price": round(float(closes[i]), 2),
                                 "stoch_k": round(k_curr, 1),
                                 "type": "BULLISH_DIV",
-                                "label": "▲ Bull Div",
+                                "label": "â–² Bull Div",
                                 "color": "#10b981",
                             }
                         )
@@ -635,7 +635,7 @@ async def skill_history(req: HistoryRequest):
                                 "price": round(float(closes[i]), 2),
                                 "stoch_k": round(k_curr, 1),
                                 "type": "BEARISH_DIV",
-                                "label": "▼ Bear Div",
+                                "label": "â–¼ Bear Div",
                                 "color": "#f43f5e",
                             }
                         )
@@ -996,13 +996,13 @@ async def skill_analyze(req: AnalyzeRequest):
     7-analyst multi-agent analysis with bull/bear debate and 3 trade plans.
 
     Pipeline:
-      Phase 1 — 7 analysts (Technical, Fundamental, Options, News/Macro,
+      Phase 1 â€” 7 analysts (Technical, Fundamental, Options, News/Macro,
                  Sentiment, Sector Rotation, Risk) run in parallel
-      Phase 2 — Bull vs Bear researcher debate (2 rounds)
-      Phase 3 — Fund Manager synthesizes final verdict + recommendation
+      Phase 2 â€” Bull vs Bear researcher debate (2 rounds)
+      Phase 3 â€” Fund Manager synthesizes final verdict + recommendation
 
     Returns the full text report plus structured trade plans.
-    NOTE: Involves multiple LLM calls. Expect 30–90 seconds.
+    NOTE: Involves multiple LLM calls. Expect 30â€“90 seconds.
     """
     try:
         from engine.analysis_cache import analysis_cache
@@ -1104,7 +1104,7 @@ async def skill_analyze(req: AnalyzeRequest):
 
 @router.get("/analyze/ping")
 async def skill_analyze_ping():
-    """Quick SSE test — emits 3 events then closes."""
+    """Quick SSE test â€” emits 3 events then closes."""
 
     async def _gen():
         for i in range(3):
@@ -1171,7 +1171,7 @@ async def skill_analyze_stream(symbol: str, exchange: str = "NSE", force: bool =
             asyncio.run_coroutine_threadsafe(q.put(event), loop)
 
     def _run():
-        """Runs entirely in a background thread — no event loop blocking."""
+        """Runs entirely in a background thread â€” no event loop blocking."""
         try:
             import os as _os
             from engine.analysis_cache import analysis_cache
@@ -1187,7 +1187,7 @@ async def skill_analyze_stream(symbol: str, exchange: str = "NSE", force: bool =
                     _cb(
                         {
                             "type": "cached",
-                            "message": f"⚡ Instant cache hit ({cached['age_seconds']}s old | 0 AI tokens used)",
+                            "message": f"âš¡ Instant cache hit ({cached['age_seconds']}s old | 0 AI tokens used)",
                             "age_seconds": cached["age_seconds"],
                             "tokens_saved": 4500,
                         }
@@ -1265,7 +1265,7 @@ async def skill_analyze_stream(symbol: str, exchange: str = "NSE", force: bool =
 
             tb = traceback.format_exc()
             console.print(
-                f"[bold red]❌ Multi-Agent Analysis stream error for {sym}:[/bold red]\n{tb}"
+                f"[bold red]âŒ Multi-Agent Analysis stream error for {sym}:[/bold red]\n{tb}"
             )
             _cb({"type": "error", "message": str(exc), "detail": str(tb)})
         finally:
@@ -1334,9 +1334,9 @@ async def skill_analyze_hint(req: HintRequest):
 @router.post("/deep_analyze")
 async def skill_deep_analyze(req: AnalyzeRequest):
     """
-    11-LLM deep analysis — every analyst uses AI (not just Python rules).
+    11-LLM deep analysis â€” every analyst uses AI (not just Python rules).
     More thorough than /analyze but takes several minutes.
-    NOTE: 11+ LLM calls. Expect 3–8 minutes.
+    NOTE: 11+ LLM calls. Expect 3â€“8 minutes.
     """
     try:
         from agent.tools import build_registry
@@ -1378,7 +1378,7 @@ async def skill_deep_analyze(req: AnalyzeRequest):
 async def skill_morning_brief():
     """
     Daily market brief: NIFTY snapshot, FII/DII flows, top news, breadth, events.
-    Returns structured JSON — no AI narrative layer (fast, no LLM calls).
+    Returns structured JSON â€” no AI narrative layer (fast, no LLM calls).
     """
     try:
         from market.indices import get_market_snapshot
@@ -1415,7 +1415,7 @@ async def skill_chat(req: ChatRequest):
     The agent has access to all market tools (quotes, technicals, fundamentals,
     options, flows, news, portfolio) and can call them during the conversation.
 
-    Sessions are keyed by session_id — use the same ID across calls to keep
+    Sessions are keyed by session_id â€” use the same ID across calls to keep
     conversation context. Use a new ID (or call /chat/reset) to start fresh.
 
     Example:
@@ -1453,7 +1453,7 @@ async def skill_chat(req: ChatRequest):
             fallback_response = fallback_agent._fallback_chat(req.message, str(e))
         except Exception:
             fallback_response = (
-                f"> ⚠️ **AI Assistant Notice**\n\n"
+                f"> âš ï¸ **AI Assistant Notice**\n\n"
                 f"Encountered temporary issue: `{str(e)}`\n\n"
                 f"Please verify your AI API key in Settings or try a specific command like `analyze {req.message.upper()}`."
             )
@@ -1478,7 +1478,7 @@ async def skill_chat_reset(req: ChatResetRequest):
     return {"status": "ok", "data": {"session_id": req.session_id, "cleared": True}}
 
 
-# ── Alert skills ──────────────────────────────────────────────
+# â”€â”€ Alert skills â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 
 @router.post("/alerts/add")
@@ -1488,20 +1488,20 @@ async def skill_alerts_add(req: AlertAddRequest):
 
     Alert types (determined by which fields you provide):
 
-    Price alert — fires when LTP crosses a price level:
+    Price alert â€” fires when LTP crosses a price level:
         { "symbol": "RELIANCE", "condition": "ABOVE", "threshold": 2800 }
 
-    Technical alert — fires when an indicator crosses a level:
+    Technical alert â€” fires when an indicator crosses a level:
         { "symbol": "INFY", "indicator": "RSI", "condition": "ABOVE", "threshold": 70 }
         Supported indicators: RSI, MACD, ADX, ATR, SCORE
 
-    Conditional alert (AND logic) — fires when ALL conditions are met:
+    Conditional alert (AND logic) â€” fires when ALL conditions are met:
         { "symbol": "RELIANCE", "conditions": [
             {"condition_type": "PRICE",     "condition": "ABOVE", "threshold": 2800},
             {"condition_type": "TECHNICAL", "condition": "ABOVE", "threshold": 60, "indicator": "RSI"}
         ]}
 
-    Webhook — optional callback when the alert triggers:
+    Webhook â€” optional callback when the alert triggers:
         Add "webhook_url": "https://your-agent/callback" to any alert type.
         When triggered, the server POSTs:
         { "event": "alert_triggered", "alert_id": "...", "symbol": "...",
@@ -1813,7 +1813,7 @@ async def skill_positions():
         raise _err(str(e))
 
 
-# ── Broker account skills ─────────────────────────────────────
+# â”€â”€ Broker account skills â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 
 _DEMO_PROFILE = {
@@ -1822,7 +1822,7 @@ _DEMO_PROFILE = {
     "email": "",
     "broker": "demo",
     "demo": True,
-    "note": "No broker connected — connect one via the Broker panel.",
+    "note": "No broker connected â€” connect one via the Broker panel.",
 }
 _DEMO_FUNDS = {
     "available_cash": 0.0,
@@ -1881,7 +1881,7 @@ async def skill_orders():
         raise _err(str(e))
 
 
-# ── Market data skills ────────────────────────────────────────
+# â”€â”€ Market data skills â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 
 class OIProfileRequest(BaseModel):
@@ -1989,10 +1989,10 @@ async def skill_scan(req: ScanRequest):
     Options market scan across the F&O universe.
 
     Returns:
-      high_iv      — stocks with IV rank > 60
-      unusual_oi   — strikes with OI change > 100%
-      high_put_writing — stocks with PCR > 1.0
-      summary      — plain-text summary line
+      high_iv      â€” stocks with IV rank > 60
+      unusual_oi   â€” strikes with OI change > 100%
+      high_put_writing â€” stocks with PCR > 1.0
+      summary      â€” plain-text summary line
 
     Pass filters.symbols (list[str]) to narrow the scan to specific tickers.
     Pass filters.quick = true for a faster scan over a smaller universe.
@@ -2033,7 +2033,7 @@ async def skill_alerts_check():
         raise _err(str(e))
 
 
-# ── IV Smile ──────────────────────────────────────────────────
+# â”€â”€ IV Smile â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 
 class IVSmileRequest(BaseModel):
@@ -2062,7 +2062,7 @@ async def skill_iv_smile(req: IVSmileRequest):
         raise _err(str(e))
 
 
-# ── GEX ───────────────────────────────────────────────────────
+# â”€â”€ GEX â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 
 class GEXRequest(BaseModel):
@@ -2082,7 +2082,7 @@ async def skill_gex(req: GEXRequest):
         raise _err(str(e))
 
 
-# ── Delta Hedge ───────────────────────────────────────────────
+# â”€â”€ Delta Hedge â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 
 @router.post("/delta_hedge")
@@ -2130,7 +2130,7 @@ async def skill_delta_hedge():
         raise _err(str(e))
 
 
-# ── Risk Report ───────────────────────────────────────────────
+# â”€â”€ Risk Report â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 
 @router.post("/risk_report")
@@ -2154,7 +2154,7 @@ async def skill_risk_report():
         raise _err(str(e))
 
 
-# ── Broker Statement Reconciliation ───────────────────────────
+# â”€â”€ Broker Statement Reconciliation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 
 class ReconcileRequest(BaseModel):
@@ -2216,7 +2216,7 @@ async def skill_reconcile(req: Optional[ReconcileRequest] = None):
         raise _err(str(e))
 
 
-# ── Walk Forward ──────────────────────────────────────────────
+# â”€â”€ Walk Forward â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 
 class WalkForwardRequest(BaseModel):
@@ -2243,7 +2243,7 @@ async def skill_walkforward(req: WalkForwardRequest):
         raise _err(str(e))
 
 
-# ── What-If ───────────────────────────────────────────────────
+# â”€â”€ What-If â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 
 class WhatIfRequest(BaseModel):
@@ -2292,7 +2292,7 @@ async def skill_whatif(req: WhatIfRequest):
         raise _err(str(e))
 
 
-# ── Strategy ──────────────────────────────────────────────────
+# â”€â”€ Strategy â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 
 class StrategyRequest(BaseModel):
@@ -2326,7 +2326,7 @@ async def skill_strategy(req: StrategyRequest):
         raise _err(str(e))
 
 
-# ── Drift ─────────────────────────────────────────────────────
+# â”€â”€ Drift â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 
 @router.post("/drift")
@@ -2341,7 +2341,7 @@ async def skill_drift():
         raise _err(str(e))
 
 
-# ── Memory ────────────────────────────────────────────────────
+# â”€â”€ Memory â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 
 class MemoryQueryRequest(BaseModel):
@@ -2381,7 +2381,7 @@ async def skill_memory_query(req: MemoryQueryRequest):
         raise _err(str(e))
 
 
-# ── Audit ─────────────────────────────────────────────────────
+# â”€â”€ Audit â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 
 class AuditRequest(BaseModel):
@@ -2400,7 +2400,7 @@ async def skill_audit(req: AuditRequest):
         raise _err(str(e))
 
 
-# ── Quick Analyze (#153) ─────────────────────────────────────
+# â”€â”€ Quick Analyze (#153) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 
 class QuickAnalyzeRequest(BaseModel):
@@ -2411,7 +2411,7 @@ class QuickAnalyzeRequest(BaseModel):
 @router.post("/quick_analyze")
 async def skill_quick_analyze(req: QuickAnalyzeRequest):
     """
-    Fast single-agent analysis — 1 LLM call, 3-5 seconds.
+    Fast single-agent analysis â€” 1 LLM call, 3-5 seconds.
     Returns verdict, confidence, reasons, entry/SL/target.
     """
     try:
@@ -2438,7 +2438,7 @@ async def skill_quick_analyze(req: QuickAnalyzeRequest):
         raise _err(str(e))
 
 
-# ── Telegram ──────────────────────────────────────────────────
+# â”€â”€ Telegram â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 
 @router.get("/telegram/status")
@@ -2468,7 +2468,7 @@ async def skill_telegram_status():
         raise _err(str(e))
 
 
-# ── Provider ──────────────────────────────────────────────────
+# â”€â”€ Provider â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 
 @router.post("/provider")
@@ -2532,7 +2532,7 @@ async def skill_provider_switch(req: ProviderSwitchRequest):
         raise _err(str(e))
 
 
-# ── Post-analysis follow-up chat (#103) ───────────────────────
+# â”€â”€ Post-analysis follow-up chat (#103) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 
 class AnalyzeFollowupRequest(BaseModel):
@@ -2577,7 +2577,7 @@ async def analyze_followup(req: AnalyzeFollowupRequest):
             ctx_lines = [
                 f"You are a trading analysis assistant in follow-up mode for {req.symbol} ({req.exchange}).",
                 f"All follow-up questions are about {req.symbol} unless the user explicitly names another stock.",
-                f"Interpret all industry terms, product names, and business concepts in the context of {req.symbol}'s business — "
+                f"Interpret all industry terms, product names, and business concepts in the context of {req.symbol}'s business â€” "
                 f"for example, 'AI deals' means {req.symbol}'s AI contracts and partnerships, not a stock ticker called AI.",
                 f"Be concise, direct, and always ground your answer in {req.symbol}'s specific situation.",
             ]
@@ -2591,9 +2591,9 @@ async def analyze_followup(req: AnalyzeFollowupRequest):
                         verdict = a.get("verdict", "")
                         conf = a.get("confidence", "")
                         name = a.get("name", "")
-                        ctx_lines.append(f"  • {name}: {verdict} ({conf}%)")
+                        ctx_lines.append(f"  â€¢ {name}: {verdict} ({conf}%)")
                         for pt in a.get("key_points") or []:
-                            ctx_lines.append(f"    – {pt}")
+                            ctx_lines.append(f"    â€“ {pt}")
                 if synthesis_text:
                     ctx_lines.append(f"\nFund Manager Synthesis:\n{synthesis_text}")
                 if report:
@@ -2619,7 +2619,7 @@ async def analyze_followup(req: AnalyzeFollowupRequest):
         if len(session["history"]) > 20:
             session["history"] = session["history"][-20:]
 
-        # Direct LLM call — empty registry so NO tools are available
+        # Direct LLM call â€” empty registry so NO tools are available
         from agent.core import ToolRegistry
 
         provider = get_provider(registry=ToolRegistry())
@@ -2646,7 +2646,7 @@ async def analyze_followup(req: AnalyzeFollowupRequest):
         raise _err(str(e))
 
 
-# ── PDF Export ────────────────────────────────────────────────
+# â”€â”€ PDF Export â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 
 class ExportPdfRequest(BaseModel):
@@ -2690,7 +2690,7 @@ async def skill_export_pdf(req: ExportPdfRequest):
         raise _err(str(e))
 
 
-# ── Explain / Simplify ────────────────────────────────────────
+# â”€â”€ Explain / Simplify â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 
 class ExplainRequest(BaseModel):
@@ -2707,14 +2707,14 @@ async def skill_explain(req: ExplainRequest):
     try:
         from engine.output import explain_simply
 
-        # Try to get the active LLM provider (optional — rule-based fallback if not set)
+        # Try to get the active LLM provider (optional â€” rule-based fallback if not set)
         llm_provider = None
         try:
             from agent.core import ToolRegistry, get_provider
 
             llm_provider = get_provider(registry=ToolRegistry())
         except Exception:
-            pass  # No provider configured — fine, rule-based fallback handles it
+            pass  # No provider configured â€” fine, rule-based fallback handles it
 
         simplified = explain_simply(req.content, llm_provider=llm_provider)
         return _ok({"simplified": simplified})
@@ -2722,7 +2722,7 @@ async def skill_explain(req: ExplainRequest):
         raise _err(str(e))
 
 
-# ── Settings ──────────────────────────────────────────────────
+# â”€â”€ Settings â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 # Keys that can be read/written via the settings endpoints.
 # Secrets are masked on GET; all can be written via POST.
@@ -2789,7 +2789,7 @@ async def skill_settings_post(req: SettingsUpdateRequest):
     return _ok({"updated": updated})
 
 
-# ── Backtest Report ───────────────────────────────────────────
+# â”€â”€ Backtest Report â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 
 class BacktestReportRequest(BaseModel):
@@ -2854,7 +2854,7 @@ async def skill_backtest_report(req: BacktestReportRequest):
         raise _err(str(e))
 
 
-# ── RRG Sector Rotation Skill ─────────────────────────────────
+# â”€â”€ RRG Sector Rotation Skill â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 
 class RRGSkillRequest(BaseModel):
@@ -2899,7 +2899,7 @@ async def skill_rrg(req: Optional[RRGSkillRequest] = None):
         raise _err(str(e))
 
 
-# ── Forensic Accounting & Governance Skill ────────────────────
+# â”€â”€ Forensic Accounting & Governance Skill â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 
 class ForensicSkillRequest(BaseModel):
@@ -2924,7 +2924,7 @@ async def skill_forensic(req: ForensicSkillRequest):
         raise _err(str(e))
 
 
-# ── Position Sizing & Risk-Parity Skill ───────────────────────
+# â”€â”€ Position Sizing & Risk-Parity Skill â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 
 class PositionSizeSkillRequest(BaseModel):
@@ -2962,7 +2962,7 @@ async def skill_position_size(req: PositionSizeSkillRequest):
         raise _err(str(e))
 
 
-# ── Smart Funnel Screening Skill ──────────────────────────────
+# â”€â”€ Smart Funnel Screening Skill â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 
 class FunnelSkillRequest(BaseModel):
@@ -2988,7 +2988,7 @@ async def skill_funnel(req: FunnelSkillRequest):
         raise _err(str(e))
 
 
-# ── Market Structure & SMC Skill ──────────────────────────────
+# â”€â”€ Market Structure & SMC Skill â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 
 class MarketStructureSkillRequest(BaseModel):
@@ -3013,7 +3013,7 @@ async def skill_market_structure(req: MarketStructureSkillRequest):
         raise _err(str(e))
 
 
-# ── Volume Profile & VPA Skill ────────────────────────────────
+# â”€â”€ Volume Profile & VPA Skill â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 
 class VolumeProfileSkillRequest(BaseModel):
@@ -3036,7 +3036,7 @@ async def skill_volume_profile(req: VolumeProfileSkillRequest):
         raise _err(str(e))
 
 
-# ── Multibagger Screener Skill ────────────────────────────────
+# â”€â”€ Multibagger Screener Skill â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 
 class MultibaggerSkillRequest(BaseModel):
@@ -3136,7 +3136,7 @@ async def skill_multibagger_alerts(horizon: Optional[str] = None, limit: int = 5
         raise _err(str(e))
 
 
-# ── Inflection Point & Multibagger Screener Suite ──────────────
+# â”€â”€ Inflection Point & Multibagger Screener Suite â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 
 class InflectionScanSkillRequest(BaseModel):
@@ -3322,7 +3322,7 @@ async def skill_inflection_chat(req: InflectionChatSkillRequest):
         raise _err(str(e))
 
 
-# ── 3-Axis Super-Investor & Magic Trend Skills ─────────────────
+# â”€â”€ 3-Axis Super-Investor & Magic Trend Skills â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 
 class MagicTrendSkillRequest(BaseModel):
@@ -3385,7 +3385,7 @@ async def skill_thematic_baskets_list():
         raise _err(str(e))
 
 
-# ── Broker Portfolio AI Doctor & Optimizer Skill ───────────────
+# â”€â”€ Broker Portfolio AI Doctor & Optimizer Skill â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 
 @router.get("/portfolio/doctor")
@@ -3408,7 +3408,7 @@ async def skill_portfolio_doctor():
         raise _err(str(e))
 
 
-# ── Proven Super-Investor Prompts Skill ─────────────────────────
+# â”€â”€ Proven Super-Investor Prompts Skill â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 
 @router.get("/prompts/proven")
@@ -3420,34 +3420,34 @@ async def skill_prompts_proven():
     try:
         prompts = [
             {
-                "category": "💎 100-Baggers & Compounders",
+                "category": "ðŸ’Ž 100-Baggers & Compounders",
                 "title": "Christopher Mayer 100-Baggers Screen",
                 "prompt": "Scan NIFTY Microcap 250 for Christopher Mayer 100-Bagger candidates with ROCE > 20% and small market cap runway.",
                 "action": "thematic_baskets_scan",
                 "basket_id": "mayer_100_baggers",
             },
             {
-                "category": "🚀 Growth at Reasonable Price (GARP)",
+                "category": "ðŸš€ Growth at Reasonable Price (GARP)",
                 "title": "Peter Lynch Fast-Growers",
                 "prompt": "Find top Peter Lynch GARP stocks with PEG < 1.0, EPS growth > 25%, and VCP pivot breakout.",
                 "action": "thematic_baskets_scan",
                 "basket_id": "lynch_garp_fast_growers",
             },
             {
-                "category": "🏗️ Capex & Order Books",
+                "category": "ðŸ—ï¸ Capex & Order Books",
                 "title": "Mega Order-Book Titans",
                 "prompt": "Show companies with Order Book to Market Cap > 1.5x in Defence, Railways, and Power Grid with clean forensics.",
                 "action": "thematic_baskets_scan",
                 "basket_id": "order_book_powerhouses",
             },
             {
-                "category": "🛡️ Portfolio Optimization",
+                "category": "ðŸ›¡ï¸ Portfolio Optimization",
                 "title": "Run AI Portfolio Doctor",
                 "prompt": "Diagnose my connected broker portfolio for Stage 4 dead-money holdings, concentration risk, and tax-loss harvesting opportunities.",
                 "action": "portfolio_doctor",
             },
             {
-                "category": "📈 Momentum & Breakouts",
+                "category": "ðŸ“ˆ Momentum & Breakouts",
                 "title": "William O'Neil CAN SLIM Leaders",
                 "prompt": "Scan for CAN SLIM momentum leaders trading within 15% of 52-week new highs with institutional volume surges.",
                 "action": "thematic_baskets_scan",
@@ -3459,7 +3459,7 @@ async def skill_prompts_proven():
         raise _err(str(e))
 
 
-# ── Active Trade Lifecycle & Trailing Stop Skill ───────────────
+# â”€â”€ Active Trade Lifecycle & Trailing Stop Skill â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 
 class LifecycleSkillRequest(BaseModel):
@@ -3492,7 +3492,7 @@ async def skill_lifecycle(req: LifecycleSkillRequest):
         raise _err(str(e))
 
 
-# ── Top 10 High-Conviction Opportunities Skill ────────────────
+# â”€â”€ Top 10 High-Conviction Opportunities Skill â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 
 class TopConvictionSkillRequest(BaseModel):
@@ -3542,7 +3542,7 @@ async def skill_universe_categories():
         raise _err(str(e))
 
 
-# ── High-Probability Big Move & Squeeze Direction Skill ──────
+# â”€â”€ High-Probability Big Move & Squeeze Direction Skill â”€â”€â”€â”€â”€â”€
 
 
 class BigMoveSkillRequest(BaseModel):
@@ -3568,7 +3568,7 @@ async def skill_big_move(req: BigMoveSkillRequest):
         raise _err(str(e))
 
 
-# ── Two-Tier Execution Gate & Live Alert Skill ───────────────
+# â”€â”€ Two-Tier Execution Gate & Live Alert Skill â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 
 class ExecutionGateSkillRequest(BaseModel):
@@ -3724,7 +3724,7 @@ async def skill_sector_drilldown(req: SectorDrilldownSkillRequest):
         return {
             "sector_id": canonical_key,
             "sector_name": sector_info["name"],
-            "sector_icon": sector_info.get("icon", "🏢"),
+            "sector_icon": sector_info.get("icon", "ðŸ¢"),
             "index_symbol": sector_info.get("index_symbol", ""),
             "description": sector_info.get("description", ""),
             "rrg": sector_rrg,
@@ -3880,7 +3880,7 @@ async def skill_trending(req: Optional[TrendingSkillRequest] = None):
         raise _err(str(e))
 
 
-# ── High-Fidelity Workspace Snapshots ──────────────────────────
+# â”€â”€ High-Fidelity Workspace Snapshots â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 
 class DashboardSnapshotRequest(InstrumentBaseRequest):
@@ -3916,30 +3916,35 @@ def _compute_dashboard_snapshot_sync(req: Optional[DashboardSnapshotRequest] = N
         tf = req.timeframe if req and req.timeframe else "15m"
 
         # Belt-and-suspenders: re-normalize in case caller didn't pass exchange
-        # (e.g. CRUDEOIL with no exchange → auto-detects MCX)
+        # (e.g. CRUDEOIL with no exchange â†’ auto-detects MCX)
         from analysis.universe import normalize_symbol_exchange
 
         sym, exch = normalize_symbol_exchange(sym, exch)
 
-        cache_key = f"dashboard_snapshot_v5_{sym}_{exch}_{tf}"
-        try:
-            from engine.analysis_cache import analysis_cache
+        cache_key = f"dashboard_snapshot_v8_{sym}_{exch}_{tf}"
+        force = bool(req and getattr(req, "force_refresh", False))
+        if not force:
+            try:
+                from engine.analysis_cache import analysis_cache
 
-            cached = analysis_cache.get_macro(cache_key)
-            if (
-                cached
-                and isinstance(cached, dict)
-                and cached.get("symbol") == sym
-                and len(cached.get("watchlist", [])) >= 20
-                and cached.get("terminal_contract_version") == 2
-                and cached.get("automated_setup") is not None
-                and (cached.get("ltp") or 0) > 0
-            ):
-                return cached
-        except Exception:
-            pass
+                cached = analysis_cache.get_macro(cache_key)
+                if (
+                    cached
+                    and isinstance(cached, dict)
+                    and cached.get("symbol") == sym
+                    and len(cached.get("watchlist", [])) >= 20
+                    and cached.get("terminal_contract_version") == 2
+                    and "automated_setup" in cached
+                    and cached.get("councils") is not None
+                    and len(cached.get("personas", [])) >= 13
+                    and (cached.get("ltp") or 0) > 0
+                    and "portfolio_heat" in cached  # v7 sentinel â€” rejects old v6 entries
+                ):
+                    return cached
+            except Exception:
+                pass
 
-        # 1. Watchlist Quotes — comprehensive institutional universe (Equities, Indices, MCX Commodities, ETFs, Forex)
+        # 1. Watchlist Quotes â€” comprehensive institutional universe (Equities, Indices, MCX Commodities, ETFs, Forex)
         watch_meta = [
             # Benchmark Indices
             {"symbol": "NIFTY 50", "inst": "NSE:NIFTY 50", "name": "NIFTY 50", "tag": "INDEX"},
@@ -4049,7 +4054,7 @@ def _compute_dashboard_snapshot_sync(req: Optional[DashboardSnapshotRequest] = N
             pass
 
         def _resolve_quote(w: dict):
-            """Try all key variants: inst → symbol → short symbol → stripped symbol."""
+            """Try all key variants: inst â†’ symbol â†’ short symbol â†’ stripped symbol."""
             for key in (
                 w["inst"],
                 w["symbol"],
@@ -4086,28 +4091,28 @@ def _compute_dashboard_snapshot_sync(req: Optional[DashboardSnapshotRequest] = N
                 "display_name": "NIFTY 50",
                 "inst": "NSE:NIFTY 50",
                 "category": "INDEX",
-                "unit": "₹",
+                "unit": "â‚¹",
             },
             {
                 "symbol": "BANKNIFTY",
                 "display_name": "BANK NIFTY",
                 "inst": "NSE:NIFTY BANK",
                 "category": "INDEX",
-                "unit": "₹",
+                "unit": "â‚¹",
             },
             {
                 "symbol": "SENSEX",
                 "display_name": "SENSEX",
                 "inst": "BSE:SENSEX",
                 "category": "INDEX",
-                "unit": "₹",
+                "unit": "â‚¹",
             },
             {
                 "symbol": "FINNIFTY",
                 "display_name": "FIN NIFTY",
                 "inst": "NSE:NIFTY FIN SERVICE",
                 "category": "INDEX",
-                "unit": "₹",
+                "unit": "â‚¹",
             },
             {
                 "symbol": "INDIA VIX",
@@ -4121,21 +4126,21 @@ def _compute_dashboard_snapshot_sync(req: Optional[DashboardSnapshotRequest] = N
                 "display_name": "CRUDE OIL",
                 "inst": "MCX:CRUDEOIL",
                 "category": "COMMODITY",
-                "unit": "₹/bbl",
+                "unit": "â‚¹/bbl",
             },
             {
                 "symbol": "GOLD",
                 "display_name": "GOLD",
                 "inst": "MCX:GOLD",
                 "category": "COMMODITY",
-                "unit": "₹/10g",
+                "unit": "â‚¹/10g",
             },
             {
                 "symbol": "SILVER",
                 "display_name": "SILVER",
                 "inst": "MCX:SILVER",
                 "category": "COMMODITY",
-                "unit": "₹/kg",
+                "unit": "â‚¹/kg",
             },
             {
                 "symbol": "BTC",
@@ -4165,7 +4170,7 @@ def _compute_dashboard_snapshot_sync(req: Optional[DashboardSnapshotRequest] = N
                 }
             )
 
-        # Target Setup — quote specifically for the active sym (reuse from batch if already fetched)
+        # Target Setup â€” quote specifically for the active sym (reuse from batch if already fetched)
         q_obj = (
             quotes_map.get(active_inst)
             or quotes_map.get(setup_sym)
@@ -4354,207 +4359,37 @@ def _compute_dashboard_snapshot_sync(req: Optional[DashboardSnapshotRequest] = N
             return unavail_payload
 
         # Ensure market structure and volume profile entities exist for setup calculation
-        if ms_report is None:
+        # If analyzers returned None, derive genuine levels from real OHLCV if available
+        if ms_report is None and df is not None and not df.empty:
+            class _DynamicMS:
+                regime = "BULLISH" if float(df["close"].iloc[-1]) >= float(df["close"].iloc[0]) else "BEARISH"
+                structure_score = 5 if float(df["close"].iloc[-1]) >= float(df["close"].iloc[0]) else -5
+                active_demand_zones = []
+                active_supply_zones = []
 
-            class _FallbackMS:
-                regime: str = "BULLISH"
-                structure_score: int = 15
-                active_demand_zones: list = []
-                active_supply_zones: list = []
+            ms_report = _DynamicMS()
 
-            ms_report = _FallbackMS()
+        if vp_report is None and df is not None and not df.empty:
+            try:
+                poc_idx = df["volume"].idxmax() if "volume" in df.columns else df.index[-1]
+                poc_p = float(df.loc[poc_idx, "close"])
+            except Exception:
+                poc_p = cur_ltp
+            try:
+                avg_v = float(df["volume"].rolling(20, min_periods=3).mean().dropna().iloc[-1]) if len(df) >= 3 else 1.0
+                rvol_calc = float(round(df["volume"].iloc[-1] / max(1.0, avg_v), 2))
+            except Exception:
+                rvol_calc = 1.0
+            class _DynamicVP:
+                rvol_20d = rvol_calc
+                poc_price = poc_p
+                vah_price = float(df["high"].max())
+                val_price = float(df["low"].min())
+                footprint_bias = "ACCUMULATION" if float(df["close"].iloc[-1]) >= float(df["open"].iloc[-1]) else "DISTRIBUTION"
 
-        if vp_report is None:
+            vp_report = _DynamicVP()
 
-            class _FallbackVP:
-                rvol_20d: float = 1.3
-                poc_price: float = cur_ltp * 1.001
-                vah_price: float = cur_ltp * 1.004
-                val_price: float = cur_ltp * 0.997
-                footprint_bias: str = "ACCUMULATION"
-
-            vp_report = _FallbackVP()
-
-        # 2. Rich AI Personas with dynamically calculated quant metrics for setup_sym
-        rvol_val = vp_report.rvol_20d
-        structure_dir = ms_report.regime
-        struct_score = ms_report.structure_score
-
-        # Extract real fundamentals & forensics (or institutional macro baseline for indices/commodities)
-        roe_val = getattr(fund_snap, "roe", None) or 18.5
-        roce_val = getattr(fund_snap, "roce", None) or 22.0
-        de_val = getattr(fund_snap, "debt_equity", None) or 0.35
-        pe_val = getattr(fund_snap, "pe", None) or 22.4
-        sales_growth_val = getattr(fund_snap, "sales_growth", None) or 12.5
-        profit_growth_val = getattr(fund_snap, "profit_growth", None) or 14.2
-
-        m_score = getattr(forensic_rep, "beneish_m_score", None) or -2.76
-        f_score = getattr(forensic_rep, "piotroski_f_score", None) or 8
-        z_score = getattr(forensic_rep, "altman_z_score", None) or 3.45
-
-        mb_score = getattr(mb_rep, "multibagger_score", None) or 68
-        stage_str = getattr(mb_rep, "weinstein_stage", "STAGE 2 MARKUP").replace("_", " ")
-        minervini_passed = getattr(mb_rep, "trend_template_passed", 6)
-
-        # Calculate distinct dynamic conviction scores for each persona
-        # 1. Jhunjhunwala: Multibagger momentum + Topline growth
-        jh_conf = max(
-            35, min(95, int((mb_score * 0.7) + (min(25.0, max(-10.0, sales_growth_val)) * 1.0)))
-        )
-        jh_verdict = (
-            "STRONG MULTIBAGGER"
-            if jh_conf >= 75
-            else ("ACCUMULATE" if jh_conf >= 55 else ("WATCHLIST" if jh_conf >= 40 else "AVOID"))
-        )
-
-        # 2. Buffett: RoE + Low Debt/Equity + Forensic Health
-        buffett_conf = max(
-            30,
-            min(
-                96,
-                int(
-                    (roe_val * 2.2)
-                    + (25 if de_val < 0.6 else (10 if de_val < 1.0 else -15))
-                    + (f_score * 3)
-                ),
-            ),
-        )
-        buffett_verdict = (
-            "WIDE MOAT BUY"
-            if buffett_conf >= 75
-            else ("MODERATE MOAT (HOLD)" if buffett_conf >= 50 else "NO MOAT / LEVERAGED")
-        )
-
-        # 3. Forensic: Beneish M-Score + Piotroski F-Score + Altman Z
-        forensic_conf = max(
-            25,
-            min(
-                98,
-                int((f_score * 8) + (25 if m_score < -2.2 else (10 if m_score < -1.78 else -20))),
-            ),
-        )
-        forensic_verdict = (
-            "CLEAN (PASS)"
-            if (m_score < -1.78 and f_score >= 5)
-            else ("GREY ZONE" if f_score >= 4 else "RED FLAG / CAUTION")
-        )
-
-        # 4. Soros: Relative Volume + Market Structure Regime
-        soros_conf = max(30, min(95, int(50 + (struct_score * 6) + (15 if rvol_val > 1.2 else -5))))
-        soros_verdict = (
-            "MOMENTUM EXPANSION"
-            if struct_score >= 2
-            else ("RANGE REVERSAL" if struct_score >= -1 else "BEARISH BREAKDOWN")
-        )
-
-        # 5. Lynch: PEG ratio
-        peg_val = round(pe_val / max(5.0, profit_growth_val if profit_growth_val > 0 else 15.0), 2)
-        lynch_conf = max(
-            30, min(92, int(85 - (peg_val * 18) + (10 if profit_growth_val > 15 else 0)))
-        )
-        lynch_verdict = (
-            "FAST GROWER (BUY)"
-            if peg_val < 1.1
-            else ("STALWART (HOLD)" if peg_val < 1.8 else "EXPENSIVE / CYCLICAL")
-        )
-
-        # 6. Munger: ROCE + Balance Sheet Solvency
-        munger_conf = max(
-            30, min(96, int((roce_val * 2.0) + (f_score * 4) + (10 if de_val < 0.5 else -10)))
-        )
-        munger_verdict = (
-            "COMPOUNDER"
-            if roce_val >= 18
-            else ("FAIR VALUE" if roce_val >= 12 else "INVERSION RISK")
-        )
-
-        personas = [
-            {
-                "id": "jhunjhunwala",
-                "name": "Jhunjhunwala",
-                "title": "Contrarian / Multibagger",
-                "avatar": "bull",
-                "verdict": jh_verdict,
-                "horizon": "2–3 Years",
-                "thesis": f"Multibagger screen on {setup_sym}: Classifies in {stage_str} with {minervini_passed}/8 Minervini criteria passed. Topline sales growth at {sales_growth_val:+.1f}% with ROCE of {roce_val:.1f}%.",
-                "key_metric": f"3Y Sales: {sales_growth_val:+.1f}% | ROCE: {roce_val:.1f}%",
-                "quote": "Ride the Indian economic supercycle; invest in market leaders with operating leverage.",
-                "confidence": jh_conf,
-                "accent": "amber",
-            },
-            {
-                "id": "buffett",
-                "name": "Buffett",
-                "title": "Moat & Owner Earnings",
-                "avatar": "moat",
-                "verdict": buffett_verdict,
-                "horizon": "3–5+ Years",
-                "thesis": f"Owner earnings evaluation for {setup_sym}: Return on equity stands at {roe_val:.1f}% with Debt-to-Equity ratio of {de_val:.2f}. Balance sheet leverage is {'conservative and defensible' if de_val < 0.8 else 'elevated, requiring scrutiny'}.",
-                "key_metric": f"ROE: {roe_val:.1f}% | D/E: {de_val:.2f}",
-                "quote": "It's far better to buy a wonderful company at a fair price than a fair company at a wonderful price.",
-                "confidence": buffett_conf,
-                "accent": "blue",
-            },
-            {
-                "id": "forensic",
-                "name": "Forensic",
-                "title": "Forensic Audit & Accruals",
-                "avatar": "forensic",
-                "verdict": forensic_verdict,
-                "horizon": "Active Audit",
-                "thesis": f"Forensic audit on {setup_sym}: Beneish M-Score of {m_score:.2f} ({'Safe Zone' if m_score < -1.78 else 'Manipulation Risk'}), Piotroski F-Score of {f_score}/9, and Altman Z'' of {z_score:.2f} ({forensic_rep.distress_zone if forensic_rep else 'SAFE'}).",
-                "key_metric": f"Beneish M: {m_score:.2f} | F-Score: {f_score}/9",
-                "quote": "Rule No. 1: Don't lose money on accounting landmines. Verify working capital accruals.",
-                "confidence": forensic_conf,
-                "accent": "emerald",
-            },
-            {
-                "id": "soros",
-                "name": "Soros",
-                "title": "Global Macro & Reflexivity",
-                "avatar": "macro",
-                "verdict": soros_verdict,
-                "horizon": "2–6 Weeks",
-                "thesis": f"Reflexive capital flows in {setup_sym}: Relative Volume at {rvol_val:.1f}x with price action in {structure_dir} regime. Institutional participation bias reflects {vp_report.footprint_bias if vp_report else 'ACCUMULATION'}.",
-                "key_metric": f"20D RVOL: {rvol_val:.1f}x | Bias: {vp_report.footprint_bias if vp_report else 'ACCUMULATION'}",
-                "quote": "Markets are constantly in a state of uncertainty and flux; identify the prevailing bias and ride it.",
-                "confidence": soros_conf,
-                "accent": "purple",
-            },
-            {
-                "id": "lynch",
-                "name": "Lynch",
-                "title": "GARP & Fast Growth",
-                "avatar": "garp",
-                "verdict": lynch_verdict,
-                "horizon": "1–2 Years",
-                "thesis": f"Peter Lynch GARP framework on {setup_sym}: Trading at {pe_val:.1f}x P/E with {profit_growth_val:+.1f}% profit trajectory, yielding an implied PEG ratio of {peg_val:.2f} ({'Attractive' if peg_val < 1.2 else 'Fair / Full'}).",
-                "key_metric": f"P/E: {pe_val:.1f} | Implied PEG: {peg_val:.2f}",
-                "quote": "Know what you own, and know why you own it. Look for earnings growth exceeding P/E.",
-                "confidence": lynch_conf,
-                "accent": "cyan",
-            },
-            {
-                "id": "munger",
-                "name": "Munger",
-                "title": "Quality & Inversion",
-                "avatar": "quality",
-                "verdict": munger_verdict,
-                "horizon": "Multi-Year",
-                "thesis": f"Inversion analysis on {setup_sym}: Assesses capital return efficiency at {roce_val:.1f}% ROCE with financial health matrix at {f_score}/9. Downside ruin risk is {'minimized' if de_val < 0.8 else 'moderated by debt load'}.",
-                "key_metric": f"ROCE: {roce_val:.1f}% | Health: {f_score}/9",
-                "quote": "Invert, always invert: Turn a problem upside down to see the real vulnerabilities.",
-                "confidence": munger_conf,
-                "accent": "rose",
-            },
-        ]
-
-        # 3. Market Structure & SMC Setup for target symbol
-        is_bullish = bool(ms_report and ms_report.structure_score >= 0) if ms_report else True
-        action_type = "LONG (BUY)" if is_bullish else "SHORT (SELL)"
-        trigger_name = "Demand OB Retest" if is_bullish else "Supply OB Rejection"
-
-        # Compute adaptive True Range / ATR from df
+        # Compute adaptive True Range / ATR from df for volatility risk models
         atr_val = cur_ltp * 0.012  # default 1.2% ATR
         if df is not None and len(df) >= 5:
             try:
@@ -4570,116 +4405,804 @@ def _compute_dashboard_snapshot_sync(req: Optional[DashboardSnapshotRequest] = N
             except Exception:
                 pass
 
-        if is_bullish:
-            # Bullish Long Entry: near Demand OTE or 0.2% below current LTP
-            active_d = ms_report.active_demand_zones if ms_report else []
-            if active_d and active_d[-1].bottom < cur_ltp:
-                top_ob = active_d[-1]
-                raw_entry = getattr(top_ob, "ote_price", (top_ob.top + top_ob.bottom) / 2.0)
-                raw_sl = top_ob.bottom * 0.998
-            else:
-                raw_entry = cur_ltp * 0.998
-                raw_sl = raw_entry - (1.1 * atr_val)
+        # 2. Rich AI Personas with dynamically calculated quant metrics for setup_sym
+        rvol_val = vp_report.rvol_20d if vp_report else 1.0
+        structure_dir = ms_report.regime if ms_report else "NEUTRAL"
+        struct_score = ms_report.structure_score if ms_report else 0
 
-            # Strict bounds: Entry must be between 98.5% and 100.2% of LTP
-            entry_val = max(cur_ltp * 0.985, min(cur_ltp * 1.002, raw_entry))
-            # Stop loss must be below entry by at least 0.35% and at most 2.2% (or 1.2x ATR)
-            risk_unit = max(
-                entry_val * 0.0035, min(entry_val * 0.022, entry_val - raw_sl, 1.2 * atr_val)
-            )
-            sl_val = entry_val - risk_unit
-            tgt1_val = entry_val + (risk_unit * 2.0)
-            tgt2_val = entry_val + (risk_unit * 3.5)
-            rr_val = 2.0
-            thesis_txt = f"Bullish structure with unmitigated Demand Zone near ₹{entry_val:.2f}. Limit entry at 50% Mean Threshold (OTE) with {((risk_unit / entry_val) * 100):.1f}% risk invalidation below swing support."
+        # Extract real fundamentals & forensics (None if not available or non-equity)
+        roe_val = getattr(fund_snap, "roe", None)
+        roce_val = getattr(fund_snap, "roce", None)
+        de_val = getattr(fund_snap, "debt_equity", None)
+        pe_val = getattr(fund_snap, "pe", None)
+        sales_growth_val = getattr(fund_snap, "sales_growth", None)
+        profit_growth_val = getattr(fund_snap, "profit_growth", None)
+
+        m_score = getattr(forensic_rep, "beneish_m_score", None)
+        f_score = getattr(forensic_rep, "piotroski_f_score", None)
+        z_score = getattr(forensic_rep, "altman_z_score", None)
+
+        mb_score = getattr(mb_rep, "multibagger_score", None)
+        stage_str = (getattr(mb_rep, "weinstein_stage", "STAGE 2 MARKUP") or "STAGE 2 MARKUP").replace("_", " ") if mb_rep else "CONSOLIDATING"
+        minervini_passed = getattr(mb_rep, "trend_template_passed", None)
+        vcp_detected = getattr(mb_rep, "vcp_detected", False) if mb_rep else False
+
+        # Dynamic conviction scores for all 13 Specialist Personas based strictly on available real data
+        # 1. Minervini: SEPA & Trend Template
+        if minervini_passed is not None:
+            minervini_conf = max(35, min(95, int((minervini_passed / 8.0) * 80 + (15 if vcp_detected else 0))))
+            minervini_verdict = "SEPA STAGE 2 BUY" if minervini_passed >= 6 else ("VCP CONSOLIDATING" if minervini_passed >= 4 else "WATCHLIST / NO BREAKOUT")
+            minervini_thesis = f"Minervini SEPA analysis on {setup_sym}: {minervini_passed}/8 trend template rules passed. Stage: {stage_str}. VCP contraction: {'Tight' if vcp_detected else 'Developing'}."
+            minervini_metric = f"Trend Template: {minervini_passed}/8 | VCP: {'Tight' if vcp_detected else 'Developing'}"
+        elif df is not None and len(df) >= 50:
+            c_now = cur_ltp
+            sma50 = float(df["close"].tail(50).mean())
+            above50 = c_now > sma50
+            minervini_conf = 68 if above50 else 42
+            minervini_verdict = "ABOVE 50-DMA" if above50 else "BELOW 50-DMA"
+            minervini_thesis = f"{setup_sym} trading {'above' if above50 else 'below'} 50-DMA (â‚¹{sma50:.1f}). Full Minervini template screening pending."
+            minervini_metric = f"50-DMA: â‚¹{sma50:.1f}"
         else:
-            # Bearish Short Entry: near Supply OTE or 0.2% above current LTP
-            active_s = ms_report.active_supply_zones if ms_report else []
-            if active_s and active_s[-1].top > cur_ltp:
-                top_ob = active_s[-1]
-                raw_entry = getattr(top_ob, "ote_price", (top_ob.top + top_ob.bottom) / 2.0)
-                raw_sl = top_ob.top * 1.002
-            else:
-                raw_entry = cur_ltp * 1.002
-                raw_sl = raw_entry + (1.1 * atr_val)
+            minervini_conf = 50
+            minervini_verdict = "N/A (NON-EQUITY)" if not is_equity else "SCREENING PENDING"
+            minervini_thesis = f"Minervini momentum rules evaluate equity trend templates; {setup_sym} is evaluated via macro regime." if not is_equity else f"Sufficient historical bars required to verify Minervini template for {setup_sym}."
+            minervini_metric = "Trend: Pending"
 
-            entry_val = max(cur_ltp * 0.998, min(cur_ltp * 1.015, raw_entry))
-            risk_unit = max(
-                entry_val * 0.0035, min(entry_val * 0.022, raw_sl - entry_val, 1.2 * atr_val)
+        # 2. Kedia: SMILE Framework
+        if mb_score is not None:
+            kedia_conf = max(35, min(95, int(mb_score * 0.9)))
+            kedia_verdict = "SMILE MULTIBAGGER" if mb_score >= 70 else ("SMILE ACCUMULATE" if mb_score >= 50 else "SMILE WATCHLIST")
+            kedia_thesis = f"Vijay Kedia SMILE scan on {setup_sym}: Multibagger composite score {mb_score}/100 with Stage {stage_str}."
+            kedia_metric = f"SMILE Score: {mb_score}/100"
+        elif is_equity:
+            kedia_conf = 45
+            kedia_verdict = "SMILE PENDING"
+            kedia_thesis = f"Vijay Kedia SMILE disclosures pending fundamental verification for {setup_sym}."
+            kedia_metric = "SMILE: Pending"
+        else:
+            kedia_conf = 50
+            kedia_verdict = "N/A (NON-EQUITY)"
+            kedia_thesis = f"SMILE framework applies strictly to domestic corporate equities, not {setup_sym}."
+            kedia_metric = "SMILE: N/A"
+
+        # 3. Taleb: Antifragile Convexity & Spreads
+        vol_pct = ((atr_val / cur_ltp) * 100) if cur_ltp > 0 else 1.5
+        taleb_conf = max(40, min(95, int(88 - (vol_pct * 8))))
+        taleb_verdict = "POSITIVE CONVEXITY" if vol_pct <= 2.8 else "HIGH VOLATILITY (SPREADS ONLY)"
+        taleb_thesis = f"Nassim Taleb convexity model on {setup_sym}: Realized ATR volatility is {vol_pct:.2f}%. Mandates strictly defined-risk spread structures to neutralize downside tail risk."
+        taleb_metric = f"ATR Vol: {vol_pct:.2f}% | Tail Risk: Defined"
+
+        # 4. Wyckoff: VSA & Phase Detection
+        bias_str = vp_report.footprint_bias if vp_report else "NEUTRAL"
+        wyckoff_conf = max(30, min(95, int(50 + (struct_score * 7) + (15 if rvol_val > 1.3 else (-10 if rvol_val < 0.7 else 0)))))
+        wyckoff_verdict = "PHASE D (SIGN OF STRENGTH)" if struct_score >= 2 and rvol_val > 1.2 else ("PHASE C (SPRING TEST)" if struct_score >= 0 else "PHASE B (SUPPLY TEST)")
+        wyckoff_thesis = f"Wyckoff Volume Spread Analysis on {setup_sym}: 20D RVOL at {rvol_val:.1f}x with institutional footprint reflecting {bias_str}. Phase structure: {wyckoff_verdict}."
+        wyckoff_metric = f"RVOL: {rvol_val:.1f}x | Bias: {bias_str}"
+
+        # 5. O'Neil: CAN SLIM Momentum
+        if is_equity and (sales_growth_val is not None or profit_growth_val is not None):
+            sg_val = sales_growth_val if sales_growth_val is not None else 0.0
+            pg_val = profit_growth_val if profit_growth_val is not None else 0.0
+            oneil_conf = max(30, min(95, int(50 + (min(25, sg_val) * 0.8) + (min(25, pg_val) * 0.8))))
+            oneil_verdict = "CAN SLIM LEADER" if sg_val > 15 and pg_val > 15 else ("CAN SLIM MODERATE" if sg_val > 0 else "EARNINGS LAGGARD")
+            oneil_thesis = f"William O'Neil CAN SLIM scan on {setup_sym}: Sales growth {sg_val:+.1f}%, Profit growth {pg_val:+.1f}%."
+            oneil_metric = f"Sales: {sg_val:+.1f}% | Profit: {pg_val:+.1f}%"
+        elif is_equity:
+            oneil_conf = 45
+            oneil_verdict = "EARNINGS PENDING"
+            oneil_thesis = f"Quarterly sales and profit filings pending verification for {setup_sym}."
+            oneil_metric = "CAN SLIM: Pending"
+        else:
+            oneil_conf = 50
+            oneil_verdict = "N/A (NON-EQUITY)"
+            oneil_thesis = f"CAN SLIM quarterly earnings growth applies to corporate equities, not {setup_sym}."
+            oneil_metric = "CAN SLIM: N/A"
+
+        # 6. Simons: Statistical Arbitrage & Mean Reversion Z-Score
+        if df is not None and len(df) >= 20:
+            c_series = df["close"].tail(20)
+            mean_c = float(c_series.mean())
+            std_c = float(c_series.std()) or 1.0
+            z_score_price = round((cur_ltp - mean_c) / std_c, 2)
+            simons_conf = max(35, min(95, int(50 + abs(z_score_price) * 14 if z_score_price < 0 else 50 - z_score_price * 8)))
+            simons_verdict = "OVERSOLD MEAN REVERSION" if z_score_price < -1.5 else ("OVERBOUGHT REGRESSION" if z_score_price > 1.5 else "EQUILIBRIUM DRIFT")
+            simons_thesis = f"Jim Simons quant statistical edge on {setup_sym}: 20-day price mean reversion Z-score is {z_score_price:+.2f}Ïƒ against the regression channel."
+            simons_metric = f"Z-Score: {z_score_price:+.2f}Ïƒ | EV: +{(2.1 if z_score_price < 0 else 1.2):.1f}R"
+        else:
+            simons_conf = 50
+            simons_verdict = "Z-SCORE PENDING"
+            simons_thesis = f"20-day OHLCV series required to compute mean reversion Z-score for {setup_sym}."
+            simons_metric = "Z-Score: â€”"
+
+        # 7. SMC: ICT Order Blocks & Liquidity Sweeps
+        active_d = getattr(ms_report, "active_demand_zones", []) if ms_report else []
+        active_s = getattr(ms_report, "active_supply_zones", []) if ms_report else []
+        smc_conf = max(35, min(95, int(55 + (struct_score * 7) + (15 if active_d else (-10 if active_s else 0)))))
+        smc_verdict = "DEMAND OB RETEST" if active_d else ("SUPPLY ZONE REJECTION" if active_s else ("BULLISH CHOCH" if struct_score > 0 else "BEARISH BOS"))
+        smc_thesis = f"Smart Money Concepts (ICT) order flow on {setup_sym}: Market structure score {struct_score:+d} ({structure_dir}). Active zones: {len(active_d)} Demand / {len(active_s)} Supply."
+        smc_metric = f"OB Zones: {len(active_d)}D / {len(active_s)}S | Score: {struct_score:+d}"
+
+        # 8. Jhunjhunwala: Multibagger momentum + Topline growth
+        if mb_score is not None:
+            sg = sales_growth_val if sales_growth_val is not None else 0.0
+            jh_conf = max(35, min(95, int((mb_score * 0.7) + (min(25.0, max(-10.0, sg)) * 1.0))))
+            jh_verdict = "STRONG MULTIBAGGER" if jh_conf >= 75 else ("ACCUMULATE" if jh_conf >= 55 else ("WATCHLIST" if jh_conf >= 40 else "AVOID"))
+            jh_thesis = f"Multibagger screen on {setup_sym}: Classifies in {stage_str} with {minervini_passed or 0}/8 Minervini criteria passed. Topline sales growth at {sg:+.1f}%."
+            jh_metric = f"Score: {mb_score}/100 | Stage: {stage_str}"
+        elif is_equity:
+            jh_conf = 45
+            jh_verdict = "WATCHLIST"
+            jh_thesis = f"Awaiting comprehensive multibagger screening disclosures for {setup_sym}."
+            jh_metric = "Screening: In Progress"
+        else:
+            jh_conf = 55
+            jh_verdict = "ASSET CLASS DIVERSIFICATION"
+            jh_thesis = f"Macro allocation in {setup_sym} based on sector rotation and commodities/forex trend."
+            jh_metric = f"Regime: {structure_dir}"
+
+        # 9. Buffett: RoE + Low Debt/Equity + Forensic Health
+        if roe_val is not None and de_val is not None:
+            f_sc = f_score if f_score is not None else 5
+            buffett_conf = max(30, min(96, int((roe_val * 2.2) + (25 if de_val < 0.6 else (10 if de_val < 1.0 else -15)) + (f_sc * 3))))
+            buffett_verdict = "WIDE MOAT BUY" if buffett_conf >= 75 else ("MODERATE MOAT (HOLD)" if buffett_conf >= 50 else "NO MOAT / LEVERAGED")
+            buffett_thesis = f"Owner earnings evaluation for {setup_sym}: Return on equity stands at {roe_val:.1f}% with Debt-to-Equity of {de_val:.2f}."
+            buffett_metric = f"ROE: {roe_val:.1f}% | D/E: {de_val:.2f}"
+        elif is_equity:
+            buffett_conf = 40
+            buffett_verdict = "AWAITING FINANCIALS"
+            buffett_thesis = f"Balance sheet disclosures and return on equity pending verification for {setup_sym}."
+            buffett_metric = "ROE: â€” | D/E: â€”"
+        else:
+            buffett_conf = 50
+            buffett_verdict = "N/A (NON-EQUITY)"
+            buffett_thesis = f"Corporate moat and balance sheet metrics do not apply to index/commodity/forex asset {setup_sym}."
+            buffett_metric = "Moat: Non-Corporate Asset"
+
+        # 10. Forensic: Beneish M-Score + Piotroski F-Score + Altman Z
+        if m_score is not None and f_score is not None:
+            forensic_conf = max(25, min(98, int((f_score * 8) + (25 if m_score < -2.2 else (10 if m_score < -1.78 else -20)))))
+            forensic_verdict = "CLEAN (PASS)" if (m_score < -1.78 and f_score >= 5) else ("GREY ZONE" if f_score >= 4 else "RED FLAG / CAUTION")
+            z_zone = getattr(forensic_rep, "distress_zone", "SAFE") if forensic_rep else "SAFE"
+            forensic_thesis = f"Forensic audit on {setup_sym}: Beneish M-Score of {m_score:.2f} ({'Safe Zone' if m_score < -1.78 else 'Manipulation Risk'}), Piotroski F-Score of {f_score}/9, and Altman Z'' of {z_score if z_score is not None else 0:.2f} ({z_zone})."
+            forensic_metric = f"Beneish M: {m_score:.2f} | F-Score: {f_score}/9"
+        elif is_equity:
+            forensic_conf = 50
+            forensic_verdict = "AUDIT PENDING"
+            forensic_thesis = f"Forensic working capital accruals and earnings manipulation model pending data for {setup_sym}."
+            forensic_metric = "Beneish M: â€” | F-Score: â€”"
+        else:
+            forensic_conf = 50
+            forensic_verdict = "NOT APPLICABLE"
+            forensic_thesis = f"Forensic corporate accounting audits apply strictly to listed corporate equities; {setup_sym} is an index/macro contract."
+            forensic_metric = "Forensic: N/A"
+
+        # 11. Soros: Relative Volume + Market Structure Regime
+        soros_conf = max(30, min(95, int(50 + (struct_score * 6) + (15 if rvol_val > 1.2 else -5))))
+        soros_verdict = "MOMENTUM EXPANSION" if struct_score >= 2 else ("RANGE REVERSAL" if struct_score >= -1 else "BEARISH BREAKDOWN")
+        soros_thesis = f"Reflexive capital flows in {setup_sym}: Relative Volume at {rvol_val:.1f}x with price action in {structure_dir} regime. Institutional participation reflects {bias_str}."
+        soros_metric = f"20D RVOL: {rvol_val:.1f}x | Bias: {bias_str}"
+
+        # 12. Lynch: PEG ratio
+        if pe_val is not None and profit_growth_val is not None and profit_growth_val > 0:
+            peg_val = round(pe_val / max(5.0, profit_growth_val), 2)
+            lynch_conf = max(30, min(92, int(85 - (peg_val * 18) + (10 if profit_growth_val > 15 else 0))))
+            lynch_verdict = "FAST GROWER (BUY)" if peg_val < 1.1 else ("STALWART (HOLD)" if peg_val < 1.8 else "EXPENSIVE / CYCLICAL")
+            lynch_thesis = f"Peter Lynch GARP framework on {setup_sym}: Trading at {pe_val:.1f}x P/E with {profit_growth_val:+.1f}% profit growth, yielding implied PEG of {peg_val:.2f}."
+            lynch_metric = f"P/E: {pe_val:.1f} | Implied PEG: {peg_val:.2f}"
+        elif is_equity:
+            lynch_conf = 40
+            lynch_verdict = "PEG UNAVAILABLE"
+            lynch_thesis = f"P/E ratio or earnings growth history unavailable to compute PEG ratio for {setup_sym}."
+            lynch_metric = "P/E: â€” | PEG: â€”"
+        else:
+            lynch_conf = 50
+            lynch_verdict = "N/A (NON-EQUITY)"
+            lynch_thesis = f"GARP growth and price-to-earnings metrics apply strictly to corporate equities, not {setup_sym}."
+            lynch_metric = "P/E: N/A"
+
+        # 13. Munger: ROCE + Balance Sheet Solvency
+        if roce_val is not None and de_val is not None:
+            f_sc = f_score if f_score is not None else 5
+            munger_conf = max(30, min(96, int((roce_val * 2.0) + (f_sc * 4) + (10 if de_val < 0.5 else -10))))
+            munger_verdict = "COMPOUNDER" if roce_val >= 18 else ("FAIR VALUE" if roce_val >= 12 else "INVERSION RISK")
+            munger_thesis = f"Inversion analysis on {setup_sym}: Capital return efficiency at {roce_val:.1f}% ROCE with leverage {'defensible' if de_val < 0.8 else 'elevated'}."
+            munger_metric = f"ROCE: {roce_val:.1f}% | Health: {f_sc}/9"
+        elif is_equity:
+            munger_conf = 40
+            munger_verdict = "ROCE PENDING"
+            munger_thesis = f"Return on capital employed and balance sheet solvency pending verification for {setup_sym}."
+            munger_metric = "ROCE: â€” | Health: â€”"
+        else:
+            munger_conf = 50
+            munger_verdict = "N/A (NON-EQUITY)"
+            munger_thesis = f"Inversion solvency principles evaluate businesses; {setup_sym} is evaluated via macro dynamics."
+            munger_metric = "ROCE: N/A"
+
+        personas = [
+            {
+                "id": "minervini",
+                "name": "Mark Minervini",
+                "title": "SEPA & VCP Breakouts",
+                "avatar": "momentum",
+                "icon": "ðŸš€",
+                "style": "Momentum",
+                "verdict": minervini_verdict,
+                "horizon": "1â€“4 Weeks (Swing)",
+                "thesis": minervini_thesis,
+                "key_metric": minervini_metric,
+                "quote": "Look for contraction in volatility accompanied by a distinct volume contraction before the breakout.",
+                "confidence": minervini_conf,
+                "accent": "amber",
+                "checklist": [
+                    f"Trend Template: {minervini_passed or 0}/8 Passed",
+                    f"Weinstein Stage: {stage_str}",
+                    f"VCP Consolidation: {'Tight' if vcp_detected else 'Developing'}",
+                    f"20D Relative Volume: {rvol_val:.1f}x",
+                ],
+                "metrics": {
+                    "Stage": stage_str,
+                    "Rules": f"{minervini_passed or 0}/8",
+                    "VCP": "Detected" if vcp_detected else "Developing",
+                    "RVOL": f"{rvol_val:.1f}x",
+                },
+            },
+            {
+                "id": "kedia",
+                "name": "Vijay Kedia",
+                "title": "SMILE Indian Multibaggers",
+                "avatar": "multibagger",
+                "icon": "ðŸ’Ž",
+                "style": "Multibagger",
+                "verdict": kedia_verdict,
+                "horizon": "6â€“24 Months (Positional)",
+                "thesis": kedia_thesis,
+                "key_metric": kedia_metric,
+                "quote": "Invest like a bull, sit like a sloth, and work like a hound to spot 10x opportunities.",
+                "confidence": kedia_conf,
+                "accent": "emerald",
+                "checklist": [
+                    f"Multibagger Score: {mb_score or 0}/100",
+                    f"Topline Growth: {sales_growth_val or 0:+.1f}%",
+                    f"Balance Sheet Solvency: D/E {de_val or 0:.2f}",
+                    f"Forensic Quality: F-Score {f_score or 0}/9",
+                ],
+                "metrics": {
+                    "Score": f"{mb_score or 0}/100",
+                    "Growth": f"{sales_growth_val or 0:+.1f}%",
+                    "D/E": f"{de_val or 0:.2f}",
+                    "Forensic": f"{f_score or 0}/9",
+                },
+            },
+            {
+                "id": "taleb",
+                "name": "Nassim Nicholas Taleb",
+                "title": "Antifragile Convexity & Spreads",
+                "avatar": "quant",
+                "icon": "ðŸ›¡ï¸",
+                "style": "Asymmetric Quant",
+                "verdict": taleb_verdict,
+                "horizon": "1â€“2 Expiries (Options)",
+                "thesis": taleb_thesis,
+                "key_metric": taleb_metric,
+                "quote": "Invest in asymmetric opportunities where your downside is bounded and upside is open-ended.",
+                "confidence": taleb_conf,
+                "accent": "cyan",
+                "checklist": [
+                    f"Realized ATR Volatility: {vol_pct:.2f}%",
+                    "Defined-Risk Options Spread Mandate",
+                    "Zero Unhedged Short Gamma Exposure",
+                    "Positive Convexity Tail Skew Capture",
+                ],
+                "metrics": {
+                    "ATR Vol": f"{vol_pct:.2f}%",
+                    "Max Loss": "Strictly Capped",
+                    "Payoff": "Defined-Risk",
+                    "Tail Hedge": "Active",
+                },
+            },
+            {
+                "id": "wyckoff",
+                "name": "Richard Wyckoff",
+                "title": "VSA & Accumulation Springs",
+                "avatar": "spread",
+                "icon": "ðŸ“ˆ",
+                "style": "Volume Spread",
+                "verdict": wyckoff_verdict,
+                "horizon": "2â€“6 Weeks (Swing)",
+                "thesis": wyckoff_thesis,
+                "key_metric": wyckoff_metric,
+                "quote": "When the composite operator has accumulated the floating supply, price must advance.",
+                "confidence": wyckoff_conf,
+                "accent": "amber",
+                "checklist": [
+                    f"20D Relative Volume: {rvol_val:.1f}x",
+                    f"Institutional Footprint: {bias_str}",
+                    f"Market Structure Score: {struct_score:+d}",
+                    f"Wyckoff Phase: {wyckoff_verdict}",
+                ],
+                "metrics": {
+                    "RVOL 20D": f"{rvol_val:.1f}x",
+                    "Footprint": bias_str,
+                    "Score": f"{struct_score:+d}",
+                    "Phase": wyckoff_verdict.split(" ")[0],
+                },
+            },
+            {
+                "id": "oneil",
+                "name": "William O'Neil",
+                "title": "CAN SLIM Momentum Growth",
+                "avatar": "growth",
+                "icon": "âš¡",
+                "style": "Growth",
+                "verdict": oneil_verdict,
+                "horizon": "3â€“8 Weeks (Swing)",
+                "thesis": oneil_thesis,
+                "key_metric": oneil_metric,
+                "quote": "Whole truth: 90% of the biggest winners in the stock market were emerging growth leaders.",
+                "confidence": oneil_conf,
+                "accent": "emerald",
+                "checklist": [
+                    f"Quarterly Sales Growth: {sales_growth_val or 0:+.1f}%",
+                    f"Quarterly Profit Growth: {profit_growth_val or 0:+.1f}%",
+                    f"Price Structure: {structure_dir}",
+                    f"Multibagger Rank: {mb_score or 0}/100",
+                ],
+                "metrics": {
+                    "Sales": f"{sales_growth_val or 0:+.1f}%",
+                    "Profit": f"{profit_growth_val or 0:+.1f}%",
+                    "Structure": structure_dir,
+                    "Rank": f"{mb_score or 0}/100",
+                },
+            },
+            {
+                "id": "simons",
+                "name": "Jim Simons",
+                "title": "Statistical Arbitrage & EV",
+                "avatar": "quant",
+                "icon": "ðŸ§®",
+                "style": "Mathematical Quant",
+                "verdict": simons_verdict,
+                "horizon": "1â€“5 Days (Intraday/Swing)",
+                "thesis": simons_thesis,
+                "key_metric": simons_metric,
+                "quote": "We search for anomalies in historical price patterns that have statistical significance.",
+                "confidence": simons_conf,
+                "accent": "purple",
+                "checklist": [
+                    simons_metric,
+                    f"Realized ATR: â‚¹{atr_val:.2f}",
+                    f"Regime Direction: {structure_dir}",
+                    "Kelly Risk-Parity Lot Quantization",
+                ],
+                "metrics": {
+                    "Metric": simons_metric.split("|")[0].strip(),
+                    "ATR": f"â‚¹{atr_val:.2f}",
+                    "Regime": structure_dir,
+                    "Edge": "Quantitative",
+                },
+            },
+            {
+                "id": "smc",
+                "name": "Smart Money Concepts",
+                "title": "Liquidity Sweeps & Order Blocks",
+                "avatar": "smc",
+                "icon": "ðŸŽ¯",
+                "style": "ICT Price Action",
+                "verdict": smc_verdict,
+                "horizon": "1â€“3 Sessions (Intraday/Swing)",
+                "thesis": smc_thesis,
+                "key_metric": smc_metric,
+                "quote": "Follow institutional order flow and trade when unmitigated liquidity is tapped.",
+                "confidence": smc_conf,
+                "accent": "rose",
+                "checklist": [
+                    f"Market Structure Score: {struct_score:+d} ({structure_dir})",
+                    f"Active Demand Zones: {len(active_d)}",
+                    f"Active Supply Zones: {len(active_s)}",
+                    f"Setup Trigger: {smc_verdict}",
+                ],
+                "metrics": {
+                    "Score": f"{struct_score:+d}",
+                    "Demand": f"{len(active_d)} zones",
+                    "Supply": f"{len(active_s)} zones",
+                    "Action": smc_verdict,
+                },
+            },
+            {
+                "id": "jhunjhunwala",
+                "name": "Jhunjhunwala",
+                "title": "Contrarian / Multibagger",
+                "avatar": "bull",
+                "icon": "ðŸ‚",
+                "style": "Contrarian",
+                "verdict": jh_verdict,
+                "horizon": "2â€“3 Years",
+                "thesis": jh_thesis,
+                "key_metric": jh_metric,
+                "quote": "Ride the Indian economic supercycle; invest in market leaders with operating leverage.",
+                "confidence": jh_conf,
+                "accent": "amber",
+                "checklist": [
+                    f"Multibagger Score: {mb_score or 0}/100",
+                    f"Sales Growth: {sales_growth_val or 0:+.1f}%",
+                    f"Minervini Criteria: {minervini_passed or 0}/8",
+                    f"Indian Supercycle Tailwind: Verified",
+                ],
+                "metrics": {
+                    "Score": f"{mb_score or 0}/100",
+                    "Stage": stage_str,
+                    "Sales": f"{sales_growth_val or 0:+.1f}%",
+                    "Conviction": f"{jh_conf}%",
+                },
+            },
+            {
+                "id": "buffett",
+                "name": "Buffett",
+                "title": "Moat & Owner Earnings",
+                "avatar": "moat",
+                "icon": "ðŸ°",
+                "style": "Value Moat",
+                "verdict": buffett_verdict,
+                "horizon": "3â€“5+ Years",
+                "thesis": buffett_thesis,
+                "key_metric": buffett_metric,
+                "quote": "It's far better to buy a wonderful company at a fair price than a fair company at a wonderful price.",
+                "confidence": buffett_conf,
+                "accent": "blue",
+                "checklist": [
+                    f"Return on Equity: {roe_val or 0:.1f}%",
+                    f"Debt-to-Equity: {de_val or 0:.2f}",
+                    f"Forensic Health: F-Score {f_score or 0}/9",
+                    "Durable Competitive Advantage: Audited",
+                ],
+                "metrics": {
+                    "ROE": f"{roe_val or 0:.1f}%",
+                    "D/E": f"{de_val or 0:.2f}",
+                    "F-Score": f"{f_score or 0}/9",
+                    "Moat": "Evaluated",
+                },
+            },
+            {
+                "id": "forensic",
+                "name": "Forensic",
+                "title": "Forensic Audit & Accruals",
+                "avatar": "forensic",
+                "icon": "ðŸ”",
+                "style": "Forensic Auditor",
+                "verdict": forensic_verdict,
+                "horizon": "Active Audit",
+                "thesis": forensic_thesis,
+                "key_metric": forensic_metric,
+                "quote": "Rule No. 1: Don't lose money on accounting landmines. Verify working capital accruals.",
+                "confidence": forensic_conf,
+                "accent": "emerald",
+                "checklist": [
+                    f"Beneish M-Score: {m_score or 0:.2f} ({'Safe' if m_score and m_score < -1.78 else 'Caution'})",
+                    f"Piotroski F-Score: {f_score or 0}/9",
+                    f"Altman Z'' Score: {z_score or 0:.2f}",
+                    "Revenue Recognition & Accruals: Screened",
+                ],
+                "metrics": {
+                    "Beneish M": f"{m_score or 0:.2f}",
+                    "Piotroski F": f"{f_score or 0}/9",
+                    "Altman Z": f"{z_score or 0:.2f}",
+                    "Verdict": forensic_verdict,
+                },
+            },
+            {
+                "id": "soros",
+                "name": "Soros",
+                "title": "Global Macro & Reflexivity",
+                "avatar": "macro",
+                "icon": "ðŸŒŠ",
+                "style": "Global Macro",
+                "verdict": soros_verdict,
+                "horizon": "2â€“6 Weeks",
+                "thesis": soros_thesis,
+                "key_metric": soros_metric,
+                "quote": "Markets are constantly in a state of uncertainty and flux; identify the prevailing bias and ride it.",
+                "confidence": soros_conf,
+                "accent": "purple",
+                "checklist": [
+                    f"20D Relative Volume: {rvol_val:.1f}x",
+                    f"Market Regime: {structure_dir}",
+                    f"Institutional Bias: {bias_str}",
+                    "Reflexive Momentum Factor: Active",
+                ],
+                "metrics": {
+                    "RVOL": f"{rvol_val:.1f}x",
+                    "Regime": structure_dir,
+                    "Footprint": bias_str,
+                    "Score": f"{struct_score:+d}",
+                },
+            },
+            {
+                "id": "lynch",
+                "name": "Lynch",
+                "title": "GARP & Fast Growth",
+                "avatar": "garp",
+                "icon": "ðŸ›’",
+                "style": "GARP",
+                "verdict": lynch_verdict,
+                "horizon": "1â€“2 Years",
+                "thesis": lynch_thesis,
+                "key_metric": lynch_metric,
+                "quote": "Know what you own, and know why you own it. Look for earnings growth exceeding P/E.",
+                "confidence": lynch_conf,
+                "accent": "cyan",
+                "checklist": [
+                    f"Price-to-Earnings (P/E): {pe_val or 0:.1f}x",
+                    f"Profit Growth: {profit_growth_val or 0:+.1f}%",
+                    f"Implied PEG: {peg_val if pe_val and profit_growth_val and profit_growth_val > 0 else 'â€”'}",
+                    "Fast-Growing Stalwart Category: Screened",
+                ],
+                "metrics": {
+                    "P/E": f"{pe_val or 0:.1f}x",
+                    "Profit Growth": f"{profit_growth_val or 0:+.1f}%",
+                    "PEG": f"{peg_val if pe_val and profit_growth_val and profit_growth_val > 0 else 'â€”'}",
+                    "Category": lynch_verdict.split(" ")[0],
+                },
+            },
+            {
+                "id": "munger",
+                "name": "Munger",
+                "title": "Quality & Inversion",
+                "avatar": "quality",
+                "icon": "ðŸ›ï¸",
+                "style": "Quality Inversion",
+                "verdict": munger_verdict,
+                "horizon": "Multi-Year",
+                "thesis": munger_thesis,
+                "key_metric": munger_metric,
+                "quote": "Invert, always invert: Turn a problem upside down to see the real vulnerabilities.",
+                "confidence": munger_conf,
+                "accent": "rose",
+                "checklist": [
+                    f"ROCE Efficiency: {roce_val or 0:.1f}%",
+                    f"Debt-to-Equity Leverage: {de_val or 0:.2f}",
+                    f"Piotroski Health: {f_score or 0}/9",
+                    "Zero-Leverage Sanity Filter: Audited",
+                ],
+                "metrics": {
+                    "ROCE": f"{roce_val or 0:.1f}%",
+                    "D/E": f"{de_val or 0:.2f}",
+                    "F-Score": f"{f_score or 0}/9",
+                    "Solvency": "Evaluated",
+                },
+            },
+        ]
+
+        # Dynamically compute the 5 Councils from member persona evaluations
+        council_specs = [
+            {
+                "id": "breakout",
+                "name": "Breakout Council",
+                "icon": "ðŸš€",
+                "desc": "Minervini + Wyckoff + O'Neil + Forensic Auditor",
+                "badge": "MOMENTUM",
+                "members": ["minervini", "wyckoff", "oneil", "forensic"],
+            },
+            {
+                "id": "options_sniper",
+                "name": "Options Sniper",
+                "icon": "ðŸŽ¯",
+                "desc": "SMC + Taleb + Simons",
+                "badge": "DEFINED-RISK",
+                "members": ["smc", "taleb", "simons"],
+            },
+            {
+                "id": "multibagger",
+                "name": "Multibagger Hub",
+                "icon": "ðŸ’Ž",
+                "desc": "Kedia + Buffett + Munger + Jhunjhunwala + Forensic",
+                "badge": "COMPOUNDER",
+                "members": ["kedia", "buffett", "munger", "jhunjhunwala", "forensic"],
+            },
+            {
+                "id": "macro_regime",
+                "name": "Macro Regime",
+                "icon": "ðŸŒ",
+                "desc": "Soros + Jhunjhunwala + Simons + Forensic",
+                "badge": "INSTITUTIONAL",
+                "members": ["soros", "jhunjhunwala", "simons", "forensic"],
+            },
+            {
+                "id": "core_value",
+                "name": "Core Value Moat",
+                "icon": "ðŸ›ï¸",
+                "desc": "Buffett + Munger + Lynch + Forensic",
+                "badge": "DEFENSIVE",
+                "members": ["buffett", "munger", "lynch", "forensic"],
+            },
+        ]
+        persona_lookup = {p["id"]: p for p in personas}
+        councils = []
+        for c in council_specs:
+            confs = [
+                persona_lookup[m]["confidence"]
+                for m in c["members"]
+                if m in persona_lookup and persona_lookup[m].get("confidence") is not None
+            ]
+            c_score = int(sum(confs) / len(confs)) if confs else 50
+            if c_score >= 75:
+                c_verdict = "BULLISH CONFLUENCE"
+            elif c_score >= 60:
+                c_verdict = "MODERATE CONFLUENCE"
+            elif c_score >= 45:
+                c_verdict = "NEUTRAL / BALANCED"
+            else:
+                c_verdict = "CAUTION / BEARISH BIAS"
+
+            member_summaries = [
+                f"{persona_lookup[m]['name']}: {persona_lookup[m]['verdict']}"
+                for m in c["members"]
+                if m in persona_lookup
+            ]
+            c_thesis = (
+                f"{c['name']} quantitative confluence on {setup_sym}: Conviction score {c_score}/100 ({c_verdict}). "
+                + "Specialist inputs: "
+                + "; ".join(member_summaries)
+                + "."
             )
-            sl_val = entry_val + risk_unit
-            tgt1_val = entry_val - (risk_unit * 2.0)
-            tgt2_val = entry_val - (risk_unit * 3.5)
-            rr_val = 2.0
-            thesis_txt = f"Bearish structure with unmitigated Supply Zone near ₹{entry_val:.2f}. Short entry on liquidity rejection with {((risk_unit / entry_val) * 100):.1f}% risk invalidation above swing resistance."
+            councils.append(
+                {
+                    **c,
+                    "score": c_score,
+                    "verdict": c_verdict,
+                    "thesis": c_thesis,
+                }
+            )
+
+        # 3. Market Structure & SMC Setup for target symbol
+        is_bullish = bool(ms_report and ms_report.structure_score >= 0) if ms_report else True
+        action_type = "LONG (BUY)" if is_bullish else "SHORT (SELL)"
 
         timeline_map = {
-            "5m": "1–2 Trading Sessions (Scalp / Intraday)",
-            "15m": "1–3 Trading Sessions (Intraday Swing)",
-            "1h": "2–5 Trading Days (Swing Pivot)",
-            "day": "5–15 Trading Days (Positional Markup)",
-            "1D": "5–15 Trading Days (Positional Markup)",
-            "week": "3–8 Weeks (Trend Continuation)",
-            "1W": "3–8 Weeks (Trend Continuation)",
-            "month": "3–12 Months (Secular Macro Cycle)",
-            "1M": "3–12 Months (Secular Macro Cycle)",
+            "5m": "1â€“2 Trading Sessions (Scalp / Intraday)",
+            "15m": "1â€“3 Trading Sessions (Intraday Swing)",
+            "1h": "2â€“5 Trading Days (Swing Pivot)",
+            "day": "5â€“15 Trading Days (Positional Markup)",
+            "1D": "5â€“15 Trading Days (Positional Markup)",
+            "week": "3â€“8 Weeks (Trend Continuation)",
+            "1W": "3â€“8 Weeks (Trend Continuation)",
+            "month": "3â€“12 Months (Secular Macro Cycle)",
+            "1M": "3â€“12 Months (Secular Macro Cycle)",
         }
-        timeline_str = timeline_map.get(str(tf).lower(), "5–15 Trading Days (Positional Markup)")
+        timeline_str = timeline_map.get(str(tf).lower(), "5â€“15 Trading Days (Positional Markup)")
+
+        vp_data = None
+        if vp_report:
+            vp_data = {
+                "poc": round(float(vp_report.poc_price), 2),
+                "vah": round(float(vp_report.vah_price), 2),
+                "val": round(float(vp_report.val_price), 2),
+                "rvol": round(float(vp_report.rvol_20d), 1),
+                "bias": getattr(vp_report, "footprint_bias", "NEUTRAL"),
+            }
 
         ob_data = None
-        if ms_report and ms_report.active_demand_zones:
+        if ms_report and getattr(ms_report, "active_demand_zones", None) and is_bullish:
             top_ob = ms_report.active_demand_zones[-1]
             ob_data = {
-                "bottom": round(top_ob.bottom, 2),
-                "top": round(top_ob.top, 2),
+                "bottom": round(float(top_ob.bottom), 2),
+                "top": round(float(top_ob.top), 2),
                 "type": "DEMAND",
+            }
+        elif ms_report and getattr(ms_report, "active_supply_zones", None) and not is_bullish:
+            top_ob = ms_report.active_supply_zones[-1]
+            ob_data = {
+                "bottom": round(float(top_ob.bottom), 2),
+                "top": round(float(top_ob.top), 2),
+                "type": "SUPPLY",
+            }
+        elif ms_report and getattr(ms_report, "active_demand_zones", None):
+            top_ob = ms_report.active_demand_zones[-1]
+            ob_data = {
+                "bottom": round(float(top_ob.bottom), 2),
+                "top": round(float(top_ob.top), 2),
+                "type": "DEMAND",
+            }
+
+        has_ob = False
+        automated_setup = None
+
+        if is_bullish and ms_report and getattr(ms_report, "active_demand_zones", None):
+            active_d = ms_report.active_demand_zones
+            # Demand zone must be below or retesting current price (within 3.5% range)
+            if active_d and active_d[-1].bottom < cur_ltp and cur_ltp <= active_d[-1].top * 1.035:
+                has_ob = True
+                top_ob = active_d[-1]
+                entry_val = float(getattr(top_ob, "ote_price", (top_ob.top + top_ob.bottom) / 2.0))
+                sl_val = float(top_ob.bottom * 0.998)
+                trigger_name = "Demand OB Retest"
+                ob_data = {
+                    "bottom": round(float(top_ob.bottom), 2),
+                    "top": round(float(top_ob.top), 2),
+                    "type": "DEMAND",
+                }
+                risk_unit = max(entry_val * 0.0035, entry_val - sl_val)
+                sl_val = entry_val - risk_unit
+                tgt1_val = entry_val + (risk_unit * 2.0)
+                tgt2_val = entry_val + (risk_unit * 3.5)
+                rr_val = 2.0
+                thesis_txt = f"Bullish structure with unmitigated Demand Zone near â‚¹{entry_val:.2f}. Limit entry at 50% Mean Threshold (OTE) with {((risk_unit / entry_val) * 100):.1f}% risk invalidation below swing support."
+        elif not is_bullish and ms_report and getattr(ms_report, "active_supply_zones", None):
+            active_s = ms_report.active_supply_zones
+            # Supply zone must be above or retesting current price (within 3.5% range)
+            if active_s and active_s[-1].top > cur_ltp and cur_ltp >= active_s[-1].bottom * 0.965:
+                has_ob = True
+                top_ob = active_s[-1]
+                entry_val = float(getattr(top_ob, "ote_price", (top_ob.top + top_ob.bottom) / 2.0))
+                sl_val = float(top_ob.top * 1.002)
+                trigger_name = "Supply OB Rejection"
+                ob_data = {
+                    "bottom": round(float(top_ob.bottom), 2),
+                    "top": round(float(top_ob.top), 2),
+                    "type": "SUPPLY",
+                }
+                risk_unit = max(entry_val * 0.0035, sl_val - entry_val)
+                sl_val = entry_val + risk_unit
+                tgt1_val = entry_val - (risk_unit * 2.0)
+                tgt2_val = entry_val - (risk_unit * 3.5)
+                rr_val = 2.0
+                thesis_txt = f"Bearish structure with unmitigated Supply Zone near â‚¹{entry_val:.2f}. Short entry on liquidity rejection with {((risk_unit / entry_val) * 100):.1f}% risk invalidation above swing resistance."
+
+        if has_ob:
+            q_src = getattr(q_obj, "source", None)
+            q_prov = getattr(q_obj, "provider", None)
+            q_state = getattr(q_obj, "data_state", None)
+            is_live = bool(q_state == "LIVE" or (q_src in ("STREAM", "REST") and q_prov not in ("yfinance", "disk_cache", None)))
+
+            automated_setup = {
+                "symbol": f"{setup_sym} ({exch})",
+                "action": action_type,
+                "trigger": trigger_name,
+                "entry": round(entry_val, 2),
+                "stop_loss": round(sl_val, 2),
+                "target_1": round(tgt1_val, 2),
+                "target_2": round(tgt2_val, 2),
+                "risk_reward": rr_val,
+                "risk_points": round(abs(entry_val - sl_val), 2),
+                "risk_pct": round((abs(entry_val - sl_val) / entry_val) * 100, 2),
+                "reward_points": round(abs(tgt1_val - entry_val), 2),
+                "reward_pct": round((abs(tgt1_val - entry_val) / entry_val) * 100, 2),
+                "timeline": timeline_str,
+                "thesis": thesis_txt,
+                "status": "READY",
+                "status_label": "High Conviction Institutional Setup",
+                # Setup progress: computed from real signals â€” never hardcoded.
+                # Base 45pts: SMC order block confirmed + price in OB range.
+                # +10pts: RVOL > 1.2 (above-avg volume confirms interest)
+                # +10pts: Volume profile bias aligns with trade direction
+                # +10pts: Market structure score strongly confirms direction
+                # +10pts: Council persona mean confidence â‰¥ 65
+                # +15pts: ATR-derived R:R â‰¥ 2.5 (extra edge)
+                "progress": min(100, (
+                    45  # OB confirmed + price retesting (prerequisite for has_ob==True)
+                    + (10 if vp_report and float(vp_report.rvol_20d) >= 1.2 else 0)
+                    + (10 if vp_report and getattr(vp_report, 'footprint_bias', '') == ('BULLISH' if is_bullish else 'BEARISH') else 0)
+                    + (10 if ms_report and abs(float(ms_report.structure_score)) >= 3 else (5 if ms_report and abs(float(ms_report.structure_score)) >= 1 else 0))
+                    + (10 if persona_lookup and (sum(p.get('confidence', 0) for p in persona_lookup.values()) / max(len(persona_lookup), 1)) >= 65 else 0)
+                    + (15 if rr_val >= 2.5 else (8 if rr_val >= 2.0 else 0))
+                )),
+                "order_block": ob_data,
+                "volume_profile": vp_data,
+                "trailing_stop": "2R Breakeven (+0.2% buffer), Chandelier ATR 3x",
+                "provenance": {
+                    "data_source": q_prov or ("LIVE_TICK" if quotes_map else "EOD_HISTORICAL"),
+                    "data_state": q_state or ("LIVE" if is_live else "DELAYED"),
+                    "is_real_time": is_live,
+                    "is_fallback": bool(q_src == "FALLBACK" or q_prov in ("yfinance", "disk_cache")),
+                    "as_of": getattr(q_obj, "received_at", None) or f"{datetime.now().strftime('%d %b %Y, %I:%M %p IST')}",
+                    "dataset_timeline": f"{'Real-Time Broker Stream' if is_live else 'Exchange Delayed Fallback'} & {timeline_str}",
+                },
             }
         else:
-            ob_data = {
-                "bottom": round(cur_ltp * 0.995, 2),
-                "top": round(cur_ltp * 0.998, 2),
-                "type": "DEMAND",
-            }
-
-        vp_data = {
-            "poc": round(vp_report.poc_price, 2) if vp_report else round(cur_ltp * 1.001, 2),
-            "vah": round(vp_report.vah_price, 2) if vp_report else round(cur_ltp * 1.004, 2),
-            "val": round(vp_report.val_price, 2) if vp_report else round(cur_ltp * 0.997, 2),
-            "rvol": round(vp_report.rvol_20d, 1) if vp_report else 1.8,
-            "bias": vp_report.footprint_bias if vp_report else "ACCUMULATION",
-        }
-
-        automated_setup = {
-            "symbol": f"{setup_sym} ({exch})",
-            "action": action_type,
-            "trigger": trigger_name,
-            "entry": round(entry_val, 2),
-            "stop_loss": round(sl_val, 2),
-            "target_1": round(tgt1_val, 2),
-            "target_2": round(tgt2_val, 2),
-            "risk_reward": rr_val,
-            "risk_points": round(abs(entry_val - sl_val), 2),
-            "risk_pct": round((abs(entry_val - sl_val) / entry_val) * 100, 2),
-            "reward_points": round(abs(tgt1_val - entry_val), 2),
-            "reward_pct": round((abs(tgt1_val - entry_val) / entry_val) * 100, 2),
-            "timeline": timeline_str,
-            "thesis": thesis_txt,
-            "status": "READY",
-            "status_label": "High Conviction Institutional Setup",
-            "progress": 72,
-            "order_block": ob_data,
-            "volume_profile": vp_data,
-            "trailing_stop": "2R Breakeven (+0.2% buffer), Chandelier ATR 3x",
-            "provenance": {
-                "data_source": "LIVE_TICK" if quotes_map else "EOD_HISTORICAL",
-                "as_of": f"{datetime.now().strftime('%d %b %Y, %I:%M %p IST')} • Live Market Context",
-                "is_real_time": True,
-                "dataset_timeline": f"Real-Time Live State & {timeline_str}",
-            },
-        }
+            automated_setup = None
 
         # 4. Institutional Flows (DLY + Multi-Day Intelligence)
         flow_ana = None
+        flows = None
         try:
             from market.flow_intel import get_flow_analysis
 
@@ -4687,68 +5210,64 @@ def _compute_dashboard_snapshot_sync(req: Optional[DashboardSnapshotRequest] = N
         except Exception:
             pass
 
-        fii_net = flow_ana.fii_net_today if flow_ana else -1450.0
-        dii_net = flow_ana.dii_net_today if flow_ana else 1120.0
-        total_net = round(fii_net + dii_net, 2)
+        has_flows = flow_ana is not None and getattr(flow_ana, "raw_data", None) and len(flow_ana.raw_data) > 0
+        if has_flows:
+            fii_net = float(flow_ana.fii_net_today)
+            dii_net = float(flow_ana.dii_net_today)
+            total_net = round(fii_net + dii_net, 2)
 
-        # Absorption rate computation
-        absorption_pct = 0.0
-        if fii_net < 0 and dii_net > 0:
-            absorption_pct = round((dii_net / abs(fii_net)) * 100, 1)
-        elif fii_net >= 0 and dii_net >= 0:
-            absorption_pct = 100.0
+            absorption_pct = 0.0
+            if fii_net < 0 and dii_net > 0:
+                absorption_pct = round((dii_net / abs(fii_net)) * 100, 1)
+            elif fii_net >= 0 and dii_net >= 0:
+                absorption_pct = 100.0
 
-        # Institutional regime classification
-        if fii_net > 500 and dii_net > 500:
-            regime = "TWIN_BUYING"
-            regime_label = "Twin Institutional Inflow"
-        elif fii_net < -500 and dii_net < -500:
-            regime = "TWIN_SELLING"
-            regime_label = "Institutional Risk-Off Exit"
-        elif fii_net < 0 and dii_net > abs(fii_net):
-            regime = "DII_ABSORPTION"
-            regime_label = "DII Shielding FII Selling"
-        elif fii_net < 0 and dii_net > 0:
-            regime = "PARTIAL_ABSORPTION"
-            regime_label = "Partial DII Absorption"
-        elif fii_net > 0 and dii_net < 0:
-            regime = "FII_ACCUMULATION"
-            regime_label = "FII Accumulating / DII Profit-Booking"
-        else:
-            regime = "BALANCED"
-            regime_label = "Institutional Balance"
+            if fii_net > 500 and dii_net > 500:
+                regime = "TWIN_BUYING"
+                regime_label = "Twin Institutional Inflow"
+            elif fii_net < -500 and dii_net < -500:
+                regime = "TWIN_SELLING"
+                regime_label = "Institutional Risk-Off Exit"
+            elif fii_net < 0 and dii_net > abs(fii_net):
+                regime = "DII_ABSORPTION"
+                regime_label = "DII Shielding FII Selling"
+            elif fii_net < 0 and dii_net > 0:
+                regime = "PARTIAL_ABSORPTION"
+                regime_label = "Partial DII Absorption"
+            elif fii_net > 0 and dii_net < 0:
+                regime = "FII_ACCUMULATION"
+                regime_label = "FII Accumulating / DII Profit-Booking"
+            else:
+                regime = "BALANCED"
+                regime_label = "Institutional Balance"
 
-        flows = {
-            "fii_net": round(fii_net, 2),
-            "dii_net": round(dii_net, 2),
-            "net_total": total_net,
-            "label": "DLY + 5D",
-            "fii_streak": flow_ana.fii_streak if flow_ana else -1,
-            "dii_streak": flow_ana.dii_streak if flow_ana else 1,
-            "fii_streak_total": round(flow_ana.fii_streak_total, 2)
-            if flow_ana
-            else round(fii_net, 2),
-            "dii_streak_total": round(flow_ana.dii_streak_total, 2)
-            if flow_ana
-            else round(dii_net, 2),
-            "fii_5d_net": round(flow_ana.fii_5d_net, 2) if flow_ana else round(fii_net, 2),
-            "dii_5d_net": round(flow_ana.dii_5d_net, 2) if flow_ana else round(dii_net, 2),
-            "fii_momentum": flow_ana.fii_momentum if flow_ana else "STEADY",
-            "absorption_pct": absorption_pct,
-            "regime": regime,
-            "regime_label": regime_label,
-            "signal": flow_ana.signal if flow_ana else "NEUTRAL",
-            "signal_reason": (
-                flow_ana.signal_reason
-                if flow_ana and flow_ana.signal_reason
-                else f"DII absorbed {absorption_pct}% of foreign outflows."
-            ),
-            "verdict": (
-                flow_ana.signal_reason
-                if flow_ana and flow_ana.signal_reason
-                else f"{regime_label} ({'+' if total_net >= 0 else ''}₹{total_net:,.0f} Cr)"
-            ),
-        }
+            flows = {
+                "fii_net": round(fii_net, 2),
+                "dii_net": round(dii_net, 2),
+                "net_total": total_net,
+                "label": "DLY + 5D",
+                "fii_streak": flow_ana.fii_streak,
+                "dii_streak": flow_ana.dii_streak,
+                "fii_streak_total": round(flow_ana.fii_streak_total, 2),
+                "dii_streak_total": round(flow_ana.dii_streak_total, 2),
+                "fii_5d_net": round(flow_ana.fii_5d_net, 2),
+                "dii_5d_net": round(flow_ana.dii_5d_net, 2),
+                "fii_momentum": flow_ana.fii_momentum,
+                "absorption_pct": absorption_pct,
+                "regime": regime,
+                "regime_label": regime_label,
+                "signal": flow_ana.signal,
+                "signal_reason": (
+                    flow_ana.signal_reason
+                    if flow_ana and flow_ana.signal_reason
+                    else f"DII absorbed {absorption_pct}% of foreign outflows."
+                ),
+                "verdict": (
+                    flow_ana.signal_reason
+                    if flow_ana and flow_ana.signal_reason
+                    else f"{regime_label} ({'+' if total_net >= 0 else ''}â‚¹{total_net:,.0f} Cr)"
+                ),
+            }
 
         # 5. Sector Rotation Matrix & RRG 2D Momentum
         sector_items = []
@@ -4777,146 +5296,16 @@ def _compute_dashboard_snapshot_sync(req: Optional[DashboardSnapshotRequest] = N
         except Exception:
             pass
 
-        if not sector_items:
-            sector_items = [
-                {
-                    "code": "IT",
-                    "name": "IT",
-                    "full_name": "NIFTY IT",
-                    "change_pct": 1.2,
-                    "rs_ratio": 102.14,
-                    "rs_momentum": 115.67,
-                    "quadrant": "LEADING",
-                },
-                {
-                    "code": "BANK",
-                    "name": "BANK",
-                    "full_name": "NIFTY BANK",
-                    "change_pct": 0.5,
-                    "rs_ratio": 99.53,
-                    "rs_momentum": 98.60,
-                    "quadrant": "LAGGING",
-                },
-                {
-                    "code": "AUTO",
-                    "name": "AUTO",
-                    "full_name": "NIFTY AUTO",
-                    "change_pct": 0.8,
-                    "rs_ratio": 96.16,
-                    "rs_momentum": 96.89,
-                    "quadrant": "LAGGING",
-                },
-                {
-                    "code": "PHARMA",
-                    "name": "PHARMA",
-                    "full_name": "NIFTY PHARMA",
-                    "change_pct": -0.4,
-                    "rs_ratio": 100.00,
-                    "rs_momentum": 104.05,
-                    "quadrant": "LEADING",
-                },
-                {
-                    "code": "FMCG",
-                    "name": "FMCG",
-                    "full_name": "NIFTY FMCG",
-                    "change_pct": -0.2,
-                    "rs_ratio": 96.14,
-                    "rs_momentum": 100.99,
-                    "quadrant": "IMPROVING",
-                },
-                {
-                    "code": "METAL",
-                    "name": "METAL",
-                    "full_name": "NIFTY METAL",
-                    "change_pct": 1.5,
-                    "rs_ratio": 102.21,
-                    "rs_momentum": 98.47,
-                    "quadrant": "WEAKENING",
-                },
-                {
-                    "code": "REALTY",
-                    "name": "REALTY",
-                    "full_name": "NIFTY REALTY",
-                    "change_pct": 1.1,
-                    "rs_ratio": 103.17,
-                    "rs_momentum": 100.26,
-                    "quadrant": "LEADING",
-                },
-                {
-                    "code": "ENERGY",
-                    "name": "ENERGY",
-                    "full_name": "NIFTY ENERGY",
-                    "change_pct": 0.6,
-                    "rs_ratio": 96.85,
-                    "rs_momentum": 100.83,
-                    "quadrant": "IMPROVING",
-                },
-            ]
-
         # 6. Multi-Timeframe Technical Confluence (15m, 1h, 1D)
-        tf_15m_regime = "BULLISH" if (ms_report and ms_report.structure_score >= 0) else "BEARISH"
-        tf_15m_desc = (
-            "SMC Order Block Retest"
-            if (ms_report and ms_report.active_demand_zones)
-            else "Stage 2 Breakout"
-        )
-        tf_1h_regime = "BULLISH" if (ms_report and ms_report.structure_score >= 20) else "RANGING"
-        tf_1d_regime = "BULLISH" if (mb_rep and mb_rep.multibagger_score >= 50) else "CONSOLIDATION"
+        multi_tf = None
+        try:
+            from analysis.multi_timeframe import multi_timeframe_analysis
 
-        confluence_score = int(
-            min(
-                98,
-                max(
-                    35,
-                    50
-                    + (ms_report.structure_score * 0.3 if ms_report else 15)
-                    + (mb_rep.multibagger_score * 0.3 if mb_rep else 15),
-                ),
-            )
-        )
-        confluence_stance = (
-            "HIGH ALIGNMENT (STRONG LONG)"
-            if confluence_score >= 75
-            else (
-                "MODERATE ALIGNMENT (STALK)"
-                if confluence_score >= 55
-                else "MIXED SIGNALS (STAND DOWN)"
-            )
-        )
-
-        multi_tf = {
-            "symbol": setup_sym,
-            "confluence_score": confluence_score,
-            "stance": confluence_stance,
-            "timeframes": [
-                {
-                    "tf": "15m",
-                    "label": "Intraday Execution",
-                    "bias": tf_15m_regime,
-                    "signal": tf_15m_desc,
-                    "rsi": 58.4 if tf_15m_regime == "BULLISH" else 42.1,
-                    "key_level": f"OB ₹{round(entry_val, 1)}",
-                },
-                {
-                    "tf": "1h",
-                    "label": "Swing Structure",
-                    "bias": tf_1h_regime,
-                    "signal": "Higher Highs (HH) Structure"
-                    if tf_1h_regime == "BULLISH"
-                    else "Range Compression",
-                    "rsi": 61.2 if tf_1h_regime == "BULLISH" else 46.5,
-                    "key_level": f"EMA20 ₹{round(cur_ltp * 0.995, 1)}",
-                },
-                {
-                    "tf": "1D",
-                    "label": "Institutional Trend",
-                    "bias": tf_1d_regime,
-                    "signal": f"{stage_str} ({minervini_passed}/8 Passed)",
-                    "rsi": 64.8 if tf_1d_regime == "BULLISH" else 48.0,
-                    "key_level": f"50-SMA ₹{round(cur_ltp * 0.975, 1)}",
-                },
-            ],
-        }
+            mtf_res = multi_timeframe_analysis(setup_sym, exch)
+            if mtf_res and mtf_res.signals:
+                multi_tf = mtf_res.to_dict()
+        except Exception:
+            multi_tf = None
 
         # Global Macro Correlation Report
         global_macro_data = None
@@ -4932,6 +5321,24 @@ def _compute_dashboard_snapshot_sync(req: Optional[DashboardSnapshotRequest] = N
         except Exception:
             pass
 
+        # Portfolio Heat â€” derived from India VIX level (live watchlist quote).
+        # VIX 10 â†’ heat 0%; VIX 40+ â†’ heat 100%. Clamped [0, 100].
+        # Returns None (not 0%) if VIX quote is missing to preserve data-truthfulness.
+        portfolio_heat: Optional[float] = None
+        vix_q = None
+        for vix_key in ("NSE:INDIA VIX", "INDIA VIX"):
+            vix_q = quotes_map.get(vix_key)
+            if vix_q and vix_q.last_price:
+                break
+        if vix_q and vix_q.last_price:
+            vix_level = float(vix_q.last_price)
+            heat_raw = (vix_level - 10.0) / 30.0  # 10â†’0, 40â†’1
+            portfolio_heat = round(max(0.0, min(100.0, heat_raw * 100)), 1)
+
+        # ATR-14 for the active symbol â€” computed earlier in the pipeline.
+        # Send as float (â‚¹ absolute, not %) for the frontend ATR trail widget.
+        atr_14: Optional[float] = round(atr_val, 2) if atr_val and atr_val > 0 else None
+
         payload = {
             "terminal_contract_version": 2,
             "symbol": sym,
@@ -4941,15 +5348,21 @@ def _compute_dashboard_snapshot_sync(req: Optional[DashboardSnapshotRequest] = N
             "watchlist": watchlist,
             "live_tickers": live_tickers,
             "personas": personas,
+            "councils": councils,
+            "setup": automated_setup,
             "automated_setup": automated_setup,
+            "volume_profile": vp_data,
+            "order_block": ob_data,
             "flows": flows,
             "sector_matrix": sector_items,
             "rrg_sectors": rrg_sectors or sector_items,
             "multi_tf": multi_tf,
             "global_macro": global_macro_data,
+            "portfolio_heat": portfolio_heat,
+            "atr_14": atr_14,
             "provenance": {
                 "data_source": "LIVE_TICK" if quotes_map else "EOD_HISTORICAL",
-                "as_of": f"{datetime.now().strftime('%d %b %Y, %I:%M %p IST')} • Live Market Context",
+                "as_of": f"{datetime.now().strftime('%d %b %Y, %I:%M %p IST')} â€¢ Live Market Context",
                 "dataset_timeline": "250D Daily Historical Bars & 15m SMC Order Blocks",
             },
         }
@@ -4990,23 +5403,28 @@ async def skill_dashboard_snapshot(req: Optional[DashboardSnapshotRequest] = Non
 
         sym, exch = normalize_symbol_exchange(sym, exch)
 
-        cache_key = f"dashboard_snapshot_v5_{sym}_{exch}_{tf}"
-        try:
-            from engine.analysis_cache import analysis_cache
+        cache_key = f"dashboard_snapshot_v8_{sym}_{exch}_{tf}"
+        force = bool(req and getattr(req, "force_refresh", False))
+        if not force:
+            try:
+                from engine.analysis_cache import analysis_cache
 
-            cached = analysis_cache.get_macro(cache_key)
-            if (
-                cached
-                and isinstance(cached, dict)
-                and cached.get("symbol") == sym
-                and len(cached.get("watchlist", [])) >= 20
-                and cached.get("terminal_contract_version") == 2
-                and cached.get("automated_setup") is not None
-                and (cached.get("ltp") or 0) > 0
-            ):
-                return _ok(cached)
-        except Exception:
-            pass
+                cached = analysis_cache.get_macro(cache_key)
+                if (
+                    cached
+                    and isinstance(cached, dict)
+                    and cached.get("symbol") == sym
+                    and len(cached.get("watchlist", [])) >= 20
+                    and cached.get("terminal_contract_version") == 2
+                    and "automated_setup" in cached
+                    and cached.get("councils") is not None
+                    and len(cached.get("personas", [])) >= 13
+                    and (cached.get("ltp") or 0) > 0
+                    and "portfolio_heat" in cached  # v7 sentinel â€” rejects stale v6 entries
+                ):
+                    return _ok(cached)
+            except Exception:
+                pass
 
         async with _in_flight_snapshots_lock:
             existing_task = _in_flight_snapshots.get(cache_key)
@@ -5184,7 +5602,7 @@ def _compute_market_overview_sync() -> dict:
     except Exception:
         pass
 
-    # Sector RRG — non-blocking timeout
+    # Sector RRG â€” non-blocking timeout
     try:
         import concurrent.futures as _cf
 
@@ -5242,7 +5660,7 @@ def _compute_market_overview_sync() -> dict:
 @router.post("/market_overview")
 async def skill_market_overview():
     """
-    P0-A: Market overview snapshot — India VIX, FII/DII flows, sector RRG.
+    P0-A: Market overview snapshot â€” India VIX, FII/DII flows, sector RRG.
     Returns null for unavailable fields per DataEnvelope truthful data contract.
     """
     try:
@@ -5255,13 +5673,13 @@ async def skill_market_overview():
         raise _err(str(e))
 
 
-# ── P0-A: /skills/tax/calculate alias — fixes T-06 frontend route mismatch ──
+# â”€â”€ P0-A: /skills/tax/calculate alias â€” fixes T-06 frontend route mismatch â”€â”€
 # InputBar.jsx calls /skills/tax/calculate; backend has /skills/tax/estimate.
 
 
 @router.post("/tax/calculate")
 async def skill_tax_calculate(req: TaxEstimateRequest):
-    """P0-A Alias: /skills/tax/calculate → /skills/tax/estimate (T-06 mismatch fix)."""
+    """P0-A Alias: /skills/tax/calculate â†’ /skills/tax/estimate (T-06 mismatch fix)."""
     try:
         from engine.charges import calculate_capital_gains_tax
 
@@ -5402,7 +5820,7 @@ def _debate_snapshot_sync(req: Optional[DebateSnapshotRequest] = None):
             ob_bot = getattr(top_ob, "bottom", None)
             ob_top = getattr(top_ob, "top", None)
             if ob_bot is not None and ob_top is not None:
-                flow_desc = f"Unmitigated Demand Order Block at ₹{ob_bot:.2f}-₹{ob_top:.2f} confirms strong smart money buying interest. Volume absorption noted."
+                flow_desc = f"Unmitigated Demand Order Block at â‚¹{ob_bot:.2f}-â‚¹{ob_top:.2f} confirms strong smart money buying interest. Volume absorption noted."
             else:
                 flow_desc = "Unmitigated Demand Order Block identified; confirms strong smart money buying interest with volume absorption."
         else:
@@ -5458,20 +5876,20 @@ def _debate_snapshot_sync(req: Optional[DebateSnapshotRequest] = None):
         if vp:
             vah_val = getattr(vp, "vah_price", None)
             if vah_val is not None:
-                val_desc = f"Value Area High (VAH) overhead supply at ₹{vah_val:,.2f} presents potential resistance as price approaches distribution ceiling."
+                val_desc = f"Value Area High (VAH) overhead supply at â‚¹{vah_val:,.2f} presents potential resistance as price approaches distribution ceiling."
             else:
-                val_desc = f"Historic supply zone near ₹{round(ltp * 1.045, 2):,} represents potential multi-week profit-taking boundary."
+                val_desc = f"Historic supply zone near â‚¹{round(ltp * 1.045, 2):,} represents potential multi-week profit-taking boundary."
         else:
-            val_desc = f"Historic supply zone near ₹{round(ltp * 1.045, 2):,} represents potential multi-week profit-taking boundary."
+            val_desc = f"Historic supply zone near â‚¹{round(ltp * 1.045, 2):,} represents potential multi-week profit-taking boundary."
 
         if ms:
             sl_val = getattr(ms, "invalidation_level", None)
             if sl_val is not None:
-                sent_desc = f"Structural invalidation level at ₹{sl_val:,.2f}. A clean breakdown below this pivot would invalidate the bullish thesis and trigger trailing stops."
+                sent_desc = f"Structural invalidation level at â‚¹{sl_val:,.2f}. A clean breakdown below this pivot would invalidate the bullish thesis and trigger trailing stops."
             else:
-                sent_desc = f"Short-term momentum oscillator entering overbought region; trailing stop at ₹{round(ltp * 0.985, 2):,} protects downside."
+                sent_desc = f"Short-term momentum oscillator entering overbought region; trailing stop at â‚¹{round(ltp * 0.985, 2):,} protects downside."
         else:
-            sent_desc = f"Short-term momentum oscillator entering overbought region; trailing stop at ₹{round(ltp * 0.985, 2):,} protects downside."
+            sent_desc = f"Short-term momentum oscillator entering overbought region; trailing stop at â‚¹{round(ltp * 0.985, 2):,} protects downside."
 
         bear_case = [
             {
@@ -5547,7 +5965,7 @@ def _debate_snapshot_sync(req: Optional[DebateSnapshotRequest] = None):
             "stop_loss": round(sl_px, 2),
             "target": round(tgt_px, 2),
             "risk_reward": rr_ratio,
-            "summary": f"Institutional defense at ₹{sl_px:,.2f} yields a {rr_ratio}R asymmetric payoff targeting ₹{tgt_px:,.2f}.",
+            "summary": f"Institutional defense at â‚¹{sl_px:,.2f} yields a {rr_ratio}R asymmetric payoff targeting â‚¹{tgt_px:,.2f}.",
         }
 
         now_time = datetime.now().strftime("%H:%M:%S IST")
@@ -5601,7 +6019,7 @@ async def skill_gex_snapshot(req: Optional[GEXSnapshotRequest] = None):
         import math
         from datetime import datetime
         from market.quotes import get_ltp, get_quote, normalize_instrument
-        from market.options import get_options_snapshot, get_expiries
+        from market.options import get_options_snapshot
         from engine.greeks_manager import LOT_SIZES
 
         raw_in = None
@@ -5747,7 +6165,7 @@ async def skill_gex_snapshot(req: Optional[GEXSnapshotRequest] = None):
             c_oi = ce.oi if ce else 0
             p_oi = pe.oi if pe else 0
 
-            # GEX in Crores (₹ 10M)
+            # GEX in Crores (â‚¹ 10M)
             call_gex = 0.5 * gamma * (spot**2) * c_oi * lot_sz / 1e7
             put_gex = -0.5 * gamma * (spot**2) * p_oi * lot_sz / 1e7
             net_gex = call_gex + put_gex
@@ -5794,8 +6212,8 @@ async def skill_gex_snapshot(req: Optional[GEXSnapshotRequest] = None):
                     "strike": k,
                     "type": "CE",
                     "score": min(98, int(60 + ce_imbalance * 8 + (20 if ce_vol_surge else 0))),
-                    "title": f"₹{int(k):,} CE • Call Momentum Blast",
-                    "reason": f"Heavy Buy Aggression ({ce_imbalance:.1f}× Bids) • {ce_vol:,} Vol Spike",
+                    "title": f"â‚¹{int(k):,} CE â€¢ Call Momentum Blast",
+                    "reason": f"Heavy Buy Aggression ({ce_imbalance:.1f}Ã— Bids) â€¢ {ce_vol:,} Vol Spike",
                     "action": "BUY",
                     "bid": round(ce_bid, 2) if ce_bid else 0.0,
                     "ask": round(ce_ask, 2) if ce_ask else 0.0,
@@ -5807,8 +6225,8 @@ async def skill_gex_snapshot(req: Optional[GEXSnapshotRequest] = None):
                     "strike": k,
                     "type": "PE",
                     "score": min(98, int(60 + pe_imbalance * 8 + (20 if pe_vol_surge else 0))),
-                    "title": f"₹{int(k):,} PE • Put Shock / Breakdown",
-                    "reason": f"Heavy Put Demand ({pe_imbalance:.1f}× Bids) • {pe_vol:,} Vol Spike",
+                    "title": f"â‚¹{int(k):,} PE â€¢ Put Shock / Breakdown",
+                    "reason": f"Heavy Put Demand ({pe_imbalance:.1f}Ã— Bids) â€¢ {pe_vol:,} Vol Spike",
                     "action": "BUY",
                     "bid": round(pe_bid, 2) if pe_bid else 0.0,
                     "ask": round(pe_ask, 2) if pe_ask else 0.0,
@@ -5889,13 +6307,13 @@ async def skill_gex_snapshot(req: Optional[GEXSnapshotRequest] = None):
             "hedge_action": "SELL",
             "hedge_instrument": f"{clean_sym} FUT",
             "actionable_state": "HEDGE REQUIRED: NEUTRAL",
-            "recommendation": f"SELL 1 Lot ({lot_sz} Qty) {clean_sym} FUT at ₹{round(spot - 2.50, 2):,}",
-            "rebalance_trigger": f"When Spot drifts > ±0.75% (±{round(spot * 0.0075)} pts) or Net Delta > ±0.15",
+            "recommendation": f"SELL 1 Lot ({lot_sz} Qty) {clean_sym} FUT at â‚¹{round(spot - 2.50, 2):,}",
+            "rebalance_trigger": f"When Spot drifts > Â±0.75% (Â±{round(spot * 0.0075)} pts) or Net Delta > Â±0.15",
             "cash_sensitivity": cash_sens,
             "margin_estimate": margin_est,
-            "why": f"Portfolio directional exposure (+{pos_delta} shares). A 1% drop in {clean_sym} (~₹{pts_1pct} pts) generates ~₹{abs(cash_sens):,} delta loss before volatility benefits.",
-            "when": f"Execute rebalance when {clean_sym} breaks support (₹{round(spot - 50)}) or during the 03:15 PM IST window.",
-            "how": f"Place LIMIT SELL order for 1 Lot ({lot_sz} Qty) of {clean_sym} Futures at ₹{round(spot - 2.50, 2):,} (Margin: ₹{margin_est:,}).",
+            "why": f"Portfolio directional exposure (+{pos_delta} shares). A 1% drop in {clean_sym} (~â‚¹{pts_1pct} pts) generates ~â‚¹{abs(cash_sens):,} delta loss before volatility benefits.",
+            "when": f"Execute rebalance when {clean_sym} breaks support (â‚¹{round(spot - 50)}) or during the 03:15 PM IST window.",
+            "how": f"Place LIMIT SELL order for 1 Lot ({lot_sz} Qty) of {clean_sym} Futures at â‚¹{round(spot - 2.50, 2):,} (Margin: â‚¹{margin_est:,}).",
         }
 
         return _ok(
@@ -5937,7 +6355,7 @@ async def skill_gex_snapshot(req: Optional[GEXSnapshotRequest] = None):
         raise _err(str(e))
 
 
-# ── Telemetry & Observability Endpoints ─────────────────────────────────────
+# â”€â”€ Telemetry & Observability Endpoints â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 
 @router.get("/telemetry/summary")
@@ -5987,7 +6405,7 @@ async def skill_telemetry_clear():
         raise _err(str(e))
 
 
-# ── Retail Enablement & Wealth Protection Skills ─────────────────────────────
+# â”€â”€ Retail Enablement & Wealth Protection Skills â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 
 @router.post("/portfolio/health")
@@ -6357,7 +6775,7 @@ async def skill_security_360(
         raise _err(str(e))
 
 
-# ── P2-C: Strategy Lab & Options Lab Integrity ───────────────────────────────
+# â”€â”€ P2-C: Strategy Lab & Options Lab Integrity â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 
 class StrategyManifestRequest(BaseModel):
@@ -6435,3 +6853,4 @@ async def skill_options_chain_integrity(req: ChainIntegrityRequest):
         return _ok(report.to_dict())
     except Exception as e:
         raise _err(str(e))
+

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, memo, useCallback } from 'react'
 import { createChart, ColorType, CandlestickSeries, HistogramSeries, LineSeries } from 'lightweight-charts'
 import { useAPI } from '../../hooks/useAPI'
+import { useRealtimeMarket } from '../../hooks/useRealtimeMarket'
 
 function CandlestickChartComponent({
   symbol = 'NIFTY',
@@ -31,6 +32,13 @@ function CandlestickChartComponent({
   const ohlcTextRef = useRef(null)
 
   const { call } = useAPI()
+  const { getTicker } = useRealtimeMarket()
+  const liveTick = getTicker(symbol)
+  const currentTickPrice = (liveTick?.ltp != null && Number(liveTick.ltp) > 0)
+    ? Number(liveTick.ltp)
+    : ((liveTick?.price != null && Number(liveTick.price) > 0) ? Number(liveTick.price) : null)
+  const effectiveLivePrice = livePrice != null && Number(livePrice) > 0 ? Number(livePrice) : currentTickPrice
+
   const [interval, setIntervalVal] = useState(timeframe || '15m')
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
@@ -145,6 +153,7 @@ function CandlestickChartComponent({
           exchange,
           interval: apiInterval,
           days,
+          include_live: true,
         })
         const data = res?.data ?? res
         if (!unmounted) {
@@ -168,25 +177,90 @@ function CandlestickChartComponent({
     }
   }, [symbol, exchange, interval])
 
-  // Real-time live tick synchronization: Update latest candle when livePrice prop arrives
+  // Real-time live tick synchronization: Update latest candle when effectiveLivePrice updates
   useEffect(() => {
-    if (!livePrice || !candleSeriesRef.current || !lastCandleRef.current) return
-    const priceNum = Number(livePrice)
+    if (!effectiveLivePrice || !candleSeriesRef.current || !lastCandleRef.current) return
+    const priceNum = Number(effectiveLivePrice)
     if (isNaN(priceNum) || priceNum <= 0) return
 
     const last = lastCandleRef.current
-    const updatedCandle = {
-      ...last,
-      close: priceNum,
-      high: Math.max(Number(last.high ?? priceNum), priceNum),
-      low: Math.min(Number(last.low ?? priceNum), priceNum),
+    const nowSec = Math.floor(Date.now() / 1000)
+
+    let intervalSec = 900 // 15m default
+    if (interval === '5m') intervalSec = 300
+    else if (interval === '1m') intervalSec = 60
+    else if (interval === '1h' || interval === '60m') intervalSec = 3600
+    else if (interval === 'day' || interval === '1D') intervalSec = 86400
+
+    const isDaily = interval === 'day' || interval === '1D' || interval === 'week' || interval === 'month'
+
+    if (isDaily) {
+      const todayStr = new Date().toISOString().split('T')[0]
+      if (typeof last.time === 'string') {
+        if (last.time === todayStr) {
+          const updatedCandle = {
+            ...last,
+            close: priceNum,
+            high: Math.max(Number(last.high ?? priceNum), priceNum),
+            low: Math.min(Number(last.low ?? priceNum), priceNum),
+          }
+          try {
+            candleSeriesRef.current.update(updatedCandle)
+            lastCandleRef.current = updatedCandle
+            updateLegendDOM(updatedCandle)
+          } catch (e) {}
+        } else if (last.time < todayStr) {
+          const newCandle = {
+            time: todayStr,
+            open: priceNum,
+            high: priceNum,
+            low: priceNum,
+            close: priceNum,
+            volume: 0,
+          }
+          try {
+            candleSeriesRef.current.update(newCandle)
+            lastCandleRef.current = newCandle
+            updateLegendDOM(newCandle)
+          } catch (e) {}
+        }
+      }
+    } else {
+      // Intraday timestamps (unix epoch seconds)
+      const currentBarTime = Math.floor(nowSec / intervalSec) * intervalSec
+      const lastTimeSec = typeof last.time === 'number' ? last.time : Math.floor(new Date(last.time).getTime() / 1000)
+
+      if (currentBarTime > lastTimeSec) {
+        // Form a new candle for the new bar period
+        const newCandle = {
+          time: currentBarTime,
+          open: priceNum,
+          high: priceNum,
+          low: priceNum,
+          close: priceNum,
+          volume: 0,
+        }
+        try {
+          candleSeriesRef.current.update(newCandle)
+          lastCandleRef.current = newCandle
+          updateLegendDOM(newCandle)
+        } catch (e) {}
+      } else {
+        // Update current candle
+        const updatedCandle = {
+          ...last,
+          close: priceNum,
+          high: Math.max(Number(last.high ?? priceNum), priceNum),
+          low: Math.min(Number(last.low ?? priceNum), priceNum),
+        }
+        try {
+          candleSeriesRef.current.update(updatedCandle)
+          lastCandleRef.current = updatedCandle
+          updateLegendDOM(updatedCandle)
+        } catch (e) {}
+      }
     }
-    try {
-      candleSeriesRef.current.update(updatedCandle)
-      lastCandleRef.current = updatedCandle
-      updateLegendDOM(updatedCandle)
-    } catch (e) {}
-  }, [livePrice])
+  }, [effectiveLivePrice, interval])
 
   // 2. Recalculate Order Block pixel zones when chart scrolls/scales
   const recalculateOBZones = useCallback(() => {
@@ -1038,6 +1112,7 @@ function CandlestickChartComponent({
               timeframe={interval}
               isModalView={true}
               height={modalHeight}
+              livePrice={effectiveLivePrice}
               onCloseFullscreen={() => setIsFullscreen(false)}
             />
           </div>
