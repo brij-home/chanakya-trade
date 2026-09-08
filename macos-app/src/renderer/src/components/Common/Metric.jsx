@@ -31,23 +31,23 @@ export default function Metric({
 
   const statusColors = {
     positive: {
-      text: 'text-emerald-400',
-      badge: 'bg-emerald-950/60 text-emerald-300 border-emerald-500/30',
+      text: 'text-emerald-700 dark:text-emerald-300',
+      badge: 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border-emerald-500/30',
       icon: '▲ +',
     },
     negative: {
-      text: 'text-rose-400',
-      badge: 'bg-rose-950/60 text-rose-300 border-rose-500/30',
+      text: 'text-rose-700 dark:text-rose-300',
+      badge: 'bg-rose-500/15 text-rose-700 dark:text-rose-300 border-rose-500/30',
       icon: '▼ -',
     },
     warning: {
-      text: 'text-amber-400',
-      badge: 'bg-amber-950/60 text-amber-300 border-amber-500/30',
+      text: 'text-amber-700 dark:text-amber-300',
+      badge: 'bg-amber-500/15 text-amber-700 dark:text-amber-300 border-amber-500/30',
       icon: '●',
     },
     neutral: {
-      text: 'text-slate-200',
-      badge: 'bg-slate-800 text-slate-300 border-slate-700',
+      text: 'text-text',
+      badge: 'bg-elevated text-muted border-border',
       icon: '',
     },
   }
@@ -59,14 +59,14 @@ export default function Metric({
       role="group"
       aria-label={`${label}: ${value}`}
       title={tooltip || undefined}
-      className={`rounded-xl bg-slate-900/80 border border-slate-800/80 p-3.5 sm:p-4 flex flex-col justify-between transition-all duration-150 hover:border-slate-700 shadow-sm ${className}`}
+      className={`rounded-xl bg-panel border border-border p-3.5 sm:p-4 flex flex-col justify-between transition-all duration-150 hover:border-subtle shadow-card ${className}`}
     >
       {/* Label */}
-      <div className="flex items-center justify-between text-xs font-medium text-slate-400 mb-1.5">
+      <div className="flex items-center justify-between text-xs font-medium text-muted mb-1.5">
         <span>{label}</span>
         {tooltip && (
           <span
-            className="cursor-help text-slate-500 hover:text-slate-300 text-[10px]"
+            className="cursor-help text-muted hover:text-text text-[10px]"
             aria-hidden="true"
           >
             ⓘ
@@ -76,21 +76,21 @@ export default function Metric({
 
       {/* Primary Value */}
       <div className="flex items-baseline justify-between gap-2">
-        <div className="text-lg sm:text-xl font-bold font-mono tracking-tight text-slate-100">
+        <div className="text-lg sm:text-xl font-bold font-mono tracking-tight text-text">
           {value !== null && value !== undefined ? (
             <>
               {value}
-              {unit && <span className="text-xs font-normal text-slate-400 ml-1">{unit}</span>}
+              {unit && <span className="text-xs font-normal text-muted ml-1">{unit}</span>}
             </>
           ) : (
-            <span className="text-slate-500 font-sans text-sm font-normal">Unavailable</span>
+            <span className="text-muted font-sans text-sm font-normal">Unavailable</span>
           )}
         </div>
 
         {/* Change Badge */}
         {(change !== null || changePct !== null) && (
           <div
-            className={`inline-flex items-center px-1.5 py-0.5 rounded text-[11px] font-mono font-medium border ${currentTheme.badge}`}
+            className={`inline-flex items-center px-1.5 py-0.5 rounded text-[11px] font-mono font-bold border ${currentTheme.badge}`}
           >
             <span className="mr-0.5 text-[9px]" aria-hidden="true">
               {resolvedStatus === 'positive' ? '▲' : resolvedStatus === 'negative' ? '▼' : ''}
@@ -105,7 +105,7 @@ export default function Metric({
       </div>
 
       {/* Subtext */}
-      {subtext && <div className="text-[11px] text-slate-500 mt-1.5">{subtext}</div>}
+      {subtext && <div className="text-[11px] text-muted mt-1.5">{subtext}</div>}
     </div>
   )
 }

@@ -61,7 +61,7 @@ export default function Dialog({
     >
       {/* Backdrop */}
       <div
-        className="fixed inset-0 bg-slate-950/80 backdrop-blur-md transition-opacity animate-fadeIn"
+        className="fixed inset-0 bg-black/60 backdrop-blur-md transition-opacity animate-fadeIn"
         aria-hidden="true"
         onClick={onClose}
       />
@@ -73,23 +73,23 @@ export default function Dialog({
         aria-modal="true"
         aria-labelledby={title ? ariaLabelledBy : undefined}
         aria-describedby={description ? ariaDescribedBy : undefined}
-        className={`relative w-full ${sizeClasses[size] || sizeClasses.md} rounded-2xl bg-slate-900/95 border border-slate-700/80 shadow-2xl shadow-slate-950/80 flex flex-col max-h-[90vh] overflow-hidden transition-all duration-200 animate-scaleIn ${className}`}
+        className={`relative w-full ${sizeClasses[size] || sizeClasses.md} rounded-2xl bg-panel border border-border shadow-modal flex flex-col max-h-[90vh] overflow-hidden transition-all duration-200 animate-scaleIn ${className}`}
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
         {(title || showCloseButton) && (
-          <div className="flex items-center justify-between px-6 py-4 border-b border-slate-800 bg-slate-900/60 flex-shrink-0">
+          <div className="flex items-center justify-between px-6 py-4 border-b border-border bg-surface flex-shrink-0">
             <div>
               {title && (
                 <h2
                   id={ariaLabelledBy}
-                  className="text-base sm:text-lg font-semibold text-slate-100 leading-tight"
+                  className="text-base sm:text-lg font-semibold text-text leading-tight"
                 >
                   {title}
                 </h2>
               )}
               {description && (
-                <p id={ariaDescribedBy} className="text-xs text-slate-400 mt-1">
+                <p id={ariaDescribedBy} className="text-xs text-muted mt-1">
                   {description}
                 </p>
               )}
@@ -99,7 +99,7 @@ export default function Dialog({
                 type="button"
                 onClick={onClose}
                 aria-label="Close dialog"
-                className="rounded-lg p-1.5 text-slate-400 hover:text-slate-100 hover:bg-slate-800/80 focus-visible:ring-2 focus-visible:ring-emerald-500 transition-colors ml-4"
+                className="rounded-lg p-1.5 text-muted hover:text-text hover:bg-elevated focus-visible:ring-2 focus-visible:ring-gold transition-colors ml-4 cursor-pointer"
               >
                 <svg
                   className="w-5 h-5"
@@ -117,7 +117,7 @@ export default function Dialog({
         )}
 
         {/* Content */}
-        <div className="p-6 overflow-y-auto flex-1 custom-scrollbar text-slate-200">
+        <div className="p-6 overflow-y-auto flex-1 custom-scrollbar text-text">
           {children}
         </div>
       </div>

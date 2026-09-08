@@ -26,7 +26,7 @@ export default function Button({
 
   // Base styling with prominent focus rings and calm institutional feel
   const baseStyles =
-    'inline-flex items-center justify-center font-medium rounded-lg transition-all duration-150 select-none outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-emerald-500 focus-visible:ring-offset-slate-900 disabled:opacity-50 disabled:cursor-not-allowed disabled:pointer-events-none'
+    'inline-flex items-center justify-center font-medium rounded-lg transition-all duration-150 select-none outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-emerald-500 focus-visible:ring-offset-surface disabled:opacity-50 disabled:cursor-not-allowed disabled:pointer-events-none'
 
   const sizeStyles = {
     sm: 'text-xs px-2.5 py-1.5 gap-1.5 min-h-[32px]',
@@ -36,15 +36,15 @@ export default function Button({
 
   const variantStyles = {
     primary:
-      'bg-emerald-600 hover:bg-emerald-500 active:bg-emerald-700 text-white shadow-sm hover:shadow shadow-emerald-950/40 border border-emerald-500/30',
+      'bg-emerald-600 hover:bg-emerald-500 active:bg-emerald-700 text-white shadow-sm hover:shadow border border-emerald-500/30',
     secondary:
-      'bg-slate-800 hover:bg-slate-700 active:bg-slate-900 text-slate-100 border border-slate-700 hover:border-slate-600 shadow-sm',
+      'bg-elevated hover:bg-highlight active:bg-panel text-text border border-border hover:border-subtle shadow-xs',
     danger:
-      'bg-rose-600 hover:bg-rose-500 active:bg-rose-700 text-white shadow-sm hover:shadow shadow-rose-950/40 border border-rose-500/30',
+      'bg-rose-600 hover:bg-rose-500 active:bg-rose-700 text-white shadow-sm hover:shadow border border-rose-500/30',
     ghost:
-      'bg-transparent hover:bg-slate-800/80 active:bg-slate-800 text-slate-300 hover:text-slate-100 border border-transparent',
+      'bg-transparent hover:bg-highlight active:bg-elevated text-muted hover:text-text border border-transparent',
     outline:
-      'bg-transparent hover:bg-slate-800/60 active:bg-slate-800 text-emerald-400 hover:text-emerald-300 border border-emerald-500/40 hover:border-emerald-500/70',
+      'bg-transparent hover:bg-emerald-500/10 active:bg-emerald-500/20 text-emerald-600 dark:text-emerald-400 hover:text-emerald-500 border border-emerald-500/40 hover:border-emerald-500/70',
   }
 
   return (

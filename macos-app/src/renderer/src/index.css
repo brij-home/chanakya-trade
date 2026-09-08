@@ -1043,5 +1043,98 @@
     /* Never defer first 3 visible items */
     content-visibility: visible;
   }
+
+  /* ── Standardized Form & Filter Controls ("Define Once, Reuse Everywhere") ── */
+  .select-input {
+    background: var(--color-elevated);
+    border: 1px solid var(--color-border);
+    color: var(--color-text);
+    border-radius: 8px;
+    padding: 0.375rem 0.625rem;
+    font-size: 0.75rem;
+    font-weight: 600;
+    cursor: pointer;
+    outline: none;
+    transition: border-color 0.15s var(--ease-out), box-shadow 0.15s var(--ease-out), color 0.15s var(--ease-out);
+  }
+  .select-input:hover {
+    border-color: var(--color-subtle);
+  }
+  .select-input:focus,
+  .select-input.active-filter {
+    border-color: var(--color-gold);
+    color: var(--color-gold);
+    box-shadow: 0 0 0 2px rgba(245, 166, 35, 0.2);
+  }
+
+  .search-input {
+    background: var(--color-elevated);
+    border: 1px solid var(--color-border);
+    color: var(--color-text);
+    border-radius: 8px;
+    padding: 0.375rem 0.625rem 0.375rem 1.75rem;
+    font-size: 0.75rem;
+    outline: none;
+    transition: all 0.15s var(--ease-out);
+  }
+  .search-input:focus {
+    border-color: var(--color-gold);
+    box-shadow: 0 0 0 2px rgba(245, 166, 35, 0.2);
+  }
+  .search-input::placeholder {
+    color: var(--color-muted);
+  }
+
+  /* ── Standardized Score Boxes (Watchmaker aesthetic) ───────────────────── */
+  .score-badge-gold {
+    background: var(--color-gold-dim);
+    color: var(--color-gold);
+    border: 1px solid var(--color-gold);
+    box-shadow: var(--glow-gold);
+  }
+  .score-badge-sapphire {
+    background: var(--color-sapphire-dim);
+    color: var(--color-sapphire);
+    border: 1px solid var(--color-sapphire);
+    box-shadow: none;
+  }
+
+  /* ── Semantic Design System Badges ───────────────────────────────────── */
+  .badge-gold {
+    background: color-mix(in srgb, var(--color-gold) 15%, transparent);
+    color: var(--color-gold);
+    border: 1px solid color-mix(in srgb, var(--color-gold) 35%, transparent);
+  }
+  .badge-emerald {
+    background: color-mix(in srgb, var(--color-emerald) 15%, transparent);
+    color: var(--color-emerald);
+    border: 1px solid color-mix(in srgb, var(--color-emerald) 35%, transparent);
+  }
+  .badge-rose {
+    background: color-mix(in srgb, var(--color-rose) 15%, transparent);
+    color: var(--color-rose);
+    border: 1px solid color-mix(in srgb, var(--color-rose) 35%, transparent);
+  }
+  .badge-sapphire {
+    background: color-mix(in srgb, var(--color-sapphire) 15%, transparent);
+    color: var(--color-sapphire);
+    border: 1px solid color-mix(in srgb, var(--color-sapphire) 35%, transparent);
+  }
+  .badge-cyan {
+    background: color-mix(in srgb, var(--color-cyan) 15%, transparent);
+    color: var(--color-cyan);
+    border: 1px solid color-mix(in srgb, var(--color-cyan) 35%, transparent);
+  }
+  .badge-violet {
+    background: color-mix(in srgb, var(--color-violet) 15%, transparent);
+    color: var(--color-violet);
+    border: 1px solid color-mix(in srgb, var(--color-violet) 35%, transparent);
+  }
+  .badge-neutral {
+    background: var(--color-elevated);
+    color: var(--color-muted);
+    border: 1px solid var(--color-border);
+  }
 }
+
 
