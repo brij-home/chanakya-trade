@@ -253,6 +253,12 @@
 - **Utility**: Always use [`formatINR.js`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/macos-app/src/renderer/src/utils/formatINR.js) (`formatINR`, `formatINRFull`, `formatPct`, `formatVol`) for all price, P&L, turnover, and volume values.
 - **Units**: Automatic scaling (`₹Cr`, `₹L`, `₹K`) with null/NaN defensive guards and ₹ currency prefix.
 
+### 6.8 Human-Readable, Crisp & Decisive Communication Standard
+- **Zero Raw LaTeX or Cryptic Syntax**: Never output raw LaTeX math (e.g. `$\text{OI} \ge 35{,}000$`, `$\times$`, `$\le$`) in assistant responses, UI tooltips, card descriptions, or trade commentary. Always express conditions in natural, human-readable English (e.g., *"At least 35,000 Open Interest and 40,000 Volume"*).
+- **Crisp, Articulate & Decisive**: Avoid essays, long preamble, and narrative filler unless explicitly requested. Deliver actionable conclusions, price zones, conviction scores, and risk parameters immediately.
+- **High Scannability**: Use clean bullet points, bold key terms, and visual state badges (`🟢 READY`, `🔴 STAND_DOWN`, `⚡ TRIGGER NOW`, `🎯 TARGET 1`) instead of monolithic text walls.
+- **Trader Intuition First**: Translate technical and quantitative thresholds into intuitive market behavior (e.g., *"Call writers unwinding positions"*, *"Put support breaking down"*, *"Heavy buyer aggression"*) rather than academic formulas or raw code variables.
+
 ---
 
 ## 7. Operational Invariants & Lessons Learned
