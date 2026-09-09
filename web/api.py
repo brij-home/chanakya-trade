@@ -2833,6 +2833,102 @@ async def cleanup_auto_alerts(payload: Optional[dict] = None):
     }
 
 
+# ── Mover Autopsy & Precursor Radar Endpoints ────────────────
+
+
+@app.get("/api/movers/autopsy", tags=["Movers & Autopsy"])
+async def get_mover_autopsy(date: Optional[str] = None, segment: Optional[str] = None):
+    """
+    Get daily top gainers & losers forensic autopsy dossier.
+    Includes 5-dimensional causal factor decomposition and control cohort contrast.
+    Optionally filter by segment: 'ALL' | 'FNO' | 'NON_FNO' | 'INDEX'.
+    """
+    from engine.mover_autopsy import mover_autopsy_engine
+
+    if date:
+        autopsy = mover_autopsy_engine.get_autopsy_by_date(date)
+    else:
+        autopsy = mover_autopsy_engine.get_latest_autopsy()
+
+    if not autopsy:
+        # Run on-demand if no autopsy exists yet
+        autopsy = await asyncio.to_thread(
+            mover_autopsy_engine.run_daily_autopsy, segment=segment
+        )
+
+    # Filter gainers & losers by segment if specified
+    if autopsy and segment and segment.upper() not in ("ALL", ""):
+        seg_upper = segment.upper().replace("CASH", "NON_FNO")
+        autopsy_dict = autopsy.to_dict()
+        autopsy_dict["gainers"] = [
+            g for g in autopsy_dict.get("gainers", [])
+            if g.get("segment") == seg_upper or (seg_upper == "FNO" and g.get("is_fo"))
+        ]
+        autopsy_dict["losers"] = [
+            l for l in autopsy_dict.get("losers", [])
+            if l.get("segment") == seg_upper or (seg_upper == "FNO" and l.get("is_fo"))
+        ]
+        return {"status": "ok", "data": autopsy_dict}
+
+    return {"status": "ok", "data": autopsy.to_dict() if autopsy else None}
+
+
+@app.post("/api/movers/autopsy/run", tags=["Movers & Autopsy"])
+async def run_mover_autopsy(payload: Optional[dict] = None):
+    """
+    Trigger an on-demand forensic autopsy across top movers and control cohort.
+    Can specify segment: 'ALL' | 'FNO' | 'NON_FNO' | 'INDEX'.
+    """
+    from engine.mover_autopsy import mover_autopsy_engine
+
+    top_n = payload.get("top_n", 10) if payload else 10
+    target_date = payload.get("date") if payload else None
+    segment = payload.get("segment") if payload else None
+
+    autopsy = await asyncio.to_thread(
+        mover_autopsy_engine.run_daily_autopsy,
+        target_date=target_date,
+        segment=segment,
+        top_n=top_n,
+    )
+
+    # Publish SSE notification so UI toasts and card views update immediately
+    try:
+        from web.sse import event_bus
+
+        event_bus.publish_sync(
+            "system",
+            {
+                "type": "mover_autopsy_completed",
+                "date": autopsy.date,
+                "segment": segment or "ALL",
+                "market_regime": autopsy.market_regime,
+                "gainers_count": len(autopsy.gainers),
+                "losers_count": len(autopsy.losers),
+                "traps_filtered": autopsy.traps_filtered,
+            },
+        )
+    except Exception:
+        pass
+
+    return {"status": "ok", "data": autopsy.to_dict()}
+
+
+@app.get("/api/movers/precursors", tags=["Movers & Autopsy"])
+async def get_mover_precursors(limit: int = 5, segment: Optional[str] = None):
+    """
+    Scan liquid universe and return high-conviction pre-ignition candidates
+    matching the pre-move DNA of past winners.
+    Can be filtered by segment ('INDEX' | 'FNO' | 'NON_FNO' | 'ALL').
+    """
+    from engine.precursor_radar import precursor_radar
+
+    candidates = await asyncio.to_thread(
+        precursor_radar.scan_precursors, segment=segment, top_n=limit
+    )
+    return {"status": "ok", "data": [c.to_dict() for c in candidates]}
+
+
 @app.post("/api/quotes/batch", tags=["Market Data"])
 async def api_quotes_batch(req: dict):
     """Sidecar batch quote query endpoint."""

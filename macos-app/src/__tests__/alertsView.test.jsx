@@ -206,18 +206,17 @@ describe('AlertsView - Institutional Active/Archived standard & Derivative Clari
     })
 
     // Direction & Option Type
-    expect(screen.getByText(/CALL OPTION \(CE\)/i)).toBeTruthy()
+    expect(screen.getByText('CE')).toBeTruthy()
+    expect(screen.getAllByText(/▲ BULLISH/i).length).toBeGreaterThanOrEqual(1)
 
     // Strike specification
-    expect(screen.getByText(/Strike: ₹24,500/i)).toBeTruthy()
+    expect(screen.getByText('₹24,500')).toBeTruthy()
 
-    expect(screen.getByText(/WEEKLY CONTRACT/i)).toBeTruthy()
-    expect(screen.getByText(/2026-09-11/i)).toBeTruthy()
-    expect(screen.getByText('[ITM]')).toBeTruthy()
-    expect(screen.getByText(/Option Premium \(LTP\)/i)).toBeTruthy()
-    expect(screen.getAllByText(/₹(165\.50|145\.50)/).length).toBeGreaterThanOrEqual(1)
-    expect(screen.getAllByText(/Underlying Spot/i).length).toBeGreaterThanOrEqual(1)
-    expect(screen.getAllByText(/₹(24,650\.0|24,580\.0)/).length).toBeGreaterThanOrEqual(1)
+    expect(screen.getByText(/⚡W 2026-09-11/i)).toBeTruthy()
+    expect(screen.getByText('ITM')).toBeTruthy()
+    expect(screen.getAllByText(/₹(165\.5|145\.5)/).length).toBeGreaterThanOrEqual(1)
+    expect(screen.getAllByText(/Spot/i).length).toBeGreaterThanOrEqual(1)
+    expect(screen.getAllByText(/₹(24,650|24,580)/).length).toBeGreaterThanOrEqual(1)
   })
 
   it('displays crystal clear Future details (long future direction, future price LTP vs spot, monthly contract)', async () => {
@@ -227,11 +226,11 @@ describe('AlertsView - Institutional Active/Archived standard & Derivative Clari
       expect(screen.getByText('RELIANCE')).toBeTruthy()
     })
 
-    expect(screen.getByText(/LONG FUTURE \(BUY\)/i)).toBeTruthy()
-    expect(screen.getByText(/MONTHLY CONTRACT/i)).toBeTruthy()
-    expect(screen.getByText(/Futures Price \(LTP\)/i)).toBeTruthy()
-    expect(screen.getAllByText(/₹(3,055\.00|3,025\.00)/).length).toBeGreaterThanOrEqual(1)
-    expect(screen.getAllByText(/₹(3,040\.0|3,015\.0)/).length).toBeGreaterThanOrEqual(1)
+    expect(screen.getByText('FUT')).toBeTruthy()
+    expect(screen.getAllByText(/▲ BULLISH/i).length).toBeGreaterThanOrEqual(1)
+    expect(screen.getByText(/📅M 2026-09-24/i)).toBeTruthy()
+    expect(screen.getAllByText(/₹(3,055\.0|3,025\.0)/).length).toBeGreaterThanOrEqual(1)
+    expect(screen.getAllByText(/₹(3,040|3,015)/).length).toBeGreaterThanOrEqual(1)
   })
 
   it('switches to Archived & History mode to view archived and completed setups', async () => {
@@ -255,7 +254,7 @@ describe('AlertsView - Institutional Active/Archived standard & Derivative Clari
       expect(screen.getByText('NIFTY')).toBeTruthy()
     })
 
-    const archiveBtns = screen.getAllByTitle('Archive trade to avoid clutter')
+    const archiveBtns = screen.getAllByTitle(/Archive alert/i)
     expect(archiveBtns.length).toBeGreaterThanOrEqual(1)
 
     fireEvent.click(archiveBtns[0])
@@ -310,7 +309,7 @@ describe('AlertsView - Institutional Active/Archived standard & Derivative Clari
     })
 
     await waitFor(() => {
-      expect(screen.getAllByText(/24,650\.0/).length).toBeGreaterThanOrEqual(1)
+      expect(screen.getAllByText(/24,650/).length).toBeGreaterThanOrEqual(1)
     })
   })
 
@@ -369,12 +368,12 @@ describe('AlertsView - Institutional Active/Archived standard & Derivative Clari
     })
 
     await waitFor(() => {
-      expect(screen.getAllByText(/₹165\.50/).length).toBeGreaterThanOrEqual(1)
-      expect(screen.getAllByText(/₹3,055\.00/).length).toBeGreaterThanOrEqual(1)
+      expect(screen.getAllByText(/₹165\.5/).length).toBeGreaterThanOrEqual(1)
+      expect(screen.getAllByText(/₹3,055\.0/).length).toBeGreaterThanOrEqual(1)
     })
 
-    expect(screen.getAllByText(/₹24,650\.0/).length).toBeGreaterThanOrEqual(1)
-    expect(screen.getAllByText(/₹3,040\.0/).length).toBeGreaterThanOrEqual(1)
+    expect(screen.getAllByText(/₹24,650/).length).toBeGreaterThanOrEqual(1)
+    expect(screen.getAllByText(/₹3,040/).length).toBeGreaterThanOrEqual(1)
   })
 
   it('displays 5-tier Trade Execution Matrix (Entry, SL, T1, T2, T3) and Next Expiry Opportunity with justification', async () => {

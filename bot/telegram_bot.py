@@ -310,6 +310,8 @@ async def cmd_start(update, context) -> None:
         "/deepanalyze RELIANCE — deep LLM analysis (7-10 min)\n"
         "/brief — morning market brief\n"
         "/conviction [SYMBOL] — 12-factor trade conviction score (0–100)\n"
+        "/movers — daily top gainers & losers forensic autopsy\n"
+        "/precursors — high-conviction coiling setups before breakout\n"
         "/scan [UNIVERSE] — scan top liquid/F&O list for breakouts & gamma blasts\n"
         "/radar — quick market radar on today's top liquid setups\n"
         "/flows — FII/DII flow signals\n"
@@ -981,6 +983,157 @@ async def cmd_scan(update, context) -> None:
         await update.message.reply_text(f"Scan failed: {e}")
 
 
+async def cmd_movers(update, context) -> None:
+    """Handle /movers [fno|cash|index] — Daily Top 10 Gainers & Losers forensic autopsy report."""
+    arg = context.args[0].upper() if context.args else "ALL"
+    if arg in ("FNO", "F&O"):
+        segment = "FNO"
+        seg_label = "F&O DERIVATIVES"
+    elif arg in ("CASH", "NON_FNO", "EQUITY"):
+        segment = "NON_FNO"
+        seg_label = "NON-F&O CASH"
+    elif arg in ("INDEX", "INDICES"):
+        segment = "INDEX"
+        seg_label = "INDICES"
+    else:
+        segment = None
+        seg_label = "ALL UNIVERSES"
+
+    await update.message.reply_text(
+        f"🔬 <b>Running Top Movers Forensic Autopsy [{seg_label}]...</b>\n"
+        "<i>Analyzing 5-dimensional causal drivers, control group contrast, and trap filters...</i>",
+        parse_mode="HTML",
+    )
+
+    def _run_autopsy_summary() -> str:
+        from engine.mover_autopsy import mover_autopsy_engine
+
+        autopsy = mover_autopsy_engine.get_latest_autopsy()
+        if not autopsy:
+            autopsy = mover_autopsy_engine.run_daily_autopsy(segment=segment)
+
+        if not autopsy:
+            return f"No mover autopsy report available for {seg_label}."
+
+        lines = [
+            f"🔬 <b>DAILY MOVER FORENSIC AUTOPSY [{seg_label}] — {autopsy.date}</b>\n"
+            f"<i>Market Regime: <b>{autopsy.market_regime}</b> | Traps Filtered: <b>{autopsy.traps_filtered}</b></i>\n",
+            "🚀 <b>TOP GAINERS (Causal Breakdown):</b>",
+        ]
+
+        # Filter by segment if specified
+        all_gainers = autopsy.gainers
+        all_losers = autopsy.losers
+        if segment:
+            all_gainers = [g for g in all_gainers if g.segment == segment or (segment == "FNO" and g.is_fo)]
+            all_losers = [l for l in all_losers if l.segment == segment or (segment == "FNO" and l.is_fo)]
+
+        valid_gainers = [g for g in all_gainers if not g.is_trap][:5]
+        for g in valid_gainers:
+            clean_arch = g.archetype.replace("ARCHETYPE_", "").replace("_", " ").title()
+            factors_short = "; ".join(g.deciding_factors[:2]) if g.deciding_factors else "Momentum expansion"
+            lines.append(
+                f"• <b>{g.symbol} [{g.segment}]</b>: <b>+{g.change_pct:.1f}%</b> (RVOL: {g.rvol:.1f}x)\n"
+                f"  🏷️ <i>{clean_arch}</i>\n"
+                f"  💡 {factors_short}"
+            )
+
+        lines.append("\n🩸 <b>TOP LOSERS (Breakdown Breakdown):</b>")
+        valid_losers = [l for l in all_losers if not l.is_trap][:3]
+        for l in valid_losers:
+            lines.append(
+                f"• <b>{l.symbol} [{l.segment}]</b>: <b>{l.change_pct:.1f}%</b> (RVOL: {l.rvol:.1f}x) | <i>{l.derivative_verdict}</i>"
+            )
+
+        if autopsy.top_predictive_precursors:
+            lines.append("\n🧠 <b>TOP STATISTICAL PRECURSORS (Signal vs Noise):</b>")
+            for p in autopsy.top_predictive_precursors[:3]:
+                lines.append(f"• <b>{p}</b>")
+
+        traps = [m for m in (autopsy.gainers + autopsy.losers) if m.is_trap]
+        if traps:
+            lines.append(f"\n🛡️ <b>TRAPS FILTERED OUT ({len(traps)}):</b>")
+            for t in traps[:2]:
+                lines.append(f"• <b>{t.symbol}</b> ({t.change_pct:+.1f}%): <i>{t.trap_reason}</i>")
+
+        lines.append("\n⚡ <i>Chanakya Institutional Quantitative Forensics</i>")
+        return "\n".join(lines)
+
+    try:
+        loop = asyncio.get_running_loop()
+        res_text = await asyncio.wait_for(
+            loop.run_in_executor(None, _run_autopsy_summary),
+            timeout=45,
+        )
+        await update.message.reply_text(res_text, parse_mode="HTML")
+    except Exception as e:
+        await update.message.reply_text(f"Autopsy failed: {e}")
+
+
+async def cmd_precursors(update, context) -> None:
+    """Handle /precursors [fno|cash|index] — Scans for tomorrow's high-conviction coiling setups."""
+    arg = context.args[0].upper() if context.args else "ALL"
+    if arg in ("FNO", "F&O"):
+        segment = "FNO"
+        seg_label = "F&O DERIVATIVES"
+    elif arg in ("CASH", "NON_FNO", "EQUITY"):
+        segment = "NON_FNO"
+        seg_label = "NON-F&O CASH"
+    elif arg in ("INDEX", "INDICES"):
+        segment = "INDEX"
+        seg_label = "INDICES"
+    else:
+        segment = None
+        seg_label = "ALL UNIVERSES"
+
+    await update.message.reply_text(
+        f"⚡ <b>Scanning Pre-Ignition Radar Setups [{seg_label}]...</b>\n"
+        "<i>Searching for volume dry-up, squeeze coiling, and institutional order block anchors...</i>",
+        parse_mode="HTML",
+    )
+
+    def _run_precursors_summary() -> str:
+        from engine.precursor_radar import precursor_radar
+
+        candidates = precursor_radar.scan_precursors(segment=segment, top_n=5)
+        if not candidates:
+            return (
+                f"🛡️ <b>No qualified pre-breakout setups in {seg_label} right now.</b>\n"
+                "All scanned candidates failed minimum 75/100 conviction or were penalized below VWAP.\n"
+                "<i>Disciplined quants wait for the market to come to them.</i>"
+            )
+
+        lines = [
+            f"⚡ <b>CHANAKYA PRECURSOR RADAR [{seg_label}] — {len(candidates)} SETUPS</b>\n"
+            f"<i>Candidates exhibiting pre-move DNA before explosive breakouts:</i>\n",
+        ]
+
+        for c in candidates:
+            icon = "🔥" if c.conviction_score >= 85 else "✅"
+            factors_brief = "\n  • ".join(c.matched_factors[:2])
+            lines.append(
+                f"{icon} <b>{c.symbol} [{c.segment}]</b> — 🧠 <b>Score: {c.conviction_score}/100</b> ({c.verdict})\n"
+                f"  💰 <b>LTP:</b> ₹{c.ltp:,.2f} | <b>Sector:</b> {c.sector_name} ({c.rrg_quadrant})\n"
+                f"  🎯 <b>Entry Zone:</b> <code>{c.entry_range}</code>\n"
+                f"  🛑 <b>SL:</b> <code>₹{c.stop_loss:,.2f}</code> | 🎯 <b>T1:</b> <code>₹{c.target_1:,.2f}</code> ({c.risk_reward} R:R)\n"
+                f"  📊 <b>Pre-Move Precursors:</b>\n  • {factors_brief}\n"
+                f"  💡 <b>Execution Rule:</b> <i>{c.when_to_wait}</i>\n"
+            )
+
+        lines.append("⚡ <i>Chanakya Institutional Momentum Intelligence</i>")
+        return "\n".join(lines)
+
+    try:
+        loop = asyncio.get_running_loop()
+        res_text = await asyncio.wait_for(
+            loop.run_in_executor(None, _run_precursors_summary),
+            timeout=45,
+        )
+        await update.message.reply_text(res_text, parse_mode="HTML")
+    except Exception as e:
+        await update.message.reply_text(f"Precursor scan failed: {e}")
+
+
 async def cmd_unknown(update, context) -> None:
     """Handle unknown messages."""
     await update.message.reply_text("Unknown command. Type /help for available commands.")
@@ -1509,6 +1662,57 @@ def send_blast_push(
         return False
 
 
+def format_precursor_alert(candidate_dict: dict) -> str:
+    """Format a high-conviction Precursor Radar alert for Telegram push."""
+    sym = candidate_dict.get("symbol", "STOCK")
+    seg = candidate_dict.get("segment", "FNO")
+    score = candidate_dict.get("conviction_score", 80)
+    verdict = candidate_dict.get("verdict", "HIGH_CONVICTION")
+    ltp = candidate_dict.get("ltp", 0.0)
+    entry_range = candidate_dict.get("entry_range", f"₹{ltp:,.1f}")
+    sl = candidate_dict.get("stop_loss", 0.0)
+    t1 = candidate_dict.get("target_1", 0.0)
+    t2 = candidate_dict.get("target_2", 0.0)
+    rr = candidate_dict.get("risk_reward", "1:2.5")
+    when_buy = candidate_dict.get("when_to_buy", "Enter on ask within coiling range with VWAP hold.")
+    when_wait = candidate_dict.get("when_to_wait", "DO NOT CHASE if price gaps > 1.8%.")
+    profit_rule = candidate_dict.get("profit_rule", "Book 50% at T1, trail runner to T2.")
+    factors = candidate_dict.get("matched_factors", ["Pre-ignition volume dry-up & squeeze coiling"])
+    factors_str = "\n• ".join(factors[:3]) if factors else "• Pre-ignition coiling setup"
+
+    icon = "🔥" if score >= 85 else "⚡"
+    msg = (
+        f"{icon} <b>CHANAKYA HIGH-CONVICTION PRECURSOR RADAR [{seg}]</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"<b>{sym} [{seg}]</b> · 🧠 <b>Score: {score}/100</b> ({verdict})\n\n"
+        f"📊 <b>Matched Precursor DNA:</b>\n"
+        f"• {factors_str}\n\n"
+        f"🎯 <b>Actionable Profit Blueprint:</b>\n"
+        f"• <b>Entry Zone:</b> <code>{entry_range}</code> (Ref: ₹{ltp:,.2f})\n"
+        f"• <b>Invalidation SL:</b> <code>₹{sl:,.2f}</code>\n"
+        f"• <b>Target 1 (1.5R):</b> <code>₹{t1:,.2f}</code> — <i>Scale 50% & SL to Cost</i>\n"
+        f"• <b>Target 2 (2.5R):</b> <code>₹{t2:,.2f}</code> — <i>Full Extension</i>\n"
+        f"• <b>Risk : Reward:</b> <b>{rr}</b>\n\n"
+        f"💡 <b>Trader Execution Playbook:</b>\n"
+        f"1️⃣ <b>When to Buy:</b> {when_buy}\n"
+        f"2️⃣ <b>When to Wait:</b> {when_wait}\n"
+        f"3️⃣ <b>Profit Rule:</b> {profit_rule}\n\n"
+        f"⚡ <i>Chanakya Institutional Momentum Intelligence</i>"
+    )
+    return msg
+
+
+def send_precursor_push(candidate_dict: dict) -> bool:
+    """Send an actionable Precursor Radar alert notification to Telegram."""
+    try:
+        msg = format_precursor_alert(candidate_dict)
+        send_push(msg, parse_mode="HTML", bypass_dedup=True)
+        return True
+    except Exception as e:
+        logger.warning(f"Failed to send precursor push to Telegram: {e}")
+        return False
+
+
 # ── Alert Integration ────────────────────────────────────────
 
 
@@ -1553,6 +1757,8 @@ def run_bot() -> None:
     app.add_handler(CommandHandler("deepanalyze", _track_command(cmd_deepanalyze)))
     app.add_handler(CommandHandler("brief", _track_command(cmd_brief)))
     app.add_handler(CommandHandler("conviction", _track_command(cmd_conviction)))
+    app.add_handler(CommandHandler("movers", _track_command(cmd_movers)))
+    app.add_handler(CommandHandler("precursors", _track_command(cmd_precursors)))
     app.add_handler(CommandHandler("scan", _track_command(cmd_scan)))
     app.add_handler(CommandHandler("radar", _track_command(cmd_scan)))
     app.add_handler(CommandHandler("flows", _track_command(cmd_flows)))

@@ -1767,8 +1767,9 @@ class AutoAlertEngine:
 
                 elif alert.stage == "EARLY_WARNING":
                     # Early warnings are preliminary coiling signals -> keep in SSE / Terminal,
-                    # do not buzz Telegram unless exceptionally high confidence (>= 90)
-                    if alert.confidence < 90:
+                    # do not buzz Telegram unless exceptionally high confidence (>= 90 for general, >= 80 for PRECURSOR_RADAR)
+                    min_conf = 80 if alert.alert_type == "PRECURSOR_RADAR" else 90
+                    if alert.confidence < min_conf:
                         return
                     m_key = f"{alert.symbol}:{alert.alert_type}:EARLY"
                     last_e = self._dispatch_cooldowns.get(m_key, 0.0)
@@ -2002,13 +2003,47 @@ class AutoAlertEngine:
                     if not in_market and not is_test
                     else ""
                 )
-                tg_msg = (
-                    f"{tg_header}\n"
-                    f"🚨 <b>{alert.headline}</b>\n\n"
-                    f"{alert.summary}"
-                    f"{plan_str}\n\n"
-                    f"📊 <b>Confidence:</b> {alert.confidence}% | 🕒 <b>Timestamp:</b> {now_ts_str}{off_note}"
-                )
+                if alert.alert_type == "PRECURSOR_RADAR":
+                    act_plan = alert.actionable_plan or {}
+                    entry_range = act_plan.get("entry_range", f"₹{alert.ltp:,.1f}")
+                    t1 = act_plan.get("target", f"₹{alert.target_level:,.1f}")
+                    t2 = act_plan.get("target_2", "Open")
+                    sl = act_plan.get("stop_loss", f"₹{alert.stop_loss:,.1f}")
+                    rr = act_plan.get("risk_reward", "1:2.5")
+                    when_buy = act_plan.get("when_to_buy", "Enter within coiling range on ask with VWAP confirmation.")
+                    when_wait = act_plan.get("when_to_wait", "DO NOT CHASE if price gaps > 1.8%. Wait for 15-min VWAP pullback.")
+                    profit_rule = act_plan.get("profit_rule", "Book 50% at T1, move SL to breakeven, trail runner to T2.")
+                    raw_factors = alert.metrics.get("matched_factors", ["Pre-ignition volume dry-up & squeeze coiling"]) if alert.metrics else []
+                    factors_str = "\n• ".join(raw_factors[:3]) if raw_factors else "• Pre-ignition coiling setup"
+
+                    tg_msg = (
+                        f"⚡ <b>{env_tag} CHANAKYA HIGH-CONVICTION PRECURSOR RADAR</b>\n"
+                        f"━━━━━━━━━━━━━━━━━━━━\n"
+                        f"<b>{alert.symbol}</b> · 🧠 <b>Score: {alert.confidence}/100</b>\n"
+                        f"<i>{alert.summary}</i>\n\n"
+                        f"📊 <b>Matched Precursor DNA:</b>\n"
+                        f"• {factors_str}\n\n"
+                        f"🎯 <b>Actionable Profit Blueprint:</b>\n"
+                        f"• <b>Entry Zone:</b> <code>{entry_range}</code> (Ref: ₹{alert.ltp:,.2f})\n"
+                        f"• <b>Invalidation SL:</b> <code>{sl}</code>\n"
+                        f"• <b>Target 1 (1.5R):</b> <code>{t1}</code> — <i>Scale 50% & SL to Cost</i>\n"
+                        f"• <b>Target 2 (2.5R):</b> <code>{t2}</code> — <i>Full Extension</i>\n"
+                        f"• <b>Risk : Reward:</b> <b>{rr}</b>\n\n"
+                        f"💡 <b>Trader Execution Playbook:</b>\n"
+                        f"1️⃣ <b>When to Buy:</b> {when_buy}\n"
+                        f"2️⃣ <b>When to Wait:</b> {when_wait}\n"
+                        f"3️⃣ <b>Profit Rule:</b> {profit_rule}\n\n"
+                        f"🕒 <b>Timestamp:</b> {now_ts_str}{off_note}\n"
+                        f"⚡ <i>Chanakya Institutional Momentum Intelligence</i>"
+                    )
+                else:
+                    tg_msg = (
+                        f"{tg_header}\n"
+                        f"🚨 <b>{alert.headline}</b>\n\n"
+                        f"{alert.summary}"
+                        f"{plan_str}\n\n"
+                        f"📊 <b>Confidence:</b> {alert.confidence}% | 🕒 <b>Timestamp:</b> {now_ts_str}{off_note}"
+                    )
             _telegram_notify(tg_msg)
         except Exception:
             pass
@@ -2576,6 +2611,172 @@ class AutoAlertEngine:
 
         return found
 
+    def scan_precursor_radars(self) -> list[AutoAlert]:
+        """Scans liquid universe across F&O, Cash Equities, and Indices for high-conviction pre-ignition candidates."""
+        from engine.precursor_radar import precursor_radar
+
+        found: list[AutoAlert] = []
+        try:
+            candidates = precursor_radar.scan_precursors(top_n=6)
+            for c in candidates:
+                if c.conviction_score >= 80:
+                    now_iso = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
+                    alert_id = f"precursor-{c.symbol.lower()}-{datetime.now(IST).strftime('%Y%m%d')}"
+                    seg_tag = f"[{c.segment}]"
+                    headline = f"⚡ [REAL/LIVE] PRECURSOR RADAR {seg_tag}: {c.symbol} Coiling at ₹{c.ltp:,.1f} ({c.conviction_score}/100)"
+                    summary = f"{seg_tag} Pre-ignition coiling: {'; '.join(c.matched_factors[:2])}. Entry: {c.entry_range}."
+                    alert = AutoAlert(
+                        alert_id=alert_id,
+                        alert_type="PRECURSOR_RADAR",
+                        stage="EARLY_WARNING",
+                        symbol=c.symbol,
+                        exchange=c.exchange,
+                        direction=c.direction,
+                        headline=headline,
+                        summary=summary,
+                        ltp=c.ltp,
+                        trigger_level=c.coiling_pivot_high or c.ltp,
+                        target_level=c.target_1,
+                        stop_loss=c.stop_loss,
+                        confidence=c.conviction_score,
+                        created_at=now_iso,
+                        is_live=True,
+                        environment="LIVE",
+                        metrics={
+                            "conviction_score": c.conviction_score,
+                            "segment": c.segment,
+                            "prior_vol_ratio": c.prior_vol_ratio,
+                            "squeeze_bars": c.squeeze_bars,
+                            "sector_name": c.sector_name,
+                            "rrg_quadrant": c.rrg_quadrant,
+                            "matched_factors": c.matched_factors,
+                            "closest_archetype": c.closest_archetype,
+                        },
+                        actionable_plan={
+                            "action": "BUY",
+                            "segment": c.segment,
+                            "entry_range": c.entry_range,
+                            "target": f"₹{c.target_1:,.1f}",
+                            "target_2": f"₹{c.target_2:,.1f}",
+                            "stop_loss": f"₹{c.stop_loss:,.1f}",
+                            "risk_reward": c.risk_reward,
+                            "when_to_buy": c.when_to_buy,
+                            "when_to_wait": c.when_to_wait,
+                            "profit_rule": c.profit_rule,
+                        },
+                    )
+                    if self.record_alert(alert):
+                        found.append(alert)
+        except Exception as e:
+            logger.debug(f"[AutoAlertEngine] Precursor scan error: {e}")
+        return found
+
+    def scan_intraday_mover_sparks(self) -> list[AutoAlert]:
+        """
+        Scans liquid universe (Indices, F&O, Cash) for explosive intraday breakout sparks (T-0 session moves).
+        Triggers when a stock surges >= 2.8% (or index >= 1.0%) with RVOL >= 2.0x and holds above VWAP.
+        """
+        from engine.precursor_radar import precursor_radar, classify_symbol_segment
+        from market.quotes import get_quote
+        from market.history import get_ohlcv
+
+        found: list[AutoAlert] = []
+        universe = precursor_radar.get_scan_universe(segment="ALL")
+
+        # Batch fetch quotes
+        formatted = [f"NSE:{s}" if ":" not in s else s for s in universe]
+        try:
+            quotes_map = get_quote(formatted)
+        except Exception as e:
+            logger.debug(f"[AutoAlertEngine] Quotes fetch error in spark scan: {e}")
+            return found
+
+        now_iso = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
+
+        for sym in universe:
+            clean_sym = sym.upper().replace("NSE:", "").replace(".NS", "").strip()
+            q = quotes_map.get(f"NSE:{clean_sym}") or quotes_map.get(clean_sym)
+            if not q or getattr(q, "ltp", 0.0) <= 0:
+                continue
+
+            ltp = float(q.ltp)
+            chg = float(getattr(q, "change_pct", 0.0) or 0.0)
+            vol = int(getattr(q, "volume", 0) or 0)
+            vwap = float(getattr(q, "vwap", 0.0) or ltp)
+
+            # Minimum move threshold: indices >= 1.0%, stocks >= 2.8%
+            seg = classify_symbol_segment(clean_sym)
+            min_chg = 1.0 if seg == "INDEX" else 2.8
+
+            if chg < min_chg or (vwap > 0 and ltp < vwap):
+                continue
+
+            # Check turnover gate for equities (₹10 Cr min)
+            turnover_cr = round((ltp * vol) / 1e7, 2)
+            if seg != "INDEX" and turnover_cr < 10.0:
+                continue
+
+            # Calculate RVOL
+            try:
+                df = get_ohlcv(clean_sym, exchange="NSE", interval="day", days=30)
+                if df is None or len(df) < 15:
+                    continue
+                vols = df["volume"].values
+                avg_vol = float(np.mean(vols[-21:-1])) if len(vols) >= 21 else float(np.mean(vols[:-1]))
+                rvol = round(vol / max(1.0, avg_vol), 2)
+            except Exception:
+                rvol = 1.0
+
+            if rvol < 2.0:
+                continue
+
+            alert_id = f"spark-{clean_sym.lower()}-{datetime.now(IST).strftime('%Y%m%d%H%M')}"
+            sl_price = round(max(vwap * 0.995, ltp * 0.985), 2)
+            t1_price = round(ltp + 1.5 * (ltp - sl_price), 2)
+            seg_tag = f"[{seg}]"
+
+            headline = f"🚀 [REAL/LIVE] INTRADAY SPARK {seg_tag}: {clean_sym} +{chg:.1f}% with {rvol:.1f}x Volume Surge"
+            summary = f"{seg_tag} Session breakout underway: Reclaimed VWAP (₹{vwap:,.1f}) with {rvol:.1f}x RVOL. Momentum entry active."
+
+            alert = AutoAlert(
+                alert_id=alert_id,
+                alert_type="INTRADAY_SPARK",
+                stage="IGNITED",
+                symbol=clean_sym,
+                exchange="NSE",
+                direction="BULLISH",
+                headline=headline,
+                summary=summary,
+                ltp=ltp,
+                trigger_level=ltp,
+                target_level=t1_price,
+                stop_loss=sl_price,
+                confidence=min(95, int(75 + rvol * 5)),
+                created_at=now_iso,
+                is_live=True,
+                environment="LIVE",
+                metrics={
+                    "rvol": rvol,
+                    "turnover_cr": turnover_cr,
+                    "vwap": vwap,
+                    "change_pct": chg,
+                    "segment": seg,
+                },
+                actionable_plan={
+                    "action": "BUY_MOMENTUM",
+                    "segment": seg,
+                    "entry_range": f"₹{round(ltp*0.998, 1):,.1f} - ₹{round(ltp*1.005, 1):,.1f}",
+                    "stop_loss": f"₹{sl_price:,.1f}",
+                    "target": f"₹{t1_price:,.1f}",
+                    "when_to_buy": f"Buy on 5m VWAP holding above ₹{vwap:,.1f}",
+                    "when_to_wait": f"Do not chase if price extends > {round(chg + 1.5, 1)}%",
+                },
+            )
+            if self.record_alert(alert):
+                found.append(alert)
+
+        return found
+
     def scan_fresh_signals_now(self) -> list[AutoAlert]:
         """Scans watched universe for fresh market signals across all detectors."""
         results: list[AutoAlert] = []
@@ -2583,6 +2784,8 @@ class AutoAlertEngine:
         results.extend(self.scan_squeeze_breakouts())
         results.extend(self.scan_circuits())
         results.extend(self.scan_pattern_coilings())
+        results.extend(self.scan_precursor_radars())
+        results.extend(self.scan_intraday_mover_sparks())
         return results
 
     def scan_all_now(self) -> list[AutoAlert]:

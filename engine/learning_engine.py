@@ -388,6 +388,32 @@ class PatternLearningEngine:
 
         logger.debug(f"[PatternLearningEngine] Calibrated factor weights: {self._factor_weights}")
 
+    def recalibrate_from_snr(self, snr_table: dict[str, float]) -> None:
+        """
+        Dynamically adjusts factor weights based on Discriminative Signal-to-Noise Ratio (SNR)
+        from daily mover autopsies.
+        Factors that show high separation (Delta > 0.20) against control group receive weight boosts.
+        """
+        if not snr_table:
+            return
+
+        mapping = {
+            "volume_dry_up": "volume_dry_up",
+            "squeeze_compression": "squeeze_coiling",
+            "gamma_short_squeeze": "ce_unwind",
+            "sector_tailwind": "sector_tailwind",
+        }
+
+        for snr_key, weight_key in mapping.items():
+            if snr_key in snr_table and weight_key in self._factor_weights:
+                delta = snr_table[snr_key]
+                if delta >= 0.25:
+                    self._factor_weights[weight_key] = min(35, self._factor_weights[weight_key] + 5)
+                elif delta <= 0.05:
+                    self._factor_weights[weight_key] = max(10, self._factor_weights[weight_key] - 3)
+
+        logger.info(f"[PatternLearningEngine] Recalibrated weights from SNR: {self._factor_weights}")
+
     # ── Invalidation Post-Mortem & Retrospective Learning ───
 
     def set_symbol_lockout(

@@ -12,6 +12,7 @@ import React, {
 import { useAPI } from '../../hooks/useAPI'
 import { useChatStore } from '../../store/chatStore'
 import UnavailableState from '../Common/UnavailableState'
+import MoversAutopsyPanel from './MoversAutopsyPanel'
 
 // ─── LiveSpotsContext ────────────────────────────────────────────────────────
 // Stores live quote data in a ref (never triggers parent re-renders).
@@ -164,6 +165,13 @@ const AUTO_TYPE_STYLE = {
     color: 'var(--color-sapphire)',
     bg: 'rgba(77, 155, 255, 0.12)',
     border: 'rgba(77, 155, 255, 0.35)',
+  },
+  PRECURSOR_RADAR: {
+    icon: '⚡',
+    label: 'PRECURSOR RADAR',
+    color: '#f59e0b',
+    bg: 'rgba(245, 158, 11, 0.12)',
+    border: 'rgba(245, 158, 11, 0.35)',
   },
 }
 
@@ -2434,6 +2442,14 @@ function AlertsViewInner({ onOpenOrderTicket }) {
           >
             🔔 Manual Price Alerts ({alerts.length})
           </button>
+          <button
+            onClick={() => setActiveTab('movers')}
+            className={`px-3 py-1 text-xs font-bold rounded-lg transition-all ${
+              activeTab === 'movers' ? 'bg-amber-400 text-panel font-black shadow-sm' : 'text-muted hover:text-text'
+            }`}
+          >
+            🔬 Movers Autopsy & Precursors
+          </button>
         </div>
       </header>
 
@@ -2992,6 +3008,11 @@ function AlertsViewInner({ onOpenOrderTicket }) {
             </div>
           )}
         </div>
+      )}
+
+      {/* ── TAB 3: Daily Movers Autopsy & Precursor Radar ───────────── */}
+      {activeTab === 'movers' && (
+        <MoversAutopsyPanel onOpenOrderTicket={onOpenOrderTicket} />
       )}
     </div>
   )
