@@ -464,6 +464,14 @@ function computeExecutionLevels(alert, isDerivative, spotNum, optLtpNum) {
 
   // 4. Target 2
   let t2 = null
+  const act = String(tradePlan.action || alert?.actionable_plan?.action || '').toUpperCase()
+  const isOptionSell = isDerivative && (
+    act === 'SELL' ||
+    act === 'WRITE' ||
+    act === 'SHORT' ||
+    (sl && entry && t1 && sl > entry && t1 < entry)
+  )
+  const isUpwardPayoff = isDerivative ? !isOptionSell : isBull
   if (isDerivative && optPlan?.t2_premium) {
     t2 = Number(optPlan.t2_premium)
   } else if (tradePlan.target_2) {
@@ -471,12 +479,10 @@ function computeExecutionLevels(alert, isDerivative, spotNum, optLtpNum) {
   }
   if ((!t2 || isNaN(t2) || t2 <= 0) && t1 && entry) {
     const spread1 = Math.abs(t1 - entry)
-    // T2 extends beyond T1 in the trade direction — avoids T2 < T1 inversion
-    t2 = isBull ? t1 + spread1 * 0.6 : t1 - spread1 * 0.6
+    t2 = isUpwardPayoff ? t1 + spread1 * 0.6 : t1 - spread1 * 0.6
   }
 
   // 5. Target 3 (Runner / Moonshot)
-  // CRITICAL FIX: T3 must be anchored to T2, not T1, to guarantee T3 > T2 (LONG) / T3 < T2 (SHORT)
   let t3 = null
   if (isDerivative && optPlan?.t3_premium) {
     t3 = Number(optPlan.t3_premium)
@@ -486,26 +492,23 @@ function computeExecutionLevels(alert, isDerivative, spotNum, optLtpNum) {
   if ((!t3 || isNaN(t3) || t3 <= 0) && t2 && entry) {
     const spread2 = Math.abs(t2 - entry)
     t3 = isDerivative
-      ? entry * 2.5  // Options: 2.5x entry for runner target
+      ? (isOptionSell ? entry * 0.2 : entry * 2.5)
       : isBull
-      ? t2 + spread2 * 0.8  // T3 = T2 + 80% of (T2-Entry) range → always > T2
-      : t2 - spread2 * 0.8  // SHORT: T3 = T2 - range → always < T2
+      ? t2 + spread2 * 0.8
+      : t2 - spread2 * 0.8
   }
 
-  // Monotonic invariant enforcement (client-side safety net)
+  // Monotonic invariant enforcement
   if (t1 && t2 && entry) {
-    if (isBull) {
-      // Ensure: Entry < T1 < T2 < T3
+    if (isUpwardPayoff) {
       if (t2 <= t1) t2 = t1 + Math.abs(t1 - entry) * 0.5
       if (t3 !== null && t3 <= t2) t3 = t2 + Math.abs(t2 - t1) * 0.8
     } else {
-      // Ensure: Entry > T1 > T2 > T3
       if (t2 >= t1) t2 = t1 - Math.abs(entry - t1) * 0.5
       if (t3 !== null && t3 >= t2) t3 = t2 - Math.abs(t1 - t2) * 0.8
     }
   }
 
-  // Payoff calculations — truthfully only computed when numbers exist
   const hasValidBase = entry && sl && entry > 0
   const sl_pts = hasValidBase ? Math.abs(entry - sl) : null
   const sl_pct = hasValidBase ? ((sl_pts / entry) * 100).toFixed(1) : null
@@ -539,16 +542,15 @@ function computeExecutionLevels(alert, isDerivative, spotNum, optLtpNum) {
     t3_pts,
     t3_pct,
     t3_rr,
-    // Pass through option plan for Rupee P&L display
+    isUpwardPayoff,
+    isOptionSell,
     optPlanRef: optPlan || null,
   }
 }
 
 /**
  * TradeExecutionMatrix:
- * Provides an institutional, ultra-high-contrast 5-tier execution board:
- * Entry, SL, T1, T2, T3 (Runner) with risk/reward payoff, ETA badges, and visual runway bar.
- * Designed to be read in < 1 second.
+ * Provides an institutional, ultra-high-contrast 5-tier execution board.
  */
 function TradeExecutionMatrix({
   levels,
@@ -560,6 +562,7 @@ function TradeExecutionMatrix({
   tradePlan,
   marketStatus,
   expiryInfo,
+  densityMode = 'compact',
 }) {
   const tp = tradePlan || {}
   const mktSt = marketStatus || 'SESSION_CLOSED'
@@ -577,17 +580,17 @@ function TradeExecutionMatrix({
     if (pnl === null || pnl === undefined || isNaN(pnl)) return null
     const n = Number(pnl)
     const sign = n >= 0 ? '+' : ''
-    return `${sign}₹${Math.abs(n).toLocaleString('en-IN', { maximumFractionDigits: 0 })}/lot`
+    return `${sign}₹${n.toLocaleString('en-IN')}`
   }
 
   let progressPct = 30
   if (currentPrice && levels.sl && levels.t3 && levels.t3 !== levels.sl) {
     const totalSpan = Math.abs(levels.t3 - levels.sl)
-    const currentDist = isBull ? currentPrice - levels.sl : levels.sl - currentPrice
+    const isUpward = levels.isUpwardPayoff !== undefined ? levels.isUpwardPayoff : (isBull || isDerivative)
+    const currentDist = isUpward ? currentPrice - levels.sl : levels.sl - currentPrice
     progressPct = Math.min(100, Math.max(0, Math.round((currentDist / totalSpan) * 100)))
   }
 
-  // Market status badge styling
   const mktBadge = mktSt === 'LIVE'
     ? { cls: 'text-emerald-400 bg-emerald-500/15 border-emerald-500/40', label: '🟢 LIVE MARKET' }
     : mktSt === 'PRE_MARKET'
@@ -602,38 +605,38 @@ function TradeExecutionMatrix({
     : null
 
   return (
-    <div className="rounded-xl p-3 border border-border/70 bg-surface/90 space-y-2.5 shadow-sm">
+    <div className="rounded-xl p-2.5 border border-border/70 bg-surface/90 space-y-2 shadow-sm">
       {/* Execution Matrix Header with Quick Verdict + Market Status */}
-      <div className="flex items-center justify-between flex-wrap gap-2">
+      <div className="flex items-center justify-between flex-wrap gap-1.5 pb-1 border-b border-border/40">
         <div className="flex items-center gap-1.5">
-          <span className="text-sm font-mono">🎯</span>
-          <span className="text-[11px] font-black uppercase tracking-wider text-text">
+          <span className="text-xs font-mono">🎯</span>
+          <span className="text-[10px] font-black uppercase tracking-wider text-text">
             Trade Execution Matrix & Target Milestones
           </span>
         </div>
-        <div className="flex items-center gap-2 text-[10px] font-mono font-bold flex-wrap">
+        <div className="flex items-center gap-1.5 text-[9px] font-mono font-bold flex-wrap">
           {/* Market session status */}
-          <span className={`px-2 py-0.5 rounded border ${mktBadge.cls}`}>
+          <span className={`px-1.5 py-0.5 rounded border ${mktBadge.cls}`}>
             {mktBadge.label}
           </span>
           {/* Expiry badge */}
           {expBadge && (
-            <span className="px-2 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30">
+            <span className="px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30">
               {expBadge}
             </span>
           )}
           {levels.t1_rr ? (
-            <span className="px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">
+            <span className="px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">
               T1 R:R {levels.t1_rr}:1
             </span>
           ) : null}
           {levels.t2_rr ? (
-            <span className="px-2 py-0.5 rounded bg-cyan-500/15 text-cyan-300 border border-cyan-500/30">
+            <span className="px-1.5 py-0.5 rounded bg-cyan-500/15 text-cyan-300 border border-cyan-500/30">
               T2 R:R {levels.t2_rr}:1
             </span>
           ) : null}
           {levels.t3_rr ? (
-            <span className="px-2 py-0.5 rounded bg-purple-500/15 text-purple-300 border border-purple-500/30">
+            <span className="px-1.5 py-0.5 rounded bg-purple-500/15 text-purple-300 border border-purple-500/30">
               T3 R:R {levels.t3_rr}:1
             </span>
           ) : null}
@@ -641,9 +644,9 @@ function TradeExecutionMatrix({
       </div>
 
       {/* 5-Column High-Contrast Grid */}
-      <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 font-mono text-xs">
+      <div className="grid grid-cols-2 sm:grid-cols-5 gap-1.5 font-mono text-xs">
         {/* 1. STOP LOSS */}
-        <div className="p-2.5 rounded-lg bg-rose-500/10 border border-rose-500/35 hover:border-rose-500/60 transition-colors">
+        <div className="p-2 rounded-lg bg-rose-500/10 border border-rose-500/35 hover:border-rose-500/60 transition-colors">
           <div className="flex items-center justify-between">
             <span className="text-[9px] font-black uppercase tracking-wider text-rose-400">
               🛑 Invalidation SL
@@ -652,27 +655,27 @@ function TradeExecutionMatrix({
               {levels.sl_pct ? `-${levels.sl_pct}%` : '—'}
             </span>
           </div>
-          <div className="text-sm font-black text-rose-300 mt-1">
+          <div className="text-sm font-black text-rose-300 mt-0.5">
             ₹{formatNum(levels.sl)}
           </div>
-          <div className="text-[9px] text-muted block truncate font-sans mt-0.5" title={slRationale}>
+          <div className="text-[9px] text-muted block truncate font-sans" title={slRationale}>
             {slRationale || (levels.sl_pts ? `Risk: ₹${formatNum(levels.sl_pts)}` : 'Structural SL')}
           </div>
           {/* Rupee risk per lot */}
           {levels.optPlanRef?.sl_pnl_per_lot !== undefined && (
-            <div className="mt-1 text-[9px] font-bold text-rose-400/80">
+            <div className="text-[8px] font-bold text-rose-400/80">
               {formatPnl(levels.optPlanRef.sl_pnl_per_lot)}
             </div>
           )}
           {trailingStop && (
-            <div className="mt-1 pt-1 border-t border-rose-500/25 text-[9px] text-cyan-300 font-bold">
+            <div className="pt-0.5 border-t border-rose-500/25 text-[9px] text-cyan-300 font-bold">
               ⚡ Trailing: ₹{formatNum(trailingStop)}
             </div>
           )}
         </div>
 
         {/* 2. ENTRY TRIGGER */}
-        <div className="p-2.5 rounded-lg bg-gold/10 border border-gold/45 hover:border-gold/70 transition-colors">
+        <div className="p-2 rounded-lg bg-gold/10 border border-gold/45 hover:border-gold/70 transition-colors">
           <div className="flex items-center justify-between">
             <span className="text-[9px] font-black uppercase tracking-wider text-gold">
               ⚡ Entry Trigger
@@ -681,16 +684,16 @@ function TradeExecutionMatrix({
               {isBull ? 'BUY' : 'SELL'}
             </span>
           </div>
-          <div className="text-sm font-black text-gold mt-1">
+          <div className="text-sm font-black text-gold mt-0.5">
             ₹{formatNum(levels.entry)}
           </div>
-          <div className="text-[9px] text-muted block truncate font-sans mt-0.5">
+          <div className="text-[9px] text-muted block truncate font-sans">
             {isDerivative ? 'Contract Entry' : 'Spot Breakout Level'}
           </div>
         </div>
 
         {/* 3. TARGET 1 */}
-        <div className="p-2.5 rounded-lg bg-emerald-500/10 border border-emerald-500/35 hover:border-emerald-500/60 transition-colors">
+        <div className="p-2 rounded-lg bg-emerald-500/10 border border-emerald-500/35 hover:border-emerald-500/60 transition-colors">
           <div className="flex items-center justify-between">
             <span className="text-[9px] font-black uppercase tracking-wider text-emerald-400">
               🎯 Target 1 (T1)
@@ -699,34 +702,34 @@ function TradeExecutionMatrix({
               {levels.t1_pct ? `+${levels.t1_pct}%` : '—'}
             </span>
           </div>
-          <div className="text-sm font-black text-emerald-300 mt-1">
+          <div className="text-sm font-black text-emerald-300 mt-0.5">
             ₹{formatNum(levels.t1)}
           </div>
-          <div className="text-[9px] text-emerald-400/90 block font-sans font-bold mt-0.5">
+          <div className="text-[9px] text-emerald-400/90 block font-sans font-bold">
             {levels.t1_rr ? `${levels.t1_rr}:1 R:R · Book 50%` : 'Book 50%'}
           </div>
           {/* Spot Reference for derivatives */}
           {isDerivative && levels.optPlanRef?.t1_spot && (
-            <div className="text-[9px] text-emerald-300/60 font-sans mt-0.5">
+            <div className="text-[8px] text-emerald-300/60 font-sans">
               Spot ₹{formatNum(levels.optPlanRef.t1_spot)}
             </div>
           )}
           {/* Rupee P&L per lot */}
           {levels.optPlanRef?.t1_pnl_per_lot !== undefined && (
-            <div className={`mt-0.5 text-[9px] font-bold ${(levels.optPlanRef.t1_pnl_per_lot || 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+            <div className={`text-[8px] font-bold ${(levels.optPlanRef.t1_pnl_per_lot || 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
               {formatPnl(levels.optPlanRef.t1_pnl_per_lot)}
             </div>
           )}
           {/* ETA Badge */}
           {tp.eta_t1_str && (
-            <div className="mt-1 text-[9px] text-cyan-400/80 font-mono truncate" title={tp.eta_t1_str}>
+            <div className="text-[8px] text-cyan-400/80 font-mono truncate" title={tp.eta_t1_str}>
               ⏱ {tp.eta_t1_str}
             </div>
           )}
         </div>
 
         {/* 4. TARGET 2 */}
-        <div className="p-2.5 rounded-lg bg-cyan-500/10 border border-cyan-500/35 hover:border-cyan-500/60 transition-colors">
+        <div className="p-2 rounded-lg bg-cyan-500/10 border border-cyan-500/35 hover:border-cyan-500/60 transition-colors">
           <div className="flex items-center justify-between">
             <span className="text-[9px] font-black uppercase tracking-wider text-cyan-400">
               🏁 Target 2 (T2)
@@ -735,31 +738,31 @@ function TradeExecutionMatrix({
               {levels.t2_pct ? `+${levels.t2_pct}%` : '—'}
             </span>
           </div>
-          <div className="text-sm font-black text-cyan-300 mt-1">
+          <div className="text-sm font-black text-cyan-300 mt-0.5">
             ₹{formatNum(levels.t2)}
           </div>
-          <div className="text-[9px] text-cyan-400/90 block font-sans font-bold mt-0.5">
+          <div className="text-[9px] text-cyan-400/90 block font-sans font-bold">
             {levels.t2_rr ? `${levels.t2_rr}:1 R:R · Resistance Wall` : 'Resistance Wall'}
           </div>
           {isDerivative && levels.optPlanRef?.t2_spot && (
-            <div className="text-[9px] text-cyan-300/60 font-sans mt-0.5">
+            <div className="text-[8px] text-cyan-300/60 font-sans">
               Spot ₹{formatNum(levels.optPlanRef.t2_spot)}
             </div>
           )}
           {levels.optPlanRef?.t2_pnl_per_lot !== undefined && (
-            <div className={`mt-0.5 text-[9px] font-bold ${(levels.optPlanRef.t2_pnl_per_lot || 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+            <div className={`text-[8px] font-bold ${(levels.optPlanRef.t2_pnl_per_lot || 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
               {formatPnl(levels.optPlanRef.t2_pnl_per_lot)}
             </div>
           )}
           {tp.eta_t2_str && (
-            <div className="mt-1 text-[9px] text-cyan-400/80 font-mono truncate" title={tp.eta_t2_str}>
+            <div className="text-[8px] text-cyan-400/80 font-mono truncate" title={tp.eta_t2_str}>
               ⏱ {tp.eta_t2_str}
             </div>
           )}
         </div>
 
         {/* 5. TARGET 3 (RUNNER) */}
-        <div className="p-2.5 rounded-lg bg-purple-500/10 border border-purple-500/35 hover:border-purple-500/60 transition-colors col-span-2 sm:col-span-1">
+        <div className="p-2 rounded-lg bg-purple-500/10 border border-purple-500/35 hover:border-purple-500/60 transition-colors col-span-2 sm:col-span-1">
           <div className="flex items-center justify-between">
             <span className="text-[9px] font-black uppercase tracking-wider text-purple-300">
               🚀 Target 3 (T3)
@@ -768,24 +771,24 @@ function TradeExecutionMatrix({
               {levels.t3_pct ? `+${levels.t3_pct}%` : '—'}
             </span>
           </div>
-          <div className="text-sm font-black text-purple-200 mt-1">
+          <div className="text-sm font-black text-purple-200 mt-0.5">
             ₹{formatNum(levels.t3)}
           </div>
-          <div className="text-[9px] text-purple-300/90 block font-sans font-bold mt-0.5">
+          <div className="text-[9px] text-purple-300/90 block font-sans font-bold">
             {levels.t3_rr ? `${levels.t3_rr}:1 R:R · Moonshot Runner` : 'Moonshot Runner'}
           </div>
           {isDerivative && levels.optPlanRef?.t3_spot && (
-            <div className="text-[9px] text-purple-300/60 font-sans mt-0.5">
+            <div className="text-[8px] text-purple-300/60 font-sans">
               Spot ₹{formatNum(levels.optPlanRef.t3_spot)}
             </div>
           )}
           {levels.optPlanRef?.t3_pnl_per_lot !== undefined && levels.optPlanRef.t3_pnl_per_lot !== null && (
-            <div className={`mt-0.5 text-[9px] font-bold ${(levels.optPlanRef.t3_pnl_per_lot || 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+            <div className={`text-[8px] font-bold ${(levels.optPlanRef.t3_pnl_per_lot || 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
               {formatPnl(levels.optPlanRef.t3_pnl_per_lot)}
             </div>
           )}
           {tp.eta_t3_str && (
-            <div className="mt-1 text-[9px] text-cyan-400/80 font-mono truncate" title={tp.eta_t3_str}>
+            <div className="text-[8px] text-cyan-400/80 font-mono truncate" title={tp.eta_t3_str}>
               ⏱ {tp.eta_t3_str}
             </div>
           )}
@@ -793,15 +796,15 @@ function TradeExecutionMatrix({
       </div>
 
       {/* Visual Trade Runway Progress Tracker */}
-      <div className="pt-2 border-t border-border/30 space-y-1.5">
-        <div className="flex items-center justify-between text-[9px] font-mono text-muted flex-wrap gap-1">
+      <div className="pt-1 border-t border-border/20 space-y-1">
+        <div className="flex items-center justify-between text-[8px] font-mono text-muted flex-wrap gap-1">
           <span className="text-rose-400 font-bold">🛑 SL ₹{formatNum(levels.sl)}</span>
           <span className="text-gold font-bold">⚡ Entry ₹{formatNum(levels.entry)}</span>
           <span className="text-emerald-400 font-bold">🎯 T1 ₹{formatNum(levels.t1)}</span>
           <span className="text-cyan-400 font-bold">🏁 T2 ₹{formatNum(levels.t2)}</span>
           <span className="text-purple-300 font-bold">🚀 T3 ₹{formatNum(levels.t3)}</span>
         </div>
-        <div className="relative w-full h-2 rounded-full bg-surface border border-border/50 overflow-hidden flex items-center">
+        <div className="relative w-full h-1.5 rounded-full bg-surface border border-border/50 overflow-hidden flex items-center">
           <div className="h-full bg-rose-500/40 border-r border-rose-500" style={{ width: '20%' }} title="Stop Loss Risk Zone" />
           <div className="h-full bg-gold/40 border-r border-gold" style={{ width: '10%' }} title="Entry Zone" />
           <div className="h-full bg-emerald-500/35 border-r border-emerald-500" style={{ width: '30%' }} title="T1 Profit Zone" />
@@ -809,7 +812,7 @@ function TradeExecutionMatrix({
           <div className="h-full bg-purple-500/35" style={{ width: '20%' }} title="T3 Runner Moonshot Zone" />
           {currentPrice ? (
             <div
-              className="absolute top-0 bottom-0 w-2.5 -ml-1.25 bg-white rounded-full shadow-lg border border-gold animate-pulse"
+              className="absolute top-0 bottom-0 w-2 -ml-1 bg-white rounded-full shadow-lg border border-gold animate-pulse"
               style={{ left: `${progressPct}%` }}
               title={`Live Price Position: ₹${formatNum(currentPrice)} (${progressPct}% runway)`}
             />
@@ -829,9 +832,9 @@ const AutoAlertCard = memo(function AutoAlertCard({
   onClearLockout,
   archiving,
   historyAttempts = [],
+  densityMode = 'compact',
 }) {
   // Subscribe to live prices for this card's symbol & contract individually.
-  // Only THIS card re-renders when its own symbol's price changes.
   const cleanSym = alert.symbol?.replace(/^(NSE|BSE|MCX|NFO):/, '').trim().toUpperCase()
   const cleanContract = alert.contract_symbol?.replace(/^(NSE|BSE|MCX|NFO):/, '').trim().toUpperCase()
 
@@ -844,11 +847,17 @@ const AutoAlertCard = memo(function AutoAlertCard({
     alert.contract_symbol && alert.contract_symbol !== cleanContract ? alert.contract_symbol : null
   )
   const liveContract = liveContractByClean ?? liveContractByFull
+
   const [showHistory, setShowHistory] = useState(false)
-  const [showPostMortem, setShowPostMortem] = useState(true)
+  const [showPostMortem, setShowPostMortem] = useState(false)
   const [showPlan, setShowPlan] = useState(false)
+  const [showDetails, setShowDetails] = useState(densityMode === 'expanded')
   const [clearingLockout, setClearingLockout] = useState(false)
   const [lockoutCleared, setLockoutCleared] = useState(false)
+
+  useEffect(() => {
+    setShowDetails(densityMode === 'expanded')
+  }, [densityMode])
 
   const handleClearLockoutClick = async () => {
     if (!onClearLockout) return
@@ -898,7 +907,6 @@ const AutoAlertCard = memo(function AutoAlertCard({
   const spotNum = rawSpot ? Number(String(rawSpot).replace(/[^0-9.-]/g, '')) : null
 
   // Dynamic Live Contract Premium/Price (Options Premium or Futures Price)
-  // For options: liveContract (streamed) > alert.ltp (recorded option LTP at trigger) > alert.option_premium
   const rawOptLtp = liveContract?.ltp ?? alert.ltp ?? alert.option_premium
   const optLtpNum = rawOptLtp ? Number(String(rawOptLtp).replace(/[^0-9.-]/g, '')) : null
 
@@ -909,9 +917,7 @@ const AutoAlertCard = memo(function AutoAlertCard({
     [alert, isDerivative, spotNum, optLtpNum]
   )
 
-  // Entry price: what the option/future was trading at when alert fired.
-  // Priority: option_premium field > recommended_entry from plan > alert.ltp (option LTP at trigger)
-  // For equity: trigger_level is the breakout/entry price.
+  // Entry price calculation
   const entryPriceNum = isDerivative
     ? (
         alert.option_premium
@@ -959,41 +965,27 @@ const AutoAlertCard = memo(function AutoAlertCard({
     }
   }
 
-  // Dynamic live distance to Target & Stop Loss
-  let targetDistanceInfo = null
-  if (targetNum && spotNum && spotNum > 0) {
-    const diff = Math.abs(targetNum - spotNum)
-    const pct = ((diff / spotNum) * 100).toFixed(1)
-    const reached = isBull ? spotNum >= targetNum : spotNum <= targetNum
-    targetDistanceInfo = reached ? '🏁 Reached' : `${diff.toFixed(1)} pts (${pct}%)`
-  }
-
-  let slDistanceInfo = null
-  if (stopLossNum && spotNum && spotNum > 0) {
-    const diff = Math.abs(spotNum - stopLossNum)
-    const pct = ((diff / spotNum) * 100).toFixed(1)
-    const breached = isBull ? spotNum <= stopLossNum : spotNum >= stopLossNum
-    slDistanceInfo = breached ? '⚠️ Breached' : `${diff.toFixed(1)} pts (${pct}%)`
-  }
-
   return (
     <article
-      className="rounded-2xl p-4 space-y-3 transition-all duration-150 hover:border-gold/40"
+      className="rounded-2xl p-3 sm:p-3.5 space-y-2.5 transition-all duration-150 hover:border-gold/40 shadow-sm"
       style={{
-        background: isInvalidated ? 'rgba(255, 79, 123, 0.05)' : 'var(--color-panel)',
-        border: isInvalidated ? '1px solid rgba(255, 79, 123, 0.5)' : `1px solid ${style.border}`,
+        background: isInvalidated ? 'rgba(255, 79, 123, 0.04)' : 'var(--color-panel)',
+        border: isInvalidated ? '1px solid rgba(255, 79, 123, 0.45)' : `1px solid ${style.border}`,
         boxShadow: isInvalidated
-          ? '0 0 16px rgba(255, 79, 123, 0.12)'
+          ? '0 0 16px rgba(255, 79, 123, 0.08)'
           : isEarly
           ? 'var(--shadow-card)'
-          : '0 0 16px rgba(245, 166, 35, 0.15)',
+          : '0 0 16px rgba(245, 166, 35, 0.08)',
       }}
     >
-      {/* Header Bar */}
-      <div className="flex items-start justify-between gap-3">
-        <div className="flex items-start gap-3">
+      {/* ── CARD HEADER ─────────────────────────────────────────────────── */}
+      {/* Power Header: 3-column Bloomberg-style — Symbol | Thesis | Actions */}
+      <div className="flex items-center gap-2 min-w-0">
+
+        {/* Col A: Stage icon + Symbol + Contract chip */}
+        <div className="flex items-center gap-1.5 flex-shrink-0 min-w-0">
           <div
-            className="w-10 h-10 rounded-xl flex items-center justify-center text-lg flex-shrink-0"
+            className="w-7 h-7 rounded-lg flex items-center justify-center text-sm flex-shrink-0"
             style={{
               background: isInvalidated ? 'rgba(255, 79, 123, 0.15)' : style.bg,
               border: `1px solid ${isInvalidated ? 'rgba(255, 79, 123, 0.4)' : style.border}`,
@@ -1001,176 +993,241 @@ const AutoAlertCard = memo(function AutoAlertCard({
           >
             {isInvalidated ? '🛑' : isFinalTarget ? '🏁' : isT1 ? '🎯' : isTrail ? '📈' : style.icon}
           </div>
-          <div>
-            <div className="flex items-center gap-2 flex-wrap">
-              <span className="text-sm font-black tracking-wide">{alert.symbol}</span>
-              {alert.contract_symbol && (
-                <span className="text-xs font-mono font-bold text-gold px-1.5 py-0.5 rounded bg-gold/10">
-                  {alert.contract_symbol}
-                </span>
+          <div className="min-w-0">
+            <div className="flex items-center gap-1 flex-wrap">
+              <span className="text-sm font-black tracking-wide text-text leading-none">{alert.symbol}</span>
+              {strikeNum && !isFuture && (
+                <span className="text-[9px] font-black text-gold font-mono leading-none">₹{Number(strikeNum).toLocaleString('en-IN')}</span>
               )}
-
-              {/* Real-time Streaming Price Pill */}
-              {isDerivative && optLtpNum ? (
-                <span
-                  className={`inline-flex items-center gap-1.5 text-[10px] font-mono px-2 py-0.5 rounded-md border ${
-                    liveContract?.flash === 'up'
-                      ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
-                      : liveContract?.flash === 'down'
-                      ? 'bg-rose-500/20 text-rose-300 border-rose-500/40'
-                      : 'bg-surface/90 text-text border-border/60'
-                  }`}
-                  title="Real-time Live Contract Price"
-                >
-                  <span className="text-muted text-[8px] uppercase font-sans font-bold">{isFuture ? 'FUT' : 'OPT'} LTP:</span>
-                  <span className="font-black text-gold">₹{Number(optLtpNum).toLocaleString('en-IN', { minimumFractionDigits: 1, maximumFractionDigits: 2 })}</span>
-                  {liveContract?.ltp ? (
-                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" title="Live Streaming Feed" />
-                  ) : null}
-                  {liveContractReturn ? (
-                    <span className={`text-[9px] font-bold ${liveContractReturn.isProfitable ? 'text-emerald-400' : 'text-rose-400'}`}>
-                      {liveContractReturn.isProfitable ? '+' : ''}{liveContractReturn.pct}%
-                    </span>
-                  ) : null}
-                </span>
-              ) : spotNum ? (
-                <span
-                  className={`inline-flex items-center gap-1.5 text-[10px] font-mono px-2 py-0.5 rounded-md border ${
-                    liveSpot?.flash === 'up'
-                      ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
-                      : liveSpot?.flash === 'down'
-                      ? 'bg-rose-500/20 text-rose-300 border-rose-500/40'
-                      : 'bg-surface/90 text-text border-border/60'
-                  }`}
-                  title="Real-time Live Spot Price"
-                >
-                  <span className="text-muted text-[8px] uppercase font-sans font-bold">SPOT:</span>
-                  <span className="font-black text-text">₹{Number(spotNum).toLocaleString('en-IN', { minimumFractionDigits: 1, maximumFractionDigits: 2 })}</span>
-                  {liveSpot?.ltp ? (
-                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" title="Live Streaming Feed" />
-                  ) : null}
-                  {liveCashReturn ? (
-                    <span className={`text-[9px] font-bold ${liveCashReturn.isProfitable ? 'text-emerald-400' : 'text-rose-400'}`}>
-                      {liveCashReturn.isProfitable ? '+' : ''}{liveCashReturn.pct}%
-                    </span>
-                  ) : null}
-                </span>
-              ) : null}
-
-              {/* REAL/LIVE vs TEST Badge */}
-              <span
-                className={`text-[9px] px-2 py-0.5 rounded-full font-black uppercase tracking-wider ${
-                  isTest
-                    ? 'bg-purple-500/20 text-purple-300 border border-purple-500/40'
-                    : 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
-                }`}
-              >
-                {isTest ? '🧪 TEST ALERT' : '🟢 REAL / LIVE'}
-              </span>
-
-              <span
-                className="text-[9px] px-2 py-0.5 rounded-full font-bold uppercase tracking-wider"
-                style={{ background: style.bg, color: style.color, border: `1px solid ${style.border}` }}
-              >
-                {style.label}
-              </span>
-
-              {/* Archived Badge */}
-              {alert.is_archived && !isInvalidated && !isFinalTarget && (
-                <span className="text-[9px] px-2 py-0.5 rounded-full font-bold uppercase tracking-wider bg-zinc-500/20 text-zinc-300 border border-zinc-500/40">
-                  📁 ARCHIVED
-                </span>
+              {optType && !isFuture && (
+                <span className={`text-[8px] px-1 py-px rounded font-black uppercase ${
+                  optType === 'CE' ? 'bg-emerald-500/20 text-emerald-300' : 'bg-rose-500/20 text-rose-300'
+                }`}>{optType}</span>
               )}
-
-              {/* Expired Contract Badge */}
-              {isExpired && (
-                <span className="text-[9px] px-2 py-0.5 rounded-full font-black uppercase tracking-wider bg-rose-500/25 text-rose-300 border border-rose-500/50">
-                  🚫 EXPIRED CONTRACT ({alert.expiry_date || 'Shelf-Life Passed'})
-                </span>
+              {isFuture && (
+                <span className="text-[8px] px-1 py-px rounded font-black uppercase bg-blue-500/20 text-blue-300">FUT</span>
               )}
-
-              {/* Status / Stage Badge */}
-              {isInvalidated ? (
-                <span className="text-[9px] px-2 py-0.5 rounded-full font-black uppercase tracking-wider bg-rose-500/20 text-rose-300 border border-rose-500/40 animate-pulse">
-                  ❌ INVALIDATED (No Longer Valid)
-                </span>
-              ) : isFinalTarget ? (
-                <span className="text-[9px] px-2 py-0.5 rounded-full font-black uppercase tracking-wider bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 animate-pulse">
-                  🏁 FINAL TARGET REACHED
-                </span>
-              ) : isT1 ? (
-                <span className="text-[9px] px-2 py-0.5 rounded-full font-black uppercase tracking-wider bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 animate-pulse">
-                  🎯 T1 REACHED (Breakeven Locked)
-                </span>
-              ) : isTrail ? (
-                <span className="text-[9px] px-2 py-0.5 rounded-full font-black uppercase tracking-wider bg-blue-500/20 text-blue-300 border border-blue-500/40">
-                  📈 TRAILING UPDATED
-                </span>
-              ) : (
-                <span
-                  className={`text-[9px] px-2 py-0.5 rounded-full font-black uppercase tracking-wider ${
-                    isEarly
-                      ? 'bg-amber-500/15 text-amber-400 border border-amber-500/30'
-                      : 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 animate-pulse'
-                  }`}
-                >
-                  {isEarly ? '⏳ EARLY-WARNING (Coiling)' : '🔥 IGNITED (Active)'}
-                </span>
+              {moneyness && !isFuture && (
+                <span className={`text-[8px] px-1 py-px rounded font-black ${
+                  moneyness === 'ITM' ? 'text-emerald-300 bg-emerald-500/15' : moneyness === 'ATM' ? 'text-gold bg-gold/15' : 'text-zinc-400 bg-zinc-500/15'
+                }`}>{moneyness}</span>
               )}
-
-              <span
-                className={`text-[9px] font-bold px-1.5 py-0.2 rounded ${
-                  isBull ? 'text-emerald-400 bg-emerald-500/10' : 'text-rose-400 bg-rose-500/10'
-                }`}
-              >
-                {alert.direction}
-              </span>
             </div>
-            <p className="text-xs font-semibold mt-1" style={{ color: 'var(--color-text)' }}>
-              {alert.headline}
-            </p>
+            {/* Expiry + direction sub-line */}
+            <div className="flex items-center gap-1 mt-0.5 flex-wrap">
+              <span className={`text-[8px] font-bold ${isBull ? 'text-emerald-400' : 'text-rose-400'}`}>
+                {isBull ? '▲' : '▼'} {alert.direction}
+              </span>
+              {isDerivative && alert.expiry_date && (
+                <span className="text-[8px] text-muted font-mono">
+                  {expiryInfo.isWeekly ? '⚡W' : '📅M'} {alert.expiry_date}{expiryInfo.dte !== null ? ` (${expiryInfo.dte}d)` : ''}
+                </span>
+              )}
+              {isTest && (
+                <span className="text-[7px] px-1 py-px rounded font-black uppercase bg-purple-500/20 text-purple-300">TEST</span>
+              )}
+            </div>
           </div>
         </div>
 
-        {/* Timestamp & Confidence */}
-        <div className="text-right flex-shrink-0 space-y-1">
-          {alert.timestamp || alert.created_at ? (
-            <div
-              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-surface/90 border border-border/60 text-[10px] font-mono text-muted shadow-sm"
-              title={`Alert Timestamp: ${alert.created_at || alert.timestamp}`}
-            >
-              <span className="text-cyan-400">🕒</span>
-              <span className="font-semibold text-text">
-                {(alert.timestamp || alert.created_at).includes(' ')
-                  ? (alert.timestamp || alert.created_at).split(' ').slice(-2).join(' ')
-                  : (alert.timestamp || alert.created_at)}
+        {/* Col B: Status chip + Headline (flex-1, truncated) + key metric chips */}
+        <div className="flex-1 min-w-0 flex items-center gap-2 overflow-hidden">
+          {/* Status pill — compact, single word */}
+          <div className="flex-shrink-0">
+            {isInvalidated ? (
+              <span className="text-[8px] px-1.5 py-0.5 rounded-full font-black uppercase bg-rose-500/20 text-rose-300 border border-rose-500/40 animate-pulse whitespace-nowrap">
+                ❌ Invalid
               </span>
-            </div>
-          ) : null}
-          <div className="text-[10px] font-mono text-muted">
-            Confidence: <span className="font-black text-gold">{alert.confidence || 85}%</span>
+            ) : isFinalTarget ? (
+              <span className="text-[8px] px-1.5 py-0.5 rounded-full font-black uppercase bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 animate-pulse whitespace-nowrap">
+                🏁 Hit
+              </span>
+            ) : isT1 ? (
+              <span className="text-[8px] px-1.5 py-0.5 rounded-full font-black uppercase bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 animate-pulse whitespace-nowrap">
+                🎯 T1
+              </span>
+            ) : isTrail ? (
+              <span className="text-[8px] px-1.5 py-0.5 rounded-full font-black uppercase bg-blue-500/20 text-blue-300 border border-blue-500/40 whitespace-nowrap">
+                📈 Trail
+              </span>
+            ) : isEarly ? (
+              <span className="text-[8px] px-1.5 py-0.5 rounded-full font-black uppercase bg-amber-500/15 text-amber-400 border border-amber-500/30 whitespace-nowrap">
+                ⏳ Early
+              </span>
+            ) : (
+              <span className="text-[8px] px-1.5 py-0.5 rounded-full font-black uppercase bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 animate-pulse whitespace-nowrap">
+                🔥 Live
+              </span>
+            )}
           </div>
+
+          {/* Headline — single line, truncated, most important signal info */}
+          <p className="text-[11px] font-bold text-text truncate min-w-0 flex-1" title={alert.headline}>
+            {alert.headline}
+          </p>
+
+          {/* 3 key metric chips — always visible, no wrap */}
+          <div className="flex items-center gap-1 flex-shrink-0">
+            <span className="text-[9px] font-mono font-bold text-gold whitespace-nowrap">
+              {alert.confidence || 85}% conf
+            </span>
+            {alert.metrics?.vol_oi_ratio !== undefined && (
+              <span className="text-[9px] font-mono font-bold px-1 py-px rounded bg-gold/10 text-gold border border-gold/25 whitespace-nowrap">
+                {alert.metrics.vol_oi_ratio}x OI
+              </span>
+            )}
+            {alert.metrics?.expected_rr && (
+              <span className="text-[9px] font-mono font-bold px-1 py-px rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/25 whitespace-nowrap">
+                {alert.metrics.expected_rr}:1 R
+              </span>
+            )}
+          </div>
+        </div>
+
+        {/* Col C: Live Price pill + Action buttons */}
+        <div className="flex items-center gap-1 flex-shrink-0">
+          {/* Compact live price pill */}
+          <div className="flex flex-col items-end text-right">
+            {isDerivative ? (
+              <>
+                <span className={`text-[11px] font-black font-mono leading-none ${
+                  liveContract?.flash === 'up' ? 'text-emerald-400' : liveContract?.flash === 'down' ? 'text-rose-400' : 'text-gold'
+                }`}>
+                  ₹{Number(optLtpNum || 0).toLocaleString('en-IN', { minimumFractionDigits: 1, maximumFractionDigits: 1 })}
+                  {liveContract?.ltp ? <span className="inline-block w-1 h-1 rounded-full bg-emerald-400 animate-pulse ml-0.5 align-middle" /> : null}
+                </span>
+                {liveContractReturn && (
+                  <span className={`text-[9px] font-bold leading-none ${liveContractReturn.isProfitable ? 'text-emerald-400' : 'text-rose-400'}`}>
+                    {liveContractReturn.isProfitable ? '+' : ''}{liveContractReturn.pct}%
+                  </span>
+                )}
+                <span className={`text-[8px] font-mono text-muted leading-none ${liveSpot?.flash === 'up' ? 'text-emerald-300' : liveSpot?.flash === 'down' ? 'text-rose-300' : ''}`}>
+                  Spot ₹{Number(spotNum || 0).toLocaleString('en-IN', { maximumFractionDigits: 0 })}
+                </span>
+              </>
+            ) : (
+              <>
+                <span className={`text-[11px] font-black font-mono leading-none ${
+                  liveSpot?.flash === 'up' ? 'text-emerald-400' : liveSpot?.flash === 'down' ? 'text-rose-400' : 'text-text'
+                }`}>
+                  ₹{Number(spotNum || 0).toLocaleString('en-IN', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}
+                  {liveSpot?.ltp ? <span className="inline-block w-1 h-1 rounded-full bg-emerald-400 animate-pulse ml-0.5 align-middle" /> : null}
+                </span>
+                {liveCashReturn && (
+                  <span className={`text-[9px] font-bold leading-none ${liveCashReturn.isProfitable ? 'text-emerald-400' : 'text-rose-400'}`}>
+                    {liveCashReturn.isProfitable ? '+' : ''}{liveCashReturn.pct}%
+                  </span>
+                )}
+              </>
+            )}
+          </div>
+
+          {/* Divider */}
+          <span className="text-border/40 text-xs">│</span>
+
+          {/* Action buttons — icon-only at compact size */}
+          <button
+            onClick={() => onAnalyze(alert.symbol)}
+            className="btn btn-xs btn-ghost text-[10px] px-1.5 hover:bg-surface border border-border/40"
+            title={`Deep analyze ${alert.symbol}`}
+          >📊</button>
+
+          {alert.option_type && !isInvalidated && (
+            <button
+              onClick={() => onInspectOptions(alert.symbol)}
+              className="btn btn-xs btn-ghost text-[10px] px-1.5 text-gold hover:bg-gold/10 border border-gold/30"
+              title="Options Desk"
+            >⚡</button>
+          )}
+
+          {onArchiveToggle && (
+            <button
+              onClick={() => onArchiveToggle(alert.alert_id, !alert.is_archived)}
+              disabled={archiving === alert.alert_id}
+              className="btn btn-xs btn-ghost text-[10px] px-1.5 text-muted hover:text-text border border-border/40"
+              title={alert.is_archived ? 'Restore alert' : 'Archive alert'}
+            >
+              {archiving === alert.alert_id ? '…' : alert.is_archived ? '↩️' : '📁'}
+            </button>
+          )}
+
+          {!isInvalidated ? (
+            <button
+              onClick={() => onOpenTicket(alert)}
+              className="btn btn-xs btn-gold text-[10px] font-black px-2"
+              title="Open order ticket"
+            >🎫</button>
+          ) : null}
+
+          <button
+            onClick={() => setShowDetails((v) => !v)}
+            className={`btn btn-xs text-[10px] font-mono px-1.5 border transition-all ${
+              showDetails ? 'bg-gold/20 text-gold border-gold/40' : 'btn-ghost text-muted hover:text-text border-border/40'
+            }`}
+            title="Toggle full plan & metrics"
+          >
+            {showDetails ? '▲' : '▼'}
+          </button>
         </div>
       </div>
 
+      {/* ── Thesis Summary Bar (single slim line below header) ─────────── */}
+      {(alert.trailing_rationale || alert.summary) && (
+        <div className="flex items-start gap-2 px-1 text-[10px] text-zinc-400 leading-relaxed">
+          <span
+            className="text-[8px] px-1 py-px rounded font-black uppercase flex-shrink-0 mt-0.5"
+            style={{ background: style.bg, color: style.color, border: `1px solid ${style.border}` }}
+          >{style.label}</span>
+          <p className={`${showDetails ? '' : 'line-clamp-2'} flex-1 min-w-0`}>
+            {alert.trailing_rationale || alert.summary}
+          </p>
+          {alert.metrics?.oi_change_pct !== undefined && (
+            <span className={`flex-shrink-0 text-[9px] font-mono font-bold px-1 py-px rounded ${
+              alert.metrics.oi_change_pct < 0 ? 'bg-rose-500/15 text-rose-300' : 'bg-emerald-500/15 text-emerald-300'
+            }`}>ΔOI {alert.metrics.oi_change_pct}%</span>
+          )}
+          {alert.trailing_stop && (
+            <span className="flex-shrink-0 text-[9px] font-mono font-bold px-1 py-px rounded bg-cyan-500/15 text-cyan-300">
+              Trail ₹{Number(alert.trailing_stop).toLocaleString('en-IN', { maximumFractionDigits: 0 })}
+            </span>
+          )}
+        </div>
+      )}
+
+      {/* Next Expiry Opportunity & Institutional Justification Callout */}
+      {nextExpiryOpp && (
+        <div className="p-2 rounded-xl bg-gradient-to-r from-amber-500/10 via-surface/90 to-amber-500/5 border border-amber-500/30 text-xs text-amber-200 space-y-0.5 animate-slide-up-fade">
+          <div className="flex items-center justify-between flex-wrap gap-2">
+            <div className="flex items-center gap-1.5 font-bold">
+              <span className="text-xs">💡</span>
+              <span className="text-[10px] font-black uppercase tracking-wider text-amber-300">
+                Next Expiry Opportunity: {nextExpiryOpp.recommendedContract}
+              </span>
+            </div>
+            <span className="text-[9px] font-mono px-1.5 py-0.2 rounded bg-amber-500/20 text-amber-200 border border-amber-500/40 font-bold uppercase">
+              {nextExpiryOpp.tag}
+            </span>
+          </div>
+          <p className="text-[10px] text-amber-100/90 leading-relaxed font-sans">
+            <span className="font-bold text-amber-300">Institutional Justification: </span>
+            {nextExpiryOpp.justification}
+          </p>
+        </div>
+      )}
+
       {/* Invalidation Callout & Forensic Post-Mortem if invalidated */}
       {isInvalidated && (
-        <div className="rounded-xl border border-rose-500/35 bg-rose-500/10 p-3 space-y-2.5 text-xs text-rose-200 animate-slide-up-fade">
-          <div className="flex items-start justify-between gap-2 flex-wrap">
-            <div className="flex items-start gap-2">
+        <div className="rounded-xl border border-rose-500/35 bg-rose-500/10 p-2.5 space-y-2 text-xs text-rose-200 animate-slide-up-fade">
+          <div className="flex items-center justify-between gap-2 flex-wrap">
+            <div className="flex items-center gap-2 min-w-0 flex-1">
               <span className="text-base flex-shrink-0">🛑</span>
-              <div>
-                <span className="font-black text-rose-300 block tracking-wide">
+              <div className="min-w-0 flex-1">
+                <span className="font-black text-rose-300 block tracking-wide text-xs">
                   Trade Thesis Invalidated:
                 </span>
-                <span className="leading-relaxed text-rose-200/90 font-medium">
+                <span className="leading-relaxed text-rose-200/90 font-medium text-[11px] block truncate" title={alert.invalidation_reason || alert.summary}>
                   {alert.invalidation_reason || alert.summary}
                 </span>
-                {alert.invalidated_at && (
-                  <span className="text-[10px] text-muted block mt-1 font-mono">
-                    Invalidated at: {alert.invalidated_at}
-                  </span>
-                )}
               </div>
             </div>
             <div className="flex items-center gap-1.5 flex-shrink-0">
@@ -1195,13 +1252,13 @@ const AutoAlertCard = memo(function AutoAlertCard({
             </div>
           </div>
 
-          {/* Institutional Forensic Post-Mortem & Retrospective Analysis */}
+          {/* Forensic Post-Mortem Drawer */}
           {postMortem && showPostMortem && (
             <div className="pt-2 border-t border-rose-500/25 space-y-2 animate-slide-up-fade">
               <div className="flex items-center justify-between flex-wrap gap-1.5">
                 <div className="flex items-center gap-1.5">
-                  <span className="text-sm">🧠</span>
-                  <span className="font-black uppercase tracking-wider text-[11px] text-rose-300">
+                  <span className="text-xs">🧠</span>
+                  <span className="font-black uppercase tracking-wider text-[10px] text-rose-300">
                     Retrospective Post-Mortem & Attribution
                   </span>
                 </div>
@@ -1216,10 +1273,10 @@ const AutoAlertCard = memo(function AutoAlertCard({
                   <span className="text-[10px] font-black text-amber-300 uppercase tracking-wider flex items-center gap-1">
                     <span>🔍</span> What Was Missed Prior to / During Invalidation:
                   </span>
-                  <ul className="space-y-1 pl-1">
+                  <ul className="space-y-0.5 pl-1">
                     {postMortem.missed_signals.map((sig, i) => (
-                      <li key={i} className="text-[11px] flex items-start gap-1.5 text-zinc-300 leading-relaxed font-sans">
-                        <span className="text-rose-400 mt-0.5 font-bold">•</span>
+                      <li key={i} className="text-[10px] flex items-start gap-1.5 text-zinc-300 leading-relaxed font-sans">
+                        <span className="text-rose-400 font-bold">•</span>
                         <span>{sig}</span>
                       </li>
                     ))}
@@ -1233,10 +1290,10 @@ const AutoAlertCard = memo(function AutoAlertCard({
                   <span className="text-[10px] font-black text-emerald-300 uppercase tracking-wider flex items-center gap-1">
                     <span>🛡️</span> Systemic Guardrails & Self-Corrections Enforced:
                   </span>
-                  <ul className="space-y-1 pl-1">
+                  <ul className="space-y-0.5 pl-1">
                     {postMortem.corrective_actions.map((act, i) => (
-                      <li key={i} className="text-[11px] flex items-start gap-1.5 text-emerald-200/90 leading-relaxed font-mono">
-                        <span className="text-emerald-400 font-bold mt-0.5">✓</span>
+                      <li key={i} className="text-[10px] flex items-start gap-1.5 text-emerald-200/90 leading-relaxed font-mono">
+                        <span className="text-emerald-400 font-bold">✓</span>
                         <span>{act}</span>
                       </li>
                     ))}
@@ -1245,26 +1302,26 @@ const AutoAlertCard = memo(function AutoAlertCard({
               )}
 
               {/* Metrics Snapshot Bar */}
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5 text-[10px] font-mono pt-1">
-                <div className="p-1.5 rounded bg-surface/80 border border-border/40">
-                  <span className="text-muted block text-[9px] uppercase">Realized R</span>
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5 text-[9px] font-mono pt-1">
+                <div className="p-1 rounded bg-surface/80 border border-border/40">
+                  <span className="text-muted block text-[8px] uppercase">Realized R</span>
                   <span className="font-bold text-rose-400">{postMortem.realized_r !== undefined ? `${postMortem.realized_r}R` : '-1.0R'}</span>
                 </div>
-                <div className="p-1.5 rounded bg-surface/80 border border-border/40">
-                  <span className="text-muted block text-[9px] uppercase">Stop Distance</span>
+                <div className="p-1 rounded bg-surface/80 border border-border/40">
+                  <span className="text-muted block text-[8px] uppercase">Stop Distance</span>
                   <span className="font-bold text-amber-300">
                     {postMortem.loss_pts ? `${postMortem.loss_pts} pts ` : ''}
                     ({postMortem.loss_pct || 0}%)
                   </span>
                 </div>
-                <div className="p-1.5 rounded bg-surface/80 border border-border/40">
-                  <span className="text-muted block text-[9px] uppercase">Min 1.2x ATR Floor</span>
+                <div className="p-1 rounded bg-surface/80 border border-border/40">
+                  <span className="text-muted block text-[8px] uppercase">Min 1.2x ATR Floor</span>
                   <span className="font-bold text-cyan-300">
                     {postMortem.metrics_snapshot?.min_noise_sl_pts ? `${postMortem.metrics_snapshot.min_noise_sl_pts} pts` : 'Calculated'}
                   </span>
                 </div>
-                <div className="p-1.5 rounded bg-surface/80 border border-border/40">
-                  <span className="text-muted block text-[9px] uppercase">Intraday VWAP</span>
+                <div className="p-1 rounded bg-surface/80 border border-border/40">
+                  <span className="text-muted block text-[8px] uppercase">Intraday VWAP</span>
                   <span className="font-bold text-zinc-300">
                     {postMortem.metrics_snapshot?.intraday_vwap ? `₹${postMortem.metrics_snapshot.intraday_vwap.toLocaleString('en-IN', { maximumFractionDigits: 1 })}` : 'N/A'}
                   </span>
@@ -1275,7 +1332,7 @@ const AutoAlertCard = memo(function AutoAlertCard({
         </div>
       )}
 
-      {/* ── Institutional 5-Tier Execution Matrix (Entry, SL, T1, T2, T3) ── */}
+      {/* ── Institutional 5-Tier Execution Runway (Entry, SL, T1, T2, T3) ── */}
       <TradeExecutionMatrix
         levels={executionLevels}
         isBull={isBull}
@@ -1286,660 +1343,220 @@ const AutoAlertCard = memo(function AutoAlertCard({
         tradePlan={alert.actionable_plan?.trade_plan || null}
         marketStatus={alert.market_status || alert.actionable_plan?.market_status?.status || 'SESSION_CLOSED'}
         expiryInfo={expiryInfo}
+        densityMode={densityMode}
       />
 
-
-      {/* Target & Trailing Stop Decisive Guidance Callout */}
-      {(alert.trailing_decision || alert.trailing_stop || isTarget || isTrail) && !isInvalidated && (
-        <div
-          className="p-3 rounded-xl border text-xs space-y-2 animate-slide-up-fade"
-          style={{
-            background: isFinalTarget
-              ? (alert.should_trail ? 'rgba(56, 189, 248, 0.08)' : 'rgba(16, 185, 129, 0.08)')
-              : isT1
-              ? 'rgba(16, 185, 129, 0.08)'
-              : 'rgba(56, 189, 248, 0.08)',
-            borderColor: isFinalTarget
-              ? (alert.should_trail ? 'rgba(56, 189, 248, 0.35)' : 'rgba(16, 185, 129, 0.35)')
-              : isT1
-              ? 'rgba(16, 185, 129, 0.35)'
-              : 'rgba(56, 189, 248, 0.35)',
-          }}
-        >
-          <div className="flex items-center justify-between gap-2 flex-wrap">
-            <div className="flex items-center gap-1.5 font-bold">
-              <span className="text-base">{isFinalTarget ? (alert.should_trail ? '🚀' : '🏁') : isT1 ? '🎯' : '📈'}</span>
-              <span style={{ color: 'var(--color-text)' }}>
-                {isFinalTarget ? 'Final Target Milestone' : isT1 ? 'Target 1 Milestone (Partial Lock)' : 'Dynamic Trailing Active'}
-              </span>
-            </div>
-            <span
-              className={`text-[10px] px-2 py-0.5 rounded-full font-black uppercase tracking-wider ${
-                alert.trailing_decision === 'BOOK_50_TRAIL_BREAKEVEN'
-                  ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
-                  : alert.trailing_decision === 'TRAIL_DYNAMIC_ATR'
-                  ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40'
-                  : alert.trailing_decision === 'BOOK_FULL_PROFIT_NO_TRAIL'
-                  ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
-                  : 'bg-indigo-500/20 text-indigo-300 border border-indigo-500/40'
-              }`}
-            >
-              ⚡ {alert.trailing_decision || (alert.should_trail ? 'TRAIL STOP' : 'HOLD STOP')}
-            </span>
-          </div>
-
-          <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 font-mono text-[11px] pt-1 border-t border-border/20">
-            {alert.trailing_stop && (
-              <div>
-                <span className="text-[9px] text-muted uppercase block">Recommended Stop Loss</span>
-                <span className="font-bold text-gold">₹{alert.trailing_stop.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span>
-              </div>
-            )}
-            {alert.locked_profit_pct !== undefined && alert.locked_profit_pct !== null && (
-              <div>
-                <span className="text-[9px] text-muted uppercase block">Locked Profit</span>
-                <span className="font-bold text-emerald-400">
-                  {alert.locked_profit_pts ? `+₹${alert.locked_profit_pts} ` : ''}(+{alert.locked_profit_pct}%)
+      {/* ── Progressive Disclosure Deep Dive Drawer (Plan details, Hedge, Matched chips, Full metrics) ── */}
+      {showDetails && (
+        <div className="space-y-2 pt-2 border-t border-border/30 animate-slide-up-fade">
+          {/* Hedging & Defined-Risk Structure Advice */}
+          {(alert.actionable_plan?.structure_advice || alert.actionable_plan?.trade_plan?.structure_advice) && !isInvalidated && (
+            <div className="p-2.5 rounded-xl border border-indigo-500/30 bg-indigo-500/10 text-xs space-y-1">
+              <div className="flex items-center gap-1.5 font-bold text-indigo-300">
+                <span className="text-sm">🛡️</span>
+                <span className="uppercase tracking-wider text-[10px]">
+                  HEDGE STRUCTURE RECOMMENDED:{' '}
+                  {(
+                    alert.actionable_plan?.options_recommended_structure ||
+                    alert.actionable_plan?.trade_plan?.options_recommended_structure ||
+                    'DEFINED_RISK_SPREAD'
+                  ).replace(/_/g, ' ')}
                 </span>
               </div>
-            )}
-            <div>
-              <span className="text-[9px] text-muted uppercase block">Trailing Action</span>
-              <span className={`font-bold ${alert.should_trail ? 'text-cyan-400' : 'text-amber-400'}`}>
-                {alert.should_trail ? '✅ TRAIL SL RECOMMENDED' : '🛑 DO NOT TRAIL (FULL EXIT)'}
-              </span>
-            </div>
-          </div>
-
-          {alert.trailing_rationale && (
-            <p className="text-[11px] leading-relaxed pt-1" style={{ color: 'var(--color-text-dim)' }}>
-              {alert.trailing_rationale}
-            </p>
-          )}
-        </div>
-      )}
-
-      {/* Institutional Derivative Specification Strip (Strike, Price, Direction, Weekly vs Monthly Expiry) */}
-      {isDerivative && (
-        <div
-          className="p-3 rounded-xl border space-y-2.5 font-mono text-xs animate-slide-up-fade"
-          style={{
-            background: 'rgba(245, 166, 35, 0.04)',
-            borderColor: 'rgba(245, 166, 35, 0.28)',
-          }}
-        >
-          {/* Derivative Header: Contract Type & Direction, Strike, Expiry Type & Date, Moneyness */}
-          <div className="flex items-center justify-between flex-wrap gap-2">
-            <div className="flex items-center gap-1.5 flex-wrap">
-              {isFuture ? (
-                <span
-                  className={`text-[10px] px-2 py-0.5 rounded font-black uppercase tracking-wider ${
-                    isBull
-                      ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
-                      : 'bg-rose-500/20 text-rose-300 border border-rose-500/40'
-                  }`}
-                >
-                  ⚡ {isBull ? 'LONG FUTURE (BUY)' : 'SHORT FUTURE (SELL)'}
-                </span>
-              ) : optType ? (
-                <span
-                  className={`text-[10px] px-2 py-0.5 rounded font-black uppercase tracking-wider ${
-                    optType === 'CE'
-                      ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
-                      : 'bg-rose-500/20 text-rose-300 border border-rose-500/40'
-                  }`}
-                >
-                  ⚡ {optType === 'CE' ? 'CALL OPTION (CE)' : 'PUT OPTION (PE)'}
-                </span>
-              ) : (
-                <span className="text-[10px] px-2 py-0.5 rounded font-black uppercase tracking-wider bg-cyan-500/20 text-cyan-300 border border-cyan-500/40">
-                  ⚡ DERIVATIVE
-                </span>
-              )}
-
-              {strikeNum && !isFuture ? (
-                <span className="text-[11px] font-black text-gold px-2 py-0.5 rounded bg-gold/10 border border-gold/30">
-                  Strike: ₹{Number(strikeNum).toLocaleString('en-IN')}
-                </span>
-              ) : null}
-
-              <span
-                className={`text-[10px] px-2 py-0.5 rounded-full font-black uppercase tracking-wider ${
-                  expiryInfo.isWeekly
-                    ? 'bg-indigo-500/20 text-indigo-300 border border-indigo-500/40'
-                    : 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
-                }`}
-                title={expiryInfo.formatted}
-              >
-                {expiryInfo.isWeekly
-                  ? `⚡ WEEKLY CONTRACT · ${expiryInfo.weekday || 'Thu'}`
-                  : `📅 ${expiryInfo.monthName ? `${expiryInfo.monthName.toUpperCase()} ` : ''}MONTHLY CONTRACT`}
-              </span>
-
-              {alert.expiry_date && (
-                <span
-                  className="text-[10px] text-muted font-bold px-1.5 py-0.5 rounded bg-surface border border-border"
-                  title={expiryInfo.formatted}
-                >
-                  🗓️ {alert.expiry_date} {expiryInfo.dte !== null ? `(${expiryInfo.dte} DTE)` : ''}
-                </span>
-              )}
-
-              {moneyness && !isFuture && (
-                <span
-                  className={`text-[9px] px-1.5 py-0.5 rounded font-black ${
-                    moneyness === 'ITM'
-                      ? 'bg-emerald-500/20 text-emerald-300'
-                      : moneyness === 'ATM'
-                      ? 'bg-gold/20 text-gold'
-                      : 'bg-zinc-500/20 text-zinc-300'
-                  }`}
-                >
-                  [{moneyness}]
-                </span>
-              )}
-            </div>
-
-            {alert.contract_symbol && (
-              <span className="text-[10px] font-mono text-gold/80 font-bold">
-                {alert.contract_symbol}
-              </span>
-            )}
-          </div>
-
-          {/* Next Expiry Opportunity & Institutional Justification Callout */}
-          {nextExpiryOpp && (
-            <div className="p-2.5 rounded-xl bg-gradient-to-r from-amber-500/15 via-surface/90 to-amber-500/10 border border-amber-500/40 text-xs text-amber-200 space-y-1 animate-slide-up-fade">
-              <div className="flex items-center justify-between flex-wrap gap-2">
-                <div className="flex items-center gap-1.5 font-bold">
-                  <span className="text-sm">💡</span>
-                  <span className="text-[11px] font-black uppercase tracking-wider text-amber-300">
-                    Next Expiry Opportunity: {nextExpiryOpp.recommendedContract}
-                  </span>
-                </div>
-                <span className="text-[9px] font-mono px-2 py-0.5 rounded bg-amber-500/25 text-amber-200 border border-amber-500/50 font-bold uppercase">
-                  {nextExpiryOpp.tag}
-                </span>
-              </div>
-              <p className="text-[11px] text-amber-100/90 leading-relaxed font-sans">
-                <span className="font-bold text-amber-300">Institutional Justification: </span>
-                {nextExpiryOpp.justification}
+              <p className="text-zinc-200 text-[11px] leading-relaxed">
+                {alert.actionable_plan?.structure_advice || alert.actionable_plan?.trade_plan?.structure_advice}
               </p>
+              {(alert.actionable_plan?.session_clock_note || alert.actionable_plan?.trade_plan?.session_clock_note) && (
+                <p className="text-amber-300/90 text-[10px] font-mono pt-0.5 border-t border-indigo-500/20">
+                  {alert.actionable_plan?.session_clock_note || alert.actionable_plan?.trade_plan?.session_clock_note}
+                </p>
+              )}
             </div>
           )}
 
-          {/* Pricing Grid: Contract Price vs Spot Reference vs Target vs SL */}
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-1 border-t border-border/20">
-            <div className="p-1.5 rounded-lg bg-surface/70 border border-border/40">
-              <div className="flex items-center justify-between">
-                <span className="text-[9px] text-muted uppercase block font-sans">
-                  {isFuture ? 'Futures Price (LTP)' : 'Option Premium (LTP)'}
-                </span>
-                {liveContract?.ltp ? (
-                  <span className="inline-flex items-center gap-1 text-[8px] font-black text-emerald-400 bg-emerald-500/10 px-1 py-0.2 rounded animate-pulse">
-                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400"></span> LIVE
+          {/* Institutional Trade Plan & Strategy Rationales */}
+          {alert.actionable_plan?.trade_plan && !isInvalidated && (
+            <div className="p-2.5 rounded-xl border border-indigo-500/30 bg-indigo-500/5 space-y-1.5 text-xs">
+              <div className="flex items-center justify-between flex-wrap gap-1.5">
+                <div className="flex items-center gap-1.5">
+                  <span className="text-sm">🔬</span>
+                  <span className="font-black text-indigo-300 text-[10px] uppercase tracking-wider">
+                    Institutional Trade Plan & Strategy Rationales
                   </span>
-                ) : null}
-              </div>
-              <div className="flex items-baseline gap-1.5 flex-wrap">
-                <span
-                  className={`text-sm font-black transition-colors duration-300 ${
-                    liveContract?.flash === 'up'
-                      ? 'text-emerald-400 font-black'
-                      : liveContract?.flash === 'down'
-                      ? 'text-rose-400 font-black'
-                      : 'text-gold'
-                  }`}
-                >
-                  ₹{Number(optLtpNum || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                </span>
-                {liveContract?.change_pct !== undefined && liveContract?.change_pct !== null ? (
-                  <span
-                    className={`text-[10px] font-mono font-bold ${
-                      liveContract.change_pct >= 0 ? 'text-emerald-400' : 'text-rose-400'
-                    }`}
-                  >
-                    {liveContract.change_pct >= 0 ? '+' : ''}
-                    {Number(liveContract.change_pct).toFixed(2)}%
-                  </span>
-                ) : liveContractReturn ? (
-                  <span
-                    className={`text-[10px] font-mono font-bold ${
-                      liveContractReturn.isProfitable ? 'text-emerald-400' : 'text-rose-400'
-                    }`}
-                    title={`Return vs trigger entry price ₹${entryPriceNum}`}
-                  >
-                    {liveContractReturn.isProfitable ? '+' : ''}
-                    {liveContractReturn.pct}%
-                  </span>
-                ) : null}
-              </div>
-            </div>
-
-            {/* Underlying Spot Price with LIVE indicator and tick flash */}
-            <div className="p-1.5 rounded-lg bg-surface/70 border border-border/40">
-              <div className="flex items-center justify-between">
-                <span className="text-[9px] text-muted uppercase block font-sans">Underlying Spot</span>
-                {liveSpot?.ltp ? (
-                  <span className="inline-flex items-center gap-1 text-[8px] font-black text-emerald-400 bg-emerald-500/10 px-1 py-0.2 rounded animate-pulse">
-                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400"></span> LIVE
-                  </span>
-                ) : null}
-              </div>
-              <div className="flex items-baseline gap-1.5 flex-wrap">
-                <span
-                  className={`text-sm font-bold transition-colors duration-300 ${
-                    liveSpot?.flash === 'up'
-                      ? 'text-emerald-400 font-black'
-                      : liveSpot?.flash === 'down'
-                      ? 'text-rose-400 font-black'
-                      : 'text-text'
-                  }`}
-                >
-                  ₹{Number(spotNum || 0).toLocaleString('en-IN', { minimumFractionDigits: 1, maximumFractionDigits: 2 })}
-                </span>
-                {liveSpot?.change_pct !== undefined && liveSpot?.change_pct !== null && (
-                  <span
-                    className={`text-[10px] font-mono font-bold ${
-                      liveSpot.change_pct >= 0 ? 'text-emerald-400' : 'text-rose-400'
-                    }`}
-                  >
-                    {liveSpot.change_pct >= 0 ? '+' : ''}
-                    {Number(liveSpot.change_pct).toFixed(2)}%
+                </div>
+                {alert.actionable_plan.trade_plan.asymmetry_verdict && (
+                  <span className="text-[9px] font-mono font-bold px-1.5 py-0.2 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 uppercase">
+                    {alert.actionable_plan.trade_plan.asymmetry_verdict}
                   </span>
                 )}
               </div>
-            </div>
 
-            <div className="p-1.5 rounded-lg bg-surface/70 border border-border/40">
-              <div className="flex items-center justify-between">
-                <span className="text-[9px] text-muted uppercase block font-sans">Target {isFuture ? 'Level' : 'Premium'}</span>
-                {targetDistanceInfo ? (
-                  <span className="text-[9px] font-mono font-bold text-emerald-400/90">{targetDistanceInfo}</span>
-                ) : null}
-              </div>
-              <span className="text-sm font-bold text-emerald-400">
-                ₹{Number(targetNum || 0).toLocaleString('en-IN', { minimumFractionDigits: 1 })}
-              </span>
-            </div>
-
-            <div className="p-1.5 rounded-lg bg-surface/70 border border-border/40">
-              <div className="flex items-center justify-between">
-                <span className="text-[9px] text-muted uppercase block font-sans">Stop Loss {isFuture ? 'Level' : 'Premium'}</span>
-                {slDistanceInfo ? (
-                  <span className="text-[9px] font-mono font-bold text-rose-400/90">{slDistanceInfo}</span>
-                ) : null}
-              </div>
-              <span className="text-sm font-bold text-rose-400">
-                ₹{Number(stopLossNum || 0).toLocaleString('en-IN', { minimumFractionDigits: 1 })}
-              </span>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Cash Equity Institutional Trade Plan Strip (Spot, Entry, Target, SL) */}
-      {!isDerivative && (
-        <div
-          className="p-3 rounded-xl border space-y-2.5 font-mono text-xs animate-slide-up-fade"
-          style={{
-            background: 'rgba(255, 255, 255, 0.02)',
-            borderColor: 'var(--color-border-subtle)',
-          }}
-        >
-          <div className="flex items-center justify-between flex-wrap gap-2">
-            <div className="flex items-center gap-1.5 flex-wrap">
-              <span
-                className={`text-[10px] px-2 py-0.5 rounded font-black uppercase tracking-wider ${
-                  isBull
-                    ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
-                    : 'bg-rose-500/20 text-rose-300 border border-rose-500/40'
-                }`}
-              >
-                ⚡ {isBull ? 'CASH EQUITY (BUY / LONG)' : 'CASH EQUITY (SELL / SHORT)'}
-              </span>
-              {alert.exchange && (
-                <span className="text-[10px] text-muted font-bold px-1.5 py-0.5 rounded bg-surface border border-border">
-                  {alert.exchange}
-                </span>
-              )}
-            </div>
-          </div>
-
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-1 border-t border-border/20">
-            {/* Live Spot */}
-            <div className="p-1.5 rounded-lg bg-surface/70 border border-border/40">
-              <div className="flex items-center justify-between">
-                <span className="text-[9px] text-muted uppercase block font-sans">Live Spot Price</span>
-                {liveSpot?.ltp ? (
-                  <span className="inline-flex items-center gap-1 text-[8px] font-black text-emerald-400 bg-emerald-500/10 px-1 py-0.2 rounded animate-pulse">
-                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400"></span> LIVE
-                  </span>
-                ) : null}
-              </div>
-              <div className="flex items-baseline gap-1.5 flex-wrap">
-                <span
-                  className={`text-sm font-bold transition-colors duration-300 ${
-                    liveSpot?.flash === 'up'
-                      ? 'text-emerald-400 font-black'
-                      : liveSpot?.flash === 'down'
-                      ? 'text-rose-400 font-black'
-                      : 'text-text'
-                  }`}
-                >
-                  ₹{Number(spotNum || 0).toLocaleString('en-IN', { minimumFractionDigits: 1, maximumFractionDigits: 2 })}
-                </span>
-                {liveSpot?.change_pct !== undefined && liveSpot?.change_pct !== null && (
-                  <span
-                    className={`text-[10px] font-mono font-bold ${
-                      liveSpot.change_pct >= 0 ? 'text-emerald-400' : 'text-rose-400'
-                    }`}
-                  >
-                    {liveSpot.change_pct >= 0 ? '+' : ''}
-                    {Number(liveSpot.change_pct).toFixed(2)}%
-                  </span>
-                )}
-                {liveCashReturn ? (
-                  <span
-                    className={`text-[10px] font-mono font-bold px-1 py-0.2 rounded ${
-                      liveCashReturn.isProfitable ? 'bg-emerald-500/15 text-emerald-300' : 'bg-rose-500/15 text-rose-300'
-                    }`}
-                    title={`Unrealized return vs trigger ₹${alert.trigger_level}`}
-                  >
-                    {liveCashReturn.isProfitable ? '▲ +' : '▼ '}
-                    {liveCashReturn.pct}%
-                  </span>
-                ) : null}
-              </div>
-            </div>
-
-            {/* Entry / Trigger */}
-            <div className="p-1.5 rounded-lg bg-surface/70 border border-border/40">
-              <span className="text-[9px] text-muted uppercase block font-sans">Trigger / Entry</span>
-              <span className="text-sm font-black text-gold">
-                ₹{Number(alert.trigger_level || alert.ltp || spotNum || 0).toLocaleString('en-IN', { minimumFractionDigits: 1, maximumFractionDigits: 2 })}
-              </span>
-            </div>
-
-            {/* Target */}
-            <div className="p-1.5 rounded-lg bg-surface/70 border border-border/40">
-              <div className="flex items-center justify-between">
-                <span className="text-[9px] text-muted uppercase block font-sans">Target Level</span>
-                {targetDistanceInfo ? (
-                  <span className="text-[9px] font-mono font-bold text-emerald-400/90">{targetDistanceInfo}</span>
-                ) : null}
-              </div>
-              <span className="text-sm font-bold text-emerald-400">
-                ₹{Number(targetNum || 0).toLocaleString('en-IN', { minimumFractionDigits: 1 })}
-              </span>
-            </div>
-
-            {/* Stop Loss */}
-            <div className="p-1.5 rounded-lg bg-surface/70 border border-border/40">
-              <div className="flex items-center justify-between">
-                <span className="text-[9px] text-muted uppercase block font-sans">Invalidation SL</span>
-                {slDistanceInfo ? (
-                  <span className="text-[9px] font-mono font-bold text-rose-400/90">{slDistanceInfo}</span>
-                ) : null}
-              </div>
-              <span className="text-sm font-bold text-rose-400">
-                ₹{Number(stopLossNum || 0).toLocaleString('en-IN', { minimumFractionDigits: 1 })}
-              </span>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Filter Conditions & Setup Criteria Matched */}
-      {alert.metrics?.matched_factors && alert.metrics.matched_factors.length > 0 && (
-        <div className="p-3 rounded-xl border border-gold/30 bg-gold/5 space-y-2 text-xs animate-slide-up-fade">
-          <div className="flex items-center justify-between flex-wrap gap-1.5">
-            <span className="font-black text-gold flex items-center gap-1.5 text-[11px] uppercase tracking-wider">
-              <span>⚡</span> Filter Conditions & Setup Criteria Matched ({alert.metrics.matched_factors.length})
-            </span>
-            <div className="flex items-center gap-2 flex-wrap">
-              {alert.metrics.similarity_score ? (
-                <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-gold/20 text-gold border border-gold/40 font-bold">
-                  {alert.metrics.similarity_score}% Archetype Match {alert.metrics.closest_archetype ? `· ${alert.metrics.closest_archetype}` : ''}
-                </span>
-              ) : null}
-              {alert.metrics.expected_rr ? (
-                <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 font-bold">
-                  Expected R:R {alert.metrics.expected_rr}:1
-                </span>
-              ) : null}
-            </div>
-          </div>
-          <div className="flex flex-wrap gap-1.5 pt-1">
-            {alert.metrics.matched_factors.map((factor, idx) => (
-              <span
-                key={idx}
-                className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-surface/90 border border-gold/20 text-[11px] font-sans text-zinc-200"
-              >
-                <span className="text-emerald-400 font-bold text-xs">✓</span>
-                <span>{factor}</span>
-              </span>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* Institutional Trade Plan & Execution Strategy */}
-      {alert.actionable_plan?.trade_plan && !isInvalidated && (
-        <div className="p-3 rounded-xl border border-indigo-500/30 bg-indigo-500/5 space-y-2 text-xs animate-slide-up-fade">
-          <div className="flex items-center justify-between flex-wrap gap-2">
-            <div className="flex items-center gap-1.5 flex-wrap">
-              <span className="text-sm">🔬</span>
-              <span className="font-black text-indigo-300 text-[11px] uppercase tracking-wider">
-                Institutional Trade Plan & Strategy Rationales
-              </span>
-              {alert.actionable_plan.trade_plan.asymmetry_verdict && (
-                <span className="text-[9px] font-mono font-bold px-1.5 py-0.2 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 uppercase">
-                  {alert.actionable_plan.trade_plan.asymmetry_verdict}
-                </span>
-              )}
-            </div>
-            <button
-              onClick={() => setShowPlan((v) => !v)}
-              className="text-[10px] text-indigo-300 hover:text-indigo-100 font-mono font-bold cursor-pointer"
-            >
-              {showPlan ? 'Hide Details ▲' : 'Show Plan Details ▼'}
-            </button>
-          </div>
-
-          {showPlan && (
-            <div className="space-y-2 pt-1 border-t border-indigo-500/20">
-              {alert.actionable_plan.trade_plan.sl_rationale && (
-                <div className="text-[11px] leading-relaxed">
-                  <span className="text-rose-400 font-bold">Stop Rationale: </span>
-                  <span className="text-zinc-300">{alert.actionable_plan.trade_plan.sl_rationale}</span>
-                </div>
-              )}
-              {alert.actionable_plan.trade_plan.t1_rationale && (
-                <div className="text-[11px] leading-relaxed">
-                  <span className="text-emerald-400 font-bold">Target 1 Rationale: </span>
-                  <span className="text-zinc-300">{alert.actionable_plan.trade_plan.t1_rationale}</span>
-                  {alert.actionable_plan.trade_plan.eta_t1_str && (
-                    <span className="ml-1.5 text-cyan-400 font-mono text-[10px]">({alert.actionable_plan.trade_plan.eta_t1_str})</span>
-                  )}
-                </div>
-              )}
-              {alert.actionable_plan.trade_plan.t2_rationale && (
-                <div className="text-[11px] leading-relaxed">
-                  <span className="text-cyan-400 font-bold">Target 2 / Runner: </span>
-                  <span className="text-zinc-300">{alert.actionable_plan.trade_plan.t2_rationale}</span>
-                </div>
-              )}
-              {alert.actionable_plan.trade_plan.structure_advice && (
-                <div className="text-[11px] p-2 rounded-lg bg-surface/80 border border-indigo-500/20 text-indigo-200">
-                  <span className="font-bold">Structure Guidance: </span>
-                  <span>{alert.actionable_plan.trade_plan.structure_advice}</span>
-                </div>
-              )}
-              {alert.actionable_plan.trade_plan.session_clock_note && (
-                <div className="text-[11px] p-2 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-300">
-                  {alert.actionable_plan.trade_plan.session_clock_note}
-                </div>
-              )}
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* Summary */}
-      {!isInvalidated && !alert.trailing_rationale && (
-        <p className="text-xs leading-relaxed" style={{ color: 'var(--color-text-dim)' }}>
-          {alert.summary}
-        </p>
-      )}
-
-      {/* Quantitative Proof Metrics */}
-      {alert.metrics && Object.keys(alert.metrics).length > 0 && (
-        <div
-          className="grid grid-cols-2 sm:grid-cols-4 gap-2 p-2.5 rounded-xl text-[11px] font-mono"
-          style={{ background: 'var(--color-elevated)', border: '1px solid var(--color-border-subtle)' }}
-        >
-          {alert.metrics.vol_oi_ratio !== undefined && (
-            <div>
-              <span className="text-[9px] text-muted uppercase block">Vol / OI Ratio</span>
-              <span className="font-bold text-gold">{alert.metrics.vol_oi_ratio}x</span>
-            </div>
-          )}
-          {alert.metrics.oi_change_pct !== undefined && (
-            <div>
-              <span className="text-[9px] text-muted uppercase block">Δ OI Unwinding</span>
-              <span className={`font-bold ${alert.metrics.oi_change_pct < 0 ? 'text-rose-400' : 'text-emerald-400'}`}>
-                {alert.metrics.oi_change_pct}%
-              </span>
-            </div>
-          )}
-          {alert.metrics.dist_to_pivot_pct !== undefined && (
-            <div>
-              <span className="text-[9px] text-muted uppercase block">Pivot Distance</span>
-              <span className="font-bold text-emerald-400">{alert.metrics.dist_to_pivot_pct}%</span>
-            </div>
-          )}
-          {alert.metrics.dist_to_uc_pct !== undefined && (
-            <div>
-              <span className="text-[9px] text-muted uppercase block">To Circuit Ceiling</span>
-              <span className="font-bold text-rose-400">{alert.metrics.dist_to_uc_pct}%</span>
-            </div>
-          )}
-          {alert.metrics.rvol !== undefined && (
-            <div>
-              <span className="text-[9px] text-muted uppercase block">RVOL 20D</span>
-              <span className="font-bold text-cyan-400">{alert.metrics.rvol}x</span>
-            </div>
-          )}
-          {alert.metrics.spot !== undefined && (
-            <div>
-              <span className="text-[9px] text-muted uppercase block">Spot Price</span>
-              <span className="font-bold">₹{alert.metrics.spot}</span>
-            </div>
-          )}
-          {alert.target_level > 0 && (
-            <div>
-              <span className="text-[9px] text-muted uppercase block">Target</span>
-              <span className="font-bold text-emerald-400">₹{alert.target_level}</span>
-            </div>
-          )}
-          {alert.stop_loss > 0 && (
-            <div>
-              <span className="text-[9px] text-muted uppercase block">Stop Loss</span>
-              <span className="font-bold text-rose-400">₹{alert.stop_loss}</span>
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* Multi-Attempt History Drawer (Groups repeated alerts for the same symbol) */}
-      {historyAttempts && historyAttempts.length > 0 && (
-        <div className="rounded-xl border border-border/60 bg-surface/50 p-2.5 text-xs space-y-2">
-          <div className="flex items-center justify-between">
-            <span className="font-bold text-[11px] text-muted flex items-center gap-1.5">
-              <span>📜</span> Attempt History ({historyAttempts.length + 1} total calls for {alert.symbol}):
-            </span>
-            <button
-              onClick={() => setShowHistory((v) => !v)}
-              className="text-[10px] text-gold hover:underline font-mono font-bold"
-            >
-              {showHistory ? 'Hide Previous Attempts ▲' : `Show ${historyAttempts.length} Older Attempt${historyAttempts.length > 1 ? 's' : ''} ▼`}
-            </button>
-          </div>
-
-          {showHistory && (
-            <div className="space-y-1.5 pt-1 border-t border-border/40 animate-slide-up-fade">
-              {historyAttempts.map((hist, idx) => (
-                <div
-                  key={hist.alert_id || idx}
-                  className="p-2 rounded-lg bg-panel/70 border border-border/40 flex items-center justify-between gap-2 text-[11px]"
-                >
-                  <div className="flex items-center gap-2">
-                    <span className="text-xs">{hist.is_invalidated ? '🛑' : '⚡'}</span>
-                    <div>
-                      <span className="font-semibold text-text">
-                        Attempt #{historyAttempts.length - idx}: {hist.headline || hist.alert_type}
-                      </span>
-                      <p className="text-[10px] text-muted font-mono">
-                        {hist.invalidated_at || hist.created_at || 'Previous'} · Trigger: ₹{hist.trigger_level} · SL: ₹{hist.stop_loss}
-                      </p>
-                    </div>
+              <div className="space-y-1 pt-1 border-t border-indigo-500/20 text-[11px]">
+                {alert.actionable_plan.trade_plan.sl_rationale && (
+                  <div>
+                    <span className="text-rose-400 font-bold">Stop Rationale: </span>
+                    <span className="text-zinc-300">{alert.actionable_plan.trade_plan.sl_rationale}</span>
                   </div>
-                  <span className="text-[9px] font-mono px-2 py-0.5 rounded bg-rose-500/20 text-rose-300 font-bold">
-                    {hist.is_invalidated ? 'INVALIDATED' : hist.stage}
+                )}
+                {alert.actionable_plan.trade_plan.t1_rationale && (
+                  <div>
+                    <span className="text-emerald-400 font-bold">Target 1 Rationale: </span>
+                    <span className="text-zinc-300">{alert.actionable_plan.trade_plan.t1_rationale}</span>
+                    {alert.actionable_plan.trade_plan.eta_t1_str && (
+                      <span className="ml-1.5 text-cyan-400 font-mono text-[10px]">({alert.actionable_plan.trade_plan.eta_t1_str})</span>
+                    )}
+                  </div>
+                )}
+                {alert.actionable_plan.trade_plan.t2_rationale && (
+                  <div>
+                    <span className="text-cyan-400 font-bold">Target 2 / Runner: </span>
+                    <span className="text-zinc-300">{alert.actionable_plan.trade_plan.t2_rationale}</span>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* Filter Conditions & Setup Criteria Matched */}
+          {alert.metrics?.matched_factors && alert.metrics.matched_factors.length > 0 && (
+            <div className="p-2 rounded-xl border border-gold/30 bg-gold/5 space-y-1 text-xs">
+              <div className="flex items-center justify-between flex-wrap gap-1.5">
+                <span className="font-black text-gold flex items-center gap-1.5 text-[10px] uppercase tracking-wider">
+                  <span>⚡</span> Filter Conditions & Setup Criteria Matched ({alert.metrics.matched_factors.length})
+                </span>
+                <div className="flex items-center gap-2 flex-wrap">
+                  {alert.metrics.similarity_score ? (
+                    <span className="text-[9px] font-mono px-1.5 py-0.2 rounded bg-gold/20 text-gold border border-gold/40 font-bold">
+                      {alert.metrics.similarity_score}% Archetype Match {alert.metrics.closest_archetype ? `· ${alert.metrics.closest_archetype}` : ''}
+                    </span>
+                  ) : null}
+                  {alert.metrics.expected_rr ? (
+                    <span className="text-[9px] font-mono px-1.5 py-0.2 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 font-bold">
+                      Expected R:R {alert.metrics.expected_rr}:1
+                    </span>
+                  ) : null}
+                </div>
+              </div>
+              <div className="flex flex-wrap gap-1 pt-0.5">
+                {alert.metrics.matched_factors.map((factor, idx) => (
+                  <span
+                    key={idx}
+                    className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-surface/90 border border-gold/20 text-[10px] font-sans text-zinc-200"
+                  >
+                    <span className="text-emerald-400 font-bold text-xs">✓</span>
+                    <span>{factor}</span>
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Quantitative Proof Metrics Grid */}
+          {alert.metrics && Object.keys(alert.metrics).length > 0 && (
+            <div
+              className="grid grid-cols-2 sm:grid-cols-4 gap-1.5 p-2 rounded-xl text-[10px] font-mono"
+              style={{ background: 'var(--color-elevated)', border: '1px solid var(--color-border-subtle)' }}
+            >
+              {alert.metrics.vol_oi_ratio !== undefined && (
+                <div>
+                  <span className="text-[8px] text-muted uppercase block">Vol / OI Ratio</span>
+                  <span className="font-bold text-gold">{alert.metrics.vol_oi_ratio}x</span>
+                </div>
+              )}
+              {alert.metrics.oi_change_pct !== undefined && (
+                <div>
+                  <span className="text-[8px] text-muted uppercase block">Δ OI Unwinding</span>
+                  <span className={`font-bold ${alert.metrics.oi_change_pct < 0 ? 'text-rose-400' : 'text-emerald-400'}`}>
+                    {alert.metrics.oi_change_pct}%
                   </span>
                 </div>
-              ))}
+              )}
+              {alert.metrics.dist_to_pivot_pct !== undefined && (
+                <div>
+                  <span className="text-[8px] text-muted uppercase block">Pivot Distance</span>
+                  <span className="font-bold text-emerald-400">{alert.metrics.dist_to_pivot_pct}%</span>
+                </div>
+              )}
+              {alert.metrics.dist_to_uc_pct !== undefined && (
+                <div>
+                  <span className="text-[8px] text-muted uppercase block">To Circuit Ceiling</span>
+                  <span className="font-bold text-rose-400">{alert.metrics.dist_to_uc_pct}%</span>
+                </div>
+              )}
+              {alert.metrics.rvol !== undefined && (
+                <div>
+                  <span className="text-[8px] text-muted uppercase block">RVOL 20D</span>
+                  <span className="font-bold text-cyan-400">{alert.metrics.rvol}x</span>
+                </div>
+              )}
+              {alert.metrics.spot !== undefined && (
+                <div>
+                  <span className="text-[8px] text-muted uppercase block">Underlying Spot</span>
+                  <span className="font-bold">₹{alert.metrics.spot}</span>
+                </div>
+              )}
+              {alert.target_level > 0 && (
+                <div>
+                  <span className="text-[8px] text-muted uppercase block">Target</span>
+                  <span className="font-bold text-emerald-400">₹{alert.target_level}</span>
+                </div>
+              )}
+              {alert.stop_loss > 0 && (
+                <div>
+                  <span className="text-[8px] text-muted uppercase block">Stop Loss</span>
+                  <span className="font-bold text-rose-400">₹{alert.stop_loss}</span>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Multi-Attempt History Drawer */}
+          {historyAttempts && historyAttempts.length > 0 && (
+            <div className="rounded-xl border border-border/60 bg-surface/50 p-2 text-xs space-y-1.5">
+              <div className="flex items-center justify-between">
+                <span className="font-bold text-[10px] text-muted flex items-center gap-1.5">
+                  <span>📜</span> Attempt History ({historyAttempts.length + 1} total calls):
+                </span>
+                <button
+                  onClick={() => setShowHistory((v) => !v)}
+                  className="text-[9px] text-gold hover:underline font-mono font-bold"
+                >
+                  {showHistory ? 'Hide Attempts ▲' : `Show ${historyAttempts.length} Older Attempt${historyAttempts.length > 1 ? 's' : ''} ▼`}
+                </button>
+              </div>
+
+              {showHistory && (
+                <div className="space-y-1 pt-1 border-t border-border/40 animate-slide-up-fade">
+                  {historyAttempts.map((hist, idx) => (
+                    <div
+                      key={hist.alert_id || idx}
+                      className="p-1.5 rounded-lg bg-panel/70 border border-border/40 flex items-center justify-between gap-2 text-[10px]"
+                    >
+                      <div className="flex items-center gap-1.5">
+                        <span>{hist.is_invalidated ? '🛑' : '⚡'}</span>
+                        <div>
+                          <span className="font-semibold text-text">
+                            Attempt #{historyAttempts.length - idx}: {hist.headline || hist.alert_type}
+                          </span>
+                          <p className="text-[9px] text-muted font-mono">
+                            {hist.invalidated_at || hist.created_at || 'Previous'} · Trigger: ₹{hist.trigger_level} · SL: ₹{hist.stop_loss}
+                          </p>
+                        </div>
+                      </div>
+                      <span className="text-[8px] font-mono px-1.5 py-0.2 rounded bg-rose-500/20 text-rose-300 font-bold">
+                        {hist.is_invalidated ? 'INVALIDATED' : hist.stage}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           )}
         </div>
       )}
-
-      {/* Action Buttons */}
-      <div className="flex items-center gap-2 pt-2 border-t flex-wrap" style={{ borderColor: 'var(--color-border-subtle)' }}>
-        <button
-          onClick={() => onAnalyze(alert.symbol)}
-          className="btn btn-sm btn-ghost text-xs"
-        >
-          📊 Analyze {alert.symbol}
-        </button>
-
-        {alert.option_type && !isInvalidated && (
-          <button
-            onClick={() => onInspectOptions(alert.symbol)}
-            className="btn btn-sm btn-ghost text-xs text-gold"
-          >
-            ⚡ Options Desk
-          </button>
-        )}
-
-        {onArchiveToggle && (
-          <button
-            onClick={() => onArchiveToggle(alert.alert_id, !alert.is_archived)}
-            disabled={archiving === alert.alert_id}
-            className="btn btn-sm btn-ghost text-xs text-muted hover:text-text"
-            title={alert.is_archived ? 'Restore to Active Trades' : 'Archive trade to avoid clutter'}
-          >
-            {archiving === alert.alert_id ? 'Updating…' : alert.is_archived ? '↩️ Restore' : '📁 Archive'}
-          </button>
-        )}
-
-        {!isInvalidated ? (
-          <button
-            onClick={() => onOpenTicket(alert)}
-            className="btn btn-sm btn-gold text-xs ml-auto"
-          >
-            🎫 Order Ticket
-          </button>
-        ) : (
-          <span className="text-[10px] text-rose-400 font-bold ml-auto">
-            🛑 Orders Disabled (Invalidated)
-          </span>
-        )}
-      </div>
 
       {/* Footer Timestamp Strip */}
-      <div className="flex items-center justify-between text-[10px] font-mono text-muted/80 pt-2 border-t border-border/20 flex-wrap gap-2">
+      <div className="flex items-center justify-between text-[9px] font-mono text-muted/70 pt-1.5 border-t border-border/20 flex-wrap gap-1.5">
         <div className="flex items-center gap-2 flex-wrap">
           <span>🕒 Triggered: {alert.timestamp || alert.created_at || 'Live'}</span>
           {alert.invalidated_at && (
@@ -1949,17 +1566,17 @@ const AutoAlertCard = memo(function AutoAlertCard({
             <span className="text-amber-400/80 font-semibold">📁 Archived: {alert.archived_at}</span>
           )}
         </div>
-        <span className="text-[9px] uppercase tracking-wider text-muted/60">
+        <span className="text-[8px] uppercase tracking-wider text-muted/50">
           ID: {alert.alert_id?.slice(-8) || alert.symbol}
         </span>
       </div>
     </article>
   )
 }, (prev, next) => {
-  // liveSpot and liveContract are now subscribed internally — only alert data and archiving control re-renders
   if (prev.alert !== next.alert) return false
   if (prev.archiving !== next.archiving) return false
   if (prev.historyAttempts?.length !== next.historyAttempts?.length) return false
+  if (prev.densityMode !== next.densityMode) return false
   return true
 })
 

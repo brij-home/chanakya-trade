@@ -30,6 +30,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import threading
 import time
 import uuid
@@ -381,28 +382,65 @@ def evaluate_alert_invalidation(
     if current_ltp is None or current_ltp <= 0:
         return None  # Cannot evaluate without live price quote
 
+    is_option = bool(
+        alert.option_type
+        or (alert.contract_symbol and any(x in alert.contract_symbol.upper() for x in ("CE", "PE")))
+        or (alert.alert_type == "GAMMA_BLAST" and alert.option_type)
+    )
+
     # 1. Stop-Loss Invalidation
     if alert.stop_loss and alert.stop_loss > 0:
-        if alert.direction == "BULLISH" and current_ltp < alert.stop_loss:
-            if alert.option_type:
-                return (
-                    f"Option premium collapsed to ₹{current_ltp:.1f} "
-                    f"(breached stop-loss ₹{alert.stop_loss:.1f}). Call gamma thesis invalidated."
-                )
-            return (
-                f"Price dropped to ₹{current_ltp:,.1f} "
-                f"(breached stop-loss ₹{alert.stop_loss:,.1f}). Bullish thesis invalidated."
-            )
-        elif alert.direction == "BEARISH" and current_ltp > alert.stop_loss:
-            if alert.option_type:
-                return (
-                    f"Option premium collapsed to ₹{current_ltp:.1f} "
-                    f"(breached stop-loss ₹{alert.stop_loss:.1f}). Put gamma thesis invalidated."
-                )
-            return (
-                f"Price surged to ₹{current_ltp:,.1f} "
-                f"(breached stop-loss ₹{alert.stop_loss:,.1f}). Bearish thesis invalidated."
-            )
+        if is_option:
+            # Check if option writing / selling position:
+            act = str((alert.actionable_plan or {}).get("action", "")).upper()
+            is_option_sell = act in ("SELL", "WRITE", "SHORT")
+            if not is_option_sell and alert.stop_loss > 0 and alert.target_level > 0:
+                ref_entry = alert.option_premium or alert.ltp
+                if ref_entry and alert.stop_loss > ref_entry and alert.target_level < ref_entry:
+                    is_option_sell = True
+
+            if is_option_sell:
+                # Option writing / selling (Short CE / Short PE):
+                # Stop-loss is above entry. Breached IF AND ONLY IF premium surges above SL.
+                if current_ltp > alert.stop_loss:
+                    opt_desc = "Call" if (alert.option_type == "CE" or alert.direction == "BULLISH") else "Put"
+                    return (
+                        f"Option premium surged to ₹{current_ltp:.1f} "
+                        f"(breached stop-loss ₹{alert.stop_loss:.1f}). {opt_desc} writing thesis invalidated."
+                    )
+            else:
+                # Option buying (Long CE / Long PE):
+                # The stop-loss on the option premium is breached IF AND ONLY IF premium drops below SL.
+                if current_ltp < alert.stop_loss:
+                    opt_desc = "Call" if (alert.option_type == "CE" or alert.direction == "BULLISH") else "Put"
+                    return (
+                        f"Option premium collapsed to ₹{current_ltp:.1f} "
+                        f"(breached stop-loss ₹{alert.stop_loss:.1f}). {opt_desc} gamma thesis invalidated."
+                    )
+        else:
+            # Non-option instruments (Equities / Futures)
+            if alert.direction == "BEARISH":
+                # For short positions, stop loss is above entry
+                ref_entry = alert.ltp or alert.trigger_level or 0.0
+                if alert.stop_loss > ref_entry:
+                    if current_ltp > alert.stop_loss:
+                        return (
+                            f"Price surged to ₹{current_ltp:,.1f} "
+                            f"(breached stop-loss ₹{alert.stop_loss:,.1f}). Bearish thesis invalidated."
+                        )
+                else:
+                    if current_ltp < alert.stop_loss:
+                        return (
+                            f"Price dropped to ₹{current_ltp:,.1f} "
+                            f"(breached stop-loss ₹{alert.stop_loss:,.1f}). Bearish thesis invalidated."
+                        )
+            else:
+                # Bullish / Neutral long positions
+                if current_ltp < alert.stop_loss:
+                    return (
+                        f"Price dropped to ₹{current_ltp:,.1f} "
+                        f"(breached stop-loss ₹{alert.stop_loss:,.1f}). Bullish thesis invalidated."
+                    )
 
     # 2. Detector-Specific Structural Breakdown
     if alert.alert_type == "SQUEEZE_BREAKOUT":
@@ -431,11 +469,35 @@ def evaluate_alert_invalidation(
                 )
 
     elif alert.alert_type == "GAMMA_BLAST":
-        if current_vwap and current_vwap > 0:
-            if alert.direction == "BULLISH" and current_ltp < (current_vwap * 0.992):
-                return f"Underlying broke below intraday VWAP ₹{current_vwap:,.1f}. Long gamma setup invalidated."
-            elif alert.direction == "BEARISH" and current_ltp > (current_vwap * 1.008):
-                return f"Underlying reclaimed above intraday VWAP ₹{current_vwap:,.1f}. Short gamma setup invalidated."
+        # Ensure underlying spot price is used for VWAP comparison, not option premium
+        underlying_price = None
+        if is_option:
+            underlying_price = alert.underlying_spot or (
+                alert.metrics.get("spot") if alert.metrics else None
+            )
+            if not underlying_price or underlying_price <= 0:
+                try:
+                    from market.quotes import get_ltp
+
+                    underlying_price = get_ltp(
+                        f"NSE:{alert.symbol}" if ":" not in alert.symbol else alert.symbol
+                    )
+                except Exception:
+                    underlying_price = None
+        else:
+            underlying_price = current_ltp
+
+        if underlying_price and underlying_price > 0 and current_vwap and current_vwap > 0:
+            if alert.direction == "BULLISH" and underlying_price < (current_vwap * 0.992):
+                return (
+                    f"Underlying broke below intraday VWAP ₹{current_vwap:,.1f} "
+                    f"(Spot ₹{underlying_price:,.1f}). Long gamma setup invalidated."
+                )
+            elif alert.direction == "BEARISH" and underlying_price > (current_vwap * 1.008):
+                return (
+                    f"Underlying reclaimed above intraday VWAP ₹{current_vwap:,.1f} "
+                    f"(Spot ₹{underlying_price:,.1f}). Short gamma setup invalidated."
+                )
 
     return None
 
@@ -488,11 +550,50 @@ def evaluate_alert_targets_and_trailing(
     if current_ltp is None or current_ltp <= 0:
         return None
 
-    entry = alert.trigger_level if alert.trigger_level > 0 else alert.ltp
-    if entry <= 0:
-        entry = current_ltp
+    is_option = bool(
+        alert.option_type
+        or (alert.contract_symbol and any(x in alert.contract_symbol.upper() for x in ("CE", "PE")))
+        or (alert.alert_type == "GAMMA_BLAST" and alert.option_type)
+    )
 
-    is_bullish = alert.direction.upper() != "BEARISH"
+    if is_option:
+        # Check if option buyer or option writer/seller:
+        act = str((alert.actionable_plan or {}).get("action", "")).upper()
+        is_option_sell = act in ("SELL", "WRITE", "SHORT")
+        if not is_option_sell and alert.stop_loss and alert.target_level:
+            ref_entry = alert.option_premium or alert.ltp
+            if ref_entry and alert.stop_loss > ref_entry and alert.target_level < ref_entry:
+                is_option_sell = True
+
+        # For option buyers, payoff is upward (is_bullish = True, profit on premium expansion).
+        # For option writers/sellers, payoff is downward (is_bullish = False, profit on premium decay).
+        is_bullish = not is_option_sell
+        # For options, entry is the option entry premium, NOT the underlying strike!
+        entry = (
+            alert.option_premium
+            if (alert.option_premium and alert.option_premium > 0)
+            else None
+        )
+        if not entry and alert.actionable_plan:
+            rec_entry = alert.actionable_plan.get("recommended_entry", "")
+            m = re.search(r"[\d.]+", str(rec_entry))
+            if m:
+                try:
+                    entry = float(m.group(0))
+                except ValueError:
+                    pass
+        if not entry:
+            if alert.ltp and alert.ltp > 0 and alert.ltp != alert.trigger_level:
+                entry = alert.ltp
+            elif alert.stop_loss and alert.stop_loss > 0:
+                entry = round(alert.stop_loss * 1.4, 2)
+            else:
+                entry = current_ltp
+    else:
+        entry = alert.trigger_level if alert.trigger_level > 0 else alert.ltp
+        if entry <= 0:
+            entry = current_ltp
+        is_bullish = alert.direction.upper() != "BEARISH"
 
     # Reference stop loss
     if alert.stop_loss and alert.stop_loss > 0:
@@ -630,17 +731,19 @@ def evaluate_alert_targets_and_trailing(
     ):
         if is_bullish:
             higher_trail = round(max(alert.trailing_stop, current_ltp - (initial_risk * 1.8)), 2)
-            # Must ratchet higher by at least 0.75% and at least 2 pts
+            min_dist = 0.5 if is_option else 2.0
+            # Must ratchet higher by at least 0.75% and at least min_dist
             if (
                 higher_trail >= round(alert.trailing_stop * 1.0075, 2)
-                and (higher_trail - alert.trailing_stop) >= 2.0
+                and (higher_trail - alert.trailing_stop) >= min_dist
             ):
                 locked_pts = higher_trail - entry
                 locked_pct = round((locked_pts / entry) * 100, 2)
+                unit_str = "pts" if is_option else "/sh"
                 rationale = (
                     f"Price expanded to ₹{current_ltp:,.2f}. "
                     f"DECISION: RATCHET TRAILING STOP HIGHER from ₹{alert.trailing_stop:,.2f} to ₹{higher_trail:,.2f}. "
-                    f"Guaranteed locked profit increased to +₹{locked_pts:,.2f}/sh (+{locked_pct:.1f}%)."
+                    f"Guaranteed locked profit increased to +₹{locked_pts:,.2f} {unit_str} (+{locked_pct:.1f}%)."
                 )
                 return TargetTrailingEvaluation(
                     new_milestone="TRAILING_UPDATE",
@@ -2830,7 +2933,61 @@ class AutoAlertEngine:
                                 option_premium=d.get("option_premium"),
                             )
                         )
+                # Rehabilitate alerts erroneously invalidated by the inverted Put option stop-loss bug
+                rehab_count = 0
+                for a in alerts:
+                    if a.is_invalidated and a.invalidation_reason:
+                        # Match "Option premium collapsed to ₹X (breached stop-loss ₹Y)"
+                        m = re.search(
+                            r"Option premium collapsed to ₹([\d.]+)\s*\(breached stop-loss ₹([\d.]+)\)",
+                            a.invalidation_reason,
+                        )
+                        if m:
+                            try:
+                                reported_ltp = float(m.group(1))
+                                reported_sl = float(m.group(2))
+                                if reported_ltp >= reported_sl:
+                                    logger.info(
+                                        f"[AutoAlertEngine] Rehabilitating falsely invalidated option alert {a.symbol} ({a.alert_id}): "
+                                        f"reported LTP ₹{reported_ltp} >= SL ₹{reported_sl}"
+                                    )
+                                    a.is_invalidated = False
+                                    a.invalidation_reason = None
+                                    a.invalidated_at = None
+                                    a.is_archived = False
+                                    a.archived_at = None
+                                    a.archive_reason = None
+                                    vol_oi = float(
+                                        a.metrics.get("vol_oi_ratio", 0.0) if a.metrics else 0.0
+                                    )
+                                    a.stage = "IGNITED" if vol_oi >= 2.5 else "EARLY_WARNING"
+                                    tag = (
+                                        "[TEST]"
+                                        if (a.environment == "TEST" or not a.is_live)
+                                        else "[REAL/LIVE]"
+                                    )
+                                    opt_type = a.option_type or (
+                                        "PE" if a.direction == "BEARISH" else "CE"
+                                    )
+                                    strike_int = int(a.strike) if a.strike else ""
+                                    a.headline = (
+                                        f"⚡ {tag} {opt_type} GAMMA BLAST {a.stage.replace('_', ' ')}: "
+                                        f"{a.symbol} {strike_int} {opt_type}"
+                                    ).strip()
+                                    a.summary = f"{opt_type} gamma setup active. Holding above stop-loss ₹{a.stop_loss:.1f}."
+                                    rehab_count += 1
+                                    try:
+                                        from engine.learning_engine import pattern_learning_engine
+
+                                        pattern_learning_engine.clear_symbol_lockout(a.symbol)
+                                    except Exception:
+                                        pass
+                            except Exception:
+                                pass
+
                 self._alerts = alerts
+                if rehab_count > 0:
+                    self._save()
                 # Automatically reap expired derivative alerts
                 self._reap_expired_alerts_unlocked()
                 # Periodically prune archived records older than 3 days

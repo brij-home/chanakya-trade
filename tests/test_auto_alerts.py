@@ -12,6 +12,7 @@ Verifies early-warning detection for:
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 import numpy as np
 import pandas as pd
 import pytest
@@ -322,6 +323,74 @@ def test_auto_alert_invalidation_detection_stop_loss():
     assert reason_bear is not None
     assert "Bearish thesis invalidated" in reason_bear or "breached stop-loss" in reason_bear
 
+    # PUT Option Alert (SBIN / ICICIBANK PE Gamma Blast)
+    # Bought PE option contract: entry premium 16.55, SL premium 10.8, Target 36.4
+    put_opt_alert = AutoAlert(
+        alert_id="gamma-pe-sbin",
+        alert_type="GAMMA_BLAST",
+        stage="IGNITED",
+        symbol="SBIN",
+        exchange="NFO",
+        direction="BEARISH",
+        headline="⚡ PUT GAMMA BLAST: SBIN 1010 PE",
+        summary="Put capitulation",
+        ltp=16.55,
+        trigger_level=1010.0,
+        target_level=36.4,
+        stop_loss=10.8,
+        strike=1010.0,
+        option_type="PE",
+        contract_symbol="SBIN1010PE",
+        underlying_spot=1007.3,
+        option_premium=16.55,
+    )
+
+    # Option premium at 20.6 (profitable, above SL 10.8) -> MUST NOT be invalidated!
+    assert evaluate_alert_invalidation(put_opt_alert, current_ltp=20.6) is None
+    assert evaluate_alert_invalidation(put_opt_alert, current_ltp=16.55) is None
+    assert evaluate_alert_invalidation(put_opt_alert, current_ltp=11.0) is None
+
+    # Option premium drops to 9.5 (breached SL 10.8) -> invalidated!
+    reason_opt = evaluate_alert_invalidation(put_opt_alert, current_ltp=9.5)
+    assert reason_opt is not None
+    assert "Option premium collapsed to ₹9.5" in reason_opt
+    assert "breached stop-loss ₹10.8" in reason_opt
+    assert "Put gamma thesis invalidated" in reason_opt
+
+    # OPTION SELLING / WRITING ALERT (Short CE / Short PE / Credit Writing)
+    # Seller writes option at premium 50.0, target 10.0, stop loss 75.0
+    sell_opt_alert = AutoAlert(
+        alert_id="opt-sell-sbin",
+        alert_type="OPTION_WRITE",
+        stage="IGNITED",
+        symbol="SBIN",
+        exchange="NFO",
+        direction="BEARISH",
+        headline="⚡ CALL OPTION WRITING: SBIN 1020 CE",
+        summary="Call writing credit",
+        ltp=50.0,
+        trigger_level=1020.0,
+        target_level=10.0,
+        stop_loss=75.0,
+        strike=1020.0,
+        option_type="CE",
+        contract_symbol="SBIN1020CE",
+        actionable_plan={"action": "SELL", "recommended_entry": "50.0"},
+        option_premium=50.0,
+    )
+
+    # Option premium drops to 30.0 (profitable decay) -> MUST NOT be invalidated!
+    assert evaluate_alert_invalidation(sell_opt_alert, current_ltp=30.0) is None
+    assert evaluate_alert_invalidation(sell_opt_alert, current_ltp=50.0) is None
+    assert evaluate_alert_invalidation(sell_opt_alert, current_ltp=70.0) is None
+
+    # Option premium surges to 80.0 (breached SL 75.0) -> invalidated!
+    reason_sell = evaluate_alert_invalidation(sell_opt_alert, current_ltp=80.0)
+    assert reason_sell is not None
+    assert "Option premium surged to ₹80.0" in reason_sell
+    assert "breached stop-loss ₹75.0" in reason_sell
+    assert "Call writing thesis invalidated" in reason_sell
+
 
 def test_auto_alert_invalidation_detection_structural():
     """Verify structural failure (squeeze drift > 3.5% or circuit retreat > 3%)."""
@@ -570,6 +639,85 @@ def test_bearish_target_and_trailing():
     assert res.trailing_decision == "BOOK_50_TRAIL_BREAKEVEN"
     assert res.recommended_stop == round(51000.0 * 0.998, 2)  # 50898.0
     assert "BOOK 50% PARTIAL PROFIT NOW" in res.trailing_rationale
+
+
+def test_put_option_target_and_trailing():
+    """Verify that Put option buyers have targets above entry and trailing stop ratchets higher."""
+    alert = AutoAlert(
+        alert_id="opt-pe-trail-1",
+        alert_type="GAMMA_BLAST",
+        stage="IGNITED",
+        symbol="SBIN",
+        exchange="NFO",
+        direction="BEARISH",
+        headline="Put Gamma Surge",
+        summary="Put buying",
+        ltp=16.55,
+        trigger_level=1010.0,  # strike
+        target_level=36.4,     # target premium
+        stop_loss=10.8,        # SL premium
+        strike=1010.0,
+        option_type="PE",
+        contract_symbol="SBIN1010PE",
+        option_premium=16.55,
+    )
+
+    # Option premium at 20.6 (positive return, but below T1) -> holds stop
+    res_hold = evaluate_alert_targets_and_trailing(alert, current_ltp=20.6)
+    assert res_hold is None or res_hold.new_milestone is None
+
+    # Option premium expands to 27.0 -> reaches T1
+    res_t1 = evaluate_alert_targets_and_trailing(alert, current_ltp=27.0)
+    assert res_t1 is not None
+    assert res_t1.new_milestone == "T1_ACHIEVED"
+    assert res_t1.should_trail is True
+    assert res_t1.trailing_decision == "BOOK_50_TRAIL_BREAKEVEN"
+    assert res_t1.recommended_stop == round(16.55 * 1.002, 2)  # breakeven above entry
+    assert res_t1.pnl_pct > 0
+
+    # Final target reached at 37.0
+    res_final = evaluate_alert_targets_and_trailing(alert, current_ltp=37.0)
+    assert res_final is not None
+    assert res_final.new_milestone == "TARGET_ACHIEVED"
+    assert res_final.pnl_pct > 100
+
+
+def test_option_selling_target_and_trailing():
+    """Verify that Option sellers (writers) profit when premium decays and trail stop downwards."""
+    alert = AutoAlert(
+        alert_id="opt-sell-trail-1",
+        alert_type="OPTION_WRITE",
+        stage="IGNITED",
+        symbol="NIFTY",
+        exchange="NFO",
+        direction="BEARISH",
+        headline="NIFTY Call Writing",
+        summary="Short CE credit",
+        ltp=100.0,
+        trigger_level=25000.0,
+        target_level=20.0,   # Target premium (decayed)
+        stop_loss=150.0,     # SL premium (surged)
+        strike=25000.0,
+        option_type="CE",
+        contract_symbol="NIFTY25000CE",
+        option_premium=100.0,
+        actionable_plan={"action": "SELL"},
+    )
+
+    # Option premium decays to 55.0 (T1 reached)
+    res_t1 = evaluate_alert_targets_and_trailing(alert, current_ltp=55.0)
+    assert res_t1 is not None
+    assert res_t1.new_milestone == "T1_ACHIEVED"
+    assert res_t1.should_trail is True
+    assert res_t1.trailing_decision == "BOOK_50_TRAIL_BREAKEVEN"
+    assert res_t1.recommended_stop == round(100.0 * 0.998, 2)  # Breakeven below entry
+    assert res_t1.pnl_pct > 0
+
+    # Final target reached at 18.0 (below target 20.0)
+    res_final = evaluate_alert_targets_and_trailing(alert, current_ltp=18.0)
+    assert res_final is not None
+    assert res_final.new_milestone == "TARGET_ACHIEVED"
+    assert res_final.pnl_pct > 80
 
 
 def test_target_milestone_latching_and_ratchet_dedup(monkeypatch):
@@ -1292,3 +1440,49 @@ def test_auto_alert_expiration_and_reaping():
     active_alerts = engine.get_alerts(view_mode="ACTIVE")
     assert len(active_alerts) == 1
     assert active_alerts[0].alert_id == "t-active-sbin"
+
+
+def test_auto_alert_rehabilitates_falsely_invalidated_options(tmp_path, monkeypatch):
+    """Verify that _load automatically restores alerts falsely invalidated by the inverted Put SL bug."""
+    data_file = tmp_path / "auto_alerts.json"
+    monkeypatch.setattr("engine.auto_alert_engine.get_auto_alerts_file", lambda: data_file)
+
+    corrupted_data = [
+        {
+            "alert_id": "aa-gamma-pe-SBIN-1010-test",
+            "alert_type": "GAMMA_BLAST",
+            "stage": "INVALIDATED",
+            "symbol": "SBIN",
+            "exchange": "NFO",
+            "direction": "BEARISH",
+            "headline": "⚠️ [REAL/LIVE] VIEW INVALIDATED: SBIN GAMMA BLAST",
+            "summary": "Option premium collapsed to ₹20.6 (breached stop-loss ₹10.8). Put gamma thesis invalidated.",
+            "ltp": 16.55,
+            "trigger_level": 1010.0,
+            "target_level": 36.4,
+            "stop_loss": 10.8,
+            "strike": 1010.0,
+            "option_type": "PE",
+            "contract_symbol": "SBIN1010PE",
+            "is_invalidated": True,
+            "invalidation_reason": "Option premium collapsed to ₹20.6 (breached stop-loss ₹10.8). Put gamma thesis invalidated.",
+            "is_archived": True,
+            "is_live": True,
+            "environment": "LIVE",
+            "metrics": {"vol_oi_ratio": 2.5},
+        }
+    ]
+    data_file.write_text(json.dumps(corrupted_data))
+
+    engine = AutoAlertEngine(max_buffer=50)
+    engine._load()
+
+    alerts = engine.get_alerts(view_mode="ALL")
+    assert len(alerts) == 1
+    rehab = alerts[0]
+    assert rehab.is_invalidated is False
+    assert rehab.invalidation_reason is None
+    assert rehab.is_archived is False
+    assert rehab.stage == "IGNITED"
+    assert "PE GAMMA BLAST IGNITED: SBIN 1010 PE" in rehab.headline
+

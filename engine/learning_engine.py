@@ -34,6 +34,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -534,13 +535,64 @@ class PatternLearningEngine:
             else alert.get("alert_type", "SETUP")
         )
 
-        entry_price = float(
-            getattr(alert, "trigger_level", 0.0) or getattr(alert, "ltp", 0.0) or exit_price
+        is_opt = bool(
+            getattr(alert, "option_type", None)
+            or (
+                getattr(alert, "contract_symbol", None)
+                and any(x in str(getattr(alert, "contract_symbol")).upper() for x in ("CE", "PE"))
+            )
+            or (
+                getattr(alert, "alert_type", "") == "GAMMA_BLAST"
+                and getattr(alert, "option_type", None)
+            )
         )
+
+        if is_opt:
+            entry_price = float(
+                getattr(alert, "option_premium", 0.0)
+                or getattr(alert, "ltp", 0.0)
+                or exit_price
+            )
+            act_plan = getattr(alert, "actionable_plan", {}) or (
+                alert.get("actionable_plan", {}) if isinstance(alert, dict) else {}
+            )
+            if entry_price <= 0 and act_plan:
+                rec_str = str(act_plan.get("recommended_entry", ""))
+                m = re.search(r"[\d.]+", rec_str)
+                if m:
+                    try:
+                        entry_price = float(m.group(0))
+                    except ValueError:
+                        pass
+        else:
+            entry_price = float(
+                getattr(alert, "trigger_level", 0.0) or getattr(alert, "ltp", 0.0) or exit_price
+            )
+
         stop_loss = float(getattr(alert, "stop_loss", 0.0) or 0.0)
         exit_price = float(exit_price or entry_price)
 
-        loss_pts = round(abs(entry_price - exit_price), 2)
+        is_opt_sell = False
+        if is_opt:
+            act_plan = getattr(alert, "actionable_plan", {}) or (
+                alert.get("actionable_plan", {}) if isinstance(alert, dict) else {}
+            )
+            act = str(act_plan.get("action", "")).upper() if act_plan else ""
+            is_opt_sell = act in ("SELL", "WRITE", "SHORT")
+            if not is_opt_sell and stop_loss > 0 and getattr(alert, "target_level", 0):
+                t_lvl = float(getattr(alert, "target_level", 0) or 0)
+                if entry_price > 0 and stop_loss > entry_price and t_lvl < entry_price:
+                    is_opt_sell = True
+
+            if is_opt_sell:
+                loss_pts = max(0.0, round(exit_price - entry_price, 2))
+            else:
+                loss_pts = max(0.0, round(entry_price - exit_price, 2))
+        elif direction == "BEARISH":
+            loss_pts = max(0.0, round(exit_price - entry_price, 2))
+        else:
+            loss_pts = max(0.0, round(entry_price - exit_price, 2))
+
         loss_pct = round((loss_pts / max(0.1, entry_price)) * 100.0, 2)
         initial_risk_pts = abs(entry_price - stop_loss) if stop_loss > 0 else (entry_price * 0.015)
         realized_r = round(-1.0 * (loss_pts / max(0.1, initial_risk_pts)), 2)
@@ -666,14 +718,17 @@ class PatternLearningEngine:
         )
 
         # Determine structural reclaim level (price needed to disprove invalidation thesis)
-        alert_trig = float(
-            getattr(alert, "trigger_level", 0.0) or getattr(alert, "ltp", 0.0) or entry_price
-        )
-        reclaim_level = (
-            max(entry_price, alert_trig, exit_price)
-            if direction == "BULLISH"
-            else (min(entry_price, alert_trig, exit_price) if entry_price > 0 else exit_price)
-        )
+        if is_opt:
+            reclaim_level = min(entry_price, exit_price) if is_opt_sell else max(entry_price, exit_price)
+        else:
+            alert_trig = float(
+                getattr(alert, "trigger_level", 0.0) or getattr(alert, "ltp", 0.0) or entry_price
+            )
+            reclaim_level = (
+                max(entry_price, alert_trig, exit_price)
+                if direction == "BULLISH"
+                else (min(entry_price, alert_trig, exit_price) if entry_price > 0 else exit_price)
+            )
         reclaim_str = f" above ₹{reclaim_level:,.1f}" if reclaim_level > 0 else ""
 
         corrective_actions = [
