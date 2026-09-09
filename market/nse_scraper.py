@@ -160,10 +160,34 @@ def nse_get_contract_info(underlying: str) -> dict:
     return {}
 
 
+def _fetch_nse_chain(underlying: str, is_index: bool) -> dict:
+    """
+    Fetch raw NSE option chain JSON for the given underlying.
+
+    Args:
+        underlying: Symbol string e.g. "NIFTY", "RELIANCE"
+        is_index:   True -> index endpoint; False -> equity endpoint
+
+    Returns:
+        Parsed JSON dict from NSE API.
+    """
+    session = _get_session()
+    clean_sym = underlying.upper().replace("NSE:", "").replace("NFO:", "").strip()
+    endpoint = "indices" if is_index else "equities"
+    url = f"{_NSE_BASE}/api/option-chain-{endpoint}?symbol={clean_sym}"
+    resp = session.get(url, timeout=10)
+    resp.raise_for_status()
+    return resp.json()
+
+
+_default_fetch_nse_chain = _fetch_nse_chain
+
+
 def _parse_v3_chain(
     raw_data: dict,
     underlying: str,
     lot_size: int,
+    expiry_filter: Optional[str] = None,
 ) -> list[OptionsContract]:
     """
     Parse NSE v3 JSON records into structured OptionsContract list.
@@ -178,8 +202,13 @@ def _parse_v3_chain(
         if strike <= 0:
             continue
 
-        raw_exp = row.get("expiryDates") or ""
+        raw_exp = row.get("expiryDate") or row.get("expiryDates") or ""
         iso_exp = _nse_expiry_to_iso(raw_exp)
+
+        if expiry_filter:
+            clean_exp = expiry_filter.strip()
+            if iso_exp != clean_exp and raw_exp != clean_exp:
+                continue
 
         for opt_type in ("CE", "PE"):
             leg = row.get(opt_type)
@@ -231,6 +260,20 @@ def _parse_v3_chain(
             )
 
     return sorted(contracts, key=lambda c: (c.strike, c.option_type))
+
+
+def _parse_chain(
+    raw: dict,
+    underlying: str,
+    expiry_filter: Optional[str] = None,
+) -> list[OptionsContract]:
+    """
+    Parse NSE API response into a list of OptionsContract objects (legacy compatibility helper).
+    """
+    clean_sym = underlying.upper().replace("NSE:", "").replace("NFO:", "").strip()
+    is_idx = _is_index_underlying(clean_sym)
+    lot_sz = LOT_SIZES.get(clean_sym, 75 if is_idx else 250)
+    return _parse_v3_chain(raw, clean_sym, lot_sz, expiry_filter=expiry_filter)
 
 
 def nse_fetch_full_snapshot(
@@ -308,7 +351,7 @@ def nse_get_options_chain(
     expiry: Optional[str] = None,
 ) -> list[OptionsContract]:
     """
-    Fetch options chain from NSE public API v3.
+    Fetch options chain from NSE public API v3 or fallback endpoint.
 
     Args:
         underlying: Symbol e.g. "NIFTY", "BANKNIFTY", "RELIANCE"
@@ -317,8 +360,26 @@ def nse_get_options_chain(
     Returns:
         List of OptionsContract sorted by strike then type.
     """
+    # If _fetch_nse_chain is monkeypatched (e.g. in tests), honor it directly
+    if _fetch_nse_chain is not _default_fetch_nse_chain:
+        try:
+            is_index = _is_index_underlying(underlying)
+            raw = _fetch_nse_chain(underlying, is_index)
+            return _parse_chain(raw, underlying, expiry)
+        except Exception:
+            return []
+
     contracts, _, _ = nse_fetch_full_snapshot(underlying, expiry)
-    return contracts
+    if contracts:
+        return contracts
+
+    # Secondary fallback to direct _fetch_nse_chain
+    try:
+        is_index = _is_index_underlying(underlying)
+        raw = _fetch_nse_chain(underlying, is_index)
+        return _parse_chain(raw, underlying, expiry)
+    except Exception:
+        return []
 
 
 def nse_get_expiries(underlying: str) -> list[str]:

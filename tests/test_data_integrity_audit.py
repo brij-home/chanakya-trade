@@ -167,6 +167,14 @@ def test_static_code_audit_no_mojibake():
                 # Skip fix scripts or text sanitizers containing mapping patterns
                 if "fix_mojibake" in file_path.name or "cleanText" in file_path.name:
                     continue
+                # Skip compiled / minified frontend bundle assets
+                posix_path = file_path.as_posix()
+                if (
+                    "web/static/assets" in posix_path
+                    or "/dist/" in posix_path
+                    or "/build/" in posix_path
+                ):
+                    continue
                 try:
                     text = file_path.read_text(encoding="utf-8", errors="ignore")
                 except Exception:

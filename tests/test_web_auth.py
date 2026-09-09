@@ -189,6 +189,6 @@ class TestAuthMiddleware:
 
 class TestStaticServing:
     def test_root_serves_something(self, client):
-        r = client.get("/")
+        r = client.get("/", follow_redirects=False)
         # Either serves auth.html or index.html — should not 404
         assert r.status_code in (200, 307)

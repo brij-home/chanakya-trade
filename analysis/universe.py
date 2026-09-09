@@ -450,10 +450,15 @@ SECTOR_TAXONOMY: dict[str, dict[str, Any]] = {
 }
 
 
+_UNIVERSES_DATA_DIR = Path(__file__).resolve().parent.parent / "data" / "universes"
+
+
 def _load_bundled_universe_symbols(filename: str, fallback_symbols: list[str]) -> list[str]:
     """Loads official index constituent symbols from bundled data/universes JSON, falling back to static list."""
     try:
-        p = Path("data/universes") / filename
+        p = _UNIVERSES_DATA_DIR / filename
+        if not p.exists():
+            p = Path("data/universes") / filename
         if p.exists():
             data = json.loads(p.read_text(encoding="utf-8"))
             if isinstance(data, list) and len(data) > 0:
@@ -473,7 +478,9 @@ def _load_bundled_company_names() -> dict[str, str]:
     """Loads comprehensive company names from bundled JSON files."""
     names = {}
     for fn in ("nse_all_eq.json", "nifty_total_market.json", "nifty500.json"):
-        p = Path("data/universes") / fn
+        p = _UNIVERSES_DATA_DIR / fn
+        if not p.exists():
+            p = Path("data/universes") / fn
         if p.exists():
             try:
                 data = json.loads(p.read_text(encoding="utf-8"))
@@ -1552,7 +1559,9 @@ _GICS_SECTOR_TO_SECTOR: dict[str, tuple[str, str]] = {
 def _load_bundled_index_sectors() -> None:
     """Ingests official constituent industry classifications from bundled Nifty datasets."""
     for fn in ("nifty_total_market.json", "nifty500.json"):
-        p = Path("data/universes") / fn
+        p = _UNIVERSES_DATA_DIR / fn
+        if not p.exists():
+            p = Path("data/universes") / fn
         if p.exists():
             try:
                 data = json.loads(p.read_text(encoding="utf-8"))
@@ -1713,6 +1722,7 @@ COMPANY_NAMES: dict[str, str] = {
     "COCHINSHIP": "Cochin Shipyard Ltd",
     "GRSE": "Garden Reach Shipbuilders Ltd",
     "BDL": "Bharat Dynamics Ltd",
+    "ADANIPOWER": "Adani Power Ltd",
 }
 
 # Update company names from bundled official index constituent datasets
@@ -1724,8 +1734,52 @@ _SMALL_CAP_SET = set(THEMATIC_PRESETS.get("smallcap250", {}).get("symbols", []))
 _MICRO_CAP_SET = set(THEMATIC_PRESETS.get("microcap250", {}).get("symbols", []))
 
 # SEBI Categorization Standard: Top 100 Equities (Nifty 50 + Nifty Next 50) = Large Cap
-_LARGE_CAP_SET = set(THEMATIC_PRESETS.get("nifty50", {}).get("symbols", [])) | set(
-    s for s in _n500_symbols if s not in _MID_CAP_SET and s not in _SMALL_CAP_SET
+_NIFTY_NEXT_50_CORE = {
+    "ADANIPOWER",
+    "ABB",
+    "DMART",
+    "HAL",
+    "BEL",
+    "ZOMATO",
+    "TRENT",
+    "AMBUJACEM",
+    "BANKBARODA",
+    "BOSCHLTD",
+    "CANBK",
+    "CHOLAFIN",
+    "COLPAL",
+    "DLF",
+    "GAIL",
+    "GODREJCP",
+    "HAVELLS",
+    "ICICIGI",
+    "ICICIPRULI",
+    "INDIGO",
+    "IOC",
+    "IRCTC",
+    "JINDALSTEL",
+    "JIOFIN",
+    "LTIM",
+    "MOTHERSON",
+    "NAUKRI",
+    "PIDILITIND",
+    "PFC",
+    "PNB",
+    "RECLTD",
+    "SHRIRAMFIN",
+    "SIEMENS",
+    "TORNTPHARM",
+    "TVSHLTD",
+    "UNITDSPR",
+    "VBL",
+    "VEDL",
+    "ZYDUSLIFE",
+}
+
+_LARGE_CAP_SET = (
+    set(THEMATIC_PRESETS.get("nifty50", {}).get("symbols", []))
+    | set(s for s in _n500_symbols if s not in _MID_CAP_SET and s not in _SMALL_CAP_SET)
+    | _NIFTY_NEXT_50_CORE
 )
 
 

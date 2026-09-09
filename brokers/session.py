@@ -175,11 +175,10 @@ def unregister_broker(key: str) -> None:
 def _try_auto_restore_sessions() -> None:
     """Attempt to restore persisted broker sessions (mStock, Shoonya, etc.) when _brokers is empty."""
     global _brokers, _primary_key, _data_key, _exec_key
-    if _brokers:
+    if _brokers or os.environ.get("CHANAKYA_TESTING") == "1":
         return
     # 1. m.Stock
     try:
-        import os
         from brokers.mstock import MStockAPI, TOKEN_FILE as _MT
 
         if os.path.exists(_MT):
@@ -192,7 +191,6 @@ def _try_auto_restore_sessions() -> None:
 
     # 2. Shoonya
     try:
-        import os
         from brokers.shoonya import ShoonyaAPI, TOKEN_FILE as _ST
 
         if os.path.exists(_ST):

@@ -57,7 +57,8 @@ ENV/
 *.csv
 *.parquet
 .cache/
-/data/
+/data/*
+!/data/universes/
 
 # ── Logs ─────────────────────────────────────────────────────
 *.log
