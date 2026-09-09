@@ -361,7 +361,9 @@ def get_cached_ohlcv_batch(symbols: list[str], days: int = 300) -> dict[str, pd.
                 df.index = df.index.tz_localize(None)
                 newly_loaded[sym] = df
                 orig_key = clean_map.get(sym, sym)
-                results[orig_key] = df.iloc[-days:].copy() if (days and len(df) > days) else df.copy()
+                results[orig_key] = (
+                    df.iloc[-days:].copy() if (days and len(df) > days) else df.copy()
+                )
 
     # Populate L1 cache with newly loaded
     if newly_loaded:
@@ -405,7 +407,6 @@ def save_ohlcv_batch(data: dict[str, pd.DataFrame]) -> int:
         return 0
 
     now_iso = datetime.now(timezone.utc).isoformat()
-    now_ts = time.time()
     ohlcv_rows = []
     affected_symbols = set()
 
@@ -415,7 +416,9 @@ def save_ohlcv_batch(data: dict[str, pd.DataFrame]) -> int:
 
         clean_sym = symbol.upper().replace(".NS", "").replace("NSE:", "").strip()
         # Guard: In production store, never save test symbols
-        if _get_db_path() == DEFAULT_EOD_DB_PATH and (clean_sym.startswith("TEST") or clean_sym.startswith("DUMMY")):
+        if _get_db_path() == DEFAULT_EOD_DB_PATH and (
+            clean_sym.startswith("TEST") or clean_sym.startswith("DUMMY")
+        ):
             continue
         affected_symbols.add(clean_sym)
         df_sorted = df.sort_index()
@@ -491,9 +494,7 @@ def save_ohlcv_batch(data: dict[str, pd.DataFrame]) -> int:
                     (float(r["close"]) * float(r["volume"])) / 1e7
                     for r in recent_rows[-lookback_20d:]
                 ]
-                median_turnover = (
-                    float(np.median(turnover_vals)) if len(turnover_vals) > 0 else 0.0
-                )
+                median_turnover = float(np.median(turnover_vals)) if len(turnover_vals) > 0 else 0.0
 
                 meta_rows.append(
                     (
@@ -638,9 +639,7 @@ def get_cached_fundamentals_batch(
 
     conn = _get_connection()
     chunk_size = 400
-    cutoff_iso = (
-        datetime.now(timezone.utc) - timedelta(days=max_age_days)
-    ).isoformat()
+    cutoff_iso = (datetime.now(timezone.utc) - timedelta(days=max_age_days)).isoformat()
 
     for i in range(0, len(missing_syms), chunk_size):
         chunk = missing_syms[i : i + chunk_size]
@@ -765,9 +764,7 @@ def get_cached_forensics_batch(
 
     conn = _get_connection()
     chunk_size = 400
-    cutoff_iso = (
-        datetime.now(timezone.utc) - timedelta(days=max_age_days)
-    ).isoformat()
+    cutoff_iso = (datetime.now(timezone.utc) - timedelta(days=max_age_days)).isoformat()
 
     for i in range(0, len(missing_syms), chunk_size):
         chunk = missing_syms[i : i + chunk_size]
@@ -1016,9 +1013,7 @@ def get_store_statistics() -> dict[str, Any]:
     last_update = last_update_row[0] if last_update_row and last_update_row[0] else None
 
     db_path = _get_db_path()
-    size_mb = (
-        round(db_path.stat().st_size / (1024 * 1024), 2) if db_path.exists() else 0.0
-    )
+    size_mb = round(db_path.stat().st_size / (1024 * 1024), 2) if db_path.exists() else 0.0
 
     with _l1_lock:
         l1_ohlcv = len(_l1_ohlcv_cache)
@@ -1044,4 +1039,3 @@ def get_store_statistics() -> dict[str, Any]:
 # Convenience aliases for batch loading
 get_ohlcv_batch = get_cached_ohlcv_batch
 load_ohlcv_batch = get_cached_ohlcv_batch
-

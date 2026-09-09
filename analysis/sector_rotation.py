@@ -735,7 +735,9 @@ def get_stock_tailwind(
 
     if not sector_point and matrix:
         # Fallback to BROAD_MARKET point, or nearest valid sector point in matrix
-        sector_point = matrix.get("BROAD_MARKET") or matrix.get("INFRA") or next(iter(matrix.values()), None)
+        sector_point = (
+            matrix.get("BROAD_MARKET") or matrix.get("INFRA") or next(iter(matrix.values()), None)
+        )
 
     if not sector_point:
         return StockTailwind(

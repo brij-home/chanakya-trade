@@ -11,21 +11,9 @@ global.ResizeObserver = class {
   disconnect() {}
 }
 
-// Mock CandlestickChart so we don't render canvas in jsdom
-vi.mock('../renderer/src/components/Charts/CandlestickChart', () => {
-  return {
-    default: ({ symbol, timeframe }) => (
-      <div data-testid="mock-candlestick-chart">
-        Chart for {symbol} ({timeframe})
-      </div>
-    ),
-  }
-})
-
-describe('TerminalView Chart Toggle & Default Hidden State', () => {
+describe('TerminalView Decision Cockpit & Zero Redundancy Standard', () => {
   beforeEach(() => {
     useChatStore.setState({
-      terminalShowChart: false,
       activeView: 'terminal',
       selectedSymbol: 'NIFTY',
     })
@@ -48,6 +36,7 @@ describe('TerminalView Chart Toggle & Default Hidden State', () => {
                   entry: 24480,
                   stop_loss: 24360,
                   target_1: 24720,
+                  risk_reward: '2.0',
                   status: 'READY',
                 },
                 order_block: { bottom: 24400, top: 24450 },
@@ -64,92 +53,146 @@ describe('TerminalView Chart Toggle & Default Hidden State', () => {
     })
   })
 
-  it('keeps chart hidden by default and renders collapsed banner', async () => {
+  it('renders clean Decision Cockpit without any embedded chart canvas or collapsed banner', async () => {
     await act(async () => {
       render(<TerminalView />)
     })
 
-    // The chart canvas should NOT be rendered
+    // Candlestick canvas must NOT be rendered on Terminal
     expect(screen.queryByTestId('mock-candlestick-chart')).toBeNull()
 
-    // The collapsed banner must be visible
-    expect(screen.getByText(/Interactive Chart Hidden/i)).toBeTruthy()
-
-    // Both Show Chart buttons should exist (Header badge & Collapsed banner button)
-    const showBtns = screen.getAllByRole('button', { name: /Show Chart/i })
-    expect(showBtns.length).toBeGreaterThanOrEqual(2)
-
-    // The toolbar button should indicate Chart OFF
-    expect(screen.getByRole('button', { name: /Chart OFF/i })).toBeTruthy()
+    // No collapsed banner or legacy toggle buttons
+    expect(screen.queryByText(/Interactive Chart Hidden/i)).toBeNull()
+    expect(screen.queryByRole('button', { name: /Chart OFF/i })).toBeNull()
+    expect(screen.queryByRole('button', { name: /Chart ON/i })).toBeNull()
   })
 
-  it('toggles chart ON when clicking Show Chart banner button and displays CandlestickChart', async () => {
+  it('provides a sleek 1-click button to route traders to dedicated Chart Studio', async () => {
     await act(async () => {
       render(<TerminalView />)
     })
 
-    expect(screen.queryByTestId('mock-candlestick-chart')).toBeNull()
+    // Look for the "Open in Chart Studio ↗" buttons (Command Strip & HUD)
+    const chartStudioBtns = screen.getAllByRole('button', { name: /Open in Chart Studio ↗/i })
+    expect(chartStudioBtns.length).toBeGreaterThanOrEqual(1)
 
-    // Click the collapsed banner button to show chart
-    const showBtns = screen.getAllByRole('button', { name: /Show Chart/i })
+    // Clicking routes activeView to 'charts'
     await act(async () => {
-      fireEvent.click(showBtns[1])
+      fireEvent.click(chartStudioBtns[0])
     })
 
-    // Chart should now be visible
-    expect(screen.getByTestId('mock-candlestick-chart')).toBeTruthy()
-
-    // Buttons should now indicate Chart ON / HIDE CHART
-    expect(screen.getByRole('button', { name: /Chart ON/i })).toBeTruthy()
-    const hideBtns = screen.getAllByRole('button', { name: /Hide Chart/i })
-    expect(hideBtns.length).toBeGreaterThanOrEqual(2)
-
-    // Clicking Hide Chart collapses it back
-    await act(async () => {
-      fireEvent.click(hideBtns[0])
-    })
-
-    expect(screen.queryByTestId('mock-candlestick-chart')).toBeNull()
-    expect(screen.getByText(/Interactive Chart Hidden/i)).toBeTruthy()
+    expect(useChatStore.getState().activeView).toBe('charts')
   })
 
-  it('toggles chart via top toolbar Chart OFF / ON button', async () => {
+  it('renders sleek self-clickable Poll on Symbol and Debate buttons', async () => {
+    const sendDraftSpy = vi.fn()
+    useChatStore.setState({ sendDraft: sendDraftSpy })
+
     await act(async () => {
       render(<TerminalView />)
     })
 
-    expect(screen.queryByTestId('mock-candlestick-chart')).toBeNull()
+    const pollBtns = screen.getAllByRole('button', { name: /Poll on NIFTY/i })
+    expect(pollBtns.length).toBeGreaterThanOrEqual(1)
 
-    const toolbarBtn = screen.getByRole('button', { name: /Chart OFF/i })
     await act(async () => {
-      fireEvent.click(toolbarBtn)
+      fireEvent.click(pollBtns[0])
     })
 
-    expect(screen.getByTestId('mock-candlestick-chart')).toBeTruthy()
-    expect(screen.getByRole('button', { name: /Chart ON/i })).toBeTruthy()
+    expect(sendDraftSpy).toHaveBeenCalledWith(expect.stringContaining('council'))
 
-    // Click again to turn off
+    const debateBtns = screen.getAllByRole('button', { name: /Run Debate/i })
+    expect(debateBtns.length).toBeGreaterThanOrEqual(1)
+
     await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: /Chart ON/i }))
+      fireEvent.click(debateBtns[0])
     })
 
-    expect(screen.queryByTestId('mock-candlestick-chart')).toBeNull()
-    expect(screen.getByRole('button', { name: /Chart OFF/i })).toBeTruthy()
+    expect(sendDraftSpy).toHaveBeenCalledWith('analyze NIFTY')
   })
 
-  it('toggles chart via ContextBar quick toggle button', async () => {
+  it('renders Actionable Institutional Key Levels HUD (OB, POC, Value Area, ATR)', async () => {
     await act(async () => {
-      render(<ContextBar />)
+      render(<TerminalView />)
     })
 
-    const toggleBtn = screen.getByRole('button', { name: /Chart OFF/i })
-    expect(toggleBtn).toBeTruthy()
+    expect(screen.getByText(/UNMITIGATED OB/i)).toBeTruthy()
+    expect(screen.getByText(/POC \(Max Volume\)/i)).toBeTruthy()
+    expect(screen.getByText(/VALUE AREA \(70%\)/i)).toBeTruthy()
+    expect(screen.getByText(/14D ATR VOLATILITY/i)).toBeTruthy()
+  })
 
+  it('renders elevated Smart Order Staging execution button and collapsible risk drawer', async () => {
     await act(async () => {
-      fireEvent.click(toggleBtn)
+      render(<TerminalView />)
     })
 
-    expect(useChatStore.getState().terminalShowChart).toBe(true)
-    expect(screen.getByRole('button', { name: /Chart ON/i })).toBeTruthy()
+    // Execute order button should be immediately accessible
+    expect(screen.getByRole('button', { name: /STAGE \/ EXECUTE ORDER \(BUY\)/i })).toBeTruthy()
+
+    // Risk Telemetry drawer should be collapsible
+    const riskDrawerBtn = screen.getByRole('button', { name: /Risk Telemetry & ATR Trails/i })
+    expect(riskDrawerBtn).toBeTruthy()
+    expect(screen.queryByText(/PORTFOLIO HEAT METER/i)).toBeNull()
+
+    // Click to expand risk telemetry details
+    await act(async () => {
+      fireEvent.click(riskDrawerBtn)
+    })
+
+    expect(screen.getByText(/PORTFOLIO HEAT METER/i)).toBeTruthy()
+  })
+
+  it('renders interactive Quant Position Sizer and passes sized quantity to onOpenOrderTicket', async () => {
+    const onOpenOrderTicket = vi.fn()
+    await act(async () => {
+      render(<TerminalView onOpenOrderTicket={onOpenOrderTicket} />)
+    })
+
+    // Sizer header and budget pills
+    expect(screen.getByText(/QUANT POSITION SIZER/i)).toBeTruthy()
+    expect(screen.getByText(/CAPPED RISK/i)).toBeTruthy()
+    expect(screen.getByText(/T1 PROFIT \(2R\)/i)).toBeTruthy()
+
+    // Test clicking budget pill ₹5k
+    const pill5k = screen.getByRole('button', { name: /₹5k/i })
+    expect(pill5k).toBeTruthy()
+    await act(async () => {
+      fireEvent.click(pill5k)
+    })
+
+    // Click execute order button and check payload
+    const stageBtn = screen.getByRole('button', { name: /STAGE \/ EXECUTE ORDER \(BUY\)/i })
+    await act(async () => {
+      fireEvent.click(stageBtn)
+    })
+
+    expect(onOpenOrderTicket).toHaveBeenCalledTimes(1)
+    const payload = onOpenOrderTicket.mock.calls[0][0]
+    expect(payload).toHaveProperty('quantity')
+    expect(payload.quantity).toBeGreaterThan(0)
+    expect(payload).toHaveProperty('lotSize')
+  })
+
+  it('renders Multi-Horizon switcher, Options & Intraday Edge Bar, and Quick Universe bar', async () => {
+    await act(async () => {
+      render(<TerminalView />)
+    })
+
+    // Multi-horizon pills in top command strip
+    expect(screen.getByRole('button', { name: /15m/i })).toBeTruthy()
+    expect(screen.getByRole('button', { name: /1h/i })).toBeTruthy()
+    expect(screen.getByRole('button', { name: /1D/i })).toBeTruthy()
+
+    // Options & Intraday Edge Bar in HUD
+    expect(screen.getByText(/PCR:/i)).toBeTruthy()
+    expect(screen.getByText(/Max Pain:/i)).toBeTruthy()
+    expect(screen.getByText(/VWAP:/i)).toBeTruthy()
+    expect(screen.getByRole('button', { name: /Options Desk ↗/i })).toBeTruthy()
+
+    // Quick universe bar
+    expect(screen.getByText(/QUICK:/i)).toBeTruthy()
+    expect(screen.getByRole('button', { name: /BANKNIFTY/i })).toBeTruthy()
   })
 })
+

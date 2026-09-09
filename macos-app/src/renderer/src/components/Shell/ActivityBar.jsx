@@ -16,6 +16,14 @@ const WORKSPACE_ITEMS = [
     accentBg: 'rgba(245, 166, 35, 0.15)',
   },
   {
+    id: 'charts',
+    icon: '📈',
+    label: 'Chart Studio (Full Viewport)',
+    shortcut: '^C',
+    accentColor: '#38bdf8',
+    accentBg: 'rgba(56, 189, 248, 0.15)',
+  },
+  {
     id: 'scanner',
     icon: '🎯',
     label: 'Inflection & Multibagger Radar',

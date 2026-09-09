@@ -181,6 +181,7 @@ def _try_auto_restore_sessions() -> None:
     try:
         import os
         from brokers.mstock import MStockAPI, TOKEN_FILE as _MT
+
         if os.path.exists(_MT):
             b = MStockAPI()
             if b.is_authenticated():
@@ -193,6 +194,7 @@ def _try_auto_restore_sessions() -> None:
     try:
         import os
         from brokers.shoonya import ShoonyaAPI, TOKEN_FILE as _ST
+
         if os.path.exists(_ST):
             b = ShoonyaAPI()
             if b.is_authenticated():

@@ -133,9 +133,17 @@ def bollinger_bands(
 
 
 def atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
-    h = df["high"] if "high" in df.columns else (df["High"] if "High" in df.columns else df.iloc[:, 1])
+    h = (
+        df["high"]
+        if "high" in df.columns
+        else (df["High"] if "High" in df.columns else df.iloc[:, 1])
+    )
     l = df["low"] if "low" in df.columns else (df["Low"] if "Low" in df.columns else df.iloc[:, 2])
-    c = df["close"] if "close" in df.columns else (df["Close"] if "Close" in df.columns else df.iloc[:, 3])
+    c = (
+        df["close"]
+        if "close" in df.columns
+        else (df["Close"] if "Close" in df.columns else df.iloc[:, 3])
+    )
     high_low = h - l
     high_close = (h - c.shift()).abs()
     low_close = (l - c.shift()).abs()
@@ -348,7 +356,9 @@ def analyse(
         f"{'Above' if ltp > sma200_val else 'Below'} 200 DMA"
     )
 
-    as_of_str = str(df.index[-1].date()) if hasattr(df.index[-1], "date") else str(df.index[-1])[:10]
+    as_of_str = (
+        str(df.index[-1].date()) if hasattr(df.index[-1], "date") else str(df.index[-1])[:10]
+    )
     data_source_str = df.attrs.get("provenance", {}).get("provider", "NSE Historical EOD")
     anomaly_notes = []
     is_valid = True

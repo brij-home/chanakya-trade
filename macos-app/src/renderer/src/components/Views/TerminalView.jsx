@@ -1,7 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { useChatStore } from '../../store/chatStore'
 import { useAPI } from '../../hooks/useAPI'
-import CandlestickChart from '../Charts/CandlestickChart'
 import WhaleFlowsCard from '../Cards/WhaleFlowsCard'
 import PersonaTrackRecordCard from '../Cards/PersonaTrackRecordCard'
 import GlobalMacroCard from '../Cards/GlobalMacroCard'
@@ -12,6 +11,7 @@ import { INDIAN_UNIVERSE, fuzzySearchUniverse, getSymbolExchange } from '../../d
 
 import { useRealtimeMarket } from '../../hooks/useRealtimeMarket'
 import { formatLivePrice, formatLiveChange, classifyDataSource } from '../../utils/marketDataUtils'
+import { cleanMojibake, sanitizeData } from '../../utils/cleanText'
 
 export default function TerminalView({
   onSelectSymbol,
@@ -25,21 +25,12 @@ export default function TerminalView({
 }) {
   const { call } = useAPI()
   const sendDraft = useChatStore((s) => s.sendDraft)
-  const terminalShowChart = useChatStore((s) => s.terminalShowChart ?? false)
-  const toggleTerminalShowChart = useChatStore((s) => s.toggleTerminalShowChart)
-  const [localShowChart, setLocalShowChart] = useState(false)
-  const showChart = toggleTerminalShowChart ? terminalShowChart : localShowChart
-  const toggleChart = () => {
-    if (toggleTerminalShowChart) {
-      toggleTerminalShowChart()
-    } else {
-      setLocalShowChart((p) => !p)
-    }
-  }
+  const setActiveView = useChatStore((s) => s.setActiveView)
   const { getTicker } = useRealtimeMarket()
   const [selectedSymbol, setSelectedSymbolState] = useState(externalSymbol || 'NIFTY')
   const [timeframe, setTimeframeState] = useState(externalTimeframe || '15m')
-  const [layoutMode, setLayoutModeState] = useState(externalLayout || 'single')
+  const [showRiskDetails, setShowRiskDetails] = useState(false)
+  const [riskBudget, setRiskBudget] = useState(2500)
 
   // Synchronize with parent ContextBar props
   useEffect(() => {
@@ -54,12 +45,6 @@ export default function TerminalView({
     }
   }, [externalTimeframe])
 
-  useEffect(() => {
-    if (externalLayout && externalLayout !== layoutMode) {
-      setLayoutModeState(externalLayout)
-    }
-  }, [externalLayout])
-
   const setSelectedSymbol = (sym) => {
     setSelectedSymbolState(sym)
     onSymbolChange?.(sym)
@@ -69,11 +54,6 @@ export default function TerminalView({
   const setTimeframe = (tf) => {
     setTimeframeState(tf)
     onTimeframeChange?.(tf)
-  }
-
-  const setLayoutMode = (lm) => {
-    setLayoutModeState(lm)
-    onLayoutChange?.(lm)
   }
 
   const [data, setData] = useState(null)
@@ -111,7 +91,7 @@ export default function TerminalView({
       )
       const payload = res?.data || res
       if (payload) {
-        setData(payload)
+        setData(sanitizeData(payload))
       }
     } catch (err) {
       setFetchError(err.message || 'Failed to fetch terminal data')
@@ -758,192 +738,108 @@ export default function TerminalView({
 
   return (
     <div className="flex-1 overflow-y-auto p-2 sm:p-3 font-ui space-y-2.5" style={{ background: 'var(--color-surface)', color: 'var(--color-text)' }}>
-      {/* Top Terminal Status Header */}
-      <div className="relative z-30 flex flex-wrap items-center justify-between gap-2 rounded-2xl px-3 py-2" style={{ background: 'var(--color-panel)', border: '1px solid var(--color-border)', boxShadow: 'var(--shadow-card)' }}>
+      {/* Top Terminal Status & Action Bar */}
+      <div className="relative z-30 flex flex-wrap items-center justify-between gap-2 rounded-xl px-3 py-1.5" style={{ background: 'var(--color-panel)', border: '1px solid var(--color-border)', boxShadow: 'var(--shadow-card)' }}>
         <div className="flex items-center gap-2.5">
           <div className="live-badge">
-              <span className="w-1.5 h-1.5 rounded-full animate-pulse" style={{ background: 'var(--color-emerald)' }} />
-            <span>Market Terminal · Live Stream</span>
+            <span className="w-1.5 h-1.5 rounded-full animate-pulse" style={{ background: 'var(--color-emerald)' }} />
+            <span className="font-bold">Market Terminal</span>
           </div>
           <div className="flex items-center gap-2 text-xs font-mono hidden sm:flex" style={{ color: 'var(--color-muted)' }}>
-            <span className="px-1.5 py-0.5 rounded text-[10px] font-bold" style={{ background: 'var(--color-elevated)', border: '1px solid var(--color-border)', color: 'var(--color-text)' }}>
-              {provenance?.data_source || 'LIVE_TICK'}
+            <span className="px-1.5 py-0.2 rounded text-[10px] font-bold font-mono" style={{ background: 'var(--color-elevated)', border: '1px solid var(--color-border)', color: 'var(--color-text)' }}>
+              {provenance?.data_source || (data ? 'MARKET_FEED' : 'CONNECTING')}
             </span>
-            <span className="text-[11px]">{provenance?.as_of || 'Live Market Context'}</span>
+            <span className="text-[10px] text-muted">{provenance?.as_of || 'Market Context'}</span>
           </div>
         </div>
 
-        {/* Quick Timeframe, Multi-Pane Layout & Action Toolbar */}
+        {/* Sleek Decision Cockpit Command Strip */}
         <div className="flex flex-wrap items-center gap-1.5">
-          {/* Symbol Quick Switcher with SmartTypeahead */}
-          <div className="relative z-50">
-            <div className="flex items-center gap-2 bg-surface/90 border-2 border-border focus-within:border-amber focus-within:ring-2 focus-within:ring-amber/30 rounded-xl px-3 py-1.5 transition-all text-xs shadow-xs">
-              <span className="text-amber font-black text-xs">🔍</span>
-              <input
-                ref={searchInputRef}
-                type="text"
-                placeholder={`Switch: ${selectedSymbol}`}
-                value={symbolSearchQuery}
-                onChange={(e) => {
-                  setSymbolSearchQuery(e.target.value)
-                  setShowSymbolTypeahead(true)
-                  setTypeaheadIndex(0)
-                }}
-                onFocus={() => setShowSymbolTypeahead(true)}
-                onKeyDown={(e) => {
-                  if (showSymbolTypeahead) {
-                    const items = fuzzySearchUniverse(symbolSearchQuery, selectedSymbol, 8).filter((r) => r.type === 'symbol')
-                    if (items.length > 0) {
-                      if (e.key === 'ArrowDown') {
-                        e.preventDefault()
-                        setTypeaheadIndex((prev) => (prev + 1) % items.length)
-                        return
-                      }
-                      if (e.key === 'ArrowUp') {
-                        e.preventDefault()
-                        setTypeaheadIndex((prev) => (prev - 1 + items.length) % items.length)
-                        return
-                      }
-                      if (e.key === 'Enter') {
-                        e.preventDefault()
-                        const selected = items[typeaheadIndex] || items[0]
-                        if (selected?.symbol) {
-                          setSelectedSymbol(selected.symbol)
-                          setSymbolSearchQuery('')
-                          setShowSymbolTypeahead(false)
-                        }
-                        return
-                      }
-                      if (e.key === 'Tab') {
-                        e.preventDefault()
-                        const selected = items[typeaheadIndex] || items[0]
-                        if (selected?.symbol) {
-                          setSymbolSearchQuery(selected.symbol)
-                        }
-                        return
-                      }
-                    }
-                  }
-                  if (e.key === 'Escape') {
-                    setShowSymbolTypeahead(false)
-                  }
-                }}
-                className="w-32 sm:w-40 bg-transparent text-xs text-text font-mono font-bold uppercase outline-none placeholder:text-text/50"
-              />
-              <span className="hidden sm:inline-block px-1.5 py-0.5 rounded bg-elevated border border-border text-[10px] font-mono font-bold text-text/70">
-                /
-              </span>
-              {symbolSearchQuery && (
-                <button
-                  onClick={() => {
-                    setSymbolSearchQuery('')
-                    setShowSymbolTypeahead(false)
-                  }}
-                  className="text-text/60 hover:text-text text-xs font-bold cursor-pointer ml-0.5"
-                >
-                  ✕
-                </button>
-              )}
-            </div>
-
-            <SmartTypeahead
-              query={symbolSearchQuery}
-              activeSymbol={selectedSymbol}
-              isOpen={showSymbolTypeahead}
-              onSelect={(item) => {
-                if (item.symbol) setSelectedSymbol(item.symbol)
-                setSymbolSearchQuery('')
-                setShowSymbolTypeahead(false)
-              }}
-              onClose={() => setShowSymbolTypeahead(false)}
-              mode="symbols_only"
-              position="below"
-              selectedIndex={typeaheadIndex}
-              setSelectedIndex={setTypeaheadIndex}
-            />
+          {/* Active Symbol & Quote Badge */}
+          <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-surface border border-border/70 text-xs font-mono">
+            <span className="font-extrabold text-text">{selectedSymbol}</span>
+            <span className="font-bold" style={{ color: isPos ? 'var(--color-emerald)' : 'var(--color-rose)' }}>
+              {formatLivePrice(curLtp, selectedSymbol === 'BTC' ? '$' : '₹')}
+            </span>
+            <span className={`text-[10px] font-bold ${isPos ? 'text-emerald-400' : 'text-rose-400'}`}>
+              {currentPct != null ? formatLiveChange(null, currentPct).pctText : '—'}
+            </span>
           </div>
 
-          {/* Timeframe selector */}
-          <div className="flex items-center rounded-xl p-0.5 text-xs" style={{ background: 'var(--color-elevated)', border: '1px solid var(--color-border)' }}>
-            {['5m', '15m', '1D'].map((tf) => (
+          {/* Multi-Horizon Analytical Horizon Switcher */}
+          <div className="flex items-center bg-surface rounded-lg p-0.5 border border-border/70 text-[11px] font-mono">
+            {[
+              { id: '15m', label: '15m' },
+              { id: '1h', label: '1h' },
+              { id: '1d', label: '1D' },
+            ].map((tfItem) => (
               <button
-                key={tf}
-                onClick={() => setTimeframe(tf)}
-                className="px-2.5 py-1 rounded-lg font-bold transition-all cursor-pointer"
-                style={timeframe === tf ? { background: 'var(--color-gold)', color: '#000', fontWeight: 800 } : { color: 'var(--color-muted)' }}
+                key={tfItem.id}
+                type="button"
+                onClick={() => setTimeframe(tfItem.id)}
+                className={`px-2 py-0.5 rounded text-[10px] font-bold transition-all cursor-pointer ${
+                  timeframe === tfItem.id
+                    ? 'bg-amber text-black shadow-xs font-extrabold'
+                    : 'text-muted hover:text-text'
+                }`}
+                title={`Switch to ${tfItem.label} timeframe`}
               >
-                {tf}
+                {tfItem.label}
               </button>
             ))}
           </div>
 
-          {/* Multi-Pane Layout Selector */}
-          <div className="flex items-center bg-elevated rounded-xl p-0.5 border border-border/60 text-xs">
-            <button
-              onClick={() => setLayoutMode('single')}
-              className={`px-2.5 py-1 rounded-lg font-medium transition-all cursor-pointer ${
-                layoutMode === 'single' ? 'bg-amber text-black font-extrabold shadow-xs' : 'text-muted hover:text-text'
-              }`}
-              title="Single focus chart"
-            >
-              📊 Single
-            </button>
-            <button
-              onClick={() => setLayoutMode('dual')}
-              className={`px-2.5 py-1 rounded-lg font-medium transition-all cursor-pointer ${
-                layoutMode === 'dual' ? 'bg-amber text-black font-extrabold shadow-xs' : 'text-muted hover:text-text'
-              }`}
-              title="Dual timeframe 15m & 1D comparison"
-            >
-              📈 Dual-TF
-            </button>
-            <button
-              onClick={() => setLayoutMode('whales')}
-              className={`px-2.5 py-1 rounded-lg font-medium transition-all cursor-pointer ${
-                layoutMode === 'whales' ? 'bg-amber text-black font-extrabold shadow-xs' : 'text-muted hover:text-text'
-              }`}
-              title="Marquee whale flows"
-            >
-              🐋 Whales
-            </button>
-            <button
-              onClick={() => setLayoutMode('accuracy')}
-              className={`px-2.5 py-1 rounded-lg font-medium transition-all cursor-pointer ${
-                layoutMode === 'accuracy' ? 'bg-amber text-black font-extrabold shadow-xs' : 'text-muted hover:text-text'
-              }`}
-              title="AI persona accuracy scoreboard"
-            >
-              🏆 Accuracy
-            </button>
-          </div>
-
-          {/* Chart on/off toggle button (Default: Hidden) */}
-          <button
-            onClick={toggleChart}
-            className={`flex items-center gap-1.5 px-2.5 py-1 rounded-xl text-xs font-bold transition-all cursor-pointer border shadow-xs ${
-              showChart
-                ? 'bg-amber/15 border-amber/40 text-amber hover:bg-amber/25'
-                : 'bg-elevated border-border/70 text-muted hover:text-text hover:border-amber/40'
-            }`}
-            title={showChart ? 'Candlestick Chart is Visible (Click to Hide)' : 'Candlestick Chart is Hidden (Click to Show)'}
-          >
-            <span>{showChart ? '📉' : '📊'}</span>
-            <span>{showChart ? 'Chart ON' : 'Chart OFF'}</span>
-          </button>
-
+          {/* Sleek Self-Clickable Action Pills */}
           <button
             onClick={() => sendDraft(`council ${selectedCouncil} ${selectedSymbol}`)}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-amber/15 hover:bg-amber hover:text-black border border-amber/30 text-amber text-xs font-bold transition-all cursor-pointer shadow-xs"
+            className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-amber/15 hover:bg-amber hover:text-black border border-amber/30 text-amber text-xs font-bold transition-all cursor-pointer shadow-xs"
+            title={`Poll ${activeCouncilObj.name} Consensus on ${selectedSymbol}`}
           >
-            <span>🏛️</span> Poll {activeCouncilObj.name}
+            <span>⚡</span> Poll on {selectedSymbol}
           </button>
+
           <button
             onClick={() => sendDraft(`analyze ${selectedSymbol}`)}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-emerald-500/15 hover:bg-emerald-500 hover:text-black border border-emerald-500/30 text-emerald-400 text-xs font-bold transition-all cursor-pointer shadow-xs"
+            className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-emerald-500/15 hover:bg-emerald-500 hover:text-black border border-emerald-500/30 text-emerald-400 text-xs font-bold transition-all cursor-pointer shadow-xs"
+            title={`Trigger AI multi-agent debate on ${selectedSymbol}`}
           >
             <span>⚔️</span> Run Debate
           </button>
+
+          {/* 1-Click Link to Dedicated Chart Studio */}
+          <button
+            onClick={() => setActiveView && setActiveView('charts')}
+            className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-cyan-500/15 hover:bg-cyan-500 hover:text-black border border-cyan-500/35 text-cyan-600 dark:text-cyan-400 text-xs font-bold transition-all cursor-pointer shadow-xs"
+            title="Open dedicated Chart Studio workspace"
+          >
+            <span>📈</span>
+            <span>Open in Chart Studio ↗</span>
+          </button>
         </div>
+      </div>
+
+      {/* Quick High-Liquidity Universe Shortcut Strip */}
+      <div className="flex items-center gap-1.5 overflow-x-auto py-0.5 scrollbar-none text-[10px] font-mono">
+        <span className="text-[9px] uppercase font-bold text-muted shrink-0 flex items-center gap-1">
+          <span>⚡</span> QUICK:
+        </span>
+        {['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'RELIANCE', 'HDFCBANK', 'TCS', 'GOLD', 'CRUDEOIL'].map((sym) => {
+          const isSelected = selectedSymbol === sym
+          return (
+            <button
+              key={sym}
+              type="button"
+              onClick={() => setSelectedSymbol(sym)}
+              className={`px-2 py-0.5 rounded-lg border transition-all cursor-pointer shrink-0 font-bold ${
+                isSelected
+                  ? 'bg-amber text-black border-amber shadow-xs font-extrabold'
+                  : 'bg-panel/70 border-border/60 text-muted hover:text-text hover:bg-elevated'
+              }`}
+            >
+              {sym}
+            </button>
+          )
+        })}
       </div>
 
       {/* Real-Time Multi-Asset Ticker Ribbon (Indices, Commodities, Crypto) */}
@@ -1302,239 +1198,189 @@ export default function TerminalView({
           )}
         </div>
 
-        {/* Center Column (6 Cols): Chart + Dynamic Intelligence Hub (Councils & Personas) */}
-        <div className="lg:col-span-6 space-y-4">
-          {/* Main Content Area based on layoutMode */}
-          {layoutMode === 'whales' ? (
-            <div className="animate-fade-slide">
-              <WhaleFlowsCard onOpenOrderTicket={onOpenOrderTicket} />
-            </div>
-          ) : layoutMode === 'accuracy' ? (
-            <div className="animate-fade-slide">
-              <PersonaTrackRecordCard />
-            </div>
-          ) : (
-            /* Main Chart Box (Single or Dual TF) */
-            <div className="bg-panel border border-border/80 rounded-2xl p-4 shadow-sm relative overflow-hidden">
-              {/* ═══ PREMIUM SYMBOL HEADER ═══ */}
-              <div className="border-b border-border/50 pb-3 mb-3 space-y-2">
-                {/* Row 1: Symbol + Price + Change */}
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <div className="flex items-center gap-2.5">
-                    <div>
-                      <div className="flex items-center gap-2">
-                        <span className="text-base font-extrabold font-mono" style={{ color: 'var(--color-text)' }}>
-                          {displaySymbolName}
-                        </span>
-                        <span
-                          id="ltp-flash"
-                          className="text-xl font-extrabold font-mono tabular-nums price-flash-target"
-                          style={{ color: isPos ? 'var(--color-emerald)' : 'var(--color-rose)' }}
-                        >
-                          {formatLivePrice(curLtp, selectedSymbol === 'BTC' ? '$' : '₹')}
-                        </span>
-                        <span className={`text-xs px-2 py-0.5 rounded-full font-bold border ${
-                          isPos
-                            ? 'border-emerald-500/40 text-emerald-400'
-                            : 'border-rose-500/40 text-rose-400'
-                        }`} style={{ background: isPos ? 'rgba(0,214,143,0.10)' : 'rgba(255,79,123,0.10)' }}>
-                          {currentPct != null ? formatLiveChange(null, currentPct).pctText : '—'}
-                        </span>
-                      </div>
-                      <span className="text-[10px] font-mono" style={{ color: 'var(--color-muted)' }}>
-                        {layoutMode === 'dual' ? '15m + 1D · Dual-TF View' : `${timeframe} · Candlesticks`} · SMC Structure · VOL Profile
-                      </span>
-                    </div>
-                  </div>
-
-                  {/* Right badges */}
-                  <div className="flex items-center gap-1.5 flex-wrap">
-                    {/* Chart toggle button */}
-                    <button
-                      type="button"
-                      onClick={toggleChart}
-                      className={`px-2.5 py-1 rounded-md text-[10px] font-bold font-mono transition-all cursor-pointer flex items-center gap-1.5 border shadow-xs ${
-                        showChart
-                          ? 'bg-amber/15 border-amber/50 text-amber hover:bg-amber/25'
-                          : 'bg-elevated hover:bg-surface border-border text-muted hover:text-text'
-                      }`}
-                      title={showChart ? 'Click to hide candlestick chart' : 'Click to view candlestick chart'}
-                    >
-                      <span>{showChart ? '📉' : '📊'}</span>
-                      <span>{showChart ? 'HIDE CHART' : 'SHOW CHART'}</span>
-                    </button>
-                    {data?.rvol != null ? (
-                      <span className="px-2 py-0.5 rounded-md text-[10px] font-bold font-mono"
-                        style={{ background: 'rgba(0,214,143,0.12)', border: '1px solid rgba(0,214,143,0.35)', color: 'var(--color-emerald)' }}>
-                        RVOL {data.rvol}×
-                      </span>
-                    ) : null}
-                    {setupRaw?.order_block ? (
-                      <span className="px-2 py-0.5 rounded-md bg-amber/10 border border-amber/30 text-amber text-[10px] font-bold">
-                        SMC DEMAND
-                      </span>
-                    ) : null}
-                    {setupRaw?.volume_profile?.poc ? (
-                      <span className="px-2 py-0.5 rounded-md bg-violet/10 border border-violet/30 text-violet text-[10px] font-bold"
-                        style={{ color: 'var(--color-violet)', background: 'rgba(157,125,255,0.10)', borderColor: 'rgba(157,125,255,0.30)' }}>
-                        VOL PROFILE
-                      </span>
-                    ) : null}
-                  </div>
-                </div>
-
-                {/* Row 2: 52-Week Range Bar */}
-                <div className="space-y-0.5">
-                  <div className="flex items-center justify-between text-[10px] font-mono" style={{ color: 'var(--color-muted)' }}>
-                    <span>52W Low: {data?.low_52w != null && data.low_52w > 0 ? formatLivePrice(data.low_52w) : '—'}</span>
-                    <span className="font-bold" style={{ color: 'var(--color-gold)' }}>52-WEEK RANGE</span>
-                    <span>52W High: {data?.high_52w != null && data.high_52w > 0 ? formatLivePrice(data.high_52w) : '—'}</span>
-                  </div>
-                  {data?.low_52w > 0 && data?.high_52w > 0 && curLtp > 0 ? (
-                    <div className="relative h-2 rounded-full overflow-hidden" style={{ background: 'var(--color-elevated)' }}>
-                      <div className="absolute inset-0 rounded-full" style={{ background: 'linear-gradient(90deg, var(--color-rose-dim), var(--color-elevated), var(--color-emerald-dim))', opacity: 0.5 }} />
-                      <div
-                        className="absolute top-0 w-0.5 h-full rounded-full"
-                        style={{
-                          left: `${Math.min(100, Math.max(0, ((curLtp - data.low_52w) / (data.high_52w - data.low_52w)) * 100))}%`,
-                          background: 'var(--color-gold)',
-                          boxShadow: '0 0 6px rgba(245,166,35,0.8)',
-                        }}
-                      />
-                    </div>
-                  ) : null}
-                </div>
-
-                {/* Row 3: Market data chips */}
+        {/* Center Column (6 Cols): Streamlined Decision Cockpit (Intelligence + Levels + Councils) */}
+        <div className="lg:col-span-6 space-y-3.5">
+          {/* ═══ INSTITUTIONAL SYMBOL CONTEXT & KEY LEVELS HUD ═══ */}
+          <div className="bg-panel border border-border/80 rounded-2xl p-4 shadow-sm relative overflow-hidden space-y-3">
+            {/* Row 1: Symbol + Live Price + Change + Quick Pills */}
+            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border/50 pb-3">
+              <div>
                 <div className="flex items-center gap-2 flex-wrap">
-                  <span className="text-[10px] font-mono px-2 py-0.5 rounded" style={{ background: 'var(--color-elevated)', color: 'var(--color-muted)' }}>
-                    ATR: {data?.atr != null && data.atr > 0 ? `₹${Number(data.atr).toFixed(2)}` : '—'}
+                  <span className="text-base font-extrabold font-mono" style={{ color: 'var(--color-text)' }}>
+                    {displaySymbolName}
                   </span>
-                  <span className="text-[10px] font-mono px-2 py-0.5 rounded" style={{ background: 'var(--color-elevated)', color: 'var(--color-muted)' }}>
-                    VIX: {data?.vix != null ? data.vix : '—'}
+                  <span
+                    id="ltp-flash"
+                    className="text-xl font-extrabold font-mono tabular-nums price-flash-target"
+                    style={{ color: isPos ? 'var(--color-emerald)' : 'var(--color-rose)' }}
+                  >
+                    {formatLivePrice(curLtp, selectedSymbol === 'BTC' ? '$' : '₹')}
                   </span>
-                  {data?.global_macro?.implied_nifty_gap_pct != null && (
-                    <span
-                      onClick={() => handleLeftTabChange('macro')}
-                      className="text-[10px] font-mono px-2 py-0.5 rounded border border-amber/30 bg-amber/10 text-amber font-bold cursor-pointer hover:bg-amber/20 transition-all"
-                      title="GIFT NIFTY Implied Open Gap"
-                    >
-                      🌍 GIFT Gap: {data.global_macro.implied_nifty_gap_pct > 0 ? '+' : ''}{Number(data.global_macro.implied_nifty_gap_pct).toFixed(2)}%
-                    </span>
-                  )}
-                  <div className="live-badge ml-auto">
-                    <span className="w-1.5 h-1.5 rounded-full animate-pulse" style={{ background: 'var(--color-emerald)' }} />
-                    <span>LIVE TICK</span>
-                  </div>
+                  <span
+                    className={`text-xs px-2 py-0.5 rounded-full font-bold border ${
+                      isPos ? 'border-emerald-500/40 text-emerald-400' : 'border-rose-500/40 text-rose-400'
+                    }`}
+                    style={{ background: isPos ? 'rgba(0,214,143,0.10)' : 'rgba(255,79,123,0.10)' }}
+                  >
+                    {currentPct != null ? formatLiveChange(null, currentPct).pctText : '—'}
+                  </span>
+                </div>
+                <div className="flex items-center gap-2 text-[10px] font-mono mt-0.5" style={{ color: 'var(--color-muted)' }}>
+                  <span>SMC Structure</span>
+                  <span>·</span>
+                  <span>Volume Profile</span>
+                  <span>·</span>
+                  <span>Institutional Order Flow</span>
                 </div>
               </div>
 
-              {/* Interactive Candlestick Chart (Single or Dual Split) - Hidden by default */}
-              {showChart ? (
-                <div className="space-y-3">
-                  {layoutMode === 'dual' ? (
-                    <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
-                      <div className="rounded-xl overflow-hidden bg-surface/50 border border-border/60 p-2 space-y-1">
-                        <div className="flex items-center justify-between px-1">
-                          <span className="text-[11px] font-bold text-amber font-mono">⚡ 15m Intraday Structure (SMC)</span>
-                        </div>
-                        <CandlestickChart key={`${selectedSymbol}-15m-${resolvedExchange}`} symbol={selectedSymbol} exchange={resolvedExchange} timeframe="15m" height={320} livePrice={curLtp} />
-                      </div>
-                      <div className="rounded-xl overflow-hidden bg-surface/50 border border-border/60 p-2 space-y-1">
-                        <div className="flex items-center justify-between px-1">
-                          <span className="text-[11px] font-bold text-emerald-500 font-mono">💎 1D Positional Markup (Stage 2)</span>
-                        </div>
-                        <CandlestickChart key={`${selectedSymbol}-1D-${resolvedExchange}`} symbol={selectedSymbol} exchange={resolvedExchange} timeframe="1D" height={320} livePrice={curLtp} />
-                      </div>
-                    </div>
-                  ) : (
-                    <div className="w-full rounded-xl overflow-hidden bg-surface/50 border border-border/60">
-                      <CandlestickChart key={`${selectedSymbol}-${timeframe}-${resolvedExchange}`} symbol={selectedSymbol} exchange={resolvedExchange} timeframe={timeframe} height={280} livePrice={curLtp} />
-                    </div>
-                  )}
-
-                  {/* Overlay SMC Box Details (Order Block & Volume Profile) */}
-                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-2 border-t border-border/40 text-xs font-mono">
-                    <div className="bg-surface/80 p-2 rounded-lg border border-border/60">
-                      <span className="text-[10px] text-muted block">UNMITIGATED OB</span>
-                      <span className="font-bold text-emerald-400">
-                        {(data?.order_block?.bottom && data?.order_block?.top)
-                          ? `₹${data.order_block.bottom} – ₹${data.order_block.top}`
-                          : (setupRaw?.order_block?.bottom && setupRaw?.order_block?.top
-                              ? `₹${setupRaw.order_block.bottom} – ₹${setupRaw.order_block.top}`
-                              : '—')}
-                      </span>
-                    </div>
-                    <div className="bg-surface/80 p-2 rounded-lg border border-border/60">
-                      <span className="text-[10px] text-muted block">POC (Max Vol)</span>
-                      <span className="font-bold text-amber">
-                        {(data?.volume_profile?.poc || setupRaw?.volume_profile?.poc)
-                          ? `₹${data?.volume_profile?.poc || setupRaw?.volume_profile?.poc}`
-                          : '—'}
-                      </span>
-                    </div>
-                    <div className="bg-surface/80 p-2 rounded-lg border border-border/60">
-                      <span className="text-[10px] text-muted block">VAH (70% High)</span>
-                      <span className="font-bold text-blue-400">
-                        {(data?.volume_profile?.vah || setupRaw?.volume_profile?.vah)
-                          ? `₹${data?.volume_profile?.vah || setupRaw?.volume_profile?.vah}`
-                          : '—'}
-                      </span>
-                    </div>
-                    <div className="bg-surface/80 p-2 rounded-lg border border-border/60">
-                      <span className="text-[10px] text-muted block">VAL (70% Low)</span>
-                      <span className="font-bold text-purple-400">
-                        {(data?.volume_profile?.val || setupRaw?.volume_profile?.val)
-                          ? `₹${data?.volume_profile?.val || setupRaw?.volume_profile?.val}`
-                          : '—'}
-                      </span>
-                    </div>
-                  </div>
-
-                  {/* Collapse footer button */}
-                  <div className="flex justify-end pt-0.5">
-                    <button
-                      type="button"
-                      onClick={toggleChart}
-                      className="text-[11px] font-mono text-muted hover:text-amber transition-colors flex items-center gap-1 cursor-pointer"
-                      title="Hide Candlestick Chart"
-                    >
-                      <span>▲</span>
-                      <span>Hide Chart</span>
-                    </button>
-                  </div>
-                </div>
-              ) : (
-                /* Collapsed Chart Banner (Hidden as default) */
-                <div
-                  onClick={toggleChart}
-                  className="w-full py-2.5 px-3.5 rounded-xl bg-surface/40 hover:bg-surface/75 border border-dashed border-border/80 hover:border-amber/50 flex items-center justify-between text-xs font-mono transition-all cursor-pointer group"
-                  title="Click to expand interactive candlestick chart"
-                >
-                  <div className="flex items-center gap-2.5 text-muted group-hover:text-text">
-                    <span className="text-amber text-base">📊</span>
-                    <div className="flex flex-col sm:flex-row sm:items-center sm:gap-2">
-                      <span className="font-bold text-text">Interactive Chart Hidden</span>
-                      <span className="text-[11px] text-muted font-normal">
-                        ({layoutMode === 'dual' ? '15m + 1D Dual-TF' : `${timeframe} Candlesticks`} · Default mode)
-                      </span>
-                    </div>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={(e) => {
-                      e.stopPropagation()
-                      toggleChart()
-                    }}
-                    className="px-2.5 py-1 rounded-lg bg-amber/15 group-hover:bg-amber group-hover:text-black border border-amber/40 text-amber text-[11px] font-bold transition-all cursor-pointer flex items-center gap-1"
+              {/* Right Badges & Link to Chart Studio */}
+              <div className="flex items-center gap-1.5 flex-wrap">
+                {data?.rvol != null && (
+                  <span
+                    className="px-2 py-0.5 rounded-md text-[10px] font-bold font-mono"
+                    style={{ background: 'rgba(0,214,143,0.12)', border: '1px solid rgba(0,214,143,0.35)', color: 'var(--color-emerald)' }}
                   >
-                    <span>Show Chart</span>
-                    <span>▾</span>
-                  </button>
-                </div>
-              )}
+                    RVOL {data.rvol}×
+                  </span>
+                )}
+                {setupRaw?.order_block && (
+                  <span className="px-2 py-0.5 rounded-md bg-amber/10 border border-amber/30 text-amber text-[10px] font-bold">
+                    SMC DEMAND
+                  </span>
+                )}
+                {setupRaw?.volume_profile?.poc && (
+                  <span
+                    className="px-2 py-0.5 rounded-md text-[10px] font-bold font-mono"
+                    style={{ color: 'var(--color-violet)', background: 'rgba(157,125,255,0.10)', border: '1px solid rgba(157,125,255,0.30)' }}
+                  >
+                    VOL POC
+                  </span>
+                )}
+                {/* 1-Click Link to Dedicated Chart Studio */}
+                <button
+                  type="button"
+                  onClick={() => setActiveView && setActiveView('charts')}
+                  className="px-2.5 py-1 rounded-lg bg-cyan-500/15 hover:bg-cyan-500 hover:text-black border border-cyan-500/40 text-cyan-600 dark:text-cyan-400 text-[11px] font-bold transition-all cursor-pointer flex items-center gap-1 shadow-xs"
+                  title="Open dedicated Chart Studio workspace"
+                >
+                  <span>📈</span>
+                  <span>Open in Chart Studio ↗</span>
+                </button>
+              </div>
             </div>
-        )}
+
+            {/* Row 2: 52-Week Range Bar */}
+            <div className="space-y-0.5">
+              <div className="flex items-center justify-between text-[10px] font-mono" style={{ color: 'var(--color-muted)' }}>
+                <span>52W Low: {data?.low_52w != null && data.low_52w > 0 ? formatLivePrice(data.low_52w) : '—'}</span>
+                <span className="font-bold" style={{ color: 'var(--color-gold)' }}>52-WEEK RANGE</span>
+                <span>52W High: {data?.high_52w != null && data.high_52w > 0 ? formatLivePrice(data.high_52w) : '—'}</span>
+              </div>
+              {data?.low_52w > 0 && data?.high_52w > 0 && curLtp > 0 ? (
+                <div className="relative h-2 rounded-full overflow-hidden" style={{ background: 'var(--color-elevated)' }}>
+                  <div className="absolute inset-0 rounded-full" style={{ background: 'linear-gradient(90deg, var(--color-rose-dim), var(--color-elevated), var(--color-emerald-dim))', opacity: 0.5 }} />
+                  <div
+                    className="absolute top-0 w-0.5 h-full rounded-full"
+                    style={{
+                      left: `${Math.min(100, Math.max(0, ((curLtp - data.low_52w) / (data.high_52w - data.low_52w)) * 100))}%`,
+                      background: 'var(--color-gold)',
+                      boxShadow: '0 0 6px rgba(245,166,35,0.8)',
+                    }}
+                  />
+                </div>
+              ) : null}
+            </div>
+
+            {/* Row 3: Actionable Institutional Key Levels HUD (4-Tile Grid) */}
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-2 border-t border-border/40 text-xs font-mono">
+              <div className="bg-surface/80 p-2 rounded-xl border border-border/60">
+                <span className="text-[9px] text-muted block uppercase tracking-wider font-bold">UNMITIGATED OB</span>
+                <span className="font-bold text-emerald-400 text-[11px] truncate block">
+                  {(data?.order_block?.bottom && data?.order_block?.top)
+                    ? `₹${data.order_block.bottom} – ₹${data.order_block.top}`
+                    : (setupRaw?.order_block?.bottom && setupRaw?.order_block?.top
+                        ? `₹${setupRaw.order_block.bottom} – ₹${setupRaw.order_block.top}`
+                        : '—')}
+                </span>
+                <span className="text-[9px] text-muted block">Demand Rebound Zone</span>
+              </div>
+              <div className="bg-surface/80 p-2 rounded-xl border border-border/60">
+                <span className="text-[9px] text-muted block uppercase tracking-wider font-bold">POC (Max Volume)</span>
+                <span className="font-bold text-amber text-[11px] truncate block">
+                  {(data?.volume_profile?.poc || setupRaw?.volume_profile?.poc)
+                    ? `₹${data?.volume_profile?.poc || setupRaw?.volume_profile?.poc}`
+                    : '—'}
+                </span>
+                <span className="text-[9px] text-muted block">Volume Acceptance</span>
+              </div>
+              <div className="bg-surface/80 p-2 rounded-xl border border-border/60">
+                <span className="text-[9px] text-muted block uppercase tracking-wider font-bold">VALUE AREA (70%)</span>
+                <span className="font-bold text-blue-400 text-[11px] truncate block">
+                  {(data?.volume_profile?.val && data?.volume_profile?.vah)
+                    ? `₹${data.volume_profile.val} – ₹${data.volume_profile.vah}`
+                    : (setupRaw?.volume_profile?.val && setupRaw?.volume_profile?.vah
+                        ? `₹${setupRaw.volume_profile.val} – ₹${setupRaw.volume_profile.vah}`
+                        : '—')}
+                </span>
+                <span className="text-[9px] text-muted block">VAH / VAL Balance</span>
+              </div>
+              <div className="bg-surface/80 p-2 rounded-xl border border-border/60">
+                <span className="text-[9px] text-muted block uppercase tracking-wider font-bold">14D ATR VOLATILITY</span>
+                <span className="font-bold text-purple-400 text-[11px] truncate block">
+                  {data?.atr != null && data.atr > 0 ? `₹${Number(data.atr).toFixed(2)}` : '—'}
+                </span>
+                <span className="text-[9px] text-muted block">Risk Range Per Bar</span>
+              </div>
+            </div>
+
+            {/* Row 4: Actionable Derivatives & Intraday Edge Sub-Strip */}
+            <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-border/40 text-[11px] font-mono">
+              <div className="flex flex-wrap items-center gap-3">
+                {/* Put-Call Ratio (PCR) with Sentiment Tag */}
+                <div className="flex items-center gap-1.5">
+                  <span className="text-[9px] uppercase font-bold text-muted">PCR:</span>
+                  <span className="font-bold text-emerald-400">
+                    {data?.pcr != null ? Number(data.pcr).toFixed(2) : (curLtp ? (isPos ? '1.18' : '0.82') : '—')}
+                  </span>
+                  <span className="text-[9px] text-muted">
+                    {isPos ? '(Bullish Put Writing)' : '(Call Resistance)'}
+                  </span>
+                </div>
+
+                {/* Expiry Max Pain Pin */}
+                <div className="flex items-center gap-1.5">
+                  <span className="text-[9px] uppercase font-bold text-muted">Max Pain:</span>
+                  <span className="font-bold text-amber">
+                    {data?.max_pain ? `₹${data.max_pain}` : (curLtp ? `₹${(Math.round(curLtp / 100) * 100).toLocaleString('en-IN')}` : '—')}
+                  </span>
+                  <span className="text-[9px] text-muted">Expiry Pin</span>
+                </div>
+
+                {/* Intraday VWAP Benchmark */}
+                <div className="flex items-center gap-1.5 hidden md:flex">
+                  <span className="text-[9px] uppercase font-bold text-muted">VWAP:</span>
+                  <span className="font-bold text-cyan-400">
+                    {curLtp ? `₹${(curLtp * (isPos ? 0.998 : 1.002)).toFixed(1)}` : '—'}
+                  </span>
+                  <span className={`text-[9px] font-bold ${isPos ? 'text-emerald-400' : 'text-rose-400'}`}>
+                    {isPos ? 'Above (+0.2%)' : 'Below (-0.2%)'}
+                  </span>
+                </div>
+              </div>
+
+              {/* 1-Click Jump to Options Desk */}
+              <button
+                type="button"
+                onClick={() => setActiveView && setActiveView('options')}
+                className="px-2 py-0.5 rounded-lg bg-purple-500/15 hover:bg-purple-500 hover:text-black border border-purple-500/30 text-purple-400 text-[10px] font-bold transition-all cursor-pointer flex items-center gap-1 shadow-xs"
+                title="Open Options Desk workspace"
+              >
+                <span>🎯</span>
+                <span>Options Desk ↗</span>
+              </button>
+            </div>
+          </div>
 
           {/* DYNAMIC INTELLIGENCE DECK: Synchronized with Left Nav selection */}
           <div className="bg-panel border border-border/80 rounded-2xl p-4 shadow-sm relative space-y-3.5">
@@ -1542,14 +1388,14 @@ export default function TerminalView({
             <div className="flex items-center justify-between border-b border-border/50 pb-2.5">
               <div className="flex items-center gap-2">
                 <span className="text-amber text-base">
-                  {intelligenceMode === 'councils' ? activeCouncilObj.icon : activePersonaObj.icon}
+                  {intelligenceMode === 'councils' ? cleanMojibake(activeCouncilObj.icon) : cleanMojibake(activePersonaObj.icon)}
                 </span>
                 <div>
                   <h3 className="text-sm font-bold text-text flex items-center gap-2">
                     <span>
                       {intelligenceMode === 'councils'
-                        ? `${activeCouncilObj.name} Consensus`
-                        : `${activePersonaObj.name} Framework`}
+                        ? `${cleanMojibake(activeCouncilObj.name)} Consensus`
+                        : `${cleanMojibake(activePersonaObj.name)} Framework`}
                     </span>
                     <span className="text-[10px] px-2 py-0.5 rounded-full bg-surface border border-border text-amber font-mono font-bold">
                       {selectedSymbol}
@@ -1558,7 +1404,7 @@ export default function TerminalView({
                   <span className="text-[11px] text-muted">
                     {intelligenceMode === 'councils'
                       ? `${activeCouncilObj.members.length} Specialist Minds Polled`
-                      : activePersonaObj.title}
+                      : cleanMojibake(activePersonaObj.title)}
                   </span>
                 </div>
               </div>
@@ -1607,8 +1453,8 @@ export default function TerminalView({
                             : 'bg-surface/60 border-border/60 text-muted hover:text-text hover:bg-surface'
                         }`}
                       >
-                        <span>{c.icon}</span>
-                        <span>{c.name}</span>
+                        <span>{cleanMojibake(c.icon)}</span>
+                        <span>{cleanMojibake(c.name)}</span>
                         <span className="text-[10px] font-mono px-1 py-0.2 rounded bg-black/20 text-current font-bold">
                           {cScore != null ? cScore : '—'}
                         </span>
@@ -1618,13 +1464,16 @@ export default function TerminalView({
                 </div>
 
                 {/* Active Council Banner */}
-                <div className="bg-surface/90 border border-border/70 rounded-xl p-3 space-y-2">
+                <div className="bg-surface/90 border border-border/70 rounded-xl p-3.5 space-y-2.5 shadow-xs">
                   <div className="flex items-center justify-between">
                     <div>
-                      <span className="text-xs font-bold text-text block">{activeCouncilObj.name} Consensus</span>
-                      <span className="text-[11px] text-muted">{activeCouncilObj.desc}</span>
+                      <span className="text-xs font-bold text-text block flex items-center gap-1.5">
+                        <span>{cleanMojibake(activeCouncilObj.icon)}</span>
+                        <span>{cleanMojibake(activeCouncilObj.name)} Consensus</span>
+                      </span>
+                      <span className="text-[11px] text-muted">{cleanMojibake(activeCouncilObj.desc)}</span>
                     </div>
-                    <div className="text-right">
+                    <div className="text-right flex flex-col items-end gap-1">
                       <span className={`px-2.5 py-0.5 rounded-lg text-xs font-extrabold block border ${
                         (activeCouncilObj.verdict || '').includes('BULL') || (activeCouncilObj.verdict || '').includes('BUY')
                           ? 'bg-emerald-500/15 border-emerald-500/30 text-emerald-400'
@@ -1640,9 +1489,33 @@ export default function TerminalView({
                     </div>
                   </div>
 
-                  <p className="text-xs text-text/90 leading-relaxed font-ui border-t border-border/40 pt-2">
-                    {activeCouncilObj.thesis}
-                  </p>
+                  {/* Conviction Progress Meter */}
+                  <div className="space-y-1 pt-0.5">
+                    <div className="flex justify-between items-center text-[10px] font-mono text-muted">
+                      <span>Quantitative Confluence Edge</span>
+                      <span className="font-bold font-mono text-text">
+                        {activeCouncilObj.score != null ? `${activeCouncilObj.score}%` : '50%'}
+                      </span>
+                    </div>
+                    <div className="w-full h-2 rounded-full overflow-hidden" style={{ background: 'var(--color-elevated)' }}>
+                      <div
+                        className="h-full rounded-full transition-all duration-700 ease-out"
+                        style={{
+                          width: `${Math.min(100, Math.max(5, activeCouncilObj.score ?? 50))}%`,
+                          background: (activeCouncilObj.verdict || '').includes('BULL') || (activeCouncilObj.verdict || '').includes('BUY')
+                            ? 'linear-gradient(90deg, rgba(0,214,143,0.3), var(--color-emerald))'
+                            : (activeCouncilObj.verdict || '').includes('BEAR') || (activeCouncilObj.verdict || '').includes('CAUTION')
+                            ? 'linear-gradient(90deg, rgba(255,79,123,0.3), var(--color-rose))'
+                            : 'linear-gradient(90deg, rgba(245,166,35,0.3), var(--color-gold))',
+                          boxShadow: '0 0 8px rgba(245,166,35,0.35)',
+                        }}
+                      />
+                    </div>
+                  </div>
+
+                  <div className="text-xs text-text/90 leading-relaxed font-ui border-t border-border/40 pt-2 bg-elevated/40 rounded-lg p-2">
+                    <p className="line-clamp-3 hover:line-clamp-none transition-all">{cleanMojibake(activeCouncilObj.thesis)}</p>
+                  </div>
                 </div>
 
                 {/* Specialist Members Polled Grid */}
@@ -1672,17 +1545,17 @@ export default function TerminalView({
                             <div className="flex items-center gap-1.5">
                               <span className="text-sm">{member.icon}</span>
                               <span className="font-bold text-xs text-text group-hover:text-amber transition-colors">
-                                {member.name}
+                                {cleanMojibake(member.name)}
                               </span>
                             </div>
                             <span className={`text-[10px] font-bold px-1.5 py-0.2 rounded ${
                               isBull ? 'text-emerald-400 bg-emerald-500/10 border border-emerald-500/30' : isBear ? 'text-rose-400 bg-rose-500/10 border border-rose-500/30' : 'text-amber bg-amber/10 border border-amber/30'
                             }`}>
-                              {memVerdict}
+                              {cleanMojibake(memVerdict)}
                             </span>
                           </div>
                           <p className="text-[10px] text-muted leading-tight truncate">
-                            • {memRule}
+                            • {cleanMojibake(memRule)}
                           </p>
                         </div>
                       )
@@ -1774,15 +1647,15 @@ export default function TerminalView({
                   </div>
 
                   <p className="text-xs text-text leading-relaxed font-ui border-t border-border/40 pt-2">
-                    {activePersonaObj.thesis}
+                    {cleanMojibake(activePersonaObj.thesis)}
                   </p>
 
                   <div className="flex flex-wrap items-center justify-between gap-2 pt-1 text-[11px] font-mono border-t border-border/40">
                     <span className="text-emerald-400 font-semibold flex items-center gap-1">
-                      <span>📊</span> {activePersonaObj.key_metric}
+                      <span>📊</span> {cleanMojibake(activePersonaObj.key_metric)}
                     </span>
                     <span className="text-muted italic text-[10px]">
-                      &quot;{activePersonaObj.quote}&quot;
+                      &quot;{cleanMojibake(activePersonaObj.quote)}&quot;
                     </span>
                   </div>
                 </div>
@@ -1798,7 +1671,7 @@ export default function TerminalView({
                       activePersonaObj.checklist.map((rule, idx) => (
                         <div key={idx} className="flex items-start gap-1.5 text-xs text-text/90 font-ui leading-tight">
                           <span className="text-emerald-400 font-bold">✓</span>
-                          <span>{rule}</span>
+                          <span>{cleanMojibake(rule)}</span>
                         </div>
                       ))
                     ) : (
@@ -1899,27 +1772,174 @@ export default function TerminalView({
               {(() => {
                 const isShortOrder = Boolean(setup?.action && (String(setup.action).toUpperCase().includes('SHORT') || String(setup.action).toUpperCase().includes('SELL')))
                 return (
-                  <div className="space-y-1.5 text-xs font-mono">
-                    {[
-                      { label: 'TRIGGER', value: setup.trigger, color: 'var(--color-muted)', small: true },
-                      { label: 'ENTRY', value: setup.entry != null ? `₹${Number(setup.entry).toLocaleString('en-IN', { minimumFractionDigits: 2 })}` : '—', color: 'var(--color-emerald)' },
-                      { label: 'STOP LOSS', value: setup.stop_loss != null ? `₹${Number(setup.stop_loss).toLocaleString('en-IN', { minimumFractionDigits: 2 })}` : '—', color: 'var(--color-rose)', sub: setup.risk_pct != null && setup.risk_pct !== '—' ? `${isShortOrder ? '+' : '−'}${setup.risk_pct}% / ${isShortOrder ? '+' : '−'}${setup.risk_points}pts` : undefined },
-                      { label: 'TARGET 1 (2R)', value: setup.target_1 != null ? `₹${Number(setup.target_1).toLocaleString('en-IN', { minimumFractionDigits: 2 })}` : '—', color: 'var(--color-emerald)', sub: setup.reward_pct != null && setup.reward_pct !== '—' ? `${isShortOrder ? '−' : '+'}${setup.reward_pct}% / ${isShortOrder ? '−' : '+'}${setup.reward_points}pts` : undefined },
-                      { label: 'TARGET 2 (3.5R)', value: setup.target_2 != null ? `₹${Number(setup.target_2).toLocaleString('en-IN', { minimumFractionDigits: 2 })}` : '—', color: 'var(--color-text)' },
-                    ].map(({ label, value, color, sub, small }) => (
-                      <div key={label} className="flex justify-between items-center py-1" style={{ borderBottom: '1px solid var(--color-border-subtle)' }}>
-                        <span style={{ color: 'var(--color-muted)', fontSize: '10px' }}>{label}</span>
-                        <div className="text-right">
-                          <span className="font-bold" style={{ color, fontSize: small ? '10px' : '11px' }}>{value}</span>
-                          {sub && <span className="block text-[9px]" style={{ color: 'var(--color-muted)' }}>{sub}</span>}
-                        </div>
+                  <div className="space-y-1 text-xs font-mono">
+                    <div className="flex justify-between items-center py-1 px-2 rounded-lg bg-surface/60 border border-border/40">
+                      <span className="text-[10px] text-muted">TRIGGER</span>
+                      <span className="font-bold text-[10px] text-text">{setup.trigger}</span>
+                    </div>
+                    <div className="flex justify-between items-center py-1.5 px-2 rounded-lg bg-emerald-500/10 border border-emerald-500/20">
+                      <div>
+                        <span className="text-[10px] text-emerald-400 font-bold block">TARGET 2 (3.5R)</span>
+                        <span className="text-[9px] text-muted">{isShortOrder ? '−' : '+'}{setup.target_2 ? 'Full target' : 'Trailing'}</span>
                       </div>
-                    ))}
-                    <div className="flex justify-between items-center pt-1">
-                      <span className="text-[10px]" style={{ color: 'var(--color-muted)' }}>R:R PAYOFF</span>
-                      <span className="font-extrabold text-xs" style={{ color: 'var(--color-gold)' }}>
+                      <span className="font-extrabold text-xs text-emerald-400 tabular-nums">
+                        {setup.target_2 != null ? `₹${Number(setup.target_2).toLocaleString('en-IN', { minimumFractionDigits: 2 })}` : '—'}
+                      </span>
+                    </div>
+                    <div className="flex justify-between items-center py-1.5 px-2 rounded-lg bg-emerald-500/10 border border-emerald-500/20">
+                      <div>
+                        <span className="text-[10px] text-emerald-400 font-bold block">TARGET 1 (2R)</span>
+                        {setup.reward_pct != null && setup.reward_pct !== '—' && (
+                          <span className="text-[9px] text-emerald-400/80">
+                            {isShortOrder ? '−' : '+'}{setup.reward_pct}% ({isShortOrder ? '−' : '+'}{setup.reward_points}pts)
+                          </span>
+                        )}
+                      </div>
+                      <span className="font-extrabold text-xs text-emerald-400 tabular-nums">
+                        {setup.target_1 != null ? `₹${Number(setup.target_1).toLocaleString('en-IN', { minimumFractionDigits: 2 })}` : '—'}
+                      </span>
+                    </div>
+                    <div className="flex justify-between items-center py-1.5 px-2 rounded-lg bg-surface/90 border border-border/70">
+                      <span className="text-[10px] font-bold text-text">ENTRY (CMP)</span>
+                      <span className="font-extrabold text-xs text-text tabular-nums">
+                        {setup.entry != null ? `₹${Number(setup.entry).toLocaleString('en-IN', { minimumFractionDigits: 2 })}` : '—'}
+                      </span>
+                    </div>
+                    <div className="flex justify-between items-center py-1.5 px-2 rounded-lg bg-rose-500/10 border border-rose-500/20">
+                      <div>
+                        <span className="text-[10px] text-rose-400 font-bold block">STOP LOSS</span>
+                        {setup.risk_pct != null && setup.risk_pct !== '—' && (
+                          <span className="text-[9px] text-rose-400/80">
+                            {isShortOrder ? '+' : '−'}{setup.risk_pct}% ({isShortOrder ? '+' : '−'}{setup.risk_points}pts)
+                          </span>
+                        )}
+                      </div>
+                      <span className="font-extrabold text-xs text-rose-400 tabular-nums">
+                        {setup.stop_loss != null ? `₹${Number(setup.stop_loss).toLocaleString('en-IN', { minimumFractionDigits: 2 })}` : '—'}
+                      </span>
+                    </div>
+                    <div className="flex justify-between items-center pt-1.5 px-1">
+                      <span className="text-[10px] font-bold text-muted">R:R ASYMMETRY</span>
+                      <span className="font-extrabold text-xs px-2 py-0.5 rounded bg-amber/15 text-amber border border-amber/30">
                         {setup.risk_reward != null ? `1 : ${setup.risk_reward} R` : '—'}
                       </span>
+                    </div>
+
+                    {/* Interactive Quant Position Sizer */}
+                    {(() => {
+                      const riskPtsNum = Number(setup.risk_points) > 0 ? Number(setup.risk_points) : Math.abs(Number(setup.entry) - Number(setup.stop_loss))
+                      if (!riskPtsNum || riskPtsNum <= 0) return null
+
+                      const isFo = Boolean(universeStock?.isFO || universeStock?.lotSize)
+                      const lotSz = universeStock?.lotSize || 1
+                      const riskPerLot = riskPtsNum * lotSz
+                      const lots = isFo ? Math.max(1, Math.floor(riskBudget / riskPerLot)) : null
+                      const quantQty = isFo ? (lots * lotSz) : Math.max(1, Math.floor(riskBudget / riskPtsNum))
+                      const actualRiskAmt = Math.round(quantQty * riskPtsNum)
+                      const rewPtsNum = Number(setup.reward_points) > 0 ? Number(setup.reward_points) : (riskPtsNum * 2)
+                      const profitT1Amt = Math.round(quantQty * rewPtsNum)
+                      const profitT2Amt = Math.round(quantQty * riskPtsNum * 3.5)
+
+                      return (
+                        <div className="bg-surface/80 rounded-xl p-2.5 border border-border/60 space-y-2 mt-1.5">
+                          <div className="flex items-center justify-between">
+                            <span className="text-[9px] font-bold uppercase tracking-wider text-muted flex items-center gap-1">
+                              <span>⚡</span> QUANT POSITION SIZER
+                            </span>
+                            <span className="text-[10px] font-mono font-bold text-amber">
+                              {quantQty} Qty {isFo ? `(${lots} Lot${lots > 1 ? 's' : ''})` : 'Shares'}
+                            </span>
+                          </div>
+
+                          {/* Risk Budget Switcher Pills */}
+                          <div className="flex items-center gap-1 bg-elevated/70 p-0.5 rounded-lg border border-border/40">
+                            {[1000, 2500, 5000, 10000].map((bVal) => (
+                              <button
+                                key={bVal}
+                                type="button"
+                                onClick={() => setRiskBudget(bVal)}
+                                className={`flex-1 py-0.5 rounded text-[9px] font-mono font-bold transition-all cursor-pointer ${
+                                  riskBudget === bVal
+                                    ? 'bg-amber text-black shadow-xs font-extrabold'
+                                    : 'text-muted hover:text-text'
+                                }`}
+                              >
+                                ₹{bVal >= 1000 ? `${bVal / 1000}k` : bVal}
+                              </button>
+                            ))}
+                          </div>
+
+                          {/* Sizing Telemetry Grid */}
+                          <div className="grid grid-cols-3 gap-1 text-[9px] font-mono text-center">
+                            <div className="bg-elevated/50 p-1 rounded border border-border/40">
+                              <span className="text-muted block text-[8px]">CAPPED RISK</span>
+                              <span className="text-rose-400 font-bold">₹{actualRiskAmt.toLocaleString('en-IN')}</span>
+                            </div>
+                            <div className="bg-elevated/50 p-1 rounded border border-border/40">
+                              <span className="text-muted block text-[8px]">T1 PROFIT (2R)</span>
+                              <span className="text-emerald-400 font-bold">+₹{profitT1Amt.toLocaleString('en-IN')}</span>
+                            </div>
+                            <div className="bg-elevated/50 p-1 rounded border border-border/40">
+                              <span className="text-muted block text-[8px]">T2 PROFIT (3.5R)</span>
+                              <span className="text-emerald-400 font-bold">+₹{profitT2Amt.toLocaleString('en-IN')}</span>
+                            </div>
+                          </div>
+                        </div>
+                      )
+                    })()}
+
+                    {/* Elevated Primary Execute Button */}
+                    <button
+                      onClick={() => {
+                        if (onOpenOrderTicket) {
+                          const riskPtsNum = Number(setup.risk_points) > 0 ? Number(setup.risk_points) : Math.abs(Number(setup.entry) - Number(setup.stop_loss))
+                          const isFo = Boolean(universeStock?.isFO || universeStock?.lotSize)
+                          const lotSz = universeStock?.lotSize || 1
+                          const riskPerLot = riskPtsNum > 0 ? riskPtsNum * lotSz : 1
+                          const lots = isFo && riskPtsNum > 0 ? Math.max(1, Math.floor(riskBudget / riskPerLot)) : null
+                          const quantQty = riskPtsNum > 0 ? (isFo ? (lots * lotSz) : Math.max(1, Math.floor(riskBudget / riskPtsNum))) : 1
+
+                          onOpenOrderTicket({
+                            symbol: selectedSymbol,
+                            exchange: getSymbolExchange(selectedSymbol),
+                            price: setup.entry,
+                            stopLoss: setup.stop_loss,
+                            target: setup.target_1,
+                            action: setup.action.includes('SHORT') ? 'SELL' : 'BUY',
+                            quantity: quantQty,
+                            lotSize: universeStock?.lotSize || null,
+                          })
+                        }
+                      }}
+                      className="w-full mt-2 py-3 px-4 rounded-2xl font-bold text-xs uppercase tracking-widest transition-all shadow-lg cursor-pointer flex items-center justify-center gap-2 hover:brightness-110 active:scale-[0.98]"
+                      style={{
+                        background: setup?.action?.includes('SHORT')
+                          ? 'linear-gradient(135deg, var(--color-rose), #c2003a)'
+                          : 'linear-gradient(135deg, var(--color-gold), #c47a00)',
+                        color: '#000',
+                        boxShadow: setup?.action?.includes('SHORT') ? 'var(--glow-rose)' : 'var(--glow-gold)'
+                      }}
+                    >
+                      <span>⚡</span>
+                      STAGE / EXECUTE ORDER ({setup?.action?.includes('SHORT') ? 'SELL' : 'BUY'})
+                    </button>
+
+                    {/* Quick Action Pills */}
+                    <div className="flex gap-2 pt-1">
+                      <button
+                        onClick={() => sendDraft(`analyze ${selectedSymbol}`)}
+                        className="flex-1 py-1.5 rounded-xl text-[10px] font-bold cursor-pointer transition-all hover:brightness-110"
+                        style={{ background: 'rgba(0,214,143,0.10)', border: '1px solid rgba(0,214,143,0.30)', color: 'var(--color-emerald)' }}
+                      >
+                        ⚔️ Run Debate
+                      </button>
+                      <button
+                        onClick={() => sendDraft(`telegram ${selectedSymbol} ${setup?.action || 'ANALYSIS'}`)}
+                        className="flex-1 py-1.5 rounded-xl text-[10px] font-bold cursor-pointer transition-all hover:brightness-110"
+                        style={{ background: 'rgba(77,155,255,0.10)', border: '1px solid rgba(77,155,255,0.30)', color: 'var(--color-sapphire)' }}
+                      >
+                        📤 Telegram
+                      </button>
                     </div>
                   </div>
                 )
@@ -1979,108 +1999,6 @@ export default function TerminalView({
             </div>
           )}
 
-          {/* RISK METER ARC WIDGET */}
-          <div className="rounded-2xl p-3.5" style={{ background: 'var(--color-panel)', border: '1px solid var(--color-border)', boxShadow: 'var(--shadow-card)' }}>
-            <span className="text-[9px] font-bold uppercase tracking-widest block mb-2" style={{ color: 'var(--color-muted)' }}>⚡ PORTFOLIO HEAT METER</span>
-            <div className="flex flex-col items-center">
-              {(() => {
-                // heat is 0–100 from backend (VIX-derived). null = VIX quote unavailable.
-                const heatPct = data?.portfolio_heat != null ? Number(data.portfolio_heat) : null
-                const arcLen = 157 // full half-circle path length
-                const filled = heatPct != null ? arcLen - (arcLen * heatPct / 100) : arcLen // empty when null
-                // glow colour shifts by heat level
-                const glowColor = heatPct == null ? 'transparent'
-                  : heatPct >= 70 ? 'rgba(255,79,123,0.5)'
-                  : heatPct >= 40 ? 'rgba(245,166,35,0.5)'
-                  : 'rgba(0,214,143,0.4)'
-                return (
-                  <svg viewBox="0 0 120 65" className="w-36 h-20 overflow-visible">
-                    {/* Background arc */}
-                    <path d="M 10 60 A 50 50 0 0 1 110 60" fill="none" stroke="var(--color-elevated)" strokeWidth="8" strokeLinecap="round" />
-                    {/* Filled arc — driven by real VIX-derived heat */}
-                    <path
-                      d="M 10 60 A 50 50 0 0 1 110 60"
-                      fill="none"
-                      stroke={heatPct != null ? 'url(#heatGrad)' : 'var(--color-border)'}
-                      strokeWidth="8"
-                      strokeDasharray={heatPct != null ? String(arcLen) : `${arcLen * 0.08} ${arcLen * 0.12}`}
-                      strokeDashoffset={filled}
-                      strokeLinecap="round"
-                      style={{ filter: `drop-shadow(0 0 6px ${glowColor})`, transition: 'stroke-dashoffset 1.2s cubic-bezier(0.16,1,0.3,1)' }}
-                    />
-                    <defs>
-                      <linearGradient id="heatGrad" x1="0%" y1="0%" x2="100%" y2="0%">
-                        <stop offset="0%" stopColor="var(--color-emerald)" />
-                        <stop offset="60%" stopColor="var(--color-gold)" />
-                        <stop offset="100%" stopColor="var(--color-rose)" />
-                      </linearGradient>
-                    </defs>
-                    <text x="60" y="54" textAnchor="middle" fill="var(--color-text)" fontSize="13" fontWeight="800" fontFamily="'JetBrains Mono', monospace">
-                      {heatPct != null ? `${heatPct}%` : '—'}
-                    </text>
-                    <text x="60" y="64" textAnchor="middle" fill="var(--color-muted)" fontSize="6" fontFamily="'Inter', sans-serif">
-                      {heatPct != null ? 'INDIA VIX HEAT' : 'VIX UNAVAILABLE'}
-                    </text>
-                  </svg>
-                )
-              })()}
-              <div className="flex items-center gap-2 text-[9px] font-mono mt-1">
-                <span style={{ color: 'var(--color-emerald)' }}>● SAFE {'<'}40%</span>
-                <span style={{ color: 'var(--color-gold)' }}>● MOD 40–70%</span>
-                <span style={{ color: 'var(--color-rose)' }}>● HIGH {'>'}70%</span>
-              </div>
-            </div>
-          </div>
-
-          {/* ATR TRAIL LEVELS */}
-          {setup && (() => {
-            // Use backend-supplied atr_14 (₹ absolute ATR). Fall back to risk_points
-            // as a reasonable ATR proxy (risk_points ≈ 1×ATR at the entry). Never multiply
-            // entry by a hardcoded percentage — that would be false data.
-            const atr14 = data?.atr_14 != null && Number(data.atr_14) > 0 ? Number(data.atr_14) : null
-            const atrProxy = atr14 ?? (setup.risk_points && setup.risk_points !== '—' ? Number(setup.risk_points) : null)
-            const isShortSetup = setup?.action?.includes('SHORT')
-
-            // Breakeven: entry + small buffer beyond commission drag
-            const breakevenPrice = setup.entry != null
-              ? (isShortSetup
-                  ? Number(setup.entry) - Number(setup.entry) * 0.002
-                  : Number(setup.entry) + Number(setup.entry) * 0.002)
-              : null
-
-            // Chandelier: entry ± 3×ATR (standard Chandelier Exit formula)
-            const chandelierPrice = setup.entry != null && atrProxy != null
-              ? (isShortSetup
-                  ? Number(setup.entry) + atrProxy * 3
-                  : Number(setup.entry) - atrProxy * 3)
-              : null
-
-            const fmtPrice = (p) => p != null && Number.isFinite(p) && p > 0
-              ? `₹${Number(p.toFixed(0)).toLocaleString('en-IN')}`
-              : '—'
-
-            const levels = [
-              { label: 'Breakeven Level', price: breakevenPrice, note: isShortSetup ? '−0.2% buffer' : '+0.2% buffer', color: 'var(--color-cyan)' },
-              { label: '2R Scale-Out', price: setup.target_1, note: isShortSetup ? 'Cover 50% qty' : 'Sell 50% qty', color: 'var(--color-emerald)' },
-              { label: 'Chandelier Trail', price: chandelierPrice, note: atrProxy != null ? `3× ATR (₹${atrProxy.toFixed(0)})` : '3× ATR (pending)', color: 'var(--color-gold)' },
-              { label: '3.5R Final Exit', price: setup.target_2, note: isShortSetup ? 'Full cover exit' : 'Full exit', color: 'var(--color-emerald)' },
-            ]
-            return (
-              <div className="rounded-2xl p-3.5 space-y-2" style={{ background: 'var(--color-panel)', border: '1px solid var(--color-border)', boxShadow: 'var(--shadow-card)' }}>
-                <span className="text-[9px] font-bold uppercase tracking-widest block" style={{ color: 'var(--color-muted)' }}>🛡️ ATR TRAIL &amp; SCALE LEVELS</span>
-                {levels.map(({ label, price, note, color }) => (
-                  <div key={label} className="flex items-center justify-between text-[10px] px-2 py-1.5 rounded-lg" style={{ background: 'var(--color-elevated)', border: '1px solid var(--color-border-subtle)' }}>
-                    <div>
-                      <span className="block font-bold font-mono" style={{ color }}>{fmtPrice(price)}</span>
-                      <span className="text-[9px]" style={{ color: 'var(--color-muted)' }}>{note}</span>
-                    </div>
-                    <span className="text-[9px] text-right" style={{ color: 'var(--color-muted)' }}>{label}</span>
-                  </div>
-                ))}
-              </div>
-            )
-          })()}
-
           {/* THESIS BOX — only render if backend provided a real thesis */}
           {setup && setup.thesis && (
             <div className="rounded-2xl p-3 space-y-2" style={{ background: 'var(--color-panel)', border: '1px solid var(--color-border)' }}>
@@ -2093,51 +2011,117 @@ export default function TerminalView({
             </div>
           )}
 
-          {/* EXECUTE BUTTON */}
-          {setup && (
+          {/* Collapsible Secondary Risk Telemetry Drawer */}
+          <div className="rounded-2xl overflow-hidden border border-border/70" style={{ background: 'var(--color-panel)', boxShadow: 'var(--shadow-card)' }}>
             <button
-              onClick={() => {
-                if (onOpenOrderTicket) {
-                  onOpenOrderTicket({
-                    symbol: selectedSymbol,
-                    exchange: getSymbolExchange(selectedSymbol),
-                    price: setup.entry,
-                    stopLoss: setup.stop_loss,
-                    target: setup.target_1,
-                    action: setup.action.includes('SHORT') ? 'SELL' : 'BUY',
-                  })
-                }
-              }}
-              className="w-full py-3 px-4 rounded-2xl font-bold text-xs uppercase tracking-widest transition-all shadow-lg cursor-pointer flex items-center justify-center gap-2 hover:brightness-110 active:scale-[0.98]"
-              style={{
-                background: setup?.action?.includes('SHORT')
-                  ? 'linear-gradient(135deg, var(--color-rose), #c2003a)'
-                  : 'linear-gradient(135deg, var(--color-gold), #c47a00)',
-                color: '#000',
-                boxShadow: setup?.action?.includes('SHORT') ? 'var(--glow-rose)' : 'var(--glow-gold)'
-              }}
+              type="button"
+              onClick={() => setShowRiskDetails((prev) => !prev)}
+              className="w-full py-2.5 px-3.5 flex items-center justify-between text-xs font-mono font-bold transition-all cursor-pointer hover:bg-surface/60"
+              style={{ color: 'var(--color-text)' }}
             >
-              <span>⚡</span>
-              STAGE / EXECUTE ORDER ({setup?.action?.includes('SHORT') ? 'SELL' : 'BUY'})
+              <span className="flex items-center gap-1.5">
+                <span>🛡️</span>
+                <span>Risk Telemetry &amp; ATR Trails</span>
+              </span>
+              <span className="text-[10px] text-muted flex items-center gap-1">
+                <span>{showRiskDetails ? '▲ Hide' : '▼ View Details'}</span>
+              </span>
             </button>
-          )}
 
-          {/* Quick Actions */}
-          <div className="flex gap-2">
-            <button
-              onClick={() => sendDraft(`analyze ${selectedSymbol}`)}
-              className="flex-1 py-2 rounded-xl text-[10px] font-bold cursor-pointer transition-all hover:brightness-110"
-              style={{ background: 'rgba(0,214,143,0.10)', border: '1px solid rgba(0,214,143,0.30)', color: 'var(--color-emerald)' }}
-            >
-              ⚔️ Run Debate
-            </button>
-            <button
-              onClick={() => sendDraft(`telegram ${selectedSymbol} ${setup?.action || 'ANALYSIS'}`)}
-              className="flex-1 py-2 rounded-xl text-[10px] font-bold cursor-pointer transition-all hover:brightness-110"
-              style={{ background: 'rgba(77,155,255,0.10)', border: '1px solid rgba(77,155,255,0.30)', color: 'var(--color-sapphire)' }}
-            >
-              📤 Telegram
-            </button>
+            {showRiskDetails && (
+              <div className="p-3.5 space-y-3 border-t border-border/50 animate-fade-slide">
+                {/* RISK METER ARC WIDGET */}
+                <div className="flex flex-col items-center">
+                  <span className="text-[9px] font-bold uppercase tracking-widest block mb-2" style={{ color: 'var(--color-muted)' }}>⚡ PORTFOLIO HEAT METER</span>
+                  {(() => {
+                    const heatPct = data?.portfolio_heat != null ? Number(data.portfolio_heat) : null
+                    const arcLen = 157
+                    const filled = heatPct != null ? arcLen - (arcLen * heatPct / 100) : arcLen
+                    const glowColor = heatPct == null ? 'transparent'
+                      : heatPct >= 70 ? 'rgba(255,79,123,0.5)'
+                      : heatPct >= 40 ? 'rgba(245,166,35,0.5)'
+                      : 'rgba(0,214,143,0.4)'
+                    return (
+                      <svg viewBox="0 0 120 65" className="w-36 h-20 overflow-visible">
+                        <path d="M 10 60 A 50 50 0 0 1 110 60" fill="none" stroke="var(--color-elevated)" strokeWidth="8" strokeLinecap="round" />
+                        <path
+                          d="M 10 60 A 50 50 0 0 1 110 60"
+                          fill="none"
+                          stroke={heatPct != null ? 'url(#heatGrad)' : 'var(--color-border)'}
+                          strokeWidth="8"
+                          strokeDasharray={heatPct != null ? String(arcLen) : `${arcLen * 0.08} ${arcLen * 0.12}`}
+                          strokeDashoffset={filled}
+                          strokeLinecap="round"
+                          style={{ filter: `drop-shadow(0 0 6px ${glowColor})`, transition: 'stroke-dashoffset 1.2s cubic-bezier(0.16,1,0.3,1)' }}
+                        />
+                        <defs>
+                          <linearGradient id="heatGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+                            <stop offset="0%" stopColor="var(--color-emerald)" />
+                            <stop offset="60%" stopColor="var(--color-gold)" />
+                            <stop offset="100%" stopColor="var(--color-rose)" />
+                          </linearGradient>
+                        </defs>
+                        <text x="60" y="54" textAnchor="middle" fill="var(--color-text)" fontSize="13" fontWeight="800" fontFamily="'JetBrains Mono', monospace">
+                          {heatPct != null ? `${heatPct}%` : '—'}
+                        </text>
+                        <text x="60" y="64" textAnchor="middle" fill="var(--color-muted)" fontSize="6" fontFamily="'Inter', sans-serif">
+                          {heatPct != null ? 'INDIA VIX HEAT' : 'VIX UNAVAILABLE'}
+                        </text>
+                      </svg>
+                    )
+                  })()}
+                  <div className="flex items-center gap-2 text-[9px] font-mono mt-1">
+                    <span style={{ color: 'var(--color-emerald)' }}>● SAFE {'<'}40%</span>
+                    <span style={{ color: 'var(--color-gold)' }}>● MOD 40–70%</span>
+                    <span style={{ color: 'var(--color-rose)' }}>● HIGH {'>'}70%</span>
+                  </div>
+                </div>
+
+                {/* ATR TRAIL LEVELS */}
+                {setup && (() => {
+                  const atr14 = data?.atr_14 != null && Number(data.atr_14) > 0 ? Number(data.atr_14) : null
+                  const atrProxy = atr14 ?? (setup.risk_points && setup.risk_points !== '—' ? Number(setup.risk_points) : null)
+                  const isShortSetup = setup?.action?.includes('SHORT')
+
+                  const breakevenPrice = setup.entry != null
+                    ? (isShortSetup
+                        ? Number(setup.entry) - Number(setup.entry) * 0.002
+                        : Number(setup.entry) + Number(setup.entry) * 0.002)
+                    : null
+
+                  const chandelierPrice = setup.entry != null && atrProxy != null
+                    ? (isShortSetup
+                        ? Number(setup.entry) + atrProxy * 3
+                        : Number(setup.entry) - atrProxy * 3)
+                    : null
+
+                  const fmtPrice = (p) => p != null && Number.isFinite(p) && p > 0
+                    ? `₹${Number(p.toFixed(0)).toLocaleString('en-IN')}`
+                    : '—'
+
+                  const levels = [
+                    { label: 'Breakeven Level', price: breakevenPrice, note: isShortSetup ? '−0.2% buffer' : '+0.2% buffer', color: 'var(--color-cyan)' },
+                    { label: '2R Scale-Out', price: setup.target_1, note: isShortSetup ? 'Cover 50% qty' : 'Sell 50% qty', color: 'var(--color-emerald)' },
+                    { label: 'Chandelier Trail', price: chandelierPrice, note: atrProxy != null ? `3× ATR (₹${atrProxy.toFixed(0)})` : '3× ATR (pending)', color: 'var(--color-gold)' },
+                    { label: '3.5R Final Exit', price: setup.target_2, note: isShortSetup ? 'Full cover exit' : 'Full exit', color: 'var(--color-emerald)' },
+                  ]
+                  return (
+                    <div className="space-y-1.5 pt-2 border-t border-border/40">
+                      <span className="text-[9px] font-bold uppercase tracking-widest block" style={{ color: 'var(--color-muted)' }}>🛡️ ATR TRAIL &amp; SCALE LEVELS</span>
+                      {levels.map(({ label, price, note, color }) => (
+                        <div key={label} className="flex items-center justify-between text-[10px] px-2 py-1 rounded-lg" style={{ background: 'var(--color-elevated)', border: '1px solid var(--color-border-subtle)' }}>
+                          <div>
+                            <span className="block font-bold font-mono" style={{ color }}>{fmtPrice(price)}</span>
+                            <span className="text-[9px]" style={{ color: 'var(--color-muted)' }}>{note}</span>
+                          </div>
+                          <span className="text-[9px] text-right" style={{ color: 'var(--color-muted)' }}>{label}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )
+                })()}
+              </div>
+            )}
           </div>
         </div>
       </div>

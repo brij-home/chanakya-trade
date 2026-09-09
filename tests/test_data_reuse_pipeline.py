@@ -53,8 +53,10 @@ class TestDataReusePipeline:
             change_pct=0.30,
         )
 
-        with patch("market.quotes.get_data_broker") as mock_broker_fn, \
-             patch("market.quotes._yf_fallback_quotes") as mock_yf:
+        with (
+            patch("market.quotes.get_data_broker") as mock_broker_fn,
+            patch("market.quotes._yf_fallback_quotes"),
+        ):
             mock_broker = MagicMock()
             mock_broker.get_quote.return_value = {"NSE:INFY": fake_quote}
             mock_broker_fn.return_value = mock_broker
@@ -74,14 +76,19 @@ class TestDataReusePipeline:
 
             # Call 4: With bypass_cache=True, forces query
             q4 = get_quote(["NSE:INFY"], bypass_cache=True)
+            assert "NSE:INFY" in q4
             assert mock_broker.get_quote.call_count == 2
 
     def test_get_ohlcv_reuses_eod_store(self):
         """Verify market.history.get_ohlcv retrieves from engine.eod_store when available."""
         df_sample = _generate_synthetic_ohlcv(50)
 
-        with patch("engine.eod_store.get_ohlcv_batch", return_value={"TATAMOTORS": df_sample}) as mock_store, \
-             patch("market.history._yfinance_fallback") as mock_yf:
+        with (
+            patch(
+                "engine.eod_store.get_ohlcv_batch", return_value={"TATAMOTORS": df_sample}
+            ) as mock_store,
+            patch("market.history._yfinance_fallback") as mock_yf,
+        ):
             res_df = get_ohlcv("TATAMOTORS", interval="day", days=30)
             assert not res_df.empty
             assert len(res_df) >= 20  # 30 calendar days = ~21 business days
@@ -92,16 +99,46 @@ class TestDataReusePipeline:
     def test_get_ohlcv_persists_to_eod_store_on_vendor_fetch(self):
         """Verify market.history.get_ohlcv saves fresh vendor fetches to engine.eod_store."""
         raw_rows = [
-            {"date": "2026-09-01", "open": 100.0, "high": 105.0, "low": 99.0, "close": 104.0, "volume": 10000.0},
-            {"date": "2026-09-02", "open": 104.0, "high": 108.0, "low": 103.0, "close": 107.0, "volume": 12000.0},
-            {"date": "2026-09-03", "open": 107.0, "high": 110.0, "low": 106.0, "close": 109.0, "volume": 15000.0},
-            {"date": "2026-09-04", "open": 109.0, "high": 112.0, "low": 108.0, "close": 111.0, "volume": 14000.0},
+            {
+                "date": "2026-09-01",
+                "open": 100.0,
+                "high": 105.0,
+                "low": 99.0,
+                "close": 104.0,
+                "volume": 10000.0,
+            },
+            {
+                "date": "2026-09-02",
+                "open": 104.0,
+                "high": 108.0,
+                "low": 103.0,
+                "close": 107.0,
+                "volume": 12000.0,
+            },
+            {
+                "date": "2026-09-03",
+                "open": 107.0,
+                "high": 110.0,
+                "low": 106.0,
+                "close": 109.0,
+                "volume": 15000.0,
+            },
+            {
+                "date": "2026-09-04",
+                "open": 109.0,
+                "high": 112.0,
+                "low": 108.0,
+                "close": 111.0,
+                "volume": 14000.0,
+            },
         ]
 
-        with patch("engine.eod_store.get_ohlcv_batch", return_value={}), \
-             patch("engine.eod_store.save_ohlcv_batch") as mock_save, \
-             patch("market.history._yfinance_fallback", return_value=raw_rows), \
-             patch("market.history.save_ohlcv_cache"):
+        with (
+            patch("engine.eod_store.get_ohlcv_batch", return_value={}),
+            patch("engine.eod_store.save_ohlcv_batch") as mock_save,
+            patch("market.history._yfinance_fallback", return_value=raw_rows),
+            patch("market.history.save_ohlcv_cache"),
+        ):
             res_df = get_ohlcv("NEWSTOCK", interval="day", days=10)
             assert not res_df.empty
             mock_save.assert_called_once()
@@ -125,8 +162,12 @@ class TestDataReusePipeline:
             "dxy": mock_gm_item,
         }
 
-        with patch("market.global_macro.get_global_macro_snapshot", return_value=mock_gm) as mock_fetch, \
-             patch("engine.analysis_cache.analysis_cache.get_macro", return_value=None):
+        with (
+            patch(
+                "market.global_macro.get_global_macro_snapshot", return_value=mock_gm
+            ) as mock_fetch,
+            patch("engine.analysis_cache.analysis_cache.get_macro", return_value=None),
+        ):
             snap = get_macro_snapshot()
             assert snap.usdinr == 85.25
             assert snap.usdinr_change == -0.15

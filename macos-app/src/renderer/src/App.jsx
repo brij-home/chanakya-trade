@@ -18,6 +18,7 @@ import { useToastStore } from './hooks/useToast'
 
 // ── Lazy-loaded Workspace Views (Code-Split Chunks) ─────────────────────────
 const TerminalView = lazy(() => import('./components/Views/TerminalView'))
+const ChartStudioView = lazy(() => import('./components/Views/ChartStudioView'))
 const InflectionScannerView = lazy(() => import('./components/Views/InflectionScannerView'))
 const DebateArenaView = lazy(() => import('./components/Views/DebateArenaView'))
 const OptionsDeskView = lazy(() => import('./components/Views/OptionsDeskView'))
@@ -490,6 +491,7 @@ export default function App() {
           style={{ background: 'var(--color-elevated)', border: '1px solid var(--color-border)' }}
         >
           <WorkspaceTab id="terminal"  icon="📊" label="Terminal"    active={activeView === 'terminal'}  color="gold"     onClick={() => document.startViewTransition?.(() => setActiveView('terminal'))  ?? setActiveView('terminal')} shortcut="^1" />
+          <WorkspaceTab id="charts"    icon="📈" label="Charts"      active={activeView === 'charts'}    color="cyan"     onClick={() => document.startViewTransition?.(() => setActiveView('charts'))    ?? setActiveView('charts')} shortcut="^C" />
           <WorkspaceTab id="scanner"   icon="🎯" label="Inflection"  active={activeView === 'scanner'}   color="amber"    onClick={() => document.startViewTransition?.(() => setActiveView('scanner'))   ?? setActiveView('scanner')} shortcut="^0" />
           <WorkspaceTab id="debate"    icon="⚔️" label="Debate"      active={activeView === 'debate'}    color="emerald"  onClick={() => document.startViewTransition?.(() => setActiveView('debate'))    ?? setActiveView('debate')} shortcut="^2" />
           <WorkspaceTab id="options"   icon="⚡" label="Options"     active={activeView === 'options'}   color="violet"   onClick={() => document.startViewTransition?.(() => setActiveView('options'))   ?? setActiveView('options')} shortcut="^3" />
@@ -591,6 +593,14 @@ export default function App() {
                   onTimeframeChange={setCtxTimeframe}
                   externalLayout={ctxLayout}
                   onLayoutChange={setCtxLayout}
+                />
+              )}
+
+              {activeView === 'charts' && (
+                <ChartStudioView
+                  onOpenOrderTicket={handleOpenOrderTicket}
+                  initialSymbol={selectedSymbol || ctxSymbol}
+                  initialTimeframe={ctxTimeframe}
                 />
               )}
 

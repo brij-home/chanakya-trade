@@ -10,7 +10,7 @@ Fallback chain:
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Any, Optional
 
 import pandas as pd
 
@@ -162,7 +162,9 @@ def get_options_snapshot(
         "is_realtime": False,
         "as_of": now_utc,
         "as_of_display": now_ist,
-        "source_label": f"BSE {clean_u} Broker Required for BFO" if is_bse else "Data Feed Unavailable",
+        "source_label": f"BSE {clean_u} Broker Required for BFO"
+        if is_bse
+        else "Data Feed Unavailable",
     }
     return [], None, [], source_info
 

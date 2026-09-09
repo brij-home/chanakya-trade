@@ -204,7 +204,13 @@ class TestOptionsScanner:
             # Ghost strike: 12 contracts, high % change
             {"symbol": "NIFTY", "strike": 22000, "oi": 12, "oi_change": 12, "oi_change_pct": 1200},
             # Institutional block: 100k contracts, 150% change
-            {"symbol": "NIFTY", "strike": 23800, "oi": 100000, "oi_change": 60000, "oi_change_pct": 150},
+            {
+                "symbol": "NIFTY",
+                "strike": 23800,
+                "oi": 100000,
+                "oi_change": 60000,
+                "oi_change_pct": 150,
+            },
         ]
         # With min_oi=250 and min_oi_change=100, ghost strike must be filtered out
         filtered = filter_unusual_oi(strikes, threshold=100, min_oi=250, min_oi_change=100)
@@ -216,12 +222,48 @@ class TestOptionsScanner:
         from market.options_scanner import filter_unusual_oi
 
         strikes = [
-            {"symbol": "NIFTY", "strike": 23750, "option_type": "CE", "oi_change_pct": 500, "oi_change": 50000},
-            {"symbol": "NIFTY", "strike": 23800, "option_type": "CE", "oi_change_pct": 750, "oi_change": 120000},
-            {"symbol": "NIFTY", "strike": 23850, "option_type": "CE", "oi_change_pct": 600, "oi_change": 80000},
-            {"symbol": "BANKNIFTY", "strike": 53000, "option_type": "PE", "oi_change_pct": 320, "oi_change": 40000},
-            {"symbol": "BANKNIFTY", "strike": 53500, "option_type": "PE", "oi_change_pct": 410, "oi_change": 45000},
-            {"symbol": "RELIANCE", "strike": 3000, "option_type": "CE", "oi_change_pct": 180, "oi_change": 15000},
+            {
+                "symbol": "NIFTY",
+                "strike": 23750,
+                "option_type": "CE",
+                "oi_change_pct": 500,
+                "oi_change": 50000,
+            },
+            {
+                "symbol": "NIFTY",
+                "strike": 23800,
+                "option_type": "CE",
+                "oi_change_pct": 750,
+                "oi_change": 120000,
+            },
+            {
+                "symbol": "NIFTY",
+                "strike": 23850,
+                "option_type": "CE",
+                "oi_change_pct": 600,
+                "oi_change": 80000,
+            },
+            {
+                "symbol": "BANKNIFTY",
+                "strike": 53000,
+                "option_type": "PE",
+                "oi_change_pct": 320,
+                "oi_change": 40000,
+            },
+            {
+                "symbol": "BANKNIFTY",
+                "strike": 53500,
+                "option_type": "PE",
+                "oi_change_pct": 410,
+                "oi_change": 45000,
+            },
+            {
+                "symbol": "RELIANCE",
+                "strike": 3000,
+                "option_type": "CE",
+                "oi_change_pct": 180,
+                "oi_change": 15000,
+            },
         ]
 
         deduped = filter_unusual_oi(strikes, threshold=100, dedup_by_symbol=True)
@@ -252,4 +294,3 @@ class TestOptionsScanner:
         for item in results.get("unusual_oi", []):
             assert "contract" in item
             assert "oi_change_pct" in item
-

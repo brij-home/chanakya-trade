@@ -157,6 +157,7 @@ class TestStockSectorAlignment:
 
     def test_titagarh_railways_sector_alignment(self):
         from analysis.sector_rotation import get_stock_tailwind
+
         tw = get_stock_tailwind("TITAGARH")
         assert tw.symbol == "TITAGARH"
         assert tw.sector == "INFRA"

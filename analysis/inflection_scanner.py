@@ -251,9 +251,7 @@ def evaluate_single_stock_inflection(
     # 2. VCP Contraction Detection
     is_vcp, vcp_contractions, vcp_pivot = detect_vcp(df)
     vcp_tightness = (
-        round(vcp_contractions[-1].depth_pct, 1)
-        if (is_vcp and vcp_contractions)
-        else 0.0
+        round(vcp_contractions[-1].depth_pct, 1) if (is_vcp and vcp_contractions) else 0.0
     )
 
     # 3. TTM Squeeze Detection
@@ -369,7 +367,9 @@ def evaluate_single_stock_inflection(
         pivot_dist_pct = abs(ltp - vcp_pivot) / vcp_pivot * 100.0
         if pivot_dist_pct <= 3.0:
             base_vcp += 15
-            confluence_factors.append(f"At VCP Pivot ₹{vcp_pivot:.1f} (within {pivot_dist_pct:.1f}%)")
+            confluence_factors.append(
+                f"At VCP Pivot ₹{vcp_pivot:.1f} (within {pivot_dist_pct:.1f}%)"
+            )
 
         archetype_scores["VCP_PIVOT_BREAKOUT"] = base_vcp
 
@@ -419,7 +419,9 @@ def evaluate_single_stock_inflection(
         base_rrg = 45 + int(sector_tailwind * 0.4)
         if rrg_quadrant == "LEADING":
             base_rrg += 10
-            confluence_factors.append(f"Sector {sector_name} LEADING Benchmark ({sector_tailwind}/100)")
+            confluence_factors.append(
+                f"Sector {sector_name} LEADING Benchmark ({sector_tailwind}/100)"
+            )
         else:
             base_rrg += 5
             confluence_factors.append(f"Sector {sector_name} IMPROVING into Leading")
@@ -605,9 +607,29 @@ def evaluate_single_stock_inflection(
     is_fo = clean_sym in THEMATIC_PRESETS.get("fno_universe", {}).get("symbols", [])
 
     # 3-Pillar Unified Matrix Scores
-    tech_score = int(min(40, (max_archetype_score * 0.22) + (trend_passed * 1.5) + (8 if weekly_stage == "WEEKLY_STAGE_2" else 0) + (4 if is_vcp or squeeze.is_squeeze_on else 0)))
-    sec_score = int(min(30, (15 if rrg_quadrant == "LEADING" else (10 if rrg_quadrant == "IMPROVING" else 4)) + (sector_tailwind * 0.15)))
-    qual_score = int(min(30, (20 if forensic_safe else 0) + (10 if turnover_20d_cr >= 1.0 else (6 if turnover_20d_cr >= 0.5 else 2))))
+    tech_score = int(
+        min(
+            40,
+            (max_archetype_score * 0.22)
+            + (trend_passed * 1.5)
+            + (8 if weekly_stage == "WEEKLY_STAGE_2" else 0)
+            + (4 if is_vcp or squeeze.is_squeeze_on else 0),
+        )
+    )
+    sec_score = int(
+        min(
+            30,
+            (15 if rrg_quadrant == "LEADING" else (10 if rrg_quadrant == "IMPROVING" else 4))
+            + (sector_tailwind * 0.15),
+        )
+    )
+    qual_score = int(
+        min(
+            30,
+            (20 if forensic_safe else 0)
+            + (10 if turnover_20d_cr >= 1.0 else (6 if turnover_20d_cr >= 0.5 else 2)),
+        )
+    )
     confluence_total = int(min(99, tech_score + sec_score + qual_score))
 
     # Executive Action Verdict
@@ -730,7 +752,9 @@ def scan_inflections_universe(
             cache_state = "LOCAL_SQLITE_EOD"
 
             if sync_missing:
-                missing = [s for s in symbols if s not in df_cache and not s.upper().startswith("DUMMY")]
+                missing = [
+                    s for s in symbols if s not in df_cache and not s.upper().startswith("DUMMY")
+                ]
                 # Auto-sync up to 60 missing symbols synchronously if explicitly requested
                 if missing and len(missing) <= 60:
                     sync_universe_eod(missing, exchange=exchange)
@@ -797,9 +821,7 @@ def scan_inflections_universe(
 
     for c in candidates:
         # Tally counts
-        archetype_counts[c.primary_archetype] = (
-            archetype_counts.get(c.primary_archetype, 0) + 1
-        )
+        archetype_counts[c.primary_archetype] = archetype_counts.get(c.primary_archetype, 0) + 1
         timing_counts[c.timing_state] = timing_counts.get(c.timing_state, 0) + 1
 
         # Check archetype filter

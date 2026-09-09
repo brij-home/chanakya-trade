@@ -229,8 +229,8 @@ export default function ContextBar({
         />
       </div>
 
-      {/* Timeframe pills */}
-      {onTimeframeChange && (
+      {/* Timeframe pills — only shown for views that require timeframe selection (not Terminal) */}
+      {activeView !== 'terminal' && onTimeframeChange && (
         <div
           className="flex items-center p-0.5 rounded-xl text-xs gap-px flex-shrink-0"
           style={{ background: 'var(--color-elevated)', border: '1px solid var(--color-border)' }}
@@ -252,8 +252,8 @@ export default function ContextBar({
         </div>
       )}
 
-      {/* Layout switcher */}
-      {onLayoutChange && (
+      {/* Layout switcher — only for views with multi-pane layouts */}
+      {activeView !== 'terminal' && onLayoutChange && (
         <div
           className="flex items-center p-0.5 rounded-xl text-xs gap-px flex-shrink-0"
           style={{ background: 'var(--color-elevated)', border: '1px solid var(--color-border)' }}
@@ -276,34 +276,12 @@ export default function ContextBar({
         </div>
       )}
 
-      {/* Terminal View: Chart visibility quick toggle */}
-      {activeView === 'terminal' && toggleTerminalShowChart && (
-        <button
-          type="button"
-          onClick={toggleTerminalShowChart}
-          title={terminalShowChart ? 'Hide Candlestick Chart' : 'Show Candlestick Chart (Default: Hidden)'}
-          className="flex items-center gap-1.5 px-2.5 py-1 rounded-xl text-xs font-bold transition-all cursor-pointer border shadow-xs"
-          style={
-            terminalShowChart
-              ? { background: 'rgba(245,166,35,0.15)', borderColor: 'rgba(245,166,35,0.5)', color: 'var(--color-gold)' }
-              : { background: 'var(--color-elevated)', borderColor: 'var(--color-border)', color: 'var(--color-muted)' }
-          }
-        >
-          <span>{terminalShowChart ? '📉' : '📊'}</span>
-          <span>{terminalShowChart ? 'Chart ON' : 'Chart OFF'}</span>
-        </button>
-      )}
-
-      {/* Key market metrics strip — only shown in non-terminal views to eliminate duplication */}
-      {activeView !== 'terminal' && (
-        <>
-          <div
-            className="hidden md:block h-4 w-px flex-shrink-0"
-            style={{ background: 'var(--color-border)' }}
-          />
-          <LiveIndexTicker onSymbolChange={onSymbolChange} />
-        </>
-      )}
+      {/* Key market metrics strip */}
+      <div
+        className="hidden md:block h-4 w-px flex-shrink-0"
+        style={{ background: 'var(--color-border)' }}
+      />
+      <LiveIndexTicker onSymbolChange={onSymbolChange} />
     </div>
   )
 }

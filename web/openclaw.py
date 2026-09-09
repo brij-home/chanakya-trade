@@ -338,9 +338,18 @@ MANIFEST: dict = {
             "input_schema": {
                 "type": "object",
                 "properties": {
-                    "limit": {"type": "integer", "description": "Max alerts to return (default 50)"},
-                    "alert_type": {"type": "string", "description": "Filter by GAMMA_BLAST, SQUEEZE_BREAKOUT, CIRCUIT_WARNING"},
-                    "stage": {"type": "string", "description": "Filter by EARLY_WARNING or IGNITED"},
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max alerts to return (default 50)",
+                    },
+                    "alert_type": {
+                        "type": "string",
+                        "description": "Filter by GAMMA_BLAST, SQUEEZE_BREAKOUT, CIRCUIT_WARNING",
+                    },
+                    "stage": {
+                        "type": "string",
+                        "description": "Filter by EARLY_WARNING or IGNITED",
+                    },
                 },
             },
             "output_description": "List of AutoAlert objects with quantitative proof metrics and actionable trade plans.",

@@ -118,7 +118,9 @@ def test_delta_append_and_metadata_integrity():
     assert meta1["bar_count"] == 100
 
     # Append 5 new delta days
-    df_delta = _generate_synthetic_df("TEST_RELIANCE", days=5, end_date="2026-09-04", base_price=160.0)
+    df_delta = _generate_synthetic_df(
+        "TEST_RELIANCE", days=5, end_date="2026-09-04", base_price=160.0
+    )
     save_ohlcv_batch({"TEST_RELIANCE": df_delta})
 
     meta2 = get_symbol_meta("TEST_RELIANCE")
@@ -191,7 +193,9 @@ def test_liquidity_filter_control():
     assert setup is None
 
     # Should be accepted when min_turnover_cr is 0.0
-    setup_allow = evaluate_single_stock_inflection("PENNY_STOCK", df=df_illiquid, min_turnover_cr=0.0)
+    setup_allow = evaluate_single_stock_inflection(
+        "PENNY_STOCK", df=df_illiquid, min_turnover_cr=0.0
+    )
     assert setup_allow is not None
     assert setup_allow.turnover_20d_cr < 0.05
 
@@ -203,5 +207,7 @@ def test_circuit_lock_and_weekly_alignment():
     assert setup is not None
     assert setup.circuit_state == "UPPER_CIRCUIT_LOCKED"
     assert setup.execution_ticket["is_executable"] is False
-    assert "Upper Circuit" in setup.confluence_factors[0] or any("Circuit" in c for c in setup.confluence_factors)
+    assert "Upper Circuit" in setup.confluence_factors[0] or any(
+        "Circuit" in c for c in setup.confluence_factors
+    )
     assert setup.weekly_stage == "WEEKLY_STAGE_2"

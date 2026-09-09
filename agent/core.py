@@ -985,6 +985,7 @@ def _get_nse_symbols() -> set[str]:
     if _NSE_ALL_SYMBOLS is None:
         try:
             from config.paths import DATA_DIR
+
             p = DATA_DIR / "universes" / "nse_all_eq.json"
             if p.exists():
                 import json

@@ -46,7 +46,7 @@ Register these redirect URIs in your broker developer consoles:
 
 from __future__ import annotations
 
-from typing import Optional, Any, Dict, List
+from typing import Optional
 import json
 import os
 import sys
@@ -65,7 +65,7 @@ if sys.platform == "win32":
         except Exception:
             pass
 
-from fastapi import FastAPI, Request as _Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request as _Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse, StreamingResponse
 
 from web.auth import auth_router, init_db as init_auth_db, get_session, user_count
@@ -186,6 +186,7 @@ async def lifespan(app: FastAPI):
     # Start the autonomous real-time auto alert engine (45s loop)
     try:
         from engine.auto_alert_engine import auto_alert_engine
+
         auto_alert_engine.start_polling(interval_seconds=45)
     except Exception:
         pass
@@ -197,6 +198,7 @@ async def lifespan(app: FastAPI):
     maintenance_task.cancel()
     try:
         from engine.auto_alert_engine import auto_alert_engine
+
         auto_alert_engine.stop_polling()
     except Exception:
         pass
@@ -2776,9 +2778,11 @@ async def get_auto_alerts(
     environment: Optional[str] = None,
     is_invalidated: Optional[bool] = None,
     target_status: Optional[str] = None,
+    view_mode: str = "ALL",  # "ACTIVE" | "ARCHIVED" | "ALL"
+    is_archived: Optional[bool] = None,
 ):
     """
-    Get real-time auto-detected alerts (Gamma Blasts, Squeeze Breakouts, Circuit Warnings, SMC).
+    Get real-time auto-detected alerts with active/archived partitioning (Gamma Blasts, Squeezes, SMC).
     """
     from engine.auto_alert_engine import auto_alert_engine
 
@@ -2789,8 +2793,54 @@ async def get_auto_alerts(
         environment=environment,
         is_invalidated=is_invalidated,
         target_status=target_status,
+        view_mode=view_mode,
+        is_archived=is_archived,
     )
     return {"status": "ok", "data": [a.to_dict() for a in alerts]}
+
+
+@app.post("/api/alerts/auto/archive", tags=["Alerts"])
+async def archive_auto_alert(payload: dict):
+    """Archive or restore an alert by ID."""
+    from engine.auto_alert_engine import auto_alert_engine
+
+    alert_id = payload.get("alert_id")
+    archive = payload.get("archive", True)
+    reason = payload.get("reason")
+    if not alert_id:
+        raise HTTPException(status_code=400, detail="Missing alert_id")
+    alert = auto_alert_engine.archive_alert_by_id(alert_id, archive=archive, reason=reason)
+    if not alert:
+        raise HTTPException(status_code=404, detail=f"Alert {alert_id} not found")
+    return {"status": "ok", "data": alert.to_dict()}
+
+
+@app.post("/api/alerts/auto/cleanup", tags=["Alerts"])
+async def cleanup_auto_alerts(payload: Optional[dict] = None):
+    """Cleanup archived alerts older than max_age_days (default 3 days)."""
+    from engine.auto_alert_engine import auto_alert_engine
+
+    days = payload.get("max_age_days", 3) if payload else 3
+    purged = auto_alert_engine.cleanup_archived_records(max_age_days=days)
+    surviving = auto_alert_engine.get_alerts(limit=500)
+    return {
+        "status": "ok",
+        "data": {
+            "purged_count": purged,
+            "remaining_count": len(surviving),
+            "max_age_days": days,
+        },
+    }
+
+
+@app.post("/api/quotes/batch", tags=["Market Data"])
+async def api_quotes_batch(req: dict):
+    """Sidecar batch quote query endpoint."""
+    from web.skills import BatchQuotesRequest, skill_quotes_batch
+
+    symbols = req.get("symbols", []) if isinstance(req, dict) else []
+    exchange = req.get("exchange", "NSE") if isinstance(req, dict) else "NSE"
+    return await skill_quotes_batch(BatchQuotesRequest(symbols=symbols, exchange=exchange))
 
 
 # ── Real-Time Market Ticker Stream (Indian & Global) ───────────
@@ -3081,7 +3131,6 @@ async def get_preflight_diagnostics():
 
 
 from pydantic import BaseModel, field_validator
-from typing import Optional
 
 
 class CalculateChargesRequest(BaseModel):
@@ -3513,23 +3562,52 @@ async def api_audit_verify():
 _static_dir = os.path.join(os.path.dirname(__file__), "static")
 if os.path.isdir(_static_dir):
     from fastapi.staticfiles import StaticFiles
-    from fastapi.responses import FileResponse
+    from fastapi.responses import FileResponse, RedirectResponse
+    from fastapi import Request
+
+    _NO_CACHE_HEADERS = {
+        "Cache-Control": "no-cache, no-store, must-revalidate, max-age=0",
+        "Pragma": "no-cache",
+        "Expires": "0",
+    }
+
+    async def _check_vite_running() -> bool:
+        """Probe if Vite dev server is running on port 5173 with low latency."""
+        try:
+            import httpx
+
+            async with httpx.AsyncClient(timeout=0.35) as client:
+                for target in ("http://localhost:5173/", "http://127.0.0.1:5173/"):
+                    try:
+                        res = await client.get(target)
+                        if res.status_code == 200:
+                            return True
+                    except Exception:
+                        continue
+            return False
+        except Exception:
+            return False
 
     @app.get("/app")
     @app.get("/app/{rest_of_path:path}")
-    async def serve_spa(rest_of_path: str = ""):
-        """Serve React SPA for all /app/* routes."""
+    async def serve_spa(request: Request, rest_of_path: str = ""):
+        """Serve React SPA for all /app/* routes. In dev mode with Vite active, routes to 5173 for live HMR."""
+        if request.query_params.get("static") != "true" and await _check_vite_running():
+            return RedirectResponse("http://localhost:5173/")
         index = os.path.join(_static_dir, "index.html")
         if os.path.exists(index):
-            return FileResponse(index)
+            return FileResponse(index, headers=_NO_CACHE_HEADERS)
         raise _HTTPException(404, "Web UI not built")
 
     @app.get("/")
-    async def root():
-        """Serve React SPA terminal at root URL /."""
+    async def root(request: Request):
+        """Serve React SPA terminal at root URL /.
+        If Vite dev server is active on 5173, seamlessly redirects there for instant Hot Module Replacement."""
+        if request.query_params.get("static") != "true" and await _check_vite_running():
+            return RedirectResponse("http://localhost:5173/")
         index = os.path.join(_static_dir, "index.html")
         if os.path.exists(index):
-            return FileResponse(index)
-        return FileResponse(os.path.join(_static_dir, "auth.html"))
+            return FileResponse(index, headers=_NO_CACHE_HEADERS)
+        return FileResponse(os.path.join(_static_dir, "auth.html"), headers=_NO_CACHE_HEADERS)
 
     app.mount("/static", StaticFiles(directory=_static_dir), name="static")

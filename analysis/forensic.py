@@ -257,6 +257,7 @@ def fetch_reported_accounting_inputs(symbol: str) -> dict[str, Any]:
     # 2. Query statements via yfinance
     try:
         from market.yfinance_provider import _to_yf_symbol
+
         yf_sym = _to_yf_symbol(clean_sym)
     except Exception:
         yf_sym = f"{clean_sym}.NS"
@@ -307,7 +308,9 @@ def fetch_reported_accounting_inputs(symbol: str) -> dict[str, Any]:
     ta = _get_val(bs, ["Total Assets"])
     ca = _get_val(bs, ["Current Assets"])
     cl = _get_val(bs, ["Current Liabilities"])
-    wc = _get_val(bs, ["Working Capital"]) or ((ca - cl) if ca is not None and cl is not None else None)
+    wc = _get_val(bs, ["Working Capital"]) or (
+        (ca - cl) if ca is not None and cl is not None else None
+    )
     re = _get_val(bs, ["Retained Earnings"]) or 0.0
     ebit = _get_val(inc, ["EBIT", "Operating Income", "Pretax Income"])
     bve = _get_val(
@@ -321,8 +324,12 @@ def fetch_reported_accounting_inputs(symbol: str) -> dict[str, Any]:
     # Beneish M-Score inputs (t0 vs t1)
     rev_t = _get_val(inc, ["Total Revenue", "Operating Revenue"], 0)
     rev_t1 = _get_val(inc, ["Total Revenue", "Operating Revenue"], 1)
-    rec_t = _get_val(bs, ["Accounts Receivable", "Gross Accounts Receivable", "Receivables"], 0) or 0.0
-    rec_t1 = _get_val(bs, ["Accounts Receivable", "Gross Accounts Receivable", "Receivables"], 1) or 0.0
+    rec_t = (
+        _get_val(bs, ["Accounts Receivable", "Gross Accounts Receivable", "Receivables"], 0) or 0.0
+    )
+    rec_t1 = (
+        _get_val(bs, ["Accounts Receivable", "Gross Accounts Receivable", "Receivables"], 1) or 0.0
+    )
     cogs_t = _get_val(inc, ["Cost Of Revenue", "Reconciled Cost Of Revenue"], 0)
     cogs_t1 = _get_val(inc, ["Cost Of Revenue", "Reconciled Cost Of Revenue"], 1)
     ta_t1 = _get_val(bs, ["Total Assets"], 1)
@@ -410,17 +417,9 @@ def fetch_reported_accounting_inputs(symbol: str) -> dict[str, Any]:
         if (bve and bve > 0)
         else (info.get("debtToEquity", 0) / 100.0 if info.get("debtToEquity") else 0.0)
     )
-    current_ratio = (
-        (ca / cl) if (ca and cl and cl > 0) else (info.get("currentRatio") or 1.0)
-    )
-    sales_growth = (
-        ((rev_t - rev_t1) / rev_t1 * 100.0) if (rev_t and rev_t1 and rev_t1 > 0) else 0.0
-    )
-    roce = (
-        (ebit / (ta - (cl or 0.0)) * 100.0)
-        if (ta and cl and (ta - cl) > 0 and ebit)
-        else roe
-    )
+    current_ratio = (ca / cl) if (ca and cl and cl > 0) else (info.get("currentRatio") or 1.0)
+    sales_growth = ((rev_t - rev_t1) / rev_t1 * 100.0) if (rev_t and rev_t1 and rev_t1 > 0) else 0.0
+    roce = (ebit / (ta - (cl or 0.0)) * 100.0) if (ta and cl and (ta - cl) > 0 and ebit) else roe
 
     pledged_pct = 0.0
     promoter_holding = None
@@ -435,6 +434,7 @@ def fetch_reported_accounting_inputs(symbol: str) -> dict[str, Any]:
 
     try:
         from analysis.fundamental import analyse
+
         snap = analyse(clean_sym)
         if snap:
             pledged_pct = snap.pledged_pct if snap.pledged_pct is not None else 0.0
@@ -505,8 +505,13 @@ def audit_forensics(
     if use_cache and data is None:
         try:
             from engine.eod_store import get_cached_forensics
+
             cached_eod = get_cached_forensics(clean_sym, max_age_days=30)
-            if cached_eod and isinstance(cached_eod, dict) and cached_eod.get("available") is not False:
+            if (
+                cached_eod
+                and isinstance(cached_eod, dict)
+                and cached_eod.get("available") is not False
+            ):
                 c = dict(cached_eod)
                 c.pop("overall_forensic_verdict", None)
                 c.pop("updated_at", None)

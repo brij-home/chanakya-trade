@@ -289,7 +289,13 @@ class TechnicalAnalyst(BaseAnalyst):
 
             if result.get("rsi") is not None:
                 rsi = result["rsi"]
-                zone = "overbought (>70)" if rsi > 70 else "oversold (<30)" if rsi < 30 else "neutral zone (30-70)"
+                zone = (
+                    "overbought (>70)"
+                    if rsi > 70
+                    else "oversold (<30)"
+                    if rsi < 30
+                    else "neutral zone (30-70)"
+                )
                 points.append(f"RSI(14, {timeframe}): {rsi:.1f} ({zone})")
 
             if result.get("macd") is not None:
@@ -311,10 +317,14 @@ class TechnicalAnalyst(BaseAnalyst):
             if result.get("sma200"):
                 ltp = result.get("ltp", 0.0)
                 sma_rel = "above" if ltp > result["sma200"] else "below"
-                points.append(f"DMA200({timeframe}): Price {sma_rel} 200 DMA ({result['sma200']:.1f})")
+                points.append(
+                    f"DMA200({timeframe}): Price {sma_rel} 200 DMA ({result['sma200']:.1f})"
+                )
 
             if result.get("support") and result.get("resistance"):
-                points.append(f"Levels({timeframe}): S1 ₹{result['support']:.1f} | R1 ₹{result['resistance']:.1f}")
+                points.append(
+                    f"Levels({timeframe}): S1 ₹{result['support']:.1f} | R1 ₹{result['resistance']:.1f}"
+                )
 
             if as_of:
                 points.append(f"Provenance: {data_source} as of {as_of}")

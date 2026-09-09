@@ -141,7 +141,7 @@ def test_gamma_blast_no_panic_returns_empty():
             last_price=50.0,
             oi=100000,
             oi_change=15000,  # positive
-            volume=50000,     # Vol/OI = 0.5x
+            volume=50000,  # Vol/OI = 0.5x
         ),
     ]
 
@@ -158,12 +158,14 @@ def test_detect_squeeze_breakout_early_warning():
     lows = [c - 3.0 for c in closes]
     volumes = [100000 for _ in range(30)]
 
-    df = pd.DataFrame({
-        "close": closes,
-        "high": highs,
-        "low": lows,
-        "volume": volumes,
-    })
+    df = pd.DataFrame(
+        {
+            "close": closes,
+            "high": highs,
+            "low": lows,
+            "volume": volumes,
+        }
+    )
 
     # 20-day high is around 2520, LTP is 2505 (around 0.6% below pivot)
     pivot_high = float(np.max(highs[-21:-1]))
@@ -636,7 +638,9 @@ def test_create_test_target_alert():
     assert t1_test.trailing_stop == 2865.0
 
     # Final Target Test Alert with full profit booking (no trail)
-    final_test = engine.create_test_target_alert(milestone="FINAL", should_trail=False, symbol="TCS")
+    final_test = engine.create_test_target_alert(
+        milestone="FINAL", should_trail=False, symbol="TCS"
+    )
     assert final_test.environment == "TEST"
     assert final_test.stage == "TARGET_ACHIEVED"
     assert final_test.should_trail is False
@@ -644,7 +648,9 @@ def test_create_test_target_alert():
     assert "DO NOT TRAIL FURTHER" in final_test.trailing_rationale
 
     # Trail SL Ratchet Test Alert
-    trail_test = engine.create_test_target_alert(milestone="TRAIL", should_trail=True, symbol="INFY")
+    trail_test = engine.create_test_target_alert(
+        milestone="TRAIL", should_trail=True, symbol="INFY"
+    )
     assert trail_test.environment == "TEST"
     assert trail_test.stage == "TRAILING_UPDATE"
     assert trail_test.should_trail is True
@@ -712,7 +718,9 @@ def test_decisive_telegram_formatting_and_one_shot_dispatch(monkeypatch):
     engine.clear_alerts()
 
     dispatched_messages = []
-    monkeypatch.setattr("engine.alerts._telegram_notify", lambda msg: dispatched_messages.append(msg))
+    monkeypatch.setattr(
+        "engine.alerts._telegram_notify", lambda msg: dispatched_messages.append(msg)
+    )
 
     alert = AutoAlert(
         alert_id="decisive-test-1",
@@ -796,3 +804,491 @@ def test_telegram_bot_send_push_deduplication_buffer(monkeypatch):
     assert len(sent_calls) == 2
 
 
+def test_early_warning_coiling_alert_header_and_plan_formatting(monkeypatch):
+    """Verify that early-warning coiling alerts use EARLY WARNING header and correct mathematical signs."""
+    from engine.auto_alert_engine import AutoAlert, AutoAlertEngine
+
+    dispatched = []
+    monkeypatch.setattr("engine.alerts._telegram_notify", lambda msg: dispatched.append(msg))
+    monkeypatch.setattr("engine.alerts._is_market_hours", lambda exchange="NSE": True)
+
+    engine = AutoAlertEngine()
+    alert = AutoAlert(
+        alert_id="test-coiling-header",
+        alert_type="PATTERN_COILING",
+        stage="EARLY_WARNING",
+        symbol="MANKIND",
+        exchange="NSE",
+        direction="BULLISH",
+        headline="💎 PRE-BLAST COILING: MANKIND at ₹2,285.4",
+        summary="Healthy Volume Contraction.",
+        ltp=2285.4,
+        trigger_level=2285.4,
+        target_level=2400.0,
+        stop_loss=2271.5,
+        confidence=90,
+        is_live=True,
+        environment="LIVE",
+    )
+
+    engine._dispatch(alert)
+    assert len(dispatched) == 1
+    msg = dispatched[0]
+
+    # Header must be EARLY WARNING, not BREAKOUT IGNITED!
+    assert "EARLY WARNING" in msg
+    assert "BREAKOUT IGNITED" not in msg
+
+    # Direction and Trade plan checks
+    assert "Action:</b> BUY" in msg
+    assert "Invalidation SL:</b> <code>₹" in msg
+    assert "Target 1:</b> <code>₹" in msg
+    assert "EXCELLENT_ASYMMETRY" in msg
+    assert "session ~21:" not in msg and "ETA: ~21:" not in msg, (
+        "Off-market 21:xx hours must not appear in equity ETA"
+    )
+
+
+def test_bearish_alert_header_and_plan_formatting(monkeypatch):
+    """Verify that a bearish ignited alert formats SELL action, positive risk pts, and negative reward pts."""
+    from engine.auto_alert_engine import AutoAlert, AutoAlertEngine
+
+    dispatched = []
+    monkeypatch.setattr("engine.alerts._telegram_notify", lambda msg: dispatched.append(msg))
+    monkeypatch.setattr("engine.alerts._is_market_hours", lambda exchange="NSE": True)
+
+    engine = AutoAlertEngine()
+    alert = AutoAlert(
+        alert_id="test-short-ignited",
+        alert_type="SMC_SWEEP",
+        stage="IGNITED",
+        symbol="INFY",
+        exchange="NSE",
+        direction="BEARISH",
+        headline="Liquidity Sweep Wick Rejection: INFY at ₹1,850.0",
+        summary="CHoCH bearish shift confirmed.",
+        ltp=1850.0,
+        trigger_level=1850.0,
+        target_level=1800.0,
+        stop_loss=1870.0,
+        confidence=92,
+        is_live=True,
+        environment="LIVE",
+    )
+
+    engine._dispatch(alert)
+    assert len(dispatched) == 1
+    msg = dispatched[0]
+
+    # Header must reflect IGNITED
+    assert "BREAKOUT IGNITED" in msg
+    # Action must be SELL for bearish
+    assert "Action:</b> SELL" in msg
+
+
+def test_options_alert_uses_options_plan_directly(monkeypatch):
+    """Verify that options alerts format contract plan directly without running equity spot calculator."""
+    from engine.auto_alert_engine import AutoAlert, AutoAlertEngine
+
+    dispatched = []
+    monkeypatch.setattr("engine.alerts._telegram_notify", lambda msg: dispatched.append(msg))
+    monkeypatch.setattr("engine.alerts._is_market_hours", lambda exchange="NSE": True)
+
+    engine = AutoAlertEngine()
+    alert = AutoAlert(
+        alert_id="test-gamma-plan",
+        alert_type="GAMMA_BLAST",
+        stage="IGNITED",
+        symbol="NIFTY",
+        exchange="NFO",
+        direction="BULLISH",
+        headline="⚡ CALL GAMMA BLAST IGNITED: NIFTY 24500 CE",
+        summary="Call writers shedding 18.5% OI.",
+        ltp=45.0,
+        trigger_level=24500.0,
+        target_level=99.0,
+        stop_loss=29.0,
+        strike=24500.0,
+        option_type="CE",
+        contract_symbol="NIFTY24500CE",
+        actionable_plan={
+            "action": "BUY",
+            "instrument": "NIFTY24500CE",
+            "recommended_entry": "₹45.0",
+            "target": "₹99.0 (+120%)",
+            "stop_loss": "₹29.0 (-35%)",
+            "risk_reward": "1:3.4",
+        },
+        confidence=95,
+        is_live=True,
+        environment="LIVE",
+    )
+
+    engine._dispatch(alert)
+    assert len(dispatched) == 1
+    msg = dispatched[0]
+
+    assert "Data-Driven Options Plan" in msg
+    assert "NIFTY24500CE" in msg
+    assert "₹99.0 (+120%)" in msg
+    assert "₹29.0 (-35%)" in msg
+
+
+def test_auto_alert_is_active_and_archived_properties():
+    """Verify is_active is True only when trade is not archived, not invalidated, and not completed."""
+    from engine.auto_alert_engine import AutoAlert
+
+    # Active alert
+    a_active = AutoAlert(
+        alert_id="a-active",
+        alert_type="SQUEEZE_BREAKOUT",
+        stage="IGNITED",
+        symbol="TCS",
+        exchange="NSE",
+        direction="BULLISH",
+        headline="Breakout",
+        summary="Testing active",
+        ltp=4200.0,
+        trigger_level=4200.0,
+        target_level=4400.0,
+        stop_loss=4100.0,
+    )
+    assert a_active.is_active is True
+    assert a_active.is_archived is False
+
+    # Invalidated alert
+    a_inval = AutoAlert(
+        alert_id="a-inval",
+        alert_type="SQUEEZE_BREAKOUT",
+        stage="INVALIDATED",
+        symbol="TCS",
+        exchange="NSE",
+        direction="BULLISH",
+        headline="Invalidated",
+        summary="Stop breached",
+        ltp=4080.0,
+        trigger_level=4200.0,
+        target_level=4400.0,
+        stop_loss=4100.0,
+        is_invalidated=True,
+    )
+    assert a_inval.is_active is False
+
+    # Manually archived alert
+    a_archived = AutoAlert(
+        alert_id="a-arch",
+        alert_type="SQUEEZE_BREAKOUT",
+        stage="IGNITED",
+        symbol="TCS",
+        exchange="NSE",
+        direction="BULLISH",
+        headline="Archived",
+        summary="User archived",
+        ltp=4250.0,
+        trigger_level=4200.0,
+        target_level=4400.0,
+        stop_loss=4100.0,
+        is_archived=True,
+    )
+    assert a_archived.is_active is False
+
+    # Completed target alert
+    a_completed = AutoAlert(
+        alert_id="a-comp",
+        alert_type="SQUEEZE_BREAKOUT",
+        stage="TARGET_ACHIEVED",
+        symbol="TCS",
+        exchange="NSE",
+        direction="BULLISH",
+        headline="Target reached",
+        summary="Done",
+        ltp=4410.0,
+        trigger_level=4200.0,
+        target_level=4400.0,
+        stop_loss=4100.0,
+        target_status="TARGET_ACHIEVED",
+    )
+    assert a_completed.is_active is False
+
+
+def test_classify_expiry_type():
+    """Verify weekly vs monthly expiry classification for equities and indices."""
+    from engine.auto_alert_engine import classify_expiry_type
+
+    # Non-index equity stocks on NSE only have monthly expiries
+    assert classify_expiry_type("2026-09-17", symbol="RELIANCE") == "MONTHLY"
+    assert classify_expiry_type("2026-09-24", symbol="TCS") == "MONTHLY"
+
+    # Index options: mid-month expiry is WEEKLY, month-end expiry is MONTHLY
+    # 2026-09-17 + 7 days = 2026-09-24 (same month) -> WEEKLY
+    assert classify_expiry_type("2026-09-17", symbol="NIFTY") == "WEEKLY"
+    # 2026-09-24 + 7 days = 2026-10-01 (next month) -> MONTHLY
+    assert classify_expiry_type("2026-09-24", symbol="NIFTY") == "MONTHLY"
+    assert classify_expiry_type("2026-09-24", symbol="BANKNIFTY") == "MONTHLY"
+
+
+def test_archive_alert_by_id():
+    """Verify archiving and unarchiving an alert by ID."""
+    from engine.auto_alert_engine import AutoAlert, AutoAlertEngine
+
+    engine = AutoAlertEngine()
+    alert = AutoAlert(
+        alert_id="test-archive-123",
+        alert_type="SQUEEZE_BREAKOUT",
+        stage="IGNITED",
+        symbol="HDFCBANK",
+        exchange="NSE",
+        direction="BULLISH",
+        headline="Breakout",
+        summary="Test",
+        ltp=1650.0,
+        trigger_level=1650.0,
+        target_level=1750.0,
+        stop_loss=1600.0,
+    )
+    with engine._lock:
+        engine._alerts.insert(0, alert)
+
+    assert alert.is_active is True
+
+    # Archive
+    res = engine.archive_alert_by_id("test-archive-123", archive=True, reason="Clutter cleanup")
+    assert res is not None
+    assert res.is_archived is True
+    assert res.is_active is False
+    assert res.archive_reason == "Clutter cleanup"
+
+    # Unarchive / Restore
+    res2 = engine.archive_alert_by_id("test-archive-123", archive=False)
+    assert res2 is not None
+    assert res2.is_archived is False
+    assert res2.is_active is True
+
+
+def test_cleanup_archived_records_leaves_active_trades_intact():
+    """Verify cleanup_archived_records deletes only inactive records older than max_age_days, NEVER active trades."""
+    from datetime import datetime, timedelta, timezone
+    from engine.auto_alert_engine import AutoAlert, AutoAlertEngine
+
+    IST = timezone(timedelta(hours=5, minutes=30))
+    engine = AutoAlertEngine()
+
+    old_date = (datetime.now(IST) - timedelta(days=5)).strftime("%Y-%m-%d %H:%M:%S IST")
+    recent_date = (datetime.now(IST) - timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S IST")
+
+    # 1. Old ACTIVE trade (>5 days old, but still valid): MUST BE RETAINED!
+    old_active = AutoAlert(
+        alert_id="old-active-trade",
+        alert_type="SQUEEZE_BREAKOUT",
+        stage="IGNITED",
+        symbol="LT",
+        exchange="NSE",
+        direction="BULLISH",
+        headline="Swing trade holding valid",
+        summary="Active",
+        ltp=3600.0,
+        trigger_level=3550.0,
+        target_level=3800.0,
+        stop_loss=3480.0,
+        created_at=old_date,
+        is_archived=False,
+    )
+
+    # 2. Old ARCHIVED trade (>5 days old): MUST BE PURGED!
+    old_archived = AutoAlert(
+        alert_id="old-archived-trade",
+        alert_type="SQUEEZE_BREAKOUT",
+        stage="INVALIDATED",
+        symbol="SBIN",
+        exchange="NSE",
+        direction="BULLISH",
+        headline="Old invalidation",
+        summary="Purge me",
+        ltp=780.0,
+        trigger_level=800.0,
+        target_level=850.0,
+        stop_loss=790.0,
+        is_invalidated=True,
+        is_archived=True,
+        invalidated_at=old_date,
+        created_at=old_date,
+    )
+
+    # 3. Recent ARCHIVED trade (1 day old): MUST BE RETAINED (within 3 days)!
+    recent_archived = AutoAlert(
+        alert_id="recent-archived-trade",
+        alert_type="SQUEEZE_BREAKOUT",
+        stage="INVALIDATED",
+        symbol="WIPRO",
+        exchange="NSE",
+        direction="BULLISH",
+        headline="Recent invalidation",
+        summary="Keep me for 3 days",
+        ltp=520.0,
+        trigger_level=540.0,
+        target_level=580.0,
+        stop_loss=530.0,
+        is_invalidated=True,
+        is_archived=True,
+        invalidated_at=recent_date,
+        created_at=recent_date,
+    )
+
+    with engine._lock:
+        engine._alerts = [old_active, old_archived, recent_archived]
+
+    purged = engine.cleanup_archived_records(max_age_days=3)
+    assert purged == 1
+
+    remaining_ids = [a.alert_id for a in engine._alerts]
+    assert "old-active-trade" in remaining_ids, (
+        "Active valid trade must NEVER be deleted during cleanup!"
+    )
+    assert "recent-archived-trade" in remaining_ids, (
+        "Recent archived trade within 3 days must be kept!"
+    )
+    assert "old-archived-trade" not in remaining_ids, (
+        "Old archived trade older than 3 days must be purged!"
+    )
+
+
+def test_get_alerts_view_mode_filtering():
+    """Verify get_alerts(view_mode='ACTIVE') vs get_alerts(view_mode='ARCHIVED')."""
+    from engine.auto_alert_engine import AutoAlert, AutoAlertEngine
+
+    engine = AutoAlertEngine()
+
+    a1 = AutoAlert(
+        alert_id="vm-active-1",
+        alert_type="SQUEEZE_BREAKOUT",
+        stage="IGNITED",
+        symbol="INFY",
+        exchange="NSE",
+        direction="BULLISH",
+        headline="Active",
+        summary="",
+        ltp=1850.0,
+        trigger_level=1850.0,
+        target_level=1950.0,
+        stop_loss=1800.0,
+    )
+    a2 = AutoAlert(
+        alert_id="vm-archived-1",
+        alert_type="SQUEEZE_BREAKOUT",
+        stage="INVALIDATED",
+        symbol="TCS",
+        exchange="NSE",
+        direction="BULLISH",
+        headline="Invalidated",
+        summary="",
+        ltp=4100.0,
+        trigger_level=4200.0,
+        target_level=4400.0,
+        stop_loss=4150.0,
+        is_invalidated=True,
+        is_archived=True,
+    )
+
+    with engine._lock:
+        engine._alerts = [a1, a2]
+        engine._save()
+
+    active_list = engine.get_alerts(view_mode="ACTIVE")
+    assert len(active_list) == 1
+    assert active_list[0].alert_id == "vm-active-1"
+
+    archived_list = engine.get_alerts(view_mode="ARCHIVED")
+    assert len(archived_list) == 1
+    assert archived_list[0].alert_id == "vm-archived-1"
+
+    all_list = engine.get_alerts(view_mode="ALL")
+    assert len(all_list) == 2
+
+
+def test_auto_alert_expiration_and_reaping():
+    """Verify that expired derivative contracts and stale Gamma Blasts are flagged and reaped."""
+    engine = AutoAlertEngine(max_buffer=50)
+    engine.clear_alerts()
+
+    # 1. Past explicit expiry
+    past_exp = AutoAlert(
+        alert_id="t-exp-1",
+        alert_type="GAMMA_BLAST",
+        stage="IGNITED",
+        symbol="NIFTY",
+        exchange="NFO",
+        direction="BEARISH",
+        headline="NIFTY Put",
+        summary="",
+        ltp=150.0,
+        trigger_level=24000.0,
+        target_level=23500.0,
+        stop_loss=24200.0,
+        expiry_date="2026-09-01",
+        strike=24000.0,
+        option_type="PE",
+    )
+    assert past_exp.is_expired is True
+    assert past_exp.is_active is False
+
+    # 2. FINNIFTY created on 2026-09-07 (weekly Tuesday expiry was 2026-09-08)
+    finnifty_exp = AutoAlert(
+        alert_id="t-exp-finnifty",
+        alert_type="GAMMA_BLAST",
+        stage="IGNITED",
+        symbol="FINNIFTY",
+        exchange="NFO",
+        direction="BEARISH",
+        headline="FINNIFTY Put",
+        summary="",
+        ltp=25.0,
+        trigger_level=26000.0,
+        target_level=25500.0,
+        stop_loss=26200.0,
+        created_at="2026-09-07 16:07:14 IST",
+        strike=26000.0,
+        option_type="PE",
+        contract_symbol="FINNIFTY26000PE",
+    )
+    assert finnifty_exp.is_expired is True
+    assert finnifty_exp.is_active is False
+
+    # 3. Active future contract: SBIN monthly expiring end of September
+    sbin_active = AutoAlert(
+        alert_id="t-active-sbin",
+        alert_type="GAMMA_BLAST",
+        stage="IGNITED",
+        symbol="SBIN",
+        exchange="NFO",
+        direction="BEARISH",
+        headline="SBIN Put",
+        summary="",
+        ltp=20.55,
+        trigger_level=1010.0,
+        target_level=950.0,
+        stop_loss=1040.0,
+        created_at="2026-09-09 13:25:48 IST",
+        expiry_date="2026-09-29",
+        strike=1010.0,
+        option_type="PE",
+        contract_symbol="SBIN1010PE",
+    )
+    assert sbin_active.is_expired is False
+    assert sbin_active.is_active is True
+
+    # 4. Reaping test
+    with engine._lock:
+        engine._alerts = [past_exp, finnifty_exp, sbin_active]
+        engine._save()
+
+    reaped_count = engine.reap_expired_alerts()
+    assert reaped_count == 2
+    assert past_exp.is_archived is True
+    assert past_exp.stage == "EXPIRED"
+    assert finnifty_exp.is_archived is True
+    assert sbin_active.is_archived is False
+
+    # Only SBIN should be returned in ACTIVE view
+    active_alerts = engine.get_alerts(view_mode="ACTIVE")
+    assert len(active_alerts) == 1
+    assert active_alerts[0].alert_id == "t-active-sbin"

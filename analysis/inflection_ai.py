@@ -31,6 +31,8 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Optional
 
+import pandas as pd
+
 # UTF-8 console output for Windows
 if sys.platform == "win32":
     if sys.stdout and hasattr(sys.stdout, "reconfigure"):
@@ -140,7 +142,7 @@ def _build_deterministic_5w_decision(
     # 3. WHERE: Precise Price Coordinates & Sizing
     where = {
         "entry_zone": f"₹{entry:.2f} (Optimal Entry)",
-        "stop_loss": f"₹{sl:.2f} (Risk: ₹{setup.risk_pts:.2f} / {round((entry-sl)/entry*100, 1)}%)",
+        "stop_loss": f"₹{sl:.2f} (Risk: ₹{setup.risk_pts:.2f} / {round((entry - sl) / entry * 100, 1)}%)",
         "target_1": f"₹{t1:.2f} (+2.0R Breakeven Pivot)",
         "target_2": f"₹{t2:.2f} (+3.5R Positional Swing)",
         "target_moonshot": f"₹{moonshot:.2f} (+6.5R Multibagger Horizon)",
@@ -259,7 +261,11 @@ def _build_deterministic_5w_decision(
             "style": "Governance & Quality Sanity",
             "commentary": (
                 "Forensic audit: "
-                + ("CLEAN PASS. Low manipulation probability and strong balance sheet safety." if setup.forensic_safe else "CAUTION. Mild accounting anomalies detected. Strict stop-loss required.")
+                + (
+                    "CLEAN PASS. Low manipulation probability and strong balance sheet safety."
+                    if setup.forensic_safe
+                    else "CAUTION. Mild accounting anomalies detected. Strict stop-loss required."
+                )
             ),
         },
     ]
@@ -371,13 +377,16 @@ def generate_inflection_decision(
     live_as_of = ""
     try:
         from market.quotes import get_quotes
+
         inst = f"{exchange}:{clean_sym}"
         quotes = get_quotes([inst])
         q = quotes.get(inst) or quotes.get(clean_sym)
         if q and getattr(q, "last_price", 0.0) > 0:
             live_ltp = float(q.last_price)
             live_data_state = str(getattr(q, "data_state", "LIVE"))
-            live_as_of = str(getattr(q, "received_at", "") or datetime.now(timezone.utc).isoformat())
+            live_as_of = str(
+                getattr(q, "received_at", "") or datetime.now(timezone.utc).isoformat()
+            )
     except Exception:
         pass
 
@@ -389,8 +398,13 @@ def generate_inflection_decision(
         or os.environ.get("ANTHROPIC_API_KEY")
     ):
         return _build_deterministic_5w_decision(
-            setup, macro_report, forensic_rep, options_flow,
-            live_ltp=live_ltp, live_data_state=live_data_state, live_as_of=live_as_of,
+            setup,
+            macro_report,
+            forensic_rep,
+            options_flow,
+            live_ltp=live_ltp,
+            live_data_state=live_data_state,
+            live_as_of=live_as_of,
         )
 
     # 4. LLM Synthesis Attempt
@@ -400,8 +414,13 @@ def generate_inflection_decision(
         provider = get_deep_provider()
         if not provider:
             return _build_deterministic_5w_decision(
-                setup, macro_report, forensic_rep, options_flow,
-                live_ltp=live_ltp, live_data_state=live_data_state, live_as_of=live_as_of,
+                setup,
+                macro_report,
+                forensic_rep,
+                options_flow,
+                live_ltp=live_ltp,
+                live_data_state=live_data_state,
+                live_as_of=live_as_of,
             )
 
         system_prompt = (
@@ -413,13 +432,13 @@ def generate_inflection_decision(
             "Be precise with price levels, connect macro/sector dots, and protect against false breakouts."
         )
 
-        b_score = getattr(forensic_rep, 'beneish_m_score', None)
+        b_score = getattr(forensic_rep, "beneish_m_score", None)
         b_txt = f"{b_score:.2f}" if b_score is not None else "N/A"
-        alt_z = getattr(forensic_rep, 'altman_z_score', None)
+        alt_z = getattr(forensic_rep, "altman_z_score", None)
         alt_txt = f"{alt_z:.2f}" if alt_z is not None else "N/A"
-        nifty_gap = getattr(macro_report, 'implied_nifty_gap_pct', None)
+        nifty_gap = getattr(macro_report, "implied_nifty_gap_pct", None)
         gap_txt = f"{nifty_gap:+.2f}%" if nifty_gap is not None else "0.00%"
-        opt_pcr = getattr(options_flow, 'pcr', None)
+        opt_pcr = getattr(options_flow, "pcr", None)
         pcr_txt = f"{opt_pcr:.2f}" if opt_pcr is not None else "1.00"
 
         user_prompt = f"""
@@ -429,13 +448,13 @@ Inflection Archetype: {setup.archetype_label} (Primary: {setup.primary_archetype
 Timing Radar: {setup.timing_label} ({setup.timing_state})
 Inflection Score: {setup.inflection_score}/100
 Minervini 8-Point: {setup.trend_template_passed}/8 Passed | Weinstein Stage: {setup.weinstein_stage}
-VCP Status: {'Detected with ' + str(setup.vcp_tightness_pct) + '% tightness at pivot ₹' + str(setup.vcp_pivot_price) if setup.vcp_detected else 'None'}
+VCP Status: {"Detected with " + str(setup.vcp_tightness_pct) + "% tightness at pivot ₹" + str(setup.vcp_pivot_price) if setup.vcp_detected else "None"}
 TTM Squeeze: {setup.squeeze_state} ({setup.squeeze_duration} bars)
 RVOL 20D: {setup.rvol_20d}x | SMC Structure: {setup.smc_regime} ({setup.smc_setup})
 Sector: {setup.sector} (RRG Quadrant: {setup.rrg_quadrant} | Tailwind: {setup.sector_tailwind_score}/100)
 Forensic Audit: Beneish M-Score: {b_txt}, Altman Z: {alt_txt}, Safe: {setup.forensic_safe}
-Macro Backdrop: Global Posture {getattr(macro_report, 'global_posture', 'NEUTRAL')}, Implied Nifty Gap: {gap_txt}
-Options Flow: PCR {pcr_txt}, Regime: {getattr(options_flow, 'dominant_regime', 'BALANCED')}
+Macro Backdrop: Global Posture {getattr(macro_report, "global_posture", "NEUTRAL")}, Implied Nifty Gap: {gap_txt}
+Options Flow: PCR {pcr_txt}, Regime: {getattr(options_flow, "dominant_regime", "BALANCED")}
 Calculated Levels: Entry: ₹{setup.entry_price:.2f}, Stop Loss: ₹{setup.stop_loss:.2f}, Target 1 (+2R): ₹{setup.target_1:.2f}, Target 2 (+3.5R): ₹{setup.target_2:.2f}, Moonshot: ₹{setup.target_moonshot:.2f}, Risk/Reward: 1:{setup.risk_reward_ratio}
 
 Respond ONLY with a valid JSON object with these exact keys:
@@ -541,8 +560,13 @@ Respond ONLY with a valid JSON object with these exact keys:
 
     # Fallback if parsing or call fails
     return _build_deterministic_5w_decision(
-        setup, macro_report, forensic_rep, options_flow,
-        live_ltp=live_ltp, live_data_state=live_data_state, live_as_of=live_as_of,
+        setup,
+        macro_report,
+        forensic_rep,
+        options_flow,
+        live_ltp=live_ltp,
+        live_data_state=live_data_state,
+        live_as_of=live_as_of,
     )
 
 
@@ -592,7 +616,12 @@ def answer_inflection_chat(
                         system="You are ChanakyaTrade Inflection Copilot. Connect dots authoritatively.",
                         message=prompt,
                     )
-                    return {"symbol": clean_sym, "question": question, "answer": ans, "status": "success"}
+                    return {
+                        "symbol": clean_sym,
+                        "question": question,
+                        "answer": ans,
+                        "status": "success",
+                    }
         except Exception:
             pass
 

@@ -144,6 +144,43 @@ class TestQuoteSkill:
         assert "network down" in r.json()["detail"]["message"]
 
 
+class TestQuotesBatchSkill:
+    def test_batch_quotes_returns_live_prices(self, client):
+        mock_quotes = {
+            "NSE:NIFTY": FakeQuote(
+                symbol="NSE:NIFTY", last_price=24650.0, change=70.0, change_pct=0.28
+            ),
+            "NSE:RELIANCE": FakeQuote(
+                symbol="NSE:RELIANCE", last_price=3040.0, change=25.0, change_pct=0.83
+            ),
+            "NFO:NIFTY2691124500CE": FakeQuote(
+                symbol="NFO:NIFTY2691124500CE", last_price=165.5, change=20.0, change_pct=13.75
+            ),
+            "NFO:RELIANCE26SEPFUT": FakeQuote(
+                symbol="NFO:RELIANCE26SEPFUT", last_price=3055.0, change=30.0, change_pct=0.99
+            ),
+        }
+        with patch("market.quotes.get_quote", return_value=mock_quotes):
+            r = client.post(
+                "/skills/quotes/batch",
+                json={"symbols": ["NIFTY", "RELIANCE", "NIFTY2691124500CE", "RELIANCE26SEPFUT"]},
+            )
+        assert r.status_code == 200
+        body = r.json()
+        assert body["status"] == "ok"
+        quotes = body["data"]
+        # Verify both short and full keys exist
+        assert quotes["NIFTY"]["ltp"] == 24650.0
+        assert quotes["RELIANCE"]["ltp"] == 3040.0
+        assert quotes["NIFTY2691124500CE"]["ltp"] == 165.5
+        assert quotes["RELIANCE26SEPFUT"]["ltp"] == 3055.0
+
+    def test_batch_quotes_empty_list(self, client):
+        r = client.post("/skills/quotes/batch", json={"symbols": []})
+        assert r.status_code == 200
+        assert r.json()["data"] == {}
+
+
 # ── /skills/flows ─────────────────────────────────────────────
 
 
@@ -702,4 +739,3 @@ class TestAutoAlertSkills:
         data = r.json()
         assert data["status"] == "ok"
         assert isinstance(data["data"], list)
-

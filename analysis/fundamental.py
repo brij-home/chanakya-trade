@@ -1073,8 +1073,13 @@ def analyse(symbol: str, fast: bool = False, **_kwargs) -> FundamentalSnapshot:
     # Tier 2: Persistent eod_store company_fundamentals (30-day TTL)
     try:
         from engine.eod_store import get_cached_fundamentals
+
         cached_eod = get_cached_fundamentals(sym_upper, max_age_days=30)
-        if cached_eod and isinstance(cached_eod, dict) and (cached_eod.get("pe") is not None or cached_eod.get("roe") is not None):
+        if (
+            cached_eod
+            and isinstance(cached_eod, dict)
+            and (cached_eod.get("pe") is not None or cached_eod.get("roe") is not None)
+        ):
             snap = _snapshot_from_dict(cached_eod)
             with _fund_cache_lock:
                 _fund_cache[sym_upper] = (now_ts, snap)
@@ -1304,6 +1309,7 @@ def analyse(symbol: str, fast: bool = False, **_kwargs) -> FundamentalSnapshot:
 
     try:
         from engine.eod_store import save_fundamentals
+
         save_fundamentals(sym_upper, _snapshot_to_dict(snapshot))
     except Exception:
         pass

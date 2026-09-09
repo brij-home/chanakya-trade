@@ -6,11 +6,10 @@ include explicit timeframe and provenance, and do not suffer from synthetic
 overwrites (like RSI 99.9) or false bearish crossovers.
 """
 
-import pytest
 import pandas as pd
 import numpy as np
 
-from analysis.technical import analyse, rsi, macd, TechnicalSnapshot
+from analysis.technical import analyse, TechnicalSnapshot
 from agent.tools import build_registry
 from agent.multi_agent import TechnicalAnalyst
 from analysis.pipeline import build_compact_signals
@@ -101,7 +100,9 @@ def test_technical_analyst_key_points_formatting():
     assert any("RSI(14, 1D (Daily)): 33.7" in p for p in report.key_points)
     assert any("MACD(12,26,9, 1D (Daily)): -44.13" in p for p in report.key_points)
     assert any("Below signal line" in p for p in report.key_points)
-    assert not any("bearish crossover" in p for p in report.key_points)  # Must NOT falsely claim crossover!
+    assert not any(
+        "bearish crossover" in p for p in report.key_points
+    )  # Must NOT falsely claim crossover!
     assert any("Provenance: NSE EOD as of 2026-09-08" in p for p in report.key_points)
 
     # Test compact signals table header

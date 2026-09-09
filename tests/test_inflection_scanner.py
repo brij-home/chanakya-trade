@@ -154,9 +154,7 @@ def test_get_inflection_universes():
 
 
 def test_generate_inflection_decision(synthetic_vcp_breakout_df):
-    matrix = generate_inflection_decision(
-        "TRENT", df=synthetic_vcp_breakout_df, force_refresh=True
-    )
+    matrix = generate_inflection_decision("TRENT", df=synthetic_vcp_breakout_df, force_refresh=True)
     assert matrix.symbol == "TRENT"
     assert matrix.verdict in (
         "🟢 HIGH_CONVICTION_BUY",

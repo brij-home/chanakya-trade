@@ -10,8 +10,6 @@ Guarantees:
 4. Fail-Closed Resilience: Missing data returns None/UNAVAILABLE rather than fabricated values.
 """
 
-import ast
-import os
 import sqlite3
 from pathlib import Path
 import pytest
@@ -21,13 +19,21 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = REPO_ROOT / "data"
 
 from engine.eod_store import get_cached_ohlcv, sync_universe_eod
-from analysis.technical import analyse as analyse_technical, rsi as calc_rsi, atr as calc_atr, macd as calc_macd
+from analysis.technical import (
+    analyse as analyse_technical,
+    rsi as calc_rsi,
+    atr as calc_atr,
+    macd as calc_macd,
+)
 
 
 def test_static_code_audit_no_dummy_fallbacks():
     """Scan production code in web, analysis, agent, engine, market for forbidden dummy patterns."""
     forbidden_patterns = [
-        ("ltp = 1000.0", "Hardcoded dummy LTP 1000.0 is strictly prohibited in production pathways"),
+        (
+            "ltp = 1000.0",
+            "Hardcoded dummy LTP 1000.0 is strictly prohibited in production pathways",
+        ),
         ("m_score = -2.45", "Hardcoded Beneish M-Score -2.45 is strictly prohibited"),
         ("atr_val = cur_ltp * 0.012", "Fabricated ATR 1.2% multiplier is prohibited"),
         ("atr_px = ltp * 0.012", "Fabricated ATR 1.2% multiplier is prohibited"),
@@ -45,9 +51,13 @@ def test_static_code_audit_no_dummy_fallbacks():
             text = py_file.read_text(encoding="utf-8", errors="ignore")
             for pattern, reason in forbidden_patterns:
                 if pattern in text:
-                    violations.append(f"{py_file.relative_to(REPO_ROOT)}: Found '{pattern}' -> {reason}")
+                    violations.append(
+                        f"{py_file.relative_to(REPO_ROOT)}: Found '{pattern}' -> {reason}"
+                    )
 
-    assert not violations, "Data integrity violations found in production code:\n" + "\n".join(violations)
+    assert not violations, "Data integrity violations found in production code:\n" + "\n".join(
+        violations
+    )
 
 
 def test_eod_database_no_test_symbols():
@@ -73,7 +83,9 @@ def test_trent_real_data_and_rsi_sanity():
         sync_universe_eod(["TRENT"], exchange="NSE")
         df = get_cached_ohlcv("TRENT", days=250)
 
-    assert df is not None and len(df) >= 50, f"Expected at least 50 bars for TRENT, got {0 if df is None else len(df)}"
+    assert df is not None and len(df) >= 50, (
+        f"Expected at least 50 bars for TRENT, got {0 if df is None else len(df)}"
+    )
 
     # Calculate RSI
     rsi_series = calc_rsi(df["close"], period=14).dropna()
@@ -92,7 +104,9 @@ def test_trent_real_data_and_rsi_sanity():
     assert snap.timeframe == "1D (Daily)", f"Expected timeframe '1D (Daily)', got {snap.timeframe}"
     assert snap.as_of != "", "as_of date must be populated"
     assert snap.is_valid is True, "Technical snapshot must be marked valid"
-    assert snap.macd_signal in ("BULLISH", "BEARISH", "NEUTRAL"), f"Unexpected macd_signal: {snap.macd_signal}"
+    assert snap.macd_signal in ("BULLISH", "BEARISH", "NEUTRAL"), (
+        f"Unexpected macd_signal: {snap.macd_signal}"
+    )
     assert snap.macd_detail != "", "macd_detail must not be empty"
 
 
@@ -102,28 +116,30 @@ def test_macd_true_crossover_vs_regime_distinction():
     dates = pd.date_range("2026-01-01", periods=50, freq="D")
     # Steady downtrend then sharp bounce creating a real crossover
     prices = [2000.0 - i * 10 for i in range(40)] + [1600.0 + i * 25 for i in range(10)]
-    df = pd.DataFrame({
-        "open": prices,
-        "high": [p + 5 for p in prices],
-        "low": [p - 5 for p in prices],
-        "close": prices,
-        "volume": [100000] * 50
-    }, index=dates)
+    df = pd.DataFrame(
+        {
+            "open": prices,
+            "high": [p + 5 for p in prices],
+            "low": [p - 5 for p in prices],
+            "close": prices,
+            "volume": [100000] * 50,
+        },
+        index=dates,
+    )
 
     macd_line, signal_line, hist = calc_macd(df["close"])
     curr_diff = hist.iloc[-1]
     prev_diff = hist.iloc[-2]
 
     # Verify that fresh crossover condition matches technical.py logic
-    if (prev_diff <= 0 and curr_diff > 0):
+    if prev_diff <= 0 and curr_diff > 0:
         expected_signal = "BUY"
-    elif (prev_diff >= 0 and curr_diff < 0):
+    elif prev_diff >= 0 and curr_diff < 0:
         expected_signal = "SELL"
     else:
         expected_signal = "NEUTRAL"
 
     # Run full analyser on this synthetic df via an isolated symbol
-    from analysis.technical import TechnicalSnapshot
     # Verify math directly
     assert isinstance(expected_signal, str)
 
@@ -134,3 +150,33 @@ def test_fail_closed_on_missing_data():
     empty_df = pd.DataFrame(columns=["high", "low", "close"])
     atr_series = calc_atr(empty_df, period=14)
     assert atr_series.empty or atr_series.dropna().empty
+
+
+def test_static_code_audit_no_mojibake():
+    """Verify production code contains ZERO mojibake / corrupted encoding sequences."""
+    mojibake_signatures = ["ðŸ", "âš¡", "â€”", "â”€", "ðŸš€", "ðŸ’Ž"]
+    target_dirs = ["web", "analysis", "agent", "engine", "market", "macos-app/src"]
+    violations = []
+
+    for d in target_dirs:
+        dir_path = REPO_ROOT / d
+        if not dir_path.exists():
+            continue
+        for ext in ("*.py", "*.js", "*.jsx", "*.json"):
+            for file_path in dir_path.rglob(ext):
+                # Skip fix scripts or text sanitizers containing mapping patterns
+                if "fix_mojibake" in file_path.name or "cleanText" in file_path.name:
+                    continue
+                try:
+                    text = file_path.read_text(encoding="utf-8", errors="ignore")
+                except Exception:
+                    continue
+                for sig in mojibake_signatures:
+                    if sig in text:
+                        violations.append(
+                            f"{file_path.relative_to(REPO_ROOT)}: Contains forbidden mojibake sequence '{sig}'"
+                        )
+
+    assert not violations, "Mojibake encoding violations found in production code:\n" + "\n".join(
+        violations
+    )

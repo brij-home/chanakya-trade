@@ -135,7 +135,9 @@ def get_ohlcv(
                     if include_live_candle:
                         res_df = inject_live_tick(res_df, symbol=symbol, exchange=exchange)
                     res_df.attrs["provenance"] = {
-                        "data_source": "LIVE_ENRICHED" if include_live_candle else "LOCAL_SQLITE_EOD",
+                        "data_source": "LIVE_ENRICHED"
+                        if include_live_candle
+                        else "LOCAL_SQLITE_EOD",
                         "provider": "eod_store",
                         "as_of": to_date.isoformat(),
                         "snapshot_id": None,
@@ -320,9 +322,21 @@ def inject_live_tick(
         today_date = pd.Timestamp(now.date())
 
         is_intraday = str(interval).lower() in {
-            "minute", "1minute", "3minute", "3m", "5minute", "5m",
-            "10minute", "10m", "15minute", "15m", "30minute", "30m",
-            "60minute", "1h", "60m"
+            "minute",
+            "1minute",
+            "3minute",
+            "3m",
+            "5minute",
+            "5m",
+            "10minute",
+            "10m",
+            "15minute",
+            "15m",
+            "30minute",
+            "30m",
+            "60minute",
+            "1h",
+            "60m",
         }
 
         if df.empty:
@@ -362,6 +376,7 @@ def inject_live_tick(
                 interval_mins = 60
 
             from datetime import timezone
+
             now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
             mins_elapsed = (now_utc - last_idx).total_seconds() / 60.0
 
@@ -390,8 +405,12 @@ def inject_live_tick(
                     df = pd.concat([df, new_row])
                 else:
                     df.loc[last_idx, "close"] = float(q.last_price)
-                    df.loc[last_idx, "high"] = max(float(df.loc[last_idx, "high"]), float(q.last_price))
-                    df.loc[last_idx, "low"] = min(float(df.loc[last_idx, "low"]), float(q.last_price))
+                    df.loc[last_idx, "high"] = max(
+                        float(df.loc[last_idx, "high"]), float(q.last_price)
+                    )
+                    df.loc[last_idx, "low"] = min(
+                        float(df.loc[last_idx, "low"]), float(q.last_price)
+                    )
         else:
             if last_date == now.date():
                 # Update today's existing candle with live tick
@@ -399,11 +418,15 @@ def inject_live_tick(
                 if q.high and q.high > 0:
                     df.loc[last_idx, "high"] = max(float(df.loc[last_idx, "high"]), float(q.high))
                 else:
-                    df.loc[last_idx, "high"] = max(float(df.loc[last_idx, "high"]), float(q.last_price))
+                    df.loc[last_idx, "high"] = max(
+                        float(df.loc[last_idx, "high"]), float(q.last_price)
+                    )
                 if q.low and q.low > 0:
                     df.loc[last_idx, "low"] = min(float(df.loc[last_idx, "low"]), float(q.low))
                 else:
-                    df.loc[last_idx, "low"] = min(float(df.loc[last_idx, "low"]), float(q.last_price))
+                    df.loc[last_idx, "low"] = min(
+                        float(df.loc[last_idx, "low"]), float(q.last_price)
+                    )
                 if q.volume and q.volume > 0:
                     df.loc[last_idx, "volume"] = float(q.volume)
             else:

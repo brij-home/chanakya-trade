@@ -99,9 +99,9 @@ def evaluate_execution_gate(
 
     if df is None or len(df) == 0:
         try:
-            from market.history import get_daily_history
+            from market.history import get_ohlcv
 
-            df = get_daily_history(symbol=symbol, exchange=exchange, days=250)
+            df = get_ohlcv(symbol=symbol, exchange=exchange, interval="day", days=250)
         except Exception:
             df = None
 

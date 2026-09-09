@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useMemo } from 'react'
 import { useChatStore } from '../../store/chatStore'
 import { useAPI } from '../../hooks/useAPI'
 import PayoffSimulatorCard from '../Cards/PayoffSimulatorCard'
+import ConvictionScoreCard from '../Cards/ConvictionScoreCard'
 import { getSymbolExchange } from '../../data/universeData'
 
 // Cumulative standard normal distribution for Greeks
@@ -64,6 +65,152 @@ function calculateGreeks(spot, strike, ivPct, isCall = true, daysToExpiry = 4, r
   }
 }
 
+function BlastActionPopover({
+  blastData,
+  underlying,
+  spot,
+  resolvedExchange,
+  onClose,
+  onOpenOrderTicket,
+  onSendTelegram,
+  onSendCopilot,
+}) {
+  if (!blastData) return null
+  const isCall = blastData.option_type === 'CE'
+  const flame = isCall ? '🔥' : '🚨'
+
+  return (
+    <div
+      className="p-3.5 rounded-2xl shadow-2xl font-mono border backdrop-blur-xl max-w-sm w-full animate-in fade-in zoom-in-95 duration-150 text-text"
+      style={{
+        background: 'rgba(15, 23, 42, 0.96)',
+        borderColor: isCall ? 'rgba(34, 211, 238, 0.6)' : 'rgba(244, 63, 94, 0.6)',
+        boxShadow: isCall ? '0 12px 48px -8px rgba(6, 182, 212, 0.45)' : '0 12px 48px -8px rgba(244, 63, 94, 0.45)',
+      }}
+      onClick={(e) => e.stopPropagation()}
+    >
+      {/* Popover Header */}
+      <div className="flex items-start justify-between border-b border-border/60 pb-2 mb-2">
+        <div>
+          <div className="flex items-center gap-1.5 mb-0.5">
+            <span className="text-base animate-pulse">{flame}</span>
+            <span
+              className={`text-[9px] font-black px-1.5 py-0.2 rounded tracking-wide ${
+                isCall ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40' : 'bg-rose-500/20 text-rose-300 border border-rose-500/40'
+              }`}
+            >
+              {blastData.action_recommendation || (isCall ? 'BUY CALL (MOMENTUM)' : 'BUY PUT (BREAKDOWN)')}
+            </span>
+            <span className="text-[9px] font-bold text-amber bg-amber-500/15 border border-amber-500/30 px-1 py-0.2 rounded">
+              Score {blastData.score}/100
+            </span>
+          </div>
+          <h3 className="text-xs font-black text-text flex items-center gap-1">
+            {blastData.action_title || blastData.contract}
+          </h3>
+          <p className="text-[10px] text-muted font-ui mt-0.5 leading-snug">
+            {blastData.blast_reason}
+          </p>
+        </div>
+        <button
+          onClick={onClose}
+          className="text-muted hover:text-text p-1 text-xs cursor-pointer rounded-lg hover:bg-surface ml-1"
+          title="Close Popover"
+        >
+          ✕
+        </button>
+      </div>
+
+      {/* Actionable Profit Blueprint Matrix */}
+      <div className="grid grid-cols-2 gap-1.5 mb-2 bg-surface/80 p-2 rounded-xl border border-border/50 text-[11px]">
+        <div>
+          <span className="text-[9px] uppercase tracking-wider text-muted block">Entry Zone</span>
+          <span className="font-extrabold text-emerald-400 text-xs">
+            {blastData.entry_range || `₹${blastData.bid} – ₹${blastData.ask}`}
+          </span>
+        </div>
+        <div>
+          <span className="text-[9px] uppercase tracking-wider text-muted block">Invalidation SL</span>
+          <span className="font-extrabold text-rose-400 text-xs">
+            ₹{blastData.stop_loss || '—'} <span className="text-[9px] font-normal opacity-75">({blastData.stop_loss_pct || '-25%'})</span>
+          </span>
+        </div>
+        <div>
+          <span className="text-[9px] uppercase tracking-wider text-muted block">Target 1 (1.5R Scalp)</span>
+          <span className="font-extrabold text-cyan-300 text-xs">
+            ₹{blastData.target_1 || '—'} <span className="text-[9px] font-normal opacity-75">({blastData.target_1_pct || '+35%'})</span>
+          </span>
+        </div>
+        <div>
+          <span className="text-[9px] uppercase tracking-wider text-muted block">Target 2 (2.5R Runner)</span>
+          <span className="font-extrabold text-amber text-xs">
+            ₹{blastData.target_2 || '—'} <span className="text-[9px] font-normal opacity-75">({blastData.target_2_pct || '+65%'})</span>
+          </span>
+        </div>
+      </div>
+
+      {/* Trader Execution Playbook */}
+      <div className="space-y-1 text-[10px] mb-2.5 bg-black/40 p-2 rounded-xl border border-border/40 font-ui leading-tight">
+        <div className="flex items-start gap-1">
+          <span className="text-emerald-400 font-bold shrink-0">🟢 BUY:</span>
+          <span className="text-text/90">{blastData.when_to_buy || `Enter on Ask/Retest while Spot holds support`}</span>
+        </div>
+        <div className="flex items-start gap-1">
+          <span className="text-amber font-bold shrink-0">🟡 WAIT:</span>
+          <span className="text-text/80">{blastData.when_to_wait || `DO NOT CHASE if premium spiked > 15%`}</span>
+        </div>
+        <div className="flex items-start gap-1">
+          <span className="text-cyan-400 font-bold shrink-0">💰 PROFIT:</span>
+          <span className="text-text/90 font-semibold">{blastData.profit_rule || `Take 50% off at T1 and trail SL to Cost`}</span>
+        </div>
+      </div>
+
+      {/* Action Buttons */}
+      <div className="flex items-center gap-1.5 pt-0.5">
+        <button
+          onClick={() => {
+            onOpenOrderTicket &&
+              onOpenOrderTicket({
+                symbol: blastData.contract,
+                exchange: resolvedExchange === 'BSE' ? 'BFO' : 'NFO',
+                price: blastData.ask || blastData.bid,
+                orderType: 'BUY',
+                side: 'BUY',
+              })
+            onClose && onClose()
+          }}
+          className={`flex-1 py-1 px-2.5 rounded-lg font-extrabold text-[10px] transition-all cursor-pointer flex items-center justify-center gap-1 shadow-md ${
+            isCall
+              ? 'bg-gradient-to-r from-cyan-400 to-cyan-500 text-black hover:brightness-110'
+              : 'bg-gradient-to-r from-rose-500 to-rose-600 text-white hover:brightness-110'
+          }`}
+        >
+          <span>🚀</span> Stage BUY Order
+        </button>
+
+        <button
+          onClick={() => onSendTelegram && onSendTelegram(blastData)}
+          className="px-2 py-1 rounded-lg bg-surface hover:bg-elevated border border-border/70 text-text hover:text-amber text-[10px] font-bold transition-all cursor-pointer flex items-center gap-1 shrink-0"
+          title="Send actionable alert to Telegram"
+        >
+          <span>📲</span> Telegram
+        </button>
+
+        <button
+          onClick={() => {
+            onSendCopilot && onSendCopilot(blastData)
+            onClose && onClose()
+          }}
+          className="px-2 py-1 rounded-lg bg-surface hover:bg-elevated border border-border/70 text-text hover:text-cyan-400 text-[10px] font-bold transition-all cursor-pointer flex items-center gap-1 shrink-0"
+          title="Analyze in Copilot Chat"
+        >
+          <span>💬</span> Copilot
+        </button>
+      </div>
+    </div>
+  )
+}
+
 export default function OptionsDeskView({
   onOpenOrderTicket,
   selectedSymbol = 'NIFTY',
@@ -79,6 +226,8 @@ export default function OptionsDeskView({
   const [lastUpdated, setLastUpdated] = useState(null)
   const [isRefreshing, setIsRefreshing] = useState(false)
   const [isPayoffModalOpen, setIsPayoffModalOpen] = useState(false)
+  const [activeBlastPopover, setActiveBlastPopover] = useState(null)
+  const [telegramStatus, setTelegramStatus] = useState(null)
   const [strikeFilter, setStrikeFilter] = useState('ATM_10')
   const [chainSort, setChainSort] = useState('strike_asc')
   const [chainPage, setChainPage] = useState(1)
@@ -154,17 +303,53 @@ export default function OptionsDeskView({
     return () => clearInterval(interval)
   }, [underlying, selectedExpiry, isLiveActive])
 
+  const handleSendTelegramBlast = async (blastData) => {
+    if (!blastData) return
+    try {
+      setTelegramStatus({ status: 'loading', msg: `Sending ${blastData.contract} alert to Telegram...` })
+      const res = await call(
+        '/skills/telegram_blast',
+        {
+          blast_data: blastData,
+          underlying,
+          spot: data?.spot_price || 0,
+        },
+        { method: 'POST' }
+      )
+      if (res?.data?.status === 'sent' || res?.status === 'ok') {
+        setTelegramStatus({ status: 'success', msg: `✅ ${blastData.contract} alert sent to Telegram!` })
+      } else {
+        const reason = res?.data?.reason || res?.detail || 'Telegram bot token or chat ID not configured in .env'
+        setTelegramStatus({ status: 'warning', msg: `⚠️ ${reason}` })
+      }
+    } catch (err) {
+      setTelegramStatus({ status: 'error', msg: `❌ Telegram push error: ${err.message}` })
+    }
+    setTimeout(() => setTelegramStatus(null), 6000)
+  }
+
+  const handleOpenBlastPopover = (blastData, el) => {
+    if (!blastData || !el) return
+    const rect = el.getBoundingClientRect()
+    setActiveBlastPopover({
+      data: blastData,
+      x: Math.min(window.innerWidth - 410, Math.max(16, rect.left - 120)),
+      y: Math.max(60, Math.min(window.innerHeight - 440, rect.top - 200)),
+    })
+  }
+
   const spot = data?.spot_price || 0
   const spotChange = data?.spot_change || '0.00'
   const spotChangePct = data?.spot_change_pct || '0.00%'
   const spotIsPositive = data?.spot_is_positive ?? (!String(spotChange).startsWith('-'))
-  const dataState = data?.data_state || (data ? 'LIVE' : 'LOADING')
-  const isRealtime = Boolean(data?.is_realtime ?? (dataState === 'LIVE'))
-  const dataSource = data?.data_source || (isRealtime ? 'mstock' : 'fallback')
-  const sourceLabel = data?.source_label || (isRealtime ? `${dataSource.toUpperCase()} Direct Feed` : 'Exchange Fallback')
+  const dataState = data?.data_state || (data ? 'UNVERIFIED' : 'LOADING')
+  const isRealtime = Boolean(data?.is_realtime && dataState === 'LIVE')
+  const dataSource = data?.data_source || (isRealtime ? 'broker' : 'fallback')
+  const sourceLabel = data?.source_label || (isRealtime ? `${dataSource.toUpperCase()} Direct Feed` : 'Exchange Scraper (~15m Delayed)')
   const asOfTime = data?.as_of_display || data?.time || (lastUpdated ? lastUpdated.toLocaleTimeString('en-IN') + ' IST' : '')
   const brokerNote = data?.note || ''
   const blastRadar = data?.blast_radar || []
+  const convictionScore = data?.conviction_score || null
   const gexProfile = data?.gex_profile || []
   const deltaHedge = data?.delta_hedge
   const ivSkew = data?.iv_skew || []
@@ -479,7 +664,7 @@ export default function OptionsDeskView({
               title={isRealtime ? `Live sub-second real-time stream via ${sourceLabel} (Click to pause)` : `Delayed data feed (${sourceLabel}). Connect or route broker for real-time streaming.`}
             >
               <span className={`w-1.5 h-1.5 rounded-full ${isLiveActive ? (isRealtime ? 'bg-emerald-500 animate-pulse' : 'bg-amber-400 animate-pulse') : 'bg-muted'}`} />
-              <span>{isLiveActive ? (isRealtime ? `LIVE (${dataSource.toUpperCase()})` : 'DELAYED (~15m)') : 'PAUSED'}</span>
+              <span>{isLiveActive ? (isRealtime ? `LIVE (${dataSource.toUpperCase()})` : `DELAYED (${dataSource.toUpperCase()})`) : 'PAUSED'}</span>
               {asOfTime && (
                 <span className="text-[9px] opacity-75 font-mono ml-0.5">
                   {asOfTime}
@@ -620,14 +805,37 @@ export default function OptionsDeskView({
                   ? 'bg-blue-500/15 border-blue-500/30 text-blue-400'
                   : 'bg-amber-500/15 border-amber-500/30 text-amber'
               }`}>
-                {isRealtime ? `⚡ REALTIME (${dataSource.toUpperCase()})` : dataState === 'BROKER_REQUIRED' ? '🔒 SPOT ONLY' : '⏱️ DELAYED (~15m)'}
+                {isRealtime ? `⚡ REALTIME (${dataSource.toUpperCase()})` : dataState === 'BROKER_REQUIRED' ? '🔒 SPOT ONLY' : `⏱️ DELAYED (${dataSource.toUpperCase()})`}
               </span>
               <span className="text-muted text-[10px] hidden sm:inline">
-                As of: <span className="text-text font-semibold">{asOfTime}</span>
+                Feed: <span className="text-text font-semibold">{sourceLabel}</span>
+              </span>
+              <span className="text-muted text-[10px] hidden md:inline">
+                • As of: <span className="text-text font-semibold">{asOfTime}</span>
               </span>
             </div>
           </div>
         </div>
+
+        {/* Institutional Transparent Fallback Warning Banner */}
+        {(!isRealtime && dataState !== 'BROKER_REQUIRED' && dataState !== 'LOADING') && (
+          <div className="bg-amber-500/10 border-l-4 border-amber p-2.5 rounded-r-lg flex items-center justify-between text-xs font-mono shadow-sm">
+            <div className="flex items-center gap-2.5">
+              <span className="text-base text-amber">⚠️</span>
+              <div>
+                <span className="font-bold text-amber block">
+                  FALLBACK DATA ACTIVE: {sourceLabel}
+                </span>
+                <span className="text-[11px] text-text/80 font-ui">
+                  Real-time broker feed is inactive or failed. Displaying public exchange scraper feed (~15-minute delayed). Depth and live tick aggression are not real-time — do not use for sub-second execution.
+                </span>
+              </div>
+            </div>
+            <span className="px-2 py-0.5 rounded bg-amber-500/20 text-amber text-[10px] font-bold shrink-0">
+              NON-REALTIME
+            </span>
+          </div>
+        )}
 
         {/* High-Impact PCR Blast Alert Banner */}
         {pcrBlast && (
@@ -1256,69 +1464,163 @@ export default function OptionsDeskView({
             </span>
           </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-2.5">
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
             {blastRadar.map((pick, pIdx) => {
               const isCall = pick.option_type === 'CE'
               return (
                 <div
                   key={pIdx}
-                  className={`p-2.5 rounded-xl border transition-all ${
+                  className={`p-3 rounded-2xl border transition-all shadow-sm space-y-2.5 ${
                     isCall
                       ? 'bg-cyan-950/20 border-cyan-500/40 hover:border-cyan-400'
                       : 'bg-rose-950/20 border-rose-500/40 hover:border-rose-400'
                   }`}
                 >
+                  {/* Card Header */}
                   <div className="flex items-center justify-between font-mono">
                     <span className="text-xs font-extrabold text-text flex items-center gap-1.5">
                       <span className={isCall ? 'text-cyan-400' : 'text-rose-400'}>
                         {pick.contract}
                       </span>
-                      <span className={`text-[9px] px-1.5 py-0.2 rounded font-black ${
-                        isCall ? 'bg-cyan-500/20 text-cyan-300' : 'bg-rose-500/20 text-rose-300'
-                      }`}>
+                      <span
+                        className={`text-[9px] px-1.5 py-0.2 rounded font-black ${
+                          isCall ? 'bg-cyan-500/20 text-cyan-300' : 'bg-rose-500/20 text-rose-300'
+                        }`}
+                      >
                         {pick.option_type}
                       </span>
                     </span>
-                    <span className="text-[10px] font-bold text-emerald-400 bg-emerald-500/15 border border-emerald-500/30 px-1.5 py-0.5 rounded">
-                      ⚡ {pick.imbalance_ratio}x Buyers
-                    </span>
+                    <div className="flex items-center gap-1">
+                      <span className="text-[9px] font-bold text-amber bg-amber-500/15 border border-amber-500/30 px-1.5 py-0.5 rounded">
+                        Score {pick.score}/100
+                      </span>
+                      <span className="text-[9px] font-bold text-emerald-400 bg-emerald-500/15 border border-emerald-500/30 px-1.5 py-0.5 rounded">
+                        ⚡ {pick.imbalance_ratio}x Buyers
+                      </span>
+                    </div>
                   </div>
 
-                  <p className="text-[10px] text-muted font-ui mt-1 line-clamp-2">
+                  <p className="text-[10px] text-muted font-ui leading-snug">
                     {pick.blast_reason}
                   </p>
 
-                  <div className="mt-2 pt-2 border-t border-border/40 flex items-center justify-between text-xs font-mono">
+                  {/* Actionable Profit Blueprint Matrix */}
+                  <div className="grid grid-cols-2 gap-1.5 bg-surface/70 p-2 rounded-xl border border-border/50 text-[10px] font-mono">
                     <div>
-                      <span className="text-[9px] text-muted block">Bid / Ask (Realtime)</span>
-                      <span className="font-bold text-text">
-                        ₹{pick.bid} <span className="text-muted text-[10px]">/</span> ₹{pick.ask}
+                      <span className="text-[8px] uppercase tracking-wider text-muted block">Entry Zone</span>
+                      <span className="font-extrabold text-emerald-400 text-xs">
+                        {pick.entry_range || `₹${pick.bid} – ₹${pick.ask}`}
                       </span>
                     </div>
-                    <button
-                      onClick={() =>
-                        onOpenOrderTicket &&
-                        onOpenOrderTicket({
-                          symbol: pick.contract,
-                          exchange: resolvedExchange === 'BSE' ? 'BFO' : 'NFO',
-                          price: pick.ask || pick.bid,
-                          side: pick.side || 'BUY',
-                          segment: 'OPTIONS',
-                        })
-                      }
-                      className={`px-2.5 py-1 rounded-lg font-extrabold text-[10px] transition-all shadow-xs cursor-pointer flex items-center gap-1 ${
-                        isCall
-                          ? 'bg-gradient-to-r from-cyan-400 to-cyan-500 hover:brightness-110 text-black'
-                          : 'bg-gradient-to-r from-rose-500 to-rose-600 hover:brightness-110 text-white'
-                      }`}
-                    >
-                      <span>🚀</span> Stage Order
-                    </button>
+                    <div>
+                      <span className="text-[8px] uppercase tracking-wider text-muted block">Invalidation SL</span>
+                      <span className="font-extrabold text-rose-400 text-xs">
+                        ₹{pick.stop_loss || '—'}{' '}
+                        <span className="text-[8px] font-normal opacity-75">
+                          ({pick.stop_loss_pct || '-25%'})
+                        </span>
+                      </span>
+                    </div>
+                    <div>
+                      <span className="text-[8px] uppercase tracking-wider text-muted block">Target 1 (1.5R)</span>
+                      <span className="font-extrabold text-cyan-300 text-xs">
+                        ₹{pick.target_1 || '—'}{' '}
+                        <span className="text-[8px] font-normal opacity-75">
+                          ({pick.target_1_pct || '+35%'})
+                        </span>
+                      </span>
+                    </div>
+                    <div>
+                      <span className="text-[8px] uppercase tracking-wider text-muted block">Target 2 (2.5R)</span>
+                      <span className="font-extrabold text-amber text-xs">
+                        ₹{pick.target_2 || '—'}{' '}
+                        <span className="text-[8px] font-normal opacity-75">
+                          ({pick.target_2_pct || '+65%'})
+                        </span>
+                      </span>
+                    </div>
                   </div>
 
-                  <div className="flex items-center justify-between text-[9px] text-muted font-mono mt-1 pt-1">
+                  {/* Trader Execution Rules */}
+                  <div className="space-y-1 text-[9px] bg-black/30 p-2 rounded-xl border border-border/40 font-ui leading-tight">
+                    <div className="flex items-start gap-1">
+                      <span className="text-emerald-400 font-bold shrink-0">🟢 BUY:</span>
+                      <span className="text-text/90">
+                        {pick.when_to_buy || `Enter on Ask/Retest while Spot holds support`}
+                      </span>
+                    </div>
+                    <div className="flex items-start gap-1">
+                      <span className="text-amber font-bold shrink-0">🟡 WAIT:</span>
+                      <span className="text-text/80">
+                        {pick.when_to_wait || `DO NOT CHASE if premium spiked > 15%`}
+                      </span>
+                    </div>
+                    <div className="flex items-start gap-1">
+                      <span className="text-cyan-400 font-bold shrink-0">💰 PROFIT:</span>
+                      <span className="text-text/90 font-semibold">
+                        {pick.profit_rule || `Take 50% off at T1 and trail SL to Cost`}
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Realtime Bid/Ask & Action Controls */}
+                  <div className="pt-1.5 border-t border-border/40 flex flex-wrap items-center justify-between gap-1.5 text-xs font-mono">
+                    <div>
+                      <span className="text-[8px] text-muted block uppercase">Bid / Ask</span>
+                      <span className="font-bold text-text text-[11px]">
+                        ₹{pick.bid} <span className="text-muted text-[9px]">/</span> ₹{pick.ask}
+                      </span>
+                    </div>
+
+                    <div className="flex items-center gap-1.5">
+                      <button
+                        onClick={() =>
+                          onOpenOrderTicket &&
+                          onOpenOrderTicket({
+                            symbol: pick.contract,
+                            exchange: resolvedExchange === 'BSE' ? 'BFO' : 'NFO',
+                            price: pick.ask || pick.bid,
+                            side: pick.side || 'BUY',
+                            orderType: 'BUY',
+                            segment: 'OPTIONS',
+                          })
+                        }
+                        className={`px-2.5 py-1 rounded-lg font-extrabold text-[10px] transition-all shadow-xs cursor-pointer flex items-center gap-1 ${
+                          isCall
+                            ? 'bg-gradient-to-r from-cyan-400 to-cyan-500 hover:brightness-110 text-black'
+                            : 'bg-gradient-to-r from-rose-500 to-rose-600 hover:brightness-110 text-white'
+                        }`}
+                        title="Open Order Ticket"
+                      >
+                        <span>🚀</span> Stage Order
+                      </button>
+
+                      <button
+                        onClick={() => handleSendTelegramBlast(pick)}
+                        className="px-2 py-1 rounded-lg bg-surface hover:bg-elevated border border-border/70 text-text hover:text-amber text-[10px] font-bold transition-all cursor-pointer flex items-center gap-1"
+                        title="Send actionable alert to Telegram"
+                      >
+                        <span>📲</span>
+                      </button>
+
+                      <button
+                        onClick={() =>
+                          sendDraft(
+                            `Analyze ${pick.contract} blast surge (${pick.blast_reason}) and recommend asymmetric trade structure`
+                          )
+                        }
+                        className="px-2 py-1 rounded-lg bg-surface hover:bg-elevated border border-border/70 text-text hover:text-cyan-400 text-[10px] font-bold transition-all cursor-pointer flex items-center gap-1"
+                        title="Analyze in Copilot Chat"
+                      >
+                        <span>💬</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center justify-between text-[9px] text-muted font-mono pt-0.5">
                     <span>Vol: {Number(pick.volume || 0).toLocaleString('en-IN')}</span>
                     <span>OI: {Number(pick.oi || 0).toLocaleString('en-IN')}</span>
+                    <span>R:R: {pick.risk_reward || '1:2.5'}</span>
                   </div>
                 </div>
               )
@@ -1326,6 +1628,17 @@ export default function OptionsDeskView({
           </div>
         </div>
       )}
+
+      {/* Conviction Score Card — 10-Factor High-Probability Signal Intelligence */}
+      <div className="mt-3">
+        <ConvictionScoreCard
+          underlying={underlying}
+          spot={typeof spot === 'number' ? spot : parseFloat(spot) || 0}
+          pcr={pcr !== '—' ? parseFloat(pcr) || null : null}
+          blastRadar={blastRadar}
+          convictionScore={convictionScore}
+        />
+      </div>
 
       {/* Bottom Full-Width Institutional Options Chain Table */}
       {(() => {
@@ -1607,6 +1920,52 @@ export default function OptionsDeskView({
                       const callIsBlast = Boolean(row.calls_blast)
                       const putIsBlast = Boolean(row.puts_blast)
 
+                      const resolvedCallBlastData = row.calls_blast_data || (callIsBlast ? {
+                        contract: `${underlying} ${row.strike} CE`,
+                        strike: row.strike,
+                        option_type: 'CE',
+                        side: 'BUY',
+                        action_recommendation: 'BUY (CALL MOMENTUM)',
+                        score: row.calls_blast_score || 85,
+                        blast_reason: row.calls_blast_reason || 'Surge in call volume and buyer aggression',
+                        bid: row.calls_bid,
+                        ask: row.calls_ask,
+                        entry_range: `₹${(row.calls_bid * 0.95).toFixed(2)} – ₹${(row.calls_bid * 1.03).toFixed(2)}`,
+                        stop_loss: Number((row.calls_bid * 0.75).toFixed(2)),
+                        stop_loss_pct: '-25%',
+                        target_1: Number((row.calls_bid * 1.35).toFixed(2)),
+                        target_1_pct: '+35%',
+                        target_2: Number((row.calls_bid * 1.65).toFixed(2)),
+                        target_2_pct: '+65%',
+                        risk_reward: '1:2.5',
+                        when_to_buy: `Enter in range ₹${(row.calls_bid * 0.95).toFixed(2)} – ₹${(row.calls_bid * 1.03).toFixed(2)} while Spot holds support`,
+                        when_to_wait: `DO NOT CHASE if premium > ₹${(row.calls_bid * 1.15).toFixed(2)}. Wait for dip.`,
+                        profit_rule: `Book 50% at T1 (₹${(row.calls_bid * 1.35).toFixed(2)}), trail SL to Cost for T2.`,
+                      } : null)
+
+                      const resolvedPutBlastData = row.puts_blast_data || (putIsBlast ? {
+                        contract: `${underlying} ${row.strike} PE`,
+                        strike: row.strike,
+                        option_type: 'PE',
+                        side: 'BUY',
+                        action_recommendation: 'BUY (PUT BREAKDOWN)',
+                        score: row.puts_blast_score || 85,
+                        blast_reason: row.puts_blast_reason || 'Put support liquidating / Downside breakdown volume',
+                        bid: row.puts_bid,
+                        ask: row.puts_ask,
+                        entry_range: `₹${(row.puts_bid * 0.95).toFixed(2)} – ₹${(row.puts_bid * 1.03).toFixed(2)}`,
+                        stop_loss: Number((row.puts_bid * 0.75).toFixed(2)),
+                        stop_loss_pct: '-25%',
+                        target_1: Number((row.puts_bid * 1.35).toFixed(2)),
+                        target_1_pct: '+35%',
+                        target_2: Number((row.puts_bid * 1.65).toFixed(2)),
+                        target_2_pct: '+65%',
+                        risk_reward: '1:2.5',
+                        when_to_buy: `Enter in range ₹${(row.puts_bid * 0.95).toFixed(2)} – ₹${(row.puts_bid * 1.03).toFixed(2)} while Spot drifts lower`,
+                        when_to_wait: `DO NOT CHASE if premium > ₹${(row.puts_bid * 1.15).toFixed(2)}. Wait for bounce.`,
+                        profit_rule: `Book 50% at T1 (₹${(row.puts_bid * 1.35).toFixed(2)}), trail SL to Cost for T2.`,
+                      } : null)
+
                       const callGreeks = calculateGreeks(spot, row.strike, row.calls_iv, true)
                       const putGreeks = calculateGreeks(spot, row.strike, row.puts_iv, false)
 
@@ -1673,16 +2032,28 @@ export default function OptionsDeskView({
                                       orderType: 'BUY',
                                     })
                                   }
+                                  onMouseEnter={(e) => {
+                                    if (callIsBlast && resolvedCallBlastData) {
+                                      handleOpenBlastPopover(resolvedCallBlastData, e.currentTarget)
+                                    }
+                                  }}
                                   className={`px-1.5 py-0.5 rounded border text-xs font-bold transition-all cursor-pointer flex items-center justify-between gap-1 w-full ${
                                     callIsBlast
-                                      ? 'bg-cyan-500/20 border-cyan-400 text-cyan-300 ring-1 ring-cyan-400/50 shadow-xs'
+                                      ? 'bg-cyan-500/20 border-cyan-400 text-cyan-300 ring-1 ring-cyan-400/50 shadow-xs hover:bg-cyan-500/30'
                                       : 'bg-surface hover:bg-emerald-500 hover:text-black border-border/60 text-text'
                                   }`}
-                                  title={callIsBlast ? `🚀 BLAST ALERT: ${row.calls_blast_reason || 'High order flow imbalance'}` : 'Click to stage BUY Call Order'}
+                                  title={callIsBlast ? `🚀 BLAST ALERT: ${row.calls_blast_reason || 'Hover or click for profit roadmap'}` : 'Click to stage BUY Call Order'}
                                 >
                                   <span>₹{row.calls_bid}</span>
                                   {callIsBlast && (
-                                    <span className="text-[7px] bg-cyan-500 text-black px-1 rounded-xs font-black animate-pulse">
+                                    <span
+                                      onClick={(e) => {
+                                        e.stopPropagation()
+                                        handleOpenBlastPopover(resolvedCallBlastData, e.currentTarget)
+                                      }}
+                                      className="text-[7px] bg-cyan-500 text-black px-1 rounded-xs font-black animate-pulse hover:scale-110 transition-transform"
+                                      title="Click to view Actionable Profit Roadmap"
+                                    >
                                       BLAST
                                     </span>
                                   )}
@@ -1734,16 +2105,28 @@ export default function OptionsDeskView({
                                       orderType: 'BUY',
                                     })
                                   }
+                                  onMouseEnter={(e) => {
+                                    if (callIsBlast && resolvedCallBlastData) {
+                                      handleOpenBlastPopover(resolvedCallBlastData, e.currentTarget)
+                                    }
+                                  }}
                                   className={`px-1.5 py-0.5 rounded border text-xs font-bold transition-all cursor-pointer flex items-center justify-between gap-1 w-full ${
                                     callIsBlast
-                                      ? 'bg-cyan-500/20 border-cyan-400 text-cyan-300 ring-1 ring-cyan-400/50 shadow-xs'
+                                      ? 'bg-cyan-500/20 border-cyan-400 text-cyan-300 ring-1 ring-cyan-400/50 shadow-xs hover:bg-cyan-500/30'
                                       : 'bg-surface hover:bg-emerald-500 hover:text-black border-border/60 text-text'
                                   }`}
-                                  title={callIsBlast ? `🚀 BLAST ALERT: ${row.calls_blast_reason || 'High order flow imbalance'}` : 'Click to stage BUY Call Order'}
+                                  title={callIsBlast ? `🚀 BLAST ALERT: ${row.calls_blast_reason || 'Hover or click for profit roadmap'}` : 'Click to stage BUY Call Order'}
                                 >
                                   <span>₹{row.calls_bid}</span>
                                   {callIsBlast && (
-                                    <span className="text-[7px] bg-cyan-500 text-black px-1 rounded-xs font-black animate-pulse">
+                                    <span
+                                      onClick={(e) => {
+                                        e.stopPropagation()
+                                        handleOpenBlastPopover(resolvedCallBlastData, e.currentTarget)
+                                      }}
+                                      className="text-[7px] bg-cyan-500 text-black px-1 rounded-xs font-black animate-pulse hover:scale-110 transition-transform"
+                                      title="Click to view Actionable Profit Roadmap"
+                                    >
                                       BLAST
                                     </span>
                                   )}
@@ -1821,15 +2204,27 @@ export default function OptionsDeskView({
                                       orderType: 'BUY',
                                     })
                                   }
+                                  onMouseEnter={(e) => {
+                                    if (putIsBlast && resolvedPutBlastData) {
+                                      handleOpenBlastPopover(resolvedPutBlastData, e.currentTarget)
+                                    }
+                                  }}
                                   className={`px-1.5 py-0.5 rounded border text-xs font-bold transition-all cursor-pointer flex items-center justify-between gap-1 w-full ${
                                     putIsBlast
-                                      ? 'bg-rose-500/20 border-rose-400 text-rose-300 ring-1 ring-rose-400/50 shadow-xs'
+                                      ? 'bg-rose-500/20 border-rose-400 text-rose-300 ring-1 ring-rose-400/50 shadow-xs hover:bg-rose-500/30'
                                       : 'bg-surface hover:bg-emerald-500 hover:text-black border-border/60 text-text'
                                   }`}
-                                  title={putIsBlast ? `🚀 BLAST ALERT: ${row.puts_blast_reason || 'High order flow imbalance'}` : 'Click to stage BUY Put Order'}
+                                  title={putIsBlast ? `🚀 BLAST ALERT: ${row.puts_blast_reason || 'Hover or click for profit roadmap'}` : 'Click to stage BUY Put Order'}
                                 >
                                   {putIsBlast && (
-                                    <span className="text-[7px] bg-rose-500 text-white px-1 rounded-xs font-black animate-pulse">
+                                    <span
+                                      onClick={(e) => {
+                                        e.stopPropagation()
+                                        handleOpenBlastPopover(resolvedPutBlastData, e.currentTarget)
+                                      }}
+                                      className="text-[7px] bg-rose-500 text-white px-1 rounded-xs font-black animate-pulse hover:scale-110 transition-transform"
+                                      title="Click to view Actionable Profit Roadmap"
+                                    >
                                       BLAST
                                     </span>
                                   )}
@@ -1908,15 +2303,27 @@ export default function OptionsDeskView({
                                       orderType: 'BUY',
                                     })
                                   }
+                                  onMouseEnter={(e) => {
+                                    if (putIsBlast && resolvedPutBlastData) {
+                                      handleOpenBlastPopover(resolvedPutBlastData, e.currentTarget)
+                                    }
+                                  }}
                                   className={`px-1.5 py-0.5 rounded border text-xs font-bold transition-all cursor-pointer flex items-center justify-between gap-1 w-full ${
                                     putIsBlast
-                                      ? 'bg-rose-500/20 border-rose-400 text-rose-300 ring-1 ring-rose-400/50 shadow-xs'
+                                      ? 'bg-rose-500/20 border-rose-400 text-rose-300 ring-1 ring-rose-400/50 shadow-xs hover:bg-rose-500/30'
                                       : 'bg-surface hover:bg-emerald-500 hover:text-black border-border/60 text-text'
                                   }`}
-                                  title={putIsBlast ? `🚀 BLAST ALERT: ${row.puts_blast_reason || 'High order flow imbalance'}` : 'Click to stage BUY Put Order'}
+                                  title={putIsBlast ? `🚀 BLAST ALERT: ${row.puts_blast_reason || 'Hover or click for profit roadmap'}` : 'Click to stage BUY Put Order'}
                                 >
                                   {putIsBlast && (
-                                    <span className="text-[7px] bg-rose-500 text-white px-1 rounded-xs font-black animate-pulse">
+                                    <span
+                                      onClick={(e) => {
+                                        e.stopPropagation()
+                                        handleOpenBlastPopover(resolvedPutBlastData, e.currentTarget)
+                                      }}
+                                      className="text-[7px] bg-rose-500 text-white px-1 rounded-xs font-black animate-pulse hover:scale-110 transition-transform"
+                                      title="Click to view Actionable Profit Roadmap"
+                                    >
                                       BLAST
                                     </span>
                                   )}
@@ -2032,6 +2439,53 @@ export default function OptionsDeskView({
 
             <PayoffSimulatorCard initialSymbol={underlying} initialSpot={spot} />
           </div>
+        </div>
+      )}
+
+      {/* Floating Actionable Blast Alert Popover */}
+      {activeBlastPopover && (
+        <>
+          <div
+            className="fixed inset-0 z-50 bg-black/25 backdrop-blur-[1px]"
+            onClick={() => setActiveBlastPopover(null)}
+          />
+          <div
+            style={{
+              position: 'fixed',
+              left: activeBlastPopover.x,
+              top: activeBlastPopover.y,
+              zIndex: 55,
+            }}
+          >
+            <BlastActionPopover
+              blastData={activeBlastPopover.data}
+              underlying={underlying}
+              spot={spot}
+              resolvedExchange={resolvedExchange}
+              onClose={() => setActiveBlastPopover(null)}
+              onOpenOrderTicket={onOpenOrderTicket}
+              onSendTelegram={handleSendTelegramBlast}
+              onSendCopilot={(b) => sendDraft(`Analyze ${b.contract} blast surge`)}
+            />
+          </div>
+        </>
+      )}
+
+      {/* Telegram Toast Notification */}
+      {telegramStatus && (
+        <div
+          className={`fixed bottom-6 right-6 z-60 px-4 py-2.5 rounded-xl border text-xs font-mono font-bold shadow-2xl flex items-center gap-2 animate-in fade-in slide-in-from-bottom-4 duration-200 ${
+            telegramStatus.status === 'success'
+              ? 'bg-emerald-950/90 border-emerald-500/60 text-emerald-300'
+              : telegramStatus.status === 'error'
+              ? 'bg-rose-950/90 border-rose-500/60 text-rose-300'
+              : telegramStatus.status === 'warning'
+              ? 'bg-amber-950/90 border-amber-500/60 text-amber-300'
+              : 'bg-surface border-border text-text'
+          }`}
+        >
+          {telegramStatus.status === 'loading' && <span className="animate-spin">⏳</span>}
+          <span>{telegramStatus.msg}</span>
         </div>
       )}
     </div>

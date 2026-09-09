@@ -229,7 +229,7 @@
 - **Error Boundaries**: Every global modal and dynamic card wrapped in `<ErrorBoundary>` with graceful fallback.
 - **AST Hook Linting**: `node scripts/audit-react-hooks.js` enforces 0 violations in `npm test` and `npm run build:web`.
 - **Root Error Boundary**: Wrap root app in [`main.jsx`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/macos-app/src/renderer/src/main.jsx) to prevent white screens.
-- **Web Mode**: Support standalone browser access (`window.__CHANAKYA_TRADE_WEB__ || !window.electronAPI`) with fallback port `8765`.
+- **Web Mode & Dual-Target Sync**: Support standalone browser access (`window.__CHANAKYA_TRADE_WEB__ || !window.electronAPI`) with fallback port `8765`. Whenever modifying React files in `macos-app/src/renderer/`, run `npm run build:web` to ensure `web/static/` is synchronized for production/offline mode. In dev mode, FastAPI port 8765 automatically redirects to Vite port 5173 for live HMR.
 
 ### 6.5 JSDoc & TypeScript Type Contracts
 - **Type Definitions Repository**: All frontend data models are strongly typed in [`renderer/src/types/`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/macos-app/src/renderer/src/types/) (`contracts.ts`, `market.js`, `options.js`, `personas.js`, `backtest.js`, `index.js`).
@@ -258,6 +258,7 @@
 - **Crisp, Articulate & Decisive**: Avoid essays, long preamble, and narrative filler unless explicitly requested. Deliver actionable conclusions, price zones, conviction scores, and risk parameters immediately.
 - **High Scannability**: Use clean bullet points, bold key terms, and visual state badges (`🟢 READY`, `🔴 STAND_DOWN`, `⚡ TRIGGER NOW`, `🎯 TARGET 1`) instead of monolithic text walls.
 - **Trader Intuition First**: Translate technical and quantitative thresholds into intuitive market behavior (e.g., *"Call writers unwinding positions"*, *"Put support breaking down"*, *"Heavy buyer aggression"*) rather than academic formulas or raw code variables.
+- **Zero Mojibake & Clean UTF-8 Standard**: The terminal is built for humans, not machines. Never permit mojibake encoding corruption (e.g., `ðŸš€`, `ðŸ’Ž`, `âš¡`, `â€”`). All files must be read and written strictly with `encoding="utf-8"`, and Windows console output must reconfigure stdout via `sys.stdout.reconfigure(encoding="utf-8", errors="replace")`. Automated static code audit in [`tests/test_data_integrity_audit.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/tests/test_data_integrity_audit.py) enforces 0 mojibake occurrences across all Python and JavaScript source files. Frontend views must sanitize all dynamic labels via [`cleanText.js`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/macos-app/src/renderer/src/utils/cleanText.js).
 
 ---
 

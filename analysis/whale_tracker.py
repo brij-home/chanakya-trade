@@ -205,6 +205,7 @@ def get_whale_flows(
     live_quotes: dict[str, float] = {}
     try:
         from market.quotes import get_quote
+
         needed_symbols = list({f"NSE:{d['symbol']}" for d in CURATED_WHALE_DEALS if "symbol" in d})
         quotes_dict = get_quote(needed_symbols)
         for sym_key, q in quotes_dict.items():

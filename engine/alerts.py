@@ -331,12 +331,50 @@ class AlertManager:
         """Return all active (non-triggered) alerts as dicts."""
         return [self.public_dict(a) for a in self._alerts if not a.triggered]
 
+    def cleanup_archived_alerts(self, max_age_days: int = 3) -> int:
+        """Prunes triggered, invalidated, or target-achieved manual alerts older than max_age_days."""
+        from datetime import datetime, timedelta, timezone
+
+        IST = timezone(timedelta(hours=5, minutes=30))
+        cutoff = datetime.now(IST) - timedelta(days=max_age_days)
+        purged = 0
+        surviving = []
+        with self._lock:
+            for a in self._alerts:
+                if not (a.triggered or a.is_invalidated or a.target_achieved):
+                    surviving.append(a)
+                    continue
+                # Parse timestamp
+                ts_str = a.invalidated_at or a.triggered_at or a.created_at or ""
+                dt = None
+                if ts_str:
+                    clean = ts_str.replace(" IST", "").strip()
+                    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
+                        try:
+                            dt = datetime.strptime(clean[:19], fmt).replace(tzinfo=IST)
+                            break
+                        except Exception:
+                            continue
+                if dt and dt < cutoff:
+                    purged += 1
+                else:
+                    surviving.append(a)
+            if purged > 0:
+                self._alerts = surviving
+                self._save()
+        return purged
+
     @staticmethod
     def public_dict(alert: Alert) -> dict:
         """Serialize an alert without exposing its callback signing secret."""
         payload = asdict(alert)
         payload.pop("webhook_secret", None)
-        payload["timestamp"] = alert.triggered_at or alert.invalidated_at or alert.created_at or datetime.now().strftime("%Y-%m-%d %H:%M:%S IST")
+        payload["timestamp"] = (
+            alert.triggered_at
+            or alert.invalidated_at
+            or alert.created_at
+            or datetime.now().strftime("%Y-%m-%d %H:%M:%S IST")
+        )
         return payload
 
     def active_count(self) -> int:
@@ -572,7 +610,9 @@ class AlertManager:
             is_live=False,
             environment="TEST",
             is_invalidated=is_invalidation,
-            invalidation_reason="[TEST SIMULATION] Stop level breached. Alert setup is invalidated." if is_invalidation else None,
+            invalidation_reason="[TEST SIMULATION] Stop level breached. Alert setup is invalidated."
+            if is_invalidation
+            else None,
             invalidated_at=now_iso if is_invalidation else None,
         )
         alert.message = f"[TEST] {alert.describe()}"
@@ -617,8 +657,15 @@ class AlertManager:
         elif alert.target_achieved:
             panel_title = f"[bold cyan]🎯 {env_tag} TARGET ACHIEVED[/bold cyan]"
             desktop_title = f"🎯 {env_tag} TARGET HIT: {alert.symbol}"
-            desktop_msg = alert.trailing_rationale or f"{desc} reached target price ₹{alert.target_price or alert.threshold:,.2f}!"
-            trail_str = f"\n🛑 <b>Recommended Trail SL:</b> ₹{alert.trailing_stop:,.2f}" if alert.trailing_stop and alert.should_trail else "\n🛑 <b>Trailing:</b> DO NOT TRAIL (Book Full Profit)"
+            desktop_msg = (
+                alert.trailing_rationale
+                or f"{desc} reached target price ₹{alert.target_price or alert.threshold:,.2f}!"
+            )
+            trail_str = (
+                f"\n🛑 <b>Recommended Trail SL:</b> ₹{alert.trailing_stop:,.2f}"
+                if alert.trailing_stop and alert.should_trail
+                else "\n🛑 <b>Trailing:</b> DO NOT TRAIL (Book Full Profit)"
+            )
             tg_msg = (
                 f"🎯 <b>{env_tag} TARGET ACHIEVED</b>\n\n"
                 f"🏆 <b>{alert.symbol} {alert.alert_type} Alert</b> reached target!\n\n"
@@ -643,21 +690,29 @@ class AlertManager:
             else:
                 tg_prefix = "🟢 <b>[REAL / LIVE ALERT TRIGGERED]</b>"
 
-            off_market_note = "\n\n⏸️ <i>Market is closed. Setup triggered from post-market settlement/EOD price.</i>" if not in_market and not is_test else ""
+            off_market_note = (
+                "\n\n⏸️ <i>Market is closed. Setup triggered from post-market settlement/EOD price.</i>"
+                if not in_market and not is_test
+                else ""
+            )
             tg_msg = f"{tg_prefix}\n\n🔔 <b>{alert.symbol}</b>: {desc}{ltp_str}{off_market_note}"
             headline = f"{env_tag} 🔔 {alert.symbol} {alert.alert_type} Alert Triggered"
             summary = f"{desc}{ltp_str}"
             border_style = "magenta" if is_test else ("yellow" if not in_market else "green")
             sys_type = "market_alert"
 
-        now_stamp = alert.triggered_at or alert.invalidated_at or alert.created_at or datetime.now().strftime("%Y-%m-%d %H:%M:%S IST")
+        now_stamp = (
+            alert.triggered_at
+            or alert.invalidated_at
+            or alert.created_at
+            or datetime.now().strftime("%Y-%m-%d %H:%M:%S IST")
+        )
 
         # 1. Terminal
         console.print()
         console.print(
             Panel(
-                f"[bold white]{desc}[/bold white]{ltp_str}\n\n"
-                f"[dim]🕒 Timestamp: {now_stamp}[/dim]",
+                f"[bold white]{desc}[/bold white]{ltp_str}\n\n[dim]🕒 Timestamp: {now_stamp}[/dim]",
                 title=panel_title,
                 border_style=border_style,
             )
@@ -693,7 +748,9 @@ class AlertManager:
                 "created_at": alert.created_at or now_stamp,
                 "triggered_at": alert.triggered_at or alert.invalidated_at,
                 "ltp": ltp or alert.threshold,
-                "stage": "INVALIDATED" if alert.is_invalidated else ("TARGET_ACHIEVED" if alert.target_achieved else "TRIGGERED"),
+                "stage": "INVALIDATED"
+                if alert.is_invalidated
+                else ("TARGET_ACHIEVED" if alert.target_achieved else "TRIGGERED"),
                 "is_live": not is_test,
                 "environment": "TEST" if is_test else "LIVE",
                 "env_tag": env_tag,
@@ -706,12 +763,15 @@ class AlertManager:
                 "trailing_rationale": alert.trailing_rationale,
             }
             event_bus.publish_sync("alert", alert_payload)
-            event_bus.publish_sync("system", {
-                "type": sys_type,
-                "alert": alert_payload,
-                "is_invalidated": alert.is_invalidated,
-                "environment": alert.environment,
-            })
+            event_bus.publish_sync(
+                "system",
+                {
+                    "type": sys_type,
+                    "alert": alert_payload,
+                    "is_invalidated": alert.is_invalidated,
+                    "environment": alert.environment,
+                },
+            )
         except Exception:
             pass
 
