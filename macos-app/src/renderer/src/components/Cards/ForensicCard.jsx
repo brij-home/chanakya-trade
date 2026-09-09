@@ -28,8 +28,10 @@ export default function ForensicCard({ data }) {
   const ratingStyle = RATING_COLORS[rating] || RATING_COLORS['B']
   const mScore = Number(d.beneish_m_score)
   const isMScoreSafe = !d.is_manipulator_risk
-  const zScore = Number(d.altman_z_score)
+  const hasZScore = d.altman_z_score !== null && d.altman_z_score !== undefined
+  const zScore = hasZScore ? Number(d.altman_z_score) : null
   const zZone = d.distress_zone || 'UNAVAILABLE'
+  const isZNotApplicable = zZone === 'NOT_APPLICABLE' || zZone === 'N/A'
   const fScore = Number(d.piotroski_f_score)
   const redFlags = d.governance_red_flags || []
   const strengths = d.strengths || []
@@ -114,17 +116,22 @@ export default function ForensicCard({ data }) {
             <div className="flex items-center justify-between">
               <span className="text-[11px] font-semibold text-text font-ui group-hover:text-blue transition-colors">Altman Z''-Score</span>
               <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${
+                isZNotApplicable ? 'bg-muted/10 text-muted border border-border/40' :
                 zZone === 'SAFE' ? 'bg-green/10 text-green' : zZone === 'GREY' ? 'bg-amber/10 text-amber' : 'bg-red/10 text-red'
               }`}>
-                {zZone}
+                {isZNotApplicable ? 'N/A (BANK)' : zZone}
               </span>
             </div>
             <div className="flex items-baseline gap-2">
-              <span className="text-xl font-bold font-mono text-text">{zScore.toFixed(2)}</span>
-              <span className="text-[10px] text-muted font-ui">Safe: &gt; 2.60</span>
+              <span className="text-xl font-bold font-mono text-text">
+                {hasZScore ? zScore.toFixed(2) : '—'}
+              </span>
+              <span className="text-[10px] text-muted font-ui">
+                {isZNotApplicable ? 'RBI Basel III' : 'Safe: > 2.60'}
+              </span>
             </div>
             <p className="text-[10px] text-muted font-ui line-clamp-1">
-              {zZone === 'SAFE' ? 'Strong solvency profile' : zZone === 'GREY' ? 'Moderate credit buffer' : 'Distress risk'}
+              {isZNotApplicable ? 'Non-financial model N/A for banks' : zZone === 'SAFE' ? 'Strong solvency profile' : zZone === 'GREY' ? 'Moderate credit buffer' : 'Distress risk'}
             </p>
           </div>
         </Tooltip>

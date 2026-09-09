@@ -229,7 +229,7 @@
 - **Error Boundaries**: Every global modal and dynamic card wrapped in `<ErrorBoundary>` with graceful fallback.
 - **AST Hook Linting**: `node scripts/audit-react-hooks.js` enforces 0 violations in `npm test` and `npm run build:web`.
 - **Root Error Boundary**: Wrap root app in [`main.jsx`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/macos-app/src/renderer/src/main.jsx) to prevent white screens.
-- **Web Mode**: Support standalone browser access (`window.__CHANAKYA_TRADE_WEB__ || !window.electronAPI`) with fallback port `8765`.
+- **Web Mode & Dual-Target Sync**: Support standalone browser access (`window.__CHANAKYA_TRADE_WEB__ || !window.electronAPI`) with fallback port `8765`. Whenever modifying React files in `macos-app/src/renderer/`, run `npm run build:web` to ensure `web/static/` is synchronized for production/offline mode. In dev mode, FastAPI port 8765 automatically redirects to Vite port 5173 for live HMR.
 
 ### 6.5 JSDoc & TypeScript Type Contracts
 - **Type Definitions Repository**: All frontend data models are strongly typed in [`renderer/src/types/`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/macos-app/src/renderer/src/types/) (`contracts.ts`, `market.js`, `options.js`, `personas.js`, `backtest.js`, `index.js`).
@@ -252,6 +252,13 @@
 ### 6.7 Indian Currency & Number Formatting Standard
 - **Utility**: Always use [`formatINR.js`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/macos-app/src/renderer/src/utils/formatINR.js) (`formatINR`, `formatINRFull`, `formatPct`, `formatVol`) for all price, P&L, turnover, and volume values.
 - **Units**: Automatic scaling (`₹Cr`, `₹L`, `₹K`) with null/NaN defensive guards and ₹ currency prefix.
+
+### 6.8 Human-Readable, Crisp & Decisive Communication Standard
+- **Zero Raw LaTeX or Cryptic Syntax**: Never output raw LaTeX math (e.g. `$\text{OI} \ge 35{,}000$`, `$\times$`, `$\le$`) in assistant responses, UI tooltips, card descriptions, or trade commentary. Always express conditions in natural, human-readable English (e.g., *"At least 35,000 Open Interest and 40,000 Volume"*).
+- **Crisp, Articulate & Decisive**: Avoid essays, long preamble, and narrative filler unless explicitly requested. Deliver actionable conclusions, price zones, conviction scores, and risk parameters immediately.
+- **High Scannability**: Use clean bullet points, bold key terms, and visual state badges (`🟢 READY`, `🔴 STAND_DOWN`, `⚡ TRIGGER NOW`, `🎯 TARGET 1`) instead of monolithic text walls.
+- **Trader Intuition First**: Translate technical and quantitative thresholds into intuitive market behavior (e.g., *"Call writers unwinding positions"*, *"Put support breaking down"*, *"Heavy buyer aggression"*) rather than academic formulas or raw code variables.
+- **Zero Mojibake & Clean UTF-8 Standard**: The terminal is built for humans, not machines. Never permit mojibake encoding corruption (e.g., `ðŸš€`, `ðŸ’Ž`, `âš¡`, `â€”`). All files must be read and written strictly with `encoding="utf-8"`, and Windows console output must reconfigure stdout via `sys.stdout.reconfigure(encoding="utf-8", errors="replace")`. Automated static code audit in [`tests/test_data_integrity_audit.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/tests/test_data_integrity_audit.py) enforces 0 mojibake occurrences across all Python and JavaScript source files. Frontend views must sanitize all dynamic labels via [`cleanText.js`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/macos-app/src/renderer/src/utils/cleanText.js).
 
 ---
 
@@ -276,7 +283,7 @@
 
 ### 7.2 Server & Daemon Lifecycle
 6. **Thread Lifecycle & Cooperative Cancellation**: All background pollers in `engine/` MUST use `self._stop_event = threading.Event()`, wait on `self._stop_event.wait(timeout=...)` instead of blocking `time.sleep()`, and provide clean `.join(timeout=1.0)` in `stop_polling()`.
-7. **Hot-Reload Awareness**: Background daemons (`uvicorn web.api:app`) cache imports. Always restart after backend code edits.
+7. **Hot-Reload Awareness & Clean Instance Restart Standard**: Never rely on partial hot-reload or in-memory state when restarting development services or verifying UI/backend behavior. Always terminate any old processes completely (`electron`, `node`/Vite, `uvicorn`/Python, and socket listeners on ports `8765` & `5173`) using `scripts/quick_cleanup.ps1` before launching a fresh, clean instance. This prevents stale in-memory bundles and saves debugging time.
 8. **API Route Aliasing**: Register aliases (`/high_conviction` + `/top_conviction`, `/taxonomy` + `/universe_categories`) with both GET and POST to prevent 404s.
 
 ### 7.3 LLM Provider Management

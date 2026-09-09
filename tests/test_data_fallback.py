@@ -323,6 +323,7 @@ class TestOhlcvCache:
 
         hist_mod._df_memory_cache.clear()
         monkeypatch.setattr("engine.analysis_cache.cache_get", lambda *a, **kw: None)
+        monkeypatch.setattr("engine.eod_store.get_ohlcv_batch", lambda *a, **kw: {})
 
         def _raise_broker():
             raise RuntimeError("no broker")
@@ -353,6 +354,7 @@ class TestOhlcvCache:
 
         hist_mod._df_memory_cache.clear()
         monkeypatch.setattr("engine.analysis_cache.cache_get", lambda *a, **kw: None)
+        monkeypatch.setattr("engine.eod_store.get_ohlcv_batch", lambda *a, **kw: {})
 
         def _raise_broker():
             raise RuntimeError("no broker")
@@ -388,6 +390,7 @@ class TestOhlcvCache:
 
         hist_mod._df_memory_cache.clear()
         monkeypatch.setattr("engine.analysis_cache.cache_get", lambda *a, **kw: None)
+        monkeypatch.setattr("engine.eod_store.get_ohlcv_batch", lambda *a, **kw: {})
 
         def _raise_broker():
             raise RuntimeError("no broker")

@@ -104,6 +104,12 @@ _KNOWN_NSE_TOKENS = {
     "NIFTY 50": "26000",
     "BANKNIFTY": "26009",
     "NIFTY BANK": "26009",
+    "FINNIFTY": "26037",
+    "NIFTY FIN SERVICE": "26037",
+    "NIFTY FINANCIAL SERVICES": "26037",
+    "MIDCPNIFTY": "26074",
+    "NIFTY MID SELECT": "26074",
+    "NIFTYIT": "26002",
     "RELIANCE": "2885",
     "TCS": "11536",
     "INFY": "1594",
@@ -994,31 +1000,113 @@ class MStockAPI(BrokerAPI):
                                         )
                                     )
 
-                            # Batch enrich quotes if contracts exist
+                            # Batch enrich quotes with FULL mode — populates ltp, bid/ask,
+                            # volume, oi_change, total_buy/sell_qty, and IV for blast detection.
                             if tokens_to_quote:
                                 try:
                                     q_url = f"{MSTOCK_BASE_URL}/openapi/typeb/instruments/quote"
-                                    # Query first 50 contracts to remain within typical REST quota
+                                    # FULL mode returns the complete market snapshot per contract.
+                                    # Cap at 50 tokens to stay within typical REST quota per call.
                                     batch_tokens = tokens_to_quote[:50]
                                     q_resp = self._client.post(
                                         q_url,
                                         json={
-                                            "mode": "LTP",
+                                            "mode": "FULL",
                                             "exchangeTokens": {"NFO": batch_tokens},
                                         },
                                         headers=self._headers(),
+                                        timeout=5.0,
                                     )
                                     if q_resp.status_code == 200:
                                         q_data = q_resp.json()
                                         fetched = q_data.get("data", {}).get("fetched", [])
-                                        ltp_map = {
-                                            item.get("symbolToken"): float(item.get("ltp") or 0.0)
+                                        # Build token → full quote dict
+                                        full_map: dict[str, dict] = {
+                                            str(item.get("symbolToken", "")): item
                                             for item in fetched
+                                            if item.get("symbolToken")
                                         }
                                         for idx, c in enumerate(contracts[:50]):
                                             tok = tokens_to_quote[idx]
-                                            if tok in ltp_map:
-                                                c.last_price = ltp_map[tok]
+                                            q = full_map.get(str(tok))
+                                            if not q:
+                                                continue
+                                            # LTP / last price
+                                            ltp = float(q.get("ltp") or 0.0)
+                                            if ltp > 0:
+                                                c.last_price = ltp
+                                            # Bid / Ask prices
+                                            bid = float(
+                                                q.get("buyPrice1") or q.get("buyPrice") or 0.0
+                                            )
+                                            ask = float(
+                                                q.get("sellPrice1") or q.get("sellPrice") or 0.0
+                                            )
+                                            if bid > 0:
+                                                c.bid = bid
+                                            if ask > 0:
+                                                c.ask = ask
+                                            # Bid / Ask quantities (top of book)
+                                            c.bid_qty = int(
+                                                q.get("buyQty1") or q.get("buyQty") or 0
+                                            )
+                                            c.ask_qty = int(
+                                                q.get("sellQty1") or q.get("sellQty") or 0
+                                            )
+                                            # Total buy / sell depth quantities
+                                            c.total_buy_qty = int(
+                                                q.get("totalBuyQuantity")
+                                                or q.get("totBuyQuan")
+                                                or q.get("totalBuyQty")
+                                                or 0
+                                            )
+                                            c.total_sell_qty = int(
+                                                q.get("totalSellQuantity")
+                                                or q.get("totSellQuan")
+                                                or q.get("totalSellQty")
+                                                or 0
+                                            )
+                                            # Volume traded today
+                                            vol = int(q.get("tradedVolume") or q.get("volume") or 0)
+                                            if vol > 0:
+                                                c.volume = vol
+                                            # OI change vs previous day
+                                            oi_chg = int(
+                                                q.get("oiDayChange")
+                                                or q.get("openInterestChange")
+                                                or q.get("changeinOpenInterest")
+                                                or 0
+                                            )
+                                            if oi_chg != 0:
+                                                c.oi_change = oi_chg
+                                            # Implied Volatility
+                                            iv_val = float(
+                                                q.get("impliedVolatility") or q.get("iv") or 0.0
+                                            )
+                                            if iv_val > 0:
+                                                c.iv = iv_val
+                                    elif q_resp.status_code != 200:
+                                        # FULL mode unsupported — degrade gracefully to LTP
+                                        ltp_resp = self._client.post(
+                                            q_url,
+                                            json={
+                                                "mode": "LTP",
+                                                "exchangeTokens": {"NFO": batch_tokens},
+                                            },
+                                            headers=self._headers(),
+                                            timeout=5.0,
+                                        )
+                                        if ltp_resp.status_code == 200:
+                                            ltp_fetched = (
+                                                ltp_resp.json().get("data", {}).get("fetched", [])
+                                            )
+                                            for item in ltp_fetched:
+                                                tok = str(item.get("symbolToken", ""))
+                                                ltp = float(item.get("ltp") or 0.0)
+                                                for idx, c in enumerate(contracts[:50]):
+                                                    if tokens_to_quote[idx] == tok and ltp > 0:
+                                                        c.last_price = ltp
+                                                        break
                                 except Exception:
                                     pass
 

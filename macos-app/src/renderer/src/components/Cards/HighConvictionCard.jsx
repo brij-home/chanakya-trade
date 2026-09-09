@@ -459,18 +459,18 @@ export default function HighConvictionCard({ data, onOpenOrderTicket }) {
                       <div className="flex flex-wrap items-center justify-between gap-1 text-muted">
                         <span className="flex items-center gap-1">
                           <span>⏳</span>
-                          <span>Horizon: <strong className="text-text">{opp.expected_timeline || '3–10 Trading Days (Swing Momentum)'}</strong></span>
+                          <span>Horizon: <strong className="text-text">{opp.expected_timeline ?? '—'}</strong></span>
                         </span>
                         <span className="flex items-center gap-2">
-                          <span>T1: <strong className="text-green font-mono">{opp.target_1_timeline || '2–5 Days'}</strong></span>
+                          <span>T1: <strong className="text-green font-mono">{opp.target_1_timeline ?? '—'}</strong></span>
                           <span>•</span>
-                          <span>T2: <strong className="text-green font-mono">{opp.target_2_timeline || '6–10 Days'}</strong></span>
+                          <span>T2: <strong className="text-green font-mono">{opp.target_2_timeline ?? '—'}</strong></span>
                           <span>•</span>
                           <span>Time Invalidation: <strong className="text-red font-mono">{opp.time_stop_days || 10} Sessions</strong></span>
                         </span>
                       </div>
                       <p className="text-[10px] text-muted leading-tight border-t border-border/20 pt-1">
-                        📋 <strong>Playbook:</strong> {opp.profit_booking_plan || `Scale out 50% at Target 1 (₹${opp.target_1?.toLocaleString()}), move SL to Breakeven (+0.2%), and trail remainder via Daily 20-EMA to Target 2.`}
+                        📋 <strong>Playbook:</strong> {opp.profit_booking_plan ?? '—'}
                       </p>
                     </div>
 

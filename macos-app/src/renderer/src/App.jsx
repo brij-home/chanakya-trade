@@ -14,9 +14,12 @@ import ModeBanner from './components/Common/ModeBanner'
 import ToastContainer from './components/Toast/ToastContainer'
 import HotkeyPanel from './components/UI/HotkeyPanel'
 import ErrorBoundary from './components/ErrorBoundary'
+import { useToastStore } from './hooks/useToast'
 
 // ── Lazy-loaded Workspace Views (Code-Split Chunks) ─────────────────────────
 const TerminalView = lazy(() => import('./components/Views/TerminalView'))
+const ChartStudioView = lazy(() => import('./components/Views/ChartStudioView'))
+const InflectionScannerView = lazy(() => import('./components/Views/InflectionScannerView'))
 const DebateArenaView = lazy(() => import('./components/Views/DebateArenaView'))
 const OptionsDeskView = lazy(() => import('./components/Views/OptionsDeskView'))
 const OverviewView = lazy(() => import('./components/Views/OverviewView'))
@@ -71,6 +74,26 @@ function useTheme() {
   return { theme, toggle }
 }
 
+/* ── Web Audio Chime (Institutional 2-tone chime) ────────────────────────── */
+function playAlertChime() {
+  try {
+    const AudioContext = window.AudioContext || window.webkitAudioContext
+    if (!AudioContext) return
+    const ctx = new AudioContext()
+    const osc = ctx.createOscillator()
+    const gain = ctx.createGain()
+    osc.type = 'sine'
+    osc.frequency.setValueAtTime(587.33, ctx.currentTime) // D5
+    osc.frequency.exponentialRampToValueAtTime(880, ctx.currentTime + 0.15) // A5
+    gain.gain.setValueAtTime(0.12, ctx.currentTime)
+    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.35)
+    osc.connect(gain)
+    gain.connect(ctx.destination)
+    osc.start()
+    osc.stop(ctx.currentTime + 0.35)
+  } catch (_) {}
+}
+
 /* ── Main App ───────────────────────────────────────────────────────────── */
 export default function App() {
   const { setPort, setSidecarError, setBrokerStatuses, activeView, setActiveView } = useChatStore()
@@ -80,11 +103,15 @@ export default function App() {
   const modeLoading = useChatStore((s) => s.modeLoading)
   const setAppMode = useChatStore((s) => s.setAppMode)
   const setModeLoading = useChatStore((s) => s.setModeLoading)
+  const selectedSymbol = useChatStore((s) => s.selectedSymbol)
+  const setSelectedSymbol = useChatStore((s) => s.setSelectedSymbol)
   const { theme, toggle: toggleTheme } = useTheme()
   const [pilotSafety, setPilotSafety] = useState(null)
+  const [unreadAlertCount, setUnreadAlertCount] = useState(0)
 
   // System status SSE URL — connects when port is known
   const systemStreamUrl = port ? `${getBaseUrl(port)}/api/system/stream` : null
+  const alertStreamUrl = port ? `${getBaseUrl(port)}/stream/alerts` : null
 
   // Setup phase state machine — fast path: if terminal was already initialized, skip full boot screen
   const [setupPhase, setSetupPhase] = useState(() => {
@@ -107,10 +134,17 @@ export default function App() {
   const [sectorDrilldown, setSectorDrilldown] = useState({ isOpen: false, sector: null })
   const [showHotkeyRef, setShowHotkeyRef] = useState(false)
 
-  // Per-view context state (passed to ContextBar)
-  const [ctxSymbol, setCtxSymbol] = useState('NIFTY')
+  // Per-view context state (passed to ContextBar and synchronized with global selectedSymbol)
+  const [ctxSymbol, setCtxSymbol] = useState(selectedSymbol || 'NIFTY')
   const [ctxTimeframe, setCtxTimeframe] = useState('15m')
   const [ctxLayout, setCtxLayout] = useState('single')
+
+  const handleSymbolChange = (sym) => {
+    if (!sym) return
+    const clean = String(sym).trim().toUpperCase().replace(/^(NSE:|BSE:|MCX:|CDS:)/i, '')
+    setCtxSymbol(clean)
+    setSelectedSymbol(clean)
+  }
 
   // ── Event listeners ──────────────────────────────────────────────────────
   useEffect(() => {
@@ -250,6 +284,68 @@ export default function App() {
     enabled: !!(port || port === 0) && setupPhase === 'ready',
   })
 
+  // ── Real-Time Auto-Alert Stream (Gamma Blasts, Squeezes, Circuits, Targets, Invalidation) ─────────
+  const handleAlertMessage = useCallback((payload) => {
+    if (!payload) return
+    setUnreadAlertCount((prev) => prev + 1)
+    playAlertChime()
+
+    const isTest = payload.environment === 'TEST' || payload.is_live === false
+    const isInvalidated = payload.is_invalidated === true || payload.stage === 'INVALIDATED'
+    const isTarget = payload.is_target === true || payload.stage === 'T1_ACHIEVED' || payload.stage === 'TARGET_ACHIEVED' || payload.target_achieved === true
+    const isTrail = payload.is_trail === true || payload.stage === 'TRAILING_UPDATE'
+    const envBadge = isTest ? '🧪 [TEST]' : '🟢 [REAL/LIVE]'
+
+    let headline = payload.headline || `${payload.symbol} ${payload.alert_type || 'Alert'}`
+    if (!headline.includes('[TEST]') && !headline.includes('[REAL/LIVE]')) {
+      if (isInvalidated) {
+        headline = `⚠️ ${envBadge} VIEW INVALIDATED: ${payload.symbol}`
+      } else if (isTarget) {
+        headline = `🎯 ${envBadge} TARGET ACHIEVED: ${payload.symbol}`
+      } else if (isTrail) {
+        headline = `📈 ${envBadge} TRAILING STOP: ${payload.symbol}`
+      } else {
+        headline = `${envBadge} ${headline}`
+      }
+    }
+
+    const decision = payload.trailing_decision ? `⚡ ${payload.trailing_decision}: ` : ''
+    const summary = payload.invalidation_reason || payload.trailing_rationale || payload.summary || payload.description || payload.message || ''
+    const isGamma = payload.alert_type === 'GAMMA_BLAST'
+    const isCircuit = payload.alert_type === 'CIRCUIT_WARNING'
+
+    const rawTime = payload.timestamp || payload.invalidated_at || payload.triggered_at || payload.created_at || ''
+    let timeStr = ''
+    if (rawTime) {
+      timeStr = rawTime.includes(' ') ? rawTime.split(' ').slice(-2).join(' ') : rawTime
+    } else {
+      timeStr = new Date().toLocaleTimeString('en-IN', { hour12: false }) + ' IST'
+    }
+
+    useToastStore.getState().addToast({
+      type: isInvalidated ? 'error' : isTarget ? 'trade' : isTrail ? 'info' : isGamma ? 'trade' : isCircuit ? 'warning' : 'info',
+      title: headline,
+      message: `${decision}${summary}`,
+      timestamp: timeStr,
+      duration: isInvalidated ? 12000 : (isTarget ? 10000 : 8000),
+    })
+
+    // Notify Alerts Manager and other active screens that an alert arrived
+    window.dispatchEvent(new CustomEvent('new-market-alert', { detail: payload }))
+  }, [])
+
+  useSSEStream(alertStreamUrl, {
+    onMessage: handleAlertMessage,
+    enabled: !!(port || port === 0) && setupPhase === 'ready',
+  })
+
+  // Clear unread count when user views the alerts manager
+  useEffect(() => {
+    if (activeView === 'alerts') {
+      setUnreadAlertCount(0)
+    }
+  }, [activeView])
+
   // Fallback REST polling for broker status when SSE is not available
   // (older backend versions without /api/system/stream)
   useEffect(() => {
@@ -311,6 +407,7 @@ export default function App() {
       if (e.metaKey || e.ctrlKey) {
         const handlers = {
           '1': () => setActiveView('terminal'),
+          '0': () => setActiveView('scanner'),
           '2': () => setActiveView('debate'),
           '3': () => setActiveView('options'),
           '4': () => setActiveView('copilot'),
@@ -394,6 +491,8 @@ export default function App() {
           style={{ background: 'var(--color-elevated)', border: '1px solid var(--color-border)' }}
         >
           <WorkspaceTab id="terminal"  icon="📊" label="Terminal"    active={activeView === 'terminal'}  color="gold"     onClick={() => document.startViewTransition?.(() => setActiveView('terminal'))  ?? setActiveView('terminal')} shortcut="^1" />
+          <WorkspaceTab id="charts"    icon="📈" label="Charts"      active={activeView === 'charts'}    color="cyan"     onClick={() => document.startViewTransition?.(() => setActiveView('charts'))    ?? setActiveView('charts')} shortcut="^C" />
+          <WorkspaceTab id="scanner"   icon="🎯" label="Inflection"  active={activeView === 'scanner'}   color="amber"    onClick={() => document.startViewTransition?.(() => setActiveView('scanner'))   ?? setActiveView('scanner')} shortcut="^0" />
           <WorkspaceTab id="debate"    icon="⚔️" label="Debate"      active={activeView === 'debate'}    color="emerald"  onClick={() => document.startViewTransition?.(() => setActiveView('debate'))    ?? setActiveView('debate')} shortcut="^2" />
           <WorkspaceTab id="options"   icon="⚡" label="Options"     active={activeView === 'options'}   color="violet"   onClick={() => document.startViewTransition?.(() => setActiveView('options'))   ?? setActiveView('options')} shortcut="^3" />
           <WorkspaceTab id="copilot"   icon="💬" label="Copilot"     active={activeView === 'copilot'}   color="sapphire" onClick={() => document.startViewTransition?.(() => setActiveView('copilot'))   ?? setActiveView('copilot')} shortcut="^4" />
@@ -476,7 +575,7 @@ export default function App() {
       <div className="flex flex-1 overflow-hidden">
 
         {/* Left Activity Bar — always present */}
-        <ActivityBar alertCount={0} />
+        <ActivityBar alertCount={unreadAlertCount} />
 
         {/* Copilot Sidebar */}
         {isCopilot && <Sidebar />}
@@ -488,12 +587,33 @@ export default function App() {
               {activeView === 'terminal' && (
                 <TerminalView
                   onOpenOrderTicket={handleOpenOrderTicket}
-                  externalSymbol={ctxSymbol}
-                  onSymbolChange={setCtxSymbol}
+                  externalSymbol={selectedSymbol || ctxSymbol}
+                  onSymbolChange={handleSymbolChange}
                   externalTimeframe={ctxTimeframe}
                   onTimeframeChange={setCtxTimeframe}
                   externalLayout={ctxLayout}
                   onLayoutChange={setCtxLayout}
+                />
+              )}
+
+              {activeView === 'charts' && (
+                <ChartStudioView
+                  onOpenOrderTicket={handleOpenOrderTicket}
+                  initialSymbol={selectedSymbol || ctxSymbol}
+                  initialTimeframe={ctxTimeframe}
+                />
+              )}
+
+              {activeView === 'scanner' && (
+                <InflectionScannerView
+                  onOpenOrderTicket={handleOpenOrderTicket}
+                  onNavigateToTerminal={(sym) => {
+                    handleSymbolChange(sym)
+                    setActiveView('terminal')
+                  }}
+                  onNavigateToDebate={(sym) => {
+                    setActiveView('debate')
+                  }}
                 />
               )}
 
@@ -502,7 +622,11 @@ export default function App() {
               )}
 
               {activeView === 'options' && (
-                <OptionsDeskView onOpenOrderTicket={handleOpenOrderTicket} />
+                <OptionsDeskView
+                  onOpenOrderTicket={handleOpenOrderTicket}
+                  selectedSymbol={selectedSymbol || ctxSymbol}
+                  onSelectSymbol={handleSymbolChange}
+                />
               )}
 
               {activeView === 'copilot' && (

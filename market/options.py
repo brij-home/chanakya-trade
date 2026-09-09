@@ -10,7 +10,7 @@ Fallback chain:
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Any, Optional
 
 import pandas as pd
 
@@ -75,9 +75,98 @@ def get_expiries(underlying: str) -> list[str]:
     All available expiry dates for an underlying (sorted ascending).
     Returns dates as "YYYY-MM-DD" strings.
     """
+    try:
+        broker = get_data_broker()
+        if hasattr(broker, "get_expiries"):
+            exp = broker.get_expiries(underlying)
+            if exp:
+                return exp
+    except Exception:
+        pass
+
+    try:
+        from market.nse_scraper import nse_get_expiries
+
+        exp = nse_get_expiries(underlying)
+        if exp:
+            return exp
+    except Exception:
+        pass
+
     chain = get_options_chain(underlying)
-    dates = sorted({c.expiry for c in chain})
+    dates = sorted({c.expiry for c in chain if c.expiry})
     return dates
+
+
+def get_options_snapshot(
+    underlying: str,
+    expiry: Optional[str] = None,
+) -> tuple[list[OptionsContract], Optional[float], list[str], dict[str, Any]]:
+    """
+    Unified options snapshot returning (contracts, live_spot_price, available_expiries, source_info).
+    source_info conveys transparent provenance: provider, source, data_state, is_realtime, and as_of timestamps.
+    """
+    from datetime import datetime, timezone
+    from brokers.session import get_data_broker, get_data_broker_key
+
+    clean_u = underlying.replace("NSE:", "").replace("BSE:", "").upper().strip()
+    is_bse = clean_u in ("SENSEX", "BANKEX")
+    now_utc = datetime.now(timezone.utc).isoformat()
+    now_ist = datetime.now().strftime("%I:%M:%S %p IST")
+
+    # Tier 1: Primary Data Broker (m.Stock, Fyers, Shoonya, Zerodha)
+    try:
+        broker = get_data_broker()
+        broker_name = get_data_broker_key() or getattr(broker, "name", "broker")
+        chain = broker.get_options_chain(underlying, expiry)
+        if chain:
+            spot = getattr(broker, "get_ltp", lambda _: None)(underlying)
+            expiries = sorted({c.expiry for c in chain if c.expiry})
+            source_info = {
+                "provider": broker_name,
+                "source": "BROKER_REST",
+                "data_state": "LIVE",
+                "is_realtime": True,
+                "as_of": now_utc,
+                "as_of_display": now_ist,
+                "source_label": f"{broker_name.upper()} Direct Real-Time Feed",
+            }
+            return chain, spot, expiries, source_info
+    except Exception:
+        pass
+
+    # Tier 2: Upgraded NSE Scraper v3 (Delayed Fallback)
+    try:
+        from market.nse_scraper import nse_fetch_full_snapshot
+
+        contracts, spot, expiries = nse_fetch_full_snapshot(underlying, expiry)
+        if contracts:
+            source_info = {
+                "provider": "nse_scraper",
+                "source": "SCRAPER_FALLBACK",
+                "data_state": "DELAYED",
+                "is_realtime": False,
+                "as_of": now_utc,
+                "as_of_display": now_ist,
+                "source_label": "NSE Public Scraper (~15m Delayed Fallback)",
+            }
+            return contracts, spot, expiries, source_info
+    except Exception:
+        pass
+
+    # Tier 3: Honest Disconnected / Broker Required
+    source_info = {
+        "provider": "none",
+        "source": "UNAVAILABLE",
+        "data_state": "BROKER_REQUIRED" if is_bse else "UNAVAILABLE",
+        "is_realtime": False,
+        "as_of": now_utc,
+        "as_of_display": now_ist,
+        "source_label": f"BSE {clean_u} Broker Required for BFO"
+        if is_bse
+        else "Data Feed Unavailable",
+    }
+    return [], None, [], source_info
 
 
 def chain_to_dataframe(contracts: list[OptionsContract]) -> pd.DataFrame:

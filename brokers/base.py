@@ -126,6 +126,12 @@ class OptionsContract:
     iv: Optional[float] = None  # Implied Volatility (%)
     bid: Optional[float] = None
     ask: Optional[float] = None
+    bid_qty: int = 0
+    ask_qty: int = 0
+    total_buy_qty: int = 0
+    total_sell_qty: int = 0
+    pchange: Optional[float] = None
+    pchange_oi: Optional[float] = None
     lot_size: int = 1
     exchange: str = "NFO"
 

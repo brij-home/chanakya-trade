@@ -41,6 +41,8 @@ class TechnicalSnapshot:
     macd: float = 0.0
     macd_sig: float = 0.0
     macd_hist: float = 0.0
+    macd_signal: str = "NEUTRAL"  # BULLISH | BEARISH | NEUTRAL
+    macd_detail: str = ""  # e.g. "Bullish crossover", "Above signal line"
     ema20: float = 0.0
     ema50: float = 0.0
     sma200: float = 0.0
@@ -49,6 +51,13 @@ class TechnicalSnapshot:
     bb_mid: float = 0.0
     atr: float = 0.0
     volume_ratio: float = 0.0  # today's vol / 20-day avg vol
+
+    # Timeframe & Provenance
+    timeframe: str = "1D (Daily)"
+    as_of: str = ""
+    data_source: str = "NSE Historical EOD"
+    is_valid: bool = True
+    anomaly_notes: list[str] = field(default_factory=list)
 
     # Support / Resistance
     support: float = 0.0
@@ -73,8 +82,18 @@ def rsi(close: pd.Series, period: int = 14) -> pd.Series:
     loss = (-delta).clip(lower=0)
     avg_gain = gain.ewm(alpha=1 / period, min_periods=period).mean()
     avg_loss = loss.ewm(alpha=1 / period, min_periods=period).mean()
+
     rs = avg_gain / avg_loss.replace(0, np.nan)
-    return 100 - (100 / (1 + rs))
+    rsi_series = 100.0 - (100.0 / (1.0 + rs))
+
+    zero_loss = (avg_loss == 0) & (avg_gain > 0)
+    zero_gain = (avg_gain == 0) & (avg_loss > 0)
+    flat = (avg_gain == 0) & (avg_loss == 0)
+
+    rsi_series = rsi_series.where(~zero_loss, 100.0)
+    rsi_series = rsi_series.where(~zero_gain, 0.0)
+    rsi_series = rsi_series.where(~flat, 50.0)
+    return rsi_series
 
 
 def ema(series: pd.Series, period: int) -> pd.Series:
@@ -114,9 +133,20 @@ def bollinger_bands(
 
 
 def atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
-    high_low = df["high"] - df["low"]
-    high_close = (df["high"] - df["close"].shift()).abs()
-    low_close = (df["low"] - df["close"].shift()).abs()
+    h = (
+        df["high"]
+        if "high" in df.columns
+        else (df["High"] if "High" in df.columns else df.iloc[:, 1])
+    )
+    l = df["low"] if "low" in df.columns else (df["Low"] if "Low" in df.columns else df.iloc[:, 2])
+    c = (
+        df["close"]
+        if "close" in df.columns
+        else (df["Close"] if "Close" in df.columns else df.iloc[:, 3])
+    )
+    high_low = h - l
+    high_close = (h - c.shift()).abs()
+    low_close = (l - c.shift()).abs()
     true_range = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
     return true_range.ewm(alpha=1 / period, adjust=False).mean()
 
@@ -222,18 +252,26 @@ def analyse(
         )
         score += 5 if rsi_val > 50 else -5
 
-    # MACD crossover
+    # MACD crossover & positioning
     prev_hist = float(histogram.iloc[-2]) if len(histogram) >= 2 else 0
     if hist_val > 0 and prev_hist <= 0:
+        macd_detail = "Bullish crossover"
+        macd_signal_str = "BULLISH"
         signals.append(Signal("MACD", round(macd_val, 2), "BULLISH", "Bullish crossover"))
         score += 15
     elif hist_val < 0 and prev_hist >= 0:
+        macd_detail = "Bearish crossover"
+        macd_signal_str = "BEARISH"
         signals.append(Signal("MACD", round(macd_val, 2), "BEARISH", "Bearish crossover"))
         score -= 15
     elif hist_val > 0:
+        macd_detail = "Above signal line"
+        macd_signal_str = "BULLISH"
         signals.append(Signal("MACD", round(macd_val, 2), "BULLISH", "Above signal line"))
         score += 8
     else:
+        macd_detail = "Below signal line"
+        macd_signal_str = "BEARISH"
         signals.append(Signal("MACD", round(macd_val, 2), "BEARISH", "Below signal line"))
         score -= 8
 
@@ -318,6 +356,16 @@ def analyse(
         f"{'Above' if ltp > sma200_val else 'Below'} 200 DMA"
     )
 
+    as_of_str = (
+        str(df.index[-1].date()) if hasattr(df.index[-1], "date") else str(df.index[-1])[:10]
+    )
+    data_source_str = df.attrs.get("provenance", {}).get("provider", "NSE Historical EOD")
+    anomaly_notes = []
+    is_valid = True
+    if rsi_val >= 95.0 or rsi_val <= 5.0:
+        anomaly_notes.append(f"Extreme RSI ({rsi_val:.1f}) detected - verify price continuity")
+        is_valid = False
+
     return TechnicalSnapshot(
         symbol=symbol,
         ltp=round(ltp, 2),
@@ -325,6 +373,8 @@ def analyse(
         macd=round(macd_val, 4),
         macd_sig=round(sig_val, 4),
         macd_hist=round(hist_val, 4),
+        macd_signal=macd_signal_str,
+        macd_detail=macd_detail,
         ema20=round(ema20_val, 2),
         ema50=round(ema50_val, 2),
         sma200=round(sma200_val, 2),
@@ -333,6 +383,11 @@ def analyse(
         bb_mid=round(bb_m, 2),
         atr=round(atr_val, 2),
         volume_ratio=vol_ratio,
+        timeframe="1D (Daily)",
+        as_of=as_of_str,
+        data_source=data_source_str,
+        is_valid=is_valid,
+        anomaly_notes=anomaly_notes,
         support=pivots["s1"],
         resistance=pivots["r1"],
         pivot=pivots["pivot"],

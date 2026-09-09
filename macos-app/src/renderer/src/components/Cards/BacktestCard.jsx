@@ -22,15 +22,15 @@ export default function BacktestCard({ data }) {
   ]
 
   // Normalize equity curve points whether returned as raw numbers or object array
-  const rawCurve = r.equity_curve && r.equity_curve.length > 0
+  const rawCurve = Array.isArray(r.equity_curve) && r.equity_curve.length > 0
     ? r.equity_curve
-    : generateMockEquityCurve(returnVal, r.max_drawdown, r.total_trades || 30)
+    : []
 
   const equityCurve = rawCurve.map((p) => ({
-    value: typeof p === 'number' ? p : Number(p?.value ?? 100000),
-  }))
+    value: typeof p === 'number' ? p : Number(p?.value ?? 0),
+  })).filter((p) => Number.isFinite(p.value) && p.value > 0)
 
-  const peakValue = equityCurve.length > 0 ? Math.max(...equityCurve.map((p) => p.value)) : 100000
+  const peakValue = equityCurve.length > 0 ? Math.max(...equityCurve.map((p) => p.value)) : 0
 
   return (
     <div className="bg-elevated border border-border rounded-xl p-4 max-w-xl w-full space-y-4 font-mono shadow-sm">
@@ -58,11 +58,19 @@ export default function BacktestCard({ data }) {
       <div className="bg-surface border border-border/60 rounded-lg p-2.5 space-y-1">
         <div className="flex justify-between text-[10px] text-muted font-ui">
           <span>Equity Progression</span>
-          <span className={isPositive ? 'text-green' : 'text-amber'}>
-            Peak: ₹{peakValue.toLocaleString('en-IN', { maximumFractionDigits: 0 })}
-          </span>
+          {peakValue > 0 ? (
+            <span className={isPositive ? 'text-green' : 'text-amber'}>
+              Peak: ₹{peakValue.toLocaleString('en-IN', { maximumFractionDigits: 0 })}
+            </span>
+          ) : null}
         </div>
-        <EquityCurveSVG data={equityCurve} isPositive={isPositive} />
+        {equityCurve.length > 1 ? (
+          <EquityCurveSVG data={equityCurve} isPositive={isPositive} />
+        ) : (
+          <div className="py-4 text-center text-[11px] text-muted font-ui">
+            Historical equity progression curve not included in backtest output
+          </div>
+        )}
       </div>
 
       {/* Metrics Grid */}
@@ -129,19 +137,6 @@ function EquityCurveSVG({ data = [], isPositive = true }) {
       <path d={path} fill="none" stroke={strokeColor} strokeWidth="2" strokeLinecap="round" />
     </svg>
   )
-}
-
-function generateMockEquityCurve(totalReturnPct, maxDdPct, steps = 30) {
-  const points = [{ value: 100000 }]
-  let current = 100000
-  const growthRate = (1 + totalReturnPct / 100) ** (1 / steps)
-
-  for (let i = 1; i <= steps; i++) {
-    const shock = (Math.random() - 0.48) * (Math.abs(maxDdPct || 5) / 10)
-    current = current * growthRate * (1 + shock / 100)
-    points.push({ value: Math.round(current) })
-  }
-  return points
 }
 
 const pct = (n) => `${Number(n ?? 0).toFixed(2)}%`

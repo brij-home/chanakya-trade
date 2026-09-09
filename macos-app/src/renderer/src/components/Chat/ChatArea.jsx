@@ -4,14 +4,14 @@ import { useAPI } from '../../hooks/useAPI'
 import Message from './Message'
 
 const DEFAULT_TICKERS = [
-  { symbol: 'NIFTY', name: 'NIFTY 50', cmd: 'quote NIFTY', tag: 'INDEX', ltp: 0, change_pct: 0 },
-  { symbol: 'BANKNIFTY', name: 'BANK NIFTY', cmd: 'quote BANKNIFTY', tag: 'INDEX', ltp: 0, change_pct: 0 },
-  { symbol: 'COFORGE', name: 'Coforge Ltd', cmd: 'analyze COFORGE', tag: 'READY', ltp: 0, change_pct: 0 },
-  { symbol: 'TRENT', name: 'Trent Ltd', cmd: 'analyze TRENT', tag: 'STAGE 2', ltp: 0, change_pct: 0 },
-  { symbol: 'RELIANCE', name: 'Reliance Ind', cmd: 'analyze RELIANCE', tag: 'LARGE CAP', ltp: 0, change_pct: 0 },
-  { symbol: 'HDFCBANK', name: 'HDFC Bank', cmd: 'analyze HDFCBANK', tag: 'LARGE CAP', ltp: 0, change_pct: 0 },
-  { symbol: 'TCS', name: 'Tata Consultancy', cmd: 'analyze TCS', tag: 'LARGE CAP', ltp: 0, change_pct: 0 },
-  { symbol: 'INFY', name: 'Infosys Ltd', cmd: 'analyze INFY', tag: 'LARGE CAP', ltp: 0, change_pct: 0 },
+  { symbol: 'NIFTY', name: 'NIFTY 50', cmd: 'quote NIFTY', tag: 'INDEX', ltp: null, change_pct: null },
+  { symbol: 'BANKNIFTY', name: 'BANK NIFTY', cmd: 'quote BANKNIFTY', tag: 'INDEX', ltp: null, change_pct: null },
+  { symbol: 'COFORGE', name: 'Coforge Ltd', cmd: 'analyze COFORGE', tag: 'NSE', ltp: null, change_pct: null },
+  { symbol: 'TRENT', name: 'Trent Ltd', cmd: 'analyze TRENT', tag: 'NSE', ltp: null, change_pct: null },
+  { symbol: 'RELIANCE', name: 'Reliance Ind', cmd: 'analyze RELIANCE', tag: 'NSE', ltp: null, change_pct: null },
+  { symbol: 'HDFCBANK', name: 'HDFC Bank', cmd: 'analyze HDFCBANK', tag: 'NSE', ltp: null, change_pct: null },
+  { symbol: 'TCS', name: 'Tata Consultancy', cmd: 'analyze TCS', tag: 'NSE', ltp: null, change_pct: null },
+  { symbol: 'INFY', name: 'Infosys Ltd', cmd: 'analyze INFY', tag: 'NSE', ltp: null, change_pct: null },
 ]
 
 export default function ChatArea() {
@@ -221,7 +221,7 @@ export default function ChatArea() {
                     title={`Instant 1-click execution: ${cmd}`}
                   >
                     <span className="font-bold text-amber group-hover:text-amber-light">{label}</span>
-                    {ltp > 0 && (
+                    {ltp != null && ltp > 0 && (
                       <span className="text-[10px] text-muted hidden sm:inline">₹{Number(ltp).toLocaleString('en-IN')}</span>
                     )}
                     {changePct !== undefined && changePct !== 0 && (

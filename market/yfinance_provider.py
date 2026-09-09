@@ -479,11 +479,20 @@ def yf_get_ohlcv(
 
                 clamped_from = now - timedelta(days=58)
 
-            hist = t.history(
-                start=clamped_from.strftime("%Y-%m-%d"),
-                end=(to_date or now).strftime("%Y-%m-%d"),
-                interval=yf_interval,
-            )
+            kwargs = {
+                "start": clamped_from.strftime("%Y-%m-%d"),
+                "interval": yf_interval,
+            }
+            # Yahoo Finance `end` date is strictly exclusive.
+            # Only supply `end` if caller explicitly specified a cutoff strictly in the past.
+            # If to_date is not provided or is today/future, omit `end` so Yahoo Finance
+            # returns all completed bars up to the current moment (including today's intraday sessions).
+            if to_date and to_date.date() < now.date():
+                from datetime import timedelta
+
+                kwargs["end"] = (to_date + timedelta(days=1)).strftime("%Y-%m-%d")
+
+            hist = t.history(**kwargs)
         else:
             p = period
             if yf_interval == "1m" and p in ("1mo", "3mo", "6mo", "1y", "2y", "5y", "max"):

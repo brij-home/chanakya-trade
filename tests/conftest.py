@@ -24,6 +24,7 @@ _TEST_DATA_DIR.mkdir(parents=True, exist_ok=True)
 os.environ["TRADING_PLATFORM_HOME"] = str(_TEST_DATA_DIR)
 os.environ["TRADING_PLATFORM_DATA"] = str(_TEST_DATA_DIR)
 os.environ["TRADING_PLATFORM_PDF_DIR"] = str(_TEST_DATA_DIR / "pdf")
+os.environ["CHANAKYA_EOD_DB_PATH"] = str(_TEST_DATA_DIR / "test_eod_bars.db")
 os.environ["CHANAKYA_TESTING"] = "1"
 os.environ["TRADING_MODE"] = "PAPER"
 # Test runs must not inherit deployment authentication policy from a developer's
@@ -66,6 +67,24 @@ def sanitize_test_env(monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRe
         monkeypatch.setenv("ANTHROPIC_API_KEY", "")
         monkeypatch.setenv("NVIDIA_API_KEY", "")
         monkeypatch.setenv("OPENROUTER_API_KEY", "")
+
+
+@pytest.fixture(autouse=True)
+def isolate_test_notifications(monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest):
+    """Ensure tests never emit real-world Telegram pushes or desktop popups."""
+    if "live_telegram" not in request.keywords:
+        try:
+            monkeypatch.setattr("engine.alerts._telegram_notify", lambda msg: None)
+        except Exception:
+            pass
+        try:
+            monkeypatch.setattr("engine.alerts._desktop_notify", lambda **kwargs: None)
+        except Exception:
+            pass
+        try:
+            monkeypatch.setattr("bot.telegram_bot.send_push", lambda *args, **kwargs: None)
+        except Exception:
+            pass
 
 
 @pytest.fixture

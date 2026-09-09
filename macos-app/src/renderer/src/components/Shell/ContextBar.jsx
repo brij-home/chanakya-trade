@@ -63,49 +63,35 @@ export function MarketClock() {
   )
 }
 
+import { useRealtimeMarket } from '../../hooks/useRealtimeMarket'
+import { formatLivePrice, formatLiveChange } from '../../utils/marketDataUtils'
+
 /**
  * LiveIndexTicker — dynamic real-time ticker strip for Indices, Commodities & Crypto
  */
 export function LiveIndexTicker({ onSymbolChange }) {
-  const { call } = useAPI()
-  const [tickers, setTickers] = useState([])
+  const { tickers, connectionState } = useRealtimeMarket()
 
-  useEffect(() => {
-    let mounted = true
-    const fetchTickers = async () => {
-      try {
-        const res = await call('/skills/live_tickers', {}, { method: 'GET' })
-        const list = res?.data?.tickers || res?.tickers
-        if (mounted && Array.isArray(list) && list.length > 0) {
-          setTickers(list)
-        }
-      } catch {
-        // Fallback gracefully without console spam
-      }
-    }
+  // Curated indices for quick reference
+  const targetSymbols = ['NIFTY', 'BANKNIFTY', 'INDIA VIX']
+  const displayItems = tickers.filter((t) => targetSymbols.includes(t.symbol))
 
-    fetchTickers()
-    const interval = setInterval(fetchTickers, 10000)
-    return () => {
-      mounted = false
-      clearInterval(interval)
-    }
-  }, [])
-
-  // Curated indices for non-terminal views
-  const displayItems = tickers.length > 0
-    ? tickers.filter((t) => ['NIFTY', 'BANKNIFTY', 'INDIA VIX'].includes(t.symbol))
-    : [
-        { symbol: 'NIFTY', display_name: 'NIFTY', ltp: 23897.70, change_pct: 0.10, unit: '₹' },
-        { symbol: 'BANKNIFTY', display_name: 'BKNIFTY', ltp: 57369.65, change_pct: -0.02, unit: '₹' },
-        { symbol: 'INDIA VIX', display_name: 'INDIA VIX', ltp: 10.68, change_pct: -6.07, unit: 'pts' },
-      ]
+  if (displayItems.length === 0) {
+    return (
+      <div className="hidden lg:flex items-center gap-2 no-drag font-mono text-[10px]" style={{ color: 'var(--color-subtle)' }}>
+        <span className="w-1.5 h-1.5 rounded-full animate-pulse" style={{ background: connectionState === 'live' ? 'var(--color-emerald)' : 'var(--color-gold)' }} />
+        <span>{connectionState === 'live' ? 'Awaiting ticks...' : 'Connecting live market feed...'}</span>
+      </div>
+    )
+  }
 
   return (
     <div className="hidden lg:flex items-center gap-2 no-drag overflow-x-auto no-scrollbar max-w-[620px]">
       {displayItems.map((idx) => {
-        const isUp = (idx.direction === 'up') || (idx.change_pct > 0)
-        const isDown = (idx.direction === 'down') || (idx.change_pct < 0)
+        const rawPrice = idx.ltp != null ? idx.ltp : idx.price
+        const changeObj = formatLiveChange(idx.change, idx.change_pct)
+        const isUp = (idx.direction === 'up') || (idx.change_pct > 0) || changeObj.isPositive
+        const isDown = (idx.direction === 'down') || (idx.change_pct < 0) || (changeObj.direction === 'down')
         const changeColor = isUp ? 'var(--color-emerald)' : isDown ? 'var(--color-rose)' : 'var(--color-subtle)'
 
         return (
@@ -125,13 +111,13 @@ export function LiveIndexTicker({ onSymbolChange }) {
               className="text-xs font-mono font-bold tabular-nums"
               style={{ color: 'var(--color-text)' }}
             >
-              {idx.unit === '$' ? '$' : ''}{Number(idx.ltp || 0).toLocaleString(idx.unit === '$' ? 'en-US' : 'en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+              {formatLivePrice(rawPrice, idx.unit || '₹')}
             </span>
             <span
               className="text-[10px] font-semibold font-mono tabular-nums"
               style={{ color: changeColor }}
             >
-              {isUp ? '+' : ''}{Number(idx.change_pct || 0).toFixed(2)}%
+              {changeObj.pctText}
             </span>
           </button>
         )
@@ -153,7 +139,7 @@ export default function ContextBar({
   layoutMode,
   onLayoutChange,
 }) {
-  const { activeView } = useChatStore()
+  const { activeView, terminalShowChart, toggleTerminalShowChart } = useChatStore()
   const [searchQuery, setSearchQuery] = useState('')
   const [showTypeahead, setShowTypeahead] = useState(false)
   const [typeaheadIdx, setTypeaheadIdx] = useState(0)
@@ -243,8 +229,8 @@ export default function ContextBar({
         />
       </div>
 
-      {/* Timeframe pills */}
-      {onTimeframeChange && (
+      {/* Timeframe pills — only shown for views that require timeframe selection (not Terminal) */}
+      {activeView !== 'terminal' && onTimeframeChange && (
         <div
           className="flex items-center p-0.5 rounded-xl text-xs gap-px flex-shrink-0"
           style={{ background: 'var(--color-elevated)', border: '1px solid var(--color-border)' }}
@@ -266,8 +252,8 @@ export default function ContextBar({
         </div>
       )}
 
-      {/* Layout switcher */}
-      {onLayoutChange && (
+      {/* Layout switcher — only for views with multi-pane layouts */}
+      {activeView !== 'terminal' && onLayoutChange && (
         <div
           className="flex items-center p-0.5 rounded-xl text-xs gap-px flex-shrink-0"
           style={{ background: 'var(--color-elevated)', border: '1px solid var(--color-border)' }}
@@ -290,16 +276,12 @@ export default function ContextBar({
         </div>
       )}
 
-      {/* Key market metrics strip — only shown in non-terminal views to eliminate duplication */}
-      {activeView !== 'terminal' && (
-        <>
-          <div
-            className="hidden md:block h-4 w-px flex-shrink-0"
-            style={{ background: 'var(--color-border)' }}
-          />
-          <LiveIndexTicker onSymbolChange={onSymbolChange} />
-        </>
-      )}
+      {/* Key market metrics strip */}
+      <div
+        className="hidden md:block h-4 w-px flex-shrink-0"
+        style={{ background: 'var(--color-border)' }}
+      />
+      <LiveIndexTicker onSymbolChange={onSymbolChange} />
     </div>
   )
 }

@@ -171,3 +171,17 @@ class TestForensicAuditFull:
         assert res.overall_forensic_verdict == "UNAVAILABLE"
         assert res.beneish_m_score is None
         assert res.quality_rating == "UNAVAILABLE"
+
+    def test_banking_sector_forensic_audit_routing(self):
+        """Commercial banks and financial institutions should be audited without non-applicable working capital."""
+        res = audit_forensics("KOTAKBANK", use_cache=False)
+        assert isinstance(res, ForensicAuditResult)
+        assert res.available is True
+        assert res.overall_forensic_verdict == "CLEAN_PASS"
+        assert res.altman_z_score is None
+        assert res.distress_zone == "NOT_APPLICABLE"
+        assert res.beneish_m_score is not None
+        assert res.beneish_m_score < -1.78  # Clean earnings
+        assert res.piotroski_f_score is not None and res.piotroski_f_score >= 4
+        assert res.quality_rating in ("A+", "A", "B")
+        assert "Altman Z'' model is not applicable to commercial banks" in res.summary_text

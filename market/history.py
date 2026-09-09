@@ -115,6 +115,42 @@ def get_ohlcv(
     to_date = effective_to or datetime.now()
     from_date = from_date or (to_date - timedelta(days=days))
 
+    # Tier 1.5: Local SQLite EOD Store & L1 Process Cache (<1ms)
+    if kite_interval == "day" and not as_of:
+        try:
+            from engine.eod_store import get_ohlcv_batch
+
+            store_map = get_ohlcv_batch([clean_sym])
+            if clean_sym in store_map and not store_map[clean_sym].empty:
+                stored_df = store_map[clean_sym]
+                if from_date or to_date:
+                    start_dt = from_date or stored_df.index[0]
+                    end_dt = to_date or stored_df.index[-1]
+                    sliced = stored_df.loc[start_dt:end_dt]
+                else:
+                    sliced = stored_df.iloc[-days:] if len(stored_df) > days else stored_df
+
+                if not sliced.empty and len(sliced) >= min(days, 15):
+                    res_df = sliced.copy()
+                    if include_live_candle:
+                        res_df = inject_live_tick(res_df, symbol=symbol, exchange=exchange)
+                    res_df.attrs["provenance"] = {
+                        "data_source": "LIVE_ENRICHED"
+                        if include_live_candle
+                        else "LOCAL_SQLITE_EOD",
+                        "provider": "eod_store",
+                        "as_of": to_date.isoformat(),
+                        "snapshot_id": None,
+                        "reproducible": not include_live_candle,
+                    }
+                    with _df_memory_cache_lock:
+                        while len(_df_memory_cache) >= MAX_MEMORY_DFS:
+                            _df_memory_cache.popitem(last=False)
+                        _df_memory_cache[cache_key] = (now_ts, res_df.copy())
+                    return res_df
+        except Exception:
+            pass
+
     # Tier 2: Fast SQLite analysis_cache for recent daily candles (15m TTL)
     raw = None
     if kite_interval == "day":
@@ -229,8 +265,8 @@ def get_ohlcv(
     df.sort_index(inplace=True)
 
     # Live/incomplete candle enrichment is opt-in and is never cached as EOD.
-    if include_live_candle and kite_interval == "day" and not df.empty:
-        df = inject_live_tick(df, symbol=symbol, exchange=exchange)
+    if include_live_candle and not df.empty:
+        df = inject_live_tick(df, symbol=symbol, exchange=exchange, interval=kite_interval)
 
     df.attrs["provenance"] = {
         "data_source": "LIVE_ENRICHED" if include_live_candle else "HISTORICAL_EOD",
@@ -239,6 +275,15 @@ def get_ohlcv(
         "snapshot_id": snapshot_id,
         "reproducible": bool(snapshot_id) and not include_live_candle,
     }
+
+    # Save into Local SQLite EOD Store for universe-wide reuse
+    if kite_interval == "day" and not df.empty and not as_of:
+        try:
+            from engine.eod_store import save_ohlcv_batch
+
+            save_ohlcv_batch({clean_sym: df.copy()})
+        except Exception:
+            pass
 
     # Save into Tier 1 In-Memory Cache (bounded LRU max MAX_MEMORY_DFS)
     if kite_interval == "day" and not df.empty:
@@ -255,10 +300,11 @@ def inject_live_tick(
     df: pd.DataFrame,
     symbol: str,
     exchange: str = "NSE",
+    interval: str = "day",
 ) -> pd.DataFrame:
     """
     Overlays the current second's live tick (LTP, Day High/Low, Volume) onto the OHLCV DataFrame.
-    Ensures all quantitative models evaluate the latest real-time market state.
+    Ensures all quantitative models evaluate the latest real-time market state for both daily and intraday charts.
     """
     try:
         from market.quotes import get_quote
@@ -275,7 +321,26 @@ def inject_live_tick(
         now = datetime.now()
         today_date = pd.Timestamp(now.date())
 
+        is_intraday = str(interval).lower() in {
+            "minute",
+            "1minute",
+            "3minute",
+            "3m",
+            "5minute",
+            "5m",
+            "10minute",
+            "10m",
+            "15minute",
+            "15m",
+            "30minute",
+            "30m",
+            "60minute",
+            "1h",
+            "60m",
+        }
+
         if df.empty:
+            bar_time = pd.Timestamp(now) if is_intraday else today_date
             new_row = pd.DataFrame(
                 [
                     {
@@ -286,41 +351,99 @@ def inject_live_tick(
                         "volume": q.volume or 0.0,
                     }
                 ],
-                index=[today_date],
+                index=[bar_time],
             )
             return new_row
 
         last_idx = df.index[-1]
         last_date = pd.Timestamp(last_idx).date() if hasattr(last_idx, "date") else None
 
-        if last_date == now.date():
-            # Update today's existing candle with live tick
-            df.loc[last_idx, "close"] = float(q.last_price)
-            if q.high and q.high > 0:
-                df.loc[last_idx, "high"] = max(float(df.loc[last_idx, "high"]), float(q.high))
-            else:
+        if is_intraday:
+            # Determine interval duration in minutes
+            interval_mins = 15
+            low_inv = str(interval).lower()
+            if "1m" in low_inv or low_inv == "minute":
+                interval_mins = 1
+            elif "3m" in low_inv:
+                interval_mins = 3
+            elif "5m" in low_inv:
+                interval_mins = 5
+            elif "10m" in low_inv:
+                interval_mins = 10
+            elif "30m" in low_inv:
+                interval_mins = 30
+            elif "60m" in low_inv or "1h" in low_inv:
+                interval_mins = 60
+
+            from datetime import timezone
+
+            now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
+            mins_elapsed = (now_utc - last_idx).total_seconds() / 60.0
+
+            if mins_elapsed < interval_mins and last_date == now_utc.date():
+                # Still within the active candle: update high, low, close
+                df.loc[last_idx, "close"] = float(q.last_price)
                 df.loc[last_idx, "high"] = max(float(df.loc[last_idx, "high"]), float(q.last_price))
-            if q.low and q.low > 0:
-                df.loc[last_idx, "low"] = min(float(df.loc[last_idx, "low"]), float(q.low))
-            else:
                 df.loc[last_idx, "low"] = min(float(df.loc[last_idx, "low"]), float(q.last_price))
-            if q.volume and q.volume > 0:
-                df.loc[last_idx, "volume"] = float(q.volume)
+            else:
+                # Interval elapsed: start new bucketed bar
+                bucket_min = (now_utc.minute // interval_mins) * interval_mins
+                new_bar_time = now_utc.replace(minute=bucket_min, second=0, microsecond=0)
+                if new_bar_time > last_idx:
+                    new_row = pd.DataFrame(
+                        [
+                            {
+                                "open": float(q.open or q.last_price),
+                                "high": float(q.high or q.last_price),
+                                "low": float(q.low or q.last_price),
+                                "close": float(q.last_price),
+                                "volume": float(q.volume or 0.0),
+                            }
+                        ],
+                        index=[new_bar_time],
+                    )
+                    df = pd.concat([df, new_row])
+                else:
+                    df.loc[last_idx, "close"] = float(q.last_price)
+                    df.loc[last_idx, "high"] = max(
+                        float(df.loc[last_idx, "high"]), float(q.last_price)
+                    )
+                    df.loc[last_idx, "low"] = min(
+                        float(df.loc[last_idx, "low"]), float(q.last_price)
+                    )
         else:
-            # Append today's active bar
-            new_row = pd.DataFrame(
-                [
-                    {
-                        "open": float(q.open or q.last_price),
-                        "high": float(q.high or q.last_price),
-                        "low": float(q.low or q.last_price),
-                        "close": float(q.last_price),
-                        "volume": float(q.volume or 0.0),
-                    }
-                ],
-                index=[today_date],
-            )
-            df = pd.concat([df, new_row])
+            if last_date == now.date():
+                # Update today's existing candle with live tick
+                df.loc[last_idx, "close"] = float(q.last_price)
+                if q.high and q.high > 0:
+                    df.loc[last_idx, "high"] = max(float(df.loc[last_idx, "high"]), float(q.high))
+                else:
+                    df.loc[last_idx, "high"] = max(
+                        float(df.loc[last_idx, "high"]), float(q.last_price)
+                    )
+                if q.low and q.low > 0:
+                    df.loc[last_idx, "low"] = min(float(df.loc[last_idx, "low"]), float(q.low))
+                else:
+                    df.loc[last_idx, "low"] = min(
+                        float(df.loc[last_idx, "low"]), float(q.last_price)
+                    )
+                if q.volume and q.volume > 0:
+                    df.loc[last_idx, "volume"] = float(q.volume)
+            else:
+                # Append today's active bar
+                new_row = pd.DataFrame(
+                    [
+                        {
+                            "open": float(q.open or q.last_price),
+                            "high": float(q.high or q.last_price),
+                            "low": float(q.low or q.last_price),
+                            "close": float(q.last_price),
+                            "volume": float(q.volume or 0.0),
+                        }
+                    ],
+                    index=[today_date],
+                )
+                df = pd.concat([df, new_row])
 
         if hasattr(df.index, "tz") and df.index.tz is not None:
             df.index = df.index.tz_localize(None)

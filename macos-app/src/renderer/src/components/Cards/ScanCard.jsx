@@ -4,30 +4,82 @@ import { useChatStore } from '../../store/chatStore'
 
 function Section({ title, items, color, onSelect }) {
   if (!items?.length) return null
+
+  // Deduplicate items by symbol to guarantee zero duplicate symbols in the UI
+  const seenSymbols = new Set()
+  const displayItems = []
+  for (const it of items) {
+    const sym = typeof it === 'string' ? it : it.symbol ?? it.tradingsymbol
+    if (!sym || seenSymbols.has(sym)) continue
+    seenSymbols.add(sym)
+    displayItems.push(it)
+  }
+
+  if (!displayItems.length) return null
+
   return (
     <div>
       <p className={`text-[10px] uppercase tracking-widest font-ui mb-2 ${color}`}>{title}</p>
       <div className="flex flex-wrap gap-1.5">
-        {items.map((item, i) => {
-          const symbol = typeof item === 'string' ? item : item.symbol ?? item.tradingsymbol ?? JSON.stringify(item)
-          const detail =
-            typeof item === 'object'
-              ? item.iv_rank != null
-                ? `IV ${item.iv_rank}%`
-                : item.oi_change != null
-                ? `OI +${item.oi_change}%`
-                : ''
-              : ''
+        {displayItems.map((item, i) => {
+          const isObj = typeof item === 'object' && item !== null
+          const rawSymbol = isObj ? item.symbol ?? item.tradingsymbol ?? JSON.stringify(item) : item
+          const underlyingSymbol = isObj && item.symbol ? item.symbol : rawSymbol
+
+          const hasContract = isObj && item.strike != null && item.option_type != null
+          const optType = (item.option_type || '').toUpperCase()
+          const isCall = optType === 'CE' || optType === 'CALL'
+
+          let detail = ''
+          if (isObj) {
+            if (item.iv_rank != null) {
+              detail = `IV ${item.iv_rank}%`
+            } else if (item.oi_change_pct != null) {
+              detail = `OI +${Number(item.oi_change_pct).toLocaleString()}%`
+            } else if (item.oi_change != null) {
+              detail = `OI +${Number(item.oi_change).toLocaleString()}`
+            }
+          }
+
+          const uniqueKey = `${underlyingSymbol}-${item.strike ?? ''}-${item.option_type ?? ''}-${i}`
+
           return (
             <button
-              key={i}
-              onClick={() => onSelect?.(symbol)}
+              key={uniqueKey}
+              onClick={() => onSelect?.(underlyingSymbol)}
               className={`border rounded-lg px-2.5 py-1.5 transition-all hover:scale-102 cursor-pointer ${color
                 .replace('text-', 'border-')
-                .replace('500', '400')}/30 bg-panel hover:bg-elevated text-left`}
+                .replace('500', '400')}/30 bg-panel hover:bg-elevated text-left flex items-center gap-1.5`}
+              title={
+                hasContract
+                  ? `${underlyingSymbol} ${item.strike} ${optType} (Peak OI spike: ${detail})`
+                  : `Select ${underlyingSymbol}`
+              }
             >
-              <span className={`text-[12px] font-mono font-semibold ${color}`}>{symbol}</span>
-              {detail && <span className="text-[10px] font-ui text-muted ml-1.5">{detail}</span>}
+              <span className={`text-[12px] font-mono font-semibold ${color}`}>{underlyingSymbol}</span>
+
+              {hasContract && (
+                <span
+                  className={`text-[10px] font-mono px-1.5 py-0.2 rounded border font-semibold ${
+                    isCall
+                      ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30'
+                      : 'bg-rose-500/10 text-rose-400 border-rose-500/30'
+                  }`}
+                >
+                  {Math.round(item.strike)} {optType}
+                </span>
+              )}
+
+              {item.spikes_count > 1 && (
+                <span
+                  className="text-[9px] font-ui px-1 py-0.2 rounded bg-amber/10 text-amber border border-amber/20"
+                  title={`${item.spikes_count} active strike spikes for ${underlyingSymbol}`}
+                >
+                  {item.spikes_count}⚡
+                </span>
+              )}
+
+              {detail && <span className="text-[10px] font-ui text-muted">{detail}</span>}
             </button>
           )
         })}

@@ -122,6 +122,7 @@ addopts = "-v --tb=short -m \"not slow and not network\""
 markers = [
     "network: tests that require network access (yfinance, NSE API, etc.)",
     "slow: tests slow by design — SSE stream connections, MC simulations (run nightly, not on every push)",
+    "live_telegram: tests that explicitly verify Telegram push notification mechanics",
 ]
 
 [tool.ruff]

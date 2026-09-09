@@ -331,6 +331,38 @@ MANIFEST: dict = {
             "output_description": "triggered (list of fired alerts), active_remaining (count still watching).",
         },
         {
+            "name": "alerts_auto_list",
+            "path": "/skills/alerts/auto/list",
+            "method": "POST",
+            "description": "List auto-detected real-time alerts (Gamma Blasts, Squeeze Breakouts, Circuit Warnings, SMC).",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max alerts to return (default 50)",
+                    },
+                    "alert_type": {
+                        "type": "string",
+                        "description": "Filter by GAMMA_BLAST, SQUEEZE_BREAKOUT, CIRCUIT_WARNING",
+                    },
+                    "stage": {
+                        "type": "string",
+                        "description": "Filter by EARLY_WARNING or IGNITED",
+                    },
+                },
+            },
+            "output_description": "List of AutoAlert objects with quantitative proof metrics and actionable trade plans.",
+        },
+        {
+            "name": "alerts_auto_scan",
+            "path": "/skills/alerts/auto/scan_now",
+            "method": "POST",
+            "description": "Trigger an immediate diagnostic scan across all detectors and return fresh early-warning alerts.",
+            "input_schema": {"type": "object", "properties": {}, "required": []},
+            "output_description": "newly_detected alerts, all_recent alerts, and total count.",
+        },
+        {
             "name": "chat_reset",
             "path": "/skills/chat/reset",
             "method": "POST",

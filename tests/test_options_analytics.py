@@ -196,3 +196,101 @@ class TestOptionsScanner:
         filtered = filter_unusual_oi(strikes, threshold=100)
         assert len(filtered) == 1
         assert filtered[0]["strike"] == 22500
+
+    def test_filter_unusual_oi_liquidity_filtering(self):
+        from market.options_scanner import filter_unusual_oi
+
+        strikes = [
+            # Ghost strike: 12 contracts, high % change
+            {"symbol": "NIFTY", "strike": 22000, "oi": 12, "oi_change": 12, "oi_change_pct": 1200},
+            # Institutional block: 100k contracts, 150% change
+            {
+                "symbol": "NIFTY",
+                "strike": 23800,
+                "oi": 100000,
+                "oi_change": 60000,
+                "oi_change_pct": 150,
+            },
+        ]
+        # With min_oi=250 and min_oi_change=100, ghost strike must be filtered out
+        filtered = filter_unusual_oi(strikes, threshold=100, min_oi=250, min_oi_change=100)
+        assert len(filtered) == 1
+        assert filtered[0]["strike"] == 23800
+        assert filtered[0]["oi"] == 100000
+
+    def test_filter_unusual_oi_dedup_by_symbol(self):
+        from market.options_scanner import filter_unusual_oi
+
+        strikes = [
+            {
+                "symbol": "NIFTY",
+                "strike": 23750,
+                "option_type": "CE",
+                "oi_change_pct": 500,
+                "oi_change": 50000,
+            },
+            {
+                "symbol": "NIFTY",
+                "strike": 23800,
+                "option_type": "CE",
+                "oi_change_pct": 750,
+                "oi_change": 120000,
+            },
+            {
+                "symbol": "NIFTY",
+                "strike": 23850,
+                "option_type": "CE",
+                "oi_change_pct": 600,
+                "oi_change": 80000,
+            },
+            {
+                "symbol": "BANKNIFTY",
+                "strike": 53000,
+                "option_type": "PE",
+                "oi_change_pct": 320,
+                "oi_change": 40000,
+            },
+            {
+                "symbol": "BANKNIFTY",
+                "strike": 53500,
+                "option_type": "PE",
+                "oi_change_pct": 410,
+                "oi_change": 45000,
+            },
+            {
+                "symbol": "RELIANCE",
+                "strike": 3000,
+                "option_type": "CE",
+                "oi_change_pct": 180,
+                "oi_change": 15000,
+            },
+        ]
+
+        deduped = filter_unusual_oi(strikes, threshold=100, dedup_by_symbol=True)
+        # Should have exactly 3 unique symbols: NIFTY, BANKNIFTY, RELIANCE
+        symbols = [s["symbol"] for s in deduped]
+        assert len(symbols) == len(set(symbols)) == 3
+        assert symbols == ["NIFTY", "BANKNIFTY", "RELIANCE"]
+
+        # NIFTY should have peak spike 23800 CE (+750%) and spikes_count = 3
+        nifty_entry = next(s for s in deduped if s["symbol"] == "NIFTY")
+        assert nifty_entry["strike"] == 23800
+        assert nifty_entry["oi_change_pct"] == 750
+        assert nifty_entry["spikes_count"] == 3
+
+        # BANKNIFTY should have peak spike 53500 PE (+410%) and spikes_count = 2
+        bn_entry = next(s for s in deduped if s["symbol"] == "BANKNIFTY")
+        assert bn_entry["strike"] == 53500
+        assert bn_entry["spikes_count"] == 2
+
+    def test_scan_options_unique_symbols(self):
+        from market.options_scanner import scan_options
+
+        results = scan_options(symbols=["NIFTY", "BANKNIFTY"], quick=True)
+        assert isinstance(results, dict)
+        symbols = [s["symbol"] for s in results.get("unusual_oi", [])]
+        # Assert no duplicate symbols in unusual_oi
+        assert len(symbols) == len(set(symbols))
+        for item in results.get("unusual_oi", []):
+            assert "contract" in item
+            assert "oi_change_pct" in item

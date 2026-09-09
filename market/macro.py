@@ -104,6 +104,38 @@ def get_macro_snapshot() -> MacroSnapshot:
     except Exception:
         pass
 
+    # Tier 1.5: Unified Global Macro Engine (reuses cached or live macro pipeline)
+    try:
+        from market.global_macro import get_global_macro_snapshot
+
+        gm = get_global_macro_snapshot(use_cache=True)
+        if gm and getattr(gm, "items", None):
+            items = gm.items
+            usdinr_item = items.get("usdinr")
+            crude_item = items.get("brent") or items.get("crude_oil") or items.get("crude_wti")
+            gold_item = items.get("gold")
+            us10y_item = items.get("us10y") or items.get("us_10y")
+            dxy_item = items.get("dxy")
+
+            snap = MacroSnapshot(
+                usdinr=getattr(usdinr_item, "ltp", None),
+                usdinr_change=getattr(usdinr_item, "change_pct", None),
+                crude_oil=getattr(crude_item, "ltp", None),
+                crude_change=getattr(crude_item, "change_pct", None),
+                gold=getattr(gold_item, "ltp", None),
+                gold_change=getattr(gold_item, "change_pct", None),
+                us_10y=getattr(us10y_item, "ltp", None),
+                us_10y_change=round(getattr(us10y_item, "change", 0.0) * 100, 1)
+                if getattr(us10y_item, "change", None) is not None
+                else None,
+                dxy=getattr(dxy_item, "ltp", None),
+                dxy_change=getattr(dxy_item, "change_pct", None),
+            )
+            if snap.usdinr or snap.crude_oil or snap.gold:
+                return snap
+    except Exception:
+        pass
+
     try:
         from market.yfinance_provider import _get_yf
 

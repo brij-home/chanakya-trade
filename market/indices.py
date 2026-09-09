@@ -18,6 +18,7 @@ INDEX_INSTRUMENTS = {
     "NIFTY50": "NSE:NIFTY 50",
     "NIFTY 50": "NSE:NIFTY 50",
     "NIFTY": "NSE:NIFTY 50",
+    "BANK": "NSE:NIFTY BANK",
     "BANKNIFTY": "NSE:NIFTY BANK",
     "NIFTY BANK": "NSE:NIFTY BANK",
     "VIX": "NSE:INDIA VIX",
@@ -71,6 +72,7 @@ INDEX_INSTRUMENTS = {
     "PSE": "NSE:NIFTY PSE",
     "NIFTYPSE": "NSE:NIFTY PSE",
     "NIFTY PSE": "NSE:NIFTY PSE",
+    "PSU_BANK": "NSE:NIFTY PSU BANK",
     "PSUBANK": "NSE:NIFTY PSU BANK",
     "NIFTYPSU": "NSE:NIFTY PSU BANK",
     "NIFTY PSU BANK": "NSE:NIFTY PSU BANK",
@@ -251,7 +253,19 @@ def get_sector_snapshot() -> list[IndexSnapshot]:
     Primary: broker/NSE quotes. Fallback: yfinance sector indices
     when primary returns zeros (common with NSE API).
     """
-    sector_keys = ["IT", "PHARMA", "AUTO", "FMCG", "REALTY", "METAL", "ENERGY"]
+    sector_keys = [
+        "BANK",
+        "IT",
+        "PHARMA",
+        "AUTO",
+        "FMCG",
+        "REALTY",
+        "METAL",
+        "ENERGY",
+        "INFRA",
+        "PSU_BANK",
+        "MEDIA",
+    ]
     instruments = [INDEX_INSTRUMENTS[k] for k in sector_keys]
     from market.quotes import get_quote
 
@@ -287,6 +301,7 @@ def get_sector_snapshot() -> list[IndexSnapshot]:
 
 # yfinance tickers for sector indices
 _YF_SECTOR_MAP = {
+    "BANK": "^NSEBANK",
     "IT": "^CNXIT",
     "PHARMA": "^CNXPHARMA",
     "AUTO": "^CNXAUTO",
@@ -294,7 +309,9 @@ _YF_SECTOR_MAP = {
     "REALTY": "^CNXREALTY",
     "METAL": "^CNXMETAL",
     "ENERGY": "^CNXENERGY",
-    "BANK": "^NSEBANK",
+    "INFRA": "^CNXINFRA",
+    "PSU_BANK": "^CNXPSUBANK",
+    "MEDIA": "^CNXMEDIA",
 }
 
 

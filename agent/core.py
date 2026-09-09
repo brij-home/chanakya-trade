@@ -91,13 +91,13 @@ console = Console(legacy_windows=False)
 
 # ── Constants ──────────────────────────────────────────────────
 
-ANTHROPIC_DEFAULT_MODEL = "claude-opus-4-5"
+ANTHROPIC_DEFAULT_MODEL = "claude-sonnet-4-7"
 OPENAI_DEFAULT_MODEL = "gpt-4o"
 GEMINI_DEFAULT_MODEL = "gemini-3.8-flash"
-OLLAMA_DEFAULT_MODEL = "llama3.1"
+OLLAMA_DEFAULT_MODEL = "llama3.3"
 NVIDIA_DEFAULT_MODEL = "meta/llama-3.2-11b-vision-instruct"
 GROQ_DEFAULT_MODEL = (
-    "openai/gpt-oss-120b,qwen/qwen3.8-27b,openai/gpt-oss-20b,qwen/qwen3.6-27b,groq/compound-mini"
+    "qwen/qwen3.8-27b,openai/gpt-oss-120b,openai/gpt-oss-20b,qwen/qwen3.6-27b,groq/compound-mini"
 )
 
 DEEPSEEK_DEFAULT_MODEL = "deepseek-chat"
@@ -901,6 +901,294 @@ class OpenAIProvider(LLMProvider):
         return "", []
 
 
+# Common stock name → NSE symbol (case-insensitive lookup)
+_STOCK_NAMES: dict[str, str] = {
+    "reliance": "RELIANCE",
+    "hdfc": "HDFCBANK",
+    "hdfc bank": "HDFCBANK",
+    "infosys": "INFY",
+    "infy": "INFY",
+    "tcs": "TCS",
+    "wipro": "WIPRO",
+    "icici": "ICICIBANK",
+    "icici bank": "ICICIBANK",
+    "sbi": "SBIN",
+    "state bank": "SBIN",
+    "bharti": "BHARTIARTL",
+    "airtel": "BHARTIARTL",
+    "kotak": "KOTAKBANK",
+    "kotak bank": "KOTAKBANK",
+    "axis": "AXISBANK",
+    "axis bank": "AXISBANK",
+    "maruti": "MARUTI",
+    "tata motors": "TATAMOTORS",
+    "tatamotors": "TATAMOTORS",
+    "tata steel": "TATASTEEL",
+    "tatasteel": "TATASTEEL",
+    "tata power": "TATAPOWER",
+    "adani": "ADANIENT",
+    "adani ports": "ADANIPORTS",
+    "adani ent": "ADANIENT",
+    "lt": "LT",
+    "larsen": "LT",
+    "bajaj auto": "BAJAJ-AUTO",
+    "bajaj_auto": "BAJAJ-AUTO",
+    "bajaj-auto": "BAJAJ-AUTO",
+    "bajaj finance": "BAJFINANCE",
+    "bajaj finserv": "BAJFINSV",
+    "bajaj": "BAJFINANCE",
+    "hul": "HINDUNILVR",
+    "hindustan unilever": "HINDUNILVR",
+    "itc": "ITC",
+    "ongc": "ONGC",
+    "coal india": "COALINDIA",
+    "power grid": "POWERGRID",
+    "ntpc": "NTPC",
+    "sun pharma": "SUNPHARMA",
+    "dr reddy": "DRREDDY",
+    "divi": "DIVISLAB",
+    "cipla": "CIPLA",
+    "titan": "TITAN",
+    "asian paints": "ASIANPAINT",
+    "ultra cement": "ULTRACEMCO",
+    "ultratech": "ULTRACEMCO",
+    "m&m": "M&M",
+    "mahindra": "M&M",
+    "indusind": "INDUSINDBK",
+    "bandhan": "BANDHANBNK",
+    "zomato": "ZOMATO",
+    "paytm": "PAYTM",
+    "shakti": "SHAKTIPUMP",
+    "shakti pumps": "SHAKTIPUMP",
+    "muthoot": "MUTHOOTFIN",
+    "muthoot finance": "MUTHOOTFIN",
+    "oil india": "OIL",
+    "63 moons": "63MOONS",
+    "63moons": "63MOONS",
+    "63 moons technologies": "63MOONS",
+    "3m india": "3MINDIA",
+    "3i infotech": "3IINFOLTD",
+    "5paisa": "5PAISA",
+    "20 microns": "20MICRONS",
+    "coforge": "COFORGE",
+    "hcl tech": "HCLTECH",
+    "hcltech": "HCLTECH",
+}
+
+
+_NSE_ALL_SYMBOLS: set[str] | None = None
+
+
+def _get_nse_symbols() -> set[str]:
+    """Return in-memory set of all valid NSE equity symbols."""
+    global _NSE_ALL_SYMBOLS
+    if _NSE_ALL_SYMBOLS is None:
+        try:
+            from config.paths import DATA_DIR
+
+            p = DATA_DIR / "universes" / "nse_all_eq.json"
+            if p.exists():
+                import json
+
+                with open(p, encoding="utf-8") as f:
+                    data = json.load(f)
+                _NSE_ALL_SYMBOLS = {item["symbol"] for item in data if "symbol" in item}
+            else:
+                _NSE_ALL_SYMBOLS = set()
+        except Exception:
+            _NSE_ALL_SYMBOLS = set()
+    return _NSE_ALL_SYMBOLS
+
+
+def extract_symbol(text: str) -> str:
+    """
+    Extract a stock symbol from user text.
+
+    Handles:
+      - Explicit symbols: "NSE:RELIANCE", "63MOONS", "NSE:63MOONS", "3MINDIA"
+      - Natural names:    "63 moons", "reliance", "hdfc bank", "tata motors"
+      - Verifies against known NSE equities universe to avoid false positives.
+    """
+    import re
+
+    # 1. Try explicit prefix first: "NSE:SYMBOL" or "BSE:SYMBOL"
+    m_exp = re.search(r"(?:NSE:|BSE:)([A-Za-z0-9&_-]{1,20})", text, re.IGNORECASE)
+    if m_exp:
+        return m_exp.group(1).upper().replace("_", "-")
+
+    # 2. Try the stock-name dictionary (longest match wins)
+    text_lower = text.lower()
+    best_name = ""
+    best_sym = ""
+    for name, sym in _STOCK_NAMES.items():
+        if name in text_lower and len(name) > len(best_name):
+            best_name = name
+            best_sym = sym
+    if best_sym:
+        return best_sym
+
+    # 3. Match against known NSE symbols universe
+    nse_symbols = _get_nse_symbols()
+    _noise = {
+        "NIFTY",
+        "BANKNIFTY",
+        "VIX",
+        "SYSTEM",
+        "USER",
+        "ASSISTANT",
+        "JSON",
+        "NSE",
+        "BSE",
+        "IST",
+        "RSI",
+        "MACD",
+        "PE",
+        "CE",
+        "PUT",
+        "CALL",
+        "BUY",
+        "SELL",
+        "STT",
+        "GST",
+        "RBI",
+        "FII",
+        "DII",
+        "NOT",
+        "USE",
+        "THE",
+        "FOR",
+        "AND",
+        "NFO",
+        "CNC",
+        "MIS",
+        "NRML",
+        "SL",
+        "AM",
+        "PM",
+        "EMA",
+        "SMA",
+        "ATR",
+        # Debate/analysis terms (not stock symbols)
+        "BULLISH",
+        "BEARISH",
+        "NEUTRAL",
+        "DEBATE",
+        "BULL",
+        "BEAR",
+        "VERDICT",
+        "HOLD",
+        "STRONG",
+        "ANALYSIS",
+        "TRADE",
+        "RISK",
+        "FUND",
+        "MANAGER",
+        "RESEARCHER",
+        "FACILITATOR",
+        "ROUND",
+        "TARGET",
+        "ENTRY",
+        "EXIT",
+        "STOP",
+        "LOSS",
+        "PROFIT",
+        "MARGIN",
+        "CAPITAL",
+        "PORTFOLIO",
+        "SCORE",
+        "CONFIDENCE",
+        "HIGH",
+        "LOW",
+        "OPEN",
+        "CLOSE",
+        "ABOVE",
+        "BELOW",
+        "MARKET",
+        "INDEX",
+        "SECTOR",
+        "IMPORTANT",
+        "DATA",
+        "OPTIONS",
+        "OPTION",
+        "FUTURES",
+        "SPREAD",
+        "STRADDLE",
+        "STRANGLE",
+        "CONDOR",
+        "BUTTERFLY",
+        "PREMIUM",
+        "STRIKE",
+        "EXPIRY",
+        "SENTIMENT",
+        "TECHNICAL",
+        "FUNDAMENTAL",
+        "EARNINGS",
+        "RESULTS",
+        "GROWTH",
+        "REVENUE",
+        "VOLUME",
+        "SUPPORT",
+        "RESISTANCE",
+        "TREND",
+        "SIGNAL",
+        "PATTERN",
+        "ANALYZE",
+        "ANALYZING",
+        "CHECK",
+        "SCAN",
+        "SCANNING",
+        "SHOW",
+        "GET",
+        "VIEW",
+        "LOOK",
+        "TELL",
+        "WHAT",
+        "WHEN",
+        "WHERE",
+        "WHICH",
+        "WHO",
+        "WHY",
+        "HOW",
+        "WILL",
+        "WOULD",
+        "COULD",
+        "ABOUT",
+        "THIS",
+        "THAT",
+        "WITH",
+        "FROM",
+        "HAVE",
+        "GIVE",
+        "TODAY",
+    }
+
+    candidates: list[str] = []
+    for m in re.finditer(r"\b([A-Za-z0-9&_-]{2,20})\b", text):
+        cand_u = m.group(1).upper().replace("_", "-")
+        if cand_u.isdigit():
+            continue
+        if cand_u in _noise:
+            continue
+        candidates.append(cand_u)
+
+    # First priority: matches a verified NSE symbol
+    if nse_symbols:
+        for cand_u in candidates:
+            if cand_u in nse_symbols:
+                return cand_u
+
+    # 4. Fallback: uppercase token not in noise
+    for m in re.finditer(r"\b([A-Z0-9][A-Z0-9&_-]{1,19})\b", text):
+        cand = m.group(1).replace("_", "-")
+        if cand.isdigit():
+            continue
+        cand_clean = cand.replace("-", "")
+        if cand_clean not in _noise and not cand.islower():
+            return cand
+
+    return ""
+
+
 # ── Claude CLI provider (subscription) ────────────────────────
 
 
@@ -1399,68 +1687,7 @@ class ClaudeCLIProvider(LLMProvider):
     }
 
     # Common stock name → NSE symbol (case-insensitive lookup)
-    _STOCK_NAMES: dict[str, str] = {
-        "reliance": "RELIANCE",
-        "hdfc": "HDFCBANK",
-        "hdfc bank": "HDFCBANK",
-        "infosys": "INFY",
-        "infy": "INFY",
-        "tcs": "TCS",
-        "wipro": "WIPRO",
-        "icici": "ICICIBANK",
-        "icici bank": "ICICIBANK",
-        "sbi": "SBIN",
-        "state bank": "SBIN",
-        "bharti": "BHARTIARTL",
-        "airtel": "BHARTIARTL",
-        "kotak": "KOTAKBANK",
-        "kotak bank": "KOTAKBANK",
-        "axis": "AXISBANK",
-        "axis bank": "AXISBANK",
-        "maruti": "MARUTI",
-        "tata motors": "TATAMOTORS",
-        "tatamotors": "TATAMOTORS",
-        "tata steel": "TATASTEEL",
-        "tatasteel": "TATASTEEL",
-        "tata power": "TATAPOWER",
-        "adani": "ADANIENT",
-        "adani ports": "ADANIPORTS",
-        "adani ent": "ADANIENT",
-        "lt": "LT",
-        "larsen": "LT",
-        "bajaj auto": "BAJAJ-AUTO",
-        "bajaj_auto": "BAJAJ-AUTO",
-        "bajaj-auto": "BAJAJ-AUTO",
-        "bajaj finance": "BAJFINANCE",
-        "bajaj finserv": "BAJFINSV",
-        "bajaj": "BAJFINANCE",
-        "hul": "HINDUNILVR",
-        "hindustan unilever": "HINDUNILVR",
-        "itc": "ITC",
-        "ongc": "ONGC",
-        "coal india": "COALINDIA",
-        "power grid": "POWERGRID",
-        "ntpc": "NTPC",
-        "sun pharma": "SUNPHARMA",
-        "dr reddy": "DRREDDY",
-        "divi": "DIVISLAB",
-        "cipla": "CIPLA",
-        "titan": "TITAN",
-        "asian paints": "ASIANPAINT",
-        "ultra cement": "ULTRACEMCO",
-        "ultratech": "ULTRACEMCO",
-        "m&m": "M&M",
-        "mahindra": "M&M",
-        "indusind": "INDUSINDBK",
-        "bandhan": "BANDHANBNK",
-        "zomato": "ZOMATO",
-        "paytm": "PAYTM",
-        "shakti": "SHAKTIPUMP",
-        "shakti pumps": "SHAKTIPUMP",
-        "muthoot": "MUTHOOTFIN",
-        "muthoot finance": "MUTHOOTFIN",
-        "oil india": "OIL",
-    }
+    _STOCK_NAMES = _STOCK_NAMES
 
     def _match_tools_in_text(self, text: str) -> list[tuple[str, dict]]:
         """
@@ -1531,140 +1758,8 @@ class ClaudeCLIProvider(LLMProvider):
         return matched
 
     def _extract_symbol(self, text: str) -> str:
-        """
-        Extract a stock symbol from user text.
-
-        Handles:
-          - Explicit symbols: "NSE:RELIANCE", "RELIANCE"
-          - Natural names:    "reliance", "hdfc bank", "tata motors"
-        """
-        import re
-
-        # 1. Try the stock-name dictionary first (longest match wins)
-        text_lower = text.lower()
-        best_name = ""
-        best_sym = ""
-        for name, sym in self._STOCK_NAMES.items():
-            if name in text_lower and len(name) > len(best_name):
-                best_name = name
-                best_sym = sym
-        if best_sym:
-            return best_sym
-
-        # 2. Fall back to uppercase regex: "NSE:RELIANCE" or standalone "RELIANCE"
-        _noise = {
-            "NIFTY",
-            "BANKNIFTY",
-            "VIX",
-            "SYSTEM",
-            "USER",
-            "ASSISTANT",
-            "JSON",
-            "NSE",
-            "BSE",
-            "IST",
-            "RSI",
-            "MACD",
-            "PE",
-            "CE",
-            "PUT",
-            "CALL",
-            "BUY",
-            "SELL",
-            "STT",
-            "GST",
-            "RBI",
-            "FII",
-            "DII",
-            "NOT",
-            "USE",
-            "THE",
-            "FOR",
-            "AND",
-            "NFO",
-            "CNC",
-            "MIS",
-            "NRML",
-            "SL",
-            "AM",
-            "PM",
-            "EMA",
-            "SMA",
-            "ATR",
-            # Debate/analysis terms (not stock symbols)
-            "BULLISH",
-            "BEARISH",
-            "NEUTRAL",
-            "DEBATE",
-            "BULL",
-            "BEAR",
-            "VERDICT",
-            "HOLD",
-            "STRONG",
-            "ANALYSIS",
-            "TRADE",
-            "RISK",
-            "FUND",
-            "MANAGER",
-            "RESEARCHER",
-            "FACILITATOR",
-            "ROUND",
-            "TARGET",
-            "ENTRY",
-            "EXIT",
-            "STOP",
-            "LOSS",
-            "PROFIT",
-            "MARGIN",
-            "CAPITAL",
-            "PORTFOLIO",
-            "SCORE",
-            "CONFIDENCE",
-            "HIGH",
-            "LOW",
-            "OPEN",
-            "CLOSE",
-            "ABOVE",
-            "BELOW",
-            "MARKET",
-            "INDEX",
-            "SECTOR",
-            "IMPORTANT",
-            "DATA",
-            "OPTIONS",
-            "OPTION",
-            "FUTURES",
-            "SPREAD",
-            "STRADDLE",
-            "STRANGLE",
-            "CONDOR",
-            "BUTTERFLY",
-            "PREMIUM",
-            "STRIKE",
-            "EXPIRY",
-            "SENTIMENT",
-            "TECHNICAL",
-            "FUNDAMENTAL",
-            "EARNINGS",
-            "RESULTS",
-            "GROWTH",
-            "REVENUE",
-            "VOLUME",
-            "SUPPORT",
-            "RESISTANCE",
-            "TREND",
-            "SIGNAL",
-            "PATTERN",
-        }
-        m = re.search(
-            r"(?:NSE:|BSE:)?([A-Z][A-Z0-9&_-]{1,19})"
-            r'(?=[\s"\'.,;:\]\)—?!]|$)',
-            text,
-        )
-        if m and m.group(1).replace("_", "").replace("-", "") not in _noise:
-            return m.group(1).replace("_", "-")
-
-        return ""
+        """Extract a stock symbol from user text."""
+        return extract_symbol(text)
 
 
 # ── OpenAI subscription provider (session token) ───────────────
@@ -2366,8 +2461,8 @@ def _build_custom_openai_provider(
         mdl = model or os.environ.get("GROQ_MODEL", GROQ_DEFAULT_MODEL)
         # Ensure active Groq candidate models are in the fallback chain
         fallbacks = [
-            "openai/gpt-oss-120b",
             "qwen/qwen3.8-27b",
+            "openai/gpt-oss-120b",
             "openai/gpt-oss-20b",
             "qwen/qwen3.6-27b",
             "groq/compound-mini",
@@ -2872,56 +2967,19 @@ class TradingAgent:
 
         return response
 
+    @staticmethod
+    def _extract_symbol(text: str) -> str:
+        """Extract a stock symbol from user text."""
+        return extract_symbol(text)
+
     def _fallback_chat(self, user_message: str, error_reason: str = "") -> str:
         """
         Deterministic quantitative fallback when LLMs are unavailable or encountering errors.
         Extracts stock symbols or market context and generates institutional real-market data.
         """
-        import re
 
         # Extract symbol
-        symbol = ""
-        # 1. Match common natural names / tickers
-        for name, sym in [
-            ("bajaj-auto", "BAJAJ-AUTO"),
-            ("bajaj auto", "BAJAJ-AUTO"),
-            ("bajaj_auto", "BAJAJ-AUTO"),
-            ("reliance", "RELIANCE"),
-            ("tcs", "TCS"),
-            ("infy", "INFY"),
-            ("infosys", "INFY"),
-            ("hdfc bank", "HDFCBANK"),
-            ("hdfc", "HDFCBANK"),
-            ("icici bank", "ICICIBANK"),
-            ("icici", "ICICIBANK"),
-            ("tata motors", "TATAMOTORS"),
-            ("tatamotors", "TATAMOTORS"),
-            ("trent", "TRENT"),
-            ("coforge", "COFORGE"),
-            ("hcl tech", "HCLTECH"),
-            ("divi", "DIVISLAB"),
-            ("sbi", "SBIN"),
-            ("state bank", "SBIN"),
-        ]:
-            if name in user_message.lower():
-                symbol = sym
-                break
-
-        if not symbol:
-            m = re.search(r"(?:NSE:|BSE:)?([A-Z][A-Z0-9&_-]{1,19})", user_message.upper())
-            if m and m.group(1) not in {
-                "AI",
-                "CHAT",
-                "BUY",
-                "SELL",
-                "HOLD",
-                "HELP",
-                "STOCK",
-                "TRADE",
-                "PRICE",
-                "ANALYZE",
-            }:
-                symbol = m.group(1).replace("_", "-")
+        symbol = self._extract_symbol(user_message)
 
         if symbol:
             # Fetch live market data

@@ -283,27 +283,54 @@ class TechnicalAnalyst(BaseAnalyst):
             confidence = min(abs(score), 100)
 
             points = []
+            timeframe = result.get("timeframe", "1D (Daily)")
+            as_of = result.get("as_of", "")
+            data_source = result.get("data_source", "NSE EOD")
+
             if result.get("rsi") is not None:
                 rsi = result["rsi"]
-                points.append(
-                    f"RSI: {rsi:.1f} ({'overbought' if rsi > 70 else 'oversold' if rsi < 30 else 'neutral'})"
+                zone = (
+                    "overbought (>70)"
+                    if rsi > 70
+                    else "oversold (<30)"
+                    if rsi < 30
+                    else "neutral zone (30-70)"
                 )
+                points.append(f"RSI(14, {timeframe}): {rsi:.1f} ({zone})")
+
             if result.get("macd") is not None:
-                macd_signal = "bullish" if result.get("macd_signal") == "BUY" else "bearish"
-                points.append(f"MACD: {macd_signal} crossover")
+                macd_val = result["macd"]
+                macd_hist = result.get("macd_hist", 0.0)
+                macd_detail = result.get("macd_detail")
+                if not macd_detail:
+                    macd_detail = "Above signal line" if macd_hist > 0 else "Below signal line"
+                points.append(
+                    f"MACD(12,26,9, {timeframe}): {macd_val:.2f} (hist {macd_hist:+.2f}, {macd_detail})"
+                )
+
             if result.get("ema20") and result.get("ema50"):
                 trend = "above" if result["ema20"] > result["ema50"] else "below"
                 points.append(
-                    f"EMA20 {trend} EMA50 (short-term trend {'up' if trend == 'above' else 'down'})"
+                    f"Trend({timeframe}): EMA20 ({result['ema20']:.1f}) {trend} EMA50 ({result['ema50']:.1f})"
                 )
-            if result.get("support"):
-                points.append(f"Support: {result['support']}")
-            if result.get("resistance"):
-                points.append(f"Resistance: {result['resistance']}")
-            if result.get("volume_verdict"):
-                points.append(f"Volume: {result['volume_verdict']}")
-            if result.get("bollinger_position"):
-                points.append(f"Bollinger: {result['bollinger_position']}")
+
+            if result.get("sma200"):
+                ltp = result.get("ltp", 0.0)
+                sma_rel = "above" if ltp > result["sma200"] else "below"
+                points.append(
+                    f"DMA200({timeframe}): Price {sma_rel} 200 DMA ({result['sma200']:.1f})"
+                )
+
+            if result.get("support") and result.get("resistance"):
+                points.append(
+                    f"Levels({timeframe}): S1 ₹{result['support']:.1f} | R1 ₹{result['resistance']:.1f}"
+                )
+
+            if as_of:
+                points.append(f"Provenance: {data_source} as of {as_of}")
+
+            for note in result.get("anomaly_notes", []):
+                points.append(f"⚠️ Data Flag: {note}")
 
             return AnalystReport(
                 analyst=self.name,
@@ -1204,53 +1231,70 @@ class SectorRotationAnalyst(BaseAnalyst):
 
     name = "Sector Rotation"
 
-    # Map stocks to their primary sector index
-    _SECTOR_MAP = {
-        "INFY": "IT",
-        "TCS": "IT",
-        "WIPRO": "IT",
-        "HCLTECH": "IT",
-        "TECHM": "IT",
-        "HDFCBANK": "BANK",
-        "ICICIBANK": "BANK",
-        "SBIN": "BANK",
-        "KOTAKBANK": "BANK",
-        "AXISBANK": "BANK",
-        "INDUSINDBK": "BANK",
-        "BANDHANBNK": "BANK",
-        "SUNPHARMA": "PHARMA",
-        "DRREDDY": "PHARMA",
-        "CIPLA": "PHARMA",
-        "DIVISLAB": "PHARMA",
-        "MARUTI": "AUTO",
-        "TATAMOTORS": "AUTO",
-        "M&M": "AUTO",
-        "BAJAJ-AUTO": "AUTO",
-        "ITC": "FMCG",
-        "HINDUNILVR": "FMCG",
-        "NESTLEIND": "FMCG",
-        "BRITANNIA": "FMCG",
-        "RELIANCE": "ENERGY",
-        "ONGC": "ENERGY",
-        "NTPC": "ENERGY",
-        "POWERGRID": "ENERGY",
-        "TATASTEEL": "METAL",
-        "JSWSTEEL": "METAL",
-        "HINDALCO": "METAL",
-        "DLF": "REALTY",
-        "GODREJPROP": "REALTY",
-        "BAJFINANCE": "FINANCE",
-        "BAJFINSV": "FINANCE",
-        "HDFCLIFE": "FINANCE",
-    }
-
     def analyze(self, symbol: str, exchange: str = "NSE") -> AnalystReport:
         try:
             points = []
             data: dict[str, Any] = {}
             score = 0.0
 
-            # Get sector snapshot
+            clean_sym = (
+                symbol.upper()
+                .replace(".NS", "")
+                .replace("NSE:", "")
+                .replace("BSE:", "")
+                .replace("MCX:", "")
+                .replace("CDS:", "")
+                .strip()
+            )
+
+            # 1. Resolve canonical sector and institutional RRG tailwind
+            from analysis.sector_rotation import get_stock_tailwind
+            from analysis.universe import get_stock_sector
+
+            sec_id, sec_display = get_stock_sector(clean_sym)
+            tailwind = get_stock_tailwind(clean_sym)
+
+            sector = tailwind.sector or sec_id.upper()
+            quad = tailwind.quadrant or "UNAVAILABLE"
+
+            data["stock_sector"] = sector
+            data["sector_display"] = sec_display
+            data["rrg_quadrant"] = quad
+            data["rs_ratio"] = tailwind.rs_ratio
+            data["rs_momentum"] = tailwind.rs_momentum
+            data["tailwind_score"] = tailwind.tailwind_score
+
+            # Evaluate RRG institutional quadrant
+            if quad == "LEADING":
+                score += 25.0
+                points.append(
+                    f"Parent sector {sector} ({sec_display}) is in LEADING quadrant "
+                    f"(RS-Ratio: {tailwind.rs_ratio:.1f}, Momentum: {tailwind.rs_momentum:.1f})"
+                )
+            elif quad == "IMPROVING":
+                score += 15.0
+                points.append(
+                    f"Parent sector {sector} ({sec_display}) is in IMPROVING quadrant "
+                    f"(Accelerating relative strength vs Nifty)"
+                )
+            elif quad == "WEAKENING":
+                score -= 10.0
+                points.append(
+                    f"Parent sector {sector} ({sec_display}) is in WEAKENING quadrant "
+                    f"(Losing relative momentum)"
+                )
+            elif quad == "LAGGING":
+                score -= 20.0
+                points.append(
+                    f"Parent sector {sector} ({sec_display}) is in LAGGING quadrant "
+                    f"(Underperforming benchmark)"
+                )
+            else:
+                points.append(
+                    f"{clean_sym} benchmarked against {sec_display} (RRG data neutral/uncomputed)"
+                )
+
+            # 2. Get live intraday sector snapshot
             try:
                 sectors = self.registry.execute("get_sector_snapshot", {})
                 if isinstance(sectors, list):
@@ -1265,42 +1309,46 @@ class SectorRotationAnalyst(BaseAnalyst):
                         top = sorted_sectors[0]
                         bottom = sorted_sectors[-1]
                         points.append(
-                            f"Strongest sector: {top.get('name', '?')} ({top.get('change_pct', 0):+.1f}%)"
+                            f"Strongest sector today: {top.get('name', '?')} ({top.get('change_pct', 0):+.1f}%)"
                         )
                         points.append(
-                            f"Weakest sector: {bottom.get('name', '?')} ({bottom.get('change_pct', 0):+.1f}%)"
+                            f"Weakest sector today: {bottom.get('name', '?')} ({bottom.get('change_pct', 0):+.1f}%)"
                         )
-            except Exception:
-                pass
 
-            # Check if this stock's sector is in favor
-            sector = self._SECTOR_MAP.get(symbol.upper(), "")
-            if sector and data.get("sectors"):
-                for s in data["sectors"]:
-                    s_name = s.get("name", "") if isinstance(s, dict) else ""
-                    if sector.upper() in s_name.upper():
-                        chg = s.get("change_pct", 0) if isinstance(s, dict) else 0
-                        data["stock_sector"] = sector
+                    # Match stock's sector in live snapshots
+                    matched_snap = None
+                    target_keys = {sector.upper(), sec_id.upper(), sec_display.upper()}
+                    for s in sectors:
+                        if not isinstance(s, dict):
+                            continue
+                        s_name = s.get("name", "").upper()
+                        s_inst = s.get("instrument", "").upper()
+                        if any(k in s_name or k in s_inst for k in target_keys):
+                            matched_snap = s
+                            break
+
+                    if matched_snap:
+                        chg = matched_snap.get("change_pct", 0)
                         data["sector_change"] = chg
                         if chg > 0.5:
                             points.append(
-                                f"{symbol}'s sector ({sector}) is outperforming: {chg:+.1f}%"
+                                f"{clean_sym}'s sector ({sec_display}) is outperforming today: {chg:+.1f}%"
                             )
-                            score += 20
+                            score += 15.0
                         elif chg < -0.5:
                             points.append(
-                                f"{symbol}'s sector ({sector}) is underperforming: {chg:+.1f}%"
+                                f"{clean_sym}'s sector ({sec_display}) is underperforming today: {chg:+.1f}%"
                             )
-                            score -= 20
+                            score -= 15.0
                         else:
-                            points.append(f"{symbol}'s sector ({sector}) is flat: {chg:+.1f}%")
-                        break
+                            points.append(
+                                f"{clean_sym}'s sector ({sec_display}) is flat today: {chg:+.1f}%"
+                            )
+            except Exception:
+                pass
 
-            if not sector:
-                points.append(f"Sector mapping not available for {symbol}")
-
-            verdict = "BULLISH" if score > 10 else "BEARISH" if score < -10 else "NEUTRAL"
-            confidence = min(abs(int(score)) + 30, 80)
+            verdict = "BULLISH" if score >= 15 else "BEARISH" if score <= -15 else "NEUTRAL"
+            confidence = max(35, min(90, abs(int(score)) + 40))
 
             return AnalystReport(
                 analyst=self.name,

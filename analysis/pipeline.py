@@ -72,10 +72,16 @@ def build_compact_signals(
 
     # Price header
     price_str = f"₹{ltp:,.2f}" if ltp else "N/A"
+    as_of = ""
+    for r in reports:
+        if hasattr(r, "data") and isinstance(r.data, dict) and r.data.get("as_of"):
+            as_of = r.data.get("as_of")
+            break
+    as_of_str = f" | As-of: {as_of}" if as_of else ""
     lines = [
-        f"SYMBOL: {symbol} ({exchange}) | Price: {price_str}",
+        f"SYMBOL: {symbol} ({exchange}) | Price: {price_str}{as_of_str} | Timeframe: 1D (Daily EOD)",
         "",
-        "PRE-COMPUTED SIGNALS — reference only, do not recompute:",
+        "PRE-COMPUTED SIGNALS (Timeframe: 1D / Daily EOD) — reference only, do not recompute:",
     ]
 
     # Signal rows — one line per analyst
@@ -87,8 +93,8 @@ def build_compact_signals(
 
         # Take first key metric line (or empty)
         metric = r.key_points[0] if r.key_points else ""
-        if len(metric) > 38:
-            metric = metric[:35] + "..."
+        if len(metric) > 52:
+            metric = metric[:49] + "..."
 
         verdict_icon = {"BULLISH": "▲", "BEARISH": "▼", "NEUTRAL": "─", "UNAVAILABLE": "○"}.get(
             r.verdict, "?"

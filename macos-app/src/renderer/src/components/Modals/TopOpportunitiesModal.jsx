@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import { useAPI } from '../../hooks/useAPI'
 import { useChatStore } from '../../store/chatStore'
+import { useRealtimeMarket } from '../../hooks/useRealtimeMarket'
 import { getSymbolExchange } from '../../data/universeData'
 
 export default function TopOpportunitiesModal({ isOpen, onClose, onOpenOrderTicket }) {
@@ -10,6 +11,7 @@ export default function TopOpportunitiesModal({ isOpen, onClose, onOpenOrderTick
   const [categories, setCategories] = useState([])
   const [tgNotification, setTgNotification] = useState(null)
   const { call } = useAPI()
+  const { getTicker } = useRealtimeMarket()
   const sendDraft = useChatStore((s) => s.sendDraft)
 
   // Fetch taxonomy categories on mount
@@ -276,13 +278,22 @@ export default function TopOpportunitiesModal({ isOpen, onClose, onOpenOrderTick
                       const signal = opp?.signal || opp?.status || 'STALK'
                       const isReady = signal === 'READY'
                       const isStalk = signal === 'STALK'
-                      const score = opp?.conviction_score || opp?.score || Math.floor(60 + Math.random() * 35)
+                      // score: use only verified backend fields. null = unavailable, never a random number.
+                      const score = opp?.conviction_score != null
+                        ? Number(opp.conviction_score)
+                        : (opp?.score != null ? Number(opp.score) : null)
                       const symbol = opp?.symbol || '—'
                       const entry = opp?.entry || opp?.entry_price
                       const sl = opp?.stop_loss || opp?.stop
                       const t1 = opp?.target_1 || opp?.target
-                      const rr = opp?.risk_reward || '2.0'
-                      const action = opp?.action || (isReady ? 'LONG' : 'MONITOR')
+                      // Live ticker resolution
+                      const liveTick = getTicker(symbol)
+                      const livePrice = liveTick?.ltp != null && liveTick.ltp > 0 ? liveTick.ltp : null
+                      const distPct = (livePrice && entry) ? ((livePrice - entry) / entry * 100) : null
+                      const isStopBreached = livePrice && sl && livePrice <= sl
+                      // R:R and action: only show what the backend explicitly provides
+                      const rr = opp?.risk_reward != null ? opp.risk_reward : null
+                      const action = opp?.action ?? null
                       const sector = opp?.sector || ''
 
                       // Signal color system
@@ -302,9 +313,10 @@ export default function TopOpportunitiesModal({ isOpen, onClose, onOpenOrderTick
                         ? 'var(--color-gold)'
                         : 'var(--color-rose)'
 
-                      // Conviction arc fill (circumference of r=16 circle ≈ 100.5)
+                      // Conviction arc fill (circumference of r=16 circle ≈ 100.5).
+                      // When score is null (unavailable), render a dashed dim ring — never a random arc.
                       const arcLen = 100.5
-                      const arcFill = arcLen - (arcLen * score / 100)
+                      const arcFill = score != null ? arcLen - (arcLen * score / 100) : arcLen
 
                       return (
                         <div
@@ -335,21 +347,47 @@ export default function TopOpportunitiesModal({ isOpen, onClose, onOpenOrderTick
                               {sector && <span className="text-[9px] block mt-0.5" style={{ color: 'var(--color-muted)' }}>{sector}</span>}
                             </div>
 
-                            {/* Conviction arc */}
+                            {/* Conviction arc — empty ring when score unavailable */}
                             <svg width="38" height="38" viewBox="0 0 38 38" className="flex-shrink-0">
                               <circle cx="19" cy="19" r="16" fill="none" stroke="var(--color-elevated)" strokeWidth="3.5" />
                               <circle
                                 cx="19" cy="19" r="16" fill="none"
-                                stroke={accentColor}
+                                stroke={score != null ? accentColor : 'var(--color-border)'}
                                 strokeWidth="3.5"
-                                strokeDasharray={arcLen}
+                                strokeDasharray={score != null ? String(arcLen) : `${arcLen * 0.1} ${arcLen * 0.15}`}
                                 strokeDashoffset={arcFill}
                                 strokeLinecap="round"
                                 transform="rotate(-90 19 19)"
-                                style={{ filter: `drop-shadow(0 0 4px ${accentColor})`, transition: 'stroke-dashoffset 0.8s ease' }}
+                                style={{ filter: score != null ? `drop-shadow(0 0 4px ${accentColor})` : 'none', transition: 'stroke-dashoffset 0.8s ease' }}
                               />
-                              <text x="19" y="22" textAnchor="middle" fill="var(--color-text)" fontSize="7" fontWeight="800" fontFamily="'JetBrains Mono', monospace">{score}</text>
+                              <text x="19" y="22" textAnchor="middle" fill="var(--color-text)" fontSize="7" fontWeight="800" fontFamily="'JetBrains Mono', monospace">
+                                {score != null ? score : '—'}
+                              </text>
                             </svg>
+                          </div>
+
+                          {/* Live Market Price & Distance */}
+                          <div className="flex items-center justify-between px-2.5 py-1 rounded-lg text-[10px] font-mono" style={{ background: 'var(--color-elevated)', border: '1px solid var(--color-border)' }}>
+                            <div className="flex items-center gap-1.5">
+                              <span style={{ color: 'var(--color-muted)' }}>LTP:</span>
+                              <span className="font-bold font-mono" style={{ color: 'var(--color-text)' }}>
+                                {livePrice ? `₹${Number(livePrice).toLocaleString('en-IN', { minimumFractionDigits: 1, maximumFractionDigits: 2 })}` : (entry ? `₹${Number(entry).toLocaleString('en-IN', { minimumFractionDigits: 1, maximumFractionDigits: 2 })}` : '—')}
+                              </span>
+                              {livePrice ? (
+                                <span className="text-[8px] font-bold px-1 py-0.2 rounded" style={{ background: 'rgba(0,214,143,0.15)', color: 'var(--color-emerald)' }}>
+                                  LIVE
+                                </span>
+                              ) : (
+                                <span className="text-[8px] px-1 py-0.2 rounded" style={{ color: 'var(--color-muted)' }}>
+                                  EOD
+                                </span>
+                              )}
+                            </div>
+                            {distPct != null && (
+                              <span className="text-[9px] font-bold" style={{ color: isStopBreached ? 'var(--color-rose)' : Math.abs(distPct) <= 1 ? 'var(--color-emerald)' : distPct > 0 ? 'var(--color-gold)' : 'var(--color-rose)' }}>
+                                {isStopBreached ? '⚠️ STOP HIT' : distPct > 0 ? `+${distPct.toFixed(1)}% entry` : `${distPct.toFixed(1)}% entry`}
+                              </span>
+                            )}
                           </div>
 
                           {/* Price levels */}
@@ -366,15 +404,17 @@ export default function TopOpportunitiesModal({ isOpen, onClose, onOpenOrderTick
                             ))}
                           </div>
 
-                          {/* R:R + Action */}
+                          {/* R:R + Action — omit badges when backend provides no confirmed data */}
                           <div className="flex items-center justify-between">
                             <span className="text-[10px] font-mono font-bold" style={{ color: 'var(--color-gold)' }}>
-                              R:R 1:{rr}
+                              {rr != null ? `R:R 1:${rr}` : <span style={{ color: 'var(--color-muted)' }}>R:R —</span>}
                             </span>
-                            <span className="text-[9px] font-bold px-2 py-0.5 rounded"
-                              style={{ background: 'var(--color-elevated)', color: accentColor }}>
-                              {action}
-                            </span>
+                            {action && (
+                              <span className="text-[9px] font-bold px-2 py-0.5 rounded"
+                                style={{ background: 'var(--color-elevated)', color: accentColor }}>
+                                {action}
+                              </span>
+                            )}
                           </div>
 
                           {/* Quick actions */}
@@ -385,10 +425,11 @@ export default function TopOpportunitiesModal({ isOpen, onClose, onOpenOrderTick
                                   onOpenOrderTicket({
                                     symbol,
                                     exchange: getSymbolExchange(symbol),
-                                    price: entry,
+                                    price: livePrice ?? entry,
                                     stopLoss: sl,
                                     target: t1,
-                                    action: action.includes('SHORT') ? 'SELL' : 'BUY',
+                                    action: action && action.includes('SHORT') ? 'SELL' : 'BUY',
+                                    _priceSource: livePrice ? 'LIVE' : 'EOD_ENTRY',
                                   })
                                 }
                                 onClose()

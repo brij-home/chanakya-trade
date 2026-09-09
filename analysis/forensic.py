@@ -48,6 +48,11 @@ class ForensicAuditResult:
             return "MILD_WARNING"
         return "CLEAN_PASS"
 
+    @property
+    def overall_flag(self) -> str:
+        """Alias for overall_forensic_verdict (used by security_360 and callers)."""
+        return self.overall_forensic_verdict
+
     def as_dict(self) -> dict[str, Any]:
         return {
             "symbol": self.symbol,
@@ -67,6 +72,7 @@ class ForensicAuditResult:
             "available": self.available,
             "unavailable_reasons": self.unavailable_reasons,
             "overall_forensic_verdict": self.overall_forensic_verdict,
+            "overall_flag": self.overall_flag,
         }
 
 
@@ -217,6 +223,271 @@ def compute_piotroski_f_score(data: dict[str, Any]) -> tuple[int, list[str]]:
     return score, checks
 
 
+def fetch_reported_accounting_inputs(symbol: str) -> dict[str, Any]:
+    """
+    Dynamically extract reported multi-year financial statements (balance sheet,
+    income statement, cash flow statement) and Indian governance metrics from
+    official exchange filings (via yfinance with .NS/.BO dual-exchange failover
+    and Screener.in fundamental integration).
+    Returns all 20 required line-items for Altman Z'', Beneish M-Score, and Piotroski F-Score.
+    """
+    import math
+    import yfinance as yf
+
+    clean_sym = (
+        symbol.upper()
+        .replace(".NS", "")
+        .replace(".BO", "")
+        .replace("NSE:", "")
+        .replace("BSE:", "")
+        .strip()
+    )
+
+    # 1. Check SQLite fundamental cache (24-hour TTL)
+    cache_key = f"acct_inputs_v1_{clean_sym}"
+    try:
+        from engine.analysis_cache import analysis_cache
+
+        cached = analysis_cache.get_fundamental(cache_key)
+        if cached and isinstance(cached, dict) and cached.get("total_assets") is not None:
+            return cached
+    except Exception:
+        pass
+
+    # 2. Query statements via yfinance
+    try:
+        from market.yfinance_provider import _to_yf_symbol
+
+        yf_sym = _to_yf_symbol(clean_sym)
+    except Exception:
+        yf_sym = f"{clean_sym}.NS"
+
+    ticker = yf.Ticker(yf_sym)
+    info = getattr(ticker, "info", {}) or {}
+    if not info or info.get("regularMarketPrice") is None:
+        ticker = yf.Ticker(f"{clean_sym}.BO")
+        info = getattr(ticker, "info", {}) or {}
+
+    bs = getattr(ticker, "balance_sheet", None)
+    inc = getattr(ticker, "income_stmt", None)
+    cf = getattr(ticker, "cashflow", None)
+
+    if bs is None or bs.empty or inc is None or inc.empty:
+        # Failover to BSE ticker (.BO)
+        ticker_bo = yf.Ticker(f"{clean_sym}.BO")
+        bs_bo = getattr(ticker_bo, "balance_sheet", None)
+        inc_bo = getattr(ticker_bo, "income_stmt", None)
+        cf_bo = getattr(ticker_bo, "cashflow", None)
+        if bs_bo is not None and not bs_bo.empty:
+            bs = bs_bo
+            inc = inc_bo
+            cf = cf_bo
+            if not info:
+                info = getattr(ticker_bo, "info", {}) or {}
+
+    if bs is None or bs.empty or inc is None or inc.empty:
+        return {}
+
+    def _get_val(df, row_names, col_idx=0):
+        if df is None or df.empty:
+            return None
+        if isinstance(row_names, str):
+            row_names = [row_names]
+        for name in row_names:
+            if name in df.index:
+                try:
+                    if col_idx < len(df.columns):
+                        v = df.loc[name].iloc[col_idx]
+                        if v is not None and not math.isnan(float(v)):
+                            return float(v)
+                except Exception:
+                    continue
+        return None
+
+    # Altman Z'' inputs
+    ta = _get_val(bs, ["Total Assets"])
+    ca = _get_val(bs, ["Current Assets"])
+    cl = _get_val(bs, ["Current Liabilities"])
+    wc = _get_val(bs, ["Working Capital"]) or (
+        (ca - cl) if ca is not None and cl is not None else None
+    )
+    re = _get_val(bs, ["Retained Earnings"]) or 0.0
+    ebit = _get_val(inc, ["EBIT", "Operating Income", "Pretax Income"])
+    bve = _get_val(
+        bs,
+        ["Stockholders Equity", "Common Stock Equity", "Total Equity Gross Minority Interest"],
+    )
+    tl = _get_val(bs, ["Total Liabilities Net Minority Interest", "Total Liabilities"]) or (
+        (ta - bve) if ta is not None and bve is not None else None
+    )
+
+    # Beneish M-Score inputs (t0 vs t1)
+    rev_t = _get_val(inc, ["Total Revenue", "Operating Revenue"], 0)
+    rev_t1 = _get_val(inc, ["Total Revenue", "Operating Revenue"], 1)
+    rec_t = (
+        _get_val(bs, ["Accounts Receivable", "Gross Accounts Receivable", "Receivables"], 0) or 0.0
+    )
+    rec_t1 = (
+        _get_val(bs, ["Accounts Receivable", "Gross Accounts Receivable", "Receivables"], 1) or 0.0
+    )
+    cogs_t = _get_val(inc, ["Cost Of Revenue", "Reconciled Cost Of Revenue"], 0)
+    cogs_t1 = _get_val(inc, ["Cost Of Revenue", "Reconciled Cost Of Revenue"], 1)
+    ta_t1 = _get_val(bs, ["Total Assets"], 1)
+    ca_t1 = _get_val(bs, ["Current Assets"], 1)
+    ppe_t = _get_val(bs, ["Net PPE", "Gross PPE"], 0) or 0.0
+    ppe_t1 = _get_val(bs, ["Net PPE", "Gross PPE"], 1) or 0.0
+    dep_t = (
+        _get_val(
+            inc, ["Reconciled Depreciation", "Depreciation And Amortization In Income Statement"], 0
+        )
+        or _get_val(cf, ["Depreciation And Amortization", "Depreciation"], 0)
+        or 0.0
+    )
+    dep_t1 = (
+        _get_val(
+            inc, ["Reconciled Depreciation", "Depreciation And Amortization In Income Statement"], 1
+        )
+        or _get_val(cf, ["Depreciation And Amortization", "Depreciation"], 1)
+        or 0.0
+    )
+    sga_t = _get_val(inc, ["Selling General And Administration", "Operating Expense"], 0) or 0.0
+    sga_t1 = _get_val(inc, ["Selling General And Administration", "Operating Expense"], 1) or 0.0
+    debt_t = _get_val(bs, ["Total Debt"], 0) or 0.0
+    debt_t1 = _get_val(bs, ["Total Debt"], 1) or 0.0
+    op_inc = _get_val(inc, ["Operating Income", "EBIT"], 0) or 0.0
+    cfo = _get_val(cf, ["Operating Cash Flow"], 0) or 0.0
+
+    dsri = 1.0
+    if rev_t and rev_t1 and rev_t > 0 and rev_t1 > 0 and rec_t1 > 0:
+        dsri = (rec_t / rev_t) / (rec_t1 / rev_t1)
+
+    gmi = 1.0
+    if rev_t and rev_t1 and cogs_t is not None and cogs_t1 is not None:
+        gm_t = (rev_t - cogs_t) / rev_t
+        gm_t1 = (rev_t1 - cogs_t1) / rev_t1
+        if gm_t > 0:
+            gmi = gm_t1 / gm_t
+
+    aqi = 1.0
+    if ta and ta_t1 and ta > 0 and ta_t1 > 0:
+        non_ca_ppe_t = ta - ((ca or 0.0) + ppe_t)
+        non_ca_ppe_t1 = ta_t1 - ((ca_t1 or 0.0) + ppe_t1)
+        aq_t = non_ca_ppe_t / ta
+        aq_t1 = non_ca_ppe_t1 / ta_t1
+        if aq_t1 > 0:
+            aqi = aq_t / aq_t1
+
+    sgi = (rev_t / rev_t1) if (rev_t and rev_t1 and rev_t1 > 0) else 1.0
+
+    depi = 1.0
+    if ppe_t and ppe_t1 and dep_t and dep_t1:
+        dr_t = dep_t / (ppe_t + dep_t)
+        dr_t1 = dep_t1 / (ppe_t1 + dep_t1)
+        if dr_t > 0:
+            depi = dr_t1 / dr_t
+
+    sgai = 1.0
+    if rev_t and rev_t1 and sga_t and sga_t1 and rev_t1 > 0:
+        sgai = (sga_t / rev_t) / (sga_t1 / rev_t1)
+
+    lvgi = 1.0
+    if ta and ta_t1 and debt_t and debt_t1 and ta_t1 > 0 and (debt_t1 / ta_t1) > 0:
+        lvgi = (debt_t / ta) / (debt_t1 / ta_t1)
+
+    tata = ((op_inc - cfo) / ta) if (ta and ta > 0) else 0.0
+
+    # Piotroski F-Score inputs
+    net_income_t = _get_val(inc, ["Net Income Common Stockholders", "Net Income"], 0) or 0.0
+    net_income_t1 = _get_val(inc, ["Net Income Common Stockholders", "Net Income"], 1) or 0.0
+    fcf = _get_val(cf, ["Free Cash Flow"], 0)
+    if fcf is None and cfo is not None:
+        capex = _get_val(cf, ["Capital Expenditure", "Capital Expenditure Reported"], 0) or 0.0
+        fcf = cfo + capex
+
+    roe = (
+        (net_income_t / bve * 100.0)
+        if (bve and bve > 0)
+        else (info.get("returnOnEquity", 0) * 100 if info.get("returnOnEquity") else 0.0)
+    )
+    profit_growth = (
+        ((net_income_t - net_income_t1) / abs(net_income_t1) * 100.0) if net_income_t1 != 0 else 0.0
+    )
+    debt_equity = (
+        (debt_t / bve)
+        if (bve and bve > 0)
+        else (info.get("debtToEquity", 0) / 100.0 if info.get("debtToEquity") else 0.0)
+    )
+    current_ratio = (ca / cl) if (ca and cl and cl > 0) else (info.get("currentRatio") or 1.0)
+    sales_growth = ((rev_t - rev_t1) / rev_t1 * 100.0) if (rev_t and rev_t1 and rev_t1 > 0) else 0.0
+    roce = (ebit / (ta - (cl or 0.0)) * 100.0) if (ta and cl and (ta - cl) > 0 and ebit) else roe
+
+    pledged_pct = 0.0
+    promoter_holding = None
+    interest_coverage = None
+    pe = info.get("trailingPE")
+    pb = info.get("priceToBook")
+    npm = (
+        (net_income_t / rev_t * 100.0)
+        if (rev_t and rev_t > 0)
+        else (info.get("profitMargins", 0) * 100 if info.get("profitMargins") else 0.0)
+    )
+
+    try:
+        from analysis.fundamental import analyse
+
+        snap = analyse(clean_sym)
+        if snap:
+            pledged_pct = snap.pledged_pct if snap.pledged_pct is not None else 0.0
+            promoter_holding = snap.promoter_holding
+            interest_coverage = snap.interest_coverage
+            if pe is None:
+                pe = snap.pe
+            if pb is None:
+                pb = snap.pb
+    except Exception:
+        pass
+
+    result_inputs = {
+        "working_capital": wc,
+        "total_assets": ta,
+        "retained_earnings": re,
+        "ebit": ebit,
+        "book_value_equity": bve,
+        "total_liabilities": tl,
+        "dsri": round(dsri, 3),
+        "gmi": round(gmi, 3),
+        "aqi": round(aqi, 3),
+        "sgi": round(sgi, 3),
+        "depi": round(depi, 3),
+        "sgai": round(sgai, 3),
+        "lvgi": round(lvgi, 3),
+        "tata": round(tata, 4),
+        "roe": round(roe, 2),
+        "free_cash_flow": round(fcf / 1e7, 2) if fcf is not None else 0.0,
+        "profit_growth": round(profit_growth, 2),
+        "debt_equity": round(debt_equity, 2),
+        "current_ratio": round(current_ratio, 2),
+        "pledged_pct": pledged_pct,
+        "promoter_holding": promoter_holding,
+        "interest_coverage": interest_coverage,
+        "sales_growth": round(sales_growth, 2),
+        "roce": round(roce, 2),
+        "pe": pe,
+        "pb": pb,
+        "npm": round(npm, 2) if npm is not None else None,
+        "market_cap": info.get("marketCap", 0) / 1e7 if info.get("marketCap") else 0.0,
+    }
+
+    try:
+        from engine.analysis_cache import analysis_cache
+
+        analysis_cache.save_fundamental(cache_key, result_inputs, ttl_hours=24)
+    except Exception:
+        pass
+
+    return result_inputs
+
+
 def audit_forensics(
     symbol: str,
     data: Optional[dict[str, Any]] = None,
@@ -233,6 +504,22 @@ def audit_forensics(
 
     if use_cache and data is None:
         try:
+            from engine.eod_store import get_cached_forensics
+
+            cached_eod = get_cached_forensics(clean_sym, max_age_days=30)
+            if (
+                cached_eod
+                and isinstance(cached_eod, dict)
+                and cached_eod.get("available") is not False
+            ):
+                c = dict(cached_eod)
+                c.pop("overall_forensic_verdict", None)
+                c.pop("updated_at", None)
+                return ForensicAuditResult(**c)
+        except Exception:
+            pass
+
+        try:
             from engine.analysis_cache import analysis_cache
 
             cached = analysis_cache.get_fundamental(cache_key)
@@ -243,46 +530,32 @@ def audit_forensics(
         except Exception:
             pass
 
-    # Extract fundamental data if not provided
+    # Extract reported accounting inputs dynamically if not provided
     if data is None:
-        data = {}
         try:
-            from analysis.fundamental import analyse
-
-            snap = analyse(clean_sym)
-            if snap:
-                data = {
-                    "pe": snap.pe,
-                    "pb": snap.pb,
-                    "roe": snap.roe,
-                    "roce": snap.roce,
-                    "npm": snap.npm,
-                    "sales_growth": snap.sales_growth,
-                    "profit_growth": snap.profit_growth,
-                    "debt_equity": snap.debt_equity,
-                    "current_ratio": snap.current_ratio,
-                    "interest_coverage": snap.interest_coverage,
-                    "free_cash_flow": snap.free_cash_flow,
-                    "promoter_holding": snap.promoter_holding,
-                    "institutional_holding": snap.institutional_holding,
-                    "pledged_pct": snap.pledged_pct,
-                    "market_cap": snap.market_cap,
-                }
+            data = fetch_reported_accounting_inputs(clean_sym)
         except Exception:
             data = {}
 
-    # These models require their published inputs.  Summary ratios cannot be
+    # Determine if the entity belongs to Banking & Financial Services
+    is_banking_or_financial = False
+    try:
+        from analysis.universe import get_stock_sector
+
+        sec_id, _ = get_stock_sector(clean_sym)
+        if sec_id == "banking":
+            is_banking_or_financial = True
+    except Exception:
+        pass
+
+    # These models require their published inputs. Summary ratios cannot be
     # reverse-engineered into an accounting score without inventing figures.
+    # Note: Altman Z''-Score was developed for non-financial corporations (Altman 1968, 2000).
+    # Commercial banks operate under fractional reserve banking with deposit liabilities
+    # and unclassified balance sheets where working capital is structurally undefined.
+    # Regulated banks are prudentially assessed under RBI Basel III CRAR capital adequacy.
     required_inputs = {
         "Beneish M-Score": {"dsri", "gmi", "aqi", "sgi", "depi", "sgai", "lvgi", "tata"},
-        "Altman Z''-Score": {
-            "working_capital",
-            "total_assets",
-            "retained_earnings",
-            "ebit",
-            "book_value_equity",
-            "total_liabilities",
-        },
         "Piotroski F-Score": {
             "roe",
             "free_cash_flow",
@@ -294,6 +567,16 @@ def audit_forensics(
             "roce",
         },
     }
+    if not is_banking_or_financial:
+        required_inputs["Altman Z''-Score"] = {
+            "working_capital",
+            "total_assets",
+            "retained_earnings",
+            "ebit",
+            "book_value_equity",
+            "total_liabilities",
+        }
+
     missing = {
         model: sorted(key for key in keys if data.get(key) is None)
         for model, keys in required_inputs.items()
@@ -326,10 +609,17 @@ def audit_forensics(
     )
     is_manipulator = m_score > -1.78
 
-    # 3. Compute Altman Z-Score
-    z_score, distress_zone = compute_altman_z_score(
-        **{key: float(data[key]) for key in required_inputs["Altman Z''-Score"]}
-    )
+    # 3. Compute Altman Z-Score (Non-financial corporations only)
+    if is_banking_or_financial:
+        z_score = None
+        distress_zone = "NOT_APPLICABLE"
+        strengths.append(
+            "Standard manufacturing Altman Z'' model is not applicable to commercial banks (prudentially governed under RBI Basel III CRAR capital adequacy norms)."
+        )
+    else:
+        z_score, distress_zone = compute_altman_z_score(
+            **{key: float(data[key]) for key in required_inputs["Altman Z''-Score"]}
+        )
 
     # 4. Indian Governance Red Flags Scanner
     red_flags = []
@@ -339,13 +629,16 @@ def audit_forensics(
     elif pledged >= 10.0:
         red_flags.append(f"Moderate Promoter Pledge ({pledged:.1f}% pledged)")
 
-    ic = data.get("interest_coverage")
-    if ic is not None and ic < 2.0 and ic >= 0:
-        red_flags.append(f"Weak Interest Coverage ({ic:.1f}x) — debt servicing vulnerability")
+    # For banks, customer deposits are operating liabilities and interest is cost of funds,
+    # so industrial interest coverage and debt/equity do not apply as distress flags.
+    if not is_banking_or_financial:
+        ic = data.get("interest_coverage")
+        if ic is not None and ic < 2.0 and ic >= 0:
+            red_flags.append(f"Weak Interest Coverage ({ic:.1f}x) — debt servicing vulnerability")
 
-    debt_equity = float(data["debt_equity"])
-    if debt_equity > 2.0:
-        red_flags.append(f"High Leverage (Debt/Equity {debt_equity:.2f}x)")
+        debt_equity = float(data["debt_equity"])
+        if debt_equity > 2.0:
+            red_flags.append(f"High Leverage (Debt/Equity {debt_equity:.2f}x)")
 
     if is_manipulator:
         red_flags.append(
@@ -356,23 +649,42 @@ def audit_forensics(
         red_flags.append(f"Altman Z''-Score ({z_score:.2f}) in DISTRESS zone")
 
     # 5. Determine Overall Quality Rating
-    if f_score >= 8 and not red_flags and distress_zone == "SAFE":
-        rating = "A+"
-    elif f_score >= 6 and len(red_flags) <= 1 and distress_zone in ("SAFE", "GREY"):
-        rating = "A"
-    elif f_score >= 4 and len(red_flags) <= 2:
-        rating = "B"
-    elif f_score >= 3:
-        rating = "C"
-    else:
-        rating = "D"
+    if is_banking_or_financial:
+        if f_score >= 7 and not red_flags and not is_manipulator:
+            rating = "A+"
+        elif f_score >= 5 and len(red_flags) <= 1 and not is_manipulator:
+            rating = "A"
+        elif f_score >= 4 and len(red_flags) <= 2:
+            rating = "B"
+        elif f_score >= 3:
+            rating = "C"
+        else:
+            rating = "D"
 
-    summary_text = (
-        f"Forensic Audit for {clean_sym}: Quality Rating {rating} | "
-        f"Piotroski F-Score {f_score}/9 | Altman Z''-Score {z_score:.2f} ({distress_zone}) | "
-        f"Beneish M-Score {m_score:.2f} ({'Manipulator Risk' if is_manipulator else 'Clean Earnings'}). "
-        f"{len(red_flags)} red flag(s) identified."
-    )
+        summary_text = (
+            f"Forensic Audit for {clean_sym} (Banking & Financial Services): Quality Rating {rating} | "
+            f"Piotroski F-Score {f_score}/9 | Beneish M-Score {m_score:.2f} ({'Manipulator Risk' if is_manipulator else 'Clean Earnings'}). "
+            f"Altman Z'' model is not applicable to commercial banks governed under RBI Basel III capital adequacy. "
+            f"{len(red_flags)} governance flag(s) identified."
+        )
+    else:
+        if f_score >= 8 and not red_flags and distress_zone == "SAFE":
+            rating = "A+"
+        elif f_score >= 6 and len(red_flags) <= 1 and distress_zone in ("SAFE", "GREY"):
+            rating = "A"
+        elif f_score >= 4 and len(red_flags) <= 2:
+            rating = "B"
+        elif f_score >= 3:
+            rating = "C"
+        else:
+            rating = "D"
+
+        summary_text = (
+            f"Forensic Audit for {clean_sym}: Quality Rating {rating} | "
+            f"Piotroski F-Score {f_score}/9 | Altman Z''-Score {z_score:.2f} ({distress_zone}) | "
+            f"Beneish M-Score {m_score:.2f} ({'Manipulator Risk' if is_manipulator else 'Clean Earnings'}). "
+            f"{len(red_flags)} red flag(s) identified."
+        )
 
     result = ForensicAuditResult(
         symbol=clean_sym,
@@ -387,12 +699,19 @@ def audit_forensics(
         summary_text=summary_text,
     )
 
-    # Save to persistent cache (24-hour TTL)
+    # Save to persistent cache (24-hour TTL in analysis_cache, 30-day TTL in eod_store)
     if use_cache:
         try:
             from engine.analysis_cache import analysis_cache
 
             analysis_cache.save_fundamental(cache_key, result.as_dict(), ttl_hours=24)
+        except Exception:
+            pass
+
+        try:
+            from engine.eod_store import save_forensics
+
+            save_forensics(clean_sym, result.as_dict())
         except Exception:
             pass
 

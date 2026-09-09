@@ -112,6 +112,24 @@ export const useChatStore = create((set, get) => ({
     set({ activeView: view })
   },
 
+  // ── Global Synchronized Active Symbol Across Workspace ──────────────────────
+  selectedSymbol: (typeof window !== 'undefined' && localStorage.getItem('chanakya_selected_symbol')) || 'NIFTY',
+  setSelectedSymbol: (symbol) => {
+    if (!symbol) return
+    const clean = String(symbol).trim().toUpperCase().replace(/^(NSE:|BSE:|MCX:|CDS:)/i, '')
+    try { localStorage.setItem('chanakya_selected_symbol', clean) } catch (_) {}
+    set({ selectedSymbol: clean })
+  },
+
+  // ── Terminal View Settings (Institutional Default: Chart Hidden) ─────────────
+  terminalShowChart: false,
+  setTerminalShowChart: (show) =>
+    set((s) => ({
+      terminalShowChart: typeof show === 'function' ? show(s.terminalShowChart) : Boolean(show),
+    })),
+  toggleTerminalShowChart: () =>
+    set((s) => ({ terminalShowChart: !s.terminalShowChart })),
+
   // ── Global In-Flight Activity & Progress HUD State ─────────
   activeActivity: null, // { id, title, details, progress, type, targetView, cancelFn, startedAt }
   completedNotification: null, // { id, title, message, targetView, actionLabel, timestamp }

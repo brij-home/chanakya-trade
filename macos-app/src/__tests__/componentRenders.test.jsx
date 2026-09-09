@@ -24,6 +24,7 @@ import ForensicCard from '../renderer/src/components/Cards/ForensicCard'
 import FunnelCard from '../renderer/src/components/Cards/FunnelCard'
 import WhaleFlowsCard from '../renderer/src/components/Cards/WhaleFlowsCard'
 import PersonaTrackRecordCard from '../renderer/src/components/Cards/PersonaTrackRecordCard'
+import ScanCard from '../renderer/src/components/Cards/ScanCard'
 import Message from '../renderer/src/components/Chat/Message'
 
 // Mock matchMedia and ResizeObserver for JSDOM test environment
@@ -561,15 +562,42 @@ describe('React Component Rendering & Hook Invariant Gates', () => {
       })
     })
 
-    it('OptionsDeskView renders and allows clicking Call/Put strikes to stage order', async () => {
+    it('OptionsDeskView renders Decision Matrix, synced chart, and allows clicking Call/Put strikes to stage order', async () => {
       const onOpenOrderTicket = vi.fn()
+      const onSelectSymbol = vi.fn()
       const OptionsDeskView = (await import('../renderer/src/components/Views/OptionsDeskView')).default
 
-      const { act } = await import('@testing-library/react')
+      const { act, fireEvent } = await import('@testing-library/react')
       let res
       await act(async () => {
-        res = render(<OptionsDeskView onOpenOrderTicket={onOpenOrderTicket} />)
+        res = render(
+          <OptionsDeskView
+            onOpenOrderTicket={onOpenOrderTicket}
+            selectedSymbol="NIFTY"
+            onSelectSymbol={onSelectSymbol}
+          />
+        )
       })
+
+      // Decision Matrix and Institutional elements rendered
+      const matrixHeaders = await res.findAllByText(/REAL-TIME OPTIONS DECISION MATRIX/i)
+      expect(matrixHeaders.length).toBeGreaterThan(0)
+
+      const gexRegime = await res.findAllByText(/1\. GEX REGIME/i)
+      expect(gexRegime.length).toBeGreaterThan(0)
+
+      const pcrSentiment = await res.findAllByText(/2\. PCR SENTIMENT/i)
+      expect(pcrSentiment.length).toBeGreaterThan(0)
+
+      // CandlestickChart is completely excluded from Options Desk view
+      expect(res.queryByTestId('mock-candlestick-chart')).toBeNull()
+
+      // Switch underlying instrument to BANKNIFTY
+      const bankNiftyBtns = await res.findAllByText('BANKNIFTY')
+      await act(async () => {
+        fireEvent.click(bankNiftyBtns[0])
+      })
+      expect(onSelectSymbol).toHaveBeenCalledWith('BANKNIFTY')
 
       const nfoBadges = await res.findAllByText(/NIFTY/i)
       expect(nfoBadges.length).toBeGreaterThan(0)
@@ -879,6 +907,206 @@ describe('React Component Rendering & Hook Invariant Gates', () => {
       render(<GlobalMacroCard data={mockData} />)
       // P0-A: proxy disclosure should be present
       expect(screen.getByText(/Research Proxy/i) || screen.getByText(/Modelled Overnight/i)).toBeTruthy()
+    })
+
+    it('OptionsDeskView renders live spot, PCR Blast Alert, and Blast Radar without 22068.75 dummy fallback', async () => {
+      global.fetch = vi.fn().mockImplementation((url, opts) => {
+        const urlStr = String(url)
+        if (urlStr.includes('/skills/gex_snapshot')) {
+          return Promise.resolve({
+            ok: true,
+            json: () => Promise.resolve({
+              status: 'SUCCESS',
+              underlying: 'NIFTY',
+              symbol: 'NSE:NIFTY',
+              exchange: 'NSE',
+              spot_price: 23754.9,
+              spot_change: '+142.10',
+              spot_change_pct: '+0.60%',
+              spot_is_positive: true,
+              data_state: 'LIVE',
+              pcr: 0.64,
+              pcr_sentiment: 'EXTREME CALL OVERHEAD',
+              pcr_blast: true,
+              pcr_blast_msg: 'EXTREME SHORT SQUEEZE POTENTIAL',
+              max_pain: 23750,
+              zero_gamma: 23680,
+              call_wall: 24000,
+              put_support: 23500,
+              total_call_oi: '1.2 Cr',
+              total_put_oi: '78.2 L',
+              net_oi_change: '+4.5 L',
+              options_chain: [
+                {
+                  strike: 23750,
+                  is_atm: true,
+                  calls_oi: '45.2 L',
+                  calls_oi_chg: '+12.4 L',
+                  calls_gex: '+42.5 Cr',
+                  calls_iv: '14.2%',
+                  calls_bid: 125.4,
+                  calls_ask: 126.8,
+                  calls_blast: true,
+                  calls_blast_reason: '2.8x buyer queue depth imbalance',
+                  puts_oi: '62.1 L',
+                  puts_oi_chg: '+18.1 L',
+                  puts_gex: '-38.1 Cr',
+                  puts_iv: '15.8%',
+                  puts_bid: 110.2,
+                  puts_ask: 111.0,
+                  puts_blast: false,
+                },
+              ],
+              blast_radar: [
+                {
+                  strike: 23750,
+                  option_type: 'CE',
+                  contract: 'NIFTY 23750 CE',
+                  blast_reason: 'Order book 2.8x buy-imbalance & volume spike',
+                  side: 'BUY',
+                  bid: 125.4,
+                  ask: 126.8,
+                  buy_qty: 280000,
+                  sell_qty: 100000,
+                  imbalance_ratio: 2.8,
+                  volume: 450000,
+                  oi: 452000,
+                },
+              ],
+            }),
+          })
+        }
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({ data: {}, status: 'ok' }),
+        })
+      })
+
+      const OptionsDeskView = (await import('../renderer/src/components/Views/OptionsDeskView')).default
+      const { findByText, findAllByText, queryByText } = render(<OptionsDeskView selectedSymbol="NIFTY" />)
+
+      // Verify real spot is rendered and NOT dummy 22068.75
+      const spotMatches = await findAllByText(/23,754\.90/)
+      expect(spotMatches.length).toBeGreaterThan(0)
+      expect(queryByText(/22068\.75/)).toBeNull()
+
+      // Verify PCR Blast alert banner is rendered
+      expect(await findByText(/IMPACT VOLATILITY ALERT/i)).toBeTruthy()
+      expect(await findByText(/EXTREME SHORT SQUEEZE POTENTIAL/i)).toBeTruthy()
+
+      // Verify Order Flow Blast Radar is rendered
+      expect(await findByText(/ORDER FLOW BLAST RADAR/i)).toBeTruthy()
+      expect(await findByText(/2\.8x Buyers/i)).toBeTruthy()
+
+      // Verify BLAST badge is rendered on explosive strike
+      const blastBadges = await findAllByText(/BLAST/i)
+      expect(blastBadges.length).toBeGreaterThan(0)
+    })
+
+    it('OptionsDeskView renders authentic BSE SENSEX spot price and broker-required state without bogus options', async () => {
+      global.fetch = vi.fn().mockImplementation((url, opts) => {
+        const urlStr = String(url)
+        if (urlStr.includes('/skills/gex_snapshot')) {
+          return Promise.resolve({
+            ok: true,
+            json: () => Promise.resolve({
+              status: 'SUCCESS',
+              underlying: 'SENSEX',
+              symbol: 'BSE:SENSEX',
+              exchange: 'BSE',
+              spot_price: 76130.65,
+              spot_change: '-74.95',
+              spot_change_pct: '-0.10%',
+              spot_is_positive: false,
+              data_state: 'BROKER_REQUIRED',
+              note: 'BSE SENSEX live spot is streaming. Connect Zerodha, Dhan, Shoonya, or Fyers for live BFO option chain.',
+              options_chain: [],
+              blast_radar: [],
+            }),
+          })
+        }
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({ data: {}, status: 'ok' }),
+        })
+      })
+
+      const OptionsDeskView = (await import('../renderer/src/components/Views/OptionsDeskView')).default
+      const { findByText, findAllByText, queryByText } = render(<OptionsDeskView selectedSymbol="SENSEX" />)
+
+      // Verify authentic BSE SENSEX spot price is rendered (~76,130.65)
+      const sensexSpotMatches = await findAllByText(/76,130\.65/)
+      expect(sensexSpotMatches.length).toBeGreaterThan(0)
+      expect(queryByText(/22068\.75/)).toBeNull()
+
+      // Verify honest broker connection required notice is rendered
+      expect(await findByText(/BSE SENSEX Spot Streaming • Broker Required for BFO Chain/i)).toBeTruthy()
+      const brokerReqBadges = await findAllByText(/BROKER CONNECTION REQUIRED/i)
+      expect(brokerReqBadges.length).toBeGreaterThan(0)
+    })
+  })
+
+  describe('ScanCard Component', () => {
+    it('renders unusual open interest without duplicate symbol buttons and with contract badges', () => {
+      const mockScanData = {
+        summary: 'Scanned 2 symbols. High IV: 0 | Unusual OI: 2 symbols (4 strikes) | Put writing: 0',
+        high_iv: [],
+        unusual_oi: [
+          {
+            symbol: 'NIFTY',
+            strike: 23750,
+            option_type: 'CE',
+            contract: 'NIFTY 23750 CE',
+            oi: 81508,
+            oi_change: 74106,
+            oi_change_pct: 1001.2,
+            spikes_count: 3,
+          },
+          // Even if upstream passes a duplicate NIFTY strike:
+          {
+            symbol: 'NIFTY',
+            strike: 23800,
+            option_type: 'CE',
+            contract: 'NIFTY 23800 CE',
+            oi: 263307,
+            oi_change: 232579,
+            oi_change_pct: 756.9,
+          },
+          {
+            symbol: 'BANKNIFTY',
+            strike: 53800,
+            option_type: 'PE',
+            contract: 'BANKNIFTY 53800 PE',
+            oi: 511,
+            oi_change: 391,
+            oi_change_pct: 325.8,
+            spikes_count: 1,
+          },
+        ],
+        high_put_writing: [],
+      }
+
+      render(<ScanCard data={mockScanData} />)
+
+      // Section header exists
+      expect(screen.getByText(/Unusual Open Interest Spike/i)).toBeTruthy()
+
+      // Verify NIFTY is rendered exactly once in the unusual_oi section
+      const niftyButtons = screen
+        .getAllByRole('button')
+        .filter((b) => b.textContent.includes('NIFTY') && !b.textContent.includes('BANKNIFTY'))
+      expect(niftyButtons.length).toBe(1)
+
+      // Verify contract strike badge
+      expect(screen.getByText('23750 CE')).toBeTruthy()
+      expect(screen.getByText('53800 PE')).toBeTruthy()
+
+      // Verify correct percentage display
+      expect(screen.getByText('OI +1,001.2%')).toBeTruthy()
+      expect(screen.getByText('OI +325.8%')).toBeTruthy()
+
+      // Verify spikes badge
+      expect(screen.getByText('3⚡')).toBeTruthy()
     })
   })
 })

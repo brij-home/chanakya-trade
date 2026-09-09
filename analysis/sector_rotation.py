@@ -66,6 +66,7 @@ NSE_SECTORS: dict[str, str] = {
     "ENERGY": "^CNXENERGY",
     "INFRA": "^CNXINFRA",
     "PSU_BANK": "^CNXPSUBANK",
+    "BROAD_MARKET": "^CRSLDX",
 }
 
 BENCHMARK_TICKER = "^NSEI"  # NIFTY 50
@@ -73,7 +74,7 @@ BENCHMARK_TICKER = "^NSEI"  # NIFTY 50
 # ── Stock to Sector Mapping ───────────────────────────────────
 
 STOCK_SECTOR_MAP: dict[str, str] = {
-    # IT
+    # IT & Software / Technology / EMS
     "INFY": "IT",
     "TCS": "IT",
     "WIPRO": "IT",
@@ -86,7 +87,30 @@ STOCK_SECTOR_MAP: dict[str, str] = {
     "OFSS": "IT",
     "KPITTECH": "IT",
     "TATAELXSI": "IT",
-    # Private Banks & Fin
+    "CYIENT": "IT",
+    "ZOMATO": "IT",
+    "NAUKRI": "IT",
+    "MAPMYINDIA": "IT",
+    "DIXON": "IT",
+    "POLICYBZR": "IT",
+    "AFFLE": "IT",
+    "BSOFT": "IT",
+    "CEINFO": "IT",
+    "HAPPSTMNDS": "IT",
+    "INTELLECT": "IT",
+    "JUSTDIAL": "IT",
+    "LATENTVIEW": "IT",
+    "LTTS": "IT",
+    "MASTEK": "IT",
+    "NEWGEN": "IT",
+    "RATEGAIN": "IT",
+    "ROUTE": "IT",
+    "SONATSOFTW": "IT",
+    "TANLA": "IT",
+    "ZENSARTECH": "IT",
+    "KAYNES": "IT",
+    "SYRMA": "IT",
+    # Private Banks, NBFCs & Capital Markets
     "HDFCBANK": "BANK",
     "ICICIBANK": "BANK",
     "KOTAKBANK": "BANK",
@@ -95,8 +119,19 @@ STOCK_SECTOR_MAP: dict[str, str] = {
     "FEDERALBNK": "BANK",
     "BANDHANBNK": "BANK",
     "AUBANK": "BANK",
+    "IDFCFIRSTB": "BANK",
     "BAJFINANCE": "BANK",
     "BAJAJFINSV": "BANK",
+    "CHOLAFIN": "BANK",
+    "MUTHOOTFIN": "BANK",
+    "SHRIRAMFIN": "BANK",
+    "JIOFIN": "BANK",
+    "BSE": "BANK",
+    "MCX": "BANK",
+    "ANGELONE": "BANK",
+    "CDSL": "BANK",
+    "CAMS": "BANK",
+    "HDFCAMC": "BANK",
     # PSU Banks
     "SBIN": "PSU_BANK",
     "BANKBARODA": "PSU_BANK",
@@ -115,7 +150,43 @@ STOCK_SECTOR_MAP: dict[str, str] = {
     "ZYDUSLIFE": "PHARMA",
     "MANKIND": "PHARMA",
     "MAXHEALTH": "PHARMA",
-    # Auto
+    "FORTIS": "PHARMA",
+    "MEDANTA": "PHARMA",
+    "LALPATHLAB": "PHARMA",
+    "SYNGENE": "PHARMA",
+    "GLENMARK": "PHARMA",
+    "BIOCON": "PHARMA",
+    "AUROPHARMA": "PHARMA",
+    "IPCALAB": "PHARMA",
+    "AARTIDRUGS": "PHARMA",
+    "ABBOTINDIA": "PHARMA",
+    "AJANTPHARM": "PHARMA",
+    "ALKEM": "PHARMA",
+    "ASTRAZEN": "PHARMA",
+    "BLISSGVS": "PHARMA",
+    "CAPLIPHARM": "PHARMA",
+    "ERIS": "PHARMA",
+    "FDC": "PHARMA",
+    "GLAXO": "PHARMA",
+    "GRANULES": "PHARMA",
+    "JBCHEPHARM": "PHARMA",
+    "KIMS": "PHARMA",
+    "LAURUSLABS": "PHARMA",
+    "MARKSANS": "PHARMA",
+    "NATCOPHARM": "PHARMA",
+    "NEULANDLAB": "PHARMA",
+    "PFIZER": "PHARMA",
+    "POLYMED": "PHARMA",
+    "RAINBOW": "PHARMA",
+    "RPGPHILIFE": "PHARMA",
+    "SANOFI": "PHARMA",
+    "SEQUENT": "PHARMA",
+    "STAR": "PHARMA",
+    "SUVENPHAR": "PHARMA",
+    "THYROCARE": "PHARMA",
+    "VIJAYA": "PHARMA",
+    "YATHARTH": "PHARMA",
+    # Auto & Mobility
     "TATAMOTORS": "AUTO",
     "MARUTI": "AUTO",
     "M&M": "AUTO",
@@ -126,7 +197,15 @@ STOCK_SECTOR_MAP: dict[str, str] = {
     "BHARATFORG": "AUTO",
     "MOTHERSON": "AUTO",
     "ASHOKLEY": "AUTO",
-    # FMCG & Consumption
+    "SONACOMS": "AUTO",
+    "UNOINDA": "AUTO",
+    "EXIDEIND": "AUTO",
+    "MRF": "AUTO",
+    "APOLLOTYRE": "AUTO",
+    "BALKRISIND": "AUTO",
+    "BOSCHLTD": "AUTO",
+    "LANDMARK": "AUTO",
+    # FMCG, Retail & Consumption
     "ITC": "FMCG",
     "HINDUNILVR": "FMCG",
     "NESTLEIND": "FMCG",
@@ -137,7 +216,26 @@ STOCK_SECTOR_MAP: dict[str, str] = {
     "GODREJCP": "FMCG",
     "COLPAL": "FMCG",
     "VARUN": "FMCG",
-    # Metals & Mining
+    "VBL": "FMCG",
+    "TRENT": "FMCG",
+    "DMART": "FMCG",
+    "TITAN": "FMCG",
+    "JUBLFOOD": "FMCG",
+    "DEVYANI": "FMCG",
+    "METRO": "FMCG",
+    "PAGEIND": "FMCG",
+    "BATAINDIA": "FMCG",
+    "RADICO": "FMCG",
+    "ASIANPAINT": "FMCG",
+    "CAMPUS": "FMCG",
+    "CARYSIL": "FMCG",
+    "DREAMFOLKS": "FMCG",
+    "ETHOSLTD": "FMCG",
+    "MANYAVAR": "FMCG",
+    "SAPPHIRE": "FMCG",
+    "WESTLIFE": "FMCG",
+    "AVANTIFEED": "FMCG",
+    # Metals, Mining & Pipes
     "TATASTEEL": "METAL",
     "JSWSTEEL": "METAL",
     "HINDALCO": "METAL",
@@ -146,7 +244,18 @@ STOCK_SECTOR_MAP: dict[str, str] = {
     "SAIL": "METAL",
     "VEDL": "METAL",
     "NATIONALUM": "METAL",
-    # Realty
+    "HINDZINC": "METAL",
+    "APLLTD": "METAL",
+    "RATNAMANI": "METAL",
+    "JINDALSAW": "METAL",
+    "GALLANTT": "METAL",
+    "GRAVITA": "METAL",
+    "HINDCOPPER": "METAL",
+    "RAMASTEEL": "METAL",
+    "SARDAEN": "METAL",
+    "SHYAMMETL": "METAL",
+    "WELCORP": "METAL",
+    # Real Estate & Housing
     "DLF": "REALTY",
     "GODREJPROP": "REALTY",
     "OBEROIRLTY": "REALTY",
@@ -154,7 +263,8 @@ STOCK_SECTOR_MAP: dict[str, str] = {
     "PHOENIXLTD": "REALTY",
     "BRIGADE": "REALTY",
     "SOBHA": "REALTY",
-    # Energy & Power
+    "CENTURYTEX": "REALTY",
+    # Energy, Power & Renewables
     "RELIANCE": "ENERGY",
     "ONGC": "ENERGY",
     "NTPC": "ENERGY",
@@ -164,9 +274,46 @@ STOCK_SECTOR_MAP: dict[str, str] = {
     "IOC": "ENERGY",
     "GAIL": "ENERGY",
     "ADANIGREEN": "ENERGY",
+    "ADANIPOWER": "ENERGY",
     "TATAPOWER": "ENERGY",
     "OIL": "ENERGY",
-    # Infra & Industrial Capital Goods
+    "SUZLON": "ENERGY",
+    "INOXWIND": "ENERGY",
+    "IREDA": "ENERGY",
+    "PFC": "ENERGY",
+    "REC": "ENERGY",
+    "NHPC": "ENERGY",
+    "SJVN": "ENERGY",
+    "TORNTPOWER": "ENERGY",
+    "PREMIERENE": "ENERGY",
+    "WAAREEENER": "ENERGY",
+    "SWANENERGY": "ENERGY",
+    "GUJGASLTD": "ENERGY",
+    # Railways, Metros & Wagons (Mapped to INFRA parent index)
+    "TITAGARH": "INFRA",
+    "TEXRAIL": "INFRA",
+    "JUPITERWAG": "INFRA",
+    "RVNL": "INFRA",
+    "IRFC": "INFRA",
+    "IRCON": "INFRA",
+    "RITES": "INFRA",
+    "RAILTEL": "INFRA",
+    "BEML": "INFRA",
+    # Defence & Aerospace (Mapped to INFRA parent index)
+    "HAL": "INFRA",
+    "BEL": "INFRA",
+    "MAZDOCK": "INFRA",
+    "COCHINSHIP": "INFRA",
+    "GRSE": "INFRA",
+    "BDL": "INFRA",
+    "DATAPATTNS": "INFRA",
+    "ZENTEC": "INFRA",
+    "SOLARINDS": "INFRA",
+    "MTARTECH": "INFRA",
+    "PARAS": "INFRA",
+    "ASTRA": "INFRA",
+    "CYIENTDLM": "INFRA",
+    # Infrastructure, Capital Goods, EPC, Building Materials
     "LT": "INFRA",
     "ADANIENT": "INFRA",
     "ADANIPORTS": "INFRA",
@@ -175,27 +322,101 @@ STOCK_SECTOR_MAP: dict[str, str] = {
     "AMBUJACEM": "INFRA",
     "CONCOR": "INFRA",
     "GMRINFRA": "INFRA",
-    "BEL": "INFRA",
-    "HAL": "INFRA",
     "BHEL": "INFRA",
     "SIEMENS": "INFRA",
     "ABB": "INFRA",
+    "POLYCAB": "INFRA",
+    "KEI": "INFRA",
+    "RRKABEL": "INFRA",
+    "CGPOWER": "INFRA",
+    "THERMAX": "INFRA",
+    "KNRCON": "INFRA",
+    "PNCINFRA": "INFRA",
+    "NCC": "INFRA",
+    "VOLTAS": "INFRA",
+    "HAVELLS": "INFRA",
+    "ASTRAL": "INFRA",
+    "APLAPOLLO": "INFRA",
+    "APOLLOPIPE": "INFRA",
+    "FINPIPE": "INFRA",
+    "PRINCEPIPE": "INFRA",
+    "SUPREMEIND": "INFRA",
+    "AIAENG": "INFRA",
+    "CUMMINSIND": "INFRA",
+    "ELECON": "INFRA",
+    "ELECTCAST": "INFRA",
+    "ENGINERSIN": "INFRA",
+    "GEPIL": "INFRA",
+    "HITACHI": "INFRA",
+    "HONAUT": "INFRA",
+    "ISGEC": "INFRA",
+    "KALPATPOWR": "INFRA",
+    "KBL": "INFRA",
+    "KEC": "INFRA",
+    "KIRLOSENG": "INFRA",
+    "PRAJIND": "INFRA",
+    "SCHAEFFLER": "INFRA",
+    "SCHNEIDER": "INFRA",
+    "SKFINDIA": "INFRA",
+    "TDPOWERSYS": "INFRA",
+    "TECHNOE": "INFRA",
+    "TIMKEN": "INFRA",
+    "TRITURBINE": "INFRA",
+    "VOLTAMP": "INFRA",
+    "RESPONIND": "INFRA",
+    "GSHIP": "INFRA",
+    "SCI": "INFRA",
+    "GVT&D": "INFRA",
+    # Telecom & Logistics
+    "BHARTIARTL": "INFRA",
+    "DELHIVERY": "INFRA",
+    "BLUEDART": "INFRA",
+    "PVRINOX": "FMCG",
+    "SUNTV": "FMCG",
+    "ZEEL": "FMCG",
+    "INDIGO": "INFRA",
+    "TATACOMM": "INFRA",
+    # Specialty Chemicals & Agrochemicals
+    "PIIND": "PHARMA",
+    "SRF": "PHARMA",
+    "NAVINFLUOR": "PHARMA",
+    "DEEPAKNTR": "PHARMA",
+    "ATUL": "PHARMA",
+    "COROMANDEL": "PHARMA",
+    "UPL": "PHARMA",
+    "TATACHEM": "PHARMA",
+    "FLUOROCHEM": "PHARMA",
+    "AETHER": "PHARMA",
+    "FINEORG": "PHARMA",
+    "CHAMBLFERT": "PHARMA",
+    "DEEPAKFERT": "PHARMA",
+    "DHANUKA": "PHARMA",
+    "FACT": "PHARMA",
+    "GNFC": "PHARMA",
+    "GSFC": "PHARMA",
+    "HIKAL": "PHARMA",
+    "NFL": "PHARMA",
+    "RCF": "PHARMA",
+    "SHARDACROP": "PHARMA",
+    "SUMICHEM": "PHARMA",
+    "TATVA": "PHARMA",
 }
 
 
 # ── Sector Constituents & Macro Drivers Map ──────────────────
 
 SECTOR_CONSTITUENTS: dict[str, list[str]] = {
-    "IT": ["INFY", "TCS", "COFORGE", "PERSISTENT", "HCLTECH"],
-    "BANK": ["HDFCBANK", "ICICIBANK", "KOTAKBANK", "AXISBANK"],
+    "IT": ["INFY", "TCS", "COFORGE", "PERSISTENT", "HCLTECH", "DIXON"],
+    "BANK": ["HDFCBANK", "ICICIBANK", "KOTAKBANK", "AXISBANK", "BAJFINANCE"],
     "PSU_BANK": ["SBIN", "BANKBARODA", "PNB", "CANBK"],
     "AUTO": ["M&M", "TATAMOTORS", "BAJAJ-AUTO", "MARUTI", "HEROMOTOCO"],
     "PHARMA": ["SUNPHARMA", "CIPLA", "DRREDDY", "DIVISLAB", "LUPIN"],
-    "FMCG": ["ITC", "HINDUNILVR", "VARUN", "NESTLEIND", "BRITANNIA"],
+    "FMCG": ["ITC", "HINDUNILVR", "VBL", "NESTLEIND", "BRITANNIA", "TRENT"],
     "METAL": ["TATASTEEL", "JSWSTEEL", "HINDALCO", "JINDALSTEL"],
     "REALTY": ["DLF", "GODREJPROP", "OBEROIRLTY", "PRESTIGE"],
-    "ENERGY": ["RELIANCE", "NTPC", "ONGC", "POWERGRID", "COALINDIA"],
-    "INFRA": ["LT", "HAL", "BEL", "SIEMENS", "ULTRACEMCO"],
+    "ENERGY": ["RELIANCE", "NTPC", "ONGC", "POWERGRID", "COALINDIA", "SUZLON"],
+    "INFRA": ["LT", "HAL", "BEL", "TITAGARH", "SIEMENS", "ULTRACEMCO", "RVNL"],
+    "BROAD_MARKET": ["RELIANCE", "TCS", "HDFCBANK", "INFY", "BHARTIARTL"],
 }
 
 SECTOR_DRIVERS: dict[str, list[str]] = {
@@ -221,6 +442,7 @@ SECTOR_DRIVERS: dict[str, list[str]] = {
     ],
     "ENERGY": ["Refining GRM Spreads", "Power Transmission Capex", "Renewable Energy Capacity"],
     "INFRA": ["National Rail / Highway Orders", "Defence Indigenisation", "Private Capex Cycle"],
+    "BROAD_MARKET": ["Broad Market Liquidity", "Mutual Fund SIP Flows", "Macro Breadth"],
 }
 
 SECTOR_PROXY_STOCKS: dict[str, str] = {
@@ -234,6 +456,7 @@ SECTOR_PROXY_STOCKS: dict[str, str] = {
     "REALTY": "DLF",
     "ENERGY": "RELIANCE",
     "INFRA": "LT",
+    "BROAD_MARKET": "RELIANCE",
 }
 
 
@@ -427,6 +650,11 @@ class StockTailwind:
     tailwind_score: int
     alignment: str
     analysis: str
+    status: str = "AVAILABLE"
+
+    @property
+    def sector_name(self) -> str:
+        return self.sector
 
     def __getitem__(self, item: str) -> Any:
         return getattr(self, item)
@@ -438,24 +666,78 @@ class StockTailwind:
         return {
             "symbol": self.symbol,
             "sector": self.sector,
+            "sector_name": self.sector,
             "quadrant": self.quadrant,
             "rs_ratio": self.rs_ratio,
             "rs_momentum": self.rs_momentum,
             "tailwind_score": self.tailwind_score,
             "alignment": self.alignment,
             "analysis": self.analysis,
+            "status": self.status,
         }
 
+    def to_dict(self) -> dict[str, Any]:
+        return self.as_dict()
 
-def get_stock_tailwind(symbol: str) -> StockTailwind:
+
+def get_stock_tailwind(
+    symbol: str,
+    rrg_matrix: Optional[dict[str, Any]] = None,
+) -> StockTailwind:
     """
     Get a stock's parent sector, its RRG quadrant, and alignment tailwind score (0-100).
+    Uses STOCK_SECTOR_MAP with dynamic taxonomy fallback to SECTOR_TAXONOMY in analysis.universe.
     """
-    clean_sym = symbol.upper().replace(".NS", "").replace("NSE:", "").strip()
-    sector = STOCK_SECTOR_MAP.get(clean_sym, "BROAD_MARKET")
+    clean_sym = (
+        symbol.upper()
+        .replace(".NS", "")
+        .replace("NSE:", "")
+        .replace("BSE:", "")
+        .replace("MCX:", "")
+        .strip()
+    )
+    sector = STOCK_SECTOR_MAP.get(clean_sym)
 
-    matrix = {p.sector: p for p in get_sector_rrg_matrix()}
+    if not sector:
+        # Dynamic fallback to SECTOR_TAXONOMY in analysis.universe
+        try:
+            from analysis.universe import get_stock_sector
+
+            sec_id, _ = get_stock_sector(clean_sym)
+            taxonomy_map = {
+                "banking": "BANK",
+                "it": "IT",
+                "auto": "AUTO",
+                "defence": "INFRA",
+                "energy": "ENERGY",
+                "metals": "METAL",
+                "pharma": "PHARMA",
+                "fmcg": "FMCG",
+                "realty": "REALTY",
+                "infra": "INFRA",
+                "chemicals": "PHARMA",
+                "telecom": "INFRA",
+                "railways": "INFRA",
+                "commodity": "METAL",
+                "currency": "BROAD_MARKET",
+                "etf": "BROAD_MARKET",
+                "broad_market": "BROAD_MARKET",
+            }
+            sector = taxonomy_map.get(sec_id, "BROAD_MARKET")
+        except Exception:
+            sector = "BROAD_MARKET"
+
+    if rrg_matrix is not None:
+        matrix = rrg_matrix
+    else:
+        matrix = {p.sector: p for p in get_sector_rrg_matrix()}
     sector_point = matrix.get(sector)
+
+    if not sector_point and matrix:
+        # Fallback to BROAD_MARKET point, or nearest valid sector point in matrix
+        sector_point = (
+            matrix.get("BROAD_MARKET") or matrix.get("INFRA") or next(iter(matrix.values()), None)
+        )
 
     if not sector_point:
         return StockTailwind(

@@ -88,25 +88,29 @@ export default function WhaleFlowsCard({ onOpenOrderTicket }) {
         <div className="bg-panel/70 border border-border/40 p-2.5 rounded-xl">
           <span className="text-[10px] text-muted uppercase font-ui">Total Deployed Capital</span>
           <p className="text-base font-bold text-amber mt-0.5">
-            ₹{data?.total_capital_deployed_cr || 281.5} <span className="text-xs font-normal">Cr</span>
+            {data?.total_capital_deployed_cr != null ? (
+              <>₹{data.total_capital_deployed_cr} <span className="text-xs font-normal">Cr</span></>
+            ) : (
+              '—'
+            )}
           </p>
         </div>
         <div className="bg-panel/70 border border-border/40 p-2.5 rounded-xl">
           <span className="text-[10px] text-muted uppercase font-ui">Stage 2 Markup Alignment</span>
           <p className="text-base font-bold text-green mt-0.5">
-            {data?.stage_2_alignment_pct || 100}%
+            {data?.stage_2_alignment_pct != null ? `${data.stage_2_alignment_pct}%` : '—'}
           </p>
         </div>
         <div className="bg-panel/70 border border-border/40 p-2.5 rounded-xl">
           <span className="text-[10px] text-muted uppercase font-ui">Average Conviction Score</span>
           <p className="text-base font-bold text-cyan mt-0.5">
-            {data?.avg_conviction_score || 84.7}/100
+            {data?.avg_conviction_score != null ? `${data.avg_conviction_score}/100` : '—'}
           </p>
         </div>
         <div className="bg-panel/70 border border-border/40 p-2.5 rounded-xl">
           <span className="text-[10px] text-muted uppercase font-ui">Active Disclosures</span>
           <p className="text-base font-bold text-text mt-0.5">
-            {deals.length} Transacted Equities
+            {deals.length > 0 ? `${deals.length} Transacted Equities` : (loading ? 'Loading…' : '—')}
           </p>
         </div>
       </div>

@@ -272,6 +272,22 @@ def _load_chat_id() -> Optional[int]:
     global _chat_id
     if _chat_id:
         return _chat_id
+    env_id = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+    if env_id:
+        try:
+            _chat_id = int(env_id)
+            return _chat_id
+        except ValueError:
+            pass
+    try:
+        from config.credentials import _kr_get
+
+        kr_id = _kr_get("TELEGRAM_CHAT_ID")
+        if kr_id:
+            _chat_id = int(kr_id.strip())
+            return _chat_id
+    except Exception:
+        pass
     try:
         with open(_CHAT_ID_FILE) as f:
             _chat_id = int(f.read().strip())
@@ -293,6 +309,9 @@ async def cmd_start(update, context) -> None:
         "/analyze RELIANCE — full analysis (3-4 min)\n"
         "/deepanalyze RELIANCE — deep LLM analysis (7-10 min)\n"
         "/brief — morning market brief\n"
+        "/conviction [SYMBOL] — 12-factor trade conviction score (0–100)\n"
+        "/scan [UNIVERSE] — scan top liquid/F&O list for breakouts & gamma blasts\n"
+        "/radar — quick market radar on today's top liquid setups\n"
         "/flows — FII/DII flow signals\n"
         "/earnings — upcoming results\n"
         "/events — event strategies\n"
@@ -771,6 +790,197 @@ async def cmd_pnl(update, context) -> None:
         await update.message.reply_text(f"Portfolio failed: {e}")
 
 
+async def cmd_conviction(update, context) -> None:
+    """Handle /conviction [SYMBOL] — 12-Factor Orthogonal Conviction Score."""
+    symbol = context.args[0].upper() if context.args else "NIFTY"
+    try:
+        from engine.conviction_score import get_conviction_score
+        from market.quotes import get_quote
+
+        # Get spot price
+        quotes = get_quote([f"NSE:{symbol}"])
+        q = quotes.get(f"NSE:{symbol}")
+        spot = float(q.last_price) if q and q.last_price else 0.0
+
+        conviction = get_conviction_score(underlying=symbol, spot=spot)
+
+        verdict_icon = {
+            "MAX_CONVICTION": "🔥",
+            "HIGH": "✅",
+            "MODERATE": "⚠️",
+            "WAIT": "🛑",
+        }.get(conviction.verdict, "⚪")
+
+        # Group factors by axis
+        axis_scores: dict[str, list] = {}
+        for f in conviction.factors:
+            axis_scores.setdefault(f.axis, []).append(f)
+
+        axis_icons = {
+            "INSTITUTIONAL": "🏛️",
+            "MACRO": "🌐",
+            "OPTIONS": "⚡",
+            "PRICE": "📊",
+            "TIMING": "⏱️",
+        }
+
+        axis_summary = []
+        for ax in ["INSTITUTIONAL", "MACRO", "OPTIONS", "PRICE", "TIMING"]:
+            f_list = axis_scores.get(ax, [])
+            if f_list:
+                avg_score = sum(f.score for f in f_list) / len(f_list)
+                icon = axis_icons.get(ax, "🔹")
+                axis_summary.append(f"  {icon} {ax.title()}: {avg_score:.1f}/10")
+
+        lines = [
+            f"🎯 <b>{symbol} — 12-Factor Conviction Score</b>\n",
+            f"Score: <b>{conviction.total_score}/100</b> ({verdict_icon} {conviction.verdict})",
+            f"Sizing: <b>{conviction.recommended_position_size}</b>",
+            f"Factors: 🟢 {conviction.bullish_count}▲ | 🔴 {conviction.bearish_count}▼ | ⚪ {conviction.unavailable_count}—\n",
+        ]
+
+        if conviction.veto and conviction.veto.vetoed:
+            lines.append(f"⛔ <b>VETO ACTIVE:</b> {conviction.veto.reason}\n")
+
+        lines.append("<b>5-Axis Orthogonal Breakdown:</b>")
+        lines.extend(axis_summary)
+
+        # Highlight decisive factors
+        sorted_factors = sorted(conviction.factors, key=lambda x: abs(x.score - 5), reverse=True)
+        top_factors = sorted_factors[:4]
+        lines.append("\n<b>Top Decisive Factor Drivers:</b>")
+        for f in top_factors:
+            s_icon = "🟢" if f.signal == "BULLISH" else "🔴" if f.signal == "BEARISH" else "⚪"
+            detail_clip = (f.detail[:75] + "...") if len(f.detail) > 75 else f.detail
+            lines.append(f"  {s_icon} <b>{f.label}</b> ({f.score}/10): {detail_clip}")
+
+        # Real Data-Driven Trade Plan (R:R & ETA)
+        if conviction.trade_plan:
+            tp = conviction.trade_plan
+            asym_icon = "✅" if tp.is_asymmetry_viable else "⚠️"
+            lines.append("\n<b>📐 Data-Driven Trade Plan (Zero Guesswork):</b>")
+            lines.append(f"  • Direction: <b>{tp.direction}</b> @ ₹{tp.entry_price:,.1f}")
+            lines.append(
+                f"  • Invalidation (SL): <b>₹{tp.invalidation_stop:,.1f}</b> (-{tp.stop_distance_pts:,.1f} pts)"
+            )
+            lines.append(f"    <i>{tp.sl_rationale}</i>")
+            lines.append(
+                f"  • Target 1: <b>₹{tp.target_1:,.1f}</b> (+{tp.t1_distance_pts:,.1f} pts | <b>{tp.rr_t1}:1 R:R</b>)"
+            )
+            lines.append(f"    <i>{tp.t1_rationale}</i>")
+            lines.append(f"    ⏱️ <b>ETA T1:</b> {tp.eta_t1_str}")
+            lines.append(
+                f"  • Target 2: <b>₹{tp.target_2:,.1f}</b> (+{tp.t2_distance_pts:,.1f} pts | <b>{tp.rr_t2}:1 R:R</b>)"
+            )
+            lines.append(f"    <i>{tp.t2_rationale}</i>")
+            lines.append(f"    ⏱️ <b>ETA T2:</b> {tp.eta_t2_str}")
+            lines.append(f"  • Expectancy: {asym_icon} <b>{tp.asymmetry_verdict}</b>")
+            if tp.structure_advice:
+                lines.append(f"  • Structure: <i>{tp.structure_advice}</i>")
+            if tp.session_clock_note:
+                lines.append(f"  • Clock: <i>{tp.session_clock_note}</i>")
+
+        lines.append(f"\n<i>Calibrated as of: {conviction.as_of}</i>")
+        await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+    except Exception as e:
+        await update.message.reply_text(f"Conviction scoring failed: {e}")
+
+
+async def cmd_scan(update, context) -> None:
+    """Handle /scan [UNIVERSE] or /radar — scans high-liquidity universe for breakout/gamma setups."""
+    universe = context.args[0].lower() if context.args else "most_liquid_today"
+    await update.message.reply_text(
+        f"🔍 <b>Scanning '{universe.upper()}' for Breakouts & Gamma Surges...</b>\n"
+        f"<i>Evaluating TTM squeeze coiling, volume expansion, options OI liquidation, and structural R:R...</i>",
+        parse_mode="HTML",
+    )
+
+    def _run_scan() -> str:
+        from analysis.universe import resolve_dynamic_universe, THEMATIC_PRESETS
+        from analysis.execution_gate import evaluate_execution_gate
+        from engine.trade_plan import calculate_trade_plan
+        from market.quotes import get_quote
+
+        symbols, desc = resolve_dynamic_universe(universe, max_stocks=15)
+        if not symbols:
+            symbols = THEMATIC_PRESETS.get("most_liquid_today", {}).get("symbols", [])[:15]
+
+        quotes = get_quote([f"NSE:{s}" for s in symbols])
+
+        candidates = []
+        for s in symbols:
+            try:
+                q = quotes.get(f"NSE:{s}")
+                if not q or not q.last_price or q.last_price <= 0:
+                    continue
+                gate = evaluate_execution_gate(s)
+                tp = calculate_trade_plan(s, direction=gate.trade_bias, spot=q.last_price)
+                candidates.append((s, q, gate, tp))
+            except Exception:
+                continue
+
+        if not candidates:
+            return "No valid candidates returned from scan."
+
+        # Sort: READY first, then by tactical score descending, then by R:R
+        candidates.sort(
+            key=lambda x: (
+                1
+                if x[2].execution_status == "READY"
+                else (0.5 if x[2].execution_status == "STALK" else 0),
+                x[2].tactical_score,
+                x[3].rr_t1 if x[3] else 0,
+            ),
+            reverse=True,
+        )
+
+        lines = [
+            f"⚡ <b>Chanakya Market Radar — {universe.upper()}</b>\n",
+            f"<i>Universe: {desc}</i>\n",
+        ]
+
+        top_picks = candidates[:5]
+        for i, (sym, q, gate, tp) in enumerate(top_picks, 1):
+            st_badge = (
+                "🚀 READY"
+                if gate.execution_status == "READY"
+                else ("🎯 STALK" if gate.execution_status == "STALK" else "👀 WATCH")
+            )
+            chg_sign = "+" if (q.change_pct or 0) >= 0 else ""
+            lines.append(
+                f"<b>{i}. {sym}</b> · ₹{q.last_price:,.1f} ({chg_sign}{q.change_pct or 0:.2f}%) · <b>{st_badge}</b>"
+            )
+            lines.append(
+                f"   📊 Strat: {gate.strategic_score}/100 | Tact: {gate.tactical_score}/100 | RVOL: {gate.rvol:.1f}x"
+            )
+            if tp and tp.invalidation_stop > 0:
+                sl_sign = "-" if tp.direction == "LONG" else "+"
+                lines.append(
+                    f"   🛑 SL: <b>₹{tp.invalidation_stop:,.1f}</b> ({sl_sign}{tp.stop_distance_pts:,.1f} pts) | T1: <b>₹{tp.target_1:,.1f}</b> ({tp.rr_t1}:1 R:R)"
+                )
+                lines.append(
+                    f"   ⏱️ ETA: <b>{tp.eta_t1_str}</b> | Flow: <i>{gate.options_oi_regime}</i>"
+                )
+            lines.append("")
+
+        lines.append(
+            "<i>Use /conviction [SYMBOL] for 12-factor deep audit and exact invalidation levels.</i>"
+        )
+        return "\n".join(lines)
+
+    try:
+        loop = asyncio.get_running_loop()
+        res_text = await asyncio.wait_for(
+            loop.run_in_executor(None, _run_scan),
+            timeout=60,
+        )
+        await update.message.reply_text(res_text, parse_mode="HTML")
+    except asyncio.TimeoutError:
+        await update.message.reply_text("⏱ Scan timed out. Try a smaller universe or single stock.")
+    except Exception as e:
+        await update.message.reply_text(f"Scan failed: {e}")
+
+
 async def cmd_unknown(update, context) -> None:
     """Handle unknown messages."""
     await update.message.reply_text("Unknown command. Type /help for available commands.")
@@ -979,15 +1189,35 @@ def run_setup_wizard() -> None:
     )
 
 
-# ── Push Notifications ───────────────────────────────────────
+# ── Push Notifications & Anti-Duplicate Buffer ────────────────
+_recent_push_digests: dict[str, float] = {}
+_push_dedup_lock = threading.Lock()
+_PUSH_DEDUP_WINDOW_SEC = 300.0  # 5 minutes suppression for duplicate messages
 
 
-def send_push(message: str, parse_mode: str = "HTML") -> None:
+def _normalize_push_message(msg: str) -> str:
+    """Strips timestamps, tags, and dynamic spacing for canonical deduplication hashing."""
+    import re
+
+    # Remove timestamps like 2026-09-07 15:45:00, 15:45:00 IST, etc.
+    s = re.sub(r"\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}(\s+IST)?", "", msg)
+    s = re.sub(r"\d{2}:\d{2}:\d{2}(\s+IST)?", "", s)
+    # Remove HTML tags
+    s = re.sub(r"<[^>]+>", "", s)
+    # Collapse whitespace
+    return " ".join(s.split()).strip().lower()
+
+
+def send_push(message: str, parse_mode: str = "HTML", bypass_dedup: bool = False) -> None:
     """
     Send a push notification to the configured Telegram chat.
     Called from alerts, morning brief scheduler, execution gate, etc.
     Non-blocking — runs in a background thread.
+    Includes a 5-minute anti-flood message deduplication guard.
     """
+    import hashlib
+    import time
+
     chat_id = _load_chat_id()
     if not chat_id:
         return
@@ -997,7 +1227,35 @@ def send_push(message: str, parse_mode: str = "HTML") -> None:
     except Exception:
         return
 
+    now = time.time()
+    if not bypass_dedup:
+        normalized = _normalize_push_message(message)
+        digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+        with _push_dedup_lock:
+            # Clean expired items if buffer is growing
+            if len(_recent_push_digests) > 200:
+                expired = [
+                    k for k, ts in _recent_push_digests.items() if now - ts > _PUSH_DEDUP_WINDOW_SEC
+                ]
+                for k in expired:
+                    del _recent_push_digests[k]
+
+            last_sent = _recent_push_digests.get(digest, 0.0)
+            if (now - last_sent) < _PUSH_DEDUP_WINDOW_SEC:
+                logger.debug(
+                    f"[TelegramPush] Suppressed duplicate push notification (hash={digest[:8]})"
+                )
+                return
+
+            _recent_push_digests[digest] = now
+
     def _send():
+        if os.environ.get("CHANAKYA_TESTING") == "1":
+            logger.debug(
+                "[TelegramPush] Network call skipped during test execution (CHANAKYA_TESTING=1)"
+            )
+            return
         try:
             import httpx
             import re
@@ -1113,6 +1371,144 @@ def push_execution_alert(report_dict: dict) -> None:
         pass
 
 
+def format_blast_alert(
+    d: dict,
+    underlying: str = "NIFTY",
+    spot: float = 0.0,
+    conviction_score: dict | None = None,
+) -> str:
+    """
+    Format a high-conviction Gamma Blast / Order Book Squeeze alert for Telegram.
+    Provides clear, institutional, profit-focused actionable levels and playbook.
+    Optionally includes a 10-Factor Conviction Score badge.
+    """
+    contract = d.get("contract", f"{underlying} OPTION")
+    opt_type = d.get("option_type", "CE")
+    score = d.get("score", 85)
+    reason = d.get("blast_reason", d.get("reason", "Heavy institutional order flow imbalance"))
+    vol_oi = float(d.get("vol_oi_ratio", 2.5))
+    oi_chg = int(d.get("oi_change", 0))
+    imb = float(d.get("imbalance_ratio", 2.0))
+
+    action_title = d.get("action_title", f"BUY {contract}")
+    prem = float(d.get("premium", d.get("entry_price", d.get("ask", 0.0))) or 50.0)
+    entry_low = d.get("entry_low") or round(max(0.5, prem * 0.95), 2)
+    entry_high = d.get("entry_high") or round(prem * 1.03, 2)
+    entry_range = d.get("entry_range") or f"₹{entry_low:,.2f} – ₹{entry_high:,.2f}"
+    sl = float(d.get("stop_loss", prem * 0.75))
+    sl_pct = str(d.get("stop_loss_pct", "-25.0%"))
+    t1 = float(d.get("target_1", prem * 1.35))
+    t1_pct = str(d.get("target_1_pct", "+35.0%"))
+    t2 = float(d.get("target_2", prem * 1.65))
+    t2_pct = str(d.get("target_2_pct", "+65.0%"))
+    rr = str(d.get("risk_reward", "1:2.5"))
+
+    when_buy = d.get("when_to_buy", f"Enter on Ask/Retest ({entry_range}) while momentum holds")
+    when_wait = d.get(
+        "when_to_wait",
+        f"DO NOT CHASE if premium is above ₹{round(prem * 1.15, 1):,}. Wait for pullback",
+    )
+    when_hold = d.get("when_to_hold", "Hold while price respects 5-EMA and structure advances")
+    profit_rule = d.get(
+        "profit_rule", f"Book 50% profit at T1 (₹{t1:,.2f}), trail SL to Cost for T2"
+    )
+
+    is_call = opt_type == "CE"
+    flame = "🔥" if is_call else "🚨"
+    icon = "📈" if is_call else "📉"
+
+    # ── Conviction Score badge (optional) ──────────────────────────
+    conviction_block = ""
+    if conviction_score and isinstance(conviction_score, dict):
+        cs_total = conviction_score.get("total_score", 0)
+        cs_verdict = conviction_score.get("verdict", "WAIT")
+        cs_bullish = conviction_score.get("bullish_count", 0)
+        cs_bearish = conviction_score.get("bearish_count", 0)
+        cs_pos_size = conviction_score.get("recommended_position_size", "FLAT")
+
+        verdict_icon = {
+            "MAX_CONVICTION": "🔥",
+            "HIGH": "✅",
+            "MODERATE": "⚠️",
+            "WAIT": "🛑",
+        }.get(cs_verdict, "⚠️")
+
+        pos_size_label = {
+            "2X": "⚡ 2× Size",
+            "NORMAL": "✓ Normal Size",
+            "HALF": "½ Size",
+            "FLAT": "No Trade",
+        }.get(cs_pos_size, cs_pos_size)
+
+        conviction_block = (
+            f"\n🧠 <b>Conviction Score: {cs_total}/100</b> {verdict_icon} {cs_verdict}\n"
+            f"• <b>Signal Factors:</b> {cs_bullish}▲ Bullish · {cs_bearish}▼ Bearish\n"
+            f"• <b>Position Size:</b> {pos_size_label}\n"
+        )
+
+    msg = (
+        f"{flame} <b>CHANAKYA BLAST SURGE ALERT</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"<b>{contract}</b> · {icon} <b>Score: {score}/100</b>\n"
+        f"<i>{reason}</i>\n\n"
+        f"📊 <b>Institutional Order Flow:</b>\n"
+        f"• <b>Vol/OI Turnover:</b> <b>{vol_oi:.1f}x</b>\n"
+        f"• <b>OI Liquidation/Shift:</b> <b>{oi_chg:+,} contracts</b>\n"
+        f"• <b>Buyer/Seller Queue Imbalance:</b> <b>{imb:.1f}x Buyers</b>\n"
+        f"• <b>Underlying Spot:</b> <b>₹{spot:,.2f}</b>\n"
+        f"{conviction_block}\n"
+        f"🎯 <b>Actionable Profit Blueprint:</b>\n"
+        f"• <b>Action:</b> <b>{action_title}</b>\n"
+        f"• <b>Entry Zone:</b> <code>{entry_range}</code> (Ref: ₹{prem:,.2f})\n"
+        f"• <b>Invalidation SL:</b> <code>₹{sl:,.2f}</code> ({sl_pct})\n"
+        f"• <b>Target 1 (1.5R):</b> <code>₹{t1:,.2f}</code> ({t1_pct}) — <i>Scale 50% & SL to Cost</i>\n"
+        f"• <b>Target 2 (2.5R):</b> <code>₹{t2:,.2f}</code> ({t2_pct}) — <i>Full Extension</i>\n"
+        f"• <b>Risk : Reward:</b> <b>{rr} R:R</b>\n\n"
+        f"💡 <b>Trader Execution Playbook:</b>\n"
+        f"1️⃣ <b>When to Buy:</b> {when_buy}\n"
+        f"2️⃣ <b>When to Wait (No Chase):</b> {when_wait}\n"
+        f"3️⃣ <b>When to Hold:</b> {when_hold}\n"
+        f"4️⃣ <b>Profit Rule:</b> {profit_rule}\n\n"
+        f"⚡ <i>Chanakya Institutional Gamma Desk</i>"
+    )
+    return msg
+
+
+def send_blast_push(
+    blast_data: dict,
+    underlying: str = "NIFTY",
+    spot: float = 0.0,
+    conviction_score: dict | None = None,
+) -> bool:
+    """
+    Send an actionable Blast alert notification to Telegram.
+    If conviction_score is not provided, computes a live score automatically.
+    """
+    try:
+        # Compute live conviction score if not provided
+        if conviction_score is None:
+            try:
+                from engine.conviction_score import get_conviction_score
+
+                cs = get_conviction_score(
+                    underlying=underlying,
+                    spot=spot,
+                    blast_score=blast_data.get("score"),
+                    vol_oi_ratio=blast_data.get("vol_oi_ratio"),
+                    imbalance_ratio=blast_data.get("imbalance_ratio"),
+                )
+                conviction_score = cs.as_dict()
+            except Exception:
+                conviction_score = None
+
+        msg = format_blast_alert(blast_data, underlying, spot, conviction_score)
+        send_push(msg, parse_mode="HTML", bypass_dedup=True)
+        return True
+    except Exception as e:
+        logger.warning(f"Failed to send blast push to Telegram: {e}")
+        return False
+
+
 # ── Alert Integration ────────────────────────────────────────
 
 
@@ -1156,6 +1552,9 @@ def run_bot() -> None:
     app.add_handler(CommandHandler("analyze", _track_command(cmd_analyze)))
     app.add_handler(CommandHandler("deepanalyze", _track_command(cmd_deepanalyze)))
     app.add_handler(CommandHandler("brief", _track_command(cmd_brief)))
+    app.add_handler(CommandHandler("conviction", _track_command(cmd_conviction)))
+    app.add_handler(CommandHandler("scan", _track_command(cmd_scan)))
+    app.add_handler(CommandHandler("radar", _track_command(cmd_scan)))
     app.add_handler(CommandHandler("flows", _track_command(cmd_flows)))
     app.add_handler(CommandHandler("earnings", _track_command(cmd_earnings)))
     app.add_handler(CommandHandler("events", _track_command(cmd_events)))

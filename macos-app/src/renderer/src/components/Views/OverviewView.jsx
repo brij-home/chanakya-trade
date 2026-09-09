@@ -116,6 +116,9 @@ export default function OverviewView() {
   const [overviewError, setOverviewError] = useState(null)
   const [macroError, setMacroError] = useState(null)
 
+  const [lastRefreshed, setLastRefreshed] = useState(null)
+  const [timeAgo, setTimeAgo] = useState('just now')
+
   const fetchData = useCallback(async () => {
     setLoading(true)
     setOverviewError(null)
@@ -138,12 +141,33 @@ export default function OverviewView() {
       setMacroError(resMacro.reason?.message ?? 'Global macro data unavailable')
     }
 
+    setLastRefreshed(Date.now())
     setLoading(false)
   }, []) // eslint-disable-line react-hooks/exhaustive-deps — intentionally stable; callRef.current handles fresh call
 
   useEffect(() => {
     fetchData()
+    const refreshTimer = setInterval(() => {
+      fetchData()
+    }, 5 * 60 * 1000)
+    return () => clearInterval(refreshTimer)
   }, [fetchData])
+
+  useEffect(() => {
+    const updateLabel = () => {
+      if (!lastRefreshed) return
+      const diffSec = Math.floor((Date.now() - lastRefreshed) / 1000)
+      if (diffSec < 60) {
+        setTimeAgo('just now')
+      } else {
+        const mins = Math.floor(diffSec / 60)
+        setTimeAgo(`${mins}m ago`)
+      }
+    }
+    updateLabel()
+    const timer = setInterval(updateLabel, 30000)
+    return () => clearInterval(timer)
+  }, [lastRefreshed])
 
   // P0-A: Derive real values only — no numeric fallbacks.
   // If data is null/absent, the corresponding sub-component shows UnavailableState.
@@ -177,12 +201,24 @@ export default function OverviewView() {
             GIFT NIFTY Gap • Global 6 • India VIX • FII/DII Flows • Sector RRG
           </p>
         </div>
-        {/* P0-A: Show real data status, not a fake "Live Institutional Feeds" badge */}
-        <DataStateBadge
-          status={overviewStatus}
-          sourceName={overviewSource}
-          asOf={overviewAsOf}
-        />
+        {/* Real data status & refresh indicator */}
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => fetchData()}
+            disabled={loading}
+            className="flex items-center gap-1.5 text-[11px] px-2.5 py-1 rounded-md border border-border bg-panel hover:bg-elevated text-muted hover:text-text cursor-pointer transition-all"
+            title="Auto-refreshes every 5 minutes"
+          >
+            <span className={loading ? 'animate-spin' : ''}>🔄</span>
+            <span>{loading ? 'Refreshing...' : `Updated ${timeAgo}`}</span>
+          </button>
+          <DataStateBadge
+            status={overviewStatus}
+            sourceName={overviewSource}
+            asOf={overviewAsOf}
+          />
+        </div>
       </div>
 
       {loading ? (

@@ -99,9 +99,9 @@ def evaluate_execution_gate(
 
     if df is None or len(df) == 0:
         try:
-            from market.history import get_daily_history
+            from market.history import get_ohlcv
 
-            df = get_daily_history(symbol=symbol, exchange=exchange, days=250)
+            df = get_ohlcv(symbol=symbol, exchange=exchange, interval="day", days=250)
         except Exception:
             df = None
 
@@ -221,11 +221,20 @@ def evaluate_execution_gate(
 
     # Actionable Blueprint Levels
     entry_price = round(ltp, 2)
-    atr = (
-        float(df["High"].iloc[-14:] - df["Low"].iloc[-14:]).mean()
-        if "High" in df.columns and len(df) >= 14
-        else ltp * 0.02
-    )
+    atr_val = None
+    if df is not None and len(df) >= 14:
+        try:
+            from analysis.technical import atr as calc_atr
+
+            atr_s = calc_atr(df, period=14)
+            if not atr_s.dropna().empty:
+                val = float(atr_s.dropna().iloc[-1])
+                if val > 0:
+                    atr_val = val
+        except Exception:
+            pass
+
+    atr = atr_val if atr_val is not None else round(ltp * 0.015, 2)
     stop_loss = round(max(ltp * 0.85, ltp - (1.5 * atr)), 2)
     risk_pts = max(1.0, entry_price - stop_loss)
     target_1 = round(entry_price + (risk_pts * 2.0), 2)

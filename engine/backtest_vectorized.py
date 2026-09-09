@@ -37,6 +37,23 @@ def _fetch_ohlcv(symbol: str, period: str = "1y", exchange: str = "NSE") -> pd.D
     Returns a DataFrame indexed by date with columns: open, high, low, close, volume.
     Raises ValueError on empty result.
     """
+    # Map period string to lookback days
+    period_days = {"1mo": 30, "3mo": 90, "6mo": 180, "1y": 365, "2y": 730, "5y": 1825}
+    days = period_days.get(period, 365)
+
+    # Tier 1: Try unified market.history get_ohlcv (which hits eod_store L1/L2 and local cache)
+    try:
+        from market.history import get_ohlcv
+
+        df = get_ohlcv(symbol=symbol, exchange=exchange, interval="day", days=days)
+        if df is not None and not df.empty and len(df) >= 15:
+            df = df.copy()
+            df.columns = [c.lower() for c in df.columns]
+            return df
+    except Exception:
+        pass
+
+    # Tier 2: yfinance fallback
     try:
         import yfinance as yf
 

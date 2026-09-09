@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import { useAPI } from '../../hooks/useAPI'
+import { useRealtimeMarket } from '../../hooks/useRealtimeMarket'
 import { formatINR, formatINRFull } from '../../utils/formatINR'
 
 const PRESETS = {
@@ -51,31 +52,40 @@ const PRESETS = {
   },
 }
 
-export default function PayoffSimulatorCard({ initialSymbol = 'NIFTY', initialSpot = 24000 }) {
+export default function PayoffSimulatorCard({ initialSymbol = 'NIFTY', initialSpot = null }) {
   const { call } = useAPI()
+  const { getTicker } = useRealtimeMarket()
   const [symbol, setSymbol] = useState(initialSymbol)
-  const [spotPrice, setSpotPrice] = useState(initialSpot)
-  const [sliderSpot, setSliderSpot] = useState(initialSpot)
+  const liveTick = getTicker(symbol)
+  const liveSpot = liveTick?.ltp != null && liveTick.ltp > 0 ? Number(liveTick.ltp) : (liveTick?.price != null && liveTick.price > 0 ? Number(liveTick.price) : null)
+  const resolvedSpot = Number(initialSpot || liveSpot || 0)
+
+  const [spotPrice, setSpotPrice] = useState(resolvedSpot)
+  const [sliderSpot, setSliderSpot] = useState(resolvedSpot)
   const [dte, setDte] = useState(7)
   const [targetDte, setTargetDte] = useState(4)
   const [iv, setIv] = useState(14)
   const [ivShock, setIvShock] = useState(0)
   const [selectedPreset, setSelectedPreset] = useState('Bull Call Spread')
-  const [legs, setLegs] = useState(PRESETS['Bull Call Spread'](initialSpot))
+  const [legs, setLegs] = useState(resolvedSpot > 0 ? PRESETS['Bull Call Spread'](resolvedSpot) : [])
   const [simData, setSimData] = useState(null)
   const [loading, setLoading] = useState(false)
 
-  // Sync with incoming props when underlying or spot price changes
+  // Sync with incoming props or live stream when underlying or spot price changes
   useEffect(() => {
     if (initialSymbol) setSymbol(initialSymbol)
-    if (initialSpot && initialSpot > 0) {
-      setSpotPrice(initialSpot)
-      setSliderSpot(initialSpot)
-      if (PRESETS[selectedPreset]) {
-        setLegs(PRESETS[selectedPreset](initialSpot))
-      }
+    const effective = Number(initialSpot || liveSpot || 0)
+    if (effective > 0) {
+      setSpotPrice((prev) => (prev > 0 ? prev : effective))
+      setSliderSpot((prev) => (prev > 0 ? prev : effective))
+      setLegs((prevLegs) => {
+        if (!prevLegs || prevLegs.length === 0) {
+          return PRESETS[selectedPreset] ? PRESETS[selectedPreset](effective) : []
+        }
+        return prevLegs
+      })
     }
-  }, [initialSymbol, initialSpot])
+  }, [initialSymbol, initialSpot, liveSpot])
 
   // Apply preset
   const handlePresetSelect = (presetName) => {

@@ -40,6 +40,9 @@ export default function BacktestStudioView({ onOpenOrderTicket }) {
   const [loading, setLoading] = useState(false)
   const [data, setData] = useState(null)
   const [tradeFilter, setTradeFilter] = useState('ALL') // 'ALL' | 'WIN' | 'LOSS'
+  const [tradeSearch, setTradeSearch] = useState('')
+  const [tradeSortCol, setTradeSortCol] = useState('date')
+  const [tradeSortDir, setTradeSortDir] = useState('desc')
   const [tradePage, setTradePage] = useState(1)
   const pageSize = 8
 
@@ -164,14 +167,88 @@ export default function BacktestStudioView({ onOpenOrderTicket }) {
     }
   })
 
-  const filteredTrades = allTrades.filter((t) => {
-    if (tradeFilter === 'WIN') return t.pnl > 0
-    if (tradeFilter === 'LOSS') return t.pnl <= 0
-    return true
-  })
+  const handleTradeSort = (col) => {
+    if (tradeSortCol === col) {
+      setTradeSortDir((d) => (d === 'asc' ? 'desc' : 'asc'))
+    } else {
+      setTradeSortCol(col)
+      const isNumeric = ['entry', 'exit', 'pnl', 'pct', 'r'].includes(col)
+      setTradeSortDir(isNumeric ? 'desc' : 'asc')
+    }
+    setTradePage(1)
+  }
+
+  const filteredTrades = (() => {
+    let list = allTrades.filter((t) => {
+      if (tradeFilter === 'WIN') return t.pnl > 0
+      if (tradeFilter === 'LOSS') return t.pnl <= 0
+      return true
+    })
+
+    if (tradeSearch.trim()) {
+      const q = tradeSearch.toLowerCase().trim()
+      list = list.filter(
+        (t) =>
+          (t.date && String(t.date).toLowerCase().includes(q)) ||
+          (t.type && String(t.type).toLowerCase().includes(q)) ||
+          (t.reason && String(t.reason).toLowerCase().includes(q))
+      )
+    }
+
+    list.sort((a, b) => {
+      let aVal = a[tradeSortCol]
+      let bVal = b[tradeSortCol]
+
+      if (aVal == null && bVal == null) return 0
+      if (aVal == null) return 1
+      if (bVal == null) return -1
+
+      if (typeof aVal === 'number' && typeof bVal === 'number') {
+        return tradeSortDir === 'asc' ? aVal - bVal : bVal - aVal
+      }
+
+      const aStr = String(aVal).toLowerCase()
+      const bStr = String(bVal).toLowerCase()
+      const cmp = aStr.localeCompare(bStr)
+      return tradeSortDir === 'asc' ? cmp : -cmp
+    })
+
+    return list
+  })()
 
   const paginatedTrades = filteredTrades.slice((tradePage - 1) * pageSize, tradePage * pageSize)
   const totalPages = Math.ceil(filteredTrades.length / pageSize) || 1
+
+  const renderTradeHeader = (colKey, label, align = 'left') => {
+    const isSorted = tradeSortCol === colKey
+    const dir = tradeSortDir
+    return (
+      <th
+        onClick={() => handleTradeSort(colKey)}
+        className={`py-2 px-3 cursor-pointer select-none transition-all group ${
+          align === 'right' ? 'text-right' : 'text-left'
+        } ${
+          isSorted
+            ? 'text-amber-600 dark:text-amber-400 font-bold bg-amber-500/10 dark:bg-amber-400/10 rounded-md'
+            : 'text-muted hover:text-text hover:bg-black/[0.04] dark:hover:bg-white/[0.05] rounded-md'
+        }`}
+        title={`Sort by ${label}`}
+      >
+        <div className={`inline-flex items-center gap-1.5 ${align === 'right' ? 'justify-end' : 'justify-start'}`}>
+          <span>{label}</span>
+          <span
+            className={`text-[9px] font-mono transition-all ${
+              isSorted
+                ? 'text-amber-600 dark:text-amber-400 font-bold opacity-100'
+                : 'opacity-30 group-hover:opacity-100 group-hover:text-amber-500'
+            }`}
+          >
+            {isSorted ? (dir === 'asc' ? '▲' : '▼') : '⇅'}
+          </span>
+        </div>
+      </th>
+    )
+  }
 
   return (
     <div className="flex flex-col h-full overflow-y-auto p-4 sm:p-6 space-y-5 animate-fade-slide" style={{ background: 'var(--color-surface)' }}>
@@ -477,32 +554,60 @@ export default function BacktestStudioView({ onOpenOrderTicket }) {
             </h3>
           </div>
 
-          {/* Win / Loss Filter Buttons */}
-          <div className="flex items-center gap-1.5 text-xs font-ui">
-            <button
-              onClick={() => { setTradeFilter('ALL'); setTradePage(1) }}
-              className={`px-3 py-1 rounded-lg font-bold transition-all cursor-pointer ${
-                tradeFilter === 'ALL' ? 'bg-elevated text-text border border-border' : 'text-muted hover:text-text'
-              }`}
-            >
-              All ({allTrades.length})
-            </button>
-            <button
-              onClick={() => { setTradeFilter('WIN'); setTradePage(1) }}
-              className={`px-3 py-1 rounded-lg font-bold transition-all cursor-pointer ${
-                tradeFilter === 'WIN' ? 'bg-green/15 text-green border border-green/30' : 'text-muted hover:text-text'
-              }`}
-            >
-              Wins ({allTrades.filter(t => t.pnl > 0).length})
-            </button>
-            <button
-              onClick={() => { setTradeFilter('LOSS'); setTradePage(1) }}
-              className={`px-3 py-1 rounded-lg font-bold transition-all cursor-pointer ${
-                tradeFilter === 'LOSS' ? 'bg-red/15 text-red border border-red/30' : 'text-muted hover:text-text'
-              }`}
-            >
-              Losses ({allTrades.filter(t => t.pnl <= 0).length})
-            </button>
+          {/* Controls: Search & Win/Loss Filter */}
+          <div className="flex items-center gap-2 flex-wrap">
+            <div className="relative flex items-center">
+              <input
+                type="text"
+                placeholder="Search trades..."
+                value={tradeSearch}
+                onChange={(e) => { setTradeSearch(e.target.value); setTradePage(1) }}
+                className="text-xs px-2.5 py-1 pl-6 pr-5 rounded-lg border outline-none w-28 sm:w-36 focus:w-44 transition-all"
+                style={{
+                  background: 'var(--color-elevated)',
+                  borderColor: tradeSearch ? 'var(--color-gold)' : 'var(--color-border)',
+                  color: 'var(--color-text)',
+                }}
+              />
+              <span className="absolute left-2 text-[10px] text-muted pointer-events-none">🔍</span>
+              {tradeSearch && (
+                <button
+                  type="button"
+                  onClick={() => { setTradeSearch(''); setTradePage(1) }}
+                  className="absolute right-1.5 text-xs text-muted hover:text-text cursor-pointer"
+                  title="Clear search"
+                >
+                  ✕
+                </button>
+              )}
+            </div>
+
+            <div className="flex items-center gap-1 text-xs font-ui">
+              <button
+                onClick={() => { setTradeFilter('ALL'); setTradePage(1) }}
+                className={`px-2.5 py-1 rounded-lg font-bold transition-all cursor-pointer ${
+                  tradeFilter === 'ALL' ? 'bg-elevated text-text border border-border' : 'text-muted hover:text-text'
+                }`}
+              >
+                All ({allTrades.length})
+              </button>
+              <button
+                onClick={() => { setTradeFilter('WIN'); setTradePage(1) }}
+                className={`px-2.5 py-1 rounded-lg font-bold transition-all cursor-pointer ${
+                  tradeFilter === 'WIN' ? 'bg-green/15 text-green border border-green/30' : 'text-muted hover:text-text'
+                }`}
+              >
+                Wins ({allTrades.filter(t => t.pnl > 0).length})
+              </button>
+              <button
+                onClick={() => { setTradeFilter('LOSS'); setTradePage(1) }}
+                className={`px-2.5 py-1 rounded-lg font-bold transition-all cursor-pointer ${
+                  tradeFilter === 'LOSS' ? 'bg-red/15 text-red border border-red/30' : 'text-muted hover:text-text'
+                }`}
+              >
+                Losses ({allTrades.filter(t => t.pnl <= 0).length})
+              </button>
+            </div>
           </div>
         </div>
 
@@ -512,14 +617,14 @@ export default function BacktestStudioView({ onOpenOrderTicket }) {
             <thead>
               <tr className="text-[10px] uppercase text-muted border-b border-border/50">
                 <th className="py-2 px-3">#</th>
-                <th className="py-2 px-3">Date</th>
-                <th className="py-2 px-3">Type</th>
-                <th className="py-2 px-3">Entry</th>
-                <th className="py-2 px-3">Exit</th>
-                <th className="py-2 px-3">P&L (₹)</th>
-                <th className="py-2 px-3">Return</th>
-                <th className="py-2 px-3">R-Multiple</th>
-                <th className="py-2 px-3">Exit Trigger</th>
+                {renderTradeHeader('date', 'Date')}
+                {renderTradeHeader('type', 'Type')}
+                {renderTradeHeader('entry', 'Entry')}
+                {renderTradeHeader('exit', 'Exit')}
+                {renderTradeHeader('pnl', 'P&L (₹)')}
+                {renderTradeHeader('pct', 'Return')}
+                {renderTradeHeader('r', 'R-Multiple')}
+                {renderTradeHeader('reason', 'Exit Trigger')}
               </tr>
             </thead>
             <tbody className="divide-y divide-border/30">
