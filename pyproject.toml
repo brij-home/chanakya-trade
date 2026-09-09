@@ -57,7 +57,7 @@ dependencies = [
     # newer requests version, so keep this compatible until either SDK relaxes
     # its constraint.  This also makes a clean `pip install -e '.[dev]'`
     # deterministic rather than invoking lengthy resolver backtracking.
-    "exa-py==1.8.9",
+    "exa-py==2.20.0",
     "tavily-python>=0.3.0",
     # ── Web ──────────────────────────────────────────────────────────
     "fastapi>=0.115.0",
