@@ -749,8 +749,15 @@ def render_precursor_alert(data: dict[str, Any], in_market: bool = True) -> str:
         else "DO NOT CHASE if gaps > 1.8%"
     )
 
+    if not in_market:
+        header_line = f"🌙 <b>[POST-MARKET EOD WATCHLIST] PRECURSOR RADAR [{seg}]</b>"
+        off_note = "\n\n⏸️ <i>Market is closed. Setup calibrated for tomorrow's opening gameplan.</i>"
+    else:
+        header_line = f"{icon} <b>CHANAKYA HIGH-CONVICTION PRECURSOR RADAR [{seg}]</b>"
+        off_note = ""
+
     msg = (
-        f"{icon} <b>CHANAKYA HIGH-CONVICTION PRECURSOR RADAR [{seg}]</b>\n"
+        f"{header_line}\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"<b>{sym} [{seg}]</b> · 🧠 <b>Score: {score}/100</b> ({verdict})\n"
         f"🎯 <b>Action: BUY</b> @ <code>{entry_range}</code> (Ref: ₹{ltp:,.2f})\n"
@@ -761,6 +768,7 @@ def render_precursor_alert(data: dict[str, Any], in_market: bool = True) -> str:
         f"🚫 <b>{no_chase}</b>\n"
         f"📊 <b>DNA:</b> {factors_str}\n"
         f"⚡ <i>Chanakya Institutional Momentum Intelligence</i>"
+        f"{off_note}"
     )
     return msg
 
@@ -791,8 +799,15 @@ def render_asymmetric_alert(data: dict[str, Any], in_market: bool = True) -> str
         else ""
     )
 
+    if not in_market:
+        header_line = f"🌙 <b>[POST-MARKET EOD WATCHLIST] ASYMMETRIC OPPORTUNITY [1:{rr} R:R]</b>"
+        off_note = "\n\n⏸️ <i>Market is closed. Setup calibrated for tomorrow's opening gameplan.</i>"
+    else:
+        header_line = f"🎯 <b>{env_tag} CHANAKYA ASYMMETRIC OPPORTUNITY [1:{rr} R:R]</b>"
+        off_note = ""
+
     msg = (
-        f"🎯 <b>{env_tag} CHANAKYA ASYMMETRIC OPPORTUNITY [1:{rr} R:R]</b>\n"
+        f"{header_line}\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"<b>{sym} [{seg}]</b> · 🧠 <b>Score: {score}/100</b> ({verdict})\n"
         f"🎯 <b>Action: BUY</b> @ <code>{entry_range}</code> (Ref: ₹{ltp:,.2f})\n"
@@ -802,6 +817,7 @@ def render_asymmetric_alert(data: dict[str, Any], in_market: bool = True) -> str
         f"• <b>Risk : Reward:</b> <b>1:{rr} R:R</b>\n"
         f"📊 <b>Confluence:</b> {conf_str}\n"
         f"⚡ <i>Chanakya Low-Risk : High-Reward Radar</i>"
+        f"{off_note}"
     )
     return msg
 
@@ -971,7 +987,7 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
     if is_test:
         tg_header = "🧪 <b>[TEST SETUP]</b>"
     elif not in_market:
-        tg_header = "🌙 <b>[POST-MARKET EOD SETUP]</b>"
+        tg_header = "🌙 <b>[POST-MARKET EOD WATCHLIST]</b>"
     else:
         if getattr(alert, "exchange", "") == "MCX" or getattr(alert, "alert_type", "") == "COMMODITY_MOMENTUM":
             tg_header = "🛢️ <b>[REAL / LIVE MCX COMMODITY SIGNAL]</b>"
@@ -990,7 +1006,7 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
             tg_header = "🟢 <b>[REAL / LIVE BREAKOUT IGNITED]</b>"
 
     off_note = (
-        "\n\n⏸️ <i>Market is currently closed. Setup detected from post-market settlement/EOD data.</i>"
+        "\n\n⏸️ <i>Market is closed. Setup calibrated for tomorrow's opening gameplan.</i>"
         if not in_market and not is_test
         else ""
     )

@@ -2329,10 +2329,26 @@ class AutoAlertEngine:
                 or not getattr(alert, "is_live", True)
                 or alert.alert_id.startswith("test-")
                 or alert.alert_id.startswith("mock-")
-                or os.environ.get("CHANAKYA_TESTING") == "1"
-                or os.environ.get("DEPLOY_MODE") == "test"
             ):
                 return
+
+            # OPTION B: Curated Post-Market Telegram Discipline
+            # When the market is closed for this asset's exchange (e.g. NSE/BSE/NFO outside 09:15-15:30 IST):
+            # 1. Strictly suppress intraday fast-derivatives / scalps (Gamma Blasts, Options Momentum, Intraday Sparks, Circuit Proximity).
+            # 2. Only permit high-conviction positional swing setups (Precursor Radar, Asymmetric Opportunity, Squeeze) with confidence >= 90%.
+            # 3. Existing position lifecycle updates (Invalidations, Targets, Trailing stops) remain permitted.
+            is_milestone = alert.is_invalidated or alert.stage == "INVALIDATED" or is_t1 or is_target or is_trail
+            if not in_market and not is_milestone:
+                if alert.alert_type in (
+                    "GAMMA_BLAST",
+                    "OPTIONS_MOMENTUM",
+                    "INTRADAY_MOVER_SPARK",
+                    "INTRADAY_BREAKDOWN_SPARK",
+                    "CIRCUIT_WARNING",
+                ):
+                    return
+                if alert.confidence < 90:
+                    return
 
             from engine.alerts import _telegram_notify
 
@@ -3457,6 +3473,21 @@ class AutoAlertEngine:
         results.extend(self.scan_asymmetric_opportunities())
         return results
 
+    def scan_post_market_digest(self) -> list[AutoAlert]:
+        """
+        Runs curated EOD post-market watchlist scans (0-token deterministic screening).
+        Surfaces high-conviction positional swing setups for the next trading session:
+          - Precursor Radars (VCP, Stage 2 breakouts, delivery accumulation)
+          - Asymmetric Opportunities (1:3+ R:R at structural support)
+          - Squeeze Breakouts (Daily TTM Squeeze coiling)
+        Excludes closed intraday options chains and circuit proximity checks.
+        """
+        results: list[AutoAlert] = []
+        results.extend(self.scan_precursor_radars())
+        results.extend(self.scan_asymmetric_opportunities())
+        results.extend(self.scan_squeeze_breakouts())
+        return results
+
     def scan_commodities_now(self) -> list[AutoAlert]:
         """
         Scans liquid MCX commodities (Crude Oil, Gold, Silver, Natural Gas, Copper)
@@ -3786,9 +3817,9 @@ class AutoAlertEngine:
         if session["commodity"]:
             results.extend(self.scan_commodities_now())
 
-        # If completely outside all market hours, run diagnostic equity scan
+        # If completely outside all market hours, run curated post-market swing digest
         if not (session["equity_nfo"] or session["currency"] or session["commodity"]):
-            results.extend(self.scan_equity_nfo_now())
+            results.extend(self.scan_post_market_digest())
 
         return results
 

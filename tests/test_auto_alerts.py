@@ -962,7 +962,7 @@ def test_early_warning_coiling_alert_header_and_plan_formatting(monkeypatch):
 
     engine = AutoAlertEngine()
     alert = AutoAlert(
-        alert_id="test-coiling-header",
+        alert_id="coiling-header-1",
         alert_type="PATTERN_COILING",
         stage="EARLY_WARNING",
         symbol="MANKIND",
@@ -1007,7 +1007,7 @@ def test_bearish_alert_header_and_plan_formatting(monkeypatch):
 
     engine = AutoAlertEngine()
     alert = AutoAlert(
-        alert_id="test-short-ignited",
+        alert_id="short-ignited-1",
         alert_type="SMC_SWEEP",
         stage="IGNITED",
         symbol="INFY",
@@ -1044,7 +1044,7 @@ def test_options_alert_uses_options_plan_directly(monkeypatch):
 
     engine = AutoAlertEngine()
     alert = AutoAlert(
-        alert_id="test-gamma-plan",
+        alert_id="gamma-plan-1",
         alert_type="GAMMA_BLAST",
         stage="IGNITED",
         symbol="NIFTY",
