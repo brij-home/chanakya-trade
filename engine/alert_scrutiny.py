@@ -97,15 +97,21 @@ class AlertScrutinyAuditor:
         if ltp <= 0 or sl <= 0 or t1 <= 0:
             return False, f"Incomplete price levels (LTP={ltp}, SL={sl}, T1={t1})", flags
 
-        # Detect whether levels represent an option contract (Long CE or Long PE premium)
-        is_option_buyer = bool(
-            getattr(alert, "option_type", None)
-            or getattr(alert, "strike", None)
-            or getattr(alert, "option_premium", None)
+        # Detect whether levels represent an option contract premium (Long CE or Long PE premium)
+        # Note: If direction is BEARISH on an underlying stock/futures, alert levels (LTP, SL, T1)
+        # are underlying prices (where SL > LTP > T1), even if the alert suggests a PE option!
+        # Alert levels represent option premium ONLY when it is an options alert type
+        # or when LTP directly matches the option premium.
+        is_option_premium_levels = bool(
+            getattr(alert, "alert_type", "") in ("OPTIONS_MOMENTUM", "GAMMA_BLAST")
+            or (
+                getattr(alert, "option_premium", None) is not None
+                and abs(ltp - float(alert.option_premium)) < 0.05
+            )
         )
 
         # 2. Geometric Level Coherence
-        if is_option_buyer or direction == "BULLISH":
+        if is_option_premium_levels or direction in ("BULLISH", "LONG", "BUY"):
             # For equity long OR long option premium (Call or Put buyer):
             if sl >= ltp:
                 return False, f"Inverted Stop-Loss: SL (Rs.{sl:,.2f}) >= LTP (Rs.{ltp:,.2f})", flags
@@ -117,7 +123,7 @@ class AlertScrutinyAuditor:
                 )
             risk_pts = ltp - sl
             reward_pts = t1 - ltp
-        elif direction == "BEARISH":
+        elif direction in ("BEARISH", "SHORT", "SELL"):
             # For cash equity short or futures short:
             if sl <= ltp:
                 return (
@@ -142,7 +148,7 @@ class AlertScrutinyAuditor:
 
         # 3. Maximum Risk Boundary Check
         # Options allow up to 45% defined risk stop; cash equities/futures capped at max_intraday_risk_pct (8%)
-        max_risk = 45.0 if is_option_buyer else self.max_intraday_risk_pct
+        max_risk = 45.0 if is_option_premium_levels else self.max_intraday_risk_pct
         risk_pct = (risk_pts / ltp) * 100.0 if ltp > 0 else 0.0
         if risk_pct > max_risk:
             return (
@@ -171,15 +177,21 @@ class AlertScrutinyAuditor:
         flags["rr_valid"] = True
 
         # 5. Strict "No Chase" Gate
-        # Disqualify if price has already blown past trigger by >2.0% without retest
+        # Disqualify if price has already blown past trigger by >2.5% without retest
         if trigger > 0 and ltp > 0:
-            if (is_option_buyer or direction == "BULLISH") and ltp > (trigger * 1.025):
+            if (is_option_premium_levels or direction in ("BULLISH", "LONG", "BUY")) and ltp > (
+                trigger * 1.025
+            ):
                 return (
                     False,
                     f"No-Chase Violation: Price already extended {((ltp / trigger) - 1) * 100:.2f}% above trigger",
                     flags,
                 )
-            elif direction == "BEARISH" and not is_option_buyer and ltp < (trigger * 0.975):
+            elif (
+                direction in ("BEARISH", "SHORT", "SELL")
+                and not is_option_premium_levels
+                and ltp < (trigger * 0.975)
+            ):
                 return (
                     False,
                     f"No-Chase Violation: Price already extended {((trigger / ltp) - 1) * 100:.2f}% below trigger",

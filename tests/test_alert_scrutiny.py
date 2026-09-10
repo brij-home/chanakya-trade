@@ -310,3 +310,70 @@ def test_auto_alert_engine_urgent_signal_enrichment():
     assert len(engine._alerts) == 1
     assert urgent_alert.metrics["scrutiny"]["status"] == "QUANT_VERIFIED"
     mock_async.assert_called_once_with(urgent_alert)
+
+
+def test_tier1_bearish_with_option_recommendation(auditor: AlertScrutinyAuditor):
+    """
+    Underlying bearish trade (e.g. Dixon breakdown) with recommended Put option metadata
+    must NOT be rejected as an inverted stop-loss.
+    LTP=13500, SL=13650 (above LTP), T1=13200 (below LTP), strike=13500, option_type=PE, option_premium=450.
+    """
+    alert = AutoAlert(
+        alert_id="spark-bear-dixon",
+        alert_type="INTRADAY_BREAKDOWN_SPARK",
+        stage="IGNITED",
+        symbol="NSE:DIXON",
+        exchange="NSE",
+        direction="BEARISH",
+        headline="Dixon Breakdown Spark",
+        summary="Lost VWAP with 2.5x RVOL",
+        ltp=13500.0,
+        trigger_level=13500.0,
+        stop_loss=13650.0,  # 150 pts risk (1.11%)
+        target_level=13200.0,  # 300 pts reward (1:2.0 R:R)
+        strike=13500.0,
+        option_type="PE",
+        option_premium=450.0,
+        is_live=True,
+        environment="LIVE",
+    )
+    passed, reason, flags = auditor.verify_tier1_sanity(alert)
+    assert passed is True, f"Failed Tier-1 sanity unexpectedly: {reason}"
+    assert reason == ""
+    assert flags["level_coherence"] is True
+    assert flags["risk_within_bounds"] is True
+    assert flags["rr_valid"] is True
+    assert flags["no_chase"] is True
+
+
+def test_tier1_options_momentum_put_buyer(auditor: AlertScrutinyAuditor):
+    """
+    Buying an option (even a Put) represents long option premium where SL < LTP < T1.
+    LTP=450.0, SL=337.5 (below LTP), T1=675.0 (above LTP).
+    """
+    alert = AutoAlert(
+        alert_id="opt-mom-put",
+        alert_type="OPTIONS_MOMENTUM",
+        stage="IGNITED",
+        symbol="NSE:DIXON",
+        exchange="NFO",
+        direction="BEARISH",
+        headline="Dixon 13500 PE Institutional Surge",
+        summary="Heavy Put buying",
+        ltp=450.0,
+        trigger_level=450.0,
+        stop_loss=337.5,  # 25% risk stop
+        target_level=675.0,  # 2x risk reward
+        strike=13500.0,
+        option_type="PE",
+        option_premium=450.0,
+        is_live=True,
+        environment="LIVE",
+    )
+    passed, reason, flags = auditor.verify_tier1_sanity(alert)
+    assert passed is True, f"Failed Tier-1 sanity unexpectedly: {reason}"
+    assert reason == ""
+    assert flags["level_coherence"] is True
+    assert flags["risk_within_bounds"] is True
+    assert flags["rr_valid"] is True
+    assert flags["no_chase"] is True
