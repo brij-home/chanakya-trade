@@ -1636,7 +1636,7 @@ def test_gamma_blast_option_rr_and_sl_floor():
     assert "risk_reward" in plan
     # Option R:R must be formatted as 1:X.X (not inverted or spot-derived like 1.32:1)
     assert plan["risk_reward"].startswith("1:")
-    assert ":1" not in plan["risk_reward"]  # Eliminates misleading 1.32:1 spot bug
+    assert not plan["risk_reward"].endswith(":1")  # Eliminates misleading 1.32:1 spot bug
 
     # Verify option execution plan has disciplined capital stop loss
     opt_plan = plan.get("option_plan")
@@ -2001,3 +2001,89 @@ def test_auto_alert_directional_whiplash_guard():
         assert engine._alerts[0].is_active is True
         # The older superseded bullish alert is purged so dead corpses don't clutter active alerts
         assert all(a.alert_id != "whiplash-bull-1" for a in engine._alerts)
+
+
+@pytest.mark.anyio
+async def test_send_alert_to_telegram_endpoint(monkeypatch, tmp_path):
+    """Verify POST /api/alerts/auto/send-telegram renders message and dispatches via send_push."""
+    from web.api import send_alert_to_telegram
+    from engine.auto_alert_engine import AutoAlert, auto_alert_engine
+    from fastapi import HTTPException
+
+    # Create synthetic alert
+    test_alert = AutoAlert(
+        alert_id="tg-test-alert-001",
+        alert_type="GAMMA_BLAST",
+        stage="IGNITED",
+        symbol="NIFTY",
+        exchange="NFO",
+        direction="BULLISH",
+        headline="CALL GAMMA BLAST IGNITED: NIFTY 24800 CE",
+        summary="Heavy call OI unwinding above VWAP",
+        ltp=185.0,
+        trigger_level=24800.0,
+        target_level=320.0,
+        stop_loss=130.0,
+        strike=24800.0,
+        option_type="CE",
+        contract_symbol="NIFTY24800CE",
+        expiry_date="2026-09-18",
+        confidence=88,
+    )
+
+    monkeypatch.setattr(auto_alert_engine, "_load", lambda: None)
+    with auto_alert_engine._lock:
+        auto_alert_engine._alerts.insert(0, test_alert)
+
+    # 1. Missing alert_id -> 400
+    with pytest.raises(HTTPException) as exc_info:
+        await send_alert_to_telegram({})
+    assert exc_info.value.status_code == 400
+
+    # 2. Non-existent alert_id -> 404
+    with pytest.raises(HTTPException) as exc_info:
+        await send_alert_to_telegram({"alert_id": "nonexistent-alert-id"})
+    assert exc_info.value.status_code == 404
+
+    # 3. Successful dispatch
+    dispatched_msgs = []
+
+    def mock_send_push(msg, parse_mode="HTML", bypass_dedup=True, chat_id=None):
+        dispatched_msgs.append((msg, parse_mode, bypass_dedup, chat_id))
+        return True
+
+    monkeypatch.setattr("bot.telegram_bot.send_push", mock_send_push)
+
+    res = await send_alert_to_telegram({"alert_id": "tg-test-alert-001"})
+    assert res["status"] == "ok"
+    assert res["alert_id"] == "tg-test-alert-001"
+    assert "message_preview" in res
+    assert len(dispatched_msgs) == 1
+    msg, parse_mode, bypass_dedup, target_chat = dispatched_msgs[0]
+    assert "NIFTY" in msg
+    assert "24800" in msg
+    assert parse_mode == "HTML"
+    assert bypass_dedup is True
+    assert target_chat is None
+
+    # Test custom channel/group forwarding
+    res2 = await send_alert_to_telegram({"alert_id": "tg-test-alert-001", "chat_id": "@chanakya_channel"})
+    assert res2["status"] == "ok"
+    assert len(dispatched_msgs) == 2
+    assert dispatched_msgs[1][3] == "@chanakya_channel"
+
+    # Test destinations endpoint
+    from web.api import get_telegram_destinations_api
+    dest_res = await get_telegram_destinations_api()
+    assert dest_res["status"] == "ok"
+    assert "default_chat_id" in dest_res["data"]
+
+    # 4. Bot unconfigured -> 503
+    def mock_fail_push(*args, **kwargs):
+        raise RuntimeError("TELEGRAM_BOT_TOKEN not configured")
+
+    monkeypatch.setattr("bot.telegram_bot.send_push", mock_fail_push)
+    with pytest.raises(HTTPException) as exc_info:
+        await send_alert_to_telegram({"alert_id": "tg-test-alert-001"})
+    assert exc_info.value.status_code == 503
+

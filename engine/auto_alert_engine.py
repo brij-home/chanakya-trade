@@ -116,10 +116,30 @@ class AutoAlert:
     underlying_spot: Optional[float] = None
     option_premium: Optional[float] = None
     market_status: str = "SESSION_CLOSED"  # "LIVE" | "PRE_MARKET" | "SESSION_CLOSED"
+    lot_size: Optional[int] = None  # Contract market lot size (SEBI 2026 active)
 
     def __post_init__(self) -> None:
         if not self.created_at:
             self.created_at = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
+        if self.lot_size is None:
+            if self.metrics and "lot_size" in self.metrics and self.metrics["lot_size"]:
+                try:
+                    self.lot_size = int(self.metrics["lot_size"])
+                except (ValueError, TypeError):
+                    pass
+            if self.lot_size is None:
+                from market.instruments import STANDARD_LOT_SIZES
+
+                clean = (
+                    (self.symbol or "")
+                    .replace("NSE:", "")
+                    .replace("NFO:", "")
+                    .replace("BSE:", "")
+                    .replace("MCX:", "")
+                    .strip()
+                    .upper()
+                )
+                self.lot_size = STANDARD_LOT_SIZES.get(clean)
 
     @property
     def is_expired(self) -> bool:

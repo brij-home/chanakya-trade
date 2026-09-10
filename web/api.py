@@ -2856,6 +2856,77 @@ async def rescrutinize_auto_alert(payload: dict):
     return {"status": "ok", "data": target.to_dict(), "scrutiny": scrutiny.to_dict()}
 
 
+
+@app.get("/api/alerts/auto/telegram-destinations", tags=["Alerts"])
+async def get_telegram_destinations_api():
+    """
+    Get available Telegram destinations (default private chat ID, channel ID if configured).
+    """
+    from bot.telegram_bot import get_telegram_destinations
+
+    return {"status": "ok", "data": get_telegram_destinations()}
+
+
+@app.post("/api/alerts/auto/send-telegram", tags=["Alerts"])
+async def send_alert_to_telegram(payload: dict):
+    """
+    Dispatch a specific alert to the configured Telegram chat, group, or channel.
+
+    Runs the canonical render_auto_alert() template to build the message,
+    then sends via send_push() (non-blocking, HTML parse mode).
+
+    Accepts optional `chat_id` in payload to route to channels/groups.
+    Returns the rendered message preview so the UI can show what was sent.
+    Fails gracefully with 503 if Telegram bot is not configured.
+    """
+    from engine.auto_alert_engine import auto_alert_engine
+    from bot.alert_templates import render_auto_alert
+    from datetime import datetime, timezone, timedelta
+
+    alert_id = payload.get("alert_id")
+    chat_id = payload.get("chat_id")
+    if not alert_id:
+        raise HTTPException(status_code=400, detail="Missing alert_id")
+
+    alerts = auto_alert_engine.get_alerts(limit=500, view_mode="ALL")
+    target = next((a for a in alerts if a.alert_id == alert_id), None)
+    if not target:
+        raise HTTPException(status_code=404, detail=f"Alert {alert_id} not found")
+
+    # Determine if market is live (09:15–15:30 IST weekdays)
+    IST = timezone(timedelta(hours=5, minutes=30))
+    now = datetime.now(IST)
+    is_weekday = now.weekday() < 5
+    market_open = now.replace(hour=9, minute=15, second=0, microsecond=0)
+    market_close = now.replace(hour=15, minute=30, second=0, microsecond=0)
+    in_market = is_weekday and market_open <= now <= market_close
+
+    try:
+        rendered_msg = render_auto_alert(target, in_market=in_market)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to render alert message: {e}")
+
+    try:
+        from bot.telegram_bot import send_push
+        send_push(rendered_msg, parse_mode="HTML", bypass_dedup=True, chat_id=chat_id)
+    except RuntimeError as e:
+        # Telegram bot token not configured
+        raise HTTPException(status_code=503, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Telegram send failed: {e}")
+
+    # Truncate preview for the response
+    preview = rendered_msg[:800] if len(rendered_msg) > 800 else rendered_msg
+    return {
+        "status": "ok",
+        "alert_id": alert_id,
+        "chat_id": chat_id or "DEFAULT_CHAT",
+        "message_preview": preview,
+        "in_market": in_market,
+        "sent_at": now.strftime("%Y-%m-%d %H:%M:%S IST"),
+    }
+
+
 # ── Mover Autopsy & Precursor Radar Endpoints ────────────────
 
 

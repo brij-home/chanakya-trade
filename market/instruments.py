@@ -23,19 +23,20 @@ Segment = Literal["EQUITY", "FNO", "COMMODITY", "CURRENCY", "INDEX"]
 InstrumentType = Literal["EQUITY", "INDEX", "FUTURE", "OPTION", "ETF", "COMMODITY"]
 SessionState = Literal["PRE_OPEN", "OPEN", "POST_CLOSE", "CLOSED"]
 
-# Standard Indian F&O & Commodity Lot Sizes
+# Standard Indian F&O & Commodity Lot Sizes (SEBI Mandated Contract Values - 2026 Active)
 STANDARD_LOT_SIZES: dict[str, int] = {
-    # Benchmark & Sectoral Indices
-    "NIFTY": 25,
-    "NIFTY 50": 25,
-    "BANKNIFTY": 15,
-    "NIFTY BANK": 15,
-    "FINNIFTY": 25,
-    "NIFTY FINANCIAL SERVICES": 25,
-    "MIDCPNIFTY": 50,
-    "NIFTY MID SELECT": 50,
-    "SENSEX": 10,
-    "BANKEX": 15,
+    # Benchmark & Sectoral Indices (NSE/BSE 2026 active specifications)
+    "NIFTY": 65,
+    "NIFTY 50": 65,
+    "BANKNIFTY": 30,
+    "NIFTY BANK": 30,
+    "FINNIFTY": 60,
+    "NIFTY FINANCIAL SERVICES": 60,
+    "MIDCPNIFTY": 120,
+    "NIFTY MID SELECT": 120,
+    "NIFTYNXT50": 25,
+    "SENSEX": 20,
+    "BANKEX": 30,
     # MCX Commodities
     "CRUDEOIL": 100,
     "NATURALGAS": 1250,

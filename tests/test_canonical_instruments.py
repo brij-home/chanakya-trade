@@ -32,16 +32,16 @@ def test_resolve_indices():
     nifty = resolve_canonical_instrument("NIFTY")
     assert nifty.instrument_id == "NSE:NIFTY:INDEX"
     assert nifty.segment == "INDEX"
-    assert nifty.lot_size == 25
+    assert nifty.lot_size == 65
     assert nifty.is_tradable is False  # Spot index is not directly tradable
 
     banknifty = resolve_canonical_instrument("BANKNIFTY")
     assert banknifty.instrument_id == "NSE:BANKNIFTY:INDEX"
-    assert banknifty.lot_size == 15
+    assert banknifty.lot_size == 30
 
     sensex = resolve_canonical_instrument("SENSEX")
     assert sensex.instrument_id == "BSE:SENSEX:INDEX"
-    assert sensex.lot_size == 10
+    assert sensex.lot_size == 20
 
 
 def test_resolve_mcx_commodities():

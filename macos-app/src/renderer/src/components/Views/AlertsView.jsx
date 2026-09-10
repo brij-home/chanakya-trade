@@ -189,12 +189,652 @@ const AUTO_TYPE_STYLE = {
   },
 }
 
+// ── Lot size lookup for NSE/BSE index options & MCX (2026 Active - SEBI 15L-20L Mandate) ──
+const INDEX_LOT_SIZES = {
+  // NSE Index Options (2026 Active Re-baselined Specifications)
+  NIFTY: 65,
+  'NIFTY 50': 65,
+  BANKNIFTY: 30,
+  'NIFTY BANK': 30,
+  FINNIFTY: 60,
+  'NIFTY FINANCIAL SERVICES': 60,
+  MIDCPNIFTY: 120,
+  'NIFTY MID SELECT': 120,
+  NIFTYNXT50: 25,
+  // BSE Index Options
+  SENSEX: 20,
+  BANKEX: 30,
+  // MCX Commodities
+  CRUDEOIL: 100,
+  NATURALGAS: 1250,
+  GOLD: 100,
+  GOLDM: 10,
+  SILVER: 30,
+  SILVERM: 5,
+  COPPER: 2500,
+  ZINC: 5000,
+  ALUMINIUM: 5000,
+  // Currency Derivatives
+  USDINR: 1000,
+  EURINR: 1000,
+  GBPINR: 1000,
+  JPYINR: 1000,
+}
+
+// ── Conviction emoji shorthand ─────────────────────────────────────────────
+function convictionEmoji(score) {
+  const n = Number(score || 0)
+  if (n >= 90) return '🔥'
+  if (n >= 80) return '💪'
+  if (n >= 70) return '👍'
+  return '⚠️'
+}
+
+// ── Staleness badge ────────────────────────────────────────────────────────
+function getStaleness(createdAt) {
+  if (!createdAt) return null
+  try {
+    const clean = createdAt.replace(' IST', '').trim()
+    const d = new Date(clean)
+    if (isNaN(d.getTime())) return null
+    const mins = Math.round((Date.now() - d.getTime()) / 60000)
+    if (mins < 90) return null // fresh
+    const hrs = Math.round(mins / 60)
+    return hrs >= 1 ? `${hrs}h old` : `${mins}m old`
+  } catch (_) { return null }
+}
+
+// ── R:R mini visual bar ───────────────────────────────────────────────────
+function RRMiniBar({ sl, entry, t1, t2, t3, isUpward = true }) {
+  if (!sl || !entry || !t1) return null
+  const totalRange = Math.abs((t3 || t2 || t1) - sl)
+  if (totalRange <= 0) return null
+  const slW = Math.max(4, Math.round((Math.abs(entry - sl) / totalRange) * 100))
+  const t1W = Math.max(4, Math.round((Math.abs(t1 - entry) / totalRange) * 100))
+  const t2W = t2 ? Math.max(4, Math.round((Math.abs(t2 - t1) / totalRange) * 100)) : 0
+  const t3W = t3 ? Math.max(4, Math.round((Math.abs((t3 || t2) - (t2 || t1)) / totalRange) * 100)) : 0
+  const rem = 100 - slW - t1W - t2W - t3W
+  return (
+    <div className="flex h-1 rounded-full overflow-hidden w-full" title={`SL→T1→T2→T3 R:R breakdown`}>
+      <div style={{ width: `${slW}%` }} className="bg-rose-500/70" />
+      <div style={{ width: `${t1W + Math.max(0, rem)}%` }} className="bg-emerald-500/60" />
+      {t2W > 0 && <div style={{ width: `${t2W}%` }} className="bg-cyan-500/60" />}
+      {t3W > 0 && <div style={{ width: `${t3W}%` }} className="bg-purple-500/50" />}
+    </div>
+  )
+}
+
+// ── Milestone progress dots ────────────────────────────────────────────────
+function MilestoneDots({ targetStatus, stage }) {
+  const t1Hit = stage === 'T1_ACHIEVED' || targetStatus === 'T1_ACHIEVED' || targetStatus === 'T2_ACHIEVED' || targetStatus === 'TARGET_ACHIEVED'
+  const t2Hit = targetStatus === 'T2_ACHIEVED' || targetStatus === 'TARGET_ACHIEVED'
+  const t3Hit = targetStatus === 'TARGET_ACHIEVED'
+  return (
+    <span className="flex items-center gap-0.5 font-mono text-[9px]" title="T1 → T2 → T3 milestones">
+      <span className={t1Hit ? 'text-emerald-400' : 'text-zinc-600'}>●</span>
+      <span className={t2Hit ? 'text-cyan-400' : 'text-zinc-600'}>●</span>
+      <span className={t3Hit ? 'text-purple-300' : 'text-zinc-600'}>●</span>
+    </span>
+  )
+}
+
+// ── Institutional terminal chime (Web Audio API Synthesizer) ─────────────
+function playTerminalChime(stage = 'IGNITED') {
+  try {
+    const AudioCtx = window.AudioContext || window.webkitAudioContext
+    if (!AudioCtx) return
+    const ctx = new AudioCtx()
+    if (ctx.state === 'suspended') {
+      ctx.resume().catch(() => {})
+    }
+    const now = ctx.currentTime
+    const osc = ctx.createOscillator()
+    const gain = ctx.createGain()
+    osc.connect(gain)
+    gain.connect(ctx.destination)
+
+    if (stage === 'IGNITED') {
+      // Harmonic institutional double ping (880Hz -> 1320Hz, A5 -> E6)
+      osc.type = 'sine'
+      osc.frequency.setValueAtTime(880, now)
+      osc.frequency.exponentialRampToValueAtTime(1320, now + 0.12)
+      gain.gain.setValueAtTime(0.08, now)
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.35)
+      osc.start(now)
+      osc.stop(now + 0.35)
+    } else {
+      // Crisp single ping (660Hz, E5)
+      osc.type = 'sine'
+      osc.frequency.setValueAtTime(660, now)
+      gain.gain.setValueAtTime(0.05, now)
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.25)
+      osc.start(now)
+      osc.stop(now + 0.25)
+    }
+  } catch (_) {}
+}
+
+/**
+ * AlertCompactRow — Bloomberg-density single-card for rapid scanning.
+ * Packs Stage · Contract · Live/Test · Direction · Type · Lot Size · Spot · Premium
+ * SL · Entry · T1/T2/T3 · Conviction · Reason · Timestamp · Telegram CTA · 1-Click Trade
+ * into 2 ultra-compact lines, collapsible to expanded full card on click.
+ */
+const AlertCompactRow = memo(function AlertCompactRow({ alert, onSendTelegram, onTrade, onExpand, isExpanded }) {
+  const cleanSym = (alert.symbol || '').replace(/^(NSE|BSE|MCX|NFO|CDS):/, '').trim().toUpperCase()
+  const style = AUTO_TYPE_STYLE[alert.alert_type] || AUTO_TYPE_STYLE.GAMMA_BLAST
+  const isBull = alert.direction === 'BULLISH'
+  const isTest = alert.environment === 'TEST' || alert.is_live === false
+  const isEarly = alert.stage === 'EARLY_WARNING'
+  const isIgnited = alert.stage === 'IGNITED'
+  const isInvalidated = alert.is_invalidated || alert.stage === 'INVALIDATED'
+  const isT1 = alert.stage === 'T1_ACHIEVED' || alert.target_status === 'T1_ACHIEVED'
+  const isFinalTarget = alert.stage === 'TARGET_ACHIEVED' || alert.target_status === 'TARGET_ACHIEVED'
+  const isTrail = alert.stage === 'TRAILING_UPDATE'
+
+  const optType = alert.option_type || (alert.contract_symbol?.endsWith('PE') ? 'PE' : alert.contract_symbol?.endsWith('CE') ? 'CE' : null)
+  const strikeNum = alert.strike ? Number(String(alert.strike).replace(/[^0-9.-]/g, '')) : null
+  const isFuture = Boolean(alert.contract_symbol?.toUpperCase().includes('FUT') || alert.derivative_type === 'FUT')
+  const isDerivative = Boolean(isFuture || optType || strikeNum || alert.contract_symbol || alert.expiry_date || alert.alert_type === 'GAMMA_BLAST')
+
+  // Lot size (Dynamic from backend/broker master > metrics > 2026 lookup table)
+  const lotSize = isDerivative ? (alert.lot_size || alert.metrics?.lot_size || INDEX_LOT_SIZES[cleanSym] || null) : null
+
+  // Spot & premium
+  const spotNum = alert.underlying_spot ? Number(alert.underlying_spot) : null
+  const premiumNum = alert.option_premium ? Number(alert.option_premium) : (alert.ltp ? Number(alert.ltp) : null)
+  const ltpNum = alert.ltp ? Number(String(alert.ltp).replace(/[^0-9.-]/g, '')) : null
+
+  // Entry / SL / Targets from computation helpers
+  const plan = alert.actionable_plan || {}
+  const tradePlan = plan.trade_plan || {}
+  const optPlan = plan.option_plan || null
+  const slNum = optPlan?.sl_premium ? Number(optPlan.sl_premium) : (tradePlan.invalidation_stop ? Number(tradePlan.invalidation_stop) : (alert.stop_loss ? Number(alert.stop_loss) : null))
+  const entryNum = isDerivative ? (premiumNum || ltpNum) : (tradePlan.entry_price ? Number(tradePlan.entry_price) : (alert.trigger_level ? Number(alert.trigger_level) : ltpNum))
+  const t1Num = optPlan?.t1_premium ? Number(optPlan.t1_premium) : (tradePlan.target_1 ? Number(tradePlan.target_1) : (alert.target_level ? Number(alert.target_level) : null))
+  const t2Num = optPlan?.t2_premium ? Number(optPlan.t2_premium) : (tradePlan.target_2 ? Number(tradePlan.target_2) : null)
+  const t3Num = optPlan?.t3_premium ? Number(optPlan.t3_premium) : (tradePlan.target_3 ? Number(tradePlan.target_3) : null)
+
+  // Expiry compact label
+  const expiryShort = (() => {
+    if (!alert.expiry_date) return null
+    try {
+      const parts = alert.expiry_date.trim().split(/[-/]/)
+      if (parts.length === 3) {
+        const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+        const d = parts[0].length === 4
+          ? new Date(Number(parts[0]), Number(parts[1]) - 1, Number(parts[2]))
+          : new Date(Number(parts[2]), Number(parts[1]) - 1, Number(parts[0]))
+        const dte = Math.round((d.getTime() - Date.now()) / 86400000)
+        return `${d.getDate()}-${months[d.getMonth()]}${dte >= 0 ? ` (${dte}d)` : ''}`
+      }
+    } catch (_) {}
+    return alert.expiry_date
+  })()
+
+  const staleness = getStaleness(alert.created_at)
+  const timeShort = (() => {
+    if (!alert.created_at) return ''
+    try {
+      const clean = alert.created_at.replace(' IST', '').trim()
+      const d = new Date(clean)
+      if (isNaN(d.getTime())) return alert.created_at.slice(-8, -4)
+      return d.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: false })
+    } catch (_) { return '' }
+  })()
+
+  const conviction = Number(alert.confidence || alert.metrics?.scrutiny?.score || 75)
+  const convBars = Math.round(conviction / 10)
+  const reasonShort = (alert.summary || alert.headline || '').slice(0, 40)
+
+  // Stage pill
+  const stagePill = isInvalidated ? { label: '❌ INVALID', cls: 'bg-rose-500/20 text-rose-300 border-rose-500/40' }
+    : isFinalTarget ? { label: '🏁 T-HIT', cls: 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40' }
+    : isT1 ? { label: '🎯 T1', cls: 'bg-cyan-500/20 text-cyan-300 border-cyan-500/40' }
+    : isTrail ? { label: '📈 TRAIL', cls: 'bg-blue-500/20 text-blue-300 border-blue-500/40' }
+    : isEarly ? { label: '⏳ EARLY', cls: 'bg-amber-500/15 text-amber-400 border-amber-500/30' }
+    : isIgnited ? { label: '🔥 IGNITED', cls: 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30 animate-pulse' }
+    : { label: '🟢 ACTIVE', cls: 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20' }
+
+  const fmt = (n, dec = 0) => n != null && !isNaN(n) ? Number(n).toLocaleString('en-IN', { minimumFractionDigits: dec, maximumFractionDigits: dec }) : '—'
+  const fmtP = (n) => n != null && !isNaN(n) ? Number(n).toLocaleString('en-IN', { minimumFractionDigits: Number(n) < 100 ? 1 : 0, maximumFractionDigits: 1 }) : '—'
+
+  return (
+    <article
+      className={`rounded-xl border px-2.5 py-1.5 cursor-pointer transition-all duration-150 hover:border-gold/40 group ${isInvalidated ? 'opacity-60' : ''}`}
+      style={{
+        background: isExpanded ? 'var(--color-elevated)' : 'var(--color-panel)',
+        borderColor: isExpanded ? style.color + '55' : style.border,
+      }}
+      onClick={() => onExpand()}
+    >
+      {/* ── Row 1: Identity + Direction + Meta badges ───────────────────── */}
+      <div className="flex items-center gap-1.5 min-w-0 flex-wrap">
+        {/* Stage pill */}
+        <span className={`text-[8px] font-black px-1.5 py-0.5 rounded-full border whitespace-nowrap flex-shrink-0 ${stagePill.cls}`}>
+          {stagePill.label}
+        </span>
+
+        {/* Contract identity */}
+        <span className="text-[11px] font-black text-text font-mono whitespace-nowrap">{cleanSym}</span>
+        {strikeNum && !isFuture && (
+          <span className="text-[10px] font-black text-gold font-mono whitespace-nowrap">
+            {Number(strikeNum).toLocaleString('en-IN')}
+          </span>
+        )}
+        {optType && !isFuture && (
+          <span className={`text-[8px] px-1 py-px rounded font-black ${optType === 'CE' ? 'bg-emerald-500/20 text-emerald-300' : 'bg-rose-500/20 text-rose-300'}`}>
+            {optType}
+          </span>
+        )}
+        {isFuture && <span className="text-[8px] px-1 py-px rounded font-black bg-blue-500/20 text-blue-300">FUT</span>}
+        {expiryShort && (
+          <span className="text-[8px] text-muted font-mono whitespace-nowrap">{expiryShort}</span>
+        )}
+
+        {/* Separator */}
+        <span className="text-border/30 text-[9px] hidden sm:inline">│</span>
+
+        {/* Live/Test badge */}
+        {isTest
+          ? <span className="text-[7px] px-1 py-px rounded font-black bg-purple-500/20 text-purple-300 border border-purple-500/30 whitespace-nowrap">🧪 TEST</span>
+          : <span className="text-[7px] px-1 py-px rounded font-black bg-rose-500/20 text-rose-300 border border-rose-500/30 whitespace-nowrap">🔴 LIVE</span>
+        }
+
+        {/* Direction */}
+        <span className={`text-[9px] font-black whitespace-nowrap ${isBull ? 'text-emerald-400' : 'text-rose-400'}`}>
+          {isBull ? '▲' : '▼'} {alert.direction?.slice(0, 4)}
+        </span>
+
+        {/* Alert type chip */}
+        <span
+          className="text-[7px] font-black px-1 py-px rounded whitespace-nowrap hidden sm:inline"
+          style={{ color: style.color, background: style.bg, border: `1px solid ${style.border}` }}
+        >
+          {style.label.replace('GAMMA BLAST', 'Γ-Blast').replace('SQUEEZE BREAKOUT', 'Squeeze').replace('SMC LIQUIDITY', 'SMC').replace('CIRCUIT WARNING', 'Circuit').replace('CONFLUENCE INFLECTION', 'Confluence').replace('OPTIONS MOMENTUM', 'Opt Mom').replace('ASYMMETRIC R:R', 'Asym').replace('PRECURSOR RADAR', 'Precursor').replace('COMMODITY MOMENTUM', 'Commodity').replace('CURRENCY BREAKOUT', 'Currency')}
+        </span>
+
+        {/* Lot size */}
+        {lotSize && (
+          <span
+            className="text-[8px] font-mono font-bold text-sky-400 bg-sky-500/10 px-1.5 py-0.5 rounded border border-sky-500/25 whitespace-nowrap hidden md:inline cursor-help"
+            title={`Market Lot Size: ${lotSize} units/shares per contract`}
+          >
+            Lot: {lotSize}
+          </span>
+        )}
+
+        {/* Milestone dots */}
+        <MilestoneDots targetStatus={alert.target_status} stage={alert.stage} />
+
+        {/* Auto-refresh live dot */}
+        <span className="inline-block w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse flex-shrink-0 ml-auto" title="Live feed active" />
+      </div>
+
+      {/* ── Row 2: Price levels + Conviction + Reason + Time + Telegram ─── */}
+      <div className="flex items-center gap-1.5 min-w-0 flex-wrap mt-0.5">
+        {/* Spot (for derivatives) */}
+        {isDerivative && spotNum && (
+          <span className="text-[9px] font-mono text-zinc-400 whitespace-nowrap">
+            Spot <span className="text-text font-bold">₹{fmt(spotNum)}</span>
+          </span>
+        )}
+
+        {/* Premium / LTP */}
+        {isDerivative ? (
+          premiumNum && (
+            <span className="text-[9px] font-mono whitespace-nowrap">
+              Prem <span className="text-gold font-black">₹{fmtP(premiumNum)}</span>
+            </span>
+          )
+        ) : (
+          ltpNum && (
+            <span className="text-[9px] font-mono whitespace-nowrap">
+              LTP <span className="text-text font-black">₹{fmt(ltpNum)}</span>
+            </span>
+          )
+        )}
+
+        {/* SL */}
+        {slNum && (
+          <span className="text-[9px] font-mono text-rose-400 whitespace-nowrap font-bold">
+            SL ₹{fmtP(slNum)}
+          </span>
+        )}
+
+        {/* Entry trigger */}
+        {entryNum && (
+          <span className="text-[9px] font-mono text-amber-400 whitespace-nowrap font-bold">
+            Entry ₹{fmtP(entryNum)}
+          </span>
+        )}
+
+        {/* Targets */}
+        {t1Num && (
+          <span className="text-[9px] font-mono whitespace-nowrap">
+            <span className="text-emerald-400 font-bold">T1 ₹{fmtP(t1Num)}</span>
+            {t2Num && <span className="text-cyan-400 font-bold"> T2 ₹{fmtP(t2Num)}</span>}
+            {t3Num && <span className="text-purple-300 font-bold"> T3 ₹{fmtP(t3Num)}</span>}
+          </span>
+        )}
+
+        {/* R:R mini bar */}
+        <div className="w-16 flex-shrink-0 hidden sm:block">
+          <RRMiniBar sl={slNum} entry={entryNum} t1={t1Num} t2={t2Num} t3={t3Num} isUpward={isBull || isDerivative} />
+        </div>
+
+        {/* Conviction */}
+        <span className="text-[9px] font-mono whitespace-nowrap" title={`Conviction: ${conviction}`}>
+          {convictionEmoji(conviction)}
+          <span className="text-gold font-bold ml-0.5">{conviction}</span>
+          <span className="text-zinc-600">{'█'.repeat(convBars)}{'░'.repeat(10 - convBars)}</span>
+        </span>
+
+        {/* Reason */}
+        {reasonShort && (
+          <span className="text-[9px] text-zinc-500 truncate min-w-0 flex-1 hidden md:block" title={alert.summary}>
+            {reasonShort}
+          </span>
+        )}
+
+        {/* Staleness */}
+        {staleness && (
+          <span className="text-[8px] font-mono text-amber-400 whitespace-nowrap flex-shrink-0" title="Alert age">
+            ⏱ {staleness}
+          </span>
+        )}
+
+        {/* Timestamp */}
+        {timeShort && (
+          <span
+            className="text-[8px] font-mono text-muted whitespace-nowrap flex-shrink-0 cursor-help"
+            title={`Generated: ${alert.created_at || alert.timestamp || 'N/A'}`}
+          >
+            {timeShort} IST
+          </span>
+        )}
+
+        {/* Copy to clipboard */}
+        <button
+          onClick={(e) => {
+            e.stopPropagation()
+            const txt = [
+              `${cleanSym}${strikeNum ? ' ' + strikeNum : ''}${optType ? optType : ''}${expiryShort ? ' ' + expiryShort : ''}`,
+              isDerivative ? (spotNum ? `Spot ₹${fmt(spotNum)} Prem ₹${fmtP(premiumNum)}` : '') : `LTP ₹${fmt(ltpNum)}`,
+              lotSize ? `Lot ${lotSize}` : '',
+              slNum ? `SL ₹${fmtP(slNum)}` : '',
+              entryNum ? `Entry ₹${fmtP(entryNum)}` : '',
+              t1Num ? `T1 ₹${fmtP(t1Num)}${t2Num ? ' T2 ₹' + fmtP(t2Num) : ''}${t3Num ? ' T3 ₹' + fmtP(t3Num) : ''}` : '',
+              `Conv ${conviction} · ${alert.direction}`,
+            ].filter(Boolean).join(' | ')
+            navigator.clipboard?.writeText(txt).catch(() => {})
+          }}
+          className="btn btn-xs btn-ghost text-[9px] px-1 text-muted hover:text-text border border-border/30 flex-shrink-0"
+          title="Copy alert summary to clipboard"
+        >📋</button>
+
+        {/* Telegram Send */}
+        <button
+          onClick={(e) => { e.stopPropagation(); onSendTelegram(alert) }}
+          className="btn btn-xs text-[9px] px-1.5 font-bold flex-shrink-0 text-sky-300 hover:text-sky-200 bg-sky-500/10 hover:bg-sky-500/20 border border-sky-500/30 hover:border-sky-500/50 transition-all"
+          title="Send to Telegram (due-diligence check)"
+        >↗ TG</button>
+
+        {/* 1-Click Instant Trade */}
+        <button
+          onClick={(e) => {
+            e.stopPropagation()
+            if (onTrade) onTrade(alert)
+          }}
+          className="btn btn-xs text-[9px] px-1.5 font-bold flex-shrink-0 text-emerald-300 hover:text-emerald-200 bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/35 hover:border-emerald-500/60 transition-all"
+          title="1-Click Trade: Open pre-populated Order Ticket"
+        >⚡ Trade</button>
+
+        {/* Expand chevron */}
+        <span className="text-muted text-[9px] flex-shrink-0 transition-transform duration-150" style={{ transform: isExpanded ? 'rotate(180deg)' : 'rotate(0deg)' }}>
+          ▼
+        </span>
+      </div>
+    </article>
+  )
+})
+
+/**
+ * TelegramPreflightModal — Due-diligence gate before Telegram dispatch.
+ * Shows full scrutiny dossier (Logic, Trap, Guidance, Auditor model) +
+ * conviction bar before allowing the user to send.
+ */
+function TelegramPreflightModal({ alert, onConfirm, onCancel, sending, sentOk, sentError, callRef }) {
+  if (!alert) return null
+
+  const scrutiny = alert.metrics?.scrutiny || null
+  const conviction = Number(alert.confidence || scrutiny?.score || 75)
+  const convBars = Math.round(conviction / 10)
+  const optType = alert.option_type || null
+  const strikeNum = alert.strike ? Number(alert.strike) : null
+  const cleanSym = (alert.symbol || '').replace(/^(NSE|BSE|MCX|NFO|CDS):/, '').trim()
+  const contractLabel = alert.contract_symbol || [cleanSym, strikeNum ? Number(strikeNum).toLocaleString('en-IN') : '', optType || ''].filter(Boolean).join(' ')
+
+  const scrutinyStatus = scrutiny?.status || 'QUANT_VERIFIED'
+  const statusColor = scrutinyStatus === 'APPROVED' ? 'text-emerald-400' : scrutinyStatus === 'QUANT_VERIFIED' ? 'text-sky-400' : 'text-amber-400'
+  const statusBg = scrutinyStatus === 'APPROVED' ? 'bg-emerald-500/15 border-emerald-500/30' : scrutinyStatus === 'QUANT_VERIFIED' ? 'bg-sky-500/15 border-sky-500/30' : 'bg-amber-500/15 border-amber-500/30'
+
+  const [destMode, setDestMode] = useState('DEFAULT')
+  const [customChannel, setCustomChannel] = useState(() => {
+    return localStorage.getItem('chanakya_telegram_channel') || ''
+  })
+  const [destInfo, setDestInfo] = useState(null)
+
+  useEffect(() => {
+    let active = true
+    const fetchDest = async () => {
+      try {
+        if (callRef?.current) {
+          const res = await callRef.current('/api/alerts/auto/telegram-destinations')
+          if (active && res?.data) {
+            setDestInfo(res.data)
+            if (res.data.channel_id && !customChannel) {
+              setCustomChannel(res.data.channel_id)
+            }
+          }
+        }
+      } catch (_) {}
+    }
+    fetchDest()
+    return () => { active = false }
+  }, [callRef])
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center p-4"
+      style={{ background: 'rgba(0,0,0,0.7)', backdropFilter: 'blur(8px)' }}
+      onClick={(e) => { if (e.target === e.currentTarget) onCancel() }}
+    >
+      <div className="w-full max-w-md rounded-2xl border border-sky-500/30 bg-elevated shadow-2xl space-y-3 p-4 animate-slide-up-fade">
+        {/* Header */}
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <span className="text-lg">📨</span>
+            <div>
+              <div className="text-sm font-black text-text">Send to Telegram</div>
+              <div className="text-[10px] text-muted font-mono">{contractLabel}</div>
+            </div>
+          </div>
+          <button onClick={onCancel} className="text-muted hover:text-text text-sm font-bold w-6 h-6 flex items-center justify-center">✕</button>
+        </div>
+
+        {/* Scrutiny Status badge */}
+        <div className={`flex items-center gap-2 p-2 rounded-lg border ${statusBg}`}>
+          <span className={`text-[10px] font-black uppercase tracking-wider ${statusColor}`}>
+            {scrutinyStatus === 'APPROVED' ? '🛡️ AI APPROVED' : scrutinyStatus === 'QUANT_VERIFIED' ? '⚡ QUANT VERIFIED' : `⚠️ ${scrutinyStatus}`}
+          </span>
+          {scrutiny?.auditor_model && (
+            <span className="text-[8px] font-mono text-muted ml-auto">{scrutiny.auditor_model}</span>
+          )}
+        </div>
+
+        {/* Conviction bar */}
+        <div className="space-y-1">
+          <div className="flex items-center justify-between text-[10px]">
+            <span className="text-muted font-bold uppercase tracking-wider">Conviction</span>
+            <span className="font-black font-mono text-gold">{convictionEmoji(conviction)} {conviction}/100</span>
+          </div>
+          <div className="w-full h-1.5 rounded-full bg-surface overflow-hidden">
+            <div
+              className="h-full rounded-full bg-gradient-to-r from-amber-500 to-emerald-500 transition-all duration-300"
+              style={{ width: `${conviction}%` }}
+            />
+          </div>
+          <div className="text-[8px] font-mono text-muted text-right">{'█'.repeat(convBars)}{'░'.repeat(10 - convBars)}</div>
+        </div>
+
+        {/* Scrutiny dossier */}
+        {scrutiny?.logic_confirmation && (
+          <div className="p-2 rounded-lg bg-emerald-500/8 border border-emerald-500/25 space-y-0.5">
+            <div className="text-[9px] font-black uppercase tracking-wider text-emerald-400">✅ Logic Confirmation</div>
+            <p className="text-[10px] text-zinc-300 leading-relaxed">{scrutiny.logic_confirmation}</p>
+          </div>
+        )}
+        {scrutiny?.trap_risk_warning && (
+          <div className="p-2 rounded-lg bg-amber-500/8 border border-amber-500/25 space-y-0.5">
+            <div className="text-[9px] font-black uppercase tracking-wider text-amber-400">⚠️ Trap Risk Warning</div>
+            <p className="text-[10px] text-zinc-300 leading-relaxed">{scrutiny.trap_risk_warning}</p>
+          </div>
+        )}
+        {scrutiny?.actionable_guidance && (
+          <div className="p-2 rounded-lg bg-sky-500/8 border border-sky-500/25 space-y-0.5">
+            <div className="text-[9px] font-black uppercase tracking-wider text-sky-400">🎯 Execution Guidance</div>
+            <p className="text-[10px] text-zinc-300 leading-relaxed">{scrutiny.actionable_guidance}</p>
+          </div>
+        )}
+        {!scrutiny && (
+          <div className="p-2 rounded-lg bg-surface border border-border text-[10px] text-zinc-500 text-center">
+            No scrutiny data. Run Re-Scrutinize first for full AI analysis.
+          </div>
+        )}
+
+        {/* Destination Target Selector */}
+        <div className="p-2.5 rounded-xl bg-surface border border-border space-y-1.5">
+          <div className="flex items-center justify-between text-[10px]">
+            <span className="font-bold text-muted uppercase tracking-wider">Destination Target</span>
+            <div className="flex items-center gap-1">
+              <button
+                type="button"
+                onClick={() => setDestMode('DEFAULT')}
+                className={`text-[9px] px-2 py-0.5 rounded font-bold transition-all ${
+                  destMode === 'DEFAULT'
+                    ? 'bg-sky-500/20 text-sky-300 border border-sky-500/40'
+                    : 'text-muted hover:text-text'
+                }`}
+              >
+                🔒 Default Chat
+              </button>
+              <button
+                type="button"
+                onClick={() => setDestMode('CHANNEL')}
+                className={`text-[9px] px-2 py-0.5 rounded font-bold transition-all ${
+                  destMode === 'CHANNEL'
+                    ? 'bg-sky-500/20 text-sky-300 border border-sky-500/40'
+                    : 'text-muted hover:text-text'
+                }`}
+              >
+                📢 Channel / Group
+              </button>
+            </div>
+          </div>
+
+          {destMode === 'DEFAULT' ? (
+            <div className="text-[9px] text-zinc-400 font-mono flex items-center justify-between px-1">
+              <span>Target: <span className="text-text font-bold">
+                {destInfo?.default_chat_id ? `Private Chat (${destInfo.default_chat_id.slice(0, 4)}***)` : 'Configured Telegram Chat'}
+              </span></span>
+              {destInfo && !destInfo.is_configured ? (
+                <span className="text-amber-400 font-bold">⚠️ Unconfigured</span>
+              ) : (
+                <span className="text-emerald-400 font-bold">● Active</span>
+              )}
+            </div>
+          ) : (
+            <div className="space-y-1.5">
+              <div className="flex items-center gap-1.5">
+                <input
+                  type="text"
+                  value={customChannel}
+                  onChange={(e) => {
+                    setCustomChannel(e.target.value)
+                    localStorage.setItem('chanakya_telegram_channel', e.target.value)
+                  }}
+                  placeholder="@my_channel_handle or -100xxxxxxxxxx"
+                  className="flex-1 text-[10px] font-mono py-1 px-2.5 rounded bg-panel border border-border text-text placeholder-zinc-600 focus:outline-none focus:border-sky-500"
+                />
+                {destInfo?.channel_id && destInfo.channel_id !== customChannel && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setCustomChannel(destInfo.channel_id)
+                      localStorage.setItem('chanakya_telegram_channel', destInfo.channel_id)
+                    }}
+                    className="text-[8px] px-1.5 py-1 rounded bg-sky-500/10 text-sky-300 border border-sky-500/25 hover:bg-sky-500/20 whitespace-nowrap"
+                    title="Use channel ID configured in environment"
+                  >
+                    Env Channel
+                  </button>
+                )}
+              </div>
+              <div className="text-[8px] text-zinc-500 px-1">
+                Enter public channel handle (e.g. <code>@chanakya_alerts</code>) or private channel/group ID (-100...)
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Alert summary */}
+        <div className="text-[10px] text-zinc-500 p-2 rounded-lg bg-surface border border-border">
+          <span className="font-bold text-muted">{alert.direction} · {alert.alert_type?.replace(/_/g, ' ')}</span>
+          {alert.expiry_date && <span className="ml-1 text-amber-400">· Exp {alert.expiry_date}</span>}
+          {(alert.environment === 'TEST' || alert.is_live === false) && (
+            <span className="ml-1 text-purple-400 font-black">· TEST ALERT</span>
+          )}
+        </div>
+
+        {/* Status messages */}
+        {sentOk && (
+          <div className="p-2 rounded-lg bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 text-[10px] font-bold text-center">
+            ✅ Alert dispatched to Telegram!
+          </div>
+        )}
+        {sentError && (
+          <div className="p-2 rounded-lg bg-rose-500/15 border border-rose-500/30 text-rose-300 text-[10px] text-center">
+            ❌ {sentError}
+          </div>
+        )}
+
+        {/* Action buttons */}
+        <div className="flex gap-2 pt-1">
+          <button
+            onClick={onCancel}
+            className="flex-1 btn btn-sm btn-ghost text-xs text-muted border border-border/50 hover:border-border"
+          >Cancel</button>
+          <button
+            onClick={() => onConfirm(destMode === 'DEFAULT' ? null : customChannel.trim())}
+            disabled={sending || sentOk || (destMode === 'CHANNEL' && !customChannel.trim())}
+            className="flex-1 btn btn-sm text-xs font-black bg-sky-500/20 hover:bg-sky-500/30 text-sky-200 border border-sky-500/40 hover:border-sky-500/60 disabled:opacity-50 transition-all"
+          >
+            {sending ? '⏳ Sending…' : sentOk ? '✅ Sent!' : '✓ Confirm & Send'}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 /**
  * In-place differential merger:
  * Updates existing alerts in-place preserving their array position and object reference
  * unless actual attributes changed. Prevents screen resets and re-renders.
  * Strictly avoids duplicates by alert_id.
  */
+
 function mergeAlertsInPlace(prevAlerts = [], freshAlerts = []) {
   if (!prevAlerts || prevAlerts.length === 0) {
     const seen = new Set()
@@ -2002,7 +2642,79 @@ function AlertsViewInner({ onOpenOrderTicket }) {
   const [selectedStage, setSelectedStage] = useState('ALL')
   const [selectedEnv, setSelectedEnv] = useState('ALL') // ALL | LIVE | TEST
   const [densityMode, setDensityMode] = useState('compact') // compact | expanded
-  const [selectedSort, setSelectedSort] = useState('NEWEST') // NEWEST | CONFIDENCE | RR_RATIO
+  const [selectedSort, setSelectedSort] = useState('NEWEST') // NEWEST | CONFIDENCE | RR_RATIO | STAGE
+
+  // ── Institutional Audio Chime state with localStorage persistence ──────────
+  const [chimeEnabled, setChimeEnabled] = useState(() => {
+    try {
+      return localStorage.getItem('chanakya_alert_chime') !== 'false'
+    } catch (_) {
+      return true
+    }
+  })
+  const seenAlertIdsRef = useRef(new Set())
+  const hasInitializedAlertsRef = useRef(false)
+
+  const toggleChime = useCallback(() => {
+    setChimeEnabled((prev) => {
+      const next = !prev
+      try { localStorage.setItem('chanakya_alert_chime', String(next)) } catch (_) {}
+      if (next) playTerminalChime('IGNITED')
+      return next
+    })
+  }, [])
+
+  // ── Compact-row expand tracking: set of alert_ids that are expanded ──────
+  const [expandedRows, setExpandedRows] = useState(new Set())
+  const toggleExpandRow = useCallback((alertId) => {
+    setExpandedRows((prev) => {
+      const next = new Set(prev)
+      if (next.has(alertId)) next.delete(alertId)
+      else next.add(alertId)
+      return next
+    })
+  }, [])
+
+  // ── Telegram preflight modal state ───────────────────────────────────────
+  const [telegramAlert, setTelegramAlert] = useState(null) // The alert being dispatched
+  const [telegramSending, setTelegramSending] = useState(false)
+  const [telegramSentOk, setTelegramSentOk] = useState(false)
+  const [telegramSentError, setTelegramSentError] = useState(null)
+
+  const handleOpenTelegramModal = useCallback((alert) => {
+    setTelegramAlert(alert)
+    setTelegramSending(false)
+    setTelegramSentOk(false)
+    setTelegramSentError(null)
+  }, [])
+
+  const handleCloseTelegramModal = useCallback(() => {
+    setTelegramAlert(null)
+    setTelegramSending(false)
+    setTelegramSentOk(false)
+    setTelegramSentError(null)
+  }, [])
+
+  const handleConfirmTelegram = useCallback(async (customChatId = null) => {
+    if (!telegramAlert) return
+    setTelegramSending(true)
+    setTelegramSentError(null)
+    try {
+      const payload = { alert_id: telegramAlert.alert_id }
+      if (customChatId && String(customChatId).trim()) {
+        payload.chat_id = String(customChatId).trim()
+      }
+      await callRef.current('/api/alerts/auto/send-telegram', payload)
+      setTelegramSentOk(true)
+      // Auto-close after 2.2s on success
+      setTimeout(() => handleCloseTelegramModal(), 2200)
+    } catch (err) {
+      setTelegramSentError(err.message || 'Failed to send. Check Telegram bot configuration.')
+    } finally {
+      setTelegramSending(false)
+    }
+  }, [telegramAlert, handleCloseTelegramModal])
+
 
   // Manual alerts state
   const [alerts, setAlerts] = useState([])
@@ -2070,13 +2782,42 @@ function AlertsViewInner({ onOpenOrderTicket }) {
     try {
       const res = await callRef.current('/skills/alerts/auto/list', { view_mode: autoViewMode })
       const fresh = res?.data ?? res ?? []
+
+      // Institutional chime check on live ignited alerts
+      if (hasInitializedAlertsRef.current && fresh.length > 0) {
+        let hasNewIgnited = false
+        for (const a of fresh) {
+          const aid = a.alert_id || a.id
+          if (aid && !seenAlertIdsRef.current.has(aid)) {
+            seenAlertIdsRef.current.add(aid)
+            if (a.stage === 'IGNITED' && a.environment !== 'TEST' && a.is_live !== false) {
+              hasNewIgnited = true
+            }
+          }
+        }
+        if (hasNewIgnited && chimeEnabled) {
+          playTerminalChime('IGNITED')
+        }
+      } else {
+        for (const a of fresh) {
+          const aid = a.alert_id || a.id
+          if (aid) seenAlertIdsRef.current.add(aid)
+        }
+        hasInitializedAlertsRef.current = true
+      }
+
       setAutoAlerts((prev) => mergeAlertsInPlace(prev, fresh))
     } catch (_) {
       // Fallback empty
     } finally {
       if (isInitial) setAutoLoading(false)
     }
-  }, [])
+  }, [autoViewMode, chimeEnabled])
+
+  // Re-fetch when autoViewMode toggles
+  useEffect(() => {
+    loadAutoAlerts(false)
+  }, [autoViewMode, loadAutoAlerts])
 
   useEffect(() => {
     loadAlerts(true)
@@ -2099,6 +2840,13 @@ function AlertsViewInner({ onOpenOrderTicket }) {
           return [newAlert, ...prev]
         })
       } else {
+        const aid = newAlert.alert_id || newAlert.id
+        if (aid && !seenAlertIdsRef.current.has(aid)) {
+          seenAlertIdsRef.current.add(aid)
+          if (newAlert.stage === 'IGNITED' && newAlert.environment !== 'TEST' && newAlert.is_live !== false) {
+            if (chimeEnabled) playTerminalChime('IGNITED')
+          }
+        }
         setAutoAlerts((prev) => mergeAlertsInPlace(prev, [newAlert]))
       }
     }
@@ -2115,7 +2863,7 @@ function AlertsViewInner({ onOpenOrderTicket }) {
       window.removeEventListener('new-market-alert', handleLiveAlert)
       clearInterval(syncTimer)
     }
-  }, [loadAlerts, loadAutoAlerts])
+  }, [loadAlerts, loadAutoAlerts, chimeEnabled])
 
   // Extract all active / visible symbols to stream spot prices and option/future contract prices for
   const activeSymbols = useMemo(() => {
@@ -2349,6 +3097,7 @@ function AlertsViewInner({ onOpenOrderTicket }) {
     setSelectedEnv('ALL')
     setDensityMode('compact')
     setSelectedSort('NEWEST')
+    setExpandedRows(new Set())
   }
 
   // Clear entire auto-alert feed (emergency reset)
@@ -2379,6 +3128,8 @@ function AlertsViewInner({ onOpenOrderTicket }) {
 
   const handleOpenTicket = useCallback((alt) => {
     const actPlan = alt.actionable_plan || {}
+    const optPlan = actPlan.option_plan || null
+    const tradePlan = actPlan.trade_plan || null
     let targetSym = alt.contract_symbol || alt.symbol
     let targetPrice = alt.trigger_level || alt.ltp
     let targetSL = alt.stop_loss
@@ -2392,8 +3143,14 @@ function AlertsViewInner({ onOpenOrderTicket }) {
       seg === 'FNO' ? 'NFO' : 'NSE'
     )
 
-    // If the alert has an option play suggestion with distinct premium pricing:
-    if (alt.contract_symbol && actPlan.option_contract === alt.contract_symbol && actPlan.option_entry) {
+    // Option plan or trade plan pricing
+    if (optPlan) {
+      if (optPlan.contract_symbol) targetSym = optPlan.contract_symbol
+      if (optPlan.entry_premium || alt.option_premium) targetPrice = optPlan.entry_premium || alt.option_premium
+      if (optPlan.sl_premium) targetSL = optPlan.sl_premium
+      if (optPlan.t1_premium) targetTP = optPlan.t1_premium
+      if (seg === 'FNO') targetExchange = 'NFO'
+    } else if (alt.contract_symbol && actPlan.option_contract === alt.contract_symbol && actPlan.option_entry) {
       const optPremNum = parseFloat(String(actPlan.option_entry).replace(/[₹,\s]/g, ''))
       if (!isNaN(optPremNum) && optPremNum > 0) {
         targetPrice = optPremNum
@@ -2401,23 +3158,38 @@ function AlertsViewInner({ onOpenOrderTicket }) {
         const optTPNum = parseFloat(String(actPlan.option_target_1 || '').replace(/[₹,\s]/g, ''))
         if (!isNaN(optSLNum) && optSLNum > 0) targetSL = optSLNum
         if (!isNaN(optTPNum) && optTPNum > 0) targetTP = optTPNum
-        // If it's an F&O option play, exchange must be NFO regardless
         if (seg === 'FNO') targetExchange = 'NFO'
       }
+    } else if (tradePlan) {
+      if (tradePlan.entry_price) targetPrice = tradePlan.entry_price
+      if (tradePlan.invalidation_stop) targetSL = tradePlan.invalidation_stop
+      if (tradePlan.target_1) targetTP = tradePlan.target_1
+    }
+
+    const cleanSym = (alt.symbol || '').replace(/^(NSE|BSE|MCX|NFO|CDS):/, '').trim().toUpperCase()
+    const lotSize = alt.lot_size || alt.metrics?.lot_size || INDEX_LOT_SIZES[cleanSym] || null
+
+    const ticketData = {
+      symbol: targetSym,
+      exchange: targetExchange,
+      price: targetPrice != null ? Number(targetPrice) : undefined,
+      target: targetTP != null ? Number(targetTP) : undefined,
+      stopLoss: targetSL != null ? Number(targetSL) : undefined,
+      lotSize: lotSize != null ? Number(lotSize) : undefined,
+      quantity: lotSize != null ? Number(lotSize) : 1,
+      action: alt.direction === 'BEARISH' && !alt.contract_symbol?.includes('PE') ? 'SELL' : 'BUY',
+    }
+
+    if (onOpenOrderTicket) {
+      onOpenOrderTicket(ticketData)
     }
 
     window.dispatchEvent(
       new CustomEvent('open-order-ticket-modal', {
-        detail: {
-          symbol: targetSym,
-          exchange: targetExchange,
-          price: targetPrice,
-          target: targetTP,
-          stopLoss: targetSL,
-        },
+        detail: ticketData,
       })
     )
-  }, [])
+  }, [onOpenOrderTicket])
 
 
   // Active validation check: True only if trade is neither archived, invalidated, expired, nor final target reached
@@ -2535,13 +3307,55 @@ function AlertsViewInner({ onOpenOrderTicket }) {
       return true
     })
 
-    // 8. Sort
-    if (selectedSort === 'CONFIDENCE') {
-      results = [...results].sort((a, b) => (Number(b.confidence || 0)) - (Number(a.confidence || 0)))
-    } else if (selectedSort === 'RR_RATIO') {
-      results = [...results].sort((a, b) => (Number(b.metrics?.expected_rr || 0)) - (Number(a.metrics?.expected_rr || 0)))
+    // Helper to safely parse alert timestamp to epoch ms for deterministic ordering
+    const getAlertEpoch = (a) => {
+      const raw = a.created_at || a.timestamp || ''
+      if (!raw) return 0
+      try {
+        const clean = raw.replace(' IST', '').trim()
+        const ts = Date.parse(clean)
+        return isNaN(ts) ? 0 : ts
+      } catch (_) {
+        return 0
+      }
     }
-    // NEWEST: keep insertion order (newest first from API)
+
+    // 8. Multi-Sort (Default: Newest first; user selectable multi-tier sort)
+    results = [...results].sort((a, b) => {
+      const timeDiff = getAlertEpoch(b) - getAlertEpoch(a)
+      const confDiff = (Number(b.confidence || 0)) - (Number(a.confidence || 0))
+
+      if (selectedSort === 'CONFIDENCE') {
+        // Multi-sort: Conviction DESC -> Newest first
+        if (confDiff !== 0) return confDiff
+        return timeDiff
+      } else if (selectedSort === 'RR_RATIO') {
+        // Multi-sort: Expected R:R DESC -> Conviction DESC -> Newest first
+        const rrDiff = (Number(b.metrics?.expected_rr || 0)) - (Number(a.metrics?.expected_rr || 0))
+        if (rrDiff !== 0) return rrDiff
+        if (confDiff !== 0) return confDiff
+        return timeDiff
+      } else if (selectedSort === 'STAGE') {
+        // Multi-sort: Stage priority (IGNITED first) -> Conviction DESC -> Newest first
+        const stagePriority = {
+          IGNITED: 0,
+          TRAILING_UPDATE: 1,
+          EARLY_WARNING: 2,
+          T1_ACHIEVED: 3,
+          TARGET_ACHIEVED: 4,
+          INVALIDATED: 5,
+          EXPIRED: 6,
+        }
+        const pa = stagePriority[a.stage] ?? 2
+        const pb = stagePriority[b.stage] ?? 2
+        if (pa !== pb) return pa - pb
+        if (confDiff !== 0) return confDiff
+        return timeDiff
+      }
+      // Default: NEWEST first, then highest conviction as tie-breaker
+      if (timeDiff !== 0) return timeDiff
+      return confDiff
+    })
 
     return results
   }, [autoAlerts, autoViewMode, selectedFilter, selectedStage, selectedEnv, searchQuery, selectedDirection, selectedSegment, selectedSort])
@@ -2601,6 +3415,7 @@ function AlertsViewInner({ onOpenOrderTicket }) {
   }, [groupedAutoAlerts])
 
   return (
+    <>
     <div
       ref={scrollContainerRef}
       onScroll={handleScroll}
@@ -2989,11 +3804,12 @@ function AlertsViewInner({ onOpenOrderTicket }) {
                   value={selectedSort}
                   onChange={(e) => setSelectedSort(e.target.value)}
                   className="text-xs py-1 px-2.5 rounded-lg bg-surface border border-border text-text hover:border-gold/50 focus:outline-none focus:border-gold transition-colors font-sans cursor-pointer w-auto"
-                  title="Sort alerts"
+                  title="Sort alerts (Multi-sort enabled)"
                 >
                   <option value="NEWEST">⏱ Newest First</option>
-                  <option value="CONFIDENCE">⭐ By Confidence</option>
-                  <option value="RR_RATIO">📊 By R:R Ratio</option>
+                  <option value="CONFIDENCE">⭐ Conviction ↓ + Newest</option>
+                  <option value="STAGE">🔥 Stage Priority + Newest</option>
+                  <option value="RR_RATIO">📊 R:R Ratio ↓ + Newest</option>
                 </select>
 
                 {/* Density Mode */}
@@ -3013,6 +3829,19 @@ function AlertsViewInner({ onOpenOrderTicket }) {
                     title="Expanded card view — all plan details visible by default"
                   >☰ Expanded</button>
                 </div>
+
+                {/* Audio Chime Mute/Unmute Toggle */}
+                <button
+                  onClick={toggleChime}
+                  className={`px-2 py-0.5 rounded-lg text-xs font-bold border transition-all flex items-center gap-1 cursor-pointer ${
+                    chimeEnabled
+                      ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30 hover:bg-emerald-500/25'
+                      : 'bg-surface text-muted border-border hover:text-text'
+                  }`}
+                  title={chimeEnabled ? 'Audio Chime ON: Harmonic ping on ignited alerts (Click to mute)' : 'Audio Chime MUTED (Click to unmute)'}
+                >
+                  {chimeEnabled ? '🔔 Chime' : '🔕 Muted'}
+                </button>
 
                 {/* Reset Filters Button */}
                 {(searchQuery || selectedFilter !== 'ALL' || selectedStage !== 'ALL' || selectedEnv !== 'ALL' || selectedDirection !== 'ALL' || selectedSegment !== 'ALL' || selectedSort !== 'NEWEST') && (
@@ -3075,21 +3904,53 @@ function AlertsViewInner({ onOpenOrderTicket }) {
                     </div>
                     <span className="text-[10px] font-mono text-muted">Gamma Blasts · Index Options · Stock Futures</span>
                   </div>
-                  <div className="space-y-3">
-                    {groupedFnoAlerts.map(({ alert: alt, history }) => (
-                      <AutoAlertCard
-                        key={alt.alert_id || alt.id || alt.symbol}
-                        alert={alt}
-                        onAnalyze={handleAnalyze}
-                        onInspectOptions={handleInspectOptions}
-                        onOpenTicket={handleOpenTicket}
-                        onArchiveToggle={handleArchiveToggle}
-                        onClearLockout={handleClearLockout}
-                        archiving={archiving}
-                        historyAttempts={history}
-                        densityMode={densityMode}
-                      />
-                    ))}
+                  <div className={densityMode === 'compact' ? 'space-y-1.5' : 'space-y-3'}>
+                    {groupedFnoAlerts.map(({ alert: alt, history }) => {
+                      const alertKey = alt.alert_id || alt.id || alt.symbol
+                      const isRowExpanded = expandedRows.has(alertKey)
+                      return (
+                        <div key={alertKey}>
+                          {densityMode === 'compact' ? (
+                            <>
+                              <AlertCompactRow
+                                alert={alt}
+                                onSendTelegram={handleOpenTelegramModal}
+                                onTrade={handleOpenTicket}
+                                onExpand={() => toggleExpandRow(alertKey)}
+                                isExpanded={isRowExpanded}
+                              />
+                              {isRowExpanded && (
+                                <div className="mt-1.5 ml-3 border-l-2 border-gold/30 pl-3">
+                                  <AutoAlertCard
+                                    alert={alt}
+                                    onAnalyze={handleAnalyze}
+                                    onInspectOptions={handleInspectOptions}
+                                    onOpenTicket={handleOpenTicket}
+                                    onArchiveToggle={handleArchiveToggle}
+                                    onClearLockout={handleClearLockout}
+                                    archiving={archiving}
+                                    historyAttempts={history}
+                                    densityMode="expanded"
+                                  />
+                                </div>
+                              )}
+                            </>
+                          ) : (
+                            <AutoAlertCard
+                              alert={alt}
+                              onAnalyze={handleAnalyze}
+                              onInspectOptions={handleInspectOptions}
+                              onOpenTicket={handleOpenTicket}
+                              onArchiveToggle={handleArchiveToggle}
+                              onClearLockout={handleClearLockout}
+                              archiving={archiving}
+                              historyAttempts={history}
+                              densityMode={densityMode}
+                            />
+                          )}
+                        </div>
+                      )
+                    })}
                   </div>
                 </div>
               )}
@@ -3105,21 +3966,53 @@ function AlertsViewInner({ onOpenOrderTicket }) {
                     </div>
                     <span className="text-[10px] font-mono text-muted">VCP · Minervini · SMC · Delivery</span>
                   </div>
-                  <div className="space-y-3">
-                    {groupedEquityAlerts.map(({ alert: alt, history }) => (
-                      <AutoAlertCard
-                        key={alt.alert_id || alt.id || alt.symbol}
-                        alert={alt}
-                        onAnalyze={handleAnalyze}
-                        onInspectOptions={handleInspectOptions}
-                        onOpenTicket={handleOpenTicket}
-                        onArchiveToggle={handleArchiveToggle}
-                        onClearLockout={handleClearLockout}
-                        archiving={archiving}
-                        historyAttempts={history}
-                        densityMode={densityMode}
-                      />
-                    ))}
+                  <div className={densityMode === 'compact' ? 'space-y-1.5' : 'space-y-3'}>
+                    {groupedEquityAlerts.map(({ alert: alt, history }) => {
+                      const alertKey = alt.alert_id || alt.id || alt.symbol
+                      const isRowExpanded = expandedRows.has(alertKey)
+                      return (
+                        <div key={alertKey}>
+                          {densityMode === 'compact' ? (
+                            <>
+                              <AlertCompactRow
+                                alert={alt}
+                                onSendTelegram={handleOpenTelegramModal}
+                                onTrade={handleOpenTicket}
+                                onExpand={() => toggleExpandRow(alertKey)}
+                                isExpanded={isRowExpanded}
+                              />
+                              {isRowExpanded && (
+                                <div className="mt-1.5 ml-3 border-l-2 border-gold/30 pl-3">
+                                  <AutoAlertCard
+                                    alert={alt}
+                                    onAnalyze={handleAnalyze}
+                                    onInspectOptions={handleInspectOptions}
+                                    onOpenTicket={handleOpenTicket}
+                                    onArchiveToggle={handleArchiveToggle}
+                                    onClearLockout={handleClearLockout}
+                                    archiving={archiving}
+                                    historyAttempts={history}
+                                    densityMode="expanded"
+                                  />
+                                </div>
+                              )}
+                            </>
+                          ) : (
+                            <AutoAlertCard
+                              alert={alt}
+                              onAnalyze={handleAnalyze}
+                              onInspectOptions={handleInspectOptions}
+                              onOpenTicket={handleOpenTicket}
+                              onArchiveToggle={handleArchiveToggle}
+                              onClearLockout={handleClearLockout}
+                              archiving={archiving}
+                              historyAttempts={history}
+                              densityMode={densityMode}
+                            />
+                          )}
+                        </div>
+                      )
+                    })}
                   </div>
                 </div>
               )}
@@ -3135,21 +4028,53 @@ function AlertsViewInner({ onOpenOrderTicket }) {
                     </div>
                     <span className="text-[10px] font-mono text-muted">09:00–23:30 IST · Prompt Expiry · VWAP</span>
                   </div>
-                  <div className="space-y-3">
-                    {groupedCommodityAlerts.map(({ alert: alt, history }) => (
-                      <AutoAlertCard
-                        key={alt.alert_id || alt.id || alt.symbol}
-                        alert={alt}
-                        onAnalyze={handleAnalyze}
-                        onInspectOptions={handleInspectOptions}
-                        onOpenTicket={handleOpenTicket}
-                        onArchiveToggle={handleArchiveToggle}
-                        onClearLockout={handleClearLockout}
-                        archiving={archiving}
-                        historyAttempts={history}
-                        densityMode={densityMode}
-                      />
-                    ))}
+                  <div className={densityMode === 'compact' ? 'space-y-1.5' : 'space-y-3'}>
+                    {groupedCommodityAlerts.map(({ alert: alt, history }) => {
+                      const alertKey = alt.alert_id || alt.id || alt.symbol
+                      const isRowExpanded = expandedRows.has(alertKey)
+                      return (
+                        <div key={alertKey}>
+                          {densityMode === 'compact' ? (
+                            <>
+                              <AlertCompactRow
+                                alert={alt}
+                                onSendTelegram={handleOpenTelegramModal}
+                                onTrade={handleOpenTicket}
+                                onExpand={() => toggleExpandRow(alertKey)}
+                                isExpanded={isRowExpanded}
+                              />
+                              {isRowExpanded && (
+                                <div className="mt-1.5 ml-3 border-l-2 border-gold/30 pl-3">
+                                  <AutoAlertCard
+                                    alert={alt}
+                                    onAnalyze={handleAnalyze}
+                                    onInspectOptions={handleInspectOptions}
+                                    onOpenTicket={handleOpenTicket}
+                                    onArchiveToggle={handleArchiveToggle}
+                                    onClearLockout={handleClearLockout}
+                                    archiving={archiving}
+                                    historyAttempts={history}
+                                    densityMode="expanded"
+                                  />
+                                </div>
+                              )}
+                            </>
+                          ) : (
+                            <AutoAlertCard
+                              alert={alt}
+                              onAnalyze={handleAnalyze}
+                              onInspectOptions={handleInspectOptions}
+                              onOpenTicket={handleOpenTicket}
+                              onArchiveToggle={handleArchiveToggle}
+                              onClearLockout={handleClearLockout}
+                              archiving={archiving}
+                              historyAttempts={history}
+                              densityMode={densityMode}
+                            />
+                          )}
+                        </div>
+                      )
+                    })}
                   </div>
                 </div>
               )}
@@ -3165,21 +4090,53 @@ function AlertsViewInner({ onOpenOrderTicket }) {
                     </div>
                     <span className="text-[10px] font-mono text-muted">NSE CDS Segment · INR Pairs</span>
                   </div>
-                  <div className="space-y-3">
-                    {groupedCurrencyAlerts.map(({ alert: alt, history }) => (
-                      <AutoAlertCard
-                        key={alt.alert_id || alt.id || alt.symbol}
-                        alert={alt}
-                        onAnalyze={handleAnalyze}
-                        onInspectOptions={handleInspectOptions}
-                        onOpenTicket={handleOpenTicket}
-                        onArchiveToggle={handleArchiveToggle}
-                        onClearLockout={handleClearLockout}
-                        archiving={archiving}
-                        historyAttempts={history}
-                        densityMode={densityMode}
-                      />
-                    ))}
+                  <div className={densityMode === 'compact' ? 'space-y-1.5' : 'space-y-3'}>
+                    {groupedCurrencyAlerts.map(({ alert: alt, history }) => {
+                      const alertKey = alt.alert_id || alt.id || alt.symbol
+                      const isRowExpanded = expandedRows.has(alertKey)
+                      return (
+                        <div key={alertKey}>
+                          {densityMode === 'compact' ? (
+                            <>
+                              <AlertCompactRow
+                                alert={alt}
+                                onSendTelegram={handleOpenTelegramModal}
+                                onTrade={handleOpenTicket}
+                                onExpand={() => toggleExpandRow(alertKey)}
+                                isExpanded={isRowExpanded}
+                              />
+                              {isRowExpanded && (
+                                <div className="mt-1.5 ml-3 border-l-2 border-gold/30 pl-3">
+                                  <AutoAlertCard
+                                    alert={alt}
+                                    onAnalyze={handleAnalyze}
+                                    onInspectOptions={handleInspectOptions}
+                                    onOpenTicket={handleOpenTicket}
+                                    onArchiveToggle={handleArchiveToggle}
+                                    onClearLockout={handleClearLockout}
+                                    archiving={archiving}
+                                    historyAttempts={history}
+                                    densityMode="expanded"
+                                  />
+                                </div>
+                              )}
+                            </>
+                          ) : (
+                            <AutoAlertCard
+                              alert={alt}
+                              onAnalyze={handleAnalyze}
+                              onInspectOptions={handleInspectOptions}
+                              onOpenTicket={handleOpenTicket}
+                              onArchiveToggle={handleArchiveToggle}
+                              onClearLockout={handleClearLockout}
+                              archiving={archiving}
+                              historyAttempts={history}
+                              densityMode={densityMode}
+                            />
+                          )}
+                        </div>
+                      )
+                    })}
                   </div>
                 </div>
               )}
@@ -3242,6 +4199,18 @@ function AlertsViewInner({ onOpenOrderTicket }) {
         <MoversAutopsyPanel onOpenOrderTicket={onOpenOrderTicket} />
       )}
     </div>
+
+    {/* ── Telegram Preflight Modal (portal-style, rendered outside scroll container) ── */}
+    <TelegramPreflightModal
+      alert={telegramAlert}
+      onConfirm={handleConfirmTelegram}
+      onCancel={handleCloseTelegramModal}
+      sending={telegramSending}
+      sentOk={telegramSentOk}
+      sentError={telegramSentError}
+      callRef={callRef}
+    />
+  </>
   )
 }
 

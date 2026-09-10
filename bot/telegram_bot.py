@@ -1450,9 +1450,32 @@ def _normalize_push_message(msg: str) -> str:
     return " ".join(s.split()).strip().lower()
 
 
-def send_push(message: str, parse_mode: str = "HTML", bypass_dedup: bool = False) -> None:
+def get_telegram_destinations() -> dict[str, Any]:
+    """Returns available Telegram destinations: default private chat, channel ID (if set in env/keychain)."""
+    default_chat = _load_chat_id() or ""
+    channel_id = os.environ.get("TELEGRAM_CHANNEL_ID", "").strip()
+    if not channel_id:
+        try:
+            from config.credentials import _kr_get
+
+            channel_id = _kr_get("TELEGRAM_CHANNEL_ID") or ""
+        except Exception:
+            channel_id = ""
+    return {
+        "default_chat_id": str(default_chat) if default_chat else "",
+        "channel_id": channel_id.strip(),
+        "is_configured": bool(default_chat),
+    }
+
+
+def send_push(
+    message: str,
+    parse_mode: str = "HTML",
+    bypass_dedup: bool = False,
+    chat_id: Optional[str] = None,
+) -> None:
     """
-    Send a push notification to the configured Telegram chat.
+    Send a push notification to the configured Telegram chat, group, or channel.
     Called from alerts, morning brief scheduler, execution gate, etc.
     Non-blocking — runs in a background thread.
     Includes a 5-minute anti-flood message deduplication guard.
@@ -1460,8 +1483,8 @@ def send_push(message: str, parse_mode: str = "HTML", bypass_dedup: bool = False
     import hashlib
     import time
 
-    chat_id = _load_chat_id()
-    if not chat_id:
+    target_chat_id = (chat_id or "").strip() or _load_chat_id()
+    if not target_chat_id:
         return
 
     try:
@@ -1472,7 +1495,7 @@ def send_push(message: str, parse_mode: str = "HTML", bypass_dedup: bool = False
     now = time.time()
     if not bypass_dedup:
         normalized = _normalize_push_message(message)
-        digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+        digest = hashlib.sha256(f"{target_chat_id}:{normalized}".encode("utf-8")).hexdigest()
 
         with _push_dedup_lock:
             # Clean expired items if buffer is growing
@@ -1503,7 +1526,7 @@ def send_push(message: str, parse_mode: str = "HTML", bypass_dedup: bool = False
             import re
 
             url = f"https://api.telegram.org/bot{token}/sendMessage"
-            payload = {"chat_id": chat_id, "text": message}
+            payload = {"chat_id": target_chat_id, "text": message}
             if parse_mode:
                 payload["parse_mode"] = parse_mode
 
@@ -1511,7 +1534,7 @@ def send_push(message: str, parse_mode: str = "HTML", bypass_dedup: bool = False
             # If HTML parsing fails due to any unescaped tags/characters, retry as plain text so the alert is never lost
             if not resp.is_success and parse_mode == "HTML":
                 clean_text = re.sub(r"<[^>]+>", "", message)
-                httpx.post(url, json={"chat_id": chat_id, "text": clean_text}, timeout=10)
+                httpx.post(url, json={"chat_id": target_chat_id, "text": clean_text}, timeout=10)
         except Exception:
             pass
 

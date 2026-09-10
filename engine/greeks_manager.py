@@ -42,12 +42,13 @@ class _PortfolioGreeksLike:
 
 
 LOT_SIZES: dict[str, int] = {
-    "NIFTY": 75,
-    "BANKNIFTY": 15,
-    "FINNIFTY": 40,
-    "MIDCPNIFTY": 50,
-    "SENSEX": 10,
-    "BANKEX": 15,
+    "NIFTY": 65,
+    "BANKNIFTY": 30,
+    "FINNIFTY": 60,
+    "MIDCPNIFTY": 120,
+    "NIFTYNXT50": 25,
+    "SENSEX": 20,
+    "BANKEX": 30,
 }
 
 
@@ -63,7 +64,7 @@ class DeltaHedgeSuggestion:
         dict
     ]  # [{"action", "instrument", "lots", "delta_change", "why", "when", "how"}]
     cost_estimate: float = 0.0
-    lot_size: int = 75
+    lot_size: int = 65
     rupee_sensitivity: float = 0.0
     why: str = ""
     when: str = ""
