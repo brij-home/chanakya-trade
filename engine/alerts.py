@@ -976,7 +976,12 @@ def _telegram_notify(message: str) -> None:
     """
     Send a Telegram push notification.
     Non-blocking — runs in background thread.
+    Never dispatches during test execution or test deployment modes.
     """
+    import os
+    if os.environ.get("CHANAKYA_TESTING") == "1" or os.environ.get("DEPLOY_MODE") == "test":
+        return
+
     try:
         from bot.telegram_bot import send_push
 

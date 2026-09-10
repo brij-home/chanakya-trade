@@ -2322,6 +2322,18 @@ class AutoAlertEngine:
 
         # 3. Telegram push with multi-layer deduplication & decisive institutional formatting
         try:
+            # STRICT PROVENANCE ISOLATION: Never push TEST, mock, or simulated alerts to user's real Telegram
+            if (
+                is_test
+                or getattr(alert, "environment", "LIVE") == "TEST"
+                or not getattr(alert, "is_live", True)
+                or alert.alert_id.startswith("test-")
+                or alert.alert_id.startswith("mock-")
+                or os.environ.get("CHANAKYA_TESTING") == "1"
+                or os.environ.get("DEPLOY_MODE") == "test"
+            ):
+                return
+
             from engine.alerts import _telegram_notify
 
             # Anti-flood / deduplication filter for Telegram channel
@@ -3594,6 +3606,16 @@ class AutoAlertEngine:
             if opt_recommendation:
                 plan_dict["option_alternative"] = opt_recommendation
 
+            # Strict Data Provenance Gate: Verify if quote is authentic live broker data vs synthetic/mock
+            is_mock_quote = (
+                type(q).__name__ == "MagicMock"
+                or getattr(q, "_is_mock", False)
+                or getattr(q, "provider", "") in ("mock", "TEST")
+                or getattr(q, "data_state", "") == "UNAVAILABLE"
+            )
+            is_test_env = os.environ.get("CHANAKYA_TESTING") == "1" or os.environ.get("DEPLOY_MODE") == "test"
+            is_authentic_live = not (is_mock_quote or is_test_env)
+
             alert = AutoAlert(
                 alert_id=alert_id,
                 alert_type=alert_type,
@@ -3609,8 +3631,8 @@ class AutoAlertEngine:
                 stop_loss=sl_price,
                 confidence=min(95, int(75 + abs(chg) * 6)),
                 created_at=now_iso,
-                is_live=True,
-                environment="LIVE",
+                is_live=is_authentic_live,
+                environment="LIVE" if is_authentic_live else "TEST",
                 metrics={
                     "change_pct": chg,
                     "volume": vol,
@@ -3682,6 +3704,16 @@ class AutoAlertEngine:
                 summary = f"Macro currency drop in {clean_sym}: Moving {chg:.2f}% to ₹{ltp:.4f}. Short thesis active."
                 action = "SELL_SHORT_FUTURES"
 
+            # Strict Data Provenance Gate: Verify if quote is authentic live broker data vs synthetic/mock
+            is_mock_quote = (
+                type(q).__name__ == "MagicMock"
+                or getattr(q, "_is_mock", False)
+                or getattr(q, "provider", "") in ("mock", "TEST")
+                or getattr(q, "data_state", "") == "UNAVAILABLE"
+            )
+            is_test_env = os.environ.get("CHANAKYA_TESTING") == "1" or os.environ.get("DEPLOY_MODE") == "test"
+            is_authentic_live = not (is_mock_quote or is_test_env)
+
             alert = AutoAlert(
                 alert_id=alert_id,
                 alert_type=alert_type,
@@ -3697,8 +3729,8 @@ class AutoAlertEngine:
                 stop_loss=sl_price,
                 confidence=min(92, int(75 + abs(chg) * 30)),
                 created_at=now_iso,
-                is_live=True,
-                environment="LIVE",
+                is_live=is_authentic_live,
+                environment="LIVE" if is_authentic_live else "TEST",
                 metrics={
                     "change_pct": chg,
                     "segment": "CURRENCY",

@@ -287,3 +287,33 @@ def test_commodity_alert_includes_defined_risk_option_alternative():
                 assert opt_alt["strike"] == 6500.0
                 assert opt_alt["max_loss_capped"] > 0
                 assert "MCX:CRUDEOIL" in opt_alt["contract"]
+
+
+def test_mock_data_strictly_tagged_test_and_blocks_telegram():
+    """Ensures synthetic/mock data is strictly tagged TEST/is_live=False and never leaked to Telegram."""
+    engine = AutoAlertEngine()
+    engine._alerts = []
+    engine._cooldowns = {}
+    engine._watched_commodities = ["CRUDEOIL"]
+
+    mock_quote = MagicMock()
+    mock_quote.last_price = 6500.0
+    mock_quote.ltp = 6500.0
+    mock_quote.change_pct = 2.1
+    mock_quote.volume = 45000
+
+    with patch("market.quotes.get_quote", return_value={"MCX:CRUDEOIL": mock_quote}):
+        with patch("market.history.get_ohlcv", return_value=None):
+            with patch("market.quotes.get_ltp", return_value=6500.0):
+                alerts = engine.scan_commodities_now()
+                assert len(alerts) >= 1
+                alert = alerts[0]
+                # Must be strictly marked as TEST and not live
+                assert alert.environment == "TEST"
+                assert alert.is_live is False
+
+                # Verifies that _dispatch strictly suppresses Telegram dispatch for test alerts
+                with patch("engine.alerts._telegram_notify") as mock_tg:
+                    engine._dispatch(alert)
+                    mock_tg.assert_not_called()
+
