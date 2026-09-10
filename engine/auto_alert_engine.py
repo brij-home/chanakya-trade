@@ -3477,34 +3477,42 @@ class AutoAlertEngine:
 
             chg = float(getattr(q, "change_pct", 0.0) or 0.0)
             vol = int(getattr(q, "volume", 0) or 0)
-            vwap = float(getattr(q, "vwap", 0.0) or ltp)
+            # 1. Sanitize VWAP: discard corrupted/mock zero or sub-50% values
+            raw_vwap = getattr(q, "vwap", None)
+            try:
+                vwap = float(raw_vwap) if (raw_vwap is not None and float(raw_vwap) > (ltp * 0.5)) else ltp
+            except Exception:
+                vwap = ltp
 
             # Minimum move threshold for commodity trigger (0.6% for Gold/Silver/Copper, 1.0% for Crude/NatGas)
             min_chg = 1.0 if clean_sym in ("CRUDEOIL", "NATURALGAS") else 0.6
 
-            is_bullish = (chg >= min_chg) and (vwap <= 0 or ltp >= (vwap * 0.998))
-            is_bearish = (chg <= -min_chg) and (vwap > 0 and ltp < vwap)
+            is_bullish = (chg >= min_chg) and (ltp >= (vwap * 0.998))
+            is_bearish = (chg <= -min_chg) and (ltp <= (vwap * 1.002))
 
             if not (is_bullish or is_bearish):
                 continue
 
-            # Compute realized commodity ATR from historical daily bars
-            atr = ltp * 0.015  # 1.5% baseline
-            try:
-                df = get_ohlcv(clean_sym, exchange="MCX", days=20, interval="day")
-                if df is not None and len(df) >= 5:
-                    high = df["High"] if "High" in df.columns else df["high"]
-                    low = df["Low"] if "Low" in df.columns else df["low"]
-                    close = df["Close"] if "Close" in df.columns else df["close"]
-                    tr = pd.concat(
-                        [high - low, (high - close.shift(1)).abs(), (low - close.shift(1)).abs()],
-                        axis=1,
-                    ).max(axis=1)
-                    atr = float(tr.rolling(14).mean().iloc[-1]) if len(tr) >= 14 else float(tr.mean())
-            except Exception:
-                pass
-
-            risk_pts = round(max(atr * 0.75, ltp * 0.008), 2)
+            # 2. Calibrated Intraday Commodity Stop Loss Risk (Points)
+            # Intraday commodities require nimble, structural risk:
+            # - CRUDEOIL (₹6,500): 18-28 pts (~0.35% = ₹1,800 to ₹2,800 risk per 100-bbl lot)
+            # - NATURALGAS (₹260): 2.0-3.5 pts (~1.0% = ₹2,500 to ₹4,375 risk per 1250-MMBtu lot)
+            # - GOLD (₹1,35,000): 180-350 pts (~0.2% = ₹180 to ₹350 per 10g)
+            # - SILVER (₹2,00,000): 400-750 pts (~0.25% = ₹12,000 to ₹22,500 per 30-kg lot)
+            # - COPPER (₹850): 3.0-5.5 pts (~0.4% = ₹7,500 to ₹13,750 per 2500-kg lot)
+            intraday_risk_map = {
+                "CRUDEOIL": max(18.0, min(28.0, round(ltp * 0.0035, 1))),
+                "CRUDEOILM": max(18.0, min(28.0, round(ltp * 0.0035, 1))),
+                "NATURALGAS": max(2.0, min(3.5, round(ltp * 0.010, 1))),
+                "NATGASMINI": max(2.0, min(3.5, round(ltp * 0.010, 1))),
+                "GOLD": max(180.0, min(350.0, round(ltp * 0.0020, 0))),
+                "GOLDM": max(180.0, min(350.0, round(ltp * 0.0020, 0))),
+                "SILVER": max(400.0, min(750.0, round(ltp * 0.0025, 0))),
+                "SILVERM": max(400.0, min(750.0, round(ltp * 0.0025, 0))),
+                "COPPER": max(3.0, min(5.5, round(ltp * 0.0040, 1))),
+            }
+            risk_pts = intraday_risk_map.get(clean_sym, round(max(5.0, ltp * 0.0035), 1))
+            atr = risk_pts
             direction = "BULLISH" if is_bullish else "BEARISH"
             alert_type = "COMMODITY_MOMENTUM"
             alert_id = f"comm-{clean_sym.lower()}-{datetime.now(IST).strftime('%Y%m%d%H%M')}"
@@ -3513,20 +3521,32 @@ class AutoAlertEngine:
             lot_map = {"CRUDEOIL": 100, "GOLD": 1, "SILVER": 30, "NATURALGAS": 1250, "COPPER": 2500}
             lot_sz = lot_map.get(clean_sym, 1)
 
+            has_real_vwap = abs(ltp - vwap) >= 2.0 and vwap != ltp
             if is_bullish:
                 sl_price = round(ltp - risk_pts, 2)
                 t1_price = round(ltp + 1.8 * risk_pts, 2)
                 t2_price = round(ltp + 3.2 * risk_pts, 2)
-                headline = f"🛢️ [REAL/LIVE] MCX MOMENTUM: {clean_sym} +{chg:.1f}% Reclaiming VWAP (₹{vwap:,.1f})"
-                summary = f"Institutional breakout in {clean_sym}: Trading at ₹{ltp:,.1f} (+{chg:.1f}%). VWAP support at ₹{vwap:,.1f}."
+                if has_real_vwap:
+                    headline = f"MCX MOMENTUM: {clean_sym} +{chg:.1f}% Reclaiming VWAP (₹{vwap:,.1f})"
+                    summary = f"Institutional breakout in {clean_sym}: Trading at ₹{ltp:,.1f} (+{chg:.1f}%). VWAP support at ₹{vwap:,.1f}."
+                else:
+                    headline = f"MCX MOMENTUM: {clean_sym} +{chg:.1f}% Breakout @ ₹{ltp:,.1f}"
+                    summary = f"Institutional breakout in {clean_sym}: Trading at ₹{ltp:,.1f} (+{chg:.1f}%). Session momentum active."
                 action = "BUY_FUTURES"
             else:
                 sl_price = round(ltp + risk_pts, 2)
                 t1_price = round(ltp - 1.8 * risk_pts, 2)
                 t2_price = round(ltp - 3.2 * risk_pts, 2)
-                headline = f"⚡ [REAL/LIVE] MCX BREAKDOWN: {clean_sym} {chg:.1f}% Lost VWAP (₹{vwap:,.1f})"
-                summary = f"Severe session weakness in {clean_sym}: Trading at ₹{ltp:,.1f} ({chg:.1f}%). Broken below VWAP ₹{vwap:,.1f}."
-            # Resolve defined-risk options contract alternative (ATM/near-OTM Call/Put)
+                if has_real_vwap:
+                    headline = f"MCX BREAKDOWN: {clean_sym} {chg:.1f}% Lost VWAP (₹{vwap:,.1f})"
+                    summary = f"Severe session weakness in {clean_sym}: Trading at ₹{ltp:,.1f} ({chg:.1f}%). Broken below VWAP ₹{vwap:,.1f}."
+                else:
+                    headline = f"MCX BREAKDOWN: {clean_sym} {chg:.1f}% Drop @ ₹{ltp:,.1f}"
+                    summary = f"Severe session weakness in {clean_sym}: Trading at ₹{ltp:,.1f} ({chg:.1f}%). Session selling active."
+                action = "SELL_SHORT_FUTURES"
+
+            # 3. Resolve defined-risk options contract alternative (ATM/near-OTM Call/Put)
+            # Scale option stop loss by Delta (~0.50) so option risk matches the futures invalidation
             opt_recommendation = None
             try:
                 from market.options import get_options_chain
@@ -3539,15 +3559,16 @@ class AutoAlertEngine:
                 if filtered:
                     closest_opt = min(filtered, key=lambda c: abs(c.strike - ltp))
                     opt_prem = closest_opt.last_price
-                    opt_risk = round(max(0.50, opt_prem * 0.35), 2)
-                    opt_t1 = round(opt_prem + 1.8 * opt_risk, 2)
-                    opt_t2 = round(opt_prem + 3.2 * opt_risk, 2)
+                    # Scale option risk to underlying futures riskpts (Delta approx 0.50)
+                    opt_risk = round(max(1.0, min(opt_prem * 0.35, risk_pts * 0.52)), 1)
+                    opt_t1 = round(opt_prem + 1.8 * opt_risk, 1)
+                    opt_t2 = round(opt_prem + 3.2 * opt_risk, 1)
                     opt_recommendation = {
                         "contract": closest_opt.symbol,
                         "strike": closest_opt.strike,
                         "option_type": opt_type,
                         "ltp": opt_prem,
-                        "stop_loss": round(max(0.05, opt_prem - opt_risk), 2),
+                        "stop_loss": round(max(0.05, opt_prem - opt_risk), 1),
                         "target_1": opt_t1,
                         "target_2": opt_t2,
                         "risk_reward": "1:2.4",
