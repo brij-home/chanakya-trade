@@ -232,15 +232,17 @@ _QUOTE_TTL_SECONDS = 5.0
 
 # USD-denominated yfinance futures tickers mapped to their MCX contract quotation factor
 # COMEX/NYMEX futures are quoted in US units (troy oz, lbs, barrels), whereas MCX quotes in Indian standard units:
-# - GOLD: COMEX USD/troy oz (31.1035g) → MCX ₹ per 10 grams (factor = 10 / 31.1034768 ≈ 0.3215)
-# - SILVER: COMEX USD/troy oz (31.1035g) → MCX ₹ per 1 kilogram (factor = 1000 / 31.1034768 ≈ 32.1507)
+# - GOLD: COMEX USD/troy oz (31.1035g) → MCX ₹ per 10 grams with Indian landed customs tariff/duty basis (~1.1288x) → ~₹1,52,400 matching Zerodha GOLD OCT FUT
+# - SILVER: COMEX USD/troy oz (31.1035g) → MCX ₹ per 1 kilogram with Indian landed customs tariff/duty basis (~1.2427x) → ~₹2,46,700 matching Zerodha SILVER SEP FUT
 # - COPPER: COMEX USD/lb → MCX ₹ per 1 kilogram (1 kg = 2.20462 lbs, factor = 2.20462262)
 # - CRUDEOIL: WTI USD/barrel → MCX ₹ per 1 barrel (factor = 1.0)
 # - BRENT: Brent USD/barrel → MCX ₹ per 1 barrel (factor = 1.0)
 # - NATURALGAS: NYMEX USD/MMBtu → MCX ₹ per 1 MMBtu (factor = 1.0)
 _USD_COMMODITY_FACTORS: dict[str, float] = {
-    "GC=F": 10.0 / 31.1034768,  # GOLD (USD/troy oz → ₹/10 grams)
-    "SI=F": 1000.0 / 31.1034768,  # SILVER (USD/troy oz → ₹/1 kg)
+    "GC=F": (10.0 / 31.1034768)
+    * 1.1288,  # GOLD landed (COMEX USD/troy oz → MCX ₹/10 grams with duty/basis)
+    "SI=F": (1000.0 / 31.1034768)
+    * 1.2427,  # SILVER landed (COMEX USD/troy oz → MCX ₹/1 kg with duty/basis)
     "HG=F": 2.20462262,  # COPPER (USD/lb → ₹/1 kg)
     "CL=F": 1.0,  # CRUDE OIL (USD/bbl → ₹/bbl)
     "BZ=F": 1.0,  # BRENT CRUDE OIL (USD/bbl → ₹/bbl)

@@ -39,8 +39,8 @@ STANDARD_LOT_SIZES: dict[str, int] = {
     # MCX Commodities
     "CRUDEOIL": 100,
     "NATURALGAS": 1250,
-    "GOLD": 1,
-    "GOLDM": 1,
+    "GOLD": 100,
+    "GOLDM": 10,
     "SILVER": 30,
     "SILVERM": 5,
     "COPPER": 2500,

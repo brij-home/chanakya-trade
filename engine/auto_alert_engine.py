@@ -2084,6 +2084,15 @@ class AutoAlertEngine:
                                 if alert.ltp > 0:
                                     corr_lower = min(corr_lower, round(alert.ltp * 0.98, 1))
                                     corr_upper = max(corr_lower + 0.1, round(alert.ltp * 1.02, 1))
+                                    # Strict target clamping: Long entry range must NEVER exceed or touch Target 1
+                                    if alert.target_level > alert.ltp:
+                                        max_allowed_upper = round(
+                                            alert.ltp + 0.35 * (alert.target_level - alert.ltp), 1
+                                        )
+                                        corr_upper = min(
+                                            corr_upper,
+                                            max(corr_lower + 0.1, max_allowed_upper),
+                                        )
                                     if corr_lower <= alert.stop_loss:
                                         corr_lower = round(alert.stop_loss + 0.5, 1)
                                         corr_upper = max(corr_lower + 0.5, corr_upper)
@@ -2103,6 +2112,18 @@ class AutoAlertEngine:
                                 corr_lower = min(lower_val, round(corr_upper - max(0.5, step), 1))
                                 if corr_lower <= 0:
                                     corr_lower = max(0.5, round(corr_upper * 0.95, 1))
+                                if alert.ltp > 0:
+                                    corr_upper = max(corr_upper, round(alert.ltp * 1.02, 1))
+                                    corr_lower = min(corr_lower, round(alert.ltp * 0.98, 1))
+                                    # Strict target clamping: Short entry range must NEVER drop below or touch Target 1
+                                    if 0 < alert.target_level < alert.ltp:
+                                        min_allowed_lower = round(
+                                            alert.ltp - 0.35 * (alert.ltp - alert.target_level), 1
+                                        )
+                                        corr_lower = max(
+                                            corr_lower,
+                                            min(corr_upper - 0.1, min_allowed_lower),
+                                        )
                                 alert.actionable_plan["entry_range"] = (
                                     f"₹{corr_lower:,.1f} – ₹{corr_upper:,.1f}"
                                 )
@@ -2136,6 +2157,10 @@ class AutoAlertEngine:
                     "SQUEEZE_BREAKOUT",
                     "CONFLUENCE_INFLECTION",
                     "ASYMMETRIC_OPPORTUNITY",
+                    # Commodity and currency alerts must pass macro-aware AI scrutiny
+                    # to filter session noise, DXY artifacts, and thin-market traps.
+                    "COMMODITY_MOMENTUM",
+                    "CURRENCY_BREAKOUT",
                 )
                 if is_gated:
                     scrutiny = alert_scrutiny_auditor.scrutinize_alert(alert, timeout=2.5)
@@ -3553,22 +3578,22 @@ class AutoAlertEngine:
                 continue
 
             # 2. Calibrated Intraday Commodity Stop Loss Risk (Points)
-            # Intraday commodities require nimble, structural risk:
-            # - CRUDEOIL (₹6,500): 18-28 pts (~0.35% = ₹1,800 to ₹2,800 risk per 100-bbl lot)
-            # - NATURALGAS (₹260): 2.0-3.5 pts (~1.0% = ₹2,500 to ₹4,375 risk per 1250-MMBtu lot)
-            # - GOLD (₹1,35,000): 180-350 pts (~0.2% = ₹180 to ₹350 per 10g)
-            # - SILVER (₹2,00,000): 400-750 pts (~0.25% = ₹12,000 to ₹22,500 per 30-kg lot)
-            # - COPPER (₹850): 3.0-5.5 pts (~0.4% = ₹7,500 to ₹13,750 per 2500-kg lot)
+            # Intraday commodities require nimble, structural risk aligned with live contract CMP:
+            # - CRUDEOIL (₹9,700): 18-35 pts (~0.35% = ₹1,800 to ₹3,500 risk per 100-bbl lot)
+            # - NATURALGAS (₹270): 2.0-4.5 pts (~1.0% = ₹2,500 to ₹5,625 risk per 1250-MMBtu lot)
+            # - GOLD (₹1,52,400): 250-650 pts (~0.25% = ₹25,000 to ₹65,000 per 1-kg lot, ₹2,500 to ₹6,500 per GoldM)
+            # - SILVER (₹2,46,700): 600-1500 pts (~0.30% = ₹18,000 to ₹45,000 per 30-kg lot)
+            # - COPPER (₹1,375): 3.0-7.5 pts (~0.4% = ₹7,500 to ₹18,750 per 2500-kg lot)
             intraday_risk_map = {
-                "CRUDEOIL": max(18.0, min(28.0, round(ltp * 0.0035, 1))),
-                "CRUDEOILM": max(18.0, min(28.0, round(ltp * 0.0035, 1))),
-                "NATURALGAS": max(2.0, min(3.5, round(ltp * 0.010, 1))),
-                "NATGASMINI": max(2.0, min(3.5, round(ltp * 0.010, 1))),
-                "GOLD": max(180.0, min(350.0, round(ltp * 0.0020, 0))),
-                "GOLDM": max(180.0, min(350.0, round(ltp * 0.0020, 0))),
-                "SILVER": max(400.0, min(750.0, round(ltp * 0.0025, 0))),
-                "SILVERM": max(400.0, min(750.0, round(ltp * 0.0025, 0))),
-                "COPPER": max(3.0, min(5.5, round(ltp * 0.0040, 1))),
+                "CRUDEOIL": max(18.0, min(35.0, round(ltp * 0.0035, 1))),
+                "CRUDEOILM": max(18.0, min(35.0, round(ltp * 0.0035, 1))),
+                "NATURALGAS": max(2.0, min(4.5, round(ltp * 0.010, 1))),
+                "NATGASMINI": max(2.0, min(4.5, round(ltp * 0.010, 1))),
+                "GOLD": max(250.0, min(650.0, round(ltp * 0.0025, 0))),
+                "GOLDM": max(250.0, min(650.0, round(ltp * 0.0025, 0))),
+                "SILVER": max(600.0, min(1500.0, round(ltp * 0.0030, 0))),
+                "SILVERM": max(600.0, min(1500.0, round(ltp * 0.0030, 0))),
+                "COPPER": max(3.0, min(7.5, round(ltp * 0.0040, 1))),
             }
             risk_pts = intraday_risk_map.get(clean_sym, round(max(5.0, ltp * 0.0035), 1))
             atr = risk_pts
@@ -3576,8 +3601,16 @@ class AutoAlertEngine:
             alert_type = "COMMODITY_MOMENTUM"
             alert_id = f"comm-{clean_sym.lower()}-{datetime.now(IST).strftime('%Y%m%d%H%M')}"
 
-            # Contract lot sizes
-            lot_map = {"CRUDEOIL": 100, "GOLD": 1, "SILVER": 30, "NATURALGAS": 1250, "COPPER": 2500}
+            # Contract lot sizes: Standard GOLD = 100 (1 kg = 100 x 10g units), GOLDM = 10 (100g)
+            lot_map = {
+                "CRUDEOIL": 100,
+                "GOLD": 100,
+                "GOLDM": 10,
+                "SILVER": 30,
+                "SILVERM": 5,
+                "NATURALGAS": 1250,
+                "COPPER": 2500,
+            }
             lot_sz = lot_map.get(clean_sym, 1)
 
             has_real_vwap = abs(ltp - vwap) >= 2.0 and vwap != ltp
@@ -3636,15 +3669,24 @@ class AutoAlertEngine:
             except Exception:
                 opt_recommendation = None
 
+            # Bounded Entry Range: strictly clamped within Stop-Loss and Target 1
+            rr_ratio_t1 = round(abs(t1_price - ltp) / max(0.01, abs(ltp - sl_price)), 1)
+            if is_bullish:
+                e_low = round(max(sl_price + 0.5, ltp - 0.25 * risk_pts), 1)
+                e_high = round(min(t1_price - 0.25 * risk_pts, ltp + 0.25 * risk_pts), 1)
+            else:
+                e_high = round(min(sl_price - 0.5, ltp + 0.25 * risk_pts), 1)
+                e_low = round(max(t1_price + 0.25 * risk_pts, ltp - 0.25 * risk_pts), 1)
+
             plan_dict = {
                 "action": action,
                 "segment": "COMMODITY",
                 "contract": f"MCX:{clean_sym}",
-                "entry_range": f"₹{round(ltp * 0.997, 1):,.1f} – ₹{round(ltp * 1.003, 1):,.1f}",
+                "entry_range": f"₹{e_low:,.1f} – ₹{e_high:,.1f}",
                 "stop_loss": f"₹{sl_price:,.1f}",
                 "target": f"₹{t1_price:,.1f}",
                 "target_2": f"₹{t2_price:,.1f}",
-                "risk_reward": "1:2.4",
+                "risk_reward": f"1:{rr_ratio_t1}",
                 "lot_size": lot_sz,
                 "when_to_buy": f"Enter on 5m candle closing in direction above/below VWAP ₹{vwap:,.1f}.",
                 "when_to_wait": f"Do not chase if move exceeds {round(abs(chg) + 1.0, 1)}%.",
@@ -3665,6 +3707,11 @@ class AutoAlertEngine:
             )
             is_authentic_live = not (is_mock_quote or is_test_env)
 
+            from engine.trade_plan import get_market_status
+
+            mcx_status_dict = get_market_status("MCX")
+            mcx_status = mcx_status_dict.get("status", "LIVE")
+
             alert = AutoAlert(
                 alert_id=alert_id,
                 alert_type=alert_type,
@@ -3682,6 +3729,7 @@ class AutoAlertEngine:
                 created_at=now_iso,
                 is_live=is_authentic_live,
                 environment="LIVE" if is_authentic_live else "TEST",
+                market_status=mcx_status,
                 metrics={
                     "change_pct": chg,
                     "volume": vol,
@@ -3765,6 +3813,11 @@ class AutoAlertEngine:
             )
             is_authentic_live = not (is_mock_quote or is_test_env)
 
+            from engine.trade_plan import get_market_status
+
+            cds_status_dict = get_market_status("CDS")
+            cds_status = cds_status_dict.get("status", "LIVE")
+
             alert = AutoAlert(
                 alert_id=alert_id,
                 alert_type=alert_type,
@@ -3782,6 +3835,7 @@ class AutoAlertEngine:
                 created_at=now_iso,
                 is_live=is_authentic_live,
                 environment="LIVE" if is_authentic_live else "TEST",
+                market_status=cds_status,
                 metrics={
                     "change_pct": chg,
                     "segment": "CURRENCY",

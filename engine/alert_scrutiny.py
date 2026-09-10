@@ -378,7 +378,13 @@ class AlertScrutinyAuditor:
         )
 
     def _build_scrutiny_prompt(self, alert: Any) -> str:
-        """Constructs a compact, high-signal institutional JSON audit prompt."""
+        """Constructs a compact, high-signal institutional JSON audit prompt.
+
+        For COMMODITY_MOMENTUM and CURRENCY_BREAKOUT alerts a macro-aware
+        prompt is emitted that checks DXY alignment, MCX session traps,
+        domestic basis risk and geopolitical headline noise — instead of
+        the equity-derivative checks used for equity alerts.
+        """
         ltp = float(getattr(alert, "ltp", 0.0) or 0.0)
         sl = float(getattr(alert, "stop_loss", 0.0) or 0.0)
         t1 = float(getattr(alert, "target_level", 0.0) or 0.0)
@@ -399,6 +405,64 @@ class AlertScrutinyAuditor:
         reward_pts = abs(t1 - ltp)
         rr_str = f"1:{reward_pts / risk_pts:.2f}" if risk_pts > 0 else "N/A"
 
+        # ── Macro-Aware Prompt for Commodity and Currency Alerts ──────────────
+        is_commodity = alert_type == "COMMODITY_MOMENTUM"
+        is_currency = alert_type == "CURRENCY_BREAKOUT"
+
+        if is_commodity:
+            chg_pct = float(metrics.get("change_pct", 0.0) or 0.0)
+            vwap = float(metrics.get("vwap", ltp) or ltp)
+            has_opt_chain = bool(metrics.get("has_options_chain", False))
+            return f"""You are a senior commodity macro trader and CRO at an institutional MCX desk.
+Perform strict pre-dispatch scrutiny of this LIVE MCX commodity momentum alert:
+
+COMMODITY: {sym} | ACTION: {trade_desc} | DIRECTION: {direction}
+CMP: ₹{ltp:,.2f} | VWAP: ₹{vwap:,.2f} | Session Change: {chg_pct:+.2f}%
+STOP LOSS: ₹{sl:,.2f} | TARGET 1: ₹{t1:,.2f} | R:R: {rr_str}
+OPTIONS CHAIN AVAILABLE: {has_opt_chain}
+HEADLINE: {headline}
+SUMMARY: {summary}
+
+Perform 3 Institutional Commodity Scrutiny Tests:
+1. MACRO ALIGNMENT: Is this move backed by genuine macro driver (DXY reversal, API crude build/draw, COMEX gold accumulation, LME copper demand) — or is it a late-session MCX rollover artifact or thin-market echo?
+2. DEVIL'S ADVOCATE: Identify the #1 trap: (e.g., MCX session closing gap vs COMEX, pre-weekend position squaring, domestic INR basis distortion, stop-hunt sweep without fundamental follow-through).
+3. VERDICT: "APPROVED" (real macro-backed move, Score >= 75), "CONDITIONAL" (Score 70-74, enter only on 5m candle confirmation), or "REJECTED" (session trap / basis distortion, Score < 70).
+
+Respond STRICTLY in valid JSON:
+{{
+  "verdict": "APPROVED" | "CONDITIONAL" | "REJECTED",
+  "score": <integer 40-95>,
+  "logic_confirmation": "<one crisp sentence: why this commodity move has genuine macro institutional backing>",
+  "trap_risk_warning": "<one crisp sentence: #1 commodity-specific trap or session artifact to watch>",
+  "actionable_guidance": "<one crisp sentence: exact MCX entry discipline and trailing stop rule>"
+}}"""
+
+        if is_currency:
+            chg_pct = float(metrics.get("change_pct", 0.0) or 0.0)
+            return f"""You are a senior FX macro strategist and CRO at an institutional currency derivatives desk.
+Perform strict pre-dispatch scrutiny of this LIVE NSE CDS currency breakout alert:
+
+PAIR: {sym} | ACTION: {trade_desc} | DIRECTION: {direction}
+CMP: ₹{ltp:.4f} | Session Change: {chg_pct:+.3f}%
+STOP LOSS: ₹{sl:.4f} | TARGET 1: ₹{t1:.4f} | R:R: {rr_str}
+HEADLINE: {headline}
+SUMMARY: {summary}
+
+Perform 3 Institutional FX Scrutiny Tests:
+1. MACRO ALIGNMENT: Is this INR move driven by genuine macro catalyst (RBI policy, global risk-off/on, crude oil import bill, FII equity flow reversal) — or is it a post-equity thin-market fixup or squaring artifact?
+2. DEVIL'S ADVOCATE: Identify the #1 trap: (e.g., RBI intervention band proximity, expiry settlement squaring, US session liquidity vacuum creating false breakout, INR correlation with equity reversal).
+3. VERDICT: "APPROVED" (genuine macro catalyst, Score >= 75), "CONDITIONAL" (Score 70-74), or "REJECTED" (thin-market artifact, Score < 70).
+
+Respond STRICTLY in valid JSON:
+{{
+  "verdict": "APPROVED" | "CONDITIONAL" | "REJECTED",
+  "score": <integer 40-95>,
+  "logic_confirmation": "<one crisp sentence: why this currency move reflects genuine macro institutional flow>",
+  "trap_risk_warning": "<one crisp sentence: #1 FX-specific trap or post-equity artifact to watch>",
+  "actionable_guidance": "<one crisp sentence: exact CDS entry discipline with spread and trailing stop rule>"
+}}"""
+
+        # ── Standard Equity / Derivative Prompt ───────────────────────────────
         return f"""You are the Chief Risk Officer and Devil's Advocate for an institutional quant trading desk.
 Perform a strict pre-dispatch scrutiny of this real-time Indian market trade setup:
 
@@ -457,6 +521,74 @@ Respond STRICTLY in valid JSON matching this schema:
 
         score = min(92, max(75, score))
 
+        # ── Commodity Quant Fallback ──────────────────────────────────────────
+        if alert_type == "COMMODITY_MOMENTUM":
+            chg_pct = float(metrics.get("change_pct", 0.0) or 0.0)
+            vwap = float(metrics.get("vwap", ltp) or ltp)
+            if direction in ("BEARISH", "SHORT", "SELL"):
+                logic = (
+                    f"Quant-validated MCX {sym} breakdown: session decline of {chg_pct:.1f}% below VWAP ₹{vwap:,.1f} "
+                    f"with calibrated {rr:.1f}R downside asymmetry; COMEX basis suggests genuine selling pressure."
+                )
+                trap = (
+                    f"Watch for COMEX midnight gap fill or INR basis correction reversing the MCX breakdown; "
+                    f"invalidate immediately if price reclaims VWAP ₹{vwap:,.1f}."
+                )
+                guidance = f"Short MCX {sym} near ₹{ltp:,.1f}; SL above ₹{sl:,.1f}; book 50% at ₹{t1:,.1f} and trail on 5m candle."
+            else:
+                logic = (
+                    f"Quant-validated MCX {sym} momentum: session gain of {chg_pct:+.1f}% reclaiming VWAP ₹{vwap:,.1f} "
+                    f"with calibrated {rr:.1f}R upside asymmetry; DXY softness supports domestic gold/crude bid."
+                )
+                trap = (
+                    f"Watch for MCX session closing rollover pressure or thin-book stop-hunt above ₹{ltp:,.1f}; "
+                    f"do not chase if price extends beyond 1.5× trigger move without VWAP reclaim."
+                )
+                guidance = f"Long MCX {sym} near ₹{ltp:,.1f}; SL below ₹{sl:,.1f}; book 50% at ₹{t1:,.1f} and trail on 5m candle."
+            return ScrutinyResult(
+                status="APPROVED",
+                score=score,
+                logic_confirmation=logic,
+                trap_risk_warning=trap,
+                actionable_guidance=guidance,
+                sanctity_matrix=flags,
+                auditor_model="QUANT_FALLBACK",
+            )
+
+        # ── Currency Quant Fallback ───────────────────────────────────────────
+        if alert_type == "CURRENCY_BREAKOUT":
+            chg_pct = float(metrics.get("change_pct", 0.0) or 0.0)
+            if direction in ("BEARISH", "SHORT", "SELL"):
+                logic = (
+                    f"Quant-validated {sym} INR depreciation: {chg_pct:.3f}% macro drop with "
+                    f"1:{rr:.1f} R:R asymmetry; consistent with FII equity outflow or global risk-off trigger."
+                )
+                trap = (
+                    f"RBI intervention band proximity or sudden risk-on reversal could squeeze shorts; "
+                    f"watch for price reclaim above ₹{sl:.4f}."
+                )
+                guidance = f"Short {sym} near ₹{ltp:.4f}; SL ₹{sl:.4f}; T1 ₹{t1:.4f}; close 50% at T1 and trail tightly."
+            else:
+                logic = (
+                    f"Quant-validated {sym} INR appreciation: {chg_pct:+.3f}% macro move with "
+                    f"1:{rr:.1f} R:R asymmetry; consistent with FII equity inflow or crude drawdown."
+                )
+                trap = (
+                    f"Post-equity session thin liquidity could amplify false breakout; "
+                    f"invalidate if price falls back below ₹{sl:.4f}."
+                )
+                guidance = f"Long {sym} near ₹{ltp:.4f}; SL ₹{sl:.4f}; T1 ₹{t1:.4f}; close 50% at T1 and trail tightly."
+            return ScrutinyResult(
+                status="APPROVED",
+                score=score,
+                logic_confirmation=logic,
+                trap_risk_warning=trap,
+                actionable_guidance=guidance,
+                sanctity_matrix=flags,
+                auditor_model="QUANT_FALLBACK",
+            )
+
+        # ── Generic Equity / Derivative Fallback ─────────────────────────────
         if is_option_buy:
             if opt_type == "PE" or "PE" in contract or "PUT" in action or direction == "BEARISH":
                 opt_lbl = contract or f"{sym} {opt_type or 'PE'}"

@@ -913,6 +913,14 @@ COUNCIL_PRESETS: dict[str, list[str]] = {
     "multibagger": ["kedia", "buffett", "munger", "jhunjhunwala", "forensic"],
     "macro_regime": ["soros", "jhunjhunwala", "simons", "forensic"],
     "core_value": ["buffett", "munger", "lynch", "forensic"],
+    # Commodity & Currency Specialist Councils
+    # commodity_macro: Adversarial macro regime (Soros) + defined-risk convexity (Taleb) +
+    #   statistical-arb structure (Simons) + SMC liquidity sweep detection.
+    #   Use for MCX COMMODITY_MOMENTUM alerts to catch DXY/COMEX basis traps.
+    "commodity_macro": ["soros", "taleb", "simons", "smc"],
+    # currency_macro: Macro reflexivity (Soros) + stat-arb mean-reversion (Simons) +
+    #   forensic quality (rules out flow-manipulation traps on thin INR crosses).
+    "currency_macro": ["soros", "simons", "forensic"],
 }
 
 

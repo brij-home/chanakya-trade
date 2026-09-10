@@ -17,6 +17,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 from datetime import date, timedelta
+from typing import Any, Optional
 
 from rich.console import Console
 from rich.panel import Panel
@@ -567,6 +568,45 @@ def black_76_price_and_greeks(
     }
 
 
+def get_mcx_prompt_expiry_and_dte(sym: str, as_of: Optional[Any] = None) -> tuple[str, int]:
+    """
+    Resolves the exact prompt calendar expiry date and DTE for MCX commodities:
+      - CRUDEOIL / CRUDEOILM: Mid-month cycle (~15th-17th of month, 2 business days prior to futures expiry)
+      - NATURALGAS / NATGASMINI: ~24th-26th of month
+      - GOLD / GOLDM / SILVER / SILVERM: ~27th of month (matching Zerodha 27SEP)
+      - COPPER / BASE METALS: ~27th-28th of month
+    """
+    from datetime import datetime, timezone, timedelta, date
+
+    IST = timezone(timedelta(hours=5, minutes=30))
+    now_dt = as_of or datetime.now(IST)
+    today = now_dt.date() if isinstance(now_dt, datetime) else now_dt
+
+    clean = sym.upper().replace("MCX:", "").strip()
+    if clean in ("CRUDEOIL", "CRUDEOILM"):
+        exp_day = 16  # mid-month option expiry for Crude Oil
+    elif clean in ("NATURALGAS", "NATGASMINI"):
+        exp_day = 25
+    elif clean in ("GOLD", "GOLDM", "SILVER", "SILVERM"):
+        exp_day = 27
+    else:
+        exp_day = 27
+
+    try:
+        cand = date(today.year, today.month, exp_day)
+    except ValueError:
+        cand = date(today.year, today.month, 28)
+
+    # If prompt date has already expired, roll to next month
+    if cand <= today:
+        next_m = 1 if today.month == 12 else today.month + 1
+        next_y = today.year + 1 if today.month == 12 else today.year
+        cand = date(next_y, next_m, exp_day)
+
+    dte = max(1, (cand - today).days)
+    return cand.strftime("%Y-%m-%d"), dte
+
+
 def build_commodity_option_chain_synthetic(
     underlying: str,
     futures_price: float,
@@ -614,16 +654,22 @@ def build_commodity_option_chain_synthetic(
     vol = iv if iv is not None else base_iv_map.get(sym, 0.30)
     lot_size = STANDARD_LOT_SIZES.get(sym, 1)
 
-    dte = max(1, days_to_expiry)
-    T = dte / 365.0
-
     if not expiry_date:
-        from datetime import datetime, timezone, timedelta
-
-        IST = timezone(timedelta(hours=5, minutes=30))
-        target_exp = (datetime.now(IST) + timedelta(days=dte)).strftime("%Y-%m-%d")
+        target_exp, calc_dte = get_mcx_prompt_expiry_and_dte(sym)
+        # Use calculated prompt calendar DTE unless caller explicitly specified a non-default custom DTE
+        dte = days_to_expiry if (days_to_expiry is not None and days_to_expiry != 14) else calc_dte
     else:
         target_exp = expiry_date
+        try:
+            from datetime import datetime, timezone, timedelta
+
+            IST = timezone(timedelta(hours=5, minutes=30))
+            exp_d = datetime.strptime(expiry_date, "%Y-%m-%d").date()
+            dte = max(1, (exp_d - datetime.now(IST).date()).days)
+        except Exception:
+            dte = max(1, days_to_expiry or 14)
+
+    T = dte / 365.0
 
     # Find nearest ATM strike
     atm_strike = round(F / step) * step
@@ -654,9 +700,16 @@ def build_commodity_option_chain_synthetic(
             dist = abs(strike_val - F) / step
             mock_oi = max(50, int(5000 * math.exp(-0.15 * dist)))
 
-            contract_symbol = (
-                f"MCX:{sym}{target_exp.replace('-', '')[2:]}{strike_int}{opt_type}"
-            )
+            try:
+                from datetime import datetime
+
+                d_obj = datetime.strptime(target_exp, "%Y-%m-%d")
+                exp_tag = d_obj.strftime("%y%b").upper()
+                contract_symbol = f"MCX:{sym}{exp_tag}{strike_int}{opt_type}"
+            except Exception:
+                contract_symbol = (
+                    f"MCX:{sym}{target_exp.replace('-', '')[2:]}{strike_int}{opt_type}"
+                )
 
             contracts.append(
                 OptionsContract(

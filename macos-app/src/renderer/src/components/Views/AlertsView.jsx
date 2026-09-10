@@ -276,6 +276,56 @@ function mergeAlertsInPlace(prevAlerts = [], freshAlerts = []) {
 }
 
 /**
+ * classifyAlertSegment — canonical single-pass segment classifier for an alert.
+ * Returns: 'FNO' | 'EQUITY' | 'COMMODITY' | 'CURRENCY'
+ */
+const MCX_COMMODITY_SYMBOLS = new Set([
+  'CRUDEOIL', 'CRUDEOILM', 'GOLD', 'GOLDM', 'GOLDGUINEA', 'SILVER', 'SILVERM', 'SILVERMIC',
+  'NATURALGAS', 'COPPER', 'ALUMINIUM', 'ZINC', 'LEAD', 'NICKEL', 'MENTHAOIL',
+])
+const CDS_CURRENCY_SYMBOLS = new Set(['USDINR', 'EURINR', 'GBPINR', 'JPYINR', 'EURUSD', 'GBPUSD'])
+const NSE_INDEX_SYMBOLS = new Set(['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'SENSEX', 'BANKEX'])
+
+function classifyAlertSegment(alert) {
+  const cleanSym = (alert.symbol || '').replace(/^(NSE|BSE|MCX|NFO|CDS):/, '').trim().toUpperCase()
+  const exch = (alert.exchange || '').toUpperCase()
+  const seg = (alert.segment || alert.metrics?.segment || alert.actionable_plan?.segment || '').toUpperCase()
+
+  // Commodity (MCX) — check before FNO to avoid misclassification
+  if (
+    exch === 'MCX' ||
+    seg === 'MCX' ||
+    alert.symbol?.toUpperCase().startsWith('MCX:') ||
+    MCX_COMMODITY_SYMBOLS.has(cleanSym)
+  ) return 'COMMODITY'
+
+  // Currency (CDS)
+  if (
+    exch === 'CDS' ||
+    seg === 'CDS' ||
+    CDS_CURRENCY_SYMBOLS.has(cleanSym)
+  ) return 'CURRENCY'
+
+  // F&O / Derivatives
+  const isIndex = NSE_INDEX_SYMBOLS.has(cleanSym) || seg === 'INDEX'
+  const isFut = Boolean(
+    alert.contract_symbol?.toUpperCase().includes('FUT') ||
+    alert.symbol?.toUpperCase().includes('FUT') ||
+    alert.derivative_type === 'FUT' ||
+    alert.alert_type === 'FUTURES'
+  )
+  const isDeriv = Boolean(
+    isIndex || isFut ||
+    alert.option_type || alert.strike || alert.contract_symbol || alert.expiry_date ||
+    alert.alert_type === 'GAMMA_BLAST' || alert.alert_type === 'OPTIONS_MOMENTUM' ||
+    (seg === 'FNO' && (alert.option_type || alert.strike))
+  )
+  if (isDeriv) return 'FNO'
+
+  return 'EQUITY'
+}
+
+/**
  * Parses and formats option/future expiry details with explicit month name,
  * weekday, specific week date, and Days to Expiry (DTE).
  */
@@ -1943,14 +1993,16 @@ function AlertsViewInner({ onOpenOrderTicket }) {
   const [autoLoading, setAutoLoading] = useState(true)
   const [scanning, setScanning] = useState(false)
   const [testing, setTesting] = useState(false)
-  const [showTestTools, setShowTestTools] = useState(false)
+  const [showTools, setShowTools] = useState(false) // Unified maintenance + simulation dropdown
   const [searchQuery, setSearchQuery] = useState('')
   const [selectedDirection, setSelectedDirection] = useState('ALL') // ALL | BULLISH | BEARISH
-  const [selectedType, setSelectedType] = useState('ALL') // ALL | DERIVATIVE | CASH
+  // Unified 5-way segment rail: ALL | FNO | EQUITY | COMMODITY | CURRENCY
+  const [selectedSegment, setSelectedSegment] = useState('ALL')
   const [selectedFilter, setSelectedFilter] = useState('ALL')
   const [selectedStage, setSelectedStage] = useState('ALL')
   const [selectedEnv, setSelectedEnv] = useState('ALL') // ALL | LIVE | TEST
-  const [marketSegment, setMarketSegment] = useState('ALL') // ALL | DERIVATIVES | EQUITY
+  const [densityMode, setDensityMode] = useState('compact') // compact | expanded
+  const [selectedSort, setSelectedSort] = useState('NEWEST') // NEWEST | CONFIDENCE | RR_RATIO
 
   // Manual alerts state
   const [alerts, setAlerts] = useState([])
@@ -2292,10 +2344,11 @@ function AlertsViewInner({ onOpenOrderTicket }) {
     setSearchQuery('')
     setSelectedFilter('ALL')
     setSelectedDirection('ALL')
-    setSelectedType('ALL')
+    setSelectedSegment('ALL')
     setSelectedStage('ALL')
     setSelectedEnv('ALL')
-    setMarketSegment('ALL')
+    setDensityMode('compact')
+    setSelectedSort('NEWEST')
   }
 
   // Clear entire auto-alert feed (emergency reset)
@@ -2330,7 +2383,14 @@ function AlertsViewInner({ onOpenOrderTicket }) {
     let targetPrice = alt.trigger_level || alt.ltp
     let targetSL = alt.stop_loss
     let targetTP = alt.target_level
-    let targetExchange = alt.exchange || 'NSE'
+
+    // Resolve exchange from alert metadata first
+    const seg = classifyAlertSegment(alt)
+    let targetExchange = alt.exchange || (
+      seg === 'COMMODITY' ? 'MCX' :
+      seg === 'CURRENCY' ? 'CDS' :
+      seg === 'FNO' ? 'NFO' : 'NSE'
+    )
 
     // If the alert has an option play suggestion with distinct premium pricing:
     if (alt.contract_symbol && actPlan.option_contract === alt.contract_symbol && actPlan.option_entry) {
@@ -2341,7 +2401,8 @@ function AlertsViewInner({ onOpenOrderTicket }) {
         const optTPNum = parseFloat(String(actPlan.option_target_1 || '').replace(/[₹,\s]/g, ''))
         if (!isNaN(optSLNum) && optSLNum > 0) targetSL = optSLNum
         if (!isNaN(optTPNum) && optTPNum > 0) targetTP = optTPNum
-        targetExchange = 'NFO'
+        // If it's an F&O option play, exchange must be NFO regardless
+        if (seg === 'FNO') targetExchange = 'NFO'
       }
     }
 
@@ -2402,14 +2463,14 @@ function AlertsViewInner({ onOpenOrderTicket }) {
   // Filter auto-alerts with duplicate suppression and memoization
   const filteredAutoAlerts = useMemo(() => {
     const seenIds = new Set()
-    return autoAlerts.filter((a) => {
+    let results = autoAlerts.filter((a) => {
       const id = a.alert_id || a.id
       if (id) {
         if (seenIds.has(id)) return false
         seenIds.add(id)
       }
 
-      // 1. Primary Filter: View Mode ('ACTIVE' default: clutter-free active trades vs 'ARCHIVED' vs 'ALL')
+      // 1. Primary Filter: View Mode
       if (autoViewMode === 'ACTIVE' && !isAlertActive(a)) return false
       if (autoViewMode === 'ARCHIVED' && isAlertActive(a)) return false
 
@@ -2424,36 +2485,15 @@ function AlertsViewInner({ onOpenOrderTicket }) {
       }
 
       // 3. Direction Filter
-      if (selectedDirection !== 'ALL') {
-        if (a.direction !== selectedDirection) return false
+      if (selectedDirection !== 'ALL' && a.direction !== selectedDirection) return false
+
+      // 4. Unified Segment Filter (replaces former selectedType + marketSegment)
+      if (selectedSegment !== 'ALL') {
+        const seg = classifyAlertSegment(a)
+        if (seg !== selectedSegment) return false
       }
 
-      // 4. Instrument Type Filter (Derivatives vs Cash Equity)
-      if (selectedType !== 'ALL') {
-        const cleanSym = a.symbol?.replace(/^(NSE|BSE|MCX|NFO):/, '').trim().toUpperCase() || ''
-        const isIndex = a.segment === 'INDEX' || a.metrics?.segment === 'INDEX' || a.actionable_plan?.segment === 'INDEX' || ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'SENSEX', 'BANKEX'].includes(cleanSym)
-        const isFut = Boolean(
-          a.contract_symbol?.toUpperCase().includes('FUT') ||
-          a.symbol?.toUpperCase().includes('FUT') ||
-          a.derivative_type === 'FUT' ||
-          a.alert_type === 'FUTURES'
-        )
-        const isDeriv = Boolean(
-          isIndex ||
-          isFut ||
-          a.contract_symbol ||
-          a.option_type ||
-          a.strike ||
-          a.expiry_date ||
-          a.alert_type === 'GAMMA_BLAST' ||
-          a.alert_type === 'OPTIONS_MOMENTUM' ||
-          (a.segment === 'FNO' && (a.option_type || a.strike))
-        )
-        if (selectedType === 'DERIVATIVE' && !isDeriv) return false
-        if (selectedType === 'CASH' && isDeriv) return false
-      }
-
-      // 5. Category Filter
+      // 5. Category / Alert-Type Filter
       if (selectedFilter === 'INVALIDATED') {
         if (!a.is_invalidated && a.stage !== 'INVALIDATED') return false
       } else if (selectedFilter === 'TARGET_HIT') {
@@ -2494,7 +2534,17 @@ function AlertsViewInner({ onOpenOrderTicket }) {
 
       return true
     })
-  }, [autoAlerts, autoViewMode, selectedFilter, selectedStage, selectedEnv, searchQuery, selectedDirection, selectedType])
+
+    // 8. Sort
+    if (selectedSort === 'CONFIDENCE') {
+      results = [...results].sort((a, b) => (Number(b.confidence || 0)) - (Number(a.confidence || 0)))
+    } else if (selectedSort === 'RR_RATIO') {
+      results = [...results].sort((a, b) => (Number(b.metrics?.expected_rr || 0)) - (Number(a.metrics?.expected_rr || 0)))
+    }
+    // NEWEST: keep insertion order (newest first from API)
+
+    return results
+  }, [autoAlerts, autoViewMode, selectedFilter, selectedStage, selectedEnv, searchQuery, selectedDirection, selectedSegment, selectedSort])
 
   // Group repeated attempts for the same symbol so the screen remains clean and uncluttered
   const groupedAutoAlerts = useMemo(() => {
@@ -2534,37 +2584,20 @@ function AlertsViewInner({ onOpenOrderTicket }) {
     return primaryAlerts
   }, [filteredAutoAlerts])
 
-  // Segregate F&O vs Cash Equity groups
-  const { groupedFnoAlerts, groupedEquityAlerts } = useMemo(() => {
+  // Segregate into 4 canonical market segments using classifyAlertSegment
+  const { groupedFnoAlerts, groupedEquityAlerts, groupedCommodityAlerts, groupedCurrencyAlerts } = useMemo(() => {
     const fno = []
     const equity = []
+    const commodity = []
+    const currency = []
     for (const item of groupedAutoAlerts) {
-      const alt = item.alert
-      const cleanSym = alt.symbol?.replace(/^(NSE|BSE|MCX|NFO):/, '').trim().toUpperCase() || ''
-      const isIndex = alt.segment === 'INDEX' || alt.metrics?.segment === 'INDEX' || alt.actionable_plan?.segment === 'INDEX' || ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'SENSEX', 'BANKEX'].includes(cleanSym)
-      const isFut = Boolean(
-        alt.contract_symbol?.toUpperCase().includes('FUT') ||
-        alt.symbol?.toUpperCase().includes('FUT') ||
-        alt.derivative_type === 'FUT' ||
-        alt.alert_type === 'FUTURES'
-      )
-      const isDeriv = Boolean(
-        isIndex ||
-        isFut ||
-        alt.option_type ||
-        alt.strike ||
-        alt.contract_symbol ||
-        alt.expiry_date ||
-        alt.alert_type === 'GAMMA_BLAST' ||
-        alt.alert_type === 'OPTIONS_MOMENTUM'
-      )
-      if (isDeriv) {
-        fno.push(item)
-      } else {
-        equity.push(item)
-      }
+      const seg = classifyAlertSegment(item.alert)
+      if (seg === 'FNO') fno.push(item)
+      else if (seg === 'COMMODITY') commodity.push(item)
+      else if (seg === 'CURRENCY') currency.push(item)
+      else equity.push(item)
     }
-    return { groupedFnoAlerts: fno, groupedEquityAlerts: equity }
+    return { groupedFnoAlerts: fno, groupedEquityAlerts: equity, groupedCommodityAlerts: commodity, groupedCurrencyAlerts: currency }
   }, [groupedAutoAlerts])
 
   return (
@@ -2581,7 +2614,7 @@ function AlertsViewInner({ onOpenOrderTicket }) {
             🔔 Institutional Alert Center
           </h1>
           <p className="text-xs" style={{ color: 'var(--color-muted)' }}>
-            Real-time early warnings · Live vs Test clear distinction · Proactive View Invalidation alerts
+            Real-time early warnings · NSE / NFO / MCX / CDS · Live vs Test · Proactive Invalidation
           </p>
         </div>
 
@@ -2601,7 +2634,7 @@ function AlertsViewInner({ onOpenOrderTicket }) {
               activeTab === 'manual' ? 'bg-gold text-panel font-black shadow-sm' : 'text-muted hover:text-text'
             }`}
           >
-            🔔 Manual Price Alerts ({alerts.length})
+            🔔 Manual ({alerts.length})
           </button>
           <button
             onClick={() => setActiveTab('movers')}
@@ -2609,7 +2642,7 @@ function AlertsViewInner({ onOpenOrderTicket }) {
               activeTab === 'movers' ? 'bg-amber-400 text-panel font-black shadow-sm' : 'text-muted hover:text-text'
             }`}
           >
-            🔬 Movers Autopsy & Precursors
+            🔬 Movers Autopsy
           </button>
         </div>
       </header>
@@ -2646,179 +2679,57 @@ function AlertsViewInner({ onOpenOrderTicket }) {
         <div className="space-y-3">
           {/* Institutional Unified High-Density Control Center */}
           <div className="p-2.5 rounded-2xl bg-panel/95 border border-border/80 backdrop-blur-md space-y-2">
-            {/* ROW 1: Primary Mode Switcher + Market Segment Switcher + Action Tools */}
+
+            {/* ROW 1: View Mode + 5-way Segment Rail + Scan Now + Tools */}
             <div className="flex items-center justify-between flex-wrap gap-2">
-              <div className="flex items-center gap-2 flex-wrap">
-                {/* 1. View Mode (Active / Archived / All) */}
-                <div className="flex items-center gap-0.5 p-0.5 rounded-xl bg-surface/90 border border-border/60">
-                  <button
-                    onClick={() => setAutoViewMode('ACTIVE')}
-                    className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-black rounded-lg transition-all ${
-                      autoViewMode === 'ACTIVE'
-                        ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 shadow-sm'
-                        : 'text-muted hover:text-text'
-                    }`}
-                    title="Show only valid active trades (removes clutter)"
-                  >
-                    <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-                    <span>🟢 Active Valid Trades</span>
-                    <span className="text-[10px] px-1.5 py-0.2 rounded-full font-mono bg-emerald-500/30 text-emerald-200">
-                      {activeCount}
-                    </span>
-                  </button>
-
-                  <button
-                    onClick={() => setAutoViewMode('ARCHIVED')}
-                    className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold rounded-lg transition-all ${
-                      autoViewMode === 'ARCHIVED'
-                        ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40 shadow-sm'
-                        : 'text-muted hover:text-text'
-                    }`}
-                    title="View archived, completed, and invalidated trades"
-                  >
-                    <span>📁 Archived & History</span>
-                    <span className="text-[10px] px-1.5 py-0.2 rounded-full font-mono bg-amber-500/30 text-amber-200">
-                      {archivedCount}
-                    </span>
-                  </button>
-
-                  <button
-                    onClick={() => setAutoViewMode('ALL')}
-                    className={`flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium rounded-lg transition-all ${
-                      autoViewMode === 'ALL'
-                        ? 'bg-indigo-500/20 text-indigo-300 border border-indigo-500/40 shadow-sm'
-                        : 'text-muted hover:text-text'
-                    }`}
-                    title="Show all records"
-                  >
-                    <span>All ({autoAlerts.length})</span>
-                  </button>
-                </div>
-
-                {/* 2. Market Segment Switcher (All / F&O / Equity) */}
-                <div className="flex items-center gap-0.5 p-0.5 rounded-xl bg-surface/90 border border-border/60">
-                  <button
-                    onClick={() => setMarketSegment('ALL')}
-                    className={`px-3 py-1.5 text-xs font-bold rounded-lg transition-all flex items-center gap-1.5 ${
-                      marketSegment === 'ALL'
-                        ? 'bg-gold text-surface shadow-sm font-black'
-                        : 'text-muted hover:text-text'
-                    }`}
-                    title="Show both F&O and Cash Equity in segregated sections"
-                  >
-                    <span>🌐</span> All Segments ({groupedAutoAlerts.length})
-                  </button>
-                  <button
-                    onClick={() => setMarketSegment('DERIVATIVES')}
-                    className={`px-3 py-1.5 text-xs font-bold rounded-lg transition-all flex items-center gap-1.5 ${
-                      marketSegment === 'DERIVATIVES'
-                        ? 'bg-gold text-surface shadow-sm font-black'
-                        : 'text-muted hover:text-text'
-                    }`}
-                    title="Show only Derivatives & F&O alerts (Options & Futures)"
-                  >
-                    <span>⚡</span> Derivatives & F&O ({groupedFnoAlerts.length})
-                  </button>
-                  <button
-                    onClick={() => setMarketSegment('EQUITY')}
-                    className={`px-3 py-1.5 text-xs font-bold rounded-lg transition-all flex items-center gap-1.5 ${
-                      marketSegment === 'EQUITY'
-                        ? 'bg-gold text-surface shadow-sm font-black'
-                        : 'text-muted hover:text-text'
-                    }`}
-                    title="Show only Cash Equity alerts"
-                  >
-                    <span>🏢</span> Cash Equity ({groupedEquityAlerts.length})
-                  </button>
-                </div>
-              </div>
-
-              {/* 3. Action Buttons & Simulation Tools */}
-              <div className="flex items-center gap-1.5 flex-wrap">
-                {expiredCount > 0 && (
-                  <button
-                    onClick={handlePurgeExpired}
-                    disabled={purging}
-                    className="btn btn-sm btn-ghost text-xs text-rose-300 hover:bg-rose-500/20 border border-rose-500/40 flex items-center gap-1 py-1 px-2.5"
-                    title="Permanently purge all expired derivative contracts from alerts storage"
-                  >
-                    <span>{purging ? '🧹 Purging…' : `🧹 Purge Expired (${expiredCount})`}</span>
-                  </button>
-                )}
-
+              {/* Left: View Mode pills */}
+              <div className="flex items-center gap-0.5 p-0.5 rounded-xl bg-surface/90 border border-border/60">
                 <button
-                  onClick={() => handleCleanupOld(3)}
-                  disabled={cleaning}
-                  className="btn btn-sm btn-ghost text-xs text-muted hover:text-amber-300 border border-border flex items-center gap-1 py-1 px-2.5"
-                  title="Clean up expired derivative contracts and archived records older than 3 days. Active valid trades are never deleted."
+                  onClick={() => setAutoViewMode('ACTIVE')}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-black rounded-lg transition-all ${
+                    autoViewMode === 'ACTIVE'
+                      ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 shadow-sm'
+                      : 'text-muted hover:text-text'
+                  }`}
+                  title="Show only valid active trades (removes clutter)"
                 >
-                  <span>{cleaning ? '🧹 Cleaning…' : '🧹 Clean >3d Old'}</span>
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse flex-shrink-0" />
+                  <span>Active</span>
+                  <span className="text-[10px] px-1.5 py-px rounded-full font-mono bg-emerald-500/30 text-emerald-200">
+                    {activeCount}
+                  </span>
                 </button>
 
-                {/* Simulation Tools Dropdown */}
-                <div className="relative">
-                  <button
-                    onClick={() => setShowTestTools((v) => !v)}
-                    className="btn btn-sm btn-ghost text-xs text-cyan-300 border border-cyan-500/30 hover:bg-cyan-500/20 flex items-center gap-1 py-1 px-2.5"
-                    title="Simulate institutional target and invalidation events"
-                  >
-                    <span>🧪 Simulation Tools</span>
-                    <span className="text-[10px]">{showTestTools ? '▲' : '▼'}</span>
-                  </button>
-                  {showTestTools && (
-                    <div
-                      className="absolute right-0 top-full mt-1.5 w-64 p-2 rounded-xl bg-panel border border-border shadow-2xl z-50 space-y-1 text-xs animate-slide-up-fade"
-                      style={{ backdropFilter: 'blur(16px)', background: 'var(--color-panel)' }}
-                    >
-                      <div className="text-[10px] font-bold text-muted uppercase px-2 py-1">Simulate Target & SL</div>
-                      <button
-                        onClick={() => { handleTriggerTestTarget('T1', true); setShowTestTools(false); }}
-                        disabled={testing}
-                        className="w-full text-left px-2.5 py-1.5 rounded-lg hover:bg-elevated text-cyan-300 flex items-center gap-2 cursor-pointer transition-colors"
-                      >
-                        <span>🎯</span>
-                        <div>
-                          <span className="font-bold block">Target 1 Hit</span>
-                          <span className="text-[10px] text-muted">Triggers partial lock & breakeven trail</span>
-                        </div>
-                      </button>
-                      <button
-                        onClick={() => { handleTriggerTestTarget('FINAL', false); setShowTestTools(false); }}
-                        disabled={testing}
-                        className="w-full text-left px-2.5 py-1.5 rounded-lg hover:bg-elevated text-amber-300 flex items-center gap-2 cursor-pointer transition-colors"
-                      >
-                        <span>🏁</span>
-                        <div>
-                          <span className="font-bold block">Final Target Hit</span>
-                          <span className="text-[10px] text-muted">Triggers full profit exit guidance</span>
-                        </div>
-                      </button>
-                      <button
-                        onClick={() => { handleTriggerTestTarget('TRAIL', true); setShowTestTools(false); }}
-                        disabled={testing}
-                        className="w-full text-left px-2.5 py-1.5 rounded-lg hover:bg-elevated text-blue-300 flex items-center gap-2 cursor-pointer transition-colors"
-                      >
-                        <span>📈</span>
-                        <div>
-                          <span className="font-bold block">Trailing Stop Ratchet</span>
-                          <span className="text-[10px] text-muted">Simulates ATR trailing stop update</span>
-                        </div>
-                      </button>
-                      <button
-                        onClick={() => { handleTriggerTest(true); setShowTestTools(false); }}
-                        disabled={testing}
-                        className="w-full text-left px-2.5 py-1.5 rounded-lg hover:bg-elevated text-rose-300 flex items-center gap-2 cursor-pointer transition-colors"
-                      >
-                        <span>⚠️</span>
-                        <div>
-                          <span className="font-bold block">Test Invalidation</span>
-                          <span className="text-[10px] text-muted">Simulates stop-loss breach & post-mortem</span>
-                        </div>
-                      </button>
-                    </div>
-                  )}
-                </div>
+                <button
+                  onClick={() => setAutoViewMode('ARCHIVED')}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold rounded-lg transition-all ${
+                    autoViewMode === 'ARCHIVED'
+                      ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40 shadow-sm'
+                      : 'text-muted hover:text-text'
+                  }`}
+                  title="View archived, completed, and invalidated trades"
+                >
+                  <span>📁 Archived</span>
+                  <span className="text-[10px] px-1.5 py-px rounded-full font-mono bg-amber-500/30 text-amber-200">
+                    {archivedCount}
+                  </span>
+                </button>
 
+                <button
+                  onClick={() => setAutoViewMode('ALL')}
+                  className={`flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium rounded-lg transition-all ${
+                    autoViewMode === 'ALL'
+                      ? 'bg-indigo-500/20 text-indigo-300 border border-indigo-500/40 shadow-sm'
+                      : 'text-muted hover:text-text'
+                  }`}
+                  title="Show all records"
+                >
+                  All ({autoAlerts.length})
+                </button>
+              </div>
+
+              {/* Right: Scan Now + Tools dropdown */}
+              <div className="flex items-center gap-1.5">
                 <button
                   onClick={handleScanNow}
                   disabled={scanning}
@@ -2828,28 +2739,164 @@ function AlertsViewInner({ onOpenOrderTicket }) {
                   {scanning ? '⚡ Scanning…' : '⚡ Scan Now'}
                 </button>
 
-                {autoAlerts.length > 0 && (
+                {/* Unified ⚙️ Tools dropdown (maintenance + simulation + clear) */}
+                <div className="relative">
                   <button
-                    onClick={handleClearAuto}
-                    className="btn btn-sm btn-ghost text-xs text-muted hover:text-rose-400 py-1 px-2"
-                    title="Clear alert feed"
+                    onClick={() => setShowTools((v) => !v)}
+                    className={`btn btn-sm btn-ghost text-xs border flex items-center gap-1 py-1 px-2.5 transition-all ${
+                      showTools ? 'text-gold border-gold/50 bg-gold/10' : 'text-muted border-border hover:text-text'
+                    }`}
+                    title="Maintenance, simulation & dev tools"
                   >
-                    🗑️
+                    <span>⚙️ Tools</span>
+                    <span className="text-[10px]">{showTools ? '▲' : '▼'}</span>
                   </button>
-                )}
+                  {showTools && (
+                    <div
+                      className="absolute right-0 top-full mt-1.5 w-72 p-2 rounded-xl bg-panel border border-border shadow-2xl z-50 space-y-0.5 text-xs animate-slide-up-fade"
+                      style={{ backdropFilter: 'blur(16px)', background: 'var(--color-panel)' }}
+                    >
+                      {/* Maintenance section */}
+                      <div className="text-[10px] font-bold text-muted uppercase px-2 py-1 tracking-wider">🧹 Maintenance</div>
+                      {expiredCount > 0 && (
+                        <button
+                          onClick={() => { handlePurgeExpired(); setShowTools(false) }}
+                          disabled={purging}
+                          className="w-full text-left px-2.5 py-1.5 rounded-lg hover:bg-elevated text-rose-300 flex items-center gap-2 cursor-pointer transition-colors"
+                        >
+                          <span>🧹</span>
+                          <div>
+                            <span className="font-bold block">Purge Expired Contracts ({expiredCount})</span>
+                            <span className="text-[10px] text-muted">Remove derivative alerts past expiry date</span>
+                          </div>
+                        </button>
+                      )}
+                      <button
+                        onClick={() => { handleCleanupOld(3); setShowTools(false) }}
+                        disabled={cleaning}
+                        className="w-full text-left px-2.5 py-1.5 rounded-lg hover:bg-elevated text-amber-300 flex items-center gap-2 cursor-pointer transition-colors"
+                      >
+                        <span>🧹</span>
+                        <div>
+                          <span className="font-bold block">{cleaning ? 'Cleaning…' : 'Clean Archived >3 Days Old'}</span>
+                          <span className="text-[10px] text-muted">Active valid trades are never deleted</span>
+                        </div>
+                      </button>
+                      {autoAlerts.length > 0 && (
+                        <button
+                          onClick={() => { handleClearAuto(); setShowTools(false) }}
+                          className="w-full text-left px-2.5 py-1.5 rounded-lg hover:bg-elevated text-rose-400 flex items-center gap-2 cursor-pointer transition-colors"
+                        >
+                          <span>🗑️</span>
+                          <div>
+                            <span className="font-bold block">Clear Entire Alert Feed</span>
+                            <span className="text-[10px] text-muted">Emergency reset — removes all alerts from view</span>
+                          </div>
+                        </button>
+                      )}
+
+                      {/* Simulation section */}
+                      <div className="border-t border-border/40 mt-1 pt-1">
+                        <div className="text-[10px] font-bold text-muted uppercase px-2 py-1 tracking-wider">🧪 Simulation Tools</div>
+                      </div>
+                      <button
+                        onClick={() => { handleTriggerTestTarget('T1', true); setShowTools(false) }}
+                        disabled={testing}
+                        className="w-full text-left px-2.5 py-1.5 rounded-lg hover:bg-elevated text-cyan-300 flex items-center gap-2 cursor-pointer transition-colors"
+                      >
+                        <span>🎯</span>
+                        <div>
+                          <span className="font-bold block">Simulate Target 1 Hit</span>
+                          <span className="text-[10px] text-muted">Triggers partial lock & breakeven trail</span>
+                        </div>
+                      </button>
+                      <button
+                        onClick={() => { handleTriggerTestTarget('FINAL', false); setShowTools(false) }}
+                        disabled={testing}
+                        className="w-full text-left px-2.5 py-1.5 rounded-lg hover:bg-elevated text-amber-300 flex items-center gap-2 cursor-pointer transition-colors"
+                      >
+                        <span>🏁</span>
+                        <div>
+                          <span className="font-bold block">Simulate Final Target Hit</span>
+                          <span className="text-[10px] text-muted">Triggers full profit exit guidance</span>
+                        </div>
+                      </button>
+                      <button
+                        onClick={() => { handleTriggerTestTarget('TRAIL', true); setShowTools(false) }}
+                        disabled={testing}
+                        className="w-full text-left px-2.5 py-1.5 rounded-lg hover:bg-elevated text-blue-300 flex items-center gap-2 cursor-pointer transition-colors"
+                      >
+                        <span>📈</span>
+                        <div>
+                          <span className="font-bold block">Simulate Trailing Stop Ratchet</span>
+                          <span className="text-[10px] text-muted">Simulates ATR trailing stop update</span>
+                        </div>
+                      </button>
+                      <button
+                        onClick={() => { handleTriggerTest(true); setShowTools(false) }}
+                        disabled={testing}
+                        className="w-full text-left px-2.5 py-1.5 rounded-lg hover:bg-elevated text-rose-300 flex items-center gap-2 cursor-pointer transition-colors"
+                      >
+                        <span>⚠️</span>
+                        <div>
+                          <span className="font-bold block">Simulate Invalidation</span>
+                          <span className="text-[10px] text-muted">Simulates stop-loss breach & post-mortem</span>
+                        </div>
+                      </button>
+                      <button
+                        onClick={() => { handleTriggerTest(false); setShowTools(false) }}
+                        disabled={testing}
+                        className="w-full text-left px-2.5 py-1.5 rounded-lg hover:bg-elevated text-purple-300 flex items-center gap-2 cursor-pointer transition-colors"
+                      >
+                        <span>🧪</span>
+                        <div>
+                          <span className="font-bold block">Send Test Alert (Gamma Blast)</span>
+                          <span className="text-[10px] text-muted">Verifies alert pipeline end-to-end</span>
+                        </div>
+                      </button>
+                    </div>
+                  )}
+                </div>
               </div>
             </div>
 
-            {/* ROW 2: Compact Search, Category Micro-Chips & Compact Inline Filters */}
+            {/* ROW 2: Unified 5-way Segment Rail */}
+            <div className="flex items-center gap-0.5 p-0.5 rounded-xl bg-surface/90 border border-border/60 w-fit flex-wrap">
+              {[
+                { id: 'ALL',       label: '🌐 All Markets',          count: groupedAutoAlerts.length,      activeColor: 'bg-gold text-surface' },
+                { id: 'FNO',       label: '⚡ F&O / Derivatives',    count: groupedFnoAlerts.length,       activeColor: 'bg-indigo-500/25 text-indigo-200 border border-indigo-500/50' },
+                { id: 'EQUITY',    label: '🏢 Cash Equity',           count: groupedEquityAlerts.length,    activeColor: 'bg-emerald-500/25 text-emerald-200 border border-emerald-500/50' },
+                { id: 'COMMODITY', label: '🌙 Commodity (MCX)',       count: groupedCommodityAlerts.length, activeColor: 'bg-amber-500/25 text-amber-200 border border-amber-500/50' },
+                { id: 'CURRENCY',  label: '💱 Currency (CDS)',        count: groupedCurrencyAlerts.length,  activeColor: 'bg-cyan-500/25 text-cyan-200 border border-cyan-500/50' },
+              ].map((seg) => (
+                <button
+                  key={seg.id}
+                  onClick={() => setSelectedSegment(seg.id)}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold rounded-lg transition-all ${
+                    selectedSegment === seg.id
+                      ? `${seg.activeColor} shadow-sm font-black`
+                      : 'text-muted hover:text-text'
+                  }`}
+                  title={`Filter to ${seg.label} only`}
+                >
+                  <span>{seg.label}</span>
+                  <span className={`text-[10px] font-mono px-1.5 py-px rounded-full ${
+                    selectedSegment === seg.id ? 'bg-black/20' : 'bg-elevated'
+                  }`}>{seg.count}</span>
+                </button>
+              ))}
+            </div>
+
+            {/* ROW 3: Search + Category chips (scrollable) + Dropdowns */}
             <div className="flex items-center justify-between flex-wrap gap-2 pt-1.5 border-t border-border/40 text-[11px]">
-              <div className="flex items-center gap-2 flex-wrap flex-1 min-w-0">
+              <div className="flex items-center gap-2 min-w-0 flex-1">
                 {/* Symbol / Contract Search Input */}
-                <div className="relative w-48 sm:w-56">
+                <div className="relative w-44 flex-shrink-0">
                   <input
                     type="text"
                     value={searchQuery}
                     onChange={(e) => setSearchQuery(e.target.value)}
-                    placeholder="🔍 Search symbol, strike…"
+                    placeholder="🔍 Symbol, strike…"
                     className="w-full text-xs pl-2.5 pr-6 py-1 rounded-lg bg-surface border border-border text-text placeholder:text-muted focus:outline-none focus:border-gold transition-colors font-sans"
                   />
                   {searchQuery && (
@@ -2863,32 +2910,30 @@ function AlertsViewInner({ onOpenOrderTicket }) {
                   )}
                 </div>
 
-                {/* Category Micro-Chips */}
-                <div className="flex items-center gap-1 flex-wrap">
+                {/* Category chips — horizontally scrollable, no line-wrapping */}
+                <div
+                  className="flex items-center gap-1 overflow-x-auto min-w-0 flex-1"
+                  style={{ scrollbarWidth: 'none', msOverflowStyle: 'none' }}
+                >
                   {[
-                    { id: 'ALL', label: 'All Alerts' },
-                    { id: 'TARGET_HIT', label: '🎯 Targets' },
-                    { id: 'HIGH_CONVICTION', label: '⭐ Conviction 85%+' },
-                    { id: 'MULTI_FLOW', label: '🌊 Multi-Strike' },
-                    { id: 'GAMMA_BLAST', label: '⚡ Gamma' },
-                    { id: 'SQUEEZE_BREAKOUT', label: '🎯 Squeeze' },
-                    { id: 'CIRCUIT_WARNING', label: '🔒 Circuit' },
-                    { id: 'INVALIDATED', label: `❌ Invalidated (${invalidatedCount})` },
+                    { id: 'ALL',                 label: 'All' },
+                    { id: 'TARGET_HIT',          label: '🎯 Targets Hit',       activeClass: 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/40' },
+                    { id: 'HIGH_CONVICTION',     label: '⭐ 85%+ Conviction',   activeClass: 'bg-amber-500/20 text-amber-300 border border-amber-500/40' },
+                    { id: 'MULTI_FLOW',          label: '🌊 Multi-Strike',      activeClass: 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40' },
+                    { id: 'GAMMA_BLAST',         label: '⚡ Gamma Blast',       activeClass: 'bg-gold/20 text-gold border border-gold/40' },
+                    { id: 'SQUEEZE_BREAKOUT',    label: '🚀 Squeeze',           activeClass: 'bg-gold/20 text-gold border border-gold/40' },
+                    { id: 'SMC_SWEEP',           label: '🌊 SMC Sweep',         activeClass: 'bg-violet-500/20 text-violet-300 border border-violet-500/40' },
+                    { id: 'PRECURSOR_RADAR',     label: '⚡ Precursor',         activeClass: 'bg-amber-500/20 text-amber-300 border border-amber-500/40' },
+                    { id: 'ASYMMETRIC_OPPORTUNITY', label: '🎯 Asymmetric R:R', activeClass: 'bg-sky-500/20 text-sky-300 border border-sky-500/40' },
+                    { id: 'CIRCUIT_WARNING',     label: '🔒 Circuit',           activeClass: 'bg-rose-500/20 text-rose-400 border border-rose-500/40' },
+                    { id: 'INVALIDATED',         label: `❌ Invalidated (${invalidatedCount})`, activeClass: 'bg-rose-500/20 text-rose-400 border border-rose-500/40' },
                   ].map((chip) => (
                     <button
                       key={chip.id}
                       onClick={() => setSelectedFilter(chip.id)}
-                      className={`px-2.5 py-0.5 rounded-lg font-bold transition-all text-[11px] ${
+                      className={`flex-shrink-0 px-2.5 py-0.5 rounded-lg font-bold transition-all text-[11px] whitespace-nowrap ${
                         selectedFilter === chip.id
-                          ? chip.id === 'INVALIDATED'
-                            ? 'bg-rose-500/20 text-rose-400 border border-rose-500/40'
-                            : chip.id === 'TARGET_HIT'
-                            ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/40'
-                            : chip.id === 'HIGH_CONVICTION'
-                            ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
-                            : chip.id === 'MULTI_FLOW'
-                            ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40'
-                            : 'bg-gold/20 text-gold border border-gold/40'
+                          ? (chip.activeClass || 'bg-gold/20 text-gold border border-gold/40')
                           : 'text-muted hover:text-text hover:bg-elevated'
                       }`}
                     >
@@ -2898,30 +2943,18 @@ function AlertsViewInner({ onOpenOrderTicket }) {
                 </div>
               </div>
 
-              {/* Right: Inline Compact Dropdowns (Auto-width, NEVER w-full!) */}
-              <div className="flex items-center gap-1.5 flex-wrap">
+              {/* Right: compact inline dropdowns + density + sort + reset */}
+              <div className="flex items-center gap-1.5 flex-shrink-0 flex-wrap">
                 {/* Direction Filter */}
                 <select
                   value={selectedDirection}
                   onChange={(e) => setSelectedDirection(e.target.value)}
                   className="text-xs py-1 px-2.5 rounded-lg bg-surface border border-border text-text hover:border-gold/50 focus:outline-none focus:border-gold transition-colors font-sans cursor-pointer w-auto"
-                  title="Filter by Bullish (Long) vs Bearish (Short)"
+                  title="Filter by direction"
                 >
                   <option value="ALL">All Directions</option>
-                  <option value="BULLISH">📈 Bullish (Long)</option>
-                  <option value="BEARISH">📉 Bearish (Short)</option>
-                </select>
-
-                {/* Instrument Type Filter */}
-                <select
-                  value={selectedType}
-                  onChange={(e) => setSelectedType(e.target.value)}
-                  className="text-xs py-1 px-2.5 rounded-lg bg-surface border border-border text-text hover:border-gold/50 focus:outline-none focus:border-gold transition-colors font-sans cursor-pointer w-auto"
-                  title="Filter by Derivatives (F&O) vs Cash Equity"
-                >
-                  <option value="ALL">All Instruments</option>
-                  <option value="DERIVATIVE">⚡ Options / F&O</option>
-                  <option value="CASH">🏢 Cash Equity</option>
+                  <option value="BULLISH">📈 Bullish</option>
+                  <option value="BEARISH">📉 Bearish</option>
                 </select>
 
                 {/* Stage Filter */}
@@ -2932,9 +2965,9 @@ function AlertsViewInner({ onOpenOrderTicket }) {
                   title="Filter by trade lifecycle stage"
                 >
                   <option value="ALL">All Stages</option>
-                  <option value="EARLY_WARNING">⏳ Early-Warning</option>
+                  <option value="EARLY_WARNING">⏳ Early Warning</option>
                   <option value="IGNITED">🔥 Ignited</option>
-                  <option value="T1_ACHIEVED">🎯 Target 1</option>
+                  <option value="T1_ACHIEVED">🎯 Target 1 Hit</option>
                   <option value="TARGET_ACHIEVED">🏁 Final Target</option>
                   <option value="INVALIDATED">❌ Invalidated</option>
                 </select>
@@ -2944,19 +2977,49 @@ function AlertsViewInner({ onOpenOrderTicket }) {
                   value={selectedEnv}
                   onChange={(e) => setSelectedEnv(e.target.value)}
                   className="text-xs py-1 px-2.5 rounded-lg bg-surface border border-border text-text hover:border-gold/50 focus:outline-none focus:border-gold transition-colors font-sans cursor-pointer w-auto"
-                  title="Filter by Live market data vs Test simulation"
+                  title="Filter by environment"
                 >
-                  <option value="ALL">All Environments</option>
-                  <option value="LIVE">🟢 Real / Live</option>
-                  <option value="TEST">🧪 Test Only</option>
+                  <option value="ALL">All Envs</option>
+                  <option value="LIVE">🟢 Live</option>
+                  <option value="TEST">🧪 Test</option>
                 </select>
 
+                {/* Sort Order */}
+                <select
+                  value={selectedSort}
+                  onChange={(e) => setSelectedSort(e.target.value)}
+                  className="text-xs py-1 px-2.5 rounded-lg bg-surface border border-border text-text hover:border-gold/50 focus:outline-none focus:border-gold transition-colors font-sans cursor-pointer w-auto"
+                  title="Sort alerts"
+                >
+                  <option value="NEWEST">⏱ Newest First</option>
+                  <option value="CONFIDENCE">⭐ By Confidence</option>
+                  <option value="RR_RATIO">📊 By R:R Ratio</option>
+                </select>
+
+                {/* Density Mode */}
+                <div className="flex items-center gap-0.5 p-0.5 rounded-lg bg-surface border border-border">
+                  <button
+                    onClick={() => setDensityMode('compact')}
+                    className={`px-2 py-0.5 rounded text-xs font-bold transition-all ${
+                      densityMode === 'compact' ? 'bg-gold/20 text-gold' : 'text-muted hover:text-text'
+                    }`}
+                    title="Compact card view"
+                  >▤ Compact</button>
+                  <button
+                    onClick={() => setDensityMode('expanded')}
+                    className={`px-2 py-0.5 rounded text-xs font-bold transition-all ${
+                      densityMode === 'expanded' ? 'bg-gold/20 text-gold' : 'text-muted hover:text-text'
+                    }`}
+                    title="Expanded card view — all plan details visible by default"
+                  >☰ Expanded</button>
+                </div>
+
                 {/* Reset Filters Button */}
-                {(searchQuery || selectedFilter !== 'ALL' || selectedStage !== 'ALL' || selectedEnv !== 'ALL' || selectedDirection !== 'ALL' || selectedType !== 'ALL') && (
+                {(searchQuery || selectedFilter !== 'ALL' || selectedStage !== 'ALL' || selectedEnv !== 'ALL' || selectedDirection !== 'ALL' || selectedSegment !== 'ALL' || selectedSort !== 'NEWEST') && (
                   <button
                     onClick={handleResetFilters}
                     className="btn btn-sm btn-ghost text-xs text-gold hover:text-gold-light border border-gold/30 hover:bg-gold/10 flex items-center gap-1 font-bold px-2 py-0.5"
-                    title="Reset all search queries and filters to defaults"
+                    title="Reset all filters to defaults"
                   >
                     ✕ Reset
                   </button>
@@ -2977,39 +3040,40 @@ function AlertsViewInner({ onOpenOrderTicket }) {
 
           {/* Alert Cards Feed */}
           {autoLoading && autoAlerts.length === 0 ? (
-            <UnavailableState title="Checking market feeds" reason="Scanning for real-time Gamma Blasts, Squeezes, and Invalidations." size="md" />
+            <UnavailableState title="Checking market feeds" reason="Scanning for real-time Gamma Blasts, Squeezes, Commodity momentum, and Invalidations." size="md" />
           ) : filteredAutoAlerts.length === 0 ? (
             <div className="p-8 text-center rounded-2xl bg-panel border border-border space-y-2">
               <div className="text-3xl">📡</div>
-              <div className="text-sm font-bold text-text">No active alerts match this filter</div>
+              <div className="text-sm font-bold text-text">No alerts match the current filters</div>
               <p className="text-xs text-muted max-w-md mx-auto">
-                The alert engine actively monitors Gamma Blasts, TTM Squeezes, Circuit Proxies, and tracks whether active setups remain valid.
-                Use <span className="text-gold font-bold">Scan Now</span> or <span className="text-purple-300 font-bold">Test Alert</span> to verify notifications.
+                The engine monitors NSE F&O, Cash Equity, MCX Commodities (Crude, Gold, Silver), and Currency derivatives.
+                Try adjusting the segment rail or clearing the category filter.
               </p>
-              <div className="flex items-center justify-center gap-2 pt-2">
-                <button onClick={handleScanNow} className="btn btn-sm btn-gold">
-                  ⚡ Scan Watchlist Now
+              <div className="flex items-center justify-center gap-2 pt-2 flex-wrap">
+                <button onClick={handleScanNow} disabled={scanning} className="btn btn-sm btn-gold">
+                  ⚡ Scan Now
                 </button>
-                <button onClick={() => handleTriggerTest(false)} className="btn btn-sm btn-ghost text-purple-300 border border-purple-500/30">
-                  🧪 Send Test Alert
-                </button>
+                {(selectedSegment !== 'ALL' || selectedFilter !== 'ALL' || selectedStage !== 'ALL' || searchQuery) && (
+                  <button onClick={handleResetFilters} className="btn btn-sm btn-ghost text-gold border border-gold/30">
+                    ✕ Clear Filters
+                  </button>
+                )}
               </div>
             </div>
-          ) : marketSegment === 'ALL' ? (
+          ) : (
+            /* Section renderer — 4 segments in ALL mode, or filtered single segment */
             <div className="space-y-6">
-              {/* SECTION 1: Institutional Derivatives & F&O Alerts */}
-              {groupedFnoAlerts.length > 0 && (
+              {/* Helper: renders a section header + cards for a given bucket */}
+              {(selectedSegment === 'ALL' || selectedSegment === 'FNO') && groupedFnoAlerts.length > 0 && (
                 <div className="space-y-3">
-                  <div className="flex items-center justify-between pb-2 border-b border-gold/40">
+                  <div className="flex items-center justify-between pb-2 border-b border-indigo-500/40">
                     <div className="flex items-center gap-2">
                       <span className="text-base">⚡</span>
-                      <h2 className="text-xs font-black uppercase tracking-wider text-gold">
-                        Institutional Derivatives & Options/Futures Alerts ({groupedFnoAlerts.length})
+                      <h2 className="text-xs font-black uppercase tracking-wider text-indigo-300">
+                        F&O / Derivatives — Options & Futures ({groupedFnoAlerts.length})
                       </h2>
                     </div>
-                    <span className="text-[10px] font-mono text-muted">
-                      Option Gamma Blasts · Index/Stock Futures · Strike & Greek Traps
-                    </span>
+                    <span className="text-[10px] font-mono text-muted">Gamma Blasts · Index Options · Stock Futures</span>
                   </div>
                   <div className="space-y-3">
                     {groupedFnoAlerts.map(({ alert: alt, history }) => (
@@ -3018,30 +3082,28 @@ function AlertsViewInner({ onOpenOrderTicket }) {
                         alert={alt}
                         onAnalyze={handleAnalyze}
                         onInspectOptions={handleInspectOptions}
-                        onOpenTicket={onOpenOrderTicket}
+                        onOpenTicket={handleOpenTicket}
                         onArchiveToggle={handleArchiveToggle}
                         onClearLockout={handleClearLockout}
                         archiving={archiving}
                         historyAttempts={history}
+                        densityMode={densityMode}
                       />
                     ))}
                   </div>
                 </div>
               )}
 
-              {/* SECTION 2: Institutional Cash Equity Alerts */}
-              {groupedEquityAlerts.length > 0 && (
+              {(selectedSegment === 'ALL' || selectedSegment === 'EQUITY') && groupedEquityAlerts.length > 0 && (
                 <div className="space-y-3">
                   <div className="flex items-center justify-between pb-2 border-b border-emerald-500/40">
                     <div className="flex items-center gap-2">
                       <span className="text-base">🏢</span>
                       <h2 className="text-xs font-black uppercase tracking-wider text-emerald-400">
-                        Institutional Cash Equity Breakouts & Squeezes ({groupedEquityAlerts.length})
+                        Cash Equity — Breakouts & Squeezes ({groupedEquityAlerts.length})
                       </h2>
                     </div>
-                    <span className="text-[10px] font-mono text-muted">
-                      Volume Contractions · Minervini VCP · Delivery Accumulation
-                    </span>
+                    <span className="text-[10px] font-mono text-muted">VCP · Minervini · SMC · Delivery</span>
                   </div>
                   <div className="space-y-3">
                     {groupedEquityAlerts.map(({ alert: alt, history }) => (
@@ -3050,84 +3112,82 @@ function AlertsViewInner({ onOpenOrderTicket }) {
                         alert={alt}
                         onAnalyze={handleAnalyze}
                         onInspectOptions={handleInspectOptions}
-                        onOpenTicket={onOpenOrderTicket}
+                        onOpenTicket={handleOpenTicket}
                         onArchiveToggle={handleArchiveToggle}
                         onClearLockout={handleClearLockout}
                         archiving={archiving}
                         historyAttempts={history}
+                        densityMode={densityMode}
                       />
                     ))}
                   </div>
                 </div>
               )}
-            </div>
-          ) : marketSegment === 'DERIVATIVES' ? (
-            <div className="space-y-3">
-              <div className="flex items-center justify-between pb-2 border-b border-gold/40">
-                <div className="flex items-center gap-2">
-                  <span className="text-base">⚡</span>
-                  <h2 className="text-xs font-black uppercase tracking-wider text-gold">
-                    Institutional Derivatives & Options/Futures Alerts ({groupedFnoAlerts.length})
-                  </h2>
-                </div>
-                <span className="text-[10px] font-mono text-muted">
-                  Filtered to F&O Only
-                </span>
-              </div>
-              {groupedFnoAlerts.length === 0 ? (
-                <div className="p-8 text-center text-xs text-muted border border-border/50 rounded-xl bg-surface/50">
-                  No active F&O alerts matching current filters
-                </div>
-              ) : (
+
+              {(selectedSegment === 'ALL' || selectedSegment === 'COMMODITY') && groupedCommodityAlerts.length > 0 && (
                 <div className="space-y-3">
-                  {groupedFnoAlerts.map(({ alert: alt, history }) => (
-                    <AutoAlertCard
-                      key={alt.alert_id || alt.id || alt.symbol}
-                      alert={alt}
-                      onAnalyze={handleAnalyze}
-                      onInspectOptions={handleInspectOptions}
-                      onOpenTicket={onOpenOrderTicket}
-                      onArchiveToggle={handleArchiveToggle}
-                      onClearLockout={handleClearLockout}
-                      archiving={archiving}
-                      historyAttempts={history}
-                    />
-                  ))}
+                  <div className="flex items-center justify-between pb-2 border-b border-amber-500/40">
+                    <div className="flex items-center gap-2">
+                      <span className="text-base">🌙</span>
+                      <h2 className="text-xs font-black uppercase tracking-wider text-amber-400">
+                        Commodity (MCX) — Crude Oil · Gold · Silver · Metals ({groupedCommodityAlerts.length})
+                      </h2>
+                    </div>
+                    <span className="text-[10px] font-mono text-muted">09:00–23:30 IST · Prompt Expiry · VWAP</span>
+                  </div>
+                  <div className="space-y-3">
+                    {groupedCommodityAlerts.map(({ alert: alt, history }) => (
+                      <AutoAlertCard
+                        key={alt.alert_id || alt.id || alt.symbol}
+                        alert={alt}
+                        onAnalyze={handleAnalyze}
+                        onInspectOptions={handleInspectOptions}
+                        onOpenTicket={handleOpenTicket}
+                        onArchiveToggle={handleArchiveToggle}
+                        onClearLockout={handleClearLockout}
+                        archiving={archiving}
+                        historyAttempts={history}
+                        densityMode={densityMode}
+                      />
+                    ))}
+                  </div>
                 </div>
               )}
-            </div>
-          ) : (
-            <div className="space-y-3">
-              <div className="flex items-center justify-between pb-2 border-b border-emerald-500/40">
-                <div className="flex items-center gap-2">
-                  <span className="text-base">🏢</span>
-                  <h2 className="text-xs font-black uppercase tracking-wider text-emerald-400">
-                    Institutional Cash Equity Breakouts & Squeezes ({groupedEquityAlerts.length})
-                  </h2>
-                </div>
-                <span className="text-[10px] font-mono text-muted">
-                  Filtered to Cash Equity Only
-                </span>
-              </div>
-              {groupedEquityAlerts.length === 0 ? (
-                <div className="p-8 text-center text-xs text-muted border border-border/50 rounded-xl bg-surface/50">
-                  No active Cash Equity alerts matching current filters
-                </div>
-              ) : (
+
+              {(selectedSegment === 'ALL' || selectedSegment === 'CURRENCY') && groupedCurrencyAlerts.length > 0 && (
                 <div className="space-y-3">
-                  {groupedEquityAlerts.map(({ alert: alt, history }) => (
-                    <AutoAlertCard
-                      key={alt.alert_id || alt.id || alt.symbol}
-                      alert={alt}
-                      onAnalyze={handleAnalyze}
-                      onInspectOptions={handleInspectOptions}
-                      onOpenTicket={onOpenOrderTicket}
-                      onArchiveToggle={handleArchiveToggle}
-                      onClearLockout={handleClearLockout}
-                      archiving={archiving}
-                      historyAttempts={history}
-                    />
-                  ))}
+                  <div className="flex items-center justify-between pb-2 border-b border-cyan-500/40">
+                    <div className="flex items-center gap-2">
+                      <span className="text-base">💱</span>
+                      <h2 className="text-xs font-black uppercase tracking-wider text-cyan-400">
+                        Currency Derivatives (CDS) — USDINR · EURINR ({groupedCurrencyAlerts.length})
+                      </h2>
+                    </div>
+                    <span className="text-[10px] font-mono text-muted">NSE CDS Segment · INR Pairs</span>
+                  </div>
+                  <div className="space-y-3">
+                    {groupedCurrencyAlerts.map(({ alert: alt, history }) => (
+                      <AutoAlertCard
+                        key={alt.alert_id || alt.id || alt.symbol}
+                        alert={alt}
+                        onAnalyze={handleAnalyze}
+                        onInspectOptions={handleInspectOptions}
+                        onOpenTicket={handleOpenTicket}
+                        onArchiveToggle={handleArchiveToggle}
+                        onClearLockout={handleClearLockout}
+                        archiving={archiving}
+                        historyAttempts={history}
+                        densityMode={densityMode}
+                      />
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Segment-specific empty state when a segment filter is active but has no results */}
+              {selectedSegment !== 'ALL' && filteredAutoAlerts.length === 0 && (
+                <div className="p-6 text-center text-xs text-muted border border-border/50 rounded-xl bg-surface/50">
+                  No {selectedSegment === 'COMMODITY' ? 'MCX Commodity' : selectedSegment === 'CURRENCY' ? 'Currency (CDS)' : selectedSegment === 'FNO' ? 'F&O' : 'Cash Equity'} alerts matching current filters
                 </div>
               )}
             </div>
