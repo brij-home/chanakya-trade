@@ -103,6 +103,34 @@ class MockBrokerAPI(BrokerAPI):
         underlying: str,
         expiry: Optional[str] = None,
     ) -> list[OptionsContract]:
+        from market.instruments import COMMODITY_SYMBOLS
+        from engine.greeks_manager import build_commodity_option_chain_synthetic
+
+        clean_sym = (
+            underlying.upper()
+            .replace("MCX:", "")
+            .replace("CDS:", "")
+            .replace("NSE:", "")
+            .strip()
+        )
+        if clean_sym in COMMODITY_SYMBOLS or underlying.upper().startswith("MCX:"):
+            default_prices = {
+                "CRUDEOIL": 6500.0,
+                "CRUDEOILM": 6500.0,
+                "NATURALGAS": 260.0,
+                "NATGASMINI": 260.0,
+                "GOLD": 135000.0,
+                "GOLDM": 135000.0,
+                "SILVER": 200000.0,
+                "SILVERM": 200000.0,
+                "COPPER": 850.0,
+                "ZINC": 280.0,
+            }
+            price = default_prices.get(clean_sym, 1000.0)
+            return build_commodity_option_chain_synthetic(
+                clean_sym, futures_price=price, expiry_date=expiry
+            )
+
         raise NotImplementedError("Mock broker — use NSE/yfinance for options")
 
     # ── Orders ────────────────────────────────────────────────

@@ -507,6 +507,8 @@ class AlertManager:
         for alert in self._alerts:
             if alert.triggered:
                 continue
+            if not _is_market_hours(alert.exchange):
+                continue
             try:
                 if self._evaluate(alert):
                     alert.triggered = True
@@ -532,7 +534,11 @@ class AlertManager:
 
     def _poll_loop(self, interval: int) -> None:
         while self._polling and not self._stop_event.is_set():
-            if self.active_count() > 0 and _is_market_hours():
+            if self.active_count() > 0 and (
+                _is_market_hours("NSE")
+                or _is_market_hours("CDS")
+                or _is_market_hours("MCX")
+            ):
                 # Check for triggered alerts
                 triggered = self.check_alerts()
                 for alert in triggered:
@@ -552,6 +558,8 @@ class AlertManager:
         with self._lock:
             for alert in self._alerts:
                 if alert.triggered or alert.is_invalidated:
+                    continue
+                if not _is_market_hours(alert.exchange):
                     continue
                 if alert.invalidation_threshold is None:
                     continue
@@ -643,12 +651,19 @@ class AlertManager:
             panel_title = f"[bold red]⚠️ {env_tag} ALERT / VIEW INVALIDATED[/bold red]"
             desktop_title = f"⚠️ {env_tag} VIEW INVALIDATED: {alert.symbol}"
             desktop_msg = alert.invalidation_reason or f"{desc} is no longer valid."
-            tg_msg = (
-                f"⚠️ <b>{env_tag} VIEW INVALIDATED</b>\n\n"
-                f"🚨 <b>{alert.symbol} {alert.alert_type} Alert</b> is <b>NO LONGER VALID</b>!\n\n"
-                f"🛑 <b>Reason:</b> {alert.invalidation_reason or desc}\n"
-                f"🕒 <b>Invalidated at:</b> {alert.invalidated_at or 'Just now'}\n\n"
-                f"<i>Level or technical setup was invalidated by opposing price movement.</i>"
+            from bot.alert_templates import render_milestone_alert, MilestoneAlertData
+
+            tg_msg = render_milestone_alert(
+                MilestoneAlertData(
+                    milestone_type="INVALIDATED",
+                    symbol=alert.symbol,
+                    alert_type=alert.alert_type,
+                    invalidation_reason=alert.invalidation_reason or desc,
+                    environment=alert.environment,
+                    in_market=in_market,
+                    timestamp=alert.invalidated_at or alert.created_at,
+                ),
+                in_market=in_market,
             )
             headline = f"⚠️ {env_tag} VIEW INVALIDATED: {alert.symbol} {alert.alert_type}"
             summary = alert.invalidation_reason or f"{desc} is no longer valid."
@@ -661,19 +676,24 @@ class AlertManager:
                 alert.trailing_rationale
                 or f"{desc} reached target price ₹{alert.target_price or alert.threshold:,.2f}!"
             )
-            trail_str = (
-                f"\n🛑 <b>Recommended Trail SL:</b> ₹{alert.trailing_stop:,.2f}"
-                if alert.trailing_stop and alert.should_trail
-                else "\n🛑 <b>Trailing:</b> DO NOT TRAIL (Book Full Profit)"
-            )
-            tg_msg = (
-                f"🎯 <b>{env_tag} TARGET ACHIEVED</b>\n\n"
-                f"🏆 <b>{alert.symbol} {alert.alert_type} Alert</b> reached target!\n\n"
-                f"💰 <b>LTP:</b> ₹{ltp or alert.threshold:,.2f} | <b>Target:</b> ₹{alert.target_price or alert.threshold:,.2f}"
-                f"{trail_str}\n"
-                f"⚡ <b>DECISION:</b> <code>{alert.trailing_decision or 'BOOK_50_TRAIL_BREAKEVEN'}</code>\n\n"
-                f"💡 <b>Action:</b> {alert.trailing_rationale or desc}\n\n"
-                f"🕒 {alert.triggered_at or 'Live'}"
+            from bot.alert_templates import render_milestone_alert, MilestoneAlertData
+
+            tg_msg = render_milestone_alert(
+                MilestoneAlertData(
+                    milestone_type="FINAL_TARGET",
+                    symbol=alert.symbol,
+                    alert_type=alert.alert_type,
+                    ltp=ltp or alert.threshold,
+                    target_level=alert.target_price or alert.threshold,
+                    trailing_stop=alert.trailing_stop,
+                    decisive_action=alert.trailing_decision or "BOOK_50_TRAIL_BREAKEVEN",
+                    rationale=alert.trailing_rationale or desc,
+                    should_trail=alert.should_trail,
+                    environment=alert.environment,
+                    in_market=in_market,
+                    timestamp=alert.triggered_at or alert.created_at,
+                ),
+                in_market=in_market,
             )
             headline = f"🎯 {env_tag} TARGET ACHIEVED: {alert.symbol} {alert.alert_type}"
             summary = alert.trailing_rationale or f"{desc} hit target price!"
@@ -683,19 +703,14 @@ class AlertManager:
             panel_title = f"[bold {'magenta' if is_test else ('yellow' if not in_market else 'green')}]🔔 {env_tag} ALERT TRIGGERED[/bold {'magenta' if is_test else ('yellow' if not in_market else 'green')}]"
             desktop_title = f"{env_tag} Alert Triggered: {alert.symbol}"
             desktop_msg = f"{desc}{ltp_str}"
-            if is_test:
-                tg_prefix = "🧪 <b>[TEST ALERT - SIMULATED]</b>"
-            elif not in_market:
-                tg_prefix = "⏸️ <b>[OFF-MARKET ALERT TRIGGERED]</b>"
-            else:
-                tg_prefix = "🟢 <b>[REAL / LIVE ALERT TRIGGERED]</b>"
+            from bot.alert_templates import render_price_alert
 
-            off_market_note = (
-                "\n\n⏸️ <i>Market is closed. Setup triggered from post-market settlement/EOD price.</i>"
-                if not in_market and not is_test
-                else ""
+            tg_msg = render_price_alert(
+                symbol=alert.symbol,
+                condition_desc=f"{desc}{ltp_str}",
+                environment=alert.environment,
+                in_market=in_market,
             )
-            tg_msg = f"{tg_prefix}\n\n🔔 <b>{alert.symbol}</b>: {desc}{ltp_str}{off_market_note}"
             headline = f"{env_tag} 🔔 {alert.symbol} {alert.alert_type} Alert Triggered"
             summary = f"{desc}{ltp_str}"
             border_style = "magenta" if is_test else ("yellow" if not in_market else "green")

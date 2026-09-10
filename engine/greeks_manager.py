@@ -494,3 +494,187 @@ def print_dashboard(dash: GreeksDashboard) -> None:
             border_style="cyan",
         )
     )
+
+
+# ── Black-76 Model for Commodity Futures Options ─────────────────────────────
+
+
+def black_76_price_and_greeks(
+    futures_price: float,
+    strike: float,
+    time_to_expiry_years: float,
+    risk_free_rate: float = 0.065,
+    volatility: float = 0.30,
+    option_type: str = "CE",
+) -> dict[str, float]:
+    """
+    Computes theoretical option price and Greeks using the Black-76 model for options on futures.
+    Standard pricing model for MCX Commodity options and futures options worldwide.
+
+    Formulas:
+      d1 = [ln(F/K) + 0.5 * sigma^2 * T] / (sigma * sqrt(T))
+      d2 = d1 - sigma * sqrt(T)
+      Call = e^(-rT) * [F * N(d1) - K * N(d2)]
+      Put  = e^(-rT) * [K * N(-d2) - F * N(-d1)]
+    """
+    F = max(0.001, float(futures_price))
+    K = max(0.001, float(strike))
+    T = max(1e-5, float(time_to_expiry_years))
+    r = float(risk_free_rate)
+    sigma = max(0.01, float(volatility))
+    is_call = str(option_type).upper() in ("CE", "CALL")
+
+    sqrt_T = math.sqrt(T)
+    sigma_sqrt_T = sigma * sqrt_T
+
+    d1 = (math.log(F / K) + 0.5 * (sigma**2) * T) / sigma_sqrt_T
+    d2 = d1 - sigma_sqrt_T
+
+    def norm_cdf(x: float) -> float:
+        return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
+
+    def norm_pdf(x: float) -> float:
+        return (1.0 / math.sqrt(2.0 * math.pi)) * math.exp(-0.5 * (x**2))
+
+    discount = math.exp(-r * T)
+    pdf_d1 = norm_pdf(d1)
+
+    if is_call:
+        price = discount * (F * norm_cdf(d1) - K * norm_cdf(d2))
+        delta = discount * norm_cdf(d1)
+        theta_annual = -(discount * F * sigma * pdf_d1) / (2.0 * sqrt_T) - r * discount * (
+            F * norm_cdf(d1) - K * norm_cdf(d2)
+        )
+    else:
+        price = discount * (K * norm_cdf(-d2) - F * norm_cdf(-d1))
+        delta = -discount * norm_cdf(-d1)
+        theta_annual = -(discount * F * sigma * pdf_d1) / (2.0 * sqrt_T) - r * discount * (
+            K * norm_cdf(-d2) - F * norm_cdf(-d1)
+        )
+
+    gamma = (discount * pdf_d1) / (F * sigma_sqrt_T)
+    vega = (discount * F * sqrt_T * pdf_d1) / 100.0  # per 1% change in IV
+    theta_daily = theta_annual / 365.0
+
+    return {
+        "price": max(0.05, round(price, 2)),
+        "delta": round(delta, 4),
+        "gamma": round(gamma, 6),
+        "theta": round(theta_daily, 2),
+        "vega": round(vega, 2),
+        "d1": round(d1, 4),
+        "d2": round(d2, 4),
+    }
+
+
+def build_commodity_option_chain_synthetic(
+    underlying: str,
+    futures_price: float,
+    iv: Optional[float] = None,
+    days_to_expiry: int = 14,
+    expiry_date: Optional[str] = None,
+) -> list:
+    """
+    Generates a deterministic, institutionally grounded MCX commodity options chain
+    using the Black-76 model when live broker credentials are unavailable or off-market.
+    Provides 21 strikes (10 OTM, 1 ATM, 10 ITM) for CE and PE with exact lot sizes.
+    """
+    from brokers.base import OptionsContract
+    from market.instruments import STANDARD_LOT_SIZES
+
+    sym = underlying.upper().replace("MCX:", "").strip()
+    F = float(futures_price)
+    if F <= 0:
+        return []
+
+    # Strike step mapping for Indian MCX contracts
+    strike_step_map = {
+        "CRUDEOIL": 50.0,
+        "CRUDEOILM": 50.0,
+        "NATURALGAS": 5.0,
+        "NATGASMINI": 5.0,
+        "GOLD": 500.0,
+        "GOLDM": 100.0,
+        "SILVER": 1000.0,
+        "SILVERM": 500.0,
+        "COPPER": 10.0,
+        "ZINC": 5.0,
+    }
+    step = strike_step_map.get(sym, 50.0)
+
+    # Base typical IVs for commodities
+    base_iv_map = {
+        "CRUDEOIL": 0.34,
+        "NATURALGAS": 0.48,
+        "GOLD": 0.16,
+        "SILVER": 0.24,
+        "COPPER": 0.22,
+        "ZINC": 0.20,
+    }
+    vol = iv if iv is not None else base_iv_map.get(sym, 0.30)
+    lot_size = STANDARD_LOT_SIZES.get(sym, 1)
+
+    dte = max(1, days_to_expiry)
+    T = dte / 365.0
+
+    if not expiry_date:
+        from datetime import datetime, timezone, timedelta
+
+        IST = timezone(timedelta(hours=5, minutes=30))
+        target_exp = (datetime.now(IST) + timedelta(days=dte)).strftime("%Y-%m-%d")
+    else:
+        target_exp = expiry_date
+
+    # Find nearest ATM strike
+    atm_strike = round(F / step) * step
+
+    contracts: list[OptionsContract] = []
+    # 10 strikes below and 10 strikes above ATM
+    strikes = [atm_strike + i * step for i in range(-10, 11)]
+
+    for strike in strikes:
+        strike_val = round(strike, 2 if step < 1.0 else 0)
+        strike_int = int(strike_val)
+
+        for opt_type in ("CE", "PE"):
+            greeks = black_76_price_and_greeks(
+                futures_price=F,
+                strike=strike_val,
+                time_to_expiry_years=T,
+                volatility=vol,
+                option_type=opt_type,
+            )
+            price = greeks["price"]
+            # Spread: 1-2 ticks
+            spread = max(0.10, round(price * 0.004, 2))
+            bid = max(0.05, round(price - spread / 2.0, 2))
+            ask = round(price + spread / 2.0, 2)
+
+            # Realistic mock OI: higher near ATM, tapering out
+            dist = abs(strike_val - F) / step
+            mock_oi = max(50, int(5000 * math.exp(-0.15 * dist)))
+
+            contract_symbol = (
+                f"MCX:{sym}{target_exp.replace('-', '')[2:]}{strike_int}{opt_type}"
+            )
+
+            contracts.append(
+                OptionsContract(
+                    symbol=contract_symbol,
+                    underlying=sym,
+                    expiry=target_exp,
+                    strike=strike_val,
+                    option_type=opt_type,
+                    last_price=price,
+                    oi=mock_oi,
+                    oi_change=int(mock_oi * 0.05),
+                    volume=int(mock_oi * 1.5),
+                    iv=round(vol * 100.0, 1),
+                    bid=bid,
+                    ask=ask,
+                    lot_size=lot_size,
+                    exchange="MCX",
+                )
+            )
+
+    return sorted(contracts, key=lambda c: (c.expiry, c.strike, c.option_type))

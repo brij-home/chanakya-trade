@@ -494,10 +494,25 @@ class ShoonyaAPI(BrokerAPI):
     def get_options_chain(
         self, underlying: str, expiry: Optional[str] = None
     ) -> list[OptionsContract]:
-        resolved = self._resolve_instrument(f"NSE:{underlying}")
+        from market.instruments import COMMODITY_SYMBOLS
+
+        clean_sym = (
+            underlying.upper()
+            .replace("MCX:", "")
+            .replace("CDS:", "")
+            .replace("NFO:", "")
+            .replace("NSE:", "")
+            .strip()
+        )
+        is_commodity = clean_sym in COMMODITY_SYMBOLS or underlying.upper().startswith("MCX:")
+        is_currency = clean_sym in ("USDINR", "EURINR", "GBPINR", "JPYINR") or underlying.upper().startswith("CDS:")
+
+        exch = "MCX" if is_commodity else ("CDS" if is_currency else "NFO")
+        prefix = f"{exch}:" if is_commodity or is_currency else "NSE:"
+        resolved = self._resolve_instrument(f"{prefix}{clean_sym}")
         payload: dict[str, Any] = {
-            "exch": "NFO",
-            "tsym": resolved["tsym"],
+            "exch": exch,
+            "tsym": resolved.get("tsym", clean_sym),
             "strprc": "0",
             "cnt": "50",
         }
@@ -515,7 +530,7 @@ class ShoonyaAPI(BrokerAPI):
             contracts.append(
                 OptionsContract(
                     symbol=str(row.get("tsym") or ""),
-                    underlying=underlying,
+                    underlying=clean_sym,
                     expiry=str(row.get("exd") or expiry or ""),
                     strike=_num(row.get("strprc")),
                     option_type=opt,
@@ -526,7 +541,7 @@ class ShoonyaAPI(BrokerAPI):
                     bid=_num(row.get("bp1")) or None,
                     ask=_num(row.get("sp1")) or None,
                     lot_size=_int(row.get("ls"), 1),
-                    exchange="NFO",
+                    exchange=exch,
                 )
             )
         return contracts

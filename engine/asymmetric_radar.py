@@ -100,14 +100,14 @@ def _enforce_monotonic_trade_levels(
 ) -> tuple[float, float, float, float, float, float, str]:
     """
     Enforces strict mathematical invariants for Asymmetric setups:
-    1. Volatility noise floor: SL distance >= max(0.85 * ATR, 1.5% of LTP) to prevent micro-whipsaws.
+    1. Volatility noise floor: SL distance >= max(1.2 * ATR, 1.8% of LTP) to prevent micro-whipsaws and sub-ATR noise invalidations.
     2. Strict Monotonic Invariant:
        - LONG:  SL < Entry_Min <= Entry_LTP < Target_1 < Target_2 < Moonshot
        - SHORT: SL > Entry_Max >= Entry_LTP > Target_1 > Target_2 > Moonshot
     3. Guarantees Stop-Loss sits strictly outside the recommended entry range.
     Returns: (sl_price, risk_pts, t1_price, t2_price, moonshot_price, rr_ratio, entry_range)
     """
-    min_noise_buffer = max(1.0, round(max(0.85 * atr, ltp * 0.015), 2))
+    min_noise_buffer = max(1.0, round(max(1.2 * atr, ltp * 0.018), 2))
     is_bullish = direction.upper() in ("BULLISH", "BUY", "LONG")
 
     if is_bullish:

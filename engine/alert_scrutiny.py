@@ -26,6 +26,8 @@ import re
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone, timedelta
+import threading
+import time
 from typing import Any, Optional
 
 logger = logging.getLogger("engine.alert_scrutiny")
@@ -64,6 +66,9 @@ class AlertScrutinyAuditor:
     def __init__(self, min_rr_ratio: float = 1.3, max_intraday_risk_pct: float = 8.0) -> None:
         self.min_rr_ratio = min_rr_ratio
         self.max_intraday_risk_pct = max_intraday_risk_pct
+        self._cache: dict[str, tuple[float, ScrutinyResult]] = {}
+        self._cache_lock = threading.Lock()
+        self._cache_ttl = 90.0  # 90s in-memory scrutiny cache to prevent rate-limit flooding
 
     # ── Tier 1: Deterministic Mathematical Sanity Gate ───────────────────────
 
@@ -98,25 +103,23 @@ class AlertScrutinyAuditor:
             return False, f"Incomplete price levels (LTP={ltp}, SL={sl}, T1={t1})", flags
 
         # Detect whether levels represent an option contract premium (Long CE or Long PE premium)
-        # Note: If direction is BEARISH on an underlying stock/futures, alert levels (LTP, SL, T1)
-        # are underlying prices (where SL > LTP > T1), even if the alert suggests a PE option!
-        # Alert levels represent option premium ONLY when it is an options alert type
-        # or when LTP directly matches the option premium.
+        atype = str(getattr(alert, "alert_type", "") or "")
         has_opt_marker = bool(
             getattr(alert, "contract_symbol", None)
             or getattr(alert, "option_type", None)
             or getattr(alert, "strike", None)
         )
-        if not has_opt_marker:
+        if atype in ("OPTIONS_MOMENTUM", "OPTION_WRITE"):
+            is_option_premium_levels = True
+        elif atype == "GAMMA_BLAST" and getattr(alert, "option_type", None):
+            is_option_premium_levels = True
+        elif not has_opt_marker:
             is_option_premium_levels = False
         elif getattr(alert, "option_premium", None) is not None:
-            is_option_premium_levels = abs(ltp - float(alert.option_premium)) < 0.05
+            # Check if ltp is close to option_premium (within 15% tolerance for intraday movement)
+            is_option_premium_levels = abs(ltp - float(alert.option_premium)) < max(1.0, float(alert.option_premium) * 0.15)
         else:
-            atype = str(getattr(alert, "alert_type", "") or "")
-            is_option_premium_levels = bool(
-                atype in ("OPTIONS_MOMENTUM", "OPTION_WRITE")
-                or (atype == "GAMMA_BLAST" and getattr(alert, "option_type", None))
-            )
+            is_option_premium_levels = False
 
         # 2. Geometric Level Coherence
         if is_option_premium_levels or direction in ("BULLISH", "LONG", "BUY"):
@@ -131,6 +134,7 @@ class AlertScrutinyAuditor:
                 )
             risk_pts = ltp - sl
             reward_pts = t1 - ltp
+
         elif direction in ("BEARISH", "SHORT", "SELL"):
             # For cash equity short or futures short:
             if sl <= ltp:
@@ -215,31 +219,65 @@ class AlertScrutinyAuditor:
         """
         Runs comprehensive Tier-1 and Tier-2 scrutiny.
         Falls back defensively to deterministic quantitative scrutiny if LLM is unavailable.
+        Uses in-memory TTL cache (90s) to prevent LLM rate limit exhaustion during rapid scanning loops.
         """
+        # Step 0: Check In-Memory TTL Cache
+        sym = getattr(alert, "symbol", "") or (alert.get("symbol", "") if isinstance(alert, dict) else "")
+        atype = getattr(alert, "alert_type", "") or (alert.get("alert_type", "") if isinstance(alert, dict) else "")
+        direction = getattr(alert, "direction", "") or (alert.get("direction", "") if isinstance(alert, dict) else "")
+        contract = getattr(alert, "contract_symbol", "") or (alert.get("contract_symbol", "") if isinstance(alert, dict) else "")
+        strike = getattr(alert, "strike", None) or (alert.get("strike", None) if isinstance(alert, dict) else None)
+        ltp = float(getattr(alert, "ltp", 0.0) or (alert.get("ltp", 0.0) if isinstance(alert, dict) else 0.0) or 0.0)
+        trig = float(getattr(alert, "trigger_level", 0.0) or (alert.get("trigger_level", 0.0) if isinstance(alert, dict) else 0.0) or 0.0)
+
+        cache_key = f"{sym}:{atype}:{direction}:{contract}:{strike}:{round(ltp, 1)}:{round(trig, 1)}"
+        now = time.time()
+        with self._cache_lock:
+            if cache_key in self._cache:
+                ts, cached_res = self._cache[cache_key]
+                if (now - ts) < self._cache_ttl:
+                    return cached_res
+
+        def _commit_cache(res: ScrutinyResult) -> ScrutinyResult:
+            with self._cache_lock:
+                if len(self._cache) > 500:
+                    cutoff = now - self._cache_ttl
+                    self._cache = {k: v for k, v in self._cache.items() if v[0] > cutoff}
+                self._cache[cache_key] = (now, res)
+            return res
+
         # Step 1: Tier 1 Sanity Gate
         passed, failure_reason, flags = self.verify_tier1_sanity(alert)
         if not passed:
-            return ScrutinyResult(
-                status="REJECTED",
-                score=25,
-                logic_confirmation="Mathematical sanity gate failed.",
-                trap_risk_warning=f"Sanity Veto: {failure_reason}",
-                actionable_guidance="Do not execute. Discarded due to structural invalidity.",
-                sanctity_matrix=flags,
-                rejection_reason=failure_reason,
-                auditor_model="TIER1_GATE",
+            return _commit_cache(
+                ScrutinyResult(
+                    status="REJECTED",
+                    score=25,
+                    logic_confirmation="Mathematical sanity gate failed.",
+                    trap_risk_warning=f"Sanity Veto: {failure_reason}",
+                    actionable_guidance="Do not execute. Discarded due to structural invalidity.",
+                    sanctity_matrix=flags,
+                    rejection_reason=failure_reason,
+                    auditor_model="TIER1_GATE",
+                )
             )
+
+        # Step 1.5: Conviction Gate (Efficiency Guardrail)
+        # Avoid spending external LLM tokens on low-confidence (<70%) setups
+        confidence = float(getattr(alert, "confidence", 80.0) or 80.0)
+        if confidence < 70.0:
+            return _commit_cache(self._generate_quantitative_fallback(alert, flags))
 
         # Step 2: Tier 2 AI Chief Risk Officer Scrutiny
         try:
             llm_result = self._execute_fast_llm_scrutiny(alert, flags, timeout=timeout)
             if llm_result:
-                return llm_result
+                return _commit_cache(llm_result)
         except Exception as e:
             logger.debug(f"[AlertScrutinyAuditor] Fast-LLM execution exception: {e}")
 
         # Step 3: Zero-Blackout Deterministic Quantitative Fallback
-        return self._generate_quantitative_fallback(alert, flags)
+        return _commit_cache(self._generate_quantitative_fallback(alert, flags))
 
     def _execute_fast_llm_scrutiny(
         self, alert: Any, flags: dict[str, bool], timeout: float = 2.5
@@ -258,6 +296,7 @@ class AlertScrutinyAuditor:
                 messages=[{"role": "user", "content": prompt}],
                 stream=False,
                 enable_tools=False,
+                max_tokens=500,
             )
             return str(resp or "").strip()
 
@@ -274,7 +313,19 @@ class AlertScrutinyAuditor:
         if match:
             clean_json = match.group(0)
 
-        data = json.loads(clean_json)
+        try:
+            data = json.loads(clean_json)
+        except Exception:
+            # Resilient fallback: regex field extraction to prevent losing valid audits
+            data = {}
+            for field in ("verdict", "logic_confirmation", "trap_risk_warning", "actionable_guidance"):
+                m = re.search(rf'"{field}"\s*:\s*"([^"]+)"', raw_text)
+                if m:
+                    data[field] = m.group(1)
+            sm = re.search(r'"score"\s*:\s*(\d+)', raw_text)
+            if sm:
+                data["score"] = int(sm.group(1))
+
         verdict = str(data.get("verdict", "APPROVED")).upper()
         score = int(data.get("score", 80))
         logic = str(data.get("logic_confirmation", "")).strip()
@@ -311,6 +362,12 @@ class AlertScrutinyAuditor:
         summary = getattr(alert, "summary", "")
         metrics = getattr(alert, "metrics", {}) or {}
 
+        act_plan = getattr(alert, "actionable_plan", {}) or {}
+        action = str(act_plan.get("action", "") if isinstance(act_plan, dict) else "").upper()
+        opt_type = str(getattr(alert, "option_type", "") or "").upper()
+        contract = str(getattr(alert, "contract_symbol", "") or "")
+        trade_desc = action if action else ("BUY " + opt_type if opt_type else direction)
+
         risk_pts = abs(ltp - sl)
         reward_pts = abs(t1 - ltp)
         rr_str = f"1:{reward_pts / risk_pts:.2f}" if risk_pts > 0 else "N/A"
@@ -318,8 +375,8 @@ class AlertScrutinyAuditor:
         return f"""You are the Chief Risk Officer and Devil's Advocate for an institutional quant trading desk.
 Perform a strict pre-dispatch scrutiny of this real-time Indian market trade setup:
 
-SYMBOL: {sym} | DIRECTION: {direction} | TYPE: {alert_type}
-LTP: ₹{ltp:,.2f} | STOP LOSS: ₹{sl:,.2f} | TARGET 1: ₹{t1:,.2f} | R:R: {rr_str}
+SYMBOL: {sym} | CONTRACT: {contract or sym} | ACTION: {trade_desc} | DIRECTION: {direction} | TYPE: {alert_type}
+LTP / PREMIUM: ₹{ltp:,.2f} | STOP LOSS: ₹{sl:,.2f} | TARGET 1: ₹{t1:,.2f} | R:R: {rr_str}
 HEADLINE: {headline}
 SUMMARY: {summary}
 METRICS: {json.dumps(metrics, default=str)[:300]}
@@ -348,6 +405,13 @@ Respond STRICTLY in valid JSON matching this schema:
         alert_type = getattr(alert, "alert_type", "SETUP")
         metrics = getattr(alert, "metrics", {}) or {}
 
+        act_plan = getattr(alert, "actionable_plan", {}) or {}
+        action = str(act_plan.get("action", "") if isinstance(act_plan, dict) else "").upper()
+        opt_type = str(getattr(alert, "option_type", "") or "").upper()
+        contract = str(getattr(alert, "contract_symbol", "") or "")
+        is_option = bool(opt_type or contract or "OPTIONS" in alert_type or "GAMMA" in alert_type)
+        is_option_buy = is_option and ("SELL" not in action and "WRITE" not in action)
+
         risk_pts = abs(ltp - sl)
         reward_pts = abs(t1 - ltp)
         rr = reward_pts / risk_pts if risk_pts > 0 else 2.5
@@ -366,14 +430,25 @@ Respond STRICTLY in valid JSON matching this schema:
 
         score = min(92, max(75, score))
 
-        if direction == "BULLISH":
-            logic = f"Quant-validated {sym} {alert_type.lower().replace('_', ' ')}: structural pivot holds above Rs.{sl:,.1f} with favorable 1:{rr:.1f} R:R asymmetry."
-            trap = f"Overhead resistance near target Rs.{t1:,.1f}; scale 50% profit at T1 and trail SL to breakeven."
-            guidance = f"Enter near Rs.{ltp:,.1f}; strictly invalidate if candle closes below Rs.{sl:,.1f}."
-        else:
+        if is_option_buy:
+            if opt_type == "PE" or "PE" in contract or "PUT" in action or direction == "BEARISH":
+                opt_lbl = contract or f"{sym} {opt_type or 'PE'}"
+                logic = f"Quant-validated {opt_lbl} Put momentum: bearish underlying breakdown confirmed with 1:{rr:.1f} R:R premium expansion asymmetry."
+                trap = f"Watch for sudden underlying short-covering bounce; scale 50% profit at option target Rs.{t1:,.1f} and trail SL to breakeven."
+                guidance = f"Buy PE near Rs.{ltp:,.1f}; strictly invalidate if option premium drops below Rs.{sl:,.1f}."
+            else:
+                opt_lbl = contract or f"{sym} {opt_type or 'CE'}"
+                logic = f"Quant-validated {opt_lbl} Call momentum: bullish momentum holds with favorable 1:{rr:.1f} R:R premium expansion asymmetry."
+                trap = f"Watch for overhead resistance or IV crush near target Rs.{t1:,.1f}; scale 50% profit at T1 and trail SL to breakeven."
+                guidance = f"Buy CE near Rs.{ltp:,.1f}; strictly invalidate if option premium drops below Rs.{sl:,.1f}."
+        elif direction in ("BEARISH", "SHORT", "SELL"):
             logic = f"Quant-validated {sym} breakdown: distribution structure below Rs.{sl:,.1f} confirmed with 1:{rr:.1f} downside asymmetry."
             trap = f"Watch for sudden short-covering bounce near Rs.{t1:,.1f}; tighten stop on lower timeframe CHoCH."
             guidance = f"Short near Rs.{ltp:,.1f}; invalidate trade immediately if price reclaims Rs.{sl:,.1f}."
+        else:
+            logic = f"Quant-validated {sym} {alert_type.lower().replace('_', ' ')}: structural pivot holds above Rs.{sl:,.1f} with favorable 1:{rr:.1f} R:R asymmetry."
+            trap = f"Overhead resistance near target Rs.{t1:,.1f}; scale 50% profit at T1 and trail SL to breakeven."
+            guidance = f"Enter near Rs.{ltp:,.1f}; strictly invalidate if candle closes below Rs.{sl:,.1f}."
 
         return ScrutinyResult(
             status="APPROVED",

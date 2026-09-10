@@ -8,6 +8,8 @@ Docs: https://kite.trade/docs/connect/v3/
 from __future__ import annotations
 
 import json
+import threading
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -42,6 +44,8 @@ class ZerodhaAPI(BrokerAPI):
         self.api_key = api_key
         self.api_secret = api_secret
         self.kite = KiteConnect(api_key=api_key)
+        self._inst_lock = threading.Lock()
+        self._instruments_cache: dict[str, tuple[float, list[dict]]] = {}
         self._restore_token()
 
     # ── Token management ──────────────────────────────────────
@@ -187,21 +191,45 @@ class ZerodhaAPI(BrokerAPI):
             )
         return result
 
+    def _get_instruments(self, exch: str = "NFO") -> list[dict]:
+        now = time.time()
+        with self._inst_lock:
+            if exch in self._instruments_cache:
+                cached_time, data = self._instruments_cache[exch]
+                if (now - cached_time) < 3600.0:
+                    return data
+            data = self.kite.instruments(exch)
+            self._instruments_cache[exch] = (now, data)
+            return data
+
     def get_options_chain(
         self,
         underlying: str,
         expiry: Optional[str] = None,
     ) -> list[OptionsContract]:
-        # Fetch all NFO instruments once (heavy call — cache in production)
-        all_instruments = self.kite.instruments("NFO")
+        from market.instruments import COMMODITY_SYMBOLS
+
+        clean_sym = (
+            underlying.upper()
+            .replace("MCX:", "")
+            .replace("CDS:", "")
+            .replace("NFO:", "")
+            .replace("NSE:", "")
+            .strip()
+        )
+        is_commodity = clean_sym in COMMODITY_SYMBOLS or underlying.upper().startswith("MCX:")
+        is_currency = clean_sym in ("USDINR", "EURINR", "GBPINR", "JPYINR") or underlying.upper().startswith("CDS:")
+
+        exch = "MCX" if is_commodity else ("CDS" if is_currency else "NFO")
+        all_instruments = self._get_instruments(exch)
 
         # Filter by underlying and option type
         chain_instruments = [
             i
             for i in all_instruments
-            if i["name"] == underlying
-            and i["instrument_type"] in ("CE", "PE")
-            and (not expiry or str(i["expiry"]) == expiry)
+            if i.get("name") == clean_sym
+            and i.get("instrument_type") in ("CE", "PE")
+            and (not expiry or str(i.get("expiry")) == expiry)
         ]
 
         if not chain_instruments:
@@ -213,27 +241,28 @@ class ZerodhaAPI(BrokerAPI):
             chain_instruments = [i for i in chain_instruments if str(i["expiry"]) == expiry]
 
         # Fetch live quotes for all chain instruments (max 500 at once)
-        symbols = [f"NFO:{i['tradingsymbol']}" for i in chain_instruments]
+        symbols = [f"{exch}:{i['tradingsymbol']}" for i in chain_instruments]
         quotes: dict = {}
         for i in range(0, len(symbols), 400):
             quotes.update(self.kite.quote(symbols[i : i + 400]))
 
         contracts = []
         for inst in chain_instruments:
-            sym = f"NFO:{inst['tradingsymbol']}"
+            sym = f"{exch}:{inst['tradingsymbol']}"
             q = quotes.get(sym, {})
             contracts.append(
                 OptionsContract(
                     symbol=inst["tradingsymbol"],
-                    underlying=underlying,
+                    underlying=clean_sym,
                     expiry=str(inst["expiry"]),
-                    strike=inst["strike"],
+                    strike=float(inst["strike"]),
                     option_type=inst["instrument_type"],
-                    last_price=q.get("last_price", 0.0),
-                    oi=q.get("oi", 0),
-                    oi_change=q.get("oi_day_change", 0),
-                    volume=q.get("volume", 0),
-                    lot_size=inst.get("lot_size", 1),
+                    last_price=float(q.get("last_price", 0.0)),
+                    oi=int(q.get("oi", 0)),
+                    oi_change=int(q.get("oi_day_change", 0)),
+                    volume=int(q.get("volume", 0)),
+                    lot_size=int(inst.get("lot_size", 1)),
+                    exchange=exch,
                 )
             )
 

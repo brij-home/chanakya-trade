@@ -233,7 +233,7 @@ def calculate_trade_plan(
     try:
         from market.history import get_ohlcv
 
-        df = get_ohlcv(clean_sym, period="20d", interval="1d")
+        df = get_ohlcv(clean_sym, days=30, interval="day")
         if df is not None and len(df) >= 10:
             # 14-period ATR
             high = df["High"] if "High" in df.columns else df["high"]

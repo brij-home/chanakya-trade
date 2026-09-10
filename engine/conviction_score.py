@@ -367,7 +367,7 @@ def _score_india_vix_regime(vix: Optional[float] = None) -> FactorScore:
         try:
             from market.history import get_ohlcv
 
-            vix_hist = get_ohlcv("NSE:INDIA VIX", period="5d", interval="1d")
+            vix_hist = get_ohlcv("NSE:INDIA VIX", days=5, interval="day")
             if vix_hist is not None and len(vix_hist) >= 2:
                 vix_prev = float(vix_hist["Close"].iloc[-2])
         except Exception:
@@ -626,7 +626,7 @@ def _score_smc_structure(spot: float, underlying: str = "NIFTY") -> FactorScore:
         from market.quotes import normalize_instrument
 
         inst = normalize_instrument(underlying)
-        df = get_ohlcv(inst, period="20d", interval="1d")
+        df = get_ohlcv(inst, days=20, interval="day")
 
         if df is None or df.empty or len(df) < 10:
             raise ValueError("Insufficient OHLCV data")

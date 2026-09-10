@@ -213,6 +213,54 @@ class TestOpenAIProvider:
             idx2, _ = p._get_active_client()
             assert idx1 != idx2
 
+    def test_pool_cooldown_circuit_breaker(self, monkeypatch):
+        """OpenAIProvider should detect pool cooldown and fast-fail without calling API."""
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-single-key")
+        mock_sdk = MagicMock()
+        with patch.dict("sys.modules", {"openai": mock_sdk}):
+            from agent.core import OpenAIProvider
+            from agent.tools import build_registry
+
+            reg = build_registry()
+            p = OpenAIProvider(
+                model="gpt-4o",
+                registry=reg,
+                system_prompt="test",
+            )
+            assert p.is_pool_available() is True
+
+            # Put the key on cooldown
+            p._mark_key_cooldown(0, cooldown_seconds=60.0)
+            assert p.is_pool_available() is False
+
+            # Attempting chat must fast-fail with RuntimeError and ZERO calls to openai client
+            with pytest.raises(RuntimeError, match="Rate limit cooldown active across all pooled API keys"):
+                p.chat(messages=[{"role": "user", "content": "hello"}], stream=False)
+
+            # Verify no chat completions were dispatched over the network
+            assert mock_sdk.OpenAI.return_value.chat.completions.create.call_count == 0
+
+    def test_max_tokens_passed_to_completions(self, monkeypatch):
+        """OpenAIProvider should pass max_tokens to completions.create to avoid default 4096 reservation."""
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+        mock_sdk = MagicMock()
+        mock_client = MagicMock()
+        mock_sdk.OpenAI.return_value = mock_client
+        mock_resp = MagicMock()
+        mock_resp.choices = [MagicMock(message=MagicMock(content="result text", tool_calls=None))]
+        mock_client.chat.completions.create.return_value = mock_resp
+
+        with patch.dict("sys.modules", {"openai": mock_sdk}):
+            from agent.core import OpenAIProvider
+            from agent.tools import build_registry
+
+            p = OpenAIProvider(model="gpt-4o", registry=build_registry(), system_prompt="test")
+            res = p.chat([{"role": "user", "content": "hi"}], stream=False, max_tokens=250)
+            assert res == "result text"
+            assert mock_client.chat.completions.create.call_count == 1
+            call_kwargs = mock_client.chat.completions.create.call_args[1]
+            assert call_kwargs.get("max_tokens") == 250
+
 
 # ── Anthropic provider (mocked) ──────────────────────────────
 

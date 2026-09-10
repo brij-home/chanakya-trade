@@ -42,6 +42,18 @@ from typing import Any, Optional
 
 from dotenv import load_dotenv
 
+from bot.alert_templates import (
+    render_fno_alert,
+    render_equity_alert,
+    render_precursor_alert,
+    render_asymmetric_alert,
+    render_milestone_alert,
+    render_price_alert,
+    FNOAlertData,
+    EquityAlertData,
+    MilestoneAlertData,
+)
+
 load_dotenv(Path(__file__).parent.parent / ".env")
 
 try:
@@ -1517,79 +1529,8 @@ def push_brief(brief_text: str) -> None:
 
 
 def format_execution_alert_message(d: dict) -> str:
-    """
-    Format a rich, actionable Execution Readiness notification for Telegram using valid HTML formatting.
-    Includes exact Entry, Stop Loss, Targets, Risk:Reward, Expected Timelines, Profit Booking Playbook,
-    and clean quick-execute commands.
-    """
-    symbol = d.get("symbol", "UNKNOWN")
-    sector = d.get("sector", "General")
-    sector_icon = d.get("sector_icon", "🏢")
-    ltp = float(d.get("ltp", 0.0))
-    status = d.get("execution_status", "STALK")
-    strat_score = int(d.get("strategic_score", d.get("conviction_score", 0)))
-    tact_score = int(d.get("tactical_score", 80))
-    entry = float(d.get("entry_price", ltp))
-    sl = float(d.get("stop_loss", ltp * 0.97))
-    t1 = float(d.get("target_1", ltp * 1.05))
-    t2 = float(d.get("target_2", ltp * 1.08))
-    rr = float(d.get("risk_reward_ratio", 2.0))
-    setup_title = d.get("setup_title", "Institutional Setup")
-    rvol = float(d.get("rvol", d.get("rvol_20d", 1.5)))
-    oi_regime = d.get("options_oi_regime", "LONG_BUILDUP")
-    catalysts = d.get("catalysts", [])
-    if not catalysts and d.get("catalyst_summary"):
-        catalysts = [c.strip() for c in d.get("catalyst_summary", "").split("·") if c.strip()]
-
-    timeline = d.get("expected_timeline", "3–10 Trading Days (Swing Momentum)")
-    t1_time = d.get("target_1_timeline", "2–5 Trading Days")
-    t2_time = d.get("target_2_timeline", "6–10 Trading Days")
-    time_stop = d.get("time_stop_days", 10)
-
-    risk_pct = abs((entry - sl) / entry * 100) if entry else 0.0
-    t1_pct = abs((t1 - entry) / entry * 100) if entry else 0.0
-    t2_pct = abs((t2 - entry) / entry * 100) if entry else 0.0
-
-    status_badge = (
-        "🚀 <b>READY TO EXECUTE</b>" if status == "READY" else "🎯 <b>STALK ON RETEST</b>"
-    )
-    cat_text = (
-        "\n".join([f"• {c}" for c in catalysts[:3]])
-        if catalysts
-        else "• Confirmed Institutional Structure"
-    )
-
-    # Breakeven price with +0.2% cost buffer
-    be_price = entry * 1.002
-
-    msg = (
-        f"{status_badge}\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"<b>{symbol}</b> ({sector_icon} {sector}) · <b>₹{ltp:,.2f}</b>\n"
-        f"<i>{setup_title}</i>\n\n"
-        f"📊 <b>Scores:</b> Strategic: <b>{strat_score}/100</b> | Live Tactical: <b>{tact_score}/100</b>\n"
-        f"⚡ <b>RVOL:</b> {rvol:.1f}x | <b>OI Flow:</b> {oi_regime}\n\n"
-        f"🎯 <b>Actionable Blueprint:</b>\n"
-        f"• <b>Entry Zone:</b> <code>₹{entry:,.2f}</code>\n"
-        f"• <b>Invalidation SL:</b> <code>₹{sl:,.2f}</code> (-{risk_pct:.1f}%)\n"
-        f"• <b>Target 1 (2R):</b> <code>₹{t1:,.2f}</code> (+{t1_pct:.1f}%)\n"
-        f"• <b>Target 2 (3.5R):</b> <code>₹{t2:,.2f}</code> (+{t2_pct:.1f}%)\n"
-        f"• <b>Risk : Reward:</b> <b>1:{rr:.1f} R:R</b>\n\n"
-        f"⏳ <b>Expected Timeline & Horizon:</b>\n"
-        f"• <b>Holding Horizon:</b> <b>{timeline}</b>\n"
-        f"• <b>Target 1 Window:</b> Expected within <b>{t1_time}</b>\n"
-        f"• <b>Target 2 Window:</b> Expected within <b>{t2_time}</b>\n"
-        f"• <b>Time Stop Invalidation:</b> Exit if no expansion after <b>{time_stop} sessions</b>\n\n"
-        f"📋 <b>Profit-Booking & Trade Playbook:</b>\n"
-        f"1️⃣ <b>At Target 1 (₹{t1:,.2f}):</b> <b>Scale out 50% profit</b> & move Stop Loss to <b>Breakeven</b> (<code>₹{be_price:,.2f}</code>) for a 100% risk-free trade.\n"
-        f"2️⃣ <b>Target 2 Trailing:</b> Trail remaining 50% position using <b>Daily 20-EMA / 3.0×ATR</b> trailing stop.\n"
-        f"3️⃣ <b>Hard Invalidation:</b> Exit entire position if daily candle closes below <code>₹{sl:,.2f}</code>.\n\n"
-        f"💡 <b>Live Catalysts:</b>\n"
-        f"{cat_text}\n\n"
-        f"⚡ <b>Quick Size / Place Order:</b>\n"
-        f"<code>/size {symbol} {entry:.2f} {sl:.2f}</code>"
-    )
-    return msg
+    """Format a crisp, actionable, zero-redundancy Execution Readiness notification for Telegram."""
+    return render_equity_alert(d)
 
 
 def push_execution_alert(report_dict: dict) -> None:
@@ -1607,101 +1548,8 @@ def format_blast_alert(
     spot: float = 0.0,
     conviction_score: dict | None = None,
 ) -> str:
-    """
-    Format a high-conviction Gamma Blast / Order Book Squeeze alert for Telegram.
-    Provides clear, institutional, profit-focused actionable levels and playbook.
-    Optionally includes a 10-Factor Conviction Score badge.
-    """
-    contract = d.get("contract", f"{underlying} OPTION")
-    opt_type = d.get("option_type", "CE")
-    score = d.get("score", 85)
-    reason = d.get("blast_reason", d.get("reason", "Heavy institutional order flow imbalance"))
-    vol_oi = float(d.get("vol_oi_ratio", 2.5))
-    oi_chg = int(d.get("oi_change", 0))
-    imb = float(d.get("imbalance_ratio", 2.0))
-
-    action_title = d.get("action_title", f"BUY {contract}")
-    prem = float(d.get("premium", d.get("entry_price", d.get("ask", 0.0))) or 50.0)
-    entry_low = d.get("entry_low") or round(max(0.5, prem * 0.95), 2)
-    entry_high = d.get("entry_high") or round(prem * 1.03, 2)
-    entry_range = d.get("entry_range") or f"₹{entry_low:,.2f} – ₹{entry_high:,.2f}"
-    sl = float(d.get("stop_loss", prem * 0.75))
-    sl_pct = str(d.get("stop_loss_pct", "-25.0%"))
-    t1 = float(d.get("target_1", prem * 1.35))
-    t1_pct = str(d.get("target_1_pct", "+35.0%"))
-    t2 = float(d.get("target_2", prem * 1.65))
-    t2_pct = str(d.get("target_2_pct", "+65.0%"))
-    rr = str(d.get("risk_reward", "1:2.5"))
-
-    when_buy = d.get("when_to_buy", f"Enter on Ask/Retest ({entry_range}) while momentum holds")
-    when_wait = d.get(
-        "when_to_wait",
-        f"DO NOT CHASE if premium is above ₹{round(prem * 1.15, 1):,}. Wait for pullback",
-    )
-    when_hold = d.get("when_to_hold", "Hold while price respects 5-EMA and structure advances")
-    profit_rule = d.get(
-        "profit_rule", f"Book 50% profit at T1 (₹{t1:,.2f}), trail SL to Cost for T2"
-    )
-
-    is_call = opt_type == "CE"
-    flame = "🔥" if is_call else "🚨"
-    icon = "📈" if is_call else "📉"
-
-    # ── Conviction Score badge (optional) ──────────────────────────
-    conviction_block = ""
-    if conviction_score and isinstance(conviction_score, dict):
-        cs_total = conviction_score.get("total_score", 0)
-        cs_verdict = conviction_score.get("verdict", "WAIT")
-        cs_bullish = conviction_score.get("bullish_count", 0)
-        cs_bearish = conviction_score.get("bearish_count", 0)
-        cs_pos_size = conviction_score.get("recommended_position_size", "FLAT")
-
-        verdict_icon = {
-            "MAX_CONVICTION": "🔥",
-            "HIGH": "✅",
-            "MODERATE": "⚠️",
-            "WAIT": "🛑",
-        }.get(cs_verdict, "⚠️")
-
-        pos_size_label = {
-            "2X": "⚡ 2× Size",
-            "NORMAL": "✓ Normal Size",
-            "HALF": "½ Size",
-            "FLAT": "No Trade",
-        }.get(cs_pos_size, cs_pos_size)
-
-        conviction_block = (
-            f"\n🧠 <b>Conviction Score: {cs_total}/100</b> {verdict_icon} {cs_verdict}\n"
-            f"• <b>Signal Factors:</b> {cs_bullish}▲ Bullish · {cs_bearish}▼ Bearish\n"
-            f"• <b>Position Size:</b> {pos_size_label}\n"
-        )
-
-    msg = (
-        f"{flame} <b>CHANAKYA BLAST SURGE ALERT</b>\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"<b>{contract}</b> · {icon} <b>Score: {score}/100</b>\n"
-        f"<i>{reason}</i>\n\n"
-        f"📊 <b>Institutional Order Flow:</b>\n"
-        f"• <b>Vol/OI Turnover:</b> <b>{vol_oi:.1f}x</b>\n"
-        f"• <b>OI Liquidation/Shift:</b> <b>{oi_chg:+,} contracts</b>\n"
-        f"• <b>Buyer/Seller Queue Imbalance:</b> <b>{imb:.1f}x Buyers</b>\n"
-        f"• <b>Underlying Spot:</b> <b>₹{spot:,.2f}</b>\n"
-        f"{conviction_block}\n"
-        f"🎯 <b>Actionable Profit Blueprint:</b>\n"
-        f"• <b>Action:</b> <b>{action_title}</b>\n"
-        f"• <b>Entry Zone:</b> <code>{entry_range}</code> (Ref: ₹{prem:,.2f})\n"
-        f"• <b>Invalidation SL:</b> <code>₹{sl:,.2f}</code> ({sl_pct})\n"
-        f"• <b>Target 1 (1.5R):</b> <code>₹{t1:,.2f}</code> ({t1_pct}) — <i>Scale 50% & SL to Cost</i>\n"
-        f"• <b>Target 2 (2.5R):</b> <code>₹{t2:,.2f}</code> ({t2_pct}) — <i>Full Extension</i>\n"
-        f"• <b>Risk : Reward:</b> <b>{rr} R:R</b>\n\n"
-        f"💡 <b>Trader Execution Playbook:</b>\n"
-        f"1️⃣ <b>When to Buy:</b> {when_buy}\n"
-        f"2️⃣ <b>When to Wait (No Chase):</b> {when_wait}\n"
-        f"3️⃣ <b>When to Hold:</b> {when_hold}\n"
-        f"4️⃣ <b>Profit Rule:</b> {profit_rule}\n\n"
-        f"⚡ <i>Chanakya Institutional Gamma Desk</i>"
-    )
-    return msg
+    """Format a crisp, high-conviction Gamma Blast / Order Book Squeeze alert for Telegram."""
+    return render_fno_alert(d, underlying=underlying, spot=spot, conviction_score=conviction_score)
 
 
 def send_blast_push(
@@ -1741,46 +1589,7 @@ def send_blast_push(
 
 def format_precursor_alert(candidate_dict: dict) -> str:
     """Format a high-conviction Precursor Radar alert for Telegram push."""
-    sym = candidate_dict.get("symbol", "STOCK")
-    seg = candidate_dict.get("segment", "FNO")
-    score = candidate_dict.get("conviction_score", 80)
-    verdict = candidate_dict.get("verdict", "HIGH_CONVICTION")
-    ltp = candidate_dict.get("ltp", 0.0)
-    entry_range = candidate_dict.get("entry_range", f"₹{ltp:,.1f}")
-    sl = candidate_dict.get("stop_loss", 0.0)
-    t1 = candidate_dict.get("target_1", 0.0)
-    t2 = candidate_dict.get("target_2", 0.0)
-    rr = candidate_dict.get("risk_reward", "1:2.5")
-    when_buy = candidate_dict.get(
-        "when_to_buy", "Enter on ask within coiling range with VWAP hold."
-    )
-    when_wait = candidate_dict.get("when_to_wait", "DO NOT CHASE if price gaps > 1.8%.")
-    profit_rule = candidate_dict.get("profit_rule", "Book 50% at T1, trail runner to T2.")
-    factors = candidate_dict.get(
-        "matched_factors", ["Pre-ignition volume dry-up & squeeze coiling"]
-    )
-    factors_str = "\n• ".join(factors[:3]) if factors else "• Pre-ignition coiling setup"
-
-    icon = "🔥" if score >= 85 else "⚡"
-    msg = (
-        f"{icon} <b>CHANAKYA HIGH-CONVICTION PRECURSOR RADAR [{seg}]</b>\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"<b>{sym} [{seg}]</b> · 🧠 <b>Score: {score}/100</b> ({verdict})\n\n"
-        f"📊 <b>Matched Precursor DNA:</b>\n"
-        f"• {factors_str}\n\n"
-        f"🎯 <b>Actionable Profit Blueprint:</b>\n"
-        f"• <b>Entry Zone:</b> <code>{entry_range}</code> (Ref: ₹{ltp:,.2f})\n"
-        f"• <b>Invalidation SL:</b> <code>₹{sl:,.2f}</code>\n"
-        f"• <b>Target 1 (1.5R):</b> <code>₹{t1:,.2f}</code> — <i>Scale 50% & SL to Cost</i>\n"
-        f"• <b>Target 2 (2.5R):</b> <code>₹{t2:,.2f}</code> — <i>Full Extension</i>\n"
-        f"• <b>Risk : Reward:</b> <b>{rr}</b>\n\n"
-        f"💡 <b>Trader Execution Playbook:</b>\n"
-        f"1️⃣ <b>When to Buy:</b> {when_buy}\n"
-        f"2️⃣ <b>When to Wait:</b> {when_wait}\n"
-        f"3️⃣ <b>Profit Rule:</b> {profit_rule}\n\n"
-        f"⚡ <i>Chanakya Institutional Momentum Intelligence</i>"
-    )
-    return msg
+    return render_precursor_alert(candidate_dict)
 
 
 def send_precursor_push(candidate_dict: dict) -> bool:
@@ -1796,52 +1605,7 @@ def send_precursor_push(candidate_dict: dict) -> bool:
 
 def format_asymmetric_alert(opp_dict: dict) -> str:
     """Format a high-conviction Asymmetric Opportunity (1:3+ R:R) alert for Telegram push."""
-    sym = opp_dict.get("symbol", "STOCK")
-    seg = opp_dict.get("segment", "FNO")
-    setup_type = opp_dict.get("setup_type", "ASYMMETRIC")
-    score = opp_dict.get("conviction_score", 85)
-    verdict = opp_dict.get("verdict", "HIGH_CONVICTION")
-    ltp = opp_dict.get("ltp", 0.0)
-    entry_range = opp_dict.get("entry_range", f"₹{ltp:,.1f}")
-    sl = opp_dict.get("stop_loss", 0.0)
-    t1 = opp_dict.get("target_1", 0.0)
-    t2 = opp_dict.get("target_2", 0.0)
-    moonshot = opp_dict.get("moonshot_target", 0.0)
-    rr = opp_dict.get("risk_reward_ratio", 3.0)
-    entry_rule = opp_dict.get("entry_rule", "Enter strictly within entry band.")
-    no_chase = opp_dict.get("no_chase_rule", "DO NOT CHASE if price exceeds entry range.")
-    profit_rule = opp_dict.get("profit_rule", "Scale 40% at T1, 40% at T2, trail 20% moonshot.")
-    confluences = opp_dict.get("confluences", [])
-    conf_str = "\n• ".join(confluences[:3]) if confluences else "• High asymmetric edge"
-
-    setup_badge = {
-        "POCKET_PIVOT": "🚀 POCKET PIVOT (Base Accumulation)",
-        "FNO_BAN_SQUEEZE": "🔥 F&O BAN SQUEEZE (MWPL Trap)",
-        "RUBBER_BAND_200EMA": "🧲 RUBBER BAND 200-EMA (Deep Value)",
-        "EXPIRY_0DTE_GAMMA": "⚡ 0DTE EXPIRY GAMMA (Straddle Unpinning)",
-    }.get(setup_type, f"🎯 {setup_type}")
-
-    msg = (
-        f"🎯 <b>CHANAKYA ASYMMETRIC OPPORTUNITY [1:{rr:.1f} R:R]</b>\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"<b>{sym} [{seg}]</b> · <b>{setup_badge}</b>\n"
-        f"🧠 <b>Score: {score}/100</b> ({verdict})\n\n"
-        f"📊 <b>Institutional Confluences:</b>\n"
-        f"• {conf_str}\n\n"
-        f"🎯 <b>Asymmetric Payoff Blueprint:</b>\n"
-        f"• <b>Entry Zone:</b> <code>{entry_range}</code> (Ref: ₹{ltp:,.2f})\n"
-        f"• <b>Invalidation SL:</b> <code>₹{sl:,.2f}</code> (Risk: ₹{abs(ltp - sl):,.2f})\n"
-        f"• <b>Target 1 (+2R):</b> <code>₹{t1:,.2f}</code> — <i>Scale 40% & SL to Cost</i>\n"
-        f"• <b>Target 2 (+4R):</b> <code>₹{t2:,.2f}</code> — <i>Scale 40% & Trail</i>\n"
-        f"• <b>Moonshot (+6R+):</b> <code>₹{moonshot:,.2f}</code> — <i>Runner Extension</i>\n"
-        f"• <b>Risk : Reward:</b> <b>1:{rr:.1f} R:R</b>\n\n"
-        f"💡 <b>Execution Protocol:</b>\n"
-        f"1️⃣ <b>Entry:</b> {entry_rule}\n"
-        f"2️⃣ <b>Strict No-Chase:</b> {no_chase}\n"
-        f"3️⃣ <b>Profit Taking:</b> {profit_rule}\n\n"
-        f"⚡ <i>Chanakya Low-Risk : High-Reward Radar</i>"
-    )
-    return msg
+    return render_asymmetric_alert(opp_dict)
 
 
 def send_asymmetric_push(opp_dict: dict) -> bool:

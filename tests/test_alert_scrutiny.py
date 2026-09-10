@@ -377,3 +377,73 @@ def test_tier1_options_momentum_put_buyer(auditor: AlertScrutinyAuditor):
     assert flags["risk_within_bounds"] is True
     assert flags["rr_valid"] is True
     assert flags["no_chase"] is True
+
+
+def test_tier2_quant_fallback_long_put_guidance(auditor):
+    """
+    Quant fallback scrutiny on a Long Put (BUY PE) must generate coherent option buyer
+    guidance, not short-selling commands.
+    """
+    alert = AutoAlert(
+        alert_id="opt-mom-coforge-pe",
+        alert_type="OPTIONS_MOMENTUM",
+        stage="IGNITED",
+        symbol="COFORGE",
+        exchange="NFO",
+        direction="BEARISH",
+        headline="Coforge 1840 PE Surge",
+        summary="Put buying",
+        ltp=48.0,
+        trigger_level=48.0,
+        stop_loss=36.0,
+        target_level=72.0,
+        strike=1840.0,
+        option_type="PE",
+        contract_symbol="COFORGE1840PE",
+        actionable_plan={"action": "BUY PE", "entry_range": "₹47.0 – ₹49.0"},
+        is_live=True,
+        environment="LIVE",
+    )
+    result = auditor._generate_quantitative_fallback(alert, {"level_coherence": True})
+    assert result.status == "APPROVED"
+    assert "Buy PE" in result.actionable_guidance
+    assert "Rs.36.0" in result.actionable_guidance
+    assert "Short near" not in result.actionable_guidance
+    assert "Put momentum" in result.logic_confirmation
+
+
+def test_scrutiny_ttl_cache(auditor):
+    """
+    Subsequent scrutiny invocations for the exact same setup within the TTL window
+    must return cached ScrutinyResult without re-invoking LLM.
+    """
+    alert = AutoAlert(
+        alert_id="test-cache-1",
+        alert_type="PRECURSOR_RADAR",
+        stage="EARLY_WARNING",
+        symbol="NSE:CACHEDSYM",
+        exchange="NSE",
+        direction="BULLISH",
+        headline="Cache Test Setup",
+        summary="Testing cache",
+        ltp=500.0,
+        trigger_level=500.0,
+        stop_loss=485.0,
+        target_level=550.0,
+        is_live=True,
+        environment="LIVE",
+    )
+    # First call - populates cache
+    with patch.object(auditor, "_execute_fast_llm_scrutiny", return_value=None) as mock_llm:
+        res1 = auditor.scrutinize_alert(alert)
+        assert res1.status == "APPROVED"
+        assert mock_llm.call_count == 1
+
+    # Second call - returns from cache without calling LLM
+    with patch.object(auditor, "_execute_fast_llm_scrutiny") as mock_llm2:
+        res2 = auditor.scrutinize_alert(alert)
+        assert res2.status == "APPROVED"
+        assert res2.score == res1.score
+        assert mock_llm2.call_count == 0
+
+

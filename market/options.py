@@ -31,20 +31,33 @@ def get_options_chain(
     expiry: Optional[str] = None,
 ) -> list[OptionsContract]:
     """
-    Full options chain for an underlying index or stock.
+    Full options chain for an underlying index, stock, or MCX commodity.
 
     Fallback chain:
-      1. Data broker (live, full Greeks)
-      2. NSE public API scraper (delayed, basic Greeks)
-      3. Empty list (silent — never raises)
+      1. Data broker (live, full Greeks) — supports NFO, MCX, CDS
+      2. For MCX commodities: Black-76 theoretical options chain using live continuous futures quote
+      3. For NSE equities/indices: NSE public API scraper (delayed, basic Greeks)
+      4. Empty list (silent — never raises)
 
     Args:
-        underlying: e.g. "NIFTY", "BANKNIFTY", "RELIANCE"
+        underlying: e.g. "NIFTY", "BANKNIFTY", "RELIANCE", "CRUDEOIL", "GOLD"
         expiry:     "YYYY-MM-DD" — nearest expiry if None
 
     Returns:
         List of OptionsContract sorted by strike then type (CE/PE).
     """
+    from market.instruments import COMMODITY_SYMBOLS
+
+    clean_sym = (
+        underlying.upper()
+        .replace("MCX:", "")
+        .replace("CDS:", "")
+        .replace("NFO:", "")
+        .replace("NSE:", "")
+        .strip()
+    )
+    is_commodity = clean_sym in COMMODITY_SYMBOLS or underlying.upper().startswith("MCX:")
+
     cache_key = f"{underlying.upper()}:{expiry or 'nearest'}"
     now = time.time()
     if cache_key in _CHAIN_CACHE:
@@ -53,7 +66,7 @@ def get_options_chain(
         if (now - cached_at) < ttl:
             return cached_chain
 
-    # Tier 1: data broker
+    # Tier 1: data broker (live broker feed)
     try:
         chain = get_data_broker().get_options_chain(underlying, expiry)
         record_source("options", "broker")
@@ -61,9 +74,30 @@ def get_options_chain(
             _CHAIN_CACHE[cache_key] = (now, chain)
             return chain
     except Exception as e:
-        warn_fallback("options", str(e), "nse_scraper")
+        warn_fallback("options", str(e), "commodity_black76" if is_commodity else "nse_scraper")
 
-    # Tier 2: NSE scraper
+    # Tier 2: For MCX commodities, build Black-76 theoretical option chain from live futures quote
+    if is_commodity:
+        try:
+            from market.quotes import get_ltp
+            from engine.greeks_manager import build_commodity_option_chain_synthetic
+
+            fut_ltp = get_ltp(f"MCX:{clean_sym}") or get_ltp(clean_sym) or 0.0
+            if fut_ltp > 0:
+                chain = build_commodity_option_chain_synthetic(
+                    clean_sym, futures_price=fut_ltp, expiry_date=expiry
+                )
+                if chain:
+                    record_source("options", "black_76_synthetic")
+                    _CHAIN_CACHE[cache_key] = (now, chain)
+                    return chain
+        except Exception as e:
+            warn_fallback("options", str(e), "none")
+
+        _CHAIN_CACHE[cache_key] = (now, [])
+        return []
+
+    # Tier 3: NSE public scraper for equities and indices
     chain = nse_get_options_chain(underlying, expiry)
     record_source("options", "nse_scraper" if chain else "none")
     _CHAIN_CACHE[cache_key] = (now, chain or [])

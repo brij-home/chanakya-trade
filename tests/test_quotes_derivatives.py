@@ -34,6 +34,33 @@ def test_option_pattern_matching():
     assert m3.group(2) == "3000"
     assert m3.group(3) == "CE"
 
+    # Sub-1000 stocks (1 to 3 digit strikes)
+    m4 = _OPTION_PATTERN.match("SBIN990PE")
+    assert m4 is not None
+    assert m4.group(1) == "SBIN"
+    assert m4.group(2) == "990"
+    assert m4.group(3) == "PE"
+
+    m5 = _OPTION_PATTERN.match("TATASTEEL182PE")
+    assert m5 is not None
+    assert m5.group(1) == "TATASTEEL"
+    assert m5.group(2) == "182"
+    assert m5.group(3) == "PE"
+
+    m6 = _OPTION_PATTERN.match("IREDA112CE")
+    assert m6 is not None
+    assert m6.group(1) == "IREDA"
+    assert m6.group(2) == "112"
+    assert m6.group(3) == "CE"
+
+    # High strike 6-digit stock (MRF)
+    m7 = _OPTION_PATTERN.match("MRF135000CE")
+    assert m7 is not None
+    assert m7.group(1) == "MRF"
+    assert m7.group(2) == "135000"
+    assert m7.group(3) == "CE"
+
+
 
 def test_futures_pattern_matching():
     m1 = _FUT_PATTERN.match("RELIANCE26SEPFUT")

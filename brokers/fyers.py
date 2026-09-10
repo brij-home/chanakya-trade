@@ -510,13 +510,26 @@ class FyersAPI(BrokerAPI):
         """Fyers options chain via SDK."""
         fyers = self._get_fyers()
         try:
-            # Determine symbol format
-            if underlying.upper() in ("NIFTY", "NIFTY50", "NIFTY 50"):
+            from market.instruments import COMMODITY_SYMBOLS
+
+            clean_und = (
+                underlying.upper()
+                .replace("MCX:", "")
+                .replace("CDS:", "")
+                .replace("NFO:", "")
+                .replace("NSE:", "")
+                .strip()
+            )
+            if clean_und in ("NIFTY", "NIFTY50", "NIFTY 50"):
                 fyers_sym = "NSE:NIFTY50-INDEX"
-            elif underlying.upper() in ("BANKNIFTY", "NIFTY BANK"):
+            elif clean_und in ("BANKNIFTY", "NIFTY BANK"):
                 fyers_sym = "NSE:NIFTYBANK-INDEX"
+            elif clean_und in COMMODITY_SYMBOLS or underlying.upper().startswith("MCX:"):
+                fyers_sym = f"MCX:{clean_und}"
+            elif clean_und in ("USDINR", "EURINR", "GBPINR", "JPYINR") or underlying.upper().startswith("CDS:"):
+                fyers_sym = f"CDS:{clean_und}"
             else:
-                fyers_sym = f"NSE:{underlying}-EQ"
+                fyers_sym = f"NSE:{clean_und}-EQ"
 
             params = {"symbol": fyers_sym, "strikecount": 20}
             if expiry:

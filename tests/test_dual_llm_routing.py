@@ -118,3 +118,52 @@ class TestEnvVarConfig:
         from agent.core import get_deep_provider
 
         assert callable(get_deep_provider)
+
+
+class TestCascadingLLMProvider:
+    def test_cascading_provider_failover_on_error(self):
+        """When primary provider fails with 429/RuntimeError, secondary provider succeeds."""
+        from agent.core import CascadingLLMProvider
+
+        p1 = MagicMock()
+        p1.model = "qwen/qwen3.8-27b"
+        p1.provider_name = "Groq / qwen3.8"
+        p1.is_pool_available.return_value = True
+        p1.chat.side_effect = RuntimeError("429 rate limit exceeded on primary key")
+
+        p2 = MagicMock()
+        p2.model = "gemini-3.8-flash"
+        p2.provider_name = "Google Gemini / gemini-3.8-flash"
+        p2.is_pool_available.return_value = True
+        p2.chat.return_value = "Gemini validated setup"
+
+        cascade = CascadingLLMProvider([p1, p2])
+        assert "Groq / qwen3.8 -> Google Gemini / gemini-3.8-flash" in cascade.provider_name
+
+        res = cascade.chat([{"role": "user", "content": "test"}], stream=False)
+        assert res == "Gemini validated setup"
+        assert p1.chat.call_count == 1
+        assert p2.chat.call_count == 1
+
+    def test_cascading_provider_skips_cooling_provider(self):
+        """When primary provider is in cooldown, cascade skips directly to secondary with 0 calls to primary."""
+        from agent.core import CascadingLLMProvider
+
+        p1 = MagicMock()
+        p1.model = "qwen/qwen3.8-27b"
+        p1.provider_name = "Groq / qwen3.8"
+        p1.is_pool_available.return_value = False  # In cooldown!
+
+        p2 = MagicMock()
+        p2.model = "gemini-3.8-flash"
+        p2.provider_name = "Google Gemini / gemini-3.8-flash"
+        p2.is_pool_available.return_value = True
+        p2.chat.return_value = "Instant Gemini fallback response"
+
+        cascade = CascadingLLMProvider([p1, p2])
+        res = cascade.chat([{"role": "user", "content": "test"}], stream=False)
+
+        assert res == "Instant Gemini fallback response"
+        assert p1.chat.call_count == 0  # Zero network calls to cooling primary!
+        assert p2.chat.call_count == 1
+

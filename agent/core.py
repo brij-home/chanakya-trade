@@ -55,11 +55,14 @@ The agent runs a tool-calling agentic loop:
 from __future__ import annotations
 
 import json
+import logging
 import os
 import subprocess
 import sys
 from abc import ABC, abstractmethod
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 # Fix Windows charmap / cp1252 codec errors for unicode console prints
 if sys.platform == "win32":
@@ -243,6 +246,84 @@ class LLMProvider(ABC):
         """Human-readable name shown in the UI."""
 
 
+class CascadingLLMProvider(LLMProvider):
+    """
+    Chains multiple LLM providers together in priority order.
+    If the primary provider (e.g. Groq) gets throttled or hits rate-limit cooldowns,
+    requests automatically and seamlessly fail over to secondary providers
+    (e.g. Gemini, NVIDIA, OpenRouter) before giving up.
+    """
+
+    def __init__(self, providers: list[LLMProvider]) -> None:
+        if not providers:
+            raise ValueError("CascadingLLMProvider requires at least one provider")
+        primary = providers[0]
+        super().__init__(primary.model, primary.registry, primary.system_prompt)
+        self.providers = providers
+
+    @property
+    def provider_name(self) -> str:
+        names = [p.provider_name for p in self.providers]
+        return " -> ".join(names)
+
+    def is_pool_available(self) -> bool:
+        """Available if at least one provider in the cascade has a healthy pool."""
+        for p in self.providers:
+            if hasattr(p, "is_pool_available"):
+                if p.is_pool_available():
+                    return True
+            else:
+                return True
+        return False
+
+    def chat(
+        self,
+        messages: list[dict],
+        stream: bool = True,
+        tool_names: list[str] | set[str] | None = None,
+        enable_tools: bool = True,
+        max_tokens: int | None = None,
+        **kwargs,
+    ) -> str:
+        last_exc = None
+        for prov in self.providers:
+            # Skip provider if its entire pool is currently cooling down
+            if hasattr(prov, "is_pool_available") and not prov.is_pool_available():
+                continue
+
+            try:
+                return prov.chat(
+                    messages=messages,
+                    stream=stream,
+                    tool_names=tool_names,
+                    enable_tools=enable_tools,
+                    max_tokens=max_tokens,
+                    **kwargs,
+                )
+            except Exception as e:
+                last_exc = e
+                err_str = str(e).lower()
+                try:
+                    from engine.telemetry import record_event, EVENT_LLM_FAILOVER
+
+                    record_event(
+                        event_type=EVENT_LLM_FAILOVER,
+                        component="cascading_provider",
+                        action_taken=f"Cross-provider failover from {prov.provider_name}",
+                        reason=err_str[:120],
+                        details={"from_provider": prov.provider_name},
+                        severity="INFO",
+                    )
+                except Exception:
+                    pass
+                continue
+
+        if last_exc:
+            raise last_exc
+        return ""
+
+
+
 # ── Anthropic provider (API key) ───────────────────────────────
 
 
@@ -298,15 +379,19 @@ class AnthropicProvider(LLMProvider):
         stream: bool = True,
         tool_names: list[str] | set[str] | None = None,
         enable_tools: bool = True,
+        max_tokens: int | None = None,
         **kwargs,
     ) -> str:
         local = list(messages)
         tools = self.registry.anthropic_schema(include=tool_names) if enable_tools else None
         final = ""
+        effective_max_tokens = max_tokens or kwargs.get("max_tokens")
 
         for _ in range(MAX_TOOL_ROUNDS):
             text, tool_calls = (
-                self._stream_round(local, tools) if stream else self._call_round(local, tools)
+                self._stream_round(local, tools, max_tokens=effective_max_tokens)
+                if stream
+                else self._call_round(local, tools, max_tokens=effective_max_tokens)
             )
 
             if tool_calls:
@@ -335,7 +420,7 @@ class AnthropicProvider(LLMProvider):
                 break
         else:
             try:
-                final, _ = self._call_round(local, tools=None)
+                final, _ = self._call_round(local, tools=None, max_tokens=effective_max_tokens)
             except Exception:
                 final = "[Agent concluded analysis based on gathered tool data]"
 
@@ -343,11 +428,11 @@ class AnthropicProvider(LLMProvider):
 
     # ── Private ───────────────────────────────────────────────
 
-    def _call_round(self, messages, tools):
+    def _call_round(self, messages, tools, max_tokens: int | None = None):
         r = _retry_api_call(
             self._client.messages.create,
             model=self.model,
-            max_tokens=4096,
+            max_tokens=max_tokens or 4096,
             system=self.system_prompt,
             tools=tools,
             messages=messages,
@@ -360,7 +445,7 @@ class AnthropicProvider(LLMProvider):
                 tcs.append({"id": blk.id, "name": blk.name, "input": blk.input})
         return text, tcs
 
-    def _stream_round(self, messages, tools):
+    def _stream_round(self, messages, tools, max_tokens: int | None = None):
         text = ""
         tcs: list[dict] = []
         cur_tool: dict = {}
@@ -369,7 +454,7 @@ class AnthropicProvider(LLMProvider):
 
         with self._client.messages.stream(
             model=self.model,
-            max_tokens=4096,
+            max_tokens=max_tokens or 4096,
             system=self.system_prompt,
             tools=tools,
             messages=messages,
@@ -482,6 +567,15 @@ class OpenAIProvider(LLMProvider):
             return f"{host} / {self.model}{pool_str}"
         return f"OpenAI / {self.model}{pool_str}"
 
+    def is_pool_available(self) -> bool:
+        """Return True if at least one API client in the pool is not currently in cooldown."""
+        import time
+
+        now = time.time()
+        if not self._clients:
+            return False
+        return any(now >= self._client_cooldowns.get(i, 0.0) for i in range(len(self._clients)))
+
     def _get_active_client(self) -> tuple[int, Any]:
         """Return (key_index, Client) using round-robin rotation, skipping rate-limited keys."""
         import time
@@ -514,20 +608,23 @@ class OpenAIProvider(LLMProvider):
         stream: bool = True,
         enable_tools: bool = True,
         tool_names: list[str] | set[str] | None = None,
+        max_tokens: int | None = None,
+        **kwargs,
     ) -> str:
         # OpenAI takes system message inline
         oai = [{"role": "system", "content": self.system_prompt}] + list(messages)
         tools = self.registry.openai_schema(include=tool_names) if enable_tools else None
         final = ""
+        effective_max_tokens = max_tokens or kwargs.get("max_tokens")
 
         for _ in range(MAX_TOOL_ROUNDS):
             if stream:
                 try:
-                    text, tcs = self._stream_round(oai, tools)
+                    text, tcs = self._stream_round(oai, tools, max_tokens=effective_max_tokens)
                 except Exception:
-                    text, tcs = self._call_round(oai, tools)
+                    text, tcs = self._call_round(oai, tools, max_tokens=effective_max_tokens)
             else:
-                text, tcs = self._call_round(oai, tools)
+                text, tcs = self._call_round(oai, tools, max_tokens=effective_max_tokens)
 
             if tcs:
                 oai.append(
@@ -558,7 +655,7 @@ class OpenAIProvider(LLMProvider):
                 break
         else:
             try:
-                final, _ = self._call_round(oai, tools=None)
+                final, _ = self._call_round(oai, tools=None, max_tokens=effective_max_tokens)
             except Exception:
                 final = "[Agent concluded analysis based on gathered tool data]"
 
@@ -587,14 +684,27 @@ class OpenAIProvider(LLMProvider):
     def _get_model_candidates(self) -> list[str]:
         return [m.strip() for m in self.model.split(",") if m.strip()] or [self.model]
 
-    def _call_round(self, messages, tools):
+    def _call_round(self, messages, tools, max_tokens: int | None = None):
         candidates = self._get_model_candidates()
         is_openrouter = "openrouter.ai" in (self._base_url or "").lower()
         last_exc = None
 
+        import time
+
+        if not self.is_pool_available():
+            earliest_resume = (
+                min(self._client_cooldowns.values()) if self._client_cooldowns else time.time()
+            )
+            wait_sec = max(1.0, earliest_resume - time.time())
+            raise RuntimeError(
+                f"Rate limit cooldown active across all pooled API keys. Resumes in {wait_sec:.1f}s"
+            )
+
         # Iterate in chunks of 3 for OpenRouter, or 1 for others
         chunk_size = 3 if is_openrouter else 1
         for i in range(0, len(candidates), chunk_size):
+            if not self.is_pool_available():
+                break
             chunk = candidates[i : i + chunk_size]
             current_model = chunk[0]
             extra_body = {"models": chunk} if (is_openrouter and len(chunk) > 1) else None
@@ -609,10 +719,19 @@ class OpenAIProvider(LLMProvider):
                         "tools": tools if tools else None,
                         "timeout": 25.0,
                     }
+                    if max_tokens is not None:
+                        kwargs["max_tokens"] = max_tokens
                     if extra_body:
                         kwargs["extra_body"] = extra_body
                     r = _retry_api_call(client.chat.completions.create, **kwargs)
-                    msg = r.choices[0].message
+                    choice = r.choices[0]
+                    if getattr(choice, "finish_reason", None) == "length":
+                        logger.warning(
+                            "[LLM Truncation Guard] Model %s reached max_tokens=%s ceiling; response was cut off",
+                            current_model,
+                            max_tokens,
+                        )
+                    msg = choice.message
                     tcs = []
                     if msg.tool_calls:
                         for tc in msg.tool_calls:
@@ -650,8 +769,10 @@ class OpenAIProvider(LLMProvider):
                             )
                         except Exception:
                             pass
-                        if len(self._clients) > 1:
+                        if self.is_pool_available():
                             continue
+                        last_exc = e
+                        break
 
                     # If model is not found / retired on the endpoint, immediately fail over to next model candidate
                     if any(
@@ -696,6 +817,8 @@ class OpenAIProvider(LLMProvider):
                         try:
                             flat = self._flatten_messages(messages)
                             kwargs = {"model": current_model, "messages": flat}
+                            if max_tokens is not None:
+                                kwargs["max_tokens"] = max_tokens
                             if extra_body:
                                 kwargs["extra_body"] = extra_body
                             r = _retry_api_call(client.chat.completions.create, **kwargs)
@@ -721,13 +844,26 @@ class OpenAIProvider(LLMProvider):
             raise last_exc
         return "", []
 
-    def _stream_round(self, messages, tools):
+    def _stream_round(self, messages, tools, max_tokens: int | None = None):
         candidates = self._get_model_candidates()
         is_openrouter = "openrouter.ai" in (self._base_url or "").lower()
         last_exc = None
 
+        import time
+
+        if not self.is_pool_available():
+            earliest_resume = (
+                min(self._client_cooldowns.values()) if self._client_cooldowns else time.time()
+            )
+            wait_sec = max(1.0, earliest_resume - time.time())
+            raise RuntimeError(
+                f"Rate limit cooldown active across all pooled API keys. Resumes in {wait_sec:.1f}s"
+            )
+
         chunk_size = 3 if is_openrouter else 1
         for i in range(0, len(candidates), chunk_size):
+            if not self.is_pool_available():
+                break
             chunk = candidates[i : i + chunk_size]
             current_model = chunk[0]
             extra_body = {"models": chunk} if (is_openrouter and len(chunk) > 1) else None
@@ -743,14 +879,20 @@ class OpenAIProvider(LLMProvider):
                         "stream": True,
                         "timeout": 25.0,
                     }
+                    if max_tokens is not None:
+                        kwargs["max_tokens"] = max_tokens
                     if extra_body:
                         kwargs["extra_body"] = extra_body
                     stream = _retry_api_call(client.chat.completions.create, **kwargs)
                     text = ""
                     tc_acc: dict[int, dict] = {}
+                    finish_reason = None
                     for chunk_item in stream:
                         if not chunk_item.choices:
                             continue
+                        fr = getattr(chunk_item.choices[0], "finish_reason", None)
+                        if fr:
+                            finish_reason = fr
                         delta = chunk_item.choices[0].delta
                         if delta.content:
                             text += delta.content
@@ -767,6 +909,12 @@ class OpenAIProvider(LLMProvider):
                                         tc_acc[idx]["name"] += d.function.name
                                     if d.function.arguments:
                                         tc_acc[idx]["args"] += d.function.arguments
+                    if finish_reason == "length":
+                        logger.warning(
+                            "[LLM Truncation Guard] Streaming model %s reached max_tokens=%s ceiling; response was cut off",
+                            current_model,
+                            max_tokens,
+                        )
                     if text:
                         console.print()
 
@@ -807,8 +955,10 @@ class OpenAIProvider(LLMProvider):
                             )
                         except Exception:
                             pass
-                        if len(self._clients) > 1:
+                        if self.is_pool_available():
                             continue
+                        last_exc = e
+                        break
 
                     # If model is not found / retired on the endpoint, immediately fail over to next model candidate
                     if any(
@@ -2039,17 +2189,23 @@ class GeminiProvider(LLMProvider):
         stream: bool = True,
         enable_tools: bool = True,
         tool_names: list[str] | set[str] | None = None,
+        max_tokens: int | None = None,
+        **kwargs,
     ) -> str:
         """Agentic loop using Gemini's function calling with dynamic key rotation and fallback."""
         types = self._genai_types
+        effective_max_tokens = max_tokens or kwargs.get("max_tokens")
 
         # Build chat config with tools (optionally filtered) and system instruction
         active_tools = self._build_gemini_tools(include=tool_names) if enable_tools else []
-        config = types.GenerateContentConfig(
-            system_instruction=self.system_prompt,
-            tools=active_tools or None,
-            automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
-        )
+        config_kwargs = {
+            "system_instruction": self.system_prompt,
+            "tools": active_tools or None,
+            "automatic_function_calling": types.AutomaticFunctionCallingConfig(disable=True),
+        }
+        if effective_max_tokens is not None:
+            config_kwargs["max_output_tokens"] = effective_max_tokens
+        config = types.GenerateContentConfig(**config_kwargs)
 
         # Convert history to Gemini format
         gemini_history = self._to_gemini_history(messages[:-1]) if len(messages) > 1 else []
@@ -2066,8 +2222,6 @@ class GeminiProvider(LLMProvider):
                 "gemini-3.7-flash",
                 "gemini-3.6-flash",
                 "gemini-3.5-flash-lite",
-                "gemini-3.5-flash",
-                "gemini-flash-latest",
             ]
             if m != active_model
         ]
@@ -3363,6 +3517,59 @@ def get_deep_provider(
     return get_provider(provider=deep_prov, model=deep_model, registry=registry)
 
 
+def _build_fallback_fast_providers(
+    exclude_prov: str, registry: ToolRegistry, system: str
+) -> list[LLMProvider]:
+    """Build secondary fast LLM providers available in the environment for resilient failover."""
+    env = os.environ
+    from config.credentials import _is_placeholder, get_credential
+
+    def _has(k: str) -> bool:
+        v = env.get(k) or get_credential(k, required=False)
+        return bool(v and v.strip() and not _is_placeholder(v))
+
+    fallbacks: list[LLMProvider] = []
+
+    # Gemini Flash is premier high-throughput fast fallback (sub-400ms, massive RPM)
+    if exclude_prov not in (PROVIDER_GEMINI, PROVIDER_GEMINI_SUB) and (
+        _has("GEMINI_API_KEY") or _has("GEMINI_API_KEYS") or _has("GOOGLE_API_KEY")
+    ):
+        try:
+            gem_model = os.environ.get("GEMINI_FAST_MODEL") or "gemini-3.8-flash"
+            fallbacks.append(GeminiProvider(gem_model, registry, system))
+        except Exception:
+            pass
+
+    # NVIDIA NIM fallback
+    if exclude_prov != PROVIDER_NVIDIA and _has("NVIDIA_API_KEY"):
+        try:
+            p = _build_custom_openai_provider(PROVIDER_NVIDIA, None, registry, system)
+            if p:
+                fallbacks.append(p)
+        except Exception:
+            pass
+
+    # OpenRouter fallback
+    if exclude_prov != PROVIDER_OPENROUTER and _has("OPENROUTER_API_KEY"):
+        try:
+            p = _build_custom_openai_provider(PROVIDER_OPENROUTER, None, registry, system)
+            if p:
+                fallbacks.append(p)
+        except Exception:
+            pass
+
+    # Groq fallback if primary was something else
+    if exclude_prov != PROVIDER_GROQ and _has("GROQ_API_KEY"):
+        try:
+            p = _build_custom_openai_provider(PROVIDER_GROQ, None, registry, system)
+            if p:
+                fallbacks.append(p)
+        except Exception:
+            pass
+
+    return fallbacks
+
+
 def get_fast_provider(
     registry: "ToolRegistry | None" = None,
     deep_provider: "LLMProvider | None" = None,
@@ -3410,11 +3617,19 @@ def get_fast_provider(
     }
 
     try:
-        custom = _build_custom_openai_provider(chosen_prov, chosen_model, reg, system)
-        if custom is not None:
-            return custom
-        prov_cls = dispatch.get(chosen_prov, AnthropicProvider)
-        return prov_cls(chosen_model, reg, system)
+        primary = _build_custom_openai_provider(chosen_prov, chosen_model, reg, system)
+        if primary is None:
+            prov_cls = dispatch.get(chosen_prov, AnthropicProvider)
+            primary = prov_cls(chosen_model, reg, system)
+
+        # Collect available secondary fallback providers configured in .env
+        fallbacks = _build_fallback_fast_providers(chosen_prov, reg, system)
+        if deep_provider is not None and deep_provider not in fallbacks and deep_provider != primary:
+            fallbacks.append(deep_provider)
+
+        if fallbacks:
+            return CascadingLLMProvider([primary] + fallbacks)
+        return primary
     except Exception:
         # If fast provider fails to build, fall back to deep
         if deep_provider is not None:

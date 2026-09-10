@@ -1233,6 +1233,40 @@ const AutoAlertCard = memo(function AutoAlertCard({
         </div>
       )}
 
+      {/* Multi-Strike Flow Consolidation Bar */}
+      {Boolean((alert.metrics?.related_strikes || alert.related_strikes)?.length) && (
+        <div className="flex items-center gap-1.5 flex-wrap px-2 py-1 rounded-lg bg-surface/70 border border-gold/25 text-[10px] animate-slide-up-fade">
+          <span className="font-bold text-gold flex items-center gap-1 uppercase tracking-wider text-[9px]">
+            <span>🌊 Flow ({((alert.metrics?.related_strikes || alert.related_strikes) || []).length + 1}):</span>
+          </span>
+          <span className="px-1.5 py-0.5 rounded bg-gold/25 text-gold border border-gold/40 font-mono font-bold text-[9px] shadow-sm">
+            {alert.contract_symbol || `${alert.strike} ${alert.option_type}`} (Active)
+          </span>
+          {(alert.metrics?.related_strikes || alert.related_strikes || []).map((stk, sIdx) => (
+            <button
+              key={sIdx}
+              onClick={(e) => {
+                e.stopPropagation()
+                if (onOpenTicket) {
+                  onOpenTicket({
+                    ...alert,
+                    contract_symbol: stk,
+                    actionable_plan: {
+                      ...(alert.actionable_plan || {}),
+                      option_contract: stk,
+                    },
+                  })
+                }
+              }}
+              className="px-1.5 py-0.5 rounded bg-elevated hover:bg-gold/20 text-zinc-300 hover:text-gold border border-border/60 hover:border-gold/50 font-mono text-[9px] transition-all cursor-pointer"
+              title={`1-Click execute ${stk} via order ticket`}
+            >
+              {stk} ↗
+            </button>
+          ))}
+        </div>
+      )}
+
       {/* Next Expiry Opportunity & Institutional Justification Callout */}
       {nextExpiryOpp && (
         <div className="p-2 rounded-xl bg-gradient-to-r from-amber-500/10 via-surface/90 to-amber-500/5 border border-amber-500/30 text-xs text-amber-200 space-y-0.5 animate-slide-up-fade">
@@ -2291,18 +2325,39 @@ function AlertsViewInner({ onOpenOrderTicket }) {
   }, [sendDraft])
 
   const handleOpenTicket = useCallback((alt) => {
+    const actPlan = alt.actionable_plan || {}
+    let targetSym = alt.contract_symbol || alt.symbol
+    let targetPrice = alt.trigger_level || alt.ltp
+    let targetSL = alt.stop_loss
+    let targetTP = alt.target_level
+    let targetExchange = alt.exchange || 'NSE'
+
+    // If the alert has an option play suggestion with distinct premium pricing:
+    if (alt.contract_symbol && actPlan.option_contract === alt.contract_symbol && actPlan.option_entry) {
+      const optPremNum = parseFloat(String(actPlan.option_entry).replace(/[₹,\s]/g, ''))
+      if (!isNaN(optPremNum) && optPremNum > 0) {
+        targetPrice = optPremNum
+        const optSLNum = parseFloat(String(actPlan.option_stop_loss || '').replace(/[₹,\s]/g, ''))
+        const optTPNum = parseFloat(String(actPlan.option_target_1 || '').replace(/[₹,\s]/g, ''))
+        if (!isNaN(optSLNum) && optSLNum > 0) targetSL = optSLNum
+        if (!isNaN(optTPNum) && optTPNum > 0) targetTP = optTPNum
+        targetExchange = 'NFO'
+      }
+    }
+
     window.dispatchEvent(
       new CustomEvent('open-order-ticket-modal', {
         detail: {
-          symbol: alt.contract_symbol || alt.symbol,
-          exchange: alt.exchange || 'NSE',
-          price: alt.trigger_level || alt.ltp,
-          target: alt.target_level,
-          stopLoss: alt.stop_loss,
+          symbol: targetSym,
+          exchange: targetExchange,
+          price: targetPrice,
+          target: targetTP,
+          stopLoss: targetSL,
         },
       })
     )
   }, [])
+
 
   // Active validation check: True only if trade is neither archived, invalidated, expired, nor final target reached
   const isAlertActive = (a) => {
@@ -2408,6 +2463,11 @@ function AlertsViewInner({ onOpenOrderTicket }) {
           a.target_status !== 'T1_ACHIEVED' &&
           a.target_status !== 'TARGET_ACHIEVED'
         ) return false
+      } else if (selectedFilter === 'HIGH_CONVICTION') {
+        if (Number(a.confidence || 0) < 85) return false
+      } else if (selectedFilter === 'MULTI_FLOW') {
+        const rel = a.metrics?.related_strikes || a.related_strikes
+        if (!Array.isArray(rel) || rel.length === 0) return false
       } else if (selectedFilter !== 'ALL' && a.alert_type !== selectedFilter) {
         return false
       }
@@ -2808,6 +2868,8 @@ function AlertsViewInner({ onOpenOrderTicket }) {
                   {[
                     { id: 'ALL', label: 'All Alerts' },
                     { id: 'TARGET_HIT', label: '🎯 Targets' },
+                    { id: 'HIGH_CONVICTION', label: '⭐ Conviction 85%+' },
+                    { id: 'MULTI_FLOW', label: '🌊 Multi-Strike' },
                     { id: 'GAMMA_BLAST', label: '⚡ Gamma' },
                     { id: 'SQUEEZE_BREAKOUT', label: '🎯 Squeeze' },
                     { id: 'CIRCUIT_WARNING', label: '🔒 Circuit' },
@@ -2822,6 +2884,10 @@ function AlertsViewInner({ onOpenOrderTicket }) {
                             ? 'bg-rose-500/20 text-rose-400 border border-rose-500/40'
                             : chip.id === 'TARGET_HIT'
                             ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/40'
+                            : chip.id === 'HIGH_CONVICTION'
+                            ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
+                            : chip.id === 'MULTI_FLOW'
+                            ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40'
                             : 'bg-gold/20 text-gold border border-gold/40'
                           : 'text-muted hover:text-text hover:bg-elevated'
                       }`}

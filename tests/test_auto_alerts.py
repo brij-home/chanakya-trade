@@ -1870,3 +1870,134 @@ def test_underlying_bearish_alert_with_option_recommendation_invalidation():
     assert "breached stop-loss ₹2,219.7" in reason
     assert "Bearish thesis invalidated" in reason
     assert "Option premium collapsed" not in reason
+
+
+def test_auto_alert_invalidation_lockout_gate():
+    """
+    Ensure an active invalidation lockout on a symbol (or its underlying) prevents
+    new live alerts from being recorded, stopping knife-catching.
+    """
+    from engine.learning_engine import pattern_learning_engine
+
+    engine = AutoAlertEngine()
+    engine._alerts = []
+
+    # Place MANKIND on lockout
+    pattern_learning_engine.set_symbol_lockout(
+        "MANKIND",
+        direction="BULLISH",
+        duration_seconds=300.0,
+        reason="Sub-ATR noise whipsaw",
+    )
+
+    alert = AutoAlert(
+        alert_id="lockout-test-1",
+        alert_type="PRECURSOR_RADAR",
+        stage="EARLY_WARNING",
+        symbol="NSE:MANKIND",
+        exchange="NSE",
+        direction="BULLISH",
+        headline="Mankind Coiling",
+        summary="Test lockout",
+        ltp=2200.0,
+        trigger_level=2200.0,
+        stop_loss=2150.0,
+        target_level=2350.0,
+        is_live=True,
+        environment="LIVE",
+    )
+
+    recorded = engine.record_alert(alert)
+    assert recorded is False
+    assert len(engine._alerts) == 0
+
+    # Clear lockout and verify it records successfully
+    pattern_learning_engine.clear_symbol_lockout("MANKIND")
+    recorded2 = engine.record_alert(alert)
+    assert recorded2 is True
+    assert len(engine._alerts) == 1
+
+
+def test_auto_alert_directional_whiplash_guard():
+    """
+    Directional Whiplash Guard:
+    1. An active BULLISH alert suppresses unconfirmed incoming BEARISH alerts for the same symbol.
+    2. If the incoming BEARISH alert has verified structural reversal (CHoCH / MSS), it supersedes
+       the older bullish setup and retires it.
+    """
+    from unittest.mock import patch
+
+    with patch(
+        "engine.alert_scrutiny.alert_scrutiny_auditor._execute_fast_llm_scrutiny",
+        return_value=None,
+    ):
+        engine = AutoAlertEngine()
+        engine._alerts = []
+
+        bull_alert = AutoAlert(
+            alert_id="whiplash-bull-1",
+            alert_type="SQUEEZE_BREAKOUT",
+            stage="IGNITED",
+            symbol="NSE:RELIANCE",
+            exchange="NSE",
+            direction="BULLISH",
+            headline="Reliance Breakout",
+            summary="Coiled base expansion",
+            ltp=3000.0,
+            trigger_level=3000.0,
+            stop_loss=2940.0,
+            target_level=3150.0,
+            is_live=True,
+            environment="LIVE",
+        )
+        assert engine.record_alert(bull_alert) is True
+        assert len(engine._alerts) == 1
+        assert engine._alerts[0].direction == "BULLISH"
+
+        # Conflicting unconfirmed Bearish alert on same stock
+        bear_unconfirmed = AutoAlert(
+            alert_id="whiplash-bear-unconfirmed",
+            alert_type="SQUEEZE_BREAKDOWN",
+            stage="IGNITED",
+            symbol="NSE:RELIANCE",
+            exchange="NSE",
+            direction="BEARISH",
+            headline="Reliance Intraday Dip",
+            summary="Minor pullback without reversal",
+            ltp=2990.0,
+            trigger_level=2990.0,
+            stop_loss=3030.0,
+            target_level=2900.0,
+            is_live=True,
+            environment="LIVE",
+        )
+        assert engine.record_alert(bear_unconfirmed) is False
+        # Original bullish setup remains active
+        assert len(engine._alerts) == 1
+        assert engine._alerts[0].alert_id == "whiplash-bull-1"
+        assert engine._alerts[0].is_active is True
+
+        # Confirmed structural reversal with CHoCH cue
+        bear_confirmed = AutoAlert(
+            alert_id="whiplash-bear-confirmed",
+            alert_type="SQUEEZE_BREAKDOWN",
+            stage="IGNITED",
+            symbol="NSE:RELIANCE",
+            exchange="NSE",
+            direction="BEARISH",
+            headline="Reliance Structural CHoCH Reversal Breakdown",
+            summary="Confirmed market structure shift MSS and breakdown below key pivot",
+            ltp=2980.0,
+            trigger_level=2980.0,
+            stop_loss=3025.0,
+            target_level=2880.0,
+            metrics={"choch": True, "mss": True},
+            is_live=True,
+            environment="LIVE",
+        )
+        assert engine.record_alert(bear_confirmed) is True
+        # The new alert is inserted as active
+        assert engine._alerts[0].alert_id == "whiplash-bear-confirmed"
+        assert engine._alerts[0].is_active is True
+        # The older superseded bullish alert is purged so dead corpses don't clutter active alerts
+        assert all(a.alert_id != "whiplash-bull-1" for a in engine._alerts)

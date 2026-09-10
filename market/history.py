@@ -76,6 +76,8 @@ def get_ohlcv(
     *,
     as_of: Optional[datetime] = None,
     include_live_candle: bool = False,
+    period: Optional[str] = None,
+    **kwargs,
 ) -> pd.DataFrame:
     """
     Fetch historical OHLCV data as a DataFrame.
@@ -90,11 +92,32 @@ def get_ohlcv(
         as_of:     Explicit historical cutoff for a reproducible research run.
         include_live_candle: Explicitly add/refresh today's incomplete candle.
             This is disabled by default so backtests never blend live and EOD data.
+        period:    Optional yfinance-style period string e.g. "20d", "5d", "1y".
+                   Defensively mapped to days if provided.
 
     Returns:
         DataFrame with columns: date, open, high, low, close, volume
         Index: date (datetime)
     """
+    # Defensively map yfinance-style period to days if provided
+    if period and isinstance(period, str):
+        p = period.strip().lower()
+        if p.endswith("d"):
+            try:
+                days = int(p[:-1])
+            except ValueError:
+                pass
+        elif p.endswith("mo") or p.endswith("m"):
+            try:
+                days = int(p.replace("mo", "").replace("m", "")) * 30
+            except ValueError:
+                pass
+        elif p.endswith("y"):
+            try:
+                days = int(p[:-1]) * 365
+            except ValueError:
+                pass
+
     # Normalize interval alias
     kite_interval = INTERVAL_MAP.get(interval, interval)
     clean_sym = symbol.upper().replace(".NS", "").replace("NSE:", "").strip()

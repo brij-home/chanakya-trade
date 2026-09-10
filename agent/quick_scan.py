@@ -290,6 +290,7 @@ class QuickScanner:
             response = provider.chat(
                 messages=[{"role": "user", "content": prompt}],
                 stream=False,
+                max_tokens=500,
             )
         except Exception as e:
             elapsed = int((time.time() - t0) * 1000)

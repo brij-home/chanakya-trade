@@ -22,9 +22,10 @@ from engine.observability import get_registry, new_correlation_id
 from market.data_events import classify_data_state, utc_now_iso
 
 _OPTION_PATTERN = re.compile(
-    r"^(?:NFO:|BFO:|NSE:|BSE:)?([A-Za-z]+?)(?:\d{2}[A-Z0-9]{3}|\d{5})?(\d{4,6})(CE|PE)$",
+    r"^(?:NFO:|BFO:|NSE:|BSE:)?([A-Za-z]+?)(?:\d{2}[A-Z]{3}|\d{5}(?=\d{3,}))?(\d{1,6}(?:\.\d+)?)(CE|PE)$",
     re.IGNORECASE,
 )
+
 
 _FUT_PATTERN = re.compile(
     r"^(?:NFO:|NSE:)?([A-Za-z]+?)(?:\d{2}[A-Z]{3})?FUT(?:URES)?$",

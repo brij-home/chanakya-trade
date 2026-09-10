@@ -579,7 +579,7 @@ def _wizard_ai_provider(items: list[tuple[str, str, bool]]) -> None:
         _prompt_and_save("OPENAI_API_KEY", "API Key for this provider", secret=True)
         console.print(
             "\n  [dim]Model name depends on your provider. Examples:[/dim]\n"
-            "    OpenRouter:   [cyan]anthropic/claude-sonnet-4[/cyan]  or  [cyan]google/gemini-2.5-pro[/cyan]\n"
+            "    OpenRouter:   [cyan]anthropic/claude-sonnet-4[/cyan]  or  [cyan]google/gemini-3.8-flash[/cyan]\n"
             "    Groq:         [cyan]qwen/qwen3.8-27b[/cyan]\n"
             "    PaleDotBlue:  check your provider's model list\n"
             "    [dim]Default: gpt-4o (only works with OpenAI itself)[/dim]\n"

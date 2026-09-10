@@ -61,6 +61,7 @@ describe('AlertsView - Institutional Active/Archived standard & Derivative Clari
       is_invalidated: false,
       target_status: 'PENDING',
       confidence: 90,
+      related_strikes: ['NIFTY2691124600CE', 'NIFTY2691124700CE'],
       created_at: '2026-09-09 13:30:00',
     },
     // 2. Active Future Trade (Monthly Long Future)
@@ -411,5 +412,50 @@ describe('AlertsView - Institutional Active/Archived standard & Derivative Clari
 
     fireEvent.click(screen.getByRole('button', { name: /Cash Equity/i }))
     expect(screen.getByText(/Filtered to Cash Equity Only/i)).toBeTruthy()
+  })
+
+  it('filters by Conviction 85%+ and Multi-Strike flow chips', async () => {
+    render(<AlertsView />)
+
+    await waitFor(() => {
+      expect(screen.getByText('NIFTY')).toBeTruthy()
+    })
+
+    const convictionBtn = screen.getByRole('button', { name: /⭐ Conviction 85%\+/i })
+    expect(convictionBtn).toBeTruthy()
+    fireEvent.click(convictionBtn)
+
+    // Alert 1 (NIFTY - 90%) and Alert 2 (RELIANCE - 88%) qualify
+    expect(screen.getByText('NIFTY')).toBeTruthy()
+    expect(screen.getByText('RELIANCE')).toBeTruthy()
+
+    const multiStrikeBtn = screen.getByRole('button', { name: /🌊 Multi-Strike/i })
+    expect(multiStrikeBtn).toBeTruthy()
+    fireEvent.click(multiStrikeBtn)
+
+    // Only NIFTY has related_strikes
+    expect(screen.getByText('NIFTY')).toBeTruthy()
+  })
+
+  it('renders Multi-Strike Flow consolidation chips and triggers order ticket upon strike selection', async () => {
+    const mockOpenTicket = vi.fn()
+    render(<AlertsView onOpenOrderTicket={mockOpenTicket} />)
+
+    await waitFor(() => {
+      expect(screen.getByText('NIFTY')).toBeTruthy()
+    })
+
+    // Multi-Strike Flow consolidation bar should render with count (3)
+    expect(screen.getByText(/🌊 Flow \(3\):/i)).toBeTruthy()
+    expect(screen.getByText(/NIFTY2691124600CE ↗/i)).toBeTruthy()
+
+    const secondaryStrikeBtn = screen.getByRole('button', { name: /NIFTY2691124600CE ↗/i })
+    fireEvent.click(secondaryStrikeBtn)
+
+    expect(mockOpenTicket).toHaveBeenCalledWith(
+      expect.objectContaining({
+        contract_symbol: 'NIFTY2691124600CE',
+      })
+    )
   })
 })

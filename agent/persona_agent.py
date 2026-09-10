@@ -719,7 +719,8 @@ def _call_llm(
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_message},
-                ]
+                ],
+                max_tokens=650,
             )
         # Generic: try __call__
         if callable(llm_provider):

@@ -102,6 +102,20 @@
    - Curated color tokens: 🟢 Emerald (`#10B981`) for profit/bullish, 🔴 Rose/Crimson (`#F43F5E`) for invalidation/stop-loss, 🟡 Amber/Gold (`#F59E0B`) for high conviction, 🟣 Indigo (`#6366F1`) for F&O, 🔵 Sky (`#0EA5E9`) for macro/indices.
    - Smooth micro-interactions (`transition: transform 0.15s ease, opacity 0.2s`) and glassmorphism overlays (`backdrop-filter: blur(12px); background: rgba(0,0,0,0.45)`).
    - 1-Click frictionless execution: all action buttons must immediately dispatch orders or ticket drafts (`autoSubmit: true`), never leaving the user stranded. Zero broken, blank, or generic toy mockups.
+15. **Holistic Architecture & Need-Basis AI Invariants**:
+   - **System Architecture First**: Always evaluate features, background loops, and bug fixes from the perspective of the whole terminal architecture. Never introduce myopic patches that create token bloat, rate-limiting bottlenecks, or cascading process failures.
+   - **Strict Need-Basis AI Invocation**: AI models must NEVER be invoked unconditionally or on raw market ticks/unfiltered scanner loops. Every AI request must be justified by asymmetric analytical necessity that pure deterministic quantitative logic cannot provide.
+   - **The 4-Stage Zero-Token Pre-LLM Filter**: Every setup, radar candidate, or alert must pass sequentially:
+     1. *Lockout Gate*: Verify market status and active alert cooldown locks.
+     2. *In-Memory Deduplication & TTL Cache*: Skip re-analyzing identical setups within a 90–120s TTL window.
+     3. *Deterministic Quantitative Conviction Gate*: Screen out weak setups (Minervini Stage != 2, technical confidence < 70%, unfavorable R:R) with 0 tokens spent.
+     4. *Local Pool Availability Circuit Breaker*: Check `is_pool_available()` locally before dispatching network requests; if all keys are cooling down, fast-fail locally in 0.001s without firing failing network requests.
+   - **Zero Truncation & Institutional Quality Buffer (MUST HAVE)**:
+     - **NEVER compromise on data quality, analytical depth, or allow output truncation**.
+     - Keep an optimal safety buffer (1.5× to 2.5× expected output length) on all bounded token allocations.
+     - Enforce production-grade defensive parsing: strict JSON parse → regex field extractor → deterministic quantitative zero-blackout fallback.
+     - Active Truncation Monitoring: Every provider inspects `finish_reason == "length"` to log telemetry warnings if an LLM touches its ceiling.
+     - Keep system prompts dense, concise, and structured. Strip conversational filler while strictly preserving 100% of analytical parameters.
 
 ---
 
@@ -143,6 +157,23 @@
 - All debate futures must be wrapped in defensive **18.0s timeout** wrappers with deterministic quantitative fallbacks.
 - Fast-fail on auth errors (`api_key_invalid`, `401`) immediately — no retry storms.
 - Dispatch SSE start pulse (`type="debate_step", step="starting"`) as Phase 2 begins.
+
+### 3.4 Token Efficiency, RPM & TPM Optimization Standards (Production Grade)
+
+- **The Groq TPM Reservation Penalty**: When `max_tokens` is omitted in OpenAI/Groq API calls, Groq defaults to 4,096 tokens and reserves `input_tokens + 4096` against the user's Tokens Per Minute (TPM) quota before generating the response. A single multi-agent run with 6 parallel rounds without bounded tokens reserves ~25,000 tokens, triggering immediate HTTP 429 rate limits.
+- **Calibrated Production-Grade Token Budgets (Zero Truncation Guarantee)**:
+  - `alert_scrutiny`: `max_tokens=500` (optimal 3× safety buffer over ~120-token JSON verdict; saves ~3,600 reserved tokens per check with zero truncation risk).
+  - `quick_scan`: `max_tokens=500` (generous 2× buffer for complete multi-point scan analysis).
+  - `persona_agent`: `max_tokens=650` (full room for detailed specialist persona insights).
+  - Multi-agent debate rounds (`bull_r1`, `bear_r1`, `bull_r2`, `bear_r2`, `risk_manager`): `max_tokens=550–650` (uncompromising analytical depth and specific price levels).
+  - Facilitator consensus: `max_tokens=850` (holistic multi-agent argument synthesis).
+  - Final Fund Manager synthesis: `max_tokens=1200` (comprehensive 5-stage trade execution plan, trailing rules, conviction score, zero cutoff).
+- **Cross-Provider Cascading Failover**:
+  - Primary provider (`Groq`) pools round-robin keys.
+  - If Groq pool is rate-limited, `CascadingLLMProvider` automatically routes traffic to secondary providers (`gemini-3.8-flash`, NVIDIA NIM, OpenRouter) seamlessly with zero user error.
+- **Strict Model Registry Accuracy**:
+  - Only active, verified models may be referenced in configurations, code, or prompts.
+  - Never reference deprecated or removed models (`llama-3.3-70b-versatile`, `gemini-2.0-flash`, `gemini-2.5-flash`).
 
 ---
 
