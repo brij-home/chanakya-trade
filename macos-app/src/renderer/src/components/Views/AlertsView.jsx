@@ -245,7 +245,8 @@ function mergeAlertsInPlace(prevAlerts = [], freshAlerts = []) {
       oldItem.ltp !== freshItem.ltp ||
       oldItem.summary !== freshItem.summary ||
       oldItem.headline !== freshItem.headline ||
-      Boolean(oldItem.metrics?.post_mortem) !== Boolean(freshItem.metrics?.post_mortem)
+      Boolean(oldItem.metrics?.post_mortem) !== Boolean(freshItem.metrics?.post_mortem) ||
+      JSON.stringify(oldItem.metrics?.scrutiny) !== JSON.stringify(freshItem.metrics?.scrutiny)
 
     if (isModified) {
       hasChanges = true
@@ -1104,6 +1105,21 @@ const AutoAlertCard = memo(function AutoAlertCard({
                 {alert.metrics.expected_rr}:1 R
               </span>
             )}
+            {alert.metrics?.scrutiny && (
+              <span
+                className={`text-[9px] font-mono font-bold px-1 py-px rounded whitespace-nowrap ${
+                  alert.metrics.scrutiny.status === 'APPROVED'
+                    ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/35'
+                    : alert.metrics.scrutiny.status === 'QUANT_VERIFIED'
+                    ? 'bg-sky-500/20 text-sky-300 border border-sky-500/35'
+                    : 'bg-amber-500/20 text-amber-300 border border-amber-500/35'
+                }`}
+                title={`Auditor: ${alert.metrics.scrutiny.auditor_model || 'FAST_LLM'}`}
+              >
+                {alert.metrics.scrutiny.status === 'APPROVED' ? '🛡️ AI ' : '⚡ QNT '}
+                {alert.metrics.scrutiny.score}
+              </span>
+            )}
           </div>
         </div>
 
@@ -1350,6 +1366,52 @@ const AutoAlertCard = memo(function AutoAlertCard({
                   </span>
                 </div>
               </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── Institutional AI Chief Risk Officer Scrutiny & Devil's Advocate Dossier ── */}
+      {alert.metrics?.scrutiny && !isInvalidated && (
+        <div className="p-2.5 rounded-xl border border-emerald-500/30 bg-gradient-to-r from-emerald-500/10 via-surface/90 to-emerald-500/5 text-xs space-y-1.5 animate-slide-up-fade">
+          <div className="flex items-center justify-between flex-wrap gap-1.5">
+            <div className="flex items-center gap-1.5">
+              <span className="text-sm">🛡️</span>
+              <span className="font-black uppercase tracking-wider text-[10px] text-emerald-300">
+                Institutional AI Scrutiny &amp; Devil&apos;s Advocate Dossier
+              </span>
+            </div>
+            <div className="flex items-center gap-1.5">
+              <span className="text-[9px] font-mono font-bold px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 uppercase">
+                Sanctity: {alert.metrics.scrutiny.score}/100
+              </span>
+              <span className="text-[8px] font-mono text-muted uppercase">
+                Auditor: {alert.metrics.scrutiny.auditor_model || 'FAST_LLM'}
+              </span>
+            </div>
+          </div>
+
+          {/* Logic Confirmation */}
+          {alert.metrics.scrutiny.logic_confirmation && (
+            <div className="text-[11px] text-zinc-200 leading-relaxed font-sans">
+              <span className="font-bold text-emerald-300">Structural Edge: </span>
+              {alert.metrics.scrutiny.logic_confirmation}
+            </div>
+          )}
+
+          {/* Devil's Advocate Trap Warning */}
+          {alert.metrics.scrutiny.trap_risk_warning && (
+            <div className="p-1.5 rounded-lg bg-amber-500/10 border border-amber-500/25 text-[11px] text-amber-200 leading-relaxed">
+              <span className="font-bold text-amber-300">Devil&apos;s Advocate Trap Risk: </span>
+              {alert.metrics.scrutiny.trap_risk_warning}
+            </div>
+          )}
+
+          {/* Execution & Trailing Discipline */}
+          {alert.metrics.scrutiny.actionable_guidance && (
+            <div className="text-[10px] text-cyan-300/90 font-mono pt-0.5 border-t border-emerald-500/20">
+              <span className="font-bold">Execution Rule: </span>
+              {alert.metrics.scrutiny.actionable_guidance}
             </div>
           )}
         </div>

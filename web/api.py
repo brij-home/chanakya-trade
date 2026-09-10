@@ -2833,6 +2833,29 @@ async def cleanup_auto_alerts(payload: Optional[dict] = None):
     }
 
 
+@app.post("/api/alerts/auto/rescrutinize", tags=["Alerts"])
+async def rescrutinize_auto_alert(payload: dict):
+    """Re-scrutinize an active alert on demand with AI Chief Risk Officer Devil's Advocate."""
+    from engine.auto_alert_engine import auto_alert_engine
+    from engine.alert_scrutiny import alert_scrutiny_auditor
+
+    alert_id = payload.get("alert_id")
+    if not alert_id:
+        raise HTTPException(status_code=400, detail="Missing alert_id")
+    alerts = auto_alert_engine.get_alerts(limit=200, view_mode="ALL")
+    target = next((a for a in alerts if a.alert_id == alert_id), None)
+    if not target:
+        raise HTTPException(status_code=404, detail=f"Alert {alert_id} not found")
+
+    scrutiny = alert_scrutiny_auditor.scrutinize_alert(target, timeout=3.5)
+    if not isinstance(target.metrics, dict):
+        target.metrics = {}
+    target.metrics["scrutiny"] = scrutiny.to_dict()
+    target.confidence = max(target.confidence, scrutiny.score)
+    auto_alert_engine._save()
+    return {"status": "ok", "data": target.to_dict(), "scrutiny": scrutiny.to_dict()}
+
+
 # ── Mover Autopsy & Precursor Radar Endpoints ────────────────
 
 

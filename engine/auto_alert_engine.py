@@ -1764,6 +1764,58 @@ class AutoAlertEngine:
             except Exception:
                 pass
 
+        # 0a. Institutional AI Sanity & Scrutiny Funnel (Fresh Setups Only)
+        is_fresh_setup = (
+            not alert.is_invalidated
+            and alert.stage
+            not in ("TRAILING_UPDATE", "T1_ACHIEVED", "TARGET_ACHIEVED", "COMPLETED", "EXPIRED")
+            and "TARGET" not in (alert.target_status or "")
+        )
+        if is_fresh_setup and alert.environment != "TEST" and alert.is_live:
+            from engine.alert_scrutiny import alert_scrutiny_auditor
+
+            # Tier 1 Deterministic Mathematical Sanity Gate
+            passed, failure_reason, sanity_flags = alert_scrutiny_auditor.verify_tier1_sanity(alert)
+            if not passed:
+                logger.info(
+                    f"[AutoAlertEngine] Tier-1 Sanity Veto for {alert.symbol} ({alert.alert_type}): {failure_reason}"
+                )
+                return False
+
+            # Gated Alerts: Synchronously scrutinize with AI before posting
+            is_gated = alert.alert_type in (
+                "PRECURSOR_RADAR",
+                "SQUEEZE_BREAKOUT",
+                "CONFLUENCE_INFLECTION",
+                "ASYMMETRIC_OPPORTUNITY",
+            )
+            if is_gated:
+                scrutiny = alert_scrutiny_auditor.scrutinize_alert(alert, timeout=2.5)
+                if scrutiny.status == "REJECTED" or scrutiny.score < 70:
+                    logger.info(
+                        f"[AutoAlertEngine] Tier-2 AI Scrutiny Rejection for {alert.symbol}: {scrutiny.trap_risk_warning or scrutiny.rejection_reason}"
+                    )
+                    return False
+                if not isinstance(alert.metrics, dict):
+                    alert.metrics = {}
+                alert.metrics["scrutiny"] = scrutiny.to_dict()
+                alert.confidence = max(alert.confidence, scrutiny.score)
+            else:
+                # Urgent signals (Gamma Blast, Circuit Warning): attach initial verified status and trigger async AI enrichment
+                if not isinstance(alert.metrics, dict):
+                    alert.metrics = {}
+                alert.metrics["scrutiny"] = {
+                    "status": "QUANT_VERIFIED",
+                    "score": alert.confidence,
+                    "logic_confirmation": f"Tier-1 math & level sanity passed for {alert.alert_type}.",
+                    "trap_risk_warning": "Urgent microsecond trigger; monitor structural pivot.",
+                    "actionable_guidance": "Execute according to actionable plan; do not chase beyond trigger.",
+                    "sanctity_matrix": sanity_flags,
+                    "auditor_model": "TIER1_QUANT",
+                    "audited_at": datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST"),
+                }
+                self._async_enrich_scrutiny(alert)
+
         # 0b. Sanitize actionable plan entry range vs stop-loss consistency
         if (
             alert.actionable_plan
@@ -1887,6 +1939,48 @@ class AutoAlertEngine:
             self._dispatch(to_dispatch)
             return True
         return False
+
+    def _async_enrich_scrutiny(self, alert: AutoAlert) -> None:
+        """Asynchronously runs Tier-2 AI Scrutiny for urgent signals and broadcasts SSE update."""
+
+        def _worker():
+            try:
+                from engine.alert_scrutiny import alert_scrutiny_auditor
+
+                scrutiny = alert_scrutiny_auditor.scrutinize_alert(alert, timeout=3.0)
+                if scrutiny and scrutiny.status != "REJECTED":
+                    with self._lock:
+                        target = next(
+                            (a for a in self._alerts if a.alert_id == alert.alert_id), None
+                        )
+                        if target:
+                            if not isinstance(target.metrics, dict):
+                                target.metrics = {}
+                            target.metrics["scrutiny"] = scrutiny.to_dict()
+                            target.confidence = max(target.confidence, scrutiny.score)
+                            self._save()
+                    # Broadcast SSE update so React UI updates in place
+                    try:
+                        from web.sse import event_bus
+
+                        event_bus.publish_sync(
+                            "system",
+                            {
+                                "type": "alert_scrutiny_update",
+                                "alert_id": alert.alert_id,
+                                "symbol": alert.symbol,
+                                "scrutiny": scrutiny.to_dict(),
+                                "confidence": max(alert.confidence, scrutiny.score),
+                                "timestamp": datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST"),
+                            },
+                        )
+                    except Exception:
+                        pass
+            except Exception as e:
+                logger.debug(f"[AutoAlertEngine] Async scrutiny error for {alert.alert_id}: {e}")
+
+        t = threading.Thread(target=_worker, daemon=True, name=f"scrutiny-{alert.alert_id[:8]}")
+        t.start()
 
     def _dispatch(self, alert: AutoAlert) -> None:
         """Broadcasts alert across all communication channels with clear REAL/LIVE vs TEST tagging."""
