@@ -99,6 +99,11 @@ class Quote:
     correlation_id: Optional[str] = None
 
     @property
+    def ltp(self) -> float:
+        """Convenience alias for last_price used across quant models and scanners."""
+        return self.last_price
+
+    @property
     def age_seconds(self) -> Optional[float]:
         """Age since local receipt, never request round-trip duration."""
         try:

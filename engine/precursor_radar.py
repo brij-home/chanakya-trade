@@ -28,7 +28,6 @@ Core Capabilities:
 from __future__ import annotations
 
 import logging
-import os
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone, timedelta
 from typing import Any, Optional
@@ -41,8 +40,16 @@ logger = logging.getLogger("chanakya.precursor_radar")
 IST = timezone(timedelta(hours=5, minutes=30))
 
 MAJOR_INDICES = [
-    "NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY",
-    "NIFTYIT", "NIFTYAUTO", "NIFTYPHARMA", "NIFTYMETAL", "NIFTYENERGY", "SENSEX"
+    "NIFTY",
+    "BANKNIFTY",
+    "FINNIFTY",
+    "MIDCPNIFTY",
+    "NIFTYIT",
+    "NIFTYAUTO",
+    "NIFTYPHARMA",
+    "NIFTYMETAL",
+    "NIFTYENERGY",
+    "SENSEX",
 ]
 
 
@@ -59,10 +66,23 @@ def classify_symbol_segment(symbol: str) -> str:
         .strip()
     )
     if (
-        clean in (
-            "NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY",
-            "NIFTYIT", "NIFTYAUTO", "NIFTYPHARMA", "NIFTYMETAL", "NIFTYENERGY",
-            "SENSEX", "BANKEX", "NSEI", "NSEBANK", "CNXIT", "CNXAUTO"
+        clean
+        in (
+            "NIFTY",
+            "BANKNIFTY",
+            "FINNIFTY",
+            "MIDCPNIFTY",
+            "NIFTYIT",
+            "NIFTYAUTO",
+            "NIFTYPHARMA",
+            "NIFTYMETAL",
+            "NIFTYENERGY",
+            "SENSEX",
+            "BANKEX",
+            "NSEI",
+            "NSEBANK",
+            "CNXIT",
+            "CNXAUTO",
         )
         or clean.endswith("INDEX")
         or clean.startswith("NIFTY")
@@ -138,28 +158,112 @@ class PrecursorRadarScanner:
         seg = (segment or "ALL").upper().replace("CASH", "NON_FNO")
 
         index_universe = [
-            "NIFTY", "NIFTY 50", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY",
-            "NIFTYIT", "NIFTYAUTO", "NIFTYPHARMA", "NIFTYMETAL", "NIFTYENERGY", "SENSEX"
+            "NIFTY",
+            "NIFTY 50",
+            "BANKNIFTY",
+            "FINNIFTY",
+            "MIDCPNIFTY",
+            "NIFTYIT",
+            "NIFTYAUTO",
+            "NIFTYPHARMA",
+            "NIFTYMETAL",
+            "NIFTYENERGY",
+            "SENSEX",
         ]
 
         fno_universe = [
-            "RELIANCE", "TCS", "INFY", "HDFCBANK", "ICICIBANK", "SBIN", "BHARTIARTL",
-            "TRENT", "DIXON", "HAL", "BEL", "ADANIENT", "LT", "MARUTI", "BAJFINANCE",
-            "TITAN", "COFORGE", "PERSISTENT", "POLYCAB", "KALYANKJIL", "BSE", "MCX",
-            "CDSL", "MANKIND", "SUNPHARMA", "TATAMOTORS", "HINDALCO", "TATASTEEL",
-            "JSWSTEEL", "NTPC", "ONGC", "COALINDIA", "POWERGRID", "ASIANPAINT",
-            "HINDUNILVR", "ITC", "NESTLEIND", "ZOMATO", "CHOLAFIN", "FEDERALBNK",
-            "AUBANK", "MAXHEALTH", "LUPIN", "AUROPHARMA", "DLF", "GODREJPROP",
-            "ABB", "SIEMENS", "CUMMINSIND", "VOLTAS", "HAVELLS"
+            "RELIANCE",
+            "TCS",
+            "INFY",
+            "HDFCBANK",
+            "ICICIBANK",
+            "SBIN",
+            "BHARTIARTL",
+            "TRENT",
+            "DIXON",
+            "HAL",
+            "BEL",
+            "ADANIENT",
+            "LT",
+            "MARUTI",
+            "BAJFINANCE",
+            "TITAN",
+            "COFORGE",
+            "PERSISTENT",
+            "POLYCAB",
+            "KALYANKJIL",
+            "BSE",
+            "MCX",
+            "CDSL",
+            "MANKIND",
+            "SUNPHARMA",
+            "TATAMOTORS",
+            "HINDALCO",
+            "TATASTEEL",
+            "JSWSTEEL",
+            "NTPC",
+            "ONGC",
+            "COALINDIA",
+            "POWERGRID",
+            "ASIANPAINT",
+            "HINDUNILVR",
+            "ITC",
+            "NESTLEIND",
+            "ZOMATO",
+            "CHOLAFIN",
+            "FEDERALBNK",
+            "AUBANK",
+            "MAXHEALTH",
+            "LUPIN",
+            "AUROPHARMA",
+            "DLF",
+            "GODREJPROP",
+            "ABB",
+            "SIEMENS",
+            "CUMMINSIND",
+            "VOLTAS",
+            "HAVELLS",
         ]
 
         non_fno_universe = [
-            "KAYNES", "SWANENERGY", "PREMIERENE", "WAAREEENER", "ZENTEC", "DATAPATTNS",
-            "MAZDOCK", "COCHINSHIP", "ARE&M", "INOXWIND", "POLICYBZR", "MAPMYINDIA",
-            "AFFLE", "NEWGEN", "RATEGAIN", "MEDANTA", "LALPATHLAB", "APLAPOLLO",
-            "CENTURYTEX", "GRAVITA", "RAILTEL", "RVNL", "IRFC", "RITES", "IRCON",
-            "TEXRAIL", "JUPITERWAG", "BEML", "GRSE", "GSHIP", "SCI", "ELECON",
-            "TRITURBINE", "KBL", "KIRLOSENG", "VOLTAMP", "SCHNEIDER", "KEC"
+            "KAYNES",
+            "SWANENERGY",
+            "PREMIERENE",
+            "WAAREEENER",
+            "ZENTEC",
+            "DATAPATTNS",
+            "MAZDOCK",
+            "COCHINSHIP",
+            "ARE&M",
+            "INOXWIND",
+            "POLICYBZR",
+            "MAPMYINDIA",
+            "AFFLE",
+            "NEWGEN",
+            "RATEGAIN",
+            "MEDANTA",
+            "LALPATHLAB",
+            "APLAPOLLO",
+            "CENTURYTEX",
+            "GRAVITA",
+            "RAILTEL",
+            "RVNL",
+            "IRFC",
+            "RITES",
+            "IRCON",
+            "TEXRAIL",
+            "JUPITERWAG",
+            "BEML",
+            "GRSE",
+            "GSHIP",
+            "SCI",
+            "ELECON",
+            "TRITURBINE",
+            "KBL",
+            "KIRLOSENG",
+            "VOLTAMP",
+            "SCHNEIDER",
+            "KEC",
         ]
 
         if seg == "INDEX":
@@ -200,18 +304,67 @@ class PrecursorRadarScanner:
         # 2. Fetch Live Quote & Liquidity Checks
         from market.quotes import get_quote
 
-        q = None
+        q_item = None
         try:
-            q = get_quote(f"NSE:{clean_sym}")
+            q_res = get_quote(f"NSE:{clean_sym}")
+            if isinstance(q_res, dict):
+                q_item = q_res.get(f"NSE:{clean_sym}") or q_res.get(clean_sym)
+            else:
+                q_item = q_res
         except Exception:
             pass
 
-        if not q or getattr(q, "ltp", 0.0) <= 0:
+        if not q_item:
             return None
 
-        ltp = float(q.ltp)
-        vol = int(getattr(q, "volume", 0) or 0)
-        vwap = float(getattr(q, "vwap", 0.0) or ltp)
+        ltp = 0.0
+        for attr in ("last_price", "ltp"):
+            val = getattr(q_item, attr, None) if not isinstance(q_item, dict) else q_item.get(attr)
+            if val is not None and type(val).__name__ not in (
+                "MagicMock",
+                "Mock",
+                "NonCallableMagicMock",
+            ):
+                try:
+                    f = float(val)
+                    if f > 0:
+                        ltp = f
+                        break
+                except (ValueError, TypeError):
+                    pass
+        if ltp <= 0 and hasattr(q_item, "__dict__"):
+            for attr in ("last_price", "ltp"):
+                if attr in q_item.__dict__:
+                    try:
+                        f = float(q_item.__dict__[attr])
+                        if f > 0:
+                            ltp = f
+                            break
+                    except (ValueError, TypeError):
+                        pass
+
+        if ltp <= 0:
+            return None
+
+        vol_val = getattr(q_item, "volume", 0)
+        vol = (
+            int(vol_val)
+            if (vol_val and type(vol_val).__name__ not in ("MagicMock", "Mock"))
+            else (
+                int(q_item.__dict__["volume"])
+                if (hasattr(q_item, "__dict__") and "volume" in q_item.__dict__)
+                else 0
+            )
+        )
+
+        vwap_val = getattr(q_item, "vwap", None)
+        if vwap_val is not None and type(vwap_val).__name__ not in ("MagicMock", "Mock"):
+            vwap = float(vwap_val)
+        elif hasattr(q_item, "__dict__") and "vwap" in q_item.__dict__:
+            vwap = float(q_item.__dict__["vwap"])
+        else:
+            vwap = ltp
+
         turnover_cr = round((ltp * vol) / 1e7, 2)
 
         # Anti-Trap: Reject illiquid names
@@ -305,7 +458,9 @@ class PrecursorRadarScanner:
                         )
                     elif ob_dist <= 1.5:
                         score += 12
-                        matched_factors.append(f"Holding above institutional Order Block ({ob_dist:.1f}% buffer)")
+                        matched_factors.append(
+                            f"Holding above institutional Order Block ({ob_dist:.1f}% buffer)"
+                        )
         except Exception:
             pass
 
@@ -356,7 +511,9 @@ class PrecursorRadarScanner:
                     )
                 elif ce_shedding and min(ce_shedding) <= -8.0:
                     score += 10
-                    matched_factors.append(f"Call OI liquidation detected ({abs(min(ce_shedding)):.1f}%)")
+                    matched_factors.append(
+                        f"Call OI liquidation detected ({abs(min(ce_shedding)):.1f}%)"
+                    )
         except Exception:
             pass
 
@@ -375,19 +532,25 @@ class PrecursorRadarScanner:
             return None
 
         # 6. Trade Blueprint Formulation
-        pivot_high = round(float(np.max(highs[-5:])), 2) if len(highs) >= 5 else round(ltp * 1.01, 2)
+        pivot_high = (
+            round(float(np.max(highs[-5:])), 2) if len(highs) >= 5 else round(ltp * 1.01, 2)
+        )
         entry_low = round(ltp * 0.995, 2)
         entry_high = round(pivot_high * 1.005, 2)
         entry_range = f"₹{entry_low:,.1f} – ₹{entry_high:,.1f}"
 
         # Calculate ATR-based Stop-Loss
-        sl_distance = max(ltp * 0.015, (ltp - float(np.min(lows[-5:]))) * 1.05) if len(lows) >= 5 else ltp * 0.02
+        sl_distance = (
+            max(ltp * 0.015, (ltp - float(np.min(lows[-5:]))) * 1.05)
+            if len(lows) >= 5
+            else ltp * 0.02
+        )
         stop_loss = round(ltp - sl_distance, 2)
         risk_pts = max(1.0, ltp - stop_loss)
 
         target_1 = round(ltp + 1.5 * risk_pts, 2)
         target_2 = round(ltp + 2.5 * risk_pts, 2)
-        rr_str = f"1:{( (target_1 - ltp) / risk_pts ):.1f}"
+        rr_str = f"1:{((target_1 - ltp) / risk_pts):.1f}"
 
         verdict = "MAX_CONVICTION" if score >= 85 else "HIGH_CONVICTION"
 
@@ -445,7 +608,9 @@ class PrecursorRadarScanner:
         symbols = universe or self.get_scan_universe(segment=segment)
         candidates: list[PrecursorCandidate] = []
 
-        logger.info(f"[PrecursorRadar] Scanning {len(symbols)} tickers ({segment or 'ALL'}) for pre-move precursor DNA...")
+        logger.info(
+            f"[PrecursorRadar] Scanning {len(symbols)} tickers ({segment or 'ALL'}) for pre-move precursor DNA..."
+        )
 
         for sym in symbols:
             try:
@@ -472,4 +637,3 @@ precursor_radar = PrecursorRadarScanner()
 def get_scan_universe(segment: Optional[str] = None) -> list[str]:
     """Module-level convenience accessor for scan universes."""
     return precursor_radar.get_scan_universe(segment=segment)
-

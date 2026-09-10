@@ -412,7 +412,9 @@ class PatternLearningEngine:
                 elif delta <= 0.05:
                     self._factor_weights[weight_key] = max(10, self._factor_weights[weight_key] - 3)
 
-        logger.info(f"[PatternLearningEngine] Recalibrated weights from SNR: {self._factor_weights}")
+        logger.info(
+            f"[PatternLearningEngine] Recalibrated weights from SNR: {self._factor_weights}"
+        )
 
     # ── Invalidation Post-Mortem & Retrospective Learning ───
 
@@ -575,9 +577,7 @@ class PatternLearningEngine:
 
         if is_opt:
             entry_price = float(
-                getattr(alert, "option_premium", 0.0)
-                or getattr(alert, "ltp", 0.0)
-                or exit_price
+                getattr(alert, "option_premium", 0.0) or getattr(alert, "ltp", 0.0) or exit_price
             )
             act_plan = getattr(alert, "actionable_plan", {}) or (
                 alert.get("actionable_plan", {}) if isinstance(alert, dict) else {}
@@ -745,7 +745,9 @@ class PatternLearningEngine:
 
         # Determine structural reclaim level (price needed to disprove invalidation thesis)
         if is_opt:
-            reclaim_level = min(entry_price, exit_price) if is_opt_sell else max(entry_price, exit_price)
+            reclaim_level = (
+                min(entry_price, exit_price) if is_opt_sell else max(entry_price, exit_price)
+            )
         else:
             alert_trig = float(
                 getattr(alert, "trigger_level", 0.0) or getattr(alert, "ltp", 0.0) or entry_price

@@ -129,7 +129,7 @@ class AutoAlert:
         2. For index options without explicit date, resolves against the weekly expiry calendar.
         3. Gamma blast intraday spikes expire after 24 hours of market time.
         """
-        if self.is_archived or self.stage == "EXPIRED":
+        if self.stage == "EXPIRED":
             return True
 
         now = datetime.now(IST)
@@ -403,7 +403,11 @@ def evaluate_alert_invalidation(
                 # Option writing / selling (Short CE / Short PE):
                 # Stop-loss is above entry. Breached IF AND ONLY IF premium surges above SL.
                 if current_ltp > alert.stop_loss:
-                    opt_desc = "Call" if (alert.option_type == "CE" or alert.direction == "BULLISH") else "Put"
+                    opt_desc = (
+                        "Call"
+                        if (alert.option_type == "CE" or alert.direction == "BULLISH")
+                        else "Put"
+                    )
                     return (
                         f"Option premium surged to ₹{current_ltp:.1f} "
                         f"(breached stop-loss ₹{alert.stop_loss:.1f}). {opt_desc} writing thesis invalidated."
@@ -412,31 +416,49 @@ def evaluate_alert_invalidation(
                 # Option buying (Long CE / Long PE):
                 # The stop-loss on the option premium is breached IF AND ONLY IF premium drops below SL.
                 if current_ltp < alert.stop_loss:
-                    opt_desc = "Call" if (alert.option_type == "CE" or alert.direction == "BULLISH") else "Put"
+                    opt_desc = (
+                        "Call"
+                        if (alert.option_type == "CE" or alert.direction == "BULLISH")
+                        else "Put"
+                    )
                     return (
                         f"Option premium collapsed to ₹{current_ltp:.1f} "
                         f"(breached stop-loss ₹{alert.stop_loss:.1f}). {opt_desc} gamma thesis invalidated."
                     )
         else:
             # Non-option instruments (Equities / Futures)
+            # Dynamic Volatility Noise Margin (0.15x ATR or 0.25% floor)
+            # Prevents premature panic invalidations on single-tick 10-paise / sub-cent micro-chop.
+            atr_val = 0.0
+            if alert.metrics and isinstance(alert.metrics, dict):
+                atr_val = float(alert.metrics.get("atr_14d") or alert.metrics.get("atr") or 0.0)
+            if atr_val <= 0 and alert.stop_loss > 0:
+                atr_val = alert.stop_loss * 0.012
+
+            vol_noise_margin = (
+                max(0.15, min(alert.stop_loss * 0.003, 0.15 * atr_val))
+                if alert.stop_loss > 0
+                else 0.20
+            )
+
             if alert.direction == "BEARISH":
                 # For short positions, stop loss is above entry
                 ref_entry = alert.ltp or alert.trigger_level or 0.0
                 if alert.stop_loss > ref_entry:
-                    if current_ltp > alert.stop_loss:
+                    if current_ltp > (alert.stop_loss + vol_noise_margin):
                         return (
                             f"Price surged to ₹{current_ltp:,.1f} "
                             f"(breached stop-loss ₹{alert.stop_loss:,.1f}). Bearish thesis invalidated."
                         )
                 else:
-                    if current_ltp < alert.stop_loss:
+                    if current_ltp < (alert.stop_loss - vol_noise_margin):
                         return (
                             f"Price dropped to ₹{current_ltp:,.1f} "
                             f"(breached stop-loss ₹{alert.stop_loss:,.1f}). Bearish thesis invalidated."
                         )
             else:
                 # Bullish / Neutral long positions
-                if current_ltp < alert.stop_loss:
+                if current_ltp < (alert.stop_loss - vol_noise_margin):
                     return (
                         f"Price dropped to ₹{current_ltp:,.1f} "
                         f"(breached stop-loss ₹{alert.stop_loss:,.1f}). Bullish thesis invalidated."
@@ -570,9 +592,7 @@ def evaluate_alert_targets_and_trailing(
         is_bullish = not is_option_sell
         # For options, entry is the option entry premium, NOT the underlying strike!
         entry = (
-            alert.option_premium
-            if (alert.option_premium and alert.option_premium > 0)
-            else None
+            alert.option_premium if (alert.option_premium and alert.option_premium > 0) else None
         )
         if not entry and alert.actionable_plan:
             rec_entry = alert.actionable_plan.get("recommended_entry", "")
@@ -835,6 +855,20 @@ def detect_gamma_blast(
     alerts: list[AutoAlert] = []
     now_iso = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
 
+    # Institutional Liquidity & Significance Filters (SEBI / F&O standard):
+    # Prevents illiquid strikes with tiny volume from generating false percentage spikes.
+    is_index = underlying.upper() in (
+        "NIFTY",
+        "BANKNIFTY",
+        "FINNIFTY",
+        "MIDCPNIFTY",
+        "SENSEX",
+        "BANKEX",
+    )
+    min_strike_oi = 15000 if is_index else 500
+    min_abs_oi_change = 3000 if is_index else 150
+    min_volume = 10000 if is_index else 500
+
     # Group contracts by strike and type
     ce_contracts = [c for c in chain if getattr(c, "option_type", "") == "CE"]
     pe_contracts = [c for c in chain if getattr(c, "option_type", "") == "PE"]
@@ -846,7 +880,8 @@ def detect_gamma_blast(
     for c in ce_contracts:
         strike = getattr(c, "strike", 0.0)
         strike_diff_pct = ((strike - spot) / spot) * 100.0
-        if not (-0.6 <= strike_diff_pct <= 1.6):
+        # Strict ATM to 0.8% OTM proximity (Gamma explosion requires near-the-money proximity)
+        if not (-0.5 <= strike_diff_pct <= 0.8):
             continue
 
         oi = getattr(c, "oi", 0)
@@ -855,8 +890,30 @@ def detect_gamma_blast(
         opt_ltp = getattr(c, "last_price", 0.0)
         contract_sym = getattr(c, "symbol", f"{underlying}{int(strike)}CE")
 
-        if oi <= 0 or volume <= 0:
+        # Minimum Liquidity & Absolute Contract Shedding Gate:
+        if oi < min_strike_oi or volume < min_volume or abs(oi_change) < min_abs_oi_change:
             continue
+
+        exp_date = getattr(c, "expiry", "") or None
+        # Gamma Physics Gate: Gamma explosion requires DTE <= 5 days for weekly indices or front-month (<= 35 days) for stocks
+        if exp_date:
+            try:
+                exp_str = str(exp_date).split("T")[0].strip()
+                exp_dt = None
+                for fmt in ("%Y-%m-%d", "%d-%b-%Y", "%d-%m-%Y"):
+                    try:
+                        exp_dt = datetime.strptime(exp_str, fmt).date()
+                        break
+                    except ValueError:
+                        continue
+                if exp_dt:
+                    today_ist = datetime.now(IST).date()
+                    dte_days = (exp_dt - today_ist).days
+                    max_gamma_dte = 5 if is_index else 35
+                    if dte_days > max_gamma_dte:
+                        continue
+            except Exception:
+                pass
 
         vol_oi_ratio = round(volume / max(1, oi), 2)
         oi_chg_pct = (
@@ -875,7 +932,6 @@ def detect_gamma_blast(
             stage = "IGNITED" if is_ignited else "EARLY_WARNING"
             confidence = min(96, int(65 + (vol_oi_ratio * 7) + min(20, abs(oi_chg_pct) * 0.5)))
 
-            exp_date = getattr(c, "expiry", "") or None
             exp_type = classify_expiry_type(exp_date, underlying)
 
             # ── Dynamic Trade Plan: replace hardcoded 2.2x/0.65x with structural SMC levels ──
@@ -895,6 +951,11 @@ def detect_gamma_blast(
                     exchange="NFO",
                     has_active_blast=is_ignited,
                 )
+
+                # Expectancy & Asymmetry Gate: reject trades with unviable R:R geometry unless ignited
+                if tp and not tp.is_asymmetry_viable and not is_ignited:
+                    continue
+
                 mkt_status = get_market_status("NFO")
                 lot_sz = get_lot_size(underlying)
                 opt_plan = (
@@ -913,7 +974,16 @@ def detect_gamma_blast(
                 sl_premium = (
                     opt_plan["sl_premium"] if opt_plan else round(max(1.0, opt_ltp * 0.7), 1)
                 )
-                rr_str = f"{tp.rr_t1}:1" if tp else "1:2"
+                if opt_plan and opt_plan.get("option_rr"):
+                    rr_str = opt_plan["option_rr"]
+                elif opt_plan and opt_plan.get("t1_premium") and opt_plan.get("sl_premium"):
+                    risk_prem = max(0.5, opt_ltp - opt_plan["sl_premium"])
+                    reward_prem = max(0.5, opt_plan["t1_premium"] - opt_ltp)
+                    rr_str = f"1:{round(reward_prem / risk_prem, 2)}"
+                elif tp:
+                    rr_str = f"1:{tp.rr_t1}"
+                else:
+                    rr_str = "1:2"
                 t1_pct_str = (
                     f"+{opt_plan['t1_pct']:.1f}%"
                     if (opt_plan and opt_plan.get("t1_pct"))
@@ -1012,7 +1082,8 @@ def detect_gamma_blast(
     for c in pe_contracts:
         strike = getattr(c, "strike", 0.0)
         strike_diff_pct = ((strike - spot) / spot) * 100.0
-        if not (-1.6 <= strike_diff_pct <= 0.6):
+        # Strict ATM to 0.8% OTM proximity (Gamma explosion requires near-the-money proximity)
+        if not (-0.8 <= strike_diff_pct <= 0.5):
             continue
 
         oi = getattr(c, "oi", 0)
@@ -1021,8 +1092,30 @@ def detect_gamma_blast(
         opt_ltp = getattr(c, "last_price", 0.0)
         contract_sym = getattr(c, "symbol", f"{underlying}{int(strike)}PE")
 
-        if oi <= 0 or volume <= 0:
+        # Minimum Liquidity & Absolute Contract Shedding Gate:
+        if oi < min_strike_oi or volume < min_volume or abs(oi_change) < min_abs_oi_change:
             continue
+
+        exp_date = getattr(c, "expiry", "") or None
+        # Gamma Physics Gate: Gamma explosion requires DTE <= 5 days for weekly indices or front-month (<= 35 days) for stocks
+        if exp_date:
+            try:
+                exp_str = str(exp_date).split("T")[0].strip()
+                exp_dt = None
+                for fmt in ("%Y-%m-%d", "%d-%b-%Y", "%d-%m-%Y"):
+                    try:
+                        exp_dt = datetime.strptime(exp_str, fmt).date()
+                        break
+                    except ValueError:
+                        continue
+                if exp_dt:
+                    today_ist = datetime.now(IST).date()
+                    dte_days = (exp_dt - today_ist).days
+                    max_gamma_dte = 5 if is_index else 35
+                    if dte_days > max_gamma_dte:
+                        continue
+            except Exception:
+                pass
 
         vol_oi_ratio = round(volume / max(1, oi), 2)
         oi_chg_pct = (
@@ -1040,7 +1133,6 @@ def detect_gamma_blast(
             stage = "IGNITED" if is_ignited else "EARLY_WARNING"
             confidence = min(96, int(65 + (vol_oi_ratio * 7) + min(20, abs(oi_chg_pct) * 0.5)))
 
-            exp_date = getattr(c, "expiry", "") or None
             exp_type = classify_expiry_type(exp_date, underlying)
 
             # ── Dynamic Trade Plan: replace hardcoded 2.2x/0.65x with structural SMC levels ──
@@ -1060,6 +1152,11 @@ def detect_gamma_blast(
                     exchange="NFO",
                     has_active_blast=is_ignited,
                 )
+
+                # Expectancy & Asymmetry Gate: reject trades with unviable R:R geometry unless ignited
+                if tp and not tp.is_asymmetry_viable and not is_ignited:
+                    continue
+
                 mkt_status = get_market_status("NFO")
                 lot_sz = get_lot_size(underlying)
                 opt_plan = (
@@ -1078,7 +1175,16 @@ def detect_gamma_blast(
                 sl_premium = (
                     opt_plan["sl_premium"] if opt_plan else round(max(1.0, opt_ltp * 0.7), 1)
                 )
-                rr_str = f"{tp.rr_t1}:1" if tp else "1:2"
+                if opt_plan and opt_plan.get("option_rr"):
+                    rr_str = opt_plan["option_rr"]
+                elif opt_plan and opt_plan.get("t1_premium") and opt_plan.get("sl_premium"):
+                    risk_prem = max(0.5, opt_ltp - opt_plan["sl_premium"])
+                    reward_prem = max(0.5, opt_plan["t1_premium"] - opt_ltp)
+                    rr_str = f"1:{round(reward_prem / risk_prem, 2)}"
+                elif tp:
+                    rr_str = f"1:{tp.rr_t1}"
+                else:
+                    rr_str = "1:2"
                 t1_pct_str = (
                     f"+{opt_plan['t1_pct']:.1f}%"
                     if (opt_plan and opt_plan.get("t1_pct"))
@@ -1215,10 +1321,13 @@ def detect_squeeze_breakout(
         # Squeeze is ON when BB is inside Keltner Channel
         is_squeeze_on = (bb_upper < keltner_upper) and (bb_lower > keltner_lower)
 
-        # 20-day High / Pivot level
+        # 20-day High and Low / Pivot levels
         lookback = min(20, len(highs) - 1)
         pivot_high = float(np.max(highs[-lookback - 1 : -1]))
         dist_to_pivot_pct = ((pivot_high - ltp) / pivot_high) * 100.0
+
+        pivot_low = float(np.min(lows[-lookback - 1 : -1]))
+        dist_to_low_pct = ((ltp - pivot_low) / pivot_low) * 100.0
 
         # RVOL 20D
         rvol = 1.0
@@ -1229,7 +1338,7 @@ def detect_squeeze_breakout(
 
         now_iso = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
 
-        # ── EARLY WARNING: Coiled in squeeze, 0.2% - 1.5% from pivot ───
+        # ── EARLY WARNING (BULLISH): Coiled in squeeze, 0.2% - 1.5% below pivot high ───
         if is_squeeze_on and (0.2 <= dist_to_pivot_pct <= 1.5):
             target = round(pivot_high * 1.06, 1)
             sl = round(sma20, 1)
@@ -1269,7 +1378,47 @@ def detect_squeeze_breakout(
                 created_at=now_iso,
             )
 
-        # ── IGNITED: Squeeze Fired + Fresh Breakout above pivot ───
+        # ── EARLY WARNING (BEARISH): Coiled in squeeze, 0.2% - 1.5% above pivot low support ───
+        if is_squeeze_on and (0.2 <= dist_to_low_pct <= 1.5):
+            target = round(pivot_low * 0.94, 1)
+            sl = round(sma20, 1)
+            return AutoAlert(
+                alert_id=f"aa-sqz-bear-early-{symbol}-{uuid.uuid4().hex[:6]}",
+                alert_type="SQUEEZE_BREAKDOWN",
+                stage="EARLY_WARNING",
+                symbol=symbol,
+                exchange=exchange,
+                direction="BEARISH",
+                headline=f"⚠️ SQUEEZE BREAKDOWN COILING: {symbol} at ₹{ltp:,.1f} (Support ₹{pivot_low:,.1f})",
+                summary=(
+                    f"Bollinger Bands compressed inside Keltner Channels (Squeeze ON). "
+                    f"Price is only {dist_to_low_pct:.1f}% above 20D low support. "
+                    f"RVOL {rvol}x. Imminent downside breakdown risk!"
+                ),
+                ltp=ltp,
+                trigger_level=pivot_low,
+                target_level=target,
+                stop_loss=sl,
+                metrics={
+                    "is_squeeze_on": True,
+                    "dist_to_low_pct": round(dist_to_low_pct, 2),
+                    "pivot_low": pivot_low,
+                    "rvol": rvol,
+                    "sma20": round(sma20, 1),
+                    "atr20": round(atr20, 1),
+                },
+                actionable_plan={
+                    "action": "SELL_ON_BREAKDOWN",
+                    "entry_range": f"₹{pivot_low:.1f} - ₹{ltp:.1f}",
+                    "breakout_trigger": f"₹{pivot_low:.1f}",
+                    "target": f"₹{target:.1f} (-6.0%)",
+                    "stop_loss": f"₹{sl:.1f} (+{round(((sl - ltp) / ltp) * 100, 1)}%)",
+                },
+                confidence=84,
+                created_at=now_iso,
+            )
+
+        # ── IGNITED (BULLISH): Squeeze Fired + Fresh Breakout above pivot ───
         if (
             ltp >= pivot_high
             and (ltp - pivot_high) / pivot_high <= 0.025
@@ -1306,6 +1455,48 @@ def detect_squeeze_breakout(
                     "entry_range": f"₹{ltp:.1f}",
                     "target": f"₹{target:.1f} (+8.0%)",
                     "stop_loss": f"₹{sl:.1f} (-1.5%)",
+                },
+                confidence=91,
+                created_at=now_iso,
+            )
+
+        # ── IGNITED (BEARISH): Squeeze Fired + Fresh Breakdown below pivot low ───
+        if (
+            ltp <= pivot_low
+            and (pivot_low - ltp) / pivot_low <= 0.025
+            and rvol >= 1.4
+            and ltp < sma20
+        ):
+            target = round(ltp * 0.92, 1)
+            sl = round(pivot_low * 1.015, 1)
+            return AutoAlert(
+                alert_id=f"aa-sqz-bear-ignited-{symbol}-{uuid.uuid4().hex[:6]}",
+                alert_type="SQUEEZE_BREAKDOWN",
+                stage="IGNITED",
+                symbol=symbol,
+                exchange=exchange,
+                direction="BEARISH",
+                headline=f"⚡ SQUEEZE BREAKDOWN IGNITED: {symbol} broke below ₹{pivot_low:,.1f}",
+                summary=(
+                    f"TTM Squeeze breakdown fired with institutional volume (RVOL {rvol}x). "
+                    f"Price cracked 20-day low ₹{pivot_low:,.1f} (-{round(((pivot_low - ltp) / pivot_low) * 100, 1)}%). "
+                    f"Downside expansion phase active!"
+                ),
+                ltp=ltp,
+                trigger_level=pivot_low,
+                target_level=target,
+                stop_loss=sl,
+                metrics={
+                    "is_squeeze_fired": True,
+                    "pivot_low": pivot_low,
+                    "rvol": rvol,
+                    "breakdown_pct": round(((pivot_low - ltp) / pivot_low) * 100, 2),
+                },
+                actionable_plan={
+                    "action": "SELL_EXPANSION",
+                    "entry_range": f"₹{ltp:.1f}",
+                    "target": f"₹{target:.1f} (-8.0%)",
+                    "stop_loss": f"₹{sl:.1f} (+1.5%)",
                 },
                 confidence=91,
                 created_at=now_iso,
@@ -1573,6 +1764,38 @@ class AutoAlertEngine:
             except Exception:
                 pass
 
+        # 0b. Sanitize actionable plan entry range vs stop-loss consistency
+        if (
+            alert.actionable_plan
+            and isinstance(alert.actionable_plan, dict)
+            and alert.stop_loss > 0
+        ):
+            entry_rg = alert.actionable_plan.get("entry_range")
+            if entry_rg and isinstance(entry_rg, str):
+                nums = re.findall(r"[\d,]+(?:\.\d+)?", entry_rg)
+                if len(nums) >= 2:
+                    try:
+                        lower_val = float(nums[0].replace(",", ""))
+                        upper_val = float(nums[1].replace(",", ""))
+                        if alert.direction == "BULLISH" and lower_val <= alert.stop_loss:
+                            corr_lower = round(
+                                alert.stop_loss + max(0.5, (alert.ltp - alert.stop_loss) * 0.15), 1
+                            )
+                            corr_upper = max(upper_val, round(corr_lower + 1.0, 1))
+                            alert.actionable_plan["entry_range"] = (
+                                f"₹{corr_lower:,.1f} – ₹{corr_upper:,.1f}"
+                            )
+                        elif alert.direction == "BEARISH" and upper_val >= alert.stop_loss:
+                            corr_upper = round(
+                                alert.stop_loss - max(0.5, (alert.stop_loss - alert.ltp) * 0.15), 1
+                            )
+                            corr_lower = min(lower_val, round(corr_upper - 1.0, 1))
+                            alert.actionable_plan["entry_range"] = (
+                                f"₹{corr_lower:,.1f} – ₹{corr_upper:,.1f}"
+                            )
+                    except Exception:
+                        pass
+
         with self._lock:
             # Check for existing alert with identical ID
             if any(a.alert_id == alert.alert_id for a in self._alerts):
@@ -1598,6 +1821,13 @@ class AutoAlertEngine:
                     .upper()
                     == clean_target
                     and a.alert_type == alert.alert_type
+                    and (
+                        (a.contract_symbol or "") == (alert.contract_symbol or "")
+                        or (
+                            (a.strike or 0) == (alert.strike or 0)
+                            and (a.option_type or "") == (alert.option_type or "")
+                        )
+                    )
                     and not a.is_invalidated
                     and a.stage not in ("INVALIDATED", "COMPLETED")
                 ),
@@ -1622,13 +1852,30 @@ class AutoAlertEngine:
                     # Existing alert is already active/ignited/tracking targets -> suppress duplicate insertion!
                     return False
             else:
-                # 2. Signature-based cooldown check (removed volatile price noise from signature)
-                sig = f"{alert.symbol}:{alert.alert_type}:{alert.direction}:{alert.stage}"
+                # 2. Signature-based cooldown check (differentiating options contracts by symbol/strike)
+                c_tag = alert.contract_symbol or (
+                    f"{alert.strike}_{alert.option_type}" if alert.strike else ""
+                )
+                sig = f"{alert.symbol}:{alert.alert_type}:{c_tag}:{alert.direction}:{alert.stage}"
                 last_time = self._cooldowns.get(sig, 0.0)
                 if (now - last_time) < self._cooldown_ttl:
                     return False  # Cooldown active, suppress repetitive spam
 
                 self._cooldowns[sig] = now
+                # Purge any older dead/invalidated iterations of this exact symbol so corpses don't linger
+                self._alerts = [
+                    a
+                    for a in self._alerts
+                    if not (
+                        a.symbol.replace("NSE:", "")
+                        .replace("BSE:", "")
+                        .replace("MCX:", "")
+                        .strip()
+                        .upper()
+                        == clean_target
+                        and not a.is_active
+                    )
+                ]
                 self._alerts.insert(0, alert)
                 if len(self._alerts) > self._max_buffer:
                     self._alerts.pop()
@@ -1768,7 +2015,11 @@ class AutoAlertEngine:
                 elif alert.stage == "EARLY_WARNING":
                     # Early warnings are preliminary coiling signals -> keep in SSE / Terminal,
                     # do not buzz Telegram unless exceptionally high confidence (>= 90 for general, >= 80 for PRECURSOR_RADAR / ASYMMETRIC_OPPORTUNITY)
-                    min_conf = 80 if alert.alert_type in ("PRECURSOR_RADAR", "ASYMMETRIC_OPPORTUNITY") else 90
+                    min_conf = (
+                        80
+                        if alert.alert_type in ("PRECURSOR_RADAR", "ASYMMETRIC_OPPORTUNITY")
+                        else 90
+                    )
                     if alert.confidence < min_conf:
                         return
                     m_key = f"{alert.symbol}:{alert.alert_type}:EARLY"
@@ -2010,11 +2261,28 @@ class AutoAlertEngine:
                     t2 = act_plan.get("target_2", "Open")
                     sl = act_plan.get("stop_loss", f"₹{alert.stop_loss:,.1f}")
                     rr = act_plan.get("risk_reward", "1:2.5")
-                    when_buy = act_plan.get("when_to_buy", "Enter within coiling range on ask with VWAP confirmation.")
-                    when_wait = act_plan.get("when_to_wait", "DO NOT CHASE if price gaps > 1.8%. Wait for 15-min VWAP pullback.")
-                    profit_rule = act_plan.get("profit_rule", "Book 50% at T1, move SL to breakeven, trail runner to T2.")
-                    raw_factors = alert.metrics.get("matched_factors", ["Pre-ignition volume dry-up & squeeze coiling"]) if alert.metrics else []
-                    factors_str = "\n• ".join(raw_factors[:3]) if raw_factors else "• Pre-ignition coiling setup"
+                    when_buy = act_plan.get(
+                        "when_to_buy", "Enter within coiling range on ask with VWAP confirmation."
+                    )
+                    when_wait = act_plan.get(
+                        "when_to_wait",
+                        "DO NOT CHASE if price gaps > 1.8%. Wait for 15-min VWAP pullback.",
+                    )
+                    profit_rule = act_plan.get(
+                        "profit_rule", "Book 50% at T1, move SL to breakeven, trail runner to T2."
+                    )
+                    raw_factors = (
+                        alert.metrics.get(
+                            "matched_factors", ["Pre-ignition volume dry-up & squeeze coiling"]
+                        )
+                        if alert.metrics
+                        else []
+                    )
+                    factors_str = (
+                        "\n• ".join(raw_factors[:3])
+                        if raw_factors
+                        else "• Pre-ignition coiling setup"
+                    )
 
                     tg_msg = (
                         f"⚡ <b>{env_tag} CHANAKYA HIGH-CONVICTION PRECURSOR RADAR</b>\n"
@@ -2045,10 +2313,18 @@ class AutoAlertEngine:
                     sl = act_plan.get("stop_loss", f"₹{alert.stop_loss:,.1f}")
                     rr = act_plan.get("risk_reward", "1:4.0")
                     when_buy = act_plan.get("when_to_buy", "Enter on ask within base.")
-                    when_wait = act_plan.get("when_to_wait", "DO NOT CHASE if price extends past entry range.")
-                    profit_rule = act_plan.get("profit_rule", "Book 50% at T1, move SL to breakeven.")
-                    raw_factors = alert.metrics.get("confluence_factors", []) if alert.metrics else []
-                    factors_str = "\n• ".join(raw_factors[:3]) if raw_factors else f"• {alert.headline}"
+                    when_wait = act_plan.get(
+                        "when_to_wait", "DO NOT CHASE if price extends past entry range."
+                    )
+                    profit_rule = act_plan.get(
+                        "profit_rule", "Book 50% at T1, move SL to breakeven."
+                    )
+                    raw_factors = (
+                        alert.metrics.get("confluence_factors", []) if alert.metrics else []
+                    )
+                    factors_str = (
+                        "\n• ".join(raw_factors[:3]) if raw_factors else f"• {alert.headline}"
+                    )
 
                     tg_msg = (
                         f"🎯 <b>{env_tag} CHANAKYA ASYMMETRIC OPPORTUNITY (LOW RISK : HIGH REWARD)</b>\n"
@@ -2551,15 +2827,9 @@ class AutoAlertEngine:
 
         found: list[AutoAlert] = []
         targets = list(self._watched_indices)
-        try:
-            from analysis.universe import THEMATIC_PRESETS
-
-            top_fno = THEMATIC_PRESETS.get("most_liquid_today", {}).get("symbols", [])[:8]
-            for s in top_fno:
-                if s not in targets:
-                    targets.append(s)
-        except Exception:
-            pass
+        for s in self.watched_equities:
+            if s not in targets:
+                targets.append(s)
 
         for sym in targets:
             try:
@@ -2656,7 +2926,9 @@ class AutoAlertEngine:
             for c in candidates:
                 if c.conviction_score >= 80:
                     now_iso = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
-                    alert_id = f"precursor-{c.symbol.lower()}-{datetime.now(IST).strftime('%Y%m%d')}"
+                    alert_id = (
+                        f"precursor-{c.symbol.lower()}-{datetime.now(IST).strftime('%Y%m%d')}"
+                    )
                     seg_tag = f"[{c.segment}]"
                     headline = f"⚡ [REAL/LIVE] PRECURSOR RADAR {seg_tag}: {c.symbol} Coiling at ₹{c.ltp:,.1f} ({c.conviction_score}/100)"
                     summary = f"{seg_tag} Pre-ignition coiling: {'; '.join(c.matched_factors[:2])}. Entry: {c.entry_range}."
@@ -2708,8 +2980,10 @@ class AutoAlertEngine:
 
     def scan_intraday_mover_sparks(self) -> list[AutoAlert]:
         """
-        Scans liquid universe (Indices, F&O, Cash) for explosive intraday breakout sparks (T-0 session moves).
-        Triggers when a stock surges >= 2.8% (or index >= 1.0%) with RVOL >= 2.0x and holds above VWAP.
+        Scans liquid universe (Indices, F&O, Cash) for explosive intraday sparks (T-0 session moves).
+        Detects BOTH:
+          1. Bullish breakout sparks (surge >= +2.2%, holds above VWAP, RVOL >= 1.8x).
+          2. Bearish breakdown sparks (drop <= -2.0%, breaks below VWAP, RVOL >= 1.8x).
         """
         from engine.precursor_radar import precursor_radar, classify_symbol_segment
         from market.quotes import get_quote
@@ -2717,6 +2991,9 @@ class AutoAlertEngine:
 
         found: list[AutoAlert] = []
         universe = precursor_radar.get_scan_universe(segment="ALL")
+        for s in self.watched_equities:
+            if s not in universe:
+                universe.append(s)
 
         # Batch fetch quotes
         formatted = [f"NSE:{s}" if ":" not in s else s for s in universe]
@@ -2731,24 +3008,31 @@ class AutoAlertEngine:
         for sym in universe:
             clean_sym = sym.upper().replace("NSE:", "").replace(".NS", "").strip()
             q = quotes_map.get(f"NSE:{clean_sym}") or quotes_map.get(clean_sym)
-            if not q or getattr(q, "ltp", 0.0) <= 0:
+            if not q:
                 continue
 
-            ltp = float(q.ltp)
+            ltp = float(getattr(q, "last_price", 0.0) or getattr(q, "ltp", 0.0) or 0.0)
+            if ltp <= 0:
+                continue
+
             chg = float(getattr(q, "change_pct", 0.0) or 0.0)
             vol = int(getattr(q, "volume", 0) or 0)
             vwap = float(getattr(q, "vwap", 0.0) or ltp)
 
-            # Minimum move threshold: indices >= 1.0%, stocks >= 2.8%
+            # Move thresholds: indices >= 0.8% / <= -0.8%, equities >= 2.2% / <= -2.0%
             seg = classify_symbol_segment(clean_sym)
-            min_chg = 1.0 if seg == "INDEX" else 2.8
+            min_pos_chg = 0.8 if seg == "INDEX" else 2.2
+            min_neg_chg = -0.8 if seg == "INDEX" else -2.0
 
-            if chg < min_chg or (vwap > 0 and ltp < vwap):
+            is_bullish = (chg >= min_pos_chg) and (vwap <= 0 or ltp >= (vwap * 0.998))
+            is_bearish = (chg <= min_neg_chg) and (vwap > 0 and ltp < vwap)
+
+            if not (is_bullish or is_bearish):
                 continue
 
-            # Check turnover gate for equities (₹10 Cr min)
+            # Check turnover gate for equities (₹8 Cr min)
             turnover_cr = round((ltp * vol) / 1e7, 2)
-            if seg != "INDEX" and turnover_cr < 10.0:
+            if seg != "INDEX" and turnover_cr < 8.0:
                 continue
 
             # Calculate RVOL
@@ -2757,29 +3041,65 @@ class AutoAlertEngine:
                 if df is None or len(df) < 15:
                     continue
                 vols = df["volume"].values
-                avg_vol = float(np.mean(vols[-21:-1])) if len(vols) >= 21 else float(np.mean(vols[:-1]))
+                avg_vol = (
+                    float(np.mean(vols[-21:-1])) if len(vols) >= 21 else float(np.mean(vols[:-1]))
+                )
                 rvol = round(vol / max(1.0, avg_vol), 2)
             except Exception:
                 rvol = 1.0
 
-            if rvol < 2.0:
+            if rvol < 1.8:
                 continue
 
-            alert_id = f"spark-{clean_sym.lower()}-{datetime.now(IST).strftime('%Y%m%d%H%M')}"
-            sl_price = round(max(vwap * 0.995, ltp * 0.985), 2)
-            t1_price = round(ltp + 1.5 * (ltp - sl_price), 2)
             seg_tag = f"[{seg}]"
 
-            headline = f"🚀 [REAL/LIVE] INTRADAY SPARK {seg_tag}: {clean_sym} +{chg:.1f}% with {rvol:.1f}x Volume Surge"
-            summary = f"{seg_tag} Session breakout underway: Reclaimed VWAP (₹{vwap:,.1f}) with {rvol:.1f}x RVOL. Momentum entry active."
+            if is_bullish:
+                direction = "BULLISH"
+                alert_type = "INTRADAY_SPARK"
+                alert_id = (
+                    f"spark-bull-{clean_sym.lower()}-{datetime.now(IST).strftime('%Y%m%d%H%M')}"
+                )
+                sl_price = round(max(vwap * 0.995, ltp * 0.985), 2)
+                t1_price = round(ltp + 1.5 * (ltp - sl_price), 2)
+                headline = f"🚀 [REAL/LIVE] INTRADAY SPARK {seg_tag}: {clean_sym} +{chg:.1f}% with {rvol:.1f}x Volume Surge"
+                summary = f"{seg_tag} Session breakout underway: Reclaimed VWAP (₹{vwap:,.1f}) with {rvol:.1f}x RVOL. Momentum entry active."
+                plan = {
+                    "action": "BUY_MOMENTUM",
+                    "segment": seg,
+                    "entry_range": f"₹{round(ltp * 0.998, 1):,.1f} - ₹{round(ltp * 1.005, 1):,.1f}",
+                    "stop_loss": f"₹{sl_price:,.1f}",
+                    "target": f"₹{t1_price:,.1f}",
+                    "when_to_buy": f"Buy on 5m VWAP holding above ₹{vwap:,.1f}",
+                    "when_to_wait": f"Do not chase if price extends > {round(chg + 1.5, 1)}%",
+                }
+            else:
+                direction = "BEARISH"
+                alert_type = "INTRADAY_BREAKDOWN_SPARK"
+                alert_id = (
+                    f"spark-bear-{clean_sym.lower()}-{datetime.now(IST).strftime('%Y%m%d%H%M')}"
+                )
+                sl_price = round(min(vwap * 1.005, ltp * 1.015), 2)
+                risk_pts = max(1.0, sl_price - ltp)
+                t1_price = round(max(1.0, ltp - 1.5 * risk_pts), 2)
+                headline = f"⚡ [REAL/LIVE] INTRADAY BREAKDOWN {seg_tag}: {clean_sym} {chg:.1f}% with {rvol:.1f}x Volume Surge"
+                summary = f"{seg_tag} Severe session breakdown underway: Lost VWAP (₹{vwap:,.1f}) with {rvol:.1f}x RVOL. Short / Put entry active."
+                plan = {
+                    "action": "SELL_SHORT_OR_BUY_PUT",
+                    "segment": seg,
+                    "entry_range": f"₹{round(ltp * 1.002, 1):,.1f} - ₹{round(ltp * 0.995, 1):,.1f}",
+                    "stop_loss": f"₹{sl_price:,.1f}",
+                    "target": f"₹{t1_price:,.1f}",
+                    "when_to_buy": f"Enter short or ATM Put on pullbacks to ₹{vwap:,.1f} with tight stop above VWAP.",
+                    "when_to_wait": f"Do not chase if breakdown extends > {round(abs(chg) + 1.5, 1)}% without retest.",
+                }
 
             alert = AutoAlert(
                 alert_id=alert_id,
-                alert_type="INTRADAY_SPARK",
+                alert_type=alert_type,
                 stage="IGNITED",
                 symbol=clean_sym,
                 exchange="NSE",
-                direction="BULLISH",
+                direction=direction,
                 headline=headline,
                 summary=summary,
                 ltp=ltp,
@@ -2797,15 +3117,7 @@ class AutoAlertEngine:
                     "change_pct": chg,
                     "segment": seg,
                 },
-                actionable_plan={
-                    "action": "BUY_MOMENTUM",
-                    "segment": seg,
-                    "entry_range": f"₹{round(ltp*0.998, 1):,.1f} - ₹{round(ltp*1.005, 1):,.1f}",
-                    "stop_loss": f"₹{sl_price:,.1f}",
-                    "target": f"₹{t1_price:,.1f}",
-                    "when_to_buy": f"Buy on 5m VWAP holding above ₹{vwap:,.1f}",
-                    "when_to_wait": f"Do not chase if price extends > {round(chg + 1.5, 1)}%",
-                },
+                actionable_plan=plan,
             )
             if self.record_alert(alert):
                 found.append(alert)
@@ -2829,12 +3141,43 @@ class AutoAlertEngine:
                     f"T1 (+2R): ₹{opp.target_1:,.1f} | T2 (+4R): ₹{opp.target_2:,.1f} | Moonshot: ₹{opp.target_moonshot:,.1f}"
                 )
 
+                plan = {
+                    "action": opp.setup_type,
+                    "segment": opp.segment,
+                    "entry_range": opp.entry_range,
+                    "stop_loss": f"₹{opp.stop_loss:,.1f}",
+                    "target": f"₹{opp.target_1:,.1f}",
+                    "target_2": f"₹{opp.target_2:,.1f}",
+                    "target_moonshot": f"₹{opp.target_moonshot:,.1f}",
+                    "risk_reward": opp.risk_reward,
+                    "when_to_buy": opp.when_to_buy,
+                    "when_to_wait": opp.when_to_wait,
+                    "profit_rule": opp.profit_rule,
+                }
+                if opp.contract_symbol:
+                    plan["option_contract"] = opp.contract_symbol
+                    plan["option_entry"] = (
+                        f"₹{opp.option_premium:,.1f}" if opp.option_premium else None
+                    )
+                    plan["option_target_1"] = (
+                        f"₹{opp.option_target_1:,.1f}" if opp.option_target_1 else None
+                    )
+                    plan["option_target_2"] = (
+                        f"₹{opp.option_target_2:,.1f}" if opp.option_target_2 else None
+                    )
+                    plan["option_stop_loss"] = (
+                        f"₹{opp.option_stop_loss:,.1f}" if opp.option_stop_loss else None
+                    )
+                    plan["lot_size"] = opp.lot_size
+
                 alert = AutoAlert(
                     alert_id=alert_id,
                     alert_type="ASYMMETRIC_OPPORTUNITY",
                     stage="EARLY_WARNING",
                     symbol=opp.symbol,
-                    exchange=opp.exchange,
+                    exchange="NFO"
+                    if opp.segment == "INDEX" or opp.contract_symbol
+                    else opp.exchange,
                     direction=opp.direction,
                     headline=headline,
                     summary=summary,
@@ -2842,24 +3185,17 @@ class AutoAlertEngine:
                     trigger_level=opp.entry_price,
                     target_level=opp.target_1,
                     stop_loss=opp.stop_loss,
+                    strike=opp.strike,
+                    option_type=opp.option_type,
+                    contract_symbol=opp.contract_symbol,
+                    expiry_date=opp.expiry_date,
+                    option_premium=opp.option_premium,
                     confidence=opp.conviction_score,
                     created_at=now_iso,
                     is_live=True,
                     environment="LIVE",
                     metrics=opp.to_dict(),
-                    actionable_plan={
-                        "action": opp.setup_type,
-                        "segment": opp.segment,
-                        "entry_range": opp.entry_range,
-                        "stop_loss": f"₹{opp.stop_loss:,.1f}",
-                        "target": f"₹{opp.target_1:,.1f}",
-                        "target_2": f"₹{opp.target_2:,.1f}",
-                        "target_moonshot": f"₹{opp.target_moonshot:,.1f}",
-                        "risk_reward": opp.risk_reward,
-                        "when_to_buy": opp.when_to_buy,
-                        "when_to_wait": opp.when_to_wait,
-                        "profit_rule": opp.profit_rule,
-                    },
+                    actionable_plan=plan,
                 )
                 if self.record_alert(alert):
                     found.append(alert)
@@ -2869,10 +3205,176 @@ class AutoAlertEngine:
 
         return found
 
+    def scan_options_momentum_breakouts(self) -> list[AutoAlert]:
+        """
+        Scans liquid indices and Tier-1 F&O leaders for directional Options Momentum Breakouts.
+        Surfaces high-volume, high-turnover ATM contracts with strong intraday momentum and favorable R:R.
+        """
+        from market.options import get_options_chain
+        from market.quotes import get_ltp
+        from engine.position_sizer import get_lot_size
+
+        found: list[AutoAlert] = []
+        targets = list(self._watched_indices)
+        for s in self.watched_equities:
+            if s not in targets:
+                targets.append(s)
+
+        now_iso = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
+
+        for sym in targets:
+            clean_sym = sym.replace("NSE:", "").replace("NFO:", "").strip().upper()
+            try:
+                spot = get_ltp(f"NSE:{clean_sym}")
+                if not spot or spot <= 0:
+                    continue
+                chain = get_options_chain(clean_sym)
+                if not chain:
+                    continue
+
+                is_idx = clean_sym in (
+                    "NIFTY",
+                    "BANKNIFTY",
+                    "FINNIFTY",
+                    "MIDCPNIFTY",
+                    "SENSEX",
+                    "BANKEX",
+                )
+                strike_range_pct = 0.015 if is_idx else 0.035
+                min_opt_volume = 3000 if is_idx else 500
+                min_oi = 10000 if is_idx else 300
+
+                # Filter ATM and near-OTM contracts within range
+                atm_contracts = [
+                    c
+                    for c in chain
+                    if abs(getattr(c, "strike", 0.0) - spot) / spot <= strike_range_pct
+                    and getattr(c, "last_price", 0.0) > 2.0
+                    and getattr(c, "volume", 0) >= min_opt_volume
+                ]
+
+                # Check for top volume / turnover momentum
+                for c in atm_contracts:
+                    vol = getattr(c, "volume", 0)
+                    oi = getattr(c, "oi", 0)
+                    vol_oi = round(vol / max(1, oi), 2)
+                    opt_ltp = float(getattr(c, "last_price", 0.0) or 0.0)
+                    opt_type = getattr(c, "option_type", "")
+                    strike = float(getattr(c, "strike", 0.0))
+                    contract_sym = getattr(c, "symbol", f"{clean_sym}{int(strike)}{opt_type}")
+                    expiry_date = getattr(c, "expiry", None)
+                    lot_sz = get_lot_size(clean_sym)
+
+                    # Liquidity significance: Ensure strike has real participation, not an illiquid ghost strike
+                    if oi < min_oi:
+                        continue
+
+                    # Momentum DTE Gate: Indices demand active weekly liquidity (DTE <= 7), stocks allow front-month (DTE <= 35)
+                    max_dte = 7 if is_idx else 35
+                    if expiry_date:
+                        try:
+                            exp_str = str(expiry_date).split("T")[0].strip()
+                            exp_dt = None
+                            for fmt in ("%Y-%m-%d", "%d-%b-%Y", "%d-%m-%Y"):
+                                try:
+                                    exp_dt = datetime.strptime(exp_str, fmt).date()
+                                    break
+                                except ValueError:
+                                    continue
+                            if exp_dt and (exp_dt - datetime.now(IST).date()).days > max_dte:
+                                continue
+                        except Exception:
+                            pass
+
+                    # Momentum criteria: active turnover (vol_oi >= 1.0) and volume >= threshold
+                    if vol_oi < 1.0:
+                        continue
+
+                    direction = "BULLISH" if opt_type == "CE" else "BEARISH"
+                    alert_id = f"aa-optmom-{opt_type.lower()}-{clean_sym}-{int(strike)}-{uuid.uuid4().hex[:6]}"
+
+                    # Option target and risk calculation (strict 1:3.5 R:R)
+                    risk_pts = round(max(5.0, opt_ltp * 0.25), 2)  # 25% defined risk stop
+                    opt_sl = round(max(0.05, opt_ltp - risk_pts), 2)
+                    opt_t1 = round(opt_ltp + 2.0 * risk_pts, 2)
+                    opt_t2 = round(opt_ltp + 3.5 * risk_pts, 2)
+                    opt_moonshot = round(opt_ltp + 5.5 * risk_pts, 2)
+
+                    if opt_type == "PE":
+                        headline = f"🎯 [REAL/LIVE] OPTIONS MOMENTUM (PUT SURGE): {contract_sym} @ ₹{opt_ltp:,.1f} (Vol/OI {vol_oi}x)"
+                        summary = (
+                            f"Institutional Put surge in {clean_sym} {strike:,.0f} PE. "
+                            f"Underlying spot ₹{spot:,.1f}. Turnover: {vol:,} contracts ({vol_oi}x OI). "
+                            f"Entry: ₹{opt_ltp:,.1f} | SL: ₹{opt_sl:,.1f} | T1: ₹{opt_t1:,.1f} | T2: ₹{opt_t2:,.1f}"
+                        )
+                    else:
+                        headline = f"🚀 [REAL/LIVE] OPTIONS MOMENTUM: {contract_sym} @ ₹{opt_ltp:,.1f} (Vol/OI {vol_oi}x)"
+                        summary = (
+                            f"Institutional Call surge in {clean_sym} {strike:,.0f} CE. "
+                            f"Turnover: {vol:,} contracts ({vol_oi}x OI). "
+                            f"Entry: ₹{opt_ltp:,.1f} | SL: ₹{opt_sl:,.1f} | T1: ₹{opt_t1:,.1f} | T2: ₹{opt_t2:,.1f}"
+                        )
+
+                    alert = AutoAlert(
+                        alert_id=alert_id,
+                        alert_type="OPTIONS_MOMENTUM",
+                        stage="IGNITED" if vol_oi >= 2.0 else "EARLY_WARNING",
+                        symbol=clean_sym,
+                        exchange="NFO",
+                        direction=direction,
+                        headline=headline,
+                        summary=summary,
+                        ltp=opt_ltp,
+                        trigger_level=opt_ltp,
+                        target_level=opt_t1,
+                        stop_loss=opt_sl,
+                        strike=strike,
+                        option_type=opt_type,
+                        contract_symbol=contract_sym,
+                        expiry_date=expiry_date,
+                        option_premium=opt_ltp,
+                        underlying_spot=spot,
+                        confidence=min(92, int(72 + vol_oi * 8)),
+                        created_at=now_iso,
+                        is_live=True,
+                        environment="LIVE",
+                        metrics={
+                            "vol_oi_ratio": vol_oi,
+                            "volume": vol,
+                            "oi": oi,
+                            "spot": spot,
+                            "strike": strike,
+                            "lot_size": lot_sz,
+                        },
+                        actionable_plan={
+                            "action": f"BUY {opt_type}",
+                            "segment": "FNO",
+                            "contract": contract_sym,
+                            "entry_range": f"₹{round(opt_ltp * 0.98, 1):,.1f} – ₹{round(opt_ltp * 1.02, 1):,.1f}",
+                            "stop_loss": f"₹{opt_sl:,.1f}",
+                            "target": f"₹{opt_t1:,.1f}",
+                            "target_2": f"₹{opt_t2:,.1f}",
+                            "target_moonshot": f"₹{opt_moonshot:,.1f}",
+                            "risk_reward": "1:3.5",
+                            "when_to_buy": f"Buy on ask with tight defined risk below ₹{opt_sl:,.1f}.",
+                            "when_to_wait": "DO NOT CHASE if premium surges > 10% past entry.",
+                            "profit_rule": f"Book 50% at T1 (₹{opt_t1:,.1f}), move SL to Cost, let remainder ride to T2 (₹{opt_t2:,.1f}).",
+                            "lot_size": lot_sz,
+                        },
+                    )
+                    if self.record_alert(alert):
+                        found.append(alert)
+                        break  # 1 best contract per underlying per scan cycle
+            except Exception as e:
+                logger.debug(f"[AutoAlertEngine] Options momentum scan error for {sym}: {e}")
+
+        return found
+
     def scan_fresh_signals_now(self) -> list[AutoAlert]:
         """Scans watched universe for fresh market signals across all detectors."""
         results: list[AutoAlert] = []
         results.extend(self.scan_gamma_blasts())
+        results.extend(self.scan_options_momentum_breakouts())
         results.extend(self.scan_squeeze_breakouts())
         results.extend(self.scan_circuits())
         results.extend(self.scan_pattern_coilings())
@@ -3019,15 +3521,19 @@ class AutoAlertEngine:
                 self._save()
         return target_alert
 
-    def _prune_expired_archived_unlocked(self, max_age_days: int = 3) -> int:
+    def _prune_expired_archived_unlocked(self, max_age_days: int = 1) -> int:
         """
         Internal prune logic without acquiring lock (caller must hold self._lock).
         CRITICAL SAFETY RULE: Active valid trades (a.is_active == True) are NEVER purged.
-        Only inactive/archived/invalidated records older than max_age_days are removed.
+        Automatically purges:
+          1. Expired derivative contracts (shelf-life / expiry passed).
+          2. Quarantined or bogus phantom records (instant 0-TTL purge).
+          3. Inactive / archived / invalidated records older than max_age_days.
         """
         from datetime import timedelta
 
-        cutoff_dt = datetime.now(IST) - timedelta(days=max_age_days)
+        now = datetime.now(IST)
+        cutoff_dt = now - timedelta(days=max_age_days)
         purged_count = 0
         surviving: list[AutoAlert] = []
 
@@ -3037,8 +3543,18 @@ class AutoAlertEngine:
                 surviving.append(a)
                 continue
 
+            # 1. Instant Purge for Expired Derivatives
+            if a.is_expired or a.stage == "EXPIRED":
+                purged_count += 1
+                continue
+
+            # 2. Instant Purge for Quarantined / Phantom records
+            if a.archive_reason and "Quarantined" in a.archive_reason:
+                purged_count += 1
+                continue
+
             # Inactive candidate for archival cleanup: check age
-            ts_str = a.archived_at or a.invalidated_at or a.created_at or ""
+            ts_str = a.invalidated_at or a.archived_at or a.created_at or ""
             alert_dt = None
             if ts_str:
                 clean_ts = ts_str.replace(" IST", "").strip()
@@ -3053,16 +3569,26 @@ class AutoAlertEngine:
                     except Exception:
                         continue
 
-            if alert_dt and alert_dt < cutoff_dt:
-                purged_count += 1
-            else:
-                surviving.append(a)
+            # 3. Clean up records older than max_age_days or prior calendar session invalidations
+            if alert_dt:
+                if alert_dt < cutoff_dt:
+                    purged_count += 1
+                    continue
+                if (
+                    max_age_days <= 1
+                    and (a.is_invalidated or a.stage == "INVALIDATED")
+                    and alert_dt.date() < now.date()
+                ):
+                    purged_count += 1
+                    continue
+
+            surviving.append(a)
 
         if purged_count > 0:
             self._alerts = surviving
             self._save()
             logger.info(
-                f"[AutoAlertEngine] Cleaned up {purged_count} archived records older than {max_age_days} days. "
+                f"[AutoAlertEngine] Cleaned up {purged_count} stale/expired records. "
                 f"Surviving: {len(surviving)}"
             )
 
@@ -3141,7 +3667,7 @@ class AutoAlertEngine:
                 logger.info(f"[AutoAlertEngine] Purged {purged} corrupted synthetic test alerts.")
         return purged
 
-    def cleanup_archived_records(self, max_age_days: int = 3) -> int:
+    def cleanup_archived_records(self, max_age_days: int = 1) -> int:
         """
         Public thread-safe method to prune archived records older than max_age_days.
         Active valid trades are never deleted.
@@ -3169,6 +3695,152 @@ class AutoAlertEngine:
             target_path.write_text(json.dumps(data, indent=2))
         except Exception as e:
             logger.debug(f"[AutoAlertEngine] _save error: {e}")
+
+    def _sanitize_legacy_alerts_unlocked(self) -> int:
+        """
+        Permanently purges bogus/quarantined alerts that violate newly established
+        institutional quality gates (e.g. illiquid index strikes or distant gamma expiries).
+        Excludes synthetic test alerts.
+        """
+        purged = 0
+        surviving: list[AutoAlert] = []
+        for a in self._alerts:
+            # Skip test alerts from live index liquidity checks!
+            if (
+                a.environment == "TEST"
+                or not a.is_live
+                or a.alert_id.startswith("test-")
+                or a.alert_id.startswith("vm-")
+                or a.alert_id.startswith("inv-")
+            ):
+                surviving.append(a)
+                continue
+
+            # 1. Reject already quarantined or corrupted records
+            if a.archive_reason and "Quarantined" in a.archive_reason:
+                purged += 1
+                logger.info(f"[AutoAlertEngine] Purged quarantined alert {a.alert_id} ({a.symbol})")
+                continue
+
+            # 2. Gate for Index GAMMA_BLAST: Must have >= 15,000 OI and <= 5 DTE
+            if a.alert_type == "GAMMA_BLAST":
+                is_index = a.symbol.upper() in (
+                    "NIFTY",
+                    "BANKNIFTY",
+                    "FINNIFTY",
+                    "MIDCPNIFTY",
+                    "SENSEX",
+                    "BANKEX",
+                )
+                if is_index:
+                    oi = a.metrics.get("oi", 0) if a.metrics else 0
+                    dte = a.metrics.get("dte") if a.metrics else None
+                    if dte is None:
+                        dte = getattr(a, "dte", None)
+                    if dte is None and a.expiry_date:
+                        try:
+                            exp_str = str(a.expiry_date).split("T")[0].strip()
+                            for fmt in ("%Y-%m-%d", "%d-%b-%Y", "%d-%m-%Y"):
+                                try:
+                                    exp_dt = datetime.strptime(exp_str, fmt).date()
+                                    dte = (exp_dt - datetime.now(IST).date()).days
+                                    break
+                                except ValueError:
+                                    pass
+                        except Exception:
+                            pass
+
+                    if oi < 15000:
+                        purged += 1
+                        logger.info(
+                            f"[AutoAlertEngine] Purged illiquid index gamma alert {a.alert_id} "
+                            f"({a.symbol} {a.strike}): OI {oi} < 15,000"
+                        )
+                        continue
+                    elif dte is not None and dte > 5:
+                        purged += 1
+                        logger.info(
+                            f"[AutoAlertEngine] Purged distant gamma alert {a.alert_id} "
+                            f"({a.symbol} {a.strike}): DTE {dte} > 5"
+                        )
+                        continue
+
+            # 3. Gate for OPTIONS_MOMENTUM
+            elif a.alert_type == "OPTIONS_MOMENTUM":
+                is_index = a.symbol.upper() in (
+                    "NIFTY",
+                    "BANKNIFTY",
+                    "FINNIFTY",
+                    "MIDCPNIFTY",
+                    "SENSEX",
+                    "BANKEX",
+                )
+                if is_index:
+                    oi = a.metrics.get("oi", 0) if a.metrics else 0
+                    if oi < 5000:
+                        purged += 1
+                        logger.info(
+                            f"[AutoAlertEngine] Purged illiquid option momentum alert {a.alert_id} "
+                            f"({a.symbol}): OI {oi} < 5,000"
+                        )
+                        continue
+
+            surviving.append(a)
+
+        if purged > 0:
+            self._alerts = surviving
+            self._save()
+
+        return purged
+
+    def _deduplicate_symbols_unlocked(self) -> int:
+        """
+        Deduplicates alerts by symbol. If a symbol has an active setup, any dead/invalidated/archived
+        iterations of that symbol are permanently purged so old zombies never linger.
+        """
+        active_symbols = {
+            a.symbol.replace("NSE:", "").replace("NFO:", "").strip().upper()
+            for a in self._alerts
+            if a.is_active
+        }
+        surviving = []
+        purged = 0
+        seen_active = set()
+
+        for a in reversed(self._alerts):
+            # Skip synthetic test alerts from symbol deduplication
+            is_test = (
+                a.environment == "TEST"
+                or not a.is_live
+                or a.alert_id.startswith("test-")
+                or a.alert_id.startswith("vm-")
+                or a.alert_id.startswith("inv-")
+                or a.alert_id.startswith("t-")
+            )
+            if is_test:
+                surviving.append(a)
+                continue
+
+            clean_sym = a.symbol.replace("NSE:", "").replace("NFO:", "").strip().upper()
+            if a.is_active:
+                if clean_sym in seen_active:
+                    purged += 1
+                    continue
+                seen_active.add(clean_sym)
+                surviving.append(a)
+            else:
+                # If there is already an active alert for this symbol, discard old dead copies
+                if clean_sym in active_symbols:
+                    purged += 1
+                    continue
+                surviving.append(a)
+
+        surviving.reverse()
+        if purged > 0:
+            self._alerts = surviving
+            self._save()
+            logger.info(f"[AutoAlertEngine] Deduplicated and purged {purged} stale alert copies.")
+        return purged
 
     def _load(self) -> None:
         try:
@@ -3284,10 +3956,14 @@ class AutoAlertEngine:
                 self._alerts = alerts
                 if rehab_count > 0:
                     self._save()
-                # Automatically reap expired derivative alerts
-                self._reap_expired_alerts_unlocked()
-                # Periodically prune archived records older than 3 days
-                self._prune_expired_archived_unlocked(max_age_days=3)
+                # 1. Automatically reap and purge expired derivative alerts
+                self._reap_expired_alerts_unlocked(purge=True)
+                # 2. Permanently purge legacy alerts violating institutional quality gates
+                self._sanitize_legacy_alerts_unlocked()
+                # 3. Deduplicate multiple iterations of the same symbol (keep only latest active)
+                self._deduplicate_symbols_unlocked()
+                # 4. Periodically prune stale / invalidated / archived records older than 1 day
+                self._prune_expired_archived_unlocked(max_age_days=1)
         except Exception as e:
             logger.debug(f"[AutoAlertEngine] _load error: {e}")
             self._alerts = []

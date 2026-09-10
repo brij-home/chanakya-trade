@@ -58,6 +58,30 @@ def _canonical_payload(rows: list[dict[str, Any]]) -> str:
     return json.dumps(rows, sort_keys=True, separators=(",", ":"), default=str)
 
 
+def _sanitize_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Enforce physical envelope and drop non-positive or corrupted price bars."""
+    clean_rows = []
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        try:
+            o = float(r.get("open", 0))
+            h = float(r.get("high", 0))
+            l = float(r.get("low", 0))
+            c = float(r.get("close", 0))
+            if o <= 0 or h <= 0 or l <= 0 or c <= 0:
+                continue
+            r_clean = dict(r)
+            r_clean["high"] = max(h, o, c)
+            r_clean["low"] = min(l, o, c)
+            if "volume" in r_clean:
+                r_clean["volume"] = max(0, float(r_clean["volume"]))
+            clean_rows.append(r_clean)
+        except Exception:
+            continue
+    return clean_rows
+
+
 def save_eod_snapshot(
     *,
     canonical_instrument_id: str,
@@ -70,7 +94,8 @@ def save_eod_snapshot(
 ) -> str:
     """Persist immutable normalized EOD rows and return their content ID."""
     _init_db()
-    payload = _canonical_payload(rows)
+    clean_rows = _sanitize_rows(rows)
+    payload = _canonical_payload(clean_rows)
     checksum = hashlib.sha256(payload.encode("utf-8")).hexdigest()
     snapshot_id = hashlib.sha256(
         f"{canonical_instrument_id}|{provider}|{as_of_date}|{checksum}".encode("utf-8")

@@ -10,7 +10,7 @@ import pandas as pd
 import numpy as np
 from unittest.mock import patch, MagicMock
 
-from engine.precursor_radar import PrecursorRadarScanner, PrecursorCandidate
+from engine.precursor_radar import PrecursorRadarScanner
 
 
 @pytest.fixture
@@ -44,13 +44,20 @@ def test_evaluate_symbol_high_conviction(scanner):
     mock_squeeze.squeeze_fired = False
     mock_squeeze.squeeze_duration_bars = 4
 
-    with patch("market.quotes.get_quote", return_value=mock_quote), \
-         patch("market.history.get_ohlcv", return_value=df), \
-         patch("analysis.big_move.compute_ttm_squeeze", return_value=mock_squeeze), \
-         patch("analysis.sector_rotation.get_stock_sector_alignment", return_value={"sector_name": "IT", "quadrant": "LEADING"}), \
-         patch("market.options.get_options_chain", return_value=None), \
-         patch("engine.learning_engine.pattern_learning_engine.is_symbol_locked_out", return_value=(False, "")):
-
+    with (
+        patch("market.quotes.get_quote", return_value=mock_quote),
+        patch("market.history.get_ohlcv", return_value=df),
+        patch("analysis.big_move.compute_ttm_squeeze", return_value=mock_squeeze),
+        patch(
+            "analysis.sector_rotation.get_stock_sector_alignment",
+            return_value={"sector_name": "IT", "quadrant": "LEADING"},
+        ),
+        patch("market.options.get_options_chain", return_value=None),
+        patch(
+            "engine.learning_engine.pattern_learning_engine.is_symbol_locked_out",
+            return_value=(False, ""),
+        ),
+    ):
         cand = scanner.evaluate_symbol("INFY", df=df)
 
         assert cand is not None
@@ -80,11 +87,18 @@ def test_evaluate_symbol_vwap_knife_catching_penalty(scanner):
         }
     )
 
-    with patch("market.quotes.get_quote", return_value=mock_quote), \
-         patch("market.history.get_ohlcv", return_value=df), \
-         patch("analysis.sector_rotation.get_stock_sector_alignment", return_value={"sector_name": "IT", "quadrant": "LEADING"}), \
-         patch("engine.learning_engine.pattern_learning_engine.is_symbol_locked_out", return_value=(False, "")):
-
+    with (
+        patch("market.quotes.get_quote", return_value=mock_quote),
+        patch("market.history.get_ohlcv", return_value=df),
+        patch(
+            "analysis.sector_rotation.get_stock_sector_alignment",
+            return_value={"sector_name": "IT", "quadrant": "LEADING"},
+        ),
+        patch(
+            "engine.learning_engine.pattern_learning_engine.is_symbol_locked_out",
+            return_value=(False, ""),
+        ),
+    ):
         cand = scanner.evaluate_symbol("INFY", df=df)
         # Because of the below-VWAP penalty, score should drop below threshold (75) and return None
         assert cand is None
@@ -92,7 +106,10 @@ def test_evaluate_symbol_vwap_knife_catching_penalty(scanner):
 
 def test_evaluate_symbol_lockout_gate(scanner):
     """Test that a symbol on active post-mortem invalidation lockout is immediately blocked."""
-    with patch("engine.learning_engine.pattern_learning_engine.is_symbol_locked_out", return_value=(True, "Stop-loss breach cooldown")):
+    with patch(
+        "engine.learning_engine.pattern_learning_engine.is_symbol_locked_out",
+        return_value=(True, "Stop-loss breach cooldown"),
+    ):
         cand = scanner.evaluate_symbol("ADANIENT")
         assert cand is None
 
@@ -137,4 +154,3 @@ def test_get_scan_universe_segments():
     assert any(classify_symbol_segment(s) == "INDEX" for s in all_univ)
     assert any(classify_symbol_segment(s) == "FNO" for s in all_univ)
     assert any(classify_symbol_segment(s) == "NON_FNO" for s in all_univ)
-

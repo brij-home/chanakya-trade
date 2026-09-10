@@ -50,10 +50,14 @@ def test_pocket_pivot_detection(scanner):
     mock_quote.last_price = 1010.0
     mock_quote.vwap = 1008.0
 
-    with patch("market.quotes.get_quote", return_value={"NSE:TRENT": mock_quote}), \
-         patch("market.history.get_ohlcv", return_value=df), \
-         patch("analysis.sector_rotation.get_stock_sector_alignment", return_value={"sector_name": "Retail", "quadrant": "LEADING"}):
-
+    with (
+        patch("market.quotes.get_quote", return_value={"NSE:TRENT": mock_quote}),
+        patch("market.history.get_ohlcv", return_value=df),
+        patch(
+            "analysis.sector_rotation.get_stock_sector_alignment",
+            return_value={"sector_name": "Retail", "quadrant": "LEADING"},
+        ),
+    ):
         opp = scanner.detect_pocket_pivot("TRENT", df=df)
 
         assert opp is not None
@@ -87,9 +91,10 @@ def test_fno_ban_squeeze_detection(scanner):
         index=dates,
     )
 
-    with patch("market.quotes.get_quote", return_value={"NSE:TATAMOTORS": mock_quote}), \
-         patch("market.history.get_ohlcv", return_value=df):
-
+    with (
+        patch("market.quotes.get_quote", return_value={"NSE:TATAMOTORS": mock_quote}),
+        patch("market.history.get_ohlcv", return_value=df),
+    ):
         # Test pre-ban squeeze at 92% MWPL
         opp = scanner.detect_fno_ban_squeeze("TATAMOTORS", mwpl_pct=92.0, is_in_ban=False, df=df)
 
@@ -133,12 +138,13 @@ def test_rubber_band_reversal_detection(scanner):
     mock_forensic.is_clean = True
     mock_forensic.beneish_flagged = False
     mock_forensic.beneish_m_score = -2.4  # Clean (< -1.78)
-    mock_forensic.altman_z_score = 3.5    # Safe (> 2.6)
+    mock_forensic.altman_z_score = 3.5  # Safe (> 2.6)
 
-    with patch("market.quotes.get_quote", return_value={"NSE:HDFCBANK": mock_quote}), \
-         patch("market.history.get_ohlcv", return_value=df), \
-         patch("analysis.forensic.audit_company_forensics", return_value=mock_forensic):
-
+    with (
+        patch("market.quotes.get_quote", return_value={"NSE:HDFCBANK": mock_quote}),
+        patch("market.history.get_ohlcv", return_value=df),
+        patch("analysis.forensic.audit_company_forensics", return_value=mock_forensic),
+    ):
         opp = scanner.detect_rubber_band_reversal("HDFCBANK", df=df)
 
         assert opp is not None
@@ -168,10 +174,13 @@ def test_0dte_gamma_breakout_detection(scanner):
 
     mock_opt_chain = [c_call, c_put]
 
-    with patch("market.quotes.get_quote", return_value={"NSE:NIFTY": mock_quote}), \
-         patch("market.options.get_options_chain", return_value=mock_opt_chain):
-
-        opp = scanner.detect_0dte_gamma_breakout("NIFTY", spot=25150.0, chain=mock_opt_chain, expiry_date="TODAY")
+    with (
+        patch("market.quotes.get_quote", return_value={"NSE:NIFTY": mock_quote}),
+        patch("market.options.get_options_chain", return_value=mock_opt_chain),
+    ):
+        opp = scanner.detect_0dte_gamma_breakout(
+            "NIFTY", spot=25150.0, chain=mock_opt_chain, expiry_date="TODAY"
+        )
 
         assert opp is not None
         assert opp.symbol == "NIFTY"
@@ -237,7 +246,10 @@ def test_scan_asymmetric_opportunities_returns_structured_dicts():
         profit_rule="Scale 40% at T1, 40% at T2, trail 20% runner.",
     )
 
-    with patch("engine.asymmetric_radar.asymmetric_radar.scan_asymmetric_opportunities", return_value=[mock_opp]):
+    with patch(
+        "engine.asymmetric_radar.asymmetric_radar.scan_asymmetric_opportunities",
+        return_value=[mock_opp],
+    ):
         results = scan_asymmetric_opportunities(min_rr=3.0)
         assert len(results) == 1
         d = results[0]
@@ -245,3 +257,78 @@ def test_scan_asymmetric_opportunities_returns_structured_dicts():
         assert d["setup_type"] == "POCKET_PIVOT"
         assert d["risk_reward_ratio"] == 3.0
         assert "entry_range" in d
+
+
+def test_rubber_band_mazdock_volatility_floor_and_monotonic_invariants(scanner):
+    """
+    Regression Test (MAZDOCK Incident):
+    Ensures that when a high-beta stock tests 200-EMA, the stop-loss is NEVER set to a
+    paper-thin micro-stop (e.g., 0.25%) and targets are strictly monotonic (SL < Entry < T1 < T2 < Moonshot).
+    """
+    dates = pd.date_range("2025-10-01", periods=220, freq="B")
+    closes = np.full(220, 2450.0)
+    for k in range(14):
+        closes[-14 + k] = 2450.0 - (k + 1) * 6.0
+
+    # High daily volatility (ATR ~ 55 points)
+    closes[-1] = 2395.5
+    opens = closes.copy()
+    opens[-1] = 2395.0
+    highs = closes + 28.0
+    lows = closes - 28.0
+    # Intraday low was only 6 points below close, but daily ATR is ~56 pts
+    lows[-1] = 2389.5
+    volumes = np.full(220, 500000)
+
+    df = pd.DataFrame(
+        {"open": opens, "high": highs, "low": lows, "close": closes, "volume": volumes},
+        index=dates,
+    )
+
+    mock_quote = MagicMock()
+    mock_quote.last_price = 2395.5
+    mock_quote.vwap = 2398.0
+
+    mock_forensic = MagicMock()
+    mock_forensic.is_clean = True
+    mock_forensic.beneish_flagged = False
+    mock_forensic.beneish_m_score = -2.5
+    mock_forensic.altman_z_score = 3.2
+
+    with (
+        patch("market.quotes.get_quote", return_value={"NSE:MAZDOCK": mock_quote}),
+        patch("market.history.get_ohlcv", return_value=df),
+        patch("analysis.forensic.audit_company_forensics", return_value=mock_forensic),
+    ):
+        opp = scanner.detect_rubber_band_reversal("MAZDOCK", df=df)
+
+        assert opp is not None
+        assert opp.symbol == "MAZDOCK"
+
+        # 1. Volatility Floor Enforcement:
+        # Stop loss must NOT be the paper-thin 2389.5 (5.97 pts away)
+        assert (opp.ltp - opp.stop_loss) >= 35.0, (
+            f"Expected SL distance >= 35 pts given ATR, got {opp.ltp - opp.stop_loss:.1f} pts"
+        )
+
+        # 2. Entry Range Boundary:
+        # Lower bound of entry range must be strictly greater than stop-loss
+        import re
+
+        entry_nums = [
+            float(x.replace(",", "")) for x in re.findall(r"[\d,]+(?:\.\d+)?", opp.entry_range)
+        ]
+        assert len(entry_nums) >= 2
+        entry_lower = entry_nums[0]
+        assert entry_lower > opp.stop_loss, (
+            f"Entry lower bound {entry_lower} must be strictly above SL {opp.stop_loss}"
+        )
+
+        # 3. Strict Monotonic Target Hierarchy:
+        assert opp.stop_loss < opp.ltp < opp.target_1 < opp.target_2 < opp.target_moonshot, (
+            f"Target hierarchy violated: SL={opp.stop_loss}, LTP={opp.ltp}, "
+            f"T1={opp.target_1}, T2={opp.target_2}, Moonshot={opp.target_moonshot}"
+        )
+
+        # 4. Asymmetric R:R ratio guarantee:
+        assert opp.risk_reward_ratio >= 3.0

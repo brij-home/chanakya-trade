@@ -1027,13 +1027,19 @@ async def cmd_movers(update, context) -> None:
         all_gainers = autopsy.gainers
         all_losers = autopsy.losers
         if segment:
-            all_gainers = [g for g in all_gainers if g.segment == segment or (segment == "FNO" and g.is_fo)]
-            all_losers = [l for l in all_losers if l.segment == segment or (segment == "FNO" and l.is_fo)]
+            all_gainers = [
+                g for g in all_gainers if g.segment == segment or (segment == "FNO" and g.is_fo)
+            ]
+            all_losers = [
+                l for l in all_losers if l.segment == segment or (segment == "FNO" and l.is_fo)
+            ]
 
         valid_gainers = [g for g in all_gainers if not g.is_trap][:5]
         for g in valid_gainers:
             clean_arch = g.archetype.replace("ARCHETYPE_", "").replace("_", " ").title()
-            factors_short = "; ".join(g.deciding_factors[:2]) if g.deciding_factors else "Momentum expansion"
+            factors_short = (
+                "; ".join(g.deciding_factors[:2]) if g.deciding_factors else "Momentum expansion"
+            )
             lines.append(
                 f"• <b>{g.symbol} [{g.segment}]</b>: <b>+{g.change_pct:.1f}%</b> (RVOL: {g.rvol:.1f}x)\n"
                 f"  🏷️ <i>{clean_arch}</i>\n"
@@ -1745,10 +1751,14 @@ def format_precursor_alert(candidate_dict: dict) -> str:
     t1 = candidate_dict.get("target_1", 0.0)
     t2 = candidate_dict.get("target_2", 0.0)
     rr = candidate_dict.get("risk_reward", "1:2.5")
-    when_buy = candidate_dict.get("when_to_buy", "Enter on ask within coiling range with VWAP hold.")
+    when_buy = candidate_dict.get(
+        "when_to_buy", "Enter on ask within coiling range with VWAP hold."
+    )
     when_wait = candidate_dict.get("when_to_wait", "DO NOT CHASE if price gaps > 1.8%.")
     profit_rule = candidate_dict.get("profit_rule", "Book 50% at T1, trail runner to T2.")
-    factors = candidate_dict.get("matched_factors", ["Pre-ignition volume dry-up & squeeze coiling"])
+    factors = candidate_dict.get(
+        "matched_factors", ["Pre-ignition volume dry-up & squeeze coiling"]
+    )
     factors_str = "\n• ".join(factors[:3]) if factors else "• Pre-ignition coiling setup"
 
     icon = "🔥" if score >= 85 else "⚡"

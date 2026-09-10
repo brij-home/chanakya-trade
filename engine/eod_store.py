@@ -397,9 +397,220 @@ def get_all_symbol_meta() -> dict[str, dict[str, Any]]:
     return {r["symbol"]: dict(r) for r in rows}
 
 
+def validate_and_sanitize_ohlcv_dataframe(df: pd.DataFrame, symbol: str = "") -> pd.DataFrame:
+    """
+    Validates and sanitizes an OHLCV DataFrame to guarantee physical market envelope and data quality:
+      1. Drops rows with null, NaN, or infinite price/volume values.
+      2. Drops rows with zero or negative prices (open <= 0, high <= 0, low <= 0, close <= 0).
+      3. Clamps and fixes physical envelope anomalies:
+           high = max(high, open, close)
+           low = min(low, open, close)
+      4. Drops fatal invalid bars where high < low.
+      5. Ensures volume is non-negative: volume = max(0, volume).
+      6. Drops duplicate date timestamps (keeping the latest).
+      7. Normalizes and sorts the DatetimeIndex ascending (timezone-naive).
+    """
+    if df is None or df.empty:
+        return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
+
+    clean_df = df.copy()
+
+    # Column name normalization
+    if isinstance(clean_df.columns, pd.MultiIndex):
+        clean_df.columns = [str(c[0]).lower() for c in clean_df.columns]
+    else:
+        clean_df.columns = [str(c).lower() for c in clean_df.columns]
+
+    req_cols = ["open", "high", "low", "close", "volume"]
+    if not all(col in clean_df.columns for col in req_cols):
+        return pd.DataFrame(columns=req_cols)
+
+    # Convert columns to numeric float / int
+    for col in ["open", "high", "low", "close"]:
+        clean_df[col] = pd.to_numeric(clean_df[col], errors="coerce")
+    clean_df["volume"] = pd.to_numeric(clean_df["volume"], errors="coerce")
+    if "turnover" in clean_df.columns:
+        clean_df["turnover"] = pd.to_numeric(clean_df["turnover"], errors="coerce")
+
+    # Drop NaNs / Infs
+    clean_df.replace([np.inf, -np.inf], np.nan, inplace=True)
+    clean_df.dropna(subset=req_cols, inplace=True)
+
+    if clean_df.empty:
+        return pd.DataFrame(columns=req_cols)
+
+    # Filter out zero or negative prices
+    valid_mask = (
+        (clean_df["open"] > 0)
+        & (clean_df["high"] > 0)
+        & (clean_df["low"] > 0)
+        & (clean_df["close"] > 0)
+    )
+    clean_df = clean_df[valid_mask]
+    if clean_df.empty:
+        return pd.DataFrame(columns=req_cols)
+
+    # Physical Envelope Enforcement:
+    # High can never be lower than open or close; low can never be higher than open or close.
+    clean_df["high"] = clean_df[["high", "open", "close"]].max(axis=1)
+    clean_df["low"] = clean_df[["low", "open", "close"]].min(axis=1)
+
+    # Reject any fatal inverted bars where high < low
+    clean_df = clean_df[clean_df["high"] >= clean_df["low"]]
+
+    # Volume non-negative
+    clean_df["volume"] = clean_df["volume"].clip(lower=0)
+
+    # Index normalization & deduplication
+    if not isinstance(clean_df.index, pd.DatetimeIndex):
+        clean_df.index = pd.to_datetime(clean_df.index)
+    if hasattr(clean_df.index, "tz") and clean_df.index.tz is not None:
+        clean_df.index = clean_df.index.tz_localize(None)
+
+    clean_df = clean_df[~clean_df.index.duplicated(keep="last")]
+    clean_df.sort_index(inplace=True)
+
+    return clean_df
+
+
+def repair_eod_store_anomalies(db_path: Optional[Path] = None) -> dict[str, Any]:
+    """
+    Scans the SQLite store for corrupted OHLC bars violating physical envelopes or with non-positive prices,
+    repairs valid bars to the physical envelope, purges unfixable records, and recomputes symbol_meta.
+    """
+    target_path = db_path or _get_db_path()
+    if not target_path.exists():
+        return {"status": "NOT_FOUND", "repaired_bars": 0, "deleted_bars": 0, "symbols_updated": 0}
+
+    with _store_lock:
+        conn = sqlite3.connect(str(target_path), timeout=30.0)
+        conn.row_factory = sqlite3.Row
+        try:
+            # 1. Delete rows with non-positive prices
+            del_cur = conn.execute(
+                """
+                DELETE FROM ohlcv_daily 
+                WHERE open <= 0 OR high <= 0 OR low <= 0 OR close <= 0
+                """
+            )
+            deleted_count = del_cur.rowcount
+
+            # 2. Find rows with physical envelope violations:
+            # high < open OR high < close OR low > open OR low > close OR high < low
+            rows = conn.execute(
+                """
+                SELECT symbol, date, open, high, low, close, volume 
+                FROM ohlcv_daily 
+                WHERE high < low 
+                   OR high < open 
+                   OR high < close 
+                   OR low > open 
+                   OR low > close
+                """
+            ).fetchall()
+
+            repaired_count = 0
+            affected_symbols = set()
+
+            for r in rows:
+                sym = r["symbol"]
+                d_str = r["date"]
+                o = float(r["open"])
+                h = float(r["high"])
+                l = float(r["low"])
+                c = float(r["close"])
+
+                new_high = max(float(h), float(o), float(c))
+                new_low = min(float(l), float(o), float(c))
+
+                conn.execute(
+                    """
+                    UPDATE ohlcv_daily 
+                    SET high = ?, low = ? 
+                    WHERE symbol = ? AND date = ?
+                    """,
+                    (float(new_high), float(new_low), sym, d_str),
+                )
+                repaired_count += 1
+                affected_symbols.add(sym)
+
+            # 3. Recompute symbol_meta for affected symbols
+            now_iso = datetime.now(timezone.utc).isoformat()
+            for sym in affected_symbols:
+                recent_rows = conn.execute(
+                    """
+                    SELECT date, open, high, low, close, volume, turnover 
+                    FROM ohlcv_daily 
+                    WHERE symbol = ? 
+                    ORDER BY date DESC LIMIT 260
+                    """,
+                    (sym,),
+                ).fetchall()
+                if not recent_rows:
+                    continue
+
+                recent_rows = list(reversed(recent_rows))
+                bar_count_row = conn.execute(
+                    "SELECT COUNT(*), MIN(date) FROM ohlcv_daily WHERE symbol = ?",
+                    (sym,),
+                ).fetchone()
+                total_bar_count = bar_count_row[0]
+                first_date = bar_count_row[1]
+                last_date = recent_rows[-1]["date"]
+                last_close = float(recent_rows[-1]["close"])
+
+                lookback_52w = min(len(recent_rows), 250)
+                high_52w = max(float(r["high"]) for r in recent_rows[-lookback_52w:])
+                low_52w = min(float(r["low"]) for r in recent_rows[-lookback_52w:])
+
+                lookback_20d = min(len(recent_rows), 20)
+                turnover_vals = [
+                    (float(r["close"]) * float(r["volume"])) / 1e7
+                    for r in recent_rows[-lookback_20d:]
+                ]
+                median_turnover = float(np.median(turnover_vals)) if len(turnover_vals) > 0 else 0.0
+
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO symbol_meta
+                    (symbol, last_date, first_date, bar_count, median_turnover_20d, 
+                     high_52w, low_52w, last_close, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        sym,
+                        last_date,
+                        first_date,
+                        total_bar_count,
+                        round(median_turnover, 3),
+                        round(high_52w, 2),
+                        round(low_52w, 2),
+                        round(last_close, 2),
+                        now_iso,
+                    ),
+                )
+
+            conn.commit()
+            try:
+                conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
+            except Exception:
+                pass
+        finally:
+            conn.close()
+
+    clear_l1_caches()
+    return {
+        "status": "REPAIRED",
+        "repaired_bars": repaired_count,
+        "deleted_bars": deleted_count,
+        "symbols_updated": len(affected_symbols),
+    }
+
+
 def save_ohlcv_batch(data: dict[str, pd.DataFrame]) -> int:
     """
     Atomically saves or updates OHLCV DataFrames in SQLite and recomputes metadata.
+    Enforces physical market envelope validation and strict test symbol isolation.
     Handles delta appends seamlessly without corrupting historical bar counts or 52w extremes.
     Warms process L1 cache. Returns total number of bars inserted/updated.
     """
@@ -420,10 +631,15 @@ def save_ohlcv_batch(data: dict[str, pd.DataFrame]) -> int:
             clean_sym.startswith("TEST") or clean_sym.startswith("DUMMY")
         ):
             continue
-        affected_symbols.add(clean_sym)
-        df_sorted = df.sort_index()
 
-        for idx, row in df_sorted.iterrows():
+        # Ingestion Quality Gate: validate & sanitize
+        sanitized_df = validate_and_sanitize_ohlcv_dataframe(df, symbol=clean_sym)
+        if sanitized_df.empty:
+            continue
+
+        affected_symbols.add(clean_sym)
+
+        for idx, row in sanitized_df.iterrows():
             d_str = str(idx)[:10]
             c = float(row["close"])
             v = int(row["volume"])
@@ -913,11 +1129,13 @@ def sync_universe_eod(
     max_workers: int = 8,
     exchange: str = "NSE",
     delta_period: str = "1mo",
+    initial_period: str = "2y",
+    backfill_min_bars: Optional[int] = None,
 ) -> dict[str, Any]:
     """
     High-efficiency multi-threaded bulk synchronizer with delta-only ingestion.
-    - If stocks are new: downloads period='1y' once.
-    - If stocks are delta (missing only recent bars): downloads period='1mo' and appends.
+    - If stocks are new (or bar_count < backfill_min_bars): downloads initial_period (default 2y / ~500 bars).
+    - If stocks are delta (missing only recent bars): downloads delta_period='1mo' and appends.
     - If stocks are already up-to-date: returns in 0.001s without touching the network!
     """
     clean_syms = list(
@@ -935,6 +1153,22 @@ def sync_universe_eod(
         delta_targets = []
     else:
         new_targets, delta_targets = get_stale_symbols_detailed(clean_syms)
+
+        # If backfill_min_bars is requested, check if any existing cached symbols have fewer than min bars
+        if backfill_min_bars and backfill_min_bars > 0 and clean_syms:
+            conn = _get_connection()
+            placeholders = ",".join(["?"] * len(clean_syms))
+            low_bar_rows = conn.execute(
+                f"SELECT symbol FROM symbol_meta WHERE symbol IN ({placeholders}) AND bar_count < ?",
+                [*clean_syms, backfill_min_bars],
+            ).fetchall()
+            low_bar_syms = {r["symbol"] for r in low_bar_rows}
+            if low_bar_syms:
+                # Move from delta_targets to new_targets to fetch full initial_period (2y)
+                delta_targets = [s for s in delta_targets if s not in low_bar_syms]
+                for s in low_bar_syms:
+                    if s not in new_targets:
+                        new_targets.append(s)
 
     total_targets = len(new_targets) + len(delta_targets)
     if total_targets == 0:
@@ -967,14 +1201,14 @@ def sync_universe_eod(
                 if res:
                     downloaded.update(res)
 
-    # 2. Download New Chunks (initial period='1y')
+    # 2. Download New / Backfill Chunks (comprehensive initial_period='2y')
     if new_targets:
         new_chunks = [
             new_targets[i : i + chunk_size] for i in range(0, len(new_targets), chunk_size)
         ]
 
         def _worker_new(c):
-            return _download_chunk_yfinance(c, period="1y", exchange=exchange)
+            return _download_chunk_yfinance(c, period=initial_period, exchange=exchange)
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = [executor.submit(_worker_new, ch) for ch in new_chunks]

@@ -18,7 +18,11 @@ import pandas as pd
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = REPO_ROOT / "data"
 
-from engine.eod_store import get_cached_ohlcv, sync_universe_eod
+from engine.eod_store import (
+    get_cached_ohlcv,
+    sync_universe_eod,
+    validate_and_sanitize_ohlcv_dataframe,
+)
 from analysis.technical import (
     analyse as analyse_technical,
     rsi as calc_rsi,
@@ -73,6 +77,73 @@ def test_eod_database_no_test_symbols():
     conn.close()
 
     assert len(test_symbols) == 0, f"Production database contains test symbols: {test_symbols}"
+
+
+def test_eod_database_physical_envelope_sanity():
+    """Verify production database data/eod_bars.db contains ZERO physical envelope violations or non-positive prices."""
+    db_path = DATA_DIR / "eod_bars.db"
+    if not db_path.exists():
+        pytest.skip("data/eod_bars.db does not exist on this test environment")
+
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    anomalies = cursor.execute(
+        """
+        SELECT symbol, date, open, high, low, close, volume 
+        FROM ohlcv_daily 
+        WHERE high < low 
+           OR high < open 
+           OR high < close 
+           OR low > open 
+           OR low > close 
+           OR open <= 0 
+           OR high <= 0 
+           OR low <= 0 
+           OR close <= 0
+        """
+    ).fetchall()
+    conn.close()
+
+    assert len(anomalies) == 0, (
+        f"Found {len(anomalies)} corrupted physical envelope records in production EOD database: {anomalies[:5]}"
+    )
+
+
+def test_validate_and_sanitize_ohlcv_dataframe():
+    """Verify validate_and_sanitize_ohlcv_dataframe enforces physical envelope, cleans NaNs and negative prices."""
+    raw_data = {
+        "open": [100.0, 94.57, -10.0, float("nan"), 105.0, 105.0],
+        "high": [105.0, 92.68, 5.0, 110.0, 104.0, 108.0],  # row 1: high < open! row 4: high < open!
+        "low": [98.0, 92.67, -15.0, 95.0, 106.0, 102.0],  # row 4: low > open!
+        "close": [102.0, 92.67, 0.0, 100.0, 105.0, 107.0],
+        "volume": [1000, 2400, 500, 300, -50, 1500],
+    }
+    dates = [
+        "2026-01-01",
+        "2026-01-02",
+        "2026-01-03",  # negative price -> should be dropped
+        "2026-01-04",  # NaN open -> should be dropped
+        "2026-01-05",  # inverted envelope + negative volume -> clamped
+        "2026-01-05",  # duplicate date -> should keep latest
+    ]
+    df = pd.DataFrame(raw_data, index=pd.to_datetime(dates))
+
+    clean_df = validate_and_sanitize_ohlcv_dataframe(df, symbol="TEST_SYM")
+
+    assert len(clean_df) == 3  # 2026-01-01, 2026-01-02, and 2026-01-05 (deduplicated)
+    assert not clean_df.isna().any().any()
+    assert (clean_df["open"] > 0).all()
+    assert (clean_df["high"] >= clean_df["low"]).all()
+    assert (clean_df["high"] >= clean_df["open"]).all()
+    assert (clean_df["high"] >= clean_df["close"]).all()
+    assert (clean_df["low"] <= clean_df["open"]).all()
+    assert (clean_df["low"] <= clean_df["close"]).all()
+    assert (clean_df["volume"] >= 0).all()
+
+    # Verify clamping on 2026-01-02 (high was 92.68, open was 94.57 -> high must be 94.57)
+    row_2 = clean_df.loc["2026-01-02"]
+    assert row_2["high"] == 94.57
+    assert row_2["low"] == 92.67
 
 
 def test_trent_real_data_and_rsi_sanity():

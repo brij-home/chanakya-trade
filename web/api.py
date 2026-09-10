@@ -116,10 +116,10 @@ async def _background_cache_warmer():
                 )
             except Exception:
                 pass
-            # 2. Warm OHLCV for benchmark indices
+            # 2. Warm OHLCV for benchmark indices (2-year lookback)
             try:
-                get_ohlcv("NIFTY", days=250)
-                get_ohlcv("BANKNIFTY", days=250)
+                get_ohlcv("NIFTY", days=500)
+                get_ohlcv("BANKNIFTY", days=500)
             except Exception:
                 pass
             # 3. Warm sector rotation matrix
@@ -2778,7 +2778,7 @@ async def get_auto_alerts(
     environment: Optional[str] = None,
     is_invalidated: Optional[bool] = None,
     target_status: Optional[str] = None,
-    view_mode: str = "ALL",  # "ACTIVE" | "ARCHIVED" | "ALL"
+    view_mode: str = "ACTIVE",  # "ACTIVE" | "ARCHIVED" | "ALL"
     is_archived: Optional[bool] = None,
 ):
     """
@@ -2852,20 +2852,20 @@ async def get_mover_autopsy(date: Optional[str] = None, segment: Optional[str] =
 
     if not autopsy:
         # Run on-demand if no autopsy exists yet
-        autopsy = await asyncio.to_thread(
-            mover_autopsy_engine.run_daily_autopsy, segment=segment
-        )
+        autopsy = await asyncio.to_thread(mover_autopsy_engine.run_daily_autopsy, segment=segment)
 
     # Filter gainers & losers by segment if specified
     if autopsy and segment and segment.upper() not in ("ALL", ""):
         seg_upper = segment.upper().replace("CASH", "NON_FNO")
         autopsy_dict = autopsy.to_dict()
         autopsy_dict["gainers"] = [
-            g for g in autopsy_dict.get("gainers", [])
+            g
+            for g in autopsy_dict.get("gainers", [])
             if g.get("segment") == seg_upper or (seg_upper == "FNO" and g.get("is_fo"))
         ]
         autopsy_dict["losers"] = [
-            l for l in autopsy_dict.get("losers", [])
+            l
+            for l in autopsy_dict.get("losers", [])
             if l.get("segment") == seg_upper or (seg_upper == "FNO" and l.get("is_fo"))
         ]
         return {"status": "ok", "data": autopsy_dict}
@@ -2993,7 +2993,6 @@ async def run_asymmetric_opportunities_scan(payload: Optional[dict] = None):
         pass
 
     return {"status": "ok", "data": [o.to_dict() for o in opps]}
-
 
 
 @app.post("/api/quotes/batch", tags=["Market Data"])

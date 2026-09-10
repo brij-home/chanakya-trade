@@ -105,8 +105,10 @@ def get_storage_breakdown() -> StorageBreakdown:
     b_bytes = sum(_file_or_dir_size_bytes(f) for f in business_files)
 
     # Market data
-    m_bytes = _file_or_dir_size_bytes(root / "market_data.db") + _file_or_dir_size_bytes(
-        root / "persona_track_records.db"
+    m_bytes = (
+        _file_or_dir_size_bytes(root / "market_data.db")
+        + _file_or_dir_size_bytes(root / "persona_track_records.db")
+        + _file_or_dir_size_bytes(Path("data/eod_bars.db"))
     )
 
     # Analysis Cache
@@ -197,6 +199,36 @@ def run_maintenance_purge(
     except Exception as e:
         logger.warning(f"Error pruning analysis cache: {e}")
 
+    # 3b. Tier B: Auto-verify EOD store physical envelope sanity
+    try:
+        from engine.eod_store import repair_eod_store_anomalies
+
+        repair_res = repair_eod_store_anomalies()
+        repaired = repair_res.get("repaired_bars", 0)
+        deleted = repair_res.get("deleted_bars", 0)
+        if repaired > 0 or deleted > 0:
+            actions.append(
+                f"Repaired {repaired} envelope anomalies and pruned {deleted} non-physical bars in eod_bars.db."
+            )
+            items_deleted += deleted
+    except Exception as e:
+        logger.warning(f"Error checking EOD store anomalies: {e}")
+
+    # 3c. Tier D: Purge zombie, expired, and quarantined records from auto_alerts.json
+    try:
+        from engine.auto_alert_engine import auto_alert_engine
+
+        purged_alerts = auto_alert_engine.cleanup_archived_records(max_age_days=1)
+        purged_expired = auto_alert_engine.purge_expired_alerts()
+        total_alert_purges = purged_alerts + purged_expired
+        if total_alert_purges > 0:
+            actions.append(
+                f"Purged {total_alert_purges} stale, expired, and quarantined records from auto_alerts.json."
+            )
+            items_deleted += total_alert_purges
+    except Exception as e:
+        logger.warning(f"Error pruning auto alerts: {e}")
+
     # 4. Tier D: Prune old exported PDFs & reports
     try:
         exports_dir = app_data_path("exports")
@@ -223,6 +255,7 @@ def run_maintenance_purge(
         app_data_path("market_data.db"),
         app_data_path("analysis_cache.db"),
         app_data_path("analysis_search.db"),
+        Path("data/eod_bars.db"),
     ]
 
     for db_file in databases:

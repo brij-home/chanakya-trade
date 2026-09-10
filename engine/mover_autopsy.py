@@ -34,7 +34,6 @@ from pathlib import Path
 from typing import Any, Optional
 
 import numpy as np
-import pandas as pd
 
 logger = logging.getLogger("chanakya.mover_autopsy")
 
@@ -89,7 +88,9 @@ class MoverCausalProfile:
     oi_change_pct: float = 0.0
     vol_oi_ratio: float = 0.0
     pcr: float = 1.0
-    derivative_verdict: str = "NEUTRAL"  # SHORT_COVERING, LONG_BUILDUP, LONG_UNWINDING, SHORT_BUILDUP
+    derivative_verdict: str = (
+        "NEUTRAL"  # SHORT_COVERING, LONG_BUILDUP, LONG_UNWINDING, SHORT_BUILDUP
+    )
 
     # Intraday spark (T-0)
     orb_breakout: bool = False
@@ -160,8 +161,16 @@ class MoverAutopsyEngine:
                 data = json.loads(target.read_text(encoding="utf-8"))
                 for d in data:
                     if isinstance(d, dict):
-                        g_list = [MoverCausalProfile(**g) for g in d.get("gainers", []) if isinstance(g, dict)]
-                        l_list = [MoverCausalProfile(**l) for l in d.get("losers", []) if isinstance(l, dict)]
+                        g_list = [
+                            MoverCausalProfile(**g)
+                            for g in d.get("gainers", [])
+                            if isinstance(g, dict)
+                        ]
+                        l_list = [
+                            MoverCausalProfile(**l)
+                            for l in d.get("losers", [])
+                            if isinstance(l, dict)
+                        ]
                         self._autopsies.append(
                             DailyMoverAutopsy(
                                 date=d.get("date", ""),
@@ -201,12 +210,47 @@ class MoverAutopsyEngine:
 
         # Fallback to high-liquidity defaults
         return [
-            "RELIANCE", "TCS", "INFY", "HDFCBANK", "ICICIBANK", "SBIN", "BHARTIARTL",
-            "TRENT", "DIXON", "HAL", "BEL", "ADANIENT", "LT", "MARUTI", "BAJFINANCE",
-            "TITAN", "COFORGE", "PERSISTENT", "POLYCAB", "KALYANKJIL", "BSE", "MCX",
-            "CDSL", "MANKIND", "SUNPHARMA", "DRREDDY", "DIVISLAB", "TATAMOTORS",
-            "HINDALCO", "TATASTEEL", "JSWSTEEL", "VEDL", "NTPC", "ONGC", "COALINDIA",
-            "POWERGRID", "ASIANPAINT", "HINDUNILVR", "ITC", "NESTLEIND", "ZOMATO"
+            "RELIANCE",
+            "TCS",
+            "INFY",
+            "HDFCBANK",
+            "ICICIBANK",
+            "SBIN",
+            "BHARTIARTL",
+            "TRENT",
+            "DIXON",
+            "HAL",
+            "BEL",
+            "ADANIENT",
+            "LT",
+            "MARUTI",
+            "BAJFINANCE",
+            "TITAN",
+            "COFORGE",
+            "PERSISTENT",
+            "POLYCAB",
+            "KALYANKJIL",
+            "BSE",
+            "MCX",
+            "CDSL",
+            "MANKIND",
+            "SUNPHARMA",
+            "DRREDDY",
+            "DIVISLAB",
+            "TATAMOTORS",
+            "HINDALCO",
+            "TATASTEEL",
+            "JSWSTEEL",
+            "VEDL",
+            "NTPC",
+            "ONGC",
+            "COALINDIA",
+            "POWERGRID",
+            "ASIANPAINT",
+            "HINDUNILVR",
+            "ITC",
+            "NESTLEIND",
+            "ZOMATO",
         ]
 
     def fetch_daily_movers_and_control(
@@ -236,32 +280,45 @@ class MoverAutopsyEngine:
         for sym in symbols:
             clean_sym = sym.upper().replace("NSE:", "").replace(".NS", "").strip()
             q = quotes_map.get(f"NSE:{clean_sym}") or quotes_map.get(clean_sym)
-            if not q or getattr(q, "ltp", 0.0) <= 0:
+            if not q:
+                continue
+            ltp_val = float(getattr(q, "last_price", 0.0) or getattr(q, "ltp", 0.0) or 0.0)
+            if ltp_val <= 0:
                 continue
 
-            ltp = float(q.ltp)
+            ltp = ltp_val
             change_pct = float(getattr(q, "change_pct", 0.0) or 0.0)
             vol = int(getattr(q, "volume", 0) or 0)
             vwap = float(getattr(q, "vwap", 0.0) or ltp)
             turnover_cr = round((ltp * vol) / 1e7, 2)  # In Crores
 
-            quotes_data.append({
-                "symbol": clean_sym,
-                "ltp": ltp,
-                "change_pct": change_pct,
-                "volume": vol,
-                "turnover_cr": turnover_cr,
-                "vwap": vwap,
-                "raw_quote": q,
-            })
+            quotes_data.append(
+                {
+                    "symbol": clean_sym,
+                    "ltp": ltp,
+                    "change_pct": change_pct,
+                    "volume": vol,
+                    "turnover_cr": turnover_cr,
+                    "vwap": vwap,
+                    "raw_quote": q,
+                }
+            )
 
         if not quotes_data:
             return [], [], []
 
         # Sort by change_pct
-        gainers_sorted = sorted([q for q in quotes_data if q["change_pct"] > 0], key=lambda x: x["change_pct"], reverse=True)
-        losers_sorted = sorted([q for q in quotes_data if q["change_pct"] < 0], key=lambda x: x["change_pct"])
-        control_candidates = [q for q in quotes_data if abs(q["change_pct"]) <= 0.8 and q["turnover_cr"] >= 10.0]
+        gainers_sorted = sorted(
+            [q for q in quotes_data if q["change_pct"] > 0],
+            key=lambda x: x["change_pct"],
+            reverse=True,
+        )
+        losers_sorted = sorted(
+            [q for q in quotes_data if q["change_pct"] < 0], key=lambda x: x["change_pct"]
+        )
+        control_candidates = [
+            q for q in quotes_data if abs(q["change_pct"]) <= 0.8 and q["turnover_cr"] >= 10.0
+        ]
 
         top_gainers = gainers_sorted[:top_n]
         top_losers = losers_sorted[:top_n]
@@ -292,7 +349,9 @@ class MoverAutopsyEngine:
         trap_reason = None
         if turnover_cr < 8.0 and abs(chg) >= 4.0:
             is_trap = True
-            trap_reason = f"Illiquid Operator Pump: Daily turnover ₹{turnover_cr:.1f} Cr < ₹8.0 Cr threshold"
+            trap_reason = (
+                f"Illiquid Operator Pump: Daily turnover ₹{turnover_cr:.1f} Cr < ₹8.0 Cr threshold"
+            )
         elif abs(chg) in (4.95, 5.0, 9.95, 10.0, 19.95, 20.0) and vol < 50000:
             is_trap = True
             trap_reason = "Circuit-to-Circuit Lock with negligible depth / retail entrapment"
@@ -335,7 +394,10 @@ class MoverAutopsyEngine:
 
                 # VCP range contraction ratio over last 5 bars
                 if len(closes) >= 6:
-                    recent_ranges = [abs(df["high"].iloc[i] - df["low"].iloc[i]) / df["close"].iloc[i] * 100 for i in range(-6, -1)]
+                    recent_ranges = [
+                        abs(df["high"].iloc[i] - df["low"].iloc[i]) / df["close"].iloc[i] * 100
+                        for i in range(-6, -1)
+                    ]
                     if len(recent_ranges) >= 2:
                         vcp_tightness = round(min(recent_ranges) / max(0.01, max(recent_ranges)), 2)
 
@@ -345,9 +407,16 @@ class MoverAutopsyEngine:
 
                     ms = analyze_market_structure(sym, df=df.iloc[:-1], exchange="NSE")
                     if hasattr(ms, "order_blocks") and ms.order_blocks:
-                        target_obs = [ob for ob in ms.order_blocks if getattr(ob, "ob_type", "") == ("BULLISH" if direction == "GAINER" else "BEARISH")]
+                        target_obs = [
+                            ob
+                            for ob in ms.order_blocks
+                            if getattr(ob, "ob_type", "")
+                            == ("BULLISH" if direction == "GAINER" else "BEARISH")
+                        ]
                         if target_obs:
-                            nearest = target_obs[0].top if direction == "GAINER" else target_obs[0].bottom
+                            nearest = (
+                                target_obs[0].top if direction == "GAINER" else target_obs[0].bottom
+                            )
                             ob_dist = round(abs(ltp - nearest) / max(1.0, ltp) * 100, 2)
                 except Exception:
                     pass
@@ -379,10 +448,22 @@ class MoverAutopsyEngine:
 
             chain = get_options_chain(sym)
             if chain:
-                tot_ce_oi = sum(getattr(c, "oi", 0) for c in chain if getattr(c, "option_type", "") == "CE")
-                tot_pe_oi = sum(getattr(c, "oi", 0) for c in chain if getattr(c, "option_type", "") == "PE")
-                tot_ce_doi = sum(getattr(c, "oi_change", 0) for c in chain if getattr(c, "option_type", "") == "CE")
-                tot_pe_doi = sum(getattr(c, "oi_change", 0) for c in chain if getattr(c, "option_type", "") == "PE")
+                tot_ce_oi = sum(
+                    getattr(c, "oi", 0) for c in chain if getattr(c, "option_type", "") == "CE"
+                )
+                tot_pe_oi = sum(
+                    getattr(c, "oi", 0) for c in chain if getattr(c, "option_type", "") == "PE"
+                )
+                tot_ce_doi = sum(
+                    getattr(c, "oi_change", 0)
+                    for c in chain
+                    if getattr(c, "option_type", "") == "CE"
+                )
+                tot_pe_doi = sum(
+                    getattr(c, "oi_change", 0)
+                    for c in chain
+                    if getattr(c, "option_type", "") == "PE"
+                )
                 tot_vol = sum(getattr(c, "volume", 0) for c in chain)
 
                 pcr = round(tot_pe_oi / max(1, tot_ce_oi), 2)
@@ -394,14 +475,18 @@ class MoverAutopsyEngine:
                         oi_change_pct = round((tot_ce_doi / max(1, tot_ce_oi)) * 100, 1)
                     else:
                         derivative_verdict = "LONG_BUILDUP"
-                        oi_change_pct = round(((tot_ce_doi + tot_pe_doi) / max(1, tot_ce_oi + tot_pe_oi)) * 100, 1)
+                        oi_change_pct = round(
+                            ((tot_ce_doi + tot_pe_doi) / max(1, tot_ce_oi + tot_pe_oi)) * 100, 1
+                        )
                 else:
                     if tot_pe_doi < 0 and abs(tot_pe_doi) > 0.10 * max(1, tot_pe_oi):
                         derivative_verdict = "LONG_UNWINDING"
                         oi_change_pct = round((tot_pe_doi / max(1, tot_pe_oi)) * 100, 1)
                     else:
                         derivative_verdict = "SHORT_BUILDUP"
-                        oi_change_pct = round(((tot_ce_doi + tot_pe_doi) / max(1, tot_ce_oi + tot_pe_oi)) * 100, 1)
+                        oi_change_pct = round(
+                            ((tot_ce_doi + tot_pe_doi) / max(1, tot_ce_oi + tot_pe_oi)) * 100, 1
+                        )
             else:
                 is_fo = False
         except Exception:
@@ -417,47 +502,82 @@ class MoverAutopsyEngine:
         lessons_learned: list[str] = []
 
         if is_trap:
-            archetype = TRAP_LOW_LIQUIDITY_PUMP if "Illiquid" in (trap_reason or "") else TRAP_CIRCUIT_LOCK_MANIPULATION
+            archetype = (
+                TRAP_LOW_LIQUIDITY_PUMP
+                if "Illiquid" in (trap_reason or "")
+                else TRAP_CIRCUIT_LOCK_MANIPULATION
+            )
             deciding_factors.append(f"⚠️ {trap_reason}")
-            lessons_learned.append("Discard from predictive pattern memory; low institutional depth invites slippage and operator traps.")
+            lessons_learned.append(
+                "Discard from predictive pattern memory; low institutional depth invites slippage and operator traps."
+            )
         elif derivative_verdict == "SHORT_COVERING" and vol_oi_ratio >= 1.5:
             archetype = ARCHETYPE_GAMMA_SHORT_SQUEEZE
-            deciding_factors.append(f"Aggressive Short Covering: Call OI unwound by {abs(oi_change_pct):.1f}% with {vol_oi_ratio:.1f}x Vol/OI surge")
+            deciding_factors.append(
+                f"Aggressive Short Covering: Call OI unwound by {abs(oi_change_pct):.1f}% with {vol_oi_ratio:.1f}x Vol/OI surge"
+            )
             if squeeze_bars >= 2:
                 deciding_factors.append(f"Pre-squeeze coiling for {squeeze_bars} daily sessions")
-            lessons_learned.append("Watch for negative Call ΔOI combined with spot reclaiming VWAP on high-turnover F&O leaders.")
+            lessons_learned.append(
+                "Watch for negative Call ΔOI combined with spot reclaiming VWAP on high-turnover F&O leaders."
+            )
         elif prior_vol_ratio <= 0.35 and (squeeze_bars >= 2 or vcp_tightness <= 0.40):
             archetype = ARCHETYPE_VOLATILITY_CONTRACTION_SPRING
-            deciding_factors.append(f"Extreme Volume Dry-up at T-1 ({prior_vol_ratio * 100:.0f}% of 20D SMA — Seller Exhaustion)")
+            deciding_factors.append(
+                f"Extreme Volume Dry-up at T-1 ({prior_vol_ratio * 100:.0f}% of 20D SMA — Seller Exhaustion)"
+            )
             if squeeze_bars >= 2:
-                deciding_factors.append(f"Bollinger bands coiled in Keltner squeeze for {squeeze_bars} bars")
+                deciding_factors.append(
+                    f"Bollinger bands coiled in Keltner squeeze for {squeeze_bars} bars"
+                )
             if vcp_tightness > 0:
-                deciding_factors.append(f"VCP contraction ratio {vcp_tightness:.2f} (tightening daily spread)")
-            lessons_learned.append("Volume dry-up below 35% of 20-day average is the single most reliable pre-breakout signature in momentum leaders.")
+                deciding_factors.append(
+                    f"VCP contraction ratio {vcp_tightness:.2f} (tightening daily spread)"
+                )
+            lessons_learned.append(
+                "Volume dry-up below 35% of 20-day average is the single most reliable pre-breakout signature in momentum leaders."
+            )
         elif rrg_quadrant in ("LEADING", "IMPROVING") and direction == "GAINER":
             archetype = ARCHETYPE_SECTOR_MOMENTUM_CONTAGION
             deciding_factors.append(f"Parent Sector ({sector_name}) in {rrg_quadrant} RRG quadrant")
-            deciding_factors.append(f"RVOL expansion ({rvol:.1f}x) confirming institutional sector rotation")
-            lessons_learned.append("Riding stocks in Leading/Improving RRG sectors provides a 3x higher success probability than counter-trend bottom fishing.")
+            deciding_factors.append(
+                f"RVOL expansion ({rvol:.1f}x) confirming institutional sector rotation"
+            )
+            lessons_learned.append(
+                "Riding stocks in Leading/Improving RRG sectors provides a 3x higher success probability than counter-trend bottom fishing."
+            )
         elif liquidity_sweep:
             archetype = ARCHETYPE_LIQUIDITY_SWEEP_REVERSAL
             deciding_factors.append("Institutional Order Block liquidity sweep & rejection")
             deciding_factors.append(f"Held VWAP with {rvol:.1f}x volume confirmation")
-            lessons_learned.append("Wait for prior day high/low sweeps to grab retail stop-losses before entering with institutional flow.")
+            lessons_learned.append(
+                "Wait for prior day high/low sweeps to grab retail stop-losses before entering with institutional flow."
+            )
         elif direction == "LOSER":
-            archetype = ARCHETYPE_BREAKDOWN_LONG_UNWIND if derivative_verdict == "LONG_UNWINDING" else ARCHETYPE_STRUCTURAL_BREAKDOWN
+            archetype = (
+                ARCHETYPE_BREAKDOWN_LONG_UNWIND
+                if derivative_verdict == "LONG_UNWINDING"
+                else ARCHETYPE_STRUCTURAL_BREAKDOWN
+            )
             deciding_factors.append(f"Structural breakdown with {rvol:.1f}x volume surge")
             if rrg_quadrant in ("LAGGING", "WEAKENING"):
                 deciding_factors.append(f"Parent sector ({sector_name}) in {rrg_quadrant} drag")
-            lessons_learned.append("Never average down into stocks in Lagging RRG sectors breaching institutional support levels.")
+            lessons_learned.append(
+                "Never average down into stocks in Lagging RRG sectors breaching institutional support levels."
+            )
         else:
             archetype = ARCHETYPE_EARNINGS_CATALYST_EXPANSION
-            deciding_factors.append(f"High-momentum expansion: +{chg:.1f}% with {rvol:.1f}x volume surge")
-            lessons_learned.append("Trade opening range continuation with trailing stops anchored to 5-min VWAP.")
+            deciding_factors.append(
+                f"High-momentum expansion: +{chg:.1f}% with {rvol:.1f}x volume surge"
+            )
+            lessons_learned.append(
+                "Trade opening range continuation with trailing stops anchored to 5-min VWAP."
+            )
 
         catalyst = "; ".join(deciding_factors[:2])
 
         from engine.precursor_radar import classify_symbol_segment
+
         segment = classify_symbol_segment(sym)
 
         return MoverCausalProfile(
@@ -508,7 +628,6 @@ class MoverAutopsyEngine:
 
         # Extract features for control stocks
         control_vol_dry_up = 0
-        control_squeeze = 0
         control_leading_sector = 0
         control_total = max(1, len(control_quotes))
 
@@ -557,7 +676,9 @@ class MoverAutopsyEngine:
 
         # Select top predictive precursors
         sorted_factors = sorted(snr_table.items(), key=lambda x: x[1], reverse=True)
-        top_precursors = [f"{k.replace('_', ' ').title()} (SNR: {v:+.2f})" for k, v in sorted_factors if v > 0.15]
+        top_precursors = [
+            f"{k.replace('_', ' ').title()} (SNR: {v:+.2f})" for k, v in sorted_factors if v > 0.15
+        ]
 
         return snr_table, top_precursors
 
@@ -574,9 +695,13 @@ class MoverAutopsyEngine:
         Persists results and recalibrates pattern learning weights.
         """
         date_str = target_date or datetime.now(IST).strftime("%Y-%m-%d")
-        logger.info(f"[MoverAutopsyEngine] Starting daily autopsy for {date_str} (segment={segment or 'ALL'})...")
+        logger.info(
+            f"[MoverAutopsyEngine] Starting daily autopsy for {date_str} (segment={segment or 'ALL'})..."
+        )
 
-        top_gainers_raw, top_losers_raw, control_raw = self.fetch_daily_movers_and_control(segment=segment, top_n=top_n)
+        top_gainers_raw, top_losers_raw, control_raw = self.fetch_daily_movers_and_control(
+            segment=segment, top_n=top_n
+        )
 
         gainers_profiles = [self.dissect_mover(g, direction="GAINER") for g in top_gainers_raw]
         losers_profiles = [self.dissect_mover(l, direction="LOSER") for l in top_losers_raw]
@@ -605,7 +730,9 @@ class MoverAutopsyEngine:
             market_regime=market_regime,
             gainers=gainers_profiles,
             losers=losers_profiles,
-            control_cohort=[{"symbol": c["symbol"], "change_pct": c["change_pct"]} for c in control_raw],
+            control_cohort=[
+                {"symbol": c["symbol"], "change_pct": c["change_pct"]} for c in control_raw
+            ],
             factor_snr=snr_table,
             top_predictive_precursors=top_precursors,
             traps_filtered=traps_count,

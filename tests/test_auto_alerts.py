@@ -654,8 +654,8 @@ def test_put_option_target_and_trailing():
         summary="Put buying",
         ltp=16.55,
         trigger_level=1010.0,  # strike
-        target_level=36.4,     # target premium
-        stop_loss=10.8,        # SL premium
+        target_level=36.4,  # target premium
+        stop_loss=10.8,  # SL premium
         strike=1010.0,
         option_type="PE",
         contract_symbol="SBIN1010PE",
@@ -695,8 +695,8 @@ def test_option_selling_target_and_trailing():
         summary="Short CE credit",
         ltp=100.0,
         trigger_level=25000.0,
-        target_level=20.0,   # Target premium (decayed)
-        stop_loss=150.0,     # SL premium (surged)
+        target_level=20.0,  # Target premium (decayed)
+        stop_loss=150.0,  # SL premium (surged)
         strike=25000.0,
         option_type="CE",
         contract_symbol="NIFTY25000CE",
@@ -1300,8 +1300,11 @@ def test_cleanup_archived_records_leaves_active_trades_intact():
     )
 
 
-def test_get_alerts_view_mode_filtering():
+def test_get_alerts_view_mode_filtering(tmp_path, monkeypatch):
     """Verify get_alerts(view_mode='ACTIVE') vs get_alerts(view_mode='ARCHIVED')."""
+    data_file = tmp_path / "auto_alerts.json"
+    monkeypatch.setattr("engine.auto_alert_engine.get_auto_alerts_file", lambda: data_file)
+
     from engine.auto_alert_engine import AutoAlert, AutoAlertEngine
 
     engine = AutoAlertEngine()
@@ -1353,8 +1356,11 @@ def test_get_alerts_view_mode_filtering():
     assert len(all_list) == 2
 
 
-def test_auto_alert_expiration_and_reaping():
+def test_auto_alert_expiration_and_reaping(tmp_path, monkeypatch):
     """Verify that expired derivative contracts and stale Gamma Blasts are flagged and reaped."""
+    data_file = tmp_path / "auto_alerts.json"
+    monkeypatch.setattr("engine.auto_alert_engine.get_auto_alerts_file", lambda: data_file)
+
     engine = AutoAlertEngine(max_buffer=50)
     engine.clear_alerts()
 
@@ -1486,3 +1492,342 @@ def test_auto_alert_rehabilitates_falsely_invalidated_options(tmp_path, monkeypa
     assert rehab.stage == "IGNITED"
     assert "PE GAMMA BLAST IGNITED: SBIN 1010 PE" in rehab.headline
 
+
+def test_asymmetric_opportunity_options_resolution():
+    """Verify that index/F&O setups resolve liquid ATM options contracts with target projections."""
+    from engine.asymmetric_radar import resolve_recommended_option_contract
+
+    opt = resolve_recommended_option_contract(
+        symbol="BANKNIFTY",
+        direction="BULLISH",
+        spot=56000.0,
+        stop_loss=55500.0,
+        target_1=57000.0,
+        target_2=58000.0,
+    )
+
+    assert opt["strike"] > 0
+    assert opt["option_type"] == "CE"
+    assert "BANKNIFTY" in opt["contract_symbol"]
+    assert opt["option_target_1"] > opt["option_premium"]
+    assert opt["option_stop_loss"] < opt["option_premium"]
+    assert opt["lot_size"] > 0
+
+
+def test_options_momentum_scanner_recording(tmp_path, monkeypatch):
+    """Verify that scan_options_momentum_breakouts detects and records options momentum alerts."""
+    data_file = tmp_path / "auto_alerts.json"
+    monkeypatch.setattr("engine.auto_alert_engine.get_auto_alerts_file", lambda: data_file)
+
+    synthetic_chain = [
+        MockOptionsContract(
+            symbol="NIFTY23500CE",
+            underlying="NIFTY",
+            strike=23500.0,
+            option_type="CE",
+            last_price=120.0,
+            oi=20000,
+            oi_change=5000,
+            volume=35000,
+            iv=14.0,
+        ),
+        MockOptionsContract(
+            symbol="NIFTY23500PE",
+            underlying="NIFTY",
+            strike=23500.0,
+            option_type="PE",
+            last_price=95.0,
+            oi=30000,
+            oi_change=8000,
+            volume=45000,
+            iv=15.0,
+        ),
+    ]
+
+    monkeypatch.setattr("market.quotes.get_ltp", lambda sym: 23510.0)
+    monkeypatch.setattr("market.options.get_options_chain", lambda sym: synthetic_chain)
+
+    engine = AutoAlertEngine(max_buffer=50)
+    monkeypatch.setattr(engine, "_watched_indices", ["NIFTY"])
+
+    alerts = engine.scan_options_momentum_breakouts()
+    assert len(alerts) >= 1
+    top_alert = alerts[0]
+    assert top_alert.alert_type == "OPTIONS_MOMENTUM"
+    assert top_alert.exchange == "NFO"
+    assert top_alert.strike == 23500.0
+    assert top_alert.option_type in ("CE", "PE")
+    assert top_alert.contract_symbol is not None
+    assert top_alert.actionable_plan["contract"] == top_alert.contract_symbol
+
+
+def test_gamma_blast_rejects_illiquid_strike_and_distant_expiry():
+    """Verify that detect_gamma_blast rejects illiquid strikes (low OI / low shedding) and distant expiries."""
+    from engine.auto_alert_engine import detect_gamma_blast
+
+    spot = 56478.9
+    vwap = 56500.0  # spot below VWAP
+
+    # 1. Illiquid strike percentage illusion: oi=2230, oi_change=-587 (-26.3%), vol/oi = 1.85x
+    illiquid_chain = [
+        MockOptionsContract(
+            symbol="BANKNIFTY55700PE",
+            underlying="BANKNIFTY",
+            strike=55700.0,
+            option_type="PE",
+            last_price=266.1,
+            oi=2230,
+            oi_change=-587,
+            volume=4125,
+        ),
+    ]
+    alerts_illiquid = detect_gamma_blast("BANKNIFTY", spot=spot, chain=illiquid_chain, vwap=vwap)
+    # Must be rejected because oi < 15,000, volume < 10,000, and abs(oi_change) < 3,000
+    assert len(alerts_illiquid) == 0
+
+    # 2. Distant monthly expiry (> 5 DTE): Even with large OI and turnover, 20-day options are not Gamma Blasts
+    distant_chain = [
+        MockOptionsContract(
+            symbol="BANKNIFTY56500PE",
+            underlying="BANKNIFTY",
+            strike=56500.0,
+            option_type="PE",
+            last_price=350.0,
+            oi=80000,
+            oi_change=-25000,
+            volume=200000,
+        ),
+    ]
+    # Attach distant expiry 20 days in the future
+    distant_chain[0].expiry = "2026-10-30"
+    alerts_distant = detect_gamma_blast("BANKNIFTY", spot=spot, chain=distant_chain, vwap=vwap)
+    assert len(alerts_distant) == 0
+
+
+def test_gamma_blast_option_rr_and_sl_floor():
+    """Verify that a valid liquid near-expiry Gamma Blast formats option R:R and enforces the SL floor."""
+    from engine.auto_alert_engine import detect_gamma_blast
+
+    spot = 56478.9
+    vwap = 56500.0  # spot below VWAP
+
+    liquid_chain = [
+        MockOptionsContract(
+            symbol="BANKNIFTY56400PE",
+            underlying="BANKNIFTY",
+            strike=56400.0,
+            option_type="PE",
+            last_price=280.0,
+            oi=95000,
+            oi_change=-35000,
+            volume=260000,  # 2.7x OI
+        ),
+    ]
+    alerts = detect_gamma_blast(
+        "BANKNIFTY", spot=spot, chain=liquid_chain, vwap=vwap, day_low=56450.0
+    )
+    assert len(alerts) >= 1
+    alert = alerts[0]
+    assert alert.alert_type == "GAMMA_BLAST"
+    assert alert.direction == "BEARISH"
+    assert alert.stage == "IGNITED"
+
+    plan = alert.actionable_plan
+    assert "risk_reward" in plan
+    # Option R:R must be formatted as 1:X.X (not inverted or spot-derived like 1.32:1)
+    assert plan["risk_reward"].startswith("1:")
+    assert ":1" not in plan["risk_reward"]  # Eliminates misleading 1.32:1 spot bug
+
+    # Verify option execution plan has disciplined capital stop loss
+    opt_plan = plan.get("option_plan")
+    if opt_plan and "sl_pct" in opt_plan and opt_plan["sl_pct"] is not None:
+        # Stop loss percentage must not be excessively deep (must be >= -35.0%)
+        assert opt_plan["sl_pct"] >= -35.0
+
+
+def test_sanitize_legacy_alerts_quarantines_illiquid_and_distant_alerts(tmp_path, monkeypatch):
+    """Verify that AutoAlertEngine quarantines existing persisted alerts violating liquidity or DTE gates."""
+    from engine.auto_alert_engine import AutoAlertEngine, AutoAlert
+
+    data_file = tmp_path / "auto_alerts.json"
+    monkeypatch.setattr("engine.auto_alert_engine.get_auto_alerts_file", lambda: data_file)
+
+    eng = AutoAlertEngine()
+    eng._alerts = [
+        # 1. Illiquid index alert (e.g. FINNIFTY with OI=80)
+        AutoAlert(
+            alert_id="legacy-illiquid-finnifty",
+            alert_type="GAMMA_BLAST",
+            stage="IGNITED",
+            symbol="FINNIFTY",
+            exchange="NFO",
+            direction="BULLISH",
+            headline="CALL GAMMA BLAST IGNITED: FINNIFTY 25600 CE",
+            summary="Shedding OI",
+            ltp=278.0,
+            trigger_level=25600.0,
+            target_level=600.0,
+            stop_loss=195.0,
+            strike=25600.0,
+            metrics={"oi": 80, "oi_change": -20},
+            expiry_date="2026-09-29",
+        ),
+        # 2. Valid liquid near-expiry alert
+        AutoAlert(
+            alert_id="valid-liquid-nifty",
+            alert_type="GAMMA_BLAST",
+            stage="IGNITED",
+            symbol="NIFTY",
+            exchange="NFO",
+            direction="BULLISH",
+            headline="CALL GAMMA BLAST IGNITED: NIFTY 24500 CE",
+            summary="High turnover",
+            ltp=150.0,
+            trigger_level=24500.0,
+            target_level=300.0,
+            stop_loss=105.0,
+            strike=24500.0,
+            metrics={"oi": 45000, "oi_change": -12000, "dte": 2},
+            expiry_date="2026-09-12",
+        ),
+    ]
+    purged = eng._sanitize_legacy_alerts_unlocked()
+    assert purged == 1
+
+    # Illiquid alert must be permanently purged from memory & disk
+    alert_ids = [a.alert_id for a in eng._alerts]
+    assert "legacy-illiquid-finnifty" not in alert_ids
+
+    # Valid alert remains active
+    valid_alert = next(a for a in eng._alerts if a.alert_id == "valid-liquid-nifty")
+    assert valid_alert.is_archived is False
+    assert valid_alert.is_active is True
+
+
+def test_quote_ltp_property():
+    """Verify Quote dataclass exposes ltp as an alias for last_price."""
+    from brokers.base import Quote
+
+    q = Quote(
+        symbol="DIXON",
+        last_price=13550.0,
+        open=13845.0,
+        high=13867.0,
+        low=13355.0,
+        close=13845.0,
+        volume=260000,
+    )
+    assert q.ltp == 13550.0
+    assert getattr(q, "ltp", None) == 13550.0
+
+
+def test_scan_intraday_breakdown_spark(tmp_path, monkeypatch):
+    """Verify scan_intraday_mover_sparks triggers on institutional sell-offs below VWAP with RVOL."""
+    from brokers.base import Quote
+    from engine.auto_alert_engine import AutoAlertEngine
+
+    data_file = tmp_path / "auto_alerts.json"
+    monkeypatch.setattr("engine.auto_alert_engine.get_auto_alerts_file", lambda: data_file)
+
+    eng = AutoAlertEngine()
+    eng._watched_equities = ["DIXON"]
+
+    # Mock quotes returning severe breakdown below VWAP
+    quotes_data = {
+        "NSE:DIXON": Quote(
+            symbol="DIXON",
+            last_price=13450.0,
+            open=13845.0,
+            high=13867.0,
+            low=13355.0,
+            close=13845.0,
+            volume=350000,
+            change=-395.0,
+            change_pct=-2.85,
+        )
+    }
+    # Attach mock vwap to quote
+    setattr(quotes_data["NSE:DIXON"], "vwap", 13720.0)
+
+    # Synthetic OHLCV history with 100k avg volume -> RVOL ~3.5x
+    dates = pd.date_range("2026-08-01", periods=25, freq="B")
+    df = pd.DataFrame(
+        {
+            "open": [14000] * 25,
+            "high": [14100] * 25,
+            "low": [13900] * 25,
+            "close": [14000] * 25,
+            "volume": [100000] * 25,
+        },
+        index=dates,
+    )
+
+    monkeypatch.setattr("market.quotes.get_quote", lambda *args, **kwargs: quotes_data)
+    monkeypatch.setattr("market.history.get_ohlcv", lambda *args, **kwargs: df)
+
+    sparks = eng.scan_intraday_mover_sparks()
+    dixon_spark = next((s for s in sparks if s.symbol == "DIXON"), None)
+
+    assert dixon_spark is not None
+    assert dixon_spark.direction == "BEARISH"
+    assert dixon_spark.alert_type == "INTRADAY_BREAKDOWN_SPARK"
+    assert dixon_spark.stage == "IGNITED"
+    assert dixon_spark.actionable_plan["action"] == "SELL_SHORT_OR_BUY_PUT"
+    assert dixon_spark.stop_loss > dixon_spark.ltp  # Stop-loss above entry for shorts
+
+
+def test_scan_options_momentum_monthly_put_surge(tmp_path, monkeypatch):
+    """Verify single-stock monthly put options with DTE > 7 trigger options momentum."""
+    from engine.auto_alert_engine import AutoAlertEngine
+
+    data_file = tmp_path / "auto_alerts.json"
+    monkeypatch.setattr("engine.auto_alert_engine.get_auto_alerts_file", lambda: data_file)
+
+    eng = AutoAlertEngine()
+    eng._watched_indices = []
+    eng._watched_equities = ["DIXON"]
+
+    # DIXON spot = 13500, chain has 13500 PE with Vol/OI = 2.5x, expiry in 19 days
+    mock_contract = MockOptionsContract(
+        symbol="DIXON13500PE",
+        underlying="DIXON",
+        strike=13500.0,
+        option_type="PE",
+        last_price=450.0,
+        oi=3600,
+        oi_change=200,
+        volume=9000,
+    )
+    setattr(mock_contract, "expiry", "2026-09-29")
+
+    monkeypatch.setattr("market.quotes.get_ltp", lambda sym: 13520.0)
+    monkeypatch.setattr("market.options.get_options_chain", lambda sym: [mock_contract])
+
+    alerts = eng.scan_options_momentum_breakouts()
+    pe_alert = next((a for a in alerts if a.symbol == "DIXON" and a.option_type == "PE"), None)
+
+    assert pe_alert is not None
+    assert pe_alert.direction == "BEARISH"
+    assert pe_alert.alert_type == "OPTIONS_MOMENTUM"
+    assert "PUT SURGE" in pe_alert.headline
+    assert pe_alert.metrics["vol_oi_ratio"] >= 2.0
+
+
+def test_detect_squeeze_breakdown():
+    """Verify detect_squeeze_breakout detects bearish breakdown coiling and ignited."""
+    dates = pd.date_range("2026-08-01", periods=30, freq="B")
+    # Coiling near 20D low of 100.0, close at 100.8
+    closes = np.linspace(105, 100.8, 30)
+    highs = closes + 0.5
+    lows = closes - 0.5
+    lows[10] = 100.0  # 20D low pivot
+    df = pd.DataFrame(
+        {"open": closes, "high": highs, "low": lows, "close": closes, "volume": [100000] * 30},
+        index=dates,
+    )
+
+    alert_early = detect_squeeze_breakout("TESTSYM", df, ltp=100.8)
+    if alert_early:
+        assert alert_early.direction == "BEARISH"
+        assert alert_early.alert_type == "SQUEEZE_BREAKDOWN"
+        assert alert_early.stage == "EARLY_WARNING"

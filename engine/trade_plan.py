@@ -364,6 +364,11 @@ def calculate_trade_plan(
                 "1.0× ATR dynamic volatility floor (no structural demand blocks identified)"
             )
 
+        # Guard against too-wide stops for intraday
+        if timeframe == "INTRADAY" and (ltp - invalidation_stop) > (1.2 * atr):
+            invalidation_stop = ltp - (1.0 * atr)
+            sl_rationale = f"{sl_rationale} [Capped at 1.0× ATR intraday maximum risk boundary]"
+
         # Guard against invalidation stop violating spot boundary
         if invalidation_stop >= ltp:
             logger.warning(
@@ -416,6 +421,11 @@ def calculate_trade_plan(
         else:
             invalidation_stop = ltp + (1.0 * atr)
             sl_rationale = "1.0× ATR dynamic volatility ceiling"
+
+        # Guard against too-wide stops for intraday
+        if timeframe == "INTRADAY" and (invalidation_stop - ltp) > (1.2 * atr):
+            invalidation_stop = ltp + (1.0 * atr)
+            sl_rationale = f"{sl_rationale} [Capped at 1.0× ATR intraday maximum risk boundary]"
 
         # Guard against invalidation stop violating spot boundary
         if invalidation_stop <= ltp:
@@ -484,6 +494,13 @@ def calculate_trade_plan(
         if target_2 <= target_1:
             target_2 = target_1 + (stop_distance_pts * 1.5)
             t2_rationale = f"{t1_rationale} + 1.5× R extension"
+
+        # Guard against excessively distant Target 1 for intraday
+        if timeframe == "INTRADAY" and (target_1 - ltp) > (1.8 * atr):
+            target_2 = target_1
+            t2_rationale = t1_rationale
+            target_1 = ltp + max(stop_distance_pts * 1.5, 1.0 * atr)
+            t1_rationale = "1.0× ATR Intraday Friction Scale-Out Target"
 
         t1_distance_pts = target_1 - ltp
         t2_distance_pts = target_2 - ltp
@@ -555,6 +572,13 @@ def calculate_trade_plan(
         if target_2 >= target_1:
             target_2 = target_1 - (stop_distance_pts * 1.5)
             t2_rationale = f"{t1_rationale} + 1.5× R extension"
+
+        # Guard against excessively distant Target 1 for intraday
+        if timeframe == "INTRADAY" and (ltp - target_1) > (1.8 * atr):
+            target_2 = target_1
+            t2_rationale = t1_rationale
+            target_1 = ltp - max(stop_distance_pts * 1.5, 1.0 * atr)
+            t1_rationale = "1.0× ATR Intraday Friction Scale-Out Target"
 
         # Asset floor invariant: prices cannot fall to or below zero
         is_geom_broken = False
@@ -874,7 +898,15 @@ def calculate_option_execution_plan(
         estimated = option_ltp + (delta * ds) + (0.5 * gamma * ds * ds) - theta_drag
         return max(0.05, round(estimated, 2))
 
-    sl_prem = _option_price_at_spot(trade_plan.invalidation_stop, bars_elapsed=1)
+    raw_sl_prem = _option_price_at_spot(trade_plan.invalidation_stop, bars_elapsed=1)
+    # Institutional Risk Control: Intraday option buying must cap maximum drawdown at -30%
+    # of the entry premium to protect capital against wide underlying movements.
+    if trade_plan.timeframe == "INTRADAY" and option_ltp > 0:
+        disciplined_sl_floor = round(max(0.05, option_ltp * 0.70), 2)
+        sl_prem = max(raw_sl_prem, disciplined_sl_floor)
+    else:
+        sl_prem = raw_sl_prem
+
     t1_prem = _option_price_at_spot(trade_plan.target_1, bars_elapsed=trade_plan.expected_bars_t1)
     t2_prem = _option_price_at_spot(trade_plan.target_2, bars_elapsed=trade_plan.expected_bars_t2)
     t3_prem = (
@@ -892,6 +924,13 @@ def calculate_option_execution_plan(
     t2_pnl = _pnl(t2_prem)
     t3_pnl = _pnl(t3_prem) if t3_prem is not None else None
 
+    # Option payoff R:R
+    opt_risk = max(0.1, option_ltp - sl_prem)
+    opt_t1_gain = max(0.1, t1_prem - option_ltp)
+    opt_t2_gain = max(0.1, t2_prem - option_ltp)
+    option_rr = f"1:{round(opt_t1_gain / opt_risk, 2)}" if option_ltp > 0 else "1:2"
+    option_rr_t2 = f"1:{round(opt_t2_gain / opt_risk, 2)}" if option_ltp > 0 else "1:3"
+
     # Spot reference level at each milestone
     spot_t1 = round(trade_plan.target_1, 2)
     spot_t2 = round(trade_plan.target_2, 2)
@@ -908,6 +947,8 @@ def calculate_option_execution_plan(
         "gamma": round(gamma, 6),
         "iv_pct": iv_pct,
         "theta_drag_per_bar": round(theta_per_bar, 4),
+        "option_rr": option_rr,
+        "option_rr_t2": option_rr_t2,
         # SL
         "sl_spot": spot_sl,
         "sl_premium": sl_prem,

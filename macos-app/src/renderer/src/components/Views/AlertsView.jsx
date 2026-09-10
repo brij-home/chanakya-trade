@@ -173,6 +173,20 @@ const AUTO_TYPE_STYLE = {
     bg: 'rgba(245, 158, 11, 0.12)',
     border: 'rgba(245, 158, 11, 0.35)',
   },
+  OPTIONS_MOMENTUM: {
+    icon: '🚀',
+    label: 'OPTIONS MOMENTUM',
+    color: 'var(--color-gold)',
+    bg: 'rgba(245, 166, 35, 0.12)',
+    border: 'rgba(245, 166, 35, 0.35)',
+  },
+  ASYMMETRIC_OPPORTUNITY: {
+    icon: '🎯',
+    label: 'ASYMMETRIC R:R',
+    color: '#38bdf8',
+    bg: 'rgba(56, 189, 248, 0.12)',
+    border: 'rgba(56, 189, 248, 0.35)',
+  },
 }
 
 /**
@@ -904,7 +918,8 @@ const AutoAlertCard = memo(function AutoAlertCard({
     alert.strike ||
     alert.contract_symbol ||
     alert.expiry_date ||
-    alert.alert_type === 'GAMMA_BLAST'
+    alert.alert_type === 'GAMMA_BLAST' ||
+    alert.alert_type === 'OPTIONS_MOMENTUM'
   )
 
   const rawStrike = alert.strike || alert.metrics?.strike
@@ -1905,7 +1920,7 @@ function AlertsViewInner({ onOpenOrderTicket }) {
   const loadAutoAlerts = useCallback(async (isInitial = false) => {
     if (isInitial) setAutoLoading(true)
     try {
-      const res = await callRef.current('/skills/alerts/auto/list', { view_mode: 'ALL' })
+      const res = await callRef.current('/skills/alerts/auto/list', { view_mode: autoViewMode })
       const fresh = res?.data ?? res ?? []
       setAutoAlerts((prev) => mergeAlertsInPlace(prev, fresh))
     } catch (_) {
@@ -2243,8 +2258,17 @@ function AlertsViewInner({ onOpenOrderTicket }) {
   const archivedCount = autoAlerts.length - activeCount
   const expiredCount = autoAlerts.filter((a) => a.is_expired || a.stage === 'EXPIRED').length
 
-  // Invalidation count for banner
-  const invalidatedAlerts = autoAlerts.filter((a) => a.is_invalidated || a.stage === 'INVALIDATED')
+  // Invalidation count for banner (filter to recent invalidations within the last 60 mins to avoid zombie warnings)
+  const invalidatedAlerts = autoAlerts.filter((a) => {
+    if (!a.is_invalidated && a.stage !== 'INVALIDATED') return false
+    if (a.invalidated_at) {
+      try {
+        const invTime = new Date(a.invalidated_at.replace(' IST', '')).getTime()
+        if (!isNaN(invTime) && (Date.now() - invTime) > 60 * 60 * 1000) return false
+      } catch (_) {}
+    }
+    return true
+  })
   const invalidatedCount = invalidatedAlerts.length
 
   // Deduplicate invalidated symbols to prevent repetitive "MANKIND, MANKIND" in the banner
@@ -2289,13 +2313,24 @@ function AlertsViewInner({ onOpenOrderTicket }) {
 
       // 4. Instrument Type Filter (Derivatives vs Cash Equity)
       if (selectedType !== 'ALL') {
+        const cleanSym = a.symbol?.replace(/^(NSE|BSE|MCX|NFO):/, '').trim().toUpperCase() || ''
+        const isIndex = a.segment === 'INDEX' || a.metrics?.segment === 'INDEX' || a.actionable_plan?.segment === 'INDEX' || ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'SENSEX', 'BANKEX'].includes(cleanSym)
+        const isFut = Boolean(
+          a.contract_symbol?.toUpperCase().includes('FUT') ||
+          a.symbol?.toUpperCase().includes('FUT') ||
+          a.derivative_type === 'FUT' ||
+          a.alert_type === 'FUTURES'
+        )
         const isDeriv = Boolean(
+          isIndex ||
+          isFut ||
           a.contract_symbol ||
           a.option_type ||
           a.strike ||
-          a.derivative_type === 'FUT' ||
+          a.expiry_date ||
           a.alert_type === 'GAMMA_BLAST' ||
-          a.alert_type === 'FUTURES'
+          a.alert_type === 'OPTIONS_MOMENTUM' ||
+          (a.segment === 'FNO' && (a.option_type || a.strike))
         )
         if (selectedType === 'DERIVATIVE' && !isDeriv) return false
         if (selectedType === 'CASH' && isDeriv) return false
@@ -2383,6 +2418,8 @@ function AlertsViewInner({ onOpenOrderTicket }) {
     const equity = []
     for (const item of groupedAutoAlerts) {
       const alt = item.alert
+      const cleanSym = alt.symbol?.replace(/^(NSE|BSE|MCX|NFO):/, '').trim().toUpperCase() || ''
+      const isIndex = alt.segment === 'INDEX' || alt.metrics?.segment === 'INDEX' || alt.actionable_plan?.segment === 'INDEX' || ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'SENSEX', 'BANKEX'].includes(cleanSym)
       const isFut = Boolean(
         alt.contract_symbol?.toUpperCase().includes('FUT') ||
         alt.symbol?.toUpperCase().includes('FUT') ||
@@ -2390,12 +2427,14 @@ function AlertsViewInner({ onOpenOrderTicket }) {
         alt.alert_type === 'FUTURES'
       )
       const isDeriv = Boolean(
+        isIndex ||
         isFut ||
         alt.option_type ||
         alt.strike ||
         alt.contract_symbol ||
         alt.expiry_date ||
-        alt.alert_type === 'GAMMA_BLAST'
+        alt.alert_type === 'GAMMA_BLAST' ||
+        alt.alert_type === 'OPTIONS_MOMENTUM'
       )
       if (isDeriv) {
         fno.push(item)

@@ -58,7 +58,204 @@ def _extract_price(obj: Any, *attr_names: str) -> float:
                     return f
             except (ValueError, TypeError):
                 pass
-    return 0.0
+
+
+def _compute_atr(df: Optional[pd.DataFrame], ltp: float, period: int = 14) -> float:
+    """Computes 14-period ATR from OHLCV DataFrame with fallback to 1.5% daily range proxy."""
+    if df is not None and len(df) >= 5:
+        try:
+            high = (
+                df["high"]
+                if "high" in df.columns
+                else (df["High"] if "High" in df.columns else df["close"])
+            )
+            low = (
+                df["low"]
+                if "low" in df.columns
+                else (df["Low"] if "Low" in df.columns else df["close"])
+            )
+            close = df["close"] if "close" in df.columns else df["Close"]
+            tr1 = high - low
+            tr2 = (high - close.shift(1)).abs()
+            tr3 = (low - close.shift(1)).abs()
+            tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+            atr_series = tr.rolling(min(period, len(tr))).mean().dropna()
+            if len(atr_series) > 0:
+                val = float(atr_series.iloc[-1])
+                if val > 0:
+                    return round(val, 2)
+        except Exception:
+            pass
+    return round(ltp * 0.015, 2) if ltp > 0 else 1.0
+
+
+def _enforce_monotonic_trade_levels(
+    direction: str,
+    ltp: float,
+    raw_sl: float,
+    target_1: float,
+    target_2: float,
+    target_moonshot: float,
+    atr: float,
+) -> tuple[float, float, float, float, float, float, str]:
+    """
+    Enforces strict mathematical invariants for Asymmetric setups:
+    1. Volatility noise floor: SL distance >= max(0.85 * ATR, 1.5% of LTP) to prevent micro-whipsaws.
+    2. Strict Monotonic Invariant:
+       - LONG:  SL < Entry_Min <= Entry_LTP < Target_1 < Target_2 < Moonshot
+       - SHORT: SL > Entry_Max >= Entry_LTP > Target_1 > Target_2 > Moonshot
+    3. Guarantees Stop-Loss sits strictly outside the recommended entry range.
+    Returns: (sl_price, risk_pts, t1_price, t2_price, moonshot_price, rr_ratio, entry_range)
+    """
+    min_noise_buffer = max(1.0, round(max(0.85 * atr, ltp * 0.015), 2))
+    is_bullish = direction.upper() in ("BULLISH", "BUY", "LONG")
+
+    if is_bullish:
+        raw_risk = ltp - raw_sl if raw_sl > 0 else min_noise_buffer
+        risk_pts = round(max(raw_risk, min_noise_buffer), 2)
+        sl_price = round(ltp - risk_pts, 2)
+
+        # Monotonic Targets: T1 >= ltp + 1.8R, T2 >= T1 + 1.8R, Moonshot >= T2 + 2.0R
+        t1 = round(max(target_1, ltp + 1.8 * risk_pts), 2)
+        t2 = round(max(target_2, t1 + 1.8 * risk_pts, ltp + 3.8 * risk_pts), 2)
+        moonshot = round(max(target_moonshot, t2 + 2.0 * risk_pts, ltp + 6.0 * risk_pts), 2)
+
+        # Entry range: lower bound must be STRICTLY above sl_price
+        entry_lower = round(max(sl_price + max(0.5, 0.20 * atr), ltp * 0.995), 1)
+        entry_upper = round(max(entry_lower + 1.0, ltp * 1.008), 1)
+        entry_range = f"₹{entry_lower:,.1f} – ₹{entry_upper:,.1f}"
+
+        rr_ratio = round((t2 - ltp) / max(0.1, risk_pts), 1)
+    else:
+        raw_risk = raw_sl - ltp if raw_sl > 0 else min_noise_buffer
+        risk_pts = round(max(raw_risk, min_noise_buffer), 2)
+        sl_price = round(ltp + risk_pts, 2)
+
+        t1 = round(
+            min(target_1 if target_1 > 0 else (ltp - 1.8 * risk_pts), ltp - 1.8 * risk_pts), 2
+        )
+        t2 = round(
+            min(
+                target_2 if target_2 > 0 else (t1 - 1.8 * risk_pts),
+                t1 - 1.8 * risk_pts,
+                ltp - 3.8 * risk_pts,
+            ),
+            2,
+        )
+        moonshot = round(
+            min(
+                target_moonshot if target_moonshot > 0 else (t2 - 2.0 * risk_pts),
+                t2 - 2.0 * risk_pts,
+                ltp - 6.0 * risk_pts,
+            ),
+            2,
+        )
+
+        entry_upper = round(min(sl_price - max(0.5, 0.20 * atr), ltp * 1.005), 1)
+        entry_lower = round(min(entry_upper - 1.0, ltp * 0.992), 1)
+        entry_range = f"₹{entry_lower:,.1f} – ₹{entry_upper:,.1f}"
+
+        rr_ratio = round((ltp - t2) / max(0.1, risk_pts), 1)
+
+    return sl_price, risk_pts, t1, t2, moonshot, rr_ratio, entry_range
+
+
+def resolve_recommended_option_contract(
+    symbol: str,
+    direction: str,
+    spot: float,
+    stop_loss: float = 0.0,
+    target_1: float = 0.0,
+    target_2: float = 0.0,
+) -> dict[str, Any]:
+    """
+    Resolves the nearest liquid ATM/near-OTM options contract for an underlying index or F&O stock,
+    calculating entry premium, option target 1, target 2, and stop-loss levels.
+    """
+    from market.options import get_options_chain
+    from engine.position_sizer import get_lot_size
+
+    clean_sym = symbol.upper().replace("NSE:", "").replace("NFO:", "").strip()
+    opt_type = "CE" if direction.upper() in ("BULLISH", "BUY", "LONG") else "PE"
+    lot_sz = get_lot_size(clean_sym)
+
+    chain = get_options_chain(clean_sym)
+    contracts = [c for c in chain if getattr(c, "option_type", "") == opt_type] if chain else []
+
+    if contracts:
+        # Group by expiry and pick nearest expiry
+        expiries = sorted(list({c.expiry for c in contracts if getattr(c, "expiry", "")}))
+        nearest_exp = expiries[0] if expiries else None
+
+        # Filter contracts for nearest expiry
+        exp_contracts = (
+            [c for c in contracts if getattr(c, "expiry", "") == nearest_exp]
+            if nearest_exp
+            else contracts
+        )
+
+        # Filter for liquid contracts (preventing selection of zero-liquidity ghost strikes)
+        is_index = clean_sym in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX")
+        min_oi_req = 5000 if is_index else 200
+        liquid_exp_contracts = [
+            c
+            for c in exp_contracts
+            if getattr(c, "oi", 0) >= min_oi_req and getattr(c, "last_price", 0.0) > 0
+        ]
+        chosen_pool = liquid_exp_contracts if liquid_exp_contracts else exp_contracts
+
+        # Select ATM strike closest to spot
+        best_contract = min(chosen_pool, key=lambda c: abs(c.strike - spot))
+        strike = float(best_contract.strike)
+        opt_ltp = float(
+            getattr(best_contract, "last_price", 0.0) or getattr(best_contract, "ltp", 0.0) or 0.0
+        )
+        contract_sym = getattr(best_contract, "symbol", f"{clean_sym}{int(strike)}{opt_type}")
+        expiry_date = getattr(best_contract, "expiry", nearest_exp)
+    else:
+        # Synthetic fallback based on canonical index strike steps
+        step = 100 if "BANK" in clean_sym else 50
+        strike = float(round(spot / step) * step)
+        opt_ltp = round(spot * 0.015, 1)  # ~1.5% ATM premium proxy
+        contract_sym = f"{clean_sym}{int(strike)}{opt_type}"
+        expiry_date = None
+
+    # Estimate option targets based on delta (~0.5 ATM delta)
+    delta = 0.50 if opt_type == "CE" else -0.50
+    spot_move_t1 = (
+        (target_1 - spot) if target_1 > 0 else (spot * 0.01 if opt_type == "CE" else -spot * 0.01)
+    )
+    spot_move_t2 = (
+        (target_2 - spot) if target_2 > 0 else (spot * 0.02 if opt_type == "CE" else -spot * 0.02)
+    )
+    spot_move_sl = (
+        (stop_loss - spot)
+        if stop_loss > 0
+        else (-spot * 0.007 if opt_type == "CE" else spot * 0.007)
+    )
+
+    opt_gain_t1 = delta * spot_move_t1
+    opt_gain_t2 = delta * spot_move_t2
+    opt_loss_sl = delta * spot_move_sl
+
+    opt_t1 = round(max(0.05, opt_ltp + opt_gain_t1), 2)
+    opt_t2 = round(max(0.05, opt_ltp + opt_gain_t2), 2)
+    opt_sl = round(max(0.05, opt_ltp + opt_loss_sl), 2)
+    # Institutional Risk Control: Cap max option loss at -30% of entry premium
+    if opt_ltp > 0:
+        opt_sl = max(opt_sl, round(max(0.05, opt_ltp * 0.70), 2))
+
+    return {
+        "strike": strike,
+        "option_type": opt_type,
+        "contract_symbol": contract_sym,
+        "expiry_date": expiry_date,
+        "option_premium": opt_ltp,
+        "option_target_1": opt_t1,
+        "option_target_2": opt_t2,
+        "option_stop_loss": opt_sl,
+        "lot_size": lot_sz,
+    }
 
 
 @dataclass
@@ -95,6 +292,17 @@ class AsymmetricOpportunity:
     profit_rule: str = ""
     metrics: dict[str, Any] = field(default_factory=dict)
     created_at: str = ""
+
+    # Derivative & Option Execution Mapping
+    strike: Optional[float] = None
+    option_type: Optional[str] = None  # "CE" | "PE"
+    contract_symbol: Optional[str] = None
+    expiry_date: Optional[str] = None
+    option_premium: Optional[float] = None
+    option_target_1: Optional[float] = None
+    option_target_2: Optional[float] = None
+    option_stop_loss: Optional[float] = None
+    lot_size: Optional[int] = None
 
     # Compatibility Aliases
     moonshot_target: float = 0.0
@@ -197,7 +405,11 @@ class AsymmetricOpportunityRadar:
 
             quote = get_quote(f"NSE:{clean_sym}")
         if isinstance(quote, dict):
-            quote = quote.get(f"NSE:{clean_sym}") or quote.get(clean_sym) or next(iter(quote.values()), None)
+            quote = (
+                quote.get(f"NSE:{clean_sym}")
+                or quote.get(clean_sym)
+                or next(iter(quote.values()), None)
+            )
         if not quote:
             return None
 
@@ -255,23 +467,34 @@ class AsymmetricOpportunityRadar:
             return None  # Weak close / upper wick selling rejection
 
         # 4. Asymmetric Trade Plan Calculation
-        # Stop-loss anchored right below lowest of last 3 bars or 10-EMA
+        # Stop-loss anchored below confirmed base floor / 10-EMA, guarded by ATR volatility floor
+        atr = _compute_atr(df, ltp)
         base_floor = min(float(np.min(lows[-3:])), ema10[-1])
-        sl_price = round(min(base_floor * 0.995, ltp * 0.985), 2)
-        risk_pts = max(1.0, ltp - sl_price)
+        raw_sl = round(min(base_floor * 0.995, ltp * 0.985), 2)
+        raw_risk = max(1.0, ltp - raw_sl)
+        raw_t1 = round(ltp + 2.0 * raw_risk, 2)
+        raw_t2 = round(ltp + 4.0 * raw_risk, 2)
+        raw_moonshot = round(ltp + 6.5 * raw_risk, 2)
 
-        t1_price = round(ltp + 2.0 * risk_pts, 2)
-        t2_price = round(ltp + 4.0 * risk_pts, 2)
-        moonshot_price = round(ltp + 6.5 * risk_pts, 2)
+        sl_price, risk_pts, t1_price, t2_price, moonshot_price, rr_ratio, entry_range_str = (
+            _enforce_monotonic_trade_levels(
+                direction="BULLISH",
+                ltp=ltp,
+                raw_sl=raw_sl,
+                target_1=raw_t1,
+                target_2=raw_t2,
+                target_moonshot=raw_moonshot,
+                atr=atr,
+            )
+        )
 
-        rr_ratio = round((t2_price - ltp) / risk_pts, 1)
         if rr_ratio < self.min_rr:
             return None
 
         confluences = [
             f"Pocket Pivot Volume: {cur_vol:,.0f} > 10D max down-vol ({max_down_vol:,.0f})",
-            f"Constructive Base Coiling: within {min(dist_ema10, dist_sma50)*100:.1f}% of 10-EMA/50-SMA anchor",
-            f"Bullish Upper Close: {(cur_close - cur_low)/spread*100:.0f}% of daily range",
+            f"Constructive Base Coiling: within {min(dist_ema10, dist_sma50) * 100:.1f}% of 10-EMA/50-SMA anchor",
+            f"Bullish Upper Close: {(cur_close - cur_low) / spread * 100:.0f}% of daily range",
         ]
 
         # Calculate Turnover & Segment
@@ -282,18 +505,34 @@ class AsymmetricOpportunityRadar:
 
         score = min(96, int(80 + (cur_vol / max_down_vol) * 5))
 
+        # Attach recommended option execution contract for F&O/Index leaders
+        opt_info = None
+        if seg in ("INDEX", "FNO"):
+            opt_info = resolve_recommended_option_contract(
+                symbol=clean_sym,
+                direction="BULLISH",
+                spot=ltp,
+                stop_loss=sl_price,
+                target_1=t1_price,
+                target_2=t2_price,
+            )
+
+        setup_lbl = "⚡ Pocket Pivot Base Accumulation"
+        if opt_info and opt_info.get("contract_symbol"):
+            setup_lbl = f"{setup_lbl} [{opt_info['contract_symbol']}]"
+
         return AsymmetricOpportunity(
             opportunity_id=f"asym-pp-{clean_sym}-{uuid.uuid4().hex[:6]}",
             symbol=clean_sym,
-            exchange="NSE",
+            exchange="NFO" if seg == "INDEX" else "NSE",
             setup_type="POCKET_PIVOT",
-            setup_label="⚡ Pocket Pivot Base Accumulation",
+            setup_label=setup_lbl,
             segment=seg,
             direction="BULLISH",
             conviction_score=score,
             ltp=ltp,
             entry_price=ltp,
-            entry_range=f"₹{round(ltp * 0.995, 1):,.1f} – ₹{round(ltp * 1.008, 1):,.1f}",
+            entry_range=entry_range_str,
             stop_loss=sl_price,
             target_1=t1_price,
             target_2=t2_price,
@@ -307,7 +546,20 @@ class AsymmetricOpportunityRadar:
             when_to_buy=f"Enter inside base range on ask while holding above 10-EMA (₹{ema10[-1]:,.1f}).",
             when_to_wait=f"DO NOT CHASE if stock opens > 1.5% higher above ₹{round(ltp * 1.015, 1):,.1f}.",
             profit_rule=f"Scale 50% at T1 (₹{t1_price:,.1f}), move SL to Breakeven, hold runner for T2 (₹{t2_price:,.1f}).",
-            metrics={"turnover_cr": turnover_cr, "vol_ratio": round(cur_vol / max_down_vol, 2)},
+            metrics={
+                "turnover_cr": turnover_cr,
+                "vol_ratio": round(cur_vol / max_down_vol, 2),
+                "atr_14d": round(atr, 2),
+            },
+            strike=opt_info["strike"] if opt_info else None,
+            option_type=opt_info["option_type"] if opt_info else None,
+            contract_symbol=opt_info["contract_symbol"] if opt_info else None,
+            expiry_date=opt_info["expiry_date"] if opt_info else None,
+            option_premium=opt_info["option_premium"] if opt_info else None,
+            option_target_1=opt_info["option_target_1"] if opt_info else None,
+            option_target_2=opt_info["option_target_2"] if opt_info else None,
+            option_stop_loss=opt_info["option_stop_loss"] if opt_info else None,
+            lot_size=opt_info["lot_size"] if opt_info else None,
             created_at=datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST"),
         )
 
@@ -337,7 +589,11 @@ class AsymmetricOpportunityRadar:
 
             quote = get_quote(f"NSE:{clean_sym}")
         if isinstance(quote, dict):
-            quote = quote.get(f"NSE:{clean_sym}") or quote.get(clean_sym) or next(iter(quote.values()), None)
+            quote = (
+                quote.get(f"NSE:{clean_sym}")
+                or quote.get(clean_sym)
+                or next(iter(quote.values()), None)
+            )
         if not quote:
             return None
 
@@ -378,16 +634,30 @@ class AsymmetricOpportunityRadar:
             return None
 
         # Asymmetric risk levels
-        sl_price = round(vwap * 0.985 if vwap > 0 else ltp * 0.982, 2)
-        risk_pts = max(1.0, ltp - sl_price)
+        atr = _compute_atr(df, ltp)
+        raw_sl = round(vwap * 0.985 if vwap > 0 else ltp * 0.982, 2)
+        raw_risk = max(1.0, ltp - raw_sl)
+        raw_t1 = round(ltp + 2.0 * raw_risk, 2)
+        raw_t2 = round(ltp + 4.2 * raw_risk, 2)
+        raw_moonshot = round(ltp + 7.0 * raw_risk, 2)
 
-        t1_price = round(ltp + 2.0 * risk_pts, 2)
-        t2_price = round(ltp + 4.2 * risk_pts, 2)
-        moonshot_price = round(ltp + 7.0 * risk_pts, 2)
+        sl_price, risk_pts, t1_price, t2_price, moonshot_price, rr_ratio, entry_range_str = (
+            _enforce_monotonic_trade_levels(
+                direction="BULLISH",
+                ltp=ltp,
+                raw_sl=raw_sl,
+                target_1=raw_t1,
+                target_2=raw_t2,
+                target_moonshot=raw_moonshot,
+                atr=atr,
+            )
+        )
 
-        rr_ratio = round((t2_price - ltp) / risk_pts, 1)
-
-        setup_name = "🔥 F&O Pre-Ban Short Squeeze" if is_pre_ban else "🚀 F&O Ban Exit Institutional Ignition"
+        setup_name = (
+            "🔥 F&O Pre-Ban Short Squeeze"
+            if is_pre_ban
+            else "🚀 F&O Ban Exit Institutional Ignition"
+        )
         confluences = [
             f"MWPL at {mwpl_pct:.1f}% (Bears prohibited from adding fresh short hedges)",
             "Price holding comfortably above intraday VWAP with expanding turnover",
@@ -395,6 +665,17 @@ class AsymmetricOpportunityRadar:
         ]
 
         score = 88 if is_pre_ban else 84
+
+        opt_info = resolve_recommended_option_contract(
+            symbol=clean_sym,
+            direction="BULLISH",
+            spot=ltp,
+            stop_loss=sl_price,
+            target_1=t1_price,
+            target_2=t2_price,
+        )
+        if opt_info and opt_info.get("contract_symbol"):
+            setup_name = f"{setup_name} [{opt_info['contract_symbol']}]"
 
         return AsymmetricOpportunity(
             opportunity_id=f"asym-mwpl-{clean_sym}-{uuid.uuid4().hex[:6]}",
@@ -407,7 +688,7 @@ class AsymmetricOpportunityRadar:
             conviction_score=score,
             ltp=ltp,
             entry_price=ltp,
-            entry_range=f"₹{round(ltp * 0.997, 1):,.1f} – ₹{round(ltp * 1.006, 1):,.1f}",
+            entry_range=entry_range_str,
             stop_loss=sl_price,
             target_1=t1_price,
             target_2=t2_price,
@@ -422,6 +703,15 @@ class AsymmetricOpportunityRadar:
             when_to_wait="DO NOT CHASE if stock opens > 2.0% higher without initial retest.",
             profit_rule=f"Lock 50% at T1 (₹{t1_price:,.1f}), trail stop to cost, let runner target T2 (₹{t2_price:,.1f}).",
             metrics={"mwpl_pct": mwpl_pct, "is_pre_ban": is_pre_ban},
+            strike=opt_info["strike"] if opt_info else None,
+            option_type=opt_info["option_type"] if opt_info else None,
+            contract_symbol=opt_info["contract_symbol"] if opt_info else None,
+            expiry_date=opt_info["expiry_date"] if opt_info else None,
+            option_premium=opt_info["option_premium"] if opt_info else None,
+            option_target_1=opt_info["option_target_1"] if opt_info else None,
+            option_target_2=opt_info["option_target_2"] if opt_info else None,
+            option_stop_loss=opt_info["option_stop_loss"] if opt_info else None,
+            lot_size=opt_info["lot_size"] if opt_info else None,
             created_at=datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST"),
         )
 
@@ -444,7 +734,11 @@ class AsymmetricOpportunityRadar:
 
             quote = get_quote(f"NSE:{clean_sym}")
         if isinstance(quote, dict):
-            quote = quote.get(f"NSE:{clean_sym}") or quote.get(clean_sym) or next(iter(quote.values()), None)
+            quote = (
+                quote.get(f"NSE:{clean_sym}")
+                or quote.get(clean_sym)
+                or next(iter(quote.values()), None)
+            )
         if not quote:
             return None
 
@@ -460,7 +754,6 @@ class AsymmetricOpportunityRadar:
             return None
 
         closes = df["close"].values
-        highs = df["high"].values
         lows = df["low"].values
         opens = df["open"].values
 
@@ -508,40 +801,68 @@ class AsymmetricOpportunityRadar:
             pass
 
         # 5. Asymmetric Levels
-        sl_price = round(min(lows[-1] * 0.992, cur_ema200 * 0.985), 2)
-        risk_pts = max(1.0, ltp - sl_price)
+        atr = _compute_atr(df, ltp)
+        # Anchor stop below prior established daily swing or 200-EMA
+        # Use lows[-2] if available to avoid unconfirmed current forming intraday bar
+        ref_low = float(lows[-2]) if len(lows) >= 2 else float(lows[-1])
+        raw_sl = round(min(ref_low * 0.992, cur_ema200 * 0.985), 2)
+        raw_risk = max(1.0, ltp - raw_sl)
+        raw_t1 = round(max(cur_sma50, ltp + 2.0 * raw_risk), 2)
+        raw_t2 = round(ltp + 4.0 * raw_risk, 2)
+        raw_moonshot = round(ltp + 6.0 * raw_risk, 2)
 
-        # Target 1: 50-SMA Mean Reversion (+2R)
-        t1_price = round(max(cur_sma50, ltp + 2.0 * risk_pts), 2)
-        # Target 2: Prior Swing High (+4R)
-        t2_price = round(ltp + 4.0 * risk_pts, 2)
-        moonshot_price = round(ltp + 6.0 * risk_pts, 2)
+        sl_price, risk_pts, t1_price, t2_price, moonshot_price, rr_ratio, entry_range_str = (
+            _enforce_monotonic_trade_levels(
+                direction="BULLISH",
+                ltp=ltp,
+                raw_sl=raw_sl,
+                target_1=raw_t1,
+                target_2=raw_t2,
+                target_moonshot=raw_moonshot,
+                atr=atr,
+            )
+        )
 
-        rr_ratio = round((t2_price - ltp) / risk_pts, 1)
         if rr_ratio < self.min_rr:
             return None
 
         seg = classify_symbol_segment(clean_sym)
         confluences = [
-            f"200-EMA Institutional Floor: Trading within {dist_200*100:.1f}% of major 200-EMA anchor",
+            f"200-EMA Institutional Floor: Trading within {dist_200 * 100:.1f}% of major 200-EMA anchor",
             f"14-Day RSI Oversold Climax: {cur_rsi:.1f} (Rubber-band stretched to extreme)",
             "Bullish absorption hammer printed with long lower rejection shadow",
         ]
 
         score = min(94, int(78 + (36.0 - cur_rsi) * 2))
 
+        # Attach recommended option execution contract for F&O/Index leaders
+        opt_info = None
+        if seg in ("INDEX", "FNO"):
+            opt_info = resolve_recommended_option_contract(
+                symbol=clean_sym,
+                direction="BULLISH",
+                spot=ltp,
+                stop_loss=sl_price,
+                target_1=t1_price,
+                target_2=t2_price,
+            )
+
+        setup_lbl = "🧲 Rubber Band 200-EMA Deep Value"
+        if opt_info and opt_info.get("contract_symbol"):
+            setup_lbl = f"{setup_lbl} [{opt_info['contract_symbol']}]"
+
         return AsymmetricOpportunity(
             opportunity_id=f"asym-200ema-{clean_sym}-{uuid.uuid4().hex[:6]}",
             symbol=clean_sym,
-            exchange="NSE",
+            exchange="NFO" if seg == "INDEX" else "NSE",
             setup_type="RUBBER_BAND_200EMA",
-            setup_label="🧲 Rubber Band 200-EMA Deep Value",
+            setup_label=setup_lbl,
             segment=seg,
             direction="BULLISH",
             conviction_score=score,
             ltp=ltp,
             entry_price=ltp,
-            entry_range=f"₹{round(ltp * 0.995, 1):,.1f} – ₹{round(ltp * 1.008, 1):,.1f}",
+            entry_range=entry_range_str,
             stop_loss=sl_price,
             target_1=t1_price,
             target_2=t2_price,
@@ -555,7 +876,20 @@ class AsymmetricOpportunityRadar:
             when_to_buy=f"Enter near 200-EMA (₹{cur_ema200:,.1f}) on lower-wick absorption.",
             when_to_wait="DO NOT CHASE if price re-tests below 200-EMA without bouncing.",
             profit_rule=f"Book 50% at 50-SMA T1 (₹{t1_price:,.1f}), move SL to Breakeven, hold runner for T2 (₹{t2_price:,.1f}).",
-            metrics={"rsi": round(cur_rsi, 1), "ema200": round(cur_ema200, 2)},
+            metrics={
+                "rsi": round(cur_rsi, 1),
+                "ema200": round(cur_ema200, 2),
+                "atr_14d": round(atr, 2),
+            },
+            strike=opt_info["strike"] if opt_info else None,
+            option_type=opt_info["option_type"] if opt_info else None,
+            contract_symbol=opt_info["contract_symbol"] if opt_info else None,
+            expiry_date=opt_info["expiry_date"] if opt_info else None,
+            option_premium=opt_info["option_premium"] if opt_info else None,
+            option_target_1=opt_info["option_target_1"] if opt_info else None,
+            option_target_2=opt_info["option_target_2"] if opt_info else None,
+            option_stop_loss=opt_info["option_stop_loss"] if opt_info else None,
+            lot_size=opt_info["lot_size"] if opt_info else None,
             created_at=datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST"),
         )
 
@@ -621,7 +955,9 @@ class AsymmetricOpportunityRadar:
             return None
 
         # Find ATM Straddle Premium
-        strikes = sorted(list({getattr(c, "strike", 0) for c in contracts if getattr(c, "strike", 0) > 0}))
+        strikes = sorted(
+            list({getattr(c, "strike", 0) for c in contracts if getattr(c, "strike", 0) > 0})
+        )
         if not strikes:
             return None
 
@@ -666,20 +1002,32 @@ class AsymmetricOpportunityRadar:
         direction = "BULLISH" if is_bullish_unpin else "BEARISH"
 
         # Asymmetric risk levels
+        atr = _compute_atr(None, spot)
         if direction == "BULLISH":
-            sl_price = round(upper_breakeven * 0.996, 2)
-            risk_pts = max(5.0, spot - sl_price)
-            t1_price = round(spot + 2.0 * risk_pts, 2)
-            t2_price = round(spot + 4.0 * risk_pts, 2)
-            moonshot = round(spot + 6.0 * risk_pts, 2)
+            raw_sl = round(upper_breakeven * 0.996, 2)
+            raw_risk = max(5.0, spot - raw_sl)
+            raw_t1 = round(spot + 2.0 * raw_risk, 2)
+            raw_t2 = round(spot + 4.0 * raw_risk, 2)
+            raw_moonshot = round(spot + 6.0 * raw_risk, 2)
         else:
-            sl_price = round(lower_breakeven * 1.004, 2)
-            risk_pts = max(5.0, sl_price - spot)
-            t1_price = round(spot - 2.0 * risk_pts, 2)
-            t2_price = round(spot - 4.0 * risk_pts, 2)
-            moonshot = round(spot - 6.0 * risk_pts, 2)
+            raw_sl = round(lower_breakeven * 1.004, 2)
+            raw_risk = max(5.0, raw_sl - spot)
+            raw_t1 = round(spot - 2.0 * raw_risk, 2)
+            raw_t2 = round(spot - 4.0 * raw_risk, 2)
+            raw_moonshot = round(spot - 6.0 * raw_risk, 2)
 
-        rr_ratio = 4.0
+        sl_price, risk_pts, t1_price, t2_price, moonshot, rr_ratio, entry_range_str = (
+            _enforce_monotonic_trade_levels(
+                direction=direction,
+                ltp=spot,
+                raw_sl=raw_sl,
+                target_1=raw_t1,
+                target_2=raw_t2,
+                target_moonshot=raw_moonshot,
+                atr=atr,
+            )
+        )
+
         confluences = [
             f"0DTE Straddle Unpinned: Spot ({spot:,.1f}) broke outside ATM {atm_strike} straddle band (₹{straddle_premium:.1f} prem)",
             f"{'Upper' if direction == 'BULLISH' else 'Lower'} Break-Even breached: Market makers forced to aggressively delta-hedge",
@@ -688,18 +1036,44 @@ class AsymmetricOpportunityRadar:
 
         score = 90
 
+        chosen_contract = ce_atm if direction == "BULLISH" else pe_atm
+        opt_prem = float(
+            getattr(chosen_contract, "ltp", 0.0)
+            or getattr(chosen_contract, "last_price", 0.0)
+            or (ce_ltp if direction == "BULLISH" else pe_ltp)
+        )
+        opt_sym = getattr(
+            chosen_contract,
+            "symbol",
+            f"{clean_sym}{int(atm_strike)}{'CE' if direction == 'BULLISH' else 'PE'}",
+        )
+        opt_exp = getattr(chosen_contract, "expiry", None)
+
+        from engine.position_sizer import get_lot_size
+
+        lot_sz = get_lot_size(clean_sym)
+
+        # Estimate option targets
+        delta = 0.50 if direction == "BULLISH" else -0.50
+        spot_move_t1 = t1_price - spot
+        spot_move_t2 = t2_price - spot
+        spot_move_sl = sl_price - spot
+        opt_t1 = round(max(0.05, opt_prem + (delta * spot_move_t1)), 2)
+        opt_t2 = round(max(0.05, opt_prem + (delta * spot_move_t2)), 2)
+        opt_sl = round(max(0.05, opt_prem + (delta * spot_move_sl)), 2)
+
         return AsymmetricOpportunity(
             opportunity_id=f"asym-0dte-{clean_sym}-{uuid.uuid4().hex[:6]}",
             symbol=clean_sym,
             exchange="NFO",
             setup_type="EXPIRY_0DTE_GAMMA",
-            setup_label="⚡ 0DTE Expiry Gamma Straddle Unpinning",
+            setup_label=f"⚡ 0DTE Expiry Gamma Straddle Unpinning [{opt_sym}]",
             segment="INDEX",
             direction=direction,
             conviction_score=score,
             ltp=spot,
             entry_price=spot,
-            entry_range=f"₹{round(spot * 0.998, 1):,.1f} – ₹{round(spot * 1.003, 1):,.1f}",
+            entry_range=entry_range_str,
             stop_loss=sl_price,
             target_1=t1_price,
             target_2=t2_price,
@@ -711,9 +1085,18 @@ class AsymmetricOpportunityRadar:
             confluence_factors=confluences,
             catalyst_summary="Dealer short-gamma unpinning forcing vertical index momentum as written straddles implode.",
             when_to_buy=f"Enter {direction} 0DTE options/futures on 5-min candle close outside ₹{upper_breakeven if direction == 'BULLISH' else lower_breakeven:,.1f}.",
-            when_to_wait=f"DO NOT CHASE if price reverses back inside the ATM straddle boundary.",
+            when_to_wait="DO NOT CHASE if price reverses back inside the ATM straddle boundary.",
             profit_rule=f"Book 50% at T1 (₹{t1_price:,.1f}), move SL to Cost, let remainder ride to T2 (₹{t2_price:,.1f}).",
             metrics={"atm_strike": atm_strike, "straddle_premium": round(straddle_premium, 2)},
+            strike=float(atm_strike),
+            option_type="CE" if direction == "BULLISH" else "PE",
+            contract_symbol=opt_sym,
+            expiry_date=opt_exp,
+            option_premium=opt_prem,
+            option_target_1=opt_t1,
+            option_target_2=opt_t2,
+            option_stop_loss=opt_sl,
+            lot_size=lot_sz,
             created_at=datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST"),
         )
 
@@ -731,7 +1114,9 @@ class AsymmetricOpportunityRadar:
         universe = get_scan_universe(segment=segment)
         opportunities: list[AsymmetricOpportunity] = []
 
-        logger.info(f"[AsymmetricRadar] Sweeping {len(universe)} symbols ({segment or 'ALL'}) for low-risk high-reward setups...")
+        logger.info(
+            f"[AsymmetricRadar] Sweeping {len(universe)} symbols ({segment or 'ALL'}) for low-risk high-reward setups..."
+        )
 
         for sym in universe:
             try:
@@ -764,7 +1149,9 @@ class AsymmetricOpportunityRadar:
         opportunities.sort(key=lambda o: (o.conviction_score, o.risk_reward_ratio), reverse=True)
         top_opps = opportunities[:top_n]
 
-        logger.info(f"[AsymmetricRadar] Scan completed: {len(top_opps)} high-asymmetry setups qualified.")
+        logger.info(
+            f"[AsymmetricRadar] Scan completed: {len(top_opps)} high-asymmetry setups qualified."
+        )
         return top_opps
 
     scan_opportunities = scan_asymmetric_opportunities

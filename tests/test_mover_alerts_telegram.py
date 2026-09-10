@@ -101,7 +101,9 @@ async def test_cmd_movers():
         traps_filtered=1,
     )
 
-    with patch("engine.mover_autopsy.mover_autopsy_engine.get_latest_autopsy", return_value=mock_autopsy):
+    with patch(
+        "engine.mover_autopsy.mover_autopsy_engine.get_latest_autopsy", return_value=mock_autopsy
+    ):
         await cmd_movers(mock_update, mock_context)
         assert mock_update.message.reply_text.call_count >= 2
         final_call_args = mock_update.message.reply_text.call_args_list[-1]
@@ -138,7 +140,9 @@ async def test_cmd_precursors():
         )
     ]
 
-    with patch("engine.precursor_radar.precursor_radar.scan_precursors", return_value=mock_candidates):
+    with patch(
+        "engine.precursor_radar.precursor_radar.scan_precursors", return_value=mock_candidates
+    ):
         await cmd_precursors(mock_update, mock_context)
         assert mock_update.message.reply_text.call_count >= 2
         final_call_args = mock_update.message.reply_text.call_args_list[-1]
@@ -156,7 +160,9 @@ async def test_cmd_precursors_with_segment_arg():
     mock_context = MagicMock()
     mock_context.args = ["cash"]
 
-    with patch("engine.precursor_radar.precursor_radar.scan_precursors", return_value=[]) as mock_scan:
+    with patch(
+        "engine.precursor_radar.precursor_radar.scan_precursors", return_value=[]
+    ) as mock_scan:
         await cmd_precursors(mock_update, mock_context)
         mock_scan.assert_called_once_with(segment="NON_FNO", top_n=5)
         final_call_args = mock_update.message.reply_text.call_args_list[-1]
@@ -191,11 +197,12 @@ async def test_cmd_movers_with_segment_arg():
         top_predictive_precursors=[],
     )
 
-    with patch("engine.mover_autopsy.mover_autopsy_engine.get_latest_autopsy", return_value=mock_autopsy):
+    with patch(
+        "engine.mover_autopsy.mover_autopsy_engine.get_latest_autopsy", return_value=mock_autopsy
+    ):
         await cmd_movers(mock_update, mock_context)
         assert mock_update.message.reply_text.call_count >= 2
         final_call_args = mock_update.message.reply_text.call_args_list[-1]
         msg_text = final_call_args[0][0]
         assert "FNO" in msg_text
         assert "RELIANCE" in msg_text
-

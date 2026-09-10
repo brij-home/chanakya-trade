@@ -120,7 +120,7 @@ def get_ohlcv(
         try:
             from engine.eod_store import get_ohlcv_batch
 
-            store_map = get_ohlcv_batch([clean_sym])
+            store_map = get_ohlcv_batch([clean_sym], days=max(days, 300))
             if clean_sym in store_map and not store_map[clean_sym].empty:
                 stored_df = store_map[clean_sym]
                 if from_date or to_date:
@@ -130,7 +130,9 @@ def get_ohlcv(
                 else:
                     sliced = stored_df.iloc[-days:] if len(stored_df) > days else stored_df
 
-                if not sliced.empty and len(sliced) >= min(days, 15):
+                # Ensure stored slice is sufficient for requested horizon (e.g. extended backtests)
+                min_expected_bars = int(days * 0.6) if days > 100 else min(days, 15)
+                if not sliced.empty and len(sliced) >= min_expected_bars:
                     res_df = sliced.copy()
                     if include_live_candle:
                         res_df = inject_live_tick(res_df, symbol=symbol, exchange=exchange)
@@ -341,14 +343,18 @@ def inject_live_tick(
 
         if df.empty:
             bar_time = pd.Timestamp(now) if is_intraday else today_date
+            bar_open = float(q.open or q.last_price)
+            bar_close = float(q.last_price)
+            bar_high = max(float(q.high or q.last_price), bar_open, bar_close)
+            bar_low = min(float(q.low or q.last_price), bar_open, bar_close)
             new_row = pd.DataFrame(
                 [
                     {
-                        "open": q.open or q.last_price,
-                        "high": q.high or q.last_price,
-                        "low": q.low or q.last_price,
-                        "close": q.last_price,
-                        "volume": q.volume or 0.0,
+                        "open": bar_open,
+                        "high": bar_high,
+                        "low": bar_low,
+                        "close": bar_close,
+                        "volume": float(q.volume or 0.0),
                     }
                 ],
                 index=[bar_time],
@@ -381,22 +387,27 @@ def inject_live_tick(
             mins_elapsed = (now_utc - last_idx).total_seconds() / 60.0
 
             if mins_elapsed < interval_mins and last_date == now_utc.date():
-                # Still within the active candle: update high, low, close
-                df.loc[last_idx, "close"] = float(q.last_price)
-                df.loc[last_idx, "high"] = max(float(df.loc[last_idx, "high"]), float(q.last_price))
-                df.loc[last_idx, "low"] = min(float(df.loc[last_idx, "low"]), float(q.last_price))
+                # Still within the active candle: update high, low, close with physical envelope
+                cur_close = float(q.last_price)
+                df.loc[last_idx, "close"] = cur_close
+                df.loc[last_idx, "high"] = max(float(df.loc[last_idx, "high"]), cur_close)
+                df.loc[last_idx, "low"] = min(float(df.loc[last_idx, "low"]), cur_close)
             else:
                 # Interval elapsed: start new bucketed bar
                 bucket_min = (now_utc.minute // interval_mins) * interval_mins
                 new_bar_time = now_utc.replace(minute=bucket_min, second=0, microsecond=0)
                 if new_bar_time > last_idx:
+                    bar_open = float(q.open or q.last_price)
+                    bar_close = float(q.last_price)
+                    bar_high = max(float(q.high or q.last_price), bar_open, bar_close)
+                    bar_low = min(float(q.low or q.last_price), bar_open, bar_close)
                     new_row = pd.DataFrame(
                         [
                             {
-                                "open": float(q.open or q.last_price),
-                                "high": float(q.high or q.last_price),
-                                "low": float(q.low or q.last_price),
-                                "close": float(q.last_price),
+                                "open": bar_open,
+                                "high": bar_high,
+                                "low": bar_low,
+                                "close": bar_close,
                                 "volume": float(q.volume or 0.0),
                             }
                         ],
@@ -404,40 +415,36 @@ def inject_live_tick(
                     )
                     df = pd.concat([df, new_row])
                 else:
-                    df.loc[last_idx, "close"] = float(q.last_price)
-                    df.loc[last_idx, "high"] = max(
-                        float(df.loc[last_idx, "high"]), float(q.last_price)
-                    )
-                    df.loc[last_idx, "low"] = min(
-                        float(df.loc[last_idx, "low"]), float(q.last_price)
-                    )
+                    cur_close = float(q.last_price)
+                    df.loc[last_idx, "close"] = cur_close
+                    df.loc[last_idx, "high"] = max(float(df.loc[last_idx, "high"]), cur_close)
+                    df.loc[last_idx, "low"] = min(float(df.loc[last_idx, "low"]), cur_close)
         else:
             if last_date == now.date():
-                # Update today's existing candle with live tick
-                df.loc[last_idx, "close"] = float(q.last_price)
-                if q.high and q.high > 0:
-                    df.loc[last_idx, "high"] = max(float(df.loc[last_idx, "high"]), float(q.high))
-                else:
-                    df.loc[last_idx, "high"] = max(
-                        float(df.loc[last_idx, "high"]), float(q.last_price)
-                    )
-                if q.low and q.low > 0:
-                    df.loc[last_idx, "low"] = min(float(df.loc[last_idx, "low"]), float(q.low))
-                else:
-                    df.loc[last_idx, "low"] = min(
-                        float(df.loc[last_idx, "low"]), float(q.last_price)
-                    )
+                # Update today's existing candle with live tick and enforce physical envelope
+                cur_close = float(q.last_price)
+                df.loc[last_idx, "close"] = cur_close
+                prev_high = float(df.loc[last_idx, "high"])
+                prev_low = float(df.loc[last_idx, "low"])
+                raw_high = float(q.high) if (q.high and q.high > 0) else cur_close
+                raw_low = float(q.low) if (q.low and q.low > 0) else cur_close
+                df.loc[last_idx, "high"] = max(prev_high, raw_high, cur_close)
+                df.loc[last_idx, "low"] = min(prev_low, raw_low, cur_close)
                 if q.volume and q.volume > 0:
                     df.loc[last_idx, "volume"] = float(q.volume)
             else:
-                # Append today's active bar
+                # Append today's active bar with physical envelope
+                bar_open = float(q.open or q.last_price)
+                bar_close = float(q.last_price)
+                bar_high = max(float(q.high or q.last_price), bar_open, bar_close)
+                bar_low = min(float(q.low or q.last_price), bar_open, bar_close)
                 new_row = pd.DataFrame(
                     [
                         {
-                            "open": float(q.open or q.last_price),
-                            "high": float(q.high or q.last_price),
-                            "low": float(q.low or q.last_price),
-                            "close": float(q.last_price),
+                            "open": bar_open,
+                            "high": bar_high,
+                            "low": bar_low,
+                            "close": bar_close,
                             "volume": float(q.volume or 0.0),
                         }
                     ],

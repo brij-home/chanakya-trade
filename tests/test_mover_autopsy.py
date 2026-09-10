@@ -8,14 +8,12 @@ Tests causal decomposition, control cohort contrast, trap filtering, and persist
 import pytest
 import pandas as pd
 import numpy as np
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 from engine.mover_autopsy import (
     MoverAutopsyEngine,
     MoverCausalProfile,
-    DailyMoverAutopsy,
     ARCHETYPE_VOLATILITY_CONTRACTION_SPRING,
-    ARCHETYPE_GAMMA_SHORT_SQUEEZE,
     TRAP_LOW_LIQUIDITY_PUMP,
     TRAP_CIRCUIT_LOCK_MANIPULATION,
 )
@@ -51,9 +49,14 @@ def test_dissect_mover_volatility_contraction(autopsy_engine):
     }
     df = pd.DataFrame(data, index=dates)
 
-    with patch("market.history.get_ohlcv", return_value=df), \
-         patch("analysis.sector_rotation.get_stock_sector_alignment", return_value={"sector_name": "Consumer", "quadrant": "LEADING"}), \
-         patch("market.options.get_options_chain", return_value=None):
+    with (
+        patch("market.history.get_ohlcv", return_value=df),
+        patch(
+            "analysis.sector_rotation.get_stock_sector_alignment",
+            return_value={"sector_name": "Consumer", "quadrant": "LEADING"},
+        ),
+        patch("market.options.get_options_chain", return_value=None),
+    ):
         profile = autopsy_engine.dissect_mover(quote_item, direction="GAINER")
 
         assert profile.symbol == "TRENT"
@@ -144,8 +147,13 @@ def test_compute_control_contrast(autopsy_engine):
         }
     )
 
-    with patch("market.history.get_ohlcv", return_value=df_normal), \
-         patch("analysis.sector_rotation.get_stock_sector_alignment", return_value={"quadrant": "LAGGING"}):
+    with (
+        patch("market.history.get_ohlcv", return_value=df_normal),
+        patch(
+            "analysis.sector_rotation.get_stock_sector_alignment",
+            return_value={"quadrant": "LAGGING"},
+        ),
+    ):
         snr_table, top_precursors = autopsy_engine.compute_control_contrast(movers, control_quotes)
 
         assert "volume_dry_up" in snr_table
@@ -157,23 +165,56 @@ def test_compute_control_contrast(autopsy_engine):
 def test_run_daily_autopsy_integration(autopsy_engine):
     """Test full daily autopsy execution and persistence."""
     fake_gainers = [
-        {"symbol": "RELIANCE", "ltp": 2900.0, "change_pct": 4.2, "volume": 5000000, "turnover_cr": 1450.0, "vwap": 2880.0},
-        {"symbol": "INFY", "ltp": 1950.0, "change_pct": 3.8, "volume": 3000000, "turnover_cr": 585.0, "vwap": 1940.0},
+        {
+            "symbol": "RELIANCE",
+            "ltp": 2900.0,
+            "change_pct": 4.2,
+            "volume": 5000000,
+            "turnover_cr": 1450.0,
+            "vwap": 2880.0,
+        },
+        {
+            "symbol": "INFY",
+            "ltp": 1950.0,
+            "change_pct": 3.8,
+            "volume": 3000000,
+            "turnover_cr": 585.0,
+            "vwap": 1940.0,
+        },
     ]
     fake_losers = [
-        {"symbol": "SBIN", "ltp": 820.0, "change_pct": -3.5, "volume": 4000000, "turnover_cr": 328.0, "vwap": 835.0},
+        {
+            "symbol": "SBIN",
+            "ltp": 820.0,
+            "change_pct": -3.5,
+            "volume": 4000000,
+            "turnover_cr": 328.0,
+            "vwap": 835.0,
+        },
     ]
     fake_control = [
-        {"symbol": "TCS", "ltp": 4400.0, "change_pct": 0.2, "volume": 1000000, "turnover_cr": 440.0, "vwap": 4400.0},
+        {
+            "symbol": "TCS",
+            "ltp": 4400.0,
+            "change_pct": 0.2,
+            "volume": 1000000,
+            "turnover_cr": 440.0,
+            "vwap": 4400.0,
+        },
     ]
 
-    with patch.object(autopsy_engine, "fetch_daily_movers_and_control", return_value=(fake_gainers, fake_losers, fake_control)), \
-         patch("market.quotes.get_ltp", return_value=13.5), \
-         patch("market.history.get_ohlcv", return_value=None), \
-         patch("market.options.get_options_chain", return_value=None), \
-         patch("engine.learning_engine.pattern_learning_engine.register_explosive_move"), \
-         patch("engine.learning_engine.pattern_learning_engine.recalibrate_from_snr"):
-
+    with (
+        patch.object(
+            autopsy_engine,
+            "fetch_daily_movers_and_control",
+            return_value=(fake_gainers, fake_losers, fake_control),
+        ),
+        patch("market.quotes.get_ltp", return_value=13.5),
+        patch("market.history.get_ohlcv", return_value=None),
+        patch("market.options.get_options_chain", return_value=None),
+        patch("engine.learning_engine.pattern_learning_engine.register_explosive_move"),
+        patch("engine.learning_engine.pattern_learning_engine.recalibrate_from_snr"),
+    ):
         autopsy = autopsy_engine.run_daily_autopsy(target_date="2026-09-09", top_n=5)
 
         assert autopsy.date == "2026-09-09"
