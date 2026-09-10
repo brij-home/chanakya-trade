@@ -102,13 +102,21 @@ class AlertScrutinyAuditor:
         # are underlying prices (where SL > LTP > T1), even if the alert suggests a PE option!
         # Alert levels represent option premium ONLY when it is an options alert type
         # or when LTP directly matches the option premium.
-        is_option_premium_levels = bool(
-            getattr(alert, "alert_type", "") in ("OPTIONS_MOMENTUM", "GAMMA_BLAST")
-            or (
-                getattr(alert, "option_premium", None) is not None
-                and abs(ltp - float(alert.option_premium)) < 0.05
-            )
+        has_opt_marker = bool(
+            getattr(alert, "contract_symbol", None)
+            or getattr(alert, "option_type", None)
+            or getattr(alert, "strike", None)
         )
+        if not has_opt_marker:
+            is_option_premium_levels = False
+        elif getattr(alert, "option_premium", None) is not None:
+            is_option_premium_levels = abs(ltp - float(alert.option_premium)) < 0.05
+        else:
+            atype = str(getattr(alert, "alert_type", "") or "")
+            is_option_premium_levels = bool(
+                atype in ("OPTIONS_MOMENTUM", "OPTION_WRITE")
+                or (atype == "GAMMA_BLAST" and getattr(alert, "option_type", None))
+            )
 
         # 2. Geometric Level Coherence
         if is_option_premium_levels or direction in ("BULLISH", "LONG", "BUY"):

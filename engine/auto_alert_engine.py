@@ -355,6 +355,36 @@ def get_next_expiry_opportunity(
 # ── Invalidation Evaluator ──────────────────────────────────────────────────
 
 
+def is_alert_option_premium_level(alert: Any) -> bool:
+    """
+    Determines if an alert's primary numerical price levels (ltp, stop_loss, target_level)
+    represent option contract premiums rather than underlying equity/spot prices.
+    Returns True for pure option strategies (OPTIONS_MOMENTUM, GAMMA_BLAST with option_type, OPTION_WRITE)
+    or when alert.ltp directly matches the option premium.
+    Returns False for underlying stock/index setups even if an option recommendation is attached.
+    """
+    has_opt_marker = bool(
+        getattr(alert, "contract_symbol", None)
+        or getattr(alert, "option_type", None)
+        or getattr(alert, "strike", None)
+    )
+    if not has_opt_marker:
+        return False
+
+    ltp = float(getattr(alert, "ltp", 0.0) or 0.0)
+    opt_prem = getattr(alert, "option_premium", None)
+    if opt_prem is not None:
+        return abs(ltp - float(opt_prem)) < 0.05
+
+    atype = str(getattr(alert, "alert_type", "") or "")
+    if atype in ("OPTIONS_MOMENTUM", "OPTION_WRITE"):
+        return True
+    if atype == "GAMMA_BLAST" and getattr(alert, "option_type", None):
+        return True
+
+    return False
+
+
 def evaluate_alert_invalidation(
     alert: AutoAlert,
     current_ltp: Optional[float] = None,
@@ -367,26 +397,27 @@ def evaluate_alert_invalidation(
     if alert.is_invalidated or alert.stage == "INVALIDATED":
         return None
 
+    is_option = is_alert_option_premium_level(alert)
+
     # Determine current LTP if not provided
     if current_ltp is None or current_ltp <= 0:
         try:
             from market.quotes import get_ltp
 
-            lookup_sym = alert.contract_symbol or (
-                f"{alert.exchange}:{alert.symbol}" if ":" not in alert.symbol else alert.symbol
-            )
+            if is_option:
+                lookup_sym = alert.contract_symbol or (
+                    f"{alert.exchange}:{alert.symbol}" if ":" not in alert.symbol else alert.symbol
+                )
+            else:
+                lookup_sym = (
+                    f"{alert.exchange}:{alert.symbol}" if ":" not in alert.symbol else alert.symbol
+                )
             current_ltp = get_ltp(lookup_sym)
         except Exception:
             current_ltp = None
 
     if current_ltp is None or current_ltp <= 0:
         return None  # Cannot evaluate without live price quote
-
-    is_option = bool(
-        alert.option_type
-        or (alert.contract_symbol and any(x in alert.contract_symbol.upper() for x in ("CE", "PE")))
-        or (alert.alert_type == "GAMMA_BLAST" and alert.option_type)
-    )
 
     # 1. Stop-Loss Invalidation
     if alert.stop_loss and alert.stop_loss > 0:
@@ -558,25 +589,26 @@ def evaluate_alert_targets_and_trailing(
     if alert.is_invalidated or alert.stage in ("INVALIDATED", "COMPLETED"):
         return None
 
+    is_option = is_alert_option_premium_level(alert)
+
     if current_ltp is None or current_ltp <= 0:
         try:
             from market.quotes import get_ltp
 
-            lookup_sym = alert.contract_symbol or (
-                f"{alert.exchange}:{alert.symbol}" if ":" not in alert.symbol else alert.symbol
-            )
+            if is_option:
+                lookup_sym = alert.contract_symbol or (
+                    f"{alert.exchange}:{alert.symbol}" if ":" not in alert.symbol else alert.symbol
+                )
+            else:
+                lookup_sym = (
+                    f"{alert.exchange}:{alert.symbol}" if ":" not in alert.symbol else alert.symbol
+                )
             current_ltp = get_ltp(lookup_sym)
         except Exception:
             current_ltp = None
 
     if current_ltp is None or current_ltp <= 0:
         return None
-
-    is_option = bool(
-        alert.option_type
-        or (alert.contract_symbol and any(x in alert.contract_symbol.upper() for x in ("CE", "PE")))
-        or (alert.alert_type == "GAMMA_BLAST" and alert.option_type)
-    )
 
     if is_option:
         # Check if option buyer or option writer/seller:
@@ -2614,9 +2646,19 @@ class AutoAlertEngine:
         for alert in active_alerts:
             try:
                 # Refresh current quote LTP
-                lookup_sym = alert.contract_symbol or (
-                    f"{alert.exchange}:{alert.symbol}" if ":" not in alert.symbol else alert.symbol
-                )
+                is_opt_prem = is_alert_option_premium_level(alert)
+                if is_opt_prem:
+                    lookup_sym = alert.contract_symbol or (
+                        f"{alert.exchange}:{alert.symbol}"
+                        if ":" not in alert.symbol
+                        else alert.symbol
+                    )
+                else:
+                    lookup_sym = (
+                        f"{alert.exchange}:{alert.symbol}"
+                        if ":" not in alert.symbol
+                        else alert.symbol
+                    )
                 from market.quotes import get_ltp
 
                 try:
@@ -2625,6 +2667,15 @@ class AutoAlertEngine:
                         alert.ltp = cur_quote_ltp
                 except Exception:
                     cur_quote_ltp = None
+
+                # Also refresh option premium if contract_symbol is attached to an underlying alert
+                if alert.contract_symbol and not is_opt_prem:
+                    try:
+                        opt_quote = get_ltp(alert.contract_symbol)
+                        if opt_quote and opt_quote > 0:
+                            alert.option_premium = opt_quote
+                    except Exception:
+                        pass
 
                 eval_res = evaluate_alert_targets_and_trailing(alert, current_ltp=cur_quote_ltp)
                 if not eval_res or not eval_res.new_milestone:

@@ -1831,3 +1831,42 @@ def test_detect_squeeze_breakdown():
         assert alert_early.direction == "BEARISH"
         assert alert_early.alert_type == "SQUEEZE_BREAKDOWN"
         assert alert_early.stage == "EARLY_WARNING"
+
+
+def test_underlying_bearish_alert_with_option_recommendation_invalidation():
+    """
+    Ensure an underlying bearish setup (e.g. MANKIND) with an attached option contract
+    evaluates invalidation against the stock's spot stop-loss (not the option premium).
+    LTP=2180, SL=2219.7, contract_symbol="NSE:MANKIND26MAR2200PE", option_premium=11.0.
+    """
+    alert = AutoAlert(
+        alert_id="asym-mankind-1",
+        alert_type="ASYMMETRIC_OPPORTUNITY",
+        stage="EARLY_WARNING",
+        symbol="MANKIND",
+        exchange="NSE",
+        direction="BEARISH",
+        headline="Mankind Breakdown Radar",
+        summary="Distribution at resistance",
+        ltp=2180.0,
+        trigger_level=2180.0,
+        stop_loss=2219.7,
+        target_level=2050.0,
+        strike=2200.0,
+        option_type="PE",
+        contract_symbol="NSE:MANKIND26MAR2200PE",
+        option_premium=11.0,
+        is_live=True,
+        environment="LIVE",
+    )
+
+    # When stock price moves to 2185.0 (still safely below SL 2219.7): MUST NOT be invalidated!
+    assert evaluate_alert_invalidation(alert, current_ltp=2185.0) is None
+
+    # When stock price surges above SL (e.g. 2225.0): Invalidated by stock price surge!
+    reason = evaluate_alert_invalidation(alert, current_ltp=2225.0)
+    assert reason is not None
+    assert "Price surged to ₹2,225.0" in reason
+    assert "breached stop-loss ₹2,219.7" in reason
+    assert "Bearish thesis invalidated" in reason
+    assert "Option premium collapsed" not in reason
