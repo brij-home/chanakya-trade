@@ -67,16 +67,20 @@ def cleanup_orphaned_processes() -> int:
     except ImportError:
         # Fallback using PowerShell CIM on Windows
         if sys.platform == "win32":
-            cmd = (
-                'powershell -NoProfile -Command "'
-                "Get-CimInstance Win32_Process | "
-                "Where-Object { ($_.Name -like '*python*' -or $_.Name -like '*uvicorn*') -and "
-                "($_.CommandLine -like '*exec(eval*' -or ($_.CommandLine -like '*uvicorn*' -and $_.CommandLine -like '*web.api*')) -and "
-                f"$_.ProcessId -ne {current_pid} }} | "
-                'ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue; Write-Output $_.ProcessId }"'
-            )
+            cmd = [
+                "powershell",
+                "-NoProfile",
+                "-Command",
+                (
+                    "Get-CimInstance Win32_Process | "
+                    "Where-Object { ($_.Name -like '*python*' -or $_.Name -like '*uvicorn*') -and "
+                    "($_.CommandLine -like '*exec(eval*' -or ($_.CommandLine -like '*uvicorn*' -and $_.CommandLine -like '*web.api*')) -and "
+                    f"$_.ProcessId -ne {current_pid} }} | "
+                    "ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue; Write-Output $_.ProcessId }"
+                ),
+            ]
             try:
-                out = subprocess.check_output(cmd, shell=True, text=True)
+                out = subprocess.check_output(cmd, text=True)
                 pids = [int(line.strip()) for line in out.splitlines() if line.strip().isdigit()]
                 killed_count = len(pids)
             except Exception:
@@ -91,14 +95,18 @@ def release_port(port: int = 8765) -> bool:
 
     released = False
     if sys.platform == "win32":
-        cmd = (
-            f'powershell -NoProfile -Command "'
-            f"Get-NetTCPConnection -LocalPort {port} -ErrorAction SilentlyContinue | "
-            f"Select-Object -ExpandProperty OwningProcess -Unique | "
-            f'ForEach-Object {{ Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue; Write-Output $_ }}"'
-        )
+        cmd = [
+            "powershell",
+            "-NoProfile",
+            "-Command",
+            (
+                f"Get-NetTCPConnection -LocalPort {port} -ErrorAction SilentlyContinue | "
+                "Select-Object -ExpandProperty OwningProcess -Unique | "
+                "ForEach-Object { Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue; Write-Output $_ }"
+            ),
+        ]
         try:
-            out = subprocess.check_output(cmd, shell=True, text=True)
+            out = subprocess.check_output(cmd, text=True)
             if out.strip():
                 released = True
         except Exception:
