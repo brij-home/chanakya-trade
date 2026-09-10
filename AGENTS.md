@@ -72,6 +72,36 @@
    - The internal side MUST come from persisted local fills plus an explicit opening-cash baseline; never from the same broker portfolio response.
    - If the execution broker or independent ledger baseline is unavailable, return `{"status": "UNAVAILABLE"}`. Never fabricate a clean reconciliation report.
    - A successful reconciliation response MUST include `broker_account_id`, `broker_snapshot_at`, and `correlation_id` for auditability.
+10. **Zero AI Hallucinations & Deterministic Grounding**:
+   - Every recommendation, conviction score, price level, target, and signal MUST be derived from live market feeds or verified deterministic quantitative models (SMC, Minervini SEPA, VPA, Beneish, Altman, RRG).
+   - NEVER invent, simulate, or hallucinate metrics, order IDs, fill prices, historical audit logs, or P&L figures.
+   - Deterministic Quantitative Fallback: If any LLM times out (18.0s) or is rate-limited, fall back to pure quantitative models (VIX + FII/DII + Minervini + SMC). Never output raw error strings, blank cards, or hallucinated placeholder numbers.
+   - Honest Feed State: When live market data is unreachable, return explicit `UNAVAILABLE` or `DEGRADED` status codes — never substitute pleasant-looking mock data to conceal a disconnected feed.
+11. **Zero Hardcoding & Absolute Data Provenance**:
+   - Hardcoding static quotes, arbitrary multiples (e.g., `price * 1.15`), synthetic volumes, or pre-canned "CLEAN" forensic verdicts in production pathways is strictly prohibited. Real trading decisions involve real financial capital.
+   - Every market event and UI payload must carry unambiguous provenance tags (`REAL/LIVE`, `OFF-MARKET/EOD`, `TEST`, `DEGRADED`, `UNAVAILABLE`).
+   - Exchange & Instrument Authority: Instrument specifications (lot size, tick size, token, segment) must resolve from canonical exchange masters, never from client assumptions.
+12. **Strong, Decisive & Actionable Logic (Zero Wishy-Washy Language)**:
+   - Output must be mathematically justified, crisp, and decisive. Eliminate indecisive filler (*"Stock could go up or it could go down"*).
+   - Every trade setup, radar candidate, or alert must provide a complete Actionable Blueprint:
+     - Exact Entry Zone (anchored to structural support or VWAP).
+     - Invalidation Stop-Loss (anchored to structural pivots: EMA support, base floor, VWAP, or straddle break-even).
+     - Target 1 (+2R Scale 50% & SL to Breakeven), Target 2 (+4R Extension), and Moonshot Runner (+6R+).
+     - Mathematical Risk:Reward ratio (strict $\ge 1:3.0$ R:R standard for asymmetric setups; reject unfavorable setups).
+     - Strict "NO CHASE" discipline (explicit price boundary beyond which entry is disqualified without a retest).
+     - Clear Profit-Taking Playbook (e.g., scale 40–50% at T1, trail remaining on 20-EMA / 3.0×ATR).
+13. **Elimination of Architectural Anti-Patterns**:
+   - Fail-Closed Gate: Any error, timeout, or ambiguity in broker order pipelines must fail closed (status `REJECTED` or `UNKNOWN_FREEZE`). Never fabricate filled paper orders or fake live order IDs.
+   - Connection Hygiene: All HTTP requests must use `httpx` within `with` or `async with` context managers. No dangling TCP sockets.
+   - Concurrency Safety: Shared memory caches and state dictionaries must have thread locks (`threading.Lock()`) and LRU/TTL bounds to prevent memory leaks.
+   - Timezone Normalization: Enforce timezone-naive DatetimeIndex (`df.index.tz_localize(None)`) across all pandas computations.
+   - Exception Transparency: Never silently swallow exceptions (`except: pass`) without structured logging or telemetry emission.
+   - Frontend Hygiene: React components must never leave unhandled Promise rejections.
+14. **Niche Institutional UI Aesthetics & Density**:
+   - Bloomberg / TradingView institutional density, compact padding (`p-2.5`, `gap-2`, `py-1 px-2` table cells), dark theme default with crisp typography (Google Inter for body, tabular monospace for numbers).
+   - Curated color tokens: 🟢 Emerald (`#10B981`) for profit/bullish, 🔴 Rose/Crimson (`#F43F5E`) for invalidation/stop-loss, 🟡 Amber/Gold (`#F59E0B`) for high conviction, 🟣 Indigo (`#6366F1`) for F&O, 🔵 Sky (`#0EA5E9`) for macro/indices.
+   - Smooth micro-interactions (`transition: transform 0.15s ease, opacity 0.2s`) and glassmorphism overlays (`backdrop-filter: blur(12px); background: rgba(0,0,0,0.45)`).
+   - 1-Click frictionless execution: all action buttons must immediately dispatch orders or ticket drafts (`autoSubmit: true`), never leaving the user stranded. Zero broken, blank, or generic toy mockups.
 
 ---
 

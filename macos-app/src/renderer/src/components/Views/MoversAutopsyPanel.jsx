@@ -12,7 +12,8 @@ export default function MoversAutopsyPanel({ onOpenOrderTicket }) {
   const [running, setRunning] = useState(false)
   const [autopsyData, setAutopsyData] = useState(null)
   const [precursors, setPrecursors] = useState([])
-  const [activeSubTab, setActiveSubTab] = useState('precursors') // 'precursors' | 'autopsy' | 'traps'
+  const [asymmetricOpps, setAsymmetricOpps] = useState([])
+  const [activeSubTab, setActiveSubTab] = useState('precursors') // 'precursors' | 'asymmetric' | 'autopsy' | 'traps'
   const [selectedDirection, setSelectedDirection] = useState('ALL') // 'ALL' | 'GAINER' | 'LOSER'
   const [selectedSegment, setSelectedSegment] = useState('ALL') // 'ALL' | 'FNO' | 'NON_FNO' | 'INDEX'
 
@@ -21,12 +22,15 @@ export default function MoversAutopsyPanel({ onOpenOrderTicket }) {
     try {
       const segQuery = selectedSegment !== 'ALL' ? `?segment=${selectedSegment}` : ''
       const preQuery = selectedSegment !== 'ALL' ? `&segment=${selectedSegment}` : ''
-      const [autopsyRes, precursorsRes] = await Promise.all([
+      const asymQuery = selectedSegment !== 'ALL' ? `&segment=${selectedSegment}` : ''
+      const [autopsyRes, precursorsRes, asymRes] = await Promise.all([
         call(`/api/movers/autopsy${segQuery}`, {}, { method: 'GET' }),
         call(`/api/movers/precursors?limit=8${preQuery}`, {}, { method: 'GET' }),
+        call(`/api/opportunities/asymmetric?min_rr=3.0${asymQuery}`, {}, { method: 'GET' }),
       ])
       if (autopsyRes?.data) setAutopsyData(autopsyRes.data)
       if (precursorsRes?.data) setPrecursors(precursorsRes.data)
+      if (asymRes?.data) setAsymmetricOpps(asymRes.data)
     } catch (err) {
       console.error('Failed to load mover autopsy data:', err)
     } finally {
@@ -48,10 +52,15 @@ export default function MoversAutopsyPanel({ onOpenOrderTicket }) {
       const res = await call('/api/movers/autopsy/run', payload, { method: 'POST' })
       if (res?.data) {
         setAutopsyData(res.data)
-        // Refresh precursors too
+        // Refresh precursors & asymmetric opps too
         const preQuery = selectedSegment !== 'ALL' ? `&segment=${selectedSegment}` : ''
-        const pRes = await call(`/api/movers/precursors?limit=8${preQuery}`, {}, { method: 'GET' })
+        const asymQuery = selectedSegment !== 'ALL' ? `&segment=${selectedSegment}` : ''
+        const [pRes, aRes] = await Promise.all([
+          call(`/api/movers/precursors?limit=8${preQuery}`, {}, { method: 'GET' }),
+          call(`/api/opportunities/asymmetric?force_refresh=true${asymQuery}`, {}, { method: 'GET' }),
+        ])
         if (pRes?.data) setPrecursors(pRes.data)
+        if (aRes?.data) setAsymmetricOpps(aRes.data)
       }
     } catch (err) {
       console.error('Failed to run on-demand autopsy:', err)
@@ -109,6 +118,10 @@ export default function MoversAutopsyPanel({ onOpenOrderTicket }) {
 
   const displayedPrecursors = precursors.filter(
     (p) => selectedSegment === 'ALL' || (p.segment || 'FNO') === selectedSegment
+  )
+
+  const displayedAsymmetric = (asymmetricOpps || []).filter(
+    (o) => selectedSegment === 'ALL' || (o.segment || 'FNO') === selectedSegment
   )
 
   const displayedMovers =
@@ -225,6 +238,21 @@ export default function MoversAutopsyPanel({ onOpenOrderTicket }) {
             <span>Precursor Radar (Tomorrow's Moves)</span>
             <span className="px-1.5 py-0.2 rounded-full text-[10px] bg-panel/30 text-panel">
               {displayedPrecursors.length}
+            </span>
+          </button>
+
+          <button
+            onClick={() => setActiveSubTab('asymmetric')}
+            className={`px-3 py-1.5 text-xs font-bold rounded-lg transition-all flex items-center gap-1.5 ${
+              activeSubTab === 'asymmetric'
+                ? 'bg-emerald-500 text-white font-black shadow-sm'
+                : 'text-muted hover:text-text'
+            }`}
+          >
+            <span>🎯</span>
+            <span>Asymmetric Setups (1:3+ R:R)</span>
+            <span className="px-1.5 py-0.2 rounded-full text-[10px] bg-white/20 text-white">
+              {displayedAsymmetric.length}
             </span>
           </button>
 
@@ -585,6 +613,178 @@ export default function MoversAutopsyPanel({ onOpenOrderTicket }) {
                   </span>
                 </div>
               ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── SUB-TAB 4: Asymmetric Setups (Low Risk : High Reward) ────── */}
+      {activeSubTab === 'asymmetric' && (
+        <div className="space-y-3">
+          <div className="p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/25 flex items-center justify-between text-xs text-emerald-200">
+            <div className="flex items-center gap-2">
+              <span className="text-lg">🎯</span>
+              <span>
+                <strong>Low Risk : Big Reward Asymmetric Radar:</strong> Setups mathematically guaranteed to offer ≥ 1:3.0 Risk:Reward before major moves (Pocket Pivots, F&O Ban Squeezes, Rubber Band 200-EMA mean-reversions, and 0DTE Expiry Gamma).
+              </span>
+            </div>
+            <span className="font-black px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 text-[10px]">
+              Min R:R ≥ 1:3.0
+            </span>
+          </div>
+
+          {displayedAsymmetric.length === 0 ? (
+            <UnavailableState
+              title="No Qualified Asymmetric Setups Detected"
+              reason="No stocks currently offer a confirmed 1:3.0+ risk-to-reward ratio with strict invalidation pivots. Patience preserves quant capital."
+              size="md"
+            />
+          ) : (
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              {displayedAsymmetric.map((opp) => {
+                const isMax = opp.conviction_score >= 85
+                const badgeColor =
+                  {
+                    POCKET_PIVOT: 'bg-indigo-500/20 text-indigo-300 border-indigo-500/40',
+                    FNO_BAN_SQUEEZE: 'bg-rose-500/20 text-rose-300 border-rose-500/40',
+                    RUBBER_BAND_200EMA: 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40',
+                    EXPIRY_0DTE_GAMMA: 'bg-amber-500/20 text-amber-300 border-amber-500/40',
+                  }[opp.setup_type] || 'bg-gold/20 text-gold border-gold/40'
+
+                const setupTitle =
+                  {
+                    POCKET_PIVOT: '🚀 Pocket Pivot (Base Accumulation)',
+                    FNO_BAN_SQUEEZE: '🔥 F&O Ban Squeeze (MWPL Trap)',
+                    RUBBER_BAND_200EMA: '🧲 Rubber Band (200-EMA Value Dip)',
+                    EXPIRY_0DTE_GAMMA: '⚡ 0DTE Gamma (Straddle Unpinning)',
+                  }[opp.setup_type] || opp.setup_type
+
+                return (
+                  <div
+                    key={`${opp.symbol}-${opp.setup_type}`}
+                    className={`p-4 rounded-2xl bg-panel border transition-all hover:border-emerald-400/50 flex flex-col justify-between gap-3 shadow-sm ${
+                      isMax ? 'border-emerald-400/40 bg-emerald-500/5' : 'border-border'
+                    }`}
+                  >
+                    {/* Header */}
+                    <div className="space-y-1">
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                          <span className="text-base font-black text-text">{opp.symbol}</span>
+                          <span className="px-1.5 py-0.5 text-[10px] font-bold rounded bg-elevated text-muted border border-border">
+                            {opp.segment}
+                          </span>
+                          <span className={`px-2 py-0.5 text-[10px] font-black rounded border ${badgeColor}`}>
+                            {setupTitle}
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-1.5">
+                          <span className="text-xs font-black text-emerald-400">
+                            1:{opp.risk_reward_ratio?.toFixed(1)} R:R
+                          </span>
+                          <span
+                            className={`px-2 py-0.5 text-[11px] font-black rounded-lg ${
+                              isMax ? 'bg-emerald-500 text-panel' : 'bg-gold text-panel'
+                            }`}
+                          >
+                            🧠 {opp.conviction_score}/100
+                          </span>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-2 text-xs text-muted">
+                        <span>
+                          LTP:{' '}
+                          <strong className="text-text">
+                            ₹{opp.ltp?.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                          </strong>
+                        </span>
+                        <span>•</span>
+                        <span>
+                          Risk/Share:{' '}
+                          <strong className="text-rose-400">₹{opp.risk_pts?.toFixed(1)}</strong>
+                        </span>
+                      </div>
+                    </div>
+
+                    {/* Confluences List */}
+                    <div className="space-y-1 bg-elevated p-2 rounded-xl border border-border text-[11px]">
+                      <span className="text-[10px] font-bold text-muted uppercase tracking-wider block">
+                        Institutional Confluences:
+                      </span>
+                      <ul className="space-y-0.5">
+                        {opp.confluences?.slice(0, 3).map((c, idx) => (
+                          <li key={idx} className="text-text flex items-start gap-1">
+                            <span className="text-emerald-400 font-bold">✓</span>
+                            <span>{c}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+
+                    {/* Actionable Blueprint Grid */}
+                    <div className="grid grid-cols-4 gap-1.5 text-center text-xs">
+                      <div className="p-2 rounded-xl bg-elevated border border-border">
+                        <span className="text-[10px] font-bold text-muted block">Entry Band</span>
+                        <span className="font-black text-amber-300 text-[11px] truncate block">
+                          {opp.entry_range}
+                        </span>
+                      </div>
+                      <div className="p-2 rounded-xl bg-elevated border border-border">
+                        <span className="text-[10px] font-bold text-muted block">Stop Loss</span>
+                        <span className="font-black text-rose-400 text-[11px] block">
+                          ₹{opp.stop_loss?.toFixed(1)}
+                        </span>
+                      </div>
+                      <div className="p-2 rounded-xl bg-elevated border border-border">
+                        <span className="text-[10px] font-bold text-muted block">Target 1 (+2R)</span>
+                        <span className="font-black text-emerald-400 text-[11px] block">
+                          ₹{opp.target_1?.toFixed(1)}
+                        </span>
+                      </div>
+                      <div className="p-2 rounded-xl bg-elevated border border-border">
+                        <span className="text-[10px] font-bold text-muted block">Moonshot (+6R)</span>
+                        <span className="font-black text-purple-400 text-[11px] block">
+                          ₹{opp.moonshot_target?.toFixed(1)}
+                        </span>
+                      </div>
+                    </div>
+
+                    {/* Trader Playbook Rules */}
+                    <div className="p-2 rounded-xl bg-elevated/70 border border-border text-[11px] space-y-1">
+                      <div>
+                        <span className="font-bold text-emerald-400">Entry Rule: </span>
+                        <span className="text-muted">{opp.entry_rule}</span>
+                      </div>
+                      <div>
+                        <span className="font-bold text-rose-400">Strict No-Chase: </span>
+                        <span className="text-rose-300">{opp.no_chase_rule}</span>
+                      </div>
+                      <div>
+                        <span className="font-bold text-sky-400">Profit Scaling: </span>
+                        <span className="text-muted">{opp.profit_rule}</span>
+                      </div>
+                    </div>
+
+                    {/* Actions */}
+                    <div className="flex items-center justify-between pt-1 border-t border-border">
+                      <button
+                        onClick={() => handleAnalyze(opp.symbol)}
+                        className="btn btn-xs btn-outline"
+                      >
+                        🔬 Full Audit
+                      </button>
+                      <button
+                        onClick={() => handleBuy(opp)}
+                        className="btn btn-xs bg-emerald-500 hover:bg-emerald-400 text-panel font-black flex items-center gap-1 shadow-sm"
+                      >
+                        <span>⚡</span>
+                        <span>Place Asymmetric Order</span>
+                      </button>
+                    </div>
+                  </div>
+                )
+              })}
             </div>
           )}
         </div>

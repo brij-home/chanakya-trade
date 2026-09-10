@@ -1767,8 +1767,8 @@ class AutoAlertEngine:
 
                 elif alert.stage == "EARLY_WARNING":
                     # Early warnings are preliminary coiling signals -> keep in SSE / Terminal,
-                    # do not buzz Telegram unless exceptionally high confidence (>= 90 for general, >= 80 for PRECURSOR_RADAR)
-                    min_conf = 80 if alert.alert_type == "PRECURSOR_RADAR" else 90
+                    # do not buzz Telegram unless exceptionally high confidence (>= 90 for general, >= 80 for PRECURSOR_RADAR / ASYMMETRIC_OPPORTUNITY)
+                    min_conf = 80 if alert.alert_type in ("PRECURSOR_RADAR", "ASYMMETRIC_OPPORTUNITY") else 90
                     if alert.confidence < min_conf:
                         return
                     m_key = f"{alert.symbol}:{alert.alert_type}:EARLY"
@@ -2035,6 +2035,41 @@ class AutoAlertEngine:
                         f"3️⃣ <b>Profit Rule:</b> {profit_rule}\n\n"
                         f"🕒 <b>Timestamp:</b> {now_ts_str}{off_note}\n"
                         f"⚡ <i>Chanakya Institutional Momentum Intelligence</i>"
+                    )
+                elif alert.alert_type == "ASYMMETRIC_OPPORTUNITY":
+                    act_plan = alert.actionable_plan or {}
+                    entry_range = act_plan.get("entry_range", f"₹{alert.ltp:,.1f}")
+                    t1 = act_plan.get("target", f"₹{alert.target_level:,.1f}")
+                    t2 = act_plan.get("target_2", "Open")
+                    t_moon = act_plan.get("target_moonshot", "Open")
+                    sl = act_plan.get("stop_loss", f"₹{alert.stop_loss:,.1f}")
+                    rr = act_plan.get("risk_reward", "1:4.0")
+                    when_buy = act_plan.get("when_to_buy", "Enter on ask within base.")
+                    when_wait = act_plan.get("when_to_wait", "DO NOT CHASE if price extends past entry range.")
+                    profit_rule = act_plan.get("profit_rule", "Book 50% at T1, move SL to breakeven.")
+                    raw_factors = alert.metrics.get("confluence_factors", []) if alert.metrics else []
+                    factors_str = "\n• ".join(raw_factors[:3]) if raw_factors else f"• {alert.headline}"
+
+                    tg_msg = (
+                        f"🎯 <b>{env_tag} CHANAKYA ASYMMETRIC OPPORTUNITY (LOW RISK : HIGH REWARD)</b>\n"
+                        f"━━━━━━━━━━━━━━━━━━━━\n"
+                        f"<b>{alert.symbol}</b> · <b>R:R {rr}</b> · 🧠 <b>Score: {alert.confidence}/100</b>\n"
+                        f"<i>{alert.headline}</i>\n\n"
+                        f"📊 <b>Confluence Factors:</b>\n"
+                        f"• {factors_str}\n\n"
+                        f"📐 <b>Asymmetric Execution Blueprint:</b>\n"
+                        f"• <b>Entry Zone:</b> <code>{entry_range}</code>\n"
+                        f"• <b>Invalidation SL:</b> <code>{sl}</code> (Strict Floor)\n"
+                        f"• <b>Target 1 (+2R):</b> <code>{t1}</code> — <i>Scale 50% & Lock Risk</i>\n"
+                        f"• <b>Target 2 (+4R):</b> <code>{t2}</code> — <i>Swing Extension</i>\n"
+                        f"• <b>Moonshot (+6R+):</b> <code>{t_moon}</code> — <i>Generational Runner</i>\n"
+                        f"• <b>Risk : Reward Ratio:</b> <b>{rr}</b>\n\n"
+                        f"💡 <b>Trader Playbook:</b>\n"
+                        f"1️⃣ <b>When to Buy:</b> {when_buy}\n"
+                        f"2️⃣ <b>When to Wait:</b> {when_wait}\n"
+                        f"3️⃣ <b>Profit Rule:</b> {profit_rule}\n\n"
+                        f"🕒 <b>Timestamp:</b> {now_ts_str}{off_note}\n"
+                        f"⚡ <i>Chanakya Strategic Asymmetry Intelligence</i>"
                     )
                 else:
                     tg_msg = (
@@ -2777,6 +2812,63 @@ class AutoAlertEngine:
 
         return found
 
+    def scan_asymmetric_opportunities(self) -> list[AutoAlert]:
+        """Scans for high-asymmetry (min 1:3.0 R:R) setups: Pocket Pivot, MWPL Squeeze, 200-EMA dip, 0DTE Gamma."""
+        found: list[AutoAlert] = []
+        try:
+            from engine.asymmetric_radar import asymmetric_radar
+
+            opps = asymmetric_radar.scan_asymmetric_opportunities(top_n=6)
+            now_iso = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
+
+            for opp in opps:
+                alert_id = f"auto-asym-{opp.symbol}-{uuid.uuid4().hex[:6]}"
+                headline = f"🎯 [LOW RISK : HIGH REWARD] {opp.setup_label}: {opp.symbol} (R:R {opp.risk_reward})"
+                summary = (
+                    f"{opp.catalyst_summary} Invalidation SL: ₹{opp.stop_loss:,.1f} | "
+                    f"T1 (+2R): ₹{opp.target_1:,.1f} | T2 (+4R): ₹{opp.target_2:,.1f} | Moonshot: ₹{opp.target_moonshot:,.1f}"
+                )
+
+                alert = AutoAlert(
+                    alert_id=alert_id,
+                    alert_type="ASYMMETRIC_OPPORTUNITY",
+                    stage="EARLY_WARNING",
+                    symbol=opp.symbol,
+                    exchange=opp.exchange,
+                    direction=opp.direction,
+                    headline=headline,
+                    summary=summary,
+                    ltp=opp.ltp,
+                    trigger_level=opp.entry_price,
+                    target_level=opp.target_1,
+                    stop_loss=opp.stop_loss,
+                    confidence=opp.conviction_score,
+                    created_at=now_iso,
+                    is_live=True,
+                    environment="LIVE",
+                    metrics=opp.to_dict(),
+                    actionable_plan={
+                        "action": opp.setup_type,
+                        "segment": opp.segment,
+                        "entry_range": opp.entry_range,
+                        "stop_loss": f"₹{opp.stop_loss:,.1f}",
+                        "target": f"₹{opp.target_1:,.1f}",
+                        "target_2": f"₹{opp.target_2:,.1f}",
+                        "target_moonshot": f"₹{opp.target_moonshot:,.1f}",
+                        "risk_reward": opp.risk_reward,
+                        "when_to_buy": opp.when_to_buy,
+                        "when_to_wait": opp.when_to_wait,
+                        "profit_rule": opp.profit_rule,
+                    },
+                )
+                if self.record_alert(alert):
+                    found.append(alert)
+
+        except Exception as e:
+            logger.debug(f"[AutoAlertEngine] Asymmetric opportunities scan error: {e}")
+
+        return found
+
     def scan_fresh_signals_now(self) -> list[AutoAlert]:
         """Scans watched universe for fresh market signals across all detectors."""
         results: list[AutoAlert] = []
@@ -2786,6 +2878,7 @@ class AutoAlertEngine:
         results.extend(self.scan_pattern_coilings())
         results.extend(self.scan_precursor_radars())
         results.extend(self.scan_intraday_mover_sparks())
+        results.extend(self.scan_asymmetric_opportunities())
         return results
 
     def scan_all_now(self) -> list[AutoAlert]:

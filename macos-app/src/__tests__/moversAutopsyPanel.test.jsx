@@ -117,14 +117,45 @@ describe('MoversAutopsyPanel - Precursors & Institutional Mover Autopsies', () =
     },
   ]
 
+  const sampleAsymmetricOpps = [
+    {
+      symbol: 'TRENT',
+      exchange: 'NSE',
+      segment: 'FNO',
+      setup_type: 'POCKET_PIVOT',
+      conviction_score: 88,
+      verdict: 'HIGH_CONVICTION',
+      ltp: 7120.0,
+      entry_range: '₹7,110.0 – ₹7,140.0',
+      stop_loss: 6980.0,
+      target_1: 7400.0,
+      target_2: 7680.0,
+      moonshot_target: 7960.0,
+      risk_reward_ratio: 4.0,
+      risk_pts: 140.0,
+      reward_t1_pts: 280.0,
+      confluences: [
+        'Pocket Pivot volume signature',
+        'Tight base coiling < 12% width',
+        'RRG Leading momentum',
+      ],
+      entry_rule: 'Enter inside base off 10-EMA support.',
+      no_chase_rule: 'DO NOT CHASE if price exceeds ₹7,140.0.',
+      profit_rule: 'Scale 40% at T1, 40% at T2, trail 20% runner.',
+    },
+  ]
+
   beforeEach(() => {
     mockCall.mockReset()
     mockCall.mockImplementation((endpoint) => {
-      if (endpoint === '/api/movers/autopsy') {
+      if (endpoint?.startsWith('/api/movers/autopsy')) {
         return Promise.resolve({ data: sampleAutopsyData })
       }
       if (endpoint?.startsWith('/api/movers/precursors')) {
         return Promise.resolve({ data: samplePrecursors })
+      }
+      if (endpoint?.startsWith('/api/opportunities/asymmetric')) {
+        return Promise.resolve({ data: sampleAsymmetricOpps })
       }
       if (endpoint === '/api/movers/autopsy/run') {
         return Promise.resolve({ data: sampleAutopsyData })
@@ -247,5 +278,27 @@ describe('MoversAutopsyPanel - Precursors & Institutional Mover Autopsies', () =
       expect(mockCall).toHaveBeenCalledWith('/api/movers/autopsy?segment=INDEX', {}, { method: 'GET' })
       expect(mockCall).toHaveBeenCalledWith('/api/movers/precursors?limit=8&segment=INDEX', {}, { method: 'GET' })
     })
+  })
+
+  it('switches to Asymmetric Setups tab and displays low risk : high reward cards (1:3+ R:R)', async () => {
+    render(<MoversAutopsyPanel onOpenOrderTicket={vi.fn()} />)
+
+    await waitFor(() => {
+      expect(screen.getByText('BHARTIARTL')).toBeTruthy()
+    })
+
+    const asymTabBtn = screen.getByRole('button', { name: /Asymmetric Setups/i })
+    fireEvent.click(asymTabBtn)
+
+    await waitFor(() => {
+      expect(screen.getByText('TRENT')).toBeTruthy()
+    })
+
+    expect(screen.getByText(/1:4\.0 R:R/i)).toBeTruthy()
+    expect(screen.getAllByText(/Pocket Pivot/i).length).toBeGreaterThanOrEqual(1)
+    expect(screen.getByText(/₹7,110\.0 – ₹7,140\.0/)).toBeTruthy()
+    expect(screen.getByText(/₹6980/)).toBeTruthy()
+    expect(screen.getByText(/₹7400/)).toBeTruthy()
+    expect(screen.getByText(/Place Asymmetric Order/i)).toBeTruthy()
   })
 })

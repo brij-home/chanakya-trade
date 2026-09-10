@@ -14,6 +14,7 @@ Commands:
   /macro          — USD/INR, crude, gold snapshot
   /alert SYM above 2800  — Set a price alert
   /alerts         — List active alerts
+  /asymmetric     — Scan low risk : big reward setups (1:3+ R:R)
   /memory         — Recent trade analyses
   /pnl            — Portfolio P&L summary
   /help           — Command reference
@@ -312,6 +313,7 @@ async def cmd_start(update, context) -> None:
         "/conviction [SYMBOL] — 12-factor trade conviction score (0–100)\n"
         "/movers — daily top gainers & losers forensic autopsy\n"
         "/precursors — high-conviction coiling setups before breakout\n"
+        "/asymmetric — scan low risk : big reward setups (1:3+ R:R)\n"
         "/scan [UNIVERSE] — scan top liquid/F&O list for breakouts & gamma blasts\n"
         "/radar — quick market radar on today's top liquid setups\n"
         "/flows — FII/DII flow signals\n"
@@ -1134,6 +1136,75 @@ async def cmd_precursors(update, context) -> None:
         await update.message.reply_text(f"Precursor scan failed: {e}")
 
 
+async def cmd_asymmetric(update, context) -> None:
+    """Handle /asymmetric [type] — Scans for low risk : big reward asymmetric opportunities (1:3+ R:R)."""
+    filter_arg = context.args[0].upper() if context.args else "ALL"
+
+    await update.message.reply_text(
+        "🎯 <b>Scanning Asymmetric High-Reward Setups (1:3+ R:R)...</b>\n"
+        "<i>Searching for Pocket Pivots, F&O Ban Squeezes, Rubber Band 200-EMA dips, and 0DTE Gamma breakouts...</i>",
+        parse_mode="HTML",
+    )
+
+    def _run_asymmetric_summary() -> str:
+        from engine.asymmetric_radar import asymmetric_radar
+
+        opps = asymmetric_radar.scan_opportunities(force_refresh=True)
+        if filter_arg != "ALL":
+            opps = [
+                o
+                for o in opps
+                if filter_arg in o.setup_type.upper()
+                or filter_arg in o.segment.upper()
+                or filter_arg in o.symbol.upper()
+            ]
+
+        if not opps:
+            return (
+                "🛡️ <b>No qualified asymmetric setups right now.</b>\n"
+                "All candidates failed the strict 1:3.0 R:R minimum or 80+ conviction gate.\n"
+                "<i>Remember: Capital preservation is priority #1. Wait for high-asymmetry setups.</i>"
+            )
+
+        lines = [
+            f"🎯 <b>CHANAKYA ASYMMETRIC RADAR — {len(opps)} HIGH R:R SETUPS</b>\n"
+            f"<i>Strictly filtered for Minimum 1:3.0 Risk:Reward & Pre-Ignition Edge:</i>\n",
+        ]
+
+        for o in opps[:5]:
+            setup_icon = {
+                "POCKET_PIVOT": "🚀",
+                "FNO_BAN_SQUEEZE": "🔥",
+                "RUBBER_BAND_200EMA": "🧲",
+                "EXPIRY_0DTE_GAMMA": "⚡",
+            }.get(o.setup_type, "🎯")
+
+            conf_short = (
+                "; ".join(o.confluences[:2]) if o.confluences else "High structural asymmetry"
+            )
+            lines.append(
+                f"{setup_icon} <b>{o.symbol} [{o.segment}]</b> — <b>{o.setup_type.replace('_', ' ')}</b>\n"
+                f"  🧠 <b>Score: {o.conviction_score}/100</b> ({o.verdict}) | <b>1:{o.risk_reward_ratio:.1f} R:R</b>\n"
+                f"  🎯 <b>Entry:</b> <code>{o.entry_range}</code> (Ref: ₹{o.ltp:,.2f})\n"
+                f"  🛑 <b>SL:</b> <code>₹{o.stop_loss:,.2f}</code> | <b>T1:</b> <code>₹{o.target_1:,.2f}</code> | <b>Moonshot:</b> <code>₹{o.moonshot_target:,.2f}</code>\n"
+                f"  📊 <i>{conf_short}</i>\n"
+                f"  ⚠️ <b>Rule:</b> <i>{o.no_chase_rule}</i>\n"
+            )
+
+        lines.append("⚡ <i>Chanakya Low-Risk : High-Reward Radar</i>")
+        return "\n".join(lines)
+
+    try:
+        loop = asyncio.get_running_loop()
+        res_text = await asyncio.wait_for(
+            loop.run_in_executor(None, _run_asymmetric_summary),
+            timeout=45,
+        )
+        await update.message.reply_text(res_text, parse_mode="HTML")
+    except Exception as e:
+        await update.message.reply_text(f"Asymmetric scan failed: {e}")
+
+
 async def cmd_unknown(update, context) -> None:
     """Handle unknown messages."""
     await update.message.reply_text("Unknown command. Type /help for available commands.")
@@ -1713,6 +1784,67 @@ def send_precursor_push(candidate_dict: dict) -> bool:
         return False
 
 
+def format_asymmetric_alert(opp_dict: dict) -> str:
+    """Format a high-conviction Asymmetric Opportunity (1:3+ R:R) alert for Telegram push."""
+    sym = opp_dict.get("symbol", "STOCK")
+    seg = opp_dict.get("segment", "FNO")
+    setup_type = opp_dict.get("setup_type", "ASYMMETRIC")
+    score = opp_dict.get("conviction_score", 85)
+    verdict = opp_dict.get("verdict", "HIGH_CONVICTION")
+    ltp = opp_dict.get("ltp", 0.0)
+    entry_range = opp_dict.get("entry_range", f"₹{ltp:,.1f}")
+    sl = opp_dict.get("stop_loss", 0.0)
+    t1 = opp_dict.get("target_1", 0.0)
+    t2 = opp_dict.get("target_2", 0.0)
+    moonshot = opp_dict.get("moonshot_target", 0.0)
+    rr = opp_dict.get("risk_reward_ratio", 3.0)
+    entry_rule = opp_dict.get("entry_rule", "Enter strictly within entry band.")
+    no_chase = opp_dict.get("no_chase_rule", "DO NOT CHASE if price exceeds entry range.")
+    profit_rule = opp_dict.get("profit_rule", "Scale 40% at T1, 40% at T2, trail 20% moonshot.")
+    confluences = opp_dict.get("confluences", [])
+    conf_str = "\n• ".join(confluences[:3]) if confluences else "• High asymmetric edge"
+
+    setup_badge = {
+        "POCKET_PIVOT": "🚀 POCKET PIVOT (Base Accumulation)",
+        "FNO_BAN_SQUEEZE": "🔥 F&O BAN SQUEEZE (MWPL Trap)",
+        "RUBBER_BAND_200EMA": "🧲 RUBBER BAND 200-EMA (Deep Value)",
+        "EXPIRY_0DTE_GAMMA": "⚡ 0DTE EXPIRY GAMMA (Straddle Unpinning)",
+    }.get(setup_type, f"🎯 {setup_type}")
+
+    msg = (
+        f"🎯 <b>CHANAKYA ASYMMETRIC OPPORTUNITY [1:{rr:.1f} R:R]</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"<b>{sym} [{seg}]</b> · <b>{setup_badge}</b>\n"
+        f"🧠 <b>Score: {score}/100</b> ({verdict})\n\n"
+        f"📊 <b>Institutional Confluences:</b>\n"
+        f"• {conf_str}\n\n"
+        f"🎯 <b>Asymmetric Payoff Blueprint:</b>\n"
+        f"• <b>Entry Zone:</b> <code>{entry_range}</code> (Ref: ₹{ltp:,.2f})\n"
+        f"• <b>Invalidation SL:</b> <code>₹{sl:,.2f}</code> (Risk: ₹{abs(ltp - sl):,.2f})\n"
+        f"• <b>Target 1 (+2R):</b> <code>₹{t1:,.2f}</code> — <i>Scale 40% & SL to Cost</i>\n"
+        f"• <b>Target 2 (+4R):</b> <code>₹{t2:,.2f}</code> — <i>Scale 40% & Trail</i>\n"
+        f"• <b>Moonshot (+6R+):</b> <code>₹{moonshot:,.2f}</code> — <i>Runner Extension</i>\n"
+        f"• <b>Risk : Reward:</b> <b>1:{rr:.1f} R:R</b>\n\n"
+        f"💡 <b>Execution Protocol:</b>\n"
+        f"1️⃣ <b>Entry:</b> {entry_rule}\n"
+        f"2️⃣ <b>Strict No-Chase:</b> {no_chase}\n"
+        f"3️⃣ <b>Profit Taking:</b> {profit_rule}\n\n"
+        f"⚡ <i>Chanakya Low-Risk : High-Reward Radar</i>"
+    )
+    return msg
+
+
+def send_asymmetric_push(opp_dict: dict) -> bool:
+    """Send an actionable Asymmetric Opportunity alert notification to Telegram."""
+    try:
+        msg = format_asymmetric_alert(opp_dict)
+        send_push(msg, parse_mode="HTML", bypass_dedup=True)
+        return True
+    except Exception as e:
+        logger.warning(f"Failed to send asymmetric push to Telegram: {e}")
+        return False
+
+
 # ── Alert Integration ────────────────────────────────────────
 
 
@@ -1759,6 +1891,8 @@ def run_bot() -> None:
     app.add_handler(CommandHandler("conviction", _track_command(cmd_conviction)))
     app.add_handler(CommandHandler("movers", _track_command(cmd_movers)))
     app.add_handler(CommandHandler("precursors", _track_command(cmd_precursors)))
+    app.add_handler(CommandHandler("asymmetric", _track_command(cmd_asymmetric)))
+    app.add_handler(CommandHandler("opps", _track_command(cmd_asymmetric)))
     app.add_handler(CommandHandler("scan", _track_command(cmd_scan)))
     app.add_handler(CommandHandler("radar", _track_command(cmd_scan)))
     app.add_handler(CommandHandler("flows", _track_command(cmd_flows)))

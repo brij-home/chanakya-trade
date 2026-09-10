@@ -2929,6 +2929,73 @@ async def get_mover_precursors(limit: int = 5, segment: Optional[str] = None):
     return {"status": "ok", "data": [c.to_dict() for c in candidates]}
 
 
+# ── Asymmetric Opportunities (Low Risk : High Reward) Endpoints ────────
+
+
+@app.get("/api/opportunities/asymmetric", tags=["Asymmetric Opportunities"])
+async def get_asymmetric_opportunities(
+    limit: int = 8,
+    segment: Optional[str] = None,
+    setup_type: Optional[str] = None,
+):
+    """
+    Returns active high-asymmetry (low risk : high reward) trade setups.
+    Covers: Pocket Pivot, F&O Ban Squeeze, Rubber Band 200-EMA, 0DTE Gamma.
+    """
+    from engine.asymmetric_radar import asymmetric_radar
+
+    opps = await asyncio.to_thread(
+        asymmetric_radar.scan_asymmetric_opportunities,
+        segment=segment,
+        top_n=limit,
+    )
+    if setup_type and setup_type.upper() not in ("ALL", ""):
+        st_upper = setup_type.upper()
+        opps = [o for o in opps if o.setup_type == st_upper]
+
+    return {"status": "ok", "data": [o.to_dict() for o in opps]}
+
+
+@app.post("/api/opportunities/asymmetric/scan", tags=["Asymmetric Opportunities"])
+async def run_asymmetric_opportunities_scan(payload: Optional[dict] = None):
+    """
+    Trigger on-demand sweep across market universes for low-risk, high-reward setups.
+    """
+    from engine.asymmetric_radar import asymmetric_radar
+
+    top_n = payload.get("top_n", 8) if payload else 8
+    segment = payload.get("segment") if payload else None
+    setup_type = payload.get("setup_type") if payload else None
+
+    opps = await asyncio.to_thread(
+        asymmetric_radar.scan_asymmetric_opportunities,
+        segment=segment,
+        top_n=top_n,
+    )
+    if setup_type and setup_type.upper() not in ("ALL", ""):
+        st_upper = setup_type.upper()
+        opps = [o for o in opps if o.setup_type == st_upper]
+
+    # Publish SSE notification for UI toasts and instant reactive refresh
+    try:
+        from web.sse import event_bus
+
+        event_bus.publish_sync(
+            "system",
+            {
+                "type": "asymmetric_scan_completed",
+                "segment": segment or "ALL",
+                "count": len(opps),
+                "top_opportunity": opps[0].symbol if opps else None,
+            },
+        )
+    except Exception:
+        pass
+
+    return {"status": "ok", "data": [o.to_dict() for o in opps]}
+
+
+
 @app.post("/api/quotes/batch", tags=["Market Data"])
 async def api_quotes_batch(req: dict):
     """Sidecar batch quote query endpoint."""
