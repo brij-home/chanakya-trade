@@ -445,5 +445,3 @@ def test_scrutiny_ttl_cache(auditor):
         assert res2.status == "APPROVED"
         assert res2.score == res1.score
         assert mock_llm2.call_count == 0
-
-

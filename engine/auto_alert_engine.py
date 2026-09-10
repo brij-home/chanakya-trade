@@ -188,7 +188,6 @@ class AutoAlert:
 
         return False
 
-
     @property
     def is_active(self) -> bool:
         """A trade is active if it is not archived, not invalidated, not expired, and has not completed final target."""
@@ -1735,7 +1734,9 @@ def get_current_ist_session(ref_dt: Optional[datetime] = None) -> dict[str, bool
 
     # Post-Equity Session: Currency (15:30 - 17:00 IST) and Commodities (15:30 - 23:30 IST)
     # Currency is also valid 09:00 - 09:15 IST before domestic equity opens
-    is_currency = (dtime(9, 0) <= current_t < dtime(9, 15)) or (dtime(15, 30) < current_t <= dtime(17, 0))
+    is_currency = (dtime(9, 0) <= current_t < dtime(9, 15)) or (
+        dtime(15, 30) < current_t <= dtime(17, 0)
+    )
     is_commodity = dtime(15, 30) < current_t <= dtime(23, 30)
 
     return {
@@ -1847,14 +1848,16 @@ class AutoAlertEngine:
             .strip()
             .upper()
         )
-        is_sim = (alert.environment == "TEST") or (not alert.is_live) or alert.alert_id.startswith("test-")
+        is_sim = (
+            (alert.environment == "TEST")
+            or (not alert.is_live)
+            or alert.alert_id.startswith("test-")
+        )
 
         # 0. Closed-Loop Invalidation Lockout Guard (Negative Feedback Loop)
         if not is_sim:
             underlying_sym = (
-                (alert.metrics or {}).get("underlying")
-                if isinstance(alert.metrics, dict)
-                else None
+                (alert.metrics or {}).get("underlying") if isinstance(alert.metrics, dict) else None
             )
             if not underlying_sym:
                 try:
@@ -1962,8 +1965,12 @@ class AutoAlertEngine:
                             rel_strikes.append(c_tag)
 
                         inc_vol_oi = float((alert.metrics or {}).get("vol_oi_ratio", 0.0) or 0.0)
-                        cur_vol_oi = float((existing_opt.metrics or {}).get("vol_oi_ratio", 0.0) or 0.0)
-                        if alert.confidence > existing_opt.confidence or inc_vol_oi > (cur_vol_oi * 1.25):
+                        cur_vol_oi = float(
+                            (existing_opt.metrics or {}).get("vol_oi_ratio", 0.0) or 0.0
+                        )
+                        if alert.confidence > existing_opt.confidence or inc_vol_oi > (
+                            cur_vol_oi * 1.25
+                        ):
                             existing_opt.contract_symbol = alert.contract_symbol
                             existing_opt.strike = alert.strike
                             existing_opt.option_type = alert.option_type
@@ -2029,9 +2036,7 @@ class AutoAlertEngine:
                             )
                             existing_opp.is_invalidated = True
                             existing_opp.stage = "INVALIDATED"
-                            existing_opp.invalidation_reason = (
-                                f"Superseded by structural {alert.direction} reversal ({alert.alert_type})"
-                            )
+                            existing_opp.invalidation_reason = f"Superseded by structural {alert.direction} reversal ({alert.alert_type})"
                             self._save()
 
                 # 2. Signature-based cooldown check (differentiating options contracts by symbol/strike)
@@ -2116,7 +2121,9 @@ class AutoAlertEngine:
                 from engine.alert_scrutiny import alert_scrutiny_auditor
 
                 # Tier 1 Deterministic Mathematical Sanity Gate
-                passed, failure_reason, sanity_flags = alert_scrutiny_auditor.verify_tier1_sanity(alert)
+                passed, failure_reason, sanity_flags = alert_scrutiny_auditor.verify_tier1_sanity(
+                    alert
+                )
                 if not passed:
                     logger.info(
                         f"[AutoAlertEngine] Tier-1 Sanity Veto for {alert.symbol} ({alert.alert_type}): {failure_reason}"
@@ -2337,7 +2344,13 @@ class AutoAlertEngine:
             # 1. Strictly suppress intraday fast-derivatives / scalps (Gamma Blasts, Options Momentum, Intraday Sparks, Circuit Proximity).
             # 2. Only permit high-conviction positional swing setups (Precursor Radar, Asymmetric Opportunity, Squeeze) with confidence >= 90%.
             # 3. Existing position lifecycle updates (Invalidations, Targets, Trailing stops) remain permitted.
-            is_milestone = alert.is_invalidated or alert.stage == "INVALIDATED" or is_t1 or is_target or is_trail
+            is_milestone = (
+                alert.is_invalidated
+                or alert.stage == "INVALIDATED"
+                or is_t1
+                or is_target
+                or is_trail
+            )
             if not in_market and not is_milestone:
                 if alert.alert_type in (
                     "GAMMA_BLAST",
@@ -2417,7 +2430,6 @@ class AutoAlertEngine:
             _telegram_notify(tg_msg)
         except Exception:
             pass
-
 
         # 4. Terminal Notification (Rich Panel)
         try:
@@ -3277,7 +3289,6 @@ class AutoAlertEngine:
                     contract_symbol=None,  # Keep primary alert anchored to underlying spot price levels
                     expiry_date=opp.expiry_date,
                     option_premium=opp.option_premium,
-
                     confidence=opp.conviction_score,
                     created_at=now_iso,
                     is_live=True,
@@ -3382,7 +3393,9 @@ class AutoAlertEngine:
                     alert_id = f"aa-optmom-{opt_type.lower()}-{clean_sym}-{int(strike)}-{uuid.uuid4().hex[:6]}"
 
                     # Option target and risk calculation (strict 1:3.5 R:R)
-                    risk_pts = round(max(0.20, opt_ltp * 0.25), 2)  # 25% defined risk stop (min 20 paise / 4 ticks floor)
+                    risk_pts = round(
+                        max(0.20, opt_ltp * 0.25), 2
+                    )  # 25% defined risk stop (min 20 paise / 4 ticks floor)
                     opt_sl = round(max(0.05, opt_ltp - risk_pts), 2)
                     opt_t1 = round(opt_ltp + 2.0 * risk_pts, 2)
                     opt_t2 = round(opt_ltp + 3.5 * risk_pts, 2)
@@ -3495,7 +3508,6 @@ class AutoAlertEngine:
         Active during post-equity session (15:30 - 23:30 IST).
         """
         from market.quotes import get_quote
-        from market.history import get_ohlcv
 
         found: list[AutoAlert] = []
         universe = self.watched_commodities
@@ -3523,7 +3535,11 @@ class AutoAlertEngine:
             # 1. Sanitize VWAP: discard corrupted/mock zero or sub-50% values
             raw_vwap = getattr(q, "vwap", None)
             try:
-                vwap = float(raw_vwap) if (raw_vwap is not None and float(raw_vwap) > (ltp * 0.5)) else ltp
+                vwap = (
+                    float(raw_vwap)
+                    if (raw_vwap is not None and float(raw_vwap) > (ltp * 0.5))
+                    else ltp
+                )
             except Exception:
                 vwap = ltp
 
@@ -3570,7 +3586,9 @@ class AutoAlertEngine:
                 t1_price = round(ltp + 1.8 * risk_pts, 2)
                 t2_price = round(ltp + 3.2 * risk_pts, 2)
                 if has_real_vwap:
-                    headline = f"MCX MOMENTUM: {clean_sym} +{chg:.1f}% Reclaiming VWAP (₹{vwap:,.1f})"
+                    headline = (
+                        f"MCX MOMENTUM: {clean_sym} +{chg:.1f}% Reclaiming VWAP (₹{vwap:,.1f})"
+                    )
                     summary = f"Institutional breakout in {clean_sym}: Trading at ₹{ltp:,.1f} (+{chg:.1f}%). VWAP support at ₹{vwap:,.1f}."
                 else:
                     headline = f"MCX MOMENTUM: {clean_sym} +{chg:.1f}% Breakout @ ₹{ltp:,.1f}"
@@ -3596,9 +3614,7 @@ class AutoAlertEngine:
 
                 chain = get_options_chain(clean_sym)
                 opt_type = "CE" if is_bullish else "PE"
-                filtered = [
-                    c for c in chain if c.option_type == opt_type and c.last_price > 0
-                ]
+                filtered = [c for c in chain if c.option_type == opt_type and c.last_price > 0]
                 if filtered:
                     closest_opt = min(filtered, key=lambda c: abs(c.strike - ltp))
                     opt_prem = closest_opt.last_price
@@ -3644,7 +3660,9 @@ class AutoAlertEngine:
                 or getattr(q, "provider", "") in ("mock", "TEST")
                 or getattr(q, "data_state", "") == "UNAVAILABLE"
             )
-            is_test_env = os.environ.get("CHANAKYA_TESTING") == "1" or os.environ.get("DEPLOY_MODE") == "test"
+            is_test_env = (
+                os.environ.get("CHANAKYA_TESTING") == "1" or os.environ.get("DEPLOY_MODE") == "test"
+            )
             is_authentic_live = not (is_mock_quote or is_test_env)
 
             alert = AutoAlert(
@@ -3742,7 +3760,9 @@ class AutoAlertEngine:
                 or getattr(q, "provider", "") in ("mock", "TEST")
                 or getattr(q, "data_state", "") == "UNAVAILABLE"
             )
-            is_test_env = os.environ.get("CHANAKYA_TESTING") == "1" or os.environ.get("DEPLOY_MODE") == "test"
+            is_test_env = (
+                os.environ.get("CHANAKYA_TESTING") == "1" or os.environ.get("DEPLOY_MODE") == "test"
+            )
             is_authentic_live = not (is_mock_quote or is_test_env)
 
             alert = AutoAlert(

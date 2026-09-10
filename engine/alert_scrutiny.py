@@ -117,7 +117,9 @@ class AlertScrutinyAuditor:
             is_option_premium_levels = False
         elif getattr(alert, "option_premium", None) is not None:
             # Check if ltp is close to option_premium (within 15% tolerance for intraday movement)
-            is_option_premium_levels = abs(ltp - float(alert.option_premium)) < max(1.0, float(alert.option_premium) * 0.15)
+            is_option_premium_levels = abs(ltp - float(alert.option_premium)) < max(
+                1.0, float(alert.option_premium) * 0.15
+            )
         else:
             is_option_premium_levels = False
 
@@ -222,15 +224,35 @@ class AlertScrutinyAuditor:
         Uses in-memory TTL cache (90s) to prevent LLM rate limit exhaustion during rapid scanning loops.
         """
         # Step 0: Check In-Memory TTL Cache
-        sym = getattr(alert, "symbol", "") or (alert.get("symbol", "") if isinstance(alert, dict) else "")
-        atype = getattr(alert, "alert_type", "") or (alert.get("alert_type", "") if isinstance(alert, dict) else "")
-        direction = getattr(alert, "direction", "") or (alert.get("direction", "") if isinstance(alert, dict) else "")
-        contract = getattr(alert, "contract_symbol", "") or (alert.get("contract_symbol", "") if isinstance(alert, dict) else "")
-        strike = getattr(alert, "strike", None) or (alert.get("strike", None) if isinstance(alert, dict) else None)
-        ltp = float(getattr(alert, "ltp", 0.0) or (alert.get("ltp", 0.0) if isinstance(alert, dict) else 0.0) or 0.0)
-        trig = float(getattr(alert, "trigger_level", 0.0) or (alert.get("trigger_level", 0.0) if isinstance(alert, dict) else 0.0) or 0.0)
+        sym = getattr(alert, "symbol", "") or (
+            alert.get("symbol", "") if isinstance(alert, dict) else ""
+        )
+        atype = getattr(alert, "alert_type", "") or (
+            alert.get("alert_type", "") if isinstance(alert, dict) else ""
+        )
+        direction = getattr(alert, "direction", "") or (
+            alert.get("direction", "") if isinstance(alert, dict) else ""
+        )
+        contract = getattr(alert, "contract_symbol", "") or (
+            alert.get("contract_symbol", "") if isinstance(alert, dict) else ""
+        )
+        strike = getattr(alert, "strike", None) or (
+            alert.get("strike", None) if isinstance(alert, dict) else None
+        )
+        ltp = float(
+            getattr(alert, "ltp", 0.0)
+            or (alert.get("ltp", 0.0) if isinstance(alert, dict) else 0.0)
+            or 0.0
+        )
+        trig = float(
+            getattr(alert, "trigger_level", 0.0)
+            or (alert.get("trigger_level", 0.0) if isinstance(alert, dict) else 0.0)
+            or 0.0
+        )
 
-        cache_key = f"{sym}:{atype}:{direction}:{contract}:{strike}:{round(ltp, 1)}:{round(trig, 1)}"
+        cache_key = (
+            f"{sym}:{atype}:{direction}:{contract}:{strike}:{round(ltp, 1)}:{round(trig, 1)}"
+        )
         now = time.time()
         with self._cache_lock:
             if cache_key in self._cache:
@@ -318,7 +340,12 @@ class AlertScrutinyAuditor:
         except Exception:
             # Resilient fallback: regex field extraction to prevent losing valid audits
             data = {}
-            for field in ("verdict", "logic_confirmation", "trap_risk_warning", "actionable_guidance"):
+            for field in (
+                "verdict",
+                "logic_confirmation",
+                "trap_risk_warning",
+                "actionable_guidance",
+            ):
                 m = re.search(rf'"{field}"\s*:\s*"([^"]+)"', raw_text)
                 if m:
                     data[field] = m.group(1)
