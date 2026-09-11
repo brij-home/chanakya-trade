@@ -59,6 +59,8 @@ import logging
 import os
 import subprocess
 import sys
+import threading
+import time
 from abc import ABC, abstractmethod
 from typing import Any
 
@@ -549,6 +551,7 @@ class OpenAIProvider(LLMProvider):
             self._clients = [_sdk.OpenAI(api_key=k, base_url=resolved_base) for k in self._api_keys]
             self._client_idx = 0
             self._client_cooldowns: dict[int, float] = {}
+            self._pool_lock = threading.Lock()
             self._client = self._clients[0]
             self._base_url = resolved_base
         except ImportError:
@@ -569,38 +572,40 @@ class OpenAIProvider(LLMProvider):
 
     def is_pool_available(self) -> bool:
         """Return True if at least one API client in the pool is not currently in cooldown."""
-        import time
-
         now = time.time()
-        if not self._clients:
-            return False
-        return any(now >= self._client_cooldowns.get(i, 0.0) for i in range(len(self._clients)))
+        with self._pool_lock:
+            if not self._clients:
+                return False
+            return any(now >= self._client_cooldowns.get(i, 0.0) for i in range(len(self._clients)))
+
+    def _earliest_resume(self) -> float:
+        """Return the earliest cooldown expiration timestamp across all pooled clients."""
+        with self._pool_lock:
+            return min(self._client_cooldowns.values()) if self._client_cooldowns else time.time()
 
     def _get_active_client(self) -> tuple[int, Any]:
         """Return (key_index, Client) using round-robin rotation, skipping rate-limited keys."""
-        import time
-
         now = time.time()
-        n = len(self._clients)
-        for i in range(n):
-            idx = (self._client_idx + i) % n
-            cooldown_until = self._client_cooldowns.get(idx, 0.0)
-            if now >= cooldown_until:
-                self._client_idx = (idx + 1) % n
-                return idx, self._clients[idx]
+        with self._pool_lock:
+            n = len(self._clients)
+            for i in range(n):
+                idx = (self._client_idx + i) % n
+                cooldown_until = self._client_cooldowns.get(idx, 0.0)
+                if now >= cooldown_until:
+                    self._client_idx = (idx + 1) % n
+                    return idx, self._clients[idx]
 
-        earliest_idx = (
-            min(self._client_cooldowns, key=self._client_cooldowns.get)
-            if self._client_cooldowns
-            else 0
-        )
-        return earliest_idx, self._clients[earliest_idx]
+            earliest_idx = (
+                min(self._client_cooldowns, key=self._client_cooldowns.get)
+                if self._client_cooldowns
+                else 0
+            )
+            return earliest_idx, self._clients[earliest_idx]
 
     def _mark_key_cooldown(self, key_idx: int, cooldown_seconds: float = 45.0) -> None:
         """Mark a specific key index as temporarily in cooldown."""
-        import time
-
-        self._client_cooldowns[key_idx] = time.time() + cooldown_seconds
+        with self._pool_lock:
+            self._client_cooldowns[key_idx] = time.time() + cooldown_seconds
 
     def chat(
         self,
@@ -692,9 +697,7 @@ class OpenAIProvider(LLMProvider):
         import time
 
         if not self.is_pool_available():
-            earliest_resume = (
-                min(self._client_cooldowns.values()) if self._client_cooldowns else time.time()
-            )
+            earliest_resume = self._earliest_resume()
             wait_sec = max(1.0, earliest_resume - time.time())
             raise RuntimeError(
                 f"Rate limit cooldown active across all pooled API keys. Resumes in {wait_sec:.1f}s"
@@ -852,9 +855,7 @@ class OpenAIProvider(LLMProvider):
         import time
 
         if not self.is_pool_available():
-            earliest_resume = (
-                min(self._client_cooldowns.values()) if self._client_cooldowns else time.time()
-            )
+            earliest_resume = self._earliest_resume()
             wait_sec = max(1.0, earliest_resume - time.time())
             raise RuntimeError(
                 f"Rate limit cooldown active across all pooled API keys. Resumes in {wait_sec:.1f}s"
@@ -2124,6 +2125,7 @@ class GeminiProvider(LLMProvider):
             self._clients = [genai.Client(api_key=k) for k in self._api_keys]
             self._client_idx = 0
             self._client_cooldowns: dict[int, float] = {}
+            self._pool_lock = threading.Lock()
             self._tools_schema = self._build_gemini_tools()
         except ImportError:
             raise RuntimeError(
@@ -2138,32 +2140,43 @@ class GeminiProvider(LLMProvider):
         pool_str = f" ({key_count} keys pooled)" if key_count > 1 else ""
         return f"Google Gemini / {self.model or GEMINI_DEFAULT_MODEL}{pool_str}"
 
+    def is_pool_available(self) -> bool:
+        """Return True if at least one API client in the pool is not currently in cooldown."""
+        now = time.time()
+        with self._pool_lock:
+            if not self._clients:
+                return False
+            return any(now >= self._client_cooldowns.get(i, 0.0) for i in range(len(self._clients)))
+
+    def _earliest_resume(self) -> float:
+        """Return the earliest cooldown expiration timestamp across all pooled clients."""
+        with self._pool_lock:
+            return min(self._client_cooldowns.values()) if self._client_cooldowns else time.time()
+
     def _get_active_client(self) -> tuple[int, Any]:
         """Return (key_index, Client) using round-robin rotation and skipping rate-limited keys."""
-        import time
-
         now = time.time()
-        n = len(self._clients)
-        for i in range(n):
-            idx = (self._client_idx + i) % n
-            cooldown_until = self._client_cooldowns.get(idx, 0.0)
-            if now >= cooldown_until:
-                self._client_idx = (idx + 1) % n
-                return idx, self._clients[idx]
+        with self._pool_lock:
+            n = len(self._clients)
+            for i in range(n):
+                idx = (self._client_idx + i) % n
+                cooldown_until = self._client_cooldowns.get(idx, 0.0)
+                if now >= cooldown_until:
+                    self._client_idx = (idx + 1) % n
+                    return idx, self._clients[idx]
 
-        # If all keys are in cooldown, select the one with earliest expiration
-        earliest_idx = (
-            min(self._client_cooldowns, key=self._client_cooldowns.get)
-            if self._client_cooldowns
-            else 0
-        )
-        return earliest_idx, self._clients[earliest_idx]
+            # If all keys are in cooldown, select the one with earliest expiration
+            earliest_idx = (
+                min(self._client_cooldowns, key=self._client_cooldowns.get)
+                if self._client_cooldowns
+                else 0
+            )
+            return earliest_idx, self._clients[earliest_idx]
 
     def _mark_key_cooldown(self, key_idx: int, cooldown_seconds: float = 45.0) -> None:
         """Mark a specific key index as temporarily in cooldown."""
-        import time
-
-        self._client_cooldowns[key_idx] = time.time() + cooldown_seconds
+        with self._pool_lock:
+            self._client_cooldowns[key_idx] = time.time() + cooldown_seconds
 
     def _build_gemini_tools(self, include: list[str] | set[str] | None = None) -> list:
         """Convert ToolRegistry to Gemini FunctionDeclaration format."""

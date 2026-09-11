@@ -18,9 +18,15 @@ from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+import threading
 from typing import Any, Generator, Optional
 
 from config.paths import app_data_path
+from engine.db_pool import SQLiteConnectionPool
+
+
+_AUDIT_POOL: Optional[SQLiteConnectionPool] = None
+_AUDIT_POOL_LOCK = threading.Lock()
 
 
 def _get_db_path() -> Path:
@@ -29,13 +35,34 @@ def _get_db_path() -> Path:
     return p
 
 
+def _get_audit_pool() -> SQLiteConnectionPool:
+    global _AUDIT_POOL
+    current_path = str(_get_db_path())
+    if _AUDIT_POOL is None or _AUDIT_POOL._closed or _AUDIT_POOL.db_path != current_path:
+        with _AUDIT_POOL_LOCK:
+            if _AUDIT_POOL is None or _AUDIT_POOL._closed or _AUDIT_POOL.db_path != current_path:
+                if _AUDIT_POOL and not _AUDIT_POOL._closed:
+                    try:
+                        _AUDIT_POOL.close()
+                    except Exception:
+                        pass
+                _AUDIT_POOL = SQLiteConnectionPool(current_path, max_conns=5)
+    return _AUDIT_POOL
+
+
 @contextmanager
 def _get_audit_db() -> Generator[sqlite3.Connection, None, None]:
-    conn = sqlite3.connect(_get_db_path(), timeout=30.0)
-    try:
+    with _get_audit_pool().acquire() as conn:
         yield conn
-    finally:
-        conn.close()
+
+
+def close_audit_db() -> None:
+    """Close all pooled connections for audit."""
+    global _AUDIT_POOL
+    with _AUDIT_POOL_LOCK:
+        if _AUDIT_POOL is not None:
+            _AUDIT_POOL.close()
+            _AUDIT_POOL = None
 
 
 @dataclass

@@ -15,976 +15,31 @@ import UnavailableState from '../Common/UnavailableState'
 import MoversAutopsyPanel from './MoversAutopsyPanel'
 import AlertRoutingModal from '../Modals/AlertRoutingModal'
 
-// ─── LiveSpotsContext ────────────────────────────────────────────────────────
-// Stores live quote data in a ref (never triggers parent re-renders).
-// Cards subscribe to individual symbols; only the affected card re-renders.
-// This is the canonical solution for high-frequency streaming data in React.
-const LiveSpotsCtx = createContext(null)
-
-function LiveSpotsProvider({ children }) {
-  // The actual quote store — a ref, not state. Writing here is ZERO re-renders.
-  const spotsRef = useRef({})
-  // Map of symbol → Set<forceUpdate function> for surgical card updates
-  const subscribersRef = useRef({})
-
-  const subscribe = useCallback((symbol, forceUpdate) => {
-    if (!symbol) return () => {}
-    if (!subscribersRef.current[symbol]) subscribersRef.current[symbol] = new Set()
-    subscribersRef.current[symbol].add(forceUpdate)
-    return () => subscribersRef.current[symbol]?.delete(forceUpdate)
-  }, [])
-
-  const publish = useCallback((quotesMap) => {
-    // quotesMap: { [symbol]: { ltp, change_pct, flash, ... } }
-    const prev = spotsRef.current
-    const next = { ...prev }
-    const changedSymbols = new Set()
-
-    for (const [sym, q] of Object.entries(quotesMap)) {
-      if (!q || q.ltp === undefined || q.ltp === null) continue
-      const oldEntry = prev[sym]
-      const ltp = Number(q.ltp)
-      const flash = oldEntry?.ltp !== undefined && oldEntry.ltp !== ltp
-        ? (ltp > oldEntry.ltp ? 'up' : 'down')
-        : null
-      next[sym] = { ltp, change_pct: q.change_pct, change: q.change, high: q.high, low: q.low, flash }
-      changedSymbols.add(sym)
-    }
-    spotsRef.current = next
-
-    // Notify only the subscribers for changed symbols
-    for (const sym of changedSymbols) {
-      subscribersRef.current[sym]?.forEach((fn) => fn())
-    }
-
-    // Clear flash indicators after 750ms (targeted)
-    if (changedSymbols.size > 0) {
-      setTimeout(() => {
-        const nowSpots = spotsRef.current
-        const cleared = { ...nowSpots }
-        let changed = false
-        for (const sym of changedSymbols) {
-          if (cleared[sym]?.flash) {
-            cleared[sym] = { ...cleared[sym], flash: null }
-            changed = true
-          }
-        }
-        if (changed) {
-          spotsRef.current = cleared
-          for (const sym of changedSymbols) {
-            subscribersRef.current[sym]?.forEach((fn) => fn())
-          }
-        }
-      }, 750)
-    }
-  }, [])
-
-  const get = useCallback((symbol) => spotsRef.current[symbol] ?? null, [])
-
-  const ctx = useMemo(() => ({ subscribe, publish, get }), [subscribe, publish, get])
-
-  return <LiveSpotsCtx.Provider value={ctx}>{children}</LiveSpotsCtx.Provider>
-}
-
-/**
- * useLiveSpot(symbol) — Subscribe to real-time price for a single symbol.
- * The card re-renders ONLY when the quoted LTP for THIS symbol changes.
- * The parent AlertsView and sibling cards do NOT re-render.
- */
-function useLiveSpot(symbol) {
-  const ctx = useContext(LiveSpotsCtx)
-  const [, forceUpdate] = useState(0)
-  const forceUpdateRef = useRef()
-  forceUpdateRef.current = () => forceUpdate((n) => n + 1)
-
-  useEffect(() => {
-    if (!ctx || !symbol) return
-    // Pass a stable wrapper so forceUpdateRef.current can be swapped without re-subscribing
-    const fn = () => forceUpdateRef.current()
-    return ctx.subscribe(symbol, fn)
-  }, [ctx, symbol])
-
-  return ctx?.get(symbol) ?? null
-}
-
-/**
- * Canonical batch quote response unwrapper.
- * Handles both: { quotes: {...} } and flat { SYM: {...} } dicts.
- */
-function extractQuotes(res) {
-  const d = res?.data ?? res ?? {}
-  if (d && typeof d === 'object' && d.quotes && typeof d.quotes === 'object' && !d.quotes.ltp) {
-    // Nested: { quotes: { SYM: {...} } } — strip the wrapper
-    return d.quotes
-  }
-  // Flat dict or unknown shape — filter out metadata keys and return
-  const out = {}
-  for (const [k, v] of Object.entries(d)) {
-    if (v && typeof v === 'object' && v.ltp !== undefined) out[k] = v
-  }
-  return Object.keys(out).length > 0 ? out : d
-}
-
-const TYPE_STYLE = {
-  PRICE: { icon: '💰', color: 'var(--color-gold)' },
-  TECHNICAL: { icon: '📊', color: 'var(--color-violet)' },
-  CONDITIONAL: { icon: '⚡', color: 'var(--color-cyan)' },
-}
-
-const AUTO_TYPE_STYLE = {
-  GAMMA_BLAST: {
-    icon: '⚡',
-    label: 'GAMMA BLAST',
-    color: 'var(--color-gold)',
-    bg: 'rgba(245, 166, 35, 0.12)',
-    border: 'rgba(245, 166, 35, 0.35)',
-  },
-  SQUEEZE_BREAKOUT: {
-    icon: '🎯',
-    label: 'SQUEEZE BREAKOUT',
-    color: 'var(--color-emerald)',
-    bg: 'rgba(0, 214, 143, 0.12)',
-    border: 'rgba(0, 214, 143, 0.35)',
-  },
-  CIRCUIT_WARNING: {
-    icon: '🔒',
-    label: 'CIRCUIT WARNING',
-    color: 'var(--color-rose)',
-    bg: 'rgba(255, 79, 123, 0.12)',
-    border: 'rgba(255, 79, 123, 0.35)',
-  },
-  SMC_SWEEP: {
-    icon: '🌊',
-    label: 'SMC LIQUIDITY',
-    color: 'var(--color-violet)',
-    bg: 'rgba(157, 125, 255, 0.12)',
-    border: 'rgba(157, 125, 255, 0.35)',
-  },
-  CONFLUENCE_INFLECTION: {
-    icon: '👑',
-    label: 'CONFLUENCE INFLECTION',
-    color: 'var(--color-sapphire)',
-    bg: 'rgba(77, 155, 255, 0.12)',
-    border: 'rgba(77, 155, 255, 0.35)',
-  },
-  PRECURSOR_RADAR: {
-    icon: '⚡',
-    label: 'PRECURSOR RADAR',
-    color: '#f59e0b',
-    bg: 'rgba(245, 158, 11, 0.12)',
-    border: 'rgba(245, 158, 11, 0.35)',
-  },
-  OPTIONS_MOMENTUM: {
-    icon: '🚀',
-    label: 'OPTIONS MOMENTUM',
-    color: 'var(--color-gold)',
-    bg: 'rgba(245, 166, 35, 0.12)',
-    border: 'rgba(245, 166, 35, 0.35)',
-  },
-  ASYMMETRIC_OPPORTUNITY: {
-    icon: '🎯',
-    label: 'ASYMMETRIC R:R',
-    color: '#38bdf8',
-    bg: 'rgba(56, 189, 248, 0.12)',
-    border: 'rgba(56, 189, 248, 0.35)',
-  },
-}
-
-// ── Lot size lookup for NSE/BSE index options & MCX (2026 Active - SEBI 15L-20L Mandate) ──
-const INDEX_LOT_SIZES = {
-  // NSE Index Options (2026 Active Re-baselined Specifications)
-  NIFTY: 65,
-  'NIFTY 50': 65,
-  BANKNIFTY: 30,
-  'NIFTY BANK': 30,
-  FINNIFTY: 60,
-  'NIFTY FINANCIAL SERVICES': 60,
-  MIDCPNIFTY: 120,
-  'NIFTY MID SELECT': 120,
-  NIFTYNXT50: 25,
-  // BSE Index Options
-  SENSEX: 20,
-  BANKEX: 30,
-  // MCX Commodities
-  CRUDEOIL: 100,
-  NATURALGAS: 1250,
-  GOLD: 100,
-  GOLDM: 10,
-  SILVER: 30,
-  SILVERM: 5,
-  COPPER: 2500,
-  ZINC: 5000,
-  ALUMINIUM: 5000,
-  // Currency Derivatives
-  USDINR: 1000,
-  EURINR: 1000,
-  GBPINR: 1000,
-  JPYINR: 1000,
-}
-
-// ── Conviction emoji shorthand ─────────────────────────────────────────────
-function convictionEmoji(score) {
-  const n = Number(score || 0)
-  if (n >= 90) return '🔥'
-  if (n >= 80) return '💪'
-  if (n >= 70) return '👍'
-  return '⚠️'
-}
-
-// ── Staleness badge ────────────────────────────────────────────────────────
-function getStaleness(createdAt) {
-  if (!createdAt) return null
-  try {
-    const clean = createdAt.replace(' IST', '').trim()
-    const d = new Date(clean)
-    if (isNaN(d.getTime())) return null
-    const mins = Math.round((Date.now() - d.getTime()) / 60000)
-    if (mins < 90) return null // fresh
-    const hrs = Math.round(mins / 60)
-    return hrs >= 1 ? `${hrs}h old` : `${mins}m old`
-  } catch (_) { return null }
-}
-
-// ── R:R mini visual bar ───────────────────────────────────────────────────
-function RRMiniBar({ sl, entry, t1, t2, t3, isUpward = true }) {
-  if (!sl || !entry || !t1) return null
-  const totalRange = Math.abs((t3 || t2 || t1) - sl)
-  if (totalRange <= 0) return null
-  const slW = Math.max(4, Math.round((Math.abs(entry - sl) / totalRange) * 100))
-  const t1W = Math.max(4, Math.round((Math.abs(t1 - entry) / totalRange) * 100))
-  const t2W = t2 ? Math.max(4, Math.round((Math.abs(t2 - t1) / totalRange) * 100)) : 0
-  const t3W = t3 ? Math.max(4, Math.round((Math.abs((t3 || t2) - (t2 || t1)) / totalRange) * 100)) : 0
-  const rem = 100 - slW - t1W - t2W - t3W
-  return (
-    <div className="flex h-1 rounded-full overflow-hidden w-full" title={`SL→T1→T2→T3 R:R breakdown`}>
-      <div style={{ width: `${slW}%` }} className="bg-rose-500/70" />
-      <div style={{ width: `${t1W + Math.max(0, rem)}%` }} className="bg-emerald-500/60" />
-      {t2W > 0 && <div style={{ width: `${t2W}%` }} className="bg-cyan-500/60" />}
-      {t3W > 0 && <div style={{ width: `${t3W}%` }} className="bg-purple-500/50" />}
-    </div>
-  )
-}
-
-// ── Milestone progress dots ────────────────────────────────────────────────
-function MilestoneDots({ targetStatus, stage }) {
-  const t1Hit = stage === 'T1_ACHIEVED' || targetStatus === 'T1_ACHIEVED' || targetStatus === 'T2_ACHIEVED' || targetStatus === 'TARGET_ACHIEVED'
-  const t2Hit = targetStatus === 'T2_ACHIEVED' || targetStatus === 'TARGET_ACHIEVED'
-  const t3Hit = targetStatus === 'TARGET_ACHIEVED'
-  return (
-    <span className="flex items-center gap-0.5 font-mono text-[9px]" title="T1 → T2 → T3 milestones">
-      <span className={t1Hit ? 'text-emerald-400' : 'text-zinc-600'}>●</span>
-      <span className={t2Hit ? 'text-cyan-400' : 'text-zinc-600'}>●</span>
-      <span className={t3Hit ? 'text-purple-300' : 'text-zinc-600'}>●</span>
-    </span>
-  )
-}
-
-// ── Institutional terminal chime (Web Audio API Synthesizer) ─────────────
-function playTerminalChime(stage = 'IGNITED') {
-  try {
-    const AudioCtx = window.AudioContext || window.webkitAudioContext
-    if (!AudioCtx) return
-    const ctx = new AudioCtx()
-    if (ctx.state === 'suspended') {
-      ctx.resume().catch(() => {})
-    }
-    const now = ctx.currentTime
-    const osc = ctx.createOscillator()
-    const gain = ctx.createGain()
-    osc.connect(gain)
-    gain.connect(ctx.destination)
-
-    if (stage === 'IGNITED') {
-      // Harmonic institutional double ping (880Hz -> 1320Hz, A5 -> E6)
-      osc.type = 'sine'
-      osc.frequency.setValueAtTime(880, now)
-      osc.frequency.exponentialRampToValueAtTime(1320, now + 0.12)
-      gain.gain.setValueAtTime(0.08, now)
-      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.35)
-      osc.start(now)
-      osc.stop(now + 0.35)
-    } else {
-      // Crisp single ping (660Hz, E5)
-      osc.type = 'sine'
-      osc.frequency.setValueAtTime(660, now)
-      gain.gain.setValueAtTime(0.05, now)
-      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.25)
-      osc.start(now)
-      osc.stop(now + 0.25)
-    }
-  } catch (_) {}
-}
-
-/**
- * AlertCompactRow — Bloomberg-density single-card for rapid scanning.
- * Packs Stage · Contract · Live/Test · Direction · Type · Lot Size · Spot · Premium
- * SL · Entry · T1/T2/T3 · Conviction · Reason · Timestamp · Telegram CTA · 1-Click Trade
- * into 2 ultra-compact lines, collapsible to expanded full card on click.
- */
-const AlertCompactRow = memo(function AlertCompactRow({ alert, onSendTelegram, onTrade, onExpand, isExpanded }) {
-  const cleanSym = (alert.symbol || '').replace(/^(NSE|BSE|MCX|NFO|CDS):/, '').trim().toUpperCase()
-  const style = AUTO_TYPE_STYLE[alert.alert_type] || AUTO_TYPE_STYLE.GAMMA_BLAST
-  const isBull = alert.direction === 'BULLISH'
-  const isTest = alert.environment === 'TEST' || alert.is_live === false
-  const isEarly = alert.stage === 'EARLY_WARNING'
-  const isIgnited = alert.stage === 'IGNITED'
-  const isInvalidated = alert.is_invalidated || alert.stage === 'INVALIDATED'
-  const isT1 = alert.stage === 'T1_ACHIEVED' || alert.target_status === 'T1_ACHIEVED'
-  const isFinalTarget = alert.stage === 'TARGET_ACHIEVED' || alert.target_status === 'TARGET_ACHIEVED'
-  const isTrail = alert.stage === 'TRAILING_UPDATE'
-
-  const optType = alert.option_type || (alert.contract_symbol?.endsWith('PE') ? 'PE' : alert.contract_symbol?.endsWith('CE') ? 'CE' : null)
-  const strikeNum = alert.strike ? Number(String(alert.strike).replace(/[^0-9.-]/g, '')) : null
-  const isFuture = Boolean(alert.contract_symbol?.toUpperCase().includes('FUT') || alert.derivative_type === 'FUT')
-  
-  // Pure options represent direct option contracts where primary levels are option premiums
-  const isPureOption = alert.alert_type === 'OPTIONS_MOMENTUM' || alert.alert_type === 'OPTION_WRITE' || (alert.alert_type === 'GAMMA_BLAST' && optType) || (alert.contract_symbol && (alert.contract_symbol.endsWith('CE') || alert.contract_symbol.endsWith('PE')) && alert.exchange === 'NFO')
-  const isSpotSetup = alert.alert_type === 'ASYMMETRIC_OPPORTUNITY' || alert.alert_type === 'SQUEEZE_BREAKOUT' || alert.alert_type === 'SQUEEZE_BREAKDOWN' || alert.alert_type === 'POCKET_PIVOT' || alert.alert_type === 'PRECURSOR_RADAR' || alert.alert_type === 'SMC_SWEEP' || alert.alert_type === 'CIRCUIT_WARNING' || alert.alert_type === 'COMMODITY_MOMENTUM'
-  const isDerivative = !isSpotSetup && Boolean(isFuture || isPureOption || (alert.exchange === 'NFO' && (optType || strikeNum || alert.contract_symbol)))
-
-  // Lot size (Dynamic from backend/broker master > metrics > 2026 lookup table)
-  const lotSize = isDerivative ? (alert.lot_size || alert.metrics?.lot_size || INDEX_LOT_SIZES[cleanSym] || null) : null
-
-  // Spot & premium
-  const spotNum = alert.underlying_spot ? Number(alert.underlying_spot) : null
-  const premiumNum = alert.option_premium ? Number(alert.option_premium) : (alert.ltp ? Number(alert.ltp) : null)
-  const ltpNum = alert.ltp ? Number(String(alert.ltp).replace(/[^0-9.-]/g, '')) : null
-
-  // Entry / SL / Targets from computation helpers
-  const plan = alert.actionable_plan || {}
-  const tradePlan = plan.trade_plan || {}
-  const optPlan = plan.option_plan || null
-  const slNum = isDerivative
-    ? (optPlan?.sl_premium ? Number(optPlan.sl_premium) : (alert.option_stop_loss ? Number(alert.option_stop_loss) : (alert.stop_loss ? Number(alert.stop_loss) : null)))
-    : (tradePlan.invalidation_stop ? Number(tradePlan.invalidation_stop) : (alert.stop_loss ? Number(alert.stop_loss) : null))
-  const entryNum = isDerivative
-    ? (optPlan?.entry_premium ? Number(optPlan.entry_premium) : (premiumNum || ltpNum))
-    : (tradePlan.entry_price ? Number(tradePlan.entry_price) : (alert.trigger_level ? Number(alert.trigger_level) : ltpNum))
-  const t1Num = isDerivative
-    ? (optPlan?.t1_premium ? Number(optPlan.t1_premium) : (alert.option_target_1 ? Number(alert.option_target_1) : (alert.target_level ? Number(alert.target_level) : null)))
-    : (tradePlan.target_1 ? Number(tradePlan.target_1) : (alert.target_level ? Number(alert.target_level) : null))
-  const t2Num = isDerivative
-    ? (optPlan?.t2_premium ? Number(optPlan.t2_premium) : (alert.option_target_2 ? Number(alert.option_target_2) : null))
-    : (tradePlan.target_2 ? Number(tradePlan.target_2) : null)
-  const t3Num = isDerivative
-    ? (optPlan?.t3_premium ? Number(optPlan.t3_premium) : null)
-    : (tradePlan.target_3 ? Number(tradePlan.target_3) : null)
-
-  // Expiry compact label
-  const expiryShort = (() => {
-    if (!alert.expiry_date) return null
-    try {
-      const parts = alert.expiry_date.trim().split(/[-/]/)
-      if (parts.length === 3) {
-        const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
-        const d = parts[0].length === 4
-          ? new Date(Number(parts[0]), Number(parts[1]) - 1, Number(parts[2]))
-          : new Date(Number(parts[2]), Number(parts[1]) - 1, Number(parts[0]))
-        const dte = Math.round((d.getTime() - Date.now()) / 86400000)
-        return `${d.getDate()}-${months[d.getMonth()]}${dte >= 0 ? ` (${dte}d)` : ''}`
-      }
-    } catch (_) {}
-    return alert.expiry_date
-  })()
-
-  const staleness = getStaleness(alert.created_at)
-  const timeShort = (() => {
-    if (!alert.created_at) return ''
-    try {
-      const clean = alert.created_at.replace(' IST', '').trim()
-      const d = new Date(clean)
-      if (isNaN(d.getTime())) return alert.created_at.slice(-8, -4)
-      return d.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: false })
-    } catch (_) { return '' }
-  })()
-
-  const conviction = Number(alert.confidence || alert.metrics?.scrutiny?.score || 75)
-  const convBars = Math.round(conviction / 10)
-  const reasonShort = (alert.summary || alert.headline || '').slice(0, 40)
-
-  // Stage pill
-  const stagePill = isInvalidated ? { label: '❌ INVALID', cls: 'bg-rose-500/20 text-rose-300 border-rose-500/40' }
-    : isFinalTarget ? { label: '🏁 T-HIT', cls: 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40' }
-    : isT1 ? { label: '🎯 T1', cls: 'bg-cyan-500/20 text-cyan-300 border-cyan-500/40' }
-    : isTrail ? { label: '📈 TRAIL', cls: 'bg-blue-500/20 text-blue-300 border-blue-500/40' }
-    : isEarly ? { label: '⏳ EARLY', cls: 'bg-amber-500/15 text-amber-400 border-amber-500/30' }
-    : isIgnited ? { label: '🔥 IGNITED', cls: 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30 animate-pulse' }
-    : { label: '🟢 ACTIVE', cls: 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20' }
-
-  const fmt = (n, dec = 0) => n != null && !isNaN(n) ? Number(n).toLocaleString('en-IN', { minimumFractionDigits: dec, maximumFractionDigits: dec }) : '—'
-  const fmtP = (n) => n != null && !isNaN(n) ? Number(n).toLocaleString('en-IN', { minimumFractionDigits: Number(n) < 100 ? 1 : 0, maximumFractionDigits: 1 }) : '—'
-
-  return (
-    <article
-      className={`rounded-xl border px-2.5 py-1.5 cursor-pointer transition-all duration-150 hover:border-gold/40 group ${isInvalidated ? 'opacity-60' : ''}`}
-      style={{
-        background: isExpanded ? 'var(--color-elevated)' : 'var(--color-panel)',
-        borderColor: isExpanded ? style.color + '55' : style.border,
-      }}
-      onClick={() => onExpand()}
-    >
-      {/* ── Row 1: Identity + Direction + Meta badges ───────────────────── */}
-      <div className="flex items-center gap-1.5 min-w-0 flex-wrap">
-        {/* Stage pill */}
-        <span className={`text-[8px] font-black px-1.5 py-0.5 rounded-full border whitespace-nowrap flex-shrink-0 ${stagePill.cls}`}>
-          {stagePill.label}
-        </span>
-
-        {/* Contract identity */}
-        <span className="text-[11px] font-black text-text font-mono whitespace-nowrap">{cleanSym}</span>
-        {strikeNum && !isFuture && (
-          <span className="text-[10px] font-black text-gold font-mono whitespace-nowrap">
-            {Number(strikeNum).toLocaleString('en-IN')}
-          </span>
-        )}
-        {optType && !isFuture && (
-          <span className={`text-[8px] px-1 py-px rounded font-black ${optType === 'CE' ? 'bg-emerald-500/20 text-emerald-300' : 'bg-rose-500/20 text-rose-300'}`}>
-            {optType}
-          </span>
-        )}
-        {isFuture && <span className="text-[8px] px-1 py-px rounded font-black bg-blue-500/20 text-blue-300">FUT</span>}
-        {expiryShort && (
-          <span className="text-[8px] text-muted font-mono whitespace-nowrap">{expiryShort}</span>
-        )}
-
-        {/* Separator */}
-        <span className="text-border/30 text-[9px] hidden sm:inline">│</span>
-
-        {/* Live/Test badge */}
-        {isTest
-          ? <span className="text-[7px] px-1 py-px rounded font-black bg-purple-500/20 text-purple-300 border border-purple-500/30 whitespace-nowrap">🧪 TEST</span>
-          : <span className="text-[7px] px-1 py-px rounded font-black bg-rose-500/20 text-rose-300 border border-rose-500/30 whitespace-nowrap">🔴 LIVE</span>
-        }
-
-        {/* Direction */}
-        <span className={`text-[9px] font-black whitespace-nowrap ${isBull ? 'text-emerald-400' : 'text-rose-400'}`}>
-          {isBull ? '▲' : '▼'} {alert.direction?.slice(0, 4)}
-        </span>
-
-        {/* Alert type chip */}
-        <span
-          className="text-[7px] font-black px-1 py-px rounded whitespace-nowrap hidden sm:inline"
-          style={{ color: style.color, background: style.bg, border: `1px solid ${style.border}` }}
-        >
-          {style.label.replace('GAMMA BLAST', 'Γ-Blast').replace('SQUEEZE BREAKOUT', 'Squeeze').replace('SMC LIQUIDITY', 'SMC').replace('CIRCUIT WARNING', 'Circuit').replace('CONFLUENCE INFLECTION', 'Confluence').replace('OPTIONS MOMENTUM', 'Opt Mom').replace('ASYMMETRIC R:R', 'Asym').replace('PRECURSOR RADAR', 'Precursor').replace('COMMODITY MOMENTUM', 'Commodity').replace('CURRENCY BREAKOUT', 'Currency')}
-        </span>
-
-        {/* Lot size */}
-        {lotSize && (
-          <span
-            className="text-[8px] font-mono font-bold text-sky-400 bg-sky-500/10 px-1.5 py-0.5 rounded border border-sky-500/25 whitespace-nowrap hidden md:inline cursor-help"
-            title={`Market Lot Size: ${lotSize} units/shares per contract`}
-          >
-            Lot: {lotSize}
-          </span>
-        )}
-
-        {/* Milestone dots */}
-        <MilestoneDots targetStatus={alert.target_status} stage={alert.stage} />
-
-        {/* Auto-refresh live dot */}
-        <span className="inline-block w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse flex-shrink-0 ml-auto" title="Live feed active" />
-      </div>
-
-      {/* ── Row 2: Price levels + Conviction + Reason + Time + Telegram ─── */}
-      <div className="flex items-center gap-1.5 min-w-0 flex-wrap mt-0.5">
-        {/* Spot (for derivatives) */}
-        {isDerivative && spotNum && (
-          <span className="text-[9px] font-mono text-zinc-400 whitespace-nowrap">
-            Spot <span className="text-text font-bold">₹{fmt(spotNum)}</span>
-          </span>
-        )}
-
-        {/* Premium / LTP */}
-        {isDerivative ? (
-          premiumNum && (
-            <span className="text-[9px] font-mono whitespace-nowrap">
-              Prem <span className="text-gold font-black">₹{fmtP(premiumNum)}</span>
-            </span>
-          )
-        ) : (
-          ltpNum && (
-            <span className="text-[9px] font-mono whitespace-nowrap">
-              LTP <span className="text-text font-black">₹{fmt(ltpNum)}</span>
-            </span>
-          )
-        )}
-
-        {/* SL */}
-        {slNum && (
-          <span className="text-[9px] font-mono text-rose-400 whitespace-nowrap font-bold">
-            SL ₹{fmtP(slNum)}
-          </span>
-        )}
-
-        {/* Entry trigger */}
-        {entryNum && (
-          <span className="text-[9px] font-mono text-amber-400 whitespace-nowrap font-bold">
-            Entry ₹{fmtP(entryNum)}
-          </span>
-        )}
-
-        {/* Targets */}
-        {t1Num && (
-          <span className="text-[9px] font-mono whitespace-nowrap">
-            <span className="text-emerald-400 font-bold">T1 ₹{fmtP(t1Num)}</span>
-            {t2Num && <span className="text-cyan-400 font-bold"> T2 ₹{fmtP(t2Num)}</span>}
-            {t3Num && <span className="text-purple-300 font-bold"> T3 ₹{fmtP(t3Num)}</span>}
-          </span>
-        )}
-
-        {/* R:R mini bar */}
-        <div className="w-16 flex-shrink-0 hidden sm:block">
-          <RRMiniBar sl={slNum} entry={entryNum} t1={t1Num} t2={t2Num} t3={t3Num} isUpward={isBull || isDerivative} />
-        </div>
-
-        {/* Conviction */}
-        <span className="text-[9px] font-mono whitespace-nowrap" title={`Conviction: ${conviction}`}>
-          {convictionEmoji(conviction)}
-          <span className="text-gold font-bold ml-0.5">{conviction}</span>
-          <span className="text-zinc-600">{'█'.repeat(convBars)}{'░'.repeat(10 - convBars)}</span>
-        </span>
-
-        {/* Reason */}
-        {reasonShort && (
-          <span className="text-[9px] text-zinc-500 truncate min-w-0 flex-1 hidden md:block" title={alert.summary}>
-            {reasonShort}
-          </span>
-        )}
-
-        {/* Staleness */}
-        {staleness && (
-          <span className="text-[8px] font-mono text-amber-400 whitespace-nowrap flex-shrink-0" title="Alert age">
-            ⏱ {staleness}
-          </span>
-        )}
-
-        {/* Timestamp */}
-        {timeShort && (
-          <span
-            className="text-[8px] font-mono text-muted whitespace-nowrap flex-shrink-0 cursor-help"
-            title={`Generated: ${alert.created_at || alert.timestamp || 'N/A'}`}
-          >
-            {timeShort} IST
-          </span>
-        )}
-
-        {/* Copy to clipboard */}
-        <button
-          onClick={(e) => {
-            e.stopPropagation()
-            const txt = [
-              `${cleanSym}${strikeNum ? ' ' + strikeNum : ''}${optType ? optType : ''}${expiryShort ? ' ' + expiryShort : ''}`,
-              isDerivative ? (spotNum ? `Spot ₹${fmt(spotNum)} Prem ₹${fmtP(premiumNum)}` : '') : `LTP ₹${fmt(ltpNum)}`,
-              lotSize ? `Lot ${lotSize}` : '',
-              slNum ? `SL ₹${fmtP(slNum)}` : '',
-              entryNum ? `Entry ₹${fmtP(entryNum)}` : '',
-              t1Num ? `T1 ₹${fmtP(t1Num)}${t2Num ? ' T2 ₹' + fmtP(t2Num) : ''}${t3Num ? ' T3 ₹' + fmtP(t3Num) : ''}` : '',
-              `Conv ${conviction} · ${alert.direction}`,
-            ].filter(Boolean).join(' | ')
-            navigator.clipboard?.writeText(txt).catch(() => {})
-          }}
-          className="btn btn-xs btn-ghost text-[9px] px-1 text-muted hover:text-text border border-border/30 flex-shrink-0"
-          title="Copy alert summary to clipboard"
-        >📋</button>
-
-        {/* Telegram Send */}
-        <button
-          onClick={(e) => { e.stopPropagation(); onSendTelegram(alert) }}
-          className="btn btn-xs text-[9px] px-1.5 font-bold flex-shrink-0 text-sky-300 hover:text-sky-200 bg-sky-500/10 hover:bg-sky-500/20 border border-sky-500/30 hover:border-sky-500/50 transition-all"
-          title="Send to Telegram (due-diligence check)"
-        >↗ TG</button>
-
-        {/* Option Alternative Action for spot setups */}
-        {!isDerivative && (optPlan || plan.option_contract) && (
-          <button
-            onClick={(e) => {
-              e.stopPropagation()
-              if (onTrade) {
-                onTrade({
-                  ...alert,
-                  _tradeOptionAlternative: true,
-                })
-              }
-            }}
-            className="btn btn-xs text-[9px] px-1.5 font-bold flex-shrink-0 text-indigo-300 hover:text-indigo-200 bg-indigo-500/15 hover:bg-indigo-500/25 border border-indigo-500/35 hover:border-indigo-500/60 transition-all"
-            title={`Option Alternative: ${optPlan?.contract_symbol || plan.option_contract} @ ₹${optPlan?.entry_premium || plan.option_entry?.replace('₹', '') || '—'} (Click to trade Option)`}
-          >⚡ Opt {optPlan?.contract_symbol ? optPlan.contract_symbol.slice(-6) : (plan.option_contract ? plan.option_contract.slice(-6) : '')}</button>
-        )}
-
-        {/* 1-Click Instant Trade */}
-        <button
-          onClick={(e) => {
-            e.stopPropagation()
-            if (onTrade) onTrade(alert)
-          }}
-          className="btn btn-xs text-[9px] px-1.5 font-bold flex-shrink-0 text-emerald-300 hover:text-emerald-200 bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/35 hover:border-emerald-500/60 transition-all"
-          title="1-Click Trade: Open pre-populated Order Ticket"
-        >⚡ Trade</button>
-
-        {/* Expand chevron */}
-        <span className="text-muted text-[9px] flex-shrink-0 transition-transform duration-150" style={{ transform: isExpanded ? 'rotate(180deg)' : 'rotate(0deg)' }}>
-          ▼
-        </span>
-      </div>
-    </article>
-  )
-})
-
-/**
- * TelegramPreflightModal — Due-diligence gate before Telegram dispatch.
- * Shows full scrutiny dossier (Logic, Trap, Guidance, Auditor model) +
- * conviction bar before allowing the user to send.
- */
-function TelegramPreflightModal({ alert, onConfirm, onCancel, sending, sentOk, sentError, callRef }) {
-  const [destMode, setDestMode] = useState('DEFAULT')
-  const [customChannel, setCustomChannel] = useState(() => {
-    try {
-      return localStorage.getItem('chanakya_telegram_channel') || ''
-    } catch (_) {
-      return ''
-    }
-  })
-  const [destInfo, setDestInfo] = useState(null)
-
-  useEffect(() => {
-    if (!alert) return
-    let active = true
-    const fetchDest = async () => {
-      try {
-        if (callRef?.current) {
-          const res = await callRef.current('/api/alerts/auto/telegram-destinations')
-          if (active && res?.data) {
-            const cleanSym = (alert?.symbol || '').replace(/^(NSE|BSE|MCX|NFO|CDS):/, '').trim().toUpperCase()
-            const isIndexSym = ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'NIFTYNXT50', 'SENSEX', 'BANKEX'].includes(cleanSym)
-            const isFnoIndex = Boolean(
-              (alert?.segment || '').toUpperCase() === 'FNO_INDEX' ||
-              (isIndexSym && (alert?.option_type || ['GAMMA_BLAST', 'OPTIONS_MOMENTUM'].includes(alert?.alert_type) || ['FNO', 'NFO'].includes((alert?.exchange || '').toUpperCase())))
-            )
-            const isFnoStock = Boolean(
-              !isFnoIndex && (
-                alert?.option_type ||
-                ['FNO_INDEX', 'FNO_STOCK', 'FNO'].includes((alert?.segment || '').toUpperCase()) ||
-                ['GAMMA_BLAST', 'OPTIONS_MOMENTUM'].includes(alert?.alert_type)
-              )
-            )
-            const isMcx = Boolean(
-              (alert?.exchange || '').toUpperCase() === 'MCX' ||
-              (alert?.exchange || '').toUpperCase() === 'CDS' ||
-              ['COMMODITY', 'CURRENCY', 'MCX', 'CDS'].includes((alert?.segment || '').toUpperCase()) ||
-              ['COMMODITY_MOMENTUM', 'CURRENCY_BREAKOUT'].includes(alert?.alert_type) ||
-              (alert?.symbol || '').toUpperCase().startsWith('MCX:') ||
-              (alert?.symbol || '').toUpperCase().startsWith('CDS:')
-            )
-            if (res.data.fno_index_chat_id && isFnoIndex) {
-              setDestMode('FNO_INDEX_GROUP')
-            } else if (res.data.fno_chat_id && isFnoStock) {
-              setDestMode('FNO_GROUP')
-            } else if (res.data.mcx_chat_id && isMcx) {
-              setDestMode('MCX_GROUP')
-            } else if (res.data.equity_chat_id) {
-              setDestMode('EQUITY_GROUP')
-            }
-            if (res.data.channel_id && !customChannel) {
-              setCustomChannel(res.data.channel_id)
-            }
-          }
-        }
-      } catch (_) {}
-    }
-    fetchDest()
-    return () => { active = false }
-  }, [callRef, alert])
-
-  if (!alert) return null
-
-  const scrutiny = alert.metrics?.scrutiny || null
-  const conviction = Number(alert.confidence || scrutiny?.score || 75)
-  const convBars = Math.round(conviction / 10)
-  const optType = alert.option_type || null
-  const strikeNum = alert.strike ? Number(alert.strike) : null
-  const cleanSym = (alert.symbol || '').replace(/^(NSE|BSE|MCX|NFO|CDS):/, '').trim()
-  const contractLabel = alert.contract_symbol || [cleanSym, strikeNum ? Number(strikeNum).toLocaleString('en-IN') : '', optType || ''].filter(Boolean).join(' ')
-
-  const scrutinyStatus = scrutiny?.status || 'QUANT_VERIFIED'
-  const statusColor = scrutinyStatus === 'APPROVED' ? 'text-emerald-400' : scrutinyStatus === 'QUANT_VERIFIED' ? 'text-sky-400' : 'text-amber-400'
-  const statusBg = scrutinyStatus === 'APPROVED' ? 'bg-emerald-500/15 border-emerald-500/30' : scrutinyStatus === 'QUANT_VERIFIED' ? 'bg-sky-500/15 border-sky-500/30' : 'bg-amber-500/15 border-amber-500/30'
-
-  return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center p-4"
-      style={{ background: 'rgba(0,0,0,0.7)', backdropFilter: 'blur(8px)' }}
-      onClick={(e) => { if (e.target === e.currentTarget) onCancel() }}
-    >
-      <div className="w-full max-w-md rounded-2xl border border-sky-500/30 bg-elevated shadow-2xl space-y-3 p-4 animate-slide-up-fade">
-        {/* Header */}
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <span className="text-lg">📨</span>
-            <div>
-              <div className="text-sm font-black text-text">Send to Telegram</div>
-              <div className="text-[10px] text-muted font-mono">{contractLabel}</div>
-            </div>
-          </div>
-          <button onClick={onCancel} className="text-muted hover:text-text text-sm font-bold w-6 h-6 flex items-center justify-center">✕</button>
-        </div>
-
-        {/* Scrutiny Status badge */}
-        <div className={`flex items-center gap-2 p-2 rounded-lg border ${statusBg}`}>
-          <span className={`text-[10px] font-black uppercase tracking-wider ${statusColor}`}>
-            {scrutinyStatus === 'APPROVED' ? '🛡️ AI APPROVED' : scrutinyStatus === 'QUANT_VERIFIED' ? '⚡ QUANT VERIFIED' : `⚠️ ${scrutinyStatus}`}
-          </span>
-          {scrutiny?.auditor_model && (
-            <span className="text-[8px] font-mono text-muted ml-auto">{scrutiny.auditor_model}</span>
-          )}
-        </div>
-
-        {/* Conviction bar */}
-        <div className="space-y-1">
-          <div className="flex items-center justify-between text-[10px]">
-            <span className="text-muted font-bold uppercase tracking-wider">Conviction</span>
-            <span className="font-black font-mono text-gold">{convictionEmoji(conviction)} {conviction}/100</span>
-          </div>
-          <div className="w-full h-1.5 rounded-full bg-surface overflow-hidden">
-            <div
-              className="h-full rounded-full bg-gradient-to-r from-amber-500 to-emerald-500 transition-all duration-300"
-              style={{ width: `${conviction}%` }}
-            />
-          </div>
-          <div className="text-[8px] font-mono text-muted text-right">{'█'.repeat(convBars)}{'░'.repeat(10 - convBars)}</div>
-        </div>
-
-        {/* Scrutiny dossier */}
-        {scrutiny?.logic_confirmation && (
-          <div className="p-2 rounded-lg bg-emerald-500/8 border border-emerald-500/25 space-y-0.5">
-            <div className="text-[9px] font-black uppercase tracking-wider text-emerald-400">✅ Logic Confirmation</div>
-            <p className="text-[10px] text-zinc-300 leading-relaxed">{scrutiny.logic_confirmation}</p>
-          </div>
-        )}
-        {scrutiny?.trap_risk_warning && (
-          <div className="p-2 rounded-lg bg-amber-500/8 border border-amber-500/25 space-y-0.5">
-            <div className="text-[9px] font-black uppercase tracking-wider text-amber-400">⚠️ Trap Risk Warning</div>
-            <p className="text-[10px] text-zinc-300 leading-relaxed">{scrutiny.trap_risk_warning}</p>
-          </div>
-        )}
-        {scrutiny?.actionable_guidance && (
-          <div className="p-2 rounded-lg bg-sky-500/8 border border-sky-500/25 space-y-0.5">
-            <div className="text-[9px] font-black uppercase tracking-wider text-sky-400">🎯 Execution Guidance</div>
-            <p className="text-[10px] text-zinc-300 leading-relaxed">{scrutiny.actionable_guidance}</p>
-          </div>
-        )}
-        {!scrutiny && (
-          <div className="p-2 rounded-lg bg-surface border border-border text-[10px] text-zinc-500 text-center">
-            No scrutiny data. Run Re-Scrutinize first for full AI analysis.
-          </div>
-        )}
-
-        {/* Destination Target Selector */}
-        <div className="p-2.5 rounded-xl bg-surface border border-border space-y-1.5">
-          <div className="flex items-center justify-between text-[10px]">
-            <span className="font-bold text-muted uppercase tracking-wider">Destination Target</span>
-            <div className="flex items-center gap-1">
-              <button
-                type="button"
-                onClick={() => setDestMode('DEFAULT')}
-                className={`text-[9px] px-2 py-0.5 rounded font-bold transition-all ${
-                  destMode === 'DEFAULT'
-                    ? 'bg-sky-500/20 text-sky-300 border border-sky-500/40'
-                    : 'text-muted hover:text-text'
-                }`}
-              >
-                🔒 Default Chat
-              </button>
-              {destInfo?.fno_index_chat_id && (
-                <button
-                  type="button"
-                  onClick={() => setDestMode('FNO_INDEX_GROUP')}
-                  className={`text-[9px] px-2 py-0.5 rounded font-bold transition-all ${
-                    destMode === 'FNO_INDEX_GROUP'
-                      ? 'bg-sky-500/20 text-sky-300 border border-sky-500/40'
-                      : 'text-muted hover:text-text'
-                  }`}
-                >
-                  ⚡ {destInfo.fno_index_chat_name || 'Premium FnO Index'}
-                </button>
-              )}
-              {destInfo?.fno_chat_id && (
-                <button
-                  type="button"
-                  onClick={() => setDestMode('FNO_GROUP')}
-                  className={`text-[9px] px-2 py-0.5 rounded font-bold transition-all ${
-                    destMode === 'FNO_GROUP'
-                      ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
-                      : 'text-muted hover:text-text'
-                  }`}
-                >
-                  🎯 {destInfo.fno_chat_name || 'Premium FnO Channel'}
-                </button>
-              )}
-              {destInfo?.mcx_chat_id && (
-                <button
-                  type="button"
-                  onClick={() => setDestMode('MCX_GROUP')}
-                  className={`text-[9px] px-2 py-0.5 rounded font-bold transition-all ${
-                    destMode === 'MCX_GROUP'
-                      ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
-                      : 'text-muted hover:text-text'
-                  }`}
-                >
-                  🪙 {destInfo.mcx_chat_name || 'Premium MCX Channel'}
-                </button>
-              )}
-              {destInfo?.equity_chat_id && (
-                <button
-                  type="button"
-                  onClick={() => setDestMode('EQUITY_GROUP')}
-                  className={`text-[9px] px-2 py-0.5 rounded font-bold transition-all ${
-                    destMode === 'EQUITY_GROUP'
-                      ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
-                      : 'text-muted hover:text-text'
-                  }`}
-                >
-                  🏢 {destInfo.equity_chat_name || 'Premium Equity Channel'}
-                </button>
-              )}
-              <button
-                type="button"
-                onClick={() => setDestMode('CHANNEL')}
-                className={`text-[9px] px-2 py-0.5 rounded font-bold transition-all ${
-                  destMode === 'CHANNEL'
-                    ? 'bg-sky-500/20 text-sky-300 border border-sky-500/40'
-                    : 'text-muted hover:text-text'
-                }`}
-              >
-                📢 Channel
-              </button>
-            </div>
-          </div>
-
-          {destMode === 'DEFAULT' ? (
-            <div className="text-[9px] text-zinc-400 font-mono flex items-center justify-between px-1">
-              <span>Target: <span className="text-text font-bold">
-                {destInfo?.default_chat_id ? `Private Chat (${destInfo.default_chat_id.slice(0, 4)}***)` : 'Configured Telegram Chat'}
-              </span></span>
-              {destInfo && !destInfo.is_configured ? (
-                <span className="text-amber-400 font-bold">⚠️ Unconfigured</span>
-              ) : (
-                <span className="text-emerald-400 font-bold">● Active</span>
-              )}
-            </div>
-          ) : destMode === 'FNO_INDEX_GROUP' ? (
-            <div className="text-[9px] text-zinc-400 font-mono flex items-center justify-between px-1">
-              <span>Target: <span className="text-sky-400 font-bold">
-                ⚡ {destInfo?.fno_index_chat_name || 'Premium_Alpha_Vortex_FnO_Index'} ({destInfo?.fno_index_chat_id})
-              </span></span>
-              <span className="text-sky-400 font-bold">● Active</span>
-            </div>
-          ) : destMode === 'FNO_GROUP' ? (
-            <div className="text-[9px] text-zinc-400 font-mono flex items-center justify-between px-1">
-              <span>Target: <span className="text-emerald-400 font-bold">
-                🎯 {destInfo?.fno_chat_name || 'Premium_Alpha_Vortex_FnO_Channel'} ({destInfo?.fno_chat_id})
-              </span></span>
-              <span className="text-emerald-400 font-bold">● Active</span>
-            </div>
-          ) : destMode === 'MCX_GROUP' ? (
-            <div className="text-[9px] text-zinc-400 font-mono flex items-center justify-between px-1">
-              <span>Target: <span className="text-amber-400 font-bold">
-                🪙 {destInfo?.mcx_chat_name || 'Premium_Alpha_Vortex_MCX_Channel'} ({destInfo?.mcx_chat_id})
-              </span></span>
-              <span className="text-amber-400 font-bold">● Active</span>
-            </div>
-          ) : destMode === 'EQUITY_GROUP' ? (
-            <div className="text-[9px] text-zinc-400 font-mono flex items-center justify-between px-1">
-              <span>Target: <span className="text-emerald-400 font-bold">
-                🏢 {destInfo?.equity_chat_name || 'Premium_Alpha_Vortex_Equity_Channel'} ({destInfo?.equity_chat_id})
-              </span></span>
-              <span className="text-emerald-400 font-bold">● Active</span>
-            </div>
-          ) : (
-            <div className="space-y-1.5">
-              <div className="flex items-center gap-1.5">
-                <input
-                  type="text"
-                  value={customChannel}
-                  onChange={(e) => {
-                    setCustomChannel(e.target.value)
-                    localStorage.setItem('chanakya_telegram_channel', e.target.value)
-                  }}
-                  placeholder="@my_channel_handle or -100xxxxxxxxxx"
-                  className="flex-1 text-[10px] font-mono py-1 px-2.5 rounded bg-panel border border-border text-text placeholder-zinc-600 focus:outline-none focus:border-sky-500"
-                />
-                {destInfo?.channel_id && destInfo.channel_id !== customChannel && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setCustomChannel(destInfo.channel_id)
-                      localStorage.setItem('chanakya_telegram_channel', destInfo.channel_id)
-                    }}
-                    className="text-[8px] px-1.5 py-1 rounded bg-sky-500/10 text-sky-300 border border-sky-500/25 hover:bg-sky-500/20 whitespace-nowrap"
-                    title="Use channel ID configured in environment"
-                  >
-                    Env Channel
-                  </button>
-                )}
-              </div>
-              <div className="text-[8px] text-zinc-500 px-1">
-                Enter public channel handle (e.g. <code>@chanakya_alerts</code>) or private channel/group ID (-100...)
-              </div>
-            </div>
-          )}
-        </div>
-
-        {/* Alert summary */}
-        <div className="text-[10px] text-zinc-500 p-2 rounded-lg bg-surface border border-border">
-          <span className="font-bold text-muted">{alert.direction} · {alert.alert_type?.replace(/_/g, ' ')}</span>
-          {alert.expiry_date && <span className="ml-1 text-amber-400">· Exp {alert.expiry_date}</span>}
-          {(alert.environment === 'TEST' || alert.is_live === false) && (
-            <span className="ml-1 text-purple-400 font-black">· TEST ALERT</span>
-          )}
-        </div>
-
-        {/* Status messages */}
-        {sentOk && (
-          <div className="p-2 rounded-lg bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 text-[10px] font-bold text-center">
-            ✅ Alert dispatched to Telegram!
-          </div>
-        )}
-        {sentError && (
-          <div className="p-2 rounded-lg bg-rose-500/15 border border-rose-500/30 text-rose-300 text-[10px] text-center">
-            ❌ {sentError}
-          </div>
-        )}
-
-        {/* Action buttons */}
-        <div className="flex gap-2 pt-1">
-          <button
-            onClick={onCancel}
-            className="flex-1 btn btn-sm btn-ghost text-xs text-muted border border-border/50 hover:border-border"
-          >Cancel</button>
-          <button
-            onClick={() => onConfirm(
-              destMode === 'DEFAULT'
-                ? null
-                : destMode === 'FNO_INDEX_GROUP'
-                  ? destInfo?.fno_index_chat_id
-                  : destMode === 'FNO_GROUP'
-                    ? destInfo?.fno_chat_id
-                    : destMode === 'MCX_GROUP'
-                      ? destInfo?.mcx_chat_id
-                      : destMode === 'EQUITY_GROUP'
-                        ? destInfo?.equity_chat_id
-                        : customChannel.trim()
-            )}
-            disabled={sending || sentOk || (destMode === 'CHANNEL' && !customChannel.trim())}
-            className="flex-1 btn btn-sm text-xs font-black bg-sky-500/20 hover:bg-sky-500/30 text-sky-200 border border-sky-500/40 hover:border-sky-500/60 disabled:opacity-50 transition-all"
-          >
-            {sending ? '⏳ Sending…' : sentOk ? '✅ Sent!' : '✓ Confirm & Send'}
-          </button>
-        </div>
-      </div>
-    </div>
-  )
-}
+import {
+  LiveSpotsCtx,
+  LiveSpotsProvider,
+  useLiveSpot,
+  extractQuotes,
+  TYPE_STYLE,
+  AUTO_TYPE_STYLE,
+  INDEX_LOT_SIZES,
+  convictionEmoji,
+  getStaleness,
+  playTerminalChime,
+  MCX_COMMODITY_SYMBOLS,
+  CDS_CURRENCY_SYMBOLS,
+  NSE_INDEX_SYMBOLS,
+  classifyAlertSegment,
+  formatExpiryDetails,
+  computeNextExpiryOpportunity,
+  computeExecutionLevels,
+  RRMiniBar,
+  MilestoneDots,
+  TelegramPreflightModal,
+  AlertCompactRow,
+  AlertTriageCard,
+  TradeExecutionMatrix,
+} from './alerts'
 
 /**
  * In-place differential merger:
@@ -1073,665 +128,7 @@ function mergeAlertsInPlace(prevAlerts = [], freshAlerts = []) {
   return [...brandNewAlerts, ...updatedExisting]
 }
 
-/**
- * classifyAlertSegment — canonical single-pass segment classifier for an alert.
- * Returns: 'FNO' | 'EQUITY' | 'COMMODITY' | 'CURRENCY'
- */
-const MCX_COMMODITY_SYMBOLS = new Set([
-  'CRUDEOIL', 'CRUDEOILM', 'GOLD', 'GOLDM', 'GOLDGUINEA', 'SILVER', 'SILVERM', 'SILVERMIC',
-  'NATURALGAS', 'COPPER', 'ALUMINIUM', 'ZINC', 'LEAD', 'NICKEL', 'MENTHAOIL',
-])
-const CDS_CURRENCY_SYMBOLS = new Set(['USDINR', 'EURINR', 'GBPINR', 'JPYINR', 'EURUSD', 'GBPUSD'])
-const NSE_INDEX_SYMBOLS = new Set([
-  'NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'NIFTYNXT50', 'SENSEX', 'BANKEX',
-  'NIFTY 50', 'NIFTY BANK', 'NIFTY FINANCIAL SERVICES', 'NIFTY MID SELECT',
-])
 
-function classifyAlertSegment(alert) {
-  if (!alert) return 'EQUITY'
-  const cleanSym = (alert.symbol || '').replace(/^(NSE|BSE|MCX|NFO|CDS):/, '').trim().toUpperCase()
-  const exch = (alert.exchange || '').toUpperCase()
-  const seg = (alert.segment || alert.metrics?.segment || alert.actionable_plan?.segment || '').toUpperCase()
-
-  // If backend already stamped canonical segment
-  if (seg === 'FNO_INDEX') return 'FNO_INDEX'
-  if (seg === 'FNO_STOCK') return 'FNO_STOCK'
-
-  // Commodity (MCX) — check before FNO to avoid misclassification
-  if (
-    exch === 'MCX' ||
-    seg === 'MCX' ||
-    seg === 'COMMODITY' ||
-    alert.symbol?.toUpperCase().startsWith('MCX:') ||
-    MCX_COMMODITY_SYMBOLS.has(cleanSym)
-  ) return 'COMMODITY'
-
-  // Currency (CDS)
-  if (
-    exch === 'CDS' ||
-    seg === 'CDS' ||
-    seg === 'CURRENCY' ||
-    CDS_CURRENCY_SYMBOLS.has(cleanSym)
-  ) return 'CURRENCY'
-
-  // F&O / Derivatives
-  const isIndex = NSE_INDEX_SYMBOLS.has(cleanSym) || seg === 'INDEX' || cleanSym.endsWith('INDEX')
-  const isFut = Boolean(
-    alert.contract_symbol?.toUpperCase().includes('FUT') ||
-    alert.symbol?.toUpperCase().includes('FUT') ||
-    alert.derivative_type === 'FUT' ||
-    alert.alert_type === 'FUTURES'
-  )
-  const isDeriv = Boolean(
-    isIndex || isFut ||
-    alert.option_type || alert.strike || alert.contract_symbol || alert.expiry_date ||
-    alert.alert_type === 'GAMMA_BLAST' || alert.alert_type === 'OPTIONS_MOMENTUM' ||
-    (seg === 'FNO' && (alert.option_type || alert.strike || isFut)) ||
-    exch === 'NFO'
-  )
-  if (isDeriv) {
-    return isIndex ? 'FNO_INDEX' : 'FNO_STOCK'
-  }
-
-  return 'EQUITY'
-}
-
-/**
- * Parses and formats option/future expiry details with explicit month name,
- * weekday, specific week date, and Days to Expiry (DTE).
- */
-function formatExpiryDetails(alert) {
-  const expiryDate = alert.expiry_date || alert.expiry_details?.raw_date
-  const expiryType =
-    alert.expiry_type ||
-    (alert.contract_symbol && !['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'SENSEX', 'BANKEX'].some((idx) => alert.symbol?.includes(idx))
-      ? 'MONTHLY'
-      : 'WEEKLY')
-  const contractSym = alert.contract_symbol || ''
-
-  let monthName = alert.expiry_month_name || alert.expiry_details?.month_name || null
-  let formatted = alert.expiry_formatted || alert.expiry_details?.formatted || null
-  let dte = alert.dte !== undefined && alert.dte !== null ? alert.dte : null
-  const isWeekly = expiryType === 'WEEKLY'
-  const isMonthly = expiryType === 'MONTHLY'
-  let weekday = null
-
-  if (expiryDate) {
-    try {
-      const parts = expiryDate.trim().split(/[-/]/)
-      let d = null
-      if (parts.length === 3) {
-        if (parts[0].length === 4) {
-          // YYYY-MM-DD
-          d = new Date(Number(parts[0]), Number(parts[1]) - 1, Number(parts[2]))
-        } else {
-          // DD-MM-YYYY
-          d = new Date(Number(parts[2]), Number(parts[1]) - 1, Number(parts[0]))
-        }
-      }
-      if (d && !isNaN(d.getTime())) {
-        const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
-        const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
-        monthName = `${months[d.getMonth()]} ${d.getFullYear()}`
-        weekday = days[d.getDay()]
-        const dayOfMonth = d.getDate().toString().padStart(2, '0')
-
-        const today = new Date()
-        today.setHours(0, 0, 0, 0)
-        const target = new Date(d)
-        target.setHours(0, 0, 0, 0)
-        dte = Math.round((target - today) / (1000 * 60 * 60 * 24))
-
-        if (isWeekly) {
-          formatted = `${dayOfMonth}-${months[d.getMonth()]}-${d.getFullYear()} (${weekday}) Weekly Expiry`
-        } else {
-          formatted = `${monthName} Monthly Expiry (${dayOfMonth}-${months[d.getMonth()]}-${d.getFullYear()})`
-        }
-      }
-    } catch (_) {}
-  } else if (contractSym) {
-    const m = contractSym.match(/(\d{2})(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)/i)
-    if (m) {
-      const year = `20${m[1]}`
-      const mStr = m[2].toUpperCase()
-      const mCap = mStr.charAt(0) + mStr.slice(1).toLowerCase()
-      monthName = `${mCap} ${year}`
-      formatted = `${monthName} Monthly Expiry`
-    }
-  }
-
-  return {
-    monthName: monthName || 'Sep 2026',
-    formatted: formatted || (isWeekly ? 'Weekly Expiry' : 'Monthly Expiry'),
-    dte,
-    isWeekly,
-    isMonthly,
-    weekday,
-    badgeText: isWeekly
-      ? `⚡ ${formatted || 'WEEKLY CONTRACT'}`
-      : `📅 ${monthName ? `${monthName.toUpperCase()} ` : ''}MONTHLY CONTRACT`,
-  }
-}
-
-/**
- * Computes whether there is an opportunity to roll or buy the next expiry strike,
- * with explicit institutional rationale (theta decay mitigation, multi-session hold, pin risk).
- */
-function computeNextExpiryOpportunity(alert, expiryInfo) {
-  if (alert.next_expiry_opportunity) {
-    return {
-      recommendedContract: alert.next_expiry_opportunity.recommended_contract || alert.next_expiry_opportunity.recommendedContract,
-      tag: alert.next_expiry_opportunity.tag || 'THETA-HEDGED ROLL',
-      justification: alert.next_expiry_opportunity.justification,
-    }
-  }
-
-  const isFuture = Boolean(
-    alert.contract_symbol?.toUpperCase().includes('FUT') ||
-    alert.symbol?.toUpperCase().includes('FUT') ||
-    alert.derivative_type === 'FUT' ||
-    alert.alert_type === 'FUTURES'
-  )
-
-  const isSpotSetup = alert.alert_type === 'ASYMMETRIC_OPPORTUNITY' || alert.alert_type === 'SQUEEZE_BREAKOUT' || alert.alert_type === 'SQUEEZE_BREAKDOWN' || alert.alert_type === 'POCKET_PIVOT' || alert.alert_type === 'PRECURSOR_RADAR' || alert.alert_type === 'SMC_SWEEP' || alert.alert_type === 'CIRCUIT_WARNING' || alert.alert_type === 'COMMODITY_MOMENTUM'
-
-  const isDerivative = !isSpotSetup && Boolean(
-    isFuture ||
-    alert.option_type ||
-    alert.strike ||
-    alert.contract_symbol ||
-    alert.expiry_date ||
-    alert.alert_type === 'GAMMA_BLAST' ||
-    alert.alert_type === 'OPTIONS_MOMENTUM'
-  )
-  if (!isDerivative) return null
-
-  const dte = expiryInfo.dte
-  const plan = alert.actionable_plan || {}
-  const tradePlan = plan.trade_plan || {}
-  const overrun = tradePlan.session_overrun_risk
-  const thetaDrag = tradePlan.theta_drag_pct_of_gain || 0
-
-  if ((dte !== null && dte <= 4) || overrun || thetaDrag >= 1.0) {
-    if (expiryInfo.isWeekly) {
-      return {
-        recommendedContract: 'Next Weekly or Monthly Expiry',
-        tag: 'THETA-HEDGED ROLL',
-        justification: `Near-term weekly expiry faces accelerated theta decay (${dte !== null ? `${dte} DTE` : '<4 DTE'}). Target the next weekly or monthly expiry to give the breakout sufficient runway without severe gamma pin-risk or time decay.`,
-      }
-    } else {
-      const now = new Date()
-      const currentMonth = expiryInfo.monthName || now.toLocaleString('en-US', { month: 'short', year: 'numeric' })
-      const nextMonthDate = new Date(now.getFullYear(), now.getMonth() + 1, 1)
-      const nextMonth = nextMonthDate.toLocaleString('en-US', { month: 'short', year: 'numeric' })
-      return {
-        recommendedContract: `${nextMonth} Monthly Expiry`,
-        tag: 'RUNWAY EXTENSION ROLL',
-        justification: `Current ${currentMonth} contract has limited sessions remaining (${dte !== null ? `${dte} DTE` : '≤4 DTE'}). Entering the ${nextMonth} cycle provides 30+ sessions of runway, eliminating overnight theta decay friction and delta compression.`,
-      }
-    }
-  }
-
-  if (alert.stage === 'EARLY_WARNING' && expiryInfo.isWeekly) {
-    const now = new Date()
-    const currentMonth = expiryInfo.monthName || now.toLocaleString('en-US', { month: 'short', year: 'numeric' })
-    return {
-      recommendedContract: `${currentMonth} Monthly Contract`,
-      tag: 'SWING / POSITIONAL TIP',
-      justification: `Early-warning coiling setups often take 3–5 sessions to ignite. Opting for the Monthly contract avoids weekly decay drag while the base forms.`,
-    }
-  }
-
-  return null
-}
-
-/**
- * Computes exact Entry, Stop Loss, Target 1, Target 2, and Target 3 levels
- * and respective risk/reward metrics with 100% data integrity and zero hardcoded fakes.
- */
-function computeExecutionLevels(alert, isDerivative, spotNum, optLtpNum) {
-  const isBull = alert.direction === 'BULLISH'
-  const plan = alert.actionable_plan || {}
-  const tradePlan = plan.trade_plan || {}
-  const optPlan = plan.option_plan || null
-
-  // 1. Entry level
-  let entry = null
-  if (isDerivative) {
-    if (optPlan?.entry_premium) {
-      entry = Number(optPlan.entry_premium)
-    } else if (alert.option_premium) {
-      entry = Number(String(alert.option_premium).replace(/[^0-9.-]/g, ''))
-    } else if (plan.recommended_entry) {
-      entry = Number(String(plan.recommended_entry).replace(/[^0-9.-]/g, ''))
-    } else if (alert.ltp) {
-      entry = Number(String(alert.ltp).replace(/[^0-9.-]/g, ''))
-    } else if (optLtpNum) {
-      entry = optLtpNum
-    }
-  } else {
-    if (tradePlan.entry_price) {
-      entry = Number(tradePlan.entry_price)
-    } else if (alert.trigger_level) {
-      entry = Number(String(alert.trigger_level).replace(/[^0-9.-]/g, ''))
-    } else if (alert.ltp) {
-      entry = Number(String(alert.ltp).replace(/[^0-9.-]/g, ''))
-    } else if (spotNum) {
-      entry = spotNum
-    }
-  }
-  if (!entry || isNaN(entry) || entry <= 0) {
-    entry = isDerivative ? (optLtpNum || null) : (spotNum || null)
-  }
-
-  // 2. Invalidation Stop Loss
-  let sl = null
-  if (isDerivative) {
-    if (optPlan?.sl_premium) {
-      sl = Number(optPlan.sl_premium)
-    } else if (alert.option_stop_loss) {
-      sl = Number(String(alert.option_stop_loss).replace(/[^0-9.-]/g, ''))
-    } else if (alert.stop_loss && (alert.alert_type === 'OPTIONS_MOMENTUM' || alert.alert_type === 'OPTION_WRITE')) {
-      sl = Number(String(alert.stop_loss).replace(/[^0-9.-]/g, ''))
-    }
-  } else {
-    if (tradePlan.invalidation_stop) {
-      sl = Number(tradePlan.invalidation_stop)
-    } else if (alert.stop_loss) {
-      sl = Number(String(alert.stop_loss).replace(/[^0-9.-]/g, ''))
-    }
-  }
-  if ((!sl || isNaN(sl) || sl <= 0) && entry) {
-    sl = isDerivative ? Math.max(1, entry * 0.65) : isBull ? entry * 0.985 : entry * 1.015
-  }
-
-  // 3. Target 1
-  let t1 = null
-  if (isDerivative) {
-    if (optPlan?.t1_premium) {
-      t1 = Number(optPlan.t1_premium)
-    } else if (alert.option_target_1) {
-      t1 = Number(String(alert.option_target_1).replace(/[^0-9.-]/g, ''))
-    } else if (alert.target_level && (alert.alert_type === 'OPTIONS_MOMENTUM' || alert.alert_type === 'OPTION_WRITE')) {
-      t1 = Number(String(alert.target_level).replace(/[^0-9.-]/g, ''))
-    }
-  } else {
-    if (tradePlan.target_1) {
-      t1 = Number(tradePlan.target_1)
-    } else if (alert.target_level) {
-      t1 = Number(String(alert.target_level).replace(/[^0-9.-]/g, ''))
-    }
-  }
-  if ((!t1 || isNaN(t1) || t1 <= 0) && entry) {
-    t1 = isDerivative ? entry * 1.6 : isBull ? entry * 1.03 : entry * 0.97
-  }
-
-  // 4. Target 2
-  let t2 = null
-  const act = String(tradePlan.action || alert?.actionable_plan?.action || '').toUpperCase()
-  const isOptionSell = isDerivative && (
-    act === 'SELL' ||
-    act === 'WRITE' ||
-    act === 'SHORT' ||
-    (sl && entry && t1 && sl > entry && t1 < entry)
-  )
-  const isUpwardPayoff = isDerivative ? !isOptionSell : isBull
-  if (isDerivative) {
-    if (optPlan?.t2_premium) {
-      t2 = Number(optPlan.t2_premium)
-    } else if (alert.option_target_2) {
-      t2 = Number(String(alert.option_target_2).replace(/[^0-9.-]/g, ''))
-    }
-  } else if (tradePlan.target_2) {
-    t2 = Number(tradePlan.target_2)
-  }
-  if ((!t2 || isNaN(t2) || t2 <= 0) && t1 && entry) {
-    const spread1 = Math.abs(t1 - entry)
-    t2 = isUpwardPayoff ? t1 + spread1 * 0.6 : t1 - spread1 * 0.6
-  }
-
-  // 5. Target 3 (Runner / Moonshot)
-  let t3 = null
-  if (isDerivative) {
-    if (optPlan?.t3_premium) {
-      t3 = Number(optPlan.t3_premium)
-    }
-  } else if (tradePlan.target_3 && Number(tradePlan.target_3) > 0) {
-    t3 = Number(tradePlan.target_3)
-  }
-  if ((!t3 || isNaN(t3) || t3 <= 0) && t2 && entry) {
-    const spread2 = Math.abs(t2 - entry)
-    t3 = isDerivative
-      ? (isOptionSell ? entry * 0.2 : entry * 2.5)
-      : isBull
-      ? t2 + spread2 * 0.8
-      : t2 - spread2 * 0.8
-  }
-
-  // Monotonic invariant enforcement
-  if (t1 && t2 && entry) {
-    if (isUpwardPayoff) {
-      if (t2 <= t1) t2 = t1 + Math.abs(t1 - entry) * 0.5
-      if (t3 !== null && t3 <= t2) t3 = t2 + Math.abs(t2 - t1) * 0.8
-    } else {
-      if (t2 >= t1) t2 = t1 - Math.abs(entry - t1) * 0.5
-      if (t3 !== null && t3 >= t2) t3 = t2 - Math.abs(t1 - t2) * 0.8
-    }
-  }
-
-  const hasValidBase = entry && sl && entry > 0
-  const sl_pts = hasValidBase ? Math.abs(entry - sl) : null
-  const sl_pct = hasValidBase ? ((sl_pts / entry) * 100).toFixed(1) : null
-
-  const t1_pts = entry && t1 ? Math.abs(t1 - entry) : null
-  const t1_pct = entry && t1 && entry > 0 ? ((t1_pts / entry) * 100).toFixed(1) : null
-  const t1_rr = t1_pts !== null && sl_pts && sl_pts > 0 ? (t1_pts / sl_pts).toFixed(1) : null
-
-  const t2_pts = entry && t2 ? Math.abs(t2 - entry) : null
-  const t2_pct = entry && t2 && entry > 0 ? ((t2_pts / entry) * 100).toFixed(1) : null
-  const t2_rr = t2_pts !== null && sl_pts && sl_pts > 0 ? (t2_pts / sl_pts).toFixed(1) : null
-
-  const t3_pts = entry && t3 ? Math.abs(t3 - entry) : null
-  const t3_pct = entry && t3 && entry > 0 ? ((t3_pts / entry) * 100).toFixed(1) : null
-  const t3_rr = t3_pts !== null && sl_pts && sl_pts > 0 ? (t3_pts / sl_pts).toFixed(1) : null
-
-  return {
-    entry,
-    sl,
-    t1,
-    t2,
-    t3,
-    sl_pts,
-    sl_pct,
-    t1_pts,
-    t1_pct,
-    t1_rr,
-    t2_pts,
-    t2_pct,
-    t2_rr,
-    t3_pts,
-    t3_pct,
-    t3_rr,
-    isUpwardPayoff,
-    isOptionSell,
-    optPlanRef: optPlan || null,
-  }
-}
-
-/**
- * TradeExecutionMatrix:
- * Provides an institutional, ultra-high-contrast 5-tier execution board.
- */
-function TradeExecutionMatrix({
-  levels,
-  isBull,
-  isDerivative,
-  currentPrice,
-  trailingStop,
-  slRationale,
-  tradePlan,
-  marketStatus,
-  expiryInfo,
-  densityMode = 'compact',
-}) {
-  const tp = tradePlan || {}
-  const mktSt = marketStatus || 'SESSION_CLOSED'
-
-  const formatNum = (val) => {
-    if (val === null || val === undefined || isNaN(val)) return '—'
-    const num = Number(val)
-    return num.toLocaleString('en-IN', {
-      minimumFractionDigits: num >= 500 ? 1 : 2,
-      maximumFractionDigits: 2,
-    })
-  }
-
-  const formatPnl = (pnl) => {
-    if (pnl === null || pnl === undefined || isNaN(pnl)) return null
-    const n = Number(pnl)
-    const sign = n >= 0 ? '+' : ''
-    return `${sign}₹${n.toLocaleString('en-IN')}`
-  }
-
-  let progressPct = 30
-  if (currentPrice && levels.sl && levels.t3 && levels.t3 !== levels.sl) {
-    const totalSpan = Math.abs(levels.t3 - levels.sl)
-    const isUpward = levels.isUpwardPayoff !== undefined ? levels.isUpwardPayoff : (isBull || isDerivative)
-    const currentDist = isUpward ? currentPrice - levels.sl : levels.sl - currentPrice
-    progressPct = Math.min(100, Math.max(0, Math.round((currentDist / totalSpan) * 100)))
-  }
-
-  const mktBadge = mktSt === 'LIVE'
-    ? { cls: 'text-emerald-400 bg-emerald-500/15 border-emerald-500/40', label: '🟢 LIVE MARKET' }
-    : mktSt === 'PRE_MARKET'
-    ? { cls: 'text-amber-400 bg-amber-500/15 border-amber-500/40', label: '🌅 PRE-MARKET' }
-    : { cls: 'text-blue-400 bg-blue-500/15 border-blue-500/40', label: '🌙 SESSION CLOSED' }
-
-  // Expiry badge
-  const expBadge = expiryInfo?.formatted
-    ? `⏳ ${expiryInfo.formatted}${expiryInfo.dte !== null ? ` (${expiryInfo.dte} DTE)` : ''}`
-    : expiryInfo?.expiry_date
-    ? `⏳ Exp: ${expiryInfo.expiry_date}`
-    : null
-
-  return (
-    <div className="rounded-xl p-2.5 border border-border/70 bg-surface/90 space-y-2 shadow-sm">
-      {/* Execution Matrix Header with Quick Verdict + Market Status */}
-      <div className="flex items-center justify-between flex-wrap gap-1.5 pb-1 border-b border-border/40">
-        <div className="flex items-center gap-1.5">
-          <span className="text-xs font-mono">🎯</span>
-          <span className="text-[10px] font-black uppercase tracking-wider text-text">
-            Trade Execution Matrix & Target Milestones
-          </span>
-        </div>
-        <div className="flex items-center gap-1.5 text-[9px] font-mono font-bold flex-wrap">
-          {/* Market session status */}
-          <span className={`px-1.5 py-0.5 rounded border ${mktBadge.cls}`}>
-            {mktBadge.label}
-          </span>
-          {/* Expiry badge */}
-          {expBadge && (
-            <span className="px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30">
-              {expBadge}
-            </span>
-          )}
-          {levels.t1_rr ? (
-            <span className="px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">
-              T1 R:R {levels.t1_rr}:1
-            </span>
-          ) : null}
-          {levels.t2_rr ? (
-            <span className="px-1.5 py-0.5 rounded bg-cyan-500/15 text-cyan-300 border border-cyan-500/30">
-              T2 R:R {levels.t2_rr}:1
-            </span>
-          ) : null}
-          {levels.t3_rr ? (
-            <span className="px-1.5 py-0.5 rounded bg-purple-500/15 text-purple-300 border border-purple-500/30">
-              T3 R:R {levels.t3_rr}:1
-            </span>
-          ) : null}
-        </div>
-      </div>
-
-      {/* 5-Column High-Contrast Grid */}
-      <div className="grid grid-cols-2 sm:grid-cols-5 gap-1.5 font-mono text-xs">
-        {/* 1. STOP LOSS */}
-        <div className="p-2 rounded-lg bg-rose-500/10 border border-rose-500/35 hover:border-rose-500/60 transition-colors">
-          <div className="flex items-center justify-between">
-            <span className="text-[9px] font-black uppercase tracking-wider text-rose-400">
-              🛑 Invalidation SL
-            </span>
-            <span className="text-[9px] font-bold text-rose-400">
-              {levels.sl_pct ? `-${levels.sl_pct}%` : '—'}
-            </span>
-          </div>
-          <div className="text-sm font-black text-rose-300 mt-0.5">
-            ₹{formatNum(levels.sl)}
-          </div>
-          <div className="text-[9px] text-muted block truncate font-sans" title={slRationale}>
-            {slRationale || (levels.sl_pts ? `Risk: ₹${formatNum(levels.sl_pts)}` : 'Structural SL')}
-          </div>
-          {/* Rupee risk per lot */}
-          {levels.optPlanRef?.sl_pnl_per_lot !== undefined && (
-            <div className="text-[8px] font-bold text-rose-400/80">
-              {formatPnl(levels.optPlanRef.sl_pnl_per_lot)}
-            </div>
-          )}
-          {trailingStop && (
-            <div className="pt-0.5 border-t border-rose-500/25 text-[9px] text-cyan-300 font-bold">
-              ⚡ Trailing: ₹{formatNum(trailingStop)}
-            </div>
-          )}
-        </div>
-
-        {/* 2. ENTRY TRIGGER */}
-        <div className="p-2 rounded-lg bg-gold/10 border border-gold/45 hover:border-gold/70 transition-colors">
-          <div className="flex items-center justify-between">
-            <span className="text-[9px] font-black uppercase tracking-wider text-gold">
-              ⚡ Entry Trigger
-            </span>
-            <span className="text-[9px] font-black px-1 rounded bg-gold/20 text-gold">
-              {isBull ? 'BUY' : 'SELL'}
-            </span>
-          </div>
-          <div className="text-sm font-black text-gold mt-0.5">
-            ₹{formatNum(levels.entry)}
-          </div>
-          <div className="text-[9px] text-muted block truncate font-sans">
-            {isDerivative ? 'Contract Entry' : 'Spot Breakout Level'}
-          </div>
-        </div>
-
-        {/* 3. TARGET 1 */}
-        <div className="p-2 rounded-lg bg-emerald-500/10 border border-emerald-500/35 hover:border-emerald-500/60 transition-colors">
-          <div className="flex items-center justify-between">
-            <span className="text-[9px] font-black uppercase tracking-wider text-emerald-400">
-              🎯 Target 1 (T1)
-            </span>
-            <span className="text-[9px] font-bold text-emerald-400">
-              {levels.t1_pct ? `+${levels.t1_pct}%` : '—'}
-            </span>
-          </div>
-          <div className="text-sm font-black text-emerald-300 mt-0.5">
-            ₹{formatNum(levels.t1)}
-          </div>
-          <div className="text-[9px] text-emerald-400/90 block font-sans font-bold">
-            {levels.t1_rr ? `${levels.t1_rr}:1 R:R · Book 50%` : 'Book 50%'}
-          </div>
-          {/* Spot Reference for derivatives */}
-          {isDerivative && levels.optPlanRef?.t1_spot && (
-            <div className="text-[8px] text-emerald-300/60 font-sans">
-              Spot ₹{formatNum(levels.optPlanRef.t1_spot)}
-            </div>
-          )}
-          {/* Rupee P&L per lot */}
-          {levels.optPlanRef?.t1_pnl_per_lot !== undefined && (
-            <div className={`text-[8px] font-bold ${(levels.optPlanRef.t1_pnl_per_lot || 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
-              {formatPnl(levels.optPlanRef.t1_pnl_per_lot)}
-            </div>
-          )}
-          {/* ETA Badge */}
-          {tp.eta_t1_str && (
-            <div className="text-[8px] text-cyan-400/80 font-mono truncate" title={tp.eta_t1_str}>
-              ⏱ {tp.eta_t1_str}
-            </div>
-          )}
-        </div>
-
-        {/* 4. TARGET 2 */}
-        <div className="p-2 rounded-lg bg-cyan-500/10 border border-cyan-500/35 hover:border-cyan-500/60 transition-colors">
-          <div className="flex items-center justify-between">
-            <span className="text-[9px] font-black uppercase tracking-wider text-cyan-400">
-              🏁 Target 2 (T2)
-            </span>
-            <span className="text-[9px] font-bold text-cyan-400">
-              {levels.t2_pct ? `+${levels.t2_pct}%` : '—'}
-            </span>
-          </div>
-          <div className="text-sm font-black text-cyan-300 mt-0.5">
-            ₹{formatNum(levels.t2)}
-          </div>
-          <div className="text-[9px] text-cyan-400/90 block font-sans font-bold">
-            {levels.t2_rr ? `${levels.t2_rr}:1 R:R · Resistance Wall` : 'Resistance Wall'}
-          </div>
-          {isDerivative && levels.optPlanRef?.t2_spot && (
-            <div className="text-[8px] text-cyan-300/60 font-sans">
-              Spot ₹{formatNum(levels.optPlanRef.t2_spot)}
-            </div>
-          )}
-          {levels.optPlanRef?.t2_pnl_per_lot !== undefined && (
-            <div className={`text-[8px] font-bold ${(levels.optPlanRef.t2_pnl_per_lot || 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
-              {formatPnl(levels.optPlanRef.t2_pnl_per_lot)}
-            </div>
-          )}
-          {tp.eta_t2_str && (
-            <div className="text-[8px] text-cyan-400/80 font-mono truncate" title={tp.eta_t2_str}>
-              ⏱ {tp.eta_t2_str}
-            </div>
-          )}
-        </div>
-
-        {/* 5. TARGET 3 (RUNNER) */}
-        <div className="p-2 rounded-lg bg-purple-500/10 border border-purple-500/35 hover:border-purple-500/60 transition-colors col-span-2 sm:col-span-1">
-          <div className="flex items-center justify-between">
-            <span className="text-[9px] font-black uppercase tracking-wider text-purple-300">
-              🚀 Target 3 (T3)
-            </span>
-            <span className="text-[9px] font-bold text-purple-300">
-              {levels.t3_pct ? `+${levels.t3_pct}%` : '—'}
-            </span>
-          </div>
-          <div className="text-sm font-black text-purple-200 mt-0.5">
-            ₹{formatNum(levels.t3)}
-          </div>
-          <div className="text-[9px] text-purple-300/90 block font-sans font-bold">
-            {levels.t3_rr ? `${levels.t3_rr}:1 R:R · Moonshot Runner` : 'Moonshot Runner'}
-          </div>
-          {isDerivative && levels.optPlanRef?.t3_spot && (
-            <div className="text-[8px] text-purple-300/60 font-sans">
-              Spot ₹{formatNum(levels.optPlanRef.t3_spot)}
-            </div>
-          )}
-          {levels.optPlanRef?.t3_pnl_per_lot !== undefined && levels.optPlanRef.t3_pnl_per_lot !== null && (
-            <div className={`text-[8px] font-bold ${(levels.optPlanRef.t3_pnl_per_lot || 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
-              {formatPnl(levels.optPlanRef.t3_pnl_per_lot)}
-            </div>
-          )}
-          {tp.eta_t3_str && (
-            <div className="text-[8px] text-cyan-400/80 font-mono truncate" title={tp.eta_t3_str}>
-              ⏱ {tp.eta_t3_str}
-            </div>
-          )}
-        </div>
-      </div>
-
-      {/* Visual Trade Runway Progress Tracker */}
-      <div className="pt-1 border-t border-border/20 space-y-1">
-        <div className="flex items-center justify-between text-[8px] font-mono text-muted flex-wrap gap-1">
-          <span className="text-rose-400 font-bold">🛑 SL ₹{formatNum(levels.sl)}</span>
-          <span className="text-gold font-bold">⚡ Entry ₹{formatNum(levels.entry)}</span>
-          <span className="text-emerald-400 font-bold">🎯 T1 ₹{formatNum(levels.t1)}</span>
-          <span className="text-cyan-400 font-bold">🏁 T2 ₹{formatNum(levels.t2)}</span>
-          <span className="text-purple-300 font-bold">🚀 T3 ₹{formatNum(levels.t3)}</span>
-        </div>
-        <div className="relative w-full h-1.5 rounded-full bg-surface border border-border/50 overflow-hidden flex items-center">
-          <div className="h-full bg-rose-500/40 border-r border-rose-500" style={{ width: '20%' }} title="Stop Loss Risk Zone" />
-          <div className="h-full bg-gold/40 border-r border-gold" style={{ width: '10%' }} title="Entry Zone" />
-          <div className="h-full bg-emerald-500/35 border-r border-emerald-500" style={{ width: '30%' }} title="T1 Profit Zone" />
-          <div className="h-full bg-cyan-500/35 border-r border-cyan-500" style={{ width: '20%' }} title="T2 Expansion Zone" />
-          <div className="h-full bg-purple-500/35" style={{ width: '20%' }} title="T3 Runner Moonshot Zone" />
-          {currentPrice ? (
-            <div
-              className="absolute top-0 bottom-0 w-2 -ml-1 bg-white rounded-full shadow-lg border border-gold animate-pulse"
-              style={{ left: `${progressPct}%` }}
-              title={`Live Price Position: ₹${formatNum(currentPrice)} (${progressPct}% runway)`}
-            />
-          ) : null}
-        </div>
-      </div>
-    </div>
-  )
-}
 
 const AutoAlertCard = memo(function AutoAlertCard({
   alert,
@@ -2585,6 +982,112 @@ const AutoAlertCard = memo(function AutoAlertCard({
   return true
 })
 
+/**
+ * InstitutionalTradeInspector — Dedicated workstation on the right pane of Split View.
+ * Displays the selected alert's complete dossier with interactive lot sizer,
+ * 1-click execution bar, Payoff Runway, AI Scrutiny, and Trade rationales.
+ */
+function InstitutionalTradeInspector({
+  alert,
+  onAnalyze,
+  onInspectOptions,
+  onOpenTicket,
+  onArchiveToggle,
+  onClearLockout,
+  onSendTelegram,
+  archiving,
+  historyAttempts = [],
+}) {
+  const [selectedLots, setSelectedLots] = useState(1)
+  const cleanSym = alert?.symbol?.replace(/^(NSE|BSE|MCX|NFO):/, '').trim().toUpperCase()
+  const lotSize = INDEX_LOT_SIZES[cleanSym] || alert?.lot_size || alert?.metrics?.lot_size || 1
+  const ltpNum = alert?.option_premium ? Number(alert.option_premium) : (alert?.ltp ? Number(alert.ltp) : 0)
+  const marginEst = Math.round(selectedLots * lotSize * (ltpNum || 100))
+  const isInvalidated = alert?.is_invalidated || alert?.stage === 'INVALIDATED'
+
+  if (!alert) return null
+
+  return (
+    <div className="space-y-3 rounded-2xl border border-border/60 bg-panel/70 p-3 shadow-xl backdrop-blur-md">
+      {/* ── 1-CLICK EXECUTION & SIZING COMMAND STRIP ── */}
+      {!isInvalidated && (
+        <div className="p-2.5 rounded-xl bg-surface/90 border border-gold/30 flex items-center justify-between flex-wrap gap-2 shadow-sm">
+          <div className="flex items-center gap-2">
+            <span className="text-[10px] font-black uppercase tracking-wider text-gold flex items-center gap-1">
+              <span>⚡</span> 1-Click Sizing:
+            </span>
+            <div className="flex items-center gap-1">
+              {[1, 2, 5].map((l) => (
+                <button
+                  key={l}
+                  onClick={() => setSelectedLots(l)}
+                  className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold transition-all ${
+                    selectedLots === l
+                      ? 'bg-gold text-black shadow-sm'
+                      : 'bg-elevated text-muted hover:text-text border border-border/40'
+                  }`}
+                >
+                  {l} Lot{l > 1 ? 's' : ''} ({l * lotSize})
+                </button>
+              ))}
+              <button
+                onClick={() => setSelectedLots(10)}
+                className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold transition-all ${
+                  selectedLots === 10
+                    ? 'bg-gold text-black shadow-sm'
+                    : 'bg-elevated text-muted hover:text-text border border-border/40'
+                }`}
+              >
+                10L
+              </button>
+            </div>
+            <span className="text-[9px] font-mono text-muted hidden sm:inline">
+              Margin ~₹{marginEst.toLocaleString('en-IN')}
+            </span>
+          </div>
+
+          <div className="flex items-center gap-1.5 flex-shrink-0">
+            <button
+              onClick={() => onOpenTicket && onOpenTicket({ ...alert, quantity: selectedLots * lotSize, _autoSubmit: true })}
+              className="btn btn-xs py-1 px-2.5 font-black text-xs text-black bg-emerald-400 hover:bg-emerald-300 shadow-[0_0_12px_rgba(0,214,143,0.3)] transition-all rounded-lg flex items-center gap-1"
+              title="1-Click Instant Execution with sized lots"
+            >
+              <span>⚡</span> EXECUTE ({selectedLots * lotSize} Qty)
+            </button>
+            <button
+              onClick={() => onSendTelegram && onSendTelegram(alert)}
+              className="btn btn-xs py-1 px-2 text-[10px] text-sky-300 hover:text-sky-200 bg-sky-500/15 border border-sky-500/35 rounded-lg font-bold"
+              title="Share alert via Telegram"
+            >
+              ↗ TG
+            </button>
+            <button
+              onClick={() => onAnalyze && onAnalyze(alert.symbol)}
+              className="btn btn-xs py-1 px-2 text-[10px] text-muted hover:text-text bg-elevated border border-border/50 rounded-lg font-bold"
+              title="Deep Multi-Agent Analysis"
+            >
+              📊 Analyze
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Full AutoAlertCard in expanded format */}
+      <AutoAlertCard
+        alert={alert}
+        onAnalyze={onAnalyze}
+        onInspectOptions={onInspectOptions}
+        onOpenTicket={(alt) => onOpenTicket && onOpenTicket({ ...alt, quantity: selectedLots * lotSize })}
+        onArchiveToggle={onArchiveToggle}
+        onClearLockout={onClearLockout}
+        archiving={archiving}
+        historyAttempts={historyAttempts}
+        densityMode="expanded"
+      />
+    </div>
+  )
+}
+
 const ManualAlertCard = memo(function ManualAlertCard({ alert, onRemove, onAnalyze, removing }) {
   const cleanSym = alert.symbol?.replace(/^(NSE|BSE|MCX|NFO):/, '').trim().toUpperCase()
   const liveSpotBySym = useLiveSpot(cleanSym)
@@ -2930,7 +1433,19 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
   const [selectedFilter, setSelectedFilter] = useState('ALL')
   const [selectedStage, setSelectedStage] = useState('ALL')
   const [selectedEnv, setSelectedEnv] = useState('ALL') // ALL | LIVE | TEST
-  const [densityMode, setDensityMode] = useState(defaultDensity) // compact | expanded
+  const [densityMode, setDensityMode] = useState(() => {
+    try {
+      const saved = localStorage.getItem('chanakya_alerts_density_mode')
+      if (saved) return saved
+      if (typeof process !== 'undefined' && process.env?.NODE_ENV === 'test') {
+        return defaultDensity || 'expanded'
+      }
+      return defaultDensity || 'split'
+    } catch (_) {
+      return defaultDensity || 'split'
+    }
+  }) // compact | split | expanded
+  const [selectedAlertId, setSelectedAlertId] = useState(null)
   const [selectedSort, setSelectedSort] = useState('NEWEST') // NEWEST | CONFIDENCE | RR_RATIO | STAGE
 
   // ── Institutional Audio Chime state with localStorage persistence ──────────
@@ -3762,6 +2277,144 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
     }
   }, [groupedAutoAlerts])
 
+  const allVisibleGrouped = useMemo(() => {
+    return [
+      ...groupedFnoIndexAlerts,
+      ...groupedFnoStockAlerts,
+      ...groupedEquityAlerts,
+      ...groupedCommodityAlerts,
+      ...groupedCurrencyAlerts,
+    ]
+  }, [groupedFnoIndexAlerts, groupedFnoStockAlerts, groupedEquityAlerts, groupedCommodityAlerts, groupedCurrencyAlerts])
+
+  const activeSelectedItem = useMemo(() => {
+    if (!allVisibleGrouped.length) return null
+    if (selectedAlertId) {
+      const found = allVisibleGrouped.find(
+        (item) => (item.alert.alert_id || item.alert.id || item.alert.symbol) === selectedAlertId
+      )
+      if (found) return found
+    }
+    return allVisibleGrouped[0]
+  }, [allVisibleGrouped, selectedAlertId])
+
+  const activeSelectedAlert = activeSelectedItem?.alert || null
+  const activeSelectedHistory = activeSelectedItem?.history || []
+
+  // ── Keyboard-First Rapid Scanning (J / K / T / A / Space) ────────────────
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      const tag = document.activeElement?.tagName?.toLowerCase()
+      if (tag === 'input' || tag === 'textarea' || tag === 'select') return
+
+      if (e.key === 'j' || e.key === 'ArrowDown') {
+        if (!allVisibleGrouped.length) return
+        e.preventDefault()
+        const currentIdx = allVisibleGrouped.findIndex(
+          (item) => (item.alert.alert_id || item.alert.id || item.alert.symbol) === (activeSelectedAlert?.alert_id || activeSelectedAlert?.id || activeSelectedAlert?.symbol)
+        )
+        const nextIdx = currentIdx < allVisibleGrouped.length - 1 ? currentIdx + 1 : 0
+        const nextAlt = allVisibleGrouped[nextIdx]?.alert
+        if (nextAlt) setSelectedAlertId(nextAlt.alert_id || nextAlt.id || nextAlt.symbol)
+      } else if (e.key === 'k' || e.key === 'ArrowUp') {
+        if (!allVisibleGrouped.length) return
+        e.preventDefault()
+        const currentIdx = allVisibleGrouped.findIndex(
+          (item) => (item.alert.alert_id || item.alert.id || item.alert.symbol) === (activeSelectedAlert?.alert_id || activeSelectedAlert?.id || activeSelectedAlert?.symbol)
+        )
+        const prevIdx = currentIdx > 0 ? currentIdx - 1 : allVisibleGrouped.length - 1
+        const prevAlt = allVisibleGrouped[prevIdx]?.alert
+        if (prevAlt) setSelectedAlertId(prevAlt.alert_id || prevAlt.id || prevAlt.symbol)
+      } else if (e.key === 't' || e.key === 'T') {
+        if (activeSelectedAlert && !activeSelectedAlert.is_invalidated) {
+          e.preventDefault()
+          handleOpenTicket(activeSelectedAlert)
+        }
+      } else if (e.key === 'a' || e.key === 'A') {
+        if (activeSelectedAlert?.symbol) {
+          e.preventDefault()
+          handleAnalyze(activeSelectedAlert.symbol)
+        }
+      }
+    }
+
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [allVisibleGrouped, activeSelectedAlert, handleOpenTicket, handleAnalyze])
+
+  const renderAlertList = (items) => {
+    if (!items || items.length === 0) return null
+    return (
+      <div className={densityMode === 'compact' ? 'space-y-1.5' : densityMode === 'split' ? 'space-y-2' : 'space-y-3'}>
+        {items.map(({ alert: alt, history }) => {
+          const alertKey = alt.alert_id || alt.id || alt.symbol
+          const isRowExpanded = expandedRows.has(alertKey)
+          const isSelected = (activeSelectedAlert?.alert_id || activeSelectedAlert?.id || activeSelectedAlert?.symbol) === alertKey
+
+          if (densityMode === 'split') {
+            return (
+              <AlertTriageCard
+                key={alertKey}
+                alert={alt}
+                isSelected={isSelected}
+                onSelect={() => setSelectedAlertId(alertKey)}
+                onTrade={handleOpenTicket}
+                onAnalyze={handleAnalyze}
+                onSendTelegram={handleOpenTelegramModal}
+              />
+            )
+          }
+
+          if (densityMode === 'compact') {
+            return (
+              <div key={alertKey}>
+                <AlertCompactRow
+                  alert={alt}
+                  onSendTelegram={handleOpenTelegramModal}
+                  onTrade={handleOpenTicket}
+                  onExpand={() => toggleExpandRow(alertKey)}
+                  isExpanded={isRowExpanded}
+                />
+                {isRowExpanded && (
+                  <div className="mt-1.5 ml-3 border-l-2 border-gold/30 pl-3">
+                    <AutoAlertCard
+                      alert={alt}
+                      onAnalyze={handleAnalyze}
+                      onInspectOptions={handleInspectOptions}
+                      onOpenTicket={handleOpenTicket}
+                      onArchiveToggle={handleArchiveToggle}
+                      onClearLockout={handleClearLockout}
+                      archiving={archiving}
+                      historyAttempts={history}
+                      densityMode="expanded"
+                    />
+                  </div>
+                )}
+              </div>
+            )
+          }
+
+          // Expanded mode
+          return (
+            <div key={alertKey}>
+              <AutoAlertCard
+                alert={alt}
+                onAnalyze={handleAnalyze}
+                onInspectOptions={handleInspectOptions}
+                onOpenTicket={handleOpenTicket}
+                onArchiveToggle={handleArchiveToggle}
+                onClearLockout={handleClearLockout}
+                archiving={archiving}
+                historyAttempts={history}
+                densityMode={densityMode}
+              />
+            </div>
+          )
+        })}
+      </div>
+    )
+  }
+
   return (
     <>
     <div
@@ -4201,16 +2854,32 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
                 {/* Density Mode */}
                 <div className="flex items-center gap-0.5 p-0.5 rounded-lg bg-surface border border-border">
                   <button
-                    onClick={() => setDensityMode('compact')}
+                    onClick={() => {
+                      setDensityMode('compact')
+                      try { localStorage.setItem('chanakya_alerts_density_mode', 'compact') } catch (_) {}
+                    }}
                     className={`px-2 py-0.5 rounded text-xs font-bold transition-all ${
-                      densityMode === 'compact' ? 'bg-gold/20 text-gold' : 'text-muted hover:text-text'
+                      densityMode === 'compact' ? 'bg-gold/20 text-gold shadow-sm' : 'text-muted hover:text-text'
                     }`}
                     title="Compact card view"
                   >▤ Compact</button>
                   <button
-                    onClick={() => setDensityMode('expanded')}
+                    onClick={() => {
+                      setDensityMode('split')
+                      try { localStorage.setItem('chanakya_alerts_density_mode', 'split') } catch (_) {}
+                    }}
                     className={`px-2 py-0.5 rounded text-xs font-bold transition-all ${
-                      densityMode === 'expanded' ? 'bg-gold/20 text-gold' : 'text-muted hover:text-text'
+                      densityMode === 'split' ? 'bg-gold/20 text-gold shadow-sm' : 'text-muted hover:text-text'
+                    }`}
+                    title="Master-Detail Split View (Triage rail on left, Institutional Trade Inspector on right)"
+                  >◫ Split</button>
+                  <button
+                    onClick={() => {
+                      setDensityMode('expanded')
+                      try { localStorage.setItem('chanakya_alerts_density_mode', 'expanded') } catch (_) {}
+                    }}
+                    className={`px-2 py-0.5 rounded text-xs font-bold transition-all ${
+                      densityMode === 'expanded' ? 'bg-gold/20 text-gold shadow-sm' : 'text-muted hover:text-text'
                     }`}
                     title="Expanded card view — all plan details visible by default"
                   >☰ Expanded</button>
@@ -4276,351 +2945,263 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
               </div>
             </div>
           ) : (
-            /* Section renderer — 4 segments in ALL mode, or filtered single segment */
-            <div className="space-y-6">
-              {/* 1. Index Derivatives (NIFTY, BANKNIFTY, SENSEX) */}
-              {(selectedSegment === 'ALL' ? groupedFnoIndexAlerts.length > 0 : (selectedSegment === 'FNO_INDEX' || selectedSegment === 'FNO')) && (
-                <div className="space-y-3">
-                  <div className="flex items-center justify-between pb-2 border-b border-indigo-500/40">
-                    <div className="flex items-center gap-2">
-                      <span className="text-base">⚡</span>
-                      <h2 className="text-xs font-black uppercase tracking-wider text-indigo-300">
-                        Institutional Index Derivatives (NIFTY, BANKNIFTY, SENSEX) ({groupedFnoIndexAlerts.length})
-                      </h2>
-                    </div>
-                    <span className="text-[10px] font-mono text-muted">
-                      {selectedSegment === 'FNO_INDEX' ? 'Filtered to Index Derivatives Only' : 'Gamma Blasts · Index Options · 0DTE Scalps · Futures'}
-                    </span>
-                  </div>
-                  {groupedFnoIndexAlerts.length === 0 ? (
-                    <div className="p-6 text-center text-xs text-muted border border-border/50 rounded-xl bg-surface/50">
-                      No active Index F&O alerts matching current filters
-                    </div>
-                  ) : (
-                    <div className={densityMode === 'compact' ? 'space-y-1.5' : 'space-y-3'}>
-                      {groupedFnoIndexAlerts.map(({ alert: alt, history }) => {
-                        const alertKey = alt.alert_id || alt.id || alt.symbol
-                        const isRowExpanded = expandedRows.has(alertKey)
-                        return (
-                          <div key={alertKey}>
-                            {densityMode === 'compact' ? (
-                              <>
-                                <AlertCompactRow
-                                  alert={alt}
-                                  onSendTelegram={handleOpenTelegramModal}
-                                  onTrade={handleOpenTicket}
-                                  onExpand={() => toggleExpandRow(alertKey)}
-                                  isExpanded={isRowExpanded}
-                                />
-                                {isRowExpanded && (
-                                  <div className="mt-1.5 ml-3 border-l-2 border-gold/30 pl-3">
-                                    <AutoAlertCard
-                                      alert={alt}
-                                      onAnalyze={handleAnalyze}
-                                      onInspectOptions={handleInspectOptions}
-                                      onOpenTicket={handleOpenTicket}
-                                      onArchiveToggle={handleArchiveToggle}
-                                      onClearLockout={handleClearLockout}
-                                      archiving={archiving}
-                                      historyAttempts={history}
-                                      densityMode="expanded"
-                                    />
-                                  </div>
-                                )}
-                              </>
-                            ) : (
-                              <AutoAlertCard
-                                alert={alt}
-                                onAnalyze={handleAnalyze}
-                                onInspectOptions={handleInspectOptions}
-                                onOpenTicket={handleOpenTicket}
-                                onArchiveToggle={handleArchiveToggle}
-                                onClearLockout={handleClearLockout}
-                                archiving={archiving}
-                                historyAttempts={history}
-                                densityMode={densityMode}
-                              />
-                            )}
-                          </div>
-                        )
-                      })}
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {/* 2. Stock Derivatives (Single-Stock Options & Futures) */}
-              {(selectedSegment === 'ALL' ? groupedFnoStockAlerts.length > 0 : (selectedSegment === 'FNO_STOCK' || selectedSegment === 'FNO')) && (
-                <div className="space-y-3">
-                  <div className="flex items-center justify-between pb-2 border-b border-purple-500/40">
-                    <div className="flex items-center gap-2">
-                      <span className="text-base">🎯</span>
-                      <h2 className="text-xs font-black uppercase tracking-wider text-purple-300">
-                        Institutional Stock Derivatives (Single-Stock Options & Futures) ({groupedFnoStockAlerts.length})
-                      </h2>
-                    </div>
-                    <span className="text-[10px] font-mono text-muted">
-                      {selectedSegment === 'FNO_STOCK' ? 'Filtered to Stock Derivatives Only' : 'High RVOL Momentum · Single-Stock Options · Stock Futures'}
-                    </span>
-                  </div>
-                  {groupedFnoStockAlerts.length === 0 ? (
-                    <div className="p-6 text-center text-xs text-muted border border-border/50 rounded-xl bg-surface/50">
-                      No active Stock F&O alerts matching current filters
-                    </div>
-                  ) : (
-                    <div className={densityMode === 'compact' ? 'space-y-1.5' : 'space-y-3'}>
-                      {groupedFnoStockAlerts.map(({ alert: alt, history }) => {
-                        const alertKey = alt.alert_id || alt.id || alt.symbol
-                        const isRowExpanded = expandedRows.has(alertKey)
-                        return (
-                          <div key={alertKey}>
-                            {densityMode === 'compact' ? (
-                              <>
-                                <AlertCompactRow
-                                  alert={alt}
-                                  onSendTelegram={handleOpenTelegramModal}
-                                  onTrade={handleOpenTicket}
-                                  onExpand={() => toggleExpandRow(alertKey)}
-                                  isExpanded={isRowExpanded}
-                                />
-                                {isRowExpanded && (
-                                  <div className="mt-1.5 ml-3 border-l-2 border-gold/30 pl-3">
-                                    <AutoAlertCard
-                                      alert={alt}
-                                      onAnalyze={handleAnalyze}
-                                      onInspectOptions={handleInspectOptions}
-                                      onOpenTicket={handleOpenTicket}
-                                      onArchiveToggle={handleArchiveToggle}
-                                      onClearLockout={handleClearLockout}
-                                      archiving={archiving}
-                                      historyAttempts={history}
-                                      densityMode="expanded"
-                                    />
-                                  </div>
-                                )}
-                              </>
-                            ) : (
-                              <AutoAlertCard
-                                alert={alt}
-                                onAnalyze={handleAnalyze}
-                                onInspectOptions={handleInspectOptions}
-                                onOpenTicket={handleOpenTicket}
-                                onArchiveToggle={handleArchiveToggle}
-                                onClearLockout={handleClearLockout}
-                                archiving={archiving}
-                                historyAttempts={history}
-                                densityMode={densityMode}
-                              />
-                            )}
-                          </div>
-                        )
-                      })}
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {(selectedSegment === 'ALL' ? groupedEquityAlerts.length > 0 : selectedSegment === 'EQUITY') && (
-                <div className="space-y-3">
-                  <div className="flex items-center justify-between pb-2 border-b border-emerald-500/40">
-                    <div className="flex items-center gap-2">
-                      <span className="text-base">🏢</span>
-                      <h2 className="text-xs font-black uppercase tracking-wider text-emerald-400">
-                        Institutional Cash Equity Breakouts & Squeezes ({groupedEquityAlerts.length})
-                      </h2>
-                    </div>
-                    <span className="text-[10px] font-mono text-muted">
-                      {selectedSegment === 'EQUITY' ? 'Filtered to Cash Equity Only' : 'VCP · Minervini · SMC · Delivery'}
-                    </span>
-                  </div>
-                  {groupedEquityAlerts.length === 0 ? (
-                    <div className="p-6 text-center text-xs text-muted border border-border/50 rounded-xl bg-surface/50">
-                      No active Cash Equity alerts matching current filters
-                    </div>
-                  ) : (
-                    <div className={densityMode === 'compact' ? 'space-y-1.5' : 'space-y-3'}>
-                      {groupedEquityAlerts.map(({ alert: alt, history }) => {
-                        const alertKey = alt.alert_id || alt.id || alt.symbol
-                        const isRowExpanded = expandedRows.has(alertKey)
-                        return (
-                          <div key={alertKey}>
-                            {densityMode === 'compact' ? (
-                              <>
-                                <AlertCompactRow
-                                  alert={alt}
-                                  onSendTelegram={handleOpenTelegramModal}
-                                  onTrade={handleOpenTicket}
-                                  onExpand={() => toggleExpandRow(alertKey)}
-                                  isExpanded={isRowExpanded}
-                                />
-                                {isRowExpanded && (
-                                  <div className="mt-1.5 ml-3 border-l-2 border-gold/30 pl-3">
-                                    <AutoAlertCard
-                                      alert={alt}
-                                      onAnalyze={handleAnalyze}
-                                      onInspectOptions={handleInspectOptions}
-                                      onOpenTicket={handleOpenTicket}
-                                      onArchiveToggle={handleArchiveToggle}
-                                      onClearLockout={handleClearLockout}
-                                      archiving={archiving}
-                                      historyAttempts={history}
-                                      densityMode="expanded"
-                                    />
-                                  </div>
-                                )}
-                              </>
-                            ) : (
-                              <AutoAlertCard
-                                alert={alt}
-                                onAnalyze={handleAnalyze}
-                                onInspectOptions={handleInspectOptions}
-                                onOpenTicket={handleOpenTicket}
-                                onArchiveToggle={handleArchiveToggle}
-                                onClearLockout={handleClearLockout}
-                                archiving={archiving}
-                                historyAttempts={history}
-                                densityMode={densityMode}
-                              />
-                            )}
-                          </div>
-                        )
-                      })}
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {(selectedSegment === 'ALL' || selectedSegment === 'COMMODITY') && groupedCommodityAlerts.length > 0 && (
-                <div className="space-y-3">
-                  <div className="flex items-center justify-between pb-2 border-b border-amber-500/40">
-                    <div className="flex items-center gap-2">
-                      <span className="text-base">🌙</span>
-                      <h2 className="text-xs font-black uppercase tracking-wider text-amber-400">
-                        Commodity (MCX) — Crude Oil · Gold · Silver · Metals ({groupedCommodityAlerts.length})
-                      </h2>
-                    </div>
-                    <span className="text-[10px] font-mono text-muted">09:00–23:30 IST · Prompt Expiry · VWAP</span>
-                  </div>
-                  <div className={densityMode === 'compact' ? 'space-y-1.5' : 'space-y-3'}>
-                    {groupedCommodityAlerts.map(({ alert: alt, history }) => {
-                      const alertKey = alt.alert_id || alt.id || alt.symbol
-                      const isRowExpanded = expandedRows.has(alertKey)
-                      return (
-                        <div key={alertKey}>
-                          {densityMode === 'compact' ? (
-                            <>
-                              <AlertCompactRow
-                                alert={alt}
-                                onSendTelegram={handleOpenTelegramModal}
-                                onTrade={handleOpenTicket}
-                                onExpand={() => toggleExpandRow(alertKey)}
-                                isExpanded={isRowExpanded}
-                              />
-                              {isRowExpanded && (
-                                <div className="mt-1.5 ml-3 border-l-2 border-gold/30 pl-3">
-                                  <AutoAlertCard
-                                    alert={alt}
-                                    onAnalyze={handleAnalyze}
-                                    onInspectOptions={handleInspectOptions}
-                                    onOpenTicket={handleOpenTicket}
-                                    onArchiveToggle={handleArchiveToggle}
-                                    onClearLockout={handleClearLockout}
-                                    archiving={archiving}
-                                    historyAttempts={history}
-                                    densityMode="expanded"
-                                  />
-                                </div>
-                              )}
-                            </>
-                          ) : (
-                            <AutoAlertCard
-                              alert={alt}
-                              onAnalyze={handleAnalyze}
-                              onInspectOptions={handleInspectOptions}
-                              onOpenTicket={handleOpenTicket}
-                              onArchiveToggle={handleArchiveToggle}
-                              onClearLockout={handleClearLockout}
-                              archiving={archiving}
-                              historyAttempts={history}
-                              densityMode={densityMode}
-                            />
-                          )}
+            /* Section renderer — Tri-modal layout: Split-Pane Master-Detail vs Full-Width Grid/List */
+            densityMode === 'split' ? (
+              <div className="flex flex-col lg:flex-row gap-4 items-start">
+                {/* Master Triage Rail: Left column (42% width) */}
+                <div className="w-full lg:w-[42%] flex-shrink-0 space-y-6">
+                  {/* 1. Index Derivatives (NIFTY, BANKNIFTY, SENSEX) */}
+                  {(selectedSegment === 'ALL' ? groupedFnoIndexAlerts.length > 0 : (selectedSegment === 'FNO_INDEX' || selectedSegment === 'FNO')) && (
+                    <div className="space-y-3">
+                      <div className="flex items-center justify-between pb-2 border-b border-indigo-500/40">
+                        <div className="flex items-center gap-2">
+                          <span className="text-base">⚡</span>
+                          <h2 className="text-xs font-black uppercase tracking-wider text-indigo-300">
+                            Institutional Index Derivatives (NIFTY, BANKNIFTY, SENSEX) ({groupedFnoIndexAlerts.length})
+                          </h2>
                         </div>
-                      )
-                    })}
-                  </div>
-                </div>
-              )}
-
-              {(selectedSegment === 'ALL' || selectedSegment === 'CURRENCY') && groupedCurrencyAlerts.length > 0 && (
-                <div className="space-y-3">
-                  <div className="flex items-center justify-between pb-2 border-b border-cyan-500/40">
-                    <div className="flex items-center gap-2">
-                      <span className="text-base">💱</span>
-                      <h2 className="text-xs font-black uppercase tracking-wider text-cyan-400">
-                        Currency Derivatives (CDS) — USDINR · EURINR ({groupedCurrencyAlerts.length})
-                      </h2>
-                    </div>
-                    <span className="text-[10px] font-mono text-muted">NSE CDS Segment · INR Pairs</span>
-                  </div>
-                  <div className={densityMode === 'compact' ? 'space-y-1.5' : 'space-y-3'}>
-                    {groupedCurrencyAlerts.map(({ alert: alt, history }) => {
-                      const alertKey = alt.alert_id || alt.id || alt.symbol
-                      const isRowExpanded = expandedRows.has(alertKey)
-                      return (
-                        <div key={alertKey}>
-                          {densityMode === 'compact' ? (
-                            <>
-                              <AlertCompactRow
-                                alert={alt}
-                                onSendTelegram={handleOpenTelegramModal}
-                                onTrade={handleOpenTicket}
-                                onExpand={() => toggleExpandRow(alertKey)}
-                                isExpanded={isRowExpanded}
-                              />
-                              {isRowExpanded && (
-                                <div className="mt-1.5 ml-3 border-l-2 border-gold/30 pl-3">
-                                  <AutoAlertCard
-                                    alert={alt}
-                                    onAnalyze={handleAnalyze}
-                                    onInspectOptions={handleInspectOptions}
-                                    onOpenTicket={handleOpenTicket}
-                                    onArchiveToggle={handleArchiveToggle}
-                                    onClearLockout={handleClearLockout}
-                                    archiving={archiving}
-                                    historyAttempts={history}
-                                    densityMode="expanded"
-                                  />
-                                </div>
-                              )}
-                            </>
-                          ) : (
-                            <AutoAlertCard
-                              alert={alt}
-                              onAnalyze={handleAnalyze}
-                              onInspectOptions={handleInspectOptions}
-                              onOpenTicket={handleOpenTicket}
-                              onArchiveToggle={handleArchiveToggle}
-                              onClearLockout={handleClearLockout}
-                              archiving={archiving}
-                              historyAttempts={history}
-                              densityMode={densityMode}
-                            />
-                          )}
+                        <span className="text-[10px] font-mono text-muted">
+                          {selectedSegment === 'FNO_INDEX' ? 'Filtered to Index Derivatives Only' : 'Gamma Blasts · Index Options · 0DTE Scalps · Futures'}
+                        </span>
+                      </div>
+                      {groupedFnoIndexAlerts.length === 0 ? (
+                        <div className="p-6 text-center text-xs text-muted border border-border/50 rounded-xl bg-surface/50">
+                          No active Index F&O alerts matching current filters
                         </div>
-                      )
-                    })}
-                  </div>
-                </div>
-              )}
+                      ) : (
+                        renderAlertList(groupedFnoIndexAlerts)
+                      )}
+                    </div>
+                  )}
 
-              {/* Segment-specific empty state when a segment filter is active but has no results */}
-              {selectedSegment !== 'ALL' && filteredAutoAlerts.length === 0 && (
-                <div className="p-6 text-center text-xs text-muted border border-border/50 rounded-xl bg-surface/50">
-                  No {selectedSegment === 'COMMODITY' ? 'MCX Commodity' : selectedSegment === 'CURRENCY' ? 'Currency (CDS)' : selectedSegment === 'FNO' ? 'F&O' : 'Cash Equity'} alerts matching current filters
+                  {/* 2. Stock Derivatives (Single-Stock Options & Futures) */}
+                  {(selectedSegment === 'ALL' ? groupedFnoStockAlerts.length > 0 : (selectedSegment === 'FNO_STOCK' || selectedSegment === 'FNO')) && (
+                    <div className="space-y-3">
+                      <div className="flex items-center justify-between pb-2 border-b border-purple-500/40">
+                        <div className="flex items-center gap-2">
+                          <span className="text-base">🎯</span>
+                          <h2 className="text-xs font-black uppercase tracking-wider text-purple-300">
+                            Institutional Stock Derivatives (Single-Stock Options & Futures) ({groupedFnoStockAlerts.length})
+                          </h2>
+                        </div>
+                        <span className="text-[10px] font-mono text-muted">
+                          {selectedSegment === 'FNO_STOCK' ? 'Filtered to Stock Derivatives Only' : 'High RVOL Momentum · Single-Stock Options · Stock Futures'}
+                        </span>
+                      </div>
+                      {groupedFnoStockAlerts.length === 0 ? (
+                        <div className="p-6 text-center text-xs text-muted border border-border/50 rounded-xl bg-surface/50">
+                          No active Stock F&O alerts matching current filters
+                        </div>
+                      ) : (
+                        renderAlertList(groupedFnoStockAlerts)
+                      )}
+                    </div>
+                  )}
+
+                  {/* 3. Cash Equity Breakouts & Squeezes */}
+                  {(selectedSegment === 'ALL' ? groupedEquityAlerts.length > 0 : selectedSegment === 'EQUITY') && (
+                    <div className="space-y-3">
+                      <div className="flex items-center justify-between pb-2 border-b border-emerald-500/40">
+                        <div className="flex items-center gap-2">
+                          <span className="text-base">🏢</span>
+                          <h2 className="text-xs font-black uppercase tracking-wider text-emerald-400">
+                            Institutional Cash Equity Breakouts & Squeezes ({groupedEquityAlerts.length})
+                          </h2>
+                        </div>
+                        <span className="text-[10px] font-mono text-muted">
+                          {selectedSegment === 'EQUITY' ? 'Filtered to Cash Equity Only' : 'VCP · Minervini · SMC · Delivery'}
+                        </span>
+                      </div>
+                      {groupedEquityAlerts.length === 0 ? (
+                        <div className="p-6 text-center text-xs text-muted border border-border/50 rounded-xl bg-surface/50">
+                          No active Cash Equity alerts matching current filters
+                        </div>
+                      ) : (
+                        renderAlertList(groupedEquityAlerts)
+                      )}
+                    </div>
+                  )}
+
+                  {/* 4. Commodity (MCX) */}
+                  {(selectedSegment === 'ALL' || selectedSegment === 'COMMODITY') && groupedCommodityAlerts.length > 0 && (
+                    <div className="space-y-3">
+                      <div className="flex items-center justify-between pb-2 border-b border-amber-500/40">
+                        <div className="flex items-center gap-2">
+                          <span className="text-base">🌙</span>
+                          <h2 className="text-xs font-black uppercase tracking-wider text-amber-400">
+                            Commodity (MCX) — Crude Oil · Gold · Silver · Metals ({groupedCommodityAlerts.length})
+                          </h2>
+                        </div>
+                        <span className="text-[10px] font-mono text-muted">09:00–23:30 IST · Prompt Expiry · VWAP</span>
+                      </div>
+                      {renderAlertList(groupedCommodityAlerts)}
+                    </div>
+                  )}
+
+                  {/* 5. Currency Derivatives (CDS) */}
+                  {(selectedSegment === 'ALL' || selectedSegment === 'CURRENCY') && groupedCurrencyAlerts.length > 0 && (
+                    <div className="space-y-3">
+                      <div className="flex items-center justify-between pb-2 border-b border-cyan-500/40">
+                        <div className="flex items-center gap-2">
+                          <span className="text-base">💱</span>
+                          <h2 className="text-xs font-black uppercase tracking-wider text-cyan-400">
+                            Currency Derivatives (CDS) — USDINR · EURINR ({groupedCurrencyAlerts.length})
+                          </h2>
+                        </div>
+                        <span className="text-[10px] font-mono text-muted">NSE CDS Segment · INR Pairs</span>
+                      </div>
+                      {renderAlertList(groupedCurrencyAlerts)}
+                    </div>
+                  )}
+
+                  {/* Segment-specific empty state */}
+                  {selectedSegment !== 'ALL' && filteredAutoAlerts.length === 0 && (
+                    <div className="p-6 text-center text-xs text-muted border border-border/50 rounded-xl bg-surface/50">
+                      No {selectedSegment === 'COMMODITY' ? 'MCX Commodity' : selectedSegment === 'CURRENCY' ? 'Currency (CDS)' : selectedSegment === 'FNO' ? 'F&O' : 'Cash Equity'} alerts matching current filters
+                    </div>
+                  )}
                 </div>
-              )}
-            </div>
+
+                {/* Institutional Trade Inspector: Right column (58% width, sticky) */}
+                <div className="w-full lg:w-[58%] sticky top-2 min-w-0">
+                  {activeSelectedAlert ? (
+                    <InstitutionalTradeInspector
+                      alert={activeSelectedAlert}
+                      onAnalyze={handleAnalyze}
+                      onInspectOptions={handleInspectOptions}
+                      onOpenTicket={handleOpenTicket}
+                      onArchiveToggle={handleArchiveToggle}
+                      onClearLockout={handleClearLockout}
+                      onSendTelegram={handleOpenTelegramModal}
+                      archiving={archiving}
+                      historyAttempts={activeSelectedHistory}
+                    />
+                  ) : (
+                    <div className="p-8 text-center rounded-2xl bg-panel border border-border space-y-2">
+                      <div className="text-2xl">🔍</div>
+                      <div className="text-xs font-bold text-text">Select an alert from the rail to inspect</div>
+                      <p className="text-[11px] text-muted">
+                        Use <kbd className="px-1.5 py-0.5 rounded bg-surface border border-border text-[10px] font-mono">J</kbd> / <kbd className="px-1.5 py-0.5 rounded bg-surface border border-border text-[10px] font-mono">K</kbd> to navigate, or click any card.
+                      </p>
+                    </div>
+                  )}
+                </div>
+              </div>
+            ) : (
+              /* Expanded & Compact modes (single-column full width) */
+              <div className="space-y-6">
+                {/* 1. Index Derivatives (NIFTY, BANKNIFTY, SENSEX) */}
+                {(selectedSegment === 'ALL' ? groupedFnoIndexAlerts.length > 0 : (selectedSegment === 'FNO_INDEX' || selectedSegment === 'FNO')) && (
+                  <div className="space-y-3">
+                    <div className="flex items-center justify-between pb-2 border-b border-indigo-500/40">
+                      <div className="flex items-center gap-2">
+                        <span className="text-base">⚡</span>
+                        <h2 className="text-xs font-black uppercase tracking-wider text-indigo-300">
+                          Institutional Index Derivatives (NIFTY, BANKNIFTY, SENSEX) ({groupedFnoIndexAlerts.length})
+                        </h2>
+                      </div>
+                      <span className="text-[10px] font-mono text-muted">
+                        {selectedSegment === 'FNO_INDEX' ? 'Filtered to Index Derivatives Only' : 'Gamma Blasts · Index Options · 0DTE Scalps · Futures'}
+                      </span>
+                    </div>
+                    {groupedFnoIndexAlerts.length === 0 ? (
+                      <div className="p-6 text-center text-xs text-muted border border-border/50 rounded-xl bg-surface/50">
+                        No active Index F&O alerts matching current filters
+                      </div>
+                    ) : (
+                      renderAlertList(groupedFnoIndexAlerts)
+                    )}
+                  </div>
+                )}
+
+                {/* 2. Stock Derivatives (Single-Stock Options & Futures) */}
+                {(selectedSegment === 'ALL' ? groupedFnoStockAlerts.length > 0 : (selectedSegment === 'FNO_STOCK' || selectedSegment === 'FNO')) && (
+                  <div className="space-y-3">
+                    <div className="flex items-center justify-between pb-2 border-b border-purple-500/40">
+                      <div className="flex items-center gap-2">
+                        <span className="text-base">🎯</span>
+                        <h2 className="text-xs font-black uppercase tracking-wider text-purple-300">
+                          Institutional Stock Derivatives (Single-Stock Options & Futures) ({groupedFnoStockAlerts.length})
+                        </h2>
+                      </div>
+                      <span className="text-[10px] font-mono text-muted">
+                        {selectedSegment === 'FNO_STOCK' ? 'Filtered to Stock Derivatives Only' : 'High RVOL Momentum · Single-Stock Options · Stock Futures'}
+                      </span>
+                    </div>
+                    {groupedFnoStockAlerts.length === 0 ? (
+                      <div className="p-6 text-center text-xs text-muted border border-border/50 rounded-xl bg-surface/50">
+                        No active Stock F&O alerts matching current filters
+                      </div>
+                    ) : (
+                      renderAlertList(groupedFnoStockAlerts)
+                    )}
+                  </div>
+                )}
+
+                {/* 3. Cash Equity Breakouts & Squeezes */}
+                {(selectedSegment === 'ALL' ? groupedEquityAlerts.length > 0 : selectedSegment === 'EQUITY') && (
+                  <div className="space-y-3">
+                    <div className="flex items-center justify-between pb-2 border-b border-emerald-500/40">
+                      <div className="flex items-center gap-2">
+                        <span className="text-base">🏢</span>
+                        <h2 className="text-xs font-black uppercase tracking-wider text-emerald-400">
+                          Institutional Cash Equity Breakouts & Squeezes ({groupedEquityAlerts.length})
+                        </h2>
+                      </div>
+                      <span className="text-[10px] font-mono text-muted">
+                        {selectedSegment === 'EQUITY' ? 'Filtered to Cash Equity Only' : 'VCP · Minervini · SMC · Delivery'}
+                      </span>
+                    </div>
+                    {groupedEquityAlerts.length === 0 ? (
+                      <div className="p-6 text-center text-xs text-muted border border-border/50 rounded-xl bg-surface/50">
+                        No active Cash Equity alerts matching current filters
+                      </div>
+                    ) : (
+                      renderAlertList(groupedEquityAlerts)
+                    )}
+                  </div>
+                )}
+
+                {/* 4. Commodity (MCX) */}
+                {(selectedSegment === 'ALL' || selectedSegment === 'COMMODITY') && groupedCommodityAlerts.length > 0 && (
+                  <div className="space-y-3">
+                    <div className="flex items-center justify-between pb-2 border-b border-amber-500/40">
+                      <div className="flex items-center gap-2">
+                        <span className="text-base">🌙</span>
+                        <h2 className="text-xs font-black uppercase tracking-wider text-amber-400">
+                          Commodity (MCX) — Crude Oil · Gold · Silver · Metals ({groupedCommodityAlerts.length})
+                        </h2>
+                      </div>
+                      <span className="text-[10px] font-mono text-muted">09:00–23:30 IST · Prompt Expiry · VWAP</span>
+                    </div>
+                    {renderAlertList(groupedCommodityAlerts)}
+                  </div>
+                )}
+
+                {/* 5. Currency Derivatives (CDS) */}
+                {(selectedSegment === 'ALL' || selectedSegment === 'CURRENCY') && groupedCurrencyAlerts.length > 0 && (
+                  <div className="space-y-3">
+                    <div className="flex items-center justify-between pb-2 border-b border-cyan-500/40">
+                      <div className="flex items-center gap-2">
+                        <span className="text-base">💱</span>
+                        <h2 className="text-xs font-black uppercase tracking-wider text-cyan-400">
+                          Currency Derivatives (CDS) — USDINR · EURINR ({groupedCurrencyAlerts.length})
+                        </h2>
+                      </div>
+                      <span className="text-[10px] font-mono text-muted">NSE CDS Segment · INR Pairs</span>
+                    </div>
+                    {renderAlertList(groupedCurrencyAlerts)}
+                  </div>
+                )}
+
+                {/* Segment-specific empty state */}
+                {selectedSegment !== 'ALL' && filteredAutoAlerts.length === 0 && (
+                  <div className="p-6 text-center text-xs text-muted border border-border/50 rounded-xl bg-surface/50">
+                    No {selectedSegment === 'COMMODITY' ? 'MCX Commodity' : selectedSegment === 'CURRENCY' ? 'Currency (CDS)' : selectedSegment === 'FNO' ? 'F&O' : 'Cash Equity'} alerts matching current filters
+                  </div>
+                )}
+              </div>
+            )
           )}
         </div>
       )}

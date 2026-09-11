@@ -462,3 +462,32 @@ class TestExtractSymbol:
 
         msg = "when analyzing I see I don’t have access to real‑time market data for **63MOONS (NSE)** at the moment"
         assert extract_symbol(msg) == "63MOONS"
+
+
+class TestKeyPoolThreadSafety:
+    """Verify thread-safe concurrent access to multi-key pooling in providers."""
+
+    def test_concurrent_key_pool_access(self, monkeypatch):
+        import concurrent.futures
+        from agent.core import OpenAIProvider
+        from agent.tools import ToolRegistry
+
+        monkeypatch.setenv("OPENAI_API_KEY", "key1,key2,key3,key4")
+        registry = ToolRegistry()
+        provider = OpenAIProvider("gpt-4o", registry, "You are an assistant")
+
+        assert len(provider._clients) == 4
+
+        def worker(w_id: int):
+            for _ in range(100):
+                idx, client = provider._get_active_client()
+                if w_id % 2 == 0:
+                    provider._mark_key_cooldown(idx, cooldown_seconds=0.01)
+                _ = provider.is_pool_available()
+                _ = provider._earliest_resume()
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+            futures = [executor.submit(worker, i) for i in range(8)]
+            for f in futures:
+                f.result()
+

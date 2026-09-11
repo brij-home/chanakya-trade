@@ -22,6 +22,12 @@
     --color-highlight:     #1a243a;
     --color-border:        #182236;
     --color-border-subtle: #111726;
+    --color-border-hairline: rgba(255, 255, 255, 0.07);
+    --color-slate-canvas:    #0a0f18;
+    --color-slate-surface:   #101622;
+    --color-slate-panel:     #141c2b;
+    --color-slate-card:      #182234;
+    --color-slate-hover:     #1e2a40;
 
     /* ── Text ─────────────────────────────────────────────────────────── */
     --color-text:          #f1f5f9;
@@ -96,6 +102,12 @@
     --color-highlight:     #e2e8f0;
     --color-border:        #e2e8f0;
     --color-border-subtle: #edf2f7;
+    --color-border-hairline: #e2e8f0;
+    --color-slate-canvas:    #f8fafc;
+    --color-slate-surface:   #ffffff;
+    --color-slate-panel:     #ffffff;
+    --color-slate-card:      #f8fafc;
+    --color-slate-hover:     #f1f5f9;
 
     --color-text:          #0f172a;
     --color-text-dim:      #334155;

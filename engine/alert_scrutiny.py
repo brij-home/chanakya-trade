@@ -185,12 +185,44 @@ class AlertScrutinyAuditor:
 
         flags["risk_within_bounds"] = True
 
-        # 4. Mathematical Risk:Reward Asymmetry
+        # 4. Dynamic VIX Regime Adaptation & Mathematical Risk:Reward Asymmetry
+        vix_val = None
+        try:
+            from market.indices import get_vix
+            vix_raw = get_vix()
+            if hasattr(vix_raw, "ltp"):
+                vix_val = float(vix_raw.ltp)
+            elif isinstance(vix_raw, dict):
+                vix_val = float(vix_raw.get("ltp") or vix_raw.get("value") or vix_raw.get("close") or 0.0)
+            elif isinstance(vix_raw, (int, float)):
+                vix_val = float(vix_raw)
+            else:
+                vix_val = None
+        except Exception:
+            vix_val = None
+
+        req_rr = self.min_rr_ratio
+        if vix_val and vix_val > 0:
+            if vix_val > 18.0:
+                req_rr = max(self.min_rr_ratio, 2.0)
+            elif vix_val < 11.5:
+                req_rr = min(self.min_rr_ratio, 1.3)
+
+            # Extreme Tail Risk Gate: If VIX > 25.0, naked option buying carries extreme IV crush hazard
+            if vix_val > 25.0 and is_option_premium_levels:
+                act = str((getattr(alert, "actionable_plan", None) or {}).get("action", "")).upper()
+                if "BUY" in act and "SPREAD" not in act:
+                    return (
+                        False,
+                        f"VIX Tail Risk Veto: India VIX {vix_val:.1f} > 25 (Extreme IV crush risk on naked option buying). Mandate defined-risk spread structure.",
+                        flags,
+                    )
+
         rr_ratio = reward_pts / risk_pts if risk_pts > 0 else 0.0
-        if rr_ratio < self.min_rr_ratio:
+        if rr_ratio < req_rr:
             return (
                 False,
-                f"Unfavorable Risk:Reward ratio (1:{rr_ratio:.2f} < 1:{self.min_rr_ratio:.1f})",
+                f"Unfavorable Risk:Reward ratio (1:{rr_ratio:.2f} < 1:{req_rr:.1f})",
                 flags,
             )
 
@@ -223,7 +255,15 @@ class AlertScrutinyAuditor:
         # 6. Index Options Deep OTM Trap Gate:
         # Reject illiquid, high-theta lottery strikes > 1.2% away from spot on index options
         sym = str(getattr(alert, "symbol", "") or (alert.get("symbol", "") if isinstance(alert, dict) else "")).upper()
-        clean_sym = sym.replace("NSE:", "").replace("NFO:", "").strip()
+        clean_sym = (
+            sym.replace(".NS", "")
+            .replace(".BO", "")
+            .replace("NSE:", "")
+            .replace("BSE:", "")
+            .replace("MCX:", "")
+            .replace("NFO:", "")
+            .strip()
+        )
         strike_val = getattr(alert, "strike", None) or (alert.get("strike", None) if isinstance(alert, dict) else None)
         metrics_dict = getattr(alert, "metrics", {}) or (alert.get("metrics", {}) if isinstance(alert, dict) else {})
         spot_val = (metrics_dict.get("spot") if isinstance(metrics_dict, dict) else None) or getattr(alert, "underlying_spot", None)
@@ -241,6 +281,100 @@ class AlertScrutinyAuditor:
                         )
             except (ValueError, TypeError):
                 pass
+
+        # 7. Closed-Loop Learning Engine Lockout:
+        # Reject signals on assets that failed twice or are under active post-mortem lockout
+        try:
+            from engine.learning_engine import pattern_learning_engine
+
+            is_locked, lock_reason = pattern_learning_engine.is_symbol_locked_out(
+                clean_sym, direction=direction, ltp=ltp
+            )
+            if is_locked:
+                return (
+                    False,
+                    f"Learning Engine Lockout Active: {lock_reason}",
+                    flags,
+                )
+        except Exception:
+            pass
+
+        # 8. Climax / Overbought Exhaustion Filter:
+        # Prevent buying the top of a parabolic blow-off or shorting the very bottom of a capitulation
+        rsi_val = None
+        if isinstance(metrics_dict, dict):
+            for k in ("rsi", "rsi_14", "rsi_5m", "rsi_15m"):
+                if metrics_dict.get(k) is not None:
+                    try:
+                        rsi_val = float(metrics_dict[k])
+                        break
+                    except (ValueError, TypeError):
+                        pass
+        if rsi_val is None and hasattr(alert, "rsi") and alert.rsi is not None:
+            try:
+                rsi_val = float(alert.rsi)
+            except (ValueError, TypeError):
+                pass
+
+        if rsi_val is not None and rsi_val > 0:
+            is_put_option = atype == "OPTIONS_MOMENTUM" and getattr(alert, "option_type", "") == "PE"
+            is_call_option = atype == "OPTIONS_MOMENTUM" and getattr(alert, "option_type", "") == "CE"
+
+            # Long equity / Call option: reject when RSI > 78
+            if (direction in ("BULLISH", "LONG", "BUY") or is_call_option) and not is_put_option:
+                if rsi_val > 78.0:
+                    return (
+                        False,
+                        f"Climax Exhaustion: RSI ({rsi_val:.1f}) > 78 entering parabolic blow-off top; wait for pullback to 20-EMA/VWAP",
+                        flags,
+                    )
+            # Short equity / Put option (underlying): reject when underlying RSI < 22
+            elif (direction in ("BEARISH", "SHORT", "SELL") or is_put_option) and not is_call_option:
+                if rsi_val < 22.0:
+                    return (
+                        False,
+                        f"Oversold Exhaustion: RSI ({rsi_val:.1f}) < 22 entering capitulation floor; wait for relief bounce before shorting",
+                        flags,
+                    )
+
+        # 9. Mean Reversion Extension Filter (Price extended > 3.5x ATR from 20-EMA):
+        if isinstance(metrics_dict, dict) and not is_option_premium_levels:
+            ema20 = metrics_dict.get("ema20") or metrics_dict.get("ema_20")
+            atr_val = metrics_dict.get("atr")
+            if ema20 and atr_val:
+                try:
+                    ema20_f = float(ema20)
+                    atr_f = float(atr_val)
+                    if ema20_f > 0 and atr_f > 0:
+                        dist_from_ema = abs(ltp - ema20_f)
+                        if dist_from_ema > (3.5 * atr_f):
+                            return (
+                                False,
+                                f"Mean Reversion Risk: Extended {dist_from_ema / atr_f:.1f}x ATR from 20-EMA (₹{ema20_f:,.1f}) without structural base",
+                                flags,
+                            )
+                except (ValueError, TypeError):
+                    pass
+
+        # 10. Multi-Timeframe (15m) Trend Alignment Gate:
+        # Reject 5m counter-trend scalps if higher timeframe (15m) is in conflicting structural markdown/markup
+        mtf_15m_trend = None
+        if isinstance(metrics_dict, dict):
+            mtf_15m_trend = metrics_dict.get("mtf_15m_trend") or metrics_dict.get("trend_15m")
+        if mtf_15m_trend:
+            mtf_upper = str(mtf_15m_trend).upper()
+            if direction in ("BULLISH", "LONG", "BUY") and any(k in mtf_upper for k in ("BEAR", "DOWN", "MARKDOWN")):
+                return (
+                    False,
+                    f"MTF Confluence Failure: 5m Bullish trigger conflicting with 15m structural markdown ({mtf_upper})",
+                    flags,
+                )
+            elif direction in ("BEARISH", "SHORT", "SELL") and any(k in mtf_upper for k in ("BULL", "UP", "MARKUP")):
+                return (
+                    False,
+                    f"MTF Confluence Failure: 5m Bearish trigger conflicting with 15m structural markup ({mtf_upper})",
+                    flags,
+                )
 
         return True, "", flags
 

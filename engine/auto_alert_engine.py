@@ -56,1846 +56,27 @@ def get_auto_alerts_file() -> Path:
 AUTO_ALERTS_FILE = get_auto_alerts_file()
 
 
-# ── Data Models ─────────────────────────────────────────────────────────────
+# ── Modular Subsystems & Re-exports ─────────────────────────────────────────
+
+from engine.alert_model import INDEX_WEEKLY_EXPIRY_WEEKDAY, AutoAlert
+from engine.alert_expiry import (
+    classify_expiry_type,
+    get_expiry_metadata,
+    get_next_expiry_opportunity,
+    is_alert_option_premium_level,
+)
+from engine.alert_evaluator import (
+    TargetTrailingEvaluation,
+    evaluate_alert_invalidation,
+    evaluate_alert_targets_and_trailing,
+)
+from engine.detectors import (
+    detect_gamma_blast,
+    detect_squeeze_breakout,
+    detect_circuit_proximity,
+    detect_learned_pattern_coiling,
+)
 
-
-INDEX_WEEKLY_EXPIRY_WEEKDAY = {
-    "MIDCPNIFTY": 0,  # Monday
-    "BANKEX": 0,  # Monday
-    "FINNIFTY": 1,  # Tuesday
-    "BANKNIFTY": 2,  # Wednesday
-    "NIFTY": 3,  # Thursday
-    "SENSEX": 4,  # Friday
-}
-
-
-@dataclass
-class AutoAlert:
-    alert_id: str
-    alert_type: (
-        str  # GAMMA_BLAST | SQUEEZE_BREAKOUT | CIRCUIT_WARNING | SMC_SWEEP | CONFLUENCE_INFLECTION
-    )
-    stage: str  # "EARLY_WARNING" | "IGNITED" | "INVALIDATED" | "EXPIRED"
-    symbol: str
-    exchange: str
-    direction: str  # "BULLISH" | "BEARISH" | "NEUTRAL"
-    headline: str
-    summary: str
-    ltp: float
-    trigger_level: float
-    target_level: float
-    stop_loss: float
-    strike: Optional[float] = None
-    option_type: Optional[str] = None  # "CE" | "PE"
-    contract_symbol: Optional[str] = None
-    metrics: dict[str, Any] = field(default_factory=dict)
-    actionable_plan: dict[str, Any] = field(default_factory=dict)
-    confidence: int = 75  # 0 - 100
-    created_at: str = ""
-    read: bool = False
-    is_live: bool = True  # True if generated from real live market data; False if TEST/simulation
-    environment: str = "LIVE"  # "LIVE" | "TEST"
-    is_invalidated: bool = False
-    invalidation_reason: Optional[str] = None
-    invalidated_at: Optional[str] = None
-    achieved_milestones: list[str] = field(default_factory=list)
-    target_status: str = "PENDING"  # "PENDING" | "T1_ACHIEVED" | "T2_ACHIEVED" | "TARGET_ACHIEVED"
-    should_trail: bool = False  # Explicit recommendation: whether to trail or not
-    trailing_decision: Optional[str] = (
-        None  # "BOOK_50_TRAIL_BREAKEVEN" | "TRAIL_DYNAMIC_ATR" | "BOOK_FULL_PROFIT_NO_TRAIL" | "DO_NOT_TRAIL_HOLD_STOP"
-    )
-    trailing_stop: Optional[float] = None  # Exact rupee level recommended for trailing stop-loss
-    trailing_rationale: Optional[str] = None  # Institutional rationale explaining trailing decision
-    locked_profit_pts: Optional[float] = None
-    locked_profit_pct: Optional[float] = None
-    last_trail_alert_time: Optional[float] = None
-    is_archived: bool = False
-    archived_at: Optional[str] = None
-    archive_reason: Optional[str] = None
-    expiry_date: Optional[str] = None
-    expiry_type: Optional[str] = None  # "WEEKLY" | "MONTHLY"
-    underlying_spot: Optional[float] = None
-    option_premium: Optional[float] = None
-    market_status: str = "SESSION_CLOSED"  # "LIVE" | "PRE_MARKET" | "SESSION_CLOSED"
-    lot_size: Optional[int] = None  # Contract market lot size (SEBI 2026 active)
-    segment: str = ""  # "FNO" | "EQUITY" | "COMMODITY" | "CURRENCY"
-    signal_ref: Optional[str] = None
-    r_multiple: Optional[float] = None
-    pnl_pct: Optional[float] = None
-    updated_at: Optional[str] = None
-    triggered_at: Optional[str] = None
-
-    def __post_init__(self) -> None:
-        if not self.created_at:
-            self.created_at = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
-        if not self.signal_ref:
-            try:
-                from bot.alert_templates import build_signal_ref
-                self.signal_ref = build_signal_ref(
-                    symbol=self.symbol,
-                    alert_id=self.alert_id,
-                    contract=self.contract_symbol or "",
-                    created_at=self.created_at,
-                )
-            except Exception:
-                pass
-        if not self.segment:
-            try:
-                from engine.alert_preferences import classify_alert_segment
-
-                self.segment = classify_alert_segment(self)
-            except Exception:
-                self.segment = "EQUITY"
-        if self.lot_size is None:
-            if self.metrics and "lot_size" in self.metrics and self.metrics["lot_size"]:
-                try:
-                    self.lot_size = int(self.metrics["lot_size"])
-                except (ValueError, TypeError):
-                    pass
-            if self.lot_size is None:
-                from market.instruments import STANDARD_LOT_SIZES
-
-                clean = (
-                    (self.symbol or "")
-                    .replace("NSE:", "")
-                    .replace("NFO:", "")
-                    .replace("BSE:", "")
-                    .replace("MCX:", "")
-                    .strip()
-                    .upper()
-                )
-                self.lot_size = STANDARD_LOT_SIZES.get(clean)
-
-    @property
-    def is_expired(self) -> bool:
-        """
-        Determines whether a derivative contract or Gamma Blast alert has expired.
-        1. Checks explicit expiry_date (15:30 IST on expiry day).
-        2. For index options without explicit date, resolves against the weekly expiry calendar.
-        3. Gamma blast intraday spikes expire after 24 hours of market time.
-        """
-        if self.stage == "EXPIRED":
-            return True
-
-        # Test and simulation alerts do not expire based on wall-clock time
-        if self.environment == "TEST" or not self.is_live or self.alert_id.startswith("test-"):
-            return False
-
-        now = datetime.now(IST)
-
-        # 1. Check explicit expiry_date
-        if self.expiry_date:
-            for fmt in ("%Y-%m-%d", "%d-%b-%Y", "%d-%m-%Y"):
-                try:
-                    exp_dt = datetime.strptime(self.expiry_date.strip(), fmt).replace(
-                        hour=15, minute=30, second=0, tzinfo=IST
-                    )
-                    if now >= exp_dt:
-                        return True
-                    break
-                except ValueError:
-                    pass
-
-        # 2. Check derivative alerts (options/futures/gamma blast) & Intraday Early Warnings
-        created_dt = None
-        if self.created_at:
-            clean_ts = self.created_at.replace(" IST", "").strip()[:19]
-            for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
-                try:
-                    created_dt = datetime.strptime(clean_ts, fmt).replace(tzinfo=IST)
-                    break
-                except ValueError:
-                    pass
-
-        # 2a. Intraday Session Rollover Invariant:
-        # Pre-breakout coiling/early-warning setups belong strictly to their trading session.
-        # If created on a prior calendar date (created_dt.date() < now.date()),
-        # unignited early warnings expire immediately so yesterday's stale coils never pollute today.
-        if self.stage == "EARLY_WARNING" and created_dt and created_dt.date() < now.date():
-            return True
-
-        is_deriv = bool(
-            self.strike
-            or self.option_type
-            or self.contract_symbol
-            or self.alert_type == "GAMMA_BLAST"
-        )
-
-        if is_deriv:
-            if created_dt:
-                clean_sym = self.symbol.replace("NSE:", "").replace("NFO:", "").strip().upper()
-                # Indian index weekly options expiry mapping (only if no explicit expiry date)
-                if not self.expiry_date and clean_sym in INDEX_WEEKLY_EXPIRY_WEEKDAY:
-                    target_weekday = INDEX_WEEKLY_EXPIRY_WEEKDAY[clean_sym]
-                    days_ahead = (target_weekday - created_dt.weekday()) % 7
-                    exp_dt = created_dt.replace(hour=15, minute=30, second=0) + timedelta(
-                        days=days_ahead
-                    )
-                    if now >= exp_dt:
-                        return True
-
-                # Gamma blast shelf-life: intraday momentum spike expires after 24 hours only if no explicit expiry date
-                if self.alert_type == "GAMMA_BLAST" and not self.expiry_date:
-                    if (now - created_dt).total_seconds() > 24 * 3600:
-                        return True
-
-        return False
-
-    @property
-    def is_active(self) -> bool:
-        """A trade is active if it is not archived, not invalidated, not expired, and has not completed final target."""
-        if self.is_expired:
-            return False
-        return (
-            not self.is_archived
-            and not self.is_invalidated
-            and self.stage not in ("INVALIDATED", "TARGET_ACHIEVED", "EXPIRED")
-            and self.target_status != "TARGET_ACHIEVED"
-        )
-
-    def to_dict(self) -> dict[str, Any]:
-        d = asdict(self)
-        d["timestamp"] = (
-            self.invalidated_at
-            or self.created_at
-            or datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
-        )
-        d["is_active"] = self.is_active
-        d["is_expired"] = self.is_expired
-
-        # Rich expiry details & next-expiry opportunities
-        exp_info = get_expiry_metadata(
-            self.expiry_date, self.expiry_type, self.symbol, self.contract_symbol
-        )
-        d["expiry_details"] = exp_info
-        d["expiry_month_name"] = exp_info.get("month_name")
-        d["expiry_formatted"] = exp_info.get("formatted")
-        d["dte"] = exp_info.get("dte")
-
-        next_opp = get_next_expiry_opportunity(self, exp_info)
-        if next_opp:
-            d["next_expiry_opportunity"] = next_opp
-
-        return d
-
-
-def classify_expiry_type(expiry_str: Optional[str], symbol: Optional[str] = None) -> str:
-    """
-    Classifies an Indian market option contract expiry into 'WEEKLY' or 'MONTHLY'.
-    - Single-stock equities in NSE/BSE only have monthly options.
-    - Index options have weekly expiries, with the final expiry of the month being 'MONTHLY'.
-    """
-    if not expiry_str:
-        return "MONTHLY"
-    try:
-        from datetime import datetime, timedelta
-
-        dt = None
-        for fmt in ("%Y-%m-%d", "%d-%b-%Y", "%d-%m-%Y"):
-            try:
-                dt = datetime.strptime(expiry_str.strip(), fmt)
-                break
-            except ValueError:
-                continue
-        if not dt:
-            return "MONTHLY"
-        sym = (symbol or "").upper()
-        # Single-stock derivatives on NSE/BSE are strictly monthly contracts
-        if sym and sym not in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX"):
-            return "MONTHLY"
-        # For index options, if adding 7 days changes month, it is the last expiry of that month -> MONTHLY
-        if (dt + timedelta(days=7)).month != dt.month:
-            return "MONTHLY"
-        return "WEEKLY"
-    except Exception:
-        return "MONTHLY"
-
-
-def get_expiry_metadata(
-    expiry_str: Optional[str],
-    expiry_type: Optional[str] = None,
-    symbol: Optional[str] = None,
-    contract_symbol: Optional[str] = None,
-) -> dict[str, Any]:
-    """
-    Computes human-readable month name, weekly date indicator, DTE, and formatted badge string.
-    """
-    now = datetime.now(IST).date()
-    dt = None
-    if expiry_str:
-        for fmt in ("%Y-%m-%d", "%d-%b-%Y", "%d-%m-%Y"):
-            try:
-                dt = datetime.strptime(expiry_str.strip(), fmt).date()
-                break
-            except ValueError:
-                continue
-
-    if not dt:
-        return {
-            "formatted": None,
-            "month_name": None,
-            "dte": None,
-            "is_weekly": expiry_type == "WEEKLY",
-            "is_monthly": expiry_type != "WEEKLY",
-            "weekday": None,
-        }
-
-    month_name = dt.strftime("%b %Y")
-    weekday = dt.strftime("%a")
-    dte = (dt - now).days
-    is_weekly = (expiry_type == "WEEKLY") or (classify_expiry_type(expiry_str, symbol) == "WEEKLY")
-
-    if is_weekly:
-        formatted = f"{dt.strftime('%d-%b-%Y')} ({weekday}) Weekly Expiry"
-    else:
-        formatted = f"{month_name} Monthly Expiry ({dt.strftime('%d-%b-%Y')})"
-
-    return {
-        "formatted": formatted,
-        "month_name": month_name,
-        "dte": dte,
-        "is_weekly": is_weekly,
-        "is_monthly": not is_weekly,
-        "weekday": weekday,
-        "raw_date": dt.strftime("%Y-%m-%d"),
-    }
-
-
-def get_next_expiry_opportunity(
-    alert: "AutoAlert",
-    exp_info: dict[str, Any],
-) -> Optional[dict[str, Any]]:
-    """
-    Identifies if the trade benefits from rolling/targeting the next expiry
-    with explicit institutional rationale (theta decay, multi-session hold, pin risk).
-    """
-    is_deriv = bool(
-        alert.strike
-        or alert.option_type
-        or alert.contract_symbol
-        or getattr(alert, "derivative_type", None) == "FUT"
-        or alert.alert_type in ("GAMMA_BLAST", "FUTURES")
-    )
-    if not is_deriv:
-        return None
-
-    dte = exp_info.get("dte")
-    plan = alert.actionable_plan or {}
-    trade_plan = plan.get("trade_plan", {}) if isinstance(plan, dict) else {}
-    has_overrun_risk = trade_plan.get("session_overrun_risk", False)
-    theta_drag = trade_plan.get("theta_drag_pct_of_gain", 0)
-
-    # Opportunity triggers: DTE <= 4 days OR multi-session carry OR high theta drag
-    if (dte is not None and dte <= 4) or has_overrun_risk or theta_drag >= 1.0:
-        if exp_info.get("is_weekly"):
-            rec = "Next Weekly or Monthly Expiry"
-            justification = (
-                f"Current weekly contract has elevated theta decay risk ({dte if dte is not None else '<4'} DTE). "
-                "Targeting the next weekly or monthly expiry affords sufficient runway for the thesis to materialize "
-                "without severe gamma pin-risk or rapid premium decay."
-            )
-        else:
-            rec = "Next Monthly Expiry (Oct 2026)"
-            justification = (
-                f"Current monthly contract is in terminal decay cycle ({dte if dte is not None else '≤4'} DTE). "
-                "Rolling to the next monthly cycle provides 30+ sessions of runway and eliminates overnight theta drain."
-            )
-        return {
-            "recommended_contract": rec,
-            "tag": "THETA-HEDGED ROLL",
-            "justification": justification,
-            "dte": dte,
-        }
-    return None
-
-
-# ── Invalidation Evaluator ──────────────────────────────────────────────────
-
-
-def is_alert_option_premium_level(alert: Any) -> bool:
-    """
-    Determines if an alert's primary numerical price levels (ltp, stop_loss, target_level)
-    represent option contract premiums rather than underlying equity/spot prices.
-    Returns True for pure option strategies (OPTIONS_MOMENTUM, OPTION_WRITE, GAMMA_BLAST with option_type)
-    or when alert.contract_symbol represents an active option contract.
-    Returns False for underlying stock/index setups even if an option recommendation is attached.
-    """
-    atype = str(getattr(alert, "alert_type", "") or "")
-    if atype in ("OPTIONS_MOMENTUM", "OPTION_WRITE"):
-        return True
-    if atype == "GAMMA_BLAST" and getattr(alert, "option_type", None):
-        return True
-
-    # Underlying stock/index setups are always anchored to spot
-    if atype in (
-        "ASYMMETRIC_OPPORTUNITY",
-        "SQUEEZE_BREAKOUT",
-        "SQUEEZE_BREAKDOWN",
-        "POCKET_PIVOT",
-        "PRECURSOR_RADAR",
-        "SMC_SWEEP",
-        "CIRCUIT_WARNING",
-        "COMMODITY_MOMENTUM",
-    ):
-        return False
-
-    has_opt_marker = bool(
-        getattr(alert, "contract_symbol", None)
-        or getattr(alert, "option_type", None)
-        or getattr(alert, "strike", None)
-    )
-    if not has_opt_marker:
-        return False
-
-    # Check contract_symbol pattern for option contracts (e.g. NIFTY24500CE or MAZDOCK2400CE on NFO)
-    csym = str(getattr(alert, "contract_symbol", "") or "").upper()
-    exch = str(getattr(alert, "exchange", "") or "").upper()
-    if csym and (csym.endswith("CE") or csym.endswith("PE")) and exch == "NFO":
-        return True
-
-    # Check if ltp is close to option_premium (within 25% tolerance) for other derivatives
-    ltp = float(getattr(alert, "ltp", 0.0) or 0.0)
-    opt_prem = getattr(alert, "option_premium", None)
-    if opt_prem is not None and float(opt_prem) > 0 and ltp > 0:
-        prem = float(opt_prem)
-        return abs(ltp - prem) <= max(2.0, prem * 0.25)
-
-    return False
-
-
-def evaluate_alert_invalidation(
-    alert: AutoAlert,
-    current_ltp: Optional[float] = None,
-    current_vwap: Optional[float] = None,
-) -> Optional[str]:
-    """
-    Evaluates if an active AutoAlert has become invalidated.
-    Returns the specific invalidation reason string if invalidated, or None if still valid.
-    """
-    if alert.is_invalidated or alert.stage == "INVALIDATED":
-        return None
-
-    is_option = is_alert_option_premium_level(alert)
-
-    # Determine current LTP if not provided
-    if current_ltp is None or current_ltp <= 0:
-        try:
-            from market.quotes import get_ltp
-
-            if is_option:
-                lookup_sym = alert.contract_symbol or (
-                    f"{alert.exchange}:{alert.symbol}" if ":" not in alert.symbol else alert.symbol
-                )
-            else:
-                lookup_sym = (
-                    f"{alert.exchange}:{alert.symbol}" if ":" not in alert.symbol else alert.symbol
-                )
-            current_ltp = get_ltp(lookup_sym)
-        except Exception:
-            current_ltp = None
-
-    if current_ltp is None or current_ltp <= 0:
-        return None  # Cannot evaluate without live price quote
-
-    # 1. Stop-Loss Invalidation
-    if alert.stop_loss and alert.stop_loss > 0:
-        if is_option:
-            # Check if option writing / selling position:
-            act = str((alert.actionable_plan or {}).get("action", "")).upper()
-            is_option_sell = act in ("SELL", "WRITE", "SHORT")
-            if not is_option_sell and alert.stop_loss > 0 and alert.target_level > 0:
-                ref_entry = alert.option_premium or alert.ltp
-                if ref_entry and alert.stop_loss > ref_entry and alert.target_level < ref_entry:
-                    is_option_sell = True
-
-            if is_option_sell:
-                # Option writing / selling (Short CE / Short PE):
-                # Stop-loss is above entry. Breached IF AND ONLY IF premium surges above SL.
-                if current_ltp > alert.stop_loss:
-                    opt_desc = (
-                        "Call"
-                        if (alert.option_type == "CE" or alert.direction == "BULLISH")
-                        else "Put"
-                    )
-                    return (
-                        f"Option premium surged to ₹{current_ltp:.1f} "
-                        f"(breached stop-loss ₹{alert.stop_loss:.1f}). {opt_desc} writing thesis invalidated."
-                    )
-            else:
-                # Option buying (Long CE / Long PE):
-                # The stop-loss on the option premium is breached IF AND ONLY IF premium drops below SL.
-                if current_ltp < alert.stop_loss:
-                    opt_desc = (
-                        "Call"
-                        if (alert.option_type == "CE" or alert.direction == "BULLISH")
-                        else "Put"
-                    )
-                    return (
-                        f"Option premium collapsed to ₹{current_ltp:.1f} "
-                        f"(breached stop-loss ₹{alert.stop_loss:.1f}). {opt_desc} gamma thesis invalidated."
-                    )
-        else:
-            # Non-option instruments (Equities / Futures)
-            # Dynamic Volatility Noise Margin (0.15x ATR or 0.25% floor)
-            # Prevents premature panic invalidations on single-tick 10-paise / sub-cent micro-chop.
-            atr_val = 0.0
-            if alert.metrics and isinstance(alert.metrics, dict):
-                atr_val = float(alert.metrics.get("atr_14d") or alert.metrics.get("atr") or 0.0)
-            if atr_val <= 0 and alert.stop_loss > 0:
-                atr_val = alert.stop_loss * 0.012
-
-            vol_noise_margin = (
-                max(0.15, min(alert.stop_loss * 0.003, 0.15 * atr_val))
-                if alert.stop_loss > 0
-                else 0.20
-            )
-
-            if alert.direction == "BEARISH":
-                # For short positions, stop loss is above entry
-                ref_entry = alert.ltp or alert.trigger_level or 0.0
-                if alert.stop_loss > ref_entry:
-                    if current_ltp > (alert.stop_loss + vol_noise_margin):
-                        return (
-                            f"Price surged to ₹{current_ltp:,.1f} "
-                            f"(breached stop-loss ₹{alert.stop_loss:,.1f}). Bearish thesis invalidated."
-                        )
-                else:
-                    if current_ltp < (alert.stop_loss - vol_noise_margin):
-                        return (
-                            f"Price dropped to ₹{current_ltp:,.1f} "
-                            f"(breached stop-loss ₹{alert.stop_loss:,.1f}). Bearish thesis invalidated."
-                        )
-            else:
-                # Bullish / Neutral long positions
-                if current_ltp < (alert.stop_loss - vol_noise_margin):
-                    return (
-                        f"Price dropped to ₹{current_ltp:,.1f} "
-                        f"(breached stop-loss ₹{alert.stop_loss:,.1f}). Bullish thesis invalidated."
-                    )
-
-    # 2. Detector-Specific Structural Breakdown
-    if alert.alert_type == "SQUEEZE_BREAKOUT":
-        if alert.trigger_level > 0 and current_ltp < (alert.trigger_level * 0.965):
-            retreat_pct = round(
-                ((alert.trigger_level - current_ltp) / alert.trigger_level) * 100, 1
-            )
-            return (
-                f"Price retreated {retreat_pct}% below breakout pivot ₹{alert.trigger_level:,.1f} "
-                f"(LTP ₹{current_ltp:,.1f}). Squeeze compression lost momentum."
-            )
-        sma20 = alert.metrics.get("sma20") if alert.metrics else None
-        if sma20 and current_ltp < sma20:
-            return f"Price broke down below 20-SMA base support ₹{sma20:,.1f} (LTP ₹{current_ltp:,.1f}). Squeeze invalidated."
-
-    elif alert.alert_type == "CIRCUIT_WARNING":
-        upper_circuit = alert.trigger_level or (
-            alert.metrics.get("upper_circuit", 0.0) if alert.metrics else 0.0
-        )
-        if upper_circuit > 0:
-            dist_to_uc = ((upper_circuit - current_ltp) / upper_circuit) * 100.0
-            if dist_to_uc > 3.0:
-                return (
-                    f"Price backed off {dist_to_uc:.1f}% from upper circuit ceiling ₹{upper_circuit:,.1f} "
-                    f"(LTP ₹{current_ltp:,.1f}). Circuit lock threat subsided."
-                )
-
-    elif alert.alert_type == "GAMMA_BLAST":
-        # Ensure underlying spot price is used for VWAP comparison, not option premium
-        underlying_price = None
-        if is_option:
-            underlying_price = alert.underlying_spot or (
-                alert.metrics.get("spot") if alert.metrics else None
-            )
-            if not underlying_price or underlying_price <= 0:
-                try:
-                    from market.quotes import get_ltp
-
-                    underlying_price = get_ltp(
-                        f"NSE:{alert.symbol}" if ":" not in alert.symbol else alert.symbol
-                    )
-                except Exception:
-                    underlying_price = None
-        else:
-            underlying_price = current_ltp
-
-        if underlying_price and underlying_price > 0 and current_vwap and current_vwap > 0:
-            if alert.direction == "BULLISH" and underlying_price < (current_vwap * 0.992):
-                return (
-                    f"Underlying broke below intraday VWAP ₹{current_vwap:,.1f} "
-                    f"(Spot ₹{underlying_price:,.1f}). Long gamma setup invalidated."
-                )
-            elif alert.direction == "BEARISH" and underlying_price > (current_vwap * 1.008):
-                return (
-                    f"Underlying reclaimed above intraday VWAP ₹{current_vwap:,.1f} "
-                    f"(Spot ₹{underlying_price:,.1f}). Short gamma setup invalidated."
-                )
-
-    return None
-
-
-# ── Target Progression & Decisive Trailing Evaluator ────────────────────────
-
-
-@dataclass
-class TargetTrailingEvaluation:
-    new_milestone: Optional[str] = (
-        None  # "T1_ACHIEVED" | "TARGET_ACHIEVED" | "TRAILING_UPDATE" | None
-    )
-    target_status: str = "PENDING"
-    should_trail: bool = False
-    trailing_decision: str = "DO_NOT_TRAIL_HOLD_STOP"
-    recommended_stop: float = 0.0
-    trailing_rationale: str = ""
-    locked_profit_pts: float = 0.0
-    locked_profit_pct: float = 0.0
-    r_multiple: float = 0.0
-    pnl_pct: float = 0.0
-    is_superperforming: bool = False
-
-
-def evaluate_alert_targets_and_trailing(
-    alert: AutoAlert,
-    current_ltp: Optional[float] = None,
-    current_volume_ratio: Optional[float] = None,
-) -> Optional[TargetTrailingEvaluation]:
-    """
-    Evaluates an active AutoAlert against current market price to determine:
-      1. Target milestones reached (Target 1 / 2R Breakeven vs Final Target).
-      2. Clear, decisive trailing stop recommendation: WHETHER TO TRAIL OR NOT.
-      3. Exact price level to trail stop loss to and profit locked.
-    """
-    if alert.is_invalidated or alert.stage in ("INVALIDATED", "COMPLETED"):
-        return None
-
-    is_option = is_alert_option_premium_level(alert)
-
-    if current_ltp is None or current_ltp <= 0:
-        try:
-            from market.quotes import get_ltp
-
-            if is_option:
-                lookup_sym = alert.contract_symbol or (
-                    f"{alert.exchange}:{alert.symbol}" if ":" not in alert.symbol else alert.symbol
-                )
-            else:
-                lookup_sym = (
-                    f"{alert.exchange}:{alert.symbol}" if ":" not in alert.symbol else alert.symbol
-                )
-            current_ltp = get_ltp(lookup_sym)
-        except Exception:
-            current_ltp = None
-
-    if current_ltp is None or current_ltp <= 0:
-        return None
-
-    if is_option:
-        # Check if option buyer or option writer/seller:
-        act = str((alert.actionable_plan or {}).get("action", "")).upper()
-        is_option_sell = act in ("SELL", "WRITE", "SHORT")
-        if not is_option_sell and alert.stop_loss and alert.target_level:
-            ref_entry = alert.option_premium or alert.ltp
-            if ref_entry and alert.stop_loss > ref_entry and alert.target_level < ref_entry:
-                is_option_sell = True
-
-        # For option buyers, payoff is upward (is_bullish = True, profit on premium expansion).
-        # For option writers/sellers, payoff is downward (is_bullish = False, profit on premium decay).
-        is_bullish = not is_option_sell
-
-        # Canonical entry resolution for options:
-        # 1. actionable_plan.recommended_entry (if provided, it is the calibrated trade entry)
-        entry = None
-        if alert.actionable_plan:
-            rec_entry = alert.actionable_plan.get("recommended_entry", "")
-            m = re.search(r"[\d,]+(?:\.\d+)?", str(rec_entry))
-            if m:
-                try:
-                    entry = float(m.group(0).replace(",", ""))
-                except ValueError:
-                    pass
-            if not entry and alert.actionable_plan.get("entry_range"):
-                matches = re.findall(r"[\d,]+(?:\.\d+)?", str(alert.actionable_plan["entry_range"]))
-                if len(matches) >= 2:
-                    try:
-                        entry = round(
-                            (float(matches[0].replace(",", "")) + float(matches[1].replace(",", ""))) / 2.0,
-                            2,
-                        )
-                    except ValueError:
-                        pass
-                elif len(matches) == 1:
-                    try:
-                        entry = float(matches[0].replace(",", ""))
-                    except ValueError:
-                        pass
-        # 2. alert.option_premium (the canonical option contract premium)
-        if not entry and alert.option_premium and alert.option_premium > 0:
-            entry = alert.option_premium
-        # 3. alert.ltp (only if realistic option premium, not underlying spot or strike)
-        if not entry:
-            if alert.ltp and alert.ltp > 0 and (not alert.strike or alert.ltp != alert.strike):
-                entry = alert.ltp
-            elif alert.stop_loss and alert.stop_loss > 0:
-                entry = round(alert.stop_loss * 1.4, 2)
-            else:
-                entry = current_ltp
-    else:
-        entry = None
-        if alert.actionable_plan:
-            rec_entry = alert.actionable_plan.get("recommended_entry", "")
-            m = re.search(r"[\d,]+(?:\.\d+)?", str(rec_entry))
-            if m:
-                try:
-                    entry = float(m.group(0).replace(",", ""))
-                except ValueError:
-                    pass
-            if not entry and alert.actionable_plan.get("entry_range"):
-                matches = re.findall(r"[\d,]+(?:\.\d+)?", str(alert.actionable_plan["entry_range"]))
-                if len(matches) >= 2:
-                    try:
-                        entry = round(
-                            (float(matches[0].replace(",", "")) + float(matches[1].replace(",", ""))) / 2.0,
-                            2,
-                        )
-                    except ValueError:
-                        pass
-                elif len(matches) == 1:
-                    try:
-                        entry = float(matches[0].replace(",", ""))
-                    except ValueError:
-                        pass
-        if not entry and alert.trigger_level and alert.trigger_level > 0:
-            entry = alert.trigger_level
-        if not entry:
-            entry = alert.ltp if alert.ltp > 0 else current_ltp
-        is_bullish = alert.direction.upper() != "BEARISH"
-
-    # Reference stop loss (actionable plan stop_loss takes precedence)
-    stop = None
-    if alert.actionable_plan and alert.actionable_plan.get("stop_loss"):
-        m_sl = re.search(r"[\d,]+(?:\.\d+)?", str(alert.actionable_plan["stop_loss"]))
-        if m_sl:
-            try:
-                stop = float(m_sl.group(0).replace(",", ""))
-            except ValueError:
-                pass
-    if not stop and alert.stop_loss and alert.stop_loss > 0:
-        stop = alert.stop_loss
-    if not stop:
-        stop = round(entry * 0.98 if is_bullish else entry * 1.02, 2)
-
-    initial_risk = max(0.01, abs(entry - stop))
-
-    # PnL & R-multiple
-    if is_bullish:
-        pnl_pts = current_ltp - entry
-        pnl_pct = (pnl_pts / entry) * 100 if entry > 0 else 0.0
-        r_multiple = pnl_pts / initial_risk
-    else:
-        pnl_pts = entry - current_ltp
-        pnl_pct = (pnl_pts / entry) * 100 if entry > 0 else 0.0
-        r_multiple = pnl_pts / initial_risk
-
-    # Target levels resolution (Actionable plan targets take precedence)
-    plan_t1 = None
-    plan_t2 = None
-    if alert.actionable_plan:
-        if "target_1" in alert.actionable_plan:
-            m_t1 = re.search(r"[\d,]+(?:\.\d+)?", str(alert.actionable_plan["target_1"]))
-            if m_t1:
-                plan_t1 = float(m_t1.group(0).replace(",", ""))
-        elif "target" in alert.actionable_plan:
-            m_t1 = re.search(r"[\d,]+(?:\.\d+)?", str(alert.actionable_plan["target"]))
-            if m_t1:
-                plan_t1 = float(m_t1.group(0).replace(",", ""))
-
-        if "target_2" in alert.actionable_plan:
-            m_t2 = re.search(r"[\d,]+(?:\.\d+)?", str(alert.actionable_plan["target_2"]))
-            if m_t2:
-                plan_t2 = float(m_t2.group(0).replace(",", ""))
-
-    target_final = (
-        plan_t2
-        or (alert.target_level if alert.target_level > 0 else None)
-        or round(entry + (initial_risk * 3.0) if is_bullish else entry - (initial_risk * 3.0), 2)
-    )
-
-    if plan_t1:
-        t1_level = plan_t1
-    elif is_bullish:
-        t1_level = round(entry + (initial_risk * 1.8), 2)
-        if target_final > entry:
-            t1_level = min(t1_level, round(entry + (target_final - entry) * 0.5, 2))
-    else:
-        t1_level = round(entry - (initial_risk * 1.8), 2)
-        if target_final < entry:
-            t1_level = max(t1_level, round(entry - (entry - target_final) * 0.5, 2))
-
-    achieved = set(alert.achieved_milestones or [])
-
-    # Volume / Momentum check for extension
-    vol_ratio = current_volume_ratio or (
-        alert.metrics.get("vol_oi_ratio", alert.metrics.get("rvol", 1.0)) if alert.metrics else 1.0
-    )
-    is_superperforming = (vol_ratio >= 2.0) or (alert.confidence >= 88 and r_multiple >= 2.5)
-
-    # Hard Profitability Invariant: A target milestone (T1 or Final) CAN NEVER be reached
-    # if the position is sitting at or below entry price (loss or breakeven).
-    if is_bullish:
-        if current_ltp <= entry or pnl_pts <= 0 or t1_level <= entry:
-            is_final_hit = False
-            is_t1_hit = False
-        else:
-            is_final_hit = (current_ltp >= target_final)
-            is_t1_hit = (current_ltp >= t1_level)
-    else:
-        if current_ltp >= entry or pnl_pts <= 0 or t1_level >= entry:
-            is_final_hit = False
-            is_t1_hit = False
-        else:
-            is_final_hit = (current_ltp <= target_final)
-            is_t1_hit = (current_ltp <= t1_level)
-    if is_final_hit and "TARGET_ACHIEVED" not in achieved:
-        if is_superperforming:
-            # Superperforming momentum: do NOT exit all, trail runner with Chandelier ATR
-            if is_bullish:
-                rec_stop = max(t1_level, round(current_ltp - (initial_risk * 1.5), 2))
-                locked_pts = rec_stop - entry
-            else:
-                rec_stop = min(t1_level, round(current_ltp + (initial_risk * 1.5), 2))
-                locked_pts = entry - rec_stop
-
-            locked_pct = round((locked_pts / entry) * 100, 2)
-            rationale = (
-                f"Primary target ₹{target_final:,.2f} reached (+{pnl_pct:.1f}%, +{r_multiple:.1f}R) with runaway volume ({vol_ratio:.1f}x). "
-                f"DECISION: TRAIL STOP-LOSS TO ₹{rec_stop:,.2f} (Chandelier ATR Trail). "
-                f"DO NOT FULLY EXIT RUNNER — Heavy institutional flow is extending breakout. Let runners ride!"
-            )
-            return TargetTrailingEvaluation(
-                new_milestone="TARGET_ACHIEVED",
-                target_status="TARGET_ACHIEVED",
-                should_trail=True,
-                trailing_decision="TRAIL_DYNAMIC_ATR",
-                recommended_stop=rec_stop,
-                trailing_rationale=rationale,
-                locked_profit_pts=round(locked_pts, 2),
-                locked_profit_pct=locked_pct,
-                r_multiple=round(r_multiple, 2),
-                pnl_pct=round(pnl_pct, 2),
-                is_superperforming=True,
-            )
-        else:
-            # Normal target hit: resistance reached, book full profit! Do not trail.
-            rec_stop = current_ltp
-            locked_pts = pnl_pts
-            locked_pct = round(pnl_pct, 2)
-            rationale = (
-                f"Final target ₹{target_final:,.2f} reached (+{pnl_pct:.1f}%, +{r_multiple:.1f}R). "
-                f"DECISION: FULL PROFIT BOOKING RECOMMENDED. Close all open positions at market. "
-                f"DO NOT TRAIL FURTHER — high probability of mean-reversion exhaustion at major resistance."
-            )
-            return TargetTrailingEvaluation(
-                new_milestone="TARGET_ACHIEVED",
-                target_status="TARGET_ACHIEVED",
-                should_trail=False,
-                trailing_decision="BOOK_FULL_PROFIT_NO_TRAIL",
-                recommended_stop=rec_stop,
-                trailing_rationale=rationale,
-                locked_profit_pts=round(locked_pts, 2),
-                locked_profit_pct=locked_pct,
-                r_multiple=round(r_multiple, 2),
-                pnl_pct=round(pnl_pct, 2),
-                is_superperforming=False,
-            )
-
-    # 2. Target 1 (T1) Check
-    is_t1_hit = (current_ltp >= t1_level) if is_bullish else (current_ltp <= t1_level)
-    if is_t1_hit and "T1_ACHIEVED" not in achieved and "TARGET_ACHIEVED" not in achieved:
-        # T1 reached -> Book 50% & Trail SL to Breakeven (+0.2% buffer)
-        be_stop = round(entry * 1.002 if is_bullish else entry * 0.998, 2)
-        rec_stop = be_stop
-        locked_pts = abs(rec_stop - entry)
-        locked_pct = 0.2
-        rationale = (
-            f"Target 1 reached at ₹{current_ltp:,.2f} (+{pnl_pct:.1f}%, +{r_multiple:.1f}R). "
-            f"DECISION: BOOK 50% PARTIAL PROFIT NOW & TRAIL STOP-LOSS TO BREAKEVEN (₹{rec_stop:,.2f}). "
-            f"Trade is now 100% risk-free. Hold remaining 50% runner for Target 2 (₹{target_final:,.2f})."
-        )
-        return TargetTrailingEvaluation(
-            new_milestone="T1_ACHIEVED",
-            target_status="T1_ACHIEVED",
-            should_trail=True,
-            trailing_decision="BOOK_50_TRAIL_BREAKEVEN",
-            recommended_stop=rec_stop,
-            trailing_rationale=rationale,
-            locked_profit_pts=round(locked_pts, 2),
-            locked_profit_pct=locked_pct,
-            r_multiple=round(r_multiple, 2),
-            pnl_pct=round(pnl_pct, 2),
-            is_superperforming=is_superperforming,
-        )
-
-    # 3. Trailing Stop Ratchet Higher (Dynamic Trail)
-    if (
-        alert.should_trail
-        and alert.trailing_stop
-        and alert.trailing_stop > 0
-        and alert.stage != "COMPLETED"
-    ):
-        if is_bullish:
-            higher_trail = round(max(alert.trailing_stop, current_ltp - (initial_risk * 1.8)), 2)
-            min_dist = 0.5 if is_option else 2.0
-            # Must ratchet higher by at least 0.75% and at least min_dist
-            if (
-                higher_trail >= round(alert.trailing_stop * 1.0075, 2)
-                and (higher_trail - alert.trailing_stop) >= min_dist
-            ):
-                locked_pts = higher_trail - entry
-                locked_pct = round((locked_pts / entry) * 100, 2)
-                unit_str = "pts" if is_option else "/sh"
-                rationale = (
-                    f"Price expanded to ₹{current_ltp:,.2f}. "
-                    f"DECISION: RATCHET TRAILING STOP HIGHER from ₹{alert.trailing_stop:,.2f} to ₹{higher_trail:,.2f}. "
-                    f"Guaranteed locked profit increased to +₹{locked_pts:,.2f} {unit_str} (+{locked_pct:.1f}%)."
-                )
-                return TargetTrailingEvaluation(
-                    new_milestone="TRAILING_UPDATE",
-                    target_status=alert.target_status or "T1_ACHIEVED",
-                    should_trail=True,
-                    trailing_decision="TRAIL_DYNAMIC_ATR",
-                    recommended_stop=higher_trail,
-                    trailing_rationale=rationale,
-                    locked_profit_pts=round(locked_pts, 2),
-                    locked_profit_pct=locked_pct,
-                    r_multiple=round(r_multiple, 2),
-                    pnl_pct=round(pnl_pct, 2),
-                    is_superperforming=is_superperforming,
-                )
-        else:
-            lower_trail = round(min(alert.trailing_stop, current_ltp + (initial_risk * 1.8)), 2)
-            if (
-                lower_trail <= round(alert.trailing_stop * 0.9925, 2)
-                and (alert.trailing_stop - lower_trail) >= 2.0
-            ):
-                locked_pts = entry - lower_trail
-                locked_pct = round((locked_pts / entry) * 100, 2)
-                rationale = (
-                    f"Price dropped to ₹{current_ltp:,.2f}. "
-                    f"DECISION: RATCHET TRAILING STOP LOWER from ₹{alert.trailing_stop:,.2f} to ₹{lower_trail:,.2f}. "
-                    f"Guaranteed locked profit increased to +₹{locked_pts:,.2f}/sh (+{locked_pct:.1f}%)."
-                )
-                return TargetTrailingEvaluation(
-                    new_milestone="TRAILING_UPDATE",
-                    target_status=alert.target_status or "T1_ACHIEVED",
-                    should_trail=True,
-                    trailing_decision="TRAIL_DYNAMIC_ATR",
-                    recommended_stop=lower_trail,
-                    trailing_rationale=rationale,
-                    locked_profit_pts=round(locked_pts, 2),
-                    locked_profit_pct=locked_pct,
-                    r_multiple=round(r_multiple, 2),
-                    pnl_pct=round(pnl_pct, 2),
-                    is_superperforming=is_superperforming,
-                )
-
-    # 4. Early Sub-Target Phase (< 1.5R)
-    if r_multiple < 1.5:
-        rationale = (
-            f"Payoff is +{r_multiple:.1f}R (+{pnl_pct:.1f}%). "
-            f"DECISION: DO NOT TRAIL YET. Maintain initial Stop Loss at ₹{stop:,.2f}. "
-            f"Premature trailing in early stage causes whipsaws and unnecessary shakeouts."
-        )
-        return TargetTrailingEvaluation(
-            new_milestone=None,
-            target_status=alert.target_status or "PENDING",
-            should_trail=False,
-            trailing_decision="DO_NOT_TRAIL_HOLD_STOP",
-            recommended_stop=stop,
-            trailing_rationale=rationale,
-            locked_profit_pts=0.0,
-            locked_profit_pct=0.0,
-            r_multiple=round(r_multiple, 2),
-            pnl_pct=round(pnl_pct, 2),
-            is_superperforming=False,
-        )
-
-    return None
-
-
-# ── Detector 1: Gamma Blast (Early Warning & Ignited) ───────────────────────
-
-
-def detect_gamma_blast(
-    underlying: str,
-    spot: float,
-    chain: list[Any],
-    vwap: Optional[float] = None,
-    day_high: Optional[float] = None,
-    day_low: Optional[float] = None,
-) -> list[AutoAlert]:
-    """
-    Evaluates options chain for explosive Gamma Blast early-warning and ignite triggers.
-
-    Leading Indicators:
-      - Negative Change in OI (Call/Put writers closing positions in panic).
-      - Volume / OI Ratio >= 1.8x (massive intraday turnover vs accumulated open interest).
-      - Spot price reclaiming or breaking away from intraday VWAP.
-      - ATM & near-OTM strike proximity (within ±1.5% of spot).
-    """
-    if not chain or spot <= 0:
-        return []
-
-    alerts: list[AutoAlert] = []
-    now_iso = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
-
-    # Institutional Liquidity & Significance Filters (SEBI / F&O standard):
-    # Prevents illiquid strikes with tiny volume from generating false percentage spikes.
-    is_index = underlying.upper() in (
-        "NIFTY",
-        "BANKNIFTY",
-        "FINNIFTY",
-        "MIDCPNIFTY",
-        "SENSEX",
-        "BANKEX",
-    )
-    min_strike_oi = 15000 if is_index else 500
-    min_abs_oi_change = 3000 if is_index else 150
-    min_volume = 10000 if is_index else 500
-
-    # Group contracts by strike and type
-    ce_contracts = [c for c in chain if getattr(c, "option_type", "") == "CE"]
-    pe_contracts = [c for c in chain if getattr(c, "option_type", "") == "PE"]
-
-    # Effective VWAP proxy if not provided (assume spot is close to VWAP within 0.2%)
-    effective_vwap = vwap if (vwap and vwap > 0) else spot
-
-    # ── Analyze CALL Gamma Blast (Bullish Upside Explosion) ───
-    for c in ce_contracts:
-        strike = getattr(c, "strike", 0.0)
-        strike_diff_pct = ((strike - spot) / spot) * 100.0
-        # Strict ATM to 0.8% OTM proximity (Gamma explosion requires near-the-money proximity)
-        if not (-0.5 <= strike_diff_pct <= 0.8):
-            continue
-
-        oi = getattr(c, "oi", 0)
-        oi_change = getattr(c, "oi_change", 0)
-        volume = getattr(c, "volume", 0)
-        opt_ltp = getattr(c, "last_price", 0.0)
-        contract_sym = getattr(c, "symbol", f"{underlying}{int(strike)}CE")
-
-        # Minimum Liquidity & Absolute Contract Shedding Gate:
-        if oi < min_strike_oi or volume < min_volume or abs(oi_change) < min_abs_oi_change:
-            continue
-
-        exp_date = getattr(c, "expiry", "") or None
-        # Gamma Physics Gate: Gamma explosion requires DTE <= 5 days for weekly indices or front-month (<= 35 days) for stocks
-        if exp_date:
-            try:
-                exp_str = str(exp_date).split("T")[0].strip()
-                exp_dt = None
-                for fmt in ("%Y-%m-%d", "%d-%b-%Y", "%d-%m-%Y"):
-                    try:
-                        exp_dt = datetime.strptime(exp_str, fmt).date()
-                        break
-                    except ValueError:
-                        continue
-                if exp_dt:
-                    today_ist = datetime.now(IST).date()
-                    dte_days = (exp_dt - today_ist).days
-                    max_gamma_dte = 5 if is_index else 35
-                    if dte_days > max_gamma_dte:
-                        continue
-            except Exception:
-                pass
-
-        vol_oi_ratio = round(volume / max(1, oi), 2)
-        oi_chg_pct = (
-            round((oi_change / max(1, oi - oi_change)) * 100.0, 1) if (oi - oi_change) > 0 else 0.0
-        )
-
-        # Writer panic criteria:
-        is_oi_shedding = oi_change < 0 and (oi_chg_pct <= -8.0 or abs(oi_change) >= 20000)
-        is_high_turnover = vol_oi_ratio >= 1.8
-        spot_above_vwap = spot >= (effective_vwap * 0.998)
-
-        if is_oi_shedding and is_high_turnover and spot_above_vwap:
-            is_ignited = (vol_oi_ratio >= 2.5 and oi_chg_pct <= -15.0) or (
-                day_high and spot >= day_high * 0.999
-            )
-            stage = "IGNITED" if is_ignited else "EARLY_WARNING"
-            confidence = min(96, int(65 + (vol_oi_ratio * 7) + min(20, abs(oi_chg_pct) * 0.5)))
-
-            exp_type = classify_expiry_type(exp_date, underlying)
-
-            # ── Dynamic Trade Plan: replace hardcoded 2.2x/0.65x with structural SMC levels ──
-            try:
-                from engine.trade_plan import (
-                    calculate_trade_plan,
-                    calculate_option_execution_plan,
-                    get_market_status,
-                )
-                from engine.position_sizer import get_lot_size
-
-                tp = calculate_trade_plan(
-                    symbol=underlying,
-                    direction="BUY",
-                    spot=spot,
-                    timeframe="INTRADAY",
-                    exchange="NFO",
-                    has_active_blast=is_ignited,
-                )
-
-                # Expectancy & Asymmetry Gate: reject trades with unviable R:R geometry unless ignited
-                if tp and not tp.is_asymmetry_viable and not is_ignited:
-                    continue
-
-                mkt_status = get_market_status("NFO")
-                lot_sz = get_lot_size(underlying)
-                opt_plan = (
-                    calculate_option_execution_plan(
-                        trade_plan=tp,
-                        option_type="CE",
-                        strike=strike,
-                        expiry=exp_date or "",
-                        option_ltp=opt_ltp,
-                        lot_size=lot_sz,
-                    )
-                    if opt_ltp > 0 and exp_date
-                    else None
-                )
-                target_premium = opt_plan["t1_premium"] if opt_plan else round(opt_ltp * 1.8, 1)
-                sl_premium = (
-                    opt_plan["sl_premium"] if opt_plan else round(max(1.0, opt_ltp * 0.7), 1)
-                )
-                if opt_plan and opt_plan.get("option_rr"):
-                    rr_str = opt_plan["option_rr"]
-                elif opt_plan and opt_plan.get("t1_premium") and opt_plan.get("sl_premium"):
-                    risk_prem = max(0.5, opt_ltp - opt_plan["sl_premium"])
-                    reward_prem = max(0.5, opt_plan["t1_premium"] - opt_ltp)
-                    rr_str = f"1:{round(reward_prem / risk_prem, 2)}"
-                elif tp:
-                    rr_str = f"1:{tp.rr_t1}"
-                else:
-                    rr_str = "1:2"
-                t1_pct_str = (
-                    f"+{opt_plan['t1_pct']:.1f}%"
-                    if (opt_plan and opt_plan.get("t1_pct"))
-                    else "+90%"
-                )
-                sl_pct_str = (
-                    f"{opt_plan['sl_pct']:.1f}%"
-                    if (opt_plan and opt_plan.get("sl_pct"))
-                    else "-30%"
-                )
-                tp_dict = tp.as_dict()
-            except Exception as e_tp:
-                logger.debug(
-                    "[GammaBlast CE] Dynamic trade plan failed, using conservative fallback: %s",
-                    e_tp,
-                )
-                tp_dict = None
-                opt_plan = None
-                mkt_status = {"status": "SESSION_CLOSED", "label": "🌙 SESSION CLOSED"}
-                target_premium = (
-                    round(opt_ltp * 1.8, 1) if opt_ltp > 0 else round(strike * 0.015, 1)
-                )
-                sl_premium = round(max(1.0, opt_ltp * 0.70), 1) if opt_ltp > 0 else 1.0
-                rr_str = "1:2"
-                t1_pct_str = "+80%"
-                sl_pct_str = "-30%"
-
-            headline = (
-                f"⚡ CALL GAMMA BLAST {stage.replace('_', ' ')}: {underlying} {int(strike)} CE"
-            )
-            summary = (
-                f"Call writers shedding {abs(oi_chg_pct):.1f}% OI (ΔOI: {oi_change:,}). "
-                f"Vol/OI turnover {vol_oi_ratio}x. Spot ₹{spot:,.1f} holding VWAP. "
-                f"{'Explosive short-covering underway!' if is_ignited else 'Early-warning coiling before gamma surge!'}"
-            )
-
-            if not opt_ltp or opt_ltp <= 0.0:
-                try:
-                    from market.quotes import get_ltp
-                    fetched = get_ltp(contract_sym)
-                    if fetched and fetched > 0:
-                        opt_ltp = float(fetched)
-                except Exception:
-                    pass
-
-            is_authentic_opt = bool(opt_ltp and opt_ltp > 0.0)
-            alert_env = "LIVE" if is_authentic_opt else "TEST"
-
-            alerts.append(
-                AutoAlert(
-                    alert_id=f"aa-gamma-ce-{underlying}-{int(strike)}-{uuid.uuid4().hex[:6]}",
-                    alert_type="GAMMA_BLAST",
-                    stage=stage,
-                    symbol=underlying,
-                    exchange="NFO",
-                    direction="BULLISH",
-                    headline=headline,
-                    summary=summary,
-                    ltp=opt_ltp or spot,
-                    trigger_level=strike,
-                    target_level=target_premium,
-                    stop_loss=sl_premium,
-                    strike=strike,
-                    option_type="CE",
-                    contract_symbol=contract_sym,
-                    expiry_date=exp_date,
-                    expiry_type=exp_type,
-                    underlying_spot=spot,
-                    option_premium=opt_ltp or None,
-                    market_status=mkt_status["status"],
-                    is_live=is_authentic_opt,
-                    environment=alert_env,
-                    metrics={
-                        "strike": strike,
-                        "oi": oi,
-                        "oi_change": oi_change,
-                        "oi_change_pct": oi_chg_pct,
-                        "volume": volume,
-                        "vol_oi_ratio": vol_oi_ratio,
-                        "spot": spot,
-                        "vwap": effective_vwap,
-                        "spot_to_vwap_pct": round(
-                            ((spot - effective_vwap) / effective_vwap) * 100, 2
-                        ),
-                    },
-                    actionable_plan={
-                        "action": "BUY",
-                        "instrument": contract_sym,
-                        "strike": strike,
-                        "option_type": "CE",
-                        "expiry_date": exp_date,
-                        "expiry_type": exp_type,
-                        "underlying_spot": f"₹{spot:,.1f}",
-                        "recommended_entry": f"₹{opt_ltp:.1f} (Option Premium)"
-                        if opt_ltp
-                        else "Market",
-                        "target": f"₹{target_premium:.1f} ({t1_pct_str})",
-                        "stop_loss": f"₹{sl_premium:.1f} ({sl_pct_str})",
-                        "risk_reward": rr_str,
-                        "trade_plan": tp_dict,
-                        "option_plan": opt_plan,
-                        "market_status": mkt_status,
-                    },
-                    confidence=confidence,
-                    created_at=now_iso,
-                )
-            )
-
-    # ── Analyze PUT Gamma Blast (Bearish Downside Panic) ───────
-    for c in pe_contracts:
-        strike = getattr(c, "strike", 0.0)
-        strike_diff_pct = ((strike - spot) / spot) * 100.0
-        # Strict ATM to 0.8% OTM proximity (Gamma explosion requires near-the-money proximity)
-        if not (-0.8 <= strike_diff_pct <= 0.5):
-            continue
-
-        oi = getattr(c, "oi", 0)
-        oi_change = getattr(c, "oi_change", 0)
-        volume = getattr(c, "volume", 0)
-        opt_ltp = getattr(c, "last_price", 0.0)
-        contract_sym = getattr(c, "symbol", f"{underlying}{int(strike)}PE")
-
-        # Minimum Liquidity & Absolute Contract Shedding Gate:
-        if oi < min_strike_oi or volume < min_volume or abs(oi_change) < min_abs_oi_change:
-            continue
-
-        exp_date = getattr(c, "expiry", "") or None
-        # Gamma Physics Gate: Gamma explosion requires DTE <= 5 days for weekly indices or front-month (<= 35 days) for stocks
-        if exp_date:
-            try:
-                exp_str = str(exp_date).split("T")[0].strip()
-                exp_dt = None
-                for fmt in ("%Y-%m-%d", "%d-%b-%Y", "%d-%m-%Y"):
-                    try:
-                        exp_dt = datetime.strptime(exp_str, fmt).date()
-                        break
-                    except ValueError:
-                        continue
-                if exp_dt:
-                    today_ist = datetime.now(IST).date()
-                    dte_days = (exp_dt - today_ist).days
-                    max_gamma_dte = 5 if is_index else 35
-                    if dte_days > max_gamma_dte:
-                        continue
-            except Exception:
-                pass
-
-        vol_oi_ratio = round(volume / max(1, oi), 2)
-        oi_chg_pct = (
-            round((oi_change / max(1, oi - oi_change)) * 100.0, 1) if (oi - oi_change) > 0 else 0.0
-        )
-
-        is_oi_shedding = oi_change < 0 and (oi_chg_pct <= -8.0 or abs(oi_change) >= 20000)
-        is_high_turnover = vol_oi_ratio >= 1.8
-        spot_below_vwap = spot <= (effective_vwap * 1.002)
-
-        if is_oi_shedding and is_high_turnover and spot_below_vwap:
-            is_ignited = (vol_oi_ratio >= 2.5 and oi_chg_pct <= -15.0) or (
-                day_low and spot <= day_low * 1.001
-            )
-            stage = "IGNITED" if is_ignited else "EARLY_WARNING"
-            confidence = min(96, int(65 + (vol_oi_ratio * 7) + min(20, abs(oi_chg_pct) * 0.5)))
-
-            exp_type = classify_expiry_type(exp_date, underlying)
-
-            # ── Dynamic Trade Plan: replace hardcoded 2.2x/0.65x with structural SMC levels ──
-            try:
-                from engine.trade_plan import (
-                    calculate_trade_plan,
-                    calculate_option_execution_plan,
-                    get_market_status,
-                )
-                from engine.position_sizer import get_lot_size
-
-                tp = calculate_trade_plan(
-                    symbol=underlying,
-                    direction="SELL",
-                    spot=spot,
-                    timeframe="INTRADAY",
-                    exchange="NFO",
-                    has_active_blast=is_ignited,
-                )
-
-                # Expectancy & Asymmetry Gate: reject trades with unviable R:R geometry unless ignited
-                if tp and not tp.is_asymmetry_viable and not is_ignited:
-                    continue
-
-                mkt_status = get_market_status("NFO")
-                lot_sz = get_lot_size(underlying)
-                opt_plan = (
-                    calculate_option_execution_plan(
-                        trade_plan=tp,
-                        option_type="PE",
-                        strike=strike,
-                        expiry=exp_date or "",
-                        option_ltp=opt_ltp,
-                        lot_size=lot_sz,
-                    )
-                    if opt_ltp > 0 and exp_date
-                    else None
-                )
-                target_premium = opt_plan["t1_premium"] if opt_plan else round(opt_ltp * 1.8, 1)
-                sl_premium = (
-                    opt_plan["sl_premium"] if opt_plan else round(max(1.0, opt_ltp * 0.7), 1)
-                )
-                if opt_plan and opt_plan.get("option_rr"):
-                    rr_str = opt_plan["option_rr"]
-                elif opt_plan and opt_plan.get("t1_premium") and opt_plan.get("sl_premium"):
-                    risk_prem = max(0.5, opt_ltp - opt_plan["sl_premium"])
-                    reward_prem = max(0.5, opt_plan["t1_premium"] - opt_ltp)
-                    rr_str = f"1:{round(reward_prem / risk_prem, 2)}"
-                elif tp:
-                    rr_str = f"1:{tp.rr_t1}"
-                else:
-                    rr_str = "1:2"
-                t1_pct_str = (
-                    f"+{opt_plan['t1_pct']:.1f}%"
-                    if (opt_plan and opt_plan.get("t1_pct"))
-                    else "+90%"
-                )
-                sl_pct_str = (
-                    f"{opt_plan['sl_pct']:.1f}%"
-                    if (opt_plan and opt_plan.get("sl_pct"))
-                    else "-30%"
-                )
-                tp_dict = tp.as_dict()
-            except Exception as e_tp:
-                logger.debug(
-                    "[GammaBlast PE] Dynamic trade plan failed, using conservative fallback: %s",
-                    e_tp,
-                )
-                tp_dict = None
-                opt_plan = None
-                mkt_status = {"status": "SESSION_CLOSED", "label": "🌙 SESSION CLOSED"}
-                target_premium = (
-                    round(opt_ltp * 1.8, 1) if opt_ltp > 0 else round(strike * 0.015, 1)
-                )
-                sl_premium = round(max(1.0, opt_ltp * 0.70), 1) if opt_ltp > 0 else 1.0
-                rr_str = "1:2"
-                t1_pct_str = "+80%"
-                sl_pct_str = "-30%"
-
-            headline = (
-                f"⚡ PUT GAMMA BLAST {stage.replace('_', ' ')}: {underlying} {int(strike)} PE"
-            )
-            summary = (
-                f"Put writers capitulating {abs(oi_chg_pct):.1f}% OI (ΔOI: {oi_change:,}). "
-                f"Vol/OI turnover {vol_oi_ratio}x. Spot ₹{spot:,.1f} below VWAP. "
-                f"{'Aggressive long put / short spot momentum!' if is_ignited else 'Early-warning coiling before put gamma surge!'}"
-            )
-
-            if not opt_ltp or opt_ltp <= 0.0:
-                try:
-                    from market.quotes import get_ltp
-                    fetched = get_ltp(contract_sym)
-                    if fetched and fetched > 0:
-                        opt_ltp = float(fetched)
-                except Exception:
-                    pass
-
-            is_authentic_opt = bool(opt_ltp and opt_ltp > 0.0)
-            alert_env = "LIVE" if is_authentic_opt else "TEST"
-
-            alerts.append(
-                AutoAlert(
-                    alert_id=f"aa-gamma-pe-{underlying}-{int(strike)}-{uuid.uuid4().hex[:6]}",
-                    alert_type="GAMMA_BLAST",
-                    stage=stage,
-                    symbol=underlying,
-                    exchange="NFO",
-                    direction="BEARISH",
-                    headline=headline,
-                    summary=summary,
-                    ltp=opt_ltp or spot,
-                    trigger_level=strike,
-                    target_level=target_premium,
-                    stop_loss=sl_premium,
-                    strike=strike,
-                    option_type="PE",
-                    contract_symbol=contract_sym,
-                    expiry_date=exp_date,
-                    expiry_type=exp_type,
-                    underlying_spot=spot,
-                    option_premium=opt_ltp or None,
-                    market_status=mkt_status["status"],
-                    is_live=is_authentic_opt,
-                    environment=alert_env,
-                    metrics={
-                        "strike": strike,
-                        "oi": oi,
-                        "oi_change": oi_change,
-                        "oi_change_pct": oi_chg_pct,
-                        "volume": volume,
-                        "vol_oi_ratio": vol_oi_ratio,
-                        "spot": spot,
-                        "vwap": effective_vwap,
-                        "spot_to_vwap_pct": round(
-                            ((spot - effective_vwap) / effective_vwap) * 100, 2
-                        ),
-                    },
-                    actionable_plan={
-                        "action": "BUY",
-                        "instrument": contract_sym,
-                        "strike": strike,
-                        "option_type": "PE",
-                        "expiry_date": exp_date,
-                        "expiry_type": exp_type,
-                        "underlying_spot": f"₹{spot:,.1f}",
-                        "recommended_entry": f"₹{opt_ltp:.1f}" if opt_ltp else "Market",
-                        "target": f"₹{target_premium:.1f} ({t1_pct_str})",
-                        "stop_loss": f"₹{sl_premium:.1f} ({sl_pct_str})",
-                        "risk_reward": rr_str,
-                        "trade_plan": tp_dict,
-                        "option_plan": opt_plan,
-                        "market_status": mkt_status,
-                    },
-                    confidence=confidence,
-                    created_at=now_iso,
-                )
-            )
-
-    return alerts
-
-
-# ── Detector 2: Squeeze Breakout (Early Warning) ───────────────────────────
-
-
-def detect_squeeze_breakout(
-    symbol: str,
-    df: Any,
-    ltp: float,
-    exchange: str = "NSE",
-) -> Optional[AutoAlert]:
-    """
-    Detects Volatility Squeeze coiling within 0.4% - 1.2% of resistance / 20D High.
-    Triggers *before* the breakout candle runs away.
-    """
-    if df is None or len(df) < 25 or ltp <= 0:
-        return None
-
-    try:
-        closes = df["close"].values
-        highs = df["high"].values
-        lows = df["low"].values
-        volumes = df["volume"].values if "volume" in df.columns else None
-
-        # 20-period Bollinger Bands
-        period = 20
-        sma20 = float(pd.Series(closes).rolling(period).mean().iloc[-1])
-        std20 = float(pd.Series(closes).rolling(period).std().iloc[-1])
-        bb_upper = sma20 + (2.0 * std20)
-        bb_lower = sma20 - (2.0 * std20)
-
-        # 20-period ATR & Keltner Channels
-        tr = [
-            max(highs[i] - lows[i], abs(highs[i] - closes[i - 1]), abs(lows[i] - closes[i - 1]))
-            for i in range(1, len(closes))
-        ]
-        atr20 = float(pd.Series(tr).rolling(period).mean().iloc[-1]) if tr else (std20 * 0.8)
-        keltner_upper = sma20 + (1.5 * atr20)
-        keltner_lower = sma20 - (1.5 * atr20)
-
-        # Squeeze is ON when BB is inside Keltner Channel
-        is_squeeze_on = (bb_upper < keltner_upper) and (bb_lower > keltner_lower)
-
-        # 20-day High and Low / Pivot levels
-        lookback = min(20, len(highs) - 1)
-        pivot_high = float(np.max(highs[-lookback - 1 : -1]))
-        dist_to_pivot_pct = ((pivot_high - ltp) / pivot_high) * 100.0
-
-        pivot_low = float(np.min(lows[-lookback - 1 : -1]))
-        dist_to_low_pct = ((ltp - pivot_low) / pivot_low) * 100.0
-
-        # RVOL 20D
-        rvol = 1.0
-        if volumes is not None and len(volumes) >= 20:
-            avg_vol = float(np.mean(volumes[-21:-1]))
-            cur_vol = float(volumes[-1])
-            rvol = round(cur_vol / max(1.0, avg_vol), 2)
-
-        now_iso = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
-
-        # ── EARLY WARNING (BULLISH): Coiled in squeeze, 0.2% - 1.5% below pivot high ───
-        if is_squeeze_on and (0.2 <= dist_to_pivot_pct <= 1.5):
-            target = round(pivot_high * 1.06, 1)
-            sl = round(sma20, 1)
-            return AutoAlert(
-                alert_id=f"aa-sqz-early-{symbol}-{uuid.uuid4().hex[:6]}",
-                alert_type="SQUEEZE_BREAKOUT",
-                stage="EARLY_WARNING",
-                symbol=symbol,
-                exchange=exchange,
-                direction="BULLISH",
-                headline=f"🎯 SQUEEZE COILING: {symbol} at ₹{ltp:,.1f} (Pivot ₹{pivot_high:,.1f})",
-                summary=(
-                    f"Bollinger Bands compressed inside Keltner Channels (Squeeze ON). "
-                    f"Price is only {dist_to_pivot_pct:.1f}% below pivot resistance. "
-                    f"RVOL {rvol}x. Imminent explosive breakout setup!"
-                ),
-                ltp=ltp,
-                trigger_level=pivot_high,
-                target_level=target,
-                stop_loss=sl,
-                metrics={
-                    "is_squeeze_on": True,
-                    "dist_to_pivot_pct": round(dist_to_pivot_pct, 2),
-                    "pivot_high": pivot_high,
-                    "rvol": rvol,
-                    "sma20": round(sma20, 1),
-                    "atr20": round(atr20, 1),
-                },
-                actionable_plan={
-                    "action": "BUY_ON_PIVOT",
-                    "entry_range": f"₹{ltp:.1f} - ₹{pivot_high:.1f}",
-                    "breakout_trigger": f"₹{pivot_high:.1f}",
-                    "target": f"₹{target:.1f} (+6.0%)",
-                    "stop_loss": f"₹{sl:.1f} (-{round(((ltp - sl) / ltp) * 100, 1)}%)",
-                },
-                confidence=84,
-                created_at=now_iso,
-            )
-
-        # ── EARLY WARNING (BEARISH): Coiled in squeeze, 0.2% - 1.5% above pivot low support ───
-        if is_squeeze_on and (0.2 <= dist_to_low_pct <= 1.5):
-            target = round(pivot_low * 0.94, 1)
-            sl = round(sma20, 1)
-            return AutoAlert(
-                alert_id=f"aa-sqz-bear-early-{symbol}-{uuid.uuid4().hex[:6]}",
-                alert_type="SQUEEZE_BREAKDOWN",
-                stage="EARLY_WARNING",
-                symbol=symbol,
-                exchange=exchange,
-                direction="BEARISH",
-                headline=f"⚠️ SQUEEZE BREAKDOWN COILING: {symbol} at ₹{ltp:,.1f} (Support ₹{pivot_low:,.1f})",
-                summary=(
-                    f"Bollinger Bands compressed inside Keltner Channels (Squeeze ON). "
-                    f"Price is only {dist_to_low_pct:.1f}% above 20D low support. "
-                    f"RVOL {rvol}x. Imminent downside breakdown risk!"
-                ),
-                ltp=ltp,
-                trigger_level=pivot_low,
-                target_level=target,
-                stop_loss=sl,
-                metrics={
-                    "is_squeeze_on": True,
-                    "dist_to_low_pct": round(dist_to_low_pct, 2),
-                    "pivot_low": pivot_low,
-                    "rvol": rvol,
-                    "sma20": round(sma20, 1),
-                    "atr20": round(atr20, 1),
-                },
-                actionable_plan={
-                    "action": "SELL_ON_BREAKDOWN",
-                    "entry_range": f"₹{pivot_low:.1f} - ₹{ltp:.1f}",
-                    "breakout_trigger": f"₹{pivot_low:.1f}",
-                    "target": f"₹{target:.1f} (-6.0%)",
-                    "stop_loss": f"₹{sl:.1f} (+{round(((sl - ltp) / ltp) * 100, 1)}%)",
-                },
-                confidence=84,
-                created_at=now_iso,
-            )
-
-        # ── IGNITED (BULLISH): Squeeze Fired + Fresh Breakout above pivot ───
-        if (
-            ltp >= pivot_high
-            and (ltp - pivot_high) / pivot_high <= 0.025
-            and rvol >= 1.4
-            and ltp > sma20
-        ):
-            target = round(ltp * 1.08, 1)
-            sl = round(pivot_high * 0.985, 1)
-            return AutoAlert(
-                alert_id=f"aa-sqz-ignited-{symbol}-{uuid.uuid4().hex[:6]}",
-                alert_type="SQUEEZE_BREAKOUT",
-                stage="IGNITED",
-                symbol=symbol,
-                exchange=exchange,
-                direction="BULLISH",
-                headline=f"🚀 SQUEEZE BREAKOUT IGNITED: {symbol} broke ₹{pivot_high:,.1f}",
-                summary=(
-                    f"TTM Squeeze fired with heavy institutional volume (RVOL {rvol}x). "
-                    f"Price clearing 20-day high ₹{pivot_high:,.1f} (+{round(((ltp - pivot_high) / pivot_high) * 100, 1)}%). "
-                    f"Primary breakout expansion phase active!"
-                ),
-                ltp=ltp,
-                trigger_level=pivot_high,
-                target_level=target,
-                stop_loss=sl,
-                metrics={
-                    "is_squeeze_fired": True,
-                    "pivot_high": pivot_high,
-                    "rvol": rvol,
-                    "breakout_pct": round(((ltp - pivot_high) / pivot_high) * 100, 2),
-                },
-                actionable_plan={
-                    "action": "BUY_EXPANSION",
-                    "entry_range": f"₹{ltp:.1f}",
-                    "target": f"₹{target:.1f} (+8.0%)",
-                    "stop_loss": f"₹{sl:.1f} (-1.5%)",
-                },
-                confidence=91,
-                created_at=now_iso,
-            )
-
-        # ── IGNITED (BEARISH): Squeeze Fired + Fresh Breakdown below pivot low ───
-        if (
-            ltp <= pivot_low
-            and (pivot_low - ltp) / pivot_low <= 0.025
-            and rvol >= 1.4
-            and ltp < sma20
-        ):
-            target = round(ltp * 0.92, 1)
-            sl = round(pivot_low * 1.015, 1)
-            return AutoAlert(
-                alert_id=f"aa-sqz-bear-ignited-{symbol}-{uuid.uuid4().hex[:6]}",
-                alert_type="SQUEEZE_BREAKDOWN",
-                stage="IGNITED",
-                symbol=symbol,
-                exchange=exchange,
-                direction="BEARISH",
-                headline=f"⚡ SQUEEZE BREAKDOWN IGNITED: {symbol} broke below ₹{pivot_low:,.1f}",
-                summary=(
-                    f"TTM Squeeze breakdown fired with institutional volume (RVOL {rvol}x). "
-                    f"Price cracked 20-day low ₹{pivot_low:,.1f} (-{round(((pivot_low - ltp) / pivot_low) * 100, 1)}%). "
-                    f"Downside expansion phase active!"
-                ),
-                ltp=ltp,
-                trigger_level=pivot_low,
-                target_level=target,
-                stop_loss=sl,
-                metrics={
-                    "is_squeeze_fired": True,
-                    "pivot_low": pivot_low,
-                    "rvol": rvol,
-                    "breakdown_pct": round(((pivot_low - ltp) / pivot_low) * 100, 2),
-                },
-                actionable_plan={
-                    "action": "SELL_EXPANSION",
-                    "entry_range": f"₹{ltp:.1f}",
-                    "target": f"₹{target:.1f} (-8.0%)",
-                    "stop_loss": f"₹{sl:.1f} (+1.5%)",
-                },
-                confidence=91,
-                created_at=now_iso,
-            )
-
-    except Exception as e:
-        logger.debug(f"[SqueezeBreakout] Error evaluating {symbol}: {e}")
-
-    return None
-
-
-# ── Detector 3: Circuit Proximity Alert ─────────────────────────────────────
-
-
-def detect_circuit_proximity(
-    symbol: str,
-    ltp: float,
-    prev_close: float,
-    high: Optional[float] = None,
-    exchange: str = "NSE",
-    circuit_band_pct: float = 5.0,
-) -> Optional[AutoAlert]:
-    """
-    Early warning when stock is approaching Upper Circuit (<1.5% from ceiling).
-    Enables user to place limit orders or enter before 100% buyers freeze liquidity.
-    """
-    if ltp <= 0 or prev_close <= 0:
-        return None
-
-    day_chg_pct = ((ltp - prev_close) / prev_close) * 100.0
-    upper_circuit = round(prev_close * (1.0 + (circuit_band_pct / 100.0)), 2)
-    dist_to_uc_pct = ((upper_circuit - ltp) / upper_circuit) * 100.0
-
-    now_iso = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
-
-    # If within 1.5% of upper circuit ceiling and gaining strongly
-    if 0.1 <= dist_to_uc_pct <= 1.5 and day_chg_pct >= (circuit_band_pct * 0.7):
-        return AutoAlert(
-            alert_id=f"aa-cir-prox-{symbol}-{uuid.uuid4().hex[:6]}",
-            alert_type="CIRCUIT_WARNING",
-            stage="EARLY_WARNING",
-            symbol=symbol,
-            exchange=exchange,
-            direction="BULLISH",
-            headline=f"🔒 CIRCUIT WARNING: {symbol} at ₹{ltp:,.1f} ({dist_to_uc_pct:.1f}% below Upper Circuit)",
-            summary=(
-                f"Stock is surging (+{day_chg_pct:.1f}%) and trading {dist_to_uc_pct:.1f}% below "
-                f"the ₹{upper_circuit:,.1f} circuit ceiling. Place limit orders before buyers freeze liquidity!"
-            ),
-            ltp=ltp,
-            trigger_level=upper_circuit,
-            target_level=upper_circuit,
-            stop_loss=round(ltp * 0.97, 1),
-            metrics={
-                "prev_close": prev_close,
-                "day_change_pct": round(day_chg_pct, 2),
-                "upper_circuit": upper_circuit,
-                "dist_to_uc_pct": round(dist_to_uc_pct, 2),
-                "circuit_band_pct": circuit_band_pct,
-            },
-            actionable_plan={
-                "action": "BUY_LIMIT_CIRCUIT",
-                "price": f"₹{ltp:.1f}",
-            },
-            confidence=88,
-            created_at=now_iso,
-        )
-
-    return None
-
-
-# ── Detector 4: Learned Pattern Coiling (Early Warning) ───────────────────
-
-
-def detect_learned_pattern_coiling(
-    symbol: str,
-    df: Any,
-    ltp: float,
-    exchange: str = "NSE",
-) -> Optional[AutoAlert]:
-    """
-    Detects pre-blast coiling based on learned explosive move archetypes
-    (Volume dry-up + Squeeze coiling + Order Block anchor).
-    """
-    if df is None or len(df) < 20 or ltp <= 0:
-        return None
-
-    try:
-        from engine.learning_engine import pattern_learning_engine
-
-        # Negative Feedback Invalidation Lockout Gate: Prevent knife-catching after stop-loss breach
-        # Supports adaptive early unlocking if price structurally reclaims above failed level & VWAP
-        is_locked, lock_reason = pattern_learning_engine.is_symbol_locked_out(
-            symbol, direction="BULLISH", ltp=ltp
-        )
-        if is_locked:
-            logger.info(
-                f"[PatternCoiling] Gating alert for {symbol}: Under invalidation lockout ({lock_reason})"
-            )
-            return None
-
-        res = pattern_learning_engine.evaluate_candidate(symbol=symbol, df=df, chain=None)
-        if res.is_explosive_candidate:
-            now_iso = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
-
-            from engine.trade_plan import calculate_trade_plan
-
-            tp = calculate_trade_plan(symbol, direction="BULLISH", spot=ltp, exchange=exchange)
-
-            # Mathematical Expectancy Gate: Reject candidates with poor structural asymmetry
-            if tp and not tp.is_asymmetry_viable:
-                logger.info(
-                    f"[PatternCoiling] Gating alert for {symbol}: Failed structural asymmetry ({tp.asymmetry_verdict})"
-                )
-                return None
-
-            archetype_txt = (
-                f" ({res.similarity_score}% match to {res.closest_archetype})"
-                if res.closest_archetype
-                else ""
-            )
-            headline = f"💎 PRE-BLAST COILING: {symbol} at ₹{ltp:,.1f}{archetype_txt}"
-            factor_summary = (
-                "; ".join(res.matched_factors[:2])
-                if res.matched_factors
-                else "High-conviction coiling"
-            )
-            summary = f"Pre-blast footprint match: {factor_summary}. Asymmetric coiling detected with minimum risk anchor."
-
-            t1 = tp.target_1 if (tp and tp.target_1 > 0) else round(ltp * 1.05, 1)
-            sl = (
-                tp.invalidation_stop if (tp and tp.invalidation_stop > 0) else round(ltp * 0.985, 1)
-            )
-
-            # Volatility Noise Floor: Ensure stop-loss is not placed within intraday noise chop
-            # Minimum buffer: at least 1.2% of price or 1.2x ATR
-            min_sl_dist = round(max(ltp * 0.012, 1.0), 2)
-            if (ltp - sl) < min_sl_dist:
-                sl = round(ltp - min_sl_dist, 2)
-
-            rr_str = f"{tp.rr_t1:.1f}:1" if tp else "3.0:1"
-
-            act_plan = {
-                "action": res.recommended_entry_action,
-                "entry_range": f"₹{ltp:.1f}",
-                "target": f"₹{t1:.1f}",
-                "stop_loss": f"₹{sl:.1f}",
-                "risk_reward": rr_str,
-            }
-            if tp:
-                act_plan["trade_plan"] = tp.as_dict()
-
-            return AutoAlert(
-                alert_id=f"aa-coiling-{symbol}-{uuid.uuid4().hex[:6]}",
-                alert_type="PATTERN_COILING",
-                stage="EARLY_WARNING",
-                symbol=symbol,
-                exchange=exchange,
-                direction="BULLISH",
-                headline=headline,
-                summary=summary,
-                ltp=ltp,
-                trigger_level=ltp,
-                target_level=t1,
-                stop_loss=sl,
-                metrics={
-                    "similarity_score": res.similarity_score,
-                    "closest_archetype": res.closest_archetype,
-                    "matched_factors": res.matched_factors,
-                    "expected_rr": res.expected_asymmetry_rr,
-                },
-                actionable_plan=act_plan,
-                confidence=res.similarity_score,
-                created_at=now_iso,
-            )
-    except Exception as e:
-        logger.debug(f"[PatternCoiling] Error evaluating {symbol}: {e}")
-
-    return None
 
 
 def get_current_ist_session(ref_dt: Optional[datetime] = None) -> dict[str, bool]:
@@ -2061,8 +242,34 @@ class AutoAlertEngine:
                 c_tag = f"{clean_target} {int(alert.strike)} {alert.option_type}" if alert.strike and alert.option_type else clean_target
                 alert.summary = f"Institutional momentum surge on {c_tag}. Invalidation anchor: ₹{alert.stop_loss:,.1f}."
 
+        # 0a. Market Session Timing Gate (Opening Range Discovery & Closing Cutoff)
+        is_test_runner = (
+            is_sim
+            or (os.environ.get("CHANAKYA_TESTING") == "1")
+            or (os.environ.get("DEPLOY_MODE") == "test")
+            or ("PYTEST_CURRENT_TEST" in os.environ)
+        )
+        if not is_test_runner and alert.stage in ("IGNITED",) and alert.alert_type in ("OPTIONS_MOMENTUM", "GAMMA_BLAST", "SQUEEZE_BREAKOUT"):
+            now_t = datetime.now(IST).time()
+            # 09:15 - 09:25 IST: Morning Opening Discovery Quiet Window (Mute early opening auction whipsaws)
+            if dtime(9, 15) <= now_t < dtime(9, 25):
+                logger.info(
+                    f"[AutoAlertEngine] 🛑 Suppressed opening auction breakout alert for {clean_target} ({alert.alert_type}): "
+                    f"Market Opening Quiet Window (09:15–09:25 IST) active to avoid whipsaws."
+                )
+                return False
+
+            # Post-15:10 IST: Hard Closing Cutoff for domestic equity/NFO intraday options
+            if alert.exchange in ("NSE", "BSE", "NFO", "") and alert.alert_type in ("OPTIONS_MOMENTUM", "GAMMA_BLAST") and now_t >= dtime(15, 10):
+                logger.info(
+                    f"[AutoAlertEngine] 🛑 Suppressed late-session intraday option alert for {clean_target} ({alert.alert_type}): "
+                    f"Post-15:10 IST cutoff active (MIS closed, terminal theta decay risk)."
+                )
+                return False
+
         # 0. Closed-Loop Invalidation Lockout Guard (Negative Feedback Loop)
         if not is_sim:
+
             underlying_sym = (
                 (alert.metrics or {}).get("underlying") if isinstance(alert.metrics, dict) else None
             )
@@ -2147,6 +354,9 @@ class AutoAlertEngine:
                 # If existing is EARLY_WARNING and incoming is IGNITED, upgrade it!
                 if existing_active.stage == "EARLY_WARNING" and alert.stage == "IGNITED":
                     now_iso = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
+                    # Preserve original call time BEFORE overwriting created_at (prevents '0s ago' bug)
+                    if not existing_active.original_call_time:
+                        existing_active.original_call_time = existing_active.created_at
                     existing_active.stage = "IGNITED"
                     existing_active.triggered_at = now_iso
                     existing_active.created_at = now_iso  # Synchronize to exact ignition moment!
@@ -2343,6 +553,24 @@ class AutoAlertEngine:
                             )
                             return False
 
+                # 2c. Learning Engine Invalidation Lockout Gate:
+                # Prevent re-triggering on assets that were stopped out / invalidated in the current session
+                if not is_sim:
+                    try:
+                        from engine.learning_engine import pattern_learning_engine
+
+                        is_locked, lock_reason = pattern_learning_engine.is_symbol_locked_out(
+                            clean_target, direction=alert.direction, ltp=alert.ltp
+                        )
+                        if is_locked:
+                            logger.info(
+                                f"[AutoAlertEngine] 🛑 Suppressed alert for {clean_target} ({alert.direction}): "
+                                f"Negative learning lockout active ({lock_reason})"
+                            )
+                            return False
+                    except Exception as e:
+                        logger.debug(f"[AutoAlertEngine] Error checking learning lockout: {e}")
+
         # 3. Only if alert passed deduplication & cooldown: sanitize actionable plan
         if (
             alert.actionable_plan
@@ -2522,6 +750,9 @@ class AutoAlertEngine:
                         and not a.is_active
                     )
                 ]
+                # Stamp original_call_time on first insertion (immutable anchor for milestone 'Call Given:' display)
+                if not alert.original_call_time:
+                    alert.original_call_time = alert.created_at
                 self._alerts.insert(0, alert)
                 if len(self._alerts) > self._max_buffer:
                     self._alerts.pop()
@@ -2831,6 +1062,9 @@ class AutoAlertEngine:
             if alert.is_invalidated:
                 panel_title = f"[bold red]⚠️ {env_tag} ALERT / VIEW INVALIDATED[/bold red]"
                 border_color = "red"
+            elif alert.stage == "IN_FLIGHT_WARNING":
+                panel_title = f"[bold yellow]⚠️ {env_tag} IN-FLIGHT WARNING / DECAY[/bold yellow]"
+                border_color = "yellow"
             elif is_target:
                 panel_title = f"[bold cyan]🎯 {env_tag} TARGET ACHIEVED[/bold cyan]"
                 border_color = "cyan"
@@ -3093,6 +1327,182 @@ class AutoAlertEngine:
                 logger.debug(f"[AutoAlertEngine] Target eval error for {alert.symbol}: {e}")
 
         return updated_alerts
+
+    # ── In-Flight Decay & Danger Zone Warning Monitoring ────────
+
+    def check_and_alert_in_flight_decay(
+        self, exchanges: Optional[list[str]] = None
+    ) -> list[AutoAlert]:
+        """
+        Scans all active (non-invalidated, non-completed) alerts against live market price to detect:
+          1. Danger Zone Proximity: >= 70% risk budget consumed or within <= 1.5% of Stop-Loss.
+          2. Theta Decay Stagnation: Option positions active >= 15m with P&L <= 0%.
+        Dispatches high-priority IN_FLIGHT_WARNING alerts with strict one-shot latching.
+        """
+        from engine.alert_evaluator import evaluate_alert_in_flight_decay
+
+        now_iso = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
+        warning_alerts: list[AutoAlert] = []
+        exch_filter = {e.upper() for e in exchanges} if exchanges else None
+
+        with self._lock:
+            active_alerts = [
+                a
+                for a in self._alerts
+                if not a.is_invalidated
+                and a.stage not in ("INVALIDATED", "COMPLETED")
+                and not getattr(a, "in_flight_warning_sent", False)
+                and not (a.environment == "TEST" or not a.is_live)
+                and (not exch_filter or (a.exchange or "NSE").upper() in exch_filter)
+            ]
+
+        for alert in active_alerts:
+            try:
+                # Refresh current quote LTP
+                is_opt_prem = is_alert_option_premium_level(alert)
+                lookup_sym = (
+                    (alert.contract_symbol or (f"{alert.exchange}:{alert.symbol}" if ":" not in alert.symbol else alert.symbol))
+                    if is_opt_prem
+                    else (f"{alert.exchange}:{alert.symbol}" if ":" not in alert.symbol else alert.symbol)
+                )
+                from market.quotes import get_ltp
+
+                cur_quote_ltp = None
+                try:
+                    cur_quote_ltp = get_ltp(lookup_sym)
+                    if cur_quote_ltp and cur_quote_ltp > 0:
+                        alert.ltp = cur_quote_ltp
+                except Exception:
+                    cur_quote_ltp = None
+
+                eval_res = evaluate_alert_in_flight_decay(alert, current_ltp=cur_quote_ltp)
+                if not eval_res or not eval_res.triggered:
+                    continue
+
+                with self._lock:
+                    alert.in_flight_warning_sent = True
+                    alert.in_flight_warning_reason = eval_res.reason
+                    alert.in_flight_warning_at = now_iso
+                    alert.updated_at = now_iso
+                    alert.stage = "IN_FLIGHT_WARNING"
+                    alert.headline = eval_res.headline
+                    alert.summary = eval_res.summary
+                    alert.trailing_decision = eval_res.coaching_decision
+                    alert.pnl_pct = eval_res.pnl_pct
+                    self._save()
+
+                self._dispatch(alert)
+                warning_alerts.append(alert)
+                logger.warning(
+                    f"[AutoAlertEngine] Alert {alert.alert_id} IN-FLIGHT WARNING: {eval_res.reason}"
+                )
+
+            except Exception as e:
+                logger.debug(f"[AutoAlertEngine] In-flight decay check error for {alert.symbol}: {e}")
+
+        return warning_alerts
+
+    def create_test_in_flight_warning_alert(
+        self,
+        warning_type: str = "DANGER_ZONE",  # "DANGER_ZONE" | "THETA_STAGNATION"
+        symbol: str = "RELIANCE",
+    ) -> AutoAlert:
+        """
+        Generates a simulated test In-Flight Decay / Danger Zone Warning alert clearly tagged as [TEST].
+        Verifies notifications, toasts, and UI cards for proactive risk coaching.
+        """
+        now_iso = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
+        alert_id = f"test-decay-{uuid.uuid4().hex[:6]}"
+
+        w_type = warning_type.upper()
+        if "VWAP" in w_type:
+            stage = "IN_FLIGHT_WARNING"
+            headline = f"🌊 [TEST] IN-FLIGHT WARNING: {symbol} (VWAP -1.0σ Institutional Band Breakdown)"
+            decision = "SCRATCH_OR_TIGHTEN_TO_VWAP"
+            summary = (
+                f"Price ₹2,810.00 crossed below intraday VWAP -1.0σ band (₹2,822.00, VWAP ₹2,835.00, -0.9%). "
+                f"Institutional order flow distribution confirmed before nominal Stop-Loss (₹2,800.00) is hit. "
+                f"DECISION: SCRATCH POSITION AT MARKET OR TIGHTEN STOP TO VWAP LOWER BAND (₹2,822.00)."
+            )
+            ltp = 2810.0
+            trigger_level = 2840.0
+            stop_loss = 2800.0
+            target_level = 2920.0
+            pnl_pct = -1.1
+        elif "CLIFF" in w_type or ("0DTE" in w_type and "AFTERNOON" in w_type):
+            stage = "IN_FLIGHT_WARNING"
+            headline = f"⏳ [TEST] IN-FLIGHT WARNING: {symbol} (0DTE Theta Cliff: 9m No Progress)"
+            decision = "EXIT_0DTE_OPTION_IMMEDIATELY"
+            summary = (
+                f"0DTE option position active for 9m post-13:30 IST with zero momentum (P&L: -5.5%). "
+                f"Rapid afternoon pin-risk & gamma collapse underway. "
+                f"DECISION: EXIT 0DTE OPTION IMMEDIATELY TO AVOID PIN-RISK PREMIUM EVAPORATION."
+            )
+            ltp = 38.0
+            trigger_level = 42.0
+            stop_loss = 25.0
+            target_level = 65.0
+            pnl_pct = -5.5
+        elif "THETA" in w_type:
+            stage = "IN_FLIGHT_WARNING"
+            headline = f"⏳ [TEST] IN-FLIGHT WARNING: {symbol} (Theta Stagnation: 18m No Progress)"
+            decision = "EXIT_STAGNANT_OPTION"
+            summary = (
+                f"Option position {symbol} 2900 CE active for 18m without upside momentum (P&L: -4.2%). "
+                f"Accelerating theta decay threatens capital. "
+                f"DECISION: SCRATCH / EXIT AT MARKET BEFORE THETA EROSION REACHES STOP-LOSS."
+            )
+            ltp = 48.0
+            trigger_level = 50.0
+            stop_loss = 35.0
+            target_level = 75.0
+            pnl_pct = -4.2
+        else:  # DANGER_ZONE
+            stage = "IN_FLIGHT_WARNING"
+            headline = f"⚠️ [TEST] IN-FLIGHT WARNING: {symbol} (Danger Zone: 75% Risk Consumed)"
+            decision = "SCRATCH_OR_TIGHTEN_STOP"
+            summary = (
+                f"LTP ₹2,830.00 is within 0.4% of Stop-Loss (₹2,820.00). "
+                f"75% of risk budget is eroded (P&L: -1.0%). "
+                f"DECISION: SCRATCH POSITION AT MARKET OR TIGHTEN STOP TO PREVENT FULL CAPITAL LOSS."
+            )
+            ltp = 2830.0
+            trigger_level = 2860.0
+            stop_loss = 2820.0
+            target_level = 3050.0
+            pnl_pct = -1.0
+
+        alert = AutoAlert(
+            alert_id=alert_id,
+            alert_type="SQUEEZE_BREAKOUT",
+            stage=stage,
+            symbol=symbol,
+            exchange="NSE",
+            direction="BULLISH",
+            headline=headline,
+            summary=summary,
+            ltp=ltp,
+            trigger_level=trigger_level,
+            target_level=target_level,
+            stop_loss=stop_loss,
+            confidence=88,
+            created_at=now_iso,
+            is_live=False,
+            environment="TEST",
+            is_invalidated=False,
+            is_archived=False,
+            trailing_decision=decision,
+            trailing_stop=stop_loss,
+            pnl_pct=pnl_pct,
+            in_flight_warning_sent=True,
+            in_flight_warning_reason=summary,
+            in_flight_warning_at=now_iso,
+        )
+        with self._lock:
+            self._alerts.append(alert)
+            self._save()
+        self._dispatch(alert)
+        return alert
 
     def create_test_target_alert(
         self,
@@ -3427,8 +1837,10 @@ class AutoAlertEngine:
                         f"precursor-{c.symbol.lower()}-{datetime.now(IST).strftime('%Y%m%d')}"
                     )
                     seg_tag = f"[{c.segment}]"
-                    headline = f"⚡ [REAL/LIVE] PRECURSOR RADAR {seg_tag}: {c.symbol} Coiling at ₹{c.ltp:,.1f} ({c.conviction_score}/100)"
+                    headline = f"⚡ PRECURSOR RADAR {seg_tag}: {c.symbol} Coiling at ₹{c.ltp:,.1f} ({c.conviction_score}/100)"
                     summary = f"{seg_tag} Pre-ignition coiling: {'; '.join(c.matched_factors[:2])}. Entry: {c.entry_range}."
+                    # Provenance gate: mark as TEST if LTP is zero/mock
+                    is_authentic_pr = bool(c.ltp and c.ltp > 0 and not getattr(c, "_is_mock", False))
                     alert = AutoAlert(
                         alert_id=alert_id,
                         alert_type="PRECURSOR_RADAR",
@@ -3444,8 +1856,8 @@ class AutoAlertEngine:
                         stop_loss=c.stop_loss,
                         confidence=c.conviction_score,
                         created_at=now_iso,
-                        is_live=True,
-                        environment="LIVE",
+                        is_live=is_authentic_pr,
+                        environment="LIVE" if is_authentic_pr else "TEST",
                         metrics={
                             "conviction_score": c.conviction_score,
                             "segment": c.segment,
@@ -3558,7 +1970,7 @@ class AutoAlertEngine:
                 )
                 sl_price = round(max(vwap * 0.995, ltp * 0.985), 2)
                 t1_price = round(ltp + 1.5 * (ltp - sl_price), 2)
-                headline = f"🚀 [REAL/LIVE] INTRADAY SPARK {seg_tag}: {clean_sym} +{chg:.1f}% with {rvol:.1f}x Volume Surge"
+                headline = f"🚀 INTRADAY SPARK {seg_tag}: {clean_sym} +{chg:.1f}% with {rvol:.1f}x Volume Surge"
                 summary = f"{seg_tag} Session breakout underway: Reclaimed VWAP (₹{vwap:,.1f}) with {rvol:.1f}x RVOL. Momentum entry active."
                 plan = {
                     "action": "BUY_MOMENTUM",
@@ -3578,7 +1990,7 @@ class AutoAlertEngine:
                 sl_price = round(min(vwap * 1.005, ltp * 1.015), 2)
                 risk_pts = max(1.0, sl_price - ltp)
                 t1_price = round(max(1.0, ltp - 1.5 * risk_pts), 2)
-                headline = f"⚡ [REAL/LIVE] INTRADAY BREAKDOWN {seg_tag}: {clean_sym} {chg:.1f}% with {rvol:.1f}x Volume Surge"
+                headline = f"⚡ INTRADAY BREAKDOWN {seg_tag}: {clean_sym} {chg:.1f}% with {rvol:.1f}x Volume Surge"
                 summary = f"{seg_tag} Severe session breakdown underway: Lost VWAP (₹{vwap:,.1f}) with {rvol:.1f}x RVOL. Short / Put entry active."
                 plan = {
                     "action": "SELL_SHORT_OR_BUY_PUT",
@@ -3589,6 +2001,18 @@ class AutoAlertEngine:
                     "when_to_buy": f"Enter short or ATM Put on pullbacks to ₹{vwap:,.1f} with tight stop above VWAP.",
                     "when_to_wait": f"Do not chase if breakdown extends > {round(abs(chg) + 1.5, 1)}% without retest.",
                 }
+
+            # Provenance gate: validate quote is from a real broker, not mock/test stub
+            is_mock_spark = (
+                type(q).__name__ == "MagicMock"
+                or getattr(q, "_is_mock", False)
+                or getattr(q, "provider", "") in ("mock", "TEST")
+                or getattr(q, "data_state", "") == "UNAVAILABLE"
+            )
+            is_test_env = (
+                os.environ.get("CHANAKYA_TESTING") == "1" or os.environ.get("DEPLOY_MODE") == "test"
+            )
+            is_authentic_spark = not (is_mock_spark or is_test_env)
 
             alert = AutoAlert(
                 alert_id=alert_id,
@@ -3605,8 +2029,8 @@ class AutoAlertEngine:
                 stop_loss=sl_price,
                 confidence=min(95, int(75 + rvol * 5)),
                 created_at=now_iso,
-                is_live=True,
-                environment="LIVE",
+                is_live=is_authentic_spark,
+                environment="LIVE" if is_authentic_spark else "TEST",
                 metrics={
                     "rvol": rvol,
                     "turnover_cr": turnover_cr,
@@ -3823,6 +2247,8 @@ class AutoAlertEngine:
                     "SENSEX",
                     "BANKEX",
                 )
+                # Determine canonical segment for routing and display (cached on the alert object)
+                alert_segment = "FNO_INDEX" if is_idx else "FNO_STOCK"
                 strike_range_pct = 0.015 if is_idx else 0.035
                 min_opt_volume = 3000 if is_idx else 500
                 min_oi = 10000 if is_idx else 300
@@ -3929,6 +2355,65 @@ class AutoAlertEngine:
                         direction = "BEARISH"
                     else:
                         continue
+
+                    # 2b. MTF Confluence on Underlying Spot (15m OHLCV)
+                    mtf_15m_trend = "NEUTRAL"
+                    try:
+                        from market.history import get_ohlcv
+                        df_15m = get_ohlcv(clean_sym, days=4, interval="15minute")
+                        if df_15m is not None and len(df_15m) >= 15:
+                            c_15 = df_15m["close"] if "close" in df_15m.columns else df_15m["Close"]
+                            ema20_15 = float(c_15.ewm(span=20, adjust=False).mean().iloc[-1])
+                            ema50_15 = float(c_15.ewm(span=50, adjust=False).mean().iloc[-1]) if len(c_15) >= 40 else ema20_15
+                            if spot >= (ema20_15 * 0.998) and ema20_15 >= (ema50_15 * 0.998):
+                                mtf_15m_trend = "BULLISH"
+                            elif spot <= (ema20_15 * 1.002) and ema20_15 <= (ema50_15 * 1.002):
+                                mtf_15m_trend = "BEARISH"
+                    except Exception as e_mtf:
+                        logger.debug(f"[AutoAlertEngine] MTF 15m fetch failed for {clean_sym}: {e_mtf}")
+
+                    # Reject counter-trend breakout traps against 15m structural trend
+                    if opt_type == "CE" and mtf_15m_trend == "BEARISH":
+                        logger.debug(f"[AutoAlertEngine] Suppressed Call breakout on {clean_sym}: 15m trend is BEARISH")
+                        continue
+                    if opt_type == "PE" and mtf_15m_trend == "BULLISH":
+                        logger.debug(f"[AutoAlertEngine] Suppressed Put surge on {clean_sym}: 15m trend is BULLISH")
+                        continue
+
+                    # 2c. Options Delta-OI Institutional Confirmation Gate:
+                    # For Calls: If Call writers are aggressively stacking fresh OI while spot is below VWAP,
+                    # this is an institutional Call Writing Resistance Wall, NOT a bullish breakout!
+                    is_gamma_squeeze = False
+                    if opt_type == "CE":
+                        if oi_change and oi_change < 0:
+                            is_gamma_squeeze = True  # Call short covering
+                        elif oi_change and oi_change > 0 and spot_vwap and spot < spot_vwap:
+                            logger.debug(f"[AutoAlertEngine] Suppressed CE on {clean_sym}: Call writing resistance wall (OI +{oi_change} below VWAP)")
+                            continue
+                    elif opt_type == "PE":
+                        if oi_change and oi_change < 0:
+                            is_gamma_squeeze = True  # Put short covering / long liquidation
+
+                    # 2d. India VIX Volatility Regime Adaptation
+                    vix_val = None
+                    try:
+                        from market.indices import get_vix
+                        vix_val = get_vix()
+                    except Exception:
+                        vix_val = None
+
+                    if vix_val and vix_val > 0:
+                        if vix_val < 12.0:
+                            vix_regime = "LOW_VOLATILITY"
+                        elif vix_val <= 18.0:
+                            vix_regime = "NORMAL_VOLATILITY"
+                        elif vix_val <= 24.0:
+                            vix_regime = "ELEVATED_VOLATILITY"
+                        else:
+                            vix_regime = "EXTREME_VOLATILITY"
+                    else:
+                        vix_regime = "NORMAL_VOLATILITY"
+
                     alert_id = f"aa-optmom-{opt_type.lower()}-{clean_sym}-{int(strike)}-{uuid.uuid4().hex[:6]}"
 
                     # 3. Dynamic Spot-Anchored Trade Plan & Invalidation (Institutional Greeks)
@@ -3990,8 +2475,12 @@ class AutoAlertEngine:
                         conf_score += 10
                     if upper_wick_ratio <= 0.20 and lower_wick_ratio <= 0.20:
                         conf_score += 5
-                    if oi_change and oi_change < 0:
+                    if is_gamma_squeeze:
+                        conf_score += 8
+                    elif oi_change and oi_change < 0:
                         conf_score += 5
+                    if mtf_15m_trend == ("BULLISH" if opt_type == "CE" else "BEARISH"):
+                        conf_score += 7
                     confidence = min(94, max(72, conf_score))
 
                     # 6. Optimal Trade Entry (OTE) & Strict No-Chase Boundaries
@@ -4004,14 +2493,14 @@ class AutoAlertEngine:
                     when_to_buy_str = f"Buy on ask/limit within entry range with spot invalidation anchor at ₹{tp.invalidation_stop:,.1f} (Option SL ₹{opt_sl:,.1f})." if (tp and tp.invalidation_stop > 0) else f"Buy on ask/limit within entry range with tight defined risk below ₹{opt_sl:,.1f}."
 
                     if opt_type == "PE":
-                        headline = f"🎯 [REAL/LIVE] OPTIONS MOMENTUM (PUT SURGE): {contract_sym} @ ₹{opt_ltp:,.1f} (Vol/OI {vol_oi}x)"
+                        headline = f"🎯 OPTIONS MOMENTUM (PUT SURGE): {contract_sym} @ ₹{opt_ltp:,.1f} (Vol/OI {vol_oi}x)"
                         summary = (
                             f"Institutional Put surge in {clean_sym} {strike:,.0f} PE. "
                             f"Underlying spot ₹{spot:,.1f}{spot_anchor_str}. Turnover: {vol:,} contracts ({vol_oi}x OI). "
                             f"Entry: ₹{opt_ltp:,.1f} | SL: ₹{opt_sl:,.1f} | T1: ₹{opt_t1:,.1f} | T2: ₹{opt_t2:,.1f}.{friday_tag}"
                         )
                     else:
-                        headline = f"🚀 [REAL/LIVE] OPTIONS MOMENTUM: {contract_sym} @ ₹{opt_ltp:,.1f} (Vol/OI {vol_oi}x)"
+                        headline = f"🚀 OPTIONS MOMENTUM: {contract_sym} @ ₹{opt_ltp:,.1f} (Vol/OI {vol_oi}x)"
                         summary = (
                             f"Institutional Call surge in {clean_sym} {strike:,.0f} CE. "
                             f"Underlying spot ₹{spot:,.1f}{spot_anchor_str}. Turnover: {vol:,} contracts ({vol_oi}x OI). "
@@ -4035,12 +2524,16 @@ class AutoAlertEngine:
                         option_type=opt_type,
                         contract_symbol=contract_sym,
                         expiry_date=expiry_date,
+                        expiry_type=classify_expiry_type(expiry_date, clean_sym),
+                        segment=alert_segment,
                         option_premium=opt_ltp,
                         underlying_spot=spot,
                         confidence=confidence,
                         created_at=now_iso,
                         is_live=True,
                         environment="LIVE",
+                        mtf_confluence=mtf_15m_trend,
+                        vix_regime=vix_regime,
                         metrics={
                             "vol_oi_ratio": vol_oi,
                             "volume": vol,
@@ -4056,6 +2549,10 @@ class AutoAlertEngine:
                             "upper_wick_ratio": round(upper_wick_ratio, 2),
                             "lower_wick_ratio": round(lower_wick_ratio, 2),
                             "is_friday_late": is_friday_late,
+                            "mtf_15m_trend": mtf_15m_trend,
+                            "vix_regime": vix_regime,
+                            "india_vix": vix_val,
+                            "is_gamma_squeeze": is_gamma_squeeze,
                         },
                         actionable_plan={
                             "action": f"BUY {opt_type}",
@@ -4073,6 +2570,7 @@ class AutoAlertEngine:
                             "when_to_wait": when_to_wait_str,
                             "profit_rule": f"Book 50% at T1 (₹{opt_t1:,.1f}), move SL to Cost, let remainder ride to T2 (₹{opt_t2:,.1f}).",
                             "lot_size": lot_sz,
+                            "spot_invalidation_anchor": f"₹{tp.invalidation_stop:,.1f}" if (tp and tp.invalidation_stop > 0) else None,
                             "friday_weekend_warning": friday_tag.strip() if friday_tag else None,
                         },
                     )
@@ -4156,11 +2654,75 @@ class AutoAlertEngine:
             except Exception:
                 vwap = ltp
 
+            # Check Learning Engine Lockout first (Kill repetitive invalidation loops)
+            from engine.learning_engine import pattern_learning_engine
+            is_locked_bull, _ = pattern_learning_engine.is_symbol_locked_out(
+                clean_sym, direction="BULLISH", ltp=ltp, vwap=vwap
+            )
+            is_locked_bear, _ = pattern_learning_engine.is_symbol_locked_out(
+                clean_sym, direction="BEARISH", ltp=ltp, vwap=vwap
+            )
+
             # Minimum move threshold for commodity trigger (0.6% for Gold/Silver/Copper, 1.0% for Crude/NatGas)
             min_chg = 1.0 if clean_sym in ("CRUDEOIL", "NATURALGAS") else 0.6
 
-            is_bullish = (chg >= min_chg) and (ltp >= (vwap * 0.998))
-            is_bearish = (chg <= -min_chg) and (ltp <= (vwap * 1.002))
+            # 20-Bar Donchian Channel Breakout & Wick Rejection Verification on 5m OHLCV
+            df_5m = None
+            try:
+                from market.history import get_ohlcv
+                df_5m = get_ohlcv(clean_sym, exchange="MCX", interval="5minute", days=2)
+            except Exception as e:
+                logger.debug(f"[AutoAlertEngine] Error fetching 5m OHLCV for MCX:{clean_sym}: {e}")
+
+            is_bullish = False
+            is_bearish = False
+            is_donchian_breakout = False
+
+            if df_5m is not None and len(df_5m) >= 20:
+                recent_20 = df_5m.iloc[-21:-1]
+                prior_high = float(recent_20["high"].max())
+                prior_low = float(recent_20["low"].min())
+                last_bar = df_5m.iloc[-1]
+                cur_open = float(last_bar.get("open", ltp))
+                cur_high = max(float(last_bar.get("high", ltp)), ltp)
+                cur_low = min(float(last_bar.get("low", ltp)), ltp)
+                bar_range = max(1.0, cur_high - cur_low)
+
+                upper_wick_ratio = (cur_high - max(cur_open, ltp)) / bar_range
+                lower_wick_ratio = (min(cur_open, ltp) - cur_low) / bar_range
+
+                # Bullish: breaking 20-bar high, small upper wick (no shooting star rejection), holding above VWAP
+                if (
+                    not is_locked_bull
+                    and chg >= min_chg
+                    and ltp >= prior_high * 0.999
+                    and upper_wick_ratio <= 0.35
+                    and ltp >= vwap * 0.998
+                ):
+                    is_bullish = True
+                    is_donchian_breakout = True
+
+                # Bearish: breaking 20-bar low, small lower wick (no hammer absorption), trading below VWAP
+                elif (
+                    not is_locked_bear
+                    and chg <= -min_chg
+                    and ltp <= prior_low * 1.001
+                    and lower_wick_ratio <= 0.35
+                    and ltp <= vwap * 1.002
+                ):
+                    is_bearish = True
+                    is_donchian_breakout = True
+            else:
+                # Fallback when historical 5m bars are unavailable:
+                # Enforce stricter move threshold and clear VWAP separation
+                strict_min_chg = max(min_chg * 1.5, 1.2)
+                has_real_vwap_diff = (vwap > 0) and (abs(ltp - vwap) >= 2.0)
+                if has_real_vwap_diff:
+                    is_bullish = not is_locked_bull and (chg >= strict_min_chg) and (ltp >= (vwap * 0.998))
+                    is_bearish = not is_locked_bear and (chg <= -strict_min_chg) and (ltp <= (vwap * 1.002))
+                else:
+                    is_bullish = not is_locked_bull and (chg >= strict_min_chg)
+                    is_bearish = not is_locked_bear and (chg <= -strict_min_chg)
 
             if not (is_bullish or is_bearish):
                 continue
@@ -4206,7 +2768,10 @@ class AutoAlertEngine:
                 sl_price = round(ltp - risk_pts, 2)
                 t1_price = round(ltp + 1.8 * risk_pts, 2)
                 t2_price = round(ltp + 3.2 * risk_pts, 2)
-                if has_real_vwap:
+                if is_donchian_breakout:
+                    headline = f"🛢️ MCX BREAKOUT: {clean_sym} +{chg:.1f}% Breaking 20-bar High (₹{ltp:,.1f})"
+                    summary = f"Institutional breakout in {clean_sym}: Trading at ₹{ltp:,.1f} (+{chg:.1f}%). 20-bar 5m Donchian high broken with VWAP support at ₹{vwap:,.1f}."
+                elif has_real_vwap:
                     headline = (
                         f"MCX MOMENTUM: {clean_sym} +{chg:.1f}% Reclaiming VWAP (₹{vwap:,.1f})"
                     )
@@ -4219,7 +2784,10 @@ class AutoAlertEngine:
                 sl_price = round(ltp + risk_pts, 2)
                 t1_price = round(ltp - 1.8 * risk_pts, 2)
                 t2_price = round(ltp - 3.2 * risk_pts, 2)
-                if has_real_vwap:
+                if is_donchian_breakout:
+                    headline = f"🛢️ MCX BREAKDOWN: {clean_sym} {chg:.1f}% Breaking 20-bar Low (₹{ltp:,.1f})"
+                    summary = f"Institutional breakdown in {clean_sym}: Trading at ₹{ltp:,.1f} ({chg:.1f}%). 20-bar 5m Donchian low broken below VWAP ₹{vwap:,.1f}."
+                elif has_real_vwap:
                     headline = f"MCX BREAKDOWN: {clean_sym} {chg:.1f}% Lost VWAP (₹{vwap:,.1f})"
                     summary = f"Severe session weakness in {clean_sym}: Trading at ₹{ltp:,.1f} ({chg:.1f}%). Broken below VWAP ₹{vwap:,.1f}."
                 else:
@@ -4378,14 +2946,14 @@ class AutoAlertEngine:
                 sl_price = round(ltp - risk_rupees, 4)
                 t1_price = round(ltp + 1.8 * risk_rupees, 4)
                 t2_price = round(ltp + 3.0 * risk_rupees, 4)
-                headline = f"💱 [REAL/LIVE] CURRENCY BREAKOUT: {clean_sym} +{chg:.2f}% @ ₹{ltp:.4f}"
+                headline = f"💱 CURRENCY BREAKOUT: {clean_sym} +{chg:.2f}% @ ₹{ltp:.4f}"
                 summary = f"Macro currency surge in {clean_sym}: Moving +{chg:.2f}% to ₹{ltp:.4f}. Long thesis active."
                 action = "BUY_FUTURES"
             else:
                 sl_price = round(ltp + risk_rupees, 4)
                 t1_price = round(ltp - 1.8 * risk_rupees, 4)
                 t2_price = round(ltp - 3.0 * risk_rupees, 4)
-                headline = f"💱 [REAL/LIVE] CURRENCY BREAKDOWN: {clean_sym} {chg:.2f}% @ ₹{ltp:.4f}"
+                headline = f"💱 CURRENCY BREAKDOWN: {clean_sym} {chg:.2f}% @ ₹{ltp:.4f}"
                 summary = f"Macro currency drop in {clean_sym}: Moving {chg:.2f}% to ₹{ltp:.4f}. Short thesis active."
                 action = "SELL_SHORT_FUTURES"
 
@@ -4498,9 +3066,11 @@ class AutoAlertEngine:
 
         # 1. Check invalidations on existing alerts first
         self.check_and_alert_invalidations(exchanges=active_exchanges or None)
-        # 2. Check target milestones & trailing stop updates on existing alerts
+        # 2. Check in-flight decay & danger zones on existing alerts
+        self.check_and_alert_in_flight_decay(exchanges=active_exchanges or None)
+        # 3. Check target milestones & trailing stop updates on existing alerts
         self.check_and_alert_targets_and_trailing(exchanges=active_exchanges or None)
-        # 3. Check for fresh market signals
+        # 4. Check for fresh market signals
         return self.scan_fresh_signals_now(segment=segment)
 
     # ── Daemon Thread Poller ────────────────────────────────────
@@ -4552,18 +3122,21 @@ class AutoAlertEngine:
                     and alert_preferences.is_segment_globally_disabled("FNO")
                 ):
                     self.check_and_alert_invalidations(exchanges=["NSE", "BSE", "NFO"])
+                    self.check_and_alert_in_flight_decay(exchanges=["NSE", "BSE", "NFO"])
                     self.check_and_alert_targets_and_trailing(exchanges=["NSE", "BSE", "NFO"])
                     self.scan_equity_nfo_now()
 
                 # Phase 2: Currency Desk (15:30 - 17:00 IST strictly post-equity)
                 if session["currency"] and not alert_preferences.is_segment_globally_disabled("CURRENCY"):
                     self.check_and_alert_invalidations(exchanges=["CDS"])
+                    self.check_and_alert_in_flight_decay(exchanges=["CDS"])
                     self.check_and_alert_targets_and_trailing(exchanges=["CDS"])
                     self.scan_currency_now()
 
                 # Phase 3: MCX Commodities Desk (15:30 - 23:30 IST strictly post-equity)
                 if session["commodity"] and not alert_preferences.is_segment_globally_disabled("COMMODITY"):
                     self.check_and_alert_invalidations(exchanges=["MCX"])
+                    self.check_and_alert_in_flight_decay(exchanges=["MCX"])
                     self.check_and_alert_targets_and_trailing(exchanges=["MCX"])
                     self.scan_commodities_now()
 
@@ -4827,8 +3400,13 @@ class AutoAlertEngine:
         try:
             target_path = get_auto_alerts_file()
             target_path.parent.mkdir(parents=True, exist_ok=True)
-            data = [a.to_dict() for a in self._alerts]
-            target_path.write_text(json.dumps(data, indent=2))
+            with self._lock:
+                data = [a.to_dict() for a in self._alerts]
+            # Atomic persistence: write to sibling PID-tagged temp file then atomic replace
+            payload = json.dumps(data, indent=2)
+            temp_path = target_path.with_name(f"{target_path.name}.tmp.{os.getpid()}")
+            temp_path.write_text(payload, encoding="utf-8")
+            os.replace(temp_path, target_path)
         except Exception as e:
             logger.debug(f"[AutoAlertEngine] _save error: {e}")
 
@@ -4996,7 +3574,22 @@ class AutoAlertEngine:
         try:
             target_path = get_auto_alerts_file()
             if target_path.exists():
-                data = json.loads(target_path.read_text())
+                content = target_path.read_text(encoding="utf-8").strip()
+                if not content:
+                    logger.debug("[AutoAlertEngine] auto_alerts.json is empty; initializing clean state.")
+                    return
+                try:
+                    data = json.loads(content)
+                except Exception as parse_err:
+                    logger.warning(
+                        f"[AutoAlertEngine] Corrupted auto_alerts.json detected ({parse_err}); backing up and initializing clean state."
+                    )
+                    try:
+                        backup_path = target_path.with_name(f"{target_path.name}.corrupt.{int(time.time())}")
+                        os.replace(target_path, backup_path)
+                    except Exception:
+                        pass
+                    return
                 alerts = []
                 seen_ids = set()
                 for d in data:
@@ -5057,6 +3650,7 @@ class AutoAlertEngine:
                                 pnl_pct=d.get("pnl_pct"),
                                 updated_at=d.get("updated_at"),
                                 triggered_at=d.get("triggered_at"),
+                                original_call_time=d.get("original_call_time") or d.get("created_at"),
                             )
                         )
                 # Rehabilitate alerts erroneously invalidated by the inverted Put option stop-loss bug

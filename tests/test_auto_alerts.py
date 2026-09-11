@@ -2764,6 +2764,48 @@ def test_record_alert_adhoc_cli_suppresses_telegram(tmp_path, monkeypatch):
     assert len(dispatched) == 0
 
 
+def test_atomic_persistence_and_corrupt_recovery(tmp_path, monkeypatch):
+    """Verify atomic persistence via temp file replacement and corruption fallback."""
+    from engine.auto_alert_engine import AutoAlertEngine, AutoAlert
+
+    test_file = tmp_path / "auto_alerts.json"
+    monkeypatch.setattr("engine.auto_alert_engine.get_auto_alerts_file", lambda: test_file)
+
+    eng = AutoAlertEngine(max_buffer=50)
+    alert = AutoAlert(
+        alert_id="test-atomic-001",
+        alert_type="SQUEEZE_BREAKOUT",
+        stage="IGNITED",
+        symbol="RELIANCE",
+        exchange="NSE",
+        direction="BULLISH",
+        headline="RELIANCE Squeeze",
+        summary="Test",
+        ltp=2500.0,
+        trigger_level=2480.0,
+        target_level=2600.0,
+        stop_loss=2450.0,
+    )
+    eng._alerts = [alert]
+    eng._save()
+
+    # Verify file was written atomically and is valid JSON
+    assert test_file.exists()
+    import json
+    data = json.loads(test_file.read_text())
+    assert len(data) == 1
+    assert data[0]["alert_id"] == "test-atomic-001"
+
+    # Simulate corrupted file
+    test_file.write_text("{corrupted-json-data!!")
+    eng2 = AutoAlertEngine(max_buffer=50)
+    # Should not crash, and should have backed up corrupted file
+    assert len(eng2._alerts) == 0
+    backups = list(tmp_path.glob("auto_alerts.json.corrupt.*"))
+    assert len(backups) == 1
+
+
+
 
 
 

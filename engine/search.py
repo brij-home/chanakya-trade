@@ -19,6 +19,7 @@ Data is synced from trade_memory on demand (lazy, no background threads).
 from __future__ import annotations
 
 import sqlite3
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -51,25 +52,38 @@ class AnalysisSearch:
     def __init__(self, db_path: Optional[Path] = None) -> None:
         self._db_path = db_path or SEARCH_DB
         self._conn: Optional[sqlite3.Connection] = None
+        self._lock = threading.Lock()
 
     # ── Connection ────────────────────────────────────────────
 
     def _get_conn(self) -> sqlite3.Connection:
-        if self._conn is None:
-            self._db_path.parent.mkdir(parents=True, exist_ok=True)
-            self._conn = sqlite3.connect(str(self._db_path))
-            self._conn.row_factory = sqlite3.Row
-            self._init_schema()
-        return self._conn
+        with self._lock:
+            if self._conn is None:
+                self._db_path.parent.mkdir(parents=True, exist_ok=True)
+                conn = sqlite3.connect(
+                    str(self._db_path),
+                    timeout=30.0,
+                    check_same_thread=False,
+                )
+                conn.row_factory = sqlite3.Row
+                try:
+                    conn.execute("PRAGMA journal_mode=WAL")
+                    conn.execute("PRAGMA synchronous=NORMAL")
+                except Exception:
+                    pass
+                self._conn = conn
+                self._init_schema()
+            return self._conn
 
     def close(self) -> None:
         """Close persistent FTS connection if open."""
-        if self._conn is not None:
-            try:
-                self._conn.close()
-            except Exception:
-                pass
-            self._conn = None
+        with self._lock:
+            if self._conn is not None:
+                try:
+                    self._conn.close()
+                except Exception:
+                    pass
+                self._conn = None
 
     def _init_schema(self) -> None:
         """Create FTS5 virtual table and metadata table if they don't exist."""

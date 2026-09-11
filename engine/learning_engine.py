@@ -165,6 +165,7 @@ class PatternLearningEngine:
         self._outcomes: list[PatternTradeOutcome] = []
         self._post_mortems: list[InvalidationPostMortem] = []
         self._symbol_lockouts: dict[str, dict[str, Any]] = {}
+        self._invalidation_counts: dict[str, int] = {}  # symbol:direction -> count today
         self._factor_weights: dict[str, int] = {
             "volume_dry_up": 25,
             "squeeze_coiling": 20,
@@ -428,26 +429,53 @@ class PatternLearningEngine:
     ) -> dict[str, Any]:
         """
         Places a symbol on negative feedback lockout following an invalidation.
-        Prevents knife-catching and duplicate re-alerts in the same direction,
-        while allowing automatic unlocking upon structural reclaim (e.g. price > reclaim_level and > VWAP).
+        Prevents knife-catching and duplicate re-alerts in the same direction.
+        Implements the Institutional Two-Strike Rule:
+        - 1st failure: 90m adaptive lockout with structural reclaim escape.
+        - 2nd failure today: Hard Session Lockout (8h) with NO premature unlock.
         """
-        clean_sym = symbol.upper().replace(".NS", "").replace("NSE:", "").strip()
+        clean_sym = (
+            symbol.upper()
+            .replace(".NS", "")
+            .replace(".BO", "")
+            .replace("NSE:", "")
+            .replace("BSE:", "")
+            .replace("MCX:", "")
+            .replace("NFO:", "")
+            .strip()
+        )
+        dir_clean = direction.upper()
+        count_key = f"{clean_sym}:{dir_clean}"
+        inv_count = self._invalidation_counts.get(count_key, 0) + 1
+        self._invalidation_counts[count_key] = inv_count
+
+        is_hard_session_lockout = inv_count >= 2
+        if is_hard_session_lockout:
+            duration_seconds = max(duration_seconds, 28800.0)  # 8 hours (rest of session)
+            reason = f"Two-Strike Rule: Repeated invalidation ({inv_count}x today in {dir_clean} direction). Hard session lockout enforced to protect capital."
+
         expires_at = time.time() + duration_seconds
         expiry_dt_str = datetime.fromtimestamp(expires_at, tz=IST).strftime("%H:%M:%S IST")
         lockout = {
             "symbol": clean_sym,
-            "direction": direction.upper(),
+            "direction": dir_clean,
             "locked_at": datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST"),
             "expires_at": expires_at,
             "expires_at_str": expiry_dt_str,
             "duration_minutes": round(duration_seconds / 60, 1),
             "reason": reason,
             "reclaim_level": float(reclaim_level or 0.0),
+            "invalidation_count": inv_count,
+            "is_hard_session_lockout": is_hard_session_lockout,
         }
         self._symbol_lockouts[clean_sym] = lockout
-        reclaim_str = f" | Reclaim Level: ₹{reclaim_level:,.1f}" if reclaim_level > 0 else ""
+        reclaim_str = (
+            f" | Reclaim Level: ₹{reclaim_level:,.1f}"
+            if (reclaim_level > 0 and not is_hard_session_lockout)
+            else " | HARD SESSION LOCKOUT (No reclaim)"
+        )
         logger.info(
-            f"[PatternLearningEngine] Symbol lockout activated for {clean_sym} ({direction}) "
+            f"[PatternLearningEngine] Symbol lockout activated for {clean_sym} ({direction}) [Strike {inv_count}] "
             f"until {expiry_dt_str}{reclaim_str} ({reason})"
         )
         return lockout
@@ -463,11 +491,21 @@ class PatternLearningEngine:
         Returns (True, reason) if symbol is currently locked out from same-direction alerts.
         Automatically purges expired lockouts.
 
-        Adaptive Structural Reclaim:
-        If current LTP reclaims above the breakdown/reclaim level and VWAP,
-        the lockout is automatically lifted early to prevent missing real reversal/spring breakouts!
+        Two-Strike Invariant:
+        If symbol has failed twice in the current session (is_hard_session_lockout = True),
+        structural reclaim is disabled to prevent whipsawing on false bounces.
+        Otherwise, adaptive structural reclaim can lift the lockout early.
         """
-        clean_sym = symbol.upper().replace(".NS", "").replace("NSE:", "").strip()
+        clean_sym = (
+            symbol.upper()
+            .replace(".NS", "")
+            .replace(".BO", "")
+            .replace("NSE:", "")
+            .replace("BSE:", "")
+            .replace("MCX:", "")
+            .replace("NFO:", "")
+            .strip()
+        )
         lockout = self._symbol_lockouts.get(clean_sym)
         if not lockout:
             return False, ""
@@ -481,6 +519,12 @@ class PatternLearningEngine:
         lock_dir = lockout.get("direction", "BULLISH")
         if direction and lock_dir != direction.upper() and direction.upper() != "ALL":
             return False, ""
+
+        # Check Two-Strike Hard Session Lockout:
+        if lockout.get("is_hard_session_lockout", False):
+            mins_left = max(1, int((lockout["expires_at"] - now) / 60))
+            reason = f"{lockout.get('reason', 'Two-strike session lockout')} (Active for next {mins_left}m until {lockout.get('expires_at_str', '')})"
+            return True, reason
 
         # Adaptive Structural Reclaim Check (Wyckoff Spring / Liquidity Sweep Reversal)
         reclaim_lvl = float(lockout.get("reclaim_level") or 0.0)
@@ -507,6 +551,7 @@ class PatternLearningEngine:
         mins_left = max(1, int((lockout["expires_at"] - now) / 60))
         reason = f"{lockout.get('reason', 'Recent invalidation')} (cooldown active for next {mins_left}m until {lockout.get('expires_at_str', '')})"
         return True, reason
+
 
     def clear_symbol_lockout(self, symbol: Optional[str] = None) -> None:
         """Clears lockout for a specific symbol or all symbols."""
@@ -680,15 +725,24 @@ class PatternLearningEngine:
             except Exception:
                 atr = None
 
-        min_noise_sl_pts = round(1.2 * atr, 1) if atr else round(entry_price * 0.012, 1)
+        if is_opt:
+            # Option noise floor: scale underlying ATR by Delta (~0.50), bounded by 8% to 25% of premium
+            if atr and atr > 0:
+                opt_atr_equiv = round(0.50 * 1.2 * atr, 1)
+                min_noise_sl_pts = max(round(entry_price * 0.08, 1), min(round(entry_price * 0.25, 1), opt_atr_equiv))
+            else:
+                min_noise_sl_pts = round(entry_price * 0.12, 1)
+        else:
+            min_noise_sl_pts = round(1.2 * atr, 1) if atr else round(entry_price * 0.012, 1)
+
         actual_sl_pts = round(abs(entry_price - stop_loss), 2) if stop_loss > 0 else 0.0
         metrics_snapshot["stop_distance_pts"] = actual_sl_pts
         metrics_snapshot["min_noise_sl_pts"] = min_noise_sl_pts
 
-        if atr and actual_sl_pts > 0 and actual_sl_pts < min_noise_sl_pts:
+        if actual_sl_pts > 0 and actual_sl_pts < min_noise_sl_pts:
             missed_signals.append(
                 f"Stop-loss buffer ({actual_sl_pts:.1f} pts / {loss_pct:.2f}%) was narrower than volatility noise floor "
-                f"(1.2x ATR = {min_noise_sl_pts:.1f} pts) — vulnerable to ordinary intraday chop"
+                f"({min_noise_sl_pts:.1f} pts) — vulnerable to ordinary intraday chop"
             )
 
         # 3. Forensic Check: Sector RRG Alignment & Institutional Flow
@@ -720,8 +774,46 @@ class PatternLearningEngine:
         except Exception:
             pass
 
+        # 4b. Forensic Check: Session Time Windows (Opening Bell Auction Chop vs Late Session)
+        alert_time_str = str(getattr(alert, "created_at", "") or getattr(alert, "triggered_at", "") or "")
+        is_opening_bell = False
+        is_late_session = False
+        if " " in alert_time_str:
+            try:
+                t_part = alert_time_str.split(" ")[1][:5]
+                hh, mm = map(int, t_part.split(":"))
+                if (hh == 9 and mm < 25) or (hh < 9):
+                    is_opening_bell = True
+                elif (hh == 15 and mm >= 10) or (hh > 15 and getattr(alert, "exchange", "NSE") in ("NSE", "BSE", "NFO")):
+                    is_late_session = True
+            except Exception:
+                pass
+
+        if is_opening_bell:
+            missed_signals.append(
+                "Alert triggered during opening auction discovery window (09:15–09:25 IST) — vulnerable to opening spread noise and unanchored VWAP"
+            )
+        if is_late_session:
+            missed_signals.append(
+                "Alert triggered post-15:10 IST — market MIS square-off active and terminal overnight theta decay accelerated"
+            )
+
+        # 4c. Forensic Check: Repeated Churn Count
+        count_key = f"{clean_sym}:{direction.upper()}"
+        inv_count = self._invalidation_counts.get(count_key, 0)
+        if inv_count >= 2:
+            missed_signals.append(
+                f"Repeated failure ({inv_count}x today): Symbol in choppy sideways range without directional follow-through"
+            )
+
         # 5. Determine Primary Failure Reason
-        if intraday_vwap and exit_price < intraday_vwap and actual_sl_pts < min_noise_sl_pts:
+        if is_opening_bell:
+            primary_reason = "OPENING_BELL_AUCTION_CHOP"
+        elif is_late_session:
+            primary_reason = "LATE_SESSION_EXHAUSTION_THETA_DRAG"
+        elif inv_count >= 2:
+            primary_reason = "CHOPPY_SIDEWAYS_RANGE_TRAP"
+        elif intraday_vwap and exit_price < intraday_vwap and actual_sl_pts < min_noise_sl_pts:
             primary_reason = "PREMATURE_ENTRY_BELOW_VWAP_AND_SUB_ATR_STOP"
         elif intraday_vwap and exit_price < intraday_vwap:
             primary_reason = "PREMATURE_ENTRY_BELOW_VWAP"
@@ -731,6 +823,7 @@ class PatternLearningEngine:
             primary_reason = "SECTOR_ROTATION_DRAG"
         else:
             primary_reason = "STRUCTURAL_ORDERFLOW_FAILURE"
+
 
         # 6. Formulate Institutional Root Cause & Corrective Actions
         first_cues = (

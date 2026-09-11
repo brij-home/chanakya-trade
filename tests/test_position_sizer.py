@@ -23,6 +23,13 @@ class TestLotSizes:
     def test_equity_cash_defaults_to_one(self):
         assert get_lot_size("UNKNOWN_EQUITY") == 1
 
+    def test_option_contracts_resolve_underlying_lot(self):
+        assert get_lot_size("NFO:NIFTY26SEP24000CE") == 65
+        assert get_lot_size("BANKNIFTY26SEP50000PE") == 30
+        assert get_lot_size("FINNIFTY2491723500CE") == 60
+        assert get_lot_size("RELIANCE26SEP3000CE") == 500
+        assert get_lot_size("NFO:RELIANCE26SEPFUT") == 500
+
 
 class TestPositionSizer:
     def test_atr_volatility_sizing(self):

@@ -19,6 +19,7 @@ import hashlib
 import json
 import math
 import sqlite3
+import threading
 import uuid
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
@@ -28,8 +29,12 @@ from typing import Any, Generator, Literal, Optional
 
 from config.paths import app_data_path
 from engine.charges import calculate_transaction_charges
+from engine.db_pool import SQLiteConnectionPool
 from engine.modes import get_trading_mode
 from engine.security_audit import record_audit_event
+
+_ORDERS_POOL: Optional[SQLiteConnectionPool] = None
+_ORDERS_POOL_LOCK = threading.Lock()
 
 
 def _get_db_path() -> Path:
@@ -38,13 +43,34 @@ def _get_db_path() -> Path:
     return p
 
 
+def _get_orders_pool() -> SQLiteConnectionPool:
+    global _ORDERS_POOL
+    current_path = str(_get_db_path())
+    if _ORDERS_POOL is None or _ORDERS_POOL._closed or _ORDERS_POOL.db_path != current_path:
+        with _ORDERS_POOL_LOCK:
+            if _ORDERS_POOL is None or _ORDERS_POOL._closed or _ORDERS_POOL.db_path != current_path:
+                if _ORDERS_POOL and not _ORDERS_POOL._closed:
+                    try:
+                        _ORDERS_POOL.close()
+                    except Exception:
+                        pass
+                _ORDERS_POOL = SQLiteConnectionPool(current_path, max_conns=5)
+    return _ORDERS_POOL
+
+
 @contextmanager
 def _get_orders_db() -> Generator[sqlite3.Connection, None, None]:
-    conn = sqlite3.connect(_get_db_path(), timeout=30.0)
-    try:
+    with _get_orders_pool().acquire() as conn:
         yield conn
-    finally:
-        conn.close()
+
+
+def close_orders_db() -> None:
+    """Close all pooled connections for orders."""
+    global _ORDERS_POOL
+    with _ORDERS_POOL_LOCK:
+        if _ORDERS_POOL is not None:
+            _ORDERS_POOL.close()
+            _ORDERS_POOL = None
 
 
 OrderStatus = Literal[

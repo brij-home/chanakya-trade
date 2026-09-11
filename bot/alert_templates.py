@@ -798,7 +798,12 @@ class MilestoneAlertData:
         ltp = float(getattr(alert, "ltp", 0.0) or 0.0)
         trailing_stop = getattr(alert, "trailing_stop", None)
         target_level = getattr(alert, "target_level", getattr(alert, "target_price", None))
-        created_at = getattr(alert, "created_at", "")
+        # Prefer original_call_time (immutable anchor set at signal creation) over created_at
+        # to ensure "Call Given:" calculates elapsed time correctly on upgraded/ignited alerts
+        created_at = (
+            getattr(alert, "original_call_time", None)
+            or getattr(alert, "created_at", "")
+        )
         alert_id = getattr(alert, "alert_id", getattr(alert, "id", ""))
         direction = getattr(alert, "direction", "BULLISH") or "BULLISH"
         is_bullish = str(direction).upper() in ("BULLISH", "LONG", "BUY")
@@ -984,6 +989,15 @@ class MilestoneAlertData:
             )
         elif milestone_type == "TRAIL_RATCHET":
             default_action = f"UPDATE SL ORDER TO ₹{trailing_stop or 0:,.2f}"
+        elif milestone_type in (
+            "IN_FLIGHT_WARNING",
+            "DANGER_ZONE",
+            "THETA_STAGNATION",
+            "0DTE_AFTERNOON_THETA_CLIFF",
+            "0DTE_INTRADAY_DECAY",
+            "VWAP_BAND_BREAKDOWN",
+        ):
+            default_action = getattr(alert, "trailing_decision", None) or "SCRATCH POSITION AT MARKET OR TIGHTEN STOP"
         else:  # INVALIDATED
             default_action = "CANCEL PENDING ORDERS & CLOSE POSITIONS"
 
@@ -1015,7 +1029,9 @@ class MilestoneAlertData:
             locked_profit_pts=getattr(alert, "locked_profit_pts", None),
             locked_profit_pct=getattr(alert, "locked_profit_pct", None),
             decisive_action=getattr(alert, "trailing_decision", None) or default_action,
-            rationale=getattr(alert, "trailing_rationale", None) or getattr(alert, "summary", ""),
+            rationale=getattr(alert, "in_flight_warning_reason", None)
+            or getattr(alert, "trailing_rationale", None)
+            or getattr(alert, "summary", ""),
             invalidation_reason=getattr(alert, "invalidation_reason", None)
             or getattr(alert, "summary", ""),
             should_trail=getattr(alert, "should_trail", True),
@@ -1385,6 +1401,67 @@ def render_milestone_alert(data: MilestoneAlertData | dict[str, Any], in_market:
             f"{footer_line}"
         )
 
+    if d.milestone_type in (
+        "IN_FLIGHT_WARNING",
+        "DANGER_ZONE",
+        "THETA_STAGNATION",
+        "0DTE_AFTERNOON_THETA_CLIFF",
+        "0DTE_INTRADAY_DECAY",
+        "VWAP_BAND_BREAKDOWN",
+    ):
+        plan_parts = []
+        if d.entry_price:
+            plan_parts.append(f"Entry: ₹{d.entry_price:,.2f}")
+        elif d.entry_range:
+            plan_parts.append(f"Entry: {d.entry_range}")
+        if d.initial_sl:
+            plan_parts.append(f"SL: ₹{d.initial_sl:,.2f}")
+        orig_plan_line = f"\n🎯 <b>Original Plan:</b> {' | '.join(plan_parts)}" if plan_parts else ""
+
+        move_str = ""
+        if d.pnl_pts is not None and d.pnl_pct is not None:
+            sign = "+" if d.pnl_pts >= 0 else ""
+            r_str = f" | {sign}{d.r_multiple}R" if d.r_multiple is not None else ""
+            move_str = f" · 📉 <b>P&L:</b> <b>{sign}₹{d.pnl_pts:,.2f} ({sign}{d.pnl_pct:.1f}%{r_str})</b>"
+
+        m_type_upper = d.milestone_type.upper()
+        diag_upper = str(d.rationale or "").upper()
+        is_vwap = "VWAP" in m_type_upper or "VWAP" in diag_upper
+        is_cliff = "CLIFF" in m_type_upper or "CLIFF" in diag_upper
+        is_0dte = is_cliff or "0DTE" in m_type_upper or "0DTE" in diag_upper
+        is_theta = is_0dte or "THETA" in m_type_upper or "THETA" in diag_upper
+
+        if is_vwap:
+            header_icon = "🌊"
+            title_tag = "VWAP BAND WARNING"
+            default_act = "SCRATCH POSITION AT MARKET OR TIGHTEN STOP TO VWAP BAND"
+        elif is_cliff:
+            header_icon = "⏳"
+            title_tag = "0DTE THETA CLIFF WARNING"
+            default_act = "EXIT 0DTE OPTION IMMEDIATELY TO AVOID PIN-RISK DECAY"
+        elif is_theta:
+            header_icon = "⏳"
+            title_tag = "THETA DECAY WARNING"
+            default_act = "EXIT / SCRATCH STAGNANT OPTION BEFORE FURTHER DECAY"
+        else:
+            header_icon = "⚠️"
+            title_tag = "IN-FLIGHT DANGER WARNING"
+            default_act = "SCRATCH POSITION AT MARKET OR TIGHTEN STOP"
+
+        diag = d.rationale or d.invalidation_reason or "Risk budget eroding near stop-loss"
+        decisive_act = d.decisive_action or default_act
+
+        return (
+            f"{header_icon} <b>{env_tag} {title_tag}</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"🚨 <b>{contract_title} ({d.alert_type}) — ACTION REQUIRED</b>\n"
+            f"💰 <b>{cmp_label}:</b> ₹{d.ltp:,.2f}{move_str}\n"
+            f"⚠️ <b>Diagnosis:</b> {diag}\n"
+            f"⚡ <b>DECISIVE ACTION:</b> <code>{decisive_act}</code>"
+            f"{orig_plan_line}"
+            f"{footer_line}"
+        )
+
     if d.milestone_type == "TARGET_1":
         if d.trailing_stop is not None:
             ts_val = d.trailing_stop
@@ -1522,11 +1599,33 @@ def render_price_alert(
     )
 
 
+def render_in_flight_warning_alert(alert: Any, in_market: bool = True) -> str:
+    """
+    Renders a high-priority In-Flight Warning / Theta Decay alert for Telegram.
+    Provides proactive risk coaching (scratch at breakeven or tighten stop)
+    before an active position turns into a maximum loss.
+    """
+    diag = getattr(alert, "in_flight_warning_reason", "") or getattr(alert, "summary", "")
+    diag_upper = str(diag).upper()
+    if "VWAP" in diag_upper:
+        m_type = "VWAP_BAND_BREAKDOWN"
+    elif "CLIFF" in diag_upper or ("0DTE" in diag_upper and "AFTERNOON" in diag_upper):
+        m_type = "0DTE_AFTERNOON_THETA_CLIFF"
+    elif "0DTE" in diag_upper:
+        m_type = "0DTE_INTRADAY_DECAY"
+    elif "THETA" in diag_upper:
+        m_type = "THETA_STAGNATION"
+    else:
+        m_type = "IN_FLIGHT_WARNING"
+    data = MilestoneAlertData.from_alert(alert, m_type, in_market=in_market)
+    return render_milestone_alert(data, in_market=in_market)
+
+
 def render_auto_alert(alert: Any, in_market: bool = True) -> str:
     """
     Renders an AutoAlert instance into a crisp, standardized Telegram message.
     Handles Invalidation, Target 1, Final Target, Trail Ratchet, Precursor, Asymmetric,
-    Options contracts (GAMMA_BLAST), and Equity trade plans.
+    Options contracts (GAMMA_BLAST), Equity trade plans, and In-Flight Decay warnings.
     """
     is_test = (getattr(alert, "environment", "LIVE") == "TEST") or (
         not getattr(alert, "is_live", True)
@@ -1539,6 +1638,10 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
             MilestoneAlertData.from_alert(alert, "INVALIDATED", in_market=in_market),
             in_market=in_market,
         )
+
+    # 1b. In-Flight Decay & Danger Zone Warning
+    if getattr(alert, "stage", "") == "IN_FLIGHT_WARNING":
+        return render_in_flight_warning_alert(alert, in_market=in_market)
 
     # 2. Target 1
     is_t1 = "T1" in (getattr(alert, "target_status", "") or "") or getattr(
@@ -1709,12 +1812,29 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
             mins_left = max(1, 30 - now_dt.minute)
             session_clock_warn = f"\n• ⚠️ <i>Market closes in {mins_left}m. Intraday MIS closed — Overnight Hold (NRML) or Next-Session Gameplan.</i>"
 
+        spot_anchor = (
+            actionable_plan.get("spot_invalidation_anchor")
+            or (
+                alert.metrics.get("spot_invalidation_anchor")
+                if isinstance(getattr(alert, "metrics", None), dict)
+                else None
+            )
+        )
+        spot_anchor_str = (
+            f" (Spot Anchor: <code>{spot_anchor}</code>)"
+            if spot_anchor and str(spot_anchor) not in str(sl)
+            else ""
+        )
+        profit_rule = actionable_plan.get("profit_rule")
+        rule_str = f"\n• <b>Playbook:</b> <i>{profit_rule}</i>" if profit_rule else ""
+
         plan_str = (
             f"{exp_line}"
             f"• <b>Action:</b> {act} <b>{inst}</b> @ <code>{entry}</code>{opt_cmp_str}{spot_ref}\n"
-            f"• <b>Invalidation SL:</b> <code>{sl}</code>\n"
+            f"• <b>Invalidation SL:</b> <code>{sl}</code>{spot_anchor_str}\n"
             f"• <b>Target:</b> <code>{tgt}</code>{tgt2_str}\n"
             f"• <b>R:R Expectancy:</b> <b>{rr}</b>"
+            f"{rule_str}"
             f"{wait_str}"
             f"{warn_str}"
             f"{session_clock_warn}"
@@ -1911,11 +2031,35 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
         )
         hl_line = f"<b>{clean_hl}</b>{spot_bar}{opt_bar}" if clean_hl else f"<b>{alert.symbol}</b>"
     else:
-        spot_bar = (
-            f" · Spot CMP: <b>₹{alert.ltp:,.2f}</b>"
-            if (alert.ltp and f"₹{alert.ltp}" not in clean_hl and f"₹{alert.ltp:,.1f}" not in clean_hl and f"₹{alert.ltp:,.2f}" not in clean_hl and "Spot CMP:" not in clean_hl)
-            else ""
+        is_curr = (
+            getattr(alert, "exchange", "") == "CDS"
+            or getattr(alert, "segment", "") == "CURRENCY"
+            or getattr(alert, "alert_type", "") in ("CURRENCY_BREAKOUT", "CURRENCY_BREAKDOWN")
         )
+        is_comm = (
+            getattr(alert, "exchange", "") == "MCX"
+            or getattr(alert, "segment", "") == "COMMODITY"
+            or getattr(alert, "alert_type", "") == "COMMODITY_MOMENTUM"
+        )
+        if is_curr:
+            # Currency pair CMP with 4 decimal places
+            spot_bar = (
+                f" · Pair CMP: <b>₹{alert.ltp:.4f}</b>"
+                if (alert.ltp and f"₹{alert.ltp:.4f}" not in clean_hl and "CMP:" not in clean_hl)
+                else ""
+            )
+        elif is_comm:
+            spot_bar = (
+                f" · CMP: <b>₹{alert.ltp:,.2f}</b>"
+                if (alert.ltp and f"₹{alert.ltp:,.2f}" not in clean_hl and f"₹{alert.ltp:,.1f}" not in clean_hl and "CMP:" not in clean_hl)
+                else ""
+            )
+        else:
+            spot_bar = (
+                f" · Spot CMP: <b>₹{alert.ltp:,.2f}</b>"
+                if (alert.ltp and f"₹{alert.ltp}" not in clean_hl and f"₹{alert.ltp:,.1f}" not in clean_hl and f"₹{alert.ltp:,.2f}" not in clean_hl and "Spot CMP:" not in clean_hl)
+                else ""
+            )
         hl_line = f"<b>{clean_hl}</b>{spot_bar}" if clean_hl else f"<b>{alert.symbol}</b>"
 
     lines = [

@@ -299,34 +299,62 @@ _F_AND_O_LOT_SIZES: dict[str, int] = {
 }
 
 
-def is_fno_symbol(symbol: str) -> bool:
-    """Return True if symbol is traded in the F&O derivatives segment."""
+_SORTED_FNO_KEYS: list[str] = sorted(_F_AND_O_LOT_SIZES.keys(), key=len, reverse=True)
+
+
+def extract_underlying_symbol(symbol: str) -> Optional[str]:
+    """Extract the base underlying ticker from a cash or derivative symbol."""
+    if not symbol:
+        return None
     clean = (
-        symbol.upper()
+        str(symbol)
+        .upper()
         .replace(".NS", "")
         .replace("NSE:", "")
         .replace("NFO:", "")
         .replace("BSE:", "")
+        .replace("BFO:", "")
         .replace("MCX:", "")
         .replace("CDS:", "")
         .strip()
     )
-    return clean in _F_AND_O_LOT_SIZES
+    if clean in _F_AND_O_LOT_SIZES:
+        return clean
+    import re
+    for k in _SORTED_FNO_KEYS:
+        if clean.startswith(k):
+            rest = clean[len(k):]
+            if re.match(r"^\d{2}[A-Z\d]+", rest) or rest.endswith(("CE", "PE", "FUT")):
+                return k
+    return None
+
+
+def is_fno_symbol(symbol: str) -> bool:
+    """Return True if symbol is traded in the F&O derivatives segment."""
+    if not symbol:
+        return False
+    return extract_underlying_symbol(symbol) is not None
 
 
 def get_lot_size(symbol: str) -> int:
-    """Get the standard lot size for a stock/index/future (1 for cash equity)."""
-    clean = (
-        symbol.upper()
-        .replace(".NS", "")
-        .replace("NSE:", "")
-        .replace("NFO:", "")
-        .replace("BSE:", "")
-        .replace("MCX:", "")
-        .replace("CDS:", "")
-        .strip()
-    )
-    return _F_AND_O_LOT_SIZES.get(clean, 1)
+    """Get the standard lot size for a stock/index/future/option (1 for cash equity)."""
+    if not symbol:
+        return 1
+    # 1. Check verified contract master first if available
+    try:
+        from market.instrument_master import get_verified_contract
+        vc = get_verified_contract(symbol)
+        if vc and int(vc.get("lot_size", 0)) > 0:
+            return int(vc["lot_size"])
+    except Exception:
+        pass
+
+    # 2. Extract underlying and resolve from canonical lot sizes
+    und = extract_underlying_symbol(symbol)
+    if und and und in _F_AND_O_LOT_SIZES:
+        return _F_AND_O_LOT_SIZES[und]
+
+    return 1
 
 
 def calculate_position_size(
@@ -342,6 +370,7 @@ def calculate_position_size(
     win_rate: float = 0.55,
     profit_factor: float = 1.8,
     is_fno: bool = False,
+    vix: Optional[float] = None,
 ) -> PositionSizeResult:
     """
     Calculate optimal position size based on institutional risk parameters.
@@ -359,6 +388,7 @@ def calculate_position_size(
         win_rate: Historical win rate for Kelly calculation
         profit_factor: Historical win/loss ratio for Kelly calculation
         is_fno: True if trading F&O derivative contracts with lot multipliers
+        vix: Current India VIX level for dynamic regime-adaptive risk scaling
     """
     clean_sym = symbol.upper().replace(".NS", "").replace("NSE:", "").strip()
 
@@ -385,15 +415,26 @@ def calculate_position_size(
 
     r_multiple = (target_price - entry_price) / stop_distance if stop_distance > 0 else 2.0
 
+    # India VIX Volatility Regime Scaling
+    effective_risk_pct = max_risk_pct
+    vix_note = ""
+    if vix is not None and vix > 0:
+        if vix >= 25.0:
+            effective_risk_pct = round(max_risk_pct * 0.50, 2)  # Cut risk in half during extreme turbulence
+            vix_note = f" [VIX={vix:.1f} EXTREME: Risk scaled down 50% to {effective_risk_pct}%]"
+        elif vix >= 18.0:
+            effective_risk_pct = round(max_risk_pct * 0.70, 2)  # Scale down 30% during elevated volatility
+            vix_note = f" [VIX={vix:.1f} ELEVATED: Risk scaled down 30% to {effective_risk_pct}%]"
+
     # Dollar risk budget
-    risk_budget = capital * (max_risk_pct / 100.0)
+    risk_budget = capital * (effective_risk_pct / 100.0)
 
     # 1. Compute Raw Shares based on chosen model
     if sizing_model == "atr_volatility":
         effective_atr = atr if atr and atr > 0 else (stop_distance * 0.8)
         vol_stop = max(stop_distance, effective_atr * 1.5)
         raw_shares = int(risk_budget / vol_stop)
-        notes = f"Sized using ATR Volatility Parity ({vol_stop:.1f} pts risk per share)."
+        notes = f"Sized using ATR Volatility Parity ({vol_stop:.1f} pts risk per share).{vix_note}"
 
     elif sizing_model == "half_kelly":
         b = max(1.0, profit_factor)
@@ -403,12 +444,12 @@ def calculate_position_size(
         half_kelly_frac = max(0.02, min(cap_fraction, full_kelly * 0.5))
         allocated = capital * half_kelly_frac
         raw_shares = int(allocated / entry_price)
-        notes = f"Sized via Half-Kelly ({half_kelly_frac * 100:.1f}% capital allocation for {p * 100:.0f}% win-rate)."
+        notes = f"Sized via Half-Kelly ({half_kelly_frac * 100:.1f}% capital allocation for {p * 100:.0f}% win-rate).{vix_note}"
 
     else:  # fixed_fractional
         raw_shares = int(risk_budget / stop_distance)
         notes = (
-            f"Sized strictly on stop distance ({stop_distance:.2f} pts) at {max_risk_pct}% risk."
+            f"Sized strictly on stop distance ({stop_distance:.2f} pts) at {effective_risk_pct}% risk.{vix_note}"
         )
 
     # 2. Apply Capital Ceiling if configured

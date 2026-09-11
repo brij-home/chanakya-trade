@@ -287,11 +287,13 @@ class AlertPreferences:
                 or "-1004380788314"
             )
         if seg in ("FNO", "FNO_STOCK", "STOCK_FNO", "FNO_STOCKS"):
+            # FNO_STOCK (stock options/futures like RELIANCE CE, SBIN PE):
+            # Target: Premium_Alpha_Vortex_FnO_Channel (-1004393392375)
             return (
                 self.fno_chat_id
                 or os.environ.get("TELEGRAM_FNO_CHAT_ID", "").strip()
                 or os.environ.get("TELEGRAM_CHANNEL_ID", "").strip()
-                or None
+                or "-1004393392375"  # Premium_Alpha_Vortex_FnO_Channel canonical fallback
             )
         if seg in ("MCX", "COMMODITY", "CURRENCY", "CDS"):
             return (
@@ -317,7 +319,7 @@ class AlertPreferences:
             "fno_chat_id": (
                 self.fno_chat_id
                 or os.environ.get("TELEGRAM_FNO_CHAT_ID", "").strip()
-                or None
+                or "-1004393392375"
             ),
             "fno_index_chat_id": (
                 self.fno_index_chat_id
