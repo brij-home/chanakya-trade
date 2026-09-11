@@ -1549,6 +1549,7 @@ def test_options_momentum_scanner_recording(tmp_path, monkeypatch):
 
     engine = AutoAlertEngine(max_buffer=50)
     monkeypatch.setattr(engine, "_watched_indices", ["NIFTY"])
+    monkeypatch.setattr(engine, "watched_equities", [])
 
     alerts = engine.scan_options_momentum_breakouts()
     assert len(alerts) >= 1
@@ -1559,6 +1560,11 @@ def test_options_momentum_scanner_recording(tmp_path, monkeypatch):
     assert top_alert.option_type in ("CE", "PE")
     assert top_alert.contract_symbol is not None
     assert top_alert.actionable_plan["contract"] == top_alert.contract_symbol
+    assert "when_to_wait" in top_alert.actionable_plan
+    assert "DO NOT CHASE" in top_alert.actionable_plan["when_to_wait"]
+    assert top_alert.stop_loss > 0
+    # Defined risk stop must be tight (<= 15% risk instead of arbitrary 25%)
+    assert (top_alert.ltp - top_alert.stop_loss) / top_alert.ltp <= 0.16
 
 
 def test_gamma_blast_rejects_illiquid_strike_and_distant_expiry():
@@ -1785,7 +1791,7 @@ def test_scan_options_momentum_monthly_put_surge(tmp_path, monkeypatch):
 
     eng = AutoAlertEngine()
     eng._watched_indices = []
-    eng._watched_equities = ["DIXON"]
+    monkeypatch.setattr(eng, "watched_equities", ["DIXON"])
 
     # DIXON spot = 13500, chain has 13500 PE with Vol/OI = 2.5x, expiry in 19 days
     mock_contract = MockOptionsContract(
@@ -2086,4 +2092,601 @@ async def test_send_alert_to_telegram_endpoint(monkeypatch, tmp_path):
     with pytest.raises(HTTPException) as exc_info:
         await send_alert_to_telegram({"alert_id": "tg-test-alert-001"})
     assert exc_info.value.status_code == 503
+
+
+def test_options_target_1_and_target_2_keys_parsed_correctly():
+    """Verify that evaluate_alert_targets_and_trailing parses 'target' as T1 and 'target_2' as T2."""
+    alert = AutoAlert(
+        alert_id="opt-keys-test-1",
+        alert_type="OPTIONS_MOMENTUM",
+        stage="ACTIVE",
+        symbol="NIFTY",
+        exchange="NFO",
+        direction="BEARISH",
+        headline="NIFTY 23100 PE",
+        summary="Put momentum",
+        ltp=30.55,
+        trigger_level=30.55,
+        target_level=45.80,
+        stop_loss=22.90,
+        strike=23100.0,
+        option_type="PE",
+        contract_symbol="NIFTY23100PE",
+        option_premium=30.55,
+        actionable_plan={
+            "action": "BUY PE",
+            "recommended_entry": "₹30.55",
+            "stop_loss": "₹22.90",
+            "target": "₹45.80",
+            "target_2": "₹57.30",
+        },
+    )
+
+    # Below Target 1 (e.g. 40.00): MUST NOT trigger T1_ACHIEVED
+    res_sub = evaluate_alert_targets_and_trailing(alert, current_ltp=40.00)
+    assert res_sub is None or res_sub.new_milestone is None
+
+    # At Target 1 (45.80): MUST trigger T1_ACHIEVED with breakeven stop at 30.61
+    res_t1 = evaluate_alert_targets_and_trailing(alert, current_ltp=45.80)
+    assert res_t1 is not None
+    assert res_t1.new_milestone == "T1_ACHIEVED"
+    assert res_t1.recommended_stop == 30.61
+
+
+def test_no_target_milestone_when_in_loss():
+    """Verify that an alert in a loss (LTP < Entry for buyers) CAN NEVER trigger Target 1 or Final Target."""
+    alert = AutoAlert(
+        alert_id="opt-loss-guard-test",
+        alert_type="OPTIONS_MOMENTUM",
+        stage="ACTIVE",
+        symbol="NIFTY",
+        exchange="NFO",
+        direction="BEARISH",  # Put option buyer
+        headline="NIFTY 23100 PE",
+        summary="Put momentum",
+        ltp=28.85,
+        trigger_level=30.55,
+        target_level=45.80,
+        stop_loss=22.90,
+        strike=23100.0,
+        option_type="PE",
+        contract_symbol="NIFTY23100PE",
+        option_premium=18.25,  # Even if option_premium was corrupted to a lower number!
+        actionable_plan={
+            "action": "BUY PE",
+            "recommended_entry": "₹30.55",
+            "stop_loss": "₹22.90",
+            "target": "₹45.80",
+            "target_2": "₹57.30",
+        },
+    )
+
+    # Current LTP is 28.85 (below entry 30.55) -> MUST NEVER trigger any target milestone!
+    res = evaluate_alert_targets_and_trailing(alert, current_ltp=28.85)
+    assert res is None or res.new_milestone is None, f"Expected no milestone, got {res.new_milestone if res else None}"
+
+
+def test_record_alert_active_trade_immutable(tmp_path, monkeypatch):
+    """Verify that an active in-flight trade cannot have its contract or strike mutated mid-flight."""
+    data_file = tmp_path / "auto_alerts.json"
+    monkeypatch.setattr("engine.auto_alert_engine.get_auto_alerts_file", lambda: data_file)
+    monkeypatch.setattr("engine.auto_alert_engine.AutoAlertEngine._dispatch", lambda self, a: None)
+
+    engine = AutoAlertEngine(max_buffer=20)
+    engine.clear_alerts()
+
+    initial_alert = AutoAlert(
+        alert_id="aa-optmom-pe-NIFTY-23000-active",
+        alert_type="OPTIONS_MOMENTUM",
+        stage="IGNITED",  # Live trade active
+        symbol="NIFTY",
+        exchange="NFO",
+        direction="BEARISH",
+        headline="NIFTY 23000 PE Ignited",
+        summary="Active trade",
+        ltp=18.25,
+        trigger_level=18.25,
+        target_level=27.40,
+        stop_loss=13.70,
+        strike=23000.0,
+        option_type="PE",
+        contract_symbol="NIFTY23000PE",
+        option_premium=18.25,
+        is_live=True,
+        environment="LIVE",
+        metrics={"vol_oi_ratio": 5.0, "oi": 25000},
+    )
+    recorded = engine.record_alert(initial_alert)
+    assert recorded is True
+
+    # Now an incoming scan for 23100 PE appears with higher volume
+    alternate_alert = AutoAlert(
+        alert_id="aa-optmom-pe-NIFTY-23100-new",
+        alert_type="OPTIONS_MOMENTUM",
+        stage="IGNITED",
+        symbol="NIFTY",
+        exchange="NFO",
+        direction="BEARISH",
+        headline="NIFTY 23100 PE Ignited",
+        summary="New strike",
+        ltp=30.55,
+        trigger_level=30.55,
+        target_level=45.80,
+        stop_loss=22.90,
+        strike=23100.0,
+        option_type="PE",
+        contract_symbol="NIFTY23100PE",
+        option_premium=30.55,
+        confidence=95,  # higher confidence
+        is_live=True,
+        environment="LIVE",
+        metrics={"vol_oi_ratio": 15.0, "oi": 30000},
+    )
+    result = engine.record_alert(alternate_alert)
+    assert result is False  # Suppressed
+
+    # Verify that initial active alert remains 23000 PE, NOT mutated to 23100 PE!
+    active_alerts = engine.get_alerts()
+    nifty_alert = next(a for a in active_alerts if a.symbol == "NIFTY")
+    assert nifty_alert.contract_symbol == "NIFTY23000PE"
+    assert nifty_alert.strike == 23000.0
+    assert nifty_alert.option_premium == 18.25
+
+
+def test_early_warning_session_expiry():
+    """Verify that un-ignited EARLY_WARNING setups expire across day boundaries."""
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+    ist = ZoneInfo("Asia/Kolkata")
+    yesterday = datetime.now(ist) - timedelta(days=1)
+    yesterday_str = yesterday.strftime("%Y-%m-%d %H:%M:%S IST")
+
+    # 1. EARLY_WARNING from yesterday MUST be expired
+    coiling_alert = AutoAlert(
+        alert_id="aa-test-coiling-old",
+        alert_type="OPTIONS_MOMENTUM",
+        stage="EARLY_WARNING",
+        symbol="HDFCBANK",
+        exchange="NFO",
+        direction="BULLISH",
+        headline="Coiling",
+        summary="Setup coiling",
+        ltp=20.0,
+        trigger_level=20.0,
+        target_level=30.0,
+        stop_loss=15.0,
+        contract_symbol="HDFCBANK680CE",
+        created_at=yesterday_str,
+    )
+    assert coiling_alert.is_expired is True
+    assert coiling_alert.is_active is False
+
+    # 2. Live IGNITED trade from yesterday does NOT expire solely due to day boundary
+    ignited_alert = AutoAlert(
+        alert_id="aa-test-ignited-old",
+        alert_type="OPTIONS_MOMENTUM",
+        stage="IGNITED",
+        symbol="HDFCBANK",
+        exchange="NFO",
+        direction="BULLISH",
+        headline="Ignited",
+        summary="Active position",
+        ltp=20.0,
+        trigger_level=20.0,
+        target_level=30.0,
+        stop_loss=15.0,
+        contract_symbol="HDFCBANK680CE",
+        created_at=yesterday_str,
+    )
+    assert ignited_alert.is_expired is False
+    assert ignited_alert.is_active is True
+
+
+def test_alert_ignition_refreshes_timestamp_and_premium(tmp_path, monkeypatch):
+    """Verify that when an EARLY_WARNING is upgraded to IGNITED, timestamp, premium, and signal_ref are refreshed."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    ist = ZoneInfo("Asia/Kolkata")
+    now_str = datetime.now(ist).strftime("%Y-%m-%d %H:%M:%S IST")
+
+    data_file = tmp_path / "auto_alerts.json"
+    monkeypatch.setattr("engine.auto_alert_engine.get_auto_alerts_file", lambda: data_file)
+    monkeypatch.setattr("engine.auto_alert_engine.AutoAlertEngine._dispatch", lambda self, a: None)
+    engine = AutoAlertEngine(max_buffer=20)
+    engine.clear_alerts()
+
+    # 1. Record EARLY_WARNING coiling setup
+    early_alert = AutoAlert(
+        alert_id="aa-optmom-ce-HDFCBANK-680-coiling",
+        alert_type="OPTIONS_MOMENTUM",
+        stage="EARLY_WARNING",
+        symbol="HDFCBANK",
+        exchange="NFO",
+        direction="BULLISH",
+        headline="HDFCBANK Coiling @ ₹24.7",
+        summary="Coiling setup",
+        ltp=24.70,
+        trigger_level=24.70,
+        target_level=35.0,
+        stop_loss=18.0,
+        strike=680.0,
+        option_type="CE",
+        contract_symbol="HDFCBANK680CE",
+        option_premium=24.70,
+        created_at="2026-09-11 10:00:00 IST",
+        signal_ref="#SIG_HDFCBANK_680CE_11SEP_1000",
+    )
+    engine.record_alert(early_alert)
+
+    # 2. Breakout occurs: record IGNITED alert for same contract with new market conditions
+    ignite_alert = AutoAlert(
+        alert_id="aa-optmom-ce-HDFCBANK-680-ignite",
+        alert_type="OPTIONS_MOMENTUM",
+        stage="IGNITED",
+        symbol="HDFCBANK",
+        exchange="NFO",
+        direction="BULLISH",
+        headline="HDFCBANK Ignited @ ₹22.1",
+        summary="Ignition breakout",
+        ltp=22.10,
+        trigger_level=22.10,
+        target_level=33.2,
+        stop_loss=16.6,
+        strike=680.0,
+        option_type="CE",
+        contract_symbol="HDFCBANK680CE",
+        option_premium=22.10,
+        underlying_spot=693.80,
+        created_at=now_str,
+    )
+    recorded = engine.record_alert(ignite_alert)
+    assert recorded is True
+
+    # 3. Verify upgraded alert has active stage, updated premium, and fresh signal_ref
+    alerts = engine.get_alerts()
+    upgraded = next(a for a in alerts if a.symbol == "HDFCBANK")
+    assert upgraded.stage == "IGNITED"
+    assert upgraded.option_premium == 22.10
+    assert upgraded.ltp == 22.10
+    assert upgraded.underlying_spot == 693.80
+    assert upgraded.triggered_at is not None
+    assert upgraded.signal_ref != "#SIG_HDFCBANK_680CE_11SEP_1000"
+
+
+def test_symbol_consolidation_respects_session_date(tmp_path, monkeypatch):
+    """Verify that prior-day options alerts do not block today's fresh alerts for the same underlying."""
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+    ist = ZoneInfo("Asia/Kolkata")
+    yesterday = datetime.now(ist) - timedelta(days=1)
+    yesterday_str = yesterday.strftime("%Y-%m-%d %H:%M:%S IST")
+    now_str = datetime.now(ist).strftime("%Y-%m-%d %H:%M:%S IST")
+
+    data_file = tmp_path / "auto_alerts.json"
+    monkeypatch.setattr("engine.auto_alert_engine.get_auto_alerts_file", lambda: data_file)
+    monkeypatch.setattr("engine.auto_alert_engine.AutoAlertEngine._dispatch", lambda self, a: None)
+    engine = AutoAlertEngine(max_buffer=20)
+    engine.clear_alerts()
+
+    # Yesterday's active trade
+    yest_alert = AutoAlert(
+        alert_id="aa-optmom-ce-HDFCBANK-690-old",
+        alert_type="OPTIONS_MOMENTUM",
+        stage="IGNITED",
+        symbol="HDFCBANK",
+        exchange="NFO",
+        direction="BULLISH",
+        headline="HDFCBANK 690 CE Yesterday",
+        summary="Yesterday trade",
+        ltp=20.7,
+        trigger_level=20.7,
+        target_level=31.0,
+        stop_loss=15.5,
+        strike=690.0,
+        option_type="CE",
+        contract_symbol="HDFCBANK690CE",
+        option_premium=20.7,
+        created_at=yesterday_str,
+    )
+    engine.record_alert(yest_alert)
+
+    # Today's fresh trade for HDFCBANK (different strike or same)
+    today_alert = AutoAlert(
+        alert_id="aa-optmom-ce-HDFCBANK-680-today",
+        alert_type="OPTIONS_MOMENTUM",
+        stage="IGNITED",
+        symbol="HDFCBANK",
+        exchange="NFO",
+        direction="BULLISH",
+        headline="HDFCBANK 680 CE Today",
+        summary="Today trade",
+        ltp=22.1,
+        trigger_level=22.1,
+        target_level=33.2,
+        stop_loss=16.6,
+        strike=680.0,
+        option_type="CE",
+        contract_symbol="HDFCBANK680CE",
+        option_premium=22.1,
+        created_at=now_str,
+    )
+    recorded = engine.record_alert(today_alert)
+    assert recorded is True
+
+    # Yesterday's alert must be expired/retired
+    assert yest_alert.is_expired is True
+    # Today's alert must be the active alert for HDFCBANK
+    active = engine.get_alerts()
+    active_hdfc = [a for a in active if a.symbol == "HDFCBANK"]
+    assert len(active_hdfc) == 1
+    assert active_hdfc[0].contract_symbol == "HDFCBANK680CE"
+
+
+def test_underlying_directional_cooldown_suppresses_duplicate(tmp_path, monkeypatch):
+    """Verify that an active trade on an underlying suppresses redundant same-direction alerts within cooldown window."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    ist = ZoneInfo("Asia/Kolkata")
+    now_str = datetime.now(ist).strftime("%Y-%m-%d %H:%M:%S IST")
+
+    data_file = tmp_path / "auto_alerts.json"
+    monkeypatch.setattr("engine.auto_alert_engine.get_auto_alerts_file", lambda: data_file)
+    monkeypatch.setattr("engine.auto_alert_engine.AutoAlertEngine._dispatch", lambda self, a: None)
+    engine = AutoAlertEngine(max_buffer=20)
+    engine.clear_alerts()
+
+    # 1. First alert: Breakout long on RELIANCE
+    alert1 = AutoAlert(
+        alert_id="aa-rel-breakout",
+        alert_type="BREAKOUT",
+        stage="IGNITED",
+        symbol="RELIANCE",
+        exchange="NSE",
+        direction="BULLISH",
+        headline="RELIANCE Breakout",
+        summary="Volume breakout above resistance",
+        ltp=2950.0,
+        trigger_level=2950.0,
+        target_level=3050.0,
+        stop_loss=2900.0,
+        created_at=now_str,
+    )
+    rec1 = engine.record_alert(alert1)
+    assert rec1 is True
+
+    # 2. Second alert: Squeeze Breakout long on RELIANCE 1 minute later
+    alert2 = AutoAlert(
+        alert_id="aa-rel-squeeze",
+        alert_type="SQUEEZE_BREAKOUT",
+        stage="IGNITED",
+        symbol="RELIANCE",
+        exchange="NSE",
+        direction="BULLISH",
+        headline="RELIANCE Squeeze Expansion",
+        summary="Bollinger Band squeeze firing long",
+        ltp=2955.0,
+        trigger_level=2955.0,
+        target_level=3050.0,
+        stop_loss=2905.0,
+        created_at=now_str,
+    )
+    rec2 = engine.record_alert(alert2)
+    assert rec2 is False  # Suppressed by underlying directional anti-spam cooldown!
+
+
+def test_gamma_blast_and_options_momentum_unified_consolidation(tmp_path, monkeypatch):
+    """Verify OPTIONS_MOMENTUM and GAMMA_BLAST consolidate into the active trade instead of firing duplicate cards."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    ist = ZoneInfo("Asia/Kolkata")
+    now_str = datetime.now(ist).strftime("%Y-%m-%d %H:%M:%S IST")
+
+    data_file = tmp_path / "auto_alerts.json"
+    monkeypatch.setattr("engine.auto_alert_engine.get_auto_alerts_file", lambda: data_file)
+    monkeypatch.setattr("engine.auto_alert_engine.AutoAlertEngine._dispatch", lambda self, a: None)
+    engine = AutoAlertEngine(max_buffer=20)
+    engine.clear_alerts()
+
+    # Active OPTIONS_MOMENTUM trade on HDFCBANK 680 CE
+    optmom = AutoAlert(
+        alert_id="aa-optmom-hdfc",
+        alert_type="OPTIONS_MOMENTUM",
+        stage="IGNITED",
+        symbol="HDFCBANK",
+        exchange="NFO",
+        direction="BULLISH",
+        headline="HDFCBANK 680 CE Ignited",
+        summary="Options momentum",
+        ltp=22.1,
+        trigger_level=22.1,
+        target_level=33.2,
+        stop_loss=16.6,
+        strike=680.0,
+        option_type="CE",
+        contract_symbol="HDFCBANK680CE",
+        option_premium=22.1,
+        created_at=now_str,
+    )
+    engine.record_alert(optmom)
+
+    # Incoming GAMMA_BLAST on HDFCBANK 690 CE
+    gamma = AutoAlert(
+        alert_id="aa-gamma-hdfc",
+        alert_type="GAMMA_BLAST",
+        stage="IGNITED",
+        symbol="HDFCBANK",
+        exchange="NFO",
+        direction="BULLISH",
+        headline="HDFCBANK 690 CE Gamma Blast",
+        summary="Gamma surge",
+        ltp=17.5,
+        trigger_level=17.5,
+        target_level=26.0,
+        stop_loss=13.0,
+        strike=690.0,
+        option_type="CE",
+        contract_symbol="HDFCBANK690CE",
+        option_premium=17.5,
+        created_at=now_str,
+    )
+    rec_gamma = engine.record_alert(gamma)
+    assert rec_gamma is False  # Suppressed & consolidated!
+
+    # Active trade preserved as 680 CE with 690 CE in related_strikes
+    active = [a for a in engine.get_alerts() if a.symbol == "HDFCBANK"]
+    assert len(active) == 1
+    assert active[0].contract_symbol == "HDFCBANK680CE"
+    assert "HDFCBANK690CE" in (active[0].metrics or {}).get("related_strikes", [])
+
+
+def test_options_momentum_rejects_upper_wick_exhaustion(tmp_path, monkeypatch):
+    """Verify that scan_options_momentum_breakouts rejects CE breakout when 5m candle shows upper-wick rejection."""
+    data_file = tmp_path / "auto_alerts.json"
+    monkeypatch.setattr("engine.auto_alert_engine.get_auto_alerts_file", lambda: data_file)
+
+    synthetic_chain = [
+        MockOptionsContract(
+            symbol="NIFTY23500CE",
+            underlying="NIFTY",
+            strike=23500.0,
+            option_type="CE",
+            last_price=120.0,
+            oi=20000,
+            oi_change=5000,
+            volume=35000,
+        )
+    ]
+    # Candle with ~71% upper wick (High=23560, Open=23500, Close=23510, Low=23490 -> High - max(Open,Close) = 50 / 70 = 71%)
+    exhaustion_df = pd.DataFrame(
+        {
+            "open": [23490.0, 23500.0],
+            "high": [23510.0, 23560.0],
+            "low": [23485.0, 23490.0],
+            "close": [23500.0, 23510.0],
+            "volume": [10000, 50000],
+        }
+    )
+
+    monkeypatch.setattr("market.quotes.get_ltp", lambda sym: 23510.0)
+    monkeypatch.setattr("market.options.get_options_chain", lambda sym: synthetic_chain)
+    monkeypatch.setattr("market.history.get_ohlcv", lambda sym, **kwargs: exhaustion_df)
+
+    engine = AutoAlertEngine(max_buffer=50)
+    monkeypatch.setattr(engine, "_watched_indices", ["NIFTY"])
+    monkeypatch.setattr(engine, "watched_equities", [])
+
+    alerts = engine.scan_options_momentum_breakouts()
+    assert len(alerts) == 0  # Exhaustion candle rejected!
+
+
+def test_options_momentum_is_gated_in_alert_scrutiny(tmp_path, monkeypatch):
+    """Verify that OPTIONS_MOMENTUM alerts are included in is_gated and pass through AI scrutiny."""
+    from datetime import datetime, timezone, timedelta
+    ist_tz = timezone(timedelta(hours=5, minutes=30))
+    data_file = tmp_path / "auto_alerts.json"
+    monkeypatch.setattr("engine.auto_alert_engine.get_auto_alerts_file", lambda: data_file)
+
+    engine = AutoAlertEngine(max_buffer=50)
+    from engine.alert_scrutiny import ScrutinyResult, alert_scrutiny_auditor
+    monkeypatch.setattr(
+        alert_scrutiny_auditor,
+        "scrutinize_alert",
+        lambda a, timeout=2.5: ScrutinyResult(
+            status="APPROVED",
+            score=88,
+            logic_confirmation="Valid momentum setup",
+            trap_risk_warning="None observed",
+            actionable_guidance="Valid buy",
+            sanctity_matrix={"level_coherence": True, "rr_valid": True, "risk_within_bounds": True, "no_chase": True},
+            auditor_model="TEST_AUDITOR",
+            audited_at="2026-09-11 15:00:00 IST",
+        ),
+    )
+
+    alert = AutoAlert(
+        alert_id="SIG_NIFTY_23500CE_SCRUTINY_1",
+        alert_type="OPTIONS_MOMENTUM",
+        stage="IGNITED",
+        symbol="NIFTY",
+        exchange="NFO",
+        direction="BULLISH",
+        headline="NIFTY 23500 CE Call Surge",
+        summary="Volume surge",
+        ltp=120.0,
+        trigger_level=120.0,
+        target_level=160.0,
+        stop_loss=105.0,
+        strike=23500.0,
+        option_type="CE",
+        contract_symbol="NIFTY23500CE",
+        option_premium=120.0,
+        underlying_spot=23510.0,
+        confidence=85,
+        created_at=datetime.now(ist_tz).strftime("%Y-%m-%d %H:%M:%S IST"),
+        is_live=True,
+        environment="LIVE",
+        metrics={"vol_oi_ratio": 2.5, "spot": 23510.0, "strike": 23500.0},
+        actionable_plan={
+            "action": "BUY CE",
+            "contract": "NIFTY23500CE",
+            "recommended_entry": "₹120.0",
+            "entry_range": "₹116.0 – ₹121.0",
+            "stop_loss": "₹105.0",
+            "target": "₹160.0",
+            "risk_reward": "1:2.6",
+        },
+    )
+
+    recorded = engine.record_alert(alert)
+    assert recorded is True
+    assert "scrutiny" in alert.metrics
+    assert alert.metrics["scrutiny"]["status"] in ("APPROVED", "QUANT_VERIFIED")
+
+
+def test_options_momentum_friday_late_warning(tmp_path, monkeypatch):
+    """Verify Friday post-14:30 IST alert tags weekend theta decay warning."""
+    from datetime import datetime, timezone, timedelta
+    ist_tz = timezone(timedelta(hours=5, minutes=30))
+    data_file = tmp_path / "auto_alerts.json"
+    monkeypatch.setattr("engine.auto_alert_engine.get_auto_alerts_file", lambda: data_file)
+
+    synthetic_chain = [
+        MockOptionsContract(
+            symbol="NIFTY23500CE",
+            underlying="NIFTY",
+            strike=23500.0,
+            option_type="CE",
+            last_price=120.0,
+            oi=20000,
+            oi_change=5000,
+            volume=35000,
+        )
+    ]
+    monkeypatch.setattr("market.quotes.get_ltp", lambda sym: 23510.0)
+    monkeypatch.setattr("market.options.get_options_chain", lambda sym: synthetic_chain)
+
+    engine = AutoAlertEngine(max_buffer=50)
+    monkeypatch.setattr(engine, "_watched_indices", ["NIFTY"])
+    monkeypatch.setattr(engine, "watched_equities", [])
+
+    # Mock Friday 14:45 IST
+    fake_friday_late = datetime(2026, 9, 11, 14, 45, 0, tzinfo=ist_tz)
+    import engine.auto_alert_engine as aae
+
+    class MockDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return fake_friday_late
+
+    monkeypatch.setattr(aae, "datetime", MockDatetime)
+
+    alerts = engine.scan_options_momentum_breakouts()
+    assert len(alerts) >= 1
+    alert = alerts[0]
+    assert "FRIDAY POST-14:30" in alert.summary
+    assert alert.actionable_plan.get("friday_weekend_warning") is not None
+
+
+
+
 

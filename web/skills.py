@@ -6845,20 +6845,35 @@ async def skill_gex_snapshot(req: Optional[GEXSnapshotRequest] = None):
                             )
 
                             # ── Institutional Profit Blueprint & Actionable Trading Levels ──
-                            prem = round(
-                                float(ce_ask or ce_bid or getattr(ce, "last_price", 0.0) or 50.0), 2
+                            real_quote_prem = float(
+                                ce_ask or ce_bid or getattr(ce, "last_price", 0.0) or 0.0
                             )
+                            if real_quote_prem <= 0.0:
+                                try:
+                                    opt_sym = getattr(ce, "symbol", f"{clean_sym}{int(k)}CE")
+                                    fetched = get_ltp(opt_sym)
+                                    if fetched and fetched > 0:
+                                        real_quote_prem = float(fetched)
+                                except Exception:
+                                    pass
+
+                            # Hardened Contract: Zero compromise on data quality for real signals.
+                            # Never trade or broadcast an unquoted option leg with synthetic fallback premium!
+                            if real_quote_prem <= 0.0:
+                                continue
+
+                            prem = round(real_quote_prem, 2)
                             entry_low = round(max(0.5, prem * 0.95), 2)
                             entry_high = round(prem * 1.03, 2)
                             entry_range = f"₹{entry_low:,.2f} – ₹{entry_high:,.2f}"
                             sl_prem = round(max(0.5, prem * 0.75), 2)
                             sl_pct = round(((prem - sl_prem) / max(0.1, prem)) * 100.0, 1)
                             risk_pts = max(1.0, round(prem - sl_prem, 2))
-                            t1_prem = round(prem + (risk_pts * 1.5), 2)
+                            t1_prem = round(prem + (risk_pts * 1.8), 2)
                             t1_pct = round(((t1_prem - prem) / max(0.1, prem)) * 100.0, 1)
-                            t2_prem = round(prem + (risk_pts * 2.6), 2)
+                            t2_prem = round(prem + (risk_pts * 3.2), 2)
                             t2_pct = round(((t2_prem - prem) / max(0.1, prem)) * 100.0, 1)
-                            rr_val = "1:2.5"
+                            rr_val = "1:3.2"
                             spot_sup = round(spot - (spot * 0.0035), 1) if spot > 0 else 0.0
                             action_title = f"BUY {clean_sym} {int(k)} CE"
                             action_label = (
@@ -6909,6 +6924,8 @@ async def skill_gex_snapshot(req: Optional[GEXSnapshotRequest] = None):
                                     "when_to_hold": f"Hold while contract respects ₹{round(prem * 0.88, 1):,} and Spot advances",
                                     "when_to_wait": f"DO NOT CHASE if premium > ₹{round(prem * 1.15, 1):,}. Wait for pullback to ₹{entry_low:,.2f}",
                                     "profit_rule": f"Book 50% profit at Target 1 (₹{t1_prem:,.2f}), trail Stop Loss to Cost for Target 2 (₹{t2_prem:,.2f})",
+                                    "is_realtime": source_info.get("is_realtime", True),
+                                    "environment": "LIVE" if source_info.get("is_realtime", True) else "TEST",
                                 }
                             )
 
@@ -6960,20 +6977,35 @@ async def skill_gex_snapshot(req: Optional[GEXSnapshotRequest] = None):
                             )
 
                             # ── Institutional Profit Blueprint & Actionable Trading Levels ──
-                            prem = round(
-                                float(pe_ask or pe_bid or getattr(pe, "last_price", 0.0) or 50.0), 2
+                            real_quote_prem = float(
+                                pe_ask or pe_bid or getattr(pe, "last_price", 0.0) or 0.0
                             )
+                            if real_quote_prem <= 0.0:
+                                try:
+                                    opt_sym = getattr(pe, "symbol", f"{clean_sym}{int(k)}PE")
+                                    fetched = get_ltp(opt_sym)
+                                    if fetched and fetched > 0:
+                                        real_quote_prem = float(fetched)
+                                except Exception:
+                                    pass
+
+                            # Hardened Contract: Zero compromise on data quality for real signals.
+                            # Never trade or broadcast an unquoted option leg with synthetic fallback premium!
+                            if real_quote_prem <= 0.0:
+                                continue
+
+                            prem = round(real_quote_prem, 2)
                             entry_low = round(max(0.5, prem * 0.95), 2)
                             entry_high = round(prem * 1.03, 2)
                             entry_range = f"₹{entry_low:,.2f} – ₹{entry_high:,.2f}"
                             sl_prem = round(max(0.5, prem * 0.75), 2)
                             sl_pct = round(((prem - sl_prem) / max(0.1, prem)) * 100.0, 1)
                             risk_pts = max(1.0, round(prem - sl_prem, 2))
-                            t1_prem = round(prem + (risk_pts * 1.5), 2)
+                            t1_prem = round(prem + (risk_pts * 1.8), 2)
                             t1_pct = round(((t1_prem - prem) / max(0.1, prem)) * 100.0, 1)
-                            t2_prem = round(prem + (risk_pts * 2.6), 2)
+                            t2_prem = round(prem + (risk_pts * 3.2), 2)
                             t2_pct = round(((t2_prem - prem) / max(0.1, prem)) * 100.0, 1)
-                            rr_val = "1:2.5"
+                            rr_val = "1:3.2"
                             spot_res = round(spot + (spot * 0.0035), 1) if spot > 0 else 0.0
                             action_title = f"BUY {clean_sym} {int(k)} PE"
                             action_label = "PUT PANIC BREAKDOWN" if is_panic else "PUT BUY PRESSURE"
@@ -7022,6 +7054,8 @@ async def skill_gex_snapshot(req: Optional[GEXSnapshotRequest] = None):
                                     "when_to_hold": f"Hold while contract respects ₹{round(prem * 0.88, 1):,} and Spot drifts lower",
                                     "when_to_wait": f"DO NOT CHASE if premium > ₹{round(prem * 1.15, 1):,}. Wait for pullback to ₹{entry_low:,.2f}",
                                     "profit_rule": f"Book 50% profit at Target 1 (₹{t1_prem:,.2f}), trail Stop Loss to Cost for Target 2 (₹{t2_prem:,.2f})",
+                                    "is_realtime": source_info.get("is_realtime", True),
+                                    "environment": "LIVE" if source_info.get("is_realtime", True) else "TEST",
                                 }
                             )
 

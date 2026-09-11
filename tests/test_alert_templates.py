@@ -96,6 +96,7 @@ def test_render_fno_alert_dataclass():
     assert "Playbook:</b> <i>Book 50% at T1, SL to Cost</i>" in msg
     assert "Chanakya" not in msg
     assert "GAMMA BLAST SURGE" in msg
+    assert "🏷️ <b>Ref:</b> <code>#SIG_NIFTY_24500CE" in msg
 
     # Height and compactness assertions (<= 14 lines)
     lines = [line for line in msg.split("\n") if line.strip()]
@@ -164,9 +165,10 @@ def test_render_equity_alert_dataclass_and_dict():
     assert "Target 2 (3.5R):</b> <code>₹7,890.00</code>" in msg
     assert "DO NOT CHASE:</b> Above <code>₹7,220.00</code>" in msg
     assert "/size TRENT 7100.00 6880.00" in msg
+    assert "🏷️ <b>Ref:</b> <code>#SIG_TRENT" in msg
 
     lines = [l for l in msg.split("\n") if l.strip()]
-    assert len(lines) <= 13, f"Equity alert exceeded 13 lines: {len(lines)} lines"
+    assert len(lines) <= 14, f"Equity alert exceeded 14 lines: {len(lines)} lines"
 
 
 def test_render_precursor_and_asymmetric_alerts():
@@ -328,8 +330,8 @@ def test_render_milestone_alert_full_traceability():
     assert "T1: ₹118.00" in rendered
     assert "T2: ₹180.83" in rendered
 
-    # 4. Current LTP & P&L Attribution
-    assert "LTP:</b> ₹118.10 | <b>Target 1:</b> ₹118.00" in rendered
+    # 4. Current Opt CMP & P&L Attribution
+    assert "Opt CMP:</b> ₹118.10 | <b>Target 1:</b> ₹118.00" in rendered
     assert "Move:</b> <b>+₹13.10 (+12.5% | +1.0R)</b>" in rendered
 
     # 5. Trailing Stop & Decisive Action
@@ -636,3 +638,297 @@ def test_resolve_expiry_cycle_all_scenarios():
     assert res_nm["cycle"] == "Next Monthly"
     assert res_nm["is_monthly"] is True
     assert "Next Monthly · 29-Oct-2026" in res_nm["badge"]
+
+
+def test_gamma_blast_alert_contract_and_rr_resolution():
+    """Verify that Gamma Blast alerts resolve specific strike/type, avoid TYOPTION, and meet institutional R:R."""
+    raw_data = {
+        "underlying": "NIFTY",
+        "spot": 25150.0,
+        "score": 92,
+        "vol_oi_ratio": 3.8,
+        "imbalance_ratio": 2.4,
+        "blast_reason": "Institutional order flow surge",
+        "profit_rule": "Scale 50% & SL to Cost",
+    }
+    rendered = render_fno_alert(raw_data, underlying="NIFTY", spot=25150.0)
+
+    # 1. Contract resolution: Must NOT be generic "NIFTY OPTION"
+    assert "NIFTY 25150 CE" in rendered
+    assert "NIFTY OPTION" not in rendered
+
+    # 2. Ref hashtag: Must NOT contain "TYOPTION"
+    assert "TYOPTION" not in rendered
+    assert "#SIG_NIFTY_25150CE" in rendered
+
+    # 3. Dynamic spot-based premium with [TEST] provenance since real-time quote was absent
+    assert "₹50.00" not in rendered
+    assert "₹201.20" in rendered or "₹201." in rendered
+    assert "[TEST]" in rendered
+    assert "Spot: <b>₹25,150.00</b>" in rendered
+    assert "Opt CMP:" in rendered
+
+    # 4. Institutional R:R >= 1:3.0
+    assert "1:3.2 R:R" in rendered
+    assert "Target 1 (1.8R):" in rendered
+    assert "Target 2 (3.2R):" in rendered
+
+
+def test_fno_and_equity_price_showcase_and_provenance():
+    """Verify that FnO alerts showcase both Spot and Opt CMP, equities showcase Spot CMP, and provenance is truthful."""
+    # 1. Authentic Real-Time FnO alert
+    real_fno = {
+        "contract": "NIFTY 25150 CE",
+        "underlying": "NIFTY",
+        "spot": 25150.0,
+        "premium": 195.50,
+        "action_title": "BUY NIFTY 25150 CE",
+        "score": 92,
+        "environment": "LIVE",
+        "is_realtime": True,
+        "is_live": True,
+    }
+    rendered_fno = render_fno_alert(real_fno, spot=25150.0)
+    assert "[REAL/LIVE]" in rendered_fno
+    assert "Spot: <b>₹25,150.00</b> | Opt CMP: <b>₹195.50</b>" in rendered_fno
+    assert "(Opt CMP: ₹195.50)" in rendered_fno
+
+    # 2. Missing/Fallback premium forces [TEST] provenance tag
+    fallback_fno = {
+        "contract": "NIFTY 25150 CE",
+        "underlying": "NIFTY",
+        "spot": 25150.0,
+        "premium": 0.0,  # Missing real quote
+        "environment": "LIVE",  # Caller mistakenly claimed LIVE
+    }
+    rendered_fallback = render_fno_alert(fallback_fno, spot=25150.0)
+    assert "[TEST]" in rendered_fallback
+    assert "[REAL/LIVE]" not in rendered_fallback
+
+    # 3. Equity alert showcases Spot CMP
+    eq_data = {
+        "symbol": "RELIANCE",
+        "ltp": 2980.50,
+        "environment": "LIVE",
+    }
+    rendered_eq = render_equity_alert(eq_data)
+    assert "Spot CMP: <b>₹2,980.50</b>" in rendered_eq
+    assert "(Spot CMP: ₹2,980.50)" in rendered_eq
+
+    # 4. Milestone alert differentiates Opt CMP vs Spot CMP
+    opt_ms = MilestoneAlertData(
+        milestone_type="TARGET_1",
+        symbol="NIFTY",
+        contract="NIFTY 25150 CE",
+        alert_type="OPTIONS MOMENTUM",
+        ltp=265.00,
+        target_level=265.00,
+    )
+    rendered_opt_ms = render_milestone_alert(opt_ms)
+    assert "Opt CMP:</b> ₹265.00" in rendered_opt_ms
+
+    eq_ms = MilestoneAlertData(
+        milestone_type="TARGET_1",
+        symbol="TCS",
+        alert_type="BREAKOUT",
+        ltp=4250.00,
+        target_level=4250.00,
+    )
+    rendered_eq_ms = render_milestone_alert(eq_ms)
+    assert "Spot CMP:</b> ₹4,250.00" in rendered_eq_ms
+
+
+def test_milestone_alert_elapsed_time_and_not_0s_ago():
+    """Verify that call time elapsed calculates true elapsed time and never shows 0s ago."""
+    # Call given at 12:23 PM, update triggered at 12:31 PM (8 minutes elapsed)
+    data = MilestoneAlertData(
+        milestone_type="TARGET_1",
+        symbol="NIFTY",
+        contract="NIFTY 23150 PE",
+        alert_type="OPTIONS MOMENTUM",
+        ltp=58.50,
+        signal_id="#SIG_NIFTY_23150PE_11SEP_1223",
+        call_time="2026-09-11 12:23:00 IST",
+        timestamp="2026-09-11 12:31:00 IST",
+        entry_price=39.00,
+        initial_sl=29.25,
+        target_1=58.50,
+        target_2=73.10,
+        trailing_stop=39.08,
+        locked_profit_pct=0.2,
+        pnl_pts=19.50,
+        pnl_pct=50.0,
+        r_multiple=2.0,
+    )
+    rendered = render_milestone_alert(data)
+
+    assert "0s ago" not in rendered
+    assert "8m ago" in rendered
+    assert "12:23 PM IST (Today)" in rendered
+    assert "TARGET 1 ACHIEVED" in rendered
+    assert "Move:</b> <b>+₹19.50 (+50.0% | +2.0R)</b>" in rendered
+    assert "Trail Stop:</b> <code>₹39.08</code> (+0.2% Breakeven Lock)" in rendered
+
+
+def test_auto_alert_engine_milestone_evaluation_consistency():
+    """Verify that AutoAlertEngine respects recommended_entry, doesn't falsely trigger T1 at entry, and locks breakeven."""
+    from engine.auto_alert_engine import AutoAlert, evaluate_alert_targets_and_trailing
+
+    alert = AutoAlert(
+        alert_id="opt-nifty-23150-pe-1223",
+        alert_type="OPTIONS_MOMENTUM",
+        stage="IGNITED",
+        symbol="NIFTY",
+        exchange="NFO",
+        direction="BULLISH",  # Option buyer
+        headline="NIFTY 23150 PE Momentum",
+        summary="Put buying flow",
+        ltp=39.00,
+        trigger_level=23150.0,  # strike
+        target_level=73.10,
+        stop_loss=29.25,
+        strike=23150.0,
+        option_type="PE",
+        contract_symbol="NIFTY23150PE",
+        option_premium=39.00,
+        actionable_plan={
+            "action": "BUY",
+            "recommended_entry": "₹39.00",
+            "stop_loss": "₹29.25",
+            "target_1": "₹58.50",
+            "target_2": "₹73.10",
+        },
+        created_at="2026-09-11 12:23:00 IST",
+    )
+
+    # 1. At LTP ₹39.25 (+₹0.25 above entry), Target 1 (58.50) MUST NOT trigger!
+    res_entry = evaluate_alert_targets_and_trailing(alert, current_ltp=39.25)
+    assert res_entry is None or res_entry.new_milestone is None
+
+    # 2. At LTP ₹58.50, Target 1 triggers with breakeven stop at ₹39.08 (+0.2% above ₹39.00, NEVER ₹19.54)
+    res_t1 = evaluate_alert_targets_and_trailing(alert, current_ltp=58.50)
+    assert res_t1 is not None
+    assert res_t1.new_milestone == "T1_ACHIEVED"
+    assert res_t1.recommended_stop == 39.08
+    assert res_t1.r_multiple == 2.0
+    assert res_t1.pnl_pct == 50.0
+
+
+def test_put_option_buyer_milestone_rendering_correct_pnl():
+    """Verify that Put option buyers with direction='BEARISH' calculate correct payoff (ltp - entry)."""
+    # 1. Option price drops below entry: MUST show negative loss, NEVER fake profit!
+    alert_loss = AutoAlert(
+        alert_id="aa-optmom-pe-loss-test",
+        alert_type="OPTIONS_MOMENTUM",
+        stage="ACTIVE",
+        symbol="NIFTY",
+        exchange="NFO",
+        direction="BEARISH",
+        headline="NIFTY 23100 PE Momentum",
+        summary="Put buying flow",
+        ltp=28.85,
+        trigger_level=30.55,
+        target_level=45.80,
+        stop_loss=22.90,
+        strike=23100.0,
+        option_type="PE",
+        contract_symbol="NIFTY23100PE",
+        option_premium=30.55,
+        actionable_plan={
+            "action": "BUY PE",
+            "entry_range": "₹29.9 – ₹31.2",
+            "stop_loss": "₹22.90",
+            "target": "₹45.80",
+            "target_2": "₹57.30",
+        },
+        created_at="2026-09-11 13:18:00 IST",
+    )
+    data_loss = MilestoneAlertData.from_alert(alert_loss, "TARGET_1")
+    assert data_loss.pnl_pts == -1.70, f"Expected -1.70 pts, got {data_loss.pnl_pts}"
+    assert data_loss.pnl_pct == -5.6, f"Expected -5.6%, got {data_loss.pnl_pct}"
+    assert data_loss.r_multiple == -0.22, f"Expected -0.22R, got {data_loss.r_multiple}"
+
+    # 2. Option price reaches Target 1 (₹45.80): MUST show positive profit and breakeven stop >= entry * 1.002
+    alert_profit = AutoAlert(
+        alert_id="aa-optmom-pe-win-test",
+        alert_type="OPTIONS_MOMENTUM",
+        stage="T1_ACHIEVED",
+        symbol="NIFTY",
+        exchange="NFO",
+        direction="BEARISH",
+        headline="NIFTY 23100 PE Target 1",
+        summary="Target 1 reached",
+        ltp=45.80,
+        trigger_level=30.55,
+        target_level=45.80,
+        stop_loss=22.90,
+        strike=23100.0,
+        option_type="PE",
+        contract_symbol="NIFTY23100PE",
+        option_premium=30.55,
+        actionable_plan={
+            "action": "BUY PE",
+            "recommended_entry": "₹30.55",
+            "stop_loss": "₹22.90",
+            "target": "₹45.80",
+            "target_2": "₹57.30",
+        },
+        trailing_stop=30.61,
+        created_at="2026-09-11 13:18:00 IST",
+    )
+    data_profit = MilestoneAlertData.from_alert(alert_profit, "TARGET_1")
+    assert data_profit.pnl_pts == 15.25
+    assert data_profit.pnl_pct == 49.9
+    assert data_profit.trailing_stop >= 30.61
+    rendered = render_milestone_alert(data_profit)
+    assert "+₹15.25 (+49.9%" in rendered
+    assert "TARGET 1 HIT" in rendered
+
+
+def test_render_auto_alert_no_conflicting_cmp_or_stale_timestamp():
+    """Verify that render_auto_alert does not render conflicting Opt CMP and uses triggered_at timestamp."""
+    alert = AutoAlert(
+        alert_id="aa-optmom-ce-hdfc-test",
+        alert_type="OPTIONS_MOMENTUM",
+        stage="IGNITED",
+        symbol="HDFCBANK",
+        exchange="NFO",
+        direction="BULLISH",
+        headline="🚀 [REAL/LIVE] OPTIONS MOMENTUM: HDFCBANK680CE @ ₹22.1 (Vol/OI 4.05x)",
+        summary="Institutional Call surge in HDFCBANK 680 CE. Turnover: 17,634 contracts (4.05x OI)",
+        ltp=22.10,
+        trigger_level=22.10,
+        target_level=33.20,
+        stop_loss=16.60,
+        strike=680.0,
+        option_type="CE",
+        contract_symbol="HDFCBANK680CE",
+        option_premium=22.10,
+        underlying_spot=693.80,
+        confidence=92,
+        actionable_plan={
+            "action": "BUY CE",
+            "recommended_entry": "₹22.1",
+            "stop_loss": "₹16.6",
+            "target": "₹33.2",
+            "risk_reward": "1:3.5",
+        },
+        created_at="2026-09-10 19:51:54 IST",
+        triggered_at="2026-09-11 14:05:00 IST",
+    )
+
+    rendered = render_auto_alert(alert, in_market=True)
+
+    # 1. Must NOT render redundant | Opt CMP: in headline because headline already specifies @ ₹22.1
+    assert "Opt CMP: ₹22.10" not in rendered
+    assert "Opt CMP: ₹24.70" not in rendered
+
+    # 2. Must NOT render (Opt CMP: ...) in Action line because entry matches
+    assert "BUY CE <b>HDFCBANK680CE</b> @ <code>₹22.1</code>\n" in rendered or "BUY CE <b>HDFCBANK680CE</b> @ <code>₹22.1</code> (Spot: ₹693.80)" in rendered
+
+    # 3. Timestamp MUST show triggered_at (2026-09-11), not yesterday's created_at (2026-09-10)
+    assert "2026-09-11 14:05:00 IST" in rendered
+    assert "2026-09-10 19:51:54" not in rendered
+
+
+

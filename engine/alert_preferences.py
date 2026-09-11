@@ -229,6 +229,7 @@ class ChannelPreferences:
     min_confidence: int = 75
     allow_early_warnings: bool = False
     allow_milestones: bool = True
+    allow_intermediate_trails: bool = False
 
     def is_segment_allowed(self, segment: str) -> bool:
         if not self.enabled:
@@ -302,23 +303,32 @@ class AlertPreferences:
         else:
             allowed = normalize_segment_list(allowed)
 
-        def _make_channel(ch_data: Optional[dict[str, Any]], default_min_conf: int = 75) -> ChannelPreferences:
+        def _make_channel(
+            ch_data: Optional[dict[str, Any]],
+            default_min_conf: int = 75,
+            default_trails: bool = False,
+        ) -> ChannelPreferences:
             if not isinstance(ch_data, dict):
-                return ChannelPreferences(allowed_segments=list(allowed), min_confidence=default_min_conf)
+                return ChannelPreferences(
+                    allowed_segments=list(allowed),
+                    min_confidence=default_min_conf,
+                    allow_intermediate_trails=default_trails,
+                )
             return ChannelPreferences(
                 enabled=bool(ch_data.get("enabled", True)),
                 allowed_segments=normalize_segment_list(ch_data.get("allowed_segments", allowed)),
                 min_confidence=int(ch_data.get("min_confidence", default_min_conf)),
                 allow_early_warnings=bool(ch_data.get("allow_early_warnings", False)),
                 allow_milestones=bool(ch_data.get("allow_milestones", True)),
+                allow_intermediate_trails=bool(ch_data.get("allow_intermediate_trails", default_trails)),
             )
 
         return cls(
             allowed_segments=list(allowed),
-            telegram=_make_channel(data.get("telegram"), default_min_conf=80),
-            ui=_make_channel(data.get("ui"), default_min_conf=75),
-            desktop=_make_channel(data.get("desktop"), default_min_conf=80),
-            sound=_make_channel(data.get("sound"), default_min_conf=80),
+            telegram=_make_channel(data.get("telegram"), default_min_conf=80, default_trails=False),
+            ui=_make_channel(data.get("ui"), default_min_conf=75, default_trails=True),
+            desktop=_make_channel(data.get("desktop"), default_min_conf=80, default_trails=False),
+            sound=_make_channel(data.get("sound"), default_min_conf=80, default_trails=False),
             pause_disabled_scanners=bool(data.get("pause_disabled_scanners", True)),
             fno_chat_id=data.get("fno_chat_id"),
         )

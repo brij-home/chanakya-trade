@@ -162,7 +162,13 @@ class AlertScrutinyAuditor:
 
         # 3. Maximum Risk Boundary Check
         # Options allow up to 45% defined risk stop; cash equities/futures capped at max_intraday_risk_pct (8%)
-        max_risk = 45.0 if is_option_premium_levels else self.max_intraday_risk_pct
+        # For OPTIONS_MOMENTUM, enforce disciplined risk stop (capped at 32% max to align with trade_plan 30% drawdown ceiling)
+        if atype == "OPTIONS_MOMENTUM":
+            max_risk = 32.0
+        elif is_option_premium_levels:
+            max_risk = 45.0
+        else:
+            max_risk = self.max_intraday_risk_pct
         risk_pct = (risk_pts / ltp) * 100.0 if ltp > 0 else 0.0
         if risk_pct > max_risk:
             return (
@@ -213,6 +219,29 @@ class AlertScrutinyAuditor:
                 )
 
         flags["no_chase"] = True
+
+        # 6. Index Options Deep OTM Trap Gate:
+        # Reject illiquid, high-theta lottery strikes > 1.2% away from spot on index options
+        sym = str(getattr(alert, "symbol", "") or (alert.get("symbol", "") if isinstance(alert, dict) else "")).upper()
+        clean_sym = sym.replace("NSE:", "").replace("NFO:", "").strip()
+        strike_val = getattr(alert, "strike", None) or (alert.get("strike", None) if isinstance(alert, dict) else None)
+        metrics_dict = getattr(alert, "metrics", {}) or (alert.get("metrics", {}) if isinstance(alert, dict) else {})
+        spot_val = (metrics_dict.get("spot") if isinstance(metrics_dict, dict) else None) or getattr(alert, "underlying_spot", None)
+        if clean_sym in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX") and strike_val and spot_val:
+            try:
+                stk = float(strike_val)
+                spt = float(spot_val)
+                if spt > 0:
+                    dist_pct = abs(stk - spt) / spt
+                    if dist_pct > 0.012:
+                        return (
+                            False,
+                            f"Deep OTM Index Option: Strike {stk:,.0f} is {dist_pct*100:.2f}% away from spot {spt:,.1f} (>1.2% theta decay trap)",
+                            flags,
+                        )
+            except (ValueError, TypeError):
+                pass
+
         return True, "", flags
 
     # ── Tier 2: AI Devil's Advocate & Scrutiny ─────────────────────────────────
@@ -322,9 +351,16 @@ class AlertScrutinyAuditor:
             )
             return str(resp or "").strip()
 
-        with ThreadPoolExecutor(max_workers=1) as pool:
+        raw_text = None
+        pool = ThreadPoolExecutor(max_workers=1)
+        try:
             future = pool.submit(_call)
             raw_text = future.result(timeout=timeout)
+        except Exception as e:
+            logger.debug(f"[AlertScrutinyAuditor] Fast-LLM timeout/error ({timeout}s): {e}")
+            return None
+        finally:
+            pool.shutdown(wait=False, cancel_futures=True)
 
         if not raw_text:
             return None
@@ -590,16 +626,21 @@ Respond STRICTLY in valid JSON matching this schema:
 
         # ── Generic Equity / Derivative Fallback ─────────────────────────────
         if is_option_buy:
+            is_friday_late = bool(metrics.get("is_friday_late", False)) if isinstance(metrics, dict) else False
+            friday_warning = " [FRIDAY POST-14:30 WARNING: High weekend theta decay; scalp only or close by 15:20 IST]" if is_friday_late else ""
+            spot_anchor = metrics.get("spot_invalidation_anchor") if isinstance(metrics, dict) else None
+            anchor_note = f" (Spot Anchor Rs.{float(spot_anchor):,.1f})" if spot_anchor else ""
+
             if opt_type == "PE" or "PE" in contract or "PUT" in action or direction == "BEARISH":
                 opt_lbl = contract or f"{sym} {opt_type or 'PE'}"
                 logic = f"Quant-validated {opt_lbl} Put momentum: bearish underlying breakdown confirmed with 1:{rr:.1f} R:R premium expansion asymmetry."
-                trap = f"Watch for sudden underlying short-covering bounce; scale 50% profit at option target Rs.{t1:,.1f} and trail SL to breakeven."
-                guidance = f"Buy PE near Rs.{ltp:,.1f}; strictly invalidate if option premium drops below Rs.{sl:,.1f}."
+                trap = f"Watch for sudden underlying short-covering bounce{friday_warning}; scale 50% profit at option target Rs.{t1:,.1f} and trail SL to breakeven."
+                guidance = f"Buy PE near Rs.{ltp:,.1f}{anchor_note}; strictly invalidate if option premium drops below Rs.{sl:,.1f}."
             else:
                 opt_lbl = contract or f"{sym} {opt_type or 'CE'}"
                 logic = f"Quant-validated {opt_lbl} Call momentum: bullish momentum holds with favorable 1:{rr:.1f} R:R premium expansion asymmetry."
-                trap = f"Watch for overhead resistance or IV crush near target Rs.{t1:,.1f}; scale 50% profit at T1 and trail SL to breakeven."
-                guidance = f"Buy CE near Rs.{ltp:,.1f}; strictly invalidate if option premium drops below Rs.{sl:,.1f}."
+                trap = f"Watch for overhead resistance or IV crush near target Rs.{t1:,.1f}{friday_warning}; scale 50% profit at T1 and trail SL to breakeven."
+                guidance = f"Buy CE near Rs.{ltp:,.1f}{anchor_note}; strictly invalidate if option premium drops below Rs.{sl:,.1f}."
         elif direction in ("BEARISH", "SHORT", "SELL"):
             logic = f"Quant-validated {sym} breakdown: distribution structure below Rs.{sl:,.1f} confirmed with 1:{rr:.1f} downside asymmetry."
             trap = f"Watch for sudden short-covering bounce near Rs.{t1:,.1f}; tighten stop on lower timeframe CHoCH."

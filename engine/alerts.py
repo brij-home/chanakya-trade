@@ -732,15 +732,18 @@ class AlertManager:
         )
 
         # 1. Terminal
-        console.print()
-        console.print(
-            Panel(
-                f"[bold white]{desc}[/bold white]{ltp_str}\n\n[dim]🕒 Timestamp: {now_stamp}[/dim]",
-                title=panel_title,
-                border_style=border_style,
+        try:
+            console.print()
+            console.print(
+                Panel(
+                    f"[bold white]{desc}[/bold white]{ltp_str}\n\n[dim]🕒 Timestamp: {now_stamp}[/dim]",
+                    title=panel_title,
+                    border_style=border_style,
+                )
             )
-        )
-        print("\a", end="", flush=True)  # system bell
+            print("\a", end="", flush=True)  # system bell
+        except Exception:
+            pass
 
         # 2. macOS desktop notification
         _desktop_notify(

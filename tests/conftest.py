@@ -74,7 +74,7 @@ def isolate_test_notifications(monkeypatch: pytest.MonkeyPatch, request: pytest.
     """Ensure tests never emit real-world Telegram pushes or desktop popups."""
     if "live_telegram" not in request.keywords:
         try:
-            monkeypatch.setattr("engine.alerts._telegram_notify", lambda msg: None)
+            monkeypatch.setattr("engine.alerts._telegram_notify", lambda *args, **kwargs: None)
         except Exception:
             pass
         try:
