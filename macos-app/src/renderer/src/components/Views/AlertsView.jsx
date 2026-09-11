@@ -605,27 +605,18 @@ const AlertCompactRow = memo(function AlertCompactRow({ alert, onSendTelegram, o
  * conviction bar before allowing the user to send.
  */
 function TelegramPreflightModal({ alert, onConfirm, onCancel, sending, sentOk, sentError, callRef }) {
-  if (!alert) return null
-
-  const scrutiny = alert.metrics?.scrutiny || null
-  const conviction = Number(alert.confidence || scrutiny?.score || 75)
-  const convBars = Math.round(conviction / 10)
-  const optType = alert.option_type || null
-  const strikeNum = alert.strike ? Number(alert.strike) : null
-  const cleanSym = (alert.symbol || '').replace(/^(NSE|BSE|MCX|NFO|CDS):/, '').trim()
-  const contractLabel = alert.contract_symbol || [cleanSym, strikeNum ? Number(strikeNum).toLocaleString('en-IN') : '', optType || ''].filter(Boolean).join(' ')
-
-  const scrutinyStatus = scrutiny?.status || 'QUANT_VERIFIED'
-  const statusColor = scrutinyStatus === 'APPROVED' ? 'text-emerald-400' : scrutinyStatus === 'QUANT_VERIFIED' ? 'text-sky-400' : 'text-amber-400'
-  const statusBg = scrutinyStatus === 'APPROVED' ? 'bg-emerald-500/15 border-emerald-500/30' : scrutinyStatus === 'QUANT_VERIFIED' ? 'bg-sky-500/15 border-sky-500/30' : 'bg-amber-500/15 border-amber-500/30'
-
   const [destMode, setDestMode] = useState('DEFAULT')
   const [customChannel, setCustomChannel] = useState(() => {
-    return localStorage.getItem('chanakya_telegram_channel') || ''
+    try {
+      return localStorage.getItem('chanakya_telegram_channel') || ''
+    } catch (_) {
+      return ''
+    }
   })
   const [destInfo, setDestInfo] = useState(null)
 
   useEffect(() => {
+    if (!alert) return
     let active = true
     const fetchDest = async () => {
       try {
@@ -642,7 +633,21 @@ function TelegramPreflightModal({ alert, onConfirm, onCancel, sending, sentOk, s
     }
     fetchDest()
     return () => { active = false }
-  }, [callRef])
+  }, [callRef, alert])
+
+  if (!alert) return null
+
+  const scrutiny = alert.metrics?.scrutiny || null
+  const conviction = Number(alert.confidence || scrutiny?.score || 75)
+  const convBars = Math.round(conviction / 10)
+  const optType = alert.option_type || null
+  const strikeNum = alert.strike ? Number(alert.strike) : null
+  const cleanSym = (alert.symbol || '').replace(/^(NSE|BSE|MCX|NFO|CDS):/, '').trim()
+  const contractLabel = alert.contract_symbol || [cleanSym, strikeNum ? Number(strikeNum).toLocaleString('en-IN') : '', optType || ''].filter(Boolean).join(' ')
+
+  const scrutinyStatus = scrutiny?.status || 'QUANT_VERIFIED'
+  const statusColor = scrutinyStatus === 'APPROVED' ? 'text-emerald-400' : scrutinyStatus === 'QUANT_VERIFIED' ? 'text-sky-400' : 'text-amber-400'
+  const statusBg = scrutinyStatus === 'APPROVED' ? 'bg-emerald-500/15 border-emerald-500/30' : scrutinyStatus === 'QUANT_VERIFIED' ? 'bg-sky-500/15 border-sky-500/30' : 'bg-amber-500/15 border-amber-500/30'
 
   return (
     <div
