@@ -196,6 +196,17 @@ class AutoAlertsListRequest(BaseModel):
     target_status: Optional[str] = None
     view_mode: Optional[str] = None  # "ACTIVE" | "ARCHIVED" | "ALL"
     is_archived: Optional[bool] = None
+    segment: Optional[Any] = None  # str or list[str]
+
+
+class AlertPreferencesUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    allowed_segments: Optional[Any] = None
+    telegram: Optional[Any] = None
+    ui: Optional[Any] = None
+    desktop: Optional[Any] = None
+    sound: Optional[Any] = None
+    pause_disabled_scanners: Optional[bool] = None
 
 
 class AutoAlertArchiveRequest(BaseModel):
@@ -1687,8 +1698,50 @@ async def skill_auto_alerts_list(req: Optional[AutoAlertsListRequest] = None):
             target_status=target_status,
             view_mode=view_mode,
             is_archived=is_archived,
+            segment=req.segment if req else None,
         )
         return {"status": "ok", "data": [a.to_dict() for a in alerts]}
+    except Exception as e:
+        raise _err(str(e))
+
+
+@router.get("/alerts/preferences")
+@router.get("/alerts/auto/preferences")
+async def skill_alert_preferences_get():
+    """Get active alert routing and segment subscription matrix."""
+    try:
+        from engine.alert_preferences import alert_preferences
+
+        return {"status": "ok", "data": alert_preferences.get_preferences()}
+    except Exception as e:
+        raise _err(str(e))
+
+
+@router.post("/alerts/preferences")
+@router.post("/alerts/auto/preferences")
+async def skill_alert_preferences_post(req: Optional[AlertPreferencesUpdateRequest] = None):
+    """Update alert routing and segment subscription matrix. Emits SSE broadcast."""
+    try:
+        from engine.alert_preferences import alert_preferences
+
+        data = req.model_dump(exclude_unset=True) if req else {}
+        updated = alert_preferences.update_preferences(data)
+
+        # Emit SSE broadcast so all active terminals sync in real time
+        try:
+            from web.sse import event_bus
+
+            event_bus.publish_sync(
+                "system",
+                {
+                    "type": "alert_preferences_updated",
+                    "preferences": updated,
+                },
+            )
+        except Exception:
+            pass
+
+        return {"status": "ok", "data": updated}
     except Exception as e:
         raise _err(str(e))
 
@@ -2953,6 +3006,7 @@ _SETTINGS_READABLE: list[tuple[str, bool]] = [
     ("DEFAULT_RISK_PCT", False),
     ("NEWSAPI_KEY", True),
     ("TELEGRAM_BOT_TOKEN", True),
+    ("ALERT_ALLOWED_SEGMENTS", False),
 ]
 
 _SETTINGS_ALLOWED_WRITE: set[str] = {k for k, _ in _SETTINGS_READABLE}
@@ -2995,6 +3049,13 @@ async def skill_settings_post(req: SettingsUpdateRequest):
     for key, value in req.settings.items():
         set_credential(key, value)
         os.environ[key] = value
+        if key == "ALERT_ALLOWED_SEGMENTS":
+            try:
+                from engine.alert_preferences import alert_preferences
+
+                alert_preferences.set_allowed_segments(value)
+            except Exception:
+                pass
         updated.append(key)
 
     return _ok({"updated": updated})

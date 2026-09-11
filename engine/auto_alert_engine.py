@@ -117,10 +117,32 @@ class AutoAlert:
     option_premium: Optional[float] = None
     market_status: str = "SESSION_CLOSED"  # "LIVE" | "PRE_MARKET" | "SESSION_CLOSED"
     lot_size: Optional[int] = None  # Contract market lot size (SEBI 2026 active)
+    segment: str = ""  # "FNO" | "EQUITY" | "COMMODITY" | "CURRENCY"
+    signal_ref: Optional[str] = None
+    r_multiple: Optional[float] = None
+    pnl_pct: Optional[float] = None
 
     def __post_init__(self) -> None:
         if not self.created_at:
             self.created_at = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
+        if not self.signal_ref:
+            try:
+                from bot.alert_templates import build_signal_ref
+                self.signal_ref = build_signal_ref(
+                    symbol=self.symbol,
+                    alert_id=self.alert_id,
+                    contract=self.contract_symbol or "",
+                    created_at=self.created_at,
+                )
+            except Exception:
+                pass
+        if not self.segment:
+            try:
+                from engine.alert_preferences import classify_alert_segment
+
+                self.segment = classify_alert_segment(self)
+            except Exception:
+                self.segment = "EQUITY"
         if self.lot_size is None:
             if self.metrics and "lot_size" in self.metrics and self.metrics["lot_size"]:
                 try:
@@ -383,10 +405,29 @@ def is_alert_option_premium_level(alert: Any) -> bool:
     """
     Determines if an alert's primary numerical price levels (ltp, stop_loss, target_level)
     represent option contract premiums rather than underlying equity/spot prices.
-    Returns True for pure option strategies (OPTIONS_MOMENTUM, GAMMA_BLAST with option_type, OPTION_WRITE)
-    or when alert.ltp directly matches the option premium.
+    Returns True for pure option strategies (OPTIONS_MOMENTUM, OPTION_WRITE, GAMMA_BLAST with option_type)
+    or when alert.contract_symbol represents an active option contract.
     Returns False for underlying stock/index setups even if an option recommendation is attached.
     """
+    atype = str(getattr(alert, "alert_type", "") or "")
+    if atype in ("OPTIONS_MOMENTUM", "OPTION_WRITE"):
+        return True
+    if atype == "GAMMA_BLAST" and getattr(alert, "option_type", None):
+        return True
+
+    # Underlying stock/index setups are always anchored to spot
+    if atype in (
+        "ASYMMETRIC_OPPORTUNITY",
+        "SQUEEZE_BREAKOUT",
+        "SQUEEZE_BREAKDOWN",
+        "POCKET_PIVOT",
+        "PRECURSOR_RADAR",
+        "SMC_SWEEP",
+        "CIRCUIT_WARNING",
+        "COMMODITY_MOMENTUM",
+    ):
+        return False
+
     has_opt_marker = bool(
         getattr(alert, "contract_symbol", None)
         or getattr(alert, "option_type", None)
@@ -395,16 +436,18 @@ def is_alert_option_premium_level(alert: Any) -> bool:
     if not has_opt_marker:
         return False
 
+    # Check contract_symbol pattern for option contracts (e.g. NIFTY24500CE or MAZDOCK2400CE on NFO)
+    csym = str(getattr(alert, "contract_symbol", "") or "").upper()
+    exch = str(getattr(alert, "exchange", "") or "").upper()
+    if csym and (csym.endswith("CE") or csym.endswith("PE")) and exch == "NFO":
+        return True
+
+    # Check if ltp is close to option_premium (within 25% tolerance) for other derivatives
     ltp = float(getattr(alert, "ltp", 0.0) or 0.0)
     opt_prem = getattr(alert, "option_premium", None)
-    if opt_prem is not None:
-        return abs(ltp - float(opt_prem)) < 0.05
-
-    atype = str(getattr(alert, "alert_type", "") or "")
-    if atype in ("OPTIONS_MOMENTUM", "OPTION_WRITE"):
-        return True
-    if atype == "GAMMA_BLAST" and getattr(alert, "option_type", None):
-        return True
+    if opt_prem is not None and float(opt_prem) > 0 and ltp > 0:
+        prem = float(opt_prem)
+        return abs(ltp - prem) <= max(2.0, prem * 0.25)
 
     return False
 
@@ -2301,7 +2344,17 @@ class AutoAlertEngine:
         )
         is_trail = alert.stage == "TRAILING_UPDATE"
 
+        from engine.alert_preferences import alert_preferences
+
+        ui_allowed = alert_preferences.is_alert_allowed(alert, channel="ui")
+        desktop_allowed = alert_preferences.is_alert_allowed(alert, channel="desktop")
+        sound_allowed = alert_preferences.is_alert_allowed(alert, channel="sound")
+        telegram_allowed = alert_preferences.is_alert_allowed(alert, channel="telegram")
+
         alert_dict = alert.to_dict()
+        alert_dict["segment"] = getattr(alert, "segment", None) or alert_preferences.classify_alert_segment(alert)
+        alert_dict["ui_allowed"] = ui_allowed
+        alert_dict["sound_allowed"] = sound_allowed
         alert_dict["env_tag"] = env_tag
         alert_dict["is_live"] = not is_test
         alert_dict["environment"] = "TEST" if is_test else ("EOD" if not in_market else "LIVE")
@@ -2339,6 +2392,9 @@ class AutoAlertEngine:
                     "is_target": is_target,
                     "is_trail": is_trail,
                     "environment": alert.environment,
+                    "segment": alert_dict["segment"],
+                    "ui_allowed": ui_allowed,
+                    "sound_allowed": sound_allowed,
                 },
             )
         except Exception as e:
@@ -2346,29 +2402,31 @@ class AutoAlertEngine:
 
         # 2. Desktop notification
         try:
-            from engine.alerts import _desktop_notify
+            if desktop_allowed:
+                from engine.alerts import _desktop_notify
 
-            ts_short = now_ts_str.split(" ")[-2] if " " in now_ts_str else now_ts_str
-            if alert.is_invalidated:
-                desktop_title = f"⚠️ {env_tag} [{ts_short}] VIEW INVALIDATED: {alert.symbol}"
-                desktop_msg = alert.invalidation_reason or alert.summary
-            elif is_t1:
-                desktop_title = f"🎯 {env_tag} [{ts_short}] TARGET 1 HIT: {alert.symbol}"
-                desktop_msg = f"{alert.trailing_decision or 'BOOK 50% & TRAIL TO BREAKEVEN'}: {alert.trailing_rationale or alert.summary}"
-            elif is_target:
-                desktop_title = f"🏁 {env_tag} [{ts_short}] FINAL TARGET HIT: {alert.symbol}"
-                desktop_msg = f"{alert.trailing_decision or 'TARGET ACHIEVED'}: {alert.trailing_rationale or alert.summary}"
-            elif is_trail:
-                desktop_title = f"📈 {env_tag} [{ts_short}] TRAIL STOP: {alert.symbol} → ₹{alert.trailing_stop or 0:,.2f}"
-                desktop_msg = alert.trailing_rationale or alert.summary
-            else:
-                desktop_title = f"{env_tag} [{ts_short}] {alert.headline}"
-                desktop_msg = alert.summary
+                ts_short = now_ts_str.split(" ")[-2] if " " in now_ts_str else now_ts_str
+                item_label = alert.contract_symbol or alert.symbol
+                if alert.is_invalidated:
+                    desktop_title = f"⚠️ {env_tag} [{ts_short}] VIEW INVALIDATED: {item_label}"
+                    desktop_msg = alert.invalidation_reason or alert.summary
+                elif is_t1:
+                    desktop_title = f"🎯 {env_tag} [{ts_short}] TARGET 1 HIT: {item_label}"
+                    desktop_msg = f"{alert.trailing_decision or 'BOOK 50% & TRAIL TO BREAKEVEN'}: {alert.trailing_rationale or alert.summary}"
+                elif is_target:
+                    desktop_title = f"🏁 {env_tag} [{ts_short}] FINAL TARGET HIT: {item_label}"
+                    desktop_msg = f"{alert.trailing_decision or 'TARGET ACHIEVED'}: {alert.trailing_rationale or alert.summary}"
+                elif is_trail:
+                    desktop_title = f"📈 {env_tag} [{ts_short}] TRAIL STOP: {item_label} → ₹{alert.trailing_stop or 0:,.2f}"
+                    desktop_msg = alert.trailing_rationale or alert.summary
+                else:
+                    desktop_title = f"{env_tag} [{ts_short}] {alert.headline}"
+                    desktop_msg = alert.summary
 
-            _desktop_notify(
-                title=desktop_title,
-                message=desktop_msg,
-            )
+                _desktop_notify(
+                    title=desktop_title,
+                    message=desktop_msg,
+                )
         except Exception:
             pass
 
@@ -2382,6 +2440,10 @@ class AutoAlertEngine:
                 or alert.alert_id.startswith("test-")
                 or alert.alert_id.startswith("mock-")
             ):
+                return
+
+            # Check Alert Preferences routing gate
+            if not telegram_allowed:
                 return
 
             # OPTION B: Curated Post-Market Telegram Discipline
@@ -2472,7 +2534,18 @@ class AutoAlertEngine:
             from bot.alert_templates import render_auto_alert
 
             tg_msg = render_auto_alert(alert, in_market=in_market)
-            _telegram_notify(tg_msg)
+            target_seg = getattr(alert, "segment", None)
+            if not target_seg:
+                from engine.alert_preferences import classify_alert_segment
+                target_seg = classify_alert_segment(alert)
+            tg_target_chat_id = alert_preferences.get_telegram_chat_id(target_seg)
+            if tg_target_chat_id:
+                try:
+                    _telegram_notify(tg_msg, chat_id=tg_target_chat_id)
+                except TypeError:
+                    _telegram_notify(tg_msg)
+            else:
+                _telegram_notify(tg_msg)
         except Exception:
             pass
 
@@ -2696,6 +2769,8 @@ class AutoAlertEngine:
                     alert.locked_profit_pts = eval_res.locked_profit_pts
                     alert.locked_profit_pct = eval_res.locked_profit_pct
                     alert.target_status = eval_res.target_status
+                    alert.r_multiple = eval_res.r_multiple
+                    alert.pnl_pct = eval_res.pnl_pct
 
                     env_tag = (
                         "[TEST]"
@@ -3299,8 +3374,27 @@ class AutoAlertEngine:
                     "when_to_buy": opp.when_to_buy,
                     "when_to_wait": opp.when_to_wait,
                     "profit_rule": opp.profit_rule,
+                    "trade_plan": {
+                        "entry_price": opp.entry_price,
+                        "invalidation_stop": opp.stop_loss,
+                        "target_1": opp.target_1,
+                        "target_2": opp.target_2,
+                        "target_3": opp.target_moonshot,
+                        "risk_reward": opp.risk_reward,
+                    },
                 }
                 if opp.contract_symbol:
+                    plan["option_plan"] = {
+                        "contract_symbol": opp.contract_symbol,
+                        "strike": opp.strike,
+                        "option_type": opp.option_type,
+                        "expiry_date": opp.expiry_date,
+                        "entry_premium": opp.option_premium,
+                        "sl_premium": opp.option_stop_loss,
+                        "t1_premium": opp.option_target_1,
+                        "t2_premium": opp.option_target_2,
+                        "lot_size": opp.lot_size,
+                    }
                     plan["option_contract"] = opp.contract_symbol
                     plan["option_entry"] = (
                         f"₹{opp.option_premium:,.1f}" if opp.option_premium else None
@@ -3329,11 +3423,11 @@ class AutoAlertEngine:
                     trigger_level=opp.entry_price,
                     target_level=opp.target_1,
                     stop_loss=opp.stop_loss,
-                    strike=opp.strike,
-                    option_type=opp.option_type,
-                    contract_symbol=None,  # Keep primary alert anchored to underlying spot price levels
-                    expiry_date=opp.expiry_date,
-                    option_premium=opp.option_premium,
+                    strike=None,  # Keep primary alert anchored to underlying spot price levels
+                    option_type=None,
+                    contract_symbol=None,
+                    expiry_date=None,
+                    option_premium=None,
                     confidence=opp.conviction_score,
                     created_at=now_iso,
                     is_live=True,
@@ -3369,9 +3463,17 @@ class AutoAlertEngine:
         for sym in targets:
             clean_sym = sym.replace("NSE:", "").replace("NFO:", "").strip().upper()
             try:
+                from market.quotes import get_quote, get_ltp
                 spot = get_ltp(f"NSE:{clean_sym}")
                 if not spot or spot <= 0:
                     continue
+                quote_obj = None
+                try:
+                    quote_obj = get_quote(f"NSE:{clean_sym}")
+                except Exception:
+                    pass
+                spot_change_pct = getattr(quote_obj, "change_pct", None) if quote_obj else None
+                spot_open = getattr(quote_obj, "open", None) if quote_obj else None
                 chain = get_options_chain(clean_sym)
                 if not chain:
                     continue
@@ -3434,7 +3536,38 @@ class AutoAlertEngine:
                     if vol_oi < 1.0:
                         continue
 
-                    direction = "BULLISH" if opt_type == "CE" else "BEARISH"
+                    # 1. Bid/Ask Spread Sanity Gate: Avoid illiquid traps with huge bid-ask gaps (> 35%)
+                    bid = getattr(c, "bid", None)
+                    ask = getattr(c, "ask", None)
+                    if bid and ask and bid > 0 and ask > 0 and ask > bid * 1.35:
+                        continue
+
+                    # 2. Strict Directional Price Expansion & Underlying Trend Alignment:
+                    # An option momentum breakout MUST have positive price expansion (gainers, not decaying/dumping)
+                    # AND the underlying stock must be aligned with the trade direction.
+                    pchange = getattr(c, "pchange", None)
+                    if opt_type == "CE":
+                        # CALL SURGE: Option premium must be expanding positively
+                        if pchange is not None and pchange < 2.0:
+                            continue
+                        # Underlying stock must NOT be collapsing in a downtrend (reject crashing stocks like MAZDOCK)
+                        if spot_change_pct is not None and spot_change_pct < -0.3:
+                            continue
+                        if spot_open and spot_open > 0 and spot < spot_open * 0.995:
+                            continue
+                        direction = "BULLISH"
+                    elif opt_type == "PE":
+                        # PUT SURGE: Option premium must be expanding positively
+                        if pchange is not None and pchange < 2.0:
+                            continue
+                        # Underlying stock must NOT be surging in an uptrend
+                        if spot_change_pct is not None and spot_change_pct > 0.3:
+                            continue
+                        if spot_open and spot_open > 0 and spot > spot_open * 1.005:
+                            continue
+                        direction = "BEARISH"
+                    else:
+                        continue
                     alert_id = f"aa-optmom-{opt_type.lower()}-{clean_sym}-{int(strike)}-{uuid.uuid4().hex[:6]}"
 
                     # Option target and risk calculation (strict 1:3.5 R:R)
@@ -3976,20 +4109,25 @@ class AutoAlertEngine:
 
                 session = get_current_ist_session()
 
+                from engine.alert_preferences import alert_preferences
+
                 # Phase 1: Pure Domestic Equity & NFO Desk (09:15 - 15:30 IST)
-                if session["equity_nfo"]:
+                if session["equity_nfo"] and not (
+                    alert_preferences.is_segment_globally_disabled("EQUITY")
+                    and alert_preferences.is_segment_globally_disabled("FNO")
+                ):
                     self.check_and_alert_invalidations(exchanges=["NSE", "BSE", "NFO"])
                     self.check_and_alert_targets_and_trailing(exchanges=["NSE", "BSE", "NFO"])
                     self.scan_equity_nfo_now()
 
                 # Phase 2: Currency Desk (15:30 - 17:00 IST strictly post-equity)
-                if session["currency"]:
+                if session["currency"] and not alert_preferences.is_segment_globally_disabled("CURRENCY"):
                     self.check_and_alert_invalidations(exchanges=["CDS"])
                     self.check_and_alert_targets_and_trailing(exchanges=["CDS"])
                     self.scan_currency_now()
 
                 # Phase 3: MCX Commodities Desk (15:30 - 23:30 IST strictly post-equity)
-                if session["commodity"]:
+                if session["commodity"] and not alert_preferences.is_segment_globally_disabled("COMMODITY"):
                     self.check_and_alert_invalidations(exchanges=["MCX"])
                     self.check_and_alert_targets_and_trailing(exchanges=["MCX"])
                     self.scan_commodities_now()
@@ -4012,6 +4150,7 @@ class AutoAlertEngine:
         target_status: Optional[str] = None,
         view_mode: str = "ALL",  # "ACTIVE" | "ARCHIVED" | "ALL"
         is_archived: Optional[bool] = None,
+        segment: Optional[str | list[str]] = None,
     ) -> list[AutoAlert]:
         """Returns buffered alerts with optional filtering and active/archived partitioning."""
         with self._lock:
@@ -4030,6 +4169,18 @@ class AutoAlertEngine:
             res = [a for a in res if a.is_active]
         elif view_mode.upper() == "ARCHIVED":
             res = [a for a in res if not a.is_active]
+
+        if segment:
+            from engine.alert_preferences import classify_alert_segment, normalize_segment_list
+
+            allowed_segs = set(normalize_segment_list(segment))
+            raw_tokens = [segment.upper()] if isinstance(segment, str) else [str(s).upper() for s in segment]
+            if "ALL" not in raw_tokens:
+                res = [
+                    a
+                    for a in res
+                    if (getattr(a, "segment", None) or classify_alert_segment(a)).upper() in allowed_segs
+                ]
 
         if is_archived is not None:
             res = [a for a in res if a.is_archived == is_archived]

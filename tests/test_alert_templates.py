@@ -26,6 +26,8 @@ from bot.alert_templates import (
     escape_tg,
     format_price,
     normalize_env_tag,
+    build_signal_ref,
+    _format_call_time_and_elapsed,
 )
 from engine.auto_alert_engine import AutoAlert
 
@@ -91,8 +93,9 @@ def test_render_fno_alert_dataclass():
     assert "Target 2 (2.5R):</b> <code>₹145.00</code> (+65.0%)" in msg
     assert "DO NOT CHASE:</b> Above <code>₹105.00</code>" in msg
     assert "Conviction:</b> <b>92/100</b> (MAX_CONVICTION) · ⚡ 2X Size" in msg
-    assert "Trader Execution Playbook:</b> <i>Book 50% at T1, SL to Cost</i>" in msg
-    assert "Chanakya Institutional Gamma Desk" in msg
+    assert "Playbook:</b> <i>Book 50% at T1, SL to Cost</i>" in msg
+    assert "Chanakya" not in msg
+    assert "GAMMA BLAST SURGE" in msg
 
     # Height and compactness assertions (<= 14 lines)
     lines = [line for line in msg.split("\n") if line.strip()]
@@ -183,7 +186,8 @@ def test_render_precursor_and_asymmetric_alerts():
         "when_to_wait": "DO NOT CHASE if price gaps > 1.8% to ₹12,600",
     }
     p_msg = render_precursor_alert(prec_dict)
-    assert "CHANAKYA HIGH-CONVICTION PRECURSOR RADAR" in p_msg
+    assert "PRECURSOR RADAR" in p_msg
+    assert "Chanakya" not in p_msg
     assert "DIXON [FNO]" in p_msg
     assert "90/100" in p_msg
     assert "MAX_CONVICTION" in p_msg
@@ -204,7 +208,8 @@ def test_render_precursor_and_asymmetric_alerts():
         "confluences": ["Pocket Pivot", "Weekly Base Breakout"],
     }
     a_msg = render_asymmetric_alert(asym_dict)
-    assert "CHANAKYA ASYMMETRIC OPPORTUNITY" in a_msg
+    assert "ASYMMETRIC SETUP" in a_msg
+    assert "Chanakya" not in a_msg
     assert "POLYCAB" in a_msg
     assert "Moonshot (+6R+):</b> <code>₹7,400.00</code>" in a_msg
     assert "1:3.5 R:R" in a_msg
@@ -281,6 +286,140 @@ def test_render_milestone_alerts():
     assert "VIEW INVALIDATED" in inval_msg
     assert "NO LONGER VALID" in inval_msg
     assert "CANCEL PENDING ORDERS & CLOSE POSITIONS" in inval_msg
+
+
+def test_render_milestone_alert_full_traceability():
+    """Verify Target 1 alert renders full traceability: contract, hashtag ref, call time, original plan, P&L gain."""
+    t1_trace_data = MilestoneAlertData(
+        milestone_type="TARGET_1",
+        symbol="HAL",
+        contract="HAL 26SEP 4500 CE",
+        alert_type="OPTIONS MOMENTUM",
+        ltp=118.10,
+        signal_id="#SIG_HAL_4500CE_11SEP_0942",
+        call_time="2026-09-11 09:42:00 IST",
+        timestamp="2026-09-11 10:45:12 IST",
+        entry_price=105.00,
+        initial_sl=92.00,
+        target_1=118.00,
+        target_2=180.83,
+        trailing_stop=96.54,
+        locked_profit_pct=0.2,
+        pnl_pts=13.10,
+        pnl_pct=12.5,
+        r_multiple=1.0,
+        environment="LIVE",
+    )
+    rendered = render_milestone_alert(t1_trace_data)
+
+    # 1. Header & Instrument
+    assert "TARGET 1 HIT" in rendered
+    assert "HAL 26SEP 4500 CE (OPTIONS MOMENTUM) — TARGET 1 ACHIEVED" in rendered
+
+    # 2. Traceability Tag & Original Call Time
+    assert "🏷️ <b>Ref:</b> <code>#SIG_HAL_4500CE_11SEP_0942</code>" in rendered
+    assert "📞 <b>Call Given:</b> 9:42 AM IST" in rendered
+    assert "⏱️ 1h 03m ago" in rendered
+
+    # 3. Original Plan Baseline
+    assert "Original Plan:" in rendered
+    assert "Entry: ₹105.00" in rendered
+    assert "SL: ₹92.00" in rendered
+    assert "T1: ₹118.00" in rendered
+    assert "T2: ₹180.83" in rendered
+
+    # 4. Current LTP & P&L Attribution
+    assert "LTP:</b> ₹118.10 | <b>Target 1:</b> ₹118.00" in rendered
+    assert "Move:</b> <b>+₹13.10 (+12.5% | +1.0R)</b>" in rendered
+
+    # 5. Trailing Stop & Decisive Action
+    assert "Trail Stop:</b> <code>₹96.54</code> (+0.2% Breakeven Lock) (100% risk-free)" in rendered
+    assert "BOOK 50% PROFIT NOW & HOLD RUNNER (Target 2: ₹180.83)" in rendered
+
+
+def test_render_auto_alert_target_1_traceability():
+    """Verify AutoAlert at T1_ACHIEVED translates seamlessly into a fully traceable Telegram alert."""
+    alert = AutoAlert(
+        alert_id="opt-hal-26sep-4500-ce-12345",
+        alert_type="OPTIONS_MOMENTUM",
+        stage="T1_ACHIEVED",
+        symbol="HAL",
+        exchange="NFO",
+        direction="BULLISH",
+        headline="🎯 [REAL/LIVE] OPTIONS MOMENTUM: HAL 26SEP 4500 CE @ ₹118.10",
+        summary="Target 1 reached at ₹118.10.",
+        ltp=118.10,
+        trigger_level=105.00,
+        target_level=180.83,
+        stop_loss=92.00,
+        strike=4500.0,
+        option_type="CE",
+        contract_symbol="HAL 26SEP 4500 CE",
+        created_at="2026-09-11 09:42:00 IST",
+        actionable_plan={
+            "action": "BUY CE",
+            "contract": "HAL 26SEP 4500 CE",
+            "recommended_entry": "₹105.00",
+            "stop_loss": "₹92.00",
+            "target_1": "₹118.00",
+            "target_2": "₹180.83",
+        },
+        trailing_stop=96.54,
+        locked_profit_pct=0.2,
+        confidence=92,
+        is_live=True,
+        environment="LIVE",
+    )
+
+    rendered = render_auto_alert(alert, in_market=True)
+
+    assert "TARGET 1 HIT" in rendered
+    assert "HAL 26SEP 4500 CE" in rendered
+    assert "#SIG_HAL_4500CE_11SEP_0942" in rendered
+    assert "Original Plan:" in rendered
+    assert "Entry: ₹105.00" in rendered
+    assert "Target 1:</b> ₹118.00" in rendered
+    assert "BOOK 50% PROFIT NOW & HOLD RUNNER" in rendered
+
+
+def test_build_signal_ref_and_time_formatting():
+    """Verify unique, non-clashing hashtag generation and elapsed time formatting."""
+    # 1. Options contract with call timestamp
+    ref1 = build_signal_ref("HAL", alert_id="aa-opt-1234", contract="HAL 26SEP 4500 CE", created_at="2026-09-11 09:42:00 IST")
+    assert ref1 == "#SIG_HAL_4500CE_11SEP_0942"
+
+    # 2. Another call at later time has distinct timestamp hashtag
+    ref2 = build_signal_ref("HAL", alert_id="aa-opt-5678", contract="HAL 26SEP 4500 CE", created_at="2026-09-11 10:15:00 IST")
+    assert ref2 == "#SIG_HAL_4500CE_11SEP_1015"
+    assert ref1 != ref2, "Two distinct calls must never share the same hashtag"
+
+    # 3. Related milestone updates for call 1 strictly reuse call 1's unique hashtag
+    update_data_call1 = MilestoneAlertData(
+        milestone_type="TARGET_1",
+        symbol="HAL",
+        contract="HAL 26SEP 4500 CE",
+        signal_id=ref1,
+        ltp=118.10,
+    )
+    rendered = render_milestone_alert(update_data_call1)
+    assert ref1 in rendered
+    assert ref2 not in rendered
+
+    # 4. Put option hashtag with deterministic timestamp
+    ref_pe = build_signal_ref("BANKNIFTY", alert_id="opt-52000-pe-a9f1", contract="BANKNIFTY 52000 PE", created_at="2026-09-11 09:42:00 IST")
+    assert ref_pe == "#SIG_BANKNIFTY_52000PE_11SEP_0942"
+
+    # 5. Equity alert hashtag
+    ref_eq = build_signal_ref("TRENT", created_at="2026-09-11 09:42:00 IST")
+    assert ref_eq == "#SIG_TRENT_11SEP_0942"
+
+    # 6. Time formatting & elapsed duration
+    call_fmt, elap_fmt = _format_call_time_and_elapsed(
+        "2026-09-11 09:42:00 IST",
+        "2026-09-11 10:45:00 IST",
+    )
+    assert "9:42 AM IST" in call_fmt
+    assert "1h 03m ago" in elap_fmt
 
 
 def test_render_price_alert():
@@ -361,9 +500,64 @@ def test_render_auto_alert_integration():
         confidence=92,
     )
     msg3 = render_auto_alert(opt_alert)
-    assert "Data-Driven Options Plan" in msg3
+    assert "Data-Driven Options Plan" not in msg3
     assert "NIFTY 24500 CE" in msg3
     assert "Expiry:</b>" in msg3
+    assert "Action:</b> BUY <b>NIFTY 24500 CE</b>" in msg3
+    assert "Invalidation SL:</b> <code>₹66.0</code>" in msg3
+
+
+def test_minimalist_alert_hierarchy_and_deduplication():
+    """Verify zero duplicate tags, reason placed after levels, and compact vertical footprint."""
+    opt_alert = AutoAlert(
+        alert_id="auto-dedup-1",
+        alert_type="OPTIONS_MOMENTUM",
+        stage="IGNITED",
+        symbol="BANKNIFTY",
+        exchange="NFO",
+        direction="BEARISH",
+        headline="🎯 [REAL/LIVE] OPTIONS MOMENTUM (PUT SURGE): BANKNIFTY 52000 PE @ ₹145.0",
+        summary="Put buyer surge with 3.2x Vol/OI. Retest of 5m VWAP.",
+        ltp=145.0,
+        trigger_level=52100.0,
+        target_level=240.0,
+        stop_loss=105.0,
+        strike=52000.0,
+        option_type="PE",
+        contract_symbol="BANKNIFTY 52000 PE",
+        actionable_plan={
+            "action": "BUY",
+            "recommended_entry": "₹145.0",
+            "target": "₹240.0",
+            "stop_loss": "₹105.0",
+            "risk_reward": "1:2.4",
+            "expiry": "2026-09-17",
+        },
+        confidence=94,
+    )
+
+    rendered = render_auto_alert(opt_alert, in_market=True)
+
+    # 1. Zero duplicate [REAL/LIVE]
+    assert rendered.count("[REAL/LIVE]") == 1, f"Found multiple [REAL/LIVE] tags in alert: {rendered}"
+    assert "[REAL / LIVE" not in rendered
+    assert "Chanakya" not in rendered
+    assert "Data-Driven Options Plan" not in rendered
+
+    # 2. Hierarchy: Action & Levels appear BEFORE Reason
+    idx_action = rendered.find("Action:")
+    assert idx_action != -1
+    idx_sl = rendered.find("Invalidation SL:")
+    assert idx_sl != -1
+    idx_reason = rendered.find("Reason:")
+    assert idx_reason != -1
+
+    assert idx_action < idx_reason, "Action must appear before Reason"
+    assert idx_sl < idx_reason, "Stop Loss must appear before Reason"
+
+    # 3. Compact line count <= 12 lines
+    lines = [l for l in rendered.split("\n") if l.strip()]
+    assert len(lines) <= 12, f"Alert exceeded 12 lines: {len(lines)} lines"
 
 
 def test_resolve_expiry_cycle_all_scenarios():

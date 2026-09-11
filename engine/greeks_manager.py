@@ -41,15 +41,9 @@ class _PortfolioGreeksLike:
     by_underlying: dict = field(default_factory=dict)
 
 
-LOT_SIZES: dict[str, int] = {
-    "NIFTY": 65,
-    "BANKNIFTY": 30,
-    "FINNIFTY": 60,
-    "MIDCPNIFTY": 120,
-    "NIFTYNXT50": 25,
-    "SENSEX": 20,
-    "BANKEX": 30,
-}
+from engine.position_sizer import _F_AND_O_LOT_SIZES
+
+LOT_SIZES: dict[str, int] = _F_AND_O_LOT_SIZES
 
 
 # ── Delta Hedge ──────────────────────────────────────────────

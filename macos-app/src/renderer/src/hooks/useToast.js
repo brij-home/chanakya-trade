@@ -59,33 +59,45 @@ export const useToastStore = create((set) => ({
 
   addToast: (toast) => {
     const id = ++_toastId
-    set((s) => ({
-      toasts: [
-        ...s.toasts.slice(-4), // Keep max 5 toasts
-        {
-          id,
-          type: 'info',
-          title: '',
-          message: '',
-          duration: 5000,
-          action: null,
-          ...toast,
-          exiting: false,
-        },
-      ],
-    }))
+    const newToast = {
+      id,
+      type: 'info',
+      title: '',
+      message: '',
+      duration: 5000,
+      action: null,
+      ...toast,
+      exiting: false,
+    }
+
+    set((s) => {
+      // Find active non-exiting toasts
+      const active = s.toasts.filter((t) => !t.exiting)
+      let current = [...s.toasts]
+
+      // If already at 3 active toasts, gracefully fade out the oldest active one to make room
+      if (active.length >= 3) {
+        const oldestId = active[0].id
+        current = current.map((t) => (t.id === oldestId ? { ...t, exiting: true } : t))
+        setTimeout(() => {
+          set((st) => ({ toasts: st.toasts.filter((t) => t.id !== oldestId) }))
+        }, 320)
+      }
+
+      return { toasts: [...current, newToast] }
+    })
     return id
   },
 
   dismissToast: (id) => {
-    // Mark as exiting for animation
+    // Mark as exiting for smooth fade-out animation
     set((s) => ({
       toasts: s.toasts.map((t) => (t.id === id ? { ...t, exiting: true } : t)),
     }))
-    // Remove after animation completes
+    // Remove after exit animation completes
     setTimeout(() => {
       set((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) }))
-    }, 280)
+    }, 320)
   },
 
   clearAll: () => set({ toasts: [] }),
@@ -105,13 +117,9 @@ export function useToast() {
 
   const show = useCallback(
     (type, title, message, opts = {}) => {
-      const id = addToast({ type, title, message, ...opts })
-      if (opts.duration !== 0) {
-        setTimeout(() => dismissToast(id), opts.duration ?? 5000)
-      }
-      return id
+      return addToast({ type, title, message, ...opts })
     },
-    [addToast, dismissToast],
+    [addToast],
   )
 
   return {

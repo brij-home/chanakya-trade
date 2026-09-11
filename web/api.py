@@ -2867,6 +2867,42 @@ async def get_telegram_destinations_api():
     return {"status": "ok", "data": get_telegram_destinations()}
 
 
+@app.get("/api/alerts/preferences", tags=["Alerts"])
+async def get_alert_preferences_api():
+    """
+    Get active alert routing and segment subscription matrix.
+    """
+    from engine.alert_preferences import alert_preferences
+
+    return {"status": "ok", "data": alert_preferences.get_preferences()}
+
+
+@app.post("/api/alerts/preferences", tags=["Alerts"])
+async def update_alert_preferences_api(payload: dict):
+    """
+    Update alert routing and segment subscription matrix. Emits SSE broadcast.
+    """
+    from engine.alert_preferences import alert_preferences
+
+    updated = alert_preferences.update_preferences(payload)
+
+    # Emit SSE broadcast
+    try:
+        from web.sse import event_bus
+
+        event_bus.publish_sync(
+            "system",
+            {
+                "type": "alert_preferences_updated",
+                "preferences": updated,
+            },
+        )
+    except Exception:
+        pass
+
+    return {"status": "ok", "data": updated}
+
+
 @app.post("/api/alerts/auto/send-telegram", tags=["Alerts"])
 async def send_alert_to_telegram(payload: dict):
     """

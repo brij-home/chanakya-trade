@@ -98,9 +98,11 @@ def test_mcx_commodity_alert_template_rendering():
     )
 
     rendered = render_auto_alert(alert, in_market=True)
-    assert "[REAL / LIVE MCX COMMODITY SIGNAL]" in rendered
-    assert "MCX Commodity Plan" in rendered
-    assert "BUY_FUTURES MCX:CRUDEOIL" in rendered
+    assert "[REAL/LIVE] MCX MOMENTUM" in rendered
+    assert rendered.count("[REAL/LIVE]") == 1
+    assert "[REAL / LIVE" not in rendered
+    assert "MCX Commodity Plan" not in rendered
+    assert "BUY_FUTURES <b>MCX:CRUDEOIL</b>" in rendered
     assert "Lot: 100" in rendered
     assert "Target 1:" in rendered
     assert "T2:" in rendered
@@ -138,9 +140,11 @@ def test_cds_currency_alert_template_rendering():
     )
 
     rendered = render_auto_alert(alert, in_market=True)
-    assert "[REAL / LIVE CURRENCY BREAKOUT]" in rendered
-    assert "Macro Currency Plan" in rendered
-    assert "BUY_FUTURES CDS:USDINR" in rendered
+    assert "[REAL/LIVE] CURRENCY BREAKOUT" in rendered
+    assert rendered.count("[REAL/LIVE]") == 1
+    assert "[REAL / LIVE" not in rendered
+    assert "Macro Currency Plan" not in rendered
+    assert "BUY_FUTURES <b>CDS:USDINR</b>" in rendered
     assert "Lot: 1000" in rendered
     assert "Target 1:" in rendered
     assert "Scale 50% at T1" in rendered

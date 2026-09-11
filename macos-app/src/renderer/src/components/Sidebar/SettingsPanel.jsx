@@ -43,9 +43,10 @@ const SECTIONS = [
     ],
   },
   {
-    title: 'Notifications',
+    title: 'Notifications & Alert Routing',
     fields: [
       { key: 'TELEGRAM_BOT_TOKEN', label: 'Telegram bot token', type: 'password', placeholder: 'bot12345:...' },
+      { key: 'ALERT_ALLOWED_SEGMENTS', label: 'Allowed alert segments', type: 'text', placeholder: 'FNO_INDEX,FNO_STOCK,EQUITY,COMMODITY,CURRENCY' },
     ],
   },
   {

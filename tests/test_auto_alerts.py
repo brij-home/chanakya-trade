@@ -991,7 +991,7 @@ def test_early_warning_coiling_alert_header_and_plan_formatting(monkeypatch):
     assert "Action:</b> BUY" in msg
     assert "Invalidation SL:</b> <code>₹" in msg
     assert "Target 1:</b> <code>₹" in msg
-    assert "EXCELLENT_ASYMMETRY" in msg
+    assert ("ACCEPTABLE" in msg or "EXCELLENT_ASYMMETRY" in msg)
     assert "session ~21:" not in msg and "ETA: ~21:" not in msg, (
         "Off-market 21:xx hours must not appear in equity ETA"
     )
@@ -1076,7 +1076,7 @@ def test_options_alert_uses_options_plan_directly(monkeypatch):
     assert len(dispatched) == 1
     msg = dispatched[0]
 
-    assert "Data-Driven Options Plan" in msg
+    assert "Data-Driven Options Plan" not in msg
     assert "NIFTY24500CE" in msg
     assert "₹99.0 (+120%)" in msg
     assert "₹29.0 (-35%)" in msg

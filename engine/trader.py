@@ -47,34 +47,9 @@ console = Console()
 
 # ── F&O Lot Sizes (as of 2026, update periodically) ──────────
 
-LOT_SIZES = {
-    "NIFTY": 75,
-    "BANKNIFTY": 15,
-    "FINNIFTY": 25,
-    "MIDCPNIFTY": 50,
-    "RELIANCE": 250,
-    "TCS": 150,
-    "INFY": 300,
-    "HDFCBANK": 550,
-    "ICICIBANK": 700,
-    "SBIN": 750,
-    "BHARTIARTL": 475,
-    "ITC": 1600,
-    "KOTAKBANK": 400,
-    "AXISBANK": 600,
-    "LT": 150,
-    "TATAMOTORS": 575,
-    "MARUTI": 100,
-    "BAJFINANCE": 125,
-    "TITAN": 375,
-    "WIPRO": 1500,
-    "SUNPHARMA": 350,
-    "HINDUNILVR": 300,
-    "ASIANPAINT": 200,
-    "TATASTEEL": 550,
-    "M&M": 350,
-    "ADANIENT": 250,
-}
+from engine.position_sizer import _F_AND_O_LOT_SIZES
+
+LOT_SIZES = _F_AND_O_LOT_SIZES
 
 # Minimum margin requirement approximations (% of contract value)
 MARGIN_PCT = {

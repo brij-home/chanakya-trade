@@ -505,13 +505,13 @@ def _round_strike(spot: float, step: float = 50.0) -> float:
 
 # Default lot sizes for popular Indian underlyings
 LOT_SIZES = {
-    "NIFTY": 25,
-    "NIFTY50": 25,
-    "NIFTY 50": 25,
-    "BANKNIFTY": 15,
-    "NIFTY BANK": 15,
-    "FINNIFTY": 25,
-    "MIDCPNIFTY": 50,
+    "NIFTY": 65,
+    "NIFTY50": 65,
+    "NIFTY 50": 65,
+    "BANKNIFTY": 30,
+    "NIFTY BANK": 30,
+    "FINNIFTY": 60,
+    "MIDCPNIFTY": 120,
 }
 
 STRIKE_STEPS = {

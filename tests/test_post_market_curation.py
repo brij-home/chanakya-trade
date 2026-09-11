@@ -204,7 +204,7 @@ def test_live_mcx_commodity_dispatches_normally_in_evening(clean_engine, monkeyp
         clean_engine._dispatch(alert)
         mock_tg.assert_called_once()
         dispatched_msg = mock_tg.call_args[0][0]
-        assert "[REAL / LIVE MCX COMMODITY SIGNAL]" in dispatched_msg
+        assert "MCX MOMENTUM" in dispatched_msg
 
 
 def test_settlement_invalidation_permitted_post_market(clean_engine, monkeypatch):

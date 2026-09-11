@@ -266,16 +266,18 @@
     100% { stroke-dashoffset: 126; }
   }
 
-  /* Toast slide in from right */
+  /* Toast slide in from right with subtle fade & scale */
   @keyframes toast-in {
-    0%   { opacity: 0; transform: translateX(100%); }
-    100% { opacity: 1; transform: translateX(0); }
+    0%   { opacity: 0; transform: translate3d(100%, 0, 0) scale(0.94); }
+    60%  { opacity: 1; transform: translate3d(-4px, 0, 0) scale(1.01); }
+    100% { opacity: 1; transform: translate3d(0, 0, 0) scale(1); }
   }
 
-  /* Toast slide out to right */
+  /* Toast graceful fade out to make way for new alerts */
   @keyframes toast-out {
-    0%   { opacity: 1; transform: translateX(0); }
-    100% { opacity: 0; transform: translateX(110%); }
+    0%   { opacity: 1; transform: translate3d(0, 0, 0) scale(1); }
+    40%  { opacity: 0.7; transform: translate3d(15px, -2px, 0) scale(0.98); }
+    100% { opacity: 0; transform: translate3d(80px, -6px, 0) scale(0.92); }
   }
 
   /* Persona card flip */

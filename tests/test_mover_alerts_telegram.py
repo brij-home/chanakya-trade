@@ -41,7 +41,8 @@ def test_format_precursor_alert():
 
     msg = format_precursor_alert(candidate_dict)
 
-    assert "CHANAKYA HIGH-CONVICTION PRECURSOR RADAR" in msg
+    assert "PRECURSOR RADAR" in msg
+    assert "Chanakya" not in msg
     assert "TRENT" in msg
     assert "92/100" in msg
     assert "MAX_CONVICTION" in msg
@@ -147,7 +148,8 @@ async def test_cmd_precursors():
         assert mock_update.message.reply_text.call_count >= 2
         final_call_args = mock_update.message.reply_text.call_args_list[-1]
         msg_text = final_call_args[0][0]
-        assert "CHANAKYA PRECURSOR RADAR" in msg_text
+        assert "PRECURSOR RADAR" in msg_text
+        assert "Chanakya" not in msg_text
         assert "INFY" in msg_text
         assert "86/100" in msg_text
 

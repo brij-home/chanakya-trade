@@ -651,8 +651,9 @@ class AlertManager:
             panel_title = f"[bold red]⚠️ {env_tag} ALERT / VIEW INVALIDATED[/bold red]"
             desktop_title = f"⚠️ {env_tag} VIEW INVALIDATED: {alert.symbol}"
             desktop_msg = alert.invalidation_reason or f"{desc} is no longer valid."
-            from bot.alert_templates import render_milestone_alert, MilestoneAlertData
+            from bot.alert_templates import render_milestone_alert, MilestoneAlertData, build_signal_ref
 
+            sig_ref = build_signal_ref(alert.symbol, alert_id=alert.id, created_at=alert.created_at)
             tg_msg = render_milestone_alert(
                 MilestoneAlertData(
                     milestone_type="INVALIDATED",
@@ -662,6 +663,9 @@ class AlertManager:
                     environment=alert.environment,
                     in_market=in_market,
                     timestamp=alert.invalidated_at or alert.created_at,
+                    signal_id=sig_ref,
+                    call_time=alert.created_at,
+                    entry_price=alert.threshold,
                 ),
                 in_market=in_market,
             )
@@ -676,8 +680,9 @@ class AlertManager:
                 alert.trailing_rationale
                 or f"{desc} reached target price ₹{alert.target_price or alert.threshold:,.2f}!"
             )
-            from bot.alert_templates import render_milestone_alert, MilestoneAlertData
+            from bot.alert_templates import render_milestone_alert, MilestoneAlertData, build_signal_ref
 
+            sig_ref = build_signal_ref(alert.symbol, alert_id=alert.id, created_at=alert.created_at)
             tg_msg = render_milestone_alert(
                 MilestoneAlertData(
                     milestone_type="FINAL_TARGET",
@@ -692,6 +697,9 @@ class AlertManager:
                     environment=alert.environment,
                     in_market=in_market,
                     timestamp=alert.triggered_at or alert.created_at,
+                    signal_id=sig_ref,
+                    call_time=alert.created_at,
+                    entry_price=alert.threshold,
                 ),
                 in_market=in_market,
             )
@@ -741,7 +749,13 @@ class AlertManager:
         )
 
         # 3. Telegram push
-        _telegram_notify(tg_msg)
+        tg_chat_id = None
+        seg = getattr(alert, "segment", "") or ""
+        inst = getattr(alert, "instrument_type", "") or ""
+        if inst in ("OPT", "FUT") or seg.upper() in ("FNO", "FNO_INDEX", "FNO_STOCK", "NFO"):
+            import os
+            tg_chat_id = os.environ.get("TELEGRAM_FNO_CHAT_ID") or os.environ.get("TELEGRAM_CHANNEL_ID")
+        _telegram_notify(tg_msg, chat_id=tg_chat_id)
 
         # 4. Webhook (OpenClaw / external agents)
         if alert.webhook_url:
@@ -972,7 +986,7 @@ def _desktop_notify(title: str, message: str) -> None:
     threading.Thread(target=_send, daemon=True).start()
 
 
-def _telegram_notify(message: str) -> None:
+def _telegram_notify(message: str, chat_id: Optional[str] = None) -> None:
     """
     Send a Telegram push notification.
     Non-blocking — runs in background thread.
@@ -985,7 +999,7 @@ def _telegram_notify(message: str) -> None:
     try:
         from bot.telegram_bot import send_push
 
-        send_push(message)
+        send_push(message, chat_id=chat_id)
     except Exception:
         pass
 

@@ -15,10 +15,10 @@ from engine.position_sizer import (
 
 class TestLotSizes:
     def test_nifty_lot_size(self):
-        assert get_lot_size("NIFTY") == 25
+        assert get_lot_size("NIFTY") == 65
 
     def test_banknifty_lot_size(self):
-        assert get_lot_size("BANKNIFTY") == 15
+        assert get_lot_size("BANKNIFTY") == 30
 
     def test_equity_cash_defaults_to_one(self):
         assert get_lot_size("UNKNOWN_EQUITY") == 1
@@ -73,17 +73,17 @@ class TestPositionSizer:
         assert res.capital_allocated <= 200000.0 * 0.20 + 1.0
 
     def test_derivatives_lot_rounding(self):
-        # For NIFTY (lot size 25, price 24000 -> 1 lot = 600,000 INR)
+        # For NIFTY (lot size 65, price 24000 -> 1 lot = 1,560,000 INR)
         res = calculate_position_size(
             symbol="NIFTY",
             entry_price=24000.0,
             stop_loss=23800.0,
-            capital=2000000.0,
+            capital=4000000.0,
             max_risk_pct=1.5,
             sizing_model="fixed_fractional",
-            max_capital_pct=50.0,
+            max_capital_pct=80.0,
             is_fno=True,
         )
-        assert res.lot_size == 25
-        assert res.shares % 25 == 0
+        assert res.lot_size == 65
+        assert res.shares % 65 == 0
         assert res.lots >= 1

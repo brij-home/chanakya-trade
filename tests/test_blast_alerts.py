@@ -31,9 +31,9 @@ def test_format_blast_alert_call():
     assert "₹85.50 – ₹92.70" in html
     assert "Invalidation SL:" in html
     assert "Target 1 (1.5R):" in html
-    assert "Target 2 (2.5R):" in html
-    assert "Trader Execution Playbook:" in html
-    assert "Chanakya Institutional Gamma Desk" in html
+    assert "Playbook:" in html
+    assert "GAMMA BLAST SURGE" in html
+    assert "Chanakya" not in html
 
 
 def test_format_blast_alert_put():

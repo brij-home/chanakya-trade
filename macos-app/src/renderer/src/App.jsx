@@ -15,6 +15,9 @@ import ToastContainer from './components/Toast/ToastContainer'
 import HotkeyPanel from './components/UI/HotkeyPanel'
 import ErrorBoundary from './components/ErrorBoundary'
 import { useToastStore } from './hooks/useToast'
+import NotificationBell from './components/Notifications/NotificationBell'
+import NotificationDetailModal from './components/Notifications/NotificationDetailModal'
+import { useNotificationStore } from './store/notificationStore'
 
 // ── Lazy-loaded Workspace Views (Code-Split Chunks) ─────────────────────────
 const TerminalView = lazy(() => import('./components/Views/TerminalView'))
@@ -107,7 +110,7 @@ export default function App() {
   const setSelectedSymbol = useChatStore((s) => s.setSelectedSymbol)
   const { theme, toggle: toggleTheme } = useTheme()
   const [pilotSafety, setPilotSafety] = useState(null)
-  const [unreadAlertCount, setUnreadAlertCount] = useState(0)
+  const unreadAlertCount = useNotificationStore((s) => s.unreadCount)
 
   // System status SSE URL — connects when port is known
   const systemStreamUrl = port ? `${getBaseUrl(port)}/api/system/stream` : null
@@ -287,8 +290,10 @@ export default function App() {
   // ── Real-Time Auto-Alert Stream (Gamma Blasts, Squeezes, Circuits, Targets, Invalidation) ─────────
   const handleAlertMessage = useCallback((payload) => {
     if (!payload) return
-    setUnreadAlertCount((prev) => prev + 1)
     playAlertChime()
+
+    // Add to persistent notification store (glanceable feed & history)
+    useNotificationStore.getState().addNotification(payload)
 
     const isTest = payload.environment === 'TEST' || payload.is_live === false
     const isInvalidated = payload.is_invalidated === true || payload.stage === 'INVALIDATED'
@@ -342,7 +347,7 @@ export default function App() {
   // Clear unread count when user views the alerts manager
   useEffect(() => {
     if (activeView === 'alerts') {
-      setUnreadAlertCount(0)
+      useNotificationStore.getState().markAllAsRead()
     }
   }, [activeView])
 
@@ -554,6 +559,9 @@ export default function App() {
             </kbd>
           </button>
 
+          {/* Institutional Real-Time Notification Bell */}
+          <NotificationBell onOpenOrderTicket={handleOpenOrderTicket} />
+
           <ThemeToggle theme={theme} toggle={toggleTheme} />
           <StatusDot />
         </div>
@@ -685,6 +693,10 @@ export default function App() {
 
         <ErrorBoundary title="Metric Explainer">
           <MetricExplainerModal />
+        </ErrorBoundary>
+
+        <ErrorBoundary title="Notification Details">
+          <NotificationDetailModal onOpenOrderTicket={handleOpenOrderTicket} />
         </ErrorBoundary>
       </Suspense>
 

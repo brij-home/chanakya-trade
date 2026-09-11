@@ -314,31 +314,42 @@ def _load_chat_id() -> Optional[int]:
 
 async def cmd_start(update, context) -> None:
     """Handle /start command."""
-    _save_chat_id(update.effective_chat.id)
-    await update.message.reply_text(
-        "Welcome to ChanakyaTrade CLI Bot!\n\n"
-        "Commands:\n"
-        "/quote RELIANCE — live price\n"
-        "/analyze RELIANCE — full analysis (3-4 min)\n"
-        "/deepanalyze RELIANCE — deep LLM analysis (7-10 min)\n"
-        "/brief — morning market brief\n"
-        "/conviction [SYMBOL] — 12-factor trade conviction score (0–100)\n"
-        "/movers — daily top gainers & losers forensic autopsy\n"
-        "/precursors — high-conviction coiling setups before breakout\n"
-        "/asymmetric — scan low risk : big reward setups (1:3+ R:R)\n"
-        "/scan [UNIVERSE] — scan top liquid/F&O list for breakouts & gamma blasts\n"
-        "/radar — quick market radar on today's top liquid setups\n"
-        "/flows — FII/DII flow signals\n"
-        "/earnings — upcoming results\n"
-        "/events — event strategies\n"
-        "/macro — USD/INR, crude, gold\n"
-        "/alert RELIANCE above 2800\n"
-        "/alerts — list alerts\n"
-        "/memory — recent analyses\n"
-        "/pnl — portfolio P&L\n"
-        "/help — this message\n\n"
-        "Alerts will be pushed here automatically."
-    )
+    chat = update.effective_chat
+    if chat and chat.type == "private":
+        _save_chat_id(chat.id)
+        await update.message.reply_text(
+            "Welcome to ChanakyaTrade CLI Bot!\n\n"
+            "Commands:\n"
+            "/quote RELIANCE — live price\n"
+            "/analyze RELIANCE — full analysis (3-4 min)\n"
+            "/deepanalyze RELIANCE — deep LLM analysis (7-10 min)\n"
+            "/brief — morning market brief\n"
+            "/conviction [SYMBOL] — 12-factor trade conviction score (0–100)\n"
+            "/movers — daily top gainers & losers forensic autopsy\n"
+            "/precursors — high-conviction coiling setups before breakout\n"
+            "/asymmetric — scan low risk : big reward setups (1:3+ R:R)\n"
+            "/scan [UNIVERSE] — scan top liquid/F&O list for breakouts & gamma blasts\n"
+            "/radar — quick market radar on today's top liquid setups\n"
+            "/flows — FII/DII flow signals\n"
+            "/earnings — upcoming results\n"
+            "/events — event strategies\n"
+            "/macro — USD/INR, crude, gold\n"
+            "/alert RELIANCE above 2800\n"
+            "/alerts — list alerts\n"
+            "/memory — recent analyses\n"
+            "/pnl — portfolio P&L\n"
+            "/help — this message\n\n"
+            "Alerts will be pushed here automatically."
+        )
+    else:
+        title = (chat.title if chat else "") or "Telegram Group"
+        cid = chat.id if chat else "unknown"
+        await update.message.reply_text(
+            f"⚡ <b>{title}</b> connected to ChanakyaTrade Terminal!\n\n"
+            f"Group Chat ID: <code>{cid}</code>\n"
+            "Institutional F&O signals and alerts are configured to stream here.",
+            parse_mode="HTML",
+        )
 
 
 async def cmd_help(update, context) -> None:
@@ -768,6 +779,69 @@ async def cmd_alerts(update, context) -> None:
         await update.message.reply_text(f"Alerts failed: {e}")
 
 
+async def cmd_filter(update, context) -> None:
+    """
+    Handle /filter or /segments [fno_indices, fno_stocks, fno, equity, commodity, currency, all]
+    View or update allowed Telegram push alert segments.
+    """
+    try:
+        from engine.alert_preferences import alert_preferences, CANONICAL_SEGMENTS, normalize_segment_list
+
+        if not context.args:
+            prefs = alert_preferences.get_preferences()
+            tg_prefs = prefs.get("telegram", {})
+            allowed = tg_prefs.get("allowed_segments", list(CANONICAL_SEGMENTS))
+            is_enabled = tg_prefs.get("enabled", True)
+            min_conf = tg_prefs.get("min_confidence", 80)
+
+            seg_emojis = {
+                "FNO_INDEX": "⚡ F&O Indices (NIFTY, BANKNIFTY, SENSEX)",
+                "FNO_STOCK": "🎯 F&O Stocks (Single-Stock Options & Futures)",
+                "EQUITY": "🏢 Cash Equity",
+                "COMMODITY": "🌙 Commodity (MCX)",
+                "CURRENCY": "💱 Currency (CDS)",
+            }
+            status_lines = []
+            for s in CANONICAL_SEGMENTS:
+                icon = "✅" if (s in allowed or ("FNO" in allowed and s.startswith("FNO_"))) else "❌"
+                status_lines.append(f"{icon} {seg_emojis.get(s, s)}")
+
+            msg = (
+                f"⚙️ <b>TELEGRAM ALERT ROUTING</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"<b>Status:</b> {'🟢 Active' if is_enabled else '🔴 Silenced'}\n"
+                f"<b>Min Confidence:</b> {min_conf}%\n\n"
+                f"<b>Subscribed Segments:</b>\n"
+                + "\n".join(status_lines)
+                + "\n\n💡 <i>To change:</i>\n"
+                f"<code>/filter all</code>\n"
+                f"<code>/filter fno_indices</code>\n"
+                f"<code>/filter fno_stocks</code>\n"
+                f"<code>/filter fno</code> <i>(both index + stock F&O)</i>\n"
+                f"<code>/filter fno_indices,equity</code>"
+            )
+            await update.message.reply_text(msg, parse_mode="HTML")
+            return
+
+        arg_str = " ".join(context.args)
+        new_segs = normalize_segment_list(arg_str)
+
+        if not new_segs:
+            await update.message.reply_text(
+                "⚠️ Invalid segment. Choose from: FNO_INDICES, FNO_STOCKS, FNO, EQUITY, COMMODITY, CURRENCY, or ALL.",
+                parse_mode="HTML",
+            )
+            return
+
+        alert_preferences.set_allowed_segments(new_segs, channel="telegram")
+        await update.message.reply_text(
+            f"✅ <b>Telegram Alert Segments Updated:</b>\nAllowed: <code>{', '.join(new_segs)}</code>",
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        await update.message.reply_text(f"Filter update failed: {e}")
+
+
 async def cmd_memory(update, context) -> None:
     """Handle /memory — recent analyses."""
     try:
@@ -951,7 +1025,7 @@ async def cmd_scan(update, context) -> None:
         )
 
         lines = [
-            f"⚡ <b>Chanakya Market Radar — {universe.upper()}</b>\n",
+            f"⚡ <b>Market Radar — {universe.upper()}</b>\n",
             f"<i>Universe: {desc}</i>\n",
         ]
 
@@ -1076,7 +1150,6 @@ async def cmd_movers(update, context) -> None:
             for t in traps[:2]:
                 lines.append(f"• <b>{t.symbol}</b> ({t.change_pct:+.1f}%): <i>{t.trap_reason}</i>")
 
-        lines.append("\n⚡ <i>Chanakya Institutional Quantitative Forensics</i>")
         return "\n".join(lines)
 
     try:
@@ -1124,7 +1197,7 @@ async def cmd_precursors(update, context) -> None:
             )
 
         lines = [
-            f"⚡ <b>CHANAKYA PRECURSOR RADAR [{seg_label}] — {len(candidates)} SETUPS</b>\n"
+            f"⚡ <b>PRECURSOR RADAR [{seg_label}] — {len(candidates)} SETUPS</b>\n"
             f"<i>Candidates exhibiting pre-move DNA before explosive breakouts:</i>\n",
         ]
 
@@ -1140,7 +1213,6 @@ async def cmd_precursors(update, context) -> None:
                 f"  💡 <b>Execution Rule:</b> <i>{c.when_to_wait}</i>\n"
             )
 
-        lines.append("⚡ <i>Chanakya Institutional Momentum Intelligence</i>")
         return "\n".join(lines)
 
     try:
@@ -1185,7 +1257,7 @@ async def cmd_asymmetric(update, context) -> None:
             )
 
         lines = [
-            f"🎯 <b>CHANAKYA ASYMMETRIC RADAR — {len(opps)} HIGH R:R SETUPS</b>\n"
+            f"🎯 <b>ASYMMETRIC RADAR — {len(opps)} HIGH R:R SETUPS</b>\n"
             f"<i>Strictly filtered for Minimum 1:3.0 Risk:Reward & Pre-Ignition Edge:</i>\n",
         ]
 
@@ -1209,7 +1281,6 @@ async def cmd_asymmetric(update, context) -> None:
                 f"  ⚠️ <b>Rule:</b> <i>{o.no_chase_rule}</i>\n"
             )
 
-        lines.append("⚡ <i>Chanakya Low-Risk : High-Reward Radar</i>")
         return "\n".join(lines)
 
     try:
@@ -1225,7 +1296,10 @@ async def cmd_asymmetric(update, context) -> None:
 
 async def cmd_unknown(update, context) -> None:
     """Handle unknown messages."""
-    await update.message.reply_text("Unknown command. Type /help for available commands.")
+    msg = getattr(update, "effective_message", None) or getattr(update, "message", None)
+    if not msg:
+        return
+    await msg.reply_text("Unknown command. Type /help for available commands.")
 
 
 # ── Token validation ─────────────────────────────────────────
@@ -1451,9 +1525,10 @@ def _normalize_push_message(msg: str) -> str:
 
 
 def get_telegram_destinations() -> dict[str, Any]:
-    """Returns available Telegram destinations: default private chat, channel ID (if set in env/keychain)."""
+    """Returns available Telegram destinations: default private chat, F&O group, channel ID."""
     default_chat = _load_chat_id() or ""
     channel_id = os.environ.get("TELEGRAM_CHANNEL_ID", "").strip()
+    fno_chat_id = os.environ.get("TELEGRAM_FNO_CHAT_ID", "").strip()
     if not channel_id:
         try:
             from config.credentials import _kr_get
@@ -1461,10 +1536,27 @@ def get_telegram_destinations() -> dict[str, Any]:
             channel_id = _kr_get("TELEGRAM_CHANNEL_ID") or ""
         except Exception:
             channel_id = ""
+    if not fno_chat_id:
+        try:
+            from engine.alert_preferences import alert_preferences
+
+            fno_chat_id = alert_preferences._preferences.fno_chat_id or ""
+        except Exception:
+            pass
+    if "-1004393392375" in fno_chat_id:
+        fno_name = "Premium_Alpha_Vortex_FnO_Channel"
+    elif "-5352373809" in fno_chat_id:
+        fno_name = "Alpha_Vortex_Signals"
+    elif fno_chat_id:
+        fno_name = "Premium FnO Channel"
+    else:
+        fno_name = ""
     return {
         "default_chat_id": str(default_chat) if default_chat else "",
         "channel_id": channel_id.strip(),
-        "is_configured": bool(default_chat),
+        "fno_chat_id": fno_chat_id.strip(),
+        "fno_chat_name": fno_name,
+        "is_configured": bool(default_chat or fno_chat_id),
     }
 
 
@@ -1580,10 +1672,12 @@ def send_blast_push(
     underlying: str = "NIFTY",
     spot: float = 0.0,
     conviction_score: dict | None = None,
+    chat_id: Optional[str] = None,
 ) -> bool:
     """
     Send an actionable Blast alert notification to Telegram.
     If conviction_score is not provided, computes a live score automatically.
+    Routes to TELEGRAM_FNO_CHAT_ID or TELEGRAM_CHANNEL_ID if configured.
     """
     try:
         # Compute live conviction score if not provided
@@ -1603,7 +1697,13 @@ def send_blast_push(
                 conviction_score = None
 
         msg = format_blast_alert(blast_data, underlying, spot, conviction_score)
-        send_push(msg, parse_mode="HTML", bypass_dedup=True)
+        target_chat_id = (
+            (chat_id or "").strip()
+            or os.environ.get("TELEGRAM_FNO_CHAT_ID", "").strip()
+            or os.environ.get("TELEGRAM_CHANNEL_ID", "").strip()
+            or _load_chat_id()
+        )
+        send_push(msg, parse_mode="HTML", bypass_dedup=True, chat_id=target_chat_id)
         return True
     except Exception as e:
         logger.warning(f"Failed to send blast push to Telegram: {e}")
@@ -1698,9 +1798,16 @@ def run_bot() -> None:
     app.add_handler(CommandHandler("macro", _track_command(cmd_macro)))
     app.add_handler(CommandHandler("alert", _track_command(cmd_alert)))
     app.add_handler(CommandHandler("alerts", _track_command(cmd_alerts)))
+    app.add_handler(CommandHandler("filter", _track_command(cmd_filter)))
+    app.add_handler(CommandHandler("segments", _track_command(cmd_filter)))
     app.add_handler(CommandHandler("memory", _track_command(cmd_memory)))
     app.add_handler(CommandHandler("pnl", _track_command(cmd_pnl)))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, _track_command(cmd_unknown)))
+
+    async def _on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+        logger.warning("Telegram bot update handler error: %s", context.error)
+
+    app.add_error_handler(_on_error)
 
     # Patch alerts for push notifications
     patch_alert_manager()
@@ -1742,18 +1849,34 @@ def run_bot() -> None:
         async with app:
             await app.start()
             await app.updater.start_polling()
-            # Keep running until the daemon thread is killed on process exit
+            logger.info("Telegram bot polling started successfully.")
+            # Keep running until cancelled or process exit
             while True:
-                await asyncio.sleep(3600)
+                try:
+                    await asyncio.sleep(3600)
+                except asyncio.CancelledError:
+                    break
+                except Exception as e:
+                    logger.warning("Bot polling event loop exception: %s", e)
+                    await asyncio.sleep(5)
 
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    try:
-        loop.run_until_complete(_run())
-    except Exception:
-        pass
-    finally:
-        loop.close()
+    while True:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(_run())
+            break
+        except (KeyboardInterrupt, SystemExit):
+            break
+        except Exception as e:
+            logger.error("Telegram bot runner error: %s. Retrying in 5 seconds...", e)
+            import time
+            time.sleep(5)
+        finally:
+            try:
+                loop.close()
+            except Exception:
+                pass
 
 
 def run_bot_background() -> threading.Thread:

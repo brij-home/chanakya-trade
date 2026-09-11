@@ -62,7 +62,7 @@ describe('AlertsView - Institutional Active/Archived standard & Derivative Clari
       target_status: 'PENDING',
       confidence: 90,
       related_strikes: ['NIFTY2691124600CE', 'NIFTY2691124700CE'],
-      created_at: '2026-09-09 13:30:00',
+      created_at: '2026-09-09 13:45:00',
     },
     // 2. Active Future Trade (Monthly Long Future)
     {
@@ -88,7 +88,7 @@ describe('AlertsView - Institutional Active/Archived standard & Derivative Clari
       is_invalidated: false,
       target_status: 'PENDING',
       confidence: 88,
-      created_at: '2026-09-09 13:45:00',
+      created_at: '2026-09-09 13:30:00',
     },
     // 3. Inactive / Archived Trade (Invalidated setup)
     {
@@ -143,6 +143,7 @@ describe('AlertsView - Institutional Active/Archived standard & Derivative Clari
   ]
 
   beforeEach(() => {
+    try { localStorage.clear() } catch (_) {}
     mockCall.mockReset()
     mockCall.mockImplementation((endpoint) => {
       if (endpoint === '/skills/alerts/list') {
@@ -394,44 +395,53 @@ describe('AlertsView - Institutional Active/Archived standard & Derivative Clari
     expect(screen.getAllByText(/Institutional Justification:/i).length).toBeGreaterThanOrEqual(1)
   })
 
-  it('segregates F&O alerts vs Cash Equity alerts with market segment switcher and dedicated section headers', async () => {
+  it('segregates F&O Indices, F&O Stocks, and Cash Equity alerts with granular market segment switcher and dedicated section headers', async () => {
     render(<AlertsView />)
 
     await waitFor(() => {
       expect(screen.getByText('NIFTY')).toBeTruthy()
     })
 
+    // Verify 5-segment rail buttons
     expect(screen.getByRole('button', { name: /All Segments/i })).toBeTruthy()
-    expect(screen.getByRole('button', { name: /Derivatives & F&O/i })).toBeTruthy()
+    expect(screen.getByRole('button', { name: /F&O Indices/i })).toBeTruthy()
+    expect(screen.getByRole('button', { name: /F&O Stocks/i })).toBeTruthy()
     expect(screen.getByRole('button', { name: /Cash Equity/i })).toBeTruthy()
-    expect(screen.getByText(/Institutional Derivatives & Options\/Futures Alerts/i)).toBeTruthy()
+    expect(screen.getByText(/Alert Routing Matrix/i)).toBeTruthy()
+    expect(screen.getByText('ALL 5')).toBeTruthy()
 
-    fireEvent.click(screen.getByRole('button', { name: /Derivatives & F&O/i }))
-    expect(screen.getByText(/Filtered to F&O Only/i)).toBeTruthy()
+    // Dedicated sections in default view
+    expect(screen.getByText(/Institutional Index Derivatives/i)).toBeTruthy()
+    expect(screen.getByText(/Institutional Stock Derivatives/i)).toBeTruthy()
+
+    // Filter to Index Derivatives
+    fireEvent.click(screen.getByRole('button', { name: /F&O Indices/i }))
     expect(screen.getByText('NIFTY')).toBeTruthy()
 
-    fireEvent.click(screen.getByRole('button', { name: /Cash Equity/i }))
-    expect(screen.getByText(/Filtered to Cash Equity Only/i)).toBeTruthy()
+    // Filter to Stock Derivatives
+    fireEvent.click(screen.getByRole('button', { name: /F&O Stocks/i }))
+    expect(screen.getByText('RELIANCE')).toBeTruthy()
   })
 
-  it('filters by Conviction 85%+ and Multi-Strike flow chips', async () => {
+  it('filters by Conviction 85%+ and Multi-Strike flow via Category dropdown', async () => {
     render(<AlertsView />)
 
     await waitFor(() => {
       expect(screen.getByText('NIFTY')).toBeTruthy()
     })
 
-    const convictionBtn = screen.getByRole('button', { name: /⭐ Conviction 85%\+/i })
-    expect(convictionBtn).toBeTruthy()
-    fireEvent.click(convictionBtn)
+    const categorySelect = screen.getByTitle(/Filter by setup \/ strategy category/i)
+    expect(categorySelect).toBeTruthy()
+
+    // Filter by Conviction 85%+
+    fireEvent.change(categorySelect, { target: { value: 'HIGH_CONVICTION' } })
 
     // Alert 1 (NIFTY - 90%) and Alert 2 (RELIANCE - 88%) qualify
     expect(screen.getByText('NIFTY')).toBeTruthy()
     expect(screen.getByText('RELIANCE')).toBeTruthy()
 
-    const multiStrikeBtn = screen.getByRole('button', { name: /🌊 Multi-Strike/i })
-    expect(multiStrikeBtn).toBeTruthy()
-    fireEvent.click(multiStrikeBtn)
+    // Filter by Multi-Strike flow
+    fireEvent.change(categorySelect, { target: { value: 'MULTI_FLOW' } })
 
     // Only NIFTY has related_strikes
     expect(screen.getByText('NIFTY')).toBeTruthy()
