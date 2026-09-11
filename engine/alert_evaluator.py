@@ -599,9 +599,13 @@ def evaluate_alert_in_flight_decay(
     Empowers the trader with high-priority advisory friction to scratch at breakeven
     or tighten stops BEFORE suffering a full 100% loss.
     """
-    if getattr(alert, "is_invalidated", False) or getattr(alert, "stage", "") in ("INVALIDATED", "COMPLETED"):
-        return None
-    if getattr(alert, "in_flight_warning_sent", False):
+    if (
+        getattr(alert, "is_invalidated", False)
+        or getattr(alert, "stage", "") in ("INVALIDATED", "COMPLETED", "IN_FLIGHT_WARNING")
+        or getattr(alert, "in_flight_warning_sent", False)
+        or getattr(alert, "target_status", "") in ("T1_ACHIEVED", "FINAL_ACHIEVED", "TARGET_ACHIEVED")
+        or "T1_ACHIEVED" in (getattr(alert, "achieved_milestones", []) or [])
+    ):
         return None
 
     is_option = is_alert_option_premium_level(alert)
@@ -709,27 +713,35 @@ def evaluate_alert_in_flight_decay(
         dist_to_sl_pct = ((stop - current_ltp) / current_ltp) * 100 if (stop and current_ltp > 0) else 999.0
 
     # 5. Trigger A: Danger Zone Warning (>= 70% Risk Consumed OR within 1.5% of SL)
-    if stop and (risk_consumed_pct >= 70.0 or (0.0 < dist_to_sl_pct <= 1.5)):
-        eff_consumed = max(70.0, min(99.0, risk_consumed_pct))
-        headline = f"⚠️ {env_tag} IN-FLIGHT WARNING: {alert.symbol} (Danger Zone: {eff_consumed:.0f}% Risk Consumed)"
-        summary = (
-            f"LTP ₹{current_ltp:,.2f} is within {dist_to_sl_pct:.1f}% of Stop-Loss (₹{stop:,.2f}). "
-            f"{eff_consumed:.0f}% of risk budget is eroded (P&L: {pnl_pct:+.1f}%). "
-            f"DECISION: SCRATCH POSITION AT MARKET OR TIGHTEN STOP TO PREVENT FULL CAPITAL LOSS."
-        )
-        return InFlightWarningEvaluation(
-            triggered=True,
-            warning_type="DANGER_ZONE",
-            reason=f"DANGER ZONE: {eff_consumed:.0f}% risk budget consumed. LTP ₹{current_ltp:,.2f} near SL ₹{stop:,.2f}",
-            coaching_decision="SCRATCH_OR_TIGHTEN_STOP",
-            current_ltp=current_ltp,
-            entry_price=entry,
-            stop_loss=stop,
-            risk_consumed_pct=round(eff_consumed, 1),
-            pnl_pct=round(pnl_pct, 1),
-            headline=headline,
-            summary=summary,
-        )
+    # INVARIANT: Danger Zone STRICTLY applies to positions in an active LOSS.
+    # A position in profit (pnl_pts >= 0, pnl_pct >= 0, or risk_consumed_pct <= 0) can NEVER be in the Danger Zone!
+    is_in_loss = (pnl_pts < 0.0) or (pnl_pct < 0.0) or (risk_consumed_pct > 0.0)
+    is_profitable = (pnl_pts >= 0.0) and (pnl_pct >= 0.0) and (risk_consumed_pct <= 0.0)
+
+    if stop and is_in_loss and not is_profitable:
+        # Trigger if >= 70% of risk budget is eroded, OR if within 1.5% of SL with >= 50% risk consumed
+        is_danger = (risk_consumed_pct >= 70.0) or ((0.0 < dist_to_sl_pct <= 1.5) and (risk_consumed_pct >= 50.0))
+        if is_danger:
+            eff_consumed = max(50.0, min(99.0, risk_consumed_pct))
+            headline = f"⚠️ {env_tag} IN-FLIGHT WARNING: {alert.symbol} (Danger Zone: {eff_consumed:.0f}% Risk Consumed)"
+            summary = (
+                f"LTP ₹{current_ltp:,.2f} is within {dist_to_sl_pct:.1f}% of Stop-Loss (₹{stop:,.2f}). "
+                f"{eff_consumed:.0f}% of risk budget is eroded (P&L: {pnl_pct:+.1f}%). "
+                f"DECISION: SCRATCH POSITION AT MARKET OR TIGHTEN STOP TO PREVENT FULL CAPITAL LOSS."
+            )
+            return InFlightWarningEvaluation(
+                triggered=True,
+                warning_type="DANGER_ZONE",
+                reason=f"DANGER ZONE: {eff_consumed:.0f}% risk budget consumed. LTP ₹{current_ltp:,.2f} near SL ₹{stop:,.2f}",
+                coaching_decision="SCRATCH_OR_TIGHTEN_STOP",
+                current_ltp=current_ltp,
+                entry_price=entry,
+                stop_loss=stop,
+                risk_consumed_pct=round(eff_consumed, 1),
+                pnl_pct=round(pnl_pct, 1),
+                headline=headline,
+                summary=summary,
+            )
 
     # 6. Trigger B: In-Flight Theta Decay & Stagnation (Option Greeks-Aware Horizon)
     is_deriv_alert = bool(

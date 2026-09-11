@@ -161,6 +161,21 @@ class AutoAlertEngine:
         ]
         self._load()
         self.cleanup_corrupted_test_alerts()
+        # Seed dispatched milestones from loaded state to prevent duplicate dispatches across restarts
+        with self._lock:
+            for a in self._alerts:
+                aid = getattr(a, "alert_id", "")
+                sym = getattr(a, "symbol", "")
+                atype = getattr(a, "alert_type", "")
+                if getattr(a, "in_flight_warning_sent", False) or a.stage == "IN_FLIGHT_WARNING":
+                    self._dispatched_milestones.add(f"{sym}:{aid}:IN_FLIGHT_WARNING")
+                if a.is_invalidated or a.stage == "INVALIDATED":
+                    self._dispatched_milestones.add(f"{sym}:{aid}:INVALIDATED")
+                achieved = getattr(a, "achieved_milestones", []) or []
+                if "T1_ACHIEVED" in achieved:
+                    self._dispatched_milestones.add(f"{sym}:{atype}:T1")
+                if "FINAL_ACHIEVED" in achieved:
+                    self._dispatched_milestones.add(f"{sym}:{atype}:FINAL")
 
     @property
     def watched_commodities(self) -> list[str]:
@@ -1032,6 +1047,12 @@ class AutoAlertEngine:
                         return
                     self._dispatch_cooldowns[m_key] = now_ts
 
+                elif alert.stage == "IN_FLIGHT_WARNING":
+                    m_key = f"{alert.symbol}:{getattr(alert, 'alert_id', '')}:IN_FLIGHT_WARNING"
+                    if m_key in self._dispatched_milestones:
+                        return
+                    self._dispatched_milestones.add(m_key)
+
             from bot.alert_templates import render_auto_alert
 
             from engine.alert_preferences import classify_alert_segment
@@ -1350,8 +1371,10 @@ class AutoAlertEngine:
                 a
                 for a in self._alerts
                 if not a.is_invalidated
-                and a.stage not in ("INVALIDATED", "COMPLETED")
+                and a.stage not in ("INVALIDATED", "COMPLETED", "IN_FLIGHT_WARNING")
                 and not getattr(a, "in_flight_warning_sent", False)
+                and getattr(a, "target_status", "") not in ("T1_ACHIEVED", "FINAL_ACHIEVED", "TARGET_ACHIEVED")
+                and "T1_ACHIEVED" not in (getattr(a, "achieved_milestones", []) or [])
                 and not (a.environment == "TEST" or not a.is_live)
                 and (not exch_filter or (a.exchange or "NSE").upper() in exch_filter)
             ]
@@ -1389,6 +1412,7 @@ class AutoAlertEngine:
                     alert.summary = eval_res.summary
                     alert.trailing_decision = eval_res.coaching_decision
                     alert.pnl_pct = eval_res.pnl_pct
+                    self._dispatched_milestones.add(f"{alert.symbol}:{getattr(alert, 'alert_id', '')}:IN_FLIGHT_WARNING")
                     self._save()
 
                 self._dispatch(alert)
@@ -3651,6 +3675,11 @@ class AutoAlertEngine:
                                 updated_at=d.get("updated_at"),
                                 triggered_at=d.get("triggered_at"),
                                 original_call_time=d.get("original_call_time") or d.get("created_at"),
+                                in_flight_warning_sent=bool(d.get("in_flight_warning_sent", False)),
+                                in_flight_warning_reason=d.get("in_flight_warning_reason"),
+                                in_flight_warning_at=d.get("in_flight_warning_at"),
+                                mtf_confluence=d.get("mtf_confluence"),
+                                vix_regime=d.get("vix_regime"),
                             )
                         )
                 # Rehabilitate alerts erroneously invalidated by the inverted Put option stop-loss bug

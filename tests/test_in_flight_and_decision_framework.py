@@ -514,6 +514,140 @@ class TestInFlightDecayAlerts:
                 assert len(warned_second) == 0
                 assert mock_dispatch.call_count == 1  # Still 1!
 
+    def test_danger_zone_disqualified_when_trade_in_profit(self):
+        """A trade in profit (e.g. MCX:CRUDEOIL short) MUST NEVER trigger DANGER_ZONE even if distance to SL < 1.5%."""
+        # Short trade: Entry 9522.05, SL 9555.40, LTP 9509.10 (+12.95 pts profit)
+        # Note: Raw distance from 9509.10 to 9555.40 is 46.3 pts (0.49% of spot price),
+        # but because the position is WINNING, it must NEVER be flagged in Danger Zone!
+        crude_short = AutoAlert(
+            alert_id="crude-prof-1",
+            alert_type="COMMODITY_MOMENTUM",
+            stage="IGNITED",
+            symbol="CRUDEOIL",
+            exchange="MCX",
+            direction="BEARISH",
+            headline="Crude Short",
+            summary="Testing profit exclusion",
+            trigger_level=9522.05,
+            stop_loss=9555.40,
+            target_level=9460.0,
+            ltp=9509.10,
+            is_live=True,
+        )
+        res = evaluate_alert_in_flight_decay(crude_short, current_ltp=9509.10)
+        assert res is None  # Must NOT trigger!
+
+        # Long trade in profit: Entry 2800, SL 2760, LTP 2820 (+20 pts profit)
+        # Raw distance to SL 2760 is 60 pts (2.1%), in profit.
+        trent_long = AutoAlert(
+            alert_id="trent-prof-1",
+            alert_type="SQUEEZE_BREAKOUT",
+            stage="IGNITED",
+            symbol="TRENT",
+            exchange="NSE",
+            direction="BULLISH",
+            headline="Trent Long",
+            summary="Testing profit exclusion",
+            trigger_level=2800.0,
+            stop_loss=2760.0,
+            target_level=2950.0,
+            ltp=2820.0,
+            is_live=True,
+        )
+        res_long = evaluate_alert_in_flight_decay(trent_long, current_ltp=2820.0)
+        assert res_long is None  # Must NOT trigger!
+
+    def test_in_flight_warning_disqualified_when_target_1_already_achieved(self):
+        """Trades that have achieved Target 1 are risk-free or trailing, and must NEVER receive in-flight warnings."""
+        alert = AutoAlert(
+            alert_id="t1-achieved-1",
+            alert_type="COMMODITY_MOMENTUM",
+            stage="IGNITED",
+            symbol="CRUDEOIL",
+            exchange="MCX",
+            direction="BEARISH",
+            headline="Crude Short T1",
+            summary="T1 achieved testing",
+            trigger_level=9522.05,
+            stop_loss=9555.40,
+            target_level=9460.0,
+            ltp=9515.0,
+            is_live=True,
+            target_status="T1_ACHIEVED",
+            achieved_milestones=["T1_ACHIEVED"],
+        )
+        res = evaluate_alert_in_flight_decay(alert, current_ltp=9515.0)
+        assert res is None
+
+    def test_dispatch_milestone_latch_prevents_duplicate_in_flight_warnings(self, mock_engine):
+        """_dispatch() must latch IN_FLIGHT_WARNING in _dispatched_milestones and never send duplicates."""
+        alert = AutoAlert(
+            alert_id="latch-dispatch-1",
+            alert_type="COMMODITY_MOMENTUM",
+            stage="IN_FLIGHT_WARNING",
+            symbol="CRUDEOIL",
+            exchange="MCX",
+            direction="BEARISH",
+            headline="Crude Warning",
+            summary="Warning testing",
+            trigger_level=9522.05,
+            stop_loss=9555.40,
+            target_level=9460.0,
+            ltp=9550.0,
+            is_live=True,
+            environment="LIVE",
+            in_flight_warning_sent=True,
+            in_flight_warning_reason="DANGER ZONE: 84% risk budget consumed.",
+        )
+        with patch("engine.alerts._telegram_notify") as mock_notify:
+            # First dispatch -> dispatches to Telegram
+            mock_engine._dispatch(alert)
+            assert mock_notify.call_count == 1
+            latch_key = f"CRUDEOIL:latch-dispatch-1:IN_FLIGHT_WARNING"
+            assert latch_key in mock_engine._dispatched_milestones
+
+            # Second dispatch -> MUST be suppressed by milestone latch!
+            mock_engine._dispatch(alert)
+            assert mock_notify.call_count == 1  # Still 1! Zero duplicate!
+
+    def test_load_restores_in_flight_warning_fields(self, tmp_path, monkeypatch):
+        """_load() accurately restores in_flight_warning_sent and seeds _dispatched_milestones."""
+        data_file = tmp_path / "auto_alerts.json"
+        monkeypatch.setattr("engine.auto_alert_engine.get_auto_alerts_file", lambda: data_file)
+
+        engine = AutoAlertEngine()
+        alert = AutoAlert(
+            alert_id="persist-warn-1",
+            alert_type="COMMODITY_MOMENTUM",
+            stage="IN_FLIGHT_WARNING",
+            symbol="CRUDEOIL",
+            exchange="MCX",
+            direction="BEARISH",
+            headline="Crude Warning",
+            summary="Warning testing",
+            trigger_level=9522.05,
+            stop_loss=9555.40,
+            target_level=9460.0,
+            ltp=9550.0,
+            is_live=True,
+            environment="LIVE",
+            in_flight_warning_sent=True,
+            in_flight_warning_reason="DANGER ZONE: 84% risk consumed.",
+            in_flight_warning_at="2026-09-11 22:00:00 IST",
+        )
+        engine._alerts = [alert]
+        engine._save()
+
+        # Create fresh engine instance loading from disk
+        new_engine = AutoAlertEngine()
+        assert len(new_engine._alerts) == 1
+        loaded = new_engine._alerts[0]
+        assert loaded.in_flight_warning_sent is True
+        assert loaded.in_flight_warning_reason == "DANGER ZONE: 84% risk consumed."
+        assert loaded.in_flight_warning_at == "2026-09-11 22:00:00 IST"
+        # Seeded milestone check
+        assert f"CRUDEOIL:persist-warn-1:IN_FLIGHT_WARNING" in new_engine._dispatched_milestones
+
 
 # ── Telegram Alert Template Formatting Tests ─────────────────────────────────
 
