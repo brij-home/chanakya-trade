@@ -207,6 +207,10 @@ class AlertPreferencesUpdateRequest(BaseModel):
     desktop: Optional[Any] = None
     sound: Optional[Any] = None
     pause_disabled_scanners: Optional[bool] = None
+    fno_chat_id: Optional[str] = None
+    fno_index_chat_id: Optional[str] = None
+    mcx_chat_id: Optional[str] = None
+    equity_chat_id: Optional[str] = None
 
 
 class AutoAlertArchiveRequest(BaseModel):

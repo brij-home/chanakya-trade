@@ -931,4 +931,53 @@ def test_render_auto_alert_no_conflicting_cmp_or_stale_timestamp():
     assert "2026-09-10 19:51:54" not in rendered
 
 
+def test_render_auto_alert_sanitizes_degenerate_h_and_s():
+    """Verify that degenerate 'h' headline, 's' reason, and static R:R are repaired to institutional quality."""
+    from engine.auto_alert_engine import AutoAlert
+    from bot.alert_templates import render_auto_alert
+
+    alert = AutoAlert(
+        alert_id="aa-optmom-pe-DIXON-13500-123456",
+        alert_type="OPTIONS_MOMENTUM",
+        stage="IGNITED",
+        symbol="DIXON",
+        exchange="NFO",
+        direction="BEARISH",
+        headline="h",
+        summary="s",
+        ltp=450.0,
+        trigger_level=450.0,
+        target_level=732.5,
+        stop_loss=382.5,
+        strike=13500.0,
+        option_type="PE",
+        contract_symbol="DIXON13500PE",
+        option_premium=450.0,
+        underlying_spot=13520.0,
+        confidence=88,
+        actionable_plan={
+            "action": "BUY PE",
+            "recommended_entry": "₹450.0",
+            "stop_loss": "₹382.5",
+            "target": "₹732.5",
+            "risk_reward": "1:3.0",  # Stale static fallback
+        },
+        triggered_at="2026-09-11 15:28:36 IST",
+    )
+
+    rendered = render_auto_alert(alert, in_market=True)
+
+    # 1. Must NOT render degenerate single-character 'h' or 's'
+    assert "<b>h</b>" not in rendered
+    assert "<b>Reason:</b> <i>s</i>" not in rendered
+    assert "DIXON 13500 PE" in rendered
+
+    # 2. Dynamic R:R calculation must accurately reflect 282.5 / 67.5 = 1:4.2, NOT static 1:3.0
+    assert "1:4.2" in rendered
+
+    # 3. Zero-redundancy spot presentation: Spot: ₹13,520.00 must appear exactly ONCE
+    assert rendered.count("Spot:") == 1
+
+
+
 

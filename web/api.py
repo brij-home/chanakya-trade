@@ -2921,6 +2921,8 @@ async def send_alert_to_telegram(payload: dict):
 
     alert_id = payload.get("alert_id")
     chat_id = payload.get("chat_id")
+    if chat_id is not None and isinstance(chat_id, str):
+        chat_id = chat_id.strip() or None
     if not alert_id:
         raise HTTPException(status_code=400, detail="Missing alert_id")
 

@@ -806,6 +806,21 @@ async def cmd_filter(update, context) -> None:
                 icon = "✅" if (s in allowed or ("FNO" in allowed and s.startswith("FNO_"))) else "❌"
                 status_lines.append(f"{icon} {seg_emojis.get(s, s)}")
 
+            dest_lines = []
+            fno_idx_cid = prefs.get("fno_index_chat_id") or os.environ.get("TELEGRAM_FNO_INDEX_CHAT_ID", "-1004380788314")
+            if fno_idx_cid:
+                dest_lines.append(f"• <b>F&O Index:</b> <code>Premium_Alpha_Vortex_FnO_Index</code> (<code>{fno_idx_cid}</code>)")
+            fno_cid = prefs.get("fno_chat_id") or os.environ.get("TELEGRAM_FNO_CHAT_ID", "")
+            if fno_cid:
+                dest_lines.append(f"• <b>F&O Stock:</b> <code>{fno_cid}</code>")
+            mcx_cid = prefs.get("mcx_chat_id") or os.environ.get("TELEGRAM_MCX_CHAT_ID", "-1004320002599")
+            if mcx_cid:
+                dest_lines.append(f"• <b>MCX/Currency:</b> <code>Premium_Alpha_Vortex_MCX_Channel</code> (<code>{mcx_cid}</code>)")
+            eq_cid = prefs.get("equity_chat_id") or os.environ.get("TELEGRAM_EQUITY_CHAT_ID", "-1003524867091")
+            if eq_cid:
+                dest_lines.append(f"• <b>Equity Channel:</b> <code>Premium_Alpha_Vortex_Equity_Channel</code> (<code>{eq_cid}</code>)")
+            dest_str = ("\n<b>Routing Destinations:</b>\n" + "\n".join(dest_lines) + "\n") if dest_lines else ""
+
             msg = (
                 f"⚙️ <b>TELEGRAM ALERT ROUTING</b>\n"
                 f"━━━━━━━━━━━━━━━━━━━━\n"
@@ -813,7 +828,8 @@ async def cmd_filter(update, context) -> None:
                 f"<b>Min Confidence:</b> {min_conf}%\n\n"
                 f"<b>Subscribed Segments:</b>\n"
                 + "\n".join(status_lines)
-                + "\n\n💡 <i>To change:</i>\n"
+                + f"\n{dest_str}"
+                + "\n💡 <i>To change:</i>\n"
                 f"<code>/filter all</code>\n"
                 f"<code>/filter fno_indices</code>\n"
                 f"<code>/filter fno_stocks</code>\n"
@@ -1551,12 +1567,75 @@ def get_telegram_destinations() -> dict[str, Any]:
         fno_name = "Premium FnO Channel"
     else:
         fno_name = ""
+    fno_index_chat_id = os.environ.get("TELEGRAM_FNO_INDEX_CHAT_ID", "").strip()
+    if not fno_index_chat_id:
+        try:
+            from engine.alert_preferences import alert_preferences
+
+            fno_index_chat_id = alert_preferences._preferences.fno_index_chat_id or ""
+        except Exception:
+            pass
+    if not fno_index_chat_id:
+        fno_index_chat_id = "-1004380788314"
+
+    if "-1004380788314" in fno_index_chat_id:
+        fno_index_name = "Premium_Alpha_Vortex_FnO_Index"
+    elif fno_index_chat_id:
+        fno_index_name = "Premium FnO Index Channel"
+    else:
+        fno_index_name = ""
+
+    mcx_chat_id = (
+        os.environ.get("TELEGRAM_MCX_CHAT_ID", "").strip()
+        or os.environ.get("TELEGRAM_COMMODITY_CHAT_ID", "").strip()
+    )
+    if not mcx_chat_id:
+        try:
+            from engine.alert_preferences import alert_preferences
+
+            mcx_chat_id = alert_preferences._preferences.mcx_chat_id or ""
+        except Exception:
+            pass
+    if not mcx_chat_id:
+        mcx_chat_id = "-1004320002599"
+
+    if "-1004320002599" in mcx_chat_id:
+        mcx_name = "Premium_Alpha_Vortex_MCX_Channel"
+    elif mcx_chat_id:
+        mcx_name = "Premium MCX Channel"
+    else:
+        mcx_name = ""
+
+    equity_chat_id = os.environ.get("TELEGRAM_EQUITY_CHAT_ID", "").strip()
+    if not equity_chat_id:
+        try:
+            from engine.alert_preferences import alert_preferences
+
+            equity_chat_id = alert_preferences._preferences.equity_chat_id or ""
+        except Exception:
+            pass
+    if not equity_chat_id:
+        equity_chat_id = "-1003524867091"
+
+    if "-1003524867091" in equity_chat_id:
+        equity_name = "Premium_Alpha_Vortex_Equity_Channel"
+    elif equity_chat_id:
+        equity_name = "Premium Equity Channel"
+    else:
+        equity_name = ""
+
     return {
         "default_chat_id": str(default_chat) if default_chat else "",
         "channel_id": channel_id.strip(),
         "fno_chat_id": fno_chat_id.strip(),
         "fno_chat_name": fno_name,
-        "is_configured": bool(default_chat or fno_chat_id),
+        "fno_index_chat_id": fno_index_chat_id.strip(),
+        "fno_index_chat_name": fno_index_name,
+        "mcx_chat_id": mcx_chat_id.strip(),
+        "mcx_chat_name": mcx_name,
+        "equity_chat_id": equity_chat_id.strip(),
+        "equity_chat_name": equity_name,
+        "is_configured": bool(default_chat or fno_chat_id or fno_index_chat_id or mcx_chat_id or equity_chat_id),
     }
 
 

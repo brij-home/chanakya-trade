@@ -753,11 +753,17 @@ class AlertManager:
 
         # 3. Telegram push
         tg_chat_id = None
-        seg = getattr(alert, "segment", "") or ""
-        inst = getattr(alert, "instrument_type", "") or ""
-        if inst in ("OPT", "FUT") or seg.upper() in ("FNO", "FNO_INDEX", "FNO_STOCK", "NFO"):
-            import os
-            tg_chat_id = os.environ.get("TELEGRAM_FNO_CHAT_ID") or os.environ.get("TELEGRAM_CHANNEL_ID")
+        try:
+            from engine.alert_preferences import alert_preferences, classify_alert_segment
+
+            target_seg = getattr(alert, "segment", None)
+            if not target_seg or target_seg == "EQUITY":
+                detected = classify_alert_segment(alert)
+                if detected != "EQUITY" or not target_seg:
+                    target_seg = detected
+            tg_chat_id = alert_preferences.get_telegram_chat_id(target_seg)
+        except Exception:
+            tg_chat_id = None
         _telegram_notify(tg_msg, chat_id=tg_chat_id)
 
         # 4. Webhook (OpenClaw / external agents)
@@ -996,7 +1002,12 @@ def _telegram_notify(message: str, chat_id: Optional[str] = None) -> None:
     Never dispatches during test execution or test deployment modes.
     """
     import os
+    import sys
     if os.environ.get("CHANAKYA_TESTING") == "1" or os.environ.get("DEPLOY_MODE") == "test":
+        return
+
+    # Suppress ad-hoc python -c executions unless explicitly authorized
+    if sys.argv and sys.argv[0] == "-c" and os.environ.get("ALLOW_MANUAL_TELEGRAM_DISPATCH", "0").lower() not in ("1", "true"):
         return
 
     try:

@@ -655,14 +655,35 @@ function TelegramPreflightModal({ alert, onConfirm, onCancel, sending, sentOk, s
         if (callRef?.current) {
           const res = await callRef.current('/api/alerts/auto/telegram-destinations')
           if (active && res?.data) {
-            setDestInfo(res.data)
-            const isFno = Boolean(
-              alert?.option_type ||
-              ['FNO_INDEX', 'FNO_STOCK', 'FNO'].includes((alert?.segment || '').toUpperCase()) ||
-              ['GAMMA_BLAST', 'OPTIONS_MOMENTUM'].includes(alert?.alert_type)
+            const cleanSym = (alert?.symbol || '').replace(/^(NSE|BSE|MCX|NFO|CDS):/, '').trim().toUpperCase()
+            const isIndexSym = ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'NIFTYNXT50', 'SENSEX', 'BANKEX'].includes(cleanSym)
+            const isFnoIndex = Boolean(
+              (alert?.segment || '').toUpperCase() === 'FNO_INDEX' ||
+              (isIndexSym && (alert?.option_type || ['GAMMA_BLAST', 'OPTIONS_MOMENTUM'].includes(alert?.alert_type) || ['FNO', 'NFO'].includes((alert?.exchange || '').toUpperCase())))
             )
-            if (res.data.fno_chat_id && isFno) {
+            const isFnoStock = Boolean(
+              !isFnoIndex && (
+                alert?.option_type ||
+                ['FNO_INDEX', 'FNO_STOCK', 'FNO'].includes((alert?.segment || '').toUpperCase()) ||
+                ['GAMMA_BLAST', 'OPTIONS_MOMENTUM'].includes(alert?.alert_type)
+              )
+            )
+            const isMcx = Boolean(
+              (alert?.exchange || '').toUpperCase() === 'MCX' ||
+              (alert?.exchange || '').toUpperCase() === 'CDS' ||
+              ['COMMODITY', 'CURRENCY', 'MCX', 'CDS'].includes((alert?.segment || '').toUpperCase()) ||
+              ['COMMODITY_MOMENTUM', 'CURRENCY_BREAKOUT'].includes(alert?.alert_type) ||
+              (alert?.symbol || '').toUpperCase().startsWith('MCX:') ||
+              (alert?.symbol || '').toUpperCase().startsWith('CDS:')
+            )
+            if (res.data.fno_index_chat_id && isFnoIndex) {
+              setDestMode('FNO_INDEX_GROUP')
+            } else if (res.data.fno_chat_id && isFnoStock) {
               setDestMode('FNO_GROUP')
+            } else if (res.data.mcx_chat_id && isMcx) {
+              setDestMode('MCX_GROUP')
+            } else if (res.data.equity_chat_id) {
+              setDestMode('EQUITY_GROUP')
             }
             if (res.data.channel_id && !customChannel) {
               setCustomChannel(res.data.channel_id)
@@ -774,6 +795,19 @@ function TelegramPreflightModal({ alert, onConfirm, onCancel, sending, sentOk, s
               >
                 🔒 Default Chat
               </button>
+              {destInfo?.fno_index_chat_id && (
+                <button
+                  type="button"
+                  onClick={() => setDestMode('FNO_INDEX_GROUP')}
+                  className={`text-[9px] px-2 py-0.5 rounded font-bold transition-all ${
+                    destMode === 'FNO_INDEX_GROUP'
+                      ? 'bg-sky-500/20 text-sky-300 border border-sky-500/40'
+                      : 'text-muted hover:text-text'
+                  }`}
+                >
+                  ⚡ {destInfo.fno_index_chat_name || 'Premium FnO Index'}
+                </button>
+              )}
               {destInfo?.fno_chat_id && (
                 <button
                   type="button"
@@ -784,7 +818,33 @@ function TelegramPreflightModal({ alert, onConfirm, onCancel, sending, sentOk, s
                       : 'text-muted hover:text-text'
                   }`}
                 >
-                  ⚡ {destInfo.fno_chat_name || 'Premium FnO Channel'}
+                  🎯 {destInfo.fno_chat_name || 'Premium FnO Channel'}
+                </button>
+              )}
+              {destInfo?.mcx_chat_id && (
+                <button
+                  type="button"
+                  onClick={() => setDestMode('MCX_GROUP')}
+                  className={`text-[9px] px-2 py-0.5 rounded font-bold transition-all ${
+                    destMode === 'MCX_GROUP'
+                      ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
+                      : 'text-muted hover:text-text'
+                  }`}
+                >
+                  🪙 {destInfo.mcx_chat_name || 'Premium MCX Channel'}
+                </button>
+              )}
+              {destInfo?.equity_chat_id && (
+                <button
+                  type="button"
+                  onClick={() => setDestMode('EQUITY_GROUP')}
+                  className={`text-[9px] px-2 py-0.5 rounded font-bold transition-all ${
+                    destMode === 'EQUITY_GROUP'
+                      ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
+                      : 'text-muted hover:text-text'
+                  }`}
+                >
+                  🏢 {destInfo.equity_chat_name || 'Premium Equity Channel'}
                 </button>
               )}
               <button
@@ -812,10 +872,31 @@ function TelegramPreflightModal({ alert, onConfirm, onCancel, sending, sentOk, s
                 <span className="text-emerald-400 font-bold">● Active</span>
               )}
             </div>
+          ) : destMode === 'FNO_INDEX_GROUP' ? (
+            <div className="text-[9px] text-zinc-400 font-mono flex items-center justify-between px-1">
+              <span>Target: <span className="text-sky-400 font-bold">
+                ⚡ {destInfo?.fno_index_chat_name || 'Premium_Alpha_Vortex_FnO_Index'} ({destInfo?.fno_index_chat_id})
+              </span></span>
+              <span className="text-sky-400 font-bold">● Active</span>
+            </div>
           ) : destMode === 'FNO_GROUP' ? (
             <div className="text-[9px] text-zinc-400 font-mono flex items-center justify-between px-1">
               <span>Target: <span className="text-emerald-400 font-bold">
-                ⚡ {destInfo?.fno_chat_name || 'Premium_Alpha_Vortex_FnO_Channel'} ({destInfo?.fno_chat_id})
+                🎯 {destInfo?.fno_chat_name || 'Premium_Alpha_Vortex_FnO_Channel'} ({destInfo?.fno_chat_id})
+              </span></span>
+              <span className="text-emerald-400 font-bold">● Active</span>
+            </div>
+          ) : destMode === 'MCX_GROUP' ? (
+            <div className="text-[9px] text-zinc-400 font-mono flex items-center justify-between px-1">
+              <span>Target: <span className="text-amber-400 font-bold">
+                🪙 {destInfo?.mcx_chat_name || 'Premium_Alpha_Vortex_MCX_Channel'} ({destInfo?.mcx_chat_id})
+              </span></span>
+              <span className="text-amber-400 font-bold">● Active</span>
+            </div>
+          ) : destMode === 'EQUITY_GROUP' ? (
+            <div className="text-[9px] text-zinc-400 font-mono flex items-center justify-between px-1">
+              <span>Target: <span className="text-emerald-400 font-bold">
+                🏢 {destInfo?.equity_chat_name || 'Premium_Alpha_Vortex_Equity_Channel'} ({destInfo?.equity_chat_id})
               </span></span>
               <span className="text-emerald-400 font-bold">● Active</span>
             </div>
@@ -884,9 +965,15 @@ function TelegramPreflightModal({ alert, onConfirm, onCancel, sending, sentOk, s
             onClick={() => onConfirm(
               destMode === 'DEFAULT'
                 ? null
-                : destMode === 'FNO_GROUP'
-                  ? destInfo?.fno_chat_id
-                  : customChannel.trim()
+                : destMode === 'FNO_INDEX_GROUP'
+                  ? destInfo?.fno_index_chat_id
+                  : destMode === 'FNO_GROUP'
+                    ? destInfo?.fno_chat_id
+                    : destMode === 'MCX_GROUP'
+                      ? destInfo?.mcx_chat_id
+                      : destMode === 'EQUITY_GROUP'
+                        ? destInfo?.equity_chat_id
+                        : customChannel.trim()
             )}
             disabled={sending || sentOk || (destMode === 'CHANNEL' && !customChannel.trim())}
             className="flex-1 btn btn-sm text-xs font-black bg-sky-500/20 hover:bg-sky-500/30 text-sky-200 border border-sky-500/40 hover:border-sky-500/60 disabled:opacity-50 transition-all"

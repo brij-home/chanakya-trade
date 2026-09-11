@@ -31,6 +31,7 @@ import json
 import logging
 import os
 import re
+import sys
 import threading
 import time
 import uuid
@@ -2044,6 +2045,22 @@ class AutoAlertEngine:
             or alert.alert_id.startswith("test-")
         )
 
+        # 00. Content Sanity Gate: Intercept and repair degenerate / placeholder fields (e.g. 'h', 's')
+        raw_hl = (alert.headline or "").strip()
+        if not raw_hl or len(raw_hl) <= 3 or raw_hl.lower() in ("h", "test", "dummy"):
+            c_tag = f" {int(alert.strike)} {alert.option_type}" if alert.strike and alert.option_type else ""
+            alert.headline = f"🎯 [{alert.environment}] {alert.alert_type.replace('_', ' ')}: {clean_target}{c_tag} @ ₹{alert.ltp:,.1f}"
+
+        raw_sm = (alert.summary or "").strip()
+        if not raw_sm or len(raw_sm) <= 3 or raw_sm.lower() in ("s", "test", "dummy"):
+            scrutiny = (alert.metrics or {}).get("scrutiny", {}) if isinstance(alert.metrics, dict) else {}
+            logic_conf = scrutiny.get("logic_confirmation") if isinstance(scrutiny, dict) else None
+            if logic_conf and len(str(logic_conf).strip()) > 5:
+                alert.summary = str(logic_conf).strip()
+            else:
+                c_tag = f"{clean_target} {int(alert.strike)} {alert.option_type}" if alert.strike and alert.option_type else clean_target
+                alert.summary = f"Institutional momentum surge on {c_tag}. Invalidation anchor: ₹{alert.stop_loss:,.1f}."
+
         # 0. Closed-Loop Invalidation Lockout Guard (Negative Feedback Loop)
         if not is_sim:
             underlying_sym = (
@@ -2678,6 +2695,16 @@ class AutoAlertEngine:
             ):
                 return
 
+            # Ad-hoc / Scratch Script Protection:
+            # Prevent python -c or scratch one-liners from broadcasting live Telegram messages
+            # unless ALLOW_MANUAL_TELEGRAM_DISPATCH=1 is explicitly set in environment.
+            is_cli_adhoc = bool(sys.argv and sys.argv[0] == "-c")
+            if is_cli_adhoc and os.environ.get("ALLOW_MANUAL_TELEGRAM_DISPATCH", "0").lower() not in ("1", "true"):
+                logger.info(
+                    f"[AutoAlertEngine] Suppressed Telegram dispatch for ad-hoc script run of {alert.symbol} ({alert.alert_id})"
+                )
+                return
+
             # Check Alert Preferences routing gate
             if not telegram_allowed:
                 return
@@ -2776,11 +2803,14 @@ class AutoAlertEngine:
 
             from bot.alert_templates import render_auto_alert
 
+            from engine.alert_preferences import classify_alert_segment
+
             tg_msg = render_auto_alert(alert, in_market=in_market)
             target_seg = getattr(alert, "segment", None)
-            if not target_seg:
-                from engine.alert_preferences import classify_alert_segment
-                target_seg = classify_alert_segment(alert)
+            if not target_seg or target_seg == "EQUITY":
+                detected = classify_alert_segment(alert)
+                if detected != "EQUITY" or not target_seg:
+                    target_seg = detected
             tg_target_chat_id = alert_preferences.get_telegram_chat_id(target_seg)
             if tg_target_chat_id:
                 try:

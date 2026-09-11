@@ -346,12 +346,19 @@ async def test_telegram_cmd_filter(monkeypatch):
 
 
 def test_fno_telegram_destination_routing(monkeypatch):
-    """Verify that F&O alerts are specifically dispatched to TELEGRAM_FNO_CHAT_ID."""
+    """Verify that F&O Index alerts route to TELEGRAM_FNO_INDEX_CHAT_ID and F&O Stock alerts route to TELEGRAM_FNO_CHAT_ID."""
+    from bot.telegram_bot import get_telegram_destinations
     from engine.alert_preferences import alert_preferences
     from engine.auto_alert_engine import AutoAlert, AutoAlertEngine
 
+    monkeypatch.setenv("TELEGRAM_FNO_INDEX_CHAT_ID", "-1004380788314")
     monkeypatch.setenv("TELEGRAM_FNO_CHAT_ID", "-1004393392375")
     monkeypatch.setattr("engine.alerts._is_market_hours", lambda exch: True)
+
+    dests = get_telegram_destinations()
+    assert dests["fno_index_chat_id"] == "-1004380788314"
+    assert dests["fno_index_chat_name"] == "Premium_Alpha_Vortex_FnO_Index"
+    assert dests["fno_chat_id"] == "-1004393392375"
 
     sent_calls = []
 
@@ -362,8 +369,9 @@ def test_fno_telegram_destination_routing(monkeypatch):
 
     engine = AutoAlertEngine()
 
-    fno_alert = AutoAlert(
-        alert_id="live-fno-routing-001",
+    # 1. F&O Index Alert (NIFTY) -> routes to Premium_Alpha_Vortex_FnO_Index
+    fno_index_alert = AutoAlert(
+        alert_id="live-fno-index-routing-001",
         alert_type="GAMMA_BLAST",
         stage="IGNITED",
         symbol="NIFTY",
@@ -382,7 +390,216 @@ def test_fno_telegram_destination_routing(monkeypatch):
         environment="LIVE",
     )
 
-    engine._dispatch(fno_alert)
+    engine._dispatch(fno_index_alert)
     assert len(sent_calls) == 1
-    assert sent_calls[0][1] == "-1004393392375"
+    assert sent_calls[0][1] == "-1004380788314"
+
+    # 2. F&O Stock Alert (RELIANCE) -> routes to Premium_Alpha_Vortex_FnO_Channel
+    fno_stock_alert = AutoAlert(
+        alert_id="live-fno-stock-routing-001",
+        alert_type="GAMMA_BLAST",
+        stage="IGNITED",
+        symbol="RELIANCE",
+        contract_symbol="RELIANCE26SEP3000CE",
+        exchange="NFO",
+        direction="BULLISH",
+        headline="RELIANCE 3000 CE BREAKOUT",
+        summary="Heavy call buying",
+        ltp=45.0,
+        trigger_level=42.0,
+        target_level=60.0,
+        stop_loss=32.0,
+        option_type="CE",
+        strike=3000.0,
+        confidence=90,
+        is_live=True,
+        environment="LIVE",
+    )
+
+    engine._dispatch(fno_stock_alert)
+    assert len(sent_calls) == 2
+    assert sent_calls[1][1] == "-1004393392375"
+
+
+def test_mcx_commodity_currency_telegram_destination_routing(monkeypatch):
+    """Verify that MCX, Commodity, and Currency alerts route to Premium_Alpha_Vortex_MCX_Channel (-1004320002599)."""
+    from bot.telegram_bot import get_telegram_destinations
+    from engine.alert_preferences import alert_preferences
+    from engine.auto_alert_engine import AutoAlert, AutoAlertEngine
+
+    monkeypatch.setattr("engine.alerts._is_market_hours", lambda exch: True)
+
+    # 1. Verify destination info reporting
+    dests = get_telegram_destinations()
+    assert dests["mcx_chat_id"] == "-1004320002599"
+    assert dests["mcx_chat_name"] == "Premium_Alpha_Vortex_MCX_Channel"
+
+    sent_calls = []
+
+    def mock_tg_notify(msg, chat_id=None):
+        sent_calls.append((msg, chat_id))
+
+    monkeypatch.setattr("engine.alerts._telegram_notify", mock_tg_notify)
+
+    engine = AutoAlertEngine()
+
+    # 2. Commodity alert (MCX: CRUDEOIL)
+    crude_alert = AutoAlert(
+        alert_id="live-mcx-crude-001",
+        alert_type="COMMODITY_MOMENTUM",
+        stage="IGNITED",
+        symbol="CRUDEOIL",
+        exchange="MCX",
+        direction="BULLISH",
+        headline="CRUDEOIL MCX SQUEEZE IGNITED",
+        summary="Crude inventory drawdown surge",
+        ltp=6150.0,
+        trigger_level=6100.0,
+        target_level=6350.0,
+        stop_loss=6020.0,
+        confidence=91,
+        is_live=True,
+        environment="LIVE",
+    )
+
+    engine._dispatch(crude_alert)
+    assert len(sent_calls) == 1
+    assert sent_calls[0][1] == "-1004320002599"
+
+    # 3. Currency alert (CDS: USDINR)
+    usdinr_alert = AutoAlert(
+        alert_id="live-cds-usdinr-001",
+        alert_type="CURRENCY_BREAKOUT",
+        stage="IGNITED",
+        symbol="USDINR",
+        exchange="CDS",
+        direction="BEARISH",
+        headline="USDINR BREAKDOWN BELOW SUPPORT",
+        summary="RBI interventions pushing INR higher",
+        ltp=83.45,
+        trigger_level=83.50,
+        target_level=83.10,
+        stop_loss=83.65,
+        confidence=88,
+        is_live=True,
+        environment="LIVE",
+    )
+
+    engine._dispatch(usdinr_alert)
+    assert len(sent_calls) == 2
+    assert sent_calls[1][1] == "-1004320002599"
+
+    # 4. Symbol prefix MCX: GOLD
+    gold_alert = AutoAlert(
+        alert_id="live-mcx-gold-001",
+        alert_type="SQUEEZE_BREAKOUT",
+        stage="IGNITED",
+        symbol="MCX:GOLD",
+        exchange="MCX",
+        direction="BULLISH",
+        headline="GOLD 1H RANGE EXPANSION",
+        summary="Safe haven demand spike",
+        ltp=72500.0,
+        trigger_level=72000.0,
+        target_level=73500.0,
+        stop_loss=71800.0,
+        confidence=94,
+        is_live=True,
+        environment="LIVE",
+    )
+
+    engine._dispatch(gold_alert)
+    assert len(sent_calls) == 3
+    assert sent_calls[2][1] == "-1004320002599"
+
+    # 5. Test override via TELEGRAM_MCX_CHAT_ID env var
+    monkeypatch.setenv("TELEGRAM_MCX_CHAT_ID", "-1008888888888")
+    silver_alert = AutoAlert(
+        alert_id="live-mcx-silver-001",
+        alert_type="COMMODITY_MOMENTUM",
+        stage="IGNITED",
+        symbol="SILVER",
+        exchange="MCX",
+        direction="BULLISH",
+        headline="SILVER MOMENTUM",
+        summary="Industrial demand",
+        ltp=85000.0,
+        trigger_level=84500.0,
+        target_level=87000.0,
+        stop_loss=83500.0,
+        confidence=90,
+        is_live=True,
+        environment="LIVE",
+    )
+    engine._dispatch(silver_alert)
+    assert sent_calls[3][1] == "-1008888888888"
+
+
+def test_equity_telegram_destination_routing(monkeypatch):
+    """Verify that Cash Equity alerts route to Premium_Alpha_Vortex_Equity_Channel (-1003524867091)."""
+    from bot.telegram_bot import get_telegram_destinations
+    from engine.alert_preferences import alert_preferences
+    from engine.auto_alert_engine import AutoAlert, AutoAlertEngine
+
+    monkeypatch.setattr("engine.alerts._is_market_hours", lambda exch: True)
+
+    # 1. Verify destination info reporting
+    dests = get_telegram_destinations()
+    assert dests["equity_chat_id"] == "-1003524867091"
+    assert dests["equity_chat_name"] == "Premium_Alpha_Vortex_Equity_Channel"
+
+    sent_calls = []
+
+    def mock_tg_notify(msg, chat_id=None):
+        sent_calls.append((msg, chat_id))
+
+    monkeypatch.setattr("engine.alerts._telegram_notify", mock_tg_notify)
+
+    engine = AutoAlertEngine()
+
+    # 2. Equity alert (NSE: TATASTEEL)
+    eq_alert = AutoAlert(
+        alert_id="live-eq-tatasteel-001",
+        alert_type="POCKET_PIVOT",
+        stage="IGNITED",
+        symbol="TATASTEEL",
+        exchange="NSE",
+        direction="BULLISH",
+        headline="TATASTEEL POCKET PIVOT IGNITED",
+        summary="High volume institutional accumulation off 50 EMA",
+        ltp=155.0,
+        trigger_level=153.0,
+        target_level=168.0,
+        stop_loss=148.0,
+        confidence=89,
+        is_live=True,
+        environment="LIVE",
+    )
+
+    engine._dispatch(eq_alert)
+    assert len(sent_calls) == 1
+    assert sent_calls[0][1] == "-1003524867091"
+
+    # 3. Test custom override via env var
+    monkeypatch.setenv("TELEGRAM_EQUITY_CHAT_ID", "-1007777777777")
+    eq_alert_2 = AutoAlert(
+        alert_id="live-eq-zomato-001",
+        alert_type="SQUEEZE_BREAKOUT",
+        stage="IGNITED",
+        symbol="ZOMATO",
+        exchange="NSE",
+        direction="BULLISH",
+        headline="ZOMATO SQUEEZE BREAKOUT",
+        summary="Consolidation breakout",
+        ltp=280.0,
+        trigger_level=278.0,
+        target_level=310.0,
+        stop_loss=268.0,
+        confidence=92,
+        is_live=True,
+        environment="LIVE",
+    )
+    engine._dispatch(eq_alert_2)
+    assert len(sent_calls) == 2
+    assert sent_calls[1][1] == "-1007777777777"
 

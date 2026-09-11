@@ -2687,6 +2687,84 @@ def test_options_momentum_friday_late_warning(tmp_path, monkeypatch):
     assert alert.actionable_plan.get("friday_weekend_warning") is not None
 
 
+def test_record_alert_sanitizes_degenerate_fields(tmp_path, monkeypatch):
+    """Verify that record_alert auto-repairs degenerate 'h' and 's' placeholders."""
+    from engine.auto_alert_engine import AutoAlertEngine, AutoAlert
+
+    data_file = tmp_path / "auto_alerts.json"
+    monkeypatch.setattr("engine.auto_alert_engine.get_auto_alerts_file", lambda: data_file)
+
+    eng = AutoAlertEngine()
+    alert = AutoAlert(
+        alert_id="test-degenerate-001",
+        alert_type="OPTIONS_MOMENTUM",
+        stage="IGNITED",
+        symbol="DIXON",
+        exchange="NFO",
+        direction="BEARISH",
+        headline="h",
+        summary="s",
+        ltp=450.0,
+        trigger_level=450.0,
+        target_level=732.5,
+        stop_loss=382.5,
+        strike=13500.0,
+        option_type="PE",
+        contract_symbol="DIXON13500PE",
+        is_live=False,
+        environment="TEST",
+    )
+
+    rec = eng.record_alert(alert)
+    assert rec is True
+    assert alert.headline != "h"
+    assert "OPTIONS MOMENTUM" in alert.headline
+    assert alert.summary != "s"
+    assert "DIXON 13500 PE" in alert.summary or "DIXON" in alert.summary
+
+
+def test_record_alert_adhoc_cli_suppresses_telegram(tmp_path, monkeypatch):
+    """Verify that ad-hoc python -c one-liners are strictly blocked from pushing to Telegram."""
+    import sys
+    from engine.auto_alert_engine import AutoAlertEngine, AutoAlert
+
+    data_file = tmp_path / "auto_alerts.json"
+    monkeypatch.setattr("engine.auto_alert_engine.get_auto_alerts_file", lambda: data_file)
+
+    dispatched = []
+    monkeypatch.setattr("engine.alerts._telegram_notify", lambda msg, **kwargs: dispatched.append(msg))
+    monkeypatch.setattr(sys, "argv", ["-c"])
+    monkeypatch.delenv("ALLOW_MANUAL_TELEGRAM_DISPATCH", raising=False)
+
+    eng = AutoAlertEngine()
+    alert = AutoAlert(
+        alert_id="aa-adhoc-live-test-001",
+        alert_type="OPTIONS_MOMENTUM",
+        stage="IGNITED",
+        symbol="DIXON",
+        exchange="NFO",
+        direction="BEARISH",
+        headline="DIXON 13500 PE Breakout",
+        summary="Institutional momentum surge",
+        ltp=450.0,
+        trigger_level=450.0,
+        target_level=732.5,
+        stop_loss=382.5,
+        confidence=90,
+        is_live=True,
+        environment="LIVE",
+    )
+
+    # In market hours
+    monkeypatch.setattr("engine.alerts._is_market_hours", lambda *args, **kwargs: True)
+
+    rec = eng.record_alert(alert)
+    assert rec is True
+    # Telegram dispatch MUST be suppressed because sys.argv[0] == "-c"
+    assert len(dispatched) == 0
+
+
+
 
 
 

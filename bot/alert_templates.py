@@ -1623,10 +1623,30 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
             getattr(alert, "contract_symbol", None)
             or f"{alert.symbol} {int(getattr(alert, 'strike', 0) or 0)} {getattr(alert, 'option_type', '')}".strip()
         )
+        # Format contract symbol with clean spacing if joined (e.g. DIXON13500PE -> DIXON 13500 PE)
+        inst_display = re.sub(r"^([A-Za-z]+)(\d+)(CE|PE)$", r"\1 \2 \3", inst)
         entry = actionable_plan.get("recommended_entry") or f"₹{alert.ltp:.1f}"
         tgt = actionable_plan.get("target", f"₹{getattr(alert, 'target_level', 0):.1f}")
         sl = actionable_plan.get("stop_loss", f"₹{getattr(alert, 'stop_loss', 0):.1f}")
-        rr = actionable_plan.get("risk_reward", "1:3.0")
+
+        # Dynamic mathematical R:R calculation from levels
+        calc_rr = None
+        try:
+            m_e = re.search(r"₹?\s*([\d,]+(?:\.\d+)?)", str(entry))
+            m_s = re.search(r"₹?\s*([\d,]+(?:\.\d+)?)", str(sl))
+            m_t = re.search(r"₹?\s*([\d,]+(?:\.\d+)?)", str(tgt))
+            if m_e and m_s and m_t:
+                ve = float(m_e.group(1).replace(",", ""))
+                vs = float(m_s.group(1).replace(",", ""))
+                vt = float(m_t.group(1).replace(",", ""))
+                risk_amt = abs(ve - vs)
+                reward_amt = abs(vt - ve)
+                if risk_amt > 0.01:
+                    calc_rr = f"1:{round(reward_amt / risk_amt, 1)}"
+        except Exception:
+            calc_rr = None
+
+        rr = calc_rr or actionable_plan.get("risk_reward", "1:3.0")
         opt_cmp = getattr(alert, "option_premium", None) or getattr(alert, "ltp", None)
         # Suppress redundant Opt CMP tag if entry already contains or closely matches it
         entry_val = None
@@ -1682,6 +1702,13 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
         friday_warn = actionable_plan.get("friday_weekend_warning")
         warn_str = f"\n• {friday_warn}" if friday_warn else ""
 
+        # Late session clock warning (post 15:15 IST)
+        now_dt = datetime.now(IST)
+        session_clock_warn = ""
+        if in_market and getattr(alert, "exchange", "NSE") in ("NSE", "BSE", "NFO") and (now_dt.hour == 15 and now_dt.minute >= 15):
+            mins_left = max(1, 30 - now_dt.minute)
+            session_clock_warn = f"\n• ⚠️ <i>Market closes in {mins_left}m. Intraday MIS closed — Overnight Hold (NRML) or Next-Session Gameplan.</i>"
+
         plan_str = (
             f"{exp_line}"
             f"• <b>Action:</b> {act} <b>{inst}</b> @ <code>{entry}</code>{opt_cmp_str}{spot_ref}\n"
@@ -1690,6 +1717,7 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
             f"• <b>R:R Expectancy:</b> <b>{rr}</b>"
             f"{wait_str}"
             f"{warn_str}"
+            f"{session_clock_warn}"
         )
     elif getattr(alert, "exchange", "") == "MCX" or getattr(alert, "alert_type", "") == "COMMODITY_MOMENTUM":
         act = actionable_plan.get("action", "BUY_FUTURES")
@@ -1801,6 +1829,14 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
 
     raw_headline = getattr(alert, "headline", alert.symbol) or alert.symbol
     clean_hl = strip_provenance_and_icons(raw_headline)
+    if not clean_hl or len(clean_hl.strip()) <= 3 or clean_hl.strip().lower() in ("h", "test", "dummy"):
+        strike_val = getattr(alert, "strike", None)
+        opt_type_val = getattr(alert, "option_type", "") or ""
+        sym_val = getattr(alert, "symbol", "ALERT")
+        if strike_val and opt_type_val:
+            clean_hl = f"{sym_val} {int(strike_val)} {opt_type_val} · Momentum Surge"
+        else:
+            clean_hl = f"{sym_val} · {getattr(alert, 'alert_type', 'BREAKOUT').replace('_', ' ')}"
 
     # Clean summary to serve as rationale AFTER the execution levels
     raw_summary = getattr(alert, "summary", "") or ""
@@ -1811,6 +1847,19 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
             r"\s*(?:Entry|SL|T1|T2|Target)\s*:[^|]+(?:\||$)", "", clean_summary
         ).strip()
         clean_summary = clean_summary.rstrip(" .|")
+
+    if not clean_summary or len(clean_summary.strip()) <= 3 or clean_summary.strip().lower() in ("s", "test", "dummy"):
+        metrics = getattr(alert, "metrics", {}) or {}
+        scrutiny = metrics.get("scrutiny", {}) if isinstance(metrics, dict) else {}
+        logic_conf = scrutiny.get("logic_confirmation") if isinstance(scrutiny, dict) else None
+        if logic_conf and len(str(logic_conf).strip()) > 5:
+            clean_summary = str(logic_conf).strip()
+        else:
+            opt_type_val = getattr(alert, "option_type", "")
+            if opt_type_val:
+                clean_summary = f"Institutional {opt_type_val} order flow and volatility expansion on {getattr(alert, 'symbol', '')}."
+            else:
+                clean_summary = f"Technical momentum surge and volume expansion on {getattr(alert, 'symbol', '')}."
 
     reason_line = f"💡 <b>Reason:</b> <i>{clean_summary}</i>" if clean_summary else ""
 
@@ -1853,9 +1902,11 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
             )
             else ""
         )
+        # Suppress Spot bar in headline if Spot is already detailed in the Action plan line
+        has_spot_in_plan = bool(plan_str and "(Spot:" in plan_str)
         spot_bar = (
             f" · Spot: <b>₹{float(str(alert.underlying_spot).replace('₹', '').replace(',', '')):,.2f}</b>"
-            if (getattr(alert, "underlying_spot", None) and "Spot:" not in clean_hl)
+            if (getattr(alert, "underlying_spot", None) and "Spot:" not in clean_hl and not has_spot_in_plan)
             else ""
         )
         hl_line = f"<b>{clean_hl}</b>{spot_bar}{opt_bar}" if clean_hl else f"<b>{alert.symbol}</b>"

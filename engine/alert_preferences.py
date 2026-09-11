@@ -268,17 +268,43 @@ class AlertPreferences:
     # Dedicated F&O Telegram Destination (group / channel ID)
     fno_chat_id: Optional[str] = None
 
+    # Dedicated F&O Index Telegram Destination (channel ID)
+    fno_index_chat_id: Optional[str] = None
+
+    # Dedicated MCX, Commodities & Currency Telegram Destination (channel ID)
+    mcx_chat_id: Optional[str] = None
+
+    # Dedicated Cash Equity Telegram Destination (channel ID)
+    equity_chat_id: Optional[str] = None
+
     def get_telegram_chat_id(self, segment: str = "EQUITY") -> Optional[str]:
         """Returns the target Telegram chat/group ID for a given segment."""
         seg = (segment or "").upper()
-        if seg in ("FNO", "FNO_INDEX", "FNO_STOCK"):
+        if seg in ("FNO_INDEX", "INDEX_FNO", "FNO_INDICES", "FNO_INDEXES"):
+            return (
+                self.fno_index_chat_id
+                or os.environ.get("TELEGRAM_FNO_INDEX_CHAT_ID", "").strip()
+                or "-1004380788314"
+            )
+        if seg in ("FNO", "FNO_STOCK", "STOCK_FNO", "FNO_STOCKS"):
             return (
                 self.fno_chat_id
                 or os.environ.get("TELEGRAM_FNO_CHAT_ID", "").strip()
                 or os.environ.get("TELEGRAM_CHANNEL_ID", "").strip()
                 or None
             )
-        return None
+        if seg in ("MCX", "COMMODITY", "CURRENCY", "CDS"):
+            return (
+                self.mcx_chat_id
+                or os.environ.get("TELEGRAM_MCX_CHAT_ID", "").strip()
+                or os.environ.get("TELEGRAM_COMMODITY_CHAT_ID", "").strip()
+                or "-1004320002599"
+            )
+        return (
+            self.equity_chat_id
+            or os.environ.get("TELEGRAM_EQUITY_CHAT_ID", "").strip()
+            or "-1003524867091"
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -292,6 +318,22 @@ class AlertPreferences:
                 self.fno_chat_id
                 or os.environ.get("TELEGRAM_FNO_CHAT_ID", "").strip()
                 or None
+            ),
+            "fno_index_chat_id": (
+                self.fno_index_chat_id
+                or os.environ.get("TELEGRAM_FNO_INDEX_CHAT_ID", "").strip()
+                or "-1004380788314"
+            ),
+            "mcx_chat_id": (
+                self.mcx_chat_id
+                or os.environ.get("TELEGRAM_MCX_CHAT_ID", "").strip()
+                or os.environ.get("TELEGRAM_COMMODITY_CHAT_ID", "").strip()
+                or "-1004320002599"
+            ),
+            "equity_chat_id": (
+                self.equity_chat_id
+                or os.environ.get("TELEGRAM_EQUITY_CHAT_ID", "").strip()
+                or "-1003524867091"
             ),
         }
 
@@ -331,6 +373,9 @@ class AlertPreferences:
             sound=_make_channel(data.get("sound"), default_min_conf=80, default_trails=False),
             pause_disabled_scanners=bool(data.get("pause_disabled_scanners", True)),
             fno_chat_id=data.get("fno_chat_id"),
+            fno_index_chat_id=data.get("fno_index_chat_id"),
+            mcx_chat_id=data.get("mcx_chat_id"),
+            equity_chat_id=data.get("equity_chat_id"),
         )
 
 
@@ -429,6 +474,18 @@ class AlertPreferencesManager:
             if "fno_chat_id" in data:
                 val = data["fno_chat_id"]
                 self._preferences.fno_chat_id = str(val).strip() if val else None
+
+            if "fno_index_chat_id" in data:
+                val = data["fno_index_chat_id"]
+                self._preferences.fno_index_chat_id = str(val).strip() if val else None
+
+            if "mcx_chat_id" in data:
+                val = data["mcx_chat_id"]
+                self._preferences.mcx_chat_id = str(val).strip() if val else None
+
+            if "equity_chat_id" in data:
+                val = data["equity_chat_id"]
+                self._preferences.equity_chat_id = str(val).strip() if val else None
 
             self._save()
             return self._preferences.to_dict()
