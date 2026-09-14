@@ -2436,11 +2436,13 @@ async def api_risk_status(request: Request):
         raise _HTTPException(500, str(e))
 
 
-def _compute_portfolio() -> Optional[dict]:
+def _compute_portfolio(source: str = "auto") -> Optional[dict]:
     holdings: list[dict] = []
     positions: list[dict] = []
     total_cash = total_margin = total_balance = 0.0
     active_brokers: list[str] = []
+
+    src = (source or "auto").strip().lower()
 
     def _try(name: str, factory):
         nonlocal total_cash, total_margin, total_balance
@@ -2482,50 +2484,51 @@ def _compute_portfolio() -> Optional[dict]:
         except Exception:
             pass
 
-    if _has_zerodha():
-        from brokers.zerodha import ZerodhaAPI
+    if src != "paper":
+        if _has_zerodha():
+            from brokers.zerodha import ZerodhaAPI
 
-        _try("zerodha", lambda: ZerodhaAPI(_env("KITE_API_KEY"), _env("KITE_API_SECRET")))
+            _try("zerodha", lambda: ZerodhaAPI(_env("KITE_API_KEY"), _env("KITE_API_SECRET")))
 
-    if _has_groww():
-        from brokers.groww import GrowwAPI
+        if _has_groww():
+            from brokers.groww import GrowwAPI
 
-        _try("groww", lambda: GrowwAPI(_env("GROWW_CLIENT_ID"), _env("GROWW_CLIENT_SECRET")))
+            _try("groww", lambda: GrowwAPI(_env("GROWW_CLIENT_ID"), _env("GROWW_CLIENT_SECRET")))
 
-    if _has_angelone():
-        from brokers.angelone import AngelOneAPI
+        if _has_angelone():
+            from brokers.angelone import AngelOneAPI
 
-        _try(
-            "angel_one",
-            lambda: AngelOneAPI(
-                _env("ANGEL_API_KEY"),
-                _env("ANGEL_CLIENT_CODE"),
-                _env("ANGEL_PASSWORD"),
-                _env("ANGEL_TOTP_SECRET"),
-            ),
-        )
+            _try(
+                "angel_one",
+                lambda: AngelOneAPI(
+                    _env("ANGEL_API_KEY"),
+                    _env("ANGEL_CLIENT_CODE"),
+                    _env("ANGEL_PASSWORD"),
+                    _env("ANGEL_TOTP_SECRET"),
+                ),
+            )
 
-    if _has_upstox():
-        from brokers.upstox import UpstoxAPI
+        if _has_upstox():
+            from brokers.upstox import UpstoxAPI
 
-        _try("upstox", lambda: UpstoxAPI(_env("UPSTOX_API_KEY"), _env("UPSTOX_API_SECRET")))
+            _try("upstox", lambda: UpstoxAPI(_env("UPSTOX_API_KEY"), _env("UPSTOX_API_SECRET")))
 
-    if _has_fyers():
-        from brokers.fyers import FyersAPI
+        if _has_fyers():
+            from brokers.fyers import FyersAPI
 
-        _try("fyers", lambda: FyersAPI(_env("FYERS_APP_ID"), _env("FYERS_SECRET_KEY")))
+            _try("fyers", lambda: FyersAPI(_env("FYERS_APP_ID"), _env("FYERS_SECRET_KEY")))
 
-    if _has_shoonya():
-        from brokers.shoonya import ShoonyaAPI
+        if _has_shoonya():
+            from brokers.shoonya import ShoonyaAPI
 
-        _try("shoonya", ShoonyaAPI)
+            _try("shoonya", ShoonyaAPI)
 
-    if _has_mstock():
-        from brokers.mstock import MStockAPI
+        if _has_mstock():
+            from brokers.mstock import MStockAPI
 
-        _try("mstock", MStockAPI)
+            _try("mstock", MStockAPI)
 
-    if not active_brokers:
+    if src == "paper" or (src == "auto" and not active_brokers):
         try:
             from engine.paper import PaperBroker
 
@@ -2568,6 +2571,8 @@ def _compute_portfolio() -> Optional[dict]:
     total_pnl = sum(h["pnl"] for h in holdings) + sum(p["pnl"] for p in positions)
     return {
         "brokers": active_brokers,
+        "source": "paper" if "Paper Simulator" in active_brokers else "broker",
+        "has_paper": True,
         "funds": {
             "available_cash": round(total_cash, 2),
             "used_margin": round(total_margin, 2),
@@ -2583,15 +2588,52 @@ def _compute_portfolio() -> Optional[dict]:
 
 
 @app.get("/api/portfolio")
-async def api_portfolio(request: Request):
+async def api_portfolio(request: Request, source: str = "auto"):
     _require_localhost(request)
-    result = await asyncio.to_thread(_compute_portfolio)
+    result = await asyncio.to_thread(_compute_portfolio, source=source)
     if result is None:
         raise _HTTPException(
             status_code=503,
             detail="Portfolio unavailable: connect an authenticated broker to view account data.",
         )
     return result
+
+
+class PaperSquareOffRequest(BaseModel):
+    symbol: str
+
+
+@app.post("/api/paper/square-off")
+async def api_paper_square_off(req: PaperSquareOffRequest, request: Request):
+    """Square off an active paper position immediately."""
+    _require_localhost(request)
+    from engine.paper import PaperBroker
+    from brokers.base import OrderRequest
+
+    pb = PaperBroker()
+    positions = pb.get_positions()
+    target = next((p for p in positions if p.symbol.upper() == req.symbol.strip().upper()), None)
+    if not target or target.quantity == 0:
+        raise _HTTPException(404, f"No open paper position found for {req.symbol}")
+
+    side = "SELL" if target.quantity > 0 else "BUY"
+    res = pb.place_order(
+        OrderRequest(
+            symbol=target.symbol,
+            exchange=target.exchange,
+            transaction_type=side,
+            quantity=abs(target.quantity),
+            order_type="MARKET",
+            product=target.product,
+        )
+    )
+    return {
+        "status": "ok",
+        "symbol": target.symbol,
+        "squared_qty": target.quantity,
+        "order_id": res.order_id,
+        "message": f"Successfully squared off {target.symbol} ({target.quantity} qty) in paper sandbox.",
+    }
 
 
 # ── Institutional Analysis & Quant Endpoints ─────────────────────

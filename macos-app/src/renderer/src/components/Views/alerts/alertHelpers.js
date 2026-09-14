@@ -35,6 +35,20 @@ export const AUTO_TYPE_STYLE = {
     bg: 'rgba(0, 214, 143, 0.08)',
     border: 'rgba(0, 214, 143, 0.20)',
   },
+  SQUEEZE_BREAKDOWN: {
+    icon: '🔻',
+    label: 'SQUEEZE BREAKDOWN',
+    color: 'var(--color-rose)',
+    bg: 'rgba(255, 79, 123, 0.08)',
+    border: 'rgba(255, 79, 123, 0.20)',
+  },
+  PATTERN_COILING: {
+    icon: '🌀',
+    label: 'PATTERN COILING',
+    color: 'var(--color-cyan)',
+    bg: 'rgba(0, 209, 255, 0.08)',
+    border: 'rgba(0, 209, 255, 0.20)',
+  },
   CIRCUIT_WARNING: {
     icon: '🔒',
     label: 'CIRCUIT WARNING',
@@ -70,12 +84,40 @@ export const AUTO_TYPE_STYLE = {
     bg: 'rgba(245, 166, 35, 0.08)',
     border: 'rgba(245, 166, 35, 0.20)',
   },
+  OPTION_WRITE: {
+    icon: '🛡️',
+    label: 'OPTION WRITE',
+    color: '#a855f7',
+    bg: 'rgba(168, 85, 247, 0.08)',
+    border: 'rgba(168, 85, 247, 0.20)',
+  },
   ASYMMETRIC_OPPORTUNITY: {
     icon: '🎯',
     label: 'ASYMMETRIC R:R',
     color: '#38bdf8',
     bg: 'rgba(56, 189, 248, 0.08)',
     border: 'rgba(56, 189, 248, 0.20)',
+  },
+  COMMODITY_MOMENTUM: {
+    icon: '⛏️',
+    label: 'COMMODITY MOMENTUM',
+    color: '#f97316',
+    bg: 'rgba(249, 115, 22, 0.08)',
+    border: 'rgba(249, 115, 22, 0.20)',
+  },
+  CURRENCY_MOMENTUM: {
+    icon: '💱',
+    label: 'CURRENCY MOMENTUM',
+    color: '#06b6d4',
+    bg: 'rgba(6, 182, 212, 0.08)',
+    border: 'rgba(6, 182, 212, 0.20)',
+  },
+  MOMENTUM_ACCELERATION: {
+    icon: '🚀',
+    label: 'MOMENTUM SPARK',
+    color: '#10b981',
+    bg: 'rgba(16, 185, 129, 0.08)',
+    border: 'rgba(16, 185, 129, 0.20)',
   },
 }
 
@@ -302,7 +344,7 @@ export function computeNextExpiryOpportunity(alert, expiryInfo) {
     alert.alert_type === 'FUTURES'
   )
 
-  const isSpotSetup = alert.alert_type === 'ASYMMETRIC_OPPORTUNITY' || alert.alert_type === 'SQUEEZE_BREAKOUT' || alert.alert_type === 'SQUEEZE_BREAKDOWN' || alert.alert_type === 'POCKET_PIVOT' || alert.alert_type === 'PRECURSOR_RADAR' || alert.alert_type === 'SMC_SWEEP' || alert.alert_type === 'CIRCUIT_WARNING' || alert.alert_type === 'COMMODITY_MOMENTUM'
+  const isSpotSetup = alert.alert_type === 'ASYMMETRIC_OPPORTUNITY' || alert.alert_type === 'SQUEEZE_BREAKOUT' || alert.alert_type === 'SQUEEZE_BREAKDOWN' || alert.alert_type === 'PATTERN_COILING' || alert.alert_type === 'MOMENTUM_ACCELERATION' || alert.alert_type === 'POCKET_PIVOT' || alert.alert_type === 'PRECURSOR_RADAR' || alert.alert_type === 'SMC_SWEEP' || alert.alert_type === 'CIRCUIT_WARNING' || alert.alert_type === 'COMMODITY_MOMENTUM'
 
   const isDerivative = !isSpotSetup && Boolean(
     isFuture ||
