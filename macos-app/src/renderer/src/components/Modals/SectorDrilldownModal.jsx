@@ -15,14 +15,14 @@ const ELIGIBILITY_CONFIG = {
   READY: {
     label: '🟢 TOP PICK (READY TO EXECUTE)',
     badgeColor: 'bg-green/20 text-green border-green/40 shadow-[0_0_8px_rgba(16,185,129,0.25)]',
-    boxBg: 'bg-green/5 border-green/30 text-green-300',
+    boxBg: 'bg-emerald-500/10 border-emerald-500/30 text-emerald-800 dark:text-emerald-300',
     title: 'Actionable Setup',
     icon: '⚡',
   },
   STALK: {
     label: '🟡 WATCHLIST / STALK TRIGGER',
     badgeColor: 'bg-amber/20 text-amber border-amber/40 shadow-[0_0_8px_rgba(245,158,11,0.2)]',
-    boxBg: 'bg-amber/5 border-amber/30 text-amber-200',
+    boxBg: 'bg-amber-500/10 border-amber-500/30 text-amber-800 dark:text-amber-200',
     title: 'Trigger Stalking',
     icon: '🎯',
   },
@@ -156,7 +156,7 @@ export default function SectorDrilldownModal({ isOpen, sector, onClose, onOpenOr
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md animate-in fade-in duration-200 select-none"
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/35 dark:bg-black/80 backdrop-blur-md animate-in fade-in duration-200 select-none"
       onClick={onClose}
     >
       <div

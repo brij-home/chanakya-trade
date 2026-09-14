@@ -174,12 +174,12 @@ export const AlertTriageCard = memo(function AlertTriageCard({
         <div className="flex items-center gap-1 flex-shrink-0" onClick={(e) => e.stopPropagation()}>
           <button
             onClick={() => onTrade(alert)}
-            className="btn btn-xs text-[9px] px-1.5 py-0.5 font-bold text-emerald-300 hover:text-emerald-200 bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/30 transition-all rounded"
+            className="btn btn-xs text-[9px] px-1.5 py-0.5 font-bold text-emerald-700 dark:text-emerald-300 hover:text-emerald-900 dark:hover:text-emerald-200 bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-400/40 dark:border-emerald-500/30 transition-all rounded"
             title="1-Click Trade: Open pre-populated Order Ticket"
           >⚡ Trade</button>
           <button
             onClick={() => onSendTelegram(alert)}
-            className="btn btn-xs text-[9px] px-1 py-0.5 text-sky-300 hover:text-sky-200 bg-sky-500/10 hover:bg-sky-500/20 border border-sky-500/30 transition-all rounded"
+            className="btn btn-xs text-[9px] px-1 py-0.5 font-bold text-sky-700 dark:text-sky-300 hover:text-sky-900 dark:hover:text-sky-200 bg-sky-500/10 hover:bg-sky-500/20 border border-sky-400/40 dark:border-sky-500/30 transition-all rounded"
             title="Send to Telegram"
           >↗ TG</button>
         </div>

@@ -147,7 +147,7 @@ export default function BrokerPanel({ onClose }) {
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={onClose}>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 dark:bg-black/65 backdrop-blur-sm" onClick={onClose}>
     <div className="w-[480px] max-h-[80vh] flex flex-col bg-panel border border-border rounded-xl shadow-2xl"
          onClick={(e) => e.stopPropagation()}>
 

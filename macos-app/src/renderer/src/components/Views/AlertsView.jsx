@@ -582,20 +582,20 @@ const AutoAlertCard = memo(function AutoAlertCard({
 
       {/* Next Expiry Opportunity & Institutional Justification Callout */}
       {nextExpiryOpp && (
-        <div className="p-2 rounded-xl bg-gradient-to-r from-amber-500/10 via-surface/90 to-amber-500/5 border border-amber-500/30 text-xs text-amber-200 space-y-0.5 animate-slide-up-fade">
+        <div className="p-2 rounded-xl bg-gradient-to-r from-amber-500/10 via-surface/90 to-amber-500/5 border border-amber-500/30 text-xs text-amber-800 dark:text-amber-200 space-y-0.5 animate-slide-up-fade">
           <div className="flex items-center justify-between flex-wrap gap-2">
             <div className="flex items-center gap-1.5 font-bold">
               <span className="text-xs">💡</span>
-              <span className="text-[10px] font-black uppercase tracking-wider text-amber-300">
+              <span className="text-[10px] font-black uppercase tracking-wider text-amber-700 dark:text-amber-300">
                 Next Expiry Opportunity: {nextExpiryOpp.recommendedContract}
               </span>
             </div>
-            <span className="text-[9px] font-mono px-1.5 py-0.2 rounded bg-amber-500/20 text-amber-200 border border-amber-500/40 font-bold uppercase">
+            <span className="text-[9px] font-mono px-1.5 py-0.2 rounded bg-amber-500/15 dark:bg-amber-500/20 text-amber-800 dark:text-amber-200 border border-amber-500/30 dark:border-amber-500/40 font-bold uppercase">
               {nextExpiryOpp.tag}
             </span>
           </div>
-          <p className="text-[10px] text-amber-100/90 leading-relaxed font-sans">
-            <span className="font-bold text-amber-300">Institutional Justification: </span>
+          <p className="text-[10px] text-amber-900/80 dark:text-amber-100/90 leading-relaxed font-sans">
+            <span className="font-bold text-amber-700 dark:text-amber-300">Institutional Justification: </span>
             {nextExpiryOpp.justification}
           </p>
         </div>
@@ -603,15 +603,15 @@ const AutoAlertCard = memo(function AutoAlertCard({
 
       {/* Invalidation Callout & Forensic Post-Mortem if invalidated */}
       {isInvalidated && (
-        <div className="rounded-xl border border-rose-500/35 bg-rose-500/10 p-2.5 space-y-2 text-xs text-rose-200 animate-slide-up-fade">
+        <div className="rounded-xl border border-rose-500/35 bg-rose-500/10 p-2.5 space-y-2 text-xs text-rose-800 dark:text-rose-200 animate-slide-up-fade">
           <div className="flex items-center justify-between gap-2 flex-wrap">
             <div className="flex items-center gap-2 min-w-0 flex-1">
               <span className="text-base flex-shrink-0">🛑</span>
               <div className="min-w-0 flex-1">
-                <span className="font-black text-rose-300 block tracking-wide text-xs">
+                <span className="font-black text-rose-700 dark:text-rose-300 block tracking-wide text-xs">
                   Trade Thesis Invalidated:
                 </span>
-                <span className="leading-relaxed text-rose-200/90 font-medium text-[11px] block truncate" title={alert.invalidation_reason || alert.summary}>
+                <span className="leading-relaxed text-rose-900/80 dark:text-rose-200/90 font-medium text-[11px] block truncate" title={alert.invalidation_reason || alert.summary}>
                   {alert.invalidation_reason || alert.summary}
                 </span>
               </div>
@@ -678,7 +678,7 @@ const AutoAlertCard = memo(function AutoAlertCard({
                   </span>
                   <ul className="space-y-0.5 pl-1">
                     {postMortem.corrective_actions.map((act, i) => (
-                      <li key={i} className="text-[10px] flex items-start gap-1.5 text-emerald-200/90 leading-relaxed font-mono">
+                      <li key={i} className="text-[10px] flex items-start gap-1.5 text-emerald-800/90 dark:text-emerald-200/90 leading-relaxed font-mono">
                         <span className="text-emerald-400 font-bold">✓</span>
                         <span>{act}</span>
                       </li>
@@ -740,16 +740,16 @@ const AutoAlertCard = memo(function AutoAlertCard({
 
           {/* Logic Confirmation */}
           {alert.metrics.scrutiny.logic_confirmation && (
-            <div className="text-[11px] text-zinc-200 leading-relaxed font-sans">
-              <span className="font-bold text-emerald-300">Structural Edge: </span>
+            <div className="text-[11px] text-zinc-800 dark:text-zinc-200 leading-relaxed font-sans">
+              <span className="font-bold text-emerald-700 dark:text-emerald-300">Structural Edge: </span>
               {alert.metrics.scrutiny.logic_confirmation}
             </div>
           )}
 
           {/* Devil's Advocate Trap Warning */}
           {alert.metrics.scrutiny.trap_risk_warning && (
-            <div className="p-1.5 rounded-lg bg-amber-500/10 border border-amber-500/25 text-[11px] text-amber-200 leading-relaxed">
-              <span className="font-bold text-amber-300">Devil&apos;s Advocate Trap Risk: </span>
+            <div className="p-1.5 rounded-lg bg-amber-500/10 border border-amber-500/25 text-[11px] text-amber-800 dark:text-amber-200 leading-relaxed">
+              <span className="font-bold text-amber-700 dark:text-amber-300">Devil&apos;s Advocate Trap Risk: </span>
               {alert.metrics.scrutiny.trap_risk_warning}
             </div>
           )}
@@ -795,7 +795,7 @@ const AutoAlertCard = memo(function AutoAlertCard({
                   ).replace(/_/g, ' ')}
                 </span>
               </div>
-              <p className="text-zinc-200 text-[11px] leading-relaxed">
+              <p className="text-zinc-800 dark:text-zinc-200 text-[11px] leading-relaxed">
                 {alert.actionable_plan?.structure_advice || alert.actionable_plan?.trade_plan?.structure_advice}
               </p>
               {(alert.actionable_plan?.session_clock_note || alert.actionable_plan?.trade_plan?.session_clock_note) && (
@@ -873,7 +873,7 @@ const AutoAlertCard = memo(function AutoAlertCard({
                 {alert.metrics.matched_factors.map((factor, idx) => (
                   <span
                     key={idx}
-                    className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-surface/90 border border-gold/20 text-[10px] font-sans text-zinc-200"
+                    className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-surface/90 border border-gold/20 text-[10px] font-sans text-zinc-800 dark:text-zinc-200"
                   >
                     <span className="text-emerald-400 font-bold text-xs">✓</span>
                     <span>{factor}</span>
@@ -1086,7 +1086,7 @@ function InstitutionalTradeInspector({
             </button>
             <button
               onClick={() => onSendTelegram && onSendTelegram(alert)}
-              className="btn btn-xs py-1 px-2 text-[10px] text-sky-300 hover:text-sky-200 bg-sky-500/15 border border-sky-500/35 rounded-lg font-bold"
+              className="btn btn-xs py-1 px-2 text-[10px] text-sky-700 dark:text-sky-300 hover:text-sky-900 dark:hover:text-sky-200 bg-sky-500/10 hover:bg-sky-500/20 border border-sky-400/40 dark:border-sky-500/35 rounded-lg font-bold"
               title="Share alert via Telegram"
             >
               ↗ TG
@@ -2508,14 +2508,14 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
 
       {/* Invalidation Alert Banner */}
       {invalidatedCount > 0 && activeTab === 'auto' && (
-        <div className="p-3 rounded-2xl bg-rose-500/10 border border-rose-500/35 text-rose-200 flex items-center justify-between gap-3 animate-slide-up-fade">
+        <div className="p-3 rounded-2xl bg-rose-500/10 border border-rose-500/35 text-rose-800 dark:text-rose-200 flex items-center justify-between gap-3 animate-slide-up-fade">
           <div className="flex items-center gap-2.5 text-xs">
             <span className="text-xl flex-shrink-0">🛑</span>
             <div>
               <span className="font-bold">
                 ⚠️ {invalidatedCount} Trade {invalidatedCount === 1 ? 'Setup' : 'Setups'} Invalidated:
               </span>
-              <span className="ml-1 text-rose-300/80">
+              <span className="ml-1 text-rose-700 dark:text-rose-300/80">
                 {uniqueInvalidatedList.slice(0, 3).join(', ')}
                 {uniqueInvalidatedList.length > 3 ? '...' : ''} no longer valid due to stop-loss breach or structural failure.
               </span>
@@ -2526,7 +2526,7 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
               setSelectedFilter('INVALIDATED')
               setSelectedStage('ALL')
             }}
-            className="btn btn-sm btn-ghost text-rose-300 hover:bg-rose-500/20 text-xs flex-shrink-0"
+            className="btn btn-sm btn-ghost text-rose-700 dark:text-rose-300 hover:bg-rose-500/20 text-xs flex-shrink-0"
           >
             View Invalidated ({invalidatedCount}) →
           </button>
@@ -2535,24 +2535,24 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
 
       {/* Broker L2 WebSocket Depth Streaming Notice */}
       {!hasActiveBrokerSession && activeTab === 'auto' && (
-        <div className="p-3 rounded-2xl bg-amber-500/10 border border-amber-500/35 text-amber-200 flex items-center justify-between gap-3 animate-slide-up-fade">
+        <div className="p-3 rounded-2xl bg-amber-500/10 border border-amber-500/35 text-amber-800 dark:text-amber-200 flex items-center justify-between gap-3 animate-slide-up-fade">
           <div className="flex items-center gap-2.5 text-xs">
             <span className="text-xl flex-shrink-0">⚠️</span>
             <div>
               <div className="font-bold flex items-center gap-2">
                 <span>NO ACTIVE BROKER CONNECTION — Level-2 Order Book Streaming Offline</span>
-                <span className="text-[9px] px-1.5 py-0.5 rounded font-mono font-bold bg-amber-500/20 text-amber-300 border border-amber-500/40">
+                <span className="text-[9px] px-1.5 py-0.5 rounded font-mono font-bold bg-amber-500/15 dark:bg-amber-500/20 text-amber-800 dark:text-amber-300 border border-amber-500/30 dark:border-amber-500/40">
                   SYNTHETIC L1 ACTIVE
                 </span>
               </div>
-              <p className="text-amber-300/80 text-[11px] mt-0.5">
+              <p className="text-amber-800/80 dark:text-amber-300/80 text-[11px] mt-0.5">
                 Real-time broker order book depth (OBI & Iceberg detection) requires an active authenticated broker session. Trade setups are currently using tick-level OHLCV and volume delta reconstruction.
               </p>
             </div>
           </div>
           <button
             onClick={() => setActiveView('settings')}
-            className="btn btn-sm btn-ghost text-amber-300 hover:bg-amber-500/20 text-xs flex-shrink-0 border border-amber-500/30 font-bold"
+            className="btn btn-sm btn-ghost text-amber-800 dark:text-amber-300 hover:bg-amber-500/20 text-xs flex-shrink-0 border border-amber-500/30 font-bold"
           >
             Connect Broker →
           </button>
@@ -2573,14 +2573,14 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
                   onClick={() => setAutoViewMode('ACTIVE')}
                   className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-black rounded-lg transition-all ${
                     autoViewMode === 'ACTIVE'
-                      ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 shadow-sm'
+                      ? 'bg-emerald-500/15 dark:bg-emerald-500/20 text-emerald-800 dark:text-emerald-300 border border-emerald-400/50 dark:border-emerald-500/40 shadow-sm'
                       : 'text-muted hover:text-text'
                   }`}
                   title="Show only valid active trades (removes clutter)"
                 >
                   <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse flex-shrink-0" />
                   <span>Active Valid Trades</span>
-                  <span className="text-[10px] px-1.5 py-px rounded-full font-mono bg-emerald-500/30 text-emerald-200">
+                  <span className="text-[10px] px-1.5 py-px rounded-full font-mono bg-emerald-500/20 dark:bg-emerald-500/30 text-emerald-800 dark:text-emerald-200">
                     {activeCount}
                   </span>
                 </button>
@@ -2589,13 +2589,13 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
                   onClick={() => setAutoViewMode('ARCHIVED')}
                   className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold rounded-lg transition-all ${
                     autoViewMode === 'ARCHIVED'
-                      ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40 shadow-sm'
+                      ? 'bg-amber-500/15 dark:bg-amber-500/20 text-amber-800 dark:text-amber-300 border border-amber-400/50 dark:border-amber-500/40 shadow-sm'
                       : 'text-muted hover:text-text'
                   }`}
                   title="View archived, completed, and invalidated trades"
                 >
                   <span>📁 Archived & History</span>
-                  <span className="text-[10px] px-1.5 py-px rounded-full font-mono bg-amber-500/30 text-amber-200">
+                  <span className="text-[10px] px-1.5 py-px rounded-full font-mono bg-amber-500/20 dark:bg-amber-500/30 text-amber-800 dark:text-amber-200">
                     {archivedCount}
                   </span>
                 </button>
@@ -2775,11 +2775,11 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
 
                 {/* Individual Segment multi-select pills */}
                 {[
-                  { id: 'FNO_INDEX', label: '⚡ F&O Indices',      count: fnoIndexCount,  activeColor: 'bg-indigo-500/25 text-indigo-200 border-indigo-500/50' },
-                  { id: 'FNO_STOCK', label: '🎯 F&O Stocks',       count: fnoStockCount,  activeColor: 'bg-purple-500/25 text-purple-200 border-purple-500/50' },
-                  { id: 'EQUITY',    label: '🏢 Cash Equity',      count: equityCount,    activeColor: 'bg-emerald-500/25 text-emerald-200 border-emerald-500/50' },
-                  { id: 'COMMODITY', label: '🌙 Commodity (MCX)',  count: commodityCount, activeColor: 'bg-amber-500/25 text-amber-200 border-amber-500/50' },
-                  { id: 'CURRENCY',  label: '💱 Currency (CDS)',   count: currencyCount,  activeColor: 'bg-cyan-500/25 text-cyan-200 border-cyan-500/50' },
+                  { id: 'FNO_INDEX', label: '⚡ F&O Indices',      count: fnoIndexCount,  activeColor: 'bg-indigo-500/15 dark:bg-indigo-500/25 text-indigo-800 dark:text-indigo-200 border-indigo-400/60 dark:border-indigo-500/50' },
+                  { id: 'FNO_STOCK', label: '🎯 F&O Stocks',       count: fnoStockCount,  activeColor: 'bg-purple-500/15 dark:bg-purple-500/25 text-purple-800 dark:text-purple-200 border-purple-400/60 dark:border-purple-500/50' },
+                  { id: 'EQUITY',    label: '🏢 Cash Equity',      count: equityCount,    activeColor: 'bg-emerald-500/15 dark:bg-emerald-500/25 text-emerald-800 dark:text-emerald-200 border-emerald-400/60 dark:border-emerald-500/50' },
+                  { id: 'COMMODITY', label: '🌙 Commodity (MCX)',  count: commodityCount, activeColor: 'bg-amber-500/15 dark:bg-amber-500/25 text-amber-800 dark:text-amber-200 border-amber-400/60 dark:border-amber-500/50' },
+                  { id: 'CURRENCY',  label: '💱 Currency (CDS)',   count: currencyCount,  activeColor: 'bg-cyan-500/15 dark:bg-cyan-500/25 text-cyan-800 dark:text-cyan-200 border-cyan-400/60 dark:border-cyan-500/50' },
                 ].map((seg) => {
                   const isSelected = selectedSegments.has(seg.id)
                   return (
@@ -2798,7 +2798,7 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
                       }`} />
                       <span>{seg.label}</span>
                       <span className={`text-[10px] font-mono px-1.5 py-px rounded-full ${
-                        isSelected ? 'bg-black/20' : 'bg-elevated'
+                        isSelected ? 'bg-black/10 dark:bg-black/20 font-bold' : 'bg-elevated'
                       }`}>{seg.count}</span>
                     </button>
                   )
@@ -3001,7 +3001,7 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
 
           {/* Cleanup Status Toast Notice */}
           {cleanupNotice && (
-            <div className="p-2.5 rounded-xl bg-surface/90 border border-amber-500/40 text-xs text-amber-200 flex items-center justify-between gap-2 animate-slide-up-fade">
+            <div className="p-2.5 rounded-xl bg-surface/90 border border-amber-500/40 text-xs text-amber-800 dark:text-amber-200 flex items-center justify-between gap-2 animate-slide-up-fade">
               <span className="font-mono">{cleanupNotice}</span>
               <button onClick={() => setCleanupNotice(null)} className="text-muted hover:text-text text-xs font-bold">
                 ✕

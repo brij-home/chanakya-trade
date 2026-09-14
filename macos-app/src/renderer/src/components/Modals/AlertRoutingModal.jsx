@@ -210,7 +210,7 @@ export default function AlertRoutingModal({ isOpen, onClose, onSaveSuccess }) {
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-sm select-none animate-in fade-in duration-200"
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/35 dark:bg-black/75 backdrop-blur-sm select-none animate-in fade-in duration-200"
       onClick={onClose}
     >
       <div

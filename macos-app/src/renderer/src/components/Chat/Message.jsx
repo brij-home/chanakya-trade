@@ -80,7 +80,7 @@ function renderCardContent(cardType, data) {
     case 'whatif':             return <WhatIfCard data={data} />
     case 'strategy':           return <StrategyCard data={data} />
     case 'payoff':
-    case 'payoff_sim':         return <PayoffSimulatorCard initialSymbol={data?.symbol || 'NIFTY'} initialSpot={data?.spot_price || data?.last_price || 24000} />
+    case 'payoff_sim':         return <PayoffSimulatorCard initialSymbol={data?.symbol || 'NIFTY'} initialSpot={data?.spot_price || data?.last_price || 0} />
     case 'rrg':
     case 'sector_rotation':    return <RRGCard data={data} />
     case 'forensic':

@@ -93,8 +93,7 @@ export default function NotificationDetailModal({ onOpenOrderTicket }) {
 
   return (
     <div
-      className="fixed inset-0 z-[10000] flex items-center justify-center p-4"
-      style={{ background: 'rgba(0,0,0,0.75)', backdropFilter: 'blur(10px)' }}
+      className="fixed inset-0 z-[10000] flex items-center justify-center p-4 bg-black/35 dark:bg-black/75 backdrop-blur-md"
       onClick={(e) => {
         if (e.target === e.currentTarget) setSelected(null)
       }}

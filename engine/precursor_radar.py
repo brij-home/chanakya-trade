@@ -55,16 +55,26 @@ MAJOR_INDICES = [
 
 def classify_symbol_segment(symbol: str) -> str:
     """
-    Classifies a symbol into 'INDEX', 'FNO', or 'NON_FNO'.
+    Classifies a symbol into 'INDEX', 'FNO', 'NON_FNO', or 'COMMODITY'.
     """
     clean = (
         symbol.upper()
         .replace("NSE:", "")
         .replace("BSE:", "")
+        .replace("MCX:", "")
         .replace(".NS", "")
         .replace("^", "")
         .strip()
     )
+    if symbol.upper().startswith("MCX:"):
+        return "COMMODITY"
+    try:
+        from market.quotes import _MCX_SYMBOLS
+
+        if clean in _MCX_SYMBOLS and clean not in ("MCX",):
+            return "COMMODITY"
+    except Exception:
+        pass
     if (
         clean
         in (
@@ -266,15 +276,25 @@ class PrecursorRadarScanner:
             "KEC",
         ]
 
+        commodity_universe = [
+            "CRUDEOIL",
+            "GOLD",
+            "SILVER",
+            "COPPER",
+            "NATURALGAS",
+        ]
+
         if seg == "INDEX":
             return index_universe
         elif seg == "FNO":
             return fno_universe
         elif seg in ("NON_FNO", "CASH"):
             return non_fno_universe
+        elif seg in ("COMMODITY", "MCX"):
+            return commodity_universe
         else:
             # Balanced multi-segment blend
-            return index_universe[:4] + fno_universe[:30] + non_fno_universe[:20]
+            return index_universe[:4] + fno_universe[:30] + non_fno_universe[:20] + commodity_universe
 
     def evaluate_symbol(
         self,

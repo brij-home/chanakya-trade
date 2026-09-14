@@ -1100,6 +1100,148 @@ class AsymmetricOpportunityRadar:
             created_at=datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST"),
         )
 
+    # ── 5. MCX Commodity Volatility Pinch & Asymmetry ───────────
+
+    def detect_commodity_asymmetry(
+        self,
+        symbol: str,
+        df: Optional[pd.DataFrame] = None,
+        quote: Optional[Any] = None,
+    ) -> Optional[AsymmetricOpportunity]:
+        """
+        Detects high-asymmetry commodity setups (Crude, Gold, Silver, Copper, NatGas)
+        coiling at key structural anchors (VWAP, 20-EMA) with low-risk noise-hardened stops
+        and minimum 1:3.0 R:R payoff potential into the US session.
+        """
+        clean_sym = symbol.upper().replace("MCX:", "").strip()
+        if quote is None:
+            from market.quotes import get_quote
+
+            quotes_dict = get_quote(f"MCX:{clean_sym}")
+            quote = (
+                quotes_dict.get(f"MCX:{clean_sym}")
+                or quotes_dict.get(clean_sym)
+                or next(iter(quotes_dict.values()), None)
+            )
+        if isinstance(quote, dict):
+            quote = quote.get(f"MCX:{clean_sym}") or quote.get(clean_sym) or next(iter(quote.values()), None)
+        if not quote:
+            return None
+
+        ltp = _extract_price(quote, "last_price", "ltp")
+        if ltp <= 0:
+            return None
+
+        vwap = _extract_price(quote, "vwap") or ltp
+
+        # Fetch daily or 15m OHLCV if not passed
+        if df is None or len(df) < 15:
+            from market.history import get_ohlcv
+
+            df = get_ohlcv(clean_sym, exchange="MCX", interval="day", days=30)
+
+        if df is None or len(df) < 10:
+            return None
+
+        closes = df["close"].values
+        highs = df["high"].values if "high" in df.columns else closes
+        lows = df["low"].values if "low" in df.columns else closes
+
+        # Calculate daily ATR
+        tr = np.maximum(
+            highs[1:] - lows[1:],
+            np.maximum(abs(highs[1:] - closes[:-1]), abs(lows[1:] - closes[:-1])),
+        )
+        atr = round(float(np.mean(tr[-14:])), 2) if len(tr) >= 14 else round(ltp * 0.01, 2)
+
+        # 20-day EMA
+        ema20 = float(pd.Series(closes).ewm(span=20).mean().iloc[-1])
+
+        # Directional bias: anchored by relation to 20-EMA and VWAP
+        is_bullish = ltp >= ema20 * 0.985 and ltp >= vwap * 0.99
+        is_bearish = ltp <= ema20 * 1.015 and ltp <= vwap * 1.01
+
+        if not (is_bullish or is_bearish):
+            return None
+
+        direction = "BULLISH" if is_bullish else "BEARISH"
+
+        # Noise-safe stop-loss: 1.5x ATR (or minimum floor)
+        is_energy = clean_sym in ("CRUDEOIL", "CRUDEOILM", "NATURALGAS", "NATGASMINI")
+        min_pct = 0.008 if is_energy else 0.005
+        raw_risk = max(atr * 1.5, ltp * min_pct)
+
+        if direction == "BULLISH":
+            raw_sl = round(max(1.0, ltp - raw_risk), 2)
+            raw_t1 = round(ltp + 2.0 * raw_risk, 2)
+            raw_t2 = round(ltp + 3.5 * raw_risk, 2)
+            raw_moonshot = round(ltp + 5.0 * raw_risk, 2)
+        else:
+            raw_sl = round(ltp + raw_risk, 2)
+            raw_t1 = round(max(1.0, ltp - 2.0 * raw_risk), 2)
+            raw_t2 = round(max(1.0, ltp - 3.5 * raw_risk), 2)
+            raw_moonshot = round(max(1.0, ltp - 5.0 * raw_risk), 2)
+
+        sl_price, risk_pts, t1_price, t2_price, moonshot, rr_ratio, entry_range_str = (
+            _enforce_monotonic_trade_levels(
+                direction=direction,
+                ltp=ltp,
+                raw_sl=raw_sl,
+                target_1=raw_t1,
+                target_2=raw_t2,
+                target_moonshot=raw_moonshot,
+                atr=atr,
+            )
+        )
+
+        if rr_ratio < 3.0:
+            return None
+
+        from engine.position_sizer import get_lot_size
+
+        lot_sz = get_lot_size(clean_sym) or 1
+
+        confluences = [
+            f"MCX Commodity Volatility Pinch: {clean_sym} coiling near 20-EMA (₹{ema20:,.1f}) & VWAP (₹{vwap:,.1f})",
+            f"Noise-safe {direction.lower()} risk floor ({risk_pts:,.1f} pts / {round(risk_pts / ltp * 100, 2)}%) clears intraday chop",
+            f"Asymmetric {rr_ratio:.1f}x risk:reward extension into US session liquidity",
+        ]
+
+        return AsymmetricOpportunity(
+            opportunity_id=f"asym-comm-{clean_sym.lower()}-{uuid.uuid4().hex[:6]}",
+            symbol=clean_sym,
+            exchange="MCX",
+            setup_type="COMMODITY_VWAP_PINCH",
+            setup_label=f"🛢️ MCX Commodity Asymmetry [{clean_sym}]",
+            segment="COMMODITY",
+            direction=direction,
+            conviction_score=82,
+            ltp=ltp,
+            entry_price=ltp,
+            entry_range=entry_range_str,
+            stop_loss=sl_price,
+            target_1=t1_price,
+            target_2=t2_price,
+            target_moonshot=moonshot,
+            risk_reward=f"1:{rr_ratio:.1f}",
+            risk_reward_ratio=rr_ratio,
+            risk_pts=round(risk_pts, 1),
+            reward_pts=round(abs(t2_price - ltp), 1),
+            confluence_factors=confluences,
+            catalyst_summary=f"Institutional pre-expansion coiling in {clean_sym} with favorable volatility risk-parity.",
+            when_to_buy=f"Enter {direction} on 15m candle close adhering to VWAP ₹{vwap:,.1f}.",
+            when_to_wait=f"DO NOT CHASE if price moves > 1.2% past entry before confirmation.",
+            profit_rule=f"Book 50% at T1 (₹{t1_price:,.1f}), move SL to Breakeven, let runner target T2 (₹{t2_price:,.1f}).",
+            metrics={
+                "atr": atr,
+                "ema20": round(ema20, 2),
+                "vwap": round(vwap, 2),
+                "lot_size": lot_sz,
+            },
+            lot_size=lot_sz,
+            created_at=datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST"),
+        )
+
     # ── Universal Scanner ───────────────────────────────────────
 
     def scan_asymmetric_opportunities(
@@ -1108,7 +1250,7 @@ class AsymmetricOpportunityRadar:
         top_n: int = 6,
     ) -> list[AsymmetricOpportunity]:
         """
-        Sweeps the watched universe across F&O, Cash Equities, and Indices
+        Sweeps the watched universe across F&O, Cash Equities, Indices, and MCX Commodities
         to surface top asymmetric opportunities meeting strict minimum 1:3.0 R:R.
         """
         universe = get_scan_universe(segment=segment)
@@ -1141,6 +1283,12 @@ class AsymmetricOpportunityRadar:
                     g0 = self.detect_0dte_gamma_breakout(sym)
                     if g0:
                         opportunities.append(g0)
+
+                # 5. MCX Commodity Asymmetry check
+                if classify_symbol_segment(sym) == "COMMODITY":
+                    comm = self.detect_commodity_asymmetry(sym)
+                    if comm:
+                        opportunities.append(comm)
 
             except Exception as e:
                 logger.debug(f"[AsymmetricRadar] Evaluation error on {sym}: {e}")

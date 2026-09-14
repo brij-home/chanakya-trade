@@ -3,7 +3,7 @@ import { useChatStore } from '../../store/chatStore'
 import { useAPI } from '../../hooks/useAPI'
 import PayoffSimulatorCard from '../Cards/PayoffSimulatorCard'
 import ConvictionScoreCard from '../Cards/ConvictionScoreCard'
-import { getSymbolExchange } from '../../data/universeData'
+import { getSymbolExchange, resolveInstrument } from '../../data/universeData'
 
 // Cumulative standard normal distribution for Greeks
 function normalCDF(x) {
@@ -81,11 +81,10 @@ function BlastActionPopover({
 
   return (
     <div
-      className="p-3.5 rounded-2xl shadow-2xl font-mono border backdrop-blur-xl max-w-sm w-full animate-in fade-in zoom-in-95 duration-150 text-text"
+      className="p-3.5 rounded-2xl shadow-modal font-mono border backdrop-blur-xl max-w-sm w-full animate-in fade-in zoom-in-95 duration-150 text-text bg-panel"
       style={{
-        background: 'rgba(15, 23, 42, 0.96)',
         borderColor: isCall ? 'rgba(34, 211, 238, 0.6)' : 'rgba(244, 63, 94, 0.6)',
-        boxShadow: isCall ? '0 12px 48px -8px rgba(6, 182, 212, 0.45)' : '0 12px 48px -8px rgba(244, 63, 94, 0.45)',
+        boxShadow: isCall ? '0 12px 48px -8px rgba(6, 182, 212, 0.35)' : '0 12px 48px -8px rgba(244, 63, 94, 0.35)',
       }}
       onClick={(e) => e.stopPropagation()}
     >
@@ -95,13 +94,15 @@ function BlastActionPopover({
           <div className="flex items-center gap-1.5 mb-0.5">
             <span className="text-base animate-pulse">{flame}</span>
             <span
-              className={`text-[9px] font-black px-1.5 py-0.2 rounded tracking-wide ${
-                isCall ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40' : 'bg-rose-500/20 text-rose-300 border border-rose-500/40'
+              className={`text-[9px] font-black px-1.5 py-0.5 rounded tracking-wide ${
+                isCall
+                  ? 'bg-cyan-500/15 text-cyan-700 dark:text-cyan-300 border border-cyan-500/30'
+                  : 'bg-rose-500/15 text-rose-700 dark:text-rose-300 border border-rose-500/30'
               }`}
             >
               {blastData.action_recommendation || (isCall ? 'BUY CALL (MOMENTUM)' : 'BUY PUT (BREAKDOWN)')}
             </span>
-            <span className="text-[9px] font-bold text-amber bg-amber-500/15 border border-amber-500/30 px-1 py-0.2 rounded">
+            <span className="text-[9px] font-bold text-amber-700 dark:text-amber bg-amber-500/15 border border-amber-500/30 px-1.5 py-0.5 rounded">
               Score {blastData.score}/100
             </span>
           </div>
@@ -114,7 +115,7 @@ function BlastActionPopover({
         </div>
         <button
           onClick={onClose}
-          className="text-muted hover:text-text p-1 text-xs cursor-pointer rounded-lg hover:bg-surface ml-1"
+          className="text-muted hover:text-text p-1 text-xs cursor-pointer rounded-lg hover:bg-surface ml-1 transition-colors"
           title="Close Popover"
         >
           ✕
@@ -122,45 +123,45 @@ function BlastActionPopover({
       </div>
 
       {/* Actionable Profit Blueprint Matrix */}
-      <div className="grid grid-cols-2 gap-1.5 mb-2 bg-surface/80 p-2 rounded-xl border border-border/50 text-[11px]">
+      <div className="grid grid-cols-2 gap-1.5 mb-2 bg-surface/80 dark:bg-surface/50 p-2.5 rounded-xl border border-border/60 text-[11px]">
         <div>
-          <span className="text-[9px] uppercase tracking-wider text-muted block">Entry Zone</span>
-          <span className="font-extrabold text-emerald-400 text-xs">
+          <span className="text-[9px] uppercase tracking-wider text-muted block font-semibold">Entry Zone</span>
+          <span className="font-extrabold text-emerald-600 dark:text-emerald-400 text-xs">
             {blastData.entry_range || `₹${blastData.bid} – ₹${blastData.ask}`}
           </span>
         </div>
         <div>
-          <span className="text-[9px] uppercase tracking-wider text-muted block">Invalidation SL</span>
-          <span className="font-extrabold text-rose-400 text-xs">
+          <span className="text-[9px] uppercase tracking-wider text-muted block font-semibold">Invalidation SL</span>
+          <span className="font-extrabold text-rose-600 dark:text-rose-400 text-xs">
             ₹{blastData.stop_loss || '—'} <span className="text-[9px] font-normal opacity-75">({blastData.stop_loss_pct || '-25%'})</span>
           </span>
         </div>
         <div>
-          <span className="text-[9px] uppercase tracking-wider text-muted block">Target 1 (1.5R Scalp)</span>
-          <span className="font-extrabold text-cyan-300 text-xs">
+          <span className="text-[9px] uppercase tracking-wider text-muted block font-semibold">Target 1 (1.5R Scalp)</span>
+          <span className="font-extrabold text-cyan-700 dark:text-cyan-300 text-xs">
             ₹{blastData.target_1 || '—'} <span className="text-[9px] font-normal opacity-75">({blastData.target_1_pct || '+35%'})</span>
           </span>
         </div>
         <div>
-          <span className="text-[9px] uppercase tracking-wider text-muted block">Target 2 (2.5R Runner)</span>
-          <span className="font-extrabold text-amber text-xs">
+          <span className="text-[9px] uppercase tracking-wider text-muted block font-semibold">Target 2 (2.5R Runner)</span>
+          <span className="font-extrabold text-amber-700 dark:text-amber text-xs">
             ₹{blastData.target_2 || '—'} <span className="text-[9px] font-normal opacity-75">({blastData.target_2_pct || '+65%'})</span>
           </span>
         </div>
       </div>
 
       {/* Trader Execution Playbook */}
-      <div className="space-y-1 text-[10px] mb-2.5 bg-black/40 p-2 rounded-xl border border-border/40 font-ui leading-tight">
-        <div className="flex items-start gap-1">
-          <span className="text-emerald-400 font-bold shrink-0">🟢 BUY:</span>
+      <div className="space-y-1.5 text-[10px] mb-2.5 bg-surface/90 dark:bg-black/30 p-2.5 rounded-xl border border-border/60 font-ui leading-tight">
+        <div className="flex items-start gap-1.5">
+          <span className="text-emerald-600 dark:text-emerald-400 font-bold shrink-0">🟢 BUY:</span>
           <span className="text-text/90">{blastData.when_to_buy || `Enter on Ask/Retest while Spot holds support`}</span>
         </div>
-        <div className="flex items-start gap-1">
-          <span className="text-amber font-bold shrink-0">🟡 WAIT:</span>
+        <div className="flex items-start gap-1.5">
+          <span className="text-amber-600 dark:text-amber font-bold shrink-0">🟡 WAIT:</span>
           <span className="text-text/80">{blastData.when_to_wait || `DO NOT CHASE if premium spiked > 15%`}</span>
         </div>
-        <div className="flex items-start gap-1">
-          <span className="text-cyan-400 font-bold shrink-0">💰 PROFIT:</span>
+        <div className="flex items-start gap-1.5">
+          <span className="text-cyan-600 dark:text-cyan-400 font-bold shrink-0">💰 PROFIT:</span>
           <span className="text-text/90 font-semibold">{blastData.profit_rule || `Take 50% off at T1 and trail SL to Cost`}</span>
         </div>
       </div>
@@ -179,10 +180,10 @@ function BlastActionPopover({
               })
             onClose && onClose()
           }}
-          className={`flex-1 py-1 px-2.5 rounded-lg font-extrabold text-[10px] transition-all cursor-pointer flex items-center justify-center gap-1 shadow-md ${
+          className={`flex-1 py-1.5 px-2.5 rounded-lg font-extrabold text-[10px] transition-all cursor-pointer flex items-center justify-center gap-1 shadow-xs ${
             isCall
-              ? 'bg-gradient-to-r from-cyan-400 to-cyan-500 text-black hover:brightness-110'
-              : 'bg-gradient-to-r from-rose-500 to-rose-600 text-white hover:brightness-110'
+              ? 'bg-gradient-to-r from-cyan-500 to-cyan-600 text-white hover:brightness-105 active:scale-98'
+              : 'bg-gradient-to-r from-rose-500 to-rose-600 text-white hover:brightness-105 active:scale-98'
           }`}
         >
           <span>🚀</span> Stage BUY Order
@@ -190,7 +191,7 @@ function BlastActionPopover({
 
         <button
           onClick={() => onSendTelegram && onSendTelegram(blastData)}
-          className="px-2 py-1 rounded-lg bg-surface hover:bg-elevated border border-border/70 text-text hover:text-amber text-[10px] font-bold transition-all cursor-pointer flex items-center gap-1 shrink-0"
+          className="px-2.5 py-1.5 rounded-lg bg-surface hover:bg-elevated border border-border/70 text-text hover:text-amber text-[10px] font-bold transition-all cursor-pointer flex items-center gap-1 shrink-0"
           title="Send actionable alert to Telegram"
         >
           <span>📲</span> Telegram
@@ -201,7 +202,7 @@ function BlastActionPopover({
             onSendCopilot && onSendCopilot(blastData)
             onClose && onClose()
           }}
-          className="px-2 py-1 rounded-lg bg-surface hover:bg-elevated border border-border/70 text-text hover:text-cyan-400 text-[10px] font-bold transition-all cursor-pointer flex items-center gap-1 shrink-0"
+          className="px-2.5 py-1.5 rounded-lg bg-surface hover:bg-elevated border border-border/70 text-text hover:text-cyan-600 dark:hover:text-cyan-400 text-[10px] font-bold transition-all cursor-pointer flex items-center gap-1 shrink-0"
           title="Analyze in Copilot Chat"
         >
           <span>💬</span> Copilot
@@ -236,6 +237,7 @@ export default function OptionsDeskView({
   const [showVisualBars, setShowVisualBars] = useState(true)
   const [deskPosScale, setDeskPosScale] = useState(1)
   const [showDeskWhy, setShowDeskWhy] = useState(false)
+  const [showConvictionDrawer, setShowConvictionDrawer] = useState(false)
 
   const [customSymbolInput, setCustomSymbolInput] = useState('')
   const [showSymbolSearch, setShowSymbolSearch] = useState(false)
@@ -364,20 +366,6 @@ export default function OptionsDeskView({
   const totalPutOI = data?.total_put_oi || '—'
   const netOIChange = data?.net_oi_change || '—'
 
-  // Dynamic IV Curve SVG Points calculation
-  const ivValues = ivSkew.map((p) => p.iv)
-  const minIV = ivValues.length > 0 ? Math.min(...ivValues) : 12
-  const maxIV = ivValues.length > 0 ? Math.max(...ivValues) : 22
-  const ivRange = Math.max(1, maxIV - minIV)
-
-  const svgPoints = ivSkew
-    .map((pt, idx) => {
-      const x = 15 + (idx / Math.max(1, ivSkew.length - 1)) * 210
-      const y = 85 - ((pt.iv - minIV) / ivRange) * 65
-      return `${x},${y}`
-    })
-    .join(' ')
-
   // Mathematically robust ATM index calculation (guaranteed valid index)
   const atmIdx = (() => {
     if (!optionsChain || optionsChain.length === 0 || spot <= 0) return -1
@@ -394,6 +382,23 @@ export default function OptionsDeskView({
     })
     return closestIdx
   })()
+
+  // Dynamic IV Curve SVG Points calculation derived from live skew or option chain
+  const ivValues = (ivSkew || []).map((p) => p.iv).filter((v) => typeof v === 'number' && !isNaN(v))
+  const atmChainIV = parseFloat(String(optionsChain[atmIdx]?.calls_iv || optionsChain[atmIdx]?.puts_iv || 0).replace(/[^0-9.-]/g, '')) || 0
+  const minIV = ivValues.length > 0 ? Math.min(...ivValues) : (atmChainIV > 0 ? atmChainIV : 0)
+  const maxIV = ivValues.length > 0 ? Math.max(...ivValues) : (atmChainIV > 0 ? atmChainIV : 0)
+  const ivRange = Math.max(1, maxIV - minIV)
+
+  const svgPoints = ivValues.length > 1 && ivRange > 0
+    ? ivSkew
+        .map((pt, idx) => {
+          const x = 15 + (idx / Math.max(1, ivSkew.length - 1)) * 210
+          const y = 85 - (((pt.iv ?? minIV) - minIV) / ivRange) * 65
+          return `${x.toFixed(1)},${y.toFixed(1)}`
+        })
+        .join(' ')
+    : ''
 
   // Filtered & Sorted Options Chain (ATM ±5, ATM ±10, ATM ±15, ALL)
   const filteredChain = optionsChain.filter((row, idx) => {
@@ -476,6 +481,44 @@ export default function OptionsDeskView({
     ? optionsChain.reduce((max, r) => ((parseFloat(String(r.puts_oi || 0).replace(/[^0-9.-]/g, '')) || 0) > (parseFloat(String(max?.puts_oi || 0).replace(/[^0-9.-]/g, '')) || 0) ? r : max), optionsChain[0] || {})?.strike
     : data?.put_support || null
 
+  // Dynamic IV Skew derived from actual live OTM Put vs Call implied volatilities
+  const dynamicSkew = useMemo(() => {
+    if (!optionsChain || optionsChain.length === 0 || atmIdx < 0) return null
+    // Take OTM Put (2 strikes below ATM) and OTM Call (2 strikes above ATM)
+    const otmPutRow = optionsChain[Math.max(0, atmIdx - 2)]
+    const otmCallRow = optionsChain[Math.min(optionsChain.length - 1, atmIdx + 2)]
+    const putIV = parseFloat(String(otmPutRow?.puts_iv || 0).replace(/[^0-9.-]/g, ''))
+    const callIV = parseFloat(String(otmCallRow?.calls_iv || 0).replace(/[^0-9.-]/g, ''))
+    if (!putIV || !callIV || isNaN(putIV) || isNaN(callIV)) return null
+    const diff = Number((putIV - callIV).toFixed(1))
+    return {
+      diff,
+      label: diff >= 0 ? `Put Skew +${diff.toFixed(1)}%` : `Call Skew +${Math.abs(diff).toFixed(1)}%`,
+      sentiment: diff > 2.0 ? 'Heavy Put Skew (Downside Hedge)' : diff < -2.0 ? 'Call Skew (Upside Speculation)' : 'Balanced Skew',
+      putIV,
+      callIV,
+    }
+  }, [optionsChain, atmIdx])
+
+  // Dynamic Call IV Curve SVG Points calculation from live optionsChain
+  const callSvgPoints = useMemo(() => {
+    if (!optionsChain || optionsChain.length === 0) return ''
+    const centerIdx = atmIdx >= 0 ? atmIdx : Math.floor(optionsChain.length / 2)
+    const slice = optionsChain.slice(Math.max(0, centerIdx - 4), Math.min(optionsChain.length, centerIdx + 5))
+    if (slice.length < 2) return ''
+    const ivs = slice.map((r) => parseFloat(String(r.calls_iv || 0).replace(/[^0-9.-]/g, '')) || minIV)
+    const sMin = Math.min(...ivs, minIV)
+    const sMax = Math.max(...ivs, maxIV)
+    const rng = Math.max(1, sMax - sMin)
+    return slice
+      .map((_, idx) => {
+        const x = 15 + (idx / Math.max(1, slice.length - 1)) * 210
+        const y = 85 - ((ivs[idx] - sMin) / rng) * 65
+        return `${x.toFixed(1)},${y.toFixed(1)}`
+      })
+      .join(' ')
+  }, [optionsChain, atmIdx, minIV, maxIV])
+
   // Institutional Multi-Factor Options Decision Matrix
   const decisionMatrix = useMemo(() => {
     if (dataState === 'BROKER_REQUIRED' || optionsChain.length === 0) {
@@ -506,10 +549,10 @@ export default function OptionsDeskView({
       }
     }
 
-    const isPosGamma = spot >= (data?.zero_gamma ?? spot - 50)
+    const isPosGamma = spot >= (data?.zero_gamma ?? (spot > 0 ? spot - 50 : 0))
     const distToPain = (spot > 0 && maxPain != null && maxPain > 0) ? spot - maxPain : 0
-    const distToCallWall = callWallStrike ? Number(callWallStrike) - spot : 200
-    const distToPutWall = putWallStrike ? spot - Number(putWallStrike) : 200
+    const distToCallWall = callWallStrike ? Number(callWallStrike) - spot : 0
+    const distToPutWall = putWallStrike ? spot - Number(putWallStrike) : 0
     const isNearMaxPain = (maxPain != null && maxPain > 0) ? Math.abs(distToPain) <= (spot * 0.0075) : false
     const pcrNum = pcr !== '—' ? parseFloat(pcr) : 1.0
     const isPcrBullish = pcrNum >= 1.05
@@ -522,6 +565,24 @@ export default function OptionsDeskView({
     const step = (underlying === 'NIFTY' || underlying === 'FINNIFTY') ? 50 : (underlying === 'BANKNIFTY' || underlying === 'SENSEX') ? 100 : (spot > 1000 ? 20 : 10)
     const atmStrike = Math.round(spot / step) * step
 
+    // Helper to resolve live option price directly from the live options chain
+    const getOptionPrice = (targetStrike, type) => {
+      if (!optionsChain || optionsChain.length === 0) return null
+      const row = optionsChain.find((r) => Math.abs(Number(r.strike) - Number(targetStrike)) < (step * 0.5))
+      if (!row) return null
+      const rawPrice = type === 'CE' ? (row.calls_ltp || row.calls_bid || row.calls_ask) : (row.puts_ltp || row.puts_bid || row.puts_ask)
+      const num = parseFloat(String(rawPrice || 0).replace(/[^0-9.-]/g, ''))
+      return num > 0 ? num : null
+    }
+
+    // Bull Call Spread calculation
+    const atmCallPrice = getOptionPrice(atmStrike, 'CE')
+    const otmCallPrice = getOptionPrice(atmStrike + (step * 2), 'CE')
+    const bcsDebit = (atmCallPrice != null && otmCallPrice != null && atmCallPrice > otmCallPrice)
+      ? Number((atmCallPrice - otmCallPrice).toFixed(1))
+      : (atmCallPrice != null ? Number(atmCallPrice.toFixed(1)) : null)
+    const bcsMaxProfit = bcsDebit != null ? Number(((step * 2) - bcsDebit).toFixed(1)) : null
+
     let verdict = {
       strategyName: 'BULL CALL SPREAD',
       type: 'DIRECTIONAL_BULL',
@@ -529,18 +590,27 @@ export default function OptionsDeskView({
       conviction: 88,
       rationale: 'Positive Gamma regime with strong Put OI writing cushion; institutional flow defending Put Wall support.',
       legs: [
-        { action: 'BUY', strike: atmStrike, type: 'CE', desc: 'ATM Call' },
-        { action: 'SELL', strike: atmStrike + (step * 2), type: 'CE', desc: 'OTM Call (Call Wall)' },
+        { action: 'BUY', strike: atmStrike, type: 'CE', desc: 'ATM Call', price: atmCallPrice },
+        { action: 'SELL', strike: atmStrike + (step * 2), type: 'CE', desc: 'OTM Call (Call Wall)', price: otmCallPrice },
       ],
-      netPremium: Math.round(spot * 0.008),
-      maxProfit: Math.round((step * 2) - (spot * 0.008)),
-      maxLoss: Math.round(spot * 0.008),
-      riskReward: '1 : 2.5',
-      breakeven: `${atmStrike + Math.round(spot * 0.008)}`,
+      netPremium: bcsDebit != null ? bcsDebit : '—',
+      maxProfit: bcsMaxProfit != null ? bcsMaxProfit : '—',
+      maxLoss: bcsDebit != null ? bcsDebit : '—',
+      riskReward: (bcsMaxProfit != null && bcsDebit != null && bcsDebit > 0) ? `1 : ${(bcsMaxProfit / bcsDebit).toFixed(1)}` : '1 : 2.5',
+      breakeven: bcsDebit != null ? `${(atmStrike + bcsDebit).toFixed(1)}` : '—',
       winProb: 68,
     }
 
     if (isPosGamma && isNearMaxPain && pcrNum >= 0.95 && pcrNum <= 1.25) {
+      const otmCallShort = getOptionPrice(atmStrike + (step * 2), 'CE')
+      const otmCallLong = getOptionPrice(atmStrike + (step * 4), 'CE')
+      const otmPutShort = getOptionPrice(atmStrike - (step * 2), 'PE')
+      const otmPutLong = getOptionPrice(atmStrike - (step * 4), 'PE')
+      const icCredit = (otmCallShort != null && otmCallLong != null && otmPutShort != null && otmPutLong != null)
+        ? Number(((otmCallShort - otmCallLong) + (otmPutShort - otmPutLong)).toFixed(1))
+        : null
+      const icMaxLoss = icCredit != null ? Number(((step * 2) - icCredit).toFixed(1)) : null
+
       verdict = {
         strategyName: 'IRON CONDOR / RANGE PIN',
         type: 'DELTA_NEUTRAL',
@@ -548,19 +618,22 @@ export default function OptionsDeskView({
         conviction: 92,
         rationale: 'Dealer Long Gamma pinning price near Max Pain strike. Mean-reverting volatility dampens breakout drift.',
         legs: [
-          { action: 'SELL', strike: atmStrike + (step * 2), type: 'CE', desc: 'OTM Call Short' },
-          { action: 'BUY', strike: atmStrike + (step * 4), type: 'CE', desc: 'Call Protection' },
-          { action: 'SELL', strike: atmStrike - (step * 2), type: 'PE', desc: 'OTM Put Short' },
-          { action: 'BUY', strike: atmStrike - (step * 4), type: 'PE', desc: 'Put Protection' },
+          { action: 'SELL', strike: atmStrike + (step * 2), type: 'CE', desc: 'OTM Call Short', price: otmCallShort },
+          { action: 'BUY', strike: atmStrike + (step * 4), type: 'CE', desc: 'Call Protection', price: otmCallLong },
+          { action: 'SELL', strike: atmStrike - (step * 2), type: 'PE', desc: 'OTM Put Short', price: otmPutShort },
+          { action: 'BUY', strike: atmStrike - (step * 4), type: 'PE', desc: 'Put Protection', price: otmPutLong },
         ],
-        netPremium: Math.round(step * 0.45),
-        maxProfit: Math.round(step * 0.45),
-        maxLoss: Math.round(step * 1.55),
-        riskReward: '1 : 3.4',
-        breakeven: `${atmStrike - (step * 2) - Math.round(step * 0.45)} – ${atmStrike + (step * 2) + Math.round(step * 0.45)}`,
+        netPremium: icCredit != null ? icCredit : '—',
+        maxProfit: icCredit != null ? icCredit : '—',
+        maxLoss: icMaxLoss != null ? icMaxLoss : '—',
+        riskReward: (icMaxLoss != null && icCredit != null && icCredit > 0) ? `1 : ${(icMaxLoss / icCredit).toFixed(1)}` : '1 : 3.4',
+        breakeven: icCredit != null ? `${(atmStrike - (step * 2) - icCredit).toFixed(1)} – ${(atmStrike + (step * 2) + icCredit).toFixed(1)}` : '—',
         winProb: 76,
       }
     } else if (!isPosGamma && (spot > (callWallStrike || atmStrike + 100) || isPcrBullish)) {
+      const atmCallLtp = getOptionPrice(atmStrike, 'CE')
+      const longCallPrem = atmCallLtp != null ? Number(atmCallLtp.toFixed(1)) : null
+
       verdict = {
         strategyName: 'LONG GAMMA SURGE / BREAKOUT',
         type: 'VOLATILITY_EXPANSION',
@@ -568,16 +641,23 @@ export default function OptionsDeskView({
         conviction: 85,
         rationale: 'Spot broke above flip level into Negative Gamma territory; dealer short-gamma hedging will accelerate upward velocity.',
         legs: [
-          { action: 'BUY', strike: atmStrike, type: 'CE', desc: 'ATM Momentum Call' },
+          { action: 'BUY', strike: atmStrike, type: 'CE', desc: 'ATM Momentum Call', price: atmCallLtp },
         ],
-        netPremium: Math.round(spot * 0.009),
+        netPremium: longCallPrem != null ? longCallPrem : '—',
         maxProfit: 'UNLIMITED',
-        maxLoss: Math.round(spot * 0.009),
+        maxLoss: longCallPrem != null ? longCallPrem : '—',
         riskReward: 'Asymmetric (1 : 4+)',
-        breakeven: `${atmStrike + Math.round(spot * 0.009)}`,
+        breakeven: longCallPrem != null ? `${(atmStrike + longCallPrem).toFixed(1)}` : '—',
         winProb: 62,
       }
     } else if (isPcrBearish || (!isPosGamma && spot < (putWallStrike || atmStrike - 100))) {
+      const atmPutPrice = getOptionPrice(atmStrike, 'PE')
+      const otmPutPrice = getOptionPrice(atmStrike - (step * 2), 'PE')
+      const bpsDebit = (atmPutPrice != null && otmPutPrice != null && atmPutPrice > otmPutPrice)
+        ? Number((atmPutPrice - otmPutPrice).toFixed(1))
+        : (atmPutPrice != null ? Number(atmPutPrice.toFixed(1)) : null)
+      const bpsMaxProfit = bpsDebit != null ? Number(((step * 2) - bpsDebit).toFixed(1)) : null
+
       verdict = {
         strategyName: 'BEAR PUT SPREAD',
         type: 'DIRECTIONAL_BEAR',
@@ -585,17 +665,23 @@ export default function OptionsDeskView({
         conviction: 87,
         rationale: 'Call writing resistance overhead with sub-0.85 PCR and Negative Gamma breakdown risk.',
         legs: [
-          { action: 'BUY', strike: atmStrike, type: 'PE', desc: 'ATM Put' },
-          { action: 'SELL', strike: atmStrike - (step * 2), type: 'PE', desc: 'OTM Put Target' },
+          { action: 'BUY', strike: atmStrike, type: 'PE', desc: 'ATM Put', price: atmPutPrice },
+          { action: 'SELL', strike: atmStrike - (step * 2), type: 'PE', desc: 'OTM Put Target', price: otmPutPrice },
         ],
-        netPremium: Math.round(spot * 0.0075),
-        maxProfit: Math.round((step * 2) - (spot * 0.0075)),
-        maxLoss: Math.round(spot * 0.0075),
-        riskReward: '1 : 2.7',
-        breakeven: `${atmStrike - Math.round(spot * 0.0075)}`,
+        netPremium: bpsDebit != null ? bpsDebit : '—',
+        maxProfit: bpsMaxProfit != null ? bpsMaxProfit : '—',
+        maxLoss: bpsDebit != null ? bpsDebit : '—',
+        riskReward: (bpsMaxProfit != null && bpsDebit != null && bpsDebit > 0) ? `1 : ${(bpsMaxProfit / bpsDebit).toFixed(1)}` : '1 : 2.5',
+        breakeven: bpsDebit != null ? `${(atmStrike - bpsDebit).toFixed(1)}` : '—',
         winProb: 69,
       }
     } else if (atmIVNum <= 13.0 && isPosGamma) {
+      const straddleCall = getOptionPrice(atmStrike, 'CE')
+      const straddlePut = getOptionPrice(atmStrike, 'PE')
+      const straddlePrem = (straddleCall != null && straddlePut != null)
+        ? Number((straddleCall + straddlePut).toFixed(1))
+        : null
+
       verdict = {
         strategyName: 'SHORT STRADDLE / THETA HARVEST',
         type: 'THETA_DECAY',
@@ -603,14 +689,14 @@ export default function OptionsDeskView({
         conviction: 89,
         rationale: 'Subdued volatility with tight dealer pinning creates optimal conditions for theta harvesting.',
         legs: [
-          { action: 'SELL', strike: atmStrike, type: 'CE', desc: 'ATM Short Call' },
-          { action: 'SELL', strike: atmStrike, type: 'PE', desc: 'ATM Short Put' },
+          { action: 'SELL', strike: atmStrike, type: 'CE', desc: 'ATM Short Call', price: straddleCall },
+          { action: 'SELL', strike: atmStrike, type: 'PE', desc: 'ATM Short Put', price: straddlePut },
         ],
-        netPremium: Math.round(spot * 0.018),
-        maxProfit: Math.round(spot * 0.018),
+        netPremium: straddlePrem != null ? straddlePrem : '—',
+        maxProfit: straddlePrem != null ? straddlePrem : '—',
         maxLoss: 'Defined by Stop-Loss (30% premium)',
         riskReward: '1 : 1.5',
-        breakeven: `${atmStrike - Math.round(spot * 0.018)} – ${atmStrike + Math.round(spot * 0.018)}`,
+        breakeven: straddlePrem != null ? `${(atmStrike - straddlePrem).toFixed(1)} – ${(atmStrike + straddlePrem).toFixed(1)}` : '—',
         winProb: 74,
       }
     }
@@ -626,7 +712,7 @@ export default function OptionsDeskView({
       atmStrike,
       step,
     }
-  }, [spot, maxPain, callWallStrike, putWallStrike, pcr, minIV, data?.zero_gamma, underlying, dataState, optionsChain.length, brokerNote])
+  }, [spot, maxPain, callWallStrike, putWallStrike, pcr, minIV, data?.zero_gamma, underlying, dataState, optionsChain, brokerNote])
 
   return (
     <div className="flex-1 overflow-y-auto p-2.5 sm:p-3.5 bg-surface text-text space-y-2.5 font-ui">
@@ -939,23 +1025,30 @@ export default function OptionsDeskView({
             </div>
           </div>
 
-          {/* Quick Verdict Badge in Header */}
+          {/* Quick Verdict Badge & Conviction Drawer Toggle in Header */}
           <div className="flex items-center gap-2">
             <div className="text-right">
               <span className="text-[9px] text-muted block font-mono">ALGORITHMIC VERDICT</span>
               <span className={`text-xs font-bold font-mono px-2 py-0.5 rounded border ${
                 decisionMatrix.bias.includes('BULL')
-                  ? 'bg-emerald-500/15 border-emerald-500/30 text-emerald-400'
+                  ? 'bg-emerald-500/15 border-emerald-500/30 text-emerald-600 dark:text-emerald-400'
                   : decisionMatrix.bias.includes('BEAR')
-                  ? 'bg-rose-500/15 border-rose-500/30 text-rose-400'
+                  ? 'bg-rose-500/15 border-rose-500/30 text-rose-600 dark:text-rose-400'
                   : 'bg-amber/15 border-amber/30 text-amber'
               }`}>
                 {decisionMatrix.strategyName}
               </span>
             </div>
-            <span className="text-xs font-mono font-black text-amber bg-surface px-2 py-1 rounded-lg border border-border/60">
-              {decisionMatrix.conviction}% Conviction
-            </span>
+            <button
+              type="button"
+              onClick={() => setShowConvictionDrawer((prev) => !prev)}
+              className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-amber/40 bg-amber/10 hover:bg-amber/20 text-amber font-mono text-[10px] font-bold transition-colors cursor-pointer"
+              title="Toggle 12-Factor Orthogonal Conviction Breakdown"
+            >
+              <span>🧠</span>
+              <span className="hidden sm:inline">12-Factor Intel</span>
+              <span>{showConvictionDrawer ? '▲' : '▼'}</span>
+            </button>
           </div>
         </div>
 
@@ -965,7 +1058,7 @@ export default function OptionsDeskView({
           <div className="bg-surface/80 p-2 rounded-lg border border-border/60 space-y-0.5">
             <div className="flex items-center justify-between text-[9px] text-muted">
               <span>1. GEX REGIME</span>
-              <span className={decisionMatrix.isPosGamma ? 'text-emerald-400 font-bold' : 'text-rose-400 font-bold'}>
+              <span className={decisionMatrix.isPosGamma ? 'text-emerald-600 dark:text-emerald-400 font-bold' : 'text-rose-600 dark:text-rose-400 font-bold'}>
                 {decisionMatrix.isPosGamma ? '+GEX PINNING' : '-GEX EXPANSION'}
               </span>
             </div>
@@ -973,8 +1066,10 @@ export default function OptionsDeskView({
               {decisionMatrix.isPosGamma ? 'Long Gamma (Pinning)' : 'Short Gamma (Breakout)'}
             </div>
             <div className="text-[9px] text-muted flex justify-between pt-0.5">
-              <span>Flip: ₹{Number(data?.zero_gamma || spot - 50).toLocaleString('en-IN')}</span>
-              <span className="text-pink-400">Δ {Math.abs(Math.round(spot - (data?.zero_gamma || spot - 50)))} pts</span>
+              <span>Flip: {data?.zero_gamma ? `₹${Number(data.zero_gamma).toLocaleString('en-IN')}` : '—'}</span>
+              <span className="text-pink-600 dark:text-pink-400">
+                {data?.zero_gamma && spot > 0 ? `Δ ${Math.abs(Math.round(spot - data.zero_gamma))} pts` : '—'}
+              </span>
             </div>
           </div>
 
@@ -982,7 +1077,7 @@ export default function OptionsDeskView({
           <div className="bg-surface/80 p-2 rounded-lg border border-border/60 space-y-0.5">
             <div className="flex items-center justify-between text-[9px] text-muted">
               <span>2. PCR SENTIMENT</span>
-              <span className={`font-bold ${pcr >= 1.05 ? 'text-emerald-400' : pcr <= 0.85 ? 'text-rose-400' : 'text-amber'}`}>
+              <span className={`font-bold ${pcr >= 1.05 ? 'text-emerald-600 dark:text-emerald-400' : pcr <= 0.85 ? 'text-rose-600 dark:text-rose-400' : 'text-amber'}`}>
                 PCR {pcr}
               </span>
             </div>
@@ -999,15 +1094,23 @@ export default function OptionsDeskView({
           <div className="bg-surface/80 p-2 rounded-lg border border-border/60 space-y-0.5">
             <div className="flex items-center justify-between text-[9px] text-muted">
               <span>3. MAX PAIN PIN</span>
-              <span className="text-amber font-bold">₹{Number(maxPain).toLocaleString('en-IN')}</span>
+              <span className="text-amber font-bold">
+                {maxPain > 0 ? `₹${Number(maxPain).toLocaleString('en-IN')}` : '—'}
+              </span>
             </div>
             <div className="text-xs font-bold text-text">
-              {Math.abs(spot - maxPain) <= 40 ? '🎯 At Center Strike' : spot > maxPain ? `Above Pain (+${Math.round(spot - maxPain)} pts)` : `Below Pain (-${Math.round(maxPain - spot)} pts)`}
+              {maxPain > 0 && spot > 0
+                ? Math.abs(spot - maxPain) <= 40
+                  ? '🎯 At Center Strike'
+                  : spot > maxPain
+                  ? `Above Pain (+${Math.round(spot - maxPain)} pts)`
+                  : `Below Pain (-${Math.round(maxPain - spot)} pts)`
+                : 'Awaiting Expiry Pin'}
             </div>
             <div className="text-[9px] text-muted flex justify-between pt-0.5">
               <span>Pin Magnetism:</span>
-              <span className={Math.abs(spot - maxPain) <= 75 ? 'text-emerald-400 font-bold' : 'text-muted'}>
-                {Math.abs(spot - maxPain) <= 75 ? 'HIGH (Pin Risk)' : 'MODERATE'}
+              <span className={maxPain > 0 && Math.abs(spot - maxPain) <= 75 ? 'text-emerald-600 dark:text-emerald-400 font-bold' : 'text-muted'}>
+                {maxPain > 0 && Math.abs(spot - maxPain) <= 75 ? 'HIGH (Pin Risk)' : 'MODERATE'}
               </span>
             </div>
           </div>
@@ -1016,14 +1119,20 @@ export default function OptionsDeskView({
           <div className="bg-surface/80 p-2 rounded-lg border border-border/60 space-y-0.5">
             <div className="flex items-center justify-between text-[9px] text-muted">
               <span>4. EXPECTED RANGE</span>
-              <span className="text-cyan-400 font-bold">WALLS</span>
+              <span className="text-cyan-700 dark:text-cyan-400 font-bold">WALLS</span>
             </div>
             <div className="text-xs font-bold text-text truncate">
-              ₹{Number(putWallStrike || spot - 150).toLocaleString('en-IN')} – ₹{Number(callWallStrike || spot + 150).toLocaleString('en-IN')}
+              {putWallStrike && callWallStrike
+                ? `₹${Number(putWallStrike).toLocaleString('en-IN')} – ₹${Number(callWallStrike).toLocaleString('en-IN')}`
+                : putWallStrike
+                ? `Support: ₹${Number(putWallStrike).toLocaleString('en-IN')}`
+                : callWallStrike
+                ? `Resist: ₹${Number(callWallStrike).toLocaleString('en-IN')}`
+                : 'Deriving Walls...'}
             </div>
             <div className="text-[9px] text-muted flex justify-between pt-0.5">
               <span className="text-amber">Support: Put Wall</span>
-              <span className="text-cyan-400">Resist: Call Wall</span>
+              <span className="text-cyan-700 dark:text-cyan-400">Resist: Call Wall</span>
             </div>
           </div>
 
@@ -1031,14 +1140,14 @@ export default function OptionsDeskView({
           <div className="bg-surface/80 p-2 rounded-lg border border-border/60 space-y-0.5">
             <div className="flex items-center justify-between text-[9px] text-muted">
               <span>5. 1D EXPECTED MOVE</span>
-              <span className="text-emerald-400 font-bold">ATM IV {minIV.toFixed(1)}%</span>
+              <span className="text-emerald-600 dark:text-emerald-400 font-bold">ATM IV {minIV.toFixed(1)}%</span>
             </div>
             <div className="text-xs font-bold text-text">
               ±{decisionMatrix.expected1DMove} pts (±{decisionMatrix.expected1DMovePct}%)
             </div>
             <div className="text-[9px] text-muted flex justify-between pt-0.5">
-              <span>Skew: Put Skew +3.4%</span>
-              <span className="text-amber font-semibold">Decay: Normal</span>
+              <span>Skew: {dynamicSkew ? dynamicSkew.label : 'Balanced'}</span>
+              <span className="text-amber font-semibold">{dynamicSkew?.sentiment || (minIV > 18 ? 'High IV Risk' : 'Normal Decay')}</span>
             </div>
           </div>
         </div>
@@ -1173,6 +1282,19 @@ export default function OptionsDeskView({
             </div>
           </div>
         </div>
+
+        {/* Expandable 12-Factor Orthogonal Conviction Score Drawer */}
+        {showConvictionDrawer && (
+          <div className="pt-2 border-t border-border/50">
+            <ConvictionScoreCard
+              underlying={underlying}
+              spot={typeof spot === 'number' ? spot : parseFloat(spot) || 0}
+              pcr={pcr !== '—' ? parseFloat(pcr) || null : null}
+              blastRadar={blastRadar}
+              convictionScore={convictionScore}
+            />
+          </div>
+        )}
       </div>
 
       {/* Top 3-Pane Grid: GEX Volatility Pinning, Delta Hedging, IV Smile */}
@@ -1242,126 +1364,157 @@ export default function OptionsDeskView({
         </div>
 
         {/* Card 2: Delta Neutral Hedging Recommendation (4 Cols) */}
-        <div className="lg:col-span-4 bg-panel border border-border/80 rounded-xl p-3 shadow-xs space-y-2">
-          <div className="flex items-center justify-between border-b border-border/50 pb-1.5">
-            <span className="text-[11px] font-bold uppercase tracking-wider text-muted flex items-center gap-1">
-              <span>⚡</span> DELTA HEDGING &amp; RISK
-            </span>
-            <div className="flex items-center gap-1">
-              {[
-                { label: '1L', val: 1 },
-                { label: '2L', val: 2 },
-                { label: '5L', val: 5 },
-              ].map((sc) => (
-                <button
-                  key={sc.val}
-                  onClick={() => setDeskPosScale(sc.val)}
-                  className={`px-1.5 py-0.5 rounded text-[9px] font-mono font-bold transition-all cursor-pointer ${
-                    deskPosScale === sc.val ? 'bg-amber text-black' : 'bg-surface text-muted hover:text-text'
-                  }`}
-                  title={`Scale position by ${sc.label}`}
-                >
-                  {sc.label}
-                </button>
-              ))}
-              <span className={`text-[9px] font-mono font-bold px-1.5 py-0.5 rounded border ml-1 ${
-                Math.abs(Number(deltaHedge?.net_delta ?? 0.42) * deskPosScale) <= 0.08
-                  ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-400'
-                  : Number(deltaHedge?.net_delta ?? 0.42) > 0
-                  ? 'bg-cyan-500/10 border-cyan-500/30 text-cyan-400'
-                  : 'bg-rose-500/10 border-rose-500/30 text-rose-400'
-              }`}>
-                {Number(deltaHedge?.net_delta ?? 0.42) > 0 ? 'LONG Δ' : 'SHORT Δ'}
-              </span>
-            </div>
-          </div>
+        {(() => {
+          const resolvedLotSize = resolveInstrument(underlying)?.lotSize || (underlying === 'BANKNIFTY' ? 15 : underlying === 'SENSEX' ? 10 : 25)
+          const rawDelta = deltaHedge?.net_delta != null ? Number(deltaHedge.net_delta) : 0
+          const scaledDelta = Number((rawDelta * deskPosScale).toFixed(2))
+          const hasActiveDelta = Math.abs(scaledDelta) >= 0.05
+          const hedgeAction = scaledDelta > 0 ? 'SELL' : 'BUY'
+          const hedgeLots = Math.max(1, Math.round(Math.abs(scaledDelta)))
+          const hedgeQty = hedgeLots * resolvedLotSize
+          const lossPer1Pct = Math.abs(Math.round(scaledDelta * resolvedLotSize * (spot || 0) * 0.01))
+          const estMargin = Math.round(hedgeQty * (spot || 0) * 0.12)
 
-          {/* Visual Delta Balance Needle Meter */}
-          <div className="bg-surface/70 border border-border/60 rounded-lg p-2 space-y-1">
-            <div className="flex items-center justify-between text-[9px] font-mono text-muted">
-              <span className="text-rose-400">Short (-1.0)</span>
-              <span className="text-emerald-400 font-bold">Neutral Zone</span>
-              <span className="text-cyan-400">Long (+1.0)</span>
-            </div>
-            <div className="relative h-2 w-full bg-border/40 rounded-full overflow-hidden flex items-center">
-              <div className="absolute left-[45%] right-[45%] top-0 bottom-0 bg-emerald-500/30 border-x border-emerald-400/50" />
-              <div
-                className="absolute top-0 bottom-0 w-2 -ml-1 bg-gradient-to-r from-amber to-amber-light rounded-full shadow-xs transition-all duration-300"
-                style={{
-                  left: `${((Math.max(-1.0, Math.min(1.0, Number(deltaHedge?.net_delta ?? 0.42) * deskPosScale)) + 1.0) / 2.0) * 100}%`,
-                }}
-              />
-            </div>
-            <div className="flex justify-between items-center text-[9px] text-muted font-mono">
-              <span>Net Δ: <strong className="text-text">{Number(deltaHedge?.net_delta ?? 0.42) >= 0 ? '+' : ''}{(Number(deltaHedge?.net_delta ?? 0.42) * deskPosScale).toFixed(2)} Δ ({Math.round(Number(deltaHedge?.net_delta ?? 0.42) * deskPosScale * (underlying === 'BANKNIFTY' ? 15 : 75))} shares)</strong></span>
-              <span>₹/1%: <strong className="text-cyan-400">₹{Math.abs(Math.round(Number(deltaHedge?.net_delta ?? 0.42) * deskPosScale * (underlying === 'BANKNIFTY' ? 15 : 75) * spot * 0.01)).toLocaleString('en-IN')}</strong></span>
-            </div>
-          </div>
-
-          {/* Actionable Hedge Recipes */}
-          <div className="space-y-1.5 text-xs font-mono">
-            <div className="bg-surface/80 p-2 rounded-lg border border-border/60">
-              <div className="flex items-center justify-between">
-                <span className="text-[9px] text-muted block">Hedge Execution Blueprint</span>
-                <button
-                  onClick={() => setShowDeskWhy(!showDeskWhy)}
-                  className="text-[9px] text-amber hover:underline cursor-pointer flex items-center gap-0.5"
-                >
-                  <span>{showDeskWhy ? '▲ Hide' : '▼ Why?'}</span>
-                </button>
+          return (
+            <div className="lg:col-span-4 bg-panel border border-border/80 rounded-xl p-3 shadow-xs space-y-2">
+              <div className="flex items-center justify-between border-b border-border/50 pb-1.5">
+                <span className="text-[11px] font-bold uppercase tracking-wider text-muted flex items-center gap-1">
+                  <span>⚡</span> DELTA HEDGING &amp; RISK
+                </span>
+                <div className="flex items-center gap-1">
+                  {[
+                    { label: '1L', val: 1 },
+                    { label: '2L', val: 2 },
+                    { label: '5L', val: 5 },
+                  ].map((sc) => (
+                    <button
+                      key={sc.val}
+                      onClick={() => setDeskPosScale(sc.val)}
+                      className={`px-1.5 py-0.5 rounded text-[9px] font-mono font-bold transition-all cursor-pointer ${
+                        deskPosScale === sc.val ? 'bg-amber text-black' : 'bg-surface text-muted hover:text-text'
+                      }`}
+                      title={`Scale position by ${sc.label}`}
+                    >
+                      {sc.label}
+                    </button>
+                  ))}
+                  <span className={`text-[9px] font-mono font-bold px-1.5 py-0.5 rounded border ml-1 ${
+                    !hasActiveDelta
+                      ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-600 dark:text-emerald-400'
+                      : scaledDelta > 0
+                      ? 'bg-cyan-500/10 border-cyan-500/30 text-cyan-700 dark:text-cyan-400'
+                      : 'bg-rose-500/10 border-rose-500/30 text-rose-700 dark:text-rose-400'
+                  }`}>
+                    {!hasActiveDelta ? 'DELTA NEUTRAL' : scaledDelta > 0 ? 'LONG Δ' : 'SHORT Δ'}
+                  </span>
+                </div>
               </div>
-              <span className="font-bold text-emerald-400 text-[11px] block truncate mt-0.5">
-                SELL {Math.max(1, Math.round(Number(deltaHedge?.net_delta ?? 0) * deskPosScale))} Lot{Math.max(1, Math.round(Number(deltaHedge?.net_delta ?? 0) * deskPosScale)) > 1 ? 's' : ''} ({Math.max(1, Math.round(Number(deltaHedge?.net_delta ?? 0) * deskPosScale)) * (underlying === 'BANKNIFTY' ? 15 : underlying === 'SENSEX' ? 20 : 75)} Qty) {underlying} FUT
-              </span>
-            </div>
 
-            {/* Expandable Why & When Narrative */}
-            {showDeskWhy && (
-              <div className="bg-surface/90 border border-amber/30 rounded-lg p-2 space-y-1 text-[10px] font-ui text-text/90 leading-tight">
-                <p className="font-bold text-amber">💡 Monetary Risk Rationale:</p>
-                <p>
-                  Holding {deskPosScale} lot{deskPosScale > 1 ? 's' : ''} with +{(Number(deltaHedge?.net_delta ?? 0) * deskPosScale).toFixed(2)} delta exposes you to ~₹{Math.abs(Math.round(Number(deltaHedge?.net_delta ?? 0) * deskPosScale * (underlying === 'BANKNIFTY' ? 15 : underlying === 'SENSEX' ? 20 : 75) * (spot || 0) * 0.01)).toLocaleString('en-IN')} loss per 1% drop in {underlying}.
-                </p>
-                <p className="text-muted font-mono pt-0.5">Trigger: When {underlying} drifts &gt; ±0.75% (±{Math.round((spot || 0) * 0.0075)} pts).</p>
+              {/* Visual Delta Balance Needle Meter */}
+              <div className="bg-surface/70 border border-border/60 rounded-lg p-2 space-y-1">
+                <div className="flex items-center justify-between text-[9px] font-mono text-muted">
+                  <span className="text-rose-600 dark:text-rose-400">Short (-1.0)</span>
+                  <span className="text-emerald-600 dark:text-emerald-400 font-bold">Neutral Zone</span>
+                  <span className="text-cyan-700 dark:text-cyan-400">Long (+1.0)</span>
+                </div>
+                <div className="relative h-2 w-full bg-border/40 rounded-full overflow-hidden flex items-center">
+                  <div className="absolute left-[45%] right-[45%] top-0 bottom-0 bg-emerald-500/30 border-x border-emerald-400/50" />
+                  <div
+                    className="absolute top-0 bottom-0 w-2 -ml-1 bg-gradient-to-r from-amber to-amber-light rounded-full shadow-xs transition-all duration-300"
+                    style={{
+                      left: `${((Math.max(-1.0, Math.min(1.0, scaledDelta)) + 1.0) / 2.0) * 100}%`,
+                    }}
+                  />
+                </div>
+                <div className="flex justify-between items-center text-[9px] text-muted font-mono">
+                  <span>Net Δ: <strong className="text-text">{scaledDelta >= 0 ? '+' : ''}{scaledDelta.toFixed(2)} Δ ({Math.round(scaledDelta * resolvedLotSize)} shares)</strong></span>
+                  <span>₹/1%: <strong className="text-cyan-700 dark:text-cyan-400">₹{lossPer1Pct.toLocaleString('en-IN')}</strong></span>
+                </div>
               </div>
-            )}
 
-            <div className="grid grid-cols-2 gap-1.5 text-[10px]">
-              <div className="bg-surface/80 p-1.5 px-2 rounded-lg border border-border/60">
-                <span className="text-[8px] text-muted block">Gamma Risk</span>
-                <span className="font-bold text-text">{deltaHedge?.net_gamma ?? '0.00'} Γ</span>
-              </div>
-              <div className="bg-surface/80 p-1.5 px-2 rounded-lg border border-border/60">
-                <span className="text-[8px] text-muted block">Est. Margin</span>
-                <span className="font-bold text-text">₹{Math.round(Math.max(1, Math.round(Number(deltaHedge?.net_delta ?? 0) * deskPosScale)) * (underlying === 'BANKNIFTY' ? 15 : underlying === 'SENSEX' ? 20 : 75) * (spot || 0) * 0.11).toLocaleString('en-IN')}</span>
+              {/* Actionable Hedge Recipes */}
+              <div className="space-y-1.5 text-xs font-mono">
+                <div className="bg-surface/80 p-2 rounded-lg border border-border/60">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[9px] text-muted block">Hedge Execution Blueprint</span>
+                    <button
+                      onClick={() => setShowDeskWhy(!showDeskWhy)}
+                      className="text-[9px] text-amber hover:underline cursor-pointer flex items-center gap-0.5"
+                    >
+                      <span>{showDeskWhy ? '▲ Hide' : '▼ Why?'}</span>
+                    </button>
+                  </div>
+                  <span className="font-bold text-emerald-600 dark:text-emerald-400 text-[11px] block truncate mt-0.5">
+                    {hasActiveDelta
+                      ? `${hedgeAction} ${hedgeLots} Lot${hedgeLots > 1 ? 's' : ''} (${hedgeQty} Qty) ${underlying} FUT`
+                      : '✅ Delta Balanced (No Directional Futures Hedge Required)'}
+                  </span>
+                </div>
+
+                {/* Expandable Why & When Narrative */}
+                {showDeskWhy && (
+                  <div className="bg-surface/90 border border-amber/30 rounded-lg p-2 space-y-1 text-[10px] font-ui text-text/90 leading-tight">
+                    <p className="font-bold text-amber">💡 Monetary Risk Rationale:</p>
+                    {hasActiveDelta ? (
+                      <>
+                        <p>
+                          Holding {deskPosScale} lot{deskPosScale > 1 ? 's' : ''} with {scaledDelta >= 0 ? '+' : ''}{scaledDelta.toFixed(2)} delta exposes you to ~₹{lossPer1Pct.toLocaleString('en-IN')} loss per 1% adverse drift in {underlying}.
+                        </p>
+                        <p className="text-muted font-mono pt-0.5">Trigger: When {underlying} drifts &gt; ±0.75% (±{Math.round((spot || 0) * 0.0075)} pts).</p>
+                      </>
+                    ) : (
+                      <p>
+                        Portfolio delta is balanced within the neutral threshold (±0.05 Δ). No rebalancing hedge order is needed at this time.
+                      </p>
+                    )}
+                  </div>
+                )}
+
+                <div className="grid grid-cols-2 gap-1.5 text-[10px]">
+                  <div className="bg-surface/80 p-1.5 px-2 rounded-lg border border-border/60">
+                    <span className="text-[8px] text-muted block">Gamma Risk</span>
+                    <span className="font-bold text-text">{deltaHedge?.net_gamma ?? '0.00'} Γ</span>
+                  </div>
+                  <div className="bg-surface/80 p-1.5 px-2 rounded-lg border border-border/60">
+                    <span className="text-[8px] text-muted block">Est. Margin</span>
+                    <span className="font-bold text-text">₹{hasActiveDelta ? estMargin.toLocaleString('en-IN') : 0}</span>
+                  </div>
+                </div>
+
+                <div className="pt-0.5">
+                  {hasActiveDelta ? (
+                    <button
+                      onClick={() => {
+                        if (onOpenOrderTicket) {
+                          onOpenOrderTicket({
+                            symbol: `${underlying} FUT`,
+                            exchange: resolvedExchange === 'BSE' ? 'BFO' : 'NFO',
+                            price: spot,
+                            quantity: hedgeQty,
+                            side: hedgeAction,
+                            segment: 'FUTURES',
+                          })
+                        } else {
+                          sendDraft(`execute delta hedge: ${hedgeAction} ${hedgeLots} lots (${hedgeQty} qty) ${underlying} FUT`)
+                        }
+                      }}
+                      className="w-full py-1.5 px-2.5 rounded-lg bg-gradient-to-r from-emerald-500 to-teal-500 hover:brightness-110 text-black font-bold text-[11px] uppercase tracking-wide transition-all shadow-xs cursor-pointer flex items-center justify-center gap-1"
+                    >
+                      <span>⚡</span> Stage 1-Click Hedge ({hedgeLots} Lot{hedgeLots > 1 ? 's' : ''})
+                    </button>
+                  ) : (
+                    <button
+                      disabled
+                      className="w-full py-1.5 px-2.5 rounded-lg bg-surface border border-border/60 text-muted font-bold text-[11px] uppercase tracking-wide opacity-70 cursor-not-allowed flex items-center justify-center gap-1"
+                    >
+                      <span>✓</span> Delta Balanced (No Hedge Needed)
+                    </button>
+                  )}
+                </div>
               </div>
             </div>
-
-            <div className="pt-0.5">
-              <button
-                onClick={() => {
-                  const hedgeLots = Math.max(1, Math.round(Number(deltaHedge?.net_delta ?? 0) * deskPosScale))
-                  const lotSz = (underlying === 'BANKNIFTY' ? 15 : underlying === 'FINNIFTY' ? 40 : underlying === 'SENSEX' ? 20 : 75)
-                  if (onOpenOrderTicket) {
-                    onOpenOrderTicket({
-                      symbol: `${underlying} FUT`,
-                      exchange: resolvedExchange === 'BSE' ? 'BFO' : 'NFO',
-                      price: spot,
-                      quantity: hedgeLots * lotSz,
-                      side: Number(deltaHedge?.net_delta ?? 0) > 0 ? 'SELL' : 'BUY',
-                      segment: 'OPTIONS',
-                    })
-                  } else {
-                    sendDraft(`execute delta hedge: SELL ${hedgeLots} lots (${hedgeLots * lotSz} qty) ${underlying} FUT`)
-                  }
-                }}
-                className="w-full py-1.5 px-2.5 rounded-lg bg-gradient-to-r from-emerald-500 to-teal-500 hover:brightness-110 text-black font-bold text-[11px] uppercase tracking-wide transition-all shadow-xs cursor-pointer flex items-center justify-center gap-1"
-              >
-                <span>⚡</span> Stage 1-Click Hedge ({Math.max(1, Math.round(Number(deltaHedge?.net_delta ?? 0) * deskPosScale))} Lot{Math.max(1, Math.round(Number(deltaHedge?.net_delta ?? 0) * deskPosScale)) > 1 ? 's' : ''})
-              </button>
-            </div>
-          </div>
-        </div>
+          )
+        })()}
 
         {/* Card 3: Dynamic IV Smile & Skew Curve (4 Cols) */}
         <div className="lg:col-span-4 bg-panel border border-border/80 rounded-xl p-3 shadow-xs space-y-2">
@@ -1370,7 +1523,7 @@ export default function OptionsDeskView({
               <span>📈</span> VOLATILITY SMILE &amp; SKEW
             </span>
             <span className="text-[9px] text-amber font-mono font-bold px-1.5 py-0.5 rounded bg-amber/10 border border-amber/30">
-              PUT SKEW +3.4%
+              {dynamicSkew ? dynamicSkew.label.toUpperCase() : 'BALANCED SKEW'}
             </span>
           </div>
 
@@ -1408,24 +1561,24 @@ export default function OptionsDeskView({
                 strokeLinecap="round"
                 strokeLinejoin="round"
                 strokeDasharray="4 2"
-                points="15,75 70,72 120,68 170,62 225,55"
+                points={callSvgPoints || svgPoints || ""}
               />
 
               {/* ATM Circle Point */}
               <circle cx="120" cy="68" r="3" fill="#f59e0b" className="animate-pulse" />
               <text x="124" y="78" fill="#f59e0b" fontSize="7" fontFamily="monospace" fontWeight="bold">
-                ATM ({minIV.toFixed(1)}%)
+                ATM ({minIV > 0 ? `${minIV.toFixed(1)}%` : '—'})
               </text>
             </svg>
           </div>
 
           <div className="flex justify-between items-center text-[9px] font-mono text-muted bg-surface/50 p-1.5 rounded-lg border border-border/40">
             <span className="flex items-center gap-1 text-amber">
-              <span className="w-1.5 h-1 bg-amber rounded-full inline-block" /> Put IV ({ivSkew[0]?.iv || '18.2'}%)
+              <span className="w-1.5 h-1 bg-amber rounded-full inline-block" /> Put IV ({dynamicSkew ? `${dynamicSkew.putIV}%` : (ivSkew[0]?.iv != null ? `${ivSkew[0].iv}%` : '—')})
             </span>
-            <span className="text-cyan-400 font-bold">ATM ({minIV.toFixed(1)}%)</span>
-            <span className="flex items-center gap-1 text-cyan-400">
-              <span className="w-1.5 h-1 bg-cyan-400 rounded-full inline-block" /> Call IV (14.2%)
+            <span className="text-cyan-700 dark:text-cyan-400 font-bold">ATM ({minIV > 0 ? `${minIV.toFixed(1)}%` : '—'})</span>
+            <span className="flex items-center gap-1 text-cyan-700 dark:text-cyan-400">
+              <span className="w-1.5 h-1 bg-cyan-500 rounded-full inline-block" /> Call IV ({dynamicSkew ? `${dynamicSkew.callIV}%` : (ivSkew[ivSkew.length - 1]?.iv != null ? `${ivSkew[ivSkew.length - 1].iv}%` : '—')})
             </span>
           </div>
 
@@ -1439,188 +1592,115 @@ export default function OptionsDeskView({
         </div>
       </div>
 
-      {/* Blast Radar: High Impact Order Book Imbalance & Volume Blast Detector */}
+      {/* Order Flow Blast Radar: High-Density Institutional Surge Strip */}
       {blastRadar && blastRadar.length > 0 && (
-        <div className="bg-panel border border-amber/50 rounded-2xl p-3 sm:p-4 shadow-md space-y-2.5">
-          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border/50 pb-2">
-            <div className="flex items-center gap-2">
-              <span className="text-lg">🔥</span>
-              <div>
-                <div className="flex items-center gap-2">
-                  <h2 className="text-xs font-bold font-mono uppercase tracking-wider text-amber">
-                    ORDER FLOW BLAST RADAR (TOP {blastRadar.length} IMPACT STRIKES)
-                  </h2>
-                  <span className="px-1.5 py-0.2 rounded text-[9px] font-bold font-mono bg-amber/20 text-amber border border-amber/40 animate-pulse">
-                    HIGH SURGE PROBABILITY
-                  </span>
-                </div>
-                <p className="text-[10px] text-muted font-ui">
-                  Detected real-time order-book bid/ask queue imbalances &gt; 1.6x &amp; heavy volume surges.
-                </p>
-              </div>
+        <div className="bg-panel border border-amber/40 rounded-xl p-2.5 shadow-xs space-y-2">
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border/40 pb-1.5">
+            <div className="flex items-center gap-1.5">
+              <span className="text-base">🔥</span>
+              <span className="text-xs font-bold font-mono uppercase tracking-wider text-amber">
+                ORDER FLOW BLAST RADAR ({blastRadar.length} Active Surges)
+              </span>
+              <span className="px-1.5 py-0.2 rounded text-[8px] font-bold font-mono bg-amber/20 text-amber border border-amber/40">
+                &gt; 1.6× Buyer Queue Imbalance
+              </span>
             </div>
-            <span className="text-[10px] font-mono text-muted">
-              Live Order Book Sweep Monitoring
+            <span className="text-[9px] font-mono text-muted hidden sm:inline">
+              Click strike to center in chain • Click Plan for execution roadmap
             </span>
           </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+          <div className="flex items-center gap-2 overflow-x-auto pb-1 scrollbar-thin">
             {blastRadar.map((pick, pIdx) => {
               const isCall = pick.option_type === 'CE'
               return (
                 <div
                   key={pIdx}
-                  className={`p-3 rounded-2xl border transition-all shadow-sm space-y-2.5 ${
+                  className={`shrink-0 flex items-center gap-2 px-2.5 py-1.5 rounded-lg border text-xs font-mono transition-all shadow-xs ${
                     isCall
-                      ? 'bg-cyan-950/20 border-cyan-500/40 hover:border-cyan-400'
-                      : 'bg-rose-950/20 border-rose-500/40 hover:border-rose-400'
+                      ? 'bg-cyan-500/8 border-cyan-500/30 hover:border-cyan-400'
+                      : 'bg-rose-500/8 border-rose-500/30 hover:border-rose-400'
                   }`}
                 >
-                  {/* Card Header */}
-                  <div className="flex items-center justify-between font-mono">
-                    <span className="text-xs font-extrabold text-text flex items-center gap-1.5">
-                      <span className={isCall ? 'text-cyan-400' : 'text-rose-400'}>
-                        {pick.contract}
-                      </span>
-                      <span
-                        className={`text-[9px] px-1.5 py-0.2 rounded font-black ${
-                          isCall ? 'bg-cyan-500/20 text-cyan-300' : 'bg-rose-500/20 text-rose-300'
-                        }`}
-                      >
-                        {pick.option_type}
-                      </span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const row = sortedChain.findIndex((r) => Number(r.strike) === Number(pick.strike))
+                      if (row >= 0 && !isPageSizeAll) {
+                        const targetPage = Math.max(1, Math.ceil((row + 1) / pageSizeNum))
+                        setChainPage(targetPage)
+                      }
+                      setTimeout(scrollToATM, 50)
+                    }}
+                    className="flex items-center gap-1 font-extrabold cursor-pointer hover:underline text-text"
+                    title="Click to jump to strike in Options Chain"
+                  >
+                    <span className={isCall ? 'text-cyan-700 dark:text-cyan-400' : 'text-rose-600 dark:text-rose-400'}>
+                      {pick.contract}
                     </span>
-                    <div className="flex items-center gap-1">
-                      <span className="text-[9px] font-bold text-amber bg-amber-500/15 border border-amber-500/30 px-1.5 py-0.5 rounded">
-                        Score {pick.score}/100
-                      </span>
-                      <span className="text-[9px] font-bold text-emerald-400 bg-emerald-500/15 border border-emerald-500/30 px-1.5 py-0.5 rounded">
-                        ⚡ {pick.imbalance_ratio}x Buyers
-                      </span>
-                    </div>
-                  </div>
+                    <span className={`text-[8px] px-1 py-0.2 rounded font-black ${
+                      isCall ? 'bg-cyan-500/20 text-cyan-700 dark:text-cyan-300' : 'bg-rose-500/20 text-rose-700 dark:text-rose-300'
+                    }`}>
+                      {pick.option_type}
+                    </span>
+                  </button>
 
-                  <p className="text-[10px] text-muted font-ui leading-snug">
-                    {pick.blast_reason}
-                  </p>
+                  <span className="text-[9px] font-bold text-amber bg-amber-500/15 border border-amber-500/30 px-1.5 py-0.2 rounded">
+                    ★ {pick.score}
+                  </span>
 
-                  {/* Actionable Profit Blueprint Matrix */}
-                  <div className="grid grid-cols-2 gap-1.5 bg-surface/70 p-2 rounded-xl border border-border/50 text-[10px] font-mono">
-                    <div>
-                      <span className="text-[8px] uppercase tracking-wider text-muted block">Entry Zone</span>
-                      <span className="font-extrabold text-emerald-400 text-xs">
-                        {pick.entry_range || `₹${pick.bid} – ₹${pick.ask}`}
-                      </span>
-                    </div>
-                    <div>
-                      <span className="text-[8px] uppercase tracking-wider text-muted block">Invalidation SL</span>
-                      <span className="font-extrabold text-rose-400 text-xs">
-                        ₹{pick.stop_loss || '—'}{' '}
-                        <span className="text-[8px] font-normal opacity-75">
-                          ({pick.stop_loss_pct || '-25%'})
-                        </span>
-                      </span>
-                    </div>
-                    <div>
-                      <span className="text-[8px] uppercase tracking-wider text-muted block">Target 1 (1.5R)</span>
-                      <span className="font-extrabold text-cyan-300 text-xs">
-                        ₹{pick.target_1 || '—'}{' '}
-                        <span className="text-[8px] font-normal opacity-75">
-                          ({pick.target_1_pct || '+35%'})
-                        </span>
-                      </span>
-                    </div>
-                    <div>
-                      <span className="text-[8px] uppercase tracking-wider text-muted block">Target 2 (2.5R)</span>
-                      <span className="font-extrabold text-amber text-xs">
-                        ₹{pick.target_2 || '—'}{' '}
-                        <span className="text-[8px] font-normal opacity-75">
-                          ({pick.target_2_pct || '+65%'})
-                        </span>
-                      </span>
-                    </div>
-                  </div>
+                  <span className="text-[9px] font-bold text-emerald-600 dark:text-emerald-400 bg-emerald-500/15 border border-emerald-500/30 px-1.5 py-0.2 rounded">
+                    ⚡ {pick.imbalance || `${pick.imbalance_ratio}x ${pick.side === 'SELL' ? 'Sellers' : 'Buyers'}`}
+                  </span>
 
-                  {/* Trader Execution Rules */}
-                  <div className="space-y-1 text-[9px] bg-black/30 p-2 rounded-xl border border-border/40 font-ui leading-tight">
-                    <div className="flex items-start gap-1">
-                      <span className="text-emerald-400 font-bold shrink-0">🟢 BUY:</span>
-                      <span className="text-text/90">
-                        {pick.when_to_buy || `Enter on Ask/Retest while Spot holds support`}
-                      </span>
-                    </div>
-                    <div className="flex items-start gap-1">
-                      <span className="text-amber font-bold shrink-0">🟡 WAIT:</span>
-                      <span className="text-text/80">
-                        {pick.when_to_wait || `DO NOT CHASE if premium spiked > 15%`}
-                      </span>
-                    </div>
-                    <div className="flex items-start gap-1">
-                      <span className="text-cyan-400 font-bold shrink-0">💰 PROFIT:</span>
-                      <span className="text-text/90 font-semibold">
-                        {pick.profit_rule || `Take 50% off at T1 and trail SL to Cost`}
-                      </span>
-                    </div>
-                  </div>
+                  <span className="text-[10px] text-muted">
+                    ₹{pick.ask || pick.bid}
+                  </span>
 
-                  {/* Realtime Bid/Ask & Action Controls */}
-                  <div className="pt-1.5 border-t border-border/40 flex flex-wrap items-center justify-between gap-1.5 text-xs font-mono">
-                    <div>
-                      <span className="text-[8px] text-muted block uppercase">Bid / Ask</span>
-                      <span className="font-bold text-text text-[11px]">
-                        ₹{pick.bid} <span className="text-muted text-[9px]">/</span> ₹{pick.ask}
-                      </span>
-                    </div>
+                  <div className="flex items-center gap-1 pl-1 border-l border-border/50">
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        handleOpenBlastPopover(pick, e.currentTarget)
+                      }}
+                      className="px-1.5 py-0.5 rounded bg-surface hover:bg-elevated border border-border/70 text-amber hover:text-amber text-[9px] font-bold transition-all cursor-pointer"
+                      title="View Actionable Roadmap & Blueprint"
+                    >
+                      📋 Plan
+                    </button>
 
-                    <div className="flex items-center gap-1.5">
-                      <button
-                        onClick={() =>
-                          onOpenOrderTicket &&
-                          onOpenOrderTicket({
-                            symbol: pick.contract,
-                            exchange: resolvedExchange === 'BSE' ? 'BFO' : 'NFO',
-                            price: pick.ask || pick.bid,
-                            side: pick.side || 'BUY',
-                            orderType: 'BUY',
-                            segment: 'OPTIONS',
-                          })
-                        }
-                        className={`px-2.5 py-1 rounded-lg font-extrabold text-[10px] transition-all shadow-xs cursor-pointer flex items-center gap-1 ${
-                          isCall
-                            ? 'bg-gradient-to-r from-cyan-400 to-cyan-500 hover:brightness-110 text-black'
-                            : 'bg-gradient-to-r from-rose-500 to-rose-600 hover:brightness-110 text-white'
-                        }`}
-                        title="Open Order Ticket"
-                      >
-                        <span>🚀</span> Stage Order
-                      </button>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        onOpenOrderTicket &&
+                        onOpenOrderTicket({
+                          symbol: pick.contract,
+                          exchange: resolvedExchange === 'BSE' ? 'BFO' : 'NFO',
+                          price: pick.ask || pick.bid,
+                          side: pick.side || 'BUY',
+                          orderType: 'BUY',
+                          segment: 'OPTIONS',
+                        })
+                      }
+                      className={`px-2 py-0.5 rounded font-extrabold text-[9px] transition-all shadow-xs cursor-pointer ${
+                        isCall
+                          ? 'bg-cyan-500 hover:bg-cyan-400 text-black'
+                          : 'bg-rose-500 hover:bg-rose-400 text-white'
+                      }`}
+                      title="Stage Order in Ticket"
+                    >
+                      🚀 Stage
+                    </button>
 
-                      <button
-                        onClick={() => handleSendTelegramBlast(pick)}
-                        className="px-2 py-1 rounded-lg bg-surface hover:bg-elevated border border-border/70 text-text hover:text-amber text-[10px] font-bold transition-all cursor-pointer flex items-center gap-1"
-                        title="Send actionable alert to Telegram"
-                      >
-                        <span>📲</span>
-                      </button>
-
-                      <button
-                        onClick={() =>
-                          sendDraft(
-                            `Analyze ${pick.contract} blast surge (${pick.blast_reason}) and recommend asymmetric trade structure`
-                          )
-                        }
-                        className="px-2 py-1 rounded-lg bg-surface hover:bg-elevated border border-border/70 text-text hover:text-cyan-400 text-[10px] font-bold transition-all cursor-pointer flex items-center gap-1"
-                        title="Analyze in Copilot Chat"
-                      >
-                        <span>💬</span>
-                      </button>
-                    </div>
-                  </div>
-
-                  <div className="flex items-center justify-between text-[9px] text-muted font-mono pt-0.5">
-                    <span>Vol: {Number(pick.volume || 0).toLocaleString('en-IN')}</span>
-                    <span>OI: {Number(pick.oi || 0).toLocaleString('en-IN')}</span>
-                    <span>R:R: {pick.risk_reward || '1:2.5'}</span>
+                    <button
+                      type="button"
+                      onClick={() => handleSendTelegramBlast(pick)}
+                      className="px-1.5 py-0.5 rounded bg-surface hover:bg-elevated border border-border/70 text-text hover:text-amber text-[9px] font-bold transition-all cursor-pointer"
+                      title="Send alert to Telegram"
+                    >
+                      📲
+                    </button>
                   </div>
                 </div>
               )
@@ -1628,17 +1708,6 @@ export default function OptionsDeskView({
           </div>
         </div>
       )}
-
-      {/* Conviction Score Card — 10-Factor High-Probability Signal Intelligence */}
-      <div className="mt-3">
-        <ConvictionScoreCard
-          underlying={underlying}
-          spot={typeof spot === 'number' ? spot : parseFloat(spot) || 0}
-          pcr={pcr !== '—' ? parseFloat(pcr) || null : null}
-          blastRadar={blastRadar}
-          convictionScore={convictionScore}
-        />
-      </div>
 
       {/* Bottom Full-Width Institutional Options Chain Table */}
       {(() => {
@@ -1842,13 +1911,13 @@ export default function OptionsDeskView({
                   <thead className="sticky top-0 z-20 bg-surface shadow-xs">
                     {/* Category Super-Headers */}
                     <tr className="bg-elevated/80 text-[10px] uppercase font-bold tracking-wider border-b border-border/70">
-                      <th colSpan={chainViewMode === 'STANDARD' ? 6 : 6} className="py-1 px-3 text-cyan-400 text-center border-r border-border/60 bg-cyan-950/20">
+                      <th colSpan={chainViewMode === 'STANDARD' ? 6 : 6} className="py-1 px-3 text-cyan-700 dark:text-cyan-400 text-center border-r border-border/60 bg-cyan-500/10 dark:bg-cyan-950/30">
                         ◄ CALL OPTIONS (CE)
                       </th>
                       <th className="py-1 px-3 text-amber text-center bg-surface font-extrabold border-x border-border/80">
                         STRIKE
                       </th>
-                      <th colSpan={chainViewMode === 'STANDARD' ? 6 : 6} className="py-1 px-3 text-rose-400 text-center border-l border-border/60 bg-rose-950/20">
+                      <th colSpan={chainViewMode === 'STANDARD' ? 6 : 6} className="py-1 px-3 text-rose-700 dark:text-rose-400 text-center border-l border-border/60 bg-rose-500/10 dark:bg-rose-950/30">
                         PUT OPTIONS (PE) ►
                       </th>
                     </tr>
@@ -1857,21 +1926,21 @@ export default function OptionsDeskView({
                     <tr className="border-b border-border/60 text-[10px] text-muted uppercase bg-surface/90">
                       {chainViewMode === 'STANDARD' ? (
                         <>
-                          <th className="py-2 px-2.5 text-cyan-400">OI (Depth)</th>
-                          <th className="py-2 px-2 text-cyan-400">OI Chg</th>
-                          <th className="py-2 px-2 text-cyan-400">GEX</th>
-                          <th className="py-2 px-2 text-cyan-400">IV</th>
-                          <th className="py-2 px-2 text-cyan-400">Bid</th>
-                          <th className="py-2 px-2.5 text-cyan-400 border-r border-border/60">Ask</th>
+                          <th className="py-2 px-2.5 text-cyan-700 dark:text-cyan-400">OI (Depth)</th>
+                          <th className="py-2 px-2 text-cyan-700 dark:text-cyan-400">OI Chg</th>
+                          <th className="py-2 px-2 text-cyan-700 dark:text-cyan-400">GEX</th>
+                          <th className="py-2 px-2 text-cyan-700 dark:text-cyan-400">IV</th>
+                          <th className="py-2 px-2 text-cyan-700 dark:text-cyan-400">Bid</th>
+                          <th className="py-2 px-2.5 text-cyan-700 dark:text-cyan-400 border-r border-border/60">Ask</th>
                         </>
                       ) : (
                         <>
-                          <th className="py-2 px-2.5 text-cyan-400">Delta (Δ)</th>
-                          <th className="py-2 px-2 text-cyan-400">Gamma (Γ)</th>
-                          <th className="py-2 px-2 text-cyan-400">Theta (Θ)</th>
-                          <th className="py-2 px-2 text-cyan-400">Vega (ν)</th>
-                          <th className="py-2 px-2 text-cyan-400">Bid</th>
-                          <th className="py-2 px-2.5 text-cyan-400 border-r border-border/60">Ask</th>
+                          <th className="py-2 px-2.5 text-cyan-700 dark:text-cyan-400">Delta (Δ)</th>
+                          <th className="py-2 px-2 text-cyan-700 dark:text-cyan-400">Gamma (Γ)</th>
+                          <th className="py-2 px-2 text-cyan-700 dark:text-cyan-400">Theta (Θ)</th>
+                          <th className="py-2 px-2 text-cyan-700 dark:text-cyan-400">Vega (ν)</th>
+                          <th className="py-2 px-2 text-cyan-700 dark:text-cyan-400">Bid</th>
+                          <th className="py-2 px-2.5 text-cyan-700 dark:text-cyan-400 border-r border-border/60">Ask</th>
                         </>
                       )}
 
@@ -1881,21 +1950,21 @@ export default function OptionsDeskView({
 
                       {chainViewMode === 'STANDARD' ? (
                         <>
-                          <th className="py-2 px-2.5 text-rose-400 border-l border-border/60 text-right">Bid</th>
-                          <th className="py-2 px-2 text-rose-400 text-right">Ask</th>
-                          <th className="py-2 px-2 text-rose-400 text-right">IV</th>
-                          <th className="py-2 px-2 text-rose-400 text-right">GEX</th>
-                          <th className="py-2 px-2 text-rose-400 text-right">OI Chg</th>
-                          <th className="py-2 px-2.5 text-rose-400 text-right">OI (Depth)</th>
+                          <th className="py-2 px-2.5 text-rose-700 dark:text-rose-400 border-l border-border/60 text-right">Bid</th>
+                          <th className="py-2 px-2 text-rose-700 dark:text-rose-400 text-right">Ask</th>
+                          <th className="py-2 px-2 text-rose-700 dark:text-rose-400 text-right">IV</th>
+                          <th className="py-2 px-2 text-rose-700 dark:text-rose-400 text-right">GEX</th>
+                          <th className="py-2 px-2 text-rose-700 dark:text-rose-400 text-right">OI Chg</th>
+                          <th className="py-2 px-2.5 text-rose-700 dark:text-rose-400 text-right">OI (Depth)</th>
                         </>
                       ) : (
                         <>
-                          <th className="py-2 px-2.5 text-rose-400 border-l border-border/60 text-right">Bid</th>
-                          <th className="py-2 px-2 text-rose-400 text-right">Ask</th>
-                          <th className="py-2 px-2 text-rose-400 text-right">Vega (ν)</th>
-                          <th className="py-2 px-2 text-rose-400 text-right">Theta (Θ)</th>
-                          <th className="py-2 px-2 text-rose-400 text-right">Gamma (Γ)</th>
-                          <th className="py-2 px-2.5 text-rose-400 text-right">Delta (Δ)</th>
+                          <th className="py-2 px-2.5 text-rose-700 dark:text-rose-400 border-l border-border/60 text-right">Bid</th>
+                          <th className="py-2 px-2 text-rose-700 dark:text-rose-400 text-right">Ask</th>
+                          <th className="py-2 px-2 text-rose-700 dark:text-rose-400 text-right">Vega (ν)</th>
+                          <th className="py-2 px-2 text-rose-700 dark:text-rose-400 text-right">Theta (Θ)</th>
+                          <th className="py-2 px-2 text-rose-700 dark:text-rose-400 text-right">Gamma (Γ)</th>
+                          <th className="py-2 px-2.5 text-rose-700 dark:text-rose-400 text-right">Delta (Δ)</th>
                         </>
                       )}
                     </tr>
@@ -1983,25 +2052,25 @@ export default function OptionsDeskView({
                           {chainViewMode === 'STANDARD' ? (
                             <>
                               {/* Call OI with Visual Depth Bar */}
-                              <td className={`py-2 px-2.5 relative font-mono text-xs ${isCallITM ? 'bg-cyan-950/20' : ''}`}>
+                              <td className={`py-2 px-2.5 relative font-mono text-xs ${isCallITM ? 'bg-cyan-500/8 dark:bg-cyan-950/25' : ''}`}>
                                 {showVisualBars && (
                                   <div
                                     className="absolute inset-y-1 right-0 bg-cyan-500/20 rounded-l border-r-2 border-cyan-400/60 pointer-events-none transition-all duration-300"
                                     style={{ width: `${callOIWidth}%` }}
                                   />
                                 )}
-                                <span className={`relative z-10 font-bold ${isCallWall ? 'text-cyan-300 ring-1 ring-cyan-400/40 px-1 rounded bg-cyan-950/60' : 'text-text'}`}>
+                                <span className={`relative z-10 font-bold ${isCallWall ? 'text-cyan-700 dark:text-cyan-300 ring-1 ring-cyan-400/40 px-1 rounded bg-cyan-500/15 dark:bg-cyan-950/60' : 'text-text'}`}>
                                   {row.calls_oi}
                                 </span>
                               </td>
 
                               {/* Call OI Change */}
-                              <td className={`py-2 px-2 ${isCallITM ? 'bg-cyan-950/20' : ''}`}>
+                              <td className={`py-2 px-2 ${isCallITM ? 'bg-cyan-500/8 dark:bg-cyan-950/25' : ''}`}>
                                 <span
                                   className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${
                                     callOIChgIsPos
-                                      ? 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/30'
-                                      : 'bg-rose-500/15 text-rose-400 border border-rose-500/30'
+                                      ? 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border border-emerald-500/30'
+                                      : 'bg-rose-500/15 text-rose-600 dark:text-rose-400 border border-rose-500/30'
                                   }`}
                                 >
                                   {row.calls_oi_chg}
@@ -2009,19 +2078,19 @@ export default function OptionsDeskView({
                               </td>
 
                               {/* Call GEX */}
-                              <td className={`py-2 px-2 font-bold ${isCallITM ? 'bg-cyan-950/20' : ''}`}>
-                                <span className={String(row.calls_gex || '').startsWith('+') ? 'text-emerald-400' : 'text-rose-400'}>
+                              <td className={`py-2 px-2 font-bold ${isCallITM ? 'bg-cyan-500/8 dark:bg-cyan-950/25' : ''}`}>
+                                <span className={String(row.calls_gex || '').startsWith('+') ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400'}>
                                   {row.calls_gex}
                                 </span>
                               </td>
 
                               {/* Call IV */}
-                              <td className={`py-2 px-2 text-text/90 ${isCallITM ? 'bg-cyan-950/20' : ''}`}>
+                              <td className={`py-2 px-2 text-text/90 ${isCallITM ? 'bg-cyan-500/8 dark:bg-cyan-950/25' : ''}`}>
                                 {row.calls_iv}
                               </td>
 
                               {/* Call Bid (Clickable to Buy) */}
-                              <td className={`py-2 px-2 ${isCallITM ? 'bg-cyan-950/20' : ''}`}>
+                              <td className={`py-2 px-2 ${isCallITM ? 'bg-cyan-500/8 dark:bg-cyan-950/25' : ''}`}>
                                 <button
                                   onClick={() =>
                                     onOpenOrderTicket &&
@@ -2032,17 +2101,12 @@ export default function OptionsDeskView({
                                       orderType: 'BUY',
                                     })
                                   }
-                                  onMouseEnter={(e) => {
-                                    if (callIsBlast && resolvedCallBlastData) {
-                                      handleOpenBlastPopover(resolvedCallBlastData, e.currentTarget)
-                                    }
-                                  }}
                                   className={`px-1.5 py-0.5 rounded border text-xs font-bold transition-all cursor-pointer flex items-center justify-between gap-1 w-full ${
                                     callIsBlast
-                                      ? 'bg-cyan-500/20 border-cyan-400 text-cyan-300 ring-1 ring-cyan-400/50 shadow-xs hover:bg-cyan-500/30'
+                                      ? 'bg-cyan-500/15 border-cyan-400 text-cyan-700 dark:text-cyan-300 ring-1 ring-cyan-400/50 shadow-xs hover:bg-cyan-500/25'
                                       : 'bg-surface hover:bg-emerald-500 hover:text-black border-border/60 text-text'
                                   }`}
-                                  title={callIsBlast ? `🚀 BLAST ALERT: ${row.calls_blast_reason || 'Hover or click for profit roadmap'}` : 'Click to stage BUY Call Order'}
+                                  title={callIsBlast ? `🚀 BLAST ALERT: ${row.calls_blast_reason || 'Order flow surge'}. Click BLAST badge for roadmap` : 'Click to stage BUY Call Order'}
                                 >
                                   <span>₹{row.calls_bid}</span>
                                   {callIsBlast && (
@@ -2051,7 +2115,7 @@ export default function OptionsDeskView({
                                         e.stopPropagation()
                                         handleOpenBlastPopover(resolvedCallBlastData, e.currentTarget)
                                       }}
-                                      className="text-[7px] bg-cyan-500 text-black px-1 rounded-xs font-black animate-pulse hover:scale-110 transition-transform"
+                                      className="text-[7px] bg-cyan-500 text-black px-1 rounded-xs font-black animate-pulse hover:scale-110 transition-transform cursor-pointer"
                                       title="Click to view Actionable Profit Roadmap"
                                     >
                                       BLAST
@@ -2061,7 +2125,7 @@ export default function OptionsDeskView({
                               </td>
 
                               {/* Call Ask (Clickable to Sell) */}
-                              <td className={`py-2 px-2.5 border-r border-border/60 ${isCallITM ? 'bg-cyan-950/20' : ''}`}>
+                              <td className={`py-2 px-2.5 border-r border-border/60 ${isCallITM ? 'bg-cyan-500/8 dark:bg-cyan-950/25' : ''}`}>
                                 <button
                                   onClick={() =>
                                     onOpenOrderTicket &&
@@ -2082,19 +2146,19 @@ export default function OptionsDeskView({
                           ) : (
                             /* GREEKS VIEW - CALLS */
                             <>
-                              <td className={`py-2 px-2.5 text-cyan-400 font-bold ${isCallITM ? 'bg-cyan-950/20' : ''}`}>
+                              <td className={`py-2 px-2.5 text-cyan-700 dark:text-cyan-400 font-bold ${isCallITM ? 'bg-cyan-500/8 dark:bg-cyan-950/25' : ''}`}>
                                 +{callGreeks.callDelta}
                               </td>
-                              <td className={`py-2 px-2 text-muted ${isCallITM ? 'bg-cyan-950/20' : ''}`}>
+                              <td className={`py-2 px-2 text-muted ${isCallITM ? 'bg-cyan-500/8 dark:bg-cyan-950/25' : ''}`}>
                                 {callGreeks.gamma}
                               </td>
-                              <td className={`py-2 px-2 text-rose-400 font-semibold ${isCallITM ? 'bg-cyan-950/20' : ''}`}>
+                              <td className={`py-2 px-2 text-rose-600 dark:text-rose-400 font-semibold ${isCallITM ? 'bg-cyan-500/8 dark:bg-cyan-950/25' : ''}`}>
                                 {callGreeks.callTheta}
                               </td>
-                              <td className={`py-2 px-2 text-emerald-400 ${isCallITM ? 'bg-cyan-950/20' : ''}`}>
+                              <td className={`py-2 px-2 text-emerald-600 dark:text-emerald-400 ${isCallITM ? 'bg-cyan-500/8 dark:bg-cyan-950/25' : ''}`}>
                                 +{callGreeks.vega}
                               </td>
-                              <td className={`py-2 px-2 ${isCallITM ? 'bg-cyan-950/20' : ''}`}>
+                              <td className={`py-2 px-2 ${isCallITM ? 'bg-cyan-500/8 dark:bg-cyan-950/25' : ''}`}>
                                 <button
                                   onClick={() =>
                                     onOpenOrderTicket &&
@@ -2105,17 +2169,12 @@ export default function OptionsDeskView({
                                       orderType: 'BUY',
                                     })
                                   }
-                                  onMouseEnter={(e) => {
-                                    if (callIsBlast && resolvedCallBlastData) {
-                                      handleOpenBlastPopover(resolvedCallBlastData, e.currentTarget)
-                                    }
-                                  }}
                                   className={`px-1.5 py-0.5 rounded border text-xs font-bold transition-all cursor-pointer flex items-center justify-between gap-1 w-full ${
                                     callIsBlast
-                                      ? 'bg-cyan-500/20 border-cyan-400 text-cyan-300 ring-1 ring-cyan-400/50 shadow-xs hover:bg-cyan-500/30'
+                                      ? 'bg-cyan-500/15 border-cyan-400 text-cyan-700 dark:text-cyan-300 ring-1 ring-cyan-400/50 shadow-xs hover:bg-cyan-500/25'
                                       : 'bg-surface hover:bg-emerald-500 hover:text-black border-border/60 text-text'
                                   }`}
-                                  title={callIsBlast ? `🚀 BLAST ALERT: ${row.calls_blast_reason || 'Hover or click for profit roadmap'}` : 'Click to stage BUY Call Order'}
+                                  title={callIsBlast ? `🚀 BLAST ALERT: ${row.calls_blast_reason || 'Order flow surge'}. Click BLAST badge for roadmap` : 'Click to stage BUY Call Order'}
                                 >
                                   <span>₹{row.calls_bid}</span>
                                   {callIsBlast && (
@@ -2124,7 +2183,7 @@ export default function OptionsDeskView({
                                         e.stopPropagation()
                                         handleOpenBlastPopover(resolvedCallBlastData, e.currentTarget)
                                       }}
-                                      className="text-[7px] bg-cyan-500 text-black px-1 rounded-xs font-black animate-pulse hover:scale-110 transition-transform"
+                                      className="text-[7px] bg-cyan-500 text-black px-1 rounded-xs font-black animate-pulse hover:scale-110 transition-transform cursor-pointer"
                                       title="Click to view Actionable Profit Roadmap"
                                     >
                                       BLAST
@@ -2132,7 +2191,7 @@ export default function OptionsDeskView({
                                   )}
                                 </button>
                               </td>
-                              <td className={`py-2 px-2.5 border-r border-border/60 ${isCallITM ? 'bg-cyan-950/20' : ''}`}>
+                              <td className={`py-2 px-2.5 border-r border-border/60 ${isCallITM ? 'bg-cyan-500/8 dark:bg-cyan-950/25' : ''}`}>
                                 <button
                                   onClick={() =>
                                     onOpenOrderTicket &&
@@ -2167,22 +2226,22 @@ export default function OptionsDeskView({
                               </span>
                               {/* Key Level Indicators */}
                               {isATM && spot > 0 && (
-                                <span className="text-[8px] uppercase tracking-wider font-black bg-black text-amber px-1.5 py-0.5 rounded-sm mt-0.5 shadow-xs flex items-center gap-0.5">
+                                <span className="text-[8px] uppercase tracking-wider font-black bg-slate-900 text-amber dark:bg-black dark:text-amber px-1.5 py-0.5 rounded-sm mt-0.5 shadow-xs flex items-center gap-0.5">
                                   <span>⚡</span> ATM (Spot: ₹{Number(spot).toFixed(0)})
                                 </span>
                               )}
                               {isCallWall && !isATM && (
-                                <span className="text-[8px] uppercase tracking-wider font-bold bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 px-1 rounded-sm mt-0.5">
+                                <span className="text-[8px] uppercase tracking-wider font-bold bg-cyan-500/15 text-cyan-700 dark:text-cyan-300 border border-cyan-500/40 px-1 rounded-sm mt-0.5">
                                   🛡️ Call Wall
                                 </span>
                               )}
                               {isPutWall && !isATM && (
-                                <span className="text-[8px] uppercase tracking-wider font-bold bg-amber/20 text-amber border border-amber/40 px-1 rounded-sm mt-0.5">
+                                <span className="text-[8px] uppercase tracking-wider font-bold bg-amber-500/15 text-amber-700 dark:text-amber border border-amber-500/40 px-1 rounded-sm mt-0.5">
                                   🏰 Put Wall
                                 </span>
                               )}
                               {isMaxPain && !isATM && !isCallWall && !isPutWall && (
-                                <span className="text-[8px] uppercase tracking-wider font-bold bg-rose-500/20 text-rose-300 border border-rose-500/40 px-1 rounded-sm mt-0.5">
+                                <span className="text-[8px] uppercase tracking-wider font-bold bg-rose-500/15 text-rose-700 dark:text-rose-300 border border-rose-500/40 px-1 rounded-sm mt-0.5">
                                   🎯 Max Pain
                                 </span>
                               )}
@@ -2193,7 +2252,7 @@ export default function OptionsDeskView({
                           {chainViewMode === 'STANDARD' ? (
                             <>
                               {/* Put Bid (Clickable to Buy) */}
-                              <td className={`py-2 px-2.5 border-l border-border/60 text-right ${isPutITM ? 'bg-rose-950/15' : ''}`}>
+                              <td className={`py-2 px-2.5 border-l border-border/60 text-right ${isPutITM ? 'bg-rose-500/8 dark:bg-rose-950/20' : ''}`}>
                                 <button
                                   onClick={() =>
                                     onOpenOrderTicket &&
@@ -2204,17 +2263,12 @@ export default function OptionsDeskView({
                                       orderType: 'BUY',
                                     })
                                   }
-                                  onMouseEnter={(e) => {
-                                    if (putIsBlast && resolvedPutBlastData) {
-                                      handleOpenBlastPopover(resolvedPutBlastData, e.currentTarget)
-                                    }
-                                  }}
                                   className={`px-1.5 py-0.5 rounded border text-xs font-bold transition-all cursor-pointer flex items-center justify-between gap-1 w-full ${
                                     putIsBlast
-                                      ? 'bg-rose-500/20 border-rose-400 text-rose-300 ring-1 ring-rose-400/50 shadow-xs hover:bg-rose-500/30'
+                                      ? 'bg-rose-500/15 border-rose-400 text-rose-700 dark:text-rose-300 ring-1 ring-rose-400/50 shadow-xs hover:bg-rose-500/25'
                                       : 'bg-surface hover:bg-emerald-500 hover:text-black border-border/60 text-text'
                                   }`}
-                                  title={putIsBlast ? `🚀 BLAST ALERT: ${row.puts_blast_reason || 'Hover or click for profit roadmap'}` : 'Click to stage BUY Put Order'}
+                                  title={putIsBlast ? `🚀 BLAST ALERT: ${row.puts_blast_reason || 'Order flow surge'}. Click BLAST badge for roadmap` : 'Click to stage BUY Put Order'}
                                 >
                                   {putIsBlast && (
                                     <span
@@ -2222,7 +2276,7 @@ export default function OptionsDeskView({
                                         e.stopPropagation()
                                         handleOpenBlastPopover(resolvedPutBlastData, e.currentTarget)
                                       }}
-                                      className="text-[7px] bg-rose-500 text-white px-1 rounded-xs font-black animate-pulse hover:scale-110 transition-transform"
+                                      className="text-[7px] bg-rose-500 text-white px-1 rounded-xs font-black animate-pulse hover:scale-110 transition-transform cursor-pointer"
                                       title="Click to view Actionable Profit Roadmap"
                                     >
                                       BLAST
@@ -2233,7 +2287,7 @@ export default function OptionsDeskView({
                               </td>
 
                               {/* Put Ask (Clickable to Sell) */}
-                              <td className={`py-2 px-2 text-right ${isPutITM ? 'bg-rose-950/15' : ''}`}>
+                              <td className={`py-2 px-2 text-right ${isPutITM ? 'bg-rose-500/8 dark:bg-rose-950/20' : ''}`}>
                                 <button
                                   onClick={() =>
                                     onOpenOrderTicket &&
@@ -2252,24 +2306,24 @@ export default function OptionsDeskView({
                               </td>
 
                               {/* Put IV */}
-                              <td className={`py-2 px-2 text-right text-text/90 ${isPutITM ? 'bg-rose-950/15' : ''}`}>
+                              <td className={`py-2 px-2 text-right text-text/90 ${isPutITM ? 'bg-rose-500/8 dark:bg-rose-950/20' : ''}`}>
                                 {row.puts_iv}
                               </td>
 
                               {/* Put GEX */}
-                              <td className={`py-2 px-2 text-right font-bold ${isPutITM ? 'bg-rose-950/15' : ''}`}>
-                                <span className={String(row.puts_gex || '').startsWith('-') ? 'text-rose-400' : 'text-emerald-400'}>
+                              <td className={`py-2 px-2 text-right font-bold ${isPutITM ? 'bg-rose-500/8 dark:bg-rose-950/20' : ''}`}>
+                                <span className={String(row.puts_gex || '').startsWith('-') ? 'text-rose-600 dark:text-rose-400' : 'text-emerald-600 dark:text-emerald-400'}>
                                   {row.puts_gex}
                                 </span>
                               </td>
 
                               {/* Put OI Change */}
-                              <td className={`py-2 px-2 text-right ${isPutITM ? 'bg-rose-950/15' : ''}`}>
+                              <td className={`py-2 px-2 text-right ${isPutITM ? 'bg-rose-500/8 dark:bg-rose-950/20' : ''}`}>
                                 <span
                                   className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${
                                     putOIChgIsPos
-                                      ? 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/30'
-                                      : 'bg-rose-500/15 text-rose-400 border border-rose-500/30'
+                                      ? 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border border-emerald-500/30'
+                                      : 'bg-rose-500/15 text-rose-600 dark:text-rose-400 border border-rose-500/30'
                                   }`}
                                 >
                                   {row.puts_oi_chg}
@@ -2277,14 +2331,14 @@ export default function OptionsDeskView({
                               </td>
 
                               {/* Put OI with Visual Depth Bar */}
-                              <td className={`py-2 px-2.5 relative text-right font-mono text-xs ${isPutITM ? 'bg-rose-950/15' : ''}`}>
+                              <td className={`py-2 px-2.5 relative text-right font-mono text-xs ${isPutITM ? 'bg-rose-500/8 dark:bg-rose-950/20' : ''}`}>
                                 {showVisualBars && (
                                   <div
                                     className="absolute inset-y-1 left-0 bg-rose-500/15 rounded-r border-l-2 border-rose-500/50 pointer-events-none transition-all duration-300"
                                     style={{ width: `${putOIWidth}%` }}
                                   />
                                 )}
-                                <span className={`relative z-10 font-bold ${isPutWall ? 'text-rose-300 ring-1 ring-rose-500/40 px-1 rounded bg-rose-950/60' : 'text-text'}`}>
+                                <span className={`relative z-10 font-bold ${isPutWall ? 'text-rose-700 dark:text-rose-300 ring-1 ring-rose-500/40 px-1 rounded bg-rose-500/15 dark:bg-rose-950/60' : 'text-text'}`}>
                                   {row.puts_oi}
                                 </span>
                               </td>
@@ -2292,7 +2346,7 @@ export default function OptionsDeskView({
                           ) : (
                             /* GREEKS VIEW - PUTS */
                             <>
-                              <td className={`py-2 px-2.5 border-l border-border/60 text-right ${isPutITM ? 'bg-rose-950/15' : ''}`}>
+                              <td className={`py-2 px-2.5 border-l border-border/60 text-right ${isPutITM ? 'bg-rose-500/8 dark:bg-rose-950/20' : ''}`}>
                                 <button
                                   onClick={() =>
                                     onOpenOrderTicket &&
@@ -2303,17 +2357,12 @@ export default function OptionsDeskView({
                                       orderType: 'BUY',
                                     })
                                   }
-                                  onMouseEnter={(e) => {
-                                    if (putIsBlast && resolvedPutBlastData) {
-                                      handleOpenBlastPopover(resolvedPutBlastData, e.currentTarget)
-                                    }
-                                  }}
                                   className={`px-1.5 py-0.5 rounded border text-xs font-bold transition-all cursor-pointer flex items-center justify-between gap-1 w-full ${
                                     putIsBlast
-                                      ? 'bg-rose-500/20 border-rose-400 text-rose-300 ring-1 ring-rose-400/50 shadow-xs hover:bg-rose-500/30'
+                                      ? 'bg-rose-500/15 border-rose-400 text-rose-700 dark:text-rose-300 ring-1 ring-rose-400/50 shadow-xs hover:bg-rose-500/25'
                                       : 'bg-surface hover:bg-emerald-500 hover:text-black border-border/60 text-text'
                                   }`}
-                                  title={putIsBlast ? `🚀 BLAST ALERT: ${row.puts_blast_reason || 'Hover or click for profit roadmap'}` : 'Click to stage BUY Put Order'}
+                                  title={putIsBlast ? `🚀 BLAST ALERT: ${row.puts_blast_reason || 'Order flow surge'}. Click BLAST badge for roadmap` : 'Click to stage BUY Put Order'}
                                 >
                                   {putIsBlast && (
                                     <span
@@ -2321,7 +2370,7 @@ export default function OptionsDeskView({
                                         e.stopPropagation()
                                         handleOpenBlastPopover(resolvedPutBlastData, e.currentTarget)
                                       }}
-                                      className="text-[7px] bg-rose-500 text-white px-1 rounded-xs font-black animate-pulse hover:scale-110 transition-transform"
+                                      className="text-[7px] bg-rose-500 text-white px-1 rounded-xs font-black animate-pulse hover:scale-110 transition-transform cursor-pointer"
                                       title="Click to view Actionable Profit Roadmap"
                                     >
                                       BLAST
@@ -2330,7 +2379,7 @@ export default function OptionsDeskView({
                                   <span className="ml-auto">₹{row.puts_bid}</span>
                                 </button>
                               </td>
-                              <td className={`py-2 px-2 text-right ${isPutITM ? 'bg-rose-950/15' : ''}`}>
+                              <td className={`py-2 px-2 text-right ${isPutITM ? 'bg-rose-500/8 dark:bg-rose-950/20' : ''}`}>
                                 <button
                                   onClick={() =>
                                     onOpenOrderTicket &&
@@ -2346,16 +2395,16 @@ export default function OptionsDeskView({
                                   ₹{row.puts_ask}
                                 </button>
                               </td>
-                              <td className={`py-2 px-2 text-right text-emerald-400 ${isPutITM ? 'bg-rose-950/15' : ''}`}>
+                              <td className={`py-2 px-2 text-right text-emerald-600 dark:text-emerald-400 ${isPutITM ? 'bg-rose-500/8 dark:bg-rose-950/20' : ''}`}>
                                 +{putGreeks.vega}
                               </td>
-                              <td className={`py-2 px-2 text-right text-rose-400 font-semibold ${isPutITM ? 'bg-rose-950/15' : ''}`}>
+                              <td className={`py-2 px-2 text-right text-rose-600 dark:text-rose-400 font-semibold ${isPutITM ? 'bg-rose-500/8 dark:bg-rose-950/20' : ''}`}>
                                 {putGreeks.putTheta}
                               </td>
-                              <td className={`py-2 px-2 text-right text-muted ${isPutITM ? 'bg-rose-950/15' : ''}`}>
+                              <td className={`py-2 px-2 text-right text-muted ${isPutITM ? 'bg-rose-500/8 dark:bg-rose-950/20' : ''}`}>
                                 {putGreeks.gamma}
                               </td>
-                              <td className={`py-2 px-2.5 text-right text-rose-400 font-bold ${isPutITM ? 'bg-rose-950/15' : ''}`}>
+                              <td className={`py-2 px-2.5 text-right text-rose-600 dark:text-rose-400 font-bold ${isPutITM ? 'bg-rose-500/8 dark:bg-rose-950/20' : ''}`}>
                                 {putGreeks.putDelta}
                               </td>
                             </>
@@ -2412,7 +2461,7 @@ export default function OptionsDeskView({
       {/* Interactive Payoff Strategy Simulator Modal */}
       {isPayoffModalOpen && (
         <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-xs p-3 sm:p-6 animate-in fade-in duration-200"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/35 dark:bg-black/75 backdrop-blur-sm p-3 sm:p-6 animate-in fade-in duration-200"
           onClick={() => setIsPayoffModalOpen(false)}
         >
           <div
@@ -2437,7 +2486,19 @@ export default function OptionsDeskView({
               </button>
             </div>
 
-            <PayoffSimulatorCard initialSymbol={underlying} initialSpot={spot} />
+            <PayoffSimulatorCard
+              initialSymbol={underlying}
+              initialSpot={spot}
+              initialLegs={decisionMatrix.legs?.map((l) => ({
+                action: l.action,
+                type: l.type,
+                strike: l.strike,
+                premium: l.price || (l.type === 'CE' ? optionsChain[atmIdx]?.calls_ask : optionsChain[atmIdx]?.puts_ask) || 50,
+                lots: 1,
+                lot_size: resolveInstrument(underlying)?.lotSize || 25,
+              }))}
+              initialPreset={decisionMatrix.strategyName}
+            />
           </div>
         </div>
       )}
@@ -2446,7 +2507,7 @@ export default function OptionsDeskView({
       {activeBlastPopover && (
         <>
           <div
-            className="fixed inset-0 z-50 bg-black/25 backdrop-blur-[1px]"
+            className="fixed inset-0 z-50 bg-black/20 dark:bg-black/40 backdrop-blur-[1px]"
             onClick={() => setActiveBlastPopover(null)}
           />
           <div
@@ -2474,14 +2535,14 @@ export default function OptionsDeskView({
       {/* Telegram Toast Notification */}
       {telegramStatus && (
         <div
-          className={`fixed bottom-6 right-6 z-60 px-4 py-2.5 rounded-xl border text-xs font-mono font-bold shadow-2xl flex items-center gap-2 animate-in fade-in slide-in-from-bottom-4 duration-200 ${
+          className={`fixed bottom-6 right-6 z-60 px-4 py-2.5 rounded-xl border text-xs font-mono font-bold shadow-2xl flex items-center gap-2 animate-in fade-in slide-in-from-bottom-4 duration-200 bg-panel ${
             telegramStatus.status === 'success'
-              ? 'bg-emerald-950/90 border-emerald-500/60 text-emerald-300'
+              ? 'border-emerald-500/80 text-emerald-600 dark:text-emerald-300'
               : telegramStatus.status === 'error'
-              ? 'bg-rose-950/90 border-rose-500/60 text-rose-300'
+              ? 'border-rose-500/80 text-rose-600 dark:text-rose-300'
               : telegramStatus.status === 'warning'
-              ? 'bg-amber-950/90 border-amber-500/60 text-amber-300'
-              : 'bg-surface border-border text-text'
+              ? 'border-amber-500/80 text-amber-700 dark:text-amber-300'
+              : 'border-border text-text'
           }`}
         >
           {telegramStatus.status === 'loading' && <span className="animate-spin">⏳</span>}

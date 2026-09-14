@@ -3025,7 +3025,7 @@ async def skill_forensic(req: ForensicSkillRequest):
 
 class PositionSizeSkillRequest(BaseModel):
     symbol: str = "NIFTY"
-    entry_price: float = 100.0
+    entry_price: Optional[float] = None
     stop_loss: Optional[float] = None
     capital: float = 100000.0
     target_price: Optional[float] = None
@@ -3042,10 +3042,22 @@ async def skill_position_size(req: PositionSizeSkillRequest):
     try:
         from engine.position_sizer import calculate_position_size
 
-        sl = req.stop_loss if req.stop_loss is not None else round(req.entry_price * 0.98, 2)
+        entry = req.entry_price
+        if entry is None or entry <= 0:
+            try:
+                from market.quotes import get_live_quote
+                q = get_live_quote(req.symbol)
+                if q and hasattr(q, 'ltp') and q.ltp and q.ltp > 0:
+                    entry = float(q.ltp)
+            except Exception:
+                pass
+        if not entry or entry <= 0:
+            entry = 100.0
+
+        sl = req.stop_loss if req.stop_loss is not None else round(entry * 0.98, 2)
         res = calculate_position_size(
             symbol=req.symbol,
-            entry_price=req.entry_price,
+            entry_price=entry,
             stop_loss=sl,
             capital=req.capital,
             target_price=req.target_price,

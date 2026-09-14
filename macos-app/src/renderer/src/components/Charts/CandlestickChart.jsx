@@ -1043,8 +1043,8 @@ function CandlestickChartComponent({
               <span
                 className={`px-1.5 py-0.2 rounded text-[9px] font-mono font-bold tracking-wider shadow-2xs border ${
                   z.type === 'DEMAND'
-                    ? 'bg-emerald-950/85 text-emerald-300 border-emerald-500/40 backdrop-blur-xs'
-                    : 'bg-rose-950/85 text-rose-300 border-rose-500/40 backdrop-blur-xs'
+                    ? 'bg-emerald-500/15 dark:bg-emerald-950/85 text-emerald-700 dark:text-emerald-300 border-emerald-500/40 backdrop-blur-xs'
+                    : 'bg-rose-500/15 dark:bg-rose-950/85 text-rose-700 dark:text-rose-300 border-rose-500/40 backdrop-blur-xs'
                 }`}
               >
                 {z.tag}
@@ -1099,7 +1099,7 @@ function CandlestickChartComponent({
       <>
         {chartContent}
         <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/85 backdrop-blur-md p-2 sm:p-4 animate-in fade-in duration-200"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 dark:bg-black/85 backdrop-blur-md p-2 sm:p-4 animate-in fade-in duration-200"
           onClick={() => setIsFullscreen(false)}
         >
           <div

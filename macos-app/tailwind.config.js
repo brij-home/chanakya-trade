@@ -46,6 +46,8 @@ module.exports = {
         'cyan-dim':  'var(--color-cyan-dim)',
 
         /* ── Backward-compatibility aliases ── */
+        primary:     'var(--color-gold)',
+        'primary-foreground': '#000000',
         amber:       'var(--color-amber)',
         'amber-dim': 'var(--color-amber-dim)',
         'amber-light':'#ffbb40',

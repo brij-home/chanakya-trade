@@ -113,7 +113,7 @@ export default function CommandPalette({ isOpen, onClose, onOpenOrderTicket }) {
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-start justify-center pt-16 bg-black/65 backdrop-blur-md p-3 sm:p-4 select-none animate-fade-slide"
+      className="fixed inset-0 z-50 flex items-start justify-center pt-16 bg-black/30 dark:bg-black/65 backdrop-blur-md p-3 sm:p-4 select-none animate-fade-slide"
       onClick={onClose}
     >
       <div

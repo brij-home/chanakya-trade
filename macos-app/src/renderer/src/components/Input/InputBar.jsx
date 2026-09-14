@@ -199,7 +199,7 @@ function parseCommand(input, contextSymbol = null) {
     }
     case 'size': case 'position-size': case 'sizing': {
       const sym = (args[0] || contextSymbol || 'NIFTY').toUpperCase()
-      const entry = parseFloat(args[1]) || (sym === 'NIFTY' ? 24000 : 2000)
+      const entry = parseFloat(args[1]) || null
       const sl = parseFloat(args[2]) || null
       return { endpoint: '/skills/position_size', body: { symbol: sym, entry_price: entry, stop_loss: sl }, cardType: 'size' }
     }

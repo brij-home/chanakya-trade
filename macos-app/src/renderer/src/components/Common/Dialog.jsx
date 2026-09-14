@@ -61,7 +61,7 @@ export default function Dialog({
     >
       {/* Backdrop */}
       <div
-        className="fixed inset-0 bg-black/60 backdrop-blur-md transition-opacity animate-fadeIn"
+        className="fixed inset-0 bg-black/30 dark:bg-black/65 backdrop-blur-md transition-opacity animate-fadeIn"
         aria-hidden="true"
         onClick={onClose}
       />

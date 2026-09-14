@@ -276,7 +276,7 @@ export const AlertCompactRow = memo(function AlertCompactRow({ alert, onSendTele
 
         <button
           onClick={(e) => { e.stopPropagation(); onSendTelegram(alert) }}
-          className="btn btn-xs text-[9px] px-1.5 font-bold flex-shrink-0 text-sky-300 hover:text-sky-200 bg-sky-500/10 hover:bg-sky-500/20 border border-sky-500/30 hover:border-sky-500/50 transition-all"
+          className="btn btn-xs text-[9px] px-1.5 font-bold flex-shrink-0 text-sky-700 dark:text-sky-300 hover:text-sky-900 dark:hover:text-sky-200 bg-sky-500/10 hover:bg-sky-500/20 border border-sky-400/40 dark:border-sky-500/30 hover:border-sky-500/50 transition-all"
           title="Send to Telegram (due-diligence check)"
         >↗ TG</button>
 
@@ -291,7 +291,7 @@ export const AlertCompactRow = memo(function AlertCompactRow({ alert, onSendTele
                 })
               }
             }}
-            className="btn btn-xs text-[9px] px-1.5 font-bold flex-shrink-0 text-indigo-300 hover:text-indigo-200 bg-indigo-500/15 hover:bg-indigo-500/25 border border-indigo-500/35 hover:border-indigo-500/60 transition-all"
+            className="btn btn-xs text-[9px] px-1.5 font-bold flex-shrink-0 text-indigo-700 dark:text-indigo-300 hover:text-indigo-900 dark:hover:text-indigo-200 bg-indigo-500/15 hover:bg-indigo-500/25 border border-indigo-400/40 dark:border-indigo-500/35 hover:border-indigo-500/60 transition-all"
             title={`Option Alternative: ${optPlan?.contract_symbol || plan.option_contract} @ ₹${optPlan?.entry_premium || plan.option_entry?.replace('₹', '') || '—'} (Click to trade Option)`}
           >⚡ Opt {optPlan?.contract_symbol ? optPlan.contract_symbol.slice(-6) : (plan.option_contract ? plan.option_contract.slice(-6) : '')}</button>
         )}
@@ -301,7 +301,7 @@ export const AlertCompactRow = memo(function AlertCompactRow({ alert, onSendTele
             e.stopPropagation()
             if (onTrade) onTrade(alert)
           }}
-          className="btn btn-xs text-[9px] px-1.5 font-bold flex-shrink-0 text-emerald-300 hover:text-emerald-200 bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/35 hover:border-emerald-500/60 transition-all"
+          className="btn btn-xs text-[9px] px-1.5 font-bold flex-shrink-0 text-emerald-700 dark:text-emerald-300 hover:text-emerald-900 dark:hover:text-emerald-200 bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-400/40 dark:border-emerald-500/35 hover:border-emerald-500/60 transition-all"
           title="1-Click Trade: Open pre-populated Order Ticket"
         >⚡ Trade</button>
 

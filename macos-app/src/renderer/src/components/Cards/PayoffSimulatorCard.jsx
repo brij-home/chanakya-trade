@@ -2,60 +2,67 @@ import { useState, useEffect } from 'react'
 import { useAPI } from '../../hooks/useAPI'
 import { useRealtimeMarket } from '../../hooks/useRealtimeMarket'
 import { formatINR, formatINRFull } from '../../utils/formatINR'
+import { resolveInstrument } from '../../data/universeData'
 
 const PRESETS = {
-  'Bull Call Spread': (spot) => {
+  'Bull Call Spread': (spot, lotSize = 25) => {
     const s = Math.round(spot / 50) * 50
     return [
-      { action: 'BUY', option_type: 'CE', strike: s, premium: 140, lots: 1, lot_size: 25 },
-      { action: 'SELL', option_type: 'CE', strike: s + 200, premium: 50, lots: 1, lot_size: 25 },
+      { action: 'BUY', option_type: 'CE', strike: s, premium: 140, lots: 1, lot_size: lotSize },
+      { action: 'SELL', option_type: 'CE', strike: s + 200, premium: 50, lots: 1, lot_size: lotSize },
     ]
   },
-  'Bear Put Spread': (spot) => {
+  'Bear Put Spread': (spot, lotSize = 25) => {
     const s = Math.round(spot / 50) * 50
     return [
-      { action: 'BUY', option_type: 'PE', strike: s, premium: 130, lots: 1, lot_size: 25 },
-      { action: 'SELL', option_type: 'PE', strike: s - 200, premium: 45, lots: 1, lot_size: 25 },
+      { action: 'BUY', option_type: 'PE', strike: s, premium: 130, lots: 1, lot_size: lotSize },
+      { action: 'SELL', option_type: 'PE', strike: s - 200, premium: 45, lots: 1, lot_size: lotSize },
     ]
   },
-  'Long Straddle': (spot) => {
+  'Long Straddle': (spot, lotSize = 25) => {
     const s = Math.round(spot / 50) * 50
     return [
-      { action: 'BUY', option_type: 'CE', strike: s, premium: 140, lots: 1, lot_size: 25 },
-      { action: 'BUY', option_type: 'PE', strike: s, premium: 130, lots: 1, lot_size: 25 },
+      { action: 'BUY', option_type: 'CE', strike: s, premium: 140, lots: 1, lot_size: lotSize },
+      { action: 'BUY', option_type: 'PE', strike: s, premium: 130, lots: 1, lot_size: lotSize },
     ]
   },
-  'Short Straddle': (spot) => {
+  'Short Straddle': (spot, lotSize = 25) => {
     const s = Math.round(spot / 50) * 50
     return [
-      { action: 'SELL', option_type: 'CE', strike: s, premium: 140, lots: 1, lot_size: 25 },
-      { action: 'SELL', option_type: 'PE', strike: s, premium: 130, lots: 1, lot_size: 25 },
+      { action: 'SELL', option_type: 'CE', strike: s, premium: 140, lots: 1, lot_size: lotSize },
+      { action: 'SELL', option_type: 'PE', strike: s, premium: 130, lots: 1, lot_size: lotSize },
     ]
   },
-  'Iron Condor': (spot) => {
+  'Iron Condor': (spot, lotSize = 25) => {
     const s = Math.round(spot / 50) * 50
     return [
-      { action: 'BUY', option_type: 'PE', strike: s - 400, premium: 20, lots: 1, lot_size: 25 },
-      { action: 'SELL', option_type: 'PE', strike: s - 200, premium: 55, lots: 1, lot_size: 25 },
-      { action: 'SELL', option_type: 'CE', strike: s + 200, premium: 60, lots: 1, lot_size: 25 },
-      { action: 'BUY', option_type: 'CE', strike: s + 400, premium: 22, lots: 1, lot_size: 25 },
+      { action: 'BUY', option_type: 'PE', strike: s - 400, premium: 20, lots: 1, lot_size: lotSize },
+      { action: 'SELL', option_type: 'PE', strike: s - 200, premium: 55, lots: 1, lot_size: lotSize },
+      { action: 'SELL', option_type: 'CE', strike: s + 200, premium: 60, lots: 1, lot_size: lotSize },
+      { action: 'BUY', option_type: 'CE', strike: s + 400, premium: 22, lots: 1, lot_size: lotSize },
     ]
   },
-  'Iron Butterfly': (spot) => {
+  'Iron Butterfly': (spot, lotSize = 25) => {
     const s = Math.round(spot / 50) * 50
     return [
-      { action: 'BUY', option_type: 'PE', strike: s - 300, premium: 35, lots: 1, lot_size: 25 },
-      { action: 'SELL', option_type: 'PE', strike: s, premium: 130, lots: 1, lot_size: 25 },
-      { action: 'SELL', option_type: 'CE', strike: s, premium: 140, lots: 1, lot_size: 25 },
-      { action: 'BUY', option_type: 'CE', strike: s + 300, premium: 40, lots: 1, lot_size: 25 },
+      { action: 'BUY', option_type: 'PE', strike: s - 300, premium: 35, lots: 1, lot_size: lotSize },
+      { action: 'SELL', option_type: 'PE', strike: s, premium: 130, lots: 1, lot_size: lotSize },
+      { action: 'SELL', option_type: 'CE', strike: s, premium: 140, lots: 1, lot_size: lotSize },
+      { action: 'BUY', option_type: 'CE', strike: s + 300, premium: 40, lots: 1, lot_size: lotSize },
     ]
   },
 }
 
-export default function PayoffSimulatorCard({ initialSymbol = 'NIFTY', initialSpot = null }) {
+export default function PayoffSimulatorCard({
+  initialSymbol = 'NIFTY',
+  initialSpot = null,
+  initialLegs = null,
+  initialPreset = null,
+}) {
   const { call } = useAPI()
   const { getTicker } = useRealtimeMarket()
   const [symbol, setSymbol] = useState(initialSymbol)
+  const resolvedLotSize = resolveInstrument(symbol)?.lotSize || (symbol === 'BANKNIFTY' ? 15 : symbol === 'SENSEX' ? 10 : 25)
   const liveTick = getTicker(symbol)
   const liveSpot = liveTick?.ltp != null && liveTick.ltp > 0 ? Number(liveTick.ltp) : (liveTick?.price != null && liveTick.price > 0 ? Number(liveTick.price) : null)
   const resolvedSpot = Number(initialSpot || liveSpot || 0)
@@ -66,8 +73,22 @@ export default function PayoffSimulatorCard({ initialSymbol = 'NIFTY', initialSp
   const [targetDte, setTargetDte] = useState(4)
   const [iv, setIv] = useState(14)
   const [ivShock, setIvShock] = useState(0)
-  const [selectedPreset, setSelectedPreset] = useState('Bull Call Spread')
-  const [legs, setLegs] = useState(resolvedSpot > 0 ? PRESETS['Bull Call Spread'](resolvedSpot) : [])
+  const [selectedPreset, setSelectedPreset] = useState(initialPreset || 'Bull Call Spread')
+  const [legs, setLegs] = useState(() => {
+    if (initialLegs && Array.isArray(initialLegs) && initialLegs.length > 0) {
+      return initialLegs.map((l) => ({
+        action: l.action || 'BUY',
+        option_type: l.type || l.option_type || 'CE',
+        strike: Number(l.strike) || resolvedSpot,
+        premium: Number(l.premium || l.price || 50),
+        lots: Number(l.lots || 1),
+        lot_size: Number(l.lot_size || resolvedLotSize),
+      }))
+    }
+    return resolvedSpot > 0 && PRESETS['Bull Call Spread']
+      ? PRESETS['Bull Call Spread'](resolvedSpot, resolvedLotSize)
+      : []
+  })
   const [simData, setSimData] = useState(null)
   const [loading, setLoading] = useState(false)
 
@@ -80,18 +101,28 @@ export default function PayoffSimulatorCard({ initialSymbol = 'NIFTY', initialSp
       setSliderSpot((prev) => (prev > 0 ? prev : effective))
       setLegs((prevLegs) => {
         if (!prevLegs || prevLegs.length === 0) {
-          return PRESETS[selectedPreset] ? PRESETS[selectedPreset](effective) : []
+          if (initialLegs && Array.isArray(initialLegs) && initialLegs.length > 0) {
+            return initialLegs.map((l) => ({
+              action: l.action || 'BUY',
+              option_type: l.type || l.option_type || 'CE',
+              strike: Number(l.strike) || effective,
+              premium: Number(l.premium || l.price || 50),
+              lots: Number(l.lots || 1),
+              lot_size: Number(l.lot_size || resolvedLotSize),
+            }))
+          }
+          return PRESETS[selectedPreset] ? PRESETS[selectedPreset](effective, resolvedLotSize) : []
         }
         return prevLegs
       })
     }
-  }, [initialSymbol, initialSpot, liveSpot])
+  }, [initialSymbol, initialSpot, liveSpot, resolvedLotSize, initialLegs])
 
   // Apply preset
   const handlePresetSelect = (presetName) => {
     setSelectedPreset(presetName)
     if (PRESETS[presetName]) {
-      setLegs(PRESETS[presetName](spotPrice))
+      setLegs(PRESETS[presetName](spotPrice, resolvedLotSize))
     }
   }
 

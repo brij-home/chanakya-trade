@@ -16,11 +16,11 @@ import { useAPI } from '../../hooks/useAPI'
  */
 
 const AXIS_META = {
-  INSTITUTIONAL: { label: 'Institutional Flow', icon: '🏛️', color: 'text-indigo-400', border: 'border-indigo-500/30', bg: 'bg-indigo-950/30' },
-  MACRO: { label: 'Macro Regime', icon: '🌐', color: 'text-sky-400', border: 'border-sky-500/30', bg: 'bg-sky-950/30' },
-  OPTIONS: { label: 'Options Intel', icon: '⚡', color: 'text-amber-400', border: 'border-amber-500/30', bg: 'bg-amber-950/30' },
-  PRICE: { label: 'Price Structure', icon: '📊', color: 'text-emerald-400', border: 'border-emerald-500/30', bg: 'bg-emerald-950/30' },
-  TIMING: { label: 'Timing & Flow', icon: '⏱️', color: 'text-purple-400', border: 'border-purple-500/30', bg: 'bg-purple-950/30' },
+  INSTITUTIONAL: { label: 'Institutional Flow', icon: '🏛️', color: 'text-indigo-600 dark:text-indigo-400', border: 'border-indigo-500/30', bg: 'bg-indigo-500/10 dark:bg-indigo-950/30' },
+  MACRO: { label: 'Macro Regime', icon: '🌐', color: 'text-sky-600 dark:text-sky-400', border: 'border-sky-500/30', bg: 'bg-sky-500/10 dark:bg-sky-950/30' },
+  OPTIONS: { label: 'Options Intel', icon: '⚡', color: 'text-amber-600 dark:text-amber-400', border: 'border-amber-500/30', bg: 'bg-amber-500/10 dark:bg-amber-950/30' },
+  PRICE: { label: 'Price Structure', icon: '📊', color: 'text-emerald-600 dark:text-emerald-400', border: 'border-emerald-500/30', bg: 'bg-emerald-500/10 dark:bg-emerald-950/30' },
+  TIMING: { label: 'Timing & Flow', icon: '⏱️', color: 'text-purple-600 dark:text-purple-400', border: 'border-purple-500/30', bg: 'bg-purple-500/10 dark:bg-purple-950/30' },
 }
 
 export default function ConvictionScoreCard({
@@ -35,6 +35,7 @@ export default function ConvictionScoreCard({
   const [loading, setLoading] = useState(!convictionScore)
   const [expanded, setExpanded] = useState(false)
   const [selectedAxis, setSelectedAxis] = useState('ALL')
+  const [viewMode, setViewMode] = useState('TABLE')
 
   // Use injected conviction score if provided; otherwise fetch independently
   useEffect(() => {
@@ -105,38 +106,38 @@ export default function ConvictionScoreCard({
   const verdictStyles = {
     MAX_CONVICTION: {
       ring: 'ring-emerald-400/60',
-      text: 'text-emerald-400',
-      bg: 'bg-emerald-950/25',
+      text: 'text-emerald-600 dark:text-emerald-400',
+      bg: 'bg-emerald-500/8 dark:bg-emerald-950/25',
       border: 'border-emerald-500/40',
-      glow: '0 0 28px -6px rgba(52, 211, 153, 0.55)',
-      badge: 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40',
+      glow: '0 0 28px -6px rgba(52, 211, 153, 0.35)',
+      badge: 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border-emerald-500/40',
       gauge: '#10b981',
     },
     HIGH: {
       ring: 'ring-cyan-400/60',
-      text: 'text-cyan-400',
-      bg: 'bg-cyan-950/20',
+      text: 'text-cyan-700 dark:text-cyan-400',
+      bg: 'bg-cyan-500/8 dark:bg-cyan-950/20',
       border: 'border-cyan-500/40',
-      glow: '0 0 24px -6px rgba(6, 182, 212, 0.45)',
-      badge: 'bg-cyan-500/20 text-cyan-300 border-cyan-500/40',
+      glow: '0 0 24px -6px rgba(6, 182, 212, 0.35)',
+      badge: 'bg-cyan-500/15 text-cyan-700 dark:text-cyan-300 border-cyan-500/40',
       gauge: '#06b6d4',
     },
     MODERATE: {
       ring: 'ring-amber-400/60',
-      text: 'text-amber-400',
-      bg: 'bg-amber-950/20',
+      text: 'text-amber-700 dark:text-amber-400',
+      bg: 'bg-amber-500/8 dark:bg-amber-950/20',
       border: 'border-amber-500/40',
-      glow: '0 0 20px -6px rgba(251, 191, 36, 0.35)',
-      badge: 'bg-amber-500/20 text-amber-300 border-amber-500/40',
+      glow: '0 0 20px -6px rgba(251, 191, 36, 0.25)',
+      badge: 'bg-amber-500/15 text-amber-700 dark:text-amber-300 border-amber-500/40',
       gauge: '#f59e0b',
     },
     WAIT: {
       ring: 'ring-rose-400/60',
-      text: 'text-rose-400',
-      bg: 'bg-rose-950/15',
+      text: 'text-rose-600 dark:text-rose-400',
+      bg: 'bg-rose-500/8 dark:bg-rose-950/15',
       border: 'border-rose-500/40',
-      glow: '0 0 18px -6px rgba(244, 63, 94, 0.35)',
-      badge: 'bg-rose-500/20 text-rose-300 border-rose-500/40',
+      glow: '0 0 18px -6px rgba(244, 63, 94, 0.25)',
+      badge: 'bg-rose-500/15 text-rose-700 dark:text-rose-300 border-rose-500/40',
       gauge: '#f43f5e',
     },
   }
@@ -151,10 +152,10 @@ export default function ConvictionScoreCard({
   const strokeGap = GAUGE_CIRC - strokeDash
 
   const factorSignalBadge = (signal) => {
-    if (signal === 'BULLISH') return 'text-emerald-400'
-    if (signal === 'BEARISH') return 'text-rose-400'
+    if (signal === 'BULLISH') return 'text-emerald-600 dark:text-emerald-400'
+    if (signal === 'BEARISH') return 'text-rose-600 dark:text-rose-400'
     if (signal === 'UNAVAILABLE') return 'text-muted'
-    return 'text-amber-400'
+    return 'text-amber-600 dark:text-amber-400'
   }
 
   const factorSignalIcon = (signal) => {
@@ -165,10 +166,10 @@ export default function ConvictionScoreCard({
   }
 
   const posSizeBadge = {
-    '2X': 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40',
-    NORMAL: 'bg-cyan-500/20 text-cyan-300 border-cyan-500/40',
-    HALF: 'bg-amber-500/20 text-amber-300 border-amber-500/40',
-    FLAT: 'bg-rose-500/20 text-rose-300 border-rose-500/40',
+    '2X': 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border-emerald-500/40',
+    NORMAL: 'bg-cyan-500/15 text-cyan-700 dark:text-cyan-300 border-cyan-500/40',
+    HALF: 'bg-amber-500/15 text-amber-700 dark:text-amber-300 border-amber-500/40',
+    FLAT: 'bg-rose-500/15 text-rose-700 dark:text-rose-300 border-rose-500/40',
   }
 
   // Filter factors if axis selected
@@ -201,7 +202,8 @@ export default function ConvictionScoreCard({
               cy="34"
               r={GAUGE_R}
               fill="none"
-              stroke="rgba(255,255,255,0.06)"
+              stroke="currentColor"
+              className="text-border/60"
               strokeWidth="6"
             />
             {/* Fill */}
@@ -218,7 +220,7 @@ export default function ConvictionScoreCard({
               style={{ transition: 'stroke-dasharray 0.8s cubic-bezier(0.4, 0, 0.2, 1)' }}
             />
             {/* Score text */}
-            <text x="34" y="38" textAnchor="middle" fill="white" fontSize="15" fontWeight="800" fontFamily="monospace">
+            <text x="34" y="38" textAnchor="middle" fill="currentColor" className="text-text" fontSize="15" fontWeight="800" fontFamily="monospace">
               {total}
             </text>
           </svg>
@@ -238,7 +240,7 @@ export default function ConvictionScoreCard({
                posSize === 'HALF' ? '½ Sizing' : 'Flat / No Trade'}
             </span>
             {veto?.vetoed && (
-              <span className="text-[9px] font-black px-1.5 py-0.5 rounded bg-rose-500/20 text-rose-300 border border-rose-500/50 uppercase tracking-wider animate-pulse">
+              <span className="text-[9px] font-black px-1.5 py-0.5 rounded bg-rose-500/15 text-rose-700 dark:text-rose-300 border border-rose-500/50 uppercase tracking-wider animate-pulse">
                 ⛔ Veto Active
               </span>
             )}
@@ -246,9 +248,9 @@ export default function ConvictionScoreCard({
           </div>
 
           <div className="flex items-center gap-1.5 text-[9px] font-mono">
-            <span className="text-emerald-400 font-bold">{score.bullish_count}▲ Bullish</span>
+            <span className="text-emerald-600 dark:text-emerald-400 font-bold">{score.bullish_count}▲ Bullish</span>
             <span className="text-muted">/</span>
-            <span className="text-rose-400 font-bold">{score.bearish_count}▼ Bearish</span>
+            <span className="text-rose-600 dark:text-rose-400 font-bold">{score.bearish_count}▼ Bearish</span>
             <span className="text-muted">/</span>
             <span className="text-muted">{score.unavailable_count}— Neutral</span>
             <span className="text-muted/60 text-[8px] ml-auto font-sans font-semibold">12-Factor Orthogonal Engine</span>
@@ -294,8 +296,8 @@ export default function ConvictionScoreCard({
                   </span>
                   <span className={`text-[8px] font-black px-1.5 py-0.2 rounded border uppercase ${
                     score.trade_plan.direction === 'LONG'
-                      ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
-                      : 'bg-rose-500/20 text-rose-300 border-rose-500/40'
+                      ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border-emerald-500/40'
+                      : 'bg-rose-500/15 text-rose-700 dark:text-rose-300 border-rose-500/40'
                   }`}>
                     {score.trade_plan.direction}
                   </span>
@@ -303,8 +305,8 @@ export default function ConvictionScoreCard({
                 <div className="flex items-center gap-1.5">
                   <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded border ${
                     score.trade_plan.is_asymmetry_viable
-                      ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
-                      : 'bg-amber-500/20 text-amber-300 border-amber-500/40'
+                      ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border-emerald-500/40'
+                      : 'bg-amber-500/15 text-amber-700 dark:text-amber-300 border-amber-500/40'
                   }`}>
                     ⚖️ R:R {score.trade_plan.rr_t2}:1
                   </span>
@@ -318,7 +320,7 @@ export default function ConvictionScoreCard({
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-[10px]">
                 {/* Invalidation Stop-Loss */}
                 <div className="p-2 rounded-lg bg-rose-500/10 border border-rose-500/20">
-                  <div className="flex items-center justify-between text-rose-400 font-bold text-[9px] uppercase">
+                  <div className="flex items-center justify-between text-rose-600 dark:text-rose-400 font-bold text-[9px] uppercase">
                     <span>🛑 Invalidation (SL)</span>
                     <span className="font-mono">-{score.trade_plan.stop_distance_pts} pts</span>
                   </div>
@@ -332,14 +334,14 @@ export default function ConvictionScoreCard({
 
                 {/* Target 1 (Friction Point) */}
                 <div className="p-2 rounded-lg bg-cyan-500/10 border border-cyan-500/20">
-                  <div className="flex items-center justify-between text-cyan-400 font-bold text-[9px] uppercase">
+                  <div className="flex items-center justify-between text-cyan-700 dark:text-cyan-400 font-bold text-[9px] uppercase">
                     <span>🎯 Target 1 ({score.trade_plan.rr_t1}:1 R:R)</span>
                     <span className="font-mono">+{score.trade_plan.t1_distance_pts} pts</span>
                   </div>
                   <div className="font-mono font-black text-sm text-text mt-0.5">
                     ₹{score.trade_plan.target_1?.toLocaleString('en-IN', { minimumFractionDigits: 1 })}
                   </div>
-                  <div className="flex items-center gap-1 text-[8px] font-mono text-cyan-300/80 mt-1">
+                  <div className="flex items-center gap-1 text-[8px] font-mono text-cyan-700/90 dark:text-cyan-300/80 mt-1">
                     <span>⏱️ ETA: {score.trade_plan.eta_t1_str}</span>
                   </div>
                   <div className="text-[8px] text-muted leading-tight mt-0.5 line-clamp-1">
@@ -349,14 +351,14 @@ export default function ConvictionScoreCard({
 
                 {/* Target 2 (Liquidity Expansion) */}
                 <div className="p-2 rounded-lg bg-emerald-500/10 border border-emerald-500/20">
-                  <div className="flex items-center justify-between text-emerald-400 font-bold text-[9px] uppercase">
+                  <div className="flex items-center justify-between text-emerald-600 dark:text-emerald-400 font-bold text-[9px] uppercase">
                     <span>🚀 Target 2 ({score.trade_plan.rr_t2}:1 R:R)</span>
                     <span className="font-mono">+{score.trade_plan.t2_distance_pts} pts</span>
                   </div>
                   <div className="font-mono font-black text-sm text-text mt-0.5">
                     ₹{score.trade_plan.target_2?.toLocaleString('en-IN', { minimumFractionDigits: 1 })}
                   </div>
-                  <div className="flex items-center gap-1 text-[8px] font-mono text-emerald-300/80 mt-1">
+                  <div className="flex items-center gap-1 text-[8px] font-mono text-emerald-700/90 dark:text-emerald-300/80 mt-1">
                     <span>⏱️ ETA: {score.trade_plan.eta_t2_str}</span>
                   </div>
                   <div className="text-[8px] text-muted leading-tight mt-0.5 line-clamp-1">
@@ -380,7 +382,7 @@ export default function ConvictionScoreCard({
                   <div className="text-[9px] text-text/80 bg-surface/40 p-1.5 rounded border border-border/30 flex items-start gap-1.5">
                     <span className="text-xs">🛡️</span>
                     <div className="flex-1">
-                      <span className="font-bold text-primary mr-1">Structure Guidance:</span>
+                      <span className="font-bold text-amber mr-1">Structure Guidance:</span>
                       {score.trade_plan.structure_advice}
                     </div>
                   </div>
@@ -389,110 +391,225 @@ export default function ConvictionScoreCard({
             </div>
           )}
 
-          {/* Axis Filter Pills */}
-          <div className="flex items-center gap-1 overflow-x-auto pb-1 text-[9px] scrollbar-none">
-            <button
-              type="button"
-              onClick={(e) => { e.stopPropagation(); setSelectedAxis('ALL'); }}
-              className={`px-2 py-0.5 rounded-full border transition-all ${
-                selectedAxis === 'ALL'
-                  ? 'bg-primary text-primary-foreground border-primary font-bold shadow-xs'
-                  : 'bg-elevated/40 text-muted border-border/40 hover:text-text'
-              }`}
-            >
-              All 12 Factors
-            </button>
-            {axesPresent.map((ax) => {
-              const meta = AXIS_META[ax]
-              const count = factors.filter((f) => f.axis === ax).length
-              return (
-                <button
-                  key={ax}
-                  type="button"
-                  onClick={(e) => { e.stopPropagation(); setSelectedAxis(ax); }}
-                  className={`px-2 py-0.5 rounded-full border transition-all flex items-center gap-1 whitespace-nowrap ${
-                    selectedAxis === ax
-                      ? `${meta.bg} ${meta.color} ${meta.border} font-bold shadow-xs`
-                      : 'bg-elevated/40 text-muted border-border/40 hover:text-text'
-                  }`}
-                >
-                  <span>{meta.icon}</span>
-                  <span>{meta.label}</span>
-                  <span className="text-[8px] opacity-70">({count})</span>
-                </button>
-              )
-            })}
+          {/* Axis Filter Pills + View Mode Toggle */}
+          <div className="flex items-center justify-between gap-2 flex-wrap pb-1">
+            <div className="flex items-center gap-1 overflow-x-auto text-[9px] scrollbar-none">
+              <button
+                type="button"
+                onClick={(e) => { e.stopPropagation(); setSelectedAxis('ALL'); }}
+                className={`px-2 py-0.5 rounded-full border transition-all cursor-pointer ${
+                  selectedAxis === 'ALL'
+                    ? 'bg-amber text-black border-amber font-bold shadow-xs'
+                    : 'bg-elevated/40 text-muted border-border/40 hover:text-text'
+                }`}
+              >
+                All 12 Factors
+              </button>
+              {axesPresent.map((ax) => {
+                const meta = AXIS_META[ax]
+                const count = factors.filter((f) => f.axis === ax).length
+                return (
+                  <button
+                    key={ax}
+                    type="button"
+                    onClick={(e) => { e.stopPropagation(); setSelectedAxis(ax); }}
+                    className={`px-2 py-0.5 rounded-full border transition-all flex items-center gap-1 whitespace-nowrap cursor-pointer ${
+                      selectedAxis === ax
+                        ? `${meta.bg} ${meta.color} ${meta.border} font-bold shadow-xs`
+                        : 'bg-elevated/40 text-muted border-border/40 hover:text-text'
+                    }`}
+                  >
+                    <span>{meta.icon}</span>
+                    <span>{meta.label}</span>
+                    <span className="text-[8px] opacity-70">({count})</span>
+                  </button>
+                )
+              })}
+            </div>
+
+            {/* View Mode Toggle: Table (Compact) vs Cards */}
+            <div className="flex items-center gap-0.5 bg-surface border border-border/60 p-0.5 rounded-lg text-[9px] font-mono shrink-0 ml-auto">
+              <button
+                type="button"
+                onClick={(e) => { e.stopPropagation(); setViewMode('TABLE'); }}
+                className={`px-2 py-0.5 rounded font-bold transition-all cursor-pointer ${
+                  viewMode === 'TABLE' ? 'bg-amber text-black shadow-xs' : 'text-muted hover:text-text'
+                }`}
+                title="High-density institutional table (saves screen space)"
+              >
+                ☷ Table
+              </button>
+              <button
+                type="button"
+                onClick={(e) => { e.stopPropagation(); setViewMode('CARDS'); }}
+                className={`px-2 py-0.5 rounded font-bold transition-all cursor-pointer ${
+                  viewMode === 'CARDS' ? 'bg-amber text-black shadow-xs' : 'text-muted hover:text-text'
+                }`}
+                title="Expanded card view"
+              >
+                ☰ Cards
+              </button>
+            </div>
           </div>
 
-          {/* Factor List */}
-          <div className="space-y-1.5">
-            {displayedFactors.map((f, idx) => {
-              const meta = AXIS_META[f.axis] || AXIS_META.TIMING
-              return (
-                <div
-                  key={f.factor_id || idx}
-                  className="p-2 rounded-xl bg-elevated/30 border border-border/30 hover:border-border/60 transition-colors flex items-start gap-2.5 text-[10px]"
-                >
-                  {/* Score bar & Signal */}
-                  <div className="shrink-0 flex flex-col items-center gap-1 w-14">
-                    <div className="flex items-center gap-1">
-                      <span className={`text-[11px] font-black ${factorSignalBadge(f.signal)}`}>
-                        {factorSignalIcon(f.signal)}
-                      </span>
-                      <span className="font-mono font-black text-[11px] text-text">
-                        {f.score}<span className="text-[8px] text-muted font-normal">/10</span>
-                      </span>
-                    </div>
-                    <div className="w-full h-1.5 rounded-full bg-surface overflow-hidden">
-                      <div
-                        className={`h-full rounded-full transition-all duration-500 ${
-                          f.score >= 7 ? 'bg-emerald-500' :
-                          f.score >= 5 ? 'bg-amber-500' : 'bg-rose-500'
-                        }`}
-                        style={{ width: `${(f.score / 10) * 100}%` }}
-                      />
-                    </div>
-                  </div>
+          {/* Factor Representation: Table vs Cards */}
+          {viewMode === 'TABLE' ? (
+            <div className="overflow-x-auto rounded-xl border border-border/50 bg-panel/60 shadow-xs">
+              <table className="w-full text-left text-xs font-mono border-collapse">
+                <thead>
+                  <tr className="border-b border-border/60 bg-surface/80 text-[9px] uppercase tracking-wider text-muted font-bold">
+                    <th className="py-2 px-3">Factor / Dimension</th>
+                    <th className="py-2 px-2.5 hidden sm:table-cell">Pillar</th>
+                    <th className="py-2 px-2.5 text-center">Score</th>
+                    <th className="py-2 px-3">Live Empirical Reading</th>
+                    <th className="py-2 px-3 text-right">Signal</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-border/20 text-[10px]">
+                  {displayedFactors.map((f, idx) => {
+                    const meta = AXIS_META[f.axis] || AXIS_META.TIMING
+                    const isBull = f.signal === 'BULLISH'
+                    const isBear = f.signal === 'BEARISH'
+                    const isUnavailable = f.signal === 'UNAVAILABLE'
+                    return (
+                      <tr
+                        key={f.factor_id || idx}
+                        className="hover:bg-elevated/70 transition-colors group odd:bg-surface/20"
+                      >
+                        {/* Factor / Dimension */}
+                        <td className="py-1.5 px-3">
+                          <div className="flex items-center gap-1.5">
+                            <span className="text-xs shrink-0">{meta.icon}</span>
+                            <span className="font-bold text-text text-[10px] whitespace-nowrap">
+                              {f.label}
+                            </span>
+                          </div>
+                        </td>
 
-                  {/* Factor Details */}
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-1.5 flex-wrap">
-                      <span className="font-bold text-text text-[10px]">
-                        {f.label}
-                      </span>
-                      <span className={`text-[8px] font-bold px-1 py-0.2 rounded border ${meta.border} ${meta.bg} ${meta.color}`}>
-                        {meta.icon} {meta.label}
-                      </span>
-                      <span className={`text-[8px] font-bold uppercase ml-auto ${factorSignalBadge(f.signal)}`}>
-                        {f.signal}
-                      </span>
-                    </div>
-                    {f.detail && (
-                      <div className="text-muted text-[9px] leading-relaxed mt-0.5">
-                        {f.detail}
+                        {/* Pillar / Axis */}
+                        <td className="py-1.5 px-2.5 hidden sm:table-cell whitespace-nowrap">
+                          <span className={`text-[8px] font-bold px-1.5 py-0.5 rounded border ${meta.border} ${meta.bg} ${meta.color}`}>
+                            {meta.label}
+                          </span>
+                        </td>
+
+                        {/* Score with mini bar */}
+                        <td className="py-1.5 px-2.5 text-center whitespace-nowrap">
+                          <div className="inline-flex flex-col items-center gap-0.5 w-16">
+                            <div className="flex items-center gap-1 font-black text-[10px]">
+                              <span className={factorSignalBadge(f.signal)}>
+                                {factorSignalIcon(f.signal)}
+                              </span>
+                              <span className="text-text">{f.score}</span>
+                              <span className="text-[8px] text-muted font-normal">/10</span>
+                            </div>
+                            <div className="w-full h-1 rounded-full bg-surface overflow-hidden border border-border/40">
+                              <div
+                                className={`h-full rounded-full transition-all duration-300 ${
+                                  f.score >= 7 ? 'bg-emerald-500' :
+                                  f.score >= 5 ? 'bg-amber-500' : 'bg-rose-500'
+                                }`}
+                                style={{ width: `${(f.score / 10) * 100}%` }}
+                              />
+                            </div>
+                          </div>
+                        </td>
+
+                        {/* Live Observation / Reading */}
+                        <td className="py-1.5 px-3">
+                          <span className="text-muted font-ui text-[9px] leading-relaxed line-clamp-2">
+                            {f.detail || '—'}
+                          </span>
+                        </td>
+
+                        {/* Signal Badge */}
+                        <td className="py-1.5 px-3 text-right whitespace-nowrap">
+                          <span className={`text-[8px] font-black px-2 py-0.5 rounded border uppercase tracking-wider ${
+                            isBull ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 border-emerald-500/30' :
+                            isBear ? 'bg-rose-500/15 text-rose-700 dark:text-rose-400 border-rose-500/30' :
+                            isUnavailable ? 'bg-slate-500/10 text-muted border-border/40' :
+                            'bg-amber-500/15 text-amber-700 dark:text-amber-400 border-amber-500/30'
+                          }`}>
+                            {f.signal}
+                          </span>
+                        </td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            /* Factor Card Stack */
+            <div className="space-y-1.5">
+              {displayedFactors.map((f, idx) => {
+                const meta = AXIS_META[f.axis] || AXIS_META.TIMING
+                return (
+                  <div
+                    key={f.factor_id || idx}
+                    className="p-2 rounded-xl bg-elevated/30 border border-border/30 hover:border-border/60 transition-colors flex items-start gap-2.5 text-[10px]"
+                  >
+                    {/* Score bar & Signal */}
+                    <div className="shrink-0 flex flex-col items-center gap-1 w-14">
+                      <div className="flex items-center gap-1">
+                        <span className={`text-[11px] font-black ${factorSignalBadge(f.signal)}`}>
+                          {factorSignalIcon(f.signal)}
+                        </span>
+                        <span className="font-mono font-black text-[11px] text-text">
+                          {f.score}<span className="text-[8px] text-muted font-normal">/10</span>
+                        </span>
                       </div>
-                    )}
+                      <div className="w-full h-1.5 rounded-full bg-surface overflow-hidden">
+                        <div
+                          className={`h-full rounded-full transition-all duration-500 ${
+                            f.score >= 7 ? 'bg-emerald-500' :
+                            f.score >= 5 ? 'bg-amber-500' : 'bg-rose-500'
+                          }`}
+                          style={{ width: `${(f.score / 10) * 100}%` }}
+                        />
+                      </div>
+                    </div>
+
+                    {/* Factor Details */}
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        <span className="font-bold text-text text-[10px]">
+                          {f.label}
+                        </span>
+                        <span className={`text-[8px] font-bold px-1 py-0.2 rounded border ${meta.border} ${meta.bg} ${meta.color}`}>
+                          {meta.icon} {meta.label}
+                        </span>
+                        <span className={`text-[8px] font-bold uppercase ml-auto ${factorSignalBadge(f.signal)}`}>
+                          {f.signal}
+                        </span>
+                      </div>
+                      {f.detail && (
+                        <div className="text-muted text-[9px] leading-relaxed mt-0.5">
+                          {f.detail}
+                        </div>
+                      )}
+                    </div>
                   </div>
-                </div>
-              )
-            })}
-          </div>
+                )
+              })}
+            </div>
+          )}
 
           {/* Institutional Calibration Guide */}
           <div className="pt-2 border-t border-border/30 grid grid-cols-4 gap-1 text-[8px] font-mono text-center">
-            <div className="p-1 rounded-lg bg-emerald-500/10 border border-emerald-500/20 text-emerald-400">
+            <div className="p-1 rounded-lg bg-emerald-500/10 border border-emerald-500/20 text-emerald-700 dark:text-emerald-400">
               <div className="font-black text-[9px]">85–100</div>
               <div className="text-muted font-sans font-semibold">2× Size</div>
             </div>
-            <div className="p-1 rounded-lg bg-cyan-500/10 border border-cyan-500/20 text-cyan-400">
+            <div className="p-1 rounded-lg bg-cyan-500/10 border border-cyan-500/20 text-cyan-700 dark:text-cyan-400">
               <div className="font-black text-[9px]">70–84</div>
               <div className="text-muted font-sans font-semibold">Normal</div>
             </div>
-            <div className="p-1 rounded-lg bg-amber-500/10 border border-amber-500/20 text-amber-400">
+            <div className="p-1 rounded-lg bg-amber-500/10 border border-amber-500/20 text-amber-700 dark:text-amber-400">
               <div className="font-black text-[9px]">50–69</div>
               <div className="text-muted font-sans font-semibold">½ Size</div>
             </div>
-            <div className="p-1 rounded-lg bg-rose-500/10 border border-rose-500/20 text-rose-400">
+            <div className="p-1 rounded-lg bg-rose-500/10 border border-rose-500/20 text-rose-700 dark:text-rose-400">
               <div className="font-black text-[9px]">{'<'}50</div>
               <div className="text-muted font-sans font-semibold">Stand Down</div>
             </div>

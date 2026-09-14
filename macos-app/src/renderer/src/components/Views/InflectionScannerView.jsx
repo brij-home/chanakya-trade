@@ -1504,7 +1504,7 @@ export default function InflectionScannerView({
       {/* ── AI 5W+H DECISION MATRIX DRAWER ──────────────────────────────── */}
       {isDrawerOpen && (
         <div
-          className="fixed inset-0 z-50 flex justify-end bg-black/60 backdrop-blur-sm animate-in fade-in duration-150"
+          className="fixed inset-0 z-50 flex justify-end bg-black/30 dark:bg-black/65 backdrop-blur-sm animate-in fade-in duration-150"
           onClick={() => setIsDrawerOpen(false)}
         >
           <div

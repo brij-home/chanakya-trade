@@ -15,7 +15,7 @@ export default function MoversAutopsyPanel({ onOpenOrderTicket }) {
   const [asymmetricOpps, setAsymmetricOpps] = useState([])
   const [activeSubTab, setActiveSubTab] = useState('precursors') // 'precursors' | 'asymmetric' | 'autopsy' | 'traps'
   const [selectedDirection, setSelectedDirection] = useState('ALL') // 'ALL' | 'GAINER' | 'LOSER'
-  const [selectedSegment, setSelectedSegment] = useState('ALL') // 'ALL' | 'FNO' | 'NON_FNO' | 'INDEX'
+  const [selectedSegment, setSelectedSegment] = useState('ALL') // 'ALL' | 'FNO' | 'NON_FNO' | 'INDEX' | 'COMMODITY'
 
   const fetchData = useCallback(async () => {
     setLoading(true)
@@ -102,27 +102,29 @@ export default function MoversAutopsyPanel({ onOpenOrderTicket }) {
 
   const rawGainers = autopsyData?.gainers || []
   const rawLosers = autopsyData?.losers || []
-  const gainers = rawGainers.filter(
-    (g) => selectedSegment === 'ALL' || (g.segment || 'FNO') === selectedSegment
-  )
-  const losers = rawLosers.filter(
-    (l) => selectedSegment === 'ALL' || (l.segment || 'FNO') === selectedSegment
-  )
+  const isCommodityItem = (item) =>
+    item?.segment === 'COMMODITY' ||
+    item?.symbol?.startsWith('MCX:') ||
+    ['CRUDEOIL', 'GOLD', 'SILVER', 'COPPER', 'NATURALGAS'].includes(item?.symbol?.toUpperCase())
+
+  const matchesSegment = (item, defaultSeg = 'FNO') => {
+    if (selectedSegment === 'ALL') return true
+    if (selectedSegment === 'COMMODITY') return isCommodityItem(item)
+    if (isCommodityItem(item)) return false
+    return (item?.segment || defaultSeg) === selectedSegment
+  }
+
+  const gainers = rawGainers.filter((g) => matchesSegment(g, 'FNO'))
+  const losers = rawLosers.filter((l) => matchesSegment(l, 'FNO'))
   const allMovers = [...gainers, ...losers]
   const rawTraps = autopsyData?.traps || (autopsyData?.gainers || []).concat(autopsyData?.losers || []).filter((m) => m.is_trap)
-  const traps = rawTraps.filter(
-    (t) => selectedSegment === 'ALL' || (t.segment || 'NON_FNO') === selectedSegment
-  )
+  const traps = rawTraps.filter((t) => matchesSegment(t, 'NON_FNO'))
   const validGainers = gainers.filter((g) => !g.is_trap)
   const validLosers = losers.filter((l) => !l.is_trap)
 
-  const displayedPrecursors = precursors.filter(
-    (p) => selectedSegment === 'ALL' || (p.segment || 'FNO') === selectedSegment
-  )
+  const displayedPrecursors = precursors.filter((p) => matchesSegment(p, 'FNO'))
 
-  const displayedAsymmetric = (asymmetricOpps || []).filter(
-    (o) => selectedSegment === 'ALL' || (o.segment || 'FNO') === selectedSegment
-  )
+  const displayedAsymmetric = (asymmetricOpps || []).filter((o) => matchesSegment(o, 'FNO'))
 
   const displayedMovers =
     selectedDirection === 'GAINER'
@@ -211,6 +213,16 @@ export default function MoversAutopsyPanel({ onOpenOrderTicket }) {
           >
             🏛️ Indices
           </button>
+          <button
+            onClick={() => setSelectedSegment('COMMODITY')}
+            className={`px-3 py-1 text-xs font-bold rounded-lg transition-all ${
+              selectedSegment === 'COMMODITY'
+                ? 'bg-amber-600 text-white font-black shadow-sm'
+                : 'text-muted hover:text-text bg-elevated'
+            }`}
+          >
+            🛢️ MCX Commodities
+          </button>
         </div>
         <div className="text-[11px] text-muted hidden md:block">
           {selectedSegment === 'FNO'
@@ -219,6 +231,8 @@ export default function MoversAutopsyPanel({ onOpenOrderTicket }) {
             ? 'Scanning high-turnover (≥ ₹10 Cr) cash equities'
             : selectedSegment === 'INDEX'
             ? 'Scanning benchmark & sectoral macro indices'
+            : selectedSegment === 'COMMODITY'
+            ? 'Scanning MCX Commodities (Gold, Silver, Crude, Gas, Copper) with noise-safe stops'
             : 'Cross-universe multi-segment surveillance'}
         </div>
       </div>
@@ -299,14 +313,14 @@ export default function MoversAutopsyPanel({ onOpenOrderTicket }) {
       {/* ── SUB-TAB 1: Precursor Radar (Tomorrow's Candidates) ──────── */}
       {activeSubTab === 'precursors' && (
         <div className="space-y-3">
-          <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/25 flex items-center justify-between text-xs text-amber-200">
+          <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/25 flex items-center justify-between text-xs text-amber-800 dark:text-amber-200">
             <div className="flex items-center gap-2">
               <span className="text-lg">🎯</span>
               <span>
                 <strong>Pre-Ignition Detection:</strong> Stocks coiling with the exact T-1 / T-2 DNA of past winners (Volume dry-up, Squeeze compression, Order block anchor, and Leading sector momentum).
               </span>
             </div>
-            <span className="font-black px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 text-[10px]">
+            <span className="font-black px-2 py-0.5 rounded bg-amber-500/15 dark:bg-amber-500/20 text-amber-800 dark:text-amber-300 text-[10px]">
               Min Conviction ≥ 75
             </span>
           </div>
@@ -569,14 +583,14 @@ export default function MoversAutopsyPanel({ onOpenOrderTicket }) {
       {/* ── SUB-TAB 3: Traps Filtered Out ────────────────────────────── */}
       {activeSubTab === 'traps' && (
         <div className="space-y-3">
-          <div className="p-3 rounded-xl bg-rose-500/10 border border-rose-500/25 flex items-center justify-between text-xs text-rose-200">
+          <div className="p-3 rounded-xl bg-rose-500/10 border border-rose-500/25 flex items-center justify-between text-xs text-rose-800 dark:text-rose-200">
             <div className="flex items-center gap-2">
               <span className="text-lg">🛡️</span>
               <span>
                 <strong>False-Positive & Manipulation Elimination:</strong> Stocks with 5% circuit-to-circuit manipulation, negligible order book depth, or illiquid penny turnover (&lt; ₹10 Cr) are automatically quarantined from pattern learning.
               </span>
             </div>
-            <span className="font-black px-2 py-0.5 rounded bg-rose-500/20 text-rose-300 text-[10px]">
+            <span className="font-black px-2 py-0.5 rounded bg-rose-500/15 dark:bg-rose-500/20 text-rose-800 dark:text-rose-300 text-[10px]">
               {traps.length} Quarantined
             </span>
           </div>
@@ -621,14 +635,14 @@ export default function MoversAutopsyPanel({ onOpenOrderTicket }) {
       {/* ── SUB-TAB 4: Asymmetric Setups (Low Risk : High Reward) ────── */}
       {activeSubTab === 'asymmetric' && (
         <div className="space-y-3">
-          <div className="p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/25 flex items-center justify-between text-xs text-emerald-200">
+          <div className="p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/25 flex items-center justify-between text-xs text-emerald-800 dark:text-emerald-200">
             <div className="flex items-center gap-2">
               <span className="text-lg">🎯</span>
               <span>
                 <strong>Low Risk : Big Reward Asymmetric Radar:</strong> Setups mathematically guaranteed to offer ≥ 1:3.0 Risk:Reward before major moves (Pocket Pivots, F&O Ban Squeezes, Rubber Band 200-EMA mean-reversions, and 0DTE Expiry Gamma).
               </span>
             </div>
-            <span className="font-black px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 text-[10px]">
+            <span className="font-black px-2 py-0.5 rounded bg-emerald-500/15 dark:bg-emerald-500/20 text-emerald-800 dark:text-emerald-300 text-[10px]">
               Min R:R ≥ 1:3.0
             </span>
           </div>

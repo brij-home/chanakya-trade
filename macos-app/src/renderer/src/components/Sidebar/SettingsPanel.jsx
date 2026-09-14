@@ -119,7 +119,7 @@ export default function SettingsPanel({ onClose }) {
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 dark:bg-black/65 backdrop-blur-sm"
       onClick={onClose}
     >
       <div

@@ -2866,9 +2866,17 @@ class AutoAlertEngine:
             except Exception as e:
                 logger.debug(f"[AutoAlertEngine] Error fetching 5m OHLCV for MCX:{clean_sym}: {e}")
 
+            now_ist = datetime.now(IST)
+            # US Open Transition Gate (18:15 to 19:15 IST):
+            # High risk of opening range sweep / Judas swing fakeouts before COMEX/NYMEX regular trading hours.
+            is_us_open_transition = (now_ist.hour == 18 and now_ist.minute >= 15) or (
+                now_ist.hour == 19 and now_ist.minute < 15
+            )
+
             is_bullish = False
             is_bearish = False
             is_donchian_breakout = False
+            rvol = 1.0
 
             if df_5m is not None and len(df_5m) >= 20:
                 recent_20 = df_5m.iloc[-21:-1]
@@ -2878,32 +2886,53 @@ class AutoAlertEngine:
                 cur_open = float(last_bar.get("open", ltp))
                 cur_high = max(float(last_bar.get("high", ltp)), ltp)
                 cur_low = min(float(last_bar.get("low", ltp)), ltp)
+                cur_close = float(last_bar.get("close", ltp))
                 bar_range = max(1.0, cur_high - cur_low)
 
-                upper_wick_ratio = (cur_high - max(cur_open, ltp)) / bar_range
-                lower_wick_ratio = (min(cur_open, ltp) - cur_low) / bar_range
+                # Compute Relative Volume (RVOL) against 20-bar rolling average
+                try:
+                    vols_s = df_5m["volume"] if "volume" in df_5m.columns else df_5m.get("Volume")
+                    if vols_s is not None and len(vols_s) >= 20:
+                        avg_v = float(vols_s.iloc[-21:-1].mean())
+                        cur_v = float(last_bar.get("volume", 0.0) or 0.0)
+                        rvol = round(cur_v / max(1.0, avg_v), 2) if avg_v > 0 else 1.0
+                except Exception:
+                    rvol = 1.0
 
-                # Bullish: breaking 20-bar high, small upper wick (no shooting star rejection), holding above VWAP
+                upper_wick_ratio = (cur_high - max(cur_open, cur_close)) / bar_range
+                lower_wick_ratio = (min(cur_open, cur_close) - cur_low) / bar_range
+                bull_close_ratio = (cur_close - cur_low) / bar_range
+                bear_close_ratio = (cur_high - cur_close) / bar_range
+
+                # Bullish: breaking 20-bar high, small upper wick (no shooting star rejection), closing in upper half
+                req_bull_close = 0.65 if is_us_open_transition else 0.50
                 if (
                     not is_locked_bull
                     and chg >= min_chg
-                    and ltp >= prior_high * 0.999
+                    and (ltp >= prior_high * 0.999 or cur_close >= prior_high)
                     and upper_wick_ratio <= 0.35
+                    and bull_close_ratio >= req_bull_close
                     and ltp >= vwap * 0.998
                 ):
-                    is_bullish = True
-                    is_donchian_breakout = True
+                    # During US open transition window (18:15-19:15), require RVOL >= 1.3 to avoid low-vol sweeps
+                    if not is_us_open_transition or rvol >= 1.3:
+                        is_bullish = True
+                        is_donchian_breakout = True
 
-                # Bearish: breaking 20-bar low, small lower wick (no hammer absorption), trading below VWAP
-                elif (
+                # Bearish: breaking 20-bar low, small lower wick (no hammer absorption), closing in lower half
+                req_bear_close = 0.65 if is_us_open_transition else 0.50
+                if (
                     not is_locked_bear
                     and chg <= -min_chg
-                    and ltp <= prior_low * 1.001
+                    and (ltp <= prior_low * 1.001 or cur_close <= prior_low)
                     and lower_wick_ratio <= 0.35
+                    and bear_close_ratio >= req_bear_close
                     and ltp <= vwap * 1.002
                 ):
-                    is_bearish = True
-                    is_donchian_breakout = True
+                    # During US open transition window (18:15-19:15), require RVOL >= 1.3 to avoid low-vol sweeps
+                    if not is_us_open_transition or rvol >= 1.3:
+                        is_bearish = True
+                        is_donchian_breakout = True
             else:
                 # Fallback when historical 5m bars are unavailable:
                 # Enforce stricter move threshold and clear VWAP separation
@@ -2923,8 +2952,8 @@ class AutoAlertEngine:
             if not (is_bullish or is_bearish):
                 continue
 
-            # 2. Data-Driven Dynamic Commodity Volatility Risk (Points)
-            # Computed from 5m OHLCV realized ATR (or volatility range proxy)
+            # 2. Noise-Safe Quantitative Commodity Volatility Risk (Points)
+            # Recalibrated to eliminate SUB_ATR_NOISE_WHIPSAW invalidations
             atr_calc = None
             if df_5m is not None and len(df_5m) >= 14:
                 try:
@@ -2939,13 +2968,16 @@ class AutoAlertEngine:
                 except Exception:
                     atr_calc = None
 
-            if not atr_calc or atr_calc <= 0:
-                is_energy = clean_sym in ("CRUDEOIL", "CRUDEOILM", "NATURALGAS", "NATGASMINI")
-                vol_pct = 0.008 if is_energy else 0.003
-                atr_calc = round(max(1.0, ltp * vol_pct), 1)
+            is_energy = clean_sym in ("CRUDEOIL", "CRUDEOILM", "NATURALGAS", "NATGASMINI")
+            # Volatility floor percentages: 0.8% for Energy, 0.5% for Bullion/Metals
+            min_vol_pct = 0.008 if is_energy else 0.005
+            min_noise_floor_pts = round(ltp * min_vol_pct, 1)
 
-            risk_pts = round(max(1.0, atr_calc * 0.8), 1)
-            atr = round(atr_calc, 1)
+            base_atr = atr_calc if (atr_calc and atr_calc > 0) else min_noise_floor_pts
+            # Volatility noise-safe stop: at least 1.5x realized 5m ATR or minimum volatility floor
+            noise_safe_pts = max(base_atr * 1.5, min_noise_floor_pts)
+            risk_pts = round(max(1.0, noise_safe_pts), 1)
+            atr = round(base_atr, 1)
             direction = "BULLISH" if is_bullish else "BEARISH"
             alert_type = "COMMODITY_MOMENTUM"
             alert_id = f"comm-{clean_sym.lower()}-{datetime.now(IST).strftime('%Y%m%d%H%M')}"
@@ -2958,8 +2990,8 @@ class AutoAlertEngine:
             has_real_vwap = abs(ltp - vwap) >= 2.0 and vwap != ltp
             if is_bullish:
                 sl_price = round(ltp - risk_pts, 2)
-                t1_price = round(ltp + 1.8 * risk_pts, 2)
-                t2_price = round(ltp + 3.2 * risk_pts, 2)
+                t1_price = round(ltp + 2.0 * risk_pts, 2)
+                t2_price = round(ltp + 3.5 * risk_pts, 2)
                 if is_donchian_breakout:
                     headline = f"🛢️ MCX BREAKOUT: {clean_sym} +{chg:.1f}% Breaking 20-bar High (₹{ltp:,.1f})"
                     summary = f"Institutional breakout in {clean_sym}: Trading at ₹{ltp:,.1f} (+{chg:.1f}%). 20-bar 5m Donchian high broken with VWAP support at ₹{vwap:,.1f}."
@@ -2974,8 +3006,8 @@ class AutoAlertEngine:
                 action = "BUY_FUTURES"
             else:
                 sl_price = round(ltp + risk_pts, 2)
-                t1_price = round(ltp - 1.8 * risk_pts, 2)
-                t2_price = round(ltp - 3.2 * risk_pts, 2)
+                t1_price = round(ltp - 2.0 * risk_pts, 2)
+                t2_price = round(ltp - 3.5 * risk_pts, 2)
                 if is_donchian_breakout:
                     headline = (
                         f"🛢️ MCX BREAKDOWN: {clean_sym} {chg:.1f}% Breaking 20-bar Low (₹{ltp:,.1f})"
@@ -3003,8 +3035,8 @@ class AutoAlertEngine:
                     opt_prem = closest_opt.last_price
                     # Scale option risk to underlying futures riskpts (Delta approx 0.50)
                     opt_risk = round(max(1.0, min(opt_prem * 0.35, risk_pts * 0.52)), 1)
-                    opt_t1 = round(opt_prem + 1.8 * opt_risk, 1)
-                    opt_t2 = round(opt_prem + 3.2 * opt_risk, 1)
+                    opt_t1 = round(opt_prem + 2.0 * opt_risk, 1)
+                    opt_t2 = round(opt_prem + 3.5 * opt_risk, 1)
                     opt_recommendation = {
                         "contract": closest_opt.symbol,
                         "strike": closest_opt.strike,
@@ -3040,7 +3072,7 @@ class AutoAlertEngine:
                 "lot_size": lot_sz,
                 "when_to_buy": f"Enter on 5m candle closing in direction above/below VWAP ₹{vwap:,.1f}.",
                 "when_to_wait": f"Do not chase if move exceeds {round(abs(chg) + 1.0, 1)}%.",
-                "profit_rule": "Book 50% at T1, trail stop to cost, let runner target T2.",
+                "profit_rule": "Book 50% at T1 (+2.0R), trail stop to breakeven, hold runner for T2 (+3.5R).",
             }
             if opt_recommendation:
                 plan_dict["option_alternative"] = opt_recommendation
@@ -3085,6 +3117,8 @@ class AutoAlertEngine:
                     "volume": vol,
                     "vwap": vwap,
                     "atr": atr,
+                    "atr_14d": atr,
+                    "rvol": rvol,
                     "lot_size": lot_sz,
                     "segment": "COMMODITY",
                     "has_options_chain": bool(opt_recommendation),

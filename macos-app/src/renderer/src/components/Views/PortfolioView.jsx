@@ -420,7 +420,7 @@ export default function PortfolioView() {
 
           {/* Institutional Lifecycle & Trailing SL Audit Modal */}
           {selectedLifecycle && (
-            <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-fadeIn">
+            <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/30 dark:bg-black/65 backdrop-blur-sm animate-fadeIn">
               <div
                 className="w-full max-w-xl rounded-2xl p-5 border border-border shadow-2xl space-y-4"
                 style={{ background: 'var(--color-panel)' }}

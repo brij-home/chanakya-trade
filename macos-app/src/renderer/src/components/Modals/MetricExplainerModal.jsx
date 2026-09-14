@@ -29,7 +29,7 @@ export default function MetricExplainerModal() {
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-sm select-none animate-in fade-in duration-200"
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/35 dark:bg-black/75 backdrop-blur-sm select-none animate-in fade-in duration-200"
       onClick={closeInspector}
     >
       <div
@@ -171,7 +171,7 @@ export default function MetricExplainerModal() {
             </button>
             <button
               type="button"
-              onClick={() => handleAction(`size ${sym} 24000 23600`)}
+              onClick={() => handleAction(contextData?.price ? `size ${sym} ${contextData.price} ${(contextData.price * 0.98).toFixed(1)}` : `size ${sym}`)}
               className="bg-green/15 hover:bg-green/25 text-green border border-green/30 px-3 py-1.5 rounded-lg text-xs font-semibold font-ui transition-colors cursor-pointer"
             >
               ⚖️ Sizer

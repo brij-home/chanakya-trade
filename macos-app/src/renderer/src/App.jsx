@@ -814,8 +814,7 @@ function HotkeyReference({ onClose }) {
 
   return (
     <div
-      className="fixed inset-0 z-[150] flex items-center justify-center animate-slide-up-fade"
-      style={{ background: 'rgba(3,4,10,0.88)', backdropFilter: 'blur(12px)' }}
+      className="fixed inset-0 z-[150] flex items-center justify-center bg-black/35 dark:bg-black/80 backdrop-blur-md animate-slide-up-fade"
       onClick={onClose}
     >
       <div

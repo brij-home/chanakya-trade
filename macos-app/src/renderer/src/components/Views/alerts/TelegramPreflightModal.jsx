@@ -78,8 +78,7 @@ export function TelegramPreflightModal({ alert, onConfirm, onCancel, sending, se
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center p-4"
-      style={{ background: 'rgba(0,0,0,0.7)', backdropFilter: 'blur(8px)' }}
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/35 dark:bg-black/75 backdrop-blur-md"
       onClick={(e) => { if (e.target === e.currentTarget) onCancel() }}
     >
       <div className="w-full max-w-md rounded-2xl border border-sky-500/30 bg-elevated shadow-2xl space-y-3 p-4 animate-slide-up-fade">
@@ -342,7 +341,7 @@ export function TelegramPreflightModal({ alert, onConfirm, onCancel, sending, se
                         : customChannel.trim()
             )}
             disabled={sending || sentOk || (destMode === 'CHANNEL' && !customChannel.trim())}
-            className="flex-1 btn btn-sm text-xs font-black bg-sky-500/20 hover:bg-sky-500/30 text-sky-200 border border-sky-500/40 hover:border-sky-500/60 disabled:opacity-50 transition-all"
+            className="flex-1 btn btn-sm text-xs font-black bg-sky-500/15 hover:bg-sky-500/25 dark:bg-sky-500/20 dark:hover:bg-sky-500/30 text-sky-800 dark:text-sky-200 border border-sky-400/50 dark:border-sky-500/40 hover:border-sky-500/60 disabled:opacity-50 transition-all"
           >
             {sending ? '⏳ Sending…' : sentOk ? '✅ Sent!' : '✓ Confirm & Send'}
           </button>

@@ -224,17 +224,17 @@ export function TradeExecutionMatrix({
         {/* 5. TARGET 3 (RUNNER) */}
         <div className="p-2 rounded-lg bg-purple-500/5 border border-purple-500/20 hover:border-purple-500/40 transition-colors col-span-2 sm:col-span-1">
           <div className="flex items-center justify-between">
-            <span className="text-[9px] font-black uppercase tracking-wider text-purple-300">
+            <span className="text-[9px] font-black uppercase tracking-wider text-purple-700 dark:text-purple-300">
               🚀 Target 3 (T3)
             </span>
-            <span className="text-[9px] font-bold text-purple-300">
+            <span className="text-[9px] font-bold text-purple-700 dark:text-purple-300">
               {levels.t3_pct ? `+${levels.t3_pct}%` : '—'}
             </span>
           </div>
-          <div className="text-sm font-black text-purple-200 mt-0.5">
+          <div className="text-sm font-black text-purple-800 dark:text-purple-200 mt-0.5">
             ₹{formatNum(levels.t3)}
           </div>
-          <div className="text-[9px] text-purple-300/90 block font-sans font-bold">
+          <div className="text-[9px] text-purple-700/90 dark:text-purple-300/90 block font-sans font-bold">
             {levels.t3_rr ? `${levels.t3_rr}:1 R:R · Moonshot Runner` : 'Moonshot Runner'}
           </div>
           {isDerivative && levels.optPlanRef?.t3_spot && (

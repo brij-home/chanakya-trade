@@ -319,7 +319,7 @@ export default function NotificationDropdown({ isOpen, onClose, onOpenOrderTicke
                     <button
                       type="button"
                       onClick={(e) => handleTrade(e, item)}
-                      className="text-[10px] font-bold px-2 py-0.5 rounded-lg text-emerald-300 hover:text-emerald-200 bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/30 hover:border-emerald-500/50 transition-all cursor-pointer"
+                      className="text-[10px] font-bold px-2 py-0.5 rounded-lg text-emerald-700 dark:text-emerald-300 hover:text-emerald-900 dark:hover:text-emerald-200 bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-400/40 dark:border-emerald-500/30 hover:border-emerald-500/50 transition-all cursor-pointer"
                       title="1-Click pre-fill order ticket"
                     >
                       ⚡ Trade
