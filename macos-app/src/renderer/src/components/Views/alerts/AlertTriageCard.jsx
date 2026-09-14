@@ -161,12 +161,15 @@ export const AlertTriageCard = memo(function AlertTriageCard({
         <div className="flex items-center gap-1.5 flex-wrap">
           {entryNum && <span className="text-gold font-bold">Entry ₹{fmtP(entryNum)}</span>}
           {alert.no_chase_boundary && (
-            <span className="text-[8px] font-mono text-zinc-400 bg-zinc-800/60 px-1 py-px rounded border border-zinc-700/40 whitespace-nowrap" title="No-Chase limit: Entries beyond this price are disqualified">
+            <span
+              className="text-[8px] font-mono font-bold text-rose-700 dark:text-rose-300 bg-rose-500/10 dark:bg-rose-500/15 px-1 py-px rounded border border-rose-300/60 dark:border-rose-500/30 whitespace-nowrap"
+              title="No-Chase limit: Entries beyond this price are disqualified"
+            >
               Max ₹{fmtP(alert.no_chase_boundary)}
             </span>
           )}
-          {slNum && <span className="text-rose-400 font-bold">SL ₹{fmtP(slNum)}</span>}
-          {t1Num && <span className="text-emerald-400 font-bold">T1 ₹{fmtP(t1Num)}</span>}
+          {slNum && <span className="text-rose-600 dark:text-rose-400 font-bold">SL ₹{fmtP(slNum)}</span>}
+          {t1Num && <span className="text-emerald-600 dark:text-emerald-400 font-bold">T1 ₹{fmtP(t1Num)}</span>}
           <span className="text-muted">· {conviction}%</span>
         </div>
 

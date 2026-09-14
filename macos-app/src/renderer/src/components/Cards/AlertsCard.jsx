@@ -79,7 +79,7 @@ export default function AlertsCard({ data }) {
                     </span>
                   ) : null}
                   {a.no_chase_boundary && (
-                    <span className="text-[8px] px-1 py-0.2 rounded font-mono font-bold bg-rose-500/15 text-rose-300 border border-rose-500/30" title="No-Chase limit">
+                    <span className="text-[8px] px-1 py-0.2 rounded font-mono font-bold bg-rose-500/10 dark:bg-rose-500/15 text-rose-700 dark:text-rose-300 border border-rose-300/60 dark:border-rose-500/30" title="No-Chase limit">
                       Max ₹{Number(a.no_chase_boundary).toLocaleString('en-IN', { maximumFractionDigits: 1 })}
                     </span>
                   )}

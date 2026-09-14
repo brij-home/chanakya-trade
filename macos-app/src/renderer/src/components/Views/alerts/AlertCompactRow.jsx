@@ -75,7 +75,6 @@ export const AlertCompactRow = memo(function AlertCompactRow({ alert, onSendTele
   })()
 
   const conviction = Number(alert.confidence || alert.metrics?.scrutiny?.score || 75)
-  const convBars = Math.round(conviction / 10)
   const reasonShort = (alert.summary || alert.headline || '').slice(0, 40)
 
   const stagePill = isInvalidated ? { label: '❌ INVALID', cls: 'bg-rose-500/20 text-rose-300 border-rose-500/40' }
@@ -200,28 +199,31 @@ export const AlertCompactRow = memo(function AlertCompactRow({ alert, onSendTele
         )}
 
         {slNum && (
-          <span className="text-[9px] font-mono text-rose-400 whitespace-nowrap font-bold">
+          <span className="text-[9px] font-mono text-rose-600 dark:text-rose-400 whitespace-nowrap font-bold">
             SL ₹{fmtP(slNum)}
           </span>
         )}
 
         {entryNum && (
-          <span className="text-[9px] font-mono text-amber-400 whitespace-nowrap font-bold">
+          <span className="text-[9px] font-mono text-amber-600 dark:text-amber-400 whitespace-nowrap font-bold">
             Entry ₹{fmtP(entryNum)}
           </span>
         )}
 
         {alert.no_chase_boundary && (
-          <span className="text-[8px] font-mono text-zinc-400 bg-zinc-800/60 px-1 py-px rounded border border-zinc-700/40 whitespace-nowrap hidden sm:inline" title="No-Chase limit: Entries beyond this price are mathematically disqualified">
+          <span
+            className="text-[8px] font-mono font-bold text-rose-700 dark:text-rose-300 bg-rose-500/10 dark:bg-rose-500/15 px-1 py-px rounded border border-rose-300/60 dark:border-rose-500/30 whitespace-nowrap hidden sm:inline"
+            title="No-Chase limit: Entries beyond this price are mathematically disqualified"
+          >
             Max ₹{fmtP(alert.no_chase_boundary)}
           </span>
         )}
 
         {t1Num && (
           <span className="text-[9px] font-mono whitespace-nowrap">
-            <span className="text-emerald-400 font-bold">T1 ₹{fmtP(t1Num)}</span>
-            {t2Num && <span className="text-cyan-400 font-bold"> T2 ₹{fmtP(t2Num)}</span>}
-            {t3Num && <span className="text-purple-300 font-bold"> T3 ₹{fmtP(t3Num)}</span>}
+            <span className="text-emerald-500 dark:text-emerald-400 font-bold">T1 ₹{fmtP(t1Num)}</span>
+            {t2Num && <span className="text-cyan-500 dark:text-cyan-400 font-bold"> T2 ₹{fmtP(t2Num)}</span>}
+            {t3Num && <span className="text-purple-400 dark:text-purple-300 font-bold"> T3 ₹{fmtP(t3Num)}</span>}
           </span>
         )}
 
@@ -232,7 +234,6 @@ export const AlertCompactRow = memo(function AlertCompactRow({ alert, onSendTele
         <span className="text-[9px] font-mono whitespace-nowrap" title={`Conviction: ${conviction}`}>
           {convictionEmoji(conviction)}
           <span className="text-gold font-bold ml-0.5">{conviction}</span>
-          <span className="text-zinc-600">{'█'.repeat(convBars)}{'░'.repeat(10 - convBars)}</span>
         </span>
 
         {reasonShort && (

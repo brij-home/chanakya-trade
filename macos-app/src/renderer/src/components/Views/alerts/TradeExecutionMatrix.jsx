@@ -149,7 +149,7 @@ export function TradeExecutionMatrix({
             {isDerivative ? 'Contract Entry' : 'Spot Breakout Level'}
           </div>
           {levels.no_chase_boundary && (
-            <div className="pt-0.5 border-t border-gold/20 text-[8px] text-amber-300 font-bold truncate" title="Do not chase beyond this level">
+            <div className="pt-0.5 border-t border-gold/20 text-[8px] text-amber-700 dark:text-amber-300 font-bold truncate" title="Do not chase beyond this level">
               🛑 Max ₹{formatNum(levels.no_chase_boundary)}
             </div>
           )}

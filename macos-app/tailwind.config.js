@@ -1,4 +1,6 @@
 /** @type {import('tailwindcss').Config} */
+const colors = require('tailwindcss/colors')
+
 module.exports = {
   content: ['./src/renderer/**/*.{js,jsx,ts,tsx,html}'],
   darkMode: 'class',
@@ -20,41 +22,90 @@ module.exports = {
         muted:    'var(--color-muted)',
         subtle:   'var(--color-subtle)',
 
-        /* ── Semantic accents ── */
-        gold:        'var(--color-gold)',
-        'gold-bright':'var(--color-gold-bright)',
-        'gold-dim':  'var(--color-gold-dim)',
+        /* ── Semantic accents (Full 50–950 spectrum + custom CSS variable defaults) ── */
+        gold: {
+          ...colors.amber,
+          DEFAULT: 'var(--color-gold)',
+          bright:  'var(--color-gold-bright)',
+          dim:     'var(--color-gold-dim)',
+        },
+        'gold-bright': 'var(--color-gold-bright)',
+        'gold-dim':    'var(--color-gold-dim)',
 
-        emerald:        'var(--color-emerald)',
-        'emerald-bright':'var(--color-emerald-bright)',
-        'emerald-dim':  'var(--color-emerald-dim)',
+        emerald: {
+          ...colors.emerald,
+          DEFAULT: 'var(--color-emerald)',
+          bright:  'var(--color-emerald-bright)',
+          dim:     'var(--color-emerald-dim)',
+        },
+        'emerald-bright': 'var(--color-emerald-bright)',
+        'emerald-dim':    'var(--color-emerald-dim)',
 
-        rose:        'var(--color-rose)',
-        'rose-bright':'var(--color-rose-bright)',
-        'rose-dim':  'var(--color-rose-dim)',
+        rose: {
+          ...colors.rose,
+          DEFAULT: 'var(--color-rose)',
+          bright:  'var(--color-rose-bright)',
+          dim:     'var(--color-rose-dim)',
+        },
+        'rose-bright': 'var(--color-rose-bright)',
+        'rose-dim':    'var(--color-rose-dim)',
 
-        sapphire:        'var(--color-sapphire)',
-        'sapphire-bright':'var(--color-sapphire-bright)',
-        'sapphire-dim':  'var(--color-sapphire-dim)',
+        sapphire: {
+          ...colors.blue,
+          DEFAULT: 'var(--color-sapphire)',
+          bright:  'var(--color-sapphire-bright)',
+          dim:     'var(--color-sapphire-dim)',
+        },
+        'sapphire-bright': 'var(--color-sapphire-bright)',
+        'sapphire-dim':    'var(--color-sapphire-dim)',
 
-        violet:        'var(--color-violet)',
-        'violet-bright':'var(--color-violet-bright)',
-        'violet-dim':  'var(--color-violet-dim)',
+        violet: {
+          ...colors.violet,
+          DEFAULT: 'var(--color-violet)',
+          bright:  'var(--color-violet-bright)',
+          dim:     'var(--color-violet-dim)',
+        },
+        'violet-bright': 'var(--color-violet-bright)',
+        'violet-dim':    'var(--color-violet-dim)',
 
-        cyan:        'var(--color-cyan)',
-        'cyan-bright':'var(--color-cyan-bright)',
-        'cyan-dim':  'var(--color-cyan-dim)',
+        cyan: {
+          ...colors.cyan,
+          DEFAULT: 'var(--color-cyan)',
+          bright:  'var(--color-cyan-bright)',
+          dim:     'var(--color-cyan-dim)',
+        },
+        'cyan-bright': 'var(--color-cyan-bright)',
+        'cyan-dim':    'var(--color-cyan-dim)',
 
-        /* ── Backward-compatibility aliases ── */
+        /* ── Backward-compatibility aliases with numeric shade support ── */
         primary:     'var(--color-gold)',
         'primary-foreground': '#000000',
-        amber:       'var(--color-amber)',
-        'amber-dim': 'var(--color-amber-dim)',
-        'amber-light':'#ffbb40',
-        green:       'var(--color-green)',
-        red:         'var(--color-red)',
-        blue:        'var(--color-blue)',
-        purple:      'var(--color-purple)',
+        amber: {
+          ...colors.amber,
+          DEFAULT: 'var(--color-amber)',
+          bright:  'var(--color-gold-bright)',
+          dim:     'var(--color-amber-dim)',
+          light:   '#ffbb40',
+        },
+        'amber-dim':   'var(--color-amber-dim)',
+        'amber-light': '#ffbb40',
+
+        green: {
+          ...colors.green,
+          DEFAULT: 'var(--color-green)',
+        },
+        red: {
+          ...colors.red,
+          DEFAULT: 'var(--color-red)',
+        },
+        blue: {
+          ...colors.blue,
+          DEFAULT: 'var(--color-blue)',
+        },
+        purple: {
+          ...colors.purple,
+          DEFAULT: 'var(--color-purple)',
+        },
       },
 
       fontFamily: {

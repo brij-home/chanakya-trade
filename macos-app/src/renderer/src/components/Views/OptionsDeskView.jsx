@@ -2115,7 +2115,7 @@ export default function OptionsDeskView({
                                         e.stopPropagation()
                                         handleOpenBlastPopover(resolvedCallBlastData, e.currentTarget)
                                       }}
-                                      className="text-[7px] bg-cyan-500 text-black px-1 rounded-xs font-black animate-pulse hover:scale-110 transition-transform cursor-pointer"
+                                      className="text-[8.5px] tracking-wider uppercase bg-cyan-400 text-slate-950 px-1.5 py-0.5 rounded font-black animate-pulse hover:scale-110 transition-transform cursor-pointer shadow-xs border border-cyan-300/40"
                                       title="Click to view Actionable Profit Roadmap"
                                     >
                                       BLAST
@@ -2183,7 +2183,7 @@ export default function OptionsDeskView({
                                         e.stopPropagation()
                                         handleOpenBlastPopover(resolvedCallBlastData, e.currentTarget)
                                       }}
-                                      className="text-[7px] bg-cyan-500 text-black px-1 rounded-xs font-black animate-pulse hover:scale-110 transition-transform cursor-pointer"
+                                      className="text-[8.5px] tracking-wider uppercase bg-cyan-400 text-slate-950 px-1.5 py-0.5 rounded font-black animate-pulse hover:scale-110 transition-transform cursor-pointer shadow-xs border border-cyan-300/40"
                                       title="Click to view Actionable Profit Roadmap"
                                     >
                                       BLAST
@@ -2276,7 +2276,7 @@ export default function OptionsDeskView({
                                         e.stopPropagation()
                                         handleOpenBlastPopover(resolvedPutBlastData, e.currentTarget)
                                       }}
-                                      className="text-[7px] bg-rose-500 text-white px-1 rounded-xs font-black animate-pulse hover:scale-110 transition-transform cursor-pointer"
+                                      className="text-[8.5px] tracking-wider uppercase bg-rose-500 text-white px-1.5 py-0.5 rounded font-black animate-pulse hover:scale-110 transition-transform cursor-pointer shadow-xs border border-rose-400/40"
                                       title="Click to view Actionable Profit Roadmap"
                                     >
                                       BLAST
@@ -2370,7 +2370,7 @@ export default function OptionsDeskView({
                                         e.stopPropagation()
                                         handleOpenBlastPopover(resolvedPutBlastData, e.currentTarget)
                                       }}
-                                      className="text-[7px] bg-rose-500 text-white px-1 rounded-xs font-black animate-pulse hover:scale-110 transition-transform cursor-pointer"
+                                      className="text-[8.5px] tracking-wider uppercase bg-rose-500 text-white px-1.5 py-0.5 rounded font-black animate-pulse hover:scale-110 transition-transform cursor-pointer shadow-xs border border-rose-400/40"
                                       title="Click to view Actionable Profit Roadmap"
                                     >
                                       BLAST

@@ -429,7 +429,7 @@ const AutoAlertCard = memo(function AutoAlertCard({
               </span>
             )}
             {alert.no_chase_boundary && (
-              <span className="text-[9px] font-mono font-bold px-1 py-px rounded bg-rose-500/15 text-rose-300 border border-rose-500/30 whitespace-nowrap" title="No-Chase Maximum Entry Limit">
+              <span className="text-[9px] font-mono font-bold px-1 py-px rounded bg-rose-500/10 dark:bg-rose-500/15 text-rose-700 dark:text-rose-300 border border-rose-300/60 dark:border-rose-500/30 whitespace-nowrap" title="No-Chase Maximum Entry Limit">
                 🛑 Max ₹{Number(alert.no_chase_boundary).toLocaleString('en-IN', { maximumFractionDigits: 1 })}
               </span>
             )}

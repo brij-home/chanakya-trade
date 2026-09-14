@@ -66,7 +66,6 @@ export function TelegramPreflightModal({ alert, onConfirm, onCancel, sending, se
 
   const scrutiny = alert.metrics?.scrutiny || null
   const conviction = Number(alert.confidence || scrutiny?.score || 75)
-  const convBars = Math.round(conviction / 10)
   const optType = alert.option_type || null
   const strikeNum = alert.strike ? Number(alert.strike) : null
   const cleanSym = (alert.symbol || '').replace(/^(NSE|BSE|MCX|NFO|CDS):/, '').trim()
@@ -116,7 +115,6 @@ export function TelegramPreflightModal({ alert, onConfirm, onCancel, sending, se
               style={{ width: `${conviction}%` }}
             />
           </div>
-          <div className="text-[8px] font-mono text-muted text-right">{'█'.repeat(convBars)}{'░'.repeat(10 - convBars)}</div>
         </div>
 
         {/* Scrutiny dossier */}
