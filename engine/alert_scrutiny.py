@@ -189,11 +189,14 @@ class AlertScrutinyAuditor:
         vix_val = None
         try:
             from market.indices import get_vix
+
             vix_raw = get_vix()
             if hasattr(vix_raw, "ltp"):
                 vix_val = float(vix_raw.ltp)
             elif isinstance(vix_raw, dict):
-                vix_val = float(vix_raw.get("ltp") or vix_raw.get("value") or vix_raw.get("close") or 0.0)
+                vix_val = float(
+                    vix_raw.get("ltp") or vix_raw.get("value") or vix_raw.get("close") or 0.0
+                )
             elif isinstance(vix_raw, (int, float)):
                 vix_val = float(vix_raw)
             else:
@@ -254,7 +257,10 @@ class AlertScrutinyAuditor:
 
         # 6. Index Options Deep OTM Trap Gate:
         # Reject illiquid, high-theta lottery strikes > 1.2% away from spot on index options
-        sym = str(getattr(alert, "symbol", "") or (alert.get("symbol", "") if isinstance(alert, dict) else "")).upper()
+        sym = str(
+            getattr(alert, "symbol", "")
+            or (alert.get("symbol", "") if isinstance(alert, dict) else "")
+        ).upper()
         clean_sym = (
             sym.replace(".NS", "")
             .replace(".BO", "")
@@ -264,10 +270,20 @@ class AlertScrutinyAuditor:
             .replace("NFO:", "")
             .strip()
         )
-        strike_val = getattr(alert, "strike", None) or (alert.get("strike", None) if isinstance(alert, dict) else None)
-        metrics_dict = getattr(alert, "metrics", {}) or (alert.get("metrics", {}) if isinstance(alert, dict) else {})
-        spot_val = (metrics_dict.get("spot") if isinstance(metrics_dict, dict) else None) or getattr(alert, "underlying_spot", None)
-        if clean_sym in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX") and strike_val and spot_val:
+        strike_val = getattr(alert, "strike", None) or (
+            alert.get("strike", None) if isinstance(alert, dict) else None
+        )
+        metrics_dict = getattr(alert, "metrics", {}) or (
+            alert.get("metrics", {}) if isinstance(alert, dict) else {}
+        )
+        spot_val = (
+            metrics_dict.get("spot") if isinstance(metrics_dict, dict) else None
+        ) or getattr(alert, "underlying_spot", None)
+        if (
+            clean_sym in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX")
+            and strike_val
+            and spot_val
+        ):
             try:
                 stk = float(strike_val)
                 spt = float(spot_val)
@@ -276,7 +292,7 @@ class AlertScrutinyAuditor:
                     if dist_pct > 0.012:
                         return (
                             False,
-                            f"Deep OTM Index Option: Strike {stk:,.0f} is {dist_pct*100:.2f}% away from spot {spt:,.1f} (>1.2% theta decay trap)",
+                            f"Deep OTM Index Option: Strike {stk:,.0f} is {dist_pct * 100:.2f}% away from spot {spt:,.1f} (>1.2% theta decay trap)",
                             flags,
                         )
             except (ValueError, TypeError):
@@ -317,8 +333,12 @@ class AlertScrutinyAuditor:
                 pass
 
         if rsi_val is not None and rsi_val > 0:
-            is_put_option = atype == "OPTIONS_MOMENTUM" and getattr(alert, "option_type", "") == "PE"
-            is_call_option = atype == "OPTIONS_MOMENTUM" and getattr(alert, "option_type", "") == "CE"
+            is_put_option = (
+                atype == "OPTIONS_MOMENTUM" and getattr(alert, "option_type", "") == "PE"
+            )
+            is_call_option = (
+                atype == "OPTIONS_MOMENTUM" and getattr(alert, "option_type", "") == "CE"
+            )
 
             # Long equity / Call option: reject when RSI > 78
             if (direction in ("BULLISH", "LONG", "BUY") or is_call_option) and not is_put_option:
@@ -329,7 +349,9 @@ class AlertScrutinyAuditor:
                         flags,
                     )
             # Short equity / Put option (underlying): reject when underlying RSI < 22
-            elif (direction in ("BEARISH", "SHORT", "SELL") or is_put_option) and not is_call_option:
+            elif (
+                direction in ("BEARISH", "SHORT", "SELL") or is_put_option
+            ) and not is_call_option:
                 if rsi_val < 22.0:
                     return (
                         False,
@@ -363,13 +385,17 @@ class AlertScrutinyAuditor:
             mtf_15m_trend = metrics_dict.get("mtf_15m_trend") or metrics_dict.get("trend_15m")
         if mtf_15m_trend:
             mtf_upper = str(mtf_15m_trend).upper()
-            if direction in ("BULLISH", "LONG", "BUY") and any(k in mtf_upper for k in ("BEAR", "DOWN", "MARKDOWN")):
+            if direction in ("BULLISH", "LONG", "BUY") and any(
+                k in mtf_upper for k in ("BEAR", "DOWN", "MARKDOWN")
+            ):
                 return (
                     False,
                     f"MTF Confluence Failure: 5m Bullish trigger conflicting with 15m structural markdown ({mtf_upper})",
                     flags,
                 )
-            elif direction in ("BEARISH", "SHORT", "SELL") and any(k in mtf_upper for k in ("BULL", "UP", "MARKUP")):
+            elif direction in ("BEARISH", "SHORT", "SELL") and any(
+                k in mtf_upper for k in ("BULL", "UP", "MARKUP")
+            ):
                 return (
                     False,
                     f"MTF Confluence Failure: 5m Bearish trigger conflicting with 15m structural markup ({mtf_upper})",
@@ -632,14 +658,20 @@ Respond STRICTLY in valid JSON:
   "actionable_guidance": "<one crisp sentence: exact CDS entry discipline with spread and trailing stop rule>"
 }}"""
 
+        time_horizon = getattr(alert, "time_horizon", "INTRADAY")
+        setup_style = getattr(alert, "setup_style", "CONTINUATION")
+        anchored = getattr(alert, "anchored_levels", {}) or {}
+
         # ── Standard Equity / Derivative Prompt ───────────────────────────────
         return f"""You are the Chief Risk Officer and Devil's Advocate for an institutional quant trading desk.
 Perform a strict pre-dispatch scrutiny of this real-time Indian market trade setup:
 
 SYMBOL: {sym} | CONTRACT: {contract or sym} | ACTION: {trade_desc} | DIRECTION: {direction} | TYPE: {alert_type}
+HORIZON: {time_horizon} | SETUP STYLE: {setup_style}
 LTP / PREMIUM: ₹{ltp:,.2f} | STOP LOSS: ₹{sl:,.2f} | TARGET 1: ₹{t1:,.2f} | R:R: {rr_str}
 HEADLINE: {headline}
 SUMMARY: {summary}
+KEY ANCHORS: {json.dumps(anchored, default=str) if anchored else "Standard Pivots"}
 METRICS: {json.dumps(metrics, default=str)[:300]}
 
 Perform 3 Institutional Scrutiny Tests:
@@ -760,9 +792,17 @@ Respond STRICTLY in valid JSON matching this schema:
 
         # ── Generic Equity / Derivative Fallback ─────────────────────────────
         if is_option_buy:
-            is_friday_late = bool(metrics.get("is_friday_late", False)) if isinstance(metrics, dict) else False
-            friday_warning = " [FRIDAY POST-14:30 WARNING: High weekend theta decay; scalp only or close by 15:20 IST]" if is_friday_late else ""
-            spot_anchor = metrics.get("spot_invalidation_anchor") if isinstance(metrics, dict) else None
+            is_friday_late = (
+                bool(metrics.get("is_friday_late", False)) if isinstance(metrics, dict) else False
+            )
+            friday_warning = (
+                " [FRIDAY POST-14:30 WARNING: High weekend theta decay; scalp only or close by 15:20 IST]"
+                if is_friday_late
+                else ""
+            )
+            spot_anchor = (
+                metrics.get("spot_invalidation_anchor") if isinstance(metrics, dict) else None
+            )
             anchor_note = f" (Spot Anchor Rs.{float(spot_anchor):,.1f})" if spot_anchor else ""
 
             if opt_type == "PE" or "PE" in contract or "PUT" in action or direction == "BEARISH":

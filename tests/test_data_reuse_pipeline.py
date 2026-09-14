@@ -93,7 +93,7 @@ class TestDataReusePipeline:
             assert not res_df.empty
             assert len(res_df) >= 20  # 30 calendar days = ~21 business days
             assert res_df.attrs["provenance"]["provider"] == "eod_store"
-            mock_store.assert_called_once_with(["TATAMOTORS"])
+            mock_store.assert_called_once_with(["TATAMOTORS"], days=300)
             mock_yf.assert_not_called()
 
     def test_get_ohlcv_persists_to_eod_store_on_vendor_fetch(self):

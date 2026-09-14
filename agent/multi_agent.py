@@ -2775,9 +2775,7 @@ class MultiAgentAnalyzer:
         synth_fallback = self._build_deterministic_synthesis(
             symbol, exchange, reports, debate.winner
         )
-        synthesis = self._safe_chat(
-            synthesis_prompt, synth_fallback, timeout=18.0, max_tokens=1200
-        )
+        synthesis = self._safe_chat(synthesis_prompt, synth_fallback, timeout=18.0, max_tokens=1200)
         synthesis = self._validate_and_calibrate_synthesis(
             synthesis, symbol, exchange, reports, debate.winner
         )

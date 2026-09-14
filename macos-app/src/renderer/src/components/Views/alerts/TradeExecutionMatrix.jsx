@@ -65,6 +65,20 @@ export function TradeExecutionMatrix({
           <span className={`px-1.5 py-0.5 rounded border ${mktBadge.cls}`}>
             {mktBadge.label}
           </span>
+          {levels.time_horizon && (
+            <span className="px-1.5 py-0.5 rounded bg-sky-500/10 text-sky-300 border border-sky-500/25">
+              ⏱️ {levels.time_horizon === 'INTRADAY' ? 'INTRADAY' : levels.time_horizon === 'SWING_SHORT' ? '2-5D SWING' : levels.time_horizon === 'SWING_MID' ? '1-4W SWING' : 'POSITIONAL'}
+            </span>
+          )}
+          {levels.order_flow_signals?.live_broker_connected === false || levels.order_flow_signals?.broker_depth_status === 'SYNTHETIC_L1_DISCONNECTED' ? (
+            <span className="px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-300 border border-amber-500/25" title="No active broker WebSocket depth connection. Using tick-level fallback.">
+              ⚠️ SYNTHETIC L1
+            </span>
+          ) : (levels.order_flow_signals?.live_broker_connected || levels.order_flow_signals?.broker_depth_status === 'LIVE_L2') ? (
+            <span className="px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-300 border border-emerald-500/25" title="Live Broker Level 2 depth active">
+              🟢 LIVE L2
+            </span>
+          ) : null}
           {expBadge && (
             <span className="px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-300 border border-amber-500/25">
               {expBadge}
@@ -134,6 +148,11 @@ export function TradeExecutionMatrix({
           <div className="text-[9px] text-muted block truncate font-sans">
             {isDerivative ? 'Contract Entry' : 'Spot Breakout Level'}
           </div>
+          {levels.no_chase_boundary && (
+            <div className="pt-0.5 border-t border-gold/20 text-[8px] text-amber-300 font-bold truncate" title="Do not chase beyond this level">
+              🛑 Max ₹{formatNum(levels.no_chase_boundary)}
+            </div>
+          )}
         </div>
 
         {/* 3. TARGET 1 */}

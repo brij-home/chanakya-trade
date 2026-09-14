@@ -179,13 +179,13 @@ class TestFrontendUniverseDataIntegrity:
         with open("macos-app/src/renderer/src/data/universeData.js", "r", encoding="utf-8") as f:
             content = f.read()
 
-        # PRESTIGE must have sector: 'Realty', isFO: true, lotSize: 475
+        # PRESTIGE must have sector: 'Realty', isFO: true, lotSize: 450
         m = re.search(r"symbol:\s*'PRESTIGE'[^}]+", content)
         assert m is not None, "PRESTIGE must be present in universeData.js"
         prestige_entry = m.group(0)
         assert "sector: 'Realty'" in prestige_entry
         assert "isFO: true" in prestige_entry
-        assert "lotSize: 475" in prestige_entry
+        assert "lotSize: 450" in prestige_entry
 
         # No whimsical non-standard sectors in universeData.js
         disallowed = [

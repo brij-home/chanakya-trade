@@ -552,7 +552,6 @@ class PatternLearningEngine:
         reason = f"{lockout.get('reason', 'Recent invalidation')} (cooldown active for next {mins_left}m until {lockout.get('expires_at_str', '')})"
         return True, reason
 
-
     def clear_symbol_lockout(self, symbol: Optional[str] = None) -> None:
         """Clears lockout for a specific symbol or all symbols."""
         if symbol:
@@ -729,7 +728,9 @@ class PatternLearningEngine:
             # Option noise floor: scale underlying ATR by Delta (~0.50), bounded by 8% to 25% of premium
             if atr and atr > 0:
                 opt_atr_equiv = round(0.50 * 1.2 * atr, 1)
-                min_noise_sl_pts = max(round(entry_price * 0.08, 1), min(round(entry_price * 0.25, 1), opt_atr_equiv))
+                min_noise_sl_pts = max(
+                    round(entry_price * 0.08, 1), min(round(entry_price * 0.25, 1), opt_atr_equiv)
+                )
             else:
                 min_noise_sl_pts = round(entry_price * 0.12, 1)
         else:
@@ -775,7 +776,9 @@ class PatternLearningEngine:
             pass
 
         # 4b. Forensic Check: Session Time Windows (Opening Bell Auction Chop vs Late Session)
-        alert_time_str = str(getattr(alert, "created_at", "") or getattr(alert, "triggered_at", "") or "")
+        alert_time_str = str(
+            getattr(alert, "created_at", "") or getattr(alert, "triggered_at", "") or ""
+        )
         is_opening_bell = False
         is_late_session = False
         if " " in alert_time_str:
@@ -784,7 +787,9 @@ class PatternLearningEngine:
                 hh, mm = map(int, t_part.split(":"))
                 if (hh == 9 and mm < 25) or (hh < 9):
                     is_opening_bell = True
-                elif (hh == 15 and mm >= 10) or (hh > 15 and getattr(alert, "exchange", "NSE") in ("NSE", "BSE", "NFO")):
+                elif (hh == 15 and mm >= 10) or (
+                    hh > 15 and getattr(alert, "exchange", "NSE") in ("NSE", "BSE", "NFO")
+                ):
                     is_late_session = True
             except Exception:
                 pass
@@ -823,7 +828,6 @@ class PatternLearningEngine:
             primary_reason = "SECTOR_ROTATION_DRAG"
         else:
             primary_reason = "STRUCTURAL_ORDERFLOW_FAILURE"
-
 
         # 6. Formulate Institutional Root Cause & Corrective Actions
         first_cues = (

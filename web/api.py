@@ -2780,9 +2780,10 @@ async def get_auto_alerts(
     target_status: Optional[str] = None,
     view_mode: str = "ACTIVE",  # "ACTIVE" | "ARCHIVED" | "ALL"
     is_archived: Optional[bool] = None,
+    horizon: Optional[str] = None,
 ):
     """
-    Get real-time auto-detected alerts with active/archived partitioning (Gamma Blasts, Squeezes, SMC).
+    Get real-time auto-detected alerts with active/archived partitioning and horizon differentiation.
     """
     from engine.auto_alert_engine import auto_alert_engine
 
@@ -2795,8 +2796,36 @@ async def get_auto_alerts(
         target_status=target_status,
         view_mode=view_mode,
         is_archived=is_archived,
+        horizon=horizon,
     )
     return {"status": "ok", "data": [a.to_dict() for a in alerts]}
+
+
+@app.get("/api/market/participant-oi", tags=["Market Intelligence"])
+async def get_participant_oi_endpoint():
+    """Returns the latest official NSE Participant-wise Open Interest metrics."""
+    from market.participant_oi import get_latest_participant_oi
+
+    data = get_latest_participant_oi()
+    return {"status": "ok", "data": data.to_dict()}
+
+
+@app.get("/api/market/order-book/{symbol}", tags=["Market Intelligence"])
+async def get_order_book_endpoint(symbol: str):
+    """Returns real-time Order Book Imbalance (OBI) and depth analytics."""
+    from market.order_book import analyze_symbol_order_book
+
+    snapshot = analyze_symbol_order_book(symbol)
+    return {"status": "ok", "data": snapshot.to_dict()}
+
+
+@app.get("/api/market/whale-deals", tags=["Market Intelligence"])
+async def get_whale_deals_endpoint(min_deal_cr: float = 0.0, investor: Optional[str] = None):
+    """Returns marquee superstar investor and institutional bulk/block deals."""
+    from analysis.whale_tracker import get_whale_flows
+
+    flows = get_whale_flows(investor_filter=investor, min_deal_cr=min_deal_cr)
+    return {"status": "ok", "data": flows}
 
 
 @app.post("/api/alerts/auto/archive", tags=["Alerts"])
@@ -2854,7 +2883,6 @@ async def rescrutinize_auto_alert(payload: dict):
     target.confidence = max(target.confidence, scrutiny.score)
     auto_alert_engine._save()
     return {"status": "ok", "data": target.to_dict(), "scrutiny": scrutiny.to_dict()}
-
 
 
 @app.get("/api/alerts/auto/telegram-destinations", tags=["Alerts"])
@@ -2946,6 +2974,7 @@ async def send_alert_to_telegram(payload: dict):
 
     try:
         from bot.telegram_bot import send_push
+
         send_push(rendered_msg, parse_mode="HTML", bypass_dedup=True, chat_id=chat_id)
     except RuntimeError as e:
         # Telegram bot token not configured

@@ -26,6 +26,7 @@ os.environ["TRADING_PLATFORM_DATA"] = str(_TEST_DATA_DIR)
 os.environ["TRADING_PLATFORM_PDF_DIR"] = str(_TEST_DATA_DIR / "pdf")
 os.environ["CHANAKYA_EOD_DB_PATH"] = str(_TEST_DATA_DIR / "test_eod_bars.db")
 os.environ["CHANAKYA_TESTING"] = "1"
+os.environ["ALLOW_MANUAL_TELEGRAM_DISPATCH"] = "1"
 os.environ["TRADING_MODE"] = "PAPER"
 # Test runs must not inherit deployment authentication policy from a developer's
 # local .env file. Individual auth tests explicitly opt into self-hosted mode
@@ -85,6 +86,23 @@ def isolate_test_notifications(monkeypatch: pytest.MonkeyPatch, request: pytest.
             monkeypatch.setattr("bot.telegram_bot.send_push", lambda *args, **kwargs: None)
         except Exception:
             pass
+
+
+@pytest.fixture(autouse=True)
+def isolate_alert_preferences(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    """Ensure alert preferences start from clean defaults and disk writes are isolated."""
+    try:
+        from engine.alert_preferences import AlertPreferences, alert_preferences
+
+        test_file = tmp_path / "alert_preferences.json"
+        monkeypatch.setattr(alert_preferences, "_pref_file", test_file)
+        with alert_preferences._lock:
+            alert_preferences._preferences = AlertPreferences()
+        yield
+        with alert_preferences._lock:
+            alert_preferences._preferences = AlertPreferences()
+    except ImportError:
+        yield
 
 
 @pytest.fixture

@@ -8,15 +8,12 @@ Two-Strike session lockouts, and dual invalidation anchors.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone, timedelta
-import pandas as pd
-import numpy as np
-import pytest
+from datetime import timezone, timedelta
 
 from engine.alert_model import AutoAlert
 from engine.alert_scrutiny import AlertScrutinyAuditor
 from engine.learning_engine import PatternLearningEngine
-from engine.alert_evaluator import evaluate_alert_targets_and_trailing, evaluate_alert_invalidation
+from engine.alert_evaluator import evaluate_alert_targets_and_trailing
 from bot.alert_templates import render_auto_alert
 
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -96,8 +93,12 @@ def test_two_strike_hard_session_lockout(tmp_path, monkeypatch):
     """Verify that a second invalidation within a session triggers an 8-hour hard lockout with disabled structural reclaim."""
     db_file = tmp_path / "test_pm.json"
     monkeypatch.setattr("engine.learning_engine.get_pattern_post_mortems_file", lambda: db_file)
-    monkeypatch.setattr("engine.learning_engine.get_pattern_memory_file", lambda: tmp_path / "mem.json")
-    monkeypatch.setattr("engine.learning_engine.get_pattern_outcomes_file", lambda: tmp_path / "out.json")
+    monkeypatch.setattr(
+        "engine.learning_engine.get_pattern_memory_file", lambda: tmp_path / "mem.json"
+    )
+    monkeypatch.setattr(
+        "engine.learning_engine.get_pattern_outcomes_file", lambda: tmp_path / "out.json"
+    )
 
     engine = PatternLearningEngine()
 
@@ -112,7 +113,9 @@ def test_two_strike_hard_session_lockout(tmp_path, monkeypatch):
     assert lock1["is_hard_session_lockout"] is False
 
     # Check that price above reclaim level clears lockout for Strike 1
-    is_locked, _ = engine.is_symbol_locked_out("SILVER", direction="BULLISH", ltp=249000.0, vwap=248500.0)
+    is_locked, _ = engine.is_symbol_locked_out(
+        "SILVER", direction="BULLISH", ltp=249000.0, vwap=248500.0
+    )
     assert is_locked is False
 
     # Strike 2: Second failure triggers HARD SESSION LOCKOUT (8 hours, disabled reclaim)
@@ -126,7 +129,9 @@ def test_two_strike_hard_session_lockout(tmp_path, monkeypatch):
     assert lock2["duration_minutes"] >= 480.0  # 8 hours
 
     # Now, even if price is above reclaim level, HARD LOCKOUT remains active
-    is_locked_hard, reason = engine.is_symbol_locked_out("SILVER", direction="BULLISH", ltp=250000.0, vwap=248500.0)
+    is_locked_hard, reason = engine.is_symbol_locked_out(
+        "SILVER", direction="BULLISH", ltp=250000.0, vwap=248500.0
+    )
     assert is_locked_hard is True
     assert "Two-Strike Rule" in reason
     assert "Hard session lockout" in reason

@@ -127,6 +127,31 @@ export const AlertCompactRow = memo(function AlertCompactRow({ alert, onSendTele
           : <span className="text-[7px] px-1 py-px rounded font-black bg-rose-500/20 text-rose-300 border border-rose-500/30 whitespace-nowrap">🔴 LIVE</span>
         }
 
+        {/* ── Time Horizon Badge ── */}
+        {alert.time_horizon && (
+          <span className={`text-[7px] px-1.5 py-px rounded font-black whitespace-nowrap border ${
+            alert.time_horizon === 'INTRADAY' ? 'bg-sky-500/15 text-sky-300 border-sky-500/30' :
+            alert.time_horizon === 'SWING_SHORT' ? 'bg-amber-500/15 text-amber-300 border-amber-500/30' :
+            alert.time_horizon === 'SWING_MID' ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30' :
+            'bg-purple-500/15 text-purple-300 border-purple-500/30'
+          }`}>
+            {alert.time_horizon === 'INTRADAY' ? '⏱️ INTRADAY' :
+             alert.time_horizon === 'SWING_SHORT' ? '⚡ 2-5D SWING' :
+             alert.time_horizon === 'SWING_MID' ? '📈 1-4W SWING' : '🏛️ POSITIONAL'}
+          </span>
+        )}
+
+        {/* ── Broker Level 2 Connection Status ── */}
+        {alert.order_flow_signals?.live_depth === false || alert.order_flow_signals?.broker_depth_status === 'SYNTHETIC_L1_DISCONNECTED' || alert.order_flow_signals?.provenance === 'SYNTHETIC_L1_DISCONNECTED' ? (
+          <span className="text-[7px] px-1 py-px rounded font-black bg-amber-500/20 text-amber-300 border border-amber-500/40 whitespace-nowrap hidden sm:inline" title="No active broker WebSocket depth connection. Using tick-level fallback.">
+            ⚠️ SYNTHETIC L1 (NO BROKER WS)
+          </span>
+        ) : (alert.order_flow_signals?.live_broker_connected || alert.order_flow_signals?.broker_depth_status === 'LIVE_L2') ? (
+          <span className="text-[7px] px-1 py-px rounded font-black bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 whitespace-nowrap hidden sm:inline" title="Live Broker Level 2 depth active">
+            🟢 LIVE L2 DEPTH
+          </span>
+        ) : null}
+
         <span className={`text-[9px] font-black whitespace-nowrap ${isBull ? 'text-emerald-400' : 'text-rose-400'}`}>
           {isBull ? '▲' : '▼'} {alert.direction?.slice(0, 4)}
         </span>
@@ -183,6 +208,12 @@ export const AlertCompactRow = memo(function AlertCompactRow({ alert, onSendTele
         {entryNum && (
           <span className="text-[9px] font-mono text-amber-400 whitespace-nowrap font-bold">
             Entry ₹{fmtP(entryNum)}
+          </span>
+        )}
+
+        {alert.no_chase_boundary && (
+          <span className="text-[8px] font-mono text-zinc-400 bg-zinc-800/60 px-1 py-px rounded border border-zinc-700/40 whitespace-nowrap hidden sm:inline" title="No-Chase limit: Entries beyond this price are mathematically disqualified">
+            Max ₹{fmtP(alert.no_chase_boundary)}
           </span>
         )}
 

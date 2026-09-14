@@ -10,10 +10,8 @@ Comprehensive unit tests for the institutional Telegram alert template engine:
 """
 
 from datetime import date
-import pytest
 from bot.alert_templates import (
     FNOAlertData,
-    EquityAlertData,
     MilestoneAlertData,
     render_fno_alert,
     render_equity_alert,
@@ -387,11 +385,21 @@ def test_render_auto_alert_target_1_traceability():
 def test_build_signal_ref_and_time_formatting():
     """Verify unique, non-clashing hashtag generation and elapsed time formatting."""
     # 1. Options contract with call timestamp
-    ref1 = build_signal_ref("HAL", alert_id="aa-opt-1234", contract="HAL 26SEP 4500 CE", created_at="2026-09-11 09:42:00 IST")
+    ref1 = build_signal_ref(
+        "HAL",
+        alert_id="aa-opt-1234",
+        contract="HAL 26SEP 4500 CE",
+        created_at="2026-09-11 09:42:00 IST",
+    )
     assert ref1 == "#SIG_HAL_4500CE_11SEP_0942"
 
     # 2. Another call at later time has distinct timestamp hashtag
-    ref2 = build_signal_ref("HAL", alert_id="aa-opt-5678", contract="HAL 26SEP 4500 CE", created_at="2026-09-11 10:15:00 IST")
+    ref2 = build_signal_ref(
+        "HAL",
+        alert_id="aa-opt-5678",
+        contract="HAL 26SEP 4500 CE",
+        created_at="2026-09-11 10:15:00 IST",
+    )
     assert ref2 == "#SIG_HAL_4500CE_11SEP_1015"
     assert ref1 != ref2, "Two distinct calls must never share the same hashtag"
 
@@ -408,7 +416,12 @@ def test_build_signal_ref_and_time_formatting():
     assert ref2 not in rendered
 
     # 4. Put option hashtag with deterministic timestamp
-    ref_pe = build_signal_ref("BANKNIFTY", alert_id="opt-52000-pe-a9f1", contract="BANKNIFTY 52000 PE", created_at="2026-09-11 09:42:00 IST")
+    ref_pe = build_signal_ref(
+        "BANKNIFTY",
+        alert_id="opt-52000-pe-a9f1",
+        contract="BANKNIFTY 52000 PE",
+        created_at="2026-09-11 09:42:00 IST",
+    )
     assert ref_pe == "#SIG_BANKNIFTY_52000PE_11SEP_0942"
 
     # 5. Equity alert hashtag
@@ -541,7 +554,9 @@ def test_minimalist_alert_hierarchy_and_deduplication():
     rendered = render_auto_alert(opt_alert, in_market=True)
 
     # 1. Zero duplicate [REAL/LIVE]
-    assert rendered.count("[REAL/LIVE]") == 1, f"Found multiple [REAL/LIVE] tags in alert: {rendered}"
+    assert rendered.count("[REAL/LIVE]") == 1, (
+        f"Found multiple [REAL/LIVE] tags in alert: {rendered}"
+    )
     assert "[REAL / LIVE" not in rendered
     assert "Chanakya" not in rendered
     assert "Data-Driven Options Plan" not in rendered
@@ -924,7 +939,10 @@ def test_render_auto_alert_no_conflicting_cmp_or_stale_timestamp():
     assert "Opt CMP: ₹24.70" not in rendered
 
     # 2. Must NOT render (Opt CMP: ...) in Action line because entry matches
-    assert "BUY CE <b>HDFCBANK680CE</b> @ <code>₹22.1</code>\n" in rendered or "BUY CE <b>HDFCBANK680CE</b> @ <code>₹22.1</code> (Spot: ₹693.80)" in rendered
+    assert (
+        "BUY CE <b>HDFCBANK680CE</b> @ <code>₹22.1</code>\n" in rendered
+        or "BUY CE <b>HDFCBANK680CE</b> @ <code>₹22.1</code> (Spot: ₹693.80)" in rendered
+    )
 
     # 3. Timestamp MUST show triggered_at (2026-09-11), not yesterday's created_at (2026-09-10)
     assert "2026-09-11 14:05:00 IST" in rendered
@@ -977,7 +995,3 @@ def test_render_auto_alert_sanitizes_degenerate_h_and_s():
 
     # 3. Zero-redundancy spot presentation: Spot: ₹13,520.00 must appear exactly ONCE
     assert rendered.count("Spot:") == 1
-
-
-
-

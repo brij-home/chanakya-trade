@@ -100,6 +100,31 @@ export const AlertTriageCard = memo(function AlertTriageCard({
           <span className={`text-[8px] font-bold ${isBull ? 'text-emerald-400' : 'text-rose-400'}`}>
             {isBull ? '▲' : '▼'} {alert.direction}
           </span>
+
+          {/* Time Horizon Badge */}
+          {alert.time_horizon && (
+            <span className={`text-[7px] px-1 py-px rounded font-black uppercase whitespace-nowrap border ${
+              alert.time_horizon === 'INTRADAY' ? 'bg-sky-500/15 text-sky-300 border-sky-500/30' :
+              alert.time_horizon === 'SWING_SHORT' ? 'bg-amber-500/15 text-amber-300 border-amber-500/30' :
+              alert.time_horizon === 'SWING_MID' ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30' :
+              'bg-purple-500/15 text-purple-300 border-purple-500/30'
+            }`}>
+              {alert.time_horizon === 'INTRADAY' ? '⏱️ INTRADAY' :
+               alert.time_horizon === 'SWING_SHORT' ? '⚡ 2-5D' :
+               alert.time_horizon === 'SWING_MID' ? '📈 1-4W' : '🏛️ POS'}
+            </span>
+          )}
+
+          {/* Broker Depth Feed Status */}
+          {alert.order_flow_signals?.live_broker_connected === false || alert.order_flow_signals?.broker_depth_status === 'SYNTHETIC_L1_DISCONNECTED' || alert.order_flow_signals?.provenance === 'SYNTHETIC_L1_DISCONNECTED' ? (
+            <span className="text-[7px] px-1 py-px rounded font-black bg-amber-500/20 text-amber-300 border border-amber-500/40 whitespace-nowrap" title="No active broker WebSocket connection. Using tick-level fallback.">
+              ⚠️ SYNTHETIC L1
+            </span>
+          ) : (alert.order_flow_signals?.live_broker_connected || alert.order_flow_signals?.broker_depth_status === 'LIVE_L2') ? (
+            <span className="text-[7px] px-1 py-px rounded font-black bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 whitespace-nowrap" title="Live Broker Level 2 depth active">
+              🟢 LIVE L2
+            </span>
+          ) : null}
         </div>
 
         {/* Live Price & Return */}
@@ -135,6 +160,11 @@ export const AlertTriageCard = memo(function AlertTriageCard({
       <div className="flex items-center justify-between gap-1 pt-1 border-t border-border/20 text-[9px] font-mono flex-wrap">
         <div className="flex items-center gap-1.5 flex-wrap">
           {entryNum && <span className="text-gold font-bold">Entry ₹{fmtP(entryNum)}</span>}
+          {alert.no_chase_boundary && (
+            <span className="text-[8px] font-mono text-zinc-400 bg-zinc-800/60 px-1 py-px rounded border border-zinc-700/40 whitespace-nowrap" title="No-Chase limit: Entries beyond this price are disqualified">
+              Max ₹{fmtP(alert.no_chase_boundary)}
+            </span>
+          )}
           {slNum && <span className="text-rose-400 font-bold">SL ₹{fmtP(slNum)}</span>}
           {t1Num && <span className="text-emerald-400 font-bold">T1 ₹{fmtP(t1Num)}</span>}
           <span className="text-muted">· {conviction}%</span>

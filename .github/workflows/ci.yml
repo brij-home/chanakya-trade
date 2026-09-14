@@ -43,6 +43,7 @@ jobs:
           TRADING_PLATFORM_HOME: ${{ runner.temp }}/pytest_platform
           TRADING_PLATFORM_DATA: ${{ runner.temp }}/pytest_platform
           TRADING_PLATFORM_PDF_DIR: ${{ runner.temp }}/pytest_platform/pdf
+          ALLOW_MANUAL_TELEGRAM_DISPATCH: "1"
         run: |
           mkdir -p ${{ runner.temp }}/pytest_platform/pdf
           pytest tests/ -v --tb=short -m "not network and not slow" -n 2 --junitxml=junit.xml
@@ -88,6 +89,7 @@ jobs:
           TRADING_PLATFORM_HOME: ${{ runner.temp }}/pytest_platform
           TRADING_PLATFORM_DATA: ${{ runner.temp }}/pytest_platform
           TRADING_PLATFORM_PDF_DIR: ${{ runner.temp }}/pytest_platform/pdf
+          ALLOW_MANUAL_TELEGRAM_DISPATCH: "1"
         run: |
           mkdir -p ${{ runner.temp }}/pytest_platform/pdf
           pytest tests/ -v --tb=short -m "slow and not network" -n 2

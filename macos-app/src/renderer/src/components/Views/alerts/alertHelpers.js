@@ -514,5 +514,9 @@ export function computeExecutionLevels(alert, isDerivative, spotNum, optLtpNum) 
     isUpwardPayoff,
     isOptionSell,
     optPlanRef: optPlan || null,
+    no_chase_boundary: alert.no_chase_boundary || tradePlan.no_chase_boundary || null,
+    anchored_levels: alert.anchored_levels || tradePlan.anchored_levels || null,
+    time_horizon: alert.time_horizon || null,
+    order_flow_signals: alert.order_flow_signals || null,
   }
 }

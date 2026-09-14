@@ -7,9 +7,7 @@ and Multi-Channel Alert Routing (UI, Telegram, Desktop).
 
 from __future__ import annotations
 
-import json
-from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi.testclient import TestClient
@@ -20,7 +18,7 @@ from engine.alert_preferences import (
     AlertPreferencesManager,
     classify_alert_segment,
 )
-from engine.auto_alert_engine import AutoAlert, AutoAlertEngine, auto_alert_engine
+from engine.auto_alert_engine import AutoAlert, AutoAlertEngine
 
 
 def test_classify_alert_segment():
@@ -30,13 +28,19 @@ def test_classify_alert_segment():
     assert classify_alert_segment({"symbol": "MCX:GOLD", "exchange": "MCX"}) == "COMMODITY"
     assert classify_alert_segment({"symbol": "SILVER", "exchange": "MCX"}) == "COMMODITY"
     assert classify_alert_segment({"symbol": "NATURALGAS"}) == "COMMODITY"
-    assert classify_alert_segment({"alert_type": "COMMODITY_MOMENTUM", "symbol": "COPPER"}) == "COMMODITY"
+    assert (
+        classify_alert_segment({"alert_type": "COMMODITY_MOMENTUM", "symbol": "COPPER"})
+        == "COMMODITY"
+    )
 
     # 2. Currency (CDS)
     assert classify_alert_segment({"symbol": "USDINR", "exchange": "CDS"}) == "CURRENCY"
     assert classify_alert_segment({"symbol": "CDS:EURINR", "exchange": "CDS"}) == "CURRENCY"
     assert classify_alert_segment({"symbol": "GBPINR"}) == "CURRENCY"
-    assert classify_alert_segment({"alert_type": "CURRENCY_BREAKOUT", "symbol": "USDINR"}) == "CURRENCY"
+    assert (
+        classify_alert_segment({"alert_type": "CURRENCY_BREAKOUT", "symbol": "USDINR"})
+        == "CURRENCY"
+    )
 
     # 3. F&O / Derivatives — Index vs Stock
     assert classify_alert_segment({"symbol": "NIFTY", "exchange": "NSE"}) == "FNO_INDEX"
@@ -45,10 +49,19 @@ def test_classify_alert_segment():
     assert classify_alert_segment({"symbol": "MIDCPNIFTY", "segment": "INDEX"}) == "FNO_INDEX"
     assert classify_alert_segment({"symbol": "SENSEX", "exchange": "BSE"}) == "FNO_INDEX"
 
-    assert classify_alert_segment({"symbol": "RELIANCE", "contract_symbol": "RELIANCE26SEPFUT"}) == "FNO_STOCK"
-    assert classify_alert_segment({"symbol": "INFY", "option_type": "CE", "strike": 1900.0}) == "FNO_STOCK"
+    assert (
+        classify_alert_segment({"symbol": "RELIANCE", "contract_symbol": "RELIANCE26SEPFUT"})
+        == "FNO_STOCK"
+    )
+    assert (
+        classify_alert_segment({"symbol": "INFY", "option_type": "CE", "strike": 1900.0})
+        == "FNO_STOCK"
+    )
     assert classify_alert_segment({"alert_type": "GAMMA_BLAST", "symbol": "TCS"}) == "FNO_STOCK"
-    assert classify_alert_segment({"alert_type": "OPTIONS_MOMENTUM", "symbol": "HDFCBANK"}) == "FNO_STOCK"
+    assert (
+        classify_alert_segment({"alert_type": "OPTIONS_MOMENTUM", "symbol": "HDFCBANK"})
+        == "FNO_STOCK"
+    )
 
     # 4. Cash Equity
     assert classify_alert_segment({"symbol": "TATASTEEL", "exchange": "NSE"}) == "EQUITY"
@@ -132,13 +145,15 @@ def test_alert_preferences_manager(tmp_path):
     assert mgr.is_segment_allowed("COMMODITY", "telegram") is True
 
     # Configure Telegram to ONLY allow FNO_INDEX (Silencing Stock F&O, Equity, Commodity)
-    mgr.update_preferences({
-        "telegram": {
-            "enabled": True,
-            "allowed_segments": ["FNO_INDEX"],
-            "min_confidence": 80,
+    mgr.update_preferences(
+        {
+            "telegram": {
+                "enabled": True,
+                "allowed_segments": ["FNO_INDEX"],
+                "min_confidence": 80,
+            }
         }
-    })
+    )
 
     assert mgr.is_segment_allowed("FNO_INDEX", "telegram") is True
     assert mgr.is_segment_allowed("FNO_STOCK", "telegram") is False
@@ -148,7 +163,12 @@ def test_alert_preferences_manager(tmp_path):
 
     # Check alert gating
     index_alert = {"symbol": "NIFTY", "option_type": "CE", "confidence": 85, "stage": "IGNITED"}
-    stock_alert = {"symbol": "RELIANCE", "contract_symbol": "RELIANCE26SEPFUT", "confidence": 90, "stage": "IGNITED"}
+    stock_alert = {
+        "symbol": "RELIANCE",
+        "contract_symbol": "RELIANCE26SEPFUT",
+        "confidence": 90,
+        "stage": "IGNITED",
+    }
     comm_alert = {"symbol": "CRUDEOIL", "exchange": "MCX", "confidence": 95, "stage": "IGNITED"}
 
     # Index FNO is allowed on both UI and Telegram
@@ -164,12 +184,14 @@ def test_alert_preferences_manager(tmp_path):
     assert mgr.is_alert_allowed(comm_alert, "telegram") is False
 
     # Check legacy FNO alias update
-    mgr.update_preferences({
-        "allowed_segments": ["FNO", "EQUITY"],
-        "ui": {"allowed_segments": ["FNO", "EQUITY"]},
-        "desktop": {"allowed_segments": ["FNO", "EQUITY"]},
-        "telegram": {"allowed_segments": ["FNO", "EQUITY"]},
-    })
+    mgr.update_preferences(
+        {
+            "allowed_segments": ["FNO", "EQUITY"],
+            "ui": {"allowed_segments": ["FNO", "EQUITY"]},
+            "desktop": {"allowed_segments": ["FNO", "EQUITY"]},
+            "telegram": {"allowed_segments": ["FNO", "EQUITY"]},
+        }
+    )
     # Legacy "FNO" expands to both FNO_INDEX and FNO_STOCK
     assert mgr.is_segment_allowed("FNO_INDEX", "telegram") is True
     assert mgr.is_segment_allowed("FNO_STOCK", "telegram") is True
@@ -183,17 +205,19 @@ def test_auto_alert_engine_dispatch_routing(monkeypatch, tmp_path):
 
     # Direct preferences to tmp file
     monkeypatch.setattr(alert_preferences, "_pref_file", tmp_path / "prefs.json")
-    alert_preferences.update_preferences({
-        "telegram": {
-            "enabled": True,
-            "allowed_segments": ["FNO_INDEX"],  # Only Index FNO permitted on Telegram
-            "min_confidence": 80,
-        },
-        "ui": {
-            "enabled": True,
-            "allowed_segments": ["FNO_INDEX", "FNO_STOCK", "COMMODITY"],
+    alert_preferences.update_preferences(
+        {
+            "telegram": {
+                "enabled": True,
+                "allowed_segments": ["FNO_INDEX"],  # Only Index FNO permitted on Telegram
+                "min_confidence": 80,
+            },
+            "ui": {
+                "enabled": True,
+                "allowed_segments": ["FNO_INDEX", "FNO_STOCK", "COMMODITY"],
+            },
         }
-    })
+    )
 
     tg_sent = []
 
@@ -293,7 +317,7 @@ def test_api_alert_preferences_endpoints():
             "enabled": True,
             "allowed_segments": ["FNO_INDEX"],
             "min_confidence": 85,
-        }
+        },
     }
     res_post = client.post("/api/alerts/preferences", json=update_payload)
     assert res_post.status_code == 200
@@ -348,7 +372,6 @@ async def test_telegram_cmd_filter(monkeypatch):
 def test_fno_telegram_destination_routing(monkeypatch):
     """Verify that F&O Index alerts route to TELEGRAM_FNO_INDEX_CHAT_ID and F&O Stock alerts route to TELEGRAM_FNO_CHAT_ID."""
     from bot.telegram_bot import get_telegram_destinations
-    from engine.alert_preferences import alert_preferences
     from engine.auto_alert_engine import AutoAlert, AutoAlertEngine
 
     monkeypatch.setenv("TELEGRAM_FNO_INDEX_CHAT_ID", "-1004380788314")
@@ -424,7 +447,6 @@ def test_fno_telegram_destination_routing(monkeypatch):
 def test_mcx_commodity_currency_telegram_destination_routing(monkeypatch):
     """Verify that MCX, Commodity, and Currency alerts route to Premium_Alpha_Vortex_MCX_Channel (-1004320002599)."""
     from bot.telegram_bot import get_telegram_destinations
-    from engine.alert_preferences import alert_preferences
     from engine.auto_alert_engine import AutoAlert, AutoAlertEngine
 
     monkeypatch.setattr("engine.alerts._is_market_hours", lambda exch: True)
@@ -538,7 +560,6 @@ def test_mcx_commodity_currency_telegram_destination_routing(monkeypatch):
 def test_equity_telegram_destination_routing(monkeypatch):
     """Verify that Cash Equity alerts route to Premium_Alpha_Vortex_Equity_Channel (-1003524867091)."""
     from bot.telegram_bot import get_telegram_destinations
-    from engine.alert_preferences import alert_preferences
     from engine.auto_alert_engine import AutoAlert, AutoAlertEngine
 
     monkeypatch.setattr("engine.alerts._is_market_hours", lambda exch: True)
@@ -602,4 +623,3 @@ def test_equity_telegram_destination_routing(monkeypatch):
     engine._dispatch(eq_alert_2)
     assert len(sent_calls) == 2
     assert sent_calls[1][1] == "-1007777777777"
-

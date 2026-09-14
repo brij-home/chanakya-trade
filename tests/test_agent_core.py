@@ -234,7 +234,9 @@ class TestOpenAIProvider:
             assert p.is_pool_available() is False
 
             # Attempting chat must fast-fail with RuntimeError and ZERO calls to openai client
-            with pytest.raises(RuntimeError, match="Rate limit cooldown active across all pooled API keys"):
+            with pytest.raises(
+                RuntimeError, match="Rate limit cooldown active across all pooled API keys"
+            ):
                 p.chat(messages=[{"role": "user", "content": "hello"}], stream=False)
 
             # Verify no chat completions were dispatched over the network
@@ -490,4 +492,3 @@ class TestKeyPoolThreadSafety:
             futures = [executor.submit(worker, i) for i in range(8)]
             for f in futures:
                 f.result()
-

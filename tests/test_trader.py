@@ -219,10 +219,10 @@ class TestParseSynthesisVerdict:
 
 class TestLotSizes:
     def test_nifty_lot(self):
-        assert LOT_SIZES["NIFTY"] == 75
+        assert LOT_SIZES["NIFTY"] == 65
 
     def test_banknifty_lot(self):
-        assert LOT_SIZES["BANKNIFTY"] == 15
+        assert LOT_SIZES["BANKNIFTY"] == 30
 
     def test_reliance_has_lot(self):
         assert "RELIANCE" in LOT_SIZES

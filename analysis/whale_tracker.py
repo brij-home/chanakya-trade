@@ -201,12 +201,23 @@ def get_whale_flows(
     min_deal_cr: float = 0.0,
 ) -> dict[str, Any]:
     """Return filtered whale transactions and marquee investor profiles with dynamic LTP enrichment."""
+    # Ingest dynamic live/cached deals from market.whale_feed
+    all_deals = list(CURATED_WHALE_DEALS)
+    try:
+        from market.whale_feed import fetch_nse_bulk_block_deals
+
+        dyn_deals = fetch_nse_bulk_block_deals()
+        for d in dyn_deals:
+            all_deals.append(d.to_dict())
+    except Exception:
+        pass
+
     # Attempt dynamic quote enrichment for whale symbols
     live_quotes: dict[str, float] = {}
     try:
         from market.quotes import get_quote
 
-        needed_symbols = list({f"NSE:{d['symbol']}" for d in CURATED_WHALE_DEALS if "symbol" in d})
+        needed_symbols = list({f"NSE:{d['symbol']}" for d in all_deals if "symbol" in d})
         quotes_dict = get_quote(needed_symbols)
         for sym_key, q in quotes_dict.items():
             if q and getattr(q, "last_price", 0) > 0:
@@ -218,12 +229,12 @@ def get_whale_flows(
     filtered_deals = []
     total_capital_cr = 0.0
 
-    for deal in CURATED_WHALE_DEALS:
-        if investor_filter and investor_filter.lower() not in deal["investor_name"].lower():
+    for deal in all_deals:
+        if investor_filter and investor_filter.lower() not in deal.get("investor_name", "").lower():
             continue
-        if sector_filter and sector_filter.lower() not in deal["sector"].lower():
+        if sector_filter and sector_filter.lower() not in deal.get("sector", "").lower():
             continue
-        if deal["deal_value_cr"] < min_deal_cr:
+        if deal.get("deal_value_cr", 0.0) < min_deal_cr:
             continue
 
         deal_copy = dict(deal)
