@@ -78,6 +78,8 @@ dependencies = [
 [project.optional-dependencies]
 vollib = ["py_vollib>=1.0.1"]
 shoonya = ["websocket-client>=1.8.0"]
+# High-speed parallel analytics for high-frequency tick and order-book data
+quant = ["polars>=1.0.0"]
 # Vertex AI is only needed for a Google Cloud / Workspace deployment. The
 # standard Gemini API uses google-genai above, so keeping this opt-in makes the
 # personal-pilot bootstrap materially faster and lighter.

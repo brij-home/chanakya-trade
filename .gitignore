@@ -82,6 +82,8 @@ package-lock.json
 uvicorn_*.log
 uvicorn_err.log
 uvicorn_out.log
+uvicorn.log
+uvicorn.err
 
 # ── Generated docs (regenerate with: node docs/generate_*.js) ─
 docs/*.pdf

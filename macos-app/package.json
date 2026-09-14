@@ -11,6 +11,8 @@
     "build": "electron-vite build && electron-builder --mac",
     "preview": "electron-vite preview",
     "lint:hooks": "node scripts/audit-react-hooks.js",
+    "lint:biome": "biome lint src --diagnostic-level=error",
+    "format": "biome format --write src",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:ui": "vitest --ui",
@@ -19,6 +21,7 @@
   },
   "dependencies": {
     "lightweight-charts": "^5.2.1",
+    "lucide-react": "^1.45.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "zustand": "^5.0.15"
@@ -26,19 +29,20 @@
   "devDependencies": {
     "@babel/parser": "^7.29.8",
     "@babel/traverse": "^7.29.8",
-    "@testing-library/jest-dom": "^6.9.1",
+    "@biomejs/biome": "^2.5.13",
+    "@testing-library/jest-dom": "^7.0.1",
     "@testing-library/react": "^16.3.3",
     "@vitejs/plugin-react": "^4.7.0",
-    "@vitest/ui": "^3.2.7",
-    "autoprefixer": "^10.4.27",
-    "electron": "^44.1.0",
-    "electron-builder": "^26.8.1",
+    "@vitest/ui": "^5.0.0",
+    "autoprefixer": "^10.6.0",
+    "electron": "^44.3.0",
+    "electron-builder": "^26.16.1",
     "electron-vite": "^5.0.0",
-    "jsdom": "^25.0.1",
-    "postcss": "^8.5.14",
+    "jsdom": "^29.1.1",
+    "postcss": "^8.5.28",
     "tailwindcss": "^3.4.19",
     "typescript": "^5.9.3",
-    "vitest": "^3.2.7"
+    "vitest": "^5.0.0"
   },
   "overrides": {
     "browserslist": ">=4.28.8",
