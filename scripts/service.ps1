@@ -103,16 +103,18 @@ if (-not $SkipBuildWeb -and (Test-Path "$FrontendDir\package.json")) {
     }
 }
 
-# 2. Launch FastAPI backend completely detached from parent Job Object via WMI
+# 2. Launch FastAPI backend completely detached from parent Job Object via WMI (ShowWindow = 0: no black terminal)
 $backendOut = Join-Path $LogDir "backend.log"
 $backendErr = Join-Path $LogDir "backend_err.log"
 
-Write-Host "[*] Launching detached FastAPI Sidecar on http://${ApiHost}:${ApiPort} ..." -ForegroundColor Cyan
+Write-Host "[*] Launching completely hidden background FastAPI Sidecar on http://${ApiHost}:${ApiPort} ..." -ForegroundColor Cyan
+$startupClass = [wmiclass]"Win32_ProcessStartup"
+$startupInfo = $startupClass.CreateInstance()
+$startupInfo.ShowWindow = 0  # SW_HIDE (0): guarantees zero black console window
+
+$processClass = [wmiclass]"Win32_Process"
 $backendCmd = "cmd.exe /c `"`"$PythonExe`" -m uvicorn web.api:app --host $ApiHost --port $ApiPort > `"$backendOut`" 2> `"$backendErr`"`""
-$bRes = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{
-    CommandLine = $backendCmd
-    CurrentDirectory = $RootDir
-}
+$bRes = $processClass.Create($backendCmd, $RootDir, $startupInfo)
 $backendPid = $bRes.ProcessId
 
 # 3. Launch Frontend (if requested)
@@ -121,12 +123,9 @@ if (-not $NoFrontend -and (Test-Path $FrontendDir)) {
     $frontendOut = Join-Path $LogDir "frontend.log"
     $frontendErr = Join-Path $LogDir "frontend_err.log"
 
-    Write-Host "[*] Launching detached Vite Dev Server on http://localhost:$VitePort ..." -ForegroundColor Cyan
+    Write-Host "[*] Launching completely hidden background Vite Dev Server on http://localhost:$VitePort ..." -ForegroundColor Cyan
     $frontendCmd = "cmd.exe /c `"npm.cmd run dev:renderer > `"$frontendOut`" 2> `"$frontendErr`"`""
-    $fRes = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{
-        CommandLine = $frontendCmd
-        CurrentDirectory = $FrontendDir
-    }
+    $fRes = $processClass.Create($frontendCmd, $FrontendDir, $startupInfo)
     $frontendPid = $fRes.ProcessId
 }
 

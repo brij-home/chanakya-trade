@@ -15,7 +15,8 @@ try {
             $_.ProcessId -ne $currentPid -and (
                 (($_.Name -match "python|pytest|uvicorn|electron") -and
                  ($_.CommandLine -match "chanakya-trade" -or $_.CommandLine -match "pytest" -or $_.CommandLine -match "uvicorn" -or $_.CommandLine -match "validate_all" -or $_.CommandLine -match "exec\(eval")) -or
-                (($_.Name -match "node|electron") -and ($_.CommandLine -match "electron-vite|macos-app"))
+                (($_.Name -match "node|electron") -and ($_.CommandLine -match "electron-vite|macos-app")) -or
+                (($_.Name -match "cmd\.exe") -and ($_.CommandLine -match "uvicorn" -or $_.CommandLine -match "dev:renderer" -or $_.CommandLine -match "macos-app"))
             )
         }
 
