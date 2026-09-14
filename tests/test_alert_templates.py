@@ -572,9 +572,10 @@ def test_minimalist_alert_hierarchy_and_deduplication():
     assert idx_action < idx_reason, "Action must appear before Reason"
     assert idx_sl < idx_reason, "Stop Loss must appear before Reason"
 
-    # 3. Compact line count <= 12 lines
+    # 3. Compact line count <= 12 lines (or 13 if late session 15:15-15:30 closing warning is active)
     lines = [l for l in rendered.split("\n") if l.strip()]
-    assert len(lines) <= 12, f"Alert exceeded 12 lines: {len(lines)} lines"
+    max_lines = 13 if "Market closes in" in rendered else 12
+    assert len(lines) <= max_lines, f"Alert exceeded {max_lines} lines: {len(lines)} lines"
 
 
 def test_resolve_expiry_cycle_all_scenarios():

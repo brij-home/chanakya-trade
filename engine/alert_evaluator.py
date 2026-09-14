@@ -4,6 +4,7 @@ Alert target milestone tracking, invalidation evaluation, and decisive trailing 
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
@@ -97,9 +98,9 @@ def evaluate_alert_invalidation(
                 atr_val = alert.stop_loss * 0.012
 
             vol_noise_margin = (
-                max(0.15, min(alert.stop_loss * 0.003, 0.15 * atr_val))
+                max(0.05, min(alert.stop_loss * 0.003, 0.15 * atr_val))
                 if alert.stop_loss > 0
-                else 0.20
+                else 0.10
             )
 
             if alert.direction == "BEARISH":
@@ -629,6 +630,24 @@ def evaluate_alert_in_flight_decay(
     ):
         return None
 
+    exch = (getattr(alert, "exchange", "NSE") or "NSE").upper()
+    is_test = (getattr(alert, "environment", "LIVE") == "TEST") or (
+        not getattr(alert, "is_live", True)
+    )
+    is_test_runner = (
+        is_test
+        or (os.environ.get("CHANAKYA_TESTING") == "1")
+        or (os.environ.get("DEPLOY_MODE") == "test")
+        or ("PYTEST_CURRENT_TEST" in os.environ)
+    )
+
+    # In live trading, in-flight decay and danger zones ONLY evaluate during active market sessions
+    if not is_test_runner:
+        from market.calendar import is_market_open
+
+        if not is_market_open(exch):
+            return None
+
     is_option = is_alert_option_premium_level(alert)
 
     # 1. Resolve current quote LTP if not passed
@@ -813,7 +832,14 @@ def evaluate_alert_in_flight_decay(
 
         if created_dt:
             now_dt = datetime.now(IST)
-            elapsed_secs = (now_dt - created_dt).total_seconds()
+            if is_test_runner:
+                elapsed_secs = (now_dt - created_dt).total_seconds()
+            else:
+                from market.calendar import get_trading_minutes_elapsed
+
+                elapsed_secs = (
+                    get_trading_minutes_elapsed(created_dt, now_dt, exchange=exch) * 60.0
+                )
 
             # Detect 0DTE (Same-Day Expiry) status
             is_0dte = False

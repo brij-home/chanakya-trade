@@ -49,9 +49,9 @@ def detect_gamma_blast(
         "SENSEX",
         "BANKEX",
     )
-    min_strike_oi = 15000 if is_index else 500
-    min_abs_oi_change = 3000 if is_index else 150
-    min_volume = 10000 if is_index else 500
+    from engine.position_sizer import get_lot_size
+
+    lot_sz = get_lot_size(underlying) or 1
 
     ce_contracts = [c for c in chain if getattr(c, "option_type", "") == "CE"]
     pe_contracts = [c for c in chain if getattr(c, "option_type", "") == "PE"]
@@ -71,7 +71,24 @@ def detect_gamma_blast(
         opt_ltp = getattr(c, "last_price", 0.0)
         contract_sym = getattr(c, "symbol", f"{underlying}{int(strike)}CE")
 
-        if oi < min_strike_oi or volume < min_volume or abs(oi_change) < min_abs_oi_change:
+        if not is_index and lot_sz > 1:
+            c_oi = (oi / lot_sz) if oi > lot_sz * 2.5 else oi
+            c_vol = (volume / lot_sz) if volume > lot_sz * 2.5 else volume
+            c_oi_chg = (
+                (abs(oi_change) / lot_sz) if abs(oi_change) > lot_sz * 2.5 else abs(oi_change)
+            )
+            min_strike_oi = 50
+            min_abs_oi_change = 10
+            min_volume = 25
+        else:
+            c_oi = oi
+            c_vol = volume
+            c_oi_chg = abs(oi_change)
+            min_strike_oi = 15000
+            min_abs_oi_change = 3000
+            min_volume = 10000
+
+        if c_oi < min_strike_oi or c_vol < min_volume or c_oi_chg < min_abs_oi_change:
             continue
 
         exp_date = getattr(c, "expiry", "") or None
@@ -129,7 +146,10 @@ def detect_gamma_blast(
                     has_active_blast=is_ignited,
                 )
 
-                if tp and not tp.is_asymmetry_viable and not is_ignited:
+                if tp and not tp.is_asymmetry_viable:
+                    logger.debug(
+                        f"[GammaBlast] Rejected {contract_sym}: Poor structural asymmetry ({tp.asymmetry_verdict})"
+                    )
                     continue
 
                 mkt_status = get_market_status("NFO")
@@ -282,7 +302,24 @@ def detect_gamma_blast(
         opt_ltp = getattr(c, "last_price", 0.0)
         contract_sym = getattr(c, "symbol", f"{underlying}{int(strike)}PE")
 
-        if oi < min_strike_oi or volume < min_volume or abs(oi_change) < min_abs_oi_change:
+        if not is_index and lot_sz > 1:
+            c_oi = (oi / lot_sz) if oi > lot_sz * 2.5 else oi
+            c_vol = (volume / lot_sz) if volume > lot_sz * 2.5 else volume
+            c_oi_chg = (
+                (abs(oi_change) / lot_sz) if abs(oi_change) > lot_sz * 2.5 else abs(oi_change)
+            )
+            min_strike_oi = 50
+            min_abs_oi_change = 10
+            min_volume = 25
+        else:
+            c_oi = oi
+            c_vol = volume
+            c_oi_chg = abs(oi_change)
+            min_strike_oi = 15000
+            min_abs_oi_change = 3000
+            min_volume = 10000
+
+        if c_oi < min_strike_oi or c_vol < min_volume or c_oi_chg < min_abs_oi_change:
             continue
 
         exp_date = getattr(c, "expiry", "") or None
@@ -340,7 +377,10 @@ def detect_gamma_blast(
                     has_active_blast=is_ignited,
                 )
 
-                if tp and not tp.is_asymmetry_viable and not is_ignited:
+                if tp and not tp.is_asymmetry_viable:
+                    logger.debug(
+                        f"[GammaBlast] Rejected {contract_sym}: Poor structural asymmetry ({tp.asymmetry_verdict})"
+                    )
                     continue
 
                 mkt_status = get_market_status("NFO")

@@ -145,30 +145,14 @@ class Alert:
 def _is_market_hours(exchange: str = "NSE") -> bool:
     """
     Returns True only during active trading hours for the given exchange:
-      - NSE / BSE / NFO: Mon–Fri, 09:15–15:30 IST.
-      - CDS (Currency Derivatives): Mon–Fri, 09:00–17:00 IST.
-      - MCX (Commodities): Mon–Fri, 09:00–23:30 IST (or 23:55 in winter).
-    Prevents alerts firing on stale prices outside market hours.
+      - NSE / BSE / NFO: Mon–Fri, 09:15–15:30 IST (closed on trading holidays).
+      - CDS (Currency Derivatives): Mon–Fri, 09:00–17:00 IST (closed on holidays).
+      - MCX (Commodities): Mon–Fri, 09:00–23:30 IST (17:00–23:30 on evening-only holidays).
+    Prevents alerts firing on stale prices outside market hours or on market holidays.
     """
-    from datetime import timezone, timedelta
+    from market.calendar import is_market_open
 
-    IST = timezone(timedelta(hours=5, minutes=30))
-    now = datetime.now(IST)
-    if now.weekday() >= 5:  # Saturday=5, Sunday=6
-        return False
-
-    exch = (exchange or "NSE").upper()
-    if exch == "MCX":
-        market_open = now.replace(hour=9, minute=0, second=0, microsecond=0)
-        market_close = now.replace(hour=23, minute=30, second=0, microsecond=0)
-    elif exch in ("CDS", "CURRENCY"):
-        market_open = now.replace(hour=9, minute=0, second=0, microsecond=0)
-        market_close = now.replace(hour=17, minute=0, second=0, microsecond=0)
-    else:  # NSE, BSE, NFO, default
-        market_open = now.replace(hour=9, minute=15, second=0, microsecond=0)
-        market_close = now.replace(hour=15, minute=30, second=0, microsecond=0)
-
-    return market_open <= now <= market_close
+    return is_market_open(exchange)
 
 
 class AlertManager:

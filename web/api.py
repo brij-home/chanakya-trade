@@ -2959,13 +2959,11 @@ async def send_alert_to_telegram(payload: dict):
     if not target:
         raise HTTPException(status_code=404, detail=f"Alert {alert_id} not found")
 
-    # Determine if market is live (09:15–15:30 IST weekdays)
-    IST = timezone(timedelta(hours=5, minutes=30))
-    now = datetime.now(IST)
-    is_weekday = now.weekday() < 5
-    market_open = now.replace(hour=9, minute=15, second=0, microsecond=0)
-    market_close = now.replace(hour=15, minute=30, second=0, microsecond=0)
-    in_market = is_weekday and market_open <= now <= market_close
+    # Determine if market is live (09:15–15:30 IST weekdays, closed on holidays)
+    from market.calendar import is_market_open
+
+    now = datetime.now(timezone(timedelta(hours=5, minutes=30)))
+    in_market = is_market_open("NSE", ref_dt=now)
 
     try:
         rendered_msg = render_auto_alert(target, in_market=in_market)

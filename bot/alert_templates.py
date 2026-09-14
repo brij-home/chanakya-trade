@@ -1899,13 +1899,13 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
         friday_warn = actionable_plan.get("friday_weekend_warning")
         warn_str = f"\n• {friday_warn}" if friday_warn else ""
 
-        # Late session clock warning (post 15:15 IST)
+        # Late session clock warning (post 15:15 IST until 15:30 close)
         now_dt = datetime.now(IST)
         session_clock_warn = ""
         if (
             in_market
             and getattr(alert, "exchange", "NSE") in ("NSE", "BSE", "NFO")
-            and (now_dt.hour == 15 and now_dt.minute >= 15)
+            and (now_dt.hour == 15 and 15 <= now_dt.minute < 30)
         ):
             mins_left = max(1, 30 - now_dt.minute)
             session_clock_warn = f"\n• ⚠️ <i>Market closes in {mins_left}m. Intraday MIS closed — Overnight Hold (NRML) or Next-Session Gameplan.</i>"

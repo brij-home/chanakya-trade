@@ -109,10 +109,12 @@ def get_expiry_dates() -> ExpiryDates:
         nm2, ny2 = monthly.month + 1, monthly.year
     next_monthly = _last_thursday(ny2, nm2)
 
+    from market.calendar import get_adjusted_expiry_date
+
     return ExpiryDates(
-        weekly=weekly,
-        monthly=monthly,
-        next_monthly=next_monthly,
+        weekly=get_adjusted_expiry_date(weekly, "NFO"),
+        monthly=get_adjusted_expiry_date(monthly, "NFO"),
+        next_monthly=get_adjusted_expiry_date(next_monthly, "NFO"),
     )
 
 

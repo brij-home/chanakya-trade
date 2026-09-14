@@ -47,9 +47,12 @@ def detect_learned_pattern_coiling(
         if res.is_explosive_candidate:
             now_iso = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
 
+            import pandas as pd
             from engine.trade_plan import calculate_trade_plan
 
-            tp = calculate_trade_plan(symbol, direction="BULLISH", spot=ltp, exchange=exchange)
+            tp = calculate_trade_plan(
+                symbol, direction="BULLISH", spot=ltp, exchange=exchange, df=df
+            )
 
             # Mathematical Expectancy Gate: Reject candidates with poor structural asymmetry
             if tp and not tp.is_asymmetry_viable:
@@ -71,28 +74,52 @@ def detect_learned_pattern_coiling(
             )
             summary = f"Pre-blast footprint match: {factor_summary}. Asymmetric coiling detected with minimum risk anchor."
 
-            t1 = tp.target_1 if (tp and tp.target_1 > 0) else round(ltp * 1.05, 1)
-            sl = (
-                tp.invalidation_stop if (tp and tp.invalidation_stop > 0) else round(ltp * 0.985, 1)
-            )
+            if tp and tp.is_asymmetry_viable and tp.target_1 > ltp and tp.invalidation_stop < ltp:
+                t1 = tp.target_1
+                sl = tp.invalidation_stop
+                rr_str = f"1:{tp.rr_t1}"
+                tp_dict = tp.as_dict()
+            else:
+                atr20 = ltp * 0.015
+                if df is not None and len(df) >= 14:
+                    try:
+                        h = df["high"] if "high" in df.columns else df["High"]
+                        l = df["low"] if "low" in df.columns else df["Low"]
+                        c = df["close"] if "close" in df.columns else df["Close"]
+                        tr = pd.concat(
+                            [h - l, (h - c.shift(1)).abs(), (l - c.shift(1)).abs()], axis=1
+                        ).max(axis=1)
+                        atr20 = float(tr.rolling(14).mean().iloc[-1])
+                    except Exception:
+                        pass
+                risk_pts = max(1.0, round(max(0.8 * atr20, ltp * 0.015), 2))
+                sl = round(ltp - risk_pts, 2)
+                t1 = round(ltp + 2.5 * risk_pts, 2)
+                rr_str = "1:2.5"
+                tp_dict = None
 
             # Volatility Noise Floor: Ensure stop-loss is not placed within intraday noise chop
-            # Minimum buffer: at least 1.2% of price or 1.2x ATR
             min_sl_dist = round(max(ltp * 0.012, 1.0), 2)
             if (ltp - sl) < min_sl_dist:
                 sl = round(ltp - min_sl_dist, 2)
 
-            rr_str = f"{tp.rr_t1:.1f}:1" if tp else "3.0:1"
+            tick_offset = max(0.05, min(0.5, round(ltp * 0.001, 2)))
+            e_min = round(max(sl + tick_offset, ltp * 0.998), 1)
+            e_max = round(min(t1 - tick_offset, ltp * 1.005), 1)
+            if e_min >= e_max:
+                e_min = round(ltp * 0.998, 1)
+                e_max = round(ltp * 1.005, 1)
+            entry_rg = f"₹{e_min:,.1f} – ₹{e_max:,.1f}"
 
             act_plan = {
                 "action": res.recommended_entry_action,
-                "entry_range": f"₹{ltp:.1f}",
+                "entry_range": entry_rg,
                 "target": f"₹{t1:.1f}",
                 "stop_loss": f"₹{sl:.1f}",
                 "risk_reward": rr_str,
             }
-            if tp:
-                act_plan["trade_plan"] = tp.as_dict()
+            if tp_dict:
+                act_plan["trade_plan"] = tp_dict
 
             return AutoAlert(
                 alert_id=f"aa-coiling-{symbol}-{uuid.uuid4().hex[:6]}",

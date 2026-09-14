@@ -228,8 +228,21 @@ class AlertScrutinyAuditor:
                 f"Unfavorable Risk:Reward ratio (1:{rr_ratio:.2f} < 1:{req_rr:.1f})",
                 flags,
             )
-
         flags["rr_valid"] = True
+
+        # 4b. Underlying Trade Plan Asymmetry Sanity Check
+        plan = getattr(alert, "actionable_plan", {}) or {}
+        tp_dict = plan.get("trade_plan") if isinstance(plan, dict) else None
+        if isinstance(tp_dict, dict):
+            if tp_dict.get("is_asymmetry_viable") is False or str(
+                tp_dict.get("asymmetry_verdict", "")
+            ).upper() == "POOR_ASYMMETRY_REJECTED":
+                flags["rr_valid"] = False
+                return (
+                    False,
+                    f"Sanity Veto: Underlying trade plan rejected for poor asymmetry ({tp_dict.get('asymmetry_note') or 'Unfavorable structural R:R'})",
+                    flags,
+                )
 
         # 5. Strict "No Chase" Gate
         # Disqualify if price has already blown past trigger by >2.5% without retest
@@ -401,6 +414,234 @@ class AlertScrutinyAuditor:
                     f"MTF Confluence Failure: 5m Bearish trigger conflicting with 15m structural markup ({mtf_upper})",
                     flags,
                 )
+
+        # 11. Institutional Liquidity & Bid-Ask Spread Gate:
+        # Wide-spread instruments trigger immediate execution drag and slippage hazard
+        bid_val = None
+        ask_val = None
+        if isinstance(metrics_dict, dict):
+            bid_val = metrics_dict.get("bid") or metrics_dict.get("best_bid")
+            ask_val = metrics_dict.get("ask") or metrics_dict.get("best_ask")
+        if bid_val is None and hasattr(alert, "bid"):
+            bid_val = getattr(alert, "bid", None)
+        if ask_val is None and hasattr(alert, "ask"):
+            ask_val = getattr(alert, "ask", None)
+
+        if bid_val is not None and ask_val is not None:
+            try:
+                b = float(bid_val)
+                a = float(ask_val)
+                if a > b > 0 and ltp > 0:
+                    spread_pct = (a - b) / ltp
+                    max_spread = (
+                        0.06
+                        if (is_option_premium_levels or atype in ("OPTIONS_MOMENTUM", "GAMMA_BLAST"))
+                        else 0.015
+                    )
+                    if spread_pct > max_spread:
+                        flags["spread_valid"] = False
+                        return (
+                            False,
+                            f"Slippage Hazard Veto: Bid-Ask Spread ({spread_pct * 100:.2f}%) exceeds institutional threshold ({max_spread * 100:.1f}%) [Bid: Rs.{b:,.2f}, Ask: Rs.{a:,.2f}]",
+                            flags,
+                        )
+            except (ValueError, TypeError):
+                pass
+        flags["spread_valid"] = True
+
+        # 12. Stock Option Illiquidity Gate:
+        # Single-stock options frequently suffer from dry order books and wide bid-ask slippage.
+        # Enforce intelligent, time-aware liquidity thresholds and unit normalization:
+        if is_option_premium_levels or atype in ("OPTIONS_MOMENTUM", "GAMMA_BLAST"):
+            is_index_option = clean_sym in (
+                "NIFTY",
+                "BANKNIFTY",
+                "FINNIFTY",
+                "MIDCPNIFTY",
+                "SENSEX",
+                "BANKEX",
+            )
+            exch_str = str(
+                getattr(alert, "exchange", "")
+                or (alert.get("exchange") if isinstance(alert, dict) else "")
+            ).upper()
+            seg_str = str(
+                getattr(alert, "segment", "")
+                or (alert.get("segment") if isinstance(alert, dict) else "")
+            ).upper()
+            is_commodity_or_currency = exch_str in ("MCX", "CDS") or seg_str in (
+                "COMMODITY",
+                "CURRENCY",
+            )
+
+            if not is_index_option and not is_commodity_or_currency:
+                opt_oi = None
+                opt_vol = None
+                if isinstance(metrics_dict, dict):
+                    opt_oi = metrics_dict.get("oi") or metrics_dict.get("open_interest")
+                    opt_vol = metrics_dict.get("volume") or metrics_dict.get("vol")
+                if opt_oi is None and hasattr(alert, "oi"):
+                    opt_oi = getattr(alert, "oi", None)
+                if opt_vol is None and hasattr(alert, "volume"):
+                    opt_vol = getattr(alert, "volume", None)
+
+                try:
+                    # Resolve contract lot size to distinguish contracts vs shares
+                    lot_sz = getattr(alert, "lot_size", None)
+                    if not lot_sz or lot_sz <= 0:
+                        try:
+                            from engine.position_sizer import get_lot_size
+
+                            lot_sz = get_lot_size(clean_sym)
+                        except Exception:
+                            lot_sz = 1
+                    lot_sz = lot_sz or 1
+
+                    # 1. Normalize OI to contracts
+                    contracts_oi = None
+                    if opt_oi is not None:
+                        oi_f = float(opt_oi)
+                        # If OI exceeds 2.5x lot size and lot size > 1, it was reported in shares
+                        contracts_oi = (
+                            (oi_f / lot_sz) if (lot_sz > 1 and oi_f > (lot_sz * 2.5)) else oi_f
+                        )
+                        if contracts_oi < 50:
+                            flags["liquidity_valid"] = False
+                            return (
+                                False,
+                                f"Stock Option Illiquidity Trap: Strike Open Interest ({contracts_oi:,.0f}) < 50 contracts (Severe liquidity risk)",
+                                flags,
+                            )
+
+                    # 2. Time-Aware Volume Floor
+                    if opt_vol is not None:
+                        vol_f = float(opt_vol)
+                        contracts_vol = (
+                            (vol_f / lot_sz) if (lot_sz > 1 and vol_f > (lot_sz * 2.5)) else vol_f
+                        )
+
+                        # Determine session time
+                        alert_dt = None
+                        raw_ts = (
+                            getattr(alert, "created_at", None)
+                            or getattr(alert, "timestamp", None)
+                            or (
+                                alert.get("created_at") or alert.get("timestamp")
+                                if isinstance(alert, dict)
+                                else None
+                            )
+                        )
+                        if raw_ts:
+                            try:
+                                if isinstance(raw_ts, datetime):
+                                    alert_dt = raw_ts
+                                elif isinstance(raw_ts, str):
+                                    clean_ts = raw_ts.replace(" IST", "").strip()
+                                    try:
+                                        alert_dt = datetime.strptime(clean_ts, "%Y-%m-%d %H:%M:%S")
+                                    except ValueError:
+                                        alert_dt = datetime.fromisoformat(
+                                            clean_ts.replace("Z", "+00:00")
+                                        )
+                            except Exception:
+                                pass
+                        if not alert_dt:
+                            from market.calendar import IST
+
+                            alert_dt = datetime.now(IST)
+                        elif alert_dt.tzinfo is None:
+                            from market.calendar import IST
+
+                            alert_dt = alert_dt.replace(tzinfo=IST)
+                        else:
+                            from market.calendar import IST
+
+                            alert_dt = alert_dt.astimezone(IST)
+
+                        curr_t = alert_dt.time()
+                        from datetime import time as dtime
+
+                        # Dynamic volume ramp-up thresholds:
+                        # 09:15 - 09:45 IST: market opening 30 mins, volume accumulating (min 15 contracts)
+                        # 09:45 - 10:30 IST: morning trend formation (min 30 contracts)
+                        # 10:30+ IST: standard session institutional baseline (min 50 contracts)
+                        if curr_t < dtime(9, 45):
+                            min_vol = 15
+                        elif curr_t < dtime(10, 30):
+                            min_vol = 30
+                        else:
+                            min_vol = 50
+
+                        if contracts_vol < min_vol:
+                            flags["liquidity_valid"] = False
+                            return (
+                                False,
+                                f"Stock Option Illiquidity Trap: Strike Daily Volume ({contracts_vol:,.0f}) < {min_vol} contracts (Illiquid execution trap)",
+                                flags,
+                            )
+                except (ValueError, TypeError):
+                    pass
+        flags["liquidity_valid"] = True
+
+        # 13. Midday Lunch Lull RVOL Expansion Filter (11:30 - 13:00 IST):
+        # Breakouts attempted during midday lull without institutional volume frequently collapse into fakeouts.
+        if atype in ("SQUEEZE_BREAKOUT", "BREAKOUT", "INTRADAY_MOVER_IGNITED", "VOLUME_EXPANSION"):
+            alert_dt = None
+            raw_ts = (
+                getattr(alert, "created_at", None)
+                or getattr(alert, "timestamp", None)
+                or (alert.get("created_at") or alert.get("timestamp") if isinstance(alert, dict) else None)
+            )
+            if raw_ts:
+                try:
+                    if isinstance(raw_ts, datetime):
+                        alert_dt = raw_ts
+                    elif isinstance(raw_ts, str):
+                        clean_ts = raw_ts.replace(" IST", "").strip()
+                        try:
+                            alert_dt = datetime.strptime(clean_ts, "%Y-%m-%d %H:%M:%S")
+                        except ValueError:
+                            alert_dt = datetime.fromisoformat(clean_ts.replace("Z", "+00:00"))
+                except Exception:
+                    pass
+            if not alert_dt:
+                from market.calendar import IST
+
+                alert_dt = datetime.now(IST)
+            elif alert_dt.tzinfo is None:
+                from market.calendar import IST
+
+                alert_dt = alert_dt.replace(tzinfo=IST)
+            else:
+                from market.calendar import IST
+
+                alert_dt = alert_dt.astimezone(IST)
+
+            curr_time = alert_dt.time()
+            from datetime import time as dtime
+            if dtime(11, 30) <= curr_time <= dtime(13, 0):
+                rvol = None
+                if isinstance(metrics_dict, dict):
+                    rvol = (
+                        metrics_dict.get("rvol")
+                        or metrics_dict.get("rvol_20d")
+                        or metrics_dict.get("volume_ratio")
+                    )
+                if rvol is None and hasattr(alert, "rvol"):
+                    rvol = getattr(alert, "rvol", None)
+                if rvol is not None:
+                    try:
+                        rvol_f = float(rvol)
+                        if rvol_f > 0 and rvol_f < 1.8:
+                            flags["midday_rvol_valid"] = False
+                            return (
+                                False,
+                                f"Midday False Breakout Trap: Breakout attempted during lunch lull (11:30-13:00 IST) with low relative volume (RVOL {rvol_f:.2f}x < 1.8x). Mandate institutional volume expansion.",
+                                flags,
+                            )
+                    except (ValueError, TypeError):
+                        pass
+        flags["midday_rvol_valid"] = True
 
         return True, "", flags
 
@@ -722,6 +963,19 @@ Respond STRICTLY in valid JSON matching this schema:
             score += 5
 
         score = min(92, max(75, score))
+
+        # Respect mathematical sanity flag vetoes in quant fallback
+        if not flags.get("rr_valid", True):
+            return ScrutinyResult(
+                status="REJECTED",
+                score=35,
+                logic_confirmation="Mathematical asymmetry gate rejected setup.",
+                trap_risk_warning="Unfavorable risk-to-reward asymmetry or negative structural expectancy.",
+                actionable_guidance="Skip execution. Structural asymmetry threshold not met.",
+                sanctity_matrix=flags,
+                rejection_reason="Unfavorable Risk:Reward ratio or failed trade plan asymmetry.",
+                auditor_model="QUANT_FALLBACK",
+            )
 
         # ── Commodity Quant Fallback ──────────────────────────────────────────
         if alert_type == "COMMODITY_MOMENTUM":

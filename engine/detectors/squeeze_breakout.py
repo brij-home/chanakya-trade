@@ -76,13 +76,45 @@ def detect_squeeze_breakout(
 
         # ── EARLY WARNING (BULLISH): Coiled in squeeze, 0.2% - 1.5% below pivot high ───
         if is_squeeze_on and (0.2 <= dist_to_pivot_pct <= 1.5):
-            target = round(pivot_high * 1.06, 1)
-            sl = round(sma20, 1)
+            tp = None
+            try:
+                from engine.trade_plan import calculate_trade_plan
+
+                tp = calculate_trade_plan(
+                    symbol=symbol,
+                    direction="BUY",
+                    spot=ltp,
+                    timeframe="INTRADAY",
+                    exchange=exchange,
+                    df=df,
+                )
+            except Exception as e_tp:
+                logger.debug(f"[SqueezeBreakout] Trade plan calculation failed for {symbol}: {e_tp}")
+
+            if tp and tp.is_asymmetry_viable and tp.target_1 > ltp and tp.invalidation_stop < ltp:
+                target = tp.target_1
+                target_2 = tp.target_2
+                sl = tp.invalidation_stop
+                rr_str = f"1:{tp.rr_t1}"
+                tp_dict = tp.as_dict()
+            else:
+                risk_pts = max(1.0, round(max(0.8 * atr20, (ltp - sma20) if ltp > sma20 else (ltp * 0.015)), 1))
+                sl = round(ltp - risk_pts, 1)
+                target = round(max(pivot_high + 1.2 * risk_pts, ltp + 2.0 * risk_pts), 1)
+                target_2 = round(target + 1.5 * risk_pts, 1)
+                rr_str = f"1:{round((target - ltp) / risk_pts, 1)}"
+                tp_dict = None
+
             conf = 72
             conf += min(10, int(rvol * 4))
             conf += 5 if dist_to_pivot_pct <= 0.7 else 0
             conf += 5 if ltp > sma20 else 0
             confidence_val = min(90, max(72, conf))
+
+            entry_min = round(max(sl + 0.5, ltp * 0.998), 1)
+            entry_max = round(min(target - 0.5, pivot_high * 1.002), 1)
+            entry_rg = f"₹{entry_min:,.1f} – ₹{entry_max:,.1f}"
+
             return AutoAlert(
                 alert_id=f"aa-sqz-early-{symbol}-{uuid.uuid4().hex[:6]}",
                 alert_type="SQUEEZE_BREAKOUT",
@@ -110,10 +142,13 @@ def detect_squeeze_breakout(
                 },
                 actionable_plan={
                     "action": "BUY_ON_PIVOT",
-                    "entry_range": f"₹{ltp:.1f} - ₹{pivot_high:.1f}",
+                    "entry_range": entry_rg,
                     "breakout_trigger": f"₹{pivot_high:.1f}",
-                    "target": f"₹{target:.1f} (+6.0%)",
-                    "stop_loss": f"₹{sl:.1f} (-{round(((ltp - sl) / ltp) * 100, 1)}%)",
+                    "target": f"₹{target:.1f}",
+                    "target_2": f"₹{target_2:.1f}",
+                    "stop_loss": f"₹{sl:.1f}",
+                    "risk_reward": rr_str,
+                    "trade_plan": tp_dict,
                 },
                 confidence=confidence_val,
                 created_at=now_iso,
@@ -121,13 +156,45 @@ def detect_squeeze_breakout(
 
         # ── EARLY WARNING (BEARISH): Coiled in squeeze, 0.2% - 1.5% above pivot low support ───
         if is_squeeze_on and (0.2 <= dist_to_low_pct <= 1.5):
-            target = round(pivot_low * 0.94, 1)
-            sl = round(sma20, 1)
+            tp = None
+            try:
+                from engine.trade_plan import calculate_trade_plan
+
+                tp = calculate_trade_plan(
+                    symbol=symbol,
+                    direction="SELL",
+                    spot=ltp,
+                    timeframe="INTRADAY",
+                    exchange=exchange,
+                    df=df,
+                )
+            except Exception as e_tp:
+                logger.debug(f"[SqueezeBreakout] Trade plan calculation failed for {symbol}: {e_tp}")
+
+            if tp and tp.is_asymmetry_viable and tp.target_1 < ltp and tp.invalidation_stop > ltp:
+                target = tp.target_1
+                target_2 = tp.target_2
+                sl = tp.invalidation_stop
+                rr_str = f"1:{tp.rr_t1}"
+                tp_dict = tp.as_dict()
+            else:
+                risk_pts = max(1.0, round(max(0.8 * atr20, (sma20 - ltp) if sma20 > ltp else (ltp * 0.015)), 1))
+                sl = round(ltp + risk_pts, 1)
+                target = round(min(pivot_low - 1.2 * risk_pts, ltp - 2.0 * risk_pts), 1)
+                target_2 = round(target - 1.5 * risk_pts, 1)
+                rr_str = f"1:{round((ltp - target) / risk_pts, 1)}"
+                tp_dict = None
+
             conf_be = 72
             conf_be += min(10, int(rvol * 5))
             conf_be += 5 if dist_to_low_pct <= 0.7 else 0
             conf_be += 5 if ltp < sma20 else 0
             confidence_bear_ew = min(90, max(72, conf_be))
+
+            entry_max = round(min(sl - 0.5, ltp * 1.002), 1)
+            entry_min = round(max(target + 0.5, pivot_low * 0.998), 1)
+            entry_rg = f"₹{entry_min:,.1f} – ₹{entry_max:,.1f}"
+
             return AutoAlert(
                 alert_id=f"aa-sqz-bear-early-{symbol}-{uuid.uuid4().hex[:6]}",
                 alert_type="SQUEEZE_BREAKDOWN",
@@ -155,10 +222,13 @@ def detect_squeeze_breakout(
                 },
                 actionable_plan={
                     "action": "SELL_ON_BREAKDOWN",
-                    "entry_range": f"₹{pivot_low:.1f} - ₹{ltp:.1f}",
+                    "entry_range": entry_rg,
                     "breakout_trigger": f"₹{pivot_low:.1f}",
-                    "target": f"₹{target:.1f} (-6.0%)",
-                    "stop_loss": f"₹{sl:.1f} (+{round(((sl - ltp) / ltp) * 100, 1)}%)",
+                    "target": f"₹{target:.1f}",
+                    "target_2": f"₹{target_2:.1f}",
+                    "stop_loss": f"₹{sl:.1f}",
+                    "risk_reward": rr_str,
+                    "trade_plan": tp_dict,
                 },
                 confidence=confidence_bear_ew,
                 created_at=now_iso,
@@ -171,12 +241,45 @@ def detect_squeeze_breakout(
             and rvol >= 1.4
             and ltp > sma20
         ):
-            target = round(ltp * 1.08, 1)
-            sl = round(pivot_high * 0.985, 1)
+            tp = None
+            try:
+                from engine.trade_plan import calculate_trade_plan
+
+                tp = calculate_trade_plan(
+                    symbol=symbol,
+                    direction="BUY",
+                    spot=ltp,
+                    timeframe="INTRADAY",
+                    exchange=exchange,
+                    has_active_blast=True,
+                    df=df,
+                )
+            except Exception as e_tp:
+                logger.debug(f"[SqueezeBreakout] Trade plan calculation failed for {symbol}: {e_tp}")
+
+            if tp and tp.is_asymmetry_viable and tp.target_1 > ltp and tp.invalidation_stop < ltp:
+                target = tp.target_1
+                target_2 = tp.target_2
+                sl = tp.invalidation_stop
+                rr_str = f"1:{tp.rr_t1}"
+                tp_dict = tp.as_dict()
+            else:
+                risk_pts = max(1.0, round(max(0.8 * atr20, ltp - pivot_high * 0.985), 1))
+                sl = round(ltp - risk_pts, 1)
+                target = round(ltp + 2.5 * risk_pts, 1)
+                target_2 = round(ltp + 4.0 * risk_pts, 1)
+                rr_str = f"1:{round((target - ltp) / risk_pts, 1)}"
+                tp_dict = None
+
             conf_ig = 82
             conf_ig += min(8, int(rvol * 4))
             conf_ig += 5 if (ltp - pivot_high) / pivot_high <= 0.01 else 0
             confidence_ignited = min(95, max(82, conf_ig))
+
+            entry_min = round(max(sl + 0.5, ltp * 0.998), 1)
+            entry_max = round(min(target - 0.5, ltp * 1.008), 1)
+            entry_rg = f"₹{entry_min:,.1f} – ₹{entry_max:,.1f}"
+
             return AutoAlert(
                 alert_id=f"aa-sqz-ignited-{symbol}-{uuid.uuid4().hex[:6]}",
                 alert_type="SQUEEZE_BREAKOUT",
@@ -202,9 +305,12 @@ def detect_squeeze_breakout(
                 },
                 actionable_plan={
                     "action": "BUY_EXPANSION",
-                    "entry_range": f"₹{ltp:.1f}",
-                    "target": f"₹{target:.1f} (+8.0%)",
-                    "stop_loss": f"₹{sl:.1f} (-1.5%)",
+                    "entry_range": entry_rg,
+                    "target": f"₹{target:.1f}",
+                    "target_2": f"₹{target_2:.1f}",
+                    "stop_loss": f"₹{sl:.1f}",
+                    "risk_reward": rr_str,
+                    "trade_plan": tp_dict,
                 },
                 confidence=confidence_ignited,
                 created_at=now_iso,
@@ -217,12 +323,45 @@ def detect_squeeze_breakout(
             and rvol >= 1.4
             and ltp < sma20
         ):
-            target = round(ltp * 0.92, 1)
-            sl = round(pivot_low * 1.015, 1)
+            tp = None
+            try:
+                from engine.trade_plan import calculate_trade_plan
+
+                tp = calculate_trade_plan(
+                    symbol=symbol,
+                    direction="SELL",
+                    spot=ltp,
+                    timeframe="INTRADAY",
+                    exchange=exchange,
+                    has_active_blast=True,
+                    df=df,
+                )
+            except Exception as e_tp:
+                logger.debug(f"[SqueezeBreakout] Trade plan calculation failed for {symbol}: {e_tp}")
+
+            if tp and tp.is_asymmetry_viable and tp.target_1 < ltp and tp.invalidation_stop > ltp:
+                target = tp.target_1
+                target_2 = tp.target_2
+                sl = tp.invalidation_stop
+                rr_str = f"1:{tp.rr_t1}"
+                tp_dict = tp.as_dict()
+            else:
+                risk_pts = max(1.0, round(max(0.8 * atr20, pivot_low * 1.015 - ltp), 1))
+                sl = round(ltp + risk_pts, 1)
+                target = round(ltp - 2.5 * risk_pts, 1)
+                target_2 = round(ltp - 4.0 * risk_pts, 1)
+                rr_str = f"1:{round((ltp - target) / risk_pts, 1)}"
+                tp_dict = None
+
             conf_big = 82
             conf_big += min(8, int(rvol * 4))
             conf_big += 5 if (pivot_low - ltp) / pivot_low <= 0.01 else 0
             confidence_bear_ig = min(95, max(82, conf_big))
+
+            entry_max = round(min(sl - 0.5, ltp * 1.002), 1)
+            entry_min = round(max(target + 0.5, ltp * 0.992), 1)
+            entry_rg = f"₹{entry_min:,.1f} – ₹{entry_max:,.1f}"
+
             return AutoAlert(
                 alert_id=f"aa-sqz-bear-ignited-{symbol}-{uuid.uuid4().hex[:6]}",
                 alert_type="SQUEEZE_BREAKDOWN",
@@ -248,9 +387,12 @@ def detect_squeeze_breakout(
                 },
                 actionable_plan={
                     "action": "SELL_EXPANSION",
-                    "entry_range": f"₹{ltp:.1f}",
-                    "target": f"₹{target:.1f} (-8.0%)",
-                    "stop_loss": f"₹{sl:.1f} (+1.5%)",
+                    "entry_range": entry_rg,
+                    "target": f"₹{target:.1f}",
+                    "target_2": f"₹{target_2:.1f}",
+                    "stop_loss": f"₹{sl:.1f}",
+                    "risk_reward": rr_str,
+                    "trade_plan": tp_dict,
                 },
                 confidence=confidence_bear_ig,
                 created_at=now_iso,

@@ -199,6 +199,7 @@ def calculate_trade_plan(
     timeframe: str = "INTRADAY",
     exchange: str = "NSE",
     has_active_blast: bool = False,
+    df: Optional[pd.DataFrame] = None,
 ) -> TradePlan:
     """
     Generate an institutional, 100% data-driven trade plan with real invalidation,
@@ -228,13 +229,13 @@ def calculate_trade_plan(
         ltp = 23500.0 if "NIFTY" in clean_sym else 1000.0
 
     # ── 2. Fetch Historical OHLCV & Compute Realized ATR ───────────────────────
-    df = None
     atr = 0.0
     try:
-        from market.history import get_ohlcv
+        if df is None or len(df) < 5:
+            from market.history import get_ohlcv
 
-        df = get_ohlcv(clean_sym, days=30, interval="day")
-        if df is not None and len(df) >= 10:
+            df = get_ohlcv(clean_sym, days=30, interval="day")
+        if df is not None and len(df) >= 5:
             # 14-period ATR
             high = df["High"] if "High" in df.columns else df["high"]
             low = df["Low"] if "Low" in df.columns else df["low"]
@@ -621,22 +622,32 @@ def calculate_trade_plan(
             f"Invalid short geometry: Stop distance ({stop_distance_pts:,.1f} pts) exceeds asset value ({ltp:,.1f}), "
             f"or target calculations fall below zero. Structurally unviable."
         )
-    elif rr_t2 >= 2.5 and rr_t1 >= 1.4:
+    elif rr_t2 >= 2.5 and (rr_t1 >= 1.2 or (has_active_blast and rr_t2 >= 2.0) or rr_t1 >= 0.8):
         is_asymmetry_viable = True
         asymmetry_verdict = "EXCELLENT_ASYMMETRY"
         asymmetry_note = f"High positive EV: Target 2 provides {rr_t2:.2f}:1 R:R with clean runway to {t2_rationale}."
-    elif rr_t2 >= 1.8 and rr_t1 >= 1.1:
+    elif (rr_t2 >= 1.8 and rr_t1 >= 1.1) or (has_active_blast and rr_t2 >= 1.8):
         is_asymmetry_viable = True
         asymmetry_verdict = "ACCEPTABLE"
-        asymmetry_note = f"Acceptable institutional expectancy ({rr_t2:.2f}:1 R:R to Target 2)."
+        asymmetry_note = (
+            f"Acceptable gamma blast expectancy ({rr_t2:.2f}:1 R:R to Target 2; T1 serves as immediate squeeze barrier)."
+            if has_active_blast
+            else f"Acceptable institutional expectancy ({rr_t2:.2f}:1 R:R to Target 2)."
+        )
     else:
         is_asymmetry_viable = False
         asymmetry_verdict = "POOR_ASYMMETRY_REJECTED"
-        asymmetry_note = (
-            f"Structural R:R ({rr_t2:.2f}:1) is below 1.8:1 threshold. "
-            f"Overhead resistance ({t1_rationale}) is too close to entry relative to required invalidation stop ({stop_distance_pts:,.1f} pts). "
-            f"Trade should be SKIPPED or taken via credit spreads only."
-        )
+        if rr_t2 < 1.8:
+            asymmetry_note = (
+                f"Structural R:R ({rr_t2:.2f}:1) is below 1.8:1 threshold. "
+                f"Overhead resistance ({t1_rationale}) is too close to entry relative to required invalidation stop ({stop_distance_pts:,.1f} pts). "
+                f"Trade should be SKIPPED or taken via credit spreads only."
+            )
+        else:
+            asymmetry_note = (
+                f"First target milestone R:R ({rr_t1:.2f}:1) provides insufficient cushion relative to required invalidation stop ({stop_distance_pts:,.1f} pts). "
+                f"Trade should be SKIPPED or taken via credit spreads only."
+            )
 
     # ── 8. Dynamic Velocity-Derived ETA Engine ─────────────────────────────────
     # In Indian markets, 1 trading day = 375 minutes (09:15 to 15:30 IST) = 75 five-minute bars
@@ -684,8 +695,8 @@ def calculate_trade_plan(
     session_overrun_risk = False
     session_clock_note = ""
 
-    # Check if inside active market hours (weekdays only)
-    is_market_hours = (open_min <= now_minute <= close_min) and now.weekday() not in (5, 6)
+    # Check if inside active market hours
+    is_market_hours = is_market_open("MCX" if is_mcx else "NSE")
     if is_market_hours:
         if eta_t1_minutes > remaining_session_mins:
             session_overrun_risk = True
@@ -701,8 +712,9 @@ def calculate_trade_plan(
         else:
             session_clock_note = f"✓ Ample Session Runway: {remaining_session_mins} mins remaining until 15:15 IST square-off."
     else:
+        mkt_st = get_market_status("MCX" if is_mcx else "NSE")
         session_clock_note = (
-            "🌙 Market Closed: ETA projections calibrated for the upcoming market session."
+            f"{mkt_st.get('label', '🌙 Market Closed')}: ETA projections calibrated for the upcoming market session."
         )
 
     # ── 9. Options Theta Drag & Structural Recommendation ─────────────────────
@@ -789,58 +801,21 @@ def calculate_trade_plan(
 def is_market_open(exchange: str = "NSE") -> bool:
     """
     Returns True only during active trading hours for the given exchange in IST.
-    NSE/BSE/NFO: Mon–Fri, 09:15–15:30 IST.
-    MCX: Mon–Fri, 09:00–23:30 IST.
-    CDS: Mon–Fri, 09:00–17:00 IST.
+    Respects trading holidays (Ganesh Chaturthi, Republic Day, etc.), weekends,
+    and exchange-specific operational windows.
     """
-    from datetime import timezone, timedelta as td
+    from market.calendar import is_market_open as _cal_is_market_open
 
-    IST = timezone(td(hours=5, minutes=30))
-    now_ist = datetime.now(IST)
-    if now_ist.weekday() >= 5:  # Sat=5, Sun=6
-        return False
-    exch = (exchange or "NSE").upper()
-    if exch == "MCX":
-        open_h, open_m, close_h, close_m = 9, 0, 23, 30
-    elif exch in ("CDS", "CURRENCY"):
-        open_h, open_m, close_h, close_m = 9, 0, 17, 0
-    else:  # NSE, BSE, NFO, default
-        open_h, open_m, close_h, close_m = 9, 15, 15, 30
-    market_open = now_ist.replace(hour=open_h, minute=open_m, second=0, microsecond=0)
-    market_close = now_ist.replace(hour=close_h, minute=close_m, second=0, microsecond=0)
-    return market_open <= now_ist <= market_close
+    return _cal_is_market_open(exchange)
 
 
 def get_market_status(exchange: str = "NSE") -> dict[str, Any]:
     """
     Returns current market session metadata for display in the UI.
     """
-    from datetime import timezone, timedelta as td
+    from market.calendar import get_market_status as _cal_get_market_status
 
-    IST = timezone(td(hours=5, minutes=30))
-    now_ist = datetime.now(IST)
-    live = is_market_open(exchange)
-    exch = (exchange or "NSE").upper()
-    if exch == "MCX":
-        close_h, close_m = 23, 30
-    elif exch in ("CDS", "CURRENCY"):
-        close_h, close_m = 17, 0
-    else:
-        close_h, close_m = 15, 30
-    close_min = close_h * 60 + close_m
-    now_min = now_ist.hour * 60 + now_ist.minute
-    is_weekend = now_ist.weekday() >= 5
-    is_pre_market = (not live) and (not is_weekend) and (now_min < 9 * 60 + 15)
-    remaining_mins = max(0, close_min - now_min) if live else 0
-    return {
-        "is_open": live,
-        "status": "LIVE" if live else ("PRE_MARKET" if is_pre_market else "SESSION_CLOSED"),
-        "label": "🟢 LIVE MARKET"
-        if live
-        else ("🌅 PRE-MARKET" if is_pre_market else "🌙 SESSION CLOSED"),
-        "remaining_session_mins": remaining_mins,
-        "as_of_ist": now_ist.strftime("%H:%M IST"),
-    }
+    return _cal_get_market_status(exchange)
 
 
 def calculate_option_execution_plan(

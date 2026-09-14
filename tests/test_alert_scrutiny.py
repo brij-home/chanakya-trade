@@ -445,3 +445,290 @@ def test_scrutiny_ttl_cache(auditor):
         assert res2.status == "APPROVED"
         assert res2.score == res1.score
         assert mock_llm2.call_count == 0
+
+
+def test_tier1_bid_ask_spread_slippage_rejection(auditor):
+    """Excessive bid-ask spread triggers institutional slippage veto."""
+    # Equity with 2.5% spread (threshold 1.5%)
+    alert_equity_wide = AutoAlert(
+        alert_id="test-spread-wide-eq",
+        alert_type="PRECURSOR_RADAR",
+        stage="EARLY_WARNING",
+        symbol="NSE:ILLIQUIDCO",
+        exchange="NSE",
+        direction="BULLISH",
+        headline="Illiquid Co Setup",
+        summary="Wide spread test",
+        ltp=1000.0,
+        trigger_level=1000.0,
+        stop_loss=980.0,
+        target_level=1060.0,
+        metrics={"bid": 980.0, "ask": 1005.0},  # Spread = 25 / 1000 = 2.5%
+        is_live=True,
+        environment="LIVE",
+    )
+    passed, reason, flags = auditor.verify_tier1_sanity(alert_equity_wide)
+    assert passed is False
+    assert "Slippage Hazard Veto" in reason
+    assert flags["spread_valid"] is False
+
+    # Equity with 0.4% tight spread passes
+    alert_equity_tight = AutoAlert(
+        alert_id="test-spread-tight-eq",
+        alert_type="PRECURSOR_RADAR",
+        stage="EARLY_WARNING",
+        symbol="NSE:RELIANCE",
+        exchange="NSE",
+        direction="BULLISH",
+        headline="Reliance Setup",
+        summary="Tight spread test",
+        ltp=1000.0,
+        trigger_level=1000.0,
+        stop_loss=980.0,
+        target_level=1060.0,
+        metrics={"bid": 998.0, "ask": 1002.0},  # Spread = 4 / 1000 = 0.4%
+        is_live=True,
+        environment="LIVE",
+    )
+    passed, reason, flags = auditor.verify_tier1_sanity(alert_equity_tight)
+    assert passed is True
+    assert flags["spread_valid"] is True
+
+
+def test_tier1_stock_option_illiquidity_rejection(auditor):
+    """Stock options with dry OI or low volume must be rejected to prevent execution traps."""
+    # Stock option with OI < 100
+    alert_low_oi = AutoAlert(
+        alert_id="test-opt-low-oi",
+        alert_type="OPTIONS_MOMENTUM",
+        stage="IGNITED",
+        symbol="NSE:TATACHEM",
+        exchange="NFO",
+        direction="BULLISH",
+        headline="Tata Chem Call Surge",
+        summary="Low OI test",
+        ltp=45.0,
+        trigger_level=45.0,
+        stop_loss=36.0,
+        target_level=65.0,
+        strike=1100.0,
+        option_type="CE",
+        metrics={"oi": 40, "volume": 150},
+        is_live=True,
+        environment="LIVE",
+    )
+    passed, reason, flags = auditor.verify_tier1_sanity(alert_low_oi)
+    assert passed is False
+    assert "Stock Option Illiquidity Trap" in reason
+    assert "Open Interest (40) < 50" in reason
+
+    # Stock option with Volume < 50
+    alert_low_vol = AutoAlert(
+        alert_id="test-opt-low-vol",
+        alert_type="OPTIONS_MOMENTUM",
+        stage="IGNITED",
+        symbol="NSE:TATACHEM",
+        exchange="NFO",
+        direction="BULLISH",
+        headline="Tata Chem Call Low Volume",
+        summary="Low volume test",
+        ltp=45.0,
+        trigger_level=45.0,
+        stop_loss=36.0,
+        target_level=65.0,
+        strike=1100.0,
+        option_type="CE",
+        metrics={"oi": 500, "volume": 25},
+        is_live=True,
+        environment="LIVE",
+    )
+    passed, reason, flags = auditor.verify_tier1_sanity(alert_low_vol)
+    assert passed is False
+    assert "Stock Option Illiquidity Trap" in reason
+    assert "Daily Volume (25) < 50" in reason
+
+    # Liquid stock option passes
+    alert_liquid_opt = AutoAlert(
+        alert_id="test-opt-liquid",
+        alert_type="OPTIONS_MOMENTUM",
+        stage="IGNITED",
+        symbol="NSE:TATACHEM",
+        exchange="NFO",
+        direction="BULLISH",
+        headline="Tata Chem Call Liquid",
+        summary="Liquid opt test",
+        ltp=45.0,
+        trigger_level=45.0,
+        stop_loss=36.0,
+        target_level=65.0,
+        strike=1100.0,
+        option_type="CE",
+        metrics={"oi": 2500, "volume": 850},
+        is_live=True,
+        environment="LIVE",
+    )
+    passed, reason, flags = auditor.verify_tier1_sanity(alert_liquid_opt)
+    assert passed is True
+    assert flags["liquidity_valid"] is True
+
+
+def test_tier1_midday_lunch_lull_rvol_rejection(auditor):
+    """Breakouts attempted during 11:30-13:00 IST without RVOL >= 1.8x are vetoed as false breakouts."""
+    from datetime import datetime
+    from market.calendar import IST
+
+    # 12:15 IST with low RVOL (1.2x) -> VETO
+    alert_midday_low_vol = AutoAlert(
+        alert_id="test-midday-low-vol",
+        alert_type="SQUEEZE_BREAKOUT",
+        stage="IGNITED",
+        symbol="NSE:INFY",
+        exchange="NSE",
+        direction="BULLISH",
+        headline="Infy Midday Breakout",
+        summary="Midday test",
+        ltp=1950.0,
+        trigger_level=1950.0,
+        stop_loss=1925.0,
+        target_level=2020.0,
+        created_at="2026-09-14 12:15:00 IST",
+        metrics={"rvol": 1.2},
+        is_live=True,
+        environment="LIVE",
+    )
+    passed, reason, flags = auditor.verify_tier1_sanity(alert_midday_low_vol)
+    assert passed is False
+    assert "Midday False Breakout Trap" in reason
+    assert flags["midday_rvol_valid"] is False
+
+    # 12:15 IST with institutional volume (2.5x) -> PASS
+    alert_midday_high_vol = AutoAlert(
+        alert_id="test-midday-high-vol",
+        alert_type="SQUEEZE_BREAKOUT",
+        stage="IGNITED",
+        symbol="NSE:INFY",
+        exchange="NSE",
+        direction="BULLISH",
+        headline="Infy Midday Breakout High Volume",
+        summary="Midday high volume test",
+        ltp=1950.0,
+        trigger_level=1950.0,
+        stop_loss=1925.0,
+        target_level=2020.0,
+        created_at="2026-09-14 12:15:00 IST",
+        metrics={"rvol": 2.5},
+        is_live=True,
+        environment="LIVE",
+    )
+    passed, reason, flags = auditor.verify_tier1_sanity(alert_midday_high_vol)
+    assert passed is True
+    assert flags["midday_rvol_valid"] is True
+
+    # 10:15 IST (morning rush) with RVOL 1.2x -> PASS
+    alert_morning = AutoAlert(
+        alert_id="test-morning-vol",
+        alert_type="SQUEEZE_BREAKOUT",
+        stage="IGNITED",
+        symbol="NSE:INFY",
+        exchange="NSE",
+        direction="BULLISH",
+        headline="Infy Morning Breakout",
+        summary="Morning test",
+        ltp=1950.0,
+        trigger_level=1950.0,
+        stop_loss=1925.0,
+        target_level=2020.0,
+        created_at="2026-09-14 10:15:00 IST",
+        metrics={"rvol": 1.2},
+        is_live=True,
+        environment="LIVE",
+    )
+    passed, reason, flags = auditor.verify_tier1_sanity(alert_morning)
+    assert passed is True
+    assert flags["midday_rvol_valid"] is True
+
+
+def test_tier1_stock_option_morning_ramp_up_volume(auditor):
+    """At 09:25 IST, 20 contracts volume passes morning ramp-up threshold (min 15)."""
+    alert_morning_opt = AutoAlert(
+        alert_id="test-opt-morning-ramp",
+        alert_type="OPTIONS_MOMENTUM",
+        stage="IGNITED",
+        symbol="NSE:TATACHEM",
+        exchange="NFO",
+        direction="BULLISH",
+        headline="Tata Chem Morning Call",
+        summary="Morning ramp-up test",
+        ltp=45.0,
+        trigger_level=45.0,
+        stop_loss=36.0,
+        target_level=65.0,
+        strike=1100.0,
+        option_type="CE",
+        created_at="2026-09-14 09:25:00 IST",
+        metrics={"oi": 1500, "volume": 20},
+        is_live=True,
+        environment="LIVE",
+    )
+    passed, reason, flags = auditor.verify_tier1_sanity(alert_morning_opt)
+    assert passed is True
+    assert flags["liquidity_valid"] is True
+
+
+def test_tier1_stock_option_shares_to_contracts_normalization(auditor):
+    """If OI is passed in shares (e.g. 25,000 shares for lot size 500 = 50 contracts), it is correctly rejected if < 100 contracts."""
+    alert_shares_oi = AutoAlert(
+        alert_id="test-opt-shares-norm",
+        alert_type="OPTIONS_MOMENTUM",
+        stage="IGNITED",
+        symbol="NSE:TATACHEM",
+        exchange="NFO",
+        direction="BULLISH",
+        headline="Tata Chem Shares Normalization",
+        summary="Shares normalization test",
+        ltp=45.0,
+        trigger_level=45.0,
+        stop_loss=36.0,
+        target_level=65.0,
+        strike=1100.0,
+        option_type="CE",
+        lot_size=500,
+        created_at="2026-09-14 11:00:00 IST",
+        # 15,000 shares / 500 = 30 contracts < 50 contracts -> VETO
+        metrics={"oi": 15000, "volume": 50000},
+        is_live=True,
+        environment="LIVE",
+    )
+    passed, reason, flags = auditor.verify_tier1_sanity(alert_shares_oi)
+    assert passed is False
+    assert "Stock Option Illiquidity Trap" in reason
+    assert "Open Interest (30) < 50" in reason
+
+
+def test_tier1_commodity_option_exemption_from_stock_gate(auditor):
+    """MCX Commodity options are exempt from equity single-stock options liquidity rules."""
+    alert_mcx_opt = AutoAlert(
+        alert_id="test-mcx-opt",
+        alert_type="OPTIONS_MOMENTUM",
+        stage="IGNITED",
+        symbol="MCX:CRUDEOIL",
+        exchange="MCX",
+        segment="COMMODITY",
+        direction="BULLISH",
+        headline="Crude Oil Call Surge",
+        summary="MCX test",
+        ltp=150.0,
+        trigger_level=150.0,
+        stop_loss=120.0,
+        target_level=220.0,
+        strike=6000.0,
+        option_type="CE",
+        metrics={"oi": 35, "volume": 18},
+        is_live=True,
+        environment="LIVE",
+    )
+    passed, reason, flags = auditor.verify_tier1_sanity(alert_mcx_opt)
+    assert passed is True
+    assert flags["liquidity_valid"] is True
+
+

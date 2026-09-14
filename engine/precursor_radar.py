@@ -536,21 +536,25 @@ class PrecursorRadarScanner:
             round(float(np.max(highs[-5:])), 2) if len(highs) >= 5 else round(ltp * 1.01, 2)
         )
         entry_low = round(ltp * 0.995, 2)
-        entry_high = round(pivot_high * 1.005, 2)
-        entry_range = f"₹{entry_low:,.1f} – ₹{entry_high:,.1f}"
+        entry_high = round(max(entry_low + 0.1, pivot_high * 1.002), 2)
 
-        # Calculate ATR-based Stop-Loss
+        # Calculate ATR/Swing-based Stop-Loss with price-band scaled floor
+        min_risk = round(max(0.10, ltp * 0.008), 2)
         sl_distance = (
             max(ltp * 0.015, (ltp - float(np.min(lows[-5:]))) * 1.05)
             if len(lows) >= 5
             else ltp * 0.02
         )
-        stop_loss = round(ltp - sl_distance, 2)
-        risk_pts = max(1.0, ltp - stop_loss)
+        stop_loss = round(ltp - max(min_risk, sl_distance), 2)
+        if stop_loss >= entry_low:
+            stop_loss = round(entry_low - min_risk, 2)
+        risk_pts = max(min_risk, round(ltp - stop_loss, 2))
 
-        target_1 = round(ltp + 1.5 * risk_pts, 2)
-        target_2 = round(ltp + 2.5 * risk_pts, 2)
+        target_1 = round(ltp + 2.0 * risk_pts, 2)
+        target_2 = round(ltp + 3.5 * risk_pts, 2)
         rr_str = f"1:{((target_1 - ltp) / risk_pts):.1f}"
+
+        entry_range = f"₹{entry_low:,.1f} – ₹{entry_high:,.1f}"
 
         verdict = "MAX_CONVICTION" if score >= 85 else "HIGH_CONVICTION"
 
