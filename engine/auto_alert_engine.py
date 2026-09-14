@@ -1091,8 +1091,8 @@ class AutoAlertEngine:
                     _telegram_notify(tg_msg)
             else:
                 _telegram_notify(tg_msg)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"[AutoAlertEngine] Telegram dispatch failed: {e}", exc_info=True)
 
         # 4. Terminal Notification (Rich Panel)
         try:

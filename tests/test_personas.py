@@ -725,11 +725,28 @@ class TestCouncilEnsembles:
     def test_all_council_presets_exist(self):
         from agent.persona_agent import COUNCIL_PRESETS
 
-        expected = {"breakout", "options_sniper", "multibagger", "macro_regime", "core_value"}
+        expected = {
+            "breakout",
+            "options_sniper",
+            "multibagger",
+            "macro_regime",
+            "core_value",
+            "commodity_macro",
+            "currency_macro",
+        }
         assert set(COUNCIL_PRESETS.keys()) == expected
 
     @pytest.mark.parametrize(
-        "council_name", ["breakout", "options_sniper", "multibagger", "macro_regime", "core_value"]
+        "council_name",
+        [
+            "breakout",
+            "options_sniper",
+            "multibagger",
+            "macro_regime",
+            "core_value",
+            "commodity_macro",
+            "currency_macro",
+        ],
     )
     def test_council_members_are_valid_personas(self, council_name: str):
         from agent.persona_agent import COUNCIL_PRESETS
