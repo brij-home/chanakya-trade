@@ -107,11 +107,7 @@ class MockBrokerAPI(BrokerAPI):
         from engine.greeks_manager import build_commodity_option_chain_synthetic
 
         clean_sym = (
-            underlying.upper()
-            .replace("MCX:", "")
-            .replace("CDS:", "")
-            .replace("NSE:", "")
-            .strip()
+            underlying.upper().replace("MCX:", "").replace("CDS:", "").replace("NSE:", "").strip()
         )
         if clean_sym in COMMODITY_SYMBOLS or underlying.upper().startswith("MCX:"):
             default_prices = {

@@ -10,7 +10,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Any, Optional
 
 from engine.alert_expiry import is_alert_option_premium_level
-from engine.alert_model import AutoAlert, INDEX_WEEKLY_EXPIRY_WEEKDAY
+from engine.alert_model import INDEX_WEEKLY_EXPIRY_WEEKDAY
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
@@ -213,7 +213,10 @@ def evaluate_alert_targets_and_trailing(
       2. Clear, decisive trailing stop recommendation: WHETHER TO TRAIL OR NOT.
       3. Exact price level to trail stop loss to and profit locked.
     """
-    if getattr(alert, "is_invalidated", False) or getattr(alert, "stage", "") in ("INVALIDATED", "COMPLETED"):
+    if getattr(alert, "is_invalidated", False) or getattr(alert, "stage", "") in (
+        "INVALIDATED",
+        "COMPLETED",
+    ):
         return None
 
     is_option = is_alert_option_premium_level(alert)
@@ -266,7 +269,11 @@ def evaluate_alert_targets_and_trailing(
                 if len(matches) >= 2:
                     try:
                         entry = round(
-                            (float(matches[0].replace(",", "")) + float(matches[1].replace(",", ""))) / 2.0,
+                            (
+                                float(matches[0].replace(",", ""))
+                                + float(matches[1].replace(",", ""))
+                            )
+                            / 2.0,
                             2,
                         )
                     except ValueError:
@@ -279,7 +286,11 @@ def evaluate_alert_targets_and_trailing(
         if not entry and getattr(alert, "option_premium", None) and alert.option_premium > 0:
             entry = alert.option_premium
         if not entry:
-            if alert.ltp and alert.ltp > 0 and (not getattr(alert, "strike", None) or alert.ltp != alert.strike):
+            if (
+                alert.ltp
+                and alert.ltp > 0
+                and (not getattr(alert, "strike", None) or alert.ltp != alert.strike)
+            ):
                 entry = alert.ltp
             elif alert.stop_loss and alert.stop_loss > 0:
                 entry = round(alert.stop_loss * 1.4, 2)
@@ -301,7 +312,11 @@ def evaluate_alert_targets_and_trailing(
                 if len(matches) >= 2:
                     try:
                         entry = round(
-                            (float(matches[0].replace(",", "")) + float(matches[1].replace(",", ""))) / 2.0,
+                            (
+                                float(matches[0].replace(",", ""))
+                                + float(matches[1].replace(",", ""))
+                            )
+                            / 2.0,
                             2,
                         )
                     except ValueError:
@@ -395,15 +410,15 @@ def evaluate_alert_targets_and_trailing(
             is_final_hit = False
             is_t1_hit = False
         else:
-            is_final_hit = (current_ltp >= target_final)
-            is_t1_hit = (current_ltp >= t1_level)
+            is_final_hit = current_ltp >= target_final
+            is_t1_hit = current_ltp >= t1_level
     else:
         if current_ltp >= entry or pnl_pts <= 0 or t1_level >= entry:
             is_final_hit = False
             is_t1_hit = False
         else:
-            is_final_hit = (current_ltp <= target_final)
-            is_t1_hit = (current_ltp <= t1_level)
+            is_final_hit = current_ltp <= target_final
+            is_t1_hit = current_ltp <= t1_level
 
     if is_final_hit and pnl_pts > 0 and "TARGET_ACHIEVED" not in achieved:
         if is_superperforming:
@@ -459,7 +474,13 @@ def evaluate_alert_targets_and_trailing(
             )
 
     # 2. Target 1 (T1) Check - Strictly requires positive PnL and genuine milestone achievement
-    if is_t1_hit and pnl_pts > 0 and r_multiple >= 0.5 and "T1_ACHIEVED" not in achieved and "TARGET_ACHIEVED" not in achieved:
+    if (
+        is_t1_hit
+        and pnl_pts > 0
+        and r_multiple >= 0.5
+        and "T1_ACHIEVED" not in achieved
+        and "TARGET_ACHIEVED" not in achieved
+    ):
         # T1 reached -> Book 50% & Trail SL to Breakeven (+0.2% buffer)
         be_stop = round(entry * 1.002 if is_bullish else entry * 0.998, 2)
         rec_stop = be_stop
@@ -483,7 +504,6 @@ def evaluate_alert_targets_and_trailing(
             pnl_pct=round(pnl_pct, 2),
             is_superperforming=is_superperforming,
         )
-
 
     # 3. Trailing Stop Ratchet Higher (Dynamic Trail)
     if (
@@ -603,7 +623,8 @@ def evaluate_alert_in_flight_decay(
         getattr(alert, "is_invalidated", False)
         or getattr(alert, "stage", "") in ("INVALIDATED", "COMPLETED", "IN_FLIGHT_WARNING")
         or getattr(alert, "in_flight_warning_sent", False)
-        or getattr(alert, "target_status", "") in ("T1_ACHIEVED", "FINAL_ACHIEVED", "TARGET_ACHIEVED")
+        or getattr(alert, "target_status", "")
+        in ("T1_ACHIEVED", "FINAL_ACHIEVED", "TARGET_ACHIEVED")
         or "T1_ACHIEVED" in (getattr(alert, "achieved_milestones", []) or [])
     ):
         return None
@@ -614,6 +635,7 @@ def evaluate_alert_in_flight_decay(
     if current_ltp is None or current_ltp <= 0:
         try:
             from market.quotes import get_ltp
+
             if is_option:
                 lookup_sym = getattr(alert, "contract_symbol", None) or (
                     f"{alert.exchange}:{alert.symbol}" if ":" not in alert.symbol else alert.symbol
@@ -629,7 +651,9 @@ def evaluate_alert_in_flight_decay(
     if current_ltp is None or current_ltp <= 0:
         return None
 
-    is_test = (getattr(alert, "environment", "LIVE") == "TEST") or (not getattr(alert, "is_live", True))
+    is_test = (getattr(alert, "environment", "LIVE") == "TEST") or (
+        not getattr(alert, "is_live", True)
+    )
     env_tag = "[TEST]" if is_test else "[REAL/LIVE]"
 
     # 2. Extract Entry Price
@@ -646,7 +670,10 @@ def evaluate_alert_in_flight_decay(
             m_ent = re.findall(r"[\d,]+(?:\.\d+)?", str(plan["recommended_entry"]))
             if len(m_ent) >= 2:
                 try:
-                    entry = round((float(m_ent[0].replace(",", "")) + float(m_ent[1].replace(",", ""))) / 2.0, 2)
+                    entry = round(
+                        (float(m_ent[0].replace(",", "")) + float(m_ent[1].replace(",", ""))) / 2.0,
+                        2,
+                    )
                 except ValueError:
                     pass
             elif len(m_ent) == 1:
@@ -689,28 +716,40 @@ def evaluate_alert_in_flight_decay(
         pnl_pct = (pnl_pts / entry) * 100 if entry > 0 else 0.0
         risk_consumed_pts = entry - current_ltp
         risk_consumed_pct = (risk_consumed_pts / initial_risk) * 100 if initial_risk > 0 else 0.0
-        dist_to_sl_pct = ((current_ltp - stop) / current_ltp) * 100 if (stop and current_ltp > 0) else 999.0
+        dist_to_sl_pct = (
+            ((current_ltp - stop) / current_ltp) * 100 if (stop and current_ltp > 0) else 999.0
+        )
     elif is_option_sell:
         initial_risk = max(0.1, (stop - entry)) if stop and stop > entry else max(0.1, entry * 0.35)
         pnl_pts = entry - current_ltp
         pnl_pct = (pnl_pts / entry) * 100 if entry > 0 else 0.0
         risk_consumed_pts = current_ltp - entry
         risk_consumed_pct = (risk_consumed_pts / initial_risk) * 100 if initial_risk > 0 else 0.0
-        dist_to_sl_pct = ((stop - current_ltp) / current_ltp) * 100 if (stop and current_ltp > 0) else 999.0
+        dist_to_sl_pct = (
+            ((stop - current_ltp) / current_ltp) * 100 if (stop and current_ltp > 0) else 999.0
+        )
     elif is_bullish:
-        initial_risk = max(0.01, (entry - stop)) if stop and entry > stop else max(0.01, entry * 0.02)
+        initial_risk = (
+            max(0.01, (entry - stop)) if stop and entry > stop else max(0.01, entry * 0.02)
+        )
         pnl_pts = current_ltp - entry
         pnl_pct = (pnl_pts / entry) * 100 if entry > 0 else 0.0
         risk_consumed_pts = entry - current_ltp
         risk_consumed_pct = (risk_consumed_pts / initial_risk) * 100 if initial_risk > 0 else 0.0
-        dist_to_sl_pct = ((current_ltp - stop) / current_ltp) * 100 if (stop and current_ltp > 0) else 999.0
+        dist_to_sl_pct = (
+            ((current_ltp - stop) / current_ltp) * 100 if (stop and current_ltp > 0) else 999.0
+        )
     else:
-        initial_risk = max(0.01, (stop - entry)) if stop and stop > entry else max(0.01, entry * 0.02)
+        initial_risk = (
+            max(0.01, (stop - entry)) if stop and stop > entry else max(0.01, entry * 0.02)
+        )
         pnl_pts = entry - current_ltp
         pnl_pct = (pnl_pts / entry) * 100 if entry > 0 else 0.0
         risk_consumed_pts = current_ltp - entry
         risk_consumed_pct = (risk_consumed_pts / initial_risk) * 100 if initial_risk > 0 else 0.0
-        dist_to_sl_pct = ((stop - current_ltp) / current_ltp) * 100 if (stop and current_ltp > 0) else 999.0
+        dist_to_sl_pct = (
+            ((stop - current_ltp) / current_ltp) * 100 if (stop and current_ltp > 0) else 999.0
+        )
 
     # 5. Trigger A: Danger Zone Warning (>= 70% Risk Consumed OR within 1.5% of SL)
     # INVARIANT: Danger Zone STRICTLY applies to positions in an active LOSS.
@@ -720,7 +759,9 @@ def evaluate_alert_in_flight_decay(
 
     if stop and is_in_loss and not is_profitable:
         # Trigger if >= 70% of risk budget is eroded, OR if within 1.5% of SL with >= 50% risk consumed
-        is_danger = (risk_consumed_pct >= 70.0) or ((0.0 < dist_to_sl_pct <= 1.5) and (risk_consumed_pct >= 50.0))
+        is_danger = (risk_consumed_pct >= 70.0) or (
+            (0.0 < dist_to_sl_pct <= 1.5) and (risk_consumed_pct >= 50.0)
+        )
         if is_danger:
             eff_consumed = max(50.0, min(99.0, risk_consumed_pct))
             headline = f"⚠️ {env_tag} IN-FLIGHT WARNING: {alert.symbol} (Danger Zone: {eff_consumed:.0f}% Risk Consumed)"
@@ -748,16 +789,21 @@ def evaluate_alert_in_flight_decay(
         is_option
         or getattr(alert, "option_type", None)
         or getattr(alert, "contract_symbol", None)
-        or getattr(alert, "alert_type", "") in ("OPTIONS_MOMENTUM", "GAMMA_BLAST", "OPTIONS_MOMENTUM_BREAKOUT")
+        or getattr(alert, "alert_type", "")
+        in ("OPTIONS_MOMENTUM", "GAMMA_BLAST", "OPTIONS_MOMENTUM_BREAKOUT")
     )
     if is_deriv_alert and not is_option_sell:
         created_dt = None
         clean_ts = (
-            getattr(alert, "original_call_time", None)
-            or getattr(alert, "triggered_at", None)
-            or getattr(alert, "created_at", "")
-            or ""
-        ).replace(" IST", "").strip()[:19]
+            (
+                getattr(alert, "original_call_time", None)
+                or getattr(alert, "triggered_at", None)
+                or getattr(alert, "created_at", "")
+                or ""
+            )
+            .replace(" IST", "")
+            .strip()[:19]
+        )
         for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
             try:
                 created_dt = datetime.strptime(clean_ts, fmt).replace(tzinfo=IST)
@@ -772,7 +818,10 @@ def evaluate_alert_in_flight_decay(
             # Detect 0DTE (Same-Day Expiry) status
             is_0dte = False
             clean_sym = str(getattr(alert, "symbol", "")).upper()
-            if clean_sym in INDEX_WEEKLY_EXPIRY_WEEKDAY and INDEX_WEEKLY_EXPIRY_WEEKDAY[clean_sym] == now_dt.weekday():
+            if (
+                clean_sym in INDEX_WEEKLY_EXPIRY_WEEKDAY
+                and INDEX_WEEKLY_EXPIRY_WEEKDAY[clean_sym] == now_dt.weekday()
+            ):
                 is_0dte = True
             elif getattr(alert, "dte", None) == 0 or getattr(alert, "is_0dte", False):
                 is_0dte = True
@@ -792,7 +841,9 @@ def evaluate_alert_in_flight_decay(
             # Dynamic Greeks-Aware Decay Horizon
             # On 0DTE after 13:30 IST, gamma flip and rapid theta acceleration demand an 8-minute exit window.
             # On 0DTE morning/midday, compress to 10 minutes. Standard weekly/monthly is 15 minutes.
-            is_afternoon_0dte = is_0dte and (now_dt.hour > 13 or (now_dt.hour == 13 and now_dt.minute >= 30))
+            is_afternoon_0dte = is_0dte and (
+                now_dt.hour > 13 or (now_dt.hour == 13 and now_dt.minute >= 30)
+            )
             if is_afternoon_0dte:
                 stagnation_threshold_secs = 480.0  # 8 minutes
                 decay_profile = "0DTE_AFTERNOON_THETA_CLIFF"
@@ -806,7 +857,11 @@ def evaluate_alert_in_flight_decay(
             if elapsed_secs >= stagnation_threshold_secs and pnl_pct <= 0.0:
                 elapsed_mins = int(elapsed_secs // 60)
                 extra_vwap = ""
-                if current_vwap and getattr(alert, "underlying_spot", None) and alert.underlying_spot < current_vwap:
+                if (
+                    current_vwap
+                    and getattr(alert, "underlying_spot", None)
+                    and alert.underlying_spot < current_vwap
+                ):
                     extra_vwap = f" Spot ₹{alert.underlying_spot:,.1f} trapped below intraday VWAP ₹{current_vwap:,.1f}."
 
                 if is_afternoon_0dte:
@@ -859,6 +914,7 @@ def evaluate_alert_in_flight_decay(
         if not spot_price or spot_price <= 0:
             try:
                 from market.quotes import get_ltp
+
                 lookup = f"NSE:{alert.symbol}" if ":" not in alert.symbol else alert.symbol
                 spot_price = get_ltp(lookup)
             except Exception:
@@ -876,6 +932,7 @@ def evaluate_alert_in_flight_decay(
         if not effective_vwap or effective_vwap <= 0:
             try:
                 from market.quotes import get_quote
+
                 lookup = f"NSE:{alert.symbol}" if ":" not in alert.symbol else alert.symbol
                 q_res = get_quote([lookup])
                 if q_res and getattr(q_res.get(lookup), "vwap", 0):
@@ -886,9 +943,13 @@ def evaluate_alert_in_flight_decay(
     if spot_price and spot_price > 0 and effective_vwap and effective_vwap > 0:
         vwap_std = 0.0
         if isinstance(alert.metrics, dict):
-            vwap_std = float(alert.metrics.get("vwap_std") or alert.metrics.get("vwap_sigma") or 0.0)
+            vwap_std = float(
+                alert.metrics.get("vwap_std") or alert.metrics.get("vwap_sigma") or 0.0
+            )
         if vwap_std <= 0:
-            atr_val = float((alert.metrics or {}).get("atr") or (alert.metrics or {}).get("atr_14d") or 0.0)
+            atr_val = float(
+                (alert.metrics or {}).get("atr") or (alert.metrics or {}).get("atr_14d") or 0.0
+            )
             vwap_std = (atr_val * 0.50) if atr_val > 0 else (effective_vwap * 0.006)
 
         if is_bullish:
@@ -939,4 +1000,3 @@ def evaluate_alert_in_flight_decay(
                 )
 
     return None
-

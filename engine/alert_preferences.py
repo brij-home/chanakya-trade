@@ -64,6 +64,7 @@ def normalize_segment_list(raw_segments: Any) -> list[str]:
                 result.append(t)
     return result or list(CANONICAL_SEGMENTS)
 
+
 MCX_COMMODITY_SYMBOLS = {
     "CRUDEOIL",
     "CRUDEOILM",
@@ -144,7 +145,9 @@ def classify_alert_segment(alert: Any) -> str:
             or (getattr(alert, "actionable_plan", {}) or {}).get("segment")
             or ""
         ).upper()
-        contract = str(getattr(alert, "contract_symbol", "") or getattr(alert, "contract", "") or "").upper()
+        contract = str(
+            getattr(alert, "contract_symbol", "") or getattr(alert, "contract", "") or ""
+        ).upper()
         op_type = str(getattr(alert, "option_type", "") or "").upper()
         strike = getattr(alert, "strike", None)
         expiry = getattr(alert, "expiry_date", None) or getattr(alert, "expiry", None)
@@ -191,10 +194,7 @@ def classify_alert_segment(alert: Any) -> str:
         or clean_sym.endswith("INDEX")
     )
     is_fut = (
-        "FUT" in contract
-        or "FUT" in sym.upper()
-        or deriv_type == "FUT"
-        or alt_type == "FUTURES"
+        "FUT" in contract or "FUT" in sym.upper() or deriv_type == "FUT" or alt_type == "FUTURES"
     )
     is_option = bool(op_type in ("CE", "PE") or strike or expiry)
     is_deriv_alt = alt_type in ("GAMMA_BLAST", "OPTIONS_MOMENTUM")
@@ -204,14 +204,7 @@ def classify_alert_segment(alert: Any) -> str:
     if seg == "FNO_STOCK":
         return "FNO_STOCK"
 
-    if (
-        is_index
-        or is_fut
-        or is_option
-        or is_deriv_alt
-        or seg in ("FNO", "NFO")
-        or exch == "NFO"
-    ):
+    if is_index or is_fut or is_option or is_deriv_alt or seg in ("FNO", "NFO") or exch == "NFO":
         return "FNO_INDEX" if is_index else "FNO_STOCK"
 
     # 4. Default to Cash Equity
@@ -364,7 +357,9 @@ class AlertPreferences:
                 min_confidence=int(ch_data.get("min_confidence", default_min_conf)),
                 allow_early_warnings=bool(ch_data.get("allow_early_warnings", False)),
                 allow_milestones=bool(ch_data.get("allow_milestones", True)),
-                allow_intermediate_trails=bool(ch_data.get("allow_intermediate_trails", default_trails)),
+                allow_intermediate_trails=bool(
+                    ch_data.get("allow_intermediate_trails", default_trails)
+                ),
             )
 
         return cls(
@@ -449,7 +444,9 @@ class AlertPreferencesManager:
         with self._lock:
             # 1. Master allowed segments
             if "allowed_segments" in data:
-                self._preferences.allowed_segments = normalize_segment_list(data["allowed_segments"])
+                self._preferences.allowed_segments = normalize_segment_list(
+                    data["allowed_segments"]
+                )
 
             # 2. Channel updates
             for ch_name in ("telegram", "ui", "desktop", "sound"):
@@ -460,7 +457,9 @@ class AlertPreferencesManager:
                         if "enabled" in ch_val:
                             target_ch.enabled = bool(ch_val["enabled"])
                         if "allowed_segments" in ch_val:
-                            target_ch.allowed_segments = normalize_segment_list(ch_val["allowed_segments"])
+                            target_ch.allowed_segments = normalize_segment_list(
+                                ch_val["allowed_segments"]
+                            )
                         if "min_confidence" in ch_val:
                             target_ch.min_confidence = int(ch_val["min_confidence"])
                         if "allow_early_warnings" in ch_val:
@@ -507,13 +506,15 @@ class AlertPreferencesManager:
             ch_clean = channel.lower().strip()
             return self.update_preferences({ch_clean: {"allowed_segments": valid_segs}})
 
-        return self.update_preferences({
-            "allowed_segments": valid_segs,
-            "telegram": {"allowed_segments": valid_segs},
-            "ui": {"allowed_segments": valid_segs},
-            "desktop": {"allowed_segments": valid_segs},
-            "sound": {"allowed_segments": valid_segs},
-        })
+        return self.update_preferences(
+            {
+                "allowed_segments": valid_segs,
+                "telegram": {"allowed_segments": valid_segs},
+                "ui": {"allowed_segments": valid_segs},
+                "desktop": {"allowed_segments": valid_segs},
+                "sound": {"allowed_segments": valid_segs},
+            }
+        )
 
     def is_segment_allowed(self, segment: str, channel: str = "ui") -> bool:
         """Checks whether a specific segment is allowed for a given channel."""
@@ -550,9 +551,13 @@ class AlertPreferencesManager:
                 is_invalidated = bool(alert.get("is_invalidated") or stage == "INVALIDATED")
                 target_status = str(alert.get("target_status") or "").upper()
             else:
-                conf = int(getattr(alert, "confidence", 75) or getattr(alert, "conviction_score", 75) or 75)
+                conf = int(
+                    getattr(alert, "confidence", 75) or getattr(alert, "conviction_score", 75) or 75
+                )
                 stage = str(getattr(alert, "stage", "") or "").upper()
-                is_invalidated = bool(getattr(alert, "is_invalidated", False) or stage == "INVALIDATED")
+                is_invalidated = bool(
+                    getattr(alert, "is_invalidated", False) or stage == "INVALIDATED"
+                )
                 target_status = str(getattr(alert, "target_status", "") or "").upper()
 
             is_milestone = (
@@ -591,7 +596,6 @@ class AlertPreferencesManager:
             tg_ok = self._preferences.telegram.is_segment_allowed(seg_upper)
             desk_ok = self._preferences.desktop.is_segment_allowed(seg_upper)
             return not (ui_ok or tg_ok or desk_ok)
-
 
     def get_telegram_chat_id(self, segment: str = "EQUITY") -> Optional[str]:
         """Returns the target Telegram chat ID for a given segment."""

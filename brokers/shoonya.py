@@ -505,7 +505,12 @@ class ShoonyaAPI(BrokerAPI):
             .strip()
         )
         is_commodity = clean_sym in COMMODITY_SYMBOLS or underlying.upper().startswith("MCX:")
-        is_currency = clean_sym in ("USDINR", "EURINR", "GBPINR", "JPYINR") or underlying.upper().startswith("CDS:")
+        is_currency = clean_sym in (
+            "USDINR",
+            "EURINR",
+            "GBPINR",
+            "JPYINR",
+        ) or underlying.upper().startswith("CDS:")
 
         exch = "MCX" if is_commodity else ("CDS" if is_currency else "NFO")
         prefix = f"{exch}:" if is_commodity or is_currency else "NSE:"

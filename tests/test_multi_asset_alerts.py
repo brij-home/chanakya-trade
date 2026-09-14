@@ -10,7 +10,6 @@ Deterministic unit test suite validating:
 
 from datetime import datetime, timezone, timedelta
 from unittest.mock import patch, MagicMock
-import pytest
 
 from engine.auto_alert_engine import (
     AutoAlert,
@@ -320,4 +319,3 @@ def test_mock_data_strictly_tagged_test_and_blocks_telegram():
                 with patch("engine.alerts._telegram_notify") as mock_tg:
                     engine._dispatch(alert)
                     mock_tg.assert_not_called()
-

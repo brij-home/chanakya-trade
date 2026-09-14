@@ -166,4 +166,3 @@ class TestCascadingLLMProvider:
         assert res == "Instant Gemini fallback response"
         assert p1.chat.call_count == 0  # Zero network calls to cooling primary!
         assert p2.chat.call_count == 1
-

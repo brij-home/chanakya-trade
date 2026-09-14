@@ -344,7 +344,7 @@
 
 ### 7.2 Server & Daemon Lifecycle
 6. **Thread Lifecycle & Cooperative Cancellation**: All background pollers in `engine/` MUST use `self._stop_event = threading.Event()`, wait on `self._stop_event.wait(timeout=...)` instead of blocking `time.sleep()`, and provide clean `.join(timeout=1.0)` in `stop_polling()`.
-7. **Hot-Reload Awareness & Clean Instance Restart Standard**: Never rely on partial hot-reload or in-memory state when restarting development services or verifying UI/backend behavior. Always terminate any old processes completely (`electron`, `node`/Vite, `uvicorn`/Python, and socket listeners on ports `8765` & `5173`) using `scripts/quick_cleanup.ps1` before launching a fresh, clean instance. This prevents stale in-memory bundles and saves debugging time.
+7. **Hot-Reload Awareness & Seamless Service Lifecycle**: Never let long-running server loops (`uvicorn`, `electron-vite dev`) run inside Antigravity's internal conversation task manager; this keeps the IDE in a "running background tasks" state and locks the user's prompt box. Use `scripts/service.ps1 -Action [start|restart|stop|status]` (or `scripts/dev.ps1 -Detached`), which spawns processes completely detached outside the parent Job Object via WMI, verifies healthy socket binding on ports `8765` & `5173`, and exits immediately in < 3s, leaving 0 background tasks in the assistant session.
 8. **API Route Aliasing**: Register aliases (`/high_conviction` + `/top_conviction`, `/taxonomy` + `/universe_categories`) with both GET and POST to prevent 404s.
 
 ### 7.3 LLM Provider Management
@@ -418,13 +418,22 @@
 
 ### Running the Application
 ```powershell
+# Seamless Background Services (Detached — zero chat lock, 0 agent tasks)
+powershell -ExecutionPolicy Bypass -File scripts\service.ps1 -Action restart
+
+# Service Health & Port Status Check
+powershell -ExecutionPolicy Bypass -File scripts\service.ps1 -Action status
+
+# Stop All Background Services
+powershell -ExecutionPolicy Bypass -File scripts\service.ps1 -Action stop
+
 # Interactive terminal CLI (no broker / demo mode)
 .venv\Scripts\python.exe -m app.main --no-broker
 
 # Textual TUI
 .venv\Scripts\python.exe -m app.main --tui
 
-# FastAPI Sidecar Web Server on port 8765
+# FastAPI Sidecar Web Server in foreground
 .venv\Scripts\python.exe -m uvicorn web.api:app --host 127.0.0.1 --port 8765 --reload
 ```
 

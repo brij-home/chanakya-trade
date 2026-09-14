@@ -991,7 +991,7 @@ def test_early_warning_coiling_alert_header_and_plan_formatting(monkeypatch):
     assert "Action:</b> BUY" in msg
     assert "Invalidation SL:</b> <code>₹" in msg
     assert "Target 1:</b> <code>₹" in msg
-    assert ("ACCEPTABLE" in msg or "EXCELLENT_ASYMMETRY" in msg)
+    assert "ACCEPTABLE" in msg or "EXCELLENT_ASYMMETRY" in msg
     assert "session ~21:" not in msg and "ETA: ~21:" not in msg, (
         "Off-market 21:xx hours must not appear in equity ETA"
     )
@@ -1544,8 +1544,18 @@ def test_options_momentum_scanner_recording(tmp_path, monkeypatch):
         ),
     ]
 
+    healthy_df = pd.DataFrame(
+        {
+            "open": [23490.0, 23500.0] * 10,
+            "high": [23505.0, 23515.0] * 10,
+            "low": [23485.0, 23498.0] * 10,
+            "close": [23500.0, 23510.0] * 10,
+            "volume": [10000, 50000] * 10,
+        }
+    )
     monkeypatch.setattr("market.quotes.get_ltp", lambda sym: 23510.0)
     monkeypatch.setattr("market.options.get_options_chain", lambda sym: synthetic_chain)
+    monkeypatch.setattr("market.history.get_ohlcv", lambda sym, **kwargs: healthy_df)
 
     engine = AutoAlertEngine(max_buffer=50)
     monkeypatch.setattr(engine, "_watched_indices", ["NIFTY"])
@@ -1694,7 +1704,7 @@ def test_sanitize_legacy_alerts_quarantines_illiquid_and_distant_alerts(tmp_path
             stop_loss=105.0,
             strike=24500.0,
             metrics={"oi": 45000, "oi_change": -12000, "dte": 2},
-            expiry_date="2026-09-12",
+            expiry_date="2028-09-12",
         ),
     ]
     purged = eng._sanitize_legacy_alerts_unlocked()
@@ -1808,6 +1818,7 @@ def test_scan_options_momentum_monthly_put_surge(tmp_path, monkeypatch):
 
     monkeypatch.setattr("market.quotes.get_ltp", lambda sym: 13520.0)
     monkeypatch.setattr("market.options.get_options_chain", lambda sym: [mock_contract])
+    monkeypatch.setattr("market.history.get_ohlcv", lambda sym, **kwargs: None)
 
     alerts = eng.scan_options_momentum_breakouts()
     pe_alert = next((a for a in alerts if a.symbol == "DIXON" and a.option_type == "PE"), None)
@@ -2073,13 +2084,16 @@ async def test_send_alert_to_telegram_endpoint(monkeypatch, tmp_path):
     assert target_chat is None
 
     # Test custom channel/group forwarding
-    res2 = await send_alert_to_telegram({"alert_id": "tg-test-alert-001", "chat_id": "@chanakya_channel"})
+    res2 = await send_alert_to_telegram(
+        {"alert_id": "tg-test-alert-001", "chat_id": "@chanakya_channel"}
+    )
     assert res2["status"] == "ok"
     assert len(dispatched_msgs) == 2
     assert dispatched_msgs[1][3] == "@chanakya_channel"
 
     # Test destinations endpoint
     from web.api import get_telegram_destinations_api
+
     dest_res = await get_telegram_destinations_api()
     assert dest_res["status"] == "ok"
     assert "default_chat_id" in dest_res["data"]
@@ -2163,7 +2177,9 @@ def test_no_target_milestone_when_in_loss():
 
     # Current LTP is 28.85 (below entry 30.55) -> MUST NEVER trigger any target milestone!
     res = evaluate_alert_targets_and_trailing(alert, current_ltp=28.85)
-    assert res is None or res.new_milestone is None, f"Expected no milestone, got {res.new_milestone if res else None}"
+    assert res is None or res.new_milestone is None, (
+        f"Expected no milestone, got {res.new_milestone if res else None}"
+    )
 
 
 def test_record_alert_active_trade_immutable(tmp_path, monkeypatch):
@@ -2237,6 +2253,7 @@ def test_early_warning_session_expiry():
     """Verify that un-ignited EARLY_WARNING setups expire across day boundaries."""
     from datetime import datetime, timedelta
     from zoneinfo import ZoneInfo
+
     ist = ZoneInfo("Asia/Kolkata")
     yesterday = datetime.now(ist) - timedelta(days=1)
     yesterday_str = yesterday.strftime("%Y-%m-%d %H:%M:%S IST")
@@ -2286,6 +2303,7 @@ def test_alert_ignition_refreshes_timestamp_and_premium(tmp_path, monkeypatch):
     """Verify that when an EARLY_WARNING is upgraded to IGNITED, timestamp, premium, and signal_ref are refreshed."""
     from datetime import datetime
     from zoneinfo import ZoneInfo
+
     ist = ZoneInfo("Asia/Kolkata")
     now_str = datetime.now(ist).strftime("%Y-%m-%d %H:%M:%S IST")
 
@@ -2357,6 +2375,7 @@ def test_symbol_consolidation_respects_session_date(tmp_path, monkeypatch):
     """Verify that prior-day options alerts do not block today's fresh alerts for the same underlying."""
     from datetime import datetime, timedelta
     from zoneinfo import ZoneInfo
+
     ist = ZoneInfo("Asia/Kolkata")
     yesterday = datetime.now(ist) - timedelta(days=1)
     yesterday_str = yesterday.strftime("%Y-%m-%d %H:%M:%S IST")
@@ -2426,6 +2445,7 @@ def test_underlying_directional_cooldown_suppresses_duplicate(tmp_path, monkeypa
     """Verify that an active trade on an underlying suppresses redundant same-direction alerts within cooldown window."""
     from datetime import datetime
     from zoneinfo import ZoneInfo
+
     ist = ZoneInfo("Asia/Kolkata")
     now_str = datetime.now(ist).strftime("%Y-%m-%d %H:%M:%S IST")
 
@@ -2478,6 +2498,7 @@ def test_gamma_blast_and_options_momentum_unified_consolidation(tmp_path, monkey
     """Verify OPTIONS_MOMENTUM and GAMMA_BLAST consolidate into the active trade instead of firing duplicate cards."""
     from datetime import datetime
     from zoneinfo import ZoneInfo
+
     ist = ZoneInfo("Asia/Kolkata")
     now_str = datetime.now(ist).strftime("%Y-%m-%d %H:%M:%S IST")
 
@@ -2582,12 +2603,14 @@ def test_options_momentum_rejects_upper_wick_exhaustion(tmp_path, monkeypatch):
 def test_options_momentum_is_gated_in_alert_scrutiny(tmp_path, monkeypatch):
     """Verify that OPTIONS_MOMENTUM alerts are included in is_gated and pass through AI scrutiny."""
     from datetime import datetime, timezone, timedelta
+
     ist_tz = timezone(timedelta(hours=5, minutes=30))
     data_file = tmp_path / "auto_alerts.json"
     monkeypatch.setattr("engine.auto_alert_engine.get_auto_alerts_file", lambda: data_file)
 
     engine = AutoAlertEngine(max_buffer=50)
     from engine.alert_scrutiny import ScrutinyResult, alert_scrutiny_auditor
+
     monkeypatch.setattr(
         alert_scrutiny_auditor,
         "scrutinize_alert",
@@ -2597,7 +2620,12 @@ def test_options_momentum_is_gated_in_alert_scrutiny(tmp_path, monkeypatch):
             logic_confirmation="Valid momentum setup",
             trap_risk_warning="None observed",
             actionable_guidance="Valid buy",
-            sanctity_matrix={"level_coherence": True, "rr_valid": True, "risk_within_bounds": True, "no_chase": True},
+            sanctity_matrix={
+                "level_coherence": True,
+                "rr_valid": True,
+                "risk_within_bounds": True,
+                "no_chase": True,
+            },
             auditor_model="TEST_AUDITOR",
             audited_at="2026-09-11 15:00:00 IST",
         ),
@@ -2646,6 +2674,7 @@ def test_options_momentum_is_gated_in_alert_scrutiny(tmp_path, monkeypatch):
 def test_options_momentum_friday_late_warning(tmp_path, monkeypatch):
     """Verify Friday post-14:30 IST alert tags weekend theta decay warning."""
     from datetime import datetime, timezone, timedelta
+
     ist_tz = timezone(timedelta(hours=5, minutes=30))
     data_file = tmp_path / "auto_alerts.json"
     monkeypatch.setattr("engine.auto_alert_engine.get_auto_alerts_file", lambda: data_file)
@@ -2662,8 +2691,18 @@ def test_options_momentum_friday_late_warning(tmp_path, monkeypatch):
             volume=35000,
         )
     ]
+    healthy_df = pd.DataFrame(
+        {
+            "open": [23490.0, 23500.0] * 10,
+            "high": [23505.0, 23515.0] * 10,
+            "low": [23485.0, 23498.0] * 10,
+            "close": [23500.0, 23510.0] * 10,
+            "volume": [10000, 50000] * 10,
+        }
+    )
     monkeypatch.setattr("market.quotes.get_ltp", lambda sym: 23510.0)
     monkeypatch.setattr("market.options.get_options_chain", lambda sym: synthetic_chain)
+    monkeypatch.setattr("market.history.get_ohlcv", lambda sym, **kwargs: healthy_df)
 
     engine = AutoAlertEngine(max_buffer=50)
     monkeypatch.setattr(engine, "_watched_indices", ["NIFTY"])
@@ -2732,7 +2771,9 @@ def test_record_alert_adhoc_cli_suppresses_telegram(tmp_path, monkeypatch):
     monkeypatch.setattr("engine.auto_alert_engine.get_auto_alerts_file", lambda: data_file)
 
     dispatched = []
-    monkeypatch.setattr("engine.alerts._telegram_notify", lambda msg, **kwargs: dispatched.append(msg))
+    monkeypatch.setattr(
+        "engine.alerts._telegram_notify", lambda msg, **kwargs: dispatched.append(msg)
+    )
     monkeypatch.setattr(sys, "argv", ["-c"])
     monkeypatch.delenv("ALLOW_MANUAL_TELEGRAM_DISPATCH", raising=False)
 
@@ -2792,6 +2833,7 @@ def test_atomic_persistence_and_corrupt_recovery(tmp_path, monkeypatch):
     # Verify file was written atomically and is valid JSON
     assert test_file.exists()
     import json
+
     data = json.loads(test_file.read_text())
     assert len(data) == 1
     assert data[0]["alert_id"] == "test-atomic-001"
@@ -2803,10 +2845,3 @@ def test_atomic_persistence_and_corrupt_recovery(tmp_path, monkeypatch):
     assert len(eng2._alerts) == 0
     backups = list(tmp_path.glob("auto_alerts.json.corrupt.*"))
     assert len(backups) == 1
-
-
-
-
-
-
-

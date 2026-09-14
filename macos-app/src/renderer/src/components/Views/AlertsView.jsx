@@ -333,6 +333,31 @@ const AutoAlertCard = memo(function AutoAlertCard({
               {isTest && (
                 <span className="text-[7px] px-1 py-px rounded font-black uppercase bg-purple-500/20 text-purple-300">TEST</span>
               )}
+
+              {/* Time Horizon Badge */}
+              {alert.time_horizon && (
+                <span className={`text-[7px] px-1.5 py-px rounded font-black uppercase whitespace-nowrap border ${
+                  alert.time_horizon === 'INTRADAY' ? 'bg-sky-500/15 text-sky-300 border-sky-500/30' :
+                  alert.time_horizon === 'SWING_SHORT' ? 'bg-amber-500/15 text-amber-300 border-amber-500/30' :
+                  alert.time_horizon === 'SWING_MID' ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30' :
+                  'bg-purple-500/15 text-purple-300 border-purple-500/30'
+                }`}>
+                  {alert.time_horizon === 'INTRADAY' ? '⏱️ INTRADAY' :
+                   alert.time_horizon === 'SWING_SHORT' ? '⚡ 2-5D SWING' :
+                   alert.time_horizon === 'SWING_MID' ? '📈 1-4W SWING' : '🏛️ POSITIONAL'}
+                </span>
+              )}
+
+              {/* Order Flow & Broker Depth Feed Status */}
+              {alert.order_flow_signals?.live_broker_connected === false || alert.order_flow_signals?.broker_depth_status === 'SYNTHETIC_L1_DISCONNECTED' ? (
+                <span className="text-[7px] px-1 py-px rounded font-black bg-amber-500/20 text-amber-300 border border-amber-500/40 whitespace-nowrap" title="No active broker WebSocket connection. Using tick-level fallback.">
+                  ⚠️ SYNTHETIC L1
+                </span>
+              ) : (alert.order_flow_signals?.live_broker_connected || alert.order_flow_signals?.broker_depth_status === 'LIVE_L2') ? (
+                <span className="text-[7px] px-1 py-px rounded font-black bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 whitespace-nowrap" title="Live Broker Level 2 depth active">
+                  🟢 LIVE L2
+                </span>
+              ) : null}
             </div>
           </div>
         </div>
@@ -401,6 +426,11 @@ const AutoAlertCard = memo(function AutoAlertCard({
               >
                 {alert.metrics.scrutiny.status === 'APPROVED' ? '🛡️ AI ' : '⚡ QNT '}
                 {alert.metrics.scrutiny.score}
+              </span>
+            )}
+            {alert.no_chase_boundary && (
+              <span className="text-[9px] font-mono font-bold px-1 py-px rounded bg-rose-500/15 text-rose-300 border border-rose-500/30 whitespace-nowrap" title="No-Chase Maximum Entry Limit">
+                🛑 Max ₹{Number(alert.no_chase_boundary).toLocaleString('en-IN', { maximumFractionDigits: 1 })}
               </span>
             )}
           </div>
@@ -1318,6 +1348,7 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
   const callRef = useRef(call)
   const sendDraft = useChatStore((s) => s.sendDraft)
   const setActiveView = useChatStore((s) => s.setActiveView)
+  const brokerStatuses = useChatStore((s) => s.brokerStatuses)
 
   // Active tab: 'auto' (Live Auto-Alerts) vs 'manual' (User Price Alerts)
   const [activeTab, setActiveTab] = useState('auto')
@@ -1363,6 +1394,11 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
 
   const isAllSegmentsSelected = selectedSegments.size === 5
   const selectedSegment = isAllSegmentsSelected ? 'ALL' : (selectedSegments.size === 1 ? Array.from(selectedSegments)[0] : 'CUSTOM')
+
+  const connectedBrokers = useMemo(() => {
+    return Object.entries(brokerStatuses || {}).filter(([, b]) => b.authenticated)
+  }, [brokerStatuses])
+  const hasActiveBrokerSession = connectedBrokers.length > 0
 
   const setSelectedSegment = useCallback((val) => {
     if (val === 'ALL') {
@@ -1431,6 +1467,7 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
     }
   }, [])
   const [selectedFilter, setSelectedFilter] = useState('ALL')
+  const [selectedHorizon, setSelectedHorizon] = useState('ALL') // ALL | INTRADAY | SWING_SHORT | SWING_MID | POSITIONAL
   const [selectedStage, setSelectedStage] = useState('ALL')
   const [selectedEnv, setSelectedEnv] = useState('ALL') // ALL | LIVE | TEST
   const [densityMode, setDensityMode] = useState(() => {
@@ -2144,6 +2181,12 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
         if (a.environment !== 'TEST' && a.is_live !== false) return false
       }
 
+      // 7b. Time Horizon Filter
+      if (selectedHorizon !== 'ALL') {
+        const h = a.time_horizon || 'INTRADAY'
+        if (h !== selectedHorizon) return false
+      }
+
       return true
     })
 
@@ -2198,7 +2241,7 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
     })
 
     return results
-  }, [autoAlerts, autoViewMode, selectedFilter, selectedStage, selectedEnv, searchQuery, selectedDirection, selectedSegment, selectedSegments, selectedSort])
+  }, [autoAlerts, autoViewMode, selectedFilter, selectedHorizon, selectedStage, selectedEnv, searchQuery, selectedDirection, selectedSegment, selectedSegments, selectedSort])
 
   // Group repeated attempts for the same symbol so the screen remains clean and uncluttered
   const groupedAutoAlerts = useMemo(() => {
@@ -2486,6 +2529,32 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
             className="btn btn-sm btn-ghost text-rose-300 hover:bg-rose-500/20 text-xs flex-shrink-0"
           >
             View Invalidated ({invalidatedCount}) →
+          </button>
+        </div>
+      )}
+
+      {/* Broker L2 WebSocket Depth Streaming Notice */}
+      {!hasActiveBrokerSession && activeTab === 'auto' && (
+        <div className="p-3 rounded-2xl bg-amber-500/10 border border-amber-500/35 text-amber-200 flex items-center justify-between gap-3 animate-slide-up-fade">
+          <div className="flex items-center gap-2.5 text-xs">
+            <span className="text-xl flex-shrink-0">⚠️</span>
+            <div>
+              <div className="font-bold flex items-center gap-2">
+                <span>NO ACTIVE BROKER CONNECTION — Level-2 Order Book Streaming Offline</span>
+                <span className="text-[9px] px-1.5 py-0.5 rounded font-mono font-bold bg-amber-500/20 text-amber-300 border border-amber-500/40">
+                  SYNTHETIC L1 ACTIVE
+                </span>
+              </div>
+              <p className="text-amber-300/80 text-[11px] mt-0.5">
+                Real-time broker order book depth (OBI & Iceberg detection) requires an active authenticated broker session. Trade setups are currently using tick-level OHLCV and volume delta reconstruction.
+              </p>
+            </div>
+          </div>
+          <button
+            onClick={() => setActiveView('settings')}
+            className="btn btn-sm btn-ghost text-amber-300 hover:bg-amber-500/20 text-xs flex-shrink-0 border border-amber-500/30 font-bold"
+          >
+            Connect Broker →
           </button>
         </div>
       )}
@@ -2794,6 +2863,24 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
                   <option value="ASYMMETRIC_OPPORTUNITY">🎯 Asymmetric R:R</option>
                   <option value="CIRCUIT_WARNING">🔒 Circuit Warning</option>
                   <option value="INVALIDATED">❌ Invalidated ({invalidatedCount})</option>
+                </select>
+
+                {/* Horizon Filter Dropdown */}
+                <select
+                  value={selectedHorizon}
+                  onChange={(e) => setSelectedHorizon(e.target.value)}
+                  className={`text-xs py-1 px-2.5 rounded-lg bg-surface border text-text focus:outline-none focus:border-gold transition-colors font-sans cursor-pointer flex-shrink-0 ${
+                    selectedHorizon !== 'ALL'
+                      ? 'border-sky-400 text-sky-300 font-bold bg-sky-500/10'
+                      : 'border-border hover:border-gold/50'
+                  }`}
+                  title="Filter by trade time horizon"
+                >
+                  <option value="ALL">All Horizons</option>
+                  <option value="INTRADAY">⏱️ Intraday (15m–60m)</option>
+                  <option value="SWING_SHORT">⚡ 2–5D Swing</option>
+                  <option value="SWING_MID">📈 1–4W Swing</option>
+                  <option value="POSITIONAL">🏛️ 1–6M Positional</option>
                 </select>
               </div>
 

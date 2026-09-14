@@ -61,7 +61,6 @@ def test_option_pattern_matching():
     assert m7.group(3) == "CE"
 
 
-
 def test_futures_pattern_matching():
     m1 = _FUT_PATTERN.match("RELIANCE26SEPFUT")
     assert m1 is not None

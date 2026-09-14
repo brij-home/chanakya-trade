@@ -325,7 +325,6 @@ class CascadingLLMProvider(LLMProvider):
         return ""
 
 
-
 # ── Anthropic provider (API key) ───────────────────────────────
 
 
@@ -3637,7 +3636,11 @@ def get_fast_provider(
 
         # Collect available secondary fallback providers configured in .env
         fallbacks = _build_fallback_fast_providers(chosen_prov, reg, system)
-        if deep_provider is not None and deep_provider not in fallbacks and deep_provider != primary:
+        if (
+            deep_provider is not None
+            and deep_provider not in fallbacks
+            and deep_provider != primary
+        ):
             fallbacks.append(deep_provider)
 
         if fallbacks:

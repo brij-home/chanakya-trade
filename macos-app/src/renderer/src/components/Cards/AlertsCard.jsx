@@ -64,6 +64,25 @@ export default function AlertsCard({ data }) {
                   <span className={`text-[9px] px-1.5 py-0.2 rounded font-black uppercase tracking-wider ${isTest ? 'bg-purple-500/20 text-purple-300' : 'bg-emerald-500/20 text-emerald-300'}`}>
                     {isTest ? '🧪 TEST' : '🟢 LIVE'}
                   </span>
+                  {a.time_horizon && (
+                    <span className="text-[8px] px-1 py-0.2 rounded font-mono font-bold bg-sky-500/15 text-sky-300 border border-sky-500/30">
+                      {a.time_horizon === 'INTRADAY' ? '⏱️ INTRADAY' : a.time_horizon === 'SWING_SHORT' ? '⚡ 2-5D' : a.time_horizon === 'SWING_MID' ? '📈 1-4W' : '🏛️ POS'}
+                    </span>
+                  )}
+                  {a.order_flow_signals?.live_broker_connected === false || a.order_flow_signals?.broker_depth_status === 'SYNTHETIC_L1_DISCONNECTED' ? (
+                    <span className="text-[8px] px-1 py-0.2 rounded font-mono font-bold bg-amber-500/20 text-amber-300 border border-amber-500/40" title="No active broker WebSocket depth connection. Using tick-level fallback.">
+                      ⚠️ SYNTHETIC L1
+                    </span>
+                  ) : (a.order_flow_signals?.live_broker_connected || a.order_flow_signals?.broker_depth_status === 'LIVE_L2') ? (
+                    <span className="text-[8px] px-1 py-0.2 rounded font-mono font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30" title="Live Broker Level 2 depth active">
+                      🟢 LIVE L2
+                    </span>
+                  ) : null}
+                  {a.no_chase_boundary && (
+                    <span className="text-[8px] px-1 py-0.2 rounded font-mono font-bold bg-rose-500/15 text-rose-300 border border-rose-500/30" title="No-Chase limit">
+                      Max ₹{Number(a.no_chase_boundary).toLocaleString('en-IN', { maximumFractionDigits: 1 })}
+                    </span>
+                  )}
                   {isInvalidated ? (
                     <span className="text-[10px] font-ui text-rose-400 font-bold">❌ INVALIDATED</span>
                   ) : isFinalHit ? (

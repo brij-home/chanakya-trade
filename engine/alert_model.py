@@ -10,7 +10,6 @@ from typing import Any, Optional
 from zoneinfo import ZoneInfo
 
 from engine.alert_expiry import (
-    classify_expiry_type,
     get_expiry_metadata,
     get_next_expiry_opportunity,
 )
@@ -90,6 +89,12 @@ class AutoAlert:
     in_flight_warning_at: Optional[str] = None
     mtf_confluence: Optional[str] = None
     vix_regime: Optional[str] = None
+    time_horizon: str = "INTRADAY"  # "INTRADAY" | "SWING_SHORT" | "SWING_MID" | "POSITIONAL"
+    setup_style: str = "CONTINUATION"  # "CONTINUATION" | "REVERSAL"
+    entry_type: str = "LIMIT_ON_PULLBACK"  # "LIMIT_ON_PULLBACK" | "BREAKOUT_STOP" | "MARKET_NOW"
+    anchored_levels: dict[str, float] = field(default_factory=dict)
+    order_flow_signals: dict[str, Any] = field(default_factory=dict)
+    no_chase_boundary: Optional[float] = None
 
     def __post_init__(self) -> None:
         if not self.created_at:
@@ -97,6 +102,7 @@ class AutoAlert:
         if not self.signal_ref:
             try:
                 from bot.alert_templates import build_signal_ref
+
                 self.signal_ref = build_signal_ref(
                     symbol=self.symbol,
                     alert_id=self.alert_id,
@@ -131,6 +137,34 @@ class AutoAlert:
                     .upper()
                 )
                 self.lot_size = STANDARD_LOT_SIZES.get(clean)
+
+        # Auto-infer horizon if default
+        if self.time_horizon == "INTRADAY":
+            atype = (self.alert_type or "").upper()
+            if atype in ("STAGE_1_TO_2_EXPANSION", "MULTIBAGGER"):
+                self.time_horizon = "POSITIONAL"
+            elif atype in ("SQUEEZE_BREAKOUT", "VCP_PIVOT_BREAKOUT", "RRG_SECTOR_ROTATION"):
+                self.time_horizon = "SWING_MID"
+            elif atype == "ASYMMETRIC_OPPORTUNITY":
+                setup_action = str((self.actionable_plan or {}).get("action", "")).upper()
+                if "POCKET_PIVOT" in setup_action:
+                    self.time_horizon = "SWING_MID"
+                elif "0DTE" in setup_action:
+                    self.time_horizon = "INTRADAY"
+                else:
+                    self.time_horizon = "SWING_SHORT"
+            elif atype in ("CIRCUIT_WARNING", "PATTERN_COILING"):
+                self.time_horizon = "SWING_SHORT"
+
+        # Calculate no-chase boundary (1.2% past trigger level) if not provided
+        if self.no_chase_boundary is None and self.trigger_level > 0:
+            if str(self.direction).upper() in ("BEARISH", "SHORT", "SELL"):
+                self.no_chase_boundary = round(self.trigger_level * 0.988, 2)
+            else:
+                self.no_chase_boundary = round(self.trigger_level * 1.012, 2)
+
+        if self.stage == "IGNITED" and not self.triggered_at:
+            self.triggered_at = self.created_at
 
     @property
     def is_expired(self) -> bool:

@@ -535,9 +535,7 @@ class AlertManager:
     def _poll_loop(self, interval: int) -> None:
         while self._polling and not self._stop_event.is_set():
             if self.active_count() > 0 and (
-                _is_market_hours("NSE")
-                or _is_market_hours("CDS")
-                or _is_market_hours("MCX")
+                _is_market_hours("NSE") or _is_market_hours("CDS") or _is_market_hours("MCX")
             ):
                 # Check for triggered alerts
                 triggered = self.check_alerts()
@@ -651,7 +649,11 @@ class AlertManager:
             panel_title = f"[bold red]⚠️ {env_tag} ALERT / VIEW INVALIDATED[/bold red]"
             desktop_title = f"⚠️ {env_tag} VIEW INVALIDATED: {alert.symbol}"
             desktop_msg = alert.invalidation_reason or f"{desc} is no longer valid."
-            from bot.alert_templates import render_milestone_alert, MilestoneAlertData, build_signal_ref
+            from bot.alert_templates import (
+                render_milestone_alert,
+                MilestoneAlertData,
+                build_signal_ref,
+            )
 
             sig_ref = build_signal_ref(alert.symbol, alert_id=alert.id, created_at=alert.created_at)
             tg_msg = render_milestone_alert(
@@ -680,7 +682,11 @@ class AlertManager:
                 alert.trailing_rationale
                 or f"{desc} reached target price ₹{alert.target_price or alert.threshold:,.2f}!"
             )
-            from bot.alert_templates import render_milestone_alert, MilestoneAlertData, build_signal_ref
+            from bot.alert_templates import (
+                render_milestone_alert,
+                MilestoneAlertData,
+                build_signal_ref,
+            )
 
             sig_ref = build_signal_ref(alert.symbol, alert_id=alert.id, created_at=alert.created_at)
             tg_msg = render_milestone_alert(
@@ -1003,11 +1009,16 @@ def _telegram_notify(message: str, chat_id: Optional[str] = None) -> None:
     """
     import os
     import sys
+
     if os.environ.get("CHANAKYA_TESTING") == "1" or os.environ.get("DEPLOY_MODE") == "test":
         return
 
     # Suppress ad-hoc python -c executions unless explicitly authorized
-    if sys.argv and sys.argv[0] == "-c" and os.environ.get("ALLOW_MANUAL_TELEGRAM_DISPATCH", "0").lower() not in ("1", "true"):
+    if (
+        sys.argv
+        and sys.argv[0] == "-c"
+        and os.environ.get("ALLOW_MANUAL_TELEGRAM_DISPATCH", "0").lower() not in ("1", "true")
+    ):
         return
 
     try:

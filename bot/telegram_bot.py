@@ -47,11 +47,6 @@ from bot.alert_templates import (
     render_equity_alert,
     render_precursor_alert,
     render_asymmetric_alert,
-    render_milestone_alert,
-    render_price_alert,
-    FNOAlertData,
-    EquityAlertData,
-    MilestoneAlertData,
 )
 
 load_dotenv(Path(__file__).parent.parent / ".env")
@@ -785,7 +780,11 @@ async def cmd_filter(update, context) -> None:
     View or update allowed Telegram push alert segments.
     """
     try:
-        from engine.alert_preferences import alert_preferences, CANONICAL_SEGMENTS, normalize_segment_list
+        from engine.alert_preferences import (
+            alert_preferences,
+            CANONICAL_SEGMENTS,
+            normalize_segment_list,
+        )
 
         if not context.args:
             prefs = alert_preferences.get_preferences()
@@ -803,23 +802,41 @@ async def cmd_filter(update, context) -> None:
             }
             status_lines = []
             for s in CANONICAL_SEGMENTS:
-                icon = "✅" if (s in allowed or ("FNO" in allowed and s.startswith("FNO_"))) else "❌"
+                icon = (
+                    "✅" if (s in allowed or ("FNO" in allowed and s.startswith("FNO_"))) else "❌"
+                )
                 status_lines.append(f"{icon} {seg_emojis.get(s, s)}")
 
             dest_lines = []
-            fno_idx_cid = prefs.get("fno_index_chat_id") or os.environ.get("TELEGRAM_FNO_INDEX_CHAT_ID", "-1004380788314")
+            fno_idx_cid = prefs.get("fno_index_chat_id") or os.environ.get(
+                "TELEGRAM_FNO_INDEX_CHAT_ID", "-1004380788314"
+            )
             if fno_idx_cid:
-                dest_lines.append(f"• <b>F&O Index:</b> <code>Premium_Alpha_Vortex_FnO_Index</code> (<code>{fno_idx_cid}</code>)")
+                dest_lines.append(
+                    f"• <b>F&O Index:</b> <code>Premium_Alpha_Vortex_FnO_Index</code> (<code>{fno_idx_cid}</code>)"
+                )
             fno_cid = prefs.get("fno_chat_id") or os.environ.get("TELEGRAM_FNO_CHAT_ID", "")
             if fno_cid:
                 dest_lines.append(f"• <b>F&O Stock:</b> <code>{fno_cid}</code>")
-            mcx_cid = prefs.get("mcx_chat_id") or os.environ.get("TELEGRAM_MCX_CHAT_ID", "-1004320002599")
+            mcx_cid = prefs.get("mcx_chat_id") or os.environ.get(
+                "TELEGRAM_MCX_CHAT_ID", "-1004320002599"
+            )
             if mcx_cid:
-                dest_lines.append(f"• <b>MCX/Currency:</b> <code>Premium_Alpha_Vortex_MCX_Channel</code> (<code>{mcx_cid}</code>)")
-            eq_cid = prefs.get("equity_chat_id") or os.environ.get("TELEGRAM_EQUITY_CHAT_ID", "-1003524867091")
+                dest_lines.append(
+                    f"• <b>MCX/Currency:</b> <code>Premium_Alpha_Vortex_MCX_Channel</code> (<code>{mcx_cid}</code>)"
+                )
+            eq_cid = prefs.get("equity_chat_id") or os.environ.get(
+                "TELEGRAM_EQUITY_CHAT_ID", "-1003524867091"
+            )
             if eq_cid:
-                dest_lines.append(f"• <b>Equity Channel:</b> <code>Premium_Alpha_Vortex_Equity_Channel</code> (<code>{eq_cid}</code>)")
-            dest_str = ("\n<b>Routing Destinations:</b>\n" + "\n".join(dest_lines) + "\n") if dest_lines else ""
+                dest_lines.append(
+                    f"• <b>Equity Channel:</b> <code>Premium_Alpha_Vortex_Equity_Channel</code> (<code>{eq_cid}</code>)"
+                )
+            dest_str = (
+                ("\n<b>Routing Destinations:</b>\n" + "\n".join(dest_lines) + "\n")
+                if dest_lines
+                else ""
+            )
 
             msg = (
                 f"⚙️ <b>TELEGRAM ALERT ROUTING</b>\n"
@@ -830,11 +847,11 @@ async def cmd_filter(update, context) -> None:
                 + "\n".join(status_lines)
                 + f"\n{dest_str}"
                 + "\n💡 <i>To change:</i>\n"
-                f"<code>/filter all</code>\n"
-                f"<code>/filter fno_indices</code>\n"
-                f"<code>/filter fno_stocks</code>\n"
-                f"<code>/filter fno</code> <i>(both index + stock F&O)</i>\n"
-                f"<code>/filter fno_indices,equity</code>"
+                "<code>/filter all</code>\n"
+                "<code>/filter fno_indices</code>\n"
+                "<code>/filter fno_stocks</code>\n"
+                "<code>/filter fno</code> <i>(both index + stock F&O)</i>\n"
+                "<code>/filter fno_indices,equity</code>"
             )
             await update.message.reply_text(msg, parse_mode="HTML")
             return
@@ -1635,7 +1652,9 @@ def get_telegram_destinations() -> dict[str, Any]:
         "mcx_chat_name": mcx_name,
         "equity_chat_id": equity_chat_id.strip(),
         "equity_chat_name": equity_name,
-        "is_configured": bool(default_chat or fno_chat_id or fno_index_chat_id or mcx_chat_id or equity_chat_id),
+        "is_configured": bool(
+            default_chat or fno_chat_id or fno_index_chat_id or mcx_chat_id or equity_chat_id
+        ),
     }
 
 
@@ -1950,6 +1969,7 @@ def run_bot() -> None:
         except Exception as e:
             logger.error("Telegram bot runner error: %s. Retrying in 5 seconds...", e)
             import time
+
             time.sleep(5)
         finally:
             try:

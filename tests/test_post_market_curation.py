@@ -13,12 +13,11 @@ Ensures:
   6. scan_post_market_digest() executes only swing detectors, avoiding closed options chains.
 """
 
-from datetime import datetime, timezone, timedelta
-from unittest.mock import MagicMock, patch
+from datetime import timezone, timedelta
+from unittest.mock import patch
 import pytest
 
 from engine.auto_alert_engine import AutoAlert, AutoAlertEngine
-from bot.alert_templates import render_auto_alert, render_precursor_alert, render_asymmetric_alert
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
@@ -127,7 +126,9 @@ def test_post_market_high_conviction_swing_dispatches_to_telegram(clean_engine, 
         mock_tg.assert_called_once()
         dispatched_msg = mock_tg.call_args[0][0]
         assert "POST-MARKET EOD WATCHLIST" in dispatched_msg
-        assert "Market is closed. Setup calibrated for tomorrow's opening gameplan" in dispatched_msg
+        assert (
+            "Market is closed. Setup calibrated for tomorrow's opening gameplan" in dispatched_msg
+        )
 
 
 def test_post_market_asymmetric_opportunity_dispatches_high_conviction(clean_engine, monkeypatch):

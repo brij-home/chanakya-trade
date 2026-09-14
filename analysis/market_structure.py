@@ -53,6 +53,9 @@ class OrderBlock:
     volume_ratio: float = 1.0
     confluence_count: int = 1  # Number of aggregated overlapping blocks
     ote_price: float = 0.0  # 50% Mean Threshold (MT) / Optimal Trade Entry sweet spot
+    is_unmitigated: bool = True
+    has_fvg_confluence: bool = False
+    quality_tier: str = "TIER_1_PRIME"  # "TIER_1_PRIME" | "TIER_2_VALID" | "TIER_3_WEAK"
 
 
 @dataclass
@@ -108,6 +111,14 @@ class MarketStructureReport:
     target_1: float = 0.0
     target_2: float = 0.0
     risk_reward_ratio: float = 0.0
+
+    # SMC 2.0 Dealing Range & Inducement Metrics
+    dealing_range_equilibrium: float = 0.0
+    discount_zone_low: float = 0.0
+    discount_zone_high: float = 0.0
+    in_discount_zone: bool = False
+    inducement_level: Optional[float] = None
+    inducement_swept: bool = False
 
     summary: str = ""
     actionable_trade_idea: str = ""
@@ -566,9 +577,34 @@ def analyze_market_structure(
 
     # 2. SMC Elements
     demand_obs, supply_obs = detect_order_blocks(df, swings)
-    active_demand = [ob for ob in demand_obs if not ob.mitigated][-3:]
-    active_supply = [ob for ob in supply_obs if not ob.mitigated][-3:]
     fvgs = [f for f in detect_fair_value_gaps(df) if not f.filled][-4:]
+
+    # Enrich Order Blocks with FVG confluence and unmitigated status
+    for ob in demand_obs:
+        ob.is_unmitigated = not ob.mitigated
+        # Check if any bullish FVG sits directly above or inside this demand block
+        ob.has_fvg_confluence = any(
+            f.type == "BULLISH" and abs(f.bottom - ob.top) <= (ob.top * 0.008) for f in fvgs
+        )
+        ob.quality_tier = (
+            "TIER_1_PRIME"
+            if (ob.is_unmitigated and ob.has_fvg_confluence)
+            else ("TIER_2_VALID" if ob.is_unmitigated else "TIER_3_WEAK")
+        )
+
+    for ob in supply_obs:
+        ob.is_unmitigated = not ob.mitigated
+        ob.has_fvg_confluence = any(
+            f.type == "BEARISH" and abs(f.top - ob.bottom) <= (ob.bottom * 0.008) for f in fvgs
+        )
+        ob.quality_tier = (
+            "TIER_1_PRIME"
+            if (ob.is_unmitigated and ob.has_fvg_confluence)
+            else ("TIER_2_VALID" if ob.is_unmitigated else "TIER_3_WEAK")
+        )
+
+    active_demand = [ob for ob in demand_obs if ob.is_unmitigated][-3:]
+    active_supply = [ob for ob in supply_obs if ob.is_unmitigated][-3:]
     sweeps = detect_liquidity_sweeps(df, swings)[-3:]
 
     # 3. Structural Regime Classification
@@ -735,6 +771,23 @@ def analyze_market_structure(
     else:
         action = f"Consolidating inside range ₹{nearest_support:.2f} – ₹{nearest_resistance:.2f}. Await clear BOS or Liquidity Sweep before entering."
 
+    # SMC 2.0 Dealing Range Equilibrium and Inducement
+    range_high = max(last_swing_high, ltp)
+    range_low = min(last_swing_low, ltp)
+    dealing_range = max(1.0, range_high - range_low)
+    equilibrium = round(range_low + dealing_range * 0.5, 2)
+    discount_high = round(range_high - dealing_range * 0.50, 2)
+    discount_low = round(range_high - dealing_range * 0.786, 2)
+    in_discount = ltp <= equilibrium
+
+    inducement_lvl = low_swings[-1].price if len(low_swings) >= 2 else None
+    inducement_swept = any(
+        sw.type == "BULLISH_SWEEP"
+        and inducement_lvl
+        and abs(sw.swept_level - inducement_lvl) <= (dealing_range * 0.03)
+        for sw in sweeps
+    )
+
     return MarketStructureReport(
         symbol=symbol,
         ltp=round(ltp, 2),
@@ -759,6 +812,12 @@ def analyze_market_structure(
         target_1=round(target_1, 2),
         target_2=round(target_2, 2),
         risk_reward_ratio=rr,
+        dealing_range_equilibrium=equilibrium,
+        discount_zone_low=discount_low,
+        discount_zone_high=discount_high,
+        in_discount_zone=in_discount,
+        inducement_level=round(inducement_lvl, 2) if inducement_lvl else None,
+        inducement_swept=inducement_swept,
         summary=summary,
         actionable_trade_idea=action,
     )

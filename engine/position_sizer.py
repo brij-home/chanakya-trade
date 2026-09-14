@@ -321,9 +321,10 @@ def extract_underlying_symbol(symbol: str) -> Optional[str]:
     if clean in _F_AND_O_LOT_SIZES:
         return clean
     import re
+
     for k in _SORTED_FNO_KEYS:
         if clean.startswith(k):
-            rest = clean[len(k):]
+            rest = clean[len(k) :]
             if re.match(r"^\d{2}[A-Z\d]+", rest) or rest.endswith(("CE", "PE", "FUT")):
                 return k
     return None
@@ -343,6 +344,7 @@ def get_lot_size(symbol: str) -> int:
     # 1. Check verified contract master first if available
     try:
         from market.instrument_master import get_verified_contract
+
         vc = get_verified_contract(symbol)
         if vc and int(vc.get("lot_size", 0)) > 0:
             return int(vc["lot_size"])
@@ -420,10 +422,14 @@ def calculate_position_size(
     vix_note = ""
     if vix is not None and vix > 0:
         if vix >= 25.0:
-            effective_risk_pct = round(max_risk_pct * 0.50, 2)  # Cut risk in half during extreme turbulence
+            effective_risk_pct = round(
+                max_risk_pct * 0.50, 2
+            )  # Cut risk in half during extreme turbulence
             vix_note = f" [VIX={vix:.1f} EXTREME: Risk scaled down 50% to {effective_risk_pct}%]"
         elif vix >= 18.0:
-            effective_risk_pct = round(max_risk_pct * 0.70, 2)  # Scale down 30% during elevated volatility
+            effective_risk_pct = round(
+                max_risk_pct * 0.70, 2
+            )  # Scale down 30% during elevated volatility
             vix_note = f" [VIX={vix:.1f} ELEVATED: Risk scaled down 30% to {effective_risk_pct}%]"
 
     # Dollar risk budget
@@ -448,9 +454,7 @@ def calculate_position_size(
 
     else:  # fixed_fractional
         raw_shares = int(risk_budget / stop_distance)
-        notes = (
-            f"Sized strictly on stop distance ({stop_distance:.2f} pts) at {effective_risk_pct}% risk.{vix_note}"
-        )
+        notes = f"Sized strictly on stop distance ({stop_distance:.2f} pts) at {effective_risk_pct}% risk.{vix_note}"
 
     # 2. Apply Capital Ceiling if configured
     if max_capital_pct is not None and max_capital_pct > 0:

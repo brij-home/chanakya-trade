@@ -16,29 +16,26 @@ Comprehensive test suite verifying:
 from __future__ import annotations
 
 from datetime import datetime, timezone, timedelta
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
 from engine.alert_model import AutoAlert
 from engine.alert_evaluator import (
     evaluate_alert_in_flight_decay,
-    InFlightWarningEvaluation,
 )
 from engine.alert_scrutiny import AlertScrutinyAuditor
 from engine.auto_alert_engine import AutoAlertEngine
-from engine.position_sizer import calculate_position_size, PositionSizeResult
+from engine.position_sizer import calculate_position_size
 from bot.alert_templates import (
     render_auto_alert,
-    render_in_flight_warning_alert,
-    render_milestone_alert,
-    MilestoneAlertData,
 )
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
+
 
 @pytest.fixture
 def mock_engine():
@@ -53,6 +50,7 @@ def auditor() -> AlertScrutinyAuditor:
 
 
 # ── Decision Making Framework Tests ──────────────────────────────────────────
+
 
 class TestDecisionMakingFramework:
     def test_mtf_15m_trend_alignment_gate_rejects_counter_trend(self, auditor):
@@ -73,7 +71,10 @@ class TestDecisionMakingFramework:
             confidence=85,
             metrics={"mtf_15m_trend": "BEARISH_DOWNTREND"},  # Direct conflict!
         )
-        with patch("engine.learning_engine.pattern_learning_engine.is_symbol_locked_out", return_value=(False, "")):
+        with patch(
+            "engine.learning_engine.pattern_learning_engine.is_symbol_locked_out",
+            return_value=(False, ""),
+        ):
             passed, reason, flags = auditor.verify_tier1_sanity(alert)
             assert not passed, "Counter-trend trade should be rejected by MTF 15m alignment gate"
             assert "MTF Confluence Failure" in reason
@@ -115,7 +116,7 @@ class TestDecisionMakingFramework:
                 summary="Elevated VIX requires 1:2.0 RR",
                 ltp=24000.0,
                 trigger_level=24000.0,
-                stop_loss=23900.0,     # Risk = 100
+                stop_loss=23900.0,  # Risk = 100
                 target_level=24140.0,  # Reward = 140 -> R:R = 1:1.4 (Fails requirement of 1:2.0 at VIX 20.5)
                 confidence=85,
             )
@@ -190,6 +191,7 @@ class TestDecisionMakingFramework:
 
 
 # ── In-Flight Decay & Danger Zone Warning Tests ──────────────────────────────
+
 
 class TestInFlightDecayAlerts:
     def test_danger_zone_triggers_when_70pct_risk_consumed(self):
@@ -603,7 +605,7 @@ class TestInFlightDecayAlerts:
             # First dispatch -> dispatches to Telegram
             mock_engine._dispatch(alert)
             assert mock_notify.call_count == 1
-            latch_key = f"CRUDEOIL:latch-dispatch-1:IN_FLIGHT_WARNING"
+            latch_key = "CRUDEOIL:latch-dispatch-1:IN_FLIGHT_WARNING"
             assert latch_key in mock_engine._dispatched_milestones
 
             # Second dispatch -> MUST be suppressed by milestone latch!
@@ -646,10 +648,11 @@ class TestInFlightDecayAlerts:
         assert loaded.in_flight_warning_reason == "DANGER ZONE: 84% risk consumed."
         assert loaded.in_flight_warning_at == "2026-09-11 22:00:00 IST"
         # Seeded milestone check
-        assert f"CRUDEOIL:persist-warn-1:IN_FLIGHT_WARNING" in new_engine._dispatched_milestones
+        assert "CRUDEOIL:persist-warn-1:IN_FLIGHT_WARNING" in new_engine._dispatched_milestones
 
 
 # ── Telegram Alert Template Formatting Tests ─────────────────────────────────
+
 
 class TestInFlightAlertTemplates:
     def test_render_danger_zone_in_flight_warning_alert(self):

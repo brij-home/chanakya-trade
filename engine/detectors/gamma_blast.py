@@ -199,6 +199,7 @@ def detect_gamma_blast(
             if not opt_ltp or opt_ltp <= 0.0:
                 try:
                     from market.quotes import get_ltp
+
                     fetched = get_ltp(contract_sym)
                     if fetched and fetched > 0:
                         opt_ltp = float(fetched)
@@ -409,6 +410,7 @@ def detect_gamma_blast(
             if not opt_ltp or opt_ltp <= 0.0:
                 try:
                     from market.quotes import get_ltp
+
                     fetched = get_ltp(contract_sym)
                     if fetched and fetched > 0:
                         opt_ltp = float(fetched)

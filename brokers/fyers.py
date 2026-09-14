@@ -526,7 +526,12 @@ class FyersAPI(BrokerAPI):
                 fyers_sym = "NSE:NIFTYBANK-INDEX"
             elif clean_und in COMMODITY_SYMBOLS or underlying.upper().startswith("MCX:"):
                 fyers_sym = f"MCX:{clean_und}"
-            elif clean_und in ("USDINR", "EURINR", "GBPINR", "JPYINR") or underlying.upper().startswith("CDS:"):
+            elif clean_und in (
+                "USDINR",
+                "EURINR",
+                "GBPINR",
+                "JPYINR",
+            ) or underlying.upper().startswith("CDS:"):
                 fyers_sym = f"CDS:{clean_und}"
             else:
                 fyers_sym = f"NSE:{clean_und}-EQ"

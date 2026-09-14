@@ -64,7 +64,7 @@ if sys.platform == "win32":
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field
 from rich.console import Console
 
 from agent.tools import _serialise
@@ -121,10 +121,8 @@ from web.schemas import (
     ManualAlertTestRequest,
     HintRequest,
     HistoryRequest,
-    OptionLegItem,
     PayoffSimRequest,
     FlowsHistoryRequest,
-    SectorHeatmapRequest,
     PortfolioHealthRequest,
     TaxEstimateRequest,
     DefinedRiskSpreadRequest,
@@ -6751,7 +6749,9 @@ async def skill_gex_snapshot(req: Optional[GEXSnapshotRequest] = None):
                                     "when_to_wait": f"DO NOT CHASE if premium > ₹{round(prem * 1.15, 1):,}. Wait for pullback to ₹{entry_low:,.2f}",
                                     "profit_rule": f"Book 50% profit at Target 1 (₹{t1_prem:,.2f}), trail Stop Loss to Cost for Target 2 (₹{t2_prem:,.2f})",
                                     "is_realtime": source_info.get("is_realtime", True),
-                                    "environment": "LIVE" if source_info.get("is_realtime", True) else "TEST",
+                                    "environment": "LIVE"
+                                    if source_info.get("is_realtime", True)
+                                    else "TEST",
                                 }
                             )
 
@@ -6881,7 +6881,9 @@ async def skill_gex_snapshot(req: Optional[GEXSnapshotRequest] = None):
                                     "when_to_wait": f"DO NOT CHASE if premium > ₹{round(prem * 1.15, 1):,}. Wait for pullback to ₹{entry_low:,.2f}",
                                     "profit_rule": f"Book 50% profit at Target 1 (₹{t1_prem:,.2f}), trail Stop Loss to Cost for Target 2 (₹{t2_prem:,.2f})",
                                     "is_realtime": source_info.get("is_realtime", True),
-                                    "environment": "LIVE" if source_info.get("is_realtime", True) else "TEST",
+                                    "environment": "LIVE"
+                                    if source_info.get("is_realtime", True)
+                                    else "TEST",
                                 }
                             )
 

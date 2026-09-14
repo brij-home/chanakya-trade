@@ -10,6 +10,7 @@
 [CmdletBinding()]
 param (
     [switch]$NoFrontend,
+    [switch]$Detached,
     [string]$ApiHost = $(if ($env:API_HOST) { $env:API_HOST } else { "127.0.0.1" }),
     [int]$ApiPort = 8765,
     [int]$VitePort = 5173,
@@ -19,6 +20,11 @@ param (
 $ErrorActionPreference = "Stop"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $RootDir = Split-Path -Parent $ScriptDir
+
+if ($Detached) {
+    & (Join-Path $ScriptDir "service.ps1") -Action restart $(if ($NoFrontend) { "-NoFrontend" }) -ApiHost $ApiHost -ApiPort $ApiPort -VitePort $VitePort
+    exit 0
+}
 
 Write-Host ""
 Write-Host "==================================================================" -ForegroundColor Cyan

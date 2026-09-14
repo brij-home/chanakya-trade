@@ -174,11 +174,7 @@ def is_alert_option_premium_level(alert: Any) -> bool:
     ):
         return True
 
-    has_opt_marker = bool(
-        csym
-        or opt_t in ("CE", "PE")
-        or getattr(alert, "strike", None)
-    )
+    has_opt_marker = bool(csym or opt_t in ("CE", "PE") or getattr(alert, "strike", None))
     if not has_opt_marker:
         return False
 
@@ -197,4 +193,3 @@ def is_alert_option_premium_level(alert: Any) -> bool:
         return abs(ltp - prem) <= max(2.0, prem * 0.25)
 
     return False
-

@@ -192,11 +192,53 @@ def _score_fii_futures_position() -> FactorScore:
     NSE participant-wise OI data published daily ~6 PM IST.
     """
     try:
+        from market.participant_oi import get_latest_participant_oi
+
+        oi_summary = get_latest_participant_oi()
+        if oi_summary and oi_summary.fii_index_long_ratio > 0:
+            ratio = oi_summary.fii_index_long_ratio
+            net_idx = oi_summary.fii_net_index_futures
+
+            if ratio <= 0.20:
+                score = 8
+                sig = "BULLISH"
+                dtl = f"FII Index Long Ratio severely depressed at {ratio * 100:.1f}% ({net_idx:,} net contracts) — Extreme short squeeze coiling setup."
+            elif ratio >= 0.70:
+                score = 8
+                sig = "BULLISH"
+                dtl = f"FII heavily long Index Futures at {ratio * 100:.1f}% ({net_idx:,} net contracts)."
+            elif ratio >= 0.52:
+                score = 7
+                sig = "BULLISH"
+                dtl = f"FII net long bias at {ratio * 100:.1f}% ({net_idx:,} net contracts)."
+            elif ratio <= 0.35:
+                score = 3
+                sig = "BEARISH"
+                dtl = f"FII net short bias at {ratio * 100:.1f}% ({net_idx:,} net contracts)."
+            else:
+                score = 5
+                sig = "NEUTRAL"
+                dtl = f"FII balanced at {ratio * 100:.1f}% ({net_idx:,} net contracts)."
+
+            if oi_summary.divergence_notes:
+                dtl += f" [{oi_summary.divergence_notes[0]}]"
+
+            return FactorScore(
+                factor_id="fii_futures",
+                label="FII Participant-wise OI Ratio",
+                score=score,
+                signal=sig,
+                detail=dtl,
+                raw_value=float(net_idx),
+                axis="INSTITUTIONAL",
+            )
+    except Exception as e:
+        logger.debug("Real participant OI check fallback to proxy: %s", e)
+
+    try:
         from market.sentiment import get_fii_dii_data
 
-        # Approximate from cash flow trend as proxy until NSE F&O participant API is integrated
-        # Note: True F&O participant data requires NSE MWPL/participant API
-        # For now, use 5-day FII trend + momentum as proxy
+        # Fallback to 5-day FII cash momentum proxy if participant report unavailable
         raw = get_fii_dii_data(days=5)
         if not raw:
             raise ValueError("No data")
@@ -206,7 +248,6 @@ def _score_fii_futures_position() -> FactorScore:
         positive_days = sum(1 for d in recent_5 if d.fii_net > 0)
         negative_days = sum(1 for d in recent_5 if d.fii_net < 0)
 
-        # Momentum: is FII getting more or less active?
         if len(recent_5) >= 3:
             recent_3_avg = sum(d.fii_net for d in recent_5[:3]) / 3
             prior_2_avg = sum(d.fii_net for d in recent_5[3:]) / max(1, len(recent_5) - 3)

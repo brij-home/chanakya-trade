@@ -66,6 +66,11 @@ class VolumeProfileReport:
     val_price: float  # Value Area Low (70%)
     price_vs_value_area: str  # "ABOVE_VAH" | "INSIDE_VALUE_AREA" | "BELOW_VAL"
 
+    # Order Flow & Delivery Signals
+    cvd_divergence: Optional[str] = None  # "BULLISH_ABSORPTION" | "BEARISH_EXHAUSTION" | "NEUTRAL"
+    delivery_pct: Optional[float] = None
+    delivery_spike: bool = False
+
     # Signals
     vsa_signals: list[VSASignal] = field(default_factory=list)
     profile_buckets: list[VolumeProfileBucket] = field(default_factory=list)
@@ -378,6 +383,45 @@ def analyze_volume_profile(
     else:
         footprint_bias = "NEUTRAL"
 
+    # Order Flow: Cumulative Volume Delta (CVD) & Delivery Analysis
+    deltas = []
+    for i in range(max(0, len(df) - 30), len(df)):
+        h = float(df["high"].iloc[i]) if "high" in df.columns else float(df["close"].iloc[i])
+        l = float(df["low"].iloc[i]) if "low" in df.columns else float(df["close"].iloc[i])
+        c = float(df["close"].iloc[i])
+        v = float(df["volume"].iloc[i]) if "volume" in df.columns else 1.0
+        bar_range = max(0.01, h - l)
+        pos = (c - l) / bar_range
+        deltas.append(v * (2.0 * pos - 1.0))
+
+    cum_delta = np.cumsum(deltas)
+    price_change = float(df["close"].iloc[-1]) - float(df["close"].iloc[-min(len(df), 10)])
+    cvd_change = float(cum_delta[-1] - cum_delta[0]) if len(cum_delta) > 0 else 0.0
+
+    cvd_divergence = "NEUTRAL"
+    if price_change <= 0 and cvd_change > 0:
+        cvd_divergence = "BULLISH_ABSORPTION"
+        footprint_score = min(100, footprint_score + 20)
+    elif price_change >= 0 and cvd_change < 0:
+        cvd_divergence = "BEARISH_EXHAUSTION"
+        footprint_score = max(-100, footprint_score - 20)
+
+    # Cash Delivery Analysis
+    delivery_pct = None
+    delivery_spike = False
+    if "delivery_pct" in df.columns:
+        delivery_pct = float(df["delivery_pct"].iloc[-1])
+        avg_del = float(df["delivery_pct"].iloc[-15:-1].mean()) if len(df) >= 15 else 40.0
+        delivery_spike = delivery_pct >= max(55.0, avg_del * 1.3)
+    elif "delivery_quantity" in df.columns and "volume" in df.columns:
+        cur_dq = float(df["delivery_quantity"].iloc[-1])
+        cur_v = float(df["volume"].iloc[-1])
+        delivery_pct = round((cur_dq / max(1.0, cur_v)) * 100.0, 1)
+        delivery_spike = delivery_pct >= 55.0
+
+    if delivery_spike:
+        footprint_score = min(100, footprint_score + 15)
+
     # Summary
     summary = f"Volume is {vol_tier} (RVOL 20D: {rvol_20:.2f}x). POC at ₹{poc_price:.2f} (VAH: ₹{vah_price:.2f}, VAL: ₹{val_price:.2f}). Footprint: {footprint_bias} (Score: {footprint_score:+d}/100)."
     if va_status == "ABOVE_VAH":
@@ -399,6 +443,9 @@ def analyze_volume_profile(
         vah_price=vah_price,
         val_price=val_price,
         price_vs_value_area=va_status,
+        cvd_divergence=cvd_divergence,
+        delivery_pct=delivery_pct,
+        delivery_spike=delivery_spike,
         vsa_signals=vsa_signals[-5:],
         profile_buckets=buckets,
         summary=summary,
