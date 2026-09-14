@@ -121,8 +121,8 @@ if (-not $NoFrontend -and (Test-Path $FrontendDir)) {
     $frontendOut = Join-Path $LogDir "frontend.log"
     $frontendErr = Join-Path $LogDir "frontend_err.log"
 
-    Write-Host "[*] Launching detached Electron & Vite Desktop App on http://localhost:$VitePort ..." -ForegroundColor Cyan
-    $frontendCmd = "cmd.exe /c `"npm.cmd run dev > `"$frontendOut`" 2> `"$frontendErr`"`""
+    Write-Host "[*] Launching detached Vite Dev Server on http://localhost:$VitePort ..." -ForegroundColor Cyan
+    $frontendCmd = "cmd.exe /c `"npm.cmd run dev:renderer > `"$frontendOut`" 2> `"$frontendErr`"`""
     $fRes = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{
         CommandLine = $frontendCmd
         CurrentDirectory = $FrontendDir
