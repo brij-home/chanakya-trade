@@ -412,7 +412,7 @@ class PrecursorRadarScanner:
         score = 15  # baseline anchor
         matched_factors: list[str] = []
 
-        # A. Volume Dry-Up (Seller Exhaustion) [0–25 pts]
+        # A. Volume Dry-Up (Seller Exhaustion) or Early Intraday Volume Surge [0–25 pts]
         prior_vol_ratio = 1.0
         if volumes is not None and len(volumes) >= 21:
             avg_20 = float(np.mean(volumes[-21:-1]))
@@ -420,7 +420,21 @@ class PrecursorRadarScanner:
             prior_vol = float(volumes[-2]) if len(volumes) >= 2 else avg_20
             prior_vol_ratio = round(prior_vol / max(1.0, avg_20), 3)
 
-            if prior_vol_ratio <= 0.20:
+            # Intraday TOD-RVOL check if volume is already active
+            tod_rvol = 1.0
+            if vol > 0:
+                try:
+                    from engine.auto_alert_engine import compute_time_of_day_rvol
+                    tod_rvol = compute_time_of_day_rvol(vol, avg_20)
+                except Exception:
+                    pass
+
+            if tod_rvol >= 1.6:
+                score += 25
+                matched_factors.append(
+                    f"Institutional Volume Expansion ({tod_rvol:.1f}x TOD-RVOL above session expectation)"
+                )
+            elif prior_vol_ratio <= 0.20:
                 score += 25
                 matched_factors.append(
                     f"Extreme Volume Dry-Up ({prior_vol_ratio * 100:.0f}% of 20D SMA — Institutional Supply Exhaustion)"

@@ -479,11 +479,11 @@ class MStockWebSocket:
         self._thread = threading.Thread(target=self._run_loop, daemon=True)
         self._thread.start()
 
-        # Wait briefly for connection
-        for _ in range(25):
+        # Non-blocking quick check
+        for _ in range(2):
             if self._connected:
                 break
-            time.sleep(0.2)
+            time.sleep(0.05)
 
     def stop(self, timeout: float = 2.0) -> None:
         """Disconnect and stop background thread."""
@@ -555,10 +555,28 @@ class MStockWebSocket:
 
             except Exception as e:
                 self._connected = False
+                # Guard: stop retrying if the event loop is shutting down.
+                # Without this check, asyncio.sleep() raises
+                # "cannot schedule new futures after interpreter shutdown",
+                # which leaks CloseWait sockets and eventually causes
+                # "too many file descriptors in select()" on Windows.
+                try:
+                    loop = asyncio.get_event_loop()
+                    if not loop.is_running():
+                        logger.debug("m.Stock WebSocket retry aborted: event loop is not running")
+                        return
+                except RuntimeError:
+                    return
+                if not self._running:
+                    return
                 logger.warning(
                     f"m.Stock WebSocket connection dropped ({e}), retrying in {reconnect_delay:.1f}s..."
                 )
-                await asyncio.sleep(reconnect_delay)
+                try:
+                    await asyncio.sleep(reconnect_delay)
+                except (asyncio.CancelledError, RuntimeError):
+                    # Loop is shutting down — exit cleanly
+                    return
                 reconnect_delay = min(30.0, reconnect_delay * 1.5)
 
     def _handle_message(self, message: Union[bytes, str]) -> None:

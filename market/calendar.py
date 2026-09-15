@@ -302,8 +302,9 @@ def get_current_ist_session(ref_dt: Optional[datetime] = None) -> dict[str, bool
     )
     is_currency = is_currency_window and is_market_open("CDS", ref_dt=now)
 
-    is_commodity_window = dtime(15, 30) < current_t <= dtime(23, 30)
-    is_commodity = is_commodity_window and is_market_open("MCX", ref_dt=now)
+    # MCX Commodities: Active continuously throughout exchange hours (09:00 - 23:30 IST)
+    # as well as evening-only sessions on applicable holidays.
+    is_commodity = is_market_open("MCX", ref_dt=now)
 
     return {
         "equity_nfo": is_equity_nfo,

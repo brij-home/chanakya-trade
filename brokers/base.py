@@ -76,16 +76,17 @@ class Quote:
 
     symbol: str
     last_price: float
-    open: float
-    high: float
-    low: float
-    close: float  # Previous close
-    volume: int
+    open: Optional[float] = None
+    high: Optional[float] = None
+    low: Optional[float] = None
+    close: Optional[float] = None  # Previous close
+    volume: int = 0
     oi: Optional[int] = None  # Open Interest (F&O only)
     bid: Optional[float] = None
     ask: Optional[float] = None
     change: float = 0.0  # Change from prev close in INR
     change_pct: float = 0.0  # Change as %
+    vwap: Optional[float] = None  # Intraday Volume-Weighted Average Price
     provider: str = "UNKNOWN"
     source: str = "UNKNOWN"  # STREAM | REST | EOD_SNAPSHOT | FALLBACK | CACHE
     data_state: str = "UNAVAILABLE"  # LIVE | DELAYED | EOD | DEGRADED | UNAVAILABLE
@@ -314,8 +315,14 @@ class BrokerAPI(ABC):
 
     def get_ltp(self, instrument: str) -> float:
         """Quick last traded price for a single instrument."""
-        quotes = self.get_quote([instrument])
-        return quotes[instrument].last_price
+        try:
+            quotes = self.get_quote([instrument])
+            if isinstance(quotes, dict):
+                q = quotes.get(instrument) or next(iter(quotes.values()), None)
+                return float(getattr(q, "last_price", 0.0) or 0.0)
+            return float(getattr(quotes, "last_price", 0.0) or 0.0)
+        except Exception:
+            return 0.0
 
     def get_net_pnl(self) -> float:
         """Sum of unrealised P&L across holdings + positions."""

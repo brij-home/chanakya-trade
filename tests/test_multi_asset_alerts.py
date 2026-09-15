@@ -23,19 +23,19 @@ IST = timezone(timedelta(hours=5, minutes=30))
 
 def test_time_partitioned_session_schedule():
     """Validates institutional time-partitioning across trading sessions."""
-    # Wednesday 10:30 IST -> Pure Domestic Equity & NFO Desk
+    # Wednesday 10:30 IST -> Domestic Equity & NFO Desk + Continuous MCX Commodities Desk
     t_equity = datetime(2026, 9, 9, 10, 30, tzinfo=IST)
     s_eq = get_current_ist_session(t_equity)
     assert s_eq["equity_nfo"] is True
     assert s_eq["currency"] is False
-    assert s_eq["commodity"] is False
+    assert s_eq["commodity"] is True  # MCX is continuously open from 09:00 to 23:30 IST
 
-    # Wednesday 09:05 IST -> Pre-Equity Currency window
+    # Wednesday 09:05 IST -> Pre-Equity Currency window + MCX open
     t_pre_curr = datetime(2026, 9, 9, 9, 5, tzinfo=IST)
     s_pre = get_current_ist_session(t_pre_curr)
     assert s_pre["equity_nfo"] is False
     assert s_pre["currency"] is True
-    assert s_pre["commodity"] is False
+    assert s_pre["commodity"] is True
 
     # Wednesday 16:00 IST -> Post-Equity: Currency (CDS) + Commodities (MCX)
     t_post = datetime(2026, 9, 9, 16, 0, tzinfo=IST)
@@ -64,6 +64,60 @@ def test_time_partitioned_session_schedule():
     assert s_sun["equity_nfo"] is False
     assert s_sun["currency"] is False
     assert s_sun["commodity"] is False
+
+
+def test_commodity_intraday_open_relative_breakout():
+    """Verifies that scan_commodities_now detects moves from open even if change vs prev close is flat/negative."""
+    engine = AutoAlertEngine()
+    engine._alerts = []
+    engine._cooldowns = {}
+    engine._watched_commodities = ["CRUDEOIL"]
+
+    mock_quote = MagicMock()
+    mock_quote.last_price = 9880.0
+    mock_quote.ltp = 9880.0
+    mock_quote.open = 9710.0  # +1.75% from open!
+    mock_quote.high = 9890.0
+    mock_quote.low = 9705.0
+    mock_quote.change_pct = 0.15  # Only +0.15% vs prev close (opened gap down)
+    mock_quote.volume = 55000
+
+    with patch("market.quotes.get_quote", return_value={"MCX:CRUDEOIL": mock_quote}):
+        with patch("market.history.get_ohlcv", return_value=None):
+            with patch("market.quotes.get_ltp", return_value=9880.0):
+                alerts = engine.scan_commodities_now()
+                assert len(alerts) >= 1
+                crude_alert = alerts[0]
+                assert crude_alert.symbol == "CRUDEOIL"
+                assert crude_alert.direction == "BULLISH"
+                assert crude_alert.actionable_plan["segment"] == "COMMODITY"
+
+
+def test_commodity_intraday_rejection_dump():
+    """Verifies that scan_commodities_now detects intraday dumps from highs even if change vs prev close is small."""
+    engine = AutoAlertEngine()
+    engine._alerts = []
+    engine._cooldowns = {}
+    engine._watched_commodities = ["CRUDEOIL"]
+
+    mock_quote = MagicMock()
+    mock_quote.last_price = 9815.0
+    mock_quote.ltp = 9815.0
+    mock_quote.open = 9710.0
+    mock_quote.high = 9998.0
+    mock_quote.low = 9810.0
+    mock_quote.change_pct = -0.61  # Only -0.61% vs prev close (dropped from 9998 day high)
+    mock_quote.volume = 65000
+
+    with patch("market.quotes.get_quote", return_value={"MCX:CRUDEOIL": mock_quote}):
+        with patch("market.history.get_ohlcv", return_value=None):
+            with patch("market.quotes.get_ltp", return_value=9815.0):
+                alerts = engine.scan_commodities_now()
+                assert len(alerts) >= 1
+                crude_alert = alerts[0]
+                assert crude_alert.symbol == "CRUDEOIL"
+                assert crude_alert.direction == "BEARISH"
+                assert crude_alert.actionable_plan["segment"] == "COMMODITY"
 
 
 def test_mcx_commodity_alert_template_rendering():
@@ -267,6 +321,9 @@ def test_commodity_options_chain_resolution():
 
 def test_commodity_alert_includes_defined_risk_option_alternative():
     """Verifies that scan_commodities_now provides a defined-risk option contract alternative."""
+    from market.options import _CHAIN_CACHE
+
+    _CHAIN_CACHE.clear()
     engine = AutoAlertEngine()
     engine._alerts = []
     engine._cooldowns = {}

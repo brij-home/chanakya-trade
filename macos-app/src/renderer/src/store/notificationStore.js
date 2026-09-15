@@ -1,6 +1,8 @@
 import { create } from 'zustand'
 
 const STORAGE_KEY = 'chanakya_notifications_v1'
+// Singleton polling interval — only ONE interval runs across the entire app
+let _pollTimer = null
 const MAX_NOTIFICATIONS = 100
 
 // Safe localStorage loader
@@ -96,10 +98,58 @@ export const useNotificationStore = create((set, get) => ({
   isDropdownOpen: false,
   selectedNotification: null,
 
+  isLoading: false,
+  lastSyncedAt: null,
+  setIsLoading: (isLoading) => set({ isLoading }),
+
   setDropdownOpen: (isOpen) => set({ isDropdownOpen: isOpen }),
   toggleDropdown: () => set((s) => ({ isDropdownOpen: !s.isDropdownOpen })),
 
   setSelectedNotification: (notif) => set({ selectedNotification: notif }),
+
+  syncRecentAlerts: (rawList) => {
+    if (!Array.isArray(rawList)) return
+    const normalized = rawList
+      .map((item) => normalizeNotification(item))
+      .filter(Boolean)
+
+    set((s) => {
+      const existingMap = new Map(s.notifications.map((n) => [n.id, n]))
+      const merged = []
+
+      for (const item of normalized) {
+        if (existingMap.has(item.id)) {
+          // Preserve local read state and user modifications
+          const existing = existingMap.get(item.id)
+          merged.push({ ...item, read: existing.read })
+          existingMap.delete(item.id)
+        } else {
+          merged.push(item)
+        }
+      }
+
+      // Preserve any local/SSE alerts not present in the backend snapshot
+      for (const rem of existingMap.values()) {
+        merged.push(rem)
+      }
+
+      // Sort newest-first based on timestamp / created_at
+      merged.sort((a, b) => {
+        const timeA = new Date(String(a.timestamp || a.created_at || '').replace(' IST', '')).getTime() || 0
+        const timeB = new Date(String(b.timestamp || b.created_at || '').replace(' IST', '')).getTime() || 0
+        return timeB - timeA
+      })
+
+      const next = merged.slice(0, MAX_NOTIFICATIONS)
+      saveNotifications(next)
+      return {
+        notifications: next,
+        unreadCount: next.filter((n) => !n.read).length,
+        lastSyncedAt: new Date().toISOString(),
+        isLoading: false,
+      }
+    })
+  },
 
   addNotification: (rawPayload) => {
     const item = normalizeNotification(rawPayload)
@@ -164,5 +214,65 @@ export const useNotificationStore = create((set, get) => ({
       unreadCount: 0,
       selectedNotification: null,
     })
+  },
+
+  /**
+   * Fetches alerts from the backend using the provided `call` function and
+   * merges them into the store. Safe to call concurrently — uses a guard flag.
+   */
+  fetchAlerts: async (call) => {
+    if (!call) return
+    const state = useNotificationStore.getState()
+    if (state.isLoading) return // skip if a fetch is already in-flight
+    set({ isLoading: true })
+    try {
+      let list = []
+      try {
+        const res = await call('/skills/alerts/auto/list', { view_mode: 'ALL' })
+        list = res?.data ?? res ?? []
+      } catch (_callErr) {
+        // Vite browser dev fallback — sidecar IPC unavailable
+        const directRes = await fetch('http://127.0.0.1:8765/skills/alerts/auto/list', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ view_mode: 'ALL' }),
+        })
+        if (directRes.ok) {
+          const data = await directRes.json()
+          list = data?.data ?? data ?? []
+        }
+      }
+      if (Array.isArray(list) && list.length > 0) {
+        useNotificationStore.getState().syncRecentAlerts(list)
+      }
+    } catch (err) {
+      console.error('[notificationStore] fetchAlerts error:', err)
+    } finally {
+      set({ isLoading: false })
+    }
+  },
+
+  /**
+   * Starts the singleton background polling loop (30s interval).
+   * Idempotent — calling it multiple times is safe; only one timer ever runs.
+   * @param {Function} call - the useAPI `call` function
+   */
+  startPolling: (call) => {
+    if (_pollTimer !== null) return // already running
+    // Immediate first fetch
+    useNotificationStore.getState().fetchAlerts(call)
+    _pollTimer = setInterval(() => {
+      useNotificationStore.getState().fetchAlerts(call)
+    }, 30_000)
+  },
+
+  /**
+   * Stops the singleton polling loop. Call on app unmount or broker disconnect.
+   */
+  stopPolling: () => {
+    if (_pollTimer !== null) {
+      clearInterval(_pollTimer)
+      _pollTimer = null
+    }
   },
 }))

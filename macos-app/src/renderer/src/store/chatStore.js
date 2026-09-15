@@ -205,6 +205,7 @@ export const useChatStore = create((set, get) => ({
   sidecarError:  null,
   brokerStatus:   { connected: false, broker: null },
   brokerStatuses: {},   // full /api/status response
+  brokerStatusReady: false,  // true after first /api/status fetch resolves
   streamCancel:  null,   // () => void — closes the active EventSource
   activeStreamId: null,  // stream_id from SSE started event (#113)
 
@@ -225,8 +226,8 @@ export const useChatStore = create((set, get) => ({
     // also derive the simple brokerStatus from the full response
     const connected = Object.values(statuses).some(b => b.authenticated)
     const broker    = Object.entries(statuses).find(([, b]) => b.authenticated)?.[0] ?? null
-    const name      = broker ? ({ zerodha: 'Zerodha', groww: 'Groww', angel_one: 'Angel One', upstox: 'Upstox', fyers: 'Fyers' }[broker] ?? broker) : null
-    set({ brokerStatuses: statuses, brokerStatus: { connected, broker: name } })
+    const name      = broker ? ({ zerodha: 'Zerodha', groww: 'Groww', angel_one: 'Angel One', upstox: 'Upstox', fyers: 'Fyers', mstock: 'm.Stock', stoxkart: 'Stoxkart', shoonya: 'Shoonya' }[broker] ?? broker) : null
+    set({ brokerStatuses: statuses, brokerStatus: { connected, broker: name }, brokerStatusReady: true })
   },
 
   // Set server-authoritative app mode (PAPER / DEMO / LIVE)

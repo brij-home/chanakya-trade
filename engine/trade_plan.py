@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import logging
 import math
+import time
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
 from typing import Any, Optional
@@ -192,6 +193,10 @@ def compute_market_session_eta(
         return f"~{eta_minutes} mins ({days_rolled + 1} sessions / ~{arr_time.strftime('%b %d %H:%M')} IST)"
 
 
+_TRADE_PLAN_CACHE: dict[str, tuple[float, TradePlan]] = {}
+_TRADE_PLAN_TTL = 180.0  # 3 minutes cache for historical structural plan
+
+
 def calculate_trade_plan(
     symbol: str,
     direction: str = "BUY",
@@ -211,6 +216,15 @@ def calculate_trade_plan(
     clean_sym = symbol.upper().replace(".NS", "").replace("NSE:", "").strip()
     canonical_dir = normalize_direction(direction)
     is_long = canonical_dir == "LONG"
+
+    # Fast in-memory cache lookup when external df is not provided
+    if df is None and spot > 0:
+        cache_key = f"{clean_sym}:{canonical_dir}:{round(spot, 0)}:{timeframe}:{has_active_blast}"
+        now_ts = time.time()
+        if cache_key in _TRADE_PLAN_CACHE:
+            ts, cached_plan = _TRADE_PLAN_CACHE[cache_key]
+            if now_ts - ts < _TRADE_PLAN_TTL:
+                return cached_plan
 
     # ── 1. Resolve Live Spot Price ────────────────────────────────────────────
     ltp = spot
@@ -796,6 +810,17 @@ def calculate_trade_plan(
         structure_advice=structure_advice,
         as_of=now.strftime("%H:%M:%S IST"),
     )
+
+    if df is None and ltp > 0:
+        cache_key = f"{clean_sym}:{canonical_dir}:{round(ltp, 0)}:{timeframe}:{has_active_blast}"
+        _TRADE_PLAN_CACHE[cache_key] = (time.time(), res)
+        if len(_TRADE_PLAN_CACHE) > 100:
+            cutoff = time.time() - _TRADE_PLAN_TTL
+            for k in list(_TRADE_PLAN_CACHE.keys()):
+                if _TRADE_PLAN_CACHE[k][0] < cutoff:
+                    _TRADE_PLAN_CACHE.pop(k, None)
+
+    return res
 
 
 def is_market_open(exchange: str = "NSE") -> bool:

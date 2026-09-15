@@ -11,6 +11,7 @@ import React, {
 } from 'react'
 import { useAPI } from '../../hooks/useAPI'
 import { useChatStore } from '../../store/chatStore'
+import { useNotificationStore } from '../../store/notificationStore'
 import UnavailableState from '../Common/UnavailableState'
 import MoversAutopsyPanel from './MoversAutopsyPanel'
 import AlertRoutingModal from '../Modals/AlertRoutingModal'
@@ -1349,6 +1350,7 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
   const sendDraft = useChatStore((s) => s.sendDraft)
   const setActiveView = useChatStore((s) => s.setActiveView)
   const brokerStatuses = useChatStore((s) => s.brokerStatuses)
+  const brokerStatusReady = useChatStore((s) => s.brokerStatusReady)
 
   // Active tab: 'auto' (Live Auto-Alerts) vs 'manual' (User Price Alerts)
   const [activeTab, setActiveTab] = useState('auto')
@@ -1618,6 +1620,9 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
   }, [])
 
   // Load auto alerts (silent in-place merge: zero scroll jumps, zero card re-renders)
+  // NOTE: auto-alerts are ALSO synced by the singleton notificationStore.startPolling() loop
+  // (owned by NotificationBell). This local fetch is kept only for view-mode filtering
+  // (LIVE/ALL/TEST) and initial population on mount — not as a recurring timer.
   const loadAutoAlerts = useCallback(async (isInitial = false) => {
     if (isInitial) setAutoLoading(true)
     try {
@@ -1655,10 +1660,24 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
     }
   }, [autoViewMode, chimeEnabled])
 
-  // Re-fetch when autoViewMode toggles
+  // Re-fetch when autoViewMode toggles (view filter changed — must re-query)
   useEffect(() => {
     loadAutoAlerts(false)
   }, [autoViewMode, loadAutoAlerts])
+
+  // Sync store notifications into local autoAlerts so SSE-driven store updates
+  // are reflected in the view without a separate poll.
+  const storeNotifications = useNotificationStore((s) => s.notifications)
+  useEffect(() => {
+    if (!storeNotifications || storeNotifications.length === 0) return
+    // Only merge AUTO-type alerts (PRICE/TECHNICAL/OPTIONS alerts come from manual list)
+    const autoFromStore = storeNotifications.filter(
+      (n) => n.alert_type && !['PRICE', 'TECHNICAL', 'CONDITIONAL'].includes(n.alert_type)
+    )
+    if (autoFromStore.length > 0) {
+      setAutoAlerts((prev) => mergeAlertsInPlace(prev, autoFromStore))
+    }
+  }, [storeNotifications])
 
   useEffect(() => {
     loadAlerts(true)
@@ -1694,11 +1713,11 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
 
     window.addEventListener('new-market-alert', handleLiveAlert)
 
-    // 2. Background polling sync every 15s while view is active (SILENT update, zero screen flicker)
+    // 2. Background polling — MANUAL alerts only (30s); auto-alerts come from SSE + store.
+    // Reduced from 15s to 30s; auto-alerts no longer duplicated here.
     const syncTimer = setInterval(() => {
       loadAlerts(false)
-      loadAutoAlerts(false)
-    }, 15000)
+    }, 30_000)
 
     return () => {
       window.removeEventListener('new-market-alert', handleLiveAlert)
@@ -1755,7 +1774,15 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
     }
 
     fetchLiveSpots()
-    const quoteInterval = setInterval(fetchLiveSpots, 2000)
+    // Market-hours-aware interval: 2s during open hours, 5s when closed.
+    // This halves connection pressure outside trading hours (14:00–09:15 IST).
+    const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000
+    const istNow = new Date(Date.now() + new Date().getTimezoneOffset() * 60000 + IST_OFFSET_MS)
+    const hhmm = istNow.getHours() * 100 + istNow.getMinutes()
+    const day = istNow.getDay()
+    const isMarketOpen = day >= 1 && day <= 5 && hhmm >= 915 && hhmm < 1530
+    const quoteIntervalMs = isMarketOpen ? 2000 : 5000
+    const quoteInterval = setInterval(fetchLiveSpots, quoteIntervalMs)
 
     const handleVisibilityChange = () => { if (!document.hidden) fetchLiveSpots() }
     document.addEventListener('visibilitychange', handleVisibilityChange)
@@ -2540,7 +2567,7 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
       )}
 
       {/* Broker L2 WebSocket Depth Streaming Notice */}
-      {!hasActiveBrokerSession && activeTab === 'auto' && (
+      {brokerStatusReady && !hasActiveBrokerSession && activeTab === 'auto' && (
         <div className="p-3 rounded-2xl bg-amber-500/10 border border-amber-500/35 text-amber-800 dark:text-amber-200 flex items-center justify-between gap-3 animate-slide-up-fade">
           <div className="flex items-center gap-2.5 text-xs">
             <span className="text-xl flex-shrink-0">⚠️</span>

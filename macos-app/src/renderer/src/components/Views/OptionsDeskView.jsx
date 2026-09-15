@@ -278,10 +278,13 @@ export default function OptionsDeskView({
 
   const atmRowRef = useRef(null)
   const tableContainerRef = useRef(null)
+  const inFlightRef = useRef(false)
 
   const fetchGex = async (isSilent = false) => {
+    if (inFlightRef.current) return
+    inFlightRef.current = true
     try {
-      if (!isSilent) setLoading(true)
+      if (!isSilent && !data) setLoading(true)
       else setIsRefreshing(true)
       const res = await call('/skills/gex_snapshot', {
         underlying,
@@ -298,7 +301,8 @@ export default function OptionsDeskView({
     } catch (err) {
       console.error('Failed to load GEX snapshot:', err)
     } finally {
-      if (!isSilent) setLoading(false)
+      inFlightRef.current = false
+      setLoading(false)
       setIsRefreshing(false)
     }
   }
@@ -308,15 +312,32 @@ export default function OptionsDeskView({
     fetchGex(false)
   }, [underlying, selectedExpiry])
 
-  // Real-time background auto-update (every 4s when market open, 60s when market closed)
+  // Real-time background auto-update with sequential tail-polling (never stacks requests)
   useEffect(() => {
     if (!isLiveActive) return
+    let timeoutId = null
+    let cancelled = false
+
     const isMarketOpen = data ? Boolean(data.is_market_open) : true
-    const pollIntervalMs = isMarketOpen ? 4000 : 60000
-    const interval = setInterval(() => {
-      fetchGex(true)
-    }, pollIntervalMs)
-    return () => clearInterval(interval)
+    const pollIntervalMs = isMarketOpen ? 5000 : 30000
+
+    const scheduleNextPoll = () => {
+      if (cancelled) return
+      timeoutId = setTimeout(async () => {
+        if (cancelled) return
+        if (typeof document === 'undefined' || !document.hidden) {
+          await fetchGex(true)
+        }
+        scheduleNextPoll()
+      }, pollIntervalMs)
+    }
+
+    scheduleNextPoll()
+
+    return () => {
+      cancelled = true
+      if (timeoutId) clearTimeout(timeoutId)
+    }
   }, [underlying, selectedExpiry, isLiveActive, data?.is_market_open])
 
   const handleSendTelegramBlast = async (blastData) => {

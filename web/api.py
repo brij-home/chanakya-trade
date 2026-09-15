@@ -563,6 +563,11 @@ async def _auto_restore_brokers() -> None:
                 b.authenticate()
             if b.is_authenticated():
                 register_broker("mstock", b)
+                try:
+                    from brokers.session import _start_websocket
+                    _start_websocket(b)
+                except Exception:
+                    pass
                 logging.info("[startup] m.Stock session active & registered")
         except Exception as exc:
             logging.warning("[startup] Could not restore m.Stock: %s", exc)
@@ -1777,6 +1782,11 @@ async def mstock_callback(request: Request):
         profile = b.complete_login(token=token, **cb_params)
         funds = b.get_funds()
         register_broker("mstock", b)
+        try:
+            from brokers.session import _start_websocket
+            _start_websocket(b)
+        except Exception:
+            pass
         _invalidate_auth_cache("mstock")
     except Exception as e:
         body = f"""<div class="card"><div class="err-box">❌ {e}</div>
@@ -1965,7 +1975,7 @@ def _compute_status() -> dict:
 @app.get("/api/status")
 async def api_status(request: Request):
     _require_localhost(request)
-    return await asyncio.to_thread(_compute_status)
+    return _compute_status()
 
 
 # ── Cache & Data Persistence Stats API ───────────────────────
@@ -3317,19 +3327,9 @@ async def stream_system_status():
     async def _system_generator():
         # 1. Send immediate full snapshot on connect
         try:
-            from brokers.session import get_registered_brokers
             from engine.modes import get_trading_mode
 
-            brokers = get_registered_brokers()
-            broker_statuses = {
-                name: {
-                    "authenticated": b.is_authenticated()
-                    if hasattr(b, "is_authenticated")
-                    else True,
-                    "broker": name,
-                }
-                for name, b in brokers.items()
-            }
+            broker_statuses = _compute_status()
             mode_info = get_trading_mode()
             _UI_MODE_MAP = {"OBSERVE": "DEMO", "SIMULATE": "PAPER", "EXECUTE": "LIVE"}
             ui_mode = _UI_MODE_MAP.get(mode_info.mode.value, "PAPER")

@@ -472,7 +472,7 @@ export default function App() {
 
       {/* ── Tier 1: Top Navigation Bar ──────────────────────────────────── */}
       <div
-        className="drag flex items-center justify-between flex-shrink-0 px-3 gap-2 border-b"
+        className="drag relative z-40 flex items-center justify-between flex-shrink-0 px-3 gap-2 border-b"
         style={{
           height: '42px',
           background: 'var(--color-panel)',

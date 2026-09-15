@@ -13,8 +13,13 @@ from zoneinfo import ZoneInfo
 from engine.alert_expiry import classify_expiry_type
 from engine.alert_model import AutoAlert
 
+import time
+
 logger = logging.getLogger(__name__)
 IST = ZoneInfo("Asia/Kolkata")
+
+# Short-term strike snapshot cache: contract_key -> (timestamp, oi, volume)
+_STRIKE_OI_SNAPSHOTS: dict[str, tuple[float, int, int]] = {}
 
 
 def detect_gamma_blast(
@@ -119,9 +124,24 @@ def detect_gamma_blast(
         )
         pchange = float(getattr(c, "pchange", 0.0) or 0.0)
 
-        is_oi_shedding = oi_change < 0 and (
-            oi_chg_pct <= -8.0 or abs(oi_change) >= (10000 if is_opening_drive else 20000)
-        )
+        now_ts = time.time()
+        c_key = f"{underlying}_{int(strike)}_CE"
+        prior_snap = _STRIKE_OI_SNAPSHOTS.get(c_key)
+        _STRIKE_OI_SNAPSHOTS[c_key] = (now_ts, oi, volume)
+
+        short_term_unwind = False
+        if prior_snap:
+            p_ts, p_oi, _ = prior_snap
+            dt_sec = max(1.0, now_ts - p_ts)
+            if dt_sec <= 300.0:  # Within 5 minutes
+                unwind_rate = ((oi - p_oi) / dt_sec) * 60.0  # contracts / min
+                if (is_index and unwind_rate <= -1000) or (not is_index and unwind_rate <= -50):
+                    short_term_unwind = True
+
+        is_oi_shedding = (
+            oi_change < 0
+            and (oi_chg_pct <= -6.0 or abs(oi_change) >= (8000 if is_opening_drive else 15000))
+        ) or short_term_unwind
         is_gamma_expansion = (
             (
                 oi_change > 0
@@ -366,9 +386,24 @@ def detect_gamma_blast(
         )
         pchange = float(getattr(c, "pchange", 0.0) or 0.0)
 
-        is_oi_shedding = oi_change < 0 and (
-            oi_chg_pct <= -8.0 or abs(oi_change) >= (10000 if is_opening_drive else 20000)
-        )
+        now_ts = time.time()
+        c_key = f"{underlying}_{int(strike)}_PE"
+        prior_snap = _STRIKE_OI_SNAPSHOTS.get(c_key)
+        _STRIKE_OI_SNAPSHOTS[c_key] = (now_ts, oi, volume)
+
+        short_term_unwind = False
+        if prior_snap:
+            p_ts, p_oi, _ = prior_snap
+            dt_sec = max(1.0, now_ts - p_ts)
+            if dt_sec <= 300.0:  # Within 5 minutes
+                unwind_rate = ((oi - p_oi) / dt_sec) * 60.0  # contracts / min
+                if (is_index and unwind_rate <= -1000) or (not is_index and unwind_rate <= -50):
+                    short_term_unwind = True
+
+        is_oi_shedding = (
+            oi_change < 0
+            and (oi_chg_pct <= -6.0 or abs(oi_change) >= (8000 if is_opening_drive else 15000))
+        ) or short_term_unwind
         is_gamma_expansion = (
             (
                 oi_change > 0

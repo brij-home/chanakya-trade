@@ -84,6 +84,57 @@ def get_current_ist_session(ref_dt: Optional[datetime] = None) -> dict[str, bool
     return _cal_get_current_ist_session(ref_dt=ref_dt)
 
 
+def expected_volume_fraction(minutes_from_open: float) -> float:
+    """
+    Returns expected cumulative volume fraction (0.03 to 1.0)
+    for Indian equity/NFO markets (09:15 - 15:30 IST, total 375 minutes).
+    Models the institutional U-shaped cumulative volume profile.
+    """
+    if minutes_from_open <= 0:
+        return 0.03
+    if minutes_from_open >= 375.0:
+        return 1.0
+
+    t = minutes_from_open
+    if t <= 15.0:       # 09:15 - 09:30 IST (Opening discovery)
+        return 0.03 + (t / 15.0) * 0.09         # 3% -> 12%
+    elif t <= 45.0:     # 09:30 - 10:00 IST (Morning institutional drive)
+        return 0.12 + ((t - 15.0) / 30.0) * 0.13 # 12% -> 25%
+    elif t <= 135.0:    # 10:00 - 11:30 IST (Morning trend continuation)
+        return 0.25 + ((t - 45.0) / 90.0) * 0.20 # 25% -> 45%
+    elif t <= 255.0:    # 11:30 - 13:30 IST (Midday lull)
+        return 0.45 + ((t - 135.0) / 120.0) * 0.18 # 45% -> 63%
+    elif t <= 345.0:    # 13:30 - 15:00 IST (Afternoon expiry & expansion)
+        return 0.63 + ((t - 255.0) / 90.0) * 0.22 # 63% -> 85%
+    else:               # 15:00 - 15:30 IST (Closing auction acceleration)
+        return 0.85 + ((t - 345.0) / 30.0) * 0.15 # 85% -> 100%
+
+
+def compute_time_of_day_rvol(
+    current_vol: float,
+    avg_daily_vol: float,
+    ref_dt: Optional[datetime] = None,
+) -> float:
+    """
+    Computes accurate Time-of-Day Relative Volume (TOD-RVOL).
+    Normalizes intraday cumulative volume against the expected volume up to the current minute,
+    preventing early-morning breakout disqualification.
+    """
+    if avg_daily_vol <= 0:
+        return 1.0
+    now_ist = ref_dt or datetime.now(IST)
+    if now_ist.tzinfo is None:
+        now_ist = now_ist.replace(tzinfo=IST)
+    else:
+        now_ist = now_ist.astimezone(IST)
+
+    # Minutes elapsed from 09:15 IST
+    mins_from_open = (now_ist.hour * 60 + now_ist.minute) - (9 * 60 + 15)
+    fraction = expected_volume_fraction(float(mins_from_open))
+    expected_vol = max(1.0, avg_daily_vol * fraction)
+    return round(float(current_vol) / expected_vol, 2)
+
+
 # ── Auto Alert Engine Core Class ───────────────────────────────────────────
 
 
@@ -126,13 +177,18 @@ class AutoAlertEngine:
             "LT",
             "ITC",
         ]
-        # Watched commodities & currency universe for post-equity sessions
+        # Watched commodities & currency universe (continuous monitoring 09:00 - 23:30 IST)
         self._watched_commodities = [
             "CRUDEOIL",
+            "CRUDEOILM",
             "GOLD",
+            "GOLDM",
             "SILVER",
+            "SILVERM",
             "NATURALGAS",
             "COPPER",
+            "ZINC",
+            "ALUMINIUM",
         ]
         self._watched_currencies = [
             "USDINR",
@@ -185,6 +241,18 @@ class AutoAlertEngine:
             most_liquid = THEMATIC_PRESETS.get("most_liquid_today", {}).get("symbols", [])
             vol_surges = THEMATIC_PRESETS.get("volume_surges_rvol", {}).get("symbols", [])
             for s in most_liquid + vol_surges:
+                if s not in symbols:
+                    symbols.append(s)
+
+            # High-turnover liquid F&O leaders across key sectors
+            fno_leaders = [
+                "COALINDIA", "HAL", "BEL", "TRENT", "VEDL", "HINDALCO", "TATASTEEL",
+                "JINDALSTEL", "PFC", "RECLTD", "CANBK", "BANKBARODA", "PNB",
+                "CHOLAFIN", "SHRIRAMFIN", "MUTHOOTFIN", "DIXON", "POLYCAB", "PERSISTENT",
+                "COFORGE", "FEDERALBNK", "IDFCFIRSTB", "AUBANK", "ASHOKLEY", "HEROMOTOCO",
+                "ADANIENT", "ADANIPORTS", "JSWSTEEL", "POWERGRID"
+            ]
+            for s in fno_leaders:
                 if s not in symbols:
                     symbols.append(s)
         except Exception:
@@ -835,7 +903,11 @@ class AutoAlertEngine:
         from engine.alerts import _is_market_hours
 
         in_market = _is_market_hours(alert.exchange)
-        is_test = (alert.environment == "TEST") or (not alert.is_live)
+        # Provenance: treat alerts with test-/mock- IDs as TEST regardless of stored environment field.
+        # This closes the inconsistency where a manually-injected test alert has environment="LIVE"
+        # but a test- prefix, causing it to show as LIVE in the UI while being Telegram-blocked.
+        _id_prefix_is_test = (alert.alert_id or "").startswith("test-") or (alert.alert_id or "").startswith("mock-")
+        is_test = (alert.environment == "TEST") or (not alert.is_live) or _id_prefix_is_test
         if is_test:
             env_tag = "[TEST]"
         elif not in_market:
@@ -1781,16 +1853,27 @@ class AutoAlertEngine:
 
     # ── Scanning Loops ──────────────────────────────────────────
 
+    def _get_prioritized_targets(self) -> list[str]:
+        """Returns targets with today's expiring index prioritized at position 0."""
+        targets = list(self._watched_indices)
+        now_ist = datetime.now(IST)
+        expiry_map = {0: "MIDCPNIFTY", 1: "FINNIFTY", 2: "BANKNIFTY", 3: "NIFTY", 4: "SENSEX"}
+        today_expiry = expiry_map.get(now_ist.weekday())
+        if today_expiry and today_expiry in targets:
+            targets.remove(today_expiry)
+            targets.insert(0, today_expiry)
+        for s in self.watched_equities:
+            if s not in targets:
+                targets.append(s)
+        return targets
+
     def scan_gamma_blasts(self) -> list[AutoAlert]:
         """Scans watched indices and high-turnover F&O leaders for Gamma Blast inflection."""
         from market.options import get_options_chain
         from market.quotes import get_ltp
 
         found: list[AutoAlert] = []
-        targets = list(self._watched_indices)
-        for s in self.watched_equities:
-            if s not in targets:
-                targets.append(s)
+        targets = self._get_prioritized_targets()
 
         for sym in targets:
             try:
@@ -1811,21 +1894,42 @@ class AutoAlertEngine:
         return found
 
     def scan_squeeze_breakouts(self) -> list[AutoAlert]:
-        """Scans equities for TTM Squeeze breakout early warnings."""
+        """Scans watched indices and equities for multi-timeframe TTM Squeeze early warnings."""
         from market.history import get_ohlcv
-        from market.quotes import get_ltp
+        from market.quotes import get_ltp, get_quote
 
         found: list[AutoAlert] = []
-        for sym in self.watched_equities:
+        targets = self._get_prioritized_targets()
+
+        for sym in targets:
             try:
                 ltp = get_ltp(f"NSE:{sym}")
                 if not ltp or ltp <= 0:
                     continue
+
+                raw_q = get_quote(f"NSE:{sym}")
+                q = raw_q.get(f"NSE:{sym}") if isinstance(raw_q, dict) else raw_q
+                vwap_val = getattr(q, "vwap", None) if q else None
+
+                # 1. First priority: Check 15-minute intraday squeeze
+                try:
+                    df_15m = get_ohlcv(sym, exchange="NSE", interval="15minute", days=5)
+                    if df_15m is not None and len(df_15m) >= 20:
+                        alert_15m = detect_squeeze_breakout(
+                            sym, df_15m, ltp, timeframe="15m", vwap=vwap_val
+                        )
+                        if alert_15m and self.record_alert(alert_15m):
+                            found.append(alert_15m)
+                            continue  # If 15m alert fired, skip daily
+                except Exception:
+                    pass
+
+                # 2. Daily macro squeeze check
                 df = get_ohlcv(sym, exchange="NSE", interval="day", days=60)
                 if df is None or len(df) < 25:
                     continue
 
-                alert = detect_squeeze_breakout(sym, df, ltp)
+                alert = detect_squeeze_breakout(sym, df, ltp, timeframe="day", vwap=vwap_val)
                 if alert and self.record_alert(alert):
                     found.append(alert)
             except Exception as e:
@@ -1984,37 +2088,44 @@ class AutoAlertEngine:
             vol = int(getattr(q, "volume", 0) or 0)
             vwap = float(getattr(q, "vwap", 0.0) or ltp)
 
-            # Move thresholds: indices >= 0.8% / <= -0.8%, equities >= 2.2% / <= -2.0%
             seg = classify_symbol_segment(clean_sym)
-            min_pos_chg = 0.8 if seg == "INDEX" else 2.2
-            min_neg_chg = -0.8 if seg == "INDEX" else -2.0
 
-            is_bullish = (chg >= min_pos_chg) and (vwap <= 0 or ltp >= (vwap * 0.998))
-            is_bearish = (chg <= min_neg_chg) and (vwap > 0 and ltp < vwap)
+            # Check turnover gate for equities (₹5 Cr min, or active volume)
+            turnover_cr = round((ltp * vol) / 1e7, 2)
+            if seg != "INDEX" and turnover_cr < 5.0 and vol < 50000:
+                continue
+
+            # Calculate TOD-RVOL (Time-of-Day Relative Volume)
+            df = None
+            try:
+                df = get_ohlcv(clean_sym, exchange="NSE", interval="day", days=30)
+                if df is not None and len(df) >= 15:
+                    vols = df["volume"].values
+                    avg_vol = (
+                        float(np.mean(vols[-21:-1])) if len(vols) >= 21 else float(np.mean(vols[:-1]))
+                    )
+                    rvol = compute_time_of_day_rvol(vol, avg_vol, ref_dt=datetime.now(IST))
+                else:
+                    rvol = 1.0
+            except Exception:
+                rvol = 1.0
+
+            # Dynamic Inflection Thresholds:
+            # Indices: Early coiling at 0.22%, Ignited at 0.50%, RVOL >= 1.35x
+            # Equities: Early coiling at 0.85%, Ignited at 1.80%, RVOL >= 1.50x
+            min_pos_chg = 0.22 if seg == "INDEX" else 0.85
+            min_neg_chg = -0.22 if seg == "INDEX" else -0.80
+            min_rvol = 1.35 if seg == "INDEX" else 1.50
+
+            is_bullish = (chg >= min_pos_chg) and (vwap <= 0 or ltp >= (vwap * 0.998)) and (rvol >= min_rvol)
+            is_bearish = (chg <= min_neg_chg) and (vwap > 0 and ltp < (vwap * 1.002)) and (rvol >= min_rvol)
 
             if not (is_bullish or is_bearish):
                 continue
 
-            # Check turnover gate for equities (₹8 Cr min)
-            turnover_cr = round((ltp * vol) / 1e7, 2)
-            if seg != "INDEX" and turnover_cr < 8.0:
-                continue
-
-            # Calculate RVOL
-            try:
-                df = get_ohlcv(clean_sym, exchange="NSE", interval="day", days=30)
-                if df is None or len(df) < 15:
-                    continue
-                vols = df["volume"].values
-                avg_vol = (
-                    float(np.mean(vols[-21:-1])) if len(vols) >= 21 else float(np.mean(vols[:-1]))
-                )
-                rvol = round(vol / max(1.0, avg_vol), 2)
-            except Exception:
-                rvol = 1.0
-
-            if rvol < 1.8:
-                continue
+            # Stage classification: Early Warning (coiling/first thrust) vs Ignited (expanding)
+            is_early = (abs(chg) < 0.50) if seg == "INDEX" else (abs(chg) < 1.80)
+            stage = "EARLY_WARNING" if is_early else "IGNITED"
 
             seg_tag = f"[{seg}]"
 
@@ -2158,7 +2269,7 @@ class AutoAlertEngine:
             alert = AutoAlert(
                 alert_id=alert_id,
                 alert_type=alert_type,
-                stage="IGNITED",
+                stage=stage,
                 symbol=clean_sym,
                 exchange="NSE",
                 direction=direction,
@@ -2736,18 +2847,18 @@ class AutoAlertEngine:
                     )
 
                     if opt_type == "PE":
-                        headline = f"🎯 OPTIONS MOMENTUM (PUT SURGE): {contract_sym} @ ₹{opt_ltp:,.1f} (Vol/OI {vol_oi}x)"
+                        headline = f"\ud83c\udfaf OPTIONS MOMENTUM (PUT SURGE): {contract_sym} @ \u20b9{opt_ltp:,.1f} (Vol/OI {vol_oi}x)"
                         summary = (
-                            f"Institutional Put surge in {clean_sym} {strike:,.0f} PE. "
-                            f"Underlying spot ₹{spot:,.1f}{spot_anchor_str}. Turnover: {vol:,} contracts ({vol_oi}x OI). "
-                            f"Entry: ₹{opt_ltp:,.1f} | SL: ₹{opt_sl:,.1f} | T1: ₹{opt_t1:,.1f} | T2: ₹{opt_t2:,.1f}.{friday_tag}"
+                            f"Institutional Put surge in {clean_sym} {int(strike)} PE. "
+                            f"Underlying spot \u20b9{spot:,.1f}{spot_anchor_str}. Turnover: {vol:,} contracts ({vol_oi}x OI). "
+                            f"Entry: \u20b9{opt_ltp:,.1f} | SL: \u20b9{opt_sl:,.1f} | T1: \u20b9{opt_t1:,.1f} | T2: \u20b9{opt_t2:,.1f}.{friday_tag}"
                         )
                     else:
-                        headline = f"🚀 OPTIONS MOMENTUM: {contract_sym} @ ₹{opt_ltp:,.1f} (Vol/OI {vol_oi}x)"
+                        headline = f"\ud83d\ude80 OPTIONS MOMENTUM: {contract_sym} @ \u20b9{opt_ltp:,.1f} (Vol/OI {vol_oi}x)"
                         summary = (
-                            f"Institutional Call surge in {clean_sym} {strike:,.0f} CE. "
-                            f"Underlying spot ₹{spot:,.1f}{spot_anchor_str}. Turnover: {vol:,} contracts ({vol_oi}x OI). "
-                            f"Entry: ₹{opt_ltp:,.1f} | SL: ₹{opt_sl:,.1f} | T1: ₹{opt_t1:,.1f} | T2: ₹{opt_t2:,.1f}.{friday_tag}"
+                            f"Institutional Call surge in {clean_sym} {int(strike)} CE. "
+                            f"Underlying spot \u20b9{spot:,.1f}{spot_anchor_str}. Turnover: {vol:,} contracts ({vol_oi}x OI). "
+                            f"Entry: \u20b9{opt_ltp:,.1f} | SL: \u20b9{opt_sl:,.1f} | T1: \u20b9{opt_t1:,.1f} | T2: \u20b9{opt_t2:,.1f}.{friday_tag}"
                         )
 
                     alert = AutoAlert(
@@ -2846,11 +2957,34 @@ class AutoAlertEngine:
 
         return found
 
+    def scan_index_contagion(self) -> list[AutoAlert]:
+        """
+        Scans institutional constituent synchronization for major indices (BANKNIFTY, NIFTY, FINNIFTY).
+        Detects synchronized momentum in heavyweights (HDFCBANK, ICICIBANK, RELIANCE, SBIN)
+        to alert 60-120s before the parent index confirms.
+        """
+        found: list[AutoAlert] = []
+        try:
+            from engine.index_contagion import index_contagion_engine
+
+            for idx in ("BANKNIFTY", "NIFTY", "FINNIFTY"):
+                try:
+                    res = index_contagion_engine.evaluate_index(idx)
+                    if res and res.alert:
+                        if self.record_alert(res.alert):
+                            found.append(res.alert)
+                except Exception as e_sub:
+                    logger.debug(f"[AutoAlertEngine] Index contagion error for {idx}: {e_sub}")
+        except Exception as e:
+            logger.debug(f"[AutoAlertEngine] Index contagion scan failure: {e}")
+        return found
+
     # ── Time-Partitioned Segment Scanning Loops ──────────────────
 
     def scan_equity_nfo_now(self) -> list[AutoAlert]:
         """Runs all daytime Equity and NFO derivative detectors (09:15 - 15:30 IST)."""
         results: list[AutoAlert] = []
+        results.extend(self.scan_index_contagion())  # Priority 1: Heavyweight lead-lag sync!
         results.extend(self.scan_gamma_blasts())
         results.extend(self.scan_options_momentum_breakouts())
         results.extend(self.scan_squeeze_breakouts())
@@ -2905,8 +3039,17 @@ class AutoAlertEngine:
             if ltp <= 0:
                 continue
 
-            chg = float(getattr(q, "change_pct", 0.0) or 0.0)
+            chg_prev = float(getattr(q, "change_pct", 0.0) or 0.0)
+            open_p = float(getattr(q, "open", 0.0) or 0.0)
+            high_p = float(getattr(q, "high", 0.0) or 0.0)
+            low_p = float(getattr(q, "low", 0.0) or 0.0)
             vol = int(getattr(q, "volume", 0) or 0)
+
+            chg_open = round(((ltp - open_p) / open_p * 100), 2) if open_p > 0 else chg_prev
+            chg_from_low = round(((ltp - low_p) / low_p * 100), 2) if low_p > 0 else 0.0
+            chg_from_high = round(((high_p - ltp) / high_p * 100), 2) if high_p > 0 else 0.0
+            chg = chg_open if abs(chg_open) > abs(chg_prev) else chg_prev
+
             # 1. Sanitize VWAP: discard corrupted/mock zero or sub-50% values
             raw_vwap = getattr(q, "vwap", None)
             try:
@@ -2929,7 +3072,7 @@ class AutoAlertEngine:
             )
 
             # Minimum move threshold for commodity trigger (0.6% for Gold/Silver/Copper, 1.0% for Crude/NatGas)
-            min_chg = 1.0 if clean_sym in ("CRUDEOIL", "NATURALGAS") else 0.6
+            min_chg = 1.0 if clean_sym in ("CRUDEOIL", "CRUDEOILM", "NATURALGAS", "NATGASMINI") else 0.6
 
             # 20-Bar Donchian Channel Breakout & Wick Rejection Verification on 5m OHLCV
             df_5m = None
@@ -2951,6 +3094,26 @@ class AutoAlertEngine:
             is_bearish = False
             is_donchian_breakout = False
             rvol = 1.0
+
+            roc_15m = 0.0
+            if df_5m is not None and len(df_5m) >= 4:
+                try:
+                    c_ago = float(df_5m.iloc[-4]["close"])
+                    if c_ago > 0:
+                        roc_15m = round(((ltp - c_ago) / c_ago * 100), 2)
+                except Exception:
+                    pass
+
+            has_bull_chg = (
+                (chg_prev >= min_chg)
+                or (chg_open >= min_chg)
+                or (chg_from_low >= min_chg * 1.2 and roc_15m >= 0.5)
+            )
+            has_bear_chg = (
+                (chg_prev <= -min_chg)
+                or (chg_open <= -min_chg)
+                or (chg_from_high >= min_chg * 1.2 and roc_15m <= -0.5)
+            )
 
             if df_5m is not None and len(df_5m) >= 20:
                 recent_20 = df_5m.iloc[-21:-1]
@@ -2978,50 +3141,60 @@ class AutoAlertEngine:
                 bull_close_ratio = (cur_close - cur_low) / bar_range
                 bear_close_ratio = (cur_high - cur_close) / bar_range
 
-                # Bullish: breaking 20-bar high, small upper wick (no shooting star rejection), closing in upper half
-                req_bull_close = 0.65 if is_us_open_transition else 0.50
+                # Allow wick up to 0.45 when accompanied by strong RVOL >= 1.2
+                max_wick = 0.45 if (is_us_open_transition and rvol >= 1.2) else 0.40
+                req_bull_close = 0.55 if is_us_open_transition else 0.50
+                req_bear_close = 0.55 if is_us_open_transition else 0.50
+
+                # Bullish: breaking 20-bar high, acceptable upper wick, closing in upper half
                 if (
                     not is_locked_bull
-                    and chg >= min_chg
+                    and has_bull_chg
                     and (ltp >= prior_high * 0.999 or cur_close >= prior_high)
-                    and upper_wick_ratio <= 0.35
+                    and upper_wick_ratio <= max_wick
                     and bull_close_ratio >= req_bull_close
                     and ltp >= vwap * 0.998
                 ):
-                    # During US open transition window (18:15-19:15), require RVOL >= 1.3 to avoid low-vol sweeps
-                    if not is_us_open_transition or rvol >= 1.3:
+                    if not is_us_open_transition or rvol >= 1.2:
                         is_bullish = True
                         is_donchian_breakout = True
 
-                # Bearish: breaking 20-bar low, small lower wick (no hammer absorption), closing in lower half
-                req_bear_close = 0.65 if is_us_open_transition else 0.50
-                if (
+                # Bearish: breaking 20-bar low, acceptable lower wick, closing in lower half
+                elif (
                     not is_locked_bear
-                    and chg <= -min_chg
+                    and has_bear_chg
                     and (ltp <= prior_low * 1.001 or cur_close <= prior_low)
-                    and lower_wick_ratio <= 0.35
+                    and lower_wick_ratio <= max_wick
                     and bear_close_ratio >= req_bear_close
                     and ltp <= vwap * 1.002
                 ):
-                    # During US open transition window (18:15-19:15), require RVOL >= 1.3 to avoid low-vol sweeps
-                    if not is_us_open_transition or rvol >= 1.3:
+                    if not is_us_open_transition or rvol >= 1.2:
                         is_bearish = True
                         is_donchian_breakout = True
             else:
                 # Fallback when historical 5m bars are unavailable:
-                # Enforce stricter move threshold and clear VWAP separation
-                strict_min_chg = max(min_chg * 1.5, 1.2)
+                strict_min_chg = max(min_chg * 1.2, 0.9)
                 has_real_vwap_diff = (vwap > 0) and (abs(ltp - vwap) >= 2.0)
+                is_bull_thrust = (
+                    (chg_prev >= strict_min_chg)
+                    or (chg_open >= strict_min_chg)
+                    or (chg_from_low >= strict_min_chg * 1.2)
+                )
+                is_bear_thrust = (
+                    (chg_prev <= -strict_min_chg)
+                    or (chg_open <= -strict_min_chg)
+                    or (chg_from_high >= strict_min_chg * 1.2)
+                )
                 if has_real_vwap_diff:
                     is_bullish = (
-                        not is_locked_bull and (chg >= strict_min_chg) and (ltp >= (vwap * 0.998))
+                        not is_locked_bull and is_bull_thrust and (ltp >= (vwap * 0.998))
                     )
                     is_bearish = (
-                        not is_locked_bear and (chg <= -strict_min_chg) and (ltp <= (vwap * 1.002))
+                        not is_locked_bear and is_bear_thrust and (ltp <= (vwap * 1.002))
                     )
                 else:
-                    is_bullish = not is_locked_bull and (chg >= strict_min_chg)
-                    is_bearish = not is_locked_bear and (chg <= -strict_min_chg)
+                    is_bullish = not is_locked_bull and is_bull_thrust
+                    is_bearish = not is_locked_bear and is_bear_thrust
 
             if not (is_bullish or is_bearish):
                 continue
@@ -3475,7 +3648,7 @@ class AutoAlertEngine:
                     self.check_and_alert_targets_and_trailing(exchanges=["CDS"])
                     self.scan_currency_now()
 
-                # Phase 3: MCX Commodities Desk (15:30 - 23:30 IST strictly post-equity)
+                # Phase 3: MCX Commodities Desk (09:00 - 23:30 IST continuous session)
                 if session["commodity"] and not alert_preferences.is_segment_globally_disabled(
                     "COMMODITY"
                 ):

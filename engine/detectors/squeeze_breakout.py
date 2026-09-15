@@ -24,12 +24,15 @@ def detect_squeeze_breakout(
     df: Any,
     ltp: float,
     exchange: str = "NSE",
+    timeframe: str = "day",
+    vwap: Optional[float] = None,
 ) -> Optional[AutoAlert]:
     """
-    Detects Volatility Squeeze coiling within 0.4% - 1.2% of resistance / 20D High.
+    Detects Volatility Squeeze coiling within tight range of resistance / Pivot High.
+    Supports multi-timeframe (15m, 5m, Daily) and VWAP pinch detection.
     Triggers *before* the breakout candle runs away.
     """
-    if df is None or len(df) < 25 or ltp <= 0:
+    if df is None or len(df) < 20 or ltp <= 0:
         return None
 
     try:
@@ -39,7 +42,7 @@ def detect_squeeze_breakout(
         volumes = df["volume"].values if "volume" in df.columns else None
 
         # 20-period Bollinger Bands
-        period = 20
+        period = min(20, len(closes))
         sma20 = float(pd.Series(closes).rolling(period).mean().iloc[-1])
         std20 = float(pd.Series(closes).rolling(period).std().iloc[-1])
         bb_upper = sma20 + (2.0 * std20)
@@ -57,25 +60,31 @@ def detect_squeeze_breakout(
         # Squeeze is ON when BB is inside Keltner Channel
         is_squeeze_on = (bb_upper < keltner_upper) and (bb_lower > keltner_lower)
 
-        # 20-day High and Low / Pivot levels
-        lookback = min(20, len(highs) - 1)
+        # Pivot levels
+        lookback = min(period, len(highs) - 1)
         pivot_high = float(np.max(highs[-lookback - 1 : -1]))
         dist_to_pivot_pct = ((pivot_high - ltp) / pivot_high) * 100.0
 
         pivot_low = float(np.min(lows[-lookback - 1 : -1]))
         dist_to_low_pct = ((ltp - pivot_low) / pivot_low) * 100.0
 
-        # RVOL 20D
+        # Intraday vs Daily distance and RVOL adjustments
+        is_intraday = timeframe.lower() in ("5m", "5minute", "15m", "15minute", "hour", "60m")
+        min_coiling_dist = 0.0 if is_intraday else 0.05
+        max_coiling_dist = 0.65 if is_intraday else 1.50
+        is_closer_to_high = dist_to_pivot_pct <= dist_to_low_pct
+
+        # RVOL calculation (TOD-RVOL aware)
         rvol = 1.0
-        if volumes is not None and len(volumes) >= 20:
-            avg_vol = float(np.mean(volumes[-21:-1]))
+        if volumes is not None and len(volumes) >= 15:
+            avg_vol = float(np.mean(volumes[-21:-1])) if len(volumes) >= 21 else float(np.mean(volumes[:-1]))
             cur_vol = float(volumes[-1])
             rvol = round(cur_vol / max(1.0, avg_vol), 2)
 
         now_iso = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
 
-        # ── EARLY WARNING (BULLISH): Coiled in squeeze, 0.2% - 1.5% below pivot high ───
-        if is_squeeze_on and (0.2 <= dist_to_pivot_pct <= 1.5):
+        # ── EARLY WARNING (BULLISH): Coiled in squeeze, close below pivot high ───
+        if is_squeeze_on and (min_coiling_dist <= dist_to_pivot_pct <= max_coiling_dist):
             tp = None
             try:
                 from engine.trade_plan import calculate_trade_plan
@@ -166,8 +175,8 @@ def detect_squeeze_breakout(
                 created_at=now_iso,
             )
 
-        # ── EARLY WARNING (BEARISH): Coiled in squeeze, 0.2% - 1.5% above pivot low support ───
-        if is_squeeze_on and (0.2 <= dist_to_low_pct <= 1.5):
+        # ── EARLY WARNING (BEARISH): Coiled in squeeze, close above pivot low support ───
+        if is_squeeze_on and (min_coiling_dist <= dist_to_low_pct <= max_coiling_dist):
             tp = None
             try:
                 from engine.trade_plan import calculate_trade_plan

@@ -1478,7 +1478,8 @@ async def skill_alerts_list():
     try:
         from engine.alerts import alert_manager
 
-        return {"status": "ok", "data": alert_manager.list_alerts()}
+        alerts = await asyncio.to_thread(alert_manager.list_alerts)
+        return {"status": "ok", "data": alerts}
     except Exception as e:
         raise _err(str(e))
 
@@ -1489,7 +1490,7 @@ async def skill_alerts_remove(req: AlertRemoveRequest):
     try:
         from engine.alerts import alert_manager
 
-        removed = alert_manager.remove_alert(req.alert_id)
+        removed = await asyncio.to_thread(alert_manager.remove_alert, req.alert_id)
         if not removed:
             raise _err(f"Alert {req.alert_id} not found", 404)
         return {"status": "ok", "data": {"alert_id": req.alert_id, "removed": True}}
@@ -1513,7 +1514,10 @@ async def skill_auto_alerts_list(req: Optional[AutoAlertsListRequest] = None):
         target_status = req.target_status if req else None
         view_mode = (req.view_mode or "ACTIVE") if req else "ACTIVE"
         is_archived = req.is_archived if req else None
-        alerts = auto_alert_engine.get_alerts(
+        segment = req.segment if req else None
+
+        alerts = await asyncio.to_thread(
+            auto_alert_engine.get_alerts,
             limit=limit,
             alert_type=alert_type,
             stage=stage,
@@ -1522,7 +1526,7 @@ async def skill_auto_alerts_list(req: Optional[AutoAlertsListRequest] = None):
             target_status=target_status,
             view_mode=view_mode,
             is_archived=is_archived,
-            segment=req.segment if req else None,
+            segment=segment,
         )
         return {"status": "ok", "data": [a.to_dict() for a in alerts]}
     except Exception as e:
@@ -6416,6 +6420,16 @@ class GEXSnapshotRequest(BaseModel):
     expiry: Optional[str] = None
 
 
+def _fetch_options_and_spot(clean_sym: str, norm_inst: str, req_exp: Optional[str]):
+    from market.quotes import get_ltp, get_quote
+    from market.options import get_options_snapshot
+
+    quote_map = get_quote([norm_inst, clean_sym])
+    quote = quote_map.get(norm_inst) or quote_map.get(clean_sym)
+    contracts, chain_spot, expiries, source_info = get_options_snapshot(clean_sym, req_exp)
+    return quote, contracts, chain_spot, expiries, source_info
+
+
 @router.get("/gex_snapshot")
 @router.post("/gex_snapshot")
 async def skill_gex_snapshot(req: Optional[GEXSnapshotRequest] = None):
@@ -6428,8 +6442,7 @@ async def skill_gex_snapshot(req: Optional[GEXSnapshotRequest] = None):
     try:
         import math
         from datetime import datetime
-        from market.quotes import get_ltp, get_quote, normalize_instrument
-        from market.options import get_options_snapshot
+        from market.quotes import get_ltp, normalize_instrument
         from engine.greeks_manager import LOT_SIZES
 
         raw_in = None
@@ -6446,12 +6459,11 @@ async def skill_gex_snapshot(req: Optional[GEXSnapshotRequest] = None):
         )
         norm_inst = normalize_instrument(clean_sym)
 
-        # 1. Fetch authentic live spot quote
-        quote_map = get_quote([norm_inst, clean_sym])
-        quote = quote_map.get(norm_inst) or quote_map.get(clean_sym)
-
+        # 1. Fetch authentic live spot quote & option contracts off the event loop
         req_exp = req.expiry.strip() if req and req.expiry else None
-        contracts, chain_spot, expiries, source_info = get_options_snapshot(clean_sym, req_exp)
+        quote, contracts, chain_spot, expiries, source_info = await asyncio.to_thread(
+            _fetch_options_and_spot, clean_sym, norm_inst, req_exp
+        )
 
         spot = 0.0
         if quote and quote.last_price and quote.last_price > 0:
@@ -6680,19 +6692,9 @@ async def skill_gex_snapshot(req: Optional[GEXSnapshotRequest] = None):
                                 else f"Heavy Call Buy Aggression ({ce_imb:.1f}x Bids) with {vol_oi:.1f}x Vol/OI turnover"
                             )
 
-                            # ── Institutional Profit Blueprint & Actionable Trading Levels ──
                             real_quote_prem = float(
                                 ce_ask or ce_bid or getattr(ce, "last_price", 0.0) or 0.0
                             )
-                            if real_quote_prem <= 0.0:
-                                try:
-                                    opt_sym = getattr(ce, "symbol", f"{clean_sym}{int(k)}CE")
-                                    fetched = get_ltp(opt_sym)
-                                    if fetched and fetched > 0:
-                                        real_quote_prem = float(fetched)
-                                except Exception:
-                                    pass
-
                             # Hardened Contract: Zero compromise on data quality for real signals.
                             # Never trade or broadcast an unquoted option leg with synthetic fallback premium!
                             if real_quote_prem <= 0.0:
@@ -6817,19 +6819,9 @@ async def skill_gex_snapshot(req: Optional[GEXSnapshotRequest] = None):
                                 else f"Heavy Put Buying Pressure ({pe_imb:.1f}x Bids) with {vol_oi:.1f}x Vol/OI turnover"
                             )
 
-                            # ── Institutional Profit Blueprint & Actionable Trading Levels ──
                             real_quote_prem = float(
                                 pe_ask or pe_bid or getattr(pe, "last_price", 0.0) or 0.0
                             )
-                            if real_quote_prem <= 0.0:
-                                try:
-                                    opt_sym = getattr(pe, "symbol", f"{clean_sym}{int(k)}PE")
-                                    fetched = get_ltp(opt_sym)
-                                    if fetched and fetched > 0:
-                                        real_quote_prem = float(fetched)
-                                except Exception:
-                                    pass
-
                             # Hardened Contract: Zero compromise on data quality for real signals.
                             # Never trade or broadcast an unquoted option leg with synthetic fallback premium!
                             if real_quote_prem <= 0.0:
@@ -7068,7 +7060,8 @@ async def skill_gex_snapshot(req: Optional[GEXSnapshotRequest] = None):
         # ── Conviction Score (non-blocking: 12-Factor Orthogonal Engine) ──────
         conviction_data = None
         try:
-            from engine.conviction_score import get_conviction_score
+            import time
+            from engine.conviction_score import get_conviction_score, _CONVICTION_CACHE
 
             top_blast = blast_radar[0] if blast_radar else None
 
@@ -7082,22 +7075,37 @@ async def skill_gex_snapshot(req: Optional[GEXSnapshotRequest] = None):
                 _gex_pct = _total_net_gex / _max_abs_gex * 100
                 _gex_posture = "EXTREME_POSITIVE" if _gex_pct > 80 else "POSITIVE"
 
-            conviction = get_conviction_score(
-                underlying=clean_sym,
-                spot=spot,
-                pcr=pcr_val,
-                gex_posture=_gex_posture,
-                vix=None,
-                blast_score=top_blast["score"] if top_blast else None,
-                vol_oi_ratio=top_blast.get("vol_oi_ratio") if top_blast else None,
-                imbalance_ratio=top_blast.get("imbalance_ratio") if top_blast else None,
-                iv_skew=iv_skew if iv_skew else [],
-                max_pain=float(max_pain) if max_pain else None,
-                data_state=source_info.get("data_state"),
-            )
-            conviction_data = conviction.as_dict()
+            # Check instant cache first (<0.01ms)
+            cached_entry = _CONVICTION_CACHE.get(clean_sym)
+            if cached_entry and (time.time() - cached_entry[0] < 120.0):
+                conviction_data = cached_entry[1].as_dict()
+            else:
+                conviction = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        get_conviction_score,
+                        underlying=clean_sym,
+                        spot=spot,
+                        pcr=pcr_val,
+                        gex_posture=_gex_posture,
+                        vix=None,
+                        blast_score=top_blast["score"] if top_blast else None,
+                        vol_oi_ratio=top_blast.get("vol_oi_ratio") if top_blast else None,
+                        imbalance_ratio=top_blast.get("imbalance_ratio") if top_blast else None,
+                        iv_skew=iv_skew if iv_skew else [],
+                        max_pain=float(max_pain) if max_pain else None,
+                        data_state=source_info.get("data_state"),
+                    ),
+                    timeout=1.2,
+                )
+                conviction_data = conviction.as_dict()
         except Exception as _ce:
-            conviction_data = None
+            try:
+                from engine.conviction_score import _CONVICTION_CACHE
+                cached_entry = _CONVICTION_CACHE.get(clean_sym)
+                if cached_entry:
+                    conviction_data = cached_entry[1].as_dict()
+            except Exception:
+                conviction_data = None
 
         return _ok(
             {

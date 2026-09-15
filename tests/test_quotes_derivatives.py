@@ -60,6 +60,19 @@ def test_option_pattern_matching():
     assert m7.group(2) == "135000"
     assert m7.group(3) == "CE"
 
+    # ISO 8-digit date format (e.g. BAJFINANCE202609291020PE)
+    m8 = _OPTION_PATTERN.match("BAJFINANCE202609291020PE")
+    assert m8 is not None
+    assert m8.group(1) == "BAJFINANCE"
+    assert m8.group(2) == "1020"
+    assert m8.group(3) == "PE"
+
+    m9 = _OPTION_PATTERN.match("HAL202609294800PE")
+    assert m9 is not None
+    assert m9.group(1) == "HAL"
+    assert m9.group(2) == "4800"
+    assert m9.group(3) == "PE"
+
 
 def test_futures_pattern_matching():
     m1 = _FUT_PATTERN.match("RELIANCE26SEPFUT")

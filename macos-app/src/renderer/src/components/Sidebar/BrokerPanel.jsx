@@ -64,6 +64,18 @@ const BROKERS = [
       { env: 'STOXKART_TOTP_SECRET', label: 'TOTP Secret (Optional)', placeholder: 'Base32 seed', secret: true },
     ],
   },
+  {
+    key:      'mstock',
+    name:     'm.Stock (Mirae Asset)',
+    color:    'text-[#93c5fd]',
+    loginPath: '/mstock/login',
+    portalUrl: 'https://mstock.mirae.com',
+    portalLabel: 'mstock.mirae.com',
+    keys: [
+      { env: 'MSTOCK_API_KEY', label: 'API Key', placeholder: 'mStock API key', secret: false },
+      { env: 'MSTOCK_CLIENT_CODE', label: 'Client Code', placeholder: 'Client code / User ID', secret: false },
+    ],
+  },
 ]
 
 export default function BrokerPanel({ onClose }) {

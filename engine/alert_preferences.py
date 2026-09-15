@@ -593,10 +593,26 @@ class AlertPreferencesManager:
             if is_milestone:
                 return ch_pref.allow_milestones
 
-            # Early warning check
+            # Early warning check — threshold mirrors _dispatch() gate:
+            # 80% for high-conviction positional types, 90% for all others.
             if stage == "EARLY_WARNING" and not ch_pref.allow_early_warnings:
-                # Early warnings require explicit opt-in unless confidence is >= 90
-                if conf < 90:
+                if isinstance(alert, dict):
+                    alt_type = str(alert.get("alert_type") or "").upper()
+                else:
+                    alt_type = str(getattr(alert, "alert_type", "") or "").upper()
+                early_warn_min = (
+                    80
+                    if alt_type in (
+                        "PRECURSOR_RADAR",
+                        "ASYMMETRIC_OPPORTUNITY",
+                        "OPTIONS_MOMENTUM",
+                        "GAMMA_BLAST",
+                        "COMMODITY_MOMENTUM",
+                        "CURRENCY_BREAKOUT",
+                    )
+                    else 90
+                )
+                if conf < early_warn_min:
                     return False
 
             # General confidence threshold

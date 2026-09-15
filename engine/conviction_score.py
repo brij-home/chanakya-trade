@@ -33,12 +33,18 @@ Score Interpretation:
 from __future__ import annotations
 
 import logging
+import threading
+import time
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
 logger = logging.getLogger("chanakya.conviction_score")
 
 MAX_SCORE_PER_FACTOR = 10
+
+_CONVICTION_CACHE: dict[str, tuple[float, Any]] = {}
+_CONVICTION_LOCK = threading.Lock()
+_CONVICTION_CACHE_TTL = 45.0  # 45-second TTL cache for institutional factor aggregation
 
 
 @dataclass
@@ -389,33 +395,51 @@ def _score_global_macro(spot: float) -> FactorScore:
         )
 
 
+_VIX_REGIME_CACHE: dict[str, tuple[float, FactorScore]] = {}
+
+
 def _score_india_vix_regime(vix: Optional[float] = None) -> FactorScore:
     """
     Factor 4: India VIX Direction + Level.
     IMPROVED: Scores both absolute level AND rate of change direction.
     Falling VIX at elevated levels is more bullish than flat VIX at low levels.
     """
+    now_ts = time.time()
+    cache_key = f"{round(vix, 1) if vix else 'auto'}"
+    if cache_key in _VIX_REGIME_CACHE:
+        cached_ts, cached_score = _VIX_REGIME_CACHE[cache_key]
+        if now_ts - cached_ts < 60.0:
+            return cached_score
+
     try:
         vix_now = vix
-        vix_prev = None
+        vix_direction = "STABLE"
 
         if vix_now is None or vix_now <= 0:
             from market.indices import get_vix
-
             vix_now = get_vix()
 
-        # Try to get 2-day VIX history for direction
+        # Resolve direction from fast live quote change without blocking on 30s historical scrapes
         try:
-            from market.history import get_ohlcv
-
-            vix_hist = get_ohlcv("NSE:INDIA VIX", days=5, interval="day")
-            if vix_hist is not None and len(vix_hist) >= 2:
-                vix_prev = float(vix_hist["Close"].iloc[-2])
+            from market.quotes import get_quote
+            from market.indices import INDEX_INSTRUMENTS
+            vix_inst = INDEX_INSTRUMENTS.get("VIX", "NSE:INDIA VIX")
+            q_map = get_quote([vix_inst])
+            vq = q_map.get(vix_inst) or q_map.get("INDIA VIX") or q_map.get("NSE:INDIA VIX")
+            if vq:
+                if (vix_now is None or vix_now <= 0) and getattr(vq, "last_price", 0) > 0:
+                    vix_now = float(vq.last_price)
+                chg = getattr(vq, "change", None)
+                if chg is not None:
+                    if chg < -0.5:
+                        vix_direction = "FALLING"
+                    elif chg > 0.5:
+                        vix_direction = "RISING"
         except Exception:
             pass
 
         if not vix_now or vix_now <= 0:
-            return FactorScore(
+            res = FactorScore(
                 factor_id="india_vix",
                 label="India VIX Direction & Level",
                 score=5,
@@ -423,16 +447,8 @@ def _score_india_vix_regime(vix: Optional[float] = None) -> FactorScore:
                 detail="VIX data unavailable",
                 axis="MACRO",
             )
-
-        vix_direction = None
-        if vix_prev and vix_prev > 0:
-            vix_chg = vix_now - vix_prev
-            if vix_chg < -0.5:
-                vix_direction = "FALLING"
-            elif vix_chg > 0.5:
-                vix_direction = "RISING"
-            else:
-                vix_direction = "STABLE"
+            _VIX_REGIME_CACHE[cache_key] = (now_ts, res)
+            return res
 
         # Base score from absolute level
         if vix_now < 11:
@@ -461,12 +477,12 @@ def _score_india_vix_regime(vix: Optional[float] = None) -> FactorScore:
             direction_note = " ↓ Falling — relief rally conditions"
         elif vix_direction == "RISING":
             score = max(0, score - 2)
-            direction_note = " ↑ Rising — increasing uncertainty"
-        elif vix_direction == "STABLE":
+            direction_note = " ↑ Rising — volatility expansion warning"
+        else:
             direction_note = " → Stable"
 
         signal = "BULLISH" if score >= 7 else "BEARISH" if score <= 3 else "NEUTRAL"
-        return FactorScore(
+        res = FactorScore(
             factor_id="india_vix",
             label="India VIX Direction & Level",
             score=max(0, min(10, score)),
@@ -475,6 +491,8 @@ def _score_india_vix_regime(vix: Optional[float] = None) -> FactorScore:
             raw_value=vix_now,
             axis="MACRO",
         )
+        _VIX_REGIME_CACHE[cache_key] = (now_ts, res)
+        return res
     except Exception as e:
         logger.debug("india_vix error: %s", e)
         return FactorScore(
@@ -1112,6 +1130,17 @@ def get_conviction_score(
     """
     from datetime import datetime
 
+    # ── Check 45s TTL Cache (Institutional factors are macro/daily/hourly) ───
+    cache_key = underlying.strip().upper()
+
+    now = time.time()
+    with _CONVICTION_LOCK:
+        cached = _CONVICTION_CACHE.get(cache_key)
+        if cached is not None:
+            cached_time, cached_res = cached
+            if now - cached_time < _CONVICTION_CACHE_TTL:
+                return cached_res
+
     # ── Fetch veto prerequisites ──────────────────────────────────────────────
     fii_streak = None
     fii_streak_total = None
@@ -1203,7 +1232,7 @@ def get_conviction_score(
     except Exception as _tpe:
         logger.debug("Failed computing trade plan: %s", _tpe)
 
-    return ConvictionScore(
+    res = ConvictionScore(
         total_score=total_normalized,
         verdict=verdict,
         verdict_color=verdict_color,
@@ -1217,3 +1246,13 @@ def get_conviction_score(
         trade_plan=trade_plan,
         as_of=datetime.now().strftime("%H:%M:%S IST"),
     )
+
+    with _CONVICTION_LOCK:
+        _CONVICTION_CACHE[cache_key] = (now, res)
+        if len(_CONVICTION_CACHE) > 50:
+            cutoff = now - _CONVICTION_CACHE_TTL
+            for k in list(_CONVICTION_CACHE.keys()):
+                if _CONVICTION_CACHE[k][0] < cutoff:
+                    _CONVICTION_CACHE.pop(k, None)
+
+    return res

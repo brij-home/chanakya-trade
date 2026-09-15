@@ -463,6 +463,69 @@ def format_short_pct(pct: Any) -> str:
         return s
 
 
+def format_contract_display(contract: str) -> str:
+    """
+    Convert raw broker/exchange contract tokens into clean, human-readable display strings.
+
+    Handles all NSE/BSE/MCX naming conventions:
+      - MStock YYYYMMDD:  HAL202609294800PE    → "HAL 4800 PE"
+      - NSE Monthly:      HAL26SEP4800PE       → "HAL 4800 PE"
+      - NSE Weekly:       NIFTY2692524800CE    → "NIFTY 24800 CE"
+      - Fyers prefixed:   NSE:HAL26SEP4800PE   → "HAL 4800 PE"
+      - Already spaced:   NIFTY 24800 CE       → "NIFTY 24800 CE" (passthrough)
+      - Futures:          HAL26SEPFUT          → "HAL FUT"
+
+    Rules:
+      - Strike is ALWAYS a plain integer with NO comma (4800, not 4,800)
+      - Strikes >= 10000 are kept as-is (e.g. 25000, not 25,000)
+      - Option type CE/PE is space-separated from strike
+      - Expiry date/code is stripped from display (shown separately via expiry badge)
+    """
+    if not contract:
+        return contract
+
+    # Strip exchange prefixes (NSE:, BSE:, NFO:, MCX:, CDS:, BFO:)
+    c = re.sub(r"^(?:NSE|BSE|NFO|MCX|CDS|BFO):", "", contract.strip(), flags=re.IGNORECASE)
+
+    # Already well-formatted (has spaces): e.g. "HAL 4800 PE", "NIFTY 25000 CE"
+    m_spaced = re.match(r"^([A-Z]+)\s+(\d+)\s*(CE|PE|FUT)$", c.upper().strip())
+    if m_spaced:
+        sym, strike, opt = m_spaced.groups()
+        if opt == "FUT":
+            return f"{sym} FUT"
+        return f"{sym} {int(strike)} {opt}"
+
+    c_upper = c.upper()
+
+    # Futures: e.g. HAL26SEPFUT, NIFTY26OCTFUT
+    m_fut = re.match(r"^([A-Z]+)\d{2}[A-Z]{3}FUT$", c_upper)
+    if m_fut:
+        return f"{m_fut.group(1)} FUT"
+
+    # MStock / broker YYYYMMDD format: e.g. HAL202609294800PE
+    # Must start with "20" (year 20xx) to distinguish from NSE weekly compact codes
+    m_yyyymmdd = re.match(r"^([A-Z]+)(20\d{6})(\d+)(CE|PE)$", c_upper)
+    if m_yyyymmdd:
+        sym, _date, strike_str, opt = m_yyyymmdd.groups()
+        return f"{sym} {int(strike_str)} {opt}"
+
+    # NSE Weekly compact: e.g. NIFTY2692524800CE (YY + month-code(1-9/O/N/D) + DD(2) + strike + CE/PE)
+    # Try weekly BEFORE monthly — weekly has 5-char date prefix vs monthly's 5-char (2+3) prefix
+    m_weekly = re.match(r"^([A-Z]+)\d{2}[1-9OND]\d{2}(\d+)(CE|PE)$", c_upper)
+    if m_weekly:
+        sym, strike_str, opt = m_weekly.groups()
+        return f"{sym} {int(strike_str)} {opt}"
+
+    # NSE Monthly: e.g. HAL26SEP4800PE, RELIANCE26SEP3000CE
+    m_monthly = re.match(r"^([A-Z]+)\d{2}[A-Z]{3}(\d+)(CE|PE)$", c_upper)
+    if m_monthly:
+        sym, strike_str, opt = m_monthly.groups()
+        return f"{sym} {int(strike_str)} {opt}"
+
+    # Fallback: return as-is (already clean or unrecognised format)
+    return c.strip()
+
+
 def normalize_env_tag(env: Optional[str], in_market: bool = True) -> str:
     """Resolve unified [REAL/LIVE], [OFF-MARKET/EOD], or [TEST] provenance tag."""
     e = (env or "LIVE").upper()
@@ -1146,7 +1209,9 @@ def render_fno_alert(
     is_call = d.option_type == "CE" or "CE" in d.contract
     icon = "🔥" if is_call else "🚨"
 
-    action_label = d.action_title or f"BUY {d.contract}"
+    # Clean display contract: "HAL 4800 PE" not "HAL202609294800PE"
+    display_contract = format_contract_display(d.contract)
+    action_label = d.action_title or f"BUY {display_contract}"
     be_price = d.premium * 1.002 if d.premium else 0.0
     be_str = f" (Cost: ₹{be_price:,.2f})" if be_price else ""
 
@@ -1204,7 +1269,7 @@ def render_fno_alert(
     msg = (
         f"{icon} <b>{env_tag} GAMMA BLAST SURGE</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"<b>{d.contract}</b>{price_bar}\n"
+        f"<b>{display_contract}</b>{price_bar}\n"
         f"{exp_line}"
         f"🎯 <b>Action:</b> <b>{action_label}</b>\n"
         f"• <b>Entry Zone:</b> <code>{d.entry_range}</code>{opt_cmp_entry}\n"
@@ -1844,7 +1909,7 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
         getattr(alert, "option_type", None) or getattr(alert, "alert_type", "") == "GAMMA_BLAST"
     ) and actionable_plan:
         act = actionable_plan.get("action", "BUY")
-        inst = (
+        inst = format_contract_display(
             getattr(alert, "contract_symbol", None)
             or f"{alert.symbol} {int(getattr(alert, 'strike', 0) or 0)} {getattr(alert, 'option_type', '')}".strip()
         )
@@ -2101,6 +2166,15 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
 
     raw_headline = getattr(alert, "headline", alert.symbol) or alert.symbol
     clean_hl = strip_provenance_and_icons(raw_headline)
+    # Reformat any raw broker contract token embedded in the headline.
+    # e.g. "OPTIONS MOMENTUM: HAL202609294800PE @ ₹54.2" → "OPTIONS MOMENTUM: HAL 4800 PE @ ₹54.2"
+    def _replace_contract_token(m: re.Match) -> str:
+        return format_contract_display(m.group(0))
+    clean_hl = re.sub(
+        r"\b[A-Z]{2,}(?:\d{8}|\d{2}[A-Z]{3}|\d{2}[1-9OND]\d{2})\d+(?:CE|PE)\b",
+        _replace_contract_token,
+        clean_hl,
+    )
     if (
         not clean_hl
         or len(clean_hl.strip()) <= 3

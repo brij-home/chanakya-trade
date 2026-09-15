@@ -20,10 +20,27 @@ from market.nse_scraper import nse_get_options_chain
 from market.source_tracker import record_source, warn_fallback
 
 
+import threading
 import time
 
 _CHAIN_CACHE: dict[str, tuple[float, list[OptionsContract]]] = {}
-_CHAIN_CACHE_TTL = 180.0  # 3 minutes for valid chains, 60s for empty
+_CHAIN_CACHE_TTL_DEFAULT = 180.0  # Off-market hours fallback
+_CHAIN_CACHE_TTL_LIVE = 15.0     # 15s during live market hours for real-time gamma/OI shifts
+_CHAIN_CACHE_TTL_SCRAPER = 30.0  # 30s for scraper fallback
+
+def get_chain_cache_ttl(is_broker: bool = True) -> float:
+    """Returns dynamic cache TTL: 15s live broker / 30s scraper during market hours, 180s when closed."""
+    try:
+        from market.calendar import is_market_open
+        if is_market_open("NFO") or is_market_open("NSE"):
+            return _CHAIN_CACHE_TTL_LIVE if is_broker else _CHAIN_CACHE_TTL_SCRAPER
+    except Exception:
+        pass
+    return _CHAIN_CACHE_TTL_DEFAULT
+
+_SNAPSHOT_CACHE: dict[str, tuple[float, tuple[list[OptionsContract], Optional[float], list[str], dict[str, Any]]]] = {}
+_SNAPSHOT_LOCK = threading.Lock()
+_SNAPSHOT_TTL = 3.0  # 3.0-second coalescing cache
 
 
 def get_options_chain(
@@ -62,7 +79,7 @@ def get_options_chain(
     now = time.time()
     if cache_key in _CHAIN_CACHE:
         cached_at, cached_chain = _CHAIN_CACHE[cache_key]
-        ttl = _CHAIN_CACHE_TTL if cached_chain else 60.0
+        ttl = get_chain_cache_ttl(is_broker=True) if cached_chain else 15.0
         if (now - cached_at) < ttl:
             return cached_chain
 
@@ -150,31 +167,58 @@ def get_options_snapshot(
     now_utc = datetime.now(timezone.utc).isoformat()
     now_ist = datetime.now().strftime("%I:%M:%S %p IST")
 
+    cache_key = f"{clean_u}:{expiry or 'nearest'}"
+    now_ts = time.time()
+    with _SNAPSHOT_LOCK:
+        if cache_key in _SNAPSHOT_CACHE:
+            cached_at, cached_res = _SNAPSHOT_CACHE[cache_key]
+            if (now_ts - cached_at) < _SNAPSHOT_TTL:
+                return cached_res
+
     # Tier 1: Primary Data Broker (m.Stock, Fyers, Shoonya, Zerodha)
     try:
         broker = get_data_broker()
         broker_name = get_data_broker_key() or getattr(broker, "name", "broker")
-        chain = broker.get_options_chain(underlying, expiry)
-        if chain:
-            spot = getattr(broker, "get_ltp", lambda _: None)(underlying)
-            expiries = sorted({c.expiry for c in chain if c.expiry})
-            source_info = {
-                "provider": broker_name,
-                "source": "BROKER_REST",
-                "data_state": "LIVE" if market_open else "OFF_MARKET",
-                "is_realtime": bool(market_open),
-                "is_market_open": market_open,
-                "as_of": now_utc,
-                "as_of_display": now_ist,
-                "source_label": (
-                    f"{broker_name.upper()} Direct Real-Time Feed"
-                    if market_open
-                    else f"{broker_name.upper()} Settled Previous EOD (Market Closed)"
-                ),
-            }
-            return chain, spot, expiries, source_info
-    except Exception:
-        pass
+        if broker:
+            chain = broker.get_options_chain(underlying, expiry)
+            if chain:
+                spot = 0.0
+                try:
+                    spot_fn = getattr(broker, "get_ltp", None)
+                    if callable(spot_fn):
+                        spot = float(spot_fn(underlying) or 0.0)
+                except Exception:
+                    pass
+                if not spot or spot <= 0:
+                    try:
+                        from market.quotes import get_ltp as _mkt_ltp
+                        spot = float(_mkt_ltp(underlying) or 0.0)
+                    except Exception:
+                        spot = 0.0
+                expiries = getattr(broker, "get_expiries", lambda _: [])(underlying)
+                if not expiries:
+                    expiries = sorted({c.expiry for c in chain if c.expiry})
+                source_info = {
+                    "provider": broker_name,
+                    "source": "BROKER_REST",
+                    "data_state": "LIVE" if market_open else "OFF_MARKET",
+                    "is_realtime": bool(market_open),
+                    "is_market_open": market_open,
+                    "as_of": now_utc,
+                    "as_of_display": now_ist,
+                    "source_label": (
+                        f"{broker_name.upper()} Direct Real-Time Feed"
+                        if market_open
+                        else f"{broker_name.upper()} Settled Previous EOD (Market Closed)"
+                    ),
+                }
+                res = (chain, spot, expiries, source_info)
+                with _SNAPSHOT_LOCK:
+                    _SNAPSHOT_CACHE[cache_key] = (now_ts, res)
+                return res
+    except Exception as exc:
+        import logging
+        logging.warning("[market.options] Tier 1 primary broker options fetch failed: %s", exc)
 
     # Tier 2: Upgraded NSE Scraper v3 (Delayed Fallback)
     try:

@@ -185,6 +185,10 @@ def _try_auto_restore_sessions() -> None:
             b = MStockAPI()
             if b.is_authenticated():
                 register_broker("mstock", b, role="both")
+                try:
+                    _start_websocket(b)
+                except Exception:
+                    pass
                 return
     except Exception:
         pass
@@ -197,6 +201,10 @@ def _try_auto_restore_sessions() -> None:
             b = ShoonyaAPI()
             if b.is_authenticated():
                 register_broker("shoonya", b, role="both")
+                try:
+                    _start_websocket(b)
+                except Exception:
+                    pass
                 return
     except Exception:
         pass
@@ -218,6 +226,10 @@ def get_all_brokers() -> dict[str, BrokerAPI]:
     if not _brokers:
         _try_auto_restore_sessions()
     return dict(_brokers)
+
+
+# Alias for backward-compatibility across all modules and stream endpoints
+get_registered_brokers = get_all_brokers
 
 
 def is_multi_broker() -> bool:
