@@ -591,6 +591,8 @@ class FNOAlertData:
     dte: Optional[int] = None
     expiry_cycle: Optional[str] = None
     expiry_badge: Optional[str] = None
+    lot_size: Optional[int] = None
+    runner_strike: Optional[dict[str, Any]] = None
 
     @classmethod
     def from_dict(
@@ -635,12 +637,12 @@ class FNOAlertData:
                 from market.quotes import get_ltp
 
                 real_ltp = get_ltp(contract)
-                if real_ltp and real_ltp > 0:
+                if real_ltp and real_ltp > 0.05:
                     prem = float(real_ltp)
             except Exception:
                 pass
 
-        if prem <= 0.0:
+        if prem <= 0.05:
             is_fallback = True
             if spot and spot > 0:
                 prem = round(spot * 0.008, 2)
@@ -688,7 +690,9 @@ class FNOAlertData:
             else:
                 no_chase = f"₹{round(prem * 1.15, 2):,.2f}"
 
-        action_title = d.get("action_title", f"BUY {contract}")
+        action_title = d.get("action_title")
+        if action_title:
+            action_title = format_contract_display(action_title)
 
         exp_date = d.get("expiry_date", d.get("expiry", d.get("expiry_contract")))
         exp_type = d.get("expiry_type", d.get("contract_cycle", d.get("cycle")))
@@ -700,6 +704,17 @@ class FNOAlertData:
             dte=raw_dte,
             underlying=und,
         )
+
+        lot_sz = d.get("lot_size")
+        if not lot_sz:
+            try:
+                from engine.position_sizer import get_lot_size
+
+                ls = get_lot_size(und or contract)
+                if ls and ls > 1:
+                    lot_sz = ls
+            except Exception:
+                lot_sz = None
 
         return cls(
             contract=contract,
@@ -736,6 +751,10 @@ class FNOAlertData:
             dte=exp_info.get("dte"),
             expiry_cycle=exp_info.get("cycle"),
             expiry_badge=exp_info.get("badge"),
+            lot_size=lot_sz,
+            runner_strike=d.get("runner_strike")
+            or (d.get("actionable_plan") or {}).get("runner_strike")
+            or (d.get("metrics") or {}).get("runner_strike_info"),
         )
 
 
@@ -898,6 +917,7 @@ class MilestoneAlertData:
     r_multiple: Optional[float] = None
     direction: Optional[str] = "BULLISH"
     segment: Optional[str] = None
+    lot_size: Optional[int] = None
 
     @classmethod
     def from_alert(
@@ -976,9 +996,14 @@ class MilestoneAlertData:
 
         # Entry Price resolution (Actionable plan recommended_entry takes canonical precedence)
         entry_price = None
+        opt_plan = act_plan.get("option_plan") if isinstance(act_plan, dict) else None
+        if is_opt_contract and isinstance(opt_plan, dict):
+            if opt_plan.get("entry_premium"):
+                entry_price = float(opt_plan["entry_premium"])
+
         entry_range = act_plan.get("entry_range")
         rec_entry = act_plan.get("recommended_entry")
-        if rec_entry:
+        if not entry_price and rec_entry:
             m = re.search(r"[\d,]+(?:\.\d+)?", str(rec_entry))
             if m:
                 entry_price = float(m.group(0).replace(",", ""))
@@ -999,7 +1024,17 @@ class MilestoneAlertData:
                 except ValueError:
                     pass
         if not entry_price or entry_price == 0.0:
-            entry_price = getattr(alert, "trigger_level", None)
+            if is_opt_contract:
+                entry_price = getattr(alert, "option_premium", None) or (
+                    alert.ltp
+                    if (
+                        alert.ltp
+                        and (not getattr(alert, "strike", None) or alert.ltp != alert.strike)
+                    )
+                    else None
+                )
+            else:
+                entry_price = getattr(alert, "trigger_level", None) or getattr(alert, "ltp", None)
         if not entry_price or entry_price == 0.0:
             entry_price = getattr(alert, "option_premium", None) or getattr(
                 alert, "threshold", None
@@ -1007,11 +1042,14 @@ class MilestoneAlertData:
 
         # Initial Stop Loss resolution
         initial_sl = None
-        act_sl = act_plan.get("stop_loss")
-        if act_sl:
-            m = re.search(r"[\d,]+(?:\.\d+)?", str(act_sl))
-            if m:
-                initial_sl = float(m.group(0).replace(",", ""))
+        if is_opt_contract and isinstance(opt_plan, dict) and opt_plan.get("sl_premium"):
+            initial_sl = float(opt_plan["sl_premium"])
+        if not initial_sl:
+            act_sl = act_plan.get("stop_loss")
+            if act_sl:
+                m = re.search(r"[\d,]+(?:\.\d+)?", str(act_sl))
+                if m:
+                    initial_sl = float(m.group(0).replace(",", ""))
         if not initial_sl or initial_sl == 0.0:
             initial_sl = getattr(alert, "stop_loss", None)
 
@@ -1019,6 +1057,14 @@ class MilestoneAlertData:
         t1_val = None
         t2_val = None
         moon_val = None
+
+        if is_opt_contract and isinstance(opt_plan, dict):
+            if opt_plan.get("t1_premium"):
+                t1_val = float(opt_plan["t1_premium"])
+            if opt_plan.get("t2_premium"):
+                t2_val = float(opt_plan["t2_premium"])
+            if opt_plan.get("t3_premium"):
+                moon_val = float(opt_plan["t3_premium"])
 
         if "target_1" in act_plan:
             m = re.search(r"[\d,]+(?:\.\d+)?", str(act_plan["target_1"]))
@@ -1039,33 +1085,53 @@ class MilestoneAlertData:
             if m:
                 moon_val = float(m.group(0).replace(",", ""))
 
-        tp_obj = act_plan.get("trade_plan")
-        if tp_obj:
-            if isinstance(tp_obj, dict):
-                t1_val = t1_val or tp_obj.get("target_1")
-                t2_val = t2_val or tp_obj.get("target_2")
-                moon_val = moon_val or tp_obj.get("target_moonshot")
-            else:
-                t1_val = t1_val or getattr(tp_obj, "target_1", None)
-                t2_val = t2_val or getattr(tp_obj, "target_2", None)
-                moon_val = moon_val or getattr(tp_obj, "target_moonshot", None)
+        # ONLY for non-option assets (Equity / Commodity / Currency directly), extract from trade_plan.
+        # Option contracts must NEVER inherit underlying spot levels from trade_plan!
+        if not is_opt_contract:
+            tp_obj = act_plan.get("trade_plan")
+            if tp_obj:
+                if isinstance(tp_obj, dict):
+                    t1_val = t1_val or tp_obj.get("target_1")
+                    t2_val = t2_val or tp_obj.get("target_2")
+                    moon_val = moon_val or tp_obj.get("target_moonshot")
+                else:
+                    t1_val = t1_val or getattr(tp_obj, "target_1", None)
+                    t2_val = t2_val or getattr(tp_obj, "target_2", None)
+                    moon_val = moon_val or getattr(tp_obj, "target_moonshot", None)
 
         raw_target_level = getattr(alert, "target_level", getattr(alert, "target_price", None))
         if not t2_val and raw_target_level:
-            if t1_val and raw_target_level > t1_val:
-                t2_val = raw_target_level
-            elif not t1_val:
-                if milestone_type == "TARGET_1":
-                    if (
-                        entry_price
-                        and abs(raw_target_level - entry_price) > abs(ltp - entry_price) * 1.3
-                    ):
-                        t1_val = ltp
-                        t2_val = raw_target_level
-                    else:
-                        t1_val = raw_target_level
-                else:
+            is_valid_raw_tgt = True
+            if is_opt_contract and entry_price and entry_price > 0:
+                if raw_target_level > entry_price * 10:
+                    is_valid_raw_tgt = False
+            if is_valid_raw_tgt:
+                if t1_val and raw_target_level > t1_val:
                     t2_val = raw_target_level
+                elif not t1_val:
+                    if milestone_type == "TARGET_1":
+                        if (
+                            entry_price
+                            and abs(raw_target_level - entry_price) > abs(ltp - entry_price) * 1.3
+                        ):
+                            t1_val = ltp
+                            t2_val = raw_target_level
+                        else:
+                            t1_val = raw_target_level
+                    else:
+                        t2_val = raw_target_level
+
+        # Strict Domain Sanity Filter for Option Contracts:
+        # Prevent any stray underlying spot prices from polluting option target/SL fields.
+        if is_opt_contract and entry_price and entry_price > 0:
+            if t1_val and t1_val > entry_price * 10:
+                t1_val = None
+            if t2_val and t2_val > entry_price * 10:
+                t2_val = None
+            if moon_val and moon_val > entry_price * 15:
+                moon_val = None
+            if initial_sl and initial_sl > entry_price * 4:
+                initial_sl = round(max(0.05, entry_price * 0.70), 2)
 
         if not t1_val and milestone_type == "TARGET_1":
             t1_val = ltp
@@ -1144,6 +1210,25 @@ class MilestoneAlertData:
         else:
             final_env = raw_env
 
+        lot_sz = (
+            getattr(alert, "lot_size", None)
+            or act_plan.get("lot_size")
+            or (
+                getattr(alert, "metrics", {}).get("lot_size")
+                if isinstance(getattr(alert, "metrics", None), dict)
+                else None
+            )
+        )
+        if not lot_sz and is_opt_contract:
+            try:
+                from engine.position_sizer import get_lot_size
+
+                ls = get_lot_size(getattr(alert, "symbol", "") or contract or "")
+                if ls and ls > 1:
+                    lot_sz = ls
+            except Exception:
+                lot_sz = None
+
         return cls(
             milestone_type=milestone_type,
             symbol=getattr(alert, "symbol", "UNKNOWN"),
@@ -1177,6 +1262,7 @@ class MilestoneAlertData:
             r_multiple=r_multiple,
             direction=direction,
             segment=getattr(alert, "segment", None),
+            lot_size=lot_sz,
         )
 
 
@@ -1265,6 +1351,17 @@ def render_fno_alert(
     t2_r_label = "3.2R" if rr_num >= 3.0 else "2.5R"
 
     opt_cmp_entry = f" (Opt CMP: ₹{d.premium:,.2f})" if d.premium else ""
+    lot_str = f" | <b>Lot:</b> {d.lot_size}" if d.lot_size else ""
+
+    runner_str = ""
+    if d.runner_strike and isinstance(d.runner_strike, dict):
+        r_sym = format_contract_display(
+            d.runner_strike.get("symbol")
+            or f"{d.underlying} {int(d.runner_strike.get('strike', 0))} {d.runner_strike.get('option_type', d.option_type)}".strip()
+        )
+        r_ltp = float(d.runner_strike.get("ltp", 0.0) or 0.0)
+        r_ltp_str = f" (Opt CMP: ₹{r_ltp:,.2f})" if r_ltp > 0 else ""
+        runner_str = f"\n• 🚀 <b>Runner Alternative (High Beta):</b> <code>{r_sym}</code>{r_ltp_str}"
 
     msg = (
         f"{icon} <b>{env_tag} GAMMA BLAST SURGE</b>\n"
@@ -1276,7 +1373,8 @@ def render_fno_alert(
         f"• <b>Invalidation SL:</b> <code>₹{d.stop_loss:,.2f}</code> ({d.stop_loss_pct})\n"
         f"• <b>Target 1 ({t1_r_label}):</b> <code>₹{d.target_1:,.2f}</code> ({d.target_1_pct}) — <i>Scale 50% & SL to Cost{be_str}</i>\n"
         f"• <b>Target 2 ({t2_r_label}):</b> <code>₹{d.target_2:,.2f}</code> ({d.target_2_pct}) — <i>Full Extension</i>\n"
-        f"• <b>Risk : Reward:</b> <b>{d.risk_reward} R:R</b>{no_chase_str}\n"
+        f"• <b>Risk : Reward:</b> <b>{d.risk_reward} R:R</b>{lot_str}{no_chase_str}"
+        f"{runner_str}\n"
         f"💡 <b>Reason:</b> {d.trigger_reason} · {d.vol_oi:.1f}x Vol/OI (Imbalance: {d.imbalance:.1f}x)\n"
         f"📋 <b>Playbook:</b> <i>{d.profit_rule}</i>"
         f"{conv_badge}\n"
@@ -1380,6 +1478,19 @@ def render_precursor_alert(data: dict[str, Any], in_market: bool = True) -> str:
 
     cmp_label = "Opt CMP" if seg == "FNO" else "Spot CMP"
     sig_ref = build_signal_ref(symbol=sym)
+
+    lot_sz = data.get("lot_size") or (data.get("actionable_plan") or {}).get("lot_size")
+    if not lot_sz and seg == "FNO":
+        try:
+            from engine.position_sizer import get_lot_size
+
+            ls = get_lot_size(sym)
+            if ls and ls > 1:
+                lot_sz = ls
+        except Exception:
+            lot_sz = None
+    lot_str = f" | <b>Lot:</b> {lot_sz}" if lot_sz else ""
+
     msg = (
         f"{header_line}\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
@@ -1388,7 +1499,7 @@ def render_precursor_alert(data: dict[str, Any], in_market: bool = True) -> str:
         f"• <b>Invalidation SL:</b> <code>₹{sl:,.2f}</code>\n"
         f"• <b>Target 1 (1.5R):</b> <code>₹{t1:,.2f}</code> — <i>Scale 50% & SL to Cost</i>\n"
         f"• <b>Target 2 (2.5R):</b> <code>₹{t2:,.2f}</code> — <i>Full Extension</i>\n"
-        f"• <b>Risk : Reward:</b> <b>{rr}</b>\n"
+        f"• <b>Risk : Reward:</b> <b>{rr}</b>{lot_str}\n"
         f"🚫 <b>{no_chase}</b>\n"
         f"💡 <b>Reason:</b> {factors_str}"
         f"{off_note}\n"
@@ -1451,12 +1562,43 @@ def render_asymmetric_alert(data: dict[str, Any], in_market: bool = True) -> str
     cmp_label = "Opt CMP" if is_deriv else "Spot CMP"
     sig_ref = build_signal_ref(symbol=sym)
 
+    lot_sz = (
+        data.get("lot_size")
+        or (data.get("actionable_plan") or {}).get("lot_size")
+        or (data.get("metrics") or {}).get("lot_size")
+    )
+    if not lot_sz and (is_deriv or clean_seg in ("FNO_INDEX", "FNO_STOCK")):
+        try:
+            from engine.position_sizer import get_lot_size
+
+            ls = get_lot_size(sym)
+            if ls and ls > 1:
+                lot_sz = ls
+        except Exception:
+            lot_sz = None
+    lot_str = f" | <b>Lot:</b> {lot_sz}" if lot_sz else ""
+
     opt_plan = (data.get("actionable_plan") or {}).get("option_plan") or {}
     opt_line = ""
     if opt_plan and opt_plan.get("contract_symbol") and not is_deriv:
-        opt_sym = opt_plan.get("contract_symbol")
+        opt_sym = format_contract_display(opt_plan.get("contract_symbol"))
         opt_prem = opt_plan.get("entry_premium")
-        opt_line = f"\n• <b>F&O Alternative:</b> <code>{opt_sym}</code> @ ₹{opt_prem:,.1f}" if opt_prem else f"\n• <b>F&O Alternative:</b> <code>{opt_sym}</code>"
+        opt_lot = opt_plan.get("lot_size")
+        if not opt_lot:
+            try:
+                from engine.position_sizer import get_lot_size
+
+                ls = get_lot_size(opt_sym or sym)
+                if ls and ls > 1:
+                    opt_lot = ls
+            except Exception:
+                opt_lot = None
+        lot_tag = f" (Lot: {opt_lot})" if opt_lot else ""
+        opt_line = (
+            f"\n• <b>F&O Alternative:</b> <code>{opt_sym}</code>{lot_tag} @ ₹{opt_prem:,.1f}"
+            if opt_prem
+            else f"\n• <b>F&O Alternative:</b> <code>{opt_sym}</code>{lot_tag}"
+        )
 
     msg = (
         f"{header_line}\n"
@@ -1466,7 +1608,7 @@ def render_asymmetric_alert(data: dict[str, Any], in_market: bool = True) -> str
         f"• <b>Invalidation SL:</b> <code>₹{sl:,.2f}</code> (Risk: ₹{abs(ltp - sl):,.2f})\n"
         f"• <b>Target 1 (+2R):</b> <code>₹{t1:,.2f}</code> — <i>Scale 40% & SL to Cost</i>\n"
         f"• <b>Target 2 (+4R):</b> <code>₹{t2:,.2f}</code> — <i>Scale 40% & Trail</i>{moon_line}\n"
-        f"• <b>Risk : Reward:</b> <b>{rr_display} R:R</b>{opt_line}\n"
+        f"• <b>Risk : Reward:</b> <b>{rr_display} R:R</b>{lot_str}{opt_line}\n"
         f"💡 <b>Reason:</b> {conf_str}"
         f"{off_note}\n"
         f"🏷️ <b>Ref:</b> <code>{sig_ref}</code>"
@@ -1513,6 +1655,7 @@ def render_milestone_alert(
             r_multiple=data.get("r_multiple"),
             direction=data.get("direction", "BULLISH"),
             segment=data.get("segment"),
+            lot_size=data.get("lot_size"),
         )
     else:
         d = data
@@ -1550,6 +1693,8 @@ def render_milestone_alert(
             plan_parts.append(f"Entry: {d.entry_range}")
         if d.initial_sl:
             plan_parts.append(f"SL: ₹{d.initial_sl:,.2f}")
+        if is_fno and d.lot_size:
+            plan_parts.append(f"Lot: {d.lot_size}")
         orig_plan_line = (
             f"\n🎯 <b>Original Plan:</b> {' | '.join(plan_parts)}" if plan_parts else ""
         )
@@ -1579,6 +1724,8 @@ def render_milestone_alert(
             plan_parts.append(f"Entry: {d.entry_range}")
         if d.initial_sl:
             plan_parts.append(f"SL: ₹{d.initial_sl:,.2f}")
+        if is_fno and d.lot_size:
+            plan_parts.append(f"Lot: {d.lot_size}")
         orig_plan_line = (
             f"\n🎯 <b>Original Plan:</b> {' | '.join(plan_parts)}" if plan_parts else ""
         )
@@ -1656,6 +1803,8 @@ def render_milestone_alert(
             plan_parts.append(f"T1: ₹{t1_disp:,.2f}")
         if d.target_2:
             plan_parts.append(f"T2: ₹{d.target_2:,.2f}")
+        if is_fno and d.lot_size:
+            plan_parts.append(f"Lot: {d.lot_size}")
         orig_plan_line = (
             f"\n🎯 <b>Original Plan:</b> {' | '.join(plan_parts)}" if plan_parts else ""
         )
@@ -1682,7 +1831,13 @@ def render_milestone_alert(
         )
 
     if d.milestone_type == "FINAL_TARGET":
-        tgt_val = d.target_2 or d.target_level or d.ltp
+        raw_tgt = d.target_2 or d.target_1 or d.target_level or d.ltp
+        if is_fno and d.entry_price and d.entry_price > 0 and raw_tgt > d.entry_price * 10:
+            tgt_val = d.target_1 or d.target_level or d.ltp
+            if tgt_val > d.entry_price * 10:
+                tgt_val = d.ltp
+        else:
+            tgt_val = raw_tgt
         plan_parts = []
         if d.entry_price:
             plan_parts.append(f"Entry: ₹{d.entry_price:,.2f}")
@@ -1690,6 +1845,8 @@ def render_milestone_alert(
             plan_parts.append(f"SL: ₹{d.initial_sl:,.2f}")
         if tgt_val:
             plan_parts.append(f"Target: ₹{tgt_val:,.2f}")
+        if is_fno and d.lot_size:
+            plan_parts.append(f"Lot: {d.lot_size}")
         orig_plan_line = (
             f"\n🎯 <b>Original Plan:</b> {' | '.join(plan_parts)}" if plan_parts else ""
         )
@@ -1733,6 +1890,8 @@ def render_milestone_alert(
             plan_parts.append(f"Entry: ₹{d.entry_price:,.2f}")
         if d.initial_sl:
             plan_parts.append(f"Initial SL: ₹{d.initial_sl:,.2f}")
+        if is_fno and d.lot_size:
+            plan_parts.append(f"Lot: {d.lot_size}")
         orig_plan_line = (
             f"\n🎯 <b>Original Plan:</b> {' | '.join(plan_parts)}" if plan_parts else ""
         )
@@ -2021,12 +2180,48 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
                 f" | 🛑 <b>No-Chase:</b> <i>{comparator} ₹{float(no_chase_val):,.1f}</i>"
             )
 
+        lot_sz = (
+            getattr(alert, "lot_size", None)
+            or actionable_plan.get("lot_size")
+            or (
+                alert.metrics.get("lot_size")
+                if isinstance(getattr(alert, "metrics", None), dict)
+                else None
+            )
+        )
+        if not lot_sz:
+            try:
+                from engine.position_sizer import get_lot_size
+
+                ls = get_lot_size(getattr(alert, "symbol", "") or inst)
+                if ls and ls > 1:
+                    lot_sz = ls
+            except Exception:
+                lot_sz = None
+        lot_str = f" | <b>Lot:</b> {lot_sz}" if lot_sz else ""
+
+        runner_info = actionable_plan.get("runner_strike") or (
+            alert.metrics.get("runner_strike_info")
+            if isinstance(getattr(alert, "metrics", None), dict)
+            else None
+        )
+        runner_str = ""
+        if runner_info and isinstance(runner_info, dict):
+            r_sym = format_contract_display(
+                runner_info.get("symbol")
+                or f"{alert.symbol} {int(runner_info.get('strike', 0))} {runner_info.get('option_type', '')}".strip()
+            )
+            r_ltp = float(runner_info.get("ltp", 0.0) or 0.0)
+            r_ltp_str = f" (Opt CMP: ₹{r_ltp:,.2f})" if r_ltp > 0 else ""
+            runner_str = f"\n• 🚀 <b>Runner Alternative (High Beta):</b> <code>{r_sym}</code>{r_ltp_str}"
+
         plan_str = (
             f"{exp_line}"
             f"• <b>Action:</b> {act} <b>{inst}</b> @ <code>{entry}</code>{opt_cmp_str}{spot_ref}\n"
             f"• <b>Invalidation SL:</b> <code>{sl}</code>{spot_anchor_str}\n"
             f"• <b>Target:</b> <code>{tgt}</code>{tgt2_str}\n"
-            f"• <b>R:R Expectancy:</b> <b>{rr}</b>{no_chase_inline}"
+            f"• <b>R:R Expectancy:</b> <b>{rr}</b>{lot_str}{no_chase_inline}"
+            f"{runner_str}"
             f"{rule_str}"
             f"{wait_str}"
             f"{warn_str}"

@@ -2989,3 +2989,67 @@ def test_squeeze_breakout_always_provides_structured_trade_plan(monkeypatch):
     assert tp["target_1"] > tp["invalidation_stop"]
 
 
+def test_gamma_blast_dual_blueprint_runner_and_noise_margin(monkeypatch):
+    """Verify that Gamma Blast detects optional High-Beta runner strikes and applies volatility noise margin."""
+    from engine.detectors.gamma_blast import detect_gamma_blast
+    from engine.alert_evaluator import evaluate_alert_invalidation
+    from bot.alert_templates import render_auto_alert
+
+    class MockContract:
+        def __init__(self, strike, opt_type, oi, oi_chg, vol, ltp, sym):
+            self.strike = strike
+            self.option_type = opt_type
+            self.oi = oi
+            self.oi_change = oi_chg
+            self.volume = vol
+            self.last_price = ltp
+            self.symbol = sym
+            self.expiry = "2026-09-17"
+
+    # Spot = 23400. Primary = 23400 PE (ATM), Runner = 23350 PE (1 strike OTM)
+    chain = [
+        MockContract(23400, "PE", 50000, -15000, 30000, 85.0, "NIFTY23400PE"),
+        MockContract(23350, "PE", 40000, -5000, 25000, 60.0, "NIFTY23350PE"),
+        MockContract(23100, "PE", 100000, -10000, 50000, 15.0, "NIFTY23100PE"), # Far OTM (> 120 pts away)
+    ]
+
+    alerts = detect_gamma_blast(
+        underlying="NIFTY",
+        spot=23400.0,
+        chain=chain,
+        vwap=23410.0, # Bearish below VWAP
+    )
+
+    # 1. 23400 PE & 23350 PE are in sweet-spot (<= 0.6% OTM), while 23100 PE (1.28% OTM) is excluded as primary alert
+    assert len(alerts) == 2
+    strikes = [a.strike for a in alerts]
+    assert 23400.0 in strikes
+    assert 23350.0 in strikes
+    assert 23100.0 not in strikes  # Far OTM filtered out
+
+    # 2. Dual Blueprint: For 23400 PE, runner strike (23350 PE) should be attached
+    alert_23400 = next(a for a in alerts if a.strike == 23400.0)
+    assert "runner_strike" in alert_23400.actionable_plan
+    runner = alert_23400.actionable_plan["runner_strike"]
+    assert runner is not None
+    assert runner["strike"] == 23350.0
+    assert runner["symbol"] == "NIFTY23350PE"
+
+    # 3. Telegram rendering should include Runner Alternative
+    msg = render_auto_alert(alert_23400, in_market=True)
+    assert "Runner Alternative (High Beta):" in msg
+    assert "23350" in msg
+
+    # 4. Volatility noise margin test:
+    # If SL is ₹60.00, noise margin is 60 * 0.025 = 1.0. A tick at 59.50 should NOT trigger invalidation!
+    alert_23400.stop_loss = 60.0
+    inv_reason_noise = evaluate_alert_invalidation(alert_23400, current_ltp=59.50)
+    assert inv_reason_noise is None  # Preserved against noise tick!
+
+    # Severe breakdown below SL - noise margin (e.g. 58.00) SHOULD invalidate
+    inv_reason_real = evaluate_alert_invalidation(alert_23400, current_ltp=58.00)
+    assert inv_reason_real is not None
+    assert "invalidated" in inv_reason_real.lower()
+
+
+

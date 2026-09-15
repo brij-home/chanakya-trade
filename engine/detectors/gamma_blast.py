@@ -69,7 +69,10 @@ def detect_gamma_blast(
     for c in ce_contracts:
         strike = getattr(c, "strike", 0.0)
         strike_diff_pct = ((strike - spot) / spot) * 100.0
-        if not (-0.8 <= strike_diff_pct <= 1.2):
+        # Delta-Gated Sweet-Spot Filter: Indices demand ATM/Near-ATM (<= 0.6%), equities allow up to 1.2%
+        max_call_otm = 0.6 if is_index else 1.2
+        max_call_itm = 0.4 if is_index else 0.8
+        if not (-max_call_itm <= strike_diff_pct <= max_call_otm):
             continue
 
         oi = getattr(c, "oi", 0)
@@ -205,6 +208,12 @@ def detect_gamma_blast(
                     else None
                 )
                 target_premium = opt_plan["t1_premium"] if opt_plan else round(opt_ltp * 1.8, 1)
+                t2_premium = (
+                    opt_plan.get("t2_premium") if opt_plan else round(opt_ltp * 2.8, 1)
+                )
+                t3_premium = (
+                    opt_plan.get("t3_premium") if opt_plan else round(opt_ltp * 4.5, 1)
+                )
                 sl_premium = (
                     opt_plan["sl_premium"] if opt_plan else round(max(1.0, opt_ltp * 0.7), 1)
                 )
@@ -240,6 +249,12 @@ def detect_gamma_blast(
                 target_premium = (
                     round(opt_ltp * 1.8, 1) if opt_ltp > 0 else round(strike * 0.015, 1)
                 )
+                t2_premium = (
+                    round(opt_ltp * 2.8, 1) if opt_ltp > 0 else round(strike * 0.025, 1)
+                )
+                t3_premium = (
+                    round(opt_ltp * 4.5, 1) if opt_ltp > 0 else round(strike * 0.040, 1)
+                )
                 sl_premium = round(max(1.0, opt_ltp * 0.70), 1) if opt_ltp > 0 else 1.0
                 rr_str = "1:2"
                 t1_pct_str = "+80%"
@@ -266,6 +281,26 @@ def detect_gamma_blast(
 
             is_authentic_opt = bool(opt_ltp and opt_ltp > 0.0)
             alert_env = "LIVE" if is_authentic_opt else "TEST"
+
+            # Determine optional High-Beta Runner strike (1 strike further OTM with verified liquidity)
+            runner_strike_info = None
+            higher_ce_candidates = [
+                c_cand
+                for c_cand in ce_contracts
+                if getattr(c_cand, "strike", 0.0) > strike
+            ]
+            if higher_ce_candidates:
+                higher_ce_candidates.sort(key=lambda x: getattr(x, "strike", 0.0))
+                runner_c = higher_ce_candidates[0]
+                r_strike = getattr(runner_c, "strike", 0.0)
+                r_ltp = getattr(runner_c, "last_price", 0.0)
+                r_sym = getattr(runner_c, "symbol", f"{underlying}{int(r_strike)}CE")
+                runner_strike_info = {
+                    "strike": r_strike,
+                    "option_type": "CE",
+                    "ltp": r_ltp,
+                    "symbol": r_sym,
+                }
 
             alerts.append(
                 AutoAlert(
@@ -303,6 +338,11 @@ def detect_gamma_blast(
                         "spot_to_vwap_pct": round(
                             ((spot - effective_vwap) / effective_vwap) * 100, 2
                         ),
+                        "lot_size": lot_sz,
+                        "runner_strike": runner_strike_info["strike"] if runner_strike_info else None,
+                        "runner_symbol": runner_strike_info["symbol"] if runner_strike_info else None,
+                        "runner_ltp": runner_strike_info["ltp"] if runner_strike_info else None,
+                        "runner_strike_info": runner_strike_info,
                     },
                     actionable_plan={
                         "action": "BUY",
@@ -312,16 +352,21 @@ def detect_gamma_blast(
                         "expiry_date": exp_date,
                         "expiry_type": exp_type,
                         "underlying_spot": f"₹{spot:,.1f}",
-                        "recommended_entry": f"₹{opt_ltp:.1f} (Option Premium)"
-                        if opt_ltp
-                        else "Market",
-                        "target": f"₹{target_premium:.1f} ({t1_pct_str})",
-                        "stop_loss": f"₹{sl_premium:.1f} ({sl_pct_str})",
+                        "recommended_entry": f"₹{opt_ltp:,.2f}" if opt_ltp else "Market",
+                        "target_1": f"₹{target_premium:,.2f}",
+                        "target": f"₹{target_premium:,.2f} ({t1_pct_str})",
+                        "target_2": f"₹{t2_premium:,.2f}" if t2_premium else f"₹{round(target_premium * 1.6, 2):,.2f}",
+                        "target_moonshot": f"₹{t3_premium:,.2f}" if t3_premium else f"₹{round(target_premium * 2.5, 2):,.2f}",
+                        "stop_loss": f"₹{sl_premium:,.2f}",
                         "risk_reward": rr_str,
+                        "profit_rule": f"Book 50% at T1 (₹{target_premium:,.2f}), move SL to Cost, let remainder ride to T2 (₹{t2_premium:,.2f})." if t2_premium else f"Book 50% at T1 (₹{target_premium:,.2f}), move SL to Cost.",
                         "trade_plan": tp_dict,
                         "option_plan": opt_plan,
+                        "runner_strike": runner_strike_info,
                         "market_status": mkt_status,
+                        "lot_size": lot_sz,
                     },
+                    lot_size=lot_sz,
                     confidence=confidence,
                     created_at=now_iso,
                 )
@@ -331,7 +376,10 @@ def detect_gamma_blast(
     for c in pe_contracts:
         strike = getattr(c, "strike", 0.0)
         strike_diff_pct = ((strike - spot) / spot) * 100.0
-        if not (-1.2 <= strike_diff_pct <= 0.8):
+        # Delta-Gated Sweet-Spot Filter: Indices demand ATM/Near-ATM (<= 0.6%), equities allow up to 1.2%
+        max_put_otm = 0.6 if is_index else 1.2
+        max_put_itm = 0.4 if is_index else 0.8
+        if not (-max_put_otm <= strike_diff_pct <= max_put_itm):
             continue
 
         oi = getattr(c, "oi", 0)
@@ -467,6 +515,12 @@ def detect_gamma_blast(
                     else None
                 )
                 target_premium = opt_plan["t1_premium"] if opt_plan else round(opt_ltp * 1.8, 1)
+                t2_premium = (
+                    opt_plan.get("t2_premium") if opt_plan else round(opt_ltp * 2.8, 1)
+                )
+                t3_premium = (
+                    opt_plan.get("t3_premium") if opt_plan else round(opt_ltp * 4.5, 1)
+                )
                 sl_premium = (
                     opt_plan["sl_premium"] if opt_plan else round(max(1.0, opt_ltp * 0.7), 1)
                 )
@@ -502,6 +556,12 @@ def detect_gamma_blast(
                 target_premium = (
                     round(opt_ltp * 1.8, 1) if opt_ltp > 0 else round(strike * 0.015, 1)
                 )
+                t2_premium = (
+                    round(opt_ltp * 2.8, 1) if opt_ltp > 0 else round(strike * 0.025, 1)
+                )
+                t3_premium = (
+                    round(opt_ltp * 4.5, 1) if opt_ltp > 0 else round(strike * 0.040, 1)
+                )
                 sl_premium = round(max(1.0, opt_ltp * 0.70), 1) if opt_ltp > 0 else 1.0
                 rr_str = "1:2"
                 t1_pct_str = "+80%"
@@ -528,6 +588,26 @@ def detect_gamma_blast(
 
             is_authentic_opt = bool(opt_ltp and opt_ltp > 0.0)
             alert_env = "LIVE" if is_authentic_opt else "TEST"
+
+            # Determine optional High-Beta Runner strike (1 strike further OTM with verified liquidity)
+            runner_strike_info = None
+            lower_pe_candidates = [
+                c_cand
+                for c_cand in pe_contracts
+                if getattr(c_cand, "strike", 0.0) < strike
+            ]
+            if lower_pe_candidates:
+                lower_pe_candidates.sort(key=lambda x: getattr(x, "strike", 0.0), reverse=True)
+                runner_c = lower_pe_candidates[0]
+                r_strike = getattr(runner_c, "strike", 0.0)
+                r_ltp = getattr(runner_c, "last_price", 0.0)
+                r_sym = getattr(runner_c, "symbol", f"{underlying}{int(r_strike)}PE")
+                runner_strike_info = {
+                    "strike": r_strike,
+                    "option_type": "PE",
+                    "ltp": r_ltp,
+                    "symbol": r_sym,
+                }
 
             alerts.append(
                 AutoAlert(
@@ -565,6 +645,11 @@ def detect_gamma_blast(
                         "spot_to_vwap_pct": round(
                             ((spot - effective_vwap) / effective_vwap) * 100, 2
                         ),
+                        "lot_size": lot_sz,
+                        "runner_strike": runner_strike_info["strike"] if runner_strike_info else None,
+                        "runner_symbol": runner_strike_info["symbol"] if runner_strike_info else None,
+                        "runner_ltp": runner_strike_info["ltp"] if runner_strike_info else None,
+                        "runner_strike_info": runner_strike_info,
                     },
                     actionable_plan={
                         "action": "BUY",
@@ -574,14 +659,21 @@ def detect_gamma_blast(
                         "expiry_date": exp_date,
                         "expiry_type": exp_type,
                         "underlying_spot": f"₹{spot:,.1f}",
-                        "recommended_entry": f"₹{opt_ltp:.1f}" if opt_ltp else "Market",
-                        "target": f"₹{target_premium:.1f} ({t1_pct_str})",
-                        "stop_loss": f"₹{sl_premium:.1f} ({sl_pct_str})",
+                        "recommended_entry": f"₹{opt_ltp:,.2f}" if opt_ltp else "Market",
+                        "target_1": f"₹{target_premium:,.2f}",
+                        "target": f"₹{target_premium:,.2f} ({t1_pct_str})",
+                        "target_2": f"₹{t2_premium:,.2f}" if t2_premium else f"₹{round(target_premium * 1.6, 2):,.2f}",
+                        "target_moonshot": f"₹{t3_premium:,.2f}" if t3_premium else f"₹{round(target_premium * 2.5, 2):,.2f}",
+                        "stop_loss": f"₹{sl_premium:,.2f}",
                         "risk_reward": rr_str,
+                        "profit_rule": f"Book 50% at T1 (₹{target_premium:,.2f}), move SL to Cost, let remainder ride to T2 (₹{t2_premium:,.2f})." if t2_premium else f"Book 50% at T1 (₹{target_premium:,.2f}), move SL to Cost.",
                         "trade_plan": tp_dict,
                         "option_plan": opt_plan,
+                        "runner_strike": runner_strike_info,
                         "market_status": mkt_status,
+                        "lot_size": lot_sz,
                     },
+                    lot_size=lot_sz,
                     confidence=confidence,
                     created_at=now_iso,
                 )

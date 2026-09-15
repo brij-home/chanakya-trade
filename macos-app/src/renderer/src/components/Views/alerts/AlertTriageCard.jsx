@@ -11,60 +11,120 @@ export const AlertTriageCard = memo(function AlertTriageCard({
   onSendTelegram,
 }) {
   const cleanSym = (alert.symbol || '').replace(/^(NSE|BSE|MCX|NFO|CDS):/, '').trim().toUpperCase()
-  const cleanContract = (alert.contract_symbol || '').replace(/^(NSE|BSE|MCX|NFO|CDS):/, '').trim().toUpperCase()
+  const rawContract = alert.contract_symbol || alert.actionable_plan?.option_plan?.contract_symbol || alert.actionable_plan?.option_contract || ''
+  const cleanContract = rawContract.replace(/^(NSE|BSE|MCX|NFO|CDS):/, '').trim().toUpperCase()
   
   const liveSpotBySym = useLiveSpot(cleanSym)
   const liveSpotByFull = useLiveSpot(alert.symbol !== cleanSym ? alert.symbol : null)
   const liveSpot = liveSpotBySym ?? liveSpotByFull
 
   const liveContractByClean = useLiveSpot(cleanContract)
-  const liveContractByFull = useLiveSpot(alert.contract_symbol && alert.contract_symbol !== cleanContract ? alert.contract_symbol : null)
+  const liveContractByFull = useLiveSpot(rawContract && rawContract !== cleanContract ? rawContract : null)
   const liveContract = liveContractByClean ?? liveContractByFull
 
   const style = AUTO_TYPE_STYLE[alert.alert_type] || AUTO_TYPE_STYLE.GAMMA_BLAST
   const isBull = alert.direction === 'BULLISH'
   const isInvalidated = alert.is_invalidated || alert.stage === 'INVALIDATED'
-  const isT1 = alert.stage === 'T1_ACHIEVED' || alert.target_status === 'T1_ACHIEVED'
-  const isFinalTarget = alert.stage === 'TARGET_ACHIEVED' || alert.target_status === 'TARGET_ACHIEVED'
+  const isT1Achieved = alert.stage === 'T1_ACHIEVED' || alert.target_status === 'T1_ACHIEVED'
+  const isT2Achieved = alert.stage === 'T2_ACHIEVED' || alert.target_status === 'T2_ACHIEVED'
+  const isFinalTargetAchieved = alert.stage === 'TARGET_ACHIEVED' || alert.target_status === 'TARGET_ACHIEVED' || alert.stage === 'COMPLETED'
   const isTrail = alert.stage === 'TRAILING_UPDATE'
   const isEarly = alert.stage === 'EARLY_WARNING'
 
-  const optType = alert.option_type || (alert.contract_symbol?.endsWith('PE') ? 'PE' : alert.contract_symbol?.endsWith('CE') ? 'CE' : null)
+  const optType = alert.option_type || (rawContract?.endsWith('PE') ? 'PE' : rawContract?.endsWith('CE') ? 'CE' : null)
   const strikeNum = alert.strike ? Number(String(alert.strike).replace(/[^0-9.-]/g, '')) : null
-  const isFuture = Boolean(alert.contract_symbol?.toUpperCase().includes('FUT') || alert.derivative_type === 'FUT')
-  const isPureOption = alert.alert_type === 'OPTIONS_MOMENTUM' || alert.alert_type === 'OPTION_WRITE' || (alert.alert_type === 'GAMMA_BLAST' && optType) || (alert.contract_symbol && (alert.contract_symbol.endsWith('CE') || alert.contract_symbol.endsWith('PE')) && alert.exchange === 'NFO')
+  const isFuture = Boolean(rawContract?.toUpperCase().includes('FUT') || alert.symbol?.toUpperCase().includes('FUT') || alert.derivative_type === 'FUT')
+  const isPureOption = alert.alert_type === 'OPTIONS_MOMENTUM' || alert.alert_type === 'OPTION_WRITE' || (alert.alert_type === 'GAMMA_BLAST' && optType) || (rawContract && (rawContract.endsWith('CE') || rawContract.endsWith('PE')) && alert.exchange === 'NFO')
   const isSpotSetup = alert.alert_type === 'ASYMMETRIC_OPPORTUNITY' || alert.alert_type === 'SQUEEZE_BREAKOUT' || alert.alert_type === 'SQUEEZE_BREAKDOWN' || alert.alert_type === 'PATTERN_COILING' || alert.alert_type === 'MOMENTUM_ACCELERATION' || alert.alert_type === 'POCKET_PIVOT' || alert.alert_type === 'PRECURSOR_RADAR' || alert.alert_type === 'SMC_SWEEP' || alert.alert_type === 'CIRCUIT_WARNING' || alert.alert_type === 'COMMODITY_MOMENTUM'
-  const isDerivative = !isSpotSetup && Boolean(isFuture || isPureOption || (alert.exchange === 'NFO' && (optType || strikeNum || alert.contract_symbol)))
-
-  const rawSpot = liveSpot?.ltp ?? alert.underlying_spot ?? alert.metrics?.spot
-  const spotNum = rawSpot ? Number(rawSpot) : null
-  const rawOptLtp = liveContract?.ltp ?? alert.ltp ?? alert.option_premium
-  const optLtpNum = rawOptLtp ? Number(rawOptLtp) : null
+  const isDerivative = !isSpotSetup && Boolean(isFuture || isPureOption || (alert.exchange === 'NFO' && (optType || strikeNum || rawContract)))
 
   const plan = alert.actionable_plan || {}
   const tradePlan = plan.trade_plan || {}
   const optPlan = plan.option_plan || null
 
+  const act = String(tradePlan.action || plan.action || '').toUpperCase()
+  const isOptionSell = isDerivative && (
+    act === 'SELL' ||
+    act === 'WRITE' ||
+    act === 'SHORT' ||
+    alert.alert_type === 'OPTION_WRITE'
+  )
+
+  const rawSpot = liveSpot?.ltp ?? alert.underlying_spot ?? alert.metrics?.spot
+  const spotNum = rawSpot ? Number(rawSpot) : null
+  const rawOptLtp = liveContract?.ltp ?? alert.option_premium ?? (isDerivative ? alert.ltp : null)
+  const optLtpNum = rawOptLtp ? Number(rawOptLtp) : null
+
   const slNum = isDerivative
     ? (optPlan?.sl_premium ? Number(optPlan.sl_premium) : (alert.option_stop_loss ? Number(alert.option_stop_loss) : (alert.stop_loss ? Number(alert.stop_loss) : null)))
     : (tradePlan.invalidation_stop ? Number(tradePlan.invalidation_stop) : (alert.stop_loss ? Number(alert.stop_loss) : null))
   const entryNum = isDerivative
-    ? (optPlan?.entry_premium ? Number(optPlan.entry_premium) : (optLtpNum || null))
+    ? (optPlan?.entry_premium ? Number(optPlan.entry_premium) : (alert.option_premium ? Number(alert.option_premium) : (optLtpNum || null)))
     : (tradePlan.entry_price ? Number(tradePlan.entry_price) : (alert.trigger_level ? Number(alert.trigger_level) : spotNum))
   const t1Num = isDerivative
     ? (optPlan?.t1_premium ? Number(optPlan.t1_premium) : (alert.option_target_1 ? Number(alert.option_target_1) : (alert.target_level ? Number(alert.target_level) : null)))
     : (tradePlan.target_1 ? Number(tradePlan.target_1) : (alert.target_level ? Number(alert.target_level) : null))
+  const t2Num = isDerivative
+    ? (optPlan?.t2_premium ? Number(optPlan.t2_premium) : (alert.option_target_2 ? Number(alert.option_target_2) : null))
+    : (tradePlan.target_2 ? Number(tradePlan.target_2) : null)
+  const t3Num = isDerivative
+    ? (optPlan?.t3_premium ? Number(optPlan.t3_premium) : null)
+    : (tradePlan.target_3 ? Number(tradePlan.target_3) : null)
 
+  const currentPrice = isDerivative ? optLtpNum : spotNum
   const fmtP = (v) => v !== null && v !== undefined && !isNaN(v) ? (Number(v) >= 500 ? Number(v).toFixed(1) : Number(v).toFixed(2)) : '—'
 
   let liveReturnPct = null
-  if (optLtpNum && entryNum && entryNum > 0 && isDerivative) {
-    const diff = optLtpNum - entryNum
+  let isProfitable = false
+  if (currentPrice && entryNum && entryNum > 0) {
+    let diff = 0
+    if (isDerivative) {
+      diff = isOptionSell ? entryNum - currentPrice : currentPrice - entryNum
+    } else {
+      diff = isBull ? currentPrice - entryNum : entryNum - currentPrice
+    }
     liveReturnPct = ((diff / entryNum) * 100).toFixed(1)
-  } else if (spotNum && entryNum && entryNum > 0 && !isDerivative) {
-    const diff = isBull ? spotNum - entryNum : entryNum - spotNum
-    liveReturnPct = ((diff / entryNum) * 100).toFixed(1)
+    isProfitable = diff >= 0
   }
+
+  // Dynamic stage hits
+  const isSLHit = Boolean(
+    isInvalidated ||
+    (slNum && currentPrice && (
+      isDerivative
+        ? (isOptionSell ? currentPrice >= slNum : currentPrice <= slNum)
+        : (isBull ? currentPrice <= slNum : currentPrice >= slNum)
+    ))
+  )
+
+  const isT3Hit = Boolean(
+    isFinalTargetAchieved ||
+    (t3Num && currentPrice && !isSLHit && (
+      isDerivative
+        ? (isOptionSell ? currentPrice <= t3Num : currentPrice >= t3Num)
+        : (isBull ? currentPrice >= t3Num : currentPrice <= t3Num)
+    ))
+  )
+
+  const isT2Hit = Boolean(
+    isT3Hit ||
+    isT2Achieved ||
+    (t2Num && currentPrice && !isSLHit && (
+      isDerivative
+        ? (isOptionSell ? currentPrice <= t2Num : currentPrice >= t2Num)
+        : (isBull ? currentPrice >= t2Num : currentPrice <= t2Num)
+    ))
+  )
+
+  const isT1Hit = Boolean(
+    isT2Hit ||
+    isT1Achieved ||
+    (t1Num && currentPrice && !isSLHit && (
+      isDerivative
+        ? (isOptionSell ? currentPrice <= t1Num : currentPrice >= t1Num)
+        : (isBull ? currentPrice >= t1Num : currentPrice <= t1Num)
+    ))
+  )
 
   const conviction = alert.confidence || 85
 
@@ -74,8 +134,8 @@ export const AlertTriageCard = memo(function AlertTriageCard({
       className={`rounded-xl p-2.5 transition-all duration-150 cursor-pointer text-xs space-y-1.5 ${
         isSelected
           ? 'bg-surface border-l-4 border-l-gold border-y border-r border-gold/30 shadow-md ring-1 ring-gold/20'
-          : isInvalidated
-          ? 'bg-panel/50 hover:bg-surface/60 border border-rose-500/20 hover:border-rose-500/40 opacity-75'
+          : isSLHit
+          ? 'bg-panel/50 hover:bg-surface/60 border border-rose-500/30 hover:border-rose-500/50 opacity-80'
           : 'bg-panel hover:bg-surface/80 border border-border/40 hover:border-border'
       }`}
     >
@@ -83,7 +143,7 @@ export const AlertTriageCard = memo(function AlertTriageCard({
       <div className="flex items-center justify-between gap-1.5 min-w-0">
         <div className="flex items-center gap-1.5 min-w-0 flex-wrap">
           <span className="text-xs">
-            {isInvalidated ? '🛑' : isFinalTarget ? '🏁' : isT1 ? '🎯' : isTrail ? '📈' : isEarly ? '⏳' : style.icon}
+            {isSLHit ? '🛑' : isT3Hit ? '🚀' : isT2Hit ? '🏁' : isT1Hit ? '🎯' : isTrail ? '📈' : isEarly ? '⏳' : style.icon}
           </span>
           <span className="font-black text-sm text-text leading-none">{alert.symbol}</span>
           {strikeNum && !isFuture && (
@@ -100,6 +160,25 @@ export const AlertTriageCard = memo(function AlertTriageCard({
           <span className={`text-[8px] font-bold ${isBull ? 'text-emerald-400' : 'text-rose-400'}`}>
             {isBull ? '▲' : '▼'} {alert.direction}
           </span>
+
+          {/* Real-time Stage Hit Badge */}
+          {isSLHit ? (
+            <span className="text-[7px] px-1.5 py-px rounded font-black uppercase bg-rose-500/25 text-rose-300 border border-rose-500/50 animate-pulse">
+              🛑 SL HIT
+            </span>
+          ) : isT3Hit ? (
+            <span className="text-[7px] px-1.5 py-px rounded font-black uppercase bg-purple-500/25 text-purple-200 border border-purple-400/50 animate-pulse">
+              🚀 T3 HIT
+            </span>
+          ) : isT2Hit ? (
+            <span className="text-[7px] px-1.5 py-px rounded font-black uppercase bg-cyan-500/25 text-cyan-200 border border-cyan-400/50 animate-pulse">
+              🏁 T2 HIT
+            </span>
+          ) : isT1Hit ? (
+            <span className="text-[7px] px-1.5 py-px rounded font-black uppercase bg-emerald-500/25 text-emerald-200 border border-emerald-400/50 animate-pulse">
+              🎯 T1 HIT
+            </span>
+          ) : null}
 
           {/* Time Horizon Badge */}
           {alert.time_horizon && (
@@ -135,11 +214,12 @@ export const AlertTriageCard = memo(function AlertTriageCard({
                 ? (liveContract?.flash === 'up' ? 'text-emerald-400' : liveContract?.flash === 'down' ? 'text-rose-400' : 'text-gold')
                 : (liveSpot?.flash === 'up' ? 'text-emerald-400' : liveSpot?.flash === 'down' ? 'text-rose-400' : 'text-text')
             }`}>
-              ₹{fmtP(isDerivative ? optLtpNum : spotNum)}
+              ₹{fmtP(currentPrice)}
+              {isDerivative && liveContract?.ltp ? <span className="inline-block w-1 h-1 rounded-full bg-emerald-400 animate-pulse ml-0.5 align-middle" /> : null}
             </span>
             {liveReturnPct && (
-              <span className={`text-[9px] font-bold ${Number(liveReturnPct) >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
-                {Number(liveReturnPct) >= 0 ? '+' : ''}{liveReturnPct}%
+              <span className={`text-[9px] font-bold ${isProfitable ? 'text-emerald-400' : 'text-rose-400'}`}>
+                {isProfitable ? '+' : ''}{liveReturnPct}%
               </span>
             )}
           </div>
@@ -156,7 +236,7 @@ export const AlertTriageCard = memo(function AlertTriageCard({
         {alert.headline || alert.summary}
       </p>
 
-      {/* Row 3: Key levels (Entry, SL, T1) + Quick CTAs */}
+      {/* Row 3: Key levels (Entry, SL, T1, T2) + Quick CTAs */}
       <div className="flex items-center justify-between gap-1 pt-1 border-t border-border/20 text-[9px] font-mono flex-wrap">
         <div className="flex items-center gap-1.5 flex-wrap">
           {entryNum && <span className="text-gold font-bold">Entry ₹{fmtP(entryNum)}</span>}
@@ -168,8 +248,21 @@ export const AlertTriageCard = memo(function AlertTriageCard({
               Max ₹{fmtP(alert.no_chase_boundary)}
             </span>
           )}
-          {slNum && <span className="text-rose-600 dark:text-rose-400 font-bold">SL ₹{fmtP(slNum)}</span>}
-          {t1Num && <span className="text-emerald-600 dark:text-emerald-400 font-bold">T1 ₹{fmtP(t1Num)}</span>}
+          {slNum && (
+            <span className={`font-bold px-1 py-px rounded ${isSLHit ? 'bg-rose-500/25 text-rose-300 border border-rose-500/50' : 'text-rose-600 dark:text-rose-400'}`}>
+              {isSLHit ? '🛑 SL ' : 'SL '}₹{fmtP(slNum)}
+            </span>
+          )}
+          {t1Num && (
+            <span className={`font-bold px-1 py-px rounded ${isT1Hit ? 'bg-emerald-500/25 text-emerald-300 border border-emerald-500/50' : 'text-emerald-600 dark:text-emerald-400'}`}>
+              {isT1Hit ? '✅ T1 ' : 'T1 '}₹{fmtP(t1Num)}
+            </span>
+          )}
+          {t2Num && (
+            <span className={`font-bold px-1 py-px rounded ${isT2Hit ? 'bg-cyan-500/25 text-cyan-200 border border-cyan-500/50' : 'text-cyan-600 dark:text-cyan-400'}`}>
+              {isT2Hit ? '✅ T2 ' : 'T2 '}₹{fmtP(t2Num)}
+            </span>
+          )}
           <span className="text-muted">· {conviction}%</span>
         </div>
 

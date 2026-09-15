@@ -996,3 +996,169 @@ def test_render_auto_alert_sanitizes_degenerate_h_and_s():
 
     # 3. Zero-redundancy spot presentation: Spot: ₹13,520.00 must appear exactly ONCE
     assert rendered.count("Spot:") == 1
+
+
+def test_options_alerts_expose_lot_size():
+    """Verify that all Options and F&O Telegram alert templates expose the correct market lot size."""
+    from engine.auto_alert_engine import AutoAlert
+    from bot.alert_templates import (
+        render_auto_alert,
+        render_fno_alert,
+        render_asymmetric_alert,
+        render_precursor_alert,
+        render_milestone_alert,
+        MilestoneAlertData,
+    )
+
+    # 1. Standalone FNO alert (HAL -> 150)
+    fno_data = {
+        "contract": "HAL202609294800PE",
+        "underlying": "HAL",
+        "spot": 4785.0,
+        "premium": 54.2,
+        "entry_range": "₹52.0 – ₹55.0",
+        "stop_loss": 38.0,
+        "target_1": 85.0,
+        "target_2": 120.0,
+        "risk_reward": "1:2.8",
+        "trigger_reason": "Put OI unwinding",
+        "vol_oi": 3.5,
+        "imbalance": 2.1,
+    }
+    rendered_fno = render_fno_alert(fno_data)
+    assert "Lot:</b> 150" in rendered_fno or "Lot: 150" in rendered_fno
+
+    # 2. AutoAlert Options Momentum (NIFTY -> 65)
+    nifty_opt = AutoAlert(
+        alert_id="aa-nifty-opt-01",
+        alert_type="OPTIONS_MOMENTUM",
+        stage="IGNITED",
+        symbol="NIFTY",
+        exchange="NFO",
+        direction="BULLISH",
+        headline="OPTIONS MOMENTUM: NIFTY 25000 CE @ ₹120.0",
+        summary="Call momentum on NIFTY",
+        ltp=120.0,
+        trigger_level=25000,
+        target_level=220.0,
+        stop_loss=80.0,
+        strike=25000,
+        option_type="CE",
+        contract_symbol="NIFTY2692525000CE",
+        actionable_plan={
+            "action": "BUY CE",
+            "contract": "NIFTY2692525000CE",
+            "recommended_entry": "₹120.0",
+            "stop_loss": "₹80.0",
+            "target": "₹220.0",
+            "risk_reward": "1:2.5",
+        },
+    )
+    rendered_nifty = render_auto_alert(nifty_opt)
+    assert "Lot:</b> 65" in rendered_nifty or "Lot: 65" in rendered_nifty
+
+    # 3. Milestone alert (Target 1 Hit)
+    ms_data = MilestoneAlertData.from_alert(nifty_opt, "TARGET_1")
+    rendered_ms = render_milestone_alert(ms_data)
+    assert "Lot: 65" in rendered_ms
+
+    # 4. Asymmetric Option alternative
+    asym_data = {
+        "symbol": "RELIANCE",
+        "segment": "EQUITY",
+        "ltp": 3000.0,
+        "entry_range": "₹2990 – ₹3010",
+        "stop_loss": 2950.0,
+        "target_1": 3100.0,
+        "target_2": 3200.0,
+        "risk_reward": "1:3.0",
+        "actionable_plan": {
+            "option_plan": {
+                "contract_symbol": "RELIANCE26SEP3000CE",
+                "entry_premium": 65.0,
+            }
+        },
+    }
+    rendered_asym = render_asymmetric_alert(asym_data)
+    assert "Lot: 500" in rendered_asym
+
+
+def test_gamma_blast_milestone_no_spot_target_corruption():
+    """Verify that Gamma Blast option alerts never render underlying spot targets in milestone alerts."""
+    alert = AutoAlert(
+        alert_id="aa-gamma-pe-COALINDIA-420-test",
+        alert_type="GAMMA_BLAST",
+        stage="COMPLETED",
+        symbol="COALINDIA",
+        exchange="NFO",
+        direction="BEARISH",
+        headline="⚡ PUT GAMMA BLAST: COALINDIA 420 PE",
+        summary="Put writers capitulating. Spot ₹423.7 below VWAP.",
+        ltp=6.05,
+        trigger_level=420.0,
+        target_level=5.43,
+        stop_loss=2.82,
+        strike=420.0,
+        option_type="PE",
+        contract_symbol="COALINDIA420PE",
+        underlying_spot=423.7,
+        option_premium=3.90,
+        actionable_plan={
+            "action": "BUY",
+            "instrument": "COALINDIA420PE",
+            "strike": 420.0,
+            "option_type": "PE",
+            "recommended_entry": "₹3.90",
+            "target": "₹5.43 (+39.2%)",
+            "stop_loss": "₹2.82 (-27.7%)",
+            "risk_reward": "1:1.42",
+            "trade_plan": {
+                "symbol": "COALINDIA",
+                "direction": "SHORT",
+                "entry_price": 423.7,
+                "invalidation_stop": 427.0,
+                "target_1": 420.0,
+                "target_2": 410.0,
+                "target_3": 400.0,
+            },
+            "option_plan": {
+                "option_type": "PE",
+                "strike": 420.0,
+                "lot_size": 1350,
+                "entry_premium": 3.90,
+                "sl_premium": 2.82,
+                "t1_premium": 5.43,
+                "t2_premium": 11.27,
+                "t3_premium": 19.61,
+            },
+            "lot_size": 1350,
+        },
+        target_status="TARGET_ACHIEVED",
+        created_at="2026-09-15 10:29:38 IST",
+        is_live=True,
+        environment="LIVE",
+    )
+
+    # 1. Test Final Target milestone rendering
+    m_final = MilestoneAlertData.from_alert(alert, "FINAL_TARGET", in_market=True)
+    msg_final = render_milestone_alert(m_final, in_market=True)
+
+    assert "FINAL TARGET ACHIEVED" in msg_final
+    assert "COALINDIA420PE" in msg_final
+    assert "410.00" not in msg_final, "Spot target 410.00 must NOT appear in option milestone alert!"
+    assert "420.00" not in msg_final, "Spot level 420.00 must NOT appear in option target field!"
+    assert "Opt CMP:</b> ₹6.05" in msg_final
+    assert "Target: ₹11.27" in msg_final or "Final Target:</b> ₹11.27" in msg_final
+    assert "Entry: ₹3.90" in msg_final
+    assert "SL: ₹2.82" in msg_final
+
+    # 2. Test Target 1 milestone rendering
+    m_t1 = MilestoneAlertData.from_alert(alert, "TARGET_1", in_market=True)
+    msg_t1 = render_milestone_alert(m_t1, in_market=True)
+
+    assert "TARGET 1 HIT" in msg_t1
+    assert "410.00" not in msg_t1
+    assert "Target 1:</b> ₹5.43" in msg_t1
+    assert "Target 2: ₹11.27" in msg_t1
+
+

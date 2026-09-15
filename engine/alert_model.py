@@ -124,6 +124,25 @@ class AutoAlert:
                     self.lot_size = int(self.metrics["lot_size"])
                 except (ValueError, TypeError):
                     pass
+            if (
+                self.lot_size is None
+                and self.actionable_plan
+                and "lot_size" in self.actionable_plan
+                and self.actionable_plan["lot_size"]
+            ):
+                try:
+                    self.lot_size = int(self.actionable_plan["lot_size"])
+                except (ValueError, TypeError):
+                    pass
+            if self.lot_size is None:
+                try:
+                    from engine.position_sizer import get_lot_size
+
+                    ls = get_lot_size(self.contract_symbol or self.symbol)
+                    if ls and ls > 1:
+                        self.lot_size = ls
+                except Exception:
+                    pass
             if self.lot_size is None:
                 from market.instruments import STANDARD_LOT_SIZES
 

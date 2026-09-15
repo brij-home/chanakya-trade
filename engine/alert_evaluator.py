@@ -63,8 +63,11 @@ def evaluate_alert_invalidation(
 
             if is_option_sell:
                 # Option writing / selling (Short CE / Short PE):
-                # Stop-loss is above entry. Breached IF AND ONLY IF premium surges above SL.
-                if current_ltp > alert.stop_loss:
+                # Stop-loss is above entry. Breached IF AND ONLY IF premium surges above SL + noise margin.
+                opt_noise_margin = (
+                    max(0.10, min(1.0, alert.stop_loss * 0.025)) if alert.stop_loss > 0 else 0.10
+                )
+                if current_ltp > (alert.stop_loss + opt_noise_margin):
                     opt_desc = (
                         "Call"
                         if (alert.option_type == "CE" or alert.direction == "BULLISH")
@@ -76,8 +79,11 @@ def evaluate_alert_invalidation(
                     )
             else:
                 # Option buying (Long CE / Long PE):
-                # The stop-loss on the option premium is breached IF AND ONLY IF premium drops below SL.
-                if current_ltp < alert.stop_loss:
+                # The stop-loss on the option premium is breached IF AND ONLY IF premium drops below SL - noise margin.
+                opt_noise_margin = (
+                    max(0.10, min(1.0, alert.stop_loss * 0.025)) if alert.stop_loss > 0 else 0.10
+                )
+                if current_ltp < (alert.stop_loss - opt_noise_margin):
                     opt_desc = (
                         "Call"
                         if (alert.option_type == "CE" or alert.direction == "BULLISH")
@@ -363,26 +369,87 @@ def evaluate_alert_targets_and_trailing(
     # Target levels resolution
     plan_t1 = None
     plan_t2 = None
-    if plan:
-        if "target_1" in plan:
+    plan_t3 = None
+    if plan and isinstance(plan, dict):
+        if is_option:
+            opt_plan = plan.get("option_plan")
+            if isinstance(opt_plan, dict):
+                if opt_plan.get("t1_premium"):
+                    plan_t1 = float(opt_plan["t1_premium"])
+                if opt_plan.get("t2_premium"):
+                    plan_t2 = float(opt_plan["t2_premium"])
+                if opt_plan.get("t3_premium"):
+                    plan_t3 = float(opt_plan["t3_premium"])
+
+        trade_plan = plan.get("trade_plan")
+        if isinstance(trade_plan, dict):
+            if trade_plan.get("target_1") and not plan_t1:
+                plan_t1 = float(trade_plan["target_1"])
+            if trade_plan.get("target_2") and not plan_t2:
+                plan_t2 = float(trade_plan["target_2"])
+            if trade_plan.get("target_3") and not plan_t3:
+                plan_t3 = float(trade_plan["target_3"])
+
+        if "target_1" in plan and not plan_t1:
             m_t1 = re.search(r"[\d,]+(?:\.\d+)?", str(plan["target_1"]))
             if m_t1:
                 plan_t1 = float(m_t1.group(0).replace(",", ""))
-        elif "target" in plan:
+        elif "target" in plan and not plan_t1:
             m_t1 = re.search(r"[\d,]+(?:\.\d+)?", str(plan["target"]))
             if m_t1:
                 plan_t1 = float(m_t1.group(0).replace(",", ""))
 
-        if "target_2" in plan:
+        if "target_2" in plan and not plan_t2:
             m_t2 = re.search(r"[\d,]+(?:\.\d+)?", str(plan["target_2"]))
             if m_t2:
                 plan_t2 = float(m_t2.group(0).replace(",", ""))
 
-    target_final = (
-        plan_t2
-        or (alert.target_level if getattr(alert, "target_level", 0) > 0 else None)
-        or round(entry + (initial_risk * 3.0) if is_bullish else entry - (initial_risk * 3.0), 2)
-    )
+        if "target_3" in plan and not plan_t3:
+            m_t3 = re.search(r"[\d,]+(?:\.\d+)?", str(plan["target_3"]))
+            if m_t3:
+                plan_t3 = float(m_t3.group(0).replace(",", ""))
+
+    # Sanity filter for options to prevent spot price pollution
+    if is_option and entry > 0:
+        if plan_t1 and plan_t1 > entry * 10:
+            plan_t1 = None
+        if plan_t2 and plan_t2 > entry * 10:
+            plan_t2 = None
+        if plan_t3 and plan_t3 > entry * 10:
+            plan_t3 = None
+
+    valid_alert_tgt = None
+    if getattr(alert, "target_level", 0) and alert.target_level > 0:
+        raw_tgt = float(alert.target_level)
+        if is_option and entry > 0:
+            if is_bullish and entry < raw_tgt <= entry * 10:
+                valid_alert_tgt = raw_tgt
+            elif not is_bullish and 0.05 <= raw_tgt < entry:
+                valid_alert_tgt = raw_tgt
+        elif not is_option:
+            valid_alert_tgt = raw_tgt
+
+    if plan_t3:
+        target_final = plan_t3
+    elif plan_t2 and not plan_t1:
+        target_final = plan_t2
+    elif valid_alert_tgt and valid_alert_tgt > (plan_t2 or 0):
+        target_final = valid_alert_tgt
+    elif plan_t2:
+        target_final = plan_t2
+    elif valid_alert_tgt:
+        target_final = valid_alert_tgt
+    elif is_option:
+        # For options, if target_2 was not specified, compute a distinct 3.0R final target
+        target_final = round(
+            entry + (initial_risk * 3.0) if is_bullish else max(0.05, entry - (initial_risk * 3.0)),
+            2,
+        )
+    else:
+        target_final = round(
+            entry + (initial_risk * 3.0) if is_bullish else entry - (initial_risk * 3.0),
+            2,
+        )
 
     if plan_t1:
         t1_level = plan_t1
@@ -395,6 +462,13 @@ def evaluate_alert_targets_and_trailing(
         if target_final < entry:
             t1_level = max(t1_level, round(entry - (entry - target_final) * 0.5, 2))
 
+    t2_level = plan_t2
+    if not t2_level and target_final != t1_level:
+        if is_bullish and target_final > t1_level:
+            t2_level = round(t1_level + (target_final - t1_level) * 0.5, 2)
+        elif not is_bullish and target_final < t1_level:
+            t2_level = round(t1_level - (t1_level - target_final) * 0.5, 2)
+
     achieved = set(getattr(alert, "achieved_milestones", None) or [])
 
     # Volume / Momentum check for extension
@@ -404,23 +478,28 @@ def evaluate_alert_targets_and_trailing(
     conf = getattr(alert, "confidence", 75)
     is_superperforming = (vol_ratio >= 2.0) or (conf >= 88 and r_multiple >= 2.5)
 
-    # Hard Profitability Invariant: A target milestone (T1 or Final) CAN NEVER be reached
+    # Hard Profitability Invariant: A target milestone (T1, T2 or Final) CAN NEVER be reached
     # if the position is sitting at or below entry price (loss or breakeven).
     if is_bullish:
         if current_ltp <= entry or pnl_pts <= 0 or t1_level <= entry:
             is_final_hit = False
+            is_t2_hit = False
             is_t1_hit = False
         else:
             is_final_hit = current_ltp >= target_final
+            is_t2_hit = bool(t2_level and current_ltp >= t2_level and t2_level > t1_level)
             is_t1_hit = current_ltp >= t1_level
     else:
         if current_ltp >= entry or pnl_pts <= 0 or t1_level >= entry:
             is_final_hit = False
+            is_t2_hit = False
             is_t1_hit = False
         else:
             is_final_hit = current_ltp <= target_final
+            is_t2_hit = bool(t2_level and current_ltp <= t2_level and t2_level < t1_level)
             is_t1_hit = current_ltp <= t1_level
 
+    # 1. Final Target (T3 or Primary Target) Hit
     if is_final_hit and pnl_pts > 0 and "TARGET_ACHIEVED" not in achieved:
         if is_superperforming:
             # Superperforming momentum: do NOT exit all, trail runner with Chandelier ATR
@@ -474,12 +553,45 @@ def evaluate_alert_targets_and_trailing(
                 is_superperforming=False,
             )
 
-    # 2. Target 1 (T1) Check - Strictly requires positive PnL and genuine milestone achievement
+    # 2. Target 2 (T2) Check - intermediate expansion milestone
+    if (
+        is_t2_hit
+        and pnl_pts > 0
+        and t2_level
+        and (target_final > t2_level if is_bullish else target_final < t2_level)
+        and "T2_ACHIEVED" not in achieved
+        and "TARGET_ACHIEVED" not in achieved
+    ):
+        # T2 reached -> Trail SL to T1 level (Guarantees T1 profit locked)
+        rec_stop = t1_level
+        locked_pts = abs(rec_stop - entry)
+        locked_pct = round((locked_pts / entry) * 100, 2) if entry > 0 else 0.0
+        rationale = (
+            f"Target 2 reached at ₹{current_ltp:,.2f} (+{pnl_pct:.1f}%, +{r_multiple:.1f}R). "
+            f"DECISION: TRAIL STOP-LOSS TO T1 (₹{rec_stop:,.2f}) LOCKING +{locked_pct:.1f}% PROFIT. "
+            f"Hold runner position for Final Target (₹{target_final:,.2f})."
+        )
+        return TargetTrailingEvaluation(
+            new_milestone="T2_ACHIEVED",
+            target_status="T2_ACHIEVED",
+            should_trail=True,
+            trailing_decision="TRAIL_LOCK_T1",
+            recommended_stop=rec_stop,
+            trailing_rationale=rationale,
+            locked_profit_pts=round(locked_pts, 2),
+            locked_profit_pct=locked_pct,
+            r_multiple=round(r_multiple, 2),
+            pnl_pct=round(pnl_pct, 2),
+            is_superperforming=is_superperforming,
+        )
+
+    # 3. Target 1 (T1) Check - Strictly requires positive PnL and genuine milestone achievement
     if (
         is_t1_hit
         and pnl_pts > 0
         and r_multiple >= 0.5
         and "T1_ACHIEVED" not in achieved
+        and "T2_ACHIEVED" not in achieved
         and "TARGET_ACHIEVED" not in achieved
     ):
         # T1 reached -> Book 50% & Trail SL to Breakeven (+0.2% buffer)
@@ -487,10 +599,11 @@ def evaluate_alert_targets_and_trailing(
         rec_stop = be_stop
         locked_pts = abs(rec_stop - entry)
         locked_pct = 0.2
+        next_tgt = t2_level or target_final
         rationale = (
             f"Target 1 reached at ₹{current_ltp:,.2f} (+{pnl_pct:.1f}%, +{r_multiple:.1f}R). "
             f"DECISION: BOOK 50% PARTIAL PROFIT NOW & TRAIL STOP-LOSS TO BREAKEVEN (₹{rec_stop:,.2f}). "
-            f"Trade is now 100% risk-free. Hold remaining 50% runner for Target 2 (₹{target_final:,.2f})."
+            f"Trade is now 100% risk-free. Hold remaining 50% runner for Target 2 (₹{next_tgt:,.2f})."
         )
         return TargetTrailingEvaluation(
             new_milestone="T1_ACHIEVED",

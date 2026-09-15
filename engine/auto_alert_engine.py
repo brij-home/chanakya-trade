@@ -1392,7 +1392,7 @@ class AutoAlertEngine:
                         else "[REAL/LIVE]"
                     )
 
-                    if eval_res.new_milestone in ("T1_ACHIEVED", "TARGET_ACHIEVED"):
+                    if eval_res.new_milestone in ("T1_ACHIEVED", "T2_ACHIEVED", "TARGET_ACHIEVED"):
                         if eval_res.new_milestone not in alert.achieved_milestones:
                             alert.achieved_milestones.append(eval_res.new_milestone)
 
@@ -1408,6 +1408,9 @@ class AutoAlertEngine:
                             else:
                                 alert.stage = "TARGET_ACHIEVED"
                                 alert.headline = f"🎯 {env_tag} FINAL TARGET ACHIEVED: {alert.symbol} (₹{eval_res.recommended_stop:,.2f})"
+                        elif eval_res.new_milestone == "T2_ACHIEVED":
+                            alert.stage = "T2_ACHIEVED"
+                            alert.headline = f"🏁 {env_tag} TARGET 2 ACHIEVED: {alert.symbol} (₹{eval_res.recommended_stop:,.2f})"
                         else:
                             alert.stage = "T1_ACHIEVED"
                             alert.headline = f"🎯 {env_tag} TARGET 1 ACHIEVED: {alert.symbol} (₹{eval_res.recommended_stop:,.2f})"
@@ -2536,24 +2539,20 @@ class AutoAlertEngine:
                 )
                 min_oi = 10000 if is_idx else 300
 
-                # Max allowed distance from spot to avoid deep OTM lottery traps:
-                # Indices: at most 5-6 strike intervals from ATM (e.g. 300 pts for NIFTY, 600 pts for BANKNIFTY)
+                # Delta-Gated Sweet-Spot Filter: Restrict primary index alerts to ATM and near-the-money (<= 2 strikes)
+                # Avoids far OTM lottery traps (e.g. 23100 PE when spot is 23395) while capturing high-delta institutional momentum.
                 max_strike_dist = (
                     (
-                        300.0
-                        if clean_sym in ("NIFTY",)
+                        120.0
+                        if clean_sym in ("NIFTY", "FINNIFTY")
                         else (
                             250.0
-                            if clean_sym in ("FINNIFTY",)
-                            else (
-                                600.0
-                                if clean_sym in ("BANKNIFTY", "SENSEX", "BANKEX")
-                                else (150.0 if clean_sym in ("MIDCPNIFTY",) else 100.0)
-                            )
+                            if clean_sym in ("BANKNIFTY", "SENSEX", "BANKEX")
+                            else (75.0 if clean_sym in ("MIDCPNIFTY",) else 100.0)
                         )
                     )
                     if is_idx
-                    else spot * 0.035
+                    else spot * 0.02
                 )
                 min_opt_price = 10.0 if is_idx else 2.0
 

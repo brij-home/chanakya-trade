@@ -36,18 +36,19 @@ export default function AlertsCard({ data }) {
       </p>
       <div className="space-y-2">
         {alerts.map((a, idx) => {
-          // Stable key: never use Math.random() — causes every alert to re-render on each tick.
           const id = a.id ?? a.alert_id ?? `${a.symbol ?? 'unk'}-${a.triggered_at ?? a.created_at ?? a.timestamp ?? idx}`
-          const symbol    = a.symbol ?? '—'
+          const symbol = a.symbol ?? '—'
           const condition = a.condition ?? a.description ?? '—'
           const threshold = a.threshold != null ? `₹${Number(a.threshold).toLocaleString('en-IN')}` : ''
-          const isTest     = a.environment === 'TEST' || a.is_live === false
+          const isTest = a.environment === 'TEST' || a.is_live === false
           const isInvalidated = a.is_invalidated || a.stage === 'INVALIDATED'
-          const triggered = Boolean(a.triggered || a.target_achieved)
-          const isTargetAchieved = Boolean(a.target_achieved || a.target_status === 'T1_HIT' || a.target_status === 'TARGET_HIT')
-          const isFinalHit = a.target_status === 'TARGET_HIT'
+          const isT1Hit = a.stage === 'T1_ACHIEVED' || a.target_status === 'T1_ACHIEVED' || a.target_status === 'T1_HIT'
+          const isT2Hit = a.stage === 'T2_ACHIEVED' || a.target_status === 'T2_ACHIEVED'
+          const isT3Hit = a.stage === 'TARGET_ACHIEVED' || a.target_status === 'TARGET_ACHIEVED' || a.target_status === 'TARGET_HIT' || a.stage === 'COMPLETED'
+          const triggered = Boolean(a.triggered || a.target_achieved || isT1Hit || isT2Hit || isT3Hit)
           const hasTrail = Boolean(a.should_trail && a.trailing_stop)
 
+          const rawPrice = a.option_premium || a.ltp || a.underlying_spot
           const rawTime = a.timestamp || a.triggered_at || a.invalidated_at || a.created_at || ''
           let timeDisplay = ''
           if (rawTime) {
@@ -57,10 +58,18 @@ export default function AlertsCard({ data }) {
 
           return (
             <div key={id} className={`flex items-start justify-between rounded-lg border px-3 py-2.5
-              ${isInvalidated ? 'border-rose-500/40 bg-rose-500/5' : isFinalHit ? 'border-emerald-500/40 bg-emerald-500/5' : isTargetAchieved ? 'border-cyan-500/40 bg-cyan-500/5' : triggered ? 'border-green/40 bg-green/5' : 'border-border bg-panel'}`}>
+              ${isInvalidated ? 'border-rose-500/40 bg-rose-500/5' : isT3Hit ? 'border-purple-500/40 bg-purple-500/5' : isT2Hit ? 'border-cyan-500/40 bg-cyan-500/5' : isT1Hit ? 'border-emerald-500/40 bg-emerald-500/5' : triggered ? 'border-green/40 bg-green/5' : 'border-border bg-panel'}`}>
               <div className="min-w-0 flex-1">
                 <div className="flex items-center gap-2 flex-wrap">
                   <span className="text-text text-[12px] font-mono font-semibold">{symbol}</span>
+                  {a.contract_symbol && (
+                    <span className="text-[10px] font-mono font-bold text-gold">{a.contract_symbol}</span>
+                  )}
+                  {rawPrice && (
+                    <span className="text-[10px] font-mono font-black text-text bg-surface px-1 py-px rounded border border-border/40">
+                      ₹{Number(rawPrice).toLocaleString('en-IN', { maximumFractionDigits: 1 })}
+                    </span>
+                  )}
                   <span className={`text-[9px] px-1.5 py-0.2 rounded font-black uppercase tracking-wider ${isTest ? 'bg-purple-500/20 text-purple-300' : 'bg-emerald-500/20 text-emerald-300'}`}>
                     {isTest ? '🧪 TEST' : '🟢 LIVE'}
                   </span>
@@ -84,11 +93,13 @@ export default function AlertsCard({ data }) {
                     </span>
                   )}
                   {isInvalidated ? (
-                    <span className="text-[10px] font-ui text-rose-400 font-bold">❌ INVALIDATED</span>
-                  ) : isFinalHit ? (
-                    <span className="text-[10px] font-ui text-emerald-400 font-bold">🏁 TARGET HIT</span>
-                  ) : isTargetAchieved ? (
-                    <span className="text-[10px] font-ui text-cyan-400 font-bold">🎯 T1 HIT</span>
+                    <span className="text-[10px] font-ui text-rose-300 font-bold bg-rose-500/20 px-1.5 py-0.5 rounded border border-rose-500/40 animate-pulse">🛑 SL HIT</span>
+                  ) : isT3Hit ? (
+                    <span className="text-[10px] font-ui text-purple-200 font-bold bg-purple-500/20 px-1.5 py-0.5 rounded border border-purple-400/40 animate-pulse">🚀 T3 HIT</span>
+                  ) : isT2Hit ? (
+                    <span className="text-[10px] font-ui text-cyan-200 font-bold bg-cyan-500/20 px-1.5 py-0.5 rounded border border-cyan-400/40 animate-pulse">🏁 T2 HIT</span>
+                  ) : isT1Hit ? (
+                    <span className="text-[10px] font-ui text-emerald-200 font-bold bg-emerald-500/20 px-1.5 py-0.5 rounded border border-emerald-400/40 animate-pulse">🎯 T1 HIT</span>
                   ) : (
                     <span className={`text-[10px] font-ui ${triggered ? 'text-green font-semibold' : 'text-muted'}`}>
                       {triggered ? '✓ triggered' : '● active'}

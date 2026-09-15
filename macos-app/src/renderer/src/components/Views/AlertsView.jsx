@@ -144,7 +144,8 @@ const AutoAlertCard = memo(function AutoAlertCard({
 }) {
   // Subscribe to live prices for this card's symbol & contract individually.
   const cleanSym = alert.symbol?.replace(/^(NSE|BSE|MCX|NFO):/, '').trim().toUpperCase()
-  const cleanContract = alert.contract_symbol?.replace(/^(NSE|BSE|MCX|NFO):/, '').trim().toUpperCase()
+  const rawContract = alert.contract_symbol || alert.actionable_plan?.option_plan?.contract_symbol || alert.actionable_plan?.option_contract || alert.metrics?.option_symbol || ''
+  const cleanContract = rawContract.replace(/^(NSE|BSE|MCX|NFO|CDS):/, '').trim().toUpperCase()
 
   const liveSpotBySym = useLiveSpot(cleanSym)
   const liveSpotByFull = useLiveSpot(alert.symbol !== cleanSym ? alert.symbol : null)
@@ -152,7 +153,7 @@ const AutoAlertCard = memo(function AutoAlertCard({
 
   const liveContractByClean = useLiveSpot(cleanContract)
   const liveContractByFull = useLiveSpot(
-    alert.contract_symbol && alert.contract_symbol !== cleanContract ? alert.contract_symbol : null
+    rawContract && rawContract !== cleanContract ? rawContract : null
   )
   const liveContract = liveContractByClean ?? liveContractByFull
 
@@ -225,27 +226,160 @@ const AutoAlertCard = memo(function AutoAlertCard({
     [alert, isDerivative, spotNum, optLtpNum]
   )
 
-  // Entry price calculation
-  const entryPriceNum = isDerivative
-    ? (
-        alert.option_premium
-          ? Number(String(alert.option_premium).replace(/[^0-9.-]/g, ''))
-          : alert.actionable_plan?.recommended_entry
-          ? Number(String(alert.actionable_plan.recommended_entry).replace(/[^0-9.-]/g, ''))
-          : alert.ltp
-          ? Number(String(alert.ltp).replace(/[^0-9.-]/g, ''))
-          : null
-      )
-    : alert.trigger_level
-    ? Number(String(alert.trigger_level).replace(/[^0-9.-]/g, ''))
-    : null
+  const plan = alert.actionable_plan || {}
+  const tradePlan = plan.trade_plan || {}
+  const optPlan = plan.option_plan || null
 
-  let liveContractReturn = null
-  if (optLtpNum && entryPriceNum && entryPriceNum > 0 && isDerivative) {
-    const diff = optLtpNum - entryPriceNum
-    const pct = ((diff / entryPriceNum) * 100).toFixed(1)
-    liveContractReturn = { diff, pct, isProfitable: diff >= 0 }
+  const act = String(tradePlan.action || plan.action || '').toUpperCase()
+  const isOptionSell = isDerivative && (
+    act === 'SELL' ||
+    act === 'WRITE' ||
+    act === 'SHORT' ||
+    alert.alert_type === 'OPTION_WRITE'
+  )
+
+  const slNum = isDerivative
+    ? (optPlan?.sl_premium ? Number(optPlan.sl_premium) : (alert.option_stop_loss ? Number(alert.option_stop_loss) : (alert.stop_loss ? Number(alert.stop_loss) : null)))
+    : (tradePlan.invalidation_stop ? Number(tradePlan.invalidation_stop) : (alert.stop_loss ? Number(alert.stop_loss) : null))
+  const entryNum = isDerivative
+    ? (optPlan?.entry_premium ? Number(optPlan.entry_premium) : (alert.option_premium ? Number(alert.option_premium) : (optLtpNum || null)))
+    : (tradePlan.entry_price ? Number(tradePlan.entry_price) : (alert.trigger_level ? Number(alert.trigger_level) : spotNum))
+  const t1Num = isDerivative
+    ? (optPlan?.t1_premium ? Number(optPlan.t1_premium) : (alert.option_target_1 ? Number(alert.option_target_1) : (alert.target_level ? Number(alert.target_level) : null)))
+    : (tradePlan.target_1 ? Number(tradePlan.target_1) : (alert.target_level ? Number(alert.target_level) : null))
+  const t2Num = isDerivative
+    ? (optPlan?.t2_premium ? Number(optPlan.t2_premium) : (alert.option_target_2 ? Number(alert.option_target_2) : null))
+    : (tradePlan.target_2 ? Number(tradePlan.target_2) : null)
+  const t3Num = isDerivative
+    ? (optPlan?.t3_premium ? Number(optPlan.t3_premium) : null)
+    : (tradePlan.target_3 ? Number(tradePlan.target_3) : null)
+
+  const currentPrice = isDerivative ? (optLtpNum || spotNum) : spotNum
+
+  // Live Return % calculation & direction tracking
+  let liveReturn = null
+  if (currentPrice && entryNum && entryNum > 0) {
+    let diff = 0
+    if (isDerivative) {
+      diff = isOptionSell ? entryNum - currentPrice : currentPrice - entryNum
+    } else {
+      diff = isBull ? currentPrice - entryNum : entryNum - currentPrice
+    }
+    const pct = ((diff / entryNum) * 100).toFixed(1)
+    liveReturn = { diff, pct, isProfitable: diff >= 0 }
   }
+
+  // Dynamic live stage hit detection (real-time cross evaluation)
+  const isSLHit = Boolean(
+    isInvalidated ||
+    (slNum && currentPrice && (
+      isDerivative
+        ? (isOptionSell ? currentPrice >= slNum : currentPrice <= slNum)
+        : (isBull ? currentPrice <= slNum : currentPrice >= slNum)
+    ))
+  )
+
+  const isT3Hit = Boolean(
+    isFinalTarget ||
+    (t3Num && currentPrice && !isSLHit && (
+      isDerivative
+        ? (isOptionSell ? currentPrice <= t3Num : currentPrice >= t3Num)
+        : (isBull ? currentPrice >= t3Num : currentPrice <= t3Num)
+    ))
+  )
+
+  const isT2Hit = Boolean(
+    isT3Hit ||
+    alert.stage === 'T2_ACHIEVED' || alert.target_status === 'T2_ACHIEVED' ||
+    (t2Num && currentPrice && !isSLHit && (
+      isDerivative
+        ? (isOptionSell ? currentPrice <= t2Num : currentPrice >= t2Num)
+        : (isBull ? currentPrice >= t2Num : currentPrice <= t2Num)
+    ))
+  )
+
+  const isT1Hit = Boolean(
+    isT2Hit ||
+    isT1 ||
+    (t1Num && currentPrice && !isSLHit && (
+      isDerivative
+        ? (isOptionSell ? currentPrice <= t1Num : currentPrice >= t1Num)
+        : (isBull ? currentPrice >= t1Num : currentPrice <= t1Num)
+    ))
+  )
+
+  const trajectoryStatus = (() => {
+    if (isSLHit) {
+      return {
+        badge: '🛑 SL BREACHED',
+        text: 'Stop loss triggered — trade thesis invalidated',
+        theme: 'rose',
+      }
+    }
+    if (isT3Hit) {
+      return {
+        badge: '🚀 T3 REACHED',
+        text: 'Target 3 hit — runners locked (+6R+ extension)',
+        theme: 'purple',
+      }
+    }
+    if (isT2Hit) {
+      return {
+        badge: '🏁 T2 ACHIEVED',
+        text: 'Target 2 hit — 75% profit secured, trailing at T1',
+        theme: 'cyan',
+      }
+    }
+    if (isT1Hit) {
+      return {
+        badge: '🎯 T1 ACHIEVED',
+        text: 'Target 1 hit — 50% scale out complete, SL ratcheted to breakeven',
+        theme: 'emerald',
+      }
+    }
+    if (liveReturn && currentPrice && entryNum) {
+      if (liveReturn.isProfitable) {
+        if (t1Num) {
+          const t1Dist = Math.abs(t1Num - entryNum)
+          const currDist = Math.abs(currentPrice - entryNum)
+          const pctToT1 = Math.min(100, Math.max(0, Math.round((currDist / (t1Dist || 1)) * 100)))
+          const ptsAway = Math.abs(t1Num - currentPrice)
+          return {
+            badge: `🟢 RIGHT DIRECTION (+${liveReturn.pct}%)`,
+            text: `${pctToT1}% progress to T1 (${ptsAway > 0 ? `₹${ptsAway.toFixed(1)} away` : 'at target'})`,
+            theme: 'emerald',
+          }
+        }
+        return {
+          badge: `🟢 PROFITABLE (+${liveReturn.pct}%)`,
+          text: `Moving favorably from entry ₹${entryNum.toFixed(1)}`,
+          theme: 'emerald',
+        }
+      } else {
+        if (slNum) {
+          const slDist = Math.abs(entryNum - slNum)
+          const adverseDist = Math.abs(entryNum - currentPrice)
+          const pctToSL = Math.min(100, Math.max(0, Math.round((adverseDist / (slDist || 1)) * 100)))
+          const ptsBuffer = Math.abs(currentPrice - slNum)
+          return {
+            badge: `⚠️ PULLBACK (${liveReturn.pct}%)`,
+            text: `${pctToSL}% toward SL — ₹${ptsBuffer.toFixed(1)} buffer remaining`,
+            theme: 'amber',
+          }
+        }
+        return {
+          badge: `⚠️ AGAINST ENTRY (${liveReturn.pct}%)`,
+          text: `Testing below entry level`,
+          theme: 'amber',
+        }
+      }
+    }
+    return {
+      badge: '⚡ LIVE TRACKING',
+      text: 'Awaiting price updates',
+      theme: 'blue',
+    }
+  })()
 
   // Real-time Cash Equity Return vs Trigger Level
   let liveCashReturn = null
@@ -449,9 +583,9 @@ const AutoAlertCard = memo(function AutoAlertCard({
                   ₹{Number(optLtpNum || 0).toLocaleString('en-IN', { minimumFractionDigits: 1, maximumFractionDigits: 1 })}
                   {liveContract?.ltp ? <span className="inline-block w-1 h-1 rounded-full bg-emerald-400 animate-pulse ml-0.5 align-middle" /> : null}
                 </span>
-                {liveContractReturn && (
-                  <span className={`text-[9px] font-bold leading-none ${liveContractReturn.isProfitable ? 'text-emerald-400' : 'text-rose-400'}`}>
-                    {liveContractReturn.isProfitable ? '+' : ''}{liveContractReturn.pct}%
+                {liveReturn && (
+                  <span className={`text-[9px] font-bold leading-none ${liveReturn.isProfitable ? 'text-emerald-400' : 'text-rose-400'}`}>
+                    {liveReturn.isProfitable ? '+' : ''}{liveReturn.pct}%
                   </span>
                 )}
                 <span className={`text-[8px] font-mono text-muted leading-none ${liveSpot?.flash === 'up' ? 'text-emerald-300' : liveSpot?.flash === 'down' ? 'text-rose-300' : ''}`}>
@@ -466,9 +600,9 @@ const AutoAlertCard = memo(function AutoAlertCard({
                   ₹{Number(spotNum || 0).toLocaleString('en-IN', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}
                   {liveSpot?.ltp ? <span className="inline-block w-1 h-1 rounded-full bg-emerald-400 animate-pulse ml-0.5 align-middle" /> : null}
                 </span>
-                {liveCashReturn && (
-                  <span className={`text-[9px] font-bold leading-none ${liveCashReturn.isProfitable ? 'text-emerald-400' : 'text-rose-400'}`}>
-                    {liveCashReturn.isProfitable ? '+' : ''}{liveCashReturn.pct}%
+                {liveReturn && (
+                  <span className={`text-[9px] font-bold leading-none ${liveReturn.isProfitable ? 'text-emerald-400' : 'text-rose-400'}`}>
+                    {liveReturn.isProfitable ? '+' : ''}{liveReturn.pct}%
                   </span>
                 )}
               </>
@@ -765,12 +899,128 @@ const AutoAlertCard = memo(function AutoAlertCard({
         </div>
       )}
 
+      {/* ── Institutional Real-Time Trajectory & Live Price Reflection Strip ── */}
+      <div className={`p-2.5 rounded-xl border flex items-center justify-between gap-2.5 flex-wrap transition-all duration-150 ${
+        isSLHit
+          ? 'bg-rose-500/10 border-rose-500/40'
+          : isT3Hit
+          ? 'bg-purple-500/10 border-purple-500/40'
+          : isT2Hit
+          ? 'bg-cyan-500/10 border-cyan-500/40'
+          : isT1Hit
+          ? 'bg-emerald-500/10 border-emerald-500/40'
+          : liveReturn?.isProfitable
+          ? 'bg-emerald-500/5 border-emerald-500/30'
+          : liveReturn && !liveReturn.isProfitable
+          ? 'bg-amber-500/5 border-amber-500/30'
+          : 'bg-surface/80 border-border/50'
+      }`}>
+        {/* Left: Live Price & PnL Return */}
+        <div className="flex items-center gap-2.5 flex-wrap">
+          <div className="flex items-center gap-1.5">
+            <span className="text-base flex-shrink-0">
+              {isSLHit ? '🛑' : isT3Hit ? '🚀' : isT2Hit ? '🏁' : isT1Hit ? '🎯' : liveReturn?.isProfitable ? '📈' : '⚡'}
+            </span>
+            <div>
+              <div className="flex items-center gap-1.5">
+                <span className="text-[10px] font-mono uppercase tracking-wider text-muted font-bold">
+                  {isDerivative ? (rawContract || `${alert.symbol} OPT`) : `${alert.symbol} SPOT`}
+                </span>
+                {isDerivative && (
+                  <span className="text-[8px] font-mono px-1 py-px rounded font-black bg-gold/15 text-gold border border-gold/30">
+                    LIVE PREMIUM
+                  </span>
+                )}
+              </div>
+              <div className="flex items-baseline gap-1.5">
+                <span className={`text-base font-black font-mono leading-none tracking-tight ${
+                  (isDerivative ? liveContract?.flash : liveSpot?.flash) === 'up'
+                    ? 'text-emerald-400'
+                    : (isDerivative ? liveContract?.flash : liveSpot?.flash) === 'down'
+                    ? 'text-rose-400'
+                    : isDerivative ? 'text-gold' : 'text-text'
+                }`}>
+                  ₹{Number(currentPrice || 0).toLocaleString('en-IN', {
+                    minimumFractionDigits: isDerivative || (currentPrice && currentPrice < 500) ? 1 : 0,
+                    maximumFractionDigits: isDerivative || (currentPrice && currentPrice < 500) ? 2 : 0,
+                  })}
+                  {((isDerivative ? liveContract?.ltp : liveSpot?.ltp)) ? (
+                    <span className="inline-block w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse ml-1 align-middle" title="Live streaming tick" />
+                  ) : null}
+                </span>
+
+                {/* Return vs Entry Pill */}
+                {liveReturn && (
+                  <span className={`text-[10px] font-mono font-bold px-1.5 py-0.5 rounded border leading-none ${
+                    liveReturn.isProfitable
+                      ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
+                      : 'bg-rose-500/20 text-rose-300 border-rose-500/40'
+                  }`}>
+                    {liveReturn.isProfitable ? '▲ +' : '▼ '}{liveReturn.pct}%
+                    {liveReturn.diff !== undefined && (
+                      <span className="opacity-80 ml-1">
+                        ({liveReturn.diff >= 0 ? '+' : ''}₹{liveReturn.diff.toFixed(1)})
+                      </span>
+                    )}
+                  </span>
+                )}
+              </div>
+            </div>
+          </div>
+
+          {/* Underlying Spot Reference (for Options) */}
+          {isDerivative && spotNum && (
+            <div className="pl-2 border-l border-border/40 text-[10px] font-mono text-muted hidden sm:block">
+              <span className="block text-[8px] uppercase tracking-wider">Underlying Spot</span>
+              <span className={`font-bold text-text ${liveSpot?.flash === 'up' ? 'text-emerald-300' : liveSpot?.flash === 'down' ? 'text-rose-300' : ''}`}>
+                ₹{Number(spotNum).toLocaleString('en-IN', { maximumFractionDigits: 1 })}
+              </span>
+            </div>
+          )}
+        </div>
+
+        {/* Right: Milestone Trajectory Status */}
+        <div className="flex items-center gap-2 flex-wrap">
+          <div className="text-right">
+            <span className={`text-[9px] font-mono font-black uppercase px-2 py-0.5 rounded border whitespace-nowrap inline-block ${
+              trajectoryStatus.theme === 'rose'
+                ? 'bg-rose-500/25 text-rose-300 border-rose-500/50 animate-pulse'
+                : trajectoryStatus.theme === 'purple'
+                ? 'bg-purple-500/25 text-purple-200 border-purple-400/50 animate-pulse'
+                : trajectoryStatus.theme === 'cyan'
+                ? 'bg-cyan-500/25 text-cyan-200 border-cyan-400/50 animate-pulse'
+                : trajectoryStatus.theme === 'emerald'
+                ? 'bg-emerald-500/25 text-emerald-200 border-emerald-400/50 animate-pulse'
+                : 'bg-amber-500/20 text-amber-300 border-amber-500/40'
+            }`}>
+              {trajectoryStatus.badge}
+            </span>
+            <span className="block text-[9px] text-zinc-400 font-sans mt-0.5 max-w-xs truncate" title={trajectoryStatus.text}>
+              {trajectoryStatus.text}
+            </span>
+          </div>
+
+          {/* 5-Milestone Stepper Dots */}
+          <div className="flex items-center gap-1 pl-1 border-l border-border/40 font-mono text-[8px] font-black">
+            <span className={`px-1 py-0.5 rounded ${isSLHit ? 'bg-rose-500 text-white animate-pulse' : 'bg-surface text-muted/60 border border-border/40'}`}>SL</span>
+            <span className="text-muted/40">›</span>
+            <span className={`px-1 py-0.5 rounded ${!isSLHit && !isT1Hit && liveReturn?.isProfitable ? 'bg-emerald-500/40 text-emerald-200 border border-emerald-500/50' : 'bg-surface text-muted/60 border border-border/40'}`}>ENT</span>
+            <span className="text-muted/40">›</span>
+            <span className={`px-1 py-0.5 rounded ${isT1Hit ? 'bg-emerald-500 text-white animate-pulse' : 'bg-surface text-muted/60 border border-border/40'}`}>T1</span>
+            <span className="text-muted/40">›</span>
+            <span className={`px-1 py-0.5 rounded ${isT2Hit ? 'bg-cyan-500 text-white animate-pulse' : 'bg-surface text-muted/60 border border-border/40'}`}>T2</span>
+            <span className="text-muted/40">›</span>
+            <span className={`px-1 py-0.5 rounded ${isT3Hit ? 'bg-purple-500 text-white animate-pulse' : 'bg-surface text-muted/60 border border-border/40'}`}>T3</span>
+          </div>
+        </div>
+      </div>
+
       {/* ── Institutional 5-Tier Execution Runway (Entry, SL, T1, T2, T3) ── */}
       <TradeExecutionMatrix
         levels={executionLevels}
         isBull={isBull}
         isDerivative={isDerivative}
-        currentPrice={isDerivative ? optLtpNum : spotNum}
+        currentPrice={currentPrice}
         trailingStop={alert.trailing_stop}
         slRationale={alert.actionable_plan?.trade_plan?.sl_rationale}
         tradePlan={alert.actionable_plan?.trade_plan || null}
@@ -1728,21 +1978,28 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
   // Extract all active / visible symbols to stream spot prices and option/future contract prices for
   const activeSymbols = useMemo(() => {
     const syms = new Set()
+    const addSym = (raw) => {
+      if (!raw || typeof raw !== 'string') return
+      const clean = raw.replace(/^(NSE|BSE|MCX|NFO|CDS):/, '').trim().toUpperCase()
+      if (clean) syms.add(clean)
+    }
+
     for (const alt of autoAlerts) {
-      if (alt.symbol) {
-        const clean = alt.symbol.replace(/^(NSE|BSE|MCX|NFO):/, '').trim().toUpperCase()
-        if (clean) syms.add(clean)
-      }
-      if (alt.contract_symbol) {
-        const cleanContract = alt.contract_symbol.replace(/^(NSE|BSE|MCX|NFO):/, '').trim().toUpperCase()
-        if (cleanContract) syms.add(cleanContract)
+      addSym(alt.symbol)
+      addSym(alt.contract_symbol)
+      addSym(alt.actionable_plan?.option_plan?.contract_symbol)
+      addSym(alt.actionable_plan?.option_contract)
+      addSym(alt.metrics?.option_symbol)
+      const related = alt.related_strikes || alt.metrics?.related_strikes
+      if (Array.isArray(related)) {
+        related.forEach(addSym)
       }
     }
     for (const a of alerts) {
-      if (a.symbol) {
-        const clean = a.symbol.replace(/^(NSE|BSE|MCX|NFO):/, '').trim().toUpperCase()
-        if (clean) syms.add(clean)
-      }
+      addSym(a.symbol)
+      addSym(a.contract_symbol)
+      addSym(a.actionable_plan?.option_plan?.contract_symbol)
+      addSym(a.actionable_plan?.option_contract)
     }
     return Array.from(syms)
   }, [autoAlerts, alerts])
