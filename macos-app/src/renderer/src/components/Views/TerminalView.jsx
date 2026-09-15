@@ -6,7 +6,6 @@ import PersonaTrackRecordCard from '../Cards/PersonaTrackRecordCard'
 import GlobalMacroCard from '../Cards/GlobalMacroCard'
 import SmartTypeahead from '../Common/SmartTypeahead'
 import UnavailableState from '../Common/UnavailableState'
-import LiveTickerRibbon from '../Common/LiveTickerRibbon'
 import { INDIAN_UNIVERSE, fuzzySearchUniverse, getSymbolExchange } from '../../data/universeData'
 
 import { useRealtimeMarket } from '../../hooks/useRealtimeMarket'
@@ -68,16 +67,13 @@ export default function TerminalView({
   const [watchlistSort, setWatchlistSort] = useState('gain_desc')
   const [watchlistPageSize, setWatchlistPageSize] = useState(8)
   const [sectorViewMode, setSectorViewMode] = useState('2D')
-  const [symbolSearchQuery, setSymbolSearchQuery] = useState('')
-  const [showSymbolTypeahead, setShowSymbolTypeahead] = useState(false)
-  const [typeaheadIndex, setTypeaheadIndex] = useState(0)
   const [leftTab, setLeftTab] = useState('councils')
-  const searchInputRef = useRef(null)
+  const [intelSubTab, setIntelSubTab] = useState('councils')
+  const [statsSubTab, setStatsSubTab] = useState('whales')
 
   const handleLeftTabChange = (tabId) => {
     setLeftTab(tabId)
-    if (tabId === 'councils') setIntelligenceMode('councils')
-    if (tabId === 'personas') setIntelligenceMode('personas')
+    if (tabId === 'councils') setIntelligenceMode(intelSubTab)
   }
 
   const fetchSnapshot = async (force = false) => {
@@ -105,23 +101,6 @@ export default function TerminalView({
     const timer = setInterval(() => fetchSnapshot(false), 8000)
     return () => clearInterval(timer)
   }, [selectedSymbol, timeframe])
-
-  // Slash key '/' global listener for instant symbol switcher focus
-  useEffect(() => {
-    const handleKeyDown = (e) => {
-      if (
-        e.key === '/' &&
-        !['INPUT', 'TEXTAREA'].includes(document.activeElement?.tagName) &&
-        !e.metaKey &&
-        !e.ctrlKey
-      ) {
-        e.preventDefault()
-        searchInputRef.current?.focus()
-      }
-    }
-    window.addEventListener('keydown', handleKeyDown)
-    return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [])
 
   const setupRaw = data?.setup || data?.automated_setup
   const cleanSym = (s) => {
@@ -157,9 +136,6 @@ export default function TerminalView({
   if (fetchError && !data) {
     return (
       <div className="flex-1 overflow-y-auto p-3 font-ui" style={{ background: 'var(--color-surface)' }}>
-        <div className="mb-3">
-          <LiveTickerRibbon onSelectSymbol={(sym) => setSelectedSymbol(sym)} />
-        </div>
         <div className="max-w-2xl mx-auto mt-12 rounded-2xl" style={{ background: 'var(--color-panel)', border: '1px solid var(--color-border)' }}>
           <UnavailableState
             title="Backend sidecar disconnected"
@@ -738,12 +714,12 @@ export default function TerminalView({
 
   return (
     <div className="flex-1 overflow-y-auto p-2 sm:p-3 font-ui space-y-2.5" style={{ background: 'var(--color-surface)', color: 'var(--color-text)' }}>
-      {/* Top Terminal Status & Action Bar */}
+      {/* Top Terminal Status & Action Bar — Streamlined 32px */}
       <div className="relative z-30 flex flex-wrap items-center justify-between gap-2 rounded-xl px-3 py-1.5" style={{ background: 'var(--color-panel)', border: '1px solid var(--color-border)', boxShadow: 'var(--shadow-card)' }}>
         <div className="flex items-center gap-2.5">
           <div className="live-badge">
             <span className="w-1.5 h-1.5 rounded-full animate-pulse" style={{ background: 'var(--color-emerald)' }} />
-            <span className="font-bold">Market Terminal</span>
+            <span className="font-bold text-xs">Market Terminal</span>
           </div>
           <div className="flex items-center gap-2 text-xs font-mono hidden sm:flex" style={{ color: 'var(--color-muted)' }}>
             <span className="px-1.5 py-0.2 rounded text-[10px] font-bold font-mono" style={{ background: 'var(--color-elevated)', border: '1px solid var(--color-border)', color: 'var(--color-text)' }}>
@@ -753,49 +729,32 @@ export default function TerminalView({
           </div>
         </div>
 
-        {/* Sleek Decision Cockpit Command Strip */}
-        <div className="flex flex-wrap items-center gap-1.5">
-          {/* Active Symbol & Quote Badge */}
-          <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-surface border border-border/70 text-xs font-mono">
-            <span className="font-extrabold text-text">{selectedSymbol}</span>
-            <span className="font-bold" style={{ color: isPos ? 'var(--color-emerald)' : 'var(--color-rose)' }}>
-              {formatLivePrice(curLtp, selectedSymbol === 'BTC' ? '$' : '₹')}
-            </span>
-            <span className={`text-[10px] font-bold ${isPos ? 'text-emerald-400' : 'text-rose-400'}`}>
-              {currentPct != null ? formatLiveChange(null, currentPct).pctText : '—'}
-            </span>
-          </div>
+        {/* Center: Multi-Horizon Analysis Context */}
+        <div className="flex items-center gap-1.5 bg-surface border border-border/80 rounded-lg px-2 py-0.5">
+          <span className="text-[10px] uppercase font-bold text-muted font-mono mr-0.5">Horizon:</span>
+          {['15m', '1h', '1D'].map((tf) => (
+            <button
+              key={tf}
+              onClick={() => setTimeframe(tf)}
+              className={`px-2 py-0.5 rounded text-[10.5px] font-mono font-bold transition-all cursor-pointer ${
+                timeframe === tf
+                  ? 'bg-amber text-black shadow-xs'
+                  : 'text-muted hover:text-text hover:bg-elevated'
+              }`}
+            >
+              {tf}
+            </button>
+          ))}
+        </div>
 
-          {/* Multi-Horizon Analytical Horizon Switcher */}
-          <div className="flex items-center bg-surface rounded-lg p-0.5 border border-border/70 text-[11px] font-mono">
-            {[
-              { id: '15m', label: '15m' },
-              { id: '1h', label: '1h' },
-              { id: '1d', label: '1D' },
-            ].map((tfItem) => (
-              <button
-                key={tfItem.id}
-                type="button"
-                onClick={() => setTimeframe(tfItem.id)}
-                className={`px-2 py-0.5 rounded text-[10px] font-bold transition-all cursor-pointer ${
-                  timeframe === tfItem.id
-                    ? 'bg-amber text-black shadow-xs font-extrabold'
-                    : 'text-muted hover:text-text'
-                }`}
-                title={`Switch to ${tfItem.label} timeframe`}
-              >
-                {tfItem.label}
-              </button>
-            ))}
-          </div>
-
-          {/* Sleek Self-Clickable Action Pills */}
+        {/* Action Command Cluster */}
+        <div className="flex items-center gap-1.5">
           <button
             onClick={() => sendDraft(`council ${selectedCouncil} ${selectedSymbol}`)}
             className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-amber/15 hover:bg-amber hover:text-black border border-amber/30 text-amber text-xs font-bold transition-all cursor-pointer shadow-xs"
             title={`Poll ${activeCouncilObj.name} Consensus on ${selectedSymbol}`}
           >
-            <span>⚡</span> Poll on {selectedSymbol}
+            <span>⚡</span> Poll Council
           </button>
 
           <button
@@ -806,217 +765,192 @@ export default function TerminalView({
             <span>⚔️</span> Run Debate
           </button>
 
-          {/* 1-Click Link to Dedicated Chart Studio */}
           <button
             onClick={() => setActiveView && setActiveView('charts')}
             className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-cyan-500/15 hover:bg-cyan-500 hover:text-black border border-cyan-500/35 text-cyan-600 dark:text-cyan-400 text-xs font-bold transition-all cursor-pointer shadow-xs"
             title="Open dedicated Chart Studio workspace"
           >
             <span>📈</span>
-            <span>Open in Chart Studio ↗</span>
+            <span className="hidden sm:inline">Chart Studio ↗</span>
           </button>
         </div>
       </div>
 
-      {/* Quick High-Liquidity Universe Shortcut Strip */}
-      <div className="flex items-center gap-1.5 overflow-x-auto py-0.5 scrollbar-none text-[10px] font-mono">
-        <span className="text-[9px] uppercase font-bold text-muted shrink-0 flex items-center gap-1">
+      {/* ── QUICK TICKER RIBBON (NIFTY 50 HEAVYWEIGHTS) ── */}
+      <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-panel/50 border border-border/50 text-xs font-mono overflow-x-auto">
+        <span className="text-[10px] font-bold text-muted uppercase tracking-wider flex items-center gap-1">
           <span>⚡</span> QUICK:
         </span>
-        {['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'RELIANCE', 'HDFCBANK', 'TCS', 'GOLD', 'CRUDEOIL'].map((sym) => {
-          const isSelected = selectedSymbol === sym
-          return (
-            <button
-              key={sym}
-              type="button"
-              onClick={() => setSelectedSymbol(sym)}
-              className={`px-2 py-0.5 rounded-lg border transition-all cursor-pointer shrink-0 font-bold ${
-                isSelected
-                  ? 'bg-amber text-black border-amber shadow-xs font-extrabold'
-                  : 'bg-panel/70 border-border/60 text-muted hover:text-text hover:bg-elevated'
-              }`}
-            >
-              {sym}
-            </button>
-          )
-        })}
+        {['NIFTY', 'BANKNIFTY', 'RELIANCE', 'HDFCBANK', 'ICICIBANK', 'INFY', 'TCS', 'ITC', 'LT', 'SBIN'].map((sym) => (
+          <button
+            key={sym}
+            onClick={() => setSelectedSymbol(sym)}
+            className={`px-1.5 py-0.5 rounded text-[11px] font-bold transition-all cursor-pointer flex-shrink-0 ${
+              selectedSymbol === sym
+                ? 'bg-amber text-black shadow-xs'
+                : 'bg-elevated/70 hover:bg-surface border border-border/40 text-text'
+            }`}
+          >
+            {sym}
+          </button>
+        ))}
       </div>
-
-      {/* Real-Time Multi-Asset Ticker Ribbon (Indices, Commodities, Crypto) */}
-      <LiveTickerRibbon
-        tickers={data?.live_tickers}
-        selectedSymbol={selectedSymbol}
-        onSelectSymbol={setSelectedSymbol}
-      />
 
       {/* Main 3-Column Terminal Layout */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
         {/* Left Column (3 Cols): AI Councils / Personas / Whales / Accuracy / Watchlist */}
         <div className="lg:col-span-3 space-y-3">
-          {/* Intelligence Switcher Tabs */}
-          <div className="flex flex-wrap items-center bg-panel border border-border/80 rounded-2xl p-1 text-xs font-ui shadow-xs gap-1">
+          {/* Intelligence Switcher Tabs — Clean 3-Tab Grouping */}
+          <div className="flex items-center bg-panel border border-border/80 rounded-xl p-1 text-xs font-ui shadow-xs gap-1">
             <button
               onClick={() => handleLeftTabChange('councils')}
-              className={`flex-1 py-1.5 px-1 rounded-xl font-bold transition-all cursor-pointer text-center text-[10px] ${
-                leftTab === 'councils'
+              className={`flex-1 py-1.5 px-2 rounded-lg font-bold transition-all cursor-pointer text-center text-[10.5px] ${
+                leftTab === 'councils' || leftTab === 'personas'
                   ? 'bg-amber text-black shadow-xs font-extrabold'
                   : 'text-muted hover:text-text'
               }`}
             >
-              🏛️ Councils
-            </button>
-            <button
-              onClick={() => handleLeftTabChange('personas')}
-              className={`flex-1 py-1.5 px-1 rounded-xl font-bold transition-all cursor-pointer text-center text-[10px] ${
-                leftTab === 'personas'
-                  ? 'bg-amber text-black shadow-xs font-extrabold'
-                  : 'text-muted hover:text-text'
-              }`}
-            >
-              🧠 Personas
+              🏛️ AI Councils
             </button>
             <button
               onClick={() => handleLeftTabChange('whales')}
-              className={`flex-1 py-1.5 px-1 rounded-xl font-bold transition-all cursor-pointer text-center text-[10px] ${
-                leftTab === 'whales'
+              className={`flex-1 py-1.5 px-2 rounded-lg font-bold transition-all cursor-pointer text-center text-[10.5px] ${
+                leftTab === 'whales' || leftTab === 'accuracy'
                   ? 'bg-amber text-black shadow-xs font-extrabold'
                   : 'text-muted hover:text-text'
               }`}
             >
-              🐋 Whales
-            </button>
-            <button
-              onClick={() => handleLeftTabChange('accuracy')}
-              className={`flex-1 py-1.5 px-1 rounded-xl font-bold transition-all cursor-pointer text-center text-[10px] ${
-                leftTab === 'accuracy'
-                  ? 'bg-amber text-black shadow-xs font-extrabold'
-                  : 'text-muted hover:text-text'
-              }`}
-            >
-              🏆 Stats
-            </button>
-            <button
-              onClick={() => handleLeftTabChange('macro')}
-              className={`flex-1 py-1.5 px-1 rounded-xl font-bold transition-all cursor-pointer text-center text-[10px] ${
-                leftTab === 'macro'
-                  ? 'bg-amber text-black shadow-xs font-extrabold'
-                  : 'text-muted hover:text-text'
-              }`}
-            >
-              🌍 Macro
+              🐋 Whales &amp; Stats
             </button>
             <button
               onClick={() => handleLeftTabChange('watchlist')}
-              className={`flex-1 py-1.5 px-1 rounded-xl font-bold transition-all cursor-pointer text-center text-[10px] ${
+              className={`flex-1 py-1.5 px-2 rounded-lg font-bold transition-all cursor-pointer text-center text-[10.5px] ${
                 leftTab === 'watchlist'
                   ? 'bg-amber text-black shadow-xs font-extrabold'
                   : 'text-muted hover:text-text'
               }`}
             >
-              📋 Stocks
+              📋 Watchlist
             </button>
           </div>
 
-          {/* TAB 1: COUNCILS */}
+          {/* TAB 1: COUNCILS & PERSONAS */}
           {leftTab === 'councils' && (
             <div className="bg-panel border border-border/80 rounded-2xl p-3.5 shadow-sm space-y-3 animate-fade-slide">
               <div className="flex items-center justify-between border-b border-border/50 pb-2">
-                <span className="text-xs font-bold uppercase tracking-wider text-muted flex items-center gap-1.5">
-                  <span>🏛️</span> COUNCIL ENSEMBLES
+                <div className="flex items-center bg-surface border border-border/70 rounded-lg p-0.5 text-[11px] font-ui gap-1">
+                  <button
+                    onClick={() => {
+                      setIntelSubTab('councils')
+                      setIntelligenceMode('councils')
+                    }}
+                    className={`py-1 px-2.5 rounded-md font-bold transition-all cursor-pointer ${
+                      intelSubTab === 'councils'
+                        ? 'bg-amber text-black shadow-xs'
+                        : 'text-muted hover:text-text'
+                    }`}
+                  >
+                    🏛️ 5 Councils
+                  </button>
+                  <button
+                    onClick={() => {
+                      setIntelSubTab('personas')
+                      setIntelligenceMode('personas')
+                    }}
+                    className={`py-1 px-2.5 rounded-md font-bold transition-all cursor-pointer ${
+                      intelSubTab === 'personas'
+                        ? 'bg-amber text-black shadow-xs'
+                        : 'text-muted hover:text-text'
+                    }`}
+                  >
+                    🧠 13 Personas
+                  </button>
+                </div>
+                <span className="text-[10px] text-amber font-mono font-semibold">
+                  {intelSubTab === 'councils' ? '5 PRESETS' : '13 MINDS'}
                 </span>
-                <span className="text-[10px] text-amber font-mono font-semibold">5 PRESETS</span>
               </div>
 
-              <div className="space-y-2">
-                {MASTER_COUNCILS.map((c) => {
-                  const isSelected = selectedCouncil === c.id
-                  return (
-                    <div
-                      key={c.id}
-                      onClick={() => {
-                        setSelectedCouncil(c.id)
-                        setIntelligenceMode('councils')
-                      }}
-                      className={`p-2.5 rounded-xl border transition-all space-y-1.5 cursor-pointer ${
-                        isSelected
-                          ? 'bg-amber/15 border-amber text-text shadow-sm ring-1 ring-amber/30'
-                          : 'bg-surface/80 border-border/70 hover:border-amber/40 hover:bg-elevated'
-                      }`}
-                    >
-                      <div className="flex items-center justify-between">
-                        <div className="flex items-center gap-2">
-                          <span className="text-base">{c.icon}</span>
-                          <span className="font-bold text-xs text-text font-ui">
-                            {c.name}
-                          </span>
-                        </div>
-                        <span className="text-[9px] px-1.5 py-0.2 rounded font-mono font-bold bg-amber/10 border border-amber/30 text-amber">
-                          {c.badge}
-                        </span>
-                      </div>
-                      <p className="text-[10px] text-muted font-ui leading-tight">{c.desc}</p>
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation()
+              {intelSubTab === 'councils' ? (
+                <div className="space-y-2">
+                  {MASTER_COUNCILS.map((c) => {
+                    const isSelected = selectedCouncil === c.id
+                    return (
+                      <div
+                        key={c.id}
+                        onClick={() => {
                           setSelectedCouncil(c.id)
                           setIntelligenceMode('councils')
-                          sendDraft(`council ${c.id} ${selectedSymbol}`)
                         }}
-                        className="w-full mt-1 py-1.5 px-2 rounded-lg bg-elevated hover:bg-amber hover:text-black border border-border/60 text-[10px] font-bold text-text transition-all cursor-pointer text-center"
+                        className={`p-2.5 rounded-xl border transition-all space-y-1.5 cursor-pointer ${
+                          isSelected
+                            ? 'bg-amber/15 border-amber text-text shadow-sm ring-1 ring-amber/30'
+                            : 'bg-surface/80 border-border/70 hover:border-amber/40 hover:bg-elevated'
+                        }`}
                       >
-                        ⚡ Poll on {selectedSymbol} →
-                      </button>
-                    </div>
-                  )
-                })}
-              </div>
-            </div>
-          )}
-
-          {/* TAB 2: PERSONAS */}
-          {leftTab === 'personas' && (
-            <div className="bg-panel border border-border/80 rounded-2xl p-3.5 shadow-sm space-y-3 animate-fade-slide max-h-[560px] overflow-y-auto">
-              <div className="flex items-center justify-between border-b border-border/50 pb-2">
-                <span className="text-xs font-bold uppercase tracking-wider text-muted flex items-center gap-1.5">
-                  <span>🧠</span> SPECIALIST MINDS
-                </span>
-                <span className="text-[10px] text-amber font-mono font-semibold">13 MINDS</span>
-              </div>
-
-              <div className="space-y-1.5">
-                {MASTER_PERSONAS.map((p) => {
-                  const isSelected = selectedPersona === p.id
-                  return (
-                    <button
-                      key={p.id}
-                      onClick={() => {
-                        setSelectedPersona(p.id)
-                        setIntelligenceMode('personas')
-                      }}
-                      className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-left transition-all cursor-pointer border ${
-                        isSelected
-                          ? 'bg-emerald-500/15 border-emerald-500 text-text shadow-sm ring-1 ring-emerald-500/30'
-                          : 'border-border/40 hover:bg-elevated hover:border-amber/40 text-muted hover:text-text'
-                      }`}
-                    >
-                      <div className="w-7 h-7 rounded-lg bg-elevated border border-border/80 flex items-center justify-center text-sm flex-shrink-0">
-                        {p.icon}
-                      </div>
-                      <div className="flex-1 min-w-0">
                         <div className="flex items-center justify-between">
-                          <span className="text-xs font-semibold text-text truncate">
-                            {p.name}
-                          </span>
-                          <span className="text-[9px] text-muted font-mono px-1 py-0.2 rounded bg-surface border border-border/50">
-                            {p.style}
+                          <div className="flex items-center gap-2">
+                            <span className="text-base">{c.icon}</span>
+                            <span className="font-bold text-xs text-text font-ui">
+                              {c.name}
+                            </span>
+                          </div>
+                          <span className="text-[9px] px-1.5 py-0.2 rounded font-mono font-bold bg-amber/10 border border-amber/30 text-amber">
+                            {c.badge}
                           </span>
                         </div>
-                        <span className="text-[10px] text-muted truncate block">{p.title}</span>
+                        <p className="text-[10px] text-muted font-ui leading-tight">{c.desc}</p>
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            setSelectedCouncil(c.id)
+                            setIntelligenceMode('councils')
+                            sendDraft(`council ${c.id} ${selectedSymbol}`)
+                          }}
+                          className="w-full mt-1 py-1.5 px-2 rounded-lg bg-elevated hover:bg-amber hover:text-black border border-border/60 text-[10px] font-bold text-text transition-all cursor-pointer text-center"
+                        >
+                          ⚡ Poll on {selectedSymbol} →
+                        </button>
                       </div>
-                    </button>
-                  )
-                })}
-              </div>
+                    )
+                  })}
+                </div>
+              ) : (
+                <div className="space-y-1.5 max-h-[540px] overflow-y-auto pr-1">
+                  {MASTER_PERSONAS.map((p) => {
+                    const isSelected = selectedPersona === p.id
+                    return (
+                      <button
+                        key={p.id}
+                        onClick={() => {
+                          setSelectedPersona(p.id)
+                          setIntelligenceMode('personas')
+                        }}
+                        className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-left transition-all cursor-pointer border ${
+                          isSelected
+                            ? 'bg-emerald-500/15 border-emerald-500 text-text shadow-sm ring-1 ring-emerald-500/30'
+                            : 'border-border/40 hover:bg-elevated hover:border-amber/40 text-muted hover:text-text'
+                        }`}
+                      >
+                        <div className="w-7 h-7 rounded-lg bg-elevated border border-border/80 flex items-center justify-center text-sm flex-shrink-0">
+                          {p.icon}
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center justify-between">
+                            <span className="text-xs font-semibold text-text truncate">
+                              {p.name}
+                            </span>
+                            <span className="text-[9px] text-muted font-mono px-1 py-0.2 rounded bg-surface border border-border/50">
+                              {p.style}
+                            </span>
+                          </div>
+                          <span className="text-[10px] text-muted truncate block">{p.title}</span>
+                        </div>
+                      </button>
+                    )
+                  })}
+                </div>
+              )}
             </div>
           )}
 
@@ -1116,9 +1050,6 @@ export default function TerminalView({
                         <span className="text-[10px] text-muted font-mono truncate max-w-[110px] block">{item.name}</span>
                       </div>
 
-                      {/* 7-Day Mini Trend Sparkline */}
-                      <MiniTrendSparkline symbol={item.symbol} isPositive={isPositive} />
-
                       <div className="text-right font-mono flex-shrink-0">
                         <span className="text-xs font-bold font-mono">
                           {formatLivePrice(item.ltp, item.cat === 'CRYPTO' || item.symbol === 'BTC' ? '$' : item.cat === 'FOREX' ? '' : '₹')}
@@ -1176,24 +1107,59 @@ export default function TerminalView({
             </div>
           )}
 
-          {/* TAB 3: WHALE & SAST FLOWS */}
+          {/* TAB 2: WHALES & STATS & MACRO */}
           {leftTab === 'whales' && (
-            <div className="animate-fade-slide">
-              <WhaleFlowsCard onOpenOrderTicket={onOpenOrderTicket} />
-            </div>
-          )}
+            <div className="space-y-2 animate-fade-slide">
+              <div className="flex items-center bg-panel border border-border/80 rounded-xl p-1 text-[11px] font-ui gap-1">
+                <button
+                  onClick={() => setStatsSubTab('whales')}
+                  className={`flex-1 py-1 px-2 rounded-lg font-bold transition-all cursor-pointer text-center ${
+                    statsSubTab === 'whales'
+                      ? 'bg-amber text-black shadow-xs'
+                      : 'text-muted hover:text-text'
+                  }`}
+                >
+                  🐋 Whale Flows
+                </button>
+                <button
+                  onClick={() => setStatsSubTab('accuracy')}
+                  className={`flex-1 py-1 px-2 rounded-lg font-bold transition-all cursor-pointer text-center ${
+                    statsSubTab === 'accuracy'
+                      ? 'bg-amber text-black shadow-xs'
+                      : 'text-muted hover:text-text'
+                  }`}
+                >
+                  🏆 Track Records
+                </button>
+                <button
+                  onClick={() => setStatsSubTab('macro')}
+                  className={`flex-1 py-1 px-2 rounded-lg font-bold transition-all cursor-pointer text-center ${
+                    statsSubTab === 'macro'
+                      ? 'bg-amber text-black shadow-xs'
+                      : 'text-muted hover:text-text'
+                  }`}
+                >
+                  🌐 Macro
+                </button>
+              </div>
 
-          {/* TAB 4: ACCURACY & TRACK RECORDS */}
-          {leftTab === 'accuracy' && (
-            <div className="animate-fade-slide">
-              <PersonaTrackRecordCard />
-            </div>
-          )}
+              {statsSubTab === 'whales' && (
+                <div className="animate-fade-slide">
+                  <WhaleFlowsCard onOpenOrderTicket={onOpenOrderTicket} />
+                </div>
+              )}
 
-          {/* TAB 5: GLOBAL MACRO & CORRELATION */}
-          {leftTab === 'macro' && (
-            <div className="animate-fade-slide">
-              <GlobalMacroCard data={data?.global_macro} />
+              {statsSubTab === 'accuracy' && (
+                <div className="animate-fade-slide">
+                  <PersonaTrackRecordCard />
+                </div>
+              )}
+
+              {statsSubTab === 'macro' && (
+                <div className="animate-fade-slide">
+                  <GlobalMacroCard data={data?.global_macro} />
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -1341,31 +1307,35 @@ export default function TerminalView({
                 <div className="flex items-center gap-1.5">
                   <span className="text-[9px] uppercase font-bold text-muted">PCR:</span>
                   <span className="font-bold text-emerald-400">
-                    {data?.pcr != null ? Number(data.pcr).toFixed(2) : (curLtp ? (isPos ? '1.18' : '0.82') : '—')}
+                    {data?.pcr != null ? Number(data.pcr).toFixed(2) : '—'}
                   </span>
-                  <span className="text-[9px] text-muted">
-                    {isPos ? '(Bullish Put Writing)' : '(Call Resistance)'}
-                  </span>
+                  {data?.pcr != null && (
+                    <span className="text-[9px] text-muted">
+                      {Number(data.pcr) >= 1.05 ? '(Bullish Put Writing)' : Number(data.pcr) <= 0.85 ? '(Call Resistance)' : '(Balanced)'}
+                    </span>
+                  )}
                 </div>
 
                 {/* Expiry Max Pain Pin */}
                 <div className="flex items-center gap-1.5">
                   <span className="text-[9px] uppercase font-bold text-muted">Max Pain:</span>
                   <span className="font-bold text-amber">
-                    {data?.max_pain ? `₹${data.max_pain}` : (curLtp ? `₹${(Math.round(curLtp / 100) * 100).toLocaleString('en-IN')}` : '—')}
+                    {data?.max_pain ? `₹${data.max_pain}` : '—'}
                   </span>
-                  <span className="text-[9px] text-muted">Expiry Pin</span>
+                  {data?.max_pain && <span className="text-[9px] text-muted">Expiry Pin</span>}
                 </div>
 
                 {/* Intraday VWAP Benchmark */}
                 <div className="flex items-center gap-1.5 hidden md:flex">
                   <span className="text-[9px] uppercase font-bold text-muted">VWAP:</span>
                   <span className="font-bold text-cyan-400">
-                    {curLtp ? `₹${(curLtp * (isPos ? 0.998 : 1.002)).toFixed(1)}` : '—'}
+                    {data?.vwap != null ? `₹${Number(data.vwap).toFixed(1)}` : '—'}
                   </span>
-                  <span className={`text-[9px] font-bold ${isPos ? 'text-emerald-400' : 'text-rose-400'}`}>
-                    {isPos ? 'Above (+0.2%)' : 'Below (-0.2%)'}
-                  </span>
+                  {data?.vwap != null && curLtp != null && (
+                    <span className={`text-[9px] font-bold ${curLtp >= data.vwap ? 'text-emerald-400' : 'text-rose-400'}`}>
+                      {curLtp >= data.vwap ? `Above (+${(((curLtp - data.vwap) / data.vwap) * 100).toFixed(1)}%)` : `Below (${(((curLtp - data.vwap) / data.vwap) * 100).toFixed(1)}%)`}
+                    </span>
+                  )}
                 </div>
               </div>
 
@@ -2552,26 +2522,6 @@ export default function TerminalView({
         </div>
       </div>
     </div>
-  )
-}
-
-function MiniTrendSparkline({ symbol = '', isPositive = true }) {
-  let hash = 0
-  for (let i = 0; i < symbol.length; i++) hash = (hash * 31 + symbol.charCodeAt(i)) & 0xffffffff
-  const pts = []
-  for (let i = 0; i < 6; i++) {
-    const pseudoRand = ((Math.sin(hash + i * 1.7) + 1) / 2) * 6
-    const base = isPositive ? (i * 2 + pseudoRand) : (12 - i * 2 + pseudoRand)
-    pts.push(Math.max(2, Math.min(14, base)))
-  }
-
-  const strokeColor = isPositive ? 'var(--color-emerald)' : 'var(--color-rose)'
-  const pathD = pts.map((y, i) => `${i === 0 ? 'M' : 'L'} ${i * 7 + 2} ${16 - y}`).join(' ')
-
-  return (
-    <svg width="38" height="16" className="overflow-visible flex-shrink-0 opacity-75 group-hover:opacity-100 hidden sm:block">
-      <path d={pathD} fill="none" stroke={strokeColor} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
   )
 }
 

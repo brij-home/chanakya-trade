@@ -192,12 +192,12 @@ export default function OverviewView() {
   const macroAsOf = globalMacro?._as_of ?? null
 
   return (
-    <div className="flex-1 overflow-y-auto p-3 space-y-3 font-ui" style={{ background: 'var(--color-surface)' }}>
+    <div className="flex-1 overflow-y-auto p-2 sm:p-2.5 space-y-2 font-ui" style={{ background: 'var(--color-surface)' }}>
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-lg font-black" style={{ color: 'var(--color-text)' }}>🌐 Market Overview &amp; Global Macro</h1>
-          <p className="text-xs" style={{ color: 'var(--color-muted)' }}>
+          <h1 className="text-sm sm:text-base font-black tracking-wide" style={{ color: 'var(--color-text)' }}>🌐 Market Overview &amp; Global Macro</h1>
+          <p className="text-[11px]" style={{ color: 'var(--color-muted)' }}>
             GIFT NIFTY Gap • Global 6 • India VIX • FII/DII Flows • Sector RRG
           </p>
         </div>
@@ -207,7 +207,7 @@ export default function OverviewView() {
             type="button"
             onClick={() => fetchData()}
             disabled={loading}
-            className="flex items-center gap-1.5 text-[11px] px-2.5 py-1 rounded-md border border-border bg-panel hover:bg-elevated text-muted hover:text-text cursor-pointer transition-all"
+            className="flex items-center gap-1.5 text-[10.5px] px-2 py-0.5 rounded-md border border-border bg-panel hover:bg-elevated text-muted hover:text-text cursor-pointer transition-all"
             title="Auto-refreshes every 5 minutes"
           >
             <span className={loading ? 'animate-spin' : ''}>🔄</span>
@@ -222,15 +222,15 @@ export default function OverviewView() {
       </div>
 
       {loading ? (
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-2.5">
           {[1,2,3].map(i => <SkeletonCard key={i} variant="card" lines={4} />)}
         </div>
       ) : (
         <>
           {/* Row 1: Global Macro Transmission */}
           <div
-            className="rounded-2xl p-4 animate-slide-up-fade"
-            style={{ background: 'var(--color-panel)', border: '1px solid var(--color-border)', boxShadow: 'var(--shadow-card)' }}
+            className="rounded-xl p-2.5 sm:p-3 shadow-xs space-y-2 animate-slide-up-fade"
+            style={{ background: 'var(--color-panel)', border: '1px solid var(--color-border)' }}
           >
             <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
               <div className="flex items-center gap-2">
@@ -335,19 +335,19 @@ export default function OverviewView() {
           </div>
 
           {/* Row 2: VIX + Breadth + FII/DII — P0-A: show UnavailableState when data is missing */}
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-2.5">
             {/* VIX Gauge */}
             <div
-              className="rounded-2xl p-4 animate-slide-up-fade"
-              style={{ background: 'var(--color-panel)', border: '1px solid var(--color-border)', boxShadow: 'var(--shadow-card)' }}
+              className="rounded-xl p-2.5 sm:p-3 shadow-xs space-y-2 animate-slide-up-fade"
+              style={{ background: 'var(--color-panel)', border: '1px solid var(--color-border)' }}
             >
-              <div className="text-[10px] font-bold uppercase tracking-wider mb-3" style={{ color: 'var(--color-muted)' }}>
+              <div className="text-[10px] font-bold uppercase tracking-wider mb-1" style={{ color: 'var(--color-muted)' }}>
                 ⚡ India VIX — Fear Gauge
               </div>
               {vix != null ? (
                 <>
                   <VIXGauge value={vix} />
-                  <div className="mt-3 text-[10px] text-center" style={{ color: 'var(--color-muted)' }}>
+                  <div className="mt-1 text-[9.5px] text-center" style={{ color: 'var(--color-muted)' }}>
                     Safe zone: VIX &lt; 14.5 | Danger: VIX &gt; 20
                   </div>
                 </>
@@ -363,8 +363,8 @@ export default function OverviewView() {
 
             {/* Market Breadth */}
             <div
-              className="rounded-2xl p-4 space-y-3 animate-slide-up-fade"
-              style={{ background: 'var(--color-panel)', border: '1px solid var(--color-border)', boxShadow: 'var(--shadow-card)', animationDelay: '50ms' }}
+              className="rounded-xl p-2.5 sm:p-3 shadow-xs space-y-2 animate-slide-up-fade"
+              style={{ background: 'var(--color-panel)', border: '1px solid var(--color-border)', animationDelay: '50ms' }}
             >
               <div className="text-[10px] font-bold uppercase tracking-wider" style={{ color: 'var(--color-muted)' }}>
                 📊 NSE 500 Breadth
@@ -373,7 +373,7 @@ export default function OverviewView() {
                 <>
                   <BreadthBar advancing={advancers} declining={decliners} unchanged={unchanged} />
                   <div
-                    className="text-center py-2 rounded-xl text-sm font-black"
+                    className="text-center py-1.5 rounded-lg text-xs font-black"
                     style={{
                       background: advancers > decliners ? 'rgba(0,214,143,0.1)' : 'rgba(255,79,123,0.1)',
                       color: advancers > decliners ? 'var(--color-emerald)' : 'var(--color-rose)',
@@ -381,7 +381,7 @@ export default function OverviewView() {
                   >
                     {advancers > decliners ? '🚀 BULLISH BREADTH' : '🛡️ BEARISH BREADTH'}
                   </div>
-                  <div className="text-[10px] text-muted">
+                  <div className="text-[9.5px] text-muted">
                     A/D Ratio: {(advancers / Math.max(decliners, 1)).toFixed(2)}x &nbsp;|&nbsp;
                     {advancers + decliners + (unchanged ?? 0)} stocks tracked
                   </div>
@@ -398,8 +398,8 @@ export default function OverviewView() {
 
             {/* FII/DII Flows */}
             <div
-              className="rounded-2xl p-4 space-y-3 animate-slide-up-fade"
-              style={{ background: 'var(--color-panel)', border: '1px solid var(--color-border)', boxShadow: 'var(--shadow-card)', animationDelay: '100ms' }}
+              className="rounded-xl p-2.5 sm:p-3 shadow-xs space-y-2 animate-slide-up-fade"
+              style={{ background: 'var(--color-panel)', border: '1px solid var(--color-border)', animationDelay: '100ms' }}
             >
               <div className="text-[10px] font-bold uppercase tracking-wider" style={{ color: 'var(--color-muted)' }}>
                 💰 FII / DII Net Flows (Daily)
@@ -408,10 +408,10 @@ export default function OverviewView() {
                 <>
                   <FlowBar label="FII Net" value={fiiNet} />
                   <FlowBar label="DII Net" value={diiNet} />
-                  <div className="pt-1 border-t" style={{ borderColor: 'var(--color-border)' }}>
+                  <div className="pt-0.5 border-t" style={{ borderColor: 'var(--color-border)' }}>
                     <FlowBar label="NET" value={fiiNet + diiNet} max={5000} />
                   </div>
-                  <div className="text-[10px]" style={{ color: 'var(--color-muted)' }}>
+                  <div className="text-[9.5px]" style={{ color: 'var(--color-muted)' }}>
                     Combined: <span style={{ color: (fiiNet + diiNet) >= 0 ? 'var(--color-emerald)' : 'var(--color-rose)', fontWeight: 700 }}>
                       {(fiiNet + diiNet) >= 0 ? '+' : ''}₹{(fiiNet + diiNet).toLocaleString('en-IN')} Cr
                     </span>
@@ -431,8 +431,8 @@ export default function OverviewView() {
 
           {/* Row 3: Sector Rotation Grid */}
           <div
-            className="rounded-2xl p-4 animate-slide-up-fade"
-            style={{ background: 'var(--color-panel)', border: '1px solid var(--color-border)', boxShadow: 'var(--shadow-card)', animationDelay: '150ms' }}
+            className="rounded-xl p-2.5 sm:p-3 shadow-xs space-y-2 animate-slide-up-fade"
+            style={{ background: 'var(--color-panel)', border: '1px solid var(--color-border)', animationDelay: '150ms' }}
           >
             <div className="flex items-center justify-between mb-3">
               <div className="text-[10px] font-bold uppercase tracking-wider" style={{ color: 'var(--color-muted)' }}>

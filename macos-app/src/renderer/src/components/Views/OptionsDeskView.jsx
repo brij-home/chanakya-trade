@@ -170,13 +170,23 @@ function BlastActionPopover({
       <div className="flex items-center gap-1.5 pt-0.5">
         <button
           onClick={() => {
+            const rawPrice = Number(blastData.ask || blastData.bid || blastData.premium || 0)
+            const resolvedLotSize = resolveInstrument(underlying)?.lotSize || (underlying === 'BANKNIFTY' ? 30 : underlying === 'SENSEX' ? 20 : 65)
+            const cleanSym = String(blastData.contract || `${underlying} ${blastData.strike} ${blastData.option_type}`).replace(/\s+/g, ' ').trim()
             onOpenOrderTicket &&
               onOpenOrderTicket({
-                symbol: blastData.contract,
+                symbol: cleanSym,
                 exchange: resolvedExchange === 'BSE' ? 'BFO' : 'NFO',
-                price: blastData.ask || blastData.bid,
+                price: rawPrice > 0 ? rawPrice : 100.0,
                 orderType: 'BUY',
                 side: 'BUY',
+                action: 'BUY',
+                stopLoss: Number(blastData.stop_loss || (rawPrice * 0.75).toFixed(2)),
+                target: Number(blastData.target_1 || (rawPrice * 1.35).toFixed(2)),
+                lotSize: resolvedLotSize,
+                qty: resolvedLotSize,
+                product: 'NRML',
+                expiry: blastData.expiry || blastData.expiry_date || '',
               })
             onClose && onClose()
           }}
@@ -238,6 +248,8 @@ export default function OptionsDeskView({
   const [deskPosScale, setDeskPosScale] = useState(1)
   const [showDeskWhy, setShowDeskWhy] = useState(false)
   const [showConvictionDrawer, setShowConvictionDrawer] = useState(false)
+  const [showVolModels, setShowVolModels] = useState(false)
+  const [isDecisionMatrixCompact, setIsDecisionMatrixCompact] = useState(false)
 
   const [customSymbolInput, setCustomSymbolInput] = useState('')
   const [showSymbolSearch, setShowSymbolSearch] = useState(false)
@@ -296,14 +308,16 @@ export default function OptionsDeskView({
     fetchGex(false)
   }, [underlying, selectedExpiry])
 
-  // Real-time background auto-update (every 4s when live mode active)
+  // Real-time background auto-update (every 4s when market open, 60s when market closed)
   useEffect(() => {
     if (!isLiveActive) return
+    const isMarketOpen = data ? Boolean(data.is_market_open) : true
+    const pollIntervalMs = isMarketOpen ? 4000 : 60000
     const interval = setInterval(() => {
       fetchGex(true)
-    }, 4000)
+    }, pollIntervalMs)
     return () => clearInterval(interval)
-  }, [underlying, selectedExpiry, isLiveActive])
+  }, [underlying, selectedExpiry, isLiveActive, data?.is_market_open])
 
   const handleSendTelegramBlast = async (blastData) => {
     if (!blastData) return
@@ -340,14 +354,62 @@ export default function OptionsDeskView({
     })
   }
 
+  const isMarketOpen = data?.is_market_open !== undefined ? Boolean(data.is_market_open) : (data?.data_state !== 'OFF_MARKET')
   const spot = data?.spot_price || 0
   const spotChange = data?.spot_change || '0.00'
   const spotChangePct = data?.spot_change_pct || '0.00%'
   const spotIsPositive = data?.spot_is_positive ?? (!String(spotChange).startsWith('-'))
-  const dataState = data?.data_state || (data ? 'UNVERIFIED' : 'LOADING')
-  const isRealtime = Boolean(data?.is_realtime && dataState === 'LIVE')
+  const dataState = data?.data_state || (data ? (isMarketOpen ? 'LIVE' : 'OFF_MARKET') : 'LOADING')
+  const isRealtime = Boolean(data?.is_realtime && dataState === 'LIVE' && isMarketOpen)
   const dataSource = data?.data_source || (isRealtime ? 'broker' : 'fallback')
-  const sourceLabel = data?.source_label || (isRealtime ? `${dataSource.toUpperCase()} Direct Feed` : 'Exchange Scraper (~15m Delayed)')
+  const sourceLabel = data?.source_label || (
+    isRealtime
+      ? `${dataSource.toUpperCase()} Direct Feed`
+      : !isMarketOpen
+      ? 'Previous Session EOD (Market Closed)'
+      : 'Exchange Scraper (~15m Delayed)'
+  )
+
+  const handleStageOptionOrder = ({ strike, type, action, price, blastData = null }) => {
+    if (!onOpenOrderTicket) return
+    const cleanUnderlying = String(underlying || '').trim().replace(/\s+/g, ' ')
+    const cleanStrike = String(strike || '').trim()
+    const cleanSymbol = `${cleanUnderlying} ${cleanStrike} ${type}`.replace(/\s+/g, ' ').trim()
+    const resolvedLotSize = resolveInstrument(underlying)?.lotSize || (underlying === 'BANKNIFTY' ? 30 : underlying === 'SENSEX' ? 20 : 65)
+
+    const validPrice = Number(price) > 0 ? Number(price) : 100.0
+    const isBuy = action === 'BUY'
+
+    let computedSL = null
+    let computedTarget = null
+
+    if (blastData?.stop_loss && Number(blastData.stop_loss) > 0) {
+      computedSL = Number(blastData.stop_loss)
+    } else {
+      computedSL = isBuy ? Number((validPrice * 0.75).toFixed(2)) : Number((validPrice * 1.30).toFixed(2))
+    }
+
+    if (blastData?.target_1 && Number(blastData.target_1) > 0) {
+      computedTarget = Number(blastData.target_1)
+    } else {
+      computedTarget = isBuy ? Number((validPrice * 1.35).toFixed(2)) : Number((validPrice * 0.50).toFixed(2))
+    }
+
+    onOpenOrderTicket({
+      symbol: cleanSymbol,
+      exchange: resolvedExchange === 'BSE' ? 'BFO' : 'NFO',
+      price: validPrice,
+      orderType: action,
+      side: action,
+      action: action,
+      stopLoss: computedSL,
+      target: computedTarget,
+      lotSize: resolvedLotSize,
+      qty: resolvedLotSize,
+      product: 'NRML',
+      expiry: selectedExpiry || data?.expiry || undefined,
+    })
+  }
   const asOfTime = data?.as_of_display || data?.time || (lastUpdated ? lastUpdated.toLocaleTimeString('en-IN') + ' IST' : '')
   const brokerNote = data?.note || ''
   const blastRadar = data?.blast_radar || []
@@ -715,74 +777,14 @@ export default function OptionsDeskView({
   }, [spot, maxPain, callWallStrike, putWallStrike, pcr, minIV, data?.zero_gamma, underlying, dataState, optionsChain, brokerNote])
 
   return (
-    <div className="flex-1 overflow-y-auto p-2.5 sm:p-3.5 bg-surface text-text space-y-2.5 font-ui">
-      {/* Top Header Card */}
-      <div className="bg-panel/90 border border-border/80 rounded-xl p-3 shadow-sm backdrop-blur-md space-y-2">
-        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border/50 pb-2">
-          <div className="flex items-center gap-2.5">
-            <span className="text-amber text-lg font-bold">◆</span>
-            <div>
-              <h1 className="text-sm font-bold tracking-wide font-mono text-text flex items-center gap-2">
-                <span>QUANT &amp; OPTIONS DESK</span>
-                <span className="text-xs px-2 py-0.5 rounded bg-amber/20 text-amber border border-amber/40 font-mono font-black">
-                  {underlying}
-                </span>
-              </h1>
-              <div className="flex items-center gap-2 text-[10px] text-muted">
-                <span>Real-Time Greeks, GEX &amp; Multi-Factor Decision Matrix</span>
-                <span>•</span>
-                <span className="text-emerald-400 font-mono font-semibold">Synced Live Terminal Feeds</span>
-              </div>
-            </div>
-          </div>
-
-          <div className="flex items-center gap-2 flex-wrap">
-            {/* Live Auto-Refresh Indicator & Pause/Resume */}
-            <button
-              onClick={() => setIsLiveActive(!isLiveActive)}
-              className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg border text-[11px] font-semibold transition-all cursor-pointer ${
-                isLiveActive
-                  ? isRealtime
-                    ? 'bg-emerald-500/15 border-emerald-500/30 text-emerald-400 hover:bg-emerald-500/25'
-                    : 'bg-amber-500/15 border-amber-500/30 text-amber hover:bg-amber-500/25'
-                  : 'bg-surface border-border/70 text-muted hover:text-text'
-              }`}
-              title={isRealtime ? `Live sub-second real-time stream via ${sourceLabel} (Click to pause)` : `Delayed data feed (${sourceLabel}). Connect or route broker for real-time streaming.`}
-            >
-              <span className={`w-1.5 h-1.5 rounded-full ${isLiveActive ? (isRealtime ? 'bg-emerald-500 animate-pulse' : 'bg-amber-400 animate-pulse') : 'bg-muted'}`} />
-              <span>{isLiveActive ? (isRealtime ? `LIVE (${dataSource.toUpperCase()})` : `DELAYED (${dataSource.toUpperCase()})`) : 'PAUSED'}</span>
-              {asOfTime && (
-                <span className="text-[9px] opacity-75 font-mono ml-0.5">
-                  {asOfTime}
-                </span>
-              )}
-            </button>
-
-            {/* Quick Refresh Button */}
-            <button
-              onClick={() => fetchGex(true)}
-              disabled={isRefreshing}
-              className="px-2 py-1 rounded-lg bg-surface hover:bg-elevated border border-border/60 text-muted hover:text-amber text-xs font-bold transition-all cursor-pointer flex items-center gap-1"
-              title="Refresh options chain now"
-            >
-              <span className={`inline-block ${isRefreshing ? 'animate-spin' : ''}`}>↻</span>
-              <span className="text-[10px]">Refresh</span>
-            </button>
-
-            <button
-              onClick={() => setIsPayoffModalOpen(true)}
-              className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-gradient-to-r from-amber to-amber-light hover:brightness-110 text-black text-xs font-bold transition-all shadow-xs cursor-pointer"
-            >
-              <span>🎯</span> Strategy Payoff
-            </button>
-          </div>
-        </div>
-
-        {/* Sub-bar: Instrument selector, Expiry & Key Analytics */}
+    <div className="flex-1 overflow-y-auto p-2 sm:p-3 bg-surface text-text space-y-2 font-ui">
+      {/* ── UNIFIED INSTANT CONTROL & TELEMETRY DECK (36px) ── */}
+      <div className="bg-panel border border-border/80 rounded-xl px-3 py-1.5 shadow-sm space-y-1">
         <div className="flex flex-wrap items-center justify-between gap-2 text-xs font-mono">
-          <div className="flex flex-wrap items-center gap-2">
+          {/* Left: Underlying Selector & Expiry */}
+          <div className="flex flex-wrap items-center gap-1.5">
             <div className="flex items-center gap-1">
-              <span className="text-muted text-[11px]">Underlying:</span>
+              <span className="text-muted text-[11px] font-bold">Underlying:</span>
               <div className="flex items-center gap-0.5 bg-elevated rounded-lg p-0.5 border border-border/70 flex-wrap">
                 {['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'SENSEX', 'RELIANCE', 'HDFCBANK', 'TCS', 'INFY'].map((inst) => (
                   <button
@@ -798,7 +800,6 @@ export default function OptionsDeskView({
                   </button>
                 ))}
 
-                {/* Custom/Active symbol if not in the default pills */}
                 {!['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'SENSEX', 'RELIANCE', 'HDFCBANK', 'TCS', 'INFY'].includes(underlying) && (
                   <span className="px-2 py-0.5 rounded text-[11px] font-bold bg-amber text-black shadow-xs">
                     {underlying}
@@ -807,7 +808,7 @@ export default function OptionsDeskView({
               </div>
             </div>
 
-            {/* F&O Symbol Search / Custom input */}
+            {/* Other F&O Button / Input */}
             {showSymbolSearch ? (
               <form
                 onSubmit={(e) => {
@@ -850,7 +851,7 @@ export default function OptionsDeskView({
               </button>
             )}
 
-            <div className="flex items-center gap-1.5 ml-1">
+            <div className="flex items-center gap-1 ml-1">
               <span className="text-muted text-[11px]">Expiry:</span>
               <select
                 value={selectedExpiry}
@@ -866,7 +867,8 @@ export default function OptionsDeskView({
             </div>
           </div>
 
-          <div className="flex items-center gap-3 text-xs">
+          {/* Center: Spot & Status */}
+          <div className="flex items-center gap-2 text-xs">
             <div>
               <span className="text-muted mr-1 text-[11px]">Spot:</span>
               <span className={`font-bold text-xs ${spotIsPositive ? 'text-emerald-400' : 'text-rose-400'}`}>
@@ -882,8 +884,7 @@ export default function OptionsDeskView({
               </span>
             </div>
 
-            {/* Transparent Data Provenance & asOfTimestamp Disclosure */}
-            <div className="flex items-center gap-1.5 text-[10px] font-mono">
+            <div className="flex items-center gap-1 text-[10px] font-mono">
               <span className={`px-1.5 py-0.2 rounded text-[9px] font-bold border ${
                 isRealtime
                   ? 'bg-emerald-500/15 border-emerald-500/30 text-emerald-400'
@@ -891,117 +892,58 @@ export default function OptionsDeskView({
                   ? 'bg-blue-500/15 border-blue-500/30 text-blue-400'
                   : 'bg-amber-500/15 border-amber-500/30 text-amber'
               }`}>
-                {isRealtime ? `⚡ REALTIME (${dataSource.toUpperCase()})` : dataState === 'BROKER_REQUIRED' ? '🔒 SPOT ONLY' : `⏱️ DELAYED (${dataSource.toUpperCase()})`}
-              </span>
-              <span className="text-muted text-[10px] hidden sm:inline">
-                Feed: <span className="text-text font-semibold">{sourceLabel}</span>
-              </span>
-              <span className="text-muted text-[10px] hidden md:inline">
-                • As of: <span className="text-text font-semibold">{asOfTime}</span>
+                {isRealtime ? `⚡ REALTIME` : dataState === 'BROKER_REQUIRED' ? '🔒 SPOT ONLY' : `⏱️ DELAYED`}
               </span>
             </div>
+          </div>
+
+          {/* Right: Actions */}
+          <div className="flex items-center gap-1.5">
+            <button
+              onClick={() => fetchGex(true)}
+              disabled={isRefreshing}
+              className="px-2 py-0.5 rounded-lg bg-surface hover:bg-elevated border border-border/60 text-muted hover:text-amber text-[10.5px] font-bold transition-all cursor-pointer flex items-center gap-1"
+              title="Refresh options chain now"
+            >
+              <span className={`inline-block ${isRefreshing ? 'animate-spin' : ''}`}>↻</span>
+              <span>Refresh</span>
+            </button>
+
+            <button
+              onClick={() => setIsPayoffModalOpen(true)}
+              className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-gradient-to-r from-amber to-amber-light hover:brightness-110 text-black text-xs font-bold transition-all shadow-xs cursor-pointer"
+            >
+              <span>🎯</span> Strategy Payoff
+            </button>
           </div>
         </div>
 
-        {/* Institutional Transparent Fallback Warning Banner */}
+        {/* Fallback notice banner if delayed */}
         {(!isRealtime && dataState !== 'BROKER_REQUIRED' && dataState !== 'LOADING') && (
-          <div className="bg-amber-500/10 border-l-4 border-amber p-2.5 rounded-r-lg flex items-center justify-between text-xs font-mono shadow-sm">
-            <div className="flex items-center gap-2.5">
-              <span className="text-base text-amber">⚠️</span>
-              <div>
-                <span className="font-bold text-amber block">
-                  FALLBACK DATA ACTIVE: {sourceLabel}
-                </span>
-                <span className="text-[11px] text-text/80 font-ui">
-                  Real-time broker feed is inactive or failed. Displaying public exchange scraper feed (~15-minute delayed). Depth and live tick aggression are not real-time — do not use for sub-second execution.
-                </span>
-              </div>
-            </div>
-            <span className="px-2 py-0.5 rounded bg-amber-500/20 text-amber text-[10px] font-bold shrink-0">
-              NON-REALTIME
-            </span>
+          <div className="bg-amber-500/10 border-l-2 border-amber px-2 py-1 rounded text-[10.5px] font-mono flex items-center justify-between text-amber">
+            <span>⚠️ Scraper feed (~15m delayed). Connect broker for sub-second live streaming.</span>
+            <span className="font-bold text-[9px] uppercase">NON-REALTIME</span>
           </div>
         )}
 
-        {/* High-Impact PCR Blast Alert Banner */}
+        {/* PCR Blast Alert Banner */}
         {pcrBlast && (
-          <div className="bg-gradient-to-r from-amber-500/20 via-orange-500/15 to-transparent border-l-4 border-amber p-2 rounded-r-lg flex items-center justify-between text-xs font-mono">
+          <div className="bg-gradient-to-r from-amber-500/20 via-orange-500/15 to-transparent border-l-4 border-amber px-2.5 py-1.5 rounded-r-lg flex items-center justify-between text-xs font-mono">
             <div className="flex items-center gap-2">
-              <span className="text-base animate-bounce">⚡</span>
+              <span className="text-sm animate-bounce">⚡</span>
               <div>
-                <span className="font-bold text-amber block">IMPACT VOLATILITY ALERT • PCR {pcr}</span>
-                <span className="text-[11px] text-text/90 font-ui">{pcrBlastMsg || 'Extreme skew detected. High probability of violent gamma release.'}</span>
+                <span className="font-bold text-amber block text-[11px]">IMPACT VOLATILITY ALERT • PCR {pcr}</span>
+                <span className="text-[10.5px] text-text/90 font-ui">{pcrBlastMsg || 'Extreme skew detected. High probability of violent gamma release.'}</span>
               </div>
             </div>
             <button
               onClick={() => sendDraft(`Analyze PCR ${pcr} extreme blast skew for ${underlying} and recommend asymmetrical options structure`)}
-              className="px-2.5 py-1 bg-amber text-black font-bold text-[10px] rounded hover:brightness-110 cursor-pointer transition-all"
+              className="px-2.5 py-1 bg-amber text-black font-bold text-[10px] rounded hover:brightness-110 cursor-pointer transition-all shrink-0"
             >
               Analyze Squeeze
             </button>
           </div>
         )}
-
-        {/* Dynamic Key Analytics Bar (PCR, Max Pain, Total OI, Net Flow) */}
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5 pt-1.5 border-t border-border/50 text-xs font-mono">
-          <div className={`p-1.5 px-2 rounded-lg border transition-all ${
-            pcrBlast
-              ? 'bg-amber-500/15 border-amber-500/50 shadow-xs ring-1 ring-amber-500/40'
-              : 'bg-surface/80 border-border/60'
-          }`}>
-            <div className="flex items-center justify-between text-[9px] text-muted">
-              <span>PUT-CALL RATIO (PCR)</span>
-              {pcrBlast && (
-                <span className="text-[8px] font-black text-amber animate-pulse">
-                  💥 BLAST SKEW
-                </span>
-              )}
-            </div>
-            <div className="flex items-center gap-1.5 mt-0.5">
-              <span className={`text-xs font-bold ${
-                pcrBlast
-                  ? 'text-amber font-black'
-                  : pcr !== '—' && Number(pcr) >= 1.05
-                  ? 'text-emerald-400'
-                  : pcr !== '—' && Number(pcr) <= 0.85
-                  ? 'text-rose-400'
-                  : 'text-text'
-              }`}>
-                {pcr}
-              </span>
-              <span className="text-[8px] text-muted truncate">({pcrSentiment})</span>
-            </div>
-          </div>
-
-          <div className="bg-surface/80 p-1.5 px-2 rounded-lg border border-border/60">
-            <span className="text-[9px] text-muted block">MAX PAIN STRIKE</span>
-            <div className="flex items-center gap-1.5 mt-0.5">
-              <span className="text-xs font-bold text-amber">
-                {maxPain > 0 ? `₹${Number(maxPain).toLocaleString('en-IN')}` : '—'}
-              </span>
-              <span className="text-[8px] text-muted">Expiry Pin</span>
-            </div>
-          </div>
-
-          <div className="bg-surface/80 p-1.5 px-2 rounded-lg border border-border/60">
-            <span className="text-[9px] text-muted block">TOTAL OI (CALL vs PUT)</span>
-            <div className="flex items-center gap-2 mt-0.5 text-[11px] font-bold">
-              <span className="text-cyan-400">C: {totalCallOI}</span>
-              <span className="text-muted">|</span>
-              <span className="text-rose-400">P: {totalPutOI}</span>
-            </div>
-          </div>
-
-          <div className="bg-surface/80 p-1.5 px-2 rounded-lg border border-border/60">
-            <span className="text-[9px] text-muted block">NET OI CHANGE</span>
-            <div className="flex items-center gap-1.5 mt-0.5">
-              <span className={`text-xs font-bold ${String(netOIChange).startsWith('-') ? 'text-rose-400' : 'text-emerald-400'}`}>
-                {netOIChange}
-              </span>
-              <span className="text-[8px] text-muted">Institutional Flow</span>
-            </div>
-          </div>
-        </div>
       </div>
 
       {/* Real-Time Institutional Options Decision Matrix Card */}
@@ -1039,6 +981,20 @@ export default function OptionsDeskView({
                 {decisionMatrix.strategyName}
               </span>
             </div>
+            <button
+              type="button"
+              onClick={() => setShowVolModels((prev) => !prev)}
+              className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg border text-[10px] font-mono font-bold transition-all cursor-pointer ${
+                showVolModels
+                  ? 'bg-cyan-500/20 border-cyan-500/40 text-cyan-400'
+                  : 'bg-surface border-border/70 hover:border-amber/40 text-muted hover:text-text'
+              }`}
+              title="Toggle GEX dealer pinning, delta hedging and volatility smile curves"
+            >
+              <span>📊</span>
+              <span className="hidden sm:inline">Vol Models &amp; Greeks</span>
+              <span>{showVolModels ? '▲' : '▼'}</span>
+            </button>
             <button
               type="button"
               onClick={() => setShowConvictionDrawer((prev) => !prev)}
@@ -1297,8 +1253,9 @@ export default function OptionsDeskView({
         )}
       </div>
 
-      {/* Top 3-Pane Grid: GEX Volatility Pinning, Delta Hedging, IV Smile */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-2.5">
+      {/* Top 3-Pane Grid: GEX Volatility Pinning, Delta Hedging, IV Smile (Collapsible) */}
+      {showVolModels && (
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-2.5 animate-fade-slide">
         {/* Card 1: GEX Volatility Pinning & Gamma Regime (4 Cols) */}
         <div className="lg:col-span-4 bg-panel border border-border/80 rounded-xl p-3 shadow-xs space-y-2">
           <div className="flex items-center justify-between border-b border-border/50 pb-1.5">
@@ -1591,6 +1548,7 @@ export default function OptionsDeskView({
           </button>
         </div>
       </div>
+      )}
 
       {/* Order Flow Blast Radar: High-Density Institutional Surge Strip */}
       {blastRadar && blastRadar.length > 0 && (
@@ -2093,12 +2051,12 @@ export default function OptionsDeskView({
                               <td className={`py-2 px-2 ${isCallITM ? 'bg-cyan-500/8 dark:bg-cyan-950/25' : ''}`}>
                                 <button
                                   onClick={() =>
-                                    onOpenOrderTicket &&
-                                    onOpenOrderTicket({
-                                      symbol: `${underlying} ${row.strike} CE`,
-                                      exchange: resolvedExchange === 'BSE' ? 'BFO' : 'NFO',
-                                      price: row.calls_bid,
-                                      orderType: 'BUY',
+                                    handleStageOptionOrder({
+                                      strike: row.strike,
+                                      type: 'CE',
+                                      action: 'BUY',
+                                      price: row.calls_bid > 0 ? row.calls_bid : row.calls_ask,
+                                      blastData: resolvedCallBlastData,
                                     })
                                   }
                                   className={`px-1.5 py-0.5 rounded border text-xs font-bold transition-all cursor-pointer flex items-center justify-between gap-1 w-full ${
@@ -2106,7 +2064,13 @@ export default function OptionsDeskView({
                                       ? 'bg-cyan-500/15 border-cyan-400 text-cyan-700 dark:text-cyan-300 ring-1 ring-cyan-400/50 shadow-xs hover:bg-cyan-500/25'
                                       : 'bg-surface hover:bg-emerald-500 hover:text-black border-border/60 text-text'
                                   }`}
-                                  title={callIsBlast ? `🚀 BLAST ALERT: ${row.calls_blast_reason || 'Order flow surge'}. Click BLAST badge for roadmap` : 'Click to stage BUY Call Order'}
+                                  title={
+                                    callIsBlast
+                                      ? isMarketOpen
+                                        ? `🚀 BLAST ALERT: ${row.calls_blast_reason || 'Order flow surge'}. Click BLAST badge for roadmap`
+                                        : `🌙 PRE-MARKET WATCH: Settled EOD volume/OI. Market opens 09:15 IST.`
+                                      : 'Click to stage BUY Call Order'
+                                  }
                                 >
                                   <span>₹{row.calls_bid}</span>
                                   {callIsBlast && (
@@ -2115,10 +2079,14 @@ export default function OptionsDeskView({
                                         e.stopPropagation()
                                         handleOpenBlastPopover(resolvedCallBlastData, e.currentTarget)
                                       }}
-                                      className="text-[8.5px] tracking-wider uppercase bg-cyan-400 text-slate-950 px-1.5 py-0.5 rounded font-black animate-pulse hover:scale-110 transition-transform cursor-pointer shadow-xs border border-cyan-300/40"
-                                      title="Click to view Actionable Profit Roadmap"
+                                      className={`text-[8.5px] tracking-wider uppercase px-1.5 py-0.5 rounded font-black hover:scale-110 transition-transform cursor-pointer shadow-xs border ${
+                                        isMarketOpen
+                                          ? 'bg-cyan-400 text-slate-950 animate-pulse border-cyan-300/40'
+                                          : 'bg-cyan-950 text-cyan-300 border-cyan-700/60'
+                                      }`}
+                                      title={isMarketOpen ? 'Click to view Actionable Profit Roadmap' : 'Pre-market Watch: Settled prior session levels (Opens 09:15 IST)'}
                                     >
-                                      BLAST
+                                      {isMarketOpen ? 'BLAST' : 'EOD RADAR'}
                                     </span>
                                   )}
                                 </button>
@@ -2128,12 +2096,12 @@ export default function OptionsDeskView({
                               <td className={`py-2 px-2.5 border-r border-border/60 ${isCallITM ? 'bg-cyan-500/8 dark:bg-cyan-950/25' : ''}`}>
                                 <button
                                   onClick={() =>
-                                    onOpenOrderTicket &&
-                                    onOpenOrderTicket({
-                                      symbol: `${underlying} ${row.strike} CE`,
-                                      exchange: resolvedExchange === 'BSE' ? 'BFO' : 'NFO',
-                                      price: row.calls_ask,
-                                      orderType: 'SELL',
+                                    handleStageOptionOrder({
+                                      strike: row.strike,
+                                      type: 'CE',
+                                      action: 'SELL',
+                                      price: row.calls_ask > 0 ? row.calls_ask : row.calls_bid,
+                                      blastData: resolvedCallBlastData,
                                     })
                                   }
                                   className="px-1.5 py-0.5 rounded bg-surface hover:bg-rose-500 hover:text-white border border-border/60 text-text font-bold text-xs transition-all cursor-pointer w-full text-center"
@@ -2161,12 +2129,12 @@ export default function OptionsDeskView({
                               <td className={`py-2 px-2 ${isCallITM ? 'bg-cyan-500/8 dark:bg-cyan-950/25' : ''}`}>
                                 <button
                                   onClick={() =>
-                                    onOpenOrderTicket &&
-                                    onOpenOrderTicket({
-                                      symbol: `${underlying} ${row.strike} CE`,
-                                      exchange: resolvedExchange === 'BSE' ? 'BFO' : 'NFO',
-                                      price: row.calls_bid,
-                                      orderType: 'BUY',
+                                    handleStageOptionOrder({
+                                      strike: row.strike,
+                                      type: 'CE',
+                                      action: 'BUY',
+                                      price: row.calls_bid > 0 ? row.calls_bid : row.calls_ask,
+                                      blastData: resolvedCallBlastData,
                                     })
                                   }
                                   className={`px-1.5 py-0.5 rounded border text-xs font-bold transition-all cursor-pointer flex items-center justify-between gap-1 w-full ${
@@ -2174,7 +2142,13 @@ export default function OptionsDeskView({
                                       ? 'bg-cyan-500/15 border-cyan-400 text-cyan-700 dark:text-cyan-300 ring-1 ring-cyan-400/50 shadow-xs hover:bg-cyan-500/25'
                                       : 'bg-surface hover:bg-emerald-500 hover:text-black border-border/60 text-text'
                                   }`}
-                                  title={callIsBlast ? `🚀 BLAST ALERT: ${row.calls_blast_reason || 'Order flow surge'}. Click BLAST badge for roadmap` : 'Click to stage BUY Call Order'}
+                                  title={
+                                    callIsBlast
+                                      ? isMarketOpen
+                                        ? `🚀 BLAST ALERT: ${row.calls_blast_reason || 'Order flow surge'}. Click BLAST badge for roadmap`
+                                        : `🌙 PRE-MARKET WATCH: Settled EOD volume/OI. Market opens 09:15 IST.`
+                                      : 'Click to stage BUY Call Order'
+                                  }
                                 >
                                   <span>₹{row.calls_bid}</span>
                                   {callIsBlast && (
@@ -2183,10 +2157,14 @@ export default function OptionsDeskView({
                                         e.stopPropagation()
                                         handleOpenBlastPopover(resolvedCallBlastData, e.currentTarget)
                                       }}
-                                      className="text-[8.5px] tracking-wider uppercase bg-cyan-400 text-slate-950 px-1.5 py-0.5 rounded font-black animate-pulse hover:scale-110 transition-transform cursor-pointer shadow-xs border border-cyan-300/40"
-                                      title="Click to view Actionable Profit Roadmap"
+                                      className={`text-[8.5px] tracking-wider uppercase px-1.5 py-0.5 rounded font-black hover:scale-110 transition-transform cursor-pointer shadow-xs border ${
+                                        isMarketOpen
+                                          ? 'bg-cyan-400 text-slate-950 animate-pulse border-cyan-300/40'
+                                          : 'bg-cyan-950 text-cyan-300 border-cyan-700/60'
+                                      }`}
+                                      title={isMarketOpen ? 'Click to view Actionable Profit Roadmap' : 'Pre-market Watch: Settled prior session levels (Opens 09:15 IST)'}
                                     >
-                                      BLAST
+                                      {isMarketOpen ? 'BLAST' : 'EOD RADAR'}
                                     </span>
                                   )}
                                 </button>
@@ -2194,15 +2172,16 @@ export default function OptionsDeskView({
                               <td className={`py-2 px-2.5 border-r border-border/60 ${isCallITM ? 'bg-cyan-500/8 dark:bg-cyan-950/25' : ''}`}>
                                 <button
                                   onClick={() =>
-                                    onOpenOrderTicket &&
-                                    onOpenOrderTicket({
-                                      symbol: `${underlying} ${row.strike} CE`,
-                                      exchange: resolvedExchange === 'BSE' ? 'BFO' : 'NFO',
-                                      price: row.calls_ask,
-                                      orderType: 'SELL',
+                                    handleStageOptionOrder({
+                                      strike: row.strike,
+                                      type: 'CE',
+                                      action: 'SELL',
+                                      price: row.calls_ask > 0 ? row.calls_ask : row.calls_bid,
+                                      blastData: resolvedCallBlastData,
                                     })
                                   }
                                   className="px-1.5 py-0.5 rounded bg-surface hover:bg-rose-500 hover:text-white border border-border/60 text-text font-bold text-xs transition-all cursor-pointer w-full text-center"
+                                  title="Click to stage SELL Call Order"
                                 >
                                   ₹{row.calls_ask}
                                 </button>
@@ -2255,12 +2234,12 @@ export default function OptionsDeskView({
                               <td className={`py-2 px-2.5 border-l border-border/60 text-right ${isPutITM ? 'bg-rose-500/8 dark:bg-rose-950/20' : ''}`}>
                                 <button
                                   onClick={() =>
-                                    onOpenOrderTicket &&
-                                    onOpenOrderTicket({
-                                      symbol: `${underlying} ${row.strike} PE`,
-                                      exchange: resolvedExchange === 'BSE' ? 'BFO' : 'NFO',
-                                      price: row.puts_bid,
-                                      orderType: 'BUY',
+                                    handleStageOptionOrder({
+                                      strike: row.strike,
+                                      type: 'PE',
+                                      action: 'BUY',
+                                      price: row.puts_bid > 0 ? row.puts_bid : row.puts_ask,
+                                      blastData: resolvedPutBlastData,
                                     })
                                   }
                                   className={`px-1.5 py-0.5 rounded border text-xs font-bold transition-all cursor-pointer flex items-center justify-between gap-1 w-full ${
@@ -2268,7 +2247,13 @@ export default function OptionsDeskView({
                                       ? 'bg-rose-500/15 border-rose-400 text-rose-700 dark:text-rose-300 ring-1 ring-rose-400/50 shadow-xs hover:bg-rose-500/25'
                                       : 'bg-surface hover:bg-emerald-500 hover:text-black border-border/60 text-text'
                                   }`}
-                                  title={putIsBlast ? `🚀 BLAST ALERT: ${row.puts_blast_reason || 'Order flow surge'}. Click BLAST badge for roadmap` : 'Click to stage BUY Put Order'}
+                                  title={
+                                    putIsBlast
+                                      ? isMarketOpen
+                                        ? `🚀 BLAST ALERT: ${row.puts_blast_reason || 'Order flow surge'}. Click BLAST badge for roadmap`
+                                        : `🌙 PRE-MARKET WATCH: Settled EOD volume/OI. Market opens 09:15 IST.`
+                                      : 'Click to stage BUY Put Order'
+                                  }
                                 >
                                   {putIsBlast && (
                                     <span
@@ -2276,10 +2261,14 @@ export default function OptionsDeskView({
                                         e.stopPropagation()
                                         handleOpenBlastPopover(resolvedPutBlastData, e.currentTarget)
                                       }}
-                                      className="text-[8.5px] tracking-wider uppercase bg-rose-500 text-white px-1.5 py-0.5 rounded font-black animate-pulse hover:scale-110 transition-transform cursor-pointer shadow-xs border border-rose-400/40"
-                                      title="Click to view Actionable Profit Roadmap"
+                                      className={`text-[8.5px] tracking-wider uppercase px-1.5 py-0.5 rounded font-black hover:scale-110 transition-transform cursor-pointer shadow-xs border ${
+                                        isMarketOpen
+                                          ? 'bg-rose-500 text-white animate-pulse border-rose-400/40'
+                                          : 'bg-rose-950 text-rose-300 border-rose-700/60'
+                                      }`}
+                                      title={isMarketOpen ? 'Click to view Actionable Profit Roadmap' : 'Pre-market Watch: Settled prior session levels (Opens 09:15 IST)'}
                                     >
-                                      BLAST
+                                      {isMarketOpen ? 'BLAST' : 'EOD RADAR'}
                                     </span>
                                   )}
                                   <span className="ml-auto">₹{row.puts_bid}</span>
@@ -2290,12 +2279,12 @@ export default function OptionsDeskView({
                               <td className={`py-2 px-2 text-right ${isPutITM ? 'bg-rose-500/8 dark:bg-rose-950/20' : ''}`}>
                                 <button
                                   onClick={() =>
-                                    onOpenOrderTicket &&
-                                    onOpenOrderTicket({
-                                      symbol: `${underlying} ${row.strike} PE`,
-                                      exchange: resolvedExchange === 'BSE' ? 'BFO' : 'NFO',
-                                      price: row.puts_ask,
-                                      orderType: 'SELL',
+                                    handleStageOptionOrder({
+                                      strike: row.strike,
+                                      type: 'PE',
+                                      action: 'SELL',
+                                      price: row.puts_ask > 0 ? row.puts_ask : row.puts_bid,
+                                      blastData: resolvedPutBlastData,
                                     })
                                   }
                                   className="px-1.5 py-0.5 rounded bg-surface hover:bg-rose-500 hover:text-white border border-border/60 text-text font-bold text-xs transition-all cursor-pointer w-full text-center"
@@ -2349,12 +2338,12 @@ export default function OptionsDeskView({
                               <td className={`py-2 px-2.5 border-l border-border/60 text-right ${isPutITM ? 'bg-rose-500/8 dark:bg-rose-950/20' : ''}`}>
                                 <button
                                   onClick={() =>
-                                    onOpenOrderTicket &&
-                                    onOpenOrderTicket({
-                                      symbol: `${underlying} ${row.strike} PE`,
-                                      exchange: resolvedExchange === 'BSE' ? 'BFO' : 'NFO',
-                                      price: row.puts_bid,
-                                      orderType: 'BUY',
+                                    handleStageOptionOrder({
+                                      strike: row.strike,
+                                      type: 'PE',
+                                      action: 'BUY',
+                                      price: row.puts_bid > 0 ? row.puts_bid : row.puts_ask,
+                                      blastData: resolvedPutBlastData,
                                     })
                                   }
                                   className={`px-1.5 py-0.5 rounded border text-xs font-bold transition-all cursor-pointer flex items-center justify-between gap-1 w-full ${
@@ -2362,7 +2351,13 @@ export default function OptionsDeskView({
                                       ? 'bg-rose-500/15 border-rose-400 text-rose-700 dark:text-rose-300 ring-1 ring-rose-400/50 shadow-xs hover:bg-rose-500/25'
                                       : 'bg-surface hover:bg-emerald-500 hover:text-black border-border/60 text-text'
                                   }`}
-                                  title={putIsBlast ? `🚀 BLAST ALERT: ${row.puts_blast_reason || 'Order flow surge'}. Click BLAST badge for roadmap` : 'Click to stage BUY Put Order'}
+                                  title={
+                                    putIsBlast
+                                      ? isMarketOpen
+                                        ? `🚀 BLAST ALERT: ${row.puts_blast_reason || 'Order flow surge'}. Click BLAST badge for roadmap`
+                                        : `🌙 PRE-MARKET WATCH: Settled EOD volume/OI. Market opens 09:15 IST.`
+                                      : 'Click to stage BUY Put Order'
+                                  }
                                 >
                                   {putIsBlast && (
                                     <span
@@ -2370,10 +2365,14 @@ export default function OptionsDeskView({
                                         e.stopPropagation()
                                         handleOpenBlastPopover(resolvedPutBlastData, e.currentTarget)
                                       }}
-                                      className="text-[8.5px] tracking-wider uppercase bg-rose-500 text-white px-1.5 py-0.5 rounded font-black animate-pulse hover:scale-110 transition-transform cursor-pointer shadow-xs border border-rose-400/40"
-                                      title="Click to view Actionable Profit Roadmap"
+                                      className={`text-[8.5px] tracking-wider uppercase px-1.5 py-0.5 rounded font-black hover:scale-110 transition-transform cursor-pointer shadow-xs border ${
+                                        isMarketOpen
+                                          ? 'bg-rose-500 text-white animate-pulse border-rose-400/40'
+                                          : 'bg-rose-950 text-rose-300 border-rose-700/60'
+                                      }`}
+                                      title={isMarketOpen ? 'Click to view Actionable Profit Roadmap' : 'Pre-market Watch: Settled prior session levels (Opens 09:15 IST)'}
                                     >
-                                      BLAST
+                                      {isMarketOpen ? 'BLAST' : 'EOD RADAR'}
                                     </span>
                                   )}
                                   <span className="ml-auto">₹{row.puts_bid}</span>
@@ -2382,15 +2381,16 @@ export default function OptionsDeskView({
                               <td className={`py-2 px-2 text-right ${isPutITM ? 'bg-rose-500/8 dark:bg-rose-950/20' : ''}`}>
                                 <button
                                   onClick={() =>
-                                    onOpenOrderTicket &&
-                                    onOpenOrderTicket({
-                                      symbol: `${underlying} ${row.strike} PE`,
-                                      exchange: resolvedExchange === 'BSE' ? 'BFO' : 'NFO',
-                                      price: row.puts_ask,
-                                      orderType: 'SELL',
+                                    handleStageOptionOrder({
+                                      strike: row.strike,
+                                      type: 'PE',
+                                      action: 'SELL',
+                                      price: row.puts_ask > 0 ? row.puts_ask : row.puts_bid,
+                                      blastData: resolvedPutBlastData,
                                     })
                                   }
                                   className="px-1.5 py-0.5 rounded bg-surface hover:bg-rose-500 hover:text-white border border-border/60 text-text font-bold text-xs transition-all cursor-pointer w-full text-center"
+                                  title="Click to stage SELL Put Order"
                                 >
                                   ₹{row.puts_ask}
                                 </button>

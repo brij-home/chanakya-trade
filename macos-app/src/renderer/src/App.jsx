@@ -130,9 +130,7 @@ export default function App() {
   // Modal state
   const [isCommandPaletteOpen, setIsCommandPaletteOpen] = useState(false)
   const [isOrderTicketOpen, setIsOrderTicketOpen] = useState(false)
-  const [orderTicketData, setOrderTicketData] = useState({
-    symbol: 'RELIANCE', exchange: 'NSE', price: 2800, stopLoss: 2760, target: 2890,
-  })
+  const [orderTicketData, setOrderTicketData] = useState({})
   const [isTopOppsOpen, setIsTopOppsOpen] = useState(false)
   const [sectorDrilldown, setSectorDrilldown] = useState({ isOpen: false, sector: null })
   const [showHotkeyRef, setShowHotkeyRef] = useState(false)
@@ -439,7 +437,9 @@ export default function App() {
   }, [createSession, setActiveView])
 
   const handleOpenOrderTicket = useCallback((ticketData) => {
-    if (ticketData) setOrderTicketData((prev) => ({ ...prev, ...ticketData }))
+    if (ticketData) {
+      setOrderTicketData(ticketData)
+    }
     setIsOrderTicketOpen(true)
   }, [])
 
@@ -474,7 +474,7 @@ export default function App() {
       <div
         className="drag flex items-center justify-between flex-shrink-0 px-3 gap-2 border-b"
         style={{
-          height: '50px',
+          height: '42px',
           background: 'var(--color-panel)',
           borderColor: 'var(--color-border)',
           backdropFilter: 'blur(12px)',
@@ -626,7 +626,11 @@ export default function App() {
               )}
 
               {activeView === 'debate' && (
-                <DebateArenaView onOpenOrderTicket={handleOpenOrderTicket} />
+                <DebateArenaView
+                  onOpenOrderTicket={handleOpenOrderTicket}
+                  externalSymbol={selectedSymbol || ctxSymbol}
+                  onSymbolChange={handleSymbolChange}
+                />
               )}
 
               {activeView === 'options' && (
@@ -727,7 +731,7 @@ function WorkspaceTab({ icon, label, active, color, onClick, shortcut }) {
     <button
       type="button"
       onClick={onClick}
-      className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg font-semibold transition-all cursor-pointer"
+      className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg font-semibold transition-all cursor-pointer text-xs"
       style={
         active
           ? { background: c.bg, color: c.text, fontWeight: 800, boxShadow: `0 1px 6px ${c.ring}` }

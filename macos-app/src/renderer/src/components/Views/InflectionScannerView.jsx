@@ -535,137 +535,127 @@ export default function InflectionScannerView({
 
   return (
     <div className="flex flex-col flex-1 h-full overflow-hidden select-none bg-void text-text">
-      {/* ── TOP CONTROL BAR ─────────────────────────────────────────────── */}
-      <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-3 border-b border-border bg-surface">
-        {/* Left: Title & Pulse */}
-        <div className="flex items-center gap-3">
-          <div className="flex items-center justify-center w-9 h-9 rounded-xl font-bold text-base bg-gold/15 border border-gold text-amber-600 dark:text-amber-400 shadow-glow-gold">
-            📡
-          </div>
-          <div>
-            <div className="flex items-center gap-2">
-              <h1 className="text-sm font-bold tracking-wide uppercase font-mono text-text">
-                Inflection & Multibagger Radar
-              </h1>
-              <Badge variant="emerald" size="sm">
-                AI 5W+H Matrix
-              </Badge>
-            </div>
-            <p className="text-[11px] text-muted">
-              Pinpoints high-asymmetry pivots before explosive expansion across NSE/BSE
-            </p>
-          </div>
+      {/* ── ROW 1: MASTER CONTROLS & COMMAND DECK (Streamlined 36px) ─────────────────────────────── */}
+      <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-1.5 border-b border-border bg-surface text-xs">
+        {/* Left: Title & Status */}
+        <div className="flex items-center gap-2">
+          <span className="text-base">📡</span>
+          <h1 className="text-xs font-bold tracking-wide uppercase font-mono text-text">
+            Inflection Radar
+          </h1>
+          <Badge variant="emerald" size="xs">
+            5W+H
+          </Badge>
+          {isLiveConnected ? (
+            <span className="flex items-center gap-1 text-[10px] text-emerald-600 dark:text-emerald-400 font-mono">
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+              LIVE
+            </span>
+          ) : (
+            <span className="flex items-center gap-1 text-[10px] text-amber-600 dark:text-amber-400 font-mono">
+              <span className="w-1.5 h-1.5 rounded-full bg-amber-500" />
+              EOD
+            </span>
+          )}
+          {storeStats && (
+            <span className="text-[10px] text-muted font-mono hidden xl:inline">
+              ({storeStats.cached_symbols_count} cached)
+            </span>
+          )}
         </div>
 
         {/* Center/Right Controls */}
-        <div className="flex flex-wrap items-center gap-2">
+        <div className="flex flex-wrap items-center gap-1.5">
           {/* Universe Selector */}
-          <div className="flex items-center gap-1.5">
-            <span className="text-[11px] text-muted font-mono uppercase">Universe:</span>
-            <select
-              value={universe}
-              onChange={(e) => setUniverse(e.target.value)}
-              className="select-input"
-            >
-              {universesList.length > 0 ? (
-                universesList.map((u) => (
-                  <option key={u.id} value={u.id}>
-                    {u.name} ({u.count})
-                  </option>
-                ))
-              ) : (
-                <>
-                  <option value="multibagger_hunters">🚀 Multibagger Hunters (45)</option>
-                  <option value="momentum_breakouts">⚡ Momentum & Squeeze (50)</option>
-                  <option value="auto_market_aware">🌐 Market-Aware RRG (60)</option>
-                  <option value="nifty50">🏛️ NIFTY 50 (50)</option>
-                  <option value="nifty500">🏢 NIFTY 500 (501)</option>
-                  <option value="smallcap_250">🚀 Smallcap 250 (251)</option>
-                  <option value="microcap_250">🌱 Microcap 250 (254)</option>
-                  <option value="all_nse_liquid">🌊 All Liquid NSE Series EQ (1,200+)</option>
-                </>
-              )}
-            </select>
-          </div>
-
-          {/* Liquidity Floor (20D Median Turnover) */}
-          <div className="flex items-center gap-1.5">
-            <span className="text-[11px] text-muted font-mono uppercase" title="Minimum 20-Day Median Turnover (Cr) to exclude illiquid operator traps">
-              Min Liq:
-            </span>
-            <select
-              value={minTurnoverCr}
-              onChange={(e) => setMinTurnoverCr(Number(e.target.value))}
-              className="select-input font-mono"
-              title="20-Day Median Turnover filter"
-            >
-              <option value={0}>All (₹0)</option>
-              <option value={0.25}>₹25 L</option>
-              <option value={0.5}>₹50 L (Rec)</option>
-              <option value={1.0}>₹1.0 Cr</option>
-              <option value={2.0}>₹2.0 Cr</option>
-              <option value={5.0}>₹5.0 Cr</option>
-            </select>
-          </div>
-
-          {/* Market Cap Tier Selector */}
-          <div className="flex items-center gap-1.5">
-            <span className="text-[11px] text-muted font-mono uppercase">Cap:</span>
-            <select
-              value={capTierFilter}
-              onChange={(e) => setCapTierFilter(e.target.value)}
-              className={`select-input ${capTierFilter !== 'ALL' ? 'active-filter' : ''}`}
-            >
-              <option value="ALL">All Caps</option>
-              <option value="LARGE">🏛️ Large</option>
-              <option value="MID">⚡ Mid</option>
-              <option value="SMALL">🚀 Small</option>
-              <option value="MICRO">🌱 Micro</option>
-            </select>
-          </div>
-
-          {/* Sector Filter Selector */}
-          <div className="flex items-center gap-1.5">
-            <span className="text-[11px] text-muted font-mono uppercase">Sector:</span>
-            <select
-              value={sectorFilter}
-              onChange={(e) => setSectorFilter(e.target.value)}
-              className={`select-input max-w-[130px] truncate ${sectorFilter !== 'ALL' ? 'active-filter' : ''}`}
-              title="Filter by Sector"
-            >
-              <option value="ALL">All Sectors ({availableSectors.length})</option>
-              {availableSectors.map((sec) => (
-                <option key={sec.name} value={sec.name}>
-                  {sec.name} ({sec.count})
+          <select
+            value={universe}
+            onChange={(e) => setUniverse(e.target.value)}
+            className="select-input text-xs py-1"
+          >
+            {universesList.length > 0 ? (
+              universesList.map((u) => (
+                <option key={u.id} value={u.id}>
+                  {u.name} ({u.count})
                 </option>
-              ))}
-            </select>
-          </div>
+              ))
+            ) : (
+              <>
+                <option value="multibagger_hunters">🚀 Multibagger Hunters (45)</option>
+                <option value="momentum_breakouts">⚡ Momentum & Squeeze (50)</option>
+                <option value="auto_market_aware">🌐 Market-Aware RRG (60)</option>
+                <option value="nifty50">🏛️ NIFTY 50 (50)</option>
+                <option value="nifty500">🏢 NIFTY 500 (501)</option>
+                <option value="smallcap_250">🚀 Smallcap 250 (251)</option>
+                <option value="microcap_250">🌱 Microcap 250 (254)</option>
+                <option value="all_nse_liquid">🌊 All Liquid NSE Series EQ (1,200+)</option>
+              </>
+            )}
+          </select>
 
-          {/* Conviction / Min Score Selector */}
-          <div className="flex items-center gap-1.5">
-            <span className="text-[11px] text-muted font-mono uppercase">Score:</span>
-            <select
-              value={minScoreFilter}
-              onChange={(e) => setMinScoreFilter(Number(e.target.value))}
-              className={`select-input font-mono ${minScoreFilter > 0 ? 'active-filter' : ''}`}
-              title="Filter by Min Inflection Score"
-            >
-              <option value={0}>All Scores</option>
-              <option value={75}>🔥 75+ (High Conviction)</option>
-              <option value={65}>⚡ 65+ (Strong Setup)</option>
-              <option value={50}>📈 50+ (Baseline)</option>
-            </select>
-          </div>
+          {/* Liquidity Floor */}
+          <select
+            value={minTurnoverCr}
+            onChange={(e) => setMinTurnoverCr(Number(e.target.value))}
+            className="select-input font-mono text-xs py-1"
+            title="20-Day Median Turnover filter"
+          >
+            <option value={0}>Liq: All</option>
+            <option value={0.25}>Liq: ₹25 L</option>
+            <option value={0.5}>Liq: ₹50 L (Rec)</option>
+            <option value={1.0}>Liq: ₹1 Cr</option>
+            <option value={2.0}>Liq: ₹2 Cr</option>
+            <option value={5.0}>Liq: ₹5 Cr</option>
+          </select>
 
-          {/* Search Input with inline clear button */}
+          {/* Cap Tier */}
+          <select
+            value={capTierFilter}
+            onChange={(e) => setCapTierFilter(e.target.value)}
+            className={`select-input text-xs py-1 ${capTierFilter !== 'ALL' ? 'active-filter' : ''}`}
+          >
+            <option value="ALL">All Caps</option>
+            <option value="LARGE">🏛️ Large</option>
+            <option value="MID">⚡ Mid</option>
+            <option value="SMALL">🚀 Small</option>
+            <option value="MICRO">🌱 Micro</option>
+          </select>
+
+          {/* Sector Filter */}
+          <select
+            value={sectorFilter}
+            onChange={(e) => setSectorFilter(e.target.value)}
+            className={`select-input text-xs py-1 max-w-[110px] truncate ${sectorFilter !== 'ALL' ? 'active-filter' : ''}`}
+            title="Filter by Sector"
+          >
+            <option value="ALL">All Sectors ({availableSectors.length})</option>
+            {availableSectors.map((sec) => (
+              <option key={sec.name} value={sec.name}>
+                {sec.name} ({sec.count})
+              </option>
+            ))}
+          </select>
+
+          {/* Score Selector */}
+          <select
+            value={minScoreFilter}
+            onChange={(e) => setMinScoreFilter(Number(e.target.value))}
+            className={`select-input font-mono text-xs py-1 ${minScoreFilter > 0 ? 'active-filter' : ''}`}
+            title="Filter by Min Inflection Score"
+          >
+            <option value={0}>Score: All</option>
+            <option value={75}>Score: 75+ (High)</option>
+            <option value={65}>Score: 65+ (Strong)</option>
+            <option value={50}>Score: 50+ (Base)</option>
+          </select>
+
+          {/* Search Input */}
           <div className="relative flex items-center">
             <input
               type="text"
-              placeholder="Search symbol, sector, pattern..."
+              placeholder="Search..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              className={`search-input w-36 sm:w-44 focus:w-52 ${searchQuery ? 'border-gold' : ''}`}
+              className={`search-input w-28 sm:w-36 focus:w-44 text-xs py-1 ${searchQuery ? 'border-gold' : ''}`}
             />
             <span className="absolute left-2 text-xs text-muted pointer-events-none">🔍</span>
             {searchQuery && (
@@ -685,7 +675,7 @@ export default function InflectionScannerView({
             <button
               type="button"
               onClick={() => setViewMode('table')}
-              className={`text-xs px-2 py-1 rounded transition-all cursor-pointer ${
+              className={`text-xs px-2 py-0.5 rounded transition-all cursor-pointer ${
                 viewMode === 'table' ? 'font-bold bg-panel text-amber-600 dark:text-amber-400 shadow-xs' : 'text-muted hover:text-text'
               }`}
               title="Table View"
@@ -695,7 +685,7 @@ export default function InflectionScannerView({
             <button
               type="button"
               onClick={() => setViewMode('cards')}
-              className={`text-xs px-2 py-1 rounded transition-all cursor-pointer ${
+              className={`text-xs px-2 py-0.5 rounded transition-all cursor-pointer ${
                 viewMode === 'cards' ? 'font-bold bg-panel text-amber-600 dark:text-amber-400 shadow-xs' : 'text-muted hover:text-text'
               }`}
               title="Cards Matrix"
@@ -704,28 +694,28 @@ export default function InflectionScannerView({
             </button>
           </div>
 
-          {/* Local SQLite EOD Store Sync Button */}
+          {/* Sync EOD Button */}
           <button
             type="button"
             onClick={executeEodSync}
             disabled={isSyncingEod || isScanning}
-            className={`flex items-center gap-1.5 text-xs font-semibold px-2.5 py-1.5 rounded-lg border transition-all cursor-pointer ${
+            className={`flex items-center gap-1 text-xs font-semibold px-2 py-1 rounded-lg border transition-all cursor-pointer ${
               isSyncingEod
                 ? 'bg-sapphire/20 border-sapphire text-blue-600 dark:text-blue-400'
                 : 'bg-elevated border-border text-text hover:border-subtle'
             }`}
-            title="Bulk sync daily bars into local SQLite store to avoid future API hits"
+            title="Bulk sync daily bars into local SQLite store"
           >
             <span className={isSyncingEod ? 'animate-spin' : ''}>{isSyncingEod ? '⏳' : '⚡'}</span>
             <span>{isSyncingEod ? 'Syncing...' : 'Sync EOD'}</span>
           </button>
 
-          {/* Refresh Scan Button */}
+          {/* Rescan Button */}
           <button
             type="button"
             onClick={() => executeScan(universe)}
             disabled={isScanning}
-            className="flex items-center gap-1.5 text-xs font-bold px-3 py-1.5 rounded-lg border border-gold/40 bg-gold/15 text-amber-600 dark:text-amber-400 hover:bg-gold/25 shadow-xs cursor-pointer transition-all"
+            className="flex items-center gap-1 text-xs font-bold px-2.5 py-1 rounded-lg border border-gold/40 bg-gold/15 text-amber-600 dark:text-amber-400 hover:bg-gold/25 shadow-xs cursor-pointer transition-all"
           >
             <span className={isScanning ? 'animate-spin' : ''}>🔄</span>
             <span>{isScanning ? 'Scanning...' : 'Rescan'}</span>
@@ -733,55 +723,11 @@ export default function InflectionScannerView({
         </div>
       </div>
 
-      {/* ── SYNC STATUS & RISK SHIELD BANNER ─────────────────────────────── */}
-      <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-1.5 border-b border-border bg-surface text-xs font-mono">
-        <div className="flex items-center gap-3 flex-wrap">
-          {syncStatusMsg ? (
-            <div className="flex items-center gap-1.5 text-amber-600 dark:text-amber-400">
-              <span className="animate-pulse">⚡</span>
-              <span>{syncStatusMsg}</span>
-            </div>
-          ) : (
-            <div className="flex items-center gap-1.5 text-emerald-600 dark:text-emerald-400">
-              <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
-              <span>
-                💾 Local Store: {storeStats ? `${storeStats.cached_symbols_count} stocks (${storeStats.total_bars_count?.toLocaleString()} bars, ${storeStats.fundamentals_count || 0} fundamentals, 0ms local)` : 'Active'}
-              </span>
-            </div>
-          )}
-        </div>
-        <div className="flex items-center gap-2">
-          {isLiveConnected ? (
-            <span className="flex items-center gap-1 text-[10px] text-emerald-600 dark:text-emerald-400 font-mono">
-              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
-              LIVE TICKS
-            </span>
-          ) : (
-            <span className="flex items-center gap-1 text-[10px] text-amber-600 dark:text-amber-400 font-mono">
-              <span className="w-1.5 h-1.5 rounded-full bg-amber-500" />
-              EOD PRICES
-            </span>
-          )}
-          {lastScanTime && (
-            <span className="text-[10px] text-muted font-mono">Scan: {lastScanTime}</span>
-          )}
-        </div>
-
-        {scanResult?.filtered_out_liquidity_count > 0 && (
-          <Badge variant="rose" size="xs" title="Illiquid stocks excluded by turnover floor to prevent operator traps">
-            <span>🛡️</span>
-            <span>{scanResult.filtered_out_liquidity_count} illiquid stocks excluded (&lt; ₹{minTurnoverCr} Cr median turnover)</span>
-          </Badge>
-        )}
-      </div>
-
-      {/* ── FILTER CHIPS STRIP & QUICK CONDITIONS ─────────────────────── */}
-      <div className="flex flex-col gap-2 px-4 py-2 border-b border-border bg-panel text-xs">
-        {/* Row 1: Archetype Chips & Timing Tabs */}
-        <div className="flex flex-wrap items-center justify-between gap-2">
+      {/* ── ROW 2: ARCHETYPES, TIMING, CONDITIONS & LIVE METRICS (Streamlined 32px) ─────────────────────── */}
+      <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-1 border-b border-border bg-panel text-xs">
+        <div className="flex flex-wrap items-center gap-1.5 overflow-x-auto">
           {/* Archetype Chips */}
-          <div className="flex flex-wrap items-center gap-1.5 overflow-x-auto py-0.5">
-            <span className="text-[10px] text-muted uppercase font-mono mr-1">Archetype:</span>
+          <div className="flex items-center gap-1">
             {ARCHETYPE_TABS.map((tab) => {
               const active = archetypeFilter === tab.id
               const count = archetypeCounts[tab.id] ?? 0
@@ -790,10 +736,10 @@ export default function InflectionScannerView({
                   key={tab.id}
                   type="button"
                   onClick={() => setArchetypeFilter(tab.id)}
-                  className={`flex items-center gap-1 px-2.5 py-1 rounded-md text-[11px] font-semibold transition-all cursor-pointer ${
+                  className={`flex items-center gap-1 px-2 py-0.5 rounded-md text-[10.5px] font-semibold transition-all cursor-pointer ${
                     active
                       ? 'bg-gold/15 border border-gold text-amber-600 dark:text-amber-400 shadow-xs'
-                      : 'bg-elevated border border-border text-muted hover:text-text hover:border-subtle'
+                      : 'bg-elevated/70 border border-border/50 text-muted hover:text-text'
                   }`}
                 >
                   <span>{tab.icon}</span>
@@ -806,9 +752,10 @@ export default function InflectionScannerView({
             })}
           </div>
 
+          <span className="text-border">|</span>
+
           {/* Timing Filters */}
           <div className="flex items-center gap-1">
-            <span className="text-[10px] text-muted uppercase font-mono mr-1">Timing:</span>
             {TIMING_TABS.map((tab) => {
               const active = timingFilter === tab.id
               const count = timingCounts[tab.id] ?? 0
@@ -817,7 +764,7 @@ export default function InflectionScannerView({
                   key={tab.id}
                   type="button"
                   onClick={() => setTimingFilter(tab.id)}
-                  className={`flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-medium transition-all cursor-pointer ${
+                  className={`flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium transition-all cursor-pointer ${
                     active
                       ? 'bg-emerald/15 border border-emerald/40 text-emerald-700 dark:text-emerald-300 font-bold'
                       : 'text-muted hover:text-text hover:bg-elevated border border-transparent'
@@ -829,20 +776,18 @@ export default function InflectionScannerView({
               )
             })}
           </div>
-        </div>
 
-        {/* Row 2: Quick Condition Filters & Active Filter Reset Bar */}
-        <div className="flex flex-wrap items-center justify-between gap-2 pt-1 border-t border-border/30">
-          <div className="flex flex-wrap items-center gap-1.5">
-            <span className="text-[10px] text-muted uppercase font-mono mr-1">Conditions:</span>
+          <span className="text-border">|</span>
 
+          {/* Condition Toggles */}
+          <div className="flex items-center gap-1">
             <button
               type="button"
               onClick={() => setFilterCoilingOnly((p) => !p)}
-              className={`px-2 py-0.5 rounded-full text-[10px] font-semibold border transition-all cursor-pointer ${
+              className={`px-1.5 py-0.5 rounded text-[10px] font-semibold border transition-all cursor-pointer ${
                 filterCoilingOnly
                   ? 'bg-amber-500/15 text-amber-700 dark:text-amber-300 border-amber-500/40 shadow-xs'
-                  : 'bg-elevated text-muted border-border hover:text-text'
+                  : 'bg-elevated/60 text-muted border-border/60 hover:text-text'
               }`}
             >
               ⚡ Squeeze Coiling
@@ -851,10 +796,10 @@ export default function InflectionScannerView({
             <button
               type="button"
               onClick={() => setFilterVolumeSurge((p) => !p)}
-              className={`px-2 py-0.5 rounded-full text-[10px] font-semibold border transition-all cursor-pointer ${
+              className={`px-1.5 py-0.5 rounded text-[10px] font-semibold border transition-all cursor-pointer ${
                 filterVolumeSurge
                   ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border-emerald-500/40 shadow-xs'
-                  : 'bg-elevated text-muted border-border hover:text-text'
+                  : 'bg-elevated/60 text-muted border-border/60 hover:text-text'
               }`}
             >
               🔥 RVOL ≥ 1.5x
@@ -863,10 +808,10 @@ export default function InflectionScannerView({
             <button
               type="button"
               onClick={() => setFilterMinerviniOnly((p) => !p)}
-              className={`px-2 py-0.5 rounded-full text-[10px] font-semibold border transition-all cursor-pointer ${
+              className={`px-1.5 py-0.5 rounded text-[10px] font-semibold border transition-all cursor-pointer ${
                 filterMinerviniOnly
                   ? 'bg-gold/15 text-amber-600 dark:text-amber-400 border-gold/40 shadow-xs'
-                  : 'bg-elevated text-muted border-border hover:text-text'
+                  : 'bg-elevated/60 text-muted border-border/60 hover:text-text'
               }`}
             >
               👑 Minervini Stage 2
@@ -875,10 +820,10 @@ export default function InflectionScannerView({
             <button
               type="button"
               onClick={() => setFilterExcludeUCLocked((p) => !p)}
-              className={`px-2 py-0.5 rounded-full text-[10px] font-semibold border transition-all cursor-pointer ${
+              className={`px-1.5 py-0.5 rounded text-[10px] font-semibold border transition-all cursor-pointer ${
                 filterExcludeUCLocked
                   ? 'bg-rose-500/15 text-rose-700 dark:text-rose-300 border-rose-500/40 shadow-xs'
-                  : 'bg-elevated text-muted border-border hover:text-text'
+                  : 'bg-elevated/60 text-muted border-border/60 hover:text-text'
               }`}
             >
               🛡️ Exclude UC Locked
@@ -887,91 +832,48 @@ export default function InflectionScannerView({
             <button
               type="button"
               onClick={() => setFilterHighRR((p) => !p)}
-              className={`px-2 py-0.5 rounded-full text-[10px] font-semibold border transition-all cursor-pointer ${
+              className={`px-1.5 py-0.5 rounded text-[10px] font-semibold border transition-all cursor-pointer ${
                 filterHighRR
                   ? 'bg-cyan-500/15 text-cyan-700 dark:text-cyan-400 border-cyan-500/40 shadow-xs'
-                  : 'bg-elevated text-muted border-border hover:text-text'
+                  : 'bg-elevated/60 text-muted border-border/60 hover:text-text'
               }`}
             >
               🎯 R:R ≥ 2.5x
             </button>
           </div>
 
-          {/* Active Filter Counter & Reset Button */}
           {activeFilterCount > 0 && (
-            <div className="flex items-center gap-2">
-              <span className="text-[10px] font-mono text-amber-700 dark:text-amber-300 bg-amber-500/10 px-2 py-0.5 rounded border border-amber-500/30">
-                Filtered: {filteredCandidates.length} / {scanResult?.candidates?.length || 0} setups ({activeFilterCount} active)
-              </span>
-              <button
-                type="button"
-                onClick={resetAllFilters}
-                className="text-[10px] font-bold text-rose-700 dark:text-rose-400 hover:text-rose-800 dark:hover:text-rose-300 px-2 py-0.5 rounded bg-rose-500/10 border border-rose-500/30 hover:bg-rose-500/20 transition-all cursor-pointer"
-              >
-                ✕ Reset Filters
-              </button>
-            </div>
+            <button
+              type="button"
+              onClick={resetAllFilters}
+              className="text-[10px] font-bold text-rose-700 dark:text-rose-400 hover:text-rose-800 dark:hover:text-rose-300 px-1.5 py-0.5 rounded bg-rose-500/10 border border-rose-500/30 hover:bg-rose-500/20 transition-all cursor-pointer"
+            >
+              ✕ Reset Filters
+            </button>
           )}
         </div>
-      </div>
 
-      {/* ── EXECUTIVE SUMMARY METRICS STRIP ─────────────────────────────── */}
-      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2 px-4 py-2.5 border-b border-border bg-surface">
-        <div className="flex flex-col p-2.5 rounded-xl border border-border bg-elevated shadow-xs">
-          <span className="text-[10px] text-muted font-mono uppercase tracking-wider">Scanned Universe</span>
-          <div className="flex items-baseline gap-1 mt-0.5">
-            <span className="text-base font-bold text-text font-mono">{summaryMetrics.total}</span>
-            <span className="text-[10px] text-muted">Stocks</span>
-          </div>
-        </div>
-
-        <div className="flex flex-col p-2.5 rounded-xl border border-border bg-elevated shadow-xs">
-          <span className="text-[10px] text-muted font-mono uppercase tracking-wider">High Conviction (75+)</span>
-          <div className="flex items-baseline gap-1 mt-0.5">
-            <span className="text-base font-bold font-mono text-amber-600 dark:text-amber-400">
-              {summaryMetrics.highConviction}
-            </span>
-            <span className="text-[10px] text-muted">Picks</span>
-          </div>
-        </div>
-
-        <div className="flex flex-col p-2.5 rounded-xl border border-border bg-elevated shadow-xs">
-          <span className="text-[10px] text-muted font-mono uppercase tracking-wider">Active Squeezes</span>
-          <div className="flex items-baseline gap-1 mt-0.5">
-            <span className="text-base font-bold font-mono text-cyan-700 dark:text-cyan-400">
-              {summaryMetrics.coiling}
-            </span>
-            <span className="text-[10px] text-muted">Coiling</span>
-          </div>
-        </div>
-
-        <div className="flex flex-col p-2.5 rounded-xl border border-border bg-elevated shadow-xs">
-          <span className="text-[10px] text-muted font-mono uppercase tracking-wider">Breakout Fired</span>
-          <div className="flex items-baseline gap-1 mt-0.5">
-            <span className="text-base font-bold font-mono text-emerald-700 dark:text-emerald-300">
-              {summaryMetrics.triggerNow}
-            </span>
-            <span className="text-[10px] text-muted">Actionable</span>
-          </div>
-        </div>
-
-        <div className="flex flex-col p-2.5 rounded-xl border border-border bg-elevated shadow-xs">
-          <span className="text-[10px] text-muted font-mono uppercase tracking-wider">Avg Risk/Reward</span>
-          <div className="flex items-baseline gap-1 mt-0.5">
-            <span className="text-base font-bold font-mono text-text">
-              {summaryMetrics.avgRR != null ? `1:${summaryMetrics.avgRR}` : '—'}
-            </span>
-            <span className="text-[10px] text-muted">Payoff</span>
-          </div>
-        </div>
-
-        <div className="flex flex-col p-2.5 rounded-xl border border-border bg-elevated shadow-xs">
-          <span className="text-[10px] text-muted font-mono uppercase tracking-wider">Top Inflection Sector</span>
-          <div className="flex items-baseline gap-1 mt-0.5 truncate">
-            <span className="text-xs font-bold text-text truncate" title={summaryMetrics.topSector}>
-              {summaryMetrics.topSector}
-            </span>
-          </div>
+        {/* Right: High-Density Inline Metrics Telemetry */}
+        <div className="flex items-center gap-2 font-mono text-[10px] text-muted flex-shrink-0">
+          <span>
+            Setups: <strong className="text-text">{summaryMetrics.total}</strong>
+          </span>
+          <span>·</span>
+          <span>
+            75+ Score: <strong className="text-amber-500">{summaryMetrics.highConviction}</strong>
+          </span>
+          <span>·</span>
+          <span>
+            Coiling: <strong className="text-cyan-500">{summaryMetrics.coiling}</strong>
+          </span>
+          <span>·</span>
+          <span>
+            Fired: <strong className="text-emerald-500">{summaryMetrics.triggerNow}</strong>
+          </span>
+          <span>·</span>
+          <span>
+            Avg R:R: <strong className="text-text">{summaryMetrics.avgRR ? `1:${summaryMetrics.avgRR}` : '—'}</strong>
+          </span>
         </div>
       </div>
 

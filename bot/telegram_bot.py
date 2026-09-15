@@ -1816,8 +1816,12 @@ def format_precursor_alert(candidate_dict: dict) -> str:
 def send_precursor_push(candidate_dict: dict) -> bool:
     """Send an actionable Precursor Radar alert notification to Telegram."""
     try:
+        from engine.alert_preferences import alert_preferences, classify_alert_segment
+
+        seg = classify_alert_segment(candidate_dict)
+        target_chat_id = alert_preferences.get_telegram_chat_id(seg)
         msg = format_precursor_alert(candidate_dict)
-        send_push(msg, parse_mode="HTML", bypass_dedup=True)
+        send_push(msg, parse_mode="HTML", bypass_dedup=True, chat_id=target_chat_id)
         return True
     except Exception as e:
         logger.warning(f"Failed to send precursor push to Telegram: {e}")
@@ -1832,8 +1836,12 @@ def format_asymmetric_alert(opp_dict: dict) -> str:
 def send_asymmetric_push(opp_dict: dict) -> bool:
     """Send an actionable Asymmetric Opportunity alert notification to Telegram."""
     try:
+        from engine.alert_preferences import alert_preferences, classify_alert_segment
+
+        seg = classify_alert_segment(opp_dict)
+        target_chat_id = alert_preferences.get_telegram_chat_id(seg)
         msg = format_asymmetric_alert(opp_dict)
-        send_push(msg, parse_mode="HTML", bypass_dedup=True)
+        send_push(msg, parse_mode="HTML", bypass_dedup=True, chat_id=target_chat_id)
         return True
     except Exception as e:
         logger.warning(f"Failed to send asymmetric push to Telegram: {e}")

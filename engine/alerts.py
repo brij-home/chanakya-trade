@@ -746,11 +746,7 @@ class AlertManager:
         try:
             from engine.alert_preferences import alert_preferences, classify_alert_segment
 
-            target_seg = getattr(alert, "segment", None)
-            if not target_seg or target_seg == "EQUITY":
-                detected = classify_alert_segment(alert)
-                if detected != "EQUITY" or not target_seg:
-                    target_seg = detected
+            target_seg = getattr(alert, "segment", None) or classify_alert_segment(alert)
             tg_chat_id = alert_preferences.get_telegram_chat_id(target_seg)
         except Exception:
             tg_chat_id = None

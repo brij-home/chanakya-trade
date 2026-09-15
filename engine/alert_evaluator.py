@@ -622,11 +622,12 @@ def evaluate_alert_in_flight_decay(
     """
     if (
         getattr(alert, "is_invalidated", False)
-        or getattr(alert, "stage", "") in ("INVALIDATED", "COMPLETED", "IN_FLIGHT_WARNING")
+        or getattr(alert, "stage", "") in ("INVALIDATED", "COMPLETED", "IN_FLIGHT_WARNING", "EARLY_WARNING")
         or getattr(alert, "in_flight_warning_sent", False)
         or getattr(alert, "target_status", "")
         in ("T1_ACHIEVED", "FINAL_ACHIEVED", "TARGET_ACHIEVED")
         or "T1_ACHIEVED" in (getattr(alert, "achieved_milestones", []) or [])
+        or (not getattr(alert, "triggered_at", None) and getattr(alert, "stage", "") not in ("IGNITED", "TRAILING_UPDATE"))
     ):
         return None
 

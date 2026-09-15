@@ -63,11 +63,42 @@ def test_classify_alert_segment():
         == "FNO_STOCK"
     )
 
-    # 4. Cash Equity
+    # 4. Cash Equity (including F&O eligible stocks when trading spot equity shares)
     assert classify_alert_segment({"symbol": "TATASTEEL", "exchange": "NSE"}) == "EQUITY"
     assert classify_alert_segment({"symbol": "ZOMATO", "exchange": "NSE"}) == "EQUITY"
     assert classify_alert_segment({"alert_type": "POCKET_PIVOT", "symbol": "KAYNES"}) == "EQUITY"
     assert classify_alert_segment({"alert_type": "SQUEEZE_BREAKOUT", "symbol": "DIXON"}) == "EQUITY"
+    assert (
+        classify_alert_segment(
+            {
+                "symbol": "COFORGE",
+                "alert_type": "ASYMMETRIC_OPPORTUNITY",
+                "metrics": {"segment": "FNO", "setup_type": "POCKET_PIVOT"},
+                "actionable_plan": {"segment": "FNO", "action": "POCKET_PIVOT"},
+            }
+        )
+        == "EQUITY"
+    )
+    assert (
+        classify_alert_segment(
+            {
+                "symbol": "TRENT",
+                "alert_type": "ASYMMETRIC_OPPORTUNITY",
+                "metrics": {"segment": "FNO", "setup_type": "RUBBER_BAND_200EMA"},
+            }
+        )
+        == "EQUITY"
+    )
+    assert (
+        classify_alert_segment(
+            {
+                "symbol": "MANKIND",
+                "alert_type": "ASYMMETRIC_OPPORTUNITY",
+                "metrics": {"segment": "FNO"},
+            }
+        )
+        == "EQUITY"
+    )
 
     # Dataclass instances
     alt_opt = AutoAlert(
@@ -623,3 +654,34 @@ def test_equity_telegram_destination_routing(monkeypatch):
     engine._dispatch(eq_alert_2)
     assert len(sent_calls) == 2
     assert sent_calls[1][1] == "-1007777777777"
+
+    # 4. F&O-eligible stock with Cash Equity signal (COFORGE Pocket Pivot)
+    # MUST route to Equity channel, NEVER to FnO channel
+    coforge_alert = AutoAlert(
+        alert_id="auto-asym-COFORGE-test01",
+        alert_type="ASYMMETRIC_OPPORTUNITY",
+        stage="EARLY_WARNING",
+        symbol="COFORGE",
+        exchange="NSE",
+        direction="BULLISH",
+        headline="🎯 [LOW RISK : HIGH REWARD] ⚡ Pocket Pivot Base Accumulation: COFORGE",
+        summary="Pocket pivot test",
+        ltp=1864.9,
+        trigger_level=1876.0,
+        target_level=2084.4,
+        stop_loss=1771.8,
+        strike=None,
+        option_type=None,
+        contract_symbol=None,
+        confidence=96,
+        is_live=True,
+        environment="LIVE",
+        metrics={"segment": "FNO", "setup_type": "POCKET_PIVOT"},
+        actionable_plan={"segment": "FNO", "action": "POCKET_PIVOT"},
+    )
+    engine._dispatch(coforge_alert)
+    assert len(sent_calls) == 3
+    assert sent_calls[2][1] == "-1007777777777"  # Routes to Equity channel, NOT -1004393392375 (FnO)
+    assert "COFORGE [EQUITY]" in sent_calls[2][0]
+    assert "Spot CMP: ₹1,864.90" in sent_calls[2][0]
+    assert "Opt CMP" not in sent_calls[2][0]

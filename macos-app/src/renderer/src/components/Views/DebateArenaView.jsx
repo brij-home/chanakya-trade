@@ -1,8 +1,7 @@
 import { useState, useEffect } from 'react'
 import { useChatStore } from '../../store/chatStore'
 import { useAPI } from '../../hooks/useAPI'
-import SmartTypeahead from '../Common/SmartTypeahead'
-import { fuzzySearchUniverse, getSymbolExchange } from '../../data/universeData'
+import { getSymbolExchange } from '../../data/universeData'
 
 const COUNCIL_MODES = [
   { id: 'debate', name: 'Bull vs Bear Debate', icon: '⚔️', desc: 'Adversarial Thesis & Anti-Thesis' },
@@ -29,13 +28,10 @@ const PERSONA_NAMES = {
   soros: 'George Soros',
 }
 
-export default function DebateArenaView() {
+export default function DebateArenaView({ onOpenOrderTicket, externalSymbol, onSymbolChange }) {
   const { call } = useAPI()
   const sendDraft = useChatStore((s) => s.sendDraft)
-  const [symbol, setSymbol] = useState('RELIANCE')
-  const [inputSymbol, setInputSymbol] = useState('')
-  const [showTypeahead, setShowTypeahead] = useState(false)
-  const [typeaheadIndex, setTypeaheadIndex] = useState(0)
+  const [symbol, setSymbolState] = useState(externalSymbol || 'RELIANCE')
   const [selectedCouncil, setSelectedCouncil] = useState('debate')
   const [data, setData] = useState(null)
   const [councilData, setCouncilData] = useState(null)
@@ -43,6 +39,17 @@ export default function DebateArenaView() {
   const [isStreaming, setIsStreaming] = useState(false)
   const [streamingSteps, setStreamingSteps] = useState([])
   const [expandedMember, setExpandedMember] = useState(null)
+
+  useEffect(() => {
+    if (externalSymbol && externalSymbol !== symbol) {
+      setSymbolState(externalSymbol)
+    }
+  }, [externalSymbol])
+
+  const setSymbol = (sym) => {
+    setSymbolState(sym)
+    onSymbolChange?.(sym)
+  }
 
   const startActivity = useChatStore((s) => s.startActivity)
   const updateActivity = useChatStore((s) => s.updateActivity)
@@ -151,39 +158,34 @@ export default function DebateArenaView() {
 
   return (
     <div className="flex-1 overflow-y-auto p-2.5 sm:p-3.5 font-ui relative" style={{ background: 'var(--color-surface)', color: 'var(--color-text)' }}>
-      {/* Top Header & Stock Switcher */}
-      <div className="relative z-30 flex flex-wrap items-center justify-between gap-2.5 rounded-2xl px-3.5 py-2 mb-2.5" style={{ background: 'var(--color-panel)', border: '1px solid var(--color-border)', boxShadow: 'var(--shadow-card)' }}>
-        <div className="flex items-center gap-2.5">
-          <span className="text-base animate-gold-pulse" style={{ color: 'var(--color-gold)', filter: 'drop-shadow(0 0 8px rgba(245,166,35,0.5))' }}>◆</span>
+      {/* Top Header & Stock Switcher (Streamlined 36px) */}
+      <div className="relative z-30 flex flex-wrap items-center justify-between gap-2 rounded-xl px-3 py-1.5 mb-2 bg-panel border border-border shadow-card">
+        <div className="flex items-center gap-2">
+          <span className="text-base animate-gold-pulse text-amber-500">◆</span>
           <div>
-            <h1 className="text-sm font-bold font-mono flex items-center gap-2" style={{ color: 'var(--color-text)' }}>
-              <span>{symbol} (NSE)</span>
+            <h1 className="text-xs font-bold font-mono flex items-center gap-1.5 text-text">
+              <span>{symbol}</span>
               {ltp > 0 && (
-                <span className="text-[10px] px-2 py-0.5 rounded-full font-bold" style={{ background: 'rgba(0,214,143,0.12)', color: 'var(--color-emerald)', border: '1px solid rgba(0,214,143,0.3)' }}>
+                <span className="text-[10px] px-1.5 py-0.2 rounded-full font-bold bg-emerald-500/10 text-emerald-400 border border-emerald-500/30">
                   ₹{Number(ltp).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
                 </span>
               )}
             </h1>
-            <div className="flex items-center gap-2 text-[10px]" style={{ color: 'var(--color-muted)' }}>
-              <span>Multi-Agent Intelligence Hub</span>
-              <span style={{ color: 'var(--color-border)' }}>•</span>
-              <span className="font-mono font-semibold" style={{ color: 'var(--color-emerald)' }}>13 Specialist Personas</span>
-            </div>
           </div>
+          <span className="text-[10px] text-muted hidden md:inline">• Multi-Agent Intelligence Hub (13 Specialists)</span>
         </div>
 
-        {/* Quick Tickers & Search */}
-        <div className="flex flex-wrap items-center gap-1.5">
-          {/* Quick Tickers Chips */}
+        {/* Quick Tickers & Action */}
+        <div className="flex items-center gap-1.5">
           <div className="flex items-center gap-1 overflow-x-auto">
             {['RELIANCE', 'TCS', 'INFY', 'HDFCBANK', 'COFORGE', 'TRENT'].map((sym) => (
               <button
                 key={sym}
                 onClick={() => setSymbol(sym)}
-                className={`px-2.5 py-1 rounded-lg text-xs font-mono font-bold transition-all cursor-pointer ${
+                className={`px-2 py-0.5 rounded text-[11px] font-mono font-bold transition-all cursor-pointer ${
                   symbol === sym
-                    ? 'bg-amber text-black shadow-xs ring-1 ring-amber/40'
-                    : 'bg-elevated/70 hover:bg-elevated text-muted hover:text-text border border-border/60'
+                    ? 'bg-amber text-black shadow-xs'
+                    : 'bg-elevated/70 hover:bg-elevated text-muted hover:text-text border border-border/50'
                 }`}
               >
                 {sym}
@@ -191,109 +193,29 @@ export default function DebateArenaView() {
             ))}
           </div>
 
-          {/* Search Custom Symbol Input with SmartTypeahead */}
-          <div className="relative z-50">
-            <form onSubmit={handleSearch} className="flex items-center gap-1">
-              <div className="flex items-center gap-1 bg-surface/90 border-2 border-border focus-within:border-amber focus-within:ring-2 focus-within:ring-amber/30 rounded-lg px-2 py-1 transition-all text-xs shadow-xs">
-                <span className="text-amber font-black text-xs">🔍</span>
-                <input
-                  type="text"
-                  placeholder="Switch symbol..."
-                  value={inputSymbol}
-                  onChange={(e) => {
-                    setInputSymbol(e.target.value)
-                    setShowTypeahead(true)
-                    setTypeaheadIndex(0)
-                  }}
-                  onFocus={() => setShowTypeahead(true)}
-                  onKeyDown={(e) => {
-                    if (showTypeahead) {
-                      const items = fuzzySearchUniverse(inputSymbol, symbol, 8).filter((r) => r.type === 'symbol')
-                      if (items.length > 0) {
-                        if (e.key === 'ArrowDown') {
-                          e.preventDefault()
-                          setTypeaheadIndex((prev) => (prev + 1) % items.length)
-                          return
-                        }
-                        if (e.key === 'ArrowUp') {
-                          e.preventDefault()
-                          setTypeaheadIndex((prev) => (prev - 1 + items.length) % items.length)
-                          return
-                        }
-                        if (e.key === 'Enter') {
-                          e.preventDefault()
-                          const selected = items[typeaheadIndex] || items[0]
-                          if (selected?.symbol) {
-                            setSymbol(selected.symbol)
-                            setInputSymbol('')
-                            setShowTypeahead(false)
-                          }
-                          return
-                        }
-                        if (e.key === 'Tab') {
-                          e.preventDefault()
-                          const selected = items[typeaheadIndex] || items[0]
-                          if (selected?.symbol) {
-                            setInputSymbol(selected.symbol)
-                          }
-                          return
-                        }
-                      }
-                    }
-                    if (e.key === 'Escape') setShowTypeahead(false)
-                  }}
-                  className="bg-transparent text-xs text-text font-mono font-bold uppercase outline-none placeholder:text-text/50 w-32"
-                />
-              </div>
-              <button
-                type="submit"
-                className="px-3 py-2 rounded-xl bg-elevated hover:bg-amber hover:text-black border-2 border-border text-xs text-text font-bold cursor-pointer transition-all shadow-xs"
-              >
-                Go
-              </button>
-            </form>
-
-            <SmartTypeahead
-              query={inputSymbol}
-              activeSymbol={symbol}
-              isOpen={showTypeahead}
-              onSelect={(item) => {
-                if (item.symbol) setSymbol(item.symbol)
-                setInputSymbol('')
-                setShowTypeahead(false)
-              }}
-              onClose={() => setShowTypeahead(false)}
-              mode="symbols_only"
-              position="below"
-              selectedIndex={typeaheadIndex}
-              setSelectedIndex={setTypeaheadIndex}
-            />
-          </div>
-
-          {/* Action Button */}
           <button
             onClick={startLiveDebate}
             disabled={isStreaming}
-            className="btn btn-sm btn-emerald"
+            className="btn btn-sm btn-emerald py-0.5 px-2.5 text-xs font-bold"
           >
             <span>{isStreaming ? '🔄' : '⚡'}</span>
-            <span>{isStreaming ? 'Agents Polling...' : 'Run Analysis'}</span>
+            <span>{isStreaming ? 'Polling...' : 'Run Analysis'}</span>
           </button>
         </div>
       </div>
 
       {/* Council Ensemble & Debate Mode Selector Bar */}
-      <div className="tab-bar mb-2.5" style={{ gap: '4px', overflowX: 'auto' }}>
+      <div className="tab-bar mb-2.5 py-1" style={{ gap: '4px', overflowX: 'auto' }}>
         {COUNCIL_MODES.map((mode) => {
           const isActive = selectedCouncil === mode.id
           return (
             <button
               key={mode.id}
               onClick={() => setSelectedCouncil(mode.id)}
-              className={`tab-item whitespace-nowrap ${isActive ? 'active' : ''}`}
+              className={`tab-item whitespace-nowrap text-xs py-1 px-2.5 ${isActive ? 'active' : ''}`}
             >
               <span>{mode.icon}</span>
-              <span className="hidden sm:inline">{mode.name}</span>
+              <span>{mode.name}</span>
             </button>
           )
         })}

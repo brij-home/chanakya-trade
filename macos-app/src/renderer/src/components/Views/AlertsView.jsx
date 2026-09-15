@@ -1998,31 +1998,37 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
       else if (actPlan.option_contract) targetSym = actPlan.option_contract
       else if (alt.contract_symbol) targetSym = alt.contract_symbol
 
-      if (optPlan?.entry_premium) targetPrice = Number(optPlan.entry_premium)
-      else if (alt.option_premium) targetPrice = Number(alt.option_premium)
+      if (optPlan?.entry_premium && Number(optPlan.entry_premium) > 0) targetPrice = Number(optPlan.entry_premium)
+      else if (alt.option_premium && Number(alt.option_premium) > 0) targetPrice = Number(alt.option_premium)
       else if (actPlan.option_entry) {
         const p = parseFloat(String(actPlan.option_entry).replace(/[₹,\s]/g, ''))
         if (!isNaN(p) && p > 0) targetPrice = p
-      } else if (alt.ltp) {
+      } else if (isPureOpt && alt.ltp && Number(alt.ltp) > 0) {
         targetPrice = Number(alt.ltp)
+      } else {
+        targetPrice = null
       }
 
-      if (optPlan?.sl_premium) targetSL = Number(optPlan.sl_premium)
-      else if (alt.option_stop_loss) targetSL = Number(alt.option_stop_loss)
+      if (optPlan?.sl_premium && Number(optPlan.sl_premium) > 0) targetSL = Number(optPlan.sl_premium)
+      else if (alt.option_stop_loss && Number(alt.option_stop_loss) > 0) targetSL = Number(alt.option_stop_loss)
       else if (actPlan.option_stop_loss) {
         const sl = parseFloat(String(actPlan.option_stop_loss).replace(/[₹,\s]/g, ''))
         if (!isNaN(sl) && sl > 0) targetSL = sl
-      } else if (isPureOpt && alt.stop_loss) {
+      } else if (isPureOpt && alt.stop_loss && Number(alt.stop_loss) > 0) {
         targetSL = Number(alt.stop_loss)
+      } else if (targetPrice && targetPrice > 0) {
+        targetSL = Math.max(0.05, Math.round(targetPrice * 0.70 * 100) / 100)
       }
 
-      if (optPlan?.t1_premium) targetTP = Number(optPlan.t1_premium)
-      else if (alt.option_target_1) targetTP = Number(alt.option_target_1)
+      if (optPlan?.t1_premium && Number(optPlan.t1_premium) > 0) targetTP = Number(optPlan.t1_premium)
+      else if (alt.option_target_1 && Number(alt.option_target_1) > 0) targetTP = Number(alt.option_target_1)
       else if (actPlan.option_target_1) {
         const tp = parseFloat(String(actPlan.option_target_1).replace(/[₹,\s]/g, ''))
         if (!isNaN(tp) && tp > 0) targetTP = tp
-      } else if (isPureOpt && alt.target_level) {
+      } else if (isPureOpt && alt.target_level && Number(alt.target_level) > 0) {
         targetTP = Number(alt.target_level)
+      } else if (targetPrice && targetPrice > 0) {
+        targetTP = Math.round(targetPrice * 1.60 * 100) / 100
       }
     } else {
       // Direct Cash / Equity / Index Spot trade
@@ -2463,7 +2469,7 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
     <div
       ref={scrollContainerRef}
       onScroll={handleScroll}
-      className="flex-1 overflow-y-auto p-3 space-y-3 font-ui"
+      className="flex-1 overflow-y-auto p-2 sm:p-2.5 space-y-2 font-ui"
       style={{ background: 'var(--color-surface)', overflowAnchor: 'auto' }}
     >
       {/* Header Bar */}

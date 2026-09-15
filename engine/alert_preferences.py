@@ -192,22 +192,44 @@ def classify_alert_segment(alert: Any) -> str:
         clean_sym in INDEX_SYMBOLS
         or seg in ("INDEX", "FNO_INDEX", "INDICES")
         or clean_sym.endswith("INDEX")
+        or clean_sym.startswith("NIFTY")
     )
-    is_fut = (
-        "FUT" in contract or "FUT" in sym.upper() or deriv_type == "FUT" or alt_type == "FUTURES"
-    )
-    is_option = bool(op_type in ("CE", "PE") or strike or expiry)
-    is_deriv_alt = alt_type in ("GAMMA_BLAST", "OPTIONS_MOMENTUM")
-
-    if seg == "FNO_INDEX":
+    if is_index:
         return "FNO_INDEX"
-    if seg == "FNO_STOCK":
+
+    # Check for actual Stock Derivative Contract (Futures or Options)
+    is_fut = bool(
+        "FUT" in contract
+        or "FUT" in sym.upper()
+        or deriv_type == "FUT"
+        or alt_type in ("FUTURES", "STOCK_FUTURES")
+    )
+    is_option = bool(
+        op_type in ("CE", "PE")
+        or (strike is not None and float(strike or 0) > 0)
+        or (expiry and contract and contract != clean_sym)
+    )
+    is_deriv_alt = bool(alt_type in ("GAMMA_BLAST", "OPTIONS_MOMENTUM"))
+    has_deriv_contract = bool(
+        contract
+        and contract != clean_sym
+        and any(x in contract for x in ("CE", "PE", "FUT"))
+    )
+
+    is_stock_fno = bool(
+        is_fut
+        or is_option
+        or is_deriv_alt
+        or has_deriv_contract
+        or (exch == "NFO" and (has_deriv_contract or is_fut or is_option))
+    )
+
+    if is_stock_fno:
         return "FNO_STOCK"
 
-    if is_index or is_fut or is_option or is_deriv_alt or seg in ("FNO", "NFO") or exch == "NFO":
-        return "FNO_INDEX" if is_index else "FNO_STOCK"
-
     # 4. Default to Cash Equity
+    # Any stock alert without a specific derivative contract/option/futures is Cash Equity,
+    # regardless of whether the stock is in the F&O list or not.
     return "EQUITY"
 
 

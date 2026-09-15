@@ -171,9 +171,9 @@ export default function ActivityBar({ alertCount = 0 }) {
 
   return (
     <div
-      className="drag flex flex-col items-center justify-between flex-shrink-0 py-3 border-r border-border"
+      className="drag flex flex-col items-center justify-between flex-shrink-0 py-2 border-r border-border"
       style={{
-        width: '52px',
+        width: '48px',
         background: 'var(--color-panel)',
         userSelect: 'none',
       }}

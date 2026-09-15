@@ -219,7 +219,6 @@ export function classifyAlertSegment(alert) {
   const seg = (alert.segment || alert.metrics?.segment || alert.actionable_plan?.segment || '').toUpperCase()
 
   if (seg === 'FNO_INDEX') return 'FNO_INDEX'
-  if (seg === 'FNO_STOCK') return 'FNO_STOCK'
 
   if (
     exch === 'MCX' ||
@@ -236,22 +235,28 @@ export function classifyAlertSegment(alert) {
     CDS_CURRENCY_SYMBOLS.has(cleanSym)
   ) return 'CURRENCY'
 
-  const isIndex = NSE_INDEX_SYMBOLS.has(cleanSym) || seg === 'INDEX' || cleanSym.endsWith('INDEX')
+  const isIndex = NSE_INDEX_SYMBOLS.has(cleanSym) || seg === 'INDEX' || cleanSym.endsWith('INDEX') || cleanSym.startsWith('NIFTY')
+  if (isIndex) return 'FNO_INDEX'
+
   const isFut = Boolean(
     alert.contract_symbol?.toUpperCase().includes('FUT') ||
     alert.symbol?.toUpperCase().includes('FUT') ||
     alert.derivative_type === 'FUT' ||
     alert.alert_type === 'FUTURES'
   )
-  const isDeriv = Boolean(
-    isIndex || isFut ||
-    alert.option_type || alert.strike || alert.contract_symbol || alert.expiry_date ||
-    alert.alert_type === 'GAMMA_BLAST' || alert.alert_type === 'OPTIONS_MOMENTUM' ||
-    (seg === 'FNO' && (alert.option_type || alert.strike || isFut)) ||
-    exch === 'NFO'
+  const isOption = Boolean(
+    alert.option_type || (alert.strike && Number(alert.strike) > 0) ||
+    (alert.contract_symbol && alert.contract_symbol !== cleanSym && (alert.contract_symbol.includes('CE') || alert.contract_symbol.includes('PE')))
   )
-  if (isDeriv) {
-    return isIndex ? 'FNO_INDEX' : 'FNO_STOCK'
+  const isDerivAlt = alert.alert_type === 'GAMMA_BLAST' || alert.alert_type === 'OPTIONS_MOMENTUM'
+  const isStockDeriv = Boolean(
+    isFut || isOption || isDerivAlt ||
+    (exch === 'NFO' && (isFut || isOption || alert.contract_symbol)) ||
+    (seg === 'FNO_STOCK' && (isFut || isOption || isDerivAlt || alert.contract_symbol))
+  )
+
+  if (isStockDeriv) {
+    return 'FNO_STOCK'
   }
 
   return 'EQUITY'
@@ -403,16 +408,17 @@ export function computeExecutionLevels(alert, isDerivative, spotNum, optLtpNum) 
   const optPlan = plan.option_plan || null
 
   let entry = null
+  const isPureOption = alert.alert_type === 'OPTIONS_MOMENTUM' || alert.alert_type === 'OPTION_WRITE'
   if (isDerivative) {
-    if (optPlan?.entry_premium) {
+    if (optPlan?.entry_premium && Number(optPlan.entry_premium) > 0) {
       entry = Number(optPlan.entry_premium)
-    } else if (alert.option_premium) {
+    } else if (alert.option_premium && Number(alert.option_premium) > 0) {
       entry = Number(String(alert.option_premium).replace(/[^0-9.-]/g, ''))
     } else if (plan.recommended_entry) {
       entry = Number(String(plan.recommended_entry).replace(/[^0-9.-]/g, ''))
-    } else if (alert.ltp) {
+    } else if (isPureOption && alert.ltp && Number(alert.ltp) > 0) {
       entry = Number(String(alert.ltp).replace(/[^0-9.-]/g, ''))
-    } else if (optLtpNum) {
+    } else if (optLtpNum && optLtpNum > 0) {
       entry = optLtpNum
     }
   } else {

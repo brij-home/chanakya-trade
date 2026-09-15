@@ -106,7 +106,14 @@ class AutoAlertEngine:
         self._is_running = False
 
         # Watched indices & top liquid universe
-        self._watched_indices = ["NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX"]
+        self._watched_indices = [
+            "NIFTY",
+            "BANKNIFTY",
+            "FINNIFTY",
+            "MIDCPNIFTY",
+            "SENSEX",
+            "BANKEX",
+        ]
         self._watched_equities = [
             "RELIANCE",
             "TCS",
@@ -252,12 +259,21 @@ class AutoAlertEngine:
             and alert.stage in ("IGNITED",)
             and alert.alert_type in ("OPTIONS_MOMENTUM", "GAMMA_BLAST", "SQUEEZE_BREAKOUT")
         ):
-            now_t = datetime.now(IST).time()
-            # 09:15 - 09:25 IST: Morning Opening Discovery Quiet Window (Mute early opening auction whipsaws)
-            if dtime(9, 15) <= now_t < dtime(9, 25):
+            # 09:15 - 09:18 IST: Morning Opening Discovery Quiet Window (3-min auction settlement)
+            # From 09:18 onwards, opening range is formed; allow verified high-volume momentum and index explosions.
+            is_idx_alert = (getattr(alert, "segment", "") == "FNO_INDEX") or clean_target in (
+                "NIFTY",
+                "BANKNIFTY",
+                "FINNIFTY",
+                "MIDCPNIFTY",
+                "SENSEX",
+                "BANKEX",
+            )
+            quiet_cutoff = dtime(9, 18) if is_idx_alert else dtime(9, 20)
+            if dtime(9, 15) <= now_t < quiet_cutoff:
                 logger.info(
                     f"[AutoAlertEngine] 🛑 Suppressed opening auction breakout alert for {clean_target} ({alert.alert_type}): "
-                    f"Market Opening Quiet Window (09:15–09:25 IST) active to avoid whipsaws."
+                    f"Market Opening Quiet Window (09:15–{quiet_cutoff.strftime('%H:%M')} IST) active to avoid auction whipsaws."
                 )
                 return False
 
@@ -1057,11 +1073,7 @@ class AutoAlertEngine:
             from engine.alert_preferences import classify_alert_segment
 
             tg_msg = render_auto_alert(alert, in_market=in_market)
-            target_seg = getattr(alert, "segment", None)
-            if not target_seg or target_seg == "EQUITY":
-                detected = classify_alert_segment(alert)
-                if detected != "EQUITY" or not target_seg:
-                    target_seg = detected
+            target_seg = getattr(alert, "segment", None) or classify_alert_segment(alert)
             tg_target_chat_id = alert_preferences.get_telegram_chat_id(target_seg)
             if tg_target_chat_id:
                 try:
@@ -1370,7 +1382,8 @@ class AutoAlertEngine:
                 a
                 for a in self._alerts
                 if not a.is_invalidated
-                and a.stage not in ("INVALIDATED", "COMPLETED", "IN_FLIGHT_WARNING")
+                and a.stage not in ("INVALIDATED", "COMPLETED", "IN_FLIGHT_WARNING", "EARLY_WARNING")
+                and (a.stage in ("IGNITED", "TRAILING_UPDATE") or getattr(a, "triggered_at", None) is not None)
                 and not getattr(a, "in_flight_warning_sent", False)
                 and getattr(a, "target_status", "")
                 not in ("T1_ACHIEVED", "FINAL_ACHIEVED", "TARGET_ACHIEVED")
@@ -2190,9 +2203,16 @@ class AutoAlertEngine:
                     f"T1 (+2R): ₹{opp.target_1:,.1f} | T2 (+4R): ₹{opp.target_2:,.1f} | Moonshot: ₹{opp.target_moonshot:,.1f}"
                 )
 
+                if opp.exchange == "MCX" or getattr(opp, "setup_type", "") == "COMMODITY":
+                    asym_seg = "COMMODITY"
+                elif opp.symbol in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX") or getattr(opp, "setup_type", "") == "EXPIRY_0DTE_GAMMA":
+                    asym_seg = "FNO_INDEX"
+                else:
+                    asym_seg = "EQUITY"
+
                 plan = {
                     "action": opp.setup_type,
-                    "segment": opp.segment,
+                    "segment": asym_seg,
                     "entry_range": opp.entry_range,
                     "stop_loss": f"₹{opp.stop_loss:,.1f}",
                     "target": f"₹{opp.target_1:,.1f}",
@@ -2256,6 +2276,7 @@ class AutoAlertEngine:
                     contract_symbol=None,
                     expiry_date=None,
                     option_premium=None,
+                    segment=asym_seg,
                     confidence=opp.conviction_score,
                     created_at=now_iso,
                     is_live=True,
@@ -2292,6 +2313,7 @@ class AutoAlertEngine:
         is_friday_late = (now_dt.weekday() == 4) and (
             now_dt.hour > 14 or (now_dt.hour == 14 and now_dt.minute >= 30)
         )
+        is_opening_drive = (now_dt.hour == 9 and now_dt.minute <= 45)
 
         for sym in targets:
             clean_sym = sym.replace("NSE:", "").replace("NFO:", "").strip().upper()
@@ -2370,6 +2392,7 @@ class AutoAlertEngine:
                 # Compute recent 5m candle wick ratios (Exhaustion & Climax Filter)
                 upper_wick_ratio = 0.0
                 lower_wick_ratio = 0.0
+                candle_range = 0.0
                 if df_5m is not None and len(df_5m) >= 1:
                     try:
                         last_bar = df_5m.iloc[-1]
@@ -2377,9 +2400,9 @@ class AutoAlertEngine:
                         b_low = float(last_bar.get("low", last_bar.get("Low", 0.0)))
                         b_open = float(last_bar.get("open", last_bar.get("Open", 0.0)))
                         b_close = float(last_bar.get("close", last_bar.get("Close", 0.0)))
-                        b_rng = max(0.01, b_high - b_low)
-                        upper_wick_ratio = (b_high - max(b_open, b_close)) / b_rng
-                        lower_wick_ratio = (min(b_open, b_close) - b_low) / b_rng
+                        candle_range = max(0.01, b_high - b_low)
+                        upper_wick_ratio = (b_high - max(b_open, b_close)) / candle_range
+                        lower_wick_ratio = (min(b_open, b_close) - b_low) / candle_range
                     except Exception:
                         pass
 
@@ -2397,19 +2420,29 @@ class AutoAlertEngine:
                 )
                 # Determine canonical segment for routing and display (cached on the alert object)
                 alert_segment = "FNO_INDEX" if is_idx else "FNO_STOCK"
-                min_opt_volume = 3000 if is_idx else 500
+                min_opt_volume = (
+                    (2000 if is_idx else 300) if is_opening_drive else (3000 if is_idx else 500)
+                )
                 min_oi = 10000 if is_idx else 300
 
                 # Max allowed distance from spot to avoid deep OTM lottery traps:
-                # Indices: at most 2 strike intervals from ATM (e.g. 100 pts for NIFTY/FINNIFTY, 200 pts for BANKNIFTY)
+                # Indices: at most 5-6 strike intervals from ATM (e.g. 300 pts for NIFTY, 600 pts for BANKNIFTY)
                 max_strike_dist = (
                     (
-                        100.0
-                        if clean_sym in ("NIFTY", "FINNIFTY")
-                        else (200.0 if clean_sym in ("BANKNIFTY", "SENSEX", "BANKEX") else 50.0)
+                        300.0
+                        if clean_sym in ("NIFTY",)
+                        else (
+                            250.0
+                            if clean_sym in ("FINNIFTY",)
+                            else (
+                                600.0
+                                if clean_sym in ("BANKNIFTY", "SENSEX", "BANKEX")
+                                else (150.0 if clean_sym in ("MIDCPNIFTY",) else 100.0)
+                            )
+                        )
                     )
                     if is_idx
-                    else spot * 0.025
+                    else spot * 0.035
                 )
                 min_opt_price = 10.0 if is_idx else 2.0
 
@@ -2458,9 +2491,19 @@ class AutoAlertEngine:
                         except Exception:
                             pass
 
-                    # Momentum criteria: active turnover (vol_oi >= 1.0) and volume >= threshold
-                    if vol_oi < 1.0:
-                        continue
+                    # Momentum criteria: active turnover and volume velocity.
+                    # During opening drive (09:15 - 09:45 IST), volume builds rapidly but cumulative OI
+                    # was carried over from prior sessions. Allow early morning volume bursts.
+                    if is_opening_drive:
+                        if is_idx:
+                            if not (vol_oi >= 0.20 or vol >= 5000) or vol < 2000:
+                                continue
+                        else:
+                            if not (vol_oi >= 0.25 or vol >= 800) or vol < 300:
+                                continue
+                    else:
+                        if vol_oi < 0.80:
+                            continue
 
                     # 1. Bid/Ask Spread Sanity Gate: Avoid illiquid traps with huge bid-ask gaps (> 35%)
                     bid = getattr(c, "bid", None)
@@ -2484,8 +2527,8 @@ class AutoAlertEngine:
                         # Spot must hold intraday VWAP (reject buying calls below VWAP)
                         if spot_vwap and spot_vwap > 0 and spot < spot_vwap * 0.998:
                             continue
-                        # Upper-wick rejection / buying climax gate (reject false breakouts/sweeps)
-                        if upper_wick_ratio > 0.35:
+                        # Upper-wick rejection / buying climax gate (reject shooting star rejections on wide bars)
+                        if candle_range >= (spot * 0.0025) and upper_wick_ratio > 0.55:
                             continue
                         direction = "BULLISH"
                     elif opt_type == "PE":
@@ -2500,8 +2543,8 @@ class AutoAlertEngine:
                         # Spot must be below intraday VWAP (reject buying puts above VWAP)
                         if spot_vwap and spot_vwap > 0 and spot > spot_vwap * 1.002:
                             continue
-                        # Lower-wick rejection / selling climax gate (reject hammer rejections)
-                        if lower_wick_ratio > 0.35:
+                        # Lower-wick rejection / selling climax gate (reject hammer absorption on wide bars)
+                        if candle_range >= (spot * 0.0025) and lower_wick_ratio > 0.55:
                             continue
                         direction = "BEARISH"
                     else:
@@ -2530,15 +2573,27 @@ class AutoAlertEngine:
                             f"[AutoAlertEngine] MTF 15m fetch failed for {clean_sym}: {e_mtf}"
                         )
 
-                    # Reject counter-trend breakout traps against 15m structural trend
-                    if opt_type == "CE" and mtf_15m_trend == "BEARISH":
+                    # Reject counter-trend breakout traps against 15m structural trend,
+                    # UNLESS intraday price action has decisively confirmed an opening breakout/breakdown:
+                    # (For PE: spot broken below Day Open or below intraday VWAP)
+                    # (For CE: spot broken above Day Open or above intraday VWAP)
+                    has_opening_breakdown = bool(
+                        (spot_open and spot <= spot_open * 0.998)
+                        or (spot_vwap and spot <= spot_vwap * 1.001)
+                    )
+                    has_opening_breakout = bool(
+                        (spot_open and spot >= spot_open * 1.002)
+                        or (spot_vwap and spot >= spot_vwap * 0.999)
+                    )
+
+                    if opt_type == "CE" and mtf_15m_trend == "BEARISH" and not has_opening_breakout:
                         logger.debug(
                             f"[AutoAlertEngine] Suppressed Call breakout on {clean_sym}: 15m trend is BEARISH"
                         )
                         continue
-                    if opt_type == "PE" and mtf_15m_trend == "BULLISH":
+                    if opt_type == "PE" and mtf_15m_trend == "BULLISH" and not has_opening_breakdown:
                         logger.debug(
-                            f"[AutoAlertEngine] Suppressed Put surge on {clean_sym}: 15m trend is BULLISH"
+                            f"[AutoAlertEngine] Suppressed Put surge on {clean_sym}: 15m trend is BULLISH (Opening breakdown active: {has_opening_breakdown})"
                         )
                         continue
 
@@ -2698,7 +2753,14 @@ class AutoAlertEngine:
                     alert = AutoAlert(
                         alert_id=alert_id,
                         alert_type="OPTIONS_MOMENTUM",
-                        stage="IGNITED" if vol_oi >= 2.0 else "EARLY_WARNING",
+                        stage=(
+                            "IGNITED"
+                            if (
+                                vol_oi >= 2.0
+                                or (is_opening_drive and (vol_oi >= 0.50 or vol >= 6000))
+                            )
+                            else "EARLY_WARNING"
+                        ),
                         symbol=clean_sym,
                         exchange="NFO",
                         direction=direction,
@@ -2720,7 +2782,11 @@ class AutoAlertEngine:
                         created_at=now_iso,
                         is_live=True,
                         environment="LIVE",
-                        mtf_confluence=mtf_15m_trend,
+                        mtf_confluence=(
+                            "BEARISH_BREAKDOWN"
+                            if has_opening_breakdown
+                            else ("BULLISH_BREAKOUT" if has_opening_breakout else mtf_15m_trend)
+                        ),
                         vix_regime=vix_regime,
                         metrics={
                             "vol_oi_ratio": vol_oi,
@@ -2737,7 +2803,15 @@ class AutoAlertEngine:
                             "upper_wick_ratio": round(upper_wick_ratio, 2),
                             "lower_wick_ratio": round(lower_wick_ratio, 2),
                             "is_friday_late": is_friday_late,
-                            "mtf_15m_trend": mtf_15m_trend,
+                            "mtf_15m_trend": (
+                                "BEARISH_BREAKDOWN"
+                                if has_opening_breakdown
+                                else (
+                                    "BULLISH_BREAKOUT" if has_opening_breakout else mtf_15m_trend
+                                )
+                            ),
+                            "has_opening_breakdown": has_opening_breakdown,
+                            "has_opening_breakout": has_opening_breakout,
                             "vix_regime": vix_regime,
                             "india_vix": vix_val,
                             "is_gamma_squeeze": is_gamma_squeeze,
@@ -3073,6 +3147,16 @@ class AutoAlertEngine:
                 "when_to_buy": f"Enter on 5m candle closing in direction above/below VWAP ₹{vwap:,.1f}.",
                 "when_to_wait": f"Do not chase if move exceeds {round(abs(chg) + 1.0, 1)}%.",
                 "profit_rule": "Book 50% at T1 (+2.0R), trail stop to breakeven, hold runner for T2 (+3.5R).",
+                "trade_plan": {
+                    "symbol": clean_sym,
+                    "direction": "LONG" if is_bullish else "SHORT",
+                    "timeframe": "INTRADAY",
+                    "entry_price": ltp,
+                    "invalidation_stop": sl_price,
+                    "target_1": t1_price,
+                    "target_2": t2_price,
+                    "risk_reward": f"1:{rr_ratio_t1}",
+                },
             }
             if opt_recommendation:
                 plan_dict["option_alternative"] = opt_recommendation
@@ -3242,6 +3326,16 @@ class AutoAlertEngine:
                     "when_to_buy": "Execute on order book spread with defined risk below SL.",
                     "when_to_wait": "Do not chase if spread widens > 0.05 paise.",
                     "profit_rule": "Scale 50% at T1, move SL to entry.",
+                    "trade_plan": {
+                        "symbol": clean_sym,
+                        "direction": "LONG" if is_bullish else "SHORT",
+                        "timeframe": "INTRADAY",
+                        "entry_price": ltp,
+                        "invalidation_stop": sl_price,
+                        "target_1": t1_price,
+                        "target_2": t2_price,
+                        "risk_reward": "1:2.2",
+                    },
                 },
             )
             if self.record_alert(alert):

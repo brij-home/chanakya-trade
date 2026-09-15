@@ -42,8 +42,26 @@ class MockOptionsContract:
     exchange: str = "NFO"
 
 
-def test_gamma_blast_bullish_ce_early_warning_and_ignite():
+def test_gamma_blast_bullish_ce_early_warning_and_ignite(monkeypatch):
     """Test Call Gamma Blast detection on negative OI change and volume surge."""
+    from unittest.mock import MagicMock
+
+    mock_tp = MagicMock()
+    mock_tp.is_asymmetry_viable = True
+    mock_tp.target_1 = 24150.0
+    mock_tp.target_2 = 24250.0
+    mock_tp.invalidation_stop = 23920.0
+    mock_tp.rr_t1 = 2.1
+    mock_tp.as_dict = lambda: {
+        "symbol": "NIFTY",
+        "direction": "LONG",
+        "target_1": 24150.0,
+        "target_2": 24250.0,
+        "invalidation_stop": 23920.0,
+        "is_asymmetry_viable": True,
+    }
+    monkeypatch.setattr("engine.trade_plan.calculate_trade_plan", lambda **kwargs: mock_tp)
+
     spot = 24000.0
     vwap = 23990.0  # spot is above VWAP
 
@@ -2845,3 +2863,129 @@ def test_atomic_persistence_and_corrupt_recovery(tmp_path, monkeypatch):
     assert len(eng2._alerts) == 0
     backups = list(tmp_path.glob("auto_alerts.json.corrupt.*"))
     assert len(backups) == 1
+
+
+def test_early_warning_alert_immune_to_in_flight_warning(monkeypatch):
+    """Verify that alerts in EARLY_WARNING stage are never evaluated or flagged by check_in_flight_warnings."""
+    from engine.auto_alert_engine import AutoAlert, AutoAlertEngine
+    from engine.alert_evaluator import evaluate_alert_in_flight_decay
+
+    eng = AutoAlertEngine(max_buffer=50)
+    alert = AutoAlert(
+        alert_id="test-early-warn-immune",
+        alert_type="SQUEEZE_BREAKDOWN",
+        stage="EARLY_WARNING",
+        symbol="TATASTEEL",
+        exchange="NSE",
+        direction="BEARISH",
+        headline="TATASTEEL Breakdown Coiling",
+        summary="Coiling near 180 breakdown pivot",
+        ltp=183.71,
+        trigger_level=180.0,
+        target_level=175.9,
+        stop_loss=186.1,
+        triggered_at=None,
+        actionable_plan={
+            "action": "SELL_ON_BREAKDOWN",
+            "entry_range": "₹179.6 – ₹183.1",
+            "stop_loss": "₹186.1",
+            "target": "₹175.9",
+        },
+    )
+
+    # 1. Direct evaluator call must return None
+    eval_res = evaluate_alert_in_flight_decay(alert, current_ltp=183.71)
+    assert eval_res is None, "EARLY_WARNING alert must return None from in-flight evaluator"
+
+    # 2. Engine sweep must skip EARLY_WARNING alerts
+    eng._alerts = [alert]
+    monkeypatch.setattr("market.calendar.is_market_open", lambda exch: True)
+    warnings = eng.check_and_alert_in_flight_decay()
+    assert len(warnings) == 0
+    assert alert.stage == "EARLY_WARNING"
+    assert not alert.in_flight_warning_sent
+
+
+def test_resolve_recommended_option_contract_zero_ltp_fallback(monkeypatch):
+    """Verify that resolve_recommended_option_contract falls back to live quote or synthetic pricing when chain last_price is 0.0."""
+    from engine.asymmetric_radar import resolve_recommended_option_contract
+
+    class ZeroPriceContract:
+        symbol = "BANKNIFTY56700CE"
+        strike = 56700.0
+        option_type = "CE"
+        expiry = "2026-09-29"
+        last_price = 0.0
+        ltp = 0.0
+        oi = 10000
+
+    monkeypatch.setattr(
+        "market.options.get_options_chain",
+        lambda sym: [ZeroPriceContract()],
+    )
+    monkeypatch.setattr(
+        "market.quotes.get_ltp",
+        lambda sym: 615.0,
+    )
+
+    opt = resolve_recommended_option_contract(
+        symbol="BANKNIFTY",
+        direction="BULLISH",
+        spot=56722.3,
+        stop_loss=55701.3,
+        target_1=58560.1,
+        target_2=60602.1,
+    )
+
+    assert opt["contract_symbol"] == "BANKNIFTY56700CE"
+    assert opt["option_premium"] == 615.0, "Must fall back to live quote when chain last_price is 0"
+    assert opt["option_target_1"] > opt["option_premium"]
+    assert opt["option_stop_loss"] < opt["option_premium"]
+    assert opt["option_stop_loss"] >= opt["option_premium"] * 0.70
+
+
+def test_squeeze_breakout_always_provides_structured_trade_plan(monkeypatch):
+    """Verify that detect_squeeze_breakout produces a valid structured trade_plan dictionary in all branches."""
+    from engine.detectors.squeeze_breakout import detect_squeeze_breakout
+
+    # Force calculate_trade_plan to fail to test quantitative fallback
+    monkeypatch.setattr(
+        "engine.trade_plan.calculate_trade_plan",
+        lambda **kwargs: None,
+    )
+
+    closes = [2500.0 + (i * 0.05) for i in range(30)]
+    highs = [c + 2.0 for c in closes]
+    lows = [c - 2.0 for c in closes]
+    volumes = [100000 for _ in range(30)]
+
+    df = pd.DataFrame(
+        {
+            "close": closes,
+            "high": highs,
+            "low": lows,
+            "volume": volumes,
+        }
+    )
+
+    pivot_high = float(np.max(highs[-21:-1]))
+    ltp = pivot_high * 0.995
+
+    alert = detect_squeeze_breakout(
+        symbol="RELIANCE",
+        df=df,
+        ltp=ltp,
+    )
+
+    assert alert is not None
+    assert alert.alert_type == "SQUEEZE_BREAKOUT"
+    assert "trade_plan" in alert.actionable_plan
+    tp = alert.actionable_plan["trade_plan"]
+    assert isinstance(tp, dict)
+    assert tp["symbol"] == "RELIANCE"
+    assert tp["entry_price"] > 0
+    assert tp["invalidation_stop"] > 0
+    assert tp["target_1"] > 0
+    assert tp["target_1"] > tp["invalidation_stop"]
+
+

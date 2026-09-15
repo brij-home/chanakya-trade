@@ -1337,16 +1337,18 @@ def render_asymmetric_alert(data: dict[str, Any], in_market: bool = True) -> str
     Renders an Asymmetric Opportunity alert (1:3+ R:R setups with moonshot extension).
     """
     sym = data.get("symbol", "STOCK")
-    seg = data.get("segment", "FNO")
-    score = data.get("conviction_score", 85)
-    verdict = data.get("verdict", "HIGH_CONVICTION")
+    raw_seg = data.get("segment", "EQUITY")
+    score = data.get("conviction_score") or data.get("confidence") or (data.get("metrics") or {}).get("conviction_score") or 85
+    verdict = data.get("verdict") or (data.get("metrics") or {}).get("verdict") or "HIGH_CONVICTION"
     ltp = float(data.get("ltp", 0.0))
-    entry_range = data.get("entry_range", f"₹{ltp:,.1f}")
-    sl = float(data.get("stop_loss", 0.0))
-    t1 = float(data.get("target_1", 0.0))
-    t2 = float(data.get("target_2", 0.0))
-    moonshot = float(data.get("moonshot_target", data.get("target_moonshot", 0.0)))
-    rr = data.get("risk_reward_ratio", data.get("risk_reward", 3.0))
+    entry_range = data.get("entry_range") or (data.get("metrics") or {}).get("entry_range") or (data.get("actionable_plan") or {}).get("entry_range") or f"₹{ltp:,.1f}"
+    sl = float(data.get("stop_loss") or (data.get("metrics") or {}).get("stop_loss") or 0.0)
+    t1 = float(data.get("target_1") or data.get("target_level") or (data.get("metrics") or {}).get("target_1") or (data.get("actionable_plan") or {}).get("target_1") or 0.0)
+    t2 = float(data.get("target_2") or (data.get("metrics") or {}).get("target_2") or (data.get("actionable_plan") or {}).get("target_2") or 0.0)
+    moonshot = float(data.get("moonshot_target") or data.get("target_moonshot") or (data.get("metrics") or {}).get("target_moonshot") or (data.get("actionable_plan") or {}).get("target_moonshot") or 0.0)
+    raw_rr = data.get("risk_reward_ratio") or data.get("risk_reward") or (data.get("metrics") or {}).get("risk_reward") or 3.0
+    rr_str = str(raw_rr)
+    rr_display = rr_str if rr_str.startswith("1:") else f"1:{rr_str}"
 
     env_tag = normalize_env_tag(data.get("environment", "LIVE"), in_market)
     confluences = data.get("confluences", data.get("metrics", {}).get("confluence_factors", []))
@@ -1359,25 +1361,47 @@ def render_asymmetric_alert(data: dict[str, Any], in_market: bool = True) -> str
     )
 
     if not in_market:
-        header_line = f"🌙 <b>{env_tag} POST-MARKET EOD WATCHLIST [1:{rr} R:R]</b>"
+        header_line = f"🌙 <b>{env_tag} POST-MARKET EOD WATCHLIST [{rr_display} R:R]</b>"
         off_note = (
             "\n\n⏸️ <i>Market is closed. Setup calibrated for tomorrow's opening gameplan.</i>"
         )
     else:
-        header_line = f"🎯 <b>{env_tag} ASYMMETRIC SETUP [1:{rr} R:R]</b>"
+        header_line = f"🎯 <b>{env_tag} ASYMMETRIC SETUP [{rr_display} R:R]</b>"
         off_note = ""
 
-    cmp_label = "Opt CMP" if seg == "FNO" else "Spot CMP"
+    is_deriv = bool(
+        data.get("contract_symbol")
+        or data.get("option_type")
+        or (data.get("strike") and float(data.get("strike", 0)) > 0)
+    )
+    if raw_seg == "COMMODITY":
+        clean_seg = "COMMODITY"
+    elif raw_seg in ("INDEX", "FNO_INDEX") or sym in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX"):
+        clean_seg = "FNO_INDEX"
+    elif is_deriv:
+        clean_seg = "FNO_STOCK"
+    else:
+        clean_seg = "EQUITY"
+
+    cmp_label = "Opt CMP" if is_deriv else "Spot CMP"
     sig_ref = build_signal_ref(symbol=sym)
+
+    opt_plan = (data.get("actionable_plan") or {}).get("option_plan") or {}
+    opt_line = ""
+    if opt_plan and opt_plan.get("contract_symbol") and not is_deriv:
+        opt_sym = opt_plan.get("contract_symbol")
+        opt_prem = opt_plan.get("entry_premium")
+        opt_line = f"\n• <b>F&O Alternative:</b> <code>{opt_sym}</code> @ ₹{opt_prem:,.1f}" if opt_prem else f"\n• <b>F&O Alternative:</b> <code>{opt_sym}</code>"
+
     msg = (
         f"{header_line}\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"<b>{sym} [{seg}]</b> · {cmp_label}: <b>₹{ltp:,.2f}</b> · 🧠 <b>Score: {score}/100</b> ({verdict})\n"
+        f"<b>{sym} [{clean_seg}]</b> · {cmp_label}: <b>₹{ltp:,.2f}</b> · 🧠 <b>Score: {score}/100</b> ({verdict})\n"
         f"🎯 <b>Action: BUY</b> @ <code>{entry_range}</code> ({cmp_label}: ₹{ltp:,.2f})\n"
         f"• <b>Invalidation SL:</b> <code>₹{sl:,.2f}</code> (Risk: ₹{abs(ltp - sl):,.2f})\n"
         f"• <b>Target 1 (+2R):</b> <code>₹{t1:,.2f}</code> — <i>Scale 40% & SL to Cost</i>\n"
         f"• <b>Target 2 (+4R):</b> <code>₹{t2:,.2f}</code> — <i>Scale 40% & Trail</i>{moon_line}\n"
-        f"• <b>Risk : Reward:</b> <b>1:{rr} R:R</b>\n"
+        f"• <b>Risk : Reward:</b> <b>{rr_display} R:R</b>{opt_line}\n"
         f"💡 <b>Reason:</b> {conf_str}"
         f"{off_note}\n"
         f"🏷️ <b>Ref:</b> <code>{sig_ref}</code>"

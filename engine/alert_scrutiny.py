@@ -392,22 +392,31 @@ class AlertScrutinyAuditor:
                     pass
 
         # 10. Multi-Timeframe (15m) Trend Alignment Gate:
-        # Reject 5m counter-trend scalps if higher timeframe (15m) is in conflicting structural markdown/markup
+        # Reject 5m counter-trend scalps if higher timeframe (15m) is in conflicting structural markdown/markup,
+        # UNLESS an opening drive breakdown/breakout is actively confirmed by price action.
         mtf_15m_trend = None
+        has_opening_breakdown = False
+        has_opening_breakout = False
         if isinstance(metrics_dict, dict):
             mtf_15m_trend = metrics_dict.get("mtf_15m_trend") or metrics_dict.get("trend_15m")
+            has_opening_breakdown = bool(metrics_dict.get("has_opening_breakdown"))
+            has_opening_breakout = bool(metrics_dict.get("has_opening_breakout"))
         if mtf_15m_trend:
             mtf_upper = str(mtf_15m_trend).upper()
-            if direction in ("BULLISH", "LONG", "BUY") and any(
-                k in mtf_upper for k in ("BEAR", "DOWN", "MARKDOWN")
+            if (
+                direction in ("BULLISH", "LONG", "BUY")
+                and any(k in mtf_upper for k in ("BEAR", "DOWN", "MARKDOWN"))
+                and not has_opening_breakout
             ):
                 return (
                     False,
                     f"MTF Confluence Failure: 5m Bullish trigger conflicting with 15m structural markdown ({mtf_upper})",
                     flags,
                 )
-            elif direction in ("BEARISH", "SHORT", "SELL") and any(
-                k in mtf_upper for k in ("BULL", "UP", "MARKUP")
+            elif (
+                direction in ("BEARISH", "SHORT", "SELL")
+                and any(k in mtf_upper for k in ("BULL", "UP", "MARKUP"))
+                and not has_opening_breakdown
             ):
                 return (
                     False,

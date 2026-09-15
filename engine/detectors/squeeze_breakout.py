@@ -103,7 +103,19 @@ def detect_squeeze_breakout(
                 target = round(max(pivot_high + 1.2 * risk_pts, ltp + 2.0 * risk_pts), 1)
                 target_2 = round(target + 1.5 * risk_pts, 1)
                 rr_str = f"1:{round((target - ltp) / risk_pts, 1)}"
-                tp_dict = None
+                tp_dict = {
+                    "symbol": symbol,
+                    "direction": "LONG",
+                    "timeframe": "INTRADAY",
+                    "entry_price": ltp,
+                    "invalidation_stop": sl,
+                    "target_1": target,
+                    "target_2": target_2,
+                    "target_3": round(target_2 + 1.5 * risk_pts, 1),
+                    "risk_reward": rr_str,
+                    "rr_t1": round((target - ltp) / risk_pts, 1),
+                    "asymmetry_verdict": "QUANT_LEVELS",
+                }
 
             conf = 72
             conf += min(10, int(rvol * 4))
@@ -183,7 +195,19 @@ def detect_squeeze_breakout(
                 target = round(min(pivot_low - 1.2 * risk_pts, ltp - 2.0 * risk_pts), 1)
                 target_2 = round(target - 1.5 * risk_pts, 1)
                 rr_str = f"1:{round((ltp - target) / risk_pts, 1)}"
-                tp_dict = None
+                tp_dict = {
+                    "symbol": symbol,
+                    "direction": "SHORT",
+                    "timeframe": "INTRADAY",
+                    "entry_price": ltp,
+                    "invalidation_stop": sl,
+                    "target_1": target,
+                    "target_2": target_2,
+                    "target_3": round(target_2 - 1.5 * risk_pts, 1),
+                    "risk_reward": rr_str,
+                    "rr_t1": round((ltp - target) / risk_pts, 1),
+                    "asymmetry_verdict": "QUANT_LEVELS",
+                }
 
             conf_be = 72
             conf_be += min(10, int(rvol * 5))
@@ -269,7 +293,19 @@ def detect_squeeze_breakout(
                 target = round(ltp + 2.5 * risk_pts, 1)
                 target_2 = round(ltp + 4.0 * risk_pts, 1)
                 rr_str = f"1:{round((target - ltp) / risk_pts, 1)}"
-                tp_dict = None
+                tp_dict = {
+                    "symbol": symbol,
+                    "direction": "LONG",
+                    "timeframe": "INTRADAY",
+                    "entry_price": ltp,
+                    "invalidation_stop": sl,
+                    "target_1": target,
+                    "target_2": target_2,
+                    "target_3": round(target_2 + 1.5 * risk_pts, 1),
+                    "risk_reward": rr_str,
+                    "rr_t1": round((target - ltp) / risk_pts, 1),
+                    "asymmetry_verdict": "QUANT_LEVELS",
+                }
 
             conf_ig = 82
             conf_ig += min(8, int(rvol * 4))
@@ -351,7 +387,19 @@ def detect_squeeze_breakout(
                 target = round(ltp - 2.5 * risk_pts, 1)
                 target_2 = round(ltp - 4.0 * risk_pts, 1)
                 rr_str = f"1:{round((ltp - target) / risk_pts, 1)}"
-                tp_dict = None
+                tp_dict = {
+                    "symbol": symbol,
+                    "direction": "SHORT",
+                    "timeframe": "INTRADAY",
+                    "entry_price": ltp,
+                    "invalidation_stop": sl,
+                    "target_1": target,
+                    "target_2": target_2,
+                    "target_3": round(target_2 - 1.5 * risk_pts, 1),
+                    "risk_reward": rr_str,
+                    "rr_t1": round((ltp - target) / risk_pts, 1),
+                    "asymmetry_verdict": "QUANT_LEVELS",
+                }
 
             conf_big = 82
             conf_big += min(8, int(rvol * 4))

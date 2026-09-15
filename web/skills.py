@@ -6711,9 +6711,12 @@ async def skill_gex_snapshot(req: Optional[GEXSnapshotRequest] = None):
                             t2_pct = round(((t2_prem - prem) / max(0.1, prem)) * 100.0, 1)
                             rr_val = "1:3.2"
                             spot_sup = round(spot - (spot * 0.0035), 1) if spot > 0 else 0.0
+                            is_mkt_open = bool(source_info.get("is_market_open", False))
                             action_title = f"BUY {clean_sym} {int(k)} CE"
                             action_label = (
-                                "CALL SQUEEZE SURGE" if is_panic else "CALL BUY AGGRESSION"
+                                ("CALL SQUEEZE SURGE" if is_panic else "CALL BUY AGGRESSION")
+                                if is_mkt_open
+                                else ("CALL SQUEEZE (PREV EOD)" if is_panic else "CALL BUY (PREV EOD)")
                             )
 
                             raw_candidates_ce.append(
@@ -6725,8 +6728,8 @@ async def skill_gex_snapshot(req: Optional[GEXSnapshotRequest] = None):
                                     "title": f"₹{int(k):,} CE • {action_label}",
                                     "score": score,
                                     "subtype": subtype,
-                                    "blast_reason": reason,
-                                    "reason": reason,
+                                    "blast_reason": reason if is_mkt_open else f"[PREV EOD] {reason}",
+                                    "reason": reason if is_mkt_open else f"[PREV EOD] {reason}",
                                     "imbalance_ratio": round(ce_imb, 1),
                                     "side": "BUY",
                                     "action": "BUY",
@@ -6741,7 +6744,7 @@ async def skill_gex_snapshot(req: Optional[GEXSnapshotRequest] = None):
                                     # Actionable blueprint
                                     "action_title": action_title,
                                     "action_type": "BUY_CALL",
-                                    "action_recommendation": "BUY (CALL MOMENTUM)",
+                                    "action_recommendation": "BUY (CALL MOMENTUM)" if is_mkt_open else "WATCH (PREV EOD MOMENTUM)",
                                     "premium": prem,
                                     "entry_price": prem,
                                     "entry_range": entry_range,
@@ -6760,10 +6763,10 @@ async def skill_gex_snapshot(req: Optional[GEXSnapshotRequest] = None):
                                     "when_to_hold": f"Hold while contract respects ₹{round(prem * 0.88, 1):,} and Spot advances",
                                     "when_to_wait": f"DO NOT CHASE if premium > ₹{round(prem * 1.15, 1):,}. Wait for pullback to ₹{entry_low:,.2f}",
                                     "profit_rule": f"Book 50% profit at Target 1 (₹{t1_prem:,.2f}), trail Stop Loss to Cost for Target 2 (₹{t2_prem:,.2f})",
-                                    "is_realtime": source_info.get("is_realtime", True),
+                                    "is_realtime": source_info.get("is_realtime", True) and is_mkt_open,
                                     "environment": "LIVE"
-                                    if source_info.get("is_realtime", True)
-                                    else "TEST",
+                                    if (source_info.get("is_realtime", True) and is_mkt_open)
+                                    else "OFF_MARKET",
                                 }
                             )
 
@@ -6845,8 +6848,13 @@ async def skill_gex_snapshot(req: Optional[GEXSnapshotRequest] = None):
                             t2_pct = round(((t2_prem - prem) / max(0.1, prem)) * 100.0, 1)
                             rr_val = "1:3.2"
                             spot_res = round(spot + (spot * 0.0035), 1) if spot > 0 else 0.0
+                            is_mkt_open = bool(source_info.get("is_market_open", False))
                             action_title = f"BUY {clean_sym} {int(k)} PE"
-                            action_label = "PUT PANIC BREAKDOWN" if is_panic else "PUT BUY PRESSURE"
+                            action_label = (
+                                ("PUT PANIC BREAKDOWN" if is_panic else "PUT BUY PRESSURE")
+                                if is_mkt_open
+                                else ("PUT PANIC (PREV EOD)" if is_panic else "PUT DEMAND (PREV EOD)")
+                            )
 
                             raw_candidates_pe.append(
                                 {
@@ -6857,8 +6865,8 @@ async def skill_gex_snapshot(req: Optional[GEXSnapshotRequest] = None):
                                     "title": f"₹{int(k):,} PE • {action_label}",
                                     "score": score,
                                     "subtype": subtype,
-                                    "blast_reason": reason,
-                                    "reason": reason,
+                                    "blast_reason": reason if is_mkt_open else f"[PREV EOD] {reason}",
+                                    "reason": reason if is_mkt_open else f"[PREV EOD] {reason}",
                                     "imbalance_ratio": round(pe_imb, 1),
                                     "side": "BUY",
                                     "action": "BUY",
@@ -6873,7 +6881,7 @@ async def skill_gex_snapshot(req: Optional[GEXSnapshotRequest] = None):
                                     # Actionable blueprint
                                     "action_title": action_title,
                                     "action_type": "BUY_PUT",
-                                    "action_recommendation": "BUY (PUT BREAKDOWN)",
+                                    "action_recommendation": "BUY (PUT BREAKDOWN)" if is_mkt_open else "WATCH (PREV EOD MOMENTUM)",
                                     "premium": prem,
                                     "entry_price": prem,
                                     "entry_range": entry_range,
@@ -6892,10 +6900,10 @@ async def skill_gex_snapshot(req: Optional[GEXSnapshotRequest] = None):
                                     "when_to_hold": f"Hold while contract respects ₹{round(prem * 0.88, 1):,} and Spot drifts lower",
                                     "when_to_wait": f"DO NOT CHASE if premium > ₹{round(prem * 1.15, 1):,}. Wait for pullback to ₹{entry_low:,.2f}",
                                     "profit_rule": f"Book 50% profit at Target 1 (₹{t1_prem:,.2f}), trail Stop Loss to Cost for Target 2 (₹{t2_prem:,.2f})",
-                                    "is_realtime": source_info.get("is_realtime", True),
+                                    "is_realtime": source_info.get("is_realtime", True) and is_mkt_open,
                                     "environment": "LIVE"
-                                    if source_info.get("is_realtime", True)
-                                    else "TEST",
+                                    if (source_info.get("is_realtime", True) and is_mkt_open)
+                                    else "OFF_MARKET",
                                 }
                             )
 
@@ -7107,6 +7115,8 @@ async def skill_gex_snapshot(req: Optional[GEXSnapshotRequest] = None):
                 "data_source": source_info.get("provider", "unknown"),
                 "source_label": source_info.get("source_label", "Unverified Feed"),
                 "is_realtime": source_info.get("is_realtime", False),
+                "is_market_open": source_info.get("is_market_open", False),
+                "market_status": "OPEN" if source_info.get("is_market_open", False) else "CLOSED (Pre-Market / Off-Hours)",
                 "pcr": pcr_val,
                 "pcr_sentiment": pcr_sentiment,
                 "max_pain": max_pain,

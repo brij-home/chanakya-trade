@@ -142,9 +142,11 @@ def get_options_snapshot(
     """
     from datetime import datetime, timezone
     from brokers.session import get_data_broker, get_data_broker_key
+    from market.calendar import is_market_open
 
     clean_u = underlying.replace("NSE:", "").replace("BSE:", "").upper().strip()
     is_bse = clean_u in ("SENSEX", "BANKEX")
+    market_open = is_market_open("BSE" if is_bse else "NSE")
     now_utc = datetime.now(timezone.utc).isoformat()
     now_ist = datetime.now().strftime("%I:%M:%S %p IST")
 
@@ -159,11 +161,16 @@ def get_options_snapshot(
             source_info = {
                 "provider": broker_name,
                 "source": "BROKER_REST",
-                "data_state": "LIVE",
-                "is_realtime": True,
+                "data_state": "LIVE" if market_open else "OFF_MARKET",
+                "is_realtime": bool(market_open),
+                "is_market_open": market_open,
                 "as_of": now_utc,
                 "as_of_display": now_ist,
-                "source_label": f"{broker_name.upper()} Direct Real-Time Feed",
+                "source_label": (
+                    f"{broker_name.upper()} Direct Real-Time Feed"
+                    if market_open
+                    else f"{broker_name.upper()} Settled Previous EOD (Market Closed)"
+                ),
             }
             return chain, spot, expiries, source_info
     except Exception:
@@ -178,11 +185,16 @@ def get_options_snapshot(
             source_info = {
                 "provider": "nse_scraper",
                 "source": "SCRAPER_FALLBACK",
-                "data_state": "DELAYED",
+                "data_state": "DELAYED" if market_open else "OFF_MARKET",
                 "is_realtime": False,
+                "is_market_open": market_open,
                 "as_of": now_utc,
                 "as_of_display": now_ist,
-                "source_label": "NSE Public Scraper (~15m Delayed Fallback)",
+                "source_label": (
+                    "NSE Public Scraper (~15m Delayed Fallback)"
+                    if market_open
+                    else "NSE Public Settled Previous EOD (Market Closed)"
+                ),
             }
             return contracts, spot, expiries, source_info
     except Exception:
@@ -194,6 +206,7 @@ def get_options_snapshot(
         "source": "UNAVAILABLE",
         "data_state": "BROKER_REQUIRED" if is_bse else "UNAVAILABLE",
         "is_realtime": False,
+        "is_market_open": market_open,
         "as_of": now_utc,
         "as_of_display": now_ist,
         "source_label": f"BSE {clean_u} Broker Required for BFO"

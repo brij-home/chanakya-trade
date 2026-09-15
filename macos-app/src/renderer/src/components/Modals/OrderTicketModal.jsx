@@ -36,7 +36,8 @@ export default function OrderTicketModal({ isOpen, onClose, initialData = {}, ap
   const [exchange, setExchange] = useState(initialData.exchange || 'NSE')
   const [action, setAction] = useState(initialData.action || initialData.side || initialData.orderType || 'BUY')
   const [orderType, setOrderType] = useState('LIMIT')
-  const [product, setProduct] = useState('MIS') // MIS (Intraday) | CNC (Delivery) | NRML (F&O)
+  const [product, setProduct] = useState(initialData.product || 'MIS') // MIS (Intraday) | CNC (Delivery) | NRML (F&O)
+  const [lotSize, setLotSize] = useState(initialData.lotSize || initialData.lot_size || 1)
   const [price, setPrice] = useState(initialData.price ?? '')
   const [stopLoss, setStopLoss] = useState(initialData.stopLoss ?? initialData.stop_loss ?? '')
   const [target, setTarget] = useState(initialData.target ?? initialData.target_1 ?? '')
@@ -54,17 +55,61 @@ export default function OrderTicketModal({ isOpen, onClose, initialData = {}, ap
   // Sync state whenever modal opens or initialData changes
   useEffect(() => {
     if (isOpen) {
-      setSymbol(initialData.symbol || '')
-      setExchange(initialData.exchange || 'NSE')
-      const act = initialData.action || initialData.side || initialData.orderType
-      setAction(act || 'BUY')
-      setPrice(initialData.price ?? '')
-      const sl = initialData.stopLoss ?? initialData.stop_loss
-      setStopLoss(sl ?? '')
-      const tgt = initialData.target ?? initialData.target_1 ?? initialData.target_2
-      setTarget(tgt ?? '')
+      const sym = (initialData.symbol || '').toUpperCase()
+      setSymbol(sym)
+      const ex = initialData.exchange || 'NSE'
+      setExchange(ex)
+      const act = initialData.action || initialData.side || initialData.orderType || 'BUY'
+      setAction(act)
+
+      const resolvedLot = Math.max(
+        1,
+        Number(
+          initialData.lotSize ||
+          initialData.lot_size ||
+          (sym.includes('BANKNIFTY') ? 30 : sym.includes('NIFTY') ? 65 : sym.includes('SENSEX') ? 20 : 1)
+        )
+      )
+      setLotSize(resolvedLot)
+
+      const isFO = ex === 'NFO' || resolvedLot > 1 || sym.includes(' CE') || sym.includes(' PE')
+      setProduct(initialData.product || (isFO ? 'NRML' : 'MIS'))
+
+      const p = Number(initialData.price ?? 0)
+      setPrice(p > 0 ? p : (initialData.price ?? ''))
+
+      const rawSL = initialData.stopLoss ?? initialData.stop_loss
+      const rawTgt = initialData.target ?? initialData.target_1 ?? initialData.target_2
+
+      if (p > 0) {
+        if (act === 'BUY') {
+          const validSL = rawSL != null && rawSL !== '' && Number(rawSL) < p && Number(rawSL) > 0
+          setStopLoss(validSL ? Number(rawSL) : Math.max(0.05, +(p * 0.75).toFixed(2)))
+
+          const isAbnormalTgt = (resolvedLot > 1 || p < 500) && Number(rawTgt) > p * 3.5
+          const validTgt = rawTgt != null && rawTgt !== '' && Number(rawTgt) > p && !isAbnormalTgt
+          setTarget(validTgt ? Number(rawTgt) : +(p * 1.35).toFixed(2))
+        } else {
+          const validSL = rawSL != null && rawSL !== '' && Number(rawSL) > p
+          setStopLoss(validSL ? Number(rawSL) : +(p * 1.25).toFixed(2))
+
+          const validTgt = rawTgt != null && rawTgt !== '' && Number(rawTgt) < p && Number(rawTgt) > 0
+          setTarget(validTgt ? Number(rawTgt) : Math.max(0.05, +(p * 0.65).toFixed(2)))
+        }
+      } else {
+        setStopLoss(rawSL ?? '')
+        setTarget(rawTgt ?? '')
+      }
+
       const q = initialData.qty ?? initialData.quantity
-      setQty(q ?? '')
+      if (q != null && Number(q) > 0) {
+        setQty(Number(q))
+      } else if (resolvedLot > 1) {
+        setQty(resolvedLot)
+      } else {
+        setQty(1)
+      }
+
       setStep(1)
       setStatusMsg(null)
       setConfirmedRisk(false)
@@ -92,15 +137,36 @@ export default function OrderTicketModal({ isOpen, onClose, initialData = {}, ap
     if (price > 0 && stopLoss > 0 && price !== stopLoss) {
       const riskPerShare = Math.abs(price - stopLoss)
       const maxRiskAmount = capital * (riskPct / 100)
-      const calculatedQty = Math.max(1, Math.floor(maxRiskAmount / riskPerShare))
-      setQty(calculatedQty)
+      if (lotSize > 1) {
+        const riskPerLot = riskPerShare * lotSize
+        const rawLots = Math.floor(maxRiskAmount / riskPerLot)
+        const lots = Math.max(1, rawLots)
+        setQty(lots * lotSize)
+      } else {
+        const calculatedQty = Math.max(1, Math.floor(maxRiskAmount / riskPerShare))
+        setQty(calculatedQty)
+      }
     }
-  }, [price, stopLoss, capital, riskPct])
+  }, [price, stopLoss, capital, riskPct, lotSize])
 
-  const riskAmount = Math.abs(price - stopLoss) * qty
-  const rewardAmount = Math.abs(target - price) * qty
+  const riskAmount = Math.abs(price - stopLoss) * (Number(qty) || 0)
+  const rewardAmount = Math.abs(target - price) * (Number(qty) || 0)
   const riskRewardRatio = riskAmount > 0 ? (rewardAmount / riskAmount).toFixed(2) : 0
-  const orderValue = price * qty
+  const orderValue = (Number(price) || 0) * (Number(qty) || 0)
+
+  const handleActionChange = (newAct) => {
+    setAction(newAct)
+    const p = Number(price || 0)
+    if (p > 0) {
+      if (newAct === 'BUY') {
+        if (!stopLoss || Number(stopLoss) >= p) setStopLoss(Math.max(0.05, +(p * 0.75).toFixed(2)))
+        if (!target || Number(target) <= p) setTarget(+(p * 1.35).toFixed(2))
+      } else {
+        if (!stopLoss || Number(stopLoss) <= p) setStopLoss(+(p * 1.25).toFixed(2))
+        if (!target || Number(target) >= p) setTarget(Math.max(0.05, +(p * 0.65).toFixed(2)))
+      }
+    }
+  }
 
   const handleProceedToConfirm = async () => {
     setStatusMsg(null)
@@ -323,7 +389,7 @@ export default function OrderTicketModal({ isOpen, onClose, initialData = {}, ap
                   >
                     <button
                       type="button"
-                      onClick={() => setAction('BUY')}
+                      onClick={() => handleActionChange('BUY')}
                       className="py-2 rounded-lg font-bold text-center transition-all cursor-pointer text-xs"
                       style={action === 'BUY' ? { background: 'var(--color-emerald)', color: '#000', fontWeight: 800 } : { color: 'var(--color-muted)' }}
                     >
@@ -331,7 +397,7 @@ export default function OrderTicketModal({ isOpen, onClose, initialData = {}, ap
                     </button>
                     <button
                       type="button"
-                      onClick={() => setAction('SELL')}
+                      onClick={() => handleActionChange('SELL')}
                       className="py-2 rounded-lg font-bold text-center transition-all cursor-pointer text-xs"
                       style={action === 'SELL' ? { background: 'var(--color-rose)', color: '#fff', fontWeight: 800 } : { color: 'var(--color-muted)' }}
                     >
@@ -341,7 +407,10 @@ export default function OrderTicketModal({ isOpen, onClose, initialData = {}, ap
                 </div>
 
                 <div>
-                  <span className="text-muted text-[10px] uppercase font-ui block mb-1">Trading Symbol</span>
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="text-muted text-[10px] uppercase font-ui">Trading Symbol</span>
+                    <span className="text-[10px] font-mono text-muted">{exchange} · {product}</span>
+                  </div>
                   <input
                     type="text"
                     value={symbol}
@@ -360,7 +429,7 @@ export default function OrderTicketModal({ isOpen, onClose, initialData = {}, ap
                     type="number"
                     step="0.05"
                     value={price}
-                    onChange={(e) => setPrice(Number(e.target.value))}
+                    onChange={(e) => setPrice(e.target.value === '' ? '' : Number(e.target.value))}
                     className="input-field text-xs font-mono"
                     aria-label="Entry price"
                   />
@@ -371,7 +440,7 @@ export default function OrderTicketModal({ isOpen, onClose, initialData = {}, ap
                     type="number"
                     step="0.05"
                     value={stopLoss}
-                    onChange={(e) => setStopLoss(Number(e.target.value))}
+                    onChange={(e) => setStopLoss(e.target.value === '' ? '' : Number(e.target.value))}
                     className="w-full bg-panel border border-red/40 rounded px-2.5 py-1.5 text-red font-mono"
                     aria-label="Stop loss"
                   />
@@ -382,10 +451,99 @@ export default function OrderTicketModal({ isOpen, onClose, initialData = {}, ap
                     type="number"
                     step="0.05"
                     value={target}
-                    onChange={(e) => setTarget(Number(e.target.value))}
+                    onChange={(e) => setTarget(e.target.value === '' ? '' : Number(e.target.value))}
                     className="w-full bg-panel border border-green/40 rounded px-2.5 py-1.5 text-green font-mono"
                     aria-label="Target price"
                   />
+                </div>
+              </div>
+
+              {/* Quantity & Lot Sizing Section */}
+              <div className="grid grid-cols-2 gap-3 p-2.5 rounded-xl bg-panel/70 border border-border/60 items-center">
+                <div>
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="text-muted text-[10px] uppercase font-ui font-semibold">Quantity</span>
+                    {lotSize > 1 && (
+                      <span className="text-[10px] font-mono text-amber font-bold">
+                        1 Lot = {lotSize} Qty
+                      </span>
+                    )}
+                  </div>
+                  <input
+                    type="number"
+                    min={lotSize > 1 ? lotSize : 1}
+                    step={lotSize > 1 ? lotSize : 1}
+                    value={qty}
+                    onChange={(e) => setQty(e.target.value === '' ? '' : Number(e.target.value))}
+                    className="w-full bg-panel border border-border/80 rounded-lg px-3 py-1.5 text-text font-bold font-mono text-xs"
+                    aria-label="Order quantity"
+                  />
+                </div>
+
+                <div>
+                  <span className="text-muted text-[10px] uppercase font-ui font-semibold block mb-1">
+                    {lotSize > 1 ? 'Lot Selector' : 'Product Type'}
+                  </span>
+                  {lotSize > 1 ? (
+                    <div className="flex items-center gap-1 bg-elevated border border-border/80 rounded-lg p-1">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const currentLots = Math.max(1, Math.round((Number(qty) || 0) / lotSize))
+                          if (currentLots > 1) setQty((currentLots - 1) * lotSize)
+                        }}
+                        className="px-2 py-1 bg-panel hover:bg-border/60 text-text font-bold text-xs rounded cursor-pointer transition-colors"
+                        title="Decrease 1 lot"
+                      >
+                        -
+                      </button>
+                      <span className="flex-1 text-center font-mono font-bold text-xs text-text">
+                        {Math.max(1, Math.round((Number(qty) || 0) / lotSize))} {Math.round((Number(qty) || 0) / lotSize) === 1 ? 'Lot' : 'Lots'}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const currentLots = Math.max(1, Math.round((Number(qty) || 0) / lotSize))
+                          setQty((currentLots + 1) * lotSize)
+                        }}
+                        className="px-2 py-1 bg-panel hover:bg-border/60 text-text font-bold text-xs rounded cursor-pointer transition-colors"
+                        title="Increase 1 lot"
+                      >
+                        +
+                      </button>
+                      <div className="flex items-center gap-1 border-l border-border/50 pl-1">
+                        {[1, 2, 5].map((mult) => (
+                          <button
+                            key={mult}
+                            type="button"
+                            onClick={() => setQty(mult * lotSize)}
+                            className={`px-1.5 py-0.5 rounded text-[10px] font-mono cursor-pointer transition-colors ${
+                              Math.round((Number(qty) || 0) / lotSize) === mult
+                                ? 'bg-amber text-black font-bold'
+                                : 'text-muted hover:text-text bg-panel'
+                            }`}
+                          >
+                            {mult}L
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="grid grid-cols-2 gap-1 p-1 bg-elevated border border-border/80 rounded-lg">
+                      {['MIS', 'CNC'].map((prod) => (
+                        <button
+                          key={prod}
+                          type="button"
+                          onClick={() => setProduct(prod)}
+                          className={`py-1 rounded text-center text-xs font-bold transition-all cursor-pointer ${
+                            product === prod ? 'bg-primary text-text' : 'text-muted hover:text-text'
+                          }`}
+                        >
+                          {prod}
+                        </button>
+                      ))}
+                    </div>
+                  )}
                 </div>
               </div>
 
@@ -412,7 +570,9 @@ export default function OrderTicketModal({ isOpen, onClose, initialData = {}, ap
                 <div className="grid grid-cols-3 gap-2 pt-1 border-t border-border/30 text-[11px]">
                   <div>
                     <span className="text-muted text-[10px] block font-ui">Calculated Qty</span>
-                    <span className="text-text font-bold text-sm font-mono">{qty}</span>
+                    <span className="text-text font-bold text-sm font-mono">
+                      {qty || 0} {lotSize > 1 ? `(${Math.max(1, Math.round((Number(qty) || 0) / lotSize))}L)` : ''}
+                    </span>
                   </div>
                   <div>
                     <span className="text-muted text-[10px] block font-ui">Max Risk</span>

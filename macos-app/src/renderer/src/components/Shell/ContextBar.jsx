@@ -155,13 +155,17 @@ export default function ContextBar({
     { id: 'accuracy', icon: '🏆', label: 'Accuracy' },
   ]
 
+  // Candlestick timeframes and multi-pane layouts only belong to charting views
+  const viewsWithTimeframe = ['charts']
+  const viewsWithLayout = ['charts']
+
   return (
     <div
-      className="no-drag flex items-center gap-2.5 px-3 py-1.5 border-b flex-shrink-0 flex-wrap"
+      className="no-drag flex items-center gap-2 px-3 py-1 border-b flex-shrink-0 flex-wrap"
       style={{
         background: 'var(--color-surface)',
         borderColor: 'var(--color-border-subtle)',
-        minHeight: '36px',
+        minHeight: '32px',
       }}
     >
       {/* Symbol Quick-Switcher */}
@@ -229,8 +233,55 @@ export default function ContextBar({
         />
       </div>
 
-      {/* Timeframe pills — only shown for views that require timeframe selection (not Terminal) */}
-      {activeView !== 'terminal' && onTimeframeChange && (
+      {/* Relevant View Badges & Quick Action Links */}
+      {activeView === 'options' && (
+        <div className="flex items-center gap-1.5 flex-shrink-0">
+          <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded bg-amber/15 text-amber border border-amber/30">
+            Options Desk
+          </span>
+          <button
+            type="button"
+            onClick={() => useChatStore.getState().setActiveView('charts')}
+            className="hidden sm:flex items-center gap-1 px-2 py-0.5 rounded-lg text-[10px] font-bold font-mono text-muted hover:text-amber border border-border/70 hover:border-amber/40 bg-elevated transition-colors cursor-pointer"
+            title={`Open ${selectedSymbol || 'Symbol'} Candlestick Chart in Chart Studio`}
+          >
+            <span>📈</span>
+            <span>Chart Studio ↗</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              useChatStore.getState().sendDraft?.(`analyze ${selectedSymbol || 'NIFTY'}`)
+              useChatStore.getState().setActiveView('debate')
+            }}
+            className="hidden md:flex items-center gap-1 px-2 py-0.5 rounded-lg text-[10px] font-bold font-mono text-muted hover:text-cyan-400 border border-border/70 hover:border-cyan-500/40 bg-elevated transition-colors cursor-pointer"
+            title={`Analyze ${selectedSymbol || 'Symbol'} with AI Bull/Bear Councils`}
+          >
+            <span>⚔️</span>
+            <span>AI Debate</span>
+          </button>
+        </div>
+      )}
+
+      {activeView === 'debate' && (
+        <div className="flex items-center gap-1.5 flex-shrink-0">
+          <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded bg-cyan-500/15 text-cyan-400 border border-cyan-500/30">
+            AI Debate Arena
+          </span>
+          <button
+            type="button"
+            onClick={() => useChatStore.getState().setActiveView('options')}
+            className="hidden sm:flex items-center gap-1 px-2 py-0.5 rounded-lg text-[10px] font-bold font-mono text-muted hover:text-amber border border-border/70 hover:border-amber/40 bg-elevated transition-colors cursor-pointer"
+            title={`Open ${selectedSymbol || 'Symbol'} Option Chain & Greeks`}
+          >
+            <span>⚡</span>
+            <span>Options Desk ↗</span>
+          </button>
+        </div>
+      )}
+
+      {/* Timeframe pills — ONLY shown for dedicated charting views that require candle intervals */}
+      {viewsWithTimeframe.includes(activeView) && onTimeframeChange && (
         <div
           className="flex items-center p-0.5 rounded-xl text-xs gap-px flex-shrink-0"
           style={{ background: 'var(--color-elevated)', border: '1px solid var(--color-border)' }}
@@ -252,8 +303,8 @@ export default function ContextBar({
         </div>
       )}
 
-      {/* Layout switcher — only for views with multi-pane layouts */}
-      {activeView !== 'terminal' && onLayoutChange && (
+      {/* Layout switcher — ONLY for dedicated charting views with multi-pane layouts */}
+      {viewsWithLayout.includes(activeView) && onLayoutChange && (
         <div
           className="flex items-center p-0.5 rounded-xl text-xs gap-px flex-shrink-0"
           style={{ background: 'var(--color-elevated)', border: '1px solid var(--color-border)' }}

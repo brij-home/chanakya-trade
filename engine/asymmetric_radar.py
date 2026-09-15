@@ -212,6 +212,30 @@ def resolve_recommended_option_contract(
         )
         contract_sym = getattr(best_contract, "symbol", f"{clean_sym}{int(strike)}{opt_type}")
         expiry_date = getattr(best_contract, "expiry", nearest_exp)
+
+        # Fallback 1: Query live quote for contract_sym if last_price was 0.0
+        if opt_ltp <= 0.0:
+            try:
+                from market.quotes import get_ltp
+
+                quote_ltp = get_ltp(f"NFO:{contract_sym}" if ":" not in contract_sym else contract_sym)
+                if quote_ltp and quote_ltp > 0:
+                    opt_ltp = float(quote_ltp)
+            except Exception:
+                pass
+
+        # Fallback 2: Contract close or settlement price
+        if opt_ltp <= 0.0:
+            opt_ltp = float(
+                getattr(best_contract, "close", 0.0)
+                or getattr(best_contract, "settlement_price", 0.0)
+                or getattr(best_contract, "prev_close", 0.0)
+                or 0.0
+            )
+
+        # Fallback 3: Theoretical ATM option proxy (~1.5% of spot)
+        if opt_ltp <= 0.0:
+            opt_ltp = round(max(0.50, spot * 0.015), 1)
     else:
         # Synthetic fallback based on canonical index strike steps
         step = 100 if "BANK" in clean_sym else 50
@@ -907,7 +931,16 @@ class AsymmetricOpportunityRadar:
         when spot price breaks out of the ATM Straddle break-even range.
         """
         clean_sym = symbol.upper().replace("^", "").strip()
-        if clean_sym not in ("NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX", "NSEI", "NSEBANK"):
+        if clean_sym not in (
+            "NIFTY",
+            "BANKNIFTY",
+            "FINNIFTY",
+            "MIDCPNIFTY",
+            "SENSEX",
+            "BANKEX",
+            "NSEI",
+            "NSEBANK",
+        ):
             return None
 
         if spot is None:

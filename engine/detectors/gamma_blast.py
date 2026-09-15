@@ -38,7 +38,9 @@ def detect_gamma_blast(
         return []
 
     alerts: list[AutoAlert] = []
-    now_iso = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
+    now_dt = datetime.now(IST)
+    now_iso = now_dt.strftime("%Y-%m-%d %H:%M:%S IST")
+    is_opening_drive = (now_dt.hour == 9 and now_dt.minute <= 45)
 
     # Institutional Liquidity & Significance Filters (SEBI / F&O standard):
     is_index = underlying.upper() in (
@@ -62,7 +64,7 @@ def detect_gamma_blast(
     for c in ce_contracts:
         strike = getattr(c, "strike", 0.0)
         strike_diff_pct = ((strike - spot) / spot) * 100.0
-        if not (-0.5 <= strike_diff_pct <= 0.8):
+        if not (-0.8 <= strike_diff_pct <= 1.2):
             continue
 
         oi = getattr(c, "oi", 0)
@@ -79,14 +81,14 @@ def detect_gamma_blast(
             )
             min_strike_oi = 50
             min_abs_oi_change = 10
-            min_volume = 25
+            min_volume = 15 if is_opening_drive else 25
         else:
             c_oi = oi
             c_vol = volume
             c_oi_chg = abs(oi_change)
-            min_strike_oi = 15000
-            min_abs_oi_change = 3000
-            min_volume = 10000
+            min_strike_oi = 8000 if is_opening_drive else 12000
+            min_abs_oi_change = 1200 if is_opening_drive else 2500
+            min_volume = 2500 if is_opening_drive else 8000
 
         if c_oi < min_strike_oi or c_vol < min_volume or c_oi_chg < min_abs_oi_change:
             continue
@@ -115,14 +117,30 @@ def detect_gamma_blast(
         oi_chg_pct = (
             round((oi_change / max(1, oi - oi_change)) * 100.0, 1) if (oi - oi_change) > 0 else 0.0
         )
+        pchange = float(getattr(c, "pchange", 0.0) or 0.0)
 
-        is_oi_shedding = oi_change < 0 and (oi_chg_pct <= -8.0 or abs(oi_change) >= 20000)
-        is_high_turnover = vol_oi_ratio >= 1.8
+        is_oi_shedding = oi_change < 0 and (
+            oi_chg_pct <= -8.0 or abs(oi_change) >= (10000 if is_opening_drive else 20000)
+        )
+        is_gamma_expansion = (
+            (
+                oi_change > 0
+                and abs(oi_change) >= (4000 if is_opening_drive else 8000)
+                and vol_oi_ratio >= (0.30 if is_opening_drive else 0.8)
+            )
+            or (pchange >= 12.0 and volume >= (4000 if is_index else 200))
+        )
+        is_high_turnover = (
+            vol_oi_ratio >= (0.35 if is_opening_drive else 1.4)
+            or volume >= (10000 if is_index else 800)
+        )
         spot_above_vwap = spot >= (effective_vwap * 0.998)
 
-        if is_oi_shedding and is_high_turnover and spot_above_vwap:
-            is_ignited = (vol_oi_ratio >= 2.5 and oi_chg_pct <= -15.0) or (
-                day_high and spot >= day_high * 0.999
+        if (is_oi_shedding or is_gamma_expansion) and is_high_turnover and spot_above_vwap:
+            is_ignited = (
+                (vol_oi_ratio >= 2.0 and oi_chg_pct <= -15.0)
+                or (is_opening_drive and (vol_oi_ratio >= 0.50 or volume >= 8000))
+                or (day_high and spot >= day_high * 0.999)
             )
             stage = "IGNITED" if is_ignited else "EARLY_WARNING"
             confidence = min(96, int(65 + (vol_oi_ratio * 7) + min(20, abs(oi_chg_pct) * 0.5)))
@@ -293,7 +311,7 @@ def detect_gamma_blast(
     for c in pe_contracts:
         strike = getattr(c, "strike", 0.0)
         strike_diff_pct = ((strike - spot) / spot) * 100.0
-        if not (-0.8 <= strike_diff_pct <= 0.5):
+        if not (-1.2 <= strike_diff_pct <= 0.8):
             continue
 
         oi = getattr(c, "oi", 0)
@@ -310,14 +328,14 @@ def detect_gamma_blast(
             )
             min_strike_oi = 50
             min_abs_oi_change = 10
-            min_volume = 25
+            min_volume = 15 if is_opening_drive else 25
         else:
             c_oi = oi
             c_vol = volume
             c_oi_chg = abs(oi_change)
-            min_strike_oi = 15000
-            min_abs_oi_change = 3000
-            min_volume = 10000
+            min_strike_oi = 8000 if is_opening_drive else 12000
+            min_abs_oi_change = 1200 if is_opening_drive else 2500
+            min_volume = 2500 if is_opening_drive else 8000
 
         if c_oi < min_strike_oi or c_vol < min_volume or c_oi_chg < min_abs_oi_change:
             continue
@@ -346,14 +364,30 @@ def detect_gamma_blast(
         oi_chg_pct = (
             round((oi_change / max(1, oi - oi_change)) * 100.0, 1) if (oi - oi_change) > 0 else 0.0
         )
+        pchange = float(getattr(c, "pchange", 0.0) or 0.0)
 
-        is_oi_shedding = oi_change < 0 and (oi_chg_pct <= -8.0 or abs(oi_change) >= 20000)
-        is_high_turnover = vol_oi_ratio >= 1.8
+        is_oi_shedding = oi_change < 0 and (
+            oi_chg_pct <= -8.0 or abs(oi_change) >= (10000 if is_opening_drive else 20000)
+        )
+        is_gamma_expansion = (
+            (
+                oi_change > 0
+                and abs(oi_change) >= (4000 if is_opening_drive else 8000)
+                and vol_oi_ratio >= (0.30 if is_opening_drive else 0.8)
+            )
+            or (pchange >= 12.0 and volume >= (4000 if is_index else 200))
+        )
+        is_high_turnover = (
+            vol_oi_ratio >= (0.35 if is_opening_drive else 1.4)
+            or volume >= (10000 if is_index else 800)
+        )
         spot_below_vwap = spot <= (effective_vwap * 1.002)
 
-        if is_oi_shedding and is_high_turnover and spot_below_vwap:
-            is_ignited = (vol_oi_ratio >= 2.5 and oi_chg_pct <= -15.0) or (
-                day_low and spot <= day_low * 1.001
+        if (is_oi_shedding or is_gamma_expansion) and is_high_turnover and spot_below_vwap:
+            is_ignited = (
+                (vol_oi_ratio >= 2.0 and oi_chg_pct <= -15.0)
+                or (is_opening_drive and (vol_oi_ratio >= 0.50 or volume >= 8000))
+                or (day_low and spot <= day_low * 1.001)
             )
             stage = "IGNITED" if is_ignited else "EARLY_WARNING"
             confidence = min(96, int(65 + (vol_oi_ratio * 7) + min(20, abs(oi_chg_pct) * 0.5)))
