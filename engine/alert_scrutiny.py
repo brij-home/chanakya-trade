@@ -574,9 +574,9 @@ class AlertScrutinyAuditor:
                         # 09:15 - 09:45 IST: market opening 30 mins, volume accumulating (min 15 contracts)
                         # 09:45 - 10:30 IST: morning trend formation (min 30 contracts)
                         # 10:30+ IST: standard session institutional baseline (min 50 contracts)
-                        if curr_t < dtime(9, 45):
+                        if dtime(9, 15) <= curr_t < dtime(9, 45):
                             min_vol = 15
-                        elif curr_t < dtime(10, 30):
+                        elif dtime(9, 45) <= curr_t < dtime(10, 30):
                             min_vol = 30
                         else:
                             min_vol = 50

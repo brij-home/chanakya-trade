@@ -175,12 +175,36 @@ class AutoAlert:
             elif atype in ("CIRCUIT_WARNING", "PATTERN_COILING"):
                 self.time_horizon = "SWING_SHORT"
 
-        # Calculate no-chase boundary (1.2% past trigger level) if not provided
+        # Calculate no-chase boundary if not provided
         if self.no_chase_boundary is None and self.trigger_level > 0:
-            if str(self.direction).upper() in ("BEARISH", "SHORT", "SELL"):
+            act_str = str((self.actionable_plan or {}).get("action", "")).strip().upper()
+            is_option = bool(
+                self.option_type
+                or self.alert_type in ("OPTIONS_MOMENTUM", "GAMMA_BLAST")
+                or (self.segment in ("FNO", "OPTIONS") and (self.strike or self.option_type))
+            )
+            # Determine if this position is LONG (price expected to increase) or SHORT (price expected to decrease)
+            is_short_trade = False
+            if act_str.startswith("BUY") or "LONG" in act_str:
+                is_short_trade = False
+            elif act_str.startswith("SELL") or "SHORT" in act_str:
+                is_short_trade = True
+            elif is_option:
+                is_short_trade = False  # Long option is default for options momentum / gamma blast
+            elif self.target_level > 0 and self.target_level != self.trigger_level:
+                is_short_trade = self.target_level < self.trigger_level
+            elif str(self.direction).upper() in ("BEARISH", "SHORT", "SELL"):
+                is_short_trade = True
+
+            if is_short_trade:
                 self.no_chase_boundary = round(self.trigger_level * 0.988, 2)
             else:
-                self.no_chase_boundary = round(self.trigger_level * 1.012, 2)
+                mult = (
+                    1.08
+                    if self.alert_type == "OPTIONS_MOMENTUM"
+                    else (1.05 if is_option else 1.012)
+                )
+                self.no_chase_boundary = round(self.trigger_level * mult, 2)
 
         if self.stage == "IGNITED" and not self.triggered_at:
             self.triggered_at = self.created_at

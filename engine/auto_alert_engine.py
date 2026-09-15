@@ -2880,6 +2880,7 @@ class AutoAlertEngine:
                         trigger_level=opt_ltp,
                         target_level=opt_t1,
                         stop_loss=opt_sl,
+                        no_chase_boundary=max_chase,
                         strike=strike,
                         option_type=opt_type,
                         contract_symbol=contract_sym,

@@ -1162,3 +1162,98 @@ def test_gamma_blast_milestone_no_spot_target_corruption():
     assert "Target 2: ₹11.27" in msg_t1
 
 
+def test_no_chase_direction_and_comparator_sanctity():
+    """Verify that Put option buyers, Call option buyers, and directional trades have logical No-Chase boundaries and comparators."""
+    from bot.alert_templates import render_auto_alert
+
+    # 1. Long Put Option (Bearish underlying direction, BUY PE action)
+    put_alert = AutoAlert(
+        alert_id="aa-opt-put-01",
+        alert_type="OPTIONS_MOMENTUM",
+        stage="EARLY_WARNING",
+        symbol="CHOLAFIN",
+        exchange="NFO",
+        direction="BEARISH",
+        headline="OPTIONS MOMENTUM (PUT SURGE): CHOLAFIN202609291800PE @ ₹41.7",
+        summary="Put surge test",
+        ltp=41.7,
+        trigger_level=41.7,
+        target_level=57.3,
+        stop_loss=35.5,
+        strike=1800.0,
+        option_type="PE",
+        contract_symbol="CHOLAFIN202609291800PE",
+        actionable_plan={
+            "action": "BUY PE",
+            "contract": "CHOLAFIN202609291800PE",
+            "recommended_entry": "₹41.70",
+            "stop_loss": "₹35.5",
+            "target": "₹57.3",
+            "target_2": "₹76.0",
+            "when_to_wait": "DO NOT CHASE if premium surges > 8% past entry (> ₹45.0). Wait for 5m consolidation retest.",
+        },
+        is_live=True,
+        environment="LIVE",
+    )
+    # Option boundary should be > 41.7 (1.08x = 45.04)
+    assert put_alert.no_chase_boundary > 41.7
+    msg_put = render_auto_alert(put_alert, in_market=True)
+    assert "No-Chase:</b> <i>above ₹" in msg_put, f"Put Option buyer alert must use 'above', got: {msg_put}"
+    assert "below ₹" not in msg_put
+
+    # 2. Short Equity / Futures Trade (Bearish direction, SELL action)
+    short_alert = AutoAlert(
+        alert_id="aa-eq-short-01",
+        alert_type="CIRCUIT_WARNING",
+        stage="EARLY_WARNING",
+        symbol="INFY",
+        exchange="NSE",
+        direction="BEARISH",
+        headline="CIRCUIT WARNING: INFY Breakdown",
+        summary="Short breakdown test",
+        ltp=1500.0,
+        trigger_level=1500.0,
+        target_level=1400.0,
+        stop_loss=1550.0,
+        actionable_plan={
+            "action": "SELL",
+            "recommended_entry": "₹1,500.0",
+            "stop_loss": "₹1,550.0",
+            "target": "₹1,400.0",
+        },
+        is_live=True,
+        environment="LIVE",
+    )
+    assert short_alert.no_chase_boundary == 1482.0  # 1500 * 0.988
+    msg_short = render_auto_alert(short_alert, in_market=True)
+    assert "No-Chase:</b> <i>below ₹1,482.0</i>" in msg_short
+
+    # 3. Long Equity Trade (Bullish direction, BUY action)
+    long_alert = AutoAlert(
+        alert_id="aa-eq-long-01",
+        alert_type="SQUEEZE_BREAKOUT",
+        stage="EARLY_WARNING",
+        symbol="TRENT",
+        exchange="NSE",
+        direction="BULLISH",
+        headline="SQUEEZE BREAKOUT: TRENT",
+        summary="Long breakout test",
+        ltp=5000.0,
+        trigger_level=5000.0,
+        target_level=6000.0,
+        stop_loss=4600.0,
+        actionable_plan={
+            "action": "BUY",
+            "recommended_entry": "₹5,000.0",
+            "stop_loss": "₹4,600.0",
+            "target": "₹6,000.0",
+        },
+        is_live=True,
+        environment="LIVE",
+    )
+    assert long_alert.no_chase_boundary == 5060.0  # 5000 * 1.012
+    msg_long = render_auto_alert(long_alert, in_market=True)
+    assert "No-Chase:</b> <i>above ₹5,060.0</i>" in msg_long
+    assert "No-Chase:</b> <i>above ₹5,060.0</i>" in msg_long
+
+

@@ -371,6 +371,45 @@ def _format_call_time_and_elapsed(
     return (formatted_call, elapsed_str)
 
 
+def get_no_chase_comparator(
+    alert: Any,
+    actionable_plan: Optional[dict[str, Any]] = None,
+    action_str: str = "",
+) -> str:
+    """
+    Returns 'above' or 'below' for the no-chase limit boundary.
+    - If buying (Long equity, Long futures, BUY CE, BUY PE, or target > entry): comparator is 'above'
+      (trader should not chase if price/premium surges above the ceiling).
+    - If selling / shorting (Short equity, Short futures, SELL CE, SELL PE, or target < entry): comparator is 'below'
+      (trader should not chase if price drops below the floor).
+    """
+    plan = actionable_plan if actionable_plan is not None else getattr(alert, "actionable_plan", {}) or {}
+    act = (action_str or plan.get("action") or "").strip().upper()
+
+    # 1. Check explicit action verb
+    if act.startswith("BUY") or "LONG" in act:
+        return "above"
+    if act.startswith("SELL") or "SHORT" in act:
+        return "below"
+
+    # 2. Check if option contract is being traded (defaults to long option)
+    if getattr(alert, "option_type", None) or getattr(alert, "alert_type", "") in (
+        "OPTIONS_MOMENTUM",
+        "GAMMA_BLAST",
+    ):
+        return "above"
+
+    # 3. Check target vs trigger/entry levels
+    tgt = getattr(alert, "target_level", 0.0) or 0.0
+    trig = getattr(alert, "trigger_level", 0.0) or getattr(alert, "ltp", 0.0) or 0.0
+    if tgt > 0 and trig > 0 and tgt != trig:
+        return "above" if tgt > trig else "below"
+
+    # 4. Fallback to alert direction
+    dir_val = str(getattr(alert, "direction", "BULLISH")).upper()
+    return "above" if dir_val in ("BULLISH", "LONG", "BUY") else "below"
+
+
 def build_signal_ref(
     symbol: str,
     alert_id: str = "",
@@ -2174,8 +2213,7 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
         no_chase_val = getattr(alert, "no_chase_boundary", None)
         no_chase_inline = ""
         if no_chase_val and float(no_chase_val) > 0:
-            dir_val = getattr(alert, "direction", "BULLISH")
-            comparator = "above" if dir_val == "BULLISH" else "below"
+            comparator = get_no_chase_comparator(alert, actionable_plan, act)
             no_chase_inline = (
                 f" | 🛑 <b>No-Chase:</b> <i>{comparator} ₹{float(no_chase_val):,.1f}</i>"
             )
@@ -2254,8 +2292,7 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
         no_chase_val = getattr(alert, "no_chase_boundary", None)
         no_chase_inline = ""
         if no_chase_val and float(no_chase_val) > 0:
-            dir_val = getattr(alert, "direction", "BULLISH")
-            comparator = "above" if dir_val == "BULLISH" else "below"
+            comparator = get_no_chase_comparator(alert, actionable_plan, act)
             no_chase_inline = (
                 f" | 🛑 <b>No-Chase:</b> <i>{comparator} ₹{float(no_chase_val):,.1f}</i>"
             )
@@ -2328,8 +2365,7 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
                 no_chase_val = getattr(alert, "no_chase_boundary", None)
                 no_chase_inline = ""
                 if no_chase_val and float(no_chase_val) > 0:
-                    dir_val = getattr(alert, "direction", "BULLISH")
-                    comparator = "above" if dir_val == "BULLISH" else "below"
+                    comparator = get_no_chase_comparator(alert, actionable_plan, action)
                     no_chase_inline = (
                         f" | 🛑 <b>No-Chase:</b> <i>{comparator} ₹{float(no_chase_val):,.1f}</i>"
                     )
