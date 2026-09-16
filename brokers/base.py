@@ -87,6 +87,8 @@ class Quote:
     change: float = 0.0  # Change from prev close in INR
     change_pct: float = 0.0  # Change as %
     vwap: Optional[float] = None  # Intraday Volume-Weighted Average Price
+    upper_circuit: Optional[float] = None  # Price upper band / circuit limit
+    lower_circuit: Optional[float] = None  # Price lower band / circuit limit
     provider: str = "UNKNOWN"
     source: str = "UNKNOWN"  # STREAM | REST | EOD_SNAPSHOT | FALLBACK | CACHE
     data_state: str = "UNAVAILABLE"  # LIVE | DELAYED | EOD | DEGRADED | UNAVAILABLE

@@ -2356,8 +2356,18 @@ class AutoAlertEngine:
             if not (is_bullish or is_bearish):
                 continue
 
+            # Circuit Ceiling / Floor Freeze Guard:
+            # If stock is within 0.8% of Upper Circuit, avoid buying into liquidity freeze or circuit dump
+            uc = float(getattr(q, "upper_circuit", 0.0) or getattr(q, "circuit_limit", 0.0) or 0.0)
+            if uc > 0 and ltp >= (uc * 0.992) and is_bullish:
+                continue
+            lc = float(getattr(q, "lower_circuit", 0.0) or 0.0)
+            if lc > 0 and ltp <= (lc * 1.008) and is_bearish:
+                continue
+
             sec_id = None
             sec_name = None
+            sector_tailwind_bonus = 0
             if seg != "INDEX":
                 try:
                     from analysis.universe import get_stock_sector
@@ -2366,22 +2376,40 @@ class AutoAlertEngine:
                 except Exception:
                     pass
 
+                try:
+                    from analysis.sector_rotation import get_stock_tailwind
+
+                    tailwind = get_stock_tailwind(clean_sym)
+                    if tailwind and hasattr(tailwind, "quadrant"):
+                        if is_bullish:
+                            if tailwind.quadrant in ("LEADING", "IMPROVING"):
+                                sector_tailwind_bonus = 8
+                            elif tailwind.quadrant == "LAGGING" and rvol < 2.2:
+                                continue
+                        elif is_bearish:
+                            if tailwind.quadrant == "LAGGING":
+                                sector_tailwind_bonus = 8
+                            elif tailwind.quadrant == "LEADING" and rvol < 2.2:
+                                continue
+                except Exception:
+                    pass
+
             # Benchmark Gravitational Filter: If Nifty in markdown, suppress non-defensive equity sparks
             # Decoupled Exemption: Allow thematic leaders if stock belongs to an RRG Leading / High-Growth sector
-            # (e.g. DEFENCE, RAILWAYS, ENERGY, SOLAR, CAPITAL GOODS, EMS) or exhibits high relative volume (rvol >= 2.0).
+            # or exhibits high relative volume (rvol >= 2.0) or strong sector tailwind.
             if is_bullish and is_nifty_markdown and seg != "INDEX" and sec_name:
                 is_defensive = any(d in sec_name.upper() for d in ("PHARMA", "FMCG", "HEALTH"))
                 is_thematic_leader = any(
                     d in sec_name.upper()
                     for d in ("DEFENCE", "RAIL", "ENERGY", "CAPITAL", "INFRA", "EMS", "TECH", "SOLAR")
-                ) or (rvol >= 2.0)
+                ) or (rvol >= 2.0) or (sector_tailwind_bonus > 0)
                 if not (is_defensive or is_thematic_leader):
                     continue
 
             # Benchmark Gravitational Filter: If Nifty in strong markup, suppress non-lagging equity breakdowns
             if is_bearish and is_nifty_markup and seg != "INDEX" and sec_name:
                 is_lagging = any(d in sec_name.upper() for d in ("MEDIA", "REALTY"))
-                if not is_lagging:
+                if not (is_lagging or sector_tailwind_bonus > 0):
                     continue
 
             # Stage classification: Early Warning (coiling/first thrust) vs Ignited (expanding)
@@ -2412,16 +2440,33 @@ class AutoAlertEngine:
                 except Exception as e_tp:
                     logger.debug(f"[IntradaySpark] Trade plan calculation failed for {clean_sym}: {e_tp}")
 
+                atr_val = max(1.0, ltp * 0.015)
+                if df is not None and len(df) >= 5 and "high" in df.columns and "low" in df.columns:
+                    try:
+                        tr = np.maximum(
+                            df["high"] - df["low"],
+                            np.maximum(
+                                abs(df["high"] - df["close"].shift(1)),
+                                abs(df["low"] - df["close"].shift(1)),
+                            ),
+                        )
+                        atr_calc = float(tr.tail(14).mean())
+                        if atr_calc > 0:
+                            atr_val = round(atr_calc, 2)
+                    except Exception:
+                        pass
+                min_risk = max(1.0, round(0.70 * atr_val, 2)) if seg != "INDEX" else max(1.0, round(0.50 * atr_val, 2))
+
                 if tp and tp.is_asymmetry_viable and tp.target_1 > ltp and tp.invalidation_stop < ltp:
-                    sl_price = tp.invalidation_stop
-                    t1_price = tp.target_1
-                    t2_price = tp.target_2
-                    t3_price = tp.target_3
-                    rr_str = f"1:{tp.rr_t1}"
+                    risk_pts = max(min_risk, round(ltp - tp.invalidation_stop, 2))
+                    sl_price = round(ltp - risk_pts, 2)
+                    t1_price = max(tp.target_1, round(ltp + 1.5 * risk_pts, 2))
+                    t2_price = max(tp.target_2, round(ltp + 2.5 * risk_pts, 2))
+                    t3_price = max(tp.target_3, round(ltp + 4.0 * risk_pts, 2))
+                    rr_str = f"1:{round((t1_price - ltp) / risk_pts, 2)}"
                     tp_dict = tp.as_dict()
                 else:
-                    atr_val = max(1.0, ltp * 0.015)
-                    risk_pts = max(1.0, round(max(0.8 * atr_val, ltp - vwap if ltp > vwap else ltp * 0.012), 2))
+                    risk_pts = max(min_risk, round(max(0.8 * atr_val, ltp - vwap if ltp > vwap else ltp * 0.012), 2))
                     sl_price = round(ltp - risk_pts, 2)
                     t1_price = round(ltp + 2.0 * risk_pts, 2)
                     t2_price = round(ltp + 3.5 * risk_pts, 2)
@@ -2474,16 +2519,33 @@ class AutoAlertEngine:
                 except Exception as e_tp:
                     logger.debug(f"[IntradaySpark] Trade plan calculation failed for {clean_sym}: {e_tp}")
 
+                atr_val = max(1.0, ltp * 0.015)
+                if df is not None and len(df) >= 5 and "high" in df.columns and "low" in df.columns:
+                    try:
+                        tr = np.maximum(
+                            df["high"] - df["low"],
+                            np.maximum(
+                                abs(df["high"] - df["close"].shift(1)),
+                                abs(df["low"] - df["close"].shift(1)),
+                            ),
+                        )
+                        atr_calc = float(tr.tail(14).mean())
+                        if atr_calc > 0:
+                            atr_val = round(atr_calc, 2)
+                    except Exception:
+                        pass
+                min_risk = max(1.0, round(0.70 * atr_val, 2)) if seg != "INDEX" else max(1.0, round(0.50 * atr_val, 2))
+
                 if tp and tp.is_asymmetry_viable and tp.target_1 < ltp and tp.invalidation_stop > ltp:
-                    sl_price = tp.invalidation_stop
-                    t1_price = tp.target_1
-                    t2_price = tp.target_2
-                    t3_price = tp.target_3
-                    rr_str = f"1:{tp.rr_t1}"
+                    risk_pts = max(min_risk, round(tp.invalidation_stop - ltp, 2))
+                    sl_price = round(ltp + risk_pts, 2)
+                    t1_price = min(tp.target_1, round(max(0.05, ltp - 1.5 * risk_pts), 2))
+                    t2_price = min(tp.target_2, round(max(0.05, ltp - 2.5 * risk_pts), 2))
+                    t3_price = min(tp.target_3, round(max(0.05, ltp - 4.0 * risk_pts), 2))
+                    rr_str = f"1:{round((ltp - t1_price) / risk_pts, 2)}"
                     tp_dict = tp.as_dict()
                 else:
-                    atr_val = max(1.0, ltp * 0.015)
-                    risk_pts = max(1.0, round(max(0.8 * atr_val, vwap - ltp if vwap > ltp else ltp * 0.012), 2))
+                    risk_pts = max(min_risk, round(max(0.8 * atr_val, vwap - ltp if vwap > ltp else ltp * 0.012), 2))
                     sl_price = round(ltp + risk_pts, 2)
                     t1_price = round(max(0.05, ltp - 2.0 * risk_pts), 2)
                     t2_price = round(max(0.05, ltp - 3.5 * risk_pts), 2)
@@ -2527,6 +2589,86 @@ class AutoAlertEngine:
             )
             is_authentic_spark = not (is_mock_spark or is_test_env)
 
+            # Multi-Timeframe Alignment, Confirmation Candle, & RSI Divergence on 5m OHLCV
+            df_5m = None
+            try:
+                from market.history import get_ohlcv
+
+                df_5m = get_ohlcv(clean_sym, exchange="NSE", interval="5minute", days=2)
+            except Exception:
+                df_5m = None
+
+            alignment_count = 1
+            if df_5m is not None and len(df_5m) >= 5:
+                try:
+                    from analysis.market_structure import check_mtf_structural_alignment
+
+                    mtf_info = check_mtf_structural_alignment(
+                        clean_sym,
+                        exchange="NSE",
+                        ltp=ltp,
+                        direction=direction,
+                        df_5m=df_5m,
+                    )
+                    alignment_count = mtf_info.get("alignment_count", 1)
+                    if mtf_info.get("wall_collision"):
+                        logger.debug(
+                            f"[AutoAlertEngine] Suppressed spark on {clean_sym}: Proximity to 1H structural wall"
+                        )
+                        continue
+                    if alignment_count < 1 and seg != "INDEX":
+                        logger.debug(
+                            f"[AutoAlertEngine] Suppressed spark on {clean_sym}: Opposed by 15m/1H structural trend"
+                        )
+                        continue
+                except Exception as e_mtf:
+                    logger.debug(f"[AutoAlertEngine] MTF check error for {clean_sym}: {e_mtf}")
+
+            confirmation_bonus = 0
+            divergence_bonus = 0
+            conf_candle = None
+            is_confirmed = False
+            div_type = None
+            div_bias = None
+            if df_5m is not None and len(df_5m) >= 5:
+                try:
+                    from analysis.market_structure import (
+                        detect_confirmation_candle,
+                        detect_divergence,
+                    )
+
+                    conf_res = detect_confirmation_candle(df_5m, direction=direction)
+                    is_confirmed = bool(conf_res.get("confirmed")) if isinstance(conf_res, dict) else False
+                    conf_candle = conf_res.get("pattern") if isinstance(conf_res, dict) else None
+                    if is_confirmed:
+                        confirmation_bonus = 8
+
+                    div_res = detect_divergence(df_5m)
+                    div_type = div_res.get("type") if isinstance(div_res, dict) else None
+                    div_bias = div_res.get("bias") if isinstance(div_res, dict) else None
+                    if div_type == "NONE":
+                        div_type = None
+                    if div_bias == "NONE":
+                        div_bias = None
+
+                    if div_type:
+                        if is_bullish and div_bias == "BEARISH" and "REGULAR" in div_type:
+                            logger.debug(
+                                f"[AutoAlertEngine] Suppressed bullish spark on {clean_sym}: Bearish regular RSI divergence trap ({div_type})"
+                            )
+                            continue
+                        elif is_bearish and div_bias == "BULLISH" and "REGULAR" in div_type:
+                            logger.debug(
+                                f"[AutoAlertEngine] Suppressed bearish spark on {clean_sym}: Bullish regular RSI divergence trap ({div_type})"
+                            )
+                            continue
+                        elif (is_bullish and div_bias == "BULLISH") or (
+                            is_bearish and div_bias == "BEARISH"
+                        ):
+                            divergence_bonus = 6
+                except Exception as e_smc:
+                    logger.debug(f"[AutoAlertEngine] Spark candle/divergence check error: {e_smc}")
+
             alert = AutoAlert(
                 alert_id=alert_id,
                 alert_type=alert_type,
@@ -2540,7 +2682,16 @@ class AutoAlertEngine:
                 trigger_level=ltp,
                 target_level=t1_price,
                 stop_loss=sl_price,
-                confidence=min(95, int(75 + rvol * 5)),
+                confidence=min(
+                    95,
+                    int(
+                        75
+                        + rvol * 5
+                        + sector_tailwind_bonus
+                        + confirmation_bonus
+                        + divergence_bonus
+                    ),
+                ),
                 created_at=now_iso,
                 is_live=is_authentic_spark,
                 environment="LIVE" if is_authentic_spark else "TEST",
@@ -2550,6 +2701,7 @@ class AutoAlertEngine:
                     "vwap": vwap,
                     "change_pct": chg,
                     "segment": seg,
+                    "atr": atr_val,
                     "nifty_change_pct": nifty_chg if nifty_q else None,
                     "nifty_below_vwap": (
                         ((nifty_ltp < nifty_vwap) if nifty_vwap > 0 else (nifty_chg < 0))
@@ -2567,6 +2719,12 @@ class AutoAlertEngine:
                     ),
                     "sector_id": sec_id,
                     "sector_name": sec_name,
+                    "confirmation_candle": conf_candle,
+                    "confirmation_confirmed": is_confirmed,
+                    "divergence_type": div_type,
+                    "divergence_bias": div_bias,
+                    "alignment_count": alignment_count,
+                    "sector_tailwind_bonus": sector_tailwind_bonus,
                 },
                 actionable_plan=plan,
             )
@@ -2888,6 +3046,22 @@ class AutoAlertEngine:
                     if oi < min_oi:
                         continue
 
+                    # 0DTE Expiry Day Afternoon Theta Guard:
+                    # After 12:30 IST on expiry day, exponential theta decay rapidly destroys OTM value.
+                    # Restrict option buying to strictly ATM or In-The-Money (ITM) contracts only.
+                    is_zero_dte_pm = False
+                    if expiry_date:
+                        try:
+                            from engine.alert_expiry import is_0dte_afternoon
+                            is_zero_dte_pm = is_0dte_afternoon(str(expiry_date), ref_dt=now_dt)
+                            if is_zero_dte_pm:
+                                if opt_type == "CE" and strike > (spot * 1.002):
+                                    continue
+                                if opt_type == "PE" and strike < (spot * 0.998):
+                                    continue
+                        except Exception:
+                            pass
+
                     # Momentum DTE Gate: NIFTY allows weekly (DTE <= 8), monthly indices (BANKNIFTY/FINNIFTY/SENSEX) and stocks allow front-month (DTE <= 35)
                     max_dte = 8 if clean_sym in ("NIFTY",) else 35
                     if expiry_date:
@@ -2900,7 +3074,7 @@ class AutoAlertEngine:
                                     break
                                 except ValueError:
                                     continue
-                            if exp_dt and (exp_dt - datetime.now(IST).date()).days > max_dte:
+                            if exp_dt and (exp_dt - now_dt.date()).days > max_dte:
                                 continue
                         except Exception:
                             pass
@@ -2919,11 +3093,22 @@ class AutoAlertEngine:
                         if vol_oi < 0.80:
                             continue
 
-                    # 1. Bid/Ask Spread Sanity Gate: Avoid illiquid traps with huge bid-ask gaps (> 35%)
+                    # 1. Bid/Ask Spread Sanity Gate:
+                    # Index options allow up to 30% spread friction; single-stock options strictly <= 15%
                     bid = getattr(c, "bid", None)
                     ask = getattr(c, "ask", None)
-                    if bid and ask and bid > 0 and ask > 0 and ask > bid * 1.35:
+                    max_spread_mult = 1.30 if is_idx else 1.15
+                    if bid and ask and bid > 0 and ask > 0 and ask > (bid * max_spread_mult):
                         continue
+
+                    # 1b. Physical Delivery Expiry Week Detection for Stock Options
+                    is_physical_expiry_week = False
+                    if not is_idx and expiry_date:
+                        try:
+                            from engine.alert_expiry import is_monthly_physical_expiry_week
+                            is_physical_expiry_week = is_monthly_physical_expiry_week(str(expiry_date), symbol=clean_sym, ref_dt=now_dt)
+                        except Exception:
+                            pass
 
                     # 2. Strict Directional Price Expansion & Underlying Trend Alignment:
                     # An option momentum breakout MUST have positive price expansion (gainers, not decaying/dumping)
@@ -3011,7 +3196,35 @@ class AutoAlertEngine:
                         )
                         continue
 
-                    # Benchmark Gravitational Filter on single-stock options:
+                    # Benchmark Gravitational & Sector RRG Tailwind Filter on single-stock options:
+                    sector_tailwind_bonus = 0
+                    if not is_idx:
+                        try:
+                            from analysis.sector_rotation import get_stock_tailwind
+
+                            tailwind = get_stock_tailwind(clean_sym)
+                            if tailwind and hasattr(tailwind, "quadrant"):
+                                if opt_type == "CE":
+                                    if tailwind.quadrant in ("LEADING", "IMPROVING"):
+                                        sector_tailwind_bonus = 8
+                                    elif tailwind.quadrant == "LAGGING" and not (vol_oi >= 2.5):
+                                        logger.debug(
+                                            f"[AutoAlertEngine] Suppressed Call on {clean_sym}: Sector in LAGGING RRG quadrant ({getattr(tailwind, 'sector', '')})"
+                                        )
+                                        continue
+                                elif opt_type == "PE":
+                                    if tailwind.quadrant == "LAGGING":
+                                        sector_tailwind_bonus = 8
+                                    elif tailwind.quadrant == "LEADING" and not (vol_oi >= 2.5):
+                                        logger.debug(
+                                            f"[AutoAlertEngine] Suppressed Put on {clean_sym}: Sector in LEADING RRG quadrant ({getattr(tailwind, 'sector', '')})"
+                                        )
+                                        continue
+                        except Exception as e_rrg:
+                            logger.debug(
+                                f"[AutoAlertEngine] RRG tailwind check error for {clean_sym}: {e_rrg}"
+                            )
+
                     if not is_idx and is_nifty_markdown and opt_type == "CE":
                         from analysis.universe import get_stock_sector
 
@@ -3023,7 +3236,7 @@ class AutoAlertEngine:
                             d in (sec_name or "").upper()
                             for d in ("DEFENCE", "RAIL", "ENERGY", "CAPITAL", "INFRA", "EMS", "TECH", "SOLAR")
                         )
-                        if not (is_defensive or is_thematic):
+                        if not (is_defensive or is_thematic or sector_tailwind_bonus > 0):
                             logger.debug(
                                 f"[AutoAlertEngine] Suppressed Call breakout on {clean_sym}: NIFTY in structural markdown ({nifty_change:.2f}%)"
                             )
@@ -3034,7 +3247,7 @@ class AutoAlertEngine:
 
                         sec_id, sec_name = get_stock_sector(clean_sym)
                         is_lagging = any(d in sec_name.upper() for d in ("MEDIA", "REALTY"))
-                        if not is_lagging:
+                        if not (is_lagging or sector_tailwind_bonus > 0):
                             logger.debug(
                                 f"[AutoAlertEngine] Suppressed Put surge on {clean_sym}: NIFTY in structural markup (+{nifty_change:.2f}%)"
                             )
@@ -3076,6 +3289,103 @@ class AutoAlertEngine:
                             vix_regime = "EXTREME_VOLATILITY"
                     else:
                         vix_regime = "NORMAL_VOLATILITY"
+
+                    # 2e. Candlestick Trigger Confirmation & RSI Divergence Trap Gate on Underlying Spot
+                    confirmation_bonus = 0
+                    divergence_bonus = 0
+                    conf_candle = None
+                    is_confirmed = False
+                    div_type = None
+                    div_bias = None
+                    if df_5m is not None and len(df_5m) >= 5:
+                        try:
+                            from analysis.market_structure import (
+                                detect_confirmation_candle,
+                                detect_divergence,
+                            )
+
+                            conf_res = detect_confirmation_candle(
+                                df_5m, direction=direction
+                            )
+                            is_confirmed = bool(conf_res.get("confirmed")) if isinstance(conf_res, dict) else False
+                            conf_candle = conf_res.get("pattern") if isinstance(conf_res, dict) else None
+                            if is_confirmed:
+                                confirmation_bonus = 8
+
+                            div_res = detect_divergence(df_5m)
+                            div_type = div_res.get("type") if isinstance(div_res, dict) else None
+                            div_bias = div_res.get("bias") if isinstance(div_res, dict) else None
+                            if div_type == "NONE":
+                                div_type = None
+                            if div_bias == "NONE":
+                                div_bias = None
+
+                            if div_type:
+                                if opt_type == "CE" and div_bias == "BEARISH" and "REGULAR" in div_type:
+                                    logger.debug(
+                                        f"[AutoAlertEngine] Suppressed CE on {clean_sym}: Bearish regular RSI divergence trap ({div_type})"
+                                    )
+                                    continue
+                                elif opt_type == "PE" and div_bias == "BULLISH" and "REGULAR" in div_type:
+                                    logger.debug(
+                                        f"[AutoAlertEngine] Suppressed PE on {clean_sym}: Bullish regular RSI divergence trap ({div_type})"
+                                    )
+                                    continue
+                                elif (opt_type == "CE" and div_bias == "BULLISH") or (
+                                    opt_type == "PE" and div_bias == "BEARISH"
+                                ):
+                                    divergence_bonus = 6
+                        except Exception as e_smc:
+                            logger.debug(
+                                f"[AutoAlertEngine] SMC candle/divergence check error for {clean_sym}: {e_smc}"
+                            )
+
+                    # 2f. 5-Strategy Signal Ensemble Veto Gate
+                    if df_5m is not None and len(df_5m) >= 10:
+                        try:
+                            from analysis.market_structure import ensemble_signal
+
+                            ens = ensemble_signal(df_5m)
+                            if ens and getattr(ens, "confidence", 0) >= 55:
+                                ens_sig = str(getattr(ens, "signal", "")).upper()
+                                if (opt_type == "CE" and "SELL" in ens_sig) or (
+                                    opt_type == "PE" and "BUY" in ens_sig
+                                ):
+                                    logger.debug(
+                                        f"[AutoAlertEngine] Suppressed {opt_type} on {clean_sym}: Ensemble veto ({ens_sig} {ens.confidence}%)"
+                                    )
+                                    continue
+                        except Exception as e_ens:
+                            logger.debug(
+                                f"[AutoAlertEngine] Ensemble veto error for {clean_sym}: {e_ens}"
+                            )
+
+                    # 2g. Volume Profile POC Proximity & Confluence Bonus
+                    vp_bonus = 0
+                    vp_tags = []
+                    if df_5m is not None and len(df_5m) >= 10:
+                        try:
+                            from analysis.volume_profile import compute_volume_profile
+
+                            vp = compute_volume_profile(df_5m)
+                            if vp and getattr(vp, "poc", 0) > 0:
+                                poc_dist = abs(spot - vp.poc) / max(1.0, spot)
+                                if opt_type == "CE" and spot >= vp.vah * 0.998:
+                                    vp_bonus += 5
+                                    vp_tags.append("VAH_BREAKOUT")
+                                elif opt_type == "CE" and poc_dist <= 0.003:
+                                    vp_bonus += 4
+                                    vp_tags.append("POC_SUPPORT_BOUNCE")
+                                elif opt_type == "PE" and spot <= vp.val * 1.002:
+                                    vp_bonus += 5
+                                    vp_tags.append("VAL_BREAKDOWN")
+                                elif opt_type == "PE" and poc_dist <= 0.003:
+                                    vp_bonus += 4
+                                    vp_tags.append("POC_RESISTANCE_REJECT")
+                        except Exception as e_vp:
+                            logger.debug(
+                                f"[AutoAlertEngine] Volume profile error for {clean_sym}: {e_vp}"
+                            )
 
                     alert_id = f"aa-optmom-{opt_type.lower()}-{clean_sym}-{int(strike)}-{uuid.uuid4().hex[:6]}"
 
@@ -3141,6 +3451,16 @@ class AutoAlertEngine:
                         if is_friday_late
                         else ""
                     )
+                    dte_pm_tag = (
+                        " ⚠️ 0DTE AFTERNOON: Accelerated theta decay active. Deep ATM/ITM only; mandatory square-off by 15:15 IST."
+                        if is_zero_dte_pm
+                        else ""
+                    )
+                    phys_tag = (
+                        " ⚠️ SEBI Physical Delivery Expiry Week: Increased margin risk. Next-month contract rollover recommended."
+                        if is_physical_expiry_week
+                        else ""
+                    )
 
                     # 5. Multi-factor Institutional Conviction Scoring (0-95, replaces naive 72 + vol_oi * 8)
                     conf_score = 65
@@ -3163,7 +3483,13 @@ class AutoAlertEngine:
                         conf_score += 8  # Macro tailwind bonus for Put buyers in down market
                     elif is_nifty_markup and opt_type == "CE":
                         conf_score += 8  # Macro tailwind bonus for Call buyers in up market
-                    confidence = min(94, max(72, conf_score))
+
+                    conf_score += confirmation_bonus
+                    conf_score += divergence_bonus
+                    conf_score += vp_bonus
+                    conf_score += sector_tailwind_bonus
+
+                    confidence = min(95, max(72, conf_score))
 
                     # 6. Optimal Trade Entry (OTE) & Strict No-Chase Boundaries
                     ote_lower = round(max(0.05, opt_ltp * 0.96), 1)
@@ -3183,18 +3509,18 @@ class AutoAlertEngine:
                     )
 
                     if opt_type == "PE":
-                        headline = f"\ud83c\udfaf OPTIONS MOMENTUM (PUT SURGE): {contract_sym} @ \u20b9{opt_ltp:,.1f} (Vol/OI {vol_oi}x)"
+                        headline = f"🎯 OPTIONS MOMENTUM (PUT SURGE): {contract_sym} @ ₹{opt_ltp:,.1f} (Vol/OI {vol_oi}x)"
                         summary = (
                             f"Institutional Put surge in {clean_sym} {int(strike)} PE. "
-                            f"Underlying spot \u20b9{spot:,.1f}{spot_anchor_str}. Turnover: {vol:,} contracts ({vol_oi}x OI). "
-                            f"Entry: \u20b9{opt_ltp:,.1f} | SL: \u20b9{opt_sl:,.1f} | T1: \u20b9{opt_t1:,.1f} | T2: \u20b9{opt_t2:,.1f}.{friday_tag}"
+                            f"Underlying spot ₹{spot:,.1f}{spot_anchor_str}. Turnover: {vol:,} contracts ({vol_oi}x OI). "
+                            f"Entry: ₹{opt_ltp:,.1f} | SL: ₹{opt_sl:,.1f} | T1: ₹{opt_t1:,.1f} | T2: ₹{opt_t2:,.1f}.{friday_tag}{dte_pm_tag}{phys_tag}"
                         )
                     else:
-                        headline = f"\ud83d\ude80 OPTIONS MOMENTUM: {contract_sym} @ \u20b9{opt_ltp:,.1f} (Vol/OI {vol_oi}x)"
+                        headline = f"🚀 OPTIONS MOMENTUM: {contract_sym} @ ₹{opt_ltp:,.1f} (Vol/OI {vol_oi}x)"
                         summary = (
                             f"Institutional Call surge in {clean_sym} {int(strike)} CE. "
-                            f"Underlying spot \u20b9{spot:,.1f}{spot_anchor_str}. Turnover: {vol:,} contracts ({vol_oi}x OI). "
-                            f"Entry: \u20b9{opt_ltp:,.1f} | SL: \u20b9{opt_sl:,.1f} | T1: \u20b9{opt_t1:,.1f} | T2: \u20b9{opt_t2:,.1f}.{friday_tag}"
+                            f"Underlying spot ₹{spot:,.1f}{spot_anchor_str}. Turnover: {vol:,} contracts ({vol_oi}x OI). "
+                            f"Entry: ₹{opt_ltp:,.1f} | SL: ₹{opt_sl:,.1f} | T1: ₹{opt_t1:,.1f} | T2: ₹{opt_t2:,.1f}.{friday_tag}{dte_pm_tag}{phys_tag}"
                         )
 
                     alert = AutoAlert(
@@ -3274,6 +3600,14 @@ class AutoAlertEngine:
                                 if is_nifty_markdown
                                 else ("MARKUP" if is_nifty_markup else "NORMAL")
                             ),
+                            "confirmation_candle": conf_candle,
+                            "confirmation_confirmed": is_confirmed,
+                            "divergence_type": div_type,
+                            "divergence_bias": div_bias,
+                            "volume_profile_tags": vp_tags,
+                            "is_0dte_afternoon": is_zero_dte_pm,
+                            "physical_settlement_week": is_physical_expiry_week,
+                            "sector_tailwind_bonus": sector_tailwind_bonus,
                         },
                         actionable_plan={
                             "action": f"BUY {opt_type}",
@@ -3295,6 +3629,16 @@ class AutoAlertEngine:
                             if (tp and tp.invalidation_stop > 0)
                             else None,
                             "friday_weekend_warning": friday_tag.strip() if friday_tag else None,
+                            "zero_dte_afternoon_guard": (
+                                "⚠️ 0DTE AFTERNOON: Accelerated theta decay active. Deep ATM/ITM only; mandatory square-off by 15:15 IST."
+                                if is_zero_dte_pm
+                                else None
+                            ),
+                            "physical_settlement_warning": (
+                                "⚠️ SEBI Physical Delivery Expiry Week: Next-month contract rollover recommended."
+                                if is_physical_expiry_week
+                                else None
+                            ),
                         },
                     )
                     if self.record_alert(alert):

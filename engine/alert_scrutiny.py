@@ -53,6 +53,27 @@ COMMODITY_MIN_SL_FLOORS: dict[str, float] = {
     "ALUMINIUM": 2.5,
 }
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Institutional Indian Index Minimum Spot/Futures Stop-Loss Volatility Floors (Points)
+# Derived from empirical 1-minute order book tick noise and typical ATR distribution
+# to eliminate SUB_NOISE_WHIPSAW stop-outs on Indian benchmark indices.
+# ─────────────────────────────────────────────────────────────────────────────
+INDEX_MIN_SL_FLOORS: dict[str, float] = {
+    "NIFTY": 25.0,
+    "NIFTY 50": 25.0,
+    "NIFTY50": 25.0,
+    "BANKNIFTY": 65.0,
+    "NIFTY BANK": 65.0,
+    "FINNIFTY": 30.0,
+    "NIFTY FIN SERVICE": 30.0,
+    "MIDCPNIFTY": 18.0,
+    "NIFTY MID SELECT": 18.0,
+    "SENSEX": 85.0,
+    "BSE SENSEX": 85.0,
+    "BANKEX": 85.0,
+}
+
+
 
 @dataclass
 class ScrutinyResult:
@@ -195,6 +216,64 @@ class AlertScrutinyAuditor:
                 f"Excessive stop-loss risk distance ({risk_pct:.2f}% > {max_risk}%)",
                 flags,
             )
+
+        sym = str(
+            getattr(alert, "symbol", "")
+            or (alert.get("symbol", "") if isinstance(alert, dict) else "")
+        ).upper()
+        clean_sym = (
+            sym.replace(".NS", "")
+            .replace(".BO", "")
+            .replace("NSE:", "")
+            .replace("BSE:", "")
+            .replace("MCX:", "")
+            .replace("NFO:", "")
+            .replace("CDS:", "")
+            .strip()
+        )
+
+        # 3b. Institutional Minimum Stop-Loss Volatility Floor Gate
+        # Specific structural floors for MCX Commodities, Indian Benchmark Indices, and Equities
+        # to eliminate SUB_NOISE_WHIPSAW and SUB_ATR_NOISE_WHIPSAW stop-outs.
+        if clean_sym in COMMODITY_MIN_SL_FLOORS and not is_option_premium_levels:
+            min_floor = COMMODITY_MIN_SL_FLOORS[clean_sym]
+            if risk_pts < (min_floor * 0.95):  # 5% precision tolerance
+                flags["risk_within_bounds"] = False
+                return (
+                    False,
+                    f"Sub-ATR Noise Trap: {clean_sym} stop-loss ({risk_pts:.1f} pts) < minimum structural volatility floor ({min_floor:.1f} pts). Mandate wider stop or defined-risk options.",
+                    flags,
+                )
+
+        if clean_sym in INDEX_MIN_SL_FLOORS and not is_option_premium_levels:
+            idx_floor = INDEX_MIN_SL_FLOORS[clean_sym]
+            if risk_pts < (idx_floor * 0.95):
+                flags["risk_within_bounds"] = False
+                return (
+                    False,
+                    f"Sub-Noise Trap: {clean_sym} stop-loss ({risk_pts:.1f} pts) < minimum institutional volatility floor ({idx_floor:.1f} pts). Mandate wider structural stop.",
+                    flags,
+                )
+
+        if (
+            not is_option_premium_levels
+            and clean_sym not in COMMODITY_MIN_SL_FLOORS
+            and clean_sym not in INDEX_MIN_SL_FLOORS
+        ):
+            eq_atr = 0.0
+            metrics = getattr(alert, "metrics", {}) or {}
+            if isinstance(metrics, dict):
+                eq_atr = float(metrics.get("atr") or metrics.get("atr_14") or 0.0)
+            if eq_atr <= 0 and ltp > 0:
+                eq_atr = round(ltp * 0.015, 2)
+            if eq_atr > 0 and risk_pts < (0.70 * eq_atr * 0.95):
+                flags["risk_within_bounds"] = False
+                return (
+                    False,
+                    f"Sub-ATR Equity Noise Trap: {clean_sym} stop-loss ({risk_pts:.1f} pts) < 0.70x ATR volatility floor ({0.70 * eq_atr:.1f} pts).",
+                    flags,
+                )
+
         if risk_pct < 0.10:
             return (
                 False,
@@ -249,21 +328,6 @@ class AlertScrutinyAuditor:
             )
         flags["rr_valid"] = True
 
-        sym = str(
-            getattr(alert, "symbol", "")
-            or (alert.get("symbol", "") if isinstance(alert, dict) else "")
-        ).upper()
-        clean_sym = (
-            sym.replace(".NS", "")
-            .replace(".BO", "")
-            .replace("NSE:", "")
-            .replace("BSE:", "")
-            .replace("MCX:", "")
-            .replace("NFO:", "")
-            .replace("CDS:", "")
-            .strip()
-        )
-
         # 4b. Underlying Trade Plan Asymmetry Sanity Check
         plan = getattr(alert, "actionable_plan", {}) or {}
         tp_dict = plan.get("trade_plan") if isinstance(plan, dict) else None
@@ -278,17 +342,19 @@ class AlertScrutinyAuditor:
                     flags,
                 )
 
-        # 4c. MCX Commodity Minimum Stop-Loss Volatility Floor Gate
-        # Disqualify setups with tight noise stops that trigger SUB_ATR_NOISE_WHIPSAW liquidations
-        if clean_sym in COMMODITY_MIN_SL_FLOORS and not is_option_premium_levels:
-            min_floor = COMMODITY_MIN_SL_FLOORS[clean_sym]
-            if risk_pts < (min_floor * 0.95):  # 5% precision tolerance
-                flags["risk_within_bounds"] = False
-                return (
-                    False,
-                    f"Sub-ATR Noise Trap: {clean_sym} stop-loss ({risk_pts:.1f} pts) < minimum structural volatility floor ({min_floor:.1f} pts). Mandate wider stop or defined-risk options.",
-                    flags,
-                )
+        # 4c-iv. Physical Settlement Expiry Week Warning for Single-Stock Options
+        if is_option_premium_levels and clean_sym not in INDEX_MIN_SL_FLOORS:
+            exp_str = getattr(alert, "expiry_date", None)
+            if not exp_str:
+                metrics = getattr(alert, "metrics", {}) or {}
+                if isinstance(metrics, dict):
+                    exp_str = metrics.get("expiry") or metrics.get("expiry_date")
+            try:
+                from engine.alert_expiry import is_monthly_physical_expiry_week
+                if is_monthly_physical_expiry_week(exp_str, symbol=clean_sym):
+                    flags["physical_settlement_week"] = True
+            except Exception:
+                pass
 
         # 4d. MCX High-Impact Scheduled Inventory Blackout Gate
         if clean_sym in ("CRUDEOIL", "CRUDEOILM", "NATURALGAS", "NATGASMINI"):

@@ -193,3 +193,69 @@ def is_alert_option_premium_level(alert: Any) -> bool:
         return abs(ltp - prem) <= max(2.0, prem * 0.25)
 
     return False
+
+
+def _parse_expiry_date(expiry_str: Optional[str]) -> Optional[datetime.date]:
+    """Internal helper to parse varied Indian exchange expiry string formats."""
+    if not expiry_str:
+        return None
+    clean = str(expiry_str).split("T")[0].strip()
+    for fmt in ("%Y-%m-%d", "%d-%b-%Y", "%d-%m-%Y"):
+        try:
+            return datetime.strptime(clean, fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
+def is_0dte_expiry(expiry_str: Optional[str], ref_dt: Optional[datetime] = None) -> bool:
+    """Returns True if the option contract expires on the current session date (0 DTE)."""
+    exp_d = _parse_expiry_date(expiry_str)
+    if not exp_d:
+        return False
+    now_d = (ref_dt or datetime.now(IST)).date()
+    return exp_d == now_d
+
+
+def is_0dte_afternoon(expiry_str: Optional[str], ref_dt: Optional[datetime] = None) -> bool:
+    """
+    Returns True if today is expiry day AND the current session is in the afternoon
+    theta decay acceleration phase (>= 12:30 IST).
+    """
+    now_dt = ref_dt or datetime.now(IST)
+    if not is_0dte_expiry(expiry_str, ref_dt=now_dt):
+        return False
+    from datetime import time as dtime
+    return now_dt.time() >= dtime(12, 30)
+
+
+def is_monthly_physical_expiry_week(
+    expiry_str: Optional[str],
+    symbol: Optional[str] = None,
+    ref_dt: Optional[datetime] = None,
+) -> bool:
+    """
+    Returns True if a single-stock option is in the final 4 trading days of its monthly physical
+    settlement expiry week, where SEBI margin requirements surge 300%-500% and liquidity dries up.
+    """
+    exp_d = _parse_expiry_date(expiry_str)
+    if not exp_d:
+        return False
+    now_d = (ref_dt or datetime.now(IST)).date()
+    dte = (exp_d - now_d).days
+    if dte < 0:
+        return False
+    # If symbol is index, physical delivery does not apply (indices are cash settled in India)
+    is_idx = (symbol or "").upper() in (
+        "NIFTY",
+        "BANKNIFTY",
+        "FINNIFTY",
+        "MIDCPNIFTY",
+        "SENSEX",
+        "BANKEX",
+    )
+    if is_idx:
+        return False
+    # Single-stock options only: within 4 calendar days (Mon-Thu of expiry week)
+    return dte <= 4
+
