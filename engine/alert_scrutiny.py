@@ -342,17 +342,24 @@ class AlertScrutinyAuditor:
                     flags,
                 )
 
-        # 4c-iv. Physical Settlement Expiry Week Warning for Single-Stock Options
-        if is_option_premium_levels and clean_sym not in INDEX_MIN_SL_FLOORS:
+        # 4c-iv. Physical Settlement Expiry Week Warning for Single-Stock Options & Futures
+        sym_raw = str(getattr(alert, "symbol", "") or "").upper()
+        is_futures = "FUT" in sym_raw or str(getattr(alert, "instrument_type", "")).upper() == "FUTURE"
+        if (is_option_premium_levels or is_futures) and clean_sym not in INDEX_MIN_SL_FLOORS:
             exp_str = getattr(alert, "expiry_date", None)
-            if not exp_str:
-                metrics = getattr(alert, "metrics", {}) or {}
-                if isinstance(metrics, dict):
-                    exp_str = metrics.get("expiry") or metrics.get("expiry_date")
+            metrics = getattr(alert, "metrics", {}) or {}
+            if not exp_str and isinstance(metrics, dict):
+                exp_str = metrics.get("expiry") or metrics.get("expiry_date")
             try:
                 from engine.alert_expiry import is_monthly_physical_expiry_week
                 if is_monthly_physical_expiry_week(exp_str, symbol=clean_sym):
                     flags["physical_settlement_week"] = True
+                    is_rollover = isinstance(metrics, dict) and (
+                        metrics.get("rollover_series") == "NEXT_MONTH"
+                        or metrics.get("is_rollover_recommended") is True
+                    )
+                    if is_rollover:
+                        flags["rollover_protected"] = True
             except Exception:
                 pass
 

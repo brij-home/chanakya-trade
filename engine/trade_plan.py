@@ -205,6 +205,7 @@ def calculate_trade_plan(
     exchange: str = "NSE",
     has_active_blast: bool = False,
     df: Optional[pd.DataFrame] = None,
+    ref_dt: Optional[datetime] = None,
 ) -> TradePlan:
     """
     Generate an institutional, 100% data-driven trade plan with real invalidation,
@@ -212,7 +213,7 @@ def calculate_trade_plan(
 
     Zero hardcoded target multipliers. Zero arbitrary stop loss percentages.
     """
-    now = datetime.now()
+    now = ref_dt or datetime.now()
     clean_sym = symbol.upper().replace(".NS", "").replace("NSE:", "").strip()
     canonical_dir = normalize_direction(direction)
     is_long = canonical_dir == "LONG"
@@ -809,7 +810,26 @@ def calculate_trade_plan(
     expected_option_delta_gain = max(0.1, t1_distance_pts * 0.50)
     theta_drag_pct = round((estimated_theta_drag_pts / expected_option_delta_gain) * 100.0, 1)
 
-    if theta_drag_pct > 22.0 or eta_t1_minutes > 120 or session_overrun_risk:
+    # Check for SEBI Physical Settlement Expiry Week on single stocks
+    is_stock_phys_week = False
+    try:
+        from engine.alert_expiry import is_monthly_physical_expiry_week, get_last_thursday_of_month
+
+        exp_d = get_last_thursday_of_month(now.year, now.month)
+        is_stock_phys_week = is_monthly_physical_expiry_week(
+            exp_d.strftime("%Y-%m-%d"), symbol=clean_sym, ref_dt=now
+        )
+    except Exception:
+        pass
+
+    if is_stock_phys_week:
+        options_recommended_structure = "DEFINED_RISK_SPREAD"
+        structure_advice = (
+            f"⚠️ SEBI PHYSICAL SETTLEMENT EXPIRY WEEK: Near-month {clean_sym} derivatives carry mandatory physical delivery "
+            f"and staggered margin surge (25%->100% full lot cash value). Trade NEXT-MONTH options/spreads or NEXT-MONTH futures "
+            f"to bypass margin calls, avoid penalty, and protect against expiry theta crush."
+        )
+    elif theta_drag_pct > 22.0 or eta_t1_minutes > 120 or session_overrun_risk:
         options_recommended_structure = "DEFINED_RISK_SPREAD"
         spread_type = (
             "Bull Call Spread (Buy ATM, Sell OTM)"

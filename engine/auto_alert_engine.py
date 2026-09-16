@@ -2481,6 +2481,29 @@ class AutoAlertEngine:
                     e_min = round(ltp * 0.998, 1)
                     e_max = round(ltp * 1.005, 1)
 
+                fut_advice = None
+                if seg != "INDEX":
+                    try:
+                        from engine.alert_expiry import (
+                            is_monthly_physical_expiry_week,
+                            get_last_thursday_of_month,
+                            get_next_monthly_expiry_date,
+                        )
+
+                        curr_exp_d = get_last_thursday_of_month(now_dt.year, now_dt.month)
+                        if is_monthly_physical_expiry_week(
+                            curr_exp_d.strftime("%Y-%m-%d"), symbol=clean_sym, ref_dt=now_dt
+                        ):
+                            next_exp_d = get_next_monthly_expiry_date(now_dt)
+                            fut_advice = {
+                                "recommended_futures": f"{clean_sym}{next_exp_d.strftime('%y%b').upper()}FUT",
+                                "expiry": next_exp_d.strftime("%Y-%m-%d"),
+                                "rollover_status": "NEXT_MONTH_FUTURES_RECOMMENDED",
+                                "warning": "⚠️ SEBI Physical Settlement Expiry Week: Trade NEXT-MONTH futures to bypass staggered delivery margins (25%->100%).",
+                            }
+                    except Exception:
+                        pass
+
                 headline = f"🚀 INTRADAY SPARK {seg_tag}: {clean_sym} +{chg:.1f}% with {rvol:.1f}x Volume Surge"
                 summary = f"{seg_tag} Session breakout underway: Reclaimed VWAP (₹{vwap:,.1f}) with {rvol:.1f}x RVOL. Momentum entry active."
                 plan = {
@@ -2493,6 +2516,7 @@ class AutoAlertEngine:
                     "target_3": f"₹{t3_price:,.1f}",
                     "risk_reward": rr_str,
                     "trade_plan": tp_dict,
+                    "derivatives_advice": fut_advice,
                     "when_to_buy": f"Buy on 5m VWAP holding above ₹{vwap:,.1f}",
                     "when_to_wait": f"Do not chase if price extends > {round(chg + 1.5, 1)}%",
                     "profit_rule": "Book 50% at T1 and trail SL to cost; let runner target T2/T3.",
@@ -2560,6 +2584,29 @@ class AutoAlertEngine:
                     e_min = round(ltp * 0.995, 1)
                     e_max = round(ltp * 1.002, 1)
 
+                fut_advice = None
+                if seg != "INDEX":
+                    try:
+                        from engine.alert_expiry import (
+                            is_monthly_physical_expiry_week,
+                            get_last_thursday_of_month,
+                            get_next_monthly_expiry_date,
+                        )
+
+                        curr_exp_d = get_last_thursday_of_month(now_dt.year, now_dt.month)
+                        if is_monthly_physical_expiry_week(
+                            curr_exp_d.strftime("%Y-%m-%d"), symbol=clean_sym, ref_dt=now_dt
+                        ):
+                            next_exp_d = get_next_monthly_expiry_date(now_dt)
+                            fut_advice = {
+                                "recommended_futures": f"{clean_sym}{next_exp_d.strftime('%y%b').upper()}FUT",
+                                "expiry": next_exp_d.strftime("%Y-%m-%d"),
+                                "rollover_status": "NEXT_MONTH_FUTURES_RECOMMENDED",
+                                "warning": "⚠️ SEBI Physical Settlement Expiry Week: Short NEXT-MONTH futures to bypass staggered delivery margins (25%->100%).",
+                            }
+                    except Exception:
+                        pass
+
                 headline = f"⚡ INTRADAY BREAKDOWN {seg_tag}: {clean_sym} {chg:.1f}% with {rvol:.1f}x Volume Surge"
                 summary = f"{seg_tag} Severe session breakdown underway: Lost VWAP (₹{vwap:,.1f}) with {rvol:.1f}x RVOL. Short / Put entry active."
                 plan = {
@@ -2572,6 +2619,7 @@ class AutoAlertEngine:
                     "target_3": f"₹{t3_price:,.1f}",
                     "risk_reward": rr_str,
                     "trade_plan": tp_dict,
+                    "derivatives_advice": fut_advice,
                     "when_to_buy": f"Enter short or ATM Put on pullbacks to ₹{vwap:,.1f} with tight stop above VWAP.",
                     "when_to_wait": f"Do not chase if breakdown extends > {round(abs(chg) + 1.5, 1)}% without retest.",
                     "profit_rule": "Book 50% at T1 and trail SL to cost; let runner target T2/T3.",
@@ -2918,10 +2966,6 @@ class AutoAlertEngine:
                 spot_open = getattr(quote_obj, "open", None) if quote_obj else None
                 spot_vwap = getattr(quote_obj, "vwap", None) if quote_obj else None
 
-                chain = get_options_chain(clean_sym)
-                if not chain:
-                    continue
-
                 is_idx = clean_sym in (
                     "NIFTY",
                     "BANKNIFTY",
@@ -2932,6 +2976,46 @@ class AutoAlertEngine:
                 )
                 # Determine canonical segment for routing and display (cached on the alert object)
                 alert_segment = "FNO_INDEX" if is_idx else "FNO_STOCK"
+
+                # Institutional Single-Stock Expiry Protection:
+                # Under SEBI regulations, single-stock options are physically settled.
+                # In settlement week (DTE <= 4), automatically route stock options to Next-Month
+                # series to eliminate staggered physical delivery margins (25%->100%) and near-month theta collapse.
+                chain = None
+                is_next_month_routed = False
+                if not is_idx:
+                    try:
+                        from engine.alert_expiry import (
+                            is_monthly_physical_expiry_week,
+                            resolve_recommended_derivative_expiry,
+                        )
+                        from market.options import get_expiries
+
+                        available_exps = get_expiries(clean_sym)
+                        exp_res = resolve_recommended_derivative_expiry(
+                            symbol=clean_sym,
+                            instrument_type="OPTION",
+                            available_expiries=available_exps,
+                            ref_dt=now_dt,
+                        )
+                        if exp_res.get("is_next_month_routed"):
+                            next_exp_str = exp_res.get("recommended_expiry")
+                            next_chain = get_options_chain(clean_sym, expiry=next_exp_str)
+                            if next_chain and any(
+                                float(getattr(c, "last_price", 0.0) or 0.0) > 0 for c in next_chain
+                            ):
+                                chain = next_chain
+                                is_next_month_routed = True
+                    except Exception as e_exp:
+                        logger.debug(
+                            f"[AutoAlertEngine] Next-month rollover check failed for {clean_sym}: {e_exp}"
+                        )
+
+                if chain is None:
+                    chain = get_options_chain(clean_sym)
+
+                if not chain:
+                    continue
                 min_opt_volume = (
                     (2000 if is_idx else 300) if is_opening_drive else (3000 if is_idx else 500)
                 )
@@ -3062,8 +3146,8 @@ class AutoAlertEngine:
                         except Exception:
                             pass
 
-                    # Momentum DTE Gate: NIFTY allows weekly (DTE <= 8), monthly indices (BANKNIFTY/FINNIFTY/SENSEX) and stocks allow front-month (DTE <= 35)
-                    max_dte = 8 if clean_sym in ("NIFTY",) else 35
+                    # Momentum DTE Gate: NIFTY allows weekly (DTE <= 8), monthly indices/stocks allow front-month & next-month rollovers (DTE <= 45)
+                    max_dte = 8 if clean_sym in ("NIFTY",) else 45
                     if expiry_date:
                         try:
                             exp_str = str(expiry_date).split("T")[0].strip()
@@ -3457,8 +3541,13 @@ class AutoAlertEngine:
                         else ""
                     )
                     phys_tag = (
-                        " ⚠️ SEBI Physical Delivery Expiry Week: Increased margin risk. Next-month contract rollover recommended."
-                        if is_physical_expiry_week
+                        " ⚠️ SEBI Physical Delivery Expiry Week: STAGGERED MARGIN SURGE (25%->100% full lot cash value). INTRADAY SCALP ONLY — MANDATORY EXIT BY 15:00 IST."
+                        if (is_physical_expiry_week and not is_next_month_routed)
+                        else ""
+                    )
+                    rollover_tag = (
+                        f" 🎯 NEXT-MONTH ROLLOVER ({expiry_date}): Bypasses SEBI physical delivery margin surge & near-month theta collapse."
+                        if is_next_month_routed
                         else ""
                     )
 
@@ -3513,14 +3602,14 @@ class AutoAlertEngine:
                         summary = (
                             f"Institutional Put surge in {clean_sym} {int(strike)} PE. "
                             f"Underlying spot ₹{spot:,.1f}{spot_anchor_str}. Turnover: {vol:,} contracts ({vol_oi}x OI). "
-                            f"Entry: ₹{opt_ltp:,.1f} | SL: ₹{opt_sl:,.1f} | T1: ₹{opt_t1:,.1f} | T2: ₹{opt_t2:,.1f}.{friday_tag}{dte_pm_tag}{phys_tag}"
+                            f"Entry: ₹{opt_ltp:,.1f} | SL: ₹{opt_sl:,.1f} | T1: ₹{opt_t1:,.1f} | T2: ₹{opt_t2:,.1f}.{friday_tag}{dte_pm_tag}{phys_tag}{rollover_tag}"
                         )
                     else:
                         headline = f"🚀 OPTIONS MOMENTUM: {contract_sym} @ ₹{opt_ltp:,.1f} (Vol/OI {vol_oi}x)"
                         summary = (
                             f"Institutional Call surge in {clean_sym} {int(strike)} CE. "
                             f"Underlying spot ₹{spot:,.1f}{spot_anchor_str}. Turnover: {vol:,} contracts ({vol_oi}x OI). "
-                            f"Entry: ₹{opt_ltp:,.1f} | SL: ₹{opt_sl:,.1f} | T1: ₹{opt_t1:,.1f} | T2: ₹{opt_t2:,.1f}.{friday_tag}{dte_pm_tag}{phys_tag}"
+                            f"Entry: ₹{opt_ltp:,.1f} | SL: ₹{opt_sl:,.1f} | T1: ₹{opt_t1:,.1f} | T2: ₹{opt_t2:,.1f}.{friday_tag}{dte_pm_tag}{phys_tag}{rollover_tag}"
                         )
 
                     alert = AutoAlert(
@@ -3606,7 +3695,10 @@ class AutoAlertEngine:
                             "divergence_bias": div_bias,
                             "volume_profile_tags": vp_tags,
                             "is_0dte_afternoon": is_zero_dte_pm,
-                            "physical_settlement_week": is_physical_expiry_week,
+                            "physical_settlement_week": is_physical_expiry_week or is_next_month_routed,
+                            "rollover_series": "NEXT_MONTH" if is_next_month_routed else "CURRENT_MONTH",
+                            "is_rollover_recommended": is_next_month_routed,
+                            "rollover_protected": is_next_month_routed,
                             "sector_tailwind_bonus": sector_tailwind_bonus,
                         },
                         actionable_plan={
@@ -3634,9 +3726,14 @@ class AutoAlertEngine:
                                 if is_zero_dte_pm
                                 else None
                             ),
+                            "rollover_notice": (
+                                f"🎯 NEXT-MONTH ROLLOVER: Contract {contract_sym} expires {expiry_date} (bypasses SEBI delivery margin surge & theta decay)."
+                                if is_next_month_routed
+                                else None
+                            ),
                             "physical_settlement_warning": (
-                                "⚠️ SEBI Physical Delivery Expiry Week: Next-month contract rollover recommended."
-                                if is_physical_expiry_week
+                                "⚠️ SEBI Physical Delivery Expiry Week: STAGGERED MARGIN SURGE (25%->100% full lot cash value). Mandatory exit by 15:00 IST — DO NOT CARRY OVERNIGHT."
+                                if (is_physical_expiry_week and not is_next_month_routed)
                                 else None
                             ),
                         },

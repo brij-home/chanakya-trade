@@ -256,6 +256,149 @@ def is_monthly_physical_expiry_week(
     )
     if is_idx:
         return False
-    # Single-stock options only: within 4 calendar days (Mon-Thu of expiry week)
+    # Single-stock derivatives only: within 4 calendar days (Mon-Thu of expiry week)
     return dte <= 4
+
+
+def get_last_thursday_of_month(year: int, month: int) -> "date":
+    """
+    Calculates the last Thursday of a given month (canonical NSE/BSE monthly derivatives expiry).
+    """
+    import calendar
+    from datetime import date as ddate
+
+    _, last_day = calendar.monthrange(year, month)
+    d = ddate(year, month, last_day)
+    # weekday(): 0=Mon, 1=Tue, 2=Wed, 3=Thu, 4=Fri, 5=Sat, 6=Sun
+    offset = (d.weekday() - 3) % 7
+    return d - timedelta(days=offset)
+
+
+def get_next_monthly_expiry_date(ref_dt: Optional[datetime] = None) -> "date":
+    """
+    Returns the last Thursday of the subsequent month (Next-Month Expiry).
+    Used during monthly settlement week to route stock options and stock futures
+    into the next series, bypassing SEBI physical delivery margin surges and gamma crush.
+    """
+    now_d = (ref_dt or datetime.now(IST)).date()
+    if now_d.month == 12:
+        next_year = now_d.year + 1
+        next_month = 1
+    else:
+        next_year = now_d.year
+        next_month = now_d.month + 1
+    return get_last_thursday_of_month(next_year, next_month)
+
+
+def resolve_recommended_derivative_expiry(
+    symbol: str,
+    instrument_type: str = "OPTION",
+    current_expiry: Optional[str] = None,
+    available_expiries: Optional[list[str]] = None,
+    ref_dt: Optional[datetime] = None,
+) -> dict[str, Any]:
+    """
+    Institutional expiry selector for Indian Equities and Indices (Options & Futures).
+
+    - Indices (NIFTY/BANKNIFTY/FINNIFTY/SENSEX):
+      Cash settled by SEBI. Zero physical delivery risk. Preserves nearest weekly or monthly expiry.
+
+    - Equities (Single-Stock Options & Single-Stock Futures):
+      Mandatory SEBI Physical Delivery settlement.
+      During settlement week (DTE <= 4), exchanges enforce staggered margins (25% -> 100% full lot value).
+      Automatically routes trade intent to the Next-Month series to ensure:
+        1. Zero physical delivery margin risk (30+ DTE).
+        2. Zero broker RMS forced midday square-off.
+        3. Alignment with institutional FII/DII rollover liquidity.
+        4. Elimination of severe gamma/theta decay traps.
+    """
+    now_dt = ref_dt or datetime.now(IST)
+    now_d = now_dt.date()
+    clean_sym = (
+        (symbol or "")
+        .upper()
+        .replace("NSE:", "")
+        .replace("NFO:", "")
+        .replace("BSE:", "")
+        .replace("BFO:", "")
+        .strip()
+    )
+    is_idx = clean_sym in (
+        "NIFTY",
+        "BANKNIFTY",
+        "FINNIFTY",
+        "MIDCPNIFTY",
+        "SENSEX",
+        "BANKEX",
+    )
+
+    # 1. Parse current near expiry
+    near_exp_d = None
+    if current_expiry:
+        near_exp_d = _parse_expiry_date(current_expiry)
+    elif available_expiries:
+        for exp in available_expiries:
+            p = _parse_expiry_date(exp)
+            if p and p >= now_d:
+                near_exp_d = p
+                break
+
+    if not near_exp_d:
+        # Default to current month's last Thursday
+        near_exp_d = get_last_thursday_of_month(now_d.year, now_d.month)
+        if near_exp_d < now_d:
+            near_exp_d = get_next_monthly_expiry_date(now_dt)
+
+    dte = (near_exp_d - now_d).days
+
+    # 2. Indices: Cash settled -> remain on current weekly or monthly expiry
+    if is_idx:
+        return {
+            "recommended_expiry": near_exp_d.strftime("%Y-%m-%d"),
+            "is_next_month_routed": False,
+            "series": "CURRENT_SERIES",
+            "reason": "Cash settled index — no physical delivery margin risk.",
+            "margin_risk": "NORMAL",
+            "badge": "CASH_SETTLED_INDEX",
+        }
+
+    # 3. Single-Stock Derivatives: Check for SEBI Physical Settlement Expiry Week (DTE <= 4)
+    if dte <= 4:
+        # Find next-month expiry date from available_expiries if provided, else compute
+        next_exp_d = None
+        if available_expiries:
+            for exp in available_expiries:
+                p = _parse_expiry_date(exp)
+                # Next monthly expiry must be at least 15 days out
+                if p and (p - now_d).days > 15:
+                    next_exp_d = p
+                    break
+
+        if not next_exp_d:
+            next_exp_d = get_next_monthly_expiry_date(now_dt)
+
+        inst_label = "stock futures" if instrument_type.upper().startswith("FUT") else "stock options"
+        return {
+            "recommended_expiry": next_exp_d.strftime("%Y-%m-%d"),
+            "near_expiry": near_exp_d.strftime("%Y-%m-%d"),
+            "is_next_month_routed": True,
+            "series": "NEXT_MONTH",
+            "reason": (
+                f"SEBI Physical Settlement Week (DTE={dte}): Near-month {inst_label} carry staggered delivery "
+                f"margin risk (25%->100% full stock value). Automatically routed to Next-Month series."
+            ),
+            "margin_risk": "PROTECTED",
+            "badge": "🎯 NEXT-MONTH ROLLOVER",
+        }
+
+    # Normal trading period (DTE > 4)
+    return {
+        "recommended_expiry": near_exp_d.strftime("%Y-%m-%d"),
+        "is_next_month_routed": False,
+        "series": "CURRENT_MONTH",
+        "reason": "Normal trading cycle (DTE > 4) — high near-month liquidity.",
+        "margin_risk": "NORMAL",
+        "badge": "CURRENT_MONTH",
+    }
+
 
