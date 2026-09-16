@@ -20,6 +20,9 @@ from engine.alert_expiry import (
     is_0dte_expiry,
     is_0dte_afternoon,
     is_monthly_physical_expiry_week,
+    get_last_thursday_of_month,
+    get_next_monthly_expiry_date,
+    resolve_recommended_derivative_expiry,
 )
 
 IST = ZoneInfo("Asia/Kolkata")
@@ -377,3 +380,201 @@ def test_intraday_spark_upper_circuit_proximity_rejection(monkeypatch):
 
     alerts = eng.scan_intraday_mover_sparks()
     assert len(alerts) == 0, "Stock within 0.8% of Upper Circuit must be suppressed"
+
+
+# ── 5. Next-Month Rollover & Settlement Week Derivatives Tests ────
+
+
+def test_last_thursday_and_next_monthly_expiry_calculation():
+    """Validates calculation of last Thursday of month and next monthly rollover date."""
+    from datetime import date
+
+    # September 2026: 30 days. Sep 24 is Thursday, Sep 30 is Wednesday -> Last Thu is Sep 24
+    assert get_last_thursday_of_month(2026, 9) == date(2026, 9, 24)
+    # October 2026: 31 days. Oct 29 is Thursday -> Last Thu is Oct 29
+    assert get_last_thursday_of_month(2026, 10) == date(2026, 10, 29)
+    # December 2026 / January 2027 year crossover
+    assert get_last_thursday_of_month(2026, 12) == date(2026, 12, 31)
+    assert get_last_thursday_of_month(2027, 1) == date(2027, 1, 28)
+
+    # Next monthly expiry from Sep 21, 2026 (expiry week) should be Oct 29, 2026
+    ref_sep = datetime(2026, 9, 21, 10, 0, tzinfo=IST)
+    assert get_next_monthly_expiry_date(ref_sep) == date(2026, 10, 29)
+
+
+def test_resolve_recommended_derivative_expiry_stock_options():
+    """Verifies single-stock options route to next month during settlement week, while indices stay on weekly."""
+    # Case 1: RELIANCE during expiry week (3 DTE) -> Auto-route to Next-Month
+    ref_expiry_week = datetime(2026, 9, 21, 10, 0, tzinfo=IST)
+    res_stock = resolve_recommended_derivative_expiry(
+        "RELIANCE",
+        instrument_type="OPTION",
+        current_expiry="2026-09-24",
+        available_expiries=["2026-09-24", "2026-10-29", "2026-11-26"],
+        ref_dt=ref_expiry_week,
+    )
+    assert res_stock["is_next_month_routed"] is True
+    assert res_stock["recommended_expiry"] == "2026-10-29"
+    assert res_stock["series"] == "NEXT_MONTH"
+    assert res_stock["margin_risk"] == "PROTECTED"
+    assert "NEXT-MONTH ROLLOVER" in res_stock["badge"]
+
+    # Case 2: RELIANCE early in the month (20 DTE) -> Normal current month
+    ref_early = datetime(2026, 9, 4, 10, 0, tzinfo=IST)
+    res_stock_early = resolve_recommended_derivative_expiry(
+        "RELIANCE",
+        instrument_type="OPTION",
+        current_expiry="2026-09-24",
+        ref_dt=ref_early,
+    )
+    assert res_stock_early["is_next_month_routed"] is False
+    assert res_stock_early["recommended_expiry"] == "2026-09-24"
+    assert res_stock_early["series"] == "CURRENT_MONTH"
+
+    # Case 3: NIFTY Index during expiry week -> Cash settled, stays on current weekly/monthly
+    res_index = resolve_recommended_derivative_expiry(
+        "NIFTY",
+        instrument_type="OPTION",
+        current_expiry="2026-09-24",
+        ref_dt=ref_expiry_week,
+    )
+    assert res_index["is_next_month_routed"] is False
+    assert res_index["recommended_expiry"] == "2026-09-24"
+    assert res_index["series"] == "CURRENT_SERIES"
+
+
+def test_resolve_recommended_derivative_expiry_stock_futures():
+    """Verifies single-stock futures route to next-month contract during settlement week."""
+    ref_expiry_week = datetime(2026, 9, 22, 11, 30, tzinfo=IST)  # Tuesday of expiry week (2 DTE)
+    res_fut = resolve_recommended_derivative_expiry(
+        "TATASTEEL",
+        instrument_type="FUTURE",
+        current_expiry="2026-09-24",
+        available_expiries=["2026-09-24", "2026-10-29"],
+        ref_dt=ref_expiry_week,
+    )
+    assert res_fut["is_next_month_routed"] is True
+    assert res_fut["recommended_expiry"] == "2026-10-29"
+    assert res_fut["series"] == "NEXT_MONTH"
+    assert "staggered delivery margin risk" in res_fut["reason"]
+
+
+def test_options_scanner_auto_routes_stock_options_to_next_month_in_expiry_week(monkeypatch):
+    """Verifies that scan_options_momentum_breakouts loads next-month option chain for single stocks in expiry week."""
+    from engine.auto_alert_engine import AutoAlertEngine
+    from brokers.base import OptionsContract, Quote
+
+    eng = AutoAlertEngine()
+    eng._alerts = []
+    eng._cooldowns = {}
+    monkeypatch.setattr(eng, "_save", lambda: None)
+
+    spot = 3000.0
+    q_rel = Quote(symbol="RELIANCE", last_price=spot, vwap=2990.0, open=2980.0, change=20.0, change_pct=0.67)
+    q_nifty = Quote(symbol="NIFTY", last_price=24000.0, vwap=24000.0, open=24000.0, change=0.0, change_pct=0.0)
+
+    # Monday of expiry week: 2026-09-21
+    now_exp_week = datetime(2026, 9, 21, 10, 15, tzinfo=IST)
+    monkeypatch.setattr("engine.auto_alert_engine.datetime", type("MockDT", (), {
+        "now": classmethod(lambda cls, tz=None: now_exp_week),
+        "strptime": datetime.strptime,
+    }))
+
+    monkeypatch.setattr("market.quotes.get_ltp", lambda sym: spot)
+    monkeypatch.setattr("market.quotes.get_quote", lambda sym: {
+        "NSE:RELIANCE": q_rel,
+        "RELIANCE": q_rel,
+        "NSE:NIFTY 50": q_nifty,
+    })
+
+    dates = pd.date_range(end=pd.Timestamp.now(), periods=30, freq="D")
+    df_synthetic = pd.DataFrame({
+        "open": [2990.0] * 30,
+        "high": [3020.0] * 30,
+        "low": [2980.0] * 30,
+        "close": [3000.0] * 30,
+        "volume": [500000] * 30,
+    }, index=dates)
+    monkeypatch.setattr("market.history.get_ohlcv", lambda *a, **kw: df_synthetic)
+
+    # Near-month contract (Sep 24): dying series in settlement week
+    c_near = OptionsContract(
+        symbol="RELIANCE26SEP3000CE",
+        underlying="RELIANCE",
+        expiry="2026-09-24",
+        strike=3000.0,
+        option_type="CE",
+        last_price=25.0,
+        oi=50000,
+        oi_change=2000,
+        volume=80000,
+        pchange=12.0,
+        bid=24.5,
+        ask=25.5,
+    )
+    # Next-month contract (Oct 29): institutional rollover series
+    c_next = OptionsContract(
+        symbol="RELIANCE26OCT3000CE",
+        underlying="RELIANCE",
+        expiry="2026-10-29",
+        strike=3000.0,
+        option_type="CE",
+        last_price=65.0,
+        oi=50000,
+        oi_change=3000,
+        volume=80000,
+        pchange=15.0,
+        bid=64.5,
+        ask=65.5,
+    )
+
+    def mock_get_options_chain(sym, expiry=None):
+        if expiry == "2026-10-29":
+            return [c_next]
+        return [c_near]
+
+    monkeypatch.setattr("market.options.get_options_chain", mock_get_options_chain)
+    monkeypatch.setattr("market.options.get_expiries", lambda sym: ["2026-09-24", "2026-10-29"])
+
+    from dataclasses import dataclass
+
+    @dataclass
+    class DummyTailwind:
+        quadrant: str = "LEADING"
+        sector: str = "ENERGY"
+
+    monkeypatch.setattr("analysis.sector_rotation.get_stock_tailwind", lambda sym: DummyTailwind())
+
+    eng._watched_indices = []
+    eng.watched_equities = ["RELIANCE"]
+
+    alerts = eng.scan_options_momentum_breakouts()
+    assert len(alerts) == 1, "Should generate exactly 1 options momentum alert"
+    a = alerts[0]
+    # Verify it automatically selected next-month expiry
+    assert a.expiry_date == "2026-10-29", "Must route to next-month expiry date"
+    assert a.contract_symbol == "RELIANCE26OCT3000CE", "Must select next-month contract symbol"
+    assert a.metrics.get("rollover_series") == "NEXT_MONTH"
+    assert a.metrics.get("is_rollover_recommended") is True
+    assert a.metrics.get("rollover_protected") is True
+    assert "NEXT-MONTH ROLLOVER" in a.summary
+
+
+def test_trade_plan_advises_next_month_derivatives_in_expiry_week():
+    """Verifies that TradePlan structure advice explicitly recommends next-month derivatives during settlement week."""
+    from engine.trade_plan import calculate_trade_plan
+
+    # Mock datetime during September 2026 expiry week (e.g. 2026-09-22)
+    ref_dt = datetime(2026, 9, 22, 11, 0, tzinfo=IST)
+
+    tp = calculate_trade_plan(
+        symbol="INFY",
+        direction="BUY",
+        spot=1500.0,
+        timeframe="INTRADAY",
+        ref_dt=ref_dt,
+    )
+    assert "SEBI PHYSICAL SETTLEMENT EXPIRY WEEK" in tp.structure_advice
+    assert "NEXT-MONTH" in tp.structure_advice
+    assert "staggered margin" in tp.structure_advice.lower()
+
