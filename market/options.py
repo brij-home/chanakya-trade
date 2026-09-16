@@ -87,7 +87,7 @@ def get_options_chain(
     try:
         chain = get_data_broker().get_options_chain(underlying, expiry)
         record_source("options", "broker")
-        if chain:
+        if chain and any(float(getattr(c, "last_price", 0.0) or 0.0) > 0 for c in chain):
             _CHAIN_CACHE[cache_key] = (now, chain)
             return chain
     except Exception as e:
@@ -181,7 +181,7 @@ def get_options_snapshot(
         broker_name = get_data_broker_key() or getattr(broker, "name", "broker")
         if broker:
             chain = broker.get_options_chain(underlying, expiry)
-            if chain:
+            if chain and any(float(getattr(c, "last_price", 0.0) or 0.0) > 0 for c in chain):
                 spot = 0.0
                 try:
                     spot_fn = getattr(broker, "get_ltp", None)
@@ -373,3 +373,127 @@ def get_max_pain(underlying: str, expiry: Optional[str] = None) -> Optional[floa
         pain[test_strike] = total_pain
 
     return min(pain, key=pain.get)  # type: ignore[arg-type]
+
+
+# ── Human-Readable Option Formatting ──────────────────────────
+
+
+def parse_option_symbol(symbol: str) -> dict[str, Any]:
+    """
+    Parses Indian exchange option symbols (MCX, NFO, BFO, CDS) into components.
+    e.g. 'MCX:CRUDEOIL26SEP6500CE' ->
+         {'exchange': 'MCX', 'underlying': 'CRUDEOIL', 'expiry_tag': '26SEP', 'strike': 6500.0, 'option_type': 'CE'}
+    """
+    import re
+
+    clean = symbol.strip()
+    exchange = ""
+    if ":" in clean:
+        parts = clean.split(":", 1)
+        exchange = parts[0].upper()
+        clean = parts[1]
+
+    # Pattern 1: Underlying + Expiry(2 digits day/year + 3 letters month or digits) + Strike + (CE|PE)
+    # e.g., CRUDEOIL26SEP6500CE or GOLD26OCT75000PE or NIFTY24DEC24000CE
+    m = re.match(
+        r"^([A-Z]+?)(\d{2}[A-Z]{3}|\d{4,8})?(\d+(?:\.\d+)?)(CE|PE)$",
+        clean,
+        re.IGNORECASE,
+    )
+    if m:
+        underlying = m.group(1).upper()
+        expiry_tag = m.group(2) or ""
+        strike_val = float(m.group(3))
+        opt_type = m.group(4).upper()
+        return {
+            "exchange": exchange,
+            "underlying": underlying,
+            "expiry_tag": expiry_tag,
+            "strike": strike_val,
+            "option_type": opt_type,
+            "raw_symbol": symbol,
+        }
+
+    # Fallback: simple extraction of trailing CE/PE
+    m2 = re.match(r"^(.*?)(?:(\d+(?:\.\d+)?))(CE|PE)$", clean, re.IGNORECASE)
+    if m2:
+        prefix = m2.group(1)
+        strike_val = float(m2.group(2))
+        opt_type = m2.group(3).upper()
+        return {
+            "exchange": exchange,
+            "underlying": prefix.upper(),
+            "expiry_tag": "",
+            "strike": strike_val,
+            "option_type": opt_type,
+            "raw_symbol": symbol,
+        }
+
+    return {
+        "exchange": exchange,
+        "underlying": clean,
+        "expiry_tag": "",
+        "strike": 0.0,
+        "option_type": "",
+        "raw_symbol": symbol,
+    }
+
+
+def format_readable_option_symbol(
+    symbol: str,
+    strike: Optional[float] = None,
+    option_type: Optional[str] = None,
+    expiry: Optional[str] = None,
+) -> str:
+    """
+    Formats raw exchange option tokens into clean, institutional, human-readable labels.
+    Examples:
+      'MCX:CRUDEOIL26SEP6500CE' -> 'CRUDEOIL 6500 CE (26 Sep)'
+      'NATURALGAS26SEP240PE'    -> 'NATURALGAS 240 PE (26 Sep)'
+      'GOLD26OCT75000CE'        -> 'GOLD 75000 CE (26 Oct)'
+      'NIFTY24DEC24000CE'       -> 'NIFTY 24000 CE (24 Dec)'
+    """
+    import re
+    from datetime import datetime
+
+    if not symbol:
+        return ""
+
+    parsed = parse_option_symbol(symbol)
+    underlying = parsed.get("underlying") or symbol.replace("MCX:", "").replace("NFO:", "").strip()
+    s_val = strike if (strike is not None and strike > 0) else parsed.get("strike", 0.0)
+    o_type = option_type if option_type else parsed.get("option_type", "")
+
+    # Format strike nicely (int if whole number, float otherwise)
+    if s_val and s_val > 0:
+        strike_str = f"{int(s_val)}" if s_val == int(s_val) else f"{s_val:g}"
+    else:
+        strike_str = ""
+
+    # Format expiry cleanly
+    exp_display = ""
+    if expiry:
+        try:
+            d = datetime.strptime(expiry, "%Y-%m-%d")
+            exp_display = d.strftime("%d %b")
+        except Exception:
+            exp_display = str(expiry)
+    elif parsed.get("expiry_tag"):
+        tag = parsed["expiry_tag"]
+        # If tag is like '26SEP' -> '26 Sep'
+        m_exp = re.match(r"^(\d{2})([A-Z]{3})$", tag, re.IGNORECASE)
+        if m_exp:
+            exp_display = f"{m_exp.group(1)} {m_exp.group(2).capitalize()}"
+        else:
+            exp_display = tag
+
+    parts = [underlying]
+    if strike_str:
+        parts.append(strike_str)
+    if o_type:
+        parts.append(o_type)
+    base = " ".join(parts).strip()
+
+    if exp_display:
+        return f"{base} ({exp_display})"
+    return base

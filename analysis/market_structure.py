@@ -120,11 +120,203 @@ class MarketStructureReport:
     inducement_level: Optional[float] = None
     inducement_swept: bool = False
 
+    # Price Action Confirmation & Trap Filters
+    confirmation_candle: Optional[str] = None   # e.g. "Hammer", "Bullish Engulfing", None
+    confirmation_confirmed: bool = False         # True = a valid rejection candle is present
+    divergence_type: Optional[str] = None       # "BULLISH_REGULAR" | "BEARISH_REGULAR" | "BULLISH_HIDDEN" | "BEARISH_HIDDEN"
+    divergence_bias: Optional[str] = None       # "BULLISH" | "BEARISH"
+
     summary: str = ""
     actionable_trade_idea: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+# ── Candlestick Confirmation & Divergence Detectors ─────────
+
+
+def detect_confirmation_candle(
+    df: pd.DataFrame,
+    direction: str = "BULLISH",
+) -> dict[str, Any]:
+    """
+    Detects a confirming rejection candle on the last 1–3 bars.
+
+    Bullish patterns: Hammer, Bullish Engulfing, Bullish Pin Bar, Morning Star.
+    Bearish patterns: Shooting Star, Bearish Engulfing, Bearish Pin Bar, Evening Star.
+
+    Returns dict with:
+        confirmed (bool)   — True if a valid pattern found
+        pattern   (str)    — pattern name or "NONE"
+        strength  (int)    — 0-100 confidence in pattern quality
+    """
+    result: dict[str, Any] = {"confirmed": False, "pattern": "NONE", "strength": 0}
+    if df is None or len(df) < 2:
+        return result
+
+    try:
+        # Use last 3 bars for multi-bar patterns
+        last = df.iloc[-1]
+        prev = df.iloc[-2]
+        prev2 = df.iloc[-3] if len(df) >= 3 else prev
+
+        c_o = float(last.get("open", last["close"]))
+        c_c = float(last["close"])
+        c_h = float(last.get("high", c_c))
+        c_l = float(last.get("low", c_c))
+        b_range = max(c_h - c_l, 0.0001)
+        body = abs(c_c - c_o)
+        upper_wick = c_h - max(c_o, c_c)
+        lower_wick = min(c_o, c_c) - c_l
+
+        p_o = float(prev.get("open", prev["close"]))
+        p_c = float(prev["close"])
+        p_h = float(prev.get("high", p_c))
+        p_l = float(prev.get("low", p_c))
+
+        if direction == "BULLISH":
+            # 1. Hammer: lower wick >= 2x body, small upper wick, close > open preferred
+            if lower_wick >= 2.0 * max(body, 0.0001) and upper_wick <= 0.3 * b_range:
+                strength = min(95, 65 + int((lower_wick / b_range) * 40))
+                result = {"confirmed": True, "pattern": "Hammer", "strength": strength}
+
+            # 2. Bullish Engulfing: current bull bar fully engulfs prior bear bar
+            elif c_c > c_o and p_c < p_o and c_c >= p_o and c_o <= p_c:
+                strength = min(95, 70 + int((body / max(p_h - p_l, 0.0001)) * 25))
+                result = {"confirmed": True, "pattern": "Bullish Engulfing", "strength": strength}
+
+            # 3. Bullish Pin Bar: long lower wick (≥55% of range), tiny body at top
+            elif lower_wick >= 0.55 * b_range and body <= 0.25 * b_range:
+                result = {"confirmed": True, "pattern": "Bullish Pin Bar", "strength": 80}
+
+            # 4. Morning Star (3-bar): big bear → small doji/inside → big bull
+            elif len(df) >= 3:
+                p2_o = float(prev2.get("open", prev2["close"]))
+                p2_c = float(prev2["close"])
+                p2_range = max(abs(p2_o - p2_c), 0.0001)
+                p_body = abs(p_o - p_c)
+                if p2_c < p2_o and p_body <= 0.35 * p2_range and c_c > c_o and body >= 0.5 * p2_range:
+                    result = {"confirmed": True, "pattern": "Morning Star", "strength": 88}
+
+        else:  # BEARISH
+            # 1. Shooting Star: upper wick >= 2x body, small lower wick
+            if upper_wick >= 2.0 * max(body, 0.0001) and lower_wick <= 0.3 * b_range:
+                strength = min(95, 65 + int((upper_wick / b_range) * 40))
+                result = {"confirmed": True, "pattern": "Shooting Star", "strength": strength}
+
+            # 2. Bearish Engulfing: current bear bar fully engulfs prior bull bar
+            elif c_c < c_o and p_c > p_o and c_c <= p_o and c_o >= p_c:
+                strength = min(95, 70 + int((body / max(p_h - p_l, 0.0001)) * 25))
+                result = {"confirmed": True, "pattern": "Bearish Engulfing", "strength": strength}
+
+            # 3. Bearish Pin Bar: long upper wick (≥55% of range), tiny body at bottom
+            elif upper_wick >= 0.55 * b_range and body <= 0.25 * b_range:
+                result = {"confirmed": True, "pattern": "Bearish Pin Bar", "strength": 80}
+
+            # 4. Evening Star (3-bar): big bull → small doji → big bear
+            elif len(df) >= 3:
+                p2_o = float(prev2.get("open", prev2["close"]))
+                p2_c = float(prev2["close"])
+                p2_range = max(abs(p2_o - p2_c), 0.0001)
+                p_body = abs(p_o - p_c)
+                if p2_c > p2_o and p_body <= 0.35 * p2_range and c_c < c_o and body >= 0.5 * p2_range:
+                    result = {"confirmed": True, "pattern": "Evening Star", "strength": 88}
+
+    except Exception:
+        pass
+
+    return result
+
+
+def detect_divergence(
+    df: pd.DataFrame,
+    rsi_period: int = 14,
+    lookback: int = 20,
+) -> dict[str, Any]:
+    """
+    Detects RSI divergence on the last `lookback` bars.
+
+    Regular Bullish:  Price makes lower low, RSI makes higher low  → reversal up
+    Regular Bearish:  Price makes higher high, RSI makes lower high → reversal down
+    Hidden Bullish:   Price makes higher low, RSI makes lower low   → trend continuation up
+    Hidden Bearish:   Price makes lower high, RSI makes higher high → trend continuation down
+
+    Returns dict with:
+        type  (str)  — "BULLISH_REGULAR" | "BEARISH_REGULAR" | "BULLISH_HIDDEN" | "BEARISH_HIDDEN" | "NONE"
+        bias  (str)  — "BULLISH" | "BEARISH" | "NONE"
+    """
+    result: dict[str, Any] = {"type": "NONE", "bias": "NONE"}
+    if df is None or len(df) < max(rsi_period + 5, lookback + 2):
+        return result
+
+    try:
+        closes = df["close"].astype(float)
+        highs = df["high"].astype(float) if "high" in df.columns else closes
+        lows = df["low"].astype(float) if "low" in df.columns else closes
+
+        # RSI(14)
+        delta = closes.diff()
+        gain = delta.clip(lower=0)
+        loss = (-delta).clip(lower=0)
+        avg_gain = gain.ewm(alpha=1 / rsi_period, min_periods=rsi_period, adjust=False).mean()
+        avg_loss = loss.ewm(alpha=1 / rsi_period, min_periods=rsi_period, adjust=False).mean()
+        rsi = 100 - (100 / (1 + avg_gain / avg_loss.replace(0, float("nan"))))
+
+        # Use last `lookback` bars for pivot comparison
+        window = min(lookback, len(df))
+        price_lows = lows.iloc[-window:]
+        price_highs = highs.iloc[-window:]
+        rsi_win = rsi.iloc[-window:]
+
+        # Split into first half vs second half for simple pivot comparison
+        mid = window // 2
+        if mid < 3:
+            return result
+
+        price_low1 = float(price_lows.iloc[:mid].min())
+        price_low2 = float(price_lows.iloc[mid:].min())
+        price_high1 = float(price_highs.iloc[:mid].max())
+        price_high2 = float(price_highs.iloc[mid:].max())
+
+        rsi_low1 = float(rsi_win.iloc[:mid].min())
+        rsi_low2 = float(rsi_win.iloc[mid:].min())
+        rsi_high1 = float(rsi_win.iloc[:mid].max())
+        rsi_high2 = float(rsi_win.iloc[mid:].max())
+
+        # Tolerance: 0.3% for price, 2 pts for RSI
+        def price_lower(a: float, b: float) -> bool:
+            return b < a * 0.997
+
+        def price_higher(a: float, b: float) -> bool:
+            return b > a * 1.003
+
+        def rsi_higher(a: float, b: float) -> bool:
+            return b > a + 2.0
+
+        def rsi_lower(a: float, b: float) -> bool:
+            return b < a - 2.0
+
+        # Regular Bullish: price LL, RSI HL
+        if price_lower(price_low1, price_low2) and rsi_higher(rsi_low1, rsi_low2):
+            return {"type": "BULLISH_REGULAR", "bias": "BULLISH"}
+
+        # Regular Bearish: price HH, RSI LH
+        if price_higher(price_high1, price_high2) and rsi_lower(rsi_high1, rsi_high2):
+            return {"type": "BEARISH_REGULAR", "bias": "BEARISH"}
+
+        # Hidden Bullish: price HL, RSI LL (trend continuation up)
+        if price_higher(price_low1, price_low2) and rsi_lower(rsi_low1, rsi_low2):
+            return {"type": "BULLISH_HIDDEN", "bias": "BULLISH"}
+
+        # Hidden Bearish: price LH, RSI HH (trend continuation down)
+        if price_lower(price_high1, price_high2) and rsi_higher(rsi_high1, rsi_high2):
+            return {"type": "BEARISH_HIDDEN", "bias": "BEARISH"}
+
+    except Exception:
+        pass
+
+    return result
 
 
 # ── Core SMC Algorithms ───────────────────────────────────────
@@ -820,4 +1012,217 @@ def analyze_market_structure(
         inducement_swept=inducement_swept,
         summary=summary,
         actionable_trade_idea=action,
+        # Price Action Confirmation (candle rejection at key level)
+        **_build_confirmation_fields(df, structure_score),
+        # RSI Divergence (trap filter)
+        **_build_divergence_fields(df, structure_score),
     )
+
+
+def _build_confirmation_fields(df: pd.DataFrame, structure_score: int) -> dict[str, Any]:
+    """Helper: compute confirmation candle fields for MarketStructureReport."""
+    try:
+        direction = "BULLISH" if structure_score >= 0 else "BEARISH"
+        conf = detect_confirmation_candle(df, direction=direction)
+        return {
+            "confirmation_candle": conf["pattern"] if conf["confirmed"] else None,
+            "confirmation_confirmed": conf["confirmed"],
+        }
+    except Exception:
+        return {"confirmation_candle": None, "confirmation_confirmed": False}
+
+
+def _build_divergence_fields(df: pd.DataFrame, structure_score: int) -> dict[str, Any]:
+    """Helper: compute RSI divergence fields for MarketStructureReport."""
+    try:
+        div = detect_divergence(df)
+        return {
+            "divergence_type": div["type"] if div["type"] != "NONE" else None,
+            "divergence_bias": div["bias"] if div["bias"] != "NONE" else None,
+        }
+    except Exception:
+        return {"divergence_type": None, "divergence_bias": None}
+
+
+# ── Multi-Timeframe (MTF) Alignment Matrix ────────────────────
+
+
+def check_mtf_structural_alignment(
+    symbol: str,
+    exchange: str = "MCX",
+    ltp: float = 0.0,
+    direction: str = "BULLISH",
+    df_5m: Optional[pd.DataFrame] = None,
+    df_1h: Optional[pd.DataFrame] = None,
+) -> dict[str, Any]:
+    """
+    3-Tier MTF Alignment Matrix: 5m → 15m → 1H cascade.
+
+    Returns alignment_count (0–3): how many timeframes agree with `direction`.
+    Callers should require alignment_count >= 2 for high-conviction trades.
+    """
+    df_hourly = df_1h
+    if df_hourly is None or df_hourly.empty:
+        if df_5m is not None and len(df_5m) >= 24:
+            try:
+                # Resample 5m to 1h
+                resampled = (
+                    df_5m.resample("1h")
+                    .agg(
+                        {
+                            "open": "first",
+                            "high": "max",
+                            "low": "min",
+                            "close": "last",
+                            "volume": "sum",
+                        }
+                    )
+                    .dropna()
+                )
+                if len(resampled) >= 5:
+                    df_hourly = resampled
+            except Exception:
+                df_hourly = None
+
+    if df_hourly is None or df_hourly.empty:
+        try:
+            from market.history import get_ohlcv
+
+            df_hourly = get_ohlcv(symbol, exchange=exchange, interval="1h", days=10)
+        except Exception:
+            df_hourly = None
+
+    if df_hourly is None or len(df_hourly) < 5:
+        return {
+            "is_aligned": True,
+            "htf_trend": "NEUTRAL",
+            "wall_collision": False,
+            "nearest_wall": 0.0,
+            "distance_pct": 99.0,
+            "reason": "Insufficient 1H data; defaulting to neutral",
+        }
+
+    closes = df_hourly["close"] if "close" in df_hourly.columns else df_hourly["Close"]
+    highs = df_hourly["high"] if "high" in df_hourly.columns else df_hourly["High"]
+    lows = df_hourly["low"] if "low" in df_hourly.columns else df_hourly["Low"]
+
+    # 2. 1-Hour Trend Bias via EMAs (EMA 20 & EMA 50)
+    ema20 = float(closes.ewm(span=min(20, len(closes)), adjust=False).mean().iloc[-1])
+    ema50 = float(closes.ewm(span=min(50, len(closes)), adjust=False).mean().iloc[-1])
+    cur_p = ltp if ltp > 0 else float(closes.iloc[-1])
+
+    is_htf_bull = cur_p >= ema20 and ema20 >= ema50 * 0.998
+    is_htf_bear = cur_p <= ema20 and ema20 <= ema50 * 1.002
+    htf_trend = "BULLISH" if is_htf_bull else ("BEARISH" if is_htf_bear else "NEUTRAL")
+
+    is_aligned = (direction == "BULLISH" and htf_trend != "BEARISH") or (
+        direction == "BEARISH" and htf_trend != "BULLISH"
+    )
+
+    # 3. Detect 1-Hour Resistance / Support Walls (Swing Highs / Lows in last 48 bars)
+    recent_lookback = min(48, len(df_hourly))
+    recent_highs = highs.iloc[-recent_lookback:]
+    recent_lows = lows.iloc[-recent_lookback:]
+
+    wall_collision = False
+    nearest_wall = 0.0
+    dist_pct = 99.0
+
+    if direction == "BULLISH":
+        upper_walls = [float(h) for h in recent_highs if float(h) > cur_p]
+        if upper_walls:
+            nearest_wall = min(upper_walls)
+            dist_pct = round(((nearest_wall - cur_p) / cur_p) * 100, 2)
+            if dist_pct <= 0.35:
+                wall_collision = True
+    else:
+        lower_walls = [float(l) for l in recent_lows if float(l) < cur_p]
+        if lower_walls:
+            nearest_wall = max(lower_walls)
+            dist_pct = round(((cur_p - nearest_wall) / cur_p) * 100, 2)
+            if dist_pct <= 0.35:
+                wall_collision = True
+
+    # ── Tier 2: 15-minute alignment (resample 5m → 15m) ────────
+    alignment_count = 1 if is_aligned else 0  # 1H is tier 3
+    tf_15m_trend = "NEUTRAL"
+    tf_5m_trend = "NEUTRAL"
+
+    if df_5m is not None and len(df_5m) >= 15:
+        try:
+            # 15-min: resample from 5m
+            df_15m: Optional[pd.DataFrame] = None
+            try:
+                if hasattr(df_5m.index, "freq") or isinstance(df_5m.index, pd.DatetimeIndex):
+                    df_15m = (
+                        df_5m.resample("15min")
+                        .agg({"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"})
+                        .dropna()
+                    )
+            except Exception:
+                df_15m = None
+
+            if df_15m is not None and len(df_15m) >= 5:
+                c15 = df_15m["close"] if "close" in df_15m.columns else df_15m["Close"]
+                ema9_15 = float(c15.ewm(span=min(9, len(c15)), adjust=False).mean().iloc[-1])
+                ema21_15 = float(c15.ewm(span=min(21, len(c15)), adjust=False).mean().iloc[-1])
+                ltp_15 = float(c15.iloc[-1])
+                if ltp_15 >= ema9_15 and ema9_15 >= ema21_15 * 0.998:
+                    tf_15m_trend = "BULLISH"
+                elif ltp_15 <= ema9_15 and ema9_15 <= ema21_15 * 1.002:
+                    tf_15m_trend = "BEARISH"
+
+                if (
+                    (direction == "BULLISH" and tf_15m_trend == "BULLISH")
+                    or (direction == "BEARISH" and tf_15m_trend == "BEARISH")
+                ):
+                    alignment_count += 1
+
+            # ── Tier 1: 5-minute CHoCH / momentum check ─────────
+            c5 = df_5m["close"] if "close" in df_5m.columns else df_5m["Close"]
+            h5 = df_5m["high"] if "high" in df_5m.columns else df_5m["High"]
+            l5 = df_5m["low"] if "low" in df_5m.columns else df_5m["Low"]
+
+            # Simple 5m CHoCH: compare last 5 bars to prior 5 bars
+            if len(c5) >= 10:
+                recent5 = c5.iloc[-5:]
+                prior5 = c5.iloc[-10:-5]
+                recent_high = float(h5.iloc[-5:].max())
+                recent_low = float(l5.iloc[-5:].min())
+                prior_high = float(h5.iloc[-10:-5].max())
+                prior_low = float(l5.iloc[-10:-5].min())
+
+                # 5m Bullish: recent low > prior low AND recent close > prior close avg
+                if recent_low > prior_low * 1.001 and float(recent5.mean()) > float(prior5.mean()):
+                    tf_5m_trend = "BULLISH"
+                # 5m Bearish: recent high < prior high AND recent close < prior close avg
+                elif recent_high < prior_high * 0.999 and float(recent5.mean()) < float(prior5.mean()):
+                    tf_5m_trend = "BEARISH"
+
+                if (
+                    (direction == "BULLISH" and tf_5m_trend == "BULLISH")
+                    or (direction == "BEARISH" and tf_5m_trend == "BEARISH")
+                ):
+                    alignment_count += 1
+
+        except Exception:
+            pass
+
+    # Composite alignment: require >= 2/3 timeframes aligned for strong conviction
+    is_aligned_composite = alignment_count >= 2 or (
+        is_aligned and not wall_collision  # 1H aligned + no wall = acceptable
+    )
+
+    return {
+        "is_aligned": is_aligned_composite,
+        "is_htf_aligned": is_aligned,
+        "htf_trend": htf_trend,
+        "tf_15m_trend": tf_15m_trend,
+        "tf_5m_trend": tf_5m_trend,
+        "alignment_count": alignment_count,  # 0–3
+        "wall_collision": wall_collision,
+        "nearest_wall": nearest_wall,
+        "distance_pct": dist_pct,
+        "ema20": round(ema20, 2),
+        "ema50": round(ema50, 2),
+    }

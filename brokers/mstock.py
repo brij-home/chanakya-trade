@@ -748,6 +748,11 @@ class MStockAPI(BrokerAPI):
                 else quotes
             )
 
+        # 1. Partition and resolve tokens for batch query
+        exchange_tokens: dict[str, list[str]] = {}
+        token_to_targets: dict[tuple[str, str], list[tuple[str, str]]] = {}
+        unresolved: list[tuple[str, str, str]] = []
+
         for inst in inst_list:
             # Fast filter: mStock only supports Indian NSE/BSE equities & indices
             if any(
@@ -756,54 +761,71 @@ class MStockAPI(BrokerAPI):
             ):
                 continue
 
-            clean_sym = inst.replace("NSE:", "").replace("BSE:", "").strip()
-            exchange = "BSE" if inst.startswith("BSE:") else "NSE"
-            quote_obj = None
+            clean_sym = (
+                inst.replace("NSE:", "")
+                .replace("BSE:", "")
+                .replace("NFO:", "")
+                .replace("BFO:", "")
+                .strip()
+            )
+            if inst.startswith("NSE:"):
+                exchange = "NSE"
+            elif inst.startswith("BSE:"):
+                exchange = "BSE"
+            elif inst.startswith("BFO:"):
+                exchange = "BFO"
+            elif inst.startswith("NFO:"):
+                exchange = "NFO"
+            elif re.search(r"\d+(?:CE|PE)$", clean_sym) or clean_sym.endswith("-FUT") or clean_sym.endswith("FUT"):
+                exchange = "NFO"
+            else:
+                exchange = "NSE"
 
             token = self.get_symbol_token(clean_sym, exchange)
-            try:
-                url = f"{MSTOCK_BASE_URL}/openapi/typeb/instruments/quote"
-                resp = None
-                if token and token != clean_sym:
-                    q_payload = {"mode": "OHLC", "exchangeTokens": {exchange: [str(token)]}}
-                    try:
-                        resp = self._client.post(
-                            url, json=q_payload, headers=self._headers(), timeout=2.5
-                        )
-                    except Exception:
-                        resp = None
-                if (resp is None or resp.status_code != 200) and not clean_sym.startswith("MCX"):
-                    try:
-                        resp = self._client.get(
-                            url,
-                            params={"symbol": clean_sym, "exchange": exchange},
-                            headers=self._headers(),
-                            timeout=2.5,
-                        )
-                    except Exception:
-                        resp = None
+            if token and token != clean_sym:
+                token_str = str(token)
+                exchange_tokens.setdefault(exchange, []).append(token_str)
+                token_to_targets.setdefault((exchange, token_str), []).append((inst, clean_sym))
+            else:
+                unresolved.append((inst, clean_sym, exchange))
 
-                if resp is not None and resp.status_code == 200:
-                    try:
-                        data = resp.json()
-                    except Exception:
-                        data = {}
-                    if isinstance(data, list) and data:
-                        data = data[0]
-                    fetched = (
-                        data.get("data", {}).get("fetched", [])
-                        if isinstance(data.get("data"), dict)
-                        else []
-                    )
-                    if fetched:
-                        item = fetched[0]
-                        ltp = float(item.get("ltp") or 0.0)
+        # 2. Batch fetch via official Type B exchangeTokens API (single HTTP POST)
+        url = f"{MSTOCK_BASE_URL}/openapi/typeb/instruments/quote"
+        if exchange_tokens:
+            try:
+                dedup_payload = {
+                    exch: list(dict.fromkeys(toks)) for exch, toks in exchange_tokens.items()
+                }
+                q_payload = {"mode": "OHLC", "exchangeTokens": dedup_payload}
+                resp = self._client.post(
+                    url, json=q_payload, headers=self._headers(), timeout=3.5
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    raw_data = data.get("data") or data.get("result") or data
+                    if isinstance(raw_data, dict):
+                        fetched = raw_data.get("fetched", [])
+                        if not fetched and isinstance(raw_data.get("data"), list):
+                            fetched = raw_data.get("data")
+                    elif isinstance(raw_data, list):
+                        fetched = raw_data
+                    else:
+                        fetched = []
+
+                    for item in fetched:
+                        exch = item.get("exchange") or "NSE"
+                        tok = str(item.get("symbolToken") or item.get("token") or "")
+                        ltp = float(item.get("ltp") or item.get("lastTradedPrice") or item.get("lastPrice") or 0.0)
+                        if ltp <= 0:
+                            continue
                         close = float(item.get("close") or ltp)
                         change = ltp - close
                         change_pct = (change / close * 100.0) if close else 0.0
-                        if ltp > 0:
-                            quote_obj = Quote(
-                                symbol=clean_sym,
+
+                        targets = token_to_targets.get((exch, tok)) or []
+                        for orig_inst, target_sym in targets:
+                            q_obj = Quote(
+                                symbol=target_sym,
                                 last_price=ltp,
                                 open=float(item.get("open") or ltp),
                                 high=float(item.get("high") or ltp),
@@ -813,32 +835,53 @@ class MStockAPI(BrokerAPI):
                                 change=round(change, 2),
                                 change_pct=round(change_pct, 2),
                             )
-                    else:
-                        res = data.get("result") or data.get("data") or data
-                        if isinstance(res, list) and res:
-                            res = res[0]
-                        if isinstance(res, dict) and (res.get("ltp") or res.get("lastPrice")):
-                            ltp = float(res.get("ltp") or res.get("lastPrice") or 0.0)
-                            close = float(res.get("close") or res.get("prevClose") or ltp)
-                            change = ltp - close
-                            change_pct = (change / close * 100.0) if close else 0.0
-                            if ltp > 0:
-                                quote_obj = Quote(
-                                    symbol=clean_sym,
-                                    last_price=ltp,
-                                    open=float(res.get("open") or ltp),
-                                    high=float(res.get("high") or ltp),
-                                    low=float(res.get("low") or ltp),
-                                    close=close,
-                                    volume=int(res.get("volume") or 0),
-                                    change=round(change, 2),
-                                    change_pct=round(change_pct, 2),
-                                )
-            except Exception:
+                            quotes[orig_inst] = q_obj
+                            quotes[target_sym] = q_obj
+            except Exception as e:
                 pass
 
-            if quote_obj is not None:
-                quotes[inst] = quote_obj
+        # 3. Fallback for remaining unresolved instruments
+        remaining = [
+            (inst, sym, exch)
+            for inst, sym, exch in unresolved
+            if inst not in quotes and sym not in quotes
+        ]
+        for inst, clean_sym, exchange in remaining:
+            if clean_sym.startswith("MCX"):
+                continue
+            try:
+                resp = self._client.get(
+                    url,
+                    params={"symbol": clean_sym, "exchange": exchange},
+                    headers=self._headers(),
+                    timeout=2.5,
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    res = data.get("result") or data.get("data") or data
+                    if isinstance(res, list) and res:
+                        res = res[0]
+                    if isinstance(res, dict) and (res.get("ltp") or res.get("lastPrice")):
+                        ltp = float(res.get("ltp") or res.get("lastPrice") or 0.0)
+                        close = float(res.get("close") or res.get("prevClose") or ltp)
+                        change = ltp - close
+                        change_pct = (change / close * 100.0) if close else 0.0
+                        if ltp > 0:
+                            q_obj = Quote(
+                                symbol=clean_sym,
+                                last_price=ltp,
+                                open=float(res.get("open") or ltp),
+                                high=float(res.get("high") or ltp),
+                                low=float(res.get("low") or ltp),
+                                close=close,
+                                volume=int(res.get("volume") or 0),
+                                change=round(change, 2),
+                                change_pct=round(change_pct, 2),
+                            )
+                            quotes[inst] = q_obj
+                            quotes[clean_sym] = q_obj
+            except Exception:
+                pass
 
         if is_single:
             return quotes.get(instruments) or Quote(
@@ -1143,7 +1186,10 @@ class MStockAPI(BrokerAPI):
                                 except Exception:
                                     pass
 
-                            if contracts:
+                            if contracts and any(
+                                float(getattr(c, "last_price", 0.0) or 0.0) > 0
+                                for c in contracts
+                            ):
                                 return contracts
             except Exception:
                 pass

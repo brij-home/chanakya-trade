@@ -1016,10 +1016,14 @@ def calculate_option_execution_plan(
             t1_prem = max(round(option_ltp + (1.6 * opt_risk), 2), min(raw_t1_prem, round(option_ltp * 1.28, 2)))
             if round(option_ltp * 1.15, 2) <= raw_t1_prem <= round(option_ltp * 1.30, 2):
                 t1_prem = raw_t1_prem
+            # Strict safety ceiling for intraday: T1 cannot exceed +35% of premium
+            t1_prem = min(t1_prem, round(option_ltp * 1.35, 2))
 
             t2_prem = max(round(t1_prem + (1.2 * opt_risk), 2), min(raw_t2_prem, round(option_ltp * 1.50, 2)))
             if round(option_ltp * 1.30, 2) <= raw_t2_prem <= round(option_ltp * 1.55, 2):
                 t2_prem = raw_t2_prem
+            # Strict safety ceiling for intraday: T2 cannot exceed +55% of premium
+            t2_prem = min(t2_prem, round(option_ltp * 1.55, 2))
 
             t3_prem = max(round(t2_prem + (1.5 * opt_risk), 2), round(option_ltp * 1.75, 2))
             if raw_t3_prem and raw_t3_prem > t2_prem:

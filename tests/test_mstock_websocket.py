@@ -292,3 +292,97 @@ def test_mstock_websocket_subscription_messages():
         client.unsubscribe(["26000"])
         assert "26000" not in client._subscribed_tokens[1]
         assert "26009" in client._subscribed_tokens[1]
+
+
+def test_mstock_batch_quote_payload():
+    """Verify that MStockAPI.get_quote batches multiple tokens in a single HTTP POST."""
+    from brokers.mstock import MStockAPI
+    import httpx
+
+    api = MStockAPI()
+    api._authenticated = True
+    api._token = "mock_jwt_token"
+
+    captured_requests = []
+
+    def mock_post(url, headers=None, json=None, timeout=None):
+        captured_requests.append({"url": url, "json": json})
+        # Return mock OHLC response
+        return httpx.Response(
+            200,
+            json={
+                "status": True,
+                "data": [
+                    {
+                        "exchange": "NSE",
+                        "token": "26000",
+                        "tradingSymbol": "NIFTY 50",
+                        "lastTradedPrice": 24500.0,
+                        "open": 24400.0,
+                        "high": 24550.0,
+                        "low": 24350.0,
+                        "close": 24420.0,
+                        "volume": 1000000,
+                    },
+                    {
+                        "exchange": "NSE",
+                        "token": "2885",
+                        "tradingSymbol": "RELIANCE",
+                        "lastTradedPrice": 3000.0,
+                        "open": 2980.0,
+                        "high": 3010.0,
+                        "low": 2975.0,
+                        "close": 2990.0,
+                        "volume": 500000,
+                    },
+                ],
+            },
+        )
+
+    with patch.object(api._client, "post", side_effect=mock_post):
+        quotes = api.get_quote(["NSE:NIFTY 50", "NSE:RELIANCE"])
+
+        # Crucial: Exactly 1 single batch HTTP POST call was made, NOT 2 sequential calls!
+        assert len(captured_requests) == 1
+        req_json = captured_requests[0]["json"]
+        assert req_json["mode"] == "OHLC"
+        assert "26000" in req_json["exchangeTokens"]["NSE"]
+        assert "2885" in req_json["exchangeTokens"]["NSE"]
+
+        # Results mapped properly
+        assert "NSE:NIFTY 50" in quotes
+        assert quotes["NSE:NIFTY 50"].ltp == 24500.0
+        assert "NSE:RELIANCE" in quotes
+        assert quotes["NSE:RELIANCE"].ltp == 3000.0
+
+
+def test_ws_quotes_retrieves_mstock_tick():
+    """Verify that market/quotes.py _ws_quotes reads from mstock_ws stream."""
+    from market.quotes import _ws_quotes
+    from market.mstock_websocket import get_mstock_ws
+
+    mstock_ws = get_mstock_ws()
+    tick = MStockTick(
+        mode=3,
+        exchange_type=1,
+        token="26000",
+        symbol="NSE:NIFTY 50",
+        sequence=99,
+        timestamp=time.time(),
+        ltp=24680.50,
+        open=24500.0,
+        high=24700.0,
+        low=24480.0,
+        close=24520.0,
+        volume=1200000,
+    )
+    mstock_ws._ticks["NSE:NIFTY 50"] = tick
+
+    with patch("market.quotes.get_data_broker_key", return_value="mstock"):
+        res = _ws_quotes(["NSE:NIFTY 50"], correlation_id="test_cid")
+        assert "NSE:NIFTY 50" in res
+        q = res["NSE:NIFTY 50"]
+        assert q.ltp == 24680.50
+        assert q.source == "STREAM"
+        assert q.provider == "mstock"
+

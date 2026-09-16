@@ -92,9 +92,59 @@ def _enrich_quote(
 def _ws_quotes(instruments: list[str], *, correlation_id: str) -> dict[str, Quote]:
     """Try WebSocket cache first (instant, no API call)."""
     try:
-        # Fyers' legacy singleton cache must never outrank a selected non-Fyers
-        # data provider.  Other providers can register their own normalized stream.
-        if get_data_broker_key() != "fyers":
+        broker_key = get_data_broker_key()
+        result: dict[str, Quote] = {}
+
+        # 1. m.Stock WebSocket
+        if broker_key == "mstock":
+            try:
+                from market.mstock_websocket import mstock_ws
+                from market.websocket import ws_manager
+
+                missing = []
+                for inst in instruments:
+                    clean = inst.split(":")[-1].strip().upper()
+                    tick = mstock_ws.get_tick(inst) or mstock_ws.get_tick(clean)
+                    if not tick or getattr(tick, "ltp", 0.0) <= 0:
+                        c_tick = ws_manager.get_tick(inst) or ws_manager.get_tick(clean)
+                        if c_tick and getattr(c_tick, "ltp", 0.0) > 0:
+                            tick = c_tick
+                    if tick and getattr(tick, "ltp", 0.0) > 0:
+                        result[inst] = _enrich_quote(
+                            Quote(
+                                symbol=clean,
+                                last_price=float(tick.ltp),
+                                open=getattr(tick, "open", None),
+                                high=getattr(tick, "high", None),
+                                low=getattr(tick, "low", None),
+                                close=getattr(tick, "close", None),
+                                volume=int(getattr(tick, "volume", 0) or 0),
+                                change=float(getattr(tick, "change", 0.0) or 0.0),
+                                change_pct=float(getattr(tick, "change_pct", 0.0) or 0.0),
+                                exchange_timestamp=(
+                                    datetime.fromtimestamp(tick.timestamp, tz=timezone.utc).isoformat()
+                                    if getattr(tick, "timestamp", 0) and tick.timestamp > 0
+                                    else None
+                                ),
+                            ),
+                            instrument=inst,
+                            provider="mstock",
+                            source="STREAM",
+                            correlation_id=correlation_id,
+                        )
+                    else:
+                        missing.append(inst)
+
+                # Auto-subscribe missing instruments to mstock_ws if connected
+                if missing and getattr(mstock_ws, "is_connected", False):
+                    mstock_ws.subscribe(missing)
+
+                return result
+            except Exception:
+                return {}
+
+        # 2. Fyers WebSocket
+        if broker_key != "fyers":
             return {}
 
         from market.websocket import ws_manager
@@ -102,7 +152,6 @@ def _ws_quotes(instruments: list[str], *, correlation_id: str) -> dict[str, Quot
         if not ws_manager.connected:
             return {}
 
-        result = {}
         missing = []
         for inst in instruments:
             tick = ws_manager.get_tick(inst)

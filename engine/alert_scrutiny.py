@@ -34,6 +34,25 @@ logger = logging.getLogger("engine.alert_scrutiny")
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Institutional MCX Commodity Minimum Stop-Loss Volatility Floors (Points)
+# Derived from empirical daily ATR and tick-size distribution to eliminate
+# SUB_ATR_NOISE_WHIPSAW liquidations in volatile commodity contracts.
+# ─────────────────────────────────────────────────────────────────────────────
+COMMODITY_MIN_SL_FLOORS: dict[str, float] = {
+    "CRUDEOIL": 80.0,
+    "CRUDEOILM": 80.0,
+    "NATURALGAS": 6.0,
+    "NATGASMINI": 6.0,
+    "GOLD": 250.0,
+    "GOLDM": 250.0,
+    "SILVER": 450.0,
+    "SILVERM": 450.0,
+    "COPPER": 6.0,
+    "ZINC": 2.5,
+    "ALUMINIUM": 2.5,
+}
+
 
 @dataclass
 class ScrutinyResult:
@@ -230,6 +249,21 @@ class AlertScrutinyAuditor:
             )
         flags["rr_valid"] = True
 
+        sym = str(
+            getattr(alert, "symbol", "")
+            or (alert.get("symbol", "") if isinstance(alert, dict) else "")
+        ).upper()
+        clean_sym = (
+            sym.replace(".NS", "")
+            .replace(".BO", "")
+            .replace("NSE:", "")
+            .replace("BSE:", "")
+            .replace("MCX:", "")
+            .replace("NFO:", "")
+            .replace("CDS:", "")
+            .strip()
+        )
+
         # 4b. Underlying Trade Plan Asymmetry Sanity Check
         plan = getattr(alert, "actionable_plan", {}) or {}
         tp_dict = plan.get("trade_plan") if isinstance(plan, dict) else None
@@ -243,6 +277,116 @@ class AlertScrutinyAuditor:
                     f"Sanity Veto: Underlying trade plan rejected for poor asymmetry ({tp_dict.get('asymmetry_note') or 'Unfavorable structural R:R'})",
                     flags,
                 )
+
+        # 4c. MCX Commodity Minimum Stop-Loss Volatility Floor Gate
+        # Disqualify setups with tight noise stops that trigger SUB_ATR_NOISE_WHIPSAW liquidations
+        if clean_sym in COMMODITY_MIN_SL_FLOORS and not is_option_premium_levels:
+            min_floor = COMMODITY_MIN_SL_FLOORS[clean_sym]
+            if risk_pts < (min_floor * 0.95):  # 5% precision tolerance
+                flags["risk_within_bounds"] = False
+                return (
+                    False,
+                    f"Sub-ATR Noise Trap: {clean_sym} stop-loss ({risk_pts:.1f} pts) < minimum structural volatility floor ({min_floor:.1f} pts). Mandate wider stop or defined-risk options.",
+                    flags,
+                )
+
+        # 4d. MCX High-Impact Scheduled Inventory Blackout Gate
+        if clean_sym in ("CRUDEOIL", "CRUDEOILM", "NATURALGAS", "NATGASMINI"):
+            alert_dt = None
+            raw_ts = (
+                getattr(alert, "created_at", None)
+                or getattr(alert, "timestamp", None)
+                or (
+                    alert.get("created_at") or alert.get("timestamp")
+                    if isinstance(alert, dict)
+                    else None
+                )
+            )
+            if raw_ts and isinstance(raw_ts, str):
+                try:
+                    clean_ts = raw_ts.replace(" IST", "").strip()
+                    try:
+                        alert_dt = datetime.strptime(clean_ts, "%Y-%m-%d %H:%M:%S").replace(
+                            tzinfo=IST
+                        )
+                    except ValueError:
+                        alert_dt = datetime.fromisoformat(
+                            clean_ts.replace("Z", "+00:00")
+                        ).astimezone(IST)
+                except Exception:
+                    pass
+            if not alert_dt:
+                alert_dt = datetime.now(IST)
+
+            hh, mm = alert_dt.hour, alert_dt.minute
+            wday = alert_dt.weekday()
+
+            # Wednesday EIA Weekly Petroleum Status Report (Crude): 19:45 - 20:45 IST
+            if clean_sym in ("CRUDEOIL", "CRUDEOILM") and wday == 2:
+                if (hh == 19 and mm >= 45) or (hh == 20 and mm <= 45):
+                    return (
+                        False,
+                        f"EIA Crude Inventory Blackout: High-impact US weekly petroleum status report release active ({hh:02d}:{mm:02d} IST). Disallow fresh breakout entries.",
+                        flags,
+                    )
+
+            # Thursday EIA Natural Gas Storage Report: 19:45 - 20:45 IST
+            if clean_sym in ("NATURALGAS", "NATGASMINI") and wday == 3:
+                if (hh == 19 and mm >= 45) or (hh == 20 and mm <= 45):
+                    return (
+                        False,
+                        f"EIA Natural Gas Storage Blackout: High-impact US gas storage report release active ({hh:02d}:{mm:02d} IST). Disallow fresh breakout entries.",
+                        flags,
+                    )
+
+        # 4e. Global Macro Divergence Gate for MCX Bullion & Energy (Futures)
+        if (
+            not is_option_premium_levels
+            and clean_sym in ("GOLD", "GOLDM", "SILVER", "SILVERM", "CRUDEOIL", "CRUDEOILM")
+        ):
+            try:
+                from market.macro import get_macro_snapshot
+
+                macro_snap = get_macro_snapshot()
+                if macro_snap:
+                    # Gold/Silver vs DXY
+                    if (
+                        clean_sym in ("GOLD", "GOLDM", "SILVER", "SILVERM")
+                        and macro_snap.dxy_change is not None
+                    ):
+                        dxy_c = float(macro_snap.dxy_change)
+                        if direction in ("BULLISH", "LONG", "BUY") and dxy_c >= 0.35:
+                            return (
+                                False,
+                                f"Global Macro Divergence: US Dollar Index (DXY) surging +{dxy_c:.2f}% creates heavy headwind for bullion longs.",
+                                flags,
+                            )
+                        elif direction in ("BEARISH", "SHORT", "SELL") and dxy_c <= -0.35:
+                            return (
+                                False,
+                                f"Global Macro Divergence: US Dollar Index (DXY) dumping {dxy_c:.2f}% creates heavy short squeeze risk for bullion shorts.",
+                                flags,
+                            )
+                    # Crude Oil vs Brent
+                    elif (
+                        clean_sym in ("CRUDEOIL", "CRUDEOILM")
+                        and macro_snap.crude_change is not None
+                    ):
+                        brent_c = float(macro_snap.crude_change)
+                        if direction in ("BULLISH", "LONG", "BUY") and brent_c <= -1.5:
+                            return (
+                                False,
+                                f"Global Macro Divergence: Global Brent crude selling off {brent_c:.2f}% disallows domestic MCX longs.",
+                                flags,
+                            )
+                        elif direction in ("BEARISH", "SHORT", "SELL") and brent_c >= 1.5:
+                            return (
+                                False,
+                                f"Global Macro Divergence: Global Brent crude surging +{brent_c:.2f}% disallows domestic MCX shorts.",
+                                flags,
+                            )
+            except Exception:
+                pass
 
         # 5. Strict "No Chase" Gate
         # Disqualify if price has already blown past trigger by >2.5% without retest
@@ -270,19 +414,6 @@ class AlertScrutinyAuditor:
 
         # 6. Index Options Deep OTM Trap Gate:
         # Reject illiquid, high-theta lottery strikes > 1.2% away from spot on index options
-        sym = str(
-            getattr(alert, "symbol", "")
-            or (alert.get("symbol", "") if isinstance(alert, dict) else "")
-        ).upper()
-        clean_sym = (
-            sym.replace(".NS", "")
-            .replace(".BO", "")
-            .replace("NSE:", "")
-            .replace("BSE:", "")
-            .replace("MCX:", "")
-            .replace("NFO:", "")
-            .strip()
-        )
         strike_val = getattr(alert, "strike", None) or (
             alert.get("strike", None) if isinstance(alert, dict) else None
         )
@@ -583,16 +714,10 @@ class AlertScrutinyAuditor:
                             except Exception:
                                 pass
                         if not alert_dt:
-                            from market.calendar import IST
-
                             alert_dt = datetime.now(IST)
                         elif alert_dt.tzinfo is None:
-                            from market.calendar import IST
-
                             alert_dt = alert_dt.replace(tzinfo=IST)
                         else:
-                            from market.calendar import IST
-
                             alert_dt = alert_dt.astimezone(IST)
 
                         curr_t = alert_dt.time()
@@ -642,16 +767,10 @@ class AlertScrutinyAuditor:
                 except Exception:
                     pass
             if not alert_dt:
-                from market.calendar import IST
-
                 alert_dt = datetime.now(IST)
             elif alert_dt.tzinfo is None:
-                from market.calendar import IST
-
                 alert_dt = alert_dt.replace(tzinfo=IST)
             else:
-                from market.calendar import IST
-
                 alert_dt = alert_dt.astimezone(IST)
 
             curr_time = alert_dt.time()
@@ -1088,12 +1207,31 @@ class AlertScrutinyAuditor:
             chg_pct = float(metrics.get("change_pct", 0.0) or 0.0)
             vwap = float(metrics.get("vwap", ltp) or ltp)
             has_opt_chain = bool(metrics.get("has_options_chain", False))
+
+            macro_ctx = "Live global macro metrics unavailable"
+            try:
+                from market.macro import get_macro_snapshot
+
+                snap = get_macro_snapshot()
+                if snap:
+                    dxy_s = f"DXY: {snap.dxy or 'N/A'} ({snap.dxy_change or 0.0:+.2f}%)"
+                    brent_s = (
+                        f"Brent: ${snap.crude_oil or 'N/A'} ({snap.crude_change or 0.0:+.2f}%)"
+                    )
+                    gold_s = f"COMEX Gold: ${snap.gold or 'N/A'} ({snap.gold_change or 0.0:+.2f}%)"
+                    us10y_s = f"US 10Y: {snap.us_10y or 'N/A'}%"
+                    usdinr_s = f"USD/INR: ₹{snap.usdinr or 'N/A'}"
+                    macro_ctx = f"{dxy_s} | {brent_s} | {gold_s} | {us10y_s} | {usdinr_s}"
+            except Exception:
+                pass
+
             return f"""You are a senior commodity macro trader and CRO at an institutional MCX desk.
 Perform strict pre-dispatch scrutiny of this LIVE MCX commodity momentum alert:
 
 COMMODITY: {sym} | ACTION: {trade_desc} | DIRECTION: {direction}
 CMP: ₹{ltp:,.2f} | VWAP: ₹{vwap:,.2f} | Session Change: {chg_pct:+.2f}%
 STOP LOSS: ₹{sl:,.2f} | TARGET 1: ₹{t1:,.2f} | R:R: {rr_str}
+GLOBAL MACRO: {macro_ctx}
 OPTIONS CHAIN AVAILABLE: {has_opt_chain}
 HEADLINE: {headline}
 SUMMARY: {summary}

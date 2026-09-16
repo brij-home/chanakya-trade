@@ -734,7 +734,16 @@ class PatternLearningEngine:
             else:
                 min_noise_sl_pts = round(entry_price * 0.12, 1)
         else:
-            min_noise_sl_pts = round(1.2 * atr, 1) if atr else round(entry_price * 0.012, 1)
+            base_min_noise = round(1.2 * atr, 1) if atr else round(entry_price * 0.012, 1)
+            try:
+                from engine.alert_scrutiny import COMMODITY_MIN_SL_FLOORS
+
+                if clean_sym in COMMODITY_MIN_SL_FLOORS:
+                    min_noise_sl_pts = max(base_min_noise, COMMODITY_MIN_SL_FLOORS[clean_sym])
+                else:
+                    min_noise_sl_pts = base_min_noise
+            except Exception:
+                min_noise_sl_pts = base_min_noise
 
         actual_sl_pts = round(abs(entry_price - stop_loss), 2) if stop_loss > 0 else 0.0
         metrics_snapshot["stop_distance_pts"] = actual_sl_pts

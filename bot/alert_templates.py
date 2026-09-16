@@ -2259,20 +2259,24 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
     env_tag = normalize_env_tag(getattr(alert, "environment", "LIVE"), in_market)
 
     # 1. Invalidation
-    if getattr(alert, "is_invalidated", False) or getattr(alert, "stage", "") == "INVALIDATED":
+    if (
+        getattr(alert, "is_invalidated", False)
+        or getattr(alert, "stage", "") in ("INVALIDATED", "STOPPED_OUT", "CANCELLED")
+        or getattr(alert, "status", "") in ("INVALIDATED", "STOPPED_OUT", "CANCELLED")
+    ):
         return render_milestone_alert(
             MilestoneAlertData.from_alert(alert, "INVALIDATED", in_market=in_market),
             in_market=in_market,
         )
 
     # 1b. In-Flight Decay & Danger Zone Warning
-    if getattr(alert, "stage", "") == "IN_FLIGHT_WARNING":
+    if getattr(alert, "stage", "") in ("IN_FLIGHT_WARNING", "DANGER_ZONE", "THETA_STAGNATION"):
         return render_in_flight_warning_alert(alert, in_market=in_market)
 
     # 2. Target 1
     is_t1 = (
-        "T1" in (getattr(alert, "target_status", "") or "")
-        or getattr(alert, "stage", "") == "T1_ACHIEVED"
+        "T1" in (getattr(alert, "target_status", "") or "").upper()
+        or getattr(alert, "stage", "") in ("T1_ACHIEVED", "TARGET_1", "TARGET_1_HIT", "TARGET_1_ACHIEVED")
     )
     if is_t1:
         return render_milestone_alert(
@@ -2282,8 +2286,8 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
 
     # 2b. Target 2
     is_t2 = (
-        "T2" in (getattr(alert, "target_status", "") or "")
-        or getattr(alert, "stage", "") == "T2_ACHIEVED"
+        "T2" in (getattr(alert, "target_status", "") or "").upper()
+        or getattr(alert, "stage", "") in ("T2_ACHIEVED", "TARGET_2", "TARGET_2_HIT", "TARGET_2_ACHIEVED")
     )
     if is_t2:
         return render_milestone_alert(
@@ -2292,8 +2296,11 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
         )
 
     # 3. Final Target / Runner Extension
-    is_target = getattr(alert, "stage", "") in ("TARGET_ACHIEVED", "COMPLETED") or "TARGET" in (
-        getattr(alert, "target_status", "") or ""
+    is_target = (
+        getattr(alert, "is_target_hit", False)
+        or getattr(alert, "stage", "") in ("TARGET_ACHIEVED", "COMPLETED", "TARGET_3_ACHIEVED", "FINAL_TARGET")
+        or getattr(alert, "status", "") in ("TARGET_HIT", "TARGET_ACHIEVED", "COMPLETED")
+        or "TARGET" in (getattr(alert, "target_status", "") or "").upper()
     )
     if is_target:
         return render_milestone_alert(
@@ -2534,8 +2541,22 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
         getattr(alert, "exchange", "") == "MCX"
         or getattr(alert, "alert_type", "") == "COMMODITY_MOMENTUM"
     ):
+        from market.options import format_readable_option_symbol
+
+        pref_vehicle = actionable_plan.get("preferred_vehicle")
+        is_opt_first = (
+            pref_vehicle == "DEFINED_RISK_OPTION"
+            or getattr(alert, "derivative_type", "") == "OPT"
+            or "CE" in actionable_plan.get("action", "")
+            or "PE" in actionable_plan.get("action", "")
+        )
+
         act = actionable_plan.get("action", "BUY_FUTURES")
         inst = actionable_plan.get("contract", f"MCX:{alert.symbol}")
+        # Clean display name for contract if not already formatted
+        if ("CE" in inst or "PE" in inst) and "(" not in inst:
+            inst = format_readable_option_symbol(inst)
+
         entry = actionable_plan.get("entry_range", f"₹{alert.ltp:,.1f}")
         tgt1 = actionable_plan.get("target", f"₹{getattr(alert, 'target_level', 0):,.1f}")
         tgt2 = actionable_plan.get("target_2", "")
@@ -2545,13 +2566,25 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
         lot_str = f" | Lot: {lot}" if lot else ""
         tgt2_str = f" | <b>T2:</b> <code>{tgt2}</code>" if tgt2 else ""
         rule = actionable_plan.get("profit_rule", "Book 50% at T1, trail stop to cost.")
+        confluence = actionable_plan.get("setup_confluence")
+        confluence_str = f"\n🔬 <b>Confluence:</b> <i>{confluence}</i>" if confluence else ""
 
-        opt_alt = actionable_plan.get("option_alternative")
-        opt_str = ""
-        if opt_alt and isinstance(opt_alt, dict):
-            opt_str = (
-                f"\n🎯 <b>Option Alternative:</b> BUY {opt_alt.get('contract', '')} @ ₹{opt_alt.get('ltp', 0):,.1f} "
-                f"(SL: ₹{opt_alt.get('stop_loss', 0):,.1f} | Tgt: ₹{opt_alt.get('target_1', 0):,.1f})"
+        max_loss = actionable_plan.get("max_loss_capped")
+        capped_risk_str = (
+            f"\n🛡️ <b>Capped Max Risk:</b> ₹{max_loss:,.0f} per lot (Zero overnight gap risk)"
+            if max_loss
+            else ""
+        )
+
+        fut_ref = actionable_plan.get("futures_reference")
+        fut_ref_str = ""
+        if fut_ref and isinstance(fut_ref, dict):
+            fut_sym = fut_ref.get("contract", f"MCX:{alert.symbol}")
+            fut_p = fut_ref.get("entry", 0.0)
+            fut_sl = fut_ref.get("stop_loss", 0.0)
+            fut_ref_str = (
+                f"\n📍 <b>Underlying Anchor:</b> <code>{fut_sym}</code> @ ₹{fut_p:,.1f} "
+                f"(Invalidation: ₹{fut_sl:,.1f})"
             )
 
         no_chase_val = getattr(alert, "no_chase_boundary", None)
@@ -2562,14 +2595,40 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
                 f" | 🛑 <b>No-Chase:</b> <i>{comparator} ₹{float(no_chase_val):,.1f}</i>"
             )
 
-        plan_str = (
-            f"• <b>Action:</b> {act} <b>{inst}</b> @ <code>{entry}</code>\n"
-            f"• <b>Invalidation SL:</b> <code>{sl}</code>\n"
-            f"• <b>Target 1:</b> <code>{tgt1}</code>{tgt2_str}\n"
-            f"• <b>R:R Expectancy:</b> <b>{rr}</b>{lot_str}{no_chase_inline}\n"
-            f"• <b>Playbook:</b> <i>{rule}</i>"
-            f"{opt_str}"
-        )
+        if is_opt_first:
+            plan_str = (
+                f"• <b>Action:</b> {act} <b>{inst}</b> @ <code>{entry}</code>\n"
+                f"• <b>Invalidation SL:</b> <code>{sl}</code>\n"
+                f"• <b>Target 1:</b> <code>{tgt1}</code>{tgt2_str}\n"
+                f"• <b>R:R Expectancy:</b> <b>{rr}</b>{lot_str}{no_chase_inline}"
+                f"{capped_risk_str}"
+                f"{confluence_str}"
+                f"{fut_ref_str}\n"
+                f"• <b>Playbook:</b> <i>{rule}</i>"
+            )
+        else:
+            opt_alt = actionable_plan.get("option_alternative")
+            opt_str = ""
+            if opt_alt and isinstance(opt_alt, dict):
+                raw_c = opt_alt.get("contract", "")
+                readable_c = opt_alt.get("readable_contract") or format_readable_option_symbol(
+                    raw_c,
+                    strike=opt_alt.get("strike"),
+                    option_type=opt_alt.get("option_type"),
+                )
+                opt_str = (
+                    f"\n🎯 <b>Option Alternative:</b> BUY <b>{readable_c}</b> @ ₹{opt_alt.get('ltp', 0):,.1f} "
+                    f"(SL: ₹{opt_alt.get('stop_loss', 0):,.1f} | Tgt: ₹{opt_alt.get('target_1', 0):,.1f})"
+                )
+            plan_str = (
+                f"• <b>Action:</b> {act} <b>{inst}</b> @ <code>{entry}</code>\n"
+                f"• <b>Invalidation SL:</b> <code>{sl}</code>\n"
+                f"• <b>Target 1:</b> <code>{tgt1}</code>{tgt2_str}\n"
+                f"• <b>R:R Expectancy:</b> <b>{rr}</b>{lot_str}{no_chase_inline}"
+                f"{confluence_str}\n"
+                f"• <b>Playbook:</b> <i>{rule}</i>"
+                f"{opt_str}"
+            )
     elif (
         getattr(alert, "exchange", "") == "CDS"
         or getattr(alert, "alert_type", "") == "CURRENCY_BREAKOUT"
@@ -2836,10 +2895,15 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
     provenance = order_flow.get("provenance", "")
     obi = order_flow.get("obi_ratio", 0.0)
 
-    if live_broker or provenance == "LIVE_BROKER_L2":
-        depth_badge = f"🟢 <i>L2 Depth (OBI: {obi:+.2f})</i>"
-    else:
+    if live_broker or provenance in ("LIVE_BROKER_L2", "LIVE_BROKER_REST", "LIVE_BROKER_FEED", "REAL_FEED", "LIVE_QUOTE"):
+        if obi and abs(float(obi)) > 0:
+            depth_badge = f"🟢 <i>L2 Depth (OBI: {obi:+.2f})</i>"
+        else:
+            depth_badge = "🟢 <i>LIVE BROKER FEED</i>"
+    elif provenance == "SYNTHETIC_L1" or not live_broker:
         depth_badge = "⚠️ <i>SYNTHETIC L1</i>"
+    else:
+        depth_badge = f"ℹ️ <i>{provenance}</i>"
 
     lines = [
         tg_header,
@@ -2858,3 +2922,7 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
     )
 
     return "\n".join(lines)
+
+
+# ── Backward Compatibility Alias ──────────────────────────────
+format_auto_alert_telegram = render_auto_alert

@@ -529,7 +529,8 @@ class MStockWebSocket:
             logger.error("websockets package not available for m.Stock WS")
             return
 
-        reconnect_delay = 2.0
+        reconnect_delay = 5.0
+        consecutive_errors = 0
         while self._running:
             try:
                 url = f"{MSTOCK_WS_URL}?API_KEY={self.api_key}&ACCESS_TOKEN={self.access_token}"
@@ -537,7 +538,8 @@ class MStockWebSocket:
                 async with websockets.connect(url, ping_interval=20, ping_timeout=20) as ws:
                     self._ws = ws
                     self._connected = True
-                    reconnect_delay = 2.0
+                    reconnect_delay = 5.0
+                    consecutive_errors = 0
                     logger.info("m.Stock WebSocket connected successfully")
 
                     # Step 1: Send LOGIN frame
@@ -555,11 +557,8 @@ class MStockWebSocket:
 
             except Exception as e:
                 self._connected = False
+                consecutive_errors += 1
                 # Guard: stop retrying if the event loop is shutting down.
-                # Without this check, asyncio.sleep() raises
-                # "cannot schedule new futures after interpreter shutdown",
-                # which leaks CloseWait sockets and eventually causes
-                # "too many file descriptors in select()" on Windows.
                 try:
                     loop = asyncio.get_event_loop()
                     if not loop.is_running():
@@ -569,15 +568,47 @@ class MStockWebSocket:
                     return
                 if not self._running:
                     return
-                logger.warning(
-                    f"m.Stock WebSocket connection dropped ({e}), retrying in {reconnect_delay:.1f}s..."
-                )
+
+                # If server rejects connection (e.g. 502 Bad Gateway), check market session
+                err_str = str(e)
+                if "502" in err_str or "503" in err_str:
+                    is_open = False
+                    try:
+                        from market.calendar import is_market_open
+                        is_open = is_market_open("NSE") or is_market_open("NFO")
+                    except Exception:
+                        from datetime import timezone as dt_tz, timedelta as dt_td, time as dt_time
+                        ist = dt_tz(dt_td(hours=5, minutes=30))
+                        now_ist = datetime.now(ist)
+                        is_open = (now_ist.weekday() < 5) and (dt_time(9, 0) <= now_ist.time() <= dt_time(15, 30))
+
+                    if not is_open:
+                        reconnect_delay = 300.0  # 5-minute off-market heartbeat
+                        if consecutive_errors <= 1:
+                            logger.info(
+                                "m.Stock WebSocket upstream broadcast cluster is offline outside market hours (09:15–15:30 IST). "
+                                "REST data and scrapers active. 5-minute off-market heartbeat active."
+                            )
+                        else:
+                            logger.debug("m.Stock WS off-market heartbeat (retrying in 300s)")
+                    else:
+                        reconnect_delay = min(120.0, max(30.0, reconnect_delay * 1.5))
+                        if consecutive_errors <= 2 or consecutive_errors % 10 == 0:
+                            logger.warning(
+                                f"m.Stock WebSocket upstream gateway offline ({e}). REST data active. Next retry in {reconnect_delay:.0f}s."
+                            )
+                        else:
+                            logger.debug(f"m.Stock WS retry backoff in {reconnect_delay:.0f}s: {e}")
+                else:
+                    logger.warning(
+                        f"m.Stock WebSocket connection dropped ({e}), retrying in {reconnect_delay:.1f}s..."
+                    )
+                    reconnect_delay = min(60.0, reconnect_delay * 1.5)
+
                 try:
                     await asyncio.sleep(reconnect_delay)
                 except (asyncio.CancelledError, RuntimeError):
-                    # Loop is shutting down — exit cleanly
                     return
-                reconnect_delay = min(30.0, reconnect_delay * 1.5)
 
     def _handle_message(self, message: Union[bytes, str]) -> None:
         """Handle incoming binary or text frame."""
@@ -742,3 +773,8 @@ class MStockWebSocket:
 
 # Global singleton instance
 mstock_ws = MStockWebSocket()
+
+
+def get_mstock_ws() -> MStockWebSocket:
+    """Return the global MStockWebSocket client instance."""
+    return mstock_ws
