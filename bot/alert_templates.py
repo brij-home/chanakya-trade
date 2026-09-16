@@ -410,6 +410,241 @@ def get_no_chase_comparator(
     return "above" if dir_val in ("BULLISH", "LONG", "BUY") else "below"
 
 
+def format_contract_display(contract: str) -> str:
+    """
+    Convert raw broker/exchange contract tokens into clean, human-readable display strings.
+
+    Handles all NSE/BSE/MCX naming conventions:
+      - MStock YYYYMMDD:  HAL202609294800PE    → "HAL 4800 PE"
+      - NSE Monthly:      HAL26SEP4800PE       → "HAL 4800 PE"
+      - NSE Weekly:       NIFTY2692524800CE    → "NIFTY 24800 CE"
+      - Compact no-date:  HDFCBANK680CE        → "HDFCBANK 680 CE"
+      - Fyers prefixed:   NSE:HAL26SEP4800PE   → "HAL 4800 PE"
+      - Already spaced:   NIFTY 24800 CE       → "NIFTY 24800 CE" (passthrough)
+      - Futures:          HAL26SEPFUT          → "HAL FUT"
+
+    Rules:
+      - Strike is ALWAYS a plain integer with NO comma (4800, not 4,800)
+      - Strikes >= 10000 are kept as-is (e.g. 25000, not 25,000)
+      - Option type CE/PE is space-separated from strike
+      - Expiry date/code is stripped from display (shown separately via expiry badge)
+    """
+    if not contract:
+        return contract
+
+    # Strip exchange prefixes (NSE:, BSE:, NFO:, MCX:, CDS:, BFO:)
+    c = re.sub(r"^(?:NSE|BSE|NFO|MCX|CDS|BFO):", "", contract.strip(), flags=re.IGNORECASE)
+
+    # Already well-formatted (has spaces): e.g. "HAL 4800 PE", "NIFTY 25000 CE"
+    m_spaced = re.match(r"^([A-Z]+)\s+(\d+)\s*(CE|PE|FUT)$", c.upper().strip())
+    if m_spaced:
+        sym, strike, opt = m_spaced.groups()
+        if opt == "FUT":
+            return f"{sym} FUT"
+        return f"{sym} {int(strike)} {opt}"
+
+    c_upper = c.upper()
+
+    # Futures: e.g. HAL26SEPFUT, NIFTY26OCTFUT
+    m_fut = re.match(r"^([A-Z]+)\d{2}[A-Z]{3}FUT$", c_upper)
+    if m_fut:
+        return f"{m_fut.group(1)} FUT"
+
+    # MStock / broker YYYYMMDD format: e.g. HAL202609294800PE
+    # Must start with "20" (year 20xx) to distinguish from NSE weekly compact codes
+    m_yyyymmdd = re.match(r"^([A-Z]+)(20\d{6})(\d+)(CE|PE)$", c_upper)
+    if m_yyyymmdd:
+        sym, _date, strike_str, opt = m_yyyymmdd.groups()
+        return f"{sym} {int(strike_str)} {opt}"
+
+    # NSE Weekly compact: e.g. NIFTY2692524800CE (YY + month-code(1-9/O/N/D) + DD(2) + strike + CE/PE)
+    # Try weekly BEFORE monthly — weekly has 5-char date prefix vs monthly's 5-char (2+3) prefix
+    m_weekly = re.match(r"^([A-Z]+)\d{2}[1-9OND]\d{2}(\d+)(CE|PE)$", c_upper)
+    if m_weekly:
+        sym, strike_str, opt = m_weekly.groups()
+        return f"{sym} {int(strike_str)} {opt}"
+
+    # NSE Monthly: e.g. HAL26SEP4800PE, RELIANCE26SEP3000CE
+    m_monthly = re.match(r"^([A-Z]+)\d{2}[A-Z]{3}(\d+)(CE|PE)$", c_upper)
+    if m_monthly:
+        sym, strike_str, opt = m_monthly.groups()
+        return f"{sym} {int(strike_str)} {opt}"
+
+    # Compact without date: e.g. HDFCBANK680CE, MIDCPNIFTY14250CE
+    m_compact = re.match(r"^([A-Z]+?)(\d+)(CE|PE)$", c_upper)
+    if m_compact:
+        sym, strike_str, opt = m_compact.groups()
+        return f"{sym} {int(strike_str)} {opt}"
+
+    # Fallback: return as-is (already clean or unrecognised format)
+    return c.strip()
+
+
+def parse_contract_components(
+    contract: str = "",
+    underlying: str = "",
+    strike: Any = None,
+    option_type: str = "",
+    expiry_date: Optional[str | datetime | date] = None,
+    expiry_type: Optional[str] = None,
+    dte: Optional[int | float] = None,
+    spot: float = 0.0,
+) -> dict[str, Any]:
+    """
+    Parses any raw broker or exchange contract string and extracts cleanly separated components:
+      - underlying: e.g. "MIDCPNIFTY", "HDFCBANK", "HAL"
+      - strike: float e.g. 14250.0 or None
+      - strike_str: str e.g. "14250" or ""
+      - option_type: "CE", "PE", or "FUT"
+      - strike_display: "14250 CE"
+      - display_contract: "MIDCPNIFTY 14250 CE"
+      - is_option: bool
+      - is_futures: bool
+      - expiry_badge: "Current Monthly · 29-Sep-2026 (13 DTE)"
+      - expiry_date: "29-Sep-2026"
+      - dte: int
+      - spot: float
+    """
+    c = re.sub(r"^(?:NSE|BSE|NFO|MCX|CDS|BFO):", "", (contract or "").strip(), flags=re.IGNORECASE)
+    c_upper = c.upper()
+
+    und = (underlying or "").strip().upper()
+    stk: Optional[float] = None
+    if strike is not None:
+        try:
+            stk = float(str(strike).replace(",", ""))
+        except (ValueError, TypeError):
+            stk = None
+    opt = str(option_type or "").strip().upper()
+    exp_extracted: Optional[str] = None
+
+    # 1. Spaced format: e.g. "HAL 4800 PE", "HAL 26SEP 4500 CE", "MIDCPNIFTY 14250 CE"
+    m_spaced = re.match(
+        r"^([A-Z]+)\s+(?:(\d{1,2}[A-Z]{3}|\d{2}[A-Z]{3})\s+)?(\d+(?:\.\d+)?)\s*(CE|PE|FUT)$",
+        c_upper,
+    )
+    if m_spaced:
+        und_found, exp_raw, stk_raw, opt_found = m_spaced.groups()
+        if not und:
+            und = und_found
+        if stk is None:
+            try:
+                stk = float(stk_raw)
+            except ValueError:
+                pass
+        if not opt:
+            opt = opt_found
+        if exp_raw and not expiry_date:
+            exp_extracted = exp_raw
+
+    # 2. Broker YYYYMMDD format: e.g. HAL202609294800PE, MIDCPNIFTY2026092914250CE
+    if stk is None:
+        m_yyyymmdd = re.match(r"^([A-Z]+)(20\d{6})(\d+)(CE|PE)$", c_upper)
+        if m_yyyymmdd:
+            und_found, dt_str, stk_raw, opt_found = m_yyyymmdd.groups()
+            if not und:
+                und = und_found
+            stk = float(stk_raw)
+            opt = opt_found
+            if not expiry_date:
+                try:
+                    exp_dt = datetime.strptime(dt_str, "%Y%m%d").date()
+                    expiry_date = exp_dt
+                except ValueError:
+                    pass
+
+    # 3. NSE Weekly compact: e.g. NIFTY2692524800CE
+    if stk is None:
+        m_weekly = re.match(r"^([A-Z]+)(\d{2}[1-9OND]\d{2})(\d+)(CE|PE)$", c_upper)
+        if m_weekly:
+            und_found, exp_code, stk_raw, opt_found = m_weekly.groups()
+            if not und:
+                und = und_found
+            stk = float(stk_raw)
+            opt = opt_found
+            if not expiry_date:
+                exp_extracted = exp_code
+
+    # 4. NSE Monthly compact: e.g. HAL26SEP4800PE, RELIANCE26SEP3000CE
+    if stk is None:
+        m_monthly = re.match(r"^([A-Z]+)(\d{2}[A-Z]{3})(\d+)(CE|PE)$", c_upper)
+        if m_monthly:
+            und_found, exp_code, stk_raw, opt_found = m_monthly.groups()
+            if not und:
+                und = und_found
+            stk = float(stk_raw)
+            opt = opt_found
+            if not expiry_date:
+                exp_extracted = exp_code
+
+    # 5. Compact no-date: e.g. HDFCBANK680CE, MIDCPNIFTY14250CE
+    if stk is None:
+        m_compact = re.match(r"^([A-Z]+?)(\d+)(CE|PE)$", c_upper)
+        if m_compact:
+            und_found, stk_raw, opt_found = m_compact.groups()
+            if not und:
+                und = und_found
+            stk = float(stk_raw)
+            opt = opt_found
+
+    # 6. Futures: e.g. HAL FUT, HAL26SEPFUT
+    is_futures = False
+    if "FUT" in c_upper or opt == "FUT":
+        is_futures = True
+        opt = "FUT"
+        if not und:
+            m_fut = re.match(r"^([A-Z]+)(?:\d{2}[A-Z]{3}|\s+)?FUT$", c_upper)
+            if m_fut:
+                und = m_fut.group(1)
+
+    # Fallback for underlying
+    if not und:
+        und = re.sub(r"[^A-Z]", "", c_upper) if c_upper else "STOCK"
+
+    # Formatted strike string
+    stk_str = ""
+    if stk is not None and stk > 0:
+        stk_str = f"{int(stk)}" if stk.is_integer() else f"{stk}"
+
+    is_option = bool(stk_str and opt in ("CE", "PE"))
+
+    # Display contract
+    if is_futures:
+        display_contract = f"{und} FUT"
+    elif is_option:
+        display_contract = f"{und} {stk_str} {opt}"
+    elif c:
+        display_contract = format_contract_display(c)
+    else:
+        display_contract = und
+
+    # Expiry resolution
+    exp_info = resolve_expiry_cycle(
+        contract=c or display_contract,
+        expiry_date=expiry_date or exp_extracted,
+        expiry_type=expiry_type,
+        dte=dte,
+        underlying=und,
+    )
+
+    strike_display = f"{stk_str} {opt}".strip() if stk_str else opt
+
+    return {
+        "underlying": und,
+        "strike": stk,
+        "strike_str": stk_str,
+        "option_type": opt,
+        "strike_display": strike_display,
+        "display_contract": display_contract,
+        "is_option": is_option,
+        "is_futures": is_futures,
+        "expiry_badge": exp_info.get("badge", ""),
+        "expiry_date": exp_info.get("expiry_date", ""),
+        "dte": exp_info.get("dte"),
+        "spot": spot,
+    }
+
+
 def build_signal_ref(
     symbol: str,
     alert_id: str = "",
@@ -429,21 +664,27 @@ def build_signal_ref(
     # 1. Resolve Contract/Strike tag if available
     contract_tag = ""
     if contract and contract != symbol:
-        m = re.search(r"(\d+(?:\.\d+)?)\s*(CE|PE)", contract, re.IGNORECASE)
-        if m:
-            strike_str = m.group(1).replace(".0", "")
-            opt_str = m.group(2).upper()
-            contract_tag = f"{strike_str}{opt_str}"
+        comps = parse_contract_components(contract=contract, underlying=symbol)
+        if comps["is_option"] and comps["strike_str"] and comps["option_type"]:
+            contract_tag = f"{comps['strike_str']}{comps['option_type']}"
+        elif comps["is_futures"]:
+            contract_tag = "FUT"
         else:
-            clean_c = re.sub(r"[^A-Za-z0-9]", "", contract).upper()
-            # Only use trailing chars if contract has digits and is not generic like "NIFTYOPTION"
-            if (
-                clean_c
-                and clean_c != clean_sym
-                and any(ch.isdigit() for ch in clean_c)
-                and not clean_c.endswith("OPTION")
-            ):
-                contract_tag = clean_c[-8:]
+            m = re.search(r"(\d+(?:\.\d+)?)\s*(CE|PE)", contract, re.IGNORECASE)
+            if m:
+                strike_str = m.group(1).replace(".0", "")
+                opt_str = m.group(2).upper()
+                contract_tag = f"{strike_str}{opt_str}"
+            else:
+                clean_c = re.sub(r"[^A-Za-z0-9]", "", contract).upper()
+                # Only use trailing chars if contract has digits and is not generic like "NIFTYOPTION"
+                if (
+                    clean_c
+                    and clean_c != clean_sym
+                    and any(ch.isdigit() for ch in clean_c)
+                    and not clean_c.endswith("OPTION")
+                ):
+                    contract_tag = clean_c[-8:]
 
     # 2. Resolve Date & Time in IST
     dt: Optional[datetime] = None
@@ -500,69 +741,6 @@ def format_short_pct(pct: Any) -> str:
         return f"{sign}{f:.1f}%"
     except ValueError:
         return s
-
-
-def format_contract_display(contract: str) -> str:
-    """
-    Convert raw broker/exchange contract tokens into clean, human-readable display strings.
-
-    Handles all NSE/BSE/MCX naming conventions:
-      - MStock YYYYMMDD:  HAL202609294800PE    → "HAL 4800 PE"
-      - NSE Monthly:      HAL26SEP4800PE       → "HAL 4800 PE"
-      - NSE Weekly:       NIFTY2692524800CE    → "NIFTY 24800 CE"
-      - Fyers prefixed:   NSE:HAL26SEP4800PE   → "HAL 4800 PE"
-      - Already spaced:   NIFTY 24800 CE       → "NIFTY 24800 CE" (passthrough)
-      - Futures:          HAL26SEPFUT          → "HAL FUT"
-
-    Rules:
-      - Strike is ALWAYS a plain integer with NO comma (4800, not 4,800)
-      - Strikes >= 10000 are kept as-is (e.g. 25000, not 25,000)
-      - Option type CE/PE is space-separated from strike
-      - Expiry date/code is stripped from display (shown separately via expiry badge)
-    """
-    if not contract:
-        return contract
-
-    # Strip exchange prefixes (NSE:, BSE:, NFO:, MCX:, CDS:, BFO:)
-    c = re.sub(r"^(?:NSE|BSE|NFO|MCX|CDS|BFO):", "", contract.strip(), flags=re.IGNORECASE)
-
-    # Already well-formatted (has spaces): e.g. "HAL 4800 PE", "NIFTY 25000 CE"
-    m_spaced = re.match(r"^([A-Z]+)\s+(\d+)\s*(CE|PE|FUT)$", c.upper().strip())
-    if m_spaced:
-        sym, strike, opt = m_spaced.groups()
-        if opt == "FUT":
-            return f"{sym} FUT"
-        return f"{sym} {int(strike)} {opt}"
-
-    c_upper = c.upper()
-
-    # Futures: e.g. HAL26SEPFUT, NIFTY26OCTFUT
-    m_fut = re.match(r"^([A-Z]+)\d{2}[A-Z]{3}FUT$", c_upper)
-    if m_fut:
-        return f"{m_fut.group(1)} FUT"
-
-    # MStock / broker YYYYMMDD format: e.g. HAL202609294800PE
-    # Must start with "20" (year 20xx) to distinguish from NSE weekly compact codes
-    m_yyyymmdd = re.match(r"^([A-Z]+)(20\d{6})(\d+)(CE|PE)$", c_upper)
-    if m_yyyymmdd:
-        sym, _date, strike_str, opt = m_yyyymmdd.groups()
-        return f"{sym} {int(strike_str)} {opt}"
-
-    # NSE Weekly compact: e.g. NIFTY2692524800CE (YY + month-code(1-9/O/N/D) + DD(2) + strike + CE/PE)
-    # Try weekly BEFORE monthly — weekly has 5-char date prefix vs monthly's 5-char (2+3) prefix
-    m_weekly = re.match(r"^([A-Z]+)\d{2}[1-9OND]\d{2}(\d+)(CE|PE)$", c_upper)
-    if m_weekly:
-        sym, strike_str, opt = m_weekly.groups()
-        return f"{sym} {int(strike_str)} {opt}"
-
-    # NSE Monthly: e.g. HAL26SEP4800PE, RELIANCE26SEP3000CE
-    m_monthly = re.match(r"^([A-Z]+)\d{2}[A-Z]{3}(\d+)(CE|PE)$", c_upper)
-    if m_monthly:
-        sym, strike_str, opt = m_monthly.groups()
-        return f"{sym} {int(strike_str)} {opt}"
-
-    # Fallback: return as-is (already clean or unrecognised format)
-    return c.strip()
 
 
 def normalize_env_tag(env: Optional[str], in_market: bool = True) -> str:
@@ -669,17 +847,6 @@ class FNOAlertData:
                     prem = float(m_pr.group(0).replace(",", ""))
                 except ValueError:
                     pass
-
-        # Attempt to fetch authentic live quote from broker if missing
-        if prem <= 0.0 and contract:
-            try:
-                from market.quotes import get_ltp
-
-                real_ltp = get_ltp(contract)
-                if real_ltp and real_ltp > 0.05:
-                    prem = float(real_ltp)
-            except Exception:
-                pass
 
         if prem <= 0.05:
             is_fallback = True
@@ -926,7 +1093,7 @@ class EquityAlertData:
 class MilestoneAlertData:
     """Data container for milestone events: Target Hit, Trailing Stop Ratchet, Invalidation."""
 
-    milestone_type: str  # "TARGET_1" | "FINAL_TARGET" | "TRAIL_RATCHET" | "INVALIDATED"
+    milestone_type: str  # "TARGET_1" | "TARGET_2" | "FINAL_TARGET" | "TRAIL_RATCHET" | "INVALIDATED"
     symbol: str
     alert_type: str = "SETUP"
     ltp: float = 0.0
@@ -1174,6 +1341,8 @@ class MilestoneAlertData:
 
         if not t1_val and milestone_type == "TARGET_1":
             t1_val = ltp
+        if not t2_val and milestone_type == "TARGET_2":
+            t2_val = ltp
 
         # Performance & Gain calculation
         # True market move is computed from actual price change (ltp - entry_price for long payoffs)
@@ -1207,6 +1376,13 @@ class MilestoneAlertData:
             if not ts_val:
                 ts_val = ltp * 0.998 if is_payoff_bullish else ltp * 1.002
             trailing_stop = ts_val
+        elif milestone_type == "TARGET_2":
+            # For Target 2, trailing stop is locked at Target 1 level
+            ts_val = trailing_stop or t1_val or getattr(alert, "stop_loss", None)
+            if not ts_val and entry_price:
+                ts_val = round(entry_price * 1.15, 2) if is_payoff_bullish else round(entry_price * 0.85, 2)
+            trailing_stop = ts_val
+            default_action = f"TRAIL STOP-LOSS TO T1 (₹{ts_val:,.2f}) & HOLD RUNNER" if ts_val else "TRAIL STOP-LOSS TO T1 & HOLD RUNNER"
         elif milestone_type == "FINAL_TARGET":
             should_trail = getattr(alert, "should_trail", False)
             default_action = (
@@ -1273,10 +1449,21 @@ class MilestoneAlertData:
             symbol=getattr(alert, "symbol", "UNKNOWN"),
             alert_type=getattr(alert, "alert_type", "SETUP").replace("_", " "),
             ltp=ltp,
-            target_level=target_level,
+            target_level=target_level
+            or (t2_val if milestone_type == "TARGET_2" else (t1_val if milestone_type == "TARGET_1" else None)),
             trailing_stop=trailing_stop,
-            locked_profit_pts=getattr(alert, "locked_profit_pts", None),
-            locked_profit_pct=getattr(alert, "locked_profit_pct", None),
+            locked_profit_pts=getattr(alert, "locked_profit_pts", None)
+            or (
+                round(abs(trailing_stop - entry_price), 2)
+                if (milestone_type in ("TARGET_1", "TARGET_2", "TRAIL_RATCHET") and trailing_stop and entry_price)
+                else None
+            ),
+            locked_profit_pct=getattr(alert, "locked_profit_pct", None)
+            or (
+                round((abs(trailing_stop - entry_price) / entry_price) * 100.0, 1)
+                if (milestone_type in ("TARGET_1", "TARGET_2", "TRAIL_RATCHET") and trailing_stop and entry_price and entry_price > 0)
+                else None
+            ),
             decisive_action=getattr(alert, "trailing_decision", None) or default_action,
             rationale=getattr(alert, "in_flight_warning_reason", None)
             or getattr(alert, "trailing_rationale", None)
@@ -1700,18 +1887,28 @@ def render_milestone_alert(
         d = data
 
     env_tag = normalize_env_tag(d.environment, d.in_market)
-    contract_title = d.contract or d.symbol
+    contract_title = format_contract_display(d.contract or d.symbol)
     if d.symbol and d.symbol not in contract_title:
         contract_title = f"{d.symbol} {contract_title}"
 
+    comps = parse_contract_components(contract=d.contract or "", underlying=d.symbol)
     is_fno = bool(
-        (d.contract and any(k in d.contract.upper() for k in ("CE", "PE", "FUT", "OPTION")))
+        comps["is_option"]
+        or comps["is_futures"]
+        or (d.contract and any(k in d.contract.upper() for k in ("CE", "PE", "FUT", "OPTION")))
         or (d.symbol and any(k in d.symbol.upper() for k in ("CE", "PE", "FUT", "OPTION")))
         or (d.segment and d.segment.upper() == "FNO")
         or "OPTION" in (d.alert_type or "").upper()
         or "GAMMA" in (d.alert_type or "").upper()
     )
     cmp_label = "Opt CMP" if is_fno else "Spot CMP"
+
+    opt_spec_line = ""
+    if comps["is_option"] and comps["strike_str"]:
+        exp_badge_str = f" | <b>Expiry:</b> ⏳ {comps['expiry_badge']}" if comps["expiry_badge"] else ""
+        opt_spec_line = (
+            f"• <b>Underlying:</b> {comps['underlying']} | <b>Strike:</b> {comps['strike_display']}{exp_badge_str}\n"
+        )
 
     call_time_fmt, elapsed_fmt = _format_call_time_and_elapsed(d.call_time, d.timestamp)
     call_time_part = (
@@ -1742,6 +1939,7 @@ def render_milestone_alert(
             f"⚠️ <b>{env_tag} VIEW INVALIDATED</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"🚨 <b>{contract_title} ({d.alert_type})</b> is <b>NO LONGER VALID</b>!\n"
+            f"{opt_spec_line}"
             f"🛑 <b>Reason:</b> {d.invalidation_reason or d.rationale or 'Stop-loss or invalidation floor breached'}\n"
             f"⚡ <b>DECISIVE ACTION:</b> <code>CANCEL PENDING ORDERS & CLOSE POSITIONS</code>"
             f"{orig_plan_line}"
@@ -1808,6 +2006,7 @@ def render_milestone_alert(
             f"{header_icon} <b>{env_tag} {title_tag}</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"🚨 <b>{contract_title} ({d.alert_type}) — ACTION REQUIRED</b>\n"
+            f"{opt_spec_line}"
             f"💰 <b>{cmp_label}:</b> ₹{d.ltp:,.2f}{move_str}\n"
             f"⚠️ <b>Diagnosis:</b> {diag}\n"
             f"⚡ <b>DECISIVE ACTION:</b> <code>{decisive_act}</code>"
@@ -1862,9 +2061,54 @@ def render_milestone_alert(
             f"🎯 <b>{env_tag} TARGET 1 HIT</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"🏆 <b>{contract_title} ({d.alert_type}) — TARGET 1 ACHIEVED</b>\n"
+            f"{opt_spec_line}"
             f"💰 <b>{cmp_label}:</b> ₹{d.ltp:,.2f} | <b>Target 1:</b> ₹{t1_disp:,.2f}{move_str}\n"
             f"🛡️ <b>Trail Stop:</b> <code>₹{ts_val:,.2f}</code>{lock_pct} (100% risk-free)\n"
             f"⚡ <b>DECISIVE ACTION:</b> <code>BOOK 50% PROFIT NOW & HOLD RUNNER{t2_runner_note}</code>"
+            f"{orig_plan_line}"
+            f"{footer_line}"
+        )
+
+    if d.milestone_type == "TARGET_2":
+        t2_disp = d.target_2 or d.target_level or d.ltp
+        ts_val = d.trailing_stop or d.target_1 or d.entry_price or (d.ltp * 0.95)
+        lock_pct = f" (+{d.locked_profit_pct:.1f}% locked)" if d.locked_profit_pct else ""
+
+        plan_parts = []
+        if d.entry_price:
+            plan_parts.append(f"Entry: ₹{d.entry_price:,.2f}")
+        elif d.entry_range:
+            plan_parts.append(f"Entry: {d.entry_range}")
+        if d.initial_sl:
+            plan_parts.append(f"SL: ₹{d.initial_sl:,.2f}")
+        if d.target_1:
+            plan_parts.append(f"T1: ₹{d.target_1:,.2f}")
+        if t2_disp:
+            plan_parts.append(f"T2: ₹{t2_disp:,.2f}")
+        if is_fno and d.lot_size:
+            plan_parts.append(f"Lot: {d.lot_size}")
+        orig_plan_line = (
+            f"\n🎯 <b>Original Plan:</b> {' | '.join(plan_parts)}" if plan_parts else ""
+        )
+
+        move_str = ""
+        if d.pnl_pts is not None and d.pnl_pct is not None:
+            sign = "+" if d.pnl_pts >= 0 else ""
+            r_str = f" | {sign}{d.r_multiple}R" if d.r_multiple is not None else ""
+            move_str = (
+                f" · 📈 <b>Move:</b> <b>{sign}₹{d.pnl_pts:,.2f} ({sign}{d.pnl_pct:.1f}%{r_str})</b>"
+            )
+
+        t3_runner_note = f" FOR T3 (₹{d.target_moonshot:,.2f})" if d.target_moonshot else " FOR FINAL TARGET"
+
+        return (
+            f"🎯 <b>{env_tag} TARGET 2 HIT</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"🏆 <b>{contract_title} ({d.alert_type}) — TARGET 2 ACHIEVED</b>\n"
+            f"{opt_spec_line}"
+            f"💰 <b>{cmp_label}:</b> ₹{d.ltp:,.2f} | <b>Target 2:</b> ₹{t2_disp:,.2f}{move_str}\n"
+            f"🛡️ <b>Trail Stop:</b> <code>₹{ts_val:,.2f}</code>{lock_pct} (T1 Locked)\n"
+            f"⚡ <b>DECISIVE ACTION:</b> <code>TRAIL STOP-LOSS TO T1 (₹{ts_val:,.2f}) & HOLD RUNNER{t3_runner_note}</code>"
             f"{orig_plan_line}"
             f"{footer_line}"
         )
@@ -1907,6 +2151,7 @@ def render_milestone_alert(
                 f"🚀 <b>{env_tag} RUNNER EXTENSION</b>\n"
                 f"━━━━━━━━━━━━━━━━━━━━\n"
                 f"🏆 <b>{contract_title} ({d.alert_type}) — INSTITUTIONAL RUNAWAY</b>\n"
+                f"{opt_spec_line}"
                 f"💰 <b>{cmp_label}:</b> ₹{d.ltp:,.2f} | <b>Primary Target:</b> ₹{tgt_val:,.2f}{move_str}\n"
                 f"🛡️ <b>Chandelier Trail SL:</b> <code>₹{ts_val:,.2f}</code>{lock_str}\n"
                 f"⚡ <b>DECISIVE ACTION:</b> <code>LET RUNNER RIDE (TRAIL SL)</code>"
@@ -1917,6 +2162,7 @@ def render_milestone_alert(
             f"🏁 <b>{env_tag} FINAL TARGET ACHIEVED</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"🏆 <b>{contract_title} ({d.alert_type}) — FINAL TARGET REACHED</b>\n"
+            f"{opt_spec_line}"
             f"💰 <b>{cmp_label}:</b> ₹{d.ltp:,.2f} | <b>Final Target:</b> ₹{tgt_val:,.2f}{move_str}\n"
             f"⚡ <b>DECISIVE ACTION:</b> <code>CLOSE ALL POSITIONS (BOOK FULL PROFIT)</code>"
             f"{orig_plan_line}"
@@ -1950,6 +2196,7 @@ def render_milestone_alert(
             f"📈 <b>{env_tag} TRAILING STOP RATCHET</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"🛡️ <b>{contract_title} Trailing Stop Ratcheted Higher!</b>\n"
+            f"{opt_spec_line}"
             f"💰 <b>{cmp_label}:</b> ₹{d.ltp:,.2f} · <b>New SL:</b> <code>₹{d.trailing_stop or 0:,.2f}</code>{move_str}\n"
             f"{lock_str}"
             f"⚡ <b>DECISIVE ACTION:</b> <code>UPDATE SL ORDER TO ₹{d.trailing_stop or 0:,.2f}</code>"
@@ -2033,6 +2280,17 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
             in_market=in_market,
         )
 
+    # 2b. Target 2
+    is_t2 = (
+        "T2" in (getattr(alert, "target_status", "") or "")
+        or getattr(alert, "stage", "") == "T2_ACHIEVED"
+    )
+    if is_t2:
+        return render_milestone_alert(
+            MilestoneAlertData.from_alert(alert, "TARGET_2", in_market=in_market),
+            in_market=in_market,
+        )
+
     # 3. Final Target / Runner Extension
     is_target = getattr(alert, "stage", "") in ("TARGET_ACHIEVED", "COMPLETED") or "TARGET" in (
         getattr(alert, "target_status", "") or ""
@@ -2106,7 +2364,14 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
     if (
         getattr(alert, "option_type", None) or getattr(alert, "alert_type", "") == "GAMMA_BLAST"
     ) and actionable_plan:
-        act = actionable_plan.get("action", "BUY")
+        act_raw = str(actionable_plan.get("action", "BUY"))
+        act = (
+            act_raw.replace("_MOMENTUM", "")
+            .replace("BUY_CALL", "BUY")
+            .replace("BUY_PUT", "BUY")
+            .replace("_", " ")
+            .strip()
+        )
         inst = format_contract_display(
             getattr(alert, "contract_symbol", None)
             or f"{alert.symbol} {int(getattr(alert, 'strike', 0) or 0)} {getattr(alert, 'option_type', '')}".strip()
@@ -2349,6 +2614,7 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
                     alert.symbol,
                     direction=getattr(alert, "direction", "BULLISH"),
                     spot=clean_spot,
+                    timeframe=getattr(alert, "time_horizon", "INTRADAY"),
                     exchange=getattr(alert, "exchange", "NSE"),
                     has_active_blast=(getattr(alert, "alert_type", "") == "GAMMA_BLAST"),
                 )
@@ -2448,16 +2714,22 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
 
     reason_line = f"💡 <b>Reason:</b> <i>{clean_summary}</i>" if clean_summary else ""
 
-    # Build clean headline line
-    sig_ref = getattr(alert, "signal_ref", None) or build_signal_ref(
-        symbol=getattr(alert, "symbol", ""),
-        alert_id=str(getattr(alert, "alert_id", getattr(alert, "id", ""))),
-        contract=str(getattr(alert, "contract_symbol", "")),
-        created_at=now_ts_str,
-    )
     is_options_alert = bool(
         getattr(alert, "option_type", None)
         or getattr(alert, "alert_type", "") in ("GAMMA_BLAST", "OPTIONS_MOMENTUM")
+    )
+
+    # Build clean headline line
+    inst_contract = (
+        getattr(alert, "contract_symbol", "")
+        or getattr(alert, "contract", "")
+        or (inst if (is_options_alert and 'inst' in locals()) else "")
+    )
+    sig_ref = getattr(alert, "signal_ref", None) or build_signal_ref(
+        symbol=getattr(alert, "symbol", ""),
+        alert_id=str(getattr(alert, "alert_id", getattr(alert, "id", ""))),
+        contract=str(inst_contract),
+        created_at=now_ts_str,
     )
     if is_options_alert:
         opt_cmp = getattr(alert, "option_premium", None) or getattr(alert, "ltp", None)
@@ -2496,6 +2768,12 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
             )
             else ""
         )
+        # Ensure clean_hl includes full display contract if strike is missing
+        if 'inst' in locals() and inst and (inst not in clean_hl and (not getattr(alert, "strike", None) or str(int(alert.strike)) not in clean_hl)):
+            if clean_hl and clean_hl != alert.symbol and "·" not in clean_hl:
+                clean_hl = f"{inst} · {clean_hl}"
+            else:
+                clean_hl = inst
         hl_line = f"<b>{clean_hl}</b>{spot_bar}{opt_bar}" if clean_hl else f"<b>{alert.symbol}</b>"
     else:
         is_curr = (

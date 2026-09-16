@@ -70,6 +70,7 @@ def detect_squeeze_breakout(
 
         # Intraday vs Daily distance and RVOL adjustments
         is_intraday = timeframe.lower() in ("5m", "5minute", "15m", "15minute", "hour", "60m")
+        trade_tf = "INTRADAY" if is_intraday else ("SWING_SHORT" if timeframe.lower() in ("day", "daily") else "SWING_MID")
         min_coiling_dist = 0.0 if is_intraday else 0.05
         max_coiling_dist = 0.65 if is_intraday else 1.50
         is_closer_to_high = dist_to_pivot_pct <= dist_to_low_pct
@@ -83,8 +84,36 @@ def detect_squeeze_breakout(
 
         now_iso = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
 
+        # Compute recent candle wick ratios (Exhaustion & Wick Trap Filter)
+        upper_wick_ratio = 0.0
+        lower_wick_ratio = 0.0
+        candle_range = 0.0
+        has_real_ohlc = (
+            df is not None
+            and len(df) >= 1
+            and ("open" in df.columns or "Open" in df.columns)
+            and ("close" in df.columns or "Close" in df.columns)
+        )
+        if has_real_ohlc:
+            try:
+                last_bar = df.iloc[-1]
+                b_high = float(last_bar.get("high", last_bar.get("High", 0.0)))
+                b_low = float(last_bar.get("low", last_bar.get("Low", 0.0)))
+                b_open = float(last_bar.get("open", last_bar.get("Open", 0.0)))
+                b_close = float(last_bar.get("close", last_bar.get("Close", 0.0)))
+                candle_range = max(0.01, b_high - b_low)
+                if candle_range > 0.01 and b_open > 0 and b_close > 0:
+                    upper_wick_ratio = (b_high - max(b_open, b_close)) / candle_range
+                    lower_wick_ratio = (min(b_open, b_close) - b_low) / candle_range
+            except Exception:
+                pass
+
         # ── EARLY WARNING (BULLISH): Coiled in squeeze, close below pivot high ───
-        if is_squeeze_on and (min_coiling_dist <= dist_to_pivot_pct <= max_coiling_dist):
+        if (
+            is_squeeze_on
+            and (min_coiling_dist <= dist_to_pivot_pct <= max_coiling_dist)
+            and not (upper_wick_ratio >= 0.60 and candle_range >= 0.50 * atr20)
+        ):
             tp = None
             try:
                 from engine.trade_plan import calculate_trade_plan
@@ -93,7 +122,7 @@ def detect_squeeze_breakout(
                     symbol=symbol,
                     direction="BUY",
                     spot=ltp,
-                    timeframe="INTRADAY",
+                    timeframe=trade_tf,
                     exchange=exchange,
                     df=df,
                 )
@@ -115,7 +144,7 @@ def detect_squeeze_breakout(
                 tp_dict = {
                     "symbol": symbol,
                     "direction": "LONG",
-                    "timeframe": "INTRADAY",
+                    "timeframe": trade_tf,
                     "entry_price": ltp,
                     "invalidation_stop": sl,
                     "target_1": target,
@@ -176,7 +205,11 @@ def detect_squeeze_breakout(
             )
 
         # ── EARLY WARNING (BEARISH): Coiled in squeeze, close above pivot low support ───
-        if is_squeeze_on and (min_coiling_dist <= dist_to_low_pct <= max_coiling_dist):
+        if (
+            is_squeeze_on
+            and (min_coiling_dist <= dist_to_low_pct <= max_coiling_dist)
+            and not (lower_wick_ratio >= 0.60 and candle_range >= 0.50 * atr20)
+        ):
             tp = None
             try:
                 from engine.trade_plan import calculate_trade_plan
@@ -185,7 +218,7 @@ def detect_squeeze_breakout(
                     symbol=symbol,
                     direction="SELL",
                     spot=ltp,
-                    timeframe="INTRADAY",
+                    timeframe=trade_tf,
                     exchange=exchange,
                     df=df,
                 )
@@ -207,7 +240,7 @@ def detect_squeeze_breakout(
                 tp_dict = {
                     "symbol": symbol,
                     "direction": "SHORT",
-                    "timeframe": "INTRADAY",
+                    "timeframe": trade_tf,
                     "entry_price": ltp,
                     "invalidation_stop": sl,
                     "target_1": target,
@@ -273,6 +306,7 @@ def detect_squeeze_breakout(
             and (ltp - pivot_high) / pivot_high <= 0.025
             and rvol >= 1.4
             and ltp > sma20
+            and not (upper_wick_ratio >= 0.50 and candle_range >= 0.50 * atr20)
         ):
             tp = None
             try:
@@ -282,7 +316,7 @@ def detect_squeeze_breakout(
                     symbol=symbol,
                     direction="BUY",
                     spot=ltp,
-                    timeframe="INTRADAY",
+                    timeframe=trade_tf,
                     exchange=exchange,
                     has_active_blast=True,
                     df=df,
@@ -305,7 +339,7 @@ def detect_squeeze_breakout(
                 tp_dict = {
                     "symbol": symbol,
                     "direction": "LONG",
-                    "timeframe": "INTRADAY",
+                    "timeframe": trade_tf,
                     "entry_price": ltp,
                     "invalidation_stop": sl,
                     "target_1": target,
@@ -367,6 +401,7 @@ def detect_squeeze_breakout(
             and (pivot_low - ltp) / pivot_low <= 0.025
             and rvol >= 1.4
             and ltp < sma20
+            and not (lower_wick_ratio >= 0.50 and candle_range >= 0.50 * atr20)
         ):
             tp = None
             try:
@@ -376,7 +411,7 @@ def detect_squeeze_breakout(
                     symbol=symbol,
                     direction="SELL",
                     spot=ltp,
-                    timeframe="INTRADAY",
+                    timeframe=trade_tf,
                     exchange=exchange,
                     has_active_blast=True,
                     df=df,
@@ -399,7 +434,7 @@ def detect_squeeze_breakout(
                 tp_dict = {
                     "symbol": symbol,
                     "direction": "SHORT",
-                    "timeframe": "INTRADAY",
+                    "timeframe": trade_tf,
                     "entry_price": ltp,
                     "invalidation_stop": sl,
                     "target_1": target,

@@ -660,3 +660,100 @@ class TestEdgeCases:
             assert result is not None
         finally:
             socket.socket.connect = original_connect
+
+
+# ── Sector Concentration Limit ───────────────────────────────
+
+
+class TestSectorConcentrationLimit:
+    def test_sector_concentration_caps_max_qty_when_sector_near_30pct(self):
+        """When existing holdings in same sector consume most of the 30% cap, room is clamped."""
+        from engine.risk_gate import compute_allowed_actions
+
+        # Total capital = 200,000; 30% sector cap = 60,000
+        # Portfolio holds TCS (40,000) and WIPRO (15,000) = 55,000 in IT sector
+        # Remaining sector room = 60,000 - 55,000 = 5,000
+        # Single stock limit for INFY (10%) would be 20,000, but sector capacity clamps it to 5,000
+        portfolio = {
+            "TCS": {"qty": 10, "avg_price": 4000.0, "current_price": 4000.0},
+            "WIPRO": {"qty": 30, "avg_price": 500.0, "current_price": 500.0},
+        }
+        result = compute_allowed_actions(
+            "INFY",
+            "NSE",
+            capital=200000.0,
+            portfolio=portfolio,
+            prices={"INFY": 1400.0},
+            max_sector_pct=0.30,
+        )
+        # 5,000 / 1400 = 3 shares
+        assert result.max_qty == 3
+        assert result.max_capital == 5000.0
+        assert "SECTOR_CONCENTRATION_LIMIT" in result.flags
+        assert any("capacity capped" in w.lower() for w in result.warnings)
+
+    def test_sector_concentration_blocks_when_at_or_above_30pct(self):
+        """When existing holdings in same sector reach or exceed 30%, new orders are blocked."""
+        from engine.risk_gate import compute_allowed_actions
+
+        # Total capital = 200,000; 30% sector cap = 60,000
+        # Portfolio holds TCS = 15 shares @ 4000 = 60,000 in IT sector
+        portfolio = {
+            "TCS": {"qty": 15, "avg_price": 4000.0, "current_price": 4000.0},
+        }
+        result = compute_allowed_actions(
+            "INFY",
+            "NSE",
+            capital=200000.0,
+            portfolio=portfolio,
+            prices={"INFY": 1400.0},
+            max_sector_pct=0.30,
+        )
+        assert result.max_qty == 0
+        assert result.max_capital == 0.0
+        assert result.direction == "NONE"
+        assert "SECTOR_CONCENTRATION_LIMIT" in result.flags
+        assert any("reached 30% concentration cap" in w.lower() for w in result.warnings)
+
+    def test_sector_concentration_permits_sell_only_when_shares_held(self):
+        """When sector is full but trader holds shares of the target stock, direction becomes SELL_ONLY."""
+        from engine.risk_gate import compute_allowed_actions
+
+        # Total capital = 200,000; 30% sector cap = 60,000
+        # Holds TCS 48,000 and INFY 14,000 = 62,000 in IT sector (over 60,000)
+        portfolio = {
+            "TCS": {"qty": 12, "avg_price": 4000.0, "current_price": 4000.0},
+            "INFY": {"qty": 10, "avg_price": 1400.0, "current_price": 1400.0},
+        }
+        result = compute_allowed_actions(
+            "INFY",
+            "NSE",
+            capital=200000.0,
+            portfolio=portfolio,
+            prices={"INFY": 1400.0},
+            max_sector_pct=0.30,
+        )
+        assert result.max_qty == 0
+        assert result.direction == "SELL_ONLY"
+        assert "SECTOR_CONCENTRATION_LIMIT" in result.flags
+
+    def test_different_sector_unaffected_by_it_concentration(self):
+        """Positions in IT do not block positions in Banking."""
+        from engine.risk_gate import compute_allowed_actions
+
+        portfolio = {
+            "TCS": {"qty": 15, "avg_price": 4000.0, "current_price": 4000.0},  # 60,000 in IT
+        }
+        result = compute_allowed_actions(
+            "HDFCBANK",
+            "NSE",
+            capital=200000.0,
+            portfolio=portfolio,
+            prices={"HDFCBANK": 1600.0},
+            max_sector_pct=0.30,
+        )
+        # Banking has 0 existing value; full 10% limit (20,000) applies
+        # 20,000 / 1600 = 12 shares
+        assert result.max_qty == 12
+        assert "SECTOR_CONCENTRATION_LIMIT" not in result.flags
+

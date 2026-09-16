@@ -162,13 +162,19 @@ class IndexContagionEngine:
             dist_from_high = max(0.0, (day_high - ltp) / max(1.0, day_high) * 100.0)
             dist_from_low = max(0.0, (ltp - day_low) / max(1.0, day_low) * 100.0)
 
+             # Score logic:
+            # Bullish impulse: Above VWAP, positive change, near day high, active RVOL
+            c_score = 0.0
             is_above_vwap = ltp >= (vwap * 0.999)
             is_below_vwap = ltp <= (vwap * 1.001)
 
-            # Score logic:
-            # Bullish impulse: Above VWAP, positive change, near day high, active RVOL
-            c_score = 0.0
-            if is_above_vwap and chg >= 0.20:
+            # Institutional impulse bar:
+            # Minimum 0.40% move required, OR 0.25% if confirmed by active volume (RVOL >= 1.2x).
+            # Flat sub-0.35% noise with zero volume is disqualified from triggering contagion.
+            is_bull_impulse = is_above_vwap and (chg >= 0.40 or (chg >= 0.25 and rvol >= 1.2))
+            is_bear_impulse = is_below_vwap and (chg <= -0.40 or (chg <= -0.25 and rvol >= 1.2))
+
+            if is_bull_impulse:
                 c_score += 1.0
                 if chg >= 0.70:
                     c_score += 1.0
@@ -177,17 +183,19 @@ class IndexContagionEngine:
                 if rvol >= 1.2:
                     c_score += 0.5
                 bullish_weight += weight
-                leading_bulls.append(f"{sym} (+{chg:.1f}%, RVOL {rvol:.1f}x)")
-            elif is_below_vwap and chg <= -0.20:
+                rvol_tag = f", RVOL {rvol:.1f}x" if vol > 0 else ""
+                leading_bulls.append(f"{sym} (+{chg:.1f}%{rvol_tag})")
+            elif is_bear_impulse:
                 c_score -= 1.0
                 if chg <= -0.70:
                     c_score -= 1.0
                 if dist_from_low <= 0.35:
-                    c_score -= 0.5
+                    c_score += 0.5
                 if rvol >= 1.2:
-                    c_score -= 0.5
+                    c_score += 0.5
                 bearish_weight += weight
-                leading_bears.append(f"{sym} ({chg:.1f}%, RVOL {rvol:.1f}x)")
+                rvol_tag = f", RVOL {rvol:.1f}x" if vol > 0 else ""
+                leading_bears.append(f"{sym} ({chg:.1f}%{rvol_tag})")
 
             weighted_impulse += (c_score * weight)
 
@@ -207,8 +215,14 @@ class IndexContagionEngine:
         )
 
         # 3. Generate Alert if Synchronization threshold (>= 68% weight) is met
+        # AND Index spot is directionally aligned with VWAP (not sitting dead-flat at VWAP)
+        # For Bullish: spot must hold above VWAP (>= vwap * 1.0003) or index change >= +0.10%
+        # For Bearish: spot must hold below VWAP (<= vwap * 0.9997) or index change <= -0.10%
         alert = None
-        if bullish_pct >= 68.0 and net_score >= 1.2:
+        is_index_bull_active = idx_ltp >= (idx_vwap * 1.0003) or idx_chg >= 0.10
+        is_index_bear_active = idx_ltp <= (idx_vwap * 0.9997) or idx_chg <= -0.10
+
+        if bullish_pct >= 68.0 and net_score >= 1.2 and is_index_bull_active:
             alert = self._create_contagion_alert(
                 index_name=clean_idx,
                 direction="BULLISH",
@@ -219,7 +233,7 @@ class IndexContagionEngine:
                 leading=leading_bulls,
                 now_iso=now_iso,
             )
-        elif bearish_pct >= 68.0 and net_score <= -1.2:
+        elif bearish_pct >= 68.0 and net_score <= -1.2 and is_index_bear_active:
             alert = self._create_contagion_alert(
                 index_name=clean_idx,
                 direction="BEARISH",
@@ -290,17 +304,135 @@ class IndexContagionEngine:
         leaders_str = ", ".join(leading[:3]) if leading else "Core heavyweights"
         tag = "🚀 HEAVYWEIGHT CONTAGION" if is_bull else "🔻 HEAVYWEIGHT BREAKDOWN"
 
-        headline = (
-            f"{tag}: {index_name} at {spot:,.1f} ({sync_pct:.0f}% Weight {direction})"
-        )
-        summary = (
-            f"Institutional {index_name} constituent synchronization ({sync_pct:.0f}% aligned). "
-            f"Leaders: {leaders_str}. Index spot at ₹{spot:,.1f} (VWAP ₹{vwap:,.1f}). "
-            f"Precursor impulse active."
-        )
+        # Resolve live ATM Option Contract for the index
+        opt_type = "CE" if is_bull else "PE"
+        atm_contract = None
+        opt_plan = None
+        opt_ltp = None
+        opt_strike = None
+        opt_contract_sym = None
+        opt_expiry = None
+        opt_sl = None
+        opt_t1 = None
+        opt_t2 = None
+        opt_t3 = None
+        try:
+            from market.options import get_options_chain
+            from engine.position_sizer import get_lot_size
+            from engine.trade_plan import calculate_option_execution_plan
 
-        entry_min = round(spot - 25.0 if is_bull else spot - 15.0, 1)
-        entry_max = round(spot + 35.0 if is_bull else spot + 15.0, 1)
+            chain = get_options_chain(index_name)
+            if chain:
+                # Institutional ATM Proximity Gate:
+                # Strike must be within 2.0% of index spot (typically within 150-500 pts for 20k-25k indices).
+                # Rejects strikes that are 1000-2000 points OTM (which Zerodha and exchange RMS reject).
+                max_allowed_dist_pct = 0.020
+                matching = [
+                    c
+                    for c in chain
+                    if getattr(c, "option_type", "") == opt_type
+                    and float(getattr(c, "last_price", 0.0) or 0.0) > 0
+                    and (abs(float(getattr(c, "strike", 0.0)) - spot) / max(1.0, spot)) <= max_allowed_dist_pct
+                ]
+                # Prioritize liquid contracts with open interest or volume if available
+                liquid_matching = [
+                    c for c in matching
+                    if int(getattr(c, "oi", 0) or 0) > 0 or int(getattr(c, "volume", 0) or 0) > 0
+                ]
+                chosen_pool = liquid_matching if liquid_matching else matching
+                if chosen_pool:
+                    chosen_pool.sort(key=lambda c: abs(float(getattr(c, "strike", 0.0)) - spot))
+                    atm_contract = chosen_pool[0]
+                    opt_ltp = float(atm_contract.last_price)
+                    opt_strike = float(atm_contract.strike)
+                    opt_contract_sym = atm_contract.symbol
+                    opt_expiry = getattr(atm_contract, "expiry", None)
+                    lot_sz = get_lot_size(index_name)
+                    if tp and getattr(tp, "invalidation_stop", 0) > 0:
+                        opt_plan = calculate_option_execution_plan(
+                            trade_plan=tp,
+                            option_type=opt_type,
+                            strike=opt_strike,
+                            expiry=str(opt_expiry) if opt_expiry else "",
+                            option_ltp=opt_ltp,
+                            lot_size=lot_sz or 15,
+                        )
+                        if opt_plan and opt_plan.get("sl_premium"):
+                            opt_sl = float(opt_plan["sl_premium"])
+                            opt_t1 = float(opt_plan.get("t1_premium") or round(opt_ltp * 1.25, 2))
+                            opt_t2 = float(opt_plan.get("t2_premium") or round(opt_ltp * 1.45, 2))
+                            opt_t3 = float(opt_plan.get("t3_premium") or round(opt_ltp * 1.75, 2))
+                            rr_str = str(opt_plan.get("option_rr") or rr_str)
+                    if not opt_sl:
+                        opt_sl = round(max(0.05, opt_ltp * 0.85), 2)
+                        opt_t1 = round(opt_ltp * 1.25, 2)
+                        opt_t2 = round(opt_ltp * 1.45, 2)
+                        opt_t3 = round(opt_ltp * 1.75, 2)
+        except Exception as e_opt:
+            logger.debug(f"[IndexContagion] Option resolution failed for {index_name}: {e_opt}")
+
+        if opt_ltp and opt_contract_sym:
+            headline = f"{tag}: {opt_contract_sym} @ ₹{opt_ltp:,.1f} ({sync_pct:.0f}% Weight {direction})"
+            summary = (
+                f"Institutional {index_name} constituent synchronization ({sync_pct:.0f}% aligned). "
+                f"ATM Option: {opt_contract_sym} @ ₹{opt_ltp:,.1f} (SL ₹{opt_sl:,.1f} | T1 ₹{opt_t1:,.1f}). "
+                f"Leaders: {leaders_str}. Index spot at ₹{spot:,.1f} (VWAP ₹{vwap:,.1f})."
+            )
+            alert_ltp = opt_ltp
+            alert_sl = opt_sl
+            alert_t1 = opt_t1
+            entry_range_str = f"₹{round(opt_ltp * 0.98, 1):,.1f} – ₹{round(opt_ltp * 1.02, 1):,.1f}"
+            when_to_buy_str = f"Buy {opt_contract_sym} on limit/ask while {index_name} spot holds above ₹{vwap:,.1f}."
+        else:
+            headline = f"{tag}: {index_name} at {spot:,.1f} ({sync_pct:.0f}% Weight {direction})"
+            summary = (
+                f"Institutional {index_name} constituent synchronization ({sync_pct:.0f}% aligned). "
+                f"Leaders: {leaders_str}. Index spot at ₹{spot:,.1f} (VWAP ₹{vwap:,.1f}). "
+                f"Precursor impulse active."
+            )
+            alert_ltp = spot
+            alert_sl = sl
+            alert_t1 = t1
+            entry_min = round(spot - 25.0 if is_bull else spot - 15.0, 1)
+            entry_max = round(spot + 35.0 if is_bull else spot + 15.0, 1)
+            entry_range_str = f"₹{entry_min:,.1f} – ₹{entry_max:,.1f}"
+            when_to_buy_str = f"Enter ATM options while {index_name} holds above ₹{vwap:,.1f}"
+
+        # Calibrated institutional confidence scoring (0 - 95%)
+        # Base: 60 pts
+        # + Synchronization contribution (up to 16 pts): sync_pct * 0.16
+        # + Leader impulse strength: average move of leaders >= 0.8% gets +10 pts, >= 0.5% gets +5 pts
+        # + Volume confirmation: +5 pts if active RVOL observed in leaders
+        # + Index trend: +4 pts if spot clearly extended from VWAP (>0.15%)
+        conf_score = 60.0 + (sync_pct * 0.16)
+
+        # Evaluate leader magnitude
+        import re
+        leader_chgs = []
+        for l_str in leading:
+            m = re.search(r"([+-]?\d+\.?\d*)%", l_str)
+            if m:
+                try:
+                    leader_chgs.append(abs(float(m.group(1))))
+                except Exception:
+                    pass
+        avg_lead_chg = (sum(leader_chgs) / len(leader_chgs)) if leader_chgs else 0.0
+        if avg_lead_chg >= 0.8:
+            conf_score += 10.0
+        elif avg_lead_chg >= 0.5:
+            conf_score += 5.0
+
+        # Volume confirmation
+        has_active_rvol = any("RVOL" in l_str for l_str in leading)
+        if has_active_rvol:
+            conf_score += 5.0
+
+        # VWAP trend separation
+        vwap_dist_pct = abs(spot - vwap) / max(1.0, vwap) * 100.0
+        if vwap_dist_pct >= 0.15:
+            conf_score += 4.0
+
+        final_conf = min(95, max(65, int(conf_score)))
 
         return AutoAlert(
             alert_id=f"aa-contagion-{index_name.lower()}-{uuid.uuid4().hex[:6]}",
@@ -311,32 +443,48 @@ class IndexContagionEngine:
             direction=direction,
             headline=headline,
             summary=summary,
-            ltp=spot,
-            trigger_level=spot,
-            target_level=t1,
-            stop_loss=sl,
+            ltp=alert_ltp,
+            trigger_level=alert_ltp,
+            target_level=alert_t1,
+            stop_loss=alert_sl,
+            strike=opt_strike,
+            option_type=opt_type if opt_strike else None,
+            contract_symbol=opt_contract_sym,
+            expiry_date=opt_expiry,
+            option_premium=opt_ltp,
+            underlying_spot=spot,
+            segment="FNO_INDEX",
             metrics={
                 "sync_pct": sync_pct,
                 "direction": direction,
                 "leaders": leading[:4],
                 "vwap": round(vwap, 1),
                 "change_pct": round(change_pct, 2),
+                "option_contract": opt_contract_sym,
+                "option_premium": opt_ltp,
             },
             actionable_plan={
-                "action": f"{'BUY_CALL' if is_bull else 'BUY_PUT'}_MOMENTUM",
+                "action": f"BUY_{'CALL' if is_bull else 'PUT'}",
                 "segment": "FNO_INDEX",
-                "entry_range": f"₹{entry_min:,.1f} – ₹{entry_max:,.1f}",
-                "stop_loss": f"₹{sl:,.1f}",
-                "target": f"₹{t1:,.1f}",
-                "target_2": f"₹{t2:,.1f}",
-                "target_3": f"₹{t3:,.1f}",
+                "contract": opt_contract_sym or index_name,
+                "strike": opt_strike,
+                "option_type": opt_type if opt_strike else None,
+                "entry_range": entry_range_str,
+                "stop_loss": f"₹{alert_sl:,.1f}",
+                "target": f"₹{alert_t1:,.1f}",
+                "target_2": f"₹{opt_t2 or t2:,.1f}",
+                "target_3": f"₹{opt_t3 or t3:,.1f}",
+                "underlying_spot": f"₹{spot:,.1f}",
+                "underlying_sl": f"₹{sl:,.1f}",
+                "underlying_target": f"₹{t1:,.1f}",
                 "risk_reward": rr_str,
                 "trade_plan": tp_dict,
-                "when_to_buy": f"Enter ATM options while {index_name} holds above ₹{vwap:,.1f}",
+                "option_plan": opt_plan,
+                "when_to_buy": when_to_buy_str,
                 "when_to_wait": f"Do not chase if spot extends > 0.6% from VWAP without retest",
                 "profit_rule": "Scale 50% at T1, move SL to breakeven, trail runner on 5m 20-EMA.",
             },
-            confidence=min(95, int(72 + (sync_pct * 0.22))),
+            confidence=final_conf,
             created_at=now_iso,
         )
 

@@ -903,6 +903,7 @@ def test_decisive_telegram_formatting_and_one_shot_dispatch(monkeypatch):
         stop_loss=3350.0,
         is_live=True,
         environment="LIVE",
+        telegram_dispatched=True,
     )
     engine._alerts.append(alert)
 
@@ -1095,7 +1096,7 @@ def test_options_alert_uses_options_plan_directly(monkeypatch):
     msg = dispatched[0]
 
     assert "Data-Driven Options Plan" not in msg
-    assert "NIFTY24500CE" in msg
+    assert "NIFTY 24500 CE" in msg or "NIFTY24500CE" in msg
     assert "₹99.0 (+120%)" in msg
     assert "₹29.0 (-35%)" in msg
 
@@ -1572,6 +1573,7 @@ def test_options_momentum_scanner_recording(tmp_path, monkeypatch):
         }
     )
     monkeypatch.setattr("market.quotes.get_ltp", lambda sym: 23510.0)
+    monkeypatch.setattr("market.quotes.get_quote", lambda *args, **kwargs: {})
     monkeypatch.setattr("market.options.get_options_chain", lambda sym: synthetic_chain)
     monkeypatch.setattr("market.history.get_ohlcv", lambda sym, **kwargs: healthy_df)
 
@@ -1835,6 +1837,7 @@ def test_scan_options_momentum_monthly_put_surge(tmp_path, monkeypatch):
     setattr(mock_contract, "expiry", "2026-09-29")
 
     monkeypatch.setattr("market.quotes.get_ltp", lambda sym: 13520.0)
+    monkeypatch.setattr("market.quotes.get_quote", lambda sym: {})
     monkeypatch.setattr("market.options.get_options_chain", lambda sym: [mock_contract])
     monkeypatch.setattr("market.history.get_ohlcv", lambda sym, **kwargs: None)
 
@@ -3050,6 +3053,312 @@ def test_gamma_blast_dual_blueprint_runner_and_noise_margin(monkeypatch):
     inv_reason_real = evaluate_alert_invalidation(alert_23400, current_ltp=58.00)
     assert inv_reason_real is not None
     assert "invalidated" in inv_reason_real.lower()
+
+
+def test_zero_ghost_lifecycle_invalidation_suppressed_if_not_broadcast_to_telegram(monkeypatch, tmp_path):
+    """
+    ZERO-GHOST LIFECYCLE INVARIANT:
+    An alert that was never broadcast to Telegram (e.g. MIDCPNIFTY suppressed on low confidence)
+    must NEVER emit a 'VIEW INVALIDATED' or target update to Telegram when stopped out.
+    """
+    from engine.auto_alert_engine import AutoAlertEngine, AutoAlert
+
+    data_file = tmp_path / "auto_alerts_ghost.json"
+    monkeypatch.setattr("engine.auto_alert_engine.get_auto_alerts_file", lambda: data_file)
+    monkeypatch.setattr("engine.alerts._is_market_hours", lambda *args, **kwargs: True)
+
+    tg_dispatched = []
+    monkeypatch.setattr("engine.alerts._telegram_notify", lambda msg, **kwargs: tg_dispatched.append(msg))
+
+    engine = AutoAlertEngine(max_buffer=20)
+    engine.clear_alerts()
+
+    # 1. Alert created without Telegram dispatch (telegram_dispatched=False)
+    ghost_alert = AutoAlert(
+        alert_id="aa-optmom-pe-MIDCPNIFTY-14200-ghost",
+        alert_type="OPTIONS_MOMENTUM",
+        stage="EARLY_WARNING",
+        symbol="MIDCPNIFTY",
+        exchange="NFO",
+        direction="BEARISH",
+        headline="MIDCPNIFTY 14200 PE Early Warning",
+        summary="Internal scan only",
+        ltp=185.0,
+        trigger_level=185.0,
+        target_level=280.0,
+        stop_loss=157.25,
+        option_type="PE",
+        strike=14200.0,
+        contract_symbol="MIDCPNIFTY2026092914200PE",
+        confidence=74,  # Below Telegram 82% threshold -> never sent to Telegram
+        telegram_dispatched=False,
+        is_live=True,
+        environment="LIVE",
+    )
+    engine._alerts.append(ghost_alert)
+
+    # 2. Premium collapses to 145.0 (below stop-loss 157.25) -> Invalidation evaluation triggers!
+    monkeypatch.setattr("market.quotes.get_ltp", lambda sym: 145.0)
+    invalidated = engine.check_and_alert_invalidations(exchanges=["NFO"])
+    assert len(invalidated) == 1
+    assert ghost_alert.is_invalidated is True
+
+    # Telegram MUST NOT receive any message because original signal was never broadcast!
+    assert len(tg_dispatched) == 0
+
+    # 3. Legitimate alert that WAS broadcast to Telegram (telegram_dispatched=True)
+    real_alert = AutoAlert(
+        alert_id="aa-optmom-pe-NIFTY-23000-real",
+        alert_type="OPTIONS_MOMENTUM",
+        stage="IGNITED",
+        symbol="NIFTY",
+        exchange="NFO",
+        direction="BEARISH",
+        headline="NIFTY 23000 PE Breakout",
+        summary="Broadcast to Telegram earlier",
+        ltp=150.0,
+        trigger_level=150.0,
+        target_level=220.0,
+        stop_loss=120.0,
+        option_type="PE",
+        strike=23000.0,
+        contract_symbol="NIFTY23000PE",
+        confidence=90,
+        telegram_dispatched=True,
+        is_live=True,
+        environment="LIVE",
+    )
+    engine._alerts.append(real_alert)
+
+    monkeypatch.setattr("market.quotes.get_ltp", lambda sym: 110.0)
+    inv_real = engine.check_and_alert_invalidations(exchanges=["NFO"])
+    assert len(inv_real) == 1
+    assert real_alert.is_invalidated is True
+
+    # Telegram MUST receive the invalidation notification for the broadcasted trade!
+    assert len(tg_dispatched) == 1
+    assert "VIEW INVALIDATED" in tg_dispatched[0]
+    assert "NIFTY" in tg_dispatched[0]
+
+
+def test_signal_once_ignited_suppresses_duplicate_telegram_card(monkeypatch, tmp_path):
+    """
+    SIGNAL ONCE DISCIPLINE:
+    When an actionable early warning was already dispatched to Telegram,
+    a subsequent IGNITED transition must NOT send a duplicate full alert card to Telegram.
+    """
+    from engine.auto_alert_engine import AutoAlertEngine, AutoAlert
+
+    data_file = tmp_path / "auto_alerts_once.json"
+    monkeypatch.setattr("engine.auto_alert_engine.get_auto_alerts_file", lambda: data_file)
+    monkeypatch.setattr("engine.alerts._is_market_hours", lambda *args, **kwargs: True)
+
+    tg_dispatched = []
+    monkeypatch.setattr("engine.alerts._telegram_notify", lambda msg, **kwargs: tg_dispatched.append(msg))
+
+    engine = AutoAlertEngine(max_buffer=20)
+    engine.clear_alerts()
+
+    # Step 1: Early warning arrives with high confidence -> dispatched to Telegram
+    early = AutoAlert(
+        alert_id="aa-gamma-ce-RELIANCE-1300-once",
+        alert_type="GAMMA_BLAST",
+        stage="EARLY_WARNING",
+        symbol="RELIANCE",
+        exchange="NFO",
+        direction="BULLISH",
+        headline="⚡ CALL GAMMA BLAST: RELIANCE 1300 CE",
+        summary="Actionable early warning with entry range",
+        ltp=40.0,
+        trigger_level=42.0,
+        target_level=60.0,
+        stop_loss=32.0,
+        option_type="CE",
+        strike=1300.0,
+        confidence=88,
+        is_live=True,
+        environment="LIVE",
+    )
+    rec1 = engine.record_alert(early)
+    assert rec1 is True
+    assert early.telegram_dispatched is True
+    assert len(tg_dispatched) == 1
+
+    # Step 2: Minutes later, trigger level crossed -> stage upgraded to IGNITED
+    ignite = AutoAlert(
+        alert_id="aa-gamma-ce-RELIANCE-1300-ignited",
+        alert_type="GAMMA_BLAST",
+        stage="IGNITED",
+        symbol="RELIANCE",
+        exchange="NFO",
+        direction="BULLISH",
+        headline="⚡ CALL GAMMA BLAST IGNITED: RELIANCE 1300 CE",
+        summary="Trigger breached",
+        ltp=42.5,
+        trigger_level=42.0,
+        target_level=60.0,
+        stop_loss=32.0,
+        option_type="CE",
+        strike=1300.0,
+        confidence=88,
+        is_live=True,
+        environment="LIVE",
+    )
+    rec2 = engine.record_alert(ignite)
+    assert rec2 is True
+    # Telegram messages must remain at 1! No duplicate alert card!
+    assert len(tg_dispatched) == 1
+
+
+def test_cross_detector_active_trade_mutex(monkeypatch, tmp_path):
+    """
+    CROSS-DETECTOR MUTEX:
+    If a symbol has an active trade thesis running, competing detectors
+    must be suppressed for the same symbol in the same direction.
+    """
+    from engine.auto_alert_engine import AutoAlertEngine, AutoAlert
+
+    data_file = tmp_path / "auto_alerts_mutex.json"
+    monkeypatch.setattr("engine.auto_alert_engine.get_auto_alerts_file", lambda: data_file)
+    monkeypatch.setattr("engine.auto_alert_engine.AutoAlertEngine._dispatch", lambda self, a: None)
+
+    engine = AutoAlertEngine(max_buffer=20)
+    engine.clear_alerts()
+
+    # 1. INTRADAY_SPARK fires for SBIN (BULLISH)
+    spark = AutoAlert(
+        alert_id="spark-sbin-01",
+        alert_type="INTRADAY_SPARK",
+        stage="IGNITED",
+        symbol="SBIN",
+        exchange="NSE",
+        direction="BULLISH",
+        headline="SBIN Intraday Spark +2%",
+        summary="Volume surge",
+        ltp=850.0,
+        trigger_level=850.0,
+        target_level=875.0,
+        stop_loss=840.0,
+        is_live=True,
+        environment="LIVE",
+    )
+    rec1 = engine.record_alert(spark)
+    assert rec1 is True
+
+    # 2. 10 minutes later, GAMMA_BLAST detector finds SBIN 860 CE (BULLISH)
+    gamma = AutoAlert(
+        alert_id="gamma-sbin-860ce",
+        alert_type="GAMMA_BLAST",
+        stage="IGNITED",
+        symbol="SBIN",
+        exchange="NFO",
+        direction="BULLISH",
+        headline="SBIN 860 CE Gamma Blast",
+        summary="Call OI unwinding",
+        ltp=15.0,
+        trigger_level=15.0,
+        target_level=25.0,
+        stop_loss=10.0,
+        option_type="CE",
+        strike=860.0,
+        is_live=True,
+        environment="LIVE",
+    )
+    rec2 = engine.record_alert(gamma)
+    # MUST BE SUPPRESSED: SBIN is already tracking an active BULLISH trade!
+    assert rec2 is False
+
+
+def test_commodity_root_canonicalization(monkeypatch, tmp_path):
+    """
+    COMMODITY CANONICALIZATION:
+    Mini/micro contracts (SILVERM, GOLDM) must be suppressed if the primary commodity
+    has an active trade or has recently alerted.
+    """
+    from engine.auto_alert_engine import AutoAlertEngine, AutoAlert
+
+    data_file = tmp_path / "auto_alerts_comm.json"
+    monkeypatch.setattr("engine.auto_alert_engine.get_auto_alerts_file", lambda: data_file)
+    monkeypatch.setattr("engine.auto_alert_engine.AutoAlertEngine._dispatch", lambda self, a: None)
+
+    engine = AutoAlertEngine(max_buffer=20)
+    engine.clear_alerts()
+
+    # 1. Primary SILVER breakout fires
+    silver = AutoAlert(
+        alert_id="comm-silver-01",
+        alert_type="COMMODITY_MOMENTUM",
+        stage="IGNITED",
+        symbol="SILVER",
+        exchange="MCX",
+        direction="BULLISH",
+        headline="SILVER +1.5% Breakout",
+        summary="Breaking 20-bar high",
+        ltp=92000.0,
+        trigger_level=92000.0,
+        target_level=94000.0,
+        stop_loss=91000.0,
+        is_live=True,
+        environment="LIVE",
+    )
+    assert engine.record_alert(silver) is True
+
+    # 2. SILVERM triggers at the exact same time
+    silverm = AutoAlert(
+        alert_id="comm-silverm-01",
+        alert_type="COMMODITY_MOMENTUM",
+        stage="IGNITED",
+        symbol="SILVERM",
+        exchange="MCX",
+        direction="BULLISH",
+        headline="SILVERM +1.5% Breakout",
+        summary="Breaking 20-bar high",
+        ltp=92000.0,
+        trigger_level=92000.0,
+        target_level=94000.0,
+        stop_loss=91000.0,
+        is_live=True,
+        environment="LIVE",
+    )
+    # MUST BE SUPPRESSED: Primary SILVER is already active!
+    assert engine.record_alert(silverm) is False
+
+
+def test_strict_no_chase_guard(monkeypatch, tmp_path):
+    """
+    STRICT NO-CHASE GUARD:
+    Rejects setups where market price has already run beyond the no-chase boundary.
+    """
+    from engine.auto_alert_engine import AutoAlertEngine, AutoAlert
+
+    data_file = tmp_path / "auto_alerts_chase.json"
+    monkeypatch.setattr("engine.auto_alert_engine.get_auto_alerts_file", lambda: data_file)
+    monkeypatch.setattr("engine.auto_alert_engine.AutoAlertEngine._dispatch", lambda self, a: None)
+
+    engine = AutoAlertEngine(max_buffer=20)
+    engine.clear_alerts()
+
+    # Long Option: Trigger was ₹100.0, No-chase boundary is ₹105.0. Current LTP is ₹112.0 (chased out!)
+    chased_option = AutoAlert(
+        alert_id="opt-chased-01",
+        alert_type="OPTIONS_MOMENTUM",
+        stage="IGNITED",
+        symbol="NIFTY",
+        exchange="NFO",
+        direction="BULLISH",
+        headline="NIFTY 23500 CE Late",
+        summary="Late entry",
+        ltp=112.0,
+        trigger_level=100.0,
+        no_chase_boundary=105.0,
+        target_level=150.0,
+        stop_loss=80.0,
+        option_type="CE",
+        strike=23500.0,
+        is_live=True,
+        environment="LIVE",
+    )
+    assert engine.record_alert(chased_option) is False
 
 
 

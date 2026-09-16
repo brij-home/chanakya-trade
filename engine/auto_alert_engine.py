@@ -272,6 +272,7 @@ class AutoAlertEngine:
         Strictly prevents duplicate active alerts for the same symbol & alert_type.
         """
         now = time.time()
+        now_t = datetime.now(IST).time()
         to_dispatch = None
 
         clean_target = (
@@ -618,12 +619,44 @@ class AutoAlertEngine:
                 if (now - last_time) < self._cooldown_ttl:
                     return False  # Cooldown active, suppress repetitive spam
 
-                # 2b. Underlying Directional Cooldown: Prevent redundant same-direction alerts on the same stock
-                sym_sig = f"{clean_target}:{alert.direction}"
+                # 2b. Cross-Detector Active Trade Mutex:
+                # If a different detector is already tracking an active trade for this stock in the same direction today,
+                # suppress new initial alerts from other detectors (e.g. don't fire GAMMA_BLAST if
+                # OPTIONS_MOMENTUM or INTRADAY_SPARK is already active).
                 if not is_sim and alert.stage in ("IGNITED", "EARLY_WARNING"):
+                    active_diff_detector = next(
+                        (
+                            a
+                            for a in self._alerts
+                            if a.symbol.replace("NSE:", "")
+                            .replace("BSE:", "")
+                            .replace("MCX:", "")
+                            .replace("NFO:", "")
+                            .strip()
+                            .upper()
+                            == clean_target
+                            and a.direction == alert.direction
+                            and a.alert_type != alert.alert_type
+                            and a.is_active
+                            and not a.is_invalidated
+                            and a.stage not in ("INVALIDATED", "COMPLETED", "EXPIRED", "TARGET_ACHIEVED")
+                            and a.alert_id != alert.alert_id
+                            and (_alert_date(a) is None or _alert_date(a) == alert_dt_date)
+                        ),
+                        None,
+                    )
+                    if active_diff_detector:
+                        logger.info(
+                            f"[AutoAlertEngine] 🛑 Suppressed redundant {alert.alert_type} for {clean_target}: "
+                            f"Active {active_diff_detector.alert_type} ({active_diff_detector.stage}) trade already in flight."
+                        )
+                        return False
+
+                    # Cooldown check: prevent duplicate same-direction alerts for the same stock today
+                    sym_sig = f"{clean_target}:{alert.direction}"
                     last_sym_time = self._cooldowns.get(sym_sig, 0.0)
                     if (now - last_sym_time) < self._cooldown_ttl:
-                        has_active_same_dir = any(
+                        has_active_today = any(
                             a.symbol.replace("NSE:", "")
                             .replace("BSE:", "")
                             .replace("MCX:", "")
@@ -637,12 +670,69 @@ class AutoAlertEngine:
                             and (_alert_date(a) is None or _alert_date(a) == alert_dt_date)
                             for a in self._alerts
                         )
-                        if has_active_same_dir:
+                        if has_active_today:
                             logger.info(
                                 f"[AutoAlertEngine] 🛑 Suppressed redundant alert for {clean_target} ({alert.alert_type}): "
                                 f"Active {alert.direction} trade already running within {int(self._cooldown_ttl / 60)}m window."
                             )
                             return False
+
+                # 2bb. Base Commodity Canonicalization Gate:
+                # Suppress mini/micro contract duplicates if base commodity has an active trade or recent alert
+                COMMODITY_CANONICAL_MAP = {
+                    "SILVERM": "SILVER",
+                    "SILVERMIC": "SILVER",
+                    "GOLDM": "GOLD",
+                    "GOLDGUINEA": "GOLD",
+                    "CRUDEOILM": "CRUDEOIL",
+                }
+                if not is_sim and clean_target in COMMODITY_CANONICAL_MAP and alert.stage in ("IGNITED", "EARLY_WARNING"):
+                    root_comm = COMMODITY_CANONICAL_MAP[clean_target]
+                    has_root_active = any(
+                        a.symbol.strip().upper() == root_comm
+                        and a.is_active
+                        and not a.is_invalidated
+                        and a.stage not in ("INVALIDATED", "COMPLETED", "EXPIRED", "TARGET_ACHIEVED")
+                        for a in self._alerts
+                    )
+                    last_root_t = self._cooldowns.get(f"{root_comm}:{alert.direction}", 0.0)
+                    if has_root_active or (now - last_root_t) < 3600.0:
+                        logger.info(
+                            f"[AutoAlertEngine] 🛑 Suppressed derivative commodity {clean_target} ({alert.alert_type}): "
+                            f"Primary commodity {root_comm} is already active or recently alerted."
+                        )
+                        return False
+
+                # 2bc. Strict 'On/Before Time' No-Chase Guard:
+                # Disqualify setups where the market price has already run past the defined no-chase boundary.
+                if not is_sim and alert.no_chase_boundary and alert.ltp > 0 and alert.stage in ("IGNITED", "EARLY_WARNING"):
+                    is_option = bool(
+                        alert.option_type
+                        or alert.alert_type in ("OPTIONS_MOMENTUM", "GAMMA_BLAST")
+                        or (alert.segment in ("FNO", "OPTIONS") and (alert.strike or alert.option_type))
+                    )
+                    act_str = str((alert.actionable_plan or {}).get("action", "")).strip().upper()
+                    if act_str.startswith("SELL") or "SHORT" in act_str or "WRITE" in act_str:
+                        is_short_pos = True
+                    elif is_option:
+                        is_short_pos = False  # Long option: premium expected to rise
+                    elif alert.direction in ("BEARISH", "SHORT", "SELL"):
+                        is_short_pos = True
+                    else:
+                        is_short_pos = False
+
+                    if not is_short_pos and alert.ltp > alert.no_chase_boundary:
+                        logger.info(
+                            f"[AutoAlertEngine] 🛑 Disqualified chased entry for {clean_target} ({alert.alert_type}): "
+                            f"LTP ₹{alert.ltp:,.1f} has surged past no-chase boundary ₹{alert.no_chase_boundary:,.1f}."
+                        )
+                        return False
+                    elif is_short_pos and alert.ltp < alert.no_chase_boundary:
+                        logger.info(
+                            f"[AutoAlertEngine] 🛑 Disqualified chased short entry for {clean_target} ({alert.alert_type}): "
+                            f"LTP ₹{alert.ltp:,.1f} has dropped past short no-chase boundary ₹{alert.no_chase_boundary:,.1f}."
+                        )
+                        return False
 
                 # 2c. Learning Engine Invalidation Lockout Gate:
                 # Prevent re-triggering on assets that were stopped out / invalidated in the current session
@@ -1046,11 +1136,33 @@ class AutoAlertEngine:
             # 3. Existing position lifecycle updates (Invalidations, Targets, Trailing stops) remain permitted.
             is_milestone = (
                 alert.is_invalidated
-                or alert.stage == "INVALIDATED"
+                or alert.stage in ("INVALIDATED", "IN_FLIGHT_WARNING", "TARGET_ACHIEVED", "COMPLETED")
                 or is_t1
                 or is_target
                 or is_trail
             )
+
+            # ZERO-GHOST LIFECYCLE INVARIANT:
+            # Downstream lifecycle updates (Invalidations, Targets, Trailing stops, In-flight warnings)
+            # must NEVER be dispatched to Telegram if the original signal was not dispatched to Telegram!
+            if is_milestone:
+                if not getattr(alert, "telegram_dispatched", False):
+                    logger.info(
+                        f"[AutoAlertEngine] 🛑 Suppressed Telegram lifecycle milestone ({alert.stage} / is_invalidated={alert.is_invalidated}) "
+                        f"for {alert.symbol} ({alert.alert_id}): Original signal was never broadcast to Telegram."
+                    )
+                    return
+
+            # "SIGNAL ONCE" DISCIPLINE:
+            # If an early warning trade card was already dispatched to Telegram for this alert,
+            # suppress duplicate full card on subsequent ignition. The ignition is captured in Terminal UI/SSE.
+            if alert.stage == "IGNITED" and getattr(alert, "telegram_dispatched", False):
+                logger.info(
+                    f"[AutoAlertEngine] 🛑 Suppressed duplicate IGNITED Telegram card for {alert.symbol} ({alert.alert_id}): "
+                    f"Actionable trade setup was already dispatched once on Telegram."
+                )
+                return
+
             if not in_market and not is_milestone:
                 if alert.alert_type in (
                     "GAMMA_BLAST",
@@ -1061,6 +1173,42 @@ class AutoAlertEngine:
                 ):
                     return
                 if alert.confidence < 90:
+                    return
+
+            if not is_milestone:
+                # Institutional Telegram Conviction Bar: minimum 82% confidence for initial trade signals
+                if alert.confidence < 82:
+                    logger.info(
+                        f"[AutoAlertEngine] 🛑 Suppressed marginal setup for {alert.symbol} on Telegram: "
+                        f"Confidence {alert.confidence}% below institutional Telegram bar (82%)."
+                    )
+                    return
+
+                # Risk:Reward Quality Filter (Favor setups with R:R >= 1:1.4)
+                if alert.stop_loss > 0 and alert.target_level > 0 and alert.trigger_level > 0:
+                    is_short = alert.direction in ("BEARISH", "SHORT", "SELL")
+                    risk_pts = (alert.stop_loss - alert.trigger_level) if is_short else (alert.trigger_level - alert.stop_loss)
+                    reward_pts = (alert.trigger_level - alert.target_level) if is_short else (alert.target_level - alert.trigger_level)
+                    if risk_pts > 0 and reward_pts > 0:
+                        rr_ratio = reward_pts / risk_pts
+                        if rr_ratio < 1.4:
+                            logger.info(
+                                f"[AutoAlertEngine] 🛑 Suppressed unfavorable R:R setup for {alert.symbol} on Telegram: "
+                                f"R:R 1:{rr_ratio:.1f} below minimum 1:1.4 threshold."
+                            )
+                            return
+
+                # Segment-level Pacing Throttle:
+                # Prevent bursting multiple initial signals within a 45-second window on the same segment,
+                # unless the candidate has exceptional conviction (>= 90).
+                seg_label = alert_dict.get("segment") or "GENERAL"
+                pacing_key = f"PACING:{seg_label}"
+                last_pace_t = self._dispatch_cooldowns.get(pacing_key, 0.0)
+                if (time.time() - last_pace_t) < 45.0 and alert.confidence < 90:
+                    logger.info(
+                        f"[AutoAlertEngine] 🛑 Telegram pacing throttle active on {seg_label} "
+                        f"({int(time.time() - last_pace_t)}s elapsed < 45s). Holding setup in Terminal UI."
+                    )
                     return
 
             from engine.alerts import _telegram_notify
@@ -1105,9 +1253,9 @@ class AutoAlertEngine:
 
                 elif alert.stage == "EARLY_WARNING":
                     # Early warnings are preliminary coiling signals -> keep in SSE / Terminal,
-                    # do not buzz Telegram unless exceptionally high confidence (>= 90 for general, >= 80 for PRECURSOR_RADAR / ASYMMETRIC_OPPORTUNITY)
+                    # do not buzz Telegram unless exceptionally high confidence (>= 90 for general, >= 82 for PRECURSOR_RADAR / ASYMMETRIC_OPPORTUNITY)
                     min_conf = (
-                        80
+                        82
                         if alert.alert_type
                         in (
                             "PRECURSOR_RADAR",
@@ -1154,6 +1302,18 @@ class AutoAlertEngine:
                     _telegram_notify(tg_msg)
             else:
                 _telegram_notify(tg_msg)
+
+            # Record channel delivery provenance and segment pacing timestamp
+            with self._lock:
+                alert.telegram_dispatched = True
+                if not isinstance(alert.dispatched_channels, list):
+                    alert.dispatched_channels = []
+                if "telegram" not in alert.dispatched_channels:
+                    alert.dispatched_channels.append("telegram")
+                if not is_milestone:
+                    seg_lbl = alert_dict.get("segment") or "GENERAL"
+                    self._dispatch_cooldowns[f"PACING:{seg_lbl}"] = now_ts
+                self._save()
         except Exception as e:
             logger.warning(f"[AutoAlertEngine] Telegram dispatch failed: {e}", exc_info=True)
 
@@ -1396,31 +1556,37 @@ class AutoAlertEngine:
                         if eval_res.new_milestone not in alert.achieved_milestones:
                             alert.achieved_milestones.append(eval_res.new_milestone)
 
-                        if eval_res.new_milestone == "TARGET_ACHIEVED":
-                            if not eval_res.should_trail:
-                                alert.stage = "COMPLETED"
-                                alert.headline = f"🏁 {env_tag} FINAL TARGET ACHIEVED: {alert.symbol} (₹{eval_res.recommended_stop:,.2f})"
-                                alert.is_archived = True
-                                alert.archived_at = datetime.now(IST).strftime(
-                                    "%Y-%m-%d %H:%M:%S IST"
-                                )
-                                alert.archive_reason = "Final target achieved"
-                            else:
-                                alert.stage = "TARGET_ACHIEVED"
-                                alert.headline = f"🎯 {env_tag} FINAL TARGET ACHIEVED: {alert.symbol} (₹{eval_res.recommended_stop:,.2f})"
-                        elif eval_res.new_milestone == "T2_ACHIEVED":
-                            alert.stage = "T2_ACHIEVED"
-                            alert.headline = f"🏁 {env_tag} TARGET 2 ACHIEVED: {alert.symbol} (₹{eval_res.recommended_stop:,.2f})"
-                        else:
-                            alert.stage = "T1_ACHIEVED"
-                            alert.headline = f"🎯 {env_tag} TARGET 1 ACHIEVED: {alert.symbol} (₹{eval_res.recommended_stop:,.2f})"
-                        alert.summary = eval_res.trailing_rationale
+                    inst_label = alert.symbol
+                    if alert.contract_symbol:
+                        from bot.alert_templates import format_contract_display
+                        inst_label = format_contract_display(alert.contract_symbol)
+                    elif getattr(alert, "strike", None) and getattr(alert, "option_type", None):
+                        inst_label = f"{alert.symbol} {int(alert.strike)} {alert.option_type}".strip()
 
+                    cur_disp_p = cur_quote_ltp or alert.ltp
+                    if eval_res.new_milestone == "TARGET_ACHIEVED":
+                        if not eval_res.should_trail:
+                            alert.stage = "COMPLETED"
+                            alert.headline = f"🏁 {env_tag} FINAL TARGET ACHIEVED: {inst_label} (₹{cur_disp_p:,.2f})"
+                            alert.is_archived = True
+                            alert.archived_at = datetime.now(IST).strftime(
+                                "%Y-%m-%d %H:%M:%S IST"
+                            )
+                            alert.archive_reason = "Final target achieved"
+                        else:
+                            alert.stage = "TARGET_ACHIEVED"
+                            alert.headline = f"🎯 {env_tag} FINAL TARGET ACHIEVED: {inst_label} (₹{cur_disp_p:,.2f})"
+                    elif eval_res.new_milestone == "T2_ACHIEVED":
+                        alert.stage = "T2_ACHIEVED"
+                        alert.headline = f"🎯 {env_tag} TARGET 2 ACHIEVED: {inst_label} (₹{cur_disp_p:,.2f})"
+                    elif eval_res.new_milestone == "T1_ACHIEVED":
+                        alert.stage = "T1_ACHIEVED"
+                        alert.headline = f"🎯 {env_tag} TARGET 1 ACHIEVED: {inst_label} (₹{cur_disp_p:,.2f})"
                     elif eval_res.new_milestone == "TRAILING_UPDATE":
                         alert.last_trail_alert_time = now_ts
                         alert.stage = "TRAILING_UPDATE"
-                        alert.headline = f"📈 {env_tag} TRAILING STOP UPDATED: {alert.symbol} → ₹{eval_res.recommended_stop:,.2f}"
-                        alert.summary = eval_res.trailing_rationale
+                        alert.headline = f"📈 {env_tag} TRAILING STOP UPDATED: {inst_label} → ₹{eval_res.recommended_stop:,.2f}"
+                    alert.summary = eval_res.trailing_rationale
 
                     self._save()
 
@@ -2077,6 +2243,27 @@ class AutoAlertEngine:
 
         now_iso = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
 
+        # Resolve benchmark NIFTY status once for the whole scan batch
+        nifty_q = (
+            quotes_map.get("NSE:NIFTY 50")
+            or quotes_map.get("NSE:NIFTY")
+            or quotes_map.get("NIFTY 50")
+            or quotes_map.get("NIFTY")
+        )
+        nifty_chg = float(getattr(nifty_q, "change_pct", 0.0) or 0.0) if nifty_q else 0.0
+        nifty_ltp = (
+            float(getattr(nifty_q, "last_price", 0.0) or getattr(nifty_q, "ltp", 0.0) or 0.0)
+            if nifty_q
+            else 0.0
+        )
+        nifty_vwap = float(getattr(nifty_q, "vwap", 0.0) or 0.0) if nifty_q else 0.0
+        is_nifty_markdown = (nifty_chg <= -0.35) and (
+            (nifty_ltp < nifty_vwap) if nifty_vwap > 0 else True
+        )
+        is_nifty_markup = (nifty_chg >= 0.40) and (
+            (nifty_ltp > nifty_vwap) if nifty_vwap > 0 else True
+        )
+
         for sym in universe:
             clean_sym = sym.upper().replace("NSE:", "").replace(".NS", "").strip()
             q = quotes_map.get(f"NSE:{clean_sym}") or quotes_map.get(clean_sym)
@@ -2125,6 +2312,34 @@ class AutoAlertEngine:
 
             if not (is_bullish or is_bearish):
                 continue
+
+            sec_id = None
+            sec_name = None
+            if seg != "INDEX":
+                try:
+                    from analysis.universe import get_stock_sector
+
+                    sec_id, sec_name = get_stock_sector(clean_sym)
+                except Exception:
+                    pass
+
+            # Benchmark Gravitational Filter: If Nifty in markdown, suppress non-defensive equity sparks
+            # Decoupled Exemption: Allow thematic leaders if stock belongs to an RRG Leading / High-Growth sector
+            # (e.g. DEFENCE, RAILWAYS, ENERGY, SOLAR, CAPITAL GOODS, EMS) or exhibits high relative volume (rvol >= 2.0).
+            if is_bullish and is_nifty_markdown and seg != "INDEX" and sec_name:
+                is_defensive = any(d in sec_name.upper() for d in ("PHARMA", "FMCG", "HEALTH"))
+                is_thematic_leader = any(
+                    d in sec_name.upper()
+                    for d in ("DEFENCE", "RAIL", "ENERGY", "CAPITAL", "INFRA", "EMS", "TECH", "SOLAR")
+                ) or (rvol >= 2.0)
+                if not (is_defensive or is_thematic_leader):
+                    continue
+
+            # Benchmark Gravitational Filter: If Nifty in strong markup, suppress non-lagging equity breakdowns
+            if is_bearish and is_nifty_markup and seg != "INDEX" and sec_name:
+                is_lagging = any(d in sec_name.upper() for d in ("MEDIA", "REALTY"))
+                if not is_lagging:
+                    continue
 
             # Stage classification: Early Warning (coiling/first thrust) vs Ignited (expanding)
             is_early = (abs(chg) < 0.50) if seg == "INDEX" else (abs(chg) < 1.80)
@@ -2292,6 +2507,23 @@ class AutoAlertEngine:
                     "vwap": vwap,
                     "change_pct": chg,
                     "segment": seg,
+                    "nifty_change_pct": nifty_chg if nifty_q else None,
+                    "nifty_below_vwap": (
+                        ((nifty_ltp < nifty_vwap) if nifty_vwap > 0 else (nifty_chg < 0))
+                        if nifty_q
+                        else None
+                    ),
+                    "nifty_regime": (
+                        (
+                            "MARKDOWN"
+                            if is_nifty_markdown
+                            else ("MARKUP" if is_nifty_markup else "NORMAL")
+                        )
+                        if nifty_q
+                        else "NORMAL"
+                    ),
+                    "sector_id": sec_id,
+                    "sector_name": sec_name,
                 },
                 actionable_plan=plan,
             )
@@ -2429,6 +2661,32 @@ class AutoAlertEngine:
         )
         is_opening_drive = (now_dt.hour == 9 and now_dt.minute <= 45)
 
+        # Resolve benchmark NIFTY regime once for the scan cycle
+        nifty_change = None
+        nifty_below_vwap = None
+        try:
+            from market.quotes import get_quote
+
+            nq = get_quote("NSE:NIFTY 50")
+            q_obj = nq.get("NSE:NIFTY 50") or nq.get("NIFTY 50") if isinstance(nq, dict) else nq
+            if q_obj:
+                n_ltp = float(
+                    getattr(q_obj, "last_price", 0.0) or getattr(q_obj, "ltp", 0.0) or 0.0
+                )
+                n_vwap = float(getattr(q_obj, "vwap", 0.0) or 0.0)
+                n_chg = float(getattr(q_obj, "change_pct", 0.0) or 0.0)
+                if n_ltp > 0:
+                    nifty_change = n_chg
+                    nifty_below_vwap = (n_ltp < n_vwap) if n_vwap > 0 else (n_chg < 0)
+        except Exception:
+            pass
+        is_nifty_markdown = (
+            nifty_change is not None and nifty_change <= -0.35 and nifty_below_vwap is not False
+        )
+        is_nifty_markup = (
+            nifty_change is not None and nifty_change >= 0.40 and nifty_below_vwap is False
+        )
+
         for sym in targets:
             clean_sym = sym.replace("NSE:", "").replace("NFO:", "").strip().upper()
             try:
@@ -2459,7 +2717,57 @@ class AutoAlertEngine:
                 spot_open = getattr(quote_obj, "open", None) if quote_obj else None
                 spot_vwap = getattr(quote_obj, "vwap", None) if quote_obj else None
 
-                # ── Underlying Price Action & SMC Due Diligence ──────────────
+                chain = get_options_chain(clean_sym)
+                if not chain:
+                    continue
+
+                is_idx = clean_sym in (
+                    "NIFTY",
+                    "BANKNIFTY",
+                    "FINNIFTY",
+                    "MIDCPNIFTY",
+                    "SENSEX",
+                    "BANKEX",
+                )
+                # Determine canonical segment for routing and display (cached on the alert object)
+                alert_segment = "FNO_INDEX" if is_idx else "FNO_STOCK"
+                min_opt_volume = (
+                    (2000 if is_idx else 300) if is_opening_drive else (3000 if is_idx else 500)
+                )
+                min_oi = 10000 if is_idx else 300
+
+                # Delta-Gated Sweet-Spot Filter: Restrict primary index alerts to ATM and near-the-money (<= 2 strikes)
+                # Avoids far OTM lottery traps (e.g. 23100 PE when spot is 23395) while capturing high-delta institutional momentum.
+                max_strike_dist = (
+                    (
+                        120.0
+                        if clean_sym in ("NIFTY", "FINNIFTY")
+                        else (
+                            250.0
+                            if clean_sym in ("BANKNIFTY", "SENSEX", "BANKEX")
+                            else (75.0 if clean_sym in ("MIDCPNIFTY",) else 100.0)
+                        )
+                    )
+                    if is_idx
+                    else spot * 0.02
+                )
+                min_opt_price = 10.0 if is_idx else 2.0
+
+                # Filter ATM and near-the-money contracts within tight range
+                atm_contracts = [
+                    c
+                    for c in chain
+                    if abs(getattr(c, "strike", 0.0) - spot) <= max_strike_dist
+                    and getattr(c, "last_price", 0.0) >= min_opt_price
+                    and getattr(c, "volume", 0) >= min_opt_volume
+                ]
+                if not atm_contracts:
+                    continue
+
+                # Sort ATM contracts by proximity to spot (closest to ATM first!)
+                atm_contracts.sort(key=lambda c: abs(getattr(c, "strike", 0.0) - spot))
+
+                # ── Underlying Price Action & SMC Due Diligence (computed only if liquid ATM contracts exist) ──
                 from market.history import get_ohlcv
 
                 df_5m = None
@@ -2520,53 +2828,6 @@ class AutoAlertEngine:
                     except Exception:
                         pass
 
-                chain = get_options_chain(clean_sym)
-                if not chain:
-                    continue
-
-                is_idx = clean_sym in (
-                    "NIFTY",
-                    "BANKNIFTY",
-                    "FINNIFTY",
-                    "MIDCPNIFTY",
-                    "SENSEX",
-                    "BANKEX",
-                )
-                # Determine canonical segment for routing and display (cached on the alert object)
-                alert_segment = "FNO_INDEX" if is_idx else "FNO_STOCK"
-                min_opt_volume = (
-                    (2000 if is_idx else 300) if is_opening_drive else (3000 if is_idx else 500)
-                )
-                min_oi = 10000 if is_idx else 300
-
-                # Delta-Gated Sweet-Spot Filter: Restrict primary index alerts to ATM and near-the-money (<= 2 strikes)
-                # Avoids far OTM lottery traps (e.g. 23100 PE when spot is 23395) while capturing high-delta institutional momentum.
-                max_strike_dist = (
-                    (
-                        120.0
-                        if clean_sym in ("NIFTY", "FINNIFTY")
-                        else (
-                            250.0
-                            if clean_sym in ("BANKNIFTY", "SENSEX", "BANKEX")
-                            else (75.0 if clean_sym in ("MIDCPNIFTY",) else 100.0)
-                        )
-                    )
-                    if is_idx
-                    else spot * 0.02
-                )
-                min_opt_price = 10.0 if is_idx else 2.0
-
-                # Filter ATM and near-the-money contracts within tight range
-                atm_contracts = [
-                    c
-                    for c in chain
-                    if abs(getattr(c, "strike", 0.0) - spot) <= max_strike_dist
-                    and getattr(c, "last_price", 0.0) >= min_opt_price
-                    and getattr(c, "volume", 0) >= min_opt_volume
-                ]
-                # Sort ATM contracts by proximity to spot (closest to ATM first!)
-                atm_contracts.sort(key=lambda c: abs(getattr(c, "strike", 0.0) - spot))
-
                 # Check for top volume / turnover momentum
                 for c in atm_contracts:
                     vol = getattr(c, "volume", 0)
@@ -2584,8 +2845,8 @@ class AutoAlertEngine:
                     if oi < min_oi:
                         continue
 
-                    # Momentum DTE Gate: Indices demand active weekly liquidity (DTE <= 7), stocks allow front-month (DTE <= 35)
-                    max_dte = 7 if is_idx else 35
+                    # Momentum DTE Gate: NIFTY allows weekly (DTE <= 8), monthly indices (BANKNIFTY/FINNIFTY/SENSEX) and stocks allow front-month (DTE <= 35)
+                    max_dte = 8 if clean_sym in ("NIFTY",) else 35
                     if expiry_date:
                         try:
                             exp_str = str(expiry_date).split("T")[0].strip()
@@ -2707,6 +2968,35 @@ class AutoAlertEngine:
                         )
                         continue
 
+                    # Benchmark Gravitational Filter on single-stock options:
+                    if not is_idx and is_nifty_markdown and opt_type == "CE":
+                        from analysis.universe import get_stock_sector
+
+                        sec_id, sec_name = get_stock_sector(clean_sym)
+                        is_defensive = any(
+                            d in (sec_name or "").upper() for d in ("PHARMA", "FMCG", "HEALTH")
+                        )
+                        is_thematic = any(
+                            d in (sec_name or "").upper()
+                            for d in ("DEFENCE", "RAIL", "ENERGY", "CAPITAL", "INFRA", "EMS", "TECH", "SOLAR")
+                        )
+                        if not (is_defensive or is_thematic):
+                            logger.debug(
+                                f"[AutoAlertEngine] Suppressed Call breakout on {clean_sym}: NIFTY in structural markdown ({nifty_change:.2f}%)"
+                            )
+                            continue
+
+                    if not is_idx and is_nifty_markup and opt_type == "PE":
+                        from analysis.universe import get_stock_sector
+
+                        sec_id, sec_name = get_stock_sector(clean_sym)
+                        is_lagging = any(d in sec_name.upper() for d in ("MEDIA", "REALTY"))
+                        if not is_lagging:
+                            logger.debug(
+                                f"[AutoAlertEngine] Suppressed Put surge on {clean_sym}: NIFTY in structural markup (+{nifty_change:.2f}%)"
+                            )
+                            continue
+
                     # 2c. Options Delta-OI Institutional Confirmation Gate:
                     # For Calls: If Call writers are aggressively stacking fresh OI while spot is below VWAP,
                     # this is an institutional Call Writing Resistance Wall, NOT a bullish breakout!
@@ -2782,25 +3072,25 @@ class AutoAlertEngine:
                         max_opt_sl_risk = round(opt_ltp * 0.15, 2)
                         opt_sl = max(opt_sl, round(opt_ltp - max_opt_sl_risk, 2))
                         opt_risk = max(0.2, opt_ltp - opt_sl)
-                        opt_t1 = max(opt_t1, round(opt_ltp + 2.5 * opt_risk, 2))
+                        opt_t1 = float(opt_plan.get("t1_premium") or round(opt_ltp + 1.8 * opt_risk, 2))
                         opt_t2 = float(
-                            opt_plan.get("t2_premium") or round(opt_ltp + 4.0 * opt_risk, 2)
+                            opt_plan.get("t2_premium") or round(opt_ltp + 3.0 * opt_risk, 2)
                         )
                         opt_moonshot = float(
-                            opt_plan.get("t3_premium") or round(opt_ltp + 6.0 * opt_risk, 2)
+                            opt_plan.get("t3_premium") or round(opt_ltp + 5.0 * opt_risk, 2)
                         )
                         rr_str = str(
                             opt_plan.get("option_rr")
                             or f"1:{round((opt_t1 - opt_ltp) / opt_risk, 1)}"
                         )
                     else:
-                        # Tight structural defined risk stop (10%–14% risk instead of arbitrary 25%)
-                        risk_pts = round(max(0.20, min(opt_ltp * 0.12, opt_ltp - 0.05)), 2)
+                        # Tight structural defined risk stop for intraday options (12%–15% risk)
+                        risk_pts = round(max(0.20, min(opt_ltp * 0.15, opt_ltp - 0.05)), 2)
                         opt_sl = round(max(0.05, opt_ltp - risk_pts), 2)
-                        opt_t1 = round(opt_ltp + 2.5 * risk_pts, 2)
-                        opt_t2 = round(opt_ltp + 4.0 * risk_pts, 2)
-                        opt_moonshot = round(opt_ltp + 6.0 * risk_pts, 2)
-                        rr_str = "1:2.5"
+                        opt_t1 = round(opt_ltp + 1.8 * risk_pts, 2)
+                        opt_t2 = round(opt_ltp + 3.0 * risk_pts, 2)
+                        opt_moonshot = round(opt_ltp + 5.0 * risk_pts, 2)
+                        rr_str = "1:1.8"
 
                     # 4. Friday Session Clock & Weekend Theta Decay Filter
                     friday_tag = (
@@ -2826,6 +3116,10 @@ class AutoAlertEngine:
                         conf_score += 5
                     if mtf_15m_trend == ("BULLISH" if opt_type == "CE" else "BEARISH"):
                         conf_score += 7
+                    if is_nifty_markdown and opt_type == "PE":
+                        conf_score += 8  # Macro tailwind bonus for Put buyers in down market
+                    elif is_nifty_markup and opt_type == "CE":
+                        conf_score += 8  # Macro tailwind bonus for Call buyers in up market
                     confidence = min(94, max(72, conf_score))
 
                     # 6. Optimal Trade Entry (OTE) & Strict No-Chase Boundaries
@@ -2913,6 +3207,10 @@ class AutoAlertEngine:
                             "spot_target_2": tp.target_2 if tp else None,
                             "upper_wick_ratio": round(upper_wick_ratio, 2),
                             "lower_wick_ratio": round(lower_wick_ratio, 2),
+                            "high": getattr(c, "high", None),
+                            "low": getattr(c, "low", None),
+                            "open": getattr(c, "open", None),
+                            "close": getattr(c, "close", None),
                             "is_friday_late": is_friday_late,
                             "mtf_15m_trend": (
                                 "BEARISH_BREAKDOWN"
@@ -2926,6 +3224,13 @@ class AutoAlertEngine:
                             "vix_regime": vix_regime,
                             "india_vix": vix_val,
                             "is_gamma_squeeze": is_gamma_squeeze,
+                            "nifty_change_pct": nifty_change,
+                            "nifty_below_vwap": nifty_below_vwap,
+                            "nifty_regime": (
+                                "MARKDOWN"
+                                if is_nifty_markdown
+                                else ("MARKUP" if is_nifty_markup else "NORMAL")
+                            ),
                         },
                         actionable_plan={
                             "action": f"BUY {opt_type}",
@@ -3999,11 +4304,11 @@ class AutoAlertEngine:
                             f"({a.symbol} {a.strike}): OI {oi} < 15,000"
                         )
                         continue
-                    elif dte is not None and dte > 5:
+                    elif dte is not None and (dte > 8 if a.symbol.upper() in ("NIFTY",) else dte > 35):
                         purged += 1
                         logger.info(
                             f"[AutoAlertEngine] Purged distant gamma alert {a.alert_id} "
-                            f"({a.symbol} {a.strike}): DTE {dte} > 5"
+                            f"({a.symbol} {a.strike}): DTE {dte}"
                         )
                         continue
 
@@ -4189,6 +4494,8 @@ class AutoAlertEngine:
                                 in_flight_warning_at=d.get("in_flight_warning_at"),
                                 mtf_confluence=d.get("mtf_confluence"),
                                 vix_regime=d.get("vix_regime"),
+                                telegram_dispatched=bool(d.get("telegram_dispatched", False)),
+                                dispatched_channels=list(d.get("dispatched_channels", [])),
                             )
                         )
                 # Rehabilitate alerts erroneously invalidated by the inverted Put option stop-loss bug

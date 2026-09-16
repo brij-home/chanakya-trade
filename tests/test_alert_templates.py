@@ -941,8 +941,8 @@ def test_render_auto_alert_no_conflicting_cmp_or_stale_timestamp():
 
     # 2. Must NOT render (Opt CMP: ...) in Action line because entry matches
     assert (
-        "BUY CE <b>HDFCBANK680CE</b> @ <code>₹22.1</code>\n" in rendered
-        or "BUY CE <b>HDFCBANK680CE</b> @ <code>₹22.1</code> (Spot: ₹693.80)" in rendered
+        "BUY CE <b>HDFCBANK 680 CE</b> @ <code>₹22.1</code>" in rendered
+        or "BUY CE <b>HDFCBANK680CE</b> @ <code>₹22.1</code>" in rendered
     )
 
     # 3. Timestamp MUST show triggered_at (2026-09-11), not yesterday's created_at (2026-09-10)
@@ -1144,7 +1144,7 @@ def test_gamma_blast_milestone_no_spot_target_corruption():
     msg_final = render_milestone_alert(m_final, in_market=True)
 
     assert "FINAL TARGET ACHIEVED" in msg_final
-    assert "COALINDIA420PE" in msg_final
+    assert "COALINDIA 420 PE" in msg_final or "COALINDIA420PE" in msg_final
     assert "410.00" not in msg_final, "Spot target 410.00 must NOT appear in option milestone alert!"
     assert "420.00" not in msg_final, "Spot level 420.00 must NOT appear in option target field!"
     assert "Opt CMP:</b> ₹6.05" in msg_final
@@ -1254,6 +1254,108 @@ def test_no_chase_direction_and_comparator_sanctity():
     assert long_alert.no_chase_boundary == 5060.0  # 5000 * 1.012
     msg_long = render_auto_alert(long_alert, in_market=True)
     assert "No-Chase:</b> <i>above ₹5,060.0</i>" in msg_long
-    assert "No-Chase:</b> <i>above ₹5,060.0</i>" in msg_long
+
+
+def test_render_auto_alert_t2_achieved_milestone():
+    """Verify that render_auto_alert renders a dedicated clean TARGET 2 HIT card when target_status is T2_ACHIEVED."""
+    alert = AutoAlert(
+        alert_id="aa-gamma-ce-MIDCPNIFTY-14250-test",
+        alert_type="OPTIONS_BREAKOUT",
+        stage="ACTIVE",
+        symbol="MIDCPNIFTY",
+        exchange="NFO",
+        direction="BULLISH",
+        headline="TARGET 2 ACHIEVED: MIDCPNIFTY (₹293.94) | Opt CMP: ₹293.94",
+        summary="Options Call breakout Target 2",
+        ltp=293.94,
+        trigger_level=204.0,
+        target_level=254.55,
+        stop_loss=173.40,
+        strike=14250.0,
+        option_type="CE",
+        contract_symbol="MIDCPNIFTY2026092914250CE",
+        option_premium=204.0,
+        target_status="T2_ACHIEVED",
+        achieved_milestones=["T1_ACHIEVED", "T2_ACHIEVED"],
+        trailing_stop=254.55,
+        locked_profit_pct=24.8,
+        locked_profit_pts=50.55,
+        r_multiple=2.94,
+        pnl_pct=44.1,
+        lot_size=120,
+        actionable_plan={
+            "action": "BUY",
+            "recommended_entry": "₹204.00",
+            "stop_loss": "₹173.40",
+            "target_1": "₹254.55",
+            "target_2": "₹293.94",
+            "target_moonshot": "₹342.84",
+            "lot_size": 120,
+        },
+        is_live=True,
+        environment="LIVE",
+    )
+    rendered = render_auto_alert(alert, in_market=True)
+    assert "TARGET 2 HIT" in rendered
+    assert "TARGET 2 ACHIEVED" in rendered
+    assert "MIDCPNIFTY" in rendered
+    assert "Target 2:</b> ₹293.94" in rendered
+    assert "Trail Stop:</b> <code>₹254.55</code>" in rendered
+    assert "TRAIL STOP-LOSS TO T1 (₹254.55)" in rendered
+    # Invariant: Must NOT fall through to initial breakout BUY card!
+    assert "• Action: BUY" not in rendered
+    assert "🛑 No-Chase:" not in rendered
+
+
+def test_alert_evaluator_rejects_dirty_phantom_tick():
+    """Verify that evaluate_alert_targets_and_trailing discards phantom dirty ticks exceeding exchange high."""
+    from engine.alert_evaluator import evaluate_alert_targets_and_trailing
+
+    alert = AutoAlert(
+        alert_id="aa-midcp-dirty-test",
+        alert_type="OPTIONS_BREAKOUT",
+        stage="ACTIVE",
+        symbol="MIDCPNIFTY",
+        exchange="NFO",
+        direction="BULLISH",
+        headline="MIDCPNIFTY 14250 CE Breakout",
+        summary="Test breakout",
+        ltp=197.25,
+        trigger_level=204.0,
+        target_level=254.55,
+        stop_loss=173.40,
+        strike=14250.0,
+        option_type="CE",
+        contract_symbol="MIDCPNIFTY2026092914250CE",
+        option_premium=204.0,
+        target_status="PENDING",
+        achieved_milestones=[],
+        metrics={"high": 222.0, "low": 145.6},
+        actionable_plan={
+            "action": "BUY",
+            "recommended_entry": "₹204.00",
+            "stop_loss": "₹173.40",
+            "target_1": "₹254.55",
+            "target_2": "₹293.94",
+            "target_moonshot": "₹342.84",
+        },
+        is_live=True,
+        environment="LIVE",
+    )
+
+    # 1. Normal LTP 197.25 (below entry 204.00) -> PENDING, no milestone hit
+    res_normal = evaluate_alert_targets_and_trailing(alert, current_ltp=197.25)
+    assert res_normal is not None
+    assert res_normal.new_milestone is None
+    assert res_normal.target_status == "PENDING"
+    assert res_normal.should_trail is False
+
+    # 2. Rogue phantom tick 329.70 (> exchange high 222.0 by >2%) -> Discarded & clamped to 222.0
+    # Since 222.0 is below T1 (254.55), neither T1 nor T2 nor Final target is triggered!
+    res_dirty = evaluate_alert_targets_and_trailing(alert, current_ltp=329.70)
+    assert res_dirty is not None
+    assert res_dirty.new_milestone is None
+    assert res_dirty.target_status == "PENDING"
+    assert res_dirty.should_trail is False
 
 

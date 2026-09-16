@@ -191,3 +191,86 @@ class TestOptionsOiVelocity:
             assert len(alerts) > 0
             assert alerts[0].alert_type == "GAMMA_BLAST"
             assert alerts[0].direction == "BULLISH"
+
+
+class TestContagionHolisticSanity:
+    """Validates institutional sanity gates preventing false/illogical contagion alerts."""
+
+    def test_contagion_rejects_sub_04_pct_noise_with_zero_volume(self):
+        """0.20%-0.30% moves with zero volume (RVOL 0.0x) must NOT trigger heavyweight contagion."""
+        dt = datetime(2026, 9, 16, 12, 34, tzinfo=IST)
+        # FINNIFTY heavyweights moving just 0.1-0.3% with 0 volume (the exact scenario user reported)
+        quotes = {
+            "NSE:FINNIFTY": Quote(symbol="FINNIFTY", last_price=25243.0, vwap=25243.0, change_pct=0.0),
+            "NSE:HDFCBANK": Quote(symbol="HDFCBANK", last_price=717.0, vwap=717.0, change_pct=0.25, volume=0),
+            "NSE:ICICIBANK": Quote(symbol="ICICIBANK", last_price=1353.0, vwap=1353.0, change_pct=0.20, volume=0),
+            "NSE:BAJFINANCE": Quote(symbol="BAJFINANCE", last_price=1013.0, vwap=1013.0, change_pct=0.30, volume=0),
+            "NSE:AXISBANK": Quote(symbol="AXISBANK", last_price=1200.0, vwap=1200.0, change_pct=0.15, volume=0),
+            "NSE:SBIN": Quote(symbol="SBIN", last_price=800.0, vwap=800.0, change_pct=0.20, volume=0),
+            "NSE:KOTAKBANK": Quote(symbol="KOTAKBANK", last_price=1800.0, vwap=1800.0, change_pct=0.10, volume=0),
+        }
+        res = index_contagion_engine.evaluate_index("FINNIFTY", quotes_map=quotes, ref_dt=dt)
+        assert res is not None
+        # Must NOT generate an alert on flat baseline flutter
+        assert res.alert is None
+
+    def test_contagion_rejects_spot_pinned_at_vwap(self):
+        """Even if leaders are up 0.5%, index sitting dead-flat at VWAP (0 pts separation) must not trigger."""
+        dt = datetime(2026, 9, 16, 12, 34, tzinfo=IST)
+        quotes = {
+            "NSE:FINNIFTY": Quote(symbol="FINNIFTY", last_price=25243.0, vwap=25243.0, change_pct=0.0),
+            "NSE:HDFCBANK": Quote(symbol="HDFCBANK", last_price=720.0, vwap=715.0, change_pct=0.7, volume=500_000),
+            "NSE:ICICIBANK": Quote(symbol="ICICIBANK", last_price=1360.0, vwap=1350.0, change_pct=0.6, volume=400_000),
+            "NSE:BAJFINANCE": Quote(symbol="BAJFINANCE", last_price=1020.0, vwap=1010.0, change_pct=0.8, volume=200_000),
+            "NSE:AXISBANK": Quote(symbol="AXISBANK", last_price=1210.0, vwap=1200.0, change_pct=0.6, volume=200_000),
+            "NSE:SBIN": Quote(symbol="SBIN", last_price=810.0, vwap=800.0, change_pct=0.7, volume=300_000),
+            "NSE:KOTAKBANK": Quote(symbol="KOTAKBANK", last_price=1810.0, vwap=1800.0, change_pct=0.5, volume=200_000),
+        }
+        res = index_contagion_engine.evaluate_index("FINNIFTY", quotes_map=quotes, ref_dt=dt)
+        assert res is not None
+        # Index spot is at 25243 with vwap 25243 and change 0.0 -> must be suppressed!
+        assert res.alert is None
+
+    def test_contagion_rejects_far_otm_strike(self):
+        """Options chain with strikes > 2.0% away from spot (e.g. 27250 on 25250 spot) must be rejected."""
+        from engine.index_contagion import IndexContagionEngine
+        engine = IndexContagionEngine()
+
+        # Mock chain that only has strikes far away from spot (27250 CE when spot is 25250)
+        far_contract = OptionsContract(
+            symbol="FINNIFTY2026092927250CE",
+            underlying="FINNIFTY",
+            strike=27250.0,
+            option_type="CE",
+            expiry="2026-09-29",
+            last_price=336.4,
+            oi=5000,
+            oi_change=0,
+            volume=2000,
+        )
+        with patch("market.options.get_options_chain", return_value=[far_contract]):
+            alert = engine._create_contagion_alert(
+                index_name="FINNIFTY",
+                direction="BULLISH",
+                spot=25250.0,
+                vwap=25230.0,
+                change_pct=0.5,
+                sync_pct=85.0,
+                leading=["HDFCBANK (+1.2%)", "ICICIBANK (+1.0%)"],
+                now_iso="2026-09-16 12:34:00 IST",
+            )
+            assert alert is not None
+            # The 27250 CE strike is 7.9% away from 25250, so it MUST NOT be selected as an ATM option!
+            assert alert.strike != 27250.0
+            assert "27250" not in alert.headline
+            # Falls back cleanly to spot index setup
+            assert alert.symbol == "FINNIFTY"
+            assert alert.ltp == 25250.0
+
+    def test_finnifty_yfinance_ticker_mapping(self):
+        """FINNIFTY must map to NIFTY_FIN_SERVICE.NS, not ^CNXFIN."""
+        from market.yfinance_provider import _INDEX_MAP
+        assert _INDEX_MAP["FINNIFTY"] == "NIFTY_FIN_SERVICE.NS"
+        assert _INDEX_MAP["NIFTY FIN SERVICE"] == "NIFTY_FIN_SERVICE.NS"
+        assert _INDEX_MAP.get("FINNIFTY") != "^CNXFIN"
+

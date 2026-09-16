@@ -4,6 +4,7 @@ Alert target milestone tracking, invalidation evaluation, and decisive trailing 
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 from dataclasses import dataclass
@@ -13,6 +14,7 @@ from typing import Any, Optional
 from engine.alert_expiry import is_alert_option_premium_level
 from engine.alert_model import INDEX_WEEKLY_EXPIRY_WEEKDAY
 
+logger = logging.getLogger(__name__)
 IST = timezone(timedelta(hours=5, minutes=30))
 
 
@@ -498,6 +500,57 @@ def evaluate_alert_targets_and_trailing(
             is_final_hit = current_ltp <= target_final
             is_t2_hit = bool(t2_level and current_ltp <= t2_level and t2_level < t1_level)
             is_t1_hit = current_ltp <= t1_level
+
+    # Exchange High/Low & Dirty Tick Sanity Filter:
+    # Discard unverified phantom spikes where current_ltp violates the day's exchange high/low.
+    # Primarily guards option contracts against broker token cross-pollution or unverified feed spikes.
+    day_high = float(getattr(alert, "high", 0.0) or (getattr(alert, "metrics", {}) or {}).get("high", 0.0) or 0.0)
+    day_low = float(getattr(alert, "low", 0.0) or (getattr(alert, "metrics", {}) or {}).get("low", 0.0) or 0.0)
+
+    if is_t1_hit or is_t2_hit or is_final_hit:
+        try:
+            if is_option and (day_high <= 0 or day_low <= 0):
+                lookup_sym = getattr(alert, "contract_symbol", None) or (
+                    f"{alert.exchange}:{alert.symbol}"
+                    if ":" not in getattr(alert, "symbol", "")
+                    else getattr(alert, "symbol", "")
+                )
+                from market.quotes import get_ohlc
+                ohlc = get_ohlc(lookup_sym)
+                if ohlc and isinstance(ohlc, dict):
+                    day_high = day_high or float(ohlc.get("high") or 0.0)
+                    day_low = day_low or float(ohlc.get("low") or 0.0)
+
+            is_coherent = (entry <= 0) or (0.4 * entry <= day_high <= 2.5 * entry)
+
+            if is_bullish and day_high > 0 and is_coherent:
+                if current_ltp > day_high * 1.02:
+                    logger.warning(
+                        f"[AlertEvaluator] Discarded phantom dirty tick for {alert.symbol}: "
+                        f"current_ltp={current_ltp} exceeds exchange day_high={day_high} by >2%."
+                    )
+                    current_ltp = day_high
+                    pnl_pts = current_ltp - entry
+                    pnl_pct = (pnl_pts / entry) * 100 if entry > 0 else 0.0
+                    r_multiple = pnl_pts / initial_risk
+                    is_t1_hit = current_ltp >= t1_level
+                    is_t2_hit = bool(t2_level and current_ltp >= t2_level and t2_level > t1_level)
+                    is_final_hit = current_ltp >= target_final
+            elif not is_bullish and day_low > 0 and is_coherent:
+                if current_ltp < day_low * 0.98:
+                    logger.warning(
+                        f"[AlertEvaluator] Discarded phantom dirty tick for {alert.symbol}: "
+                        f"current_ltp={current_ltp} below exchange day_low={day_low} by >2%."
+                    )
+                    current_ltp = day_low
+                    pnl_pts = entry - current_ltp
+                    pnl_pct = (pnl_pts / entry) * 100 if entry > 0 else 0.0
+                    r_multiple = pnl_pts / initial_risk
+                    is_t1_hit = current_ltp <= t1_level
+                    is_t2_hit = bool(t2_level and current_ltp <= t2_level and t2_level < t1_level)
+                    is_final_hit = current_ltp <= target_final
+        except Exception as e:
+            logger.debug(f"[AlertEvaluator] OHLC sanity check error: {e}")
 
     # 1. Final Target (T3 or Primary Target) Hit
     if is_final_hit and pnl_pts > 0 and "TARGET_ACHIEVED" not in achieved:

@@ -91,6 +91,53 @@ def _get_existing_position_value(
     return qty * price
 
 
+def _get_existing_sector_value(
+    symbol: str,
+    portfolio: dict | None,
+    prices: dict | None = None,
+) -> tuple[float, str, str]:
+    """
+    Compute total market value of existing positions in portfolio belonging to
+    the same institutional sector as `symbol`.
+
+    portfolio: {symbol: {qty, avg_price, current_price}}
+    Returns: (total_sector_val, sector_id, sector_name)
+    """
+    if not portfolio:
+        return 0.0, "", ""
+
+    try:
+        from analysis.universe import get_stock_sector
+
+        target_sec_id, target_sec_name = get_stock_sector(symbol)
+    except Exception:
+        return 0.0, "", ""
+
+    if not target_sec_id or target_sec_id in ("broad_market", "unknown", "currency", "etf"):
+        return 0.0, target_sec_id, target_sec_name
+
+    sector_total = 0.0
+    for pos_sym, pos_data in portfolio.items():
+        if not isinstance(pos_data, dict):
+            continue
+        qty = float(pos_data.get("qty", 0))
+        if qty <= 0:
+            continue
+
+        try:
+            pos_sec_id, _ = get_stock_sector(pos_sym)
+        except Exception:
+            continue
+
+        if pos_sec_id == target_sec_id:
+            p = float(pos_data.get("current_price") or pos_data.get("avg_price") or 0.0)
+            if p <= 0 and prices:
+                p = float(_get_price(pos_sym, prices) or 0.0)
+            sector_total += qty * p
+
+    return sector_total, target_sec_id, target_sec_name
+
+
 def _days_until_event(symbol: str, upcoming_events: dict | None) -> int | None:
     """
     Return the number of calendar days until the next earnings event for this symbol.
@@ -123,6 +170,7 @@ def compute_allowed_actions(
     prices: dict | None = None,  # {symbol: current_price}
     upcoming_events: dict | None = None,  # {symbol: "YYYY-MM-DD"} earnings dates
     vix: float | None = None,  # India VIX value (None = skip VIX check)
+    max_sector_pct: float = 0.30,  # Max portfolio concentration in a single sector (default 30%)
 ) -> AllowedAction:
     """
     Compute what actions are allowed for this symbol before LLM sees it.
@@ -131,8 +179,9 @@ def compute_allowed_actions(
     1. risk_limits.check() — daily loss cap, trade counts
     2. Earnings proximity — within 3 days? halve max_qty, add EARNINGS_PROXIMITY flag
     3. Position limit — existing position + new order > 10% of capital? reduce max_qty
-    4. Cash check — enough capital for at least 1 share?
-    5. VIX regime — if VIX > 20, add HIGH_VOLATILITY flag, reduce max_qty by 50%
+    4. Sector concentration limit — existing sector exposure > max_sector_pct (30%)? cap/block
+    5. Cash check — enough capital for at least 1 share?
+    6. VIX regime — if VIX > 20, add HIGH_VOLATILITY flag, reduce max_qty by 50%
 
     Never calls LLM. Pure deterministic rules.
     Returns AllowedAction with all constraints pre-computed.
@@ -177,17 +226,41 @@ def compute_allowed_actions(
             warnings=warnings,
         )
 
-    # ── Compute base max_qty from position limit (10% of capital) ──
+    # ── Single-Stock Position Limit (10% of capital) ──
     position_limit = total_capital * 0.10  # 10% cap
 
     existing_value = _get_existing_position_value(sym, portfolio)
     remaining_room = position_limit - existing_value
 
+    # ── Sector Concentration Limit (e.g. 30% of total capital) ──
+    if max_sector_pct and max_sector_pct > 0:
+        sector_limit = total_capital * max_sector_pct
+        existing_sector_value, sec_id, sec_name = _get_existing_sector_value(
+            sym, portfolio, prices
+        )
+        if sec_id and sec_id not in ("broad_market", "unknown", "currency", "etf"):
+            remaining_sector_room = sector_limit - existing_sector_value
+            if remaining_sector_room <= 0:
+                remaining_room = 0.0
+                flags.append("SECTOR_CONCENTRATION_LIMIT")
+                warnings.append(
+                    f"Sector '{sec_name}' reached {max_sector_pct * 100:.0f}% concentration cap "
+                    f"(₹{existing_sector_value:,.0f}/₹{sector_limit:,.0f})"
+                )
+            elif remaining_sector_room < remaining_room:
+                remaining_room = remaining_sector_room
+                flags.append("SECTOR_CONCENTRATION_LIMIT")
+                warnings.append(
+                    f"Sector '{sec_name}' capacity capped at remaining ₹{remaining_sector_room:,.0f} "
+                    f"(max {max_sector_pct * 100:.0f}%)"
+                )
+
     if current_price and current_price > 0:
         if remaining_room <= 0:
             # Already at or over the limit
             base_max_qty = 0
-            flags.append("POSITION_LIMIT")
+            if existing_value > 0 and "POSITION_LIMIT" not in flags:
+                flags.append("POSITION_LIMIT")
         else:
             base_max_qty = int(remaining_room / current_price)
             if existing_value > 0:
@@ -195,7 +268,7 @@ def compute_allowed_actions(
                 flags.append("POSITION_LIMIT")
     else:
         # No price info — use a reasonable default based on capital
-        base_max_qty = int(position_limit / 100)  # rough estimate
+        base_max_qty = max(0, int(remaining_room / 100)) if remaining_room > 0 else 0
 
     max_qty = base_max_qty
     max_capital = min(remaining_room, position_limit) if remaining_room > 0 else 0.0
@@ -237,7 +310,7 @@ def compute_allowed_actions(
     # Default to BOTH — caller can override based on portfolio context
     direction: Literal["BUY_ONLY", "SELL_ONLY", "BOTH", "NONE"] = "BOTH"
     if max_qty == 0:
-        direction = "NONE"
+        direction = "SELL_ONLY" if existing_value > 0 else "NONE"
 
     return AllowedAction(
         symbol=sym,

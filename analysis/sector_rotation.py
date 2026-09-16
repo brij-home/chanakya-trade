@@ -651,6 +651,10 @@ class StockTailwind:
     alignment: str
     analysis: str
     status: str = "AVAILABLE"
+    intraday_rs: float = 0.0
+    intraday_sector_change: float = 0.0
+    intraday_nifty_change: float = 0.0
+    intraday_alignment: str = "INTRADAY_NEUTRAL"
 
     @property
     def sector_name(self) -> str:
@@ -674,6 +678,10 @@ class StockTailwind:
             "alignment": self.alignment,
             "analysis": self.analysis,
             "status": self.status,
+            "intraday_rs": self.intraday_rs,
+            "intraday_sector_change": self.intraday_sector_change,
+            "intraday_nifty_change": self.intraday_nifty_change,
+            "intraday_alignment": self.intraday_alignment,
         }
 
     def to_dict(self) -> dict[str, Any]:
@@ -687,6 +695,8 @@ def get_stock_tailwind(
     """
     Get a stock's parent sector, its RRG quadrant, and alignment tailwind score (0-100).
     Uses STOCK_SECTOR_MAP with dynamic taxonomy fallback to SECTOR_TAXONOMY in analysis.universe.
+    Incorporates real-time intraday sector relative strength (Sector % - NIFTY 50 %) to prevent
+    buying into intraday sector sell-offs.
     """
     clean_sym = (
         symbol.upper()
@@ -752,6 +762,10 @@ def get_stock_tailwind(
                 f"Sector rotation data for {sector} is unavailable because sufficient benchmark and "
                 "sector price history could not be retrieved."
             ),
+            intraday_rs=0.0,
+            intraday_sector_change=0.0,
+            intraday_nifty_change=0.0,
+            intraday_alignment="UNAVAILABLE",
         )
 
     quad = sector_point.quadrant
@@ -763,7 +777,29 @@ def get_stock_tailwind(
     }
     base_score = quadrant_scores.get(quad, 50)
     momentum_adj = int((sector_point.rs_momentum - 100.0) * 0.5)
-    final_score = max(10, min(95, base_score + momentum_adj))
+
+    # Intraday sector relative performance calculation
+    sec_chg = round(float(getattr(sector_point, "day_change_pct", 0.0) or 0.0), 2)
+    bm_chg = round(float(getattr(sector_point, "benchmark_change_pct", 0.0) or 0.0), 2)
+    intraday_rs = round(sec_chg - bm_chg, 2)
+
+    if intraday_rs <= -1.50:
+        intraday_alignment = "SEVERE_INTRADAY_HEADWIND"
+        intraday_adj = -20
+    elif intraday_rs <= -0.80:
+        intraday_alignment = "INTRADAY_HEADWIND"
+        intraday_adj = -12
+    elif intraday_rs >= 1.50:
+        intraday_alignment = "STRONG_INTRADAY_TAILWIND"
+        intraday_adj = +10
+    elif intraday_rs >= 0.80:
+        intraday_alignment = "INTRADAY_TAILWIND"
+        intraday_adj = +6
+    else:
+        intraday_alignment = "INTRADAY_NEUTRAL"
+        intraday_adj = 0
+
+    final_score = max(10, min(95, base_score + momentum_adj + intraday_adj))
 
     if final_score >= 75:
         alignment = "STRONG_TAILWIND"
@@ -780,6 +816,11 @@ def get_stock_tailwind(
         alignment = "HEADWIND"
         desc = f"Parent sector {sector} is in LAGGING quadrant; institutional outflows present."
 
+    if intraday_alignment in ("INTRADAY_HEADWIND", "SEVERE_INTRADAY_HEADWIND"):
+        desc += f" ⚠️ CAUTION: Sector is lagging NIFTY by {abs(intraday_rs):.2f}% intraday (selling pressure)."
+    elif intraday_alignment in ("INTRADAY_TAILWIND", "STRONG_INTRADAY_TAILWIND"):
+        desc += f" ⚡ Sector exhibits strong intraday relative strength ({intraday_rs:+.2f}% vs NIFTY)."
+
     return StockTailwind(
         symbol=clean_sym,
         sector=sector,
@@ -789,6 +830,10 @@ def get_stock_tailwind(
         tailwind_score=final_score,
         alignment=alignment,
         analysis=desc,
+        intraday_rs=intraday_rs,
+        intraday_sector_change=sec_chg,
+        intraday_nifty_change=bm_chg,
+        intraday_alignment=intraday_alignment,
     )
 
 

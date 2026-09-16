@@ -327,6 +327,45 @@ def calculate_trade_plan(
     # Volatility buffer for invalidation (prevents wick-hunting stop outs)
     vol_buffer = max(1.0, 0.15 * atr)
 
+    # ── Timeframe Calibration Architecture ─────────────────────────────────────
+    # Standardize timeframe into canonical profiles:
+    # INTRADAY (15m–60m session scalp), SWING_SHORT (2–5 days), SWING_MID (1–4 weeks), POSITIONAL (1–6 months)
+    raw_tf = (timeframe or "INTRADAY").strip().upper()
+    if raw_tf in ("5M", "15M", "60M", "HOUR", "SESSION", "SCALP", "INTRADAY"):
+        tf = "INTRADAY"
+        effective_atr = 0.35 * atr
+        min_stop_mult = 0.25
+        max_stop_mult = 1.00
+        max_t1_atr = 0.50 * atr
+        max_t2_atr = 0.85 * atr
+        max_t3_atr = 1.25 * atr
+    elif raw_tf in ("DAY", "DAILY", "SWING_SHORT", "SHORT_TERM"):
+        tf = "SWING_SHORT"
+        effective_atr = 0.85 * atr
+        min_stop_mult = 0.50
+        max_stop_mult = 1.20
+        max_t1_atr = 1.80 * atr
+        max_t2_atr = 3.00 * atr
+        max_t3_atr = 4.50 * atr
+    elif raw_tf in ("SWING", "SWING_MID", "WEEK", "WEEKLY", "MID_TERM"):
+        tf = "SWING_MID"
+        effective_atr = 1.30 * atr
+        min_stop_mult = 0.80
+        max_stop_mult = 1.80
+        max_t1_atr = 3.50 * atr
+        max_t2_atr = 6.00 * atr
+        max_t3_atr = 9.00 * atr
+    else:  # POSITIONAL / MULTIBAGGER
+        tf = "POSITIONAL"
+        effective_atr = 2.20 * atr
+        min_stop_mult = 1.20
+        max_stop_mult = 2.80
+        max_t1_atr = 6.00 * atr
+        max_t2_atr = 10.00 * atr
+        max_t3_atr = 15.00 * atr
+
+    timeframe = tf
+
     # ── 5. Data-Driven Invalidation Stop-Loss ──────────────────────────────────
     if is_long:
         # Candidate structural supports strictly below LTP
@@ -363,34 +402,34 @@ def calculate_trade_plan(
                 # Prefer the most protective support anchor (closest to LTP without being inside noise)
                 valid_candidates.sort(key=lambda c: c[0], reverse=True)
                 invalidation_stop, sl_rationale = valid_candidates[0]
-                # Guard against too-tight stops (minimum 0.4x ATR)
-                min_stop_distance = max(2.0, 0.4 * atr)
+                # Guard against too-tight stops (minimum noise floor scaled to timeframe)
+                min_stop_distance = max(1.0 if tf == "INTRADAY" else 2.0, min_stop_mult * effective_atr)
                 if (ltp - invalidation_stop) < min_stop_distance:
                     invalidation_stop = ltp - min_stop_distance
-                    sl_rationale = f"{sl_rationale} [Enforced 0.4× ATR minimum noise floor]"
+                    sl_rationale = f"{sl_rationale} [Enforced {min_stop_mult:.2f}× effective ATR minimum noise floor]"
             else:
-                invalidation_stop = ltp - (1.0 * atr)
+                invalidation_stop = ltp - (1.0 * effective_atr)
                 sl_rationale = (
-                    "1.0× ATR dynamic volatility floor (no structural support strictly below spot)"
+                    f"{effective_atr / atr:.2f}× ATR dynamic volatility floor (no structural support strictly below spot)"
                 )
         else:
-            invalidation_stop = ltp - (1.0 * atr)
+            invalidation_stop = ltp - (1.0 * effective_atr)
             sl_rationale = (
-                "1.0× ATR dynamic volatility floor (no structural demand blocks identified)"
+                f"{effective_atr / atr:.2f}× ATR dynamic volatility floor (no structural demand blocks identified)"
             )
 
-        # Guard against too-wide stops for intraday
-        if timeframe == "INTRADAY" and (ltp - invalidation_stop) > (1.2 * atr):
-            invalidation_stop = ltp - (1.0 * atr)
-            sl_rationale = f"{sl_rationale} [Capped at 1.0× ATR intraday maximum risk boundary]"
+        # Guard against too-wide stops (capped at max_stop_mult × effective ATR)
+        if (ltp - invalidation_stop) > (max_stop_mult * effective_atr):
+            invalidation_stop = ltp - (max_stop_mult * effective_atr)
+            sl_rationale = f"{sl_rationale} [Capped at {tf} maximum risk boundary ({(max_stop_mult * effective_atr) / atr:.2f}× Daily ATR)]"
 
         # Guard against invalidation stop violating spot boundary
         if invalidation_stop >= ltp:
             logger.warning(
                 f"[TradePlan] Guardrail triggered: Long SL ₹{invalidation_stop:,.1f} >= LTP ₹{ltp:,.1f}. Enforcing dynamic ATR floor."
             )
-            invalidation_stop = ltp - (1.0 * atr)
-            sl_rationale = "1.0× ATR dynamic volatility floor (geometric guardrail enforced)"
+            invalidation_stop = ltp - (1.0 * effective_atr)
+            sl_rationale = "Dynamic volatility floor (geometric guardrail enforced)"
 
         stop_distance_pts = max(1.0, ltp - invalidation_stop)
     else:
@@ -426,29 +465,29 @@ def calculate_trade_plan(
             if valid_candidates:
                 valid_candidates.sort(key=lambda c: c[0])
                 invalidation_stop, sl_rationale = valid_candidates[0]
-                min_stop_distance = max(2.0, 0.4 * atr)
+                min_stop_distance = max(1.0 if tf == "INTRADAY" else 2.0, min_stop_mult * effective_atr)
                 if (invalidation_stop - ltp) < min_stop_distance:
                     invalidation_stop = ltp + min_stop_distance
-                    sl_rationale = f"{sl_rationale} [Enforced 0.4× ATR minimum noise floor]"
+                    sl_rationale = f"{sl_rationale} [Enforced {min_stop_mult:.2f}× effective ATR minimum noise floor]"
             else:
-                invalidation_stop = ltp + (1.0 * atr)
-                sl_rationale = "1.0× ATR dynamic volatility ceiling"
+                invalidation_stop = ltp + (1.0 * effective_atr)
+                sl_rationale = f"{effective_atr / atr:.2f}× ATR dynamic volatility ceiling"
         else:
-            invalidation_stop = ltp + (1.0 * atr)
-            sl_rationale = "1.0× ATR dynamic volatility ceiling"
+            invalidation_stop = ltp + (1.0 * effective_atr)
+            sl_rationale = f"{effective_atr / atr:.2f}× ATR dynamic volatility ceiling"
 
-        # Guard against too-wide stops for intraday
-        if timeframe == "INTRADAY" and (invalidation_stop - ltp) > (1.2 * atr):
-            invalidation_stop = ltp + (1.0 * atr)
-            sl_rationale = f"{sl_rationale} [Capped at 1.0× ATR intraday maximum risk boundary]"
+        # Guard against too-wide stops
+        if (invalidation_stop - ltp) > (max_stop_mult * effective_atr):
+            invalidation_stop = ltp + (max_stop_mult * effective_atr)
+            sl_rationale = f"{sl_rationale} [Capped at {tf} maximum risk boundary ({(max_stop_mult * effective_atr) / atr:.2f}× Daily ATR)]"
 
         # Guard against invalidation stop violating spot boundary
         if invalidation_stop <= ltp:
             logger.warning(
                 f"[TradePlan] Guardrail triggered: Short SL ₹{invalidation_stop:,.1f} <= LTP ₹{ltp:,.1f}. Enforcing dynamic ATR ceiling."
             )
-            invalidation_stop = ltp + (1.0 * atr)
-            sl_rationale = "1.0× ATR dynamic volatility ceiling (geometric guardrail enforced)"
+            invalidation_stop = ltp + (1.0 * effective_atr)
+            sl_rationale = "Dynamic volatility ceiling (geometric guardrail enforced)"
 
         stop_distance_pts = max(1.0, invalidation_stop - ltp)
 
@@ -510,29 +549,43 @@ def calculate_trade_plan(
             target_2 = target_1 + (stop_distance_pts * 1.5)
             t2_rationale = f"{t1_rationale} + 1.5× R extension"
 
-        # Guard against excessively distant Target 1 for intraday
-        if timeframe == "INTRADAY" and (target_1 - ltp) > (1.8 * atr):
+        # Guard against excessively distant targets scaled to timeframe
+        if (target_1 - ltp) > max_t1_atr:
+            target_3 = target_2
+            t3_rationale = t2_rationale
             target_2 = target_1
             t2_rationale = t1_rationale
-            target_1 = ltp + max(stop_distance_pts * 1.5, 1.0 * atr)
-            t1_rationale = "1.0× ATR Intraday Friction Scale-Out Target"
+            target_1 = ltp + min(max(stop_distance_pts * 1.6, 0.35 * effective_atr), max_t1_atr)
+            t1_rationale = f"{tf} Scale-Out Target (1.6× R / {max_t1_atr / atr:.2f}× Daily ATR)"
+            if target_2 <= target_1 + (stop_distance_pts * 0.8):
+                target_2 = min(ltp + max_t2_atr, target_1 + max(stop_distance_pts * 1.2, 0.35 * effective_atr))
+                t2_rationale = f"{tf} Session Expansion Target ({max_t2_atr / atr:.2f}× Daily ATR)"
+
+        if (target_2 - ltp) > max_t2_atr:
+            target_3 = target_2
+            t3_rationale = t2_rationale
+            target_2 = ltp + min(max((target_1 - ltp) + (stop_distance_pts * 1.2), 0.65 * effective_atr), max_t2_atr)
+            t2_rationale = f"{tf} Session Expansion Target ({max_t2_atr / atr:.2f}× Daily ATR)"
 
         t1_distance_pts = target_1 - ltp
         t2_distance_pts = target_2 - ltp
 
         # ── Target 3 (Runner / Moonshot) — must be strictly > Target 2 ──────────
-        # Look for 3rd+ structural level beyond T2, then fall back to Fibonacci extension
         t3_candidates = [t for t in valid_targets if t[0] >= target_2 + (stop_distance_pts * 0.5)]
         if t3_candidates:
             target_3, t3_rationale = t3_candidates[0]
         else:
-            # 3-tier Fibonacci projections beyond T2: 4.236 × stop spans premium runner territory
             target_3 = target_2 + (stop_distance_pts * 2.0)
             t3_rationale = f"4.236× Fibonacci Runner Extension beyond {t2_rationale}"
 
+        # Clamp T3 to timeframe ceiling if set
+        if tf == "INTRADAY" and (target_3 - ltp) > max_t3_atr:
+            target_3 = ltp + max_t3_atr
+            t3_rationale = f"Intraday Session Maximum Expansion Runner ({max_t3_atr / atr:.2f}× Daily ATR)"
+
         # Strict monotonic invariant: T3 > T2 > T1 > Entry
         if target_3 <= target_2:
-            target_3 = target_2 + (stop_distance_pts * 2.0)
+            target_3 = target_2 + max(1.0, stop_distance_pts * 1.5)
             t3_rationale = f"Runner extension enforced: T3 must exceed T2 (₹{target_2:,.2f})"
 
         t3_distance_pts = target_3 - ltp
@@ -588,12 +641,23 @@ def calculate_trade_plan(
             target_2 = target_1 - (stop_distance_pts * 1.5)
             t2_rationale = f"{t1_rationale} + 1.5× R extension"
 
-        # Guard against excessively distant Target 1 for intraday
-        if timeframe == "INTRADAY" and (ltp - target_1) > (1.8 * atr):
+        # Guard against excessively distant targets scaled to timeframe
+        if (ltp - target_1) > max_t1_atr:
+            target_3 = target_2
+            t3_rationale = t2_rationale
             target_2 = target_1
             t2_rationale = t1_rationale
-            target_1 = ltp - max(stop_distance_pts * 1.5, 1.0 * atr)
-            t1_rationale = "1.0× ATR Intraday Friction Scale-Out Target"
+            target_1 = ltp - min(max(stop_distance_pts * 1.6, 0.35 * effective_atr), max_t1_atr)
+            t1_rationale = f"{tf} Breakdown Scale-Out Target (1.6× R / {max_t1_atr / atr:.2f}× Daily ATR)"
+            if target_2 >= target_1 - (stop_distance_pts * 0.8):
+                target_2 = max(0.05, max(ltp - max_t2_atr, target_1 - max(stop_distance_pts * 1.2, 0.35 * effective_atr)))
+                t2_rationale = f"{tf} Breakdown Session Expansion Target ({max_t2_atr / atr:.2f}× Daily ATR)"
+
+        if (ltp - target_2) > max_t2_atr:
+            target_3 = target_2
+            t3_rationale = t2_rationale
+            target_2 = ltp - min(max((ltp - target_1) + (stop_distance_pts * 1.2), 0.65 * effective_atr), max_t2_atr)
+            t2_rationale = f"{tf} Breakdown Session Expansion Target ({max_t2_atr / atr:.2f}× Daily ATR)"
 
         # Asset floor invariant: prices cannot fall to or below zero
         is_geom_broken = False
@@ -613,9 +677,13 @@ def calculate_trade_plan(
             target_3 = target_2 - (stop_distance_pts * 2.0)
             t3_rationale = f"4.236× Fibonacci Breakdown Runner Extension below {t2_rationale}"
 
+        if tf == "INTRADAY" and (ltp - target_3) > max_t3_atr:
+            target_3 = max(0.05, ltp - max_t3_atr)
+            t3_rationale = f"Intraday Breakdown Session Maximum Expansion Runner ({max_t3_atr / atr:.2f}× Daily ATR)"
+
         # Strict monotonic invariant: T3 < T2 < T1 < Entry (SHORT)
         if target_3 >= target_2:
-            target_3 = target_2 - (stop_distance_pts * 2.0)
+            target_3 = target_2 - max(1.0, stop_distance_pts * 1.5)
             t3_rationale = f"Runner extension enforced: T3 must be below T2 (₹{target_2:,.2f})"
 
         target_3 = max(0.05, target_3)
@@ -640,7 +708,7 @@ def calculate_trade_plan(
         is_asymmetry_viable = True
         asymmetry_verdict = "EXCELLENT_ASYMMETRY"
         asymmetry_note = f"High positive EV: Target 2 provides {rr_t2:.2f}:1 R:R with clean runway to {t2_rationale}."
-    elif (rr_t2 >= 1.8 and rr_t1 >= 1.1) or (has_active_blast and rr_t2 >= 1.8):
+    elif (rr_t2 >= 1.8 and rr_t1 >= 1.1) or (has_active_blast and (rr_t2 >= 1.3 or rr_t1 >= 0.8)):
         is_asymmetry_viable = True
         asymmetry_verdict = "ACCEPTABLE"
         asymmetry_note = (
@@ -899,21 +967,79 @@ def calculate_option_execution_plan(
         return max(0.05, round(estimated, 2))
 
     raw_sl_prem = _option_price_at_spot(trade_plan.invalidation_stop, bars_elapsed=1)
-    # Institutional Risk Control: Intraday option buying must cap maximum drawdown at -30%
-    # of the entry premium to protect capital against wide underlying movements.
-    if trade_plan.timeframe == "INTRADAY" and option_ltp > 0:
-        disciplined_sl_floor = round(max(0.05, option_ltp * 0.70), 2)
-        sl_prem = max(raw_sl_prem, disciplined_sl_floor)
+
+    # ── Timeframe-Calibrated Options Risk & Targets ──────────────────────────
+    tf = (getattr(trade_plan, "timeframe", "") or "INTRADAY").upper()
+    if tf in ("5M", "15M", "60M", "SESSION", "SCALP"):
+        tf = "INTRADAY"
+    elif tf in ("DAY", "DAILY", "SWING_SHORT", "SHORT_TERM"):
+        tf = "SWING_SHORT"
+    elif tf in ("SWING", "SWING_MID", "WEEK", "WEEKLY"):
+        tf = "SWING_MID"
+    elif tf in ("POSITIONAL", "MONTH", "MONTHLY"):
+        tf = "POSITIONAL"
+
+    if option_ltp > 0:
+        if tf == "INTRADAY":
+            # Cap maximum intraday option drawdown at -15.0%
+            disciplined_sl_floor = round(max(0.05, option_ltp * 0.85), 2)
+            sl_prem = max(raw_sl_prem, disciplined_sl_floor)
+        elif tf == "SWING_SHORT":
+            # Cap swing short (2-5 days) option drawdown at -28.0%
+            disciplined_sl_floor = round(max(0.05, option_ltp * 0.72), 2)
+            sl_prem = max(raw_sl_prem, disciplined_sl_floor)
+        elif tf == "SWING_MID":
+            # Cap swing mid (1-4 weeks) option drawdown at -35.0%
+            disciplined_sl_floor = round(max(0.05, option_ltp * 0.65), 2)
+            sl_prem = max(raw_sl_prem, disciplined_sl_floor)
+        else:
+            disciplined_sl_floor = round(max(0.05, option_ltp * 0.60), 2)
+            sl_prem = max(raw_sl_prem, disciplined_sl_floor)
     else:
         sl_prem = raw_sl_prem
 
-    t1_prem = _option_price_at_spot(trade_plan.target_1, bars_elapsed=trade_plan.expected_bars_t1)
-    t2_prem = _option_price_at_spot(trade_plan.target_2, bars_elapsed=trade_plan.expected_bars_t2)
-    t3_prem = (
+    opt_risk = max(0.20, option_ltp - sl_prem)
+    raw_t1_prem = _option_price_at_spot(trade_plan.target_1, bars_elapsed=trade_plan.expected_bars_t1)
+    raw_t2_prem = _option_price_at_spot(trade_plan.target_2, bars_elapsed=trade_plan.expected_bars_t2)
+    raw_t3_prem = (
         _option_price_at_spot(trade_plan.target_3, bars_elapsed=trade_plan.expected_bars_t3)
         if trade_plan.target_3 > 0
         else None
     )
+
+    if option_ltp > 0:
+        if tf == "INTRADAY":
+            # For INTRADAY options:
+            # T1 realistic gain: +18% to +28% (scale 50% & SL to Cost)
+            # T2 realistic gain: +35% to +50%
+            # T3 runner: +65% to +85%
+            t1_prem = max(round(option_ltp + (1.6 * opt_risk), 2), min(raw_t1_prem, round(option_ltp * 1.28, 2)))
+            if round(option_ltp * 1.15, 2) <= raw_t1_prem <= round(option_ltp * 1.30, 2):
+                t1_prem = raw_t1_prem
+
+            t2_prem = max(round(t1_prem + (1.2 * opt_risk), 2), min(raw_t2_prem, round(option_ltp * 1.50, 2)))
+            if round(option_ltp * 1.30, 2) <= raw_t2_prem <= round(option_ltp * 1.55, 2):
+                t2_prem = raw_t2_prem
+
+            t3_prem = max(round(t2_prem + (1.5 * opt_risk), 2), round(option_ltp * 1.75, 2))
+            if raw_t3_prem and raw_t3_prem > t2_prem:
+                t3_prem = min(raw_t3_prem, round(option_ltp * 1.90, 2))
+        elif tf == "SWING_SHORT":
+            # For SWING_SHORT (2-5 days):
+            # T1: +35% to +50%
+            # T2: +70% to +100%
+            # T3: +150%+
+            t1_prem = max(round(option_ltp + (1.5 * opt_risk), 2), min(raw_t1_prem, round(option_ltp * 1.50, 2)))
+            t2_prem = max(round(t1_prem + (1.8 * opt_risk), 2), min(raw_t2_prem, round(option_ltp * 2.00, 2)))
+            t3_prem = max(round(t2_prem + (2.5 * opt_risk), 2), round(option_ltp * 2.80, 2))
+        else:
+            t1_prem = raw_t1_prem
+            t2_prem = raw_t2_prem
+            t3_prem = raw_t3_prem
+    else:
+        t1_prem = raw_t1_prem
+        t2_prem = raw_t2_prem
+        t3_prem = raw_t3_prem
 
     def _pnl(prem: float) -> float:
         return round((prem - option_ltp) * lot_size, 2)

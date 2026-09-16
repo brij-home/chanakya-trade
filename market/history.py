@@ -44,9 +44,10 @@ import threading
 from collections import OrderedDict
 
 _df_memory_cache_lock = threading.Lock()
-MAX_MEMORY_DFS = 64  # Bounded for 8 GB RAM profile (<25 MB footprint)
+MAX_MEMORY_DFS = 256  # Bounded for 8 GB RAM profile (<30 MB footprint)
 _df_memory_cache: OrderedDict[str, tuple[float, pd.DataFrame]] = OrderedDict()
-_DF_TTL_SECONDS = 300.0  # 5 minutes in-memory cache
+_DF_TTL_SECONDS = 300.0  # 5 minutes in-memory cache for daily
+_INTRADAY_TTL_SECONDS = 60.0  # 60s in-memory cache for intraday (5m, 15m)
 
 
 def clear_df_memory_cache() -> int:
@@ -127,11 +128,12 @@ def get_ohlcv(
     now_ts = time.time()
 
     # Tier 1: Instant In-Memory DataFrame Cache (0.1ms latency)
-    if kite_interval == "day" and not from_date and not to_date:
+    ttl_limit = _DF_TTL_SECONDS if kite_interval == "day" else _INTRADAY_TTL_SECONDS
+    if not from_date and not to_date:
         with _df_memory_cache_lock:
             if cache_key in _df_memory_cache:
                 stored_ts, cached_df = _df_memory_cache[cache_key]
-                if now_ts - stored_ts < _DF_TTL_SECONDS and not cached_df.empty:
+                if now_ts - stored_ts < ttl_limit and not cached_df.empty:
                     _df_memory_cache.move_to_end(cache_key)
                     return cached_df.copy()
 
@@ -321,7 +323,7 @@ def get_ohlcv(
             pass
 
     # Save into Tier 1 In-Memory Cache (bounded LRU max MAX_MEMORY_DFS)
-    if kite_interval == "day" and not df.empty:
+    if not df.empty:
         with _df_memory_cache_lock:
             # Enforce max limit by evicting oldest item
             while len(_df_memory_cache) >= MAX_MEMORY_DFS:

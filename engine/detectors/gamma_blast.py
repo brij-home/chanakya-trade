@@ -46,6 +46,7 @@ def detect_gamma_blast(
     now_dt = datetime.now(IST)
     now_iso = now_dt.strftime("%Y-%m-%d %H:%M:%S IST")
     is_opening_drive = (now_dt.hour == 9 and now_dt.minute <= 45)
+    clean_sym = underlying.upper().replace(".NS", "").replace("NSE:", "").replace("NFO:", "").strip()
 
     # Institutional Liquidity & Significance Filters (SEBI / F&O standard):
     is_index = underlying.upper() in (
@@ -98,7 +99,7 @@ def detect_gamma_blast(
             min_abs_oi_change = 1200 if is_opening_drive else 2500
             min_volume = 2500 if is_opening_drive else 8000
 
-        if c_oi < min_strike_oi or c_vol < min_volume or c_oi_chg < min_abs_oi_change:
+        if c_oi < min_strike_oi or c_vol < min_volume:
             continue
 
         exp_date = getattr(c, "expiry", "") or None
@@ -115,7 +116,7 @@ def detect_gamma_blast(
                 if exp_dt:
                     today_ist = datetime.now(IST).date()
                     dte_days = (exp_dt - today_ist).days
-                    max_gamma_dte = 5 if is_index else 35
+                    max_gamma_dte = 8 if (is_index and clean_sym == "NIFTY") else (16 if is_index else 35)
                     if dte_days > max_gamma_dte:
                         continue
             except Exception:
@@ -140,6 +141,12 @@ def detect_gamma_blast(
                 unwind_rate = ((oi - p_oi) / dt_sec) * 60.0  # contracts / min
                 if (is_index and unwind_rate <= -1000) or (not is_index and unwind_rate <= -50):
                     short_term_unwind = True
+
+        has_gamma_pchange = (pchange >= 12.0 and volume >= (4000 if is_index else 200))
+        if c_oi_chg > 0 and c_oi_chg < min_abs_oi_change:
+            continue
+        if c_oi_chg == 0 and not short_term_unwind and not has_gamma_pchange:
+            continue
 
         is_oi_shedding = (
             oi_change < 0
@@ -207,15 +214,15 @@ def detect_gamma_blast(
                     if opt_ltp > 0 and exp_date
                     else None
                 )
-                target_premium = opt_plan["t1_premium"] if opt_plan else round(opt_ltp * 1.8, 1)
+                target_premium = opt_plan["t1_premium"] if opt_plan else round(opt_ltp * 1.25, 1)
                 t2_premium = (
-                    opt_plan.get("t2_premium") if opt_plan else round(opt_ltp * 2.8, 1)
+                    opt_plan.get("t2_premium") if opt_plan else round(opt_ltp * 1.45, 1)
                 )
                 t3_premium = (
-                    opt_plan.get("t3_premium") if opt_plan else round(opt_ltp * 4.5, 1)
+                    opt_plan.get("t3_premium") if opt_plan else round(opt_ltp * 1.75, 1)
                 )
                 sl_premium = (
-                    opt_plan["sl_premium"] if opt_plan else round(max(1.0, opt_ltp * 0.7), 1)
+                    opt_plan["sl_premium"] if opt_plan else round(max(0.05, opt_ltp * 0.85), 1)
                 )
                 if opt_plan and opt_plan.get("option_rr"):
                     rr_str = opt_plan["option_rr"]
@@ -226,16 +233,16 @@ def detect_gamma_blast(
                 elif tp:
                     rr_str = f"1:{tp.rr_t1}"
                 else:
-                    rr_str = "1:2"
+                    rr_str = "1:1.7"
                 t1_pct_str = (
                     f"+{opt_plan['t1_pct']:.1f}%"
                     if (opt_plan and opt_plan.get("t1_pct"))
-                    else "+90%"
+                    else "+25%"
                 )
                 sl_pct_str = (
                     f"{opt_plan['sl_pct']:.1f}%"
                     if (opt_plan and opt_plan.get("sl_pct"))
-                    else "-30%"
+                    else "-15%"
                 )
                 tp_dict = tp.as_dict()
             except Exception as e_tp:
@@ -247,25 +254,31 @@ def detect_gamma_blast(
                 opt_plan = None
                 mkt_status = {"status": "SESSION_CLOSED", "label": "🌙 SESSION CLOSED"}
                 target_premium = (
-                    round(opt_ltp * 1.8, 1) if opt_ltp > 0 else round(strike * 0.015, 1)
+                    round(opt_ltp * 1.25, 1) if opt_ltp > 0 else round(strike * 0.012, 1)
                 )
                 t2_premium = (
-                    round(opt_ltp * 2.8, 1) if opt_ltp > 0 else round(strike * 0.025, 1)
+                    round(opt_ltp * 1.45, 1) if opt_ltp > 0 else round(strike * 0.020, 1)
                 )
                 t3_premium = (
-                    round(opt_ltp * 4.5, 1) if opt_ltp > 0 else round(strike * 0.040, 1)
+                    round(opt_ltp * 1.75, 1) if opt_ltp > 0 else round(strike * 0.035, 1)
                 )
-                sl_premium = round(max(1.0, opt_ltp * 0.70), 1) if opt_ltp > 0 else 1.0
-                rr_str = "1:2"
-                t1_pct_str = "+80%"
-                sl_pct_str = "-30%"
+                sl_premium = round(max(0.05, opt_ltp * 0.85), 1) if opt_ltp > 0 else 1.0
+                rr_str = "1:1.7"
+                t1_pct_str = "+25%"
+                sl_pct_str = "-15%"
 
             headline = (
                 f"⚡ CALL GAMMA BLAST {stage.replace('_', ' ')}: {underlying} {int(strike)} CE"
             )
+            if oi_change < 0 and abs(oi_chg_pct) > 0.05:
+                oi_desc = f"Call writers shedding {abs(oi_chg_pct):.1f}% OI (ΔOI: {oi_change:,}). "
+            elif oi_change > 0 and abs(oi_chg_pct) > 0.05:
+                oi_desc = f"Call volume surging with fresh accumulation (ΔOI: +{oi_change:,}). "
+            else:
+                oi_desc = f"Institutional Call turnover surge ({volume:,} contracts traded). "
+
             summary = (
-                f"Call writers shedding {abs(oi_chg_pct):.1f}% OI (ΔOI: {oi_change:,}). "
-                f"Vol/OI turnover {vol_oi_ratio}x. Spot ₹{spot:,.1f} holding VWAP. "
+                f"{oi_desc}Vol/OI turnover {vol_oi_ratio}x. Spot ₹{spot:,.1f} holding VWAP. "
                 f"{'Explosive short-covering underway!' if is_ignited else 'Early-warning coiling before gamma surge!'}"
             )
 
@@ -313,9 +326,10 @@ def detect_gamma_blast(
                     headline=headline,
                     summary=summary,
                     ltp=opt_ltp or spot,
-                    trigger_level=strike,
+                    trigger_level=opt_ltp if (opt_ltp and opt_ltp > 0) else strike,
                     target_level=target_premium,
                     stop_loss=sl_premium,
+                    no_chase_boundary=round(opt_ltp * 1.06, 1) if (opt_ltp and opt_ltp > 0) else round(spot * 1.006, 1),
                     strike=strike,
                     option_type="CE",
                     contract_symbol=contract_sym,
@@ -405,7 +419,7 @@ def detect_gamma_blast(
             min_abs_oi_change = 1200 if is_opening_drive else 2500
             min_volume = 2500 if is_opening_drive else 8000
 
-        if c_oi < min_strike_oi or c_vol < min_volume or c_oi_chg < min_abs_oi_change:
+        if c_oi < min_strike_oi or c_vol < min_volume:
             continue
 
         exp_date = getattr(c, "expiry", "") or None
@@ -422,7 +436,7 @@ def detect_gamma_blast(
                 if exp_dt:
                     today_ist = datetime.now(IST).date()
                     dte_days = (exp_dt - today_ist).days
-                    max_gamma_dte = 5 if is_index else 35
+                    max_gamma_dte = 8 if (is_index and clean_sym == "NIFTY") else (16 if is_index else 35)
                     if dte_days > max_gamma_dte:
                         continue
             except Exception:
@@ -447,6 +461,12 @@ def detect_gamma_blast(
                 unwind_rate = ((oi - p_oi) / dt_sec) * 60.0  # contracts / min
                 if (is_index and unwind_rate <= -1000) or (not is_index and unwind_rate <= -50):
                     short_term_unwind = True
+
+        has_gamma_pchange = (pchange >= 12.0 and volume >= (4000 if is_index else 200))
+        if c_oi_chg > 0 and c_oi_chg < min_abs_oi_change:
+            continue
+        if c_oi_chg == 0 and not short_term_unwind and not has_gamma_pchange:
+            continue
 
         is_oi_shedding = (
             oi_change < 0
@@ -514,15 +534,15 @@ def detect_gamma_blast(
                     if opt_ltp > 0 and exp_date
                     else None
                 )
-                target_premium = opt_plan["t1_premium"] if opt_plan else round(opt_ltp * 1.8, 1)
+                target_premium = opt_plan["t1_premium"] if opt_plan else round(opt_ltp * 1.25, 1)
                 t2_premium = (
-                    opt_plan.get("t2_premium") if opt_plan else round(opt_ltp * 2.8, 1)
+                    opt_plan.get("t2_premium") if opt_plan else round(opt_ltp * 1.45, 1)
                 )
                 t3_premium = (
-                    opt_plan.get("t3_premium") if opt_plan else round(opt_ltp * 4.5, 1)
+                    opt_plan.get("t3_premium") if opt_plan else round(opt_ltp * 1.75, 1)
                 )
                 sl_premium = (
-                    opt_plan["sl_premium"] if opt_plan else round(max(1.0, opt_ltp * 0.7), 1)
+                    opt_plan["sl_premium"] if opt_plan else round(max(0.05, opt_ltp * 0.85), 1)
                 )
                 if opt_plan and opt_plan.get("option_rr"):
                     rr_str = opt_plan["option_rr"]
@@ -533,16 +553,16 @@ def detect_gamma_blast(
                 elif tp:
                     rr_str = f"1:{tp.rr_t1}"
                 else:
-                    rr_str = "1:2"
+                    rr_str = "1:1.7"
                 t1_pct_str = (
                     f"+{opt_plan['t1_pct']:.1f}%"
                     if (opt_plan and opt_plan.get("t1_pct"))
-                    else "+90%"
+                    else "+25%"
                 )
                 sl_pct_str = (
                     f"{opt_plan['sl_pct']:.1f}%"
                     if (opt_plan and opt_plan.get("sl_pct"))
-                    else "-30%"
+                    else "-15%"
                 )
                 tp_dict = tp.as_dict()
             except Exception as e_tp:
@@ -554,25 +574,31 @@ def detect_gamma_blast(
                 opt_plan = None
                 mkt_status = {"status": "SESSION_CLOSED", "label": "🌙 SESSION CLOSED"}
                 target_premium = (
-                    round(opt_ltp * 1.8, 1) if opt_ltp > 0 else round(strike * 0.015, 1)
+                    round(opt_ltp * 1.25, 1) if opt_ltp > 0 else round(strike * 0.012, 1)
                 )
                 t2_premium = (
-                    round(opt_ltp * 2.8, 1) if opt_ltp > 0 else round(strike * 0.025, 1)
+                    round(opt_ltp * 1.45, 1) if opt_ltp > 0 else round(strike * 0.020, 1)
                 )
                 t3_premium = (
-                    round(opt_ltp * 4.5, 1) if opt_ltp > 0 else round(strike * 0.040, 1)
+                    round(opt_ltp * 1.75, 1) if opt_ltp > 0 else round(strike * 0.035, 1)
                 )
-                sl_premium = round(max(1.0, opt_ltp * 0.70), 1) if opt_ltp > 0 else 1.0
-                rr_str = "1:2"
-                t1_pct_str = "+80%"
-                sl_pct_str = "-30%"
+                sl_premium = round(max(0.05, opt_ltp * 0.85), 1) if opt_ltp > 0 else 1.0
+                rr_str = "1:1.7"
+                t1_pct_str = "+25%"
+                sl_pct_str = "-15%"
 
             headline = (
                 f"⚡ PUT GAMMA BLAST {stage.replace('_', ' ')}: {underlying} {int(strike)} PE"
             )
+            if oi_change < 0 and abs(oi_chg_pct) > 0.05:
+                oi_desc = f"Put writers capitulating {abs(oi_chg_pct):.1f}% OI (ΔOI: {oi_change:,}). "
+            elif oi_change > 0 and abs(oi_chg_pct) > 0.05:
+                oi_desc = f"Put volume surging with fresh accumulation (ΔOI: +{oi_change:,}). "
+            else:
+                oi_desc = f"Institutional Put turnover surge ({volume:,} contracts traded). "
+
             summary = (
-                f"Put writers capitulating {abs(oi_chg_pct):.1f}% OI (ΔOI: {oi_change:,}). "
-                f"Vol/OI turnover {vol_oi_ratio}x. Spot ₹{spot:,.1f} below VWAP. "
+                f"{oi_desc}Vol/OI turnover {vol_oi_ratio}x. Spot ₹{spot:,.1f} below VWAP. "
                 f"{'Aggressive long put / short spot momentum!' if is_ignited else 'Early-warning coiling before put gamma surge!'}"
             )
 
@@ -620,9 +646,10 @@ def detect_gamma_blast(
                     headline=headline,
                     summary=summary,
                     ltp=opt_ltp or spot,
-                    trigger_level=strike,
+                    trigger_level=opt_ltp if (opt_ltp and opt_ltp > 0) else strike,
                     target_level=target_premium,
                     stop_loss=sl_premium,
+                    no_chase_boundary=round(opt_ltp * 1.06, 1) if (opt_ltp and opt_ltp > 0) else round(spot * 0.994, 1),
                     strike=strike,
                     option_type="PE",
                     contract_symbol=contract_sym,

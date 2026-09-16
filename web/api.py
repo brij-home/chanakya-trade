@@ -3920,6 +3920,86 @@ async def api_audit_verify():
     return JSONResponse(res)
 
 
+# ── Multi-Horizon Compounder & Multibagger Endpoints ───────────
+
+
+@app.get("/api/compounder/roster", tags=["Compounder & Multibagger"])
+def get_compounder_roster(horizon: str = "ALL"):
+    """
+    Returns decoupled rosters for:
+      - SHORT_TERM: High-Velocity VCP Breakouts & Alpha (1–4 Weeks)
+      - MID_TERM: Stan Weinstein Stage 2 & Minervini Superperformers (1–6 Months)
+      - LONG_TERM: Generational Wealth & High-ROCE Compounders (1–3+ Years)
+    """
+    from engine.compounder_scanner import compounder_scanner
+
+    return JSONResponse(compounder_scanner.get_roster(horizon))
+
+
+@app.post("/api/compounder/scan", tags=["Compounder & Multibagger"])
+def trigger_compounder_scan(background: bool = True):
+    """
+    Triggers an autonomous batch screening sweep across the broad
+    750-stock Nifty Total Market, Smallcap 250, and Microcap 250 universe.
+    """
+    from engine.compounder_scanner import compounder_scanner
+
+    if background:
+        t = threading.Thread(
+            target=compounder_scanner.scan_universe_batch,
+            daemon=True,
+            name="compounder-batch-scanner",
+        )
+        t.start()
+        return JSONResponse({"status": "SCAN_INITIATED", "message": "Batch scan started in background across 750 equities."})
+    else:
+        roster = compounder_scanner.scan_universe_batch()
+        return JSONResponse({"status": "SUCCESS", "data": roster.to_dict()})
+
+
+@app.get("/api/compounder/lifecycle/{symbol}", tags=["Compounder & Multibagger"])
+def get_compounder_lifecycle(
+    symbol: str,
+    entry: float = 0.0,
+    sl: float = 0.0,
+    mode: str = "STAGE_2_COMPOUNDER",
+    ltp: Optional[float] = None,
+):
+    """
+    Audits a position's health with dual-mode lifecycle rules:
+      - mode='SWING': 2R 50% scale-out, Chandelier ATR stop
+      - mode='STAGE_2_COMPOUNDER': ZERO 2R profit booking, base pivot breakeven, 50-SMA trail, +30% pyramiding signal
+      - mode='GENERATIONAL': 200-SMA / 40-week trail
+    """
+    from engine.trade_lifecycle import audit_position_lifecycle
+
+    clean_sym = symbol.upper().replace(".NS", "").replace("NSE:", "").strip()
+    entry_p = float(entry) if entry > 0 else 100.0
+    sl_p = float(sl) if sl > 0 else (entry_p * 0.93)
+
+    report = audit_position_lifecycle(
+        symbol=clean_sym,
+        entry_price=entry_p,
+        initial_stop_loss=sl_p,
+        current_ltp=ltp,
+        mode=mode,
+    )
+    return JSONResponse(report.to_dict())
+
+
+@app.get("/api/compounder/multibagger/{symbol}", tags=["Compounder & Multibagger"])
+def get_multibagger_analysis(symbol: str):
+    """
+    Runs full institutional analysis and returns decoupled Short-Term,
+    Mid-Term Stage 2 Compounder, and Long-Term Generational tickets.
+    """
+    from analysis.multibagger import scan_multibagger_opportunity
+
+    clean_sym = symbol.upper().replace(".NS", "").replace("NSE:", "").strip()
+    report = scan_multibagger_opportunity(clean_sym)
+    return JSONResponse(report.to_dict())
+
+
 # ── Static file serving (web mode) ──────────────────────────────
 
 _static_dir = os.path.join(os.path.dirname(__file__), "static")

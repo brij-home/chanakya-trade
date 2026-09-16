@@ -95,6 +95,8 @@ class AutoAlert:
     anchored_levels: dict[str, float] = field(default_factory=dict)
     order_flow_signals: dict[str, Any] = field(default_factory=dict)
     no_chase_boundary: Optional[float] = None
+    telegram_dispatched: bool = False
+    dispatched_channels: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if not self.created_at:
@@ -103,10 +105,13 @@ class AutoAlert:
             try:
                 from bot.alert_templates import build_signal_ref
 
+                contract_val = self.contract_symbol
+                if not contract_val and self.strike and self.option_type:
+                    contract_val = f"{self.symbol} {int(self.strike)} {self.option_type}".strip()
                 self.signal_ref = build_signal_ref(
                     symbol=self.symbol,
                     alert_id=self.alert_id,
-                    contract=self.contract_symbol or "",
+                    contract=contract_val or "",
                     created_at=self.created_at,
                 )
             except Exception:
@@ -168,12 +173,14 @@ class AutoAlert:
                 setup_action = str((self.actionable_plan or {}).get("action", "")).upper()
                 if "POCKET_PIVOT" in setup_action:
                     self.time_horizon = "SWING_MID"
-                elif "0DTE" in setup_action:
+                elif "0DTE" in setup_action or "INTRADAY" in setup_action:
                     self.time_horizon = "INTRADAY"
                 else:
                     self.time_horizon = "SWING_SHORT"
             elif atype in ("CIRCUIT_WARNING", "PATTERN_COILING"):
                 self.time_horizon = "SWING_SHORT"
+            elif atype in ("GAMMA_BLAST", "INTRADAY_SPARK", "INTRADAY_BREAKDOWN_SPARK", "INDEX_CONTAGION"):
+                self.time_horizon = "INTRADAY"
 
         # Calculate no-chase boundary if not provided
         if self.no_chase_boundary is None and self.trigger_level > 0:
@@ -196,14 +203,18 @@ class AutoAlert:
             elif str(self.direction).upper() in ("BEARISH", "SHORT", "SELL"):
                 is_short_trade = True
 
-            if is_short_trade:
-                self.no_chase_boundary = round(self.trigger_level * 0.988, 2)
+            th = (self.time_horizon or "INTRADAY").upper()
+            if is_option:
+                if is_short_trade:
+                    # Option Writing / Credit Spread
+                    mult = 0.95 if th == "INTRADAY" else 0.92
+                else:
+                    # Option Buying: Intraday capped at +5% of premium; Swing capped at +8%
+                    mult = 1.05 if th == "INTRADAY" else 1.08
+                self.no_chase_boundary = round(self.trigger_level * mult, 2)
             else:
-                mult = (
-                    1.08
-                    if self.alert_type == "OPTIONS_MOMENTUM"
-                    else (1.05 if is_option else 1.012)
-                )
+                # Cash Equity / Futures standard 1.2% institutional buffer
+                mult = 0.988 if is_short_trade else 1.012
                 self.no_chase_boundary = round(self.trigger_level * mult, 2)
 
         if self.stage == "IGNITED" and not self.triggered_at:

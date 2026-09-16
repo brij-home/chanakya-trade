@@ -104,6 +104,9 @@ class MultibaggerReport:
 
     best_horizon: str = "MID_TERM"  # "SHORT_TERM" | "MID_TERM" | "LONG_TERM"
     execution_ticket: dict[str, Any] = field(default_factory=dict)
+    short_term_ticket: dict[str, Any] = field(default_factory=dict)
+    mid_term_ticket: dict[str, Any] = field(default_factory=dict)
+    long_term_ticket: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -522,6 +525,174 @@ def evaluate_long_term_horizon(
     return score, verdict, details
 
 
+def _compute_atr_14(ltp: float, df: Optional[pd.DataFrame]) -> float:
+    """Calculates 14-day ATR with safe fallbacks."""
+    if ltp <= 0:
+        return 1.0
+    atr = ltp * 0.025  # default 2.5% ATR
+    if df is not None and len(df) >= 14:
+        highs = df["high"].values
+        lows = df["low"].values
+        closes = df["close"].values
+        tr = np.maximum(highs[-14:] - lows[-14:], np.abs(highs[-14:] - closes[-15:-1]))
+        val = float(np.mean(tr))
+        if val > 0:
+            atr = val
+    return max(0.1, atr)
+
+
+def generate_short_term_ticket(
+    ltp: float,
+    df: Optional[pd.DataFrame],
+    is_vcp: bool,
+    pivot_price: float,
+) -> dict[str, Any]:
+    """
+    Generates high-velocity Short-Term Swing / Alpha Ticket (1–4 Weeks).
+    Features tight ATR risk, 1:2.5 to 1:3.5 R:R, and 50% profit-scaling at +2R.
+    """
+    if ltp <= 0:
+        return {}
+
+    atr = _compute_atr_14(ltp, df)
+    entry_price = round(pivot_price if (is_vcp and pivot_price > 0) else ltp, 2)
+    stop_loss = round(max(0.1, entry_price - (1.1 * atr)), 2)
+    risk_per_share = max(0.5, entry_price - stop_loss)
+
+    target_1 = round(entry_price + (2.0 * risk_per_share), 2)
+    target_2 = round(entry_price + (3.5 * risk_per_share), 2)
+    target_runner = round(entry_price + (5.0 * risk_per_share), 2)
+    risk_reward = round((target_1 - entry_price) / risk_per_share, 1)
+
+    return {
+        "horizon_id": "SHORT_TERM",
+        "horizon_label": "1–4 Weeks (Velocity Alpha & Swing Breakouts)",
+        "action": "LONG (BUY)",
+        "strategy_action": "BUY_SWING_BREAKOUT",
+        "entry_price": entry_price,
+        "stop_loss": stop_loss,
+        "risk_per_share": round(risk_per_share, 2),
+        "target_1": target_1,
+        "target_2": target_2,
+        "target_runner": target_runner,
+        "risk_reward_ratio": f"1:{risk_reward} (T1: 2.0R | T2: 3.5R)",
+        "holding_period": "5 to 20 Trading Days",
+        "trailing_stop_rule": "Scale 50% at Target 1 (+2R) -> Shift SL to Breakeven (+0.2%) -> Trail remaining 50% via 10/20-EMA swing low support.",
+        "pyramid_allowed": False,
+    }
+
+
+def generate_mid_term_compounder_ticket(
+    ltp: float,
+    df: Optional[pd.DataFrame],
+    stage: str,
+    is_vcp: bool,
+    pivot_price: float,
+) -> dict[str, Any]:
+    """
+    Generates Stan Weinstein Stage 2 & Mark Minervini Positional Compounder Ticket (1–6 Months).
+    CRITICAL MULTIBAGGER RULE: ZERO premature profit booking at 2R!
+    Trails position strictly below rising 50-Day SMA / 10-Week EMA on daily closes.
+    Includes automated +30% pyramiding trigger on secondary consolidation base breakouts.
+    """
+    if ltp <= 0:
+        return {}
+
+    atr = _compute_atr_14(ltp, df)
+    entry_price = round(pivot_price if (is_vcp and pivot_price > 0) else ltp, 2)
+
+    # Base structural stop floor (allows 6%–10% normal base consolidation)
+    stop_loss = round(max(0.1, entry_price - (1.8 * atr)), 2)
+    risk_per_share = max(1.0, entry_price - stop_loss)
+
+    # Asymmetric positional targets
+    target_1 = round(entry_price + (3.5 * risk_per_share), 2)  # ~+25% to +35% expansion
+    target_2 = round(entry_price + (6.0 * risk_per_share), 2)  # ~+50% to +80% markup
+    target_superperformer = round(entry_price + (10.0 * risk_per_share), 2)  # +100% to +150% Superperformer
+
+    # Trailing anchors: 50 SMA / 20 EMA
+    sma_50_est = round(entry_price - (1.2 * atr), 2)
+    if df is not None and len(df) >= 50:
+        sma_50_est = round(float(np.mean(df["close"].values[-50:])), 2)
+
+    return {
+        "horizon_id": "MID_TERM",
+        "horizon_label": "1–6 Months (Stage 2 Positional Compounder)",
+        "action": "LONG (BUY)",
+        "strategy_action": "BUY_STAGE_2_COMPOUNDER",
+        "entry_price": entry_price,
+        "stop_loss": stop_loss,
+        "risk_per_share": round(risk_per_share, 2),
+        "target_1": target_1,
+        "target_2": target_2,
+        "target_runner": target_superperformer,
+        "risk_reward_ratio": "1:3.5 (T1) | 1:6.0 (T2) | 1:10+ (Superperformer)",
+        "holding_period": "30 to 180 Calendar Days",
+        "trailing_stop_rule": (
+            "ZERO profit booking at 2R. At +20% gain, shift initial SL to entry base pivot. "
+            "Trail core position strictly below rising 50-Day SMA / 10-Week EMA on daily closes. "
+            "Exit only upon confirmed daily close below 50-SMA with expanding volume."
+        ),
+        "pyramid_rule": (
+            "Progressive Pyramiding Activated: Add +30% to position upon confirmed breakout from "
+            "the first secondary 3-to-5 week consolidation base (cheat handle / VCP reset)."
+        ),
+        "structural_floor_50sma": sma_50_est,
+    }
+
+
+def generate_generational_ticket(
+    ltp: float,
+    df: Optional[pd.DataFrame],
+    details: dict[str, Any],
+    forensic_safe: bool,
+) -> dict[str, Any]:
+    """
+    Generates Vijay Kedia SMILE & Jhunjhunwala Generational Wealth Ticket (1–3+ Years, 3x to 10x+).
+    Anchors holding to multi-quarter earnings growth, clean governance, and the 200-Day / 40-Week SMA floor.
+    """
+    if ltp <= 0:
+        return {}
+
+    # Initial catastrophic stop: 15% structural stop or below rising 200-day SMA
+    sma_200 = ltp * 0.85
+    if df is not None and len(df) >= 200:
+        sma_200 = float(np.mean(df["close"].values[-200:]))
+
+    initial_stop = round(min(ltp * 0.85, sma_200 * 0.95), 2)
+    risk_pts = round(ltp - initial_stop, 2)
+
+    target_rerating = round(ltp * 1.50, 2)  # +50% PE expansion
+    target_compounder = round(ltp * 2.50, 2)  # +150% (2.5x)
+    target_multibagger = round(ltp * 5.00, 2)  # +400% (5x)
+
+    return {
+        "horizon_id": "LONG_TERM",
+        "horizon_label": "1–3+ Years (Generational Multibagger & Wealth Compounder)",
+        "action": "LONG (BUY)",
+        "strategy_action": "ACCUMULATE_CORE_COMPOUNDER",
+        "entry_price": round(ltp, 2),
+        "stop_loss": initial_stop,
+        "risk_per_share": risk_pts,
+        "target_1": target_rerating,
+        "target_2": target_compounder,
+        "target_runner": target_multibagger,
+        "risk_reward_ratio": "1:3.3 (1.5x) | 1:10 (2.5x) | 1:26+ (5x Multibagger)",
+        "holding_period": "1 to 3+ Years",
+        "trailing_stop_rule": (
+            "Ride multi-quarter earnings expansion through routine 15%–20% market corrections. "
+            "Trail core investment strictly on weekly closes above the 40-Week (200-Day) Moving Average. "
+            "Liquidate or downsize only if: (1) Forensic audit flags accounting manipulation, "
+            "(2) ROCE falls sustainably below 15%, or (3) Stock enters Stage 3 Institutional Distribution."
+        ),
+        "fundamental_anchors": {
+            "roce_pct": details.get("roce_pct", 20.0),
+            "debt_equity": details.get("debt_equity", 0.3),
+            "forensic_status": "CLEAN_PASS" if forensic_safe else "WARNING",
+        },
+    }
+
+
 def generate_multibagger_trade_ticket(
     ltp: float,
     df: Optional[pd.DataFrame],
@@ -529,54 +700,18 @@ def generate_multibagger_trade_ticket(
     is_vcp: bool,
     pivot_price: float,
     best_horizon: str,
+    lt_details: Optional[dict[str, Any]] = None,
+    forensic_safe: bool = True,
 ) -> dict[str, Any]:
     """
-    Generates actionable, ATR-bounded trade levels and trailing stop rules.
+    Generates horizon-tailored execution ticket matching the best qualified timeframe.
     """
-    if ltp <= 0:
-        return {}
-
-    # Calculate 14-day ATR
-    atr = ltp * 0.025  # default 2.5% ATR
-    if df is not None and len(df) >= 14:
-        highs = df["high"].values
-        lows = df["low"].values
-        closes = df["close"].values
-        tr = np.maximum(highs[-14:] - lows[-14:], np.abs(highs[-14:] - closes[-15:-1]))
-        atr = float(np.mean(tr))
-
-    # Entry Price & Stop Loss
-    if is_vcp and pivot_price > 0:
-        entry_price = round(pivot_price, 2)
-        stop_loss = round(max(0.1, pivot_price - (1.1 * atr)), 2)
-    elif stage == "STAGE_2_MARKUP":
-        entry_price = round(ltp, 2)
-        stop_loss = round(max(0.1, ltp - (1.2 * atr)), 2)
-    else:
-        entry_price = round(ltp, 2)
-        stop_loss = round(max(0.1, ltp - (1.5 * atr)), 2)
-
-    risk_per_share = max(0.5, entry_price - stop_loss)
-    target_1 = round(entry_price + (2.0 * risk_per_share), 2)
-    target_2 = round(entry_price + (3.5 * risk_per_share), 2)
-    risk_reward = round((target_1 - entry_price) / risk_per_share, 1)
-
-    horizon_labels = {
-        "SHORT_TERM": "1–4 Weeks (Intraday/Swing Alpha)",
-        "MID_TERM": "1–6 Months (Positional Markup)",
-        "LONG_TERM": "1–5 Years (Generational Compounder)",
-    }
-
-    return {
-        "action": "LONG (BUY)",
-        "entry_price": entry_price,
-        "stop_loss": stop_loss,
-        "target_1": target_1,
-        "target_2": target_2,
-        "risk_reward_ratio": f"1:{risk_reward} (2R/3.5R)",
-        "recommended_horizon": horizon_labels.get(best_horizon, "1–6 Months (Positional Markup)"),
-        "trailing_stop_rule": "Scale 50% at Target 1 (+2R) -> Shift SL to Breakeven -> Trail remainder via 20-EMA / Higher Low Supports.",
-    }
+    if best_horizon == "SHORT_TERM":
+        return generate_short_term_ticket(ltp, df, is_vcp, pivot_price)
+    elif best_horizon == "LONG_TERM":
+        return generate_generational_ticket(ltp, df, lt_details or {}, forensic_safe)
+    else:  # MID_TERM (Default Compounder)
+        return generate_mid_term_compounder_ticket(ltp, df, stage, is_vcp, pivot_price)
 
 
 # ── Full Multibagger Opportunity Scanner ────────────────────────
@@ -591,7 +726,7 @@ def scan_multibagger_opportunity(
     """
     Comprehensive Multibagger Screener analyzing Minervini criteria, Weinstein stages,
     VCP contraction tightness, RRG sector tailwinds, Forensic accounting safety,
-    and 3-Horizon potential (Short, Mid, Long term).
+    and generating 3 decoupled horizon execution blueprints.
     """
     clean_sym = symbol.upper().replace(".NS", "").replace("NSE:", "").strip()
 
@@ -679,18 +814,28 @@ def scan_multibagger_opportunity(
     else:
         category = "DEVELOPING_SETUP"
 
-    # Execution Ticket
-    ticket = generate_multibagger_trade_ticket(ltp, df, stage, is_vcp, pivot_price, best_horizon)
+    # Decoupled Horizon Execution Tickets
+    st_ticket = generate_short_term_ticket(ltp, df, is_vcp, pivot_price)
+    mt_ticket = generate_mid_term_compounder_ticket(ltp, df, stage, is_vcp, pivot_price)
+    lt_ticket = generate_generational_ticket(ltp, df, lt_details, forensic_safe)
+
+    # Primary ticket matches the best-fit horizon
+    if best_horizon == "SHORT_TERM":
+        primary_ticket = st_ticket
+    elif best_horizon == "LONG_TERM":
+        primary_ticket = lt_ticket
+    else:
+        primary_ticket = mt_ticket
 
     # Synthesis Summaries
     summary = f"{clean_sym} ranks {category} (Multibagger Score: {composite_score}/100 | Best Horizon: {best_horizon}). Minervini: {passed_count}/8 passed. Weinstein Stage: {stage}. Sector Tailwind: {sector_tailwind}/100 ({sector})."
 
     if is_vcp:
         catalyst = f"VCP Contraction active with pivot resistance at ₹{pivot_price:.2f}. Volatility is drying up prior to potential Stage 2 expansion."
-        entry_strat = f"Buy on volume breakout above VCP Pivot ₹{pivot_price:.2f} (or on retest). Stop-loss ₹{ticket.get('stop_loss', ltp * 0.95):.2f}."
+        entry_strat = f"Buy on volume breakout above VCP Pivot ₹{pivot_price:.2f} (or on retest). Stop-loss ₹{primary_ticket.get('stop_loss', ltp * 0.95):.2f}."
     elif stage == "STAGE_2_MARKUP":
         catalyst = "Established Stage 2 markup with rising 50/200 SMA alignment and positive institutional sector momentum."
-        entry_strat = f"Enter near ₹{ltp:.2f} on 20/50-day EMA pullbacks. Target ₹{ticket.get('target_1', ltp * 1.15):.2f} (+2R) with SL at ₹{ticket.get('stop_loss', ltp * 0.95):.2f}."
+        entry_strat = f"Enter near ₹{ltp:.2f} on 20/50-day EMA pullbacks. Mid-Term Target ₹{mt_ticket.get('target_1', ltp * 1.30):.2f} with SL at ₹{mt_ticket.get('stop_loss', ltp * 0.92):.2f}. Zero 2R early exits."
     else:
         catalyst = "Consolidating or basing. Watch for Stage 2 volume breakout confirmation."
         entry_strat = "Wait for Minervini criteria >= 6/8 and confirmed Stage 2 expansion before taking heavy positional allocation."
@@ -724,5 +869,9 @@ def scan_multibagger_opportunity(
         long_term_verdict=lt_verdict,
         long_term_details=lt_details,
         best_horizon=best_horizon,
-        execution_ticket=ticket,
+        execution_ticket=primary_ticket,
+        short_term_ticket=st_ticket,
+        mid_term_ticket=mt_ticket,
+        long_term_ticket=lt_ticket,
     )
+

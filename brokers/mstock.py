@@ -520,6 +520,22 @@ class MStockAPI(BrokerAPI):
         else:
             resp = self._client.request(method, url, headers=headers, **kwargs)
 
+        if resp.status_code == 429:
+            time.sleep(0.5)
+            headers = self._headers()
+            if "headers" in kwargs:
+                headers.update(kwargs["headers"])
+            if m == "GET":
+                resp = self._client.get(url, headers=headers, **kwargs)
+            elif m == "POST":
+                resp = self._client.post(url, headers=headers, **kwargs)
+            elif m == "PUT":
+                resp = self._client.put(url, headers=headers, **kwargs)
+            elif m == "DELETE":
+                resp = self._client.delete(url, headers=headers, **kwargs)
+            else:
+                resp = self._client.request(method, url, headers=headers, **kwargs)
+
         if (
             resp.status_code in (401, 403)
             and self._client_code
@@ -980,6 +996,9 @@ class MStockAPI(BrokerAPI):
                             except Exception:
                                 continue
 
+                    # Strictly sort candidates chronologically so candidates[0] is always the nearest active expiry
+                    candidates.sort(key=lambda x: (x[1], x[0]))
+
                     if expiry:
                         target_clean = expiry.strip()
                         for ep_int, date_str in candidates:
@@ -1107,9 +1126,20 @@ class MStockAPI(BrokerAPI):
                                                     c.ask = round(ltp * 1.001, 2)
                                                     c.bid_qty = 65
                                                     c.ask_qty = 65
+                                                high_p = float(item.get("high") or 0.0)
+                                                if high_p > 0:
+                                                    c.high = high_p
+                                                low_p = float(item.get("low") or 0.0)
+                                                if low_p > 0:
+                                                    c.low = low_p
+                                                open_p = float(item.get("open") or 0.0)
+                                                if open_p > 0:
+                                                    c.open = open_p
                                                 close_p = float(item.get("close") or 0.0)
-                                                if close_p > 0 and ltp > 0:
-                                                    c.pchange = round(((ltp - close_p) / close_p) * 100.0, 2)
+                                                if close_p > 0:
+                                                    c.close = close_p
+                                                    if ltp > 0:
+                                                        c.pchange = round(((ltp - close_p) / close_p) * 100.0, 2)
                                 except Exception:
                                     pass
 

@@ -69,6 +69,14 @@ def sanitize_test_env(monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRe
         monkeypatch.setenv("NVIDIA_API_KEY", "")
         monkeypatch.setenv("OPENROUTER_API_KEY", "")
 
+    try:
+        from market.quotes import _QUOTE_CACHE, _quote_cache_lock
+
+        with _quote_cache_lock:
+            _QUOTE_CACHE.clear()
+    except Exception:
+        pass
+
 
 @pytest.fixture(autouse=True)
 def isolate_test_notifications(monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest):

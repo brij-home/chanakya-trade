@@ -140,6 +140,10 @@ class OptionsContract:
     pchange_oi: Optional[float] = None
     lot_size: int = 1
     exchange: str = "NFO"
+    open: Optional[float] = None
+    high: Optional[float] = None
+    low: Optional[float] = None
+    close: Optional[float] = None
 
 
 @dataclass

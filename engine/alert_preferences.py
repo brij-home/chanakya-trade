@@ -584,14 +584,26 @@ class AlertPreferencesManager:
 
             is_milestone = (
                 is_invalidated
-                or stage in ("T1_ACHIEVED", "TARGET_ACHIEVED", "TRAILING_UPDATE")
+                or stage in ("T1_ACHIEVED", "TARGET_ACHIEVED", "TRAILING_UPDATE", "INVALIDATED", "IN_FLIGHT_WARNING")
                 or "T1" in target_status
                 or "TARGET" in target_status
             )
 
             # Milestones check
             if is_milestone:
-                return ch_pref.allow_milestones
+                if not ch_pref.allow_milestones:
+                    return False
+                # Zero-Ghost Lifecycle Invariant: Suppress downstream milestones on Telegram
+                # if the original trade signal was never dispatched to Telegram!
+                if channel == "telegram":
+                    tg_disp = (
+                        alert.get("telegram_dispatched", False)
+                        if isinstance(alert, dict)
+                        else getattr(alert, "telegram_dispatched", False)
+                    )
+                    if not tg_disp:
+                        return False
+                return True
 
             # Early warning check — threshold mirrors _dispatch() gate:
             # 80% for high-conviction positional types, 90% for all others.

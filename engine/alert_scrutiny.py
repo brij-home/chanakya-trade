@@ -353,26 +353,44 @@ class AlertScrutinyAuditor:
                 atype == "OPTIONS_MOMENTUM" and getattr(alert, "option_type", "") == "CE"
             )
 
-            # Long equity / Call option: reject when RSI > 78
+            tf_str = str(
+                getattr(alert, "timeframe", "")
+                or (metrics_dict.get("timeframe") if isinstance(metrics_dict, dict) else "")
+                or ""
+            ).lower()
+            is_intraday = (
+                tf_str in ("5m", "15m", "intraday", "1m", "3m")
+                or atype in (
+                    "OPTIONS_MOMENTUM",
+                    "INTRADAY_SPARK",
+                    "GAMMA_BLAST",
+                    "SQUEEZE_BREAKOUT",
+                    "SQUEEZE_BREAKDOWN",
+                )
+            )
+            rsi_overbought = 72.0 if is_intraday else 78.0
+            rsi_oversold = 28.0 if is_intraday else 22.0
+
+            # Long equity / Call option: reject when RSI exceeds threshold
             if (direction in ("BULLISH", "LONG", "BUY") or is_call_option) and not is_put_option:
-                if rsi_val > 78.0:
+                if rsi_val > rsi_overbought:
                     return (
                         False,
-                        f"Climax Exhaustion: RSI ({rsi_val:.1f}) > 78 entering parabolic blow-off top; wait for pullback to 20-EMA/VWAP",
+                        f"Climax Exhaustion: {'Intraday ' if is_intraday else ''}RSI ({rsi_val:.1f}) > {rsi_overbought:.0f} entering parabolic blow-off top; wait for pullback to 20-EMA/VWAP",
                         flags,
                     )
-            # Short equity / Put option (underlying): reject when underlying RSI < 22
+            # Short equity / Put option (underlying): reject when underlying RSI breaches oversold floor
             elif (
                 direction in ("BEARISH", "SHORT", "SELL") or is_put_option
             ) and not is_call_option:
-                if rsi_val < 22.0:
+                if rsi_val < rsi_oversold:
                     return (
                         False,
-                        f"Oversold Exhaustion: RSI ({rsi_val:.1f}) < 22 entering capitulation floor; wait for relief bounce before shorting",
+                        f"Oversold Exhaustion: {'Intraday ' if is_intraday else ''}RSI ({rsi_val:.1f}) < {rsi_oversold:.0f} entering capitulation floor; wait for relief bounce before shorting",
                         flags,
                     )
 
-        # 9. Mean Reversion Extension Filter (Price extended > 3.5x ATR from 20-EMA):
+        # 9. Mean Reversion Extension Filter (Price extended from 20-EMA):
         if isinstance(metrics_dict, dict) and not is_option_premium_levels:
             ema20 = metrics_dict.get("ema20") or metrics_dict.get("ema_20")
             atr_val = metrics_dict.get("atr")
@@ -382,7 +400,17 @@ class AlertScrutinyAuditor:
                     atr_f = float(atr_val)
                     if ema20_f > 0 and atr_f > 0:
                         dist_from_ema = abs(ltp - ema20_f)
-                        if dist_from_ema > (3.5 * atr_f):
+                        tf_str = str(
+                            getattr(alert, "timeframe", "")
+                            or metrics_dict.get("timeframe")
+                            or ""
+                        ).lower()
+                        is_intraday_ema = (
+                            tf_str in ("5m", "15m", "intraday", "1m", "3m")
+                            or atype in ("INTRADAY_SPARK", "SQUEEZE_BREAKOUT", "SQUEEZE_BREAKDOWN")
+                        )
+                        max_atr_mult = 2.2 if is_intraday_ema else 3.5
+                        if dist_from_ema > (max_atr_mult * atr_f):
                             return (
                                 False,
                                 f"Mean Reversion Risk: Extended {dist_from_ema / atr_f:.1f}x ATR from 20-EMA (₹{ema20_f:,.1f}) without structural base",
@@ -651,6 +679,207 @@ class AlertScrutinyAuditor:
                     except (ValueError, TypeError):
                         pass
         flags["midday_rvol_valid"] = True
+
+        # 14. Macro Benchmark Gravitational Veto (NIFTY 50 Intraday Regime Alignment):
+        # When NIFTY is in structural markdown (< VWAP & change <= -0.35%), individual equity breakouts
+        # carry >75% failure rates due to index gravitational drag.
+        # Conversely, in a runaway markup (> VWAP & change >= +0.40%), short equity breakdowns have high short squeeze risk.
+        is_index = clean_sym in (
+            "NIFTY",
+            "NIFTY 50",
+            "BANKNIFTY",
+            "FINNIFTY",
+            "MIDCPNIFTY",
+            "SENSEX",
+            "BANKEX",
+        )
+        exch_str = str(
+            getattr(alert, "exchange", "")
+            or (alert.get("exchange") if isinstance(alert, dict) else "")
+        ).upper()
+        seg_str = str(
+            getattr(alert, "segment", "")
+            or (alert.get("segment") if isinstance(alert, dict) else "")
+        ).upper()
+        is_commodity_or_curr = exch_str in ("MCX", "CDS") or seg_str in ("COMMODITY", "CURRENCY")
+
+        if not is_index and not is_commodity_or_curr:
+            nifty_data = (
+                metrics_dict.get("nifty_regime") if isinstance(metrics_dict, dict) else None
+            )
+            nifty_change = None
+            nifty_below_vwap = None
+
+            if isinstance(nifty_data, dict):
+                nifty_change = nifty_data.get("change_pct")
+                nifty_below_vwap = nifty_data.get("is_below_vwap")
+            elif isinstance(metrics_dict, dict):
+                if "nifty_change_pct" in metrics_dict:
+                    nifty_change = metrics_dict["nifty_change_pct"]
+                if "nifty_below_vwap" in metrics_dict:
+                    nifty_below_vwap = metrics_dict["nifty_below_vwap"]
+
+            # If benchmark context wasn't passed directly, attempt in-memory quote cache lookup only (0ms, no network I/O)
+            if nifty_change is None:
+                try:
+                    from market.quotes import _QUOTE_CACHE, _quote_cache_lock
+
+                    with _quote_cache_lock:
+                        for k in ("NSE:NIFTY 50", "NIFTY 50", "NSE:NIFTY", "NIFTY"):
+                            if k in _QUOTE_CACHE:
+                                _, q_obj = _QUOTE_CACHE[k]
+                                n_ltp = float(
+                                    getattr(q_obj, "last_price", 0.0)
+                                    or getattr(q_obj, "ltp", 0.0)
+                                    or 0.0
+                                )
+                                n_vwap = float(getattr(q_obj, "vwap", 0.0) or 0.0)
+                                n_chg = float(getattr(q_obj, "change_pct", 0.0) or 0.0)
+                                if n_ltp > 0:
+                                    nifty_change = n_chg
+                                    nifty_below_vwap = (n_ltp < n_vwap) if n_vwap > 0 else (n_chg < 0)
+                                    break
+                except Exception:
+                    pass
+
+            if nifty_change is not None:
+                try:
+                    n_chg_f = float(nifty_change)
+                    is_nifty_markdown = (n_chg_f <= -0.35) and (nifty_below_vwap is not False)
+                    is_nifty_markup = (n_chg_f >= 0.40) and (nifty_below_vwap is False)
+
+                    # Defensive sector check (Pharma & FMCG can decouple during market sell-offs)
+                    sec_name = str(
+                        (
+                            metrics_dict.get("sector_name") or metrics_dict.get("sector")
+                            if isinstance(metrics_dict, dict)
+                            else ""
+                        )
+                        or getattr(alert, "sector_name", "")
+                        or getattr(alert, "sector", "")
+                    ).upper()
+                    rrg_quad = str(
+                        (
+                            metrics_dict.get("rrg_quadrant")
+                            if isinstance(metrics_dict, dict)
+                            else ""
+                        )
+                        or getattr(alert, "rrg_quadrant", "")
+                    ).upper()
+                    is_defensive_leader = any(
+                        d in sec_name for d in ("PHARMA", "FMCG", "HEALTH")
+                    ) and rrg_quad in ("LEADING", "IMPROVING")
+
+                    # Bullish equity alert during severe NIFTY markdown:
+                    if (
+                        direction in ("BULLISH", "LONG", "BUY")
+                        or (atype == "OPTIONS_MOMENTUM" and getattr(alert, "option_type", "") == "CE")
+                    ) and is_nifty_markdown:
+                        if not is_defensive_leader:
+                            flags["macro_regime_aligned"] = False
+                            return (
+                                False,
+                                f"Benchmark Gravitational Veto: NIFTY 50 in structural markdown ({n_chg_f:.2f}%, below VWAP). Bullish equity breakouts face >75% failure probability during market sell-offs. Mandate short/put setups or leading defensive decouplers.",
+                                flags,
+                            )
+
+                    # Bearish equity alert during strong NIFTY markup:
+                    if (
+                        direction in ("BEARISH", "SHORT", "SELL")
+                        or (atype == "OPTIONS_MOMENTUM" and getattr(alert, "option_type", "") == "PE")
+                    ) and is_nifty_markup:
+                        is_lagging_breakdown = rrg_quad == "LAGGING"
+                        if not is_lagging_breakdown:
+                            flags["macro_regime_aligned"] = False
+                            return (
+                                False,
+                                f"Benchmark Gravitational Veto: NIFTY 50 in strong structural markup (+{n_chg_f:.2f}%, above VWAP). Short equity breakdowns have high short-covering squeeze risk.",
+                                flags,
+                            )
+                except (ValueError, TypeError):
+                    pass
+        flags["macro_regime_aligned"] = True
+
+        # 15. 3-Bar Parabolic Velocity / Climax Acceleration Gate (Anti-FOMO):
+        # Disallow market chasing at the absolute tip of a vertical 3-bar blow-off
+        move_3b = None
+        if isinstance(metrics_dict, dict):
+            move_3b = metrics_dict.get("move_3b_atr") or metrics_dict.get("climax_velocity_atr")
+        if move_3b is None and hasattr(alert, "move_3b_atr"):
+            move_3b = getattr(alert, "move_3b_atr", None)
+
+        if move_3b is not None:
+            try:
+                m_val = float(move_3b)
+                if m_val > 2.0:
+                    flags["velocity_sustainable"] = False
+                    return (
+                        False,
+                        f"Parabolic Velocity Climax: Asset expanded {m_val:.1f}x ATR over last 3 bars without consolidation. Disallow market chase; mandate limit order on 20-EMA/VWAP pullback.",
+                        flags,
+                    )
+            except (ValueError, TypeError):
+                pass
+        flags["velocity_sustainable"] = True
+
+        # 16. Intraday Sector Relative Performance / Breadth Sanity Gate:
+        # When a stock triggers a bullish signal, but its parent sector is experiencing an intraday dump
+        # (intraday_sector_rs <= -1.0% vs NIFTY), individual equity breakouts face severe sector drag.
+        # Conversely, when an alert triggers a short/put breakdown, but the parent sector is exploding higher
+        # (intraday_sector_rs >= +1.2% vs NIFTY), shorting faces high squeeze risk.
+        if not is_index and not is_commodity_or_curr:
+            sec_rs = None
+            if isinstance(metrics_dict, dict):
+                sec_rs = (
+                    metrics_dict.get("intraday_sector_rs")
+                    or metrics_dict.get("sector_rs")
+                    or metrics_dict.get("sector_relative_strength_intraday")
+                )
+                if sec_rs is None and "sector_tailwind" in metrics_dict:
+                    st = metrics_dict["sector_tailwind"]
+                    if isinstance(st, dict):
+                        sec_rs = st.get("intraday_rs")
+                    elif hasattr(st, "intraday_rs"):
+                        sec_rs = getattr(st, "intraday_rs", None)
+
+            if sec_rs is None and hasattr(alert, "intraday_sector_rs"):
+                sec_rs = getattr(alert, "intraday_sector_rs", None)
+
+            if sec_rs is not None:
+                try:
+                    sec_rs_f = float(sec_rs)
+                    opt_type = str(
+                        getattr(alert, "option_type", "")
+                        or (alert.get("option_type", "") if isinstance(alert, dict) else "")
+                    ).upper()
+                    is_put_opt = atype == "OPTIONS_MOMENTUM" and opt_type == "PE"
+                    is_call_opt = atype == "OPTIONS_MOMENTUM" and opt_type == "CE"
+
+                    # Bullish equity / Call option into severe sector liquidation:
+                    if (
+                        direction in ("BULLISH", "LONG", "BUY") or is_call_opt
+                    ) and not is_put_opt:
+                        if sec_rs_f <= -1.0:
+                            flags["sector_aligned"] = False
+                            return (
+                                False,
+                                f"Intraday Sector Drag Veto: Parent sector lagging NIFTY by {abs(sec_rs_f):.2f}% intraday (institutional sector liquidation). Disallow long breakout into heavy sector drag.",
+                                flags,
+                            )
+                    # Bearish equity / Put option into surging sector momentum:
+                    elif (
+                        direction in ("BEARISH", "SHORT", "SELL") or is_put_opt
+                    ) and not is_call_opt:
+                        if sec_rs_f >= 1.2:
+                            flags["sector_aligned"] = False
+                            return (
+                                False,
+                                f"Intraday Sector Tailwind Veto: Parent sector outperforming NIFTY by +{sec_rs_f:.2f}% intraday (strong institutional bid). Disallow short breakdown into surging sector tailwinds.",
+                                flags,
+                            )
+                except (ValueError, TypeError):
+                    pass
+        flags["sector_aligned"] = True
 
         return True, "", flags
 
