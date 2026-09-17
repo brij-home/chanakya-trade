@@ -1304,6 +1304,48 @@ async def skill_morning_brief():
         raise _err(str(e))
 
 
+class EODReportRequest(BaseModel):
+    date: Optional[str] = None
+    dispatch_telegram: bool = False
+    chat_id: Optional[str] = None
+
+
+@router.get("/eod_report")
+@router.post("/eod_report")
+async def skill_eod_report(req: Optional[EODReportRequest] = None):
+    """
+    Comprehensive End-Of-Day (EOD) institutional post-market audit report.
+    Pillars: Scorecard & What Went Well, What Went Bad & RCA, What Could Have Been Better,
+             Algorithmic Improvements, and Tomorrow's Strategic Recommendations.
+    """
+    try:
+        import asyncio
+        from engine.eod_report_generator import EODReportGenerator
+
+        target_date = req.date if req else None
+        dispatch = req.dispatch_telegram if req else False
+        chat_id = req.chat_id if req else None
+
+        def _generate():
+            gen = EODReportGenerator()
+            rep = gen.generate(target_date)
+            json_p, md_p = gen.save_to_disk(rep)
+            dispatched = False
+            if dispatch:
+                dispatched = gen.dispatch_to_telegram(rep, chat_id=chat_id)
+            return rep.to_dict(), str(md_p), dispatched
+
+        data, md_file, dispatched = await asyncio.to_thread(_generate)
+        return {
+            "status": "ok",
+            "data": data,
+            "markdown_path": md_file,
+            "telegram_dispatched": dispatched,
+        }
+    except Exception as e:
+        raise _err(str(e))
+
+
 @router.post("/chat")
 async def skill_chat(req: ChatRequest):
     """

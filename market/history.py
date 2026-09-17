@@ -121,21 +121,42 @@ def get_ohlcv(
 
     # Normalize interval alias
     kite_interval = INTERVAL_MAP.get(interval, interval)
-    clean_sym = symbol.upper().replace(".NS", "").replace("NSE:", "").strip()
+    clean_sym = symbol.upper().replace(".NS", "").replace("NSE:", "").replace("BSE:", "").strip()
     effective_to = as_of or to_date
     cutoff_key = effective_to.strftime("%Y%m%d%H%M%S") if effective_to else "latest"
     cache_key = f"{clean_sym}_{exchange.upper()}_{kite_interval}_{days}_{cutoff_key}_{int(include_live_candle)}"
+    norm_intraday_key = f"{clean_sym}_{exchange.upper()}_{kite_interval}_intraday_norm"
     now_ts = time.time()
 
     # Tier 1: Instant In-Memory DataFrame Cache (0.1ms latency)
     ttl_limit = _DF_TTL_SECONDS if kite_interval == "day" else _INTRADAY_TTL_SECONDS
     if not from_date and not to_date:
         with _df_memory_cache_lock:
+            # 1a. Check exact cache key
             if cache_key in _df_memory_cache:
                 stored_ts, cached_df = _df_memory_cache[cache_key]
                 if now_ts - stored_ts < ttl_limit and not cached_df.empty:
                     _df_memory_cache.move_to_end(cache_key)
                     return cached_df.copy()
+            # 1b. Check normalized intraday cache key (shares 5d slice across Squeeze, ORB, Options Momentum)
+            if kite_interval != "day" and norm_intraday_key in _df_memory_cache:
+                stored_ts, master_df = _df_memory_cache[norm_intraday_key]
+                if now_ts - stored_ts < ttl_limit and not master_df.empty:
+                    _df_memory_cache.move_to_end(norm_intraday_key)
+                    # Slice for requested days with timezone-aware compatibility
+                    cutoff_dt = pd.Timestamp(now_ts - days * 86400, unit="s")
+                    if getattr(master_df.index, "tz", None) is not None:
+                        cutoff_dt = cutoff_dt.tz_localize("UTC").tz_convert(master_df.index.tz)
+                    try:
+                        sliced = master_df.loc[master_df.index >= cutoff_dt]
+                    except Exception:
+                        sliced = master_df.iloc[-min(len(master_df), max(15, days * 75)):]
+                    if sliced.empty:
+                        sliced = master_df.iloc[-min(len(master_df), max(15, days * 75)):]
+                    res_df = sliced.copy()
+                    if include_live_candle:
+                        res_df = inject_live_tick(res_df, symbol=symbol, exchange=exchange, interval=kite_interval)
+                    return res_df
 
     to_date = effective_to or datetime.now()
     from_date = from_date or (to_date - timedelta(days=days))
@@ -329,6 +350,8 @@ def get_ohlcv(
             while len(_df_memory_cache) >= MAX_MEMORY_DFS:
                 _df_memory_cache.popitem(last=False)
             _df_memory_cache[cache_key] = (now_ts, df.copy())
+            if kite_interval != "day" and days >= 2:
+                _df_memory_cache[norm_intraday_key] = (now_ts, df.copy())
 
     return df
 
@@ -509,6 +532,10 @@ def load_ohlcv_cache(key: str) -> tuple[list, None]:
     return load_cache(key)
 
 
+_YF_BACKOFF: dict[str, float] = {}  # ticker -> backoff_until_timestamp
+_YF_BACKOFF_LOCK = threading.Lock()
+
+
 def _yfinance_fallback(
     symbol: str,
     exchange: str,
@@ -516,20 +543,35 @@ def _yfinance_fallback(
     from_date: datetime,
     to_date: datetime,
 ) -> list[dict]:
-    """Try yfinance for real market data when broker API is unavailable."""
+    """Try yfinance for real market data when broker API is unavailable, with 429 rate-limit backoff."""
+    sym_key = f"{exchange}:{symbol}:{interval}".upper()
+    now = time.time()
+    with _YF_BACKOFF_LOCK:
+        if _YF_BACKOFF.get(sym_key, 0.0) > now:
+            return []
+
     try:
         from market.yfinance_provider import yf_get_ohlcv, yf_available
 
         if not yf_available():
             return []
-        return yf_get_ohlcv(
+        res = yf_get_ohlcv(
             symbol=symbol,
             exchange=exchange,
             interval=interval,
             from_date=from_date,
             to_date=to_date,
         )
+        if not res:
+            with _YF_BACKOFF_LOCK:
+                _YF_BACKOFF[sym_key] = now + 30.0  # 30s cooldown on empty/rate-limited response
+        else:
+            with _YF_BACKOFF_LOCK:
+                _YF_BACKOFF.pop(sym_key, None)
+        return res
     except Exception:
+        with _YF_BACKOFF_LOCK:
+            _YF_BACKOFF[sym_key] = now + 45.0
         return []
 
 

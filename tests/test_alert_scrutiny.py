@@ -190,6 +190,7 @@ def test_tier2_fast_llm_approval(auditor: AlertScrutinyAuditor):
         trigger_level=13550.0,
         stop_loss=13680.0,  # 130 pts risk
         target_level=13100.0,  # 450 pts reward (1:3.4 R:R)
+        metrics={"atr": 120.0},
         is_live=True,
         environment="LIVE",
     )

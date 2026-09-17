@@ -1001,8 +1001,8 @@ def calculate_option_execution_plan(
 
     if option_ltp > 0:
         if tf == "INTRADAY":
-            # Cap maximum intraday option drawdown at -15.0%
-            disciplined_sl_floor = round(max(0.05, option_ltp * 0.85), 2)
+            # Cap maximum intraday option drawdown at -28.0% (Greeks-anchored floor, preventing spread/whipsaw stops)
+            disciplined_sl_floor = round(max(0.05, option_ltp * 0.72), 2)
             sl_prem = max(raw_sl_prem, disciplined_sl_floor)
         elif tf == "SWING_SHORT":
             # Cap swing short (2-5 days) option drawdown at -28.0%
@@ -1019,6 +1019,7 @@ def calculate_option_execution_plan(
         sl_prem = raw_sl_prem
 
     opt_risk = max(0.20, option_ltp - sl_prem)
+    t0_5_prem = round(max(option_ltp + opt_risk, option_ltp * 1.16), 2) if option_ltp > 0 else None
     raw_t1_prem = _option_price_at_spot(trade_plan.target_1, bars_elapsed=trade_plan.expected_bars_t1)
     raw_t2_prem = _option_price_at_spot(trade_plan.target_2, bars_elapsed=trade_plan.expected_bars_t2)
     raw_t3_prem = (
@@ -1030,7 +1031,8 @@ def calculate_option_execution_plan(
     if option_ltp > 0:
         if tf == "INTRADAY":
             # For INTRADAY options:
-            # T1 realistic gain: +18% to +28% (scale 50% & SL to Cost)
+            # T0.5 Scalp Scale-Out / Breakeven Milestone (+1.0R / +16%)
+            # T1 realistic gain: +20% to +28% (scale 50% & SL to Cost)
             # T2 realistic gain: +35% to +50%
             # T3 runner: +65% to +85%
             t1_prem = max(round(option_ltp + (1.6 * opt_risk), 2), min(raw_t1_prem, round(option_ltp * 1.28, 2)))
@@ -1104,6 +1106,9 @@ def calculate_option_execution_plan(
         "sl_premium": sl_prem,
         "sl_pnl_per_lot": sl_pnl,
         "sl_pct": round(((sl_prem - option_ltp) / option_ltp) * 100, 1) if option_ltp > 0 else None,
+        # T0.5 (Scalp Scale-1 / Breakeven Milestone)
+        "t0_5_premium": t0_5_prem,
+        "t0_5_pct": round(((t0_5_prem - option_ltp) / option_ltp) * 100, 1) if (t0_5_prem and option_ltp > 0) else None,
         # T1
         "t1_spot": spot_t1,
         "t1_premium": t1_prem,

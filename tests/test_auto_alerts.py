@@ -680,9 +680,16 @@ def test_put_option_target_and_trailing():
         option_premium=16.55,
     )
 
-    # Option premium at 20.6 (positive return, but below T1) -> holds stop
-    res_hold = evaluate_alert_targets_and_trailing(alert, current_ltp=20.6)
+    # Option premium at 17.5 (small gain, below T0.5) -> holds stop
+    res_hold = evaluate_alert_targets_and_trailing(alert, current_ltp=17.5)
     assert res_hold is None or res_hold.new_milestone is None
+
+    # Option premium at 20.6 (+24.5% gain, +0.7R) -> hits T0.5 (Scale 1 / Breakeven Trail)
+    res_t0_5 = evaluate_alert_targets_and_trailing(alert, current_ltp=20.6)
+    assert res_t0_5 is not None
+    assert res_t0_5.new_milestone == "T0_5_ACHIEVED"
+    assert res_t0_5.should_trail is True
+    assert res_t0_5.trailing_decision == "SCALE_35_TRAIL_BREAKEVEN"
 
     # Option premium expands to 27.0 -> reaches T1
     res_t1 = evaluate_alert_targets_and_trailing(alert, current_ltp=27.0)
@@ -2157,9 +2164,15 @@ def test_options_target_1_and_target_2_keys_parsed_correctly():
         },
     )
 
-    # Below Target 1 (e.g. 40.00): MUST NOT trigger T1_ACHIEVED
-    res_sub = evaluate_alert_targets_and_trailing(alert, current_ltp=40.00)
+    # Below Target 0.5 (e.g. 32.00): MUST NOT trigger any milestone
+    res_sub = evaluate_alert_targets_and_trailing(alert, current_ltp=32.00)
     assert res_sub is None or res_sub.new_milestone is None
+
+    # Between T0.5 and T1 (40.00): triggers T0_5_ACHIEVED, MUST NOT trigger T1_ACHIEVED
+    res_t0_5 = evaluate_alert_targets_and_trailing(alert, current_ltp=40.00)
+    assert res_t0_5 is not None
+    assert res_t0_5.new_milestone == "T0_5_ACHIEVED"
+    assert res_t0_5.new_milestone != "T1_ACHIEVED"
 
     # At Target 1 (45.80): MUST trigger T1_ACHIEVED with breakeven stop at 30.61
     res_t1 = evaluate_alert_targets_and_trailing(alert, current_ltp=45.80)
@@ -2231,6 +2244,7 @@ def test_record_alert_active_trade_immutable(tmp_path, monkeypatch):
         option_premium=18.25,
         is_live=True,
         environment="LIVE",
+        expiry_date="2026-09-24",
         metrics={"vol_oi_ratio": 5.0, "oi": 25000},
     )
     recorded = engine.record_alert(initial_alert)
@@ -2257,6 +2271,7 @@ def test_record_alert_active_trade_immutable(tmp_path, monkeypatch):
         confidence=95,  # higher confidence
         is_live=True,
         environment="LIVE",
+        expiry_date="2026-09-24",
         metrics={"vol_oi_ratio": 15.0, "oi": 30000},
     )
     result = engine.record_alert(alternate_alert)

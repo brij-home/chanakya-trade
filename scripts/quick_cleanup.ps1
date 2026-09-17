@@ -5,12 +5,26 @@ Write-Host "=======================================================" -Foreground
 Write-Host "   Antigravity IDE & AI Agent Quick Environment Cleanup" -ForegroundColor Cyan
 Write-Host "=======================================================" -ForegroundColor Cyan
 
-# 1. Terminate orphaned headless Python/pytest/uvicorn and Electron/Vite worker processes
-$currentPid = $PID
-$killedCount = 0
-
+# 1. Immediately release stale local socket bindings & locks on ports 8765 and 5173 (< 30ms)
 try {
-    $zombieProcs = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | 
+    $ports = @(8765, 5173)
+    foreach ($targetPort in $ports) {
+        $portProcs = Get-NetTCPConnection -LocalPort $targetPort -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique
+        foreach ($p in $portProcs) {
+            if ($p -and $p -ne 0 -and $p -ne $currentPid) {
+                Stop-Process -Id $p -Force -ErrorAction SilentlyContinue
+                Write-Host " [+] Released stuck port $targetPort listener (PID $p)" -ForegroundColor Yellow
+            }
+        }
+    }
+} catch {
+    # Non-admin or no active listener
+}
+
+# 2. Terminate orphaned headless Python/pytest/uvicorn and Electron/Vite worker processes using WQL filter (0.18s vs 31s)
+try {
+    $wqlFilter = "Name = 'python.exe' OR Name = 'node.exe' OR Name = 'electron.exe' OR Name = 'cmd.exe'"
+    $zombieProcs = Get-CimInstance Win32_Process -Filter $wqlFilter -ErrorAction SilentlyContinue | 
         Where-Object { 
             $_.ProcessId -ne $currentPid -and (
                 (($_.Name -match "python|pytest|uvicorn|electron") -and
@@ -37,22 +51,6 @@ if ($killedCount -eq 0) {
     Write-Host " [v] No orphaned Python/uvicorn/Electron/Vite processes found." -ForegroundColor Green
 } else {
     Write-Host " [v] Successfully purged $killedCount orphaned worker process(es)." -ForegroundColor Green
-}
-
-# 2. Release stale local socket bindings & locks on ports 8765 and 5173 if stuck
-try {
-    $ports = @(8765, 5173)
-    foreach ($targetPort in $ports) {
-        $portProcs = Get-NetTCPConnection -LocalPort $targetPort -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique
-        foreach ($p in $portProcs) {
-            if ($p -and $p -ne 0 -and $p -ne $currentPid) {
-                Stop-Process -Id $p -Force -ErrorAction SilentlyContinue
-                Write-Host " [+] Released stuck port $targetPort listener (PID $p)" -ForegroundColor Yellow
-            }
-        }
-    }
-} catch {
-    # Non-admin or no active listener
 }
 
 # 3. Clean temporary pytest and analysis caches

@@ -269,6 +269,7 @@ class TestInFlightDecayAlerts:
             created_at=twenty_mins_ago,
             original_call_time=twenty_mins_ago,
             confidence=88,
+            expiry_date="2026-09-24",
         )
         # Option bought at 100 is now trading at 96 after 20 mins (-4% P&L)
         eval_res = evaluate_alert_in_flight_decay(alert, current_ltp=96.0)

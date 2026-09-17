@@ -86,6 +86,23 @@ def evaluate_alert_invalidation(
                     max(0.10, min(1.0, alert.stop_loss * 0.025)) if alert.stop_loss > 0 else 0.10
                 )
                 if current_ltp < (alert.stop_loss - opt_noise_margin):
+                    # Dual Validation Guard against Noise & Spread Whipsaws:
+                    # If underlying spot support is known (e.g. spot_invalidation_anchor) and underlying
+                    # spot price is still holding above support (for CE) or below support (for PE),
+                    # suppress premature invalidation unless option drawdown has genuinely breached the -28% risk floor.
+                    metrics_dict = alert.metrics if isinstance(alert.metrics, dict) else {}
+                    spot_anchor = metrics_dict.get("spot_invalidation_anchor")
+                    underlying_spot = alert.underlying_spot or metrics_dict.get("spot")
+                    opt_entry = alert.option_premium or alert.trigger_level or 0.0
+
+                    if spot_anchor and underlying_spot and opt_entry > 0:
+                        is_ce = (alert.option_type == "CE" or alert.direction == "BULLISH")
+                        spot_holding = (underlying_spot >= spot_anchor) if is_ce else (underlying_spot <= spot_anchor)
+                        opt_drawdown = (opt_entry - current_ltp) / opt_entry if opt_entry > 0 else 0.0
+                        if spot_holding and opt_drawdown < 0.28:
+                            # Underlying structure is completely intact! Suppress premature stop-out.
+                            return None
+
                     opt_desc = (
                         "Call"
                         if (alert.option_type == "CE" or alert.direction == "BULLISH")
@@ -145,8 +162,11 @@ def evaluate_alert_invalidation(
                 f"(LTP ₹{current_ltp:,.1f}). Squeeze compression lost momentum."
             )
         sma20 = alert.metrics.get("sma20") if alert.metrics else None
-        if sma20 and current_ltp < sma20:
-            return f"Price broke down below 20-SMA base support ₹{sma20:,.1f} (LTP ₹{current_ltp:,.1f}). Squeeze invalidated."
+        if sma20:
+            # Add dynamic noise margin (minimum 0.08% or 0.20 pts) to prevent single-tick 20-paise invalidations on indices
+            sma_noise_margin = max(0.20, sma20 * 0.0008)
+            if current_ltp < (sma20 - sma_noise_margin):
+                return f"Price broke down below 20-SMA base support ₹{sma20:,.1f} (LTP ₹{current_ltp:,.1f}). Squeeze invalidated."
 
     elif alert.alert_type == "CIRCUIT_WARNING":
         upper_circuit = alert.trigger_level or (
@@ -369,6 +389,7 @@ def evaluate_alert_targets_and_trailing(
         r_multiple = pnl_pts / initial_risk
 
     # Target levels resolution
+    plan_t0_5 = None
     plan_t1 = None
     plan_t2 = None
     plan_t3 = None
@@ -376,6 +397,8 @@ def evaluate_alert_targets_and_trailing(
         if is_option:
             opt_plan = plan.get("option_plan")
             if isinstance(opt_plan, dict):
+                if opt_plan.get("t0_5_premium"):
+                    plan_t0_5 = float(opt_plan["t0_5_premium"])
                 if opt_plan.get("t1_premium"):
                     plan_t1 = float(opt_plan["t1_premium"])
                 if opt_plan.get("t2_premium"):
@@ -385,12 +408,19 @@ def evaluate_alert_targets_and_trailing(
 
         trade_plan = plan.get("trade_plan")
         if isinstance(trade_plan, dict):
+            if trade_plan.get("target_0_5") and not plan_t0_5:
+                plan_t0_5 = float(trade_plan["target_0_5"])
             if trade_plan.get("target_1") and not plan_t1:
                 plan_t1 = float(trade_plan["target_1"])
             if trade_plan.get("target_2") and not plan_t2:
                 plan_t2 = float(trade_plan["target_2"])
             if trade_plan.get("target_3") and not plan_t3:
                 plan_t3 = float(trade_plan["target_3"])
+
+        if "target_0_5" in plan and not plan_t0_5:
+            m_t0_5 = re.search(r"[\d,]+(?:\.\d+)?", str(plan["target_0_5"]))
+            if m_t0_5:
+                plan_t0_5 = float(m_t0_5.group(0).replace(",", ""))
 
         if "target_1" in plan and not plan_t1:
             m_t1 = re.search(r"[\d,]+(?:\.\d+)?", str(plan["target_1"]))
@@ -413,6 +443,8 @@ def evaluate_alert_targets_and_trailing(
 
     # Sanity filter for options to prevent spot price pollution
     if is_option and entry > 0:
+        if plan_t0_5 and plan_t0_5 > entry * 10:
+            plan_t0_5 = None
         if plan_t1 and plan_t1 > entry * 10:
             plan_t1 = None
         if plan_t2 and plan_t2 > entry * 10:
@@ -464,6 +496,23 @@ def evaluate_alert_targets_and_trailing(
         if target_final < entry:
             t1_level = max(t1_level, round(entry - (entry - target_final) * 0.5, 2))
 
+    t0_5_level = plan_t0_5
+    if not t0_5_level:
+        if is_option and entry > 0:
+            t0_5_level = round(entry * 1.16 if is_bullish else max(0.05, entry * 0.84), 2)
+        elif is_bullish:
+            t0_5_level = round(entry + (initial_risk * 1.0), 2)
+        else:
+            t0_5_level = round(entry - (initial_risk * 1.0), 2)
+
+    # Ensure t0_5_level sits strictly between entry and t1_level
+    if is_bullish:
+        if not (entry < t0_5_level < t1_level):
+            t0_5_level = round(entry + (t1_level - entry) * 0.5, 2) if t1_level > entry else None
+    else:
+        if not (t1_level < t0_5_level < entry):
+            t0_5_level = round(entry - (entry - t1_level) * 0.5, 2) if t1_level < entry else None
+
     t2_level = plan_t2
     if not t2_level and target_final != t1_level:
         if is_bullish and target_final > t1_level:
@@ -487,19 +536,23 @@ def evaluate_alert_targets_and_trailing(
             is_final_hit = False
             is_t2_hit = False
             is_t1_hit = False
+            is_t0_5_hit = False
         else:
             is_final_hit = current_ltp >= target_final
             is_t2_hit = bool(t2_level and current_ltp >= t2_level and t2_level > t1_level)
             is_t1_hit = current_ltp >= t1_level
+            is_t0_5_hit = bool(t0_5_level and current_ltp >= t0_5_level and t0_5_level < t1_level)
     else:
         if current_ltp >= entry or pnl_pts <= 0 or t1_level >= entry:
             is_final_hit = False
             is_t2_hit = False
             is_t1_hit = False
+            is_t0_5_hit = False
         else:
             is_final_hit = current_ltp <= target_final
             is_t2_hit = bool(t2_level and current_ltp <= t2_level and t2_level < t1_level)
             is_t1_hit = current_ltp <= t1_level
+            is_t0_5_hit = bool(t0_5_level and current_ltp <= t0_5_level and t0_5_level > t1_level)
 
     # Exchange High/Low & Dirty Tick Sanity Filter:
     # Discard unverified phantom spikes where current_ltp violates the day's exchange high/low.
@@ -672,7 +725,41 @@ def evaluate_alert_targets_and_trailing(
             is_superperforming=is_superperforming,
         )
 
-    # 3. Trailing Stop Ratchet Higher (Dynamic Trail)
+    # 4. Target 0.5 (T0.5 / Scale 1) Check - De-risks trades early at +1.0R / +16%
+    if (
+        is_t0_5_hit
+        and pnl_pts > 0
+        and r_multiple >= 0.4
+        and "T0_5_ACHIEVED" not in achieved
+        and "T1_ACHIEVED" not in achieved
+        and "T2_ACHIEVED" not in achieved
+        and "TARGET_ACHIEVED" not in achieved
+    ):
+        be_stop = round(entry * 1.002 if is_bullish else entry * 0.998, 2)
+        rec_stop = be_stop
+        locked_pts = abs(rec_stop - entry)
+        locked_pct = 0.2
+        next_tgt = t1_level or target_final
+        rationale = (
+            f"Target 0.5 (Scale 1) reached at ₹{current_ltp:,.2f} (+{pnl_pct:.1f}%, +{r_multiple:.1f}R). "
+            f"DECISION: SCALE 35% PARTIAL PROFIT & TRAIL STOP-LOSS TO BREAKEVEN (₹{rec_stop:,.2f}). "
+            f"Trade is now de-risked to 100% free trade. Hold remaining 65% runner for Target 1 (₹{next_tgt:,.2f})."
+        )
+        return TargetTrailingEvaluation(
+            new_milestone="T0_5_ACHIEVED",
+            target_status="T0_5_ACHIEVED",
+            should_trail=True,
+            trailing_decision="SCALE_35_TRAIL_BREAKEVEN",
+            recommended_stop=rec_stop,
+            trailing_rationale=rationale,
+            locked_profit_pts=round(locked_pts, 2),
+            locked_profit_pct=locked_pct,
+            r_multiple=round(r_multiple, 2),
+            pnl_pct=round(pnl_pct, 2),
+            is_superperforming=is_superperforming,
+        )
+
+    # 5. Trailing Stop Ratchet Higher (Dynamic Trail)
     if (
         getattr(alert, "should_trail", False)
         and getattr(alert, "trailing_stop", None)
@@ -1011,25 +1098,31 @@ def evaluate_alert_in_flight_decay(
             # Detect 0DTE (Same-Day Expiry) status
             is_0dte = False
             clean_sym = str(getattr(alert, "symbol", "")).upper()
-            if (
-                clean_sym in INDEX_WEEKLY_EXPIRY_WEEKDAY
-                and INDEX_WEEKLY_EXPIRY_WEEKDAY[clean_sym] == now_dt.weekday()
-            ):
-                is_0dte = True
-            elif getattr(alert, "dte", None) == 0 or getattr(alert, "is_0dte", False):
-                is_0dte = True
-            else:
-                exp_raw = getattr(alert, "expiry_date", None) or (
-                    alert.metrics.get("expiry_date") if isinstance(alert.metrics, dict) else None
-                )
-                if exp_raw:
-                    for fmt in ("%Y-%m-%d", "%d-%b-%Y", "%d%b%Y"):
-                        try:
-                            if datetime.strptime(str(exp_raw).strip(), fmt).date() == now_dt.date():
-                                is_0dte = True
-                                break
-                        except ValueError:
-                            pass
+            exp_type = str(getattr(alert, "expiry_type", "")).upper()
+            exp_raw = getattr(alert, "expiry_date", None) or (
+                alert.metrics.get("expiry_date") if isinstance(alert.metrics, dict) else None
+            )
+            has_future_exp = False
+            if exp_raw:
+                for fmt in ("%Y-%m-%d", "%d-%b-%Y", "%d%b%Y"):
+                    try:
+                        exp_d = datetime.strptime(str(exp_raw).strip(), fmt).date()
+                        if exp_d == now_dt.date():
+                            is_0dte = True
+                        elif exp_d > now_dt.date():
+                            has_future_exp = True
+                        break
+                    except ValueError:
+                        pass
+
+            if not is_0dte and not has_future_exp and exp_type != "MONTHLY":
+                if (
+                    clean_sym in INDEX_WEEKLY_EXPIRY_WEEKDAY
+                    and INDEX_WEEKLY_EXPIRY_WEEKDAY[clean_sym] == now_dt.weekday()
+                ):
+                    is_0dte = True
+                elif getattr(alert, "dte", None) == 0 or getattr(alert, "is_0dte", False):
+                    is_0dte = True
 
             # Dynamic Greeks-Aware Decay Horizon
             # On 0DTE after 13:30 IST, gamma flip and rapid theta acceleration demand an 8-minute exit window.
@@ -1047,7 +1140,10 @@ def evaluate_alert_in_flight_decay(
                 stagnation_threshold_secs = 900.0  # 15 minutes
                 decay_profile = "THETA_STAGNATION"
 
-            if elapsed_secs >= stagnation_threshold_secs and pnl_pct <= 0.0:
+            max_gain = float(getattr(alert, "max_potential_gain_pct", 0.0) or 0.0)
+            pnl_stagnant = (pnl_pct <= 0.0) if is_0dte else (pnl_pct <= -2.0)
+
+            if elapsed_secs >= stagnation_threshold_secs and pnl_stagnant and max_gain < 10.0:
                 elapsed_mins = int(elapsed_secs // 60)
                 extra_vwap = ""
                 if (

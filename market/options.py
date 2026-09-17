@@ -42,6 +42,85 @@ _SNAPSHOT_CACHE: dict[str, tuple[float, tuple[list[OptionsContract], Optional[fl
 _SNAPSHOT_LOCK = threading.Lock()
 _SNAPSHOT_TTL = 3.0  # 3.0-second coalescing cache
 
+_STRIKE_BASELINE_OI: dict[str, int] = {}
+_BASELINE_DATE: Optional[str] = None
+_BASELINE_LOCK = threading.Lock()
+
+
+def enrich_options_chain_deltas(
+    chain: list[OptionsContract],
+    underlying: str,
+    expiry: Optional[str] = None,
+) -> list[OptionsContract]:
+    """
+    Enriches option contracts with real-time Open Interest changes (ΔOI) and %ΔOI.
+    If broker returns 0 oi_change (e.g. m.Stock), this resolves:
+      1. Cross-enrichment from NSE v3 public option chain scraper (changeinOpenInterest).
+      2. Persistent session opening baseline delta: ΔOI = current_oi - baseline_oi.
+    """
+    if not chain:
+        return chain
+
+    clean_und = (
+        underlying.upper()
+        .replace("NSE:", "")
+        .replace("NFO:", "")
+        .replace("MCX:", "")
+        .replace("CDS:", "")
+        .strip()
+    )
+    from datetime import date
+
+    today_str = date.today().isoformat()
+
+    with _BASELINE_LOCK:
+        global _BASELINE_DATE
+        if _BASELINE_DATE != today_str:
+            _STRIKE_BASELINE_OI.clear()
+            _BASELINE_DATE = today_str
+
+    # 1. If broker returned 0 oi_change for all strikes, cross-enrich from NSE public API scraper
+    needs_enrichment = all(getattr(c, "oi_change", 0) == 0 for c in chain)
+
+    if needs_enrichment and clean_und not in (
+        "GOLD", "GOLDM", "SILVER", "SILVERM", "CRUDEOIL", "CRUDEOILM", "NATURALGAS", "COPPER", "ZINC", "ALUMINIUM"
+    ):
+        try:
+            from market.nse_scraper import nse_get_options_chain
+
+            nse_chain = nse_get_options_chain(clean_und, expiry)
+            if nse_chain:
+                nse_map = {(int(c.strike), c.option_type): c for c in nse_chain}
+                for c in chain:
+                    k = (int(c.strike), c.option_type)
+                    if k in nse_map:
+                        nse_c = nse_map[k]
+                        if nse_c.oi_change != 0:
+                            c.oi_change = nse_c.oi_change
+                            if hasattr(nse_c, "pchange_oi") and nse_c.pchange_oi:
+                                c.pchange_oi = nse_c.pchange_oi
+                        if not getattr(c, "iv", None) and getattr(nse_c, "iv", None):
+                            c.iv = nse_c.iv
+        except Exception:
+            pass
+
+    # 2. Baseline tracking fallback: calculate delta against session opening baseline
+    with _BASELINE_LOCK:
+        for c in chain:
+            b_key = f"{clean_und}_{c.expiry}_{int(c.strike)}_{c.option_type}"
+            c_oi = int(getattr(c, "oi", 0) or 0)
+            if c_oi > 0:
+                if b_key not in _STRIKE_BASELINE_OI:
+                    _STRIKE_BASELINE_OI[b_key] = c_oi
+                elif getattr(c, "oi_change", 0) == 0:
+                    delta = c_oi - _STRIKE_BASELINE_OI[b_key]
+                    c.oi_change = delta
+                    base = _STRIKE_BASELINE_OI[b_key]
+                    if base > 0:
+                        c.pchange_oi = round((delta / base) * 100.0, 2)
+
+    return chain
+
 
 def get_options_chain(
     underlying: str,
@@ -88,6 +167,7 @@ def get_options_chain(
         chain = get_data_broker().get_options_chain(underlying, expiry)
         record_source("options", "broker")
         if chain and any(float(getattr(c, "last_price", 0.0) or 0.0) > 0 for c in chain):
+            chain = enrich_options_chain_deltas(chain, underlying, expiry)
             _CHAIN_CACHE[cache_key] = (now, chain)
             return chain
     except Exception as e:
@@ -116,6 +196,8 @@ def get_options_chain(
 
     # Tier 3: NSE public scraper for equities and indices
     chain = nse_get_options_chain(underlying, expiry)
+    if chain:
+        chain = enrich_options_chain_deltas(chain, underlying, expiry)
     record_source("options", "nse_scraper" if chain else "none")
     _CHAIN_CACHE[cache_key] = (now, chain or [])
     return chain or []
