@@ -1978,6 +1978,53 @@ async def api_status(request: Request):
     return _compute_status()
 
 
+# ── EOD Post-Market Reports ──────────────────────────────────────────────────
+
+
+@app.get("/api/reports/eod")
+async def api_get_eod_report(date: Optional[str] = None):
+    """Fetch structured EOD report for specified date (default today)."""
+    try:
+        from engine.eod_report_generator import EODReportGenerator
+
+        gen = EODReportGenerator()
+        rep = gen.generate(target_date=date)
+        _, md_p = gen.save_to_disk(rep)
+        return {
+            "status": "ok",
+            "data": rep.to_dict(),
+            "markdown_path": str(md_p),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/reports/eod/generate")
+async def api_generate_eod_report(
+    date: Optional[str] = None,
+    dispatch_telegram: bool = False,
+    chat_id: Optional[str] = None,
+):
+    """Force generate and optionally dispatch daily EOD report to Telegram."""
+    try:
+        from engine.eod_report_generator import EODReportGenerator
+
+        gen = EODReportGenerator()
+        rep = gen.generate(target_date=date)
+        _, md_p = gen.save_to_disk(rep)
+        dispatched = False
+        if dispatch_telegram:
+            dispatched = gen.dispatch_to_telegram(rep, chat_id=chat_id)
+        return {
+            "status": "ok",
+            "data": rep.to_dict(),
+            "markdown_path": str(md_p),
+            "telegram_dispatched": dispatched,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # ── Cache & Data Persistence Stats API ───────────────────────
 
 

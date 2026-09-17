@@ -1457,6 +1457,13 @@ def run_repl(broker: BrokerAPI) -> None:
 
                 brief_run(use_agent=True)
 
+            elif command in ("eod", "eod-report"):
+                from app.commands.eod import run as eod_run
+
+                target_dt = args[0] if (args and not args[0].startswith("-")) else None
+                wants_tg = "--telegram" in args or "-tg" in args
+                eod_run(target_date=target_dt, dispatch_telegram=wants_tg)
+
             elif command == "analyze":
                 from engine.output import parse_output_flags, handle_output_flags
 

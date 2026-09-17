@@ -319,6 +319,7 @@ async def cmd_start(update, context) -> None:
             "/analyze RELIANCE — full analysis (3-4 min)\n"
             "/deepanalyze RELIANCE — deep LLM analysis (7-10 min)\n"
             "/brief — morning market brief\n"
+            "/eod [DATE] — daily post-market audit (what went well, bad, RCA & tomorrow's gameplan)\n"
             "/conviction [SYMBOL] — 12-factor trade conviction score (0–100)\n"
             "/movers — daily top gainers & losers forensic autopsy\n"
             "/precursors — high-conviction coiling setups before breakout\n"
@@ -640,6 +641,35 @@ async def cmd_brief(update, context) -> None:
         )
     except Exception as e:
         await update.message.reply_text(f"Brief failed: {e}")
+
+
+async def cmd_eod(update, context) -> None:
+    """Handle /eod [date] — daily institutional post-market audit & strategic report."""
+    target_date = context.args[0].strip() if (context.args and len(context.args) > 0) else None
+    prompt_date = target_date or "today"
+    await update.message.reply_text(f"⏳ Generating Institutional EOD Report for {prompt_date}... Please wait.")
+    try:
+        loop = asyncio.get_running_loop()
+
+        def _run_eod():
+            from engine.eod_report_generator import EODReportGenerator
+
+            gen = EODReportGenerator()
+            rep = gen.generate(target_date)
+            gen.save_to_disk(rep)
+            return rep.to_telegram_chunks()
+
+        chunks = await loop.run_in_executor(None, _run_eod)
+        for chunk in chunks:
+            try:
+                await update.message.reply_text(chunk, parse_mode="HTML")
+            except Exception:
+                import re as _re
+
+                clean = _re.sub(r"<[^>]+>", "", chunk)
+                await update.message.reply_text(clean)
+    except Exception as e:
+        await update.message.reply_text(f"❌ Failed to generate EOD report: {e}")
 
 
 async def cmd_flows(update, context) -> None:
@@ -1891,6 +1921,7 @@ def run_bot() -> None:
     app.add_handler(CommandHandler("analyze", _track_command(cmd_analyze)))
     app.add_handler(CommandHandler("deepanalyze", _track_command(cmd_deepanalyze)))
     app.add_handler(CommandHandler("brief", _track_command(cmd_brief)))
+    app.add_handler(CommandHandler("eod", _track_command(cmd_eod)))
     app.add_handler(CommandHandler("conviction", _track_command(cmd_conviction)))
     app.add_handler(CommandHandler("movers", _track_command(cmd_movers)))
     app.add_handler(CommandHandler("precursors", _track_command(cmd_precursors)))

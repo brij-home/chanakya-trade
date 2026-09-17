@@ -60,6 +60,8 @@ def detect_gamma_blast(
     from engine.position_sizer import get_lot_size
 
     lot_sz = get_lot_size(underlying) or 1
+    is_bse = underlying.upper() in ("SENSEX", "BANKEX")
+    opt_exchange = "BFO" if is_bse else "NFO"
 
     ce_contracts = [c for c in chain if getattr(c, "option_type", "") == "CE"]
     pe_contracts = [c for c in chain if getattr(c, "option_type", "") == "PE"]
@@ -143,9 +145,17 @@ def detect_gamma_blast(
                     short_term_unwind = True
 
         has_gamma_pchange = (pchange >= 12.0 and volume >= (4000 if is_index else 200))
+        is_high_volume_expansion = (
+            vol_oi_ratio >= 1.8 and volume >= (8000 if is_index else 500) and pchange >= 4.5
+        )
         if c_oi_chg > 0 and c_oi_chg < min_abs_oi_change:
             continue
-        if c_oi_chg == 0 and not short_term_unwind and not has_gamma_pchange:
+        if (
+            c_oi_chg == 0
+            and not short_term_unwind
+            and not has_gamma_pchange
+            and not is_high_volume_expansion
+        ):
             continue
 
         is_oi_shedding = (
@@ -159,6 +169,7 @@ def detect_gamma_blast(
                 and vol_oi_ratio >= (0.30 if is_opening_drive else 0.8)
             )
             or (pchange >= 12.0 and volume >= (4000 if is_index else 200))
+            or is_high_volume_expansion
         )
         is_high_turnover = (
             vol_oi_ratio >= (0.35 if is_opening_drive else 1.4)
@@ -190,7 +201,7 @@ def detect_gamma_blast(
                     direction="BUY",
                     spot=spot,
                     timeframe="INTRADAY",
-                    exchange="NFO",
+                    exchange=opt_exchange,
                     has_active_blast=is_ignited,
                 )
 
@@ -200,7 +211,7 @@ def detect_gamma_blast(
                     )
                     continue
 
-                mkt_status = get_market_status("NFO")
+                mkt_status = get_market_status(opt_exchange)
                 lot_sz = get_lot_size(underlying)
                 opt_plan = (
                     calculate_option_execution_plan(
@@ -262,10 +273,10 @@ def detect_gamma_blast(
                 t3_premium = (
                     round(opt_ltp * 1.75, 1) if opt_ltp > 0 else round(strike * 0.035, 1)
                 )
-                sl_premium = round(max(0.05, opt_ltp * 0.85), 1) if opt_ltp > 0 else 1.0
+                sl_premium = round(max(0.05, opt_ltp * 0.72), 1) if opt_ltp > 0 else 1.0
                 rr_str = "1:1.7"
                 t1_pct_str = "+25%"
-                sl_pct_str = "-15%"
+                sl_pct_str = "-28%"
 
             headline = (
                 f"⚡ CALL GAMMA BLAST {stage.replace('_', ' ')}: {underlying} {int(strike)} CE"
@@ -321,7 +332,7 @@ def detect_gamma_blast(
                     alert_type="GAMMA_BLAST",
                     stage=stage,
                     symbol=underlying,
-                    exchange="NFO",
+                    exchange=opt_exchange,
                     direction="BULLISH",
                     headline=headline,
                     summary=summary,
@@ -347,6 +358,7 @@ def detect_gamma_blast(
                         "oi_change_pct": oi_chg_pct,
                         "volume": volume,
                         "vol_oi_ratio": vol_oi_ratio,
+                        "is_volume_expansion": is_high_volume_expansion,
                         "spot": spot,
                         "vwap": effective_vwap,
                         "spot_to_vwap_pct": round(
@@ -463,9 +475,17 @@ def detect_gamma_blast(
                     short_term_unwind = True
 
         has_gamma_pchange = (pchange >= 12.0 and volume >= (4000 if is_index else 200))
+        is_high_volume_expansion = (
+            vol_oi_ratio >= 1.8 and volume >= (8000 if is_index else 500) and pchange >= 4.5
+        )
         if c_oi_chg > 0 and c_oi_chg < min_abs_oi_change:
             continue
-        if c_oi_chg == 0 and not short_term_unwind and not has_gamma_pchange:
+        if (
+            c_oi_chg == 0
+            and not short_term_unwind
+            and not has_gamma_pchange
+            and not is_high_volume_expansion
+        ):
             continue
 
         is_oi_shedding = (
@@ -479,6 +499,7 @@ def detect_gamma_blast(
                 and vol_oi_ratio >= (0.30 if is_opening_drive else 0.8)
             )
             or (pchange >= 12.0 and volume >= (4000 if is_index else 200))
+            or is_high_volume_expansion
         )
         is_high_turnover = (
             vol_oi_ratio >= (0.35 if is_opening_drive else 1.4)
@@ -510,7 +531,7 @@ def detect_gamma_blast(
                     direction="SELL",
                     spot=spot,
                     timeframe="INTRADAY",
-                    exchange="NFO",
+                    exchange=opt_exchange,
                     has_active_blast=is_ignited,
                 )
 
@@ -520,7 +541,7 @@ def detect_gamma_blast(
                     )
                     continue
 
-                mkt_status = get_market_status("NFO")
+                mkt_status = get_market_status(opt_exchange)
                 lot_sz = get_lot_size(underlying)
                 opt_plan = (
                     calculate_option_execution_plan(
@@ -582,10 +603,10 @@ def detect_gamma_blast(
                 t3_premium = (
                     round(opt_ltp * 1.75, 1) if opt_ltp > 0 else round(strike * 0.035, 1)
                 )
-                sl_premium = round(max(0.05, opt_ltp * 0.85), 1) if opt_ltp > 0 else 1.0
+                sl_premium = round(max(0.05, opt_ltp * 0.72), 1) if opt_ltp > 0 else 1.0
                 rr_str = "1:1.7"
                 t1_pct_str = "+25%"
-                sl_pct_str = "-15%"
+                sl_pct_str = "-28%"
 
             headline = (
                 f"⚡ PUT GAMMA BLAST {stage.replace('_', ' ')}: {underlying} {int(strike)} PE"
@@ -641,7 +662,7 @@ def detect_gamma_blast(
                     alert_type="GAMMA_BLAST",
                     stage=stage,
                     symbol=underlying,
-                    exchange="NFO",
+                    exchange=opt_exchange,
                     direction="BEARISH",
                     headline=headline,
                     summary=summary,
@@ -667,6 +688,7 @@ def detect_gamma_blast(
                         "oi_change_pct": oi_chg_pct,
                         "volume": volume,
                         "vol_oi_ratio": vol_oi_ratio,
+                        "is_volume_expansion": is_high_volume_expansion,
                         "spot": spot,
                         "vwap": effective_vwap,
                         "spot_to_vwap_pct": round(

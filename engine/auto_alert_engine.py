@@ -70,6 +70,7 @@ from engine.detectors import (
     detect_squeeze_breakout,
     detect_circuit_proximity,
     detect_learned_pattern_coiling,
+    detect_opening_range_breakout,
 )
 
 
@@ -1483,6 +1484,100 @@ class AutoAlertEngine:
             self._dispatch(target_alert)
         return target_alert
 
+    # ── Early Warning Ignition Monitoring ───────────────────────
+
+    def check_and_ignite_early_warnings(
+        self, exchanges: Optional[list[str]] = None
+    ) -> list[AutoAlert]:
+        """
+        Scans all active EARLY_WARNING alerts against live market price to detect
+        when the price crosses the breakout/breakdown trigger level.
+        Transitions the alert to stage="IGNITED", updates headline/summary,
+        and dispatches high-priority breakout notifications.
+        """
+        ignited_alerts: list[AutoAlert] = []
+        exch_filter = {e.upper() for e in exchanges} if exchanges else None
+
+        with self._lock:
+            early_alerts = [
+                a
+                for a in self._alerts
+                if not a.is_invalidated
+                and a.stage == "EARLY_WARNING"
+                and not (a.environment == "TEST" or not a.is_live)
+                and (not exch_filter or (a.exchange or "NSE").upper() in exch_filter)
+            ]
+
+        for alert in early_alerts:
+            try:
+                is_opt_prem = is_alert_option_premium_level(alert)
+                if is_opt_prem:
+                    lookup_sym = alert.contract_symbol or (
+                        f"{alert.exchange}:{alert.symbol}"
+                        if ":" not in alert.symbol
+                        else alert.symbol
+                    )
+                else:
+                    lookup_sym = (
+                        f"{alert.exchange}:{alert.symbol}"
+                        if ":" not in alert.symbol
+                        else alert.symbol
+                    )
+                from market.quotes import get_ltp
+
+                cur_ltp = get_ltp(lookup_sym)
+                if not cur_ltp or cur_ltp <= 0:
+                    continue
+
+                trigger = float(alert.trigger_level or 0.0)
+                if trigger <= 0:
+                    continue
+
+                is_bullish = (alert.direction or "BULLISH").upper() == "BULLISH"
+                has_ignited = False
+
+                if is_bullish and cur_ltp >= trigger:
+                    has_ignited = True
+                elif not is_bullish and cur_ltp <= trigger:
+                    has_ignited = True
+
+                if has_ignited:
+                    with self._lock:
+                        now_str = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
+                        alert.stage = "IGNITED"
+                        alert.ltp = cur_ltp
+                        alert.updated_at = now_str
+                        alert.triggered_at = now_str
+                        env_tag = (
+                            "[TEST]"
+                            if (alert.environment == "TEST" or not alert.is_live)
+                            else "[REAL/LIVE]"
+                        )
+                        inst_label = alert.symbol
+                        if alert.contract_symbol:
+                            from bot.alert_templates import format_contract_display
+                            inst_label = format_contract_display(alert.contract_symbol)
+                        elif getattr(alert, "strike", None) and getattr(alert, "option_type", None):
+                            inst_label = f"{alert.symbol} {int(alert.strike)} {alert.option_type}".strip()
+
+                        dir_str = "BREAKOUT" if is_bullish else "BREAKDOWN"
+                        alert.headline = f"🔥 {env_tag} {dir_str} IGNITED: {inst_label} crossed ₹{trigger:,.1f} (LTP: ₹{cur_ltp:,.1f})"
+                        alert.summary = (
+                            f"Early warning coiling confirmed! {inst_label} triggered {dir_str.lower()} past ₹{trigger:,.1f}. "
+                            f"Live quote: ₹{cur_ltp:,.1f}. Invalidation SL: ₹{alert.stop_loss:,.1f} | Target 1: ₹{alert.target_level:,.1f}."
+                        )
+                        self._save()
+
+                    self._dispatch(alert)
+                    ignited_alerts.append(alert)
+                    logger.info(
+                        f"[AutoAlertEngine] Alert {alert.alert_id} IGNITED: {alert.symbol} crossed trigger {trigger} (LTP={cur_ltp})"
+                    )
+            except Exception as e:
+                logger.debug(f"[AutoAlertEngine] Early warning ignition check error for {alert.symbol}: {e}")
+
+        return ignited_alerts
+
     # ── Target & Trailing Monitoring & Alerting ─────────────────
 
     def check_and_alert_targets_and_trailing(
@@ -1495,6 +1590,9 @@ class AutoAlertEngine:
         Dispatches high-priority target & trailing alerts with strict deduplication.
         Optionally filters by list of active exchange names (e.g. ['NSE', 'NFO']).
         """
+        # First, check and ignite any pending early warnings that crossed trigger levels
+        self.check_and_ignite_early_warnings(exchanges=exchanges)
+
         updated_alerts: list[AutoAlert] = []
         now_ts = time.time()
         exch_filter = {e.upper() for e in exchanges} if exchanges else None
@@ -1573,7 +1671,7 @@ class AutoAlertEngine:
                         else "[REAL/LIVE]"
                     )
 
-                    if eval_res.new_milestone in ("T1_ACHIEVED", "T2_ACHIEVED", "TARGET_ACHIEVED"):
+                    if eval_res.new_milestone in ("T0_5_ACHIEVED", "T1_ACHIEVED", "T2_ACHIEVED", "TARGET_ACHIEVED"):
                         if eval_res.new_milestone not in alert.achieved_milestones:
                             alert.achieved_milestones.append(eval_res.new_milestone)
 
@@ -1603,6 +1701,9 @@ class AutoAlertEngine:
                     elif eval_res.new_milestone == "T1_ACHIEVED":
                         alert.stage = "T1_ACHIEVED"
                         alert.headline = f"🎯 {env_tag} TARGET 1 ACHIEVED: {inst_label} (₹{cur_disp_p:,.2f})"
+                    elif eval_res.new_milestone == "T0_5_ACHIEVED":
+                        alert.stage = "T0_5_ACHIEVED"
+                        alert.headline = f"🎯 {env_tag} TARGET 0.5 (SCALE 1) ACHIEVED: {inst_label} (₹{cur_disp_p:,.2f})"
                     elif eval_res.new_milestone == "TRAILING_UPDATE":
                         alert.last_trail_alert_time = now_ts
                         alert.stage = "TRAILING_UPDATE"
@@ -1698,9 +1799,6 @@ class AutoAlertEngine:
                     alert.summary = eval_res.summary
                     alert.trailing_decision = eval_res.coaching_decision
                     alert.pnl_pct = eval_res.pnl_pct
-                    self._dispatched_milestones.add(
-                        f"{alert.symbol}:{getattr(alert, 'alert_id', '')}:IN_FLIGHT_WARNING"
-                    )
                     self._save()
 
                 self._dispatch(alert)
@@ -2043,6 +2141,15 @@ class AutoAlertEngine:
 
     # ── Scanning Loops ──────────────────────────────────────────
 
+    def _resolve_index_exchange(self, sym: str) -> str:
+        """Resolves BSE for SENSEX/BANKEX, MCX for commodities, otherwise NSE."""
+        clean = sym.replace("NSE:", "").replace("BSE:", "").replace("MCX:", "").strip().upper()
+        if clean in ("SENSEX", "BANKEX"):
+            return "BSE"
+        if clean in ("CRUDEOIL", "NATURALGAS", "GOLD", "SILVER", "COPPER"):
+            return "MCX"
+        return "NSE"
+
     def _get_prioritized_targets(self) -> list[str]:
         """Returns targets with today's expiring index prioritized at position 0."""
         targets = list(self._watched_indices)
@@ -2067,7 +2174,9 @@ class AutoAlertEngine:
 
         for sym in targets:
             try:
-                spot = get_ltp(f"NSE:{sym}")
+                exch = self._resolve_index_exchange(sym)
+                lookup_sym = f"{exch}:{sym}" if ":" not in sym else sym
+                spot = get_ltp(lookup_sym)
                 if not spot or spot <= 0:
                     continue
                 chain = get_options_chain(sym)
@@ -2076,6 +2185,8 @@ class AutoAlertEngine:
 
                 alerts = detect_gamma_blast(sym, spot, chain)
                 for a in alerts:
+                    if exch == "BSE":
+                        a.exchange = "BFO"
                     if self.record_alert(a):
                         found.append(a)
             except Exception as e:
@@ -2093,35 +2204,48 @@ class AutoAlertEngine:
 
         for sym in targets:
             try:
-                ltp = get_ltp(f"NSE:{sym}")
+                exch = self._resolve_index_exchange(sym)
+                lookup_sym = f"{exch}:{sym}" if ":" not in sym else sym
+                ltp = get_ltp(lookup_sym)
                 if not ltp or ltp <= 0:
                     continue
 
-                raw_q = get_quote(f"NSE:{sym}")
-                q = raw_q.get(f"NSE:{sym}") if isinstance(raw_q, dict) else raw_q
+                raw_q = get_quote(lookup_sym)
+                q = raw_q.get(lookup_sym) if isinstance(raw_q, dict) else raw_q
                 vwap_val = getattr(q, "vwap", None) if q else None
+
+                # Pre-filter optimization: For cash equities, if price is completely flat (< 0.15% change)
+                # skip expensive multi-timeframe OHLCV fetching
+                if exch == "NSE" and sym not in self._watched_indices:
+                    chg = abs(getattr(q, "change_pct", 0.0) or 0.0) if q else 0.0
+                    if chg < 0.15:
+                        continue
 
                 # 1. First priority: Check 15-minute intraday squeeze
                 try:
-                    df_15m = get_ohlcv(sym, exchange="NSE", interval="15minute", days=5)
+                    df_15m = get_ohlcv(sym, exchange=exch, interval="15minute", days=5)
                     if df_15m is not None and len(df_15m) >= 20:
                         alert_15m = detect_squeeze_breakout(
                             sym, df_15m, ltp, timeframe="15m", vwap=vwap_val
                         )
-                        if alert_15m and self.record_alert(alert_15m):
-                            found.append(alert_15m)
-                            continue  # If 15m alert fired, skip daily
+                        if alert_15m:
+                            alert_15m.exchange = exch
+                            if self.record_alert(alert_15m):
+                                found.append(alert_15m)
+                                continue  # If 15m alert fired, skip daily
                 except Exception:
                     pass
 
                 # 2. Daily macro squeeze check
-                df = get_ohlcv(sym, exchange="NSE", interval="day", days=60)
+                df = get_ohlcv(sym, exchange=exch, interval="day", days=60)
                 if df is None or len(df) < 25:
                     continue
 
                 alert = detect_squeeze_breakout(sym, df, ltp, timeframe="day", vwap=vwap_val)
-                if alert and self.record_alert(alert):
-                    found.append(alert)
+                if alert:
+                    alert.exchange = exch
+                    if self.record_alert(alert):
+                        found.append(alert)
             except Exception as e:
                 logger.debug(f"[AutoAlertEngine] Squeeze scan error for {sym}: {e}")
 
@@ -2937,19 +3061,21 @@ class AutoAlertEngine:
         )
 
         for sym in targets:
-            clean_sym = sym.replace("NSE:", "").replace("NFO:", "").strip().upper()
+            clean_sym = sym.replace("NSE:", "").replace("NFO:", "").replace("BSE:", "").strip().upper()
             try:
                 from market.quotes import get_quote, get_ltp
 
-                spot = get_ltp(f"NSE:{clean_sym}")
+                exch = self._resolve_index_exchange(clean_sym)
+                lookup_sym = f"{exch}:{clean_sym}"
+                spot = get_ltp(lookup_sym)
                 if not spot or spot <= 0:
                     continue
                 quote_obj = None
                 try:
-                    raw_q = get_quote(f"NSE:{clean_sym}")
+                    raw_q = get_quote(lookup_sym)
                     if isinstance(raw_q, dict):
                         quote_obj = (
-                            raw_q.get(f"NSE:{clean_sym}")
+                            raw_q.get(lookup_sym)
                             or raw_q.get(clean_sym)
                             or (next(iter(raw_q.values())) if raw_q else None)
                         )
@@ -3057,7 +3183,7 @@ class AutoAlertEngine:
 
                 df_5m = None
                 try:
-                    df_5m = get_ohlcv(clean_sym, exchange="NSE", interval="5minute", days=2)
+                    df_5m = get_ohlcv(clean_sym, exchange=exch, interval="5minute", days=2)
                 except Exception:
                     pass
 
@@ -3482,12 +3608,13 @@ class AutoAlertEngine:
                             calculate_option_execution_plan,
                         )
 
+                        opt_exchange = "BFO" if exch == "BSE" else "NFO"
                         tp = calculate_trade_plan(
                             symbol=clean_sym,
                             direction="BUY" if opt_type == "CE" else "SELL",
                             spot=spot,
                             timeframe="INTRADAY",
-                            exchange="NFO",
+                            exchange=opt_exchange,
                             has_active_blast=(vol_oi >= 2.0),
                         )
                         if tp and tp.invalidation_stop > 0:
@@ -3505,10 +3632,11 @@ class AutoAlertEngine:
                     if opt_plan and opt_plan.get("sl_premium") and opt_plan.get("t1_premium"):
                         opt_sl = float(opt_plan["sl_premium"])
                         opt_t1 = float(opt_plan["t1_premium"])
-                        # Enforce defined risk tight stop for Options Momentum (cap risk at 15% of premium to honor small SL):
-                        max_opt_sl_risk = round(opt_ltp * 0.15, 2)
+                        # Enforce defined risk realistic stop for Options Momentum (cap risk at 28% of premium to prevent noise stops):
+                        max_opt_sl_risk = round(opt_ltp * 0.28, 2)
                         opt_sl = max(opt_sl, round(opt_ltp - max_opt_sl_risk, 2))
                         opt_risk = max(0.2, opt_ltp - opt_sl)
+                        opt_t0_5 = float(opt_plan.get("t0_5_premium") or round(opt_ltp + 1.0 * opt_risk, 2))
                         opt_t1 = float(opt_plan.get("t1_premium") or round(opt_ltp + 1.8 * opt_risk, 2))
                         opt_t2 = float(
                             opt_plan.get("t2_premium") or round(opt_ltp + 3.0 * opt_risk, 2)
@@ -3521,9 +3649,10 @@ class AutoAlertEngine:
                             or f"1:{round((opt_t1 - opt_ltp) / opt_risk, 1)}"
                         )
                     else:
-                        # Tight structural defined risk stop for intraday options (12%–15% risk)
-                        risk_pts = round(max(0.20, min(opt_ltp * 0.15, opt_ltp - 0.05)), 2)
+                        # Structural defined risk stop for intraday options (25%–28% risk buffer)
+                        risk_pts = round(max(0.20, min(opt_ltp * 0.28, opt_ltp - 0.05)), 2)
                         opt_sl = round(max(0.05, opt_ltp - risk_pts), 2)
+                        opt_t0_5 = round(opt_ltp + 1.0 * risk_pts, 2)
                         opt_t1 = round(opt_ltp + 1.8 * risk_pts, 2)
                         opt_t2 = round(opt_ltp + 3.0 * risk_pts, 2)
                         opt_moonshot = round(opt_ltp + 5.0 * risk_pts, 2)
@@ -3624,7 +3753,7 @@ class AutoAlertEngine:
                             else "EARLY_WARNING"
                         ),
                         symbol=clean_sym,
-                        exchange="NFO",
+                        exchange=opt_exchange,
                         direction=direction,
                         headline=headline,
                         summary=summary,
@@ -3708,6 +3837,7 @@ class AutoAlertEngine:
                             "recommended_entry": f"₹{opt_ltp:,.2f}",
                             "entry_range": entry_range_str,
                             "stop_loss": f"₹{opt_sl:,.1f}",
+                            "target_0_5": f"₹{opt_t0_5:,.1f}",
                             "target_1": f"₹{opt_t1:,.1f}",
                             "target": f"₹{opt_t1:,.1f}",
                             "target_2": f"₹{opt_t2:,.1f}",
@@ -3715,7 +3845,8 @@ class AutoAlertEngine:
                             "risk_reward": rr_str,
                             "when_to_buy": when_to_buy_str,
                             "when_to_wait": when_to_wait_str,
-                            "profit_rule": f"Book 50% at T1 (₹{opt_t1:,.1f}), move SL to Cost, let remainder ride to T2 (₹{opt_t2:,.1f}).",
+                            "profit_rule": f"Scale 35% at T0.5 (₹{opt_t0_5:,.1f}) & trail SL to Cost. Scale 40% at T1 (₹{opt_t1:,.1f}), let runner ride to T2 (₹{opt_t2:,.1f}).",
+                            "option_plan": opt_plan,
                             "lot_size": lot_sz,
                             "spot_invalidation_anchor": f"₹{tp.invalidation_stop:,.1f}"
                             if (tp and tp.invalidation_stop > 0)
@@ -3768,6 +3899,73 @@ class AutoAlertEngine:
             logger.debug(f"[AutoAlertEngine] Index contagion scan failure: {e}")
         return found
 
+    def scan_opening_range_breakouts(self) -> list[AutoAlert]:
+        """
+        Scans watched indices and high-liquidity equities for 15-minute Opening Range Breakouts (ORB-15).
+        Active post-09:30 IST (09:30 - 11:30 IST) when opening range is fully established.
+        """
+        now_ist = datetime.now(IST)
+        curr_t = now_ist.time()
+        is_test_env = (
+            (os.environ.get("CHANAKYA_TESTING") == "1")
+            or (os.environ.get("DEPLOY_MODE") == "test")
+            or ("PYTEST_CURRENT_TEST" in os.environ)
+        )
+        if not is_test_env and (curr_t < dtime(9, 30) or curr_t > dtime(11, 30)):
+            return []
+
+        from market.history import get_ohlcv
+        from market.quotes import get_ltp, get_quote
+
+        found: list[AutoAlert] = []
+        targets = self._get_prioritized_targets()
+
+        for sym in targets:
+            try:
+                exch = self._resolve_index_exchange(sym)
+                lookup_sym = f"{exch}:{sym}" if ":" not in sym else sym
+                ltp = get_ltp(lookup_sym)
+                if not ltp or ltp <= 0:
+                    continue
+
+                raw_q = get_quote(lookup_sym)
+                q = raw_q.get(lookup_sym) if isinstance(raw_q, dict) else raw_q
+                vwap_val = getattr(q, "vwap", None) if q else None
+
+                # Fetch 5-minute intraday OHLCV for opening range calculation
+                df_5m = get_ohlcv(sym, exchange=exch, interval="5minute", days=1)
+                if df_5m is None or len(df_5m) < 3:
+                    continue
+
+                # Compute TOD-RVOL from volume series
+                rvol_val = 1.5
+                try:
+                    vols = df_5m["volume"].values if "volume" in df_5m.columns else None
+                    if vols is not None and len(vols) >= 3:
+                        cur_v = float(vols[-1])
+                        avg_v = float(np.mean(vols[:-1]))
+                        if avg_v > 0:
+                            rvol_val = round(cur_v / avg_v, 2)
+                except Exception:
+                    pass
+
+                alert = detect_opening_range_breakout(
+                    sym,
+                    df=df_5m,
+                    ltp=ltp,
+                    vwap=vwap_val,
+                    exchange=exch,
+                    rvol=rvol_val,
+                    ref_time=now_ist,
+                    ignore_time_gate=is_test_env,
+                )
+                if alert and self.record_alert(alert):
+                    found.append(alert)
+            except Exception as e:
+                logger.debug(f"[AutoAlertEngine] ORB scan error for {sym}: {e}")
+
+        return found
+
     # ── Time-Partitioned Segment Scanning Loops ──────────────────
 
     def scan_equity_nfo_now(self) -> list[AutoAlert]:
@@ -3777,6 +3975,7 @@ class AutoAlertEngine:
         results.extend(self.scan_gamma_blasts())
         results.extend(self.scan_options_momentum_breakouts())
         results.extend(self.scan_squeeze_breakouts())
+        results.extend(self.scan_opening_range_breakouts())
         results.extend(self.scan_circuits())
         results.extend(self.scan_pattern_coilings())
         results.extend(self.scan_precursor_radars())
@@ -4491,9 +4690,9 @@ class AutoAlertEngine:
             mcx_status_dict = get_market_status("MCX")
             mcx_status = mcx_status_dict.get("status", "LIVE")
 
-            trigger_p = opt_recommendation["ltp"] if opt_recommendation else ltp
-            sl_p = opt_recommendation["stop_loss"] if opt_recommendation else sl_price
-            tgt_p = opt_recommendation["target_1"] if opt_recommendation else t1_price
+            trigger_p = ltp
+            sl_p = sl_price
+            tgt_p = t1_price
 
             # Composite confidence: base + SMC confluence + MTF alignment + divergence boost
             n_smc_tags = len(smc_tags)
@@ -4523,6 +4722,8 @@ class AutoAlertEngine:
                 is_live=is_authentic_live,
                 environment="LIVE" if is_authentic_live else "TEST",
                 market_status=mcx_status,
+                option_premium=opt_recommendation["ltp"] if opt_recommendation else None,
+                contract_symbol=opt_recommendation["contract"] if opt_recommendation else None,
                 metrics={
                     "change_pct": chg,
                     "volume": vol,
@@ -4824,6 +5025,14 @@ class AutoAlertEngine:
                     self.check_and_alert_in_flight_decay(exchanges=["MCX"])
                     self.check_and_alert_targets_and_trailing(exchanges=["MCX"])
                     self.scan_commodities_now()
+
+                # Phase 4: Automated Post-Market EOD Report (triggers at/after 15:45 IST)
+                try:
+                    from engine.eod_report_generator import check_and_trigger_daily_eod
+
+                    check_and_trigger_daily_eod()
+                except Exception as _eod_err:
+                    logger.debug(f"[AutoAlertEngine] EOD trigger check: {_eod_err}")
 
             except Exception as e:
                 logger.warning(f"[AutoAlertEngine] Error in poll cycle: {e}")

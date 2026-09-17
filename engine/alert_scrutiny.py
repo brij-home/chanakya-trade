@@ -1073,6 +1073,153 @@ class AlertScrutinyAuditor:
                     pass
         flags["sector_aligned"] = True
 
+        # 17. Order Book Level-2 Depth Imbalance Gate:
+        # Detects order book spoofing and skewed supply/demand overhangs before breakout ignition.
+        depth_data = None
+        if isinstance(metrics_dict, dict):
+            depth_data = metrics_dict.get("depth") or metrics_dict.get("order_book")
+        if depth_data is None and hasattr(alert, "depth"):
+            depth_data = getattr(alert, "depth", None)
+
+        total_buy_qty = 0.0
+        total_sell_qty = 0.0
+
+        if isinstance(depth_data, dict):
+            buys = depth_data.get("buy") or depth_data.get("bids") or []
+            sells = depth_data.get("sell") or depth_data.get("asks") or []
+            if isinstance(buys, list) and isinstance(sells, list):
+                total_buy_qty = sum(
+                    float(b.get("quantity", 0) or b.get("qty", 0))
+                    for b in buys
+                    if isinstance(b, dict)
+                )
+                total_sell_qty = sum(
+                    float(s.get("quantity", 0) or s.get("qty", 0))
+                    for s in sells
+                    if isinstance(s, dict)
+                )
+
+        if total_buy_qty <= 0 and isinstance(metrics_dict, dict):
+            try:
+                total_buy_qty = float(
+                    metrics_dict.get("total_buy_qty")
+                    or metrics_dict.get("buy_quantity")
+                    or metrics_dict.get("total_buy_quantity")
+                    or 0.0
+                )
+                total_sell_qty = float(
+                    metrics_dict.get("total_sell_qty")
+                    or metrics_dict.get("sell_quantity")
+                    or metrics_dict.get("total_sell_quantity")
+                    or 0.0
+                )
+            except (ValueError, TypeError):
+                total_buy_qty = 0.0
+                total_sell_qty = 0.0
+
+        if total_buy_qty > 0 and total_sell_qty > 0:
+            is_call = atype == "OPTIONS_MOMENTUM" and getattr(alert, "option_type", "") == "CE"
+            is_put = atype == "OPTIONS_MOMENTUM" and getattr(alert, "option_type", "") == "PE"
+
+            # Long breakout into extreme overhead supply wall:
+            if (direction in ("BULLISH", "LONG", "BUY") or is_call) and not is_put:
+                if total_sell_qty > (2.2 * total_buy_qty):
+                    flags["depth_imbalance_valid"] = False
+                    return (
+                        False,
+                        f"Order Book Depth Imbalance Trap: Top sell limit orders ({total_sell_qty:,.0f}) outnumber buy bids ({total_buy_qty:,.0f}) by {(total_sell_qty / total_buy_qty):.1f}x. Disallow long breakout into heavy overhead supply overhang.",
+                        flags,
+                    )
+            # Short breakdown into heavy bid absorption wall:
+            elif (direction in ("BEARISH", "SHORT", "SELL") or is_put) and not is_call:
+                if total_buy_qty > (2.2 * total_sell_qty):
+                    flags["depth_imbalance_valid"] = False
+                    return (
+                        False,
+                        f"Order Book Depth Imbalance Trap: Top buy bids ({total_buy_qty:,.0f}) outnumber sell offers ({total_sell_qty:,.0f}) by {(total_buy_qty / total_sell_qty):.1f}x. Disallow short breakdown into strong institutional bid absorption.",
+                        flags,
+                    )
+        flags["depth_imbalance_valid"] = True
+
+        # 18. Developing Volume Profile (d-POC / Value Area) Acceptance Gate:
+        # Guarantees that intraday breakouts are holding above the day's heaviest volume node (d-POC)
+        # and not trapped below the developing Value Area Low (d-VAL).
+        d_poc = None
+        d_val = None
+        d_vah = None
+        if isinstance(metrics_dict, dict):
+            d_poc = metrics_dict.get("d_poc") or metrics_dict.get("developing_poc") or metrics_dict.get("poc")
+            d_val = metrics_dict.get("d_val") or metrics_dict.get("developing_val") or metrics_dict.get("val")
+            d_vah = metrics_dict.get("d_vah") or metrics_dict.get("developing_vah") or metrics_dict.get("vah")
+
+        if d_poc is not None and d_val is not None and d_vah is not None:
+            try:
+                dp = float(d_poc)
+                dv = float(d_val)
+                dh = float(d_vah)
+                if dp > 0 and dv > 0 and dh > 0 and ltp > 0:
+                    is_call_opt = atype == "OPTIONS_MOMENTUM" and getattr(alert, "option_type", "") == "CE"
+                    is_put_opt = atype == "OPTIONS_MOMENTUM" and getattr(alert, "option_type", "") == "PE"
+
+                    if not is_option_premium_levels:
+                        # Long setup: price must not be trading below Value Area Low without a structural base
+                        if (direction in ("BULLISH", "LONG", "BUY") or is_call_opt) and not is_put_opt:
+                            if ltp < (dv * 0.995):
+                                flags["poc_acceptance_valid"] = False
+                                return (
+                                    False,
+                                    f"Developing Value Area Rejection: Price (₹{ltp:,.1f}) is trading below intraday Value Area Low (₹{dv:,.1f}). Mandate price acceptance back inside value area before long entry.",
+                                    flags,
+                                )
+                        # Short setup: price must not be trading above Value Area High
+                        elif (direction in ("BEARISH", "SHORT", "SELL") or is_put_opt) and not is_call_opt:
+                            if ltp > (dh * 1.005):
+                                flags["poc_acceptance_valid"] = False
+                                return (
+                                    False,
+                                    f"Developing Value Area Rejection: Price (₹{ltp:,.1f}) is trading above intraday Value Area High (₹{dh:,.1f}). Mandate price acceptance below value area before short entry.",
+                                    flags,
+                                )
+            except (ValueError, TypeError):
+                pass
+        flags["poc_acceptance_valid"] = True
+
+        # 19. Momentum Divergence Exhaustion Trap Gate:
+        # Prevents long entries on regular bearish divergence (price high on exhausted momentum)
+        # and short entries on regular bullish divergence (price low on exhausted momentum / Wyckoff spring).
+        div_type_val = None
+        div_bias_val = None
+        if isinstance(metrics_dict, dict):
+            div_type_val = metrics_dict.get("divergence_type") or metrics_dict.get("divergence")
+            div_bias_val = metrics_dict.get("divergence_bias")
+        if not div_type_val and hasattr(alert, "divergence_type"):
+            div_type_val = getattr(alert, "divergence_type", None)
+
+        if div_type_val and isinstance(div_type_val, str):
+            div_upper = div_type_val.upper()
+            is_call_opt = atype == "OPTIONS_MOMENTUM" and getattr(alert, "option_type", "") == "CE"
+            is_put_opt = atype == "OPTIONS_MOMENTUM" and getattr(alert, "option_type", "") == "PE"
+
+            # Long setup into Bearish Regular Divergence
+            if (direction in ("BULLISH", "LONG", "BUY") or is_call_opt) and not is_put_opt:
+                if "BEARISH_REGULAR" in div_upper or (div_bias_val == "BEARISH" and "REGULAR" in div_upper):
+                    flags["divergence_sanity_valid"] = False
+                    return (
+                        False,
+                        f"Momentum Divergence Exhaustion Trap: Bearish regular RSI divergence detected ({div_type_val}). Disallow long entry into momentum exhaustion.",
+                        flags,
+                    )
+            # Short setup into Bullish Regular Divergence
+            elif (direction in ("BEARISH", "SHORT", "SELL") or is_put_opt) and not is_call_opt:
+                if "BULLISH_REGULAR" in div_upper or (div_bias_val == "BULLISH" and "REGULAR" in div_upper):
+                    flags["divergence_sanity_valid"] = False
+                    return (
+                        False,
+                        f"Momentum Divergence Exhaustion Trap: Bullish regular RSI divergence detected ({div_type_val}). Disallow short entry into Wyckoff spring / momentum absorption.",
+                        flags,
+                    )
+        flags["divergence_sanity_valid"] = True
+
         return True, "", flags
 
     # ── Tier 2: AI Devil's Advocate & Scrutiny ─────────────────────────────────

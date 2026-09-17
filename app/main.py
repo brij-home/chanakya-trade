@@ -82,6 +82,16 @@ def main() -> None:
         rep = run_preflight(verbose=True)
         sys.exit(0 if rep.healthy else 1)
 
+    if "eod" in sys.argv:
+        from app.commands.eod import run as run_eod
+
+        idx = sys.argv.index("eod")
+        rem_args = sys.argv[idx + 1 :]
+        target_dt = rem_args[0] if (rem_args and not rem_args[0].startswith("-")) else None
+        wants_tg = "--telegram" in rem_args or "-tg" in rem_args
+        run_eod(target_date=target_dt, dispatch_telegram=wants_tg)
+        sys.exit(0)
+
     use_tui = "--tui" in sys.argv
     no_broker = "--no-broker" in sys.argv
 

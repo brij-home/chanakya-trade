@@ -18,7 +18,8 @@
     "test:watch": "vitest",
     "test:ui": "vitest --ui",
     "typecheck": "tsc --noEmit",
-    "build:web": "node scripts/audit-react-hooks.js && electron-vite build && node scripts/build-web.js"
+    "build:web": "node scripts/audit-react-hooks.js && electron-vite build && node scripts/build-web.js",
+    "build:web:fast": "electron-vite build && node scripts/build-web.js"
   },
   "dependencies": {
     "lightweight-charts": "^5.2.1",
