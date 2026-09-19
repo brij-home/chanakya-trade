@@ -2961,6 +2961,36 @@ async def cleanup_auto_alerts(payload: Optional[dict] = None):
     }
 
 
+@app.post("/api/alerts/auto/invalidate", tags=["Alerts"])
+async def invalidate_auto_alert_endpoint(payload: dict):
+    """Explicitly invalidate an auto alert with a specific rationale."""
+    from engine.auto_alert_engine import auto_alert_engine
+
+    alert_id = payload.get("alert_id")
+    reason = payload.get("reason", "Manually invalidated by user")
+    if not alert_id:
+        raise HTTPException(status_code=400, detail="Missing alert_id")
+    alert = auto_alert_engine.invalidate_alert_by_id(alert_id, reason=reason)
+    if not alert:
+        raise HTTPException(status_code=404, detail=f"Alert {alert_id} not found or already invalidated")
+    return {"status": "ok", "data": alert.to_dict()}
+
+
+@app.post("/api/alerts/manual/invalidate", tags=["Alerts"])
+async def invalidate_manual_alert_endpoint(payload: dict):
+    """Explicitly invalidate a manual alert with a specific rationale."""
+    from engine.alerts import alert_manager
+
+    alert_id = payload.get("alert_id")
+    reason = payload.get("reason", "Manually invalidated by user")
+    if not alert_id:
+        raise HTTPException(status_code=400, detail="Missing alert_id")
+    alert = alert_manager.invalidate_alert(alert_id, reason=reason)
+    if not alert:
+        raise HTTPException(status_code=404, detail=f"Manual alert {alert_id} not found or already invalidated")
+    return {"status": "ok", "data": alert_manager.public_dict(alert)}
+
+
 @app.post("/api/alerts/auto/rescrutinize", tags=["Alerts"])
 async def rescrutinize_auto_alert(payload: dict):
     """Re-scrutinize an active alert on demand with AI Chief Risk Officer Devil's Advocate."""

@@ -1,11 +1,15 @@
-import React, { memo } from 'react'
+import React, { memo, useMemo } from 'react'
 import { useLiveSpot } from './LiveSpotsContext'
-import { AUTO_TYPE_STYLE, INDEX_LOT_SIZES, convictionEmoji, getStaleness } from './alertHelpers'
+import { AUTO_TYPE_STYLE, INDEX_LOT_SIZES, convictionEmoji, getStaleness, formatExpiryDetails } from './alertHelpers'
 import { RRMiniBar, MilestoneDots } from './AlertWidgets'
 
 export const AlertCompactRow = memo(function AlertCompactRow({ alert, onSendTelegram, onTrade, onExpand, isExpanded }) {
+  const plan = alert.actionable_plan || {}
+  const tradePlan = plan.trade_plan || {}
+  const optPlan = plan.option_plan || null
+
   const cleanSym = (alert.symbol || '').replace(/^(NSE|BSE|MCX|NFO|CDS):/, '').trim().toUpperCase()
-  const rawContract = alert.contract_symbol || alert.actionable_plan?.option_plan?.contract_symbol || alert.actionable_plan?.option_contract || ''
+  const rawContract = alert.contract_symbol || optPlan?.contract_symbol || plan.option_contract || ''
   const cleanContract = rawContract.replace(/^(NSE|BSE|MCX|NFO|CDS):/, '').trim().toUpperCase()
 
   const liveSpotBySym = useLiveSpot(cleanSym)
@@ -18,6 +22,8 @@ export const AlertCompactRow = memo(function AlertCompactRow({ alert, onSendTele
 
   const style = AUTO_TYPE_STYLE[alert.alert_type] || AUTO_TYPE_STYLE.GAMMA_BLAST
   const isBull = alert.direction === 'BULLISH'
+  const isBear = alert.direction === 'BEARISH'
+  const isNeutral = alert.direction === 'NEUTRAL' || alert.alert_type === 'IRON_CONDOR_PINNING'
   const isTest = alert.environment === 'TEST' || alert.is_live === false
   const isEarly = alert.stage === 'EARLY_WARNING'
   const isIgnited = alert.stage === 'IGNITED'
@@ -27,19 +33,18 @@ export const AlertCompactRow = memo(function AlertCompactRow({ alert, onSendTele
   const isFinalTargetAchieved = alert.stage === 'TARGET_ACHIEVED' || alert.target_status === 'TARGET_ACHIEVED' || alert.stage === 'COMPLETED'
   const isTrail = alert.stage === 'TRAILING_UPDATE'
 
-  const optType = alert.option_type || (rawContract?.endsWith('PE') ? 'PE' : rawContract?.endsWith('CE') ? 'CE' : null)
-  const strikeNum = alert.strike ? Number(String(alert.strike).replace(/[^0-9.-]/g, '')) : null
+  const optType = alert.option_type || optPlan?.option_type || (rawContract?.endsWith('PE') ? 'PE' : rawContract?.endsWith('CE') ? 'CE' : null)
+  const rawStrike = alert.strike || optPlan?.strike || alert.metrics?.strike
+  const strikeNum = rawStrike ? Number(String(rawStrike).replace(/[^0-9.-]/g, '')) : null
   const isFuture = Boolean(rawContract?.toUpperCase().includes('FUT') || alert.symbol?.toUpperCase().includes('FUT') || alert.derivative_type === 'FUT')
   
   const isPureOption = alert.alert_type === 'OPTIONS_MOMENTUM' || alert.alert_type === 'OPTION_WRITE' || (alert.alert_type === 'GAMMA_BLAST' && optType) || (rawContract && (rawContract.endsWith('CE') || rawContract.endsWith('PE')) && alert.exchange === 'NFO')
-  const isSpotSetup = alert.alert_type === 'ASYMMETRIC_OPPORTUNITY' || alert.alert_type === 'SQUEEZE_BREAKOUT' || alert.alert_type === 'SQUEEZE_BREAKDOWN' || alert.alert_type === 'PATTERN_COILING' || alert.alert_type === 'MOMENTUM_ACCELERATION' || alert.alert_type === 'POCKET_PIVOT' || alert.alert_type === 'PRECURSOR_RADAR' || alert.alert_type === 'SMC_SWEEP' || alert.alert_type === 'CIRCUIT_WARNING' || alert.alert_type === 'COMMODITY_MOMENTUM'
+  const isSpotSetup = alert.alert_type === 'ASYMMETRIC_OPPORTUNITY' || alert.alert_type === 'SQUEEZE_BREAKOUT' || alert.alert_type === 'SQUEEZE_BREAKDOWN' || alert.alert_type === 'PATTERN_COILING' || alert.alert_type === 'MOMENTUM_ACCELERATION' || alert.alert_type === 'POCKET_PIVOT' || alert.alert_type === 'PRECURSOR_RADAR' || alert.alert_type === 'SMC_SWEEP' || alert.alert_type === 'CIRCUIT_WARNING' || alert.alert_type === 'COMMODITY_MOMENTUM' || alert.alert_type === 'TURTLE_SOUP_SHORT' || alert.alert_type === 'IRON_CONDOR_PINNING'
   const isDerivative = !isSpotSetup && Boolean(isFuture || isPureOption || (alert.exchange === 'NFO' && (optType || strikeNum || rawContract)))
 
   const lotSize = isDerivative ? (alert.lot_size || alert.metrics?.lot_size || INDEX_LOT_SIZES[cleanSym] || null) : null
 
-  const plan = alert.actionable_plan || {}
-  const tradePlan = plan.trade_plan || {}
-  const optPlan = plan.option_plan || null
+  const expiryInfo = useMemo(() => formatExpiryDetails(alert), [alert])
 
   const act = String(tradePlan.action || plan.action || '').toUpperCase()
   const isOptionSell = isDerivative && (
@@ -80,13 +85,22 @@ export const AlertCompactRow = memo(function AlertCompactRow({ alert, onSendTele
   let liveReturn = null
   if (currentPrice && entryNum && entryNum > 0) {
     let diff = 0
+    let isProf = false
     if (isDerivative) {
       diff = isOptionSell ? entryNum - currentPrice : currentPrice - entryNum
+      isProf = diff >= 0
+    } else if (isNeutral) {
+      const spe = Number(alert.metrics?.short_pe || slNum || entryNum * 0.985)
+      const sce = Number(alert.metrics?.short_ce || t1Num || entryNum * 1.015)
+      isProf = currentPrice >= spe && currentPrice <= sce
+      const center = (spe + sce) / 2
+      diff = isProf ? Math.max(0, (entryNum * 0.015) - Math.abs(currentPrice - center) * 0.03) : -Math.min(Math.abs(currentPrice - spe), Math.abs(currentPrice - sce))
     } else {
       diff = isBull ? currentPrice - entryNum : entryNum - currentPrice
+      isProf = diff >= 0
     }
     const pct = ((diff / entryNum) * 100).toFixed(1)
-    liveReturn = { diff, pct, isProfitable: diff >= 0 }
+    liveReturn = { diff, pct, isProfitable: isProf }
   }
 
   // Dynamic live stage hit detection (real-time cross evaluation)
@@ -95,6 +109,8 @@ export const AlertCompactRow = memo(function AlertCompactRow({ alert, onSendTele
     (slNum && currentPrice && (
       isDerivative
         ? (isOptionSell ? currentPrice >= slNum : currentPrice <= slNum)
+        : isNeutral
+        ? (currentPrice < slNum || (alert.metrics?.long_ce && currentPrice > alert.metrics.long_ce))
         : (isBull ? currentPrice <= slNum : currentPrice >= slNum)
     ))
   )
@@ -128,10 +144,12 @@ export const AlertCompactRow = memo(function AlertCompactRow({ alert, onSendTele
     ))
   )
 
-  const expiryShort = (() => {
-    if (!alert.expiry_date) return null
+  const expiryShort = useMemo(() => {
+    if (expiryInfo?.fullDisplay) return expiryInfo.fullDisplay
+    const rawDate = alert.expiry_date || optPlan?.expiry_date || alert.expiry_details?.raw_date
+    if (!rawDate) return null
     try {
-      const parts = alert.expiry_date.trim().split(/[-/]/)
+      const parts = String(rawDate).trim().split(/[-/]/)
       if (parts.length === 3) {
         const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
         const d = parts[0].length === 4
@@ -141,19 +159,77 @@ export const AlertCompactRow = memo(function AlertCompactRow({ alert, onSendTele
         return `${d.getDate()}-${months[d.getMonth()]}${dte >= 0 ? ` (${dte}d)` : ''}`
       }
     } catch (_) {}
-    return alert.expiry_date
-  })()
+    return String(rawDate)
+  }, [expiryInfo, alert.expiry_date, optPlan?.expiry_date, alert.expiry_details?.raw_date])
 
-  const staleness = getStaleness(alert.created_at)
-  const timeShort = (() => {
-    if (!alert.created_at) return ''
+  const triggerTimeStr = alert.timestamp || alert.created_at || alert.triggered_at || alert.time || ''
+
+  const triggerTimeInfo = useMemo(() => {
+    if (!triggerTimeStr) return null
     try {
-      const clean = alert.created_at.replace(' IST', '').trim()
-      const d = new Date(clean)
-      if (isNaN(d.getTime())) return alert.created_at.slice(-8, -4)
-      return d.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: false })
-    } catch (_) { return '' }
-  })()
+      const raw = String(triggerTimeStr).trim()
+      const m = raw.match(/^(\d{4})-(\d{2})-(\d{2})[T\s](\d{2}):(\d{2})(?::(\d{2}))?/)
+      const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+
+      if (m) {
+        const [_, y, mo, d, hh, mm, ss] = m
+        const alertDate = new Date(Number(y), Number(mo) - 1, Number(d), Number(hh), Number(mm), Number(ss || 0))
+        const today = new Date()
+        const isToday = alertDate.toDateString() === today.toDateString()
+
+        const diffMs = Math.max(0, today.getTime() - alertDate.getTime())
+        const diffMins = Math.floor(diffMs / 60000)
+        let elapsed = ''
+        if (diffMins < 1) elapsed = 'just now'
+        else if (diffMins < 60) elapsed = `${diffMins}m ago`
+        else if (diffMins < 1440) elapsed = `${Math.floor(diffMins / 60)}h ago`
+        else elapsed = `${Math.floor(diffMins / 1440)}d ago`
+
+        const timeStr = `${hh}:${mm}${ss ? `:${ss}` : ''}`
+        const prettyDate = `${Number(d)} ${months[Number(mo) - 1]}`
+
+        return {
+          display: isToday ? `${timeStr} IST` : `${prettyDate} ${timeStr} IST`,
+          full: raw,
+          elapsed,
+          timeOnly: timeStr,
+        }
+      }
+
+      const clean = raw.replace(/\s*IST$/i, '').trim()
+      const parsed = new Date(clean)
+      if (!isNaN(parsed.getTime())) {
+        const today = new Date()
+        const isToday = parsed.toDateString() === today.toDateString()
+        const timeStr = parsed.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false })
+        const diffMs = Math.max(0, today.getTime() - parsed.getTime())
+        const diffMins = Math.floor(diffMs / 60000)
+        let elapsed = ''
+        if (diffMins < 1) elapsed = 'just now'
+        else if (diffMins < 60) elapsed = `${diffMins}m ago`
+        else if (diffMins < 1440) elapsed = `${Math.floor(diffMins / 60)}h ago`
+        else elapsed = `${Math.floor(diffMins / 1440)}d ago`
+
+        const prettyDate = `${parsed.getDate()} ${months[parsed.getMonth()]}`
+
+        return {
+          display: isToday ? `${timeStr} IST` : `${prettyDate} ${timeStr} IST`,
+          full: raw,
+          elapsed,
+          timeOnly: timeStr,
+        }
+      }
+
+      return {
+        display: raw.length > 18 ? raw.slice(-14) : raw,
+        full: raw,
+        elapsed: '',
+        timeOnly: raw,
+      }
+    } catch (_) {
+      return { display: String(triggerTimeStr), full: String(triggerTimeStr), elapsed: '', timeOnly: String(triggerTimeStr) }
+    }
+  }, [triggerTimeStr])
 
   const conviction = Number(alert.confidence || alert.metrics?.scrutiny?.score || 75)
   const reasonShort = (alert.summary || alert.headline || '').slice(0, 40)
@@ -209,8 +285,17 @@ export const AlertCompactRow = memo(function AlertCompactRow({ alert, onSendTele
           </span>
         )}
         {isFuture && <span className="text-[8px] px-1 py-px rounded font-black bg-blue-500/20 text-blue-300">FUT</span>}
-        {expiryShort && (
-          <span className="text-[8px] text-muted font-mono whitespace-nowrap">{expiryShort}</span>
+        {(expiryInfo?.fullDisplay || expiryShort) && (
+          <span
+            className={`text-[8px] font-mono px-1.5 py-px rounded font-bold whitespace-nowrap border ${
+              expiryInfo?.isWeekly
+                ? 'bg-amber-500/15 text-amber-300 border-amber-500/30'
+                : 'bg-blue-500/15 text-blue-300 border-blue-500/30'
+            }`}
+            title={expiryInfo?.formatted || 'Contract Expiry'}
+          >
+            {expiryInfo?.fullDisplay || expiryShort}
+          </span>
         )}
 
         <span className="text-border/30 text-[9px] hidden sm:inline">│</span>
@@ -245,8 +330,12 @@ export const AlertCompactRow = memo(function AlertCompactRow({ alert, onSendTele
           </span>
         ) : null}
 
-        <span className={`text-[9px] font-black whitespace-nowrap ${isBull ? 'text-emerald-400' : 'text-rose-400'}`}>
-          {isBull ? '▲' : '▼'} {alert.direction?.slice(0, 4)}
+        <span className={`text-[9px] font-black px-1.5 py-px rounded whitespace-nowrap ${
+          isBull ? 'text-emerald-400 bg-emerald-500/10' :
+          isNeutral ? 'text-purple-400 bg-purple-500/10' :
+          'text-rose-400 bg-rose-500/10'
+        }`}>
+          {isBull ? '▲ BULL' : isNeutral ? '◆ NEUT' : '▼ BEAR'}
         </span>
 
         <span
@@ -278,7 +367,21 @@ export const AlertCompactRow = memo(function AlertCompactRow({ alert, onSendTele
           </span>
         )}
 
-        <span className="inline-block w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse flex-shrink-0 ml-auto" title="Live quote feed active" />
+        {/* Triggered Timestamp Badge (High visibility on top right of compact card) */}
+        {triggerTimeInfo && (
+          <span
+            className="text-[9px] font-mono font-bold px-2 py-0.5 rounded bg-surface/90 text-zinc-300 border border-border/60 hover:border-gold/40 transition-all whitespace-nowrap flex items-center gap-1.5 ml-auto cursor-help shadow-xs"
+            title={`Triggered: ${triggerTimeInfo.full}${triggerTimeInfo.elapsed ? ` (${triggerTimeInfo.elapsed})` : ''}`}
+          >
+            <span className="text-[10px] text-amber-400">🕒</span>
+            <span className="text-zinc-200">{triggerTimeInfo.display}</span>
+            {triggerTimeInfo.elapsed && (
+              <span className="text-[8px] text-amber-400/90 font-medium">({triggerTimeInfo.elapsed})</span>
+            )}
+          </span>
+        )}
+
+        <span className={`inline-block w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse flex-shrink-0 ${triggerTimeInfo ? '' : 'ml-auto'}`} title="Live quote feed active" />
       </div>
 
       {/* ── Row 2: Live Price levels + Realtime Direction + Conviction + Actions ─── */}
@@ -372,20 +475,6 @@ export const AlertCompactRow = memo(function AlertCompactRow({ alert, onSendTele
           </span>
         )}
 
-        {staleness && (
-          <span className="text-[8px] font-mono text-amber-400 whitespace-nowrap flex-shrink-0" title="Alert age">
-            ⏱ {staleness}
-          </span>
-        )}
-
-        {timeShort && (
-          <span
-            className="text-[8px] font-mono text-muted whitespace-nowrap flex-shrink-0 cursor-help"
-            title={`Generated: ${alert.created_at || alert.timestamp || 'N/A'}`}
-          >
-            {timeShort} IST
-          </span>
-        )}
 
         <button
           onClick={(e) => {

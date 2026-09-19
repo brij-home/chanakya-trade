@@ -1542,6 +1542,26 @@ async def skill_alerts_remove(req: AlertRemoveRequest):
         raise _err(str(e))
 
 
+@router.post("/alerts/invalidate")
+async def skill_alerts_invalidate(req: AlertInvalidateRequest):
+    """Invalidate a manual alert by ID with rationale."""
+    try:
+        from engine.alerts import alert_manager
+
+        alert = await asyncio.to_thread(
+            alert_manager.invalidate_alert,
+            req.alert_id,
+            req.reason or "Manually invalidated by user",
+        )
+        if not alert:
+            raise _err(f"Alert {req.alert_id} not found or already invalidated", 404)
+        return {"status": "ok", "data": alert_manager.public_dict(alert)}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise _err(str(e))
+
+
 @router.post("/alerts/auto/list")
 async def skill_auto_alerts_list(req: Optional[AutoAlertsListRequest] = None):
     """List auto-detected real-time alerts (Gamma Blasts, Squeeze Breakouts, Circuits, SMC)."""
@@ -1837,6 +1857,18 @@ async def skill_auto_alerts_archive(req: AutoAlertArchiveRequest):
         return {"status": "ok", "data": alert.to_dict()}
     except HTTPException:
         raise
+    except Exception as e:
+        raise _err(str(e))
+
+
+@router.post("/alerts/auto/archive_all_invalidated")
+async def skill_auto_alerts_archive_all_invalidated():
+    """Bulk archive all currently invalidated auto-alerts to historical storage."""
+    try:
+        from engine.auto_alert_engine import auto_alert_engine
+
+        count = await asyncio.to_thread(auto_alert_engine.archive_all_invalidated)
+        return {"status": "ok", "archived_count": count}
     except Exception as e:
         raise _err(str(e))
 

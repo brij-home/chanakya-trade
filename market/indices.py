@@ -108,6 +108,19 @@ class IndexSnapshot:
 
 
 @dataclass
+class IndexPolarization:
+    index: str
+    is_polarized: bool
+    regime: str  # "TUG_OF_WAR_CHOP" | "UNIDIRECTIONAL_TREND" | "NORMAL_BREADTH"
+    dispersion_std: float
+    max_gainer: tuple[str, float]  # (symbol, change_pct)
+    max_loser: tuple[str, float]   # (symbol, change_pct)
+    spread_pct: float
+    heavyweight_changes: dict[str, float]
+    summary: str
+
+
+@dataclass
 class MarketSnapshot:
     nifty: IndexSnapshot
     banknifty: IndexSnapshot
@@ -116,6 +129,7 @@ class MarketSnapshot:
     posture: str  # "BULLISH" | "BEARISH" | "NEUTRAL" | "VOLATILE"
     posture_reason: str
     gift_nifty: Optional[object] = None  # GiftNiftySnapshot | None (#106)
+    polarization: Optional[IndexPolarization] = None
 
 
 def get_index(name: str) -> IndexSnapshot:
@@ -195,6 +209,17 @@ def get_market_snapshot() -> MarketSnapshot:
     except Exception:
         pass
 
+    # Heavyweight Tug-of-War Polarization Detector
+    polarization = None
+    try:
+        polarization = get_index_polarization("NIFTY")
+        if polarization and polarization.is_polarized:
+            reason += f" | {polarization.summary}"
+            if posture in ("BULLISH", "BEARISH"):
+                posture = "NEUTRAL"
+    except Exception:
+        pass
+
     return MarketSnapshot(
         nifty=nifty,
         banknifty=banknifty,
@@ -203,6 +228,94 @@ def get_market_snapshot() -> MarketSnapshot:
         posture=posture,
         posture_reason=reason,
         gift_nifty=gift_nifty,
+        polarization=polarization,
+    )
+
+
+NIFTY_TOP_HEAVYWEIGHTS = [
+    "HDFCBANK",
+    "RELIANCE",
+    "ICICIBANK",
+    "INFY",
+    "TCS",
+    "BHARTIARTL",
+    "LT",
+]
+
+
+def get_index_polarization(index: str = "NIFTY") -> IndexPolarization:
+    """
+    Computes cross-sectional return dispersion among benchmark heavyweights.
+    When top drivers are moving in opposite directions (e.g., HDFC Bank +2.5% vs TCS -3.8% and Reliance -1.4%),
+    the index is trapped in a 'TUG_OF_WAR_CHOP' regime where directional breakouts whipsaw.
+    """
+    from market.quotes import get_quote
+    import numpy as np
+
+    symbols = NIFTY_TOP_HEAVYWEIGHTS
+    instruments = [f"NSE:{s}" for s in symbols]
+    quotes = get_quote(instruments)
+
+    changes: dict[str, float] = {}
+    for s in symbols:
+        q = quotes.get(f"NSE:{s}") or quotes.get(s)
+        if q and getattr(q, "last_price", 0.0) > 0:
+            changes[s] = float(getattr(q, "change_pct", 0.0) or 0.0)
+
+    if len(changes) < 3:
+        return IndexPolarization(
+            index=index,
+            is_polarized=False,
+            regime="NORMAL_BREADTH",
+            dispersion_std=0.0,
+            max_gainer=("NONE", 0.0),
+            max_loser=("NONE", 0.0),
+            spread_pct=0.0,
+            heavyweight_changes=changes,
+            summary="Insufficient heavyweight data to determine polarization.",
+        )
+
+    vals = list(changes.values())
+    dispersion_std = float(np.std(vals))
+    max_gainer_sym = max(changes, key=changes.get)
+    max_loser_sym = min(changes, key=changes.get)
+    max_gainer = (max_gainer_sym, changes[max_gainer_sym])
+    max_loser = (max_loser_sym, changes[max_loser_sym])
+    spread_pct = round(max_gainer[1] - max_loser[1], 2)
+
+    # Polarized Tug-of-War threshold:
+    # Spread between top gainer and top loser >= 3.0% with opposing signs (one >= +1.0%, other <= -1.0%)
+    # OR dispersion standard deviation >= 1.5% with mixed signs.
+    has_opposing_momentum = max_gainer[1] >= 1.0 and max_loser[1] <= -1.0
+    is_polarized = has_opposing_momentum and (spread_pct >= 3.0 or dispersion_std >= 1.5)
+
+    if is_polarized:
+        regime = "TUG_OF_WAR_CHOP"
+        summary = (
+            f"⚠️ Heavyweight Tug-of-War: {max_gainer[0]} ({max_gainer[1]:+.2f}%) pulling UP vs. "
+            f"{max_loser[0]} ({max_loser[1]:+.2f}%) dragging DOWN. Spread: {spread_pct:.2f}%. "
+            f"Index trapped in range-bound chop; suppress directional breakout alerts."
+        )
+    elif abs(float(np.mean(vals))) > 1.0 and dispersion_std < 1.2:
+        regime = "UNIDIRECTIONAL_TREND"
+        summary = (
+            f"✅ Broad Heavyweight Alignment: Mean change {float(np.mean(vals)):+.2f}%. "
+            f"Unidirectional trend expansion supported across sector leaders."
+        )
+    else:
+        regime = "NORMAL_BREADTH"
+        summary = f"Normal heavyweight dispersion (Spread: {spread_pct:.2f}%, Std: {dispersion_std:.2f}%)."
+
+    return IndexPolarization(
+        index=index,
+        is_polarized=is_polarized,
+        regime=regime,
+        dispersion_std=round(dispersion_std, 2),
+        max_gainer=max_gainer,
+        max_loser=max_loser,
+        spread_pct=spread_pct,
+        heavyweight_changes=changes,
+        summary=summary,
     )
 
 

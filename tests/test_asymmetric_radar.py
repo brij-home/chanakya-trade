@@ -332,3 +332,67 @@ def test_rubber_band_mazdock_volatility_floor_and_monotonic_invariants(scanner):
 
         # 4. Asymmetric R:R ratio guarantee:
         assert opp.risk_reward_ratio >= 3.0
+
+
+def test_turtle_soup_sweep_short_detection(scanner):
+    """Test ICT Turtle Soup Bearish Liquidity Sweep: price sweeps prior 15-day high and closes with upper rejection wick."""
+    dates = pd.date_range("2026-08-01", periods=25, freq="B")
+    closes = np.full(25, 2500.0)
+    highs = np.full(25, 2515.0)
+    lows = np.full(25, 2480.0)
+    opens = np.full(25, 2495.0)
+
+    # Historical swing high = 2540 at day 10
+    highs[10] = 2540.0
+
+    # Today sweeps the swing high to 2555 (15 pts above 2540), but gets rejected and closes back down at 2510
+    # Open=2515, High=2555, Low=2500, Close=2510 -> Upper wick = 2555 - 2515 = 40 pts on a 55 pt candle (> 70% wick!)
+    highs[-1] = 2555.0
+    opens[-1] = 2515.0
+    closes[-1] = 2510.0
+    lows[-1] = 2500.0
+
+    df = pd.DataFrame(
+        {"open": opens, "high": highs, "low": lows, "close": closes, "volume": [1000000] * 25},
+        index=dates,
+    )
+
+    mock_quote = MagicMock()
+    mock_quote.last_price = 2510.0
+    mock_quote.vwap = 2520.0
+
+    with (
+        patch("market.quotes.get_quote", return_value={"NSE:RELIANCE": mock_quote}),
+        patch("market.history.get_ohlcv", return_value=df),
+    ):
+        opp = scanner.detect_turtle_soup_sweep_short("RELIANCE", df=df)
+
+        assert opp is not None
+        assert opp.symbol == "RELIANCE"
+        assert opp.setup_type == "TURTLE_SOUP_SHORT"
+        assert opp.direction == "BEARISH"
+        assert opp.risk_reward_ratio >= 3.0
+        # Bearish monotonic hierarchy: SL > Entry > T1 > T2 > Moonshot
+        assert opp.stop_loss > opp.ltp > opp.target_1 > opp.target_2 > opp.target_moonshot
+        assert "ICT Turtle Soup" in opp.confluences[0]
+
+
+def test_volatility_pinning_iron_condor_detection(scanner):
+    """Test Non-Directional Volatility Pinning Iron Condor setup for indices and F&O leaders."""
+    mock_quote = MagicMock()
+    mock_quote.last_price = 24500.0
+    mock_quote.vwap = 24490.0
+
+    with patch("market.quotes.get_quote", return_value={"NSE:NIFTY": mock_quote}):
+        opp = scanner.detect_volatility_pinning_iron_condor("NIFTY", quote=mock_quote)
+
+        assert opp is not None
+        assert opp.symbol == "NIFTY"
+        assert opp.setup_type == "IRON_CONDOR_PINNING"
+        assert opp.direction == "NEUTRAL"
+        assert "Iron Condor" in opp.setup_label
+        assert opp.metrics["short_pe"] < opp.ltp < opp.metrics["short_ce"]
+        assert opp.metrics["long_pe"] < opp.metrics["short_pe"]
+        assert opp.metrics["long_ce"] > opp.metrics["short_ce"]
+        assert opp.risk_reward_ratio >= 3.0
+

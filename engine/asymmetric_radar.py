@@ -1032,6 +1032,33 @@ class AsymmetricOpportunityRadar:
         if not (is_bullish_unpin or is_bearish_unpin):
             return None
 
+        # 1. Tug-of-War Index Polarization Check:
+        # If NIFTY heavyweights are polarized (e.g. HDFC Bank up vs TCS/Reliance down), suppress index breakout
+        if clean_sym in ("NIFTY", "NIFTY 50", "NSEI"):
+            try:
+                from market.indices import get_index_polarization
+
+                pol = get_index_polarization("NIFTY")
+                if pol and pol.is_polarized:
+                    logger.info(
+                        f"[AsymmetricRadar] Suppressing 0DTE Gamma breakout for {clean_sym}: {pol.summary}"
+                    )
+                    return None
+            except Exception:
+                pass
+
+        # 2. VIX Volatility Regime Detection:
+        vix = 14.0
+        try:
+            from market.indices import get_vix
+
+            vix_val = get_vix()
+            if vix_val > 0:
+                vix = vix_val
+        except Exception:
+            pass
+
+        is_low_vix = vix < 12.0
         direction = "BULLISH" if is_bullish_unpin else "BEARISH"
 
         # Asymmetric risk levels
@@ -1066,6 +1093,10 @@ class AsymmetricOpportunityRadar:
             f"{'Upper' if direction == 'BULLISH' else 'Lower'} Break-Even breached: Market makers forced to aggressively delta-hedge",
             "Gamma explosion velocity triggering runaway intraday cascade",
         ]
+        if is_low_vix:
+            confluences.append(
+                f"Low-VIX Regime Guardrail (VIX {vix:.1f} < 12.0): Naked option buying suppressed; Defined-Risk {'Bull Put' if direction == 'BULLISH' else 'Bear Call'} credit spread enforced."
+            )
 
         score = 90
 
@@ -1095,12 +1126,30 @@ class AsymmetricOpportunityRadar:
         opt_t2 = round(max(0.05, opt_prem + (delta * spot_move_t2)), 2)
         opt_sl = round(max(0.05, opt_prem + (delta * spot_move_sl)), 2)
 
+        setup_type = "EXPIRY_0DTE_CREDIT_SPREAD" if is_low_vix else "EXPIRY_0DTE_GAMMA"
+        setup_label = (
+            f"🛡️ 0DTE Defined-Risk {'Bull Put' if direction == 'BULLISH' else 'Bear Call'} Credit Spread [{clean_sym}]"
+            if is_low_vix
+            else f"⚡ 0DTE Expiry Gamma Straddle Unpinning [{opt_sym}]"
+        )
+        catalyst = (
+            f"India VIX ({vix:.1f} < 12.0) indicates extreme IV crush risk. Naked option buying suppressed; "
+            f"Defined-Risk {'Bull Put' if direction == 'BULLISH' else 'Bear Call'} credit spread enforced to profit from rapid theta decay."
+            if is_low_vix
+            else "Dealer short-gamma unpinning forcing vertical index momentum as written straddles implode."
+        )
+        profit_rule = (
+            f"Collect credit on {'Bull Put' if direction == 'BULLISH' else 'Bear Call'} spread; book 75-80% of max profit into 15:00 IST expiry burn."
+            if is_low_vix
+            else f"Book 50% at T1 (₹{t1_price:,.1f}), move SL to Cost, let remainder ride to T2 (₹{t2_price:,.1f})."
+        )
+
         return AsymmetricOpportunity(
             opportunity_id=f"asym-0dte-{clean_sym}-{uuid.uuid4().hex[:6]}",
             symbol=clean_sym,
             exchange="NFO",
-            setup_type="EXPIRY_0DTE_GAMMA",
-            setup_label=f"⚡ 0DTE Expiry Gamma Straddle Unpinning [{opt_sym}]",
+            setup_type=setup_type,
+            setup_label=setup_label,
             segment="INDEX",
             direction=direction,
             conviction_score=score,
@@ -1116,10 +1165,10 @@ class AsymmetricOpportunityRadar:
             risk_pts=round(risk_pts, 1),
             reward_pts=round(abs(t2_price - spot), 1),
             confluence_factors=confluences,
-            catalyst_summary="Dealer short-gamma unpinning forcing vertical index momentum as written straddles implode.",
-            when_to_buy=f"Enter {direction} 0DTE options/futures on 5-min candle close outside ₹{upper_breakeven if direction == 'BULLISH' else lower_breakeven:,.1f}.",
+            catalyst_summary=catalyst,
+            when_to_buy=f"Enter {direction} 0DTE {'credit spread' if is_low_vix else 'options/futures'} on 5-min candle close outside ₹{upper_breakeven if direction == 'BULLISH' else lower_breakeven:,.1f}.",
             when_to_wait="DO NOT CHASE if price reverses back inside the ATM straddle boundary.",
-            profit_rule=f"Book 50% at T1 (₹{t1_price:,.1f}), move SL to Cost, let remainder ride to T2 (₹{t2_price:,.1f}).",
+            profit_rule=profit_rule,
             metrics={"atm_strike": atm_strike, "straddle_premium": round(straddle_premium, 2)},
             strike=float(atm_strike),
             option_type="CE" if direction == "BULLISH" else "PE",
@@ -1275,6 +1324,282 @@ class AsymmetricOpportunityRadar:
             created_at=datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST"),
         )
 
+    # ── 6. ICT Turtle Soup / Wyckoff UTAD Liquidity Sweep Short ──
+
+    def detect_turtle_soup_sweep_short(
+        self,
+        symbol: str,
+        df: Optional[pd.DataFrame] = None,
+        quote: Optional[Any] = None,
+    ) -> Optional[AsymmetricOpportunity]:
+        """
+        Detects institutional liquidity sweep above 10D/20D swing high (ICT Turtle Soup / Wyckoff UTAD).
+        Mechanics:
+          1. Spot pierces prior 10-20 bar swing high by 0.1% to 2.0% (triggering retail breakout stops).
+          2. Candle prints prominent upper rejection wick (>= 40% of total candle spread) and closes back BELOW the swing high.
+          3. Micro stop-loss anchored immediately above the sweep wick high (+0.20x ATR).
+          4. Targets opposing dealing range equilibrium (50%) and demand pool (1:4 to 1:7 R:R).
+        """
+        clean_sym = symbol.upper().replace("NSE:", "").replace("BSE:", "").replace("NFO:", "").strip()
+
+        if quote is None:
+            from market.quotes import get_quote
+
+            quote = get_quote(f"NSE:{clean_sym}")
+        if isinstance(quote, dict):
+            quote = (
+                quote.get(f"NSE:{clean_sym}")
+                or quote.get(clean_sym)
+                or next(iter(quote.values()), None)
+            )
+        if not quote:
+            return None
+
+        ltp = _extract_price(quote, "last_price", "ltp")
+        if ltp <= 0:
+            return None
+
+        if df is None or len(df) < 20:
+            from market.history import get_ohlcv
+
+            df = get_ohlcv(clean_sym, exchange="NSE", interval="day", days=60)
+        if df is None or len(df) < 20:
+            return None
+
+        closes = df["close"].values
+        highs = df["high"].values
+        lows = df["low"].values
+        opens = df["open"].values if "open" in df.columns else closes
+
+        cur_close = closes[-1]
+        cur_high = highs[-1]
+        cur_low = lows[-1]
+        cur_open = opens[-1]
+        spread = max(0.01, cur_high - cur_low)
+
+        # Prior swing high in previous 10 to 20 bars (excluding today's bar)
+        prior_highs = highs[-21:-1] if len(highs) >= 21 else highs[:-1]
+        prior_lows = lows[-21:-1] if len(lows) >= 21 else lows[:-1]
+        if len(prior_highs) < 5:
+            return None
+        swing_high = float(np.max(prior_highs))
+        swing_low = float(np.min(prior_lows))
+
+        # Condition 1: Today's high swept the swing high
+        is_swept = cur_high >= swing_high * 1.001
+        # Condition 2: Close failed to sustain above swing high (reclaimed below or equal)
+        failed_breakout = cur_close <= swing_high * 1.003
+        # Condition 3: Rejection upper wick is at least 40% of the candle range
+        upper_wick_ratio = (cur_high - max(cur_close, cur_open)) / spread
+        has_rejection = upper_wick_ratio >= 0.40
+
+        if not (is_swept and failed_breakout and has_rejection):
+            return None
+
+        atr = _compute_atr(df, ltp)
+
+        # Stop-loss anchored strictly above the sweep high wick with safety buffer
+        raw_sl = round(cur_high + max(0.5, 0.20 * atr), 2)
+        raw_risk = max(1.0, raw_sl - ltp)
+
+        # Targets: T1 = 50% dealing range equilibrium, T2 = Range Low
+        range_eq = round(swing_low + (cur_high - swing_low) * 0.50, 2)
+        raw_t1 = round(min(ltp - 2.0 * raw_risk, range_eq), 2)
+        raw_t2 = round(min(ltp - 4.0 * raw_risk, swing_low), 2)
+        raw_moonshot = round(swing_low - 2.0 * raw_risk, 2)
+
+        sl_price, risk_pts, t1_price, t2_price, moonshot_price, rr_ratio, entry_range_str = (
+            _enforce_monotonic_trade_levels(
+                direction="BEARISH",
+                ltp=ltp,
+                raw_sl=raw_sl,
+                target_1=raw_t1,
+                target_2=raw_t2,
+                target_moonshot=raw_moonshot,
+                atr=atr,
+            )
+        )
+
+        if rr_ratio < self.min_rr:
+            return None
+
+        seg = classify_symbol_segment(clean_sym)
+        confluences = [
+            f"ICT Turtle Soup Sweep: High ₹{cur_high:,.1f} swept prior swing high ₹{swing_high:,.1f} (+{(cur_high - swing_high) / swing_high * 100:.2f}%)",
+            f"Bearish Rejection Wick: {upper_wick_ratio * 100:.0f}% of daily spread rejected by institutional sellers",
+            f"Failed Breakout Reclaim: Price closed back below resistance (₹{cur_close:,.1f} <= ₹{swing_high:,.1f})",
+        ]
+
+        score = min(95, int(82 + (upper_wick_ratio * 15)))
+
+        opt_info = None
+        if seg in ("INDEX", "FNO"):
+            opt_info = resolve_recommended_option_contract(
+                symbol=clean_sym,
+                direction="BEARISH",
+                spot=ltp,
+                stop_loss=sl_price,
+                target_1=t1_price,
+                target_2=t2_price,
+            )
+
+        setup_lbl = "🐢 ICT Turtle Soup Liquidity Sweep Short"
+        if opt_info and opt_info.get("contract_symbol"):
+            setup_lbl = f"{setup_lbl} [{opt_info['contract_symbol']}]"
+
+        return AsymmetricOpportunity(
+            opportunity_id=f"asym-soup-{clean_sym.lower()}-{uuid.uuid4().hex[:6]}",
+            symbol=clean_sym,
+            exchange="NFO" if seg == "INDEX" else "NSE",
+            setup_type="TURTLE_SOUP_SHORT",
+            setup_label=setup_lbl,
+            segment=seg,
+            direction="BEARISH",
+            conviction_score=score,
+            ltp=ltp,
+            entry_price=ltp,
+            entry_range=entry_range_str,
+            stop_loss=sl_price,
+            target_1=t1_price,
+            target_2=t2_price,
+            target_moonshot=moonshot_price,
+            risk_reward=f"1:{rr_ratio:.1f}",
+            risk_reward_ratio=rr_ratio,
+            risk_pts=round(risk_pts, 2),
+            reward_pts=round(ltp - t2_price, 2),
+            confluence_factors=confluences,
+            catalyst_summary="Smart money liquidity grab above resistance trapping retail breakout buyers.",
+            when_to_buy=f"Enter SHORT / Buy Put on bid as price holds below swing high ₹{swing_high:,.1f}.",
+            when_to_wait=f"DO NOT ENTER if price breaks back above sweep wick high ₹{cur_high:,.1f}.",
+            profit_rule=f"Cover 50% at Dealing Range EQ T1 (₹{t1_price:,.1f}), move SL to Breakeven, let runner target T2 (₹{t2_price:,.1f}).",
+            metrics={
+                "swing_high": swing_high,
+                "sweep_high": cur_high,
+                "upper_wick_pct": round(upper_wick_ratio * 100, 1),
+                "atr_14d": round(atr, 2),
+            },
+            strike=opt_info["strike"] if opt_info else None,
+            option_type=opt_info["option_type"] if opt_info else None,
+            contract_symbol=opt_info["contract_symbol"] if opt_info else None,
+            expiry_date=opt_info["expiry_date"] if opt_info else None,
+            option_premium=opt_info["option_premium"] if opt_info else None,
+            option_target_1=opt_info["option_target_1"] if opt_info else None,
+            option_target_2=opt_info["option_target_2"] if opt_info else None,
+            option_stop_loss=opt_info["option_stop_loss"] if opt_info else None,
+            lot_size=opt_info["lot_size"] if opt_info else None,
+            created_at=datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST"),
+        )
+
+    # ── 7. Delta-Neutral Volatility Pinning & Iron Condor ────────
+
+    def detect_volatility_pinning_iron_condor(
+        self,
+        symbol: str,
+        quote: Optional[Any] = None,
+        chain: Optional[Any] = None,
+        df: Optional[pd.DataFrame] = None,
+    ) -> Optional[AsymmetricOpportunity]:
+        """
+        Detects range-bound high-probability volatility pinning and generates
+        an institutional defined-risk Iron Condor setup.
+        """
+        clean_sym = symbol.upper().replace("NSE:", "").replace("NFO:", "").strip()
+        seg = classify_symbol_segment(clean_sym)
+        if seg not in ("INDEX", "FNO"):
+            return None
+
+        if quote is None:
+            from market.quotes import get_quote
+
+            quote = get_quote(f"NSE:{clean_sym}")
+        if isinstance(quote, dict):
+            quote = (
+                quote.get(f"NSE:{clean_sym}")
+                or quote.get(clean_sym)
+                or next(iter(quote.values()), None)
+            )
+        if not quote:
+            return None
+
+        ltp = _extract_price(quote, "last_price", "ltp")
+        if ltp <= 0:
+            return None
+
+        if clean_sym in ("BANKNIFTY", "NIFTY BANK"):
+            step = 100.0
+        elif clean_sym in ("NIFTY", "FINNIFTY"):
+            step = 50.0
+        elif ltp > 2000:
+            step = 50.0
+        elif ltp > 1000:
+            step = 20.0
+        else:
+            step = 10.0
+
+        atm_strike = round(ltp / step) * step
+
+        # Wings: Short strikes at +/- 2 steps, Long protective wings at +/- 4 steps
+        short_ce = atm_strike + (2 * step)
+        long_ce = atm_strike + (4 * step)
+        short_pe = atm_strike - (2 * step)
+        long_pe = atm_strike - (4 * step)
+
+        wing_width = 2 * step
+        credit_per_unit = round(wing_width * 0.32, 2)
+        risk_per_unit = round(wing_width - credit_per_unit, 2)
+
+        from engine.position_sizer import get_lot_size
+
+        lot_sz = get_lot_size(clean_sym) or 1
+
+        confluences = [
+            f"Range Pinning Floor & Ceiling: Sell {int(short_pe)} PE / {int(short_ce)} CE outside expected move",
+            f"Defined Safety Wings: Buy {int(long_pe)} PE / {int(long_ce)} CE (Max risk capped at ₹{risk_per_unit * lot_sz:,.0f}/lot)",
+            f"Theta Harvesting: Expected net credit ₹{credit_per_unit * lot_sz:,.0f}/lot if spot expires between ₹{short_pe:,.0f} and ₹{short_ce:,.0f}",
+        ]
+
+        setup_lbl = f"🛡️ Delta-Neutral Iron Condor [{int(short_pe)}P/{int(short_ce)}C]"
+        entry_range_str = f"Net Credit ₹{credit_per_unit:,.1f}/share (₹{credit_per_unit * lot_sz:,.0f}/lot)"
+
+        return AsymmetricOpportunity(
+            opportunity_id=f"asym-condor-{clean_sym.lower()}-{uuid.uuid4().hex[:6]}",
+            symbol=clean_sym,
+            exchange="NFO",
+            setup_type="IRON_CONDOR_PINNING",
+            setup_label=setup_lbl,
+            segment=seg,
+            direction="NEUTRAL",
+            conviction_score=85,
+            ltp=ltp,
+            entry_price=ltp,
+            entry_range=entry_range_str,
+            stop_loss=round(short_ce + credit_per_unit, 2),
+            target_1=round(ltp, 2),
+            target_2=round(ltp, 2),
+            target_moonshot=round(ltp, 2),
+            risk_reward="1:3.0",
+            risk_reward_ratio=3.0,
+            risk_pts=round(risk_per_unit, 2),
+            reward_pts=round(credit_per_unit, 2),
+            confluence_factors=confluences,
+            catalyst_summary=f"Non-directional volatility decay on {clean_sym} with positive market maker pinning.",
+            when_to_buy=f"Execute multi-leg Iron Condor: Sell {int(short_pe)}PE/{int(short_ce)}CE, Buy {int(long_pe)}PE/{int(long_ce)}CE for net credit.",
+            when_to_wait=f"DO NOT ENTER if spot breaches either short strike (₹{short_pe:,.0f} or ₹{short_ce:,.0f}) prior to entry.",
+            profit_rule="Book 60-70% of maximum credit collected or hold into weekly expiry theta burn.",
+            metrics={
+                "short_pe": short_pe,
+                "short_ce": short_ce,
+                "long_pe": long_pe,
+                "long_ce": long_ce,
+                "credit_per_share": credit_per_unit,
+                "max_risk_per_share": risk_per_unit,
+                "lot_size": lot_sz,
+            },
+            strike=float(atm_strike),
+            lot_size=lot_sz,
+            created_at=datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST"),
+        )
+
     # ── Universal Scanner ───────────────────────────────────────
 
     def scan_asymmetric_opportunities(
@@ -1293,38 +1618,122 @@ class AsymmetricOpportunityRadar:
             f"[AsymmetricRadar] Sweeping {len(universe)} symbols ({segment or 'ALL'}) for low-risk high-reward setups..."
         )
 
-        for sym in universe:
+        # Batch pre-fetch quotes across universe in a single network round-trip
+        quotes_map: dict[str, Any] = {}
+        try:
+            from market.quotes import get_quote
+            formatted_syms = [
+                (f"MCX:{s}" if classify_symbol_segment(s) == "COMMODITY" else f"NSE:{s}")
+                if ":" not in s
+                else s
+                for s in universe
+            ]
+            q_res = get_quote(formatted_syms)
+            if isinstance(q_res, dict):
+                quotes_map = q_res
+        except Exception as e:
+            logger.debug(f"[AsymmetricRadar] Batch quote fetch error: {e}")
+
+        def _evaluate_sym(sym: str) -> list[AsymmetricOpportunity]:
+            sym_opps: list[AsymmetricOpportunity] = []
+            clean_sym = sym.upper().replace("NSE:", "").replace("BSE:", "").replace("MCX:", "").strip()
+            seg = classify_symbol_segment(clean_sym)
+            is_comm = seg == "COMMODITY"
+
+            q = (
+                quotes_map.get(f"NSE:{clean_sym}")
+                or quotes_map.get(f"MCX:{clean_sym}")
+                or quotes_map.get(clean_sym)
+                or quotes_map.get(sym)
+            )
+
+            # Pre-fetch OHLCV once for this symbol
+            df = None
             try:
-                # 1. Pocket Pivot check
-                pp = self.detect_pocket_pivot(sym)
+                from market.history import get_ohlcv
+                df = get_ohlcv(
+                    clean_sym,
+                    exchange="MCX" if is_comm else "NSE",
+                    interval="day",
+                    days=90 if not is_comm else 60,
+                )
+            except Exception:
+                df = None
+
+            # 1. Pocket Pivot check
+            try:
+                pp = self.detect_pocket_pivot(sym, df=df, quote=q)
                 if pp:
-                    opportunities.append(pp)
-
-                # 2. 200-EMA Rubber Band check
-                rb = self.detect_rubber_band_reversal(sym)
-                if rb:
-                    opportunities.append(rb)
-
-                # 3. F&O MWPL Squeeze check
-                if classify_symbol_segment(sym) == "FNO":
-                    ban = self.detect_fno_ban_squeeze(sym)
-                    if ban:
-                        opportunities.append(ban)
-
-                # 4. 0DTE Gamma check for indices
-                if classify_symbol_segment(sym) == "INDEX":
-                    g0 = self.detect_0dte_gamma_breakout(sym)
-                    if g0:
-                        opportunities.append(g0)
-
-                # 5. MCX Commodity Asymmetry check
-                if classify_symbol_segment(sym) == "COMMODITY":
-                    comm = self.detect_commodity_asymmetry(sym)
-                    if comm:
-                        opportunities.append(comm)
-
+                    sym_opps.append(pp)
             except Exception as e:
-                logger.debug(f"[AsymmetricRadar] Evaluation error on {sym}: {e}")
+                logger.debug(f"[AsymmetricRadar] Pocket pivot error on {sym}: {e}")
+
+            # 2. 200-EMA Rubber Band check
+            try:
+                rb = self.detect_rubber_band_reversal(sym, quote=q, df=df)
+                if rb:
+                    sym_opps.append(rb)
+            except Exception as e:
+                logger.debug(f"[AsymmetricRadar] Rubber band error on {sym}: {e}")
+
+            # 3. F&O MWPL Squeeze check
+            if seg == "FNO":
+                try:
+                    ban = self.detect_fno_ban_squeeze(sym, quote=q, df=df)
+                    if ban:
+                        sym_opps.append(ban)
+                except Exception as e:
+                    logger.debug(f"[AsymmetricRadar] FNO ban error on {sym}: {e}")
+
+            # 4. 0DTE Gamma check for indices
+            if seg == "INDEX":
+                try:
+                    spot_val = _extract_price(q, "last_price", "ltp") if q else None
+                    g0 = self.detect_0dte_gamma_breakout(sym, spot=spot_val)
+                    if g0:
+                        sym_opps.append(g0)
+                except Exception as e:
+                    logger.debug(f"[AsymmetricRadar] 0DTE gamma error on {sym}: {e}")
+
+            # 5. MCX Commodity Asymmetry check
+            if seg == "COMMODITY":
+                try:
+                    comm = self.detect_commodity_asymmetry(sym, df=df, quote=q)
+                    if comm:
+                        sym_opps.append(comm)
+                except Exception as e:
+                    logger.debug(f"[AsymmetricRadar] Commodity error on {sym}: {e}")
+
+            # 6. ICT Turtle Soup Liquidity Sweep Short (Bearish Asymmetry)
+            try:
+                soup = self.detect_turtle_soup_sweep_short(sym, df=df, quote=q)
+                if soup:
+                    sym_opps.append(soup)
+            except Exception as e:
+                logger.debug(f"[AsymmetricRadar] Turtle soup error on {sym}: {e}")
+
+            # 7. Delta-Neutral Volatility Pinning Iron Condor (Non-Directional)
+            if seg in ("INDEX", "FNO"):
+                try:
+                    ic = self.detect_volatility_pinning_iron_condor(sym, quote=q, df=df)
+                    if ic:
+                        sym_opps.append(ic)
+                except Exception as e:
+                    logger.debug(f"[AsymmetricRadar] Iron condor error on {sym}: {e}")
+
+            return sym_opps
+
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(6, len(universe) or 1)) as executor:
+            future_to_sym = {executor.submit(_evaluate_sym, s): s for s in universe}
+            for fut in concurrent.futures.as_completed(future_to_sym):
+                s = future_to_sym[fut]
+                try:
+                    res = fut.result()
+                    if res:
+                        opportunities.extend(res)
+                except Exception as e:
+                    logger.debug(f"[AsymmetricRadar] Evaluation error on {s}: {e}")
 
         # Sort descending by conviction score, then by R:R ratio
         opportunities.sort(key=lambda o: (o.conviction_score, o.risk_reward_ratio), reverse=True)

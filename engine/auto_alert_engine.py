@@ -338,6 +338,24 @@ class AutoAlertEngine:
             except Exception:
                 pass
 
+        # 00c. Quantitative State Snapshot & Traceability
+        if not getattr(alert, "quant_snapshot", None):
+            vix_val = None
+            try:
+                from market.indices import get_vix
+                vix_val = get_vix()
+            except Exception:
+                pass
+            alert.quant_snapshot = {
+                "ltp": alert.ltp,
+                "trigger_level": alert.trigger_level,
+                "stop_loss": alert.stop_loss,
+                "target_level": alert.target_level,
+                "vix": vix_val,
+                "feed_provenance": (alert.order_flow_signals or {}).get("provenance", "LIVE_FEED"),
+                "recorded_at": datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST"),
+            }
+
         # 0a. Market Session Timing Gate (Opening Range Discovery & Closing Cutoff)
         is_test_runner = (
             is_sim
@@ -668,36 +686,116 @@ class AutoAlertEngine:
                         None,
                     )
                     if active_diff_detector:
-                        logger.info(
-                            f"[AutoAlertEngine] 🛑 Suppressed redundant {alert.alert_type} for {clean_target}: "
-                            f"Active {active_diff_detector.alert_type} ({active_diff_detector.stage}) trade already in flight."
+                        CONFLUENCE_RADARS = {
+                            "PRECURSOR_RADAR",
+                            "ASYMMETRIC_OPPORTUNITY",
+                            "POCKET_PIVOT",
+                            "SMC_SWEEP",
+                            "VOLUME_PROFILE",
+                            "SQUEEZE_BREAKOUT",
+                        }
+                        is_orthogonal_confluence = (
+                            active_diff_detector.alert_type in CONFLUENCE_RADARS
+                            and alert.alert_type in CONFLUENCE_RADARS
                         )
-                        return False
 
-                    # Cooldown check: prevent duplicate same-direction alerts for the same stock today
-                    sym_sig = f"{clean_target}:{alert.direction}"
-                    last_sym_time = self._cooldowns.get(sym_sig, 0.0)
-                    if (now - last_sym_time) < self._cooldown_ttl:
-                        has_active_today = any(
-                            a.symbol.replace("NSE:", "")
-                            .replace("BSE:", "")
-                            .replace("MCX:", "")
-                            .replace("NFO:", "")
-                            .strip()
-                            .upper()
-                            == clean_target
-                            and a.direction == alert.direction
-                            and a.is_active
-                            and a.alert_id != alert.alert_id
-                            and (_alert_date(a) is None or _alert_date(a) == alert_dt_date)
-                            for a in self._alerts
-                        )
-                        if has_active_today:
+                        if is_orthogonal_confluence:
+                            # Cross-Radar Confluence Aggregation: Elevate active alert to multi-model confluence
+                            if not isinstance(active_diff_detector.metrics, dict):
+                                active_diff_detector.metrics = {}
+                            conf_types = active_diff_detector.metrics.setdefault(
+                                "confluence_types", [active_diff_detector.alert_type]
+                            )
+                            if alert.alert_type not in conf_types:
+                                conf_types.append(alert.alert_type)
+                                old_conf = active_diff_detector.confidence
+                                active_diff_detector.confidence = min(
+                                    99, max(active_diff_detector.confidence, alert.confidence) + 6
+                                )
+                                catalysts = active_diff_detector.metrics.setdefault("confluence_catalysts", [])
+                                if alert.summary and alert.summary not in catalysts:
+                                    catalysts.append(alert.summary)
+
+                                # Actionable plan & levels inheritance if active plan was incomplete
+                                if not active_diff_detector.actionable_plan and alert.actionable_plan:
+                                    active_diff_detector.actionable_plan = dict(alert.actionable_plan)
+                                elif alert.actionable_plan and isinstance(alert.actionable_plan, dict):
+                                    for k, v in alert.actionable_plan.items():
+                                        if k not in active_diff_detector.actionable_plan or not active_diff_detector.actionable_plan[k]:
+                                            active_diff_detector.actionable_plan[k] = v
+
+                                if (not active_diff_detector.stop_loss or active_diff_detector.stop_loss <= 0) and alert.stop_loss:
+                                    active_diff_detector.stop_loss = alert.stop_loss
+                                if (not active_diff_detector.target_level or active_diff_detector.target_level <= 0) and alert.target_level:
+                                    active_diff_detector.target_level = alert.target_level
+
+                                # If incoming is IGNITED while active was EARLY_WARNING, upgrade stage
+                                if active_diff_detector.stage == "EARLY_WARNING" and alert.stage == "IGNITED":
+                                    active_diff_detector.stage = "IGNITED"
+                                    active_diff_detector.trigger_level = alert.trigger_level
+
+                                types_str = " + ".join([t.replace("_", " ") for t in conf_types])
+                                active_diff_detector.headline = (
+                                    f"💎 [CONFLUENCE APEX] {clean_target}: {types_str} @ ₹{alert.ltp:,.1f}"
+                                )
+                                logger.info(
+                                    f"[AutoAlertEngine] 💎 Confluence Apex formed for {clean_target}: "
+                                    f"Added {alert.alert_type} to existing {active_diff_detector.alert_type} "
+                                    f"(Conviction boosted: {old_conf} -> {active_diff_detector.confidence})"
+                                )
+                                self._save()
+                                to_dispatch = active_diff_detector
+                                try:
+                                    from web.sse import event_bus
+                                    event_bus.publish_sync(
+                                        "alerts",
+                                        {
+                                            "type": "alert_confluence_update",
+                                            "alert": active_diff_detector.to_dict(),
+                                        },
+                                    )
+                                except Exception:
+                                    pass
+                            else:
+                                logger.info(
+                                    f"[AutoAlertEngine] 🛑 Suppressed redundant {alert.alert_type} for {clean_target}: "
+                                    f"Active {active_diff_detector.alert_type} ({active_diff_detector.stage}) already tracking."
+                                )
+                            if not to_dispatch:
+                                return False
+                        else:
+                            # Cross-Detector Active Trade Mutex: Suppress duplicate execution triggers
                             logger.info(
-                                f"[AutoAlertEngine] 🛑 Suppressed redundant alert for {clean_target} ({alert.alert_type}): "
-                                f"Active {alert.direction} trade already running within {int(self._cooldown_ttl / 60)}m window."
+                                f"[AutoAlertEngine] 🛑 Active trade mutex: Suppressed {alert.alert_type} for {clean_target} "
+                                f"(Already tracking active {active_diff_detector.alert_type} in {alert.direction} direction)."
                             )
                             return False
+
+                    if not to_dispatch:
+                        # Cooldown check: prevent duplicate same-direction alerts for the same stock today
+                        sym_sig = f"{clean_target}:{alert.direction}"
+                        last_sym_time = self._cooldowns.get(sym_sig, 0.0)
+                        if (now - last_sym_time) < self._cooldown_ttl:
+                            has_active_today = any(
+                                a.symbol.replace("NSE:", "")
+                                .replace("BSE:", "")
+                                .replace("MCX:", "")
+                                .replace("NFO:", "")
+                                .strip()
+                                .upper()
+                                == clean_target
+                                and a.direction == alert.direction
+                                and a.is_active
+                                and a.alert_id != alert.alert_id
+                                and (_alert_date(a) is None or _alert_date(a) == alert_dt_date)
+                                for a in self._alerts
+                            )
+                            if has_active_today:
+                                logger.info(
+                                    f"[AutoAlertEngine] 🛑 Suppressed redundant alert for {clean_target} ({alert.alert_type}): "
+                                    f"Active {alert.direction} trade already running within {int(self._cooldown_ttl / 60)}m window."
+                                )
+                                return False
 
                 # 2bb. Base Commodity Canonicalization Gate:
                 # Suppress mini/micro contract duplicates if base commodity has an active trade or recent alert
@@ -708,7 +806,7 @@ class AutoAlertEngine:
                     "GOLDGUINEA": "GOLD",
                     "CRUDEOILM": "CRUDEOIL",
                 }
-                if not is_sim and clean_target in COMMODITY_CANONICAL_MAP and alert.stage in ("IGNITED", "EARLY_WARNING"):
+                if not is_sim and not to_dispatch and clean_target in COMMODITY_CANONICAL_MAP and alert.stage in ("IGNITED", "EARLY_WARNING"):
                     root_comm = COMMODITY_CANONICAL_MAP[clean_target]
                     has_root_active = any(
                         a.symbol.strip().upper() == root_comm
@@ -727,19 +825,20 @@ class AutoAlertEngine:
 
                 # 2bc. Strict 'On/Before Time' No-Chase Guard:
                 # Disqualify setups where the market price has already run past the defined no-chase boundary.
-                if not is_sim and alert.no_chase_boundary and alert.ltp > 0 and alert.stage in ("IGNITED", "EARLY_WARNING"):
-                    is_option = bool(
-                        alert.option_type
-                        or alert.alert_type in ("OPTIONS_MOMENTUM", "GAMMA_BLAST")
-                        or (alert.segment in ("FNO", "OPTIONS") and (alert.strike or alert.option_type))
+                if not is_sim and not to_dispatch and alert.no_chase_boundary and alert.ltp > 0 and alert.stage in ("IGNITED", "EARLY_WARNING"):
+                    is_plan_opt = (alert.actionable_plan or {}).get("instrument_type") == "OPTION"
+                    is_opt_prem = is_alert_option_premium_level(alert) or (
+                        is_plan_opt and alert.option_premium and abs(alert.trigger_level - alert.option_premium) < 0.01
                     )
                     act_str = str((alert.actionable_plan or {}).get("action", "")).strip().upper()
-                    if act_str.startswith("SELL") or "SHORT" in act_str or "WRITE" in act_str:
+                    if is_opt_prem:
+                        is_short_pos = act_str.startswith("SELL") or "SHORT" in act_str or "WRITE" in act_str
+                    elif act_str in ("BUY_PE", "BUY_PUT") or alert.direction in ("BEARISH", "SHORT", "SELL"):
                         is_short_pos = True
-                    elif is_option:
-                        is_short_pos = False  # Long option: premium expected to rise
-                    elif alert.direction in ("BEARISH", "SHORT", "SELL"):
-                        is_short_pos = True
+                    elif act_str.startswith("BUY") or "LONG" in act_str or alert.direction in ("BULLISH", "LONG"):
+                        is_short_pos = False
+                    elif alert.target_level > 0 and alert.target_level != alert.trigger_level:
+                        is_short_pos = alert.target_level < alert.trigger_level
                     else:
                         is_short_pos = False
 
@@ -758,7 +857,7 @@ class AutoAlertEngine:
 
                 # 2c. Learning Engine Invalidation Lockout Gate:
                 # Prevent re-triggering on assets that were stopped out / invalidated in the current session
-                if not is_sim:
+                if not is_sim and not to_dispatch:
                     try:
                         from engine.learning_engine import pattern_learning_engine
 
@@ -773,6 +872,11 @@ class AutoAlertEngine:
                             return False
                     except Exception as e:
                         logger.debug(f"[AutoAlertEngine] Error checking learning lockout: {e}")
+
+        # If an existing active alert was upgraded or aggregated with multi-radar confluence, dispatch immediately!
+        if to_dispatch:
+            self._dispatch(to_dispatch)
+            return True
 
         # 3. Only if alert passed deduplication & cooldown: sanitize actionable plan
         if (
@@ -790,37 +894,78 @@ class AutoAlertEngine:
 
                         act = str(alert.actionable_plan.get("action", "")).upper()
                         is_opt = is_alert_option_premium_level(alert)
+                        is_plan_opt = (
+                            is_opt
+                            or alert.actionable_plan.get("instrument_type") == "OPTION"
+                            or "OPTION" in str(alert.actionable_plan.get("preferred_vehicle", "")).upper()
+                            or alert.option_premium is not None
+                            or (
+                                alert.actionable_plan.get("raw_contract")
+                                and any(x in str(alert.actionable_plan.get("raw_contract")).upper() for x in ("CE", "PE"))
+                            )
+                        )
+
+                        # Isolate price coordinate system:
+                        # If actionable plan is for an option vehicle while alert price levels are in spot/futures space,
+                        # reference levels must be sourced from the option plan, NOT the underlying stock!
+                        if is_plan_opt and not is_opt:
+                            opt_sl_str = str(alert.actionable_plan.get("stop_loss", ""))
+                            m_sl = re.findall(r"[\d,]+(?:\.\d+)?", opt_sl_str)
+                            ref_sl = (
+                                float(m_sl[0].replace(",", ""))
+                                if m_sl
+                                else float(alert.actionable_plan.get("trade_plan", {}).get("invalidation_stop") or 0.0)
+                            )
+                            ref_ltp = float(
+                                alert.option_premium
+                                or alert.actionable_plan.get("trade_plan", {}).get("entry_price")
+                                or ((lower_val + upper_val) / 2.0)
+                            )
+                            opt_t_str = str(alert.actionable_plan.get("target", ""))
+                            m_t = re.findall(r"[\d,]+(?:\.\d+)?", opt_t_str)
+                            ref_target = (
+                                float(m_t[0].replace(",", ""))
+                                if m_t
+                                else float(alert.actionable_plan.get("trade_plan", {}).get("target_1") or 0.0)
+                            )
+                            if ref_sl <= 0:
+                                ref_sl = round(max(0.1, ref_ltp * 0.72), 1)
+                        else:
+                            ref_sl = alert.stop_loss
+                            ref_ltp = alert.ltp
+                            ref_target = alert.target_level
+
                         is_long = (
                             alert.direction in ("BULLISH", "LONG", "BUY")
                             or "BUY" in act
-                            or (is_opt and "SELL" not in act and "WRITE" not in act)
+                            or (is_plan_opt and "SELL" not in act and "WRITE" not in act)
                         )
 
                         if is_long:
                             # Long position (Long Equity, Long Call CE, or Long Put PE):
                             # Entry Range must be strictly above Stop-Loss (StopLoss < Entry <= Target)
-                            if lower_val <= alert.stop_loss or lower_val <= 0:
+                            if lower_val <= ref_sl or lower_val <= 0:
                                 step = (
-                                    max(0.5, (alert.ltp - alert.stop_loss) * 0.15)
-                                    if alert.ltp > alert.stop_loss
-                                    else max(0.5, alert.stop_loss * 0.05)
+                                    max(0.5, (ref_ltp - ref_sl) * 0.15)
+                                    if ref_ltp > ref_sl
+                                    else max(0.5, ref_sl * 0.05)
                                 )
-                                corr_lower = round(alert.stop_loss + step, 1)
+                                corr_lower = round(ref_sl + step, 1)
                                 corr_upper = max(upper_val, round(corr_lower + max(0.5, step), 1))
-                                if alert.ltp > 0:
-                                    corr_lower = min(corr_lower, round(alert.ltp * 0.98, 1))
-                                    corr_upper = max(corr_lower + 0.1, round(alert.ltp * 1.02, 1))
+                                if ref_ltp > 0:
+                                    corr_lower = min(corr_lower, round(ref_ltp * 0.98, 1))
+                                    corr_upper = max(corr_lower + 0.1, round(ref_ltp * 1.02, 1))
                                     # Strict target clamping: Long entry range must NEVER exceed or touch Target 1
-                                    if alert.target_level > alert.ltp:
+                                    if ref_target > ref_ltp:
                                         max_allowed_upper = round(
-                                            alert.ltp + 0.35 * (alert.target_level - alert.ltp), 1
+                                            ref_ltp + 0.35 * (ref_target - ref_ltp), 1
                                         )
                                         corr_upper = min(
                                             corr_upper,
                                             max(corr_lower + 0.1, max_allowed_upper),
                                         )
-                                    if corr_lower <= alert.stop_loss:
-                                        corr_lower = round(alert.stop_loss + 0.5, 1)
+                                    if corr_lower <= ref_sl:
+                                        corr_lower = round(ref_sl + 0.5, 1)
                                         corr_upper = max(corr_lower + 0.5, corr_upper)
                                 alert.actionable_plan["entry_range"] = (
                                     f"₹{corr_lower:,.1f} – ₹{corr_upper:,.1f}"
@@ -828,23 +973,23 @@ class AutoAlertEngine:
                         else:
                             # Short position (Cash Equity / Futures Short):
                             # Entry Range must be strictly below Stop-Loss (Target < Entry < StopLoss)
-                            if upper_val >= alert.stop_loss or upper_val <= 0:
+                            if upper_val >= ref_sl or upper_val <= 0:
                                 step = (
-                                    max(0.5, (alert.stop_loss - alert.ltp) * 0.15)
-                                    if alert.stop_loss > alert.ltp
-                                    else max(0.5, alert.stop_loss * 0.05)
+                                    max(0.5, (ref_sl - ref_ltp) * 0.15)
+                                    if ref_sl > ref_ltp
+                                    else max(0.5, ref_sl * 0.05)
                                 )
-                                corr_upper = round(alert.stop_loss - step, 1)
+                                corr_upper = round(ref_sl - step, 1)
                                 corr_lower = min(lower_val, round(corr_upper - max(0.5, step), 1))
                                 if corr_lower <= 0:
                                     corr_lower = max(0.5, round(corr_upper * 0.95, 1))
-                                if alert.ltp > 0:
-                                    corr_upper = max(corr_upper, round(alert.ltp * 1.02, 1))
-                                    corr_lower = min(corr_lower, round(alert.ltp * 0.98, 1))
+                                if ref_ltp > 0:
+                                    corr_upper = max(corr_upper, round(ref_ltp * 1.02, 1))
+                                    corr_lower = min(corr_lower, round(ref_ltp * 0.98, 1))
                                     # Strict target clamping: Short entry range must NEVER drop below or touch Target 1
-                                    if 0 < alert.target_level < alert.ltp:
+                                    if 0 < ref_target < ref_ltp:
                                         min_allowed_lower = round(
-                                            alert.ltp - 0.35 * (alert.ltp - alert.target_level), 1
+                                            ref_ltp - 0.35 * (ref_ltp - ref_target), 1
                                         )
                                         corr_lower = max(
                                             corr_lower,
@@ -1671,9 +1816,59 @@ class AutoAlertEngine:
                         else "[REAL/LIVE]"
                     )
 
+                    cur_disp_p = cur_quote_ltp or alert.ltp or 0.0
                     if eval_res.new_milestone in ("T0_5_ACHIEVED", "T1_ACHIEVED", "T2_ACHIEVED", "TARGET_ACHIEVED"):
                         if eval_res.new_milestone not in alert.achieved_milestones:
                             alert.achieved_milestones.append(eval_res.new_milestone)
+                            try:
+                                from engine.learning_engine import pattern_learning_engine
+
+                                outcome_map = {
+                                    "T0_5_ACHIEVED": ("WIN_T0_5", 1.0),
+                                    "T1_ACHIEVED": ("WIN_T1", 2.0),
+                                    "T2_ACHIEVED": ("WIN_T2", 3.5),
+                                    "TARGET_ACHIEVED": (
+                                        "WIN_TARGET",
+                                        max(2.5, float(eval_res.r_multiple or 4.0)),
+                                    ),
+                                }
+                                outcome_str, r_mult = outcome_map.get(
+                                    eval_res.new_milestone, ("WIN_TARGET", 2.0)
+                                )
+                                is_opt_trade = is_alert_option_premium_level(alert) or (
+                                    alert.actionable_plan or {}
+                                ).get("instrument_type") == "OPTION"
+                                if is_opt_trade:
+                                    trade_entry = float(
+                                        alert.option_premium
+                                        or (alert.actionable_plan or {})
+                                        .get("trade_plan", {})
+                                        .get("entry_price")
+                                        or alert.trigger_level
+                                        or cur_disp_p
+                                    )
+                                else:
+                                    trade_entry = float(alert.trigger_level or alert.ltp or cur_disp_p)
+
+                                m_factors = (
+                                    (alert.metrics or {}).get("matched_factors")
+                                    or (alert.metrics or {}).get("confluence_types")
+                                    or [alert.alert_type]
+                                )
+                                pattern_learning_engine.record_trade_outcome(
+                                    alert_id=alert.alert_id,
+                                    symbol=alert.symbol,
+                                    archetype=alert.alert_type,
+                                    entry_price=trade_entry,
+                                    exit_price=float(cur_disp_p),
+                                    outcome=outcome_str,
+                                    realized_rr=float(r_mult),
+                                    factors_present=m_factors,
+                                )
+                            except Exception as e_learn:
+                                logger.debug(
+                                    f"[AutoAlertEngine] Error recording milestone outcome to learning engine: {e_learn}"
+                                )
 
                     inst_label = alert.symbol
                     if alert.contract_symbol:
@@ -2311,10 +2506,15 @@ class AutoAlertEngine:
                     seg_tag = f"[{c.segment}]"
                     headline = f"⚡ PRECURSOR RADAR {seg_tag}: {c.symbol} Coiling at ₹{c.ltp:,.1f} ({c.conviction_score}/100)"
                     summary = f"{seg_tag} Pre-ignition coiling: {'; '.join(c.matched_factors[:2])}. Entry: {c.entry_range}."
-                    # Provenance gate: mark as TEST if LTP is zero/mock
+                    # Provenance & Session gate: mark as TEST if LTP is zero/mock; EOD_SCAN if session closed
+                    from market.calendar import is_market_open
+                    is_mkt_open = is_market_open(c.exchange or "NSE")
                     is_authentic_pr = bool(
                         c.ltp and c.ltp > 0 and not getattr(c, "_is_mock", False)
                     )
+                    pr_env = "LIVE" if (is_authentic_pr and is_mkt_open) else ("EOD_SCAN" if not is_mkt_open else "TEST")
+                    pr_live = is_authentic_pr and is_mkt_open
+
                     alert = AutoAlert(
                         alert_id=alert_id,
                         alert_type="PRECURSOR_RADAR",
@@ -2330,8 +2530,9 @@ class AutoAlertEngine:
                         stop_loss=c.stop_loss,
                         confidence=c.conviction_score,
                         created_at=now_iso,
-                        is_live=is_authentic_pr,
-                        environment="LIVE" if is_authentic_pr else "TEST",
+                        is_live=pr_live,
+                        environment=pr_env,
+                        market_status="LIVE" if is_mkt_open else "SESSION_CLOSED",
                         metrics={
                             "conviction_score": c.conviction_score,
                             "segment": c.segment,
@@ -2915,7 +3116,9 @@ class AutoAlertEngine:
             now_iso = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
 
             for opp in opps:
-                alert_id = f"auto-asym-{opp.symbol}-{uuid.uuid4().hex[:6]}"
+                clean_opp_sym = opp.symbol.lower().replace("nse:", "").replace("mcx:", "").strip()
+                clean_setup = (getattr(opp, "setup_type", "") or "opp").lower().replace("_", "-")
+                alert_id = f"asym-{clean_opp_sym}-{clean_setup}-{datetime.now(IST).strftime('%Y%m%d')}"
                 headline = f"🎯 [LOW RISK : HIGH REWARD] {opp.setup_label}: {opp.symbol} (R:R {opp.risk_reward})"
                 summary = (
                     f"{opp.catalyst_summary} Invalidation SL: ₹{opp.stop_loss:,.1f} | "
@@ -5134,6 +5337,22 @@ class AutoAlertEngine:
             if target_alert:
                 self._save()
         return target_alert
+
+    def archive_all_invalidated(self, reason: Optional[str] = None) -> int:
+        """Bulk archives all currently invalidated auto-alerts."""
+        now_iso = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
+        archived_count = 0
+        with self._lock:
+            for alert in self._alerts:
+                if (alert.is_invalidated or alert.stage == "INVALIDATED") and not alert.is_archived:
+                    alert.is_archived = True
+                    alert.archived_at = now_iso
+                    alert.archive_reason = reason or "Bulk archived invalidated setups"
+                    archived_count += 1
+            if archived_count > 0:
+                self._save()
+        logger.info(f"[AutoAlertEngine] Bulk archived {archived_count} invalidated setups.")
+        return archived_count
 
     def _prune_expired_archived_unlocked(self, max_age_days: int = 1) -> int:
         """

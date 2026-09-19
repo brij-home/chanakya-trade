@@ -1239,6 +1239,70 @@ def test_archive_alert_by_id():
     assert res2.is_active is True
 
 
+def test_archive_all_invalidated():
+    """Verify archive_all_invalidated bulk archives all invalidated alerts while leaving valid active ones alone."""
+    from engine.auto_alert_engine import AutoAlert, AutoAlertEngine
+
+    engine = AutoAlertEngine()
+    a1 = AutoAlert(
+        alert_id="inv-1",
+        alert_type="COMMODITY_MOMENTUM",
+        stage="INVALIDATED",
+        symbol="GOLD",
+        exchange="MCX",
+        direction="BULLISH",
+        headline="Gold SL Breached",
+        summary="Invalidated",
+        ltp=73500.0,
+        trigger_level=74000.0,
+        target_level=75000.0,
+        stop_loss=73800.0,
+        is_invalidated=True,
+        is_archived=False,
+    )
+    a2 = AutoAlert(
+        alert_id="inv-2",
+        alert_type="SQUEEZE_BREAKOUT",
+        stage="INVALIDATED",
+        symbol="CRUDEOIL",
+        exchange="MCX",
+        direction="BULLISH",
+        headline="Crude SL Breached",
+        summary="Invalidated",
+        ltp=5800.0,
+        trigger_level=5900.0,
+        target_level=6100.0,
+        stop_loss=5850.0,
+        is_invalidated=True,
+        is_archived=False,
+    )
+    a3 = AutoAlert(
+        alert_id="act-1",
+        alert_type="GAMMA_BLAST",
+        stage="IGNITED",
+        symbol="NIFTY",
+        exchange="NSE",
+        direction="BULLISH",
+        headline="Nifty Gamma Blast",
+        summary="Active",
+        ltp=25000.0,
+        trigger_level=24950.0,
+        target_level=25200.0,
+        stop_loss=24900.0,
+        is_invalidated=False,
+        is_archived=False,
+    )
+    with engine._lock:
+        engine._alerts = [a1, a2, a3]
+
+    count = engine.archive_all_invalidated("Bulk archive test")
+    assert count == 2
+    assert a1.is_archived is True
+    assert a2.is_archived is True
+    assert a3.is_archived is False
+    assert a1.archive_reason == "Bulk archive test"
+
+
 def test_cleanup_archived_records_leaves_active_trades_intact():
     """Verify cleanup_archived_records deletes only inactive records older than max_age_days, NEVER active trades."""
     from datetime import datetime, timedelta, timezone

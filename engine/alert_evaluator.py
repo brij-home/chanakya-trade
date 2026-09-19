@@ -32,10 +32,14 @@ def evaluate_alert_invalidation(
 
     is_option = is_alert_option_premium_level(alert)
 
+    session_low: Optional[float] = None
+    session_high: Optional[float] = None
+
     # Determine current LTP if not provided
     if current_ltp is None or current_ltp <= 0:
+        lookup_sym = ""
         try:
-            from market.quotes import get_ltp
+            from market.quotes import get_quote, get_ltp
 
             if is_option:
                 lookup_sym = getattr(alert, "contract_symbol", None) or (
@@ -45,9 +49,20 @@ def evaluate_alert_invalidation(
                 lookup_sym = (
                     f"{alert.exchange}:{alert.symbol}" if ":" not in alert.symbol else alert.symbol
                 )
-            current_ltp = get_ltp(lookup_sym)
+            q = get_quote(lookup_sym)
+            q_obj = q.get(lookup_sym) or (list(q.values())[0] if q else None)
+            if q_obj:
+                current_ltp = getattr(q_obj, "last_price", None) or getattr(q_obj, "price", None)
+                session_low = getattr(q_obj, "low", None)
+                session_high = getattr(q_obj, "high", None)
+            else:
+                current_ltp = get_ltp(lookup_sym)
         except Exception:
-            current_ltp = None
+            try:
+                from market.quotes import get_ltp
+                current_ltp = get_ltp(lookup_sym) if lookup_sym else None
+            except Exception:
+                current_ltp = None
 
     if current_ltp is None or current_ltp <= 0:
         return None  # Cannot evaluate without live price quote
@@ -128,6 +143,7 @@ def evaluate_alert_invalidation(
                 else 0.10
             )
 
+            is_live_alert = getattr(alert, "is_live", True) and getattr(alert, "environment", "") != "TEST"
             if alert.direction == "BEARISH":
                 # For short positions, stop loss is above entry
                 ref_entry = alert.ltp or alert.trigger_level or 0.0
@@ -137,11 +153,21 @@ def evaluate_alert_invalidation(
                             f"Price surged to ₹{current_ltp:,.1f} "
                             f"(breached stop-loss ₹{alert.stop_loss:,.1f}). Bearish thesis invalidated."
                         )
+                    if session_high and session_high > (alert.stop_loss + vol_noise_margin) and is_live_alert:
+                        return (
+                            f"Session high surged to ₹{session_high:,.1f} "
+                            f"(breached stop-loss ceiling ₹{alert.stop_loss:,.1f}). Bearish thesis invalidated."
+                        )
                 else:
                     if current_ltp < (alert.stop_loss - vol_noise_margin):
                         return (
                             f"Price dropped to ₹{current_ltp:,.1f} "
                             f"(breached stop-loss ₹{alert.stop_loss:,.1f}). Bearish thesis invalidated."
+                        )
+                    if session_low and session_low < (alert.stop_loss - vol_noise_margin) and is_live_alert:
+                        return (
+                            f"Session low dropped to ₹{session_low:,.1f} "
+                            f"(breached stop-loss floor ₹{alert.stop_loss:,.1f}). Bearish thesis invalidated."
                         )
             else:
                 # Bullish / Neutral long positions
@@ -149,6 +175,11 @@ def evaluate_alert_invalidation(
                     return (
                         f"Price dropped to ₹{current_ltp:,.1f} "
                         f"(breached stop-loss ₹{alert.stop_loss:,.1f}). Bullish thesis invalidated."
+                    )
+                if session_low and session_low < (alert.stop_loss - vol_noise_margin) and is_live_alert:
+                    return (
+                        f"Session low plunged to ₹{session_low:,.1f} "
+                        f"(breached stop-loss floor ₹{alert.stop_loss:,.1f}). Bullish thesis invalidated."
                     )
 
     # 2. Detector-Specific Structural Breakdown

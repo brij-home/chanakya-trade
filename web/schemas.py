@@ -97,6 +97,11 @@ class AlertRemoveRequest(BaseModel):
     alert_id: str
 
 
+class AlertInvalidateRequest(BaseModel):
+    alert_id: str
+    reason: Optional[str] = "Manually invalidated by user"
+
+
 class AutoAlertsListRequest(BaseModel):
     model_config = ConfigDict(extra="ignore")
     limit: int = 50

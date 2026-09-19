@@ -1762,13 +1762,30 @@ def render_asymmetric_alert(data: dict[str, Any], in_market: bool = True) -> str
         else ""
     )
 
+    direction = str(data.get("direction") or (data.get("metrics") or {}).get("direction") or "BULLISH").upper()
+    setup_type = str(data.get("setup_type") or (data.get("metrics") or {}).get("setup_type") or "").upper()
+    is_bearish = direction in ("BEARISH", "SHORT", "SELL") or "SHORT" in setup_type
+    is_neutral = direction in ("NEUTRAL", "DELTA_NEUTRAL") or "IRON_CONDOR" in setup_type or "PINNING" in setup_type
+
+    if "TURTLE_SOUP" in setup_type:
+        setup_title_tag = "TURTLE SOUP SHORT"
+    elif "IRON_CONDOR" in setup_type:
+        setup_title_tag = "IRON CONDOR PINNING (DELTA-NEUTRAL)"
+    elif is_bearish:
+        setup_title_tag = "ASYMMETRIC SHORT SETUP"
+    elif is_neutral:
+        setup_title_tag = "ASYMMETRIC DELTA-NEUTRAL SETUP"
+    else:
+        setup_title_tag = "ASYMMETRIC SETUP"
+
     if not in_market:
-        header_line = f"🌙 <b>{env_tag} POST-MARKET EOD WATCHLIST [{rr_display} R:R]</b>"
+        header_line = f"🌙 <b>{env_tag} POST-MARKET EOD WATCHLIST — {setup_title_tag} [{rr_display} R:R]</b>"
         off_note = (
             "\n\n⏸️ <i>Market is closed. Setup calibrated for tomorrow's opening gameplan.</i>"
         )
     else:
-        header_line = f"🎯 <b>{env_tag} ASYMMETRIC SETUP [{rr_display} R:R]</b>"
+        icon = "🦅" if is_neutral else ("🔻" if is_bearish else "🎯")
+        header_line = f"{icon} <b>{env_tag} {setup_title_tag} [{rr_display} R:R]</b>"
         off_note = ""
 
     is_deriv = bool(
@@ -1826,19 +1843,69 @@ def render_asymmetric_alert(data: dict[str, Any], in_market: bool = True) -> str
             else f"\n• <b>F&O Alternative:</b> <code>{opt_sym}</code>{lot_tag}"
         )
 
-    msg = (
-        f"{header_line}\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"<b>{sym} [{clean_seg}]</b> · {cmp_label}: <b>₹{ltp:,.2f}</b> · 🧠 <b>Score: {score}/100</b> ({verdict})\n"
-        f"🎯 <b>Action: BUY</b> @ <code>{entry_range}</code> ({cmp_label}: ₹{ltp:,.2f})\n"
-        f"• <b>Invalidation SL:</b> <code>₹{sl:,.2f}</code> (Risk: ₹{abs(ltp - sl):,.2f})\n"
-        f"• <b>Target 1 (+2R):</b> <code>₹{t1:,.2f}</code> — <i>Scale 40% & SL to Cost</i>\n"
-        f"• <b>Target 2 (+4R):</b> <code>₹{t2:,.2f}</code> — <i>Scale 40% & Trail</i>{moon_line}\n"
-        f"• <b>Risk : Reward:</b> <b>{rr_display} R:R</b>{lot_str}{opt_line}\n"
-        f"💡 <b>Reason:</b> {conf_str}"
-        f"{off_note}\n"
-        f"🏷️ <b>Ref:</b> <code>{sig_ref}</code>"
-    )
+    # Multi-directional formatting:
+    if is_neutral:
+        metrics_dict = data.get("metrics") or {}
+        spe = float(data.get("short_pe") or metrics_dict.get("short_pe") or sl or 0.0)
+        sce = float(data.get("short_ce") or metrics_dict.get("short_ce") or t1 or 0.0)
+        lpe = float(data.get("long_pe") or metrics_dict.get("long_pe") or 0.0)
+        lce = float(data.get("long_ce") or metrics_dict.get("long_ce") or 0.0)
+        net_credit = float(data.get("net_credit") or metrics_dict.get("net_credit") or 0.0)
+        max_risk = float(data.get("max_risk") or metrics_dict.get("max_risk") or 0.0)
+        corridor_low = float(data.get("corridor_low") or metrics_dict.get("corridor_low") or spe)
+        corridor_high = float(data.get("corridor_high") or metrics_dict.get("corridor_high") or sce)
+
+        wings_lines = []
+        if spe and sce:
+            wings_lines.append(f"• <b>Short Wing (Sell):</b> <code>{spe:,.0f} PE + {sce:,.0f} CE</code>")
+        if lpe and lce:
+            wings_lines.append(f"• <b>Hedge Wing (Buy):</b> <code>{lpe:,.0f} PE + {lce:,.0f} CE</code>")
+        if net_credit:
+            credit_str = f"• <b>Net Credit Harvest:</b> <code>+₹{net_credit:,.2f}/lot</code>"
+            if max_risk:
+                credit_str += f" | <b>Max Risk:</b> ₹{max_risk:,.2f}/lot"
+            wings_lines.append(credit_str)
+        wings_block = "\n" + "\n".join(wings_lines) if wings_lines else ""
+
+        msg = (
+            f"{header_line}\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"<b>{sym} [{clean_seg}]</b> · {cmp_label}: <b>₹{ltp:,.2f}</b> · 🧠 <b>Score: {score}/100</b> ({verdict})\n"
+            f"🎯 <b>Action: SELL IRON CONDOR (DELTA-NEUTRAL)</b> @ Spot ₹{ltp:,.2f}\n"
+            f"• <b>Corridor Pin Zone:</b> <code>₹{corridor_low:,.2f} – ₹{corridor_high:,.2f}</code>{wings_block}\n"
+            f"• <b>Risk : Reward:</b> <b>{rr_display} R:R</b>{lot_str}{opt_line}\n"
+            f"💡 <b>Reason:</b> {conf_str}"
+            f"{off_note}\n"
+            f"🏷️ <b>Ref:</b> <code>{sig_ref}</code>"
+        )
+    elif is_bearish:
+        msg = (
+            f"{header_line}\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"<b>{sym} [{clean_seg}]</b> · {cmp_label}: <b>₹{ltp:,.2f}</b> · 🧠 <b>Score: {score}/100</b> ({verdict})\n"
+            f"🎯 <b>Action: SHORT (SELL)</b> @ <code>{entry_range}</code> ({cmp_label}: ₹{ltp:,.2f})\n"
+            f"• <b>Invalidation SL (Above High):</b> <code>₹{sl:,.2f}</code> (Risk: ₹{abs(sl - ltp):,.2f})\n"
+            f"• <b>Target 1 (Downside):</b> <code>₹{t1:,.2f}</code> — <i>Cover 40% & SL to Cost</i>\n"
+            f"• <b>Target 2 (Downside):</b> <code>₹{t2:,.2f}</code> — <i>Cover 40% & Trail</i>{moon_line}\n"
+            f"• <b>Risk : Reward:</b> <b>{rr_display} R:R</b>{lot_str}{opt_line}\n"
+            f"💡 <b>Reason:</b> {conf_str}"
+            f"{off_note}\n"
+            f"🏷️ <b>Ref:</b> <code>{sig_ref}</code>"
+        )
+    else:
+        msg = (
+            f"{header_line}\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"<b>{sym} [{clean_seg}]</b> · {cmp_label}: <b>₹{ltp:,.2f}</b> · 🧠 <b>Score: {score}/100</b> ({verdict})\n"
+            f"🎯 <b>Action: BUY</b> @ <code>{entry_range}</code> ({cmp_label}: ₹{ltp:,.2f})\n"
+            f"• <b>Invalidation SL:</b> <code>₹{sl:,.2f}</code> (Risk: ₹{abs(ltp - sl):,.2f})\n"
+            f"• <b>Target 1 (+2R):</b> <code>₹{t1:,.2f}</code> — <i>Scale 40% & SL to Cost</i>\n"
+            f"• <b>Target 2 (+4R):</b> <code>₹{t2:,.2f}</code> — <i>Scale 40% & Trail</i>{moon_line}\n"
+            f"• <b>Risk : Reward:</b> <b>{rr_display} R:R</b>{lot_str}{opt_line}\n"
+            f"💡 <b>Reason:</b> {conf_str}"
+            f"{off_note}\n"
+            f"🏷️ <b>Ref:</b> <code>{sig_ref}</code>"
+        )
     return msg
 
 

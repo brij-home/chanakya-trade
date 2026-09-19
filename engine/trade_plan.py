@@ -709,13 +709,17 @@ def calculate_trade_plan(
         is_asymmetry_viable = True
         asymmetry_verdict = "EXCELLENT_ASYMMETRY"
         asymmetry_note = f"High positive EV: Target 2 provides {rr_t2:.2f}:1 R:R with clean runway to {t2_rationale}."
-    elif (rr_t2 >= 1.8 and rr_t1 >= 1.1) or (has_active_blast and (rr_t2 >= 1.3 or rr_t1 >= 0.8)):
+    elif (
+        (rr_t2 >= 1.8 and rr_t1 >= 1.0)
+        or (rr_t2 >= 2.0 and rr_t1 >= 0.6)
+        or (has_active_blast and (rr_t2 >= 1.3 or rr_t1 >= 0.8))
+    ):
         is_asymmetry_viable = True
         asymmetry_verdict = "ACCEPTABLE"
         asymmetry_note = (
             f"Acceptable gamma blast expectancy ({rr_t2:.2f}:1 R:R to Target 2; T1 serves as immediate squeeze barrier)."
             if has_active_blast
-            else f"Acceptable institutional expectancy ({rr_t2:.2f}:1 R:R to Target 2)."
+            else f"Acceptable institutional expectancy ({rr_t2:.2f}:1 R:R to Target 2; T1 serves as initial de-risking milestone)."
         )
     else:
         is_asymmetry_viable = False

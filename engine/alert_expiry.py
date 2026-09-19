@@ -60,6 +60,42 @@ def get_expiry_metadata(
             except ValueError:
                 continue
 
+    # Fallback to contract_symbol parsing if expiry_str is missing or unparsed
+    if not dt and contract_symbol:
+        import re
+        from datetime import date
+        csym = str(contract_symbol).upper().replace("NSE:", "").replace("NFO:", "").replace("MCX:", "").replace("BSE:", "").strip()
+
+        # 1. Weekly NSE Index Option: e.g. NIFTY2692425000CE
+        m_weekly = re.search(r"^([A-Z]+)(\d{2})([1-9OND])(\d{2})", csym)
+        if m_weekly:
+            yr = 2000 + int(m_weekly.group(2))
+            m_code = m_weekly.group(3)
+            m_idx = 10 if m_code == "O" else (11 if m_code == "N" else (12 if m_code == "D" else int(m_code)))
+            day = int(m_weekly.group(4))
+            try:
+                dt = date(yr, m_idx, day)
+                if not expiry_type:
+                    expiry_type = "WEEKLY"
+            except ValueError:
+                pass
+
+        # 2. Monthly Contract: e.g. NIFTY26SEP25000CE, RELIANCE26SEPFUT, GOLD26SEP154000CE
+        if not dt:
+            m_monthly = re.search(r"(\d{2})(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)", csym)
+            if m_monthly:
+                yr = 2000 + int(m_monthly.group(1))
+                m_str = m_monthly.group(2)
+                month_names = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"]
+                if m_str in month_names:
+                    m_idx = month_names.index(m_str) + 1
+                    try:
+                        dt = get_last_thursday_of_month(yr, m_idx)
+                        if not expiry_type:
+                            expiry_type = "MONTHLY"
+                    except Exception:
+                        pass
+
     if not dt:
         return {
             "formatted": None,

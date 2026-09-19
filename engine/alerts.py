@@ -311,6 +311,25 @@ class AlertManager:
             self._save()
         return removed
 
+    def invalidate_alert(self, alert_id: str, reason: str = "Manually invalidated") -> Optional[Alert]:
+        """Invalidates an active manual alert with a clear rationale."""
+        from datetime import datetime, timezone, timedelta
+        IST = timezone(timedelta(hours=5, minutes=30))
+        now_iso = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
+        with self._lock:
+            for alert in self._alerts:
+                if alert.id == alert_id and not alert.is_invalidated:
+                    alert.is_invalidated = True
+                    alert.invalidated_at = now_iso
+                    alert.invalidation_reason = reason
+                    self._save()
+                    try:
+                        self._notify(alert)
+                    except Exception:
+                        pass
+                    return alert
+        return None
+
     def list_alerts(self) -> list[dict]:
         """Return all active (non-triggered) alerts as dicts."""
         return [self.public_dict(a) for a in self._alerts if not a.triggered]

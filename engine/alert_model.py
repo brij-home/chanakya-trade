@@ -97,10 +97,21 @@ class AutoAlert:
     no_chase_boundary: Optional[float] = None
     telegram_dispatched: bool = False
     dispatched_channels: list[str] = field(default_factory=list)
+    trace_id: Optional[str] = None
+    quant_snapshot: Optional[dict[str, Any]] = None
 
     def __post_init__(self) -> None:
         if not self.created_at:
             self.created_at = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
+        if not self.trace_id:
+            try:
+                date_compact = (self.created_at[:10] if self.created_at else datetime.now(IST).strftime("%Y-%m-%d")).replace("-", "")
+                sym_clean = self.symbol.replace("NSE:", "").replace("BSE:", "").replace("MCX:", "").strip().upper()
+                type_short = (self.alert_type[:4] if self.alert_type else "ALRT").upper()
+                id_suffix = self.alert_id[-4:].upper() if len(self.alert_id) >= 4 else "0001"
+                self.trace_id = f"TRC-{date_compact}-{self.exchange or 'NSE'}-{sym_clean}-{type_short}-{id_suffix}"
+            except Exception:
+                self.trace_id = f"TRC-{self.alert_id}"
         if not self.signal_ref:
             try:
                 from bot.alert_templates import build_signal_ref
@@ -185,26 +196,35 @@ class AutoAlert:
         # Calculate no-chase boundary if not provided
         if self.no_chase_boundary is None and self.trigger_level > 0:
             act_str = str((self.actionable_plan or {}).get("action", "")).strip().upper()
-            is_option = bool(
+            is_plan_opt = (self.actionable_plan or {}).get("instrument_type") == "OPTION"
+            is_opt_level = bool(
                 self.option_type
                 or self.alert_type in ("OPTIONS_MOMENTUM", "GAMMA_BLAST")
                 or (self.segment in ("FNO", "OPTIONS") and (self.strike or self.option_type))
             )
+            # If the alert coordinates themselves are option premium levels
+            is_option_prem = is_opt_level or (
+                is_plan_opt
+                and self.option_premium
+                and abs(self.trigger_level - self.option_premium) < 0.01
+            )
+
             # Determine if this position is LONG (price expected to increase) or SHORT (price expected to decrease)
             is_short_trade = False
-            if act_str.startswith("BUY") or "LONG" in act_str:
-                is_short_trade = False
-            elif act_str.startswith("SELL") or "SHORT" in act_str:
+            if is_option_prem:
+                if act_str.startswith("SELL") or "SHORT" in act_str or "WRITE" in act_str:
+                    is_short_trade = True
+                else:
+                    is_short_trade = False  # Long option premium
+            elif act_str in ("BUY_PE", "BUY_PUT") or str(self.direction).upper() in ("BEARISH", "SHORT", "SELL"):
                 is_short_trade = True
-            elif is_option:
-                is_short_trade = False  # Long option is default for options momentum / gamma blast
+            elif act_str.startswith("BUY") or "LONG" in act_str or str(self.direction).upper() in ("BULLISH", "LONG"):
+                is_short_trade = False
             elif self.target_level > 0 and self.target_level != self.trigger_level:
                 is_short_trade = self.target_level < self.trigger_level
-            elif str(self.direction).upper() in ("BEARISH", "SHORT", "SELL"):
-                is_short_trade = True
 
             th = (self.time_horizon or "INTRADAY").upper()
-            if is_option:
+            if is_option_prem:
                 if is_short_trade:
                     # Option Writing / Credit Spread
                     mult = 0.95 if th == "INTRADAY" else 0.92
@@ -317,10 +337,20 @@ class AutoAlert:
         d["is_active"] = self.is_active
         d["is_expired"] = self.is_expired
 
+        plan_opt = (self.actionable_plan or {}).get("option_plan", {}) if isinstance(self.actionable_plan, dict) else {}
+        eff_exp_date = self.expiry_date or plan_opt.get("expiry_date")
+        eff_exp_type = self.expiry_type or plan_opt.get("expiry_type")
+        eff_contract = self.contract_symbol or plan_opt.get("contract_symbol")
+        if not eff_exp_type and eff_exp_date:
+            from engine.alert_expiry import classify_expiry_type
+            eff_exp_type = classify_expiry_type(eff_exp_date, self.symbol)
+
         # Rich expiry details & next-expiry opportunities
         exp_info = get_expiry_metadata(
-            self.expiry_date, self.expiry_type, self.symbol, self.contract_symbol
+            eff_exp_date, eff_exp_type, self.symbol, eff_contract
         )
+        d["expiry_date"] = eff_exp_date
+        d["expiry_type"] = eff_exp_type
         d["expiry_details"] = exp_info
         d["expiry_month_name"] = exp_info.get("month_name")
         d["expiry_formatted"] = exp_info.get("formatted")

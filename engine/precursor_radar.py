@@ -157,8 +157,8 @@ class PrecursorRadarScanner:
     to surface high-conviction pre-ignition candidates.
     """
 
-    def __init__(self) -> None:
-        self._min_conviction_alert = 75
+    def __init__(self, min_conviction: int = 70) -> None:
+        self._min_conviction_alert = min_conviction
 
     def get_scan_universe(self, segment: Optional[str] = None) -> list[str]:
         """
@@ -207,7 +207,7 @@ class PrecursorRadarScanner:
             "CDSL",
             "MANKIND",
             "SUNPHARMA",
-            "TATAMOTORS",
+            "M&M",
             "HINDALCO",
             "TATASTEEL",
             "JSWSTEEL",
@@ -246,7 +246,7 @@ class PrecursorRadarScanner:
         ]
 
         non_fno_universe = [
-            "SWANENERGY",
+            "KPITTECH",
             "ZENTEC",
             "DATAPATTNS",
             "ARE&M",
@@ -256,16 +256,16 @@ class PrecursorRadarScanner:
             "RATEGAIN",
             "MEDANTA",
             "LALPATHLAB",
-            "CENTURYTEX",
+            "CENTURYPLY",
             "GRAVITA",
             "RAILTEL",
             "RITES",
             "IRCON",
             "TEXRAIL",
-            "JUPITERWAG",
+            "TITAGARH",
             "BEML",
             "GRSE",
-            "GSHIP",
+            "GESHIP",
             "SCI",
             "ELECON",
             "TRITURBINE",
@@ -301,6 +301,7 @@ class PrecursorRadarScanner:
         symbol: str,
         df: Optional[pd.DataFrame] = None,
         chain: Optional[list[Any]] = None,
+        quote: Optional[Any] = None,
     ) -> Optional[PrecursorCandidate]:
         """
         Evaluates a single stock for pre-move coiling DNA against dynamic factor weights.
@@ -324,15 +325,16 @@ class PrecursorRadarScanner:
         # 2. Fetch Live Quote & Liquidity Checks
         from market.quotes import get_quote
 
-        q_item = None
-        try:
-            q_res = get_quote(f"NSE:{clean_sym}")
-            if isinstance(q_res, dict):
-                q_item = q_res.get(f"NSE:{clean_sym}") or q_res.get(clean_sym)
-            else:
-                q_item = q_res
-        except Exception:
-            pass
+        q_item = quote
+        if q_item is None:
+            try:
+                q_res = get_quote(f"NSE:{clean_sym}")
+                if isinstance(q_res, dict):
+                    q_item = q_res.get(f"NSE:{clean_sym}") or q_res.get(clean_sym)
+                else:
+                    q_item = q_res
+            except Exception:
+                pass
 
         if not q_item:
             return None
@@ -377,19 +379,22 @@ class PrecursorRadarScanner:
             )
         )
 
+        vwap = ltp
         vwap_val = getattr(q_item, "vwap", None)
         if vwap_val is not None and type(vwap_val).__name__ not in ("MagicMock", "Mock"):
-            vwap = float(vwap_val)
+            try:
+                f = float(vwap_val)
+                if f > 0:
+                    vwap = f
+            except (ValueError, TypeError):
+                pass
         elif hasattr(q_item, "__dict__") and "vwap" in q_item.__dict__:
-            vwap = float(q_item.__dict__["vwap"])
-        else:
-            vwap = ltp
-
-        turnover_cr = round((ltp * vol) / 1e7, 2)
-
-        # Anti-Trap: Reject illiquid names
-        if turnover_cr < 8.0 and vol < 50000:
-            return None
+            try:
+                f = float(q_item.__dict__["vwap"])
+                if f > 0:
+                    vwap = f
+            except (ValueError, TypeError):
+                pass
 
         # 3. Daily History & Structural Footprint
         from market.history import get_ohlcv
@@ -408,43 +413,67 @@ class PrecursorRadarScanner:
         lows = df["low"].values if "low" in df.columns else closes
         volumes = df["volume"].values if "volume" in df.columns else None
 
+        # Fallback to daily session volume when quote volume is 0/delayed
+        if vol <= 0 and volumes is not None and len(volumes) > 0:
+            try:
+                vol = int(volumes[-1])
+            except Exception:
+                pass
+
+        turnover_cr = round((ltp * vol) / 1e7, 2)
+        avg_20_vol = (
+            float(np.mean(volumes[-21:-1]))
+            if (volumes is not None and len(volumes) >= 21)
+            else float(vol)
+        )
+        avg_turnover_cr = round((ltp * avg_20_vol) / 1e7, 2)
+
+        # Anti-Trap: Reject illiquid names (evaluate against both session and 20D average)
+        if turnover_cr < 8.0 and avg_turnover_cr < 8.0 and vol < 50000 and avg_20_vol < 50000:
+            return None
+
         # 4. Orthogonal Factor Scoring
         score = 15  # baseline anchor
         matched_factors: list[str] = []
 
-        # A. Volume Dry-Up (Seller Exhaustion) or Early Intraday Volume Surge [0–25 pts]
+        # A. Volume Dry-Up (Seller Exhaustion) or Early Institutional Volume Surge [0–25 pts]
         prior_vol_ratio = 1.0
+        session_vol_ratio = 1.0
         if volumes is not None and len(volumes) >= 21:
             avg_20 = float(np.mean(volumes[-21:-1]))
             # Current session volume vs 20D SMA or prior day volume
             prior_vol = float(volumes[-2]) if len(volumes) >= 2 else avg_20
             prior_vol_ratio = round(prior_vol / max(1.0, avg_20), 3)
+            session_vol_ratio = round(vol / max(1.0, avg_20), 3)
 
             # Intraday TOD-RVOL check if volume is already active
             tod_rvol = 1.0
             if vol > 0:
                 try:
                     from engine.auto_alert_engine import compute_time_of_day_rvol
+
                     tod_rvol = compute_time_of_day_rvol(vol, avg_20)
                 except Exception:
-                    pass
+                    tod_rvol = session_vol_ratio
 
-            if tod_rvol >= 1.6:
+            # Evaluate either intraday surge, full-day surge (>=1.3x), or supply dry-up (<=0.4x)
+            if tod_rvol >= 1.6 or session_vol_ratio >= 1.3:
+                score += 25
+                v_mult = max(tod_rvol, session_vol_ratio)
+                matched_factors.append(
+                    f"Institutional Volume Expansion ({v_mult:.1f}x RVOL above normal expectation)"
+                )
+            elif prior_vol_ratio <= 0.20 or session_vol_ratio <= 0.30:
                 score += 25
                 matched_factors.append(
-                    f"Institutional Volume Expansion ({tod_rvol:.1f}x TOD-RVOL above session expectation)"
+                    f"Extreme Volume Dry-Up ({min(prior_vol_ratio, session_vol_ratio) * 100:.0f}% of 20D SMA — Institutional Supply Exhaustion)"
                 )
-            elif prior_vol_ratio <= 0.20:
-                score += 25
-                matched_factors.append(
-                    f"Extreme Volume Dry-Up ({prior_vol_ratio * 100:.0f}% of 20D SMA — Institutional Supply Exhaustion)"
-                )
-            elif prior_vol_ratio <= 0.40:
+            elif prior_vol_ratio <= 0.40 or session_vol_ratio <= 0.50:
                 score += 18
                 matched_factors.append(
-                    f"Healthy Volume Contraction ({prior_vol_ratio * 100:.0f}% of 20D SMA)"
+                    f"Healthy Volume Contraction ({min(prior_vol_ratio, session_vol_ratio) * 100:.0f}% of 20D SMA)"
                 )
-            elif prior_vol_ratio <= 0.65:
+            elif prior_vol_ratio <= 0.65 or session_vol_ratio <= 0.70:
                 score += 10
 
         # B. Volatility Compression / TTM Squeeze [0–25 pts]
@@ -474,27 +503,38 @@ class PrecursorRadarScanner:
             score += 5
             matched_factors.append("Daily candle range tightly compressed (< 1.2% daily spread)")
 
-        # C. Institutional Order Block Anchor [0–20 pts]
+        # C. Institutional Order Block Anchor & Structural Support [0–20 pts]
         ob_dist = 2.0
         try:
             from analysis.market_structure import analyze_market_structure
 
             ms = analyze_market_structure(clean_sym, df=df, exchange="NSE")
-            if hasattr(ms, "order_blocks") and ms.order_blocks:
-                bull_obs = [ob for ob in ms.order_blocks if getattr(ob, "ob_type", "") == "BULLISH"]
-                if bull_obs:
-                    nearest_top = bull_obs[0].top
-                    ob_dist = round(abs(ltp - nearest_top) / ltp * 100, 2)
-                    if ob_dist <= 0.8:
-                        score += 20
-                        matched_factors.append(
-                            f"Anchored within {ob_dist:.1f}% of Bullish Order Block (Asymmetric risk pivot)"
-                        )
-                    elif ob_dist <= 1.5:
-                        score += 12
-                        matched_factors.append(
-                            f"Holding above institutional Order Block ({ob_dist:.1f}% buffer)"
-                        )
+            demand_zones = getattr(ms, "active_demand_zones", []) or []
+            nearest_sup = getattr(ms, "nearest_support", 0.0) or 0.0
+            in_discount = getattr(ms, "in_discount_zone", False)
+
+            if demand_zones:
+                nearest_top = demand_zones[0].top
+                ob_dist = round(abs(ltp - nearest_top) / ltp * 100, 2)
+                if ob_dist <= 1.2:
+                    score += 20
+                    matched_factors.append(
+                        f"Anchored within {ob_dist:.1f}% of Bullish Demand Zone (Asymmetric risk pivot)"
+                    )
+                elif ob_dist <= 2.2:
+                    score += 12
+                    matched_factors.append(
+                        f"Holding above institutional Demand Zone ({ob_dist:.1f}% buffer)"
+                    )
+            elif nearest_sup > 0 and abs(ltp - nearest_sup) / ltp <= 0.025:
+                sup_dist = round(abs(ltp - nearest_sup) / ltp * 100, 2)
+                score += 15
+                matched_factors.append(
+                    f"Holding right at major structural support pivot (₹{nearest_sup:,.1f}, {sup_dist:.1f}% buffer)"
+                )
+            elif in_discount:
+                score += 10
+                matched_factors.append("Trading in institutional 50% OTE discount zone")
         except Exception:
             pass
 
@@ -505,21 +545,25 @@ class PrecursorRadarScanner:
             from analysis.sector_rotation import get_stock_sector_alignment
 
             align = get_stock_sector_alignment(clean_sym)
-            if isinstance(align, dict):
-                sector_name = align.get("sector_name", sector_name)
+            if hasattr(align, "quadrant"):
+                rrg_quad = getattr(align, "quadrant", rrg_quad)
+                sector_name = getattr(align, "sector", getattr(align, "sector_name", sector_name))
+            elif isinstance(align, dict):
+                sector_name = align.get("sector_name", align.get("sector", sector_name))
                 rrg_quad = align.get("quadrant", rrg_quad)
-                if rrg_quad == "LEADING":
-                    score += 15
-                    matched_factors.append(
-                        f"Parent sector ({sector_name}) in LEADING RRG quadrant (Institutional inflow tailwind)"
-                    )
-                elif rrg_quad == "IMPROVING":
-                    score += 10
-                    matched_factors.append(
-                        f"Parent sector ({sector_name}) in IMPROVING RRG quadrant (Emerging rotation)"
-                    )
-                elif rrg_quad == "LAGGING":
-                    score -= 15  # Veto penalty
+
+            if rrg_quad == "LEADING":
+                score += 15
+                matched_factors.append(
+                    f"Parent sector ({sector_name}) in LEADING RRG quadrant (Institutional inflow tailwind)"
+                )
+            elif rrg_quad == "IMPROVING":
+                score += 10
+                matched_factors.append(
+                    f"Parent sector ({sector_name}) in IMPROVING RRG quadrant (Emerging rotation)"
+                )
+            elif rrg_quad == "LAGGING":
+                score -= 10  # Mild drag penalty instead of harsh -15
         except Exception:
             pass
 
@@ -586,11 +630,15 @@ class PrecursorRadarScanner:
 
         target_1 = round(ltp + 2.0 * risk_pts, 2)
         target_2 = round(ltp + 3.5 * risk_pts, 2)
-        rr_str = f"1:{((target_1 - ltp) / risk_pts):.1f}"
+        rr_str = f"1:{((target_2 - ltp) / risk_pts):.1f}"
 
         entry_range = f"₹{entry_low:,.1f} – ₹{entry_high:,.1f}"
 
-        verdict = "MAX_CONVICTION" if score >= 85 else "HIGH_CONVICTION"
+        verdict = (
+            "MAX_CONVICTION"
+            if score >= 85
+            else ("HIGH_CONVICTION" if score >= 75 else "COILING_ACCUMULATION")
+        )
 
         when_buy = f"Enter on Ask/Retest within coiling range ({entry_range}) while price holds above ₹{entry_low:,.1f} and VWAP."
         when_wait = f"DO NOT CHASE if stock gaps up > 1.8% at open (above ₹{round(ltp * 1.018, 1):,}). Wait for a 15-min VWAP pullback."
@@ -650,13 +698,43 @@ class PrecursorRadarScanner:
             f"[PrecursorRadar] Scanning {len(symbols)} tickers ({segment or 'ALL'}) for pre-move precursor DNA..."
         )
 
-        for sym in symbols:
-            try:
-                candidate = self.evaluate_symbol(sym)
-                if candidate:
-                    candidates.append(candidate)
-            except Exception as e:
-                logger.debug(f"[PrecursorRadar] Evaluation error on {sym}: {e}")
+        # Batch pre-fetch quotes across universe in a single network round-trip
+        quotes_map: dict[str, Any] = {}
+        try:
+            from market.quotes import get_quote
+            formatted_syms = [
+                (f"MCX:{s}" if classify_symbol_segment(s) == "COMMODITY" else f"NSE:{s}")
+                if ":" not in s
+                else s
+                for s in symbols
+            ]
+            q_res = get_quote(formatted_syms)
+            if isinstance(q_res, dict):
+                quotes_map = q_res
+        except Exception as e:
+            logger.debug(f"[PrecursorRadar] Batch quote fetch error: {e}")
+
+        def _worker(sym: str) -> Optional[PrecursorCandidate]:
+            clean = sym.upper().replace("NSE:", "").replace("MCX:", "").replace(".NS", "").strip()
+            q = (
+                quotes_map.get(f"NSE:{clean}")
+                or quotes_map.get(f"MCX:{clean}")
+                or quotes_map.get(clean)
+                or quotes_map.get(sym)
+            )
+            return self.evaluate_symbol(sym, quote=q)
+
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(6, len(symbols) or 1)) as executor:
+            future_to_sym = {executor.submit(_worker, s): s for s in symbols}
+            for fut in concurrent.futures.as_completed(future_to_sym):
+                s = future_to_sym[fut]
+                try:
+                    candidate = fut.result()
+                    if candidate:
+                        candidates.append(candidate)
+                except Exception as e:
+                    logger.debug(f"[PrecursorRadar] Evaluation error on {s}: {e}")
 
         # Sort descending by conviction score
         candidates.sort(key=lambda c: c.conviction_score, reverse=True)

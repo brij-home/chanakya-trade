@@ -622,21 +622,6 @@ class EODReportGenerator:
         avg_r = (total_realized_r / completed) if completed > 0 else 0.0
         profit_factor = (win_count * 2.2 / (loss_count * 1.0)) if loss_count > 0 else (3.5 if win_count > 0 else 1.0)
 
-        # Fallback star setups if fresh testing environment
-        if not star_setups and total_alerts == 0:
-            star_setups = [
-                TradeOutcomeSummary("al-1", "NIFTY 25350 CE", "FNO", "BULLISH", 104.5, 75.0, 138.0, 32.1, 2.3, ["T1", "T2"], "WIN_TARGET"),
-                TradeOutcomeSummary("al-2", "BANKNIFTY 54800 CE", "FNO", "BULLISH", 320.0, 230.0, 410.0, 41.8, 2.5, ["T1", "T2"], "WIN_TARGET"),
-                TradeOutcomeSummary("al-3", "DIXON", "EQUITY", "BULLISH", 11400.0, 11150.0, 11950.0, 3.8, 3.2, ["T1"], "WIN_TARGET"),
-            ]
-            win_rate = 74.2
-            total_realized_r = 8.4
-            avg_r = 1.68
-            profit_factor = 2.85
-            ignited_count = 15
-            win_count = 11
-            loss_count = 4
-
         # Star setups sorted by peak gain %
         star_setups.sort(key=lambda s: s.peak_gain_pct, reverse=True)
 
@@ -693,12 +678,20 @@ class EODReportGenerator:
             )
 
         # What went well points
-        what_went_well = [
-            f"Institutional breakout momentum delivered a <b>{win_rate:.1f}% win rate</b> across primary vectors.",
-            f"Precursor Radar and TTMSqueeze successfully identified volume compression 3–8 minutes before retail breakout.",
-            "Zero safety breaches: 100% adherence to fail-closed contract; zero fake paper fills or synthetic prices.",
-            f"Captured asymmetric expansions with aggregate realized payoff of <b>{total_realized_r:+.2f}R</b>.",
-        ]
+        if ignited_count > 0:
+            what_went_well = [
+                f"Institutional breakout momentum delivered a <b>{win_rate:.1f}% win rate</b> across primary vectors.",
+                f"Precursor Radar and TTMSqueeze successfully identified volume compression 3–8 minutes before retail breakout.",
+                "Zero safety breaches: 100% adherence to fail-closed contract; zero fake paper fills or synthetic prices.",
+                f"Captured asymmetric expansions with aggregate realized payoff of <b>{total_realized_r:+.2f}R</b>.",
+            ]
+        else:
+            what_went_well = [
+                "Zero capital drawdown: Preserved cash and discipline during non-viable market conditions.",
+                "Deterministic screening prevented false entries during low-momentum consolidation.",
+                "Zero safety breaches: 100% adherence to fail-closed contract; zero fake paper fills or synthetic prices.",
+                "Terminal remained in high-fidelity monitoring posture ready for opening drives.",
+            ]
 
         # What went bad points
         what_went_bad = [

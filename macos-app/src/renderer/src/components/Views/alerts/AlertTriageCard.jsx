@@ -1,6 +1,6 @@
-import React, { memo } from 'react'
+import React, { memo, useMemo } from 'react'
 import { useLiveSpot } from './LiveSpotsContext'
-import { AUTO_TYPE_STYLE } from './alertHelpers'
+import { AUTO_TYPE_STYLE, formatExpiryDetails } from './alertHelpers'
 
 export const AlertTriageCard = memo(function AlertTriageCard({
   alert,
@@ -10,8 +10,12 @@ export const AlertTriageCard = memo(function AlertTriageCard({
   onAnalyze,
   onSendTelegram,
 }) {
+  const plan = alert.actionable_plan || {}
+  const tradePlan = plan.trade_plan || {}
+  const optPlan = plan.option_plan || null
+
   const cleanSym = (alert.symbol || '').replace(/^(NSE|BSE|MCX|NFO|CDS):/, '').trim().toUpperCase()
-  const rawContract = alert.contract_symbol || alert.actionable_plan?.option_plan?.contract_symbol || alert.actionable_plan?.option_contract || ''
+  const rawContract = alert.contract_symbol || optPlan?.contract_symbol || plan.option_contract || ''
   const cleanContract = rawContract.replace(/^(NSE|BSE|MCX|NFO|CDS):/, '').trim().toUpperCase()
   
   const liveSpotBySym = useLiveSpot(cleanSym)
@@ -24,6 +28,8 @@ export const AlertTriageCard = memo(function AlertTriageCard({
 
   const style = AUTO_TYPE_STYLE[alert.alert_type] || AUTO_TYPE_STYLE.GAMMA_BLAST
   const isBull = alert.direction === 'BULLISH'
+  const isBear = alert.direction === 'BEARISH'
+  const isNeutral = alert.direction === 'NEUTRAL' || alert.alert_type === 'IRON_CONDOR_PINNING'
   const isInvalidated = alert.is_invalidated || alert.stage === 'INVALIDATED'
   const isT1Achieved = alert.stage === 'T1_ACHIEVED' || alert.target_status === 'T1_ACHIEVED'
   const isT2Achieved = alert.stage === 'T2_ACHIEVED' || alert.target_status === 'T2_ACHIEVED'
@@ -31,16 +37,15 @@ export const AlertTriageCard = memo(function AlertTriageCard({
   const isTrail = alert.stage === 'TRAILING_UPDATE'
   const isEarly = alert.stage === 'EARLY_WARNING'
 
-  const optType = alert.option_type || (rawContract?.endsWith('PE') ? 'PE' : rawContract?.endsWith('CE') ? 'CE' : null)
-  const strikeNum = alert.strike ? Number(String(alert.strike).replace(/[^0-9.-]/g, '')) : null
+  const optType = alert.option_type || optPlan?.option_type || (rawContract?.endsWith('PE') ? 'PE' : rawContract?.endsWith('CE') ? 'CE' : null)
+  const rawStrike = alert.strike || optPlan?.strike || alert.metrics?.strike
+  const strikeNum = rawStrike ? Number(String(rawStrike).replace(/[^0-9.-]/g, '')) : null
   const isFuture = Boolean(rawContract?.toUpperCase().includes('FUT') || alert.symbol?.toUpperCase().includes('FUT') || alert.derivative_type === 'FUT')
   const isPureOption = alert.alert_type === 'OPTIONS_MOMENTUM' || alert.alert_type === 'OPTION_WRITE' || (alert.alert_type === 'GAMMA_BLAST' && optType) || (rawContract && (rawContract.endsWith('CE') || rawContract.endsWith('PE')) && alert.exchange === 'NFO')
-  const isSpotSetup = alert.alert_type === 'ASYMMETRIC_OPPORTUNITY' || alert.alert_type === 'SQUEEZE_BREAKOUT' || alert.alert_type === 'SQUEEZE_BREAKDOWN' || alert.alert_type === 'PATTERN_COILING' || alert.alert_type === 'MOMENTUM_ACCELERATION' || alert.alert_type === 'POCKET_PIVOT' || alert.alert_type === 'PRECURSOR_RADAR' || alert.alert_type === 'SMC_SWEEP' || alert.alert_type === 'CIRCUIT_WARNING' || alert.alert_type === 'COMMODITY_MOMENTUM'
+  const isSpotSetup = alert.alert_type === 'ASYMMETRIC_OPPORTUNITY' || alert.alert_type === 'SQUEEZE_BREAKOUT' || alert.alert_type === 'SQUEEZE_BREAKDOWN' || alert.alert_type === 'PATTERN_COILING' || alert.alert_type === 'MOMENTUM_ACCELERATION' || alert.alert_type === 'POCKET_PIVOT' || alert.alert_type === 'PRECURSOR_RADAR' || alert.alert_type === 'SMC_SWEEP' || alert.alert_type === 'CIRCUIT_WARNING' || alert.alert_type === 'COMMODITY_MOMENTUM' || alert.alert_type === 'TURTLE_SOUP_SHORT' || alert.alert_type === 'IRON_CONDOR_PINNING'
   const isDerivative = !isSpotSetup && Boolean(isFuture || isPureOption || (alert.exchange === 'NFO' && (optType || strikeNum || rawContract)))
 
-  const plan = alert.actionable_plan || {}
-  const tradePlan = plan.trade_plan || {}
-  const optPlan = plan.option_plan || null
+  const expiryInfo = useMemo(() => formatExpiryDetails(alert), [alert])
 
   const act = String(tradePlan.action || plan.action || '').toUpperCase()
   const isOptionSell = isDerivative && (
@@ -80,11 +85,18 @@ export const AlertTriageCard = memo(function AlertTriageCard({
     let diff = 0
     if (isDerivative) {
       diff = isOptionSell ? entryNum - currentPrice : currentPrice - entryNum
+      isProfitable = diff >= 0
+    } else if (isNeutral) {
+      const spe = Number(alert.metrics?.short_pe || slNum || entryNum * 0.985)
+      const sce = Number(alert.metrics?.short_ce || t1Num || entryNum * 1.015)
+      isProfitable = currentPrice >= spe && currentPrice <= sce
+      const center = (spe + sce) / 2
+      diff = isProfitable ? Math.max(0, (entryNum * 0.015) - Math.abs(currentPrice - center) * 0.03) : -Math.min(Math.abs(currentPrice - spe), Math.abs(currentPrice - sce))
     } else {
       diff = isBull ? currentPrice - entryNum : entryNum - currentPrice
+      isProfitable = diff >= 0
     }
     liveReturnPct = ((diff / entryNum) * 100).toFixed(1)
-    isProfitable = diff >= 0
   }
 
   // Dynamic stage hits
@@ -93,6 +105,8 @@ export const AlertTriageCard = memo(function AlertTriageCard({
     (slNum && currentPrice && (
       isDerivative
         ? (isOptionSell ? currentPrice >= slNum : currentPrice <= slNum)
+        : isNeutral
+        ? (currentPrice < slNum || (alert.metrics?.long_ce && currentPrice > alert.metrics.long_ce))
         : (isBull ? currentPrice <= slNum : currentPrice >= slNum)
     ))
   )
@@ -102,6 +116,8 @@ export const AlertTriageCard = memo(function AlertTriageCard({
     (t3Num && currentPrice && !isSLHit && (
       isDerivative
         ? (isOptionSell ? currentPrice <= t3Num : currentPrice >= t3Num)
+        : isNeutral
+        ? false
         : (isBull ? currentPrice >= t3Num : currentPrice <= t3Num)
     ))
   )
@@ -112,6 +128,8 @@ export const AlertTriageCard = memo(function AlertTriageCard({
     (t2Num && currentPrice && !isSLHit && (
       isDerivative
         ? (isOptionSell ? currentPrice <= t2Num : currentPrice >= t2Num)
+        : isNeutral
+        ? false
         : (isBull ? currentPrice >= t2Num : currentPrice <= t2Num)
     ))
   )
@@ -122,6 +140,8 @@ export const AlertTriageCard = memo(function AlertTriageCard({
     (t1Num && currentPrice && !isSLHit && (
       isDerivative
         ? (isOptionSell ? currentPrice <= t1Num : currentPrice >= t1Num)
+        : isNeutral
+        ? isProfitable
         : (isBull ? currentPrice >= t1Num : currentPrice <= t1Num)
     ))
   )
@@ -157,9 +177,27 @@ export const AlertTriageCard = memo(function AlertTriageCard({
           {isFuture && (
             <span className="text-[8px] px-1 py-px rounded font-black uppercase bg-blue-500/20 text-blue-300">FUT</span>
           )}
-          <span className={`text-[8px] font-bold ${isBull ? 'text-emerald-400' : 'text-rose-400'}`}>
-            {isBull ? '▲' : '▼'} {alert.direction}
+          <span className={`text-[8px] font-black px-1.5 py-0.5 rounded ${
+            isBull ? 'text-emerald-400 bg-emerald-500/15' :
+            isNeutral ? 'text-purple-400 bg-purple-500/15' :
+            'text-rose-400 bg-rose-500/15'
+          }`}>
+            {isBull ? '▲ LONG' : isNeutral ? '◆ NEUTRAL' : '▼ SHORT'}
           </span>
+
+          {/* Real-time Expiry Badge: Weekly vs Monthly */}
+          {expiryInfo?.fullDisplay && (
+            <span
+              className={`text-[8px] font-mono px-1.5 py-0.5 rounded font-bold whitespace-nowrap border ${
+                expiryInfo.isWeekly
+                  ? 'bg-amber-500/15 text-amber-300 border-amber-500/30'
+                  : 'bg-blue-500/15 text-blue-300 border-blue-500/30'
+              }`}
+              title={expiryInfo.formatted || 'Contract Expiry'}
+            >
+              {expiryInfo.fullDisplay}
+            </span>
+          )}
 
           {/* Real-time Stage Hit Badge */}
           {isSLHit ? (

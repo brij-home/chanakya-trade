@@ -107,7 +107,8 @@ def enrich_options_chain_deltas(
     # 2. Baseline tracking fallback: calculate delta against session opening baseline
     with _BASELINE_LOCK:
         for c in chain:
-            b_key = f"{clean_und}_{c.expiry}_{int(c.strike)}_{c.option_type}"
+            c_exp = getattr(c, "expiry", None) or expiry or "NA"
+            b_key = f"{clean_und}_{c_exp}_{int(c.strike)}_{c.option_type}"
             c_oi = int(getattr(c, "oi", 0) or 0)
             if c_oi > 0:
                 if b_key not in _STRIKE_BASELINE_OI:

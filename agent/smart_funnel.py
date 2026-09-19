@@ -514,7 +514,33 @@ class SmartFunnel:
         rejection_flags = []
         positive_flags = []
 
+        # Live quote inspection for intraday impulse & volume surge
+        chg_pct = 0.0
+        live_vol = 0
+        try:
+            from market.quotes import get_quote
+            q_dict = get_quote(f"{exchange}:{symbol}")
+            q = q_dict.get(f"{exchange}:{symbol}") or q_dict.get(symbol)
+            if q:
+                chg_pct = float(getattr(q, "change_pct", 0.0) or 0.0)
+                live_vol = int(getattr(q, "volume", 0) or 0)
+        except Exception:
+            pass
+
+        # Wyckoff Spring / V-Shape Liquidity Sweep Signature:
+        # Stock emerging from oversold/downtrend with heavy volume absorption or strong price impulse (>=2.0% gain or >=1.2% with vol expansion)
+        is_wyckoff_spring = (
+            (chg_pct >= 2.0 or (chg_pct >= 1.2 and (vol_ratio >= 1.2 or live_vol > 500000)))
+            and (rsi < 42.0 or (ema20 > 0 and ema50 > 0 and ema20 < ema50))
+        )
+
         # ── Technical Rules ──
+        if is_wyckoff_spring:
+            score += 20.0
+            positive_flags.append(
+                f"⚡ Wyckoff Spring / V-Shape Reversal: Heavy institutional absorption (+{chg_pct:.1f}%, {vol_ratio:.2f}x vol)"
+            )
+
         if 42.0 <= rsi <= 64.0:
             score += 15.0
             positive_flags.append(f"RSI {rsi:.1f} in prime base accumulation zone")
@@ -522,21 +548,35 @@ class SmartFunnel:
             score -= 20.0
             rejection_flags.append(f"RSI overbought ({rsi:.1f} > 72)")
         elif rsi < 32.0:
-            score -= 10.0
-            rejection_flags.append(f"RSI oversold/momentum broken ({rsi:.1f} < 32)")
+            if not is_wyckoff_spring:
+                score -= 10.0
+                rejection_flags.append(f"RSI oversold/momentum broken ({rsi:.1f} < 32)")
+            else:
+                positive_flags.append(f"Oversold anchor (RSI {rsi:.1f}) spring-board loaded")
 
         if ema20 > 0 and ema50 > 0:
             if ema20 >= ema50:
                 score += 10.0
                 positive_flags.append("EMA20 >= EMA50 bullish trend alignment")
             else:
-                score -= 10.0
-                rejection_flags.append("EMA20 below EMA50 short-term downtrend")
+                if not is_wyckoff_spring:
+                    score -= 10.0
+                    rejection_flags.append("EMA20 below EMA50 short-term downtrend")
+                else:
+                    positive_flags.append("Accumulation base below 50-EMA emerging from Spring")
+
+        if q and getattr(q, "last_price", 0.0) > 0:
+            ltp = float(q.last_price)
+            metrics["ltp"] = ltp
 
         if dma200 > 0 and ltp > 0:
             if ltp < (dma200 * 0.88):
-                score -= 25.0
-                rejection_flags.append(f"Price ({ltp:.1f}) is >12% below 200-DMA ({dma200:.1f})")
+                if not is_wyckoff_spring:
+                    score -= 25.0
+                    rejection_flags.append(f"Price ({ltp:.1f}) is >12% below 200-DMA ({dma200:.1f})")
+                else:
+                    score -= 5.0
+                    positive_flags.append(f"Spring reversal discount below 200-DMA ({dma200:.1f})")
             elif ltp >= dma200:
                 score += 10.0
                 positive_flags.append("Trading above 200-DMA long-term support")

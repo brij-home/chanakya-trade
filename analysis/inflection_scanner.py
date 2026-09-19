@@ -555,7 +555,7 @@ def evaluate_single_stock_inflection(
     target_1 = round(entry_price + (2.0 * risk_per_share), 2)
     target_2 = round(entry_price + (3.5 * risk_per_share), 2)
     target_moonshot = round(entry_price + (6.5 * risk_per_share), 2)
-    risk_reward = round((target_1 - entry_price) / risk_per_share, 1)
+    risk_reward = round((target_2 - entry_price) / risk_per_share, 1)
 
     ticket = {
         "action": "LONG (BUY)",
@@ -564,7 +564,7 @@ def evaluate_single_stock_inflection(
         "target_1": target_1,
         "target_2": target_2,
         "target_moonshot": target_moonshot,
-        "risk_reward_ratio": f"1:{risk_reward} (2R) / 1:3.5 (T2) / 1:6.5 (Moonshot)",
+        "risk_reward_ratio": f"1:{risk_reward} (T2 3.5R) / 1:2.0 (T1 scale) / 1:6.5 (Moonshot)",
         "trailing_rule": "Scale 40-50% at Target 1 (+2R) -> Shift SL to Breakeven (+0.2% costs) -> Trail balance along 20-EMA / Swing Higher Lows.",
         "risk_pts": round(risk_per_share, 2),
         "reward_pts": round(target_2 - entry_price, 2),

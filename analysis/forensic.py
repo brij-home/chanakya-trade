@@ -537,13 +537,14 @@ def audit_forensics(
         except Exception:
             data = {}
 
-    # Determine if the entity belongs to Banking & Financial Services
+    # Determine if the entity belongs to Banking & Financial Services or Telecom
     is_banking_or_financial = False
+    sec_id = None
     try:
         from analysis.universe import get_stock_sector
 
         sec_id, _ = get_stock_sector(clean_sym)
-        if sec_id == "banking":
+        if sec_id in ("banking", "financial_services"):
             is_banking_or_financial = True
     except Exception:
         pass
@@ -645,8 +646,17 @@ def audit_forensics(
             f"Elevated Beneish M-Score ({m_score:.2f} > -1.78) — potential accruals distortion"
         )
 
+    fcf_val = float(data.get("free_cash_flow") or 0.0)
+    ic_val = float(data.get("interest_coverage") or 0.0)
+    is_telecom_or_utility_solvent = (sec_id in ("telecom", "utilities")) and (fcf_val > 0 or ic_val >= 2.5)
+
     if distress_zone == "DISTRESS":
-        red_flags.append(f"Altman Z''-Score ({z_score:.2f}) in DISTRESS zone")
+        if is_telecom_or_utility_solvent:
+            strengths.append(
+                f"Capital-intensive subscription network model: robust operating cash flow generation (FCF ₹{fcf_val:,.0f} Cr) offsets statutory spectrum/lease debt."
+            )
+        else:
+            red_flags.append(f"Altman Z''-Score ({z_score:.2f}) in DISTRESS zone")
 
     # 5. Determine Overall Quality Rating
     if is_banking_or_financial:
@@ -668,9 +678,10 @@ def audit_forensics(
             f"{len(red_flags)} governance flag(s) identified."
         )
     else:
-        if f_score >= 8 and not red_flags and distress_zone == "SAFE":
+        eff_distress = "SAFE" if (is_telecom_or_utility_solvent and fcf_val > 0) else distress_zone
+        if f_score >= 8 and not red_flags and eff_distress == "SAFE":
             rating = "A+"
-        elif f_score >= 6 and len(red_flags) <= 1 and distress_zone in ("SAFE", "GREY"):
+        elif f_score >= 6 and len(red_flags) <= 1 and eff_distress in ("SAFE", "GREY"):
             rating = "A"
         elif f_score >= 4 and len(red_flags) <= 2:
             rating = "B"

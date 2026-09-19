@@ -1330,7 +1330,7 @@ def test_alert_evaluator_rejects_dirty_phantom_tick():
         option_premium=204.0,
         target_status="PENDING",
         achieved_milestones=[],
-        metrics={"high": 222.0, "low": 145.6},
+        metrics={"high": 215.0, "low": 145.6},
         actionable_plan={
             "action": "BUY",
             "recommended_entry": "₹204.00",
@@ -1350,12 +1350,82 @@ def test_alert_evaluator_rejects_dirty_phantom_tick():
     assert res_normal.target_status == "PENDING"
     assert res_normal.should_trail is False
 
-    # 2. Rogue phantom tick 329.70 (> exchange high 222.0 by >2%) -> Discarded & clamped to 222.0
-    # Since 222.0 is below T1 (254.55), neither T1 nor T2 nor Final target is triggered!
+    # 2. Rogue phantom tick 329.70 (> exchange high 215.0 by >2%) -> Discarded & clamped to 215.0
+    # Since 215.0 is below T0.5 (219.30) and T1 (254.55), neither T0.5, T1 nor T2 is triggered!
     res_dirty = evaluate_alert_targets_and_trailing(alert, current_ltp=329.70)
     assert res_dirty is not None
     assert res_dirty.new_milestone is None
     assert res_dirty.target_status == "PENDING"
     assert res_dirty.should_trail is False
+
+
+def test_render_asymmetric_alert_bearish_and_neutral():
+    """Verify render_asymmetric_alert correctly formats BEARISH (Turtle Soup) and NEUTRAL (Iron Condor) alerts."""
+    # 1. Bearish Turtle Soup Short Setup
+    turtle_soup = {
+        "symbol": "BANKNIFTY",
+        "segment": "FNO",
+        "setup_type": "TURTLE_SOUP_SHORT",
+        "direction": "BEARISH",
+        "conviction_score": 91,
+        "verdict": "MAX_CONVICTION",
+        "ltp": 52400.0,
+        "entry_range": "₹52,380 – ₹52,420",
+        "stop_loss": 52620.0,
+        "target_1": 51950.0,
+        "target_2": 51600.0,
+        "moonshot_target": 51100.0,
+        "risk_reward_ratio": 3.6,
+        "confluences": [
+            "Liquidity Sweep of 20-Day High (BSL Purged)",
+            "Bearish CHoCH Reversal on 5m/15m",
+            "Aggressive Call Writer Inflow (1.9x Call OI Surge)",
+        ],
+        "when_to_wait": "DO NOT CHASE if price breaks below ₹52,250 without a retest pull-back",
+    }
+    bear_msg = render_asymmetric_alert(turtle_soup)
+    assert "TURTLE SOUP SHORT" in bear_msg
+    assert "🔻" in bear_msg or "🔴" in bear_msg
+    assert "Action: SHORT (SELL)" in bear_msg
+    assert "Invalidation SL (Above High):</b> <code>₹52,620.00</code>" in bear_msg
+    assert "Target 1 (Downside):</b> <code>₹51,950.00</code>" in bear_msg
+    assert "Target 2 (Downside):</b> <code>₹51,600.00</code>" in bear_msg
+    assert "1:3.6 R:R" in bear_msg
+
+    # 2. Delta-Neutral Expiry Iron Condor Pinning Setup
+    iron_condor = {
+        "symbol": "NIFTY",
+        "segment": "FNO",
+        "setup_type": "IRON_CONDOR_PINNING",
+        "direction": "NEUTRAL",
+        "conviction_score": 93,
+        "verdict": "MAX_CONVICTION",
+        "ltp": 25200.0,
+        "entry_range": "₹25,180 – ₹25,220",
+        "corridor_low": 25050.0,
+        "corridor_high": 25350.0,
+        "short_pe": 25050.0,
+        "short_ce": 25350.0,
+        "long_pe": 24900.0,
+        "long_ce": 25500.0,
+        "net_credit": 46.5,
+        "max_risk": 103.5,
+        "risk_reward_ratio": 2.2,
+        "confluences": [
+            "Max Pain Pinning at ₹25,200",
+            "IV Rank > 65 with Rapid Theta Acceleration",
+            "Heavy Straddle Writing at 25200 Strike",
+        ],
+        "when_to_wait": "DO NOT ENTER if Spot breaches ₹25,050 or ₹25,350 short strikes",
+    }
+    condor_msg = render_asymmetric_alert(iron_condor)
+    assert "IRON CONDOR PINNING" in condor_msg
+    assert "🦅" in condor_msg
+    assert "Action: SELL IRON CONDOR (DELTA-NEUTRAL)" in condor_msg
+    assert "Corridor Pin Zone:</b> <code>₹25,050.00 – ₹25,350.00</code>" in condor_msg
+    assert "Short Wing (Sell):</b> <code>25,050 PE + 25,350 CE</code>" in condor_msg
+    assert "Hedge Wing (Buy):</b> <code>24,900 PE + 25,500 CE</code>" in condor_msg
+    assert "Net Credit Harvest:</b> <code>+₹46.50/lot</code>" in condor_msg
+
 
 

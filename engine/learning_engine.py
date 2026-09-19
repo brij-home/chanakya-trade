@@ -620,27 +620,55 @@ class PatternLearningEngine:
         )
 
         if is_opt:
-            entry_price = float(
-                getattr(alert, "option_premium", 0.0) or getattr(alert, "ltp", 0.0) or exit_price
-            )
             act_plan = getattr(alert, "actionable_plan", {}) or (
                 alert.get("actionable_plan", {}) if isinstance(alert, dict) else {}
             )
+            # 1. Resolve true entry price in option premium coordinates
+            entry_price = float(
+                getattr(alert, "option_premium", 0.0)
+                or (act_plan.get("trade_plan", {}).get("entry_price") if act_plan else 0.0)
+                or 0.0
+            )
             if entry_price <= 0 and act_plan:
-                rec_str = str(act_plan.get("recommended_entry", ""))
+                rec_str = str(act_plan.get("recommended_entry", "") or act_plan.get("entry_range", ""))
                 m = re.search(r"[\d.]+", rec_str)
                 if m:
                     try:
                         entry_price = float(m.group(0))
                     except ValueError:
                         pass
+            if entry_price <= 0:
+                entry_price = float(getattr(alert, "ltp", 0.0) or exit_price or 1.0)
+
+            # 2. Resolve option stop-loss in premium coordinates (never inherit underlying spot/futures level)
+            stop_loss = 0.0
+            if act_plan:
+                opt_sl_str = str(act_plan.get("stop_loss", ""))
+                m_sl = re.findall(r"[\d,]+(?:\.\d+)?", opt_sl_str)
+                if m_sl:
+                    stop_loss = float(m_sl[0].replace(",", ""))
+                elif act_plan.get("trade_plan", {}).get("invalidation_stop"):
+                    stop_loss = float(act_plan["trade_plan"]["invalidation_stop"])
+
+            raw_sl = float(getattr(alert, "stop_loss", 0.0) or 0.0)
+            if stop_loss <= 0 and 0 < raw_sl <= 3.0 * entry_price:
+                stop_loss = raw_sl
+            elif stop_loss <= 0 or stop_loss > 3.0 * entry_price:
+                # If stop_loss was missing or in underlying spot coordinates, use 28% Greek risk floor
+                stop_loss = round(max(0.05, entry_price * 0.72), 2)
+
+            # 3. Resolve option exit_price in premium coordinates
+            # If exit_price was passed as underlying spot price (e.g. 56444 vs entry 799), clamp to stop_loss
+            if exit_price > 3.0 * entry_price or exit_price <= 0:
+                exit_price = stop_loss
+            else:
+                exit_price = float(exit_price)
         else:
             entry_price = float(
                 getattr(alert, "trigger_level", 0.0) or getattr(alert, "ltp", 0.0) or exit_price
             )
-
-        stop_loss = float(getattr(alert, "stop_loss", 0.0) or 0.0)
-        exit_price = float(exit_price or entry_price)
+            stop_loss = float(getattr(alert, "stop_loss", 0.0) or 0.0)
+            exit_price = float(exit_price or entry_price)
 
         is_opt_sell = False
         if is_opt:
