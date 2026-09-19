@@ -5,13 +5,33 @@ const STORAGE_KEY = 'chanakya_notifications_v1'
 let _pollTimer = null
 const MAX_NOTIFICATIONS = 100
 
-// Safe localStorage loader
+// Safe localStorage loader with prior-day intraday expiration sanitization
 function loadStoredNotifications() {
   try {
     const raw = localStorage.getItem(STORAGE_KEY)
     if (!raw) return []
     const parsed = JSON.parse(raw)
-    return Array.isArray(parsed) ? parsed : []
+    if (!Array.isArray(parsed)) return []
+    const now = new Date()
+    return parsed.map((item) => {
+      const isIntraday = item.time_horizon === 'INTRADAY' || item.timeHorizon === 'INTRADAY'
+      const timeStr = item.created_at || item.timestamp
+      if (isIntraday && timeStr) {
+        try {
+          const d = new Date(String(timeStr).replace(' IST', '').trim())
+          if (!isNaN(d.getTime()) && d.toDateString() !== now.toDateString()) {
+            return {
+              ...item,
+              is_invalidated: true,
+              isInvalidated: true,
+              stage: 'EXPIRED',
+              invalidation_reason: item.invalidation_reason || 'Intraday session expired (15:15 IST cutoff reached). Trade closed.'
+            }
+          }
+        } catch (_) {}
+      }
+      return item
+    })
   } catch (_) {
     return []
   }
@@ -129,7 +149,25 @@ export const useNotificationStore = create((set, get) => ({
       }
 
       // Preserve any local/SSE alerts not present in the backend snapshot
+      const now = new Date()
       for (const rem of existingMap.values()) {
+        const isIntraday = rem.time_horizon === 'INTRADAY' || rem.timeHorizon === 'INTRADAY'
+        const timeStr = rem.created_at || rem.timestamp
+        if (isIntraday && timeStr) {
+          try {
+            const d = new Date(String(timeStr).replace(' IST', '').trim())
+            if (!isNaN(d.getTime()) && d.toDateString() !== now.toDateString()) {
+              merged.push({
+                ...rem,
+                is_invalidated: true,
+                isInvalidated: true,
+                stage: 'EXPIRED',
+                invalidation_reason: rem.invalidation_reason || 'Intraday session expired (15:15 IST cutoff reached). Trade closed.'
+              })
+              continue
+            }
+          } catch (_) {}
+        }
         merged.push(rem)
       }
 

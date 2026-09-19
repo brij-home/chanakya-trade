@@ -580,3 +580,115 @@ def format_readable_option_symbol(
     if exp_display:
         return f"{base} ({exp_display})"
     return base
+
+
+def audit_option_liquidity(
+    contract_or_quote: Any,
+    underlying: Optional[str] = None,
+    lot_size: Optional[int] = None,
+) -> dict[str, Any]:
+    """
+    Audits the real-time liquidity of an option contract based on:
+      1. Bid-Ask Spread %: ((ask - bid) / ref_price) * 100
+      2. Open Interest (OI) & Day Volume
+      3. Slippage Feasibility
+    Returns:
+      {
+         "is_liquid": bool,
+         "liquidity_status": "OPTIMAL" | "MODERATE" | "WIDE_SPREAD_CAUTION" | "ILLIQUID",
+         "bid_ask_spread_pct": float,
+         "best_bid": float,
+         "best_ask": float,
+         "oi": int,
+         "volume": int,
+         "slippage_risk": "LOW" | "MEDIUM" | "HIGH",
+         "execution_warning": Optional[str]
+      }
+    """
+    if contract_or_quote is None:
+        return {
+            "is_liquid": False,
+            "liquidity_status": "ILLIQUID",
+            "bid_ask_spread_pct": None,
+            "best_bid": 0.0,
+            "best_ask": 0.0,
+            "oi": 0,
+            "volume": 0,
+            "slippage_risk": "HIGH",
+            "execution_warning": "No live market quote available for contract.",
+        }
+
+    # Extract fields from object or dict
+    if isinstance(contract_or_quote, dict):
+        d = contract_or_quote
+        ltp = float(d.get("last_price") or d.get("price") or d.get("ltp") or 0.0)
+        bid = float(d.get("bid") or d.get("best_bid") or d.get("buy_price") or 0.0)
+        ask = float(d.get("ask") or d.get("best_ask") or d.get("sell_price") or 0.0)
+        oi = int(d.get("oi") or d.get("open_interest") or 0)
+        volume = int(d.get("volume") or d.get("vol") or 0)
+    else:
+        obj = contract_or_quote
+        ltp = float(getattr(obj, "last_price", None) or getattr(obj, "price", None) or getattr(obj, "ltp", 0.0) or 0.0)
+        bid = float(getattr(obj, "bid", None) or getattr(obj, "best_bid", None) or getattr(obj, "buy_price", 0.0) or 0.0)
+        ask = float(getattr(obj, "ask", None) or getattr(obj, "best_ask", None) or getattr(obj, "sell_price", 0.0) or 0.0)
+        oi = int(getattr(obj, "oi", 0) or getattr(obj, "open_interest", 0) or 0)
+        volume = int(getattr(obj, "volume", 0) or getattr(obj, "vol", 0) or 0)
+
+    # Spread calculation
+    ref_price = ltp if ltp > 0 else ((bid + ask) / 2.0 if (bid > 0 and ask > 0) else 0.0)
+    has_valid_book = bid > 0 and ask > 0 and ask >= bid and ref_price > 0
+
+    if has_valid_book:
+        spread_abs = ask - bid
+        spread_pct = round((spread_abs / ref_price) * 100.0, 2)
+    else:
+        spread_pct = None
+
+    # Underlying category checks
+    und_clean = (underlying or "").replace("NSE:", "").replace("NFO:", "").replace("BSE:", "").strip().upper()
+    is_index = und_clean in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX")
+    min_oi_floor = 8000 if is_index else 50
+    min_vol_floor = 1000 if is_index else 25
+
+    # Status classification
+    warning = None
+    if not has_valid_book:
+        if oi >= min_oi_floor and volume >= min_vol_floor:
+            # High activity but missing bid/ask in snapshot (e.g. L1 tick feed)
+            status = "OPTIMAL"
+            risk = "LOW"
+        else:
+            status = "ILLIQUID"
+            risk = "HIGH"
+            warning = "Zero bid or ask quotes in order book. Avoid market orders."
+    elif spread_pct <= 1.0:
+        status = "OPTIMAL"
+        risk = "LOW"
+    elif spread_pct <= 2.5:
+        status = "MODERATE"
+        risk = "MEDIUM"
+        warning = f"Moderate bid-ask spread ({spread_pct}%). Execute strictly with Limit Orders."
+    else:
+        status = "WIDE_SPREAD_CAUTION"
+        risk = "HIGH"
+        warning = f"Wide bid-ask spread ({spread_pct}%). Severe slippage risk upon exit."
+
+    # Verify OI and Volume thresholds
+    if oi > 0 and oi < min_oi_floor and status == "OPTIMAL":
+        status = "MODERATE"
+        risk = "MEDIUM"
+        warning = f"Low open interest ({oi:,} contracts). Thin order depth."
+
+    is_liquid = status in ("OPTIMAL", "MODERATE")
+
+    return {
+        "is_liquid": is_liquid,
+        "liquidity_status": status,
+        "bid_ask_spread_pct": spread_pct,
+        "best_bid": bid,
+        "best_ask": ask,
+        "oi": oi,
+        "volume": volume,
+        "slippage_risk": risk,
+        "execution_warning": warning,
+    }

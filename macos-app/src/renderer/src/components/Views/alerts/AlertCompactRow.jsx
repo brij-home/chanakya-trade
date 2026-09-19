@@ -27,7 +27,8 @@ export const AlertCompactRow = memo(function AlertCompactRow({ alert, onSendTele
   const isTest = alert.environment === 'TEST' || alert.is_live === false
   const isEarly = alert.stage === 'EARLY_WARNING'
   const isIgnited = alert.stage === 'IGNITED'
-  const isInvalidated = alert.is_invalidated || alert.stage === 'INVALIDATED'
+  const isExpired = alert.is_expired || alert.stage === 'EXPIRED'
+  const isInvalidated = alert.is_invalidated || alert.stage === 'INVALIDATED' || isExpired
   const isT1Achieved = alert.stage === 'T1_ACHIEVED' || alert.target_status === 'T1_ACHIEVED'
   const isT2Achieved = alert.stage === 'T2_ACHIEVED' || alert.target_status === 'T2_ACHIEVED'
   const isFinalTargetAchieved = alert.stage === 'TARGET_ACHIEVED' || alert.target_status === 'TARGET_ACHIEVED' || alert.stage === 'COMPLETED'
@@ -235,7 +236,9 @@ export const AlertCompactRow = memo(function AlertCompactRow({ alert, onSendTele
   const reasonShort = (alert.summary || alert.headline || '').slice(0, 40)
 
   // Stage pill styling with high-contrast glowing alerts
-  const stagePill = isSLHit
+  const stagePill = isExpired
+    ? { label: '⏱️ EXPIRED', cls: 'bg-zinc-700/40 text-zinc-300 border-zinc-600/40' }
+    : isSLHit
     ? { label: '🛑 SL HIT', cls: 'bg-rose-500/25 text-rose-300 border-rose-500/60 ring-1 ring-rose-500/40 animate-pulse' }
     : isT3Hit
     ? { label: '🚀 T3 HIT', cls: 'bg-purple-500/25 text-purple-200 border-purple-400/60 ring-1 ring-purple-500/40 animate-pulse' }
@@ -313,10 +316,35 @@ export const AlertCompactRow = memo(function AlertCompactRow({ alert, onSendTele
             alert.time_horizon === 'SWING_MID' ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30' :
             'bg-purple-500/15 text-purple-300 border-purple-500/30'
           }`}>
-            {alert.time_horizon === 'INTRADAY' ? '⏱️ INTRADAY' :
-             alert.time_horizon === 'SWING_SHORT' ? '⚡ 2-5D SWING' :
-             alert.time_horizon === 'SWING_MID' ? '📈 1-4W SWING' : '🏛️ POSITIONAL'}
+            {alert.time_horizon === 'INTRADAY'
+              ? (alert.exchange === 'MCX' ? '⏱️ INTRADAY (23:15)' : '⏱️ INTRADAY (15:15)')
+              : alert.time_horizon === 'SWING_SHORT' ? '⚡ 2-5D SWING'
+              : alert.time_horizon === 'SWING_MID' ? '📈 1-4W SWING'
+              : '🏛️ POSITIONAL'}
           </span>
+        )}
+
+        {/* ── Options Liquidity Watchdog Badge ── */}
+        {isDerivative && (alert.liquidity_status || alert.bid_ask_spread_pct !== null || alert.metrics?.liquidity) && (
+          (() => {
+            const spread = alert.bid_ask_spread_pct ?? alert.metrics?.liquidity?.bid_ask_spread_pct
+            const status = alert.liquidity_status || alert.metrics?.liquidity?.liquidity_status || 'OPTIMAL'
+            const isWide = status === 'WIDE_SPREAD_CAUTION' || (spread != null && spread > 2.5)
+            const isMod = status === 'MODERATE' || (spread != null && spread > 1.0)
+            const spreadLabel = spread != null ? `${spread.toFixed(1)}%` : ''
+            return (
+              <span
+                className={`text-[7px] px-1.5 py-px rounded font-black whitespace-nowrap border hidden sm:inline ${
+                  isWide ? 'bg-rose-500/20 text-rose-300 border-rose-500/40' :
+                  isMod ? 'bg-amber-500/20 text-amber-300 border-amber-500/40' :
+                  'bg-emerald-500/20 text-emerald-300 border-emerald-500/30'
+                }`}
+                title={isWide ? `Wide Bid-Ask Spread (${spreadLabel}). Slippage risk on market orders!` : isMod ? `Moderate Spread (${spreadLabel}). Use Limit Orders.` : `Optimal Liquidity (${spreadLabel})`}
+              >
+                {isWide ? `⚠️ WIDE ${spreadLabel}` : isMod ? `🟡 SPREAD ${spreadLabel}` : `🟢 LIQUID ${spreadLabel}`.trim()}
+              </span>
+            )
+          })()
         )}
 
         {/* ── Broker Level 2 Connection Status ── */}
@@ -514,6 +542,24 @@ export const AlertCompactRow = memo(function AlertCompactRow({ alert, onSendTele
             className="btn btn-xs text-[9px] px-1.5 font-bold flex-shrink-0 text-indigo-700 dark:text-indigo-300 hover:text-indigo-900 dark:hover:text-indigo-200 bg-indigo-500/15 hover:bg-indigo-500/25 border border-indigo-400/40 dark:border-indigo-500/35 hover:border-indigo-500/60 transition-all"
             title={`Option Alternative: ${optPlan?.contract_symbol || plan.option_contract} @ ₹${optPlan?.entry_premium || plan.option_entry?.replace('₹', '') || '—'} (Click to trade Option)`}
           >⚡ Opt {optPlan?.contract_symbol ? optPlan.contract_symbol.slice(-6) : (plan.option_contract ? plan.option_contract.slice(-6) : '')}</button>
+        )}
+
+        {/* ── 1-Click Roll Strike Button ── */}
+        {isDerivative && (isT2Hit || isT3Hit || isFinalTargetAchieved || Boolean(alert.strike_roll_recommendation)) && (
+          <button
+            onClick={(e) => {
+              e.stopPropagation()
+              if (onTrade) {
+                onTrade({
+                  ...alert,
+                  _isStrikeRoll: true,
+                  _rollRecommendation: alert.strike_roll_recommendation,
+                })
+              }
+            }}
+            className="btn btn-xs text-[9px] px-1.5 font-bold flex-shrink-0 text-amber-700 dark:text-amber-300 hover:text-amber-900 dark:hover:text-amber-200 bg-amber-500/15 hover:bg-amber-500/25 border border-amber-400/40 dark:border-amber-500/35 hover:border-amber-500/60 transition-all animate-pulse"
+            title={`Roll Strike: ${alert.strike_roll_recommendation?.reason || 'Lock in deep ITM gains and roll to liquid ATM strike'}`}
+          >🔄 Roll Strike</button>
         )}
 
         <button

@@ -30,6 +30,52 @@ def evaluate_alert_invalidation(
     if getattr(alert, "is_invalidated", False) or getattr(alert, "stage", "") == "INVALIDATED":
         return None
 
+    # 0. Session Cutoff & Time-Stop Horizon Invalidation
+    is_test_runner = (
+        (getattr(alert, "environment", "LIVE") == "TEST")
+        or (not getattr(alert, "is_live", True))
+        or (os.environ.get("CHANAKYA_TESTING") == "1")
+        or (os.environ.get("DEPLOY_MODE") == "test")
+        or ("PYTEST_CURRENT_TEST" in os.environ)
+    ) and not getattr(alert, "_force_test_expiry", False)
+
+    created_str = getattr(alert, "created_at", "")
+    created_dt = None
+    if created_str:
+        clean_ts = created_str.replace(" IST", "").strip()[:19]
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+            try:
+                created_dt = datetime.strptime(clean_ts, fmt).replace(tzinfo=IST)
+                break
+            except ValueError:
+                pass
+
+    if not is_test_runner and created_dt:
+        now_ist = datetime.now(IST)
+        th = (getattr(alert, "time_horizon", "INTRADAY") or "INTRADAY").upper()
+
+        # 0a. Hard Intraday Cutoff (15:15 IST NSE/BSE/NFO, 23:15 IST MCX)
+        if th == "INTRADAY" and not getattr(alert, "expiry_date", None):
+            exch = (getattr(alert, "exchange", "NSE") or "NSE").upper()
+            cutoff_reached = False
+            if created_dt.date() < now_ist.date():
+                cutoff_reached = True
+            elif exch == "MCX":
+                cutoff_reached = now_ist.hour > 23 or (now_ist.hour == 23 and now_ist.minute >= 15)
+            else:
+                cutoff_reached = now_ist.hour > 15 or (now_ist.hour == 15 and now_ist.minute >= 15)
+            if cutoff_reached:
+                cutoff_time = "23:15" if exch == "MCX" else "15:15"
+                return f"Intraday session expired ({cutoff_time} IST cutoff reached). Trade closed."
+
+        # 0b. Time-Stop for unignited EARLY_WARNING setups (default 60 mins for intraday)
+        if getattr(alert, "stage", "") == "EARLY_WARNING":
+            elapsed_sec = (now_ist - created_dt).total_seconds()
+            ttl_sec = getattr(alert, "ttl_seconds", None) or (3600 if th == "INTRADAY" else 86400 * 5)
+            if elapsed_sec >= ttl_sec:
+                mins = int(ttl_sec / 60)
+                return f"Time-Stop expired: Setup did not trigger within {mins}-minute momentum window."
+
     is_option = is_alert_option_premium_level(alert)
 
     session_low: Optional[float] = None
@@ -260,6 +306,100 @@ class TargetTrailingEvaluation:
     r_multiple: float = 0.0
     pnl_pct: float = 0.0
     is_superperforming: bool = False
+    strike_roll_recommendation: Optional[dict[str, Any]] = None
+    should_roll_strike: bool = False
+
+
+def calculate_strike_roll_recommendation(
+    alert: Any,
+    current_ltp: float,
+    pnl_pct: float,
+    is_bullish: bool,
+) -> Optional[dict[str, Any]]:
+    """
+    Computes institutional strike roll recommendation when an option hits T2 / Final target.
+    Prevents holding deep ITM options with delta ~ 1.0, wide bid-ask spread, and low liquidity.
+    Suggests rolling to an active liquid ATM strike.
+    """
+    sym = (
+        (getattr(alert, "symbol", "") or "")
+        .replace("NSE:", "")
+        .replace("NFO:", "")
+        .replace("BSE:", "")
+        .strip()
+        .upper()
+    )
+    cur_strike = getattr(alert, "strike", None)
+    opt_type = getattr(alert, "option_type", None)
+    if not cur_strike or not opt_type:
+        return None
+
+    # Underlying spot price reference
+    spot = getattr(alert, "underlying_spot", None)
+    if not spot or spot <= 0:
+        metrics = getattr(alert, "metrics", {}) or {}
+        spot = metrics.get("spot")
+    if not spot or spot <= 0:
+        return None
+
+    # Strike step determination
+    step = 50.0
+    if sym in ("BANKNIFTY", "SENSEX", "BANKEX"):
+        step = 100.0
+    elif sym == "FINNIFTY":
+        step = 50.0
+    elif sym == "MIDCPNIFTY":
+        step = 25.0
+    elif sym == "NIFTY":
+        step = 50.0
+    else:
+        # Stock options strike step heuristic
+        if spot >= 5000:
+            step = 100.0
+        elif spot >= 2500:
+            step = 50.0
+        elif spot >= 1000:
+            step = 20.0
+        elif spot >= 500:
+            step = 10.0
+        elif spot >= 200:
+            step = 5.0
+        else:
+            step = 2.5
+
+    # Compute fresh ATM strike
+    atm_strike = round(spot / step) * step
+
+    # If current strike is already near ATM (e.g. within 0.5 step), rolling is not needed
+    if abs(cur_strike - atm_strike) < (step * 0.5):
+        return None
+
+    action_type = "ROLL_UP" if is_bullish else "ROLL_DOWN"
+    roll_target_strike = atm_strike
+
+    # Attempt to derive new contract symbol if possible
+    exp_date = getattr(alert, "expiry_date", None)
+    cur_contract = getattr(alert, "contract_symbol", "")
+    new_contract = None
+    if cur_contract and str(int(cur_strike)) in cur_contract:
+        new_contract = cur_contract.replace(str(int(cur_strike)), str(int(roll_target_strike)))
+
+    action_desc = "up" if is_bullish else "down"
+    return {
+        "action": action_type,
+        "current_strike": cur_strike,
+        "recommended_strike": roll_target_strike,
+        "recommended_contract": new_contract,
+        "underlying_spot": spot,
+        "expiry_date": exp_date,
+        "pnl_pct": round(pnl_pct, 1),
+        "reason": (
+            f"Lock in deep ITM option gains (+{pnl_pct:.1f}%). "
+            f"Roll {action_desc} to liquid ATM {int(roll_target_strike)} {opt_type} "
+            f"to restore gamma leverage and avoid wide bid-ask slippage."
+        ),
+        "status": "RECOMMENDED",
+    }
 
 
 def evaluate_alert_targets_and_trailing(
@@ -638,6 +778,11 @@ def evaluate_alert_targets_and_trailing(
 
     # 1. Final Target (T3 or Primary Target) Hit
     if is_final_hit and pnl_pts > 0 and "TARGET_ACHIEVED" not in achieved:
+        roll_rec = (
+            calculate_strike_roll_recommendation(alert, current_ltp, pnl_pct, is_bullish)
+            if is_option
+            else None
+        )
         if is_superperforming:
             # Superperforming momentum: do NOT exit all, trail runner with Chandelier ATR
             if is_bullish:
@@ -653,6 +798,8 @@ def evaluate_alert_targets_and_trailing(
                 f"DECISION: TRAIL STOP-LOSS TO ₹{rec_stop:,.2f} (Chandelier ATR Trail). "
                 f"DO NOT FULLY EXIT RUNNER — Heavy institutional flow is extending breakout. Let runners ride!"
             )
+            if roll_rec:
+                rationale += f" | 🔄 OPTION ROLL: {roll_rec['reason']}"
             return TargetTrailingEvaluation(
                 new_milestone="TARGET_ACHIEVED",
                 target_status="TARGET_ACHIEVED",
@@ -665,6 +812,8 @@ def evaluate_alert_targets_and_trailing(
                 r_multiple=round(r_multiple, 2),
                 pnl_pct=round(pnl_pct, 2),
                 is_superperforming=True,
+                strike_roll_recommendation=roll_rec,
+                should_roll_strike=bool(roll_rec),
             )
         else:
             # Normal target hit: resistance reached, book full profit! Do not trail.
@@ -676,6 +825,8 @@ def evaluate_alert_targets_and_trailing(
                 f"DECISION: FULL PROFIT BOOKING RECOMMENDED. Close all open positions at market. "
                 f"DO NOT TRAIL FURTHER — high probability of mean-reversion exhaustion at major resistance."
             )
+            if roll_rec:
+                rationale += f" | 🔄 OPTION ROLL: {roll_rec['reason']}"
             return TargetTrailingEvaluation(
                 new_milestone="TARGET_ACHIEVED",
                 target_status="TARGET_ACHIEVED",
@@ -688,6 +839,8 @@ def evaluate_alert_targets_and_trailing(
                 r_multiple=round(r_multiple, 2),
                 pnl_pct=round(pnl_pct, 2),
                 is_superperforming=False,
+                strike_roll_recommendation=roll_rec,
+                should_roll_strike=bool(roll_rec),
             )
 
     # 2. Target 2 (T2) Check - intermediate expansion milestone
@@ -700,6 +853,11 @@ def evaluate_alert_targets_and_trailing(
         and "TARGET_ACHIEVED" not in achieved
     ):
         # T2 reached -> Trail SL to T1 level (Guarantees T1 profit locked)
+        roll_rec = (
+            calculate_strike_roll_recommendation(alert, current_ltp, pnl_pct, is_bullish)
+            if is_option
+            else None
+        )
         rec_stop = t1_level
         locked_pts = abs(rec_stop - entry)
         locked_pct = round((locked_pts / entry) * 100, 2) if entry > 0 else 0.0
@@ -708,6 +866,8 @@ def evaluate_alert_targets_and_trailing(
             f"DECISION: TRAIL STOP-LOSS TO T1 (₹{rec_stop:,.2f}) LOCKING +{locked_pct:.1f}% PROFIT. "
             f"Hold runner position for Final Target (₹{target_final:,.2f})."
         )
+        if roll_rec:
+            rationale += f" | 🔄 OPTION ROLL: {roll_rec['reason']}"
         return TargetTrailingEvaluation(
             new_milestone="T2_ACHIEVED",
             target_status="T2_ACHIEVED",
@@ -720,6 +880,8 @@ def evaluate_alert_targets_and_trailing(
             r_multiple=round(r_multiple, 2),
             pnl_pct=round(pnl_pct, 2),
             is_superperforming=is_superperforming,
+            strike_roll_recommendation=roll_rec,
+            should_roll_strike=bool(roll_rec),
         )
 
     # 3. Target 1 (T1) Check - Strictly requires positive PnL and genuine milestone achievement

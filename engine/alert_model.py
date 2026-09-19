@@ -99,6 +99,10 @@ class AutoAlert:
     dispatched_channels: list[str] = field(default_factory=list)
     trace_id: Optional[str] = None
     quant_snapshot: Optional[dict[str, Any]] = None
+    ttl_seconds: Optional[int] = None
+    liquidity_status: Optional[str] = None  # "OPTIMAL" | "MODERATE" | "WIDE_SPREAD_CAUTION" | "ILLIQUID"
+    bid_ask_spread_pct: Optional[float] = None
+    strike_roll_recommendation: Optional[dict[str, Any]] = None
 
     def __post_init__(self) -> None:
         if not self.created_at:
@@ -243,19 +247,32 @@ class AutoAlert:
     @property
     def is_expired(self) -> bool:
         """
-        Determines whether a derivative contract or Gamma Blast alert has expired.
+        Determines whether an alert, derivative contract, or intraday trade has expired.
         1. Checks explicit expiry_date (15:30 IST on expiry day).
-        2. For index options without explicit date, resolves against the weekly expiry calendar.
-        3. Gamma blast intraday spikes expire after 24 hours of market time.
+        2. Intraday Session Cutoff: All INTRADAY setups strictly expire at 15:15 IST (NSE/BSE/NFO)
+           or 23:15 IST (MCX) on the session date, or immediately if created on a prior date.
+        3. Configured TTL: Checks if (now - created_dt) exceeds explicit ttl_seconds.
+        4. Stale Setup Time-Stop: Unignited EARLY_WARNING setups expire after 60 mins during session.
+        5. Weekly Index expiry calendar and 24h Gamma Blast fallback.
         """
         if self.stage == "EXPIRED":
             return True
 
-        # Test and simulation alerts do not expire based on wall-clock time
-        if self.environment == "TEST" or not self.is_live or self.alert_id.startswith("test-"):
+        # Test and simulation alerts do not expire based on wall-clock time unless explicitly tested
+        if (
+            (self.environment == "TEST" or not self.is_live or self.alert_id.startswith("test-"))
+            and not getattr(self, "_force_test_expiry", False)
+        ):
             return False
 
         now = datetime.now(IST)
+
+        is_deriv = bool(
+            self.strike
+            or self.option_type
+            or self.contract_symbol
+            or self.alert_type in ("GAMMA_BLAST", "OPTIONS_MOMENTUM")
+        )
 
         # 1. Check explicit expiry_date
         if self.expiry_date:
@@ -270,7 +287,7 @@ class AutoAlert:
                 except ValueError:
                     pass
 
-        # 2. Check derivative alerts (options/futures/gamma blast) & Intraday Early Warnings
+        # 2. Check creation timestamp for intraday cutoff, TTL, and time-stops
         created_dt = None
         if self.created_at:
             clean_ts = self.created_at.replace(" IST", "").strip()[:19]
@@ -281,19 +298,65 @@ class AutoAlert:
                 except ValueError:
                     pass
 
-        # 2a. Intraday Session Rollover Invariant:
-        # Pre-breakout coiling/early-warning setups belong strictly to their trading session.
-        # If created on a prior calendar date (created_dt.date() < now.date()),
-        # unignited early warnings expire immediately so yesterday's stale coils never pollute today.
-        if self.stage == "EARLY_WARNING" and created_dt and created_dt.date() < now.date():
-            return True
+        if created_dt:
+            # 2a. Explicit Time-To-Live (TTL)
+            if self.ttl_seconds and self.ttl_seconds > 0:
+                if (now - created_dt).total_seconds() >= self.ttl_seconds:
+                    return True
 
-        is_deriv = bool(
-            self.strike
-            or self.option_type
-            or self.contract_symbol
-            or self.alert_type == "GAMMA_BLAST"
-        )
+            # 2b. Intraday Session Cutoff (15:15 IST for NSE/BSE/NFO, 23:15 IST for MCX)
+            # Intraday setups belong strictly to their trading session and cannot carry overnight.
+            # Derivative contracts with future expiry dates remain active until their contract expiry date.
+            th = (self.time_horizon or "INTRADAY").upper()
+            if th == "INTRADAY":
+                has_future_expiry = False
+                if self.expiry_date:
+                    for fmt in ("%Y-%m-%d", "%d-%b-%Y", "%d-%m-%Y"):
+                        try:
+                            exp_dt = datetime.strptime(self.expiry_date.strip(), fmt).replace(
+                                hour=15, minute=30, second=0, tzinfo=IST
+                            )
+                            if exp_dt.date() > now.date():
+                                has_future_expiry = True
+                            break
+                        except ValueError:
+                            pass
+
+                is_active_deriv = (
+                    is_deriv
+                    and self.stage in ("IGNITED", "TRAILING_UPDATE", "T1_ACHIEVED", "T2_ACHIEVED")
+                    and not getattr(self, "_force_test_expiry", False)
+                )
+
+                if not has_future_expiry and not is_active_deriv:
+                    if created_dt.date() < now.date():
+                        return True
+                    exch = (self.exchange or "NSE").upper()
+                    if exch == "MCX":
+                        if now.hour > 23 or (now.hour == 23 and now.minute >= 15):
+                            return True
+                    else:
+                        if now.hour > 15 or (now.hour == 15 and now.minute >= 15):
+                            return True
+                elif getattr(self, "_force_test_expiry", False):
+                    if created_dt.date() < now.date():
+                        return True
+                    exch = (self.exchange or "NSE").upper()
+                    if exch == "MCX":
+                        if now.hour > 23 or (now.hour == 23 and now.minute >= 15):
+                            return True
+                    else:
+                        if now.hour > 15 or (now.hour == 15 and now.minute >= 15):
+                            return True
+
+            # 2c. Unignited Early Warning Setup Time-Stop:
+            # Pre-breakout early warnings expire if left unignited from a prior day,
+            # or if 60 minutes have elapsed without triggering during an active session.
+            if self.stage == "EARLY_WARNING":
+                if created_dt.date() < now.date():
+                    return True
+                if th == "INTRADAY" and (now - created_dt).total_seconds() >= 3600:
+                    return True
 
         if is_deriv:
             if created_dt:

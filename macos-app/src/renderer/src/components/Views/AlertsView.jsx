@@ -84,6 +84,25 @@ function mergeAlertsInPlace(prevAlerts = [], freshAlerts = []) {
 
     const freshItem = freshMap.get(id)
     if (!freshItem) {
+      const horizon = oldItem.time_horizon || oldItem.timeHorizon || 'INTRADAY'
+      if (horizon === 'INTRADAY' && (oldItem.created_at || oldItem.timestamp)) {
+        try {
+          const clean = String(oldItem.created_at || oldItem.timestamp).replace(' IST', '').trim()
+          const createdDate = new Date(clean)
+          if (!isNaN(createdDate.getTime()) && createdDate.toDateString() !== new Date().toDateString()) {
+            hasChanges = true
+            updatedExisting.push({
+              ...oldItem,
+              is_invalidated: true,
+              is_archived: true,
+              is_active: false,
+              stage: 'EXPIRED',
+              invalidation_reason: oldItem.invalidation_reason || 'Intraday session expired (15:15 IST cutoff reached). Trade closed.'
+            })
+            continue
+          }
+        } catch (_) {}
+      }
       // Item still exists locally
       updatedExisting.push(oldItem)
       continue
@@ -2185,7 +2204,19 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
       seg === 'FNO' ? 'NFO' : 'NSE'
     )
 
-    if (wantOption) {
+    if (alt._isStrikeRoll) {
+      const roll = alt._rollRecommendation || alt.strike_roll_recommendation
+      if (roll?.recommended_contract) {
+        targetSym = roll.recommended_contract
+      } else if (roll?.recommended_strike) {
+        const oType = alt.option_type || (String(targetSym).endsWith('PE') ? 'PE' : 'CE')
+        targetSym = `${cleanSym} ${roll.recommended_strike} ${oType}`
+      }
+      targetExchange = alt.exchange === 'BSE' ? 'BFO' : (alt.exchange === 'MCX' ? 'MCX' : 'NFO')
+      targetPrice = null
+      targetSL = null
+      targetTP = null
+    } else if (wantOption) {
       targetExchange = 'NFO'
       if (optPlan?.contract_symbol) targetSym = optPlan.contract_symbol
       else if (actPlan.option_contract) targetSym = actPlan.option_contract
@@ -2268,14 +2299,26 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
 
   // Active validation check: True only if trade is neither archived, invalidated, expired, nor final target reached
   const isAlertActive = (a) => {
-    if (a.is_expired || a.stage === 'EXPIRED') return false
+    if (!a) return false
+    if (a.is_expired || a.stage === 'EXPIRED' || a.is_invalidated || a.is_archived) return false
+    if (a.stage === 'INVALIDATED' || a.stage === 'TARGET_ACHIEVED' || a.stage === 'COMPLETED' || a.target_status === 'TARGET_ACHIEVED') return false
+
+    // Check Intraday session expiration
+    const horizon = a.time_horizon || a.timeHorizon || 'INTRADAY'
+    if (horizon === 'INTRADAY' && (a.created_at || a.timestamp)) {
+      try {
+        const clean = String(a.created_at || a.timestamp).replace(' IST', '').trim()
+        const createdDate = new Date(clean)
+        const now = new Date()
+        if (!isNaN(createdDate.getTime()) && createdDate.toDateString() !== now.toDateString()) {
+          return false
+        }
+      } catch (_) {}
+    }
+
     return a.is_active !== undefined
       ? Boolean(a.is_active)
-      : !a.is_archived &&
-        !a.is_invalidated &&
-        a.stage !== 'INVALIDATED' &&
-        a.stage !== 'TARGET_ACHIEVED' &&
-        a.target_status !== 'TARGET_ACHIEVED'
+      : true
   }
 
   const activeCount = autoAlerts.filter(isAlertActive).length

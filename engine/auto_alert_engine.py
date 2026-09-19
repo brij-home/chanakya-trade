@@ -1809,6 +1809,8 @@ class AutoAlertEngine:
                     alert.target_status = eval_res.target_status
                     alert.r_multiple = eval_res.r_multiple
                     alert.pnl_pct = eval_res.pnl_pct
+                    if getattr(eval_res, "strike_roll_recommendation", None):
+                        alert.strike_roll_recommendation = eval_res.strike_roll_recommendation
 
                     env_tag = (
                         "[TEST]"
@@ -5455,8 +5457,31 @@ class AutoAlertEngine:
                 a.is_archived = True
                 a.archived_at = now_iso
                 a.stage = "EXPIRED"
+                a.is_invalidated = True
                 exp_label = a.expiry_date or "weekly/intraday shelf-life passed"
-                a.archive_reason = f"Contract expired ({exp_label})"
+                if a.time_horizon == "INTRADAY":
+                    cutoff = (
+                        "23:15 IST"
+                        if (
+                            a.exchange == "MCX"
+                            or (a.symbol or "").upper()
+                            in (
+                                "GOLD",
+                                "GOLDM",
+                                "SILVER",
+                                "SILVERM",
+                                "CRUDEOIL",
+                                "CRUDEOILM",
+                                "COPPER",
+                            )
+                        )
+                        else "15:15 IST"
+                    )
+                    reason = f"Intraday session expired ({cutoff} cutoff reached). Trade closed."
+                else:
+                    reason = f"Contract expired ({exp_label})"
+                a.archive_reason = a.archive_reason or reason
+                a.invalidation_reason = a.invalidation_reason or reason
                 reaped += 1
         if reaped > 0:
             self._save()
@@ -5844,8 +5869,8 @@ class AutoAlertEngine:
                 self._alerts = alerts
                 if rehab_count > 0:
                     self._save()
-                # 1. Automatically reap and purge expired derivative alerts
-                self._reap_expired_alerts_unlocked(purge=True)
+                # 1. Automatically reap and archive expired derivative alerts
+                self._reap_expired_alerts_unlocked(purge=False)
                 # 2. Permanently purge legacy alerts violating institutional quality gates
                 self._sanitize_legacy_alerts_unlocked()
                 # 3. Deduplicate multiple iterations of the same symbol (keep only latest active)

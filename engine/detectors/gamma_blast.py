@@ -121,6 +121,12 @@ def detect_gamma_blast(
                     max_gamma_dte = 8 if (is_index and clean_sym == "NIFTY") else (16 if is_index else 35)
                     if dte_days > max_gamma_dte:
                         continue
+                    # 0DTE Afternoon Filter (Post 13:30 IST):
+                    # On expiry day (dte_days == 0), OTM options decay rapidly due to hyper-accelerated theta.
+                    # Ban naked OTM options after 13:30 IST; strictly require ATM or ITM contracts!
+                    if dte_days == 0 and (now_dt.hour > 13 or (now_dt.hour == 13 and now_dt.minute >= 30)):
+                        if strike_diff_pct > 0.05:
+                            continue
             except Exception:
                 pass
 
@@ -326,6 +332,9 @@ def detect_gamma_blast(
                     "symbol": r_sym,
                 }
 
+            from market.options import audit_option_liquidity
+            liq_audit = audit_option_liquidity(c, underlying=underlying, lot_size=lot_sz)
+
             alerts.append(
                 AutoAlert(
                     alert_id=f"aa-gamma-ce-{underlying}-{int(strike)}-{uuid.uuid4().hex[:6]}",
@@ -351,6 +360,8 @@ def detect_gamma_blast(
                     market_status=mkt_status["status"],
                     is_live=is_authentic_opt,
                     environment=alert_env,
+                    liquidity_status=liq_audit["liquidity_status"],
+                    bid_ask_spread_pct=liq_audit["bid_ask_spread_pct"],
                     metrics={
                         "strike": strike,
                         "oi": oi,
@@ -358,6 +369,7 @@ def detect_gamma_blast(
                         "oi_change_pct": oi_chg_pct,
                         "volume": volume,
                         "vol_oi_ratio": vol_oi_ratio,
+                        "liquidity": liq_audit,
                         "is_volume_expansion": is_high_volume_expansion,
                         "spot": spot,
                         "vwap": effective_vwap,
@@ -451,6 +463,12 @@ def detect_gamma_blast(
                     max_gamma_dte = 8 if (is_index and clean_sym == "NIFTY") else (16 if is_index else 35)
                     if dte_days > max_gamma_dte:
                         continue
+                    # 0DTE Afternoon Filter (Post 13:30 IST):
+                    # On expiry day (dte_days == 0), OTM options decay rapidly due to hyper-accelerated theta.
+                    # Ban naked OTM options after 13:30 IST; strictly require ATM or ITM contracts!
+                    if dte_days == 0 and (now_dt.hour > 13 or (now_dt.hour == 13 and now_dt.minute >= 30)):
+                        if strike_diff_pct < -0.05:
+                            continue
             except Exception:
                 pass
 
@@ -656,6 +674,9 @@ def detect_gamma_blast(
                     "symbol": r_sym,
                 }
 
+            from market.options import audit_option_liquidity
+            liq_audit = audit_option_liquidity(c, underlying=underlying, lot_size=lot_sz)
+
             alerts.append(
                 AutoAlert(
                     alert_id=f"aa-gamma-pe-{underlying}-{int(strike)}-{uuid.uuid4().hex[:6]}",
@@ -681,6 +702,8 @@ def detect_gamma_blast(
                     market_status=mkt_status["status"],
                     is_live=is_authentic_opt,
                     environment=alert_env,
+                    liquidity_status=liq_audit["liquidity_status"],
+                    bid_ask_spread_pct=liq_audit["bid_ask_spread_pct"],
                     metrics={
                         "strike": strike,
                         "oi": oi,
@@ -688,6 +711,7 @@ def detect_gamma_blast(
                         "oi_change_pct": oi_chg_pct,
                         "volume": volume,
                         "vol_oi_ratio": vol_oi_ratio,
+                        "liquidity": liq_audit,
                         "is_volume_expansion": is_high_volume_expansion,
                         "spot": spot,
                         "vwap": effective_vwap,
