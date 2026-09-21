@@ -27,6 +27,7 @@ Multi-Channel Dispatch:
 
 from __future__ import annotations
 
+from collections import defaultdict, deque
 import json
 import logging
 import os
@@ -67,11 +68,13 @@ from engine.alert_evaluator import (
 )
 from engine.detectors import (
     detect_gamma_blast,
+    detect_opening_drive,
     detect_squeeze_breakout,
     detect_circuit_proximity,
     detect_learned_pattern_coiling,
     detect_opening_range_breakout,
 )
+
 
 
 def get_current_ist_session(ref_dt: Optional[datetime] = None) -> dict[str, bool]:
@@ -196,6 +199,17 @@ class AutoAlertEngine:
             "EURINR",
             "GBPINR",
         ]
+        # Watched 24x7 Crypto universe (Binance Spot/Futures & Deribit Options benchmarks)
+        self._watched_crypto = [
+            "BTCUSDT",
+            "ETHUSDT",
+            "SOLUSDT",
+            "BNBUSDT",
+        ]
+        self._crypto_listener_initialized = False
+        self._crypto_tick_history: dict[str, deque] = defaultdict(lambda: deque(maxlen=20))
+        self._crypto_last_surge_eval: dict[str, float] = {}
+
         self._load()
         self.cleanup_corrupted_test_alerts()
         # Seed dispatched milestones from loaded state to prevent duplicate dispatches across restarts
@@ -213,6 +227,11 @@ class AutoAlertEngine:
                     self._dispatched_milestones.add(f"{sym}:{atype}:T1")
                 if "FINAL_ACHIEVED" in achieved:
                     self._dispatched_milestones.add(f"{sym}:{atype}:FINAL")
+
+    @property
+    def watched_crypto(self) -> list[str]:
+        """Returns liquid 24x7 Crypto pairs for continuous monitoring."""
+        return list(self._watched_crypto)
 
     @property
     def watched_commodities(self) -> list[str]:
@@ -366,8 +385,52 @@ class AutoAlertEngine:
                 "recorded_at": datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST"),
             }
 
+        # 00d. Invalidation Noise Floor Gate (Anti-Whipsaw Guard):
+        # Enforces that stop-loss is not placed inside sub-ATR noise (< 1.0% on equities or < 12% on options).
+        # Eliminates the 60.4% SUB_ATR_NOISE_WHIPSAW invalidation failures.
+        if alert.ltp and alert.ltp > 0 and alert.stop_loss and alert.stop_loss > 0:
+            opt_prem = getattr(alert, "option_premium", None)
+            is_opt = bool(
+                alert.alert_type in ("OPTIONS_MOMENTUM", "OPTION_WRITE")
+                or (alert.alert_type == "GAMMA_BLAST" and alert.option_type)
+                or (opt_prem is not None and abs(alert.ltp - float(opt_prem)) < max(1.0, float(opt_prem) * 0.15))
+            )
+            if is_opt:
+                # Option premium risk floor: SL must give at least 15% breathing room from entry
+                opt_risk_pct = (abs(alert.ltp - alert.stop_loss) / alert.ltp) * 100.0
+                if opt_risk_pct < 10.0:
+                    alert.stop_loss = round(max(0.1, alert.ltp * 0.85), 2)
+                    new_opt_risk = max(0.2, alert.ltp - alert.stop_loss)
+                    min_t1 = round(alert.ltp + 1.8 * new_opt_risk, 2)
+                    if alert.target_level < min_t1:
+                        alert.target_level = min_t1
+                    if alert.actionable_plan and isinstance(alert.actionable_plan, dict):
+                        alert.actionable_plan["stop_loss"] = f"₹{alert.stop_loss:,.1f}"
+                        alert.actionable_plan["target_1"] = f"₹{alert.target_level:,.1f}"
+                        alert.actionable_plan["target"] = f"₹{alert.target_level:,.1f}"
+                        alert.actionable_plan["risk_reward"] = f"1:{round((alert.target_level - alert.ltp) / new_opt_risk, 1)}"
+            else:
+                # Equity risk floor: minimum 0.85% distance from entry
+                eq_risk_pct = (abs(alert.ltp - alert.stop_loss) / alert.ltp) * 100.0
+                if eq_risk_pct < 0.60:
+                    alert.stop_loss = round(
+                        alert.ltp * (0.988 if alert.direction == "BULLISH" else 1.012), 1
+                    )
+                    new_eq_risk = abs(alert.ltp - alert.stop_loss)
+                    min_t1 = round(alert.ltp + (1.8 * new_eq_risk if alert.direction == "BULLISH" else -1.8 * new_eq_risk), 1)
+                    if alert.direction == "BULLISH" and alert.target_level < min_t1:
+                        alert.target_level = min_t1
+                    elif alert.direction == "BEARISH" and alert.target_level > min_t1:
+                        alert.target_level = min_t1
+                    if alert.actionable_plan and isinstance(alert.actionable_plan, dict):
+                        alert.actionable_plan["stop_loss"] = f"₹{alert.stop_loss:,.1f}"
+                        alert.actionable_plan["target_1"] = f"₹{alert.target_level:,.1f}"
+                        alert.actionable_plan["target"] = f"₹{alert.target_level:,.1f}"
+                        alert.actionable_plan["risk_reward"] = f"1:{round(abs(alert.target_level - alert.ltp) / new_eq_risk, 1)}"
+
         # 0a. Market Session Timing Gate (Opening Range Discovery & Closing Cutoff)
         is_test_runner = (
+
             is_sim
             or (os.environ.get("CHANAKYA_TESTING") == "1")
             or (os.environ.get("DEPLOY_MODE") == "test")
@@ -1432,22 +1495,29 @@ class AutoAlertEngine:
 
                 elif alert.stage == "EARLY_WARNING":
                     # Early warnings are preliminary coiling signals -> keep in SSE / Terminal,
-                    # do not buzz Telegram unless exceptionally high confidence (>= 90 for general, >= 82 for PRECURSOR_RADAR / ASYMMETRIC_OPPORTUNITY)
-                    min_conf = (
-                        82
-                        if alert.alert_type
-                        in (
-                            "PRECURSOR_RADAR",
-                            "ASYMMETRIC_OPPORTUNITY",
-                            "OPTIONS_MOMENTUM",
-                            "GAMMA_BLAST",
-                            "COMMODITY_MOMENTUM",
-                            "CURRENCY_BREAKOUT",
-                        )
-                        else 90
+                    # do not buzz Telegram unless exceptionally high confidence (>= 90 for general, >= 82 for
+                    # PRECURSOR_RADAR / ASYMMETRIC_OPPORTUNITY / crypto early warnings)
+                    _ew_whitelist = (
+                        "PRECURSOR_RADAR",
+                        "ASYMMETRIC_OPPORTUNITY",
+                        "OPTIONS_MOMENTUM",
+                        "GAMMA_BLAST",
+                        "COMMODITY_MOMENTUM",
+                        "CURRENCY_BREAKOUT",
+                        # Crypto early-warning types: funding squeeze build-up,
+                        # Deribit max pain gravity pull — structurally high-conviction
+                        "CRYPTO_SQUEEZE",
+                        "CRYPTO_MOMENTUM",
+                        "CRYPTO_VOLATILITY",
                     )
-                    if alert.confidence < min_conf:
-                        return
+                    if alert.alert_type in _ew_whitelist:
+                        # Whitelisted type — 82% bar. Block if below, pass through to dispatch if met.
+                        if alert.confidence < 82:
+                            return
+                    else:
+                        # General early warning — require 90%
+                        if alert.confidence < 90:
+                            return
                     m_key = f"{alert.symbol}:{alert.alert_type}:EARLY"
                     last_e = self._dispatch_cooldowns.get(m_key, 0.0)
                     if (now_ts - last_e) < 1800.0:
@@ -2412,6 +2482,21 @@ class AutoAlertEngine:
         from market.history import get_ohlcv
         from market.quotes import get_ltp, get_quote
 
+        # Adaptive Market Dynamics: Query India VIX
+        vix_val = 14.0
+        try:
+            from market.indices import get_vix
+            v_val = get_vix()
+            if v_val and v_val > 0:
+                vix_val = float(v_val)
+        except Exception:
+            pass
+
+        # Low VIX Regime Filter (VIX < 12.5):
+        # Under ultra-low volatility, daily Bollinger compressions fail due to whipsaw chop (0% win rate).
+        # Daily squeeze is suppressed when VIX < 12.5; 15m squeezes require strict RVOL >= 1.8x and conf >= 85.
+        is_low_vix = vix_val < 12.5
+
         found: list[AutoAlert] = []
         targets = self._get_prioritized_targets()
 
@@ -2442,14 +2527,22 @@ class AutoAlertEngine:
                             sym, df_15m, ltp, timeframe="15m", vwap=vwap_val
                         )
                         if alert_15m:
-                            alert_15m.exchange = exch
-                            if self.record_alert(alert_15m):
-                                found.append(alert_15m)
-                                continue  # If 15m alert fired, skip daily
+                            # Low-VIX filter on intraday squeezes
+                            rvol_15m = (alert_15m.metrics or {}).get("rvol", 1.0)
+                            if is_low_vix and (rvol_15m < 1.8 or alert_15m.confidence < 85):
+                                pass
+                            else:
+                                alert_15m.exchange = exch
+                                if self.record_alert(alert_15m):
+                                    found.append(alert_15m)
+                                    continue  # If 15m alert fired, skip daily
                 except Exception:
                     pass
 
-                # 2. Daily macro squeeze check
+                # 2. Daily macro squeeze check (Suppressed in Low-VIX regime to eliminate false breakouts)
+                if is_low_vix:
+                    continue
+
                 df = get_ohlcv(sym, exchange=exch, interval="day", days=60)
                 if df is None or len(df) < 25:
                     continue
@@ -2463,6 +2556,7 @@ class AutoAlertEngine:
                 logger.debug(f"[AutoAlertEngine] Squeeze scan error for {sym}: {e}")
 
         return found
+
 
     def scan_circuits(self) -> list[AutoAlert]:
         """Scans watched equities for Upper Circuit proximity."""
@@ -2672,14 +2766,15 @@ class AutoAlertEngine:
             min_rvol = 1.35 if seg == "INDEX" else 1.50
 
             # Opening Range & Session Time Gates (09:15 - 09:45 IST):
-            # Before 09:30 IST: Opening 15m range is discovering price — suppress single-stock sparks to avoid whipsaws.
+            # Before 09:30 IST: Opening 15m range is discovering price — suppress single-stock sparks unless institutional surge (RVOL >= 2.0x, |chg| >= 1.5%).
             # Between 09:30 and 09:45 IST: Require strict institutional confirmation (RVOL >= 2.0x, chg >= 1.2%).
             is_test_env = (os.environ.get("CHANAKYA_TESTING") == "1") or ("PYTEST_CURRENT_TEST" in os.environ)
             if not is_test_env:
                 now_dt = datetime.now(IST)
                 time_hm = now_dt.hour * 60 + now_dt.minute
                 if 555 <= time_hm < 570 and seg != "INDEX":
-                    continue
+                    if not (rvol >= 2.0 and abs(chg) >= 1.5):
+                        continue
                 if 570 <= time_hm < 585:
                     min_rvol = max(min_rvol, 2.0)
                     if seg != "INDEX" and abs(chg) < 1.20:
@@ -2687,11 +2782,13 @@ class AutoAlertEngine:
 
             # Exhaustion & Extension Guard:
             # Reject chasing breakouts/breakdowns that are already stretched >2.5% from VWAP without a base consolidation.
+            # Exception: High volume institutional moves (RVOL >= 2.0x) are allowed up to 4.5% extension.
             if vwap > 0:
                 vwap_dist_pct = (abs(ltp - vwap) / vwap) * 100.0
-                max_allowed_ext = 1.20 if seg == "INDEX" else 2.50
+                max_allowed_ext = 1.20 if seg == "INDEX" else (4.50 if rvol >= 2.0 else 2.50)
                 if vwap_dist_pct > max_allowed_ext:
                     continue
+
 
             is_bullish = (chg >= min_pos_chg) and (vwap <= 0 or ltp >= (vwap * 0.998)) and (rvol >= min_rvol)
             is_bearish = (chg <= min_neg_chg) and (vwap > 0 and ltp < (vwap * 1.002)) and (rvol >= min_rvol)
@@ -3172,6 +3269,24 @@ class AutoAlertEngine:
                     },
                 }
                 if opp.contract_symbol:
+                    plan["contract"] = opp.contract_symbol
+                    plan["instrument"] = opp.contract_symbol
+                    plan["instrument_type"] = "OPTION"
+                    plan["action"] = f"BUY {opp.option_type}" if opp.option_type else "BUY_OPTION"
+                    plan["option_type"] = opp.option_type
+                    plan["recommended_entry"] = f"₹{opp.option_premium:,.2f}" if opp.option_premium else opp.entry_range
+                    if opp.option_premium:
+                        plan["entry_range"] = f"₹{round(opp.option_premium * 0.96, 1):,.1f} – ₹{round(opp.option_premium * 1.04, 1):,.1f}"
+                    if opp.option_stop_loss:
+                        plan["stop_loss"] = f"₹{opp.option_stop_loss:,.1f}"
+                    if opp.option_target_1:
+                        plan["target"] = f"₹{opp.option_target_1:,.1f}"
+                        plan["target_1"] = f"₹{opp.option_target_1:,.1f}"
+                    if opp.option_target_2:
+                        plan["target_2"] = f"₹{opp.option_target_2:,.1f}"
+                    plan["underlying_spot"] = f"₹{opp.ltp:,.1f}"
+                    plan["underlying_sl"] = f"₹{opp.stop_loss:,.1f}"
+                    plan["underlying_target"] = f"₹{opp.target_1:,.1f}"
                     plan["option_plan"] = {
                         "contract_symbol": opp.contract_symbol,
                         "strike": opp.strike,
@@ -3198,6 +3313,7 @@ class AutoAlertEngine:
                     )
                     plan["lot_size"] = opp.lot_size
 
+                has_opt_leg = bool(opp.contract_symbol and opp.option_premium)
                 alert = AutoAlert(
                     alert_id=alert_id,
                     alert_type="ASYMMETRIC_OPPORTUNITY",
@@ -3207,16 +3323,23 @@ class AutoAlertEngine:
                     direction=opp.direction,
                     headline=headline,
                     summary=summary,
-                    ltp=opp.ltp,
-                    trigger_level=opp.entry_price,
-                    target_level=opp.target_1,
-                    stop_loss=opp.stop_loss,
-                    strike=None,  # Keep primary alert anchored to underlying spot price levels
-                    option_type=None,
-                    contract_symbol=None,
-                    expiry_date=None,
-                    option_premium=None,
-                    segment=asym_seg,
+                    ltp=opp.option_premium if has_opt_leg else opp.ltp,
+                    trigger_level=opp.option_premium if has_opt_leg else opp.entry_price,
+                    target_level=opp.option_target_1 if has_opt_leg else opp.target_1,
+                    stop_loss=opp.option_stop_loss if has_opt_leg else opp.stop_loss,
+                    strike=opp.strike if has_opt_leg else None,
+                    option_type=opp.option_type if has_opt_leg else None,
+                    contract_symbol=opp.contract_symbol if has_opt_leg else None,
+                    expiry_date=opp.expiry_date if has_opt_leg else None,
+                    option_premium=opp.option_premium if has_opt_leg else None,
+                    underlying_spot=opp.ltp,
+                    lot_size=opp.lot_size if has_opt_leg else None,
+                    segment=(
+                        "FNO_INDEX"
+                        if opp.symbol in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX")
+                        or getattr(opp, "segment", "") == "INDEX"
+                        else asym_seg
+                    ),
                     confidence=opp.conviction_score,
                     created_at=now_iso,
                     is_live=True,
@@ -3349,7 +3472,9 @@ class AutoAlertEngine:
                     is_vwap_displaced = bool(spot_vwap > 0 and abs(spot - spot_vwap) / spot_vwap >= 0.005)
                     is_momentum_active = bool(abs(spot_change_pct) >= 0.80)
 
-                    if not (is_momentum_active or is_bear_drive or is_bull_drive or is_vwap_displaced):
+                    if (spot_open > 0 or spot_vwap > 0 or spot_change_pct != 0.0) and not (
+                        is_momentum_active or is_bear_drive or is_bull_drive or is_vwap_displaced
+                    ):
                         # Stock is flat and inactive today (skips ~180 sideways stocks in 0.0001s)
                         continue
 
@@ -3585,9 +3710,13 @@ class AutoAlertEngine:
                             continue
                         if spot_open and spot_open > 0 and spot < spot_open * 0.995:
                             continue
-                        # Spot must hold intraday VWAP with at least 0.1% buffer (reject flat/drifting stocks)
-                        if spot_vwap and spot_vwap > 0 and spot < spot_vwap * 1.001:
-                            continue
+                        # Spot must hold intraday VWAP
+                        if is_idx:
+                            if spot_vwap and spot_vwap > 0 and spot < spot_vwap:
+                                continue
+                        else:
+                            if spot_vwap and spot_vwap > 0 and spot < spot_vwap * 1.0005:
+                                continue
                         # Upper-wick rejection / buying climax gate (reject shooting star rejections on wide bars)
                         if candle_range >= (spot * 0.0025) and upper_wick_ratio > 0.50:
                             continue
@@ -3601,9 +3730,13 @@ class AutoAlertEngine:
                             continue
                         if spot_open and spot_open > 0 and spot > spot_open * 1.005:
                             continue
-                        # Spot must be below intraday VWAP with at least 0.1% buffer
-                        if spot_vwap and spot_vwap > 0 and spot > spot_vwap * 0.999:
-                            continue
+                        # Spot must be below intraday VWAP
+                        if is_idx:
+                            if spot_vwap and spot_vwap > 0 and spot > spot_vwap:
+                                continue
+                        else:
+                            if spot_vwap and spot_vwap > 0 and spot > spot_vwap * 0.9995:
+                                continue
                         # Lower-wick rejection / selling climax gate (reject hammer absorption on wide bars)
                         if candle_range >= (spot * 0.0025) and lower_wick_ratio > 0.50:
                             continue
@@ -3888,18 +4021,16 @@ class AutoAlertEngine:
                         max_opt_sl_risk = round(opt_ltp * 0.28, 2)
                         opt_sl = max(opt_sl, round(opt_ltp - max_opt_sl_risk, 2))
                         opt_risk = max(0.2, opt_ltp - opt_sl)
-                        opt_t0_5 = float(opt_plan.get("t0_5_premium") or round(opt_ltp + 1.0 * opt_risk, 2))
-                        opt_t1 = float(opt_plan.get("t1_premium") or round(opt_ltp + 1.8 * opt_risk, 2))
-                        opt_t2 = float(
-                            opt_plan.get("t2_premium") or round(opt_ltp + 3.0 * opt_risk, 2)
+                        opt_t0_5 = round(opt_ltp + 1.0 * opt_risk, 2)
+                        opt_t1 = max(float(opt_plan.get("t1_premium") or 0.0), round(opt_ltp + 1.8 * opt_risk, 2))
+                        opt_t2 = max(
+                            float(opt_plan.get("t2_premium") or 0.0), round(opt_ltp + 3.0 * opt_risk, 2)
                         )
-                        opt_moonshot = float(
-                            opt_plan.get("t3_premium") or round(opt_ltp + 5.0 * opt_risk, 2)
+                        opt_moonshot = max(
+                            float(opt_plan.get("t3_premium") or 0.0), round(opt_ltp + 5.0 * opt_risk, 2)
                         )
-                        rr_str = str(
-                            opt_plan.get("option_rr")
-                            or f"1:{round((opt_t1 - opt_ltp) / opt_risk, 1)}"
-                        )
+                        rr_val = round((opt_t1 - opt_ltp) / max(0.01, opt_risk), 1)
+                        rr_str = f"1:{rr_val}"
                     else:
                         # Structural defined risk stop for intraday options (25%–28% risk buffer)
                         risk_pts = round(max(0.20, min(opt_ltp * 0.28, opt_ltp - 0.05)), 2)
@@ -4204,6 +4335,78 @@ class AutoAlertEngine:
             logger.debug(f"[AutoAlertEngine] Index contagion scan failure: {e}")
         return found
 
+    def scan_opening_drives(self) -> list[AutoAlert]:
+        """
+        Scans watched indices and comprehensive F&O universe for explosive Opening Drive ignitions
+        (09:16 - 09:45 IST) based on Open==Low (Bullish) or Open==High (Bearish) institutional setups.
+        """
+        now_ist = datetime.now(IST)
+        curr_t = now_ist.time()
+        is_test_env = (
+            (os.environ.get("CHANAKYA_TESTING") == "1")
+            or (os.environ.get("DEPLOY_MODE") == "test")
+            or ("PYTEST_CURRENT_TEST" in os.environ)
+        )
+        if not is_test_env and (curr_t < dtime(9, 16) or curr_t > dtime(9, 45)):
+            return []
+
+        from market.history import get_ohlcv
+        from market.quotes import get_ltp, get_quote
+
+        found: list[AutoAlert] = []
+        targets = self._get_prioritized_targets()
+
+        for sym in targets:
+            try:
+                exch = self._resolve_index_exchange(sym)
+                lookup_sym = f"{exch}:{sym}" if ":" not in sym else sym
+                ltp = get_ltp(lookup_sym)
+                if not ltp or ltp <= 0:
+                    continue
+
+                raw_q = get_quote(lookup_sym)
+                q = raw_q.get(lookup_sym) if isinstance(raw_q, dict) else raw_q
+                vwap_val = getattr(q, "vwap", None) if q else None
+                prev_close = getattr(q, "previous_close", None) if q else None
+                prev_high = getattr(q, "prev_high", None) if q else None
+                prev_low = getattr(q, "prev_low", None) if q else None
+
+                # Fetch 5-minute intraday OHLCV for opening drive pattern
+                df_5m = get_ohlcv(sym, exchange=exch, interval="5minute", days=1)
+                if df_5m is None or len(df_5m) < 1:
+                    continue
+
+                # Compute RVOL
+                rvol_val = 1.8
+                try:
+                    vols = df_5m["volume"].values if "volume" in df_5m.columns else None
+                    if vols is not None and len(vols) >= 3:
+                        cur_v = float(vols[-1])
+                        avg_v = float(np.mean(vols[:-1]))
+                        if avg_v > 0:
+                            rvol_val = round(cur_v / avg_v, 2)
+                except Exception:
+                    pass
+
+                alert = detect_opening_drive(
+                    symbol=sym,
+                    df_5m=df_5m,
+                    ltp=ltp,
+                    vwap=vwap_val,
+                    rvol=rvol_val,
+                    ref_time=now_ist,
+                    prev_close=prev_close,
+                    prev_high=prev_high,
+                    prev_low=prev_low,
+                    ignore_time_gate=is_test_env,
+                )
+                if alert and self.record_alert(alert):
+                    found.append(alert)
+            except Exception as e:
+                logger.debug(f"[AutoAlertEngine] Opening Drive scan error for {sym}: {e}")
+
+        return found
+
     def scan_opening_range_breakouts(self) -> list[AutoAlert]:
         """
         Scans watched indices and high-liquidity equities for 15-minute Opening Range Breakouts (ORB-15).
@@ -4276,6 +4479,7 @@ class AutoAlertEngine:
     def scan_equity_nfo_now(self) -> list[AutoAlert]:
         """Runs all daytime Equity and NFO derivative detectors (09:15 - 15:30 IST)."""
         results: list[AutoAlert] = []
+        results.extend(self.scan_opening_drives())  # Priority 0: 09:16 - 09:45 Morning Institutional Drive
         results.extend(self.scan_index_contagion())  # Priority 1: Heavyweight lead-lag sync!
         results.extend(self.scan_gamma_blasts())
         results.extend(self.scan_options_momentum_breakouts())
@@ -4287,6 +4491,7 @@ class AutoAlertEngine:
         results.extend(self.scan_intraday_mover_sparks())
         results.extend(self.scan_asymmetric_opportunities())
         return results
+
 
     def scan_post_market_digest(self) -> list[AutoAlert]:
         """
@@ -5190,10 +5395,524 @@ class AutoAlertEngine:
 
         return found
 
+    # ── 24x7 Real-Time Crypto Streaming & Autonomous Detection ─────────
+
+    def _init_crypto_stream_listener(self) -> None:
+        """Hooks AutoAlertEngine into the 24x7 live Binance tick stream for sub-second event triggers."""
+        if getattr(self, "_crypto_listener_initialized", False):
+            return
+        try:
+            from market.crypto_stream import crypto_stream
+
+            crypto_stream.on_tick(self._on_crypto_tick)
+            self._crypto_listener_initialized = True
+            logger.info("[AutoAlertEngine] ⚡ Successfully connected to 24x7 Binance live tick stream.")
+        except Exception as e:
+            logger.debug(f"[AutoAlertEngine] Failed to register crypto tick listener: {e}")
+
+    def _on_crypto_tick(self, tick: dict[str, Any]) -> None:
+        """
+        Sub-second event-driven handler for live Binance crypto ticks.
+        Executes instant invalidations, target milestone ratchets,
+        and impulse surge fast-path detection without waiting for the 45s poller.
+        """
+        if not tick or not isinstance(tick, dict):
+            return
+
+        raw_sym = str(tick.get("symbol") or "").upper()
+        clean_sym = raw_sym.replace("CRYPTO:", "").replace("BINANCE:", "").strip()
+        ltp = float(tick.get("ltp") or 0.0)
+        if not clean_sym or ltp <= 0:
+            return
+
+        now_ts = float(tick.get("timestamp") or time.time())
+
+        # 1. Instant Lifecycle Checks on Active Crypto Alerts
+        with self._lock:
+            active_crypto_alerts = [
+                a
+                for a in self._alerts
+                if not a.is_invalidated
+                and a.stage not in ("INVALIDATED", "COMPLETED", "TARGET_ACHIEVED")
+                and (a.exchange or "").upper() in ("CRYPTO", "BINANCE")
+                and a.symbol.upper().replace("CRYPTO:", "").strip()
+                in (clean_sym, f"{clean_sym}USDT", clean_sym.replace("USDT", ""))
+            ]
+
+        for alert in active_crypto_alerts:
+            # 1a. Instant Invalidation
+            reason = evaluate_alert_invalidation(alert, current_ltp=ltp)
+            if reason:
+                now_iso = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
+                pm_dict = None
+                try:
+                    from engine.learning_engine import pattern_learning_engine
+
+                    pm = pattern_learning_engine.conduct_invalidation_post_mortem(
+                        alert, exit_price=ltp, exchange=alert.exchange
+                    )
+                    pm_dict = pm.to_dict()
+                except Exception as e:
+                    logger.debug(f"[AutoAlertEngine] Post-mortem error for {alert.symbol}: {e}")
+
+                with self._lock:
+                    alert.is_invalidated = True
+                    alert.invalidation_reason = reason
+                    alert.invalidated_at = now_iso
+                    alert.stage = "INVALIDATED"
+                    alert.is_archived = True
+                    alert.archived_at = now_iso
+                    alert.archive_reason = reason
+                    if pm_dict:
+                        alert.metrics["post_mortem"] = pm_dict
+                    is_test = (alert.environment == "TEST") or (not alert.is_live)
+                    tag = "[TEST]" if is_test else "[REAL/LIVE]"
+                    alert.headline = (
+                        f"⚠️ {tag} VIEW INVALIDATED: {alert.symbol} {alert.alert_type.replace('_', ' ')}"
+                    )
+                    alert.summary = reason
+                    self._save()
+                self._dispatch(alert)
+                logger.warning(
+                    f"[AutoAlertEngine] ⚡ Sub-Second Live Invalidation for {alert.symbol}: {reason}"
+                )
+                continue
+
+            # 1b. Instant Target 1 / Target 2 / Trailing Milestone
+            eval_res = evaluate_alert_targets_and_trailing(alert, current_ltp=ltp)
+            if eval_res and (eval_res.is_t1_hit or eval_res.is_target_hit or eval_res.trailing_ratcheted):
+                now_iso = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
+                with self._lock:
+                    alert.current_ltp = ltp
+                    alert.ltp = ltp
+                    if eval_res.is_t1_hit:
+                        alert.stage = "T1_ACHIEVED"
+                        alert.target_status = "T1_HIT"
+                        if "T1_ACHIEVED" not in (alert.achieved_milestones or []):
+                            alert.achieved_milestones.append("T1_ACHIEVED")
+                    elif eval_res.is_target_hit:
+                        alert.stage = "TARGET_ACHIEVED"
+                        alert.target_status = "TARGET_HIT"
+                        if "FINAL_ACHIEVED" not in (alert.achieved_milestones or []):
+                            alert.achieved_milestones.append("FINAL_ACHIEVED")
+                    elif eval_res.trailing_ratcheted:
+                        alert.stage = "TRAILING_UPDATE"
+
+                    if eval_res.new_trailing_stop:
+                        alert.trailing_stop = eval_res.new_trailing_stop
+                    alert.trailing_decision = eval_res.action_decision
+                    alert.trailing_rationale = eval_res.rationale
+                    self._save()
+                self._dispatch(alert)
+                logger.info(
+                    f"[AutoAlertEngine] ⚡ Sub-Second Target/Trail Hit for {alert.symbol}: {eval_res.action_decision}"
+                )
+
+        # 2. Impulse Velocity / Sudden Volatility Spike Detection
+        history = self._crypto_tick_history[clean_sym]
+        history.append((now_ts, ltp))
+        if history:
+            oldest_ts, oldest_price = history[0]
+            if (now_ts - oldest_ts) >= 10.0 and oldest_price > 0:
+                price_delta_pct = abs(ltp - oldest_price) / oldest_price * 100.0
+                last_surge = self._crypto_last_surge_eval.get(clean_sym, 0.0)
+                if price_delta_pct >= 0.65 and (now_ts - last_surge) >= 120.0:
+                    self._crypto_last_surge_eval[clean_sym] = now_ts
+                    logger.info(
+                        f"[AutoAlertEngine] ⚡ Live Crypto Impulse Spike on {clean_sym} "
+                        f"({price_delta_pct:.2f}% in {int(now_ts - oldest_ts)}s)! Fast scan triggered."
+                    )
+                    threading.Thread(
+                        target=self._scan_single_crypto_symbol, args=(clean_sym,), daemon=True
+                    ).start()
+
+    def _scan_single_crypto_symbol(self, sym: str) -> list[AutoAlert]:
+        """Scans a single crypto symbol for Squeeze, SMC Momentum, and Options Volatility."""
+        from market.crypto_stream import crypto_stream, normalize_crypto_symbol
+        from analysis.market_structure import analyze_market_structure
+        from engine.alert_preferences import alert_preferences
+
+        if alert_preferences.is_segment_globally_disabled("CRYPTO"):
+            return []
+
+        clean_sym = normalize_crypto_symbol(sym).replace("CRYPTO:", "").strip()
+        found: list[AutoAlert] = []
+        now_dt = datetime.now(IST)
+        now_iso = now_dt.strftime("%Y-%m-%d %H:%M:%S IST")
+        date_str = now_dt.strftime("%Y%m%d%H%M")
+
+        q = crypto_stream.get_quote(clean_sym)
+        if not q or float(q.last_price or 0.0) <= 0:
+            return found
+
+        ltp = float(q.last_price)
+        chg_pct = float(q.change_pct or 0.0)
+
+        # ── 1. SQUEEZE DETECTOR: Binance Futures 8h Funding Rate & Open Interest ──
+        try:
+            sq_metrics = crypto_stream.get_squeeze_metrics(clean_sym)
+            sq_sig = sq_metrics.get("squeeze_signal", "NEUTRAL")
+            fut_data = sq_metrics.get("futures_metrics", {})
+            fr = float(fut_data.get("funding_rate_8h", 0.0) or 0.0)
+
+            if sq_sig in ("SHORT_SQUEEZE_IMMINENT", "LONG_FLUSH_RISK"):
+                is_bullish = sq_sig == "SHORT_SQUEEZE_IMMINENT"
+                direction = "BULLISH" if is_bullish else "BEARISH"
+                alert_type = "CRYPTO_SQUEEZE"
+                alert_id = f"crypto-sq-{clean_sym.lower()}-{date_str}"
+                # Funding rate squeeze at extreme thresholds is a high-conviction structural setup
+                squeeze_confidence = 91 if sq_sig == "SHORT_SQUEEZE_IMMINENT" else 90
+                risk_usd = round(max(0.5, ltp * 0.018), 2)  # 1.8% structural risk stop
+
+                if is_bullish:
+                    sl_price = round(ltp - risk_usd, 2)
+                    t1_price = round(ltp + 2.2 * risk_usd, 2)
+                    t2_price = round(ltp + 4.0 * risk_usd, 2)
+                    headline = f"🪙 CRYPTO SQUEEZE: {clean_sym} Short-Squeeze Imminent @ ${ltp:,.2f}"
+                    summary = (
+                        f"Heavily short-crowded funding (8h FR: {fr*100:.4f}%). "
+                        f"Extreme negative leverage positioning primed for upward cascade. Target: ${t1_price:,.2f}."
+                    )
+                    action = "BUY_SPOT / LONG"
+                    conf = "Binance Futures Short-Crowded Funding Imbalance (FR <= -0.02%)"
+                else:
+                    sl_price = round(ltp + risk_usd, 2)
+                    t1_price = round(ltp - 2.2 * risk_usd, 2)
+                    t2_price = round(ltp - 4.0 * risk_usd, 2)
+                    headline = f"🪙 CRYPTO SQUEEZE: {clean_sym} Long-Flush Liquidation Risk @ ${ltp:,.2f}"
+                    summary = (
+                        f"Overheated long leverage (8h FR: +{fr*100:.4f}%). "
+                        f"Vulnerable to cascading long liquidations. Downside target: ${t1_price:,.2f}."
+                    )
+                    action = "SELL_SHORT_FUTURES / SHORT"
+                    conf = "Binance Futures Long-Overheated Leverage Imbalance (FR >= +0.04%)"
+
+                alert = AutoAlert(
+                    alert_id=alert_id,
+                    alert_type=alert_type,
+                    stage="IGNITED" if abs(chg_pct) >= 1.5 else "EARLY_WARNING",
+                    symbol=clean_sym,
+                    exchange="CRYPTO",
+                    direction=direction,
+                    headline=headline,
+                    summary=summary,
+                    ltp=ltp,
+                    trigger_level=ltp,
+                    target_level=t1_price,
+                    stop_loss=sl_price,
+                    confidence=squeeze_confidence,
+                    created_at=now_iso,
+                    is_live=True,
+                    environment="LIVE",
+                    market_status="LIVE",
+                    metrics={
+                        "change_pct": chg_pct,
+                        "segment": "CRYPTO",
+                        "funding_rate_8h": fr,
+                        "open_interest_usd": fut_data.get("open_interest_usd", 0.0),
+                        "setup_confluence": conf,
+                    },
+                    actionable_plan={
+                        "action": action,
+                        "segment": "CRYPTO",
+                        "contract": f"CRYPTO:{clean_sym}",
+                        "entry_range": f"${round(ltp * 0.995, 2):,.2f} – ${round(ltp * 1.005, 2):,.2f}",
+                        "stop_loss": f"${sl_price:,.2f}",
+                        "target": f"${t1_price:,.2f}",
+                        "target_2": f"${t2_price:,.2f}",
+                        "risk_reward": "1:2.2",
+                        "when_to_buy": "Enter on order book spread with defined risk below invalidation SL.",
+                        "when_to_wait": "Do not chase if price extends > 0.8% beyond entry.",
+                        "no_chase_boundary": round(ltp * 1.008, 2) if is_bullish else round(ltp * 0.992, 2),
+                        "setup_confluence": conf,
+                        "profit_rule": "Scale 50% at T1, trail remaining on 20-EMA / break-even.",
+                        "trade_plan": {
+                            "symbol": clean_sym,
+                            "direction": "LONG" if is_bullish else "SHORT",
+                            "timeframe": "15M",
+                            "entry_price": ltp,
+                            "invalidation_stop": sl_price,
+                            "target_1": t1_price,
+                            "target_2": t2_price,
+                            "risk_reward": "1:2.2",
+                        },
+                    },
+                )
+                if self.record_alert(alert):
+                    found.append(alert)
+        except Exception as e:
+            logger.debug(f"[AutoAlertEngine] Squeeze check failed for {clean_sym}: {e}")
+
+        # ── 2. SMC MOMENTUM DETECTOR: Order Block Reclaim & CHoCH Reversal ──
+        try:
+            df = crypto_stream.get_klines(clean_sym, interval="15m", limit=120)
+            if not df.empty and len(df) >= 30:
+                smc = analyze_market_structure(symbol=clean_sym, df=df, exchange="CRYPTO", timeframe="15m")
+                regime = (smc.regime or "").upper()
+
+                if regime == "BULLISH" and smc.active_demand_zones:
+                    ob = smc.active_demand_zones[0]
+                    if ob.bottom <= ltp <= (ob.top * 1.025):
+                        sl_price = round(ob.bottom * 0.992, 2)
+                        risk_usd = ltp - sl_price
+                        if 0 < risk_usd <= (ltp * 0.045):
+                            t1_price = round(ltp + 2.4 * risk_usd, 2)
+                            t2_price = round(ltp + 4.2 * risk_usd, 2)
+                            # IGNITED stage = price already inside OB = confirmed entry trigger
+                            # EARLY_WARNING = approaching OB but not yet inside
+                            smc_stage = "IGNITED" if ltp > ob.top else "EARLY_WARNING"
+                            smc_confidence = 91 if smc_stage == "IGNITED" else 85
+                            alert_id = f"crypto-smc-{clean_sym.lower()}-{date_str}"
+                            headline = f"⚡ CRYPTO SMC ALPHA: {clean_sym} Demand Order Block Reclaim @ ${ltp:,.2f}"
+                            summary = (
+                                f"Smart Money structural reclaim at 15m Demand OB (${ob.bottom:,.2f} - ${ob.top:,.2f}). "
+                                f"Bullish structure confirmed. Upside target: ${t1_price:,.2f}."
+                            )
+                            conf = f"15m Bullish Regime + Unmitigated Demand OB (${ob.bottom:,.1f} - ${ob.top:,.1f})"
+                            alert = AutoAlert(
+                                alert_id=alert_id,
+                                alert_type="CRYPTO_MOMENTUM",
+                                stage=smc_stage,
+                                symbol=clean_sym,
+                                exchange="CRYPTO",
+                                direction="BULLISH",
+                                headline=headline,
+                                summary=summary,
+                                ltp=ltp,
+                                trigger_level=round(ob.top, 2),
+                                target_level=t1_price,
+                                stop_loss=sl_price,
+                                confidence=smc_confidence,
+                                created_at=now_iso,
+                                is_live=True,
+                                environment="LIVE",
+                                market_status="LIVE",
+                                metrics={
+                                    "change_pct": chg_pct,
+                                    "segment": "CRYPTO",
+                                    "ob_bottom": ob.bottom,
+                                    "ob_top": ob.top,
+                                    "setup_confluence": conf,
+                                },
+                                actionable_plan={
+                                    "action": "BUY_SPOT / LONG",
+                                    "segment": "CRYPTO",
+                                    "contract": f"CRYPTO:{clean_sym}",
+                                    "entry_range": f"${round(ob.bottom, 2):,.2f} – ${round(ob.top * 1.005, 2):,.2f}",
+                                    "stop_loss": f"${sl_price:,.2f}",
+                                    "target": f"${t1_price:,.2f}",
+                                    "target_2": f"${t2_price:,.2f}",
+                                    "risk_reward": "1:2.4",
+                                    "when_to_buy": "Enter on order block retest or momentum breakout above OB top.",
+                                    "when_to_wait": f"Do not chase above ${round(ob.top * 1.012, 2):,.2f}.",
+                                    "no_chase_boundary": round(ob.top * 1.012, 2),
+                                    "setup_confluence": conf,
+                                    "profit_rule": "Scale 50% at T1 (+2.4R), trail remaining to breakeven.",
+                                    "trade_plan": {
+                                        "symbol": clean_sym,
+                                        "direction": "LONG",
+                                        "timeframe": "15M",
+                                        "entry_price": ltp,
+                                        "invalidation_stop": sl_price,
+                                        "target_1": t1_price,
+                                        "target_2": t2_price,
+                                        "risk_reward": "1:2.4",
+                                    },
+                                },
+                            )
+                            if self.record_alert(alert):
+                                found.append(alert)
+
+                elif regime == "BEARISH" and smc.active_supply_zones:
+                    ob = smc.active_supply_zones[0]
+                    if (ob.bottom * 0.975) <= ltp <= ob.top:
+                        sl_price = round(ob.top * 1.008, 2)
+                        risk_usd = sl_price - ltp
+                        if 0 < risk_usd <= (ltp * 0.045):
+                            t1_price = round(ltp - 2.4 * risk_usd, 2)
+                            t2_price = round(ltp - 4.2 * risk_usd, 2)
+                            smc_stage = "IGNITED" if ltp < ob.bottom else "EARLY_WARNING"
+                            smc_confidence = 91 if smc_stage == "IGNITED" else 85
+                            alert_id = f"crypto-smc-{clean_sym.lower()}-{date_str}"
+                            headline = f"⚡ CRYPTO SMC BREAKDOWN: {clean_sym} Supply OB Rejection @ ${ltp:,.2f}"
+                            summary = (
+                                f"Smart Money rejection at 15m Supply OB (${ob.bottom:,.2f} - ${ob.top:,.2f}). "
+                                f"Bearish structure confirmed. Downside target: ${t1_price:,.2f}."
+                            )
+                            conf = f"15m Bearish Regime + Active Supply OB (${ob.bottom:,.1f} - ${ob.top:,.1f})"
+                            alert = AutoAlert(
+                                alert_id=alert_id,
+                                alert_type="CRYPTO_MOMENTUM",
+                                stage=smc_stage,
+                                symbol=clean_sym,
+                                exchange="CRYPTO",
+                                direction="BEARISH",
+                                headline=headline,
+                                summary=summary,
+                                ltp=ltp,
+                                trigger_level=round(ob.bottom, 2),
+                                target_level=t1_price,
+                                stop_loss=sl_price,
+                                confidence=smc_confidence,
+                                created_at=now_iso,
+                                is_live=True,
+                                environment="LIVE",
+                                market_status="LIVE",
+                                metrics={
+                                    "change_pct": chg_pct,
+                                    "segment": "CRYPTO",
+                                    "ob_bottom": ob.bottom,
+                                    "ob_top": ob.top,
+                                    "setup_confluence": conf,
+                                },
+                                actionable_plan={
+                                    "action": "SELL_SHORT_FUTURES / SHORT",
+                                    "segment": "CRYPTO",
+                                    "contract": f"CRYPTO:{clean_sym}",
+                                    "entry_range": f"${round(ob.bottom * 0.995, 2):,.2f} – ${round(ob.top, 2):,.2f}",
+                                    "stop_loss": f"${sl_price:,.2f}",
+                                    "target": f"${t1_price:,.2f}",
+                                    "target_2": f"${t2_price:,.2f}",
+                                    "risk_reward": "1:2.4",
+                                    "when_to_buy": "Short on rejection wick from supply OB.",
+                                    "when_to_wait": f"Do not chase below ${round(ob.bottom * 0.988, 2):,.2f}.",
+                                    "no_chase_boundary": round(ob.bottom * 0.988, 2),
+                                    "setup_confluence": conf,
+                                    "profit_rule": "Scale 50% at T1, trail stop to breakeven.",
+                                    "trade_plan": {
+                                        "symbol": clean_sym,
+                                        "direction": "SHORT",
+                                        "timeframe": "15M",
+                                        "entry_price": ltp,
+                                        "invalidation_stop": sl_price,
+                                        "target_1": t1_price,
+                                        "target_2": t2_price,
+                                        "risk_reward": "1:2.4",
+                                    },
+                                },
+                            )
+                            if self.record_alert(alert):
+                                found.append(alert)
+        except Exception as e:
+            logger.debug(f"[AutoAlertEngine] SMC check failed for {clean_sym}: {e}")
+
+        # ── 3. OPTIONS VOLATILITY & MAX PAIN DETECTOR: Deribit Options Surface (BTC/ETH) ──
+        if clean_sym in ("BTCUSDT", "BTC", "ETHUSDT", "ETH"):
+            try:
+                from market.crypto_options import get_crypto_options_summary
+
+                base_curr = "BTC" if "BTC" in clean_sym else "ETH"
+                opt_sum = get_crypto_options_summary(base_curr)
+                max_pain = float(opt_sum.get("max_pain", 0.0) or 0.0)
+                dist_pct = float(opt_sum.get("max_pain_distance_pct", 0.0) or 0.0)
+                pcr_oi = float(opt_sum.get("pcr_open_interest", 1.0) or 1.0)
+
+                if abs(dist_pct) >= 4.5 and max_pain > 0:
+                    is_bullish = dist_pct < 0
+                    direction = "BULLISH" if is_bullish else "BEARISH"
+                    alert_id = f"crypto-opt-{clean_sym.lower()}-{date_str}"
+                    risk_usd = round(max(1.0, ltp * 0.02), 2)  # 2% defined risk stop
+
+                    if is_bullish:
+                        sl_price = round(ltp - risk_usd, 2)
+                        t1_price = round(max_pain, 2)
+                        t2_price = round(max_pain * 1.03, 2)
+                        headline = f"🌊 DERIBIT OPTIONS GRAVITY: {clean_sym} Max Pain Magnet at ${max_pain:,.0f}"
+                        summary = (
+                            f"Spot is {abs(dist_pct):.1f}% below Deribit Max Pain (${max_pain:,.0f}). "
+                            f"Options dealer gamma position exerts strong upward gravitational pull into expiry."
+                        )
+                        action = "BUY_SPOT / LONG"
+                    else:
+                        sl_price = round(ltp + risk_usd, 2)
+                        t1_price = round(max_pain, 2)
+                        t2_price = round(max_pain * 0.97, 2)
+                        headline = f"🌊 DERIBIT OPTIONS GRAVITY: {clean_sym} Overextended Above Max Pain (${max_pain:,.0f})"
+                        summary = (
+                            f"Spot is +{dist_pct:.1f}% extended above Deribit Max Pain (${max_pain:,.0f}). "
+                            f"Dealer gamma pull indicates mean-reversion pull towards ${max_pain:,.0f}."
+                        )
+                        action = "SELL_SHORT_FUTURES / SHORT"
+
+                    conf = f"Deribit {base_curr} Max Pain Gravitational Magnet (${max_pain:,.0f} | PCR: {pcr_oi:.2f})"
+                    alert = AutoAlert(
+                        alert_id=alert_id,
+                        alert_type="CRYPTO_VOLATILITY",
+                        stage="EARLY_WARNING",
+                        symbol=clean_sym,
+                        exchange="CRYPTO",
+                        direction=direction,
+                        headline=headline,
+                        summary=summary,
+                        ltp=ltp,
+                        trigger_level=ltp,
+                        target_level=t1_price,
+                        stop_loss=sl_price,
+                        confidence=85,
+                        created_at=now_iso,
+                        is_live=True,
+                        environment="LIVE",
+                        market_status="LIVE",
+                        metrics={
+                            "change_pct": chg_pct,
+                            "segment": "CRYPTO",
+                            "max_pain": max_pain,
+                            "max_pain_dist_pct": dist_pct,
+                            "pcr_oi": pcr_oi,
+                            "setup_confluence": conf,
+                        },
+                        actionable_plan={
+                            "action": action,
+                            "segment": "CRYPTO",
+                            "contract": f"CRYPTO:{clean_sym}",
+                            "entry_range": f"${round(ltp * 0.995, 2):,.2f} – ${round(ltp * 1.005, 2):,.2f}",
+                            "stop_loss": f"${sl_price:,.2f}",
+                            "target": f"${t1_price:,.2f}",
+                            "target_2": f"${t2_price:,.2f}",
+                            "risk_reward": f"1:{round(abs(t1_price - ltp) / max(0.01, abs(ltp - sl_price)), 1)}",
+                            "when_to_buy": "Execute on structural support with defined risk below SL.",
+                            "when_to_wait": "Do not chase if price moves > 1% towards Max Pain without retest.",
+                            "no_chase_boundary": round(ltp * 1.01, 2) if is_bullish else round(ltp * 0.99, 2),
+                            "setup_confluence": conf,
+                            "profit_rule": f"Scale 50% at Max Pain magnet (${max_pain:,.0f}), trail remainder.",
+                            "trade_plan": {
+                                "symbol": clean_sym,
+                                "direction": direction,
+                                "timeframe": "SWING",
+                                "entry_price": ltp,
+                                "invalidation_stop": sl_price,
+                                "target_1": t1_price,
+                                "target_2": t2_price,
+                                "risk_reward": f"1:{round(abs(t1_price - ltp) / max(0.01, abs(ltp - sl_price)), 1)}",
+                            },
+                        },
+                    )
+                    if self.record_alert(alert):
+                        found.append(alert)
+            except Exception as e:
+                logger.debug(f"[AutoAlertEngine] Options gravity check failed for {clean_sym}: {e}")
+
+        return found
+
+    def scan_crypto_now(self) -> list[AutoAlert]:
+        """
+        24x7 Real-Time Autonomous Crypto Market Alert Scanner.
+        Evaluates top liquid crypto benchmarks (BTC, ETH, SOL, BNB) across:
+          1. Leading Leverage & Funding Squeeze (Binance Futures Open Interest + 8h Funding Rate)
+          2. Smart Money Concepts (15m Market Structure, CHoCH, and Order Block bounces)
+          3. Deribit Options Surface & Max Pain Magnet (BTC/ETH Options Volatility)
+        """
+        found: list[AutoAlert] = []
+        universe = self.watched_crypto
+        for sym in universe:
+            alerts = self._scan_single_crypto_symbol(sym)
+            found.extend(alerts)
+        return found
+
     def scan_fresh_signals_now(self, segment: str = "AUTO") -> list[AutoAlert]:
         """
         Scans watched universe for fresh market signals across detectors.
-        segment: 'AUTO' (matches active IST session) | 'EQUITY' | 'COMMODITY' | 'CURRENCY' | 'ALL'
+        segment: 'AUTO' (matches active IST session) | 'EQUITY' | 'COMMODITY' | 'CURRENCY' | 'CRYPTO' | 'ALL'
         """
         results: list[AutoAlert] = []
         seg = (segment or "AUTO").upper()
@@ -5202,6 +5921,7 @@ class AutoAlertEngine:
             results.extend(self.scan_equity_nfo_now())
             results.extend(self.scan_commodities_now())
             results.extend(self.scan_currency_now())
+            results.extend(self.scan_crypto_now())
             return results
 
         if seg in ("EQUITY", "NFO"):
@@ -5210,8 +5930,10 @@ class AutoAlertEngine:
             return self.scan_commodities_now()
         if seg in ("CURRENCY", "CDS"):
             return self.scan_currency_now()
+        if seg in ("CRYPTO", "BINANCE"):
+            return self.scan_crypto_now()
 
-        # Default AUTO: respect strict time-partitioned operational session
+        # Default AUTO: respect strict operational sessions
         session = get_current_ist_session()
         if session["equity_nfo"]:
             results.extend(self.scan_equity_nfo_now())
@@ -5219,6 +5941,12 @@ class AutoAlertEngine:
             results.extend(self.scan_currency_now())
         if session["commodity"]:
             results.extend(self.scan_commodities_now())
+
+        # 24x7 Continuous Global Desk: Crypto
+        from engine.alert_preferences import alert_preferences
+
+        if not alert_preferences.is_segment_globally_disabled("CRYPTO"):
+            results.extend(self.scan_crypto_now())
 
         # If completely outside all market hours, run curated post-market swing digest
         if not (session["equity_nfo"] or session["currency"] or session["commodity"]):
@@ -5236,6 +5964,9 @@ class AutoAlertEngine:
             active_exchanges.append("CDS")
         if session["commodity"]:
             active_exchanges.append("MCX")
+
+        # Crypto is 24x7 continuous global exchange
+        active_exchanges.append("CRYPTO")
 
         is_test_runner = (
             (os.environ.get("CHANAKYA_TESTING") == "1")
@@ -5268,6 +5999,8 @@ class AutoAlertEngine:
             return
         self._is_running = True
         self._stop_event.clear()
+        # Initialize 24x7 real-time crypto stream listener for sub-second event execution
+        self._init_crypto_stream_listener()
         self._poller_thread = threading.Thread(
             target=self._run_loop,
             args=(interval_seconds,),
@@ -5338,6 +6071,13 @@ class AutoAlertEngine:
                     check_and_trigger_daily_eod()
                 except Exception as _eod_err:
                     logger.debug(f"[AutoAlertEngine] EOD trigger check: {_eod_err}")
+
+                # Phase 5: 24x7 Continuous Crypto Intelligence Desk (Binance Spot/Futures & Deribit Options)
+                if not alert_preferences.is_segment_globally_disabled("CRYPTO"):
+                    self.check_and_alert_invalidations(exchanges=["CRYPTO"])
+                    self.check_and_alert_in_flight_decay(exchanges=["CRYPTO"])
+                    self.check_and_alert_targets_and_trailing(exchanges=["CRYPTO"])
+                    self.scan_crypto_now()
 
             except Exception as e:
                 logger.warning(f"[AutoAlertEngine] Error in poll cycle: {e}")

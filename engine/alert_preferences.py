@@ -264,7 +264,7 @@ class ChannelPreferences:
 
     enabled: bool = True
     allowed_segments: list[str] = field(
-        default_factory=lambda: ["FNO_INDEX", "FNO_STOCK", "EQUITY", "COMMODITY", "CURRENCY"]
+        default_factory=lambda: ["FNO_INDEX", "FNO_STOCK", "EQUITY", "COMMODITY", "CURRENCY", "CRYPTO"]
     )
     min_confidence: int = 75
     allow_early_warnings: bool = False
@@ -732,28 +732,35 @@ class AlertPreferencesManager:
                 return True
 
             # Early warning check — threshold mirrors _dispatch() gate:
-            # 80% for high-conviction positional types, 90% for all others.
+            # 82% for high-conviction positional and crypto types, 90% for all others.
             if stage == "EARLY_WARNING" and not ch_pref.allow_early_warnings:
                 if isinstance(alert, dict):
                     alt_type = str(alert.get("alert_type") or "").upper()
                 else:
                     alt_type = str(getattr(alert, "alert_type", "") or "").upper()
-                early_warn_min = (
-                    80
-                    if alt_type in (
-                        "PRECURSOR_RADAR",
-                        "ASYMMETRIC_OPPORTUNITY",
-                        "OPTIONS_MOMENTUM",
-                        "GAMMA_BLAST",
-                        "COMMODITY_MOMENTUM",
-                        "CURRENCY_BREAKOUT",
-                    )
-                    else 90
+                _early_warn_whitelisted_types = (
+                    "PRECURSOR_RADAR",
+                    "ASYMMETRIC_OPPORTUNITY",
+                    "OPTIONS_MOMENTUM",
+                    "GAMMA_BLAST",
+                    "COMMODITY_MOMENTUM",
+                    "CURRENCY_BREAKOUT",
+                    # Crypto early-warning types (funding squeeze build-up,
+                    # Deribit max pain gravity pull, SMC OB approach)
+                    "CRYPTO_SQUEEZE",
+                    "CRYPTO_MOMENTUM",
+                    "CRYPTO_VOLATILITY",
                 )
-                if conf < early_warn_min:
-                    return False
+                if alt_type in _early_warn_whitelisted_types:
+                    # Special class: 82% bar. If passed, allow — do NOT re-block with general min_confidence.
+                    return conf >= 82
+                else:
+                    # General early-warning: require 90%
+                    if conf < 90:
+                        return False
 
-            # General confidence threshold
+            # General confidence threshold (applies to IGNITED, IN_FLIGHT, etc. — not whitelisted EARLY_WARNING)
+
             if conf < ch_pref.min_confidence:
                 return False
 
