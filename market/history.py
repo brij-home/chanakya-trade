@@ -234,6 +234,47 @@ def get_ohlcv(
         except Exception:
             pass
 
+    # Tier 2.8: 24x7 Crypto Provider (Binance REST & Stream)
+    is_crypto = (
+        exchange.upper() in ("CRYPTO", "BINANCE")
+        or symbol.upper().startswith("CRYPTO:")
+        or clean_sym in (
+            "BTC",
+            "ETH",
+            "SOL",
+            "BNB",
+            "BTCUSDT",
+            "ETHUSDT",
+            "SOLUSDT",
+            "BNBUSDT",
+            "BTC-USD",
+            "ETH-USD",
+            "SOL-USD",
+        )
+    )
+    if not raw and is_crypto:
+        try:
+            from market.crypto_stream import crypto_stream
+
+            limit_count = min(max(days * (24 if kite_interval != "day" else 1), 50), 500)
+            c_df = crypto_stream.get_klines(clean_sym, interval=kite_interval, limit=limit_count)
+            if not c_df.empty:
+                raw = []
+                for dt, row in c_df.iterrows():
+                    raw.append(
+                        {
+                            "date": dt.isoformat() if hasattr(dt, "isoformat") else str(dt),
+                            "open": float(row["open"]),
+                            "high": float(row["high"]),
+                            "low": float(row["low"]),
+                            "close": float(row["close"]),
+                            "volume": float(row["volume"]),
+                        }
+                    )
+                provider_name = "binance"
+        except Exception:
+            pass
+
     # Tier 3: explicit data-provider API → yfinance → disk cache.
     if not raw:
         try:

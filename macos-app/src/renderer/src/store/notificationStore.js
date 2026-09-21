@@ -1,19 +1,27 @@
 import { create } from 'zustand'
+import { isTestOrSimAlert } from '../components/Views/alerts/alertHelpers'
 
 const STORAGE_KEY = 'chanakya_notifications_v1'
 // Singleton polling interval — only ONE interval runs across the entire app
 let _pollTimer = null
 const MAX_NOTIFICATIONS = 100
 
-// Safe localStorage loader with prior-day intraday expiration sanitization
+// Safe localStorage loader with prior-day intraday expiration sanitization and test alert pruning
 function loadStoredNotifications() {
   try {
     const raw = localStorage.getItem(STORAGE_KEY)
     if (!raw) return []
     const parsed = JSON.parse(raw)
     if (!Array.isArray(parsed)) return []
+    // Sanitize any legacy test/sim alerts right upon initial load!
+    const sanitized = parsed.filter((item) => !isTestOrSimAlert(item))
+    if (sanitized.length !== parsed.length) {
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(sanitized.slice(0, MAX_NOTIFICATIONS)))
+      } catch (_) {}
+    }
     const now = new Date()
-    return parsed.map((item) => {
+    return sanitized.map((item) => {
       const isIntraday = item.time_horizon === 'INTRADAY' || item.timeHorizon === 'INTRADAY'
       const timeStr = item.created_at || item.timestamp
       if (isIntraday && timeStr) {
@@ -132,6 +140,7 @@ export const useNotificationStore = create((set, get) => ({
     const normalized = rawList
       .map((item) => normalizeNotification(item))
       .filter(Boolean)
+      .filter((item) => !isTestOrSimAlert(item))
 
     set((s) => {
       const existingMap = new Map(s.notifications.map((n) => [n.id, n]))
@@ -251,6 +260,17 @@ export const useNotificationStore = create((set, get) => ({
       notifications: [],
       unreadCount: 0,
       selectedNotification: null,
+    })
+  },
+
+  purgeTestAlerts: () => {
+    set((s) => {
+      const next = s.notifications.filter((n) => !isTestOrSimAlert(n))
+      saveNotifications(next)
+      return {
+        notifications: next,
+        unreadCount: next.filter((n) => !n.read).length,
+      }
     })
   },
 

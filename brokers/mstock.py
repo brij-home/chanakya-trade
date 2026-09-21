@@ -23,6 +23,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
 import time
 from datetime import datetime
 from typing import Optional
@@ -130,6 +131,19 @@ _KNOWN_NSE_TOKENS = {
     "HCLTECH": "7229",
     "DIVISLAB": "10940",
     "TECHM": "13538",
+    "OFSS": "10738",
+    "MFSL": "2142",
+    "HDFCLIFE": "467",
+    "ICICIPRULI": "18652",
+    "SBILIFE": "21808",
+    "PATANJALI": "17029",
+    "OBEROIRLTY": "20242",
+    "KPITTECH": "9683",
+    "TATAELXSI": "3506",
+    "MPHASIS": "4503",
+    "MANKIND": "5926",
+    "BSE": "19585",
+    "MCX": "31181",
     "GOLD": "GOLD",
     "SILVER": "SILVER",
     "CRUDEOIL": "CRUDEOIL",
@@ -200,9 +214,54 @@ class MStockAPI(BrokerAPI):
         """Parse instruments from Scrip Master if not yet loaded."""
         if self._scrip_token_cache or not self._token:
             return
+
+        cache_disk_file = app_data_path("mstock_scrip_cache.json")
+        now_ts = time.time()
+        # 1. Try local disk cache if fresher than 24 hours
+        if cache_disk_file.exists():
+            try:
+                disk_data = json.loads(cache_disk_file.read_text(encoding="utf-8"))
+                if disk_data.get("timestamp", 0) > now_ts - 86400 and disk_data.get("tokens"):
+                    self._scrip_token_cache.update(disk_data["tokens"])
+                    return
+            except Exception:
+                pass
+
         scrip_txt = self.download_scrip_master()
         if not scrip_txt:
             return
+
+        # 2. Try JSON parsing (mStock returns JSON array of instruments)
+        try:
+            items = json.loads(scrip_txt)
+            if isinstance(items, list):
+                for item in items:
+                    tok = str(item.get("token") or "").strip()
+                    sym = str(item.get("symbol") or "").strip().upper()
+                    name = str(item.get("name") or "").strip().upper()
+                    exch = str(item.get("exch_seg") or "NSE").strip().upper()
+                    if tok and sym:
+                        self._scrip_token_cache[f"{exch}:{sym}"] = tok
+                        if sym.endswith("-EQ"):
+                            self._scrip_token_cache[f"{exch}:{sym[:-3]}"] = tok
+                    if tok and name:
+                        self._scrip_token_cache[f"{exch}:{name}"] = tok
+                        if name.endswith("-EQ"):
+                            self._scrip_token_cache[f"{exch}:{name[:-3]}"] = tok
+
+                if self._scrip_token_cache:
+                    try:
+                        cache_disk_file.write_text(
+                            json.dumps({"timestamp": now_ts, "tokens": self._scrip_token_cache}),
+                            encoding="utf-8",
+                        )
+                    except Exception:
+                        pass
+                return
+        except Exception:
+            pass
+
+        # 3. CSV fallback
         for line in scrip_txt.splitlines():
             parts = [p.strip() for p in line.split(",")]
             if len(parts) >= 3:

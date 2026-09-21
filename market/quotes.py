@@ -363,10 +363,22 @@ _CRYPTO_SYMBOLS = {
     "BITCOIN",
     "BTCUSD",
     "BTC-USD",
+    "BTCUSDT",
     "BTCINR",
     "ETH",
     "ETHEREUM",
+    "ETHUSD",
+    "ETH-USD",
+    "ETHUSDT",
     "SOL",
+    "SOLANA",
+    "SOLUSD",
+    "SOL-USD",
+    "SOLUSDT",
+    "BNB",
+    "BNBUSD",
+    "BNB-USD",
+    "BNBUSDT",
 }
 
 
@@ -438,6 +450,26 @@ def get_quote(
         ws_quotes = _ws_quotes(missing, correlation_id=correlation_id)
         result.update(ws_quotes)
         missing = [i for i in canonical_instruments if i not in result]
+
+    # 2.5. Try 24x7 Crypto Stream (instant in-memory Binance ticks)
+    if missing:
+        crypto_missing = [
+            i
+            for i in missing
+            if i.startswith("CRYPTO:")
+            or any(i.replace("CRYPTO:", "") == s for s in _CRYPTO_SYMBOLS)
+        ]
+        if crypto_missing:
+            try:
+                from market.crypto_stream import crypto_stream
+
+                for c_inst in crypto_missing:
+                    q = crypto_stream.get_quote(c_inst)
+                    if q and getattr(q, "last_price", 0.0) > 0:
+                        result[c_inst] = q
+                missing = [i for i in canonical_instruments if i not in result]
+            except Exception:
+                pass
 
     # 3. Try broker REST API
     if missing:

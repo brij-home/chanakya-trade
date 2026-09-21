@@ -1736,9 +1736,40 @@ async def skill_auto_alerts_clear():
     """Clear auto-detected alert history and reset anti-spam cooldowns."""
     try:
         from engine.auto_alert_engine import auto_alert_engine
+        from web.sse import event_bus
 
         auto_alert_engine.clear_alerts()
+        try:
+            await event_bus.broadcast({
+                "type": "auto_alerts_cleared",
+                "mode": "ALL",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            })
+        except Exception:
+            pass
         return {"status": "ok", "data": {"cleared": True}}
+    except Exception as e:
+        raise _err(str(e))
+
+
+@router.post("/alerts/auto/clear_test")
+async def skill_auto_alerts_clear_test():
+    """Clear all synthetic test/simulated alerts from engine buffer and broadcast purge."""
+    try:
+        from engine.auto_alert_engine import auto_alert_engine
+        from web.sse import event_bus
+
+        purged_count = auto_alert_engine.clear_test_alerts()
+        try:
+            await event_bus.broadcast({
+                "type": "auto_alerts_cleared",
+                "mode": "TEST_ONLY",
+                "purged_count": purged_count,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            })
+        except Exception:
+            pass
+        return {"status": "ok", "data": {"cleared": True, "purged": purged_count}}
     except Exception as e:
         raise _err(str(e))
 
@@ -3318,6 +3349,155 @@ async def skill_multibagger_alerts(horizon: Optional[str] = None, limit: int = 5
         mgr = get_alert_manager()
         alerts = mgr.get_recent_alerts(limit=limit, horizon=horizon)
         return _ok({"alerts": [a.to_dict() for a in alerts], "count": len(alerts)})
+    except Exception as e:
+        raise _err(str(e))
+
+
+@router.get("/multibagger/accumulation_radar")
+@router.post("/multibagger/accumulation_radar")
+async def skill_accumulation_radar(symbols: Optional[str] = None, limit: int = 30):
+    """
+    Scans for institutional stealth accumulation & floating supply exhaustion (CFAI).
+    """
+    try:
+        from analysis.delivery_accumulation import compute_cfai
+        from market.history import get_ohlcv
+
+        if symbols:
+            target_syms = [s.strip().upper() for s in symbols.split(",") if s.strip()]
+        else:
+            target_syms = [
+                "MAZDOCK", "COCHINSHIP", "GRSE", "TITAGARH", "HAL", "BEL", "BDL",
+                "TRENT", "DIXON", "KAYNES", "INOXWIND", "BHEL", "RVNL", "POLYCAB", "KEC"
+            ]
+
+        results = []
+        for sym in target_syms[:limit]:
+            try:
+                df = get_ohlcv(sym, interval="day", days=90)
+                rep = compute_cfai(sym, df=df)
+                results.append(rep.to_dict())
+            except Exception:
+                continue
+
+        results.sort(key=lambda r: r.get("cfai_pct", 0.0), reverse=True)
+        return _ok({"accumulation_radar": results, "count": len(results)})
+    except Exception as e:
+        raise _err(str(e))
+
+
+@router.get("/multibagger/order_inflows")
+@router.post("/multibagger/order_inflows")
+async def skill_order_inflows(symbol: Optional[str] = None, announcement_text: Optional[str] = None):
+    """
+    Retrieves Book-to-Bill order-book titans and evaluates contract win impact ratios.
+    """
+    try:
+        from analysis.order_book_catalyst import analyze_order_book_catalyst, get_top_order_book_titans
+
+        if symbol:
+            rep = analyze_order_book_catalyst(symbol, latest_announcement_text=announcement_text)
+            return _ok({"order_book_report": rep.to_dict()})
+
+        titans = get_top_order_book_titans(min_book_to_bill=1.5)
+        return _ok({"titans": [t.to_dict() for t in titans], "count": len(titans)})
+    except Exception as e:
+        raise _err(str(e))
+
+
+@router.get("/multibagger/block_deals")
+@router.post("/multibagger/block_deals")
+async def skill_block_deals(symbol: str, days: int = 30):
+    """
+    Evaluates institutional block deal absorption vs distribution anchoring.
+    """
+    try:
+        from analysis.block_deal_analyzer import analyze_block_deal_absorption
+        from market.quotes import get_quote
+
+        q = get_quote(symbol)
+        ltp = getattr(q, "last_price", 1000.0) if q else 1000.0
+        rep = analyze_block_deal_absorption(symbol, current_price=ltp, days=days)
+        return _ok({"block_deal_report": rep.to_dict()})
+    except Exception as e:
+        raise _err(str(e))
+
+
+@router.get("/multibagger/capex_inflections")
+@router.post("/multibagger/capex_inflections")
+async def skill_capex_inflections(symbol: Optional[str] = None):
+    """
+    Evaluates Capex & CWIP-to-Gross-Block commercialization inflections and capacity ramp-ups.
+    """
+    try:
+        from analysis.capex_inflection import analyze_capex_inflection, scan_capex_inflection_universe
+
+        if symbol:
+            rep = analyze_capex_inflection(symbol)
+            return _ok({"capex_inflection": rep.to_dict()})
+
+        universe = scan_capex_inflection_universe()
+        return _ok({"capex_inflections": [u.to_dict() for u in universe], "count": len(universe)})
+    except Exception as e:
+        raise _err(str(e))
+
+
+@router.get("/multibagger/rrg_orderbook_convergence")
+@router.post("/multibagger/rrg_orderbook_convergence")
+async def skill_rrg_orderbook_convergence(symbol: Optional[str] = None):
+    """
+    Evaluates convergence of Sector RRG Momentum (Leading/Improving) with Micro Order-Book backlog.
+    """
+    try:
+        from analysis.rrg_orderbook_convergence import evaluate_rrg_orderbook_convergence, scan_rrg_orderbook_matrix
+
+        if symbol:
+            rep = evaluate_rrg_orderbook_convergence(symbol)
+            return _ok({"convergence_report": rep.to_dict()})
+
+        matrix = scan_rrg_orderbook_matrix()
+        return _ok({"convergence_matrix": [m.to_dict() for m in matrix], "count": len(matrix)})
+    except Exception as e:
+        raise _err(str(e))
+
+
+@router.get("/multibagger/insider_radar")
+@router.post("/multibagger/insider_radar")
+async def skill_insider_radar(symbol: Optional[str] = None):
+    """
+    Evaluates promoter de-pledging trajectory and open-market insider purchases (SEBI SAST Reg 29).
+    """
+    try:
+        from analysis.insider_radar import analyze_insider_activity, scan_insider_radar
+
+        if symbol:
+            rep = analyze_insider_activity(symbol)
+            return _ok({"insider_report": rep.to_dict()})
+
+        radar = scan_insider_radar()
+        return _ok({"insider_radar": [r.to_dict() for r in radar], "count": len(radar)})
+    except Exception as e:
+        raise _err(str(e))
+
+
+@router.get("/multibagger/institutional_edge_radar")
+@router.post("/multibagger/institutional_edge_radar")
+async def skill_institutional_edge_radar(symbol: Optional[str] = None):
+    """
+    Unified Master Institutional Edge Matrix combining all 6 pillars into a single conviction ranker.
+    """
+    try:
+        from analysis.institutional_convergence import (
+            evaluate_master_institutional_convergence,
+            scan_master_institutional_radar,
+        )
+
+        if symbol:
+            rep = evaluate_master_institutional_convergence(symbol)
+            return _ok({"institutional_edge": rep.to_dict()})
+
+        radar = scan_master_institutional_radar()
+        return _ok({"institutional_edge_radar": [r.to_dict() for r in radar], "count": len(radar)})
     except Exception as e:
         raise _err(str(e))
 
@@ -6498,6 +6678,14 @@ def _fetch_options_and_spot(clean_sym: str, norm_inst: str, req_exp: Optional[st
     from market.quotes import get_ltp, get_quote
     from market.options import get_options_snapshot
 
+    if clean_sym in ("BTC", "ETH", "SOL"):
+        try:
+            from market.crypto_options import get_crypto_options_snapshot
+            contracts, chain_spot, expiries, source_info = get_crypto_options_snapshot(clean_sym, req_exp)
+            return None, contracts, chain_spot, expiries, source_info
+        except Exception as e:
+            logger.warning(f"Crypto options snapshot fallback error for {clean_sym}: {e}")
+
     quote_map = get_quote([norm_inst, clean_sym])
     quote = quote_map.get(norm_inst) or quote_map.get(clean_sym)
     contracts, chain_spot, expiries, source_info = get_options_snapshot(clean_sym, req_exp)
@@ -6506,7 +6694,12 @@ def _fetch_options_and_spot(clean_sym: str, norm_inst: str, req_exp: Optional[st
 
 @router.get("/gex_snapshot")
 @router.post("/gex_snapshot")
-async def skill_gex_snapshot(req: Optional[GEXSnapshotRequest] = None):
+async def skill_gex_snapshot(
+    req: Optional[GEXSnapshotRequest] = None,
+    underlying: Optional[str] = None,
+    symbol: Optional[str] = None,
+    expiry: Optional[str] = None,
+):
     """
     Snapshot for the Quant & Options Desk:
     Returns genuine Gamma Exposure Profile (GEX), Delta Hedging Recommendations,
@@ -6520,7 +6713,9 @@ async def skill_gex_snapshot(req: Optional[GEXSnapshotRequest] = None):
         from engine.greeks_manager import LOT_SIZES
 
         raw_in = None
-        if req:
+        if symbol or underlying:
+            raw_in = symbol or underlying
+        elif req:
             raw_in = req.symbol or req.underlying
         clean_raw = (raw_in if raw_in else "NIFTY").strip().upper()
         clean_sym = (
@@ -6534,7 +6729,7 @@ async def skill_gex_snapshot(req: Optional[GEXSnapshotRequest] = None):
         norm_inst = normalize_instrument(clean_sym)
 
         # 1. Fetch authentic live spot quote & option contracts off the event loop
-        req_exp = req.expiry.strip() if req and req.expiry else None
+        req_exp = (expiry or (req.expiry if req else None) or "").strip() or None
         quote, contracts, chain_spot, expiries, source_info = await asyncio.to_thread(
             _fetch_options_and_spot, clean_sym, norm_inst, req_exp
         )
@@ -6555,17 +6750,18 @@ async def skill_gex_snapshot(req: Optional[GEXSnapshotRequest] = None):
         now_time = source_info.get("as_of_display") or datetime.now().strftime("%I:%M:%S %p IST")
         active_expiry = req_exp or (expiries[0] if expiries else "")
 
-        lot_sz = LOT_SIZES.get(
+        lot_sz = 1 if clean_sym in ("BTC", "ETH", "SOL") else LOT_SIZES.get(
             clean_sym, 75 if "NIFTY" in clean_sym else (20 if clean_sym == "SENSEX" else 250)
         )
 
         # Venue-specific check if no contracts exist
         if not contracts:
+            is_crypto = clean_sym in ("BTC", "ETH", "SOL")
             is_bse = clean_sym in ("SENSEX", "BANKEX")
             return _ok(
                 {
                     "underlying": clean_sym,
-                    "exchange": "BSE" if is_bse else "NSE",
+                    "exchange": "DERIBIT" if is_crypto else ("BSE" if is_bse else "NSE"),
                     "expiry": active_expiry,
                     "expiries": expiries,
                     "spot_price": round(spot, 2),
@@ -7184,7 +7380,7 @@ async def skill_gex_snapshot(req: Optional[GEXSnapshotRequest] = None):
         return _ok(
             {
                 "underlying": clean_sym,
-                "exchange": "BSE" if clean_sym in ("SENSEX", "BANKEX") else "NSE",
+                "exchange": "DERIBIT" if clean_sym in ("BTC", "ETH", "SOL") else ("BSE" if clean_sym in ("SENSEX", "BANKEX") else "NSE"),
                 "expiry": active_expiry,
                 "expiries": expiries[:8] if expiries else [],
                 "spot_price": round(spot, 2),

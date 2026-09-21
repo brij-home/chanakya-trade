@@ -135,6 +135,121 @@ class MultibaggerAlertManager:
             if self.record_alert(alt):
                 triggered.append(alt)
 
+        # 4. CFAI Floating Supply Exhaustion Catalyst
+        if getattr(report, "float_exhaustion_detected", False) and getattr(report, "cfai_pct", 0.0) >= 3.5:
+            alt = MultibaggerAlert(
+                alert_id=f"alert-cfai-{uuid.uuid4().hex[:8]}",
+                symbol=report.symbol,
+                event_type="CFAI_FLOAT_EXHAUSTION",
+                headline=f"🐋 {report.symbol} Floating Supply Exhaustion (CFAI {report.cfai_pct:.1f}%)",
+                description=f"Stealth institutional delivery has absorbed {report.cfai_pct:.1f}% of entire tradable free float inside base. Float is cornered for explosive Stage 2 markup.",
+                severity="CRITICAL" if getattr(report, "cfai_score", 50) >= 80 else "HIGH",
+                horizon="SHORT_TERM" if report.vcp_detected else "MID_TERM",
+                ltp=report.ltp,
+                pivot_level=report.vcp_pivot_price or report.ltp,
+                timestamp=now_str,
+                execution_ticket=report.execution_ticket,
+            )
+            if self.record_alert(alt):
+                triggered.append(alt)
+
+        # 5. Mega Order-Book Expansion Catalyst
+        ob_ratio = getattr(report, "order_book_to_bill", None)
+        if ob_ratio and ob_ratio >= 2.0:
+            alt = MultibaggerAlert(
+                alert_id=f"alert-ord-{uuid.uuid4().hex[:8]}",
+                symbol=report.symbol,
+                event_type="ORDER_BOOK_EXPANSION",
+                headline=f"🏗️ {report.symbol} Mega Order-Book Titan ({ob_ratio:.1f}x Book-to-Bill)",
+                description=f"Multi-year revenue visibility with {ob_ratio:.1f}x Book-to-Bill ratio. Operating leverage expansion runway for next 3-5 years.",
+                severity="HIGH",
+                horizon="MID_TERM",
+                ltp=report.ltp,
+                pivot_level=report.ltp,
+                timestamp=now_str,
+                execution_ticket=report.execution_ticket,
+            )
+            if self.record_alert(alt):
+                triggered.append(alt)
+
+        # 6. Institutional Block Deal Absorption Catalyst
+        blk_status = getattr(report, "institutional_block_status", None)
+        blk_anchor = getattr(report, "institutional_support_anchor", None)
+        if blk_status == "INSTITUTIONAL_ABSORPTION" and blk_anchor:
+            alt = MultibaggerAlert(
+                alert_id=f"alert-blk-{uuid.uuid4().hex[:8]}",
+                symbol=report.symbol,
+                event_type="BLOCK_DEAL_ABSORPTION",
+                headline=f"🛡️ {report.symbol} Institutional Block Absorption above ₹{blk_anchor:.2f}",
+                description=f"Price holding and expanding above institutional block transaction price (₹{blk_anchor:.2f}). Level acting as institutional support floor.",
+                severity="HIGH",
+                horizon="SHORT_TERM",
+                ltp=report.ltp,
+                pivot_level=blk_anchor,
+                timestamp=now_str,
+                execution_ticket=report.execution_ticket,
+            )
+            if self.record_alert(alt):
+                triggered.append(alt)
+
+        # 7. Capex & CWIP Inflection Catalyst
+        c_tier = getattr(report, "capex_inflection_tier", None)
+        if c_tier == "CAPEX_INFLECTION_TITAN":
+            alt = MultibaggerAlert(
+                alert_id=f"alert-cpx-{uuid.uuid4().hex[:8]}",
+                symbol=report.symbol,
+                event_type="CAPEX_INFLECTION",
+                headline=f"🏭 {report.symbol} Capex & CWIP Commercialization Inflection",
+                description=f"Massive capacity transition from CWIP to Gross Block with >75% utilization. Operating leverage margin expansion underway.",
+                severity="HIGH",
+                horizon="MID_TERM",
+                ltp=report.ltp,
+                pivot_level=report.ltp,
+                timestamp=now_str,
+                execution_ticket=report.execution_ticket,
+            )
+            if self.record_alert(alt):
+                triggered.append(alt)
+
+        # 8. Apex RRG Sector Momentum x Order-Book Convergence
+        rrg_tier = getattr(report, "rrg_convergence_tier", None)
+        if rrg_tier == "APEX_CONVERGENCE":
+            alt = MultibaggerAlert(
+                alert_id=f"alert-rrg-{uuid.uuid4().hex[:8]}",
+                symbol=report.symbol,
+                event_type="RRG_ORDERBOOK_CONVERGENCE",
+                headline=f"🔄 {report.symbol} Apex RRG Sector x Order-Book Convergence",
+                description=f"Macro institutional sector inflows in Leading/Improving RRG quadrant converging with multi-year micro order book backlog.",
+                severity="CRITICAL",
+                horizon="MID_TERM",
+                ltp=report.ltp,
+                pivot_level=report.ltp,
+                timestamp=now_str,
+                execution_ticket=report.execution_ticket,
+            )
+            if self.record_alert(alt):
+                triggered.append(alt)
+
+        # 9. Promoter Skin-in-the-Game & De-Pledging Catalyst
+        ins_status = getattr(report, "insider_de_pledging_status", None)
+        ins_score = getattr(report, "insider_skin_score", 50)
+        if ins_score >= 85 and ins_status in ("ZERO_PLEDGE_CLEAN", "AGGRESSIVE_DEPLEDGING"):
+            alt = MultibaggerAlert(
+                alert_id=f"alert-ins-{uuid.uuid4().hex[:8]}",
+                symbol=report.symbol,
+                event_type="PROMOTER_SKIN_IN_THE_GAME",
+                headline=f"💎 {report.symbol} High Promoter Conviction ({ins_status})",
+                description=f"Zero margin call distress risk with heavy promoter alignment and insider open-market accumulation.",
+                severity="HIGH",
+                horizon="LONG_TERM",
+                ltp=report.ltp,
+                pivot_level=report.ltp,
+                timestamp=now_str,
+                execution_ticket=report.execution_ticket,
+            )
+            if self.record_alert(alt):
+                triggered.append(alt)
+
         return triggered
 
     def get_recent_alerts(

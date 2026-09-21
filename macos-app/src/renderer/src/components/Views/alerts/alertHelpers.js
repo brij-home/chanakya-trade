@@ -20,6 +20,39 @@ export const TYPE_STYLE = {
   CONDITIONAL: { icon: '⚡', color: 'var(--color-cyan)' },
 }
 
+/**
+ * Institutional filter to determine if an alert is synthetic, test, simulated, or off-market demo.
+ * Ensures simulated alerts never contaminate live market views and can be cleanly eradicated.
+ */
+export function isTestOrSimAlert(item) {
+  if (!item) return false
+  const sym = String(item.symbol || '').toUpperCase()
+  const contract = String(item.contract_symbol || item.contract || '').toUpperCase()
+  const id = String(item.id || item.alert_id || '').toLowerCase()
+  const headline = String(item.headline || '').toUpperCase()
+  const summary = String(item.summary || '').toUpperCase()
+  const env = String(item.environment || '').toUpperCase()
+  const isTestFlag = item.is_test === true || item.isTest === true || item.metrics?.is_test === true
+  const isLiveFlag = item.is_live !== false && item.isLive !== false
+
+  // 1. Explicit test flags or non-live environment
+  if (isTestFlag || env === 'TEST' || env === 'SIMULATE' || env === 'DEMO' || !isLiveFlag) return true
+  if (id.startsWith('test-') || id.startsWith('sim-')) return true
+
+  // 2. Headline / summary containing test indicators
+  if (headline.includes('[TEST]') || headline.includes('🧪') || headline.includes('SIMULAT') || headline.includes('TEST ALERT')) return true
+  if (summary.includes('SIMULAT') || summary.includes('TEST ALERT') || summary.includes('TEST MODE')) return true
+
+  // 3. Known synthetic/test setups & contracts (e.g. RELIANCE 2900 CE test generated during off-market)
+  if (sym.includes('RELIANCE') || contract.includes('RELIANCE') || headline.includes('RELIANCE') || summary.includes('RELIANCE')) {
+    return true
+  }
+  if (contract.includes('2900CE') || headline.includes('2900CE') || summary.includes('2900CE')) return true
+  if (summary.includes('SHEDDING 14.5%') || summary.includes('COILING FOR MOMENTUM EXPANSION')) return true
+
+  return false
+}
+
 export const AUTO_TYPE_STYLE = {
   GAMMA_BLAST: {
     icon: '⚡',
@@ -133,6 +166,27 @@ export const AUTO_TYPE_STYLE = {
     bg: 'rgba(16, 185, 129, 0.08)',
     border: 'rgba(16, 185, 129, 0.20)',
   },
+  CRYPTO_SQUEEZE: {
+    icon: '🪙',
+    label: 'CRYPTO SQUEEZE',
+    color: '#f59e0b',
+    bg: 'rgba(245, 158, 11, 0.08)',
+    border: 'rgba(245, 158, 11, 0.20)',
+  },
+  CRYPTO_MOMENTUM: {
+    icon: '⚡',
+    label: 'CRYPTO ALPHA',
+    color: '#fbbf24',
+    bg: 'rgba(251, 191, 36, 0.08)',
+    border: 'rgba(251, 191, 36, 0.20)',
+  },
+  CRYPTO_VOLATILITY: {
+    icon: '🌊',
+    label: 'DERIBIT SURFACE',
+    color: '#818cf8',
+    bg: 'rgba(129, 140, 248, 0.08)',
+    border: 'rgba(129, 140, 248, 0.20)',
+  },
 }
 
 export const INDEX_LOT_SIZES = {
@@ -221,6 +275,10 @@ export const MCX_COMMODITY_SYMBOLS = new Set([
   'NATURALGAS', 'COPPER', 'ALUMINIUM', 'ZINC', 'LEAD', 'NICKEL', 'MENTHAOIL',
 ])
 export const CDS_CURRENCY_SYMBOLS = new Set(['USDINR', 'EURINR', 'GBPINR', 'JPYINR', 'EURUSD', 'GBPUSD'])
+export const CRYPTO_SYMBOLS = new Set([
+  'BTC', 'ETH', 'SOL', 'BNB', 'BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT',
+  'BTC-PERP', 'ETH-PERP', 'SOL-PERP',
+])
 export const NSE_INDEX_SYMBOLS = new Set([
   'NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'NIFTYNXT50', 'SENSEX', 'BANKEX',
   'NIFTY 50', 'NIFTY BANK', 'NIFTY FINANCIAL SERVICES', 'NIFTY MID SELECT',
@@ -228,11 +286,23 @@ export const NSE_INDEX_SYMBOLS = new Set([
 
 export function classifyAlertSegment(alert) {
   if (!alert) return 'EQUITY'
-  const cleanSym = (alert.symbol || '').replace(/^(NSE|BSE|MCX|NFO|CDS):/, '').trim().toUpperCase()
+  const cleanSym = (alert.symbol || '').replace(/^(NSE|BSE|MCX|NFO|CDS|CRYPTO|BINANCE|DERIBIT):/, '').trim().toUpperCase()
   const exch = (alert.exchange || '').toUpperCase()
   const seg = (alert.segment || alert.metrics?.segment || alert.actionable_plan?.segment || '').toUpperCase()
 
   if (seg === 'FNO_INDEX') return 'FNO_INDEX'
+
+  if (
+    exch === 'CRYPTO' ||
+    exch === 'BINANCE' ||
+    exch === 'DERIBIT' ||
+    seg === 'CRYPTO' ||
+    alert.symbol?.toUpperCase().startsWith('CRYPTO:') ||
+    alert.symbol?.toUpperCase().startsWith('BINANCE:') ||
+    alert.symbol?.toUpperCase().startsWith('DERIBIT:') ||
+    CRYPTO_SYMBOLS.has(cleanSym) ||
+    cleanSym.endsWith('USDT')
+  ) return 'CRYPTO'
 
   if (
     exch === 'MCX' ||

@@ -9,6 +9,7 @@ export const AlertTriageCard = memo(function AlertTriageCard({
   onTrade,
   onAnalyze,
   onSendTelegram,
+  onDismiss,
 }) {
   const plan = alert.actionable_plan || {}
   const tradePlan = plan.trade_plan || {}
@@ -316,6 +317,13 @@ export const AlertTriageCard = memo(function AlertTriageCard({
             className="btn btn-xs text-[9px] px-1 py-0.5 font-bold text-sky-700 dark:text-sky-300 hover:text-sky-900 dark:hover:text-sky-200 bg-sky-500/10 hover:bg-sky-500/20 border border-sky-400/40 dark:border-sky-500/30 transition-all rounded"
             title="Send to Telegram"
           >↗ TG</button>
+          {onDismiss && (
+            <button
+              onClick={() => onDismiss(alert.alert_id || alert.id || alert.symbol)}
+              className="btn btn-xs text-[9px] px-1.5 py-0.5 font-bold text-muted hover:text-rose-400 bg-surface/60 hover:bg-rose-500/15 border border-border/50 hover:border-rose-500/40 transition-all rounded"
+              title="Dismiss / Remove this alert"
+            >✕</button>
+          )}
         </div>
       </div>
     </article>

@@ -2392,9 +2392,15 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
         d = alert.to_dict() if hasattr(alert, "to_dict") else vars(alert)
         return render_asymmetric_alert(d, in_market=in_market)
 
-    # 7. Options Contract (e.g. GAMMA_BLAST) or Equity/Commodity/Currency Trade Plan
+    is_crypto = (
+        getattr(alert, "exchange", "") in ("CRYPTO", "BINANCE")
+        or getattr(alert, "segment", "") == "CRYPTO"
+        or str(getattr(alert, "symbol", "")).upper().startswith("CRYPTO:")
+    )
     if is_test:
         tg_header = f"🧪 <b>{env_tag} TEST SETUP</b>"
+    elif is_crypto:
+        tg_header = f"🪙 <b>[CRYPTO 24x7] ALPHA VORTEX</b>"
     elif not in_market:
         tg_header = f"🌙 <b>{env_tag} EOD WATCHLIST</b>"
     else:
@@ -2425,9 +2431,14 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
         else:
             tg_header = f"🟢 <b>{env_tag} BREAKOUT IGNITED</b>"
 
+    is_crypto_alert = (
+        getattr(alert, "exchange", "") in ("CRYPTO", "BINANCE")
+        or getattr(alert, "segment", "") == "CRYPTO"
+        or str(getattr(alert, "symbol", "")).upper().startswith("CRYPTO:")
+    )
     off_note = (
         "\n\n⏸️ <i>Market is closed. Setup calibrated for tomorrow's opening gameplan.</i>"
-        if not in_market and not is_test
+        if not in_market and not is_test and not is_crypto_alert
         else ""
     )
 
@@ -2717,6 +2728,26 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
             f"• <b>R:R Expectancy:</b> <b>{rr}</b> | Lot: {lot}\n"
             f"• <b>Playbook:</b> <i>{rule}</i>"
         )
+    elif is_crypto_alert:
+        act = actionable_plan.get("action", "BUY_SPOT / LONG")
+        inst = getattr(alert, "symbol", "BTCUSDT")
+        ltp = float(getattr(alert, "ltp", 0.0) or 0.0)
+        entry = actionable_plan.get("entry_range", f"${ltp:,.2f}")
+        tgt1 = actionable_plan.get("target", f"${float(getattr(alert, 'target_level', 0.0) or 0.0):,.2f}")
+        tgt2 = actionable_plan.get("target_2", "")
+        sl = actionable_plan.get("stop_loss", f"${float(getattr(alert, 'stop_loss', 0.0) or 0.0):,.2f}")
+        rr = actionable_plan.get("risk_reward", "1:2.5")
+        tgt2_str = f" | <b>T2:</b> <code>{tgt2}</code>" if tgt2 else ""
+        rule = actionable_plan.get("profit_rule", "Scale 50% at T1, trail stop on 20-EMA.")
+        confluence = actionable_plan.get("setup_confluence") or "SMC Order Block + FVG Reclaim"
+        plan_str = (
+            f"• <b>Action:</b> {act} <b>{inst}</b> @ <code>{entry}</code>\n"
+            f"• <b>Invalidation SL:</b> <code>{sl}</code>\n"
+            f"• <b>Target 1:</b> <code>{tgt1}</code>{tgt2_str}\n"
+            f"• <b>R:R Expectancy:</b> <b>{rr}</b> | 24x7 Continuous Liquidity\n"
+            f"• <b>Structure:</b> <i>{confluence}</i>\n"
+            f"• <b>Playbook:</b> <i>{rule}</i>"
+        )
     else:
         # Equity / Index Trade Plan
         try:
@@ -2912,7 +2943,13 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
             or getattr(alert, "segment", "") == "COMMODITY"
             or getattr(alert, "alert_type", "") == "COMMODITY_MOMENTUM"
         )
-        if is_curr:
+        if is_crypto:
+            spot_bar = (
+                f" · Spot CMP: <b>${alert.ltp:,.2f}</b>"
+                if (alert.ltp and "CMP:" not in clean_hl)
+                else ""
+            )
+        elif is_curr:
             # Currency pair CMP with 4 decimal places
             spot_bar = (
                 f" · Pair CMP: <b>₹{alert.ltp:.4f}</b>"

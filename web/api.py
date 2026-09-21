@@ -183,6 +183,14 @@ async def lifespan(app: FastAPI):
 
     ticker_stream.start(poll_interval_seconds=3.0)
 
+    # Start the 24x7 real-time crypto stream engine
+    try:
+        from market.crypto_stream import crypto_stream
+
+        crypto_stream.start()
+    except Exception:
+        pass
+
     # Start the autonomous real-time auto alert engine (45s loop)
     try:
         from engine.auto_alert_engine import auto_alert_engine
@@ -204,6 +212,12 @@ async def lifespan(app: FastAPI):
         pass
     try:
         ticker_stream.stop(timeout=1.5)
+    except Exception:
+        pass
+    try:
+        from market.crypto_stream import crypto_stream
+
+        crypto_stream.stop(timeout=1.5)
     except Exception:
         pass
     try:
@@ -3379,6 +3393,128 @@ async def websocket_ticker(ws: WebSocket):
         pass
     except Exception:
         pass
+
+
+# ── 24x7 Real-Time Crypto Pipeline Endpoints ─────────────────────────────────
+
+
+@app.get("/api/crypto/snapshot", tags=["Crypto 24x7"])
+async def get_crypto_snapshot():
+    """
+    Current 24x7 snapshot of major crypto assets (BTC, ETH, SOL, BNB)
+    from Binance public stream with 24h change, high/low, volume, and BBO.
+    """
+    from market.crypto_stream import crypto_stream
+
+    return crypto_stream.get_snapshot()
+
+
+@app.get("/api/crypto/smc", tags=["Crypto 24x7"])
+async def get_crypto_smc(
+    symbol: str = "BTCUSDT",
+    timeframe: str = "15m",
+    limit: int = 150,
+):
+    """
+    24x7 Real-Time Smart Money Concepts (SMC) & Market Structure Analysis.
+    Computes Order Blocks, FVGs, Liquidity Sweeps, CHoCH, and +2R/+4R invalidation targets.
+    """
+    from market.crypto_stream import crypto_stream
+    from analysis.market_structure import analyze_market_structure
+
+    df = await asyncio.to_thread(
+        crypto_stream.get_klines,
+        symbol=symbol,
+        interval=timeframe,
+        limit=limit,
+    )
+    if df.empty:
+        raise HTTPException(status_code=404, detail=f"No kline data available for {symbol}")
+
+    report = await asyncio.to_thread(
+        analyze_market_structure,
+        symbol=symbol,
+        df=df,
+        exchange="CRYPTO",
+        timeframe=timeframe,
+    )
+    return report.to_dict()
+
+
+@app.get("/api/crypto/options", tags=["Crypto 24x7"])
+async def get_crypto_options(currency: str = "BTC", force_refresh: bool = False):
+    """
+    24x7 Real-Time Crypto Options Chain & Volatility Surface via Deribit.
+    Computes Max Pain strike, Put-Call Ratio (OI & Volume), ATM IV, and dealer positioning.
+    Zero auth/API key required.
+    """
+    from market.crypto_options import get_crypto_options_summary
+
+    return await asyncio.to_thread(
+        get_crypto_options_summary,
+        currency=currency,
+        force_refresh=force_refresh,
+    )
+
+
+@app.get("/api/crypto/squeeze", tags=["Crypto 24x7"])
+async def get_crypto_squeeze(symbol: str = "BTCUSDT"):
+    """
+    Leading Indicator Squeeze & Leverage Positioning Analysis via Binance Futures.
+    Computes Open Interest, 8h Funding Rate skew, and Long/Short Squeeze warnings.
+    Zero auth/API key required.
+    """
+    from market.crypto_stream import crypto_stream
+
+    return await asyncio.to_thread(
+        crypto_stream.get_squeeze_metrics,
+        symbol=symbol,
+    )
+
+
+@app.get("/api/crypto/stream", tags=["SSE"])
+async def stream_crypto():
+    """
+    SSE stream of 24x7 real-time crypto ticks, BBO, and candle updates.
+    """
+    from market.crypto_stream import crypto_stream
+
+    async def _crypto_generator():
+        snap = crypto_stream.get_snapshot()
+        yield f"data: {json.dumps({'type': 'crypto_snapshot', 'data': snap})}\n\n"
+
+        queue: asyncio.Queue[dict] = asyncio.Queue(maxsize=100)
+        loop = asyncio.get_running_loop()
+
+        def _on_tick(tick: dict):
+            try:
+                loop.call_soon_threadsafe(
+                    lambda: queue.put_nowait(tick) if not queue.full() else None
+                )
+            except Exception:
+                pass
+
+        crypto_stream.on_tick(_on_tick)
+
+        try:
+            while True:
+                try:
+                    tick = await asyncio.wait_for(queue.get(), timeout=15.0)
+                    yield f"data: {json.dumps({'type': 'crypto_tick', 'data': tick})}\n\n"
+                except asyncio.TimeoutError:
+                    yield ": heartbeat\n\n"
+        except asyncio.CancelledError:
+            pass
+
+    return StreamingResponse(
+        _crypto_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 # ── System Status SSE Stream ──────────────────────────────────────────────────

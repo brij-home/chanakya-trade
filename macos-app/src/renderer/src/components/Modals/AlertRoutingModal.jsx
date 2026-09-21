@@ -42,9 +42,17 @@ const SEGMENTS = [
     desc: 'USDINR, EURINR, GBPINR, JPYINR forex volatility & break-of-structure',
     color: 'text-cyan-400 bg-cyan-500/10 border-cyan-500/30',
   },
+  {
+    id: 'CRYPTO',
+    name: 'Crypto 24x7',
+    icon: '🪙',
+    badge: 'Binance & Deribit',
+    desc: 'BTC, ETH, SOL, BNB 24x7 squeeze detection, Deribit options surface & volatility flow',
+    color: 'text-amber-400 bg-amber-500/10 border-amber-500/30',
+  },
 ]
 
-const ALL_CANONICAL_SEGMENTS = ['FNO_INDEX', 'FNO_STOCK', 'EQUITY', 'COMMODITY', 'CURRENCY']
+const ALL_CANONICAL_SEGMENTS = ['FNO_INDEX', 'FNO_STOCK', 'EQUITY', 'COMMODITY', 'CURRENCY', 'CRYPTO']
 
 function normalizeSegs(list) {
   if (!Array.isArray(list)) return ALL_CANONICAL_SEGMENTS
@@ -58,6 +66,10 @@ function normalizeSegs(list) {
     } else if (ALL_CANONICAL_SEGMENTS.includes(s)) {
       if (!out.includes(s)) out.push(s)
     }
+  }
+  // If previously saved list lacked CRYPTO, auto-include it so it's not silently disabled
+  if (!out.includes('CRYPTO')) {
+    out.push('CRYPTO')
   }
   return out.length > 0 ? out : ALL_CANONICAL_SEGMENTS
 }
@@ -165,6 +177,10 @@ export default function AlertRoutingModal({ isOpen, onClose, onSaveSuccess }) {
       setUiSegments(['EQUITY'])
       setTgSegments(['EQUITY'])
       setSoundSegments(['EQUITY'])
+    } else if (preset === 'CRYPTO_ONLY') {
+      setUiSegments(['CRYPTO'])
+      setTgSegments(['CRYPTO'])
+      setSoundSegments(['CRYPTO'])
     }
   }
 
@@ -294,6 +310,13 @@ export default function AlertRoutingModal({ isOpen, onClose, onSaveSuccess }) {
                 className="px-2.5 py-1 rounded-lg text-xs font-medium bg-elevated hover:bg-emerald-500/20 hover:text-emerald-300 transition-colors"
               >
                 🏢 Equity Only
+              </button>
+              <button
+                type="button"
+                onClick={() => applyPreset('CRYPTO_ONLY')}
+                className="px-2.5 py-1 rounded-lg text-xs font-medium bg-elevated hover:bg-amber-500/20 hover:text-amber-300 transition-colors"
+              >
+                🪙 Crypto 24x7
               </button>
             </div>
           </div>

@@ -276,9 +276,20 @@ WATCHLIST_PRESETS: dict[str, list[str]] = {
         "BRIGADE",
         "SOBHA",
     ],
+    "crypto_majors": [
+        "BTCUSDT",
+        "ETHUSDT",
+        "SOLUSDT",
+        "BNBUSDT",
+    ],
 }
 
 SECTOR_NAME_MAP: dict[str, str] = {
+    "crypto": "crypto_majors",
+    "crypto_majors": "crypto_majors",
+    "cryptomajors": "crypto_majors",
+    "bitcoin": "crypto_majors",
+    "btc": "crypto_majors",
     "bank": "nifty_bank",
     "banking": "nifty_bank",
     "banks": "nifty_bank",
@@ -442,6 +453,14 @@ class SmartFunnel:
         Pure Python quantitative rule evaluation (0 LLM tokens, ~0.2s).
         Scores stock from 0-100 and records an unambiguous why/why-not rationale.
         """
+        sym_upper = symbol.strip().upper()
+        if (
+            sym_upper.startswith("CRYPTO:")
+            or sym_upper in ("BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "BTC", "ETH", "SOL", "BNB")
+            or exchange.upper() in ("CRYPTO", "BINANCE")
+        ):
+            exchange = "CRYPTO"
+
         reg = self._get_registry()
         if not reg:
             return PreFilterReport(
@@ -473,12 +492,13 @@ class SmartFunnel:
                 metrics={},
             )
 
-        # 2. Fundamental Signals (use fast mode for 0.1s quant screening)
+        # 2. Fundamental Signals (use fast mode for 0.1s quant screening; skip for crypto)
         fund = {}
-        try:
-            fund = reg.execute("fundamental_analyse", {"symbol": symbol, "fast": True}) or {}
-        except Exception:
-            pass
+        if exchange.upper() != "CRYPTO":
+            try:
+                fund = reg.execute("fundamental_analyse", {"symbol": symbol, "fast": True}) or {}
+            except Exception:
+                pass
 
         # Extract parameters
         rsi = float(tech.get("rsi") or 50.0)
@@ -591,27 +611,32 @@ class SmartFunnel:
             score -= 10.0
             rejection_flags.append(f"Anemic liquidity/volume ratio ({vol_ratio:.2f}x avg)")
 
-        # ── Fundamental Rules ──
-        if roe >= 15.0:
-            score += 10.0
-            positive_flags.append(f"High ROE ({roe:.1f}%)")
-        elif roe < 5.0 and roe != 0.0:
-            score -= 15.0
-            rejection_flags.append(f"Weak capital efficiency (ROE {roe:.1f}% < 5%)")
+        # ── Fundamental Rules (Bypassed for Crypto) ──
+        if exchange.upper() != "CRYPTO":
+            if roe >= 15.0:
+                score += 10.0
+                positive_flags.append(f"High ROE ({roe:.1f}%)")
+            elif roe < 5.0 and roe != 0.0:
+                score -= 15.0
+                rejection_flags.append(f"Weak capital efficiency (ROE {roe:.1f}% < 5%)")
 
-        if 0.0 < de <= 0.6:
-            score += 10.0
-            positive_flags.append(f"Clean debt-light balance sheet (D/E {de:.2f}x)")
-        elif de > 2.2:
-            score -= 20.0
-            rejection_flags.append(f"High financial leverage (D/E {de:.2f}x > 2.2x)")
+            if 0.0 < de <= 0.6:
+                score += 10.0
+                positive_flags.append(f"Clean debt-light balance sheet (D/E {de:.2f}x)")
+            elif de > 2.2:
+                score -= 20.0
+                rejection_flags.append(f"High financial leverage (D/E {de:.2f}x > 2.2x)")
 
-        if pe > 95.0:
-            score -= 15.0
-            rejection_flags.append(f"Extreme valuation multiple (P/E {pe:.1f}x)")
+            if pe > 95.0:
+                score -= 15.0
+                rejection_flags.append(f"Extreme valuation multiple (P/E {pe:.1f}x)")
+        else:
+            if vol_ratio >= 1.0:
+                score += 10.0
+                positive_flags.append(f"Strong 24x7 volume participation ({vol_ratio:.2f}x)")
 
         # ── Sector Rotation & RRG Alignment ──
-        if not os.environ.get("CHANAKYA_TESTING"):
+        if exchange.upper() != "CRYPTO" and not os.environ.get("CHANAKYA_TESTING"):
             try:
                 from analysis.sector_rotation import get_stock_sector_alignment
 

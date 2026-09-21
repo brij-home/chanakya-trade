@@ -807,7 +807,7 @@ export default function OptionsDeskView({
             <div className="flex items-center gap-1">
               <span className="text-muted text-[11px] font-bold">Underlying:</span>
               <div className="flex items-center gap-0.5 bg-elevated rounded-lg p-0.5 border border-border/70 flex-wrap">
-                {['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'SENSEX', 'RELIANCE', 'HDFCBANK', 'TCS', 'INFY'].map((inst) => (
+                {['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'SENSEX', 'RELIANCE', 'HDFCBANK', 'BTC', 'ETH'].map((inst) => (
                   <button
                     key={inst}
                     onClick={() => handleSelectSymbol(inst)}
@@ -821,7 +821,7 @@ export default function OptionsDeskView({
                   </button>
                 ))}
 
-                {!['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'SENSEX', 'RELIANCE', 'HDFCBANK', 'TCS', 'INFY'].includes(underlying) && (
+                {!['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'SENSEX', 'RELIANCE', 'HDFCBANK', 'BTC', 'ETH'].includes(underlying) && (
                   <span className="px-2 py-0.5 rounded text-[11px] font-bold bg-amber text-black shadow-xs">
                     {underlying}
                   </span>

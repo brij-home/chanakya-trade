@@ -578,6 +578,8 @@ export default function TerminalView({
     // Forex / Currency & Crypto
     { symbol: 'USDINR',     name: 'USD / INR Rupee',    cat: 'FOREX' },
     { symbol: 'BTC',        name: 'Bitcoin Spot ($)',    cat: 'CRYPTO' },
+    { symbol: 'ETH',        name: 'Ethereum Spot ($)',   cat: 'CRYPTO' },
+    { symbol: 'SOL',        name: 'Solana Spot ($)',     cat: 'CRYPTO' },
     { symbol: 'SENSEX',     name: 'BSE SENSEX 30',      cat: 'INDEX' },
     { symbol: 'INDIA VIX',  name: 'India Volatility VIX',cat: 'VIX' },
   ]

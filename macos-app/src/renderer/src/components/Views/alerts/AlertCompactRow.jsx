@@ -3,7 +3,7 @@ import { useLiveSpot } from './LiveSpotsContext'
 import { AUTO_TYPE_STYLE, INDEX_LOT_SIZES, convictionEmoji, getStaleness, formatExpiryDetails } from './alertHelpers'
 import { RRMiniBar, MilestoneDots } from './AlertWidgets'
 
-export const AlertCompactRow = memo(function AlertCompactRow({ alert, onSendTelegram, onTrade, onExpand, isExpanded }) {
+export const AlertCompactRow = memo(function AlertCompactRow({ alert, onSendTelegram, onTrade, onExpand, isExpanded, onDismiss }) {
   const plan = alert.actionable_plan || {}
   const tradePlan = plan.trade_plan || {}
   const optPlan = plan.option_plan || null
@@ -305,7 +305,7 @@ export const AlertCompactRow = memo(function AlertCompactRow({ alert, onSendTele
 
         {isTest
           ? <span className="text-[7px] px-1 py-px rounded font-black bg-purple-500/20 text-purple-300 border border-purple-500/30 whitespace-nowrap">🧪 TEST</span>
-          : <span className="text-[7px] px-1 py-px rounded font-black bg-rose-500/20 text-rose-300 border border-rose-500/30 whitespace-nowrap">🔴 LIVE</span>
+          : <span className="text-[7px] px-1 py-px rounded font-black bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 whitespace-nowrap">🟢 REAL / LIVE</span>
         }
 
         {/* ── Time Horizon Badge ── */}
@@ -348,7 +348,11 @@ export const AlertCompactRow = memo(function AlertCompactRow({ alert, onSendTele
         )}
 
         {/* ── Broker Level 2 Connection Status ── */}
-        {alert.order_flow_signals?.live_depth === false || alert.order_flow_signals?.broker_depth_status === 'SYNTHETIC_L1_DISCONNECTED' || alert.order_flow_signals?.provenance === 'SYNTHETIC_L1_DISCONNECTED' ? (
+        {isTest ? (
+          <span className="text-[7px] px-1 py-px rounded font-black bg-purple-500/20 text-purple-300 border border-purple-500/30 whitespace-nowrap hidden sm:inline" title="Simulated test environment">
+            🧪 SIM DEPTH
+          </span>
+        ) : alert.order_flow_signals?.live_depth === false || alert.order_flow_signals?.broker_depth_status === 'SYNTHETIC_L1_DISCONNECTED' || alert.order_flow_signals?.provenance === 'SYNTHETIC_L1_DISCONNECTED' ? (
           <span className="text-[7px] px-1 py-px rounded font-black bg-amber-500/20 text-amber-300 border border-amber-500/40 whitespace-nowrap hidden sm:inline" title="No active broker WebSocket depth connection. Using tick-level fallback.">
             ⚠️ SYNTHETIC L1 (NO BROKER WS)
           </span>
@@ -570,6 +574,17 @@ export const AlertCompactRow = memo(function AlertCompactRow({ alert, onSendTele
           className="btn btn-xs text-[9px] px-1.5 font-bold flex-shrink-0 text-emerald-700 dark:text-emerald-300 hover:text-emerald-900 dark:hover:text-emerald-200 bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-400/40 dark:border-emerald-500/35 hover:border-emerald-500/60 transition-all"
           title="1-Click Trade: Open pre-populated Order Ticket"
         >⚡ Trade</button>
+
+        {onDismiss && (
+          <button
+            onClick={(e) => {
+              e.stopPropagation()
+              onDismiss(alert.alert_id || alert.id || alert.symbol)
+            }}
+            className="btn btn-xs text-[9px] px-1 font-bold flex-shrink-0 text-muted hover:text-rose-400 bg-surface/60 hover:bg-rose-500/15 border border-border/50 hover:border-rose-500/40 transition-all rounded"
+            title="Dismiss / Remove this alert"
+          >✕</button>
+        )}
 
         <span className="text-muted text-[9px] flex-shrink-0 transition-transform duration-150" style={{ transform: isExpanded ? 'rotate(180deg)' : 'rotate(0deg)' }}>
           ▼

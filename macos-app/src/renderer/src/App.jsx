@@ -288,6 +288,17 @@ export default function App() {
   // ── Real-Time Auto-Alert Stream (Gamma Blasts, Squeezes, Circuits, Targets, Invalidation) ─────────
   const handleAlertMessage = useCallback((payload) => {
     if (!payload) return
+
+    if (payload.type === 'auto_alerts_cleared') {
+      if (payload.mode === 'TEST_ONLY') {
+        useNotificationStore.getState().purgeTestAlerts()
+      } else {
+        useNotificationStore.getState().clearAll()
+      }
+      window.dispatchEvent(new CustomEvent('auto-alerts-cleared', { detail: payload }))
+      return
+    }
+
     playAlertChime()
 
     // Add to persistent notification store (glanceable feed & history)

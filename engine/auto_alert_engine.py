@@ -239,6 +239,16 @@ class AutoAlertEngine:
         try:
             from analysis.universe import THEMATIC_PRESETS
 
+            # 1. Complete liquid NSE F&O Universe (single-stock equities, excluding indices)
+            fno_all = THEMATIC_PRESETS.get("fno_universe", {}).get("symbols", [])
+            for s in fno_all:
+                if (
+                    s not in symbols
+                    and s not in self._watched_indices
+                    and s not in ("NIFTYFPI", "NIFTYNXT50")
+                ):
+                    symbols.append(s)
+
             most_liquid = THEMATIC_PRESETS.get("most_liquid_today", {}).get("symbols", [])
             vol_surges = THEMATIC_PRESETS.get("volume_surges_rvol", {}).get("symbols", [])
             for s in most_liquid + vol_surges:
@@ -1343,11 +1353,13 @@ class AutoAlertEngine:
                     return
 
             if not is_milestone:
-                # Institutional Telegram Conviction Bar: minimum 82% confidence for initial trade signals
-                if alert.confidence < 82:
+                # Institutional Telegram Conviction Bar:
+                # Respect alert_preferences.telegram.min_confidence (defaults to 85, configured to 90+ in production).
+                tg_min = getattr(alert_preferences.telegram, "min_confidence", 85)
+                if alert.confidence < tg_min:
                     logger.info(
-                        f"[AutoAlertEngine] 🛑 Suppressed marginal setup for {alert.symbol} on Telegram: "
-                        f"Confidence {alert.confidence}% below institutional Telegram bar (82%)."
+                        f"[AutoAlertEngine] 🛑 Suppressed setup for {alert.symbol} on Telegram: "
+                        f"Confidence {alert.confidence}% below Telegram bar ({tg_min}%)."
                     )
                     return
 
@@ -2349,13 +2361,17 @@ class AutoAlertEngine:
 
     def _get_prioritized_targets(self) -> list[str]:
         """Returns targets with today's expiring index prioritized at position 0."""
-        targets = list(self._watched_indices)
-        now_ist = datetime.now(IST)
-        expiry_map = {0: "MIDCPNIFTY", 1: "FINNIFTY", 2: "BANKNIFTY", 3: "NIFTY", 4: "SENSEX"}
-        today_expiry = expiry_map.get(now_ist.weekday())
-        if today_expiry and today_expiry in targets:
-            targets.remove(today_expiry)
-            targets.insert(0, today_expiry)
+        from engine.alert_preferences import alert_preferences
+
+        index_allowed = alert_preferences.is_segment_allowed("FNO_INDEX")
+        targets = list(self._watched_indices) if index_allowed else []
+        if index_allowed:
+            now_ist = datetime.now(IST)
+            expiry_map = {0: "MIDCPNIFTY", 1: "FINNIFTY", 2: "BANKNIFTY", 3: "NIFTY", 4: "SENSEX"}
+            today_expiry = expiry_map.get(now_ist.weekday())
+            if today_expiry and today_expiry in targets:
+                targets.remove(today_expiry)
+                targets.insert(0, today_expiry)
         for s in self.watched_equities:
             if s not in targets:
                 targets.append(s)
@@ -3225,9 +3241,11 @@ class AutoAlertEngine:
         from market.options import get_options_chain
         from market.quotes import get_ltp
         from engine.position_sizer import get_lot_size
+        from engine.alert_preferences import alert_preferences
 
         found: list[AutoAlert] = []
-        targets = list(self._watched_indices)
+        index_allowed = alert_preferences.is_segment_allowed("FNO_INDEX")
+        targets = list(self._watched_indices) if index_allowed else []
         for s in self.watched_equities:
             if s not in targets:
                 targets.append(s)
@@ -3265,37 +3283,37 @@ class AutoAlertEngine:
             nifty_change is not None and nifty_change >= 0.40 and nifty_below_vwap is False
         )
 
+        # Stage 1: Fast Batch-fetch underlying spot quotes for all targets in one call (<150ms)
+        from market.quotes import get_quote, get_ltp
+
+        formatted_targets = [f"{self._resolve_index_exchange(s)}:{s}" for s in targets]
+        batch_quotes = {}
+        try:
+            batch_quotes = get_quote(formatted_targets)
+        except Exception as e_batch:
+            logger.debug(f"[AutoAlertEngine] Batch quote pre-fetch error: {e_batch}")
+
         for sym in targets:
             clean_sym = sym.replace("NSE:", "").replace("NFO:", "").replace("BSE:", "").strip().upper()
             try:
-                from market.quotes import get_quote, get_ltp
-
                 exch = self._resolve_index_exchange(clean_sym)
                 lookup_sym = f"{exch}:{clean_sym}"
-                spot = get_ltp(lookup_sym)
-                if not spot or spot <= 0:
+                quote_obj = batch_quotes.get(lookup_sym) or batch_quotes.get(clean_sym)
+                spot = (
+                    float(getattr(quote_obj, "last_price", 0.0) or getattr(quote_obj, "ltp", 0.0) or 0.0)
+                    if quote_obj
+                    else 0.0
+                )
+                if spot <= 0:
+                    spot = get_ltp(lookup_sym) or 0.0
+                if spot <= 0:
                     continue
-                quote_obj = None
-                try:
-                    raw_q = get_quote(lookup_sym)
-                    if isinstance(raw_q, dict):
-                        quote_obj = (
-                            raw_q.get(lookup_sym)
-                            or raw_q.get(clean_sym)
-                            or (next(iter(raw_q.values())) if raw_q else None)
-                        )
-                    else:
-                        quote_obj = raw_q
-                except Exception:
-                    pass
-                if quote_obj:
-                    q_ltp = getattr(quote_obj, "last_price", None)
-                    if q_ltp and abs(q_ltp - spot) / max(1.0, spot) > 0.005:
-                        quote_obj = None
 
-                spot_change_pct = getattr(quote_obj, "change_pct", None) if quote_obj else None
-                spot_open = getattr(quote_obj, "open", None) if quote_obj else None
-                spot_vwap = getattr(quote_obj, "vwap", None) if quote_obj else None
+                spot_change_pct = float(getattr(quote_obj, "change_pct", 0.0) or 0.0) if quote_obj else 0.0
+                spot_open = float(getattr(quote_obj, "open", 0.0) or 0.0) if quote_obj else 0.0
+                spot_high = float(getattr(quote_obj, "high", 0.0) or 0.0) if quote_obj else 0.0
+                spot_low = float(getattr(quote_obj, "low", 0.0) or 0.0) if quote_obj else 0.0
+                spot_vwap = float(getattr(quote_obj, "vwap", 0.0) or 0.0) if quote_obj else 0.0
 
                 is_idx = clean_sym in (
                     "NIFTY",
@@ -3307,6 +3325,33 @@ class AutoAlertEngine:
                 )
                 # Determine canonical segment for routing and display (cached on the alert object)
                 alert_segment = "FNO_INDEX" if is_idx else "FNO_STOCK"
+
+                # ── STAGE 1: SPOT MOVEMENT & OPENING DRIVE PRE-FILTER ──
+                # For single-stock F&O, skip expensive options chain extraction if the underlying stock
+                # is completely flat and inactive today (0 momentum, 0 displacement from VWAP).
+                is_bear_drive = False
+                is_bull_drive = False
+                if not is_idx:
+                    if spot_open > 0:
+                        if (
+                            spot_high > 0
+                            and (abs(spot_high - spot_open) / spot_open <= 0.0015)
+                            and spot_change_pct <= -0.4
+                        ):
+                            is_bear_drive = True  # Open = High Bearish Liquidation Drive (e.g. OFSS)
+                        elif (
+                            spot_low > 0
+                            and (abs(spot_low - spot_open) / spot_open <= 0.0015)
+                            and spot_change_pct >= 0.4
+                        ):
+                            is_bull_drive = True  # Open = Low Bullish Institutional Sweep (e.g. MFSL/HDFCLIFE)
+
+                    is_vwap_displaced = bool(spot_vwap > 0 and abs(spot - spot_vwap) / spot_vwap >= 0.005)
+                    is_momentum_active = bool(abs(spot_change_pct) >= 0.80)
+
+                    if not (is_momentum_active or is_bear_drive or is_bull_drive or is_vwap_displaced):
+                        # Stock is flat and inactive today (skips ~180 sideways stocks in 0.0001s)
+                        continue
 
                 # Institutional Single-Stock Expiry Protection:
                 # Under SEBI regulations, single-stock options are physically settled.
@@ -3496,17 +3541,18 @@ class AutoAlertEngine:
 
                     # Momentum criteria: active turnover and volume velocity.
                     # During opening drive (09:15 - 09:45 IST), volume builds rapidly but cumulative OI
-                    # was carried over from prior sessions. Allow early morning volume bursts.
+                    # Momentum criteria: active turnover and volume velocity.
+                    # Require authentic institutional participation:
+                    # Minimum 1.0x Vol/OI during opening drive, 1.2x post-opening, with contract turnover floor.
                     if is_opening_drive:
-                        if is_idx:
-                            if not (vol_oi >= 0.20 or vol >= 5000) or vol < 2000:
-                                continue
-                        else:
-                            if not (vol_oi >= 0.25 or vol >= 800) or vol < 300:
-                                continue
+                        min_vol_oi = 0.60 if is_idx else 1.00
+                        min_contracts = 2000 if is_idx else 500
                     else:
-                        if vol_oi < 0.80:
-                            continue
+                        min_vol_oi = 1.00 if is_idx else 1.20
+                        min_contracts = 2500 if is_idx else 600
+
+                    if vol_oi < min_vol_oi or vol < min_contracts:
+                        continue
 
                     # 1. Bid/Ask Spread Sanity Gate:
                     # Index options allow up to 30% spread friction; single-stock options strictly <= 15%
@@ -3529,36 +3575,37 @@ class AutoAlertEngine:
                     # An option momentum breakout MUST have positive price expansion (gainers, not decaying/dumping)
                     # AND the underlying stock must be aligned with the trade direction.
                     pchange = getattr(c, "pchange", None)
+                    min_pchange = 8.0 if is_opening_drive else 6.0
                     if opt_type == "CE":
-                        # CALL SURGE: Option premium must be expanding positively
-                        if pchange is not None and pchange < 2.0:
+                        # CALL SURGE: Option premium must be expanding positively (minimum 6% expansion, 8% at open)
+                        if pchange is not None and pchange < min_pchange:
                             continue
-                        # Underlying stock must NOT be collapsing in a severe downtrend (reject crashing stocks like MAZDOCK)
-                        if spot_change_pct is not None and spot_change_pct < -2.0:
+                        # Underlying stock must NOT be collapsing in a severe downtrend (reject crashing stocks)
+                        if spot_change_pct is not None and spot_change_pct < -1.5:
                             continue
-                        if spot_open and spot_open > 0 and spot < spot_open * 0.98:
+                        if spot_open and spot_open > 0 and spot < spot_open * 0.995:
                             continue
-                        # Spot must hold intraday VWAP (reject buying calls below VWAP)
-                        if spot_vwap and spot_vwap > 0 and spot < spot_vwap * 0.998:
+                        # Spot must hold intraday VWAP with at least 0.1% buffer (reject flat/drifting stocks)
+                        if spot_vwap and spot_vwap > 0 and spot < spot_vwap * 1.001:
                             continue
                         # Upper-wick rejection / buying climax gate (reject shooting star rejections on wide bars)
-                        if candle_range >= (spot * 0.0025) and upper_wick_ratio > 0.55:
+                        if candle_range >= (spot * 0.0025) and upper_wick_ratio > 0.50:
                             continue
                         direction = "BULLISH"
                     elif opt_type == "PE":
-                        # PUT SURGE: Option premium must be expanding positively
-                        if pchange is not None and pchange < 2.0:
+                        # PUT SURGE: Option premium must be expanding positively (minimum 6% expansion, 8% at open)
+                        if pchange is not None and pchange < min_pchange:
                             continue
                         # Underlying stock must NOT be surging in a severe uptrend
-                        if spot_change_pct is not None and spot_change_pct > 2.0:
+                        if spot_change_pct is not None and spot_change_pct > 1.5:
                             continue
-                        if spot_open and spot_open > 0 and spot > spot_open * 1.02:
+                        if spot_open and spot_open > 0 and spot > spot_open * 1.005:
                             continue
-                        # Spot must be below intraday VWAP (reject buying puts above VWAP)
-                        if spot_vwap and spot_vwap > 0 and spot > spot_vwap * 1.002:
+                        # Spot must be below intraday VWAP with at least 0.1% buffer
+                        if spot_vwap and spot_vwap > 0 and spot > spot_vwap * 0.999:
                             continue
                         # Lower-wick rejection / selling climax gate (reject hammer absorption on wide bars)
-                        if candle_range >= (spot * 0.0025) and lower_wick_ratio > 0.55:
+                        if candle_range >= (spot * 0.0025) and lower_wick_ratio > 0.50:
                             continue
                         direction = "BEARISH"
                     else:
@@ -3885,34 +3932,80 @@ class AutoAlertEngine:
                         else ""
                     )
 
-                    # 5. Multi-factor Institutional Conviction Scoring (0-95, replaces naive 72 + vol_oi * 8)
-                    conf_score = 65
-                    conf_score += min(15, int(vol_oi * 3.5))
-                    if opt_type == "CE" and spot_vwap and spot >= spot_vwap:
+                    # 5. Multi-factor Institutional Conviction Scoring (Earned 50-96 scale)
+                    # Lower base score from 65 to 50 so mediocre setups don't falsely max out at 95%
+                    conf_score = 50
+
+                    # A. Volume / OI Ratio conviction (up to +20 pts)
+                    if vol_oi >= 3.0:
+                        conf_score += 20
+                    elif vol_oi >= 2.0:
+                        conf_score += 15
+                    elif vol_oi >= 1.5:
                         conf_score += 10
-                    elif opt_type == "PE" and spot_vwap and spot <= spot_vwap:
+                    elif vol_oi >= 1.2:
+                        conf_score += 5
+
+                    # B. Option Price Expansion (+5 to +15 pts)
+                    opt_pch = getattr(c, "pchange", 0.0) or 0.0
+                    if opt_pch >= 20.0:
+                        conf_score += 15
+                    elif opt_pch >= 12.0:
                         conf_score += 10
+                    elif opt_pch >= 6.0:
+                        conf_score += 5
+
+                    # C. Underlying Stock Expansion from VWAP (+5 to +12 pts)
+                    if spot_vwap and spot_vwap > 0:
+                        vwap_dist_pct = abs(spot - spot_vwap) / spot_vwap * 100.0
+                        if opt_type == "CE" and spot >= spot_vwap * 1.005:
+                            conf_score += 12 if vwap_dist_pct >= 0.8 else 8
+                        elif opt_type == "PE" and spot <= spot_vwap * 0.995:
+                            conf_score += 12 if vwap_dist_pct >= 0.8 else 8
+                        elif (opt_type == "CE" and spot >= spot_vwap) or (opt_type == "PE" and spot <= spot_vwap):
+                            conf_score += 4
+
+                    # D. Mathematical Asymmetry Viability (+8 pts)
                     if tp and tp.is_asymmetry_viable:
-                        conf_score += 10
+                        conf_score += 8
+
+                    # E. Candlestick Cleanliness (low wicks = clean trend, +5 pts)
                     if upper_wick_ratio <= 0.20 and lower_wick_ratio <= 0.20:
                         conf_score += 5
+
+                    # F. Gamma Squeeze / Short Covering (+7 pts)
                     if is_gamma_squeeze:
-                        conf_score += 8
+                        conf_score += 7
                     elif oi_change and oi_change < 0:
-                        conf_score += 5
+                        conf_score += 4
+
+                    # G. MTF 15m Alignment (+7 pts)
                     if mtf_15m_trend == ("BULLISH" if opt_type == "CE" else "BEARISH"):
                         conf_score += 7
+
+                    # H. Macro Tailwind (+6 pts)
                     if is_nifty_markdown and opt_type == "PE":
-                        conf_score += 8  # Macro tailwind bonus for Put buyers in down market
+                        conf_score += 6
                     elif is_nifty_markup and opt_type == "CE":
-                        conf_score += 8  # Macro tailwind bonus for Call buyers in up market
+                        conf_score += 6
+
+                    # I. Opening Drive Institutional Bonus (+10 pts)
+                    opening_drive_bonus = 0
+                    drive_tag = ""
+                    if is_bear_drive and opt_type == "PE":
+                        opening_drive_bonus = 10
+                        drive_tag = " ⚡ OPENING DRIVE (Open=High)"
+                    elif is_bull_drive and opt_type == "CE":
+                        opening_drive_bonus = 10
+                        drive_tag = " ⚡ OPENING DRIVE (Open=Low)"
 
                     conf_score += confirmation_bonus
                     conf_score += divergence_bonus
                     conf_score += vp_bonus
                     conf_score += sector_tailwind_bonus
+                    conf_score += opening_drive_bonus
 
-                    confidence = min(95, max(72, conf_score))
+                    confidence = min(96, max(50, conf_score))
 
                     # 6. Optimal Trade Entry (OTE) & Strict No-Chase Boundaries
                     ote_lower = round(max(0.05, opt_ltp * 0.96), 1)
@@ -3936,14 +4029,14 @@ class AutoAlertEngine:
                         summary = (
                             f"Institutional Put surge in {clean_sym} {int(strike)} PE. "
                             f"Underlying spot ₹{spot:,.1f}{spot_anchor_str}. Turnover: {vol:,} contracts ({vol_oi}x OI). "
-                            f"Entry: ₹{opt_ltp:,.1f} | SL: ₹{opt_sl:,.1f} | T1: ₹{opt_t1:,.1f} | T2: ₹{opt_t2:,.1f}.{friday_tag}{dte_pm_tag}{phys_tag}{rollover_tag}"
+                            f"Entry: ₹{opt_ltp:,.1f} | SL: ₹{opt_sl:,.1f} | T1: ₹{opt_t1:,.1f} (Scale 50% & SL to Cost) | T2: ₹{opt_t2:,.1f}.{drive_tag}{friday_tag}{dte_pm_tag}{phys_tag}{rollover_tag}"
                         )
                     else:
                         headline = f"🚀 OPTIONS MOMENTUM: {contract_sym} @ ₹{opt_ltp:,.1f} (Vol/OI {vol_oi}x)"
                         summary = (
                             f"Institutional Call surge in {clean_sym} {int(strike)} CE. "
                             f"Underlying spot ₹{spot:,.1f}{spot_anchor_str}. Turnover: {vol:,} contracts ({vol_oi}x OI). "
-                            f"Entry: ₹{opt_ltp:,.1f} | SL: ₹{opt_sl:,.1f} | T1: ₹{opt_t1:,.1f} | T2: ₹{opt_t2:,.1f}.{friday_tag}{dte_pm_tag}{phys_tag}{rollover_tag}"
+                            f"Entry: ₹{opt_ltp:,.1f} | SL: ₹{opt_sl:,.1f} | T1: ₹{opt_t1:,.1f} (Scale 50% & SL to Cost) | T2: ₹{opt_t2:,.1f}.{drive_tag}{friday_tag}{dte_pm_tag}{phys_tag}{rollover_tag}"
                         )
 
                     alert = AutoAlert(
@@ -4004,6 +4097,8 @@ class AutoAlertEngine:
                             "open": getattr(c, "open", None),
                             "close": getattr(c, "close", None),
                             "is_friday_late": is_friday_late,
+                            "is_opening_drive": bool(is_bear_drive or is_bull_drive),
+                            "opening_drive_type": "BEARISH_OPEN_EQUALS_HIGH" if is_bear_drive else ("BULLISH_OPEN_EQUALS_LOW" if is_bull_drive else None),
                             "mtf_15m_trend": (
                                 "BEARISH_BREAKDOWN"
                                 if has_opening_breakdown
@@ -4050,7 +4145,12 @@ class AutoAlertEngine:
                             "risk_reward": rr_str,
                             "when_to_buy": when_to_buy_str,
                             "when_to_wait": when_to_wait_str,
-                            "profit_rule": f"Scale 35% at T0.5 (₹{opt_t0_5:,.1f}) & trail SL to Cost. Scale 40% at T1 (₹{opt_t1:,.1f}), let runner ride to T2 (₹{opt_t2:,.1f}).",
+                            "profit_rule": (
+                                f"🏆 3-TIER PROFIT-TAKING: "
+                                f"1) Scale 50% at T1 (₹{opt_t1:,.1f}) & move SL to Breakeven (0 Risk). "
+                                f"2) Scale 25% at T2 (₹{opt_t2:,.1f}). "
+                                f"3) Trail final 25% on 15m VWAP / 20-EMA to Moonshot (₹{opt_moonshot:,.1f})."
+                            ),
                             "option_plan": opt_plan,
                             "lot_size": lot_sz,
                             "spot_invalidation_anchor": f"₹{tp.invalidation_stop:,.1f}"
@@ -5523,6 +5623,55 @@ class AutoAlertEngine:
                 self._alerts = surviving
                 self._save()
                 logger.info(f"[AutoAlertEngine] Purged {purged} corrupted synthetic test alerts.")
+        return purged
+
+    def clear_test_alerts(self) -> int:
+        """
+        Purges all synthetic test, simulated, or mock alerts from buffer and persistent storage.
+        Guarantees zero contamination of live trading screens.
+        """
+        purged = 0
+        with self._lock:
+            surviving: list[AutoAlert] = []
+            for a in self._alerts:
+                aid = (getattr(a, "alert_id", "") or "").lower()
+                sym = (getattr(a, "symbol", "") or "").upper()
+                contract = (getattr(a, "contract_symbol", "") or "").upper()
+                headline = (getattr(a, "headline", "") or "").upper()
+                summary = (getattr(a, "summary", "") or "").upper()
+                env = (getattr(a, "environment", "") or "").upper()
+                is_test = getattr(a, "is_test", False) or getattr(a, "isTest", False)
+                is_live = getattr(a, "is_live", True)
+                metrics = getattr(a, "metrics", {}) or {}
+                if isinstance(metrics, dict) and metrics.get("is_test"):
+                    is_test = True
+
+                is_sim = (
+                    is_test
+                    or env in ("TEST", "SIMULATE", "DEMO")
+                    or not is_live
+                    or aid.startswith("test-")
+                    or aid.startswith("sim-")
+                    or "[TEST]" in headline
+                    or "🧪" in headline
+                    or "SIMULAT" in headline
+                    or "SIMULAT" in summary
+                    or "RELIANCE" in sym
+                    or "RELIANCE" in contract
+                    or "2900CE" in contract
+                    or "SHEDDING 14.5%" in summary
+                    or "COILING FOR MOMENTUM" in summary
+                )
+
+                if is_sim:
+                    purged += 1
+                else:
+                    surviving.append(a)
+
+            if purged > 0 or len(surviving) != len(self._alerts):
+                self._alerts = surviving
+                self._save()
+                logger.info(f"[AutoAlertEngine] Purged {purged} test/simulated alerts from engine memory and storage.")
         return purged
 
     def cleanup_archived_records(self, max_age_days: int = 1) -> int:

@@ -42,7 +42,17 @@ export function TelegramPreflightModal({ alert, onConfirm, onCancel, sending, se
               (alert?.symbol || '').toUpperCase().startsWith('MCX:') ||
               (alert?.symbol || '').toUpperCase().startsWith('CDS:')
             )
-            if (res.data.fno_index_chat_id && isFnoIndex) {
+            const isCrypto = Boolean(
+              (alert?.exchange || '').toUpperCase() === 'CRYPTO' ||
+              (alert?.exchange || '').toUpperCase() === 'BINANCE' ||
+              (alert?.exchange || '').toUpperCase() === 'DERIBIT' ||
+              ['CRYPTO', 'CRYPTO_MAJORS'].includes((alert?.segment || '').toUpperCase()) ||
+              ['BTC', 'ETH', 'SOL', 'BNB', 'DOGE', 'XRP'].includes(cleanSym) ||
+              (alert?.symbol || '').toUpperCase().startsWith('CRYPTO:')
+            )
+            if (res.data.crypto_chat_id && isCrypto) {
+              setDestMode('CRYPTO_GROUP')
+            } else if (res.data.fno_index_chat_id && isFnoIndex) {
               setDestMode('FNO_INDEX_GROUP')
             } else if (res.data.fno_chat_id && isFnoStock) {
               setDestMode('FNO_GROUP')
@@ -59,8 +69,16 @@ export function TelegramPreflightModal({ alert, onConfirm, onCancel, sending, se
       } catch (_) {}
     }
     fetchDest()
-    return () => { active = false }
-  }, [callRef, alert])
+
+    const handleKeyDown = (e) => {
+      if (e.key === 'Escape') onCancel()
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    return () => {
+      active = false
+      window.removeEventListener('keydown', handleKeyDown)
+    }
+  }, [callRef, alert, onCancel, customChannel])
 
   if (!alert) return null
 
@@ -197,6 +215,19 @@ export function TelegramPreflightModal({ alert, onConfirm, onCancel, sending, se
                   🪙 {destInfo.mcx_chat_name || 'Premium MCX Channel'}
                 </button>
               )}
+              {destInfo?.crypto_chat_id && (
+                <button
+                  type="button"
+                  onClick={() => setDestMode('CRYPTO_GROUP')}
+                  className={`text-[9px] px-2 py-0.5 rounded font-bold transition-all ${
+                    destMode === 'CRYPTO_GROUP'
+                      ? 'bg-purple-500/20 text-purple-300 border border-purple-500/40'
+                      : 'text-muted hover:text-text'
+                  }`}
+                >
+                  🪙 {destInfo.crypto_chat_name || 'Crypto Vortex'}
+                </button>
+              )}
               {destInfo?.equity_chat_id && (
                 <button
                   type="button"
@@ -255,6 +286,13 @@ export function TelegramPreflightModal({ alert, onConfirm, onCancel, sending, se
                 🪙 {destInfo?.mcx_chat_name || 'Premium_Alpha_Vortex_MCX_Channel'} ({destInfo?.mcx_chat_id})
               </span></span>
               <span className="text-amber-400 font-bold">● Active</span>
+            </div>
+          ) : destMode === 'CRYPTO_GROUP' ? (
+            <div className="text-[9px] text-zinc-400 font-mono flex items-center justify-between px-1">
+              <span>Target: <span className="text-purple-400 font-bold">
+                🪙 {destInfo?.crypto_chat_name || 'Crypto_Premium_Alpha_Vortex'} ({destInfo?.crypto_chat_id})
+              </span></span>
+              <span className="text-purple-400 font-bold">● Active</span>
             </div>
           ) : destMode === 'EQUITY_GROUP' ? (
             <div className="text-[9px] text-zinc-400 font-mono flex items-center justify-between px-1">
@@ -334,9 +372,11 @@ export function TelegramPreflightModal({ alert, onConfirm, onCancel, sending, se
                     ? destInfo?.fno_chat_id
                     : destMode === 'MCX_GROUP'
                       ? destInfo?.mcx_chat_id
-                      : destMode === 'EQUITY_GROUP'
-                        ? destInfo?.equity_chat_id
-                        : customChannel.trim()
+                      : destMode === 'CRYPTO_GROUP'
+                        ? destInfo?.crypto_chat_id
+                        : destMode === 'EQUITY_GROUP'
+                          ? destInfo?.equity_chat_id
+                          : customChannel.trim()
             )}
             disabled={sending || sentOk || (destMode === 'CHANNEL' && !customChannel.trim())}
             className="flex-1 btn btn-sm text-xs font-black bg-sky-500/15 hover:bg-sky-500/25 dark:bg-sky-500/20 dark:hover:bg-sky-500/30 text-sky-800 dark:text-sky-200 border border-sky-400/50 dark:border-sky-500/40 hover:border-sky-500/60 disabled:opacity-50 transition-all"

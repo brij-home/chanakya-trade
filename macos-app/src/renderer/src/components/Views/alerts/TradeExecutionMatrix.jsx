@@ -92,7 +92,10 @@ export function TradeExecutionMatrix({
     progressPct = Math.min(100, Math.max(0, Math.round((currentDist / totalSpan) * 100)))
   }
 
-  const mktBadge = mktSt === 'LIVE'
+  const isTestAlert = alert.environment === 'TEST' || alert.is_live === false || alert.alert_id?.startsWith?.('test-')
+  const mktBadge = isTestAlert
+    ? { cls: 'text-purple-400 bg-purple-500/15 border-purple-500/40', label: '🧪 TEST SIMULATION' }
+    : mktSt === 'LIVE'
     ? { cls: 'text-emerald-400 bg-emerald-500/15 border-emerald-500/40', label: '🟢 LIVE MARKET' }
     : mktSt === 'PRE_MARKET'
     ? { cls: 'text-amber-400 bg-amber-500/15 border-amber-500/40', label: '🌅 PRE-MARKET' }

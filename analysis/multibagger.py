@@ -108,6 +108,21 @@ class MultibaggerReport:
     mid_term_ticket: dict[str, Any] = field(default_factory=dict)
     long_term_ticket: dict[str, Any] = field(default_factory=dict)
 
+    # ── Institutional Edge Metrics (All 6 Pillars) ────────────────────
+    cfai_pct: float = 0.0
+    cfai_score: int = 50
+    float_exhaustion_detected: bool = False
+    order_book_to_bill: Optional[float] = None
+    order_book_to_mcap: Optional[float] = None
+    order_catalyst_verdict: Optional[str] = None
+    institutional_block_status: Optional[str] = None
+    institutional_support_anchor: Optional[float] = None
+    capex_inflection_tier: Optional[str] = None
+    capex_inflection_score: int = 50
+    rrg_convergence_tier: Optional[str] = None
+    insider_de_pledging_status: Optional[str] = None
+    insider_skin_score: int = 50
+
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
@@ -794,6 +809,36 @@ def scan_multibagger_opportunity(
     )
     lt_score, lt_verdict, lt_details = evaluate_long_term_horizon(clean_sym, df, ltp, forensic_safe)
 
+    # 5b. Institutional Edge Evaluation (All 6 Pillars)
+    from analysis.delivery_accumulation import compute_cfai
+    from analysis.order_book_catalyst import analyze_order_book_catalyst
+    from analysis.block_deal_analyzer import analyze_block_deal_absorption
+    from analysis.capex_inflection import analyze_capex_inflection
+    from analysis.rrg_orderbook_convergence import evaluate_rrg_orderbook_convergence
+    from analysis.insider_radar import analyze_insider_activity
+
+    cfai_rep = compute_cfai(clean_sym, df=df, ltp=ltp)
+    ob_rep = analyze_order_book_catalyst(clean_sym)
+    block_rep = analyze_block_deal_absorption(clean_sym, current_price=ltp)
+    capex_rep = analyze_capex_inflection(clean_sym)
+    rrg_rep = evaluate_rrg_orderbook_convergence(clean_sym)
+    insider_rep = analyze_insider_activity(clean_sym)
+
+    if cfai_rep.float_exhaustion_detected:
+        st_score = min(99, st_score + 10)
+        mt_score = min(99, mt_score + 5)
+
+    if ob_rep.book_to_bill_ratio >= 2.0:
+        mt_score = min(99, mt_score + 8)
+        lt_score = min(99, lt_score + 8)
+
+    if capex_rep.inflection_tier == "CAPEX_INFLECTION_TITAN":
+        mt_score = min(99, mt_score + 5)
+        lt_score = min(99, lt_score + 5)
+
+    if insider_rep.skin_in_the_game_score >= 85:
+        lt_score = min(99, lt_score + 5)
+
     # 6. Composite Multibagger Potential Score (0-100)
     composite_score = int(round((st_score * 0.25) + (mt_score * 0.50) + (lt_score * 0.25)))
     composite_score = max(0, min(100, composite_score))
@@ -819,6 +864,11 @@ def scan_multibagger_opportunity(
     mt_ticket = generate_mid_term_compounder_ticket(ltp, df, stage, is_vcp, pivot_price)
     lt_ticket = generate_generational_ticket(ltp, df, lt_details, forensic_safe)
 
+    # Anchor institutional support into execution tickets if available
+    if block_rep.status == "INSTITUTIONAL_ABSORPTION" and block_rep.support_anchor_price:
+        st_ticket["institutional_anchor"] = block_rep.support_anchor_price
+        mt_ticket["institutional_anchor"] = block_rep.support_anchor_price
+
     # Primary ticket matches the best-fit horizon
     if best_horizon == "SHORT_TERM":
         primary_ticket = st_ticket
@@ -839,6 +889,24 @@ def scan_multibagger_opportunity(
     else:
         catalyst = "Consolidating or basing. Watch for Stage 2 volume breakout confirmation."
         entry_strat = "Wait for Minervini criteria >= 6/8 and confirmed Stage 2 expansion before taking heavy positional allocation."
+
+    if cfai_rep.float_exhaustion_detected:
+        catalyst += f" 🐋 Float Exhaustion: {cfai_rep.cfai_pct:.1f}% free float absorbed in tight base."
+
+    if ob_rep.catalyst_verdict == "ORDER_BOOK_TITAN":
+        catalyst += f" 🏗️ Order-Book Titan: {ob_rep.book_to_bill_ratio:.1f}x Book-to-Bill (~{ob_rep.revenue_runway_years}Y revenue lock-in)."
+
+    if block_rep.status == "INSTITUTIONAL_ABSORPTION" and block_rep.support_anchor_price:
+        catalyst += f" 🛡️ Block Absorption: Defending institutional block VWAP ₹{block_rep.support_anchor_price:.2f}."
+
+    if capex_rep.inflection_tier == "CAPEX_INFLECTION_TITAN":
+        catalyst += f" 🏭 Capex Inflection: +{capex_rep.gross_block_growth_1y_pct:.1f}% Gross Block expansion with {capex_rep.capacity_utilization_pct:.0f}% capacity utilization."
+
+    if rrg_rep.convergence_tier == "APEX_CONVERGENCE":
+        catalyst += f" 🔄 Apex RRG Convergence: Leading sector tailwinds + {rrg_rep.book_to_bill_ratio:.1f}x backlog."
+
+    if insider_rep.skin_in_the_game_score >= 85:
+        catalyst += f" 💎 Promoter Skin: {insider_rep.de_pledging_status} with zero margin liquidation risk."
 
     return MultibaggerReport(
         symbol=clean_sym,
@@ -873,5 +941,18 @@ def scan_multibagger_opportunity(
         short_term_ticket=st_ticket,
         mid_term_ticket=mt_ticket,
         long_term_ticket=lt_ticket,
+        cfai_pct=cfai_rep.cfai_pct,
+        cfai_score=cfai_rep.accumulation_score,
+        float_exhaustion_detected=cfai_rep.float_exhaustion_detected,
+        order_book_to_bill=ob_rep.book_to_bill_ratio,
+        order_book_to_mcap=ob_rep.book_to_mcap_ratio,
+        order_catalyst_verdict=ob_rep.catalyst_verdict,
+        institutional_block_status=block_rep.status,
+        institutional_support_anchor=block_rep.support_anchor_price,
+        capex_inflection_tier=capex_rep.inflection_tier,
+        capex_inflection_score=capex_rep.conviction_score,
+        rrg_convergence_tier=rrg_rep.convergence_tier,
+        insider_de_pledging_status=insider_rep.de_pledging_status,
+        insider_skin_score=insider_rep.skin_in_the_game_score,
     )
 
