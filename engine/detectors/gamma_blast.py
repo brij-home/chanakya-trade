@@ -362,6 +362,7 @@ def detect_gamma_blast(
                     environment=alert_env,
                     liquidity_status=liq_audit["liquidity_status"],
                     bid_ask_spread_pct=liq_audit["bid_ask_spread_pct"],
+                    segment="FNO_INDEX" if underlying in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX") else "FNO_STOCK",
                     metrics={
                         "strike": strike,
                         "oi": oi,
@@ -383,8 +384,10 @@ def detect_gamma_blast(
                         "runner_strike_info": runner_strike_info,
                     },
                     actionable_plan={
-                        "action": "BUY",
+                        "action": "BUY CE",
+                        "contract": contract_sym,
                         "instrument": contract_sym,
+                        "instrument_type": "OPTION",
                         "strike": strike,
                         "option_type": "CE",
                         "expiry_date": exp_date,
@@ -702,8 +705,7 @@ def detect_gamma_blast(
                     market_status=mkt_status["status"],
                     is_live=is_authentic_opt,
                     environment=alert_env,
-                    liquidity_status=liq_audit["liquidity_status"],
-                    bid_ask_spread_pct=liq_audit["bid_ask_spread_pct"],
+                    segment="FNO_INDEX" if underlying in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX") else "FNO_STOCK",
                     metrics={
                         "strike": strike,
                         "oi": oi,
@@ -725,8 +727,10 @@ def detect_gamma_blast(
                         "runner_strike_info": runner_strike_info,
                     },
                     actionable_plan={
-                        "action": "BUY",
+                        "action": "BUY PE",
+                        "contract": contract_sym,
                         "instrument": contract_sym,
+                        "instrument_type": "OPTION",
                         "strike": strike,
                         "option_type": "PE",
                         "expiry_date": exp_date,

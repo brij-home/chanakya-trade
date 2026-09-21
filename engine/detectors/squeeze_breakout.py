@@ -14,9 +14,123 @@ import numpy as np
 import pandas as pd
 
 from engine.alert_model import AutoAlert
+from engine.option_resolver import resolve_option_contract, is_index_symbol
 
 logger = logging.getLogger(__name__)
 IST = ZoneInfo("Asia/Kolkata")
+
+
+def _format_squeeze_alert(
+    symbol: str,
+    exchange: str,
+    stage: str,
+    direction: str,
+    ltp: float,
+    sl: float,
+    target: float,
+    target_2: float,
+    rr_str: str,
+    conf: int,
+    headline: str,
+    summary: str,
+    metrics: dict[str, Any],
+    tp_dict: dict[str, Any],
+    now_iso: str,
+    action: str,
+    entry_rg: str,
+    trigger_lvl: float,
+) -> AutoAlert:
+    clean_sym = symbol.upper().replace("NSE:", "").replace("BSE:", "").strip()
+    is_idx = is_index_symbol(clean_sym)
+    opt_plan = (
+        resolve_option_contract(
+            symbol=clean_sym,
+            spot=ltp,
+            direction=direction,
+            underlying_sl=sl,
+            underlying_target=target,
+        )
+        if is_idx
+        else None
+    )
+
+    if opt_plan:
+        icon = "🎯" if stage == "EARLY_WARNING" else "🚀"
+        status_txt = "COILING" if stage == "EARLY_WARNING" else "IGNITED"
+        opt_headline = f"{icon} SQUEEZE {status_txt}: {opt_plan.contract_symbol} @ ₹{opt_plan.entry_premium:,.1f} (Spot ₹{ltp:,.1f})"
+        act_plan = {
+            "action": f"BUY {opt_plan.option_type}",
+            "contract": opt_plan.contract_symbol,
+            "instrument": opt_plan.contract_symbol,
+            "instrument_type": "OPTION",
+            "recommended_entry": f"₹{opt_plan.entry_premium:,.2f}",
+            "stop_loss": f"₹{opt_plan.sl_premium:,.1f}",
+            "target": f"₹{opt_plan.t1_premium:,.1f}",
+            "target_1": f"₹{opt_plan.t1_premium:,.1f}",
+            "target_2": f"₹{opt_plan.t2_premium:,.1f}",
+            "risk_reward": rr_str,
+            "underlying_spot": f"₹{ltp:,.1f}",
+            "underlying_sl": f"₹{sl:,.1f}",
+            "underlying_target": f"₹{target:,.1f}",
+            "option_type": opt_plan.option_type,
+            "strike": opt_plan.strike,
+            "option_plan": opt_plan.as_dict(),
+            "trade_plan": tp_dict,
+        }
+        return AutoAlert(
+            alert_id=f"aa-sqz-{stage.lower()[:5]}-{clean_sym.lower()}-{uuid.uuid4().hex[:6]}",
+            alert_type="SQUEEZE_BREAKOUT" if direction == "BULLISH" else "SQUEEZE_BREAKDOWN",
+            stage=stage,
+            symbol=clean_sym,
+            exchange="NFO",
+            direction=direction,
+            headline=opt_headline,
+            summary=summary,
+            ltp=opt_plan.entry_premium,
+            trigger_level=opt_plan.entry_premium,
+            target_level=opt_plan.t1_premium,
+            stop_loss=opt_plan.sl_premium,
+            strike=opt_plan.strike,
+            option_type=opt_plan.option_type,
+            contract_symbol=opt_plan.contract_symbol,
+            option_premium=opt_plan.entry_premium,
+            underlying_spot=ltp,
+            lot_size=opt_plan.lot_size,
+            segment="FNO_INDEX",
+            confidence=conf,
+            created_at=now_iso,
+            metrics=metrics,
+            actionable_plan=act_plan,
+        )
+
+    # Standard Cash Equity Alert
+    return AutoAlert(
+        alert_id=f"aa-sqz-{stage.lower()[:5]}-{symbol.lower()}-{uuid.uuid4().hex[:6]}",
+        alert_type="SQUEEZE_BREAKOUT" if direction == "BULLISH" else "SQUEEZE_BREAKDOWN",
+        stage=stage,
+        symbol=symbol,
+        exchange=exchange,
+        direction=direction,
+        headline=headline,
+        summary=summary,
+        ltp=ltp,
+        trigger_level=trigger_lvl,
+        target_level=target,
+        stop_loss=sl,
+        metrics=metrics,
+        actionable_plan={
+            "action": action,
+            "entry_range": entry_rg,
+            "breakout_trigger": f"₹{trigger_lvl:.1f}",
+            "target": f"₹{target:.1f}",
+            "target_2": f"₹{target_2:.1f}",
+            "stop_loss": f"₹{sl:.1f}",
+            "risk_reward": rr_str,
+            "trade_plan": tp_dict,
+        },
+        confidence=conf,
+        created_at=now_iso,
+    )
 
 
 def detect_squeeze_breakout(
@@ -27,6 +141,7 @@ def detect_squeeze_breakout(
     timeframe: str = "day",
     vwap: Optional[float] = None,
 ) -> Optional[AutoAlert]:
+
     """
     Detects Volatility Squeeze coiling within tight range of resistance / Pivot High.
     Supports multi-timeframe (15m, 5m, Daily) and VWAP pinch detection.
@@ -133,10 +248,12 @@ def detect_squeeze_breakout(
                 target = tp.target_1
                 target_2 = tp.target_2
                 sl = tp.invalidation_stop
+                if (ltp - sl) < 1.25 * atr20:
+                    sl = round(ltp - 1.25 * atr20, 1)
                 rr_str = f"1:{tp.rr_t1}"
                 tp_dict = tp.as_dict()
             else:
-                risk_pts = max(1.0, round(max(0.8 * atr20, (ltp - sma20) if ltp > sma20 else (ltp * 0.015)), 1))
+                risk_pts = max(1.0, round(max(1.35 * atr20, (ltp - sma20) if ltp > sma20 else (ltp * 0.018)), 1))
                 sl = round(ltp - risk_pts, 1)
                 target = round(max(pivot_high + 1.2 * risk_pts, ltp + 2.0 * risk_pts), 1)
                 target_2 = round(target + 1.5 * risk_pts, 1)
@@ -165,44 +282,42 @@ def detect_squeeze_breakout(
             entry_max = round(min(target - 0.5, pivot_high * 1.002), 1)
             entry_rg = f"₹{entry_min:,.1f} – ₹{entry_max:,.1f}"
 
-            return AutoAlert(
-                alert_id=f"aa-sqz-early-{symbol}-{uuid.uuid4().hex[:6]}",
-                alert_type="SQUEEZE_BREAKOUT",
-                stage="EARLY_WARNING",
+            headline = f"🎯 SQUEEZE COILING: {symbol} at ₹{ltp:,.1f} (Pivot ₹{pivot_high:,.1f})"
+            summary = (
+                f"Bollinger Bands compressed inside Keltner Channels (Squeeze ON). "
+                f"Price is only {dist_to_pivot_pct:.1f}% below pivot resistance. "
+                f"RVOL {rvol}x. Imminent explosive breakout setup!"
+            )
+            metrics = {
+                "is_squeeze_on": True,
+                "dist_to_pivot_pct": round(dist_to_pivot_pct, 2),
+                "pivot_high": pivot_high,
+                "rvol": rvol,
+                "sma20": round(sma20, 1),
+                "atr20": round(atr20, 1),
+            }
+
+            return _format_squeeze_alert(
                 symbol=symbol,
                 exchange=exchange,
+                stage="EARLY_WARNING",
                 direction="BULLISH",
-                headline=f"🎯 SQUEEZE COILING: {symbol} at ₹{ltp:,.1f} (Pivot ₹{pivot_high:,.1f})",
-                summary=(
-                    f"Bollinger Bands compressed inside Keltner Channels (Squeeze ON). "
-                    f"Price is only {dist_to_pivot_pct:.1f}% below pivot resistance. "
-                    f"RVOL {rvol}x. Imminent explosive breakout setup!"
-                ),
                 ltp=ltp,
-                trigger_level=pivot_high,
-                target_level=target,
-                stop_loss=sl,
-                metrics={
-                    "is_squeeze_on": True,
-                    "dist_to_pivot_pct": round(dist_to_pivot_pct, 2),
-                    "pivot_high": pivot_high,
-                    "rvol": rvol,
-                    "sma20": round(sma20, 1),
-                    "atr20": round(atr20, 1),
-                },
-                actionable_plan={
-                    "action": "BUY_ON_PIVOT",
-                    "entry_range": entry_rg,
-                    "breakout_trigger": f"₹{pivot_high:.1f}",
-                    "target": f"₹{target:.1f}",
-                    "target_2": f"₹{target_2:.1f}",
-                    "stop_loss": f"₹{sl:.1f}",
-                    "risk_reward": rr_str,
-                    "trade_plan": tp_dict,
-                },
-                confidence=confidence_val,
-                created_at=now_iso,
+                sl=sl,
+                target=target,
+                target_2=target_2,
+                rr_str=rr_str,
+                conf=confidence_val,
+                headline=headline,
+                summary=summary,
+                metrics=metrics,
+                tp_dict=tp_dict,
+                now_iso=now_iso,
+                action="BUY_ON_PIVOT",
+                entry_rg=entry_rg,
+                trigger_lvl=pivot_high,
             )
+
 
         # ── EARLY WARNING (BEARISH): Coiled in squeeze, close above pivot low support ───
         if (
@@ -229,10 +344,12 @@ def detect_squeeze_breakout(
                 target = tp.target_1
                 target_2 = tp.target_2
                 sl = tp.invalidation_stop
+                if (sl - ltp) < 1.25 * atr20:
+                    sl = round(ltp + 1.25 * atr20, 1)
                 rr_str = f"1:{tp.rr_t1}"
                 tp_dict = tp.as_dict()
             else:
-                risk_pts = max(1.0, round(max(0.8 * atr20, (sma20 - ltp) if sma20 > ltp else (ltp * 0.015)), 1))
+                risk_pts = max(1.0, round(max(1.35 * atr20, (sma20 - ltp) if sma20 > ltp else (ltp * 0.018)), 1))
                 sl = round(ltp + risk_pts, 1)
                 target = round(min(pivot_low - 1.2 * risk_pts, ltp - 2.0 * risk_pts), 1)
                 target_2 = round(target - 1.5 * risk_pts, 1)
@@ -261,44 +378,42 @@ def detect_squeeze_breakout(
             entry_min = round(max(target + 0.5, pivot_low * 0.998), 1)
             entry_rg = f"₹{entry_min:,.1f} – ₹{entry_max:,.1f}"
 
-            return AutoAlert(
-                alert_id=f"aa-sqz-bear-early-{symbol}-{uuid.uuid4().hex[:6]}",
-                alert_type="SQUEEZE_BREAKDOWN",
-                stage="EARLY_WARNING",
+            headline = f"⚠️ SQUEEZE BREAKDOWN COILING: {symbol} at ₹{ltp:,.1f} (Support ₹{pivot_low:,.1f})"
+            summary = (
+                f"Bollinger Bands compressed inside Keltner Channels (Squeeze ON). "
+                f"Price is only {dist_to_low_pct:.1f}% above 20D low support. "
+                f"RVOL {rvol}x. Imminent downside breakdown risk!"
+            )
+            metrics = {
+                "is_squeeze_on": True,
+                "dist_to_low_pct": round(dist_to_low_pct, 2),
+                "pivot_low": pivot_low,
+                "rvol": rvol,
+                "sma20": round(sma20, 1),
+                "atr20": round(atr20, 1),
+            }
+
+            return _format_squeeze_alert(
                 symbol=symbol,
                 exchange=exchange,
+                stage="EARLY_WARNING",
                 direction="BEARISH",
-                headline=f"⚠️ SQUEEZE BREAKDOWN COILING: {symbol} at ₹{ltp:,.1f} (Support ₹{pivot_low:,.1f})",
-                summary=(
-                    f"Bollinger Bands compressed inside Keltner Channels (Squeeze ON). "
-                    f"Price is only {dist_to_low_pct:.1f}% above 20D low support. "
-                    f"RVOL {rvol}x. Imminent downside breakdown risk!"
-                ),
                 ltp=ltp,
-                trigger_level=pivot_low,
-                target_level=target,
-                stop_loss=sl,
-                metrics={
-                    "is_squeeze_on": True,
-                    "dist_to_low_pct": round(dist_to_low_pct, 2),
-                    "pivot_low": pivot_low,
-                    "rvol": rvol,
-                    "sma20": round(sma20, 1),
-                    "atr20": round(atr20, 1),
-                },
-                actionable_plan={
-                    "action": "SELL_ON_BREAKDOWN",
-                    "entry_range": entry_rg,
-                    "breakout_trigger": f"₹{pivot_low:.1f}",
-                    "target": f"₹{target:.1f}",
-                    "target_2": f"₹{target_2:.1f}",
-                    "stop_loss": f"₹{sl:.1f}",
-                    "risk_reward": rr_str,
-                    "trade_plan": tp_dict,
-                },
-                confidence=confidence_bear_ew,
-                created_at=now_iso,
+                sl=sl,
+                target=target,
+                target_2=target_2,
+                rr_str=rr_str,
+                conf=confidence_bear_ew,
+                headline=headline,
+                summary=summary,
+                metrics=metrics,
+                tp_dict=tp_dict,
+                now_iso=now_iso,
+                action="SELL_ON_BREAKDOWN",
+                entry_rg=entry_rg,
+                trigger_lvl=pivot_low,
             )
+
 
         # ── IGNITED (BULLISH): Squeeze Fired + Fresh Breakout above pivot ───
         if (
@@ -328,10 +443,12 @@ def detect_squeeze_breakout(
                 target = tp.target_1
                 target_2 = tp.target_2
                 sl = tp.invalidation_stop
+                if (ltp - sl) < 1.25 * atr20:
+                    sl = round(ltp - 1.25 * atr20, 1)
                 rr_str = f"1:{tp.rr_t1}"
                 tp_dict = tp.as_dict()
             else:
-                risk_pts = max(1.0, round(max(0.8 * atr20, ltp - pivot_high * 0.985), 1))
+                risk_pts = max(1.0, round(max(1.35 * atr20, ltp - pivot_high * 0.985), 1))
                 sl = round(ltp - risk_pts, 1)
                 target = round(ltp + 2.5 * risk_pts, 1)
                 target_2 = round(ltp + 4.0 * risk_pts, 1)
@@ -359,40 +476,38 @@ def detect_squeeze_breakout(
             entry_max = round(min(target - 0.5, ltp * 1.008), 1)
             entry_rg = f"₹{entry_min:,.1f} – ₹{entry_max:,.1f}"
 
-            return AutoAlert(
-                alert_id=f"aa-sqz-ignited-{symbol}-{uuid.uuid4().hex[:6]}",
-                alert_type="SQUEEZE_BREAKOUT",
-                stage="IGNITED",
+            headline = f"🚀 SQUEEZE BREAKOUT IGNITED: {symbol} broke ₹{pivot_high:,.1f}"
+            summary = (
+                f"TTM Squeeze fired with heavy institutional volume (RVOL {rvol}x). "
+                f"Price clearing 20-day high ₹{pivot_high:,.1f} (+{round(((ltp - pivot_high) / pivot_high) * 100, 1)}%). "
+                f"Primary breakout expansion phase active!"
+            )
+            metrics = {
+                "is_squeeze_fired": True,
+                "pivot_high": pivot_high,
+                "rvol": rvol,
+                "breakout_pct": round(((ltp - pivot_high) / pivot_high) * 100, 2),
+            }
+
+            return _format_squeeze_alert(
                 symbol=symbol,
                 exchange=exchange,
+                stage="IGNITED",
                 direction="BULLISH",
-                headline=f"🚀 SQUEEZE BREAKOUT IGNITED: {symbol} broke ₹{pivot_high:,.1f}",
-                summary=(
-                    f"TTM Squeeze fired with heavy institutional volume (RVOL {rvol}x). "
-                    f"Price clearing 20-day high ₹{pivot_high:,.1f} (+{round(((ltp - pivot_high) / pivot_high) * 100, 1)}%). "
-                    f"Primary breakout expansion phase active!"
-                ),
                 ltp=ltp,
-                trigger_level=pivot_high,
-                target_level=target,
-                stop_loss=sl,
-                metrics={
-                    "is_squeeze_fired": True,
-                    "pivot_high": pivot_high,
-                    "rvol": rvol,
-                    "breakout_pct": round(((ltp - pivot_high) / pivot_high) * 100, 2),
-                },
-                actionable_plan={
-                    "action": "BUY_EXPANSION",
-                    "entry_range": entry_rg,
-                    "target": f"₹{target:.1f}",
-                    "target_2": f"₹{target_2:.1f}",
-                    "stop_loss": f"₹{sl:.1f}",
-                    "risk_reward": rr_str,
-                    "trade_plan": tp_dict,
-                },
-                confidence=confidence_ignited,
-                created_at=now_iso,
+                sl=sl,
+                target=target,
+                target_2=target_2,
+                rr_str=rr_str,
+                conf=confidence_ignited,
+                headline=headline,
+                summary=summary,
+                metrics=metrics,
+                tp_dict=tp_dict,
+                now_iso=now_iso,
+                action="BUY_EXPANSION",
+                entry_rg=entry_rg,
+                trigger_lvl=pivot_high,
             )
 
         # ── IGNITED (BEARISH): Squeeze Fired + Fresh Breakdown below pivot low ───
@@ -423,10 +538,12 @@ def detect_squeeze_breakout(
                 target = tp.target_1
                 target_2 = tp.target_2
                 sl = tp.invalidation_stop
+                if (sl - ltp) < 1.25 * atr20:
+                    sl = round(ltp + 1.25 * atr20, 1)
                 rr_str = f"1:{tp.rr_t1}"
                 tp_dict = tp.as_dict()
             else:
-                risk_pts = max(1.0, round(max(0.8 * atr20, pivot_low * 1.015 - ltp), 1))
+                risk_pts = max(1.0, round(max(1.35 * atr20, pivot_low * 1.015 - ltp), 1))
                 sl = round(ltp + risk_pts, 1)
                 target = round(ltp - 2.5 * risk_pts, 1)
                 target_2 = round(ltp - 4.0 * risk_pts, 1)
@@ -454,41 +571,40 @@ def detect_squeeze_breakout(
             entry_min = round(max(target + 0.5, ltp * 0.992), 1)
             entry_rg = f"₹{entry_min:,.1f} – ₹{entry_max:,.1f}"
 
-            return AutoAlert(
-                alert_id=f"aa-sqz-bear-ignited-{symbol}-{uuid.uuid4().hex[:6]}",
-                alert_type="SQUEEZE_BREAKDOWN",
-                stage="IGNITED",
+            headline = f"⚡ SQUEEZE BREAKDOWN IGNITED: {symbol} broke below ₹{pivot_low:,.1f}"
+            summary = (
+                f"TTM Squeeze breakdown fired with institutional volume (RVOL {rvol}x). "
+                f"Price cracked 20-day low ₹{pivot_low:,.1f} (-{round(((pivot_low - ltp) / pivot_low) * 100, 1)}%). "
+                f"Downside expansion phase active!"
+            )
+            metrics = {
+                "is_squeeze_fired": True,
+                "pivot_low": pivot_low,
+                "rvol": rvol,
+                "breakdown_pct": round(((pivot_low - ltp) / pivot_low) * 100, 2),
+            }
+
+            return _format_squeeze_alert(
                 symbol=symbol,
                 exchange=exchange,
+                stage="IGNITED",
                 direction="BEARISH",
-                headline=f"⚡ SQUEEZE BREAKDOWN IGNITED: {symbol} broke below ₹{pivot_low:,.1f}",
-                summary=(
-                    f"TTM Squeeze breakdown fired with institutional volume (RVOL {rvol}x). "
-                    f"Price cracked 20-day low ₹{pivot_low:,.1f} (-{round(((pivot_low - ltp) / pivot_low) * 100, 1)}%). "
-                    f"Downside expansion phase active!"
-                ),
                 ltp=ltp,
-                trigger_level=pivot_low,
-                target_level=target,
-                stop_loss=sl,
-                metrics={
-                    "is_squeeze_fired": True,
-                    "pivot_low": pivot_low,
-                    "rvol": rvol,
-                    "breakdown_pct": round(((pivot_low - ltp) / pivot_low) * 100, 2),
-                },
-                actionable_plan={
-                    "action": "SELL_EXPANSION",
-                    "entry_range": entry_rg,
-                    "target": f"₹{target:.1f}",
-                    "target_2": f"₹{target_2:.1f}",
-                    "stop_loss": f"₹{sl:.1f}",
-                    "risk_reward": rr_str,
-                    "trade_plan": tp_dict,
-                },
-                confidence=confidence_bear_ig,
-                created_at=now_iso,
+                sl=sl,
+                target=target,
+                target_2=target_2,
+                rr_str=rr_str,
+                conf=confidence_bear_ig,
+                headline=headline,
+                summary=summary,
+                metrics=metrics,
+                tp_dict=tp_dict,
+                now_iso=now_iso,
+                action="SELL_EXPANSION",
+                entry_rg=entry_rg,
+                trigger_lvl=pivot_low,
             )
+
 
     except Exception as e:
         logger.debug(f"[SqueezeBreakout] Error evaluating {symbol}: {e}")

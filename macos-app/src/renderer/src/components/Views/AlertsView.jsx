@@ -911,6 +911,7 @@ const AutoAlertCard = memo(function AutoAlertCard({
 
       {/* ── Institutional 5-Tier Execution Runway (Entry, SL, T1, T2, T3) ── */}
       <TradeExecutionMatrix
+        alert={alert}
         levels={executionLevels}
         isBull={isBull}
         isDerivative={isDerivative}
@@ -926,6 +927,40 @@ const AutoAlertCard = memo(function AutoAlertCard({
       {/* ── Progressive Disclosure Deep Dive Drawer (Plan details, Hedge, Matched chips, Full metrics) ── */}
       {showDetails && (
         <div className="space-y-2 pt-2 border-t border-border/30 animate-slide-up-fade">
+          {/* Runner Alternative (High Beta) */}
+          {(alert.actionable_plan?.runner_strike || alert.actionable_plan?.runner_alternative) && !isInvalidated && (
+            <div className="flex items-center justify-between p-2.5 rounded-xl border border-purple-500/30 bg-purple-500/10 text-xs flex-wrap gap-1.5">
+              <div className="flex items-center gap-1.5 font-bold text-purple-300">
+                <span className="text-sm">🚀</span>
+                <span className="uppercase tracking-wider text-[10px]">
+                  Runner Alternative (High Beta):
+                </span>
+                <code className="font-mono text-purple-200 bg-purple-500/25 px-1.5 py-0.5 rounded text-[11px] border border-purple-400/40">
+                  {alert.actionable_plan.runner_strike?.symbol || alert.actionable_plan.runner_strike?.contract_symbol || alert.actionable_plan.runner_alternative}
+                </code>
+                {alert.actionable_plan.runner_strike?.ltp && (
+                  <span className="text-zinc-300 font-mono text-[10px]">
+                    (Opt CMP: ₹{alert.actionable_plan.runner_strike.ltp})
+                  </span>
+                )}
+              </div>
+              {onOpenOrderTicket && alert.actionable_plan.runner_strike?.symbol && (
+                <button
+                  type="button"
+                  onClick={() => onOpenOrderTicket({
+                    symbol: alert.actionable_plan.runner_strike.symbol,
+                    exchange: alert.exchange || 'NFO',
+                    price: alert.actionable_plan.runner_strike.ltp || 0,
+                  })}
+                  className="btn btn-xs text-[9px] px-2 py-0.5 font-black bg-purple-500/25 hover:bg-purple-500/35 text-purple-100 border border-purple-400/50 rounded transition-all"
+                  title="1-Click Trade: Open pre-populated Order Ticket for Runner Strike"
+                >
+                  ⚡ Trade Runner
+                </button>
+              )}
+            </div>
+          )}
+
           {/* Hedging & Defined-Risk Structure Advice */}
           {(alert.actionable_plan?.structure_advice || alert.actionable_plan?.trade_plan?.structure_advice) && !isInvalidated && (
             <div className="p-2.5 rounded-xl border border-indigo-500/30 bg-indigo-500/10 text-xs space-y-1">

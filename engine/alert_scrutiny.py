@@ -1330,7 +1330,7 @@ class AlertScrutinyAuditor:
             return str(resp or "").strip()
 
         raw_text = None
-        pool = ThreadPoolExecutor(max_workers=1)
+        pool = ThreadPoolExecutor(max_workers=3)
         try:
             future = pool.submit(_call)
             raw_text = future.result(timeout=timeout)

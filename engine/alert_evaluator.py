@@ -30,6 +30,8 @@ def evaluate_alert_invalidation(
     if getattr(alert, "is_invalidated", False) or getattr(alert, "stage", "") == "INVALIDATED":
         return None
 
+    exch = (getattr(alert, "exchange", "NSE") or "NSE").upper()
+
     # 0. Session Cutoff & Time-Stop Horizon Invalidation
     is_test_runner = (
         (getattr(alert, "environment", "LIVE") == "TEST")
@@ -54,11 +56,16 @@ def evaluate_alert_invalidation(
         now_ist = datetime.now(IST)
         th = (getattr(alert, "time_horizon", "INTRADAY") or "INTRADAY").upper()
 
-        # 0a. Hard Intraday Cutoff (15:15 IST NSE/BSE/NFO, 23:15 IST MCX)
+        # 0a. Hard Intraday Cutoff (15:15 IST NSE/BSE/NFO, 23:15 IST MCX; Crypto is 24x7 rolling)
         if th == "INTRADAY" and not getattr(alert, "expiry_date", None):
             exch = (getattr(alert, "exchange", "NSE") or "NSE").upper()
             cutoff_reached = False
-            if created_dt.date() < now_ist.date():
+            if exch in ("CRYPTO", "BINANCE", "DERIBIT"):
+                # Crypto is 24x7; intraday alerts have a 24-hour rolling expiry window
+                elapsed_sec = (now_ist - created_dt).total_seconds()
+                if elapsed_sec >= 86400:
+                    return "24x7 Crypto session expired (24h rolling limit reached). Trade closed."
+            elif created_dt.date() < now_ist.date():
                 cutoff_reached = True
             elif exch == "MCX":
                 cutoff_reached = now_ist.hour > 23 or (now_ist.hour == 23 and now_ist.minute >= 15)
@@ -174,20 +181,29 @@ def evaluate_alert_invalidation(
                         f"(breached stop-loss ₹{alert.stop_loss:.1f}). {opt_desc} gamma thesis invalidated."
                     )
         else:
-            # Non-option instruments (Equities / Futures)
-            # Dynamic Volatility Noise Margin (0.15x ATR or 0.25% floor)
-            # Prevents premature panic invalidations on single-tick 10-paise / sub-cent micro-chop.
-            atr_val = 0.0
-            if alert.metrics and isinstance(alert.metrics, dict):
-                atr_val = float(alert.metrics.get("atr_14d") or alert.metrics.get("atr") or 0.0)
-            if atr_val <= 0 and alert.stop_loss > 0:
-                atr_val = alert.stop_loss * 0.012
+            # Non-option instruments (Equities / Futures / Crypto)
+            curr_sym = "$" if exch in ("CRYPTO", "BINANCE", "DERIBIT") else "₹"
+            if exch in ("CRYPTO", "BINANCE", "DERIBIT"):
+                # Tight, institutional noise margin for crypto assets
+                vol_noise_margin = (
+                    max(0.01, min(1.0, alert.stop_loss * 0.0001))
+                    if alert.stop_loss > 0
+                    else 0.01
+                )
+            else:
+                # Dynamic Volatility Noise Margin (0.15x ATR or 0.25% floor)
+                # Prevents premature panic invalidations on single-tick 10-paise / sub-cent micro-chop.
+                atr_val = 0.0
+                if alert.metrics and isinstance(alert.metrics, dict):
+                    atr_val = float(alert.metrics.get("atr_14d") or alert.metrics.get("atr") or 0.0)
+                if atr_val <= 0 and alert.stop_loss > 0:
+                    atr_val = alert.stop_loss * 0.012
 
-            vol_noise_margin = (
-                max(0.05, min(alert.stop_loss * 0.003, 0.15 * atr_val))
-                if alert.stop_loss > 0
-                else 0.10
-            )
+                vol_noise_margin = (
+                    max(0.05, min(alert.stop_loss * 0.003, 0.15 * atr_val))
+                    if alert.stop_loss > 0
+                    else 0.10
+                )
 
             is_live_alert = getattr(alert, "is_live", True) and getattr(alert, "environment", "") != "TEST"
             if alert.direction == "BEARISH":
@@ -196,36 +212,36 @@ def evaluate_alert_invalidation(
                 if alert.stop_loss > ref_entry:
                     if current_ltp > (alert.stop_loss + vol_noise_margin):
                         return (
-                            f"Price surged to ₹{current_ltp:,.1f} "
-                            f"(breached stop-loss ₹{alert.stop_loss:,.1f}). Bearish thesis invalidated."
+                            f"Price surged to {curr_sym}{current_ltp:,.1f} "
+                            f"(breached stop-loss {curr_sym}{alert.stop_loss:,.1f}). Bearish thesis invalidated."
                         )
                     if session_high and session_high > (alert.stop_loss + vol_noise_margin) and is_live_alert:
                         return (
-                            f"Session high surged to ₹{session_high:,.1f} "
-                            f"(breached stop-loss ceiling ₹{alert.stop_loss:,.1f}). Bearish thesis invalidated."
+                            f"Session high surged to {curr_sym}{session_high:,.1f} "
+                            f"(breached stop-loss ceiling {curr_sym}{alert.stop_loss:,.1f}). Bearish thesis invalidated."
                         )
                 else:
                     if current_ltp < (alert.stop_loss - vol_noise_margin):
                         return (
-                            f"Price dropped to ₹{current_ltp:,.1f} "
-                            f"(breached stop-loss ₹{alert.stop_loss:,.1f}). Bearish thesis invalidated."
+                            f"Price dropped to {curr_sym}{current_ltp:,.1f} "
+                            f"(breached stop-loss {curr_sym}{alert.stop_loss:,.1f}). Bearish thesis invalidated."
                         )
                     if session_low and session_low < (alert.stop_loss - vol_noise_margin) and is_live_alert:
                         return (
-                            f"Session low dropped to ₹{session_low:,.1f} "
-                            f"(breached stop-loss floor ₹{alert.stop_loss:,.1f}). Bearish thesis invalidated."
+                            f"Session low dropped to {curr_sym}{session_low:,.1f} "
+                            f"(breached stop-loss floor {curr_sym}{alert.stop_loss:,.1f}). Bearish thesis invalidated."
                         )
             else:
                 # Bullish / Neutral long positions
                 if current_ltp < (alert.stop_loss - vol_noise_margin):
                     return (
-                        f"Price dropped to ₹{current_ltp:,.1f} "
-                        f"(breached stop-loss ₹{alert.stop_loss:,.1f}). Bullish thesis invalidated."
+                        f"Price dropped to {curr_sym}{current_ltp:,.1f} "
+                        f"(breached stop-loss {curr_sym}{alert.stop_loss:,.1f}). Bullish thesis invalidated."
                     )
                 if session_low and session_low < (alert.stop_loss - vol_noise_margin) and is_live_alert:
                     return (
-                        f"Session low plunged to ₹{session_low:,.1f} "
-                        f"(breached stop-loss floor ₹{alert.stop_loss:,.1f}). Bullish thesis invalidated."
+                        f"Session low plunged to {curr_sym}{session_low:,.1f} "
+                        f"(breached stop-loss floor {curr_sym}{alert.stop_loss:,.1f}). Bullish thesis invalidated."
                     )
 
     # 2. Detector-Specific Structural Breakdown
@@ -308,6 +324,30 @@ class TargetTrailingEvaluation:
     is_superperforming: bool = False
     strike_roll_recommendation: Optional[dict[str, Any]] = None
     should_roll_strike: bool = False
+
+    @property
+    def is_t1_hit(self) -> bool:
+        return self.new_milestone in ("T1_ACHIEVED", "TARGET_ACHIEVED", "T0_5_ACHIEVED")
+
+    @property
+    def is_target_hit(self) -> bool:
+        return self.new_milestone in ("TARGET_ACHIEVED", "T2_ACHIEVED", "FINAL_ACHIEVED")
+
+    @property
+    def trailing_ratcheted(self) -> bool:
+        return self.new_milestone == "TRAILING_UPDATE" or self.should_trail
+
+    @property
+    def new_trailing_stop(self) -> float:
+        return self.recommended_stop
+
+    @property
+    def action_decision(self) -> str:
+        return self.trailing_decision
+
+    @property
+    def rationale(self) -> str:
+        return self.trailing_rationale
 
 
 def calculate_strike_roll_recommendation(

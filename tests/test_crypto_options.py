@@ -149,7 +149,53 @@ def test_calculate_max_pain():
     assert max_pain == 80000.0
 
 
-# ── 3. Deribit Options Summary Tests ───────────────────────────
+# ── 3. Deribit Options Summary & GEX Tests ─────────────────────
+
+
+def test_calculate_deribit_gex():
+    """Verify Dealer Gamma Exposure (GEX) calculation on synthetic options chain."""
+    from market.crypto_options import calculate_deribit_gex
+
+    contracts = [
+        DeribitOptionContract(
+            instrument_name="BTC-TEST-80000-C",
+            currency="BTC",
+            expiry="26DEC26",
+            strike=80000.0,
+            option_type="CE",
+            mark_price_crypto=0.05,
+            mark_price_usd=4000.0,
+            underlying_price=80000.0,
+            iv=50.0,
+            open_interest=500.0,
+            volume_24h=100.0,
+        ),
+        DeribitOptionContract(
+            instrument_name="BTC-TEST-80000-P",
+            currency="BTC",
+            expiry="26DEC26",
+            strike=80000.0,
+            option_type="PE",
+            mark_price_crypto=0.05,
+            mark_price_usd=4000.0,
+            underlying_price=80000.0,
+            iv=50.0,
+            open_interest=200.0,
+            volume_24h=50.0,
+        ),
+    ]
+
+    gex = calculate_deribit_gex(contracts, underlying_spot=80000.0)
+    assert "net_gex_usd" in gex
+    assert "call_gex_usd" in gex
+    assert "put_gex_usd" in gex
+    assert "gamma_regime" in gex
+    assert "gex_flip_strike" in gex
+    assert gex["call_gex_usd"] > 0
+    assert gex["put_gex_usd"] > 0
+    # Since call OI (500) > put OI (200) at ATM strike, net GEX should be positive
+    assert gex["net_gex_usd"] > 0
+    assert gex["gamma_regime"] == "POSITIVE_GAMMA_PIN"
 
 
 def test_get_crypto_options_summary():
@@ -162,6 +208,9 @@ def test_get_crypto_options_summary():
         assert summary["max_pain"] > 0
         assert "pcr_open_interest" in summary
         assert "atm_implied_volatility_pct" in summary
+        assert "net_gex_usd" in summary
+        assert "gamma_regime" in summary
+        assert summary["gamma_regime"] in ("POSITIVE_GAMMA_PIN", "NEGATIVE_GAMMA_ACCELERATION", "NEUTRAL")
         assert summary["pcr_sentiment"] in (
             "BULLISH_EXHAUSTION_EXTREME",
             "MILD_BULLISH",

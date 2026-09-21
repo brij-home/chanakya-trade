@@ -1,6 +1,7 @@
 import React from 'react'
 
 export function TradeExecutionMatrix({
+  alert,
   levels,
   isBull,
   isDerivative,
@@ -15,10 +16,13 @@ export function TradeExecutionMatrix({
   const tp = tradePlan || {}
   const mktSt = marketStatus || 'SESSION_CLOSED'
 
+  const isCrypto = (alert?.exchange || '').toUpperCase() === 'CRYPTO' || (alert?.exchange || '').toUpperCase() === 'BINANCE' || (alert?.segment || '').toUpperCase() === 'CRYPTO'
+  const currSym = isCrypto ? '$' : '₹'
+
   const formatNum = (val) => {
     if (val === null || val === undefined || isNaN(val)) return '—'
     const num = Number(val)
-    return num.toLocaleString('en-IN', {
+    return num.toLocaleString(isCrypto ? 'en-US' : 'en-IN', {
       minimumFractionDigits: num >= 500 ? 1 : 2,
       maximumFractionDigits: 2,
     })
@@ -28,7 +32,7 @@ export function TradeExecutionMatrix({
     if (pnl === null || pnl === undefined || isNaN(pnl)) return null
     const n = Number(pnl)
     const sign = n >= 0 ? '+' : ''
-    return `${sign}₹${n.toLocaleString('en-IN')}`
+    return `${sign}${currSym}${n.toLocaleString(isCrypto ? 'en-US' : 'en-IN')}`
   }
 
   const isUpward = levels.isUpwardPayoff !== undefined ? levels.isUpwardPayoff : (isBull || isDerivative)
@@ -178,11 +182,11 @@ export function TradeExecutionMatrix({
             </span>
           </div>
           <div className={`text-xs font-black mt-0.5 ${isSLHit ? 'text-white' : 'text-rose-300'}`}>
-            ₹{formatNum(levels.sl)}
+            {currSym}{formatNum(levels.sl)}
           </div>
           {trailingStop ? (
             <div className="text-[8px] text-cyan-300 font-bold truncate">
-              ⚡ Trail ₹{formatNum(trailingStop)}
+              ⚡ Trail {currSym}{formatNum(trailingStop)}
             </div>
           ) : levels.optPlanRef?.sl_pnl_per_lot !== undefined ? (
             <div className="text-[8px] text-rose-400/80 font-bold">
@@ -206,11 +210,11 @@ export function TradeExecutionMatrix({
             </span>
           </div>
           <div className="text-xs font-black text-amber-200 mt-0.5">
-            ₹{formatNum(levels.entry)}
+            {currSym}{formatNum(levels.entry)}
           </div>
           {levels.no_chase_boundary ? (
             <div className="text-[8px] text-rose-400 font-bold truncate" title="No-Chase Maximum Entry Limit">
-              🛑 Max ₹{formatNum(levels.no_chase_boundary)}
+              🛑 Max {currSym}{formatNum(levels.no_chase_boundary)}
             </div>
           ) : null}
         </div>
@@ -232,11 +236,11 @@ export function TradeExecutionMatrix({
             </span>
           </div>
           <div className={`text-xs font-black mt-0.5 ${isT1Hit ? 'text-white' : 'text-emerald-300'}`}>
-            ₹{formatNum(levels.t1)}
+            {currSym}{formatNum(levels.t1)}
           </div>
           {t1DistInfo && !isT1Hit ? (
             <div className="text-[8px] text-emerald-300 font-bold truncate">
-              {t1DistInfo.pct}% · ₹{formatNum(t1DistInfo.remPts)} away
+              {t1DistInfo.pct}% · {currSym}{formatNum(t1DistInfo.remPts)} away
             </div>
           ) : isT1Hit ? (
             <div className="text-[8px] text-emerald-200 font-bold truncate">
@@ -262,11 +266,11 @@ export function TradeExecutionMatrix({
             </span>
           </div>
           <div className={`text-xs font-black mt-0.5 ${isT2Hit ? 'text-white' : 'text-cyan-300'}`}>
-            ₹{formatNum(levels.t2)}
+            {currSym}{formatNum(levels.t2)}
           </div>
           {t2DistInfo && !isT2Hit ? (
             <div className="text-[8px] text-cyan-300 font-bold truncate">
-              {t2DistInfo.pct}% · ₹{formatNum(t2DistInfo.remPts)} away
+              {t2DistInfo.pct}% · {currSym}{formatNum(t2DistInfo.remPts)} away
             </div>
           ) : isT2Hit ? (
             <div className="text-[8px] text-cyan-200 font-bold truncate">
@@ -292,15 +296,19 @@ export function TradeExecutionMatrix({
             </span>
           </div>
           <div className={`text-xs font-black mt-0.5 ${isT3Hit ? 'text-white' : 'text-purple-800 dark:text-purple-200'}`}>
-            ₹{formatNum(levels.t3)}
+            {currSym}{formatNum(levels.t3)}
           </div>
           {t3DistInfo && !isT3Hit ? (
             <div className="text-[8px] text-purple-300 font-bold truncate">
-              {t3DistInfo.pct}% · ₹{formatNum(t3DistInfo.remPts)} away
+              {t3DistInfo.pct}% · {currSym}{formatNum(t3DistInfo.remPts)} away
             </div>
           ) : isT3Hit ? (
             <div className="text-[8px] text-purple-200 font-bold truncate">
               Max Profit Hit
+            </div>
+          ) : alert?.actionable_plan?.runner_strike?.symbol ? (
+            <div className="text-[7.5px] font-mono text-purple-300 font-bold truncate" title={`High-Beta Runner: ${alert.actionable_plan.runner_strike.symbol}`}>
+              ⚡ {alert.actionable_plan.runner_strike.symbol.replace(/^(NSE|BSE|MCX|NFO|CDS|CRYPTO|BINANCE):/, '')}
             </div>
           ) : null}
         </div>
@@ -327,7 +335,7 @@ export function TradeExecutionMatrix({
                 : 'bg-gold border-gold/50'
             }`}
             style={{ left: `${progressPct}%` }}
-            title={`Live Position: ₹${formatNum(currentPrice)} (${progressPct}% runway)`}
+            title={`Live Position: ${currSym}${formatNum(currentPrice)} (${progressPct}% runway)`}
           />
         ) : null}
       </div>

@@ -55,17 +55,30 @@ MAJOR_INDICES = [
 
 def classify_symbol_segment(symbol: str) -> str:
     """
-    Classifies a symbol into 'INDEX', 'FNO', 'NON_FNO', or 'COMMODITY'.
+    Classifies a symbol into 'INDEX', 'FNO', 'NON_FNO', 'COMMODITY', or 'CRYPTO'.
     """
     clean = (
         symbol.upper()
         .replace("NSE:", "")
         .replace("BSE:", "")
         .replace("MCX:", "")
+        .replace("CRYPTO:", "")
+        .replace("BINANCE:", "")
         .replace(".NS", "")
         .replace("^", "")
         .strip()
     )
+    if symbol.upper().startswith("CRYPTO:") or symbol.upper().startswith("BINANCE:"):
+        return "CRYPTO"
+    try:
+        from market.quotes import _CRYPTO_SYMBOLS
+
+        if clean in _CRYPTO_SYMBOLS:
+            return "CRYPTO"
+    except Exception:
+        pass
+    if clean in ("BTC", "ETH", "SOL", "BNB", "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"):
+        return "CRYPTO"
     if symbol.upper().startswith("MCX:"):
         return "COMMODITY"
     try:
@@ -284,6 +297,13 @@ class PrecursorRadarScanner:
             "NATURALGAS",
         ]
 
+        crypto_universe = [
+            "BTC",
+            "ETH",
+            "SOL",
+            "BNB",
+        ]
+
         if seg == "INDEX":
             return index_universe
         elif seg == "FNO":
@@ -292,9 +312,17 @@ class PrecursorRadarScanner:
             return non_fno_universe
         elif seg in ("COMMODITY", "MCX"):
             return commodity_universe
+        elif seg in ("CRYPTO", "BINANCE"):
+            return crypto_universe
         else:
             # Balanced multi-segment blend
-            return index_universe[:4] + fno_universe[:30] + non_fno_universe[:20] + commodity_universe
+            return (
+                index_universe[:4]
+                + fno_universe[:30]
+                + non_fno_universe[:20]
+                + commodity_universe
+                + crypto_universe
+            )
 
     def evaluate_symbol(
         self,
@@ -307,7 +335,17 @@ class PrecursorRadarScanner:
         Evaluates a single stock for pre-move coiling DNA against dynamic factor weights.
         Returns a PrecursorCandidate if the setup meets quality and conviction thresholds.
         """
-        clean_sym = symbol.upper().replace("NSE:", "").replace(".NS", "").strip()
+        clean_sym = (
+            symbol.upper()
+            .replace("NSE:", "")
+            .replace("BSE:", "")
+            .replace("MCX:", "")
+            .replace("CRYPTO:", "")
+            .replace("BINANCE:", "")
+            .replace(".NS", "")
+            .strip()
+        )
+        sym_seg = classify_symbol_segment(symbol)
 
         # 1. Check Symbol Invalidation Lockout (Anti-knife catching)
         try:
@@ -328,9 +366,14 @@ class PrecursorRadarScanner:
         q_item = quote
         if q_item is None:
             try:
-                q_res = get_quote(f"NSE:{clean_sym}")
+                inst_lookup = (
+                    f"CRYPTO:{clean_sym}"
+                    if sym_seg == "CRYPTO"
+                    else (f"MCX:{clean_sym}" if sym_seg == "COMMODITY" else f"NSE:{clean_sym}")
+                )
+                q_res = get_quote(inst_lookup)
                 if isinstance(q_res, dict):
-                    q_item = q_res.get(f"NSE:{clean_sym}") or q_res.get(clean_sym)
+                    q_item = q_res.get(inst_lookup) or q_res.get(clean_sym)
                 else:
                     q_item = q_res
             except Exception:
@@ -399,9 +442,15 @@ class PrecursorRadarScanner:
         # 3. Daily History & Structural Footprint
         from market.history import get_ohlcv
 
+        hist_exchange = (
+            "CRYPTO"
+            if sym_seg == "CRYPTO"
+            else ("MCX" if sym_seg == "COMMODITY" else "NSE")
+        )
+
         if df is None or len(df) < 20:
             try:
-                df = get_ohlcv(clean_sym, exchange="NSE", interval="day", days=45)
+                df = get_ohlcv(clean_sym, exchange=hist_exchange, interval="day", days=45)
             except Exception:
                 df = None
 
@@ -429,8 +478,10 @@ class PrecursorRadarScanner:
         avg_turnover_cr = round((ltp * avg_20_vol) / 1e7, 2)
 
         # Anti-Trap: Reject illiquid names (evaluate against both session and 20D average)
-        if turnover_cr < 8.0 and avg_turnover_cr < 8.0 and vol < 50000 and avg_20_vol < 50000:
-            return None
+        # Turnover in INR only applies to Indian cash equities
+        if sym_seg not in ("CRYPTO", "COMMODITY", "INDEX"):
+            if turnover_cr < 8.0 and avg_turnover_cr < 8.0 and vol < 50000 and avg_20_vol < 50000:
+                return None
 
         # 4. Orthogonal Factor Scoring
         score = 15  # baseline anchor
@@ -632,7 +683,8 @@ class PrecursorRadarScanner:
         target_2 = round(ltp + 3.5 * risk_pts, 2)
         rr_str = f"1:{((target_2 - ltp) / risk_pts):.1f}"
 
-        entry_range = f"₹{entry_low:,.1f} – ₹{entry_high:,.1f}"
+        curr_sym = "$" if sym_seg == "CRYPTO" else "₹"
+        entry_range = f"{curr_sym}{entry_low:,.1f} – {curr_sym}{entry_high:,.1f}"
 
         verdict = (
             "MAX_CONVICTION"
@@ -640,9 +692,9 @@ class PrecursorRadarScanner:
             else ("HIGH_CONVICTION" if score >= 75 else "COILING_ACCUMULATION")
         )
 
-        when_buy = f"Enter on Ask/Retest within coiling range ({entry_range}) while price holds above ₹{entry_low:,.1f} and VWAP."
-        when_wait = f"DO NOT CHASE if stock gaps up > 1.8% at open (above ₹{round(ltp * 1.018, 1):,}). Wait for a 15-min VWAP pullback."
-        profit_rule = f"Book 50% profit at Target 1 (₹{target_1:,.1f}), move Stop-Loss to Breakeven, and trail runner to Target 2 (₹{target_2:,.1f})."
+        when_buy = f"Enter on Ask/Retest within coiling range ({entry_range}) while price holds above {curr_sym}{entry_low:,.1f} and VWAP."
+        when_wait = f"DO NOT CHASE if asset gaps up > 1.8% at open (above {curr_sym}{round(ltp * 1.018, 1):,}). Wait for a VWAP pullback."
+        profit_rule = f"Book 50% profit at Target 1 ({curr_sym}{target_1:,.1f}), move Stop-Loss to Breakeven, and trail runner to Target 2 ({curr_sym}{target_2:,.1f})."
         has_squeeze = squeeze_bars >= 2
         severe_dry_up = prior_vol_ratio <= 0.40
         closest_archetype = (
@@ -653,15 +705,19 @@ class PrecursorRadarScanner:
             else "ARCHETYPE_MOMENTUM_TREND_CONTINUATION"
         )
 
-        segment = classify_symbol_segment(clean_sym)
+        exchange = (
+            "CRYPTO"
+            if sym_seg == "CRYPTO"
+            else ("MCX" if sym_seg == "COMMODITY" else "NSE")
+        )
 
         return PrecursorCandidate(
             symbol=clean_sym,
-            exchange="NSE",
+            exchange=exchange,
             direction="BULLISH",
             conviction_score=score,
             verdict=verdict,
-            segment=segment,
+            segment=sym_seg,
             sector_name=sector_name,
             rrg_quadrant=rrg_quad,
             ltp=round(ltp, 2),

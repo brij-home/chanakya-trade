@@ -115,6 +115,10 @@ class TradePlan:
     # Option Contract Execution Mapping (populated when trading derivatives)
     option_plan: Optional[dict[str, Any]] = None
 
+    # Stagnation & Momentum Expiry Controls
+    stagnation_timeout_mins: int = 25
+    stagnation_advice: str = ""
+
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
 
@@ -741,8 +745,33 @@ def calculate_trade_plan(
     # Intra-day 5-minute ATR ≈ Daily ATR / sqrt(75) ≈ Daily ATR / 8.66
     atr_5m = max(1.0, atr / 8.66)
 
-    # Velocity per 5-minute bar: during expansion, impulse moves cover ~1.25x to 1.75x 5m ATR per bar
-    velocity_mult = 1.75 if has_active_blast else 1.25
+    # Diurnal time-of-day velocity scalar for Indian trading sessions (09:15 to 15:30 IST):
+    # - 09:15-10:15 (mins 555-615): Opening drive impulse & morning discovery (1.70x velocity)
+    # - 10:15-11:30 (mins 615-690): Morning trend continuation (1.15x velocity)
+    # - 11:30-13:15 (mins 690-795): Midday liquidity lull & balance (0.65x velocity)
+    # - 13:15-14:15 (mins 795-855): European open & afternoon positioning (1.10x velocity)
+    # - 14:15-15:15 (mins 855-915): Power hour & closing expansion (1.55x velocity)
+    # - Off-market / after-hours: 1.00x baseline
+    now_min = now.hour * 60 + now.minute
+    if 555 <= now_min < 615:
+        diurnal_mult = 1.70
+    elif 615 <= now_min < 690:
+        diurnal_mult = 1.15
+    elif 690 <= now_min < 795:
+        diurnal_mult = 0.65
+    elif 795 <= now_min < 855:
+        diurnal_mult = 1.10
+    elif 855 <= now_min < 915:
+        diurnal_mult = 1.55
+    else:
+        diurnal_mult = 1.00
+
+    # Path efficiency (Kaufman Efficiency Ratio proxy / fractal tortuosity):
+    # During high-velocity blast, path efficiency is higher (~0.85). In standard moves, ~0.70.
+    path_efficiency = 0.85 if has_active_blast else 0.70
+
+    # Velocity per 5-minute bar: calibrated with diurnal curve and path efficiency
+    velocity_mult = (1.75 if has_active_blast else 1.25) * diurnal_mult * path_efficiency
     velocity_per_bar = max(0.5, atr_5m * velocity_mult)
 
     expected_bars_t1 = max(1, math.ceil(t1_distance_pts / velocity_per_bar))
@@ -752,6 +781,15 @@ def calculate_trade_plan(
     eta_t1_minutes = expected_bars_t1 * 5
     eta_t2_minutes = expected_bars_t2 * 5
     eta_t3_minutes = expected_bars_t3 * 5
+
+    # Invalidation Stagnation Timeout:
+    # If price fails to reach +0.35R within 5 bars (25m) for intraday, scratch to avoid theta bleed
+    stagnation_timeout_mins = 25 if tf == "INTRADAY" else 180
+    stagnation_cutoff_time = (now + timedelta(minutes=stagnation_timeout_mins)).strftime("%H:%M")
+    stagnation_advice = (
+        f"⏳ Stagnation Timeout: {stagnation_timeout_mins}m. If price fails to reach +0.35R by "
+        f"{stagnation_cutoff_time} IST, scratch trade at breakeven to prevent theta rot."
+    )
 
     # Resolve exchange market session boundaries
     is_mcx = (
@@ -901,6 +939,8 @@ def calculate_trade_plan(
         theta_drag_pct_of_gain=theta_drag_pct,
         structure_advice=structure_advice,
         as_of=now.strftime("%H:%M:%S IST"),
+        stagnation_timeout_mins=stagnation_timeout_mins,
+        stagnation_advice=stagnation_advice,
     )
 
     if df is None and ltp > 0:

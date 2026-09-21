@@ -38,8 +38,10 @@ import numpy as np
 import pandas as pd
 
 from engine.alert_model import AutoAlert
+from engine.option_resolver import resolve_option_contract, is_index_symbol
 
 logger = logging.getLogger("chanakya.detectors.orb")
+
 
 try:
     IST = ZoneInfo("Asia/Kolkata")
@@ -313,6 +315,86 @@ def detect_opening_range_breakout(
         confidence += 4
     confidence = min(96, confidence)
 
+    clean_sym = symbol.upper().replace("NSE:", "").replace("BSE:", "").strip()
+    is_idx = is_index_symbol(clean_sym)
+    opt_plan = (
+        resolve_option_contract(
+            symbol=clean_sym,
+            spot=ltp,
+            direction=direction,
+            underlying_sl=stop_loss,
+            underlying_target=target_1,
+        )
+        if is_idx
+        else None
+    )
+
+    if opt_plan:
+        opt_headline = f"⚡ ORB-15 {'BREAKOUT' if is_bullish else 'BREAKDOWN'}: {opt_plan.contract_symbol} @ ₹{opt_plan.entry_premium:,.1f} (Spot ₹{ltp:,.1f})"
+        act_plan = {
+            "action": f"BUY {opt_plan.option_type}",
+            "contract": opt_plan.contract_symbol,
+            "instrument": opt_plan.contract_symbol,
+            "instrument_type": "OPTION",
+            "recommended_entry": f"₹{opt_plan.entry_premium:,.2f}",
+            "stop_loss": f"₹{opt_plan.sl_premium:,.1f}",
+            "target": f"₹{opt_plan.t1_premium:,.1f}",
+            "target_1": f"₹{opt_plan.t1_premium:,.1f}",
+            "target_2": f"₹{opt_plan.t2_premium:,.1f}",
+            "risk_reward": f"1:{rr_ratio:.1f}",
+            "underlying_spot": f"₹{ltp:,.1f}",
+            "underlying_sl": f"₹{stop_loss:,.1f}",
+            "underlying_target": f"₹{target_1:,.1f}",
+            "option_type": opt_plan.option_type,
+            "strike": opt_plan.strike,
+            "option_plan": opt_plan.as_dict(),
+            "when_to_buy": f"Buy {opt_plan.contract_symbol} while {clean_sym} spot holds {'above' if is_bullish else 'below'} ₹{trigger_level:,.1f}.",
+            "when_to_wait": when_wait,
+            "profit_rule": "Book 50% at T1, move Stop-Loss to Breakeven, trail runner on 5m 20-EMA.",
+        }
+        return AutoAlert(
+            alert_id=alert_id,
+            alert_type=alert_type,
+            stage="IGNITED",
+            symbol=clean_sym,
+            exchange="NFO",
+            direction=direction,
+            headline=opt_headline,
+            summary=summary,
+            ltp=opt_plan.entry_premium,
+            trigger_level=opt_plan.entry_premium,
+            target_level=opt_plan.t1_premium,
+            stop_loss=opt_plan.sl_premium,
+            strike=opt_plan.strike,
+            option_type=opt_plan.option_type,
+            contract_symbol=opt_plan.contract_symbol,
+            option_premium=opt_plan.entry_premium,
+            underlying_spot=ltp,
+            lot_size=opt_plan.lot_size,
+            segment="FNO_INDEX",
+            no_chase_boundary=no_chase_lvl,
+            confidence=confidence,
+            created_at=now_iso,
+            is_live=True,
+            environment="LIVE",
+            entry_type="LIMIT_ON_PULLBACK",
+            setup_style="CONTINUATION",
+            metrics={
+                "orb_high": orb_high,
+                "orb_low": orb_low,
+                "orb_range": orb_range,
+                "orb_mid": orb_mid,
+                "range_pct": round(range_pct, 2),
+                "rvol": round(rvol_val, 2),
+                "vwap": vwap,
+                "target_2": target_2,
+                "target_3": target_3,
+                "confirmation_candle": conf_candle,
+                "divergence_type": div_type,
+            },
+            actionable_plan=act_plan,
+        )
+
     return AutoAlert(
         alert_id=alert_id,
         alert_type=alert_type,
@@ -360,3 +442,4 @@ def detect_opening_range_breakout(
             "profit_rule": f"Book 50% at Target 1 (₹{target_1:,.1f}), move Stop-Loss to Breakeven, trail runner to Target 2.",
         },
     )
+

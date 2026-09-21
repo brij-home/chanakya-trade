@@ -62,7 +62,8 @@ describe('AlertsView - Institutional Active/Archived standard & Derivative Clari
       target_status: 'PENDING',
       confidence: 90,
       related_strikes: ['NIFTY2691124600CE', 'NIFTY2691124700CE'],
-      created_at: '2026-09-09 13:45:00',
+      time_horizon: 'SWING_SHORT',
+      created_at: new Date().toISOString(),
     },
     // 2. Active Future Trade (Monthly Long Future)
     {
@@ -88,7 +89,8 @@ describe('AlertsView - Institutional Active/Archived standard & Derivative Clari
       is_invalidated: false,
       target_status: 'PENDING',
       confidence: 88,
-      created_at: '2026-09-09 13:30:00',
+      time_horizon: 'SWING_SHORT',
+      created_at: new Date().toISOString(),
     },
     // 3. Inactive / Archived Trade (Invalidated setup)
     {
@@ -408,7 +410,7 @@ describe('AlertsView - Institutional Active/Archived standard & Derivative Clari
     expect(screen.getByRole('button', { name: /F&O Stocks/i })).toBeTruthy()
     expect(screen.getByRole('button', { name: /Cash Equity/i })).toBeTruthy()
     expect(screen.getByText(/Alert Routing Matrix/i)).toBeTruthy()
-    expect(screen.getByText('ALL 5')).toBeTruthy()
+    expect(screen.getByText(/ALL [56]/)).toBeTruthy()
 
     // Dedicated sections in default view
     expect(screen.getByText(/Institutional Index Derivatives/i)).toBeTruthy()

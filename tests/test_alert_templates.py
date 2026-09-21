@@ -572,9 +572,9 @@ def test_minimalist_alert_hierarchy_and_deduplication():
     assert idx_action < idx_reason, "Action must appear before Reason"
     assert idx_sl < idx_reason, "Stop Loss must appear before Reason"
 
-    # 3. Compact line count <= 12 lines (or 13 if late session 15:15-15:30 closing warning is active)
+    # 3. Compact line count <= 12 lines (or 13 if late session closing warning / runner alternative is active)
     lines = [l for l in rendered.split("\n") if l.strip()]
-    max_lines = 13 if "Market closes in" in rendered else 12
+    max_lines = 13 if ("Market closes in" in rendered or "Runner Alternative" in rendered) else 12
     assert len(lines) <= max_lines, f"Alert exceeded {max_lines} lines: {len(lines)} lines"
 
 
@@ -939,11 +939,12 @@ def test_render_auto_alert_no_conflicting_cmp_or_stale_timestamp():
     assert "Opt CMP: ₹22.10" not in rendered
     assert "Opt CMP: ₹24.70" not in rendered
 
-    # 2. Must NOT render (Opt CMP: ...) in Action line because entry matches
+    # 2. Must NOT render duplicate CE/PE in Action line and must omit redundant (Opt CMP: ...)
     assert (
-        "BUY CE <b>HDFCBANK 680 CE</b> @ <code>₹22.1</code>" in rendered
-        or "BUY CE <b>HDFCBANK680CE</b> @ <code>₹22.1</code>" in rendered
+        "BUY <b>HDFCBANK 680 CE</b> @ <code>₹22.1</code>" in rendered
+        or "BUY <b>HDFCBANK680CE</b> @ <code>₹22.1</code>" in rendered
     )
+    assert "BUY CE <b>HDFCBANK" not in rendered
 
     # 3. Timestamp MUST show triggered_at (2026-09-11), not yesterday's created_at (2026-09-10)
     assert "2026-09-11 14:05:00 IST" in rendered
@@ -1426,6 +1427,240 @@ def test_render_asymmetric_alert_bearish_and_neutral():
     assert "Short Wing (Sell):</b> <code>25,050 PE + 25,350 CE</code>" in condor_msg
     assert "Hedge Wing (Buy):</b> <code>24,900 PE + 25,500 CE</code>" in condor_msg
     assert "Net Credit Harvest:</b> <code>+₹46.50/lot</code>" in condor_msg
+
+
+def test_render_auto_alert_target_0_5_milestone_not_initial_breakout():
+    """Verify that Target 0.5 (Scale 1) alerts render as milestone updates and NEVER fall through to initial BUY cards."""
+    from engine.auto_alert_engine import AutoAlert
+
+    alert = AutoAlert(
+        alert_id="aa-bse-3200pe-t05",
+        alert_type="OPTIONS_BREAKOUT",
+        stage="T0_5_ACHIEVED",
+        symbol="BSE",
+        exchange="NFO",
+        direction="BEARISH",
+        headline="🎯 [REAL/LIVE] TARGET 0.5 (SCALE 1) ACHIEVED: BSE 3200 PE (₹91.40)",
+        summary="Target 0.5 reached at ₹91.40 (+31.1%, +1.5R). DECISION: SCALE 35% PARTIAL PROFIT & TRAIL STOP-LOSS TO BREAKEVEN (₹69.84).",
+        ltp=91.40,
+        trigger_level=69.70,
+        target_level=93.30,
+        stop_loss=55.0,
+        trailing_stop=69.84,
+        strike=3200.0,
+        option_type="PE",
+        contract_symbol="BSE 3200 PE",
+        option_premium=69.70,
+        target_status="T0_5_ACHIEVED",
+        achieved_milestones=["T0_5_ACHIEVED"],
+        actionable_plan={
+            "action": "BUY_PUT",
+            "recommended_entry": "₹69.70",
+            "stop_loss": "₹55.00",
+            "target_0_5": "₹84.50",
+            "target_1": "₹93.30",
+            "target_2": "₹108.00",
+            "lot_size": 200,
+        },
+        is_live=True,
+        environment="LIVE",
+    )
+
+    rendered = render_auto_alert(alert, in_market=True)
+
+    # Invariant 1: Milestone header and title
+    assert "TARGET 0.5 ACHIEVED (SCALE 1)" in rendered
+    assert "DE-RISK SCALE HIT" in rendered
+    assert "BSE 3200 PE" in rendered
+
+    # Invariant 2: Execution levels and trailing stop
+    assert "Scale 1:</b> ₹91.40" in rendered or "Scale 1:</b> ₹84.50" in rendered
+    assert "Trail Stop:</b> <code>₹69.84</code>" in rendered
+    assert "(Breakeven Cost Locked — 100% Risk-Free)" in rendered
+
+    # Invariant 3: Decisive Action
+    assert "DECISIVE ACTION:</b> <code>SCALE 35% PARTIAL PROFIT NOW & HOLD RUNNER FOR T1 (₹93.30)</code>" in rendered
+
+    # Invariant 4: MUST NOT fall through to initial breakout BUY template!
+    assert "🟢 <b>[REAL/LIVE] OPTIONS BREAKOUT</b>" not in rendered
+    assert "• <b>Action:</b> BUY" not in rendered
+    assert "BUY PE BSE 3200 PE" not in rendered
+    assert "🛑 No-Chase:" not in rendered
+
+
+def test_options_action_deduplication_pe_and_ce():
+    """Verify that action='BUY_PUT' and action='BUY_CALL' do not duplicate CE/PE in the Action line."""
+    from engine.auto_alert_engine import AutoAlert
+
+    alert_pe = AutoAlert(
+        alert_id="auto-pe-dedup",
+        alert_type="OPTIONS_BREAKOUT",
+        stage="IGNITED",
+        symbol="BSE",
+        exchange="NFO",
+        direction="BEARISH",
+        headline="BSE 3200 PE Momentum",
+        summary="Put flow surge",
+        ltp=69.70,
+        trigger_level=69.70,
+        target_level=93.30,
+        stop_loss=55.00,
+        strike=3200.0,
+        option_type="PE",
+        contract_symbol="BSE 3200 PE",
+        actionable_plan={
+            "action": "BUY_PUT",
+            "recommended_entry": "₹69.70",
+            "stop_loss": "₹55.00",
+            "target_1": "₹93.30",
+            "lot_size": 200,
+        },
+    )
+    rendered_pe = render_auto_alert(alert_pe, in_market=True)
+    assert "• <b>Action:</b> BUY <b>BSE 3200 PE</b>" in rendered_pe
+    assert "BUY PE BSE 3200 PE" not in rendered_pe
+
+    alert_ce = AutoAlert(
+        alert_id="auto-ce-dedup",
+        alert_type="OPTIONS_BREAKOUT",
+        stage="IGNITED",
+        symbol="NIFTY",
+        exchange="NFO",
+        direction="BULLISH",
+        headline="NIFTY 25000 CE Breakout",
+        summary="Call flow surge",
+        ltp=120.0,
+        trigger_level=120.0,
+        target_level=160.0,
+        stop_loss=95.0,
+        strike=25000.0,
+        option_type="CE",
+        contract_symbol="NIFTY 25000 CE",
+        actionable_plan={
+            "action": "BUY_CALL",
+            "recommended_entry": "₹120.00",
+            "stop_loss": "₹95.00",
+            "target_1": "₹160.00",
+            "lot_size": 25,
+        },
+    )
+    rendered_ce = render_auto_alert(alert_ce, in_market=True)
+    assert "• <b>Action:</b> BUY <b>NIFTY 25000 CE</b>" in rendered_ce
+    assert "BUY CE NIFTY 25000 CE" not in rendered_ce
+
+
+def test_multi_asset_alert_rendering_crypto_cds_mcx():
+    """Verify that Crypto, CDS Currency, and MCX Commodity alerts render with proper units and structure."""
+    from engine.auto_alert_engine import AutoAlert
+
+    # 1. Crypto Alert
+    crypto_alert = AutoAlert(
+        alert_id="crypto-1",
+        alert_type="ALPHA_VORTEX",
+        stage="IGNITED",
+        symbol="CRYPTO:BTCUSDT",
+        exchange="CRYPTO",
+        direction="BULLISH",
+        headline="BTCUSDT Squeeze",
+        summary="Order block reclaim",
+        ltp=64250.0,
+        trigger_level=64250.0,
+        target_level=68000.0,
+        stop_loss=62500.0,
+        no_chase_boundary=64800.0,
+        actionable_plan={
+            "action": "BUY_SPOT / LONG",
+            "entry_range": "$64,200 – $64,300",
+            "stop_loss": "$62,500.00",
+            "target": "$68,000.00",
+            "setup_confluence": "SMC Order Block + FVG Reclaim",
+        },
+    )
+    crypto_msg = render_auto_alert(crypto_alert, in_market=True)
+    assert "ALPHA VORTEX" in crypto_msg
+    assert "Action:</b> BUY SPOT / LONG <b>BTCUSDT</b>" in crypto_msg
+    assert "24x7 Continuous Liquidity" in crypto_msg
+    assert "No-Chase:</b> <i>above $64,800.00</i>" in crypto_msg
+
+    # 2. CDS Currency Alert
+    cds_alert = AutoAlert(
+        alert_id="cds-1",
+        alert_type="CURRENCY_BREAKOUT",
+        stage="IGNITED",
+        symbol="USDINR",
+        exchange="CDS",
+        direction="BULLISH",
+        headline="USDINR 26OCTFUT Breakout",
+        summary="Rupee depreciation breakout",
+        ltp=84.1250,
+        trigger_level=84.1250,
+        target_level=84.5500,
+        stop_loss=83.9500,
+        no_chase_boundary=84.2000,
+        actionable_plan={
+            "action": "BUY_FUTURES",
+            "contract": "CDS:USDINR",
+            "entry_range": "₹84.1250",
+            "stop_loss": "₹83.9500",
+            "target": "₹84.5500",
+            "lot_size": 1000,
+        },
+    )
+    cds_msg = render_auto_alert(cds_alert, in_market=True)
+    assert "CURRENCY BREAKOUT" in cds_msg
+    assert "Action:</b> BUY FUTURES <b>CDS:USDINR</b> @ <code>₹84.1250</code>" in cds_msg
+    assert "Lot: 1000" in cds_msg
+    assert "No-Chase:</b> <i>above ₹84.2000</i>" in cds_msg
+
+
+def test_first_time_message_prominently_shows_runner_and_confidence():
+    """Verify that 1st-time messages prominently display Confidence score on the Horizon line and include Runner Alternative."""
+    from engine.auto_alert_engine import AutoAlert
+
+    alert = AutoAlert(
+        alert_id="aa-first-time-test",
+        alert_type="OPTIONS_BREAKOUT",
+        stage="IGNITED",
+        symbol="BSE",
+        exchange="NFO",
+        direction="BEARISH",
+        headline="BSE 3200 PE Breakdown",
+        summary="Put surge with high volume",
+        ltp=69.70,
+        trigger_level=69.70,
+        target_level=93.30,
+        stop_loss=55.00,
+        strike=3200.0,
+        option_type="PE",
+        contract_symbol="BSE 3200 PE",
+        confidence=95,
+        actionable_plan={
+            "action": "BUY_PUT",
+            "recommended_entry": "₹69.70",
+            "stop_loss": "₹55.00",
+            "target": "₹93.30",
+            "lot_size": 200,
+            "runner_strike": {
+                "strike": 3150.0,
+                "option_type": "PE",
+                "ltp": 42.50,
+                "symbol": "BSE 3150 PE",
+            },
+        },
+    )
+
+    rendered = render_auto_alert(alert, in_market=True)
+
+    # 1. Prominent Confidence Score on the Horizon line (shown strictly once, no duplicate in footer)
+    assert "🧠 <b>Confidence:</b> <b>95%</b>" in rendered
+    assert rendered.count("Confidence") == 1
+    assert "• <b>Horizon:</b>" in rendered
+    assert "⏱️ INTRADAY" in rendered
+
+    # 2. Runner Alternative
+    assert "• 🚀 <b>Runner Alternative (High Beta):</b> <code>BSE 3150 PE</code> (Opt CMP: ₹42.50)" in rendered
+
+
 
 
 

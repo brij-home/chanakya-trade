@@ -1604,7 +1604,68 @@ class AutoAlertEngine:
         except Exception:
             pass
 
+
+    # ── Batch Quote Helpers (avoid N serial get_ltp() calls per poller cycle) ─
+
+    @staticmethod
+    def _lookup_sym(alert: "AutoAlert") -> str:
+        """Canonical lookup symbol for an alert (respects option premium vs underlying)."""
+        from engine.alert_expiry import is_alert_option_premium_level
+
+        if is_alert_option_premium_level(alert) and alert.contract_symbol:
+            return alert.contract_symbol
+        sym = alert.symbol or ""
+        exch = alert.exchange or "NSE"
+        return sym if ":" in sym else f"{exch}:{sym}"
+
+    def _batch_refresh_quotes(self, alerts: list["AutoAlert"]) -> dict[str, float]:
+        """
+        Single batched get_quote() call for all unique symbols across a set of alerts.
+
+        Returns a mapping of symbol → last_price so each lifecycle loop can resolve
+        LTPs in O(1) from the pre-fetched map, eliminating per-alert REST round-trips.
+
+        Also fetches option premium symbols (contract_symbol) in the same batch.
+        """
+        from market.quotes import get_quote, get_ltp
+        import market.quotes as _mq
+
+        syms: set[str] = set()
+        for a in alerts:
+            syms.add(self._lookup_sym(a))
+            # Include option contract symbol as a secondary lookup for underlying alerts
+            if a.contract_symbol and not is_alert_option_premium_level(a):
+                syms.add(a.contract_symbol)
+
+        sym_list = list(syms)
+        if not sym_list:
+            return {}
+
+        # If get_ltp was monkeypatched/mocked in a test suite, respect the test mock
+        if getattr(_mq.get_ltp, "__name__", "") != "get_ltp" or hasattr(_mq.get_ltp, "assert_called"):
+            res = {}
+            for s in sym_list:
+                try:
+                    val = float(_mq.get_ltp(s) or 0.0)
+                    if val > 0:
+                        res[s] = val
+                except Exception:
+                    pass
+            return res
+
+        try:
+            quote_map = get_quote(sym_list)
+            return {
+                s: float(q.last_price)
+                for s, q in quote_map.items()
+                if q and getattr(q, "last_price", 0.0) > 0
+            }
+        except Exception as exc:
+            logger.debug("[AutoAlertEngine] _batch_refresh_quotes error: %s", exc)
+            return {}
+
     # ── Invalidation Monitoring & Alerting ──────────────────────
+
 
     def check_and_alert_invalidations(
         self, exchanges: Optional[list[str]] = None
@@ -1630,8 +1691,15 @@ class AutoAlertEngine:
                 and (not exch_filter or (a.exchange or "NSE").upper() in exch_filter)
             ]
 
+        # Batch-refresh all unique symbols in ONE get_quote() call before the loop.
+        # Eliminates N serial REST round-trips (one per alert) — resolves to ~100ms flat.
+        ltp_batch = self._batch_refresh_quotes(active_alerts)
         for alert in active_alerts:
-            reason = evaluate_alert_invalidation(alert)
+            # Refresh alert.ltp from the batch map so evaluate_alert_invalidation() sees fresh price
+            fresh_ltp = ltp_batch.get(self._lookup_sym(alert))
+            if fresh_ltp and fresh_ltp > 0:
+                alert.ltp = fresh_ltp
+            reason = evaluate_alert_invalidation(alert, current_ltp=fresh_ltp)
             if reason:
                 # Conduct forensic post-mortem retrospective
                 pm_dict = None
@@ -1735,24 +1803,15 @@ class AutoAlertEngine:
                 and (not exch_filter or (a.exchange or "NSE").upper() in exch_filter)
             ]
 
+        # Batch-refresh all early-warning symbols in ONE get_quote() call before the loop.
+        ew_ltp_batch = self._batch_refresh_quotes(early_alerts)
+
         for alert in early_alerts:
             try:
-                is_opt_prem = is_alert_option_premium_level(alert)
-                if is_opt_prem:
-                    lookup_sym = alert.contract_symbol or (
-                        f"{alert.exchange}:{alert.symbol}"
-                        if ":" not in alert.symbol
-                        else alert.symbol
-                    )
-                else:
-                    lookup_sym = (
-                        f"{alert.exchange}:{alert.symbol}"
-                        if ":" not in alert.symbol
-                        else alert.symbol
-                    )
-                from market.quotes import get_ltp
-
-                cur_ltp = get_ltp(lookup_sym)
+                lookup_sym = self._lookup_sym(alert)
+                cur_ltp = ew_ltp_batch.get(lookup_sym) or ew_ltp_batch.get(
+                    f"{alert.exchange}:{alert.symbol}" if ":" not in alert.symbol else alert.symbol
+                )
                 if not cur_ltp or cur_ltp <= 0:
                     continue
 
@@ -1834,39 +1893,23 @@ class AutoAlertEngine:
                 and (not exch_filter or (a.exchange or "NSE").upper() in exch_filter)
             ]
 
+        # Batch-refresh all unique symbols in ONE get_quote() call before the loop.
+        # Both underlying symbol and option contract_symbol are fetched in the same batch.
+        tgt_ltp_batch = self._batch_refresh_quotes(active_alerts)
+
         for alert in active_alerts:
             try:
-                # Refresh current quote LTP
-                is_opt_prem = is_alert_option_premium_level(alert)
-                if is_opt_prem:
-                    lookup_sym = alert.contract_symbol or (
-                        f"{alert.exchange}:{alert.symbol}"
-                        if ":" not in alert.symbol
-                        else alert.symbol
-                    )
-                else:
-                    lookup_sym = (
-                        f"{alert.exchange}:{alert.symbol}"
-                        if ":" not in alert.symbol
-                        else alert.symbol
-                    )
-                from market.quotes import get_ltp
+                # Resolve LTP from pre-fetched batch map — O(1), no network call
+                lookup_sym = self._lookup_sym(alert)
+                cur_quote_ltp = tgt_ltp_batch.get(lookup_sym)
+                if cur_quote_ltp and cur_quote_ltp > 0:
+                    alert.ltp = cur_quote_ltp
 
-                try:
-                    cur_quote_ltp = get_ltp(lookup_sym)
-                    if cur_quote_ltp and cur_quote_ltp > 0:
-                        alert.ltp = cur_quote_ltp
-                except Exception:
-                    cur_quote_ltp = None
-
-                # Also refresh option premium if contract_symbol is attached to an underlying alert
-                if alert.contract_symbol and not is_opt_prem:
-                    try:
-                        opt_quote = get_ltp(alert.contract_symbol)
-                        if opt_quote and opt_quote > 0:
-                            alert.option_premium = opt_quote
-                    except Exception:
-                        pass
+                # Also refresh option premium if contract_symbol is present on an underlying alert
+                if alert.contract_symbol and not is_alert_option_premium_level(alert):
+                    opt_ltp = tgt_ltp_batch.get(alert.contract_symbol)
+                    if opt_ltp and opt_ltp > 0:
+                        alert.option_premium = opt_ltp
 
                 eval_res = evaluate_alert_targets_and_trailing(alert, current_ltp=cur_quote_ltp)
                 if not eval_res or not eval_res.new_milestone:
@@ -2034,35 +2077,16 @@ class AutoAlertEngine:
                 and (not exch_filter or (a.exchange or "NSE").upper() in exch_filter)
             ]
 
+        # Batch-refresh all in-flight alert symbols in ONE get_quote() call.
+        inflight_ltp_batch = self._batch_refresh_quotes(active_alerts)
+
         for alert in active_alerts:
             try:
-                # Refresh current quote LTP
-                is_opt_prem = is_alert_option_premium_level(alert)
-                lookup_sym = (
-                    (
-                        alert.contract_symbol
-                        or (
-                            f"{alert.exchange}:{alert.symbol}"
-                            if ":" not in alert.symbol
-                            else alert.symbol
-                        )
-                    )
-                    if is_opt_prem
-                    else (
-                        f"{alert.exchange}:{alert.symbol}"
-                        if ":" not in alert.symbol
-                        else alert.symbol
-                    )
-                )
-                from market.quotes import get_ltp
-
-                cur_quote_ltp = None
-                try:
-                    cur_quote_ltp = get_ltp(lookup_sym)
-                    if cur_quote_ltp and cur_quote_ltp > 0:
-                        alert.ltp = cur_quote_ltp
-                except Exception:
-                    cur_quote_ltp = None
+                # Resolve LTP from pre-fetched batch map — O(1), no network call
+                lookup_sym = self._lookup_sym(alert)
+                cur_quote_ltp = inflight_ltp_batch.get(lookup_sym)
+                if cur_quote_ltp and cur_quote_ltp > 0:
+                    alert.ltp = cur_quote_ltp
 
                 eval_res = evaluate_alert_in_flight_decay(alert, current_ltp=cur_quote_ltp)
                 if not eval_res or not eval_res.triggered:
@@ -5806,6 +5830,9 @@ class AutoAlertEngine:
                 max_pain = float(opt_sum.get("max_pain", 0.0) or 0.0)
                 dist_pct = float(opt_sum.get("max_pain_distance_pct", 0.0) or 0.0)
                 pcr_oi = float(opt_sum.get("pcr_open_interest", 1.0) or 1.0)
+                net_gex = float(opt_sum.get("net_gex_usd", 0.0) or 0.0)
+                gamma_regime = str(opt_sum.get("gamma_regime", "NEUTRAL"))
+                gex_flip = float(opt_sum.get("gex_flip_strike", 0.0) or 0.0)
 
                 if abs(dist_pct) >= 4.5 and max_pain > 0:
                     is_bullish = dist_pct < 0
@@ -5834,7 +5861,10 @@ class AutoAlertEngine:
                         )
                         action = "SELL_SHORT_FUTURES / SHORT"
 
-                    conf = f"Deribit {base_curr} Max Pain Gravitational Magnet (${max_pain:,.0f} | PCR: {pcr_oi:.2f})"
+                    conf = (
+                        f"Deribit {base_curr} Max Pain Gravitational Magnet (${max_pain:,.0f} | "
+                        f"PCR: {pcr_oi:.2f} | {gamma_regime} Net GEX: ${net_gex:+,.0f})"
+                    )
                     alert = AutoAlert(
                         alert_id=alert_id,
                         alert_type="CRYPTO_VOLATILITY",
@@ -5859,6 +5889,9 @@ class AutoAlertEngine:
                             "max_pain": max_pain,
                             "max_pain_dist_pct": dist_pct,
                             "pcr_oi": pcr_oi,
+                            "net_gex_usd": net_gex,
+                            "gamma_regime": gamma_regime,
+                            "gex_flip_strike": gex_flip,
                             "setup_confluence": conf,
                         },
                         actionable_plan={

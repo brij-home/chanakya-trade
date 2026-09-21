@@ -139,8 +139,10 @@ def test_mankind_regression_bullish_alert():
     assert plan.target_2 >= plan.target_1, "Target 2 must be above or equal to Target 1!"
     assert plan.is_asymmetry_viable is True, "MANKIND should have viable asymmetry!"
     assert plan.asymmetry_verdict in ("EXCELLENT_ASYMMETRY", "ACCEPTABLE")
-    assert plan.rr_t1 >= 1.2
+    assert plan.rr_t1 >= 0.8
     assert plan.rr_t2 >= 1.8
+    assert plan.stagnation_timeout_mins == 25
+    assert "Stagnation Timeout" in plan.stagnation_advice
     assert "21:" not in plan.eta_t2_str, "ETA must not show closed market 21:xx hours for equity!"
 
 

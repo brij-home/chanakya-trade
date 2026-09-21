@@ -2801,6 +2801,7 @@ def test_options_momentum_friday_late_warning(tmp_path, monkeypatch):
         }
     )
     monkeypatch.setattr("market.quotes.get_ltp", lambda sym: 23510.0)
+    monkeypatch.setattr("market.quotes.get_quote", lambda *args, **kwargs: {})
     monkeypatch.setattr("market.options.get_options_chain", lambda sym: synthetic_chain)
     monkeypatch.setattr("market.history.get_ohlcv", lambda sym, **kwargs: healthy_df)
 

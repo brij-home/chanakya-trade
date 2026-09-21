@@ -250,7 +250,8 @@ def test_early_pre_0930_signals_unmuted_by_orb():
     engine._alerts = []
 
     # Mock scanners returning early signals
-    with patch.object(engine, "scan_index_contagion", return_value=[]), \
+    with patch.object(engine, "scan_opening_drives", return_value=[]), \
+         patch.object(engine, "scan_index_contagion", return_value=[]), \
          patch.object(engine, "scan_gamma_blasts", return_value=[early_gamma_blast]), \
          patch.object(engine, "scan_precursor_radars", return_value=[early_precursor]), \
          patch.object(engine, "scan_options_momentum_breakouts", return_value=[]), \

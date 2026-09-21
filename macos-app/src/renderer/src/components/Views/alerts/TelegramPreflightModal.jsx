@@ -21,7 +21,7 @@ export function TelegramPreflightModal({ alert, onConfirm, onCancel, sending, se
           const res = await callRef.current('/api/alerts/auto/telegram-destinations')
           if (active && res?.data) {
             setDestInfo(res.data)
-            const cleanSym = (alert?.symbol || '').replace(/^(NSE|BSE|MCX|NFO|CDS):/, '').trim().toUpperCase()
+            const cleanSym = (alert?.symbol || '').replace(/^(NSE|BSE|MCX|NFO|CDS|CRYPTO|BINANCE|DERIBIT):/, '').trim().toUpperCase()
             const isIndexSym = ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'NIFTYNXT50', 'SENSEX', 'BANKEX'].includes(cleanSym)
             const isFnoIndex = Boolean(
               (alert?.segment || '').toUpperCase() === 'FNO_INDEX' ||
@@ -87,7 +87,13 @@ export function TelegramPreflightModal({ alert, onConfirm, onCancel, sending, se
   const optType = alert.option_type || null
   const strikeNum = alert.strike ? Number(alert.strike) : null
   const cleanSym = (alert.symbol || '').replace(/^(NSE|BSE|MCX|NFO|CDS):/, '').trim()
-  const contractLabel = alert.contract_symbol || [cleanSym, strikeNum ? Number(strikeNum).toLocaleString('en-IN') : '', optType || ''].filter(Boolean).join(' ')
+  const hasStrikeInSym = strikeNum && cleanSym.includes(String(strikeNum))
+  const hasOptInSym = optType && (cleanSym.endsWith('CE') || cleanSym.endsWith('PE'))
+  const contractLabel = alert.contract_symbol || [
+    cleanSym,
+    !hasStrikeInSym && strikeNum ? Number(strikeNum).toLocaleString('en-IN') : '',
+    !hasOptInSym && optType ? optType : '',
+  ].filter(Boolean).join(' ')
 
   const scrutinyStatus = scrutiny?.status || 'QUANT_VERIFIED'
   const statusColor = scrutinyStatus === 'APPROVED' ? 'text-emerald-400' : scrutinyStatus === 'QUANT_VERIFIED' ? 'text-sky-400' : 'text-amber-400'
@@ -335,12 +341,33 @@ export function TelegramPreflightModal({ alert, onConfirm, onCancel, sending, se
           )}
         </div>
 
-        {/* Alert summary */}
-        <div className="text-[10px] text-zinc-500 p-2 rounded-lg bg-surface border border-border">
-          <span className="font-bold text-muted">{alert.direction} · {alert.alert_type?.replace(/_/g, ' ')}</span>
-          {alert.expiry_date && <span className="ml-1 text-amber-400">· Exp {alert.expiry_date}</span>}
-          {(alert.environment === 'TEST' || alert.is_live === false) && (
-            <span className="ml-1 text-purple-400 font-black">· TEST ALERT</span>
+        {/* Telegram Message Preview */}
+        <div className="p-2.5 rounded-xl bg-surface border border-border/80 space-y-1 font-mono text-[10px]">
+          <div className="flex items-center justify-between text-[9px] font-bold text-muted border-b border-border/40 pb-1">
+            <span>TELEGRAM PREVIEW</span>
+            <span className="text-gold font-bold">🧠 Confidence: {conviction}%</span>
+          </div>
+          <div className="text-text font-bold">
+            {alert.is_live === false ? '🧪 [TEST]' : '🟢 [REAL/LIVE]'} {alert.alert_type?.replace(/_/g, ' ')}
+          </div>
+          <div className="text-zinc-300">
+            • <b>Action:</b> {alert.actionable_plan?.trade_plan?.action || alert.actionable_plan?.action || (alert.direction === 'BEARISH' ? 'BUY PUT' : 'BUY CALL')} {contractLabel}
+            {alert.ltp ? ` @ ₹${Number(alert.ltp).toFixed(1)}` : ''}
+          </div>
+          {alert.stop_loss && (
+            <div className="text-rose-400">
+              • <b>Invalidation SL:</b> ₹{Number(alert.stop_loss).toFixed(1)}
+            </div>
+          )}
+          {alert.target_level && (
+            <div className="text-emerald-400">
+              • <b>Target:</b> ₹{Number(alert.target_level).toFixed(1)}
+            </div>
+          )}
+          {(alert.actionable_plan?.runner_strike || alert.actionable_plan?.runner_alternative) && (
+            <div className="text-purple-300">
+              • 🚀 <b>Runner Alternative:</b> {alert.actionable_plan.runner_strike?.symbol || alert.actionable_plan.runner_alternative}
+            </div>
           )}
         </div>
 

@@ -237,6 +237,12 @@ def is_market_open(
     current_t = now.time()
     rule = get_holiday_rule(today)
 
+    exch = (exchange or "NSE").upper()
+
+    # 24x7 Continuous Global Markets (Crypto / Binance / Deribit)
+    if exch in ("CRYPTO", "BINANCE", "DERIBIT"):
+        return True
+
     # Check for special trading session (e.g. Diwali Muhurat Trading)
     if rule and rule.special_session:
         start_t, end_t = rule.special_session
@@ -245,8 +251,6 @@ def is_market_open(
     # Weekends (Sat=5, Sun=6) are closed
     if now.weekday() >= 5:
         return False
-
-    exch = (exchange or "NSE").upper()
 
     # MCX Commodity Segment
     if exch == "MCX":
@@ -279,6 +283,7 @@ def get_current_ist_session(ref_dt: Optional[datetime] = None) -> dict[str, bool
       - 'currency':   Mon–Fri 15:30–17:00 IST (Strictly post-equity, active until CDS close)
                       plus 09:00–09:15 IST (Pre-equity opening window).
       - 'commodity':  Mon–Fri 15:30–23:30 IST (Strictly post-equity, active through US overlap).
+      - 'crypto':     24x7 Continuous Global Trading (Binance / Deribit 365 days).
     All markets return False outside operational trading windows or during closed holidays.
     """
     now = ref_dt or datetime.now(IST)
@@ -288,7 +293,12 @@ def get_current_ist_session(ref_dt: Optional[datetime] = None) -> dict[str, bool
         now = now.astimezone(IST)
 
     if now.weekday() >= 5:
-        return {"equity_nfo": False, "currency": False, "commodity": False}
+        return {
+            "equity_nfo": False,
+            "currency": False,
+            "commodity": False,
+            "crypto": True,
+        }
 
     current_t = now.time()
 
@@ -310,6 +320,7 @@ def get_current_ist_session(ref_dt: Optional[datetime] = None) -> dict[str, bool
         "equity_nfo": is_equity_nfo,
         "currency": is_currency,
         "commodity": is_commodity,
+        "crypto": True,
     }
 
 
@@ -339,7 +350,10 @@ def get_market_status(
 
     if live:
         status = "LIVE"
-        label = f"🟢 LIVE {exch} MARKET"
+        if exch in ("CRYPTO", "BINANCE", "DERIBIT"):
+            label = f"🟢 LIVE {exch} (24x7 CONTINUOUS)"
+        else:
+            label = f"🟢 LIVE {exch} MARKET"
     elif is_weekend:
         status = "WEEKEND"
         label = "🏖️ WEEKEND (MARKET CLOSED)"
@@ -359,14 +373,20 @@ def get_market_status(
     # Remaining session minutes
     remaining_mins = 0
     if live:
-        if exch == "MCX":
+        if exch in ("CRYPTO", "BINANCE", "DERIBIT"):
+            remaining_mins = 1440  # 24h continuous rolling
+        elif exch == "MCX":
             close_min = 23 * 60 + 30
+            now_min = now.hour * 60 + now.minute
+            remaining_mins = max(0, close_min - now_min)
         elif exch in ("CDS", "CURRENCY"):
             close_min = 17 * 60
+            now_min = now.hour * 60 + now.minute
+            remaining_mins = max(0, close_min - now_min)
         else:
             close_min = 15 * 60 + 30
-        now_min = now.hour * 60 + now.minute
-        remaining_mins = max(0, close_min - now_min)
+            now_min = now.hour * 60 + now.minute
+            remaining_mins = max(0, close_min - now_min)
 
     return {
         "is_open": live,

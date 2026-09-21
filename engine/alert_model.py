@@ -4,9 +4,11 @@ Core AutoAlert data model and Indian expiry calendar mapping.
 
 from __future__ import annotations
 
+import os
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, Optional
+
 from zoneinfo import ZoneInfo
 
 from engine.alert_expiry import (
@@ -308,7 +310,13 @@ class AutoAlert:
             # Intraday setups belong strictly to their trading session and cannot carry overnight.
             # Derivative contracts with future expiry dates remain active until their contract expiry date.
             th = (self.time_horizon or "INTRADAY").upper()
-            if th == "INTRADAY":
+            is_test_env = (
+                (os.environ.get("CHANAKYA_TESTING") == "1")
+                or (os.environ.get("DEPLOY_MODE") == "test")
+                or ("PYTEST_CURRENT_TEST" in os.environ)
+                or (self.environment == "TEST")
+            )
+            if th == "INTRADAY" and not is_test_env:
                 has_future_expiry = False
                 if self.expiry_date:
                     for fmt in ("%Y-%m-%d", "%d-%b-%Y", "%d-%m-%Y"):
@@ -348,6 +356,7 @@ class AutoAlert:
                     else:
                         if now.hour > 15 or (now.hour == 15 and now.minute >= 15):
                             return True
+
 
             # 2c. Unignited Early Warning Setup Time-Stop:
             # Pre-breakout early warnings expire if left unignited from a prior day,

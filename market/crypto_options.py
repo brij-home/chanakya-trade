@@ -34,6 +34,7 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 import httpx
+from market.http_pool import get_shared_client
 
 logger = logging.getLogger(__name__)
 
@@ -109,6 +110,89 @@ def calculate_max_pain(contracts: list[DeribitOptionContract]) -> float:
     return best_strike
 
 
+def calculate_deribit_gex(
+    contracts: list[DeribitOptionContract],
+    underlying_spot: float,
+) -> dict[str, Any]:
+    """
+    Calculate Dealer Gamma Exposure (GEX) across Deribit options surface.
+    GEX estimates the dollar change in dealer hedging needs per 1% spot move.
+
+    Formula per contract:
+      d1 = [ln(S/K) + (r + 0.5 * sigma^2) * T] / [sigma * sqrt(T)]
+      Gamma = [exp(-0.5 * d1^2) / sqrt(2*pi)] / [S * sigma * sqrt(T)]
+      Dollar Gamma = Gamma * S^2 * 0.01 * OI
+
+    Net GEX = Call GEX - Put GEX
+      - Positive Gamma (> 0): Dealers mean-revert / pin toward Max Pain.
+      - Negative Gamma (< 0): Dealers trend-follow / amplify volatility and breakouts.
+    """
+    import math
+
+    if underlying_spot <= 0 or not contracts:
+        return {
+            "net_gex_usd": 0.0,
+            "call_gex_usd": 0.0,
+            "put_gex_usd": 0.0,
+            "gamma_regime": "NEUTRAL",
+            "gex_flip_strike": 0.0,
+        }
+
+    now = datetime.now(timezone.utc)
+    strike_gex: dict[float, float] = defaultdict(float)
+    total_call_gex = 0.0
+    total_put_gex = 0.0
+
+    for c in contracts:
+        if c.strike <= 0 or c.iv <= 0 or c.open_interest <= 0:
+            continue
+        try:
+            exp_dt = datetime.strptime(c.expiry.upper(), "%d%b%y").replace(tzinfo=timezone.utc)
+            t_days = max(0.25, (exp_dt - now).total_seconds() / 86400.0)
+            t_years = t_days / 365.25
+        except Exception:
+            t_years = 7.0 / 365.25
+
+        sigma = max(0.10, min(3.0, c.iv / 100.0))
+        r = 0.04
+
+        try:
+            d1 = (math.log(underlying_spot / c.strike) + (r + 0.5 * sigma * sigma) * t_years) / (sigma * math.sqrt(t_years))
+            pdf_d1 = math.exp(-0.5 * d1 * d1) / math.sqrt(2.0 * math.pi)
+            gamma = pdf_d1 / (underlying_spot * sigma * math.sqrt(t_years))
+        except (ValueError, ZeroDivisionError, OverflowError):
+            continue
+
+        dollar_gamma = gamma * (underlying_spot ** 2) * 0.01 * c.open_interest
+
+        if c.option_type == "CE":
+            total_call_gex += dollar_gamma
+            strike_gex[c.strike] += dollar_gamma
+        else:
+            total_put_gex += dollar_gamma
+            strike_gex[c.strike] -= dollar_gamma
+
+    net_gex = total_call_gex - total_put_gex
+    regime = "POSITIVE_GAMMA_PIN" if net_gex >= 0 else "NEGATIVE_GAMMA_ACCELERATION"
+
+    sorted_strikes = sorted(strike_gex.keys())
+    cum_gex = 0.0
+    flip_strike = underlying_spot
+    for s in sorted_strikes:
+        cum_gex += strike_gex[s]
+        if cum_gex >= 0:
+            flip_strike = s
+            break
+
+    return {
+        "net_gex_usd": round(net_gex, 2),
+        "call_gex_usd": round(total_call_gex, 2),
+        "put_gex_usd": round(total_put_gex, 2),
+        "gamma_regime": regime,
+        "gex_flip_strike": round(flip_strike, 2),
+    }
+
+
 def get_crypto_options_summary(currency: str = "BTC", force_refresh: bool = False) -> dict[str, Any]:
     """
     Fetch and compute institutional 24x7 options metrics for BTC or ETH.
@@ -126,12 +210,12 @@ def get_crypto_options_summary(currency: str = "BTC", force_refresh: bool = Fals
 
     params = {"currency": curr, "kind": "option"}
     try:
-        with httpx.Client(timeout=8.0) as client:
-            resp = client.get(DERIBIT_BOOK_SUMMARY_URL, params=params)
-            if resp.status_code != 200:
-                logger.warning(f"Deribit options API returned {resp.status_code}: {resp.text[:200]}")
-                return {"status": "UNAVAILABLE", "currency": curr, "error": f"HTTP {resp.status_code}"}
-            raw_data = resp.json().get("result", [])
+        client = get_shared_client()
+        resp = client.get(DERIBIT_BOOK_SUMMARY_URL, params=params, timeout=8.0)
+        if resp.status_code != 200:
+            logger.warning(f"Deribit options API returned {resp.status_code}: {resp.text[:200]}")
+            return {"status": "UNAVAILABLE", "currency": curr, "error": f"HTTP {resp.status_code}"}
+        raw_data = resp.json().get("result", [])
     except Exception as e:
         logger.error(f"Failed to fetch Deribit options for {curr}: {e}")
         return {"status": "UNAVAILABLE", "currency": curr, "error": str(e)}
@@ -224,6 +308,9 @@ def get_crypto_options_summary(currency: str = "BTC", force_refresh: bool = Fals
         pcr_sentiment = "NEUTRAL"
         pcr_note = f"PCR {pcr_oi:.2f} in balanced equilibrium."
 
+    # 4. Dealer Gamma Exposure (GEX)
+    gex = calculate_deribit_gex(contracts, underlying_spot)
+
     result = {
         "status": "ONLINE",
         "currency": curr,
@@ -239,6 +326,11 @@ def get_crypto_options_summary(currency: str = "BTC", force_refresh: bool = Fals
         "atm_implied_volatility_pct": atm_iv,
         "total_call_oi": round(call_oi, 2),
         "total_put_oi": round(put_oi, 2),
+        "net_gex_usd": gex["net_gex_usd"],
+        "call_gex_usd": gex["call_gex_usd"],
+        "put_gex_usd": gex["put_gex_usd"],
+        "gamma_regime": gex["gamma_regime"],
+        "gex_flip_strike": gex["gex_flip_strike"],
         "available_expiries": list(by_expiry.keys())[:10],
         "as_of": datetime.now(timezone.utc).isoformat(),
     }
@@ -266,12 +358,12 @@ def get_crypto_options_snapshot(
     params = {"currency": curr, "kind": "option"}
     raw_data = []
     try:
-        with httpx.Client(timeout=8.0) as client:
-            resp = client.get(DERIBIT_BOOK_SUMMARY_URL, params=params)
-            if resp.status_code == 200:
-                raw_data = resp.json().get("result", [])
-            else:
-                logger.warning(f"Deribit API returned HTTP {resp.status_code}")
+        client = get_shared_client()
+        resp = client.get(DERIBIT_BOOK_SUMMARY_URL, params=params, timeout=8.0)
+        if resp.status_code == 200:
+            raw_data = resp.json().get("result", [])
+        else:
+            logger.warning(f"Deribit API returned HTTP {resp.status_code}")
     except Exception as e:
         logger.error(f"Failed to fetch Deribit snapshot for {curr}: {e}")
 

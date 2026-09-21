@@ -24,6 +24,7 @@ from pathlib import Path
 import threading
 from typing import Any, Optional
 import httpx
+from market.http_pool import get_nse_client
 
 logger = logging.getLogger("market.whale_feed")
 
@@ -174,47 +175,47 @@ def fetch_nse_bulk_block_deals() -> list[WhaleDeal]:
     deals: list[WhaleDeal] = []
 
     try:
-        with httpx.Client(timeout=6.0, follow_redirects=True, headers=headers) as client:
-            resp = client.get(url)
-            if resp.status_code == 200:
-                raw_json = resp.json()
-                raw_list = raw_json.get("data", []) if isinstance(raw_json, dict) else raw_json
-                for idx, row in enumerate(raw_list):
-                    c_name = str(row.get("clientName", "") or "")
-                    symbol = str(row.get("symbol", "") or "").upper()
-                    buy_sell = str(row.get("buySell", "") or "").upper()
-                    qty = int(float(row.get("quantityTraded", 0) or 0))
-                    price = float(row.get("tradePrice", 0.0) or 0.0)
-                    deal_cr = round((qty * price) / 10000000.0, 2)
+        client = get_nse_client()
+        resp = client.get(url, timeout=6.0)
+        if resp.status_code == 200:
+            raw_json = resp.json()
+            raw_list = raw_json.get("data", []) if isinstance(raw_json, dict) else raw_json
+            for idx, row in enumerate(raw_list):
+                c_name = str(row.get("clientName", "") or "")
+                symbol = str(row.get("symbol", "") or "").upper()
+                buy_sell = str(row.get("buySell", "") or "").upper()
+                qty = int(float(row.get("quantityTraded", 0) or 0))
+                price = float(row.get("tradePrice", 0.0) or 0.0)
+                deal_cr = round((qty * price) / 10000000.0, 2)
 
-                    # Only capture institutional sized deals (>= 5 Crore) or marquee matches
-                    marquee = match_marquee_investor(c_name)
-                    if not marquee and deal_cr < 5.0:
-                        continue
+                # Only capture institutional sized deals (>= 5 Crore) or marquee matches
+                marquee = match_marquee_investor(c_name)
+                if not marquee and deal_cr < 5.0:
+                    continue
 
-                    deal_type = f"BULK_{buy_sell}" if "SELL" in buy_sell else "BULK_BUY"
-                    inv_name = marquee["investor_name"] if marquee else c_name.title()
-                    inv_cat = marquee["category"] if marquee else "Institutional Participant"
-                    icon = marquee["icon"] if marquee else "🏛️"
+                deal_type = f"BULK_{buy_sell}" if "SELL" in buy_sell else "BULK_BUY"
+                inv_name = marquee["investor_name"] if marquee else c_name.title()
+                inv_cat = marquee["category"] if marquee else "Institutional Participant"
+                icon = marquee["icon"] if marquee else "🏛️"
 
-                    deals.append(
-                        WhaleDeal(
-                            id=f"nse-bd-{idx}",
-                            symbol=symbol,
-                            company_name=row.get("securityName", symbol),
-                            investor_name=inv_name,
-                            investor_category=inv_cat,
-                            deal_type=deal_type,
-                            shares_quantity=qty,
-                            trade_price=price,
-                            current_ltp=price,
-                            deal_value_cr=deal_cr,
-                            date=row.get("date", datetime.now(IST).strftime("%Y-%m-%d")),
-                            conviction_score=85 if marquee else 75,
-                            icon=icon,
-                            provenance="LIVE_NSE",
-                        )
+                deals.append(
+                    WhaleDeal(
+                        id=f"nse-bd-{idx}",
+                        symbol=symbol,
+                        company_name=row.get("securityName", symbol),
+                        investor_name=inv_name,
+                        investor_category=inv_cat,
+                        deal_type=deal_type,
+                        shares_quantity=qty,
+                        trade_price=price,
+                        current_ltp=price,
+                        deal_value_cr=deal_cr,
+                        date=row.get("date", datetime.now(IST).strftime("%Y-%m-%d")),
+                        conviction_score=85 if marquee else 75,
+                        icon=icon,
+                        provenance="LIVE_NSE",
                     )
+                )
     except Exception as e:
         logger.debug("Failed fetching live NSE bulk deals: %s", e)
 

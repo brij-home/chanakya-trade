@@ -1623,7 +1623,11 @@ class AsymmetricOpportunityRadar:
         try:
             from market.quotes import get_quote
             formatted_syms = [
-                (f"MCX:{s}" if classify_symbol_segment(s) == "COMMODITY" else f"NSE:{s}")
+                (
+                    f"CRYPTO:{s}"
+                    if classify_symbol_segment(s) == "CRYPTO"
+                    else (f"MCX:{s}" if classify_symbol_segment(s) == "COMMODITY" else f"NSE:{s}")
+                )
                 if ":" not in s
                 else s
                 for s in universe
@@ -1636,12 +1640,22 @@ class AsymmetricOpportunityRadar:
 
         def _evaluate_sym(sym: str) -> list[AsymmetricOpportunity]:
             sym_opps: list[AsymmetricOpportunity] = []
-            clean_sym = sym.upper().replace("NSE:", "").replace("BSE:", "").replace("MCX:", "").strip()
+            clean_sym = (
+                sym.upper()
+                .replace("NSE:", "")
+                .replace("BSE:", "")
+                .replace("MCX:", "")
+                .replace("CRYPTO:", "")
+                .replace("BINANCE:", "")
+                .strip()
+            )
             seg = classify_symbol_segment(clean_sym)
             is_comm = seg == "COMMODITY"
+            is_crypto = seg == "CRYPTO"
 
             q = (
-                quotes_map.get(f"NSE:{clean_sym}")
+                quotes_map.get(f"CRYPTO:{clean_sym}")
+                or quotes_map.get(f"NSE:{clean_sym}")
                 or quotes_map.get(f"MCX:{clean_sym}")
                 or quotes_map.get(clean_sym)
                 or quotes_map.get(sym)
@@ -1651,9 +1665,11 @@ class AsymmetricOpportunityRadar:
             df = None
             try:
                 from market.history import get_ohlcv
+
+                hist_exch = "CRYPTO" if is_crypto else ("MCX" if is_comm else "NSE")
                 df = get_ohlcv(
                     clean_sym,
-                    exchange="MCX" if is_comm else "NSE",
+                    exchange=hist_exch,
                     interval="day",
                     days=90 if not is_comm else 60,
                 )

@@ -41,8 +41,10 @@ from typing import Any, Callable, Optional
 
 import httpx
 import pandas as pd
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from brokers.base import Quote
+from market.http_pool import get_binance_client
 
 logger = logging.getLogger(__name__)
 
@@ -349,31 +351,39 @@ class CryptoStreamManager:
                 logger.debug(f"Tick listener callback error: {e}")
 
     def _bootstrap_initial_klines(self) -> None:
-        """REST bootstrapper: load 200 initial 1m klines per symbol for instant readiness."""
-        for sym in self.symbols:
+        """REST bootstrapper: parallel-load 200 initial 1m klines per symbol for instant readiness."""
+        def _fetch_one(sym: str) -> tuple[str, Any]:
             try:
-                df = self.fetch_klines_rest(sym, interval="1m", limit=200)
-                if not df.empty:
-                    with self._lock:
-                        dq = self._klines[sym]
-                        existing_dates = {c["date"] for c in dq}
-                        for _, row in df.iterrows():
-                            d = row["date"]
-                            if d not in existing_dates:
-                                dq.append(
-                                    {
-                                        "date": d,
-                                        "open": float(row["open"]),
-                                        "high": float(row["high"]),
-                                        "low": float(row["low"]),
-                                        "close": float(row["close"]),
-                                        "volume": float(row["volume"]),
-                                        "is_closed": True,
-                                    }
-                                )
-                time.sleep(0.1)
-            except Exception as e:
-                logger.warning(f"Initial klines bootstrap failed for {sym}: {e}")
+                return sym, self.fetch_klines_rest(sym, interval="1m", limit=200)
+            except Exception as exc:
+                logger.warning(f"Initial klines bootstrap failed for {sym}: {exc}")
+                return sym, None
+
+        with ThreadPoolExecutor(
+            max_workers=min(len(self.symbols), 4), thread_name_prefix="crypto-boot"
+        ) as executor:
+            futures = {executor.submit(_fetch_one, sym): sym for sym in self.symbols}
+            for fut in as_completed(futures, timeout=20):
+                sym, df = fut.result()
+                if df is None or df.empty:
+                    continue
+                with self._lock:
+                    dq = self._klines[sym]
+                    existing_dates = {c["date"] for c in dq}
+                    for _, row in df.iterrows():
+                        d = row["date"]
+                        if d not in existing_dates:
+                            dq.append(
+                                {
+                                    "date": d,
+                                    "open": float(row["open"]),
+                                    "high": float(row["high"]),
+                                    "low": float(row["low"]),
+                                    "close": float(row["close"]),
+                                    "volume": float(row["volume"]),
+                                    "is_closed": True,
+                                }
+                            )
 
     def fetch_klines_rest(
         self,
@@ -400,12 +410,12 @@ class CryptoStreamManager:
 
         params = {"symbol": canon_sym, "interval": binance_interval, "limit": min(limit, 1000)}
         try:
-            with httpx.Client(timeout=8.0) as client:
-                resp = client.get(BINANCE_REST_KLINES, params=params)
-                if resp.status_code != 200:
-                    logger.warning(f"Binance REST klines returned {resp.status_code}: {resp.text[:200]}")
-                    return pd.DataFrame(columns=["date", "open", "high", "low", "close", "volume"])
-                data = resp.json()
+            client = get_binance_client()
+            resp = client.get(BINANCE_REST_KLINES, params=params, timeout=8.0)
+            if resp.status_code != 200:
+                logger.warning(f"Binance REST klines returned {resp.status_code}: {resp.text[:200]}")
+                return pd.DataFrame(columns=["date", "open", "high", "low", "close", "volume"])
+            data = resp.json()
 
             rows = []
             for c in data:
@@ -438,42 +448,43 @@ class CryptoStreamManager:
             if canon_sym in self._quotes:
                 return self._quotes[canon_sym]
 
-        # If cache cold, try single fast REST ticker
+        # If cache cold, try single fast REST ticker (reuse persistent Binance client)
         try:
-            with httpx.Client(timeout=4.0) as client:
-                resp = client.get(
-                    "https://api.binance.com/api/v3/ticker/24hr",
-                    params={"symbol": canon_sym},
+            client = get_binance_client()
+            resp = client.get(
+                "https://api.binance.com/api/v3/ticker/24hr",
+                params={"symbol": canon_sym},
+                timeout=4.0,
+            )
+            if resp.status_code == 200:
+                p = resp.json()
+                ltp = float(p.get("lastPrice", 0.0))
+                chg = float(p.get("priceChange", 0.0))
+                chg_pct = float(p.get("priceChangePercent", 0.0))
+                high = float(p.get("highPrice", 0.0))
+                low = float(p.get("lowPrice", 0.0))
+                vol = float(p.get("volume", 0.0))
+                open_p = float(p.get("openPrice", 0.0))
+                quote = Quote(
+                    symbol=f"CRYPTO:{canon_sym}",
+                    last_price=ltp,
+                    open=open_p,
+                    high=high,
+                    low=low,
+                    close=ltp - chg,
+                    volume=int(vol),
+                    bid=float(p.get("bidPrice", 0.0)) or None,
+                    ask=float(p.get("askPrice", 0.0)) or None,
+                    change=chg,
+                    change_pct=chg_pct,
+                    provider="binance",
+                    source="REST",
+                    data_state="LIVE",
+                    received_at=datetime.now(timezone.utc).isoformat(),
                 )
-                if resp.status_code == 200:
-                    p = resp.json()
-                    ltp = float(p.get("lastPrice", 0.0))
-                    chg = float(p.get("priceChange", 0.0))
-                    chg_pct = float(p.get("priceChangePercent", 0.0))
-                    high = float(p.get("highPrice", 0.0))
-                    low = float(p.get("lowPrice", 0.0))
-                    vol = float(p.get("volume", 0.0))
-                    open_p = float(p.get("openPrice", 0.0))
-                    quote = Quote(
-                        symbol=f"CRYPTO:{canon_sym}",
-                        last_price=ltp,
-                        open=open_p,
-                        high=high,
-                        low=low,
-                        close=ltp - chg,
-                        volume=int(vol),
-                        bid=float(p.get("bidPrice", 0.0)) or None,
-                        ask=float(p.get("askPrice", 0.0)) or None,
-                        change=chg,
-                        change_pct=chg_pct,
-                        provider="binance",
-                        source="REST",
-                        data_state="LIVE",
-                        received_at=datetime.now(timezone.utc).isoformat(),
-                    )
-                    with self._lock:
-                        self._quotes[canon_sym] = quote
-                    return quote
+                with self._lock:
+                    self._quotes[canon_sym] = quote
+                return quote
         except Exception as e:
             logger.debug(f"Fast REST fallback for crypto quote failed: {e}")
         return None
@@ -557,26 +568,28 @@ class CryptoStreamManager:
         next_funding_time = None
 
         try:
-            with httpx.Client(timeout=5.0) as client:
-                # 1. Open Interest
-                r_oi = client.get(
-                    "https://fapi.binance.com/fapi/v1/openInterest",
-                    params={"symbol": canon_sym},
-                )
-                if r_oi.status_code == 200:
-                    oi_val = float(r_oi.json().get("openInterest", 0.0))
+            client = get_binance_client()
+            # 1. Open Interest
+            r_oi = client.get(
+                "https://fapi.binance.com/fapi/v1/openInterest",
+                params={"symbol": canon_sym},
+                timeout=5.0,
+            )
+            if r_oi.status_code == 200:
+                oi_val = float(r_oi.json().get("openInterest", 0.0))
 
-                # 2. Premium Index & Funding Rate
-                r_prem = client.get(
-                    "https://fapi.binance.com/fapi/v1/premiumIndex",
-                    params={"symbol": canon_sym},
-                )
-                if r_prem.status_code == 200:
-                    prem_data = r_prem.json()
-                    funding_rate = float(prem_data.get("lastFundingRate", 0.0))
-                    mark_price = float(prem_data.get("markPrice", 0.0))
-                    index_price = float(prem_data.get("indexPrice", 0.0))
-                    next_funding_time = prem_data.get("nextFundingTime")
+            # 2. Premium Index & Funding Rate
+            r_prem = client.get(
+                "https://fapi.binance.com/fapi/v1/premiumIndex",
+                params={"symbol": canon_sym},
+                timeout=5.0,
+            )
+            if r_prem.status_code == 200:
+                prem_data = r_prem.json()
+                funding_rate = float(prem_data.get("lastFundingRate", 0.0))
+                mark_price = float(prem_data.get("markPrice", 0.0))
+                index_price = float(prem_data.get("indexPrice", 0.0))
+                next_funding_time = prem_data.get("nextFundingTime")
         except Exception as e:
             logger.debug(f"Futures metrics fetch failed for {canon_sym}: {e}")
 

@@ -22,6 +22,7 @@ def test_option_entry_range_not_mangled_by_underlying_price(tmp_path, monkeypatc
     monkeypatch.setattr("engine.auto_alert_engine.get_auto_alerts_file", lambda: data_file)
     monkeypatch.setattr("engine.auto_alert_engine.AutoAlertEngine._dispatch", lambda self, a: None)
     monkeypatch.setattr("engine.learning_engine.pattern_learning_engine.is_symbol_locked_out", lambda *a, **kw: (False, ""))
+    monkeypatch.setattr("market.macro.get_macro_snapshot", lambda: None)
 
     engine = AutoAlertEngine(max_buffer=20)
     engine.clear_alerts()

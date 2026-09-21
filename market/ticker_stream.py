@@ -109,6 +109,20 @@ RIBBON_SPEC = [
         "category": "CRYPTO",
         "unit": "$",
     },
+    {
+        "symbol": "ETH",
+        "display_name": "ETHEREUM",
+        "inst": "CRYPTO:ETH",
+        "category": "CRYPTO",
+        "unit": "$",
+    },
+    {
+        "symbol": "SOL",
+        "display_name": "SOLANA",
+        "inst": "CRYPTO:SOL",
+        "category": "CRYPTO",
+        "unit": "$",
+    },
 ]
 
 

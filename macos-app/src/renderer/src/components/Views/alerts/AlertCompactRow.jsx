@@ -8,9 +8,12 @@ export const AlertCompactRow = memo(function AlertCompactRow({ alert, onSendTele
   const tradePlan = plan.trade_plan || {}
   const optPlan = plan.option_plan || null
 
-  const cleanSym = (alert.symbol || '').replace(/^(NSE|BSE|MCX|NFO|CDS):/, '').trim().toUpperCase()
+  const cleanSym = (alert.symbol || '').replace(/^(NSE|BSE|MCX|NFO|CDS|CRYPTO|BINANCE):/, '').trim().toUpperCase()
   const rawContract = alert.contract_symbol || optPlan?.contract_symbol || plan.option_contract || ''
-  const cleanContract = rawContract.replace(/^(NSE|BSE|MCX|NFO|CDS):/, '').trim().toUpperCase()
+  const cleanContract = rawContract.replace(/^(NSE|BSE|MCX|NFO|CDS|CRYPTO|BINANCE):/, '').trim().toUpperCase()
+
+  const isCrypto = (alert.exchange || '').toUpperCase() === 'CRYPTO' || (alert.exchange || '').toUpperCase() === 'BINANCE' || (alert.segment || '').toUpperCase() === 'CRYPTO'
+  const currSym = isCrypto ? '$' : '₹'
 
   const liveSpotBySym = useLiveSpot(cleanSym)
   const liveSpotByFull = useLiveSpot(alert.symbol !== cleanSym ? alert.symbol : null)
@@ -40,7 +43,7 @@ export const AlertCompactRow = memo(function AlertCompactRow({ alert, onSendTele
   const isFuture = Boolean(rawContract?.toUpperCase().includes('FUT') || alert.symbol?.toUpperCase().includes('FUT') || alert.derivative_type === 'FUT')
   
   const isPureOption = alert.alert_type === 'OPTIONS_MOMENTUM' || alert.alert_type === 'OPTION_WRITE' || (alert.alert_type === 'GAMMA_BLAST' && optType) || (rawContract && (rawContract.endsWith('CE') || rawContract.endsWith('PE')) && alert.exchange === 'NFO')
-  const isSpotSetup = alert.alert_type === 'ASYMMETRIC_OPPORTUNITY' || alert.alert_type === 'SQUEEZE_BREAKOUT' || alert.alert_type === 'SQUEEZE_BREAKDOWN' || alert.alert_type === 'PATTERN_COILING' || alert.alert_type === 'MOMENTUM_ACCELERATION' || alert.alert_type === 'POCKET_PIVOT' || alert.alert_type === 'PRECURSOR_RADAR' || alert.alert_type === 'SMC_SWEEP' || alert.alert_type === 'CIRCUIT_WARNING' || alert.alert_type === 'COMMODITY_MOMENTUM' || alert.alert_type === 'TURTLE_SOUP_SHORT' || alert.alert_type === 'IRON_CONDOR_PINNING'
+  const isSpotSetup = alert.alert_type === 'ASYMMETRIC_OPPORTUNITY' || alert.alert_type === 'SQUEEZE_BREAKOUT' || alert.alert_type === 'SQUEEZE_BREAKDOWN' || alert.alert_type === 'PATTERN_COILING' || alert.alert_type === 'MOMENTUM_ACCELERATION' || alert.alert_type === 'POCKET_PIVOT' || alert.alert_type === 'PRECURSOR_RADAR' || alert.alert_type === 'SMC_SWEEP' || alert.alert_type === 'CIRCUIT_WARNING' || alert.alert_type === 'COMMODITY_MOMENTUM' || alert.alert_type === 'TURTLE_SOUP_SHORT' || alert.alert_type === 'IRON_CONDOR_PINNING' || alert.alert_type === 'CRYPTO_SQUEEZE' || alert.alert_type === 'CRYPTO_MOMENTUM'
   const isDerivative = !isSpotSetup && Boolean(isFuture || isPureOption || (alert.exchange === 'NFO' && (optType || strikeNum || rawContract)))
 
   const lotSize = isDerivative ? (alert.lot_size || alert.metrics?.lot_size || INDEX_LOT_SIZES[cleanSym] || null) : null
@@ -254,8 +257,8 @@ export const AlertCompactRow = memo(function AlertCompactRow({ alert, onSendTele
     ? { label: '🔥 IGNITED', cls: 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30 animate-pulse' }
     : { label: '🟢 ACTIVE', cls: 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20' }
 
-  const fmt = (n, dec = 0) => n != null && !isNaN(n) ? Number(n).toLocaleString('en-IN', { minimumFractionDigits: dec, maximumFractionDigits: dec }) : '—'
-  const fmtP = (n) => n != null && !isNaN(n) ? Number(n).toLocaleString('en-IN', { minimumFractionDigits: Number(n) < 100 ? 1 : 0, maximumFractionDigits: 1 }) : '—'
+  const fmt = (n, dec = 0) => n != null && !isNaN(n) ? Number(n).toLocaleString(isCrypto ? 'en-US' : 'en-IN', { minimumFractionDigits: dec, maximumFractionDigits: dec }) : '—'
+  const fmtP = (n) => n != null && !isNaN(n) ? Number(n).toLocaleString(isCrypto ? 'en-US' : 'en-IN', { minimumFractionDigits: Number(n) < 100 ? 1 : 0, maximumFractionDigits: isCrypto ? 2 : 1 }) : '—'
 
   const flashClass = isDerivative
     ? (liveContract?.flash === 'up' ? 'bg-emerald-500/30 text-emerald-300 ring-1 ring-emerald-400' : liveContract?.flash === 'down' ? 'bg-rose-500/30 text-rose-300 ring-1 ring-rose-400' : '')
@@ -279,7 +282,7 @@ export const AlertCompactRow = memo(function AlertCompactRow({ alert, onSendTele
         <span className="text-[11px] font-black text-text font-mono whitespace-nowrap">{cleanSym}</span>
         {strikeNum && !isFuture && (
           <span className="text-[10px] font-black text-gold font-mono whitespace-nowrap">
-            {Number(strikeNum).toLocaleString('en-IN')}
+            {currSym}{Number(strikeNum).toLocaleString(isCrypto ? 'en-US' : 'en-IN')}
           </span>
         )}
         {optType && !isFuture && (
@@ -395,7 +398,7 @@ export const AlertCompactRow = memo(function AlertCompactRow({ alert, onSendTele
               ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30 shadow-[0_0_8px_rgba(16,185,129,0.15)]'
               : 'bg-rose-500/15 text-rose-300 border-rose-500/30'
           }`} title="Live Return vs Entry">
-            {liveReturn.isProfitable ? '▲ +' : '▼ '}{liveReturn.pct}% ({liveReturn.diff >= 0 ? '+' : ''}₹{fmtP(liveReturn.diff)})
+            {liveReturn.isProfitable ? '▲ +' : '▼ '}{liveReturn.pct}% ({liveReturn.diff >= 0 ? '+' : ''}{currSym}{fmtP(liveReturn.diff)})
           </span>
         )}
 
@@ -421,7 +424,7 @@ export const AlertCompactRow = memo(function AlertCompactRow({ alert, onSendTele
         {/* Spot Price */}
         {isDerivative && spotNum && (
           <span className="text-[9px] font-mono text-zinc-400 whitespace-nowrap">
-            Spot <span className="text-text font-bold">₹{fmt(spotNum)}</span>
+            Spot <span className="text-text font-bold">{currSym}{fmt(spotNum)}</span>
           </span>
         )}
 
@@ -429,14 +432,14 @@ export const AlertCompactRow = memo(function AlertCompactRow({ alert, onSendTele
         {isDerivative ? (
           premiumNum && (
             <span className={`text-[9px] font-mono px-1 py-0.5 rounded transition-all duration-200 whitespace-nowrap ${flashClass || 'bg-panel'}`}>
-              Prem <span className="text-gold font-black">₹{fmtP(premiumNum)}</span>
+              Prem <span className="text-gold font-black">{currSym}{fmtP(premiumNum)}</span>
               {liveContract?.ltp ? <span className="inline-block w-1 h-1 rounded-full bg-emerald-400 animate-pulse ml-0.5 align-middle" /> : null}
             </span>
           )
         ) : (
           ltpNum && (
             <span className={`text-[9px] font-mono px-1 py-0.5 rounded transition-all duration-200 whitespace-nowrap ${flashClass || 'bg-panel'}`}>
-              LTP <span className="text-text font-black">₹{fmt(ltpNum)}</span>
+              LTP <span className="text-text font-black">{currSym}{fmt(ltpNum)}</span>
               {liveSpot?.ltp ? <span className="inline-block w-1 h-1 rounded-full bg-emerald-400 animate-pulse ml-0.5 align-middle" /> : null}
             </span>
           )
@@ -447,14 +450,14 @@ export const AlertCompactRow = memo(function AlertCompactRow({ alert, onSendTele
           <span className={`text-[9px] font-mono whitespace-nowrap font-bold px-1 py-px rounded ${
             isSLHit ? 'bg-rose-500/25 text-rose-300 border border-rose-500/50' : 'text-rose-600 dark:text-rose-400'
           }`}>
-            {isSLHit ? '🛑 SL ' : 'SL '}₹{fmtP(slNum)}
+            {isSLHit ? '🛑 SL ' : 'SL '}{currSym}{fmtP(slNum)}
           </span>
         )}
 
         {/* Entry Level */}
         {entryNum && (
           <span className="text-[9px] font-mono text-amber-600 dark:text-amber-400 whitespace-nowrap font-bold">
-            Entry ₹{fmtP(entryNum)}
+            Entry {currSym}{fmtP(entryNum)}
           </span>
         )}
 
@@ -463,7 +466,7 @@ export const AlertCompactRow = memo(function AlertCompactRow({ alert, onSendTele
             className="text-[8px] font-mono font-bold text-rose-700 dark:text-rose-300 bg-rose-500/10 dark:bg-rose-500/15 px-1 py-px rounded border border-rose-300/60 dark:border-rose-500/30 whitespace-nowrap hidden sm:inline"
             title="No-Chase limit: Entries beyond this price are mathematically disqualified"
           >
-            Max ₹{fmtP(alert.no_chase_boundary)}
+            Max {currSym}{fmtP(alert.no_chase_boundary)}
           </span>
         )}
 
@@ -473,20 +476,20 @@ export const AlertCompactRow = memo(function AlertCompactRow({ alert, onSendTele
             <span className={`px-1 py-px rounded font-bold transition-all ${
               isT1Hit ? 'bg-emerald-500/25 text-emerald-300 border border-emerald-500/40 shadow-sm' : 'text-emerald-500 dark:text-emerald-400'
             }`}>
-              {isT1Hit ? '✅ T1 ' : 'T1 '}₹{fmtP(t1Num)}
+              {isT1Hit ? '✅ T1 ' : 'T1 '}{currSym}{fmtP(t1Num)}
             </span>
             {t2Num && (
               <span className={`px-1 py-px rounded font-bold transition-all ${
                 isT2Hit ? 'bg-cyan-500/25 text-cyan-200 border border-cyan-500/40 shadow-sm' : 'text-cyan-500 dark:text-cyan-400'
               }`}>
-                {isT2Hit ? '✅ T2 ' : 'T2 '}₹{fmtP(t2Num)}
+                {isT2Hit ? '✅ T2 ' : 'T2 '}{currSym}{fmtP(t2Num)}
               </span>
             )}
             {t3Num && (
               <span className={`px-1 py-px rounded font-bold transition-all ${
                 isT3Hit ? 'bg-purple-500/25 text-purple-200 border border-purple-500/40 shadow-sm' : 'text-purple-400 dark:text-purple-300'
               }`}>
-                {isT3Hit ? '🚀 T3 ' : 'T3 '}₹{fmtP(t3Num)}
+                {isT3Hit ? '🚀 T3 ' : 'T3 '}{currSym}{fmtP(t3Num)}
               </span>
             )}
           </span>
@@ -513,11 +516,11 @@ export const AlertCompactRow = memo(function AlertCompactRow({ alert, onSendTele
             e.stopPropagation()
             const txt = [
               `${cleanSym}${strikeNum ? ' ' + strikeNum : ''}${optType ? optType : ''}${expiryShort ? ' ' + expiryShort : ''}`,
-              isDerivative ? (spotNum ? `Spot ₹${fmt(spotNum)} Prem ₹${fmtP(premiumNum)}` : '') : `LTP ₹${fmt(ltpNum)}`,
+              isDerivative ? (spotNum ? `Spot ${currSym}${fmt(spotNum)} Prem ${currSym}${fmtP(premiumNum)}` : '') : `LTP ${currSym}${fmt(ltpNum)}`,
               lotSize ? `Lot ${lotSize}` : '',
-              slNum ? `SL ₹${fmtP(slNum)}` : '',
-              entryNum ? `Entry ₹${fmtP(entryNum)}` : '',
-              t1Num ? `T1 ₹${fmtP(t1Num)}${t2Num ? ' T2 ₹' + fmtP(t2Num) : ''}${t3Num ? ' T3 ₹' + fmtP(t3Num) : ''}` : '',
+              slNum ? `SL ${currSym}${fmtP(slNum)}` : '',
+              entryNum ? `Entry ${currSym}${fmtP(entryNum)}` : '',
+              t1Num ? `T1 ${currSym}${fmtP(t1Num)}${t2Num ? ` T2 ${currSym}` + fmtP(t2Num) : ''}${t3Num ? ` T3 ${currSym}` + fmtP(t3Num) : ''}` : '',
               `Conv ${conviction} · ${alert.direction}`,
             ].filter(Boolean).join(' | ')
             navigator.clipboard?.writeText(txt).catch(() => {})
@@ -544,7 +547,7 @@ export const AlertCompactRow = memo(function AlertCompactRow({ alert, onSendTele
               }
             }}
             className="btn btn-xs text-[9px] px-1.5 font-bold flex-shrink-0 text-indigo-700 dark:text-indigo-300 hover:text-indigo-900 dark:hover:text-indigo-200 bg-indigo-500/15 hover:bg-indigo-500/25 border border-indigo-400/40 dark:border-indigo-500/35 hover:border-indigo-500/60 transition-all"
-            title={`Option Alternative: ${optPlan?.contract_symbol || plan.option_contract} @ ₹${optPlan?.entry_premium || plan.option_entry?.replace('₹', '') || '—'} (Click to trade Option)`}
+            title={`Option Alternative: ${optPlan?.contract_symbol || plan.option_contract} @ ${currSym}${optPlan?.entry_premium || plan.option_entry?.replace(/^[₹$]/, '') || '—'} (Click to trade Option)`}
           >⚡ Opt {optPlan?.contract_symbol ? optPlan.contract_symbol.slice(-6) : (plan.option_contract ? plan.option_contract.slice(-6) : '')}</button>
         )}
 
