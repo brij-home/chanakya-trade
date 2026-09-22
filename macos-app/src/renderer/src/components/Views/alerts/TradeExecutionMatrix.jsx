@@ -212,6 +212,11 @@ export function TradeExecutionMatrix({
           <div className="text-xs font-black text-amber-200 mt-0.5">
             {currSym}{formatNum(levels.entry)}
           </div>
+          {levels.entry_range ? (
+            <div className="text-[8px] text-amber-300/90 font-mono font-medium truncate" title="Optimal Trade Entry (OTE) Pullback Range">
+              🎯 OTE {levels.entry_range}
+            </div>
+          ) : null}
           {levels.no_chase_boundary ? (
             <div className="text-[8px] text-rose-400 font-bold truncate" title="No-Chase Maximum Entry Limit">
               🛑 Max {currSym}{formatNum(levels.no_chase_boundary)}

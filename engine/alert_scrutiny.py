@@ -532,6 +532,93 @@ class AlertScrutinyAuditor:
         except Exception:
             pass
 
+        # 7b. Opposing Major Zone Collision Gate (Truncated Headroom):
+        # Prevent buying right beneath a major overhead supply zone (PDH/Day High) or shorting right above major demand (PDL/Day Low)
+        ref_spot = float(spot_val or (ltp if not is_option_premium_levels else 0.0))
+        if ref_spot > 0:
+            is_bull_setup = (
+                direction in ("BULLISH", "LONG", "BUY")
+                or (has_opt_marker and getattr(alert, "option_type", "") == "CE")
+            )
+            is_bear_setup = (
+                direction in ("BEARISH", "SHORT", "SELL")
+                or (has_opt_marker and getattr(alert, "option_type", "") == "PE")
+            )
+
+            if is_bull_setup and not is_bear_setup:
+                overhead_barriers: list[tuple[float, str]] = []
+                pdh = float(metrics_dict.get("prev_day_high") or 0.0)
+                pwh = float(metrics_dict.get("prev_week_high") or 0.0)
+                dh = float(metrics_dict.get("day_high") or 0.0)
+                dl = float(metrics_dict.get("day_low") or 0.0)
+                if dh > ref_spot and dl > 0 and ((dh - dl) / ref_spot) >= 0.0025:
+                    overhead_barriers.append((dh, "Day High"))
+                if pdh > ref_spot:
+                    overhead_barriers.append((pdh, "Previous Day High (PDH)"))
+                if pwh > ref_spot:
+                    overhead_barriers.append((pwh, "Previous Week High (PWH)"))
+
+                for barrier_lvl, barrier_name in overhead_barriers:
+                    headroom_pts = barrier_lvl - ref_spot
+                    headroom_pct = (headroom_pts / ref_spot) * 100.0
+                    if 0.0 < headroom_pct < 0.15:
+                        return (
+                            False,
+                            f"Opposing Supply Collision: Spot (₹{ref_spot:,.1f}) is right beneath {barrier_name} (₹{barrier_lvl:,.1f}, only {headroom_pts:.1f} pts / {headroom_pct:.2f}% headroom); avoid buying into resistance",
+                            flags,
+                        )
+            elif is_bear_setup and not is_bull_setup:
+                underneath_barriers: list[tuple[float, str]] = []
+                pdl = float(metrics_dict.get("prev_day_low") or 0.0)
+                pwl = float(metrics_dict.get("prev_week_low") or 0.0)
+                dh = float(metrics_dict.get("day_high") or 0.0)
+                dl = float(metrics_dict.get("day_low") or 0.0)
+                if dl > 0 and dl < ref_spot and dh > 0 and ((dh - dl) / ref_spot) >= 0.0025:
+                    underneath_barriers.append((dl, "Day Low"))
+                if pdl > 0 and pdl < ref_spot:
+                    underneath_barriers.append((pdl, "Previous Day Low (PDL)"))
+                if pwl > 0 and pwl < ref_spot:
+                    underneath_barriers.append((pwl, "Previous Week Low (PWL)"))
+
+                for barrier_lvl, barrier_name in underneath_barriers:
+                    headroom_pts = ref_spot - barrier_lvl
+                    headroom_pct = (headroom_pts / ref_spot) * 100.0
+                    if 0.0 < headroom_pct < 0.15:
+                        return (
+                            False,
+                            f"Opposing Demand Collision: Spot (₹{ref_spot:,.1f}) is right above {barrier_name} (₹{barrier_lvl:,.1f}, only {headroom_pts:.1f} pts / {headroom_pct:.2f}% headroom); avoid shorting into support",
+                            flags,
+                        )
+
+        # 7c. VWAP Overextension & Climax Exhaustion Gate:
+        # Disqualify setups where price has moved too far from session VWAP without a base
+        spot_vwap_pct = None
+        if isinstance(metrics_dict, dict) and metrics_dict.get("spot_to_vwap_pct") is not None:
+            try:
+                spot_vwap_pct = float(metrics_dict["spot_to_vwap_pct"])
+            except (ValueError, TypeError):
+                pass
+        if spot_vwap_pct is None:
+            m_vwap = float((metrics_dict.get("vwap") if isinstance(metrics_dict, dict) else 0.0) or 0.0)
+            if ref_spot > 0 and m_vwap > 0:
+                spot_vwap_pct = round(((ref_spot - m_vwap) / m_vwap) * 100.0, 2)
+
+        if spot_vwap_pct is not None:
+            is_idx = clean_sym in INDEX_MIN_SL_FLOORS
+            max_ext = 0.65 if is_idx else 1.40
+            if (direction in ("BULLISH", "LONG", "BUY") or getattr(alert, "option_type", "") == "CE") and spot_vwap_pct > max_ext:
+                return (
+                    False,
+                    f"Climax Exhaustion: Spot is extended +{spot_vwap_pct:.2f}% above VWAP (>{max_ext:.2f}% threshold); wait for pullback to VWAP/20-EMA",
+                    flags,
+                )
+            elif (direction in ("BEARISH", "SHORT", "SELL") or getattr(alert, "option_type", "") == "PE") and spot_vwap_pct < -max_ext:
+                return (
+                    False,
+                    f"Capitulation Exhaustion: Spot is extended {spot_vwap_pct:.2f}% below VWAP (<-{max_ext:.2f}% threshold); wait for relief bounce",
+                    flags,
+                )
+
         # 8. Climax / Overbought Exhaustion Filter:
         # Prevent buying the top of a parabolic blow-off or shorting the very bottom of a capitulation
         rsi_val = None
@@ -551,10 +638,12 @@ class AlertScrutinyAuditor:
 
         if rsi_val is not None and rsi_val > 0:
             is_put_option = (
-                atype == "OPTIONS_MOMENTUM" and getattr(alert, "option_type", "") == "PE"
+                (atype in ("OPTIONS_MOMENTUM", "GAMMA_BLAST") and getattr(alert, "option_type", "") == "PE")
+                or direction in ("BEARISH", "SHORT", "SELL")
             )
             is_call_option = (
-                atype == "OPTIONS_MOMENTUM" and getattr(alert, "option_type", "") == "CE"
+                (atype in ("OPTIONS_MOMENTUM", "GAMMA_BLAST") and getattr(alert, "option_type", "") == "CE")
+                or direction in ("BULLISH", "LONG", "BUY")
             )
 
             tf_str = str(
@@ -576,7 +665,7 @@ class AlertScrutinyAuditor:
             rsi_oversold = 28.0 if is_intraday else 22.0
 
             # Long equity / Call option: reject when RSI exceeds threshold
-            if (direction in ("BULLISH", "LONG", "BUY") or is_call_option) and not is_put_option:
+            if is_call_option and not is_put_option:
                 if rsi_val > rsi_overbought:
                     return (
                         False,
@@ -584,9 +673,7 @@ class AlertScrutinyAuditor:
                         flags,
                     )
             # Short equity / Put option (underlying): reject when underlying RSI breaches oversold floor
-            elif (
-                direction in ("BEARISH", "SHORT", "SELL") or is_put_option
-            ) and not is_call_option:
+            elif is_put_option and not is_call_option:
                 if rsi_val < rsi_oversold:
                     return (
                         False,
@@ -958,39 +1045,103 @@ class AlertScrutinyAuditor:
                         )
                         or getattr(alert, "rrg_quadrant", "")
                     ).upper()
-                    is_defensive_leader = any(
-                        d in sec_name for d in ("PHARMA", "FMCG", "HEALTH")
-                    ) and rrg_quad in ("LEADING", "IMPROVING")
+                    # Institutional Decoupler Recognition (SEPA / Outperforming Leaders):
+                    # A stock with massive independent institutional participation, high RVOL, or explosive option volume
+                    # is an institutional leader decoupling from market drag (e.g. SWIGGY +4.16%, Call +254%).
+                    vol_oi_val = float((metrics_dict or {}).get("vol_oi_ratio", 0.0) or 0.0)
+                    opt_vol = int((metrics_dict or {}).get("volume", 0) or 0)
+                    opt_pch = float(
+                        (metrics_dict or {}).get("pchange", 0.0)
+                        or (metrics_dict or {}).get("option_pchange", 0.0)
+                        or (metrics_dict or {}).get("opt_pchange", 0.0)
+                        or 0.0
+                    )
+                    spot_chg = float((metrics_dict or {}).get("spot_change_pct", 0.0) or (metrics_dict or {}).get("change_pct", 0.0) or 0.0)
+                    rvol_val = float((metrics_dict or {}).get("rvol", 0.0) or (metrics_dict or {}).get("tod_rvol", 0.0) or 0.0)
+
+                    # Explicit decoupler tag from upstream scan engine (highest precedence)
+                    upstream_decoupler_tag = str(
+                        (metrics_dict or {}).get("decoupler_status", "") or ""
+                    ).upper()
+                    is_upstream_decoupler = (upstream_decoupler_tag == "VERIFIED_DECOUPLER")
+
+                    is_defensive_leader = bool(
+                        any(d in sec_name for d in ("PHARMA", "FMCG", "HEALTH", "CONSUMER"))
+                        and spot_chg >= 0.5
+                    )
+                    is_options_surge_decoupler = bool(
+                        vol_oi_val >= 2.0 and opt_vol >= 3000 and (opt_pch >= 20.0 or spot_chg >= 1.5)
+                    )
+                    is_equity_momentum_decoupler = bool(
+                        spot_chg >= 2.0 and (rvol_val >= 1.8 or rrg_quad in ("LEADING", "IMPROVING"))
+                    )
+                    is_rrg_momentum_decoupler = bool(
+                        rrg_quad in ("LEADING", "IMPROVING") and (spot_chg >= 1.0 or rvol_val >= 1.5)
+                    )
+                    is_thematic_decoupler = bool(
+                        any(
+                            d in sec_name for d in ("DEFENCE", "RAIL", "ENERGY", "CAPITAL", "INFRA", "EMS", "TECH", "SOLAR", "CONSUMER")
+                        ) and spot_chg >= 1.5
+                    )
+
+                    is_verified_decoupler = bool(
+                        is_upstream_decoupler
+                        or is_defensive_leader
+                        or is_options_surge_decoupler
+                        or is_equity_momentum_decoupler
+                        or is_rrg_momentum_decoupler
+                        or is_thematic_decoupler
+                    )
+
 
                     # Bullish equity alert during severe NIFTY markdown:
                     if (
                         direction in ("BULLISH", "LONG", "BUY")
                         or (atype == "OPTIONS_MOMENTUM" and getattr(alert, "option_type", "") == "CE")
                     ) and is_nifty_markdown:
-                        if not is_defensive_leader:
+                        if not is_verified_decoupler:
                             flags["macro_regime_aligned"] = False
+                            flags["benchmark_regime_valid"] = False
                             return (
                                 False,
                                 f"Benchmark Gravitational Veto: NIFTY 50 in structural markdown ({n_chg_f:.2f}%, below VWAP). Bullish equity breakouts face >75% failure probability during market sell-offs. Mandate short/put setups or leading defensive decouplers.",
                                 flags,
                             )
+                        else:
+                            flags["benchmark_regime_valid"] = True
+                            flags["decoupler_status"] = "VERIFIED_DECOUPLER"
+                            if isinstance(metrics_dict, dict):
+                                metrics_dict["decoupler_status"] = "VERIFIED_DECOUPLER"
 
                     # Bearish equity alert during strong NIFTY markup:
                     if (
                         direction in ("BEARISH", "SHORT", "SELL")
                         or (atype == "OPTIONS_MOMENTUM" and getattr(alert, "option_type", "") == "PE")
                     ) and is_nifty_markup:
-                        is_lagging_breakdown = rrg_quad == "LAGGING"
-                        if not is_lagging_breakdown:
+                        is_short_breakdown_decoupler = bool(
+                            rrg_quad == "LAGGING"
+                            or (vol_oi_val >= 2.0 and opt_vol >= 3000 and (opt_pch >= 20.0 or spot_chg <= -1.5))
+                            or (spot_chg <= -2.0 and (rvol_val >= 1.8 or rrg_quad == "LAGGING"))
+                        )
+                        if not is_short_breakdown_decoupler:
                             flags["macro_regime_aligned"] = False
+                            flags["benchmark_regime_valid"] = False
                             return (
                                 False,
                                 f"Benchmark Gravitational Veto: NIFTY 50 in strong structural markup (+{n_chg_f:.2f}%, above VWAP). Short equity breakdowns have high short-covering squeeze risk.",
                                 flags,
                             )
+                        else:
+                            flags["benchmark_regime_valid"] = True
+                            flags["decoupler_status"] = "VERIFIED_DECOUPLER"
+                            if isinstance(metrics_dict, dict):
+                                metrics_dict["decoupler_status"] = "VERIFIED_DECOUPLER"
+
                 except (ValueError, TypeError):
                     pass
         flags["macro_regime_aligned"] = True
+        flags.setdefault("benchmark_regime_valid", True)
+
 
         # 15. 3-Bar Parabolic Velocity / Climax Acceleration Gate (Anti-FOMO):
         # Disallow market chasing at the absolute tip of a vertical 3-bar blow-off
@@ -1325,7 +1476,7 @@ class AlertScrutinyAuditor:
                 messages=[{"role": "user", "content": prompt}],
                 stream=False,
                 enable_tools=False,
-                max_tokens=500,
+                max_tokens=750,
             )
             return str(resp or "").strip()
 

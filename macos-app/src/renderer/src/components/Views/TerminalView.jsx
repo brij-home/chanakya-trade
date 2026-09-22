@@ -783,7 +783,7 @@ export default function TerminalView({
         <span className="text-[10px] font-bold text-muted uppercase tracking-wider flex items-center gap-1">
           <span>⚡</span> QUICK:
         </span>
-        {['NIFTY', 'BANKNIFTY', 'RELIANCE', 'HDFCBANK', 'ICICIBANK', 'INFY', 'TCS', 'ITC', 'LT', 'SBIN'].map((sym) => (
+        {['NIFTY', 'BANKNIFTY', 'CRUDEOIL', 'NATURALGAS', 'GOLD', 'SILVER', 'BTC', 'ETH', 'RELIANCE', 'HDFCBANK', 'INFY'].map((sym) => (
           <button
             key={sym}
             onClick={() => setSelectedSymbol(sym)}

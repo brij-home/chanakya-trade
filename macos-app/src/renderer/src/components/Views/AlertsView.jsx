@@ -599,6 +599,11 @@ const AutoAlertCard = memo(function AutoAlertCard({
                 {alert.metrics.scrutiny.score}
               </span>
             )}
+            {(alert.entry_range || alert.optimal_entry_range) && (
+              <span className="text-[9px] font-mono font-bold px-1 py-px rounded bg-amber-500/10 dark:bg-amber-500/15 text-amber-700 dark:text-amber-300 border border-amber-300/60 dark:border-amber-500/30 whitespace-nowrap" title="Optimal Trade Entry (OTE) Pullback Range">
+                🎯 OTE {alert.entry_range || alert.optimal_entry_range}
+              </span>
+            )}
             {alert.no_chase_boundary && (
               <span className="text-[9px] font-mono font-bold px-1 py-px rounded bg-rose-500/10 dark:bg-rose-500/15 text-rose-700 dark:text-rose-300 border border-rose-300/60 dark:border-rose-500/30 whitespace-nowrap" title="No-Chase Maximum Entry Limit">
                 🛑 Max ₹{Number(alert.no_chase_boundary).toLocaleString('en-IN', { maximumFractionDigits: 1 })}

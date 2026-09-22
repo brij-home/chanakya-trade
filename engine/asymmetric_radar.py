@@ -167,25 +167,127 @@ def resolve_recommended_option_contract(
     stop_loss: float = 0.0,
     target_1: float = 0.0,
     target_2: float = 0.0,
+    setup_type: str = "",
+    is_positional: bool = False,
+    ref_dt: Optional[datetime] = None,
 ) -> dict[str, Any]:
     """
-    Resolves the nearest liquid ATM/near-OTM options contract for an underlying index or F&O stock,
-    calculating entry premium, option target 1, target 2, and stop-loss levels.
+    Resolves recommended options and futures derivative contracts for an underlying index or F&O stock,
+    enforcing institutional safeguards:
+      1. Single-stock F&O: Automatically routes to the Next-Month series during settlement week (DTE <= 4)
+         to eliminate SEBI physical delivery margin surges (25%->100%) and near-month theta collapse.
+      2. Positional Swings: Selects options with runway (DTE >= 10) to mitigate theta burn on multi-day targets.
+      3. Futures Contract Specification: Formats canonical futures ticker with cost-of-carry entry and delta 1.0 levels.
     """
-    from market.options import get_options_chain
+    from market.options import get_options_chain, get_expiries
     from engine.position_sizer import get_lot_size
+    from engine.alert_expiry import (
+        resolve_recommended_derivative_expiry,
+        get_last_thursday_of_month,
+        get_next_monthly_expiry_date,
+        _parse_expiry_date,
+    )
 
     clean_sym = symbol.upper().replace("NSE:", "").replace("NFO:", "").strip()
+    # Resolve feed-variant names (e.g. "NIFTY 50" → "NIFTY") via the canonical alias map
+    try:
+        from engine.position_sizer import _SYMBOL_ALIASES
+        clean_sym = _SYMBOL_ALIASES.get(clean_sym, clean_sym)
+    except Exception:
+        pass
     opt_type = "CE" if direction.upper() in ("BULLISH", "BUY", "LONG") else "PE"
     lot_sz = get_lot_size(clean_sym)
+    is_index = clean_sym in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX")
 
-    chain = get_options_chain(clean_sym)
+    now_dt = ref_dt or datetime.now(IST)
+    now_d = now_dt.date()
+
+    if not is_positional:
+        if setup_type in ("RUBBER_BAND_200EMA", "POCKET_PIVOT", "PRECURSOR_RADAR", "MULTIBAGGER"):
+            is_positional = True
+        elif target_1 > 0 and spot > 0 and (abs(target_1 - spot) / spot) >= 0.02:
+            is_positional = True
+
+    try:
+        available_expiries = get_expiries(clean_sym)
+    except Exception:
+        available_expiries = []
+
+    target_expiry: Optional[str] = None
+    is_next_month_routed = False
+    derivative_safeguard = None
+
+    if not is_index:
+        # Single-Stock F&O: SEBI Mandatory Physical Delivery Safeguard
+        exp_res = resolve_recommended_derivative_expiry(
+            symbol=clean_sym,
+            instrument_type="OPTION",
+            available_expiries=available_expiries,
+            ref_dt=now_dt,
+        )
+        if exp_res.get("is_next_month_routed"):
+            rec_exp = exp_res.get("recommended_expiry")
+            matched = [
+                e
+                for e in available_expiries
+                if _parse_expiry_date(e) and _parse_expiry_date(e) >= _parse_expiry_date(rec_exp)
+            ]
+            target_expiry = matched[0] if matched else rec_exp
+            is_next_month_routed = True
+            derivative_safeguard = (
+                "🎯 NEXT-MONTH ROLLOVER (Bypasses SEBI physical delivery margin surge & theta collapse)"
+            )
+        elif available_expiries:
+            target_expiry = available_expiries[0]
+    else:
+        # Index F&O: Cash Settled
+        if is_positional and available_expiries:
+            # Multi-session positional swing: select contract with runway (DTE >= 10)
+            valid_runways = [
+                e
+                for e in available_expiries
+                if _parse_expiry_date(e) and (_parse_expiry_date(e) - now_d).days >= 10
+            ]
+            if valid_runways:
+                target_expiry = valid_runways[0]
+                derivative_safeguard = (
+                    "🛡️ POSITION RUNWAY (Selected DTE >= 10 to protect multi-day swing from weekly theta decay)"
+                )
+            else:
+                target_expiry = available_expiries[-1]
+        elif available_expiries:
+            target_expiry = available_expiries[0]
+
+    chain = None
+    if target_expiry:
+        try:
+            chain = get_options_chain(clean_sym, expiry=target_expiry)
+        except TypeError:
+            chain = get_options_chain(clean_sym)
+    if not chain:
+        chain = get_options_chain(clean_sym)
+
     contracts = [c for c in chain if getattr(c, "option_type", "") == opt_type] if chain else []
 
     if contracts:
-        # Group by expiry and pick nearest expiry
+        # Group by expiry
         expiries = sorted(list({c.expiry for c in contracts if getattr(c, "expiry", "")}))
-        nearest_exp = expiries[0] if expiries else None
+        if target_expiry and target_expiry in expiries:
+            nearest_exp = target_expiry
+        elif expiries:
+            if not is_index and is_next_month_routed and len(expiries) > 1:
+                nearest_exp = expiries[1]
+            elif is_index and is_positional and len(expiries) > 1:
+                runways = [
+                    e
+                    for e in expiries
+                    if _parse_expiry_date(e) and (_parse_expiry_date(e) - now_d).days >= 10
+                ]
+                nearest_exp = runways[0] if runways else expiries[-1]
+            else:
+                nearest_exp = expiries[0]
+        else:
+            nearest_exp = target_expiry
 
         # Filter contracts for nearest expiry
         exp_contracts = (
@@ -195,7 +297,6 @@ def resolve_recommended_option_contract(
         )
 
         # Filter for liquid contracts (preventing selection of zero-liquidity ghost strikes)
-        is_index = clean_sym in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX")
         min_oi_req = 5000 if is_index else 200
         liquid_exp_contracts = [
             c
@@ -242,7 +343,7 @@ def resolve_recommended_option_contract(
         strike = float(round(spot / step) * step)
         opt_ltp = round(spot * 0.015, 1)  # ~1.5% ATM premium proxy
         contract_sym = f"{clean_sym}{int(strike)}{opt_type}"
-        expiry_date = None
+        expiry_date = target_expiry
 
     # Estimate option targets based on delta (~0.5 ATM delta)
     delta = 0.50 if opt_type == "CE" else -0.50
@@ -269,6 +370,27 @@ def resolve_recommended_option_contract(
     if opt_ltp > 0:
         opt_sl = max(opt_sl, round(max(0.05, opt_ltp * 0.70), 2))
 
+    # ── Futures Contract Specification ────────────────────────────
+    # Formulate canonical monthly futures contract: {SYMBOL}{YY}{MMM}FUT
+    fut_exp_date = _parse_expiry_date(expiry_date or target_expiry)
+    if not fut_exp_date:
+        if is_next_month_routed:
+            fut_exp_date = get_next_monthly_expiry_date(now_dt)
+        else:
+            fut_exp_date = get_last_thursday_of_month(now_d.year, now_d.month)
+            if fut_exp_date < now_d:
+                fut_exp_date = get_next_monthly_expiry_date(now_dt)
+
+    yr_2d = fut_exp_date.strftime("%y")
+    mon_3letter = fut_exp_date.strftime("%b").upper()
+    fut_contract_sym = f"{clean_sym}{yr_2d}{mon_3letter}FUT"
+
+    fut_entry = round(spot * 1.0035, 2)
+    fut_basis = fut_entry - spot
+    fut_t1 = round(target_1 + fut_basis, 2) if target_1 > 0 else 0.0
+    fut_t2 = round(target_2 + fut_basis, 2) if target_2 > 0 else 0.0
+    fut_sl = round(stop_loss + fut_basis, 2) if stop_loss > 0 else 0.0
+
     return {
         "strike": strike,
         "option_type": opt_type,
@@ -279,6 +401,22 @@ def resolve_recommended_option_contract(
         "option_target_2": opt_t2,
         "option_stop_loss": opt_sl,
         "lot_size": lot_sz,
+        # Institutional derivative safeguards
+        "is_positional": is_positional,
+        "is_next_month_routed": is_next_month_routed,
+        "derivative_safeguard": derivative_safeguard,
+        "futures_contract": fut_contract_sym,
+        "futures_symbol": f"NFO:{fut_contract_sym}",
+        "futures_entry": fut_entry,
+        "futures_target_1": fut_t1,
+        "futures_target_2": fut_t2,
+        "futures_stop_loss": fut_sl,
+        "futures_lot_size": lot_sz,
+        "futures_recommendation": (
+            "Delta 1.0 zero-decay vehicle for positional swing"
+            if is_positional
+            else None
+        ),
     }
 
 
@@ -327,6 +465,15 @@ class AsymmetricOpportunity:
     option_target_2: Optional[float] = None
     option_stop_loss: Optional[float] = None
     lot_size: Optional[int] = None
+
+    # Institutional Derivative Safeguards & Futures Mapping
+    futures_contract_symbol: Optional[str] = None
+    futures_entry: Optional[float] = None
+    futures_target_1: Optional[float] = None
+    futures_target_2: Optional[float] = None
+    futures_stop_loss: Optional[float] = None
+    is_next_month_routed: bool = False
+    derivative_safeguard: Optional[str] = None
 
     # Compatibility Aliases
     moonshot_target: float = 0.0
@@ -539,11 +686,16 @@ class AsymmetricOpportunityRadar:
                 stop_loss=sl_price,
                 target_1=t1_price,
                 target_2=t2_price,
+                setup_type="POCKET_PIVOT",
+                is_positional=True,
             )
 
         setup_lbl = "⚡ Pocket Pivot Base Accumulation"
         if opt_info and opt_info.get("contract_symbol"):
-            setup_lbl = f"{setup_lbl} [{opt_info['contract_symbol']}]"
+            suffix = f" [{opt_info['contract_symbol']}]"
+            if opt_info.get("is_next_month_routed"):
+                suffix = f" [{opt_info['contract_symbol']} · 🎯 NEXT-MONTH ROLLOVER]"
+            setup_lbl = f"{setup_lbl}{suffix}"
 
         return AsymmetricOpportunity(
             opportunity_id=f"asym-pp-{clean_sym}-{uuid.uuid4().hex[:6]}",
@@ -584,6 +736,13 @@ class AsymmetricOpportunityRadar:
             option_target_2=opt_info["option_target_2"] if opt_info else None,
             option_stop_loss=opt_info["option_stop_loss"] if opt_info else None,
             lot_size=opt_info["lot_size"] if opt_info else None,
+            futures_contract_symbol=opt_info.get("futures_contract") if opt_info else None,
+            futures_entry=opt_info.get("futures_entry") if opt_info else None,
+            futures_target_1=opt_info.get("futures_target_1") if opt_info else None,
+            futures_target_2=opt_info.get("futures_target_2") if opt_info else None,
+            futures_stop_loss=opt_info.get("futures_stop_loss") if opt_info else None,
+            is_next_month_routed=opt_info.get("is_next_month_routed", False) if opt_info else False,
+            derivative_safeguard=opt_info.get("derivative_safeguard") if opt_info else None,
             created_at=datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST"),
         )
 
@@ -697,9 +856,14 @@ class AsymmetricOpportunityRadar:
             stop_loss=sl_price,
             target_1=t1_price,
             target_2=t2_price,
+            setup_type="FNO_BAN_SQUEEZE",
+            is_positional=True,
         )
         if opt_info and opt_info.get("contract_symbol"):
-            setup_name = f"{setup_name} [{opt_info['contract_symbol']}]"
+            suffix = f" [{opt_info['contract_symbol']}]"
+            if opt_info.get("is_next_month_routed"):
+                suffix = f" [{opt_info['contract_symbol']} · 🎯 NEXT-MONTH ROLLOVER]"
+            setup_name = f"{setup_name}{suffix}"
 
         return AsymmetricOpportunity(
             opportunity_id=f"asym-mwpl-{clean_sym}-{uuid.uuid4().hex[:6]}",
@@ -736,6 +900,13 @@ class AsymmetricOpportunityRadar:
             option_target_2=opt_info["option_target_2"] if opt_info else None,
             option_stop_loss=opt_info["option_stop_loss"] if opt_info else None,
             lot_size=opt_info["lot_size"] if opt_info else None,
+            futures_contract_symbol=opt_info.get("futures_contract") if opt_info else None,
+            futures_entry=opt_info.get("futures_entry") if opt_info else None,
+            futures_target_1=opt_info.get("futures_target_1") if opt_info else None,
+            futures_target_2=opt_info.get("futures_target_2") if opt_info else None,
+            futures_stop_loss=opt_info.get("futures_stop_loss") if opt_info else None,
+            is_next_month_routed=opt_info.get("is_next_month_routed", False) if opt_info else False,
+            derivative_safeguard=opt_info.get("derivative_safeguard") if opt_info else None,
             created_at=datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST"),
         )
 
@@ -869,11 +1040,16 @@ class AsymmetricOpportunityRadar:
                 stop_loss=sl_price,
                 target_1=t1_price,
                 target_2=t2_price,
+                setup_type="RUBBER_BAND_200EMA",
+                is_positional=True,
             )
 
         setup_lbl = "🧲 Rubber Band 200-EMA Deep Value"
         if opt_info and opt_info.get("contract_symbol"):
-            setup_lbl = f"{setup_lbl} [{opt_info['contract_symbol']}]"
+            suffix = f" [{opt_info['contract_symbol']}]"
+            if opt_info.get("is_next_month_routed"):
+                suffix = f" [{opt_info['contract_symbol']} · 🎯 NEXT-MONTH ROLLOVER]"
+            setup_lbl = f"{setup_lbl}{suffix}"
 
         return AsymmetricOpportunity(
             opportunity_id=f"asym-200ema-{clean_sym}-{uuid.uuid4().hex[:6]}",
@@ -914,6 +1090,13 @@ class AsymmetricOpportunityRadar:
             option_target_2=opt_info["option_target_2"] if opt_info else None,
             option_stop_loss=opt_info["option_stop_loss"] if opt_info else None,
             lot_size=opt_info["lot_size"] if opt_info else None,
+            futures_contract_symbol=opt_info.get("futures_contract") if opt_info else None,
+            futures_entry=opt_info.get("futures_entry") if opt_info else None,
+            futures_target_1=opt_info.get("futures_target_1") if opt_info else None,
+            futures_target_2=opt_info.get("futures_target_2") if opt_info else None,
+            futures_stop_loss=opt_info.get("futures_stop_loss") if opt_info else None,
+            is_next_month_routed=opt_info.get("is_next_month_routed", False) if opt_info else False,
+            derivative_safeguard=opt_info.get("derivative_safeguard") if opt_info else None,
             created_at=datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST"),
         )
 
@@ -1441,11 +1624,16 @@ class AsymmetricOpportunityRadar:
                 stop_loss=sl_price,
                 target_1=t1_price,
                 target_2=t2_price,
+                setup_type="TURTLE_SOUP_SHORT",
+                is_positional=False,
             )
 
         setup_lbl = "🐢 ICT Turtle Soup Liquidity Sweep Short"
         if opt_info and opt_info.get("contract_symbol"):
-            setup_lbl = f"{setup_lbl} [{opt_info['contract_symbol']}]"
+            suffix = f" [{opt_info['contract_symbol']}]"
+            if opt_info.get("is_next_month_routed"):
+                suffix = f" [{opt_info['contract_symbol']} · 🎯 NEXT-MONTH ROLLOVER]"
+            setup_lbl = f"{setup_lbl}{suffix}"
 
         return AsymmetricOpportunity(
             opportunity_id=f"asym-soup-{clean_sym.lower()}-{uuid.uuid4().hex[:6]}",
@@ -1487,6 +1675,13 @@ class AsymmetricOpportunityRadar:
             option_target_2=opt_info["option_target_2"] if opt_info else None,
             option_stop_loss=opt_info["option_stop_loss"] if opt_info else None,
             lot_size=opt_info["lot_size"] if opt_info else None,
+            futures_contract_symbol=opt_info.get("futures_contract") if opt_info else None,
+            futures_entry=opt_info.get("futures_entry") if opt_info else None,
+            futures_target_1=opt_info.get("futures_target_1") if opt_info else None,
+            futures_target_2=opt_info.get("futures_target_2") if opt_info else None,
+            futures_stop_loss=opt_info.get("futures_stop_loss") if opt_info else None,
+            is_next_month_routed=opt_info.get("is_next_month_routed", False) if opt_info else False,
+            derivative_safeguard=opt_info.get("derivative_safeguard") if opt_info else None,
             created_at=datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST"),
         )
 

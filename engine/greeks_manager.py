@@ -567,9 +567,12 @@ def get_mcx_prompt_expiry_and_dte(sym: str, as_of: Optional[Any] = None) -> tupl
     """
     Resolves the exact prompt calendar expiry date and DTE for MCX commodities:
       - CRUDEOIL / CRUDEOILM: Mid-month cycle (~15th-17th of month, 2 business days prior to futures expiry)
-      - NATURALGAS / NATGASMINI: ~24th-26th of month
-      - GOLD / GOLDM / SILVER / SILVERM: ~27th of month (matching Zerodha 27SEP)
-      - COPPER / BASE METALS: ~27th-28th of month
+      - NATURALGAS / NATGASMINI: ~23rd-25th of month (2 business days prior to futures expiry)
+      - COPPER / BASE METALS: ~22nd-24th of month (2 business days prior to first tender date)
+      - GOLD / GOLDM / SILVER / SILVERM: ~24th-26th of month
+      - ZINC / ALUMINIUM: ~22nd-24th of month
+    Crucially, MCX contracts NEVER expire on weekends (Saturday/Sunday).
+    If an expiry date falls on a weekend, it automatically rolls backward to the preceding Friday.
     """
     from datetime import datetime, timezone, timedelta, date
 
@@ -581,22 +584,35 @@ def get_mcx_prompt_expiry_and_dte(sym: str, as_of: Optional[Any] = None) -> tupl
     if clean in ("CRUDEOIL", "CRUDEOILM"):
         exp_day = 16  # mid-month option expiry for Crude Oil
     elif clean in ("NATURALGAS", "NATGASMINI"):
+        exp_day = 23
+    elif clean in ("COPPER", "ZINC", "ALUMINIUM", "LEAD"):
+        exp_day = 23
+    elif clean in ("GOLD", "GOLDM"):
         exp_day = 25
-    elif clean in ("GOLD", "GOLDM", "SILVER", "SILVERM"):
-        exp_day = 27
+    elif clean in ("SILVER", "SILVERM"):
+        exp_day = 25
     else:
-        exp_day = 27
+        exp_day = 25
 
-    try:
-        cand = date(today.year, today.month, exp_day)
-    except ValueError:
-        cand = date(today.year, today.month, 28)
+    def _resolve_candidate(yr: int, mo: int, day: int) -> date:
+        try:
+            d = date(yr, mo, day)
+        except ValueError:
+            d = date(yr, mo, 28)
+        # Roll backward if Saturday (5) or Sunday (6)
+        if d.weekday() == 5:
+            d -= timedelta(days=1)
+        elif d.weekday() == 6:
+            d -= timedelta(days=2)
+        return d
+
+    cand = _resolve_candidate(today.year, today.month, exp_day)
 
     # If prompt date has already expired, roll to next month
     if cand <= today:
         next_m = 1 if today.month == 12 else today.month + 1
         next_y = today.year + 1 if today.month == 12 else today.year
-        cand = date(next_y, next_m, exp_day)
+        cand = _resolve_candidate(next_y, next_m, exp_day)
 
     dte = max(1, (cand - today).days)
     return cand.strftime("%Y-%m-%d"), dte

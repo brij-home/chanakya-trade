@@ -89,12 +89,29 @@ def get_expiry_metadata(
                 month_names = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"]
                 if m_str in month_names:
                     m_idx = month_names.index(m_str) + 1
-                    try:
-                        dt = get_last_thursday_of_month(yr, m_idx)
-                        if not expiry_type:
-                            expiry_type = "MONTHLY"
-                    except Exception:
-                        pass
+                    clean_underlying = (symbol or "").upper().replace("MCX:", "").strip()
+                    from market.instruments import COMMODITY_SYMBOLS
+                    is_comm = (
+                        clean_underlying in COMMODITY_SYMBOLS
+                        or any(csym.startswith(c) for c in COMMODITY_SYMBOLS)
+                    )
+                    if is_comm:
+                        try:
+                            from engine.greeks_manager import get_mcx_prompt_expiry_and_dte
+                            comm_sym = clean_underlying if clean_underlying in COMMODITY_SYMBOLS else next((c for c in COMMODITY_SYMBOLS if csym.startswith(c)), "CRUDEOIL")
+                            exp_date_str, _ = get_mcx_prompt_expiry_and_dte(comm_sym)
+                            dt = datetime.strptime(exp_date_str, "%Y-%m-%d").date()
+                            if not expiry_type:
+                                expiry_type = "MONTHLY"
+                        except Exception:
+                            pass
+                    if not dt:
+                        try:
+                            dt = get_last_thursday_of_month(yr, m_idx)
+                            if not expiry_type:
+                                expiry_type = "MONTHLY"
+                        except Exception:
+                            pass
 
     if not dt:
         return {

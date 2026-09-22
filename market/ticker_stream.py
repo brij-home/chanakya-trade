@@ -68,13 +68,6 @@ RIBBON_SPEC = [
         "unit": "₹",
     },
     {
-        "symbol": "FINNIFTY",
-        "display_name": "FIN NIFTY",
-        "inst": "NSE:NIFTY FIN SERVICE",
-        "category": "INDEX",
-        "unit": "₹",
-    },
-    {
         "symbol": "INDIA VIX",
         "display_name": "INDIA VIX",
         "inst": "NSE:INDIA VIX",
@@ -87,6 +80,13 @@ RIBBON_SPEC = [
         "inst": "MCX:CRUDEOIL",
         "category": "COMMODITY",
         "unit": "₹/bbl",
+    },
+    {
+        "symbol": "NATURALGAS",
+        "display_name": "NATURAL GAS",
+        "inst": "MCX:NATURALGAS",
+        "category": "COMMODITY",
+        "unit": "₹",
     },
     {
         "symbol": "GOLD",
@@ -314,6 +314,16 @@ class MarketTickerStream:
                 change_pct=0.0,
                 unit="₹/bbl",
             ),
+            "naturalgas": TickerIndexItem(
+                key="naturalgas",
+                symbol="MCX:NATURALGAS",
+                name="NATURAL GAS",
+                category="COMMODITY",
+                price=0.0,
+                change=0.0,
+                change_pct=0.0,
+                unit="₹",
+            ),
             "gold": TickerIndexItem(
                 key="gold",
                 symbol="GC=F",
@@ -388,6 +398,9 @@ class MarketTickerStream:
             "26014": "midcpnifty",
             "MCX:CRUDEOIL": "crudeoil",
             "CRUDEOIL": "crudeoil",
+            "MCX:NATURALGAS": "naturalgas",
+            "NATURALGAS": "naturalgas",
+            "NG=F": "naturalgas",
             "MCX:GOLD": "gold",
             "GOLD": "gold",
             "MCX:SILVER": "silver",
@@ -596,9 +609,12 @@ class MarketTickerStream:
                 "FINNIFTY": "finnifty",
                 "INDIA VIX": "india_vix",
                 "CRUDEOIL": "crudeoil",
+                "NATURALGAS": "naturalgas",
                 "GOLD": "gold",
                 "SILVER": "silver",
                 "BTC": "btc",
+                "ETH": "eth",
+                "SOL": "sol",
             }
             with self._lock:
                 for r in ribbon:

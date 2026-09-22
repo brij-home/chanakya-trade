@@ -99,6 +99,12 @@ export function TelegramPreflightModal({ alert, onConfirm, onCancel, sending, se
   const statusColor = scrutinyStatus === 'APPROVED' ? 'text-emerald-400' : scrutinyStatus === 'QUANT_VERIFIED' ? 'text-sky-400' : 'text-amber-400'
   const statusBg = scrutinyStatus === 'APPROVED' ? 'bg-emerald-500/15 border-emerald-500/30' : scrutinyStatus === 'QUANT_VERIFIED' ? 'bg-sky-500/15 border-sky-500/30' : 'bg-amber-500/15 border-amber-500/30'
 
+  const isBearish = optType === 'PE' || alert.direction === 'BEARISH' || (alert.actionable_plan?.action || '').includes('SELL') || (alert.actionable_plan?.action || '').includes('PUT') || (alert.headline || '').includes('PUT') || (alert.headline || '').includes('DOWN')
+  const dirBadge = isBearish ? '🔴' : '🟢'
+
+  const lotSize = alert.lot_size || alert.actionable_plan?.lot_size || alert.metrics?.lot_size || null
+  const lotTag = lotSize && Number(lotSize) > 1 ? ` (Lot: ${lotSize})` : ''
+
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/35 dark:bg-black/75 backdrop-blur-md"
@@ -111,7 +117,7 @@ export function TelegramPreflightModal({ alert, onConfirm, onCancel, sending, se
             <span className="text-lg">📨</span>
             <div>
               <div className="text-sm font-black text-text">Send to Telegram</div>
-              <div className="text-[10px] text-muted font-mono">{contractLabel}</div>
+              <div className="text-[10px] text-muted font-mono">{dirBadge} {contractLabel}{lotTag}</div>
             </div>
           </div>
           <button onClick={onCancel} className="text-muted hover:text-text text-sm font-bold w-6 h-6 flex items-center justify-center">✕</button>
@@ -348,11 +354,11 @@ export function TelegramPreflightModal({ alert, onConfirm, onCancel, sending, se
             <span className="text-gold font-bold">🧠 Confidence: {conviction}%</span>
           </div>
           <div className="text-text font-bold">
-            {alert.is_live === false ? '🧪 [TEST]' : '🟢 [REAL/LIVE]'} {alert.alert_type?.replace(/_/g, ' ')}
+            {alert.is_live === false ? '🧪 [TEST]' : `${dirBadge} [REAL/LIVE]`} {alert.alert_type?.replace(/_/g, ' ')}
           </div>
           <div className="text-zinc-300">
-            • <b>Action:</b> {alert.actionable_plan?.trade_plan?.action || alert.actionable_plan?.action || (alert.direction === 'BEARISH' ? 'BUY PUT' : 'BUY CALL')} {contractLabel}
-            {alert.ltp ? ` @ ₹${Number(alert.ltp).toFixed(1)}` : ''}
+            • <b>Action:</b> {alert.actionable_plan?.trade_plan?.action || alert.actionable_plan?.action || (alert.direction === 'BEARISH' ? 'BUY PUT' : 'BUY CALL')} <b>{contractLabel}</b>
+            {alert.ltp ? ` @ ₹${Number(alert.ltp).toFixed(1)}` : ''}{lotTag}
           </div>
           {alert.stop_loss && (
             <div className="text-rose-400">

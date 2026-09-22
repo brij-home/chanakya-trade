@@ -290,14 +290,18 @@ export const useNotificationStore = create((set, get) => ({
         list = res?.data ?? res ?? []
       } catch (_callErr) {
         // Vite browser dev fallback — sidecar IPC unavailable
-        const directRes = await fetch('http://127.0.0.1:8765/skills/alerts/auto/list', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ view_mode: 'ALL' }),
-        })
-        if (directRes.ok) {
-          const data = await directRes.json()
-          list = data?.data ?? data ?? []
+        try {
+          const directRes = await fetch('http://127.0.0.1:8765/skills/alerts/auto/list', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ view_mode: 'ALL' }),
+          })
+          if (directRes.ok) {
+            const data = await directRes.json()
+            list = data?.data ?? data ?? []
+          }
+        } catch (_netErr) {
+          // Backend offline or reloading; fallback gracefully without logging uncaught error
         }
       }
       if (Array.isArray(list) && list.length > 0) {

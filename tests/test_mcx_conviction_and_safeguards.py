@@ -672,3 +672,283 @@ def test_mtf_alignment_returns_alignment_count():
     assert "tf_5m_trend" in result
     assert "tf_15m_trend" in result
 
+
+# ── MCX Alert Quality, Options Safeguards & Provenance Tests ───────────────
+
+
+def test_copper_and_base_metals_default_to_futures_never_options(monkeypatch):
+    """
+    Verifies that COPPER, ZINC, and ALUMINIUM always default to MCX FUTURES,
+    never illiquid options, even if an options chain function returns mock contracts.
+    """
+    import pandas as pd
+    from engine.auto_alert_engine import AutoAlertEngine
+    from market.macro import MacroSnapshot
+    from brokers.base import OptionsContract
+
+    engine = AutoAlertEngine()
+    engine._alerts = []
+    engine._cooldowns = {}
+    engine._watched_commodities = ["COPPER"]
+
+    mock_quote = MagicMock()
+    mock_quote.last_price = 1413.5
+    mock_quote.ltp = 1413.5
+    mock_quote.open = 1400.0
+    mock_quote.high = 1420.0
+    mock_quote.low = 1395.0
+    mock_quote.vwap = 1405.0
+    mock_quote.change_pct = 1.8
+    mock_quote.volume = 12000
+    mock_quote.source = "REST"
+    mock_quote.provider = "live"
+
+    dates = pd.date_range("2026-09-22 18:00", periods=25, freq="5min")
+    opens = [1400.0 + (i % 5) * 1.0 for i in range(24)] + [1410.0]
+    highs = [o + 2.0 for o in opens[:-1]] + [1415.0]
+    lows = [o - 1.0 for o in opens[:-1]] + [1409.0]
+    closes = [o + 1.0 for o in opens[:-1]] + [1413.5]
+    volumes = [500.0] * 24 + [2500.0]
+    df_5m = pd.DataFrame(
+        {"open": opens, "high": highs, "low": lows, "close": closes, "volume": volumes},
+        index=dates,
+    )
+
+    mock_opt = OptionsContract(
+        symbol="MCX:COPPER26SEP1450CE",
+        underlying="COPPER",
+        expiry="2026-09-23",
+        strike=1450.0,
+        option_type="CE",
+        last_price=0.27,
+        oi=1000,
+        oi_change=50,
+        volume=5000,
+        lot_size=2500,
+        exchange="MCX",
+    )
+
+    monkeypatch.setattr(
+        "market.macro.get_macro_snapshot",
+        lambda: MacroSnapshot(dxy_change=-0.2, crude_change=0.5),
+    )
+    monkeypatch.setattr("market.options.get_options_chain", lambda sym: [mock_opt])
+
+    with patch("market.quotes.get_quote", return_value={"MCX:COPPER": mock_quote}), \
+         patch("market.history.get_ohlcv", return_value=df_5m), \
+         patch("market.quotes.get_ltp", return_value=1413.5):
+        alerts = engine.scan_commodities_now()
+        assert len(alerts) >= 1
+        alert = alerts[0]
+        plan = alert.actionable_plan
+
+        # Institutional Base Metals Rule: MUST be FUTURES
+        assert alert.derivative_type == "FUT"
+        assert alert.contract_symbol == "MCX:COPPER"
+        assert plan["preferred_vehicle"] == "FUTURES"
+        assert plan["action"] == "BUY_FUTURES"
+        assert "MCX BREAKOUT: COPPER" in alert.headline or "MCX MOMENTUM: COPPER" in alert.headline
+        assert "MCX OPTION: COPPER" not in alert.headline
+
+
+def test_mcx_prompt_expiry_weekend_rollback_and_accurate_dte():
+    """
+    Verifies that MCX options never expire on weekends and calculate exact DTE.
+    """
+    from datetime import date
+    from engine.greeks_manager import get_mcx_prompt_expiry_and_dte
+
+    # On 2026-09-22: Copper prompt expiry is 2026-09-23 (Wednesday), DTE = 1
+    exp_date, dte = get_mcx_prompt_expiry_and_dte("COPPER", as_of=date(2026, 9, 22))
+    assert exp_date == "2026-09-23"
+    assert dte == 1
+
+    # Verify that if candidate day 25 falls on Sunday (e.g. October 2026 where Oct 25 is Sunday)
+    # it rolls backward to Friday Oct 23!
+    assert date(2026, 10, 25).weekday() == 6  # Sunday
+    exp_oct, _ = get_mcx_prompt_expiry_and_dte("GOLD", as_of=date(2026, 10, 1))
+    oct_d = date.fromisoformat(exp_oct)
+    assert oct_d.weekday() < 5  # MUST be Monday-Friday, never weekend!
+    assert oct_d == date(2026, 10, 23)  # Rolled backward from Sunday 25 to Friday 23
+
+
+def test_alert_invalidation_clears_milestones_and_purges_outcomes():
+    """
+    Verifies that when an alert is invalidated:
+    1. achieved_milestones is emptied so it is never displayed or counted as a target hit.
+    2. target_status is set to INVALIDATED.
+    3. r_multiple and pnl_pct are zeroed out.
+    4. PatternLearningEngine.invalidate_alert_outcomes() is invoked to purge any false win records.
+    """
+    from engine.auto_alert_engine import AutoAlertEngine
+    from engine.alert_model import AutoAlert
+    from engine.learning_engine import pattern_learning_engine
+
+    engine = AutoAlertEngine()
+
+    test_alert = AutoAlert(
+        alert_id="test-inv-milestones-123",
+        alert_type="COMMODITY_MOMENTUM",
+        stage="TRAILING_UPDATE",
+        symbol="COPPER",
+        exchange="MCX",
+        direction="BULLISH",
+        headline="Test alert",
+        summary="Test summary",
+        ltp=1442.0,
+        trigger_level=1442.0,
+        stop_loss=1426.0,
+        target_level=1476.0,
+        confidence=85,
+        is_live=True,
+        achieved_milestones=["T1_ACHIEVED", "T2_ACHIEVED"],
+        target_status="T2_ACHIEVED",
+        r_multiple=247.95,
+        pnl_pct=8719.88,
+    )
+
+    with engine._lock:
+        engine._alerts.append(test_alert)
+
+    # Record a test outcome in pattern_learning_engine to verify purging
+    pattern_learning_engine.record_trade_outcome(
+        alert_id="test-inv-milestones-123",
+        symbol="COPPER",
+        archetype="COMMODITY_MOMENTUM",
+        entry_price=16.33,
+        exit_price=1441.63,
+        outcome="WIN_T2",
+        realized_rr=3.5,
+    )
+
+    # Invalidate alert with honest reason
+    inv = engine.invalidate_alert_by_id(
+        "test-inv-milestones-123",
+        reason="Corrupted alert: MCX option vehicle evaluated against spot price with uncalibrated COMEX basis",
+    )
+
+    assert inv is not None
+    assert inv.is_invalidated is True
+    assert inv.stage == "INVALIDATED"
+    assert inv.target_status == "INVALIDATED"
+    assert inv.achieved_milestones == []
+    assert inv.r_multiple == 0.0
+    assert inv.pnl_pct == 0.0
+    assert inv.should_trail is False
+    assert inv.trailing_decision == "INVALIDATED"
+
+    # Verify that pattern_learning_engine no longer holds WIN_T2 for this alert
+    matching = [o for o in pattern_learning_engine._outcomes if o.alert_id == "test-inv-milestones-123"]
+    assert len(matching) >= 1
+    for m in matching:
+        assert m.outcome == "INVALIDATED"
+        assert m.realized_rr == 0.0
+
+
+def test_alert_evaluator_rejects_spot_option_scale_mismatch():
+    """
+    Verifies that evaluate_alert_targets_and_trailing rejects extreme price scale mismatch
+    (e.g. current_ltp=1442.0 vs entry=16.33, ratio=88.3) and returns None instead of triggering fake WIN_T2.
+    Also verifies that when trigger_level is spot price, option target levels are never falsely triggered.
+    """
+    from engine.alert_evaluator import evaluate_alert_targets_and_trailing
+    from engine.alert_model import AutoAlert
+
+    # Scenario 1: Mismatched entry (option premium 16.33 vs spot quote 1442.05)
+    alert_mismatched = AutoAlert(
+        alert_id="test-mismatch-1",
+        alert_type="COMMODITY_MOMENTUM",
+        stage="IGNITED",
+        symbol="COPPER",
+        exchange="MCX",
+        direction="BULLISH",
+        headline="Test alert",
+        summary="Test summary",
+        ltp=16.33,
+        trigger_level=16.33,
+        stop_loss=10.6,
+        target_level=27.7,
+        confidence=85,
+        is_live=True,
+    )
+
+    res_mismatch = evaluate_alert_targets_and_trailing(alert_mismatched, current_ltp=1442.05)
+    # MUST return None because ratio is ~88x
+    assert res_mismatch is None
+
+    # Scenario 2: Spot trade with attached option plan (option target ₹27.7 must not trigger on spot 1442.0)
+    alert_spot = AutoAlert(
+        alert_id="test-spot-opt-plan-2",
+        alert_type="COMMODITY_MOMENTUM",
+        stage="IGNITED",
+        symbol="COPPER",
+        exchange="MCX",
+        direction="BULLISH",
+        headline="Test alert",
+        summary="Test summary",
+        ltp=1442.0,
+        trigger_level=1442.0,
+        stop_loss=1426.0,
+        target_level=1476.0,
+        confidence=85,
+        is_live=True,
+        actionable_plan={
+            "action": "BUY_CE",
+            "entry_range": "₹15.5 – ₹17.2",
+            "stop_loss": "₹10.6",
+            "target": "₹27.7",
+            "target_2": "₹36.3",
+            "preferred_vehicle": "DEFINED_RISK_OPTION",
+            "instrument_type": "OPTION",
+        },
+    )
+
+    res_spot = evaluate_alert_targets_and_trailing(alert_spot, current_ltp=1442.05)
+    # MUST NOT falsely trigger milestone or mark T2
+    assert res_spot.new_milestone is None
+    assert res_spot.target_status == "PENDING"
+    assert res_spot.r_multiple == 0.0
+
+
+def test_eod_report_excludes_invalidated_corrupted_alerts(tmp_path, monkeypatch):
+    """
+    Verifies that EODReportGenerator excludes invalidated corrupted alerts
+    from win counts and star setups.
+    """
+    import json
+    from engine.eod_report_generator import EODReportGenerator
+
+    mock_alerts = [
+        {
+            "alert_id": "comm-copper-corrupt",
+            "alert_type": "COMMODITY_MOMENTUM",
+            "symbol": "COPPER",
+            "exchange": "MCX",
+            "direction": "BULLISH",
+            "stage": "INVALIDATED",
+            "target_status": "INVALIDATED",
+            "achieved_milestones": [],
+            "is_invalidated": True,
+            "invalidation_reason": "Corrupted alert: MCX option vehicle evaluated against spot price with uncalibrated COMEX basis",
+            "trigger_level": 1442.0,
+            "ltp": 1442.0,
+            "stop_loss": 1426.0,
+            "target_level": 1476.0,
+            "created_at": "2026-09-22 14:42:00 IST",
+            "triggered_at": "2026-09-22 14:42:00 IST",
+        }
+    ]
+
+    alerts_file = tmp_path / "auto_alerts.json"
+    alerts_file.write_text(json.dumps(mock_alerts, indent=2), encoding="utf-8")
+    monkeypatch.setenv("TRADING_PLATFORM_DATA", str(tmp_path))
+
+    gen = EODReportGenerator(data_file=alerts_file)
+    report = gen.generate(target_date="2026-09-22")
+    # The corrupted alert MUST NOT be counted as a win or trade
+    assert report.win_count == 0
+    assert report.loss_count == 0
+    assert len(report.star_setups) == 0
+
+
+

@@ -40,6 +40,7 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any, Optional
 import time
+import threading
 
 import numpy as np
 import pandas as pd
@@ -166,6 +167,7 @@ class PatternLearningEngine:
         self._post_mortems: list[InvalidationPostMortem] = []
         self._symbol_lockouts: dict[str, dict[str, Any]] = {}
         self._invalidation_counts: dict[str, int] = {}  # symbol:direction -> count today
+        self._lock = threading.Lock()
         self._factor_weights: dict[str, int] = {
             "volume_dry_up": 25,
             "squeeze_coiling": 20,
@@ -333,20 +335,41 @@ class PatternLearningEngine:
         )
         return rec
 
+    def invalidate_alert_outcomes(self, alert_id: str, reason: str = "") -> int:
+        """
+        Invalidates and zeroes out any recorded outcomes for an alert_id
+        so that false or corrupted alerts are NEVER counted as wins or trade stats.
+        """
+        updated_count = 0
+        with self._lock:
+            for out in self._outcomes:
+                if out.alert_id == alert_id and out.outcome != "INVALIDATED":
+                    out.outcome = "INVALIDATED"
+                    out.realized_rr = 0.0
+                    updated_count += 1
+            if updated_count > 0:
+                self._save_outcomes()
+                self._recalculate_factor_weights()
+                logger.info(
+                    f"[PatternLearningEngine] Invalidated {updated_count} outcome(s) for alert {alert_id}: {reason}"
+                )
+        return updated_count
+
     def _recalculate_factor_weights(self) -> None:
         """
         Dynamically recalibrates factor weights based on empirical win rate.
         If volume dry-up correlates with a high win rate, its weight expands.
         """
-        if len(self._outcomes) < 5:
+        valid_outcomes = [o for o in self._outcomes if o.outcome not in ("INVALIDATED", "CORRUPTED", "EXCLUDED")]
+        if len(valid_outcomes) < 5:
             # Not enough statistical sample size yet; preserve institutional baseline
             return
 
         factor_wins: dict[str, int] = {k: 0 for k in self._factor_weights}
         factor_totals: dict[str, int] = {k: 0 for k in self._factor_weights}
 
-        for out in self._outcomes:
-            is_win = out.outcome in ("WIN_T1", "WIN_T2")
+        for out in valid_outcomes:
+            is_win = out.outcome in ("WIN_T1", "WIN_T2", "WIN_TARGET")
             for f_text in out.factors_present:
                 f_lower = f_text.lower()
                 if "volume dry-up" in f_lower or "volume contraction" in f_lower:
@@ -1392,13 +1415,14 @@ class PatternLearningEngine:
     def get_learning_analytics(self) -> dict[str, Any]:
         """Returns comprehensive self-learning intelligence and factor attribution."""
         total_archetypes = len(self._fingerprints)
-        total_outcomes = len(self._outcomes)
-        wins = [o for o in self._outcomes if o.outcome in ("WIN_T1", "WIN_T2")]
+        valid_outcomes = [o for o in self._outcomes if o.outcome not in ("INVALIDATED", "CORRUPTED", "EXCLUDED")]
+        total_outcomes = len(valid_outcomes)
+        wins = [o for o in valid_outcomes if o.outcome in ("WIN_T1", "WIN_T2", "WIN_TARGET")]
         win_rate = (
             round((len(wins) / max(1, total_outcomes)) * 100, 1) if total_outcomes > 0 else 85.0
         )
         avg_rr = (
-            round(float(np.mean([o.realized_rr for o in self._outcomes])), 2)
+            round(float(np.mean([o.realized_rr for o in valid_outcomes])), 2)
             if total_outcomes > 0
             else 3.2
         )

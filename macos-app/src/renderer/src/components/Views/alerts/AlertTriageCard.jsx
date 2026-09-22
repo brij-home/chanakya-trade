@@ -282,6 +282,14 @@ export const AlertTriageCard = memo(function AlertTriageCard({
       <div className="flex items-center justify-between gap-1 pt-1 border-t border-border/20 text-[9px] font-mono flex-wrap">
         <div className="flex items-center gap-1.5 flex-wrap">
           {entryNum && <span className="text-gold font-bold">Entry {currSym}{fmtP(entryNum)}</span>}
+          {(alert.entry_range || alert.optimal_entry_range) && (
+            <span
+              className="text-[8px] font-mono font-bold text-amber-700 dark:text-amber-300 bg-amber-500/10 dark:bg-amber-500/15 px-1 py-px rounded border border-amber-300/60 dark:border-amber-500/30 whitespace-nowrap"
+              title="Optimal Trade Entry (OTE) pullback range"
+            >
+              OTE {alert.entry_range || alert.optimal_entry_range}
+            </span>
+          )}
           {alert.no_chase_boundary && (
             <span
               className="text-[8px] font-mono font-bold text-rose-700 dark:text-rose-300 bg-rose-500/10 dark:bg-rose-500/15 px-1 py-px rounded border border-rose-300/60 dark:border-rose-500/30 whitespace-nowrap"

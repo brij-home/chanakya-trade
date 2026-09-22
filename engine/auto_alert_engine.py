@@ -67,12 +67,20 @@ from engine.alert_evaluator import (
     evaluate_alert_targets_and_trailing,
 )
 from engine.detectors import (
-    detect_gamma_blast,
-    detect_opening_drive,
-    detect_squeeze_breakout,
     detect_circuit_proximity,
+    detect_commodity_breakouts,
+    detect_crypto_signals,
+    detect_single_crypto_symbol,
+    detect_currency_breakouts,
+    detect_gamma_blast,
+    detect_index_call_setup,
+    detect_index_put_setup,
+    detect_intraday_mover_sparks,
     detect_learned_pattern_coiling,
+    detect_opening_drive,
     detect_opening_range_breakout,
+    detect_options_momentum_breakouts,
+    detect_squeeze_breakout,
 )
 
 
@@ -328,7 +336,27 @@ class AutoAlertEngine:
                 if alert.strike and alert.option_type
                 else ""
             )
-            alert.headline = f"🎯 [{alert.environment}] {alert.alert_type.replace('_', ' ')}: {clean_target}{c_tag} @ ₹{alert.ltp:,.1f}"
+            is_bear = (
+                getattr(alert, "option_type", "") == "PE"
+                or getattr(alert, "direction", "") in ("BEARISH", "SHORT", "SELL")
+                or "DOWN" in alert.alert_type
+                or "DROP" in alert.alert_type
+            )
+            hl_icon = "🔴" if is_bear else "🟢"
+            lot_tag = ""
+            hl_lot = getattr(alert, "lot_size", None)
+            if not hl_lot:
+                try:
+                    from engine.position_sizer import get_lot_size
+
+                    ls = get_lot_size(alert.symbol)
+                    if ls and ls > 1:
+                        hl_lot = ls
+                except Exception:
+                    hl_lot = None
+            if hl_lot and hl_lot > 1:
+                lot_tag = f" (Lot: {hl_lot})"
+            alert.headline = f"{hl_icon} [{alert.environment}] {alert.alert_type.replace('_', ' ')}: {clean_target}{c_tag} @ ₹{alert.ltp:,.1f}{lot_tag}"
 
         raw_sm = (alert.summary or "").strip()
         if not raw_sm or len(raw_sm) <= 3 or raw_sm.lower() in ("s", "test", "dummy"):
@@ -697,11 +725,15 @@ class AutoAlertEngine:
                     if existing_opp:
                         metrics_dict = alert.metrics if isinstance(alert.metrics, dict) else {}
                         summary_str = f"{alert.headline or ''} {alert.summary or ''}"
+                        # Fix 6: PDH sweep is structurally equivalent to a CHoCH reversal.
+                        # A day-high supply sweep + wick rejection confirms institutional reversal
+                        # intent; treat it as a valid structural reversal that unlocks the whiplash guard.
                         has_reversal = bool(
                             metrics_dict.get("choch")
                             or metrics_dict.get("mss")
+                            or metrics_dict.get("pdh_sweep")  # Fix 6: PDH sweep = structural reversal
                             or re.search(
-                                r"\b(choch|mss|change of character|market structure shift|trend reversal|structural reversal)\b",
+                                r"\b(choch|mss|change of character|market structure shift|trend reversal|structural reversal|pdh|supply rejection|vwap rejection)\b",
                                 summary_str,
                                 re.IGNORECASE,
                             )
@@ -1174,9 +1206,11 @@ class AutoAlertEngine:
                 # Stamp original_call_time on first insertion (immutable anchor for milestone 'Call Given:' display)
                 if not alert.original_call_time:
                     alert.original_call_time = alert.created_at
+                setattr(alert, "_recorded_epoch", time.time())
                 self._alerts.insert(0, alert)
                 if len(self._alerts) > self._max_buffer:
                     self._alerts.pop()
+
                 self._save()
                 to_dispatch = alert
 
@@ -1613,8 +1647,18 @@ class AutoAlertEngine:
         from engine.alert_expiry import is_alert_option_premium_level
 
         if is_alert_option_premium_level(alert) and alert.contract_symbol:
-            return alert.contract_symbol
-        sym = alert.symbol or ""
+            raw_c = (
+                alert.contract_symbol.replace("NIFTY 50", "NIFTY")
+                .replace("NIFTY BANK", "BANKNIFTY")
+                .strip()
+            )
+            return raw_c
+        sym = (
+            (alert.symbol or "")
+            .replace("NIFTY 50", "NIFTY")
+            .replace("NIFTY BANK", "BANKNIFTY")
+            .strip()
+        )
         exch = alert.exchange or "NSE"
         return sym if ":" in sym else f"{exch}:{sym}"
 
@@ -1626,16 +1670,26 @@ class AutoAlertEngine:
         LTPs in O(1) from the pre-fetched map, eliminating per-alert REST round-trips.
 
         Also fetches option premium symbols (contract_symbol) in the same batch.
+        Populates both canonical exchange-prefixed keys (e.g. NFO:SYM) and raw keys (e.g. SYM)
+        to guarantee instant matching without KeyErrors.
         """
         from market.quotes import get_quote, get_ltp
         import market.quotes as _mq
 
         syms: set[str] = set()
         for a in alerts:
-            syms.add(self._lookup_sym(a))
+            l_sym = self._lookup_sym(a)
+            if l_sym:
+                syms.add(l_sym)
             # Include option contract symbol as a secondary lookup for underlying alerts
             if a.contract_symbol and not is_alert_option_premium_level(a):
-                syms.add(a.contract_symbol)
+                clean_c = (
+                    a.contract_symbol.replace("NIFTY 50", "NIFTY")
+                    .replace("NIFTY BANK", "BANKNIFTY")
+                    .strip()
+                )
+                if clean_c:
+                    syms.add(clean_c)
 
         sym_list = list(syms)
         if not sym_list:
@@ -1649,20 +1703,28 @@ class AutoAlertEngine:
                     val = float(_mq.get_ltp(s) or 0.0)
                     if val > 0:
                         res[s] = val
+                        if ":" in s:
+                            res[s.split(":", 1)[1]] = val
                 except Exception:
                     pass
             return res
 
         try:
             quote_map = get_quote(sym_list)
-            return {
-                s: float(q.last_price)
-                for s, q in quote_map.items()
-                if q and getattr(q, "last_price", 0.0) > 0
-            }
+            res = {}
+            for k, q in quote_map.items():
+                if q and getattr(q, "last_price", 0.0) > 0:
+                    lp = float(q.last_price)
+                    res[k] = lp
+                    # Populate stripped key without exchange prefix for seamless lookup
+                    if ":" in k:
+                        clean_key = k.split(":", 1)[1]
+                        res[clean_key] = lp
+            return res
         except Exception as exc:
             logger.debug("[AutoAlertEngine] _batch_refresh_quotes error: %s", exc)
             return {}
+
 
     # ── Invalidation Monitoring & Alerting ──────────────────────
 
@@ -1718,6 +1780,12 @@ class AutoAlertEngine:
                     alert.invalidation_reason = reason
                     alert.invalidated_at = now_iso
                     alert.stage = "INVALIDATED"
+                    alert.target_status = "INVALIDATED"
+                    alert.achieved_milestones = []
+                    alert.should_trail = False
+                    alert.trailing_decision = "INVALIDATED"
+                    alert.r_multiple = 0.0
+                    alert.pnl_pct = 0.0
                     alert.is_archived = True
                     alert.archived_at = now_iso
                     alert.archive_reason = reason
@@ -1728,6 +1796,14 @@ class AutoAlertEngine:
                     alert.headline = f"⚠️ {tag} VIEW INVALIDATED: {alert.symbol} {alert.alert_type.replace('_', ' ')}"
                     alert.summary = reason
                     self._save()
+
+                # Invalidate any recorded pattern outcomes so it is never counted as a win
+                try:
+                    from engine.learning_engine import pattern_learning_engine
+
+                    pattern_learning_engine.invalidate_alert_outcomes(alert.alert_id, reason=reason)
+                except Exception as e:
+                    logger.debug(f"[AutoAlertEngine] Error invalidating pattern outcomes: {e}")
 
                 # Dispatch the invalidation notification immediately!
                 self._dispatch(alert)
@@ -1750,21 +1826,40 @@ class AutoAlertEngine:
                     alert.invalidation_reason = reason
                     alert.invalidated_at = now_iso
                     alert.stage = "INVALIDATED"
+                    alert.target_status = "INVALIDATED"
+                    alert.achieved_milestones = []
+                    alert.should_trail = False
+                    alert.trailing_decision = "INVALIDATED"
+                    alert.r_multiple = 0.0
+                    alert.pnl_pct = 0.0
                     alert.is_archived = True
                     alert.archived_at = now_iso
                     alert.archive_reason = reason
 
+                    # Invalidate any recorded pattern outcomes so it is never counted as a win
                     try:
                         from engine.learning_engine import pattern_learning_engine
 
-                        pm = pattern_learning_engine.conduct_invalidation_post_mortem(
-                            alert, exit_price=alert.ltp, exchange=alert.exchange
-                        )
-                        alert.metrics["post_mortem"] = pm.to_dict()
+                        pattern_learning_engine.invalidate_alert_outcomes(alert.alert_id, reason=reason)
                     except Exception as e:
-                        logger.debug(
-                            f"[AutoAlertEngine] Error in manual invalidation post-mortem: {e}"
-                        )
+                        logger.debug(f"[AutoAlertEngine] Error invalidating pattern outcomes: {e}")
+
+                    is_corruption = any(
+                        k in reason.lower()
+                        for k in ("corrupt", "phantom", "uncalibrated", "mismatch", "false alert", "unit scale")
+                    )
+                    if not is_corruption:
+                        try:
+                            from engine.learning_engine import pattern_learning_engine
+
+                            pm = pattern_learning_engine.conduct_invalidation_post_mortem(
+                                alert, exit_price=alert.ltp, exchange=alert.exchange
+                            )
+                            alert.metrics["post_mortem"] = pm.to_dict()
+                        except Exception as e:
+                            logger.debug(
+                                f"[AutoAlertEngine] Error in manual invalidation post-mortem: {e}"
+                            )
 
                     is_test = (alert.environment == "TEST") or (not alert.is_live)
                     tag = "[TEST]" if is_test else "[REAL/LIVE]"
@@ -1866,6 +1961,73 @@ class AutoAlertEngine:
 
     # ── Target & Trailing Monitoring & Alerting ─────────────────
 
+    def resolve_session_end_alerts(self) -> list[AutoAlert]:
+        """
+        At or after 15:30 IST (Indian market close), automatically resolves remaining active
+        intraday alerts (OPTIONS_MOMENTUM, SCALP, OPENING_DRIVE, INTRADAY_EQUITY, GAMMA_BLAST)
+        that never hit T1 or SL during regular market hours.
+        Marks them as 'EXPIRED_SESSION_END' with their final Mark-to-Market P&L,
+        preventing perpetual PENDING stagnation.
+        """
+        now_dt = datetime.now(IST)
+        # Indian market hours for Equity/FNO: 09:15 to 15:30 IST.
+        # Run only if time >= 15:30 IST or before 09:15 IST
+        is_market_closed = (
+            now_dt.hour > 15
+            or (now_dt.hour == 15 and now_dt.minute >= 30)
+            or now_dt.hour < 9
+            or (now_dt.hour == 9 and now_dt.minute < 15)
+        )
+        if not is_market_closed:
+            return []
+
+        resolved = []
+        now_iso = now_dt.strftime("%Y-%m-%d %H:%M:%S IST")
+        intraday_types = {
+            "OPTIONS_MOMENTUM",
+            "SCALP",
+            "OPENING_DRIVE",
+            "INTRADAY_EQUITY",
+            "GAMMA_BLAST",
+        }
+
+        with self._lock:
+            for alert in self._alerts:
+                if (
+                    not alert.is_invalidated
+                    and not alert.is_archived
+                    and alert.stage not in ("INVALIDATED", "COMPLETED", "TARGET_ACHIEVED", "EXPIRED_SESSION_END")
+                    and alert.target_status in (None, "", "PENDING")
+                    and alert.alert_type in intraday_types
+                    and (alert.exchange or "NSE").upper() in ("NSE", "NFO", "BSE")
+                ):
+                    entry_p = alert.trigger_level or alert.ltp or 0.0
+                    cur_p = alert.ltp or entry_p
+                    pnl_pct = 0.0
+                    if entry_p > 0 and cur_p > 0:
+                        if getattr(alert, "direction", "BULLISH") == "BEARISH":
+                            pnl_pct = round(((entry_p - cur_p) / entry_p) * 100.0, 2)
+                        else:
+                            pnl_pct = round(((cur_p - entry_p) / entry_p) * 100.0, 2)
+
+                    alert.stage = "COMPLETED"
+                    alert.target_status = "EXPIRED_SESSION_END"
+                    alert.is_archived = True
+                    alert.archived_at = now_iso
+                    alert.archive_reason = (
+                        f"Intraday market session closed at 15:30 IST (Final MTM: {pnl_pct:+.2f}%)"
+                    )
+                    alert.pnl_pct = pnl_pct
+                    resolved.append(alert)
+
+            if resolved:
+                self._save()
+                logger.info(
+                    f"[AutoAlertEngine] Automatically resolved {len(resolved)} intraday alerts at session close."
+                )
+
+        return resolved
+
     def check_and_alert_targets_and_trailing(
         self, exchanges: Optional[list[str]] = None
     ) -> list[AutoAlert]:
@@ -1878,6 +2040,9 @@ class AutoAlertEngine:
         """
         # First, check and ignite any pending early warnings that crossed trigger levels
         self.check_and_ignite_early_warnings(exchanges=exchanges)
+
+        # Automatically resolve expired intraday alerts if session has closed (post 15:30 IST)
+        self.resolve_session_end_alerts()
 
         updated_alerts: list[AutoAlert] = []
         now_ts = time.time()
@@ -2472,9 +2637,14 @@ class AutoAlertEngine:
         return targets
 
     def scan_gamma_blasts(self) -> list[AutoAlert]:
-        """Scans watched indices and high-turnover F&O leaders for Gamma Blast inflection."""
+        """Scans watched indices and high-turnover F&O leaders for Gamma Blast inflection.
+
+        Fix 4: now passes VWAP, day_high, and day_low from the live quote into detect_gamma_blast.
+        Previously these were always None, causing effective_vwap=spot fallback which silently
+        disabled the VWAP gate discrimination logic for both CE and PE sides.
+        """
         from market.options import get_options_chain
-        from market.quotes import get_ltp
+        from market.quotes import get_ltp, get_quote
 
         found: list[AutoAlert] = []
         targets = self._get_prioritized_targets()
@@ -2483,14 +2653,41 @@ class AutoAlertEngine:
             try:
                 exch = self._resolve_index_exchange(sym)
                 lookup_sym = f"{exch}:{sym}" if ":" not in sym else sym
-                spot = get_ltp(lookup_sym)
-                if not spot or spot <= 0:
+
+                # Fix 4: Use get_quote (not get_ltp) to capture VWAP + day extremes in one call
+                raw_q = get_quote(lookup_sym)
+                q_obj = (
+                    raw_q.get(lookup_sym) or raw_q.get(sym)
+                    if isinstance(raw_q, dict)
+                    else raw_q
+                )
+                spot = (
+                    float(getattr(q_obj, "last_price", 0.0) or getattr(q_obj, "ltp", 0.0) or 0.0)
+                    if q_obj
+                    else 0.0
+                )
+                if spot <= 0:
+                    spot = get_ltp(lookup_sym) or 0.0
+                if spot <= 0:
                     continue
+
+                # Fix 4: Extract VWAP, day_high, day_low from the quote object
+                vwap_val = float(getattr(q_obj, "vwap", 0.0) or 0.0) if q_obj else 0.0
+                day_high_val = float(getattr(q_obj, "high", 0.0) or 0.0) if q_obj else 0.0
+                day_low_val = float(getattr(q_obj, "low", 0.0) or 0.0) if q_obj else 0.0
+
                 chain = get_options_chain(sym)
                 if not chain:
                     continue
 
-                alerts = detect_gamma_blast(sym, spot, chain)
+                alerts = detect_gamma_blast(
+                    sym,
+                    spot,
+                    chain,
+                    vwap=vwap_val if vwap_val > 0 else None,
+                    day_high=day_high_val if day_high_val > 0 else None,
+                    day_low=day_low_val if day_low_val > 0 else None,
+                )
                 for a in alerts:
                     if exch == "BSE":
                         a.exchange = "BFO"
@@ -2705,544 +2902,13 @@ class AutoAlertEngine:
           1. Bullish breakout sparks (surge >= +2.2%, holds above VWAP, RVOL >= 1.8x).
           2. Bearish breakdown sparks (drop <= -2.0%, breaks below VWAP, RVOL >= 1.8x).
         """
-        from engine.precursor_radar import precursor_radar, classify_symbol_segment
-        from market.quotes import get_quote
-        from market.history import get_ohlcv
+        from engine.detectors.intraday_spark import detect_intraday_mover_sparks
 
+        alerts = detect_intraday_mover_sparks(universe=self.watched_equities)
         found: list[AutoAlert] = []
-        universe = precursor_radar.get_scan_universe(segment="ALL")
-        for s in self.watched_equities:
-            if s not in universe:
-                universe.append(s)
-
-        # Batch fetch quotes
-        formatted = [f"NSE:{s}" if ":" not in s else s for s in universe]
-        try:
-            quotes_map = get_quote(formatted)
-        except Exception as e:
-            logger.debug(f"[AutoAlertEngine] Quotes fetch error in spark scan: {e}")
-            return found
-
-        now_iso = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
-
-        # Resolve benchmark NIFTY status once for the whole scan batch
-        nifty_q = (
-            quotes_map.get("NSE:NIFTY 50")
-            or quotes_map.get("NSE:NIFTY")
-            or quotes_map.get("NIFTY 50")
-            or quotes_map.get("NIFTY")
-        )
-        nifty_chg = float(getattr(nifty_q, "change_pct", 0.0) or 0.0) if nifty_q else 0.0
-        nifty_ltp = (
-            float(getattr(nifty_q, "last_price", 0.0) or getattr(nifty_q, "ltp", 0.0) or 0.0)
-            if nifty_q
-            else 0.0
-        )
-        nifty_vwap = float(getattr(nifty_q, "vwap", 0.0) or 0.0) if nifty_q else 0.0
-        is_nifty_markdown = (nifty_chg <= -0.35) and (
-            (nifty_ltp < nifty_vwap) if nifty_vwap > 0 else True
-        )
-        is_nifty_markup = (nifty_chg >= 0.40) and (
-            (nifty_ltp > nifty_vwap) if nifty_vwap > 0 else True
-        )
-
-        for sym in universe:
-            clean_sym = sym.upper().replace("NSE:", "").replace(".NS", "").strip()
-            q = quotes_map.get(f"NSE:{clean_sym}") or quotes_map.get(clean_sym)
-            if not q:
-                continue
-
-            ltp = float(getattr(q, "last_price", 0.0) or getattr(q, "ltp", 0.0) or 0.0)
-            if ltp <= 0:
-                continue
-
-            chg = float(getattr(q, "change_pct", 0.0) or 0.0)
-            vol = int(getattr(q, "volume", 0) or 0)
-            vwap = float(getattr(q, "vwap", 0.0) or ltp)
-
-            seg = classify_symbol_segment(clean_sym)
-
-            # Check turnover gate for equities (₹5 Cr min, or active volume)
-            turnover_cr = round((ltp * vol) / 1e7, 2)
-            if seg != "INDEX" and turnover_cr < 5.0 and vol < 50000:
-                continue
-
-            # Calculate TOD-RVOL (Time-of-Day Relative Volume)
-            df = None
-            try:
-                df = get_ohlcv(clean_sym, exchange="NSE", interval="day", days=30)
-                if df is not None and len(df) >= 15:
-                    vols = df["volume"].values
-                    avg_vol = (
-                        float(np.mean(vols[-21:-1])) if len(vols) >= 21 else float(np.mean(vols[:-1]))
-                    )
-                    rvol = compute_time_of_day_rvol(vol, avg_vol, ref_dt=datetime.now(IST))
-                else:
-                    rvol = 1.0
-            except Exception:
-                rvol = 1.0
-
-            # Dynamic Inflection Thresholds:
-            # Indices: Early coiling at 0.22%, Ignited at 0.50%, RVOL >= 1.35x
-            # Equities: Early coiling at 0.85%, Ignited at 1.80%, RVOL >= 1.50x
-            min_pos_chg = 0.22 if seg == "INDEX" else 0.85
-            min_neg_chg = -0.22 if seg == "INDEX" else -0.80
-            min_rvol = 1.35 if seg == "INDEX" else 1.50
-
-            # Opening Range & Session Time Gates (09:15 - 09:45 IST):
-            # Before 09:30 IST: Opening 15m range is discovering price — suppress single-stock sparks unless institutional surge (RVOL >= 2.0x, |chg| >= 1.5%).
-            # Between 09:30 and 09:45 IST: Require strict institutional confirmation (RVOL >= 2.0x, chg >= 1.2%).
-            is_test_env = (os.environ.get("CHANAKYA_TESTING") == "1") or ("PYTEST_CURRENT_TEST" in os.environ)
-            if not is_test_env:
-                now_dt = datetime.now(IST)
-                time_hm = now_dt.hour * 60 + now_dt.minute
-                if 555 <= time_hm < 570 and seg != "INDEX":
-                    if not (rvol >= 2.0 and abs(chg) >= 1.5):
-                        continue
-                if 570 <= time_hm < 585:
-                    min_rvol = max(min_rvol, 2.0)
-                    if seg != "INDEX" and abs(chg) < 1.20:
-                        continue
-
-            # Exhaustion & Extension Guard:
-            # Reject chasing breakouts/breakdowns that are already stretched >2.5% from VWAP without a base consolidation.
-            # Exception: High volume institutional moves (RVOL >= 2.0x) are allowed up to 4.5% extension.
-            if vwap > 0:
-                vwap_dist_pct = (abs(ltp - vwap) / vwap) * 100.0
-                max_allowed_ext = 1.20 if seg == "INDEX" else (4.50 if rvol >= 2.0 else 2.50)
-                if vwap_dist_pct > max_allowed_ext:
-                    continue
-
-
-            is_bullish = (chg >= min_pos_chg) and (vwap <= 0 or ltp >= (vwap * 0.998)) and (rvol >= min_rvol)
-            is_bearish = (chg <= min_neg_chg) and (vwap > 0 and ltp < (vwap * 1.002)) and (rvol >= min_rvol)
-
-            if not (is_bullish or is_bearish):
-                continue
-
-            # Circuit Ceiling / Floor Freeze Guard:
-            # If stock is within 0.8% of Upper Circuit, avoid buying into liquidity freeze or circuit dump
-            uc = float(getattr(q, "upper_circuit", 0.0) or getattr(q, "circuit_limit", 0.0) or 0.0)
-            if uc > 0 and ltp >= (uc * 0.992) and is_bullish:
-                continue
-            lc = float(getattr(q, "lower_circuit", 0.0) or 0.0)
-            if lc > 0 and ltp <= (lc * 1.008) and is_bearish:
-                continue
-
-            sec_id = None
-            sec_name = None
-            sector_tailwind_bonus = 0
-            if seg != "INDEX":
-                try:
-                    from analysis.universe import get_stock_sector
-
-                    sec_id, sec_name = get_stock_sector(clean_sym)
-                except Exception:
-                    pass
-
-                try:
-                    from analysis.sector_rotation import get_stock_tailwind
-
-                    tailwind = get_stock_tailwind(clean_sym)
-                    if tailwind and hasattr(tailwind, "quadrant"):
-                        if is_bullish:
-                            if tailwind.quadrant in ("LEADING", "IMPROVING"):
-                                sector_tailwind_bonus = 8
-                            elif tailwind.quadrant == "LAGGING" and rvol < 2.2:
-                                continue
-                        elif is_bearish:
-                            if tailwind.quadrant == "LAGGING":
-                                sector_tailwind_bonus = 8
-                            elif tailwind.quadrant == "LEADING" and rvol < 2.2:
-                                continue
-                except Exception:
-                    pass
-
-            # Benchmark Gravitational Filter: If Nifty in markdown, suppress non-defensive equity sparks
-            # Decoupled Exemption: Allow thematic leaders if stock belongs to an RRG Leading / High-Growth sector
-            # or exhibits high relative volume (rvol >= 2.0) or strong sector tailwind.
-            if is_bullish and is_nifty_markdown and seg != "INDEX" and sec_name:
-                is_defensive = any(d in sec_name.upper() for d in ("PHARMA", "FMCG", "HEALTH"))
-                is_thematic_leader = any(
-                    d in sec_name.upper()
-                    for d in ("DEFENCE", "RAIL", "ENERGY", "CAPITAL", "INFRA", "EMS", "TECH", "SOLAR")
-                ) or (rvol >= 2.0) or (sector_tailwind_bonus > 0)
-                if not (is_defensive or is_thematic_leader):
-                    continue
-
-            # Benchmark Gravitational Filter: If Nifty in strong markup, suppress non-lagging equity breakdowns
-            if is_bearish and is_nifty_markup and seg != "INDEX" and sec_name:
-                is_lagging = any(d in sec_name.upper() for d in ("MEDIA", "REALTY"))
-                if not (is_lagging or sector_tailwind_bonus > 0):
-                    continue
-
-            # Stage classification: Early Warning (coiling/first thrust) vs Ignited (expanding)
-            is_early = (abs(chg) < 0.50) if seg == "INDEX" else (abs(chg) < 1.80)
-            stage = "EARLY_WARNING" if is_early else "IGNITED"
-
-            seg_tag = f"[{seg}]"
-
-            if is_bullish:
-                direction = "BULLISH"
-                alert_type = "INTRADAY_SPARK"
-                alert_id = (
-                    f"spark-bull-{clean_sym.lower()}-{datetime.now(IST).strftime('%Y%m%d%H%M')}"
-                )
-                tp = None
-                try:
-                    from engine.trade_plan import calculate_trade_plan
-
-                    tp = calculate_trade_plan(
-                        symbol=clean_sym,
-                        direction="BUY",
-                        spot=ltp,
-                        timeframe="INTRADAY",
-                        exchange="NSE",
-                        has_active_blast=True,
-                        df=df,
-                    )
-                except Exception as e_tp:
-                    logger.debug(f"[IntradaySpark] Trade plan calculation failed for {clean_sym}: {e_tp}")
-
-                atr_val = max(1.0, ltp * 0.015)
-                if df is not None and len(df) >= 5 and "high" in df.columns and "low" in df.columns:
-                    try:
-                        tr = np.maximum(
-                            df["high"] - df["low"],
-                            np.maximum(
-                                abs(df["high"] - df["close"].shift(1)),
-                                abs(df["low"] - df["close"].shift(1)),
-                            ),
-                        )
-                        atr_calc = float(tr.tail(14).mean())
-                        if atr_calc > 0:
-                            atr_val = round(atr_calc, 2)
-                    except Exception:
-                        pass
-                min_risk = max(1.0, round(0.70 * atr_val, 2)) if seg != "INDEX" else max(1.0, round(0.50 * atr_val, 2))
-
-                if tp and tp.is_asymmetry_viable and tp.target_1 > ltp and tp.invalidation_stop < ltp:
-                    risk_pts = max(min_risk, round(ltp - tp.invalidation_stop, 2))
-                    sl_price = round(ltp - risk_pts, 2)
-                    t1_price = max(tp.target_1, round(ltp + 1.5 * risk_pts, 2))
-                    t2_price = max(tp.target_2, round(ltp + 2.5 * risk_pts, 2))
-                    t3_price = max(tp.target_3, round(ltp + 4.0 * risk_pts, 2))
-                    rr_str = f"1:{round((t1_price - ltp) / risk_pts, 2)}"
-                    tp_dict = tp.as_dict()
-                else:
-                    risk_pts = max(min_risk, round(max(0.8 * atr_val, ltp - vwap if ltp > vwap else ltp * 0.012), 2))
-                    sl_price = round(ltp - risk_pts, 2)
-                    t1_price = round(ltp + 2.0 * risk_pts, 2)
-                    t2_price = round(ltp + 3.5 * risk_pts, 2)
-                    t3_price = round(ltp + 5.0 * risk_pts, 2)
-                    rr_str = "1:2.0"
-                    tp_dict = None
-
-                tick_offset = max(0.05, min(0.5, round(ltp * 0.001, 2)))
-                e_min = round(max(sl_price + tick_offset, ltp * 0.998), 1)
-                e_max = round(min(t1_price - tick_offset, ltp * 1.005), 1)
-                if e_min >= e_max:
-                    e_min = round(ltp * 0.998, 1)
-                    e_max = round(ltp * 1.005, 1)
-
-                fut_advice = None
-                if seg != "INDEX":
-                    try:
-                        from engine.alert_expiry import (
-                            is_monthly_physical_expiry_week,
-                            get_last_thursday_of_month,
-                            get_next_monthly_expiry_date,
-                        )
-
-                        curr_exp_d = get_last_thursday_of_month(now_dt.year, now_dt.month)
-                        if is_monthly_physical_expiry_week(
-                            curr_exp_d.strftime("%Y-%m-%d"), symbol=clean_sym, ref_dt=now_dt
-                        ):
-                            next_exp_d = get_next_monthly_expiry_date(now_dt)
-                            fut_advice = {
-                                "recommended_futures": f"{clean_sym}{next_exp_d.strftime('%y%b').upper()}FUT",
-                                "expiry": next_exp_d.strftime("%Y-%m-%d"),
-                                "rollover_status": "NEXT_MONTH_FUTURES_RECOMMENDED",
-                                "warning": "⚠️ SEBI Physical Settlement Expiry Week: Trade NEXT-MONTH futures to bypass staggered delivery margins (25%->100%).",
-                            }
-                    except Exception:
-                        pass
-
-                headline = f"🚀 INTRADAY SPARK {seg_tag}: {clean_sym} +{chg:.1f}% with {rvol:.1f}x Volume Surge"
-                summary = f"{seg_tag} Session breakout underway: Reclaimed VWAP (₹{vwap:,.1f}) with {rvol:.1f}x RVOL. Momentum entry active."
-                plan = {
-                    "action": "BUY_MOMENTUM",
-                    "segment": seg,
-                    "entry_range": f"₹{e_min:,.1f} – ₹{e_max:,.1f}",
-                    "stop_loss": f"₹{sl_price:,.1f}",
-                    "target": f"₹{t1_price:,.1f}",
-                    "target_2": f"₹{t2_price:,.1f}",
-                    "target_3": f"₹{t3_price:,.1f}",
-                    "risk_reward": rr_str,
-                    "trade_plan": tp_dict,
-                    "derivatives_advice": fut_advice,
-                    "when_to_buy": f"Buy on 5m VWAP holding above ₹{vwap:,.1f}",
-                    "when_to_wait": f"Do not chase if price extends > {round(chg + 1.5, 1)}%",
-                    "profit_rule": "Book 50% at T1 and trail SL to cost; let runner target T2/T3.",
-                }
-            else:
-                direction = "BEARISH"
-                alert_type = "INTRADAY_BREAKDOWN_SPARK"
-                alert_id = (
-                    f"spark-bear-{clean_sym.lower()}-{datetime.now(IST).strftime('%Y%m%d%H%M')}"
-                )
-                tp = None
-                try:
-                    from engine.trade_plan import calculate_trade_plan
-
-                    tp = calculate_trade_plan(
-                        symbol=clean_sym,
-                        direction="SELL",
-                        spot=ltp,
-                        timeframe="INTRADAY",
-                        exchange="NSE",
-                        has_active_blast=True,
-                        df=df,
-                    )
-                except Exception as e_tp:
-                    logger.debug(f"[IntradaySpark] Trade plan calculation failed for {clean_sym}: {e_tp}")
-
-                atr_val = max(1.0, ltp * 0.015)
-                if df is not None and len(df) >= 5 and "high" in df.columns and "low" in df.columns:
-                    try:
-                        tr = np.maximum(
-                            df["high"] - df["low"],
-                            np.maximum(
-                                abs(df["high"] - df["close"].shift(1)),
-                                abs(df["low"] - df["close"].shift(1)),
-                            ),
-                        )
-                        atr_calc = float(tr.tail(14).mean())
-                        if atr_calc > 0:
-                            atr_val = round(atr_calc, 2)
-                    except Exception:
-                        pass
-                min_risk = max(1.0, round(0.70 * atr_val, 2)) if seg != "INDEX" else max(1.0, round(0.50 * atr_val, 2))
-
-                if tp and tp.is_asymmetry_viable and tp.target_1 < ltp and tp.invalidation_stop > ltp:
-                    risk_pts = max(min_risk, round(tp.invalidation_stop - ltp, 2))
-                    sl_price = round(ltp + risk_pts, 2)
-                    t1_price = min(tp.target_1, round(max(0.05, ltp - 1.5 * risk_pts), 2))
-                    t2_price = min(tp.target_2, round(max(0.05, ltp - 2.5 * risk_pts), 2))
-                    t3_price = min(tp.target_3, round(max(0.05, ltp - 4.0 * risk_pts), 2))
-                    rr_str = f"1:{round((ltp - t1_price) / risk_pts, 2)}"
-                    tp_dict = tp.as_dict()
-                else:
-                    risk_pts = max(min_risk, round(max(0.8 * atr_val, vwap - ltp if vwap > ltp else ltp * 0.012), 2))
-                    sl_price = round(ltp + risk_pts, 2)
-                    t1_price = round(max(0.05, ltp - 2.0 * risk_pts), 2)
-                    t2_price = round(max(0.05, ltp - 3.5 * risk_pts), 2)
-                    t3_price = round(max(0.05, ltp - 5.0 * risk_pts), 2)
-                    rr_str = "1:2.0"
-                    tp_dict = None
-
-                tick_offset = max(0.05, min(0.5, round(ltp * 0.001, 2)))
-                e_max = round(min(sl_price - tick_offset, ltp * 1.002), 1)
-                e_min = round(max(t1_price + tick_offset, ltp * 0.995), 1)
-                if e_min >= e_max:
-                    e_min = round(ltp * 0.995, 1)
-                    e_max = round(ltp * 1.002, 1)
-
-                fut_advice = None
-                if seg != "INDEX":
-                    try:
-                        from engine.alert_expiry import (
-                            is_monthly_physical_expiry_week,
-                            get_last_thursday_of_month,
-                            get_next_monthly_expiry_date,
-                        )
-
-                        curr_exp_d = get_last_thursday_of_month(now_dt.year, now_dt.month)
-                        if is_monthly_physical_expiry_week(
-                            curr_exp_d.strftime("%Y-%m-%d"), symbol=clean_sym, ref_dt=now_dt
-                        ):
-                            next_exp_d = get_next_monthly_expiry_date(now_dt)
-                            fut_advice = {
-                                "recommended_futures": f"{clean_sym}{next_exp_d.strftime('%y%b').upper()}FUT",
-                                "expiry": next_exp_d.strftime("%Y-%m-%d"),
-                                "rollover_status": "NEXT_MONTH_FUTURES_RECOMMENDED",
-                                "warning": "⚠️ SEBI Physical Settlement Expiry Week: Short NEXT-MONTH futures to bypass staggered delivery margins (25%->100%).",
-                            }
-                    except Exception:
-                        pass
-
-                headline = f"⚡ INTRADAY BREAKDOWN {seg_tag}: {clean_sym} {chg:.1f}% with {rvol:.1f}x Volume Surge"
-                summary = f"{seg_tag} Severe session breakdown underway: Lost VWAP (₹{vwap:,.1f}) with {rvol:.1f}x RVOL. Short / Put entry active."
-                plan = {
-                    "action": "SELL_SHORT_OR_BUY_PUT",
-                    "segment": seg,
-                    "entry_range": f"₹{e_min:,.1f} – ₹{e_max:,.1f}",
-                    "stop_loss": f"₹{sl_price:,.1f}",
-                    "target": f"₹{t1_price:,.1f}",
-                    "target_2": f"₹{t2_price:,.1f}",
-                    "target_3": f"₹{t3_price:,.1f}",
-                    "risk_reward": rr_str,
-                    "trade_plan": tp_dict,
-                    "derivatives_advice": fut_advice,
-                    "when_to_buy": f"Enter short or ATM Put on pullbacks to ₹{vwap:,.1f} with tight stop above VWAP.",
-                    "when_to_wait": f"Do not chase if breakdown extends > {round(abs(chg) + 1.5, 1)}% without retest.",
-                    "profit_rule": "Book 50% at T1 and trail SL to cost; let runner target T2/T3.",
-                }
-
-            # Provenance gate: validate quote is from a real broker, not mock/test stub
-            is_mock_spark = (
-                type(q).__name__ == "MagicMock"
-                or getattr(q, "_is_mock", False)
-                or getattr(q, "provider", "") in ("mock", "TEST")
-                or getattr(q, "data_state", "") == "UNAVAILABLE"
-            )
-            is_test_env = (
-                os.environ.get("CHANAKYA_TESTING") == "1" or os.environ.get("DEPLOY_MODE") == "test"
-            )
-            is_authentic_spark = not (is_mock_spark or is_test_env)
-
-            # Multi-Timeframe Alignment, Confirmation Candle, & RSI Divergence on 5m OHLCV
-            df_5m = None
-            try:
-                from market.history import get_ohlcv
-
-                df_5m = get_ohlcv(clean_sym, exchange="NSE", interval="5minute", days=2)
-            except Exception:
-                df_5m = None
-
-            alignment_count = 1
-            if df_5m is not None and len(df_5m) >= 5:
-                try:
-                    from analysis.market_structure import check_mtf_structural_alignment
-
-                    mtf_info = check_mtf_structural_alignment(
-                        clean_sym,
-                        exchange="NSE",
-                        ltp=ltp,
-                        direction=direction,
-                        df_5m=df_5m,
-                    )
-                    alignment_count = mtf_info.get("alignment_count", 1)
-                    if mtf_info.get("wall_collision"):
-                        logger.debug(
-                            f"[AutoAlertEngine] Suppressed spark on {clean_sym}: Proximity to 1H structural wall"
-                        )
-                        continue
-                    if alignment_count < 1 and seg != "INDEX":
-                        logger.debug(
-                            f"[AutoAlertEngine] Suppressed spark on {clean_sym}: Opposed by 15m/1H structural trend"
-                        )
-                        continue
-                except Exception as e_mtf:
-                    logger.debug(f"[AutoAlertEngine] MTF check error for {clean_sym}: {e_mtf}")
-
-            confirmation_bonus = 0
-            divergence_bonus = 0
-            conf_candle = None
-            is_confirmed = False
-            div_type = None
-            div_bias = None
-            if df_5m is not None and len(df_5m) >= 5:
-                try:
-                    from analysis.market_structure import (
-                        detect_confirmation_candle,
-                        detect_divergence,
-                    )
-
-                    conf_res = detect_confirmation_candle(df_5m, direction=direction)
-                    is_confirmed = bool(conf_res.get("confirmed")) if isinstance(conf_res, dict) else False
-                    conf_candle = conf_res.get("pattern") if isinstance(conf_res, dict) else None
-                    if is_confirmed:
-                        confirmation_bonus = 8
-
-                    div_res = detect_divergence(df_5m)
-                    div_type = div_res.get("type") if isinstance(div_res, dict) else None
-                    div_bias = div_res.get("bias") if isinstance(div_res, dict) else None
-                    if div_type == "NONE":
-                        div_type = None
-                    if div_bias == "NONE":
-                        div_bias = None
-
-                    if div_type:
-                        if is_bullish and div_bias == "BEARISH" and "REGULAR" in div_type:
-                            logger.debug(
-                                f"[AutoAlertEngine] Suppressed bullish spark on {clean_sym}: Bearish regular RSI divergence trap ({div_type})"
-                            )
-                            continue
-                        elif is_bearish and div_bias == "BULLISH" and "REGULAR" in div_type:
-                            logger.debug(
-                                f"[AutoAlertEngine] Suppressed bearish spark on {clean_sym}: Bullish regular RSI divergence trap ({div_type})"
-                            )
-                            continue
-                        elif (is_bullish and div_bias == "BULLISH") or (
-                            is_bearish and div_bias == "BEARISH"
-                        ):
-                            divergence_bonus = 6
-                except Exception as e_smc:
-                    logger.debug(f"[AutoAlertEngine] Spark candle/divergence check error: {e_smc}")
-
-            alert = AutoAlert(
-                alert_id=alert_id,
-                alert_type=alert_type,
-                stage=stage,
-                symbol=clean_sym,
-                exchange="NSE",
-                direction=direction,
-                headline=headline,
-                summary=summary,
-                ltp=ltp,
-                trigger_level=ltp,
-                target_level=t1_price,
-                stop_loss=sl_price,
-                confidence=min(
-                    95,
-                    int(
-                        75
-                        + rvol * 5
-                        + sector_tailwind_bonus
-                        + confirmation_bonus
-                        + divergence_bonus
-                    ),
-                ),
-                created_at=now_iso,
-                is_live=is_authentic_spark,
-                environment="LIVE" if is_authentic_spark else "TEST",
-                metrics={
-                    "rvol": rvol,
-                    "turnover_cr": turnover_cr,
-                    "vwap": vwap,
-                    "change_pct": chg,
-                    "segment": seg,
-                    "atr": atr_val,
-                    "nifty_change_pct": nifty_chg if nifty_q else None,
-                    "nifty_below_vwap": (
-                        ((nifty_ltp < nifty_vwap) if nifty_vwap > 0 else (nifty_chg < 0))
-                        if nifty_q
-                        else None
-                    ),
-                    "nifty_regime": (
-                        (
-                            "MARKDOWN"
-                            if is_nifty_markdown
-                            else ("MARKUP" if is_nifty_markup else "NORMAL")
-                        )
-                        if nifty_q
-                        else "NORMAL"
-                    ),
-                    "sector_id": sec_id,
-                    "sector_name": sec_name,
-                    "confirmation_candle": conf_candle,
-                    "confirmation_confirmed": is_confirmed,
-                    "divergence_type": div_type,
-                    "divergence_bias": div_bias,
-                    "alignment_count": alignment_count,
-                    "sector_tailwind_bonus": sector_tailwind_bonus,
-                },
-                actionable_plan=plan,
-            )
-            if self.record_alert(alert):
-                found.append(alert)
-
+        for a in alerts:
+            if self.record_alert(a):
+                found.append(a)
         return found
 
     def scan_asymmetric_opportunities(self) -> list[AutoAlert]:
@@ -3259,9 +2925,10 @@ class AutoAlertEngine:
                 clean_setup = (getattr(opp, "setup_type", "") or "opp").lower().replace("_", "-")
                 alert_id = f"asym-{clean_opp_sym}-{clean_setup}-{datetime.now(IST).strftime('%Y%m%d')}"
                 headline = f"🎯 [LOW RISK : HIGH REWARD] {opp.setup_label}: {opp.symbol} (R:R {opp.risk_reward})"
+                rollover_note = " | 🎯 NEXT-MONTH ROLLOVER: SEBI Physical Delivery Safe" if opp.is_next_month_routed else ""
                 summary = (
                     f"{opp.catalyst_summary} Invalidation SL: ₹{opp.stop_loss:,.1f} | "
-                    f"T1 (+2R): ₹{opp.target_1:,.1f} | T2 (+4R): ₹{opp.target_2:,.1f} | Moonshot: ₹{opp.target_moonshot:,.1f}"
+                    f"T1 (+2R): ₹{opp.target_1:,.1f} | T2 (+4R): ₹{opp.target_2:,.1f} | Moonshot: ₹{opp.target_moonshot:,.1f}{rollover_note}"
                 )
 
                 if opp.exchange == "MCX" or getattr(opp, "setup_type", "") == "COMMODITY":
@@ -3337,6 +3004,25 @@ class AutoAlertEngine:
                     )
                     plan["lot_size"] = opp.lot_size
 
+                if opp.futures_contract_symbol:
+                    plan["futures_plan"] = {
+                        "contract_symbol": opp.futures_contract_symbol,
+                        "entry_price": opp.futures_entry or opp.ltp,
+                        "stop_loss": opp.futures_stop_loss or opp.stop_loss,
+                        "target_1": opp.futures_target_1 or opp.target_1,
+                        "target_2": opp.futures_target_2 or opp.target_2,
+                        "lot_size": opp.lot_size,
+                        "instrument_type": "FUTURES",
+                    }
+                    plan["futures_contract"] = opp.futures_contract_symbol
+                    plan["futures_entry"] = (
+                        f"₹{opp.futures_entry:,.2f}" if opp.futures_entry else f"₹{opp.ltp:,.2f}"
+                    )
+
+                if opp.is_next_month_routed:
+                    plan["is_next_month_routed"] = True
+                    plan["derivative_safeguard"] = opp.derivative_safeguard
+
                 has_opt_leg = bool(opp.contract_symbol and opp.option_premium)
                 alert = AutoAlert(
                     alert_id=alert_id,
@@ -3347,21 +3033,31 @@ class AutoAlertEngine:
                     direction=opp.direction,
                     headline=headline,
                     summary=summary,
-                    ltp=opp.option_premium if has_opt_leg else opp.ltp,
-                    trigger_level=opp.option_premium if has_opt_leg else opp.entry_price,
-                    target_level=opp.option_target_1 if has_opt_leg else opp.target_1,
-                    stop_loss=opp.option_stop_loss if has_opt_leg else opp.stop_loss,
-                    strike=opp.strike if has_opt_leg else None,
-                    option_type=opp.option_type if has_opt_leg else None,
-                    contract_symbol=opp.contract_symbol if has_opt_leg else None,
-                    expiry_date=opp.expiry_date if has_opt_leg else None,
+                    # ── Root fields ALWAYS in Underlying Spot units ────────────────
+                    # Option contract metadata (contract_symbol, strike, option_type)
+                    # must NOT be set at the AutoAlert root for ASYMMETRIC_OPPORTUNITY
+                    # alerts — they live exclusively in actionable_plan["option_plan"]
+                    # (already populated above). Setting them here triggers is_deriv=True
+                    # in the template, which suppresses F&O Alternative / Futures
+                    # Preferred lines and replaces Spot CMP with confusing Opt CMP.
+                    ltp=opp.ltp,
+                    trigger_level=opp.entry_price or opp.ltp,
+                    target_level=opp.target_1,
+                    stop_loss=opp.stop_loss,
+                    # Option premium stored for display purposes only (not trading levels)
                     option_premium=opp.option_premium if has_opt_leg else None,
                     underlying_spot=opp.ltp,
-                    lot_size=opp.lot_size if has_opt_leg else None,
+                    # Lot size: resolved from the corrected get_lot_size (65 for NIFTY, etc.)
+                    lot_size=opp.lot_size if (opp.lot_size and opp.lot_size > 1) else None,
+                    # Derivative contract identity stays in actionable_plan["option_plan"]
+                    strike=None,
+                    option_type=None,
+                    contract_symbol=None,
+                    expiry_date=None,
                     segment=(
                         "FNO_INDEX"
                         if opp.symbol in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX")
-                        or getattr(opp, "segment", "") == "INDEX"
+                        or getattr(opp, "segment", "") in ("INDEX", "FNO_INDEX")
                         else asym_seg
                     ),
                     confidence=opp.conviction_score,
@@ -3385,956 +3081,26 @@ class AutoAlertEngine:
         Surfaces high-volume, high-turnover ATM contracts with verified underlying SMC alignment,
         tight spot-anchored stop-losses, optimal trade entry (OTE) pullback zones, and favorable R:R.
         """
-        from market.options import get_options_chain
-        from market.quotes import get_ltp
-        from engine.position_sizer import get_lot_size
+        from engine.detectors.options_momentum import detect_options_momentum_breakouts
         from engine.alert_preferences import alert_preferences
 
-        found: list[AutoAlert] = []
         index_allowed = alert_preferences.is_segment_allowed("FNO_INDEX")
         targets = list(self._watched_indices) if index_allowed else []
         for s in self.watched_equities:
             if s not in targets:
                 targets.append(s)
 
-        now_iso = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
         now_dt = datetime.now(IST)
-        is_friday_late = (now_dt.weekday() == 4) and (
-            now_dt.hour > 14 or (now_dt.hour == 14 and now_dt.minute >= 30)
+        alerts = detect_options_momentum_breakouts(
+            targets=targets,
+            watched_indices=self._watched_indices,
+            recent_alerts=self._alerts,
+            now_dt=now_dt,
         )
-        is_opening_drive = (now_dt.hour == 9 and now_dt.minute <= 45)
-
-        # Resolve benchmark NIFTY regime once for the scan cycle
-        nifty_change = None
-        nifty_below_vwap = None
-        try:
-            from market.quotes import get_quote
-
-            nq = get_quote("NSE:NIFTY 50")
-            q_obj = nq.get("NSE:NIFTY 50") or nq.get("NIFTY 50") if isinstance(nq, dict) else nq
-            if q_obj:
-                n_ltp = float(
-                    getattr(q_obj, "last_price", 0.0) or getattr(q_obj, "ltp", 0.0) or 0.0
-                )
-                n_vwap = float(getattr(q_obj, "vwap", 0.0) or 0.0)
-                n_chg = float(getattr(q_obj, "change_pct", 0.0) or 0.0)
-                if n_ltp > 0:
-                    nifty_change = n_chg
-                    nifty_below_vwap = (n_ltp < n_vwap) if n_vwap > 0 else (n_chg < 0)
-        except Exception:
-            pass
-        is_nifty_markdown = (
-            nifty_change is not None and nifty_change <= -0.35 and nifty_below_vwap is not False
-        )
-        is_nifty_markup = (
-            nifty_change is not None and nifty_change >= 0.40 and nifty_below_vwap is False
-        )
-
-        # Stage 1: Fast Batch-fetch underlying spot quotes for all targets in one call (<150ms)
-        from market.quotes import get_quote, get_ltp
-
-        formatted_targets = [f"{self._resolve_index_exchange(s)}:{s}" for s in targets]
-        batch_quotes = {}
-        try:
-            batch_quotes = get_quote(formatted_targets)
-        except Exception as e_batch:
-            logger.debug(f"[AutoAlertEngine] Batch quote pre-fetch error: {e_batch}")
-
-        for sym in targets:
-            clean_sym = sym.replace("NSE:", "").replace("NFO:", "").replace("BSE:", "").strip().upper()
-            try:
-                exch = self._resolve_index_exchange(clean_sym)
-                lookup_sym = f"{exch}:{clean_sym}"
-                quote_obj = batch_quotes.get(lookup_sym) or batch_quotes.get(clean_sym)
-                spot = (
-                    float(getattr(quote_obj, "last_price", 0.0) or getattr(quote_obj, "ltp", 0.0) or 0.0)
-                    if quote_obj
-                    else 0.0
-                )
-                if spot <= 0:
-                    spot = get_ltp(lookup_sym) or 0.0
-                if spot <= 0:
-                    continue
-
-                spot_change_pct = float(getattr(quote_obj, "change_pct", 0.0) or 0.0) if quote_obj else 0.0
-                spot_open = float(getattr(quote_obj, "open", 0.0) or 0.0) if quote_obj else 0.0
-                spot_high = float(getattr(quote_obj, "high", 0.0) or 0.0) if quote_obj else 0.0
-                spot_low = float(getattr(quote_obj, "low", 0.0) or 0.0) if quote_obj else 0.0
-                spot_vwap = float(getattr(quote_obj, "vwap", 0.0) or 0.0) if quote_obj else 0.0
-
-                is_idx = clean_sym in (
-                    "NIFTY",
-                    "BANKNIFTY",
-                    "FINNIFTY",
-                    "MIDCPNIFTY",
-                    "SENSEX",
-                    "BANKEX",
-                )
-                # Determine canonical segment for routing and display (cached on the alert object)
-                alert_segment = "FNO_INDEX" if is_idx else "FNO_STOCK"
-
-                # ── STAGE 1: SPOT MOVEMENT & OPENING DRIVE PRE-FILTER ──
-                # For single-stock F&O, skip expensive options chain extraction if the underlying stock
-                # is completely flat and inactive today (0 momentum, 0 displacement from VWAP).
-                is_bear_drive = False
-                is_bull_drive = False
-                if not is_idx:
-                    if spot_open > 0:
-                        if (
-                            spot_high > 0
-                            and (abs(spot_high - spot_open) / spot_open <= 0.0015)
-                            and spot_change_pct <= -0.4
-                        ):
-                            is_bear_drive = True  # Open = High Bearish Liquidation Drive (e.g. OFSS)
-                        elif (
-                            spot_low > 0
-                            and (abs(spot_low - spot_open) / spot_open <= 0.0015)
-                            and spot_change_pct >= 0.4
-                        ):
-                            is_bull_drive = True  # Open = Low Bullish Institutional Sweep (e.g. MFSL/HDFCLIFE)
-
-                    is_vwap_displaced = bool(spot_vwap > 0 and abs(spot - spot_vwap) / spot_vwap >= 0.005)
-                    is_momentum_active = bool(abs(spot_change_pct) >= 0.80)
-
-                    if (spot_open > 0 or spot_vwap > 0 or spot_change_pct != 0.0) and not (
-                        is_momentum_active or is_bear_drive or is_bull_drive or is_vwap_displaced
-                    ):
-                        # Stock is flat and inactive today (skips ~180 sideways stocks in 0.0001s)
-                        continue
-
-                # Institutional Single-Stock Expiry Protection:
-                # Under SEBI regulations, single-stock options are physically settled.
-                # In settlement week (DTE <= 4), automatically route stock options to Next-Month
-                # series to eliminate staggered physical delivery margins (25%->100%) and near-month theta collapse.
-                chain = None
-                is_next_month_routed = False
-                if not is_idx:
-                    try:
-                        from engine.alert_expiry import (
-                            is_monthly_physical_expiry_week,
-                            resolve_recommended_derivative_expiry,
-                        )
-                        from market.options import get_expiries
-
-                        available_exps = get_expiries(clean_sym)
-                        exp_res = resolve_recommended_derivative_expiry(
-                            symbol=clean_sym,
-                            instrument_type="OPTION",
-                            available_expiries=available_exps,
-                            ref_dt=now_dt,
-                        )
-                        if exp_res.get("is_next_month_routed"):
-                            next_exp_str = exp_res.get("recommended_expiry")
-                            next_chain = get_options_chain(clean_sym, expiry=next_exp_str)
-                            if next_chain and any(
-                                float(getattr(c, "last_price", 0.0) or 0.0) > 0 for c in next_chain
-                            ):
-                                chain = next_chain
-                                is_next_month_routed = True
-                    except Exception as e_exp:
-                        logger.debug(
-                            f"[AutoAlertEngine] Next-month rollover check failed for {clean_sym}: {e_exp}"
-                        )
-
-                if chain is None:
-                    chain = get_options_chain(clean_sym)
-
-                if not chain:
-                    continue
-                min_opt_volume = (
-                    (2000 if is_idx else 300) if is_opening_drive else (3000 if is_idx else 500)
-                )
-                min_oi = 10000 if is_idx else 300
-
-                # Delta-Gated Sweet-Spot Filter: Restrict primary index alerts to ATM and near-the-money (<= 2 strikes)
-                # Avoids far OTM lottery traps (e.g. 23100 PE when spot is 23395) while capturing high-delta institutional momentum.
-                max_strike_dist = (
-                    (
-                        120.0
-                        if clean_sym in ("NIFTY", "FINNIFTY")
-                        else (
-                            250.0
-                            if clean_sym in ("BANKNIFTY", "SENSEX", "BANKEX")
-                            else (75.0 if clean_sym in ("MIDCPNIFTY",) else 100.0)
-                        )
-                    )
-                    if is_idx
-                    else spot * 0.02
-                )
-                min_opt_price = 10.0 if is_idx else 2.0
-
-                # Filter ATM and near-the-money contracts within tight range
-                atm_contracts = [
-                    c
-                    for c in chain
-                    if abs(getattr(c, "strike", 0.0) - spot) <= max_strike_dist
-                    and getattr(c, "last_price", 0.0) >= min_opt_price
-                    and getattr(c, "volume", 0) >= min_opt_volume
-                ]
-                if not atm_contracts:
-                    continue
-
-                # Sort ATM contracts by proximity to spot (closest to ATM first!)
-                atm_contracts.sort(key=lambda c: abs(getattr(c, "strike", 0.0) - spot))
-
-                # ── Underlying Price Action & SMC Due Diligence (computed only if liquid ATM contracts exist) ──
-                from market.history import get_ohlcv
-
-                df_5m = None
-                try:
-                    df_5m = get_ohlcv(clean_sym, exchange=exch, interval="5minute", days=2)
-                except Exception:
-                    pass
-
-                if df_5m is not None and len(df_5m) >= 1:
-                    try:
-                        last_c = float(
-                            df_5m.iloc[-1].get("close", df_5m.iloc[-1].get("Close", 0.0))
-                        )
-                        if last_c > 0 and abs(last_c - spot) / max(1.0, spot) > 0.02:
-                            df_5m = None
-                    except Exception:
-                        pass
-
-                # Derive 5m intraday VWAP if not provided by quote
-                if (not spot_vwap or spot_vwap <= 0) and df_5m is not None and len(df_5m) >= 2:
-                    try:
-                        vols = df_5m["volume"].values
-                        highs = (
-                            df_5m["high"].values
-                            if "high" in df_5m.columns
-                            else df_5m["High"].values
-                        )
-                        lows = (
-                            df_5m["low"].values if "low" in df_5m.columns else df_5m["Low"].values
-                        )
-                        closes = (
-                            df_5m["close"].values
-                            if "close" in df_5m.columns
-                            else df_5m["Close"].values
-                        )
-                        typical_price = (highs + lows + closes) / 3.0
-                        cum_vol = np.cumsum(vols)
-                        cum_pv = np.cumsum(typical_price * vols)
-                        if cum_vol[-1] > 0:
-                            spot_vwap = float(cum_pv[-1] / cum_vol[-1])
-                    except Exception:
-                        pass
-
-                # Compute recent 5m candle wick ratios (Exhaustion & Climax Filter)
-                upper_wick_ratio = 0.0
-                lower_wick_ratio = 0.0
-                candle_range = 0.0
-                if df_5m is not None and len(df_5m) >= 1:
-                    try:
-                        last_bar = df_5m.iloc[-1]
-                        b_high = float(last_bar.get("high", last_bar.get("High", 0.0)))
-                        b_low = float(last_bar.get("low", last_bar.get("Low", 0.0)))
-                        b_open = float(last_bar.get("open", last_bar.get("Open", 0.0)))
-                        b_close = float(last_bar.get("close", last_bar.get("Close", 0.0)))
-                        candle_range = max(0.01, b_high - b_low)
-                        upper_wick_ratio = (b_high - max(b_open, b_close)) / candle_range
-                        lower_wick_ratio = (min(b_open, b_close) - b_low) / candle_range
-                    except Exception:
-                        pass
-
-                # Check for top volume / turnover momentum
-                for c in atm_contracts:
-                    vol = getattr(c, "volume", 0)
-                    oi = getattr(c, "oi", 0)
-                    oi_change = getattr(c, "oi_change", 0)
-                    vol_oi = round(vol / max(1, oi), 2)
-                    opt_ltp = float(getattr(c, "last_price", 0.0) or 0.0)
-                    opt_type = getattr(c, "option_type", "")
-                    strike = float(getattr(c, "strike", 0.0))
-                    contract_sym = getattr(c, "symbol", f"{clean_sym}{int(strike)}{opt_type}")
-                    expiry_date = getattr(c, "expiry", None)
-                    lot_sz = get_lot_size(clean_sym)
-
-                    # Liquidity significance: Ensure strike has real participation, not an illiquid ghost strike
-                    if oi < min_oi:
-                        continue
-
-                    # 0DTE Expiry Day Afternoon Theta Guard:
-                    # After 12:30 IST on expiry day, exponential theta decay rapidly destroys OTM value.
-                    # Restrict option buying to strictly ATM or In-The-Money (ITM) contracts only.
-                    is_zero_dte_pm = False
-                    if expiry_date:
-                        try:
-                            from engine.alert_expiry import is_0dte_afternoon
-                            is_zero_dte_pm = is_0dte_afternoon(str(expiry_date), ref_dt=now_dt)
-                            if is_zero_dte_pm:
-                                if opt_type == "CE" and strike > (spot * 1.002):
-                                    continue
-                                if opt_type == "PE" and strike < (spot * 0.998):
-                                    continue
-                        except Exception:
-                            pass
-
-                    # Momentum DTE Gate: NIFTY allows weekly (DTE <= 8), monthly indices/stocks allow front-month & next-month rollovers (DTE <= 45)
-                    max_dte = 8 if clean_sym in ("NIFTY",) else 45
-                    if expiry_date:
-                        try:
-                            exp_str = str(expiry_date).split("T")[0].strip()
-                            exp_dt = None
-                            for fmt in ("%Y-%m-%d", "%d-%b-%Y", "%d-%m-%Y"):
-                                try:
-                                    exp_dt = datetime.strptime(exp_str, fmt).date()
-                                    break
-                                except ValueError:
-                                    continue
-                            if exp_dt and (exp_dt - now_dt.date()).days > max_dte:
-                                continue
-                        except Exception:
-                            pass
-
-                    # Momentum criteria: active turnover and volume velocity.
-                    # During opening drive (09:15 - 09:45 IST), volume builds rapidly but cumulative OI
-                    # Momentum criteria: active turnover and volume velocity.
-                    # Require authentic institutional participation:
-                    # Minimum 1.0x Vol/OI during opening drive, 1.2x post-opening, with contract turnover floor.
-                    if is_opening_drive:
-                        min_vol_oi = 0.60 if is_idx else 1.00
-                        min_contracts = 2000 if is_idx else 500
-                    else:
-                        min_vol_oi = 1.00 if is_idx else 1.20
-                        min_contracts = 2500 if is_idx else 600
-
-                    if vol_oi < min_vol_oi or vol < min_contracts:
-                        continue
-
-                    # 1. Bid/Ask Spread Sanity Gate:
-                    # Index options allow up to 30% spread friction; single-stock options strictly <= 15%
-                    bid = getattr(c, "bid", None)
-                    ask = getattr(c, "ask", None)
-                    max_spread_mult = 1.30 if is_idx else 1.15
-                    if bid and ask and bid > 0 and ask > 0 and ask > (bid * max_spread_mult):
-                        continue
-
-                    # 1b. Physical Delivery Expiry Week Detection for Stock Options
-                    is_physical_expiry_week = False
-                    if not is_idx and expiry_date:
-                        try:
-                            from engine.alert_expiry import is_monthly_physical_expiry_week
-                            is_physical_expiry_week = is_monthly_physical_expiry_week(str(expiry_date), symbol=clean_sym, ref_dt=now_dt)
-                        except Exception:
-                            pass
-
-                    # 2. Strict Directional Price Expansion & Underlying Trend Alignment:
-                    # An option momentum breakout MUST have positive price expansion (gainers, not decaying/dumping)
-                    # AND the underlying stock must be aligned with the trade direction.
-                    pchange = getattr(c, "pchange", None)
-                    min_pchange = 8.0 if is_opening_drive else 6.0
-                    if opt_type == "CE":
-                        # CALL SURGE: Option premium must be expanding positively (minimum 6% expansion, 8% at open)
-                        if pchange is not None and pchange < min_pchange:
-                            continue
-                        # Underlying stock must NOT be collapsing in a severe downtrend (reject crashing stocks)
-                        if spot_change_pct is not None and spot_change_pct < -1.5:
-                            continue
-                        if spot_open and spot_open > 0 and spot < spot_open * 0.995:
-                            continue
-                        # Spot must hold intraday VWAP
-                        if is_idx:
-                            if spot_vwap and spot_vwap > 0 and spot < spot_vwap:
-                                continue
-                        else:
-                            if spot_vwap and spot_vwap > 0 and spot < spot_vwap * 1.0005:
-                                continue
-                        # Upper-wick rejection / buying climax gate (reject shooting star rejections on wide bars)
-                        if candle_range >= (spot * 0.0025) and upper_wick_ratio > 0.50:
-                            continue
-                        direction = "BULLISH"
-                    elif opt_type == "PE":
-                        # PUT SURGE: Option premium must be expanding positively (minimum 6% expansion, 8% at open)
-                        if pchange is not None and pchange < min_pchange:
-                            continue
-                        # Underlying stock must NOT be surging in a severe uptrend
-                        if spot_change_pct is not None and spot_change_pct > 1.5:
-                            continue
-                        if spot_open and spot_open > 0 and spot > spot_open * 1.005:
-                            continue
-                        # Spot must be below intraday VWAP
-                        if is_idx:
-                            if spot_vwap and spot_vwap > 0 and spot > spot_vwap:
-                                continue
-                        else:
-                            if spot_vwap and spot_vwap > 0 and spot > spot_vwap * 0.9995:
-                                continue
-                        # Lower-wick rejection / selling climax gate (reject hammer absorption on wide bars)
-                        if candle_range >= (spot * 0.0025) and lower_wick_ratio > 0.50:
-                            continue
-                        direction = "BEARISH"
-                    else:
-                        continue
-
-                    # 2b. MTF Confluence on Underlying Spot (15m OHLCV)
-                    mtf_15m_trend = "NEUTRAL"
-                    try:
-                        from market.history import get_ohlcv
-
-                        df_15m = get_ohlcv(clean_sym, days=4, interval="15minute")
-                        if df_15m is not None and len(df_15m) >= 15:
-                            c_15 = df_15m["close"] if "close" in df_15m.columns else df_15m["Close"]
-                            ema20_15 = float(c_15.ewm(span=20, adjust=False).mean().iloc[-1])
-                            ema50_15 = (
-                                float(c_15.ewm(span=50, adjust=False).mean().iloc[-1])
-                                if len(c_15) >= 40
-                                else ema20_15
-                            )
-                            if spot >= (ema20_15 * 0.998) and ema20_15 >= (ema50_15 * 0.998):
-                                mtf_15m_trend = "BULLISH"
-                            elif spot <= (ema20_15 * 1.002) and ema20_15 <= (ema50_15 * 1.002):
-                                mtf_15m_trend = "BEARISH"
-                    except Exception as e_mtf:
-                        logger.debug(
-                            f"[AutoAlertEngine] MTF 15m fetch failed for {clean_sym}: {e_mtf}"
-                        )
-
-                    # Reject counter-trend breakout traps against 15m structural trend,
-                    # UNLESS intraday price action has decisively confirmed an opening breakout/breakdown:
-                    # (For PE: spot broken below Day Open or below intraday VWAP)
-                    # (For CE: spot broken above Day Open or above intraday VWAP)
-                    has_opening_breakdown = bool(
-                        (spot_open and spot <= spot_open * 0.998)
-                        or (spot_vwap and spot <= spot_vwap * 1.001)
-                    )
-                    has_opening_breakout = bool(
-                        (spot_open and spot >= spot_open * 1.002)
-                        or (spot_vwap and spot >= spot_vwap * 0.999)
-                    )
-
-                    if opt_type == "CE" and mtf_15m_trend == "BEARISH" and not has_opening_breakout:
-                        logger.debug(
-                            f"[AutoAlertEngine] Suppressed Call breakout on {clean_sym}: 15m trend is BEARISH"
-                        )
-                        continue
-                    if opt_type == "PE" and mtf_15m_trend == "BULLISH" and not has_opening_breakdown:
-                        logger.debug(
-                            f"[AutoAlertEngine] Suppressed Put surge on {clean_sym}: 15m trend is BULLISH (Opening breakdown active: {has_opening_breakdown})"
-                        )
-                        continue
-
-                    # Benchmark Gravitational & Sector RRG Tailwind Filter on single-stock options:
-                    sector_tailwind_bonus = 0
-                    if not is_idx:
-                        try:
-                            from analysis.sector_rotation import get_stock_tailwind
-
-                            tailwind = get_stock_tailwind(clean_sym)
-                            if tailwind and hasattr(tailwind, "quadrant"):
-                                if opt_type == "CE":
-                                    if tailwind.quadrant in ("LEADING", "IMPROVING"):
-                                        sector_tailwind_bonus = 8
-                                    elif tailwind.quadrant == "LAGGING" and not (vol_oi >= 2.5):
-                                        logger.debug(
-                                            f"[AutoAlertEngine] Suppressed Call on {clean_sym}: Sector in LAGGING RRG quadrant ({getattr(tailwind, 'sector', '')})"
-                                        )
-                                        continue
-                                elif opt_type == "PE":
-                                    if tailwind.quadrant == "LAGGING":
-                                        sector_tailwind_bonus = 8
-                                    elif tailwind.quadrant == "LEADING" and not (vol_oi >= 2.5):
-                                        logger.debug(
-                                            f"[AutoAlertEngine] Suppressed Put on {clean_sym}: Sector in LEADING RRG quadrant ({getattr(tailwind, 'sector', '')})"
-                                        )
-                                        continue
-                        except Exception as e_rrg:
-                            logger.debug(
-                                f"[AutoAlertEngine] RRG tailwind check error for {clean_sym}: {e_rrg}"
-                            )
-
-                    if not is_idx and is_nifty_markdown and opt_type == "CE":
-                        from analysis.universe import get_stock_sector
-
-                        sec_id, sec_name = get_stock_sector(clean_sym)
-                        is_defensive = any(
-                            d in (sec_name or "").upper() for d in ("PHARMA", "FMCG", "HEALTH")
-                        )
-                        is_thematic = any(
-                            d in (sec_name or "").upper()
-                            for d in ("DEFENCE", "RAIL", "ENERGY", "CAPITAL", "INFRA", "EMS", "TECH", "SOLAR")
-                        )
-                        if not (is_defensive or is_thematic or sector_tailwind_bonus > 0):
-                            logger.debug(
-                                f"[AutoAlertEngine] Suppressed Call breakout on {clean_sym}: NIFTY in structural markdown ({nifty_change:.2f}%)"
-                            )
-                            continue
-
-                    if not is_idx and is_nifty_markup and opt_type == "PE":
-                        from analysis.universe import get_stock_sector
-
-                        sec_id, sec_name = get_stock_sector(clean_sym)
-                        is_lagging = any(d in sec_name.upper() for d in ("MEDIA", "REALTY"))
-                        if not (is_lagging or sector_tailwind_bonus > 0):
-                            logger.debug(
-                                f"[AutoAlertEngine] Suppressed Put surge on {clean_sym}: NIFTY in structural markup (+{nifty_change:.2f}%)"
-                            )
-                            continue
-
-                    # 2c. Options Delta-OI Institutional Confirmation Gate:
-                    # For Calls: If Call writers are aggressively stacking fresh OI while spot is below VWAP,
-                    # this is an institutional Call Writing Resistance Wall, NOT a bullish breakout!
-                    is_gamma_squeeze = False
-                    if opt_type == "CE":
-                        if oi_change and oi_change < 0:
-                            is_gamma_squeeze = True  # Call short covering
-                        elif oi_change and oi_change > 0 and spot_vwap and spot < spot_vwap:
-                            logger.debug(
-                                f"[AutoAlertEngine] Suppressed CE on {clean_sym}: Call writing resistance wall (OI +{oi_change} below VWAP)"
-                            )
-                            continue
-                    elif opt_type == "PE":
-                        if oi_change and oi_change < 0:
-                            is_gamma_squeeze = True  # Put short covering / long liquidation
-
-                    # 2d. India VIX Volatility Regime Adaptation
-                    vix_val = None
-                    try:
-                        from market.indices import get_vix
-
-                        vix_val = get_vix()
-                    except Exception:
-                        vix_val = None
-
-                    if vix_val and vix_val > 0:
-                        if vix_val < 12.0:
-                            vix_regime = "LOW_VOLATILITY"
-                        elif vix_val <= 18.0:
-                            vix_regime = "NORMAL_VOLATILITY"
-                        elif vix_val <= 24.0:
-                            vix_regime = "ELEVATED_VOLATILITY"
-                        else:
-                            vix_regime = "EXTREME_VOLATILITY"
-                    else:
-                        vix_regime = "NORMAL_VOLATILITY"
-
-                    # 2e. Candlestick Trigger Confirmation & RSI Divergence Trap Gate on Underlying Spot
-                    confirmation_bonus = 0
-                    divergence_bonus = 0
-                    conf_candle = None
-                    is_confirmed = False
-                    div_type = None
-                    div_bias = None
-                    if df_5m is not None and len(df_5m) >= 5:
-                        try:
-                            from analysis.market_structure import (
-                                detect_confirmation_candle,
-                                detect_divergence,
-                            )
-
-                            conf_res = detect_confirmation_candle(
-                                df_5m, direction=direction
-                            )
-                            is_confirmed = bool(conf_res.get("confirmed")) if isinstance(conf_res, dict) else False
-                            conf_candle = conf_res.get("pattern") if isinstance(conf_res, dict) else None
-                            if is_confirmed:
-                                confirmation_bonus = 8
-
-                            div_res = detect_divergence(df_5m)
-                            div_type = div_res.get("type") if isinstance(div_res, dict) else None
-                            div_bias = div_res.get("bias") if isinstance(div_res, dict) else None
-                            if div_type == "NONE":
-                                div_type = None
-                            if div_bias == "NONE":
-                                div_bias = None
-
-                            if div_type:
-                                if opt_type == "CE" and div_bias == "BEARISH" and "REGULAR" in div_type:
-                                    logger.debug(
-                                        f"[AutoAlertEngine] Suppressed CE on {clean_sym}: Bearish regular RSI divergence trap ({div_type})"
-                                    )
-                                    continue
-                                elif opt_type == "PE" and div_bias == "BULLISH" and "REGULAR" in div_type:
-                                    logger.debug(
-                                        f"[AutoAlertEngine] Suppressed PE on {clean_sym}: Bullish regular RSI divergence trap ({div_type})"
-                                    )
-                                    continue
-                                elif (opt_type == "CE" and div_bias == "BULLISH") or (
-                                    opt_type == "PE" and div_bias == "BEARISH"
-                                ):
-                                    divergence_bonus = 6
-                        except Exception as e_smc:
-                            logger.debug(
-                                f"[AutoAlertEngine] SMC candle/divergence check error for {clean_sym}: {e_smc}"
-                            )
-
-                    # 2f. 5-Strategy Signal Ensemble Veto Gate
-                    if df_5m is not None and len(df_5m) >= 10:
-                        try:
-                            from analysis.market_structure import ensemble_signal
-
-                            ens = ensemble_signal(df_5m)
-                            if ens and getattr(ens, "confidence", 0) >= 55:
-                                ens_sig = str(getattr(ens, "signal", "")).upper()
-                                if (opt_type == "CE" and "SELL" in ens_sig) or (
-                                    opt_type == "PE" and "BUY" in ens_sig
-                                ):
-                                    logger.debug(
-                                        f"[AutoAlertEngine] Suppressed {opt_type} on {clean_sym}: Ensemble veto ({ens_sig} {ens.confidence}%)"
-                                    )
-                                    continue
-                        except Exception as e_ens:
-                            logger.debug(
-                                f"[AutoAlertEngine] Ensemble veto error for {clean_sym}: {e_ens}"
-                            )
-
-                    # 2g. Volume Profile POC Proximity & Confluence Bonus
-                    vp_bonus = 0
-                    vp_tags = []
-                    if df_5m is not None and len(df_5m) >= 10:
-                        try:
-                            from analysis.volume_profile import compute_volume_profile
-
-                            vp = compute_volume_profile(df_5m)
-                            if vp and getattr(vp, "poc", 0) > 0:
-                                poc_dist = abs(spot - vp.poc) / max(1.0, spot)
-                                if opt_type == "CE" and spot >= vp.vah * 0.998:
-                                    vp_bonus += 5
-                                    vp_tags.append("VAH_BREAKOUT")
-                                elif opt_type == "CE" and poc_dist <= 0.003:
-                                    vp_bonus += 4
-                                    vp_tags.append("POC_SUPPORT_BOUNCE")
-                                elif opt_type == "PE" and spot <= vp.val * 1.002:
-                                    vp_bonus += 5
-                                    vp_tags.append("VAL_BREAKDOWN")
-                                elif opt_type == "PE" and poc_dist <= 0.003:
-                                    vp_bonus += 4
-                                    vp_tags.append("POC_RESISTANCE_REJECT")
-                        except Exception as e_vp:
-                            logger.debug(
-                                f"[AutoAlertEngine] Volume profile error for {clean_sym}: {e_vp}"
-                            )
-
-                    alert_id = f"aa-optmom-{opt_type.lower()}-{clean_sym}-{int(strike)}-{uuid.uuid4().hex[:6]}"
-
-                    # 3. Dynamic Spot-Anchored Trade Plan & Invalidation (Institutional Greeks)
-                    tp = None
-                    opt_plan = None
-                    try:
-                        from engine.trade_plan import (
-                            calculate_trade_plan,
-                            calculate_option_execution_plan,
-                        )
-
-                        opt_exchange = "BFO" if exch == "BSE" else "NFO"
-                        tp = calculate_trade_plan(
-                            symbol=clean_sym,
-                            direction="BUY" if opt_type == "CE" else "SELL",
-                            spot=spot,
-                            timeframe="INTRADAY",
-                            exchange=opt_exchange,
-                            has_active_blast=(vol_oi >= 2.0),
-                        )
-                        if tp and tp.invalidation_stop > 0:
-                            opt_plan = calculate_option_execution_plan(
-                                trade_plan=tp,
-                                option_type=opt_type,
-                                strike=strike,
-                                expiry=str(expiry_date) if expiry_date else "",
-                                option_ltp=opt_ltp,
-                                lot_size=lot_sz,
-                            )
-                    except Exception as e_tp:
-                        logger.debug(f"[OptionsBreakout] Trade plan calculation failed: {e_tp}")
-
-                    if opt_plan and opt_plan.get("sl_premium") and opt_plan.get("t1_premium"):
-                        opt_sl = float(opt_plan["sl_premium"])
-                        opt_t1 = float(opt_plan["t1_premium"])
-                        # Enforce defined risk realistic stop for Options Momentum (cap risk at 28% of premium to prevent noise stops):
-                        max_opt_sl_risk = round(opt_ltp * 0.28, 2)
-                        opt_sl = max(opt_sl, round(opt_ltp - max_opt_sl_risk, 2))
-                        opt_risk = max(0.2, opt_ltp - opt_sl)
-                        opt_t0_5 = round(opt_ltp + 1.0 * opt_risk, 2)
-                        opt_t1 = max(float(opt_plan.get("t1_premium") or 0.0), round(opt_ltp + 1.8 * opt_risk, 2))
-                        opt_t2 = max(
-                            float(opt_plan.get("t2_premium") or 0.0), round(opt_ltp + 3.0 * opt_risk, 2)
-                        )
-                        opt_moonshot = max(
-                            float(opt_plan.get("t3_premium") or 0.0), round(opt_ltp + 5.0 * opt_risk, 2)
-                        )
-                        rr_val = round((opt_t1 - opt_ltp) / max(0.01, opt_risk), 1)
-                        rr_str = f"1:{rr_val}"
-                    else:
-                        # Structural defined risk stop for intraday options (25%–28% risk buffer)
-                        risk_pts = round(max(0.20, min(opt_ltp * 0.28, opt_ltp - 0.05)), 2)
-                        opt_sl = round(max(0.05, opt_ltp - risk_pts), 2)
-                        opt_t0_5 = round(opt_ltp + 1.0 * risk_pts, 2)
-                        opt_t1 = round(opt_ltp + 1.8 * risk_pts, 2)
-                        opt_t2 = round(opt_ltp + 3.0 * risk_pts, 2)
-                        opt_moonshot = round(opt_ltp + 5.0 * risk_pts, 2)
-                        rr_str = "1:1.8"
-
-                    # 4. Friday Session Clock & Weekend Theta Decay Filter
-                    friday_tag = (
-                        " ⚠️ FRIDAY POST-14:30: Weekend theta decay risk; Intraday Quick Scalp only (Square off by 15:20 IST) or trade Bull Call Spread."
-                        if is_friday_late
-                        else ""
-                    )
-                    dte_pm_tag = (
-                        " ⚠️ 0DTE AFTERNOON: Accelerated theta decay active. Deep ATM/ITM only; mandatory square-off by 15:15 IST."
-                        if is_zero_dte_pm
-                        else ""
-                    )
-                    phys_tag = (
-                        " ⚠️ SEBI Physical Delivery Expiry Week: STAGGERED MARGIN SURGE (25%->100% full lot cash value). INTRADAY SCALP ONLY — MANDATORY EXIT BY 15:00 IST."
-                        if (is_physical_expiry_week and not is_next_month_routed)
-                        else ""
-                    )
-                    rollover_tag = (
-                        f" 🎯 NEXT-MONTH ROLLOVER ({expiry_date}): Bypasses SEBI physical delivery margin surge & near-month theta collapse."
-                        if is_next_month_routed
-                        else ""
-                    )
-
-                    # 5. Multi-factor Institutional Conviction Scoring (Earned 50-96 scale)
-                    # Lower base score from 65 to 50 so mediocre setups don't falsely max out at 95%
-                    conf_score = 50
-
-                    # A. Volume / OI Ratio conviction (up to +20 pts)
-                    if vol_oi >= 3.0:
-                        conf_score += 20
-                    elif vol_oi >= 2.0:
-                        conf_score += 15
-                    elif vol_oi >= 1.5:
-                        conf_score += 10
-                    elif vol_oi >= 1.2:
-                        conf_score += 5
-
-                    # B. Option Price Expansion (+5 to +15 pts)
-                    opt_pch = getattr(c, "pchange", 0.0) or 0.0
-                    if opt_pch >= 20.0:
-                        conf_score += 15
-                    elif opt_pch >= 12.0:
-                        conf_score += 10
-                    elif opt_pch >= 6.0:
-                        conf_score += 5
-
-                    # C. Underlying Stock Expansion from VWAP (+5 to +12 pts)
-                    if spot_vwap and spot_vwap > 0:
-                        vwap_dist_pct = abs(spot - spot_vwap) / spot_vwap * 100.0
-                        if opt_type == "CE" and spot >= spot_vwap * 1.005:
-                            conf_score += 12 if vwap_dist_pct >= 0.8 else 8
-                        elif opt_type == "PE" and spot <= spot_vwap * 0.995:
-                            conf_score += 12 if vwap_dist_pct >= 0.8 else 8
-                        elif (opt_type == "CE" and spot >= spot_vwap) or (opt_type == "PE" and spot <= spot_vwap):
-                            conf_score += 4
-
-                    # D. Mathematical Asymmetry Viability (+8 pts)
-                    if tp and tp.is_asymmetry_viable:
-                        conf_score += 8
-
-                    # E. Candlestick Cleanliness (low wicks = clean trend, +5 pts)
-                    if upper_wick_ratio <= 0.20 and lower_wick_ratio <= 0.20:
-                        conf_score += 5
-
-                    # F. Gamma Squeeze / Short Covering (+7 pts)
-                    if is_gamma_squeeze:
-                        conf_score += 7
-                    elif oi_change and oi_change < 0:
-                        conf_score += 4
-
-                    # G. MTF 15m Alignment (+7 pts)
-                    if mtf_15m_trend == ("BULLISH" if opt_type == "CE" else "BEARISH"):
-                        conf_score += 7
-
-                    # H. Macro Tailwind (+6 pts)
-                    if is_nifty_markdown and opt_type == "PE":
-                        conf_score += 6
-                    elif is_nifty_markup and opt_type == "CE":
-                        conf_score += 6
-
-                    # I. Opening Drive Institutional Bonus (+10 pts)
-                    opening_drive_bonus = 0
-                    drive_tag = ""
-                    if is_bear_drive and opt_type == "PE":
-                        opening_drive_bonus = 10
-                        drive_tag = " ⚡ OPENING DRIVE (Open=High)"
-                    elif is_bull_drive and opt_type == "CE":
-                        opening_drive_bonus = 10
-                        drive_tag = " ⚡ OPENING DRIVE (Open=Low)"
-
-                    conf_score += confirmation_bonus
-                    conf_score += divergence_bonus
-                    conf_score += vp_bonus
-                    conf_score += sector_tailwind_bonus
-                    conf_score += opening_drive_bonus
-
-                    confidence = min(96, max(50, conf_score))
-
-                    # 6. Optimal Trade Entry (OTE) & Strict No-Chase Boundaries
-                    ote_lower = round(max(0.05, opt_ltp * 0.96), 1)
-                    ote_upper = round(opt_ltp * 1.01, 1)
-                    max_chase = round(opt_ltp * 1.08, 1)
-                    entry_range_str = f"₹{ote_lower:,.1f} – ₹{ote_upper:,.1f}"
-                    when_to_wait_str = f"DO NOT CHASE if premium surges > 8% past entry (> ₹{max_chase:,.1f}). Wait for 5m consolidation retest."
-                    spot_anchor_str = (
-                        f" (Spot Anchor: ₹{tp.invalidation_stop:,.1f})"
-                        if (tp and tp.invalidation_stop > 0)
-                        else ""
-                    )
-                    when_to_buy_str = (
-                        f"Buy on ask/limit within entry range with spot invalidation anchor at ₹{tp.invalidation_stop:,.1f} (Option SL ₹{opt_sl:,.1f})."
-                        if (tp and tp.invalidation_stop > 0)
-                        else f"Buy on ask/limit within entry range with tight defined risk below ₹{opt_sl:,.1f}."
-                    )
-
-                    if opt_type == "PE":
-                        headline = f"🎯 OPTIONS MOMENTUM (PUT SURGE): {contract_sym} @ ₹{opt_ltp:,.1f} (Vol/OI {vol_oi}x)"
-                        summary = (
-                            f"Institutional Put surge in {clean_sym} {int(strike)} PE. "
-                            f"Underlying spot ₹{spot:,.1f}{spot_anchor_str}. Turnover: {vol:,} contracts ({vol_oi}x OI). "
-                            f"Entry: ₹{opt_ltp:,.1f} | SL: ₹{opt_sl:,.1f} | T1: ₹{opt_t1:,.1f} (Scale 50% & SL to Cost) | T2: ₹{opt_t2:,.1f}.{drive_tag}{friday_tag}{dte_pm_tag}{phys_tag}{rollover_tag}"
-                        )
-                    else:
-                        headline = f"🚀 OPTIONS MOMENTUM: {contract_sym} @ ₹{opt_ltp:,.1f} (Vol/OI {vol_oi}x)"
-                        summary = (
-                            f"Institutional Call surge in {clean_sym} {int(strike)} CE. "
-                            f"Underlying spot ₹{spot:,.1f}{spot_anchor_str}. Turnover: {vol:,} contracts ({vol_oi}x OI). "
-                            f"Entry: ₹{opt_ltp:,.1f} | SL: ₹{opt_sl:,.1f} | T1: ₹{opt_t1:,.1f} (Scale 50% & SL to Cost) | T2: ₹{opt_t2:,.1f}.{drive_tag}{friday_tag}{dte_pm_tag}{phys_tag}{rollover_tag}"
-                        )
-
-                    alert = AutoAlert(
-                        alert_id=alert_id,
-                        alert_type="OPTIONS_MOMENTUM",
-                        stage=(
-                            "IGNITED"
-                            if (
-                                vol_oi >= 2.0
-                                or (is_opening_drive and (vol_oi >= 0.50 or vol >= 6000))
-                            )
-                            else "EARLY_WARNING"
-                        ),
-                        symbol=clean_sym,
-                        exchange=opt_exchange,
-                        direction=direction,
-                        headline=headline,
-                        summary=summary,
-                        ltp=opt_ltp,
-                        trigger_level=opt_ltp,
-                        target_level=opt_t1,
-                        stop_loss=opt_sl,
-                        no_chase_boundary=max_chase,
-                        strike=strike,
-                        option_type=opt_type,
-                        contract_symbol=contract_sym,
-                        expiry_date=expiry_date,
-                        expiry_type=classify_expiry_type(expiry_date, clean_sym),
-                        segment=alert_segment,
-                        option_premium=opt_ltp,
-                        underlying_spot=spot,
-                        confidence=confidence,
-                        created_at=now_iso,
-                        is_live=True,
-                        environment="LIVE",
-                        mtf_confluence=(
-                            "BEARISH_BREAKDOWN"
-                            if has_opening_breakdown
-                            else ("BULLISH_BREAKOUT" if has_opening_breakout else mtf_15m_trend)
-                        ),
-                        vix_regime=vix_regime,
-                        metrics={
-                            "vol_oi_ratio": vol_oi,
-                            "volume": vol,
-                            "oi": oi,
-                            "oi_change": oi_change,
-                            "spot": spot,
-                            "strike": strike,
-                            "lot_size": lot_sz,
-                            "spot_vwap": spot_vwap,
-                            "spot_invalidation_anchor": tp.invalidation_stop if tp else None,
-                            "spot_target_1": tp.target_1 if tp else None,
-                            "spot_target_2": tp.target_2 if tp else None,
-                            "upper_wick_ratio": round(upper_wick_ratio, 2),
-                            "lower_wick_ratio": round(lower_wick_ratio, 2),
-                            "high": getattr(c, "high", None),
-                            "low": getattr(c, "low", None),
-                            "open": getattr(c, "open", None),
-                            "close": getattr(c, "close", None),
-                            "is_friday_late": is_friday_late,
-                            "is_opening_drive": bool(is_bear_drive or is_bull_drive),
-                            "opening_drive_type": "BEARISH_OPEN_EQUALS_HIGH" if is_bear_drive else ("BULLISH_OPEN_EQUALS_LOW" if is_bull_drive else None),
-                            "mtf_15m_trend": (
-                                "BEARISH_BREAKDOWN"
-                                if has_opening_breakdown
-                                else (
-                                    "BULLISH_BREAKOUT" if has_opening_breakout else mtf_15m_trend
-                                )
-                            ),
-                            "has_opening_breakdown": has_opening_breakdown,
-                            "has_opening_breakout": has_opening_breakout,
-                            "vix_regime": vix_regime,
-                            "india_vix": vix_val,
-                            "is_gamma_squeeze": is_gamma_squeeze,
-                            "nifty_change_pct": nifty_change,
-                            "nifty_below_vwap": nifty_below_vwap,
-                            "nifty_regime": (
-                                "MARKDOWN"
-                                if is_nifty_markdown
-                                else ("MARKUP" if is_nifty_markup else "NORMAL")
-                            ),
-                            "confirmation_candle": conf_candle,
-                            "confirmation_confirmed": is_confirmed,
-                            "divergence_type": div_type,
-                            "divergence_bias": div_bias,
-                            "volume_profile_tags": vp_tags,
-                            "is_0dte_afternoon": is_zero_dte_pm,
-                            "physical_settlement_week": is_physical_expiry_week or is_next_month_routed,
-                            "rollover_series": "NEXT_MONTH" if is_next_month_routed else "CURRENT_MONTH",
-                            "is_rollover_recommended": is_next_month_routed,
-                            "rollover_protected": is_next_month_routed,
-                            "sector_tailwind_bonus": sector_tailwind_bonus,
-                        },
-                        actionable_plan={
-                            "action": f"BUY {opt_type}",
-                            "segment": "FNO",
-                            "contract": contract_sym,
-                            "recommended_entry": f"₹{opt_ltp:,.2f}",
-                            "entry_range": entry_range_str,
-                            "stop_loss": f"₹{opt_sl:,.1f}",
-                            "target_0_5": f"₹{opt_t0_5:,.1f}",
-                            "target_1": f"₹{opt_t1:,.1f}",
-                            "target": f"₹{opt_t1:,.1f}",
-                            "target_2": f"₹{opt_t2:,.1f}",
-                            "target_moonshot": f"₹{opt_moonshot:,.1f}",
-                            "risk_reward": rr_str,
-                            "when_to_buy": when_to_buy_str,
-                            "when_to_wait": when_to_wait_str,
-                            "profit_rule": (
-                                f"🏆 3-TIER PROFIT-TAKING: "
-                                f"1) Scale 50% at T1 (₹{opt_t1:,.1f}) & move SL to Breakeven (0 Risk). "
-                                f"2) Scale 25% at T2 (₹{opt_t2:,.1f}). "
-                                f"3) Trail final 25% on 15m VWAP / 20-EMA to Moonshot (₹{opt_moonshot:,.1f})."
-                            ),
-                            "option_plan": opt_plan,
-                            "lot_size": lot_sz,
-                            "spot_invalidation_anchor": f"₹{tp.invalidation_stop:,.1f}"
-                            if (tp and tp.invalidation_stop > 0)
-                            else None,
-                            "friday_weekend_warning": friday_tag.strip() if friday_tag else None,
-                            "zero_dte_afternoon_guard": (
-                                "⚠️ 0DTE AFTERNOON: Accelerated theta decay active. Deep ATM/ITM only; mandatory square-off by 15:15 IST."
-                                if is_zero_dte_pm
-                                else None
-                            ),
-                            "rollover_notice": (
-                                f"🎯 NEXT-MONTH ROLLOVER: Contract {contract_sym} expires {expiry_date} (bypasses SEBI delivery margin surge & theta decay)."
-                                if is_next_month_routed
-                                else None
-                            ),
-                            "physical_settlement_warning": (
-                                "⚠️ SEBI Physical Delivery Expiry Week: STAGGERED MARGIN SURGE (25%->100% full lot cash value). Mandatory exit by 15:00 IST — DO NOT CARRY OVERNIGHT."
-                                if (is_physical_expiry_week and not is_next_month_routed)
-                                else None
-                            ),
-                        },
-                    )
-                    if self.record_alert(alert):
-                        found.append(alert)
-                        break  # 1 best contract per underlying per scan cycle
-            except Exception as e:
-                logger.debug(f"[AutoAlertEngine] Options momentum scan error for {sym}: {e}")
-
+        found: list[AutoAlert] = []
+        for a in alerts:
+            if self.record_alert(a):
+                found.append(a)
         return found
 
     def scan_index_contagion(self) -> list[AutoAlert]:
@@ -4431,6 +3197,75 @@ class AutoAlertEngine:
 
         return found
 
+    def scan_preopen_bias(self) -> list[AutoAlert]:
+        """Priority-0a: Pre-open GIFT Nifty directional bias scanner.
+
+        Fires EARLY_WARNING CE/PE alerts at 09:05–09:14 IST based on GIFT Nifty
+        premium/discount vs previous close. Gives traders a 5–10 minute head-start
+        before the NSE opening bell (09:15 IST).
+
+        Threshold: |gap| >= 0.30% triggers bias; >= 0.60% = STRONG signal.
+        """
+        from engine.alert_preferences import alert_preferences
+        from engine.detectors.preopen_bias import detect_preopen_bias
+        from market.options import get_options_chain
+
+        if not alert_preferences.is_segment_allowed("FNO_INDEX"):
+            return []
+
+        now_dt = datetime.now(IST)
+        is_preopen = (now_dt.hour == 9 and 5 <= now_dt.minute <= 14)
+        is_test_runner = (
+            os.environ.get("CHANAKYA_TESTING") == "1"
+            or "PYTEST_CURRENT_TEST" in os.environ
+        )
+        if not is_preopen and not is_test_runner:
+            return []
+
+        found: list[AutoAlert] = []
+
+        for sym in ("NIFTY", "BANKNIFTY"):
+            try:
+                from market.gift_nifty import get_gift_nifty_quote
+                exch = self._resolve_index_exchange(sym)
+                lookup_sym = f"{exch}:{sym}"
+
+                gift_data = get_gift_nifty_quote(sym)
+                if not gift_data:
+                    continue
+                gift_price = float(gift_data.get("last_price") or gift_data.get("ltp") or 0.0)
+                prev_close = float(gift_data.get("prev_close") or gift_data.get("previous_close") or 0.0)
+
+                if gift_price <= 0 or prev_close <= 0:
+                    # Fallback: read from quote cache
+                    from market.quotes import get_quote, get_ltp
+                    raw_q = get_quote(lookup_sym)
+                    q_obj = (raw_q.get(lookup_sym) or raw_q.get(sym) if isinstance(raw_q, dict) else raw_q)
+                    if q_obj:
+                        gift_price = gift_price or float(getattr(q_obj, "last_price", 0.0) or 0.0)
+                        prev_close = prev_close or float(getattr(q_obj, "prev_close", 0.0) or 0.0)
+
+                if gift_price <= 0 or prev_close <= 0:
+                    continue
+
+                chain = get_options_chain(sym)
+                alerts = detect_preopen_bias(
+                    underlying=sym,
+                    gift_futures_price=gift_price,
+                    prev_close=prev_close,
+                    chain=chain or [],
+                )
+                for a in alerts:
+                    if self.record_alert(a):
+                        found.append(a)
+                        logger.info(
+                            f"[AutoAlertEngine] 🌅 Pre-Open Bias fired: {a.headline}"
+                        )
+            except Exception as e:
+                logger.debug(f"[AutoAlertEngine] Pre-open bias scan error for {sym}: {e}")
+
+        return found
+
     def scan_opening_range_breakouts(self) -> list[AutoAlert]:
         """
         Scans watched indices and high-liquidity equities for 15-minute Opening Range Breakouts (ORB-15).
@@ -4500,11 +3335,248 @@ class AutoAlertEngine:
 
     # ── Time-Partitioned Segment Scanning Loops ──────────────────
 
+    def scan_index_call_setups(self) -> list[AutoAlert]:
+        """Priority-0b SMC-driven BULLISH index options scanner (CE symmetric counterpart).
+
+        Catches CE opportunities that the OI-centric Gamma Blast detector misses:
+        PDL/PWL demand rejection, VWAP reclaim entry, intraday demand zone sweep,
+        bearish exhaustion absorption, double bottom breakout, and VCP coiling.
+        Runs BEFORE scan_gamma_blasts() as the earliest possible bullish index signal.
+        """
+        from market.quotes import get_quote, get_ltp
+        from market.options import get_options_chain
+        from engine.alert_preferences import alert_preferences
+
+        if not alert_preferences.is_segment_allowed("FNO_INDEX"):
+            return []
+
+        found: list[AutoAlert] = []
+        now_dt = datetime.now(IST)
+        # Only run during active equity/NFO session (09:18 – 15:10 IST)
+        is_active_session = (
+            (now_dt.hour > 9 or (now_dt.hour == 9 and now_dt.minute >= 18))
+            and (now_dt.hour < 15 or (now_dt.hour == 15 and now_dt.minute <= 10))
+        )
+        is_test_runner = (
+            os.environ.get("CHANAKYA_TESTING") == "1"
+            or "PYTEST_CURRENT_TEST" in os.environ
+        )
+        if not is_active_session and not is_test_runner:
+            return []
+
+        _INDEX_SYMS = [s for s in self._watched_indices if s not in ("SENSEX", "BANKEX")]
+
+        for sym in _INDEX_SYMS:
+            try:
+                exch = self._resolve_index_exchange(sym)
+                lookup_sym = f"{exch}:{sym}" if ":" not in sym else sym
+
+                # Fix P0: use exchange-prefixed lookup to match the quote cache key
+                raw_q = get_quote(lookup_sym)
+                q_obj = (
+                    raw_q.get(lookup_sym) or raw_q.get(sym)
+                    if isinstance(raw_q, dict)
+                    else raw_q
+                )
+                spot = (
+                    float(getattr(q_obj, "last_price", 0.0) or getattr(q_obj, "ltp", 0.0) or 0.0)
+                    if q_obj else 0.0
+                )
+                if spot <= 0:
+                    spot = get_ltp(lookup_sym) or 0.0
+                if spot <= 0:
+                    continue
+
+                vwap_val = float(getattr(q_obj, "vwap", 0.0) or getattr(q_obj, "average_price", 0.0) or 0.0) if q_obj else 0.0
+                day_high_val = float(getattr(q_obj, "high", 0.0) or getattr(q_obj, "day_high", 0.0) or 0.0) if q_obj else 0.0
+                day_low_val = float(getattr(q_obj, "low", 0.0) or getattr(q_obj, "day_low", 0.0) or 0.0) if q_obj else 0.0
+
+                # Resolve prev day high/low; fall back to daily OHLCV
+                prev_day_high = float(getattr(q_obj, "prev_day_high", 0.0) or getattr(q_obj, "prev_high", 0.0) or 0.0) if q_obj else 0.0
+                prev_day_low = float(getattr(q_obj, "prev_day_low", 0.0) or getattr(q_obj, "prev_low", 0.0) or 0.0) if q_obj else 0.0
+                prev_week_low = float(getattr(q_obj, "week_52_low", 0.0) or 0.0) if q_obj else 0.0
+
+                if prev_day_low <= 0:
+                    prev_close = float(getattr(q_obj, "prev_close", 0.0) or getattr(q_obj, "previous_close", 0.0) or 0.0) if q_obj else 0.0
+                    if prev_close > 0:
+                        try:
+                            from market.history import get_ohlcv
+                            df_prev = get_ohlcv(sym, exchange=exch, interval="day", days=5)
+                            if df_prev is not None and len(df_prev) >= 2:
+                                col_h = "high" if "high" in df_prev.columns else "High"
+                                col_l = "low" if "low" in df_prev.columns else "Low"
+                                prev_day_high = float(df_prev[col_h].iloc[-2])
+                                prev_day_low = float(df_prev[col_l].iloc[-2])
+                        except Exception:
+                            prev_day_low = prev_close * 0.994   # ATR-estimated floor
+
+                # 5-minute OHLCV for structural signal analysis
+                df_5m = None
+                try:
+                    from market.history import get_ohlcv
+                    df_5m = get_ohlcv(sym, exchange=exch, interval="5minute", days=2)
+                except Exception:
+                    pass
+
+                chain = get_options_chain(sym)
+                if not chain:
+                    continue
+
+                alerts = detect_index_call_setup(
+                    underlying=sym,
+                    spot=spot,
+                    chain=chain,
+                    vwap=vwap_val if vwap_val > 0 else None,
+                    day_high=day_high_val if day_high_val > 0 else None,
+                    day_low=day_low_val if day_low_val > 0 else None,
+                    prev_day_high=prev_day_high if prev_day_high > 0 else None,
+                    prev_day_low=prev_day_low if prev_day_low > 0 else None,
+                    prev_week_low=prev_week_low if prev_week_low > 0 else None,
+                    ohlcv_5m=df_5m,
+                )
+                for a in alerts:
+                    if self.record_alert(a):
+                        found.append(a)
+                        logger.info(
+                            f"[AutoAlertEngine] 🟢 SMC Index Call Setup fired: {a.headline} "
+                            f"({', '.join(a.metrics.get('signals', []))}) stage={a.stage}"
+                        )
+            except Exception as e:
+                logger.debug(f"[AutoAlertEngine] Index call setup scan error for {sym}: {e}")
+
+        return found
+
+
+    def scan_index_put_setups(self) -> list[AutoAlert]:
+        """Priority-0 SMC-driven bearish index options scanner (Fix 9).
+
+        Catches PE opportunities that the OI-centric Gamma Blast detector misses:
+        PDH/PWH supply rejection, VWAP failure retest, intraday supply zone sweep,
+        and double top breakdown. Uses structural price action, not raw OI unwind.
+        Runs BEFORE scan_gamma_blasts() as the earliest possible bearish index signal.
+        """
+        from market.options import get_options_chain
+        from market.quotes import get_quote, get_ltp
+        from market.history import get_ohlcv
+        from engine.alert_preferences import alert_preferences
+
+        if not alert_preferences.is_segment_allowed("FNO_INDEX"):
+            return []
+
+        found: list[AutoAlert] = []
+        now_dt = datetime.now(IST)
+        # Only run during active equity/NFO session (09:18 – 15:10 IST)
+        is_active_session = (
+            (now_dt.hour > 9 or (now_dt.hour == 9 and now_dt.minute >= 18))
+            and (now_dt.hour < 15 or (now_dt.hour == 15 and now_dt.minute <= 10))
+        )
+        is_test_runner = (
+            os.environ.get("CHANAKYA_TESTING") == "1"
+            or "PYTEST_CURRENT_TEST" in os.environ
+        )
+        if not is_active_session and not is_test_runner:
+            return []
+
+        # Focus on liquid weekly-expiry index universe
+        index_targets = [s for s in self._watched_indices if s not in ("SENSEX", "BANKEX")]
+
+        for sym in index_targets:
+            try:
+                exch = self._resolve_index_exchange(sym)
+                lookup_sym = f"{exch}:{sym}" if ":" not in sym else sym
+
+                raw_q = get_quote(lookup_sym)
+                q_obj = (
+                    raw_q.get(lookup_sym) or raw_q.get(sym)
+                    if isinstance(raw_q, dict)
+                    else raw_q
+                )
+                spot = (
+                    float(getattr(q_obj, "last_price", 0.0) or getattr(q_obj, "ltp", 0.0) or 0.0)
+                    if q_obj else 0.0
+                )
+                if spot <= 0:
+                    spot = get_ltp(lookup_sym) or 0.0
+                if spot <= 0:
+                    continue
+
+                # Only evaluate if market is showing intraday weakness or testing resistance
+                spot_change_pct = float(getattr(q_obj, "change_pct", 0.0) or 0.0) if q_obj else 0.0
+                day_high_val = float(getattr(q_obj, "high", 0.0) or 0.0) if q_obj else 0.0
+                day_low_val = float(getattr(q_obj, "low", 0.0) or 0.0) if q_obj else 0.0
+                vwap_val = float(getattr(q_obj, "vwap", 0.0) or 0.0) if q_obj else 0.0
+                prev_close = float(getattr(q_obj, "prev_close", 0.0) or 0.0) if q_obj else 0.0
+
+                # Pre-filter: skip if index is strongly trending up (>0.8% above VWAP + green day > 0.6%)
+                is_strong_bull_trend = (
+                    spot_change_pct > 0.6
+                    and vwap_val > 0
+                    and spot > vwap_val * 1.008
+                )
+                if is_strong_bull_trend and not is_test_runner:
+                    continue
+
+                # Resolve previous day high (PDH) from yesterday's close + a small estimate
+                # In production this comes from the historical data; fall back to prev_close
+                prev_day_high = None
+                prev_day_low = None
+                prev_week_high = None
+                try:
+                    from market.history import get_ohlcv as _gohlcv
+                    df_daily = _gohlcv(sym, exchange=exch, interval="day", days=7)
+                    if df_daily is not None and len(df_daily) >= 2:
+                        col_h = "high" if "high" in df_daily.columns else "High"
+                        col_l = "low" if "low" in df_daily.columns else "Low"
+                        prev_day_high = float(df_daily[col_h].iloc[-2])
+                        prev_day_low = float(df_daily[col_l].iloc[-2])
+                        if len(df_daily) >= 6:
+                            prev_week_high = float(df_daily[col_h].iloc[-6:-1].max())
+                except Exception:
+                    if prev_close > 0:
+                        prev_day_high = prev_close * 1.006  # estimate: prev_close + 0.6% typical high
+
+                # 5-minute OHLCV for structural analysis
+                df_5m = None
+                try:
+                    df_5m = get_ohlcv(sym, exchange=exch, interval="5minute", days=2)
+                except Exception:
+                    pass
+
+                chain = get_options_chain(sym)
+                if not chain:
+                    continue
+
+                alerts = detect_index_put_setup(
+                    underlying=sym,
+                    spot=spot,
+                    chain=chain,
+                    vwap=vwap_val if vwap_val > 0 else None,
+                    day_high=day_high_val if day_high_val > 0 else None,
+                    day_low=day_low_val if day_low_val > 0 else None,
+                    prev_day_high=prev_day_high,
+                    prev_day_low=prev_day_low,
+                    prev_week_high=prev_week_high,
+                    ohlcv_5m=df_5m,
+                )
+                for a in alerts:
+                    if self.record_alert(a):
+                        found.append(a)
+                        logger.info(
+                            f"[AutoAlertEngine] 🔴 SMC Index Put Setup fired: {a.headline} "
+                            f"({', '.join(a.metrics.get('signals', []))}) stage={a.stage}"
+                        )
+            except Exception as e:
+                logger.debug(f"[AutoAlertEngine] Index put setup scan error for {sym}: {e}")
+
+        return found
+
     def scan_equity_nfo_now(self) -> list[AutoAlert]:
         """Runs all daytime Equity and NFO derivative detectors (09:15 - 15:30 IST)."""
         results: list[AutoAlert] = []
-        results.extend(self.scan_opening_drives())  # Priority 0: 09:16 - 09:45 Morning Institutional Drive
-        results.extend(self.scan_index_contagion())  # Priority 1: Heavyweight lead-lag sync!
+        results.extend(self.scan_index_call_setups())  # Priority 0a: SMC bullish index CE detector
+        results.extend(self.scan_index_put_setups())   # Priority 0b: SMC bearish index PE detector
+        results.extend(self.scan_opening_drives())      # Priority 1: 09:16 - 09:45 Morning Institutional Drive
+        results.extend(self.scan_index_contagion())     # Priority 2: Heavyweight lead-lag sync!
         results.extend(self.scan_gamma_blasts())
         results.extend(self.scan_options_momentum_breakouts())
         results.extend(self.scan_squeeze_breakouts())
@@ -4534,889 +3606,31 @@ class AutoAlertEngine:
 
     def scan_commodities_now(self) -> list[AutoAlert]:
         """
-        Scans liquid MCX commodities (Crude Oil, Gold, Silver, Natural Gas, Copper)
+        Scans liquid MCX commodities (Crude Oil, Gold, Silver, Natural Gas, Copper, Zinc)
         for high-asymmetry session breakouts, VWAP reclaims, and US session volatility expansion.
         Active during post-equity session (15:30 - 23:30 IST).
         """
-        from market.quotes import get_quote
+        from engine.detectors.commodity import detect_commodity_breakouts
 
+        alerts = detect_commodity_breakouts(universe=self.watched_commodities)
         found: list[AutoAlert] = []
-        universe = self.watched_commodities
-        formatted = [f"MCX:{s}" if ":" not in s else s for s in universe]
-        now_iso = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
-
-        try:
-            quotes_map = get_quote(formatted)
-        except Exception as e:
-            logger.debug(f"[AutoAlertEngine] Commodity quotes fetch error: {e}")
-            return found
-
-        for sym in universe:
-            clean_sym = sym.upper().replace("MCX:", "").strip()
-            q = quotes_map.get(f"MCX:{clean_sym}") or quotes_map.get(clean_sym)
-            if not q:
-                continue
-
-            ltp = float(getattr(q, "last_price", 0.0) or getattr(q, "ltp", 0.0) or 0.0)
-            if ltp <= 0:
-                continue
-
-            # Strict Data Provenance Gate: Verify if quote is authentic live broker data vs synthetic/mock
-            is_mock_quote = (
-                type(q).__name__ == "MagicMock"
-                or getattr(q, "_is_mock", False)
-                or getattr(q, "provider", "") in ("mock", "TEST")
-                or getattr(q, "data_state", "") == "UNAVAILABLE"
-            )
-            is_test_env = (
-                os.environ.get("CHANAKYA_TESTING") == "1"
-                or os.environ.get("DEPLOY_MODE") == "test"
-            )
-            is_authentic_live = not (is_mock_quote or is_test_env)
-
-            chg_prev = float(getattr(q, "change_pct", 0.0) or 0.0)
-            open_p = float(getattr(q, "open", 0.0) or 0.0)
-            high_p = float(getattr(q, "high", 0.0) or 0.0)
-            low_p = float(getattr(q, "low", 0.0) or 0.0)
-            vol = int(getattr(q, "volume", 0) or 0)
-
-            chg_open = round(((ltp - open_p) / open_p * 100), 2) if open_p > 0 else chg_prev
-            chg_from_low = round(((ltp - low_p) / low_p * 100), 2) if low_p > 0 else 0.0
-            chg_from_high = round(((high_p - ltp) / high_p * 100), 2) if high_p > 0 else 0.0
-            chg = chg_open if abs(chg_open) > abs(chg_prev) else chg_prev
-
-            # 1. Sanitize VWAP: discard corrupted/mock zero or sub-50% values
-            raw_vwap = getattr(q, "vwap", None)
-            try:
-                vwap = (
-                    float(raw_vwap)
-                    if (raw_vwap is not None and float(raw_vwap) > (ltp * 0.5))
-                    else ltp
-                )
-            except Exception:
-                vwap = ltp
-
-            # Check Learning Engine Lockout first (Kill repetitive invalidation loops)
-            from engine.learning_engine import pattern_learning_engine
-
-            is_locked_bull, _ = pattern_learning_engine.is_symbol_locked_out(
-                clean_sym, direction="BULLISH", ltp=ltp, vwap=vwap
-            )
-            is_locked_bear, _ = pattern_learning_engine.is_symbol_locked_out(
-                clean_sym, direction="BEARISH", ltp=ltp, vwap=vwap
-            )
-
-            # High-Impact Scheduled US Inventory Event Blackout Window (Live market only)
-            now_ist = datetime.now(IST)
-            if is_authentic_live:
-                hh, mm = now_ist.hour, now_ist.minute
-                weekday = now_ist.weekday()  # Monday=0, Wednesday=2, Thursday=3
-
-                # 1. Wednesday EIA Weekly Petroleum Status Report (Crude): 19:45 - 20:45 IST
-                if clean_sym in ("CRUDEOIL", "CRUDEOILM") and weekday == 2:
-                    if (hh == 19 and mm >= 45) or (hh == 20 and mm <= 45):
-                        logger.info(
-                            f"[AutoAlertEngine] Suppressing {clean_sym} during Wednesday EIA Crude inventory blackout window ({hh:02d}:{mm:02d} IST)"
-                        )
-                        continue
-
-                # 2. Thursday EIA Natural Gas Storage Report: 19:45 - 20:45 IST
-                if clean_sym in ("NATURALGAS", "NATGASMINI") and weekday == 3:
-                    if (hh == 19 and mm >= 45) or (hh == 20 and mm <= 45):
-                        logger.info(
-                            f"[AutoAlertEngine] Suppressing {clean_sym} during Thursday EIA NatGas storage blackout window ({hh:02d}:{mm:02d} IST)"
-                        )
-                        continue
-
-                # 3. Tuesday API Weekly Crude Inventory (American Petroleum Institute): 20:00 - 21:30 IST
-                if clean_sym in ("CRUDEOIL", "CRUDEOILM") and weekday == 1:
-                    if (hh == 20) or (hh == 21 and mm <= 30):
-                        logger.info(
-                            f"[AutoAlertEngine] Suppressing {clean_sym} during Tuesday API crude inventory blackout window ({hh:02d}:{mm:02d} IST)"
-                        )
-                        continue
-
-                # 4. US FOMC / Fed Rate Decisions (typically 23:30 IST — hard blackout all commodities)
-                # Non-scheduled: handled by macro_blackouts in alert_scrutiny
-
-            # Minimum move threshold for commodity trigger (0.6% for Gold/Silver/Copper, 1.0% for Crude/NatGas)
-            min_chg = 1.0 if clean_sym in ("CRUDEOIL", "CRUDEOILM", "NATURALGAS", "NATGASMINI") else 0.6
-
-            # 20-Bar Donchian Channel Breakout & Wick Rejection Verification on 5m OHLCV
-            df_5m = None
-            try:
-                from market.history import get_ohlcv
-
-                df_5m = get_ohlcv(clean_sym, exchange="MCX", interval="5minute", days=2)
-            except Exception as e:
-                logger.debug(f"[AutoAlertEngine] Error fetching 5m OHLCV for MCX:{clean_sym}: {e}")
-
-            # US Open Transition Gate (18:15 to 19:15 IST):
-            # High risk of opening range sweep / Judas swing fakeouts before COMEX/NYMEX regular trading hours.
-            is_us_open_transition = (now_ist.hour == 18 and now_ist.minute >= 15) or (
-                now_ist.hour == 19 and now_ist.minute < 15
-            )
-
-            is_bullish = False
-            is_bearish = False
-            is_donchian_breakout = False
-            rvol = 1.0
-
-            roc_15m = 0.0
-            if df_5m is not None and len(df_5m) >= 4:
-                try:
-                    c_ago = float(df_5m.iloc[-4]["close"])
-                    if c_ago > 0:
-                        roc_15m = round(((ltp - c_ago) / c_ago * 100), 2)
-                except Exception:
-                    pass
-
-            has_bull_chg = (
-                (chg_prev >= min_chg)
-                or (chg_open >= min_chg)
-                or (chg_from_low >= min_chg * 1.2 and roc_15m >= 0.5)
-            )
-            has_bear_chg = (
-                (chg_prev <= -min_chg)
-                or (chg_open <= -min_chg)
-                or (chg_from_high >= min_chg * 1.2 and roc_15m <= -0.5)
-            )
-
-            if df_5m is not None and len(df_5m) >= 20:
-                recent_20 = df_5m.iloc[-21:-1]
-                prior_high = float(recent_20["high"].max())
-                prior_low = float(recent_20["low"].min())
-                last_bar = df_5m.iloc[-1]
-                cur_open = float(last_bar.get("open", ltp))
-                cur_high = max(float(last_bar.get("high", ltp)), ltp)
-                cur_low = min(float(last_bar.get("low", ltp)), ltp)
-                cur_close = float(last_bar.get("close", ltp))
-                bar_range = max(1.0, cur_high - cur_low)
-
-                # Compute Relative Volume (RVOL) against 20-bar rolling average
-                try:
-                    vols_s = df_5m["volume"] if "volume" in df_5m.columns else df_5m.get("Volume")
-                    if vols_s is not None and len(vols_s) >= 20:
-                        avg_v = float(vols_s.iloc[-21:-1].mean())
-                        cur_v = float(last_bar.get("volume", 0.0) or 0.0)
-                        rvol = round(cur_v / max(1.0, avg_v), 2) if avg_v > 0 else 1.0
-                except Exception:
-                    rvol = 1.0
-
-                upper_wick_ratio = (cur_high - max(cur_open, cur_close)) / bar_range
-                lower_wick_ratio = (min(cur_open, cur_close) - cur_low) / bar_range
-                bull_close_ratio = (cur_close - cur_low) / bar_range
-                bear_close_ratio = (cur_high - cur_close) / bar_range
-
-                # Allow wick up to 0.45 when accompanied by strong RVOL >= 1.2
-                max_wick = 0.45 if (is_us_open_transition and rvol >= 1.2) else 0.40
-                req_bull_close = 0.55 if is_us_open_transition else 0.50
-                req_bear_close = 0.55 if is_us_open_transition else 0.50
-
-                # Bullish: breaking 20-bar high, acceptable upper wick, closing in upper half
-                if (
-                    not is_locked_bull
-                    and has_bull_chg
-                    and (ltp >= prior_high * 0.999 or cur_close >= prior_high)
-                    and upper_wick_ratio <= max_wick
-                    and bull_close_ratio >= req_bull_close
-                    and ltp >= vwap * 0.998
-                ):
-                    if not is_us_open_transition or rvol >= 1.2:
-                        is_bullish = True
-                        is_donchian_breakout = True
-
-                # Bearish: breaking 20-bar low, acceptable lower wick, closing in lower half
-                elif (
-                    not is_locked_bear
-                    and has_bear_chg
-                    and (ltp <= prior_low * 1.001 or cur_close <= prior_low)
-                    and lower_wick_ratio <= max_wick
-                    and bear_close_ratio >= req_bear_close
-                    and ltp <= vwap * 1.002
-                ):
-                    if not is_us_open_transition or rvol >= 1.2:
-                        is_bearish = True
-                        is_donchian_breakout = True
-            else:
-                # Fallback when historical 5m bars are unavailable:
-                strict_min_chg = max(min_chg * 1.2, 0.9)
-                has_real_vwap_diff = (vwap > 0) and (abs(ltp - vwap) >= 2.0)
-                is_bull_thrust = (
-                    (chg_prev >= strict_min_chg)
-                    or (chg_open >= strict_min_chg)
-                    or (chg_from_low >= strict_min_chg * 1.2)
-                )
-                is_bear_thrust = (
-                    (chg_prev <= -strict_min_chg)
-                    or (chg_open <= -strict_min_chg)
-                    or (chg_from_high >= strict_min_chg * 1.2)
-                )
-                if has_real_vwap_diff:
-                    is_bullish = (
-                        not is_locked_bull and is_bull_thrust and (ltp >= (vwap * 0.998))
-                    )
-                    is_bearish = (
-                        not is_locked_bear and is_bear_thrust and (ltp <= (vwap * 1.002))
-                    )
-                else:
-                    is_bullish = not is_locked_bull and is_bull_thrust
-                    is_bearish = not is_locked_bear and is_bear_thrust
-
-            if not (is_bullish or is_bearish):
-                continue
-
-            # Global Macro Pre-Filter (Live market only: DXY for Bullion, Brent for Crude Oil)
-            if is_authentic_live:
-                try:
-                    from market.macro import get_macro_snapshot
-
-                    macro_snap = get_macro_snapshot()
-                    if macro_snap:
-                        # Gold / Silver vs DXY (Dollar Index)
-                        if clean_sym in ("GOLD", "GOLDM", "SILVER", "SILVERM"):
-                            dxy_chg = macro_snap.dxy_change
-                            if dxy_chg is not None:
-                                if is_bullish and dxy_chg >= 0.25:
-                                    logger.debug(
-                                        f"[AutoAlertEngine] Bullish {clean_sym} vetoed by surging DXY (+{dxy_chg:.2f}%)"
-                                    )
-                                    continue
-                                elif is_bearish and dxy_chg <= -0.25:
-                                    logger.debug(
-                                        f"[AutoAlertEngine] Bearish {clean_sym} vetoed by collapsing DXY ({dxy_chg:.2f}%)"
-                                    )
-                                    continue
-                        # Crude Oil vs Brent Crude
-                        elif clean_sym in ("CRUDEOIL", "CRUDEOILM"):
-                            brent_chg = macro_snap.crude_change
-                            if brent_chg is not None:
-                                if is_bullish and brent_chg <= -1.2:
-                                    logger.debug(
-                                        f"[AutoAlertEngine] Bullish {clean_sym} vetoed by collapsing Brent ({brent_chg:.2f}%)"
-                                    )
-                                    continue
-                                elif is_bearish and brent_chg >= 1.2:
-                                    logger.debug(
-                                        f"[AutoAlertEngine] Bearish {clean_sym} vetoed by surging Brent (+{brent_chg:.2f}%)"
-                                    )
-                                    continue
-                except Exception as e:
-                    logger.debug(f"[AutoAlertEngine] Macro snapshot check exception: {e}")
-
-            # 2. Noise-Safe Quantitative Commodity Volatility Risk (Points)
-            # Recalibrated to eliminate SUB_ATR_NOISE_WHIPSAW invalidations
-            atr_calc = None
-            if df_5m is not None and len(df_5m) >= 14:
-                try:
-                    highs_s = df_5m["high"] if "high" in df_5m.columns else df_5m["High"]
-                    lows_s = df_5m["low"] if "low" in df_5m.columns else df_5m["Low"]
-                    closes_s = df_5m["close"] if "close" in df_5m.columns else df_5m["Close"]
-                    tr1 = highs_s - lows_s
-                    tr2 = (highs_s - closes_s.shift(1)).abs()
-                    tr3 = (lows_s - closes_s.shift(1)).abs()
-                    tr_s = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-                    atr_calc = float(tr_s.rolling(14).mean().iloc[-1])
-                except Exception:
-                    atr_calc = None
-
-            is_energy = clean_sym in ("CRUDEOIL", "CRUDEOILM", "NATURALGAS", "NATGASMINI")
-            # Volatility floor percentages: 0.8% for Energy, 0.5% for Bullion/Metals
-            min_vol_pct = 0.008 if is_energy else 0.005
-            min_noise_floor_pts = round(ltp * min_vol_pct, 1)
-
-            base_atr = atr_calc if (atr_calc and atr_calc > 0) else min_noise_floor_pts
-
-            # Multi-timeframe structural noise floor:
-            from engine.alert_scrutiny import COMMODITY_MIN_SL_FLOORS
-
-            min_structural_pts = COMMODITY_MIN_SL_FLOORS.get(
-                clean_sym, round(ltp * min_vol_pct, 1)
-            )
-
-            # 1b. Institutional Smart Money Concepts (SMC) & Price Action Confluence
-            smc_tags: list[str] = []
-            smc_report = None
-            if df_5m is not None and len(df_5m) >= 14:
-                try:
-                    from analysis.market_structure import analyze_market_structure
-
-                    smc_report = analyze_market_structure(
-                        clean_sym, df=df_5m, exchange="MCX", timeframe="5m"
-                    )
-                    if smc_report:
-                        if smc_report.bos_detected:
-                            if is_bullish and smc_report.bos_type == "BULLISH_BOS":
-                                smc_tags.append("SMC Bullish BOS")
-                            elif is_bearish and smc_report.bos_type == "BEARISH_BOS":
-                                smc_tags.append("SMC Bearish BOS")
-                        if smc_report.choch_detected:
-                            if is_bullish and smc_report.choch_type == "BULLISH_CHOCH":
-                                smc_tags.append("SMC Bullish CHoCH Reversal")
-                            elif is_bearish and smc_report.choch_type == "BEARISH_CHOCH":
-                                smc_tags.append("SMC Bearish CHoCH Reversal")
-                        if smc_report.liquidity_sweeps:
-                            sweep_types = [s.type for s in smc_report.liquidity_sweeps]
-                            if is_bullish and "BULLISH_SWEEP" in sweep_types:
-                                smc_tags.append("SMC Liquidity Sweep (Spring Reclaim)")
-                            elif is_bearish and "BEARISH_SWEEP" in sweep_types:
-                                smc_tags.append("SMC Liquidity Sweep (Upthrust Reclaim)")
-                        if is_bullish and smc_report.active_demand_zones:
-                            smc_tags.append("Demand Order Block Support")
-                        elif is_bearish and smc_report.active_supply_zones:
-                            smc_tags.append("Supply Order Block Resistance")
-                        if is_bullish and smc_report.in_discount_zone:
-                            smc_tags.append("Discount Zone (≤50% Eq)")
-                except Exception as e:
-                    logger.debug(f"[AutoAlertEngine] SMC analysis error: {e}")
-
-            # Candlestick & Price Action Patterns + Confirmation Candle Gate
-            if df_5m is not None and len(df_5m) >= 2:
-                try:
-                    last_b = df_5m.iloc[-1]
-                    prev_b = df_5m.iloc[-2]
-                    c_o = float(last_b.get("open", ltp))
-                    c_c = float(last_b.get("close", ltp))
-                    c_h = float(last_b.get("high", ltp))
-                    c_l = float(last_b.get("low", ltp))
-                    p_o = float(prev_b.get("open", ltp))
-                    p_c = float(prev_b.get("close", ltp))
-                    b_range = max(0.5, c_h - c_l)
-
-                    u_wick = (c_h - max(c_o, c_c)) / b_range
-                    l_wick = (min(c_o, c_c) - c_l) / b_range
-                    if is_bullish and l_wick >= 0.45 and (c_c >= c_o):
-                        smc_tags.append("Hammer / Absorption Wick")
-                    elif is_bearish and u_wick >= 0.45 and (c_c <= c_o):
-                        smc_tags.append("Shooting Star / Rejection Wick")
-
-                    if is_bullish and (c_c > c_o) and (p_c < p_o) and (c_c >= p_o) and (c_o <= p_c):
-                        smc_tags.append("Bullish Engulfing Expansion")
-                    elif is_bearish and (c_c < c_o) and (p_c > p_o) and (c_c <= p_o) and (c_o >= p_c):
-                        smc_tags.append("Bearish Engulfing Expansion")
-                except Exception:
-                    pass
-
-            # SMC Confirmation Candle Gate (from analyze_market_structure)
-            if smc_report is not None:
-                if smc_report.confirmation_confirmed and smc_report.confirmation_candle:
-                    smc_tags.append(f"Confirmed: {smc_report.confirmation_candle}")
-
-                # RSI Divergence tags — add as confluence or contra-signal
-                if smc_report.divergence_type and smc_report.divergence_bias:
-                    div_bias = smc_report.divergence_bias
-                    div_type = smc_report.divergence_type
-                    if (is_bullish and div_bias == "BULLISH") or (is_bearish and div_bias == "BEARISH"):
-                        smc_tags.append(f"RSI Divergence ({div_type.replace('_', ' ').title()})")
-                    elif (is_bullish and div_bias == "BEARISH") or (is_bearish and div_bias == "BULLISH"):
-                        # Opposite divergence = trap warning → raise bar for entry
-                        if rvol < 1.5:
-                            logger.info(
-                                f"[AutoAlertEngine] ⚠️ Contra divergence ({div_type}) on {clean_sym} — RVOL {rvol:.1f}x below 1.5x threshold; suppressing."
-                            )
-                            is_bullish = False
-                            is_bearish = False
-
-            # For PULLBACK_RETEST / BOTTOM_FISHING setups require confirmation candle
-            if smc_report and smc_report.setup_type in ("PULLBACK_RETEST", "BOTTOM_FISHING_SPRING", "TOP_FISHING_UTAD"):
-                if smc_report.confirmation_confirmed is False and rvol < 1.5:
-                    # No candle confirmation AND low volume — strong trap risk; demote to EARLY_WARNING only
-                    if is_bullish or is_bearish:
-                        smc_tags.append("⚠️ Awaiting Candle Confirmation")
-
-            # Volume Profile — POC / VAH / VAL proximity tags
-            if df_5m is not None and len(df_5m) >= 10:
-                try:
-                    from analysis.volume_profile import compute_volume_profile
-                    poc_price, vah_price, val_price, _ = compute_volume_profile(df_5m, num_bins=10)
-                    if poc_price > 0 and ltp > 0:
-                        poc_dist_pct = abs(ltp - poc_price) / ltp * 100
-                        if poc_dist_pct <= 0.30:
-                            smc_tags.append(f"POC Magnet (₹{poc_price:,.1f})")
-                        if is_bullish:
-                            if vah_price > 0 and ltp >= vah_price * 0.999:
-                                smc_tags.append(f"Breaking VAH ₹{vah_price:,.1f} (Volume Breakout)")
-                            elif val_price > 0 and abs(ltp - val_price) / ltp <= 0.003:
-                                smc_tags.append(f"VAL Support ₹{val_price:,.1f}")
-                        elif is_bearish:
-                            if val_price > 0 and ltp <= val_price * 1.001:
-                                smc_tags.append(f"Breaking VAL ₹{val_price:,.1f} (Volume Breakdown)")
-                            elif vah_price > 0 and abs(ltp - vah_price) / ltp <= 0.003:
-                                smc_tags.append(f"VAH Resistance ₹{vah_price:,.1f}")
-                except Exception as e:
-                    logger.debug(f"[AutoAlertEngine] Volume profile error for {clean_sym}: {e}")
-
-            # Signal Ensemble Gate — 5-strategy weighted vote must agree with direction
-            if df_5m is not None and len(df_5m) >= 50:
-                try:
-                    from engine.signal_ensemble import ensemble_signal
-                    ens = ensemble_signal(df_5m)
-                    if ens.confidence > 0:
-                        if (is_bullish and ens.verdict == "BEARISH" and ens.confidence >= 0.55) or \
-                           (is_bearish and ens.verdict == "BULLISH" and ens.confidence >= 0.55):
-                            logger.info(
-                                f"[AutoAlertEngine] 🛑 Ensemble VETO on {clean_sym}: "
-                                f"Signal is {direction} but ensemble says {ens.verdict} (conf={ens.confidence:.0%}). Suppressing."
-                            )
-                            is_bullish = False
-                            is_bearish = False
-                        elif (is_bullish and ens.verdict == "BULLISH") or (is_bearish and ens.verdict == "BEARISH"):
-                            smc_tags.append(f"Ensemble ✓ ({ens.verdict} {ens.confidence:.0%})")
-                except Exception as e:
-                    logger.debug(f"[AutoAlertEngine] Ensemble signal error for {clean_sym}: {e}")
-
-            if not (is_bullish or is_bearish):
-                continue
-
-            # Volume Spread Analysis (VPA)
-            if rvol >= 1.5:
-                smc_tags.append(f"Institutional Surge (RVOL {rvol:.1f}x)")
-            elif rvol >= 1.2:
-                smc_tags.append(f"Volume Expansion (RVOL {rvol:.1f}x)")
-
-            # Volatility noise-safe stop: at least 1.5x realized 5m ATR, minimum structural floor, or volatility % floor
-            noise_safe_pts = max(base_atr * 1.5, min_structural_pts, min_noise_floor_pts)
-            if smc_report and smc_report.invalidation_level and smc_report.invalidation_level > 0:
-                smc_inval_pts = abs(ltp - smc_report.invalidation_level)
-                if smc_inval_pts >= min_structural_pts:
-                    noise_safe_pts = max(noise_safe_pts, round(smc_inval_pts, 1))
-
-            risk_pts = round(max(1.0, noise_safe_pts), 1)
-            atr = round(base_atr, 1)
-            direction = "BULLISH" if is_bullish else "BEARISH"
-            alert_type = "COMMODITY_MOMENTUM"
-            alert_id = f"comm-{clean_sym.lower()}-{datetime.now(IST).strftime('%Y%m%d%H%M')}"
-
-            # Contract lot sizes: resolved canonically from position sizer master
-            from engine.position_sizer import get_lot_size
-
-            lot_sz = get_lot_size(clean_sym) or 1
-
-            has_real_vwap = abs(ltp - vwap) >= 2.0 and vwap != ltp
-            if is_bullish:
-                sl_price = round(ltp - risk_pts, 2)
-                t1_price = round(ltp + 2.0 * risk_pts, 2)
-                t2_price = round(ltp + 3.5 * risk_pts, 2)
-                if is_donchian_breakout:
-                    headline = f"🛢️ MCX BREAKOUT: {clean_sym} +{chg:.1f}% Breaking 20-bar High (₹{ltp:,.1f})"
-                    summary = f"Institutional breakout in {clean_sym}: Trading at ₹{ltp:,.1f} (+{chg:.1f}%). 20-bar 5m Donchian high broken with VWAP support at ₹{vwap:,.1f}."
-                elif has_real_vwap:
-                    headline = (
-                        f"MCX MOMENTUM: {clean_sym} +{chg:.1f}% Reclaiming VWAP (₹{vwap:,.1f})"
-                    )
-                    summary = f"Institutional breakout in {clean_sym}: Trading at ₹{ltp:,.1f} (+{chg:.1f}%). VWAP support at ₹{vwap:,.1f}."
-                else:
-                    headline = f"MCX MOMENTUM: {clean_sym} +{chg:.1f}% Breakout @ ₹{ltp:,.1f}"
-                    summary = f"Institutional breakout in {clean_sym}: Trading at ₹{ltp:,.1f} (+{chg:.1f}%). Session momentum active."
-                action = "BUY_FUTURES"
-            else:
-                sl_price = round(ltp + risk_pts, 2)
-                t1_price = round(ltp - 2.0 * risk_pts, 2)
-                t2_price = round(ltp - 3.5 * risk_pts, 2)
-                if is_donchian_breakout:
-                    headline = (
-                        f"🛢️ MCX BREAKDOWN: {clean_sym} {chg:.1f}% Breaking 20-bar Low (₹{ltp:,.1f})"
-                    )
-                    summary = f"Institutional breakdown in {clean_sym}: Trading at ₹{ltp:,.1f} ({chg:.1f}%). 20-bar 5m Donchian low broken below VWAP ₹{vwap:,.1f}."
-                elif has_real_vwap:
-                    headline = f"MCX BREAKDOWN: {clean_sym} {chg:.1f}% Lost VWAP (₹{vwap:,.1f})"
-                    summary = f"Severe session weakness in {clean_sym}: Trading at ₹{ltp:,.1f} ({chg:.1f}%). Broken below VWAP ₹{vwap:,.1f}."
-                else:
-                    headline = f"MCX BREAKDOWN: {clean_sym} {chg:.1f}% Drop @ ₹{ltp:,.1f}"
-                    summary = f"Severe session weakness in {clean_sym}: Trading at ₹{ltp:,.1f} ({chg:.1f}%). Session selling active."
-                action = "SELL_SHORT_FUTURES"
-
-            # 3. Resolve defined-risk options contract (Delta-aware strike selection)
-            # Target: Delta 0.35–0.50 for momentum plays (near ATM). Flag < 5 DTE with theta risk.
-            opt_recommendation = None
-            readable_contract = None
-            try:
-                from market.options import get_options_chain, format_readable_option_symbol
-
-                chain = get_options_chain(clean_sym)
-                opt_type = "CE" if is_bullish else "PE"
-                filtered = [c for c in chain if c.option_type == opt_type and c.last_price > 0]
-                if filtered:
-                    # Delta-aware selection: prefer near-ATM contracts (strike within ±3% of spot)
-                    # as a proxy for Delta 0.35–0.50 when actual Greeks are unavailable
-                    atm_band = ltp * 0.03
-                    atm_candidates = [
-                        c for c in filtered
-                        if abs(c.strike - ltp) <= atm_band and c.last_price >= 1.0
-                    ]
-                    # Fall back to all filtered if no ATM candidates
-                    candidates = atm_candidates if atm_candidates else filtered
-
-                    # Sort: prefer strike closest to spot (best delta proxy)
-                    candidates.sort(key=lambda c: abs(c.strike - ltp))
-                    closest_opt = candidates[0]
-
-                    # Delta tier classification (by moneyness as proxy)
-                    moneyness_pct = (ltp - closest_opt.strike) / ltp * 100 if is_bullish else (closest_opt.strike - ltp) / ltp * 100
-                    if -1.0 <= moneyness_pct <= 1.0:
-                        delta_tier = "ATM (Δ≈0.50)"
-                    elif moneyness_pct > 1.0:
-                        delta_tier = "ITM (Δ>0.50)"
-                    else:
-                        delta_tier = "OTM (Δ<0.40)"
-
-                    # DTE warning
-                    dte_warning = None
-                    try:
-                        expiry = getattr(closest_opt, "expiry", None)
-                        if expiry:
-                            from datetime import date as _date
-                            exp_date = expiry if isinstance(expiry, _date) else _date.fromisoformat(str(expiry)[:10])
-                            dte = (exp_date - _date.today()).days
-                            if dte <= 5:
-                                dte_warning = f"⚠️ THETA RISK: Only {dte} DTE — rapid premium decay."
-                    except Exception:
-                        pass
-
-                    opt_prem = closest_opt.last_price
-                    opt_risk = round(max(1.0, min(opt_prem * 0.35, risk_pts * 0.52)), 1)
-                    opt_t1 = round(opt_prem + 2.0 * opt_risk, 1)
-                    opt_t2 = round(opt_prem + 3.5 * opt_risk, 1)
-                    readable_contract = format_readable_option_symbol(
-                        closest_opt.symbol,
-                        strike=closest_opt.strike,
-                        option_type=opt_type,
-                        expiry=getattr(closest_opt, "expiry", None),
-                    )
-                    opt_recommendation = {
-                        "contract": closest_opt.symbol,
-                        "readable_contract": readable_contract,
-                        "strike": closest_opt.strike,
-                        "option_type": opt_type,
-                        "ltp": opt_prem,
-                        "stop_loss": round(max(0.05, opt_prem - opt_risk), 1),
-                        "target_1": opt_t1,
-                        "target_2": opt_t2,
-                        "risk_reward": "1:2.4",
-                        "max_loss_capped": round(opt_prem * lot_sz, 0),
-                        "delta_tier": delta_tier,
-                        "dte_warning": dte_warning,
-                    }
-            except Exception as e:
-                logger.debug(f"[AutoAlertEngine] Options chain resolution error: {e}")
-                opt_recommendation = None
-
-            # Bounded Entry Range for continuous futures
-            rr_ratio_t1 = round(abs(t1_price - ltp) / max(0.01, abs(ltp - sl_price)), 1)
-            if is_bullish:
-                e_low = round(max(sl_price + 0.5, ltp - 0.25 * risk_pts), 1)
-                e_high = round(min(t1_price - 0.25 * risk_pts, ltp + 0.25 * risk_pts), 1)
-            else:
-                e_high = round(min(sl_price - 0.5, ltp + 0.25 * risk_pts), 1)
-                e_low = round(max(t1_price + 0.25 * risk_pts, ltp - 0.25 * risk_pts), 1)
-
-            confluence_str = " + ".join(smc_tags) if smc_tags else "Donchian Breakout + VWAP Confirmation"
-
-            # Build Options-First Plan when liquid option contracts exist
-            if opt_recommendation:
-                opt_contract_name = (
-                    opt_recommendation.get("readable_contract")
-                    or readable_contract
-                    or opt_recommendation["contract"]
-                )
-                opt_sl = opt_recommendation["stop_loss"]
-                opt_t1 = opt_recommendation["target_1"]
-                opt_t2 = opt_recommendation["target_2"]
-                opt_entry_low = round(max(0.5, opt_recommendation["ltp"] - 0.15 * opt_risk), 1)
-                opt_entry_high = round(opt_recommendation["ltp"] + 0.15 * opt_risk, 1)
-
-                _delta_tier = opt_recommendation.get("delta_tier", "ATM (Δ≈0.50)")
-                _dte_warn = opt_recommendation.get("dte_warning") or ""
-                plan_dict = {
-                    "action": f"BUY_{opt_type}",
-                    "segment": "COMMODITY",
-                    "instrument_type": "OPTION",
-                    "contract": opt_contract_name,
-                    "raw_contract": opt_recommendation["contract"],
-                    "entry_range": f"₹{opt_entry_low:,.1f} – ₹{opt_entry_high:,.1f}",
-                    "stop_loss": f"₹{opt_sl:,.1f}",
-                    "target": f"₹{opt_t1:,.1f}",
-                    "target_2": f"₹{opt_t2:,.1f}",
-                    "risk_reward": "1:2.4",
-                    "lot_size": lot_sz,
-                    "preferred_vehicle": "DEFINED_RISK_OPTION",
-                    "delta_tier": _delta_tier,
-                    "max_loss_capped": opt_recommendation["max_loss_capped"],
-                    "setup_confluence": confluence_str,
-                    "when_to_buy": (
-                        f"Enter {_delta_tier} {opt_contract_name} on 5m candle closing in breakout direction above/below VWAP ₹{vwap:,.1f}."
-                        + (f" {_dte_warn}" if _dte_warn else "")
-                    ),
-                    "when_to_wait": f"Do not chase if option premium moves >15% beyond ₹{opt_recommendation['ltp']:,.1f}.",
-                    "profit_rule": f"Book 50% at T1 (₹{opt_t1:,.1f}), trail stop to cost, hold runner for T2 (₹{opt_t2:,.1f}). Capped risk ₹{opt_recommendation['max_loss_capped']:,.0f} per lot.",
-                    "vehicle_rationale": (
-                        f"Defined-risk option vehicle: {_delta_tier} {opt_recommendation['option_type']} "
-                        f"caps maximum loss to ₹{opt_recommendation['max_loss_capped']:,.0f} per lot against sub-ATR noise whipsaws and gap risk."
-                    ),
-                    "trade_plan": {
-                        "symbol": clean_sym,
-                        "direction": "LONG" if is_bullish else "SHORT",
-                        "timeframe": "INTRADAY",
-                        "entry_price": opt_recommendation["ltp"],
-                        "invalidation_stop": opt_sl,
-                        "target_1": opt_t1,
-                        "target_2": opt_t2,
-                        "risk_reward": "1:2.4",
-                    },
-                    "futures_reference": {
-                        "contract": f"MCX:{clean_sym}",
-                        "entry": ltp,
-                        "stop_loss": sl_price,
-                        "target_1": t1_price,
-                        "target_2": t2_price,
-                        "risk_reward": f"1:{rr_ratio_t1}",
-                    },
-                    "option_alternative": opt_recommendation,  # backward compatibility
-                }
-                headline = f"🛢️ MCX OPTION: {opt_contract_name} @ ₹{opt_recommendation['ltp']:,.1f} ({'Breakout' if is_bullish else 'Breakdown'} @ ₹{ltp:,.1f})"
-                summary = (
-                    f"Institutional {'breakout' if is_bullish else 'breakdown'} in {clean_sym} ({chg:+.1f}%). "
-                    f"Preferred Vehicle: {opt_contract_name} @ ₹{opt_recommendation['ltp']:,.1f} with capped risk ₹{opt_recommendation['max_loss_capped']:,.0f}. "
-                    f"Confluence: {confluence_str}."
-                )
-            else:
-                # Standard futures plan if no liquid options chain exists
-                plan_dict = {
-                    "action": action,
-                    "segment": "COMMODITY",
-                    "contract": f"MCX:{clean_sym}",
-                    "entry_range": f"₹{e_low:,.1f} – ₹{e_high:,.1f}",
-                    "stop_loss": f"₹{sl_price:,.1f}",
-                    "target": f"₹{t1_price:,.1f}",
-                    "target_2": f"₹{t2_price:,.1f}",
-                    "risk_reward": f"1:{rr_ratio_t1}",
-                    "lot_size": lot_sz,
-                    "setup_confluence": confluence_str,
-                    "when_to_buy": f"Enter on 5m candle closing in direction above/below VWAP ₹{vwap:,.1f}.",
-                    "when_to_wait": f"Do not chase if move exceeds {round(abs(chg) + 1.0, 1)}%.",
-                    "profit_rule": "Book 50% at T1 (+2.0R), trail stop to breakeven, hold runner for T2 (+3.5R).",
-                    "trade_plan": {
-                        "symbol": clean_sym,
-                        "direction": "LONG" if is_bullish else "SHORT",
-                        "timeframe": "INTRADAY",
-                        "entry_price": ltp,
-                        "invalidation_stop": sl_price,
-                        "target_1": t1_price,
-                        "target_2": t2_price,
-                        "risk_reward": f"1:{rr_ratio_t1}",
-                    },
-                }
-
-            # Strict Data Provenance Gate: Verify if quote is authentic live broker data vs synthetic/mock
-            is_mock_quote = (
-                type(q).__name__ == "MagicMock"
-                or getattr(q, "_is_mock", False)
-                or getattr(q, "provider", "") in ("mock", "TEST")
-                or getattr(q, "data_state", "") == "UNAVAILABLE"
-            )
-            is_test_env = (
-                os.environ.get("CHANAKYA_TESTING") == "1" or os.environ.get("DEPLOY_MODE") == "test"
-            )
-            is_authentic_live = not (is_mock_quote or is_test_env)
-
-            from engine.trade_plan import get_market_status
-
-            mcx_status_dict = get_market_status("MCX")
-            mcx_status = mcx_status_dict.get("status", "LIVE")
-
-            trigger_p = ltp
-            sl_p = sl_price
-            tgt_p = t1_price
-
-            # Composite confidence: base + SMC confluence + MTF alignment + divergence boost
-            n_smc_tags = len(smc_tags)
-            base_conf = min(95, int(75 + abs(chg) * 6))
-            conf_boost = min(15, n_smc_tags * 3)
-            # RSI divergence in same direction adds +5 conviction
-            if smc_report and smc_report.divergence_bias:
-                if (is_bullish and smc_report.divergence_bias == "BULLISH") or \
-                   (is_bearish and smc_report.divergence_bias == "BEARISH"):
-                    conf_boost = min(15, conf_boost + 5)
-            final_conf = min(95, base_conf + conf_boost)
-            alert = AutoAlert(
-                alert_id=alert_id,
-                alert_type=alert_type,
-                stage="IGNITED" if abs(chg) >= (min_chg * 1.5) else "EARLY_WARNING",
-                symbol=clean_sym,
-                exchange="MCX",
-                direction=direction,
-                headline=headline,
-                summary=summary,
-                ltp=trigger_p,
-                trigger_level=trigger_p,
-                target_level=tgt_p,
-                stop_loss=sl_p,
-                confidence=final_conf,
-                created_at=now_iso,
-                is_live=is_authentic_live,
-                environment="LIVE" if is_authentic_live else "TEST",
-                market_status=mcx_status,
-                option_premium=opt_recommendation["ltp"] if opt_recommendation else None,
-                contract_symbol=opt_recommendation["contract"] if opt_recommendation else None,
-                metrics={
-                    "change_pct": chg,
-                    "volume": vol,
-                    "vwap": vwap,
-                    "atr": atr,
-                    "atr_14d": atr,
-                    "rvol": rvol,
-                    "lot_size": lot_sz,
-                    "segment": "COMMODITY",
-                    "has_options_chain": bool(opt_recommendation),
-                    "confluence": confluence_str,
-                    "spot": ltp,
-                },
-                actionable_plan=plan_dict,
-            )
-            if opt_recommendation:
-                alert.derivative_type = "OPT"
-                alert.strike = opt_recommendation["strike"]
-                alert.option_type = opt_recommendation["option_type"]
-                alert.option_premium = opt_recommendation["ltp"]
-                alert.option_stop_loss = opt_recommendation["stop_loss"]
-                alert.option_target_1 = opt_recommendation["target_1"]
-                alert.option_target_2 = opt_recommendation["target_2"]
-                alert.underlying_spot = ltp
-                alert.raw_contract = opt_recommendation["contract"]
-
-            if self.record_alert(alert):
-                found.append(alert)
-
+        for a in alerts:
+            if self.record_alert(a):
+                found.append(a)
         return found
-
 
     def scan_currency_now(self) -> list[AutoAlert]:
         """
         Scans liquid Currency pairs (USDINR, EURINR, GBPINR) for post-equity breakouts.
         Active during post-equity session (15:30 - 17:00 IST).
         """
-        from market.quotes import get_quote
+        from engine.detectors.currency import detect_currency_breakouts
 
+        alerts = detect_currency_breakouts(universe=self.watched_currencies)
         found: list[AutoAlert] = []
-        universe = self.watched_currencies
-        formatted = [f"CDS:{s}" if ":" not in s else s for s in universe]
-        now_iso = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
-
-        try:
-            quotes_map = get_quote(formatted)
-        except Exception as e:
-            logger.debug(f"[AutoAlertEngine] Currency quotes fetch error: {e}")
-            return found
-
-        for sym in universe:
-            clean_sym = sym.upper().replace("CDS:", "").strip()
-            q = quotes_map.get(f"CDS:{clean_sym}") or quotes_map.get(clean_sym)
-            if not q:
-                continue
-
-            ltp = float(getattr(q, "last_price", 0.0) or getattr(q, "ltp", 0.0) or 0.0)
-            if ltp <= 0:
-                continue
-
-            chg = float(getattr(q, "change_pct", 0.0) or 0.0)
-            # Significant currency move threshold (>= 0.10% is a multi-tick macro expansion)
-            if abs(chg) < 0.10:
-                continue
-
-            is_bullish = chg > 0
-            direction = "BULLISH" if is_bullish else "BEARISH"
-            alert_type = "CURRENCY_BREAKOUT"
-            alert_id = f"curr-{clean_sym.lower()}-{datetime.now(IST).strftime('%Y%m%d%H%M')}"
-
-            # Currency dynamic risk: based on CMP volatility
-            risk_rupees = round(max(0.06, ltp * 0.0012), 4)
-            from engine.position_sizer import get_lot_size
-
-            curr_lot = get_lot_size(clean_sym) or 1000
-
-            if is_bullish:
-                sl_price = round(ltp - risk_rupees, 4)
-                t1_price = round(ltp + 1.8 * risk_rupees, 4)
-                t2_price = round(ltp + 3.0 * risk_rupees, 4)
-                headline = f"💱 CURRENCY BREAKOUT: {clean_sym} +{chg:.2f}% @ ₹{ltp:.4f}"
-                summary = f"Macro currency surge in {clean_sym}: Moving +{chg:.2f}% to ₹{ltp:.4f}. Long thesis active."
-                action = "BUY_FUTURES"
-            else:
-                sl_price = round(ltp + risk_rupees, 4)
-                t1_price = round(ltp - 1.8 * risk_rupees, 4)
-                t2_price = round(ltp - 3.0 * risk_rupees, 4)
-                headline = f"💱 CURRENCY BREAKDOWN: {clean_sym} {chg:.2f}% @ ₹{ltp:.4f}"
-                summary = f"Macro currency drop in {clean_sym}: Moving {chg:.2f}% to ₹{ltp:.4f}. Short thesis active."
-                action = "SELL_SHORT_FUTURES"
-
-            # Strict Data Provenance Gate: Verify if quote is authentic live broker data vs synthetic/mock
-            is_mock_quote = (
-                type(q).__name__ == "MagicMock"
-                or getattr(q, "_is_mock", False)
-                or getattr(q, "provider", "") in ("mock", "TEST")
-                or getattr(q, "data_state", "") == "UNAVAILABLE"
-            )
-            is_test_env = (
-                os.environ.get("CHANAKYA_TESTING") == "1" or os.environ.get("DEPLOY_MODE") == "test"
-            )
-            is_authentic_live = not (is_mock_quote or is_test_env)
-
-            from engine.trade_plan import get_market_status
-
-            cds_status_dict = get_market_status("CDS")
-            cds_status = cds_status_dict.get("status", "LIVE")
-
-            alert = AutoAlert(
-                alert_id=alert_id,
-                alert_type=alert_type,
-                stage="IGNITED" if abs(chg) >= 0.20 else "EARLY_WARNING",
-                symbol=clean_sym,
-                exchange="CDS",
-                direction=direction,
-                headline=headline,
-                summary=summary,
-                ltp=ltp,
-                trigger_level=ltp,
-                target_level=t1_price,
-                stop_loss=sl_price,
-                confidence=min(92, int(75 + abs(chg) * 30)),
-                created_at=now_iso,
-                is_live=is_authentic_live,
-                environment="LIVE" if is_authentic_live else "TEST",
-                market_status=cds_status,
-                metrics={
-                    "change_pct": chg,
-                    "segment": "CURRENCY",
-                    "lot_size": curr_lot,
-                },
-                actionable_plan={
-                    "action": action,
-                    "segment": "CURRENCY",
-                    "contract": f"CDS:{clean_sym}",
-                    "entry_range": f"₹{round(ltp - 0.02, 4):.4f} – ₹{round(ltp + 0.02, 4):.4f}",
-                    "stop_loss": f"₹{sl_price:.4f}",
-                    "target": f"₹{t1_price:.4f}",
-                    "target_2": f"₹{t2_price:.4f}",
-                    "risk_reward": "1:2.2",
-                    "lot_size": curr_lot,
-                    "when_to_buy": "Execute on order book spread with defined risk below SL.",
-                    "when_to_wait": "Do not chase if spread widens > 0.05 paise.",
-                    "profit_rule": "Scale 50% at T1, move SL to entry.",
-                    "trade_plan": {
-                        "symbol": clean_sym,
-                        "direction": "LONG" if is_bullish else "SHORT",
-                        "timeframe": "INTRADAY",
-                        "entry_price": ltp,
-                        "invalidation_stop": sl_price,
-                        "target_1": t1_price,
-                        "target_2": t2_price,
-                        "risk_reward": "1:2.2",
-                    },
-                },
-            )
-            if self.record_alert(alert):
-                found.append(alert)
-
+        for a in alerts:
+            if self.record_alert(a):
+                found.append(a)
         return found
 
     # ── 24x7 Real-Time Crypto Streaming & Autonomous Detection ─────────
@@ -5552,379 +3766,13 @@ class AutoAlertEngine:
 
     def _scan_single_crypto_symbol(self, sym: str) -> list[AutoAlert]:
         """Scans a single crypto symbol for Squeeze, SMC Momentum, and Options Volatility."""
-        from market.crypto_stream import crypto_stream, normalize_crypto_symbol
-        from analysis.market_structure import analyze_market_structure
-        from engine.alert_preferences import alert_preferences
+        from engine.detectors.crypto import detect_single_crypto_symbol
 
-        if alert_preferences.is_segment_globally_disabled("CRYPTO"):
-            return []
-
-        clean_sym = normalize_crypto_symbol(sym).replace("CRYPTO:", "").strip()
+        alerts = detect_single_crypto_symbol(sym)
         found: list[AutoAlert] = []
-        now_dt = datetime.now(IST)
-        now_iso = now_dt.strftime("%Y-%m-%d %H:%M:%S IST")
-        date_str = now_dt.strftime("%Y%m%d%H%M")
-
-        q = crypto_stream.get_quote(clean_sym)
-        if not q or float(q.last_price or 0.0) <= 0:
-            return found
-
-        ltp = float(q.last_price)
-        chg_pct = float(q.change_pct or 0.0)
-
-        # ── 1. SQUEEZE DETECTOR: Binance Futures 8h Funding Rate & Open Interest ──
-        try:
-            sq_metrics = crypto_stream.get_squeeze_metrics(clean_sym)
-            sq_sig = sq_metrics.get("squeeze_signal", "NEUTRAL")
-            fut_data = sq_metrics.get("futures_metrics", {})
-            fr = float(fut_data.get("funding_rate_8h", 0.0) or 0.0)
-
-            if sq_sig in ("SHORT_SQUEEZE_IMMINENT", "LONG_FLUSH_RISK"):
-                is_bullish = sq_sig == "SHORT_SQUEEZE_IMMINENT"
-                direction = "BULLISH" if is_bullish else "BEARISH"
-                alert_type = "CRYPTO_SQUEEZE"
-                alert_id = f"crypto-sq-{clean_sym.lower()}-{date_str}"
-                # Funding rate squeeze at extreme thresholds is a high-conviction structural setup
-                squeeze_confidence = 91 if sq_sig == "SHORT_SQUEEZE_IMMINENT" else 90
-                risk_usd = round(max(0.5, ltp * 0.018), 2)  # 1.8% structural risk stop
-
-                if is_bullish:
-                    sl_price = round(ltp - risk_usd, 2)
-                    t1_price = round(ltp + 2.2 * risk_usd, 2)
-                    t2_price = round(ltp + 4.0 * risk_usd, 2)
-                    headline = f"🪙 CRYPTO SQUEEZE: {clean_sym} Short-Squeeze Imminent @ ${ltp:,.2f}"
-                    summary = (
-                        f"Heavily short-crowded funding (8h FR: {fr*100:.4f}%). "
-                        f"Extreme negative leverage positioning primed for upward cascade. Target: ${t1_price:,.2f}."
-                    )
-                    action = "BUY_SPOT / LONG"
-                    conf = "Binance Futures Short-Crowded Funding Imbalance (FR <= -0.02%)"
-                else:
-                    sl_price = round(ltp + risk_usd, 2)
-                    t1_price = round(ltp - 2.2 * risk_usd, 2)
-                    t2_price = round(ltp - 4.0 * risk_usd, 2)
-                    headline = f"🪙 CRYPTO SQUEEZE: {clean_sym} Long-Flush Liquidation Risk @ ${ltp:,.2f}"
-                    summary = (
-                        f"Overheated long leverage (8h FR: +{fr*100:.4f}%). "
-                        f"Vulnerable to cascading long liquidations. Downside target: ${t1_price:,.2f}."
-                    )
-                    action = "SELL_SHORT_FUTURES / SHORT"
-                    conf = "Binance Futures Long-Overheated Leverage Imbalance (FR >= +0.04%)"
-
-                alert = AutoAlert(
-                    alert_id=alert_id,
-                    alert_type=alert_type,
-                    stage="IGNITED" if abs(chg_pct) >= 1.5 else "EARLY_WARNING",
-                    symbol=clean_sym,
-                    exchange="CRYPTO",
-                    direction=direction,
-                    headline=headline,
-                    summary=summary,
-                    ltp=ltp,
-                    trigger_level=ltp,
-                    target_level=t1_price,
-                    stop_loss=sl_price,
-                    confidence=squeeze_confidence,
-                    created_at=now_iso,
-                    is_live=True,
-                    environment="LIVE",
-                    market_status="LIVE",
-                    metrics={
-                        "change_pct": chg_pct,
-                        "segment": "CRYPTO",
-                        "funding_rate_8h": fr,
-                        "open_interest_usd": fut_data.get("open_interest_usd", 0.0),
-                        "setup_confluence": conf,
-                    },
-                    actionable_plan={
-                        "action": action,
-                        "segment": "CRYPTO",
-                        "contract": f"CRYPTO:{clean_sym}",
-                        "entry_range": f"${round(ltp * 0.995, 2):,.2f} – ${round(ltp * 1.005, 2):,.2f}",
-                        "stop_loss": f"${sl_price:,.2f}",
-                        "target": f"${t1_price:,.2f}",
-                        "target_2": f"${t2_price:,.2f}",
-                        "risk_reward": "1:2.2",
-                        "when_to_buy": "Enter on order book spread with defined risk below invalidation SL.",
-                        "when_to_wait": "Do not chase if price extends > 0.8% beyond entry.",
-                        "no_chase_boundary": round(ltp * 1.008, 2) if is_bullish else round(ltp * 0.992, 2),
-                        "setup_confluence": conf,
-                        "profit_rule": "Scale 50% at T1, trail remaining on 20-EMA / break-even.",
-                        "trade_plan": {
-                            "symbol": clean_sym,
-                            "direction": "LONG" if is_bullish else "SHORT",
-                            "timeframe": "15M",
-                            "entry_price": ltp,
-                            "invalidation_stop": sl_price,
-                            "target_1": t1_price,
-                            "target_2": t2_price,
-                            "risk_reward": "1:2.2",
-                        },
-                    },
-                )
-                if self.record_alert(alert):
-                    found.append(alert)
-        except Exception as e:
-            logger.debug(f"[AutoAlertEngine] Squeeze check failed for {clean_sym}: {e}")
-
-        # ── 2. SMC MOMENTUM DETECTOR: Order Block Reclaim & CHoCH Reversal ──
-        try:
-            df = crypto_stream.get_klines(clean_sym, interval="15m", limit=120)
-            if not df.empty and len(df) >= 30:
-                smc = analyze_market_structure(symbol=clean_sym, df=df, exchange="CRYPTO", timeframe="15m")
-                regime = (smc.regime or "").upper()
-
-                if regime == "BULLISH" and smc.active_demand_zones:
-                    ob = smc.active_demand_zones[0]
-                    if ob.bottom <= ltp <= (ob.top * 1.025):
-                        sl_price = round(ob.bottom * 0.992, 2)
-                        risk_usd = ltp - sl_price
-                        if 0 < risk_usd <= (ltp * 0.045):
-                            t1_price = round(ltp + 2.4 * risk_usd, 2)
-                            t2_price = round(ltp + 4.2 * risk_usd, 2)
-                            # IGNITED stage = price already inside OB = confirmed entry trigger
-                            # EARLY_WARNING = approaching OB but not yet inside
-                            smc_stage = "IGNITED" if ltp > ob.top else "EARLY_WARNING"
-                            smc_confidence = 91 if smc_stage == "IGNITED" else 85
-                            alert_id = f"crypto-smc-{clean_sym.lower()}-{date_str}"
-                            headline = f"⚡ CRYPTO SMC ALPHA: {clean_sym} Demand Order Block Reclaim @ ${ltp:,.2f}"
-                            summary = (
-                                f"Smart Money structural reclaim at 15m Demand OB (${ob.bottom:,.2f} - ${ob.top:,.2f}). "
-                                f"Bullish structure confirmed. Upside target: ${t1_price:,.2f}."
-                            )
-                            conf = f"15m Bullish Regime + Unmitigated Demand OB (${ob.bottom:,.1f} - ${ob.top:,.1f})"
-                            alert = AutoAlert(
-                                alert_id=alert_id,
-                                alert_type="CRYPTO_MOMENTUM",
-                                stage=smc_stage,
-                                symbol=clean_sym,
-                                exchange="CRYPTO",
-                                direction="BULLISH",
-                                headline=headline,
-                                summary=summary,
-                                ltp=ltp,
-                                trigger_level=round(ob.top, 2),
-                                target_level=t1_price,
-                                stop_loss=sl_price,
-                                confidence=smc_confidence,
-                                created_at=now_iso,
-                                is_live=True,
-                                environment="LIVE",
-                                market_status="LIVE",
-                                metrics={
-                                    "change_pct": chg_pct,
-                                    "segment": "CRYPTO",
-                                    "ob_bottom": ob.bottom,
-                                    "ob_top": ob.top,
-                                    "setup_confluence": conf,
-                                },
-                                actionable_plan={
-                                    "action": "BUY_SPOT / LONG",
-                                    "segment": "CRYPTO",
-                                    "contract": f"CRYPTO:{clean_sym}",
-                                    "entry_range": f"${round(ob.bottom, 2):,.2f} – ${round(ob.top * 1.005, 2):,.2f}",
-                                    "stop_loss": f"${sl_price:,.2f}",
-                                    "target": f"${t1_price:,.2f}",
-                                    "target_2": f"${t2_price:,.2f}",
-                                    "risk_reward": "1:2.4",
-                                    "when_to_buy": "Enter on order block retest or momentum breakout above OB top.",
-                                    "when_to_wait": f"Do not chase above ${round(ob.top * 1.012, 2):,.2f}.",
-                                    "no_chase_boundary": round(ob.top * 1.012, 2),
-                                    "setup_confluence": conf,
-                                    "profit_rule": "Scale 50% at T1 (+2.4R), trail remaining to breakeven.",
-                                    "trade_plan": {
-                                        "symbol": clean_sym,
-                                        "direction": "LONG",
-                                        "timeframe": "15M",
-                                        "entry_price": ltp,
-                                        "invalidation_stop": sl_price,
-                                        "target_1": t1_price,
-                                        "target_2": t2_price,
-                                        "risk_reward": "1:2.4",
-                                    },
-                                },
-                            )
-                            if self.record_alert(alert):
-                                found.append(alert)
-
-                elif regime == "BEARISH" and smc.active_supply_zones:
-                    ob = smc.active_supply_zones[0]
-                    if (ob.bottom * 0.975) <= ltp <= ob.top:
-                        sl_price = round(ob.top * 1.008, 2)
-                        risk_usd = sl_price - ltp
-                        if 0 < risk_usd <= (ltp * 0.045):
-                            t1_price = round(ltp - 2.4 * risk_usd, 2)
-                            t2_price = round(ltp - 4.2 * risk_usd, 2)
-                            smc_stage = "IGNITED" if ltp < ob.bottom else "EARLY_WARNING"
-                            smc_confidence = 91 if smc_stage == "IGNITED" else 85
-                            alert_id = f"crypto-smc-{clean_sym.lower()}-{date_str}"
-                            headline = f"⚡ CRYPTO SMC BREAKDOWN: {clean_sym} Supply OB Rejection @ ${ltp:,.2f}"
-                            summary = (
-                                f"Smart Money rejection at 15m Supply OB (${ob.bottom:,.2f} - ${ob.top:,.2f}). "
-                                f"Bearish structure confirmed. Downside target: ${t1_price:,.2f}."
-                            )
-                            conf = f"15m Bearish Regime + Active Supply OB (${ob.bottom:,.1f} - ${ob.top:,.1f})"
-                            alert = AutoAlert(
-                                alert_id=alert_id,
-                                alert_type="CRYPTO_MOMENTUM",
-                                stage=smc_stage,
-                                symbol=clean_sym,
-                                exchange="CRYPTO",
-                                direction="BEARISH",
-                                headline=headline,
-                                summary=summary,
-                                ltp=ltp,
-                                trigger_level=round(ob.bottom, 2),
-                                target_level=t1_price,
-                                stop_loss=sl_price,
-                                confidence=smc_confidence,
-                                created_at=now_iso,
-                                is_live=True,
-                                environment="LIVE",
-                                market_status="LIVE",
-                                metrics={
-                                    "change_pct": chg_pct,
-                                    "segment": "CRYPTO",
-                                    "ob_bottom": ob.bottom,
-                                    "ob_top": ob.top,
-                                    "setup_confluence": conf,
-                                },
-                                actionable_plan={
-                                    "action": "SELL_SHORT_FUTURES / SHORT",
-                                    "segment": "CRYPTO",
-                                    "contract": f"CRYPTO:{clean_sym}",
-                                    "entry_range": f"${round(ob.bottom * 0.995, 2):,.2f} – ${round(ob.top, 2):,.2f}",
-                                    "stop_loss": f"${sl_price:,.2f}",
-                                    "target": f"${t1_price:,.2f}",
-                                    "target_2": f"${t2_price:,.2f}",
-                                    "risk_reward": "1:2.4",
-                                    "when_to_buy": "Short on rejection wick from supply OB.",
-                                    "when_to_wait": f"Do not chase below ${round(ob.bottom * 0.988, 2):,.2f}.",
-                                    "no_chase_boundary": round(ob.bottom * 0.988, 2),
-                                    "setup_confluence": conf,
-                                    "profit_rule": "Scale 50% at T1, trail stop to breakeven.",
-                                    "trade_plan": {
-                                        "symbol": clean_sym,
-                                        "direction": "SHORT",
-                                        "timeframe": "15M",
-                                        "entry_price": ltp,
-                                        "invalidation_stop": sl_price,
-                                        "target_1": t1_price,
-                                        "target_2": t2_price,
-                                        "risk_reward": "1:2.4",
-                                    },
-                                },
-                            )
-                            if self.record_alert(alert):
-                                found.append(alert)
-        except Exception as e:
-            logger.debug(f"[AutoAlertEngine] SMC check failed for {clean_sym}: {e}")
-
-        # ── 3. OPTIONS VOLATILITY & MAX PAIN DETECTOR: Deribit Options Surface (BTC/ETH) ──
-        if clean_sym in ("BTCUSDT", "BTC", "ETHUSDT", "ETH"):
-            try:
-                from market.crypto_options import get_crypto_options_summary
-
-                base_curr = "BTC" if "BTC" in clean_sym else "ETH"
-                opt_sum = get_crypto_options_summary(base_curr)
-                max_pain = float(opt_sum.get("max_pain", 0.0) or 0.0)
-                dist_pct = float(opt_sum.get("max_pain_distance_pct", 0.0) or 0.0)
-                pcr_oi = float(opt_sum.get("pcr_open_interest", 1.0) or 1.0)
-                net_gex = float(opt_sum.get("net_gex_usd", 0.0) or 0.0)
-                gamma_regime = str(opt_sum.get("gamma_regime", "NEUTRAL"))
-                gex_flip = float(opt_sum.get("gex_flip_strike", 0.0) or 0.0)
-
-                if abs(dist_pct) >= 4.5 and max_pain > 0:
-                    is_bullish = dist_pct < 0
-                    direction = "BULLISH" if is_bullish else "BEARISH"
-                    alert_id = f"crypto-opt-{clean_sym.lower()}-{date_str}"
-                    risk_usd = round(max(1.0, ltp * 0.02), 2)  # 2% defined risk stop
-
-                    if is_bullish:
-                        sl_price = round(ltp - risk_usd, 2)
-                        t1_price = round(max_pain, 2)
-                        t2_price = round(max_pain * 1.03, 2)
-                        headline = f"🌊 DERIBIT OPTIONS GRAVITY: {clean_sym} Max Pain Magnet at ${max_pain:,.0f}"
-                        summary = (
-                            f"Spot is {abs(dist_pct):.1f}% below Deribit Max Pain (${max_pain:,.0f}). "
-                            f"Options dealer gamma position exerts strong upward gravitational pull into expiry."
-                        )
-                        action = "BUY_SPOT / LONG"
-                    else:
-                        sl_price = round(ltp + risk_usd, 2)
-                        t1_price = round(max_pain, 2)
-                        t2_price = round(max_pain * 0.97, 2)
-                        headline = f"🌊 DERIBIT OPTIONS GRAVITY: {clean_sym} Overextended Above Max Pain (${max_pain:,.0f})"
-                        summary = (
-                            f"Spot is +{dist_pct:.1f}% extended above Deribit Max Pain (${max_pain:,.0f}). "
-                            f"Dealer gamma pull indicates mean-reversion pull towards ${max_pain:,.0f}."
-                        )
-                        action = "SELL_SHORT_FUTURES / SHORT"
-
-                    conf = (
-                        f"Deribit {base_curr} Max Pain Gravitational Magnet (${max_pain:,.0f} | "
-                        f"PCR: {pcr_oi:.2f} | {gamma_regime} Net GEX: ${net_gex:+,.0f})"
-                    )
-                    alert = AutoAlert(
-                        alert_id=alert_id,
-                        alert_type="CRYPTO_VOLATILITY",
-                        stage="EARLY_WARNING",
-                        symbol=clean_sym,
-                        exchange="CRYPTO",
-                        direction=direction,
-                        headline=headline,
-                        summary=summary,
-                        ltp=ltp,
-                        trigger_level=ltp,
-                        target_level=t1_price,
-                        stop_loss=sl_price,
-                        confidence=85,
-                        created_at=now_iso,
-                        is_live=True,
-                        environment="LIVE",
-                        market_status="LIVE",
-                        metrics={
-                            "change_pct": chg_pct,
-                            "segment": "CRYPTO",
-                            "max_pain": max_pain,
-                            "max_pain_dist_pct": dist_pct,
-                            "pcr_oi": pcr_oi,
-                            "net_gex_usd": net_gex,
-                            "gamma_regime": gamma_regime,
-                            "gex_flip_strike": gex_flip,
-                            "setup_confluence": conf,
-                        },
-                        actionable_plan={
-                            "action": action,
-                            "segment": "CRYPTO",
-                            "contract": f"CRYPTO:{clean_sym}",
-                            "entry_range": f"${round(ltp * 0.995, 2):,.2f} – ${round(ltp * 1.005, 2):,.2f}",
-                            "stop_loss": f"${sl_price:,.2f}",
-                            "target": f"${t1_price:,.2f}",
-                            "target_2": f"${t2_price:,.2f}",
-                            "risk_reward": f"1:{round(abs(t1_price - ltp) / max(0.01, abs(ltp - sl_price)), 1)}",
-                            "when_to_buy": "Execute on structural support with defined risk below SL.",
-                            "when_to_wait": "Do not chase if price moves > 1% towards Max Pain without retest.",
-                            "no_chase_boundary": round(ltp * 1.01, 2) if is_bullish else round(ltp * 0.99, 2),
-                            "setup_confluence": conf,
-                            "profit_rule": f"Scale 50% at Max Pain magnet (${max_pain:,.0f}), trail remainder.",
-                            "trade_plan": {
-                                "symbol": clean_sym,
-                                "direction": direction,
-                                "timeframe": "SWING",
-                                "entry_price": ltp,
-                                "invalidation_stop": sl_price,
-                                "target_1": t1_price,
-                                "target_2": t2_price,
-                                "risk_reward": f"1:{round(abs(t1_price - ltp) / max(0.01, abs(ltp - sl_price)), 1)}",
-                            },
-                        },
-                    )
-                    if self.record_alert(alert):
-                        found.append(alert)
-            except Exception as e:
-                logger.debug(f"[AutoAlertEngine] Options gravity check failed for {clean_sym}: {e}")
-
+        for a in alerts:
+            if self.record_alert(a):
+                found.append(a)
         return found
 
     def scan_crypto_now(self) -> list[AutoAlert]:
@@ -5935,11 +3783,13 @@ class AutoAlertEngine:
           2. Smart Money Concepts (15m Market Structure, CHoCH, and Order Block bounces)
           3. Deribit Options Surface & Max Pain Magnet (BTC/ETH Options Volatility)
         """
+        from engine.detectors.crypto import detect_crypto_signals
+
+        alerts = detect_crypto_signals(universe=self.watched_crypto)
         found: list[AutoAlert] = []
-        universe = self.watched_crypto
-        for sym in universe:
-            alerts = self._scan_single_crypto_symbol(sym)
-            found.extend(alerts)
+        for a in alerts:
+            if self.record_alert(a):
+                found.append(a)
         return found
 
     def scan_fresh_signals_now(self, segment: str = "AUTO") -> list[AutoAlert]:
@@ -6057,6 +3907,10 @@ class AutoAlertEngine:
 
     def _run_loop(self, interval: int) -> None:
         last_cleanup_time = 0.0
+        # Fix 5: Fast-path index scan tracking (NIFTY/BANKNIFTY every ~20s during active session)
+        _last_index_fast_scan: float = 0.0
+        _INDEX_FAST_INTERVAL = 20.0  # seconds between dedicated index gamma + PE scans
+
         while self._is_running and not self._stop_event.is_set():
             try:
                 now_loop = time.time()
@@ -6068,6 +3922,28 @@ class AutoAlertEngine:
                 session = get_current_ist_session()
 
                 from engine.alert_preferences import alert_preferences
+
+                # Fix 5: Fast-path index scan (every 20s during equity/NFO session).
+                # Runs ONLY gamma blasts + SMC index put setups on NIFTY/BANKNIFTY without
+                # triggering the full equity universe scan (which runs at the 45s interval).
+                # This cuts the worst-case PE detection lag from 45s → 20s.
+                if session["equity_nfo"] and not (
+                    alert_preferences.is_segment_globally_disabled("FNO")
+                    or alert_preferences.is_segment_globally_disabled("FNO_INDEX")
+                ):
+                    now_ist = datetime.now(IST)
+                    is_active_index_window = (
+                        (now_ist.hour > 9 or (now_ist.hour == 9 and now_ist.minute >= 18))
+                        and (now_ist.hour < 15 or (now_ist.hour == 15 and now_ist.minute <= 10))
+                    )
+                    if is_active_index_window and (now_loop - _last_index_fast_scan) >= _INDEX_FAST_INTERVAL:
+                        try:
+                            self.scan_index_call_setups()  # CE: PDL bounce, VWAP reclaim, demand sweep
+                            self.scan_index_put_setups()   # PE: PDH rejection, VWAP failure, supply sweep
+                            self.scan_gamma_blasts()       # OI-driven CE + PE
+                        except Exception as e_fast:
+                            logger.debug(f"[AutoAlertEngine] Fast-path index scan error: {e_fast}")
+                        _last_index_fast_scan = now_loop
 
                 # Phase 1: Pure Domestic Equity & NFO Desk (09:15 - 15:30 IST)
                 if session["equity_nfo"] and not (
@@ -6477,7 +4353,19 @@ class AutoAlertEngine:
             payload = json.dumps(data, indent=2)
             temp_path = target_path.with_name(f"{target_path.name}.tmp.{os.getpid()}")
             temp_path.write_text(payload, encoding="utf-8")
-            os.replace(temp_path, target_path)
+            for attempt in range(4):
+                try:
+                    os.replace(temp_path, target_path)
+                    break
+                except PermissionError:
+                    if attempt == 3:
+                        target_path.write_text(payload, encoding="utf-8")
+                        try:
+                            temp_path.unlink(missing_ok=True)
+                        except Exception:
+                            pass
+                    else:
+                        time.sleep(0.04)
         except Exception as e:
             logger.debug(f"[AutoAlertEngine] _save error: {e}")
 

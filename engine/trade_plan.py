@@ -119,6 +119,9 @@ class TradePlan:
     stagnation_timeout_mins: int = 25
     stagnation_advice: str = ""
 
+    # Optimal Trade Entry (OTE) & Pullback Boundaries
+    optimal_entry_range: str = ""
+
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
 
@@ -516,6 +519,13 @@ def calculate_trade_plan(
                 (max_pain_strike, f"Expiry Max Pain Magnet (₹{max_pain_strike:,.0f})")
             )
 
+        # Check for immediate opposing barrier collision (truncated headroom < 0.70x risk)
+        opposing_barrier = None
+        for t in target_candidates:
+            if ltp < t[0] < ltp + (stop_distance_pts * 0.70):
+                opposing_barrier = t
+                break
+
         # Filter candidates strictly above LTP by at least 0.5× stop_distance
         valid_targets = [t for t in target_candidates if t[0] >= ltp + (stop_distance_pts * 0.5)]
         valid_targets.sort(key=lambda t: t[0])
@@ -610,6 +620,13 @@ def calculate_trade_plan(
             target_candidates.append(
                 (max_pain_strike, f"Expiry Max Pain Magnet (₹{max_pain_strike:,.0f})")
             )
+
+        # Check for immediate opposing barrier collision (truncated headroom < 0.70x risk)
+        opposing_barrier = None
+        for t in target_candidates:
+            if ltp - (stop_distance_pts * 0.70) < t[0] < ltp:
+                opposing_barrier = t
+                break
 
         valid_targets = [t for t in target_candidates if t[0] <= ltp - (stop_distance_pts * 0.5)]
         valid_targets.sort(key=lambda t: t[0], reverse=True)
@@ -708,6 +725,15 @@ def calculate_trade_plan(
         asymmetry_note = (
             f"Invalid short geometry: Stop distance ({stop_distance_pts:,.1f} pts) exceeds asset value ({ltp:,.1f}), "
             f"or target calculations fall below zero. Structurally unviable."
+        )
+    elif opposing_barrier and not has_active_blast:
+        barrier_price, barrier_desc = opposing_barrier
+        headroom_pts = abs(barrier_price - ltp)
+        is_asymmetry_viable = False
+        asymmetry_verdict = "OPPOSING_ZONE_COLLISION_REJECTED"
+        asymmetry_note = (
+            f"Opposing zone collision: {barrier_desc} is only {headroom_pts:,.1f} pts from spot "
+            f"(< 0.70x stop risk {stop_distance_pts:,.1f} pts). Headroom truncated; wait for clean breakout/retest."
         )
     elif rr_t2 >= 2.5 and (rr_t1 >= 1.2 or (has_active_blast and rr_t2 >= 2.0) or rr_t1 >= 0.8):
         is_asymmetry_viable = True
@@ -894,7 +920,16 @@ def calculate_trade_plan(
     t3_distance_pct = (t3_distance_pts / ltp) * 100.0
     rr_t3 = round(t3_distance_pts / stop_distance_pts, 2)
 
-    return TradePlan(
+    # ── 11. Optimal Trade Entry (OTE) Pullback Range ───────────────────────────
+    if is_long:
+        pullback_entry_low = round(max(invalidation_stop + 0.5, ltp - (stop_distance_pts * 0.35)), 1)
+        pullback_entry_high = round(ltp, 1)
+    else:
+        pullback_entry_high = round(min(invalidation_stop - 0.5, ltp + (stop_distance_pts * 0.35)), 1)
+        pullback_entry_low = round(ltp, 1)
+    optimal_entry_range = f"₹{pullback_entry_low:,.1f} – ₹{pullback_entry_high:,.1f}"
+
+    res = TradePlan(
         symbol=clean_sym,
         direction="LONG" if is_long else "SHORT",
         timeframe=timeframe,
@@ -941,6 +976,7 @@ def calculate_trade_plan(
         as_of=now.strftime("%H:%M:%S IST"),
         stagnation_timeout_mins=stagnation_timeout_mins,
         stagnation_advice=stagnation_advice,
+        optimal_entry_range=optimal_entry_range,
     )
 
     if df is None and ltp > 0:
@@ -982,6 +1018,7 @@ def calculate_option_execution_plan(
     expiry: str,  # ISO date "YYYY-MM-DD"
     option_ltp: float,  # Current option premium (LTP)
     lot_size: int = 25,
+    expiry_type: str = "WEEKLY",  # "WEEKLY" | "MONTHLY" | "DAILY" | "QUARTERLY"
 ) -> dict[str, Any]:
     """
     Maps Spot-level trade plan milestones to option contract premiums using
@@ -1062,6 +1099,21 @@ def calculate_option_execution_plan(
     else:
         sl_prem = raw_sl_prem
 
+    # ── Expiry-Day Detection ──────────────────────────────────────
+    # On the expiry day, a small spot move = massive option gain (near-zero extrinsic).
+    # Weekly NIFTY/BANKNIFTY CE: 50 pts spot move = 200%+ option gain.
+    # Remove all hardcoded multiplier ceilings so real Greek-driven targets are shown.
+    is_expiry_day = False
+    try:
+        expiry_d = None
+        if expiry:
+            import datetime as _dt
+            expiry_d = _dt.date.fromisoformat(str(expiry)[:10])
+            today = _dt.date.today()
+            is_expiry_day = (expiry_d == today)
+    except Exception:
+        is_expiry_day = False
+
     opt_risk = max(0.20, option_ltp - sl_prem)
     t0_5_prem = round(max(option_ltp + opt_risk, option_ltp * 1.16), 2) if option_ltp > 0 else None
     raw_t1_prem = _option_price_at_spot(trade_plan.target_1, bars_elapsed=trade_plan.expected_bars_t1)
@@ -1074,26 +1126,27 @@ def calculate_option_execution_plan(
 
     if option_ltp > 0:
         if tf == "INTRADAY":
-            # For INTRADAY options:
-            # T0.5 Scalp Scale-Out / Breakeven Milestone (+1.0R / +16%)
-            # T1 realistic gain: +20% to +28% (scale 50% & SL to Cost)
-            # T2 realistic gain: +35% to +50%
-            # T3 runner: +65% to +85%
-            t1_prem = max(round(option_ltp + (1.6 * opt_risk), 2), min(raw_t1_prem, round(option_ltp * 1.28, 2)))
-            if round(option_ltp * 1.15, 2) <= raw_t1_prem <= round(option_ltp * 1.30, 2):
+            if is_expiry_day:
+                # Expiry-day: Greeks dominate. Remove multiplier ceilings — use raw Greek estimates.
+                # A 50-pt NIFTY move = 150-300% on a weekly ATM CE. Hardcoded 28% caps are wrong.
                 t1_prem = raw_t1_prem
-            # Strict safety ceiling for intraday: T1 cannot exceed +35% of premium
-            t1_prem = min(t1_prem, round(option_ltp * 1.35, 2))
-
-            t2_prem = max(round(t1_prem + (1.2 * opt_risk), 2), min(raw_t2_prem, round(option_ltp * 1.50, 2)))
-            if round(option_ltp * 1.30, 2) <= raw_t2_prem <= round(option_ltp * 1.55, 2):
                 t2_prem = raw_t2_prem
-            # Strict safety ceiling for intraday: T2 cannot exceed +55% of premium
-            t2_prem = min(t2_prem, round(option_ltp * 1.55, 2))
+                t3_prem = raw_t3_prem if raw_t3_prem else round(option_ltp + (4.0 * opt_risk), 2)
+            else:
+                # Non-expiry intraday: calibrated ceilings to prevent wildly optimistic targets
+                t1_prem = max(round(option_ltp + (1.6 * opt_risk), 2), min(raw_t1_prem, round(option_ltp * 1.28, 2)))
+                if round(option_ltp * 1.15, 2) <= raw_t1_prem <= round(option_ltp * 1.30, 2):
+                    t1_prem = raw_t1_prem
+                t1_prem = min(t1_prem, round(option_ltp * 1.35, 2))
 
-            t3_prem = max(round(t2_prem + (1.5 * opt_risk), 2), round(option_ltp * 1.75, 2))
-            if raw_t3_prem and raw_t3_prem > t2_prem:
-                t3_prem = min(raw_t3_prem, round(option_ltp * 1.90, 2))
+                t2_prem = max(round(t1_prem + (1.2 * opt_risk), 2), min(raw_t2_prem, round(option_ltp * 1.50, 2)))
+                if round(option_ltp * 1.30, 2) <= raw_t2_prem <= round(option_ltp * 1.55, 2):
+                    t2_prem = raw_t2_prem
+                t2_prem = min(t2_prem, round(option_ltp * 1.55, 2))
+
+                t3_prem = max(round(t2_prem + (1.5 * opt_risk), 2), round(option_ltp * 1.75, 2))
+                if raw_t3_prem and raw_t3_prem > t2_prem:
+                    t3_prem = min(raw_t3_prem, round(option_ltp * 1.90, 2))
         elif tf == "SWING_SHORT":
             # For SWING_SHORT (2-5 days):
             # T1: +35% to +50%

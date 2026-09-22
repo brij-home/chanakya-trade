@@ -746,6 +746,7 @@ export function computeExecutionLevels(alert, isDerivative, spotNum, optLtpNum) 
     isOptionSell,
     optPlanRef: optPlan || null,
     no_chase_boundary: alert.no_chase_boundary || tradePlan.no_chase_boundary || null,
+    entry_range: alert.entry_range || alert.optimal_entry_range || tradePlan.optimal_entry_range || null,
     anchored_levels: alert.anchored_levels || tradePlan.anchored_levels || null,
     time_horizon: alert.time_horizon || null,
     order_flow_signals: alert.order_flow_signals || null,

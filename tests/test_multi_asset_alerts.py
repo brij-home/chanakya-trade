@@ -197,7 +197,7 @@ def test_cds_currency_alert_template_rendering():
     assert rendered.count("[REAL/LIVE]") == 1
     assert "[REAL / LIVE" not in rendered
     assert "Macro Currency Plan" not in rendered
-    assert "BUY_FUTURES <b>CDS:USDINR</b>" in rendered
+    assert "BUY FUTURES <b>CDS:USDINR</b>" in rendered
     assert "Lot: 1000" in rendered
     assert "Target 1:" in rendered
     assert "Scale 50% at T1" in rendered

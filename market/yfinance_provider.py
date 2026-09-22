@@ -118,6 +118,14 @@ _INDEX_MAP = {
     "NIFTY PSE": "^CNXPSE",
     "NIFTY PSU BANK": "^CNXPSUBANK",
     "NIFTY PRIVATE BANK": "^CNXPVTBANK",
+    "NIFTY PVT BANK": "^CNXPVTBANK",
+    "NIFTY MEDIA": "^CNXMEDIA",
+    "NIFTYMEDIA": "^CNXMEDIA",
+    "MEDIA": "^CNXMEDIA",
+    "NIFTY CONSUMPTION": "^CNXCONSUMP",
+    "NIFTY HEALTHCARE": "^CNXHEALTH",
+    "NIFTY OIL AND GAS": "^CNXOILGAS",
+    "NIFTY OIL & GAS": "^CNXOILGAS",
 }
 
 
@@ -191,6 +199,10 @@ def _to_yf_symbol(symbol: str, exchange: str = "NSE") -> str:
             return f"{upper}=X"
         return upper
 
+    # Special corporate ticker mappings (e.g. corporate restructuring / rebranding)
+    if upper == "ZOMATO":
+        return "ETERNAL.NS"
+
     if exch_upper == "BSE":
         return f"{symbol}.BO"
     return f"{symbol}.NS"
@@ -250,7 +262,7 @@ _USD_COMMODITY_FACTORS: dict[str, float] = {
     * 1.1288,  # GOLD landed (COMEX USD/troy oz → MCX ₹/10 grams with duty/basis)
     "SI=F": (1000.0 / 31.1034768)
     * 1.2427,  # SILVER landed (COMEX USD/troy oz → MCX ₹/1 kg with duty/basis)
-    "HG=F": 2.20462262,  # COPPER (COMEX USD/lb → MCX ₹/1 kg)
+    "HG=F": 2.20462262 * 0.9785,  # COPPER landed (COMEX USD/lb → MCX ₹/1 kg with LME/MCX basis ~0.9785x)
     "CL=F": 1.0,  # CRUDE OIL (NYMEX USD/bbl → MCX ₹/bbl)
     "BZ=F": 1.0,  # BRENT CRUDE OIL (ICE USD/bbl → MCX ₹/bbl)
     "NG=F": 1.0,  # NATURAL GAS (NYMEX USD/MMBtu → MCX ₹/MMBtu)
@@ -324,16 +336,22 @@ def yf_get_quote(symbol: str, exchange: str = "NSE") -> Quote:
         day_low = float(info.get("dayLow", 0) or info.get("day_low", 0) or 0)
         volume = int(info.get("lastVolume", 0) or info.get("last_volume", 0) or 0)
 
-        # If fast_info is sparse, try history for today
-        if not last_price:
-            hist = t.history(period="1d")
-            if not hist.empty:
-                row = hist.iloc[-1]
-                last_price = float(row.get("Close", 0))
-                open_price = float(row.get("Open", 0))
-                day_high = float(row.get("High", 0))
-                day_low = float(row.get("Low", 0))
-                volume = int(row.get("Volume", 0))
+        # If fast_info is sparse or volume is missing, try history for today
+        if not last_price or volume <= 0:
+            try:
+                hist = t.history(period="1d")
+                if not hist.empty:
+                    row = hist.iloc[-1]
+                    if not last_price:
+                        last_price = float(row.get("Close", 0))
+                        open_price = float(row.get("Open", 0))
+                        day_high = float(row.get("High", 0))
+                        day_low = float(row.get("Low", 0))
+                    if volume <= 0:
+                        volume = int(row.get("Volume", 0))
+            except Exception:
+                pass
+
 
         # ── MCX Commodity USD → INR conversion with unit multiplier ────
         # yfinance returns USD-denominated prices for commodity futures
@@ -368,7 +386,7 @@ def yf_get_quote(symbol: str, exchange: str = "NSE") -> Quote:
         return q
     except Exception as e:
         err_str = str(e).lower()
-        if "404" in err_str or "not found" in err_str or "delisted" in err_str:
+        if "404" in err_str or "not found" in err_str or "delisted" in err_str or isinstance(e, (KeyError, IndexError)):
             with _quote_cache_lock:
                 _DEAD_TICKER_CACHE[ticker] = now
         raise RuntimeError(f"yfinance quote failed for {symbol}: {e}") from e

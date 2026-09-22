@@ -1661,6 +1661,266 @@ def test_first_time_message_prominently_shows_runner_and_confidence():
     assert "• 🚀 <b>Runner Alternative (High Beta):</b> <code>BSE 3150 PE</code> (Opt CMP: ₹42.50)" in rendered
 
 
+def test_format_signal_badge_and_lot_concor_and_scenarios():
+    """Verify format_signal_badge_and_lot accurately color-codes bull/bear scenarios and places lot size beside price."""
+    from bot.alert_templates import format_signal_badge_and_lot
+
+    # 1. User's exact prompt scenario: 'CONCOR 485 PE @ ₹7.2'
+    res_concor_pe = format_signal_badge_and_lot("CONCOR 485 PE @ ₹7.2")
+    assert res_concor_pe == "🔴 CONCOR 485 PE @ ₹7.2 (Lot: 1250)"
+
+    # 2. Call Option counterpart
+    res_concor_ce = format_signal_badge_and_lot("CONCOR 485 CE @ ₹8.5")
+    assert res_concor_ce == "🟢 CONCOR 485 CE @ ₹8.5 (Lot: 1250)"
+
+    # 3. Index Call & Put
+    res_nifty_ce = format_signal_badge_and_lot("NIFTY 24500 CE @ ₹105.0")
+    assert res_nifty_ce == "🟢 NIFTY 24500 CE @ ₹105.0 (Lot: 65)"
+
+    res_banknifty_pe = format_signal_badge_and_lot("BANKNIFTY 52000 PE @ ₹145.0")
+    assert res_banknifty_pe == "🔴 BANKNIFTY 52000 PE @ ₹145.0 (Lot: 30)"
+
+    # 4. HAL F&O stock
+    res_hal_pe = format_signal_badge_and_lot("HAL 4800 PE @ ₹54.2")
+    assert res_hal_pe == "🔴 HAL 4800 PE @ ₹54.2 (Lot: 150)"
+
+    # 5. Target Hit Scenario (🎯 badge)
+    res_tgt = format_signal_badge_and_lot("CONCOR 485 PE @ ₹14.5", scenario="TARGET_HIT")
+    assert res_tgt == "🎯 CONCOR 485 PE @ ₹14.5 (Lot: 1250)"
+
+    # 6. Invalidation Scenario (🛑 badge)
+    res_inval = format_signal_badge_and_lot("CONCOR 485 PE @ ₹4.5", scenario="INVALIDATED")
+    assert res_inval == "🛑 CONCOR 485 PE @ ₹4.5 (Lot: 1250)"
+
+    # 7. Neutral / Coiling Scenario (🟡 badge)
+    res_neutral = format_signal_badge_and_lot("NIFTY 24500 IRON CONDOR @ ₹120.0", scenario="NEUTRAL")
+    assert res_neutral.startswith("🟡 ")
+
+    # 8. Deduplication check: existing lot size is NOT duplicated
+    res_no_dup = format_signal_badge_and_lot("CONCOR 485 PE @ ₹7.2 (Lot: 1250)")
+    assert res_no_dup == "🔴 CONCOR 485 PE @ ₹7.2 (Lot: 1250)"
+    assert res_no_dup.count("(Lot:") == 1
+
+    # 9. Cash equity check: lot size = 1 is suppressed
+    res_cash_eq = format_signal_badge_and_lot("TRENT @ ₹7100.0", symbol="TRENT", lot_size=1)
+    assert res_cash_eq == "🟢 TRENT @ ₹7100.0"
+    assert "(Lot:" not in res_cash_eq
+
+
+def test_fno_and_auto_alerts_color_coding_and_lot_size():
+    """Verify render_fno_alert and render_auto_alert apply color coding and show lot size beside price."""
+    from bot.alert_templates import render_fno_alert, render_auto_alert
+    from engine.auto_alert_engine import AutoAlert
+
+    # 1. render_fno_alert with Put option (Bearish 🔴)
+    pe_alert = {
+        "contract": "CONCOR 485 PE",
+        "underlying": "CONCOR",
+        "option_type": "PE",
+        "premium": 7.20,
+        "entry_range": "₹7.00 – ₹7.40",
+        "stop_loss": 5.00,
+        "target_1": 10.80,
+        "target_2": 14.50,
+        "spot": 482.0,
+        "lot_size": 1250,
+    }
+    rendered_fno_pe = render_fno_alert(pe_alert)
+    assert "🔴 <b>[REAL/LIVE] GAMMA BLAST SURGE</b>" in rendered_fno_pe
+    assert "🔴 <b>CONCOR 485 PE</b> @ <code>₹7.20</code> (Lot: 1250)" in rendered_fno_pe
+    assert "• <b>Entry Zone:</b> <code>₹7.00 – ₹7.40</code> (Lot: 1250)" in rendered_fno_pe
+
+    # 2. render_fno_alert with Call option (Bullish 🟢)
+    ce_alert = {
+        "contract": "CONCOR 485 CE",
+        "underlying": "CONCOR",
+        "option_type": "CE",
+        "premium": 8.50,
+        "entry_range": "₹8.20 – ₹8.80",
+        "stop_loss": 6.00,
+        "target_1": 12.50,
+        "target_2": 17.00,
+        "spot": 488.0,
+        "lot_size": 1250,
+    }
+    rendered_fno_ce = render_fno_alert(ce_alert)
+    assert "🟢 <b>[REAL/LIVE] GAMMA BLAST SURGE</b>" in rendered_fno_ce
+    assert "🟢 <b>CONCOR 485 CE</b> @ <code>₹8.50</code> (Lot: 1250)" in rendered_fno_ce
+
+    # 3. render_auto_alert with Options Momentum Put Alert
+    auto_pe = AutoAlert(
+        alert_id="opt-concor-485-pe",
+        alert_type="OPTIONS_MOMENTUM",
+        stage="IGNITED",
+        symbol="CONCOR",
+        exchange="NFO",
+        direction="BEARISH",
+        headline="OPTIONS MOMENTUM (PUT SURGE): CONCOR 485 PE @ ₹7.2",
+        summary="Heavy Put accumulation with high volume.",
+        ltp=7.20,
+        trigger_level=7.20,
+        target_level=12.0,
+        stop_loss=5.0,
+        strike=485.0,
+        option_type="PE",
+        contract_symbol="CONCOR 485 PE",
+        actionable_plan={
+            "action": "BUY",
+            "recommended_entry": "₹7.2",
+            "target": "₹12.0",
+            "stop_loss": "₹5.0",
+            "lot_size": 1250,
+        },
+        lot_size=1250,
+        confidence=91,
+    )
+    rendered_auto_pe = render_auto_alert(auto_pe, in_market=True)
+    assert "🔴 <b>[REAL/LIVE] OPTIONS PUT SURGE</b>" in rendered_auto_pe
+    assert "🔴 OPTIONS MOMENTUM (PUT SURGE): CONCOR 485 PE @ ₹7.2 (Lot: 1250)" in rendered_auto_pe
+    assert "• <b>Action:</b> BUY <b>CONCOR 485 PE</b> @ <code>₹7.2</code> (Lot: 1250)" in rendered_auto_pe
+
+
+def test_milestone_alerts_color_coding_and_lot_size():
+    """Verify render_milestone_alert includes color-coded icon and lot size beside entry price."""
+    from bot.alert_templates import render_milestone_alert, MilestoneAlertData
+
+    # 1. Put Option milestone (🔴)
+    t1_pe = MilestoneAlertData(
+        milestone_type="TARGET_1",
+        symbol="CONCOR",
+        contract="CONCOR 485 PE",
+        alert_type="OPTIONS MOMENTUM",
+        direction="BEARISH",
+        ltp=10.80,
+        entry_price=7.20,
+        initial_sl=5.00,
+        target_1=10.80,
+        target_2=14.50,
+        lot_size=1250,
+        signal_id="#SIG_CONCOR_485PE_11SEP_0942",
+        environment="LIVE",
+    )
+    rendered_pe_m = render_milestone_alert(t1_pe)
+    assert "TARGET 1 ACHIEVED" in rendered_pe_m
+    assert "🔴 CONCOR 485 PE (OPTIONS MOMENTUM) — TARGET 1 ACHIEVED" in rendered_pe_m
+    assert "Entry: ₹7.20 (Lot: 1250)" in rendered_pe_m
+    assert "SL: ₹5.00" in rendered_pe_m
+    assert "T1: ₹10.80" in rendered_pe_m
+
+    # 2. Call Option milestone (🟢)
+    t1_ce = MilestoneAlertData(
+        milestone_type="TARGET_1",
+        symbol="CONCOR",
+        contract="CONCOR 485 CE",
+        alert_type="OPTIONS MOMENTUM",
+        direction="BULLISH",
+        ltp=12.50,
+        entry_price=8.50,
+        initial_sl=6.00,
+        target_1=12.50,
+        target_2=17.00,
+        lot_size=1250,
+        signal_id="#SIG_CONCOR_485CE_11SEP_0942",
+        environment="LIVE",
+    )
+    rendered_ce_m = render_milestone_alert(t1_ce)
+    assert "TARGET 1 ACHIEVED" in rendered_ce_m
+    assert "🟢 CONCOR 485 CE (OPTIONS MOMENTUM) — TARGET 1 ACHIEVED" in rendered_ce_m
+    assert "Entry: ₹8.50 (Lot: 1250)" in rendered_ce_m
+
+
+def test_discipline_regex_preserves_decimals_and_suppresses_zero_dot():
+    """
+    Verifies that 'Do not chase if option premium moves >15% beyond ₹13.0.'
+    does NOT render as '• Discipline: 0.'
+    """
+    from bot.alert_templates import render_auto_alert
+    from engine.alert_model import AutoAlert
+
+    alert = AutoAlert(
+        alert_id="test-discipline-decimal-bug",
+        alert_type="COMMODITY_MOMENTUM",
+        stage="IGNITED",
+        symbol="COPPER",
+        exchange="MCX",
+        direction="BULLISH",
+        headline="🛢️ MCX BREAKOUT: COPPER +2.1% @ ₹1,413.5",
+        summary="Test discipline decimal parsing",
+        ltp=1413.5,
+        trigger_level=1413.5,
+        stop_loss=1400.0,
+        target_level=1440.0,
+        confidence=85,
+        is_live=True,
+        environment="LIVE",
+        market_status="LIVE",
+        no_chase_boundary=1425.0,
+        actionable_plan={
+            "action": "BUY_FUTURES",
+            "contract": "MCX:COPPER",
+            "entry_range": "₹1,410.0 – ₹1,415.0",
+            "stop_loss": "₹1,400.0",
+            "target": "₹1,440.0",
+            "risk_reward": "1:2.0",
+            "lot_size": 2500,
+            "when_to_wait": "Do not chase if option premium moves >15% beyond ₹13.0.",
+            "profit_rule": "Book 50% at T1, trail stop.",
+        },
+    )
+
+    rendered = render_auto_alert(alert, in_market=True)
+    # MUST NOT contain broken "• Discipline: 0."
+    assert "Discipline: 0." not in rendered
+    assert "Discipline:</b> <i>0." not in rendered
+    # Must contain the inline no-chase boundary properly
+    assert "🛑 <b>No-Chase:</b>" in rendered
+
+    # Now verify that substantive advice following a no-chase rule IS preserved
+    alert.actionable_plan["when_to_wait"] = (
+        "Do not chase if option premium moves >15% beyond ₹13.0. Wait for 5m candle confirmation before entering."
+    )
+    rendered_with_advice = render_auto_alert(alert, in_market=True)
+    assert "Wait for 5m candle confirmation before entering." in rendered_with_advice
+
+
+def test_mcx_provenance_badge_reflects_delayed_feed_when_broker_is_mstock():
+    """
+    Verifies that an MCX alert with mstock as data broker renders DELAYED FEED (yfinance),
+    not false 'LIVE BROKER FEED'.
+    """
+    from unittest.mock import patch
+    from bot.alert_templates import render_auto_alert
+    from engine.alert_model import AutoAlert
+
+    alert = AutoAlert(
+        alert_id="test-mcx-prov",
+        alert_type="COMMODITY_MOMENTUM",
+        stage="IGNITED",
+        symbol="COPPER",
+        exchange="MCX",
+        direction="BULLISH",
+        headline="🛢️ MCX BREAKOUT: COPPER @ ₹1,413.5",
+        summary="MCX test provenance",
+        ltp=1413.5,
+        trigger_level=1413.5,
+        stop_loss=1400.0,
+        target_level=1440.0,
+        confidence=85,
+        is_live=True,
+        environment="LIVE",
+        market_status="LIVE",
+        order_flow_signals={"live_broker_connected": True},  # Equity broker connected
+    )
+
+    with patch("brokers.session.get_data_broker_key", return_value="mstock"):
+        rendered = render_auto_alert(alert, in_market=True)
+        # MUST NOT claim LIVE BROKER FEED for MCX when broker is mstock
+        assert "LIVE BROKER FEED" not in rendered
+        assert "DELAYED FEED (yfinance)" in rendered
+
+
+
+
 
 
 

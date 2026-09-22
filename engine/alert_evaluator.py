@@ -539,7 +539,13 @@ def evaluate_alert_targets_and_trailing(
     else:
         entry = None
         plan = getattr(alert, "actionable_plan", None)
-        if plan:
+        if plan and (plan.get("instrument_type") == "OPTION" or plan.get("preferred_vehicle") == "DEFINED_RISK_OPTION"):
+            fut_ref = plan.get("futures_reference")
+            if fut_ref and isinstance(fut_ref, dict) and fut_ref.get("entry"):
+                entry = float(fut_ref["entry"])
+            else:
+                entry = alert.trigger_level or alert.ltp or current_ltp
+        elif plan:
             rec_entry = plan.get("recommended_entry", "")
             m = re.search(r"[\d,]+(?:\.\d+)?", str(rec_entry))
             if m:
@@ -575,7 +581,13 @@ def evaluate_alert_targets_and_trailing(
     # Reference stop loss
     stop = None
     plan = getattr(alert, "actionable_plan", None)
-    if plan and plan.get("stop_loss"):
+    if not is_option and plan and (plan.get("instrument_type") == "OPTION" or plan.get("preferred_vehicle") == "DEFINED_RISK_OPTION"):
+        fut_ref = plan.get("futures_reference")
+        if fut_ref and isinstance(fut_ref, dict) and fut_ref.get("stop_loss"):
+            stop = float(fut_ref["stop_loss"])
+        elif alert.stop_loss and alert.stop_loss > 0:
+            stop = alert.stop_loss
+    elif plan and plan.get("stop_loss"):
         m_sl = re.search(r"[\d,]+(?:\.\d+)?", str(plan["stop_loss"]))
         if m_sl:
             try:
@@ -586,6 +598,22 @@ def evaluate_alert_targets_and_trailing(
         stop = alert.stop_loss
     if not stop:
         stop = round(entry * 0.98 if is_bullish else entry * 1.02, 2)
+
+    # Sanity guard against unit-scale corruption (e.g. comparing spot price ₹1,442 against option entry ₹16)
+    if entry > 0 and current_ltp > 0:
+        ratio = current_ltp / entry
+        if not is_option and (ratio > 2.5 or ratio < 0.4):
+            logger.warning(
+                f"[AlertEvaluator] Spot/futures price scale mismatch for {getattr(alert, 'symbol', '')} "
+                f"({getattr(alert, 'alert_id', '')}): current_ltp={current_ltp} vs entry={entry}. Suppressing false evaluation."
+            )
+            return None
+        elif is_option and (ratio > 10.0 or ratio < 0.05):
+            logger.warning(
+                f"[AlertEvaluator] Option premium price scale mismatch for {getattr(alert, 'symbol', '')} "
+                f"({getattr(alert, 'alert_id', '')}): current_ltp={current_ltp} vs entry={entry}. Suppressing false evaluation."
+            )
+            return None
 
     initial_risk = max(0.01, abs(entry - stop))
 
@@ -605,6 +633,13 @@ def evaluate_alert_targets_and_trailing(
     plan_t2 = None
     plan_t3 = None
     if plan and isinstance(plan, dict):
+        if not is_option and (plan.get("instrument_type") == "OPTION" or plan.get("preferred_vehicle") == "DEFINED_RISK_OPTION"):
+            fut_ref = plan.get("futures_reference")
+            if fut_ref and isinstance(fut_ref, dict):
+                if fut_ref.get("target_1"):
+                    plan_t1 = float(fut_ref["target_1"])
+                if fut_ref.get("target_2"):
+                    plan_t2 = float(fut_ref["target_2"])
         if is_option:
             opt_plan = plan.get("option_plan")
             if isinstance(opt_plan, dict):
@@ -773,7 +808,7 @@ def evaluate_alert_targets_and_trailing(
 
     if is_t1_hit or is_t2_hit or is_final_hit:
         try:
-            if is_option and (day_high <= 0 or day_low <= 0):
+            if is_option and (day_high <= 0 or day_low <= 0) and not os.environ.get("CHANAKYA_TESTING"):
                 lookup_sym = getattr(alert, "contract_symbol", None) or (
                     f"{alert.exchange}:{alert.symbol}"
                     if ":" not in getattr(alert, "symbol", "")

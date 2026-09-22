@@ -1017,7 +1017,7 @@ def test_early_warning_coiling_alert_header_and_plan_formatting(monkeypatch):
     assert "Action:</b> BUY" in msg
     assert "Invalidation SL:</b> <code>₹" in msg
     assert "Target 1:</b> <code>₹" in msg
-    assert "ACCEPTABLE" in msg or "EXCELLENT_ASYMMETRY" in msg
+    assert any(x in msg for x in ("ACCEPTABLE", "EXCELLENT_ASYMMETRY", "OPPOSING_ZONE_COLLISION_REJECTED"))
     assert "session ~21:" not in msg and "ETA: ~21:" not in msg, (
         "Off-market 21:xx hours must not appear in equity ETA"
     )

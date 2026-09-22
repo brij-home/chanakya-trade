@@ -38,6 +38,14 @@ def detect_gamma_blast(
       - Volume / OI Ratio >= 1.8x (massive intraday turnover vs accumulated open interest).
       - Spot price reclaiming or breaking away from intraday VWAP.
       - ATM & near-OTM strike proximity (within ±1.5% of spot).
+      - PDH/PDL Liquidity Sweep + Wick Rejection (institutional supply/demand OB reversal).
+
+    VWAP Gate Policy:
+      - CE: spot must be >= vwap * 0.998 (spot holding or above VWAP = bullish).
+      - PE: spot must be <= vwap * 1.008 (0.8% buffer — experts buy PEs at supply/OB rejection
+            BEFORE spot actually breaks down; hard reject was causing systematic PE misses).
+      - PDH Sweep bypass: if spot tagged day_high and rejected with a wick, the VWAP gate
+            is lifted for PE — structural reversal signal supersedes VWAP position.
     """
     if not chain or spot <= 0:
         return []
@@ -67,6 +75,23 @@ def detect_gamma_blast(
     pe_contracts = [c for c in chain if getattr(c, "option_type", "") == "PE"]
 
     effective_vwap = vwap if (vwap and vwap > 0) else spot
+
+    # ── PDH / PDL Liquidity Sweep Detection (Fix 3) ────────────────────────────
+    # Detects when spot has swept the day's high (for PE) or day's low (for CE)
+    # and rejected — the highest-conviction SMC reversal signal.
+    # sweep_pct: how close spot came to tagging the intraday extreme.
+    _pdh_sweep_active = bool(
+        day_high
+        and day_high > 0
+        and spot <= day_high  # spot has pulled back from the high
+        and spot >= (day_high * 0.997)  # within 0.3% of day_high = sweep territory
+    )
+    _pdl_sweep_active = bool(
+        day_low
+        and day_low > 0
+        and spot >= day_low  # spot has bounced off the low
+        and spot <= (day_low * 1.003)  # within 0.3% of day_low = sweep territory
+    )
 
     # ── Analyze CALL Gamma Blast (Bullish Upside Explosion) ───
     for c in ce_contracts:
@@ -182,15 +207,32 @@ def detect_gamma_blast(
             or volume >= (10000 if is_index else 800)
         )
         spot_above_vwap = spot >= (effective_vwap * 0.998)
+        # PDL sweep bypass: if spot tagged day_low and bounced, it's a structural CE trigger
+        # regardless of VWAP position (covers gap-fill bounce + demand OB scenarios)
+        if _pdl_sweep_active and not spot_above_vwap:
+            spot_above_vwap = True
+            logger.debug(
+                f"[GammaBlast CE] PDL sweep bypass activated for {underlying}: "
+                f"spot={spot:.1f} within 0.3% of day_low={day_low:.1f}"
+            )
+
+        # Opposing Day High collision & VWAP overextension filter for CE:
+        if effective_vwap > 0 and (spot - effective_vwap) / effective_vwap * 100 > 0.65:
+            continue  # Extended > 0.65% above VWAP: Climax exhaustion risk
+        if day_high and spot < day_high and day_low and ((day_high - day_low) / max(1.0, spot)) >= 0.003:
+            if (day_high - spot) / spot * 100 < 0.15:
+                continue  # Spot is colliding into day high resistance (< 0.15% headroom)
 
         if (is_oi_shedding or is_gamma_expansion) and is_high_turnover and spot_above_vwap:
             is_ignited = (
                 (vol_oi_ratio >= 2.0 and oi_chg_pct <= -15.0)
                 or (is_opening_drive and (vol_oi_ratio >= 0.50 or volume >= 8000))
-                or (day_high and spot >= day_high * 0.999)
+                or (pchange >= 18.0 and volume >= 12000)
             )
             stage = "IGNITED" if is_ignited else "EARLY_WARNING"
-            confidence = min(96, int(65 + (vol_oi_ratio * 7) + min(20, abs(oi_chg_pct) * 0.5)))
+            # PDL sweep elevates confidence: sweep+bounce is structurally stronger than plain volume surge
+            pdl_confidence_bonus = 5 if _pdl_sweep_active else 0
+            confidence = min(96, int(65 + (vol_oi_ratio * 7) + min(20, abs(oi_chg_pct) * 0.5) + pdl_confidence_bonus))
 
             exp_type = classify_expiry_type(exp_date, underlying)
 
@@ -208,14 +250,23 @@ def detect_gamma_blast(
                     spot=spot,
                     timeframe="INTRADAY",
                     exchange=opt_exchange,
-                    has_active_blast=is_ignited,
+                    has_active_blast=True,
                 )
 
-                if tp and not tp.is_asymmetry_viable:
+                # Fix 2: SMC Structural Bypass for is_asymmetry_viable (CE side)
+                # For PDL sweep + bounce, the demand OB is the asymmetric anchor — trade plan's
+                # equity-long calibration doesn't capture this reversal structure.
+                _ce_smc_bypass = _pdl_sweep_active and is_index and vol_oi_ratio >= 1.5
+                if tp and not tp.is_asymmetry_viable and not _ce_smc_bypass:
                     logger.debug(
                         f"[GammaBlast] Rejected {contract_sym}: Poor structural asymmetry ({tp.asymmetry_verdict})"
                     )
                     continue
+                elif tp and not tp.is_asymmetry_viable and _ce_smc_bypass:
+                    logger.debug(
+                        f"[GammaBlast CE] SMC PDL-sweep bypass: overriding asymmetry rejection for {contract_sym} "
+                        f"(spot={spot:.1f} near day_low={day_low})"
+                    )
 
                 mkt_status = get_market_status(opt_exchange)
                 lot_sz = get_lot_size(underlying)
@@ -335,21 +386,26 @@ def detect_gamma_blast(
             from market.options import audit_option_liquidity
             liq_audit = audit_option_liquidity(c, underlying=underlying, lot_size=lot_sz)
 
+            entry_min_ce = round(max(0.5, opt_ltp * 0.94), 1) if opt_ltp > 0 else spot
+            entry_max_ce = round(opt_ltp * 1.02, 1) if opt_ltp > 0 else spot
+            entry_range_ce = f"₹{entry_min_ce:,.1f} – ₹{entry_max_ce:,.1f}"
+            no_chase_ce = round(opt_ltp * 1.04, 1) if (opt_ltp and opt_ltp > 0) else round(spot * 1.004, 1)
+
             alerts.append(
                 AutoAlert(
-                    alert_id=f"aa-gamma-ce-{underlying}-{int(strike)}-{uuid.uuid4().hex[:6]}",
+                    alert_id=f"aa-gb-ce-{underlying}-{int(strike)}-{uuid.uuid4().hex[:6]}",
                     alert_type="GAMMA_BLAST",
                     stage=stage,
                     symbol=underlying,
                     exchange=opt_exchange,
                     direction="BULLISH",
                     headline=headline,
-                    summary=summary,
+                    summary=f"{summary} | OTE Entry: {entry_range_ce} | No Chase > ₹{no_chase_ce}",
                     ltp=opt_ltp or spot,
                     trigger_level=opt_ltp if (opt_ltp and opt_ltp > 0) else strike,
                     target_level=target_premium,
                     stop_loss=sl_premium,
-                    no_chase_boundary=round(opt_ltp * 1.06, 1) if (opt_ltp and opt_ltp > 0) else round(spot * 1.006, 1),
+                    no_chase_boundary=no_chase_ce,
                     strike=strike,
                     option_type="CE",
                     contract_symbol=contract_sym,
@@ -382,6 +438,10 @@ def detect_gamma_blast(
                         "runner_symbol": runner_strike_info["symbol"] if runner_strike_info else None,
                         "runner_ltp": runner_strike_info["ltp"] if runner_strike_info else None,
                         "runner_strike_info": runner_strike_info,
+                        # Fix 3: SMC structural context tags (used by whiplash guard downstream)
+                        "pdl_sweep": _pdl_sweep_active,
+                        "day_low": day_low,
+                        "day_high": day_high,
                     },
                     actionable_plan={
                         "action": "BUY CE",
@@ -393,7 +453,9 @@ def detect_gamma_blast(
                         "expiry_date": exp_date,
                         "expiry_type": exp_type,
                         "underlying_spot": f"₹{spot:,.1f}",
-                        "recommended_entry": f"₹{opt_ltp:,.2f}" if opt_ltp else "Market",
+                        "recommended_entry": f"₹{opt_ltp:,.2f} (OTE Pullback: {entry_range_ce})" if opt_ltp else "Market",
+                        "entry_range": entry_range_ce,
+                        "no_chase": f"DO NOT CHASE above ₹{no_chase_ce}",
                         "target_1": f"₹{target_premium:,.2f}",
                         "target": f"₹{target_premium:,.2f} ({t1_pct_str})",
                         "target_2": f"₹{t2_premium:,.2f}" if t2_premium else f"₹{round(target_premium * 1.6, 2):,.2f}",
@@ -526,16 +588,38 @@ def detect_gamma_blast(
             vol_oi_ratio >= (0.35 if is_opening_drive else 1.4)
             or volume >= (10000 if is_index else 800)
         )
-        spot_below_vwap = spot <= (effective_vwap * 1.002)
+        # Fix 1: Relaxed VWAP gate for PE (1.002 → 1.008).
+        # Market experts buy PEs at supply/OB resistance BEFORE spot breaks — the original hard gate
+        # systematically blocked valid setups where spot was 0.2–0.7% above VWAP at entry.
+        # 0.8% buffer allows supply-zone rejection entries while still filtering genuine uptrends.
+        _pe_vwap_multiplier = 1.008 if is_index else 1.004
+        spot_below_vwap = spot <= (effective_vwap * _pe_vwap_multiplier)
+        # Fix 1 (PDH sweep bypass): if spot swept the day_high and wicked back, lift the VWAP gate.
+        # This is the highest-conviction bearish SMC setup — institutional supply sweep + rejection.
+        if _pdh_sweep_active and not spot_below_vwap:
+            spot_below_vwap = True
+            logger.debug(
+                f"[GammaBlast PE] PDH sweep bypass activated for {underlying}: "
+                f"spot={spot:.1f} within 0.3% of day_high={day_high:.1f} — VWAP gate lifted"
+            )
+
+        # Opposing Day Low collision & VWAP overextension filter for PE:
+        if effective_vwap > 0 and (effective_vwap - spot) / effective_vwap * 100 > 0.65:
+            continue  # Extended > 0.65% below VWAP: Capitulation exhaustion risk
+        if day_low and spot > day_low and day_high and ((day_high - day_low) / max(1.0, spot)) >= 0.003:
+            if (spot - day_low) / spot * 100 < 0.15:
+                continue  # Spot is colliding into day low support (< 0.15% headroom)
 
         if (is_oi_shedding or is_gamma_expansion) and is_high_turnover and spot_below_vwap:
             is_ignited = (
                 (vol_oi_ratio >= 2.0 and oi_chg_pct <= -15.0)
                 or (is_opening_drive and (vol_oi_ratio >= 0.50 or volume >= 8000))
-                or (day_low and spot <= day_low * 1.001)
+                or (pchange >= 18.0 and volume >= 12000)
             )
             stage = "IGNITED" if is_ignited else "EARLY_WARNING"
-            confidence = min(96, int(65 + (vol_oi_ratio * 7) + min(20, abs(oi_chg_pct) * 0.5)))
+            # PDH sweep elevates confidence: institutional supply sweep + rejection is high-conviction
+            pdh_confidence_bonus = 5 if _pdh_sweep_active else 0
+            confidence = min(96, int(65 + (vol_oi_ratio * 7) + min(20, abs(oi_chg_pct) * 0.5) + pdh_confidence_bonus))
 
             exp_type = classify_expiry_type(exp_date, underlying)
 
@@ -553,14 +637,28 @@ def detect_gamma_blast(
                     spot=spot,
                     timeframe="INTRADAY",
                     exchange=opt_exchange,
-                    has_active_blast=is_ignited,
+                    has_active_blast=True,
                 )
 
-                if tp and not tp.is_asymmetry_viable:
+                # Fix 2: SMC Structural Bypass for is_asymmetry_viable (PE side).
+                # For index PE, bypass the equity-calibrated asymmetry check when:
+                #   (a) vol_oi_ratio >= 2.0 → extreme institutional unwind / panic covering
+                #   (b) PDH sweep → spot just tagged the day high and rejected (supply OB confirmation)
+                # Both are stronger structural signals than the trade_plan model's EMA-based viability.
+                _pe_smc_bypass = is_index and (
+                    (vol_oi_ratio >= 2.0)  # extreme OI unwind velocity
+                    or _pdh_sweep_active   # day_high sweep + wick rejection
+                )
+                if tp and not tp.is_asymmetry_viable and not _pe_smc_bypass:
                     logger.debug(
                         f"[GammaBlast] Rejected {contract_sym}: Poor structural asymmetry ({tp.asymmetry_verdict})"
                     )
                     continue
+                elif tp and not tp.is_asymmetry_viable and _pe_smc_bypass:
+                    logger.debug(
+                        f"[GammaBlast PE] SMC bypass: overriding asymmetry rejection for {contract_sym} "
+                        f"(vol_oi={vol_oi_ratio:.2f}, pdh_sweep={_pdh_sweep_active})"
+                    )
 
                 mkt_status = get_market_status(opt_exchange)
                 lot_sz = get_lot_size(underlying)
@@ -680,21 +778,26 @@ def detect_gamma_blast(
             from market.options import audit_option_liquidity
             liq_audit = audit_option_liquidity(c, underlying=underlying, lot_size=lot_sz)
 
+            entry_min_pe = round(max(0.5, opt_ltp * 0.94), 1) if opt_ltp > 0 else spot
+            entry_max_pe = round(opt_ltp * 1.02, 1) if opt_ltp > 0 else spot
+            entry_range_pe = f"₹{entry_min_pe:,.1f} – ₹{entry_max_pe:,.1f}"
+            no_chase_pe = round(opt_ltp * 1.04, 1) if (opt_ltp and opt_ltp > 0) else round(spot * 0.996, 1)
+
             alerts.append(
                 AutoAlert(
-                    alert_id=f"aa-gamma-pe-{underlying}-{int(strike)}-{uuid.uuid4().hex[:6]}",
+                    alert_id=f"aa-gb-pe-{underlying}-{int(strike)}-{uuid.uuid4().hex[:6]}",
                     alert_type="GAMMA_BLAST",
                     stage=stage,
                     symbol=underlying,
                     exchange=opt_exchange,
                     direction="BEARISH",
                     headline=headline,
-                    summary=summary,
+                    summary=f"{summary} | OTE Entry: {entry_range_pe} | No Chase > ₹{no_chase_pe}",
                     ltp=opt_ltp or spot,
                     trigger_level=opt_ltp if (opt_ltp and opt_ltp > 0) else strike,
                     target_level=target_premium,
                     stop_loss=sl_premium,
-                    no_chase_boundary=round(opt_ltp * 1.06, 1) if (opt_ltp and opt_ltp > 0) else round(spot * 0.994, 1),
+                    no_chase_boundary=no_chase_pe,
                     strike=strike,
                     option_type="PE",
                     contract_symbol=contract_sym,
@@ -725,6 +828,13 @@ def detect_gamma_blast(
                         "runner_symbol": runner_strike_info["symbol"] if runner_strike_info else None,
                         "runner_ltp": runner_strike_info["ltp"] if runner_strike_info else None,
                         "runner_strike_info": runner_strike_info,
+                        # Fix 3: SMC structural context tags (used by whiplash guard downstream)
+                        "pdh_sweep": _pdh_sweep_active,
+                        "pdl_sweep": _pdl_sweep_active,
+                        "day_high": day_high,
+                        "day_low": day_low,
+                        # CHoCH/MSS signal for whiplash guard — PDH sweep IS a structural reversal
+                        "choch": _pdh_sweep_active,
                     },
                     actionable_plan={
                         "action": "BUY PE",
@@ -736,7 +846,9 @@ def detect_gamma_blast(
                         "expiry_date": exp_date,
                         "expiry_type": exp_type,
                         "underlying_spot": f"₹{spot:,.1f}",
-                        "recommended_entry": f"₹{opt_ltp:,.2f}" if opt_ltp else "Market",
+                        "recommended_entry": f"₹{opt_ltp:,.2f} (OTE Pullback: {entry_range_pe})" if opt_ltp else "Market",
+                        "entry_range": entry_range_pe,
+                        "no_chase": f"DO NOT CHASE above ₹{no_chase_pe}",
                         "target_1": f"₹{target_premium:,.2f}",
                         "target": f"₹{target_premium:,.2f} ({t1_pct_str})",
                         "target_2": f"₹{t2_premium:,.2f}" if t2_premium else f"₹{round(target_premium * 1.6, 2):,.2f}",

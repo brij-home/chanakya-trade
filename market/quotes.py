@@ -22,9 +22,10 @@ from engine.observability import get_registry, new_correlation_id
 from market.data_events import classify_data_state, utc_now_iso
 
 _OPTION_PATTERN = re.compile(
-    r"^(?:NFO:|BFO:|NSE:|BSE:)?([A-Za-z&]+?)(?:20\d{6}|\d{2}[A-Z]{3}|\d{5}(?=\d{3,}))?\s*(\d{1,6}(?:\.\d+)?)\s*(CE|PE)$",
+    r"^(?:NFO:|BFO:|NSE:|BSE:)?([A-Za-z0-9_& -]+?)(?:20\d{6}|\d{2}[A-Z]{3}|\d{5}(?=\d{3,}))?\s*(\d{1,6}(?:\.\d+)?)\s*(CE|PE)$",
     re.IGNORECASE,
 )
+
 
 
 _FUT_PATTERN = re.compile(
@@ -301,9 +302,11 @@ def _yf_fallback_quotes(
                 i.startswith("NFO:")
                 or i.startswith("BFO:")
                 or _OPTION_PATTERN.match(i.split(":")[-1])
+                or _OPTION_PATTERN.match(i.split(":")[-1].replace("NIFTY 50", "NIFTY").replace("NIFTY BANK", "BANKNIFTY"))
                 or _FUT_PATTERN.match(i.split(":")[-1])
             )
         ]
+
         if not yf_eligible:
             return {}
 
@@ -396,9 +399,12 @@ def normalize_instrument(inst: str) -> str:
         return f"CDS:{upper}"
     if upper in _BSE_SYMBOLS:
         return f"BSE:{upper}"
-    if _OPTION_PATTERN.match(upper) or _FUT_PATTERN.match(upper):
+    # Standardize index names with spaces (e.g. NIFTY 50 -> NIFTY) before option matching
+    clean_deriv = upper.replace("NIFTY 50", "NIFTY").replace("NIFTY BANK", "BANKNIFTY")
+    if _OPTION_PATTERN.match(upper) or _OPTION_PATTERN.match(clean_deriv) or _FUT_PATTERN.match(upper):
         return f"NFO:{upper}"
     return f"NSE:{upper}"
+
 
 
 def get_quote(

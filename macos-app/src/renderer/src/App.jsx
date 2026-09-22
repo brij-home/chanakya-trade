@@ -11,6 +11,7 @@ import SettingsPanel from './components/Sidebar/SettingsPanel'
 import SetupScreen from './components/SetupScreen'
 import ActivityHUD from './components/Common/ActivityHUD'
 import ModeBanner from './components/Common/ModeBanner'
+import LiveTickerRibbon from './components/Common/LiveTickerRibbon'
 import ToastContainer from './components/Toast/ToastContainer'
 import HotkeyPanel from './components/UI/HotkeyPanel'
 import ErrorBoundary from './components/ErrorBoundary'
@@ -578,11 +579,24 @@ export default function App() {
         </div>
       </div>
 
-      {/* ── Tier 2: Context Bar (view-specific) ─────────────────────────── */}
+      {/* ── Tier 2: Persistent Multi-Asset Live Ticker Ribbon ─────────── */}
+      <div className="px-2 py-0.5 bg-surface border-b border-border/30 flex-shrink-0 overflow-hidden">
+        <LiveTickerRibbon
+          selectedSymbol={selectedSymbol || ctxSymbol}
+          onSelectSymbol={(sym) => {
+            handleSymbolChange(sym)
+            if (activeView !== 'terminal' && activeView !== 'charts') {
+              setActiveView('terminal')
+            }
+          }}
+        />
+      </div>
+
+      {/* ── Tier 3: Context Bar (view-specific) ─────────────────────────── */}
       {showContextBar && (
         <ContextBar
-          selectedSymbol={ctxSymbol}
-          onSymbolChange={setCtxSymbol}
+          selectedSymbol={selectedSymbol || ctxSymbol}
+          onSymbolChange={handleSymbolChange}
           timeframe={ctxTimeframe}
           onTimeframeChange={setCtxTimeframe}
           layoutMode={ctxLayout}

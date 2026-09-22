@@ -534,7 +534,47 @@ class EODReportGenerator:
             r_mult = gain_pts / risk if risk > 0 else 0.0
 
             # Determine outcome
-            if any(m in ("T1", "T2", "T3") for m in milestones) or target_status in (
+            if is_inv:
+                is_corrupt = any(
+                    k in inv_reason.lower()
+                    for k in ("corrupt", "phantom", "uncalibrated", "mismatch", "false alert", "unit scale")
+                )
+                if is_corrupt:
+                    outcome = "INVALIDATED_CORRUPTED"
+                    # Exclude from win/loss counts as data corruption artifact
+                else:
+                    outcome = "LOSS_STOPPED"
+                    loss_count += 1
+                    total_realized_r -= 1.0
+                    stopped_setups.append(
+                        TradeOutcomeSummary(
+                            alert_id=a.get("alert_id", ""),
+                            symbol=symbol,
+                            segment=seg,
+                            direction=direction,
+                            entry_level=entry,
+                            stop_loss=sl,
+                            target_level=target,
+                            peak_gain_pct=gain_pct,
+                            realized_r=-1.0,
+                            milestones=milestones,
+                            outcome=outcome,
+                            headline=a.get("headline", ""),
+                            invalidation_reason=inv_reason,
+                        )
+                    )
+
+                    # Classify RCA failure category
+                    lower_reason = inv_reason.lower()
+                    if "theta" in lower_reason or "stagnan" in lower_reason:
+                        rca_buckets["THETA_STAGNATION"].append(symbol)
+                    elif "wick" in lower_reason or "20-sma" in lower_reason or "noise" in lower_reason or "option premium" in lower_reason:
+                        rca_buckets["PREMATURE_SL"].append(symbol)
+                    elif gain_pct >= 12.0 or "target" in lower_reason:
+                        rca_buckets["MISSED_T1_REVERSAL"].append(symbol)
+                    else:
+                        rca_buckets["STRUCTURAL_INVALIDATION"].append(symbol)
+            elif any(m in ("T1", "T2", "T3") for m in milestones) or target_status in (
                 "T1_ACHIEVED",
                 "T2_ACHIEVED",
                 "TARGET_ACHIEVED",
@@ -580,38 +620,6 @@ class EODReportGenerator:
                         headline=a.get("headline", ""),
                     )
                 )
-            elif is_inv:
-                outcome = "LOSS_STOPPED"
-                loss_count += 1
-                total_realized_r -= 1.0
-                stopped_setups.append(
-                    TradeOutcomeSummary(
-                        alert_id=a.get("alert_id", ""),
-                        symbol=symbol,
-                        segment=seg,
-                        direction=direction,
-                        entry_level=entry,
-                        stop_loss=sl,
-                        target_level=target,
-                        peak_gain_pct=gain_pct,
-                        realized_r=-1.0,
-                        milestones=milestones,
-                        outcome=outcome,
-                        headline=a.get("headline", ""),
-                        invalidation_reason=inv_reason,
-                    )
-                )
-
-                # Classify RCA failure category
-                lower_reason = inv_reason.lower()
-                if "theta" in lower_reason or "stagnan" in lower_reason:
-                    rca_buckets["THETA_STAGNATION"].append(symbol)
-                elif "wick" in lower_reason or "20-sma" in lower_reason or "noise" in lower_reason or "option premium" in lower_reason:
-                    rca_buckets["PREMATURE_SL"].append(symbol)
-                elif gain_pct >= 12.0 or "target" in lower_reason:
-                    rca_buckets["MISSED_T1_REVERSAL"].append(symbol)
-                else:
-                    rca_buckets["STRUCTURAL_INVALIDATION"].append(symbol)
             else:
                 outcome = "IN_FLIGHT"
                 in_flight_count += 1
