@@ -111,6 +111,7 @@ class ExplosiveMoveFingerprint:
     key_catalyst: str
     fingerprint_score: int = 85
     coiling_pivot_high: float = 0.0
+    sepa_qualified: bool = False
     created_at: str = ""
 
     def __post_init__(self) -> None:
@@ -416,28 +417,67 @@ class PatternLearningEngine:
         """
         Dynamically adjusts factor weights based on Discriminative Signal-to-Noise Ratio (SNR)
         from daily mover autopsies.
-        Factors that show high separation (Delta > 0.20) against control group receive weight boosts.
+
+        Factors with high discriminative SNR (separating gainers from control) receive proportional
+        weight boosts. Low-SNR factors (noise) receive gradual reductions.
+        Weights are normalized to sum to 100 after each update to maintain scoring coherence.
+
+        SNR table keys (from mover_autopsy.py):
+          volume_dry_up, squeeze_compression, gamma_short_squeeze, sector_tailwind,
+          trend_score, smc_score, rvol_20d, forensic_safe
         """
         if not snr_table:
             return
 
+        # Full factor mapping: autopsy SNR key -> internal weight key
         mapping = {
-            "volume_dry_up": "volume_dry_up",
+            "volume_dry_up":       "volume_dry_up",
             "squeeze_compression": "squeeze_coiling",
             "gamma_short_squeeze": "ce_unwind",
-            "sector_tailwind": "sector_tailwind",
+            "sector_tailwind":     "sector_tailwind",
+            "trend_score":         "trend_alignment",
+            "smc_score":           "ob_distance",
+            "rvol_20d":            "volume_dry_up",  # maps to same — RVOL surge boosts volume weight
+            "forensic_safe":       "sector_tailwind", # governance quality → sector quality proxy
         }
 
+        weights_before = dict(self._factor_weights)
+
         for snr_key, weight_key in mapping.items():
-            if snr_key in snr_table and weight_key in self._factor_weights:
-                delta = snr_table[snr_key]
-                if delta >= 0.25:
-                    self._factor_weights[weight_key] = min(35, self._factor_weights[weight_key] + 5)
-                elif delta <= 0.05:
-                    self._factor_weights[weight_key] = max(10, self._factor_weights[weight_key] - 3)
+            if snr_key not in snr_table:
+                continue
+            if weight_key not in self._factor_weights:
+                continue
+
+            snr_val = snr_table[snr_key]
+            current = self._factor_weights[weight_key]
+
+            if snr_val >= 0.50:
+                # Very high discrimination — significant boost (proportional)
+                boost = min(8, max(4, int(snr_val * 6)))
+                self._factor_weights[weight_key] = min(40, current + boost)
+            elif snr_val >= 0.25:
+                # Moderate discrimination — small boost
+                self._factor_weights[weight_key] = min(35, current + 3)
+            elif snr_val <= 0.05:
+                # Near-noise — gentle reduction
+                self._factor_weights[weight_key] = max(8, current - 2)
+            # 0.05 < snr_val < 0.25: no change (stable zone)
+
+        # Normalize so all weights sum to 100 (maintains scoring invariant)
+        total = sum(self._factor_weights.values())
+        if total > 0 and abs(total - 100) > 5:
+            scale = 100.0 / total
+            self._factor_weights = {
+                k: max(5, round(v * scale)) for k, v in self._factor_weights.items()
+            }
 
         logger.info(
-            f"[PatternLearningEngine] Recalibrated weights from SNR: {self._factor_weights}"
+            "[PatternLearningEngine] SNR recalibration complete. "
+            "Δweights: %s → %s",
+            {k: f"{weights_before.get(k,0)}→{v}" for k, v in self._factor_weights.items()
+             if weights_before.get(k) != v},
+            {k: v for k, v in sorted(self._factor_weights.items(), key=lambda x: -x[1])[:5]},
         )
 
     # ── Invalidation Post-Mortem & Retrospective Learning ───
@@ -1095,6 +1135,16 @@ class PatternLearningEngine:
             round(float(np.max(highs[-5:])), 2) if len(highs) >= 5 else round(float(closes[-1]), 2)
         )
 
+        # 7. Minervini SEPA Fundamentals
+        sepa_qual = False
+        try:
+            from analysis.fundamental import analyse
+
+            snap = analyse(clean_sym, fast=True)
+            sepa_qual = bool(getattr(snap, "sepa_qualified", False))
+        except Exception:
+            pass
+
         return {
             "symbol": clean_sym,
             "prior_vol_ratio": prior_vol_ratio,
@@ -1103,6 +1153,7 @@ class PatternLearningEngine:
             "ob_distance_pct": ob_dist_pct,
             "rrg_quadrant": rrg_quad,
             "coiling_pivot_high": pivot_high,
+            "sepa_qualified": sepa_qual,
         }
 
     # ── Learning from a Validated Move ───────────────────────
@@ -1144,6 +1195,7 @@ class PatternLearningEngine:
             key_catalyst=catalyst or "Institutional Volatility Expansion",
             fingerprint_score=min(98, int(75 + min(15, move_pct * 2))),
             coiling_pivot_high=features.get("coiling_pivot_high", 0.0),
+            sepa_qualified=features.get("sepa_qualified", False),
         )
 
         # Avoid duplicates on same symbol and date
@@ -1383,13 +1435,37 @@ class PatternLearningEngine:
             score += int(w_rrg * 0.6)
             matched_factors.append("Parent sector in Improving RRG quadrant (Emerging rotation)")
 
+        # Factor F: Minervini SEPA Fundamentals
+        if features.get("sepa_qualified"):
+            score += 10
+            matched_factors.append(
+                "Minervini SEPA Qualified: ≥25% YoY EPS acceleration (Institutional leadership growth)"
+            )
+
         score = max(5, min(98, score))
         is_candidate = score >= 70
 
-        # Find closest archetype from memory
+        # Find closest archetype from memory with feature similarity
         best_match = None
         if self._fingerprints:
-            best_match = f"{self._fingerprints[0].symbol} ({self._fingerprints[0].date})"
+            best_sim = -1
+            cand_sepa = features.get("sepa_qualified", False)
+            cand_rrg = features.get("rrg_quadrant", "")
+            for fp in self._fingerprints:
+                sim = 0
+                if cand_sepa and getattr(fp, "sepa_qualified", False):
+                    sim += 20
+                if cand_rrg == getattr(fp, "rrg_quadrant", ""):
+                    sim += 15
+                if abs(features.get("prior_vol_ratio", 1.0) - getattr(fp, "prior_vol_ratio", 1.0)) < 0.2:
+                    sim += 15
+                if abs(sq_bars - getattr(fp, "squeeze_bars", 0)) <= 1:
+                    sim += 10
+                if sim > best_sim:
+                    best_sim = sim
+                    best_match = f"{fp.symbol} ({fp.date})"
+            if not best_match:
+                best_match = f"{self._fingerprints[0].symbol} ({self._fingerprints[0].date})"
 
         if is_candidate:
             rec_action = "BUY_COILING_ZONE" if sq_bars >= 2 else "BUY_EARLY_BREAKOUT"

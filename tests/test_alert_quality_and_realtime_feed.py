@@ -162,6 +162,7 @@ def test_orb_stabilization_requires_institutional_volume_0930_to_0945(tmp_path, 
         )
     }
     monkeypatch.setattr("market.quotes.get_quote", lambda *args, **kwargs: quotes_strong)
+    monkeypatch.setattr("analysis.sector_rotation.get_stock_tailwind", lambda *a, **kw: None)
     sparks_strong = eng.scan_intraday_mover_sparks()
     spark_strong = next((s for s in sparks_strong if "MAZDOCK" in s.symbol), None)
     assert spark_strong is not None

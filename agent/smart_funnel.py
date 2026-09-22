@@ -448,7 +448,12 @@ class SmartFunnel:
 
     # ── Stage 1: Fast Quantitative Pre-Filter ─────────────────────────────────
 
-    def evaluate_stock_quant(self, symbol: str, exchange: str = "NSE") -> PreFilterReport:
+    def evaluate_stock_quant(
+        self,
+        symbol: str,
+        exchange: str = "NSE",
+        rrg_matrix: Optional[dict[str, Any]] = None,
+    ) -> PreFilterReport:
         """
         Pure Python quantitative rule evaluation (0 LLM tokens, ~0.2s).
         Scores stock from 0-100 and records an unambiguous why/why-not rationale.
@@ -507,12 +512,14 @@ class SmartFunnel:
         dma200 = float(tech.get("sma200") or tech.get("dma200") or tech.get("ema200") or 0.0)
         macd_hist = float(tech.get("macd_hist") or tech.get("macd_histogram") or 0.0)
         vol_ratio = float(tech.get("volume_ratio") or tech.get("vol_ratio") or 1.0)
+        week52_high = float(tech.get("week52_high") or tech.get("52w_high") or 0.0)
 
         pe = float(fund.get("pe") or fund.get("pe_ratio") or 0.0)
         roe = float(fund.get("roe") or 0.0)
         de = float(fund.get("debt_to_equity") or fund.get("debt_equity") or 0.0)
         rev_growth = float(fund.get("revenue_growth_3y") or fund.get("rev_growth") or 0.0)
         fcf = float(fund.get("free_cash_flow") or fund.get("fcf") or 0.0)
+        pledged_pct = float(fund.get("pledged_pct") or fund.get("pledging") or 0.0)
 
         metrics = {
             "ltp": ltp,
@@ -522,12 +529,66 @@ class SmartFunnel:
             "dma200": dma200,
             "macd_hist": macd_hist,
             "vol_ratio": vol_ratio,
+            "week52_high": week52_high,
             "pe": pe,
             "roe": roe,
             "de": de,
             "rev_growth": rev_growth,
             "fcf": fcf,
+            "pledged_pct": pledged_pct,
         }
+
+        # ── STAGE-1 HARD GATES (0 tokens, immediate kill) ──────────────────────
+        # These eliminate Stage 3/4 distribution stocks and fundamental landmines
+        # BEFORE they ever consume AI debate tokens.
+        if exchange.upper() != "CRYPTO" and not os.environ.get("CHANAKYA_TESTING"):
+            # Gate A: Weinstein Stage 3/4 — distribution/markdown stocks are NEVER valid entries
+            try:
+                from engine.eod_store import get_cached_ohlcv
+                from analysis.multibagger import classify_weinstein_stage
+                _df_gate = get_cached_ohlcv(symbol.upper().replace(".NS", "").replace("NSE:", ""), days=300)
+                if _df_gate is not None and len(_df_gate) >= 50:
+                    _ws, _ = classify_weinstein_stage(_df_gate)
+                    if _ws in ("STAGE_3_DISTRIBUTION", "STAGE_4_MARKDOWN"):
+                        return PreFilterReport(
+                            symbol=symbol,
+                            exchange=exchange,
+                            score=15.0,
+                            qualified=False,
+                            status_label="HARD_KILL",
+                            rejection_reason=f"Weinstein {_ws} — distribution/markdown phase. Institutional exits active. Zero debate tokens spent.",
+                            metrics=metrics,
+                        )
+                    metrics["weinstein_stage"] = _ws
+            except Exception:
+                pass
+
+            # Gate B: Minervini 52W proximity — stock >40% below 52W high is a Stage 4 laggard
+            if week52_high > 0 and ltp > 0:
+                dist_from_52w_high_pct = ((week52_high - ltp) / week52_high) * 100.0
+                metrics["dist_from_52w_high_pct"] = round(dist_from_52w_high_pct, 1)
+                if dist_from_52w_high_pct > 42.0:
+                    return PreFilterReport(
+                        symbol=symbol,
+                        exchange=exchange,
+                        score=20.0,
+                        qualified=False,
+                        status_label="HARD_KILL",
+                        rejection_reason=f"Price is {dist_from_52w_high_pct:.0f}% below 52W high (₹{week52_high:.0f}) — Minervini Stage 4 laggard. Leaders stay within 15-25% of highs.",
+                        metrics=metrics,
+                    )
+
+            # Gate C: Promoter pledging >30% — fundamental landmine regardless of technicals
+            if pledged_pct > 30.0:
+                return PreFilterReport(
+                    symbol=symbol,
+                    exchange=exchange,
+                    score=25.0,
+                    qualified=False,
+                    status_label="HARD_KILL",
+                    rejection_reason=f"Promoter pledging {pledged_pct:.0f}% > 30% threshold — structural governance risk. Forced sale risk in corrections.",
+                    metrics=metrics,
+                )
 
         # Scoring & Filter Evaluation
         score = 50.0
@@ -630,6 +691,15 @@ class SmartFunnel:
             if pe > 95.0:
                 score -= 15.0
                 rejection_flags.append(f"Extreme valuation multiple (P/E {pe:.1f}x)")
+
+            if fund.get("sepa_qualified"):
+                score += 10.0
+                positive_flags.append(
+                    f"Minervini SEPA qualified (Q1 EPS {fund.get('eps_q1_growth', 0):.0f}% YoY accelerating)"
+                )
+            elif fund.get("eps_acceleration") is not None and fund.get("eps_acceleration", 0) < -15.0:
+                score -= 10.0
+                rejection_flags.append(f"Severe EPS deceleration ({fund.get('eps_acceleration', 0):+.0f}pp)")
         else:
             if vol_ratio >= 1.0:
                 score += 10.0
@@ -640,7 +710,7 @@ class SmartFunnel:
             try:
                 from analysis.sector_rotation import get_stock_sector_alignment
 
-                sec_info = get_stock_sector_alignment(symbol)
+                sec_info = get_stock_sector_alignment(symbol, rrg_matrix=rrg_matrix)
                 quad = sec_info.get("quadrant")
                 if quad == "LEADING":
                     score += 5.0
@@ -650,6 +720,24 @@ class SmartFunnel:
                     positive_flags.append(f"Sector {sec_info.get('sector')} is IMPROVING momentum")
                 elif quad == "LAGGING":
                     score -= 5.0
+            except Exception:
+                pass
+
+            # ── Market Breadth Gate ──
+            try:
+                from market.sentiment import get_market_breadth
+
+                breadth = get_market_breadth()
+                ad_ratio = getattr(breadth, "ad_ratio", None)
+                if isinstance(breadth, dict):
+                    ad_ratio = breadth.get("ad_ratio")
+                if ad_ratio is not None and ad_ratio > 0:
+                    if ad_ratio < 0.35:
+                        score -= 15.0
+                        rejection_flags.append(f"Broad market breadth deterioration (A/D ratio {ad_ratio:.2f} < 0.35)")
+                    elif ad_ratio >= 1.8:
+                        score += 5.0
+                        positive_flags.append(f"Broad market tailwind (A/D ratio {ad_ratio:.2f})")
             except Exception:
                 pass
 
@@ -694,10 +782,38 @@ class SmartFunnel:
         max_workers: int = 8,
     ) -> list[PreFilterReport]:
         """Run parallel pure-Python quantitative pre-filtering across all symbols."""
+        # 1. Batch pre-fetch live quotes for all symbols upfront in ONE bulk call.
+        # This populates the in-memory quote cache (_QUOTE_CACHE) so subsequent thread evaluations
+        # hit cache in 0.001ms without redundant REST API roundtrips.
+        try:
+            from market.quotes import get_quote
+
+            batch_keys = [f"{exchange}:{s.strip()}" for s in symbols]
+            get_quote(batch_keys)
+        except Exception:
+            pass
+
+        # 2. Batch pre-fetch market breadth and sector RRG matrix once for the entire batch
+        rrg_matrix = None
+        if exchange.upper() != "CRYPTO" and not os.environ.get("CHANAKYA_TESTING"):
+            try:
+                from market.sentiment import get_market_breadth
+
+                get_market_breadth()
+            except Exception:
+                pass
+            try:
+                from analysis.sector_rotation import get_sector_rrg_matrix
+
+                rrg_matrix = {p.sector: p for p in get_sector_rrg_matrix()}
+            except Exception:
+                pass
+
         reports: list[PreFilterReport] = []
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
             future_to_sym = {
-                executor.submit(self.evaluate_stock_quant, sym, exchange): sym for sym in symbols
+                executor.submit(self.evaluate_stock_quant, sym, exchange, rrg_matrix): sym
+                for sym in symbols
             }
             for future in concurrent.futures.as_completed(future_to_sym):
                 try:

@@ -316,7 +316,7 @@ class AutoAlert:
                 or ("PYTEST_CURRENT_TEST" in os.environ)
                 or (self.environment == "TEST")
             )
-            if th == "INTRADAY" and not is_test_env:
+            if th == "INTRADAY" and (not is_test_env or getattr(self, "_force_test_expiry", False)):
                 has_future_expiry = False
                 if self.expiry_date:
                     for fmt in ("%Y-%m-%d", "%d-%b-%Y", "%d-%m-%Y"):

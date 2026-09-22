@@ -852,11 +852,72 @@ def _score_max_pain_proximity(
 # ── AXIS 5: TIMING & FLOW ─────────────────────────────────────────────────────
 
 
-def _score_sector_rotation(underlying: str = "NIFTY") -> FactorScore:
+def _score_sector_rotation(underlying: str = "NIFTY", symbol: str = "") -> FactorScore:
     """
     Factor 10: Sector Rotation Momentum (RRG Quadrant).
+
+    Enhanced with:
+    - Stock-specific sector lookup via get_stock_tailwind (not just index mapping)
+    - rotation_velocity from 12-point trail: rewards early IMPROVING + penalizes
+      decelerating WEAKENING sectors
     """
     try:
+        # Try stock-specific sector first (most accurate for individual equities)
+        sector_point = None
+        rrg_data = []
+        stock_tailwind = None
+
+        if symbol:
+            try:
+                from analysis.sector_rotation import get_stock_tailwind
+                stock_tailwind = get_stock_tailwind(symbol.upper().replace("NSE:", "").replace(".NS", ""))
+                if stock_tailwind and stock_tailwind.quadrant and stock_tailwind.quadrant != "UNAVAILABLE":
+                    # Found stock-specific sector RRG — highest accuracy path
+                    quad = stock_tailwind.quadrant
+                    sec_name = stock_tailwind.sector or symbol
+                    tailwind_score = stock_tailwind.tailwind_score
+                    # Get velocity from the tailwind if available
+                    rotation_velocity = getattr(stock_tailwind, "rotation_velocity", None)
+
+                    if quad == "LEADING":
+                        vel_boost = 1 if rotation_velocity and rotation_velocity > 0.1 else 0
+                        score = min(10, 9 + vel_boost)
+                        detail = f"{sec_name}: LEADING (tailwind={tailwind_score}/100)"
+                        if vel_boost:
+                            detail += " ↑ accelerating RS-Momentum"
+                        signal = "BULLISH"
+                    elif quad == "IMPROVING":
+                        if rotation_velocity is not None and rotation_velocity > 0.08:
+                            # Accelerating into leadership — early entry ideal
+                            score, signal = 8, "BULLISH"
+                            detail = f"{sec_name}: IMPROVING ↑ accel (velocity={rotation_velocity:.2f}) — best early entry"
+                        elif rotation_velocity is not None and rotation_velocity < -0.05:
+                            # Stalling before entering leading — risk of reverting to weakening
+                            score, signal = 5, "NEUTRAL"
+                            detail = f"{sec_name}: IMPROVING but decelerating (vel={rotation_velocity:.2f}) — watch"
+                        else:
+                            score, signal = 7, "BULLISH"
+                            detail = f"{sec_name}: IMPROVING → entering leadership"
+                    elif quad == "WEAKENING":
+                        score, signal = 4, "NEUTRAL"
+                        detail = f"{sec_name}: WEAKENING — momentum fading"
+                    else:
+                        score, signal = 2, "BEARISH"
+                        detail = f"{sec_name}: LAGGING — underperforming benchmark"
+
+                    return FactorScore(
+                        factor_id="sector_rotation",
+                        label="Sector Rotation Momentum (RRG)",
+                        score=max(0, min(10, score)),
+                        signal=signal,
+                        detail=detail,
+                        raw_value=float(tailwind_score),
+                        axis="TIMING",
+                    )
+            except Exception:
+                pass
+
+        # Fallback: index-to-sector mapping for index options/derivatives
         sector_map = {
             "BANKNIFTY": "BANK",
             "BANKBEES": "BANK",
@@ -942,6 +1003,10 @@ def _score_sector_rotation(underlying: str = "NIFTY") -> FactorScore:
             detail="Sector rotation data temporarily unavailable",
             axis="TIMING",
         )
+
+
+
+
 
 
 def _score_event_calendar() -> FactorScore:

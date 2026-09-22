@@ -238,7 +238,24 @@ def resolve_recommended_option_contract(
                 "🎯 NEXT-MONTH ROLLOVER (Bypasses SEBI physical delivery margin surge & theta collapse)"
             )
         elif available_expiries:
-            target_expiry = available_expiries[0]
+            if is_positional:
+                # Positional swing on stock F&O: require at least 7 DTE to avoid rapid theta bleed
+                valid_stock_runways = [
+                    e
+                    for e in available_expiries
+                    if _parse_expiry_date(e) and (_parse_expiry_date(e) - now_d).days >= 7
+                ]
+                if valid_stock_runways:
+                    target_expiry = valid_stock_runways[0]
+                    if target_expiry != available_expiries[0]:
+                        is_next_month_routed = True
+                        derivative_safeguard = (
+                            "🛡️ STOCK SWING RUNWAY (Selected DTE >= 7 to protect multi-day swing from theta bleed)"
+                        )
+                else:
+                    target_expiry = available_expiries[0]
+            else:
+                target_expiry = available_expiries[0]
     else:
         # Index F&O: Cash Settled
         if is_positional and available_expiries:
@@ -591,7 +608,7 @@ class AsymmetricOpportunityRadar:
         if df is None or len(df) < 25:
             from market.history import get_ohlcv
 
-            df = get_ohlcv(clean_sym, exchange="NSE", interval="day", days=90)
+            df = get_ohlcv(clean_sym, exchange="NSE", interval="day", days=250)
         if df is None or len(df) < 25:
             return None
 
@@ -605,6 +622,11 @@ class AsymmetricOpportunityRadar:
         close_series = pd.Series(closes)
         ema10 = close_series.ewm(span=10, adjust=False).mean().values
         sma50 = close_series.rolling(window=min(50, len(closes))).mean().values
+        sma200 = (
+            close_series.rolling(window=min(200, len(closes))).mean().values
+            if len(closes) >= 150
+            else None
+        )
 
         cur_close = closes[-1]
         cur_vol = volumes[-1]
@@ -613,6 +635,10 @@ class AsymmetricOpportunityRadar:
 
         # 1. Base Alignment: Close above or within 2% of 50-SMA, uptrend intact
         if cur_close < sma50[-1] * 0.98:
+            return None
+
+        # Minervini Rule #1: Price must not be deep below 200-SMA in markdown trend
+        if sma200 is not None and cur_close < sma200[-1] * 0.98:
             return None
 
         # Proximity to 10-EMA or 50-SMA (Inside base, not extended > 4%)
@@ -673,6 +699,19 @@ class AsymmetricOpportunityRadar:
         seg = classify_symbol_segment(clean_sym)
         if seg == "NON_FNO" and turnover_cr < 10.0:
             return None  # Strict anti-trap liquidity gate
+
+        # Sector Tailwind & Intraday Pressure Guard
+        try:
+            from analysis.sector_rotation import get_stock_tailwind
+
+            sec_tailwind = get_stock_tailwind(clean_sym)
+            if sec_tailwind:
+                if getattr(sec_tailwind, "intraday_alignment", "") == "SEVERE_INTRADAY_HEADWIND":
+                    return None  # Drop setup when sector is under severe intraday dump
+                if getattr(sec_tailwind, "quadrant", "") == "LAGGING" and (cur_vol / max_down_vol) < 2.0:
+                    return None  # Drop lagging sector unless volume is extraordinarily high (>2.0x)
+        except Exception:
+            pass
 
         score = min(96, int(80 + (cur_vol / max_down_vol) * 5))
 

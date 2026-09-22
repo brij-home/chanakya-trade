@@ -1,16 +1,15 @@
 """
 engine/signal_ensemble.py
 ─────────────────────────
-Weighted multi-strategy signal ensemble (#167).
+Weighted multi-strategy signal ensemble (#167) with regime-adaptive weighting.
 
 Five strategies vote on direction; final signal = weighted majority.
 
-Strategy weights:
-  trend       25% — EMA-20/50 crossover + ADX > 20 confirmation
-  mean_rev    20% — RSI extremes (30/70) + Bollinger Band touch
-  momentum    25% — 1M / 3M / 6M return momentum (weighted blend)
-  volatility  15% — ATR regime: low vol leans bullish, high vol caution
-  statistical 15% — Hurst exponent: trending vs mean-reverting regime
+Strategy weights adapt to VIX regime (recalibrated at each call):
+  VIX < 15  (calm/trending): trend 30%, momentum 30%, mean_rev 15%, volatility 15%, statistical 10%
+  VIX 15-22 (normal):        trend 25%, momentum 25%, mean_rev 20%, volatility 15%, statistical 15%
+  VIX 22-28 (elevated):      trend 20%, momentum 15%, mean_rev 20%, volatility 25%, statistical 20%
+  VIX > 28  (extreme):       trend 15%, momentum 10%, mean_rev 25%, volatility 30%, statistical 20%
 
 Usage:
     from engine.signal_ensemble import ensemble_signal
@@ -31,9 +30,10 @@ import numpy as np
 import pandas as pd
 
 
-# ── Strategy weights ─────────────────────────────────────────────
+# ── Strategy weights (regime-adaptive) ──────────────────────
 
 
+# Default balanced weights (VIX 15-22 normal regime)
 STRATEGY_WEIGHTS: dict[str, float] = {
     "trend": 0.25,
     "mean_rev": 0.20,
@@ -41,6 +41,49 @@ STRATEGY_WEIGHTS: dict[str, float] = {
     "volatility": 0.15,
     "statistical": 0.15,
 }
+
+
+def get_regime_weights(vix: Optional[float] = None) -> dict[str, float]:
+    """
+    Return VIX regime-adaptive strategy weights.
+
+    In calm trending markets, trend + momentum are most predictive.
+    In volatile/extreme markets, volatility + statistical + mean-reversion dominate.
+
+    Weight sets are normalized to sum to 1.0.
+    Falls back to balanced defaults if VIX is unavailable.
+    """
+    if vix is None:
+        try:
+            from market.indices import get_vix
+            import os
+            if not os.environ.get("CHANAKYA_TESTING"):
+                raw_vix = get_vix()
+                if isinstance(raw_vix, (int, float)):
+                    vix = float(raw_vix)
+                elif hasattr(raw_vix, "ltp"):
+                    vix = float(raw_vix.ltp)
+                elif isinstance(raw_vix, dict):
+                    vix = float(raw_vix.get("ltp") or raw_vix.get("value") or 0)
+        except Exception:
+            pass
+
+    if vix is None or vix <= 0:
+        return dict(STRATEGY_WEIGHTS)  # Return copy of defaults
+
+    if vix < 15:
+        # Calm/trending regime: trend + momentum dominate
+        return {"trend": 0.30, "momentum": 0.30, "mean_rev": 0.15, "volatility": 0.15, "statistical": 0.10}
+    elif vix < 22:
+        # Normal regime: balanced (default)
+        return dict(STRATEGY_WEIGHTS)
+    elif vix < 28:
+        # Elevated volatility: shift to volatility + statistical, reduce trend
+        return {"trend": 0.20, "momentum": 0.15, "mean_rev": 0.20, "volatility": 0.25, "statistical": 0.20}
+    else:
+        # Extreme VIX (tail risk): mean reversion + volatility dominant, momentum unreliable
+        return {"trend": 0.15, "momentum": 0.10, "mean_rev": 0.25, "volatility": 0.30, "statistical": 0.20}
+
 
 _SIGNAL_LABELS = {1: "BULLISH", -1: "BEARISH", 0: "NEUTRAL"}
 
@@ -441,6 +484,38 @@ def ensemble_signal(df: pd.DataFrame) -> EnsembleSignal:
         adx_val = round(float(adx_series.iloc[-1]), 1)
     except Exception:
         pass
+
+    # ── Regime-adaptive weights (reads live VIX; ~0ms with in-process cache) ─────
+    regime_weights = get_regime_weights()
+    regime_label = "NORMAL"
+    _vix_hint: Optional[float] = None
+    try:
+        import os
+        if not os.environ.get("CHANAKYA_TESTING"):
+            from market.indices import get_vix
+            _raw = get_vix()
+            if isinstance(_raw, (int, float)):
+                _vix_hint = float(_raw)
+            elif hasattr(_raw, "ltp"):
+                _vix_hint = float(_raw.ltp)
+            if _vix_hint:
+                regime_label = (
+                    "CALM" if _vix_hint < 15 else
+                    "NORMAL" if _vix_hint < 22 else
+                    "ELEVATED" if _vix_hint < 28 else
+                    "EXTREME"
+                )
+    except Exception:
+        pass
+
+    # Apply regime-adaptive weights to each vote
+    trend_vote.weight = regime_weights.get("trend", STRATEGY_WEIGHTS["trend"])
+    mean_rev_vote.weight = regime_weights.get("mean_rev", STRATEGY_WEIGHTS["mean_rev"])
+    momentum_vote.weight = regime_weights.get("momentum", STRATEGY_WEIGHTS["momentum"])
+    vol_vote.weight = regime_weights.get("volatility", STRATEGY_WEIGHTS["volatility"])
+    stat_vote.weight = regime_weights.get("statistical", STRATEGY_WEIGHTS["statistical"])
+    if _vix_hint:
+        trend_vote.detail += f" [VIX {_vix_hint:.1f} — {regime_label} weights]"
 
     breakdown = {
         "trend": trend_vote,

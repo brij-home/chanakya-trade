@@ -176,6 +176,13 @@ def scan_rrg_orderbook_matrix() -> list[ConvergenceReport]:
     from analysis.sector_rotation import get_sector_rrg_matrix
 
     try:
+        from market.quotes import get_quote
+
+        get_quote([f"NSE:{s}" for s in ORDER_BOOK_TITANS_LEDGER])
+    except Exception:
+        pass
+
+    try:
         rrg_matrix = {p.sector: p for p in get_sector_rrg_matrix()}
     except Exception:
         rrg_matrix = None

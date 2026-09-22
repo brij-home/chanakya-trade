@@ -227,6 +227,13 @@ def scan_master_institutional_radar() -> list[MasterConvergenceReport]:
     )
 
     try:
+        from market.quotes import get_quote
+
+        get_quote([f"NSE:{s}" for s in all_symbols])
+    except Exception:
+        pass
+
+    try:
         rrg_matrix = {p.sector: p for p in get_sector_rrg_matrix()}
     except Exception:
         rrg_matrix = None

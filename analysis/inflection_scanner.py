@@ -464,13 +464,49 @@ def evaluate_single_stock_inflection(
     dist_52w_high = round(((high_52w - ltp) / max(0.01, high_52w)) * 100.0, 1)
     dist_52w_low = round(((ltp - low_52w) / max(0.01, low_52w)) * 100.0, 1)
 
-    # Multi-Timeframe Weekly Alignment (30-week / 150-day EMA)
+    # Multi-Timeframe Weekly Alignment — Real Weinstein Stage on weekly bars
+    # Fetches actual weekly OHLCV and classifies Weinstein Stage for high-timeframe context.
+    # Stocks in weekly Stage 3 (distribution) or Stage 4 (markdown) are killed immediately
+    # regardless of daily signal quality — weekly > daily in Minervini/Weinstein methodology.
     weekly_stage = "NEUTRAL"
-    if len(closes) >= 150:
-        ema_150 = pd.Series(closes).ewm(span=150, adjust=False).mean().values
-        if ltp > ema_150[-1] and ema_150[-1] > ema_150[-20]:
-            weekly_stage = "WEEKLY_STAGE_2"
-            confluence_factors.append("👑 Weekly 30-Week Stage 2 Confluence")
+    weekly_stage_confidence = 0
+    try:
+        weekly_df = None
+        # 1. Prefer resampling provided daily df to respect caller's backtest/test data
+        if df is not None and len(df) >= 100:
+            try:
+                _d = df.copy()
+                if not isinstance(_d.index, pd.DatetimeIndex):
+                    _d.index = pd.to_datetime(_d.index)
+                weekly_df = _d.resample("W").agg(
+                    {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}
+                ).dropna()
+            except Exception:
+                weekly_df = None
+
+        # 2. If weekly_df not generated from df and network is allowed, fetch from history
+        if (weekly_df is None or len(weekly_df) < 25) and allow_network and not os.environ.get("CHANAKYA_TESTING"):
+            try:
+                from market.history import get_ohlcv
+                weekly_df = get_ohlcv(clean_sym, interval="week", days=520)  # ~2Y of weekly bars
+            except Exception:
+                pass
+
+        if weekly_df is not None and len(weekly_df) >= 25:
+            _ws, _wc = classify_weinstein_stage(weekly_df)
+            weekly_stage = "WEEKLY_STAGE_2" if _ws == "STAGE_2_MARKUP" else _ws
+            weekly_stage_confidence = _wc
+
+            # HARD KILL: Weekly Stage 3/4 — never enter a distribution or markdown on weekly chart
+            if _ws in ("STAGE_3_DISTRIBUTION", "STAGE_4_MARKDOWN"):
+                return None  # Drop before scoring — weekly timeframe overrides all daily signals
+
+            if _ws == "STAGE_2_MARKUP":
+                confluence_factors.append(f"👑 Weekly Weinstein Stage 2 Markup (confidence {_wc}/8)")
+            elif _ws == "STAGE_1_BASE" and _wc >= 3:
+                confluence_factors.append(f"📐 Weekly Stage 1 Accumulation Base (late stage, conf {_wc}/8)")
+    except Exception:
+        pass
 
     # Determine Best Primary Archetype
     primary_archetype = max(archetype_scores, key=archetype_scores.get)
@@ -951,50 +987,120 @@ def get_inflection_universes() -> list[dict[str, Any]]:
         {
             "id": "fno_universe",
             "name": "⚡ Complete Liquid F&O Universe",
-            "description": "All ~180+ liquid derivatives contracts eligible for single-stock futures & options.",
+            "description": "All 217 liquid derivatives contracts eligible for single-stock futures & options.",
             "category": "DERIVATIVES",
-            "count": 180,
+            "count": 217,
+        },
+        {
+            "id": "auto",
+            "name": "🚗 Automobiles & Mobility",
+            "description": "OEMs, 2-wheelers, commercial vehicles, EV supply chain & auto ancillaries.",
+            "category": "SECTOR",
+            "count": 21,
+        },
+        {
+            "id": "metals",
+            "name": "⛏️ Metals & Mining",
+            "description": "Integrated steel, aluminium, copper rolling, zinc, and mining PSUs.",
+            "category": "SECTOR",
+            "count": 19,
+        },
+        {
+            "id": "fmcg",
+            "name": "🛒 FMCG, Retail & Consumption",
+            "description": "Essential staples, packaged foods, apparel, quick-commerce, and retail chains.",
+            "category": "SECTOR",
+            "count": 28,
+        },
+        {
+            "id": "infra",
+            "name": "🏗️ Infrastructure & Capital Goods",
+            "description": "Heavy electricals, power cables, automation, construction, and ports infrastructure.",
+            "category": "SECTOR",
+            "count": 47,
+        },
+        {
+            "id": "realty",
+            "name": "🏢 Real Estate & Housing",
+            "description": "Top tier residential & commercial developers and REITs.",
+            "category": "SECTOR",
+            "count": 9,
+        },
+        {
+            "id": "chemicals",
+            "name": "🧪 Specialty Chemicals & Agri",
+            "description": "Fluorochemicals, advanced intermediates, agrochemicals, and green chemistry.",
+            "category": "SECTOR",
+            "count": 24,
+        },
+        {
+            "id": "telecom",
+            "name": "📡 Telecom, Ports & Logistics",
+            "description": "5G telecom carriers, optical fiber, seaport operators, and express logistics.",
+            "category": "SECTOR",
+            "count": 10,
         },
         {
             "id": "railways",
             "name": "🚆 Railways & Metro Infra",
             "description": "Vande Bharat Coaches, Freight Wagons, Metro Bogies, and Railway EPC (Titagarh, RVNL, IRFC).",
             "category": "THEMATIC",
-            "count": 10,
+            "count": 9,
         },
         {
             "id": "defence",
             "name": "🛡️ Defence & Aerospace",
             "description": "Indigenization compounders, HAL, BEL, Mazagon, Bharat Dynamics.",
             "category": "THEMATIC",
-            "count": 14,
+            "count": 13,
         },
         {
             "id": "energy",
             "name": "⚡ Energy & Power Transition",
             "description": "Power gen, transmission, renewable green energy, and PSU exploration.",
             "category": "SECTOR",
-            "count": 22,
+            "count": 24,
         },
         {
             "id": "it",
             "name": "💻 IT & Digital Engineering",
             "description": "Tier-1 & midcap IT services compounders tracking NASDAQ / global demand.",
             "category": "SECTOR",
-            "count": 32,
+            "count": 34,
         },
         {
             "id": "banking",
             "name": "🏦 Banking & Financial Services",
             "description": "Private Banks, PSU Banks, High-ROE NBFCs, and Capital Markets infrastructure.",
             "category": "SECTOR",
-            "count": 25,
+            "count": 26,
         },
         {
             "id": "pharma",
             "name": "💊 Pharma & Healthcare",
             "description": "CDMO, Active Pharmaceutical Ingredients (API), and domestic formulations.",
             "category": "SECTOR",
-            "count": 45,
+            "count": 44,
+        },
+        {
+            "id": "commodities",
+            "name": "🪙 MCX Commodities Futures",
+            "description": "Gold, Silver, Crude Oil, Natural Gas, Copper, Zinc, Aluminium continuous futures.",
+            "category": "COMMODITY",
+            "count": 15,
+        },
+        {
+            "id": "etfs",
+            "name": "📊 Leading Exchange Traded Funds",
+            "description": "Equity Index, Bullion, Sectoral and Global Tech ETFs.",
+            "category": "ETF",
+            "count": 12,
+        },
+        {
+            "id": "currencies",
+            "name": "💱 Currency Derivatives (CDS)",
+            "description": "RBI-approved Indian currency pairs (USDINR, EURINR, GBPINR, JPYINR).",
+            "category": "CURRENCY",
+            "count": 4,
         },
     ]

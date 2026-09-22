@@ -397,6 +397,32 @@ def get_all_symbol_meta() -> dict[str, dict[str, Any]]:
     return {r["symbol"]: dict(r) for r in rows}
 
 
+def get_symbol_meta_batch(symbols: list[str]) -> dict[str, dict[str, Any]]:
+    """Returns metadata for a batch of symbols in a single query."""
+    if not symbols:
+        return {}
+    clean_map = {s.upper().replace(".NS", "").replace("NSE:", "").strip(): s for s in symbols}
+    clean_syms = list(clean_map.keys())
+    conn = _get_connection()
+    results: dict[str, dict[str, Any]] = {}
+    chunk_size = 400
+    for i in range(0, len(clean_syms), chunk_size):
+        chunk = clean_syms[i : i + chunk_size]
+        placeholders = ",".join(["?"] * len(chunk))
+        rows = conn.execute(
+            f"SELECT * FROM symbol_meta WHERE symbol IN ({placeholders})",
+            chunk,
+        ).fetchall()
+        for r in rows:
+            sym = r["symbol"]
+            d = dict(r)
+            results[sym] = d
+            orig_s = clean_map.get(sym)
+            if orig_s and orig_s != sym:
+                results[orig_s] = d
+    return results
+
+
 def validate_and_sanitize_ohlcv_dataframe(df: pd.DataFrame, symbol: str = "") -> pd.DataFrame:
     """
     Validates and sanitizes an OHLCV DataFrame to guarantee physical market envelope and data quality:
@@ -1068,7 +1094,7 @@ def _download_chunk_yfinance(
     period: str = "1mo",
     exchange: str = "NSE",
 ) -> dict[str, pd.DataFrame]:
-    """Downloads a chunk of symbols via yfinance with specified period."""
+    """Downloads a chunk of symbols via yfinance with specified period, supporting equities, indices, ETFs, commodities, and currencies."""
     if not chunk_symbols:
         return {}
     try:
@@ -1076,9 +1102,31 @@ def _download_chunk_yfinance(
     except ImportError:
         return {}
 
-    suffix = ".NS" if exchange.upper() in ("NSE", "NFO") else ".BO"
-    ticker_map = {f"{s}{suffix}": s for s in chunk_symbols}
-    tickers_str = " ".join(ticker_map.keys())
+    try:
+        from market.yfinance_provider import _to_yf_symbol
+    except Exception:
+        _to_yf_symbol = None
+
+    try:
+        from analysis.universe import CORPORATE_ALIASES
+    except Exception:
+        CORPORATE_ALIASES = {}
+
+    ticker_to_syms: dict[str, list[str]] = {}
+    sym_alias_map: dict[str, str] = {}
+    for s in chunk_symbols:
+        clean_s = s.upper().replace(".NS", "").replace("NSE:", "").strip()
+        canon_s = CORPORATE_ALIASES.get(clean_s, clean_s)
+        if _to_yf_symbol:
+            yf_ticker = _to_yf_symbol(clean_s, exchange=exchange)
+        else:
+            suffix = ".NS" if exchange.upper() in ("NSE", "NFO") else ".BO"
+            yf_ticker = f"{canon_s}{suffix}"
+        ticker_to_syms.setdefault(yf_ticker, []).append(clean_s)
+        if canon_s != clean_s:
+            sym_alias_map[clean_s] = canon_s
+
+    tickers_str = " ".join(ticker_to_syms.keys())
 
     try:
         data = yf.download(
@@ -1097,8 +1145,8 @@ def _download_chunk_yfinance(
 
     results: dict[str, pd.DataFrame] = {}
 
-    if len(chunk_symbols) == 1:
-        s = chunk_symbols[0]
+    if len(ticker_to_syms) == 1:
+        yf_tick, sym_list = list(ticker_to_syms.items())[0]
         df = data.copy()
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = [c[0].lower() for c in df.columns]
@@ -1106,16 +1154,26 @@ def _download_chunk_yfinance(
             df.columns = [c.lower() for c in df.columns]
         df = df.dropna()
         if len(df) >= 1:
-            results[s] = df
+            for s in sym_list:
+                results[s] = df.copy()
+                if s in sym_alias_map:
+                    results[sym_alias_map[s]] = df.copy()
     else:
-        for ticker, sym in ticker_map.items():
+        for ticker, sym_list in ticker_to_syms.items():
             try:
-                if ticker in data.columns.levels[1]:
+                if (
+                    hasattr(data.columns, "levels")
+                    and len(data.columns.levels) > 1
+                    and ticker in data.columns.levels[1]
+                ):
                     sub_df = data.xs(ticker, level=1, axis=1).copy()
                     sub_df.columns = [c.lower() for c in sub_df.columns]
                     sub_df = sub_df.dropna()
                     if len(sub_df) >= 1:
-                        results[sym] = sub_df
+                        for s in sym_list:
+                            results[s] = sub_df.copy()
+                            if s in sym_alias_map:
+                                results[sym_alias_map[s]] = sub_df.copy()
             except Exception:
                 pass
 

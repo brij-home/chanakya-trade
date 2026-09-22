@@ -591,14 +591,18 @@ def get_sector_rrg_matrix(use_cache: bool = True) -> list[SectorRRGPoint]:
                 proxy_df = get_ohlcv(proxy_sym, interval="day", days=60)
                 if not proxy_df.empty and len(proxy_df) >= 15:
                     p_closes = proxy_df["close"].tolist()
-                    # Compute 4-period trail: t-6, t-4, t-2, t
-                    for offset in [6, 4, 2, 0]:
-                        idx = len(p_closes) - offset
-                        b_idx = len(bm_closes) - offset
-                        r_pt, m_pt = compute_rrg_point_at(
-                            p_closes[:idx], bm_closes[:b_idx], period=14
-                        )
-                        trail.append({"rs_ratio": r_pt, "rs_momentum": m_pt})
+                    # Compute 12-point bi-weekly RRG trail for full rotation cycle detection:
+                    # t-22, t-20, t-18, t-16, t-14, t-12, t-10, t-8, t-6, t-4, t-2, t
+                    # This provides ~6 months of rotation context vs 2 weeks with 4-point trail
+                    trail_offsets = [22, 20, 18, 16, 14, 12, 10, 8, 6, 4, 2, 0]
+                    for offset in trail_offsets:
+                        if offset < len(p_closes) and offset < len(bm_closes):
+                            idx = len(p_closes) - offset
+                            b_idx = len(bm_closes) - offset
+                            r_pt, m_pt = compute_rrg_point_at(
+                                p_closes[:idx], bm_closes[:b_idx], period=14
+                            )
+                            trail.append({"rs_ratio": r_pt, "rs_momentum": m_pt})
 
                     if trail:
                         rs_ratio = trail[-1]["rs_ratio"]
@@ -655,6 +659,7 @@ class StockTailwind:
     intraday_sector_change: float = 0.0
     intraday_nifty_change: float = 0.0
     intraday_alignment: str = "INTRADAY_NEUTRAL"
+    rotation_velocity: Optional[float] = None
 
     @property
     def sector_name(self) -> str:
@@ -682,6 +687,7 @@ class StockTailwind:
             "intraday_sector_change": self.intraday_sector_change,
             "intraday_nifty_change": self.intraday_nifty_change,
             "intraday_alignment": self.intraday_alignment,
+            "rotation_velocity": self.rotation_velocity,
         }
 
     def to_dict(self) -> dict[str, Any]:
@@ -766,6 +772,7 @@ def get_stock_tailwind(
             intraday_sector_change=0.0,
             intraday_nifty_change=0.0,
             intraday_alignment="UNAVAILABLE",
+            rotation_velocity=None,
         )
 
     quad = sector_point.quadrant
@@ -821,6 +828,16 @@ def get_stock_tailwind(
     elif intraday_alignment in ("INTRADAY_TAILWIND", "STRONG_INTRADAY_TAILWIND"):
         desc += f" ⚡ Sector exhibits strong intraday relative strength ({intraday_rs:+.2f}% vs NIFTY)."
 
+    # Rotation velocity from historical trail
+    rot_velocity = None
+    if getattr(sector_point, "trail", None) and len(sector_point.trail) >= 2:
+        try:
+            curr_mom = float(sector_point.trail[-1].get("rs_momentum", 100.0))
+            prev_mom = float(sector_point.trail[-2].get("rs_momentum", 100.0))
+            rot_velocity = round((curr_mom - prev_mom) / 100.0, 3)
+        except Exception:
+            rot_velocity = None
+
     return StockTailwind(
         symbol=clean_sym,
         sector=sector,
@@ -834,14 +851,18 @@ def get_stock_tailwind(
         intraday_sector_change=sec_chg,
         intraday_nifty_change=bm_chg,
         intraday_alignment=intraday_alignment,
+        rotation_velocity=rot_velocity,
     )
 
 
-def get_stock_sector_alignment(symbol: str) -> dict[str, Any] | StockTailwind:
+def get_stock_sector_alignment(
+    symbol: str,
+    rrg_matrix: Optional[dict[str, Any]] = None,
+) -> dict[str, Any] | StockTailwind:
     """
     Get a stock's parent sector, its RRG quadrant, and alignment tailwind score.
 
     Returns:
         StockTailwind object (compatible with dict access and attribute access).
     """
-    return get_stock_tailwind(symbol)
+    return get_stock_tailwind(symbol, rrg_matrix=rrg_matrix)

@@ -95,10 +95,16 @@ _INDEX_MAP = {
     "NIFTY MIDCAP 100": "^NSEMDCP50",
     "NIFTY MIDCAP 50": "^NSEMDCP50",
     "NIFTY NEXT 50": "^NSMIDCP",
+    "NIFTYNXT50": "^NSMIDCP",
+    "NEXT50": "^NSMIDCP",
     "NIFTY 100": "^CNX100",
+    "NIFTY100": "^CNX100",
     "NIFTY 200": "^CNX200",
+    "NIFTY200": "^CNX200",
     "NIFTY 500": "^CRSLDX",
+    "NIFTY500": "^CRSLDX",
     "NIFTY SMALLCAP 100": "^CNXSC",
+    "NIFTYSMLCAP100": "^CNXSC",
     "SENSEX": "^BSESN",
     "BSE SENSEX": "^BSESN",
     "BANKEX": "BSE-BANK.BO",
@@ -107,25 +113,61 @@ _INDEX_MAP = {
     "INDIAVIX": "^INDIAVIX",
     "VIX": "^INDIAVIX",
     "NIFTY IT": "^CNXIT",
+    "NIFTYIT": "^CNXIT",
     "NIFTY PHARMA": "^CNXPHARMA",
+    "NIFTYPHARMA": "^CNXPHARMA",
     "NIFTY AUTO": "^CNXAUTO",
+    "NIFTYAUTO": "^CNXAUTO",
     "NIFTY FMCG": "^CNXFMCG",
+    "NIFTYFMCG": "^CNXFMCG",
     "NIFTY REALTY": "^CNXREALTY",
+    "NIFTYREALTY": "^CNXREALTY",
     "NIFTY METAL": "^CNXMETAL",
+    "NIFTYMETAL": "^CNXMETAL",
     "NIFTY ENERGY": "^CNXENERGY",
+    "NIFTYENERGY": "^CNXENERGY",
     "NIFTY INFRA": "^CNXINFRA",
+    "NIFTYINFRA": "^CNXINFRA",
     "NIFTY COMMODITIES": "^CNXCOMMODITIES",
+    "NIFTYCOMMODITIES": "^CNXCOMMODITIES",
     "NIFTY PSE": "^CNXPSE",
+    "NIFTYPSE": "^CNXPSE",
     "NIFTY PSU BANK": "^CNXPSUBANK",
-    "NIFTY PRIVATE BANK": "^CNXPVTBANK",
-    "NIFTY PVT BANK": "^CNXPVTBANK",
+    "NIFTY PSU": "^CNXPSUBANK",
+    "NIFTYPSU": "^CNXPSUBANK",
+    "NIFTY PRIVATE BANK": "NIFTY_PVT_BANK.NS",
+    "NIFTY PVT BANK": "NIFTY_PVT_BANK.NS",
+    "NIFTYPVTBANK": "NIFTY_PVT_BANK.NS",
     "NIFTY MEDIA": "^CNXMEDIA",
     "NIFTYMEDIA": "^CNXMEDIA",
     "MEDIA": "^CNXMEDIA",
     "NIFTY CONSUMPTION": "^CNXCONSUMP",
+    "NIFTYCONSUMPTION": "^CNXCONSUMP",
     "NIFTY HEALTHCARE": "^CNXHEALTH",
+    "NIFTYHEALTHCARE": "^CNXHEALTH",
     "NIFTY OIL AND GAS": "^CNXOILGAS",
     "NIFTY OIL & GAS": "^CNXOILGAS",
+    "NIFTYOILGAS": "^CNXOILGAS",
+}
+
+# Special corporate ticker mappings (corporate restructuring / demergers / rebranding)
+_CORPORATE_ALIAS_MAP = {
+    "TATAMOTORS": "TMPV.NS",
+    "ZOMATO": "ETERNAL.NS",
+    "CEINFO": "MAPMYINDIA.NS",
+    "UNOINDA": "UNOMINDA.NS",
+    "REC": "RECLTD.NS",
+    "ASTRA": "ASTRAMICRO.NS",
+    "SWANENERGY": "SWANCORP.NS",
+    "CAPLIPHARM": "CAPLIPOINT.NS",
+    "RPGPHILIFE": "RPGLIFE.NS",
+    "METRO": "METROBRAND.NS",
+    "CENTURYTEX": "ABREL.NS",
+    "HITACHI": "POWERINDIA.NS",
+    "KALPATPOWR": "KPIL.NS",
+    "KBL": "KIRLOSBROS.NS",
+    "GSHIP": "GESHIP.NS",
+    "JUPITERWAG": "JWL.NS",
 }
 
 
@@ -200,8 +242,8 @@ def _to_yf_symbol(symbol: str, exchange: str = "NSE") -> str:
         return upper
 
     # Special corporate ticker mappings (e.g. corporate restructuring / rebranding)
-    if upper == "ZOMATO":
-        return "ETERNAL.NS"
+    if upper in _CORPORATE_ALIAS_MAP:
+        return _CORPORATE_ALIAS_MAP[upper]
 
     if exch_upper == "BSE":
         return f"{symbol}.BO"

@@ -600,13 +600,16 @@ def detect_options_momentum_breakouts(
                         from engine.signal_ensemble import ensemble_signal
 
                         ens = ensemble_signal(df_5m)
-                        if ens and getattr(ens, "confidence", 0) >= 55:
-                            ens_sig = str(getattr(ens, "signal", "")).upper()
-                            if (opt_type == "CE" and "SELL" in ens_sig) or (
-                                opt_type == "PE" and "BUY" in ens_sig
-                            ):
+                        conf = getattr(ens, "confidence", 0.0) or 0.0
+                        conf_pct = conf * 100.0 if conf <= 1.0 else conf
+                        if ens and conf_pct >= 55.0:
+                            verd = str(getattr(ens, "verdict", "")).upper()
+                            sig_val = getattr(ens, "signal", 0)
+                            is_bear = verd == "BEARISH" or sig_val == -1
+                            is_bull = verd == "BULLISH" or sig_val == 1
+                            if (opt_type == "CE" and is_bear) or (opt_type == "PE" and is_bull):
                                 logger.debug(
-                                    f"[OptionsBreakout] Suppressed {opt_type} on {clean_sym}: Ensemble veto ({ens_sig})"
+                                    f"[OptionsBreakout] Suppressed {opt_type} on {clean_sym}: Ensemble veto ({verd} {conf_pct:.0f}%)"
                                 )
                                 continue
                     except Exception as e_ens:

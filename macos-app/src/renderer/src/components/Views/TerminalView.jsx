@@ -551,20 +551,24 @@ export default function TerminalView({
     { symbol: 'HCLTECH',   name: 'HCL Tech',            cat: 'TECH' },
     { symbol: 'WIPRO',     name: 'Wipro Ltd',           cat: 'TECH' },
     { symbol: 'COFORGE',   name: 'Coforge',             cat: 'TECH' },
-    { symbol: 'TATAMOTORS',name: 'Tata Motors',         cat: 'AUTO' },
-    { symbol: 'MARUTI',    name: 'Maruti Suzuki',       cat: 'AUTO' },
-    { symbol: 'M&M',       name: 'Mahindra & Mahindra', cat: 'AUTO' },
-    { symbol: 'BAJFINANCE',name: 'Bajaj Finance',       cat: 'FINANCE' },
-    { symbol: 'LT',        name: 'Larsen & Toubro',     cat: 'INFRA' },
-    { symbol: 'ITC',       name: 'ITC Ltd',             cat: 'FMCG' },
-    { symbol: 'BHARTIARTL',name: 'Bharti Airtel',       cat: 'TELECOM' },
-    { symbol: 'SUNPHARMA', name: 'Sun Pharma',          cat: 'PHARMA' },
-    { symbol: 'TITAN',     name: 'Titan Company',       cat: 'CONSUMER' },
-    { symbol: 'TRENT',     name: 'Trent Ltd',           cat: 'STAGE 2' },
-    { symbol: 'ZOMATO',    name: 'Zomato Ltd',          cat: 'STAGE 2' },
-    { symbol: 'HAL',       name: 'Hindustan Aeronautics',cat: 'DEFENSE' },
-    { symbol: 'BEL',       name: 'Bharat Electronics',  cat: 'DEFENSE' },
-    { symbol: 'ADANIENT',  name: 'Adani Enterprises',   cat: 'STAGE 2' },
+    { symbol: 'TMPV',       name: 'Tata Motors Passenger',cat: 'AUTO' },
+    { symbol: 'TMCV',       name: 'Tata Motors Commercial',cat: 'AUTO' },
+    { symbol: 'MARUTI',     name: 'Maruti Suzuki',        cat: 'AUTO' },
+    { symbol: 'M&M',        name: 'Mahindra & Mahindra',  cat: 'AUTO' },
+    { symbol: 'HYUNDAI',    name: 'Hyundai Motor India',  cat: 'AUTO' },
+    { symbol: 'BAJFINANCE', name: 'Bajaj Finance',        cat: 'FINANCE' },
+    { symbol: 'LT',         name: 'Larsen & Toubro',      cat: 'INFRA' },
+    { symbol: 'ITC',        name: 'ITC Ltd',              cat: 'FMCG' },
+    { symbol: 'BHARTIARTL', name: 'Bharti Airtel',        cat: 'TELECOM' },
+    { symbol: 'SUNPHARMA',  name: 'Sun Pharma',           cat: 'PHARMA' },
+    { symbol: 'TITAN',      name: 'Titan Company',        cat: 'CONSUMER' },
+    { symbol: 'TRENT',      name: 'Trent Ltd',            cat: 'STAGE 2' },
+    { symbol: 'ETERNAL',    name: 'Eternal (Zomato)',     cat: 'STAGE 2' },
+    { symbol: 'PREMIERENE', name: 'Premier Energies',     cat: 'STAGE 2' },
+    { symbol: 'WAAREEENER', name: 'Waaree Energies',      cat: 'STAGE 2' },
+    { symbol: 'HAL',        name: 'Hindustan Aeronautics',cat: 'DEFENSE' },
+    { symbol: 'BEL',        name: 'Bharat Electronics',   cat: 'DEFENSE' },
+    { symbol: 'ADANIENT',   name: 'Adani Enterprises',    cat: 'STAGE 2' },
     // MCX Commodities
     { symbol: 'GOLD',       name: 'MCX Gold Futures',   cat: 'COMMODITY' },
     { symbol: 'SILVER',     name: 'MCX Silver Futures', cat: 'COMMODITY' },
@@ -1004,7 +1008,7 @@ export default function TerminalView({
               <form onSubmit={handleWatchlistSearchSubmit} className="relative">
                 <input
                   type="text"
-                  placeholder="Search symbol (e.g. SBIN, TATAMOTORS)..."
+                  placeholder="Search symbol (e.g. SBIN, TMPV, ETERNAL)..."
                   value={watchlistFilter}
                   onChange={(e) => {
                     setWatchlistFilter(e.target.value)

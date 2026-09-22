@@ -201,8 +201,8 @@ def test_liquidity_filter_control():
 
 
 def test_circuit_lock_and_weekly_alignment():
-    # Upper circuit stock
-    df_uc = _generate_synthetic_df("UC_STOCK", days=160, base_price=100.0, is_uc=True)
+    # Upper circuit stock with sufficient history for weekly Weinstein stage analysis (>= 50 weeks)
+    df_uc = _generate_synthetic_df("UC_STOCK", days=280, base_price=100.0, is_uc=True)
     setup = evaluate_single_stock_inflection("UC_STOCK", df=df_uc)
     assert setup is not None
     assert setup.circuit_state == "UPPER_CIRCUIT_LOCKED"

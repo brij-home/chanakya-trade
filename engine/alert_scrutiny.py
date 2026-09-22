@@ -26,6 +26,7 @@ import re
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone, timedelta
+import os
 import threading
 import time
 from typing import Any, Optional
@@ -104,7 +105,8 @@ class AlertScrutinyAuditor:
     """
 
     def __init__(self, min_rr_ratio: float = 1.3, max_intraday_risk_pct: float = 8.0) -> None:
-        self.min_rr_ratio = min_rr_ratio
+        drift_rr = float(os.environ.get("CHANAKYA_MIN_RR_OVERRIDE", "0"))
+        self.min_rr_ratio = max(min_rr_ratio, drift_rr) if drift_rr > 0 else min_rr_ratio
         self.max_intraday_risk_pct = max_intraday_risk_pct
         self._cache: dict[str, tuple[float, ScrutinyResult]] = {}
         self._cache_lock = threading.Lock()
@@ -302,12 +304,14 @@ class AlertScrutinyAuditor:
         except Exception:
             vix_val = None
 
-        req_rr = self.min_rr_ratio
+        drift_rr = float(os.environ.get("CHANAKYA_MIN_RR_OVERRIDE", "0"))
+        active_min_rr = max(self.min_rr_ratio, drift_rr) if drift_rr > 0 else self.min_rr_ratio
+        req_rr = active_min_rr
         if vix_val and vix_val > 0:
             if vix_val > 18.0:
-                req_rr = max(self.min_rr_ratio, 2.0)
+                req_rr = max(active_min_rr, 2.0)
             elif vix_val < 11.5:
-                req_rr = min(self.min_rr_ratio, 1.3)
+                req_rr = min(active_min_rr, 1.3)
 
             # Extreme Tail Risk Gate: If VIX > 25.0, naked option buying carries extreme IV crush hazard
             if vix_val > 25.0 and is_option_premium_levels:

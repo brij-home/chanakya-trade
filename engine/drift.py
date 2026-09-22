@@ -1,7 +1,8 @@
 """
 engine/drift.py
 ───────────────
-Model drift detection — tracks whether analysis accuracy is degrading.
+Model drift detection AND closed-loop correction — tracks whether analysis
+accuracy is degrading and actively recalibrates the system when it does.
 
 Detects:
   - Win rate declining over time
@@ -9,21 +10,32 @@ Detects:
   - Analyst disagreement patterns
   - Strategy performance decay
 
+Corrects (when DECLINING trend detected):
+  - Raises AlertScrutinyAuditor min_rr_ratio from 1.3 → 1.6
+  - Triggers mover autopsy → SNR computation → PatternLearningEngine recalibration
+  - Logs a structured DriftCorrectionEvent for audit trail
+
 Requires trade outcomes in trade_memory (engine/memory.py).
 
 Usage:
-    from engine.drift import detect_drift, print_drift_report
+    from engine.drift import detect_drift, print_drift_report, nightly_drift_check
 """
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
+from datetime import datetime, timezone, timedelta
+from typing import Any
 
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
+logger = logging.getLogger("engine.drift")
 console = Console()
+
+IST = timezone(timedelta(hours=5, minutes=30))
 
 
 @dataclass
@@ -58,6 +70,116 @@ class DriftReport:
 
     # Alerts
     alerts: list[str] = field(default_factory=list)
+
+    def apply_drift_corrections(self) -> dict[str, Any]:
+        """
+        Closed-loop correction controller.
+
+        When DECLINING trend is detected, this method:
+          1. Raises AlertScrutinyAuditor.min_rr_ratio from 1.3 →  1.6 (tighter gates)
+          2. Triggers mover_autopsy → SNR → PatternLearningEngine.recalibrate_from_snr()
+          3. Returns a structured correction event dict for audit logging
+
+        Safe to call unconditionally — no-ops when trend is STABLE or IMPROVING.
+        Returns: dict with correction_applied, actions_taken, timestamp
+        """
+        correction_event: dict[str, Any] = {
+            "timestamp": datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST"),
+            "win_rate_trend": self.win_rate_trend,
+            "win_rate_delta": self.win_rate_delta,
+            "recent_win_rate": self.recent_win_rate,
+            "correction_applied": False,
+            "actions_taken": [],
+        }
+
+        if self.win_rate_trend not in ("DECLINING",) or self.trades_with_outcome < 5:
+            return correction_event  # No-op for STABLE / IMPROVING
+
+        # 1. Raise AlertScrutiny minimum R:R threshold during declining phase
+        try:
+            from engine.alert_scrutiny import AlertScrutinyAuditor
+            # Patch the module-level singleton if instantiated, else flag via env
+            import os
+            current_rr = float(os.environ.get("CHANAKYA_MIN_RR_OVERRIDE", "1.3"))
+            adjusted_rr = 1.6 if self.win_rate_delta < -15 else 1.45
+            if adjusted_rr > current_rr:
+                os.environ["CHANAKYA_MIN_RR_OVERRIDE"] = str(adjusted_rr)
+                correction_event["actions_taken"].append(
+                    f"AlertScrutiny min_rr_ratio raised: {current_rr:.2f} → {adjusted_rr:.2f} (win rate declining {self.win_rate_delta:+.0f}%)"
+                )
+                logger.warning(
+                    "[DRIFT CORRECTION] min_rr_ratio raised %.2f → %.2f (win_rate_delta=%.1f%%)",
+                    current_rr, adjusted_rr, self.win_rate_delta,
+                )
+        except Exception as e:
+            logger.debug("Drift correction: rr_ratio adjustment failed: %s", e)
+
+        # 2. Trigger mover autopsy → SNR → recalibrate_from_snr pipeline
+        try:
+            from engine.mover_autopsy import run_daily_autopsy
+            from engine.learning_engine import PatternLearningEngine
+
+            autopsy = run_daily_autopsy()
+            if autopsy and hasattr(autopsy, "gainers") and hasattr(autopsy, "control_cohort"):
+                gainers = autopsy.gainers or []
+                controls = autopsy.control_cohort or []
+
+                if gainers and controls:
+                    # Compute discriminative SNR: which factors separate gainers from controls
+                    snr_table: dict[str, float] = {}
+                    factor_keys = [
+                        "trend_score", "vcp_score", "smc_score", "rvol_20d",
+                        "squeeze_coiling", "sector_tailwind", "forensic_safe",
+                    ]
+                    for fk in factor_keys:
+                        gainer_vals = [float(getattr(g, fk, 0) or 0) for g in gainers]
+                        control_vals = [float(getattr(c, fk, 0) or 0) for c in controls]
+                        if gainer_vals and control_vals:
+                            mean_g = sum(gainer_vals) / len(gainer_vals)
+                            mean_c = sum(control_vals) / len(control_vals)
+                            spread = abs(mean_g - mean_c)
+                            noise = max(0.01, (sum(abs(v - mean_g) for v in gainer_vals) / len(gainer_vals) +
+                                               sum(abs(v - mean_c) for v in control_vals) / len(control_vals)) / 2)
+                            snr_table[fk] = round(spread / noise, 3)
+
+                    if snr_table:
+                        learning_engine = PatternLearningEngine()
+                        if hasattr(learning_engine, "recalibrate_from_snr"):
+                            learning_engine.recalibrate_from_snr(snr_table)
+                            correction_event["actions_taken"].append(
+                                f"PatternLearningEngine recalibrated from SNR table ({len(snr_table)} factors): "
+                                + ", ".join(f"{k}={v:.2f}" for k, v in sorted(snr_table.items(), key=lambda x: -x[1])[:4])
+                            )
+                            logger.info("[DRIFT CORRECTION] Learning engine recalibrated. SNR: %s", snr_table)
+        except Exception as e:
+            logger.debug("Drift correction: autopsy/recalibrate pipeline failed: %s", e)
+
+        # 3. Emit audit alert for worst analyst if accuracy < 35%
+        if (
+            self.worst_analyst
+            and self.analyst_accuracy.get(self.worst_analyst, {}).get("accuracy", 50) < 35
+        ):
+            try:
+                from engine.analysis_cache import analysis_cache
+                analysis_cache.save_macro(
+                    f"drift_worst_analyst_{self.worst_analyst}",
+                    {"analyst": self.worst_analyst, "accuracy": self.analyst_accuracy[self.worst_analyst]},
+                    ttl_minutes=1440,  # 24h cache
+                )
+                correction_event["actions_taken"].append(
+                    f"Analyst {self.worst_analyst} flagged (accuracy {self.analyst_accuracy[self.worst_analyst].get('accuracy', 0):.0f}% < 35%)"
+                )
+            except Exception:
+                pass
+
+        correction_event["correction_applied"] = len(correction_event["actions_taken"]) > 0
+        if correction_event["correction_applied"]:
+            logger.warning(
+                "[DRIFT CORRECTION APPLIED] %d actions: %s",
+                len(correction_event["actions_taken"]),
+                " | ".join(correction_event["actions_taken"]),
+            )
+        return correction_event
 
     def print_report(self) -> None:
         if self.trades_with_outcome < 5:
@@ -243,6 +365,37 @@ def detect_drift() -> DriftReport:
 
 
 def print_drift_report() -> None:
-    """Display drift analysis."""
+    """Display drift analysis and auto-apply corrections if declining."""
     report = detect_drift()
     report.print_report()
+    # Auto-trigger corrections if drift detected — turns report into action
+    corrections = report.apply_drift_corrections()
+    if corrections["correction_applied"]:
+        console.print("\n[bold yellow]⚡ Drift Corrections Applied:[/bold yellow]")
+        for action in corrections["actions_taken"]:
+            console.print(f"  [yellow]✓ {action}[/yellow]")
+
+
+def nightly_drift_check() -> dict[str, Any]:
+    """
+    Nightly post-market drift check (to be called at 15:45–16:30 IST).
+
+    Chains: detect_drift() → apply_drift_corrections() → structured result
+    for logging or alerting via Telegram bot.
+    """
+    report = detect_drift()
+    corrections = report.apply_drift_corrections()
+    return {
+        "report": {
+            "total_trades": report.total_trades,
+            "trades_with_outcome": report.trades_with_outcome,
+            "win_rate_trend": report.win_rate_trend,
+            "recent_win_rate": report.recent_win_rate,
+            "older_win_rate": report.older_win_rate,
+            "win_rate_delta": report.win_rate_delta,
+            "best_analyst": report.best_analyst,
+            "worst_analyst": report.worst_analyst,
+            "alerts": report.alerts,
+        },
+        "corrections": corrections,
+    }

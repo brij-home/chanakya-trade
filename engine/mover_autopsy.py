@@ -332,6 +332,7 @@ class MoverAutopsyEngine:
         self,
         quote_item: dict[str, Any],
         direction: str = "GAINER",
+        rrg_matrix: Optional[dict[str, Any]] = None,
     ) -> MoverCausalProfile:
         """
         Performs 5-dimensional causal factor decomposition on a single mover.
@@ -429,7 +430,7 @@ class MoverAutopsyEngine:
         try:
             from analysis.sector_rotation import get_stock_sector_alignment
 
-            align = get_stock_sector_alignment(sym)
+            align = get_stock_sector_alignment(sym, rrg_matrix=rrg_matrix)
             if isinstance(align, dict):
                 sector_name = align.get("sector_name", sector_name)
                 rrg_quadrant = align.get("quadrant", rrg_quadrant)
@@ -617,6 +618,7 @@ class MoverAutopsyEngine:
         self,
         movers: list[MoverCausalProfile],
         control_quotes: list[dict[str, Any]],
+        rrg_matrix: Optional[dict[str, Any]] = None,
     ) -> tuple[dict[str, float], list[str]]:
         """
         Calculates the Discriminative Signal-to-Noise Ratio (SNR) for each factor.
@@ -643,7 +645,7 @@ class MoverAutopsyEngine:
                 # Sector
                 from analysis.sector_rotation import get_stock_sector_alignment
 
-                align = get_stock_sector_alignment(c_sym)
+                align = get_stock_sector_alignment(c_sym, rrg_matrix=rrg_matrix)
                 if isinstance(align, dict) and align.get("quadrant") == "LEADING":
                     control_leading_sector += 1
             except Exception:
@@ -703,14 +705,30 @@ class MoverAutopsyEngine:
             segment=segment, top_n=top_n
         )
 
-        gainers_profiles = [self.dissect_mover(g, direction="GAINER") for g in top_gainers_raw]
-        losers_profiles = [self.dissect_mover(l, direction="LOSER") for l in top_losers_raw]
+        rrg_matrix = None
+        try:
+            from analysis.sector_rotation import get_sector_rrg_matrix
+
+            rrg_matrix = {p.sector: p for p in get_sector_rrg_matrix()}
+        except Exception:
+            rrg_matrix = None
+
+        gainers_profiles = [
+            self.dissect_mover(g, direction="GAINER", rrg_matrix=rrg_matrix)
+            for g in top_gainers_raw
+        ]
+        losers_profiles = [
+            self.dissect_mover(l, direction="LOSER", rrg_matrix=rrg_matrix)
+            for l in top_losers_raw
+        ]
 
         all_movers = gainers_profiles + losers_profiles
         traps_count = sum(1 for m in all_movers if m.is_trap)
 
         # Statistical Contrast vs Control Cohort
-        snr_table, top_precursors = self.compute_control_contrast(all_movers, control_raw)
+        snr_table, top_precursors = self.compute_control_contrast(
+            all_movers, control_raw, rrg_matrix=rrg_matrix
+        )
 
         # Market regime assessment
         market_regime = "NORMAL_TRENDING"
@@ -778,6 +796,9 @@ class MoverAutopsyEngine:
             if a.date == date_str:
                 return a
         return None
+
+    # Canonical alias
+    perform_daily_autopsy = run_daily_autopsy
 
 
 # Module-level singleton instance

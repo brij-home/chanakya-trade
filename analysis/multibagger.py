@@ -494,6 +494,10 @@ def evaluate_long_term_horizon(
                     details["debt_equity"] = snap.debt_equity
                 if snap.pledged_pct is not None:
                     details["promoter_pledging_pct"] = snap.pledged_pct
+                if getattr(snap, "sepa_qualified", False):
+                    details["sepa_qualified"] = True
+                    details["eps_q1_growth"] = getattr(snap, "eps_q1_growth", None)
+                    details["eps_acceleration"] = getattr(snap, "eps_acceleration", None)
         except Exception:
             pass
 
@@ -527,6 +531,10 @@ def evaluate_long_term_horizon(
         score += 5
     elif pledge > 15.0:
         score -= 20
+
+    # 5. Minervini SEPA Growth Momentum
+    if details.get("sepa_qualified"):
+        score += 10
 
     score = max(10, min(98, score))
 
@@ -704,6 +712,7 @@ def generate_generational_ticket(
             "roce_pct": details.get("roce_pct", 20.0),
             "debt_equity": details.get("debt_equity", 0.3),
             "forensic_status": "CLEAN_PASS" if forensic_safe else "WARNING",
+            "sepa_qualified": details.get("sepa_qualified", False),
         },
     }
 

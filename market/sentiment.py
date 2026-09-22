@@ -10,6 +10,8 @@ Market sentiment indicators:
 from __future__ import annotations
 
 import re
+import threading
+import time
 from dataclasses import dataclass
 
 
@@ -281,31 +283,89 @@ class MarketBreadth:
     verdict: str  # "BROAD_RALLY" | "BROAD_DECLINE" | "MIXED"
 
 
-def get_market_breadth() -> MarketBreadth:
-    """
-    Advance/Decline ratio from NSE.
-    Falls back to mock if NSE unavailable.
-    """
-    try:
-        session = get_nse_client()
-        r = session.get(
-            "https://www.nseindia.com/api/allIndices",
-            timeout=8,
-        )
-        r.raise_for_status()
-        # Parse NIFTY 500 advances/declines
-        data = r.json().get("data", [])
-        nifty500 = next((d for d in data if "500" in d.get("index", "")), None)
-        if nifty500:
-            adv = int(nifty500.get("advances", 0))
-            dec = int(nifty500.get("declines", 0))
-            unch = int(nifty500.get("unchanged", 0))
-            return _build_breadth(adv, dec, unch)
-    except Exception:
-        pass
+_BREADTH_CACHE: MarketBreadth | None = None
+_BREADTH_CACHE_TS: float = 0.0
+_BREADTH_LOCK = threading.Lock()
+_BREADTH_TTL: float = 60.0
 
-    # No mock data — return zeros so consumers know data is unavailable
-    return MarketBreadth(advances=0, declines=0, unchanged=0, ad_ratio=0.0, verdict="UNAVAILABLE")
+
+def get_market_breadth(use_cache: bool = True, force_refresh: bool = False) -> MarketBreadth:
+    """
+    Advance/Decline ratio from NSE with thread-safe 60s in-memory and persistent caching.
+    Prevents repetitive network hammer across parallel batch scanning.
+    """
+    global _BREADTH_CACHE, _BREADTH_CACHE_TS
+    now = time.time()
+
+    if use_cache and not force_refresh:
+        with _BREADTH_LOCK:
+            if _BREADTH_CACHE is not None and (now - _BREADTH_CACHE_TS) < _BREADTH_TTL:
+                return _BREADTH_CACHE
+
+        try:
+            from engine.analysis_cache import analysis_cache
+
+            cached = analysis_cache.get_macro("market_breadth_nifty500")
+            if cached and isinstance(cached, dict):
+                mb = MarketBreadth(
+                    advances=int(cached.get("advances", 0)),
+                    declines=int(cached.get("declines", 0)),
+                    unchanged=int(cached.get("unchanged", 0)),
+                    ad_ratio=float(cached.get("ad_ratio", 0.0)),
+                    verdict=str(cached.get("verdict", "UNAVAILABLE")),
+                )
+                with _BREADTH_LOCK:
+                    _BREADTH_CACHE = mb
+                    _BREADTH_CACHE_TS = now
+                return mb
+        except Exception:
+            pass
+
+    with _BREADTH_LOCK:
+        if use_cache and not force_refresh:
+            if _BREADTH_CACHE is not None and (time.time() - _BREADTH_CACHE_TS) < _BREADTH_TTL:
+                return _BREADTH_CACHE
+
+        try:
+            session = get_nse_client()
+            r = session.get(
+                "https://www.nseindia.com/api/allIndices",
+                timeout=8,
+            )
+            r.raise_for_status()
+            # Parse NIFTY 500 advances/declines
+            data = r.json().get("data", [])
+            nifty500 = next((d for d in data if "500" in d.get("index", "")), None)
+            if nifty500:
+                adv = int(nifty500.get("advances", 0))
+                dec = int(nifty500.get("declines", 0))
+                unch = int(nifty500.get("unchanged", 0))
+                mb = _build_breadth(adv, dec, unch)
+                _BREADTH_CACHE = mb
+                _BREADTH_CACHE_TS = time.time()
+                try:
+                    from engine.analysis_cache import analysis_cache
+
+                    analysis_cache.set_macro(
+                        "market_breadth_nifty500",
+                        {
+                            "advances": mb.advances,
+                            "declines": mb.declines,
+                            "unchanged": mb.unchanged,
+                            "ad_ratio": mb.ad_ratio,
+                            "verdict": mb.verdict,
+                        },
+                        ttl=int(_BREADTH_TTL),
+                    )
+                except Exception:
+                    pass
+                return mb
+        except Exception:
+            if _BREADTH_CACHE is not None and _BREADTH_CACHE.verdict != "UNAVAILABLE":
+                return _BREADTH_CACHE
+
+        # No mock data — return zeros so consumers know data is unavailable
+        return MarketBreadth(advances=0, declines=0, unchanged=0, ad_ratio=0.0, verdict="UNAVAILABLE")
 
 
 def _build_breadth(adv: int, dec: int, unch: int) -> MarketBreadth:
