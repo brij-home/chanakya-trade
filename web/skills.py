@@ -6348,10 +6348,14 @@ def _debate_snapshot_sync(req: Optional[DebateSnapshotRequest] = None):
         if not ltp or ltp <= 0:
             from market.indices import get_index
 
-            idx = get_index(sym)
-            if idx and idx.last_price > 0:
-                ltp = float(idx.last_price)
-            else:
+            try:
+                idx = get_index(sym)
+                if idx and getattr(idx, "last_price", 0) > 0:
+                    ltp = float(idx.last_price)
+            except Exception:
+                pass
+
+            if not ltp or ltp <= 0:
                 from market.history import get_ohlcv
 
                 df_last = get_ohlcv(sym, exchange=exch, interval="day", days=5)
@@ -6364,46 +6368,46 @@ def _debate_snapshot_sync(req: Optional[DebateSnapshotRequest] = None):
                 404,
             )
 
-        # 1. Market structure (SMC)
+        # Run quantitative evaluations in parallel (concurrent workers eliminate serial 10s latency)
+        from concurrent.futures import ThreadPoolExecutor
+        from analysis.multibagger import scan_multibagger_opportunity
+        from market.sentiment import get_fii_dii_data
+
         ms = None
-        try:
-            ms = analyze_market_structure(sym, exchange=exch)
-        except Exception:
-            pass
-
-        # 2. Volume Profile
         vp = None
-        try:
-            vp = analyze_volume_profile(sym, exchange=exch)
-        except Exception:
-            pass
-
-        # 3. Forensics
         fa = None
-        try:
-            fa = audit_forensics(sym)
-        except Exception:
-            pass
-
-        # 4. Multibagger & Stage Analysis
         mb = None
-        try:
-            from analysis.multibagger import calculate_multibagger_score
-
-            mb = calculate_multibagger_score(sym)
-        except Exception:
-            pass
-
-        # 5. Institutional flows
         flows = None
-        try:
-            from market.sentiment import get_fii_dii_data
 
-            flow_list = get_fii_dii_data(days=1)
-            if flow_list:
-                flows = flow_list[0]
-        except Exception:
-            pass
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            fut_ms = executor.submit(analyze_market_structure, sym, exchange=exch)
+            fut_vp = executor.submit(analyze_volume_profile, sym, exchange=exch)
+            fut_fa = executor.submit(audit_forensics, sym)
+            fut_mb = executor.submit(scan_multibagger_opportunity, sym, exchange=exch)
+            fut_flows = executor.submit(get_fii_dii_data, days=1)
+
+            try:
+                ms = fut_ms.result(timeout=4.5)
+            except Exception:
+                pass
+            try:
+                vp = fut_vp.result(timeout=4.5)
+            except Exception:
+                pass
+            try:
+                fa = fut_fa.result(timeout=4.5)
+            except Exception:
+                pass
+            try:
+                mb = fut_mb.result(timeout=4.5)
+            except Exception:
+                pass
+            try:
+                flow_list = fut_flows.result(timeout=3.0)
+                if flow_list:
+                    flows = flow_list[0]
+            except Exception:
+                pass
 
         # Compute dynamic conviction score
         base_score = 65
@@ -6415,7 +6419,7 @@ def _debate_snapshot_sync(req: Optional[DebateSnapshotRequest] = None):
             base_score += 8
         elif fa and (getattr(fa, "manipulation_risk", "") or "") == "HIGH":
             base_score -= 15
-        if mb and (getattr(mb, "stage_2_confirmed", False) or False):
+        if mb and (getattr(mb, "weinstein_stage", "") == "STAGE_2_MARKUP" or getattr(mb, "trend_template_qualified", False)):
             base_score += 7
         conviction_score = max(20, min(95, base_score))
 
@@ -6437,8 +6441,8 @@ def _debate_snapshot_sync(req: Optional[DebateSnapshotRequest] = None):
             flow_desc = "Accumulation base observed with healthy volume absorption near key exponential moving average support."
 
         if mb:
-            stage_str = getattr(mb, "stage", "Stage 1/2") or "Stage 1/2"
-            passed_count = getattr(mb, "passed_checks_count", 0) or 0
+            stage_str = getattr(mb, "weinstein_stage", "STAGE_1_BASE").replace("_", " ")
+            passed_count = getattr(mb, "trend_template_passed", 0) or 0
             tech_desc = f"Stock is in {stage_str}. Passing {passed_count}/8 Minervini Trend Template criteria with expanding relative strength."
         else:
             tech_desc = "Constructive price action holding above 50-day moving average with positive trend momentum."
@@ -7713,25 +7717,82 @@ class PersonaAnalyzeRequest(BaseModel):
     exchange: str = "NSE"
 
 
+def _persona_council_sync(req: CouncilRequest):
+    sym = (req.symbol or "RELIANCE").upper().strip()
+    council = (req.council or "breakout").lower().strip()
+    exch = (req.exchange or "NSE").upper().strip()
+    cache_key = f"persona_council_{council}_{sym}_{exch}"
+    try:
+        from engine.analysis_cache import analysis_cache
+
+        cached = analysis_cache.get_macro(cache_key)
+        if cached and isinstance(cached, dict) and cached.get("symbol") == sym:
+            return _ok(cached)
+    except Exception:
+        pass
+
+    from agent.persona_agent import run_council
+
+    res = run_council(
+        council_name=council,
+        symbol=sym,
+        exchange=exch,
+        llm_provider="auto",
+    )
+    if "signals" in res:
+        res["signals"] = [s.to_dict() if hasattr(s, "to_dict") else s for s in res["signals"]]
+
+    try:
+        from engine.analysis_cache import analysis_cache
+
+        analysis_cache.save_macro(cache_key, res, ttl_minutes=15)
+    except Exception:
+        pass
+    return _ok(res)
+
+
 @router.post("/persona/council")
 @router.post("/skills/persona/council")
 async def skill_persona_council(req: CouncilRequest):
     """Run a specialized council of research-framework lenses on a stock symbol."""
     try:
-        from agent.persona_agent import run_council
+        import asyncio
 
-        res = run_council(
-            council_name=req.council,
-            symbol=req.symbol,
-            exchange=req.exchange,
-            llm_provider="auto",
-        )
-        # Convert PersonaSignal objects to dict
-        if "signals" in res:
-            res["signals"] = [s.to_dict() if hasattr(s, "to_dict") else s for s in res["signals"]]
-        return _ok(res)
+        return await asyncio.to_thread(_persona_council_sync, req)
     except Exception as e:
         raise _err(str(e))
+
+
+def _persona_analyze_sync(req: PersonaAnalyzeRequest):
+    sym = (req.symbol or "RELIANCE").upper().strip()
+    persona_id = (req.persona_id or "minervini").lower().strip()
+    exch = (req.exchange or "NSE").upper().strip()
+    cache_key = f"persona_analyze_{persona_id}_{sym}_{exch}"
+    try:
+        from engine.analysis_cache import analysis_cache
+
+        cached = analysis_cache.get_macro(cache_key)
+        if cached and isinstance(cached, dict) and cached.get("persona") == persona_id:
+            return _ok(cached)
+    except Exception:
+        pass
+
+    from agent.persona_agent import run_persona_analysis
+
+    sig = run_persona_analysis(
+        persona_id=persona_id,
+        symbol=sym,
+        exchange=exch,
+        llm_provider="auto",
+    )
+    res = sig.to_dict() if hasattr(sig, "to_dict") else sig
+    try:
+        from engine.analysis_cache import analysis_cache
+
+        analysis_cache.save_macro(cache_key, res, ttl_minutes=15)
+    except Exception:
+        pass
+    return _ok(res)
 
 
 @router.post("/persona/analyze")
@@ -7739,15 +7800,9 @@ async def skill_persona_council(req: CouncilRequest):
 async def skill_persona_analyze(req: PersonaAnalyzeRequest):
     """Analyze a stock through a selected research-framework lens."""
     try:
-        from agent.persona_agent import run_persona_analysis
+        import asyncio
 
-        sig = run_persona_analysis(
-            persona_id=req.persona_id,
-            symbol=req.symbol,
-            exchange=req.exchange,
-            llm_provider="auto",
-        )
-        return _ok(sig.to_dict())
+        return await asyncio.to_thread(_persona_analyze_sync, req)
     except Exception as e:
         raise _err(str(e))
 

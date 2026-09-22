@@ -46,7 +46,7 @@ import queue as _queue_mod
 import re
 import sys
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, wait
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -2385,14 +2385,17 @@ class MultiAgentAnalyzer:
         with ThreadPoolExecutor(max_workers=2) as executor:
             f_bull = executor.submit(_run_bull_r1)
             f_bear = executor.submit(_run_bear_r1)
+            done, not_done = wait([f_bull, f_bear], timeout=18.0)
             try:
-                bull_argument = f_bull.result(timeout=18.0)
+                bull_argument = f_bull.result(timeout=0) if f_bull in done else bull_fallback
             except Exception:
                 bull_argument = bull_fallback
             try:
-                bear_argument = f_bear.result(timeout=18.0)
+                bear_argument = f_bear.result(timeout=0) if f_bear in done else bear_fallback
             except Exception:
                 bear_argument = bear_fallback
+            for fut in not_done:
+                fut.cancel()
 
         # ── Round 2: Rebuttals (Concurrent) ───────────────────────────────
         if self.verbose:
@@ -2462,14 +2465,21 @@ class MultiAgentAnalyzer:
         with ThreadPoolExecutor(max_workers=2) as executor:
             f_bull_reb = executor.submit(_run_bull_r2)
             f_bear_reb = executor.submit(_run_bear_r2)
+            done_reb, not_done_reb = wait([f_bull_reb, f_bear_reb], timeout=18.0)
             try:
-                bull_rebuttal = f_bull_reb.result(timeout=18.0)
+                bull_rebuttal = (
+                    f_bull_reb.result(timeout=0) if f_bull_reb in done_reb else bull_reb_fallback
+                )
             except Exception:
                 bull_rebuttal = bull_reb_fallback
             try:
-                bear_rebuttal = f_bear_reb.result(timeout=18.0)
+                bear_rebuttal = (
+                    f_bear_reb.result(timeout=0) if f_bear_reb in done_reb else bear_reb_fallback
+                )
             except Exception:
                 bear_rebuttal = bear_reb_fallback
+            for fut in not_done_reb:
+                fut.cancel()
 
         # ── Facilitator: Summarize & pick winner ─────────────
         facilitator_prompt = FACILITATOR_PROMPT.format(
@@ -2604,14 +2614,21 @@ class MultiAgentAnalyzer:
                 f_cons = executor.submit(
                     self._safe_chat, cons_prompt, cons_fallback, 18.0, fast_llm, 550
                 )
+                done_risk, not_done_risk = wait([f_agg, f_cons], timeout=18.0)
                 try:
-                    aggressive_view = f_agg.result(timeout=18.0)
+                    aggressive_view = (
+                        f_agg.result(timeout=0) if f_agg in done_risk else agg_fallback
+                    )
                 except Exception:
                     aggressive_view = agg_fallback
                 try:
-                    conservative_view = f_cons.result(timeout=18.0)
+                    conservative_view = (
+                        f_cons.result(timeout=0) if f_cons in done_risk else cons_fallback
+                    )
                 except Exception:
                     conservative_view = cons_fallback
+                for fut in not_done_risk:
+                    fut.cancel()
         else:
             aggressive_view = self._safe_chat(
                 agg_prompt, agg_fallback, 18.0, fast_llm, max_tokens=550
