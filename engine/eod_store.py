@@ -47,7 +47,7 @@ _store_lock = threading.Lock()
 _local_connections: dict[int, sqlite3.Connection] = {}
 
 # ── L1 In-Memory Process Caches ──────────────────────────────────────
-_L1_MAX_ITEMS = 1500
+_L1_MAX_ITEMS = 4000
 _L1_TTL_SECONDS = 3600.0  # 1 hour
 _l1_ohlcv_cache: dict[str, tuple[float, pd.DataFrame]] = {}
 _l1_fundamentals_cache: dict[str, tuple[float, dict[str, Any]]] = {}
@@ -278,8 +278,8 @@ def get_cached_ohlcv(symbol: str, days: int = 300) -> Optional[pd.DataFrame]:
     # Populate L1 cache
     with _l1_lock:
         if len(_l1_ohlcv_cache) >= _L1_MAX_ITEMS:
-            oldest_key = min(_l1_ohlcv_cache.keys(), key=lambda k: _l1_ohlcv_cache[k][0])
-            _l1_ohlcv_cache.pop(oldest_key, None)
+            # O(1) FIFO eviction
+            _l1_ohlcv_cache.pop(next(iter(_l1_ohlcv_cache)), None)
         _l1_ohlcv_cache[clean_sym] = (now_ts, df)
 
     if days and len(df) > days:
@@ -370,8 +370,8 @@ def get_cached_ohlcv_batch(symbols: list[str], days: int = 300) -> dict[str, pd.
         with _l1_lock:
             for sym, df in newly_loaded.items():
                 if len(_l1_ohlcv_cache) >= _L1_MAX_ITEMS:
-                    oldest_key = min(_l1_ohlcv_cache.keys(), key=lambda k: _l1_ohlcv_cache[k][0])
-                    _l1_ohlcv_cache.pop(oldest_key, None)
+                    # O(1) FIFO eviction
+                    _l1_ohlcv_cache.pop(next(iter(_l1_ohlcv_cache)), None)
                 _l1_ohlcv_cache[sym] = (now_ts, df)
 
     return results

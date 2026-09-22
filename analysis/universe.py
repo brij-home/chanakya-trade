@@ -1682,24 +1682,18 @@ def get_stock_sector(symbol: str) -> tuple[str, str]:
     if clean in _STOCK_TO_SECTOR:
         return _STOCK_TO_SECTOR[clean]
 
-    # Dynamic fallback: check cached fundamentals or yfinance metadata
+    # Dynamic fallback: check local eod_store SQLite company_fundamentals (0ms local query)
     try:
-        from engine.analysis_cache import cache_get, cache_set
+        from engine.eod_store import _get_connection
 
-        cache_key = f"stock_sector:{clean}"
-        cached = cache_get(cache_key, namespace="universe", max_age_seconds=86400 * 7)
-        if cached and isinstance(cached, list) and len(cached) == 2:
-            _STOCK_TO_SECTOR[clean] = (cached[0], cached[1])
-            _STOCK_SECTOR_SOURCE[clean] = "CACHED_DYNAMIC_DISCOVERY"
-            return cached[0], cached[1]
-
-        # Inspect fundamental summary if available
-        from analysis.fundamental import analyse
-
-        fund = analyse(clean)
-        if fund and fund.sector:
-            gics_sec = fund.sector.strip()
-            gics_ind = (fund.industry or "").lower()
+        conn = _get_connection()
+        row = conn.execute(
+            "SELECT sector, industry FROM company_fundamentals WHERE symbol = ?",
+            (clean,),
+        ).fetchone()
+        if row and row["sector"]:
+            gics_sec = row["sector"].strip()
+            gics_ind = (row["industry"] or "").lower()
             mapped = _GICS_SECTOR_TO_SECTOR.get(gics_sec)
             if not mapped:
                 # Sub-industry heuristics
@@ -1729,14 +1723,17 @@ def get_stock_sector(symbol: str) -> tuple[str, str]:
 
             if mapped:
                 _STOCK_TO_SECTOR[clean] = mapped
-                _STOCK_SECTOR_SOURCE[clean] = "DYNAMIC_METADATA_DISCOVERY"
-                if fund.industry:
-                    _STOCK_INDUSTRY[clean] = fund.industry
-                cache_set(cache_key, list(mapped), namespace="universe", ttl_minutes=60 * 24 * 7)
+                _STOCK_SECTOR_SOURCE[clean] = "SQLITE_FUNDAMENTALS"
+                if row["industry"]:
+                    _STOCK_INDUSTRY[clean] = row["industry"]
                 return mapped
     except Exception:
         pass
 
+    # Strictly avoid external network calls during sector lookups.
+    # Default to broad market and memoize in _STOCK_TO_SECTOR.
+    _STOCK_TO_SECTOR[clean] = ("broad_market", "Broad Market")
+    _STOCK_SECTOR_SOURCE[clean] = "BROAD_MARKET_DEFAULT"
     return ("broad_market", "Broad Market")
 
 

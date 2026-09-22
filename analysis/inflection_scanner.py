@@ -755,7 +755,7 @@ def scan_inflections_universe(
     use_local_cache: bool = True,
     sync_missing: bool = True,
     exchange: str = "NSE",
-    parallel_workers: int = 16,
+    parallel_workers: int = 24,
     df_cache: Optional[dict[str, pd.DataFrame]] = None,
 ) -> InflectionScanResult:
     """
@@ -791,8 +791,9 @@ def scan_inflections_universe(
                 missing = [
                     s for s in symbols if s not in df_cache and not s.upper().startswith("DUMMY")
                 ]
-                # Auto-sync up to 60 missing symbols synchronously if explicitly requested
-                if missing and len(missing) <= 60:
+                # Auto-sync up to 60 missing symbols synchronously only for focused universes (<= 100 stocks)
+                # to prevent broad scans (2,000+ stocks) from blocking on obsolete/unlisted tickers
+                if missing and len(missing) <= 60 and len(symbols) <= 100:
                     sync_universe_eod(missing, exchange=exchange)
                     newly_cached = get_cached_ohlcv_batch(missing, days=300)
                     df_cache.update(newly_cached)

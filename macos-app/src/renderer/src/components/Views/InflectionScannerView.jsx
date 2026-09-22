@@ -82,6 +82,8 @@ export default function InflectionScannerView({
   const [chatLoading, setChatLoading] = useState(false)
   const chatScrollRef = useRef(null)
 
+  const scanAbortRef = useRef(null)
+
   // ── 1. Load Universes & Store Diagnostics on Mount ────────────────────
   const loadStoreStats = async () => {
     try {
@@ -107,6 +109,11 @@ export default function InflectionScannerView({
     }
     loadUniverses()
     loadStoreStats()
+    return () => {
+      if (scanAbortRef.current) {
+        try { scanAbortRef.current.abort() } catch {}
+      }
+    }
   }, [])
 
   // ── 2. Run Inflection Scan ──────────────────────────────────────────
@@ -115,8 +122,12 @@ export default function InflectionScannerView({
     overrideTurnover = minTurnoverCr,
     overrideCap = capTierFilter
   ) => {
-    setIsScanning(true)
+    if (scanAbortRef.current) {
+      try { scanAbortRef.current.abort() } catch {}
+    }
     const abortCtrl = new AbortController()
+    scanAbortRef.current = abortCtrl
+    setIsScanning(true)
 
     startActivity({
       title: 'Inflection & Multibagger Radar',
@@ -131,25 +142,33 @@ export default function InflectionScannerView({
     })
 
     try {
-      const res = await call('/skills/inflection_scan', {
-        universe: targetUniverse,
-        archetype: archetypeFilter,
-        timing: timingFilter,
-        min_score: minScore,
-        max_results: 60,
-        min_turnover_cr: overrideTurnover,
-        cap_tier: overrideCap,
-        use_local_cache: true,
-        sync_missing: false,
-      })
+      const res = await call(
+        '/skills/inflection_scan',
+        {
+          universe: targetUniverse,
+          archetype: archetypeFilter,
+          timing: timingFilter,
+          min_score: minScore,
+          max_results: 60,
+          min_turnover_cr: overrideTurnover,
+          cap_tier: overrideCap,
+          use_local_cache: true,
+          sync_missing: false,
+        },
+        { timeoutMs: 120000, signal: abortCtrl.signal }
+      )
       const resultData = res?.data ?? res
       setScanResult(resultData)
       setLastScanTime(new Date().toLocaleTimeString('en-IN', { hour12: false }))
     } catch (err) {
-      console.error('Inflection scan failed:', err)
+      if (err.name !== 'AbortError') {
+        console.error('Inflection scan failed:', err)
+      }
     } finally {
-      setIsScanning(false)
-      stopActivity()
+      if (scanAbortRef.current === abortCtrl) {
+        setIsScanning(false)
+        stopActivity()
+      }
     }
   }
 

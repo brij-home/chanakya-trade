@@ -3547,6 +3547,16 @@ async def skill_inflection_scan(req: InflectionScanSkillRequest):
     Uses local SQLite EOD store for zero-latency scanning.
     """
     import asyncio
+    from engine.analysis_cache import analysis_cache
+
+    cache_key = (
+        f"inflection_scan:{req.universe}:{req.archetype}:{req.timing}:"
+        f"{req.min_score}:{req.max_results}:{req.min_turnover_cr}:{req.cap_tier}"
+    )
+    if req.use_local_cache:
+        cached = analysis_cache.get_macro(cache_key, max_age_seconds=300)
+        if cached and isinstance(cached, dict):
+            return _ok(cached)
 
     def _scan():
         from analysis.inflection_scanner import scan_inflections_universe
@@ -3585,7 +3595,13 @@ async def skill_inflection_scan(req: InflectionScanSkillRequest):
 
     try:
         res = await asyncio.to_thread(_scan)
-        return _ok(res.to_dict())
+        res_dict = res.to_dict()
+        if req.use_local_cache:
+            try:
+                analysis_cache.save_macro(cache_key, res_dict, ttl_minutes=5)
+            except Exception:
+                pass
+        return _ok(res_dict)
     except Exception as e:
         raise _err(str(e))
 
