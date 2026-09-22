@@ -446,7 +446,43 @@ export default function OrderTicketModal({ isOpen, onClose, initialData = {}, ap
                   />
                 </div>
                 <div className="space-y-1">
-                  <span className="text-green text-[10px] uppercase font-ui font-semibold">Target</span>
+                  <div className="flex items-center justify-between">
+                    <span className="text-green text-[10px] uppercase font-ui font-semibold">Target</span>
+                    {(initialData.target2 || initialData.targetMoonshot) && (
+                      <div className="flex items-center gap-1 text-[9px] font-mono">
+                        {initialData.target && (
+                          <button
+                            type="button"
+                            onClick={() => setTarget(Number(initialData.target))}
+                            className={`px-1 rounded cursor-pointer transition-colors ${Number(target) === Number(initialData.target) ? 'bg-emerald-500/20 text-emerald-400 font-bold border border-emerald-500/40' : 'text-muted hover:text-text'}`}
+                            title={`T1 (+2R): ₹${Number(initialData.target).toFixed(1)}`}
+                          >
+                            T1
+                          </button>
+                        )}
+                        {initialData.target2 && (
+                          <button
+                            type="button"
+                            onClick={() => setTarget(Number(initialData.target2))}
+                            className={`px-1 rounded cursor-pointer transition-colors ${Number(target) === Number(initialData.target2) ? 'bg-amber-500/20 text-amber-400 font-bold border border-amber-500/40' : 'text-muted hover:text-text'}`}
+                            title={`T2 (+3.5R): ₹${Number(initialData.target2).toFixed(1)}`}
+                          >
+                            T2
+                          </button>
+                        )}
+                        {initialData.targetMoonshot && (
+                          <button
+                            type="button"
+                            onClick={() => setTarget(Number(initialData.targetMoonshot))}
+                            className={`px-1 rounded cursor-pointer transition-colors ${Number(target) === Number(initialData.targetMoonshot) ? 'bg-purple-500/20 text-purple-400 font-bold border border-purple-500/40' : 'text-muted hover:text-text'}`}
+                            title={`Moonshot T3 (+6.5R): ₹${Number(initialData.targetMoonshot).toFixed(1)}`}
+                          >
+                            🚀T3
+                          </button>
+                        )}
+                      </div>
+                    )}
+                  </div>
                   <input
                     type="number"
                     step="0.05"
