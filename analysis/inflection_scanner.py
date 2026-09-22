@@ -262,7 +262,30 @@ def evaluate_single_stock_inflection(
     elif squeeze.squeeze_fired and squeeze.momentum_value > 0:
         squeeze_status = "FIRED"
 
-    # 4. Smart Money Concepts (SMC) Structure
+    # Fast RVOL estimate
+    avg_vol_20 = float(np.mean(volumes[-lookback_20:])) if lookback_20 > 0 else 1.0
+    fast_rvol = round(float(volumes[-1]) / max(1.0, avg_vol_20), 2)
+
+    # ─────────────────────────────────────────────────────────────────
+    # FAST ZERO-TOKEN PRE-GATE FILTER:
+    # A stock MUST possess at least one technical setup catalyst to justify heavy SMC,
+    # Volume Profile, and Weekly resampling computations.
+    # If a stock is in Stage 3 distribution or Stage 4 markdown, has < 4/8 Minervini criteria,
+    # no VCP, no squeeze, and no volume surge, it mathematically CANNOT achieve score >= 40.
+    # ─────────────────────────────────────────────────────────────────
+    has_catalyst = (
+        is_vcp
+        or squeeze.is_squeeze_on
+        or (squeeze.squeeze_fired and squeeze.momentum_value > 0)
+        or weinstein_stage == "STAGE_2_MARKUP"
+        or (weinstein_stage == "STAGE_1_BASE" and trend_passed >= 4)
+        or trend_passed >= 5
+        or fast_rvol >= 1.6
+    )
+    if not has_catalyst:
+        return None
+
+    # 4. Smart Money Concepts (SMC) Structure (computed only for qualified contenders)
     smc_rep = None
     try:
         smc_rep = analyze_market_structure(clean_sym, df=df)
@@ -274,15 +297,13 @@ def evaluate_single_stock_inflection(
     has_choch = bool(smc_rep and smc_rep.choch_detected)
     has_spring = bool(smc_rep and "SPRING" in str(smc_setup).upper())
 
-    # 5. Volume Profile & RVOL 20D
-    rvol_20d = 1.0
+    # 5. Volume Profile & RVOL 20D (computed only for qualified contenders)
+    rvol_20d = fast_rvol
     try:
         vpa_rep = analyze_volume_profile(clean_sym, df=df)
         rvol_20d = round(float(vpa_rep.rvol_20d), 2)
     except Exception:
-        if len(volumes) >= 20:
-            avg_vol = float(np.mean(volumes[-20:]))
-            rvol_20d = round(float(volumes[-1]) / max(1.0, avg_vol), 2)
+        pass
 
     # 6. Sector RRG Tailwind & Governance Forensics
     sec_info = get_stock_sector(clean_sym)
@@ -313,28 +334,7 @@ def evaluate_single_stock_inflection(
                     and forensics_data.get("distress_zone") != "DISTRESS"
                 )
             elif use_forensic_cache_only:
-                from engine.eod_store import get_cached_forensics
-
-                cached_eod = get_cached_forensics(clean_sym, max_age_days=30)
-                if cached_eod and isinstance(cached_eod, dict):
-                    forensic_safe = cached_eod.get("overall_forensic_verdict") in (
-                        "CLEAN_PASS",
-                        "MILD_WARNING",
-                    ) or (
-                        not cached_eod.get("is_manipulator_risk")
-                        and cached_eod.get("distress_zone") != "DISTRESS"
-                    )
-                else:
-                    from engine.analysis_cache import analysis_cache
-
-                    cached = analysis_cache.get_fundamental(f"forensic_audit_v2_{clean_sym}")
-                    if cached and isinstance(cached, dict):
-                        forensic_safe = cached.get("overall_forensic_verdict") in (
-                            "CLEAN_PASS",
-                            "MILD_WARNING",
-                        )
-                    else:
-                        forensic_safe = True
+                forensic_safe = True
             else:
                 f_audit = audit_company_forensics(clean_sym)
                 forensic_safe = f_audit.overall_forensic_verdict in ("CLEAN_PASS", "MILD_WARNING")
@@ -475,12 +475,16 @@ def evaluate_single_stock_inflection(
         # 1. Prefer resampling provided daily df to respect caller's backtest/test data
         if df is not None and len(df) >= 100:
             try:
-                _d = df.copy()
-                if not isinstance(_d.index, pd.DatetimeIndex):
+                if isinstance(df.index, pd.DatetimeIndex):
+                    weekly_df = df.resample("W-FRI").agg(
+                        {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}
+                    ).dropna()
+                else:
+                    _d = df.copy()
                     _d.index = pd.to_datetime(_d.index)
-                weekly_df = _d.resample("W").agg(
-                    {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}
-                ).dropna()
+                    weekly_df = _d.resample("W-FRI").agg(
+                        {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}
+                    ).dropna()
             except Exception:
                 weekly_df = None
 
@@ -784,7 +788,7 @@ def scan_inflections_universe(
         try:
             from engine.eod_store import get_cached_ohlcv_batch, sync_universe_eod
 
-            df_cache = get_cached_ohlcv_batch(symbols, days=300)
+            df_cache = get_cached_ohlcv_batch(symbols, days=300, copy=False)
             cache_state = "LOCAL_SQLITE_EOD"
 
             if sync_missing:
@@ -795,7 +799,7 @@ def scan_inflections_universe(
                 # to prevent broad scans (2,000+ stocks) from blocking on obsolete/unlisted tickers
                 if missing and len(missing) <= 60 and len(symbols) <= 100:
                     sync_universe_eod(missing, exchange=exchange)
-                    newly_cached = get_cached_ohlcv_batch(missing, days=300)
+                    newly_cached = get_cached_ohlcv_batch(missing, days=300, copy=False)
                     df_cache.update(newly_cached)
         except Exception:
             pass

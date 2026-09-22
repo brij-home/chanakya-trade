@@ -120,8 +120,12 @@ export default function InflectionScannerView({
   const executeScan = async (
     targetUniverse = universe,
     overrideTurnover = minTurnoverCr,
-    overrideCap = capTierFilter
+    overrideCap = capTierFilter,
+    force = false
   ) => {
+    if (isScanning && !force) {
+      return
+    }
     if (scanAbortRef.current) {
       try { scanAbortRef.current.abort() } catch {}
     }
@@ -146,13 +150,13 @@ export default function InflectionScannerView({
         '/skills/inflection_scan',
         {
           universe: targetUniverse,
-          archetype: archetypeFilter,
-          timing: timingFilter,
-          min_score: minScore,
-          max_results: 60,
+          archetype: 'ALL',
+          timing: 'ALL',
+          min_score: 45,
+          max_results: 100,
           min_turnover_cr: overrideTurnover,
           cap_tier: overrideCap,
-          use_local_cache: true,
+          use_local_cache: !force,
           sync_missing: false,
         },
         { timeoutMs: 120000, signal: abortCtrl.signal }
@@ -191,7 +195,7 @@ export default function InflectionScannerView({
           `✓ Synced ${data.synced_count || 0} stocks (${data.failed_count || 0} failed) in ${data.duration_sec || 0}s`
         )
         // Auto re-scan using the newly cached EOD store
-        await executeScan(universe, minTurnoverCr, capTierFilter)
+        await executeScan(universe, minTurnoverCr, capTierFilter, true)
       }
       loadStoreStats()
     } catch (err) {
@@ -204,10 +208,10 @@ export default function InflectionScannerView({
     }
   }
 
-  // Trigger scan when universe, archetype, timing, minScore, minTurnoverCr, or capTierFilter changes
+  // Trigger scan when universe, minTurnoverCr, or capTierFilter changes (archetype, timing & score filter client-side instantly)
   useEffect(() => {
     executeScan(universe, minTurnoverCr, capTierFilter)
-  }, [universe, archetypeFilter, timingFilter, minScore, minTurnoverCr, capTierFilter])
+  }, [universe, minTurnoverCr, capTierFilter])
 
   // ── 3. Open AI Decision Matrix Drawer ───────────────────────────────
   const openDecisionDrawer = async (candidate) => {
@@ -732,7 +736,7 @@ export default function InflectionScannerView({
           {/* Rescan Button */}
           <button
             type="button"
-            onClick={() => executeScan(universe)}
+            onClick={() => executeScan(universe, minTurnoverCr, capTierFilter, true)}
             disabled={isScanning}
             className="flex items-center gap-1 text-xs font-bold px-2.5 py-1 rounded-lg border border-gold/40 bg-gold/15 text-amber-600 dark:text-amber-400 hover:bg-gold/25 shadow-xs cursor-pointer transition-all"
           >

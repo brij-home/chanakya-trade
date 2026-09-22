@@ -3538,6 +3538,10 @@ class InflectionChatSkillRequest(BaseModel):
     matrix: Optional[dict[str, Any]] = None
 
 
+_in_flight_inflection_scans: dict[str, Any] = {}
+_in_flight_inflection_lock = asyncio.Lock()
+
+
 @router.post("/inflection_scan")
 @router.post("/scan_inflections")
 async def skill_inflection_scan(req: InflectionScanSkillRequest):
@@ -3546,7 +3550,6 @@ async def skill_inflection_scan(req: InflectionScanSkillRequest):
     TTM squeezes, Stage 1->2 breakouts, SMC springs, and Sector RRG rotation.
     Uses local SQLite EOD store for zero-latency scanning.
     """
-    import asyncio
     from engine.analysis_cache import analysis_cache
 
     cache_key = (
@@ -3593,10 +3596,19 @@ async def skill_inflection_scan(req: InflectionScanSkillRequest):
 
         return res
 
+    is_originator = False
+    async with _in_flight_inflection_lock:
+        if cache_key in _in_flight_inflection_scans:
+            in_flight_task = _in_flight_inflection_scans[cache_key]
+        else:
+            in_flight_task = asyncio.create_task(asyncio.to_thread(_scan))
+            _in_flight_inflection_scans[cache_key] = in_flight_task
+            is_originator = True
+
     try:
-        res = await asyncio.to_thread(_scan)
-        res_dict = res.to_dict()
-        if req.use_local_cache:
+        res = await in_flight_task
+        res_dict = res.to_dict() if hasattr(res, "to_dict") else res
+        if is_originator and req.use_local_cache:
             try:
                 analysis_cache.save_macro(cache_key, res_dict, ttl_minutes=5)
             except Exception:
@@ -3604,6 +3616,10 @@ async def skill_inflection_scan(req: InflectionScanSkillRequest):
         return _ok(res_dict)
     except Exception as e:
         raise _err(str(e))
+    finally:
+        if is_originator:
+            async with _in_flight_inflection_lock:
+                _in_flight_inflection_scans.pop(cache_key, None)
 
 
 @router.post("/inflection_sync")
