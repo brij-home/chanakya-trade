@@ -235,9 +235,7 @@ def compute_allowed_actions(
     # ── Sector Concentration Limit (e.g. 30% of total capital) ──
     if max_sector_pct and max_sector_pct > 0:
         sector_limit = total_capital * max_sector_pct
-        existing_sector_value, sec_id, sec_name = _get_existing_sector_value(
-            sym, portfolio, prices
-        )
+        existing_sector_value, sec_id, sec_name = _get_existing_sector_value(sym, portfolio, prices)
         if sec_id and sec_id not in ("broad_market", "unknown", "currency", "etf"):
             remaining_sector_room = sector_limit - existing_sector_value
             if remaining_sector_room <= 0:

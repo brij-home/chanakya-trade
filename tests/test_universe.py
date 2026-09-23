@@ -140,7 +140,7 @@ def test_resolve_dynamic_universe_multi_asset_presets():
 def test_resolve_dynamic_universe_auto_sector():
     # Ensure "auto" resolves to Automobile sector taxonomy, NOT auto_market_aware
     auto_syms, reason = resolve_dynamic_universe("auto")
-    assert "TATAMOTORS" in auto_syms
+    assert "TMPV" in auto_syms or "TATAMOTORS" in auto_syms
     assert "MARUTI" in auto_syms
     assert "M&M" in auto_syms
     assert "Sector watchlist: Automobiles & Mobility" in reason

@@ -1,53 +1,48 @@
 # AGENTS.md — ChanakyaTrade Agent Guidelines
 
 > Operational handbook, architectural invariants, and institutional-grade standards for AI agents working in the `chanakya-trade` codebase.
+> Deep domain runbooks are maintained on-demand under [`.agents/skills/`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/.agents/skills).
 
 ---
 
 <!-- TOC -->
-- [1. Project Overview](#1-project-overview)
-- [2. Safety & Trading Guardrails](#2-safety--trading-guardrails)
+- [1. Project Overview & Component Map](#1-project-overview--component-map)
+- [2. Safety & Trading Guardrails (15 Core Invariants)](#2-safety--trading-guardrails-15-core-invariants)
 - [3. LLM Model Hierarchy & Multi-Key Resilience](#3-llm-model-hierarchy--multi-key-resilience)
-- [4. Architecture & Design Patterns](#4-architecture--design-patterns)
-- [5. Data Pipeline & Quality Standards](#5-data-pipeline--quality-standards)
-- [6. Frontend & UX Standards](#6-frontend--ux-standards)
-- [7. Operational Invariants & Lessons Learned](#7-operational-invariants--lessons-learned)
-- [8. Environment & Common Commands](#8-environment--common-commands)
-- [9. On-Demand Skills](#9-on-demand-skills)
+- [4. Environment & Common Commands](#4-environment--common-commands)
+- [5. On-Demand Skills Directory](#5-on-demand-skills-directory)
 <!-- /TOC -->
 
 ---
 
-## 1. Project Overview
+## 1. Project Overview & Component Map
 
 `ChanakyaTrade` is an institutional-grade **AI-Powered Strategic Quant Terminal & Multi-Agent Intelligence** for Indian Markets (**NSE, BSE, NFO, MCX**).
-
-### Component Map
 
 | Directory | Responsibility | Key Modules |
 | :--- | :--- | :--- |
 | **`agent/`** | Multi-agent reasoning, smart funnel, screening & debates | [`smart_funnel.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/agent/smart_funnel.py), [`multi_agent.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/agent/multi_agent.py), [`dag_orchestrator.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/agent/dag_orchestrator.py), [`personas.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/agent/personas.py), [`tools.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/agent/tools.py) |
 | **`analysis/`** | Quantitative sector rotation, forensic accounting, DCF, SMC & Multibagger | [`sector_rotation.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/analysis/sector_rotation.py), [`market_structure.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/analysis/market_structure.py), [`volume_profile.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/analysis/volume_profile.py), [`multibagger.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/analysis/multibagger.py), [`forensic.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/analysis/forensic.py), [`dcf.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/analysis/dcf.py) |
-| **`brokers/`** | Broker unified abstraction (data vs execution) | [`session.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/brokers/session.py), [`fyers.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/brokers/fyers.py) *(data)*, [`shoonya.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/brokers/shoonya.py) *(Noren data/execution)*, [`zerodha.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/brokers/zerodha.py) *(execution)*, [`angelone.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/brokers/angelone.py), [`groww.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/brokers/groww.py), [`upstox.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/brokers/upstox.py), [`mock.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/brokers/mock.py) |
-| **`engine/`** | Backtesting, risk gate, execution, sizing, lifecycle & cache | [`backtest.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/backtest.py), [`trade_lifecycle.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/trade_lifecycle.py), [`position_sizer.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/position_sizer.py), [`risk_gate.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/risk_gate.py), [`analysis_cache.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/analysis_cache.py), [`paper.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/paper.py), [`trader.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/trader.py) |
-| **`market/`** | Market feeds, options chain, quotes, sentiment & global macro | [`quotes.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/market/quotes.py), [`global_macro.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/market/global_macro.py), [`gift_nifty.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/market/gift_nifty.py), [`options.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/market/options.py), [`indices.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/market/indices.py), [`websocket.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/market/websocket.py), [`sentiment.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/market/sentiment.py) |
+| **`brokers/`** | Broker unified abstraction (data vs execution) | [`session.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/brokers/session.py), [`fyers.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/brokers/fyers.py), [`shoonya.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/brokers/shoonya.py), [`zerodha.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/brokers/zerodha.py), [`angelone.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/brokers/angelone.py), [`mstock.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/brokers/mstock.py), [`mock.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/brokers/mock.py) |
+| **`engine/`** | Backtesting, risk gate, execution, sizing, lifecycle & cache | [`backtest.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/backtest.py), [`trade_lifecycle.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/trade_lifecycle.py), [`position_sizer.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/position_sizer.py), [`risk_gate.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/risk_gate.py), [`auto_alert_engine.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/auto_alert_engine.py), [`alert_postmortem_runner.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/alert_postmortem_runner.py), [`paper.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/paper.py) |
+| **`market/`** | Market feeds, options chain, quotes, sentiment & global macro | [`quotes.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/market/quotes.py), [`global_macro.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/market/global_macro.py), [`gift_nifty.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/market/gift_nifty.py), [`options.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/market/options.py), [`indices.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/market/indices.py), [`mstock_websocket.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/market/mstock_websocket.py) |
 | **`web/`** | FastAPI sidecar API (port `8765`), OAuth & SSE | [`api.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/web/api.py), [`auth.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/web/auth.py), [`sse.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/web/sse.py), [`openclaw.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/web/openclaw.py), [`skills.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/web/skills.py) |
 | **`app/`** | Interactive REPL, CLI commands & launcher | [`main.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/app/main.py), [`repl.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/app/repl.py), [`commands/`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/app/commands) |
 | **`ui/`** | Rich terminal TUI & Textual widgets | [`app.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/ui/app.py), [`widgets/`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/ui/widgets) |
 | **`bot/`** | Telegram bot for remote trade management | [`telegram_bot.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/bot/telegram_bot.py) |
-| **`config/`** | Credential management (keychain + .env) & paths | [`credentials.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/config/credentials.py), [`paths.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/config/paths.py) |
+| **`config/`** | Centralized constants, encoding, credentials & paths | [`constants.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/config/constants.py), [`encoding.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/config/encoding.py), [`credentials.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/config/credentials.py) |
 | **`tests/`** | Comprehensive unit & integration tests | [`conftest.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/tests/conftest.py), 90+ test suites (deterministic, synthetic data) |
 
 ---
 
-## 2. Safety & Trading Guardrails
+## 2. Safety & Trading Guardrails (15 Core Invariants)
 
 > **⚠️ Never commit `.env` — see [`config/credentials.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/config/credentials.py) for secure token management.**
 
 1. **Default to Paper/Mock Mode**: `TRADING_MODE=PAPER` is the safety default. Never execute real broker orders without explicit user intent and double-confirmation.
 2. **Credential & Secret Protection**: Never commit, log, or hardcode API keys, TOTP secrets, or passwords. Use OS keychain storage via `config.credentials`.
 3. **SEBI IPv4 Network Binding**: Indian broker APIs enforce whitelisted IPv4 addresses. Keep the `socket.getaddrinfo` override intact in [`app/main.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/app/main.py).
-4. **Market Hours & IST**: Equity & F&O: 09:15–15:30 IST. MCX: up to 23:30/23:55 IST. Handle market-closed edge cases gracefully.
+4. **Market Hours & IST**: Equity & F&O: 09:15–15:30 IST. MCX: up to 23:30/23:55 IST. Centralized constants live in [`config/constants.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/config/constants.py).
 5. **Advisory Risk Friction (Co-Pilot, Not Police)**: When behavioral flags (loss streak ≥3, pyramiding into losers, daily loss cap) trigger, present mindful friction with coaching alternatives and double-confirmation — never hard-block without an escape path.
 6. **Live Execution Pipeline — Fail-Closed Contract** (enforced in [`engine/order_lifecycle.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/order_lifecycle.py)):
    - `execute_order_intent()` MUST call `assert_live_execution_allowed()` → pilot safety gate → `validate_pretrade()` → real `get_execution_broker().place_order()` in that order. Any short-circuit is a safety violation.
@@ -60,7 +55,7 @@
 7. **Mode Banner Truthfulness** (`GET /api/mode` in [`web/api.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/web/api.py)):
    - The canonical mapping is: `OBSERVE → DEMO`, `SIMULATE → PAPER`, `EXECUTE → LIVE`.
    - Do NOT add a fourth mode or let an unknown backend mode silently default to `PAPER`. Add it to the map or raise.
-   - ModeBanner.jsx reads exclusively from `/api/mode`; never infer mode client-side from other signals.
+   - ModeBanner reads exclusively from `/api/mode`; never infer mode client-side from other signals.
 8. **Security 360 Truthfulness Contract** ([`engine/security_360.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/security_360.py)):
    - If the live quote is unavailable or zero, return `_status="UNAVAILABLE"`, `decision=None`, empty lenses. Never use a hardcoded price fallback.
    - `valuation_fair_value` MUST come from a real DCF computation. Never return `price × 1.15`. Until DCF is wired, set to `None` with `valuation_status="UNAVAILABLE"`.
@@ -78,44 +73,26 @@
    - Deterministic Quantitative Fallback: If any LLM times out (18.0s) or is rate-limited, fall back to pure quantitative models (VIX + FII/DII + Minervini + SMC). Never output raw error strings, blank cards, or hallucinated placeholder numbers.
    - Honest Feed State: When live market data is unreachable, return explicit `UNAVAILABLE` or `DEGRADED` status codes — never substitute pleasant-looking mock data to conceal a disconnected feed.
 11. **Zero Hardcoding & Absolute Data Provenance**:
-   - Hardcoding static quotes, arbitrary multiples (e.g., `price * 1.15`), synthetic volumes, or pre-canned "CLEAN" forensic verdicts in production pathways is strictly prohibited. Real trading decisions involve real financial capital.
+   - Hardcoding static quotes, arbitrary multiples (e.g., `price * 1.15`), synthetic volumes, or pre-canned "CLEAN" forensic verdicts in production pathways is strictly prohibited.
    - Every market event and UI payload must carry unambiguous provenance tags (`REAL/LIVE`, `OFF-MARKET/EOD`, `TEST`, `DEGRADED`, `UNAVAILABLE`).
    - Exchange & Instrument Authority: Instrument specifications (lot size, tick size, token, segment) must resolve from canonical exchange masters, never from client assumptions.
 12. **Strong, Decisive & Actionable Logic (Zero Wishy-Washy Language)**:
-   - Output must be mathematically justified, crisp, and decisive. Eliminate indecisive filler (*"Stock could go up or it could go down"*).
-   - Every trade setup, radar candidate, or alert must provide a complete Actionable Blueprint:
-     - Exact Entry Zone (anchored to structural support or VWAP).
-     - Invalidation Stop-Loss (anchored to structural pivots: EMA support, base floor, VWAP, or straddle break-even).
-     - Target 1 (+2R Scale 50% & SL to Breakeven), Target 2 (+4R Extension), and Moonshot Runner (+6R+).
-     - Mathematical Risk:Reward ratio (strict $\ge 1:3.0$ R:R standard for asymmetric setups; reject unfavorable setups).
-     - Strict "NO CHASE" discipline (explicit price boundary beyond which entry is disqualified without a retest).
-     - Clear Profit-Taking Playbook (e.g., scale 40–50% at T1, trail remaining on 20-EMA / 3.0×ATR).
+   - Output must be mathematically justified, crisp, and decisive. Eliminate indecisive filler.
+   - Every trade setup, radar candidate, or alert must provide a complete Actionable Blueprint: Exact Entry Zone, Invalidation Stop-Loss, Target 1 (+2R Scale 50% & SL to Breakeven), Target 2 (+4R Extension), Runner (+6R+), R:R $\ge 1:3.0$, and explicit "NO CHASE" boundary.
 13. **Elimination of Architectural Anti-Patterns**:
-   - Fail-Closed Gate: Any error, timeout, or ambiguity in broker order pipelines must fail closed (status `REJECTED` or `UNKNOWN_FREEZE`). Never fabricate filled paper orders or fake live order IDs.
-   - Connection Hygiene: All HTTP requests must use `httpx` within `with` or `async with` context managers. No dangling TCP sockets.
-   - Concurrency Safety: Shared memory caches and state dictionaries must have thread locks (`threading.Lock()`) and LRU/TTL bounds to prevent memory leaks.
-   - Timezone Normalization: Enforce timezone-naive DatetimeIndex (`df.index.tz_localize(None)`) across all pandas computations.
-   - Exception Transparency: Never silently swallow exceptions (`except: pass`) without structured logging or telemetry emission.
-   - Frontend Hygiene: React components must never leave unhandled Promise rejections.
+   - Fail-Closed Gate: Any error, timeout, or ambiguity in broker order pipelines must fail closed (status `REJECTED` or `UNKNOWN_FREEZE`).
+   - Connection Hygiene: Wrap `httpx` and WebSockets in context managers. No dangling TCP sockets.
+   - Concurrency Safety: Shared caches must use thread locks and bounded LRU/TTL stores (see [`config/constants.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/config/constants.py)).
+   - Timezone Normalization: Enforce timezone-naive DatetimeIndex (`df.index.tz_localize(None)`) across pandas computations.
+   - Clean UTF-8: Call `fix_windows_console()` from [`config/encoding.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/config/encoding.py) at entrypoints. Zero mojibake encoding corruption.
 14. **Niche Institutional UI Aesthetics & Density**:
-   - Bloomberg / TradingView institutional density, compact padding (`p-2.5`, `gap-2`, `py-1 px-2` table cells), dark theme default with crisp typography (Google Inter for body, tabular monospace for numbers).
-   - Curated color tokens: 🟢 Emerald (`#10B981`) for profit/bullish, 🔴 Rose/Crimson (`#F43F5E`) for invalidation/stop-loss, 🟡 Amber/Gold (`#F59E0B`) for high conviction, 🟣 Indigo (`#6366F1`) for F&O, 🔵 Sky (`#0EA5E9`) for macro/indices.
-   - Smooth micro-interactions (`transition: transform 0.15s ease, opacity 0.2s`) and glassmorphism overlays (`backdrop-filter: blur(12px); background: rgba(0,0,0,0.45)`).
-   - 1-Click frictionless execution: all action buttons must immediately dispatch orders or ticket drafts (`autoSubmit: true`), never leaving the user stranded. Zero broken, blank, or generic toy mockups.
+   - Bloomberg / TradingView institutional density, compact padding (`p-2.5`, `gap-2`, `py-1 px-2` table cells), dark theme default with Inter font and tabular monospace numbers.
+   - Curated color tokens: 🟢 Emerald (`#10B981`) profit, 🔴 Rose (`#F43F5E`) stop-loss, 🟡 Amber (`#F59E0B`) conviction, 🟣 Indigo (`#6366F1`) F&O, 🔵 Sky (`#0EA5E9`) macro.
+   - 1-Click frictionless execution: all action buttons dispatch orders or ticket drafts (`autoSubmit: true`). Zero placeholders.
 15. **Holistic Architecture & Need-Basis AI Invariants**:
-   - **System Architecture First**: Always evaluate features, background loops, and bug fixes from the perspective of the whole terminal architecture. Never introduce myopic patches that create token bloat, rate-limiting bottlenecks, or cascading process failures.
-   - **Strict Need-Basis AI Invocation**: AI models must NEVER be invoked unconditionally or on raw market ticks/unfiltered scanner loops. Every AI request must be justified by asymmetric analytical necessity that pure deterministic quantitative logic cannot provide.
-   - **The 4-Stage Zero-Token Pre-LLM Filter**: Every setup, radar candidate, or alert must pass sequentially:
-     1. *Lockout Gate*: Verify market status and active alert cooldown locks.
-     2. *In-Memory Deduplication & TTL Cache*: Skip re-analyzing identical setups within a 90–120s TTL window.
-     3. *Deterministic Quantitative Conviction Gate*: Screen out weak setups (Minervini Stage != 2, technical confidence < 70%, unfavorable R:R) with 0 tokens spent.
-     4. *Local Pool Availability Circuit Breaker*: Check `is_pool_available()` locally before dispatching network requests; if all keys are cooling down, fast-fail locally in 0.001s without firing failing network requests.
-   - **Zero Truncation & Institutional Quality Buffer (MUST HAVE)**:
-     - **NEVER compromise on data quality, analytical depth, or allow output truncation**.
-     - Keep an optimal safety buffer (1.5× to 2.5× expected output length) on all bounded token allocations.
-     - Enforce production-grade defensive parsing: strict JSON parse → regex field extractor → deterministic quantitative zero-blackout fallback.
-     - Active Truncation Monitoring: Every provider inspects `finish_reason == "length"` to log telemetry warnings if an LLM touches its ceiling.
-     - Keep system prompts dense, concise, and structured. Strip conversational filler while strictly preserving 100% of analytical parameters.
+   - **Strict Need-Basis AI Invocation**: AI models must NEVER be invoked unconditionally on raw market ticks or unfiltered scanner loops.
+   - **4-Stage Zero-Token Pre-LLM Filter**: Lockout Gate → In-Memory TTL Dedup Cache → Deterministic Quantitative Conviction Gate → Local Pool Circuit Breaker.
+   - **Zero Truncation Guarantee**: Maintain bounded token allocations with a 1.5× to 2.5× safety buffer. Enforce defensive JSON parsing with deterministic quantitative zero-blackout fallback.
 
 ---
 
@@ -131,322 +108,64 @@
 | 4 | `qwen/qwen3.6-27b` | ~660 ms | ❌ No | Secondary fallback when primary models are throttled |
 | 5 | `groq/compound-mini` | — | ❌ No | Cheapest option for non-critical batch jobs |
 
-**Deprecated / Unavailable**: `llama-3.3-70b-versatile` — removed from Groq Cloud (returns `404 model_not_found`). Do NOT reference this model in any configuration.
-
-### Multi-Key Pooling & Self-Healing
-
-- **Comma-Separated Key Pools**: `GROQ_API_KEY=key1,key2[,key3]` in `.env` — the provider automatically round-robins across keys.
-- **Automatic Cooldown Rotation**: When any key hits `429 Too Many Requests` or TPM exhaustion, it enters a 45s cooldown and all traffic shifts to the next healthy key.
-- **Model Failover Chain**: If a model returns `404` or `401`, the system immediately tries the next model in the priority chain without user-visible delay.
-- **Deterministic Quantitative Fallback**: If ALL LLM providers fail, the system falls back to pure quantitative analysis (VIX + FII/DII + Minervini + SMC) — the terminal NEVER shows raw error strings or blank cards.
+**Deprecated**: `llama-3.3-70b-versatile` was removed from Groq Cloud (returns 404). Do NOT reference it.
 
 ### Other Supported LLM Providers
 
 | Provider | Env Var | Use Case |
 | :--- | :--- | :--- |
-| **Gemini** | `GEMINI_API_KEY` | Fast-LLM & Deep (`gemini-3.8-flash`, `gemini-3.7-flash`, `gemini-3.6-flash`, `gemini-3.5-flash-lite`) |
+| **Gemini** | `GEMINI_API_KEY` | Fast-LLM & Deep (`gemini-2.5-flash`, `gemini-2.0-flash`, `gemini-1.5-flash-latest`) |
 | **NVIDIA NIM** | `NVIDIA_API_KEY` | Deep reasoning (`meta/llama-3.3-70b-instruct`) |
 | **OpenRouter** | `OPENROUTER_API_KEY` | Multi-model gateway fallback |
-| **Anthropic** | `ANTHROPIC_API_KEY` | Deep reasoning (`claude-sonnet-4`) |
+| **Anthropic** | `ANTHROPIC_API_KEY` | Deep reasoning (`claude-sonnet-4-7`) |
 | **OpenAI** | `OPENAI_API_KEY` | Deep reasoning (`gpt-4o`, `o3-mini`) |
 
-### Dual-LLM Routing Contract
+### Dual-LLM Routing & Calibrated Token Budgets
 
-- **Fast-LLM** (`AI_FAST_PROVIDER`): Routes parallel debate rounds (Bull R1, Bear R1, Bull R2, Bear R2, Aggressive/Conservative risk) for sub-second extraction.
-- **Deep-LLM** (`AI_DEEP_PROVIDER`): Reserved for Facilitator consensus and final Fund Manager synthesis only.
-- All debate futures must be wrapped in defensive **18.0s timeout** wrappers with deterministic quantitative fallbacks.
-- Fast-fail on auth errors (`api_key_invalid`, `401`) immediately — no retry storms.
-- Dispatch SSE start pulse (`type="debate_step", step="starting"`) as Phase 2 begins.
-
-### 3.4 Token Efficiency, RPM & TPM Optimization Standards (Production Grade)
-
-- **The Groq TPM Reservation Penalty**: When `max_tokens` is omitted in OpenAI/Groq API calls, Groq defaults to 4,096 tokens and reserves `input_tokens + 4096` against the user's Tokens Per Minute (TPM) quota before generating the response. A single multi-agent run with 6 parallel rounds without bounded tokens reserves ~25,000 tokens, triggering immediate HTTP 429 rate limits.
-- **Calibrated Production-Grade Token Budgets (Zero Truncation Guarantee)**:
-  - `alert_scrutiny`: `max_tokens=500` (optimal 3× safety buffer over ~120-token JSON verdict; saves ~3,600 reserved tokens per check with zero truncation risk).
-  - `quick_scan`: `max_tokens=500` (generous 2× buffer for complete multi-point scan analysis).
-  - `persona_agent`: `max_tokens=650` (full room for detailed specialist persona insights).
-  - Multi-agent debate rounds (`bull_r1`, `bear_r1`, `bull_r2`, `bear_r2`, `risk_manager`): `max_tokens=550–650` (uncompromising analytical depth and specific price levels).
-  - Facilitator consensus: `max_tokens=850` (holistic multi-agent argument synthesis).
-  - Final Fund Manager synthesis: `max_tokens=1200` (comprehensive 5-stage trade execution plan, trailing rules, conviction score, zero cutoff).
-- **Cross-Provider Cascading Failover**:
-  - Primary provider (`Groq`) pools round-robin keys.
-  - If Groq pool is rate-limited, `CascadingLLMProvider` automatically routes traffic to secondary providers (`gemini-3.8-flash`, NVIDIA NIM, OpenRouter) seamlessly with zero user error.
-- **Strict Model Registry Accuracy**:
-  - Only active, verified models may be referenced in configurations, code, or prompts.
-  - Never reference deprecated or removed models (`llama-3.3-70b-versatile`, `gemini-2.0-flash`, `gemini-2.5-flash`).
+- **Fast-LLM** (`AI_FAST_PROVIDER`): Routes parallel debate rounds for sub-second extraction.
+- **Deep-LLM** (`AI_DEEP_PROVIDER`): Reserved for Facilitator consensus and final Fund Manager synthesis.
+- Wrap all debate futures in defensive **18.0s timeout** wrappers with deterministic quantitative fallbacks.
+- **Bounded Token Budgets**:
+  - `alert_scrutiny`: `max_tokens=500`
+  - `quick_scan`: `max_tokens=500`
+  - `persona_agent`: `max_tokens=650`
+  - Multi-agent debate rounds: `max_tokens=550–650`
+  - Facilitator consensus: `max_tokens=850`
+  - Fund Manager synthesis: `max_tokens=1200`
 
 ---
 
-## 4. Architecture & Design Patterns
+## 4. Environment & Common Commands
 
-### 4.1 AI Multi-Agent & Smart Funnel Pipeline
-
-1. **Stage 1 (Pure Quant Pre-Filter)**: 0-token deterministic screening on technicals, valuation, sector RRG momentum, forensic flags, and Minervini Stage 2 status.
-2. **Stage 2 (Macro & Sector Context)**: India VIX, NIFTY 50 breadth, FII/DII flows, Sector RRG rotation matrix.
-3. **Stage 3 (Adversarial Multi-Agent Debate & Persona Councils)**:
-   - Bull vs Bear analysts + **13 Specialist Personas**:
-     - *Value & Moat*: `buffett`, `munger`, `lynch`
-     - *Indian Growth & Multibaggers*: `jhunjhunwala`, `kedia` (SMILE Framework)
-     - *Momentum & Breakouts*: `minervini` (SEPA/VCP), `wyckoff` (VSA/Spring), `oneil` (CAN SLIM)
-     - *Macro, Quant & Convexity*: `soros`, `simons` (Statistical Arb), `taleb` (Defined-Risk)
-     - *Price Action & Liquidity*: `smc` (ICT Order Blocks & Sweeps)
-     - *Forensic Quality*: `forensic` (Beneish M-Score, Altman Z''-Score, Pledging)
-   - **Council Ensembles**: `breakout`, `options_sniper`, `multibagger`, `macro_regime`, `core_value`
-4. **Stage 4 (Fund Manager Synthesis)**: Final verdict with entry, stop-loss, targets, and position sizing.
-
-### 4.2 Quantitative & Risk Models
-
-- **SMC**: Fractal Swings, CHoCH/MSS reversals, BOS breakouts, Order Blocks, FVGs, Liquidity Sweeps.
-- **VPA**: RVOL 20D/50D, Wyckoff VSA, Volume Profile (POC, VAH, VAL).
-- **Multibagger Engine**: Minervini 8-point Trend Template, Weinstein Stage 2, VCP, Multibagger Score (0-100).
-- **Position Lifecycle**: Real-time R-multiple payoff, 2R Breakeven scale-out, Chandelier ATR Trail (3.0×ATR), 20-EMA trail.
-- **RRG Sector Rotation**: JdK RS-Ratio + RS-Momentum → LEADING / WEAKENING / LAGGING / IMPROVING.
-- **Forensic Accounting**: Beneish M-Score (>−1.78 flag), Altman Z''-Score (>2.60 SAFE), Piotroski F-Score, promoter pledging.
-- **Position Sizing**: ATR volatility risk-parity (1.5×ATR), Half-Kelly, F&O lot quantization.
-- **3-Axis Magic Trend**: Moat/Quality (35pts) + Growth/Migration (35pts) + Timing/Asymmetry (30pts).
-
-### 4.3 Broker Routing
-
-- **Fyers / Shoonya**: Primary candidates for market data & options chains; select through measured health/capability routing, never by hard-coded assumptions.
-- **Zerodha / Angel One / Groww / Upstox / Dhan / Stoxkart**: Execution & account management.
-- Use `get_data_broker()` only for market/historical data and `get_execution_broker()` only for accounts/orders. Role changes are explicit; connecting a broker must never reroute orders.
-
-### 4.4 Real-Time Data Feed Strategy
-
-- **Canonical event boundary**: Every stream/REST snapshot carries provider, provider symbol/token, source, exchange timestamp (when supplied), local receive timestamp, sequence (when supplied), quality flags, and data state.
-- **Fallback**: REST polling or delayed yfinance data must be marked `LIVE`, `DELAYED`, `EOD`, `DEGRADED`, or `UNAVAILABLE` accurately; no UI may imply live data without evidence.
-- **Pilot failover**: A degraded feed pauses new position increases but retains cancellation/user-controlled exits. Never auto-route an order to another broker.
-
-### 4.5 Global Macro Transmission & Multi-Asset Universe Taxonomy
-
-- **The High-Correlation 6** ([`market/global_macro.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/market/global_macro.py)):
-  - **GIFT NIFTY (NSE IFSC)**: ~0.96 Correlation to NIFTY 50 opening price. Computes `implied_nifty_gap_pct` and `implied_nifty_gap_pts`.
-  - **NASDAQ 100 (`^IXIC`) & S&P 500 (`^GSPC`)**: ~0.82 Correlation to Indian IT Services (`TCS`, `INFY`, `HCLTECH`, `COFORGE`).
-  - **US Dollar Index (DXY) & USD/INR (`INR=X`)**: -0.74 Correlation with FII foreign equity flows.
-  - **Brent Crude Oil (`BZ=F`)**: Bipolar correlation — Negative (-0.78) for Paints (`ASIANPAINT`), Aviation (`INDIGO`), Tyres, OMCs; Positive (+0.82) for Upstream Exploration (`ONGC`, `OIL`, `RELIANCE`).
-  - **US 10-Year Treasury Yield (`^TNX`)**: -0.70 Correlation to High-PE growth valuations and multiple compression.
-  - **US VIX vs India VIX**: Volatility contagion and options writing risk-parity.
-- **Multi-Asset Universe Segmentation** ([`analysis/universe.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/analysis/universe.py)):
-  - Intelligent auto-exchange prefix resolution:
-    - Commodities (`GOLD`, `SILVER`, `CRUDEOIL`, `NATURALGAS`, `COPPER`) → `MCX:`
-    - Currency pairs (`USDINR`, `EURINR`, `GBPINR`, `JPYINR`) → `CDS:`
-    - BSE Indices (`SENSEX`, `BANKEX`) → `BSE:`
-    - Equities & benchmark indices → `NSE:`
-  - Dual-key quote dictionary lookup ensures queries for `GOLD` or `MCX:GOLD` resolve without KeyError.
-- **MCX Commodity Quotation Unit Normalization** ([`market/yfinance_provider.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/market/yfinance_provider.py)):
-  - COMEX/NYMEX futures on `yfinance` quote in US physical units (`GC=F` in USD/troy oz, `SI=F` in USD/troy oz, `HG=F` in USD/lb, `CL=F` in USD/bbl).
-  - For MCX display, multiply by USD/INR rate AND standard physical quotation unit multipliers:
-    - **Gold (`GC=F`)**: $\times \text{USDINR} \times (10 / 31.1034768)$ (₹ per 10 grams)
-    - **Silver (`SI=F`)**: $\times \text{USDINR} \times (1000 / 31.1034768)$ (₹ per 1 kg)
-    - **Copper (`HG=F`)**: $\times \text{USDINR} \times 2.20462262$ (₹ per 1 kg)
-    - **Crude Oil (`CL=F`) / Natural Gas (`NG=F`)**: $\times \text{USDINR} \times 1.0$ (₹ per bbl / MMBtu)
-  - Applied uniformly to both live quotes and historical OHLCV chart feeds.
-- **Zero Static / False Data Policy**: Macro indicators and quotes MUST be fetched dynamically from real live feeds (`yfinance` fast_info, Fyers WebSocket, NSE IFSC). Static mock fallbacks are strictly prohibited in production pathways.
-
----
-
-## 5. Data Pipeline & Quality Standards
-
-1. **Transparent Provenance**: Every market payload must include source/provider, data state, receipt time, canonical instrument identity, and quality flags. EOD analysis also carries a replayable snapshot ID and as-of cutoff.
-2. **Cache Architecture**: SQLite `analysis_cache` with TTL (5min live quotes, 15min RRG/macro, 24h fundamentals).
-3. **Never Cache Empty Results**: Guard `cache_set` with `if len(results) > 0:`. Treat empty cache reads as misses.
-4. **Single-Source OHLCV**: Fetch 250D Daily OHLCV once, pass in-memory to all analyzers (66% network reduction).
-5. **Timezone Normalization**: Enforce tz-naive DatetimeIndex (`df.index.tz_localize(None)`) everywhere. Never mix tz-aware and tz-naive timestamps.
-6. **Bounded In-Memory Caches**: All dicts (`_df_memory_cache`, `_chat_sessions`, `_sessions`) must have LRU eviction and TTL to prevent memory growth.
-7. **Connection Hygiene**: Wrap `httpx.Client` in `with` context managers. No dangling TCP sockets.
-8. **Telemetry Observability**: Every fallback (`LLM_FAILOVER`, `LLM_COOLDOWN`, `QUANT_FALLBACK`, `DATA_FALLBACK`, `BROKER_FAILOVER`, `EXCEPTION`) emits structured telemetry via [`engine/telemetry.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/engine/telemetry.py).
-9. **Dynamic Cross-Module Pipeline Invariants**: Cross-module analytical interfaces (`get_stock_tailwind` in [`analysis/sector_rotation.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/analysis/sector_rotation.py), `audit_company_forensics` in [`analysis/forensic.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/analysis/forensic.py), and `get_options_chain` in [`market/options.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/market/options.py)) MUST always return structured objects with uniform attribute & dictionary compatibility (`StockTailwind`, `ForensicAuditResult`) and dynamic fallback chains without ever returning static mock fallbacks in production pathways.
-10. **Pilot data retention**: Retain EOD snapshots long term; retain raw real-time events for 7–30 days and order/fill/audit evidence for at least 90 days. Use local SQLite/JSONL before adding external infrastructure.
-11. **Derivative authority**: F&O execution requires a current provider-verified instrument master record with token, lot and tick size. Static contract assumptions are never executable authority.
-
----
-
-## 6. Frontend & UX Standards
-
-### 6.1 Theme & Visual Design
-- **Default dark theme**; users can toggle to light via the `ThemeToggle` component.
-- **Glass-morphism overlays** for modals: `backdrop-filter: blur(12px); background: rgba(0,0,0,0.45)`.
-- **Inter font** from Google Fonts for all body text; monospace for data tables.
-- **Micro-animations**: `transition: transform 0.15s ease, opacity 0.2s` on cards, buttons, hover states.
-- **Institutional density**: Bloomberg/TradingView-style compact padding (`p-2.5 sm:p-3.5`, `gap-2.5`, `py-1 px-2` table cells).
-
-### 6.2 Interaction Patterns
-- **1-Click Frictionless Execution**: Use `sendDraft(text)` (`autoSubmit: true`) — never `setDraft(text)` for action buttons.
-- **Modal Dismiss**: All modals support backdrop click dismiss + `e.stopPropagation()`. No blocking `alert()` popups.
-- **Bi-directional Navigation**: Sticky `← 🏠 Dashboard` button and `← Return to Active View` banner between dashboard and analysis cards.
-- **Zero-Latency Cancellation**: Wire `AbortController` + `⛔ Stop` buttons for all streaming operations.
-- **Progressive Stage Indicators**: `⚡ Initializing...` → `🔍 Technicals & Patterns...` → `🔬 Cross-Examination...` → `⚖️ Consensus...`
-
-### 6.3 Data Presentation
-- **Top-Conviction Radar**: Show 10 items on ≥1280px screens, 5 on smaller viewports.
-- **Signal Hierarchy**: `🟢 READY` / `🟡 STALK` / `🔴 STAND_DOWN` with concrete Entry, Stop-Loss, Target 1 (2R), Target 2 (3.5R).
-- **High-Density Controls**: Multi-factor filtering, multi-column sorting, instant fuzzy search, paginated navigation (5/10/20 per page).
-- **Smart Typeahead**: Punctuation-agnostic fuzzy match across symbols, company names, aliases, sectors. Category badges (`[STOCK]`, `[INDEX]`, `[ETF]`, `[COMMODITY]`). Full keyboard navigation (`↑/↓`, `Enter`, `Tab`, `Esc`).
-- **Dynamic Chart Viewport**: `Math.max(520, window.innerHeight * 0.92 - 95)` for fullscreen charts. OB ribbons at 1.5–2.5% alpha. 1-click `⟲ Reset View`.
-- **Options Chain**: Mathematical ATM strike index (`min(abs(strike - spot))`), ≥41 strikes coverage.
-
-### 6.4 React & Build Standards
-- **Hook Purity**: Hooks MUST be unconditional at the top of every component. Never place early returns before hooks.
-- **Error Boundaries**: Every global modal and dynamic card wrapped in `<ErrorBoundary>` with graceful fallback.
-- **AST Hook Linting**: `node scripts/audit-react-hooks.js` enforces 0 violations in `npm test` and `npm run build:web`.
-- **Root Error Boundary**: Wrap root app in [`main.jsx`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/macos-app/src/renderer/src/main.jsx) to prevent white screens.
-- **Web Mode & Dual-Target Sync**: Support standalone browser access (`window.__CHANAKYA_TRADE_WEB__ || !window.electronAPI`) with fallback port `8765`. Whenever modifying React files in `macos-app/src/renderer/`, run `npm run build:web` to ensure `web/static/` is synchronized for production/offline mode. In dev mode, FastAPI port 8765 automatically redirects to Vite port 5173 for live HMR.
-
-### 6.5 JSDoc & TypeScript Type Contracts
-- **Type Definitions Repository**: All frontend data models are strongly typed in [`renderer/src/types/`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/macos-app/src/renderer/src/types/) (`contracts.ts`, `market.js`, `options.js`, `personas.js`, `backtest.js`, `index.js`).
-- **Mixed TS Support**: Configured via [`tsconfig.json`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/macos-app/tsconfig.json) (`allowJs: true`, `@/*` path alias) for zero-friction mixed JavaScript & TypeScript development.
-- **1:1 Backend Parity**: Frontend types mirror Python Pydantic backend models in `engine/` and `agent/personas.py`.
-- **Defensive Unwrapping**: Always normalize API responses via `const data = res?.data ?? res`.
-
-### 6.6 9-Workspace Navigational Architecture
-- **Persistent ActivityBar Rail**: 48px left rail with keyboard shortcut index:
-  - `^1`: **Strategic Quant Terminal** (4-column layout with Symbol header, Lightweight Charts, and Trade Desk Rail)
-  - `^2`: **Multi-Agent Debate Arena** (4-stage pipeline stepper + 13-member 3D flippable council cards)
-  - `^3`: **Options & GEX Desk** (Bloomberg-style chain + Payoff Simulator)
-  - `^4`: **AI Copilot** (Progressive typing wave + chronological date-grouped sessions)
-  - `^5`: **Market Overview** (VIX gauge, RRG mini-map, FII/DII flow tracker)
-  - `^6`: **Portfolio Doctor Pro** (Concentration & SEPA compliance diagnostics)
-  - `^7`: **Alerts Manager** (Price & technical threshold monitors)
-  - `^8`: **Trade Journal** (GitHub-style Win/Loss Calendar Heatmap + realized P&L stats)
-  - `^9`: **Backtest Studio** (Interactive equity progression vs NIFTY 50 + trade execution ledger)
-
-### 6.7 Indian Currency & Number Formatting Standard
-- **Utility**: Always use [`formatINR.js`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/macos-app/src/renderer/src/utils/formatINR.js) (`formatINR`, `formatINRFull`, `formatPct`, `formatVol`) for all price, P&L, turnover, and volume values.
-- **Units**: Automatic scaling (`₹Cr`, `₹L`, `₹K`) with null/NaN defensive guards and ₹ currency prefix.
-
-### 6.8 Human-Readable, Crisp & Decisive Communication Standard
-- **Zero Raw LaTeX or Cryptic Syntax**: Never output raw LaTeX math (e.g. `$\text{OI} \ge 35{,}000$`, `$\times$`, `$\le$`) in assistant responses, UI tooltips, card descriptions, or trade commentary. Always express conditions in natural, human-readable English (e.g., *"At least 35,000 Open Interest and 40,000 Volume"*).
-- **Crisp, Articulate & Decisive**: Avoid essays, long preamble, and narrative filler unless explicitly requested. Deliver actionable conclusions, price zones, conviction scores, and risk parameters immediately.
-- **High Scannability**: Use clean bullet points, bold key terms, and visual state badges (`🟢 READY`, `🔴 STAND_DOWN`, `⚡ TRIGGER NOW`, `🎯 TARGET 1`) instead of monolithic text walls.
-- **Trader Intuition First**: Translate technical and quantitative thresholds into intuitive market behavior (e.g., *"Call writers unwinding positions"*, *"Put support breaking down"*, *"Heavy buyer aggression"*) rather than academic formulas or raw code variables.
-- **Zero Mojibake & Clean UTF-8 Standard**: The terminal is built for humans, not machines. Never permit mojibake encoding corruption (e.g., `ðŸš€`, `ðŸ’Ž`, `âš¡`, `â€”`). All files must be read and written strictly with `encoding="utf-8"`, and Windows console output must reconfigure stdout via `sys.stdout.reconfigure(encoding="utf-8", errors="replace")`. Automated static code audit in [`tests/test_data_integrity_audit.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/tests/test_data_integrity_audit.py) enforces 0 mojibake occurrences across all Python and JavaScript source files. Frontend views must sanitize all dynamic labels via [`cleanText.js`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/macos-app/src/renderer/src/utils/cleanText.js).
-
----
-
-## 7. Operational Invariants & Lessons Learned
-
-### 7.1 Testing & CI
-1. **Deterministic Test Isolation**: All unit tests run in <1s with synthetic data — no live HTTP calls. Enforced via `CHANAKYA_TESTING=1` and `sanitize_test_env` in `conftest.py`.
-2. **Windows Concurrency**: Use `scripts\test.ps1` (or `.venv\Scripts\python.exe -m pytest`) with cooperative thread teardowns to prevent worker accumulation. The bootstrap wrapper repairs stale venvs before tests.
-3. **Tiered Validation Gates**:
-   - **Environment Bootstrap**: `scripts\bootstrap.ps1` (Windows) or `scripts/bootstrap.sh` (POSIX) creates/repairs `.venv` and installs `.[dev]`; it never trusts an unusable venv.
-   - **Fast Pre-Commit Gate (< 8s)**: `.venv\Scripts\python.exe scripts/validate_all.py --fast` (Ruff lint + Format + React Hook AST audit + Vitest + Fast smoke matrix).
-   - **Full Pre-Push Gate (< 30s)**: `.venv\Scripts\python.exe scripts/validate_all.py --full` (All linters + Vitest + Web build + Full 2,188+ test matrix with 4 workers).
-   - **Daily / Nightly Deep Regression**: `.venv\Scripts\python.exe scripts/validate_daily.py` (Full matrix + Monte Carlo & options stress tests + Live network integration).
-   - **Environment & Process Cleanup**: `.venv\Scripts\python.exe scripts/cleanup.py` (Purges orphaned workers, frees port 8765, removes temp sqlite lock files).
-4. **New Execution & Truthfulness Test Suites** (must stay green at all times):
-   - [`tests/test_live_oms_p3b.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/tests/test_live_oms_p3b.py) — Kill switch, pre-trade gate, OMS state machine, and live execution safety gates (REJECTED on paper error, UNKNOWN_FREEZE on broker timeout).
-   - [`tests/test_mode_banner_mapping.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/tests/test_mode_banner_mapping.py) — `GET /api/mode` canonical mapping (`OBSERVE/SIMULATE/EXECUTE` → `DEMO/PAPER/LIVE`).
-   - [`tests/test_security_360_unavailable.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/tests/test_security_360_unavailable.py) — Security 360 truthfulness (no hardcoded price, valuation, forensic status, or lenses).
-   - [`tests/test_reconciliation_unavailable.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/tests/test_reconciliation_unavailable.py) — Reconciliation returns `UNAVAILABLE` without a real broker snapshot; never self-compares.
-5. **Conventional Commits**: `feat:`, `fix:`, `refactor:`, `test:`, `docs:`, `perf:`. No AI attribution headers.
-6. **Always request explicit user confirmation** before executing `git commit` or `git push`.
-
-### 7.2 Server & Daemon Lifecycle
-6. **Thread Lifecycle & Cooperative Cancellation**: All background pollers in `engine/` MUST use `self._stop_event = threading.Event()`, wait on `self._stop_event.wait(timeout=...)` instead of blocking `time.sleep()`, and provide clean `.join(timeout=1.0)` in `stop_polling()`.
-7. **Hot-Reload Awareness & Seamless Service Lifecycle**: Never let long-running server loops (`uvicorn`, `electron-vite dev`) run inside Antigravity's internal conversation task manager; this keeps the IDE in a "running background tasks" state and locks the user's prompt box. Use `scripts/service.ps1 -Action [start|restart|stop|status]` (or `scripts/dev.ps1 -Detached`), which spawns processes completely detached outside the parent Job Object via WMI, verifies healthy socket binding on ports `8765` & `5173`, and exits immediately in < 3s, leaving 0 background tasks in the assistant session.
-8. **API Route Aliasing**: Register aliases (`/high_conviction` + `/top_conviction`, `/taxonomy` + `/universe_categories`) with both GET and POST to prevent 404s.
-
-### 7.3 LLM Provider Management
-9. **Module Root Auto-loading**: Execute `load_dotenv()` and `config.credentials.load_all()` at module root in [`agent/core.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/agent/core.py) and [`agent/persona_agent.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/agent/persona_agent.py), guarded by `if not os.environ.get("CHANAKYA_TESTING"):`.
-10. **Keyring Precedence**: Never let stale keychain tokens override active `.env` keys. Filter out placeholders.
-11. **Provider-Specific Model Isolation**: Groq, NVIDIA NIM, OpenRouter, and Gemini must each resolve to their own model IDs — no global `AI_MODEL` crosstalk.
-12. **ToolRegistry Contract**: Always expose `.get_fn(name)` alongside `.execute(name, args)`.
-
-### 7.4 Quantitative Engine
-13. **Dynamic Risk Calibration**: Never use static legacy price levels. Compute levels from live price + ATR.
-14. **Directional Integrity**: Trade actions must match market structure score. Never default `LONG` when bearish.
-15. **Trade Ticket Completeness**: Every setup must include: timeline horizon, thesis, trailing stop rules.
-
-### 7.5 Architecture Principles
-16. **RCA First**: Diagnose root causes across the full stack. No surface-level band-aids.
-17. **Living Documentation**: Update `AGENTS.md` and skill runbooks when new invariants are discovered.
-18. **Self-Healing Resilience**: Multi-key pools → model failover chains → deterministic quant fallback. Terminal never shows raw errors.
-19. **Python Linting**: `ruff check .` + `ruff format --check .` before commits. Zero undefined variable names.
-
-### 7.6 Holistic Invariant Architecture & Zero-Patchwork Engineering Standard
-20. **Single Source of Truth (SSOT) at Ingress Boundaries**:
-    - Never write localized `if (symbol === '...')` or `exchange || 'NSE'` ternary expressions inside individual UI cards or individual route handlers.
-    - All incoming instruments MUST pass through canonical normalizers at architectural boundaries:
-      - **Backend**: Inherit from `InstrumentBaseRequest(BaseModel)` in [`web/skills.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/web/skills.py) which auto-resolves `(symbol, exchange)` via `analysis.universe.normalize_symbol_exchange()`.
-      - **Frontend**: Call `resolveInstrument(rawSymbol, rawExchange)` in [`universeData.js`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/macos-app/src/renderer/src/data/universeData.js) across stores, input bars, typeaheads, and cards.
-21. **Full Blast-Radius Auditing Protocol (No Piecemeal Fixes)**:
-    - Whenever a domain rule or invariant is added/modified (e.g. multi-asset exchange mapping, formatting, risk rules, date handling), the agent MUST audit ALL 6 layers of the stack in the same pass:
-      1. Schemas & Type Contracts (`web/skills.py`, `renderer/src/types/`)
-      2. Core Logic & Analyzers (`agent/multi_agent.py`, `engine/`, `analysis/`)
-      3. Backend APIs & Daemons (`web/api.py`, `web/skills.py`)
-      4. Store & State Layer (`chatStore.js`, `inspectorStore.js`)
-      5. Ingress & OmniSearch Routing (`InputBar.jsx`, `CommandPalette.jsx`, `SmartTypeahead.jsx`, `universeData.js`)
-      6. Output Presentation & Views (`StreamingAnalysisCard.jsx`, `AnalysisCard.jsx`, `QuoteCard.jsx`, Workspace Views)
-22. **Cross-Asset Taxonomy Matrix Testing**:
-    - Every change touching symbols, quotes, or cards MUST be tested against the full asset taxonomy matrix:
-      `[Equity (RELIANCE), Commodity (GOLD, CRUDEOIL), Forex (USDINR), Index (NIFTY50, SENSEX), ETF (GOLDBEES)]`
-    - Test suites ([`tests/test_taxonomy_matrix.py`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/tests/test_taxonomy_matrix.py) and [`macos-app/src/__tests__/taxonomyMatrix.test.js`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/macos-app/src/__tests__/taxonomyMatrix.test.js)) must verify zero fallback leakage of default values (`NSE`) to non-NSE assets.
-23. **Zero Legacy Drift**:
-    - Purge hardcoded fallback defaults at the root instead of layering defensive wrappers over stale code.
-
----
-
-## 8. Environment & Common Commands
-
-### Running Validation Gates
 ```powershell
-# Fast local pre-commit check (< 8s)
-.venv\Scripts\python.exe scripts/validate_all.py --fast
-
-# Full CI/CD pre-push gate (2,188+ tests + Web build, < 30s)
-.venv\Scripts\python.exe scripts/validate_all.py --full
-
-# Daily/Nightly deep regression & simulation runner
-.venv\Scripts\python.exe scripts/validate_daily.py
-
-# Universal process & resource cleanup
-.venv\Scripts\python.exe scripts/cleanup.py
-```
-
-### Running Tests
-```powershell
-# Complete fast test suite (skips network/slow tests)
-.venv\Scripts\pytest.exe -n 4
-
-# Specific test suite with verbose output
-.venv\Scripts\pytest.exe tests/test_smart_funnel.py -v
-
-# Single process debug mode
-.venv\Scripts\pytest.exe tests/test_schemas.py -n 0 -s
-```
-
-### Running the Application
-```powershell
-# Seamless Background Services (Detached — zero chat lock, 0 agent tasks)
+# Services & Lifecycle (Detached background daemon — 0 agent tasks, no prompt lock)
 powershell -ExecutionPolicy Bypass -File scripts\service.ps1 -Action restart
-
-# Service Health & Port Status Check
 powershell -ExecutionPolicy Bypass -File scripts\service.ps1 -Action status
-
-# Stop All Background Services
 powershell -ExecutionPolicy Bypass -File scripts\service.ps1 -Action stop
 
-# Interactive terminal CLI (no broker / demo mode)
-.venv\Scripts\python.exe -m app.main --no-broker
+# Fast Pre-Commit Gate (< 8s)
+python scripts/validate_all.py --fast
 
-# Textual TUI
-.venv\Scripts\python.exe -m app.main --tui
+# Full CI/CD Pre-Push Gate (< 30s)
+python scripts/validate_all.py --full
 
-# FastAPI Sidecar Web Server in foreground
-.venv\Scripts\python.exe -m uvicorn web.api:app --host 127.0.0.1 --port 8765 --reload
+# Targeted Test Execution
+& "C:\Users\brije\AppData\Local\Programs\Python\Python312\python.exe" -m pytest tests/test_skills.py -v
 ```
 
 ---
 
-## 9. On-Demand Skills
+## 5. On-Demand Skills Directory
 
-Specialized step-by-step runbooks under [`.agents/skills/`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/.agents/skills):
+Detailed architectural runbooks and step-by-step procedures are maintained under [`.agents/skills/`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/.agents/skills):
 
 | Skill | File | Purpose |
 | :--- | :--- | :--- |
-| **Backtesting** | [`.agents/skills/backtesting/SKILL.md`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/.agents/skills/backtesting/SKILL.md) | Vectorized & regime-based strategy backtesting, options backtesting |
-| **Broker Management** | [`.agents/skills/broker-management/SKILL.md`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/.agents/skills/broker-management/SKILL.md) | Adding/debugging broker auth, OAuth callbacks, TOTP login |
-| **Multi-Agent System** | [`.agents/skills/multi-agent-system/SKILL.md`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/.agents/skills/multi-agent-system/SKILL.md) | Smart Funnel, persona agents, Dual-LLM routing, tool definitions |
+| **Live Trading Execution** | [`.agents/skills/live-trading-execution/SKILL.md`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/.agents/skills/live-trading-execution/SKILL.md) | Order lifecycle state machine, safety gates, UNKNOWN_FREEZE, reconciliation honesty |
+| **Alert System** | [`.agents/skills/alert-system/SKILL.md`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/.agents/skills/alert-system/SKILL.md) | Alert lifecycle, 4-stage pre-LLM filter, detector registration, scrutiny tiers |
+| **Frontend Development** | [`.agents/skills/frontend-development/SKILL.md`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/.agents/skills/frontend-development/SKILL.md) | React/Electron component architecture, Bloomberg color tokens, SSE, build pipeline |
+| **Multi-Agent System** | [`.agents/skills/multi-agent-system/SKILL.md`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/.agents/skills/multi-agent-system/SKILL.md) | Smart Funnel, 13 specialist personas, Dual-LLM routing, tool definitions |
 | **Quantitative Analysis** | [`.agents/skills/quantitative-analysis/SKILL.md`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/.agents/skills/quantitative-analysis/SKILL.md) | RRG, Forensic audits, SMC, VPA, Position sizing, Trade lifecycle |
 | **FastAPI Sidecar** | [`.agents/skills/fastapi-sidecar/SKILL.md`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/.agents/skills/fastapi-sidecar/SKILL.md) | REST endpoints, SSE streaming, OAuth handlers, frontend bridges |
+| **Broker Management** | [`.agents/skills/broker-management/SKILL.md`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/.agents/skills/broker-management/SKILL.md) | Adding/debugging broker auth, OAuth callbacks, TOTP login |
+| **Backtesting** | [`.agents/skills/backtesting/SKILL.md`](file:///c:/Users/brije/.gemini/antigravity/scratch/chanakya-trade/.agents/skills/backtesting/SKILL.md) | Vectorized & regime-based strategy backtesting, options backtesting |

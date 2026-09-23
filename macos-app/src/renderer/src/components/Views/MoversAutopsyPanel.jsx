@@ -75,16 +75,20 @@ export default function MoversAutopsyPanel({ onOpenOrderTicket }) {
   }
 
   const handleBuy = (cand) => {
+    const isShort = cand.direction === 'BEARISH' || cand.setup_type === 'TURTLE_SOUP_SHORT'
+    const isCondor = cand.direction === 'NEUTRAL' || cand.setup_type === 'IRON_CONDOR_PINNING'
+    const side = isShort ? 'SELL' : 'BUY'
     if (onOpenOrderTicket) {
       onOpenOrderTicket({
         symbol: cand.symbol,
         exchange: cand.exchange || 'NSE',
-        side: 'BUY',
+        side: side,
         limitPrice: cand.ltp,
         triggerPrice: cand.stop_loss,
       })
     } else {
-      sendDraft(`buy ${cand.symbol} 1 @ limit ${cand.ltp}`, { autoSubmit: false })
+      const verb = isShort ? 'sell' : isCondor ? 'analyze' : 'buy'
+      sendDraft(`${verb} ${cand.symbol} 1 @ limit ${cand.ltp}`, { autoSubmit: false })
     }
   }
 
@@ -657,12 +661,18 @@ export default function MoversAutopsyPanel({ onOpenOrderTicket }) {
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
               {displayedAsymmetric.map((opp) => {
                 const isMax = opp.conviction_score >= 85
+                const isShort = opp.direction === 'BEARISH' || opp.setup_type === 'TURTLE_SOUP_SHORT'
+                const isCondor = opp.direction === 'NEUTRAL' || opp.setup_type === 'IRON_CONDOR_PINNING'
+
                 const badgeColor =
                   {
                     POCKET_PIVOT: 'bg-indigo-500/20 text-indigo-300 border-indigo-500/40',
                     FNO_BAN_SQUEEZE: 'bg-rose-500/20 text-rose-300 border-rose-500/40',
                     RUBBER_BAND_200EMA: 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40',
                     EXPIRY_0DTE_GAMMA: 'bg-amber-500/20 text-amber-300 border-amber-500/40',
+                    TURTLE_SOUP_SHORT: 'bg-rose-500/25 text-rose-200 border-rose-500/50',
+                    IRON_CONDOR_PINNING: 'bg-purple-500/25 text-purple-200 border-purple-500/50',
+                    COMMODITY: 'bg-amber-600/25 text-amber-200 border-amber-600/50',
                   }[opp.setup_type] || 'bg-gold/20 text-gold border-gold/40'
 
                 const setupTitle =
@@ -671,6 +681,9 @@ export default function MoversAutopsyPanel({ onOpenOrderTicket }) {
                     FNO_BAN_SQUEEZE: '🔥 F&O Ban Squeeze (MWPL Trap)',
                     RUBBER_BAND_200EMA: '🧲 Rubber Band (200-EMA Value Dip)',
                     EXPIRY_0DTE_GAMMA: '⚡ 0DTE Gamma (Straddle Unpinning)',
+                    TURTLE_SOUP_SHORT: '🐢 ICT Turtle Soup (Sweep Short)',
+                    IRON_CONDOR_PINNING: '🦅 Volatility Pinning Iron Condor',
+                    COMMODITY: '⛏️ Commodity Supply Squeeze',
                   }[opp.setup_type] || opp.setup_type
 
                 return (
@@ -690,6 +703,13 @@ export default function MoversAutopsyPanel({ onOpenOrderTicket }) {
                           </span>
                           <span className={`px-2 py-0.5 text-[10px] font-black rounded border ${badgeColor}`}>
                             {setupTitle}
+                          </span>
+                          <span className={`px-1.5 py-0.5 text-[9px] font-black rounded ${
+                            isShort ? 'bg-rose-500/20 text-rose-300 border border-rose-500/30' :
+                            isCondor ? 'bg-purple-500/20 text-purple-300 border border-purple-500/30' :
+                            'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+                          }`}>
+                            {isShort ? '▼ SHORT' : isCondor ? '◆ CONDOR' : '▲ LONG'}
                           </span>
                         </div>
                         <div className="flex items-center gap-1.5">
@@ -790,10 +810,16 @@ export default function MoversAutopsyPanel({ onOpenOrderTicket }) {
                       </button>
                       <button
                         onClick={() => handleBuy(opp)}
-                        className="btn btn-xs bg-emerald-500 hover:bg-emerald-400 text-panel font-black flex items-center gap-1 shadow-sm"
+                        className={`btn btn-xs font-black flex items-center gap-1 shadow-sm ${
+                          isShort
+                            ? 'bg-rose-500 hover:bg-rose-400 text-white'
+                            : isCondor
+                            ? 'bg-purple-600 hover:bg-purple-500 text-white'
+                            : 'bg-emerald-500 hover:bg-emerald-400 text-panel'
+                        }`}
                       >
                         <span>⚡</span>
-                        <span>Place Asymmetric Order</span>
+                        <span>{isShort ? 'Place Short Order' : isCondor ? 'Execute Iron Condor' : 'Place Asymmetric Order'}</span>
                       </button>
                     </div>
                   </div>

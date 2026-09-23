@@ -23,6 +23,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
 import time
 from datetime import datetime
 from typing import Optional
@@ -130,6 +131,19 @@ _KNOWN_NSE_TOKENS = {
     "HCLTECH": "7229",
     "DIVISLAB": "10940",
     "TECHM": "13538",
+    "OFSS": "10738",
+    "MFSL": "2142",
+    "HDFCLIFE": "467",
+    "ICICIPRULI": "18652",
+    "SBILIFE": "21808",
+    "PATANJALI": "17029",
+    "OBEROIRLTY": "20242",
+    "KPITTECH": "9683",
+    "TATAELXSI": "3506",
+    "MPHASIS": "4503",
+    "MANKIND": "5926",
+    "BSE": "19585",
+    "MCX": "31181",
     "GOLD": "GOLD",
     "SILVER": "SILVER",
     "CRUDEOIL": "CRUDEOIL",
@@ -200,9 +214,54 @@ class MStockAPI(BrokerAPI):
         """Parse instruments from Scrip Master if not yet loaded."""
         if self._scrip_token_cache or not self._token:
             return
+
+        cache_disk_file = app_data_path("mstock_scrip_cache.json")
+        now_ts = time.time()
+        # 1. Try local disk cache if fresher than 24 hours
+        if cache_disk_file.exists():
+            try:
+                disk_data = json.loads(cache_disk_file.read_text(encoding="utf-8"))
+                if disk_data.get("timestamp", 0) > now_ts - 86400 and disk_data.get("tokens"):
+                    self._scrip_token_cache.update(disk_data["tokens"])
+                    return
+            except Exception:
+                pass
+
         scrip_txt = self.download_scrip_master()
         if not scrip_txt:
             return
+
+        # 2. Try JSON parsing (mStock returns JSON array of instruments)
+        try:
+            items = json.loads(scrip_txt)
+            if isinstance(items, list):
+                for item in items:
+                    tok = str(item.get("token") or "").strip()
+                    sym = str(item.get("symbol") or "").strip().upper()
+                    name = str(item.get("name") or "").strip().upper()
+                    exch = str(item.get("exch_seg") or "NSE").strip().upper()
+                    if tok and sym:
+                        self._scrip_token_cache[f"{exch}:{sym}"] = tok
+                        if sym.endswith("-EQ"):
+                            self._scrip_token_cache[f"{exch}:{sym[:-3]}"] = tok
+                    if tok and name:
+                        self._scrip_token_cache[f"{exch}:{name}"] = tok
+                        if name.endswith("-EQ"):
+                            self._scrip_token_cache[f"{exch}:{name[:-3]}"] = tok
+
+                if self._scrip_token_cache:
+                    try:
+                        cache_disk_file.write_text(
+                            json.dumps({"timestamp": now_ts, "tokens": self._scrip_token_cache}),
+                            encoding="utf-8",
+                        )
+                    except Exception:
+                        pass
+                return
+        except Exception:
+            pass
+
+        # 3. CSV fallback
         for line in scrip_txt.splitlines():
             parts = [p.strip() for p in line.split(",")]
             if len(parts) >= 3:
@@ -776,7 +835,11 @@ class MStockAPI(BrokerAPI):
                 exchange = "BFO"
             elif inst.startswith("NFO:"):
                 exchange = "NFO"
-            elif re.search(r"\d+(?:CE|PE)$", clean_sym) or clean_sym.endswith("-FUT") or clean_sym.endswith("FUT"):
+            elif (
+                re.search(r"\d+(?:CE|PE)$", clean_sym)
+                or clean_sym.endswith("-FUT")
+                or clean_sym.endswith("FUT")
+            ):
                 exchange = "NFO"
             else:
                 exchange = "NSE"
@@ -797,9 +860,7 @@ class MStockAPI(BrokerAPI):
                     exch: list(dict.fromkeys(toks)) for exch, toks in exchange_tokens.items()
                 }
                 q_payload = {"mode": "OHLC", "exchangeTokens": dedup_payload}
-                resp = self._client.post(
-                    url, json=q_payload, headers=self._headers(), timeout=3.5
-                )
+                resp = self._client.post(url, json=q_payload, headers=self._headers(), timeout=3.5)
                 if resp.status_code == 200:
                     data = resp.json()
                     raw_data = data.get("data") or data.get("result") or data
@@ -807,6 +868,10 @@ class MStockAPI(BrokerAPI):
                         fetched = raw_data.get("fetched", [])
                         if not fetched and isinstance(raw_data.get("data"), list):
                             fetched = raw_data.get("data")
+                        elif not fetched and (
+                            raw_data.get("ltp") is not None or raw_data.get("lastPrice") is not None
+                        ):
+                            fetched = [raw_data]
                     elif isinstance(raw_data, list):
                         fetched = raw_data
                     else:
@@ -815,7 +880,12 @@ class MStockAPI(BrokerAPI):
                     for item in fetched:
                         exch = item.get("exchange") or "NSE"
                         tok = str(item.get("symbolToken") or item.get("token") or "")
-                        ltp = float(item.get("ltp") or item.get("lastTradedPrice") or item.get("lastPrice") or 0.0)
+                        ltp = float(
+                            item.get("ltp")
+                            or item.get("lastTradedPrice")
+                            or item.get("lastPrice")
+                            or 0.0
+                        )
                         if ltp <= 0:
                             continue
                         close = float(item.get("close") or ltp)
@@ -823,6 +893,9 @@ class MStockAPI(BrokerAPI):
                         change_pct = (change / close * 100.0) if close else 0.0
 
                         targets = token_to_targets.get((exch, tok)) or []
+                        if not targets and len(inst_list) == 1:
+                            clean = inst_list[0].replace("NSE:", "").replace("BSE:", "").strip()
+                            targets = [(inst_list[0], clean)]
                         for orig_inst, target_sym in targets:
                             q_obj = Quote(
                                 symbol=target_sym,
@@ -837,7 +910,7 @@ class MStockAPI(BrokerAPI):
                             )
                             quotes[orig_inst] = q_obj
                             quotes[target_sym] = q_obj
-            except Exception as e:
+            except Exception:
                 pass
 
         # 3. Fallback for remaining unresolved instruments
@@ -1045,7 +1118,9 @@ class MStockAPI(BrokerAPI):
                     if expiry:
                         target_clean = expiry.strip()
                         for ep_int, date_str in candidates:
-                            if date_str == target_clean or (len(target_clean) >= 5 and date_str.endswith(target_clean[-5:])):
+                            if date_str == target_clean or (
+                                len(target_clean) >= 5 and date_str.endswith(target_clean[-5:])
+                            ):
                                 chosen_epoch = ep_int
                                 resolved_expiry_str = date_str
                                 break
@@ -1070,7 +1145,9 @@ class MStockAPI(BrokerAPI):
                                 except Exception:
                                     pass
 
-                            expiry_str = resolved_expiry_str or datetime.fromtimestamp(chosen_epoch).strftime("%Y-%m-%d")
+                            expiry_str = resolved_expiry_str or datetime.fromtimestamp(
+                                chosen_epoch
+                            ).strftime("%Y-%m-%d")
                             contracts: list[OptionsContract] = []
                             token_map: dict[str, OptionsContract] = {}
 
@@ -1126,6 +1203,7 @@ class MStockAPI(BrokerAPI):
                                     spot_est = 0.0
                                     try:
                                         from market.quotes import get_ltp
+
                                         fetched_spot = get_ltp(clean_sym)
                                         if fetched_spot and fetched_spot > 0:
                                             spot_est = float(fetched_spot)
@@ -1136,12 +1214,22 @@ class MStockAPI(BrokerAPI):
                                         all_strikes = sorted({c.strike for c in contracts})
                                         spot_est = all_strikes[len(all_strikes) // 2]
 
-                                    ce_contracts = sorted([c for c in contracts if c.option_type == "CE"], key=lambda c: abs(c.strike - spot_est))
-                                    pe_contracts = sorted([c for c in contracts if c.option_type == "PE"], key=lambda c: abs(c.strike - spot_est))
+                                    ce_contracts = sorted(
+                                        [c for c in contracts if c.option_type == "CE"],
+                                        key=lambda c: abs(c.strike - spot_est),
+                                    )
+                                    pe_contracts = sorted(
+                                        [c for c in contracts if c.option_type == "PE"],
+                                        key=lambda c: abs(c.strike - spot_est),
+                                    )
 
                                     atm_contracts = ce_contracts[:25] + pe_contracts[:25]
                                     contract_to_tok = {id(v): k for k, v in token_map.items()}
-                                    atm_tokens = [contract_to_tok[id(c)] for c in atm_contracts if id(c) in contract_to_tok]
+                                    atm_tokens = [
+                                        contract_to_tok[id(c)]
+                                        for c in atm_contracts
+                                        if id(c) in contract_to_tok
+                                    ]
 
                                     if atm_tokens:
                                         q_url = f"{MSTOCK_BASE_URL}/openapi/typeb/instruments/quote"
@@ -1182,13 +1270,14 @@ class MStockAPI(BrokerAPI):
                                                 if close_p > 0:
                                                     c.close = close_p
                                                     if ltp > 0:
-                                                        c.pchange = round(((ltp - close_p) / close_p) * 100.0, 2)
+                                                        c.pchange = round(
+                                                            ((ltp - close_p) / close_p) * 100.0, 2
+                                                        )
                                 except Exception:
                                     pass
 
                             if contracts and any(
-                                float(getattr(c, "last_price", 0.0) or 0.0) > 0
-                                for c in contracts
+                                float(getattr(c, "last_price", 0.0) or 0.0) > 0 for c in contracts
                             ):
                                 return contracts
             except Exception:

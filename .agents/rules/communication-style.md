@@ -24,3 +24,15 @@ This rule governs all agent communication, terminal outputs, UI tooltips, card c
   - *"Call writers in retreat / covering short positions"*
   - *"Put support collapsing under selling pressure"*
   - *"Aggressive buyer demand absorbing available supply"*
+
+---
+
+## 5. Emoji Density & Non-TTY Compatibility
+
+- **Max 2 emoji per output line** in terminal context. Do not stack emoji on every bullet point — one clear status badge per section is sufficient. Overuse of emoji breaks non-TTY log parsers and looks unprofessional in structured reports.
+- **Non-TTY Contexts**: File output, CI logs, and Telegram bot messages must suppress or replace emoji with plain-text equivalents. Check `sys.stdout.isatty()` before emoji-heavy outputs in scripts. API JSON responses must never contain emoji in machine-readable fields (status codes, signal types) — only in `display_text` or `commentary` fields.
+- **Permitted Status Badges** (max 1 per output block):
+  - `[BUY]` / `[SELL]` / `[HOLD]` for signal verdicts
+  - `[LIVE]` / `[PAPER]` / `[DEMO]` for mode display
+  - `[TRIGGER]` / `[STALK]` / `[STANDDOWN]` for alert status
+

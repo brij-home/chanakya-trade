@@ -10,22 +10,28 @@ Comprehensive institutional test suite verifying the signal pipeline optimizatio
 """
 
 import time
-import pytest
 import pandas as pd
-from unittest.mock import patch, MagicMock
-from datetime import datetime, timezone, timedelta
+from unittest.mock import patch
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from engine.auto_alert_engine import AutoAlertEngine
-from engine.alert_model import AutoAlert
 from engine.detectors.gamma_blast import detect_gamma_blast
-from market.history import get_ohlcv, _df_memory_cache, _df_memory_cache_lock, _YF_BACKOFF, _YF_BACKOFF_LOCK, _yfinance_fallback
-from market.options import enrich_options_chain_deltas, _STRIKE_BASELINE_OI, _BASELINE_LOCK
+from market.history import (
+    get_ohlcv,
+    _df_memory_cache,
+    _df_memory_cache_lock,
+    _YF_BACKOFF,
+    _YF_BACKOFF_LOCK,
+    _yfinance_fallback,
+)
+from market.options import enrich_options_chain_deltas
 
 IST = ZoneInfo("Asia/Kolkata")
 
 
 # ── 1. Intraday OHLCV Cache Normalization ───────────────────────
+
 
 def test_intraday_ohlcv_cache_normalization_single_fetch():
     """Verify that multiple intraday queries with different days (1, 2, 5) reuse the 5-day master slice."""
@@ -52,7 +58,10 @@ def test_intraday_ohlcv_cache_normalization_single_fetch():
 
     try:
         # Call get_ohlcv for 1 day - should hit normalized cache and slice
-        with patch("market.history._yfinance_fallback") as mock_yf, patch("brokers.session.get_data_broker") as mock_broker:
+        with (
+            patch("market.history._yfinance_fallback") as mock_yf,
+            patch("brokers.session.get_data_broker") as mock_broker,
+        ):
             df_1d = get_ohlcv(test_sym, exchange="NSE", interval="5minute", days=1)
             assert df_1d is not None
             assert not df_1d.empty
@@ -65,7 +74,10 @@ def test_intraday_ohlcv_cache_normalization_single_fetch():
             assert df_1d.index.min() >= cutoff or len(df_1d) < len(synthetic_df)
 
         # Call get_ohlcv for 2 days - should also hit normalized cache
-        with patch("market.history._yfinance_fallback") as mock_yf, patch("brokers.session.get_data_broker") as mock_broker:
+        with (
+            patch("market.history._yfinance_fallback") as mock_yf,
+            patch("brokers.session.get_data_broker") as mock_broker,
+        ):
             df_2d = get_ohlcv(test_sym, exchange="NSE", interval="5minute", days=2)
             assert df_2d is not None
             assert not df_2d.empty
@@ -77,6 +89,7 @@ def test_intraday_ohlcv_cache_normalization_single_fetch():
 
 
 # ── 2. YFinance Rate-Limit Backoff ──────────────────────────────
+
 
 def test_yfinance_backoff_cooldown_prevents_retry_storm():
     """Verify that a 429/empty response sets a backoff cooldown preventing repeat calls."""
@@ -105,6 +118,7 @@ def test_yfinance_backoff_cooldown_prevents_retry_storm():
 
 
 # ── 3. Options Open Interest Delta Tracking & Scraper Cross-Enrichment ────
+
 
 def test_options_chain_oi_delta_calculation():
     """Verify that enrich_options_chain_deltas tracks opening session baseline and calculates delta."""
@@ -204,6 +218,7 @@ def test_options_chain_scraper_cross_enrichment():
 
 # ── 4. Gamma Blast Turnover Expansion Fallback ──────────────────
 
+
 def test_gamma_blast_triggers_on_high_volume_expansion_when_oi_change_zero():
     """
     Verify that when broker delivers oi_change == 0,
@@ -257,6 +272,7 @@ def test_gamma_blast_triggers_on_high_volume_expansion_when_oi_change_zero():
 
 
 # ── 5. BSE/MCX Exchange Resolution ──────────────────────────────
+
 
 def test_auto_alert_engine_exchange_resolution():
     """Verify that AutoAlertEngine resolves correct exchange and prefixes for BSE/MCX/NSE."""

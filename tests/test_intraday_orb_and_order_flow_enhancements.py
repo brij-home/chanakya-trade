@@ -13,11 +13,9 @@ Comprehensive test suite for:
 from __future__ import annotations
 
 import datetime
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 from zoneinfo import ZoneInfo
-import numpy as np
 import pandas as pd
-import pytest
 
 from engine.alert_model import AutoAlert
 from engine.alert_scrutiny import AlertScrutinyAuditor
@@ -41,7 +39,7 @@ def _build_synthetic_5m_df(
         tzinfo=IST
     )
     times = [start_dt + datetime.timedelta(minutes=5 * i) for i in range(n_bars)]
-    
+
     # 09:15 bar: high 6050, low 5980
     # 09:20 bar: high 6040, low 5990
     # 09:25 bar: high 6060, low 6010  --> Opening 15m Range: High=6060, Low=5980 (Range=80, Mid=6020)
@@ -57,13 +55,15 @@ def _build_synthetic_5m_df(
         else:
             # Subsequent bars
             h, l, c = curr + 70.0, curr + 30.0, curr + 65.0
-        data.append({
-            "open": curr,
-            "high": h,
-            "low": l,
-            "close": c,
-            "volume": 25000 + i * 5000,
-        })
+        data.append(
+            {
+                "open": curr,
+                "high": h,
+                "low": l,
+                "close": c,
+                "volume": 25000 + i * 5000,
+            }
+        )
     df = pd.DataFrame(data, index=pd.DatetimeIndex(times))
     return df
 
@@ -72,15 +72,16 @@ def _build_synthetic_5m_df(
 # 1. ORB-15 Extraction & Detection Tests
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def test_extract_opening_range_levels():
     """Extracts High, Low, Range, and Midpoint from the 09:15–09:30 opening window."""
     df = _build_synthetic_5m_df(base_price=6000.0, n_bars=6)
     ref_dt = datetime.datetime(2026, 9, 17, 9, 35, tzinfo=IST)
-    
+
     result = extract_opening_range(df, opening_minutes=15, ref_dt=ref_dt)
     assert result is not None
     orb_high, orb_low, orb_range, orb_mid = result
-    
+
     assert orb_high == 6060.0
     assert orb_low == 5980.0
     assert orb_range == 80.0
@@ -91,7 +92,7 @@ def test_detect_opening_range_breakout_bullish():
     """Valid bullish breakout post-09:30 triggers ORB_BREAKOUT with midpoint SL and asymmetric targets."""
     df = _build_synthetic_5m_df(base_price=6000.0, n_bars=6)
     ref_time = datetime.datetime(2026, 9, 17, 9, 35, tzinfo=IST)
-    
+
     # Spot breaking above ORB High (6060.0) at 6075.0, VWAP at 6030.0, RVOL 1.8x
     alert = detect_opening_range_breakout(
         symbol="TRENT",
@@ -101,7 +102,7 @@ def test_detect_opening_range_breakout_bullish():
         rvol=1.8,
         ref_time=ref_time,
     )
-    
+
     assert alert is not None
     assert alert.alert_type == "ORB_BREAKOUT"
     assert alert.direction == "BULLISH"
@@ -118,7 +119,7 @@ def test_detect_opening_range_breakdown_bearish():
     """Valid bearish breakdown post-09:30 triggers ORB_BREAKDOWN with midpoint SL and asymmetric targets."""
     df = _build_synthetic_5m_df(base_price=6000.0, n_bars=6)
     ref_time = datetime.datetime(2026, 9, 17, 9, 40, tzinfo=IST)
-    
+
     # Spot breaking below ORB Low (5980.0) at 5970.0, VWAP at 6010.0, RVOL 1.7x
     alert = detect_opening_range_breakout(
         symbol="TRENT",
@@ -128,7 +129,7 @@ def test_detect_opening_range_breakdown_bearish():
         rvol=1.7,
         ref_time=ref_time,
     )
-    
+
     assert alert is not None
     assert alert.alert_type == "ORB_BREAKDOWN"
     assert alert.direction == "BEARISH"
@@ -142,7 +143,7 @@ def test_detect_opening_range_breakdown_bearish():
 def test_orb_range_sanity_rejection():
     """Narrow range (<0.25%) and exhausted range (>3.5%) are rejected to prevent chop or late entries."""
     ref_time = datetime.datetime(2026, 9, 17, 9, 35, tzinfo=IST)
-    
+
     # Too narrow: Range is 6.0 pts on 6000 stock (0.10% < 0.25%)
     alert_narrow = detect_opening_range_breakout(
         symbol="TRENT",
@@ -169,7 +170,7 @@ def test_orb_range_sanity_rejection():
 def test_orb_no_chase_rejection():
     """Price extended > 35% of opening range past breakout point is rejected (Anti-FOMO)."""
     ref_time = datetime.datetime(2026, 9, 17, 9, 35, tzinfo=IST)
-    
+
     # Range is 80 pts (High 6060, Low 5980). Max chase is 6060 + (0.35 * 80) = 6088.0.
     # Spot is 6095.0 (> 6088.0) -> Rejection
     alert = detect_opening_range_breakout(
@@ -187,6 +188,7 @@ def test_orb_no_chase_rejection():
 # ─────────────────────────────────────────────────────────────────────────────
 # 2. Absolute Non-Interference Guarantee: Pre-09:30 Early Signals Unmuted
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def test_early_pre_0930_signals_unmuted_by_orb():
     """
@@ -226,7 +228,7 @@ def test_early_pre_0930_signals_unmuted_by_orb():
         is_live=True,
         environment="LIVE",
     )
-    
+
     early_precursor = AutoAlert(
         alert_id="precursor-early-0922",
         alert_type="PRECURSOR_RADAR",
@@ -250,17 +252,21 @@ def test_early_pre_0930_signals_unmuted_by_orb():
     engine._alerts = []
 
     # Mock scanners returning early signals
-    with patch.object(engine, "scan_index_contagion", return_value=[]), \
-         patch.object(engine, "scan_gamma_blasts", return_value=[early_gamma_blast]), \
-         patch.object(engine, "scan_precursor_radars", return_value=[early_precursor]), \
-         patch.object(engine, "scan_options_momentum_breakouts", return_value=[]), \
-         patch.object(engine, "scan_squeeze_breakouts", return_value=[]), \
-         patch.object(engine, "scan_circuits", return_value=[]), \
-         patch.object(engine, "scan_pattern_coilings", return_value=[]), \
-         patch.object(engine, "scan_intraday_mover_sparks", return_value=[]), \
-         patch.object(engine, "scan_asymmetric_opportunities", return_value=[]), \
-         patch.object(engine, "scan_opening_range_breakouts", return_value=[]):  # ORB returns [] pre-09:30
-
+    with (
+        patch.object(engine, "scan_index_call_setups", return_value=[]),
+        patch.object(engine, "scan_index_put_setups", return_value=[]),
+        patch.object(engine, "scan_opening_drives", return_value=[]),
+        patch.object(engine, "scan_index_contagion", return_value=[]),
+        patch.object(engine, "scan_gamma_blasts", return_value=[early_gamma_blast]),
+        patch.object(engine, "scan_precursor_radars", return_value=[early_precursor]),
+        patch.object(engine, "scan_options_momentum_breakouts", return_value=[]),
+        patch.object(engine, "scan_squeeze_breakouts", return_value=[]),
+        patch.object(engine, "scan_circuits", return_value=[]),
+        patch.object(engine, "scan_pattern_coilings", return_value=[]),
+        patch.object(engine, "scan_intraday_mover_sparks", return_value=[]),
+        patch.object(engine, "scan_asymmetric_opportunities", return_value=[]),
+        patch.object(engine, "scan_opening_range_breakouts", return_value=[]),
+    ):  # ORB returns [] pre-09:30
         all_morning_alerts = engine.scan_equity_nfo_now()
 
     # Both early alerts pass with 100% fidelity through the pipeline
@@ -276,10 +282,11 @@ def test_early_pre_0930_signals_unmuted_by_orb():
 # 3. Gate 17: Order Book Level-2 Depth Imbalance Gate Tests
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def test_tier1_gate17_depth_imbalance_supply_trap():
     """Rejects long breakout when sell order overhang > 2.2x total buy bids (Supply Trap)."""
     auditor = AlertScrutinyAuditor(min_rr_ratio=1.3, max_intraday_risk_pct=8.0)
-    
+
     # Long setup into massive sell overhang (30,000 asks vs 10,000 bids -> 3.0x supply)
     alert = AutoAlert(
         alert_id="test-depth-long-trap",
@@ -312,7 +319,7 @@ def test_tier1_gate17_depth_imbalance_supply_trap():
 def test_tier1_gate17_depth_imbalance_absorption_trap():
     """Rejects short breakdown when buy bids > 2.2x total sell offers (Bid Absorption Wall)."""
     auditor = AlertScrutinyAuditor(min_rr_ratio=1.3, max_intraday_risk_pct=8.0)
-    
+
     # Short setup into massive bid absorption wall (35,000 bids vs 10,000 asks -> 3.5x bids)
     alert = AutoAlert(
         alert_id="test-depth-short-trap",
@@ -345,7 +352,7 @@ def test_tier1_gate17_depth_imbalance_absorption_trap():
 def test_tier1_gate17_depth_graceful_pass_when_balanced_or_absent():
     """Passes when order book depth is balanced or when depth data is absent."""
     auditor = AlertScrutinyAuditor(min_rr_ratio=1.3, max_intraday_risk_pct=8.0)
-    
+
     # 1. Balanced depth (buy 20k vs sell 22k -> 1.1x ratio, well within 2.2x threshold)
     alert_balanced = AutoAlert(
         alert_id="test-depth-balanced",
@@ -395,10 +402,11 @@ def test_tier1_gate17_depth_graceful_pass_when_balanced_or_absent():
 # 4. Gate 18: Developing Volume Profile (d-POC / Value Area) Acceptance Tests
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def test_tier1_gate18_developing_poc_acceptance_rejection():
     """Rejects long setup trading stranded below developing Value Area Low (d-VAL)."""
     auditor = AlertScrutinyAuditor(min_rr_ratio=1.3, max_intraday_risk_pct=8.0)
-    
+
     # Long setup at 980.0, while d-VAL is at 995.0, d-POC is 1005.0, d-VAH is 1015.0.
     # Price is stranded below value area -> Rejection
     alert_below_val = AutoAlert(
@@ -432,7 +440,7 @@ def test_tier1_gate18_developing_poc_acceptance_rejection():
 def test_tier1_gate18_developing_poc_acceptance_success():
     """Passes long setup when price is trading comfortably above d-POC / Value Area Low."""
     auditor = AlertScrutinyAuditor(min_rr_ratio=1.3, max_intraday_risk_pct=8.0)
-    
+
     # Long setup at 1018.0, d-POC is 1005.0, d-VAL is 995.0, d-VAH is 1015.0.
     # Price is holding above developing Value Area -> Accepted!
     alert_accepted = AutoAlert(
@@ -466,10 +474,11 @@ def test_tier1_gate18_developing_poc_acceptance_success():
 # 5. Gate 19: Momentum Divergence Exhaustion Trap Gate Tests
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def test_tier1_gate19_divergence_exhaustion_trap_bullish():
     """Rejects bullish setup when bearish regular RSI divergence indicates momentum exhaustion."""
     auditor = AlertScrutinyAuditor(min_rr_ratio=1.3, max_intraday_risk_pct=8.0)
-    
+
     alert = AutoAlert(
         alert_id="test-div-trap-bull",
         alert_type="ORB_BREAKOUT",
@@ -500,7 +509,7 @@ def test_tier1_gate19_divergence_exhaustion_trap_bullish():
 def test_tier1_gate19_divergence_exhaustion_trap_bearish():
     """Rejects bearish setup when bullish regular RSI divergence indicates Wyckoff spring / absorption."""
     auditor = AlertScrutinyAuditor(min_rr_ratio=1.3, max_intraday_risk_pct=8.0)
-    
+
     alert = AutoAlert(
         alert_id="test-div-trap-bear",
         alert_type="ORB_BREAKDOWN",
@@ -531,7 +540,7 @@ def test_tier1_gate19_divergence_exhaustion_trap_bearish():
 def test_tier1_gate19_divergence_aligned_or_absent_pass():
     """Passes when divergence is aligned (e.g. Bullish Regular for Long) or absent."""
     auditor = AlertScrutinyAuditor(min_rr_ratio=1.3, max_intraday_risk_pct=8.0)
-    
+
     # 1. Aligned divergence
     alert_aligned = AutoAlert(
         alert_id="test-div-aligned",
@@ -581,7 +590,7 @@ def test_orb_retest_and_candlestick_blueprint():
     """Verifies that ORB alerts specify entry_type='LIMIT_ON_PULLBACK' and retest instructions."""
     df = _build_synthetic_5m_df(base_price=6000.0, n_bars=6)
     ref_time = datetime.datetime(2026, 9, 17, 9, 35, tzinfo=IST)
-    
+
     alert = detect_opening_range_breakout(
         symbol="TRENT",
         df=df,
@@ -590,10 +599,9 @@ def test_orb_retest_and_candlestick_blueprint():
         rvol=1.8,
         ref_time=ref_time,
     )
-    
+
     assert alert is not None
     assert alert.entry_type == "LIMIT_ON_PULLBACK"
     assert "retest" in alert.actionable_plan["when_to_buy"].lower()
     assert "do not chase" in alert.actionable_plan["when_to_wait"].lower()
     assert alert.actionable_plan["entry_type"] == "LIMIT_ON_PULLBACK"
-

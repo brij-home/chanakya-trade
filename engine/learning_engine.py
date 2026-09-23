@@ -40,6 +40,7 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any, Optional
 import time
+import threading
 
 import numpy as np
 import pandas as pd
@@ -110,6 +111,7 @@ class ExplosiveMoveFingerprint:
     key_catalyst: str
     fingerprint_score: int = 85
     coiling_pivot_high: float = 0.0
+    sepa_qualified: bool = False
     created_at: str = ""
 
     def __post_init__(self) -> None:
@@ -166,6 +168,7 @@ class PatternLearningEngine:
         self._post_mortems: list[InvalidationPostMortem] = []
         self._symbol_lockouts: dict[str, dict[str, Any]] = {}
         self._invalidation_counts: dict[str, int] = {}  # symbol:direction -> count today
+        self._lock = threading.Lock()
         self._factor_weights: dict[str, int] = {
             "volume_dry_up": 25,
             "squeeze_coiling": 20,
@@ -333,20 +336,43 @@ class PatternLearningEngine:
         )
         return rec
 
+    def invalidate_alert_outcomes(self, alert_id: str, reason: str = "") -> int:
+        """
+        Invalidates and zeroes out any recorded outcomes for an alert_id
+        so that false or corrupted alerts are NEVER counted as wins or trade stats.
+        """
+        updated_count = 0
+        with self._lock:
+            for out in self._outcomes:
+                if out.alert_id == alert_id and out.outcome != "INVALIDATED":
+                    out.outcome = "INVALIDATED"
+                    out.realized_rr = 0.0
+                    updated_count += 1
+            if updated_count > 0:
+                self._save_outcomes()
+                self._recalculate_factor_weights()
+                logger.info(
+                    f"[PatternLearningEngine] Invalidated {updated_count} outcome(s) for alert {alert_id}: {reason}"
+                )
+        return updated_count
+
     def _recalculate_factor_weights(self) -> None:
         """
         Dynamically recalibrates factor weights based on empirical win rate.
         If volume dry-up correlates with a high win rate, its weight expands.
         """
-        if len(self._outcomes) < 5:
+        valid_outcomes = [
+            o for o in self._outcomes if o.outcome not in ("INVALIDATED", "CORRUPTED", "EXCLUDED")
+        ]
+        if len(valid_outcomes) < 5:
             # Not enough statistical sample size yet; preserve institutional baseline
             return
 
         factor_wins: dict[str, int] = {k: 0 for k in self._factor_weights}
         factor_totals: dict[str, int] = {k: 0 for k in self._factor_weights}
 
-        for out in self._outcomes:
-            is_win = out.outcome in ("WIN_T1", "WIN_T2")
+        for out in valid_outcomes:
+            is_win = out.outcome in ("WIN_T1", "WIN_T2", "WIN_TARGET")
             for f_text in out.factors_present:
                 f_lower = f_text.lower()
                 if "volume dry-up" in f_lower or "volume contraction" in f_lower:
@@ -393,29 +419,76 @@ class PatternLearningEngine:
         """
         Dynamically adjusts factor weights based on Discriminative Signal-to-Noise Ratio (SNR)
         from daily mover autopsies.
-        Factors that show high separation (Delta > 0.20) against control group receive weight boosts.
+
+        Factors with high discriminative SNR (separating gainers from control) receive proportional
+        weight boosts. Low-SNR factors (noise) receive gradual reductions.
+        Weights are normalized to sum to 100 after each update to maintain scoring coherence.
+
+        SNR table keys (from mover_autopsy.py):
+          volume_dry_up, squeeze_compression, gamma_short_squeeze, sector_tailwind,
+          trend_score, smc_score, rvol_20d, forensic_safe
         """
         if not snr_table:
             return
 
+        # Full factor mapping: autopsy SNR key -> internal weight key
         mapping = {
             "volume_dry_up": "volume_dry_up",
             "squeeze_compression": "squeeze_coiling",
             "gamma_short_squeeze": "ce_unwind",
             "sector_tailwind": "sector_tailwind",
+            "trend_score": "trend_alignment",
+            "smc_score": "ob_distance",
+            "rvol_20d": "volume_dry_up",  # maps to same — RVOL surge boosts volume weight
+            "forensic_safe": "sector_tailwind",  # governance quality → sector quality proxy
         }
 
+        weights_before = dict(self._factor_weights)
+
         for snr_key, weight_key in mapping.items():
-            if snr_key in snr_table and weight_key in self._factor_weights:
-                delta = snr_table[snr_key]
-                if delta >= 0.25:
-                    self._factor_weights[weight_key] = min(35, self._factor_weights[weight_key] + 5)
-                elif delta <= 0.05:
-                    self._factor_weights[weight_key] = max(10, self._factor_weights[weight_key] - 3)
+            if snr_key not in snr_table:
+                continue
+            if weight_key not in self._factor_weights:
+                continue
+
+            snr_val = snr_table[snr_key]
+            current = self._factor_weights[weight_key]
+
+            if snr_val >= 0.50:
+                # Very high discrimination — significant boost (proportional)
+                boost = min(8, max(4, int(snr_val * 6)))
+                self._factor_weights[weight_key] = min(40, current + boost)
+            elif snr_val >= 0.25:
+                # Moderate discrimination — small boost
+                self._factor_weights[weight_key] = min(35, current + 3)
+            elif snr_val <= 0.05:
+                # Near-noise — gentle reduction
+                self._factor_weights[weight_key] = max(8, current - 2)
+            # 0.05 < snr_val < 0.25: no change (stable zone)
+
+        # Normalize so all weights sum to 100 (maintains scoring invariant)
+        total = sum(self._factor_weights.values())
+        if total > 0 and abs(total - 100) > 5:
+            scale = 100.0 / total
+            self._factor_weights = {
+                k: max(5, round(v * scale)) for k, v in self._factor_weights.items()
+            }
 
         logger.info(
-            f"[PatternLearningEngine] Recalibrated weights from SNR: {self._factor_weights}"
+            "[PatternLearningEngine] SNR recalibration complete. Δweights: %s → %s",
+            {
+                k: f"{weights_before.get(k, 0)}→{v}"
+                for k, v in self._factor_weights.items()
+                if weights_before.get(k) != v
+            },
+            {k: v for k, v in sorted(self._factor_weights.items(), key=lambda x: -x[1])[:5]},
         )
+
+    def recalibrate_factor_weights(self) -> dict[str, int]:
+        """Public entrypoint for manual or nightly factor weight recalculation."""
+        with self._lock:
+            self._recalculate_factor_weights()
+            return dict(self._factor_weights)
 
     # ── Invalidation Post-Mortem & Retrospective Learning ───
 
@@ -620,27 +693,57 @@ class PatternLearningEngine:
         )
 
         if is_opt:
-            entry_price = float(
-                getattr(alert, "option_premium", 0.0) or getattr(alert, "ltp", 0.0) or exit_price
-            )
             act_plan = getattr(alert, "actionable_plan", {}) or (
                 alert.get("actionable_plan", {}) if isinstance(alert, dict) else {}
             )
+            # 1. Resolve true entry price in option premium coordinates
+            entry_price = float(
+                getattr(alert, "option_premium", 0.0)
+                or (act_plan.get("trade_plan", {}).get("entry_price") if act_plan else 0.0)
+                or 0.0
+            )
             if entry_price <= 0 and act_plan:
-                rec_str = str(act_plan.get("recommended_entry", ""))
+                rec_str = str(
+                    act_plan.get("recommended_entry", "") or act_plan.get("entry_range", "")
+                )
                 m = re.search(r"[\d.]+", rec_str)
                 if m:
                     try:
                         entry_price = float(m.group(0))
                     except ValueError:
                         pass
+            if entry_price <= 0:
+                entry_price = float(getattr(alert, "ltp", 0.0) or exit_price or 1.0)
+
+            # 2. Resolve option stop-loss in premium coordinates (never inherit underlying spot/futures level)
+            stop_loss = 0.0
+            if act_plan:
+                opt_sl_str = str(act_plan.get("stop_loss", ""))
+                m_sl = re.findall(r"[\d,]+(?:\.\d+)?", opt_sl_str)
+                if m_sl:
+                    stop_loss = float(m_sl[0].replace(",", ""))
+                elif act_plan.get("trade_plan", {}).get("invalidation_stop"):
+                    stop_loss = float(act_plan["trade_plan"]["invalidation_stop"])
+
+            raw_sl = float(getattr(alert, "stop_loss", 0.0) or 0.0)
+            if stop_loss <= 0 and 0 < raw_sl <= 3.0 * entry_price:
+                stop_loss = raw_sl
+            elif stop_loss <= 0 or stop_loss > 3.0 * entry_price:
+                # If stop_loss was missing or in underlying spot coordinates, use 28% Greek risk floor
+                stop_loss = round(max(0.05, entry_price * 0.72), 2)
+
+            # 3. Resolve option exit_price in premium coordinates
+            # If exit_price was passed as underlying spot price (e.g. 56444 vs entry 799), clamp to stop_loss
+            if exit_price > 3.0 * entry_price or exit_price <= 0:
+                exit_price = stop_loss
+            else:
+                exit_price = float(exit_price)
         else:
             entry_price = float(
                 getattr(alert, "trigger_level", 0.0) or getattr(alert, "ltp", 0.0) or exit_price
             )
-
-        stop_loss = float(getattr(alert, "stop_loss", 0.0) or 0.0)
-        exit_price = float(exit_price or entry_price)
+            stop_loss = float(getattr(alert, "stop_loss", 0.0) or 0.0)
+            exit_price = float(exit_price or entry_price)
 
         is_opt_sell = False
         if is_opt:
@@ -1044,6 +1147,16 @@ class PatternLearningEngine:
             round(float(np.max(highs[-5:])), 2) if len(highs) >= 5 else round(float(closes[-1]), 2)
         )
 
+        # 7. Minervini SEPA Fundamentals
+        sepa_qual = False
+        try:
+            from analysis.fundamental import analyse
+
+            snap = analyse(clean_sym, fast=True)
+            sepa_qual = bool(getattr(snap, "sepa_qualified", False))
+        except Exception:
+            pass
+
         return {
             "symbol": clean_sym,
             "prior_vol_ratio": prior_vol_ratio,
@@ -1052,6 +1165,7 @@ class PatternLearningEngine:
             "ob_distance_pct": ob_dist_pct,
             "rrg_quadrant": rrg_quad,
             "coiling_pivot_high": pivot_high,
+            "sepa_qualified": sepa_qual,
         }
 
     # ── Learning from a Validated Move ───────────────────────
@@ -1093,6 +1207,7 @@ class PatternLearningEngine:
             key_catalyst=catalyst or "Institutional Volatility Expansion",
             fingerprint_score=min(98, int(75 + min(15, move_pct * 2))),
             coiling_pivot_high=features.get("coiling_pivot_high", 0.0),
+            sepa_qualified=features.get("sepa_qualified", False),
         )
 
         # Avoid duplicates on same symbol and date
@@ -1332,13 +1447,40 @@ class PatternLearningEngine:
             score += int(w_rrg * 0.6)
             matched_factors.append("Parent sector in Improving RRG quadrant (Emerging rotation)")
 
+        # Factor F: Minervini SEPA Fundamentals
+        if features.get("sepa_qualified"):
+            score += 10
+            matched_factors.append(
+                "Minervini SEPA Qualified: ≥25% YoY EPS acceleration (Institutional leadership growth)"
+            )
+
         score = max(5, min(98, score))
         is_candidate = score >= 70
 
-        # Find closest archetype from memory
+        # Find closest archetype from memory with feature similarity
         best_match = None
         if self._fingerprints:
-            best_match = f"{self._fingerprints[0].symbol} ({self._fingerprints[0].date})"
+            best_sim = -1
+            cand_sepa = features.get("sepa_qualified", False)
+            cand_rrg = features.get("rrg_quadrant", "")
+            for fp in self._fingerprints:
+                sim = 0
+                if cand_sepa and getattr(fp, "sepa_qualified", False):
+                    sim += 20
+                if cand_rrg == getattr(fp, "rrg_quadrant", ""):
+                    sim += 15
+                if (
+                    abs(features.get("prior_vol_ratio", 1.0) - getattr(fp, "prior_vol_ratio", 1.0))
+                    < 0.2
+                ):
+                    sim += 15
+                if abs(sq_bars - getattr(fp, "squeeze_bars", 0)) <= 1:
+                    sim += 10
+                if sim > best_sim:
+                    best_sim = sim
+                    best_match = f"{fp.symbol} ({fp.date})"
+            if not best_match:
+                best_match = f"{self._fingerprints[0].symbol} ({self._fingerprints[0].date})"
 
         if is_candidate:
             rec_action = "BUY_COILING_ZONE" if sq_bars >= 2 else "BUY_EARLY_BREAKOUT"
@@ -1364,13 +1506,16 @@ class PatternLearningEngine:
     def get_learning_analytics(self) -> dict[str, Any]:
         """Returns comprehensive self-learning intelligence and factor attribution."""
         total_archetypes = len(self._fingerprints)
-        total_outcomes = len(self._outcomes)
-        wins = [o for o in self._outcomes if o.outcome in ("WIN_T1", "WIN_T2")]
+        valid_outcomes = [
+            o for o in self._outcomes if o.outcome not in ("INVALIDATED", "CORRUPTED", "EXCLUDED")
+        ]
+        total_outcomes = len(valid_outcomes)
+        wins = [o for o in valid_outcomes if o.outcome in ("WIN_T1", "WIN_T2", "WIN_TARGET")]
         win_rate = (
             round((len(wins) / max(1, total_outcomes)) * 100, 1) if total_outcomes > 0 else 85.0
         )
         avg_rr = (
-            round(float(np.mean([o.realized_rr for o in self._outcomes])), 2)
+            round(float(np.mean([o.realized_rr for o in valid_outcomes])), 2)
             if total_outcomes > 0
             else 3.2
         )

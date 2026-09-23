@@ -28,7 +28,9 @@ export default function LiveTickerRibbon({
   const [isRefreshing, setIsRefreshing] = useState(false)
   const scrollContainerRef = useRef(null)
 
-  const tickers = (propTickers && propTickers.length > 0) ? propTickers : storeTickers
+  const rawTickers = (propTickers && propTickers.length > 0) ? propTickers : storeTickers
+  // Filter out redundant/noise tickers (e.g. FIN NIFTY is redundant with BANK NIFTY)
+  const tickers = rawTickers.filter((t) => t.symbol !== 'FINNIFTY' && t.display_name !== 'FIN NIFTY')
   const loading = tickers.length === 0
   const isStreaming = connectionState === 'live'
 
@@ -63,22 +65,24 @@ export default function LiveTickerRibbon({
   }
 
   const getAssetCategoryIcon = (category, symbol) => {
+    if (symbol === 'ETH') return '⟠'
+    if (symbol === 'SOL') return '◎'
     if (category === 'CRYPTO' || symbol === 'BTC') return '₿'
     if (category === 'COMMODITY') {
       if (symbol === 'CRUDEOIL') return '🛢️'
+      if (symbol === 'NATURALGAS') return '🔥'
       if (symbol === 'GOLD') return '🪙'
       if (symbol === 'SILVER') return '🥈'
       return '📦'
     }
     if (category === 'VIX') return '⚡'
     if (symbol === 'BANKNIFTY') return '🏦'
-    if (symbol === 'FINNIFTY') return '💳'
     return '🇮🇳'
   }
 
   return (
     <div
-      className={`relative z-20 flex items-center gap-2 px-2 sm:px-2.5 py-1 rounded-xl select-none transition-all ${className}`}
+      className={`relative z-20 flex items-center gap-1.5 px-2 py-0.5 rounded-lg select-none transition-all ${className}`}
       style={{
         background: 'var(--color-panel)',
         border: '1px solid var(--color-border)',
@@ -158,7 +162,7 @@ export default function LiveTickerRibbon({
               <button
                 key={t.symbol}
                 onClick={() => onSelectSymbol(t.symbol)}
-                className={`flex-shrink-0 flex items-center gap-2 px-2 py-1 rounded-lg border text-left transition-all duration-150 cursor-pointer ${
+                className={`flex-shrink-0 flex items-center gap-2 px-2 py-0.5 rounded-md border text-left transition-all duration-150 cursor-pointer ${
                   isSelected
                     ? 'ring-2 ring-amber/80 shadow-xs'
                     : 'hover:border-border hover:bg-elevated/70'
@@ -166,7 +170,7 @@ export default function LiveTickerRibbon({
                 style={{
                   background: isSelected ? 'var(--color-elevated)' : 'var(--color-surface)',
                   borderColor: isSelected ? 'var(--color-gold)' : 'var(--color-border)',
-                  minWidth: '138px',
+                  minWidth: '124px',
                   ...flashStyle,
                 }}
                 title={`Click to switch terminal to ${t.display_name} (${t.symbol})`}

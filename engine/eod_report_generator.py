@@ -23,8 +23,8 @@ import json
 import logging
 import os
 import re
-from dataclasses import asdict, dataclass, field
-from datetime import date, datetime, time as dtime, timedelta
+from dataclasses import asdict, dataclass
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Optional
 from zoneinfo import ZoneInfo
@@ -148,24 +148,28 @@ class EODReport:
         for seg, count in self.segment_counts.items():
             lines.append(f"| {seg} | {count} |")
 
-        lines.extend([
-            "",
-            "---",
-            "",
-            "## 2. 🟢 What Went Well",
-            "",
-        ])
+        lines.extend(
+            [
+                "",
+                "---",
+                "",
+                "## 2. 🟢 What Went Well",
+                "",
+            ]
+        )
         for p in self.what_went_well_points:
             lines.append(f"- {p}")
 
         if self.star_setups:
-            lines.extend([
-                "",
-                "### 🌟 Star Winning Setups",
-                "",
-                "| Symbol | Segment | Dir | Entry | Target | Peak Gain | R:R | Milestones |",
-                "| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |",
-            ])
+            lines.extend(
+                [
+                    "",
+                    "### 🌟 Star Winning Setups",
+                    "",
+                    "| Symbol | Segment | Dir | Entry | Target | Peak Gain | R:R | Milestones |",
+                    "| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |",
+                ]
+            )
             for s in self.star_setups[:8]:
                 ms = ", ".join(s.milestones) if s.milestones else "T1"
                 lines.append(
@@ -174,93 +178,115 @@ class EODReport:
                 )
 
         if self.top_detectors:
-            lines.extend([
-                "",
-                "### 🎯 Detector Performance Efficacy",
-                "",
-                "| Detector | Total Signals | Wins | Win Rate |",
-                "| :--- | :--- | :--- | :--- |",
-            ])
+            lines.extend(
+                [
+                    "",
+                    "### 🎯 Detector Performance Efficacy",
+                    "",
+                    "| Detector | Total Signals | Wins | Win Rate |",
+                    "| :--- | :--- | :--- | :--- |",
+                ]
+            )
             for d in self.top_detectors:
-                lines.append(f"| `{d['detector']}` | {d['count']} | {d['wins']} | {d['win_rate']:.1f}% |")
+                lines.append(
+                    f"| `{d['detector']}` | {d['count']} | {d['wins']} | {d['win_rate']:.1f}% |"
+                )
 
-        lines.extend([
-            "",
-            "---",
-            "",
-            "## 3. ⚠️ What Went Bad & Root Cause Analysis (RCA)",
-            "",
-        ])
+        lines.extend(
+            [
+                "",
+                "---",
+                "",
+                "## 3. ⚠️ What Went Bad & Root Cause Analysis (RCA)",
+                "",
+            ]
+        )
         for p in self.what_went_bad_points:
             lines.append(f"- {p}")
 
         if self.rca_breakdown:
-            lines.extend([
-                "",
-                "### 🔬 Root Cause Decomposition",
-                "",
-            ])
+            lines.extend(
+                [
+                    "",
+                    "### 🔬 Root Cause Decomposition",
+                    "",
+                ]
+            )
             for rca in self.rca_breakdown:
                 syms = ", ".join(rca.symbols[:4]) if rca.symbols else "N/A"
-                lines.extend([
-                    f"#### 🔴 {rca.category.replace('_', ' ').title()} ({rca.count} setups: {syms})",
-                    f"- **Root Cause:** {rca.root_cause}",
-                    f"- **Systemic Fix:** {rca.corrective_action}",
-                    "",
-                ])
+                lines.extend(
+                    [
+                        f"#### 🔴 {rca.category.replace('_', ' ').title()} ({rca.count} setups: {syms})",
+                        f"- **Root Cause:** {rca.root_cause}",
+                        f"- **Systemic Fix:** {rca.corrective_action}",
+                        "",
+                    ]
+                )
 
-        lines.extend([
-            "---",
-            "",
-            "## 4. 💡 What Could Have Been Done Better",
-            "",
-        ])
+        lines.extend(
+            [
+                "---",
+                "",
+                "## 4. 💡 What Could Have Been Done Better",
+                "",
+            ]
+        )
         for p in self.could_have_been_better_points:
             lines.append(f"- {p}")
 
-        lines.extend([
-            "",
-            "---",
-            "",
-            "## 5. 🛠️ How to Make the System Better (Algorithmic & Pipeline Upgrades)",
-            "",
-        ])
+        lines.extend(
+            [
+                "",
+                "---",
+                "",
+                "## 5. 🛠️ How to Make the System Better (Algorithmic & Pipeline Upgrades)",
+                "",
+            ]
+        )
         for p in self.system_improvement_points:
             lines.append(f"- {p}")
 
-        lines.extend([
-            "",
-            "---",
-            "",
-            f"## 6. 🎯 Strategic Recommendations for Tomorrow ({self.tomorrow_day_name})",
-            "",
-        ])
+        lines.extend(
+            [
+                "",
+                "---",
+                "",
+                f"## 6. 🎯 Strategic Recommendations for Tomorrow ({self.tomorrow_day_name})",
+                "",
+            ]
+        )
         if self.tomorrow_expiry_index:
-            lines.append(f"> ⚡ **EXPIRY FOCUS:** **{self.tomorrow_expiry_index}** weekly contract settlement tomorrow.")
+            lines.append(
+                f"> ⚡ **EXPIRY FOCUS:** **{self.tomorrow_expiry_index}** weekly contract settlement tomorrow."
+            )
             lines.append("")
 
         for p in self.tomorrow_recommendations:
             lines.append(f"- {p}")
 
         if self.key_levels:
-            lines.extend([
-                "",
-                "### Key Structural Reference Levels",
-                "",
-                "| Benchmark | Support 1 | Support 2 | Pivot | Resistance 1 | Resistance 2 |",
-                "| :--- | :--- | :--- | :--- | :--- | :--- |",
-            ])
+            lines.extend(
+                [
+                    "",
+                    "### Key Structural Reference Levels",
+                    "",
+                    "| Benchmark | Support 1 | Support 2 | Pivot | Resistance 1 | Resistance 2 |",
+                    "| :--- | :--- | :--- | :--- | :--- | :--- |",
+                ]
+            )
             for k, v in self.key_levels.items():
                 lines.append(
                     f"| **{k}** | {v.get('s1', 0):,.0f} | {v.get('s2', 0):,.0f} | "
                     f"{v.get('pivot', 0):,.0f} | {v.get('r1', 0):,.0f} | {v.get('r2', 0):,.0f} |"
                 )
 
-        lines.extend([
-            "",
-            "---",
-            "🏁 *ChanakyaTrade Quant Terminal — Deterministic Precision & Institutional Guardrails*",
-        ])
+        lines.extend(
+            [
+                "",
+                "---",
+                "🏁 *ChanakyaTrade Quant Terminal — Deterministic Precision & Institutional Guardrails*",
+            ]
+        )
         return "\n".join(lines)
 
     def to_telegram_chunks(self) -> list[str]:
@@ -270,18 +296,18 @@ class EODReport:
         """
         # Part 1: Scorecard & What Went Well
         p1_lines = [
-            f"🏛️ <b>CHANAKYATRADE INSTITUTIONAL EOD REPORT</b>",
+            "🏛️ <b>CHANAKYATRADE INSTITUTIONAL EOD REPORT</b>",
             f"📅 <b>Session Date:</b> {self.date_str} | <b>Time:</b> {self.generated_at}",
-            f"━━━━━━━━━━━━━━━━━━━━",
+            "━━━━━━━━━━━━━━━━━━━━",
             "",
-            f"📊 <b>1. SCORECARD & WHAT WENT WELL</b>",
+            "📊 <b>1. SCORECARD & WHAT WENT WELL</b>",
             f"• <b>NIFTY:</b> {self.nifty_ltp:,.1f} ({self.nifty_change_pct:+.2f}%) | <b>VIX:</b> {self.vix_ltp:.1f}",
             f"• <b>FII/DII Flows:</b> FII {self.fii_net_cr:+,.0f} Cr | DII {self.dii_net_cr:+,.0f} Cr",
             f"• <b>Total Alerts Audited:</b> {self.total_alerts} ({self.ignited_trades} Ignited)",
             f"• <b>Win Rate:</b> <b>{self.win_rate_pct:.1f}%</b> ({self.win_count}W / {self.loss_count}L / {self.in_flight_count} Active)",
             f"• <b>Realized Payoff:</b> <b>{self.total_realized_r:+.2f}R</b> (Avg: {self.avg_r_multiple:+.2f}R)",
             "",
-            f"🟢 <b>What Went Well:</b>",
+            "🟢 <b>What Went Well:</b>",
         ]
         for pt in self.what_went_well_points[:3]:
             p1_lines.append(f"• {html.escape(pt)}")
@@ -299,8 +325,8 @@ class EODReport:
 
         # Part 2: What Went Bad & RCA
         p2_lines = [
-            f"⚠️ <b>2. WHAT WENT BAD & ROOT CAUSE ANALYSIS</b>",
-            f"━━━━━━━━━━━━━━━━━━━━",
+            "⚠️ <b>2. WHAT WENT BAD & ROOT CAUSE ANALYSIS</b>",
+            "━━━━━━━━━━━━━━━━━━━━",
             "",
         ]
         for pt in self.what_went_bad_points[:3]:
@@ -311,46 +337,56 @@ class EODReport:
             for rca in self.rca_breakdown:
                 syms = ", ".join(rca.symbols[:3]) if rca.symbols else "N/A"
                 cat_title = rca.category.replace("_", " ").title()
-                p2_lines.extend([
-                    f"",
-                    f"🔴 <b>{html.escape(cat_title)} ({rca.count} setups: {html.escape(syms)}):</b>",
-                    f"• <i>Cause:</i> {html.escape(rca.root_cause)}",
-                    f"• <i>Fix:</i> {html.escape(rca.corrective_action)}",
-                ])
+                p2_lines.extend(
+                    [
+                        "",
+                        f"🔴 <b>{html.escape(cat_title)} ({rca.count} setups: {html.escape(syms)}):</b>",
+                        f"• <i>Cause:</i> {html.escape(rca.root_cause)}",
+                        f"• <i>Fix:</i> {html.escape(rca.corrective_action)}",
+                    ]
+                )
 
         part2 = "\n".join(p2_lines)
 
         # Part 3: What Could Have Been Done Better, System Upgrades & Tomorrow's Blueprint
         p3_lines = [
-            f"🛠️ <b>3. STRATEGIC FIXES & TOMORROW'S BLUEPRINT</b>",
-            f"━━━━━━━━━━━━━━━━━━━━",
+            "🛠️ <b>3. STRATEGIC FIXES & TOMORROW'S BLUEPRINT</b>",
+            "━━━━━━━━━━━━━━━━━━━━",
             "",
-            f"💡 <b>Execution Alpha / What Could Have Been Better:</b>",
+            "💡 <b>Execution Alpha / What Could Have Been Better:</b>",
         ]
         for pt in self.could_have_been_better_points[:3]:
             p3_lines.append(f"• {html.escape(pt)}")
 
-        p3_lines.extend([
-            "",
-            f"⚙️ <b>Algorithmic Upgrades Implemented:</b>",
-        ])
+        p3_lines.extend(
+            [
+                "",
+                "⚙️ <b>Algorithmic Upgrades Implemented:</b>",
+            ]
+        )
         for pt in self.system_improvement_points[:3]:
             p3_lines.append(f"• {html.escape(pt)}")
 
-        p3_lines.extend([
-            "",
-            f"🎯 <b>Recommendations for Tomorrow ({html.escape(self.tomorrow_day_name)}):</b>",
-        ])
+        p3_lines.extend(
+            [
+                "",
+                f"🎯 <b>Recommendations for Tomorrow ({html.escape(self.tomorrow_day_name)}):</b>",
+            ]
+        )
         if self.tomorrow_expiry_index:
-            p3_lines.append(f"• ⚡ <b>Expiry Focus:</b> {html.escape(self.tomorrow_expiry_index)} Weekly Settlement.")
+            p3_lines.append(
+                f"• ⚡ <b>Expiry Focus:</b> {html.escape(self.tomorrow_expiry_index)} Weekly Settlement."
+            )
 
         for pt in self.tomorrow_recommendations[:4]:
             p3_lines.append(f"• {html.escape(pt)}")
 
-        p3_lines.extend([
-            "",
-            f"🏁 <i>ChanakyaTrade Institutional Terminal — Fail-Closed Safety</i>",
-        ])
+        p3_lines.extend(
+            [
+                "",
+                "🏁 <i>ChanakyaTrade Institutional Terminal — Fail-Closed Safety</i>",
+            ]
+        )
         part3 = "\n".join(p3_lines)
 
         return [part1, part2, part3]
@@ -371,7 +407,9 @@ class EODReportGenerator:
         if data_file:
             self.alerts_file = data_file
         else:
-            base = Path(os.environ.get("TRADING_PLATFORM_DATA") or (Path.home() / ".trading_platform"))
+            base = Path(
+                os.environ.get("TRADING_PLATFORM_DATA") or (Path.home() / ".trading_platform")
+            )
             self.alerts_file = base / "auto_alerts.json"
 
     def _load_alerts(self, target_date: str) -> list[dict[str, Any]]:
@@ -391,7 +429,12 @@ class EODReportGenerator:
             if not isinstance(alert, dict):
                 continue
             # Match date against created_at, triggered_at, or original_call_time
-            created = alert.get("created_at") or alert.get("triggered_at") or alert.get("updated_at") or ""
+            created = (
+                alert.get("created_at")
+                or alert.get("triggered_at")
+                or alert.get("updated_at")
+                or ""
+            )
             if target_date in created or created.startswith(target_date):
                 matched.append(alert)
         return matched
@@ -534,7 +577,59 @@ class EODReportGenerator:
             r_mult = gain_pts / risk if risk > 0 else 0.0
 
             # Determine outcome
-            if any(m in ("T1", "T2", "T3") for m in milestones) or target_status in (
+            if is_inv:
+                is_corrupt = any(
+                    k in inv_reason.lower()
+                    for k in (
+                        "corrupt",
+                        "phantom",
+                        "uncalibrated",
+                        "mismatch",
+                        "false alert",
+                        "unit scale",
+                    )
+                )
+                if is_corrupt:
+                    outcome = "INVALIDATED_CORRUPTED"
+                    # Exclude from win/loss counts as data corruption artifact
+                else:
+                    outcome = "LOSS_STOPPED"
+                    loss_count += 1
+                    total_realized_r -= 1.0
+                    stopped_setups.append(
+                        TradeOutcomeSummary(
+                            alert_id=a.get("alert_id", ""),
+                            symbol=symbol,
+                            segment=seg,
+                            direction=direction,
+                            entry_level=entry,
+                            stop_loss=sl,
+                            target_level=target,
+                            peak_gain_pct=gain_pct,
+                            realized_r=-1.0,
+                            milestones=milestones,
+                            outcome=outcome,
+                            headline=a.get("headline", ""),
+                            invalidation_reason=inv_reason,
+                        )
+                    )
+
+                    # Classify RCA failure category
+                    lower_reason = inv_reason.lower()
+                    if "theta" in lower_reason or "stagnan" in lower_reason:
+                        rca_buckets["THETA_STAGNATION"].append(symbol)
+                    elif (
+                        "wick" in lower_reason
+                        or "20-sma" in lower_reason
+                        or "noise" in lower_reason
+                        or "option premium" in lower_reason
+                    ):
+                        rca_buckets["PREMATURE_SL"].append(symbol)
+                    elif gain_pct >= 12.0 or "target" in lower_reason:
+                        rca_buckets["MISSED_T1_REVERSAL"].append(symbol)
+                    else:
+                        rca_buckets["STRUCTURAL_INVALIDATION"].append(symbol)
+            elif any(m in ("T1", "T2", "T3") for m in milestones) or target_status in (
                 "T1_ACHIEVED",
                 "T2_ACHIEVED",
                 "TARGET_ACHIEVED",
@@ -580,62 +675,23 @@ class EODReportGenerator:
                         headline=a.get("headline", ""),
                     )
                 )
-            elif is_inv:
-                outcome = "LOSS_STOPPED"
-                loss_count += 1
-                total_realized_r -= 1.0
-                stopped_setups.append(
-                    TradeOutcomeSummary(
-                        alert_id=a.get("alert_id", ""),
-                        symbol=symbol,
-                        segment=seg,
-                        direction=direction,
-                        entry_level=entry,
-                        stop_loss=sl,
-                        target_level=target,
-                        peak_gain_pct=gain_pct,
-                        realized_r=-1.0,
-                        milestones=milestones,
-                        outcome=outcome,
-                        headline=a.get("headline", ""),
-                        invalidation_reason=inv_reason,
-                    )
-                )
-
-                # Classify RCA failure category
-                lower_reason = inv_reason.lower()
-                if "theta" in lower_reason or "stagnan" in lower_reason:
-                    rca_buckets["THETA_STAGNATION"].append(symbol)
-                elif "wick" in lower_reason or "20-sma" in lower_reason or "noise" in lower_reason or "option premium" in lower_reason:
-                    rca_buckets["PREMATURE_SL"].append(symbol)
-                elif gain_pct >= 12.0 or "target" in lower_reason:
-                    rca_buckets["MISSED_T1_REVERSAL"].append(symbol)
-                else:
-                    rca_buckets["STRUCTURAL_INVALIDATION"].append(symbol)
             else:
                 outcome = "IN_FLIGHT"
                 in_flight_count += 1
 
         # Summary calculations
         completed = win_count + loss_count
-        win_rate = (win_count / completed * 100.0) if completed > 0 else (75.0 if total_alerts > 0 else 0.0)
+        win_rate = (
+            (win_count / completed * 100.0)
+            if completed > 0
+            else (75.0 if total_alerts > 0 else 0.0)
+        )
         avg_r = (total_realized_r / completed) if completed > 0 else 0.0
-        profit_factor = (win_count * 2.2 / (loss_count * 1.0)) if loss_count > 0 else (3.5 if win_count > 0 else 1.0)
-
-        # Fallback star setups if fresh testing environment
-        if not star_setups and total_alerts == 0:
-            star_setups = [
-                TradeOutcomeSummary("al-1", "NIFTY 25350 CE", "FNO", "BULLISH", 104.5, 75.0, 138.0, 32.1, 2.3, ["T1", "T2"], "WIN_TARGET"),
-                TradeOutcomeSummary("al-2", "BANKNIFTY 54800 CE", "FNO", "BULLISH", 320.0, 230.0, 410.0, 41.8, 2.5, ["T1", "T2"], "WIN_TARGET"),
-                TradeOutcomeSummary("al-3", "DIXON", "EQUITY", "BULLISH", 11400.0, 11150.0, 11950.0, 3.8, 3.2, ["T1"], "WIN_TARGET"),
-            ]
-            win_rate = 74.2
-            total_realized_r = 8.4
-            avg_r = 1.68
-            profit_factor = 2.85
-            ignited_count = 15
-            win_count = 11
-            loss_count = 4
+        profit_factor = (
+            (win_count * 2.2 / (loss_count * 1.0))
+            if loss_count > 0
+            else (3.5 if win_count > 0 else 1.0)
+        )
 
         # Star setups sorted by peak gain %
         star_setups.sort(key=lambda s: s.peak_gain_pct, reverse=True)
@@ -693,12 +749,20 @@ class EODReportGenerator:
             )
 
         # What went well points
-        what_went_well = [
-            f"Institutional breakout momentum delivered a <b>{win_rate:.1f}% win rate</b> across primary vectors.",
-            f"Precursor Radar and TTMSqueeze successfully identified volume compression 3–8 minutes before retail breakout.",
-            "Zero safety breaches: 100% adherence to fail-closed contract; zero fake paper fills or synthetic prices.",
-            f"Captured asymmetric expansions with aggregate realized payoff of <b>{total_realized_r:+.2f}R</b>.",
-        ]
+        if ignited_count > 0:
+            what_went_well = [
+                f"Institutional breakout momentum delivered a <b>{win_rate:.1f}% win rate</b> across primary vectors.",
+                "Precursor Radar and TTMSqueeze successfully identified volume compression 3–8 minutes before retail breakout.",
+                "Zero safety breaches: 100% adherence to fail-closed contract; zero fake paper fills or synthetic prices.",
+                f"Captured asymmetric expansions with aggregate realized payoff of <b>{total_realized_r:+.2f}R</b>.",
+            ]
+        else:
+            what_went_well = [
+                "Zero capital drawdown: Preserved cash and discipline during non-viable market conditions.",
+                "Deterministic screening prevented false entries during low-momentum consolidation.",
+                "Zero safety breaches: 100% adherence to fail-closed contract; zero fake paper fills or synthetic prices.",
+                "Terminal remained in high-fidelity monitoring posture ready for opening drives.",
+            ]
 
         # What went bad points
         what_went_bad = [
@@ -842,7 +906,9 @@ class EODReportGenerator:
                         f"[EODReportGenerator] HTML dispatch failed for Part {idx} ({resp.status_code}): {resp.text}. Retrying plain text."
                     )
                     clean_text = re.sub(r"<[^>]+>", "", chunk)
-                    httpx.post(url, json={"chat_id": target_chat_id, "text": clean_text}, timeout=25)
+                    httpx.post(
+                        url, json={"chat_id": target_chat_id, "text": clean_text}, timeout=25
+                    )
 
             return True
         except Exception as e:
@@ -887,7 +953,9 @@ def check_and_trigger_daily_eod(force: bool = False) -> Optional[EODReport]:
         if (now.hour < 15) or (now.hour == 15 and now.minute < 45):
             return None
 
-    logger.info(f"[EODReport] Post-market 15:45 IST trigger active. Generating daily EOD report for {today_str}...")
+    logger.info(
+        f"[EODReport] Post-market 15:45 IST trigger active. Generating daily EOD report for {today_str}..."
+    )
     generator = EODReportGenerator()
     report, _ = generator.generate_and_dispatch(target_date=today_str)
     _EOD_GENERATED_TODAY_LOCK.add(today_str)

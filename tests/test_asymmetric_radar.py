@@ -7,9 +7,12 @@ Validates Pocket Pivots, F&O Ban Squeezes, Rubber Band 200-EMA Mean-Reversions,
 """
 
 from unittest.mock import MagicMock, patch
+from datetime import datetime, timezone, timedelta
 import numpy as np
 import pandas as pd
 import pytest
+
+IST = timezone(timedelta(hours=5, minutes=30))
 
 from engine.asymmetric_radar import (
     AsymmetricOpportunity,
@@ -332,3 +335,203 @@ def test_rubber_band_mazdock_volatility_floor_and_monotonic_invariants(scanner):
 
         # 4. Asymmetric R:R ratio guarantee:
         assert opp.risk_reward_ratio >= 3.0
+
+
+def test_turtle_soup_sweep_short_detection(scanner):
+    """Test ICT Turtle Soup Bearish Liquidity Sweep: price sweeps prior 15-day high and closes with upper rejection wick."""
+    dates = pd.date_range("2026-08-01", periods=25, freq="B")
+    closes = np.full(25, 2500.0)
+    highs = np.full(25, 2515.0)
+    lows = np.full(25, 2480.0)
+    opens = np.full(25, 2495.0)
+
+    # Historical swing high = 2540 at day 10
+    highs[10] = 2540.0
+
+    # Today sweeps the swing high to 2555 (15 pts above 2540), but gets rejected and closes back down at 2510
+    # Open=2515, High=2555, Low=2500, Close=2510 -> Upper wick = 2555 - 2515 = 40 pts on a 55 pt candle (> 70% wick!)
+    highs[-1] = 2555.0
+    opens[-1] = 2515.0
+    closes[-1] = 2510.0
+    lows[-1] = 2500.0
+
+    df = pd.DataFrame(
+        {"open": opens, "high": highs, "low": lows, "close": closes, "volume": [1000000] * 25},
+        index=dates,
+    )
+
+    mock_quote = MagicMock()
+    mock_quote.last_price = 2510.0
+    mock_quote.vwap = 2520.0
+
+    with (
+        patch("market.quotes.get_quote", return_value={"NSE:RELIANCE": mock_quote}),
+        patch("market.history.get_ohlcv", return_value=df),
+    ):
+        opp = scanner.detect_turtle_soup_sweep_short("RELIANCE", df=df)
+
+        assert opp is not None
+        assert opp.symbol == "RELIANCE"
+        assert opp.setup_type == "TURTLE_SOUP_SHORT"
+        assert opp.direction == "BEARISH"
+        assert opp.risk_reward_ratio >= 3.0
+        # Bearish monotonic hierarchy: SL > Entry > T1 > T2 > Moonshot
+        assert opp.stop_loss > opp.ltp > opp.target_1 > opp.target_2 > opp.target_moonshot
+        assert "ICT Turtle Soup" in opp.confluences[0]
+
+
+def test_volatility_pinning_iron_condor_detection(scanner):
+    """Test Non-Directional Volatility Pinning Iron Condor setup for indices and F&O leaders."""
+    mock_quote = MagicMock()
+    mock_quote.last_price = 24500.0
+    mock_quote.vwap = 24490.0
+
+    with patch("market.quotes.get_quote", return_value={"NSE:NIFTY": mock_quote}):
+        opp = scanner.detect_volatility_pinning_iron_condor("NIFTY", quote=mock_quote)
+
+        assert opp is not None
+        assert opp.symbol == "NIFTY"
+        assert opp.setup_type == "IRON_CONDOR_PINNING"
+        assert opp.direction == "NEUTRAL"
+        assert "Iron Condor" in opp.setup_label
+        assert opp.metrics["short_pe"] < opp.ltp < opp.metrics["short_ce"]
+        assert opp.metrics["long_pe"] < opp.metrics["short_pe"]
+        assert opp.metrics["long_ce"] > opp.metrics["short_ce"]
+        assert opp.risk_reward_ratio >= 3.0
+
+
+def test_resolve_recommended_option_contract_single_stock_expiry_week_next_month_rollover(
+    monkeypatch,
+):
+    """Verify single-stock option during SEBI physical settlement week automatically routes to Next-Month series."""
+    from engine.asymmetric_radar import resolve_recommended_option_contract
+    from brokers.base import OptionsContract
+
+    ref_dt = datetime(2026, 9, 22, 11, 0, tzinfo=IST)  # Tuesday before Sep 24 expiry (DTE=2)
+
+    c_oct = OptionsContract(
+        symbol="RELIANCE26OCT3000CE",
+        underlying="RELIANCE",
+        expiry="2026-10-29",
+        strike=3000.0,
+        option_type="CE",
+        last_price=65.0,
+        oi=50000,
+        oi_change=0,
+        volume=80000,
+    )
+
+    monkeypatch.setattr("market.options.get_expiries", lambda sym: ["2026-09-24", "2026-10-29"])
+    monkeypatch.setattr(
+        "market.options.get_options_chain",
+        lambda sym, expiry=None: [c_oct] if expiry == "2026-10-29" else [],
+    )
+
+    opt = resolve_recommended_option_contract(
+        symbol="RELIANCE",
+        direction="BULLISH",
+        spot=3000.0,
+        stop_loss=2950.0,
+        target_1=3100.0,
+        target_2=3200.0,
+        setup_type="POCKET_PIVOT",
+        is_positional=True,
+        ref_dt=ref_dt,
+    )
+
+    assert opt["is_next_month_routed"] is True
+    assert opt["expiry_date"] == "2026-10-29"
+    assert "NEXT-MONTH ROLLOVER" in opt["derivative_safeguard"]
+    assert "RELIANCE" in opt["contract_symbol"]
+    assert "RELIANCE" in opt["futures_contract"]
+    assert opt["futures_entry"] > 3000.0
+    assert opt["futures_lot_size"] > 0
+
+
+def test_resolve_recommended_option_contract_positional_index_dtes(monkeypatch):
+    """Verify positional index setup on NIFTY selects DTE >= 10 contract to avoid weekly theta bleed."""
+    from engine.asymmetric_radar import resolve_recommended_option_contract
+    from brokers.base import OptionsContract
+
+    ref_dt = datetime(2026, 9, 22, 14, 30, tzinfo=IST)  # Tuesday, DTE to Sep 24 = 2, Oct 8 = 16
+
+    c_oct = OptionsContract(
+        symbol="NIFTY26OCT23500CE",
+        underlying="NIFTY",
+        expiry="2026-10-08",
+        strike=23500.0,
+        option_type="CE",
+        last_price=240.0,
+        oi=60000,
+        oi_change=0,
+        volume=120000,
+    )
+
+    monkeypatch.setattr(
+        "market.options.get_expiries",
+        lambda sym: ["2026-09-24", "2026-10-01", "2026-10-08", "2026-10-29"],
+    )
+    monkeypatch.setattr(
+        "market.options.get_options_chain",
+        lambda sym, expiry=None: [c_oct] if expiry == "2026-10-08" else [],
+    )
+
+    opt = resolve_recommended_option_contract(
+        symbol="NIFTY",
+        direction="BULLISH",
+        spot=23450.0,
+        stop_loss=23000.0,
+        target_1=24300.0,
+        target_2=25200.0,
+        setup_type="RUBBER_BAND_200EMA",
+        is_positional=True,
+        ref_dt=ref_dt,
+    )
+
+    assert opt["is_positional"] is True
+    assert opt["expiry_date"] == "2026-10-08"
+    assert "POSITION RUNWAY" in opt["derivative_safeguard"]
+    assert "NIFTY" in opt["futures_contract"]
+    assert opt["futures_recommendation"] is not None
+    assert "Delta 1.0" in opt["futures_recommendation"]
+
+
+def test_render_asymmetric_alert_displays_futures_and_rollover_badge():
+    """Verify render_asymmetric_alert displays Futures Preferred and Next-Month Rollover note."""
+    from bot.alert_templates import render_asymmetric_alert
+
+    sample_alert = {
+        "symbol": "RELIANCE",
+        "segment": "FNO_STOCK",
+        "conviction_score": 90,
+        "verdict": "MAX_CONVICTION",
+        "ltp": 3000.0,
+        "entry_range": "₹2,990.0 – ₹3,020.0",
+        "stop_loss": 2950.0,
+        "target_1": 3100.0,
+        "target_2": 3200.0,
+        "target_moonshot": 3350.0,
+        "risk_reward": "1:4.0",
+        "direction": "BULLISH",
+        "confluences": ["Pocket Pivot Volume Expansion", "10-EMA Base Support Reclaim"],
+        "is_next_month_routed": True,
+        "actionable_plan": {
+            "option_plan": {
+                "contract_symbol": "RELIANCE26OCT3000CE",
+                "entry_premium": 65.0,
+                "lot_size": 250,
+            },
+            "futures_plan": {
+                "contract_symbol": "RELIANCE26OCTFUT",
+                "entry_price": 3010.5,
+                "lot_size": 250,
+            },
+        },
+    }
+
+    rendered = render_asymmetric_alert(sample_alert, in_market=True)
+    assert "Futures Preferred:" in rendered
+    assert "RELIANCE26OCTFUT" in rendered
+    assert "Delta 1.0 · Zero Theta Decay" in rendered
+    assert "NEXT-MONTH ROLLOVER" in rendered
+    assert "SEBI Physical Margin Safe" in rendered

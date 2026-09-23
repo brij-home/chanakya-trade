@@ -575,8 +575,6 @@ def test_tier1_stock_option_illiquidity_rejection(auditor):
 
 def test_tier1_midday_lunch_lull_rvol_rejection(auditor):
     """Breakouts attempted during 11:30-13:00 IST without RVOL >= 1.8x are vetoed as false breakouts."""
-    from datetime import datetime
-    from market.calendar import IST
 
     # 12:15 IST with low RVOL (1.2x) -> VETO
     alert_midday_low_vol = AutoAlert(
@@ -727,9 +725,152 @@ def test_tier1_commodity_option_exemption_from_stock_gate(auditor):
         metrics={"oi": 35, "volume": 18},
         is_live=True,
         environment="LIVE",
+        created_at="2026-09-23 11:00:00",
     )
     passed, reason, flags = auditor.verify_tier1_sanity(alert_mcx_opt)
     assert passed is True
     assert flags["liquidity_valid"] is True
 
 
+def test_tier1_opposing_supply_collision_veto(auditor):
+    """Bullish/CE alert right beneath PDH/Day High is vetoed as Opposing Supply Collision."""
+    alert_supply_trap = AutoAlert(
+        alert_id="test-supply-collision",
+        alert_type="GAMMA_BLAST",
+        stage="IGNITED",
+        symbol="NSE:NIFTY",
+        exchange="NFO",
+        segment="FNO_INDEX",
+        direction="BULLISH",
+        headline="Nifty Call Surge",
+        summary="Nifty CE test",
+        ltp=120.0,
+        trigger_level=120.0,
+        stop_loss=90.0,
+        target_level=180.0,
+        strike=23600.0,
+        option_type="CE",
+        metrics={
+            "spot": 23595.0,
+            "vwap": 23570.0,
+            "prev_day_high": 23600.0,  # Only 5 pts / 0.02% above spot!
+            "day_high": 23598.0,
+            "day_low": 23480.0,
+        },
+        is_live=True,
+        environment="LIVE",
+    )
+    passed, reason, flags = auditor.verify_tier1_sanity(alert_supply_trap)
+    assert passed is False
+    assert "Opposing Supply Collision" in reason
+    assert "Day High" in reason or "Previous Day High (PDH)" in reason
+
+
+def test_tier1_opposing_demand_collision_veto(auditor):
+    """Bearish/PE alert right above PDL/Day Low is vetoed as Opposing Demand Collision."""
+    alert_demand_trap = AutoAlert(
+        alert_id="test-demand-collision",
+        alert_type="GAMMA_BLAST",
+        stage="IGNITED",
+        symbol="NSE:NIFTY",
+        exchange="NFO",
+        segment="FNO_INDEX",
+        direction="BEARISH",
+        headline="Nifty Put Surge",
+        summary="Nifty PE test",
+        ltp=120.0,
+        trigger_level=120.0,
+        stop_loss=90.0,
+        target_level=180.0,
+        strike=23400.0,
+        option_type="PE",
+        metrics={
+            "spot": 23405.0,
+            "vwap": 23430.0,
+            "prev_day_low": 23400.0,  # Only 5 pts / 0.02% below spot!
+            "day_high": 23550.0,
+            "day_low": 23402.0,
+        },
+        is_live=True,
+        environment="LIVE",
+    )
+    with patch(
+        "engine.learning_engine.pattern_learning_engine.is_symbol_locked_out",
+        return_value=(False, ""),
+    ):
+        passed, reason, flags = auditor.verify_tier1_sanity(alert_demand_trap)
+    assert passed is False
+    assert "Opposing Demand Collision" in reason
+    assert "Day Low" in reason or "Previous Day Low (PDL)" in reason
+
+
+def test_tier1_vwap_overextension_veto(auditor):
+    """Index CE alert with spot extended > 0.65% above VWAP is vetoed as Climax Exhaustion."""
+    alert_vwap_ext = AutoAlert(
+        alert_id="test-vwap-ext",
+        alert_type="GAMMA_BLAST",
+        stage="IGNITED",
+        symbol="NSE:NIFTY",
+        exchange="NFO",
+        segment="FNO_INDEX",
+        direction="BULLISH",
+        headline="Nifty Call Chase",
+        summary="Nifty CE test",
+        ltp=120.0,
+        trigger_level=120.0,
+        stop_loss=90.0,
+        target_level=180.0,
+        strike=23800.0,
+        option_type="CE",
+        metrics={
+            "spot": 23700.0,
+            "vwap": 23500.0,  # +0.85% above VWAP
+            "spot_to_vwap_pct": 0.85,
+        },
+        is_live=True,
+        environment="LIVE",
+    )
+    with patch(
+        "engine.learning_engine.pattern_learning_engine.is_symbol_locked_out",
+        return_value=(False, ""),
+    ):
+        passed, reason, flags = auditor.verify_tier1_sanity(alert_vwap_ext)
+    assert passed is False
+    assert "Climax Exhaustion" in reason
+    assert "extended" in reason
+
+
+def test_tier1_vwap_capitulation_veto(auditor):
+    """Index PE alert with spot extended < -0.65% below VWAP is vetoed as Capitulation Exhaustion."""
+    alert_vwap_cap = AutoAlert(
+        alert_id="test-vwap-cap",
+        alert_type="GAMMA_BLAST",
+        stage="IGNITED",
+        symbol="NSE:NIFTY",
+        exchange="NFO",
+        segment="FNO_INDEX",
+        direction="BEARISH",
+        headline="Nifty Put Chase",
+        summary="Nifty PE test",
+        ltp=120.0,
+        trigger_level=120.0,
+        stop_loss=90.0,
+        target_level=180.0,
+        strike=23300.0,
+        option_type="PE",
+        metrics={
+            "spot": 23300.0,
+            "vwap": 23500.0,  # -0.85% below VWAP
+            "spot_to_vwap_pct": -0.85,
+        },
+        is_live=True,
+        environment="LIVE",
+    )
+    with patch(
+        "engine.learning_engine.pattern_learning_engine.is_symbol_locked_out",
+        return_value=(False, ""),
+    ):
+        passed, reason, flags = auditor.verify_tier1_sanity(alert_vwap_cap)
+    assert passed is False
+    assert "Capitulation Exhaustion" in reason
+    assert "extended" in reason

@@ -82,6 +82,8 @@ export default function InflectionScannerView({
   const [chatLoading, setChatLoading] = useState(false)
   const chatScrollRef = useRef(null)
 
+  const scanAbortRef = useRef(null)
+
   // ── 1. Load Universes & Store Diagnostics on Mount ────────────────────
   const loadStoreStats = async () => {
     try {
@@ -107,16 +109,29 @@ export default function InflectionScannerView({
     }
     loadUniverses()
     loadStoreStats()
+    return () => {
+      if (scanAbortRef.current) {
+        try { scanAbortRef.current.abort() } catch {}
+      }
+    }
   }, [])
 
   // ── 2. Run Inflection Scan ──────────────────────────────────────────
   const executeScan = async (
     targetUniverse = universe,
     overrideTurnover = minTurnoverCr,
-    overrideCap = capTierFilter
+    overrideCap = capTierFilter,
+    force = false
   ) => {
-    setIsScanning(true)
+    if (isScanning && !force) {
+      return
+    }
+    if (scanAbortRef.current) {
+      try { scanAbortRef.current.abort() } catch {}
+    }
     const abortCtrl = new AbortController()
+    scanAbortRef.current = abortCtrl
+    setIsScanning(true)
 
     startActivity({
       title: 'Inflection & Multibagger Radar',
@@ -131,25 +146,33 @@ export default function InflectionScannerView({
     })
 
     try {
-      const res = await call('/skills/inflection_scan', {
-        universe: targetUniverse,
-        archetype: archetypeFilter,
-        timing: timingFilter,
-        min_score: minScore,
-        max_results: 60,
-        min_turnover_cr: overrideTurnover,
-        cap_tier: overrideCap,
-        use_local_cache: true,
-        sync_missing: false,
-      })
+      const res = await call(
+        '/skills/inflection_scan',
+        {
+          universe: targetUniverse,
+          archetype: 'ALL',
+          timing: 'ALL',
+          min_score: 45,
+          max_results: 100,
+          min_turnover_cr: overrideTurnover,
+          cap_tier: overrideCap,
+          use_local_cache: !force,
+          sync_missing: false,
+        },
+        { timeoutMs: 120000, signal: abortCtrl.signal }
+      )
       const resultData = res?.data ?? res
       setScanResult(resultData)
       setLastScanTime(new Date().toLocaleTimeString('en-IN', { hour12: false }))
     } catch (err) {
-      console.error('Inflection scan failed:', err)
+      if (err.name !== 'AbortError') {
+        console.error('Inflection scan failed:', err)
+      }
     } finally {
-      setIsScanning(false)
-      stopActivity()
+      if (scanAbortRef.current === abortCtrl) {
+        setIsScanning(false)
+        stopActivity()
+      }
     }
   }
 
@@ -172,7 +195,7 @@ export default function InflectionScannerView({
           `✓ Synced ${data.synced_count || 0} stocks (${data.failed_count || 0} failed) in ${data.duration_sec || 0}s`
         )
         // Auto re-scan using the newly cached EOD store
-        await executeScan(universe, minTurnoverCr, capTierFilter)
+        await executeScan(universe, minTurnoverCr, capTierFilter, true)
       }
       loadStoreStats()
     } catch (err) {
@@ -185,10 +208,10 @@ export default function InflectionScannerView({
     }
   }
 
-  // Trigger scan when universe, archetype, timing, minScore, minTurnoverCr, or capTierFilter changes
+  // Trigger scan when universe, minTurnoverCr, or capTierFilter changes (archetype, timing & score filter client-side instantly)
   useEffect(() => {
     executeScan(universe, minTurnoverCr, capTierFilter)
-  }, [universe, archetypeFilter, timingFilter, minScore, minTurnoverCr, capTierFilter])
+  }, [universe, minTurnoverCr, capTierFilter])
 
   // ── 3. Open AI Decision Matrix Drawer ───────────────────────────────
   const openDecisionDrawer = async (candidate) => {
@@ -713,7 +736,7 @@ export default function InflectionScannerView({
           {/* Rescan Button */}
           <button
             type="button"
-            onClick={() => executeScan(universe)}
+            onClick={() => executeScan(universe, minTurnoverCr, capTierFilter, true)}
             disabled={isScanning}
             className="flex items-center gap-1 text-xs font-bold px-2.5 py-1 rounded-lg border border-gold/40 bg-gold/15 text-amber-600 dark:text-amber-400 hover:bg-gold/25 shadow-xs cursor-pointer transition-all"
           >
@@ -919,7 +942,7 @@ export default function InflectionScannerView({
                   {renderHeader('day_change_pct', 'Day Chg', 'right')}
                   {renderHeader('rvol_20d', 'RVOL 20D', 'center')}
                   {renderHeader('trend_template_passed', 'Stage / Minervini', 'center')}
-                  {renderHeader('entry_price', 'Trade Levels (Entry / SL / T1)', 'left')}
+                  {renderHeader('entry_price', 'Trade Levels (Entry / SL / Targets T1-T2-🚀T3)', 'left')}
                   {renderHeader('risk_reward_ratio', 'Payoff (R:R)', 'center')}
                   <th className="py-2.5 px-3 text-right text-muted">Actions</th>
                 </tr>
@@ -1120,20 +1143,31 @@ export default function InflectionScannerView({
                         </div>
                       </td>
 
-                      {/* Trade Levels */}
-                      <td className="py-2.5 px-2 font-mono text-[11px]">
-                        <div className="flex items-center gap-1.5">
-                          <span className="text-text font-bold" title="Entry">
-                            ₹{c.entry_price.toFixed(1)}
-                          </span>
-                          <span className="text-muted">/</span>
-                          <span className="text-rose-600 dark:text-rose-400 font-medium" title="Stop Loss">
-                            ₹{c.stop_loss.toFixed(1)}
-                          </span>
-                          <span className="text-muted">/</span>
-                          <span className="text-emerald-600 dark:text-emerald-400 font-bold" title="Target 1 (+2R)">
-                            ₹{c.target_1.toFixed(1)}
-                          </span>
+                      {/* Trade Levels: Entry, SL, T1, T2, Moonshot T3 */}
+                      <td className="py-2 px-2 font-mono text-[11px]">
+                        <div className="flex flex-col gap-0.5">
+                          <div className="flex items-center gap-1.5">
+                            <span className="text-text font-bold" title="Optimal Entry Zone">
+                              ₹{c.entry_price.toFixed(1)}
+                            </span>
+                            <span className="text-muted text-[10px]">/</span>
+                            <span className="text-rose-600 dark:text-rose-400 font-medium" title="Structural Invalidation Stop Loss">
+                              SL: ₹{c.stop_loss.toFixed(1)}
+                            </span>
+                          </div>
+                          <div className="flex items-center gap-1 text-[10px]">
+                            <span className="text-emerald-600 dark:text-emerald-400 font-bold" title="Target 1 (+2R Scale 50% & SL to Breakeven)">
+                              T1: ₹{c.target_1.toFixed(1)}
+                            </span>
+                            <span className="text-muted text-[8px]">•</span>
+                            <span className="text-amber-600 dark:text-amber-400 font-bold" title="Target 2 (+3.5R Primary Positional Swing)">
+                              T2: ₹{(c.target_2 || (c.entry_price + (3.5 * Math.max(0.5, c.entry_price - c.stop_loss)))).toFixed(1)}
+                            </span>
+                            <span className="text-muted text-[8px]">•</span>
+                            <span className="text-purple-600 dark:text-purple-400 font-bold flex items-center gap-0.5" title="Moonshot Target (+6.5R Runner)">
+                              <span>🚀</span>T3: ₹{(c.target_moonshot || (c.entry_price + (6.5 * Math.max(0.5, c.entry_price - c.stop_loss)))).toFixed(1)}
+                            </span>
+                          </div>
                         </div>
                       </td>
 
@@ -1178,6 +1212,8 @@ export default function InflectionScannerView({
                                   price: livePrice ?? c.entry_price,
                                   stopLoss: c.stop_loss,
                                   target: c.target_1,
+                                  target2: c.target_2,
+                                  targetMoonshot: c.target_moonshot,
                                   _priceSource: livePrice ? 'LIVE' : 'EOD_ENTRY',
                                 })
                               }
@@ -1316,40 +1352,61 @@ export default function InflectionScannerView({
                   )}
                 </div>
 
-                {/* Price & Levels Ribbon with live LTP overlay */}
-                <div className="rounded-lg p-2.5 font-mono text-xs border border-border bg-panel flex items-center justify-between">
-                  {(() => {
-                    const liveTick = getTicker(c.symbol)
-                    const livePrice = liveTick?.ltp != null && liveTick.ltp > 0 ? liveTick.ltp : null
-                    const displayLtp = livePrice ?? c.ltp
-                    const entryDelta = c.entry_price > 0 ? ((displayLtp - c.entry_price) / c.entry_price * 100) : null
-                    return (
-                      <div className="flex flex-col">
-                        <span className="text-[10px] text-muted block">LTP {livePrice ? <span className="text-emerald-500 text-[8px] ml-0.5">● LIVE</span> : <span className="text-muted text-[8px] ml-0.5">EOD</span>}</span>
-                        <span className="font-bold text-text">₹{displayLtp.toLocaleString('en-IN', { minimumFractionDigits: 1 })}</span>
-                        {entryDelta != null && (
-                          <span className={`text-[9px] font-mono ${Math.abs(entryDelta) <= 1 ? 'text-emerald-600 dark:text-emerald-400' : entryDelta > 3 ? 'text-amber-600 dark:text-amber-400' : 'text-muted'}`}>
-                            {entryDelta >= 0 ? '+' : ''}{entryDelta.toFixed(1)}% vs entry
+                {/* Trade Setup Coordinates */}
+                <div className="p-2.5 rounded-lg bg-panel border border-border font-mono text-xs space-y-2">
+                  {/* Row 1: LTP, Optimal Entry, Structural Stop Loss */}
+                  <div className="grid grid-cols-3 gap-2 text-center pb-2 border-b border-border/60">
+                    {(() => {
+                      const liveTick = getTicker(c.symbol)
+                      const livePrice = liveTick?.ltp != null && liveTick.ltp > 0 ? liveTick.ltp : null
+                      const displayLtp = livePrice ?? c.ltp
+                      const entryDelta = c.entry_price > 0 ? ((displayLtp - c.entry_price) / c.entry_price * 100) : null
+                      return (
+                        <div className="flex flex-col items-center">
+                          <span className="text-[9.5px] text-muted block">
+                            LTP {livePrice ? <span className="text-emerald-500 text-[8px] ml-0.5">● LIVE</span> : <span className="text-muted text-[8px] ml-0.5">EOD</span>}
                           </span>
-                        )}
-                      </div>
-                    )
-                  })()}
-                  <div>
-                    <span className="text-[10px] text-muted block">ENTRY</span>
-                    <span className="font-bold text-text">₹{c.entry_price.toFixed(1)}</span>
+                          <span className="font-bold text-text">₹{displayLtp.toLocaleString('en-IN', { minimumFractionDigits: 1 })}</span>
+                          {entryDelta != null && (
+                            <span className={`text-[8.5px] ${Math.abs(entryDelta) <= 1 ? 'text-emerald-600 dark:text-emerald-400 font-bold' : entryDelta > 3 ? 'text-amber-600 dark:text-amber-400' : 'text-muted'}`}>
+                              {entryDelta >= 0 ? '+' : ''}{entryDelta.toFixed(1)}% vs entry
+                            </span>
+                          )}
+                        </div>
+                      )
+                    })()}
+                    <div>
+                      <span className="text-[9.5px] text-muted block">ENTRY</span>
+                      <span className="font-bold text-text">₹{c.entry_price.toFixed(1)}</span>
+                    </div>
+                    <div>
+                      <span className="text-[9.5px] text-muted block">STOP LOSS</span>
+                      <span className="font-bold text-rose-600 dark:text-rose-400">₹{c.stop_loss.toFixed(1)}</span>
+                    </div>
                   </div>
-                  <div>
-                    <span className="text-[10px] text-muted block">STOP</span>
-                    <span className="font-bold text-rose-600 dark:text-rose-400">₹{c.stop_loss.toFixed(1)}</span>
-                  </div>
-                  <div>
-                    <span className="text-[10px] text-muted block">TARGET 1</span>
-                    <span className="font-bold text-emerald-600 dark:text-emerald-400">₹{c.target_1.toFixed(1)}</span>
-                  </div>
-                  <div>
-                    <span className="text-[10px] text-muted block">PAYOFF</span>
-                    <span className="font-bold text-amber-600 dark:text-amber-400">1:{c.risk_reward_ratio ?? '—'}</span>
+
+                  {/* Row 2: 3-Target Ladder + Payoff */}
+                  <div className="grid grid-cols-4 gap-1 text-center">
+                    <div className="p-1 rounded bg-surface/50 border border-emerald-500/20" title="Target 1: +2.0R Breakeven Scale-out">
+                      <span className="text-[9px] text-emerald-600 dark:text-emerald-400 font-semibold block">T1 (+2R)</span>
+                      <span className="font-bold text-emerald-600 dark:text-emerald-400 text-xs">₹{c.target_1.toFixed(1)}</span>
+                    </div>
+                    <div className="p-1 rounded bg-surface/50 border border-amber-500/20" title="Target 2: +3.5R Positional Swing Target">
+                      <span className="text-[9px] text-amber-600 dark:text-amber-400 font-semibold block">T2 (+3.5R)</span>
+                      <span className="font-bold text-amber-600 dark:text-amber-400 text-xs">
+                        ₹{(c.target_2 || (c.entry_price + (3.5 * Math.max(0.5, c.entry_price - c.stop_loss)))).toFixed(1)}
+                      </span>
+                    </div>
+                    <div className="p-1 rounded bg-surface/50 border border-purple-500/20" title="Moonshot Target: +6.5R Multibagger Horizon">
+                      <span className="text-[9px] text-purple-600 dark:text-purple-400 font-semibold block">🚀 T3++</span>
+                      <span className="font-bold text-purple-600 dark:text-purple-400 text-xs">
+                        ₹{(c.target_moonshot || (c.entry_price + (6.5 * Math.max(0.5, c.entry_price - c.stop_loss)))).toFixed(1)}
+                      </span>
+                    </div>
+                    <div className="p-1 rounded bg-surface/50 border border-border" title="Risk:Reward Multiple">
+                      <span className="text-[9px] text-muted block">PAYOFF</span>
+                      <span className="font-bold text-text text-xs">1:{c.risk_reward_ratio ?? '—'}</span>
+                    </div>
                   </div>
                 </div>
 
@@ -1387,6 +1444,8 @@ export default function InflectionScannerView({
                             price: livePrice ?? c.entry_price,
                             stopLoss: c.stop_loss,
                             target: c.target_1,
+                            target2: c.target_2,
+                            targetMoonshot: c.target_moonshot,
                             _priceSource: livePrice ? 'LIVE' : 'EOD_ENTRY',
                           })
                         }

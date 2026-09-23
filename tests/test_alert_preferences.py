@@ -656,7 +656,8 @@ def test_equity_telegram_destination_routing(monkeypatch):
     assert sent_calls[1][1] == "-1007777777777"
 
     # 4. F&O-eligible stock with Cash Equity signal (COFORGE Pocket Pivot)
-    # MUST route to Equity channel, NEVER to FnO channel
+    # MUST route to Equity channel, NEVER to FnO channel.
+    # segment="EQUITY" in metrics — Pocket Pivot is a cash-equity setup, not a derivative play.
     coforge_alert = AutoAlert(
         alert_id="auto-asym-COFORGE-test01",
         alert_type="ASYMMETRIC_OPPORTUNITY",
@@ -664,7 +665,7 @@ def test_equity_telegram_destination_routing(monkeypatch):
         symbol="COFORGE",
         exchange="NSE",
         direction="BULLISH",
-        headline="🎯 [LOW RISK : HIGH REWARD] ⚡ Pocket Pivot Base Accumulation: COFORGE",
+        headline="\U0001f3af [LOW RISK : HIGH REWARD] \u26a1 Pocket Pivot Base Accumulation: COFORGE",
         summary="Pocket pivot test",
         ltp=1864.9,
         trigger_level=1876.0,
@@ -676,12 +677,14 @@ def test_equity_telegram_destination_routing(monkeypatch):
         confidence=96,
         is_live=True,
         environment="LIVE",
-        metrics={"segment": "FNO", "setup_type": "POCKET_PIVOT"},
-        actionable_plan={"segment": "FNO", "action": "POCKET_PIVOT"},
+        metrics={"segment": "EQUITY", "setup_type": "POCKET_PIVOT"},
+        actionable_plan={"segment": "EQUITY", "action": "POCKET_PIVOT"},
     )
     engine._dispatch(coforge_alert)
     assert len(sent_calls) == 3
-    assert sent_calls[2][1] == "-1007777777777"  # Routes to Equity channel, NOT -1004393392375 (FnO)
+    assert (
+        sent_calls[2][1] == "-1007777777777"
+    )  # Routes to Equity channel, NOT -1004393392375 (FnO)
     assert "COFORGE [EQUITY]" in sent_calls[2][0]
     assert "Spot CMP: ₹1,864.90" in sent_calls[2][0]
     assert "Opt CMP" not in sent_calls[2][0]

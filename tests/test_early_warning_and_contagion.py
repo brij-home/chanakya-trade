@@ -11,22 +11,20 @@ Unit & integration tests for institutional early-warning and precision timing im
 from __future__ import annotations
 
 from datetime import datetime
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
-import pytest
 
 from brokers.base import OptionsContract, Quote
 from engine.auto_alert_engine import (
     compute_time_of_day_rvol,
     expected_volume_fraction,
-    auto_alert_engine,
 )
 from engine.detectors.gamma_blast import detect_gamma_blast, _STRIKE_OI_SNAPSHOTS
 from engine.detectors.squeeze_breakout import detect_squeeze_breakout
-from engine.index_contagion import index_contagion_engine, IndexContagionResult
+from engine.index_contagion import index_contagion_engine
 
 IST = ZoneInfo("Asia/Kolkata")
 
@@ -75,12 +73,49 @@ class TestIndexContagionEngine:
 
         # Mock quotes where HDFCBANK and ICICIBANK (>52% weight) are surging above VWAP
         quotes = {
-            "NSE:BANKNIFTY": Quote(symbol="BANKNIFTY", last_price=54000.0, vwap=53950.0, change_pct=0.30),
-            "NSE:HDFCBANK": Quote(symbol="HDFCBANK", last_price=1750.0, vwap=1740.0, change_pct=1.2, volume=800_000, high=1751.0),
-            "NSE:ICICIBANK": Quote(symbol="ICICIBANK", last_price=1320.0, vwap=1310.0, change_pct=1.1, volume=700_000, high=1321.0),
-            "NSE:SBIN": Quote(symbol="SBIN", last_price=840.0, vwap=835.0, change_pct=0.8, volume=500_000, high=841.0),
-            "NSE:AXISBANK": Quote(symbol="AXISBANK", last_price=1220.0, vwap=1218.0, change_pct=0.4, volume=300_000, high=1222.0),
-            "NSE:KOTAKBANK": Quote(symbol="KOTAKBANK", last_price=1880.0, vwap=1882.0, change_pct=-0.1, volume=200_000, high=1885.0),
+            "NSE:BANKNIFTY": Quote(
+                symbol="BANKNIFTY", last_price=54000.0, vwap=53950.0, change_pct=0.30
+            ),
+            "NSE:HDFCBANK": Quote(
+                symbol="HDFCBANK",
+                last_price=1750.0,
+                vwap=1740.0,
+                change_pct=1.2,
+                volume=800_000,
+                high=1751.0,
+            ),
+            "NSE:ICICIBANK": Quote(
+                symbol="ICICIBANK",
+                last_price=1320.0,
+                vwap=1310.0,
+                change_pct=1.1,
+                volume=700_000,
+                high=1321.0,
+            ),
+            "NSE:SBIN": Quote(
+                symbol="SBIN",
+                last_price=840.0,
+                vwap=835.0,
+                change_pct=0.8,
+                volume=500_000,
+                high=841.0,
+            ),
+            "NSE:AXISBANK": Quote(
+                symbol="AXISBANK",
+                last_price=1220.0,
+                vwap=1218.0,
+                change_pct=0.4,
+                volume=300_000,
+                high=1222.0,
+            ),
+            "NSE:KOTAKBANK": Quote(
+                symbol="KOTAKBANK",
+                last_price=1880.0,
+                vwap=1882.0,
+                change_pct=-0.1,
+                volume=200_000,
+                high=1885.0,
+            ),
         }
 
         res = index_contagion_engine.evaluate_index("BANKNIFTY", quotes_map=quotes, ref_dt=dt)
@@ -99,14 +134,70 @@ class TestIndexContagionEngine:
 
         quotes = {
             "NSE:NIFTY": Quote(symbol="NIFTY", last_price=25000.0, vwap=25050.0, change_pct=-0.35),
-            "NSE:HDFCBANK": Quote(symbol="HDFCBANK", last_price=1710.0, vwap=1725.0, change_pct=-1.1, volume=800_000, low=1709.0),
-            "NSE:RELIANCE": Quote(symbol="RELIANCE", last_price=2950.0, vwap=2975.0, change_pct=-1.0, volume=600_000, low=2948.0),
-            "NSE:ICICIBANK": Quote(symbol="ICICIBANK", last_price=1280.0, vwap=1295.0, change_pct=-1.2, volume=700_000, low=1279.0),
-            "NSE:INFY": Quote(symbol="INFY", last_price=1850.0, vwap=1870.0, change_pct=-0.9, volume=400_000, low=1849.0),
-            "NSE:TCS": Quote(symbol="TCS", last_price=4200.0, vwap=4230.0, change_pct=-0.8, volume=250_000, low=4198.0),
-            "NSE:LT": Quote(symbol="LT", last_price=3600.0, vwap=3620.0, change_pct=-0.6, volume=200_000, low=3598.0),
-            "NSE:BHARTIARTL": Quote(symbol="BHARTIARTL", last_price=1600.0, vwap=1605.0, change_pct=-0.4, volume=200_000, low=1598.0),
-            "NSE:SBIN": Quote(symbol="SBIN", last_price=820.0, vwap=828.0, change_pct=-1.0, volume=500_000, low=819.0),
+            "NSE:HDFCBANK": Quote(
+                symbol="HDFCBANK",
+                last_price=1710.0,
+                vwap=1725.0,
+                change_pct=-1.1,
+                volume=800_000,
+                low=1709.0,
+            ),
+            "NSE:RELIANCE": Quote(
+                symbol="RELIANCE",
+                last_price=2950.0,
+                vwap=2975.0,
+                change_pct=-1.0,
+                volume=600_000,
+                low=2948.0,
+            ),
+            "NSE:ICICIBANK": Quote(
+                symbol="ICICIBANK",
+                last_price=1280.0,
+                vwap=1295.0,
+                change_pct=-1.2,
+                volume=700_000,
+                low=1279.0,
+            ),
+            "NSE:INFY": Quote(
+                symbol="INFY",
+                last_price=1850.0,
+                vwap=1870.0,
+                change_pct=-0.9,
+                volume=400_000,
+                low=1849.0,
+            ),
+            "NSE:TCS": Quote(
+                symbol="TCS",
+                last_price=4200.0,
+                vwap=4230.0,
+                change_pct=-0.8,
+                volume=250_000,
+                low=4198.0,
+            ),
+            "NSE:LT": Quote(
+                symbol="LT",
+                last_price=3600.0,
+                vwap=3620.0,
+                change_pct=-0.6,
+                volume=200_000,
+                low=3598.0,
+            ),
+            "NSE:BHARTIARTL": Quote(
+                symbol="BHARTIARTL",
+                last_price=1600.0,
+                vwap=1605.0,
+                change_pct=-0.4,
+                volume=200_000,
+                low=1598.0,
+            ),
+            "NSE:SBIN": Quote(
+                symbol="SBIN",
+                last_price=820.0,
+                vwap=828.0,
+                change_pct=-1.0,
+                volume=500_000,
+                low=819.0,
+            ),
         }
 
         res = index_contagion_engine.evaluate_index("NIFTY", quotes_map=quotes, ref_dt=dt)
@@ -131,12 +222,14 @@ class TestMultiTimeframeSqueeze:
         lows = [c - 12.0 for c in closes]
         vols = [10000 + i * 100 for i in range(n)]
 
-        df = pd.DataFrame({
-            "close": closes,
-            "high": highs,
-            "low": lows,
-            "volume": vols,
-        })
+        df = pd.DataFrame(
+            {
+                "close": closes,
+                "high": highs,
+                "low": lows,
+                "volume": vols,
+            }
+        )
 
         pivot_h = float(np.max(highs[-20:-1]))
         ltp = pivot_h - 10.0  # Within 0.2% of pivot
@@ -201,13 +294,27 @@ class TestContagionHolisticSanity:
         dt = datetime(2026, 9, 16, 12, 34, tzinfo=IST)
         # FINNIFTY heavyweights moving just 0.1-0.3% with 0 volume (the exact scenario user reported)
         quotes = {
-            "NSE:FINNIFTY": Quote(symbol="FINNIFTY", last_price=25243.0, vwap=25243.0, change_pct=0.0),
-            "NSE:HDFCBANK": Quote(symbol="HDFCBANK", last_price=717.0, vwap=717.0, change_pct=0.25, volume=0),
-            "NSE:ICICIBANK": Quote(symbol="ICICIBANK", last_price=1353.0, vwap=1353.0, change_pct=0.20, volume=0),
-            "NSE:BAJFINANCE": Quote(symbol="BAJFINANCE", last_price=1013.0, vwap=1013.0, change_pct=0.30, volume=0),
-            "NSE:AXISBANK": Quote(symbol="AXISBANK", last_price=1200.0, vwap=1200.0, change_pct=0.15, volume=0),
-            "NSE:SBIN": Quote(symbol="SBIN", last_price=800.0, vwap=800.0, change_pct=0.20, volume=0),
-            "NSE:KOTAKBANK": Quote(symbol="KOTAKBANK", last_price=1800.0, vwap=1800.0, change_pct=0.10, volume=0),
+            "NSE:FINNIFTY": Quote(
+                symbol="FINNIFTY", last_price=25243.0, vwap=25243.0, change_pct=0.0
+            ),
+            "NSE:HDFCBANK": Quote(
+                symbol="HDFCBANK", last_price=717.0, vwap=717.0, change_pct=0.25, volume=0
+            ),
+            "NSE:ICICIBANK": Quote(
+                symbol="ICICIBANK", last_price=1353.0, vwap=1353.0, change_pct=0.20, volume=0
+            ),
+            "NSE:BAJFINANCE": Quote(
+                symbol="BAJFINANCE", last_price=1013.0, vwap=1013.0, change_pct=0.30, volume=0
+            ),
+            "NSE:AXISBANK": Quote(
+                symbol="AXISBANK", last_price=1200.0, vwap=1200.0, change_pct=0.15, volume=0
+            ),
+            "NSE:SBIN": Quote(
+                symbol="SBIN", last_price=800.0, vwap=800.0, change_pct=0.20, volume=0
+            ),
+            "NSE:KOTAKBANK": Quote(
+                symbol="KOTAKBANK", last_price=1800.0, vwap=1800.0, change_pct=0.10, volume=0
+            ),
         }
         res = index_contagion_engine.evaluate_index("FINNIFTY", quotes_map=quotes, ref_dt=dt)
         assert res is not None
@@ -218,13 +325,27 @@ class TestContagionHolisticSanity:
         """Even if leaders are up 0.5%, index sitting dead-flat at VWAP (0 pts separation) must not trigger."""
         dt = datetime(2026, 9, 16, 12, 34, tzinfo=IST)
         quotes = {
-            "NSE:FINNIFTY": Quote(symbol="FINNIFTY", last_price=25243.0, vwap=25243.0, change_pct=0.0),
-            "NSE:HDFCBANK": Quote(symbol="HDFCBANK", last_price=720.0, vwap=715.0, change_pct=0.7, volume=500_000),
-            "NSE:ICICIBANK": Quote(symbol="ICICIBANK", last_price=1360.0, vwap=1350.0, change_pct=0.6, volume=400_000),
-            "NSE:BAJFINANCE": Quote(symbol="BAJFINANCE", last_price=1020.0, vwap=1010.0, change_pct=0.8, volume=200_000),
-            "NSE:AXISBANK": Quote(symbol="AXISBANK", last_price=1210.0, vwap=1200.0, change_pct=0.6, volume=200_000),
-            "NSE:SBIN": Quote(symbol="SBIN", last_price=810.0, vwap=800.0, change_pct=0.7, volume=300_000),
-            "NSE:KOTAKBANK": Quote(symbol="KOTAKBANK", last_price=1810.0, vwap=1800.0, change_pct=0.5, volume=200_000),
+            "NSE:FINNIFTY": Quote(
+                symbol="FINNIFTY", last_price=25243.0, vwap=25243.0, change_pct=0.0
+            ),
+            "NSE:HDFCBANK": Quote(
+                symbol="HDFCBANK", last_price=720.0, vwap=715.0, change_pct=0.7, volume=500_000
+            ),
+            "NSE:ICICIBANK": Quote(
+                symbol="ICICIBANK", last_price=1360.0, vwap=1350.0, change_pct=0.6, volume=400_000
+            ),
+            "NSE:BAJFINANCE": Quote(
+                symbol="BAJFINANCE", last_price=1020.0, vwap=1010.0, change_pct=0.8, volume=200_000
+            ),
+            "NSE:AXISBANK": Quote(
+                symbol="AXISBANK", last_price=1210.0, vwap=1200.0, change_pct=0.6, volume=200_000
+            ),
+            "NSE:SBIN": Quote(
+                symbol="SBIN", last_price=810.0, vwap=800.0, change_pct=0.7, volume=300_000
+            ),
+            "NSE:KOTAKBANK": Quote(
+                symbol="KOTAKBANK", last_price=1810.0, vwap=1800.0, change_pct=0.5, volume=200_000
+            ),
         }
         res = index_contagion_engine.evaluate_index("FINNIFTY", quotes_map=quotes, ref_dt=dt)
         assert res is not None
@@ -234,6 +355,7 @@ class TestContagionHolisticSanity:
     def test_contagion_rejects_far_otm_strike(self):
         """Options chain with strikes > 2.0% away from spot (e.g. 27250 on 25250 spot) must be rejected."""
         from engine.index_contagion import IndexContagionEngine
+
         engine = IndexContagionEngine()
 
         # Mock chain that only has strikes far away from spot (27250 CE when spot is 25250)
@@ -265,12 +387,12 @@ class TestContagionHolisticSanity:
             assert "27250" not in alert.headline
             # Falls back cleanly to spot index setup
             assert alert.symbol == "FINNIFTY"
-            assert alert.ltp == 25250.0
+            assert alert.underlying_spot == 25250.0
 
     def test_finnifty_yfinance_ticker_mapping(self):
         """FINNIFTY must map to NIFTY_FIN_SERVICE.NS, not ^CNXFIN."""
         from market.yfinance_provider import _INDEX_MAP
+
         assert _INDEX_MAP["FINNIFTY"] == "NIFTY_FIN_SERVICE.NS"
         assert _INDEX_MAP["NIFTY FIN SERVICE"] == "NIFTY_FIN_SERVICE.NS"
         assert _INDEX_MAP.get("FINNIFTY") != "^CNXFIN"
-

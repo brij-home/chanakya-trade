@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { useChatStore } from '../../store/chatStore'
 import { useAPI } from '../../hooks/useAPI'
 import { getSymbolExchange } from '../../data/universeData'
@@ -39,6 +39,8 @@ export default function DebateArenaView({ onOpenOrderTicket, externalSymbol, onS
   const [isStreaming, setIsStreaming] = useState(false)
   const [streamingSteps, setStreamingSteps] = useState([])
   const [expandedMember, setExpandedMember] = useState(null)
+  const [error, setError] = useState(null)
+  const abortRef = useRef(null)
 
   useEffect(() => {
     if (externalSymbol && externalSymbol !== symbol) {
@@ -56,13 +58,20 @@ export default function DebateArenaView({ onOpenOrderTicket, externalSymbol, onS
   const stopActivity = useChatStore((s) => s.stopActivity)
 
   const executeDebate = async (targetSymbol = symbol, targetCouncil = selectedCouncil) => {
+    if (abortRef.current) {
+      try {
+        abortRef.current.abort()
+      } catch (e) {}
+    }
+    const abortController = new AbortController()
+    abortRef.current = abortController
+
+    setError(null)
     setIsStreaming(true)
     setLoading(true)
     const isCouncil = targetCouncil !== 'debate'
     const councilName = COUNCIL_MODES.find((c) => c.id === targetCouncil)?.name || 'Council'
     const title = isCouncil ? `${councilName} (${targetSymbol})` : `Adversarial Debate (${targetSymbol})`
-
-    const abortController = new AbortController()
 
     startActivity({
       title,
@@ -79,12 +88,26 @@ export default function DebateArenaView({ onOpenOrderTicket, externalSymbol, onS
       },
     })
 
-    setStreamingSteps([
-      `⚡ Initializing Multi-Agent Pipeline for ${targetSymbol}...`,
-      `🔍 Extracting Minervini VCP, Wyckoff accumulation & SMC Order Blocks...`,
-      `🔬 Persona agents debating invalidation and risk parameters...`,
-      `⚖️ Synthesizing high-conviction consensus score...`,
-    ])
+    setStreamingSteps([`⚡ Initializing Multi-Agent Pipeline for ${targetSymbol}...`])
+
+    const stepTimer1 = setTimeout(() => {
+      setStreamingSteps((prev) => [
+        ...prev,
+        `🔍 Extracting Minervini VCP, Wyckoff accumulation & SMC Order Blocks...`,
+      ])
+    }, 450)
+    const stepTimer2 = setTimeout(() => {
+      setStreamingSteps((prev) => [
+        ...prev,
+        `🔬 Persona agents debating invalidation and risk parameters...`,
+      ])
+    }, 1100)
+    const stepTimer3 = setTimeout(() => {
+      setStreamingSteps((prev) => [
+        ...prev,
+        `⚖️ Synthesizing high-conviction consensus score...`,
+      ])
+    }, 2000)
 
     const t1 = setTimeout(() => updateActivity({ details: `🔍 Specialists extracting quantitative edge metrics for ${targetSymbol}...` }), 300)
     const t2 = setTimeout(() => updateActivity({ details: `🔬 Persona agents debating invalidation and risk parameters...` }), 750)
@@ -92,15 +115,29 @@ export default function DebateArenaView({ onOpenOrderTicket, externalSymbol, onS
 
     try {
       const targetExchange = getSymbolExchange(targetSymbol)
+      const callOpts = { signal: abortController.signal, timeoutMs: 18000 }
       if (targetCouncil === 'debate') {
-        const res = await call('/skills/debate_snapshot', { symbol: targetSymbol, exchange: targetExchange }, { signal: abortController.signal })
+        const res = await call('/skills/debate_snapshot', { symbol: targetSymbol, exchange: targetExchange }, callOpts)
         const snapshot = res?.data ?? res
-        if (snapshot) setData(snapshot)
+        if (snapshot) {
+          setData(snapshot)
+          setError(null)
+        }
       } else {
-        const res = await call('/skills/persona/council', { symbol: targetSymbol, council: targetCouncil, exchange: targetExchange }, { signal: abortController.signal })
+        const res = await call('/skills/persona/council', { symbol: targetSymbol, council: targetCouncil, exchange: targetExchange }, callOpts)
         const cSnapshot = res?.data ?? res
-        if (cSnapshot) setCouncilData(cSnapshot)
+        if (cSnapshot) {
+          setCouncilData(cSnapshot)
+          setError(null)
+        }
       }
+
+      setStreamingSteps([
+        `⚡ Initializing Multi-Agent Pipeline for ${targetSymbol}...`,
+        `🔍 Extracting Minervini VCP, Wyckoff accumulation & SMC Order Blocks...`,
+        `🔬 Persona agents debating invalidation and risk parameters...`,
+        `⚖️ Synthesizing high-conviction consensus score...`,
+      ])
 
       const curView = useChatStore.getState().activeView
       if (curView !== 'debate') {
@@ -111,13 +148,17 @@ export default function DebateArenaView({ onOpenOrderTicket, externalSymbol, onS
         })
       }
     } catch (err) {
-      if (err.name !== 'AbortError') {
+      if (err.name !== 'AbortError' && !err.message?.includes('aborted')) {
         console.error('Failed to run live debate:', err)
+        setError(err.message || 'Analysis timed out or failed to load. Please verify sidecar connection.')
       }
     } finally {
       clearTimeout(t1)
       clearTimeout(t2)
       clearTimeout(t3)
+      clearTimeout(stepTimer1)
+      clearTimeout(stepTimer2)
+      clearTimeout(stepTimer3)
       setIsStreaming(false)
       setLoading(false)
       stopActivity()
@@ -127,6 +168,13 @@ export default function DebateArenaView({ onOpenOrderTicket, externalSymbol, onS
   // Trigger analysis whenever symbol or selectedCouncil changes
   useEffect(() => {
     executeDebate(symbol, selectedCouncil)
+    return () => {
+      if (abortRef.current) {
+        try {
+          abortRef.current.abort()
+        } catch (e) {}
+      }
+    }
   }, [symbol, selectedCouncil])
 
   const handleSearch = (e) => {
@@ -220,6 +268,30 @@ export default function DebateArenaView({ onOpenOrderTicket, externalSymbol, onS
           )
         })}
       </div>
+
+      {/* Error / Timeout Notification Banner */}
+      {error && !loading && (
+        <div className="rounded-xl p-3 mb-3 border border-rose-500/40 bg-rose-500/10 flex items-center justify-between gap-3 text-xs animate-slide-up-fade">
+          <div className="flex items-center gap-2 text-rose-400">
+            <span className="text-base">⚠️</span>
+            <span className="font-medium">{error}</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => executeDebate(symbol, selectedCouncil)}
+              className="px-3 py-1 rounded bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 font-bold border border-rose-500/30 transition-all cursor-pointer"
+            >
+              Retry
+            </button>
+            <button
+              onClick={() => setError(null)}
+              className="text-muted hover:text-text px-1 py-1"
+            >
+              ✕
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Dynamic Multi-Agent Live Reasoning Banner */}
       {(isStreaming || loading) && (

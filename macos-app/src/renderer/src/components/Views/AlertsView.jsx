@@ -40,6 +40,7 @@ import {
   AlertCompactRow,
   AlertTriageCard,
   TradeExecutionMatrix,
+  isTestOrSimAlert,
 } from './alerts'
 
 /**
@@ -84,6 +85,25 @@ function mergeAlertsInPlace(prevAlerts = [], freshAlerts = []) {
 
     const freshItem = freshMap.get(id)
     if (!freshItem) {
+      const horizon = oldItem.time_horizon || oldItem.timeHorizon || 'INTRADAY'
+      if (horizon === 'INTRADAY' && (oldItem.created_at || oldItem.timestamp)) {
+        try {
+          const clean = String(oldItem.created_at || oldItem.timestamp).replace(' IST', '').trim()
+          const createdDate = new Date(clean)
+          if (!isNaN(createdDate.getTime()) && createdDate.toDateString() !== new Date().toDateString()) {
+            hasChanges = true
+            updatedExisting.push({
+              ...oldItem,
+              is_invalidated: true,
+              is_archived: true,
+              is_active: false,
+              stage: 'EXPIRED',
+              invalidation_reason: oldItem.invalidation_reason || 'Intraday session expired (15:15 IST cutoff reached). Trade closed.'
+            })
+            continue
+          }
+        } catch (_) {}
+      }
       // Item still exists locally
       updatedExisting.push(oldItem)
       continue
@@ -138,6 +158,7 @@ const AutoAlertCard = memo(function AutoAlertCard({
   onOpenTicket,
   onArchiveToggle,
   onClearLockout,
+  onDismiss,
   archiving,
   historyAttempts = [],
   densityMode = 'compact',
@@ -160,13 +181,9 @@ const AutoAlertCard = memo(function AutoAlertCard({
   const [showHistory, setShowHistory] = useState(false)
   const [showPostMortem, setShowPostMortem] = useState(false)
   const [showPlan, setShowPlan] = useState(false)
-  const [showDetails, setShowDetails] = useState(densityMode === 'expanded')
+  const [showDetails, setShowDetails] = useState(false)
   const [clearingLockout, setClearingLockout] = useState(false)
   const [lockoutCleared, setLockoutCleared] = useState(false)
-
-  useEffect(() => {
-    setShowDetails(densityMode === 'expanded')
-  }, [densityMode])
 
   const handleClearLockoutClick = async () => {
     if (!onClearLockout) return
@@ -208,7 +225,11 @@ const AutoAlertCard = memo(function AutoAlertCard({
     )
   )
 
-  const rawStrike = alert.strike || alert.metrics?.strike
+  const plan = alert.actionable_plan || {}
+  const tradePlan = plan.trade_plan || {}
+  const optPlan = plan.option_plan || null
+
+  const rawStrike = alert.strike || optPlan?.strike || alert.metrics?.strike
   const strikeNum = rawStrike ? Number(String(rawStrike).replace(/[^0-9.-]/g, '')) : null
 
   // Dynamic Live Spot: Prioritize streamed live quote if available, fallback to alert trigger spot
@@ -225,10 +246,6 @@ const AutoAlertCard = memo(function AutoAlertCard({
     () => computeExecutionLevels(alert, isDerivative, spotNum, optLtpNum),
     [alert, isDerivative, spotNum, optLtpNum]
   )
-
-  const plan = alert.actionable_plan || {}
-  const tradePlan = plan.trade_plan || {}
-  const optPlan = plan.option_plan || null
 
   const act = String(tradePlan.action || plan.action || '').toUpperCase()
   const isOptionSell = isDerivative && (
@@ -396,7 +413,7 @@ const AutoAlertCard = memo(function AutoAlertCard({
   const stopLossNum = alert.stop_loss ? Number(String(alert.stop_loss).replace(/[^0-9.-]/g, '')) : null
 
   const expiryType = alert.expiry_type || (alert.contract_symbol && !['NIFTY', 'BANKNIFTY', 'FINNIFTY'].some((idx) => alert.symbol?.includes(idx)) ? 'MONTHLY' : 'WEEKLY')
-  const optType = alert.option_type || (alert.contract_symbol?.endsWith('PE') ? 'PE' : alert.contract_symbol?.endsWith('CE') ? 'CE' : null)
+  const optType = alert.option_type || optPlan?.option_type || (alert.contract_symbol?.endsWith('PE') ? 'PE' : alert.contract_symbol?.endsWith('CE') ? 'CE' : (optPlan?.contract_symbol?.endsWith('PE') ? 'PE' : optPlan?.contract_symbol?.endsWith('CE') ? 'CE' : null))
 
   let moneyness = null
   if (strikeNum && spotNum && optType && !isFuture) {
@@ -438,6 +455,13 @@ const AutoAlertCard = memo(function AutoAlertCard({
           <div className="min-w-0">
             <div className="flex items-center gap-1 flex-wrap">
               <span className="text-sm font-black tracking-wide text-text leading-none">{alert.symbol}</span>
+              <span className={`text-[8px] px-1.5 py-px rounded font-black tracking-wider uppercase border ${
+                isTest
+                  ? 'bg-purple-500/20 text-purple-300 border-purple-500/40'
+                  : 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
+              }`}>
+                {isTest ? '🧪 TEST' : '🟢 REAL / LIVE'}
+              </span>
               {strikeNum && !isFuture && (
                 <span className="text-[9px] font-black text-gold font-mono leading-none">₹{Number(strikeNum).toLocaleString('en-IN')}</span>
               )}
@@ -460,13 +484,17 @@ const AutoAlertCard = memo(function AutoAlertCard({
               <span className={`text-[8px] font-bold ${isBull ? 'text-emerald-400' : 'text-rose-400'}`}>
                 {isBull ? '▲' : '▼'} {alert.direction}
               </span>
-              {isDerivative && alert.expiry_date && (
-                <span className="text-[8px] text-muted font-mono">
-                  {expiryInfo.isWeekly ? '⚡W' : '📅M'} {alert.expiry_date}{expiryInfo.dte !== null ? ` (${expiryInfo.dte}d)` : ''}
+              {(isDerivative || Boolean(optPlan || optType || strikeNum || alert.expiry_date)) && expiryInfo?.fullDisplay && (
+                <span
+                  className={`text-[8px] font-mono px-1.5 py-px rounded font-bold whitespace-nowrap border ${
+                    expiryInfo.isWeekly
+                      ? 'bg-amber-500/15 text-amber-300 border-amber-500/30'
+                      : 'bg-blue-500/15 text-blue-300 border-blue-500/30'
+                  }`}
+                  title={expiryInfo.formatted || 'Contract Expiry'}
+                >
+                  {expiryInfo.isWeekly ? '⚡W' : '📅M'} {alert.expiry_date || expiryInfo.dateFormatted || expiryInfo.monthName}{expiryInfo.dte !== null ? ` (${expiryInfo.dte}d)` : ''}
                 </span>
-              )}
-              {isTest && (
-                <span className="text-[7px] px-1 py-px rounded font-black uppercase bg-purple-500/20 text-purple-300">TEST</span>
               )}
 
               {/* Time Horizon Badge */}
@@ -484,7 +512,11 @@ const AutoAlertCard = memo(function AutoAlertCard({
               )}
 
               {/* Order Flow & Broker Depth Feed Status */}
-              {alert.order_flow_signals?.live_broker_connected === false || alert.order_flow_signals?.broker_depth_status === 'SYNTHETIC_L1_DISCONNECTED' ? (
+              {isTest ? (
+                <span className="text-[7px] px-1 py-px rounded font-black bg-purple-500/20 text-purple-300 border border-purple-500/30 whitespace-nowrap" title="Simulated test environment">
+                  🧪 SIM DEPTH
+                </span>
+              ) : alert.order_flow_signals?.live_broker_connected === false || alert.order_flow_signals?.broker_depth_status === 'SYNTHETIC_L1_DISCONNECTED' ? (
                 <span className="text-[7px] px-1 py-px rounded font-black bg-amber-500/20 text-amber-300 border border-amber-500/40 whitespace-nowrap" title="No active broker WebSocket connection. Using tick-level fallback.">
                   ⚠️ SYNTHETIC L1
                 </span>
@@ -501,7 +533,11 @@ const AutoAlertCard = memo(function AutoAlertCard({
         <div className="flex-1 min-w-0 flex items-center gap-2 overflow-hidden">
           {/* Status pill — compact, single word */}
           <div className="flex-shrink-0">
-            {isInvalidated ? (
+            {isTest ? (
+              <span className="text-[8px] px-1.5 py-0.5 rounded-full font-black uppercase bg-purple-500/20 text-purple-300 border border-purple-500/40 whitespace-nowrap">
+                🧪 TEST
+              </span>
+            ) : isInvalidated ? (
               <span className="text-[8px] px-1.5 py-0.5 rounded-full font-black uppercase bg-rose-500/20 text-rose-300 border border-rose-500/40 animate-pulse whitespace-nowrap">
                 ❌ Invalid
               </span>
@@ -561,6 +597,11 @@ const AutoAlertCard = memo(function AutoAlertCard({
               >
                 {alert.metrics.scrutiny.status === 'APPROVED' ? '🛡️ AI ' : '⚡ QNT '}
                 {alert.metrics.scrutiny.score}
+              </span>
+            )}
+            {(alert.entry_range || alert.optimal_entry_range) && (
+              <span className="text-[9px] font-mono font-bold px-1 py-px rounded bg-amber-500/10 dark:bg-amber-500/15 text-amber-700 dark:text-amber-300 border border-amber-300/60 dark:border-amber-500/30 whitespace-nowrap" title="Optimal Trade Entry (OTE) Pullback Range">
+                🎯 OTE {alert.entry_range || alert.optimal_entry_range}
               </span>
             )}
             {alert.no_chase_boundary && (
@@ -635,6 +676,16 @@ const AutoAlertCard = memo(function AutoAlertCard({
               title={alert.is_archived ? 'Restore alert' : 'Archive alert'}
             >
               {archiving === alert.alert_id ? '…' : alert.is_archived ? '↩️' : '📁'}
+            </button>
+          )}
+
+          {onDismiss && (
+            <button
+              onClick={() => onDismiss(alert.alert_id || alert.id || alert.symbol)}
+              className="btn btn-xs btn-ghost text-[10px] px-1.5 text-muted hover:text-rose-400 border border-border/40 hover:border-rose-500/40"
+              title="Dismiss / Remove this alert"
+            >
+              ✕
             </button>
           )}
 
@@ -853,170 +904,19 @@ const AutoAlertCard = memo(function AutoAlertCard({
         </div>
       )}
 
-      {/* ── Institutional AI Chief Risk Officer Scrutiny & Devil's Advocate Dossier ── */}
-      {alert.metrics?.scrutiny && !isInvalidated && (
-        <div className="p-2.5 rounded-xl border border-emerald-500/30 bg-gradient-to-r from-emerald-500/10 via-surface/90 to-emerald-500/5 text-xs space-y-1.5 animate-slide-up-fade">
-          <div className="flex items-center justify-between flex-wrap gap-1.5">
-            <div className="flex items-center gap-1.5">
-              <span className="text-sm">🛡️</span>
-              <span className="font-black uppercase tracking-wider text-[10px] text-emerald-300">
-                Institutional AI Scrutiny &amp; Devil&apos;s Advocate Dossier
-              </span>
-            </div>
-            <div className="flex items-center gap-1.5">
-              <span className="text-[9px] font-mono font-bold px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 uppercase">
-                Sanctity: {alert.metrics.scrutiny.score}/100
-              </span>
-              <span className="text-[8px] font-mono text-muted uppercase">
-                Auditor: {alert.metrics.scrutiny.auditor_model || 'FAST_LLM'}
-              </span>
-            </div>
-          </div>
-
-          {/* Logic Confirmation */}
-          {alert.metrics.scrutiny.logic_confirmation && (
-            <div className="text-[11px] text-zinc-800 dark:text-zinc-200 leading-relaxed font-sans">
-              <span className="font-bold text-emerald-700 dark:text-emerald-300">Structural Edge: </span>
-              {alert.metrics.scrutiny.logic_confirmation}
-            </div>
-          )}
-
-          {/* Devil's Advocate Trap Warning */}
-          {alert.metrics.scrutiny.trap_risk_warning && (
-            <div className="p-1.5 rounded-lg bg-amber-500/10 border border-amber-500/25 text-[11px] text-amber-800 dark:text-amber-200 leading-relaxed">
-              <span className="font-bold text-amber-700 dark:text-amber-300">Devil&apos;s Advocate Trap Risk: </span>
-              {alert.metrics.scrutiny.trap_risk_warning}
-            </div>
-          )}
-
-          {/* Execution & Trailing Discipline */}
-          {alert.metrics.scrutiny.actionable_guidance && (
-            <div className="text-[10px] text-cyan-300/90 font-mono pt-0.5 border-t border-emerald-500/20">
-              <span className="font-bold">Execution Rule: </span>
-              {alert.metrics.scrutiny.actionable_guidance}
-            </div>
-          )}
+      {/* ── Crisp 1-Line Trap Risk Warning (only if present, zero screen bloat) ── */}
+      {alert.metrics?.scrutiny?.trap_risk_warning && !isInvalidated && (
+        <div className="flex items-center gap-2 px-2.5 py-1 rounded-lg bg-amber-500/10 border border-amber-500/25 text-[11px] text-amber-800 dark:text-amber-200">
+          <span className="font-bold flex-shrink-0 text-amber-700 dark:text-amber-300">⚠️ Trap Risk:</span>
+          <span className="truncate flex-1 font-sans" title={alert.metrics.scrutiny.trap_risk_warning}>
+            {alert.metrics.scrutiny.trap_risk_warning}
+          </span>
         </div>
       )}
 
-      {/* ── Institutional Real-Time Trajectory & Live Price Reflection Strip ── */}
-      <div className={`p-2.5 rounded-xl border flex items-center justify-between gap-2.5 flex-wrap transition-all duration-150 ${
-        isSLHit
-          ? 'bg-rose-500/10 border-rose-500/40'
-          : isT3Hit
-          ? 'bg-purple-500/10 border-purple-500/40'
-          : isT2Hit
-          ? 'bg-cyan-500/10 border-cyan-500/40'
-          : isT1Hit
-          ? 'bg-emerald-500/10 border-emerald-500/40'
-          : liveReturn?.isProfitable
-          ? 'bg-emerald-500/5 border-emerald-500/30'
-          : liveReturn && !liveReturn.isProfitable
-          ? 'bg-amber-500/5 border-amber-500/30'
-          : 'bg-surface/80 border-border/50'
-      }`}>
-        {/* Left: Live Price & PnL Return */}
-        <div className="flex items-center gap-2.5 flex-wrap">
-          <div className="flex items-center gap-1.5">
-            <span className="text-base flex-shrink-0">
-              {isSLHit ? '🛑' : isT3Hit ? '🚀' : isT2Hit ? '🏁' : isT1Hit ? '🎯' : liveReturn?.isProfitable ? '📈' : '⚡'}
-            </span>
-            <div>
-              <div className="flex items-center gap-1.5">
-                <span className="text-[10px] font-mono uppercase tracking-wider text-muted font-bold">
-                  {isDerivative ? (rawContract || `${alert.symbol} OPT`) : `${alert.symbol} SPOT`}
-                </span>
-                {isDerivative && (
-                  <span className="text-[8px] font-mono px-1 py-px rounded font-black bg-gold/15 text-gold border border-gold/30">
-                    LIVE PREMIUM
-                  </span>
-                )}
-              </div>
-              <div className="flex items-baseline gap-1.5">
-                <span className={`text-base font-black font-mono leading-none tracking-tight ${
-                  (isDerivative ? liveContract?.flash : liveSpot?.flash) === 'up'
-                    ? 'text-emerald-400'
-                    : (isDerivative ? liveContract?.flash : liveSpot?.flash) === 'down'
-                    ? 'text-rose-400'
-                    : isDerivative ? 'text-gold' : 'text-text'
-                }`}>
-                  ₹{Number(currentPrice || 0).toLocaleString('en-IN', {
-                    minimumFractionDigits: isDerivative || (currentPrice && currentPrice < 500) ? 1 : 0,
-                    maximumFractionDigits: isDerivative || (currentPrice && currentPrice < 500) ? 2 : 0,
-                  })}
-                  {((isDerivative ? liveContract?.ltp : liveSpot?.ltp)) ? (
-                    <span className="inline-block w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse ml-1 align-middle" title="Live streaming tick" />
-                  ) : null}
-                </span>
-
-                {/* Return vs Entry Pill */}
-                {liveReturn && (
-                  <span className={`text-[10px] font-mono font-bold px-1.5 py-0.5 rounded border leading-none ${
-                    liveReturn.isProfitable
-                      ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
-                      : 'bg-rose-500/20 text-rose-300 border-rose-500/40'
-                  }`}>
-                    {liveReturn.isProfitable ? '▲ +' : '▼ '}{liveReturn.pct}%
-                    {liveReturn.diff !== undefined && (
-                      <span className="opacity-80 ml-1">
-                        ({liveReturn.diff >= 0 ? '+' : ''}₹{liveReturn.diff.toFixed(1)})
-                      </span>
-                    )}
-                  </span>
-                )}
-              </div>
-            </div>
-          </div>
-
-          {/* Underlying Spot Reference (for Options) */}
-          {isDerivative && spotNum && (
-            <div className="pl-2 border-l border-border/40 text-[10px] font-mono text-muted hidden sm:block">
-              <span className="block text-[8px] uppercase tracking-wider">Underlying Spot</span>
-              <span className={`font-bold text-text ${liveSpot?.flash === 'up' ? 'text-emerald-300' : liveSpot?.flash === 'down' ? 'text-rose-300' : ''}`}>
-                ₹{Number(spotNum).toLocaleString('en-IN', { maximumFractionDigits: 1 })}
-              </span>
-            </div>
-          )}
-        </div>
-
-        {/* Right: Milestone Trajectory Status */}
-        <div className="flex items-center gap-2 flex-wrap">
-          <div className="text-right">
-            <span className={`text-[9px] font-mono font-black uppercase px-2 py-0.5 rounded border whitespace-nowrap inline-block ${
-              trajectoryStatus.theme === 'rose'
-                ? 'bg-rose-500/25 text-rose-300 border-rose-500/50 animate-pulse'
-                : trajectoryStatus.theme === 'purple'
-                ? 'bg-purple-500/25 text-purple-200 border-purple-400/50 animate-pulse'
-                : trajectoryStatus.theme === 'cyan'
-                ? 'bg-cyan-500/25 text-cyan-200 border-cyan-400/50 animate-pulse'
-                : trajectoryStatus.theme === 'emerald'
-                ? 'bg-emerald-500/25 text-emerald-200 border-emerald-400/50 animate-pulse'
-                : 'bg-amber-500/20 text-amber-300 border-amber-500/40'
-            }`}>
-              {trajectoryStatus.badge}
-            </span>
-            <span className="block text-[9px] text-zinc-400 font-sans mt-0.5 max-w-xs truncate" title={trajectoryStatus.text}>
-              {trajectoryStatus.text}
-            </span>
-          </div>
-
-          {/* 5-Milestone Stepper Dots */}
-          <div className="flex items-center gap-1 pl-1 border-l border-border/40 font-mono text-[8px] font-black">
-            <span className={`px-1 py-0.5 rounded ${isSLHit ? 'bg-rose-500 text-white animate-pulse' : 'bg-surface text-muted/60 border border-border/40'}`}>SL</span>
-            <span className="text-muted/40">›</span>
-            <span className={`px-1 py-0.5 rounded ${!isSLHit && !isT1Hit && liveReturn?.isProfitable ? 'bg-emerald-500/40 text-emerald-200 border border-emerald-500/50' : 'bg-surface text-muted/60 border border-border/40'}`}>ENT</span>
-            <span className="text-muted/40">›</span>
-            <span className={`px-1 py-0.5 rounded ${isT1Hit ? 'bg-emerald-500 text-white animate-pulse' : 'bg-surface text-muted/60 border border-border/40'}`}>T1</span>
-            <span className="text-muted/40">›</span>
-            <span className={`px-1 py-0.5 rounded ${isT2Hit ? 'bg-cyan-500 text-white animate-pulse' : 'bg-surface text-muted/60 border border-border/40'}`}>T2</span>
-            <span className="text-muted/40">›</span>
-            <span className={`px-1 py-0.5 rounded ${isT3Hit ? 'bg-purple-500 text-white animate-pulse' : 'bg-surface text-muted/60 border border-border/40'}`}>T3</span>
-          </div>
-        </div>
-      </div>
-
       {/* ── Institutional 5-Tier Execution Runway (Entry, SL, T1, T2, T3) ── */}
       <TradeExecutionMatrix
+        alert={alert}
         levels={executionLevels}
         isBull={isBull}
         isDerivative={isDerivative}
@@ -1032,6 +932,40 @@ const AutoAlertCard = memo(function AutoAlertCard({
       {/* ── Progressive Disclosure Deep Dive Drawer (Plan details, Hedge, Matched chips, Full metrics) ── */}
       {showDetails && (
         <div className="space-y-2 pt-2 border-t border-border/30 animate-slide-up-fade">
+          {/* Runner Alternative (High Beta) */}
+          {(alert.actionable_plan?.runner_strike || alert.actionable_plan?.runner_alternative) && !isInvalidated && (
+            <div className="flex items-center justify-between p-2.5 rounded-xl border border-purple-500/30 bg-purple-500/10 text-xs flex-wrap gap-1.5">
+              <div className="flex items-center gap-1.5 font-bold text-purple-300">
+                <span className="text-sm">🚀</span>
+                <span className="uppercase tracking-wider text-[10px]">
+                  Runner Alternative (High Beta):
+                </span>
+                <code className="font-mono text-purple-200 bg-purple-500/25 px-1.5 py-0.5 rounded text-[11px] border border-purple-400/40">
+                  {alert.actionable_plan.runner_strike?.symbol || alert.actionable_plan.runner_strike?.contract_symbol || alert.actionable_plan.runner_alternative}
+                </code>
+                {alert.actionable_plan.runner_strike?.ltp && (
+                  <span className="text-zinc-300 font-mono text-[10px]">
+                    (Opt CMP: ₹{alert.actionable_plan.runner_strike.ltp})
+                  </span>
+                )}
+              </div>
+              {onOpenOrderTicket && alert.actionable_plan.runner_strike?.symbol && (
+                <button
+                  type="button"
+                  onClick={() => onOpenOrderTicket({
+                    symbol: alert.actionable_plan.runner_strike.symbol,
+                    exchange: alert.exchange || 'NFO',
+                    price: alert.actionable_plan.runner_strike.ltp || 0,
+                  })}
+                  className="btn btn-xs text-[9px] px-2 py-0.5 font-black bg-purple-500/25 hover:bg-purple-500/35 text-purple-100 border border-purple-400/50 rounded transition-all"
+                  title="1-Click Trade: Open pre-populated Order Ticket for Runner Strike"
+                >
+                  ⚡ Trade Runner
+                </button>
+              )}
+            </div>
+          )}
+
           {/* Hedging & Defined-Risk Structure Advice */}
           {(alert.actionable_plan?.structure_advice || alert.actionable_plan?.trade_plan?.structure_advice) && !isInvalidated && (
             <div className="p-2.5 rounded-xl border border-indigo-500/30 bg-indigo-500/10 text-xs space-y-1">
@@ -1276,6 +1210,7 @@ function InstitutionalTradeInspector({
   onArchiveToggle,
   onClearLockout,
   onSendTelegram,
+  onDismiss,
   archiving,
   historyAttempts = [],
 }) {
@@ -1361,6 +1296,7 @@ function InstitutionalTradeInspector({
         onOpenTicket={(alt) => onOpenTicket && onOpenTicket({ ...alt, quantity: selectedLots * lotSize })}
         onArchiveToggle={onArchiveToggle}
         onClearLockout={onClearLockout}
+        onDismiss={onDismiss}
         archiving={archiving}
         historyAttempts={historyAttempts}
         densityMode="expanded"
@@ -1616,10 +1552,35 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
   const [scanning, setScanning] = useState(false)
   const [testing, setTesting] = useState(false)
   const [showTools, setShowTools] = useState(false) // Unified maintenance + simulation dropdown
+  const toolsMenuRef = useRef(null)
+
+  // Dismiss Tools dropdown when clicking outside or pressing Escape
+  useEffect(() => {
+    if (!showTools) return
+    const handleClickOutside = (e) => {
+      if (toolsMenuRef.current && !toolsMenuRef.current.contains(e.target)) {
+        setShowTools(false)
+      }
+    }
+    const handleKeyDown = (e) => {
+      if (e.key === 'Escape') {
+        setShowTools(false)
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside)
+    document.addEventListener('touchstart', handleClickOutside)
+    document.addEventListener('keydown', handleKeyDown)
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside)
+      document.removeEventListener('touchstart', handleClickOutside)
+      document.removeEventListener('keydown', handleKeyDown)
+    }
+  }, [showTools])
+
   const [searchQuery, setSearchQuery] = useState('')
   const [selectedDirection, setSelectedDirection] = useState('ALL') // ALL | BULLISH | BEARISH
-  // Multi-select allowed segments: set of 'FNO_INDEX' | 'FNO_STOCK' | 'EQUITY' | 'COMMODITY' | 'CURRENCY'
-  const ALL_CANONICAL_SEGMENTS = useMemo(() => ['FNO_INDEX', 'FNO_STOCK', 'EQUITY', 'COMMODITY', 'CURRENCY'], [])
+  // Multi-select allowed segments: set of 'FNO_INDEX' | 'FNO_STOCK' | 'EQUITY' | 'COMMODITY' | 'CURRENCY' | 'CRYPTO'
+  const ALL_CANONICAL_SEGMENTS = useMemo(() => ['FNO_INDEX', 'FNO_STOCK', 'EQUITY', 'COMMODITY', 'CURRENCY', 'CRYPTO'], [])
 
   const [selectedSegments, setSelectedSegments] = useState(() => {
     try {
@@ -1632,7 +1593,7 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
             if (item === 'FNO' || item === 'F&O') {
               s.add('FNO_INDEX')
               s.add('FNO_STOCK')
-            } else if (['FNO_INDEX', 'FNO_STOCK', 'EQUITY', 'COMMODITY', 'CURRENCY'].includes(item)) {
+            } else if (['FNO_INDEX', 'FNO_STOCK', 'EQUITY', 'COMMODITY', 'CURRENCY', 'CRYPTO'].includes(item)) {
               s.add(item)
             }
           }
@@ -1640,11 +1601,12 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
         }
       }
     } catch (_) {}
-    return new Set(['FNO_INDEX', 'FNO_STOCK', 'EQUITY', 'COMMODITY', 'CURRENCY'])
+    return new Set(['FNO_INDEX', 'FNO_STOCK', 'EQUITY', 'COMMODITY', 'CURRENCY', 'CRYPTO'])
   })
   const [showRoutingModal, setShowRoutingModal] = useState(false)
 
-  const isAllSegmentsSelected = selectedSegments.size === 5
+  const ALL_SEGMENTS_LIST = ['FNO_INDEX', 'FNO_STOCK', 'EQUITY', 'COMMODITY', 'CURRENCY', 'CRYPTO']
+  const isAllSegmentsSelected = selectedSegments.size === 6
   const selectedSegment = isAllSegmentsSelected ? 'ALL' : (selectedSegments.size === 1 ? Array.from(selectedSegments)[0] : 'CUSTOM')
 
   const connectedBrokers = useMemo(() => {
@@ -1654,7 +1616,7 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
 
   const setSelectedSegment = useCallback((val) => {
     if (val === 'ALL') {
-      const all = new Set(['FNO_INDEX', 'FNO_STOCK', 'EQUITY', 'COMMODITY', 'CURRENCY'])
+      const all = new Set(['FNO_INDEX', 'FNO_STOCK', 'EQUITY', 'COMMODITY', 'CURRENCY', 'CRYPTO'])
       setSelectedSegments(all)
       try { localStorage.setItem('chanakya_selected_segments', JSON.stringify([...all])) } catch (_) {}
     } else if (val === 'FNO') {
@@ -1670,14 +1632,14 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
 
   const handleToggleSegment = useCallback((segId) => {
     setSelectedSegments((prev) => {
-      const allList = ['FNO_INDEX', 'FNO_STOCK', 'EQUITY', 'COMMODITY', 'CURRENCY']
+      const allList = ['FNO_INDEX', 'FNO_STOCK', 'EQUITY', 'COMMODITY', 'CURRENCY', 'CRYPTO']
       if (segId === 'ALL') {
         const next = new Set(allList)
         try { localStorage.setItem('chanakya_selected_segments', JSON.stringify([...next])) } catch (_) {}
         return next
       }
       let next
-      if (prev.size === 5 || (prev.size === 1 && !prev.has(segId))) {
+      if (prev.size === 6 || (prev.size === 1 && !prev.has(segId))) {
         // Switching to single segment mode
         next = new Set([segId])
       } else if (prev.size === 1 && prev.has(segId)) {
@@ -1707,17 +1669,18 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
         if (s === 'FNO' || s === 'F&O') {
           if (!normalized.includes('FNO_INDEX')) normalized.push('FNO_INDEX')
           if (!normalized.includes('FNO_STOCK')) normalized.push('FNO_STOCK')
-        } else if (['FNO_INDEX', 'FNO_STOCK', 'EQUITY', 'COMMODITY', 'CURRENCY'].includes(s)) {
+        } else if (['FNO_INDEX', 'FNO_STOCK', 'EQUITY', 'COMMODITY', 'CURRENCY', 'CRYPTO'].includes(s)) {
           if (!normalized.includes(s)) normalized.push(s)
         }
       }
-      const setVal = new Set(normalized.length > 0 ? normalized : ['FNO_INDEX', 'FNO_STOCK', 'EQUITY', 'COMMODITY', 'CURRENCY'])
+      const setVal = new Set(normalized.length > 0 ? normalized : ['FNO_INDEX', 'FNO_STOCK', 'EQUITY', 'COMMODITY', 'CURRENCY', 'CRYPTO'])
       setSelectedSegments(setVal)
       try {
         localStorage.setItem('chanakya_selected_segments', JSON.stringify([...setVal]))
       } catch (_) {}
     }
   }, [])
+
   const [selectedFilter, setSelectedFilter] = useState('ALL')
   const [selectedHorizon, setSelectedHorizon] = useState('ALL') // ALL | INTRADAY | SWING_SHORT | SWING_MID | POSITIONAL
   const [selectedStage, setSelectedStage] = useState('ALL')
@@ -1767,6 +1730,16 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
       return next
     })
   }, [])
+
+  // ── Invalidation dismissal & bulk-archive state ──────────────────────────
+  const [dismissedInvalidationsTs, setDismissedInvalidationsTs] = useState(() => {
+    try {
+      return Number(sessionStorage.getItem('chanakya_dismissed_invalidations_ts') || 0)
+    } catch (_) {
+      return 0
+    }
+  })
+  const [archivingInvalidated, setArchivingInvalidated] = useState(false)
 
   // ── Telegram preflight modal state ───────────────────────────────────────
   const [telegramAlert, setTelegramAlert] = useState(null) // The alert being dispatched
@@ -1921,8 +1894,9 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
   useEffect(() => {
     if (!storeNotifications || storeNotifications.length === 0) return
     // Only merge AUTO-type alerts (PRICE/TECHNICAL/OPTIONS alerts come from manual list)
+    // and exclude any test/simulated alerts
     const autoFromStore = storeNotifications.filter(
-      (n) => n.alert_type && !['PRICE', 'TECHNICAL', 'CONDITIONAL'].includes(n.alert_type)
+      (n) => n.alert_type && !['PRICE', 'TECHNICAL', 'CONDITIONAL'].includes(n.alert_type) && !isTestOrSimAlert(n)
     )
     if (autoFromStore.length > 0) {
       setAutoAlerts((prev) => mergeAlertsInPlace(prev, autoFromStore))
@@ -1963,6 +1937,20 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
 
     window.addEventListener('new-market-alert', handleLiveAlert)
 
+    // Clear event dispatched from SSE auto_alerts_cleared broadcast
+    const handleClearEvent = (e) => {
+      const mode = e?.detail?.mode || 'TEST_ONLY'
+      if (mode === 'ALL') {
+        setAutoAlerts([])
+        setAlerts([])
+        setSelectedAlertId(null)
+      } else {
+        setAutoAlerts((prev) => prev.filter((item) => !isTestOrSimAlert(item)))
+        setAlerts((prev) => prev.filter((item) => !isTestOrSimAlert(item)))
+      }
+    }
+    window.addEventListener('auto-alerts-cleared', handleClearEvent)
+
     // 2. Background polling — MANUAL alerts only (30s); auto-alerts come from SSE + store.
     // Reduced from 15s to 30s; auto-alerts no longer duplicated here.
     const syncTimer = setInterval(() => {
@@ -1971,6 +1959,7 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
 
     return () => {
       window.removeEventListener('new-market-alert', handleLiveAlert)
+      window.removeEventListener('auto-alerts-cleared', handleClearEvent)
       clearInterval(syncTimer)
     }
   }, [loadAlerts, loadAutoAlerts, chimeEnabled])
@@ -2213,6 +2202,54 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
     }
   }
 
+  // ── Invalidation Banner controls ──────────────────────────────────────────
+  const handleDismissInvalidationBanner = useCallback(() => {
+    const now = Date.now()
+    try {
+      sessionStorage.setItem('chanakya_dismissed_invalidations_ts', String(now))
+    } catch (_) {}
+    setDismissedInvalidationsTs(now)
+  }, [])
+
+  const handleArchiveAllInvalidated = useCallback(async () => {
+    setArchivingInvalidated(true)
+    try {
+      await callRef.current('/skills/alerts/auto/archive_all_invalidated', {})
+    } catch (_) {}
+
+    // Optimistically mark all local invalidated alerts as archived
+    setAutoAlerts((prev) =>
+      prev.map((a) =>
+        (a.is_invalidated || a.stage === 'INVALIDATED')
+          ? { ...a, is_archived: true, archived_at: new Date().toISOString(), archive_reason: 'Bulk archived invalidated setups' }
+          : a
+      )
+    )
+
+    // Sync notificationStore if present
+    try {
+      const store = useNotificationStore.getState()
+      if (store && store.notifications) {
+        const updated = store.notifications.map((n) =>
+          (n.is_invalidated || n.stage === 'INVALIDATED')
+            ? { ...n, is_archived: true, isArchived: true }
+            : n
+        )
+        store.syncRecentAlerts(updated)
+      }
+    } catch (_) {}
+
+    const now = Date.now()
+    try {
+      sessionStorage.setItem('chanakya_dismissed_invalidations_ts', String(now))
+    } catch (_) {}
+    setDismissedInvalidationsTs(now)
+
+    setCleanupNotice(`📦 Successfully archived invalidated trade setups to Archived & History.`)
+    setTimeout(() => setCleanupNotice(null), 5000)
+    setArchivingInvalidated(false)
+  }, [])
+
   const handleResetFilters = () => {
     setSearchQuery('')
     setSelectedFilter('ALL')
@@ -2229,9 +2266,83 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
   const handleClearAuto = async () => {
     try {
       await callRef.current('/skills/alerts/auto/clear', {})
-      setAutoAlerts([])
     } catch (_) {}
+    setAutoAlerts([])
+    setAlerts([])
+    setSelectedAlertId(null)
+    useNotificationStore.getState().clearAll()
+    try {
+      localStorage.removeItem('chanakya_notifications_v1')
+    } catch (_) {}
+    seenAlertIdsRef.current.clear()
   }
+
+  const handleClearTestAlerts = useCallback(async () => {
+    try {
+      await callRef.current('/skills/alerts/auto/clear_test', {})
+    } catch (_) {
+      try {
+        await callRef.current('/skills/alerts/auto/clear', {})
+      } catch (__) {}
+    }
+
+    // 1. Immediately purge from local component states
+    setAutoAlerts((prev) => prev.filter((item) => !isTestOrSimAlert(item)))
+    setAlerts((prev) => prev.filter((item) => !isTestOrSimAlert(item)))
+
+    // 2. Purge from Zustand notification store
+    useNotificationStore.getState().purgeTestAlerts()
+
+    // 3. Purge from localStorage
+    try {
+      const raw = localStorage.getItem('chanakya_notifications_v1')
+      if (raw) {
+        const parsed = JSON.parse(raw)
+        if (Array.isArray(parsed)) {
+          const filtered = parsed.filter((item) => !isTestOrSimAlert(item))
+          localStorage.setItem('chanakya_notifications_v1', JSON.stringify(filtered))
+        }
+      }
+    } catch (_) {}
+
+    // 4. Clear active selection if it was a test alert & reset seen cache
+    setSelectedAlertId(null)
+    seenAlertIdsRef.current.clear()
+  }, [])
+
+  // Dismiss a single alert card permanently
+  const handleDismissAlert = useCallback((alertId) => {
+    if (!alertId) return
+    const idStr = String(alertId).toUpperCase()
+    const matchesTarget = (a) => {
+      const aId = String(a.alert_id || a.id || '').toUpperCase()
+      const aSym = String(a.symbol || '').toUpperCase()
+      const aContract = String(a.contract_symbol || '').toUpperCase()
+      return aId === idStr || aSym === idStr || aContract === idStr || aSym.includes(idStr) || aContract.includes(idStr)
+    }
+
+    setAutoAlerts((prev) => prev.filter((a) => !matchesTarget(a)))
+    setAlerts((prev) => prev.filter((a) => !matchesTarget(a)))
+    setSelectedAlertId((prev) => (prev && (prev === alertId || String(prev).includes(alertId) || String(alertId).includes(prev)) ? null : prev))
+    useNotificationStore.getState().removeNotification(alertId)
+    try {
+      const raw = localStorage.getItem('chanakya_notifications_v1')
+      if (raw) {
+        const parsed = JSON.parse(raw)
+        if (Array.isArray(parsed)) {
+          const filtered = parsed.filter((item) => !matchesTarget(item))
+          localStorage.setItem('chanakya_notifications_v1', JSON.stringify(filtered))
+        }
+      }
+    } catch (_) {}
+    try {
+      callRef.current('/skills/alerts/auto/archive', {
+        alert_id: alertId,
+        archive: true,
+        reason: 'User manually dismissed from alert feed',
+      })
+    } catch (_) {}
+  }, [])
 
   // Clear single lockout manually if institutional reclaim spotted
   const handleClearLockout = useCallback(async (symbol) => {
@@ -2276,7 +2387,19 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
       seg === 'FNO' ? 'NFO' : 'NSE'
     )
 
-    if (wantOption) {
+    if (alt._isStrikeRoll) {
+      const roll = alt._rollRecommendation || alt.strike_roll_recommendation
+      if (roll?.recommended_contract) {
+        targetSym = roll.recommended_contract
+      } else if (roll?.recommended_strike) {
+        const oType = alt.option_type || (String(targetSym).endsWith('PE') ? 'PE' : 'CE')
+        targetSym = `${cleanSym} ${roll.recommended_strike} ${oType}`
+      }
+      targetExchange = alt.exchange === 'BSE' ? 'BFO' : (alt.exchange === 'MCX' ? 'MCX' : 'NFO')
+      targetPrice = null
+      targetSL = null
+      targetTP = null
+    } else if (wantOption) {
       targetExchange = 'NFO'
       if (optPlan?.contract_symbol) targetSym = optPlan.contract_symbol
       else if (actPlan.option_contract) targetSym = actPlan.option_contract
@@ -2359,31 +2482,65 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
 
   // Active validation check: True only if trade is neither archived, invalidated, expired, nor final target reached
   const isAlertActive = (a) => {
-    if (a.is_expired || a.stage === 'EXPIRED') return false
+    if (!a) return false
+    if (a.is_expired || a.stage === 'EXPIRED' || a.is_invalidated || a.is_archived) return false
+    if (a.stage === 'INVALIDATED' || a.stage === 'TARGET_ACHIEVED' || a.stage === 'COMPLETED' || a.target_status === 'TARGET_ACHIEVED') return false
+
+    // Check Intraday session expiration
+    const horizon = a.time_horizon || a.timeHorizon || 'INTRADAY'
+    if (horizon === 'INTRADAY' && (a.created_at || a.timestamp)) {
+      try {
+        const clean = String(a.created_at || a.timestamp).replace(' IST', '').trim()
+        const createdDate = new Date(clean)
+        const now = new Date()
+        if (!isNaN(createdDate.getTime()) && createdDate.toDateString() !== now.toDateString()) {
+          return false
+        }
+      } catch (_) {}
+    }
+
     return a.is_active !== undefined
       ? Boolean(a.is_active)
-      : !a.is_archived &&
-        !a.is_invalidated &&
-        a.stage !== 'INVALIDATED' &&
-        a.stage !== 'TARGET_ACHIEVED' &&
-        a.target_status !== 'TARGET_ACHIEVED'
+      : true
   }
 
   const activeCount = autoAlerts.filter(isAlertActive).length
   const archivedCount = autoAlerts.length - activeCount
   const expiredCount = autoAlerts.filter((a) => a.is_expired || a.stage === 'EXPIRED').length
 
-  // Invalidation count for banner (filter to recent invalidations within the last 60 mins to avoid zombie warnings)
-  const invalidatedAlerts = autoAlerts.filter((a) => {
-    if (!a.is_invalidated && a.stage !== 'INVALIDATED') return false
-    if (a.invalidated_at) {
-      try {
-        const invTime = new Date(a.invalidated_at.replace(' IST', '')).getTime()
-        if (!isNaN(invTime) && (Date.now() - invTime) > 60 * 60 * 1000) return false
-      } catch (_) {}
+  // Safe helper to parse alert timestamp to epoch ms (handles ISO, IST strings, and nulls)
+  const parseAlertTimestamp = (raw) => {
+    if (!raw) return null
+    try {
+      const clean = String(raw).replace(' IST', '').trim().replace(' ', 'T')
+      const t = new Date(clean).getTime()
+      return isNaN(t) ? null : t
+    } catch (_) {
+      return null
     }
-    return true
-  })
+  }
+
+  // Invalidation count for banner:
+  // 1. Must not already be archived (archived setups belong in history tab, not active radar)
+  // 2. Must be within 15 mins of invalidation (avoids zombie warnings)
+  // 3. Respects user dismissal in the current session
+  const invalidatedAlerts = useMemo(() => {
+    return autoAlerts.filter((a) => {
+      if (!a.is_invalidated && a.stage !== 'INVALIDATED') return false
+      if (a.is_archived || a.isArchived) return false
+
+      const invTime = parseAlertTimestamp(a.invalidated_at || a.created_at || a.timestamp)
+      if (invTime) {
+        // Auto-expire from warning banner after 15 mins
+        if ((Date.now() - invTime) > 15 * 60 * 1000) return false
+        // Dismissed by user in current session
+        if (dismissedInvalidationsTs && invTime <= dismissedInvalidationsTs) return false
+      } else if (dismissedInvalidationsTs) {
+        return false
+      }
+      return true
+    })
+  }, [autoAlerts, dismissedInvalidationsTs])
   const invalidatedCount = invalidatedAlerts.length
 
   // Deduplicate invalidated symbols to prevent repetitive "MANKIND, MANKIND" in the banner
@@ -2424,8 +2581,8 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
       // 3. Direction Filter
       if (selectedDirection !== 'ALL' && a.direction !== selectedDirection) return false
 
-      // 4. Unified Multi-Select Segment Filter (FNO_INDEX, FNO_STOCK, EQUITY, COMMODITY, CURRENCY)
-      if (selectedSegments.size < 5) {
+      // 4. Unified Multi-Select Segment Filter (FNO_INDEX, FNO_STOCK, EQUITY, COMMODITY, CURRENCY, CRYPTO)
+      if (selectedSegments.size < ALL_CANONICAL_SEGMENTS.length) {
         const seg = classifyAlertSegment(a)
         if (!selectedSegments.has(seg) && !(selectedSegments.has('FNO') && (seg === 'FNO_INDEX' || seg === 'FNO_STOCK'))) {
           return false
@@ -2447,7 +2604,7 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
       } else if (selectedFilter === 'MULTI_FLOW') {
         const rel = a.metrics?.related_strikes || a.related_strikes
         if (!Array.isArray(rel) || rel.length === 0) return false
-      } else if (selectedFilter !== 'ALL' && a.alert_type !== selectedFilter) {
+      } else if (selectedFilter !== 'ALL' && a.alert_type !== selectedFilter && a.event_type !== selectedFilter) {
         return false
       }
 
@@ -2571,9 +2728,9 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
     return primaryAlerts
   }, [filteredAutoAlerts])
 
-  // Segregate into 5 canonical market segments using classifyAlertSegment across active alerts
-  const { fnoIndexCount, fnoStockCount, equityCount, commodityCount, currencyCount } = useMemo(() => {
-    let fi = 0, fs = 0, e = 0, c = 0, cu = 0
+  // Segregate into 6 canonical market segments using classifyAlertSegment across active alerts
+  const { fnoIndexCount, fnoStockCount, equityCount, commodityCount, currencyCount, cryptoCount, totalSegmentCount } = useMemo(() => {
+    let fi = 0, fs = 0, e = 0, c = 0, cu = 0, cr = 0
     for (const a of autoAlerts) {
       if (autoViewMode === 'ACTIVE' && !isAlertActive(a)) continue
       if (autoViewMode === 'ARCHIVED' && isAlertActive(a)) continue
@@ -2582,23 +2739,27 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
       else if (seg === 'FNO_STOCK') fs++
       else if (seg === 'COMMODITY') c++
       else if (seg === 'CURRENCY') cu++
+      else if (seg === 'CRYPTO') cr++
       else e++
     }
-    return { fnoIndexCount: fi, fnoStockCount: fs, equityCount: e, commodityCount: c, currencyCount: cu }
+    const total = fi + fs + e + c + cu + cr
+    return { fnoIndexCount: fi, fnoStockCount: fs, equityCount: e, commodityCount: c, currencyCount: cu, cryptoCount: cr, totalSegmentCount: total }
   }, [autoAlerts, autoViewMode])
 
-  const { groupedFnoIndexAlerts, groupedFnoStockAlerts, groupedEquityAlerts, groupedCommodityAlerts, groupedCurrencyAlerts } = useMemo(() => {
+  const { groupedFnoIndexAlerts, groupedFnoStockAlerts, groupedEquityAlerts, groupedCommodityAlerts, groupedCurrencyAlerts, groupedCryptoAlerts } = useMemo(() => {
     const fnoIdx = []
     const fnoStk = []
     const equity = []
     const commodity = []
     const currency = []
+    const crypto = []
     for (const item of groupedAutoAlerts) {
       const seg = classifyAlertSegment(item.alert)
       if (seg === 'FNO_INDEX') fnoIdx.push(item)
       else if (seg === 'FNO_STOCK') fnoStk.push(item)
       else if (seg === 'COMMODITY') commodity.push(item)
       else if (seg === 'CURRENCY') currency.push(item)
+      else if (seg === 'CRYPTO') crypto.push(item)
       else equity.push(item)
     }
     return {
@@ -2607,6 +2768,7 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
       groupedEquityAlerts: equity,
       groupedCommodityAlerts: commodity,
       groupedCurrencyAlerts: currency,
+      groupedCryptoAlerts: crypto,
     }
   }, [groupedAutoAlerts])
 
@@ -2617,8 +2779,9 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
       ...groupedEquityAlerts,
       ...groupedCommodityAlerts,
       ...groupedCurrencyAlerts,
+      ...groupedCryptoAlerts,
     ]
-  }, [groupedFnoIndexAlerts, groupedFnoStockAlerts, groupedEquityAlerts, groupedCommodityAlerts, groupedCurrencyAlerts])
+  }, [groupedFnoIndexAlerts, groupedFnoStockAlerts, groupedEquityAlerts, groupedCommodityAlerts, groupedCurrencyAlerts, groupedCryptoAlerts])
 
   const activeSelectedItem = useMemo(() => {
     if (!allVisibleGrouped.length) return null
@@ -2694,6 +2857,7 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
                 onTrade={handleOpenTicket}
                 onAnalyze={handleAnalyze}
                 onSendTelegram={handleOpenTelegramModal}
+                onDismiss={handleDismissAlert}
               />
             )
           }
@@ -2706,6 +2870,7 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
                   onSendTelegram={handleOpenTelegramModal}
                   onTrade={handleOpenTicket}
                   onExpand={() => toggleExpandRow(alertKey)}
+                  onDismiss={handleDismissAlert}
                   isExpanded={isRowExpanded}
                 />
                 {isRowExpanded && (
@@ -2717,6 +2882,7 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
                       onOpenTicket={handleOpenTicket}
                       onArchiveToggle={handleArchiveToggle}
                       onClearLockout={handleClearLockout}
+                      onDismiss={handleDismissAlert}
                       archiving={archiving}
                       historyAttempts={history}
                       densityMode="expanded"
@@ -2737,6 +2903,7 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
                 onOpenTicket={handleOpenTicket}
                 onArchiveToggle={handleArchiveToggle}
                 onClearLockout={handleClearLockout}
+                onDismiss={handleDismissAlert}
                 archiving={archiving}
                 historyAttempts={history}
                 densityMode={densityMode}
@@ -2799,27 +2966,51 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
       {/* Invalidation Alert Banner */}
       {invalidatedCount > 0 && activeTab === 'auto' && (
         <div className="p-3 rounded-2xl bg-rose-500/10 border border-rose-500/35 text-rose-800 dark:text-rose-200 flex items-center justify-between gap-3 animate-slide-up-fade">
-          <div className="flex items-center gap-2.5 text-xs">
+          <div className="flex items-center gap-2.5 text-xs min-w-0 flex-1">
             <span className="text-xl flex-shrink-0">🛑</span>
-            <div>
-              <span className="font-bold">
-                ⚠️ {invalidatedCount} Trade {invalidatedCount === 1 ? 'Setup' : 'Setups'} Invalidated:
-              </span>
-              <span className="ml-1 text-rose-700 dark:text-rose-300/80">
-                {uniqueInvalidatedList.slice(0, 3).join(', ')}
-                {uniqueInvalidatedList.length > 3 ? '...' : ''} no longer valid due to stop-loss breach or structural failure.
-              </span>
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="font-bold">
+                  ⚠️ {invalidatedCount} Trade {invalidatedCount === 1 ? 'Setup' : 'Setups'} Invalidated:
+                </span>
+                <span className="text-[10px] px-1.5 py-0.5 rounded font-mono bg-rose-500/20 text-rose-700 dark:text-rose-300 border border-rose-500/30">
+                  SL breached / thesis invalidated
+                </span>
+              </div>
+              <p className="mt-0.5 text-rose-700 dark:text-rose-300/80 truncate">
+                {uniqueInvalidatedList.slice(0, 4).join(', ')}
+                {uniqueInvalidatedList.length > 4 ? ` +${uniqueInvalidatedList.length - 4} more` : ''} no longer valid due to stop-loss breach or structural failure.
+              </p>
             </div>
           </div>
-          <button
-            onClick={() => {
-              setSelectedFilter('INVALIDATED')
-              setSelectedStage('ALL')
-            }}
-            className="btn btn-sm btn-ghost text-rose-700 dark:text-rose-300 hover:bg-rose-500/20 text-xs flex-shrink-0"
-          >
-            View Invalidated ({invalidatedCount}) →
-          </button>
+          <div className="flex items-center gap-2 flex-shrink-0">
+            <button
+              onClick={() => {
+                setSelectedFilter('INVALIDATED')
+                setSelectedStage('ALL')
+              }}
+              className="btn btn-sm btn-ghost text-rose-700 dark:text-rose-300 hover:bg-rose-500/20 text-xs flex-shrink-0 border border-rose-500/30 font-bold"
+              title="Filter view to inspect invalidated setups"
+            >
+              View Invalidated ({invalidatedCount}) →
+            </button>
+            <button
+              onClick={handleArchiveAllInvalidated}
+              disabled={archivingInvalidated}
+              className="btn btn-sm bg-rose-500/20 hover:bg-rose-500/30 text-rose-800 dark:text-rose-200 border border-rose-500/40 text-xs flex-shrink-0 font-bold flex items-center gap-1 cursor-pointer"
+              title="Move all invalidated setups to Archived & History to clean the active radar"
+            >
+              <span>📦</span>
+              <span>{archivingInvalidated ? 'Archiving…' : `Archive All (${invalidatedCount})`}</span>
+            </button>
+            <button
+              onClick={handleDismissInvalidationBanner}
+              className="p-1 rounded-lg hover:bg-rose-500/20 text-rose-500 dark:text-rose-400 hover:text-rose-700 dark:hover:text-rose-200 transition-colors text-sm font-bold leading-none cursor-pointer"
+              title="Dismiss banner for this session"
+            >
+              ✕
+            </button>
+          </div>
         </div>
       )}
 
@@ -2924,7 +3115,7 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
                 </button>
 
                 {/* Unified ⚙️ Tools dropdown (maintenance + simulation + clear) */}
-                <div className="relative">
+                <div className="relative" ref={toolsMenuRef}>
                   <button
                     onClick={() => setShowTools((v) => !v)}
                     className={`btn btn-sm btn-ghost text-xs border flex items-center gap-1 py-1 px-2.5 transition-all ${
@@ -2966,6 +3157,19 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
                           <span className="text-[10px] text-muted">Active valid trades are never deleted</span>
                         </div>
                       </button>
+                      {invalidatedCount > 0 && (
+                        <button
+                          onClick={() => { handleArchiveAllInvalidated(); setShowTools(false) }}
+                          disabled={archivingInvalidated}
+                          className="w-full text-left px-2.5 py-1.5 rounded-lg hover:bg-elevated text-rose-400 flex items-center gap-2 cursor-pointer transition-colors"
+                        >
+                          <span>📦</span>
+                          <div>
+                            <span className="font-bold block">Archive All Invalidated ({invalidatedCount})</span>
+                            <span className="text-[10px] text-muted">Move invalidated setups to history tab</span>
+                          </div>
+                        </button>
+                      )}
                       {autoAlerts.length > 0 && (
                         <button
                           onClick={() => { handleClearAuto(); setShowTools(false) }}
@@ -2978,6 +3182,17 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
                           </div>
                         </button>
                       )}
+                      {/* Purge Test / Simulation alerts button */}
+                      <button
+                        onClick={() => { handleClearTestAlerts(); setShowTools(false) }}
+                        className="w-full text-left px-2.5 py-1.5 rounded-lg hover:bg-elevated text-purple-400 flex items-center gap-2 cursor-pointer transition-colors"
+                      >
+                        <span>🧪</span>
+                        <div>
+                          <span className="font-bold block">Clear Test / Simulated Alerts</span>
+                          <span className="text-[10px] text-muted">Purge simulated cards without affecting live feeds</span>
+                        </div>
+                      </button>
 
                       {/* Simulation section */}
                       <div className="border-t border-border/40 mt-1 pt-1">
@@ -3055,12 +3270,19 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
                       ? 'bg-gold text-surface shadow-sm font-black'
                       : 'text-muted hover:text-text hover:bg-elevated'
                   }`}
-                  title="Include all market segments"
+                  title={`Include all market segments (${totalSegmentCount} total setups across ${groupedAutoAlerts.length} symbol cards)`}
                 >
                   <span>🌐 All Segments</span>
                   <span className={`text-[10px] font-mono px-1.5 py-px rounded-full ${
                     isAllSegmentsSelected ? 'bg-black/20 font-bold' : 'bg-elevated'
-                  }`}>{groupedAutoAlerts.length}</span>
+                  }`}>{totalSegmentCount}</span>
+                  {groupedAutoAlerts.length !== totalSegmentCount && (
+                    <span className={`text-[9px] font-mono opacity-70 hidden sm:inline ${
+                      isAllSegmentsSelected ? 'text-black/80 dark:text-black/70 font-semibold' : 'text-muted'
+                    }`} title={`${totalSegmentCount} total setups deduplicated into ${groupedAutoAlerts.length} symbol cards`}>
+                      ({groupedAutoAlerts.length} cards)
+                    </span>
+                  )}
                 </button>
 
                 {/* Individual Segment multi-select pills */}
@@ -3070,6 +3292,7 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
                   { id: 'EQUITY',    label: '🏢 Cash Equity',      count: equityCount,    activeColor: 'bg-emerald-500/15 dark:bg-emerald-500/25 text-emerald-800 dark:text-emerald-200 border-emerald-400/60 dark:border-emerald-500/50' },
                   { id: 'COMMODITY', label: '🌙 Commodity (MCX)',  count: commodityCount, activeColor: 'bg-amber-500/15 dark:bg-amber-500/25 text-amber-800 dark:text-amber-200 border-amber-400/60 dark:border-amber-500/50' },
                   { id: 'CURRENCY',  label: '💱 Currency (CDS)',   count: currencyCount,  activeColor: 'bg-cyan-500/15 dark:bg-cyan-500/25 text-cyan-800 dark:text-cyan-200 border-cyan-400/60 dark:border-cyan-500/50' },
+                  { id: 'CRYPTO',    label: '🪙 Crypto 24x7',      count: cryptoCount,    activeColor: 'bg-amber-500/15 dark:bg-amber-500/25 text-amber-800 dark:text-amber-200 border-amber-400/60 dark:border-amber-500/50' },
                 ].map((seg) => {
                   const isSelected = selectedSegments.has(seg.id)
                   return (
@@ -3103,7 +3326,7 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
               >
                 <span>⚙️ Alert Routing Matrix</span>
                 <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-surface border border-border text-text">
-                  {isAllSegmentsSelected ? 'ALL 5' : `${selectedSegments.size} ACTIVE`}
+                  {isAllSegmentsSelected ? 'ALL 6' : `${selectedSegments.size} ACTIVE`}
                 </span>
               </button>
             </div>
@@ -3148,10 +3371,19 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
                   <option value="MULTI_FLOW">🌊 Multi-Strike Flow</option>
                   <option value="GAMMA_BLAST">⚡ Gamma Blast</option>
                   <option value="SQUEEZE_BREAKOUT">🚀 Squeeze Breakout</option>
+                  <option value="CFAI_FLOAT_EXHAUSTION">🐋 Float Exhaustion (CFAI)</option>
+                  <option value="ORDER_BOOK_EXPANSION">🏗️ Order-Book Titan</option>
+                  <option value="BLOCK_DEAL_ABSORPTION">🛡️ Block Deal Absorption</option>
+                  <option value="CAPEX_INFLECTION">🏭 Capex & CWIP Inflection</option>
+                  <option value="RRG_ORDERBOOK_CONVERGENCE">🔄 RRG × Order-Book Convergence</option>
+                  <option value="PROMOTER_SKIN_IN_THE_GAME">💎 Promoter Skin-in-the-Game</option>
                   <option value="SMC_SWEEP">🌊 SMC Sweep</option>
                   <option value="PRECURSOR_RADAR">⚡ Precursor Radar</option>
                   <option value="ASYMMETRIC_OPPORTUNITY">🎯 Asymmetric R:R</option>
                   <option value="CIRCUIT_WARNING">🔒 Circuit Warning</option>
+                  <option value="CRYPTO_SQUEEZE">🪙 Crypto Squeeze (24x7)</option>
+                  <option value="CRYPTO_MOMENTUM">🪙 Crypto Momentum</option>
+                  <option value="CRYPTO_VOLATILITY">🪙 Crypto Volatility</option>
                   <option value="INVALIDATED">❌ Invalidated ({invalidatedCount})</option>
                 </select>
 
@@ -3431,10 +3663,26 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
                     </div>
                   )}
 
+                  {/* 6. Crypto 24x7 (Binance & Deribit) */}
+                  {(selectedSegment === 'ALL' || selectedSegment === 'CRYPTO') && groupedCryptoAlerts.length > 0 && (
+                    <div className="space-y-3">
+                      <div className="flex items-center justify-between pb-2 border-b border-amber-500/40">
+                        <div className="flex items-center gap-2">
+                          <span className="text-base">🪙</span>
+                          <h2 className="text-xs font-black uppercase tracking-wider text-amber-400">
+                            Crypto 24x7 — BTC · ETH · SOL · Derivatives ({groupedCryptoAlerts.length})
+                          </h2>
+                        </div>
+                        <span className="text-[10px] font-mono text-muted">24/7/365 · Binance Futures · Deribit Surface</span>
+                      </div>
+                      {renderAlertList(groupedCryptoAlerts)}
+                    </div>
+                  )}
+
                   {/* Segment-specific empty state */}
                   {selectedSegment !== 'ALL' && filteredAutoAlerts.length === 0 && (
                     <div className="p-6 text-center text-xs text-muted border border-border/50 rounded-xl bg-surface/50">
-                      No {selectedSegment === 'COMMODITY' ? 'MCX Commodity' : selectedSegment === 'CURRENCY' ? 'Currency (CDS)' : selectedSegment === 'FNO' ? 'F&O' : 'Cash Equity'} alerts matching current filters
+                      No {selectedSegment === 'COMMODITY' ? 'MCX Commodity' : selectedSegment === 'CURRENCY' ? 'Currency (CDS)' : selectedSegment === 'CRYPTO' ? 'Crypto 24x7' : selectedSegment === 'FNO' ? 'F&O' : 'Cash Equity'} alerts matching current filters
                     </div>
                   )}
                 </div>
@@ -3450,6 +3698,7 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
                       onArchiveToggle={handleArchiveToggle}
                       onClearLockout={handleClearLockout}
                       onSendTelegram={handleOpenTelegramModal}
+                      onDismiss={handleDismissAlert}
                       archiving={archiving}
                       historyAttempts={activeSelectedHistory}
                     />
@@ -3571,10 +3820,26 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
                   </div>
                 )}
 
+                {/* 6. Crypto 24x7 (Binance & Deribit) */}
+                {(selectedSegment === 'ALL' || selectedSegment === 'CRYPTO') && groupedCryptoAlerts.length > 0 && (
+                  <div className="space-y-3">
+                    <div className="flex items-center justify-between pb-2 border-b border-amber-500/40">
+                      <div className="flex items-center gap-2">
+                        <span className="text-base">🪙</span>
+                        <h2 className="text-xs font-black uppercase tracking-wider text-amber-400">
+                          Crypto 24x7 — BTC · ETH · SOL · Derivatives ({groupedCryptoAlerts.length})
+                        </h2>
+                      </div>
+                      <span className="text-[10px] font-mono text-muted">24/7/365 · Binance Futures · Deribit Surface</span>
+                    </div>
+                    {renderAlertList(groupedCryptoAlerts)}
+                  </div>
+                )}
+
                 {/* Segment-specific empty state */}
                 {selectedSegment !== 'ALL' && filteredAutoAlerts.length === 0 && (
                   <div className="p-6 text-center text-xs text-muted border border-border/50 rounded-xl bg-surface/50">
-                    No {selectedSegment === 'COMMODITY' ? 'MCX Commodity' : selectedSegment === 'CURRENCY' ? 'Currency (CDS)' : selectedSegment === 'FNO' ? 'F&O' : 'Cash Equity'} alerts matching current filters
+                    No {selectedSegment === 'COMMODITY' ? 'MCX Commodity' : selectedSegment === 'CURRENCY' ? 'Currency (CDS)' : selectedSegment === 'CRYPTO' ? 'Crypto 24x7' : selectedSegment === 'FNO' ? 'F&O' : 'Cash Equity'} alerts matching current filters
                   </div>
                 )}
               </div>

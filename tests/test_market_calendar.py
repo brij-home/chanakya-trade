@@ -6,7 +6,7 @@ holiday detection, MCX session handling, active trading minutes calculation,
 and asymmetry veto enforcement.
 """
 
-from datetime import date, datetime, time as dtime
+from datetime import date, datetime
 from zoneinfo import ZoneInfo
 import pytest
 
@@ -104,15 +104,20 @@ def test_get_market_status_reporting():
 
 def test_get_current_ist_session():
     """Verify session flags respect holidays and operating windows."""
-    # Monday 14-Sep-2026 (Ganesh Chaturthi morning) -> all False
+    # Monday 14-Sep-2026 (Ganesh Chaturthi morning) -> all Indian markets False, crypto True (24x7)
     holiday_dt = datetime(2026, 9, 14, 11, 0, tzinfo=IST)
     sess_holiday = get_current_ist_session(ref_dt=holiday_dt)
-    assert sess_holiday == {"equity_nfo": False, "currency": False, "commodity": False}
+    assert sess_holiday == {
+        "equity_nfo": False,
+        "currency": False,
+        "commodity": False,
+        "crypto": True,
+    }
 
-    # Monday 14-Sep-2026 (Ganesh Chaturthi evening) -> commodity True, equity False
+    # Monday 14-Sep-2026 (Ganesh Chaturthi evening) -> commodity True, equity False, crypto True
     holiday_eve = datetime(2026, 9, 14, 18, 0, tzinfo=IST)
     sess_eve = get_current_ist_session(ref_dt=holiday_eve)
-    assert sess_eve == {"equity_nfo": False, "currency": False, "commodity": True}
+    assert sess_eve == {"equity_nfo": False, "currency": False, "commodity": True, "crypto": True}
 
     # Regular Tuesday 11:00 IST -> equity True, currency False, commodity False
     tue_day = datetime(2026, 9, 15, 11, 0, tzinfo=IST)
@@ -187,43 +192,88 @@ def test_in_flight_warning_skips_when_market_closed(monkeypatch):
 
 def test_gamma_blast_strictly_rejects_unviable_asymmetry():
     """
-    Verify that detect_gamma_blast does NOT publish setups where trade plan
-    is not asymmetry viable, even if is_ignited is True.
+    Verify detect_gamma_blast asymmetry gate behavior after SMC structural bypass (Fix 2).
+
+    New behaviour:
+    - Index PE with extreme OI unwind (vol_oi >= 2.0) bypasses is_asymmetry_viable=False
+      because extreme institutional shedding IS the structural bearish signal (stronger
+      than the EMA-calibrated trade plan viability model).
+    - Equity stock PEs are still rejected: the bypass is index-only.
+    - Index PE with LOW vol_oi (< 2.0 threshold) is still rejected normally.
     """
     from engine.detectors.gamma_blast import detect_gamma_blast
     from brokers.base import OptionsContract
+    from unittest.mock import MagicMock
 
-    # Synthetic chain with massive volume and shedding to trigger is_ignited
-    chain = [
+    mock_tp = MagicMock()
+    mock_tp.is_asymmetry_viable = False
+    mock_tp.asymmetry_verdict = "POOR_ASYMMETRY_REJECTED"
+
+    # Case A: NIFTY PE with extreme vol/OI (10x >= 2.0) — SMC bypass fires, alert EXPECTED
+    chain_extreme = [
         OptionsContract(
             symbol="NIFTY23500PE",
             underlying="NIFTY",
-            expiry="2026-09-15",
+            expiry="2026-09-25",
             strike=23500.0,
             option_type="PE",
             last_price=100.0,
             oi=50000,
             oi_change=-25000,
-            volume=500000,  # 10x turnover -> is_ignited=True
+            volume=500000,
             exchange="NFO",
         )
     ]
-
-    from unittest.mock import MagicMock
-    import engine.trade_plan
-
-    # Mock trade plan returning is_asymmetry_viable = False
-    mock_tp = MagicMock()
-    mock_tp.is_asymmetry_viable = False
-    mock_tp.asymmetry_verdict = "POOR_ASYMMETRY_REJECTED"
-
     with pytest.MonkeyPatch.context() as mp:
-        mp.setattr(
-            "engine.trade_plan.calculate_trade_plan",
-            lambda **kwargs: mock_tp,
+        mp.setattr("engine.trade_plan.calculate_trade_plan", lambda **kwargs: mock_tp)
+        alerts = detect_gamma_blast("NIFTY", spot=23480.0, chain=chain_extreme, vwap=23490.0)
+        assert len(alerts) == 1, (
+            "NIFTY PE with 10x vol_oi extreme unwind must bypass asymmetry gate — "
+            "institutional OI shedding is the structural signal"
         )
-        alerts = detect_gamma_blast("NIFTY", spot=23480.0, chain=chain, vwap=23490.0)
-        assert len(alerts) == 0, "Alert must be rejected due to unviable asymmetry"
+
+    # Case B: Equity stock (RELIANCE) — bypass is index-only, must still be rejected
+    chain_equity = [
+        OptionsContract(
+            symbol="RELIANCE2900PE",
+            underlying="RELIANCE",
+            expiry="2026-09-25",
+            strike=2900.0,
+            option_type="PE",
+            last_price=50.0,
+            oi=20000,
+            oi_change=-10000,
+            volume=200000,
+            exchange="NFO",
+        )
+    ]
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr("engine.trade_plan.calculate_trade_plan", lambda **kwargs: mock_tp)
+        alerts = detect_gamma_blast("RELIANCE", spot=2870.0, chain=chain_equity, vwap=2880.0)
+        assert len(alerts) == 0, "Equity PE must still be rejected — SMC bypass is index-only"
+
+    # Case C: NIFTY PE with LOW vol/OI (1.2x < bypass threshold) — still rejected
+    chain_low = [
+        OptionsContract(
+            symbol="NIFTY23500PE",
+            underlying="NIFTY",
+            expiry="2026-09-25",
+            strike=23500.0,
+            option_type="PE",
+            last_price=100.0,
+            oi=50000,
+            oi_change=-5000,
+            volume=60000,
+            exchange="NFO",
+        )
+    ]
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr("engine.trade_plan.calculate_trade_plan", lambda **kwargs: mock_tp)
+        alerts = detect_gamma_blast("NIFTY", spot=23480.0, chain=chain_low, vwap=23490.0)
+        assert len(alerts) == 0, (
+            "NIFTY PE with 1.2x vol_oi (< 2.0 bypass threshold) must still be rejected "
+            "when is_asymmetry_viable=False"
+        )
 
 
 def test_scrutiny_auditor_vetoes_unviable_trade_plan():

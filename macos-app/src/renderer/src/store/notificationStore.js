@@ -1,17 +1,45 @@
 import { create } from 'zustand'
+import { isTestOrSimAlert } from '../components/Views/alerts/alertHelpers'
 
 const STORAGE_KEY = 'chanakya_notifications_v1'
 // Singleton polling interval — only ONE interval runs across the entire app
 let _pollTimer = null
 const MAX_NOTIFICATIONS = 100
 
-// Safe localStorage loader
+// Safe localStorage loader with prior-day intraday expiration sanitization and test alert pruning
 function loadStoredNotifications() {
   try {
     const raw = localStorage.getItem(STORAGE_KEY)
     if (!raw) return []
     const parsed = JSON.parse(raw)
-    return Array.isArray(parsed) ? parsed : []
+    if (!Array.isArray(parsed)) return []
+    // Sanitize any legacy test/sim alerts right upon initial load!
+    const sanitized = parsed.filter((item) => !isTestOrSimAlert(item))
+    if (sanitized.length !== parsed.length) {
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(sanitized.slice(0, MAX_NOTIFICATIONS)))
+      } catch (_) {}
+    }
+    const now = new Date()
+    return sanitized.map((item) => {
+      const isIntraday = item.time_horizon === 'INTRADAY' || item.timeHorizon === 'INTRADAY'
+      const timeStr = item.created_at || item.timestamp
+      if (isIntraday && timeStr) {
+        try {
+          const d = new Date(String(timeStr).replace(' IST', '').trim())
+          if (!isNaN(d.getTime()) && d.toDateString() !== now.toDateString()) {
+            return {
+              ...item,
+              is_invalidated: true,
+              isInvalidated: true,
+              stage: 'EXPIRED',
+              invalidation_reason: item.invalidation_reason || 'Intraday session expired (15:15 IST cutoff reached). Trade closed.'
+            }
+          }
+        } catch (_) {}
+      }
+      return item
+    })
   } catch (_) {
     return []
   }
@@ -112,6 +140,7 @@ export const useNotificationStore = create((set, get) => ({
     const normalized = rawList
       .map((item) => normalizeNotification(item))
       .filter(Boolean)
+      .filter((item) => !isTestOrSimAlert(item))
 
     set((s) => {
       const existingMap = new Map(s.notifications.map((n) => [n.id, n]))
@@ -129,7 +158,25 @@ export const useNotificationStore = create((set, get) => ({
       }
 
       // Preserve any local/SSE alerts not present in the backend snapshot
+      const now = new Date()
       for (const rem of existingMap.values()) {
+        const isIntraday = rem.time_horizon === 'INTRADAY' || rem.timeHorizon === 'INTRADAY'
+        const timeStr = rem.created_at || rem.timestamp
+        if (isIntraday && timeStr) {
+          try {
+            const d = new Date(String(timeStr).replace(' IST', '').trim())
+            if (!isNaN(d.getTime()) && d.toDateString() !== now.toDateString()) {
+              merged.push({
+                ...rem,
+                is_invalidated: true,
+                isInvalidated: true,
+                stage: 'EXPIRED',
+                invalidation_reason: rem.invalidation_reason || 'Intraday session expired (15:15 IST cutoff reached). Trade closed.'
+              })
+              continue
+            }
+          } catch (_) {}
+        }
         merged.push(rem)
       }
 
@@ -216,6 +263,17 @@ export const useNotificationStore = create((set, get) => ({
     })
   },
 
+  purgeTestAlerts: () => {
+    set((s) => {
+      const next = s.notifications.filter((n) => !isTestOrSimAlert(n))
+      saveNotifications(next)
+      return {
+        notifications: next,
+        unreadCount: next.filter((n) => !n.read).length,
+      }
+    })
+  },
+
   /**
    * Fetches alerts from the backend using the provided `call` function and
    * merges them into the store. Safe to call concurrently — uses a guard flag.
@@ -232,14 +290,18 @@ export const useNotificationStore = create((set, get) => ({
         list = res?.data ?? res ?? []
       } catch (_callErr) {
         // Vite browser dev fallback — sidecar IPC unavailable
-        const directRes = await fetch('http://127.0.0.1:8765/skills/alerts/auto/list', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ view_mode: 'ALL' }),
-        })
-        if (directRes.ok) {
-          const data = await directRes.json()
-          list = data?.data ?? data ?? []
+        try {
+          const directRes = await fetch('http://127.0.0.1:8765/skills/alerts/auto/list', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ view_mode: 'ALL' }),
+          })
+          if (directRes.ok) {
+            const data = await directRes.json()
+            list = data?.data ?? data ?? []
+          }
+        } catch (_netErr) {
+          // Backend offline or reloading; fallback gracefully without logging uncaught error
         }
       }
       if (Array.isArray(list) && list.length > 0) {

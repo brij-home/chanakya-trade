@@ -87,9 +87,7 @@ class PositionLifecycleReport:
 
     # Milestones & Profit Booking
     breakeven_reached: bool
-    recommended_action: (
-        str  # "HOLD_RUNNER" | "SCALE_OUT_50_PCT" | "TRAIL_SL_TIGHT" | "EXIT_IMMEDIATELY" | "HOLD_COMPOUNDER" | "PYRAMID_ADD_ON"
-    )
+    recommended_action: str  # "HOLD_RUNNER" | "SCALE_OUT_50_PCT" | "TRAIL_SL_TIGHT" | "EXIT_IMMEDIATELY" | "HOLD_COMPOUNDER" | "PYRAMID_ADD_ON"
     milestones: list[ProfitMilestone] = field(default_factory=list)
 
     # Trailing Stops
@@ -118,6 +116,8 @@ def audit_position_lifecycle(
     df: Optional[pd.DataFrame] = None,
     exchange: str = "NSE",
     mode: str = "SWING",
+    bars_held: int = 0,
+    duration_minutes: float = 0.0,
 ) -> PositionLifecycleReport:
     """
     Audits an open trade's health and dynamically calibrates trailing stops based on the position mode:
@@ -255,25 +255,39 @@ def audit_position_lifecycle(
             health_status = "HEALTHY_ACCELERATING"
             health_score = 98
             action = "PYRAMID_ADD_ON"
-            diagnostics.append(f"Stage 2 Compounder in massive expansion (+{r_multiple:.2f}R, +{pnl_pct:.2f}%).")
-            diagnostics.append("Pyramiding Window Active: Add +30% on tight consolidations. Zero premature profit-taking.")
+            diagnostics.append(
+                f"Stage 2 Compounder in massive expansion (+{r_multiple:.2f}R, +{pnl_pct:.2f}%)."
+            )
+            diagnostics.append(
+                "Pyramiding Window Active: Add +30% on tight consolidations. Zero premature profit-taking."
+            )
             diagnostics.append(f"Active trailing floor: ₹{recommended_stop:.2f} ({stop_method}).")
         elif r_multiple >= 2.0:
             health_status = "HEALTHY_ACCELERATING"
             health_score = 88
             action = "HOLD_COMPOUNDER"
             diagnostics.append(f"Reached 2R Risk-Free Pivot (+{r_multiple:.2f}R, +{pnl_pct:.2f}%).")
-            diagnostics.append("SL secured at breakeven base pivot. Do NOT scale out; allow Stage 2 markup to compound.")
+            diagnostics.append(
+                "SL secured at breakeven base pivot. Do NOT scale out; allow Stage 2 markup to compound."
+            )
         elif r_multiple >= 0.0:
-            health_status = "HEALTHY_PULLBACK" if ltp < highest_price * 0.96 else "HEALTHY_ACCELERATING"
+            health_status = (
+                "HEALTHY_PULLBACK" if ltp < highest_price * 0.96 else "HEALTHY_ACCELERATING"
+            )
             health_score = 75
             action = "HOLD_COMPOUNDER"
-            diagnostics.append(f"Position consolidating normally (+{r_multiple:.2f}R, +{pnl_pct:.2f}%). Maintain original base risk.")
+            diagnostics.append(
+                f"Position consolidating normally (+{r_multiple:.2f}R, +{pnl_pct:.2f}%). Maintain original base risk."
+            )
         else:
-            health_status = "STRUCTURAL_INVALIDATION" if ltp <= initial_stop_loss else "HEALTHY_PULLBACK"
+            health_status = (
+                "STRUCTURAL_INVALIDATION" if ltp <= initial_stop_loss else "HEALTHY_PULLBACK"
+            )
             health_score = 30 if ltp > initial_stop_loss else 15
             action = "EXIT_IMMEDIATELY" if ltp <= initial_stop_loss else "HOLD_COMPOUNDER"
-            diagnostics.append(f"Adverse excursion ({r_multiple:.2f}R). Strictly honor base stop-loss at ₹{initial_stop_loss:.2f}.")
+            diagnostics.append(
+                f"Adverse excursion ({r_multiple:.2f}R). Strictly honor base stop-loss at ₹{initial_stop_loss:.2f}."
+            )
 
     elif pos_mode in ("GENERATIONAL", "LONG_TERM"):
         # Long-Term Wealth Builder: Trailed on 200-SMA / 40-Week SMA floor
@@ -363,17 +377,38 @@ def audit_position_lifecycle(
                 "Lock in 33-50% partial profit and move SL to breakeven (Risk-Free Trade)."
             )
         elif r_multiple >= 0.5:
-            health_status = "HEALTHY_PULLBACK" if ltp < highest_price * 0.98 else "HEALTHY_ACCELERATING"
+            health_status = (
+                "HEALTHY_PULLBACK" if ltp < highest_price * 0.98 else "HEALTHY_ACCELERATING"
+            )
             health_score = 75
             action = "HOLD_RUNNER"
-            diagnostics.append(f"Trade progressing favorably (+{r_multiple:.2f}R, +{pnl_pct:.2f}%).")
+            diagnostics.append(
+                f"Trade progressing favorably (+{r_multiple:.2f}R, +{pnl_pct:.2f}%)."
+            )
             diagnostics.append("Maintain initial stop-loss until 2R target is reached.")
         elif r_multiple >= -0.5:
-            health_status = "MOMENTUM_STALLING"
-            health_score = 55
-            action = "HOLD_RUNNER"
-            diagnostics.append(f"Price hovering near entry (+{r_multiple:.2f}R, {pnl_pct:+.2f}%).")
-            diagnostics.append("Keep original risk parameters; avoid premature manual exits.")
+            # Time-Decay Stall Kill-Switch:
+            # If position has stalled near entry for 4+ bars or 20+ minutes without expanding past 0.5R,
+            # the statistical edge of momentum has decayed to zero. Mandate scratch to avoid chop trap.
+            is_stalled = (bars_held >= 4 or duration_minutes >= 20.0) and r_multiple < 0.5
+            if is_stalled:
+                health_status = "MOMENTUM_STALLING"
+                health_score = 40
+                action = "SCRATCH_POSITION"
+                diagnostics.append(
+                    f"Momentum Stalled: Position held for {bars_held} bars ({duration_minutes:.0f} mins) hovering at {r_multiple:+.2f}R without expansion."
+                )
+                diagnostics.append(
+                    "Statistical edge decayed. Mandate scratch at breakeven / flat to release capital from sideways chop."
+                )
+            else:
+                health_status = "MOMENTUM_STALLING" if r_multiple < 0.2 else "HEALTHY_ACCELERATING"
+                health_score = 55
+                action = "HOLD_RUNNER"
+                diagnostics.append(
+                    f"Price hovering near entry (+{r_multiple:.2f}R, {pnl_pct:+.2f}%)."
+                )
+                diagnostics.append("Keep original risk parameters; allow trade time to develop.")
         else:
             health_status = "STRUCTURAL_INVALIDATION"
             health_score = 25
@@ -415,4 +450,3 @@ def audit_position_lifecycle(
         summary=summary,
         diagnostic_bullet_points=diagnostics,
     )
-

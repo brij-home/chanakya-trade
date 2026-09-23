@@ -22,7 +22,7 @@ from config.paths import app_data_path
 
 logger = logging.getLogger("chanakya.alert_preferences")
 
-CANONICAL_SEGMENTS = ("FNO_INDEX", "FNO_STOCK", "EQUITY", "COMMODITY", "CURRENCY")
+CANONICAL_SEGMENTS = ("FNO_INDEX", "FNO_STOCK", "EQUITY", "COMMODITY", "CURRENCY", "CRYPTO")
 
 SEGMENT_ALIASES: dict[str, list[str]] = {
     "FNO": ["FNO_INDEX", "FNO_STOCK"],
@@ -33,6 +33,9 @@ SEGMENT_ALIASES: dict[str, list[str]] = {
     "INDEX_FNO": ["FNO_INDEX"],
     "FNO_STOCKS": ["FNO_STOCK"],
     "STOCK_FNO": ["FNO_STOCK"],
+    "CRYPTO": ["CRYPTO"],
+    "CRYPTO_MAJORS": ["CRYPTO"],
+    "BITCOIN": ["CRYPTO"],
 }
 
 
@@ -167,6 +170,29 @@ def classify_alert_segment(alert: Any) -> str:
         .upper()
     )
 
+    # 0.5. Crypto (24x7)
+    if (
+        exch in ("CRYPTO", "BINANCE", "COINBASE")
+        or seg in ("CRYPTO", "CRYPTO_MAJORS")
+        or sym.upper().startswith("CRYPTO:")
+        or clean_sym
+        in (
+            "BTC",
+            "ETH",
+            "SOL",
+            "BNB",
+            "BTCUSDT",
+            "ETHUSDT",
+            "SOLUSDT",
+            "BNBUSDT",
+            "BTCUSD",
+            "ETHUSD",
+            "SOLUSD",
+            "BNBUSD",
+        )
+    ):
+        return "CRYPTO"
+
     # 1. Commodity (MCX)
     if (
         exch == "MCX"
@@ -211,9 +237,7 @@ def classify_alert_segment(alert: Any) -> str:
     )
     is_deriv_alt = bool(alt_type in ("GAMMA_BLAST", "OPTIONS_MOMENTUM"))
     has_deriv_contract = bool(
-        contract
-        and contract != clean_sym
-        and any(x in contract for x in ("CE", "PE", "FUT"))
+        contract and contract != clean_sym and any(x in contract for x in ("CE", "PE", "FUT"))
     )
 
     is_stock_fno = bool(
@@ -239,7 +263,14 @@ class ChannelPreferences:
 
     enabled: bool = True
     allowed_segments: list[str] = field(
-        default_factory=lambda: ["FNO_INDEX", "FNO_STOCK", "EQUITY", "COMMODITY", "CURRENCY"]
+        default_factory=lambda: [
+            "FNO_INDEX",
+            "FNO_STOCK",
+            "EQUITY",
+            "COMMODITY",
+            "CURRENCY",
+            "CRYPTO",
+        ]
     )
     min_confidence: int = 75
     allow_early_warnings: bool = False
@@ -269,7 +300,14 @@ class AlertPreferences:
 
     # Master allowed segments across terminal (UI default)
     allowed_segments: list[str] = field(
-        default_factory=lambda: ["FNO_INDEX", "FNO_STOCK", "EQUITY", "COMMODITY", "CURRENCY"]
+        default_factory=lambda: [
+            "FNO_INDEX",
+            "FNO_STOCK",
+            "EQUITY",
+            "COMMODITY",
+            "CURRENCY",
+            "CRYPTO",
+        ]
     )
     # Channel routing
     telegram: ChannelPreferences = field(default_factory=ChannelPreferences)
@@ -292,9 +330,18 @@ class AlertPreferences:
     # Dedicated Cash Equity Telegram Destination (channel ID)
     equity_chat_id: Optional[str] = None
 
+    # Dedicated 24x7 Crypto Telegram Destination (Crypto_Premium_Alpha_Vortex)
+    crypto_chat_id: Optional[str] = "-1004323607372"
+
     def get_telegram_chat_id(self, segment: str = "EQUITY") -> Optional[str]:
         """Returns the target Telegram chat/group ID for a given segment."""
         seg = (segment or "").upper()
+        if seg in ("CRYPTO", "BITCOIN", "BINANCE"):
+            return (
+                self.crypto_chat_id
+                or os.environ.get("TELEGRAM_CRYPTO_CHAT_ID", "").strip()
+                or "-1004323607372"  # Crypto_Premium_Alpha_Vortex
+            )
         if seg in ("FNO_INDEX", "INDEX_FNO", "FNO_INDICES", "FNO_INDEXES"):
             return (
                 self.fno_index_chat_id
@@ -352,15 +399,20 @@ class AlertPreferences:
                 or os.environ.get("TELEGRAM_EQUITY_CHAT_ID", "").strip()
                 or "-1003524867091"
             ),
+            "crypto_chat_id": (
+                self.crypto_chat_id
+                or os.environ.get("TELEGRAM_CRYPTO_CHAT_ID", "").strip()
+                or "-1004323607372"
+            ),
         }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> AlertPreferences:
-        allowed = data.get("allowed_segments")
-        if not allowed or not isinstance(allowed, list):
-            allowed = ["FNO_INDEX", "FNO_STOCK", "EQUITY", "COMMODITY", "CURRENCY"]
+        allowed_raw = data.get("allowed_segments")
+        if allowed_raw is None or not isinstance(allowed_raw, (list, str)):
+            allowed = list(CANONICAL_SEGMENTS)
         else:
-            allowed = normalize_segment_list(allowed)
+            allowed = normalize_segment_list(allowed_raw)
 
         def _make_channel(
             ch_data: Optional[dict[str, Any]],
@@ -373,9 +425,15 @@ class AlertPreferences:
                     min_confidence=default_min_conf,
                     allow_intermediate_trails=default_trails,
                 )
+            ch_raw = ch_data.get("allowed_segments")
+            if ch_raw is None:
+                ch_segs = list(allowed)
+            else:
+                ch_segs = normalize_segment_list(ch_raw)
+
             return ChannelPreferences(
                 enabled=bool(ch_data.get("enabled", True)),
-                allowed_segments=normalize_segment_list(ch_data.get("allowed_segments", allowed)),
+                allowed_segments=ch_segs,
                 min_confidence=int(ch_data.get("min_confidence", default_min_conf)),
                 allow_early_warnings=bool(ch_data.get("allow_early_warnings", False)),
                 allow_milestones=bool(ch_data.get("allow_milestones", True)),
@@ -386,7 +444,7 @@ class AlertPreferences:
 
         return cls(
             allowed_segments=list(allowed),
-            telegram=_make_channel(data.get("telegram"), default_min_conf=80, default_trails=False),
+            telegram=_make_channel(data.get("telegram"), default_min_conf=90, default_trails=False),
             ui=_make_channel(data.get("ui"), default_min_conf=75, default_trails=True),
             desktop=_make_channel(data.get("desktop"), default_min_conf=80, default_trails=False),
             sound=_make_channel(data.get("sound"), default_min_conf=80, default_trails=False),
@@ -395,6 +453,7 @@ class AlertPreferences:
             fno_index_chat_id=data.get("fno_index_chat_id"),
             mcx_chat_id=data.get("mcx_chat_id"),
             equity_chat_id=data.get("equity_chat_id"),
+            crypto_chat_id=data.get("crypto_chat_id", "-1004323607372"),
         )
 
 
@@ -446,6 +505,22 @@ class AlertPreferencesManager:
                 tmp_file.replace(self._pref_file)
             except Exception as e:
                 logger.error(f"Failed to persist alert preferences to {self._pref_file}: {e}")
+
+    @property
+    def telegram(self) -> ChannelPreferences:
+        return self._preferences.telegram
+
+    @property
+    def ui(self) -> ChannelPreferences:
+        return self._preferences.ui
+
+    @property
+    def desktop(self) -> ChannelPreferences:
+        return self._preferences.desktop
+
+    @property
+    def sound(self) -> ChannelPreferences:
+        return self._preferences.sound
 
     def get_preferences(self) -> dict[str, Any]:
         """Returns current alert preferences as a serializable dict."""
@@ -564,7 +639,75 @@ class AlertPreferencesManager:
                 return False
 
             if not ch_pref.is_segment_allowed(seg):
-                return False
+                # Hedging Exemption on FNO_INDEX:
+                # If directional FNO_INDEX is disabled, allow index alerts ONLY if explicitly
+                # flagged as a hedging signal (portfolio hedge, delta neutral hedge, beta hedge).
+                if seg == "FNO_INDEX":
+                    is_hedge = False
+                    if isinstance(alert, dict):
+                        is_hedge = bool(
+                            alert.get("is_hedge")
+                            or alert.get("purpose") == "HEDGE"
+                            or (alert.get("actionable_plan") or {}).get("is_hedge")
+                            or (alert.get("metrics") or {}).get("is_hedge")
+                        )
+                    else:
+                        is_hedge = bool(
+                            getattr(alert, "is_hedge", False)
+                            or getattr(alert, "purpose", "") == "HEDGE"
+                            or (getattr(alert, "actionable_plan", {}) or {}).get("is_hedge")
+                            or (getattr(alert, "metrics", {}) or {}).get("is_hedge")
+                        )
+                    if not is_hedge:
+                        return False
+                else:
+                    return False
+
+            # Strict Directional Index Futures Gate:
+            # Directional futures signals on indices are prohibited unless explicitly flagged as a hedge.
+            # Index options (CE/PE/momentum/gamma) and hedging index signals are permitted.
+            if seg == "FNO_INDEX":
+                if isinstance(alert, dict):
+                    contract_val = str(
+                        alert.get("contract_symbol") or alert.get("contract") or ""
+                    ).upper()
+                    deriv_val = str(alert.get("derivative_type") or "").upper()
+                    act_val = str(alert.get("action") or "").upper()
+                    alt_val = str(alert.get("alert_type") or "").upper()
+                    is_hedge_flag = bool(
+                        alert.get("is_hedge")
+                        or alert.get("purpose") == "HEDGE"
+                        or (alert.get("actionable_plan") or {}).get("is_hedge")
+                        or (alert.get("metrics") or {}).get("is_hedge")
+                    )
+                else:
+                    contract_val = str(
+                        getattr(alert, "contract_symbol", "")
+                        or getattr(alert, "contract", "")
+                        or ""
+                    ).upper()
+                    deriv_val = str(getattr(alert, "derivative_type", "") or "").upper()
+                    act_val = str(getattr(alert, "action", "") or "").upper()
+                    alt_val = str(getattr(alert, "alert_type", "") or "").upper()
+                    is_hedge_flag = bool(
+                        getattr(alert, "is_hedge", False)
+                        or getattr(alert, "purpose", "") == "HEDGE"
+                        or (getattr(alert, "actionable_plan", {}) or {}).get("is_hedge")
+                        or (getattr(alert, "metrics", {}) or {}).get("is_hedge")
+                    )
+
+                is_index_future = bool(
+                    "FUT" in contract_val
+                    or deriv_val == "FUT"
+                    or alt_val in ("INDEX_FUTURES", "FUTURES")
+                    or act_val in ("BUY_FUTURES", "SELL_SHORT_FUTURES")
+                )
+                if is_index_future and not is_hedge_flag:
+                    logger.info(
+                        f"[AlertPreferences] Suppressed directional index futures for {contract_val or deriv_val}: "
+                        f"Only index options and index hedging permitted."
+                    )
+                    return False
 
             # Extract confidence and stage
             if isinstance(alert, dict):
@@ -584,7 +727,14 @@ class AlertPreferencesManager:
 
             is_milestone = (
                 is_invalidated
-                or stage in ("T1_ACHIEVED", "TARGET_ACHIEVED", "TRAILING_UPDATE", "INVALIDATED", "IN_FLIGHT_WARNING")
+                or stage
+                in (
+                    "T1_ACHIEVED",
+                    "TARGET_ACHIEVED",
+                    "TRAILING_UPDATE",
+                    "INVALIDATED",
+                    "IN_FLIGHT_WARNING",
+                )
                 or "T1" in target_status
                 or "TARGET" in target_status
             )
@@ -606,28 +756,35 @@ class AlertPreferencesManager:
                 return True
 
             # Early warning check — threshold mirrors _dispatch() gate:
-            # 80% for high-conviction positional types, 90% for all others.
+            # 82% for high-conviction positional and crypto types, 90% for all others.
             if stage == "EARLY_WARNING" and not ch_pref.allow_early_warnings:
                 if isinstance(alert, dict):
                     alt_type = str(alert.get("alert_type") or "").upper()
                 else:
                     alt_type = str(getattr(alert, "alert_type", "") or "").upper()
-                early_warn_min = (
-                    80
-                    if alt_type in (
-                        "PRECURSOR_RADAR",
-                        "ASYMMETRIC_OPPORTUNITY",
-                        "OPTIONS_MOMENTUM",
-                        "GAMMA_BLAST",
-                        "COMMODITY_MOMENTUM",
-                        "CURRENCY_BREAKOUT",
-                    )
-                    else 90
+                _early_warn_whitelisted_types = (
+                    "PRECURSOR_RADAR",
+                    "ASYMMETRIC_OPPORTUNITY",
+                    "OPTIONS_MOMENTUM",
+                    "GAMMA_BLAST",
+                    "COMMODITY_MOMENTUM",
+                    "CURRENCY_BREAKOUT",
+                    # Crypto early-warning types (funding squeeze build-up,
+                    # Deribit max pain gravity pull, SMC OB approach)
+                    "CRYPTO_SQUEEZE",
+                    "CRYPTO_MOMENTUM",
+                    "CRYPTO_VOLATILITY",
                 )
-                if conf < early_warn_min:
-                    return False
+                if alt_type in _early_warn_whitelisted_types:
+                    # Special class: 82% bar. If passed, allow — do NOT re-block with general min_confidence.
+                    return conf >= 82
+                else:
+                    # General early-warning: require 90%
+                    if conf < 90:
+                        return False
 
-            # General confidence threshold
+            # General confidence threshold (applies to IGNITED, IN_FLIGHT, etc. — not whitelisted EARLY_WARNING)
+
             if conf < ch_pref.min_confidence:
                 return False
 

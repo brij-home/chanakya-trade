@@ -1,6 +1,6 @@
-import React, { memo } from 'react'
+import React, { memo, useMemo } from 'react'
 import { useLiveSpot } from './LiveSpotsContext'
-import { AUTO_TYPE_STYLE } from './alertHelpers'
+import { AUTO_TYPE_STYLE, formatExpiryDetails } from './alertHelpers'
 
 export const AlertTriageCard = memo(function AlertTriageCard({
   alert,
@@ -9,11 +9,19 @@ export const AlertTriageCard = memo(function AlertTriageCard({
   onTrade,
   onAnalyze,
   onSendTelegram,
+  onDismiss,
 }) {
-  const cleanSym = (alert.symbol || '').replace(/^(NSE|BSE|MCX|NFO|CDS):/, '').trim().toUpperCase()
-  const rawContract = alert.contract_symbol || alert.actionable_plan?.option_plan?.contract_symbol || alert.actionable_plan?.option_contract || ''
-  const cleanContract = rawContract.replace(/^(NSE|BSE|MCX|NFO|CDS):/, '').trim().toUpperCase()
+  const plan = alert.actionable_plan || {}
+  const tradePlan = plan.trade_plan || {}
+  const optPlan = plan.option_plan || null
+
+  const cleanSym = (alert.symbol || '').replace(/^(NSE|BSE|MCX|NFO|CDS|CRYPTO|BINANCE):/, '').trim().toUpperCase()
+  const rawContract = alert.contract_symbol || optPlan?.contract_symbol || plan.option_contract || ''
+  const cleanContract = rawContract.replace(/^(NSE|BSE|MCX|NFO|CDS|CRYPTO|BINANCE):/, '').trim().toUpperCase()
   
+  const isCrypto = (alert.exchange || '').toUpperCase() === 'CRYPTO' || (alert.exchange || '').toUpperCase() === 'BINANCE' || (alert.segment || '').toUpperCase() === 'CRYPTO'
+  const currSym = isCrypto ? '$' : '₹'
+
   const liveSpotBySym = useLiveSpot(cleanSym)
   const liveSpotByFull = useLiveSpot(alert.symbol !== cleanSym ? alert.symbol : null)
   const liveSpot = liveSpotBySym ?? liveSpotByFull
@@ -24,6 +32,8 @@ export const AlertTriageCard = memo(function AlertTriageCard({
 
   const style = AUTO_TYPE_STYLE[alert.alert_type] || AUTO_TYPE_STYLE.GAMMA_BLAST
   const isBull = alert.direction === 'BULLISH'
+  const isBear = alert.direction === 'BEARISH'
+  const isNeutral = alert.direction === 'NEUTRAL' || alert.alert_type === 'IRON_CONDOR_PINNING'
   const isInvalidated = alert.is_invalidated || alert.stage === 'INVALIDATED'
   const isT1Achieved = alert.stage === 'T1_ACHIEVED' || alert.target_status === 'T1_ACHIEVED'
   const isT2Achieved = alert.stage === 'T2_ACHIEVED' || alert.target_status === 'T2_ACHIEVED'
@@ -31,16 +41,15 @@ export const AlertTriageCard = memo(function AlertTriageCard({
   const isTrail = alert.stage === 'TRAILING_UPDATE'
   const isEarly = alert.stage === 'EARLY_WARNING'
 
-  const optType = alert.option_type || (rawContract?.endsWith('PE') ? 'PE' : rawContract?.endsWith('CE') ? 'CE' : null)
-  const strikeNum = alert.strike ? Number(String(alert.strike).replace(/[^0-9.-]/g, '')) : null
+  const optType = alert.option_type || optPlan?.option_type || (rawContract?.endsWith('PE') ? 'PE' : rawContract?.endsWith('CE') ? 'CE' : null)
+  const rawStrike = alert.strike || optPlan?.strike || alert.metrics?.strike
+  const strikeNum = rawStrike ? Number(String(rawStrike).replace(/[^0-9.-]/g, '')) : null
   const isFuture = Boolean(rawContract?.toUpperCase().includes('FUT') || alert.symbol?.toUpperCase().includes('FUT') || alert.derivative_type === 'FUT')
   const isPureOption = alert.alert_type === 'OPTIONS_MOMENTUM' || alert.alert_type === 'OPTION_WRITE' || (alert.alert_type === 'GAMMA_BLAST' && optType) || (rawContract && (rawContract.endsWith('CE') || rawContract.endsWith('PE')) && alert.exchange === 'NFO')
-  const isSpotSetup = alert.alert_type === 'ASYMMETRIC_OPPORTUNITY' || alert.alert_type === 'SQUEEZE_BREAKOUT' || alert.alert_type === 'SQUEEZE_BREAKDOWN' || alert.alert_type === 'PATTERN_COILING' || alert.alert_type === 'MOMENTUM_ACCELERATION' || alert.alert_type === 'POCKET_PIVOT' || alert.alert_type === 'PRECURSOR_RADAR' || alert.alert_type === 'SMC_SWEEP' || alert.alert_type === 'CIRCUIT_WARNING' || alert.alert_type === 'COMMODITY_MOMENTUM'
+  const isSpotSetup = alert.alert_type === 'ASYMMETRIC_OPPORTUNITY' || alert.alert_type === 'SQUEEZE_BREAKOUT' || alert.alert_type === 'SQUEEZE_BREAKDOWN' || alert.alert_type === 'PATTERN_COILING' || alert.alert_type === 'MOMENTUM_ACCELERATION' || alert.alert_type === 'POCKET_PIVOT' || alert.alert_type === 'PRECURSOR_RADAR' || alert.alert_type === 'SMC_SWEEP' || alert.alert_type === 'CIRCUIT_WARNING' || alert.alert_type === 'COMMODITY_MOMENTUM' || alert.alert_type === 'TURTLE_SOUP_SHORT' || alert.alert_type === 'IRON_CONDOR_PINNING' || alert.alert_type === 'CRYPTO_SQUEEZE' || alert.alert_type === 'CRYPTO_MOMENTUM'
   const isDerivative = !isSpotSetup && Boolean(isFuture || isPureOption || (alert.exchange === 'NFO' && (optType || strikeNum || rawContract)))
 
-  const plan = alert.actionable_plan || {}
-  const tradePlan = plan.trade_plan || {}
-  const optPlan = plan.option_plan || null
+  const expiryInfo = useMemo(() => formatExpiryDetails(alert), [alert])
 
   const act = String(tradePlan.action || plan.action || '').toUpperCase()
   const isOptionSell = isDerivative && (
@@ -80,11 +89,18 @@ export const AlertTriageCard = memo(function AlertTriageCard({
     let diff = 0
     if (isDerivative) {
       diff = isOptionSell ? entryNum - currentPrice : currentPrice - entryNum
+      isProfitable = diff >= 0
+    } else if (isNeutral) {
+      const spe = Number(alert.metrics?.short_pe || slNum || entryNum * 0.985)
+      const sce = Number(alert.metrics?.short_ce || t1Num || entryNum * 1.015)
+      isProfitable = currentPrice >= spe && currentPrice <= sce
+      const center = (spe + sce) / 2
+      diff = isProfitable ? Math.max(0, (entryNum * 0.015) - Math.abs(currentPrice - center) * 0.03) : -Math.min(Math.abs(currentPrice - spe), Math.abs(currentPrice - sce))
     } else {
       diff = isBull ? currentPrice - entryNum : entryNum - currentPrice
+      isProfitable = diff >= 0
     }
     liveReturnPct = ((diff / entryNum) * 100).toFixed(1)
-    isProfitable = diff >= 0
   }
 
   // Dynamic stage hits
@@ -93,6 +109,8 @@ export const AlertTriageCard = memo(function AlertTriageCard({
     (slNum && currentPrice && (
       isDerivative
         ? (isOptionSell ? currentPrice >= slNum : currentPrice <= slNum)
+        : isNeutral
+        ? (currentPrice < slNum || (alert.metrics?.long_ce && currentPrice > alert.metrics.long_ce))
         : (isBull ? currentPrice <= slNum : currentPrice >= slNum)
     ))
   )
@@ -102,6 +120,8 @@ export const AlertTriageCard = memo(function AlertTriageCard({
     (t3Num && currentPrice && !isSLHit && (
       isDerivative
         ? (isOptionSell ? currentPrice <= t3Num : currentPrice >= t3Num)
+        : isNeutral
+        ? false
         : (isBull ? currentPrice >= t3Num : currentPrice <= t3Num)
     ))
   )
@@ -112,6 +132,8 @@ export const AlertTriageCard = memo(function AlertTriageCard({
     (t2Num && currentPrice && !isSLHit && (
       isDerivative
         ? (isOptionSell ? currentPrice <= t2Num : currentPrice >= t2Num)
+        : isNeutral
+        ? false
         : (isBull ? currentPrice >= t2Num : currentPrice <= t2Num)
     ))
   )
@@ -122,6 +144,8 @@ export const AlertTriageCard = memo(function AlertTriageCard({
     (t1Num && currentPrice && !isSLHit && (
       isDerivative
         ? (isOptionSell ? currentPrice <= t1Num : currentPrice >= t1Num)
+        : isNeutral
+        ? isProfitable
         : (isBull ? currentPrice >= t1Num : currentPrice <= t1Num)
     ))
   )
@@ -147,7 +171,7 @@ export const AlertTriageCard = memo(function AlertTriageCard({
           </span>
           <span className="font-black text-sm text-text leading-none">{alert.symbol}</span>
           {strikeNum && !isFuture && (
-            <span className="text-[10px] font-bold text-gold font-mono leading-none">₹{Number(strikeNum).toLocaleString('en-IN')}</span>
+            <span className="text-[10px] font-bold text-gold font-mono leading-none">{currSym}{Number(strikeNum).toLocaleString(isCrypto ? 'en-US' : 'en-IN')}</span>
           )}
           {optType && !isFuture && (
             <span className={`text-[8px] px-1 py-px rounded font-black uppercase ${
@@ -157,9 +181,27 @@ export const AlertTriageCard = memo(function AlertTriageCard({
           {isFuture && (
             <span className="text-[8px] px-1 py-px rounded font-black uppercase bg-blue-500/20 text-blue-300">FUT</span>
           )}
-          <span className={`text-[8px] font-bold ${isBull ? 'text-emerald-400' : 'text-rose-400'}`}>
-            {isBull ? '▲' : '▼'} {alert.direction}
+          <span className={`text-[8px] font-black px-1.5 py-0.5 rounded ${
+            isBull ? 'text-emerald-400 bg-emerald-500/15' :
+            isNeutral ? 'text-purple-400 bg-purple-500/15' :
+            'text-rose-400 bg-rose-500/15'
+          }`}>
+            {isBull ? '▲ LONG' : isNeutral ? '◆ NEUTRAL' : '▼ SHORT'}
           </span>
+
+          {/* Real-time Expiry Badge: Weekly vs Monthly */}
+          {expiryInfo?.fullDisplay && (
+            <span
+              className={`text-[8px] font-mono px-1.5 py-0.5 rounded font-bold whitespace-nowrap border ${
+                expiryInfo.isWeekly
+                  ? 'bg-amber-500/15 text-amber-300 border-amber-500/30'
+                  : 'bg-blue-500/15 text-blue-300 border-blue-500/30'
+              }`}
+              title={expiryInfo.formatted || 'Contract Expiry'}
+            >
+              {expiryInfo.fullDisplay}
+            </span>
+          )}
 
           {/* Real-time Stage Hit Badge */}
           {isSLHit ? (
@@ -214,7 +256,7 @@ export const AlertTriageCard = memo(function AlertTriageCard({
                 ? (liveContract?.flash === 'up' ? 'text-emerald-400' : liveContract?.flash === 'down' ? 'text-rose-400' : 'text-gold')
                 : (liveSpot?.flash === 'up' ? 'text-emerald-400' : liveSpot?.flash === 'down' ? 'text-rose-400' : 'text-text')
             }`}>
-              ₹{fmtP(currentPrice)}
+              {currSym}{fmtP(currentPrice)}
               {isDerivative && liveContract?.ltp ? <span className="inline-block w-1 h-1 rounded-full bg-emerald-400 animate-pulse ml-0.5 align-middle" /> : null}
             </span>
             {liveReturnPct && (
@@ -225,7 +267,7 @@ export const AlertTriageCard = memo(function AlertTriageCard({
           </div>
           {isDerivative && spotNum && (
             <span className="text-[8px] font-mono text-muted leading-none mt-0.5">
-              Spot ₹{Number(spotNum).toLocaleString('en-IN', { maximumFractionDigits: 0 })}
+              Spot {currSym}{Number(spotNum).toLocaleString(isCrypto ? 'en-US' : 'en-IN', { maximumFractionDigits: isCrypto ? 2 : 0 })}
             </span>
           )}
         </div>
@@ -239,28 +281,36 @@ export const AlertTriageCard = memo(function AlertTriageCard({
       {/* Row 3: Key levels (Entry, SL, T1, T2) + Quick CTAs */}
       <div className="flex items-center justify-between gap-1 pt-1 border-t border-border/20 text-[9px] font-mono flex-wrap">
         <div className="flex items-center gap-1.5 flex-wrap">
-          {entryNum && <span className="text-gold font-bold">Entry ₹{fmtP(entryNum)}</span>}
+          {entryNum && <span className="text-gold font-bold">Entry {currSym}{fmtP(entryNum)}</span>}
+          {(alert.entry_range || alert.optimal_entry_range) && (
+            <span
+              className="text-[8px] font-mono font-bold text-amber-700 dark:text-amber-300 bg-amber-500/10 dark:bg-amber-500/15 px-1 py-px rounded border border-amber-300/60 dark:border-amber-500/30 whitespace-nowrap"
+              title="Optimal Trade Entry (OTE) pullback range"
+            >
+              OTE {alert.entry_range || alert.optimal_entry_range}
+            </span>
+          )}
           {alert.no_chase_boundary && (
             <span
               className="text-[8px] font-mono font-bold text-rose-700 dark:text-rose-300 bg-rose-500/10 dark:bg-rose-500/15 px-1 py-px rounded border border-rose-300/60 dark:border-rose-500/30 whitespace-nowrap"
               title="No-Chase limit: Entries beyond this price are disqualified"
             >
-              Max ₹{fmtP(alert.no_chase_boundary)}
+              Max {currSym}{fmtP(alert.no_chase_boundary)}
             </span>
           )}
           {slNum && (
             <span className={`font-bold px-1 py-px rounded ${isSLHit ? 'bg-rose-500/25 text-rose-300 border border-rose-500/50' : 'text-rose-600 dark:text-rose-400'}`}>
-              {isSLHit ? '🛑 SL ' : 'SL '}₹{fmtP(slNum)}
+              {isSLHit ? '🛑 SL ' : 'SL '}{currSym}{fmtP(slNum)}
             </span>
           )}
           {t1Num && (
             <span className={`font-bold px-1 py-px rounded ${isT1Hit ? 'bg-emerald-500/25 text-emerald-300 border border-emerald-500/50' : 'text-emerald-600 dark:text-emerald-400'}`}>
-              {isT1Hit ? '✅ T1 ' : 'T1 '}₹{fmtP(t1Num)}
+              {isT1Hit ? '✅ T1 ' : 'T1 '}{currSym}{fmtP(t1Num)}
             </span>
           )}
           {t2Num && (
             <span className={`font-bold px-1 py-px rounded ${isT2Hit ? 'bg-cyan-500/25 text-cyan-200 border border-cyan-500/50' : 'text-cyan-600 dark:text-cyan-400'}`}>
-              {isT2Hit ? '✅ T2 ' : 'T2 '}₹{fmtP(t2Num)}
+              {isT2Hit ? '✅ T2 ' : 'T2 '}{currSym}{fmtP(t2Num)}
             </span>
           )}
           <span className="text-muted">· {conviction}%</span>
@@ -278,6 +328,13 @@ export const AlertTriageCard = memo(function AlertTriageCard({
             className="btn btn-xs text-[9px] px-1 py-0.5 font-bold text-sky-700 dark:text-sky-300 hover:text-sky-900 dark:hover:text-sky-200 bg-sky-500/10 hover:bg-sky-500/20 border border-sky-400/40 dark:border-sky-500/30 transition-all rounded"
             title="Send to Telegram"
           >↗ TG</button>
+          {onDismiss && (
+            <button
+              onClick={() => onDismiss(alert.alert_id || alert.id || alert.symbol)}
+              className="btn btn-xs text-[9px] px-1.5 py-0.5 font-bold text-muted hover:text-rose-400 bg-surface/60 hover:bg-rose-500/15 border border-border/50 hover:border-rose-500/40 transition-all rounded"
+              title="Dismiss / Remove this alert"
+            >✕</button>
+          )}
         </div>
       </div>
     </article>

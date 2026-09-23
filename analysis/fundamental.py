@@ -19,7 +19,7 @@ import re
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Any, Optional
 
 import httpx
 
@@ -97,6 +97,18 @@ class FundamentalSnapshot:
     forward_pe: Optional[float] = None
     next_earnings_date: Optional[str] = None  # "YYYY-MM-DD"
     earnings_estimate: Optional[float] = None  # consensus EPS
+
+    # EPS Acceleration — Minervini SEPA Screening (59p)
+    # Requires: most recent QoQ YoY EPS > 25% AND accelerating vs prior quarter
+    eps_q1_growth: Optional[float] = None  # Most recent quarter YoY EPS growth %
+    eps_q2_growth: Optional[float] = None  # Prior quarter YoY EPS growth %
+    eps_acceleration: Optional[float] = (
+        None  # eps_q1_growth - eps_q2_growth (positive = accelerating)
+    )
+    revenue_q1_growth: Optional[float] = None  # Most recent quarter YoY revenue growth %
+    sepa_qualified: bool = (
+        False  # True if eps_q1 >= 25% AND eps_acceleration > 0 AND revenue_q1 > 0
+    )
 
     # Governance risk (59e) — ISS scores 1-10 (10 = highest risk)
     overall_risk: Optional[int] = None
@@ -466,6 +478,55 @@ def _score(parsed: dict) -> tuple[int, list[FundamentalFlag]]:
             )
         )
 
+    # ── EPS Acceleration / Minervini SEPA Screening (59p) ────────────────────
+    # Rewards recent-quarter EPS acceleration — the #1 leading indicator for
+    # Stage 2 multibagger candidates (Minervini SEPA method).
+    eps_q1 = parsed.get("eps_q1_growth")  # Most recent quarter YoY EPS %
+    eps_q2 = parsed.get("eps_q2_growth")  # Prior quarter YoY EPS %
+    rev_q1 = parsed.get("revenue_q1_growth")  # Most recent quarter YoY revenue %
+
+    if eps_q1 is not None:
+        eps_acc = (eps_q1 - eps_q2) if eps_q2 is not None else None
+
+        if (
+            eps_q1 >= 25.0
+            and eps_acc is not None
+            and eps_acc > 0
+            and (rev_q1 is None or rev_q1 > 0)
+        ):
+            # SEPA qualified: ≥25% YoY EPS growth + accelerating + revenue positive
+            score += 12
+            flags.append(
+                FundamentalFlag(
+                    "EPS Acceleration",
+                    f"Q1={eps_q1:.0f}% YoY (acc {eps_acc:+.0f}pp)",
+                    "GOOD",
+                    f"SEPA qualified: EPS accelerating {eps_q1:.0f}% YoY, ↑{eps_acc:.0f}pp vs prior quarter — Minervini Stage 2 leadership criterion",
+                )
+            )
+        elif eps_q1 >= 25.0:
+            # Strong growth but not accelerating
+            score += 6
+            flags.append(
+                FundamentalFlag(
+                    "EPS Growth",
+                    f"Q1={eps_q1:.0f}% YoY",
+                    "GOOD",
+                    f"EPS growing strongly ({eps_q1:.0f}% YoY), not yet accelerating",
+                )
+            )
+        elif eps_acc is not None and eps_acc < -10:
+            # Decelerating EPS — Stage 3/4 warning
+            score -= 8
+            flags.append(
+                FundamentalFlag(
+                    "EPS Deceleration",
+                    f"Q1={eps_q1:.0f}% vs Q2={eps_q2:.0f}%",
+                    "BAD",
+                    f"EPS decelerating sharply ({eps_acc:+.0f}pp QoQ) — distribution/topping risk",
+                )
+            )
+
     return max(0, min(100, score)), flags
 
 
@@ -484,6 +545,76 @@ def _get_analysis_cache():
         return AnalysisCache()
     except Exception:
         return None
+
+
+def _extract_eps_acceleration(
+    info: dict, q_inc: Optional[Any] = None
+) -> tuple[Optional[float], Optional[float], Optional[float], Optional[float], bool]:
+    """
+    Extracts YoY EPS/Net Income growth for the latest 2 quarters and computes Minervini SEPA qualification.
+    Returns: (eps_q1_growth, eps_q2_growth, eps_acceleration, revenue_q1_growth, sepa_qualified)
+    """
+    eps_q1 = None
+    eps_q2 = None
+    rev_q1 = None
+
+    # Try statement first for exact 2-quarter YoY
+    if q_inc is not None and not getattr(q_inc, "empty", True):
+        try:
+            net_row = None
+            for cand in ("Net Income", "Net Income Common Stockholders", "Basic EPS"):
+                if cand in q_inc.index:
+                    net_row = cand
+                    break
+            rev_row = (
+                "Total Revenue"
+                if "Total Revenue" in q_inc.index
+                else ("Operating Revenue" if "Operating Revenue" in q_inc.index else None)
+            )
+
+            cols = list(q_inc.columns)
+            if net_row and len(cols) >= 5:
+                p0 = float(q_inc.loc[net_row].iloc[0])
+                p4 = float(q_inc.loc[net_row].iloc[4])
+                if not _is_nan(p0) and not _is_nan(p4) and abs(p4) > 0:
+                    eps_q1 = round(((p0 - p4) / abs(p4)) * 100.0, 1)
+
+                if len(cols) >= 6:
+                    p1 = float(q_inc.loc[net_row].iloc[1])
+                    p5 = float(q_inc.loc[net_row].iloc[5])
+                    if not _is_nan(p1) and not _is_nan(p5) and abs(p5) > 0:
+                        eps_q2 = round(((p1 - p5) / abs(p5)) * 100.0, 1)
+
+            if rev_row and len(cols) >= 5:
+                r0 = float(q_inc.loc[rev_row].iloc[0])
+                r4 = float(q_inc.loc[rev_row].iloc[4])
+                if not _is_nan(r0) and not _is_nan(r4) and abs(r4) > 0:
+                    rev_q1 = round(((r0 - r4) / abs(r4)) * 100.0, 1)
+        except Exception:
+            pass
+
+    # Fallback to ticker.info keys if statement was unavailable or lacked 5 quarters
+    if eps_q1 is None and info.get("earningsQuarterlyGrowth") is not None:
+        try:
+            eps_q1 = round(float(info["earningsQuarterlyGrowth"]) * 100.0, 1)
+        except (ValueError, TypeError):
+            pass
+
+    if rev_q1 is None and info.get("revenueQuarterlyGrowth") is not None:
+        try:
+            rev_q1 = round(float(info["revenueQuarterlyGrowth"]) * 100.0, 1)
+        except (ValueError, TypeError):
+            pass
+
+    eps_acc = (eps_q1 - eps_q2) if (eps_q1 is not None and eps_q2 is not None) else None
+    sepa = bool(
+        eps_q1 is not None
+        and eps_q1 >= 25.0
+        and (eps_acc is None or eps_acc > 0)
+        and (rev_q1 is None or rev_q1 > 0)
+    )
+
+    return eps_q1, eps_q2, eps_acc, rev_q1, sepa
 
 
 def _fetch_yfinance(symbol: str, fast: bool = False) -> dict:
@@ -636,6 +767,11 @@ def _fetch_yfinance(symbol: str, fast: bool = False) -> dict:
                 "five_yr_avg_div_yield": info.get("fiveYearAvgDividendYield"),
                 "insider_transactions": [],
                 "quarterly_revenue": [],
+                "eps_q1_growth": _extract_eps_acceleration(info, None)[0],
+                "eps_q2_growth": _extract_eps_acceleration(info, None)[1],
+                "eps_acceleration": _extract_eps_acceleration(info, None)[2],
+                "revenue_q1_growth": _extract_eps_acceleration(info, None)[3],
+                "sepa_qualified": _extract_eps_acceleration(info, None)[4],
                 "_data_source": "yfinance_fast",
             }
             with _yf_data_lock:
@@ -857,6 +993,11 @@ def _fetch_yfinance(symbol: str, fast: bool = False) -> dict:
             "insider_transactions": _extract_insider_txns(ticker),
             # Quarterly trend
             "quarterly_revenue": quarterly,
+            "eps_q1_growth": _extract_eps_acceleration(info, q_inc)[0],
+            "eps_q2_growth": _extract_eps_acceleration(info, q_inc)[1],
+            "eps_acceleration": _extract_eps_acceleration(info, q_inc)[2],
+            "revenue_q1_growth": _extract_eps_acceleration(info, q_inc)[3],
+            "sepa_qualified": _extract_eps_acceleration(info, q_inc)[4],
             "_data_source": "yfinance",
         }
 
@@ -1285,6 +1426,20 @@ def analyse(symbol: str, fast: bool = False, **_kwargs) -> FundamentalSnapshot:
         # 59j: Dividend
         payout_ratio=parsed.get("payout_ratio"),
         five_yr_avg_div_yield=parsed.get("five_yr_avg_div_yield"),
+        # EPS Acceleration — Minervini SEPA Screening (59p)
+        eps_q1_growth=parsed.get("eps_q1_growth"),
+        eps_q2_growth=parsed.get("eps_q2_growth"),
+        eps_acceleration=parsed.get("eps_acceleration"),
+        revenue_q1_growth=parsed.get("revenue_q1_growth"),
+        sepa_qualified=bool(
+            parsed.get("sepa_qualified")
+            or (
+                parsed.get("eps_q1_growth") is not None
+                and parsed.get("eps_q1_growth") >= 25.0
+                and (parsed.get("eps_acceleration") is None or parsed.get("eps_acceleration") > 0)
+                and (parsed.get("revenue_q1_growth") is None or parsed.get("revenue_q1_growth") > 0)
+            )
+        ),
         # 59g: Insider transactions
         insider_transactions=parsed.get("insider_transactions", []),
         # Quarterly + announcements

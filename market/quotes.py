@@ -22,7 +22,7 @@ from engine.observability import get_registry, new_correlation_id
 from market.data_events import classify_data_state, utc_now_iso
 
 _OPTION_PATTERN = re.compile(
-    r"^(?:NFO:|BFO:|NSE:|BSE:)?([A-Za-z&]+?)(?:20\d{6}|\d{2}[A-Z]{3}|\d{5}(?=\d{3,}))?\s*(\d{1,6}(?:\.\d+)?)\s*(CE|PE)$",
+    r"^(?:NFO:|BFO:|NSE:|BSE:)?([A-Za-z0-9_& -]+?)(?:20\d{6}|\d{2}[A-Z]{3}|\d{5}(?=\d{3,}))?\s*(\d{1,6}(?:\.\d+)?)\s*(CE|PE)$",
     re.IGNORECASE,
 )
 
@@ -122,7 +122,9 @@ def _ws_quotes(instruments: list[str], *, correlation_id: str) -> dict[str, Quot
                                 change=float(getattr(tick, "change", 0.0) or 0.0),
                                 change_pct=float(getattr(tick, "change_pct", 0.0) or 0.0),
                                 exchange_timestamp=(
-                                    datetime.fromtimestamp(tick.timestamp, tz=timezone.utc).isoformat()
+                                    datetime.fromtimestamp(
+                                        tick.timestamp, tz=timezone.utc
+                                    ).isoformat()
                                     if getattr(tick, "timestamp", 0) and tick.timestamp > 0
                                     else None
                                 ),
@@ -301,9 +303,13 @@ def _yf_fallback_quotes(
                 i.startswith("NFO:")
                 or i.startswith("BFO:")
                 or _OPTION_PATTERN.match(i.split(":")[-1])
+                or _OPTION_PATTERN.match(
+                    i.split(":")[-1].replace("NIFTY 50", "NIFTY").replace("NIFTY BANK", "BANKNIFTY")
+                )
                 or _FUT_PATTERN.match(i.split(":")[-1])
             )
         ]
+
         if not yf_eligible:
             return {}
 
@@ -363,10 +369,22 @@ _CRYPTO_SYMBOLS = {
     "BITCOIN",
     "BTCUSD",
     "BTC-USD",
+    "BTCUSDT",
     "BTCINR",
     "ETH",
     "ETHEREUM",
+    "ETHUSD",
+    "ETH-USD",
+    "ETHUSDT",
     "SOL",
+    "SOLANA",
+    "SOLUSD",
+    "SOL-USD",
+    "SOLUSDT",
+    "BNB",
+    "BNBUSD",
+    "BNB-USD",
+    "BNBUSDT",
 }
 
 
@@ -384,7 +402,13 @@ def normalize_instrument(inst: str) -> str:
         return f"CDS:{upper}"
     if upper in _BSE_SYMBOLS:
         return f"BSE:{upper}"
-    if _OPTION_PATTERN.match(upper) or _FUT_PATTERN.match(upper):
+    # Standardize index names with spaces (e.g. NIFTY 50 -> NIFTY) before option matching
+    clean_deriv = upper.replace("NIFTY 50", "NIFTY").replace("NIFTY BANK", "BANKNIFTY")
+    if (
+        _OPTION_PATTERN.match(upper)
+        or _OPTION_PATTERN.match(clean_deriv)
+        or _FUT_PATTERN.match(upper)
+    ):
         return f"NFO:{upper}"
     return f"NSE:{upper}"
 
@@ -438,6 +462,26 @@ def get_quote(
         ws_quotes = _ws_quotes(missing, correlation_id=correlation_id)
         result.update(ws_quotes)
         missing = [i for i in canonical_instruments if i not in result]
+
+    # 2.5. Try 24x7 Crypto Stream (instant in-memory Binance ticks)
+    if missing:
+        crypto_missing = [
+            i
+            for i in missing
+            if i.startswith("CRYPTO:")
+            or any(i.replace("CRYPTO:", "") == s for s in _CRYPTO_SYMBOLS)
+        ]
+        if crypto_missing:
+            try:
+                from market.crypto_stream import crypto_stream
+
+                for c_inst in crypto_missing:
+                    q = crypto_stream.get_quote(c_inst)
+                    if q and getattr(q, "last_price", 0.0) > 0:
+                        result[c_inst] = q
+                missing = [i for i in canonical_instruments if i not in result]
+            except Exception:
+                pass
 
     # 3. Try broker REST API
     if missing:

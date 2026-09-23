@@ -46,10 +46,11 @@ Register these redirect URIs in your broker developer consoles:
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Any, Optional
 import json
 import os
 import sys
+import threading
 from pathlib import Path
 
 # Fix Windows charmap / cp1252 codec errors for unicode console prints
@@ -183,6 +184,14 @@ async def lifespan(app: FastAPI):
 
     ticker_stream.start(poll_interval_seconds=3.0)
 
+    # Start the 24x7 real-time crypto stream engine
+    try:
+        from market.crypto_stream import crypto_stream
+
+        crypto_stream.start()
+    except Exception:
+        pass
+
     # Start the autonomous real-time auto alert engine (45s loop)
     try:
         from engine.auto_alert_engine import auto_alert_engine
@@ -204,6 +213,12 @@ async def lifespan(app: FastAPI):
         pass
     try:
         ticker_stream.stop(timeout=1.5)
+    except Exception:
+        pass
+    try:
+        from market.crypto_stream import crypto_stream
+
+        crypto_stream.stop(timeout=1.5)
     except Exception:
         pass
     try:
@@ -565,6 +580,7 @@ async def _auto_restore_brokers() -> None:
                 register_broker("mstock", b)
                 try:
                     from brokers.session import _start_websocket
+
                     _start_websocket(b)
                 except Exception:
                     pass
@@ -675,6 +691,70 @@ async def api_mode():
             "mode": ui_mode,
             "backend_mode": mode_info.mode.value,
             "allowed_modes": list(_UI_MODE_MAP.values()),
+            "description": mode_info.description,
+        }
+    )
+
+
+@app.post("/api/mode", tags=["System"])
+async def set_mode(payload: dict[str, Any]):
+    """
+    Sets the server-authoritative trading mode dynamically.
+    Normalises UI modes (DEMO -> OBSERVE, PAPER -> SIMULATE, LIVE -> EXECUTE).
+    Enforces AGENTS.md Invariant 6 (LIVE mode gated by ALLOW_LIVE_TRADING=1).
+    """
+    from engine.modes import get_trading_mode
+    from web.sse import event_bus
+
+    raw_mode = str(payload.get("mode") or "").strip().upper()
+    _PARSE_MAP = {
+        "DEMO": "OBSERVE",
+        "OBSERVE": "OBSERVE",
+        "PAPER": "SIMULATE",
+        "SIMULATE": "SIMULATE",
+        "LIVE": "EXECUTE",
+        "EXECUTE": "EXECUTE",
+    }
+    if raw_mode not in _PARSE_MAP:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid mode '{raw_mode}'. Allowed: DEMO, PAPER, LIVE",
+        )
+
+    target_backend_mode = _PARSE_MAP[raw_mode]
+    if target_backend_mode == "EXECUTE":
+        allow_live = os.environ.get("ALLOW_LIVE_TRADING", "0").strip()
+        if allow_live != "1":
+            raise HTTPException(
+                status_code=403,
+                detail="Switching to LIVE mode requires ALLOW_LIVE_TRADING=1 environment safety gate.",
+            )
+
+    os.environ["TRADING_MODE"] = target_backend_mode
+    mode_info = get_trading_mode()
+    _UI_MODE_MAP = {
+        "OBSERVE": "DEMO",
+        "SIMULATE": "PAPER",
+        "EXECUTE": "LIVE",
+    }
+    ui_mode = _UI_MODE_MAP[mode_info.mode.value]
+
+    try:
+        await event_bus.broadcast(
+            {
+                "type": "mode_changed",
+                "mode": ui_mode,
+                "backend_mode": mode_info.mode.value,
+            }
+        )
+    except Exception:
+        pass
+
+    return JSONResponse(
+        {
+            "status": "SUCCESS",
+            "mode": ui_mode,
+            "backend_mode": mode_info.mode.value,
             "description": mode_info.description,
         }
     )
@@ -1784,6 +1864,7 @@ async def mstock_callback(request: Request):
         register_broker("mstock", b)
         try:
             from brokers.session import _start_websocket
+
             _start_websocket(b)
         except Exception:
             pass
@@ -2961,6 +3042,40 @@ async def cleanup_auto_alerts(payload: Optional[dict] = None):
     }
 
 
+@app.post("/api/alerts/auto/invalidate", tags=["Alerts"])
+async def invalidate_auto_alert_endpoint(payload: dict):
+    """Explicitly invalidate an auto alert with a specific rationale."""
+    from engine.auto_alert_engine import auto_alert_engine
+
+    alert_id = payload.get("alert_id")
+    reason = payload.get("reason", "Manually invalidated by user")
+    if not alert_id:
+        raise HTTPException(status_code=400, detail="Missing alert_id")
+    alert = auto_alert_engine.invalidate_alert_by_id(alert_id, reason=reason)
+    if not alert:
+        raise HTTPException(
+            status_code=404, detail=f"Alert {alert_id} not found or already invalidated"
+        )
+    return {"status": "ok", "data": alert.to_dict()}
+
+
+@app.post("/api/alerts/manual/invalidate", tags=["Alerts"])
+async def invalidate_manual_alert_endpoint(payload: dict):
+    """Explicitly invalidate a manual alert with a specific rationale."""
+    from engine.alerts import alert_manager
+
+    alert_id = payload.get("alert_id")
+    reason = payload.get("reason", "Manually invalidated by user")
+    if not alert_id:
+        raise HTTPException(status_code=400, detail="Missing alert_id")
+    alert = alert_manager.invalidate_alert(alert_id, reason=reason)
+    if not alert:
+        raise HTTPException(
+            status_code=404, detail=f"Manual alert {alert_id} not found or already invalidated"
+        )
+    return {"status": "ok", "data": alert_manager.public_dict(alert)}
+
+
 @app.post("/api/alerts/auto/rescrutinize", tags=["Alerts"])
 async def rescrutinize_auto_alert(payload: dict):
     """Re-scrutinize an active alert on demand with AI Chief Risk Officer Devil's Advocate."""
@@ -3349,6 +3464,128 @@ async def websocket_ticker(ws: WebSocket):
         pass
     except Exception:
         pass
+
+
+# ── 24x7 Real-Time Crypto Pipeline Endpoints ─────────────────────────────────
+
+
+@app.get("/api/crypto/snapshot", tags=["Crypto 24x7"])
+async def get_crypto_snapshot():
+    """
+    Current 24x7 snapshot of major crypto assets (BTC, ETH, SOL, BNB)
+    from Binance public stream with 24h change, high/low, volume, and BBO.
+    """
+    from market.crypto_stream import crypto_stream
+
+    return crypto_stream.get_snapshot()
+
+
+@app.get("/api/crypto/smc", tags=["Crypto 24x7"])
+async def get_crypto_smc(
+    symbol: str = "BTCUSDT",
+    timeframe: str = "15m",
+    limit: int = 150,
+):
+    """
+    24x7 Real-Time Smart Money Concepts (SMC) & Market Structure Analysis.
+    Computes Order Blocks, FVGs, Liquidity Sweeps, CHoCH, and +2R/+4R invalidation targets.
+    """
+    from market.crypto_stream import crypto_stream
+    from analysis.market_structure import analyze_market_structure
+
+    df = await asyncio.to_thread(
+        crypto_stream.get_klines,
+        symbol=symbol,
+        interval=timeframe,
+        limit=limit,
+    )
+    if df.empty:
+        raise HTTPException(status_code=404, detail=f"No kline data available for {symbol}")
+
+    report = await asyncio.to_thread(
+        analyze_market_structure,
+        symbol=symbol,
+        df=df,
+        exchange="CRYPTO",
+        timeframe=timeframe,
+    )
+    return report.to_dict()
+
+
+@app.get("/api/crypto/options", tags=["Crypto 24x7"])
+async def get_crypto_options(currency: str = "BTC", force_refresh: bool = False):
+    """
+    24x7 Real-Time Crypto Options Chain & Volatility Surface via Deribit.
+    Computes Max Pain strike, Put-Call Ratio (OI & Volume), ATM IV, and dealer positioning.
+    Zero auth/API key required.
+    """
+    from market.crypto_options import get_crypto_options_summary
+
+    return await asyncio.to_thread(
+        get_crypto_options_summary,
+        currency=currency,
+        force_refresh=force_refresh,
+    )
+
+
+@app.get("/api/crypto/squeeze", tags=["Crypto 24x7"])
+async def get_crypto_squeeze(symbol: str = "BTCUSDT"):
+    """
+    Leading Indicator Squeeze & Leverage Positioning Analysis via Binance Futures.
+    Computes Open Interest, 8h Funding Rate skew, and Long/Short Squeeze warnings.
+    Zero auth/API key required.
+    """
+    from market.crypto_stream import crypto_stream
+
+    return await asyncio.to_thread(
+        crypto_stream.get_squeeze_metrics,
+        symbol=symbol,
+    )
+
+
+@app.get("/api/crypto/stream", tags=["SSE"])
+async def stream_crypto():
+    """
+    SSE stream of 24x7 real-time crypto ticks, BBO, and candle updates.
+    """
+    from market.crypto_stream import crypto_stream
+
+    async def _crypto_generator():
+        snap = crypto_stream.get_snapshot()
+        yield f"data: {json.dumps({'type': 'crypto_snapshot', 'data': snap})}\n\n"
+
+        queue: asyncio.Queue[dict] = asyncio.Queue(maxsize=100)
+        loop = asyncio.get_running_loop()
+
+        def _on_tick(tick: dict):
+            try:
+                loop.call_soon_threadsafe(
+                    lambda: queue.put_nowait(tick) if not queue.full() else None
+                )
+            except Exception:
+                pass
+
+        crypto_stream.on_tick(_on_tick)
+
+        try:
+            while True:
+                try:
+                    tick = await asyncio.wait_for(queue.get(), timeout=15.0)
+                    yield f"data: {json.dumps({'type': 'crypto_tick', 'data': tick})}\n\n"
+                except asyncio.TimeoutError:
+                    yield ": heartbeat\n\n"
+        except asyncio.CancelledError:
+            pass
+
+    return StreamingResponse(
+        _crypto_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 # ── System Status SSE Stream ──────────────────────────────────────────────────
@@ -3998,7 +4235,12 @@ def trigger_compounder_scan(background: bool = True):
             name="compounder-batch-scanner",
         )
         t.start()
-        return JSONResponse({"status": "SCAN_INITIATED", "message": "Batch scan started in background across 750 equities."})
+        return JSONResponse(
+            {
+                "status": "SCAN_INITIATED",
+                "message": "Batch scan started in background across 750 equities.",
+            }
+        )
     else:
         roster = compounder_scanner.scan_universe_batch()
         return JSONResponse({"status": "SUCCESS", "data": roster.to_dict()})

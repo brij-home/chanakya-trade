@@ -301,9 +301,28 @@ _F_AND_O_LOT_SIZES: dict[str, int] = {
 
 _SORTED_FNO_KEYS: list[str] = sorted(_F_AND_O_LOT_SIZES.keys(), key=len, reverse=True)
 
+# Canonical alias map: feed variants / display names → canonical ticker key
+# Covers NSE data-feed quirks like "NIFTY 50" (with space) and "BANK NIFTY".
+_SYMBOL_ALIASES: dict[str, str] = {
+    "NIFTY 50": "NIFTY",
+    "NIFTY50": "NIFTY",
+    "NSEI": "NIFTY",
+    "CNX NIFTY": "NIFTY",
+    "BANK NIFTY": "BANKNIFTY",
+    "BANKNIFTY50": "BANKNIFTY",
+    "NSEBANK": "BANKNIFTY",
+    "FIN NIFTY": "FINNIFTY",
+    "MIDCP NIFTY": "MIDCPNIFTY",
+    "NIFTY NEXT 50": "NIFTYNXT50",
+}
+
 
 def extract_underlying_symbol(symbol: str) -> Optional[str]:
-    """Extract the base underlying ticker from a cash or derivative symbol."""
+    """Extract the base underlying ticker from a cash or derivative symbol.
+
+    Handles feed-variant names such as ``"NIFTY 50"`` (with space) by resolving
+    them through ``_SYMBOL_ALIASES`` before performing the lot-size table lookup.
+    """
     if not symbol:
         return None
     clean = (
@@ -318,6 +337,9 @@ def extract_underlying_symbol(symbol: str) -> Optional[str]:
         .replace("CDS:", "")
         .strip()
     )
+    # Resolve common feed variants / display-name aliases before lookup
+    clean = _SYMBOL_ALIASES.get(clean, clean)
+
     if clean in _F_AND_O_LOT_SIZES:
         return clean
     import re

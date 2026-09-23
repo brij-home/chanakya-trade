@@ -94,6 +94,14 @@ class DefinedRiskSpread:
 
 
 def _get_lot_size(symbol: str) -> int:
+    try:
+        from engine.position_sizer import get_lot_size
+
+        ls = get_lot_size(symbol)
+        if ls and ls > 0:
+            return ls
+    except Exception:
+        pass
     sym = symbol.upper()
     if sym == "NIFTY" or "NIFTY 50" in sym:
         return 75  # Current revised NSE lot size

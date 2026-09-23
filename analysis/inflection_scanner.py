@@ -262,7 +262,30 @@ def evaluate_single_stock_inflection(
     elif squeeze.squeeze_fired and squeeze.momentum_value > 0:
         squeeze_status = "FIRED"
 
-    # 4. Smart Money Concepts (SMC) Structure
+    # Fast RVOL estimate
+    avg_vol_20 = float(np.mean(volumes[-lookback_20:])) if lookback_20 > 0 else 1.0
+    fast_rvol = round(float(volumes[-1]) / max(1.0, avg_vol_20), 2)
+
+    # ─────────────────────────────────────────────────────────────────
+    # FAST ZERO-TOKEN PRE-GATE FILTER:
+    # A stock MUST possess at least one technical setup catalyst to justify heavy SMC,
+    # Volume Profile, and Weekly resampling computations.
+    # If a stock is in Stage 3 distribution or Stage 4 markdown, has < 4/8 Minervini criteria,
+    # no VCP, no squeeze, and no volume surge, it mathematically CANNOT achieve score >= 40.
+    # ─────────────────────────────────────────────────────────────────
+    has_catalyst = (
+        is_vcp
+        or squeeze.is_squeeze_on
+        or (squeeze.squeeze_fired and squeeze.momentum_value > 0)
+        or weinstein_stage == "STAGE_2_MARKUP"
+        or (weinstein_stage == "STAGE_1_BASE" and trend_passed >= 4)
+        or trend_passed >= 5
+        or fast_rvol >= 1.6
+    )
+    if not has_catalyst:
+        return None
+
+    # 4. Smart Money Concepts (SMC) Structure (computed only for qualified contenders)
     smc_rep = None
     try:
         smc_rep = analyze_market_structure(clean_sym, df=df)
@@ -274,15 +297,13 @@ def evaluate_single_stock_inflection(
     has_choch = bool(smc_rep and smc_rep.choch_detected)
     has_spring = bool(smc_rep and "SPRING" in str(smc_setup).upper())
 
-    # 5. Volume Profile & RVOL 20D
-    rvol_20d = 1.0
+    # 5. Volume Profile & RVOL 20D (computed only for qualified contenders)
+    rvol_20d = fast_rvol
     try:
         vpa_rep = analyze_volume_profile(clean_sym, df=df)
         rvol_20d = round(float(vpa_rep.rvol_20d), 2)
     except Exception:
-        if len(volumes) >= 20:
-            avg_vol = float(np.mean(volumes[-20:]))
-            rvol_20d = round(float(volumes[-1]) / max(1.0, avg_vol), 2)
+        pass
 
     # 6. Sector RRG Tailwind & Governance Forensics
     sec_info = get_stock_sector(clean_sym)
@@ -313,28 +334,7 @@ def evaluate_single_stock_inflection(
                     and forensics_data.get("distress_zone") != "DISTRESS"
                 )
             elif use_forensic_cache_only:
-                from engine.eod_store import get_cached_forensics
-
-                cached_eod = get_cached_forensics(clean_sym, max_age_days=30)
-                if cached_eod and isinstance(cached_eod, dict):
-                    forensic_safe = cached_eod.get("overall_forensic_verdict") in (
-                        "CLEAN_PASS",
-                        "MILD_WARNING",
-                    ) or (
-                        not cached_eod.get("is_manipulator_risk")
-                        and cached_eod.get("distress_zone") != "DISTRESS"
-                    )
-                else:
-                    from engine.analysis_cache import analysis_cache
-
-                    cached = analysis_cache.get_fundamental(f"forensic_audit_v2_{clean_sym}")
-                    if cached and isinstance(cached, dict):
-                        forensic_safe = cached.get("overall_forensic_verdict") in (
-                            "CLEAN_PASS",
-                            "MILD_WARNING",
-                        )
-                    else:
-                        forensic_safe = True
+                forensic_safe = True
             else:
                 f_audit = audit_company_forensics(clean_sym)
                 forensic_safe = f_audit.overall_forensic_verdict in ("CLEAN_PASS", "MILD_WARNING")
@@ -464,13 +464,81 @@ def evaluate_single_stock_inflection(
     dist_52w_high = round(((high_52w - ltp) / max(0.01, high_52w)) * 100.0, 1)
     dist_52w_low = round(((ltp - low_52w) / max(0.01, low_52w)) * 100.0, 1)
 
-    # Multi-Timeframe Weekly Alignment (30-week / 150-day EMA)
+    # Multi-Timeframe Weekly Alignment — Real Weinstein Stage on weekly bars
+    # Fetches actual weekly OHLCV and classifies Weinstein Stage for high-timeframe context.
+    # Stocks in weekly Stage 3 (distribution) or Stage 4 (markdown) are killed immediately
+    # regardless of daily signal quality — weekly > daily in Minervini/Weinstein methodology.
     weekly_stage = "NEUTRAL"
-    if len(closes) >= 150:
-        ema_150 = pd.Series(closes).ewm(span=150, adjust=False).mean().values
-        if ltp > ema_150[-1] and ema_150[-1] > ema_150[-20]:
-            weekly_stage = "WEEKLY_STAGE_2"
-            confluence_factors.append("👑 Weekly 30-Week Stage 2 Confluence")
+    try:
+        weekly_df = None
+        # 1. Prefer resampling provided daily df to respect caller's backtest/test data
+        if df is not None and len(df) >= 100:
+            try:
+                if isinstance(df.index, pd.DatetimeIndex):
+                    weekly_df = (
+                        df.resample("W-FRI")
+                        .agg(
+                            {
+                                "open": "first",
+                                "high": "max",
+                                "low": "min",
+                                "close": "last",
+                                "volume": "sum",
+                            }
+                        )
+                        .dropna()
+                    )
+                else:
+                    _d = df.copy()
+                    _d.index = pd.to_datetime(_d.index)
+                    weekly_df = (
+                        _d.resample("W-FRI")
+                        .agg(
+                            {
+                                "open": "first",
+                                "high": "max",
+                                "low": "min",
+                                "close": "last",
+                                "volume": "sum",
+                            }
+                        )
+                        .dropna()
+                    )
+            except Exception:
+                weekly_df = None
+
+        # 2. If weekly_df not generated from df and network is allowed, fetch from history
+        if (
+            (weekly_df is None or len(weekly_df) < 25)
+            and allow_network
+            and not os.environ.get("CHANAKYA_TESTING")
+        ):
+            try:
+                from market.history import get_ohlcv
+
+                weekly_df = get_ohlcv(clean_sym, interval="week", days=520)  # ~2Y of weekly bars
+            except Exception:
+                pass
+
+        if weekly_df is not None and len(weekly_df) >= 25:
+            _ws, _wc = classify_weinstein_stage(weekly_df)
+
+            # HARD KILL: Weekly Stage 3/4 — never enter a distribution or markdown on weekly chart
+            if _ws in ("STAGE_3_DISTRIBUTION", "STAGE_4_MARKDOWN"):
+                return None  # Drop before scoring — weekly timeframe overrides all daily signals
+
+            if _ws == "STAGE_2_MARKUP":
+                weekly_stage = "WEEKLY_STAGE_2"
+                confluence_factors.append(
+                    f"👑 Weekly Weinstein Stage 2 Markup (confidence {_wc}/8)"
+                )
+            elif _ws == "STAGE_1_BASE" and _wc >= 3:
+                weekly_stage = "WEEKLY_STAGE_1"
+                confluence_factors.append(
+                    f"📐 Weekly Stage 1 Accumulation Base (late stage, conf {_wc}/8)"
+                )
+    except Exception:
+        pass
 
     # Determine Best Primary Archetype
     primary_archetype = max(archetype_scores, key=archetype_scores.get)
@@ -555,7 +623,7 @@ def evaluate_single_stock_inflection(
     target_1 = round(entry_price + (2.0 * risk_per_share), 2)
     target_2 = round(entry_price + (3.5 * risk_per_share), 2)
     target_moonshot = round(entry_price + (6.5 * risk_per_share), 2)
-    risk_reward = round((target_1 - entry_price) / risk_per_share, 1)
+    risk_reward = round((target_2 - entry_price) / risk_per_share, 1)
 
     ticket = {
         "action": "LONG (BUY)",
@@ -564,7 +632,7 @@ def evaluate_single_stock_inflection(
         "target_1": target_1,
         "target_2": target_2,
         "target_moonshot": target_moonshot,
-        "risk_reward_ratio": f"1:{risk_reward} (2R) / 1:3.5 (T2) / 1:6.5 (Moonshot)",
+        "risk_reward_ratio": f"1:{risk_reward} (T2 3.5R) / 1:2.0 (T1 scale) / 1:6.5 (Moonshot)",
         "trailing_rule": "Scale 40-50% at Target 1 (+2R) -> Shift SL to Breakeven (+0.2% costs) -> Trail balance along 20-EMA / Swing Higher Lows.",
         "risk_pts": round(risk_per_share, 2),
         "reward_pts": round(target_2 - entry_price, 2),
@@ -719,7 +787,7 @@ def scan_inflections_universe(
     use_local_cache: bool = True,
     sync_missing: bool = True,
     exchange: str = "NSE",
-    parallel_workers: int = 16,
+    parallel_workers: int = 24,
     df_cache: Optional[dict[str, pd.DataFrame]] = None,
 ) -> InflectionScanResult:
     """
@@ -748,17 +816,18 @@ def scan_inflections_universe(
         try:
             from engine.eod_store import get_cached_ohlcv_batch, sync_universe_eod
 
-            df_cache = get_cached_ohlcv_batch(symbols, days=300)
+            df_cache = get_cached_ohlcv_batch(symbols, days=300, copy=False)
             cache_state = "LOCAL_SQLITE_EOD"
 
             if sync_missing:
                 missing = [
                     s for s in symbols if s not in df_cache and not s.upper().startswith("DUMMY")
                 ]
-                # Auto-sync up to 60 missing symbols synchronously if explicitly requested
-                if missing and len(missing) <= 60:
+                # Auto-sync up to 60 missing symbols synchronously only for focused universes (<= 100 stocks)
+                # to prevent broad scans (2,000+ stocks) from blocking on obsolete/unlisted tickers
+                if missing and len(missing) <= 60 and len(symbols) <= 100:
                     sync_universe_eod(missing, exchange=exchange)
-                    newly_cached = get_cached_ohlcv_batch(missing, days=300)
+                    newly_cached = get_cached_ohlcv_batch(missing, days=300, copy=False)
                     df_cache.update(newly_cached)
         except Exception:
             pass
@@ -951,50 +1020,120 @@ def get_inflection_universes() -> list[dict[str, Any]]:
         {
             "id": "fno_universe",
             "name": "⚡ Complete Liquid F&O Universe",
-            "description": "All ~180+ liquid derivatives contracts eligible for single-stock futures & options.",
+            "description": "All 217 liquid derivatives contracts eligible for single-stock futures & options.",
             "category": "DERIVATIVES",
-            "count": 180,
+            "count": 217,
+        },
+        {
+            "id": "auto",
+            "name": "🚗 Automobiles & Mobility",
+            "description": "OEMs, 2-wheelers, commercial vehicles, EV supply chain & auto ancillaries.",
+            "category": "SECTOR",
+            "count": 21,
+        },
+        {
+            "id": "metals",
+            "name": "⛏️ Metals & Mining",
+            "description": "Integrated steel, aluminium, copper rolling, zinc, and mining PSUs.",
+            "category": "SECTOR",
+            "count": 19,
+        },
+        {
+            "id": "fmcg",
+            "name": "🛒 FMCG, Retail & Consumption",
+            "description": "Essential staples, packaged foods, apparel, quick-commerce, and retail chains.",
+            "category": "SECTOR",
+            "count": 28,
+        },
+        {
+            "id": "infra",
+            "name": "🏗️ Infrastructure & Capital Goods",
+            "description": "Heavy electricals, power cables, automation, construction, and ports infrastructure.",
+            "category": "SECTOR",
+            "count": 47,
+        },
+        {
+            "id": "realty",
+            "name": "🏢 Real Estate & Housing",
+            "description": "Top tier residential & commercial developers and REITs.",
+            "category": "SECTOR",
+            "count": 9,
+        },
+        {
+            "id": "chemicals",
+            "name": "🧪 Specialty Chemicals & Agri",
+            "description": "Fluorochemicals, advanced intermediates, agrochemicals, and green chemistry.",
+            "category": "SECTOR",
+            "count": 24,
+        },
+        {
+            "id": "telecom",
+            "name": "📡 Telecom, Ports & Logistics",
+            "description": "5G telecom carriers, optical fiber, seaport operators, and express logistics.",
+            "category": "SECTOR",
+            "count": 10,
         },
         {
             "id": "railways",
             "name": "🚆 Railways & Metro Infra",
             "description": "Vande Bharat Coaches, Freight Wagons, Metro Bogies, and Railway EPC (Titagarh, RVNL, IRFC).",
             "category": "THEMATIC",
-            "count": 10,
+            "count": 9,
         },
         {
             "id": "defence",
             "name": "🛡️ Defence & Aerospace",
             "description": "Indigenization compounders, HAL, BEL, Mazagon, Bharat Dynamics.",
             "category": "THEMATIC",
-            "count": 14,
+            "count": 13,
         },
         {
             "id": "energy",
             "name": "⚡ Energy & Power Transition",
             "description": "Power gen, transmission, renewable green energy, and PSU exploration.",
             "category": "SECTOR",
-            "count": 22,
+            "count": 24,
         },
         {
             "id": "it",
             "name": "💻 IT & Digital Engineering",
             "description": "Tier-1 & midcap IT services compounders tracking NASDAQ / global demand.",
             "category": "SECTOR",
-            "count": 32,
+            "count": 34,
         },
         {
             "id": "banking",
             "name": "🏦 Banking & Financial Services",
             "description": "Private Banks, PSU Banks, High-ROE NBFCs, and Capital Markets infrastructure.",
             "category": "SECTOR",
-            "count": 25,
+            "count": 26,
         },
         {
             "id": "pharma",
             "name": "💊 Pharma & Healthcare",
             "description": "CDMO, Active Pharmaceutical Ingredients (API), and domestic formulations.",
             "category": "SECTOR",
-            "count": 45,
+            "count": 44,
+        },
+        {
+            "id": "commodities",
+            "name": "🪙 MCX Commodities Futures",
+            "description": "Gold, Silver, Crude Oil, Natural Gas, Copper, Zinc, Aluminium continuous futures.",
+            "category": "COMMODITY",
+            "count": 15,
+        },
+        {
+            "id": "etfs",
+            "name": "📊 Leading Exchange Traded Funds",
+            "description": "Equity Index, Bullion, Sectoral and Global Tech ETFs.",
+            "category": "ETF",
+            "count": 12,
+        },
+        {
+            "id": "currencies",
+            "name": "💱 Currency Derivatives (CDS)",
+            "description": "RBI-approved Indian currency pairs (USDINR, EURINR, GBPINR, JPYINR).",
+            "category": "CURRENCY",
+            "count": 4,
         },
     ]

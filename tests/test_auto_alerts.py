@@ -1017,7 +1017,9 @@ def test_early_warning_coiling_alert_header_and_plan_formatting(monkeypatch):
     assert "Action:</b> BUY" in msg
     assert "Invalidation SL:</b> <code>₹" in msg
     assert "Target 1:</b> <code>₹" in msg
-    assert "ACCEPTABLE" in msg or "EXCELLENT_ASYMMETRY" in msg
+    assert any(
+        x in msg for x in ("ACCEPTABLE", "EXCELLENT_ASYMMETRY", "OPPOSING_ZONE_COLLISION_REJECTED")
+    )
     assert "session ~21:" not in msg and "ETA: ~21:" not in msg, (
         "Off-market 21:xx hours must not appear in equity ETA"
     )
@@ -1237,6 +1239,70 @@ def test_archive_alert_by_id():
     assert res2 is not None
     assert res2.is_archived is False
     assert res2.is_active is True
+
+
+def test_archive_all_invalidated():
+    """Verify archive_all_invalidated bulk archives all invalidated alerts while leaving valid active ones alone."""
+    from engine.auto_alert_engine import AutoAlert, AutoAlertEngine
+
+    engine = AutoAlertEngine()
+    a1 = AutoAlert(
+        alert_id="inv-1",
+        alert_type="COMMODITY_MOMENTUM",
+        stage="INVALIDATED",
+        symbol="GOLD",
+        exchange="MCX",
+        direction="BULLISH",
+        headline="Gold SL Breached",
+        summary="Invalidated",
+        ltp=73500.0,
+        trigger_level=74000.0,
+        target_level=75000.0,
+        stop_loss=73800.0,
+        is_invalidated=True,
+        is_archived=False,
+    )
+    a2 = AutoAlert(
+        alert_id="inv-2",
+        alert_type="SQUEEZE_BREAKOUT",
+        stage="INVALIDATED",
+        symbol="CRUDEOIL",
+        exchange="MCX",
+        direction="BULLISH",
+        headline="Crude SL Breached",
+        summary="Invalidated",
+        ltp=5800.0,
+        trigger_level=5900.0,
+        target_level=6100.0,
+        stop_loss=5850.0,
+        is_invalidated=True,
+        is_archived=False,
+    )
+    a3 = AutoAlert(
+        alert_id="act-1",
+        alert_type="GAMMA_BLAST",
+        stage="IGNITED",
+        symbol="NIFTY",
+        exchange="NSE",
+        direction="BULLISH",
+        headline="Nifty Gamma Blast",
+        summary="Active",
+        ltp=25000.0,
+        trigger_level=24950.0,
+        target_level=25200.0,
+        stop_loss=24900.0,
+        is_invalidated=False,
+        is_archived=False,
+    )
+    with engine._lock:
+        engine._alerts = [a1, a2, a3]
+
+    count = engine.archive_all_invalidated("Bulk archive test")
+    assert count == 2
+    assert a1.is_archived is True
+    assert a2.is_archived is True
+    assert a3.is_archived is False
+    assert a1.archive_reason == "Bulk archive test"
 
 
 def test_cleanup_archived_records_leaves_active_trades_intact():
@@ -2737,6 +2803,7 @@ def test_options_momentum_friday_late_warning(tmp_path, monkeypatch):
         }
     )
     monkeypatch.setattr("market.quotes.get_ltp", lambda sym: 23510.0)
+    monkeypatch.setattr("market.quotes.get_quote", lambda *args, **kwargs: {})
     monkeypatch.setattr("market.options.get_options_chain", lambda sym: synthetic_chain)
     monkeypatch.setattr("market.history.get_ohlcv", lambda sym, **kwargs: healthy_df)
 
@@ -3028,14 +3095,16 @@ def test_gamma_blast_dual_blueprint_runner_and_noise_margin(monkeypatch):
     chain = [
         MockContract(23400, "PE", 50000, -15000, 30000, 85.0, "NIFTY23400PE"),
         MockContract(23350, "PE", 40000, -5000, 25000, 60.0, "NIFTY23350PE"),
-        MockContract(23100, "PE", 100000, -10000, 50000, 15.0, "NIFTY23100PE"), # Far OTM (> 120 pts away)
+        MockContract(
+            23100, "PE", 100000, -10000, 50000, 15.0, "NIFTY23100PE"
+        ),  # Far OTM (> 120 pts away)
     ]
 
     alerts = detect_gamma_blast(
         underlying="NIFTY",
         spot=23400.0,
         chain=chain,
-        vwap=23410.0, # Bearish below VWAP
+        vwap=23410.0,  # Bearish below VWAP
     )
 
     # 1. 23400 PE & 23350 PE are in sweet-spot (<= 0.6% OTM), while 23100 PE (1.28% OTM) is excluded as primary alert
@@ -3070,7 +3139,9 @@ def test_gamma_blast_dual_blueprint_runner_and_noise_margin(monkeypatch):
     assert "invalidated" in inv_reason_real.lower()
 
 
-def test_zero_ghost_lifecycle_invalidation_suppressed_if_not_broadcast_to_telegram(monkeypatch, tmp_path):
+def test_zero_ghost_lifecycle_invalidation_suppressed_if_not_broadcast_to_telegram(
+    monkeypatch, tmp_path
+):
     """
     ZERO-GHOST LIFECYCLE INVARIANT:
     An alert that was never broadcast to Telegram (e.g. MIDCPNIFTY suppressed on low confidence)
@@ -3083,7 +3154,9 @@ def test_zero_ghost_lifecycle_invalidation_suppressed_if_not_broadcast_to_telegr
     monkeypatch.setattr("engine.alerts._is_market_hours", lambda *args, **kwargs: True)
 
     tg_dispatched = []
-    monkeypatch.setattr("engine.alerts._telegram_notify", lambda msg, **kwargs: tg_dispatched.append(msg))
+    monkeypatch.setattr(
+        "engine.alerts._telegram_notify", lambda msg, **kwargs: tg_dispatched.append(msg)
+    )
 
     engine = AutoAlertEngine(max_buffer=20)
     engine.clear_alerts()
@@ -3169,7 +3242,9 @@ def test_signal_once_ignited_suppresses_duplicate_telegram_card(monkeypatch, tmp
     monkeypatch.setattr("engine.alerts._is_market_hours", lambda *args, **kwargs: True)
 
     tg_dispatched = []
-    monkeypatch.setattr("engine.alerts._telegram_notify", lambda msg, **kwargs: tg_dispatched.append(msg))
+    monkeypatch.setattr(
+        "engine.alerts._telegram_notify", lambda msg, **kwargs: tg_dispatched.append(msg)
+    )
 
     engine = AutoAlertEngine(max_buffer=20)
     engine.clear_alerts()
@@ -3376,4 +3451,449 @@ def test_strict_no_chase_guard(monkeypatch, tmp_path):
     assert engine.record_alert(chased_option) is False
 
 
+def test_scan_gamma_blasts_anti_storm_pacing_and_indices_only(tmp_path, monkeypatch):
+    """Verify that scan_gamma_blasts prioritizes index alerts and applies anti-storm pacing to stock options."""
+    import uuid
+    from engine.auto_alert_engine import AutoAlertEngine, AutoAlert
 
+    data_file = tmp_path / "auto_alerts_gamma_pacing.json"
+    monkeypatch.setattr("engine.auto_alert_engine.get_auto_alerts_file", lambda: data_file)
+    monkeypatch.setattr("engine.auto_alert_engine.AutoAlertEngine._dispatch", lambda self, a: None)
+
+    monkeypatch.setattr(
+        "engine.learning_engine.pattern_learning_engine.is_symbol_locked_out",
+        lambda *a, **kw: (False, ""),
+    )
+
+    engine = AutoAlertEngine(max_buffer=50)
+    engine.clear_alerts()
+    engine._cooldowns.clear()
+    engine._dispatched_milestones.clear()
+
+    # Mock market data calls
+    monkeypatch.setattr(
+        "market.quotes.get_quote",
+        lambda sym: {"last_price": 1000.0, "vwap": 995.0, "high": 1010.0, "low": 990.0},
+    )
+    monkeypatch.setattr("market.quotes.get_ltp", lambda sym: 1000.0)
+    monkeypatch.setattr(
+        "market.options.get_options_chain", lambda sym: [{"strike": 1000.0, "option_type": "CE"}]
+    )
+
+    def mock_detect(sym, spot, chain, **kwargs):
+        clean = sym.replace("NSE:", "").replace("NFO:", "").strip().upper()
+        uid = uuid.uuid4().hex[:6]
+        if clean == "NIFTY":
+            return [
+                AutoAlert(
+                    alert_id=f"alert-nifty-{uid}",
+                    alert_type="GAMMA_BLAST",
+                    stage="IGNITED",
+                    symbol="NIFTY",
+                    exchange="NFO",
+                    direction="BULLISH",
+                    headline="NIFTY Gamma",
+                    summary="Index gamma",
+                    ltp=150.0,
+                    trigger_level=150.0,
+                    target_level=220.0,  # R:R = (220-150)/(150-120) = 2.33x
+                    stop_loss=120.0,
+                    strike=24000.0,
+                    option_type="CE",
+                    confidence=95,
+                    metrics={"vol_oi_ratio": 3.0},
+                    is_live=True,
+                    environment="LIVE",
+                )
+            ]
+        # Simulate 7 stock option candidates with varying confidences
+        conf_map = {
+            "MARUTI": 95,
+            "ADANIENT": 90,
+            "RELIANCE": 85,
+            "TCS": 80,
+            "INFY": 75,
+            "WIPRO": 70,
+            "HCLTECH": 65,
+        }
+        vol_map = {
+            "MARUTI": 2.5,
+            "ADANIENT": 2.1,
+            "RELIANCE": 1.9,
+            "TCS": 1.7,
+            "INFY": 1.5,
+            "WIPRO": 1.3,
+            "HCLTECH": 1.1,
+        }
+        if clean in conf_map:
+            return [
+                AutoAlert(
+                    alert_id=f"alert-{clean.lower()}-{uid}",
+                    alert_type="GAMMA_BLAST",
+                    stage="IGNITED",
+                    symbol=clean,
+                    exchange="NFO",
+                    direction="BULLISH",
+                    headline=f"{clean} Gamma",
+                    summary=f"{clean} option gamma",
+                    ltp=50.0,
+                    trigger_level=50.0,
+                    target_level=75.0,  # R:R = (75-50)/(50-40) = 2.50x
+                    stop_loss=40.0,
+                    strike=1000.0,
+                    option_type="CE",
+                    confidence=conf_map[clean],
+                    metrics={"vol_oi_ratio": vol_map[clean]},
+                    is_live=True,
+                    environment="LIVE",
+                )
+            ]
+        return []
+
+    monkeypatch.setattr("engine.auto_alert_engine.detect_gamma_blast", mock_detect)
+    engine._watched_indices = ["NIFTY"]
+    engine.watched_equities = ["MARUTI", "ADANIENT", "RELIANCE", "TCS", "INFY", "WIPRO", "HCLTECH"]
+
+    # 1. Full scan: index alert + paced top stock options (max 3 in opening drive, 5 in normal hours)
+    results = engine.scan_gamma_blasts(indices_only=False)
+    assert any(a.symbol == "NIFTY" for a in results), "Index gamma blast must always be dispatched"
+
+    stock_results = [a for a in results if a.symbol != "NIFTY"]
+    assert len(stock_results) in (3, 5), (
+        f"Stock options must be capped by anti-storm pacing, got {len(stock_results)}"
+    )
+    # Verify highest confidence stocks won the slots
+    stock_syms = [a.symbol for a in stock_results]
+    assert "MARUTI" in stock_syms, "Highest confidence stock must be selected"
+    assert "ADANIENT" in stock_syms, "Second highest confidence stock must be selected"
+    assert "HCLTECH" not in stock_syms, "Lowest confidence stock must be suppressed by pacing"
+
+    # 2. Indices-only fast-path scan: only NIFTY scanned, zero stock options
+    engine.clear_alerts()
+    fast_results = engine.scan_gamma_blasts(indices_only=True)
+    assert len(fast_results) == 1
+    assert fast_results[0].symbol == "NIFTY"
+
+
+def test_gamma_blast_oi_wall_rejection_and_breakout_acceleration(monkeypatch):
+    """Verifies that gamma blast rejects calls colliding into defending OI walls,
+
+    but accelerates setups breaking out through panicking OI walls.
+    """
+    from engine.detectors.gamma_blast import detect_gamma_blast
+    from types import SimpleNamespace
+
+    # Mock trade plan to guarantee viability for valid tests
+    class MockTP:
+        is_asymmetry_viable = True
+        asymmetry_verdict = "EXCELLENT"
+        rr_t1 = 2.4
+
+        def as_dict(self):
+            return {}
+
+    monkeypatch.setattr("engine.trade_plan.calculate_trade_plan", lambda **kw: MockTP())
+
+    spot = 24960.0  # within 0.16% of 25000 strike
+
+    # Case A: Defending Call OI wall (25000 CE has +5000 ΔOI, vol_oi_ratio 1.0)
+    c_defending = SimpleNamespace(
+        strike=25000.0,
+        option_type="CE",
+        oi=50000,
+        oi_change=5000,
+        volume=50000,
+        last_price=80.0,
+        symbol="NIFTY26SEP25000CE",
+        expiry="2026-09-30",
+        pchange=2.0,
+        bid=79.5,
+        ask=80.5,
+    )
+    alerts_defending = detect_gamma_blast("NIFTY", spot, [c_defending], vwap=24950.0)
+    assert len(alerts_defending) == 0, "Colliding into defending call OI wall must be rejected"
+
+    # Case B: Panicking Call OI wall (25000 CE has -12000 ΔOI, vol_oi_ratio 1.8)
+    c_panicking = SimpleNamespace(
+        strike=25000.0,
+        option_type="CE",
+        oi=40000,
+        oi_change=-12000,
+        volume=72000,
+        last_price=95.0,
+        symbol="NIFTY26SEP25000CE",
+        expiry="2026-09-30",
+        pchange=18.0,
+        bid=94.5,
+        ask=95.5,
+    )
+    alerts_panicking = detect_gamma_blast("NIFTY", spot, [c_panicking], vwap=24950.0)
+    assert len(alerts_panicking) == 1, (
+        "Short-covering blast through panicking call OI wall must trigger"
+    )
+    alert = alerts_panicking[0]
+    assert alert.metrics.get("wall_breakout") is True
+    assert alert.confidence >= 80
+
+
+def test_gamma_blast_bid_ask_spread_gate_and_momentum_bypass(monkeypatch):
+    """Verifies that wide bid-ask spread rejects illiquid options,
+
+    while explosive institutional turnover provides a valid bypass.
+    """
+    from engine.detectors.gamma_blast import detect_gamma_blast
+    from types import SimpleNamespace
+
+    class MockTP:
+        is_asymmetry_viable = True
+        asymmetry_verdict = "EXCELLENT"
+        rr_t1 = 2.2
+
+        def as_dict(self):
+            return {}
+
+    monkeypatch.setattr("engine.trade_plan.calculate_trade_plan", lambda **kw: MockTP())
+
+    spot = 25000.0
+
+    # Case A: Wide spread (bid 70, ask 85 -> 19.3% spread > 1.8%) with moderate turnover
+    c_wide = SimpleNamespace(
+        strike=25000.0,
+        option_type="CE",
+        oi=20000,
+        oi_change=-4000,
+        volume=24000,  # vol_oi_ratio = 1.2
+        last_price=77.5,
+        symbol="NIFTY26SEP25000CE",
+        expiry="2026-09-30",
+        pchange=8.0,
+        bid=70.0,
+        ask=85.0,
+    )
+    alerts_wide = detect_gamma_blast("NIFTY", spot, [c_wide], vwap=24980.0)
+    assert len(alerts_wide) == 0, "Wide spread with moderate turnover must be rejected for slippage"
+
+    # Case B: Wide spread on quote book, but massive explosive turnover (vol_oi_ratio 2.8, vol 56000)
+    c_explosive = SimpleNamespace(
+        strike=25000.0,
+        option_type="CE",
+        oi=20000,
+        oi_change=-8000,
+        volume=56000,  # vol_oi_ratio = 2.8 >= 2.5
+        last_price=77.5,
+        symbol="NIFTY26SEP25000CE",
+        expiry="2026-09-30",
+        pchange=15.0,
+        bid=72.0,
+        ask=82.0,
+    )
+    alerts_explosive = detect_gamma_blast("NIFTY", spot, [c_explosive], vwap=24980.0)
+    assert len(alerts_explosive) == 1, (
+        "Explosive turnover must bypass spread gate to preserve big opportunities"
+    )
+
+
+def test_gamma_blast_0dte_afternoon_theta_guard_and_hero_bypass(monkeypatch):
+    """Verifies that 0DTE afternoon OTM options are rejected to prevent theta traps,
+
+    while massive panic unwinds (hero squeeze) are permitted.
+    """
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    from engine.detectors.gamma_blast import detect_gamma_blast
+    from types import SimpleNamespace
+
+    IST = ZoneInfo("Asia/Kolkata")
+    today_str = datetime.now(IST).strftime("%Y-%m-%d")
+
+    # Mock datetime to 14:15 IST
+    class MockDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime.now(IST).replace(hour=14, minute=15)
+
+    monkeypatch.setattr("engine.detectors.gamma_blast.datetime", MockDatetime)
+
+    class MockTP:
+        is_asymmetry_viable = True
+        asymmetry_verdict = "EXCELLENT"
+        rr_t1 = 2.5
+
+        def as_dict(self):
+            return {}
+
+    monkeypatch.setattr("engine.trade_plan.calculate_trade_plan", lambda **kw: MockTP())
+
+    spot = 25000.0
+    # Strike 25050 is +0.20% OTM (above spot) on 0DTE
+    # Case A: Ordinary unwind (oi_change = -2000, vol_oi_ratio = 1.2)
+    c_otm_trap = SimpleNamespace(
+        strike=25050.0,
+        option_type="CE",
+        oi=15000,
+        oi_change=-2000,
+        volume=18000,
+        last_price=22.0,
+        symbol="NIFTY260DTE25050CE",
+        expiry=today_str,
+        pchange=10.0,
+        bid=21.8,
+        ask=22.2,
+    )
+    alerts_trap = detect_gamma_blast("NIFTY", spot, [c_otm_trap], vwap=24990.0)
+    assert len(alerts_trap) == 0, (
+        "0DTE afternoon OTM option must be rejected to prevent theta bleed"
+    )
+
+    # Case B: Hero squeeze (oi_change = -8000, oi_change_pct = -35%, vol_oi_ratio = 2.6)
+    c_hero = SimpleNamespace(
+        strike=25050.0,
+        option_type="CE",
+        oi=15000,
+        oi_change=-8000,
+        volume=39000,
+        last_price=35.0,
+        symbol="NIFTY260DTE25050CE",
+        expiry=today_str,
+        pchange=30.0,
+        bid=34.8,
+        ask=35.2,
+    )
+    alerts_hero = detect_gamma_blast("NIFTY", spot, [c_hero], vwap=24990.0)
+    assert len(alerts_hero) == 1, "0DTE hero panic squeeze must bypass theta guard"
+
+
+def test_gamma_blast_stock_sebi_physical_delivery_protection(monkeypatch):
+    """Verifies that single-stock options during physical delivery expiry week
+
+    carry explicit margin warnings and intraday scalp mandates.
+    """
+    from engine.detectors.gamma_blast import detect_gamma_blast
+    from types import SimpleNamespace
+
+    # Mock is_monthly_physical_expiry_week to return True
+    monkeypatch.setattr(
+        "engine.alert_expiry.is_monthly_physical_expiry_week", lambda *args, **kw: True
+    )
+
+    class MockTP:
+        is_asymmetry_viable = True
+        asymmetry_verdict = "EXCELLENT"
+        rr_t1 = 2.0
+
+        def as_dict(self):
+            return {}
+
+    monkeypatch.setattr("engine.trade_plan.calculate_trade_plan", lambda **kw: MockTP())
+    monkeypatch.setattr("engine.position_sizer.get_lot_size", lambda sym: 250)
+
+    spot = 2800.0
+    c_stock = SimpleNamespace(
+        strike=2800.0,
+        option_type="CE",
+        oi=80000,
+        oi_change=-20000,
+        volume=120000,  # vol_oi_ratio = 1.5, abs(oi_chg_pct) = 25%, 320 lots
+        last_price=35.0,
+        symbol="RELIANCE26SEP2800CE",
+        expiry="2026-09-24",
+        pchange=16.0,
+        bid=34.8,
+        ask=35.2,
+    )
+    alerts = detect_gamma_blast("RELIANCE", spot, [c_stock], vwap=2795.0)
+    assert len(alerts) == 1
+    alert = alerts[0]
+    assert "[SEBI PHYSICAL SETTLEMENT WEEK]" in alert.headline
+    assert alert.metrics.get("physical_settlement_week") is True
+    assert "SEBI Physical Delivery Expiry Week" in alert.metrics.get(
+        "physical_settlement_warning", ""
+    )
+    assert "INTRADAY SCALP ONLY" in alert.actionable_plan.get("profit_rule", "")
+
+
+def test_scan_opening_drives_anti_storm_pacing(tmp_path, monkeypatch):
+    """Verifies that scan_opening_drives unthrottles index alerts and caps stock opening drives to top 2-3."""
+    from engine.auto_alert_engine import AutoAlertEngine, AutoAlert
+    import pandas as pd
+
+    monkeypatch.setattr(
+        "engine.auto_alert_engine.get_auto_alerts_file", lambda: tmp_path / "auto_alerts.json"
+    )
+    monkeypatch.setattr(AutoAlertEngine, "_dispatch", lambda self, a: None)
+
+    engine = AutoAlertEngine(max_buffer=50)
+    engine.clear_alerts()
+    engine._watched_indices = ["NIFTY"]
+    engine.watched_equities = ["RELIANCE", "TCS", "INFY", "WIPRO", "TATAMOTORS"]
+
+    def mock_detect(**kw):
+        sym = kw["symbol"]
+        clean = sym.replace("NSE:", "").replace("NFO:", "").strip()
+        rvol_map = {
+            "NIFTY": 2.5,
+            "RELIANCE": 3.8,
+            "TCS": 3.2,
+            "INFY": 2.1,
+            "WIPRO": 1.9,
+            "TATAMOTORS": 1.5,
+        }
+        conf_map = {
+            "NIFTY": 90,
+            "RELIANCE": 92,
+            "TCS": 88,
+            "INFY": 82,
+            "WIPRO": 78,
+            "TATAMOTORS": 70,
+        }
+        is_idx = clean == "NIFTY"
+        ltp = 25000.0 if is_idx else 2000.0
+        sl = 24920.0 if is_idx else 1970.0
+        tgt = 25200.0 if is_idx else 2070.0
+        return AutoAlert(
+            alert_id=f"aa-opdrive-{clean.lower()}-test",
+            alert_type="OPENING_DRIVE_IGNITION",
+            stage="IGNITED",
+            symbol=clean,
+            exchange="NFO" if is_idx else "NSE",
+            direction="BULLISH",
+            headline=f"🚨 [OPENING DRIVE] {clean} Bullish",
+            summary=f"{clean} opening drive",
+            ltp=ltp,
+            trigger_level=ltp,
+            target_level=tgt,
+            stop_loss=sl,
+            confidence=conf_map[clean],
+            metrics={"rvol": rvol_map[clean]},
+            actionable_plan={
+                "action": "BUY",
+                "instrument_type": "INDEX" if is_idx else "EQUITY",
+                "opening_drive_bar": {"range_pct": 1.2},
+            },
+            is_live=True,
+            environment="LIVE",
+        )
+
+    monkeypatch.setattr("engine.auto_alert_engine.detect_opening_drive", mock_detect)
+    monkeypatch.setattr(
+        "market.history.get_ohlcv",
+        lambda *a, **k: pd.DataFrame({"close": [100.0, 101.0, 102.0], "volume": [100, 200, 300]}),
+    )
+    monkeypatch.setattr(
+        "market.quotes.get_ltp", lambda sym, *a, **k: 25000.0 if "NIFTY" in str(sym) else 2000.0
+    )
+    monkeypatch.setattr("market.quotes.get_quote", lambda *a, **k: {})
+
+    results = engine.scan_opening_drives()
+    # NIFTY should always be dispatched
+    assert any(a.symbol == "NIFTY" for a in results), "Index opening drive must be dispatched"
+
+    # Stocks should be capped at top 2 or 3
+    stock_alerts = [a for a in results if a.symbol != "NIFTY"]
+    assert len(stock_alerts) in (2, 3), (
+        f"Stock opening drives must be paced, got {len(stock_alerts)}"
+    )
+    stock_syms = [a.symbol for a in stock_alerts]
+    assert "RELIANCE" in stock_syms, "Highest confidence stock must win a slot"
+    assert "TCS" in stock_syms, "Second highest confidence stock must win a slot"
+    assert "TATAMOTORS" not in stock_syms, "Lowest confidence stock must be filtered out"

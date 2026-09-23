@@ -43,11 +43,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Optional, Union
 from uuid import uuid4
+
+logger = logging.getLogger("chanakya.web.skills")
 
 # Fix Windows charmap / cp1252 codec errors for unicode console prints
 if sys.platform == "win32":
@@ -75,7 +78,97 @@ router = APIRouter(prefix="/skills", tags=["OpenClaw Skills"])
 # ── Chat session store ────────────────────────────────────────
 # Keyed by session_id → TradingAgent instance.
 # In-memory only; sessions are lost on server restart.
-_chat_sessions: dict[str, object] = {}
+# Bounded LRU store: max 50 sessions, 2-hour TTL.
+# (Replaces unbounded dict that was an OOM vector on long-running servers.)
+
+import time as _time_mod
+from collections import OrderedDict as _OrderedDict
+import threading as _threading
+
+_CHAT_SESSION_MAX = 200
+_CHAT_SESSION_TTL = 7200.0  # 2 hours
+
+
+class _LRUSessionStore:
+    """Thread-safe bounded LRU session store with TTL eviction."""
+
+    def __init__(self, maxsize: int = 200, ttl: float = 7200.0):
+        self._store: _OrderedDict[str, tuple[object, float]] = _OrderedDict()
+        self._lock = _threading.Lock()
+        self.maxsize = maxsize
+        self.ttl = ttl
+
+    def get(self, key: str) -> object | None:
+        with self._lock:
+            if key not in self._store:
+                return None
+            session, ts = self._store[key]
+            if _time_mod.time() - ts > self.ttl:
+                del self._store[key]
+                return None
+            self._store.move_to_end(key)  # mark recently used
+            return session
+
+    def set(self, key: str, session: object) -> None:
+        with self._lock:
+            self._evict_expired_unsafe()
+            if key in self._store:
+                self._store.move_to_end(key)
+            elif len(self._store) >= self.maxsize:
+                self._store.popitem(last=False)  # evict LRU entry
+            self._store[key] = (session, _time_mod.time())
+
+    def delete(self, key: str) -> None:
+        with self._lock:
+            self._store.pop(key, None)
+
+    def pop(self, key: str, default: object = None) -> object:
+        with self._lock:
+            if key not in self._store:
+                return default
+            val, ts = self._store.pop(key)
+            if _time_mod.time() - ts > self.ttl:
+                return default
+            return val
+
+    def __getitem__(self, key: str) -> object:
+        val = self.get(key)
+        if val is None:
+            raise KeyError(key)
+        return val
+
+    def __setitem__(self, key: str, session: object) -> None:
+        self.set(key, session)
+
+    def __delitem__(self, key: str) -> None:
+        with self._lock:
+            if key not in self._store:
+                raise KeyError(key)
+            del self._store[key]
+
+    def __contains__(self, key: str) -> bool:
+        return self.get(key) is not None
+
+    def __len__(self) -> int:
+        with self._lock:
+            self._evict_expired_unsafe()
+            return len(self._store)
+
+    def clear(self) -> None:
+        with self._lock:
+            self._store.clear()
+
+    def _evict_expired_unsafe(self) -> None:
+        """Evict all TTL-expired sessions. Must be called while holding self._lock."""
+        now = _time_mod.time()
+        expired = [k for k, (_, ts) in self._store.items() if now - ts > self.ttl]
+        for k in expired:
+            del self._store[k]
+
+
+_chat_sessions: _LRUSessionStore = _LRUSessionStore(
+    maxsize=_CHAT_SESSION_MAX, ttl=_CHAT_SESSION_TTL
+)
 
 # ── Active stream tracking (#113 mid-stream context injection) ──
 # Keyed by stream_id → MultiAgentAnalyzer instance.
@@ -1286,9 +1379,16 @@ async def skill_morning_brief():
             nw = get_market_news(n=5)
             br = get_market_breadth()
             ev = get_upcoming_events(days=7)
-            return snap, fl, nw, br, ev
+            gift = None
+            try:
+                from market.gift_nifty import get_gift_nifty
 
-        snapshot, flows, news, breadth, events = await asyncio.to_thread(_fetch_brief)
+                gift = get_gift_nifty()
+            except Exception:
+                pass
+            return snap, fl, nw, br, ev, gift
+
+        snapshot, flows, news, breadth, events, gift = await asyncio.to_thread(_fetch_brief)
 
         return {
             "status": "ok",
@@ -1298,6 +1398,10 @@ async def skill_morning_brief():
                 "top_news": _serialise(news),
                 "market_breadth": _serialise(breadth),
                 "upcoming_events": _serialise(events),
+                "premarket_bias": {
+                    "gift_nifty": _serialise(gift) if gift else None,
+                    "implied_gap_pct": getattr(gift, "implied_gap_pct", 0.0) if gift else 0.0,
+                },
             },
         }
     except Exception as e:
@@ -1365,14 +1469,13 @@ async def skill_chat(req: ChatRequest):
         import asyncio
         from agent.core import TradingAgent
 
-        if req.session_id not in _chat_sessions:
-            if len(_chat_sessions) >= 200:
-                # Evict oldest registered session
-                oldest_key = next(iter(_chat_sessions))
-                _chat_sessions.pop(oldest_key, None)
-            _chat_sessions[req.session_id] = await asyncio.to_thread(TradingAgent, stream=False)
+        if _chat_sessions.get(req.session_id) is None:
+            _chat_sessions.set(
+                req.session_id,
+                await asyncio.to_thread(TradingAgent, stream=False),
+            )
 
-        agent = _chat_sessions[req.session_id]
+        agent = _chat_sessions.get(req.session_id)
         response = await asyncio.to_thread(agent.chat, req.message)
 
         return {
@@ -1413,7 +1516,7 @@ class ChatResetRequest(BaseModel):
 @router.post("/chat/reset")
 async def skill_chat_reset(req: ChatResetRequest):
     """Clear conversation history for a session (start fresh)."""
-    _chat_sessions.pop(req.session_id, None)
+    _chat_sessions.delete(req.session_id)
     return {"status": "ok", "data": {"session_id": req.session_id, "cleared": True}}
 
 
@@ -1536,6 +1639,26 @@ async def skill_alerts_remove(req: AlertRemoveRequest):
         if not removed:
             raise _err(f"Alert {req.alert_id} not found", 404)
         return {"status": "ok", "data": {"alert_id": req.alert_id, "removed": True}}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise _err(str(e))
+
+
+@router.post("/alerts/invalidate")
+async def skill_alerts_invalidate(req: AlertInvalidateRequest):
+    """Invalidate a manual alert by ID with rationale."""
+    try:
+        from engine.alerts import alert_manager
+
+        alert = await asyncio.to_thread(
+            alert_manager.invalidate_alert,
+            req.alert_id,
+            req.reason or "Manually invalidated by user",
+        )
+        if not alert:
+            raise _err(f"Alert {req.alert_id} not found or already invalidated", 404)
+        return {"status": "ok", "data": alert_manager.public_dict(alert)}
     except HTTPException:
         raise
     except Exception as e:
@@ -1716,9 +1839,44 @@ async def skill_auto_alerts_clear():
     """Clear auto-detected alert history and reset anti-spam cooldowns."""
     try:
         from engine.auto_alert_engine import auto_alert_engine
+        from web.sse import event_bus
 
         auto_alert_engine.clear_alerts()
+        try:
+            await event_bus.broadcast(
+                {
+                    "type": "auto_alerts_cleared",
+                    "mode": "ALL",
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+        except Exception:
+            pass
         return {"status": "ok", "data": {"cleared": True}}
+    except Exception as e:
+        raise _err(str(e))
+
+
+@router.post("/alerts/auto/clear_test")
+async def skill_auto_alerts_clear_test():
+    """Clear all synthetic test/simulated alerts from engine buffer and broadcast purge."""
+    try:
+        from engine.auto_alert_engine import auto_alert_engine
+        from web.sse import event_bus
+
+        purged_count = auto_alert_engine.clear_test_alerts()
+        try:
+            await event_bus.broadcast(
+                {
+                    "type": "auto_alerts_cleared",
+                    "mode": "TEST_ONLY",
+                    "purged_count": purged_count,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+        except Exception:
+            pass
+        return {"status": "ok", "data": {"cleared": True, "purged": purged_count}}
     except Exception as e:
         raise _err(str(e))
 
@@ -1837,6 +1995,18 @@ async def skill_auto_alerts_archive(req: AutoAlertArchiveRequest):
         return {"status": "ok", "data": alert.to_dict()}
     except HTTPException:
         raise
+    except Exception as e:
+        raise _err(str(e))
+
+
+@router.post("/alerts/auto/archive_all_invalidated")
+async def skill_auto_alerts_archive_all_invalidated():
+    """Bulk archive all currently invalidated auto-alerts to historical storage."""
+    try:
+        from engine.auto_alert_engine import auto_alert_engine
+
+        count = await asyncio.to_thread(auto_alert_engine.archive_all_invalidated)
+        return {"status": "ok", "archived_count": count}
     except Exception as e:
         raise _err(str(e))
 
@@ -2702,7 +2872,7 @@ async def analyze_followup(req: AnalyzeFollowupRequest):
             or req.context.get("synthesis_text")
             or req.context.get("report")
         )
-        if session_key not in _chat_sessions or has_new_context:
+        if _chat_sessions.get(session_key) is None or has_new_context:
             # Build a system message from the primed context
             analysts = req.context.get("analysts", [])
             synthesis_text = req.context.get("synthesis_text") or ""
@@ -2737,16 +2907,17 @@ async def analyze_followup(req: AnalyzeFollowupRequest):
                 ctx_lines.append("\nUse the analysis above as your primary source of truth.")
 
             system_msg = "\n".join(ctx_lines)
-            if len(_chat_sessions) >= 200:
-                oldest_key = next(iter(_chat_sessions))
-                _chat_sessions.pop(oldest_key, None)
             # Store session as dict with system prompt and message history
-            _chat_sessions[session_key] = {
-                "system": system_msg,
-                "history": [],
-            }
+            # LRU store handles max-size eviction automatically.
+            _chat_sessions.set(
+                session_key,
+                {
+                    "system": system_msg,
+                    "history": [],
+                },
+            )
 
-        session = _chat_sessions[session_key]
+        session = _chat_sessions.get(session_key)
 
         # Build messages: system + history + new question
         session["history"].append({"role": "user", "content": req.question})
@@ -3092,8 +3263,9 @@ async def skill_position_size(req: PositionSizeSkillRequest):
         if entry is None or entry <= 0:
             try:
                 from market.quotes import get_live_quote
+
                 q = get_live_quote(req.symbol)
-                if q and hasattr(q, 'ltp') and q.ltp and q.ltp > 0:
+                if q and hasattr(q, "ltp") and q.ltp and q.ltp > 0:
                     entry = float(q.ltp)
             except Exception:
                 pass
@@ -3290,6 +3462,179 @@ async def skill_multibagger_alerts(horizon: Optional[str] = None, limit: int = 5
         raise _err(str(e))
 
 
+@router.get("/multibagger/accumulation_radar")
+@router.post("/multibagger/accumulation_radar")
+async def skill_accumulation_radar(symbols: Optional[str] = None, limit: int = 30):
+    """
+    Scans for institutional stealth accumulation & floating supply exhaustion (CFAI).
+    """
+    try:
+        from analysis.delivery_accumulation import compute_cfai
+        from market.history import get_ohlcv
+
+        if symbols:
+            target_syms = [s.strip().upper() for s in symbols.split(",") if s.strip()]
+        else:
+            target_syms = [
+                "MAZDOCK",
+                "COCHINSHIP",
+                "GRSE",
+                "TITAGARH",
+                "HAL",
+                "BEL",
+                "BDL",
+                "TRENT",
+                "DIXON",
+                "KAYNES",
+                "INOXWIND",
+                "BHEL",
+                "RVNL",
+                "POLYCAB",
+                "KEC",
+            ]
+
+        results = []
+        for sym in target_syms[:limit]:
+            try:
+                df = get_ohlcv(sym, interval="day", days=90)
+                rep = compute_cfai(sym, df=df)
+                results.append(rep.to_dict())
+            except Exception:
+                continue
+
+        results.sort(key=lambda r: r.get("cfai_pct", 0.0), reverse=True)
+        return _ok({"accumulation_radar": results, "count": len(results)})
+    except Exception as e:
+        raise _err(str(e))
+
+
+@router.get("/multibagger/order_inflows")
+@router.post("/multibagger/order_inflows")
+async def skill_order_inflows(
+    symbol: Optional[str] = None, announcement_text: Optional[str] = None
+):
+    """
+    Retrieves Book-to-Bill order-book titans and evaluates contract win impact ratios.
+    """
+    try:
+        from analysis.order_book_catalyst import (
+            analyze_order_book_catalyst,
+            get_top_order_book_titans,
+        )
+
+        if symbol:
+            rep = analyze_order_book_catalyst(symbol, latest_announcement_text=announcement_text)
+            return _ok({"order_book_report": rep.to_dict()})
+
+        titans = get_top_order_book_titans(min_book_to_bill=1.5)
+        return _ok({"titans": [t.to_dict() for t in titans], "count": len(titans)})
+    except Exception as e:
+        raise _err(str(e))
+
+
+@router.get("/multibagger/block_deals")
+@router.post("/multibagger/block_deals")
+async def skill_block_deals(symbol: str, days: int = 30):
+    """
+    Evaluates institutional block deal absorption vs distribution anchoring.
+    """
+    try:
+        from analysis.block_deal_analyzer import analyze_block_deal_absorption
+        from market.quotes import get_quote
+
+        q = get_quote(symbol)
+        ltp = getattr(q, "last_price", 1000.0) if q else 1000.0
+        rep = analyze_block_deal_absorption(symbol, current_price=ltp, days=days)
+        return _ok({"block_deal_report": rep.to_dict()})
+    except Exception as e:
+        raise _err(str(e))
+
+
+@router.get("/multibagger/capex_inflections")
+@router.post("/multibagger/capex_inflections")
+async def skill_capex_inflections(symbol: Optional[str] = None):
+    """
+    Evaluates Capex & CWIP-to-Gross-Block commercialization inflections and capacity ramp-ups.
+    """
+    try:
+        from analysis.capex_inflection import (
+            analyze_capex_inflection,
+            scan_capex_inflection_universe,
+        )
+
+        if symbol:
+            rep = analyze_capex_inflection(symbol)
+            return _ok({"capex_inflection": rep.to_dict()})
+
+        universe = scan_capex_inflection_universe()
+        return _ok({"capex_inflections": [u.to_dict() for u in universe], "count": len(universe)})
+    except Exception as e:
+        raise _err(str(e))
+
+
+@router.get("/multibagger/rrg_orderbook_convergence")
+@router.post("/multibagger/rrg_orderbook_convergence")
+async def skill_rrg_orderbook_convergence(symbol: Optional[str] = None):
+    """
+    Evaluates convergence of Sector RRG Momentum (Leading/Improving) with Micro Order-Book backlog.
+    """
+    try:
+        from analysis.rrg_orderbook_convergence import (
+            evaluate_rrg_orderbook_convergence,
+            scan_rrg_orderbook_matrix,
+        )
+
+        if symbol:
+            rep = evaluate_rrg_orderbook_convergence(symbol)
+            return _ok({"convergence_report": rep.to_dict()})
+
+        matrix = scan_rrg_orderbook_matrix()
+        return _ok({"convergence_matrix": [m.to_dict() for m in matrix], "count": len(matrix)})
+    except Exception as e:
+        raise _err(str(e))
+
+
+@router.get("/multibagger/insider_radar")
+@router.post("/multibagger/insider_radar")
+async def skill_insider_radar(symbol: Optional[str] = None):
+    """
+    Evaluates promoter de-pledging trajectory and open-market insider purchases (SEBI SAST Reg 29).
+    """
+    try:
+        from analysis.insider_radar import analyze_insider_activity, scan_insider_radar
+
+        if symbol:
+            rep = analyze_insider_activity(symbol)
+            return _ok({"insider_report": rep.to_dict()})
+
+        radar = scan_insider_radar()
+        return _ok({"insider_radar": [r.to_dict() for r in radar], "count": len(radar)})
+    except Exception as e:
+        raise _err(str(e))
+
+
+@router.get("/multibagger/institutional_edge_radar")
+@router.post("/multibagger/institutional_edge_radar")
+async def skill_institutional_edge_radar(symbol: Optional[str] = None):
+    """
+    Unified Master Institutional Edge Matrix combining all 6 pillars into a single conviction ranker.
+    """
+    try:
+        from analysis.institutional_convergence import (
+            evaluate_master_institutional_convergence,
+            scan_master_institutional_radar,
+        )
+
+        if symbol:
+            rep = evaluate_master_institutional_convergence(symbol)
+            return _ok({"institutional_edge": rep.to_dict()})
+
+        radar = scan_master_institutional_radar()
+        return _ok({"institutional_edge_radar": [r.to_dict() for r in radar], "count": len(radar)})
+    except Exception as e:
+        raise _err(str(e))
+
+
 # ── Inflection Point & Multibagger Screener Suite ──────────────
 
 
@@ -3326,6 +3671,10 @@ class InflectionChatSkillRequest(BaseModel):
     matrix: Optional[dict[str, Any]] = None
 
 
+_in_flight_inflection_scans: dict[str, Any] = {}
+_in_flight_inflection_lock = asyncio.Lock()
+
+
 @router.post("/inflection_scan")
 @router.post("/scan_inflections")
 async def skill_inflection_scan(req: InflectionScanSkillRequest):
@@ -3334,7 +3683,16 @@ async def skill_inflection_scan(req: InflectionScanSkillRequest):
     TTM squeezes, Stage 1->2 breakouts, SMC springs, and Sector RRG rotation.
     Uses local SQLite EOD store for zero-latency scanning.
     """
-    import asyncio
+    from engine.analysis_cache import analysis_cache
+
+    cache_key = (
+        f"inflection_scan:{req.universe}:{req.archetype}:{req.timing}:"
+        f"{req.min_score}:{req.max_results}:{req.min_turnover_cr}:{req.cap_tier}"
+    )
+    if req.use_local_cache:
+        cached = analysis_cache.get_macro(cache_key, max_age_seconds=300)
+        if cached and isinstance(cached, dict):
+            return _ok(cached)
 
     def _scan():
         from analysis.inflection_scanner import scan_inflections_universe
@@ -3371,11 +3729,30 @@ async def skill_inflection_scan(req: InflectionScanSkillRequest):
 
         return res
 
+    is_originator = False
+    async with _in_flight_inflection_lock:
+        if cache_key in _in_flight_inflection_scans:
+            in_flight_task = _in_flight_inflection_scans[cache_key]
+        else:
+            in_flight_task = asyncio.create_task(asyncio.to_thread(_scan))
+            _in_flight_inflection_scans[cache_key] = in_flight_task
+            is_originator = True
+
     try:
-        res = await asyncio.to_thread(_scan)
-        return _ok(res.to_dict())
+        res = await in_flight_task
+        res_dict = res.to_dict() if hasattr(res, "to_dict") else res
+        if is_originator and req.use_local_cache:
+            try:
+                analysis_cache.save_macro(cache_key, res_dict, ttl_minutes=5)
+            except Exception:
+                pass
+        return _ok(res_dict)
     except Exception as e:
         raise _err(str(e))
+    finally:
+        if is_originator:
+            async with _in_flight_inflection_lock:
+                _in_flight_inflection_scans.pop(cache_key, None)
 
 
 @router.post("/inflection_sync")
@@ -6136,10 +6513,14 @@ def _debate_snapshot_sync(req: Optional[DebateSnapshotRequest] = None):
         if not ltp or ltp <= 0:
             from market.indices import get_index
 
-            idx = get_index(sym)
-            if idx and idx.last_price > 0:
-                ltp = float(idx.last_price)
-            else:
+            try:
+                idx = get_index(sym)
+                if idx and getattr(idx, "last_price", 0) > 0:
+                    ltp = float(idx.last_price)
+            except Exception:
+                pass
+
+            if not ltp or ltp <= 0:
                 from market.history import get_ohlcv
 
                 df_last = get_ohlcv(sym, exchange=exch, interval="day", days=5)
@@ -6152,46 +6533,46 @@ def _debate_snapshot_sync(req: Optional[DebateSnapshotRequest] = None):
                 404,
             )
 
-        # 1. Market structure (SMC)
+        # Run quantitative evaluations in parallel (concurrent workers eliminate serial 10s latency)
+        from concurrent.futures import ThreadPoolExecutor
+        from analysis.multibagger import scan_multibagger_opportunity
+        from market.sentiment import get_fii_dii_data
+
         ms = None
-        try:
-            ms = analyze_market_structure(sym, exchange=exch)
-        except Exception:
-            pass
-
-        # 2. Volume Profile
         vp = None
-        try:
-            vp = analyze_volume_profile(sym, exchange=exch)
-        except Exception:
-            pass
-
-        # 3. Forensics
         fa = None
-        try:
-            fa = audit_forensics(sym)
-        except Exception:
-            pass
-
-        # 4. Multibagger & Stage Analysis
         mb = None
-        try:
-            from analysis.multibagger import calculate_multibagger_score
-
-            mb = calculate_multibagger_score(sym)
-        except Exception:
-            pass
-
-        # 5. Institutional flows
         flows = None
-        try:
-            from market.sentiment import get_fii_dii_data
 
-            flow_list = get_fii_dii_data(days=1)
-            if flow_list:
-                flows = flow_list[0]
-        except Exception:
-            pass
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            fut_ms = executor.submit(analyze_market_structure, sym, exchange=exch)
+            fut_vp = executor.submit(analyze_volume_profile, sym, exchange=exch)
+            fut_fa = executor.submit(audit_forensics, sym)
+            fut_mb = executor.submit(scan_multibagger_opportunity, sym, exchange=exch)
+            fut_flows = executor.submit(get_fii_dii_data, days=1)
+
+            try:
+                ms = fut_ms.result(timeout=4.5)
+            except Exception:
+                pass
+            try:
+                vp = fut_vp.result(timeout=4.5)
+            except Exception:
+                pass
+            try:
+                fa = fut_fa.result(timeout=4.5)
+            except Exception:
+                pass
+            try:
+                mb = fut_mb.result(timeout=4.5)
+            except Exception:
+                pass
+            try:
+                flow_list = fut_flows.result(timeout=3.0)
+                if flow_list:
+                    flows = flow_list[0]
+            except Exception:
+                pass
 
         # Compute dynamic conviction score
         base_score = 65
@@ -6203,7 +6584,10 @@ def _debate_snapshot_sync(req: Optional[DebateSnapshotRequest] = None):
             base_score += 8
         elif fa and (getattr(fa, "manipulation_risk", "") or "") == "HIGH":
             base_score -= 15
-        if mb and (getattr(mb, "stage_2_confirmed", False) or False):
+        if mb and (
+            getattr(mb, "weinstein_stage", "") == "STAGE_2_MARKUP"
+            or getattr(mb, "trend_template_qualified", False)
+        ):
             base_score += 7
         conviction_score = max(20, min(95, base_score))
 
@@ -6225,8 +6609,8 @@ def _debate_snapshot_sync(req: Optional[DebateSnapshotRequest] = None):
             flow_desc = "Accumulation base observed with healthy volume absorption near key exponential moving average support."
 
         if mb:
-            stage_str = getattr(mb, "stage", "Stage 1/2") or "Stage 1/2"
-            passed_count = getattr(mb, "passed_checks_count", 0) or 0
+            stage_str = getattr(mb, "weinstein_stage", "STAGE_1_BASE").replace("_", " ")
+            passed_count = getattr(mb, "trend_template_passed", 0) or 0
             tech_desc = f"Stock is in {stage_str}. Passing {passed_count}/8 Minervini Trend Template criteria with expanding relative strength."
         else:
             tech_desc = "Constructive price action holding above 50-day moving average with positive trend momentum."
@@ -6463,8 +6847,19 @@ class GEXSnapshotRequest(BaseModel):
 
 
 def _fetch_options_and_spot(clean_sym: str, norm_inst: str, req_exp: Optional[str]):
-    from market.quotes import get_ltp, get_quote
+    from market.quotes import get_quote
     from market.options import get_options_snapshot
+
+    if clean_sym in ("BTC", "ETH", "SOL"):
+        try:
+            from market.crypto_options import get_crypto_options_snapshot
+
+            contracts, chain_spot, expiries, source_info = get_crypto_options_snapshot(
+                clean_sym, req_exp
+            )
+            return None, contracts, chain_spot, expiries, source_info
+        except Exception as e:
+            logger.warning(f"Crypto options snapshot fallback error for {clean_sym}: {e}")
 
     quote_map = get_quote([norm_inst, clean_sym])
     quote = quote_map.get(norm_inst) or quote_map.get(clean_sym)
@@ -6474,7 +6869,12 @@ def _fetch_options_and_spot(clean_sym: str, norm_inst: str, req_exp: Optional[st
 
 @router.get("/gex_snapshot")
 @router.post("/gex_snapshot")
-async def skill_gex_snapshot(req: Optional[GEXSnapshotRequest] = None):
+async def skill_gex_snapshot(
+    req: Optional[GEXSnapshotRequest] = None,
+    underlying: Optional[str] = None,
+    symbol: Optional[str] = None,
+    expiry: Optional[str] = None,
+):
     """
     Snapshot for the Quant & Options Desk:
     Returns genuine Gamma Exposure Profile (GEX), Delta Hedging Recommendations,
@@ -6488,7 +6888,9 @@ async def skill_gex_snapshot(req: Optional[GEXSnapshotRequest] = None):
         from engine.greeks_manager import LOT_SIZES
 
         raw_in = None
-        if req:
+        if symbol or underlying:
+            raw_in = symbol or underlying
+        elif req:
             raw_in = req.symbol or req.underlying
         clean_raw = (raw_in if raw_in else "NIFTY").strip().upper()
         clean_sym = (
@@ -6502,7 +6904,7 @@ async def skill_gex_snapshot(req: Optional[GEXSnapshotRequest] = None):
         norm_inst = normalize_instrument(clean_sym)
 
         # 1. Fetch authentic live spot quote & option contracts off the event loop
-        req_exp = req.expiry.strip() if req and req.expiry else None
+        req_exp = (expiry or (req.expiry if req else None) or "").strip() or None
         quote, contracts, chain_spot, expiries, source_info = await asyncio.to_thread(
             _fetch_options_and_spot, clean_sym, norm_inst, req_exp
         )
@@ -6523,17 +6925,22 @@ async def skill_gex_snapshot(req: Optional[GEXSnapshotRequest] = None):
         now_time = source_info.get("as_of_display") or datetime.now().strftime("%I:%M:%S %p IST")
         active_expiry = req_exp or (expiries[0] if expiries else "")
 
-        lot_sz = LOT_SIZES.get(
-            clean_sym, 75 if "NIFTY" in clean_sym else (20 if clean_sym == "SENSEX" else 250)
+        lot_sz = (
+            1
+            if clean_sym in ("BTC", "ETH", "SOL")
+            else LOT_SIZES.get(
+                clean_sym, 75 if "NIFTY" in clean_sym else (20 if clean_sym == "SENSEX" else 250)
+            )
         )
 
         # Venue-specific check if no contracts exist
         if not contracts:
+            is_crypto = clean_sym in ("BTC", "ETH", "SOL")
             is_bse = clean_sym in ("SENSEX", "BANKEX")
             return _ok(
                 {
                     "underlying": clean_sym,
-                    "exchange": "BSE" if is_bse else "NSE",
+                    "exchange": "DERIBIT" if is_crypto else ("BSE" if is_bse else "NSE"),
                     "expiry": active_expiry,
                     "expiries": expiries,
                     "spot_price": round(spot, 2),
@@ -6760,7 +7167,9 @@ async def skill_gex_snapshot(req: Optional[GEXSnapshotRequest] = None):
                             action_label = (
                                 ("CALL SQUEEZE SURGE" if is_panic else "CALL BUY AGGRESSION")
                                 if is_mkt_open
-                                else ("CALL SQUEEZE (PREV EOD)" if is_panic else "CALL BUY (PREV EOD)")
+                                else (
+                                    "CALL SQUEEZE (PREV EOD)" if is_panic else "CALL BUY (PREV EOD)"
+                                )
                             )
 
                             raw_candidates_ce.append(
@@ -6772,7 +7181,9 @@ async def skill_gex_snapshot(req: Optional[GEXSnapshotRequest] = None):
                                     "title": f"₹{int(k):,} CE • {action_label}",
                                     "score": score,
                                     "subtype": subtype,
-                                    "blast_reason": reason if is_mkt_open else f"[PREV EOD] {reason}",
+                                    "blast_reason": reason
+                                    if is_mkt_open
+                                    else f"[PREV EOD] {reason}",
                                     "reason": reason if is_mkt_open else f"[PREV EOD] {reason}",
                                     "imbalance_ratio": round(ce_imb, 1),
                                     "side": "BUY",
@@ -6788,7 +7199,9 @@ async def skill_gex_snapshot(req: Optional[GEXSnapshotRequest] = None):
                                     # Actionable blueprint
                                     "action_title": action_title,
                                     "action_type": "BUY_CALL",
-                                    "action_recommendation": "BUY (CALL MOMENTUM)" if is_mkt_open else "WATCH (PREV EOD MOMENTUM)",
+                                    "action_recommendation": "BUY (CALL MOMENTUM)"
+                                    if is_mkt_open
+                                    else "WATCH (PREV EOD MOMENTUM)",
                                     "premium": prem,
                                     "entry_price": prem,
                                     "entry_range": entry_range,
@@ -6807,7 +7220,8 @@ async def skill_gex_snapshot(req: Optional[GEXSnapshotRequest] = None):
                                     "when_to_hold": f"Hold while contract respects ₹{round(prem * 0.88, 1):,} and Spot advances",
                                     "when_to_wait": f"DO NOT CHASE if premium > ₹{round(prem * 1.15, 1):,}. Wait for pullback to ₹{entry_low:,.2f}",
                                     "profit_rule": f"Book 50% profit at Target 1 (₹{t1_prem:,.2f}), trail Stop Loss to Cost for Target 2 (₹{t2_prem:,.2f})",
-                                    "is_realtime": source_info.get("is_realtime", True) and is_mkt_open,
+                                    "is_realtime": source_info.get("is_realtime", True)
+                                    and is_mkt_open,
                                     "environment": "LIVE"
                                     if (source_info.get("is_realtime", True) and is_mkt_open)
                                     else "OFF_MARKET",
@@ -6887,7 +7301,9 @@ async def skill_gex_snapshot(req: Optional[GEXSnapshotRequest] = None):
                             action_label = (
                                 ("PUT PANIC BREAKDOWN" if is_panic else "PUT BUY PRESSURE")
                                 if is_mkt_open
-                                else ("PUT PANIC (PREV EOD)" if is_panic else "PUT DEMAND (PREV EOD)")
+                                else (
+                                    "PUT PANIC (PREV EOD)" if is_panic else "PUT DEMAND (PREV EOD)"
+                                )
                             )
 
                             raw_candidates_pe.append(
@@ -6899,7 +7315,9 @@ async def skill_gex_snapshot(req: Optional[GEXSnapshotRequest] = None):
                                     "title": f"₹{int(k):,} PE • {action_label}",
                                     "score": score,
                                     "subtype": subtype,
-                                    "blast_reason": reason if is_mkt_open else f"[PREV EOD] {reason}",
+                                    "blast_reason": reason
+                                    if is_mkt_open
+                                    else f"[PREV EOD] {reason}",
                                     "reason": reason if is_mkt_open else f"[PREV EOD] {reason}",
                                     "imbalance_ratio": round(pe_imb, 1),
                                     "side": "BUY",
@@ -6915,7 +7333,9 @@ async def skill_gex_snapshot(req: Optional[GEXSnapshotRequest] = None):
                                     # Actionable blueprint
                                     "action_title": action_title,
                                     "action_type": "BUY_PUT",
-                                    "action_recommendation": "BUY (PUT BREAKDOWN)" if is_mkt_open else "WATCH (PREV EOD MOMENTUM)",
+                                    "action_recommendation": "BUY (PUT BREAKDOWN)"
+                                    if is_mkt_open
+                                    else "WATCH (PREV EOD MOMENTUM)",
                                     "premium": prem,
                                     "entry_price": prem,
                                     "entry_range": entry_range,
@@ -6934,7 +7354,8 @@ async def skill_gex_snapshot(req: Optional[GEXSnapshotRequest] = None):
                                     "when_to_hold": f"Hold while contract respects ₹{round(prem * 0.88, 1):,} and Spot drifts lower",
                                     "when_to_wait": f"DO NOT CHASE if premium > ₹{round(prem * 1.15, 1):,}. Wait for pullback to ₹{entry_low:,.2f}",
                                     "profit_rule": f"Book 50% profit at Target 1 (₹{t1_prem:,.2f}), trail Stop Loss to Cost for Target 2 (₹{t2_prem:,.2f})",
-                                    "is_realtime": source_info.get("is_realtime", True) and is_mkt_open,
+                                    "is_realtime": source_info.get("is_realtime", True)
+                                    and is_mkt_open,
                                     "environment": "LIVE"
                                     if (source_info.get("is_realtime", True) and is_mkt_open)
                                     else "OFF_MARKET",
@@ -7143,6 +7564,7 @@ async def skill_gex_snapshot(req: Optional[GEXSnapshotRequest] = None):
         except Exception as _ce:
             try:
                 from engine.conviction_score import _CONVICTION_CACHE
+
                 cached_entry = _CONVICTION_CACHE.get(clean_sym)
                 if cached_entry:
                     conviction_data = cached_entry[1].as_dict()
@@ -7152,7 +7574,9 @@ async def skill_gex_snapshot(req: Optional[GEXSnapshotRequest] = None):
         return _ok(
             {
                 "underlying": clean_sym,
-                "exchange": "BSE" if clean_sym in ("SENSEX", "BANKEX") else "NSE",
+                "exchange": "DERIBIT"
+                if clean_sym in ("BTC", "ETH", "SOL")
+                else ("BSE" if clean_sym in ("SENSEX", "BANKEX") else "NSE"),
                 "expiry": active_expiry,
                 "expiries": expiries[:8] if expiries else [],
                 "spot_price": round(spot, 2),
@@ -7166,7 +7590,9 @@ async def skill_gex_snapshot(req: Optional[GEXSnapshotRequest] = None):
                 "source_label": source_info.get("source_label", "Unverified Feed"),
                 "is_realtime": source_info.get("is_realtime", False),
                 "is_market_open": source_info.get("is_market_open", False),
-                "market_status": "OPEN" if source_info.get("is_market_open", False) else "CLOSED (Pre-Market / Off-Hours)",
+                "market_status": "OPEN"
+                if source_info.get("is_market_open", False)
+                else "CLOSED (Pre-Market / Off-Hours)",
                 "pcr": pcr_val,
                 "pcr_sentiment": pcr_sentiment,
                 "max_pain": max_pain,
@@ -7485,25 +7911,82 @@ class PersonaAnalyzeRequest(BaseModel):
     exchange: str = "NSE"
 
 
+def _persona_council_sync(req: CouncilRequest):
+    sym = (req.symbol or "RELIANCE").upper().strip()
+    council = (req.council or "breakout").lower().strip()
+    exch = (req.exchange or "NSE").upper().strip()
+    cache_key = f"persona_council_{council}_{sym}_{exch}"
+    try:
+        from engine.analysis_cache import analysis_cache
+
+        cached = analysis_cache.get_macro(cache_key)
+        if cached and isinstance(cached, dict) and cached.get("symbol") == sym:
+            return _ok(cached)
+    except Exception:
+        pass
+
+    from agent.persona_agent import run_council
+
+    res = run_council(
+        council_name=council,
+        symbol=sym,
+        exchange=exch,
+        llm_provider="auto",
+    )
+    if "signals" in res:
+        res["signals"] = [s.to_dict() if hasattr(s, "to_dict") else s for s in res["signals"]]
+
+    try:
+        from engine.analysis_cache import analysis_cache
+
+        analysis_cache.save_macro(cache_key, res, ttl_minutes=15)
+    except Exception:
+        pass
+    return _ok(res)
+
+
 @router.post("/persona/council")
 @router.post("/skills/persona/council")
 async def skill_persona_council(req: CouncilRequest):
     """Run a specialized council of research-framework lenses on a stock symbol."""
     try:
-        from agent.persona_agent import run_council
+        import asyncio
 
-        res = run_council(
-            council_name=req.council,
-            symbol=req.symbol,
-            exchange=req.exchange,
-            llm_provider="auto",
-        )
-        # Convert PersonaSignal objects to dict
-        if "signals" in res:
-            res["signals"] = [s.to_dict() if hasattr(s, "to_dict") else s for s in res["signals"]]
-        return _ok(res)
+        return await asyncio.to_thread(_persona_council_sync, req)
     except Exception as e:
         raise _err(str(e))
+
+
+def _persona_analyze_sync(req: PersonaAnalyzeRequest):
+    sym = (req.symbol or "RELIANCE").upper().strip()
+    persona_id = (req.persona_id or "minervini").lower().strip()
+    exch = (req.exchange or "NSE").upper().strip()
+    cache_key = f"persona_analyze_{persona_id}_{sym}_{exch}"
+    try:
+        from engine.analysis_cache import analysis_cache
+
+        cached = analysis_cache.get_macro(cache_key)
+        if cached and isinstance(cached, dict) and cached.get("persona") == persona_id:
+            return _ok(cached)
+    except Exception:
+        pass
+
+    from agent.persona_agent import run_persona_analysis
+
+    sig = run_persona_analysis(
+        persona_id=persona_id,
+        symbol=sym,
+        exchange=exch,
+        llm_provider="auto",
+    )
+    res = sig.to_dict() if hasattr(sig, "to_dict") else sig
+    try:
+        from engine.analysis_cache import analysis_cache
+
+        analysis_cache.save_macro(cache_key, res, ttl_minutes=15)
+    except Exception:
+        pass
+    return _ok(res)
 
 
 @router.post("/persona/analyze")
@@ -7511,15 +7994,9 @@ async def skill_persona_council(req: CouncilRequest):
 async def skill_persona_analyze(req: PersonaAnalyzeRequest):
     """Analyze a stock through a selected research-framework lens."""
     try:
-        from agent.persona_agent import run_persona_analysis
+        import asyncio
 
-        sig = run_persona_analysis(
-            persona_id=req.persona_id,
-            symbol=req.symbol,
-            exchange=req.exchange,
-            llm_provider="auto",
-        )
-        return _ok(sig.to_dict())
+        return await asyncio.to_thread(_persona_analyze_sync, req)
     except Exception as e:
         raise _err(str(e))
 

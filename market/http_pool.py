@@ -20,6 +20,7 @@ logger = logging.getLogger("chanakya.http_pool")
 
 _SHARED_CLIENT: Optional[httpx.Client] = None
 _NSE_CLIENT: Optional[httpx.Client] = None
+_BINANCE_CLIENT: Optional[httpx.Client] = None
 _CLIENT_LOCK = threading.Lock()
 _NSE_LAST_INIT: float = 0.0
 _NSE_COOKIE_TTL = 300.0  # 5 minutes cookie freshness
@@ -100,9 +101,37 @@ def get_nse_client() -> httpx.Client:
     return _NSE_CLIENT
 
 
+def get_binance_client() -> httpx.Client:
+    """
+    Get or create the singleton Binance REST API client.
+
+    Uses HTTP/1.1 keep-alive with persistent connections to api.binance.com and
+    fapi.binance.com. Eliminates per-call TLS handshake overhead (50-150ms)
+    on every REST fallback call in crypto_stream and crypto_options.
+
+    Note: httpx HTTP/2 requires the h2 package. We use HTTP/1.1 keep-alive here
+    which is fully sufficient for Binance REST — their servers keep connections
+    alive for 60s which amortises the TLS cost across many requests.
+    """
+    global _BINANCE_CLIENT
+    if _BINANCE_CLIENT is None or _BINANCE_CLIENT.is_closed:
+        with _CLIENT_LOCK:
+            if _BINANCE_CLIENT is None or _BINANCE_CLIENT.is_closed:
+                _BINANCE_CLIENT = httpx.Client(
+                    follow_redirects=True,
+                    timeout=httpx.Timeout(8.0, connect=4.0),
+                    limits=httpx.Limits(
+                        max_keepalive_connections=8,
+                        max_connections=16,
+                        keepalive_expiry=60.0,
+                    ),
+                )
+    return _BINANCE_CLIENT
+
+
 def close_http_pools() -> None:
     """Deterministically close all pooled HTTP clients and release socket connections."""
-    global _SHARED_CLIENT, _NSE_CLIENT, _NSE_LAST_INIT
+    global _SHARED_CLIENT, _NSE_CLIENT, _BINANCE_CLIENT, _NSE_LAST_INIT
     with _CLIENT_LOCK:
         if _SHARED_CLIENT is not None:
             try:
@@ -118,3 +147,10 @@ def close_http_pools() -> None:
                 pass
             _NSE_CLIENT = None
             _NSE_LAST_INIT = 0.0
+
+        if _BINANCE_CLIENT is not None:
+            try:
+                _BINANCE_CLIENT.close()
+            except Exception:
+                pass
+            _BINANCE_CLIENT = None

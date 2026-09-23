@@ -31,15 +31,17 @@ from __future__ import annotations
 import logging
 import uuid
 from datetime import datetime, timezone, timedelta, time as dtime
-from typing import Any, Optional
+from typing import Optional
 from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
 
 from engine.alert_model import AutoAlert
+from engine.option_resolver import resolve_option_contract, is_index_symbol
 
 logger = logging.getLogger("chanakya.detectors.orb")
+
 
 try:
     IST = ZoneInfo("Asia/Kolkata")
@@ -165,7 +167,9 @@ def detect_opening_range_breakout(
     range_pct = (orb_range / ltp) * 100.0
     # Guard against flat chop (< 0.25% range has no expansion velocity)
     if range_pct < 0.25:
-        logger.debug(f"[ORB] {symbol} opening range too narrow ({range_pct:.2f}% < 0.25%), skipping.")
+        logger.debug(
+            f"[ORB] {symbol} opening range too narrow ({range_pct:.2f}% < 0.25%), skipping."
+        )
         return None
     # Guard against exhausted opening bar (> 3.5% range has consumed session ATR)
     if range_pct > 3.5:
@@ -173,7 +177,12 @@ def detect_opening_range_breakout(
         return None
 
     is_index = symbol.upper() in (
-        "NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX"
+        "NIFTY",
+        "BANKNIFTY",
+        "FINNIFTY",
+        "MIDCPNIFTY",
+        "SENSEX",
+        "BANKEX",
     )
 
     # 4. Evaluate Breakout Direction
@@ -229,7 +238,9 @@ def detect_opening_range_breakout(
 
             dir_eval = "BULLISH" if is_bullish else "BEARISH"
             conf_res = detect_confirmation_candle(df, direction=dir_eval)
-            is_candle_confirmed = bool(conf_res.get("confirmed")) if isinstance(conf_res, dict) else False
+            is_candle_confirmed = (
+                bool(conf_res.get("confirmed")) if isinstance(conf_res, dict) else False
+            )
             conf_candle = conf_res.get("pattern") if isinstance(conf_res, dict) else None
 
             div_res = detect_divergence(df)
@@ -280,7 +291,9 @@ def detect_opening_range_breakout(
             f"{rvol_val:.1f}x RVOL and VWAP support. Stop-Loss at Midpoint ₹{orb_mid:,.1f}."
         )
         when_buy = f"Enter on Ask or 5m retest of ₹{orb_high:,.1f} holding above VWAP."
-        when_wait = f"DO NOT CHASE above ₹{no_chase_lvl:,.1f}; wait for retest of Opening Range High."
+        when_wait = (
+            f"DO NOT CHASE above ₹{no_chase_lvl:,.1f}; wait for retest of Opening Range High."
+        )
     else:
         trigger_level = orb_low
         stop_loss = orb_mid
@@ -292,15 +305,15 @@ def detect_opening_range_breakout(
         entry_max = round(min(stop_loss - 0.5, ltp * 1.002), 1)
         entry_min = round(max(target_1 + 0.5, no_chase_lvl), 1)
         rr_ratio = round((ltp - target_1) / max(0.1, risk_pts), 1)
-        headline = (
-            f"⚡ ORB-15 BREAKDOWN: {symbol} at ₹{ltp:,.1f} (Broke Range Low ₹{orb_low:,.1f})"
-        )
+        headline = f"⚡ ORB-15 BREAKDOWN: {symbol} at ₹{ltp:,.1f} (Broke Range Low ₹{orb_low:,.1f})"
         summary = (
             f"15-min Opening Range Breakdown confirmed! Low ₹{orb_low:,.1f} breached with "
             f"{rvol_val:.1f}x RVOL and sub-VWAP pressure. Stop-Loss at Midpoint ₹{orb_mid:,.1f}."
         )
         when_buy = f"Short on Bid or 5m retest of ₹{orb_low:,.1f} staying below VWAP."
-        when_wait = f"DO NOT CHASE below ₹{no_chase_lvl:,.1f}; wait for retest of Opening Range Low."
+        when_wait = (
+            f"DO NOT CHASE below ₹{no_chase_lvl:,.1f}; wait for retest of Opening Range Low."
+        )
 
     confidence = 82
     if rvol_val >= 2.0:
@@ -309,9 +322,91 @@ def detect_opening_range_breakout(
         confidence += 4
     if is_candle_confirmed:
         confidence += 5
-    if div_type and ((is_bullish and div_bias == "BULLISH") or (is_bearish and div_bias == "BEARISH")):
+    if div_type and (
+        (is_bullish and div_bias == "BULLISH") or (is_bearish and div_bias == "BEARISH")
+    ):
         confidence += 4
     confidence = min(96, confidence)
+
+    clean_sym = symbol.upper().replace("NSE:", "").replace("BSE:", "").strip()
+    is_idx = is_index_symbol(clean_sym)
+    opt_plan = (
+        resolve_option_contract(
+            symbol=clean_sym,
+            spot=ltp,
+            direction=direction,
+            underlying_sl=stop_loss,
+            underlying_target=target_1,
+        )
+        if is_idx
+        else None
+    )
+
+    if opt_plan:
+        opt_headline = f"⚡ ORB-15 {'BREAKOUT' if is_bullish else 'BREAKDOWN'}: {opt_plan.contract_symbol} @ ₹{opt_plan.entry_premium:,.1f} (Spot ₹{ltp:,.1f})"
+        act_plan = {
+            "action": f"BUY {opt_plan.option_type}",
+            "contract": opt_plan.contract_symbol,
+            "instrument": opt_plan.contract_symbol,
+            "instrument_type": "OPTION",
+            "recommended_entry": f"₹{opt_plan.entry_premium:,.2f}",
+            "stop_loss": f"₹{opt_plan.sl_premium:,.1f}",
+            "target": f"₹{opt_plan.t1_premium:,.1f}",
+            "target_1": f"₹{opt_plan.t1_premium:,.1f}",
+            "target_2": f"₹{opt_plan.t2_premium:,.1f}",
+            "risk_reward": f"1:{rr_ratio:.1f}",
+            "underlying_spot": f"₹{ltp:,.1f}",
+            "underlying_sl": f"₹{stop_loss:,.1f}",
+            "underlying_target": f"₹{target_1:,.1f}",
+            "option_type": opt_plan.option_type,
+            "strike": opt_plan.strike,
+            "option_plan": opt_plan.as_dict(),
+            "when_to_buy": f"Buy {opt_plan.contract_symbol} while {clean_sym} spot holds {'above' if is_bullish else 'below'} ₹{trigger_level:,.1f}.",
+            "when_to_wait": when_wait,
+            "profit_rule": "Book 50% at T1, move Stop-Loss to Breakeven, trail runner on 5m 20-EMA.",
+        }
+        return AutoAlert(
+            alert_id=alert_id,
+            alert_type=alert_type,
+            stage="IGNITED",
+            symbol=clean_sym,
+            exchange="NFO",
+            direction=direction,
+            headline=opt_headline,
+            summary=summary,
+            ltp=opt_plan.entry_premium,
+            trigger_level=opt_plan.entry_premium,
+            target_level=opt_plan.t1_premium,
+            stop_loss=opt_plan.sl_premium,
+            strike=opt_plan.strike,
+            option_type=opt_plan.option_type,
+            contract_symbol=opt_plan.contract_symbol,
+            option_premium=opt_plan.entry_premium,
+            underlying_spot=ltp,
+            lot_size=opt_plan.lot_size,
+            segment="FNO_INDEX",
+            no_chase_boundary=no_chase_lvl,
+            confidence=confidence,
+            created_at=now_iso,
+            is_live=True,
+            environment="LIVE",
+            entry_type="LIMIT_ON_PULLBACK",
+            setup_style="CONTINUATION",
+            metrics={
+                "orb_high": orb_high,
+                "orb_low": orb_low,
+                "orb_range": orb_range,
+                "orb_mid": orb_mid,
+                "range_pct": round(range_pct, 2),
+                "rvol": round(rvol_val, 2),
+                "vwap": vwap,
+                "target_2": target_2,
+                "target_3": target_3,
+                "confirmation_candle": conf_candle,
+                "divergence_type": div_type,
+            },
+            actionable_plan=act_plan,
+        )
 
     return AutoAlert(
         alert_id=alert_id,

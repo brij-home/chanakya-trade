@@ -26,6 +26,7 @@ import re
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone, timedelta
+import os
 import threading
 import time
 from typing import Any, Optional
@@ -74,7 +75,6 @@ INDEX_MIN_SL_FLOORS: dict[str, float] = {
 }
 
 
-
 @dataclass
 class ScrutinyResult:
     """Institutional scrutiny verdict and risk analysis dossier."""
@@ -104,7 +104,8 @@ class AlertScrutinyAuditor:
     """
 
     def __init__(self, min_rr_ratio: float = 1.3, max_intraday_risk_pct: float = 8.0) -> None:
-        self.min_rr_ratio = min_rr_ratio
+        drift_rr = float(os.environ.get("CHANAKYA_MIN_RR_OVERRIDE", "0"))
+        self.min_rr_ratio = max(min_rr_ratio, drift_rr) if drift_rr > 0 else min_rr_ratio
         self.max_intraday_risk_pct = max_intraday_risk_pct
         self._cache: dict[str, tuple[float, ScrutinyResult]] = {}
         self._cache_lock = threading.Lock()
@@ -302,12 +303,14 @@ class AlertScrutinyAuditor:
         except Exception:
             vix_val = None
 
-        req_rr = self.min_rr_ratio
+        drift_rr = float(os.environ.get("CHANAKYA_MIN_RR_OVERRIDE", "0"))
+        active_min_rr = max(self.min_rr_ratio, drift_rr) if drift_rr > 0 else self.min_rr_ratio
+        req_rr = active_min_rr
         if vix_val and vix_val > 0:
             if vix_val > 18.0:
-                req_rr = max(self.min_rr_ratio, 2.0)
+                req_rr = max(active_min_rr, 2.0)
             elif vix_val < 11.5:
-                req_rr = min(self.min_rr_ratio, 1.3)
+                req_rr = min(active_min_rr, 1.3)
 
             # Extreme Tail Risk Gate: If VIX > 25.0, naked option buying carries extreme IV crush hazard
             if vix_val > 25.0 and is_option_premium_levels:
@@ -332,9 +335,10 @@ class AlertScrutinyAuditor:
         plan = getattr(alert, "actionable_plan", {}) or {}
         tp_dict = plan.get("trade_plan") if isinstance(plan, dict) else None
         if isinstance(tp_dict, dict):
-            if tp_dict.get("is_asymmetry_viable") is False or str(
-                tp_dict.get("asymmetry_verdict", "")
-            ).upper() == "POOR_ASYMMETRY_REJECTED":
+            if (
+                tp_dict.get("is_asymmetry_viable") is False
+                or str(tp_dict.get("asymmetry_verdict", "")).upper() == "POOR_ASYMMETRY_REJECTED"
+            ):
                 flags["rr_valid"] = False
                 return (
                     False,
@@ -344,7 +348,9 @@ class AlertScrutinyAuditor:
 
         # 4c-iv. Physical Settlement Expiry Week Warning for Single-Stock Options & Futures
         sym_raw = str(getattr(alert, "symbol", "") or "").upper()
-        is_futures = "FUT" in sym_raw or str(getattr(alert, "instrument_type", "")).upper() == "FUTURE"
+        is_futures = (
+            "FUT" in sym_raw or str(getattr(alert, "instrument_type", "")).upper() == "FUTURE"
+        )
         if (is_option_premium_levels or is_futures) and clean_sym not in INDEX_MIN_SL_FLOORS:
             exp_str = getattr(alert, "expiry_date", None)
             metrics = getattr(alert, "metrics", {}) or {}
@@ -352,6 +358,7 @@ class AlertScrutinyAuditor:
                 exp_str = metrics.get("expiry") or metrics.get("expiry_date")
             try:
                 from engine.alert_expiry import is_monthly_physical_expiry_week
+
                 if is_monthly_physical_expiry_week(exp_str, symbol=clean_sym):
                     flags["physical_settlement_week"] = True
                     is_rollover = isinstance(metrics, dict) and (
@@ -413,9 +420,13 @@ class AlertScrutinyAuditor:
                     )
 
         # 4e. Global Macro Divergence Gate for MCX Bullion & Energy (Futures)
-        if (
-            not is_option_premium_levels
-            and clean_sym in ("GOLD", "GOLDM", "SILVER", "SILVERM", "CRUDEOIL", "CRUDEOILM")
+        if not is_option_premium_levels and clean_sym in (
+            "GOLD",
+            "GOLDM",
+            "SILVER",
+            "SILVERM",
+            "CRUDEOIL",
+            "CRUDEOILM",
         ):
             try:
                 from market.macro import get_macro_snapshot
@@ -460,6 +471,57 @@ class AlertScrutinyAuditor:
                             )
             except Exception:
                 pass
+
+        # 4f. Obstacle Runway Gate (Eliminate Stuck Signals hitting immediate brick walls)
+        # Verifies that Target 1 is not obstructed by an immediate heavy resistance / Max OI wall
+        # closer than 1.25x risk distance.
+        metrics = getattr(alert, "metrics", {}) or {}
+        if isinstance(metrics, dict) and not is_option_premium_levels:
+            call_wall = metrics.get("max_call_oi_strike") or metrics.get("call_oi_wall")
+            put_wall = metrics.get("max_put_oi_strike") or metrics.get("put_oi_wall")
+            pdh = metrics.get("pdh") or metrics.get("prior_high")
+            pdl = metrics.get("pdl") or metrics.get("prior_low")
+
+            is_bull = direction in ("BULLISH", "LONG", "BUY")
+            if is_bull:
+                obstacles = [float(o) for o in (call_wall, pdh) if o and float(o) > ltp]
+                if obstacles:
+                    nearest_obs = min(obstacles)
+                    obs_dist = nearest_obs - ltp
+                    # If an obstacle lies within 1.25x of the risk distance, the trade will stall at the wall
+                    if obs_dist < (1.25 * risk_pts) and obs_dist < (0.75 * reward_pts):
+                        flags["obstacle_runway_clear"] = False
+                        flags["trap_immediate_resistance"] = True
+                        logger.debug(
+                            f"[AlertScrutiny] Obstacle Runway Trap: {clean_sym} Bullish setup obstructed by wall at ₹{nearest_obs:.1f} (only {obs_dist:.1f} pts away vs {risk_pts:.1f} pts risk)"
+                        )
+            else:
+                obstacles = [float(o) for o in (put_wall, pdl) if o and float(o) < ltp]
+                if obstacles:
+                    nearest_obs = max(obstacles)
+                    obs_dist = ltp - nearest_obs
+                    if obs_dist < (1.25 * risk_pts) and obs_dist < (0.75 * reward_pts):
+                        flags["obstacle_runway_clear"] = False
+                        flags["trap_immediate_support"] = True
+                        logger.debug(
+                            f"[AlertScrutiny] Obstacle Runway Trap: {clean_sym} Bearish setup obstructed by floor at ₹{nearest_obs:.1f} (only {obs_dist:.1f} pts away vs {risk_pts:.1f} pts risk)"
+                        )
+
+            # 4g. Volume Profile Airspace Clearance (LVN vs HVN Congestion Check)
+            # Identifies whether Target 1 enters clean Low Volume Node (LVN) airspace or risks stalling at Volume POC
+            poc_val = metrics.get("poc") or metrics.get("point_of_control")
+            if poc_val and ltp > 0:
+                try:
+                    poc_f = float(poc_val)
+                    # If target is on POC within 0.3%, price risks getting trapped at equilibrium
+                    if abs(t1 - poc_f) / ltp < 0.003 and abs(ltp - poc_f) / ltp > 0.005:
+                        flags["hvn_congestion_risk"] = True
+                    else:
+                        flags["lvn_vacuum_clear"] = True
+                except (ValueError, TypeError):
+                    pass
+            elif metrics.get("is_lvn_vacuum"):
+                flags["lvn_vacuum_clear"] = True
 
         # 5. Strict "No Chase" Gate
         # Disqualify if price has already blown past trigger by >2.5% without retest
@@ -532,6 +594,98 @@ class AlertScrutinyAuditor:
         except Exception:
             pass
 
+        # 7b. Opposing Major Zone Collision Gate (Truncated Headroom):
+        # Prevent buying right beneath a major overhead supply zone (PDH/Day High) or shorting right above major demand (PDL/Day Low)
+        ref_spot = float(spot_val or (ltp if not is_option_premium_levels else 0.0))
+        if ref_spot > 0:
+            is_bull_setup = direction in ("BULLISH", "LONG", "BUY") or (
+                has_opt_marker and getattr(alert, "option_type", "") == "CE"
+            )
+            is_bear_setup = direction in ("BEARISH", "SHORT", "SELL") or (
+                has_opt_marker and getattr(alert, "option_type", "") == "PE"
+            )
+
+            if is_bull_setup and not is_bear_setup:
+                overhead_barriers: list[tuple[float, str]] = []
+                pdh = float(metrics_dict.get("prev_day_high") or 0.0)
+                pwh = float(metrics_dict.get("prev_week_high") or 0.0)
+                dh = float(metrics_dict.get("day_high") or 0.0)
+                dl = float(metrics_dict.get("day_low") or 0.0)
+                if dh > ref_spot and dl > 0 and ((dh - dl) / ref_spot) >= 0.0025:
+                    overhead_barriers.append((dh, "Day High"))
+                if pdh > ref_spot:
+                    overhead_barriers.append((pdh, "Previous Day High (PDH)"))
+                if pwh > ref_spot:
+                    overhead_barriers.append((pwh, "Previous Week High (PWH)"))
+
+                for barrier_lvl, barrier_name in overhead_barriers:
+                    headroom_pts = barrier_lvl - ref_spot
+                    headroom_pct = (headroom_pts / ref_spot) * 100.0
+                    if 0.0 < headroom_pct < 0.15:
+                        return (
+                            False,
+                            f"Opposing Supply Collision: Spot (₹{ref_spot:,.1f}) is right beneath {barrier_name} (₹{barrier_lvl:,.1f}, only {headroom_pts:.1f} pts / {headroom_pct:.2f}% headroom); avoid buying into resistance",
+                            flags,
+                        )
+            elif is_bear_setup and not is_bull_setup:
+                underneath_barriers: list[tuple[float, str]] = []
+                pdl = float(metrics_dict.get("prev_day_low") or 0.0)
+                pwl = float(metrics_dict.get("prev_week_low") or 0.0)
+                dh = float(metrics_dict.get("day_high") or 0.0)
+                dl = float(metrics_dict.get("day_low") or 0.0)
+                if dl > 0 and dl < ref_spot and dh > 0 and ((dh - dl) / ref_spot) >= 0.0025:
+                    underneath_barriers.append((dl, "Day Low"))
+                if pdl > 0 and pdl < ref_spot:
+                    underneath_barriers.append((pdl, "Previous Day Low (PDL)"))
+                if pwl > 0 and pwl < ref_spot:
+                    underneath_barriers.append((pwl, "Previous Week Low (PWL)"))
+
+                for barrier_lvl, barrier_name in underneath_barriers:
+                    headroom_pts = ref_spot - barrier_lvl
+                    headroom_pct = (headroom_pts / ref_spot) * 100.0
+                    if 0.0 < headroom_pct < 0.15:
+                        return (
+                            False,
+                            f"Opposing Demand Collision: Spot (₹{ref_spot:,.1f}) is right above {barrier_name} (₹{barrier_lvl:,.1f}, only {headroom_pts:.1f} pts / {headroom_pct:.2f}% headroom); avoid shorting into support",
+                            flags,
+                        )
+
+        # 7c. VWAP Overextension & Climax Exhaustion Gate:
+        # Disqualify setups where price has moved too far from session VWAP without a base
+        spot_vwap_pct = None
+        if isinstance(metrics_dict, dict) and metrics_dict.get("spot_to_vwap_pct") is not None:
+            try:
+                spot_vwap_pct = float(metrics_dict["spot_to_vwap_pct"])
+            except (ValueError, TypeError):
+                pass
+        if spot_vwap_pct is None:
+            m_vwap = float(
+                (metrics_dict.get("vwap") if isinstance(metrics_dict, dict) else 0.0) or 0.0
+            )
+            if ref_spot > 0 and m_vwap > 0:
+                spot_vwap_pct = round(((ref_spot - m_vwap) / m_vwap) * 100.0, 2)
+
+        if spot_vwap_pct is not None:
+            is_idx = clean_sym in INDEX_MIN_SL_FLOORS
+            max_ext = 0.65 if is_idx else 1.40
+            if (
+                direction in ("BULLISH", "LONG", "BUY") or getattr(alert, "option_type", "") == "CE"
+            ) and spot_vwap_pct > max_ext:
+                return (
+                    False,
+                    f"Climax Exhaustion: Spot is extended +{spot_vwap_pct:.2f}% above VWAP (>{max_ext:.2f}% threshold); wait for pullback to VWAP/20-EMA",
+                    flags,
+                )
+            elif (
+                direction in ("BEARISH", "SHORT", "SELL")
+                or getattr(alert, "option_type", "") == "PE"
+            ) and spot_vwap_pct < -max_ext:
+                return (
+                    False,
+                    f"Capitulation Exhaustion: Spot is extended {spot_vwap_pct:.2f}% below VWAP (<-{max_ext:.2f}% threshold); wait for relief bounce",
+                    flags,
+                )
+
         # 8. Climax / Overbought Exhaustion Filter:
         # Prevent buying the top of a parabolic blow-off or shorting the very bottom of a capitulation
         rsi_val = None
@@ -551,32 +705,31 @@ class AlertScrutinyAuditor:
 
         if rsi_val is not None and rsi_val > 0:
             is_put_option = (
-                atype == "OPTIONS_MOMENTUM" and getattr(alert, "option_type", "") == "PE"
-            )
+                atype in ("OPTIONS_MOMENTUM", "GAMMA_BLAST")
+                and getattr(alert, "option_type", "") == "PE"
+            ) or direction in ("BEARISH", "SHORT", "SELL")
             is_call_option = (
-                atype == "OPTIONS_MOMENTUM" and getattr(alert, "option_type", "") == "CE"
-            )
+                atype in ("OPTIONS_MOMENTUM", "GAMMA_BLAST")
+                and getattr(alert, "option_type", "") == "CE"
+            ) or direction in ("BULLISH", "LONG", "BUY")
 
             tf_str = str(
                 getattr(alert, "timeframe", "")
                 or (metrics_dict.get("timeframe") if isinstance(metrics_dict, dict) else "")
                 or ""
             ).lower()
-            is_intraday = (
-                tf_str in ("5m", "15m", "intraday", "1m", "3m")
-                or atype in (
-                    "OPTIONS_MOMENTUM",
-                    "INTRADAY_SPARK",
-                    "GAMMA_BLAST",
-                    "SQUEEZE_BREAKOUT",
-                    "SQUEEZE_BREAKDOWN",
-                )
+            is_intraday = tf_str in ("5m", "15m", "intraday", "1m", "3m") or atype in (
+                "OPTIONS_MOMENTUM",
+                "INTRADAY_SPARK",
+                "GAMMA_BLAST",
+                "SQUEEZE_BREAKOUT",
+                "SQUEEZE_BREAKDOWN",
             )
             rsi_overbought = 72.0 if is_intraday else 78.0
             rsi_oversold = 28.0 if is_intraday else 22.0
 
             # Long equity / Call option: reject when RSI exceeds threshold
-            if (direction in ("BULLISH", "LONG", "BUY") or is_call_option) and not is_put_option:
+            if is_call_option and not is_put_option:
                 if rsi_val > rsi_overbought:
                     return (
                         False,
@@ -584,9 +737,7 @@ class AlertScrutinyAuditor:
                         flags,
                     )
             # Short equity / Put option (underlying): reject when underlying RSI breaches oversold floor
-            elif (
-                direction in ("BEARISH", "SHORT", "SELL") or is_put_option
-            ) and not is_call_option:
+            elif is_put_option and not is_call_option:
                 if rsi_val < rsi_oversold:
                     return (
                         False,
@@ -605,14 +756,15 @@ class AlertScrutinyAuditor:
                     if ema20_f > 0 and atr_f > 0:
                         dist_from_ema = abs(ltp - ema20_f)
                         tf_str = str(
-                            getattr(alert, "timeframe", "")
-                            or metrics_dict.get("timeframe")
-                            or ""
+                            getattr(alert, "timeframe", "") or metrics_dict.get("timeframe") or ""
                         ).lower()
-                        is_intraday_ema = (
-                            tf_str in ("5m", "15m", "intraday", "1m", "3m")
-                            or atype in ("INTRADAY_SPARK", "SQUEEZE_BREAKOUT", "SQUEEZE_BREAKDOWN")
-                        )
+                        is_intraday_ema = tf_str in (
+                            "5m",
+                            "15m",
+                            "intraday",
+                            "1m",
+                            "3m",
+                        ) or atype in ("INTRADAY_SPARK", "SQUEEZE_BREAKOUT", "SQUEEZE_BREAKDOWN")
                         max_atr_mult = 2.2 if is_intraday_ema else 3.5
                         if dist_from_ema > (max_atr_mult * atr_f):
                             return (
@@ -676,7 +828,9 @@ class AlertScrutinyAuditor:
                     spread_pct = (a - b) / ltp
                     max_spread = (
                         0.06
-                        if (is_option_premium_levels or atype in ("OPTIONS_MOMENTUM", "GAMMA_BLAST"))
+                        if (
+                            is_option_premium_levels or atype in ("OPTIONS_MOMENTUM", "GAMMA_BLAST")
+                        )
                         else 0.015
                     )
                     if spread_pct > max_spread:
@@ -825,7 +979,11 @@ class AlertScrutinyAuditor:
             raw_ts = (
                 getattr(alert, "created_at", None)
                 or getattr(alert, "timestamp", None)
-                or (alert.get("created_at") or alert.get("timestamp") if isinstance(alert, dict) else None)
+                or (
+                    alert.get("created_at") or alert.get("timestamp")
+                    if isinstance(alert, dict)
+                    else None
+                )
             )
             if raw_ts:
                 try:
@@ -848,6 +1006,7 @@ class AlertScrutinyAuditor:
 
             curr_time = alert_dt.time()
             from datetime import time as dtime
+
             if dtime(11, 30) <= curr_time <= dtime(13, 0):
                 rvol = None
                 if isinstance(metrics_dict, dict):
@@ -929,7 +1088,9 @@ class AlertScrutinyAuditor:
                                 n_chg = float(getattr(q_obj, "change_pct", 0.0) or 0.0)
                                 if n_ltp > 0:
                                     nifty_change = n_chg
-                                    nifty_below_vwap = (n_ltp < n_vwap) if n_vwap > 0 else (n_chg < 0)
+                                    nifty_below_vwap = (
+                                        (n_ltp < n_vwap) if n_vwap > 0 else (n_chg < 0)
+                                    )
                                     break
                 except Exception:
                     pass
@@ -951,46 +1112,138 @@ class AlertScrutinyAuditor:
                         or getattr(alert, "sector", "")
                     ).upper()
                     rrg_quad = str(
-                        (
-                            metrics_dict.get("rrg_quadrant")
-                            if isinstance(metrics_dict, dict)
-                            else ""
-                        )
+                        (metrics_dict.get("rrg_quadrant") if isinstance(metrics_dict, dict) else "")
                         or getattr(alert, "rrg_quadrant", "")
                     ).upper()
-                    is_defensive_leader = any(
-                        d in sec_name for d in ("PHARMA", "FMCG", "HEALTH")
-                    ) and rrg_quad in ("LEADING", "IMPROVING")
+                    # Institutional Decoupler Recognition (SEPA / Outperforming Leaders):
+                    # A stock with massive independent institutional participation, high RVOL, or explosive option volume
+                    # is an institutional leader decoupling from market drag (e.g. SWIGGY +4.16%, Call +254%).
+                    vol_oi_val = float((metrics_dict or {}).get("vol_oi_ratio", 0.0) or 0.0)
+                    opt_vol = int((metrics_dict or {}).get("volume", 0) or 0)
+                    opt_pch = float(
+                        (metrics_dict or {}).get("pchange", 0.0)
+                        or (metrics_dict or {}).get("option_pchange", 0.0)
+                        or (metrics_dict or {}).get("opt_pchange", 0.0)
+                        or 0.0
+                    )
+                    spot_chg = float(
+                        (metrics_dict or {}).get("spot_change_pct", 0.0)
+                        or (metrics_dict or {}).get("change_pct", 0.0)
+                        or 0.0
+                    )
+                    rvol_val = float(
+                        (metrics_dict or {}).get("rvol", 0.0)
+                        or (metrics_dict or {}).get("tod_rvol", 0.0)
+                        or 0.0
+                    )
+
+                    # Explicit decoupler tag from upstream scan engine (highest precedence)
+                    upstream_decoupler_tag = str(
+                        (metrics_dict or {}).get("decoupler_status", "") or ""
+                    ).upper()
+                    is_upstream_decoupler = upstream_decoupler_tag == "VERIFIED_DECOUPLER"
+
+                    is_defensive_leader = bool(
+                        any(d in sec_name for d in ("PHARMA", "FMCG", "HEALTH", "CONSUMER"))
+                        and (spot_chg >= 0.5 or rrg_quad in ("LEADING", "IMPROVING"))
+                    )
+                    is_options_surge_decoupler = bool(
+                        vol_oi_val >= 2.0
+                        and opt_vol >= 3000
+                        and (opt_pch >= 20.0 or spot_chg >= 1.5)
+                    )
+                    is_equity_momentum_decoupler = bool(
+                        spot_chg >= 2.0
+                        and (rvol_val >= 1.8 or rrg_quad in ("LEADING", "IMPROVING"))
+                    )
+                    is_rrg_momentum_decoupler = bool(
+                        rrg_quad in ("LEADING", "IMPROVING")
+                        and (spot_chg >= 1.0 or rvol_val >= 1.5)
+                    )
+                    is_thematic_decoupler = bool(
+                        any(
+                            d in sec_name
+                            for d in (
+                                "DEFENCE",
+                                "RAIL",
+                                "ENERGY",
+                                "CAPITAL",
+                                "INFRA",
+                                "EMS",
+                                "TECH",
+                                "SOLAR",
+                                "CONSUMER",
+                            )
+                        )
+                        and spot_chg >= 1.5
+                    )
+
+                    is_verified_decoupler = bool(
+                        is_upstream_decoupler
+                        or is_defensive_leader
+                        or is_options_surge_decoupler
+                        or is_equity_momentum_decoupler
+                        or is_rrg_momentum_decoupler
+                        or is_thematic_decoupler
+                    )
 
                     # Bullish equity alert during severe NIFTY markdown:
                     if (
                         direction in ("BULLISH", "LONG", "BUY")
-                        or (atype == "OPTIONS_MOMENTUM" and getattr(alert, "option_type", "") == "CE")
+                        or (
+                            atype == "OPTIONS_MOMENTUM"
+                            and getattr(alert, "option_type", "") == "CE"
+                        )
                     ) and is_nifty_markdown:
-                        if not is_defensive_leader:
+                        if not is_verified_decoupler:
                             flags["macro_regime_aligned"] = False
+                            flags["benchmark_regime_valid"] = False
                             return (
                                 False,
                                 f"Benchmark Gravitational Veto: NIFTY 50 in structural markdown ({n_chg_f:.2f}%, below VWAP). Bullish equity breakouts face >75% failure probability during market sell-offs. Mandate short/put setups or leading defensive decouplers.",
                                 flags,
                             )
+                        else:
+                            flags["benchmark_regime_valid"] = True
+                            flags["decoupler_status"] = "VERIFIED_DECOUPLER"
+                            if isinstance(metrics_dict, dict):
+                                metrics_dict["decoupler_status"] = "VERIFIED_DECOUPLER"
 
                     # Bearish equity alert during strong NIFTY markup:
                     if (
                         direction in ("BEARISH", "SHORT", "SELL")
-                        or (atype == "OPTIONS_MOMENTUM" and getattr(alert, "option_type", "") == "PE")
+                        or (
+                            atype == "OPTIONS_MOMENTUM"
+                            and getattr(alert, "option_type", "") == "PE"
+                        )
                     ) and is_nifty_markup:
-                        is_lagging_breakdown = rrg_quad == "LAGGING"
-                        if not is_lagging_breakdown:
+                        is_short_breakdown_decoupler = bool(
+                            rrg_quad == "LAGGING"
+                            or (
+                                vol_oi_val >= 2.0
+                                and opt_vol >= 3000
+                                and (opt_pch >= 20.0 or spot_chg <= -1.5)
+                            )
+                            or (spot_chg <= -2.0 and (rvol_val >= 1.8 or rrg_quad == "LAGGING"))
+                        )
+                        if not is_short_breakdown_decoupler:
                             flags["macro_regime_aligned"] = False
+                            flags["benchmark_regime_valid"] = False
                             return (
                                 False,
                                 f"Benchmark Gravitational Veto: NIFTY 50 in strong structural markup (+{n_chg_f:.2f}%, above VWAP). Short equity breakdowns have high short-covering squeeze risk.",
                                 flags,
                             )
+                        else:
+                            flags["benchmark_regime_valid"] = True
+                            flags["decoupler_status"] = "VERIFIED_DECOUPLER"
+                            if isinstance(metrics_dict, dict):
+                                metrics_dict["decoupler_status"] = "VERIFIED_DECOUPLER"
+
                 except (ValueError, TypeError):
                     pass
         flags["macro_regime_aligned"] = True
+        flags.setdefault("benchmark_regime_valid", True)
 
         # 15. 3-Bar Parabolic Velocity / Climax Acceleration Gate (Anti-FOMO):
         # Disallow market chasing at the absolute tip of a vertical 3-bar blow-off
@@ -1048,9 +1301,7 @@ class AlertScrutinyAuditor:
                     is_call_opt = atype == "OPTIONS_MOMENTUM" and opt_type == "CE"
 
                     # Bullish equity / Call option into severe sector liquidation:
-                    if (
-                        direction in ("BULLISH", "LONG", "BUY") or is_call_opt
-                    ) and not is_put_opt:
+                    if (direction in ("BULLISH", "LONG", "BUY") or is_call_opt) and not is_put_opt:
                         if sec_rs_f <= -1.0:
                             flags["sector_aligned"] = False
                             return (
@@ -1148,9 +1399,21 @@ class AlertScrutinyAuditor:
         d_val = None
         d_vah = None
         if isinstance(metrics_dict, dict):
-            d_poc = metrics_dict.get("d_poc") or metrics_dict.get("developing_poc") or metrics_dict.get("poc")
-            d_val = metrics_dict.get("d_val") or metrics_dict.get("developing_val") or metrics_dict.get("val")
-            d_vah = metrics_dict.get("d_vah") or metrics_dict.get("developing_vah") or metrics_dict.get("vah")
+            d_poc = (
+                metrics_dict.get("d_poc")
+                or metrics_dict.get("developing_poc")
+                or metrics_dict.get("poc")
+            )
+            d_val = (
+                metrics_dict.get("d_val")
+                or metrics_dict.get("developing_val")
+                or metrics_dict.get("val")
+            )
+            d_vah = (
+                metrics_dict.get("d_vah")
+                or metrics_dict.get("developing_vah")
+                or metrics_dict.get("vah")
+            )
 
         if d_poc is not None and d_val is not None and d_vah is not None:
             try:
@@ -1158,12 +1421,18 @@ class AlertScrutinyAuditor:
                 dv = float(d_val)
                 dh = float(d_vah)
                 if dp > 0 and dv > 0 and dh > 0 and ltp > 0:
-                    is_call_opt = atype == "OPTIONS_MOMENTUM" and getattr(alert, "option_type", "") == "CE"
-                    is_put_opt = atype == "OPTIONS_MOMENTUM" and getattr(alert, "option_type", "") == "PE"
+                    is_call_opt = (
+                        atype == "OPTIONS_MOMENTUM" and getattr(alert, "option_type", "") == "CE"
+                    )
+                    is_put_opt = (
+                        atype == "OPTIONS_MOMENTUM" and getattr(alert, "option_type", "") == "PE"
+                    )
 
                     if not is_option_premium_levels:
                         # Long setup: price must not be trading below Value Area Low without a structural base
-                        if (direction in ("BULLISH", "LONG", "BUY") or is_call_opt) and not is_put_opt:
+                        if (
+                            direction in ("BULLISH", "LONG", "BUY") or is_call_opt
+                        ) and not is_put_opt:
                             if ltp < (dv * 0.995):
                                 flags["poc_acceptance_valid"] = False
                                 return (
@@ -1172,7 +1441,9 @@ class AlertScrutinyAuditor:
                                     flags,
                                 )
                         # Short setup: price must not be trading above Value Area High
-                        elif (direction in ("BEARISH", "SHORT", "SELL") or is_put_opt) and not is_call_opt:
+                        elif (
+                            direction in ("BEARISH", "SHORT", "SELL") or is_put_opt
+                        ) and not is_call_opt:
                             if ltp > (dh * 1.005):
                                 flags["poc_acceptance_valid"] = False
                                 return (
@@ -1202,7 +1473,9 @@ class AlertScrutinyAuditor:
 
             # Long setup into Bearish Regular Divergence
             if (direction in ("BULLISH", "LONG", "BUY") or is_call_opt) and not is_put_opt:
-                if "BEARISH_REGULAR" in div_upper or (div_bias_val == "BEARISH" and "REGULAR" in div_upper):
+                if "BEARISH_REGULAR" in div_upper or (
+                    div_bias_val == "BEARISH" and "REGULAR" in div_upper
+                ):
                     flags["divergence_sanity_valid"] = False
                     return (
                         False,
@@ -1211,7 +1484,9 @@ class AlertScrutinyAuditor:
                     )
             # Short setup into Bullish Regular Divergence
             elif (direction in ("BEARISH", "SHORT", "SELL") or is_put_opt) and not is_call_opt:
-                if "BULLISH_REGULAR" in div_upper or (div_bias_val == "BULLISH" and "REGULAR" in div_upper):
+                if "BULLISH_REGULAR" in div_upper or (
+                    div_bias_val == "BULLISH" and "REGULAR" in div_upper
+                ):
                     flags["divergence_sanity_valid"] = False
                     return (
                         False,
@@ -1325,12 +1600,12 @@ class AlertScrutinyAuditor:
                 messages=[{"role": "user", "content": prompt}],
                 stream=False,
                 enable_tools=False,
-                max_tokens=500,
+                max_tokens=750,
             )
             return str(resp or "").strip()
 
         raw_text = None
-        pool = ThreadPoolExecutor(max_workers=1)
+        pool = ThreadPoolExecutor(max_workers=3)
         try:
             future = pool.submit(_call)
             raw_text = future.result(timeout=timeout)

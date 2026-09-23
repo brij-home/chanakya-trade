@@ -63,3 +63,26 @@
   - Glassmorphism overlays (`backdrop-filter: blur(12px); background: rgba(0,0,0,0.45)`).
   - 1-Click frictionless execution: all action buttons must immediately dispatch orders or ticket drafts (`autoSubmit: true`), never leaving the user stranded.
 - **Zero Placeholders**: Never render broken, blank, or generic toy mockups. Every card, table, and modal must be production-grade.
+
+---
+
+## 6. Code Organization & Size Limits
+
+- **Module Size Cap**: No single Python source file should exceed **800 lines** of code. If a module grows beyond this, split it into a subpackage (`module/` directory with `__init__.py`). God-files are architectural debt that kills maintainability and test isolation.
+- **Duplicate Constants Prohibited**: Never define the same constant in multiple files. `IST = timezone(timedelta(hours=5, minutes=30))` and similar constants belong in `config/constants.py` and imported from there.
+- **Windows Console Fix Singleton**: The UTF-8 reconfiguration block (`sys.stdout.reconfigure(encoding="utf-8", errors="replace")`) must NOT be copy-pasted across files. Import `fix_windows_console()` from `config/encoding.py` at entrypoints only.
+
+---
+
+## 7. Memory & Session Safety
+
+- **Unbounded Dict Prohibition**: Never use an unbounded `dict[str, object]` for session or cache storage in a long-running server process without explicit LRU eviction bounds and TTL expiry. Unbounded dicts are guaranteed OOM vectors. Use `_LRUSessionStore` (maxsize=50, TTL=2h) for chat sessions, or a capped `collections.OrderedDict` for any cache.
+- **Delisted Symbol Cache**: Any market data provider that makes network calls for a symbol MUST maintain a `_DELISTED_CACHE` with a minimum 6-hour TTL blacklist. Retrying the same delisted symbol every poll cycle is prohibited — it pollutes logs and wastes network resources.
+- **WebSocket Circuit Breaker**: Any WebSocket reconnection loop MUST implement a circuit breaker. After 5 consecutive connection failures, the client MUST: (a) stop retrying for a minimum of 10 minutes, (b) emit a `DEGRADED` SSE event to the UI, and (c) log a structured circuit-open event. Silent infinite retry loops masking infrastructure failures are prohibited.
+
+---
+
+## 8. Watchlist & Data Integrity
+
+- **Unique Watchlist Presets**: Watchlist preset dictionaries (`WATCHLIST_PRESETS` in `agent/smart_funnel.py`) must have unique keys mapping to unique symbol lists. Duplicate aliases (e.g., both `"nifty_50"` and `"nifty50"` mapping to identical 50-stock lists) are prohibited — keep one canonical key.
+- **Cache Integrity**: Never cache empty collections (`opportunities: []`, `alerts: []`). Treat empty results as cache misses. Only persist verified, non-empty data. Empty caches poison downstream queries that rely on fresh data.

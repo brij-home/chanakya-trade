@@ -68,6 +68,12 @@ def main():
         if os.name == "nt"
         else os.path.join(root_dir, ".venv", "bin", "ruff")
     )
+    venv_python = (
+        os.path.join(root_dir, ".venv", "Scripts", "python.exe")
+        if os.name == "nt"
+        else os.path.join(root_dir, ".venv", "bin", "python")
+    )
+    python_exe = venv_python if os.path.exists(venv_python) else sys.executable
 
     if args.fix:
         print("\n[*] Auto-fixing Python code formatting & lints...")
@@ -135,7 +141,7 @@ def main():
             steps.append(
                 (
                     "5. Fast Pytest Smoke Matrix",
-                    f'"{sys.executable}" -m pytest {core_test_files} -n 4 -q',
+                    f'"{python_exe}" -m pytest {core_test_files} -n 4 -q',
                     root_dir,
                 )
             )
@@ -152,7 +158,7 @@ def main():
             steps.append(
                 (
                     "6. Complete Fast Pytest Test Matrix (2,188+ tests)",
-                    f'"{sys.executable}" -m pytest -m "not network and not slow" -n 4 -q --tb=short',
+                    f'"{python_exe}" -m pytest -m "not network and not slow" -n 4 -q --tb=short',
                     root_dir,
                 )
             )

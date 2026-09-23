@@ -30,14 +30,12 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 import threading
-import time
 from typing import Any, Optional
 
 import numpy as np
 import pandas as pd
 
 from analysis.multibagger import (
-    MultibaggerReport,
     classify_weinstein_stage,
     detect_vcp,
     evaluate_trend_template,
@@ -166,13 +164,41 @@ class CompounderScanner:
 
         # Fallback if bundled json files are empty
         if len(symbols) < 50:
-            symbols.update([
-                "TRENT", "DIXON", "HAL", "BEL", "BSE", "MCX", "MAZDOCK", "COCHINSHIP",
-                "POLYCAB", "KEI", "PERSISTENT", "COFORGE", "KPITTECH", "MAXHEALTH",
-                "MANKIND", "CHOLAFIN", "SUZLON", "INOXWIND", "IREDA", "SOLARINDS",
-                "DATAPATTNS", "CYIENTDLM", "AETHER", "RADICO", "MEDANTA", "KAYNES",
-                "TITAGARH", "PREMIERENE", "WAAREEENER", "ZENTEC", "SWANENERGY"
-            ])
+            symbols.update(
+                [
+                    "TRENT",
+                    "DIXON",
+                    "HAL",
+                    "BEL",
+                    "BSE",
+                    "MCX",
+                    "MAZDOCK",
+                    "COCHINSHIP",
+                    "POLYCAB",
+                    "KEI",
+                    "PERSISTENT",
+                    "COFORGE",
+                    "KPITTECH",
+                    "MAXHEALTH",
+                    "MANKIND",
+                    "CHOLAFIN",
+                    "SUZLON",
+                    "INOXWIND",
+                    "IREDA",
+                    "SOLARINDS",
+                    "DATAPATTNS",
+                    "CYIENTDLM",
+                    "AETHER",
+                    "RADICO",
+                    "MEDANTA",
+                    "KAYNES",
+                    "TITAGARH",
+                    "PREMIERENE",
+                    "WAAREEENER",
+                    "ZENTEC",
+                    "SWANENERGY",
+                ]
+            )
 
         return sorted(list(symbols))
 
@@ -191,10 +217,9 @@ class CompounderScanner:
         stock_closes = stock_df["close"].values
         stock_ret_3m = ((stock_closes[-1] - stock_closes[-63]) / stock_closes[-63]) * 100
         stock_ret_6m = (
-            ((stock_closes[-1] - stock_closes[-min(126, len(stock_closes))])
-             / stock_closes[-min(126, len(stock_closes))])
-            * 100
-        )
+            (stock_closes[-1] - stock_closes[-min(126, len(stock_closes))])
+            / stock_closes[-min(126, len(stock_closes))]
+        ) * 100
 
         nifty_ret_3m = 3.0  # default 3% benchmark quarterly return proxy
         if nifty_df is not None and len(nifty_df) >= 63:
@@ -254,7 +279,9 @@ class CompounderScanner:
                     continue
 
                 # 1. Turnover check (ensure >= ₹2 Cr daily liquidity)
-                vol_20 = float(np.mean(df["volume"].iloc[-20:])) if "volume" in df.columns else 10000.0
+                vol_20 = (
+                    float(np.mean(df["volume"].iloc[-20:])) if "volume" in df.columns else 10000.0
+                )
                 turnover_cr = (ltp * vol_20) / 1e7
                 if turnover_cr < 2.0:
                     continue
@@ -344,7 +371,9 @@ class CompounderScanner:
 
         # Rank and take top candidates
         st_candidates.sort(key=lambda c: (c.composite_score, c.rs_rating), reverse=True)
-        mt_candidates.sort(key=lambda c: (c.composite_score, c.trend_template_passed, c.rs_rating), reverse=True)
+        mt_candidates.sort(
+            key=lambda c: (c.composite_score, c.trend_template_passed, c.rs_rating), reverse=True
+        )
         lt_candidates.sort(key=lambda c: (c.composite_score, c.rs_rating), reverse=True)
 
         with self._lock:

@@ -14,7 +14,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 import pandas as pd
-import pytest
 
 from engine.alert_model import AutoAlert
 from engine.auto_alert_engine import AutoAlertEngine
@@ -84,13 +83,20 @@ def test_orb_stabilization_suppresses_early_morning_whipsaw(tmp_path, monkeypatc
 
     # Simulate 09:25 IST (during opening discovery window)
     mock_0925 = datetime(2026, 9, 16, 9, 25, 0, tzinfo=IST)
-    monkeypatch.setattr("engine.auto_alert_engine.datetime", type("MockDT", (), {
-        "now": staticmethod(lambda tz=None: mock_0925),
-        "fromtimestamp": datetime.fromtimestamp,
-        "strptime": datetime.strptime,
-        "date": datetime.date,
-        "time": datetime.time,
-    }))
+    monkeypatch.setattr(
+        "engine.auto_alert_engine.datetime",
+        type(
+            "MockDT",
+            (),
+            {
+                "now": staticmethod(lambda tz=None: mock_0925),
+                "fromtimestamp": datetime.fromtimestamp,
+                "strptime": datetime.strptime,
+                "date": datetime.date,
+                "time": datetime.time,
+            },
+        ),
+    )
 
     # Disable test override flag so the real time gate is active
     monkeypatch.delenv("CHANAKYA_TESTING", raising=False)
@@ -99,7 +105,9 @@ def test_orb_stabilization_suppresses_early_morning_whipsaw(tmp_path, monkeypatc
     sparks = eng.scan_intraday_mover_sparks()
     mazdock_spark = next((s for s in sparks if "MAZDOCK" in s.symbol), None)
 
-    assert mazdock_spark is None, "MAZDOCK opening breakdown spark must be suppressed before 09:30 IST"
+    assert mazdock_spark is None, (
+        "MAZDOCK opening breakdown spark must be suppressed before 09:30 IST"
+    )
 
 
 def test_orb_stabilization_requires_institutional_volume_0930_to_0945(tmp_path, monkeypatch):
@@ -112,13 +120,20 @@ def test_orb_stabilization_requires_institutional_volume_0930_to_0945(tmp_path, 
 
     # Simulate 09:36 IST (where MAZDOCK originally gave a false breakdown)
     mock_0936 = datetime(2026, 9, 16, 9, 36, 0, tzinfo=IST)
-    monkeypatch.setattr("engine.auto_alert_engine.datetime", type("MockDT", (), {
-        "now": staticmethod(lambda tz=None: mock_0936),
-        "fromtimestamp": datetime.fromtimestamp,
-        "strptime": datetime.strptime,
-        "date": datetime.date,
-        "time": datetime.time,
-    }))
+    monkeypatch.setattr(
+        "engine.auto_alert_engine.datetime",
+        type(
+            "MockDT",
+            (),
+            {
+                "now": staticmethod(lambda tz=None: mock_0936),
+                "fromtimestamp": datetime.fromtimestamp,
+                "strptime": datetime.strptime,
+                "date": datetime.date,
+                "time": datetime.time,
+            },
+        ),
+    )
     monkeypatch.delenv("CHANAKYA_TESTING", raising=False)
     monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
 
@@ -162,6 +177,7 @@ def test_orb_stabilization_requires_institutional_volume_0930_to_0945(tmp_path, 
         )
     }
     monkeypatch.setattr("market.quotes.get_quote", lambda *args, **kwargs: quotes_strong)
+    monkeypatch.setattr("analysis.sector_rotation.get_stock_tailwind", lambda *a, **kw: None)
     sparks_strong = eng.scan_intraday_mover_sparks()
     spark_strong = next((s for s in sparks_strong if "MAZDOCK" in s.symbol), None)
     assert spark_strong is not None
@@ -202,7 +218,9 @@ def test_vwap_extension_exhaustion_guard(tmp_path, monkeypatch):
     monkeypatch.setattr("engine.auto_alert_engine.compute_time_of_day_rvol", lambda *a, **kw: 2.5)
 
     sparks = eng.scan_intraday_mover_sparks()
-    assert next((s for s in sparks if "LALPATHLAB" in s.symbol), None) is None, "Exhausted setup > 2.5% from VWAP must be rejected"
+    assert next((s for s in sparks if "LALPATHLAB" in s.symbol), None) is None, (
+        "Exhausted setup > 2.5% from VWAP must be rejected"
+    )
 
 
 def test_options_fallback_on_zero_price_broker_chain(monkeypatch):
@@ -211,6 +229,7 @@ def test_options_fallback_on_zero_price_broker_chain(monkeypatch):
 
     # Clear cache to ensure clean test
     from market.options import _CHAIN_CACHE
+
     _CHAIN_CACHE.clear()
 
     # Simulate broker returning 0-priced dummy objects

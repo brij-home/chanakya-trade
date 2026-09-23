@@ -706,7 +706,8 @@ def _call_llm(
     llm_provider: Any,
 ) -> str:
     """Call the LLM provider with system + user message. Returns response text."""
-    try:
+
+    def _execute():
         # Try the standard call interface used by the platform
         if hasattr(llm_provider, "call"):
             return llm_provider.call(
@@ -725,8 +726,16 @@ def _call_llm(
         # Generic: try __call__
         if callable(llm_provider):
             return str(llm_provider(system_prompt, user_message))
+        return ""
+
+    try:
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(_execute)
+            return future.result(timeout=12.0)
     except Exception as exc:
-        # Any LLM failure → return empty (caller will use rule-based fallback)
+        # Any LLM failure or timeout → return empty (caller will use rule-based fallback)
         return f"LLM call failed: {exc}"
     return ""
 
@@ -952,12 +961,45 @@ def run_council(
     # ── OPTIMIZATION: fetch data ONCE and share across all council personas ───────────
     shared_brief = _get_shared_brief(symbol, exchange, registry)
 
-    signals = [
-        run_persona_analysis(
-            pid, symbol, exchange, registry, llm_provider, precomputed_brief=shared_brief
-        )
-        for pid in persona_ids
-    ]
+    from concurrent.futures import ThreadPoolExecutor
+
+    def _run_single_persona(pid: str) -> PersonaSignal:
+        try:
+            return run_persona_analysis(
+                pid, symbol, exchange, registry, llm_provider, precomputed_brief=shared_brief
+            )
+        except Exception:
+            try:
+                return _rule_based_signal(pid, shared_brief)
+            except Exception as e_rule:
+                return PersonaSignal(
+                    persona=pid,
+                    verdict="UNAVAILABLE",
+                    confidence=0,
+                    rationale=[f"Analysis unavailable: {e_rule}"],
+                    key_metrics={},
+                )
+
+    signals_by_pid: dict[str, PersonaSignal] = {}
+    with ThreadPoolExecutor(max_workers=min(len(persona_ids), 4)) as executor:
+        future_to_pid = {executor.submit(_run_single_persona, pid): pid for pid in persona_ids}
+        for future, pid in future_to_pid.items():
+            try:
+                sig = future.result(timeout=15.0)
+                signals_by_pid[pid] = sig
+            except Exception:
+                try:
+                    signals_by_pid[pid] = _rule_based_signal(pid, shared_brief)
+                except Exception as e_rule:
+                    signals_by_pid[pid] = PersonaSignal(
+                        persona=pid,
+                        verdict="UNAVAILABLE",
+                        confidence=0,
+                        rationale=[f"Analysis timed out: {e_rule}"],
+                        key_metrics={},
+                    )
+
+    signals = [signals_by_pid[pid] for pid in persona_ids if pid in signals_by_pid]
 
     verdict_scores = {
         "STRONG_BUY": 100,

@@ -34,6 +34,27 @@ class StockProfile:
     beta: float = 1.0
 
 
+# ── Corporate Restructuring & Demerger Aliases ─────────────────────
+CORPORATE_ALIASES: dict[str, str] = {
+    "TATAMOTORS": "TMPV",
+    "ZOMATO": "ETERNAL",
+    "CEINFO": "MAPMYINDIA",
+    "UNOINDA": "UNOMINDA",
+    "REC": "RECLTD",
+    "ASTRA": "ASTRAMICRO",
+    "SWANENERGY": "SWANCORP",
+    "CAPLIPHARM": "CAPLIPOINT",
+    "RPGPHILIFE": "RPGLIFE",
+    "METRO": "METROBRAND",
+    "CENTURYTEX": "ABREL",
+    "HITACHI": "POWERINDIA",
+    "KALPATPOWR": "KPIL",
+    "KBL": "KIRLOSBROS",
+    "GSHIP": "GESHIP",
+    "JUPITERWAG": "JWL",
+}
+
+
 # ── Complete Institutional Equities Taxonomy ────────────────────────
 
 SECTOR_TAXONOMY: dict[str, dict[str, Any]] = {
@@ -89,14 +110,14 @@ SECTOR_TAXONOMY: dict[str, dict[str, Any]] = {
             "TATAELXSI",
             "OFSS",
             "CYIENT",
-            "ZOMATO",
+            "ETERNAL",
             "NAUKRI",
             "MAPMYINDIA",
             "DIXON",
             "POLICYBZR",
             "AFFLE",
             "BSOFT",
-            "CEINFO",
+            "SWIGGY",
             "HAPPSTMNDS",
             "INTELLECT",
             "JUSTDIAL",
@@ -119,7 +140,8 @@ SECTOR_TAXONOMY: dict[str, dict[str, Any]] = {
         "index_symbol": "^CNXAUTO",
         "description": "4W & 2W OEMs, Commercial Vehicles, EV Components, and Tyres.",
         "symbols": [
-            "TATAMOTORS",
+            "TMPV",
+            "TMCV",
             "MARUTI",
             "M&M",
             "BAJAJ-AUTO",
@@ -130,7 +152,9 @@ SECTOR_TAXONOMY: dict[str, dict[str, Any]] = {
             "BHARATFORG",
             "MOTHERSON",
             "SONACOMS",
-            "UNOINDA",
+            "UNOMINDA",
+            "HYUNDAI",
+            "ATHERENERG",
             "EXIDEIND",
             "MRF",
             "APOLLOTYRE",
@@ -156,7 +180,7 @@ SECTOR_TAXONOMY: dict[str, dict[str, Any]] = {
             "SOLARINDS",
             "MTARTECH",
             "PARAS",
-            "ASTRA",
+            "ASTRAMICRO",
             "CYIENTDLM",
         ],
     },
@@ -182,13 +206,14 @@ SECTOR_TAXONOMY: dict[str, dict[str, Any]] = {
             "INOXWIND",
             "IREDA",
             "PFC",
-            "REC",
+            "RECLTD",
             "NHPC",
             "SJVN",
             "TORNTPOWER",
+            "JSWENERGY",
             "PREMIERENE",
             "WAAREEENER",
-            "SWANENERGY",
+            "SWANCORP",
         ],
     },
     "metals": {
@@ -206,7 +231,7 @@ SECTOR_TAXONOMY: dict[str, dict[str, Any]] = {
             "VEDL",
             "NATIONALUM",
             "HINDZINC",
-            "APLLTD",
+            "APLAPOLLO",
             "RATNAMANI",
             "JINDALSAW",
             "GALLANTT",
@@ -248,12 +273,12 @@ SECTOR_TAXONOMY: dict[str, dict[str, Any]] = {
             "ALKEM",
             "ASTRAZEN",
             "BLISSGVS",
-            "CAPLIPHARM",
+            "CAPLIPOINT",
             "ERIS",
             "FDC",
             "GLAXO",
             "GRANULES",
-            "JBCHEPHARM",
+            "COHANCE",
             "KIMS",
             "LAURUSLABS",
             "MARKSANS",
@@ -262,11 +287,9 @@ SECTOR_TAXONOMY: dict[str, dict[str, Any]] = {
             "PFIZER",
             "POLYMED",
             "RAINBOW",
-            "RPGPHILIFE",
+            "RPGLIFE",
             "SANOFI",
-            "SEQUENT",
             "STAR",
-            "SUVENPHAR",
             "THYROCARE",
             "VIJAYA",
             "YATHARTH",
@@ -293,7 +316,7 @@ SECTOR_TAXONOMY: dict[str, dict[str, Any]] = {
             "TITAN",
             "JUBLFOOD",
             "DEVYANI",
-            "METRO",
+            "METROBRAND",
             "PAGEIND",
             "BATAINDIA",
             "RADICO",
@@ -321,7 +344,8 @@ SECTOR_TAXONOMY: dict[str, dict[str, Any]] = {
             "PHOENIXLTD",
             "BRIGADE",
             "SOBHA",
-            "CENTURYTEX",
+            "ABREL",
+            "LODHA",
         ],
     },
     "infra": {
@@ -357,25 +381,24 @@ SECTOR_TAXONOMY: dict[str, dict[str, Any]] = {
             "ELECON",
             "ELECTCAST",
             "ENGINERSIN",
-            "GEPIL",
-            "HITACHI",
+            "TDPOWERSYS",
+            "POWERINDIA",
             "HONAUT",
             "ISGEC",
-            "KALPATPOWR",
-            "KBL",
+            "KPIL",
+            "KIRLOSBROS",
             "KEC",
             "KIRLOSENG",
             "PRAJIND",
             "SCHAEFFLER",
             "SCHNEIDER",
             "SKFINDIA",
-            "TDPOWERSYS",
             "TECHNOE",
             "TIMKEN",
             "TRITURBINE",
             "VOLTAMP",
             "RESPONIND",
-            "GSHIP",
+            "GESHIP",
             "SCI",
             "GVT&D",
         ],
@@ -397,7 +420,7 @@ SECTOR_TAXONOMY: dict[str, dict[str, Any]] = {
             "FLUOROCHEM",
             "AETHER",
             "FINEORG",
-            "GUJGASLTD",
+            "MGL",
             "CHAMBLFERT",
             "DEEPAKFERT",
             "DHANUKA",
@@ -438,7 +461,7 @@ SECTOR_TAXONOMY: dict[str, dict[str, Any]] = {
         "symbols": [
             "TITAGARH",
             "TEXRAIL",
-            "JUPITERWAG",
+            "JWL",
             "RVNL",
             "IRFC",
             "IRCON",
@@ -573,7 +596,8 @@ THEMATIC_PRESETS: dict[str, dict[str, Any]] = {
             "LT",
             "KOTAKBANK",
             "AXISBANK",
-            "TATAMOTORS",
+            "TMPV",
+            "TMCV",
             "MARUTI",
             "SUNPHARMA",
             "BAJFINANCE",
@@ -603,7 +627,7 @@ THEMATIC_PRESETS: dict[str, dict[str, Any]] = {
             "TRENT",
             "BEL",
             "HAL",
-            "ZOMATO",
+            "ETERNAL",
             "NESTLEIND",
             "BRITANNIA",
             "DIVISLAB",
@@ -1158,10 +1182,10 @@ THEMATIC_PRESETS: dict[str, dict[str, Any]] = {
             "SYRMA",
             "TITAGARH",
             "TEXRAIL",
-            "JUPITERWAG",
+            "JWL",
             "PREMIERENE",
             "WAAREEENER",
-            "SWANENERGY",
+            "SWANCORP",
             "RADICO",
             "MEDANTA",
             "KIMS",
@@ -1169,14 +1193,13 @@ THEMATIC_PRESETS: dict[str, dict[str, Any]] = {
             "NEWGEN",
             "RATEGAIN",
             "MAPMYINDIA",
-            "CEINFO",
             "AETHER",
             "TATVA",
             "FINEORG",
             "DEEPAKNTR",
             "PIIND",
             "NAVINFLUOR",
-            "ZOMATO",
+            "ETERNAL",
             "JIOFIN",
             "CDSL",
             "ANGELONE",
@@ -1404,7 +1427,6 @@ THEMATIC_PRESETS: dict[str, dict[str, Any]] = {
             "NESTLEIND",
             "NHPC",
             "NIFTY",
-            "NIFTYFPI",
             "NIFTYNXT50",
             "NMDC",
             "NTPC",
@@ -1656,27 +1678,22 @@ def get_stock_sector(symbol: str) -> tuple[str, str]:
         .replace("BSE:", "")
         .strip()
     )
+    clean = CORPORATE_ALIASES.get(clean, clean)
     if clean in _STOCK_TO_SECTOR:
         return _STOCK_TO_SECTOR[clean]
 
-    # Dynamic fallback: check cached fundamentals or yfinance metadata
+    # Dynamic fallback: check local eod_store SQLite company_fundamentals (0ms local query)
     try:
-        from engine.analysis_cache import cache_get, cache_set
+        from engine.eod_store import _get_connection
 
-        cache_key = f"stock_sector:{clean}"
-        cached = cache_get(cache_key, namespace="universe", max_age_seconds=86400 * 7)
-        if cached and isinstance(cached, list) and len(cached) == 2:
-            _STOCK_TO_SECTOR[clean] = (cached[0], cached[1])
-            _STOCK_SECTOR_SOURCE[clean] = "CACHED_DYNAMIC_DISCOVERY"
-            return cached[0], cached[1]
-
-        # Inspect fundamental summary if available
-        from analysis.fundamental import analyse
-
-        fund = analyse(clean)
-        if fund and fund.sector:
-            gics_sec = fund.sector.strip()
-            gics_ind = (fund.industry or "").lower()
+        conn = _get_connection()
+        row = conn.execute(
+            "SELECT sector, industry FROM company_fundamentals WHERE symbol = ?",
+            (clean,),
+        ).fetchone()
+        if row and row["sector"]:
+            gics_sec = row["sector"].strip()
+            gics_ind = (row["industry"] or "").lower()
             mapped = _GICS_SECTOR_TO_SECTOR.get(gics_sec)
             if not mapped:
                 # Sub-industry heuristics
@@ -1706,14 +1723,55 @@ def get_stock_sector(symbol: str) -> tuple[str, str]:
 
             if mapped:
                 _STOCK_TO_SECTOR[clean] = mapped
-                _STOCK_SECTOR_SOURCE[clean] = "DYNAMIC_METADATA_DISCOVERY"
-                if fund.industry:
-                    _STOCK_INDUSTRY[clean] = fund.industry
-                cache_set(cache_key, list(mapped), namespace="universe", ttl_minutes=60 * 24 * 7)
+                _STOCK_SECTOR_SOURCE[clean] = "SQLITE_FUNDAMENTALS"
+                if row["industry"]:
+                    _STOCK_INDUSTRY[clean] = row["industry"]
                 return mapped
     except Exception:
         pass
 
+    # Dynamic fallback: query analysis.fundamental.analyse
+    try:
+        from analysis.fundamental import analyse
+
+        fund = analyse(clean)
+        if fund and getattr(fund, "sector", None):
+            gics_sec = str(fund.sector).strip()
+            mapped = _GICS_SECTOR_TO_SECTOR.get(gics_sec)
+            if not mapped:
+                gics_ind = (str(getattr(fund, "industry", "")) or "").lower()
+                if (
+                    "real estate" in gics_ind
+                    or "realt" in gics_ind
+                    or "real estate" in gics_sec.lower()
+                ):
+                    mapped = ("realty", "Real Estate & Housing")
+                elif "bank" in gics_ind or "finance" in gics_ind:
+                    mapped = ("banking", "Banking & Financial Services")
+                elif "tech" in gics_ind or "software" in gics_ind:
+                    mapped = ("it", "IT, Software & Technology")
+                elif "pharma" in gics_ind or "health" in gics_ind:
+                    mapped = ("pharma", "Pharma & Healthcare")
+                elif "auto" in gics_ind:
+                    mapped = ("auto", "Automobiles & Mobility")
+                elif "steel" in gics_ind or "metal" in gics_ind:
+                    mapped = ("metals", "Metals & Mining")
+                elif "power" in gics_ind or "energy" in gics_ind:
+                    mapped = ("energy", "Energy, Power & Green Transition")
+                elif "chemical" in gics_ind:
+                    mapped = ("chemicals", "Specialty Chemicals & Agriculture")
+            if mapped:
+                _STOCK_TO_SECTOR[clean] = mapped
+                _STOCK_SECTOR_SOURCE[clean] = "DYNAMIC_FUNDAMENTALS"
+                if getattr(fund, "industry", None):
+                    _STOCK_INDUSTRY[clean] = fund.industry
+                return mapped
+    except Exception:
+        pass
+
+    # Default to broad market and memoize in _STOCK_TO_SECTOR.
+    _STOCK_TO_SECTOR[clean] = ("broad_market", "Broad Market")
+    _STOCK_SECTOR_SOURCE[clean] = "BROAD_MARKET_DEFAULT"
     return ("broad_market", "Broad Market")
 
 
@@ -1779,6 +1837,29 @@ COMPANY_NAMES: dict[str, str] = {
     "GRSE": "Garden Reach Shipbuilders Ltd",
     "BDL": "Bharat Dynamics Ltd",
     "ADANIPOWER": "Adani Power Ltd",
+    "TMPV": "Tata Motors Passenger Vehicles Ltd",
+    "TMCV": "Tata Motors Ltd (Commercial Vehicles)",
+    "ETERNAL": "Eternal Ltd (formerly Zomato Ltd)",
+    "MAPMYINDIA": "C.E. Info Systems Ltd (MapMyIndia)",
+    "UNOMINDA": "Uno Minda Ltd",
+    "RECLTD": "REC Ltd",
+    "POWERINDIA": "Hitachi Energy India Ltd",
+    "KPIL": "Kalpataru Projects International Ltd",
+    "KIRLOSBROS": "Kirloskar Brothers Ltd",
+    "GESHIP": "The Great Eastern Shipping Co Ltd",
+    "JWL": "Jupiter Wagons Ltd",
+    "ABREL": "Aditya Birla Real Estate Ltd",
+    "SWANCORP": "Swan Corp Ltd",
+    "ASTRAMICRO": "Astra Microwave Products Ltd",
+    "CAPLIPOINT": "Caplin Point Laboratories Ltd",
+    "RPGLIFE": "RPG Life Sciences Ltd",
+    "METROBRAND": "Metro Brands Ltd",
+    "HYUNDAI": "Hyundai Motor India Ltd",
+    "ATHERENERG": "Ather Energy Ltd",
+    "SAGILITY": "Sagility India Ltd",
+    "KFINTECH": "KFin Technologies Ltd",
+    "KALYANKJIL": "Kalyan Jewellers India Ltd",
+    "PGEL": "PG Electroplast Ltd",
 }
 
 # Update company names from bundled official index constituent datasets
@@ -1796,7 +1877,13 @@ _NIFTY_NEXT_50_CORE = {
     "DMART",
     "HAL",
     "BEL",
+    "ETERNAL",
     "ZOMATO",
+    "TMPV",
+    "TMCV",
+    "TATAMOTORS",
+    "HYUNDAI",
+    "SWIGGY",
     "TRENT",
     "AMBUJACEM",
     "BANKBARODA",
@@ -1850,6 +1937,7 @@ def get_stock_cap_tier(symbol: str) -> str:
         .replace("BSE:", "")
         .strip()
     )
+    clean = CORPORATE_ALIASES.get(clean, clean)
     if clean in _LARGE_CAP_SET:
         return "LARGE"
     if clean in _MID_CAP_SET:
@@ -2048,6 +2136,38 @@ def get_taxonomy_categories() -> list[dict[str, Any]]:
             }
         )
 
+    # 3. Multi-Asset Categories (Commodities, ETFs, Currencies)
+    categories.append(
+        {
+            "id": "commodities",
+            "name": "🪙 MCX Commodities Futures",
+            "description": "Gold, Silver, Crude Oil, Natural Gas, Base Metals continuous contracts",
+            "type": "COMMODITY",
+            "count": sum(len(g["symbols"]) for g in COMMODITY_TAXONOMY.values()),
+            "icon": "🪙",
+        }
+    )
+    categories.append(
+        {
+            "id": "etfs",
+            "name": "📊 Leading Exchange Traded Funds (ETFs)",
+            "description": "Index, Bullion, Sectoral and Global Tech ETFs",
+            "type": "ETF",
+            "count": sum(len(g["symbols"]) for g in ETF_TAXONOMY.values()),
+            "icon": "📊",
+        }
+    )
+    categories.append(
+        {
+            "id": "currencies",
+            "name": "💱 Currency Derivatives (CDS)",
+            "description": "RBI-approved Indian currency futures (USDINR, EURINR, GBPINR, JPYINR)",
+            "type": "CURRENCY",
+            "count": sum(len(g["symbols"]) for g in CURRENCY_TAXONOMY.values()),
+            "icon": "💱",
+        }
+    )
+
     return categories
 
 
@@ -2228,4 +2348,5 @@ def normalize_symbol_exchange(symbol: str, exchange: str | None = None) -> tuple
             exch = "CRYPTO"
 
     clean_sym = sym.replace("_", "-")
+    clean_sym = CORPORATE_ALIASES.get(clean_sym, clean_sym)
     return clean_sym, exch

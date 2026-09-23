@@ -57,3 +57,20 @@ def test_audit_position_lifecycle_underwater():
     assert report.current_r_multiple < 0
     assert report.breakeven_reached is False
     assert report.trailing_stops.recommended_active_stop == 950.0  # Keep initial stop
+
+
+def test_audit_position_lifecycle_stall_kill_switch():
+    """Verify that a trade hovering near entry for 4+ bars triggers MOMENTUM_STALLING and SCRATCH_POSITION."""
+    report = audit_position_lifecycle(
+        symbol="STALLED_TRADE",
+        entry_price=1000.0,
+        initial_stop_loss=950.0,
+        current_ltp=1005.0,  # +0.1R (hovering near entry)
+        bars_held=5,
+        duration_minutes=25.0,
+    )
+    assert report.symbol == "STALLED_TRADE"
+    assert report.health_status == "MOMENTUM_STALLING"
+    assert report.health_score == 40
+    assert report.recommended_action == "SCRATCH_POSITION"
+    assert any("Momentum Stalled" in d for d in report.diagnostic_bullet_points)

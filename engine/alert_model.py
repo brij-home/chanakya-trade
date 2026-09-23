@@ -4,9 +4,11 @@ Core AutoAlert data model and Indian expiry calendar mapping.
 
 from __future__ import annotations
 
+import os
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, Optional
+
 from zoneinfo import ZoneInfo
 
 from engine.alert_expiry import (
@@ -97,10 +99,37 @@ class AutoAlert:
     no_chase_boundary: Optional[float] = None
     telegram_dispatched: bool = False
     dispatched_channels: list[str] = field(default_factory=list)
+    trace_id: Optional[str] = None
+    quant_snapshot: Optional[dict[str, Any]] = None
+    ttl_seconds: Optional[int] = None
+    liquidity_status: Optional[str] = (
+        None  # "OPTIMAL" | "MODERATE" | "WIDE_SPREAD_CAUTION" | "ILLIQUID"
+    )
+    bid_ask_spread_pct: Optional[float] = None
+    strike_roll_recommendation: Optional[dict[str, Any]] = None
 
     def __post_init__(self) -> None:
         if not self.created_at:
             self.created_at = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
+        if not self.trace_id:
+            try:
+                date_compact = (
+                    self.created_at[:10]
+                    if self.created_at
+                    else datetime.now(IST).strftime("%Y-%m-%d")
+                ).replace("-", "")
+                sym_clean = (
+                    self.symbol.replace("NSE:", "")
+                    .replace("BSE:", "")
+                    .replace("MCX:", "")
+                    .strip()
+                    .upper()
+                )
+                type_short = (self.alert_type[:4] if self.alert_type else "ALRT").upper()
+                id_suffix = self.alert_id[-4:].upper() if len(self.alert_id) >= 4 else "0001"
+                self.trace_id = f"TRC-{date_compact}-{self.exchange or 'NSE'}-{sym_clean}-{type_short}-{id_suffix}"
+            except Exception:
+                self.trace_id = f"TRC-{self.alert_id}"
         if not self.signal_ref:
             try:
                 from bot.alert_templates import build_signal_ref
@@ -179,32 +208,54 @@ class AutoAlert:
                     self.time_horizon = "SWING_SHORT"
             elif atype in ("CIRCUIT_WARNING", "PATTERN_COILING"):
                 self.time_horizon = "SWING_SHORT"
-            elif atype in ("GAMMA_BLAST", "INTRADAY_SPARK", "INTRADAY_BREAKDOWN_SPARK", "INDEX_CONTAGION"):
+            elif atype in (
+                "GAMMA_BLAST",
+                "INTRADAY_SPARK",
+                "INTRADAY_BREAKDOWN_SPARK",
+                "INDEX_CONTAGION",
+            ):
                 self.time_horizon = "INTRADAY"
 
         # Calculate no-chase boundary if not provided
         if self.no_chase_boundary is None and self.trigger_level > 0:
             act_str = str((self.actionable_plan or {}).get("action", "")).strip().upper()
-            is_option = bool(
+            is_plan_opt = (self.actionable_plan or {}).get("instrument_type") == "OPTION"
+            is_opt_level = bool(
                 self.option_type
                 or self.alert_type in ("OPTIONS_MOMENTUM", "GAMMA_BLAST")
                 or (self.segment in ("FNO", "OPTIONS") and (self.strike or self.option_type))
             )
+            # If the alert coordinates themselves are option premium levels
+            is_option_prem = is_opt_level or (
+                is_plan_opt
+                and self.option_premium
+                and abs(self.trigger_level - self.option_premium) < 0.01
+            )
+
             # Determine if this position is LONG (price expected to increase) or SHORT (price expected to decrease)
             is_short_trade = False
-            if act_str.startswith("BUY") or "LONG" in act_str:
-                is_short_trade = False
-            elif act_str.startswith("SELL") or "SHORT" in act_str:
+            if is_option_prem:
+                if act_str.startswith("SELL") or "SHORT" in act_str or "WRITE" in act_str:
+                    is_short_trade = True
+                else:
+                    is_short_trade = False  # Long option premium
+            elif act_str in ("BUY_PE", "BUY_PUT") or str(self.direction).upper() in (
+                "BEARISH",
+                "SHORT",
+                "SELL",
+            ):
                 is_short_trade = True
-            elif is_option:
-                is_short_trade = False  # Long option is default for options momentum / gamma blast
+            elif (
+                act_str.startswith("BUY")
+                or "LONG" in act_str
+                or str(self.direction).upper() in ("BULLISH", "LONG")
+            ):
+                is_short_trade = False
             elif self.target_level > 0 and self.target_level != self.trigger_level:
                 is_short_trade = self.target_level < self.trigger_level
-            elif str(self.direction).upper() in ("BEARISH", "SHORT", "SELL"):
-                is_short_trade = True
 
             th = (self.time_horizon or "INTRADAY").upper()
-            if is_option:
+            if is_option_prem:
                 if is_short_trade:
                     # Option Writing / Credit Spread
                     mult = 0.95 if th == "INTRADAY" else 0.92
@@ -223,19 +274,31 @@ class AutoAlert:
     @property
     def is_expired(self) -> bool:
         """
-        Determines whether a derivative contract or Gamma Blast alert has expired.
+        Determines whether an alert, derivative contract, or intraday trade has expired.
         1. Checks explicit expiry_date (15:30 IST on expiry day).
-        2. For index options without explicit date, resolves against the weekly expiry calendar.
-        3. Gamma blast intraday spikes expire after 24 hours of market time.
+        2. Intraday Session Cutoff: All INTRADAY setups strictly expire at 15:15 IST (NSE/BSE/NFO)
+           or 23:15 IST (MCX) on the session date, or immediately if created on a prior date.
+        3. Configured TTL: Checks if (now - created_dt) exceeds explicit ttl_seconds.
+        4. Stale Setup Time-Stop: Unignited EARLY_WARNING setups expire after 60 mins during session.
+        5. Weekly Index expiry calendar and 24h Gamma Blast fallback.
         """
         if self.stage == "EXPIRED":
             return True
 
-        # Test and simulation alerts do not expire based on wall-clock time
-        if self.environment == "TEST" or not self.is_live or self.alert_id.startswith("test-"):
+        # Test and simulation alerts do not expire based on wall-clock time unless explicitly tested
+        if (
+            self.environment == "TEST" or not self.is_live or self.alert_id.startswith("test-")
+        ) and not getattr(self, "_force_test_expiry", False):
             return False
 
         now = datetime.now(IST)
+
+        is_deriv = bool(
+            self.strike
+            or self.option_type
+            or self.contract_symbol
+            or self.alert_type in ("GAMMA_BLAST", "OPTIONS_MOMENTUM")
+        )
 
         # 1. Check explicit expiry_date
         if self.expiry_date:
@@ -250,7 +313,7 @@ class AutoAlert:
                 except ValueError:
                     pass
 
-        # 2. Check derivative alerts (options/futures/gamma blast) & Intraday Early Warnings
+        # 2. Check creation timestamp for intraday cutoff, TTL, and time-stops
         created_dt = None
         if self.created_at:
             clean_ts = self.created_at.replace(" IST", "").strip()[:19]
@@ -261,19 +324,71 @@ class AutoAlert:
                 except ValueError:
                     pass
 
-        # 2a. Intraday Session Rollover Invariant:
-        # Pre-breakout coiling/early-warning setups belong strictly to their trading session.
-        # If created on a prior calendar date (created_dt.date() < now.date()),
-        # unignited early warnings expire immediately so yesterday's stale coils never pollute today.
-        if self.stage == "EARLY_WARNING" and created_dt and created_dt.date() < now.date():
-            return True
+        if created_dt:
+            # 2a. Explicit Time-To-Live (TTL)
+            if self.ttl_seconds and self.ttl_seconds > 0:
+                if (now - created_dt).total_seconds() >= self.ttl_seconds:
+                    return True
 
-        is_deriv = bool(
-            self.strike
-            or self.option_type
-            or self.contract_symbol
-            or self.alert_type == "GAMMA_BLAST"
-        )
+            # 2b. Intraday Session Cutoff (15:15 IST for NSE/BSE/NFO, 23:15 IST for MCX)
+            # Intraday setups belong strictly to their trading session and cannot carry overnight.
+            # Derivative contracts with future expiry dates remain active until their contract expiry date.
+            th = (self.time_horizon or "INTRADAY").upper()
+            is_test_env = (
+                (os.environ.get("CHANAKYA_TESTING") == "1")
+                or (os.environ.get("DEPLOY_MODE") == "test")
+                or ("PYTEST_CURRENT_TEST" in os.environ)
+                or (self.environment == "TEST")
+            )
+            if th == "INTRADAY" and (not is_test_env or getattr(self, "_force_test_expiry", False)):
+                has_future_expiry = False
+                if self.expiry_date:
+                    for fmt in ("%Y-%m-%d", "%d-%b-%Y", "%d-%m-%Y"):
+                        try:
+                            exp_dt = datetime.strptime(self.expiry_date.strip(), fmt).replace(
+                                hour=15, minute=30, second=0, tzinfo=IST
+                            )
+                            if exp_dt.date() > now.date():
+                                has_future_expiry = True
+                            break
+                        except ValueError:
+                            pass
+
+                is_active_deriv = (
+                    is_deriv
+                    and self.stage in ("IGNITED", "TRAILING_UPDATE", "T1_ACHIEVED", "T2_ACHIEVED")
+                    and not getattr(self, "_force_test_expiry", False)
+                )
+
+                if not has_future_expiry and not is_active_deriv:
+                    if created_dt.date() < now.date():
+                        return True
+                    exch = (self.exchange or "NSE").upper()
+                    if exch == "MCX":
+                        if now.hour > 23 or (now.hour == 23 and now.minute >= 15):
+                            return True
+                    else:
+                        if now.hour > 15 or (now.hour == 15 and now.minute >= 15):
+                            return True
+                elif getattr(self, "_force_test_expiry", False):
+                    if created_dt.date() < now.date():
+                        return True
+                    exch = (self.exchange or "NSE").upper()
+                    if exch == "MCX":
+                        if now.hour > 23 or (now.hour == 23 and now.minute >= 15):
+                            return True
+                    else:
+                        if now.hour > 15 or (now.hour == 15 and now.minute >= 15):
+                            return True
+
+            # 2c. Unignited Early Warning Setup Time-Stop:
+            # Pre-breakout early warnings expire if left unignited from a prior day,
+            # or if 60 minutes have elapsed without triggering during an active session.
+            if self.stage == "EARLY_WARNING":
+                if created_dt.date() < now.date():
+                    return True
+                if th == "INTRADAY" and (now - created_dt).total_seconds() >= 3600:
+                    return True
 
         if is_deriv:
             if created_dt:
@@ -307,8 +422,69 @@ class AutoAlert:
             and self.target_status != "TARGET_ACHIEVED"
         )
 
+    @property
+    def entry_price(self) -> float:
+        """
+        Canonical entry price coordinate.
+        For options, returns option_premium if available; otherwise trigger_level or ltp.
+        For equities/futures, returns trigger_level or ltp.
+        """
+        is_opt = bool(
+            self.strike
+            or self.option_type
+            or self.contract_symbol
+            or self.alert_type in ("GAMMA_BLAST", "OPTIONS_MOMENTUM")
+        )
+        if is_opt and self.option_premium and self.option_premium > 0:
+            return float(self.option_premium)
+        if self.trigger_level and self.trigger_level > 0:
+            return float(self.trigger_level)
+        return float(self.ltp or 0.0)
+
+    @property
+    def target_1(self) -> Optional[float]:
+        """Canonical Target 1 price level."""
+        plan = self.actionable_plan if isinstance(self.actionable_plan, dict) else {}
+        t1_val = plan.get("target_1") or plan.get("target")
+        if t1_val:
+            try:
+                import re
+
+                m = re.findall(r"[\d.]+", str(t1_val).replace(",", ""))
+                if m:
+                    return float(m[0])
+            except Exception:
+                pass
+        return self.target_level if self.target_level > 0 else None
+
+    @property
+    def target_2(self) -> Optional[float]:
+        """Canonical Target 2 price level."""
+        plan = self.actionable_plan if isinstance(self.actionable_plan, dict) else {}
+        t2_val = plan.get("target_2")
+        if t2_val:
+            try:
+                import re
+
+                m = re.findall(r"[\d.]+", str(t2_val).replace(",", ""))
+                if m:
+                    return float(m[0])
+            except Exception:
+                pass
+        t1 = self.target_1
+        ep = self.entry_price
+        sl = self.stop_loss
+        if t1 and ep and sl and ep != sl:
+            risk = abs(ep - sl)
+            is_bull = self.direction in ("BULLISH", "LONG", "BUY") or self.option_type == "CE"
+            return round(ep + (3.0 * risk) if is_bull else ep - (3.0 * risk), 2)
+        return None
+
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
+        d["entry_price"] = self.entry_price
+        d["target_1"] = self.target_1
+        d["target_2"] = self.target_2
         d["timestamp"] = (
             self.invalidated_at
             or self.created_at
@@ -317,10 +493,23 @@ class AutoAlert:
         d["is_active"] = self.is_active
         d["is_expired"] = self.is_expired
 
-        # Rich expiry details & next-expiry opportunities
-        exp_info = get_expiry_metadata(
-            self.expiry_date, self.expiry_type, self.symbol, self.contract_symbol
+        plan_opt = (
+            (self.actionable_plan or {}).get("option_plan", {})
+            if isinstance(self.actionable_plan, dict)
+            else {}
         )
+        eff_exp_date = self.expiry_date or plan_opt.get("expiry_date")
+        eff_exp_type = self.expiry_type or plan_opt.get("expiry_type")
+        eff_contract = self.contract_symbol or plan_opt.get("contract_symbol")
+        if not eff_exp_type and eff_exp_date:
+            from engine.alert_expiry import classify_expiry_type
+
+            eff_exp_type = classify_expiry_type(eff_exp_date, self.symbol)
+
+        # Rich expiry details & next-expiry opportunities
+        exp_info = get_expiry_metadata(eff_exp_date, eff_exp_type, self.symbol, eff_contract)
+        d["expiry_date"] = eff_exp_date
+        d["expiry_type"] = eff_exp_type
         d["expiry_details"] = exp_info
         d["expiry_month_name"] = exp_info.get("month_name")
         d["expiry_formatted"] = exp_info.get("formatted")

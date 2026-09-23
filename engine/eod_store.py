@@ -47,7 +47,7 @@ _store_lock = threading.Lock()
 _local_connections: dict[int, sqlite3.Connection] = {}
 
 # ── L1 In-Memory Process Caches ──────────────────────────────────────
-_L1_MAX_ITEMS = 1500
+_L1_MAX_ITEMS = 4000
 _L1_TTL_SECONDS = 3600.0  # 1 hour
 _l1_ohlcv_cache: dict[str, tuple[float, pd.DataFrame]] = {}
 _l1_fundamentals_cache: dict[str, tuple[float, dict[str, Any]]] = {}
@@ -278,8 +278,8 @@ def get_cached_ohlcv(symbol: str, days: int = 300) -> Optional[pd.DataFrame]:
     # Populate L1 cache
     with _l1_lock:
         if len(_l1_ohlcv_cache) >= _L1_MAX_ITEMS:
-            oldest_key = min(_l1_ohlcv_cache.keys(), key=lambda k: _l1_ohlcv_cache[k][0])
-            _l1_ohlcv_cache.pop(oldest_key, None)
+            # O(1) FIFO eviction
+            _l1_ohlcv_cache.pop(next(iter(_l1_ohlcv_cache)), None)
         _l1_ohlcv_cache[clean_sym] = (now_ts, df)
 
     if days and len(df) > days:
@@ -288,7 +288,9 @@ def get_cached_ohlcv(symbol: str, days: int = 300) -> Optional[pd.DataFrame]:
     return df
 
 
-def get_cached_ohlcv_batch(symbols: list[str], days: int = 300) -> dict[str, pd.DataFrame]:
+def get_cached_ohlcv_batch(
+    symbols: list[str], days: int = 300, copy: bool = False
+) -> dict[str, pd.DataFrame]:
     """
     Loads daily OHLCV dataframes for a batch of symbols with L1 cache bypass and single SQL batch query.
     Extremely fast: 0.01ms if L1 hit, ~200ms for 500 stocks from SQLite.
@@ -307,7 +309,10 @@ def get_cached_ohlcv_batch(symbols: list[str], days: int = 300) -> dict[str, pd.
             if clean_sym in _l1_ohlcv_cache:
                 ts, df = _l1_ohlcv_cache[clean_sym]
                 if now_ts - ts < _L1_TTL_SECONDS:
-                    sub_df = df.iloc[-days:].copy() if (days and len(df) > days) else df.copy()
+                    if copy:
+                        sub_df = df.iloc[-days:].copy() if (days and len(df) > days) else df.copy()
+                    else:
+                        sub_df = df.iloc[-days:] if (days and len(df) > days) else df
                     results[orig_sym] = sub_df
                     continue
             missing_syms.append(clean_sym)
@@ -361,17 +366,20 @@ def get_cached_ohlcv_batch(symbols: list[str], days: int = 300) -> dict[str, pd.
                 df.index = df.index.tz_localize(None)
                 newly_loaded[sym] = df
                 orig_key = clean_map.get(sym, sym)
-                results[orig_key] = (
-                    df.iloc[-days:].copy() if (days and len(df) > days) else df.copy()
-                )
+                if copy:
+                    results[orig_key] = (
+                        df.iloc[-days:].copy() if (days and len(df) > days) else df.copy()
+                    )
+                else:
+                    results[orig_key] = df.iloc[-days:] if (days and len(df) > days) else df
 
     # Populate L1 cache with newly loaded
     if newly_loaded:
         with _l1_lock:
             for sym, df in newly_loaded.items():
                 if len(_l1_ohlcv_cache) >= _L1_MAX_ITEMS:
-                    oldest_key = min(_l1_ohlcv_cache.keys(), key=lambda k: _l1_ohlcv_cache[k][0])
-                    _l1_ohlcv_cache.pop(oldest_key, None)
+                    # O(1) FIFO eviction
+                    _l1_ohlcv_cache.pop(next(iter(_l1_ohlcv_cache)), None)
                 _l1_ohlcv_cache[sym] = (now_ts, df)
 
     return results
@@ -395,6 +403,32 @@ def get_all_symbol_meta() -> dict[str, dict[str, Any]]:
     conn = _get_connection()
     rows = conn.execute("SELECT * FROM symbol_meta").fetchall()
     return {r["symbol"]: dict(r) for r in rows}
+
+
+def get_symbol_meta_batch(symbols: list[str]) -> dict[str, dict[str, Any]]:
+    """Returns metadata for a batch of symbols in a single query."""
+    if not symbols:
+        return {}
+    clean_map = {s.upper().replace(".NS", "").replace("NSE:", "").strip(): s for s in symbols}
+    clean_syms = list(clean_map.keys())
+    conn = _get_connection()
+    results: dict[str, dict[str, Any]] = {}
+    chunk_size = 400
+    for i in range(0, len(clean_syms), chunk_size):
+        chunk = clean_syms[i : i + chunk_size]
+        placeholders = ",".join(["?"] * len(chunk))
+        rows = conn.execute(
+            f"SELECT * FROM symbol_meta WHERE symbol IN ({placeholders})",
+            chunk,
+        ).fetchall()
+        for r in rows:
+            sym = r["symbol"]
+            d = dict(r)
+            results[sym] = d
+            orig_s = clean_map.get(sym)
+            if orig_s and orig_s != sym:
+                results[orig_s] = d
+    return results
 
 
 def validate_and_sanitize_ohlcv_dataframe(df: pd.DataFrame, symbol: str = "") -> pd.DataFrame:
@@ -1068,7 +1102,7 @@ def _download_chunk_yfinance(
     period: str = "1mo",
     exchange: str = "NSE",
 ) -> dict[str, pd.DataFrame]:
-    """Downloads a chunk of symbols via yfinance with specified period."""
+    """Downloads a chunk of symbols via yfinance with specified period, supporting equities, indices, ETFs, commodities, and currencies."""
     if not chunk_symbols:
         return {}
     try:
@@ -1076,9 +1110,31 @@ def _download_chunk_yfinance(
     except ImportError:
         return {}
 
-    suffix = ".NS" if exchange.upper() in ("NSE", "NFO") else ".BO"
-    ticker_map = {f"{s}{suffix}": s for s in chunk_symbols}
-    tickers_str = " ".join(ticker_map.keys())
+    try:
+        from market.yfinance_provider import _to_yf_symbol
+    except Exception:
+        _to_yf_symbol = None
+
+    try:
+        from analysis.universe import CORPORATE_ALIASES
+    except Exception:
+        CORPORATE_ALIASES = {}
+
+    ticker_to_syms: dict[str, list[str]] = {}
+    sym_alias_map: dict[str, str] = {}
+    for s in chunk_symbols:
+        clean_s = s.upper().replace(".NS", "").replace("NSE:", "").strip()
+        canon_s = CORPORATE_ALIASES.get(clean_s, clean_s)
+        if _to_yf_symbol:
+            yf_ticker = _to_yf_symbol(clean_s, exchange=exchange)
+        else:
+            suffix = ".NS" if exchange.upper() in ("NSE", "NFO") else ".BO"
+            yf_ticker = f"{canon_s}{suffix}"
+        ticker_to_syms.setdefault(yf_ticker, []).append(clean_s)
+        if canon_s != clean_s:
+            sym_alias_map[clean_s] = canon_s
+
+    tickers_str = " ".join(ticker_to_syms.keys())
 
     try:
         data = yf.download(
@@ -1097,8 +1153,8 @@ def _download_chunk_yfinance(
 
     results: dict[str, pd.DataFrame] = {}
 
-    if len(chunk_symbols) == 1:
-        s = chunk_symbols[0]
+    if len(ticker_to_syms) == 1:
+        yf_tick, sym_list = list(ticker_to_syms.items())[0]
         df = data.copy()
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = [c[0].lower() for c in df.columns]
@@ -1106,16 +1162,26 @@ def _download_chunk_yfinance(
             df.columns = [c.lower() for c in df.columns]
         df = df.dropna()
         if len(df) >= 1:
-            results[s] = df
+            for s in sym_list:
+                results[s] = df.copy()
+                if s in sym_alias_map:
+                    results[sym_alias_map[s]] = df.copy()
     else:
-        for ticker, sym in ticker_map.items():
+        for ticker, sym_list in ticker_to_syms.items():
             try:
-                if ticker in data.columns.levels[1]:
+                if (
+                    hasattr(data.columns, "levels")
+                    and len(data.columns.levels) > 1
+                    and ticker in data.columns.levels[1]
+                ):
                     sub_df = data.xs(ticker, level=1, axis=1).copy()
                     sub_df.columns = [c.lower() for c in sub_df.columns]
                     sub_df = sub_df.dropna()
                     if len(sub_df) >= 1:
-                        results[sym] = sub_df
+                        for s in sym_list:
+                            results[s] = sub_df.copy()
+                            if s in sym_alias_map:
+                                results[sym_alias_map[s]] = sub_df.copy()
             except Exception:
                 pass
 

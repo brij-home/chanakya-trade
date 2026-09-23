@@ -21,7 +21,7 @@ export function TelegramPreflightModal({ alert, onConfirm, onCancel, sending, se
           const res = await callRef.current('/api/alerts/auto/telegram-destinations')
           if (active && res?.data) {
             setDestInfo(res.data)
-            const cleanSym = (alert?.symbol || '').replace(/^(NSE|BSE|MCX|NFO|CDS):/, '').trim().toUpperCase()
+            const cleanSym = (alert?.symbol || '').replace(/^(NSE|BSE|MCX|NFO|CDS|CRYPTO|BINANCE|DERIBIT):/, '').trim().toUpperCase()
             const isIndexSym = ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'NIFTYNXT50', 'SENSEX', 'BANKEX'].includes(cleanSym)
             const isFnoIndex = Boolean(
               (alert?.segment || '').toUpperCase() === 'FNO_INDEX' ||
@@ -42,7 +42,17 @@ export function TelegramPreflightModal({ alert, onConfirm, onCancel, sending, se
               (alert?.symbol || '').toUpperCase().startsWith('MCX:') ||
               (alert?.symbol || '').toUpperCase().startsWith('CDS:')
             )
-            if (res.data.fno_index_chat_id && isFnoIndex) {
+            const isCrypto = Boolean(
+              (alert?.exchange || '').toUpperCase() === 'CRYPTO' ||
+              (alert?.exchange || '').toUpperCase() === 'BINANCE' ||
+              (alert?.exchange || '').toUpperCase() === 'DERIBIT' ||
+              ['CRYPTO', 'CRYPTO_MAJORS'].includes((alert?.segment || '').toUpperCase()) ||
+              ['BTC', 'ETH', 'SOL', 'BNB', 'DOGE', 'XRP'].includes(cleanSym) ||
+              (alert?.symbol || '').toUpperCase().startsWith('CRYPTO:')
+            )
+            if (res.data.crypto_chat_id && isCrypto) {
+              setDestMode('CRYPTO_GROUP')
+            } else if (res.data.fno_index_chat_id && isFnoIndex) {
               setDestMode('FNO_INDEX_GROUP')
             } else if (res.data.fno_chat_id && isFnoStock) {
               setDestMode('FNO_GROUP')
@@ -59,8 +69,16 @@ export function TelegramPreflightModal({ alert, onConfirm, onCancel, sending, se
       } catch (_) {}
     }
     fetchDest()
-    return () => { active = false }
-  }, [callRef, alert])
+
+    const handleKeyDown = (e) => {
+      if (e.key === 'Escape') onCancel()
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    return () => {
+      active = false
+      window.removeEventListener('keydown', handleKeyDown)
+    }
+  }, [callRef, alert, onCancel, customChannel])
 
   if (!alert) return null
 
@@ -69,11 +87,23 @@ export function TelegramPreflightModal({ alert, onConfirm, onCancel, sending, se
   const optType = alert.option_type || null
   const strikeNum = alert.strike ? Number(alert.strike) : null
   const cleanSym = (alert.symbol || '').replace(/^(NSE|BSE|MCX|NFO|CDS):/, '').trim()
-  const contractLabel = alert.contract_symbol || [cleanSym, strikeNum ? Number(strikeNum).toLocaleString('en-IN') : '', optType || ''].filter(Boolean).join(' ')
+  const hasStrikeInSym = strikeNum && cleanSym.includes(String(strikeNum))
+  const hasOptInSym = optType && (cleanSym.endsWith('CE') || cleanSym.endsWith('PE'))
+  const contractLabel = alert.contract_symbol || [
+    cleanSym,
+    !hasStrikeInSym && strikeNum ? Number(strikeNum).toLocaleString('en-IN') : '',
+    !hasOptInSym && optType ? optType : '',
+  ].filter(Boolean).join(' ')
 
   const scrutinyStatus = scrutiny?.status || 'QUANT_VERIFIED'
   const statusColor = scrutinyStatus === 'APPROVED' ? 'text-emerald-400' : scrutinyStatus === 'QUANT_VERIFIED' ? 'text-sky-400' : 'text-amber-400'
   const statusBg = scrutinyStatus === 'APPROVED' ? 'bg-emerald-500/15 border-emerald-500/30' : scrutinyStatus === 'QUANT_VERIFIED' ? 'bg-sky-500/15 border-sky-500/30' : 'bg-amber-500/15 border-amber-500/30'
+
+  const isBearish = optType === 'PE' || alert.direction === 'BEARISH' || (alert.actionable_plan?.action || '').includes('SELL') || (alert.actionable_plan?.action || '').includes('PUT') || (alert.headline || '').includes('PUT') || (alert.headline || '').includes('DOWN')
+  const dirBadge = isBearish ? '🔴' : '🟢'
+
+  const lotSize = alert.lot_size || alert.actionable_plan?.lot_size || alert.metrics?.lot_size || null
+  const lotTag = lotSize && Number(lotSize) > 1 ? ` (Lot: ${lotSize})` : ''
 
   return (
     <div
@@ -87,7 +117,7 @@ export function TelegramPreflightModal({ alert, onConfirm, onCancel, sending, se
             <span className="text-lg">📨</span>
             <div>
               <div className="text-sm font-black text-text">Send to Telegram</div>
-              <div className="text-[10px] text-muted font-mono">{contractLabel}</div>
+              <div className="text-[10px] text-muted font-mono">{dirBadge} {contractLabel}{lotTag}</div>
             </div>
           </div>
           <button onClick={onCancel} className="text-muted hover:text-text text-sm font-bold w-6 h-6 flex items-center justify-center">✕</button>
@@ -197,6 +227,19 @@ export function TelegramPreflightModal({ alert, onConfirm, onCancel, sending, se
                   🪙 {destInfo.mcx_chat_name || 'Premium MCX Channel'}
                 </button>
               )}
+              {destInfo?.crypto_chat_id && (
+                <button
+                  type="button"
+                  onClick={() => setDestMode('CRYPTO_GROUP')}
+                  className={`text-[9px] px-2 py-0.5 rounded font-bold transition-all ${
+                    destMode === 'CRYPTO_GROUP'
+                      ? 'bg-purple-500/20 text-purple-300 border border-purple-500/40'
+                      : 'text-muted hover:text-text'
+                  }`}
+                >
+                  🪙 {destInfo.crypto_chat_name || 'Crypto Vortex'}
+                </button>
+              )}
               {destInfo?.equity_chat_id && (
                 <button
                   type="button"
@@ -256,6 +299,13 @@ export function TelegramPreflightModal({ alert, onConfirm, onCancel, sending, se
               </span></span>
               <span className="text-amber-400 font-bold">● Active</span>
             </div>
+          ) : destMode === 'CRYPTO_GROUP' ? (
+            <div className="text-[9px] text-zinc-400 font-mono flex items-center justify-between px-1">
+              <span>Target: <span className="text-purple-400 font-bold">
+                🪙 {destInfo?.crypto_chat_name || 'Crypto_Premium_Alpha_Vortex'} ({destInfo?.crypto_chat_id})
+              </span></span>
+              <span className="text-purple-400 font-bold">● Active</span>
+            </div>
           ) : destMode === 'EQUITY_GROUP' ? (
             <div className="text-[9px] text-zinc-400 font-mono flex items-center justify-between px-1">
               <span>Target: <span className="text-emerald-400 font-bold">
@@ -297,12 +347,33 @@ export function TelegramPreflightModal({ alert, onConfirm, onCancel, sending, se
           )}
         </div>
 
-        {/* Alert summary */}
-        <div className="text-[10px] text-zinc-500 p-2 rounded-lg bg-surface border border-border">
-          <span className="font-bold text-muted">{alert.direction} · {alert.alert_type?.replace(/_/g, ' ')}</span>
-          {alert.expiry_date && <span className="ml-1 text-amber-400">· Exp {alert.expiry_date}</span>}
-          {(alert.environment === 'TEST' || alert.is_live === false) && (
-            <span className="ml-1 text-purple-400 font-black">· TEST ALERT</span>
+        {/* Telegram Message Preview */}
+        <div className="p-2.5 rounded-xl bg-surface border border-border/80 space-y-1 font-mono text-[10px]">
+          <div className="flex items-center justify-between text-[9px] font-bold text-muted border-b border-border/40 pb-1">
+            <span>TELEGRAM PREVIEW</span>
+            <span className="text-gold font-bold">🧠 Confidence: {conviction}%</span>
+          </div>
+          <div className="text-text font-bold">
+            {alert.is_live === false ? '🧪 [TEST]' : `${dirBadge} [REAL/LIVE]`} {alert.alert_type?.replace(/_/g, ' ')}
+          </div>
+          <div className="text-zinc-300">
+            • <b>Action:</b> {alert.actionable_plan?.trade_plan?.action || alert.actionable_plan?.action || (alert.direction === 'BEARISH' ? 'BUY PUT' : 'BUY CALL')} <b>{contractLabel}</b>
+            {alert.ltp ? ` @ ₹${Number(alert.ltp).toFixed(1)}` : ''}{lotTag}
+          </div>
+          {alert.stop_loss && (
+            <div className="text-rose-400">
+              • <b>Invalidation SL:</b> ₹{Number(alert.stop_loss).toFixed(1)}
+            </div>
+          )}
+          {alert.target_level && (
+            <div className="text-emerald-400">
+              • <b>Target:</b> ₹{Number(alert.target_level).toFixed(1)}
+            </div>
+          )}
+          {(alert.actionable_plan?.runner_strike || alert.actionable_plan?.runner_alternative) && (
+            <div className="text-purple-300">
+              • 🚀 <b>Runner Alternative:</b> {alert.actionable_plan.runner_strike?.symbol || alert.actionable_plan.runner_alternative}
+            </div>
           )}
         </div>
 
@@ -334,9 +405,11 @@ export function TelegramPreflightModal({ alert, onConfirm, onCancel, sending, se
                     ? destInfo?.fno_chat_id
                     : destMode === 'MCX_GROUP'
                       ? destInfo?.mcx_chat_id
-                      : destMode === 'EQUITY_GROUP'
-                        ? destInfo?.equity_chat_id
-                        : customChannel.trim()
+                      : destMode === 'CRYPTO_GROUP'
+                        ? destInfo?.crypto_chat_id
+                        : destMode === 'EQUITY_GROUP'
+                          ? destInfo?.equity_chat_id
+                          : customChannel.trim()
             )}
             disabled={sending || sentOk || (destMode === 'CHANNEL' && !customChannel.trim())}
             className="flex-1 btn btn-sm text-xs font-black bg-sky-500/15 hover:bg-sky-500/25 dark:bg-sky-500/20 dark:hover:bg-sky-500/30 text-sky-800 dark:text-sky-200 border border-sky-400/50 dark:border-sky-500/40 hover:border-sky-500/60 disabled:opacity-50 transition-all"

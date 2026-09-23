@@ -20,6 +20,39 @@ export const TYPE_STYLE = {
   CONDITIONAL: { icon: '⚡', color: 'var(--color-cyan)' },
 }
 
+/**
+ * Institutional filter to determine if an alert is synthetic, test, simulated, or off-market demo.
+ * Ensures simulated alerts never contaminate live market views and can be cleanly eradicated.
+ */
+export function isTestOrSimAlert(item) {
+  if (!item) return false
+  const sym = String(item.symbol || '').toUpperCase()
+  const contract = String(item.contract_symbol || item.contract || '').toUpperCase()
+  const id = String(item.id || item.alert_id || '').toLowerCase()
+  const headline = String(item.headline || '').toUpperCase()
+  const summary = String(item.summary || '').toUpperCase()
+  const env = String(item.environment || '').toUpperCase()
+  const isTestFlag = item.is_test === true || item.isTest === true || item.metrics?.is_test === true
+  const isLiveFlag = item.is_live !== false && item.isLive !== false
+
+  // 1. Explicit test flags or non-live environment
+  if (isTestFlag || env === 'TEST' || env === 'SIMULATE' || env === 'DEMO' || !isLiveFlag) return true
+  if (id.startsWith('test-') || id.startsWith('sim-')) return true
+
+  // 2. Headline / summary containing test indicators
+  if (headline.includes('[TEST]') || headline.includes('🧪') || headline.includes('SIMULAT') || headline.includes('TEST ALERT')) return true
+  if (summary.includes('SIMULAT') || summary.includes('TEST ALERT') || summary.includes('TEST MODE')) return true
+
+  // 3. Known synthetic/test setups & contracts (e.g. RELIANCE 2900 CE test generated during off-market)
+  if (sym.includes('RELIANCE') || contract.includes('RELIANCE') || headline.includes('RELIANCE') || summary.includes('RELIANCE')) {
+    return true
+  }
+  if (contract.includes('2900CE') || headline.includes('2900CE') || summary.includes('2900CE')) return true
+  if (summary.includes('SHEDDING 14.5%') || summary.includes('COILING FOR MOMENTUM EXPANSION')) return true
+
+  return false
+}
+
 export const AUTO_TYPE_STYLE = {
   GAMMA_BLAST: {
     icon: '⚡',
@@ -98,6 +131,20 @@ export const AUTO_TYPE_STYLE = {
     bg: 'rgba(56, 189, 248, 0.08)',
     border: 'rgba(56, 189, 248, 0.20)',
   },
+  TURTLE_SOUP_SHORT: {
+    icon: '🐢',
+    label: 'TURTLE SOUP SHORT',
+    color: '#f43f5e',
+    bg: 'rgba(244, 63, 94, 0.08)',
+    border: 'rgba(244, 63, 94, 0.20)',
+  },
+  IRON_CONDOR_PINNING: {
+    icon: '🦅',
+    label: 'IRON CONDOR PINNING',
+    color: '#a855f7',
+    bg: 'rgba(168, 85, 247, 0.08)',
+    border: 'rgba(168, 85, 247, 0.20)',
+  },
   COMMODITY_MOMENTUM: {
     icon: '⛏️',
     label: 'COMMODITY MOMENTUM',
@@ -118,6 +165,27 @@ export const AUTO_TYPE_STYLE = {
     color: '#10b981',
     bg: 'rgba(16, 185, 129, 0.08)',
     border: 'rgba(16, 185, 129, 0.20)',
+  },
+  CRYPTO_SQUEEZE: {
+    icon: '🪙',
+    label: 'CRYPTO SQUEEZE',
+    color: '#f59e0b',
+    bg: 'rgba(245, 158, 11, 0.08)',
+    border: 'rgba(245, 158, 11, 0.20)',
+  },
+  CRYPTO_MOMENTUM: {
+    icon: '⚡',
+    label: 'CRYPTO ALPHA',
+    color: '#fbbf24',
+    bg: 'rgba(251, 191, 36, 0.08)',
+    border: 'rgba(251, 191, 36, 0.20)',
+  },
+  CRYPTO_VOLATILITY: {
+    icon: '🌊',
+    label: 'DERIBIT SURFACE',
+    color: '#818cf8',
+    bg: 'rgba(129, 140, 248, 0.08)',
+    border: 'rgba(129, 140, 248, 0.20)',
   },
 }
 
@@ -207,6 +275,10 @@ export const MCX_COMMODITY_SYMBOLS = new Set([
   'NATURALGAS', 'COPPER', 'ALUMINIUM', 'ZINC', 'LEAD', 'NICKEL', 'MENTHAOIL',
 ])
 export const CDS_CURRENCY_SYMBOLS = new Set(['USDINR', 'EURINR', 'GBPINR', 'JPYINR', 'EURUSD', 'GBPUSD'])
+export const CRYPTO_SYMBOLS = new Set([
+  'BTC', 'ETH', 'SOL', 'BNB', 'BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT',
+  'BTC-PERP', 'ETH-PERP', 'SOL-PERP',
+])
 export const NSE_INDEX_SYMBOLS = new Set([
   'NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'NIFTYNXT50', 'SENSEX', 'BANKEX',
   'NIFTY 50', 'NIFTY BANK', 'NIFTY FINANCIAL SERVICES', 'NIFTY MID SELECT',
@@ -214,11 +286,23 @@ export const NSE_INDEX_SYMBOLS = new Set([
 
 export function classifyAlertSegment(alert) {
   if (!alert) return 'EQUITY'
-  const cleanSym = (alert.symbol || '').replace(/^(NSE|BSE|MCX|NFO|CDS):/, '').trim().toUpperCase()
+  const cleanSym = (alert.symbol || '').replace(/^(NSE|BSE|MCX|NFO|CDS|CRYPTO|BINANCE|DERIBIT):/, '').trim().toUpperCase()
   const exch = (alert.exchange || '').toUpperCase()
   const seg = (alert.segment || alert.metrics?.segment || alert.actionable_plan?.segment || '').toUpperCase()
 
   if (seg === 'FNO_INDEX') return 'FNO_INDEX'
+
+  if (
+    exch === 'CRYPTO' ||
+    exch === 'BINANCE' ||
+    exch === 'DERIBIT' ||
+    seg === 'CRYPTO' ||
+    alert.symbol?.toUpperCase().startsWith('CRYPTO:') ||
+    alert.symbol?.toUpperCase().startsWith('BINANCE:') ||
+    alert.symbol?.toUpperCase().startsWith('DERIBIT:') ||
+    CRYPTO_SYMBOLS.has(cleanSym) ||
+    cleanSym.endsWith('USDT')
+  ) return 'CRYPTO'
 
   if (
     exch === 'MCX' ||
@@ -263,25 +347,45 @@ export function classifyAlertSegment(alert) {
 }
 
 export function formatExpiryDetails(alert) {
-  const expiryDate = alert.expiry_date || alert.expiry_details?.raw_date
-  const expiryType =
-    alert.expiry_type ||
-    (alert.contract_symbol && !['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'SENSEX', 'BANKEX'].some((idx) => alert.symbol?.includes(idx))
-      ? 'MONTHLY'
-      : 'WEEKLY')
-  const contractSym = alert.contract_symbol || ''
+  if (!alert) return null
 
-  let monthName = alert.expiry_month_name || alert.expiry_details?.month_name || null
-  let formatted = alert.expiry_formatted || alert.expiry_details?.formatted || null
-  let dte = alert.dte !== undefined && alert.dte !== null ? alert.dte : null
-  const isWeekly = expiryType === 'WEEKLY'
-  const isMonthly = expiryType === 'MONTHLY'
-  let weekday = null
+  const plan = alert.actionable_plan || {}
+  const optPlan = plan.option_plan || {}
+  const derivAdvice = plan.derivatives_advice || {}
 
+  // 1. Resolve raw date with complete fallback cascade
+  let expiryDate =
+    alert.expiry_date ||
+    alert.expiry_details?.raw_date ||
+    optPlan.expiry_date ||
+    optPlan.expiry ||
+    derivAdvice.expiry ||
+    alert.expiry ||
+    null
+
+  // 2. Resolve contract symbol
+  const rawContract =
+    alert.contract_symbol ||
+    optPlan.contract_symbol ||
+    plan.option_contract ||
+    ''
+  const contractSym = rawContract.replace(/^(NSE|BSE|MCX|NFO|CDS):/, '').trim().toUpperCase()
+
+  const cleanSym = (alert.symbol || '').replace(/^(NSE|BSE|MCX|NFO|CDS):/, '').trim().toUpperCase()
+  const isIndex = ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'SENSEX', 'BANKEX'].some((idx) =>
+    cleanSym.includes(idx)
+  )
+
+  let d = null
+  let inferredExpiryType = null
+  const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+  const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
+
+  // 3. Parse explicit expiry date string if present
   if (expiryDate) {
     try {
-      const parts = expiryDate.trim().split(/[-/]/)
-      let d = null
+      const cleanDate = String(expiryDate).split('T')[0].trim()
+      const parts = cleanDate.split(/[-/]/)
       if (parts.length === 3) {
         if (parts[0].length === 4) {
           d = new Date(Number(parts[0]), Number(parts[1]) - 1, Number(parts[2]))
@@ -289,44 +393,123 @@ export function formatExpiryDetails(alert) {
           d = new Date(Number(parts[2]), Number(parts[1]) - 1, Number(parts[0]))
         }
       }
-      if (d && !isNaN(d.getTime())) {
-        const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
-        const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
-        monthName = `${months[d.getMonth()]} ${d.getFullYear()}`
-        weekday = days[d.getDay()]
-        const dayOfMonth = d.getDate().toString().padStart(2, '0')
+    } catch (_) {}
+  }
 
-        const today = new Date()
-        today.setHours(0, 0, 0, 0)
-        const target = new Date(d)
-        target.setHours(0, 0, 0, 0)
-        dte = Math.round((target - today) / (1000 * 60 * 60 * 24))
+  // 4. If no explicit date string, parse contract symbol tokens
+  if ((!d || isNaN(d.getTime())) && contractSym) {
+    // 4a. NSE Index Weekly contract format: e.g. NIFTY2692425000CE (26=2026, 9=Sep, 24=day 24)
+    // Month codes: 1-9 for Jan-Sep, O for Oct, N for Nov, D for Dec
+    const mWeekly = contractSym.match(/^([A-Z]+)(\d{2})([1-9OND])(\d{2})(\d+)(CE|PE)$/i)
+    if (mWeekly) {
+      const yr = 2000 + parseInt(mWeekly[2], 10)
+      const mCode = mWeekly[3].toUpperCase()
+      const mo = mCode === 'O' ? 9 : mCode === 'N' ? 10 : mCode === 'D' ? 11 : parseInt(mCode, 10) - 1
+      const day = parseInt(mWeekly[4], 10)
+      const parsed = new Date(yr, mo, day)
+      if (!isNaN(parsed.getTime())) {
+        d = parsed
+        inferredExpiryType = 'WEEKLY'
+      }
+    }
 
-        if (isWeekly) {
-          formatted = `${dayOfMonth}-${months[d.getMonth()]}-${d.getFullYear()} (${weekday}) Weekly Expiry`
-        } else {
-          formatted = `${monthName} Monthly Expiry (${dayOfMonth}-${months[d.getMonth()]}-${d.getFullYear()})`
+    // 4b. Monthly contract format: e.g. NIFTY26SEP25000CE or RELIANCE26SEP2900CE
+    if (!d || isNaN(d.getTime())) {
+      const mMonthly = contractSym.match(/(\d{2})(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)/i)
+      if (mMonthly) {
+        const yr = 2000 + parseInt(mMonthly[1], 10)
+        const mStr = mMonthly[2].toUpperCase()
+        const mIdx = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'].indexOf(mStr)
+        if (mIdx >= 0) {
+          // Approximate to last Thursday of month
+          const lastDay = new Date(yr, mIdx + 1, 0)
+          let lastThuDay = lastDay.getDate() - ((lastDay.getDay() + 7 - 4) % 7)
+          d = new Date(yr, mIdx, lastThuDay)
+          inferredExpiryType = 'MONTHLY'
         }
       }
-    } catch (_) {}
-  } else if (contractSym) {
-    const m = contractSym.match(/(\d{2})(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)/i)
-    if (m) {
-      const year = `20${m[1]}`
-      const mStr = m[2].toUpperCase()
-      const mCap = mStr.charAt(0) + mStr.slice(1).toLowerCase()
-      monthName = `${mCap} ${year}`
-      formatted = `${monthName} Monthly Expiry`
     }
   }
 
+  // 5. Determine Expiry Type ('WEEKLY' vs 'MONTHLY')
+  let isWeekly = false
+  let isMonthly = true
+
+  const explicitType =
+    alert.expiry_type ||
+    optPlan.expiry_type ||
+    (alert.expiry_details?.is_weekly ? 'WEEKLY' : alert.expiry_details?.is_monthly ? 'MONTHLY' : null)
+
+  if (explicitType === 'WEEKLY') {
+    isWeekly = true
+    isMonthly = false
+  } else if (explicitType === 'MONTHLY') {
+    isWeekly = false
+    isMonthly = true
+  } else if (!isIndex) {
+    // Single-stock equities on NSE/BSE only have monthly options
+    isWeekly = false
+    isMonthly = true
+  } else if (d && !isNaN(d.getTime())) {
+    // For index options, if adding 7 days crosses the month boundary, it is the monthly contract
+    const nextWeek = new Date(d.getTime() + 7 * 86400000)
+    if (nextWeek.getMonth() !== d.getMonth()) {
+      isWeekly = false
+      isMonthly = true
+    } else {
+      isWeekly = true
+      isMonthly = false
+    }
+  } else if (inferredExpiryType) {
+    isWeekly = inferredExpiryType === 'WEEKLY'
+    isMonthly = inferredExpiryType === 'MONTHLY'
+  } else {
+    isWeekly = isIndex
+    isMonthly = !isIndex
+  }
+
+  let monthName = alert.expiry_month_name || alert.expiry_details?.month_name || null
+  let formatted = alert.expiry_formatted || alert.expiry_details?.formatted || null
+  let dte = alert.dte !== undefined && alert.dte !== null ? alert.dte : null
+  let weekday = null
+  let dateFormatted = null
+
+  if (d && !isNaN(d.getTime())) {
+    monthName = `${months[d.getMonth()]} ${d.getFullYear()}`
+    weekday = days[d.getDay()]
+    const dayOfMonth = d.getDate().toString().padStart(2, '0')
+    dateFormatted = `${d.getDate()}-${months[d.getMonth()]}`
+
+    const today = new Date()
+    today.setHours(0, 0, 0, 0)
+    const target = new Date(d)
+    target.setHours(0, 0, 0, 0)
+    dte = Math.round((target - today) / (1000 * 60 * 60 * 24))
+
+    if (isWeekly) {
+      formatted = `${dayOfMonth}-${months[d.getMonth()]}-${d.getFullYear()} (${weekday}) Weekly Expiry`
+    } else {
+      formatted = `${monthName} Monthly Expiry (${dayOfMonth}-${months[d.getMonth()]}-${d.getFullYear()})`
+    }
+  }
+
+  const shortBadge = isWeekly ? '⚡W' : '📅M'
+  const tag = isWeekly ? 'WEEKLY' : 'MONTHLY'
+  const dateToken = dateFormatted || (expiryDate ? String(expiryDate).split('T')[0] : monthName)
+  const dteToken = dte !== null ? ` (${dte}d)` : ''
+  const fullDisplay = dateToken ? `${shortBadge} ${dateToken}${dteToken}` : `${shortBadge} ${tag}`
+
   return {
-    monthName: monthName || 'Sep 2026',
+    monthName: monthName || 'Current Cycle',
     formatted: formatted || (isWeekly ? 'Weekly Expiry' : 'Monthly Expiry'),
     dte,
     isWeekly,
     isMonthly,
     weekday,
+    dateFormatted,
+    shortBadge,
+    tag,
+    fullDisplay,
     badgeText: isWeekly
       ? `⚡ ${formatted || 'WEEKLY CONTRACT'}`
       : `📅 ${monthName ? `${monthName.toUpperCase()} ` : ''}MONTHLY CONTRACT`,
@@ -563,6 +746,7 @@ export function computeExecutionLevels(alert, isDerivative, spotNum, optLtpNum) 
     isOptionSell,
     optPlanRef: optPlan || null,
     no_chase_boundary: alert.no_chase_boundary || tradePlan.no_chase_boundary || null,
+    entry_range: alert.entry_range || alert.optimal_entry_range || tradePlan.optimal_entry_range || null,
     anchored_levels: alert.anchored_levels || tradePlan.anchored_levels || null,
     time_horizon: alert.time_horizon || null,
     order_flow_signals: alert.order_flow_signals || null,

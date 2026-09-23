@@ -90,9 +90,10 @@ def test_evaluate_symbol_vwap_knife_catching_penalty(scanner):
     with (
         patch("market.quotes.get_quote", return_value=mock_quote),
         patch("market.history.get_ohlcv", return_value=df),
+        patch("market.options.get_options_chain", return_value=None),
         patch(
             "analysis.sector_rotation.get_stock_sector_alignment",
-            return_value={"sector_name": "IT", "quadrant": "LEADING"},
+            return_value={"sector_name": "IT", "quadrant": "LAGGING"},
         ),
         patch(
             "engine.learning_engine.pattern_learning_engine.is_symbol_locked_out",
@@ -131,6 +132,11 @@ def test_classify_symbol_segment():
     assert classify_symbol_segment("ZENTEC") == "NON_FNO"
     assert classify_symbol_segment("MEDANTA") == "NON_FNO"
 
+    assert classify_symbol_segment("BTC") == "CRYPTO"
+    assert classify_symbol_segment("CRYPTO:ETHUSDT") == "CRYPTO"
+    assert classify_symbol_segment("SOL") == "CRYPTO"
+    assert classify_symbol_segment("MCX:CRUDEOIL") == "COMMODITY"
+
 
 def test_get_scan_universe_segments():
     """Verify segment-filtered scan universes."""
@@ -150,7 +156,18 @@ def test_get_scan_universe_segments():
     assert "BANKNIFTY" in index_univ
     assert "RELIANCE" not in index_univ
 
+    crypto_univ = get_scan_universe(segment="CRYPTO")
+    assert "BTC" in crypto_univ
+    assert "ETH" in crypto_univ
+    assert "SOL" in crypto_univ
+
+    comm_univ = get_scan_universe(segment="COMMODITY")
+    assert "CRUDEOIL" in comm_univ
+    assert "GOLD" in comm_univ
+
     all_univ = get_scan_universe(segment=None)
     assert any(classify_symbol_segment(s) == "INDEX" for s in all_univ)
     assert any(classify_symbol_segment(s) == "FNO" for s in all_univ)
     assert any(classify_symbol_segment(s) == "NON_FNO" for s in all_univ)
+    assert any(classify_symbol_segment(s) == "CRYPTO" for s in all_univ)
+    assert any(classify_symbol_segment(s) == "COMMODITY" for s in all_univ)

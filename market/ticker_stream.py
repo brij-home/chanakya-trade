@@ -68,13 +68,6 @@ RIBBON_SPEC = [
         "unit": "₹",
     },
     {
-        "symbol": "FINNIFTY",
-        "display_name": "FIN NIFTY",
-        "inst": "NSE:NIFTY FIN SERVICE",
-        "category": "INDEX",
-        "unit": "₹",
-    },
-    {
         "symbol": "INDIA VIX",
         "display_name": "INDIA VIX",
         "inst": "NSE:INDIA VIX",
@@ -87,6 +80,13 @@ RIBBON_SPEC = [
         "inst": "MCX:CRUDEOIL",
         "category": "COMMODITY",
         "unit": "₹/bbl",
+    },
+    {
+        "symbol": "NATURALGAS",
+        "display_name": "NATURAL GAS",
+        "inst": "MCX:NATURALGAS",
+        "category": "COMMODITY",
+        "unit": "₹",
     },
     {
         "symbol": "GOLD",
@@ -106,6 +106,20 @@ RIBBON_SPEC = [
         "symbol": "BTC",
         "display_name": "BITCOIN",
         "inst": "CRYPTO:BTC",
+        "category": "CRYPTO",
+        "unit": "$",
+    },
+    {
+        "symbol": "ETH",
+        "display_name": "ETHEREUM",
+        "inst": "CRYPTO:ETH",
+        "category": "CRYPTO",
+        "unit": "$",
+    },
+    {
+        "symbol": "SOL",
+        "display_name": "SOLANA",
+        "inst": "CRYPTO:SOL",
         "category": "CRYPTO",
         "unit": "$",
     },
@@ -300,6 +314,16 @@ class MarketTickerStream:
                 change_pct=0.0,
                 unit="₹/bbl",
             ),
+            "naturalgas": TickerIndexItem(
+                key="naturalgas",
+                symbol="MCX:NATURALGAS",
+                name="NATURAL GAS",
+                category="COMMODITY",
+                price=0.0,
+                change=0.0,
+                change_pct=0.0,
+                unit="₹",
+            ),
             "gold": TickerIndexItem(
                 key="gold",
                 symbol="GC=F",
@@ -330,6 +354,26 @@ class MarketTickerStream:
                 change_pct=0.0,
                 unit="$",
             ),
+            "eth": TickerIndexItem(
+                key="eth",
+                symbol="CRYPTO:ETH",
+                name="ETHEREUM",
+                category="CRYPTO",
+                price=0.0,
+                change=0.0,
+                change_pct=0.0,
+                unit="$",
+            ),
+            "sol": TickerIndexItem(
+                key="sol",
+                symbol="CRYPTO:SOL",
+                name="SOLANA",
+                category="CRYPTO",
+                price=0.0,
+                change=0.0,
+                change_pct=0.0,
+                unit="$",
+            ),
         }
 
         # Symbol to key mapping for quick WebSocket lookup
@@ -354,12 +398,25 @@ class MarketTickerStream:
             "26014": "midcpnifty",
             "MCX:CRUDEOIL": "crudeoil",
             "CRUDEOIL": "crudeoil",
+            "MCX:NATURALGAS": "naturalgas",
+            "NATURALGAS": "naturalgas",
+            "NG=F": "naturalgas",
             "MCX:GOLD": "gold",
             "GOLD": "gold",
             "MCX:SILVER": "silver",
             "SILVER": "silver",
             "CRYPTO:BTC": "btc",
             "BTC": "btc",
+            "BTCUSDT": "btc",
+            "CRYPTO:BTCUSDT": "btc",
+            "CRYPTO:ETH": "eth",
+            "ETH": "eth",
+            "ETHUSDT": "eth",
+            "CRYPTO:ETHUSDT": "eth",
+            "CRYPTO:SOL": "sol",
+            "SOL": "sol",
+            "SOLUSDT": "sol",
+            "CRYPTO:SOLUSDT": "sol",
         }
 
         self._wire_websocket_listeners()
@@ -379,6 +436,14 @@ class MarketTickerStream:
             from market.websocket import ws_manager
 
             ws_manager.on_tick(self._on_fyers_tick)
+        except Exception:
+            pass
+
+        # 3. Binance Crypto WS (24x7)
+        try:
+            from market.crypto_stream import crypto_stream
+
+            crypto_stream.on_tick(self._on_crypto_tick)
         except Exception:
             pass
 
@@ -458,6 +523,40 @@ class MarketTickerStream:
 
         self._notify_listeners()
 
+    def _on_crypto_tick(self, tick: dict[str, Any]) -> None:
+        """Handle live tick from Binance Crypto WebSocket."""
+        sym = tick.get("symbol", "").upper()
+        key = self._symbol_to_key.get(sym) or self._symbol_to_key.get(f"CRYPTO:{sym}")
+        if not key or key not in self._items:
+            return
+
+        with self._lock:
+            item = self._items[key]
+            item.price = float(tick.get("ltp", 0.0))
+            item.change = float(tick.get("change", 0.0))
+            item.change_pct = float(tick.get("change_pct", 0.0))
+            if float(tick.get("high", 0.0)) > 0:
+                item.high = float(tick.get("high", 0.0))
+            if float(tick.get("low", 0.0)) > 0:
+                item.low = float(tick.get("low", 0.0))
+            item.source = "BINANCE_WS"
+            item.updated_at = datetime.now(timezone.utc).isoformat()
+
+            # Sync ribbon entry in real-time
+            if hasattr(self, "_cached_ribbon_tickers") and self._cached_ribbon_tickers:
+                for r in self._cached_ribbon_tickers:
+                    if r.get("display_name") == item.name or r.get("inst") == item.symbol:
+                        r["ltp"] = item.price
+                        r["change"] = item.change
+                        r["change_pct"] = item.change_pct
+                        r["direction"] = (
+                            "up"
+                            if item.change_pct > 0
+                            else ("down" if item.change_pct < 0 else "flat")
+                        )
+
+        self._notify_listeners()
+
     def add_listener(self, listener: Callable[[list[dict]], None]) -> None:
         """Register a callback for real-time ticker updates."""
         self._listeners.append(listener)
@@ -510,9 +609,12 @@ class MarketTickerStream:
                 "FINNIFTY": "finnifty",
                 "INDIA VIX": "india_vix",
                 "CRUDEOIL": "crudeoil",
+                "NATURALGAS": "naturalgas",
                 "GOLD": "gold",
                 "SILVER": "silver",
                 "BTC": "btc",
+                "ETH": "eth",
+                "SOL": "sol",
             }
             with self._lock:
                 for r in ribbon:

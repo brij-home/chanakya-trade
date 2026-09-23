@@ -259,6 +259,28 @@ class AnalysisCache:
         """Get cached fundamental or forensic audit data if not expired."""
         return self.get_macro(key, max_age_seconds=max_age_seconds)
 
+    def get_fundamentals_batch(self, keys: list[str]) -> dict[str, Any]:
+        """Fetch multiple fundamental/forensic records in a single fast indexed query."""
+        if not keys:
+            return {}
+        now = datetime.now().isoformat()
+        results: dict[str, Any] = {}
+        chunk_size = 400
+        with self._get_conn() as conn:
+            for i in range(0, len(keys), chunk_size):
+                chunk = keys[i : i + chunk_size]
+                placeholders = ",".join(["?"] * len(chunk))
+                rows = conn.execute(
+                    f"SELECT cache_key, data_json FROM macro_cache WHERE cache_key IN ({placeholders}) AND expires_at > ?",
+                    chunk + [now],
+                ).fetchall()
+                for r in rows:
+                    try:
+                        results[r["cache_key"]] = json.loads(r["data_json"])
+                    except Exception:
+                        pass
+        return results
+
     def save_fundamental(self, key: str, data: Any, ttl_hours: int = 24) -> None:
         """Save fundamental or forensic snapshot with TTL in hours."""
         self.save_macro(key, data, ttl_minutes=ttl_hours * 60)

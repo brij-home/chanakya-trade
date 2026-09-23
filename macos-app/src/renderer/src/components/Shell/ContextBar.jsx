@@ -72,13 +72,24 @@ import { formatLivePrice, formatLiveChange } from '../../utils/marketDataUtils'
 export function LiveIndexTicker({ onSymbolChange }) {
   const { tickers, connectionState } = useRealtimeMarket()
 
-  // Curated indices for quick reference
-  const targetSymbols = ['NIFTY', 'BANKNIFTY', 'INDIA VIX']
+  // Curated multi-asset indices, commodities & crypto for quick reference
+  const targetSymbols = [
+    'NIFTY',
+    'BANKNIFTY',
+    'INDIA VIX',
+    'CRUDEOIL',
+    'NATURALGAS',
+    'GOLD',
+    'SILVER',
+    'BTC',
+    'ETH',
+    'SOL',
+  ]
   const displayItems = tickers.filter((t) => targetSymbols.includes(t.symbol))
 
   if (displayItems.length === 0) {
     return (
-      <div className="hidden lg:flex items-center gap-2 no-drag font-mono text-[10px]" style={{ color: 'var(--color-subtle)' }}>
+      <div className="hidden md:flex items-center gap-2 no-drag font-mono text-[10px]" style={{ color: 'var(--color-subtle)' }}>
         <span className="w-1.5 h-1.5 rounded-full animate-pulse" style={{ background: connectionState === 'live' ? 'var(--color-emerald)' : 'var(--color-gold)' }} />
         <span>{connectionState === 'live' ? 'Awaiting ticks...' : 'Connecting live market feed...'}</span>
       </div>
@@ -86,7 +97,7 @@ export function LiveIndexTicker({ onSymbolChange }) {
   }
 
   return (
-    <div className="hidden lg:flex items-center gap-2 no-drag overflow-x-auto no-scrollbar max-w-[620px]">
+    <div className="hidden md:flex items-center gap-2 no-drag overflow-x-auto no-scrollbar max-w-[800px]">
       {displayItems.map((idx) => {
         const rawPrice = idx.ltp != null ? idx.ltp : idx.price
         const changeObj = formatLiveChange(idx.change, idx.change_pct)
@@ -326,13 +337,6 @@ export default function ContextBar({
           ))}
         </div>
       )}
-
-      {/* Key market metrics strip */}
-      <div
-        className="hidden md:block h-4 w-px flex-shrink-0"
-        style={{ background: 'var(--color-border)' }}
-      />
-      <LiveIndexTicker onSymbolChange={onSymbolChange} />
     </div>
   )
 }

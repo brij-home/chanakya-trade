@@ -572,9 +572,9 @@ def test_minimalist_alert_hierarchy_and_deduplication():
     assert idx_action < idx_reason, "Action must appear before Reason"
     assert idx_sl < idx_reason, "Stop Loss must appear before Reason"
 
-    # 3. Compact line count <= 12 lines (or 13 if late session 15:15-15:30 closing warning is active)
+    # 3. Compact line count <= 12 lines (or 13 if late session closing warning / runner alternative is active)
     lines = [l for l in rendered.split("\n") if l.strip()]
-    max_lines = 13 if "Market closes in" in rendered else 12
+    max_lines = 13 if ("Market closes in" in rendered or "Runner Alternative" in rendered) else 12
     assert len(lines) <= max_lines, f"Alert exceeded {max_lines} lines: {len(lines)} lines"
 
 
@@ -939,11 +939,12 @@ def test_render_auto_alert_no_conflicting_cmp_or_stale_timestamp():
     assert "Opt CMP: ₹22.10" not in rendered
     assert "Opt CMP: ₹24.70" not in rendered
 
-    # 2. Must NOT render (Opt CMP: ...) in Action line because entry matches
+    # 2. Must NOT render duplicate CE/PE in Action line and must omit redundant (Opt CMP: ...)
     assert (
-        "BUY CE <b>HDFCBANK 680 CE</b> @ <code>₹22.1</code>" in rendered
-        or "BUY CE <b>HDFCBANK680CE</b> @ <code>₹22.1</code>" in rendered
+        "BUY <b>HDFCBANK 680 CE</b> @ <code>₹22.1</code>" in rendered
+        or "BUY <b>HDFCBANK680CE</b> @ <code>₹22.1</code>" in rendered
     )
+    assert "BUY CE <b>HDFCBANK" not in rendered
 
     # 3. Timestamp MUST show triggered_at (2026-09-11), not yesterday's created_at (2026-09-10)
     assert "2026-09-11 14:05:00 IST" in rendered
@@ -1005,7 +1006,6 @@ def test_options_alerts_expose_lot_size():
         render_auto_alert,
         render_fno_alert,
         render_asymmetric_alert,
-        render_precursor_alert,
         render_milestone_alert,
         MilestoneAlertData,
     )
@@ -1145,7 +1145,9 @@ def test_gamma_blast_milestone_no_spot_target_corruption():
 
     assert "FINAL TARGET ACHIEVED" in msg_final
     assert "COALINDIA 420 PE" in msg_final or "COALINDIA420PE" in msg_final
-    assert "410.00" not in msg_final, "Spot target 410.00 must NOT appear in option milestone alert!"
+    assert "410.00" not in msg_final, (
+        "Spot target 410.00 must NOT appear in option milestone alert!"
+    )
     assert "420.00" not in msg_final, "Spot level 420.00 must NOT appear in option target field!"
     assert "Opt CMP:</b> ₹6.05" in msg_final
     assert "Target: ₹11.27" in msg_final or "Final Target:</b> ₹11.27" in msg_final
@@ -1198,7 +1200,9 @@ def test_no_chase_direction_and_comparator_sanctity():
     # Option boundary should be > 41.7 (1.08x = 45.04)
     assert put_alert.no_chase_boundary > 41.7
     msg_put = render_auto_alert(put_alert, in_market=True)
-    assert "No-Chase:</b> <i>above ₹" in msg_put, f"Put Option buyer alert must use 'above', got: {msg_put}"
+    assert "No-Chase:</b> <i>above ₹" in msg_put, (
+        f"Put Option buyer alert must use 'above', got: {msg_put}"
+    )
     assert "below ₹" not in msg_put
 
     # 2. Short Equity / Futures Trade (Bearish direction, SELL action)
@@ -1330,7 +1334,7 @@ def test_alert_evaluator_rejects_dirty_phantom_tick():
         option_premium=204.0,
         target_status="PENDING",
         achieved_milestones=[],
-        metrics={"high": 222.0, "low": 145.6},
+        metrics={"high": 215.0, "low": 145.6},
         actionable_plan={
             "action": "BUY",
             "recommended_entry": "₹204.00",
@@ -1350,8 +1354,8 @@ def test_alert_evaluator_rejects_dirty_phantom_tick():
     assert res_normal.target_status == "PENDING"
     assert res_normal.should_trail is False
 
-    # 2. Rogue phantom tick 329.70 (> exchange high 222.0 by >2%) -> Discarded & clamped to 222.0
-    # Since 222.0 is below T1 (254.55), neither T1 nor T2 nor Final target is triggered!
+    # 2. Rogue phantom tick 329.70 (> exchange high 215.0 by >2%) -> Discarded & clamped to 215.0
+    # Since 215.0 is below T0.5 (219.30) and T1 (254.55), neither T0.5, T1 nor T2 is triggered!
     res_dirty = evaluate_alert_targets_and_trailing(alert, current_ltp=329.70)
     assert res_dirty is not None
     assert res_dirty.new_milestone is None
@@ -1359,3 +1363,571 @@ def test_alert_evaluator_rejects_dirty_phantom_tick():
     assert res_dirty.should_trail is False
 
 
+def test_render_asymmetric_alert_bearish_and_neutral():
+    """Verify render_asymmetric_alert correctly formats BEARISH (Turtle Soup) and NEUTRAL (Iron Condor) alerts."""
+    # 1. Bearish Turtle Soup Short Setup
+    turtle_soup = {
+        "symbol": "BANKNIFTY",
+        "segment": "FNO",
+        "setup_type": "TURTLE_SOUP_SHORT",
+        "direction": "BEARISH",
+        "conviction_score": 91,
+        "verdict": "MAX_CONVICTION",
+        "ltp": 52400.0,
+        "entry_range": "₹52,380 – ₹52,420",
+        "stop_loss": 52620.0,
+        "target_1": 51950.0,
+        "target_2": 51600.0,
+        "moonshot_target": 51100.0,
+        "risk_reward_ratio": 3.6,
+        "confluences": [
+            "Liquidity Sweep of 20-Day High (BSL Purged)",
+            "Bearish CHoCH Reversal on 5m/15m",
+            "Aggressive Call Writer Inflow (1.9x Call OI Surge)",
+        ],
+        "when_to_wait": "DO NOT CHASE if price breaks below ₹52,250 without a retest pull-back",
+    }
+    bear_msg = render_asymmetric_alert(turtle_soup)
+    assert "TURTLE SOUP SHORT" in bear_msg
+    assert "🔻" in bear_msg or "🔴" in bear_msg
+    assert "Action: SHORT (SELL)" in bear_msg
+    assert "Invalidation SL (Above High):</b> <code>₹52,620.00</code>" in bear_msg
+    assert "Target 1 (Downside):</b> <code>₹51,950.00</code>" in bear_msg
+    assert "Target 2 (Downside):</b> <code>₹51,600.00</code>" in bear_msg
+    assert "1:3.6 R:R" in bear_msg
+
+    # 2. Delta-Neutral Expiry Iron Condor Pinning Setup
+    iron_condor = {
+        "symbol": "NIFTY",
+        "segment": "FNO",
+        "setup_type": "IRON_CONDOR_PINNING",
+        "direction": "NEUTRAL",
+        "conviction_score": 93,
+        "verdict": "MAX_CONVICTION",
+        "ltp": 25200.0,
+        "entry_range": "₹25,180 – ₹25,220",
+        "corridor_low": 25050.0,
+        "corridor_high": 25350.0,
+        "short_pe": 25050.0,
+        "short_ce": 25350.0,
+        "long_pe": 24900.0,
+        "long_ce": 25500.0,
+        "net_credit": 46.5,
+        "max_risk": 103.5,
+        "risk_reward_ratio": 2.2,
+        "confluences": [
+            "Max Pain Pinning at ₹25,200",
+            "IV Rank > 65 with Rapid Theta Acceleration",
+            "Heavy Straddle Writing at 25200 Strike",
+        ],
+        "when_to_wait": "DO NOT ENTER if Spot breaches ₹25,050 or ₹25,350 short strikes",
+    }
+    condor_msg = render_asymmetric_alert(iron_condor)
+    assert "IRON CONDOR PINNING" in condor_msg
+    assert "🦅" in condor_msg
+    assert "Action: SELL IRON CONDOR (DELTA-NEUTRAL)" in condor_msg
+    assert "Corridor Pin Zone:</b> <code>₹25,050.00 – ₹25,350.00</code>" in condor_msg
+    assert "Short Wing (Sell):</b> <code>25,050 PE + 25,350 CE</code>" in condor_msg
+    assert "Hedge Wing (Buy):</b> <code>24,900 PE + 25,500 CE</code>" in condor_msg
+    assert "Net Credit Harvest:</b> <code>+₹46.50/lot</code>" in condor_msg
+
+
+def test_render_auto_alert_target_0_5_milestone_not_initial_breakout():
+    """Verify that Target 0.5 (Scale 1) alerts render as milestone updates and NEVER fall through to initial BUY cards."""
+    from engine.auto_alert_engine import AutoAlert
+
+    alert = AutoAlert(
+        alert_id="aa-bse-3200pe-t05",
+        alert_type="OPTIONS_BREAKOUT",
+        stage="T0_5_ACHIEVED",
+        symbol="BSE",
+        exchange="NFO",
+        direction="BEARISH",
+        headline="🎯 [REAL/LIVE] TARGET 0.5 (SCALE 1) ACHIEVED: BSE 3200 PE (₹91.40)",
+        summary="Target 0.5 reached at ₹91.40 (+31.1%, +1.5R). DECISION: SCALE 35% PARTIAL PROFIT & TRAIL STOP-LOSS TO BREAKEVEN (₹69.84).",
+        ltp=91.40,
+        trigger_level=69.70,
+        target_level=93.30,
+        stop_loss=55.0,
+        trailing_stop=69.84,
+        strike=3200.0,
+        option_type="PE",
+        contract_symbol="BSE 3200 PE",
+        option_premium=69.70,
+        target_status="T0_5_ACHIEVED",
+        achieved_milestones=["T0_5_ACHIEVED"],
+        actionable_plan={
+            "action": "BUY_PUT",
+            "recommended_entry": "₹69.70",
+            "stop_loss": "₹55.00",
+            "target_0_5": "₹84.50",
+            "target_1": "₹93.30",
+            "target_2": "₹108.00",
+            "lot_size": 200,
+        },
+        is_live=True,
+        environment="LIVE",
+    )
+
+    rendered = render_auto_alert(alert, in_market=True)
+
+    # Invariant 1: Milestone header and title
+    assert "TARGET 0.5 ACHIEVED (SCALE 1)" in rendered
+    assert "DE-RISK SCALE HIT" in rendered
+    assert "BSE 3200 PE" in rendered
+
+    # Invariant 2: Execution levels and trailing stop
+    assert "Scale 1:</b> ₹91.40" in rendered or "Scale 1:</b> ₹84.50" in rendered
+    assert "Trail Stop:</b> <code>₹69.84</code>" in rendered
+    assert "(Breakeven Cost Locked — 100% Risk-Free)" in rendered
+
+    # Invariant 3: Decisive Action
+    assert (
+        "DECISIVE ACTION:</b> <code>SCALE 35% PARTIAL PROFIT NOW & HOLD RUNNER FOR T1 (₹93.30)</code>"
+        in rendered
+    )
+
+    # Invariant 4: MUST NOT fall through to initial breakout BUY template!
+    assert "🟢 <b>[REAL/LIVE] OPTIONS BREAKOUT</b>" not in rendered
+    assert "• <b>Action:</b> BUY" not in rendered
+    assert "BUY PE BSE 3200 PE" not in rendered
+    assert "🛑 No-Chase:" not in rendered
+
+
+def test_options_action_deduplication_pe_and_ce():
+    """Verify that action='BUY_PUT' and action='BUY_CALL' do not duplicate CE/PE in the Action line."""
+    from engine.auto_alert_engine import AutoAlert
+
+    alert_pe = AutoAlert(
+        alert_id="auto-pe-dedup",
+        alert_type="OPTIONS_BREAKOUT",
+        stage="IGNITED",
+        symbol="BSE",
+        exchange="NFO",
+        direction="BEARISH",
+        headline="BSE 3200 PE Momentum",
+        summary="Put flow surge",
+        ltp=69.70,
+        trigger_level=69.70,
+        target_level=93.30,
+        stop_loss=55.00,
+        strike=3200.0,
+        option_type="PE",
+        contract_symbol="BSE 3200 PE",
+        actionable_plan={
+            "action": "BUY_PUT",
+            "recommended_entry": "₹69.70",
+            "stop_loss": "₹55.00",
+            "target_1": "₹93.30",
+            "lot_size": 200,
+        },
+    )
+    rendered_pe = render_auto_alert(alert_pe, in_market=True)
+    assert "• <b>Action:</b> BUY <b>BSE 3200 PE</b>" in rendered_pe
+    assert "BUY PE BSE 3200 PE" not in rendered_pe
+
+    alert_ce = AutoAlert(
+        alert_id="auto-ce-dedup",
+        alert_type="OPTIONS_BREAKOUT",
+        stage="IGNITED",
+        symbol="NIFTY",
+        exchange="NFO",
+        direction="BULLISH",
+        headline="NIFTY 25000 CE Breakout",
+        summary="Call flow surge",
+        ltp=120.0,
+        trigger_level=120.0,
+        target_level=160.0,
+        stop_loss=95.0,
+        strike=25000.0,
+        option_type="CE",
+        contract_symbol="NIFTY 25000 CE",
+        actionable_plan={
+            "action": "BUY_CALL",
+            "recommended_entry": "₹120.00",
+            "stop_loss": "₹95.00",
+            "target_1": "₹160.00",
+            "lot_size": 25,
+        },
+    )
+    rendered_ce = render_auto_alert(alert_ce, in_market=True)
+    assert "• <b>Action:</b> BUY <b>NIFTY 25000 CE</b>" in rendered_ce
+    assert "BUY CE NIFTY 25000 CE" not in rendered_ce
+
+
+def test_multi_asset_alert_rendering_crypto_cds_mcx():
+    """Verify that Crypto, CDS Currency, and MCX Commodity alerts render with proper units and structure."""
+    from engine.auto_alert_engine import AutoAlert
+
+    # 1. Crypto Alert
+    crypto_alert = AutoAlert(
+        alert_id="crypto-1",
+        alert_type="ALPHA_VORTEX",
+        stage="IGNITED",
+        symbol="CRYPTO:BTCUSDT",
+        exchange="CRYPTO",
+        direction="BULLISH",
+        headline="BTCUSDT Squeeze",
+        summary="Order block reclaim",
+        ltp=64250.0,
+        trigger_level=64250.0,
+        target_level=68000.0,
+        stop_loss=62500.0,
+        no_chase_boundary=64800.0,
+        actionable_plan={
+            "action": "BUY_SPOT / LONG",
+            "entry_range": "$64,200 – $64,300",
+            "stop_loss": "$62,500.00",
+            "target": "$68,000.00",
+            "setup_confluence": "SMC Order Block + FVG Reclaim",
+        },
+    )
+    crypto_msg = render_auto_alert(crypto_alert, in_market=True)
+    assert "ALPHA VORTEX" in crypto_msg
+    assert "Action:</b> BUY SPOT / LONG <b>BTCUSDT</b>" in crypto_msg
+    assert "24x7 Continuous Liquidity" in crypto_msg
+    assert "No-Chase:</b> <i>above $64,800.00</i>" in crypto_msg
+
+    # 2. CDS Currency Alert
+    cds_alert = AutoAlert(
+        alert_id="cds-1",
+        alert_type="CURRENCY_BREAKOUT",
+        stage="IGNITED",
+        symbol="USDINR",
+        exchange="CDS",
+        direction="BULLISH",
+        headline="USDINR 26OCTFUT Breakout",
+        summary="Rupee depreciation breakout",
+        ltp=84.1250,
+        trigger_level=84.1250,
+        target_level=84.5500,
+        stop_loss=83.9500,
+        no_chase_boundary=84.2000,
+        actionable_plan={
+            "action": "BUY_FUTURES",
+            "contract": "CDS:USDINR",
+            "entry_range": "₹84.1250",
+            "stop_loss": "₹83.9500",
+            "target": "₹84.5500",
+            "lot_size": 1000,
+        },
+    )
+    cds_msg = render_auto_alert(cds_alert, in_market=True)
+    assert "CURRENCY BREAKOUT" in cds_msg
+    assert "Action:</b> BUY FUTURES <b>CDS:USDINR</b> @ <code>₹84.1250</code>" in cds_msg
+    assert "Lot: 1000" in cds_msg
+    assert "No-Chase:</b> <i>above ₹84.2000</i>" in cds_msg
+
+
+def test_first_time_message_prominently_shows_runner_and_confidence():
+    """Verify that 1st-time messages prominently display Confidence score on the Horizon line and include Runner Alternative."""
+    from engine.auto_alert_engine import AutoAlert
+
+    alert = AutoAlert(
+        alert_id="aa-first-time-test",
+        alert_type="OPTIONS_BREAKOUT",
+        stage="IGNITED",
+        symbol="BSE",
+        exchange="NFO",
+        direction="BEARISH",
+        headline="BSE 3200 PE Breakdown",
+        summary="Put surge with high volume",
+        ltp=69.70,
+        trigger_level=69.70,
+        target_level=93.30,
+        stop_loss=55.00,
+        strike=3200.0,
+        option_type="PE",
+        contract_symbol="BSE 3200 PE",
+        confidence=95,
+        actionable_plan={
+            "action": "BUY_PUT",
+            "recommended_entry": "₹69.70",
+            "stop_loss": "₹55.00",
+            "target": "₹93.30",
+            "lot_size": 200,
+            "runner_strike": {
+                "strike": 3150.0,
+                "option_type": "PE",
+                "ltp": 42.50,
+                "symbol": "BSE 3150 PE",
+            },
+        },
+    )
+
+    rendered = render_auto_alert(alert, in_market=True)
+
+    # 1. Prominent Confidence Score on the Horizon line (shown strictly once, no duplicate in footer)
+    assert "🧠 <b>Confidence:</b> <b>95%</b>" in rendered
+    assert rendered.count("Confidence") == 1
+    assert "• <b>Horizon:</b>" in rendered
+    assert "⏱️ INTRADAY" in rendered
+
+    # 2. Runner Alternative
+    assert (
+        "• 🚀 <b>Runner Alternative (High Beta):</b> <code>BSE 3150 PE</code> (Opt CMP: ₹42.50)"
+        in rendered
+    )
+
+
+def test_format_signal_badge_and_lot_concor_and_scenarios():
+    """Verify format_signal_badge_and_lot accurately color-codes bull/bear scenarios and places lot size beside price."""
+    from bot.alert_templates import format_signal_badge_and_lot
+
+    # 1. User's exact prompt scenario: 'CONCOR 485 PE @ ₹7.2'
+    res_concor_pe = format_signal_badge_and_lot("CONCOR 485 PE @ ₹7.2")
+    assert res_concor_pe == "🔴 CONCOR 485 PE @ ₹7.2 (Lot: 1250)"
+
+    # 2. Call Option counterpart
+    res_concor_ce = format_signal_badge_and_lot("CONCOR 485 CE @ ₹8.5")
+    assert res_concor_ce == "🟢 CONCOR 485 CE @ ₹8.5 (Lot: 1250)"
+
+    # 3. Index Call & Put
+    res_nifty_ce = format_signal_badge_and_lot("NIFTY 24500 CE @ ₹105.0")
+    assert res_nifty_ce == "🟢 NIFTY 24500 CE @ ₹105.0 (Lot: 65)"
+
+    res_banknifty_pe = format_signal_badge_and_lot("BANKNIFTY 52000 PE @ ₹145.0")
+    assert res_banknifty_pe == "🔴 BANKNIFTY 52000 PE @ ₹145.0 (Lot: 30)"
+
+    # 4. HAL F&O stock
+    res_hal_pe = format_signal_badge_and_lot("HAL 4800 PE @ ₹54.2")
+    assert res_hal_pe == "🔴 HAL 4800 PE @ ₹54.2 (Lot: 150)"
+
+    # 5. Target Hit Scenario (🎯 badge)
+    res_tgt = format_signal_badge_and_lot("CONCOR 485 PE @ ₹14.5", scenario="TARGET_HIT")
+    assert res_tgt == "🎯 CONCOR 485 PE @ ₹14.5 (Lot: 1250)"
+
+    # 6. Invalidation Scenario (🛑 badge)
+    res_inval = format_signal_badge_and_lot("CONCOR 485 PE @ ₹4.5", scenario="INVALIDATED")
+    assert res_inval == "🛑 CONCOR 485 PE @ ₹4.5 (Lot: 1250)"
+
+    # 7. Neutral / Coiling Scenario (🟡 badge)
+    res_neutral = format_signal_badge_and_lot(
+        "NIFTY 24500 IRON CONDOR @ ₹120.0", scenario="NEUTRAL"
+    )
+    assert res_neutral.startswith("🟡 ")
+
+    # 8. Deduplication check: existing lot size is NOT duplicated
+    res_no_dup = format_signal_badge_and_lot("CONCOR 485 PE @ ₹7.2 (Lot: 1250)")
+    assert res_no_dup == "🔴 CONCOR 485 PE @ ₹7.2 (Lot: 1250)"
+    assert res_no_dup.count("(Lot:") == 1
+
+    # 9. Cash equity check: lot size = 1 is suppressed
+    res_cash_eq = format_signal_badge_and_lot("TRENT @ ₹7100.0", symbol="TRENT", lot_size=1)
+    assert res_cash_eq == "🟢 TRENT @ ₹7100.0"
+    assert "(Lot:" not in res_cash_eq
+
+
+def test_fno_and_auto_alerts_color_coding_and_lot_size():
+    """Verify render_fno_alert and render_auto_alert apply color coding and show lot size beside price."""
+    from bot.alert_templates import render_fno_alert, render_auto_alert
+    from engine.auto_alert_engine import AutoAlert
+
+    # 1. render_fno_alert with Put option (Bearish 🔴)
+    pe_alert = {
+        "contract": "CONCOR 485 PE",
+        "underlying": "CONCOR",
+        "option_type": "PE",
+        "premium": 7.20,
+        "entry_range": "₹7.00 – ₹7.40",
+        "stop_loss": 5.00,
+        "target_1": 10.80,
+        "target_2": 14.50,
+        "spot": 482.0,
+        "lot_size": 1250,
+    }
+    rendered_fno_pe = render_fno_alert(pe_alert)
+    assert "🔴 <b>[REAL/LIVE] GAMMA BLAST SURGE</b>" in rendered_fno_pe
+    assert "🔴 <b>CONCOR 485 PE</b> @ <code>₹7.20</code> (Lot: 1250)" in rendered_fno_pe
+    assert "• <b>Entry Zone:</b> <code>₹7.00 – ₹7.40</code> (Lot: 1250)" in rendered_fno_pe
+
+    # 2. render_fno_alert with Call option (Bullish 🟢)
+    ce_alert = {
+        "contract": "CONCOR 485 CE",
+        "underlying": "CONCOR",
+        "option_type": "CE",
+        "premium": 8.50,
+        "entry_range": "₹8.20 – ₹8.80",
+        "stop_loss": 6.00,
+        "target_1": 12.50,
+        "target_2": 17.00,
+        "spot": 488.0,
+        "lot_size": 1250,
+    }
+    rendered_fno_ce = render_fno_alert(ce_alert)
+    assert "🟢 <b>[REAL/LIVE] GAMMA BLAST SURGE</b>" in rendered_fno_ce
+    assert "🟢 <b>CONCOR 485 CE</b> @ <code>₹8.50</code> (Lot: 1250)" in rendered_fno_ce
+
+    # 3. render_auto_alert with Options Momentum Put Alert
+    auto_pe = AutoAlert(
+        alert_id="opt-concor-485-pe",
+        alert_type="OPTIONS_MOMENTUM",
+        stage="IGNITED",
+        symbol="CONCOR",
+        exchange="NFO",
+        direction="BEARISH",
+        headline="OPTIONS MOMENTUM (PUT SURGE): CONCOR 485 PE @ ₹7.2",
+        summary="Heavy Put accumulation with high volume.",
+        ltp=7.20,
+        trigger_level=7.20,
+        target_level=12.0,
+        stop_loss=5.0,
+        strike=485.0,
+        option_type="PE",
+        contract_symbol="CONCOR 485 PE",
+        actionable_plan={
+            "action": "BUY",
+            "recommended_entry": "₹7.2",
+            "target": "₹12.0",
+            "stop_loss": "₹5.0",
+            "lot_size": 1250,
+        },
+        lot_size=1250,
+        confidence=91,
+    )
+    rendered_auto_pe = render_auto_alert(auto_pe, in_market=True)
+    assert "🔴 <b>[REAL/LIVE] OPTIONS PUT SURGE</b>" in rendered_auto_pe
+    assert "🔴 OPTIONS MOMENTUM (PUT SURGE): CONCOR 485 PE @ ₹7.2 (Lot: 1250)" in rendered_auto_pe
+    assert (
+        "• <b>Action:</b> BUY <b>CONCOR 485 PE</b> @ <code>₹7.2</code> (Lot: 1250)"
+        in rendered_auto_pe
+    )
+
+
+def test_milestone_alerts_color_coding_and_lot_size():
+    """Verify render_milestone_alert includes color-coded icon and lot size beside entry price."""
+    from bot.alert_templates import render_milestone_alert, MilestoneAlertData
+
+    # 1. Put Option milestone (🔴)
+    t1_pe = MilestoneAlertData(
+        milestone_type="TARGET_1",
+        symbol="CONCOR",
+        contract="CONCOR 485 PE",
+        alert_type="OPTIONS MOMENTUM",
+        direction="BEARISH",
+        ltp=10.80,
+        entry_price=7.20,
+        initial_sl=5.00,
+        target_1=10.80,
+        target_2=14.50,
+        lot_size=1250,
+        signal_id="#SIG_CONCOR_485PE_11SEP_0942",
+        environment="LIVE",
+    )
+    rendered_pe_m = render_milestone_alert(t1_pe)
+    assert "TARGET 1 ACHIEVED" in rendered_pe_m
+    assert "🔴 CONCOR 485 PE (OPTIONS MOMENTUM) — TARGET 1 ACHIEVED" in rendered_pe_m
+    assert "Entry: ₹7.20 (Lot: 1250)" in rendered_pe_m
+    assert "SL: ₹5.00" in rendered_pe_m
+    assert "T1: ₹10.80" in rendered_pe_m
+
+    # 2. Call Option milestone (🟢)
+    t1_ce = MilestoneAlertData(
+        milestone_type="TARGET_1",
+        symbol="CONCOR",
+        contract="CONCOR 485 CE",
+        alert_type="OPTIONS MOMENTUM",
+        direction="BULLISH",
+        ltp=12.50,
+        entry_price=8.50,
+        initial_sl=6.00,
+        target_1=12.50,
+        target_2=17.00,
+        lot_size=1250,
+        signal_id="#SIG_CONCOR_485CE_11SEP_0942",
+        environment="LIVE",
+    )
+    rendered_ce_m = render_milestone_alert(t1_ce)
+    assert "TARGET 1 ACHIEVED" in rendered_ce_m
+    assert "🟢 CONCOR 485 CE (OPTIONS MOMENTUM) — TARGET 1 ACHIEVED" in rendered_ce_m
+    assert "Entry: ₹8.50 (Lot: 1250)" in rendered_ce_m
+
+
+def test_discipline_regex_preserves_decimals_and_suppresses_zero_dot():
+    """
+    Verifies that 'Do not chase if option premium moves >15% beyond ₹13.0.'
+    does NOT render as '• Discipline: 0.'
+    """
+    from bot.alert_templates import render_auto_alert
+    from engine.alert_model import AutoAlert
+
+    alert = AutoAlert(
+        alert_id="test-discipline-decimal-bug",
+        alert_type="COMMODITY_MOMENTUM",
+        stage="IGNITED",
+        symbol="COPPER",
+        exchange="MCX",
+        direction="BULLISH",
+        headline="🛢️ MCX BREAKOUT: COPPER +2.1% @ ₹1,413.5",
+        summary="Test discipline decimal parsing",
+        ltp=1413.5,
+        trigger_level=1413.5,
+        stop_loss=1400.0,
+        target_level=1440.0,
+        confidence=85,
+        is_live=True,
+        environment="LIVE",
+        market_status="LIVE",
+        no_chase_boundary=1425.0,
+        actionable_plan={
+            "action": "BUY_FUTURES",
+            "contract": "MCX:COPPER",
+            "entry_range": "₹1,410.0 – ₹1,415.0",
+            "stop_loss": "₹1,400.0",
+            "target": "₹1,440.0",
+            "risk_reward": "1:2.0",
+            "lot_size": 2500,
+            "when_to_wait": "Do not chase if option premium moves >15% beyond ₹13.0.",
+            "profit_rule": "Book 50% at T1, trail stop.",
+        },
+    )
+
+    rendered = render_auto_alert(alert, in_market=True)
+    # MUST NOT contain broken "• Discipline: 0."
+    assert "Discipline: 0." not in rendered
+    assert "Discipline:</b> <i>0." not in rendered
+    # Must contain the inline no-chase boundary properly
+    assert "🛑 <b>No-Chase:</b>" in rendered
+
+    # Now verify that substantive advice following a no-chase rule IS preserved
+    alert.actionable_plan["when_to_wait"] = (
+        "Do not chase if option premium moves >15% beyond ₹13.0. Wait for 5m candle confirmation before entering."
+    )
+    rendered_with_advice = render_auto_alert(alert, in_market=True)
+    assert "Wait for 5m candle confirmation before entering." in rendered_with_advice
+
+
+def test_mcx_provenance_badge_reflects_delayed_feed_when_broker_is_mstock():
+    """
+    Verifies that an MCX alert with mstock as data broker renders DELAYED FEED (yfinance),
+    not false 'LIVE BROKER FEED'.
+    """
+    from unittest.mock import patch
+    from bot.alert_templates import render_auto_alert
+    from engine.alert_model import AutoAlert
+
+    alert = AutoAlert(
+        alert_id="test-mcx-prov",
+        alert_type="COMMODITY_MOMENTUM",
+        stage="IGNITED",
+        symbol="COPPER",
+        exchange="MCX",
+        direction="BULLISH",
+        headline="🛢️ MCX BREAKOUT: COPPER @ ₹1,413.5",
+        summary="MCX test provenance",
+        ltp=1413.5,
+        trigger_level=1413.5,
+        stop_loss=1400.0,
+        target_level=1440.0,
+        confidence=85,
+        is_live=True,
+        environment="LIVE",
+        market_status="LIVE",
+        order_flow_signals={"live_broker_connected": True},  # Equity broker connected
+    )
+
+    with patch("brokers.session.get_data_broker_key", return_value="mstock"):
+        rendered = render_auto_alert(alert, in_market=True)
+        # MUST NOT claim LIVE BROKER FEED for MCX when broker is mstock
+        assert "LIVE BROKER FEED" not in rendered
+        assert "DELAYED FEED (yfinance)" in rendered

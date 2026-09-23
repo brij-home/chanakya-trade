@@ -95,10 +95,16 @@ _INDEX_MAP = {
     "NIFTY MIDCAP 100": "^NSEMDCP50",
     "NIFTY MIDCAP 50": "^NSEMDCP50",
     "NIFTY NEXT 50": "^NSMIDCP",
+    "NIFTYNXT50": "^NSMIDCP",
+    "NEXT50": "^NSMIDCP",
     "NIFTY 100": "^CNX100",
+    "NIFTY100": "^CNX100",
     "NIFTY 200": "^CNX200",
+    "NIFTY200": "^CNX200",
     "NIFTY 500": "^CRSLDX",
+    "NIFTY500": "^CRSLDX",
     "NIFTY SMALLCAP 100": "^CNXSC",
+    "NIFTYSMLCAP100": "^CNXSC",
     "SENSEX": "^BSESN",
     "BSE SENSEX": "^BSESN",
     "BANKEX": "BSE-BANK.BO",
@@ -107,17 +113,61 @@ _INDEX_MAP = {
     "INDIAVIX": "^INDIAVIX",
     "VIX": "^INDIAVIX",
     "NIFTY IT": "^CNXIT",
+    "NIFTYIT": "^CNXIT",
     "NIFTY PHARMA": "^CNXPHARMA",
+    "NIFTYPHARMA": "^CNXPHARMA",
     "NIFTY AUTO": "^CNXAUTO",
+    "NIFTYAUTO": "^CNXAUTO",
     "NIFTY FMCG": "^CNXFMCG",
+    "NIFTYFMCG": "^CNXFMCG",
     "NIFTY REALTY": "^CNXREALTY",
+    "NIFTYREALTY": "^CNXREALTY",
     "NIFTY METAL": "^CNXMETAL",
+    "NIFTYMETAL": "^CNXMETAL",
     "NIFTY ENERGY": "^CNXENERGY",
+    "NIFTYENERGY": "^CNXENERGY",
     "NIFTY INFRA": "^CNXINFRA",
+    "NIFTYINFRA": "^CNXINFRA",
     "NIFTY COMMODITIES": "^CNXCOMMODITIES",
+    "NIFTYCOMMODITIES": "^CNXCOMMODITIES",
     "NIFTY PSE": "^CNXPSE",
+    "NIFTYPSE": "^CNXPSE",
     "NIFTY PSU BANK": "^CNXPSUBANK",
-    "NIFTY PRIVATE BANK": "^CNXPVTBANK",
+    "NIFTY PSU": "^CNXPSUBANK",
+    "NIFTYPSU": "^CNXPSUBANK",
+    "NIFTY PRIVATE BANK": "NIFTY_PVT_BANK.NS",
+    "NIFTY PVT BANK": "NIFTY_PVT_BANK.NS",
+    "NIFTYPVTBANK": "NIFTY_PVT_BANK.NS",
+    "NIFTY MEDIA": "^CNXMEDIA",
+    "NIFTYMEDIA": "^CNXMEDIA",
+    "MEDIA": "^CNXMEDIA",
+    "NIFTY CONSUMPTION": "^CNXCONSUMP",
+    "NIFTYCONSUMPTION": "^CNXCONSUMP",
+    "NIFTY HEALTHCARE": "^CNXHEALTH",
+    "NIFTYHEALTHCARE": "^CNXHEALTH",
+    "NIFTY OIL AND GAS": "^CNXOILGAS",
+    "NIFTY OIL & GAS": "^CNXOILGAS",
+    "NIFTYOILGAS": "^CNXOILGAS",
+}
+
+# Special corporate ticker mappings (corporate restructuring / demergers / rebranding)
+_CORPORATE_ALIAS_MAP = {
+    "TATAMOTORS": "TMPV.NS",
+    "ZOMATO": "ETERNAL.NS",
+    "CEINFO": "MAPMYINDIA.NS",
+    "UNOINDA": "UNOMINDA.NS",
+    "REC": "RECLTD.NS",
+    "ASTRA": "ASTRAMICRO.NS",
+    "SWANENERGY": "SWANCORP.NS",
+    "CAPLIPHARM": "CAPLIPOINT.NS",
+    "RPGPHILIFE": "RPGLIFE.NS",
+    "METRO": "METROBRAND.NS",
+    "CENTURYTEX": "ABREL.NS",
+    "HITACHI": "POWERINDIA.NS",
+    "KALPATPOWR": "KPIL.NS",
+    "KBL": "KIRLOSBROS.NS",
+    "GSHIP": "GESHIP.NS",
+    "JUPITERWAG": "JWL.NS",
 }
 
 
@@ -191,6 +241,10 @@ def _to_yf_symbol(symbol: str, exchange: str = "NSE") -> str:
             return f"{upper}=X"
         return upper
 
+    # Special corporate ticker mappings (e.g. corporate restructuring / rebranding)
+    if upper in _CORPORATE_ALIAS_MAP:
+        return _CORPORATE_ALIAS_MAP[upper]
+
     if exch_upper == "BSE":
         return f"{symbol}.BO"
     return f"{symbol}.NS"
@@ -225,13 +279,22 @@ def _get_yf():
 # ── Quote functions ──────────────────────────────────────────
 
 
+import logging
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 
+logger = logging.getLogger("chanakya.yfinance")
+
 _quote_cache_lock = threading.Lock()
 _quote_cache: dict[str, tuple[float, Quote]] = {}  # key -> (timestamp, Quote)
 _QUOTE_TTL_SECONDS = 5.0
+
+# 6-hour negative cache for delisted or 404 dead tickers to avoid synchronous network stalls
+# Uses a SEPARATE lock from _quote_cache_lock to prevent cross-blocking.
+_dead_ticker_lock = threading.Lock()
+_DEAD_TICKER_CACHE: dict[str, float] = {}  # ticker -> timestamp
+_DEAD_TICKER_TTL = 6 * 3600.0  # 6 hours (matches config.constants.DELISTED_SYMBOL_TTL_SECONDS)
 
 # USD-denominated yfinance futures tickers mapped to their MCX contract quotation factor
 # COMEX/NYMEX futures are quoted in US units (troy oz, lbs, barrels), whereas MCX quotes in Indian standard units:
@@ -246,13 +309,14 @@ _USD_COMMODITY_FACTORS: dict[str, float] = {
     * 1.1288,  # GOLD landed (COMEX USD/troy oz → MCX ₹/10 grams with duty/basis)
     "SI=F": (1000.0 / 31.1034768)
     * 1.2427,  # SILVER landed (COMEX USD/troy oz → MCX ₹/1 kg with duty/basis)
-    "HG=F": 2.20462262,  # COPPER (USD/lb → ₹/1 kg)
-    "CL=F": 1.0,  # CRUDE OIL (USD/bbl → ₹/bbl)
-    "BZ=F": 1.0,  # BRENT CRUDE OIL (USD/bbl → ₹/bbl)
-    "NG=F": 1.0,  # NATURAL GAS (USD/MMBtu → ₹/MMBtu)
-    "ZNC=F": 2.20462262,  # ZINC (USD/lb → ₹/1 kg)
-    "ALI=F": 2.20462262,  # ALUMINIUM (USD/lb → ₹/1 kg)
-    "LED=F": 2.20462262,  # LEAD (USD/lb → ₹/1 kg)
+    "HG=F": 2.20462262
+    * 0.9785,  # COPPER landed (COMEX USD/lb → MCX ₹/1 kg with LME/MCX basis ~0.9785x)
+    "CL=F": 1.0,  # CRUDE OIL (NYMEX USD/bbl → MCX ₹/bbl)
+    "BZ=F": 1.0,  # BRENT CRUDE OIL (ICE USD/bbl → MCX ₹/bbl)
+    "NG=F": 1.0,  # NATURAL GAS (NYMEX USD/MMBtu → MCX ₹/MMBtu)
+    "ZNC=F": 1.0 / 1000.0,  # ZINC (LME/COMEX USD/metric ton → MCX ₹/1 kg)
+    "ALI=F": 1.0 / 1000.0,  # ALUMINIUM (LME/COMEX USD/metric ton → MCX ₹/1 kg)
+    "LED=F": 1.0 / 1000.0,  # LEAD (LME USD/metric ton → MCX ₹/1 kg)
     "CT=F": 3.74786,  # COTTON (cents/lb → ₹/bale)
 }
 
@@ -304,6 +368,11 @@ def yf_get_quote(symbol: str, exchange: str = "NSE") -> Quote:
     yf = _get_yf()
     ticker = _to_yf_symbol(symbol, exchange)
 
+    with _dead_ticker_lock:
+        if ticker in _DEAD_TICKER_CACHE:
+            if now - _DEAD_TICKER_CACHE[ticker] < _DEAD_TICKER_TTL:
+                raise RuntimeError(f"Ticker {ticker} is in 6h negative cache (delisted/404)")
+
     try:
         t = yf.Ticker(ticker)
         info = t.fast_info
@@ -315,16 +384,21 @@ def yf_get_quote(symbol: str, exchange: str = "NSE") -> Quote:
         day_low = float(info.get("dayLow", 0) or info.get("day_low", 0) or 0)
         volume = int(info.get("lastVolume", 0) or info.get("last_volume", 0) or 0)
 
-        # If fast_info is sparse, try history for today
-        if not last_price:
-            hist = t.history(period="1d")
-            if not hist.empty:
-                row = hist.iloc[-1]
-                last_price = float(row.get("Close", 0))
-                open_price = float(row.get("Open", 0))
-                day_high = float(row.get("High", 0))
-                day_low = float(row.get("Low", 0))
-                volume = int(row.get("Volume", 0))
+        # If fast_info is sparse or volume is missing, try history for today
+        if not last_price or volume <= 0:
+            try:
+                hist = t.history(period="1d")
+                if not hist.empty:
+                    row = hist.iloc[-1]
+                    if not last_price:
+                        last_price = float(row.get("Close", 0))
+                        open_price = float(row.get("Open", 0))
+                        day_high = float(row.get("High", 0))
+                        day_low = float(row.get("Low", 0))
+                    if volume <= 0:
+                        volume = int(row.get("Volume", 0))
+            except Exception:
+                pass
 
         # ── MCX Commodity USD → INR conversion with unit multiplier ────
         # yfinance returns USD-denominated prices for commodity futures
@@ -358,6 +432,20 @@ def yf_get_quote(symbol: str, exchange: str = "NSE") -> Quote:
 
         return q
     except Exception as e:
+        err_str = str(e).lower()
+        if (
+            "404" in err_str
+            or "not found" in err_str
+            or "delisted" in err_str
+            or isinstance(e, (KeyError, IndexError))
+        ):
+            with _dead_ticker_lock:
+                if ticker not in _DEAD_TICKER_CACHE:  # first detection — log it
+                    logger.warning(
+                        "yfinance_symbol_delisted",
+                        extra={"ticker": ticker, "symbol": symbol, "ttl_hours": 6},
+                    )
+                _DEAD_TICKER_CACHE[ticker] = now
         raise RuntimeError(f"yfinance quote failed for {symbol}: {e}") from e
 
 
@@ -446,6 +534,12 @@ def yf_get_ohlcv(
     """
     yf = _get_yf()
     ticker = _to_yf_symbol(symbol, exchange)
+
+    now_ts = time.time()
+    with _dead_ticker_lock:
+        if ticker in _DEAD_TICKER_CACHE:
+            if now_ts - _DEAD_TICKER_CACHE[ticker] < _DEAD_TICKER_TTL:
+                return []
 
     # Map our interval names to yfinance format
     interval_map = {
@@ -553,7 +647,11 @@ def yf_get_ohlcv(
                 }
             )
         return rows
-    except Exception:
+    except Exception as e:
+        err_str = str(e).lower()
+        if "404" in err_str or "not found" in err_str or "delisted" in err_str:
+            with _quote_cache_lock:
+                _DEAD_TICKER_CACHE[ticker] = time.time()
         return []
 
 
