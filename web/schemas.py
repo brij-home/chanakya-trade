@@ -38,17 +38,17 @@ class SymbolRequest(InstrumentBaseRequest):
 
 class BacktestRequest(InstrumentBaseRequest):
     strategy: str = "rsi"
-
-
-class ModeSwitchRequest(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-    mode: str
     period: str = "1y"
     capital: Optional[float] = None
     initial_capital: Optional[float] = None
     timeframe: Optional[str] = "1d"
     risk_pct: Optional[float] = 1.0
     fast: bool = False  # True → vectorized engine (<1s, no slippage sim)
+
+
+class ModeSwitchRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    mode: str
 
 
 class PairsRequest(BaseModel):

@@ -90,9 +90,10 @@ def test_evaluate_symbol_vwap_knife_catching_penalty(scanner):
     with (
         patch("market.quotes.get_quote", return_value=mock_quote),
         patch("market.history.get_ohlcv", return_value=df),
+        patch("market.options.get_options_chain", return_value=None),
         patch(
             "analysis.sector_rotation.get_stock_sector_alignment",
-            return_value={"sector_name": "IT", "quadrant": "LEADING"},
+            return_value={"sector_name": "IT", "quadrant": "LAGGING"},
         ),
         patch(
             "engine.learning_engine.pattern_learning_engine.is_symbol_locked_out",

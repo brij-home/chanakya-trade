@@ -160,10 +160,19 @@ def test_history_crypto_integration():
 
 def test_smart_funnel_crypto_prefilter():
     funnel = SmartFunnel(verbose=False)
-    report = funnel.evaluate_stock_quant("BTCUSDT", exchange="CRYPTO")
-    assert report.symbol == "BTCUSDT"
-    assert report.exchange == "CRYPTO"
-    assert report.metrics.get("ltp", 0.0) > 0
+    test_quote = Quote(
+        symbol="CRYPTO:BTCUSDT",
+        last_price=81000.0,
+        change=500.0,
+        change_pct=0.62,
+        provider="binance",
+        data_state="LIVE",
+    )
+    with patch.object(crypto_stream, "get_quote", return_value=test_quote):
+        report = funnel.evaluate_stock_quant("BTCUSDT", exchange="CRYPTO")
+        assert report.symbol == "BTCUSDT"
+        assert report.exchange == "CRYPTO"
+        assert report.metrics.get("ltp", 0.0) > 0
 
 
 # ── 5. FastAPI Endpoints Tests ───────────────────────────────
@@ -179,13 +188,28 @@ def test_crypto_api_endpoints():
     assert "status" in data
     assert "tickers" in data
 
-    # 2. SMC analysis endpoint
-    resp_smc = client.get("/api/crypto/smc?symbol=BTCUSDT&timeframe=15m&limit=50")
-    assert resp_smc.status_code == 200
-    smc_data = resp_smc.json()
-    assert smc_data["symbol"] == "BTCUSDT"
-    assert smc_data["ltp"] > 0
-    assert "regime" in smc_data
-    assert "active_demand_zones" in smc_data
-    assert "active_supply_zones" in smc_data
-    assert "target_1" in smc_data
+    # 2. SMC analysis endpoint with hermetic klines
+    sample_df = pd.DataFrame(
+        [
+            {
+                "date": pd.to_datetime(1789900000000 + i * 900000, unit="ms"),
+                "open": 80000.0 + i * 10,
+                "high": 80500.0 + i * 10,
+                "low": 79800.0 + i * 10,
+                "close": 80200.0 + i * 10,
+                "volume": 50.0,
+            }
+            for i in range(30)
+        ]
+    ).set_index("date")
+
+    with patch.object(crypto_stream, "get_klines", return_value=sample_df):
+        resp_smc = client.get("/api/crypto/smc?symbol=BTCUSDT&timeframe=15m&limit=50")
+        assert resp_smc.status_code == 200
+        smc_data = resp_smc.json()
+        assert smc_data["symbol"] == "BTCUSDT"
+        assert smc_data["ltp"] > 0
+        assert "regime" in smc_data
+        assert "active_demand_zones" in smc_data
+        assert "active_supply_zones" in smc_data
+        assert "target_1" in smc_data

@@ -528,10 +528,12 @@ def evaluate_single_stock_inflection(
                 return None  # Drop before scoring — weekly timeframe overrides all daily signals
 
             if _ws == "STAGE_2_MARKUP":
+                weekly_stage = "WEEKLY_STAGE_2"
                 confluence_factors.append(
                     f"👑 Weekly Weinstein Stage 2 Markup (confidence {_wc}/8)"
                 )
             elif _ws == "STAGE_1_BASE" and _wc >= 3:
+                weekly_stage = "WEEKLY_STAGE_1"
                 confluence_factors.append(
                     f"📐 Weekly Stage 1 Accumulation Base (late stage, conf {_wc}/8)"
                 )

@@ -13,6 +13,17 @@ from engine.alert_scrutiny import AlertScrutinyAuditor
 from engine.detectors.squeeze_breakout import detect_squeeze_breakout
 
 
+@pytest.fixture(autouse=True)
+def clean_lockouts():
+    from engine.learning_engine import pattern_learning_engine
+
+    pattern_learning_engine._symbol_lockouts.clear()
+    pattern_learning_engine._invalidation_counts.clear()
+    yield
+    pattern_learning_engine._symbol_lockouts.clear()
+    pattern_learning_engine._invalidation_counts.clear()
+
+
 @pytest.fixture
 def auditor() -> AlertScrutinyAuditor:
     return AlertScrutinyAuditor()

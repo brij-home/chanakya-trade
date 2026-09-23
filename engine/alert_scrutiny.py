@@ -1145,7 +1145,7 @@ class AlertScrutinyAuditor:
 
                     is_defensive_leader = bool(
                         any(d in sec_name for d in ("PHARMA", "FMCG", "HEALTH", "CONSUMER"))
-                        and spot_chg >= 0.5
+                        and (spot_chg >= 0.5 or rrg_quad in ("LEADING", "IMPROVING"))
                     )
                     is_options_surge_decoupler = bool(
                         vol_oi_val >= 2.0

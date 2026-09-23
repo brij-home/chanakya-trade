@@ -104,15 +104,20 @@ def test_get_market_status_reporting():
 
 def test_get_current_ist_session():
     """Verify session flags respect holidays and operating windows."""
-    # Monday 14-Sep-2026 (Ganesh Chaturthi morning) -> all False
+    # Monday 14-Sep-2026 (Ganesh Chaturthi morning) -> all Indian markets False, crypto True (24x7)
     holiday_dt = datetime(2026, 9, 14, 11, 0, tzinfo=IST)
     sess_holiday = get_current_ist_session(ref_dt=holiday_dt)
-    assert sess_holiday == {"equity_nfo": False, "currency": False, "commodity": False}
+    assert sess_holiday == {
+        "equity_nfo": False,
+        "currency": False,
+        "commodity": False,
+        "crypto": True,
+    }
 
-    # Monday 14-Sep-2026 (Ganesh Chaturthi evening) -> commodity True, equity False
+    # Monday 14-Sep-2026 (Ganesh Chaturthi evening) -> commodity True, equity False, crypto True
     holiday_eve = datetime(2026, 9, 14, 18, 0, tzinfo=IST)
     sess_eve = get_current_ist_session(ref_dt=holiday_eve)
-    assert sess_eve == {"equity_nfo": False, "currency": False, "commodity": True}
+    assert sess_eve == {"equity_nfo": False, "currency": False, "commodity": True, "crypto": True}
 
     # Regular Tuesday 11:00 IST -> equity True, currency False, commodity False
     tue_day = datetime(2026, 9, 15, 11, 0, tzinfo=IST)

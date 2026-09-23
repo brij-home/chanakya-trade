@@ -868,6 +868,10 @@ class MStockAPI(BrokerAPI):
                         fetched = raw_data.get("fetched", [])
                         if not fetched and isinstance(raw_data.get("data"), list):
                             fetched = raw_data.get("data")
+                        elif not fetched and (
+                            raw_data.get("ltp") is not None or raw_data.get("lastPrice") is not None
+                        ):
+                            fetched = [raw_data]
                     elif isinstance(raw_data, list):
                         fetched = raw_data
                     else:
@@ -889,6 +893,9 @@ class MStockAPI(BrokerAPI):
                         change_pct = (change / close * 100.0) if close else 0.0
 
                         targets = token_to_targets.get((exch, tok)) or []
+                        if not targets and len(inst_list) == 1:
+                            clean = inst_list[0].replace("NSE:", "").replace("BSE:", "").strip()
+                            targets = [(inst_list[0], clean)]
                         for orig_inst, target_sym in targets:
                             q_obj = Quote(
                                 symbol=target_sym,

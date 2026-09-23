@@ -242,6 +242,9 @@ class TestOptionsChainFallback:
         mock_broker.get_options_chain.side_effect = RuntimeError("broker down")
         monkeypatch.setattr("market.options.get_data_broker", lambda: mock_broker)
         monkeypatch.setattr("market.options.nse_get_options_chain", lambda u, e=None: [])
+        monkeypatch.setattr(
+            "market.options.build_index_synthetic_option_chain", lambda *a, **kw: []
+        )
 
         result = options_mod.get_options_chain("NIFTY")
         assert result == []

@@ -387,7 +387,7 @@ class TestContagionHolisticSanity:
             assert "27250" not in alert.headline
             # Falls back cleanly to spot index setup
             assert alert.symbol == "FINNIFTY"
-            assert alert.ltp == 25250.0
+            assert alert.underlying_spot == 25250.0
 
     def test_finnifty_yfinance_ticker_mapping(self):
         """FINNIFTY must map to NIFTY_FIN_SERVICE.NS, not ^CNXFIN."""

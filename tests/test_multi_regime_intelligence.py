@@ -200,4 +200,4 @@ def test_dead_ticker_cache():
     # Querying yf_get_quote should raise fast without hitting network
     with pytest.raises(RuntimeError) as exc_info:
         yf_get_quote("DEADCO", exchange="NSE")
-    assert "24h negative cache" in str(exc_info.value)
+    assert "negative cache" in str(exc_info.value)

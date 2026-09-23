@@ -1730,7 +1730,45 @@ def get_stock_sector(symbol: str) -> tuple[str, str]:
     except Exception:
         pass
 
-    # Strictly avoid external network calls during sector lookups.
+    # Dynamic fallback: query analysis.fundamental.analyse
+    try:
+        from analysis.fundamental import analyse
+
+        fund = analyse(clean)
+        if fund and getattr(fund, "sector", None):
+            gics_sec = str(fund.sector).strip()
+            mapped = _GICS_SECTOR_TO_SECTOR.get(gics_sec)
+            if not mapped:
+                gics_ind = (str(getattr(fund, "industry", "")) or "").lower()
+                if (
+                    "real estate" in gics_ind
+                    or "realt" in gics_ind
+                    or "real estate" in gics_sec.lower()
+                ):
+                    mapped = ("realty", "Real Estate & Housing")
+                elif "bank" in gics_ind or "finance" in gics_ind:
+                    mapped = ("banking", "Banking & Financial Services")
+                elif "tech" in gics_ind or "software" in gics_ind:
+                    mapped = ("it", "IT, Software & Technology")
+                elif "pharma" in gics_ind or "health" in gics_ind:
+                    mapped = ("pharma", "Pharma & Healthcare")
+                elif "auto" in gics_ind:
+                    mapped = ("auto", "Automobiles & Mobility")
+                elif "steel" in gics_ind or "metal" in gics_ind:
+                    mapped = ("metals", "Metals & Mining")
+                elif "power" in gics_ind or "energy" in gics_ind:
+                    mapped = ("energy", "Energy, Power & Green Transition")
+                elif "chemical" in gics_ind:
+                    mapped = ("chemicals", "Specialty Chemicals & Agriculture")
+            if mapped:
+                _STOCK_TO_SECTOR[clean] = mapped
+                _STOCK_SECTOR_SOURCE[clean] = "DYNAMIC_FUNDAMENTALS"
+                if getattr(fund, "industry", None):
+                    _STOCK_INDUSTRY[clean] = fund.industry
+                return mapped
+    except Exception:
+        pass
+
     # Default to broad market and memoize in _STOCK_TO_SECTOR.
     _STOCK_TO_SECTOR[clean] = ("broad_market", "Broad Market")
     _STOCK_SECTOR_SOURCE[clean] = "BROAD_MARKET_DEFAULT"

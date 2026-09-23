@@ -146,6 +146,7 @@ def test_validate_and_sanitize_ohlcv_dataframe():
     assert row_2["low"] == 92.67
 
 
+@pytest.mark.network
 def test_trent_real_data_and_rsi_sanity():
     """Verify TRENT daily data produces clean, genuine RSI and no 99.9 anomaly."""
     # Fetch real daily bars from eod_bars.db or sync

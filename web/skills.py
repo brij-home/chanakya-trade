@@ -85,14 +85,14 @@ import time as _time_mod
 from collections import OrderedDict as _OrderedDict
 import threading as _threading
 
-_CHAT_SESSION_MAX = 50
+_CHAT_SESSION_MAX = 200
 _CHAT_SESSION_TTL = 7200.0  # 2 hours
 
 
 class _LRUSessionStore:
     """Thread-safe bounded LRU session store with TTL eviction."""
 
-    def __init__(self, maxsize: int = 50, ttl: float = 7200.0):
+    def __init__(self, maxsize: int = 200, ttl: float = 7200.0):
         self._store: _OrderedDict[str, tuple[object, float]] = _OrderedDict()
         self._lock = _threading.Lock()
         self.maxsize = maxsize

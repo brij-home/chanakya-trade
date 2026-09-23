@@ -230,6 +230,7 @@ def test_settlement_invalidation_permitted_post_market(clean_engine, monkeypatch
         invalidation_reason="Settlement price ₹808.5 breached stop-loss floor ₹810.0.",
         is_live=True,
         environment="LIVE",
+        telegram_dispatched=True,
     )
 
     with patch("engine.alerts._telegram_notify") as mock_tg:
