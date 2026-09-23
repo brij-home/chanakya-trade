@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import datetime
+from datetime import datetime, time as dtime
 from typing import Any, Optional
 from zoneinfo import ZoneInfo
 
@@ -291,10 +291,58 @@ def detect_index_put_setup(
                                 "current_spot": spot,
                                 "vol_ratio_p2_vs_p1": round(vol_at_p2 / max(1.0, vol_at_p1), 2),
                             }
+
+                # 6. Trend Continuation Retrace / Rejection (EMA 9/20 & VWAP Resistance Rejection)
+                # Catches sustained downtrends where price retraces up into EMA/VWAP resistance and resumes down
+                if len(ohlcv_5m) >= 6 and "TREND_PULLBACK_REJECTION" not in signals:
+                    try:
+                        closes = ohlcv_5m[col_c].values
+                        lows = ohlcv_5m[col_l].values
+                        highs = ohlcv_5m[col_h].values
+                        col_o = "open" if "open" in ohlcv_5m.columns else "Open"
+                        opens = ohlcv_5m[col_o].values
+
+                        ema9 = pd.Series(closes).ewm(span=9, adjust=False).mean().values[-1]
+                        ema20 = (
+                            pd.Series(closes).ewm(span=20, adjust=False).mean().values[-1]
+                            if len(closes) >= 20
+                            else pd.Series(closes).mean()
+                        )
+
+                        last_h = float(highs[-1])
+                        last_c = float(closes[-1])
+                        last_o = float(opens[-1])
+                        candle_rng = max(0.1, last_h - float(lows[-1]))
+
+                        # Bearish moving average alignment & holding below or near VWAP
+                        if ema9 <= (ema20 * 1.002) and spot <= (
+                            effective_vwap * 1.003 if effective_vwap else spot * 1.01
+                        ):
+                            tested_ema = last_h >= (ema9 * 0.998) and last_c <= (ema9 * 1.001)
+                            tested_vwap = (
+                                effective_vwap > 0
+                                and last_h >= (effective_vwap * 0.998)
+                                and last_c <= (effective_vwap * 1.001)
+                            )
+                            is_bearish_candle = (last_c <= last_o) and (
+                                (last_h - last_c) / candle_rng >= 0.35
+                            )
+
+                            if (tested_ema or tested_vwap) and is_bearish_candle:
+                                signals.append("TREND_PULLBACK_REJECTION")
+                                signal_tags["trend_pullback"] = {
+                                    "ema9": round(float(ema9), 2),
+                                    "ema20": round(float(ema20), 2),
+                                    "vwap": round(float(effective_vwap), 2),
+                                    "spot": spot,
+                                }
+                    except Exception as e_tpb:
+                        logger.debug(f"[IndexPutSetup] Trend pullback check error: {e_tpb}")
+
         except Exception as e_ohlcv:
             logger.debug(f"[IndexPutSetup] OHLCV analysis error for {underlying}: {e_ohlcv}")
 
-    # 6. Day Low Breakdown (Bearish Continuation / Range Expansion)
+    # 7. Day Low Breakdown (Bearish Continuation / Range Expansion)
     # When spot is testing or breaking down through session low with VWAP weakness and PE momentum
     if day_low and day_low > 0 and "DAY_LOW_BREAKDOWN" not in signals:
         dl_dist_pct = (day_low - spot) / day_low * 100.0
@@ -447,6 +495,13 @@ def detect_index_put_setup(
             f"Put momentum building ({volume:,} contracts, {vol_oi_ratio:.1f}x Vol/OI). "
             f"Entry: ₹{opt_ltp:,.1f} | SL: ₹{sl_premium:,.1f} ({sl_pct:.0f}%) | T1: ₹{t1_premium:,.1f} (+{t1_pct:.0f}%)."
         )
+    elif "TREND_PULLBACK_REJECTION" in signals:
+        tpb = signal_tags.get("trend_pullback", {})
+        headline = f"📉 TREND RETRACE REJECTION: {clean_sym} {int(strike)} PE"
+        summary = (
+            f"Bearish trend continuation: Spot (₹{spot:,.1f}) tested EMA-9/20 resistance (₹{tpb.get('ema9', 0):,.1f}) and failed beneath VWAP (₹{effective_vwap:,.1f}) with sellers in control. "
+            f"Entry: ₹{opt_ltp:,.1f} | SL: ₹{sl_premium:,.1f} ({sl_pct:.0f}%) | T1: ₹{t1_premium:,.1f} (+{t1_pct:.0f}%)."
+        )
     elif "DAY_LOW_BREAKDOWN" in signals:
         dlb = signal_tags.get("day_low_breakdown", {})
         headline = f"📉 DAY LOW BREAKDOWN: {clean_sym} {int(strike)} PE"
@@ -473,6 +528,109 @@ def detect_index_put_setup(
 
     is_authentic = bool(opt_ltp and opt_ltp > 0.0)
     alert_env = "LIVE" if is_authentic else "TEST"
+
+    # ── Defined-Risk Hedged Spread Construction (Bear Put Spread) ─
+    hedge_plan = None
+    step = 100.0 if clean_sym in ("BANKNIFTY", "SENSEX") else 50.0
+    spread_width = 2.0 * step if clean_sym in ("BANKNIFTY", "SENSEX") else step
+    otm_target_strike = strike - spread_width
+
+    # 1. Try exact target OTM strike in provided chain
+    otm_cand = None
+    exact_matches = [
+        c
+        for c in chain
+        if getattr(c, "option_type", "") == "PE"
+        and abs(getattr(c, "strike", 0.0) - otm_target_strike) <= (step * 0.25)
+        and float(getattr(c, "last_price", 0.0) or 0.0) > 0.0
+    ]
+    if exact_matches:
+        otm_cand = exact_matches[0]
+    else:
+        # Fallback to any contract in chain with strike < strike
+        lower_strikes = [
+            c
+            for c in chain
+            if getattr(c, "option_type", "") == "PE"
+            and getattr(c, "strike", 0.0) <= (strike - spread_width * 0.75)
+            and float(getattr(c, "last_price", 0.0) or 0.0) > 0.0
+        ]
+        if lower_strikes:
+            lower_strikes.sort(key=lambda c: abs(getattr(c, "strike", 0.0) - otm_target_strike))
+            otm_cand = lower_strikes[0]
+
+    if otm_cand:
+        sell_strike = float(getattr(otm_cand, "strike", otm_target_strike))
+        sell_prem = float(getattr(otm_cand, "last_price", 0.0) or 0.0)
+    else:
+        sell_strike = strike - spread_width
+        try:
+            from engine.options_backtest import bs_premium
+
+            sell_prem = round(bs_premium(spot, sell_strike, 7, 0.15, "PE"), 2)
+        except Exception:
+            sell_prem = 0.0
+
+    if sell_strike >= strike:
+        sell_strike = strike - spread_width
+
+    actual_width = strike - sell_strike
+    if sell_prem <= 0.0 or sell_prem >= opt_ltp or (opt_ltp - sell_prem) >= actual_width:
+        sell_prem = max(
+            1.0, round(min(opt_ltp * 0.55, max(1.0, opt_ltp - (actual_width * 0.35))), 2)
+        )
+
+    if opt_ltp > 0 and sell_prem > 0 and sell_strike < strike:
+        net_debit = round(max(1.0, min(actual_width * 0.75, opt_ltp - sell_prem)), 2)
+        strike_width = round(strike - sell_strike, 2)
+        max_loss = round(net_debit * lot_sz, 2)
+        max_profit = round(max(1.0, (strike_width - net_debit) * lot_sz), 2)
+        be_spot = round(spot - net_debit, 1)
+        rr_spread = round(max_profit / max(1.0, max_loss), 2)
+
+        now_time = now_dt.time()
+        is_midday_chop_window = (dtime(11, 30) <= now_time <= dtime(14, 0)) and (vel_score < 70)
+        pref_veh = "HEDGED_SPREAD" if is_midday_chop_window else "NAKED_OPTION_OR_SPREAD"
+
+        hedge_plan = {
+            "strategy": "BEAR_PUT_SPREAD",
+            "sentiment": "BEARISH",
+            "preferred_vehicle": pref_veh,
+            "description": f"Buy {int(strike)} PE & Sell {int(sell_strike)} PE (Defined Risk / Capped Loss)",
+            "buy_leg": f"BUY {clean_sym} {int(strike)} PE @ ₹{opt_ltp:,.1f}",
+            "sell_leg": f"SELL {clean_sym} {int(sell_strike)} PE @ ₹{sell_prem:,.1f}",
+            "net_debit_per_share": net_debit,
+            "net_debit_total": max_loss,
+            "max_loss": max_loss,
+            "max_profit": max_profit,
+            "breakeven_spot": be_spot,
+            "risk_reward": f"1:{rr_spread:.1f}",
+            "lot_size": lot_sz,
+            "peace_of_mind_benefit": "Zero Theta Bleed — short OTM leg finances time decay. Maximum downside risk strictly capped.",
+            "execution_guidance": (
+                "⚠️ MIDDAY CHOP WINDOW: Execute Bear Put Spread to avoid theta decay."
+                if is_midday_chop_window
+                else "High Momentum: Fast scalpers can trade Naked PE; for defined risk, trade Bear Put Spread."
+            ),
+            "legs": [
+                {
+                    "side": "BUY",
+                    "strike": strike,
+                    "option_type": "PE",
+                    "premium": opt_ltp,
+                    "lots": 1,
+                    "qty": lot_sz,
+                },
+                {
+                    "side": "SELL",
+                    "strike": sell_strike,
+                    "option_type": "PE",
+                    "premium": sell_prem,
+                    "lots": 1,
+                    "qty": lot_sz,
+                },
+            ],
+        }
 
     # ── Optimal Trade Entry (OTE) & No-Chase Guard ───────────────
     entry_min = round(max(0.5, opt_ltp * 0.94), 1) if opt_ltp > 0 else spot
@@ -526,6 +684,7 @@ def detect_index_put_setup(
             # SMC structural signal context
             "signals": signals,
             "signal_tags": signal_tags,
+            "hedge_plan": hedge_plan,
             # CHoCH / MSS tags for whiplash guard unlock (PDH rejection IS a structural reversal)
             "choch": "PDH_SUPPLY_REJECTION" in signals,
             "mss": "PDH_SUPPLY_REJECTION" in signals,
@@ -575,6 +734,10 @@ def detect_index_put_setup(
                     "time_stop_rule": "If trade active 20m with < +5% gain, exit at CMP/Scratch to avoid theta decay.",
                 }
             ),
+            "preferred_vehicle": hedge_plan.get("preferred_vehicle")
+            if hedge_plan
+            else "NAKED_OPTION_OR_SPREAD",
+            "hedge_plan": hedge_plan,
             "velocity_regime": vel_regime,
             "velocity_score": vel_score,
             "structural_signals": signals,

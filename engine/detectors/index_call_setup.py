@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import datetime
+from datetime import datetime, time as dtime
 from typing import Any, Optional
 from zoneinfo import ZoneInfo
 
@@ -342,10 +342,55 @@ def detect_index_call_setup(
                     except Exception as e_vcp:
                         logger.debug(f"[IndexCallSetup] VCP coiling check error: {e_vcp}")
 
+                # 8. Trend Continuation Pullback (EMA 9/20 & VWAP Support Reclaim)
+                # Catches sustained morning trends where price pulls back into EMA/VWAP support and resumes up
+                if len(ohlcv_5m) >= 6 and "TREND_PULLBACK_RECLAIM" not in signals:
+                    try:
+                        closes = ohlcv_5m[col_c].values
+                        lows = ohlcv_5m[col_l].values
+                        highs = ohlcv_5m[col_h].values
+                        col_o = "open" if "open" in ohlcv_5m.columns else "Open"
+                        opens = ohlcv_5m[col_o].values
+
+                        ema9 = pd.Series(closes).ewm(span=9, adjust=False).mean().values[-1]
+                        ema20 = (
+                            pd.Series(closes).ewm(span=20, adjust=False).mean().values[-1]
+                            if len(closes) >= 20
+                            else pd.Series(closes).mean()
+                        )
+
+                        last_l = float(lows[-1])
+                        last_c = float(closes[-1])
+                        last_o = float(opens[-1])
+                        candle_rng = max(0.1, float(highs[-1]) - last_l)
+
+                        # Bullish moving average alignment & holding above or near VWAP
+                        if ema9 >= (ema20 * 0.998) and spot >= (effective_vwap * 0.997):
+                            tested_ema = last_l <= (ema9 * 1.002) and last_c >= (ema9 * 0.999)
+                            tested_vwap = (
+                                effective_vwap > 0
+                                and last_l <= (effective_vwap * 1.002)
+                                and last_c >= (effective_vwap * 0.999)
+                            )
+                            is_bullish_candle = (last_c >= last_o) and (
+                                (last_c - last_l) / candle_rng >= 0.35
+                            )
+
+                            if (tested_ema or tested_vwap) and is_bullish_candle:
+                                signals.append("TREND_PULLBACK_RECLAIM")
+                                signal_tags["trend_pullback"] = {
+                                    "ema9": round(float(ema9), 2),
+                                    "ema20": round(float(ema20), 2),
+                                    "vwap": round(float(effective_vwap), 2),
+                                    "spot": spot,
+                                }
+                    except Exception as e_tpb:
+                        logger.debug(f"[IndexCallSetup] Trend pullback check error: {e_tpb}")
+
         except Exception as e_ohlcv:
             logger.debug(f"[IndexCallSetup] OHLCV analysis error for {underlying}: {e_ohlcv}")
 
-    # 8. Day High Breakout (Bullish Continuation / Range Expansion)
+    # 9. Day High Breakout (Bullish Continuation / Range Expansion)
     # When spot is testing or breaking out through session high with VWAP support and CE momentum
     if day_high and day_high > 0 and "DAY_HIGH_BREAKOUT" not in signals:
         dh_dist_pct = (spot - day_high) / day_high * 100.0
@@ -516,6 +561,13 @@ def detect_index_call_setup(
             f"Optimal Entry Zone: ₹{opt_ltp:,.1f}–₹{round(opt_ltp * 1.03, 1):,.1f} | SL: ₹{sl_premium:,.1f} | T1: ₹{t1_premium:,.1f} (+{t1_pct:.0f}%). "
             f"DO NOT CHASE above ₹{round(opt_ltp * 1.08, 1):,.1f} — wait for volume confirmation candle."
         )
+    elif "TREND_PULLBACK_RECLAIM" in signals:
+        tpb = signal_tags.get("trend_pullback", {})
+        headline = f"📈 TREND PULLBACK RECLAIM: {clean_sym} {int(strike)} CE"
+        summary = (
+            f"Bullish trend continuation: Spot (₹{spot:,.1f}) tested EMA-9/20 support (₹{tpb.get('ema9', 0):,.1f}) and held above VWAP (₹{effective_vwap:,.1f}) with buyers stepping in. "
+            f"Entry: ₹{opt_ltp:,.1f} | SL: ₹{sl_premium:,.1f} | T1: ₹{t1_premium:,.1f} (+{t1_pct:.0f}%)."
+        )
     elif "DAY_HIGH_BREAKOUT" in signals:
         dhb = signal_tags.get("day_high_breakout", {})
         headline = f"🚀 DAY HIGH BREAKOUT: {clean_sym} {int(strike)} CE"
@@ -542,6 +594,109 @@ def detect_index_call_setup(
 
     is_authentic = bool(opt_ltp and opt_ltp > 0.0)
     alert_env = "LIVE" if is_authentic else "TEST"
+
+    # ── Defined-Risk Hedged Spread Construction (Bull Call Spread) ─
+    hedge_plan = None
+    step = 100.0 if clean_sym in ("BANKNIFTY", "SENSEX") else 50.0
+    spread_width = 2.0 * step if clean_sym in ("BANKNIFTY", "SENSEX") else step
+    otm_target_strike = strike + spread_width
+
+    # 1. Try exact target OTM strike in provided chain
+    otm_cand = None
+    exact_matches = [
+        c
+        for c in chain
+        if getattr(c, "option_type", "") == "CE"
+        and abs(getattr(c, "strike", 0.0) - otm_target_strike) <= (step * 0.25)
+        and float(getattr(c, "last_price", 0.0) or 0.0) > 0.0
+    ]
+    if exact_matches:
+        otm_cand = exact_matches[0]
+    else:
+        # Fallback to any contract in chain with strike > strike
+        higher_strikes = [
+            c
+            for c in chain
+            if getattr(c, "option_type", "") == "CE"
+            and getattr(c, "strike", 0.0) >= (strike + spread_width * 0.75)
+            and float(getattr(c, "last_price", 0.0) or 0.0) > 0.0
+        ]
+        if higher_strikes:
+            higher_strikes.sort(key=lambda c: abs(getattr(c, "strike", 0.0) - otm_target_strike))
+            otm_cand = higher_strikes[0]
+
+    if otm_cand:
+        sell_strike = float(getattr(otm_cand, "strike", otm_target_strike))
+        sell_prem = float(getattr(otm_cand, "last_price", 0.0) or 0.0)
+    else:
+        sell_strike = strike + spread_width
+        try:
+            from engine.options_backtest import bs_premium
+
+            sell_prem = round(bs_premium(spot, sell_strike, 7, 0.15, "CE"), 2)
+        except Exception:
+            sell_prem = 0.0
+
+    if sell_strike <= strike:
+        sell_strike = strike + spread_width
+
+    actual_width = sell_strike - strike
+    if sell_prem <= 0.0 or sell_prem >= opt_ltp or (opt_ltp - sell_prem) >= actual_width:
+        sell_prem = max(
+            1.0, round(min(opt_ltp * 0.55, max(1.0, opt_ltp - (actual_width * 0.35))), 2)
+        )
+
+    if opt_ltp > 0 and sell_prem > 0 and sell_strike > strike:
+        net_debit = round(max(1.0, min(actual_width * 0.75, opt_ltp - sell_prem)), 2)
+        strike_width = round(sell_strike - strike, 2)
+        max_loss = round(net_debit * lot_sz, 2)
+        max_profit = round(max(1.0, (strike_width - net_debit) * lot_sz), 2)
+        be_spot = round(spot + net_debit, 1)
+        rr_spread = round(max_profit / max(1.0, max_loss), 2)
+
+        now_time = now_dt.time()
+        is_midday_chop_window = (dtime(11, 30) <= now_time <= dtime(14, 0)) and (vel_score < 70)
+        pref_veh = "HEDGED_SPREAD" if is_midday_chop_window else "NAKED_OPTION_OR_SPREAD"
+
+        hedge_plan = {
+            "strategy": "BULL_CALL_SPREAD",
+            "sentiment": "BULLISH",
+            "preferred_vehicle": pref_veh,
+            "description": f"Buy {int(strike)} CE & Sell {int(sell_strike)} CE (Defined Risk / Capped Loss)",
+            "buy_leg": f"BUY {clean_sym} {int(strike)} CE @ ₹{opt_ltp:,.1f}",
+            "sell_leg": f"SELL {clean_sym} {int(sell_strike)} CE @ ₹{sell_prem:,.1f}",
+            "net_debit_per_share": net_debit,
+            "net_debit_total": max_loss,
+            "max_loss": max_loss,
+            "max_profit": max_profit,
+            "breakeven_spot": be_spot,
+            "risk_reward": f"1:{rr_spread:.1f}",
+            "lot_size": lot_sz,
+            "peace_of_mind_benefit": "Zero Theta Bleed — short OTM leg finances time decay. Maximum risk strictly capped.",
+            "execution_guidance": (
+                "⚠️ MIDDAY CHOP WINDOW: Execute Bull Call Spread to avoid theta decay."
+                if is_midday_chop_window
+                else "High Momentum: Fast scalpers can trade Naked CE; for defined risk, trade Bull Call Spread."
+            ),
+            "legs": [
+                {
+                    "side": "BUY",
+                    "strike": strike,
+                    "option_type": "CE",
+                    "premium": opt_ltp,
+                    "lots": 1,
+                    "qty": lot_sz,
+                },
+                {
+                    "side": "SELL",
+                    "strike": sell_strike,
+                    "option_type": "CE",
+                    "premium": sell_prem,
+                    "lots": 1,
+                    "qty": lot_sz,
+                },
+            ],
+        }
 
     # ── Optimal Trade Entry (OTE) & No-Chase Guard ───────────────
     entry_min = round(max(0.5, opt_ltp * 0.94), 1) if opt_ltp > 0 else spot
@@ -595,6 +750,7 @@ def detect_index_call_setup(
             # SMC structural signal context
             "signals": signals,
             "signal_tags": signal_tags,
+            "hedge_plan": hedge_plan,
             # CHoCH / MSS tags for whiplash guard unlock (PDL bounce IS a structural reversal)
             "choch": "PDL_DEMAND_REJECTION" in signals,
             "mss": "PDL_DEMAND_REJECTION" in signals,
@@ -644,6 +800,10 @@ def detect_index_call_setup(
                     "time_stop_rule": "If trade active 20m with < +5% gain, exit at CMP/Scratch to avoid theta decay.",
                 }
             ),
+            "preferred_vehicle": hedge_plan.get("preferred_vehicle")
+            if hedge_plan
+            else "NAKED_OPTION_OR_SPREAD",
+            "hedge_plan": hedge_plan,
             "velocity_regime": vel_regime,
             "velocity_score": vel_score,
             "structural_signals": signals,

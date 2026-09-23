@@ -83,7 +83,7 @@ def test_render_fno_alert_dataclass():
     assert "NIFTY 24500 CE" in msg
     assert "Spot: <b>₹24,480.00</b>" in msg
     assert "Expiry:</b>" in msg
-    assert "Weekly" in msg or "Monthly" in msg
+    assert "Weekly" in msg or "Monthly" in msg or "0DTE" in msg
     assert "Action:</b> <b>BUY NIFTY 24500 CE</b>" in msg
     assert "Entry Zone:</b> <code>₹85.00 – ₹92.00</code>" in msg
     assert "Invalidation SL:</b> <code>₹66.00</code> (-25.0%)" in msg

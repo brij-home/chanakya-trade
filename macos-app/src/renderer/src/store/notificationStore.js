@@ -4,7 +4,7 @@ import { isTestOrSimAlert } from '../components/Views/alerts/alertHelpers'
 const STORAGE_KEY = 'chanakya_notifications_v1'
 // Singleton polling interval — only ONE interval runs across the entire app
 let _pollTimer = null
-const MAX_NOTIFICATIONS = 100
+const MAX_NOTIFICATIONS = 300
 
 // Safe localStorage loader with prior-day intraday expiration sanitization and test alert pruning
 function loadStoredNotifications() {
@@ -286,7 +286,7 @@ export const useNotificationStore = create((set, get) => ({
     try {
       let list = []
       try {
-        const res = await call('/skills/alerts/auto/list', { view_mode: 'ALL' })
+        const res = await call('/skills/alerts/auto/list', { view_mode: 'ALL', limit: 300 })
         list = res?.data ?? res ?? []
       } catch (_callErr) {
         // Vite browser dev fallback — sidecar IPC unavailable
@@ -294,7 +294,7 @@ export const useNotificationStore = create((set, get) => ({
           const directRes = await fetch('http://127.0.0.1:8765/skills/alerts/auto/list', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ view_mode: 'ALL' }),
+            body: JSON.stringify({ view_mode: 'ALL', limit: 300 }),
           })
           if (directRes.ok) {
             const data = await directRes.json()

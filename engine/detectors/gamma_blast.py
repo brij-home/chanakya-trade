@@ -347,7 +347,13 @@ def detect_gamma_blast(
         is_high_volume_expansion = (
             vol_oi_ratio >= 1.8 and volume >= (8000 if is_index else 500) and pchange >= 4.5
         )
-        if c_oi_chg > 0 and c_oi_chg < min_abs_oi_change:
+        if (
+            c_oi_chg > 0
+            and c_oi_chg < min_abs_oi_change
+            and not has_gamma_pchange
+            and not is_high_volume_expansion
+            and not short_term_unwind
+        ):
             continue
         if (
             c_oi_chg == 0
@@ -858,7 +864,13 @@ def detect_gamma_blast(
         is_high_volume_expansion = (
             vol_oi_ratio >= 1.8 and volume >= (8000 if is_index else 500) and pchange >= 4.5
         )
-        if c_oi_chg > 0 and c_oi_chg < min_abs_oi_change:
+        if (
+            c_oi_chg > 0
+            and c_oi_chg < min_abs_oi_change
+            and not has_gamma_pchange
+            and not is_high_volume_expansion
+            and not short_term_unwind
+        ):
             continue
         if (
             c_oi_chg == 0

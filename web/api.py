@@ -2952,7 +2952,7 @@ async def stream_alerts():
 
 @app.get("/api/alerts/auto", tags=["Alerts"])
 async def get_auto_alerts(
-    limit: int = 50,
+    limit: int = 300,
     alert_type: Optional[str] = None,
     stage: Optional[str] = None,
     environment: Optional[str] = None,

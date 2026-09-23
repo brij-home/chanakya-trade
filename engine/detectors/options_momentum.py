@@ -728,18 +728,36 @@ def detect_options_momentum_breakouts(
                             div_bias = None
 
                         if div_type:
+                            # Bypass RSI divergence veto if explosive momentum / high turnover is active
+                            # Explosive trends routinely exhibit minor 5m RSI divergence while continuation surges
+                            is_explosive_momentum = bool(
+                                is_extreme_catalyst
+                                or (vol_oi >= 1.8 and vol >= 800)
+                                or (vol >= 500 and (pchange or 0.0) >= 8.0)
+                                or (spot_change_pct and abs(spot_change_pct) >= 2.0)
+                            )
                             if opt_type == "CE" and div_bias == "BEARISH" and "REGULAR" in div_type:
-                                logger.debug(
-                                    f"[OptionsBreakout] Suppressed CE on {clean_sym}: Bearish RSI divergence trap ({div_type})"
-                                )
-                                continue
+                                if is_explosive_momentum:
+                                    logger.debug(
+                                        f"[OptionsBreakout] Bypassed bearish RSI divergence on {clean_sym} due to explosive momentum (vol_oi={vol_oi:.2f}, pchange={pchange}%)"
+                                    )
+                                else:
+                                    logger.debug(
+                                        f"[OptionsBreakout] Suppressed CE on {clean_sym}: Bearish RSI divergence trap ({div_type})"
+                                    )
+                                    continue
                             elif (
                                 opt_type == "PE" and div_bias == "BULLISH" and "REGULAR" in div_type
                             ):
-                                logger.debug(
-                                    f"[OptionsBreakout] Suppressed PE on {clean_sym}: Bullish RSI divergence trap ({div_type})"
-                                )
-                                continue
+                                if is_explosive_momentum:
+                                    logger.debug(
+                                        f"[OptionsBreakout] Bypassed bullish RSI divergence on {clean_sym} due to explosive momentum (vol_oi={vol_oi:.2f}, pchange={pchange}%)"
+                                    )
+                                else:
+                                    logger.debug(
+                                        f"[OptionsBreakout] Suppressed PE on {clean_sym}: Bullish RSI divergence trap ({div_type})"
+                                    )
+                                    continue
                             elif (opt_type == "CE" and div_bias == "BULLISH") or (
                                 opt_type == "PE" and div_bias == "BEARISH"
                             ):

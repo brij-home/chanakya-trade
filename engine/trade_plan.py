@@ -786,6 +786,21 @@ def calculate_trade_plan(
                 f"Trade should be SKIPPED or taken via credit spreads only."
             )
 
+    # Check ADR exhaustion if df provides recent session range
+    if df is not None and len(df) >= 2 and atr > 0:
+        try:
+            curr_h = float(df["High"].iloc[-1] if "High" in df.columns else df["high"].iloc[-1])
+            curr_l = float(df["Low"].iloc[-1] if "Low" in df.columns else df["low"].iloc[-1])
+            if curr_h > curr_l > 0:
+                day_range = curr_h - curr_l
+                adr_consumed = (day_range / atr) * 100.0
+                if adr_consumed >= 80.0:
+                    asymmetry_note += (
+                        f" [⚠️ ADR Alert: {adr_consumed:.0f}% of daily range already consumed]"
+                    )
+        except Exception:
+            pass
+
     # ── 8. Dynamic Velocity-Derived ETA Engine ─────────────────────────────────
     # In Indian markets, 1 trading day = 375 minutes (09:15 to 15:30 IST) = 75 five-minute bars
     # Intra-day 5-minute ATR ≈ Daily ATR / sqrt(75) ≈ Daily ATR / 8.66

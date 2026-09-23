@@ -1671,7 +1671,7 @@ async def skill_auto_alerts_list(req: Optional[AutoAlertsListRequest] = None):
     try:
         from engine.auto_alert_engine import auto_alert_engine
 
-        limit = req.limit if req else 50
+        limit = req.limit if req and req.limit else 300
         alert_type = req.alert_type if req else None
         stage = req.stage if req else None
         environment = req.environment if req else None

@@ -324,11 +324,69 @@ class AlertScrutinyAuditor:
 
         rr_ratio = reward_pts / risk_pts if risk_pts > 0 else 0.0
         if rr_ratio < req_rr:
-            return (
-                False,
-                f"Unfavorable Risk:Reward ratio (1:{rr_ratio:.2f} < 1:{req_rr:.1f})",
-                flags,
-            )
+            # Multi-Target / Staged Scale-Out Evaluation:
+            # In institutional execution plans (e.g. Gamma Blast, Breakout, SMC), T1 is often anchored
+            # to the immediate structural barrier (e.g. Strike Wall, PDH/PDL, Local POC) where 50% profits
+            # are banked and stop-loss is trailed to breakeven, while T2 / Moonshot captures the full extension.
+            # If T1 offers at least 1:1.0 and T2 expansion provides adequate asymmetry, approve the trade plan.
+            staged_approved = False
+            t2_val = None
+            plan = getattr(alert, "actionable_plan", {}) or {}
+            if isinstance(plan, dict):
+                opt_p = plan.get("option_plan")
+                if isinstance(opt_p, dict) and opt_p.get("t2_premium"):
+                    try:
+                        t2_val = float(opt_p["t2_premium"])
+                    except (ValueError, TypeError):
+                        pass
+                if t2_val is None and "target_2" in plan:
+                    raw_t2 = plan["target_2"]
+                    if isinstance(raw_t2, (int, float)):
+                        t2_val = float(raw_t2)
+                    elif isinstance(raw_t2, str):
+                        clean_t2 = re.sub(r"[^\d.]", "", raw_t2)
+                        if clean_t2:
+                            try:
+                                t2_val = float(clean_t2)
+                            except ValueError:
+                                pass
+                if t2_val is None:
+                    tp_dict = plan.get("trade_plan")
+                    if isinstance(tp_dict, dict) and tp_dict.get("target_2"):
+                        try:
+                            t2_val = float(tp_dict["target_2"])
+                        except (ValueError, TypeError):
+                            pass
+
+            if t2_val is None:
+                metrics = getattr(alert, "metrics", {}) or {}
+                if isinstance(metrics, dict) and metrics.get("t2_premium"):
+                    try:
+                        t2_val = float(metrics["t2_premium"])
+                    except (ValueError, TypeError):
+                        pass
+
+            if t2_val is not None and risk_pts > 0 and rr_ratio >= 1.0:
+                if is_option_premium_levels or direction in ("BULLISH", "LONG", "BUY"):
+                    reward_pts_t2 = t2_val - ltp
+                else:
+                    reward_pts_t2 = ltp - t2_val
+
+                if reward_pts_t2 > 0:
+                    rr_t2 = reward_pts_t2 / risk_pts
+                    blended_rr = (0.5 * rr_ratio) + (0.5 * rr_t2)
+                    if rr_t2 >= max(req_rr, 1.5) or blended_rr >= req_rr:
+                        staged_approved = True
+                        flags["staged_rr_scaleout"] = True
+                        flags["blended_rr"] = round(blended_rr, 2)
+                        flags["t2_rr"] = round(rr_t2, 2)
+
+            if not staged_approved:
+                return (
+                    False,
+                    f"Unfavorable Risk:Reward ratio (1:{rr_ratio:.2f} < 1:{req_rr:.1f})",
+                    flags,
+                )
         flags["rr_valid"] = True
 
         # 4b. Underlying Trade Plan Asymmetry Sanity Check
@@ -605,6 +663,60 @@ class AlertScrutinyAuditor:
                 has_opt_marker and getattr(alert, "option_type", "") == "PE"
             )
 
+            # Check if this alert is an intentional breakout/breakdown setup with volume/momentum
+            signals_list = metrics_dict.get("signals", []) if isinstance(metrics_dict, dict) else []
+            headline_str = (getattr(alert, "headline", "") or "").upper()
+            rvol_val = (
+                float(metrics_dict.get("rvol") or getattr(alert, "rvol", 1.0) or 1.0)
+                if isinstance(metrics_dict, dict)
+                else 1.0
+            )
+            opt_pchange = float(
+                (
+                    metrics_dict.get("ce_pchange")
+                    or metrics_dict.get("pe_pchange")
+                    or metrics_dict.get("change_pct")
+                    or 0.0
+                )
+                if isinstance(metrics_dict, dict)
+                else 0.0
+            )
+            has_breakout_momentum = (
+                rvol_val >= 1.2
+                or abs(opt_pchange) >= 8.0
+                or float(
+                    (metrics_dict.get("vol_oi_ratio") or 0.0)
+                    if isinstance(metrics_dict, dict)
+                    else 0.0
+                )
+                >= 1.2
+            )
+
+            is_intentional_bull_breakout = (
+                alert.alert_type in ("ORB_BREAKOUT", "SQUEEZE_BREAKOUT")
+                or any(
+                    s
+                    in (
+                        "DAY_HIGH_BREAKOUT",
+                        "ORB_BREAKOUT",
+                        "VCP_COILING",
+                        "DOUBLE_BOTTOM_BREAKOUT",
+                    )
+                    for s in signals_list
+                )
+                or "DAY HIGH BREAKOUT" in headline_str
+                or "ORB-15 BREAKOUT" in headline_str
+            )
+            is_intentional_bear_breakdown = (
+                alert.alert_type in ("ORB_BREAKDOWN", "SQUEEZE_BREAKDOWN")
+                or any(
+                    s in ("DAY_LOW_BREAKDOWN", "ORB_BREAKDOWN", "DOUBLE_TOP_BREAKDOWN")
+                    for s in signals_list
+                )
+                or "DAY LOW BREAKDOWN" in headline_str
+                or "ORB-15 BREAKDOWN" in headline_str
+            )
+
             if is_bull_setup and not is_bear_setup:
                 overhead_barriers: list[tuple[float, str]] = []
                 pdh = float(metrics_dict.get("prev_day_high") or 0.0)
@@ -619,6 +731,11 @@ class AlertScrutinyAuditor:
                     overhead_barriers.append((pwh, "Previous Week High (PWH)"))
 
                 for barrier_lvl, barrier_name in overhead_barriers:
+                    # Breakout setups testing or coiled right beneath Day High / PDH are intentional breakouts
+                    if is_intentional_bull_breakout and (
+                        barrier_name == "Day High" or has_breakout_momentum
+                    ):
+                        continue
                     headroom_pts = barrier_lvl - ref_spot
                     headroom_pct = (headroom_pts / ref_spot) * 100.0
                     if 0.0 < headroom_pct < 0.15:
@@ -641,6 +758,11 @@ class AlertScrutinyAuditor:
                     underneath_barriers.append((pwl, "Previous Week Low (PWL)"))
 
                 for barrier_lvl, barrier_name in underneath_barriers:
+                    # Breakdown setups testing or coiled right above Day Low / PDL are intentional breakdowns
+                    if is_intentional_bear_breakdown and (
+                        barrier_name == "Day Low" or has_breakout_momentum
+                    ):
+                        continue
                     headroom_pts = ref_spot - barrier_lvl
                     headroom_pct = (headroom_pts / ref_spot) * 100.0
                     if 0.0 < headroom_pct < 0.15:
@@ -972,9 +1094,16 @@ class AlertScrutinyAuditor:
                     pass
         flags["liquidity_valid"] = True
 
-        # 13. Midday Lunch Lull RVOL Expansion Filter (11:30 - 13:00 IST):
+        # 13. Midday Lunch Lull RVOL Expansion Filter (11:30 - 13:15 IST):
         # Breakouts attempted during midday lull without institutional volume frequently collapse into fakeouts.
-        if atype in ("SQUEEZE_BREAKOUT", "BREAKOUT", "INTRADAY_MOVER_IGNITED", "VOLUME_EXPANSION"):
+        if atype in (
+            "SQUEEZE_BREAKOUT",
+            "BREAKOUT",
+            "INTRADAY_MOVER_IGNITED",
+            "VOLUME_EXPANSION",
+            "INTRADAY_SPARK",
+            "SPARK",
+        ):
             alert_dt = None
             raw_ts = (
                 getattr(alert, "created_at", None)
@@ -1007,7 +1136,7 @@ class AlertScrutinyAuditor:
             curr_time = alert_dt.time()
             from datetime import time as dtime
 
-            if dtime(11, 30) <= curr_time <= dtime(13, 0):
+            if dtime(11, 30) <= curr_time <= dtime(13, 15):
                 rvol = None
                 if isinstance(metrics_dict, dict):
                     rvol = (
@@ -1024,7 +1153,7 @@ class AlertScrutinyAuditor:
                             flags["midday_rvol_valid"] = False
                             return (
                                 False,
-                                f"Midday False Breakout Trap: Breakout attempted during lunch lull (11:30-13:00 IST) with low relative volume (RVOL {rvol_f:.2f}x < 1.8x). Mandate institutional volume expansion.",
+                                f"Midday False Breakout Trap: Breakout attempted during lunch lull (11:30-13:15 IST) with low relative volume (RVOL {rvol_f:.2f}x < 1.8x). Mandate institutional volume expansion.",
                                 flags,
                             )
                     except (ValueError, TypeError):
@@ -1494,6 +1623,90 @@ class AlertScrutinyAuditor:
                         flags,
                     )
         flags["divergence_sanity_valid"] = True
+
+        # 20. ADR (Average Daily Range) Exhaustion Gate:
+        # Prevent buying the high of the day when asset has already exhausted >= 80% of its ADR/ATR,
+        # or shorting the low of the day when >= 80% of ADR is exhausted.
+        adr_val = (
+            metrics_dict.get("adr")
+            or metrics_dict.get("atr")
+            or getattr(alert, "adr", None)
+            or getattr(alert, "atr", None)
+        )
+        dh = float(metrics_dict.get("day_high") or getattr(alert, "day_high", 0.0) or 0.0)
+        dl = float(metrics_dict.get("day_low") or getattr(alert, "day_low", 0.0) or 0.0)
+        consumed_pct = metrics_dict.get("adr_consumed_pct")
+        if consumed_pct is None and adr_val and dh > dl > 0:
+            try:
+                adr_f = float(adr_val)
+                if adr_f > 0:
+                    consumed_pct = round(((dh - dl) / adr_f) * 100.0, 1)
+            except (ValueError, TypeError):
+                consumed_pct = None
+
+        if consumed_pct is not None:
+            try:
+                c_pct = float(consumed_pct)
+                if c_pct >= 80.0 and ltp > 0:
+                    # Long setup buying near day high
+                    if (
+                        direction in ("BULLISH", "LONG", "BUY")
+                        or getattr(alert, "option_type", "") == "CE"
+                    ) and dh > 0:
+                        if (dh - ltp) / ltp <= 0.005:  # within 0.5% of day high
+                            flags["adr_exhaustion_valid"] = False
+                            return (
+                                False,
+                                f"ADR Exhaustion Trap: Asset has consumed {c_pct:.1f}% of its 14-day Average Daily Range (₹{float(adr_val):,.1f}); entry at day's high lacks expansion runway for Target 1.",
+                                flags,
+                            )
+                    # Short setup shorting near day low
+                    elif (
+                        direction in ("BEARISH", "SHORT", "SELL")
+                        or getattr(alert, "option_type", "") == "PE"
+                    ) and dl > 0:
+                        if (ltp - dl) / ltp <= 0.005:  # within 0.5% of day low
+                            flags["adr_exhaustion_valid"] = False
+                            return (
+                                False,
+                                f"ADR Exhaustion Trap: Asset has consumed {c_pct:.1f}% of its 14-day Average Daily Range (₹{float(adr_val):,.1f}); entry at day's low lacks expansion runway for Target 1.",
+                                flags,
+                            )
+            except (ValueError, TypeError):
+                pass
+        flags["adr_exhaustion_valid"] = True
+
+        # 21. Circuit Limit Headroom Gate (Cash Equities & Price Bands):
+        # Disallow setups where price is boxed in by upper or lower circuit limit, truncating R:R.
+        upper_circuit = float(
+            metrics_dict.get("upper_circuit") or getattr(alert, "upper_circuit", 0.0) or 0.0
+        )
+        lower_circuit = float(
+            metrics_dict.get("lower_circuit") or getattr(alert, "lower_circuit", 0.0) or 0.0
+        )
+
+        if not is_option_premium_levels and ltp > 0:
+            if (direction in ("BULLISH", "LONG", "BUY")) and upper_circuit > ltp:
+                uc_headroom_pts = upper_circuit - ltp
+                uc_headroom_pct = (uc_headroom_pts / ltp) * 100.0
+                if uc_headroom_pts < (1.25 * risk_pts) or uc_headroom_pct < 0.8:
+                    flags["circuit_headroom_valid"] = False
+                    return (
+                        False,
+                        f"Insufficient Circuit Headroom: Spot ₹{ltp:,.2f} is within {uc_headroom_pct:.2f}% of Upper Circuit (₹{upper_circuit:,.2f}); risk-reward ratio is truncated by exchange price band.",
+                        flags,
+                    )
+            elif (direction in ("BEARISH", "SHORT", "SELL")) and 0 < lower_circuit < ltp:
+                lc_headroom_pts = ltp - lower_circuit
+                lc_headroom_pct = (lc_headroom_pts / ltp) * 100.0
+                if lc_headroom_pts < (1.25 * risk_pts) or lc_headroom_pct < 0.8:
+                    flags["circuit_headroom_valid"] = False
+                    return (
+                        False,
+                        f"Insufficient Circuit Headroom: Spot ₹{ltp:,.2f} is within {lc_headroom_pct:.2f}% of Lower Circuit (₹{lower_circuit:,.2f}); risk-reward ratio is truncated by exchange price band.",
+                        flags,
+                    )
+        flags["circuit_headroom_valid"] = True
 
         return True, "", flags
 

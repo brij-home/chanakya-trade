@@ -1540,6 +1540,191 @@ def test_auto_alert_expiration_and_reaping(tmp_path, monkeypatch):
     assert active_alerts[0].alert_id == "t-active-sbin"
 
 
+def test_three_day_alert_retention_across_all_groups(tmp_path, monkeypatch):
+    """
+    Institutional Invariant: All alerts must be retained for at least 3 days across
+    Active, Archived, Invalidated, and Expired groups for forensic analysis and model learning.
+    Only records strictly older than 3 days (> 72h) are pruned.
+    """
+    from datetime import datetime, timedelta, timezone
+    from engine.auto_alert_engine import AutoAlert, AutoAlertEngine
+
+    IST = timezone(timedelta(hours=5, minutes=30))
+    data_file = tmp_path / "auto_alerts.json"
+    monkeypatch.setattr("engine.auto_alert_engine.get_auto_alerts_file", lambda: data_file)
+
+    engine = AutoAlertEngine()
+    now = datetime.now(IST)
+
+    day0_str = now.strftime("%Y-%m-%d %H:%M:%S IST")
+    day1_str = (now - timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S IST")
+    day2_str = (now - timedelta(days=2)).strftime("%Y-%m-%d %H:%M:%S IST")
+    day4_str = (now - timedelta(days=4)).strftime("%Y-%m-%d %H:%M:%S IST")
+
+    # 1. Day 0 Active Alert
+    alert_day0_active = AutoAlert(
+        alert_id="ret-day0-active",
+        alert_type="SQUEEZE_BREAKOUT",
+        stage="IGNITED",
+        symbol="TCS",
+        exchange="NSE",
+        direction="BULLISH",
+        headline="Day 0 Active",
+        summary="Active today",
+        ltp=3500.0,
+        trigger_level=3480.0,
+        target_level=3600.0,
+        stop_loss=3440.0,
+        created_at=day0_str,
+    )
+
+    # 2. Day 1 Expired Intraday Alert (Must be preserved in ARCHIVED/EXPIRED group)
+    alert_day1_expired = AutoAlert(
+        alert_id="ret-day1-expired",
+        alert_type="SQUEEZE_BREAKOUT",
+        stage="EXPIRED",
+        symbol="INFY",
+        exchange="NSE",
+        direction="BULLISH",
+        headline="Day 1 Expired",
+        summary="Intraday session expired yesterday",
+        ltp=1800.0,
+        trigger_level=1790.0,
+        target_level=1850.0,
+        stop_loss=1770.0,
+        created_at=day1_str,
+        archived_at=day1_str,
+        is_archived=True,
+        is_invalidated=True,
+    )
+
+    # 3. Day 2 Invalidated Alert (Must be preserved in INVALIDATED group)
+    alert_day2_invalidated = AutoAlert(
+        alert_id="ret-day2-invalidated",
+        alert_type="OPTIONS_MOMENTUM",
+        stage="INVALIDATED",
+        symbol="SBIN",
+        exchange="NFO",
+        direction="BEARISH",
+        headline="Day 2 SL Hit",
+        summary="Stop loss hit 2 days ago",
+        ltp=15.0,
+        trigger_level=20.0,
+        target_level=40.0,
+        stop_loss=16.0,
+        created_at=day2_str,
+        invalidated_at=day2_str,
+        is_invalidated=True,
+        is_archived=True,
+    )
+
+    # 4. Day 4 Old Stale Alert (> 3 days old: MUST BE PRUNED)
+    alert_day4_stale = AutoAlert(
+        alert_id="ret-day4-stale",
+        alert_type="GAMMA_BLAST",
+        stage="EXPIRED",
+        symbol="RELIANCE",
+        exchange="NFO",
+        direction="BULLISH",
+        headline="Day 4 Stale",
+        summary="Ancient alert",
+        ltp=10.0,
+        trigger_level=15.0,
+        target_level=30.0,
+        stop_loss=8.0,
+        created_at=day4_str,
+        archived_at=day4_str,
+        is_archived=True,
+        is_invalidated=True,
+    )
+
+    # 5. Day 1 Prior-Session Early Warning (Should be archived as EXPIRED rather than deleted)
+    alert_prior_ew = AutoAlert(
+        alert_id="ret-prior-ew",
+        alert_type="PRECURSOR_RADAR",
+        stage="EARLY_WARNING",
+        symbol="HDFCBANK",
+        exchange="NSE",
+        direction="BULLISH",
+        headline="Day 1 Coiling",
+        summary="Unignited setup from yesterday",
+        ltp=1650.0,
+        trigger_level=1660.0,
+        target_level=1720.0,
+        stop_loss=1630.0,
+        created_at=day1_str,
+    )
+
+    # 6. Historical setup for same symbol (TCS) from Day 2 in archive
+    alert_tcs_day2 = AutoAlert(
+        alert_id="ret-tcs-day2",
+        alert_type="SQUEEZE_BREAKOUT",
+        stage="TARGET_ACHIEVED",
+        symbol="TCS",
+        exchange="NSE",
+        direction="BULLISH",
+        headline="TCS Target Achieved 2 days ago",
+        summary="Completed trade",
+        ltp=3450.0,
+        trigger_level=3380.0,
+        target_level=3450.0,
+        stop_loss=3350.0,
+        created_at=day2_str,
+        is_archived=True,
+    )
+
+    with engine._lock:
+        engine._alerts = [
+            alert_day0_active,
+            alert_day1_expired,
+            alert_day2_invalidated,
+            alert_day4_stale,
+            alert_prior_ew,
+            alert_tcs_day2,
+        ]
+        engine._save()
+
+    # Trigger full maintenance cycle (_load -> reap -> sanitize -> deduplicate -> prune)
+    engine._load()
+
+    remaining_ids = {a.alert_id for a in engine._alerts}
+
+    # Day 0, Day 1, and Day 2 alerts MUST BE RETAINED across groups
+    assert "ret-day0-active" in remaining_ids, "Day 0 active alert must be retained"
+    assert "ret-day1-expired" in remaining_ids, "Day 1 expired alert must be retained in archive"
+    assert "ret-day2-invalidated" in remaining_ids, (
+        "Day 2 invalidated alert must be retained in archive"
+    )
+    assert "ret-prior-ew" in remaining_ids, (
+        "Prior-session early warning must be archived as EXPIRED, not deleted"
+    )
+    assert "ret-tcs-day2" in remaining_ids, (
+        "Historical completed trade of active symbol must be retained in archive"
+    )
+
+    # Prior-session early warning should now be in EXPIRED stage
+    ew = next(a for a in engine._alerts if a.alert_id == "ret-prior-ew")
+    assert ew.stage == "EXPIRED"
+    assert ew.is_archived is True
+
+    # Day 4 stale alert MUST be pruned (> 3 days old)
+    assert "ret-day4-stale" not in remaining_ids, "Alert older than 3 days must be pruned"
+
+    # Verify view_mode partitioning:
+    active_view = engine.get_alerts(view_mode="ACTIVE")
+    assert [a.alert_id for a in active_view] == ["ret-day0-active"]
+
+    archived_view = engine.get_alerts(view_mode="ARCHIVED")
+    archived_ids = {a.alert_id for a in archived_view}
+    assert "ret-day1-expired" in archived_ids
+    assert "ret-day2-invalidated" in archived_ids
+    assert "ret-prior-ew" in archived_ids
+    assert "ret-tcs-day2" in archived_ids
+
+    all_view = engine.get_alerts(view_mode="ALL")
+    assert len(all_view) == 5
+
+
 def test_auto_alert_rehabilitates_falsely_invalidated_options(tmp_path, monkeypatch):
     """Verify that _load automatically restores alerts falsely invalidated by the inverted Put SL bug."""
     data_file = tmp_path / "auto_alerts.json"
@@ -3370,6 +3555,16 @@ def test_commodity_root_canonicalization(monkeypatch, tmp_path):
     data_file = tmp_path / "auto_alerts_comm.json"
     monkeypatch.setattr("engine.auto_alert_engine.get_auto_alerts_file", lambda: data_file)
     monkeypatch.setattr("engine.auto_alert_engine.AutoAlertEngine._dispatch", lambda self, a: None)
+    monkeypatch.setattr(
+        "engine.alert_scrutiny.alert_scrutiny_auditor.verify_tier1_sanity",
+        lambda alert: (True, "", {}),
+    )
+    from unittest.mock import MagicMock
+
+    monkeypatch.setattr(
+        "engine.alert_scrutiny.alert_scrutiny_auditor.scrutinize_alert",
+        lambda *a, **k: MagicMock(status="APPROVED", score=85, trap_risk_warning=None),
+    )
 
     engine = AutoAlertEngine(max_buffer=20)
     engine.clear_alerts()

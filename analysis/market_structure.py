@@ -1246,3 +1246,120 @@ def check_mtf_structural_alignment(
         "ema20": round(ema20, 2),
         "ema50": round(ema50, 2),
     }
+
+
+def compute_mtf_alignment(
+    df_5m: Optional[pd.DataFrame] = None,
+    df_15m: Optional[pd.DataFrame] = None,
+    df_daily: Optional[pd.DataFrame] = None,
+    direction: str = "BULLISH",
+) -> dict[str, Any]:
+    """
+    Computes Multi-Timeframe (MTF) trend alignment across 5m, 15m, and Daily/1H.
+
+    Returns:
+        alignment_count (int): 0 to 3
+        opposing_trend (Optional[str]): e.g. "BEARISH" if direction is BULLISH but HTF is strongly BEARISH.
+        tf_5m_trend (str): "BULLISH" | "BEARISH" | "NEUTRAL"
+        tf_15m_trend (str): "BULLISH" | "BEARISH" | "NEUTRAL"
+        htf_trend (str): "BULLISH" | "BEARISH" | "NEUTRAL"
+    """
+    tf_5m_trend = "NEUTRAL"
+    tf_15m_trend = "NEUTRAL"
+    htf_trend = "NEUTRAL"
+
+    # 1. 5-Minute Trend / Momentum
+    if df_5m is not None and len(df_5m) >= 5:
+        try:
+            c5 = df_5m["close"] if "close" in df_5m.columns else df_5m["Close"]
+            if len(c5) >= 10:
+                recent5 = c5.iloc[-5:]
+                prior5 = c5.iloc[-10:-5]
+                if float(recent5.mean()) > float(prior5.mean()) and float(c5.iloc[-1]) >= float(
+                    recent5.mean()
+                ):
+                    tf_5m_trend = "BULLISH"
+                elif float(recent5.mean()) < float(prior5.mean()) and float(c5.iloc[-1]) <= float(
+                    recent5.mean()
+                ):
+                    tf_5m_trend = "BEARISH"
+            elif len(c5) >= 5:
+                if float(c5.iloc[-1]) > float(c5.iloc[0]):
+                    tf_5m_trend = "BULLISH"
+                elif float(c5.iloc[-1]) < float(c5.iloc[0]):
+                    tf_5m_trend = "BEARISH"
+        except Exception:
+            pass
+
+    # 2. 15-Minute Trend via EMA 9 / EMA 21
+    df_15 = df_15m
+    if (df_15 is None or df_15.empty) and df_5m is not None and len(df_5m) >= 15:
+        try:
+            if hasattr(df_5m.index, "freq") or isinstance(df_5m.index, pd.DatetimeIndex):
+                df_15 = (
+                    df_5m.resample("15min")
+                    .agg(
+                        {
+                            "open": "first",
+                            "high": "max",
+                            "low": "min",
+                            "close": "last",
+                            "volume": "sum",
+                        }
+                    )
+                    .dropna()
+                )
+        except Exception:
+            df_15 = None
+
+    if df_15 is not None and len(df_15) >= 5:
+        try:
+            c15 = df_15["close"] if "close" in df_15.columns else df_15["Close"]
+            if c15.nunique() > 1 and float(c15.std()) > 1e-4:
+                ema9_15 = float(c15.ewm(span=min(9, len(c15)), adjust=False).mean().iloc[-1])
+                ema21_15 = float(c15.ewm(span=min(21, len(c15)), adjust=False).mean().iloc[-1])
+                ltp_15 = float(c15.iloc[-1])
+                if ltp_15 >= ema9_15 and ema9_15 >= ema21_15 * 0.998:
+                    tf_15m_trend = "BULLISH"
+                elif ltp_15 <= ema9_15 and ema9_15 <= ema21_15 * 1.002:
+                    tf_15m_trend = "BEARISH"
+        except Exception:
+            pass
+
+    # 3. Daily / Higher Timeframe Trend via EMA 20 / EMA 50
+    if df_daily is not None and len(df_daily) >= 10:
+        try:
+            cd = df_daily["close"] if "close" in df_daily.columns else df_daily["Close"]
+            if cd.nunique() > 1 and float(cd.std()) > 1e-4:
+                ema20_d = float(cd.ewm(span=min(20, len(cd)), adjust=False).mean().iloc[-1])
+                ema50_d = float(cd.ewm(span=min(50, len(cd)), adjust=False).mean().iloc[-1])
+                ltp_d = float(cd.iloc[-1])
+                if ltp_d >= ema20_d and ema20_d >= ema50_d * 0.998:
+                    htf_trend = "BULLISH"
+                elif ltp_d <= ema20_d and ema20_d <= ema50_d * 1.002:
+                    htf_trend = "BEARISH"
+        except Exception:
+            pass
+
+    # Alignment count
+    dir_norm = (direction or "BULLISH").upper()
+    trends = [tf_5m_trend, tf_15m_trend, htf_trend]
+    alignment_count = sum(1 for t in trends if t == dir_norm)
+
+    opposing_trend: Optional[str] = None
+    if dir_norm in ("BULLISH", "LONG", "BUY"):
+        # Opposing if both 15m and Daily are Bearish
+        if tf_15m_trend == "BEARISH" and htf_trend == "BEARISH":
+            opposing_trend = "BEARISH (15m & Daily HTF downtrend)"
+    else:
+        # Opposing if both 15m and Daily are Bullish
+        if tf_15m_trend == "BULLISH" and htf_trend == "BULLISH":
+            opposing_trend = "BULLISH (15m & Daily HTF uptrend)"
+
+    return {
+        "alignment_count": alignment_count,
+        "opposing_trend": opposing_trend,
+        "tf_5m_trend": tf_5m_trend,
+        "tf_15m_trend": tf_15m_trend,
+        "htf_trend": htf_trend,
+    }

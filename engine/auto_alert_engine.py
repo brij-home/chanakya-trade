@@ -170,7 +170,7 @@ class AutoAlertEngine:
             "SENSEX",
             "BANKEX",
         ]
-        self._watched_equities = [
+        self._default_watched_equities = [
             "RELIANCE",
             "TCS",
             "INFY",
@@ -182,6 +182,7 @@ class AutoAlertEngine:
             "LT",
             "ITC",
         ]
+        self._watched_equities = list(self._default_watched_equities)
         # Watched commodities & currency universe (continuous monitoring 09:00 - 23:30 IST)
         self._watched_commodities = [
             "CRUDEOIL",
@@ -274,7 +275,9 @@ class AutoAlertEngine:
           3. Unusual volume surge candidates (volume_surges_rvol)
         """
         symbols = list(self._watched_equities)
-        if getattr(self, "_override_watched_equities", False):
+        if getattr(self, "_override_watched_equities", False) or symbols != getattr(
+            self, "_default_watched_equities", None
+        ):
             return symbols
         try:
             from analysis.universe import THEMATIC_PRESETS
@@ -2850,8 +2853,32 @@ class AutoAlertEngine:
             today_expiry = expiry_map.get(now_ist.weekday())
             if today_expiry and today_expiry in targets and targets[0] != today_expiry:
                 targets.remove(today_expiry)
-                targets.insert(0, today_expiry)
-        for s in self.watched_equities:
+        # Prioritize active momentum equities (|change_pct| >= 1.2%) to the front of the queue
+        try:
+            from market.quotes import _QUOTE_CACHE, _quote_cache_lock
+
+            active_movers: list[tuple[float, str]] = []
+            other_equities: list[str] = []
+            with _quote_cache_lock:
+                for s in self.watched_equities:
+                    clean = s.replace(".NS", "").replace("NSE:", "").strip().upper()
+                    cached_q = None
+                    for key in (clean, f"NSE:{clean}", f"{clean}.NS", s):
+                        if key in _QUOTE_CACHE:
+                            _, cached_q = _QUOTE_CACHE[key]
+                            break
+                    chg = abs(getattr(cached_q, "change_pct", 0.0) or 0.0) if cached_q else 0.0
+                    if chg >= 1.2:
+                        active_movers.append((chg, s))
+                    else:
+                        other_equities.append(s)
+
+            active_movers.sort(key=lambda x: x[0], reverse=True)
+            sorted_equities = [s for _, s in active_movers] + other_equities
+        except Exception:
+            sorted_equities = list(self.watched_equities)
+
+        for s in sorted_equities:
             if s not in targets:
                 targets.append(s)
         return targets
@@ -3783,6 +3810,29 @@ class AutoAlertEngine:
 
     # ── Time-Partitioned Segment Scanning Loops ──────────────────
 
+    def _get_index_intraday_regime(self, df_5m: Any, spot: float) -> str:
+        """Classifies index intraday regime: 'TRENDING', 'NORMAL', or 'CHOP_CONSOLIDATION'."""
+        if df_5m is None or not hasattr(df_5m, "iloc") or len(df_5m) < 6 or spot <= 0:
+            return "NORMAL"
+        try:
+            col_h = "high" if "high" in df_5m.columns else "High"
+            col_l = "low" if "low" in df_5m.columns else "Low"
+            recent = df_5m.iloc[-12:] if len(df_5m) >= 12 else df_5m
+            rng_pts = float(recent[col_h].max() - recent[col_l].min())
+            rng_pct = (rng_pts / spot) * 100.0
+
+            now_t = datetime.now(IST).time()
+            is_midday = dtime(11, 30) <= now_t <= dtime(14, 0)
+
+            # Severe chop: 1-hour range < 0.20% during midday
+            if rng_pct < 0.20 and is_midday:
+                return "CHOP_CONSOLIDATION"
+            elif rng_pct >= 0.50:
+                return "TRENDING"
+            return "NORMAL"
+        except Exception:
+            return "NORMAL"
+
     def scan_index_call_setups(self) -> list[AutoAlert]:
         """Priority-0b SMC-driven BULLISH index options scanner (CE symmetric counterpart).
 
@@ -3919,12 +3969,17 @@ class AutoAlertEngine:
                     prev_week_low=prev_week_low if prev_week_low > 0 else None,
                     ohlcv_5m=df_5m,
                 )
+                regime = self._get_index_intraday_regime(df_5m, spot)
                 for a in alerts:
+                    if regime == "CHOP_CONSOLIDATION" and a.actionable_plan:
+                        a.actionable_plan["preferred_vehicle"] = "HEDGED_SPREAD"
+                        if a.actionable_plan.get("hedge_plan"):
+                            a.actionable_plan["hedge_plan"]["preferred_vehicle"] = "HEDGED_SPREAD"
                     if self.record_alert(a):
                         found.append(a)
                         logger.info(
                             f"[AutoAlertEngine] 🟢 SMC Index Call Setup fired: {a.headline} "
-                            f"({', '.join(a.metrics.get('signals', []))}) stage={a.stage}"
+                            f"({', '.join(a.metrics.get('signals', []))}) stage={a.stage} regime={regime}"
                         )
             except Exception as e:
                 logger.debug(f"[AutoAlertEngine] Index call setup scan error for {sym}: {e}")
@@ -4040,12 +4095,17 @@ class AutoAlertEngine:
                     prev_week_high=prev_week_high,
                     ohlcv_5m=df_5m,
                 )
+                regime = self._get_index_intraday_regime(df_5m, spot)
                 for a in alerts:
+                    if regime == "CHOP_CONSOLIDATION" and a.actionable_plan:
+                        a.actionable_plan["preferred_vehicle"] = "HEDGED_SPREAD"
+                        if a.actionable_plan.get("hedge_plan"):
+                            a.actionable_plan["hedge_plan"]["preferred_vehicle"] = "HEDGED_SPREAD"
                     if self.record_alert(a):
                         found.append(a)
                         logger.info(
                             f"[AutoAlertEngine] 🔴 SMC Index Put Setup fired: {a.headline} "
-                            f"({', '.join(a.metrics.get('signals', []))}) stage={a.stage}"
+                            f"({', '.join(a.metrics.get('signals', []))}) stage={a.stage} regime={regime}"
                         )
             except Exception as e:
                 logger.debug(f"[AutoAlertEngine] Index put setup scan error for {sym}: {e}")
@@ -4515,7 +4575,7 @@ class AutoAlertEngine:
 
     def get_alerts(
         self,
-        limit: int = 50,
+        limit: int = 300,
         alert_type: Optional[str] = None,
         stage: Optional[str] = None,
         environment: Optional[str] = None,
@@ -4622,14 +4682,15 @@ class AutoAlertEngine:
         logger.info(f"[AutoAlertEngine] Bulk archived {archived_count} invalidated setups.")
         return archived_count
 
-    def _prune_expired_archived_unlocked(self, max_age_days: int = 1) -> int:
+    def _prune_expired_archived_unlocked(self, max_age_days: int = 3) -> int:
         """
         Internal prune logic without acquiring lock (caller must hold self._lock).
         CRITICAL SAFETY RULE: Active valid trades (a.is_active == True) are NEVER purged.
+        Maintains all alert records across Active, Archived, Invalidated, and Expired groups
+        for at least max_age_days (default 3 days) for post-mortem analysis and learning.
         Automatically purges:
-          1. Expired derivative contracts (shelf-life / expiry passed).
-          2. Quarantined or bogus phantom records (instant 0-TTL purge).
-          3. Inactive / archived / invalidated records older than max_age_days.
+          1. Quarantined or bogus phantom records (instant 0-TTL purge).
+          2. Inactive / archived / invalidated / expired records strictly older than max_age_days.
         """
         from datetime import timedelta
 
@@ -4644,12 +4705,7 @@ class AutoAlertEngine:
                 surviving.append(a)
                 continue
 
-            # 1. Instant Purge for Expired Derivatives
-            if a.is_expired or a.stage == "EXPIRED":
-                purged_count += 1
-                continue
-
-            # 2. Instant Purge for Quarantined / Phantom records
+            # 1. Instant Purge for Quarantined / Phantom records
             if a.archive_reason and "Quarantined" in a.archive_reason:
                 purged_count += 1
                 continue
@@ -4670,16 +4726,9 @@ class AutoAlertEngine:
                     except Exception:
                         continue
 
-            # 3. Clean up records older than max_age_days or prior calendar session invalidations
+            # 2. Clean up inactive / archived / expired records only if older than max_age_days
             if alert_dt:
                 if alert_dt < cutoff_dt:
-                    purged_count += 1
-                    continue
-                if (
-                    max_age_days <= 1
-                    and (a.is_invalidated or a.stage == "INVALIDATED")
-                    and alert_dt.date() < now.date()
-                ):
                     purged_count += 1
                     continue
 
@@ -4689,7 +4738,7 @@ class AutoAlertEngine:
             self._alerts = surviving
             self._save()
             logger.info(
-                f"[AutoAlertEngine] Cleaned up {purged_count} stale/expired records. "
+                f"[AutoAlertEngine] Cleaned up {purged_count} stale records older than {max_age_days}d. "
                 f"Surviving: {len(surviving)}"
             )
 
@@ -4842,9 +4891,9 @@ class AutoAlertEngine:
                 )
         return purged
 
-    def cleanup_archived_records(self, max_age_days: int = 1) -> int:
+    def cleanup_archived_records(self, max_age_days: int = 3) -> int:
         """
-        Public thread-safe method to prune archived records older than max_age_days.
+        Public thread-safe method to prune archived records older than max_age_days (default 3 days).
         Active valid trades are never deleted.
         Returns the number of purged records.
         """
@@ -4977,7 +5026,7 @@ class AutoAlertEngine:
                             f"[AutoAlertEngine] Purged illiquid option momentum alert {a.alert_id} "
                             f"({a.symbol}): OI {oi} < 5,000"
                         )
-            # 4. Session Rollover Sanity: Purge unignited EARLY_WARNING alerts from prior calendar days
+            # 4. Session Rollover Sanity: Archive unignited EARLY_WARNING alerts from prior calendar days as EXPIRED
             ts_date = None
             if a.created_at:
                 clean_ts = a.created_at.replace(" IST", "").strip()[:10]
@@ -4987,10 +5036,13 @@ class AutoAlertEngine:
                     pass
             if ts_date and ts_date < datetime.now(IST).date():
                 if a.stage == "EARLY_WARNING":
-                    purged += 1
-                    logger.info(
-                        f"[AutoAlertEngine] Purged stale prior-session early warning {a.alert_id} ({a.symbol})"
-                    )
+                    a.stage = "EXPIRED"
+                    a.is_archived = True
+                    a.is_invalidated = True
+                    exp_reason = "Prior-session early warning expired without triggering"
+                    a.archive_reason = a.archive_reason or exp_reason
+                    a.invalidation_reason = a.invalidation_reason or exp_reason
+                    surviving.append(a)
                     continue
 
             surviving.append(a)
@@ -5003,14 +5055,10 @@ class AutoAlertEngine:
 
     def _deduplicate_symbols_unlocked(self) -> int:
         """
-        Deduplicates alerts by symbol. If a symbol has an active setup, any dead/invalidated/archived
-        iterations of that symbol are permanently purged so old zombies never linger.
+        Deduplicates multiple concurrent active alerts for the same symbol (keeps latest active).
+        Preserves past closed, invalidated, or archived setups for that symbol within the
+        3-day retention window so multi-day trade history and post-mortem analysis remain intact.
         """
-        active_symbols = {
-            a.symbol.replace("NSE:", "").replace("NFO:", "").strip().upper()
-            for a in self._alerts
-            if a.is_active
-        }
         surviving = []
         purged = 0
         seen_active = set()
@@ -5037,17 +5085,14 @@ class AutoAlertEngine:
                 seen_active.add(clean_sym)
                 surviving.append(a)
             else:
-                # If there is already an active alert for this symbol, discard old dead copies
-                if clean_sym in active_symbols:
-                    purged += 1
-                    continue
+                # Past archived, invalidated, or expired alerts are preserved for multi-day analysis
                 surviving.append(a)
 
         surviving.reverse()
         if purged > 0:
             self._alerts = surviving
             self._save()
-            logger.info(f"[AutoAlertEngine] Deduplicated and purged {purged} stale alert copies.")
+            logger.info(f"[AutoAlertEngine] Deduplicated {purged} concurrent active alert copies.")
         return purged
 
     def _load(self) -> None:
@@ -5206,8 +5251,8 @@ class AutoAlertEngine:
                 self._sanitize_legacy_alerts_unlocked()
                 # 3. Deduplicate multiple iterations of the same symbol (keep only latest active)
                 self._deduplicate_symbols_unlocked()
-                # 4. Periodically prune stale / invalidated / archived records older than 1 day
-                self._prune_expired_archived_unlocked(max_age_days=1)
+                # 4. Periodically prune stale / invalidated / archived records older than 3 days
+                self._prune_expired_archived_unlocked(max_age_days=3)
         except Exception as e:
             logger.debug(f"[AutoAlertEngine] _load error: {e}")
             self._alerts = []

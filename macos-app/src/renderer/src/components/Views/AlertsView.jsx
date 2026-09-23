@@ -1849,7 +1849,7 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
   const loadAutoAlerts = useCallback(async (isInitial = false) => {
     if (isInitial) setAutoLoading(true)
     try {
-      const res = await callRef.current('/skills/alerts/auto/list', { view_mode: autoViewMode })
+      const res = await callRef.current('/skills/alerts/auto/list', { view_mode: autoViewMode, limit: 300 })
       const fresh = res?.data ?? res ?? []
 
       // Institutional chime check on live ignited alerts

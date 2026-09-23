@@ -43,12 +43,9 @@ export function isTestOrSimAlert(item) {
   if (headline.includes('[TEST]') || headline.includes('🧪') || headline.includes('SIMULAT') || headline.includes('TEST ALERT')) return true
   if (summary.includes('SIMULAT') || summary.includes('TEST ALERT') || summary.includes('TEST MODE')) return true
 
-  // 3. Known synthetic/test setups & contracts (e.g. RELIANCE 2900 CE test generated during off-market)
-  if (sym.includes('RELIANCE') || contract.includes('RELIANCE') || headline.includes('RELIANCE') || summary.includes('RELIANCE')) {
-    return true
-  }
-  if (contract.includes('2900CE') || headline.includes('2900CE') || summary.includes('2900CE')) return true
-  if (summary.includes('SHEDDING 14.5%') || summary.includes('COILING FOR MOMENTUM EXPANSION')) return true
+  // 3. Known synthetic/mock test phrases from unit tests
+  if (id.startsWith('mock-') || id.startsWith('synthetic-')) return true
+  if (headline.includes('SYNTHETIC TEST') || summary.includes('SYNTHETIC TEST')) return true
 
   return false
 }

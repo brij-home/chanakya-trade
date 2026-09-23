@@ -493,7 +493,9 @@ def detect_intraday_mover_sparks(
             df_5m = get_ohlcv(clean_sym, exchange="NSE", interval="5minute", days=3)
             df_15m = get_ohlcv(clean_sym, exchange="NSE", interval="15minute", days=5)
             if df_5m is not None and df_15m is not None:
-                mtf_res = compute_mtf_alignment(df_5m=df_5m, df_15m=df_15m, df_daily=df)
+                mtf_res = compute_mtf_alignment(
+                    df_5m=df_5m, df_15m=df_15m, df_daily=df, direction=direction
+                )
                 alignment_count = int(mtf_res.get("alignment_count", 0))
                 opp_trend = mtf_res.get("opposing_trend")
                 if opp_trend:
