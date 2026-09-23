@@ -365,7 +365,9 @@ def get_market_breadth(use_cache: bool = True, force_refresh: bool = False) -> M
                 return _BREADTH_CACHE
 
         # No mock data — return zeros so consumers know data is unavailable
-        return MarketBreadth(advances=0, declines=0, unchanged=0, ad_ratio=0.0, verdict="UNAVAILABLE")
+        return MarketBreadth(
+            advances=0, declines=0, unchanged=0, ad_ratio=0.0, verdict="UNAVAILABLE"
+        )
 
 
 def _build_breadth(adv: int, dec: int, unch: int) -> MarketBreadth:

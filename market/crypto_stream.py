@@ -32,14 +32,12 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import math
 import threading
 import time
-from collections import defaultdict, deque
+from collections import deque
 from datetime import datetime, timezone
 from typing import Any, Callable, Optional
 
-import httpx
 import pandas as pd
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -162,6 +160,7 @@ class CryptoStreamManager:
 
         if self._loop and self._loop.is_running():
             try:
+
                 def _shutdown():
                     for t in asyncio.all_tasks(self._loop):
                         t.cancel()
@@ -199,7 +198,7 @@ class CryptoStreamManager:
         backoff = 1.0
         while self._running:
             try:
-                logger.info(f"CryptoStreamManager: connecting to Binance streams...")
+                logger.info("CryptoStreamManager: connecting to Binance streams...")
                 async with websockets.connect(
                     BINANCE_WS_URL,
                     ping_interval=20,
@@ -225,7 +224,9 @@ class CryptoStreamManager:
                     self._connected = False
                 if not self._running:
                     break
-                logger.warning(f"CryptoStreamManager: WS connection dropped ({e}), retrying in {backoff:.1f}s...")
+                logger.warning(
+                    f"CryptoStreamManager: WS connection dropped ({e}), retrying in {backoff:.1f}s..."
+                )
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 1.5, 30.0)
 
@@ -352,6 +353,7 @@ class CryptoStreamManager:
 
     def _bootstrap_initial_klines(self) -> None:
         """REST bootstrapper: parallel-load 200 initial 1m klines per symbol for instant readiness."""
+
         def _fetch_one(sym: str) -> tuple[str, Any]:
             try:
                 return sym, self.fetch_klines_rest(sym, interval="1m", limit=200)
@@ -413,7 +415,9 @@ class CryptoStreamManager:
             client = get_binance_client()
             resp = client.get(BINANCE_REST_KLINES, params=params, timeout=8.0)
             if resp.status_code != 200:
-                logger.warning(f"Binance REST klines returned {resp.status_code}: {resp.text[:200]}")
+                logger.warning(
+                    f"Binance REST klines returned {resp.status_code}: {resp.text[:200]}"
+                )
                 return pd.DataFrame(columns=["date", "open", "high", "low", "close", "volume"])
             data = resp.json()
 
@@ -545,7 +549,9 @@ class CryptoStreamManager:
                             "volume": q.volume,
                             "bid": q.bid,
                             "ask": q.ask,
-                            "direction": "up" if q.change_pct > 0 else ("down" if q.change_pct < 0 else "flat"),
+                            "direction": "up"
+                            if q.change_pct > 0
+                            else ("down" if q.change_pct < 0 else "flat"),
                         }
                     )
             return {
@@ -629,9 +635,7 @@ class CryptoStreamManager:
         if fr <= -0.0002:
             squeeze_signal = "SHORT_SQUEEZE_IMMINENT"
             signal_conviction = 88
-            recommendation = (
-                "Heavily short-crowded. Look for Bullish Liquidity Sweep or Demand OB bounce for violent upward squeeze."
-            )
+            recommendation = "Heavily short-crowded. Look for Bullish Liquidity Sweep or Demand OB bounce for violent upward squeeze."
         elif fr <= -0.00005:
             squeeze_signal = "SHORT_SQUEEZE_POTENTIAL"
             signal_conviction = 75

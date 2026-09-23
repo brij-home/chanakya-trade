@@ -43,11 +43,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Optional, Union
 from uuid import uuid4
+
+logger = logging.getLogger("chanakya.web.skills")
 
 # Fix Windows charmap / cp1252 codec errors for unicode console prints
 if sys.platform == "win32":
@@ -75,7 +78,97 @@ router = APIRouter(prefix="/skills", tags=["OpenClaw Skills"])
 # ── Chat session store ────────────────────────────────────────
 # Keyed by session_id → TradingAgent instance.
 # In-memory only; sessions are lost on server restart.
-_chat_sessions: dict[str, object] = {}
+# Bounded LRU store: max 50 sessions, 2-hour TTL.
+# (Replaces unbounded dict that was an OOM vector on long-running servers.)
+
+import time as _time_mod
+from collections import OrderedDict as _OrderedDict
+import threading as _threading
+
+_CHAT_SESSION_MAX = 50
+_CHAT_SESSION_TTL = 7200.0  # 2 hours
+
+
+class _LRUSessionStore:
+    """Thread-safe bounded LRU session store with TTL eviction."""
+
+    def __init__(self, maxsize: int = 50, ttl: float = 7200.0):
+        self._store: _OrderedDict[str, tuple[object, float]] = _OrderedDict()
+        self._lock = _threading.Lock()
+        self.maxsize = maxsize
+        self.ttl = ttl
+
+    def get(self, key: str) -> object | None:
+        with self._lock:
+            if key not in self._store:
+                return None
+            session, ts = self._store[key]
+            if _time_mod.time() - ts > self.ttl:
+                del self._store[key]
+                return None
+            self._store.move_to_end(key)  # mark recently used
+            return session
+
+    def set(self, key: str, session: object) -> None:
+        with self._lock:
+            self._evict_expired_unsafe()
+            if key in self._store:
+                self._store.move_to_end(key)
+            elif len(self._store) >= self.maxsize:
+                self._store.popitem(last=False)  # evict LRU entry
+            self._store[key] = (session, _time_mod.time())
+
+    def delete(self, key: str) -> None:
+        with self._lock:
+            self._store.pop(key, None)
+
+    def pop(self, key: str, default: object = None) -> object:
+        with self._lock:
+            if key not in self._store:
+                return default
+            val, ts = self._store.pop(key)
+            if _time_mod.time() - ts > self.ttl:
+                return default
+            return val
+
+    def __getitem__(self, key: str) -> object:
+        val = self.get(key)
+        if val is None:
+            raise KeyError(key)
+        return val
+
+    def __setitem__(self, key: str, session: object) -> None:
+        self.set(key, session)
+
+    def __delitem__(self, key: str) -> None:
+        with self._lock:
+            if key not in self._store:
+                raise KeyError(key)
+            del self._store[key]
+
+    def __contains__(self, key: str) -> bool:
+        return self.get(key) is not None
+
+    def __len__(self) -> int:
+        with self._lock:
+            self._evict_expired_unsafe()
+            return len(self._store)
+
+    def clear(self) -> None:
+        with self._lock:
+            self._store.clear()
+
+    def _evict_expired_unsafe(self) -> None:
+        """Evict all TTL-expired sessions. Must be called while holding self._lock."""
+        now = _time_mod.time()
+        expired = [k for k, (_, ts) in self._store.items() if now - ts > self.ttl]
+        for k in expired:
+            del self._store[k]
+
+
+_chat_sessions: _LRUSessionStore = _LRUSessionStore(
+    maxsize=_CHAT_SESSION_MAX, ttl=_CHAT_SESSION_TTL
+)
 
 # ── Active stream tracking (#113 mid-stream context injection) ──
 # Keyed by stream_id → MultiAgentAnalyzer instance.
@@ -1286,9 +1379,16 @@ async def skill_morning_brief():
             nw = get_market_news(n=5)
             br = get_market_breadth()
             ev = get_upcoming_events(days=7)
-            return snap, fl, nw, br, ev
+            gift = None
+            try:
+                from market.gift_nifty import get_gift_nifty
 
-        snapshot, flows, news, breadth, events = await asyncio.to_thread(_fetch_brief)
+                gift = get_gift_nifty()
+            except Exception:
+                pass
+            return snap, fl, nw, br, ev, gift
+
+        snapshot, flows, news, breadth, events, gift = await asyncio.to_thread(_fetch_brief)
 
         return {
             "status": "ok",
@@ -1298,6 +1398,10 @@ async def skill_morning_brief():
                 "top_news": _serialise(news),
                 "market_breadth": _serialise(breadth),
                 "upcoming_events": _serialise(events),
+                "premarket_bias": {
+                    "gift_nifty": _serialise(gift) if gift else None,
+                    "implied_gap_pct": getattr(gift, "implied_gap_pct", 0.0) if gift else 0.0,
+                },
             },
         }
     except Exception as e:
@@ -1365,14 +1469,13 @@ async def skill_chat(req: ChatRequest):
         import asyncio
         from agent.core import TradingAgent
 
-        if req.session_id not in _chat_sessions:
-            if len(_chat_sessions) >= 200:
-                # Evict oldest registered session
-                oldest_key = next(iter(_chat_sessions))
-                _chat_sessions.pop(oldest_key, None)
-            _chat_sessions[req.session_id] = await asyncio.to_thread(TradingAgent, stream=False)
+        if _chat_sessions.get(req.session_id) is None:
+            _chat_sessions.set(
+                req.session_id,
+                await asyncio.to_thread(TradingAgent, stream=False),
+            )
 
-        agent = _chat_sessions[req.session_id]
+        agent = _chat_sessions.get(req.session_id)
         response = await asyncio.to_thread(agent.chat, req.message)
 
         return {
@@ -1413,7 +1516,7 @@ class ChatResetRequest(BaseModel):
 @router.post("/chat/reset")
 async def skill_chat_reset(req: ChatResetRequest):
     """Clear conversation history for a session (start fresh)."""
-    _chat_sessions.pop(req.session_id, None)
+    _chat_sessions.delete(req.session_id)
     return {"status": "ok", "data": {"session_id": req.session_id, "cleared": True}}
 
 
@@ -1740,11 +1843,13 @@ async def skill_auto_alerts_clear():
 
         auto_alert_engine.clear_alerts()
         try:
-            await event_bus.broadcast({
-                "type": "auto_alerts_cleared",
-                "mode": "ALL",
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-            })
+            await event_bus.broadcast(
+                {
+                    "type": "auto_alerts_cleared",
+                    "mode": "ALL",
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+            )
         except Exception:
             pass
         return {"status": "ok", "data": {"cleared": True}}
@@ -1761,12 +1866,14 @@ async def skill_auto_alerts_clear_test():
 
         purged_count = auto_alert_engine.clear_test_alerts()
         try:
-            await event_bus.broadcast({
-                "type": "auto_alerts_cleared",
-                "mode": "TEST_ONLY",
-                "purged_count": purged_count,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-            })
+            await event_bus.broadcast(
+                {
+                    "type": "auto_alerts_cleared",
+                    "mode": "TEST_ONLY",
+                    "purged_count": purged_count,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+            )
         except Exception:
             pass
         return {"status": "ok", "data": {"cleared": True, "purged": purged_count}}
@@ -2765,7 +2872,7 @@ async def analyze_followup(req: AnalyzeFollowupRequest):
             or req.context.get("synthesis_text")
             or req.context.get("report")
         )
-        if session_key not in _chat_sessions or has_new_context:
+        if _chat_sessions.get(session_key) is None or has_new_context:
             # Build a system message from the primed context
             analysts = req.context.get("analysts", [])
             synthesis_text = req.context.get("synthesis_text") or ""
@@ -2800,16 +2907,17 @@ async def analyze_followup(req: AnalyzeFollowupRequest):
                 ctx_lines.append("\nUse the analysis above as your primary source of truth.")
 
             system_msg = "\n".join(ctx_lines)
-            if len(_chat_sessions) >= 200:
-                oldest_key = next(iter(_chat_sessions))
-                _chat_sessions.pop(oldest_key, None)
             # Store session as dict with system prompt and message history
-            _chat_sessions[session_key] = {
-                "system": system_msg,
-                "history": [],
-            }
+            # LRU store handles max-size eviction automatically.
+            _chat_sessions.set(
+                session_key,
+                {
+                    "system": system_msg,
+                    "history": [],
+                },
+            )
 
-        session = _chat_sessions[session_key]
+        session = _chat_sessions.get(session_key)
 
         # Build messages: system + history + new question
         session["history"].append({"role": "user", "content": req.question})
@@ -3155,8 +3263,9 @@ async def skill_position_size(req: PositionSizeSkillRequest):
         if entry is None or entry <= 0:
             try:
                 from market.quotes import get_live_quote
+
                 q = get_live_quote(req.symbol)
-                if q and hasattr(q, 'ltp') and q.ltp and q.ltp > 0:
+                if q and hasattr(q, "ltp") and q.ltp and q.ltp > 0:
                     entry = float(q.ltp)
             except Exception:
                 pass
@@ -3367,8 +3476,21 @@ async def skill_accumulation_radar(symbols: Optional[str] = None, limit: int = 3
             target_syms = [s.strip().upper() for s in symbols.split(",") if s.strip()]
         else:
             target_syms = [
-                "MAZDOCK", "COCHINSHIP", "GRSE", "TITAGARH", "HAL", "BEL", "BDL",
-                "TRENT", "DIXON", "KAYNES", "INOXWIND", "BHEL", "RVNL", "POLYCAB", "KEC"
+                "MAZDOCK",
+                "COCHINSHIP",
+                "GRSE",
+                "TITAGARH",
+                "HAL",
+                "BEL",
+                "BDL",
+                "TRENT",
+                "DIXON",
+                "KAYNES",
+                "INOXWIND",
+                "BHEL",
+                "RVNL",
+                "POLYCAB",
+                "KEC",
             ]
 
         results = []
@@ -3388,12 +3510,17 @@ async def skill_accumulation_radar(symbols: Optional[str] = None, limit: int = 3
 
 @router.get("/multibagger/order_inflows")
 @router.post("/multibagger/order_inflows")
-async def skill_order_inflows(symbol: Optional[str] = None, announcement_text: Optional[str] = None):
+async def skill_order_inflows(
+    symbol: Optional[str] = None, announcement_text: Optional[str] = None
+):
     """
     Retrieves Book-to-Bill order-book titans and evaluates contract win impact ratios.
     """
     try:
-        from analysis.order_book_catalyst import analyze_order_book_catalyst, get_top_order_book_titans
+        from analysis.order_book_catalyst import (
+            analyze_order_book_catalyst,
+            get_top_order_book_titans,
+        )
 
         if symbol:
             rep = analyze_order_book_catalyst(symbol, latest_announcement_text=announcement_text)
@@ -3430,7 +3557,10 @@ async def skill_capex_inflections(symbol: Optional[str] = None):
     Evaluates Capex & CWIP-to-Gross-Block commercialization inflections and capacity ramp-ups.
     """
     try:
-        from analysis.capex_inflection import analyze_capex_inflection, scan_capex_inflection_universe
+        from analysis.capex_inflection import (
+            analyze_capex_inflection,
+            scan_capex_inflection_universe,
+        )
 
         if symbol:
             rep = analyze_capex_inflection(symbol)
@@ -3449,7 +3579,10 @@ async def skill_rrg_orderbook_convergence(symbol: Optional[str] = None):
     Evaluates convergence of Sector RRG Momentum (Leading/Improving) with Micro Order-Book backlog.
     """
     try:
-        from analysis.rrg_orderbook_convergence import evaluate_rrg_orderbook_convergence, scan_rrg_orderbook_matrix
+        from analysis.rrg_orderbook_convergence import (
+            evaluate_rrg_orderbook_convergence,
+            scan_rrg_orderbook_matrix,
+        )
 
         if symbol:
             rep = evaluate_rrg_orderbook_convergence(symbol)
@@ -6451,7 +6584,10 @@ def _debate_snapshot_sync(req: Optional[DebateSnapshotRequest] = None):
             base_score += 8
         elif fa and (getattr(fa, "manipulation_risk", "") or "") == "HIGH":
             base_score -= 15
-        if mb and (getattr(mb, "weinstein_stage", "") == "STAGE_2_MARKUP" or getattr(mb, "trend_template_qualified", False)):
+        if mb and (
+            getattr(mb, "weinstein_stage", "") == "STAGE_2_MARKUP"
+            or getattr(mb, "trend_template_qualified", False)
+        ):
             base_score += 7
         conviction_score = max(20, min(95, base_score))
 
@@ -6711,13 +6847,16 @@ class GEXSnapshotRequest(BaseModel):
 
 
 def _fetch_options_and_spot(clean_sym: str, norm_inst: str, req_exp: Optional[str]):
-    from market.quotes import get_ltp, get_quote
+    from market.quotes import get_quote
     from market.options import get_options_snapshot
 
     if clean_sym in ("BTC", "ETH", "SOL"):
         try:
             from market.crypto_options import get_crypto_options_snapshot
-            contracts, chain_spot, expiries, source_info = get_crypto_options_snapshot(clean_sym, req_exp)
+
+            contracts, chain_spot, expiries, source_info = get_crypto_options_snapshot(
+                clean_sym, req_exp
+            )
             return None, contracts, chain_spot, expiries, source_info
         except Exception as e:
             logger.warning(f"Crypto options snapshot fallback error for {clean_sym}: {e}")
@@ -6786,8 +6925,12 @@ async def skill_gex_snapshot(
         now_time = source_info.get("as_of_display") or datetime.now().strftime("%I:%M:%S %p IST")
         active_expiry = req_exp or (expiries[0] if expiries else "")
 
-        lot_sz = 1 if clean_sym in ("BTC", "ETH", "SOL") else LOT_SIZES.get(
-            clean_sym, 75 if "NIFTY" in clean_sym else (20 if clean_sym == "SENSEX" else 250)
+        lot_sz = (
+            1
+            if clean_sym in ("BTC", "ETH", "SOL")
+            else LOT_SIZES.get(
+                clean_sym, 75 if "NIFTY" in clean_sym else (20 if clean_sym == "SENSEX" else 250)
+            )
         )
 
         # Venue-specific check if no contracts exist
@@ -7024,7 +7167,9 @@ async def skill_gex_snapshot(
                             action_label = (
                                 ("CALL SQUEEZE SURGE" if is_panic else "CALL BUY AGGRESSION")
                                 if is_mkt_open
-                                else ("CALL SQUEEZE (PREV EOD)" if is_panic else "CALL BUY (PREV EOD)")
+                                else (
+                                    "CALL SQUEEZE (PREV EOD)" if is_panic else "CALL BUY (PREV EOD)"
+                                )
                             )
 
                             raw_candidates_ce.append(
@@ -7036,7 +7181,9 @@ async def skill_gex_snapshot(
                                     "title": f"₹{int(k):,} CE • {action_label}",
                                     "score": score,
                                     "subtype": subtype,
-                                    "blast_reason": reason if is_mkt_open else f"[PREV EOD] {reason}",
+                                    "blast_reason": reason
+                                    if is_mkt_open
+                                    else f"[PREV EOD] {reason}",
                                     "reason": reason if is_mkt_open else f"[PREV EOD] {reason}",
                                     "imbalance_ratio": round(ce_imb, 1),
                                     "side": "BUY",
@@ -7052,7 +7199,9 @@ async def skill_gex_snapshot(
                                     # Actionable blueprint
                                     "action_title": action_title,
                                     "action_type": "BUY_CALL",
-                                    "action_recommendation": "BUY (CALL MOMENTUM)" if is_mkt_open else "WATCH (PREV EOD MOMENTUM)",
+                                    "action_recommendation": "BUY (CALL MOMENTUM)"
+                                    if is_mkt_open
+                                    else "WATCH (PREV EOD MOMENTUM)",
                                     "premium": prem,
                                     "entry_price": prem,
                                     "entry_range": entry_range,
@@ -7071,7 +7220,8 @@ async def skill_gex_snapshot(
                                     "when_to_hold": f"Hold while contract respects ₹{round(prem * 0.88, 1):,} and Spot advances",
                                     "when_to_wait": f"DO NOT CHASE if premium > ₹{round(prem * 1.15, 1):,}. Wait for pullback to ₹{entry_low:,.2f}",
                                     "profit_rule": f"Book 50% profit at Target 1 (₹{t1_prem:,.2f}), trail Stop Loss to Cost for Target 2 (₹{t2_prem:,.2f})",
-                                    "is_realtime": source_info.get("is_realtime", True) and is_mkt_open,
+                                    "is_realtime": source_info.get("is_realtime", True)
+                                    and is_mkt_open,
                                     "environment": "LIVE"
                                     if (source_info.get("is_realtime", True) and is_mkt_open)
                                     else "OFF_MARKET",
@@ -7151,7 +7301,9 @@ async def skill_gex_snapshot(
                             action_label = (
                                 ("PUT PANIC BREAKDOWN" if is_panic else "PUT BUY PRESSURE")
                                 if is_mkt_open
-                                else ("PUT PANIC (PREV EOD)" if is_panic else "PUT DEMAND (PREV EOD)")
+                                else (
+                                    "PUT PANIC (PREV EOD)" if is_panic else "PUT DEMAND (PREV EOD)"
+                                )
                             )
 
                             raw_candidates_pe.append(
@@ -7163,7 +7315,9 @@ async def skill_gex_snapshot(
                                     "title": f"₹{int(k):,} PE • {action_label}",
                                     "score": score,
                                     "subtype": subtype,
-                                    "blast_reason": reason if is_mkt_open else f"[PREV EOD] {reason}",
+                                    "blast_reason": reason
+                                    if is_mkt_open
+                                    else f"[PREV EOD] {reason}",
                                     "reason": reason if is_mkt_open else f"[PREV EOD] {reason}",
                                     "imbalance_ratio": round(pe_imb, 1),
                                     "side": "BUY",
@@ -7179,7 +7333,9 @@ async def skill_gex_snapshot(
                                     # Actionable blueprint
                                     "action_title": action_title,
                                     "action_type": "BUY_PUT",
-                                    "action_recommendation": "BUY (PUT BREAKDOWN)" if is_mkt_open else "WATCH (PREV EOD MOMENTUM)",
+                                    "action_recommendation": "BUY (PUT BREAKDOWN)"
+                                    if is_mkt_open
+                                    else "WATCH (PREV EOD MOMENTUM)",
                                     "premium": prem,
                                     "entry_price": prem,
                                     "entry_range": entry_range,
@@ -7198,7 +7354,8 @@ async def skill_gex_snapshot(
                                     "when_to_hold": f"Hold while contract respects ₹{round(prem * 0.88, 1):,} and Spot drifts lower",
                                     "when_to_wait": f"DO NOT CHASE if premium > ₹{round(prem * 1.15, 1):,}. Wait for pullback to ₹{entry_low:,.2f}",
                                     "profit_rule": f"Book 50% profit at Target 1 (₹{t1_prem:,.2f}), trail Stop Loss to Cost for Target 2 (₹{t2_prem:,.2f})",
-                                    "is_realtime": source_info.get("is_realtime", True) and is_mkt_open,
+                                    "is_realtime": source_info.get("is_realtime", True)
+                                    and is_mkt_open,
                                     "environment": "LIVE"
                                     if (source_info.get("is_realtime", True) and is_mkt_open)
                                     else "OFF_MARKET",
@@ -7407,6 +7564,7 @@ async def skill_gex_snapshot(
         except Exception as _ce:
             try:
                 from engine.conviction_score import _CONVICTION_CACHE
+
                 cached_entry = _CONVICTION_CACHE.get(clean_sym)
                 if cached_entry:
                     conviction_data = cached_entry[1].as_dict()
@@ -7416,7 +7574,9 @@ async def skill_gex_snapshot(
         return _ok(
             {
                 "underlying": clean_sym,
-                "exchange": "DERIBIT" if clean_sym in ("BTC", "ETH", "SOL") else ("BSE" if clean_sym in ("SENSEX", "BANKEX") else "NSE"),
+                "exchange": "DERIBIT"
+                if clean_sym in ("BTC", "ETH", "SOL")
+                else ("BSE" if clean_sym in ("SENSEX", "BANKEX") else "NSE"),
                 "expiry": active_expiry,
                 "expiries": expiries[:8] if expiries else [],
                 "spot_price": round(spot, 2),
@@ -7430,7 +7590,9 @@ async def skill_gex_snapshot(
                 "source_label": source_info.get("source_label", "Unverified Feed"),
                 "is_realtime": source_info.get("is_realtime", False),
                 "is_market_open": source_info.get("is_market_open", False),
-                "market_status": "OPEN" if source_info.get("is_market_open", False) else "CLOSED (Pre-Market / Off-Hours)",
+                "market_status": "OPEN"
+                if source_info.get("is_market_open", False)
+                else "CLOSED (Pre-Market / Off-Hours)",
                 "pcr": pcr_val,
                 "pcr_sentiment": pcr_sentiment,
                 "max_pain": max_pain,

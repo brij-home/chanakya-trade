@@ -103,7 +103,9 @@ def evaluate_rrg_orderbook_convergence(
     # Micro backlog contribution (max +30)
     if b2b >= 4.0:
         score += 30
-        insights.append(f"Hyper-scale order backlog: Book-to-Bill is {b2b:.1f}x ({runway:.1f} years revenue visibility).")
+        insights.append(
+            f"Hyper-scale order backlog: Book-to-Bill is {b2b:.1f}x ({runway:.1f} years revenue visibility)."
+        )
     elif b2b >= 2.5:
         score += 20
         insights.append(f"Strong order backlog: Book-to-Bill is {b2b:.1f}x.")
@@ -116,15 +118,21 @@ def evaluate_rrg_orderbook_convergence(
         score += 20
         if rs_momentum >= 100.0:
             score += 5
-            insights.append(f"Sector '{sector_name}' in LEADING quadrant with accelerating RS-Momentum ({rs_momentum:.1f}).")
+            insights.append(
+                f"Sector '{sector_name}' in LEADING quadrant with accelerating RS-Momentum ({rs_momentum:.1f})."
+            )
         else:
             insights.append(f"Sector '{sector_name}' in LEADING quadrant, consolidating momentum.")
     elif quadrant == "IMPROVING":
         score += 18
-        insights.append(f"Sector '{sector_name}' in IMPROVING quadrant: institutional rotation turning favorable.")
+        insights.append(
+            f"Sector '{sector_name}' in IMPROVING quadrant: institutional rotation turning favorable."
+        )
     elif quadrant == "WEAKENING":
         score -= 5
-        insights.append(f"Sector '{sector_name}' in WEAKENING quadrant: short-term sector consolidation.")
+        insights.append(
+            f"Sector '{sector_name}' in WEAKENING quadrant: short-term sector consolidation."
+        )
     elif quadrant == "LAGGING":
         score -= 20
         insights.append(f"Sector '{sector_name}' in LAGGING quadrant: macro sector drag present.")
@@ -134,19 +142,27 @@ def evaluate_rrg_orderbook_convergence(
     # Determine Convergence Tier
     if score >= 88 and b2b >= 2.5 and quadrant in ("LEADING", "IMPROVING"):
         tier = "APEX_CONVERGENCE"
-        actionable_verdict = "🔥 APEX CONVERGENCE: Macro Sector Tailwinds Amplifying Micro Multi-Year Backlog"
+        actionable_verdict = (
+            "🔥 APEX CONVERGENCE: Macro Sector Tailwinds Amplifying Micro Multi-Year Backlog"
+        )
     elif score >= 75 and b2b >= 1.8:
         tier = "HIGH_CONVERGENCE"
-        actionable_verdict = "🟢 HIGH CONVERGENCE: Favorable Institutional Sector Inflows & Strong Order Runway"
+        actionable_verdict = (
+            "🟢 HIGH CONVERGENCE: Favorable Institutional Sector Inflows & Strong Order Runway"
+        )
     elif b2b >= 2.5:
         tier = "MICRO_CATALYST_ONLY"
-        actionable_verdict = "🟡 MICRO CATALYST: Outstanding Order Book, awaiting sector rotation tailwind"
+        actionable_verdict = (
+            "🟡 MICRO CATALYST: Outstanding Order Book, awaiting sector rotation tailwind"
+        )
     elif quadrant in ("LEADING", "IMPROVING"):
         tier = "SECTOR_LIFT_ONLY"
         actionable_verdict = "⚪ SECTOR LIFT: Riding broad sector momentum with standard order book"
     else:
         tier = "CYCLICAL_HEADWIND"
-        actionable_verdict = "🔴 CYCLICAL HEADWIND: Sector lagging benchmark with low backlog visibility"
+        actionable_verdict = (
+            "🔴 CYCLICAL HEADWIND: Sector lagging benchmark with low backlog visibility"
+        )
 
     return ConvergenceReport(
         symbol=clean_sym,

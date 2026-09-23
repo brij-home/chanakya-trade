@@ -546,7 +546,10 @@ class SmartFunnel:
             try:
                 from engine.eod_store import get_cached_ohlcv
                 from analysis.multibagger import classify_weinstein_stage
-                _df_gate = get_cached_ohlcv(symbol.upper().replace(".NS", "").replace("NSE:", ""), days=300)
+
+                _df_gate = get_cached_ohlcv(
+                    symbol.upper().replace(".NS", "").replace("NSE:", ""), days=300
+                )
                 if _df_gate is not None and len(_df_gate) >= 50:
                     _ws, _ = classify_weinstein_stage(_df_gate)
                     if _ws in ("STAGE_3_DISTRIBUTION", "STAGE_4_MARKDOWN"):
@@ -600,6 +603,7 @@ class SmartFunnel:
         live_vol = 0
         try:
             from market.quotes import get_quote
+
             q_dict = get_quote(f"{exchange}:{symbol}")
             q = q_dict.get(f"{exchange}:{symbol}") or q_dict.get(symbol)
             if q:
@@ -611,9 +615,8 @@ class SmartFunnel:
         # Wyckoff Spring / V-Shape Liquidity Sweep Signature:
         # Stock emerging from oversold/downtrend with heavy volume absorption or strong price impulse (>=2.0% gain or >=1.2% with vol expansion)
         is_wyckoff_spring = (
-            (chg_pct >= 2.0 or (chg_pct >= 1.2 and (vol_ratio >= 1.2 or live_vol > 500000)))
-            and (rsi < 42.0 or (ema20 > 0 and ema50 > 0 and ema20 < ema50))
-        )
+            chg_pct >= 2.0 or (chg_pct >= 1.2 and (vol_ratio >= 1.2 or live_vol > 500000))
+        ) and (rsi < 42.0 or (ema20 > 0 and ema50 > 0 and ema20 < ema50))
 
         # ── Technical Rules ──
         if is_wyckoff_spring:
@@ -654,7 +657,9 @@ class SmartFunnel:
             if ltp < (dma200 * 0.88):
                 if not is_wyckoff_spring:
                     score -= 25.0
-                    rejection_flags.append(f"Price ({ltp:.1f}) is >12% below 200-DMA ({dma200:.1f})")
+                    rejection_flags.append(
+                        f"Price ({ltp:.1f}) is >12% below 200-DMA ({dma200:.1f})"
+                    )
                 else:
                     score -= 5.0
                     positive_flags.append(f"Spring reversal discount below 200-DMA ({dma200:.1f})")
@@ -697,9 +702,13 @@ class SmartFunnel:
                 positive_flags.append(
                     f"Minervini SEPA qualified (Q1 EPS {fund.get('eps_q1_growth', 0):.0f}% YoY accelerating)"
                 )
-            elif fund.get("eps_acceleration") is not None and fund.get("eps_acceleration", 0) < -15.0:
+            elif (
+                fund.get("eps_acceleration") is not None and fund.get("eps_acceleration", 0) < -15.0
+            ):
                 score -= 10.0
-                rejection_flags.append(f"Severe EPS deceleration ({fund.get('eps_acceleration', 0):+.0f}pp)")
+                rejection_flags.append(
+                    f"Severe EPS deceleration ({fund.get('eps_acceleration', 0):+.0f}pp)"
+                )
         else:
             if vol_ratio >= 1.0:
                 score += 10.0
@@ -734,7 +743,9 @@ class SmartFunnel:
                 if ad_ratio is not None and ad_ratio > 0:
                     if ad_ratio < 0.35:
                         score -= 15.0
-                        rejection_flags.append(f"Broad market breadth deterioration (A/D ratio {ad_ratio:.2f} < 0.35)")
+                        rejection_flags.append(
+                            f"Broad market breadth deterioration (A/D ratio {ad_ratio:.2f} < 0.35)"
+                        )
                     elif ad_ratio >= 1.8:
                         score += 5.0
                         positive_flags.append(f"Broad market tailwind (A/D ratio {ad_ratio:.2f})")

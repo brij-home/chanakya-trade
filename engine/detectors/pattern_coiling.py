@@ -51,7 +51,12 @@ def detect_learned_pattern_coiling(
             from engine.trade_plan import calculate_trade_plan
 
             tp = calculate_trade_plan(
-                symbol, direction="BULLISH", spot=ltp, timeframe="SWING_SHORT", exchange=exchange, df=df
+                symbol,
+                direction="BULLISH",
+                spot=ltp,
+                timeframe="SWING_SHORT",
+                exchange=exchange,
+                df=df,
             )
 
             # Mathematical Expectancy Gate: Reject candidates with poor structural asymmetry

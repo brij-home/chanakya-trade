@@ -11,13 +11,10 @@ Unit tests verifying the multi-regime dynamic intelligence architecture:
 import pytest
 from unittest.mock import MagicMock, patch
 
-from agent.smart_funnel import SmartFunnel, PreFilterReport
-from analysis.forensic import audit_forensics, ForensicAuditResult
+from agent.smart_funnel import SmartFunnel
+from analysis.forensic import audit_forensics
 from market.indices import (
-    IndexPolarization,
     get_index_polarization,
-    MarketSnapshot,
-    IndexSnapshot,
 )
 from market.yfinance_provider import _DEAD_TICKER_CACHE, yf_get_quote
 from engine.asymmetric_radar import AsymmetricOpportunityRadar
@@ -26,7 +23,7 @@ from engine.asymmetric_radar import AsymmetricOpportunityRadar
 def test_wyckoff_spring_stage1_qualification():
     """Verify that a stock emerging from an oversold condition with an intraday volume surge qualifies via Wyckoff Spring."""
     funnel = SmartFunnel(verbose=False)
-    
+
     mock_reg = MagicMock()
     # Simulates an oversold stock like HDFC Bank prior to bounce (RSI 29, EMA20 < EMA50)
     mock_reg.execute.side_effect = lambda tool, args: {
@@ -46,16 +43,19 @@ def test_wyckoff_spring_stage1_qualification():
             "free_cash_flow": 25000.0,
         },
     }.get(tool, {})
-    
+
     funnel._registry = mock_reg
-    
+
     # Mock quote with +2.5% intraday surge
     mock_quote = MagicMock()
     mock_quote.last_price = 731.0
     mock_quote.change_pct = 2.52
     mock_quote.volume = 39000000
-    
-    with patch("market.quotes.get_quote", return_value={"NSE:MOCKSTOCK": mock_quote, "MOCKSTOCK": mock_quote}):
+
+    with patch(
+        "market.quotes.get_quote",
+        return_value={"NSE:MOCKSTOCK": mock_quote, "MOCKSTOCK": mock_quote},
+    ):
         rep = funnel.evaluate_stock_quant("MOCKSTOCK")
         assert rep.qualified is True
         assert rep.score >= 60.0
@@ -66,7 +66,7 @@ def test_wyckoff_spring_stage1_qualification():
 def test_falling_knife_rejected_stage1():
     """Verify that a falling stock (-3.8% dump, >12% below 200-DMA) is strictly rejected."""
     funnel = SmartFunnel(verbose=False)
-    
+
     mock_reg = MagicMock()
     mock_reg.execute.side_effect = lambda tool, args: {
         "technical_analyse": {
@@ -84,16 +84,19 @@ def test_falling_knife_rejected_stage1():
             "debt_equity": 0.1,
         },
     }.get(tool, {})
-    
+
     funnel._registry = mock_reg
-    
+
     # Severe negative day
     mock_quote = MagicMock()
     mock_quote.last_price = 2100.0
     mock_quote.change_pct = -3.88
     mock_quote.volume = 6000000
-    
-    with patch("market.quotes.get_quote", return_value={"NSE:FALLINGKNIFE": mock_quote, "FALLINGKNIFE": mock_quote}):
+
+    with patch(
+        "market.quotes.get_quote",
+        return_value={"NSE:FALLINGKNIFE": mock_quote, "FALLINGKNIFE": mock_quote},
+    ):
         rep = funnel.evaluate_stock_quant("FALLINGKNIFE")
         assert rep.qualified is False
         assert rep.score < 50.0
@@ -128,7 +131,7 @@ def test_telecom_forensic_normalization():
         "roce": 15.0,
         "npm": 11.5,
     }
-    
+
     with patch("analysis.universe.get_stock_sector", return_value=("telecom", "Telecom & Media")):
         res = audit_forensics("BHARTIARTL", data=sample_telecom_data, use_cache=False)
         assert len(res.governance_red_flags) == 0
@@ -147,7 +150,7 @@ def test_index_polarization_detector():
         "NSE:ICICIBANK": MagicMock(last_price=1338.0, change_pct=-0.65),
         "NSE:LT": MagicMock(last_price=3885.0, change_pct=1.27),
     }
-    
+
     with patch("market.quotes.get_quote", return_value=mock_quotes):
         pol = get_index_polarization("NIFTY")
         assert pol.is_polarized is True
@@ -159,20 +162,26 @@ def test_index_polarization_detector():
 def test_asymmetric_radar_low_vix_adaptation():
     """Verify that 0DTE gamma setup switches to defined-risk credit spread under low VIX (<12.0)."""
     radar = AsymmetricOpportunityRadar()
-    
+
     # Straddle with ATM 23350
-    ce_contract = MagicMock(strike=23350, option_type="CE", ltp=45.0, last_price=45.0, symbol="NIFTY23350CE")
-    pe_contract = MagicMock(strike=23350, option_type="PE", ltp=45.0, last_price=45.0, symbol="NIFTY23350PE")
+    ce_contract = MagicMock(
+        strike=23350, option_type="CE", ltp=45.0, last_price=45.0, symbol="NIFTY23350CE"
+    )
+    pe_contract = MagicMock(
+        strike=23350, option_type="PE", ltp=45.0, last_price=45.0, symbol="NIFTY23350PE"
+    )
     mock_chain = [ce_contract, pe_contract]
-    
+
     # Spot unpinned upwards outside straddle breakeven (23350 + 90 = 23440)
     unpinned_spot = 23480.0
-    
+
     # Mock VIX at 11.39 (today's level) and non-polarized index
     mock_polarization = MagicMock(is_polarized=False)
-    
-    with patch("market.indices.get_vix", return_value=11.39), \
-         patch("market.indices.get_index_polarization", return_value=mock_polarization):
+
+    with (
+        patch("market.indices.get_vix", return_value=11.39),
+        patch("market.indices.get_index_polarization", return_value=mock_polarization),
+    ):
         opp = radar.detect_0dte_gamma_breakout("NIFTY", spot=unpinned_spot, chain=mock_chain)
         assert opp is not None
         assert opp.setup_type == "EXPIRY_0DTE_CREDIT_SPREAD"
@@ -184,10 +193,10 @@ def test_asymmetric_radar_low_vix_adaptation():
 def test_dead_ticker_cache():
     """Verify that a 404 delisted ticker is cached in _DEAD_TICKER_CACHE and skipped quickly."""
     import time
-    
+
     fake_dead_ticker = "DEADCO.NS"
     _DEAD_TICKER_CACHE[fake_dead_ticker] = time.time()
-    
+
     # Querying yf_get_quote should raise fast without hitting network
     with pytest.raises(RuntimeError) as exc_info:
         yf_get_quote("DEADCO", exchange="NSE")

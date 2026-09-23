@@ -718,8 +718,7 @@ class MoverAutopsyEngine:
             for g in top_gainers_raw
         ]
         losers_profiles = [
-            self.dissect_mover(l, direction="LOSER", rrg_matrix=rrg_matrix)
-            for l in top_losers_raw
+            self.dissect_mover(l, direction="LOSER", rrg_matrix=rrg_matrix) for l in top_losers_raw
         ]
 
         all_movers = gainers_profiles + losers_profiles

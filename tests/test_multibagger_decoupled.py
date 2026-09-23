@@ -19,10 +19,8 @@ from analysis.multibagger import (
     generate_short_term_ticket,
     scan_multibagger_opportunity,
 )
-from engine.compounder_scanner import CompounderScanner, compounder_scanner
+from engine.compounder_scanner import compounder_scanner
 from engine.trade_lifecycle import (
-    PositionLifecycleReport,
-    PositionMode,
     audit_position_lifecycle,
 )
 
@@ -256,4 +254,3 @@ class TestCompounderAPIEndpoints:
         assert "mid_term_ticket" in data
         assert "long_term_ticket" in data
         assert data["symbol"] == "TRENT"
-

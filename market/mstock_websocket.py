@@ -431,6 +431,15 @@ class MStockWebSocket:
         self._ticks: dict[str, MStockTick] = {}
         self._callbacks: list[Callable[[MStockTick], None]] = []
         self._lock = threading.Lock()
+        self._consecutive_errors: int = 0
+        self._circuit_open_until: float = 0.0
+        self._circuit_threshold: int = 5
+        self._circuit_cooldown: float = 600.0  # 10 minutes
+
+    @property
+    def is_circuit_open(self) -> bool:
+        """Returns True if the circuit breaker is currently open (cooling down)."""
+        return time.time() < self._circuit_open_until
 
     @property
     def connected(self) -> bool:
@@ -530,8 +539,18 @@ class MStockWebSocket:
             return
 
         reconnect_delay = 5.0
-        consecutive_errors = 0
         while self._running:
+            if self.is_circuit_open:
+                remaining = max(1.0, self._circuit_open_until - time.time())
+                logger.debug(
+                    f"m.Stock WS circuit breaker open, waiting {remaining:.1f}s before reconnect attempt"
+                )
+                try:
+                    await asyncio.sleep(min(remaining, 5.0))
+                except (asyncio.CancelledError, RuntimeError):
+                    return
+                continue
+
             try:
                 url = f"{MSTOCK_WS_URL}?API_KEY={self.api_key}&ACCESS_TOKEN={self.access_token}"
                 logger.info(f"Connecting to m.Stock WebSocket: {MSTOCK_WS_URL}")
@@ -539,8 +558,23 @@ class MStockWebSocket:
                     self._ws = ws
                     self._connected = True
                     reconnect_delay = 5.0
-                    consecutive_errors = 0
+                    self._consecutive_errors = 0
+                    self._circuit_open_until = 0.0
                     logger.info("m.Stock WebSocket connected successfully")
+
+                    try:
+                        from web.sse import event_bus
+
+                        event_bus.publish_sync(
+                            "status",
+                            {
+                                "type": "feed_status",
+                                "feed": "mstock",
+                                "status": "ONLINE",
+                            },
+                        )
+                    except Exception:
+                        pass
 
                     # Step 1: Send LOGIN frame
                     if self.access_token:
@@ -557,7 +591,7 @@ class MStockWebSocket:
 
             except Exception as e:
                 self._connected = False
-                consecutive_errors += 1
+                self._consecutive_errors += 1
                 # Guard: stop retrying if the event loop is shutting down.
                 try:
                     loop = asyncio.get_event_loop()
@@ -569,22 +603,60 @@ class MStockWebSocket:
                 if not self._running:
                     return
 
+                # Circuit breaker check: open after threshold consecutive failures
+                if self._consecutive_errors >= self._circuit_threshold:
+                    self._circuit_open_until = time.time() + self._circuit_cooldown
+                    self._consecutive_errors = 0
+                    logger.warning(
+                        "mstock_circuit_breaker_opened",
+                        extra={
+                            "threshold": self._circuit_threshold,
+                            "cooldown_seconds": self._circuit_cooldown,
+                            "error": str(e),
+                        },
+                    )
+                    try:
+                        from web.sse import event_bus
+
+                        event_bus.publish_sync(
+                            "status",
+                            {
+                                "type": "feed_status",
+                                "feed": "mstock",
+                                "status": "DEGRADED",
+                                "reason": f"Circuit breaker open after {self._circuit_threshold} consecutive errors: {e}",
+                                "cooldown_seconds": self._circuit_cooldown,
+                            },
+                        )
+                    except Exception:
+                        pass
+                    reconnect_delay = min(self._circuit_cooldown, 60.0)
+
                 # If server rejects connection (e.g. 502 Bad Gateway), check market session
                 err_str = str(e)
                 if "502" in err_str or "503" in err_str:
                     is_open = False
                     try:
                         from market.calendar import is_market_open
+
                         is_open = is_market_open("NSE") or is_market_open("NFO")
                     except Exception:
-                        from datetime import timezone as dt_tz, timedelta as dt_td, time as dt_time
+                        from datetime import (
+                            datetime,
+                            timezone as dt_tz,
+                            timedelta as dt_td,
+                            time as dt_time,
+                        )
+
                         ist = dt_tz(dt_td(hours=5, minutes=30))
                         now_ist = datetime.now(ist)
-                        is_open = (now_ist.weekday() < 5) and (dt_time(9, 0) <= now_ist.time() <= dt_time(15, 30))
+                        is_open = (now_ist.weekday() < 5) and (
+                            dt_time(9, 0) <= now_ist.time() <= dt_time(15, 30)
+                        )
 
                     if not is_open:
                         reconnect_delay = 300.0  # 5-minute off-market heartbeat
-                        if consecutive_errors <= 1:
+                        if self._consecutive_errors <= 1:
                             logger.info(
                                 "m.Stock WebSocket upstream broadcast cluster is offline outside market hours (09:15–15:30 IST). "
                                 "REST data and scrapers active. 5-minute off-market heartbeat active."
@@ -593,7 +665,7 @@ class MStockWebSocket:
                             logger.debug("m.Stock WS off-market heartbeat (retrying in 300s)")
                     else:
                         reconnect_delay = min(120.0, max(30.0, reconnect_delay * 1.5))
-                        if consecutive_errors <= 2 or consecutive_errors % 10 == 0:
+                        if self._consecutive_errors <= 2 or self._consecutive_errors % 10 == 0:
                             logger.warning(
                                 f"m.Stock WebSocket upstream gateway offline ({e}). REST data active. Next retry in {reconnect_delay:.0f}s."
                             )
@@ -770,6 +842,9 @@ class MStockWebSocket:
                 }
                 asyncio.run_coroutine_threadsafe(self._ws.send(json.dumps(payload)), self._loop)
 
+
+# Backward-compatible alias
+MStockWebSocketManager = MStockWebSocket
 
 # Global singleton instance
 mstock_ws = MStockWebSocket()

@@ -57,6 +57,7 @@ def get_regime_weights(vix: Optional[float] = None) -> dict[str, float]:
         try:
             from market.indices import get_vix
             import os
+
             if not os.environ.get("CHANAKYA_TESTING"):
                 raw_vix = get_vix()
                 if isinstance(raw_vix, (int, float)):
@@ -73,16 +74,34 @@ def get_regime_weights(vix: Optional[float] = None) -> dict[str, float]:
 
     if vix < 15:
         # Calm/trending regime: trend + momentum dominate
-        return {"trend": 0.30, "momentum": 0.30, "mean_rev": 0.15, "volatility": 0.15, "statistical": 0.10}
+        return {
+            "trend": 0.30,
+            "momentum": 0.30,
+            "mean_rev": 0.15,
+            "volatility": 0.15,
+            "statistical": 0.10,
+        }
     elif vix < 22:
         # Normal regime: balanced (default)
         return dict(STRATEGY_WEIGHTS)
     elif vix < 28:
         # Elevated volatility: shift to volatility + statistical, reduce trend
-        return {"trend": 0.20, "momentum": 0.15, "mean_rev": 0.20, "volatility": 0.25, "statistical": 0.20}
+        return {
+            "trend": 0.20,
+            "momentum": 0.15,
+            "mean_rev": 0.20,
+            "volatility": 0.25,
+            "statistical": 0.20,
+        }
     else:
         # Extreme VIX (tail risk): mean reversion + volatility dominant, momentum unreliable
-        return {"trend": 0.15, "momentum": 0.10, "mean_rev": 0.25, "volatility": 0.30, "statistical": 0.20}
+        return {
+            "trend": 0.15,
+            "momentum": 0.10,
+            "mean_rev": 0.25,
+            "volatility": 0.30,
+            "statistical": 0.20,
+        }
 
 
 _SIGNAL_LABELS = {1: "BULLISH", -1: "BEARISH", 0: "NEUTRAL"}
@@ -491,8 +510,10 @@ def ensemble_signal(df: pd.DataFrame) -> EnsembleSignal:
     _vix_hint: Optional[float] = None
     try:
         import os
+
         if not os.environ.get("CHANAKYA_TESTING"):
             from market.indices import get_vix
+
             _raw = get_vix()
             if isinstance(_raw, (int, float)):
                 _vix_hint = float(_raw)
@@ -500,10 +521,13 @@ def ensemble_signal(df: pd.DataFrame) -> EnsembleSignal:
                 _vix_hint = float(_raw.ltp)
             if _vix_hint:
                 regime_label = (
-                    "CALM" if _vix_hint < 15 else
-                    "NORMAL" if _vix_hint < 22 else
-                    "ELEVATED" if _vix_hint < 28 else
-                    "EXTREME"
+                    "CALM"
+                    if _vix_hint < 15
+                    else "NORMAL"
+                    if _vix_hint < 22
+                    else "ELEVATED"
+                    if _vix_hint < 28
+                    else "EXTREME"
                 )
     except Exception:
         pass

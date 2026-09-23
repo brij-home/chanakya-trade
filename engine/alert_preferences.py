@@ -175,7 +175,8 @@ def classify_alert_segment(alert: Any) -> str:
         exch in ("CRYPTO", "BINANCE", "COINBASE")
         or seg in ("CRYPTO", "CRYPTO_MAJORS")
         or sym.upper().startswith("CRYPTO:")
-        or clean_sym in (
+        or clean_sym
+        in (
             "BTC",
             "ETH",
             "SOL",
@@ -236,9 +237,7 @@ def classify_alert_segment(alert: Any) -> str:
     )
     is_deriv_alt = bool(alt_type in ("GAMMA_BLAST", "OPTIONS_MOMENTUM"))
     has_deriv_contract = bool(
-        contract
-        and contract != clean_sym
-        and any(x in contract for x in ("CE", "PE", "FUT"))
+        contract and contract != clean_sym and any(x in contract for x in ("CE", "PE", "FUT"))
     )
 
     is_stock_fno = bool(
@@ -264,7 +263,14 @@ class ChannelPreferences:
 
     enabled: bool = True
     allowed_segments: list[str] = field(
-        default_factory=lambda: ["FNO_INDEX", "FNO_STOCK", "EQUITY", "COMMODITY", "CURRENCY", "CRYPTO"]
+        default_factory=lambda: [
+            "FNO_INDEX",
+            "FNO_STOCK",
+            "EQUITY",
+            "COMMODITY",
+            "CURRENCY",
+            "CRYPTO",
+        ]
     )
     min_confidence: int = 75
     allow_early_warnings: bool = False
@@ -294,7 +300,14 @@ class AlertPreferences:
 
     # Master allowed segments across terminal (UI default)
     allowed_segments: list[str] = field(
-        default_factory=lambda: ["FNO_INDEX", "FNO_STOCK", "EQUITY", "COMMODITY", "CURRENCY", "CRYPTO"]
+        default_factory=lambda: [
+            "FNO_INDEX",
+            "FNO_STOCK",
+            "EQUITY",
+            "COMMODITY",
+            "CURRENCY",
+            "CRYPTO",
+        ]
     )
     # Channel routing
     telegram: ChannelPreferences = field(default_factory=ChannelPreferences)
@@ -655,7 +668,9 @@ class AlertPreferencesManager:
             # Index options (CE/PE/momentum/gamma) and hedging index signals are permitted.
             if seg == "FNO_INDEX":
                 if isinstance(alert, dict):
-                    contract_val = str(alert.get("contract_symbol") or alert.get("contract") or "").upper()
+                    contract_val = str(
+                        alert.get("contract_symbol") or alert.get("contract") or ""
+                    ).upper()
                     deriv_val = str(alert.get("derivative_type") or "").upper()
                     act_val = str(alert.get("action") or "").upper()
                     alt_val = str(alert.get("alert_type") or "").upper()
@@ -667,7 +682,9 @@ class AlertPreferencesManager:
                     )
                 else:
                     contract_val = str(
-                        getattr(alert, "contract_symbol", "") or getattr(alert, "contract", "") or ""
+                        getattr(alert, "contract_symbol", "")
+                        or getattr(alert, "contract", "")
+                        or ""
                     ).upper()
                     deriv_val = str(getattr(alert, "derivative_type", "") or "").upper()
                     act_val = str(getattr(alert, "action", "") or "").upper()
@@ -710,7 +727,14 @@ class AlertPreferencesManager:
 
             is_milestone = (
                 is_invalidated
-                or stage in ("T1_ACHIEVED", "TARGET_ACHIEVED", "TRAILING_UPDATE", "INVALIDATED", "IN_FLIGHT_WARNING")
+                or stage
+                in (
+                    "T1_ACHIEVED",
+                    "TARGET_ACHIEVED",
+                    "TRAILING_UPDATE",
+                    "INVALIDATED",
+                    "IN_FLIGHT_WARNING",
+                )
                 or "T1" in target_status
                 or "TARGET" in target_status
             )

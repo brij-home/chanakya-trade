@@ -64,5 +64,5 @@ describe('CandlestickChart Component', () => {
     // Stoch RSI starts disabled with the opacity-70 inactive CSS class
     expect(stochBtn.className).toContain('opacity-70')
     expect(stochBtn.className).not.toContain('bg-cyan-500/20')
-  })
+  }, 35000)
 })

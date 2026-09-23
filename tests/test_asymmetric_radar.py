@@ -400,7 +400,9 @@ def test_volatility_pinning_iron_condor_detection(scanner):
         assert opp.risk_reward_ratio >= 3.0
 
 
-def test_resolve_recommended_option_contract_single_stock_expiry_week_next_month_rollover(monkeypatch):
+def test_resolve_recommended_option_contract_single_stock_expiry_week_next_month_rollover(
+    monkeypatch,
+):
     """Verify single-stock option during SEBI physical settlement week automatically routes to Next-Month series."""
     from engine.asymmetric_radar import resolve_recommended_option_contract
     from brokers.base import OptionsContract
@@ -533,5 +535,3 @@ def test_render_asymmetric_alert_displays_futures_and_rollover_badge():
     assert "Delta 1.0 · Zero Theta Decay" in rendered
     assert "NEXT-MONTH ROLLOVER" in rendered
     assert "SEBI Physical Margin Safe" in rendered
-
-

@@ -46,13 +46,21 @@ if os.path.exists(auto_alerts_path):
         if ex == "MCX" and sym in ("COPPER", "ZINC", "ALUMINIUM", "LEAD", "SILVER"):
             # Check if it was generated as an option trade
             plan = a.get("actionable_plan") or {}
-            if a.get("strike") or plan.get("instrument_type") == "OPTION" or plan.get("preferred_vehicle") == "DEFINED_RISK_OPTION":
+            if (
+                a.get("strike")
+                or plan.get("instrument_type") == "OPTION"
+                or plan.get("preferred_vehicle") == "DEFINED_RISK_OPTION"
+            ):
                 is_corrupted = True
-                reasons.append(f"Illiquid MCX option contract for base metal {sym} with zero institutional open interest")
+                reasons.append(
+                    f"Illiquid MCX option contract for base metal {sym} with zero institutional open interest"
+                )
 
         if rm > 20 or pnl > 500:
             is_corrupted = True
-            reasons.append(f"Unit scale mismatch between spot price and option premium levels (R: {rm}, PnL: {pnl}%)")
+            reasons.append(
+                f"Unit scale mismatch between spot price and option premium levels (R: {rm}, PnL: {pnl}%)"
+            )
 
         if is_corrupted and not a.get("is_invalidated"):
             full_reason = (
@@ -77,7 +85,9 @@ if os.path.exists(auto_alerts_path):
             a["archive_reason"] = full_reason
             is_test = (a.get("environment") == "TEST") or (not a.get("is_live", True))
             tag = "[TEST]" if is_test else "[REAL/LIVE]"
-            a["headline"] = f"⚠️ {tag} VIEW INVALIDATED: {sym} {a.get('alert_type', '').replace('_', ' ')}"
+            a["headline"] = (
+                f"⚠️ {tag} VIEW INVALIDATED: {sym} {a.get('alert_type', '').replace('_', ' ')}"
+            )
             a["summary"] = full_reason
             invalidated_count += 1
             print(f"-> Invalidated alert {aid} ({sym}): {full_reason}")
@@ -114,7 +124,9 @@ if os.path.exists(pattern_outcomes_path):
 
         if is_false_win:
             purged_count += 1
-            print(f"-> Purged false win outcome: alert={aid}, sym={sym}, outcome={out}, entry={en}, exit={ex}")
+            print(
+                f"-> Purged false win outcome: alert={aid}, sym={sym}, outcome={out}, entry={en}, exit={ex}"
+            )
             # Mark as INVALIDATED and set realized_rr to 0.0 so it is excluded from win analytics
             item["outcome"] = "INVALIDATED"
             item["realized_rr"] = 0.0

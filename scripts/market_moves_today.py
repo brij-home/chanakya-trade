@@ -4,14 +4,13 @@ Examines market movements on 2026-09-22 across indices, F&O, and broader equitie
 """
 
 import sys
-from datetime import datetime
-import pandas as pd
 
-if hasattr(sys.stdout, 'reconfigure'):
-    sys.stdout.reconfigure(encoding='utf-8')
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
 
 from market.quotes import get_quote
 from analysis.universe import THEMATIC_PRESETS
+
 
 def check_market():
     # 1. Major Indices
@@ -23,12 +22,14 @@ def check_market():
             q = next(iter(res.values())) if res else None
             if not q:
                 continue
-            chg = getattr(q, 'change_pct', 0.0) or 0.0
-            lp = getattr(q, 'last_price', 0.0) or 0.0
-            o = getattr(q, 'open', 0.0) or 0.0
-            h = getattr(q, 'high', 0.0) or 0.0
-            l = getattr(q, 'low', 0.0) or 0.0
-            print(f"{idx:12}: LTP={lp:10.2f} | Chg={chg:+6.2f}% | Open={o:10.2f} | High={h:10.2f} | Low={l:10.2f}")
+            chg = getattr(q, "change_pct", 0.0) or 0.0
+            lp = getattr(q, "last_price", 0.0) or 0.0
+            o = getattr(q, "open", 0.0) or 0.0
+            h = getattr(q, "high", 0.0) or 0.0
+            l = getattr(q, "low", 0.0) or 0.0
+            print(
+                f"{idx:12}: LTP={lp:10.2f} | Chg={chg:+6.2f}% | Open={o:10.2f} | High={h:10.2f} | Low={l:10.2f}"
+            )
         except Exception as e:
             print(f"{idx:12}: Error: {e}")
 
@@ -40,7 +41,7 @@ def check_market():
     # Fetch in batches of 40
     all_quotes = {}
     for i in range(0, len(fno_syms), 40):
-        batch = fno_syms[i:i+40]
+        batch = fno_syms[i : i + 40]
         try:
             b_res = get_quote(batch)
             all_quotes.update(b_res)
@@ -53,25 +54,26 @@ def check_market():
         q = all_quotes.get(f"NSE:{s}") or all_quotes.get(s)
         if not q:
             continue
-        chg = getattr(q, 'change_pct', 0.0) or 0.0
-        lp = getattr(q, 'last_price', 0.0) or 0.0
-        vol = getattr(q, 'volume', 0) or 0
-        o = getattr(q, 'open', 0.0) or 0.0
-        h = getattr(q, 'high', 0.0) or 0.0
-        l = getattr(q, 'low', 0.0) or 0.0
+        chg = getattr(q, "change_pct", 0.0) or 0.0
+        lp = getattr(q, "last_price", 0.0) or 0.0
+        vol = getattr(q, "volume", 0) or 0
+        o = getattr(q, "open", 0.0) or 0.0
+        h = getattr(q, "high", 0.0) or 0.0
+        l = getattr(q, "low", 0.0) or 0.0
         if lp > 0:
             rng = (h - l) / o * 100 if o > 0 else 0
-            movers.append({
-                "symbol": s,
-                "ltp": lp,
-                "chg": chg,
-                "volume": vol,
-                "open": o,
-                "high": h,
-                "low": l,
-                "range_pct": rng
-            })
-
+            movers.append(
+                {
+                    "symbol": s,
+                    "ltp": lp,
+                    "chg": chg,
+                    "volume": vol,
+                    "open": o,
+                    "high": h,
+                    "low": l,
+                    "range_pct": rng,
+                }
+            )
 
     if not movers:
         print("No quotes returned for F&O universe. Check broker or data source.")
@@ -82,17 +84,24 @@ def check_market():
 
     print("\n=== TOP 15 GAINERS (F&O) ===")
     for m in movers[:15]:
-        print(f"{m['symbol']:12}: LTP={m['ltp']:8.2f} | Chg={m['chg']:+6.2f}% | Range={m['range_pct']:5.2f}% | Vol={m['volume']:,}")
+        print(
+            f"{m['symbol']:12}: LTP={m['ltp']:8.2f} | Chg={m['chg']:+6.2f}% | Range={m['range_pct']:5.2f}% | Vol={m['volume']:,}"
+        )
 
     print("\n=== TOP 15 LOSERS (F&O) ===")
     for m in movers[-15:][::-1]:
-        print(f"{m['symbol']:12}: LTP={m['ltp']:8.2f} | Chg={m['chg']:+6.2f}% | Range={m['range_pct']:5.2f}% | Vol={m['volume']:,}")
+        print(
+            f"{m['symbol']:12}: LTP={m['ltp']:8.2f} | Chg={m['chg']:+6.2f}% | Range={m['range_pct']:5.2f}% | Vol={m['volume']:,}"
+        )
 
     # Sort by intraday range (large moves/volatility)
     movers.sort(key=lambda x: x["range_pct"], reverse=True)
     print("\n=== TOP 15 HIGHEST INTRADAY EXPANSION / RANGE (F&O) ===")
     for m in movers[:15]:
-        print(f"{m['symbol']:12}: Range={m['range_pct']:5.2f}% | Chg={m['chg']:+6.2f}% | LTP={m['ltp']:8.2f} | High={m['high']:8.2f} | Low={m['low']:8.2f}")
+        print(
+            f"{m['symbol']:12}: Range={m['range_pct']:5.2f}% | Chg={m['chg']:+6.2f}% | LTP={m['ltp']:8.2f} | High={m['high']:8.2f} | Low={m['low']:8.2f}"
+        )
+
 
 if __name__ == "__main__":
     check_market()

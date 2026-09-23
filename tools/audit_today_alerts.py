@@ -30,18 +30,29 @@ for i, a in enumerate(today_alerts):
 
     # Check 1: In-flight warning on EARLY_WARNING
     if a.get("in_flight_warning_sent") and a.get("triggered_at") is None:
-        alert_issues.append(f"IN-FLIGHT WARNING fired on un-ignited setup (triggered_at is None, reason: {a.get('in_flight_warning_reason')})")
+        alert_issues.append(
+            f"IN-FLIGHT WARNING fired on un-ignited setup (triggered_at is None, reason: {a.get('in_flight_warning_reason')})"
+        )
 
     # Check 2: Missing or broken Option Plan
     if opt_plan:
         if opt_plan.get("entry_premium") == 0.0 or opt_plan.get("entry_premium") is None:
-            alert_issues.append(f"Option plan has 0.0 or None entry_premium: {opt_plan.get('contract_symbol')}")
-        if opt_plan.get("sl_premium") in (0.0, 0.05, 0.1) and (opt_plan.get("entry_premium") or 0) > 1.0:
-            alert_issues.append(f"Option stop loss premium is suspiciously low: {opt_plan.get('sl_premium')}")
+            alert_issues.append(
+                f"Option plan has 0.0 or None entry_premium: {opt_plan.get('contract_symbol')}"
+            )
+        if (
+            opt_plan.get("sl_premium") in (0.0, 0.05, 0.1)
+            and (opt_plan.get("entry_premium") or 0) > 1.0
+        ):
+            alert_issues.append(
+                f"Option stop loss premium is suspiciously low: {opt_plan.get('sl_premium')}"
+            )
 
     # Check 3: Plan option_entry string
     if plan.get("option_contract") and not plan.get("option_entry"):
-        alert_issues.append(f"Plan specifies option_contract '{plan.get('option_contract')}' but option_entry is null/empty")
+        alert_issues.append(
+            f"Plan specifies option_contract '{plan.get('option_contract')}' but option_entry is null/empty"
+        )
 
     # Check 4: Direction and level monotonicity
     if direction == "BULLISH":
@@ -65,7 +76,9 @@ for i, a in enumerate(today_alerts):
         alert_issues.append("LTP is missing or zero")
 
     # Check 7: R:R ratio quality
-    rr = plan.get("risk_reward") or (trade_plan.get("risk_reward") if isinstance(trade_plan, dict) else None)
+    rr = plan.get("risk_reward") or (
+        trade_plan.get("risk_reward") if isinstance(trade_plan, dict) else None
+    )
     if not rr:
         alert_issues.append("No Risk:Reward ratio in plan")
 

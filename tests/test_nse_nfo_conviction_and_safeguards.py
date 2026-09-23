@@ -7,15 +7,12 @@ suppression across Indian Equities (NSE/BSE) and Derivatives (NFO/BFO).
 
 from __future__ import annotations
 
-from datetime import datetime, time as dtime
+from datetime import datetime
 from zoneinfo import ZoneInfo
-from typing import Any
 import pandas as pd
-import numpy as np
-import pytest
 
 from engine.alert_model import AutoAlert
-from engine.alert_scrutiny import AlertScrutinyAuditor, INDEX_MIN_SL_FLOORS
+from engine.alert_scrutiny import AlertScrutinyAuditor
 from engine.alert_expiry import (
     is_0dte_expiry,
     is_0dte_afternoon,
@@ -47,7 +44,7 @@ def test_index_min_sl_floor_nifty_rejection():
         ltp=24500.0,
         trigger_level=24500.0,
         target_level=24560.0,  # 60 pt target (4:1 R:R mathematically)
-        stop_loss=24485.0,     # 15 pt stop -> SUB_NOISE
+        stop_loss=24485.0,  # 15 pt stop -> SUB_NOISE
         confidence=85,
         created_at=datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST"),
         is_live=True,
@@ -75,7 +72,7 @@ def test_index_min_sl_floor_nifty_acceptance():
         ltp=24500.0,
         trigger_level=24500.0,
         target_level=24560.0,
-        stop_loss=24470.0,     # 30 pt stop >= 25 floor
+        stop_loss=24470.0,  # 30 pt stop >= 25 floor
         confidence=85,
         created_at=datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST"),
         is_live=True,
@@ -101,7 +98,7 @@ def test_index_min_sl_floor_banknifty_rejection():
         ltp=52000.0,
         trigger_level=52000.0,
         target_level=52200.0,
-        stop_loss=51960.0,     # 40 pt stop < 65 floor
+        stop_loss=51960.0,  # 40 pt stop < 65 floor
         confidence=85,
         created_at=datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST"),
         is_live=True,
@@ -128,7 +125,7 @@ def test_equity_sub_atr_stop_rejection():
         ltp=1000.0,
         trigger_level=1000.0,
         target_level=1040.0,
-        stop_loss=990.0,     # 10 pt risk
+        stop_loss=990.0,  # 10 pt risk
         confidence=85,
         created_at=datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST"),
         is_live=True,
@@ -186,9 +183,14 @@ def test_options_momentum_0dte_afternoon_otm_rejection(monkeypatch):
 
     # NIFTY spot at 24000.0
     spot = 24000.0
-    q_nifty = Quote(symbol="NIFTY", last_price=spot, vwap=23980.0, open=23950.0, change=50.0, change_pct=0.25)
+    q_nifty = Quote(
+        symbol="NIFTY", last_price=spot, vwap=23980.0, open=23950.0, change=50.0, change_pct=0.25
+    )
     monkeypatch.setattr("market.quotes.get_ltp", lambda sym: spot)
-    monkeypatch.setattr("market.quotes.get_quote", lambda sym: {"NSE:NIFTY": q_nifty, "NIFTY": q_nifty, "NSE:NIFTY 50": q_nifty})
+    monkeypatch.setattr(
+        "market.quotes.get_quote",
+        lambda sym: {"NSE:NIFTY": q_nifty, "NIFTY": q_nifty, "NSE:NIFTY 50": q_nifty},
+    )
 
     # Chain contains:
     # 1. 24100 CE (OTM by 100 pts on 0DTE afternoon -> must be rejected)
@@ -224,10 +226,17 @@ def test_options_momentum_0dte_afternoon_otm_rejection(monkeypatch):
 
     monkeypatch.setattr("market.options.get_options_chain", lambda sym: [otm_ce, itm_ce])
     # Mock datetime.now(IST) to 13:45 IST
-    monkeypatch.setattr("engine.auto_alert_engine.datetime", type("MockDT", (), {
-        "now": classmethod(lambda cls, tz=None: now_afternoon),
-        "strptime": datetime.strptime,
-    }))
+    monkeypatch.setattr(
+        "engine.auto_alert_engine.datetime",
+        type(
+            "MockDT",
+            (),
+            {
+                "now": classmethod(lambda cls, tz=None: now_afternoon),
+                "strptime": datetime.strptime,
+            },
+        ),
+    )
 
     # Set watched indices to NIFTY only
     eng._watched_indices = ["NIFTY"]
@@ -248,7 +257,9 @@ def test_single_stock_option_wide_spread_rejection(monkeypatch):
 
     eng = AutoAlertEngine()
     spot = 1500.0
-    q_infy = Quote(symbol="INFY", last_price=spot, vwap=1495.0, open=1490.0, change=10.0, change_pct=0.67)
+    q_infy = Quote(
+        symbol="INFY", last_price=spot, vwap=1495.0, open=1490.0, change=10.0, change_pct=0.67
+    )
     monkeypatch.setattr("market.quotes.get_ltp", lambda sym: spot)
     monkeypatch.setattr("market.quotes.get_quote", lambda sym: {"NSE:INFY": q_infy, "INFY": q_infy})
 
@@ -290,29 +301,54 @@ def test_intraday_spark_sector_rrg_tailwind_integration(monkeypatch):
     eng._cooldowns = {}
     monkeypatch.setattr(eng, "_save", lambda: None)
 
-    q_stock = Quote(symbol="BEL", last_price=300.0, vwap=296.0, open=294.0, change=6.0, change_pct=2.04, volume=200000)
-    q_nifty = Quote(symbol="NIFTY", last_price=24000.0, vwap=24000.0, open=24000.0, change=0.0, change_pct=0.0)
+    q_stock = Quote(
+        symbol="BEL",
+        last_price=300.0,
+        vwap=296.0,
+        open=294.0,
+        change=6.0,
+        change_pct=2.04,
+        volume=200000,
+    )
+    q_nifty = Quote(
+        symbol="NIFTY", last_price=24000.0, vwap=24000.0, open=24000.0, change=0.0, change_pct=0.0
+    )
 
     # 30-day synthetic daily dataframe for get_ohlcv
     dates = pd.date_range(end=pd.Timestamp.now(), periods=30, freq="D")
-    df_daily = pd.DataFrame({
-        "open": [290.0] * 30,
-        "high": [305.0] * 30,
-        "low": [288.0] * 30,
-        "close": [295.0] * 30,
-        "volume": [100000] * 30,
-    }, index=dates)
+    df_daily = pd.DataFrame(
+        {
+            "open": [290.0] * 30,
+            "high": [305.0] * 30,
+            "low": [288.0] * 30,
+            "close": [295.0] * 30,
+            "volume": [100000] * 30,
+        },
+        index=dates,
+    )
 
     monkeypatch.setattr("market.history.get_ohlcv", lambda *a, **kw: df_daily)
-    monkeypatch.setattr("market.quotes.get_quote", lambda syms: {
-        "NSE:BEL": q_stock,
-        "BEL": q_stock,
-        "NSE:NIFTY 50": q_nifty,
-    })
-    monkeypatch.setattr("engine.precursor_radar.precursor_radar.get_scan_universe", lambda segment="ALL": ["BEL"])
-    monkeypatch.setattr("analysis.market_structure.check_mtf_structural_alignment", lambda *a, **kw: {"alignment_count": 2, "wall_collision": False})
-    monkeypatch.setattr("analysis.market_structure.detect_confirmation_candle", lambda *a, **kw: ("HAMMER", True))
-    monkeypatch.setattr("analysis.market_structure.detect_divergence", lambda *a, **kw: (None, None))
+    monkeypatch.setattr(
+        "market.quotes.get_quote",
+        lambda syms: {
+            "NSE:BEL": q_stock,
+            "BEL": q_stock,
+            "NSE:NIFTY 50": q_nifty,
+        },
+    )
+    monkeypatch.setattr(
+        "engine.precursor_radar.precursor_radar.get_scan_universe", lambda segment="ALL": ["BEL"]
+    )
+    monkeypatch.setattr(
+        "analysis.market_structure.check_mtf_structural_alignment",
+        lambda *a, **kw: {"alignment_count": 2, "wall_collision": False},
+    )
+    monkeypatch.setattr(
+        "analysis.market_structure.detect_confirmation_candle", lambda *a, **kw: ("HAMMER", True)
+    )
+    monkeypatch.setattr(
+        "analysis.market_structure.detect_divergence", lambda *a, **kw: (None, None)
+    )
     eng.watched_equities = ["BEL"]
 
     @dataclass
@@ -322,14 +358,22 @@ def test_intraday_spark_sector_rrg_tailwind_integration(monkeypatch):
 
     # Case 1: Stock is in a LAGGING sector with moderate RVOL (1.8x < 2.5x) -> must be suppressed
     monkeypatch.setattr("engine.auto_alert_engine.compute_time_of_day_rvol", lambda *a, **kw: 1.8)
-    monkeypatch.setattr("analysis.sector_rotation.get_stock_tailwind", lambda sym: DummyTailwind(quadrant="LAGGING", sector="NIFTY DEFENCE"))
+    monkeypatch.setattr(
+        "analysis.sector_rotation.get_stock_tailwind",
+        lambda sym: DummyTailwind(quadrant="LAGGING", sector="NIFTY DEFENCE"),
+    )
 
     alerts_lagging = eng.scan_intraday_mover_sparks()
-    assert len(alerts_lagging) == 0, "Bullish spark in LAGGING sector without RVOL >= 2.5x must be suppressed"
+    assert len(alerts_lagging) == 0, (
+        "Bullish spark in LAGGING sector without RVOL >= 2.5x must be suppressed"
+    )
 
     # Case 2: Stock is in a LEADING sector -> must pass and receive conviction bonus
     monkeypatch.setattr("engine.auto_alert_engine.compute_time_of_day_rvol", lambda *a, **kw: 2.0)
-    monkeypatch.setattr("analysis.sector_rotation.get_stock_tailwind", lambda sym: DummyTailwind(quadrant="LEADING", sector="NIFTY DEFENCE"))
+    monkeypatch.setattr(
+        "analysis.sector_rotation.get_stock_tailwind",
+        lambda sym: DummyTailwind(quadrant="LEADING", sector="NIFTY DEFENCE"),
+    )
 
     alerts_leading = eng.scan_intraday_mover_sparks()
     assert len(alerts_leading) == 1, "Bullish spark in LEADING sector must be accepted"
@@ -346,13 +390,16 @@ def test_intraday_spark_upper_circuit_proximity_rejection(monkeypatch):
     eng = AutoAlertEngine()
 
     dates = pd.date_range(end=pd.Timestamp.now(), periods=30, freq="D")
-    df_daily = pd.DataFrame({
-        "open": [100.0] * 30,
-        "high": [105.0] * 30,
-        "low": [98.0] * 30,
-        "close": [102.0] * 30,
-        "volume": [100000] * 30,
-    }, index=dates)
+    df_daily = pd.DataFrame(
+        {
+            "open": [100.0] * 30,
+            "high": [105.0] * 30,
+            "low": [98.0] * 30,
+            "close": [102.0] * 30,
+            "volume": [100000] * 30,
+        },
+        index=dates,
+    )
 
     monkeypatch.setattr("market.history.get_ohlcv", lambda *a, **kw: df_daily)
     monkeypatch.setattr("engine.auto_alert_engine.compute_time_of_day_rvol", lambda *a, **kw: 2.5)
@@ -368,14 +415,21 @@ def test_intraday_spark_upper_circuit_proximity_rejection(monkeypatch):
         volume=5000000,
         upper_circuit=105.0,
     )
-    q_nifty = Quote(symbol="NIFTY", last_price=24000.0, vwap=24000.0, open=24000.0, change=0.0, change_pct=0.0)
+    q_nifty = Quote(
+        symbol="NIFTY", last_price=24000.0, vwap=24000.0, open=24000.0, change=0.0, change_pct=0.0
+    )
 
-    monkeypatch.setattr("market.quotes.get_quote", lambda syms: {
-        "NSE:IDEA": q_stock,
-        "IDEA": q_stock,
-        "NSE:NIFTY 50": q_nifty,
-    })
-    monkeypatch.setattr("engine.precursor_radar.precursor_radar.get_scan_universe", lambda segment="ALL": ["IDEA"])
+    monkeypatch.setattr(
+        "market.quotes.get_quote",
+        lambda syms: {
+            "NSE:IDEA": q_stock,
+            "IDEA": q_stock,
+            "NSE:NIFTY 50": q_nifty,
+        },
+    )
+    monkeypatch.setattr(
+        "engine.precursor_radar.precursor_radar.get_scan_universe", lambda segment="ALL": ["IDEA"]
+    )
     eng.watched_equities = ["IDEA"]
 
     alerts = eng.scan_intraday_mover_sparks()
@@ -470,31 +524,48 @@ def test_options_scanner_auto_routes_stock_options_to_next_month_in_expiry_week(
     monkeypatch.setattr(eng, "_save", lambda: None)
 
     spot = 3000.0
-    q_rel = Quote(symbol="RELIANCE", last_price=spot, vwap=2990.0, open=2980.0, change=20.0, change_pct=0.67)
-    q_nifty = Quote(symbol="NIFTY", last_price=24000.0, vwap=24000.0, open=24000.0, change=0.0, change_pct=0.0)
+    q_rel = Quote(
+        symbol="RELIANCE", last_price=spot, vwap=2990.0, open=2980.0, change=20.0, change_pct=0.67
+    )
+    q_nifty = Quote(
+        symbol="NIFTY", last_price=24000.0, vwap=24000.0, open=24000.0, change=0.0, change_pct=0.0
+    )
 
     # Monday of expiry week: 2026-09-21
     now_exp_week = datetime(2026, 9, 21, 10, 15, tzinfo=IST)
-    monkeypatch.setattr("engine.auto_alert_engine.datetime", type("MockDT", (), {
-        "now": classmethod(lambda cls, tz=None: now_exp_week),
-        "strptime": datetime.strptime,
-    }))
+    monkeypatch.setattr(
+        "engine.auto_alert_engine.datetime",
+        type(
+            "MockDT",
+            (),
+            {
+                "now": classmethod(lambda cls, tz=None: now_exp_week),
+                "strptime": datetime.strptime,
+            },
+        ),
+    )
 
     monkeypatch.setattr("market.quotes.get_ltp", lambda sym: spot)
-    monkeypatch.setattr("market.quotes.get_quote", lambda sym: {
-        "NSE:RELIANCE": q_rel,
-        "RELIANCE": q_rel,
-        "NSE:NIFTY 50": q_nifty,
-    })
+    monkeypatch.setattr(
+        "market.quotes.get_quote",
+        lambda sym: {
+            "NSE:RELIANCE": q_rel,
+            "RELIANCE": q_rel,
+            "NSE:NIFTY 50": q_nifty,
+        },
+    )
 
     dates = pd.date_range(end=pd.Timestamp.now(), periods=30, freq="D")
-    df_synthetic = pd.DataFrame({
-        "open": [2990.0] * 30,
-        "high": [3020.0] * 30,
-        "low": [2980.0] * 30,
-        "close": [3000.0] * 30,
-        "volume": [500000] * 30,
-    }, index=dates)
+    df_synthetic = pd.DataFrame(
+        {
+            "open": [2990.0] * 30,
+            "high": [3020.0] * 30,
+            "low": [2980.0] * 30,
+            "close": [3000.0] * 30,
+            "volume": [500000] * 30,
+        },
+        index=dates,
+    )
     monkeypatch.setattr("market.history.get_ohlcv", lambda *a, **kw: df_synthetic)
 
     # Near-month contract (Sep 24): dying series in settlement week
@@ -577,4 +648,3 @@ def test_trade_plan_advises_next_month_derivatives_in_expiry_week():
     assert "SEBI PHYSICAL SETTLEMENT EXPIRY WEEK" in tp.structure_advice
     assert "NEXT-MONTH" in tp.structure_advice
     assert "staggered margin" in tp.structure_advice.lower()
-

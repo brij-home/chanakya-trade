@@ -4,7 +4,6 @@ tests/test_rrg_orderbook_convergence.py
 Unit tests for RRG Sector Momentum x Order-Book Convergence Engine.
 """
 
-import pytest
 from analysis.rrg_orderbook_convergence import (
     evaluate_rrg_orderbook_convergence,
     scan_rrg_orderbook_matrix,

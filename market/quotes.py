@@ -27,7 +27,6 @@ _OPTION_PATTERN = re.compile(
 )
 
 
-
 _FUT_PATTERN = re.compile(
     r"^(?:NFO:|NSE:)?([A-Za-z&]+?)(?:\d{2}[A-Z]{3})?FUT(?:URES)?$",
     re.IGNORECASE,
@@ -123,7 +122,9 @@ def _ws_quotes(instruments: list[str], *, correlation_id: str) -> dict[str, Quot
                                 change=float(getattr(tick, "change", 0.0) or 0.0),
                                 change_pct=float(getattr(tick, "change_pct", 0.0) or 0.0),
                                 exchange_timestamp=(
-                                    datetime.fromtimestamp(tick.timestamp, tz=timezone.utc).isoformat()
+                                    datetime.fromtimestamp(
+                                        tick.timestamp, tz=timezone.utc
+                                    ).isoformat()
                                     if getattr(tick, "timestamp", 0) and tick.timestamp > 0
                                     else None
                                 ),
@@ -302,7 +303,9 @@ def _yf_fallback_quotes(
                 i.startswith("NFO:")
                 or i.startswith("BFO:")
                 or _OPTION_PATTERN.match(i.split(":")[-1])
-                or _OPTION_PATTERN.match(i.split(":")[-1].replace("NIFTY 50", "NIFTY").replace("NIFTY BANK", "BANKNIFTY"))
+                or _OPTION_PATTERN.match(
+                    i.split(":")[-1].replace("NIFTY 50", "NIFTY").replace("NIFTY BANK", "BANKNIFTY")
+                )
                 or _FUT_PATTERN.match(i.split(":")[-1])
             )
         ]
@@ -401,10 +404,13 @@ def normalize_instrument(inst: str) -> str:
         return f"BSE:{upper}"
     # Standardize index names with spaces (e.g. NIFTY 50 -> NIFTY) before option matching
     clean_deriv = upper.replace("NIFTY 50", "NIFTY").replace("NIFTY BANK", "BANKNIFTY")
-    if _OPTION_PATTERN.match(upper) or _OPTION_PATTERN.match(clean_deriv) or _FUT_PATTERN.match(upper):
+    if (
+        _OPTION_PATTERN.match(upper)
+        or _OPTION_PATTERN.match(clean_deriv)
+        or _FUT_PATTERN.match(upper)
+    ):
         return f"NFO:{upper}"
     return f"NSE:{upper}"
-
 
 
 def get_quote(

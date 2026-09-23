@@ -97,9 +97,9 @@ class DriftReport:
 
         # 1. Raise AlertScrutiny minimum R:R threshold during declining phase
         try:
-            from engine.alert_scrutiny import AlertScrutinyAuditor
             # Patch the module-level singleton if instantiated, else flag via env
             import os
+
             current_rr = float(os.environ.get("CHANAKYA_MIN_RR_OVERRIDE", "1.3"))
             adjusted_rr = 1.6 if self.win_rate_delta < -15 else 1.45
             if adjusted_rr > current_rr:
@@ -109,7 +109,9 @@ class DriftReport:
                 )
                 logger.warning(
                     "[DRIFT CORRECTION] min_rr_ratio raised %.2f → %.2f (win_rate_delta=%.1f%%)",
-                    current_rr, adjusted_rr, self.win_rate_delta,
+                    current_rr,
+                    adjusted_rr,
+                    self.win_rate_delta,
                 )
         except Exception as e:
             logger.debug("Drift correction: rr_ratio adjustment failed: %s", e)
@@ -128,8 +130,13 @@ class DriftReport:
                     # Compute discriminative SNR: which factors separate gainers from controls
                     snr_table: dict[str, float] = {}
                     factor_keys = [
-                        "trend_score", "vcp_score", "smc_score", "rvol_20d",
-                        "squeeze_coiling", "sector_tailwind", "forensic_safe",
+                        "trend_score",
+                        "vcp_score",
+                        "smc_score",
+                        "rvol_20d",
+                        "squeeze_coiling",
+                        "sector_tailwind",
+                        "forensic_safe",
                     ]
                     for fk in factor_keys:
                         gainer_vals = [float(getattr(g, fk, 0) or 0) for g in gainers]
@@ -138,8 +145,14 @@ class DriftReport:
                             mean_g = sum(gainer_vals) / len(gainer_vals)
                             mean_c = sum(control_vals) / len(control_vals)
                             spread = abs(mean_g - mean_c)
-                            noise = max(0.01, (sum(abs(v - mean_g) for v in gainer_vals) / len(gainer_vals) +
-                                               sum(abs(v - mean_c) for v in control_vals) / len(control_vals)) / 2)
+                            noise = max(
+                                0.01,
+                                (
+                                    sum(abs(v - mean_g) for v in gainer_vals) / len(gainer_vals)
+                                    + sum(abs(v - mean_c) for v in control_vals) / len(control_vals)
+                                )
+                                / 2,
+                            )
                             snr_table[fk] = round(spread / noise, 3)
 
                     if snr_table:
@@ -148,9 +161,15 @@ class DriftReport:
                             learning_engine.recalibrate_from_snr(snr_table)
                             correction_event["actions_taken"].append(
                                 f"PatternLearningEngine recalibrated from SNR table ({len(snr_table)} factors): "
-                                + ", ".join(f"{k}={v:.2f}" for k, v in sorted(snr_table.items(), key=lambda x: -x[1])[:4])
+                                + ", ".join(
+                                    f"{k}={v:.2f}"
+                                    for k, v in sorted(snr_table.items(), key=lambda x: -x[1])[:4]
+                                )
                             )
-                            logger.info("[DRIFT CORRECTION] Learning engine recalibrated. SNR: %s", snr_table)
+                            logger.info(
+                                "[DRIFT CORRECTION] Learning engine recalibrated. SNR: %s",
+                                snr_table,
+                            )
         except Exception as e:
             logger.debug("Drift correction: autopsy/recalibrate pipeline failed: %s", e)
 
@@ -161,9 +180,13 @@ class DriftReport:
         ):
             try:
                 from engine.analysis_cache import analysis_cache
+
                 analysis_cache.save_macro(
                     f"drift_worst_analyst_{self.worst_analyst}",
-                    {"analyst": self.worst_analyst, "accuracy": self.analyst_accuracy[self.worst_analyst]},
+                    {
+                        "analyst": self.worst_analyst,
+                        "accuracy": self.analyst_accuracy[self.worst_analyst],
+                    },
                     ttl_minutes=1440,  # 24h cache
                 )
                 correction_event["actions_taken"].append(

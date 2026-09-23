@@ -1819,8 +1819,6 @@ COMPANY_NAMES: dict[str, str] = {
     "HYUNDAI": "Hyundai Motor India Ltd",
     "ATHERENERG": "Ather Energy Ltd",
     "SAGILITY": "Sagility India Ltd",
-    "PREMIERENE": "Premier Energies Ltd",
-    "WAAREEENER": "Waaree Energies Ltd",
     "KFINTECH": "KFin Technologies Ltd",
     "KALYANKJIL": "Kalyan Jewellers India Ltd",
     "PGEL": "PG Electroplast Ltd",

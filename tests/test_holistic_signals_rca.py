@@ -10,7 +10,6 @@ Institutional test suite verifying root cause analysis (RCA) fixes for trade sig
   6. Theta Decay Stagnation Window Calibration (35m threshold and -2% PnL requirement).
 """
 
-import pytest
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from engine.alert_model import AutoAlert
@@ -26,7 +25,6 @@ IST = ZoneInfo("Asia/Kolkata")
 
 def test_option_sl_floor_relaxed_from_15_to_28_percent():
     """Verify that detectors/gamma_blast and options momentum provide Greek-anchored 28% floor."""
-    from engine.detectors.gamma_blast import detect_gamma_blast
 
     # Dummy quote with low volatility triggering fallback SL
     class DummyQuote:
@@ -129,7 +127,7 @@ def test_t0_5_milestone_triggers_scale_35_and_breakeven_stop():
         ltp=138.25,
         trigger_level=138.25,
         target_level=210.0,
-        stop_loss=103.70,     # Risk = 34.55
+        stop_loss=103.70,  # Risk = 34.55
         strike=8200.0,
         option_type="CE",
         contract_symbol="POLYCAB8200CE",

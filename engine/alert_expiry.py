@@ -4,7 +4,7 @@ Expiry classification and option contract metadata helpers for ChanakyaTrade.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any, Optional
 from zoneinfo import ZoneInfo
 
@@ -64,14 +64,27 @@ def get_expiry_metadata(
     if not dt and contract_symbol:
         import re
         from datetime import date
-        csym = str(contract_symbol).upper().replace("NSE:", "").replace("NFO:", "").replace("MCX:", "").replace("BSE:", "").strip()
+
+        csym = (
+            str(contract_symbol)
+            .upper()
+            .replace("NSE:", "")
+            .replace("NFO:", "")
+            .replace("MCX:", "")
+            .replace("BSE:", "")
+            .strip()
+        )
 
         # 1. Weekly NSE Index Option: e.g. NIFTY2692425000CE
         m_weekly = re.search(r"^([A-Z]+)(\d{2})([1-9OND])(\d{2})", csym)
         if m_weekly:
             yr = 2000 + int(m_weekly.group(2))
             m_code = m_weekly.group(3)
-            m_idx = 10 if m_code == "O" else (11 if m_code == "N" else (12 if m_code == "D" else int(m_code)))
+            m_idx = (
+                10
+                if m_code == "O"
+                else (11 if m_code == "N" else (12 if m_code == "D" else int(m_code)))
+            )
             day = int(m_weekly.group(4))
             try:
                 dt = date(yr, m_idx, day)
@@ -86,19 +99,39 @@ def get_expiry_metadata(
             if m_monthly:
                 yr = 2000 + int(m_monthly.group(1))
                 m_str = m_monthly.group(2)
-                month_names = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"]
+                month_names = [
+                    "JAN",
+                    "FEB",
+                    "MAR",
+                    "APR",
+                    "MAY",
+                    "JUN",
+                    "JUL",
+                    "AUG",
+                    "SEP",
+                    "OCT",
+                    "NOV",
+                    "DEC",
+                ]
                 if m_str in month_names:
                     m_idx = month_names.index(m_str) + 1
                     clean_underlying = (symbol or "").upper().replace("MCX:", "").strip()
                     from market.instruments import COMMODITY_SYMBOLS
-                    is_comm = (
-                        clean_underlying in COMMODITY_SYMBOLS
-                        or any(csym.startswith(c) for c in COMMODITY_SYMBOLS)
+
+                    is_comm = clean_underlying in COMMODITY_SYMBOLS or any(
+                        csym.startswith(c) for c in COMMODITY_SYMBOLS
                     )
                     if is_comm:
                         try:
                             from engine.greeks_manager import get_mcx_prompt_expiry_and_dte
-                            comm_sym = clean_underlying if clean_underlying in COMMODITY_SYMBOLS else next((c for c in COMMODITY_SYMBOLS if csym.startswith(c)), "CRUDEOIL")
+
+                            comm_sym = (
+                                clean_underlying
+                                if clean_underlying in COMMODITY_SYMBOLS
+                                else next(
+                                    (c for c in COMMODITY_SYMBOLS if csym.startswith(c)), "CRUDEOIL"
+                                )
+                            )
                             exp_date_str, _ = get_mcx_prompt_expiry_and_dte(comm_sym)
                             dt = datetime.strptime(exp_date_str, "%Y-%m-%d").date()
                             if not expiry_type:
@@ -279,6 +312,7 @@ def is_0dte_afternoon(expiry_str: Optional[str], ref_dt: Optional[datetime] = No
     if not is_0dte_expiry(expiry_str, ref_dt=now_dt):
         return False
     from datetime import time as dtime
+
     return now_dt.time() >= dtime(12, 30)
 
 
@@ -430,7 +464,9 @@ def resolve_recommended_derivative_expiry(
         if not next_exp_d:
             next_exp_d = get_next_monthly_expiry_date(now_dt)
 
-        inst_label = "stock futures" if instrument_type.upper().startswith("FUT") else "stock options"
+        inst_label = (
+            "stock futures" if instrument_type.upper().startswith("FUT") else "stock options"
+        )
         return {
             "recommended_expiry": next_exp_d.strftime("%Y-%m-%d"),
             "near_expiry": near_exp_d.strftime("%Y-%m-%d"),
@@ -453,5 +489,3 @@ def resolve_recommended_derivative_expiry(
         "margin_risk": "NORMAL",
         "badge": "CURRENT_MONTH",
     }
-
-

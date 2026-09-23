@@ -4,7 +4,6 @@ tests/test_insider_radar.py
 Unit tests for Promoter De-Pledging & Open-Market Insider Buying Engine.
 """
 
-import pytest
 from analysis.insider_radar import (
     analyze_insider_activity,
     scan_insider_radar,

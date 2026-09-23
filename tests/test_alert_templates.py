@@ -1006,7 +1006,6 @@ def test_options_alerts_expose_lot_size():
         render_auto_alert,
         render_fno_alert,
         render_asymmetric_alert,
-        render_precursor_alert,
         render_milestone_alert,
         MilestoneAlertData,
     )
@@ -1146,7 +1145,9 @@ def test_gamma_blast_milestone_no_spot_target_corruption():
 
     assert "FINAL TARGET ACHIEVED" in msg_final
     assert "COALINDIA 420 PE" in msg_final or "COALINDIA420PE" in msg_final
-    assert "410.00" not in msg_final, "Spot target 410.00 must NOT appear in option milestone alert!"
+    assert "410.00" not in msg_final, (
+        "Spot target 410.00 must NOT appear in option milestone alert!"
+    )
     assert "420.00" not in msg_final, "Spot level 420.00 must NOT appear in option target field!"
     assert "Opt CMP:</b> ₹6.05" in msg_final
     assert "Target: ₹11.27" in msg_final or "Final Target:</b> ₹11.27" in msg_final
@@ -1199,7 +1200,9 @@ def test_no_chase_direction_and_comparator_sanctity():
     # Option boundary should be > 41.7 (1.08x = 45.04)
     assert put_alert.no_chase_boundary > 41.7
     msg_put = render_auto_alert(put_alert, in_market=True)
-    assert "No-Chase:</b> <i>above ₹" in msg_put, f"Put Option buyer alert must use 'above', got: {msg_put}"
+    assert "No-Chase:</b> <i>above ₹" in msg_put, (
+        f"Put Option buyer alert must use 'above', got: {msg_put}"
+    )
     assert "below ₹" not in msg_put
 
     # 2. Short Equity / Futures Trade (Bearish direction, SELL action)
@@ -1479,7 +1482,10 @@ def test_render_auto_alert_target_0_5_milestone_not_initial_breakout():
     assert "(Breakeven Cost Locked — 100% Risk-Free)" in rendered
 
     # Invariant 3: Decisive Action
-    assert "DECISIVE ACTION:</b> <code>SCALE 35% PARTIAL PROFIT NOW & HOLD RUNNER FOR T1 (₹93.30)</code>" in rendered
+    assert (
+        "DECISIVE ACTION:</b> <code>SCALE 35% PARTIAL PROFIT NOW & HOLD RUNNER FOR T1 (₹93.30)</code>"
+        in rendered
+    )
 
     # Invariant 4: MUST NOT fall through to initial breakout BUY template!
     assert "🟢 <b>[REAL/LIVE] OPTIONS BREAKOUT</b>" not in rendered
@@ -1658,7 +1664,10 @@ def test_first_time_message_prominently_shows_runner_and_confidence():
     assert "⏱️ INTRADAY" in rendered
 
     # 2. Runner Alternative
-    assert "• 🚀 <b>Runner Alternative (High Beta):</b> <code>BSE 3150 PE</code> (Opt CMP: ₹42.50)" in rendered
+    assert (
+        "• 🚀 <b>Runner Alternative (High Beta):</b> <code>BSE 3150 PE</code> (Opt CMP: ₹42.50)"
+        in rendered
+    )
 
 
 def test_format_signal_badge_and_lot_concor_and_scenarios():
@@ -1693,7 +1702,9 @@ def test_format_signal_badge_and_lot_concor_and_scenarios():
     assert res_inval == "🛑 CONCOR 485 PE @ ₹4.5 (Lot: 1250)"
 
     # 7. Neutral / Coiling Scenario (🟡 badge)
-    res_neutral = format_signal_badge_and_lot("NIFTY 24500 IRON CONDOR @ ₹120.0", scenario="NEUTRAL")
+    res_neutral = format_signal_badge_and_lot(
+        "NIFTY 24500 IRON CONDOR @ ₹120.0", scenario="NEUTRAL"
+    )
     assert res_neutral.startswith("🟡 ")
 
     # 8. Deduplication check: existing lot size is NOT duplicated
@@ -1777,7 +1788,10 @@ def test_fno_and_auto_alerts_color_coding_and_lot_size():
     rendered_auto_pe = render_auto_alert(auto_pe, in_market=True)
     assert "🔴 <b>[REAL/LIVE] OPTIONS PUT SURGE</b>" in rendered_auto_pe
     assert "🔴 OPTIONS MOMENTUM (PUT SURGE): CONCOR 485 PE @ ₹7.2 (Lot: 1250)" in rendered_auto_pe
-    assert "• <b>Action:</b> BUY <b>CONCOR 485 PE</b> @ <code>₹7.2</code> (Lot: 1250)" in rendered_auto_pe
+    assert (
+        "• <b>Action:</b> BUY <b>CONCOR 485 PE</b> @ <code>₹7.2</code> (Lot: 1250)"
+        in rendered_auto_pe
+    )
 
 
 def test_milestone_alerts_color_coding_and_lot_size():
@@ -1917,10 +1931,3 @@ def test_mcx_provenance_badge_reflects_delayed_feed_when_broker_is_mstock():
         # MUST NOT claim LIVE BROKER FEED for MCX when broker is mstock
         assert "LIVE BROKER FEED" not in rendered
         assert "DELAYED FEED (yfinance)" in rendered
-
-
-
-
-
-
-

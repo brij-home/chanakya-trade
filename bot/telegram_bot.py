@@ -647,7 +647,9 @@ async def cmd_eod(update, context) -> None:
     """Handle /eod [date] — daily institutional post-market audit & strategic report."""
     target_date = context.args[0].strip() if (context.args and len(context.args) > 0) else None
     prompt_date = target_date or "today"
-    await update.message.reply_text(f"⏳ Generating Institutional EOD Report for {prompt_date}... Please wait.")
+    await update.message.reply_text(
+        f"⏳ Generating Institutional EOD Report for {prompt_date}... Please wait."
+    )
     try:
         loop = asyncio.get_running_loop()
 
@@ -1338,13 +1340,21 @@ async def cmd_asymmetric(update, context) -> None:
             conf_short = (
                 "; ".join(o.confluences[:2]) if o.confluences else "High structural asymmetry"
             )
-            dir_tag = " [🔻 SHORT]" if o.direction == "BEARISH" else " [🦅 DELTA-NEUTRAL]" if o.direction == "NEUTRAL" else " [▲ LONG]"
-            
+            dir_tag = (
+                " [🔻 SHORT]"
+                if o.direction == "BEARISH"
+                else " [🦅 DELTA-NEUTRAL]"
+                if o.direction == "NEUTRAL"
+                else " [▲ LONG]"
+            )
+
             if o.direction == "NEUTRAL" or o.setup_type == "IRON_CONDOR_PINNING":
                 m = getattr(o, "metrics", {}) or {}
                 spe = m.get("short_pe", o.stop_loss)
                 sce = m.get("short_ce", o.target_1)
-                levels_line = f"  🎯 <b>Corridor:</b> <code>₹{spe:,.1f} – ₹{sce:,.1f}</code> (Pin Zone)\n"
+                levels_line = (
+                    f"  🎯 <b>Corridor:</b> <code>₹{spe:,.1f} – ₹{sce:,.1f}</code> (Pin Zone)\n"
+                )
             elif o.direction == "BEARISH":
                 levels_line = f"  🎯 <b>Entry:</b> <code>{o.entry_range}</code> (Ref: ₹{o.ltp:,.2f})\n  🛑 <b>SL (Above):</b> <code>₹{o.stop_loss:,.2f}</code> | <b>T1 (Down):</b> <code>₹{o.target_1:,.2f}</code> | <b>Moonshot:</b> <code>₹{o.moonshot_target:,.2f}</code>\n"
             else:

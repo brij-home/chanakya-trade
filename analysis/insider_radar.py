@@ -39,7 +39,9 @@ class PromoterInsiderReport:
 
     # Insider Buying & SAST Disclosures
     insider_buying_3m_cr: float  # Open market purchases by insiders in last 90 days (INR Cr)
-    insider_buying_verdict: str  # "AGGRESSIVE_INSIDER_BUYING" | "MODERATE_ACCUMULATION" | "NEUTRAL" | "INSIDER_SELLING"
+    insider_buying_verdict: (
+        str  # "AGGRESSIVE_INSIDER_BUYING" | "MODERATE_ACCUMULATION" | "NEUTRAL" | "INSIDER_SELLING"
+    )
 
     # Status & Composite Conviction
     de_pledging_status: str  # "ZERO_PLEDGE_CLEAN" | "AGGRESSIVE_DEPLEDGING" | "STABLE_LOW_PLEDGE" | "DANGEROUS_HIGH_PLEDGE"
@@ -185,7 +187,9 @@ def analyze_insider_activity(
     elif pledge_red >= 15.0:
         score += 20
         de_pledge_status = "AGGRESSIVE_DEPLEDGING"
-        insights.append(f"Aggressive de-pledging in progress: Pledged shares reduced by {pledge_red}% YoY.")
+        insights.append(
+            f"Aggressive de-pledging in progress: Pledged shares reduced by {pledge_red}% YoY."
+        )
     elif pledge <= 10.0:
         score += 10
         de_pledge_status = "STABLE_LOW_PLEDGE"
@@ -209,7 +213,9 @@ def analyze_insider_activity(
     if insider_buy >= 20.0:
         score += 20
         buy_verdict = "AGGRESSIVE_INSIDER_BUYING"
-        insights.append(f"Substantial open-market insider buying: ₹{insider_buy:.1f} Cr over 90 days.")
+        insights.append(
+            f"Substantial open-market insider buying: ₹{insider_buy:.1f} Cr over 90 days."
+        )
     elif insider_buy >= 5.0:
         score += 10
         buy_verdict = "MODERATE_ACCUMULATION"

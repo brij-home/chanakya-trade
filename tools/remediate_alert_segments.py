@@ -1,4 +1,6 @@
-import sys, json, shutil
+import sys
+import json
+import shutil
 from datetime import datetime
 from pathlib import Path
 

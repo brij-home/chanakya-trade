@@ -26,7 +26,6 @@ from datetime import datetime, timezone, timedelta, time as dtime
 from typing import Any, Optional
 from zoneinfo import ZoneInfo
 
-import numpy as np
 import pandas as pd
 
 from engine.alert_model import AutoAlert
@@ -72,7 +71,11 @@ def detect_opening_drive(
 
     # Filter df to today's bars
     today_str = now_dt.strftime("%Y-%m-%d")
-    df_today = df_5m[df_5m.index.strftime("%Y-%m-%d") == today_str] if hasattr(df_5m.index, "strftime") else df_5m
+    df_today = (
+        df_5m[df_5m.index.strftime("%Y-%m-%d") == today_str]
+        if hasattr(df_5m.index, "strftime")
+        else df_5m
+    )
     if len(df_today) == 0:
         df_today = df_5m
 
@@ -100,13 +103,21 @@ def detect_opening_drive(
     # 1. Bullish Opening Drive: Open == Low (within 0.15%) & expanding upward
     low_diff_pct = (abs(bar_open - bar_low) / bar_open) * 100.0
     if low_diff_pct <= 0.15 and (bar_close >= (bar_low + 0.45 * bar_range) or ltp >= bar_high):
-        if (prev_high and (bar_close >= prev_high * 0.998 or ltp >= prev_high)) or (prev_close and bar_close > prev_close) or (ltp >= bar_open * 1.003):
+        if (
+            (prev_high and (bar_close >= prev_high * 0.998 or ltp >= prev_high))
+            or (prev_close and bar_close > prev_close)
+            or (ltp >= bar_open * 1.003)
+        ):
             is_bull_drive = True
 
     # 2. Bearish Opening Drive: Open == High (within 0.15%) & expanding downward (The OFSS Archetype)
     high_diff_pct = (abs(bar_high - bar_open) / bar_open) * 100.0
     if high_diff_pct <= 0.15 and (bar_close <= (bar_low + 0.55 * bar_range) or ltp <= bar_low):
-        if (prev_low and (bar_close <= prev_low * 1.002 or ltp <= prev_low)) or (prev_close and bar_close < prev_close) or (ltp <= bar_open * 0.997):
+        if (
+            (prev_low and (bar_close <= prev_low * 1.002 or ltp <= prev_low))
+            or (prev_close and bar_close < prev_close)
+            or (ltp <= bar_open * 0.997)
+        ):
             is_bear_drive = True
 
     if not (is_bull_drive or is_bear_drive):
@@ -141,7 +152,9 @@ def detect_opening_drive(
         t1_price = round(ltp - 1.8 * risk_pts, 2)
         t2_price = round(ltp - 3.2 * risk_pts, 2)
         t3_price = round(ltp - 5.0 * risk_pts, 2)
-        headline = f"🚨 [OPENING DRIVE] {clean_sym} Bearish Breakdown (Open==High @ ₹{bar_open:,.1f})"
+        headline = (
+            f"🚨 [OPENING DRIVE] {clean_sym} Bearish Breakdown (Open==High @ ₹{bar_open:,.1f})"
+        )
         summary = (
             f"{clean_sym} institutional Opening Drive breakdown: Open==High at ₹{bar_open:,.1f} "
             f"with heavy downside liquidation (-{range_pct:.1f}% range, RVOL {rvol_val:.1f}x). "
@@ -159,7 +172,6 @@ def detect_opening_drive(
     opt_t2 = None
     opt_strike = None
     opt_type = "CE" if is_bull_drive else "PE"
-    opt_plan = None
     lot_sz = None
 
     try:
@@ -168,10 +180,15 @@ def detect_opening_drive(
 
         lot_sz = get_lot_size(clean_sym)
         raw_chain = get_options_chain(clean_sym)
-        contracts = raw_chain.contracts if hasattr(raw_chain, "contracts") else (raw_chain if isinstance(raw_chain, list) else [])
+        contracts = (
+            raw_chain.contracts
+            if hasattr(raw_chain, "contracts")
+            else (raw_chain if isinstance(raw_chain, list) else [])
+        )
         if contracts:
             matching = [
-                c for c in contracts
+                c
+                for c in contracts
                 if getattr(c, "option_type", "").upper() == opt_type
                 and getattr(c, "last_price", 0) > 0
             ]
@@ -214,10 +231,12 @@ def detect_opening_drive(
         "target": rec_t1,
         "target_1": rec_t1,
         "target_2": f"₹{opt_t2:,.1f}" if (has_opt and opt_t2) else f"₹{t2_price:,.1f}",
+        "target_3": f"₹{t3_price:,.1f}",
         "risk_reward": rr_str,
         "underlying_spot": f"₹{ltp:,.1f}",
         "underlying_sl": f"₹{sl_price:,.1f}",
         "underlying_target": f"₹{t1_price:,.1f}",
+        "underlying_target_3": f"₹{t3_price:,.1f}",
         "opening_drive_bar": {
             "open": bar_open,
             "high": bar_high,

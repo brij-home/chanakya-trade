@@ -279,17 +279,22 @@ def _get_yf():
 # ── Quote functions ──────────────────────────────────────────
 
 
+import logging
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
+
+logger = logging.getLogger("chanakya.yfinance")
 
 _quote_cache_lock = threading.Lock()
 _quote_cache: dict[str, tuple[float, Quote]] = {}  # key -> (timestamp, Quote)
 _QUOTE_TTL_SECONDS = 5.0
 
-# 24-hour negative cache for delisted or 404 dead tickers to avoid synchronous network stalls
+# 6-hour negative cache for delisted or 404 dead tickers to avoid synchronous network stalls
+# Uses a SEPARATE lock from _quote_cache_lock to prevent cross-blocking.
+_dead_ticker_lock = threading.Lock()
 _DEAD_TICKER_CACHE: dict[str, float] = {}  # ticker -> timestamp
-_DEAD_TICKER_TTL = 86400.0  # 24 hours
+_DEAD_TICKER_TTL = 6 * 3600.0  # 6 hours (matches config.constants.DELISTED_SYMBOL_TTL_SECONDS)
 
 # USD-denominated yfinance futures tickers mapped to their MCX contract quotation factor
 # COMEX/NYMEX futures are quoted in US units (troy oz, lbs, barrels), whereas MCX quotes in Indian standard units:
@@ -304,7 +309,8 @@ _USD_COMMODITY_FACTORS: dict[str, float] = {
     * 1.1288,  # GOLD landed (COMEX USD/troy oz → MCX ₹/10 grams with duty/basis)
     "SI=F": (1000.0 / 31.1034768)
     * 1.2427,  # SILVER landed (COMEX USD/troy oz → MCX ₹/1 kg with duty/basis)
-    "HG=F": 2.20462262 * 0.9785,  # COPPER landed (COMEX USD/lb → MCX ₹/1 kg with LME/MCX basis ~0.9785x)
+    "HG=F": 2.20462262
+    * 0.9785,  # COPPER landed (COMEX USD/lb → MCX ₹/1 kg with LME/MCX basis ~0.9785x)
     "CL=F": 1.0,  # CRUDE OIL (NYMEX USD/bbl → MCX ₹/bbl)
     "BZ=F": 1.0,  # BRENT CRUDE OIL (ICE USD/bbl → MCX ₹/bbl)
     "NG=F": 1.0,  # NATURAL GAS (NYMEX USD/MMBtu → MCX ₹/MMBtu)
@@ -362,10 +368,10 @@ def yf_get_quote(symbol: str, exchange: str = "NSE") -> Quote:
     yf = _get_yf()
     ticker = _to_yf_symbol(symbol, exchange)
 
-    with _quote_cache_lock:
+    with _dead_ticker_lock:
         if ticker in _DEAD_TICKER_CACHE:
             if now - _DEAD_TICKER_CACHE[ticker] < _DEAD_TICKER_TTL:
-                raise RuntimeError(f"Ticker {ticker} is in 24h negative cache (delisted/404)")
+                raise RuntimeError(f"Ticker {ticker} is in 6h negative cache (delisted/404)")
 
     try:
         t = yf.Ticker(ticker)
@@ -393,7 +399,6 @@ def yf_get_quote(symbol: str, exchange: str = "NSE") -> Quote:
                         volume = int(row.get("Volume", 0))
             except Exception:
                 pass
-
 
         # ── MCX Commodity USD → INR conversion with unit multiplier ────
         # yfinance returns USD-denominated prices for commodity futures
@@ -428,8 +433,18 @@ def yf_get_quote(symbol: str, exchange: str = "NSE") -> Quote:
         return q
     except Exception as e:
         err_str = str(e).lower()
-        if "404" in err_str or "not found" in err_str or "delisted" in err_str or isinstance(e, (KeyError, IndexError)):
-            with _quote_cache_lock:
+        if (
+            "404" in err_str
+            or "not found" in err_str
+            or "delisted" in err_str
+            or isinstance(e, (KeyError, IndexError))
+        ):
+            with _dead_ticker_lock:
+                if ticker not in _DEAD_TICKER_CACHE:  # first detection — log it
+                    logger.warning(
+                        "yfinance_symbol_delisted",
+                        extra={"ticker": ticker, "symbol": symbol, "ttl_hours": 6},
+                    )
                 _DEAD_TICKER_CACHE[ticker] = now
         raise RuntimeError(f"yfinance quote failed for {symbol}: {e}") from e
 
@@ -521,7 +536,7 @@ def yf_get_ohlcv(
     ticker = _to_yf_symbol(symbol, exchange)
 
     now_ts = time.time()
-    with _quote_cache_lock:
+    with _dead_ticker_lock:
         if ticker in _DEAD_TICKER_CACHE:
             if now_ts - _DEAD_TICKER_CACHE[ticker] < _DEAD_TICKER_TTL:
                 return []

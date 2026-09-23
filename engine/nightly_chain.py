@@ -23,12 +23,12 @@ from __future__ import annotations
 import logging
 import threading
 import time as _time
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta
 from typing import Any
 
 logger = logging.getLogger("engine.nightly_chain")
 
-IST = timezone(timedelta(hours=5, minutes=30))
+from config.constants import IST
 
 
 def run_nightly_post_market_chain(
@@ -46,6 +46,7 @@ def run_nightly_post_market_chain(
         Structured result dict with keys:
           - stage1_autopsy: autopsy dict or None
           - stage2_snr:     SNR table dict
+          - stage2b_alert_postmortems: alert post-mortem report dict
           - stage3_drift:   drift correction report
           - status:         "COMPLETED" | "SKIPPED"
           - timestamp:      IST timestamp string
@@ -55,6 +56,7 @@ def run_nightly_post_market_chain(
         "timestamp": now_ist.strftime("%Y-%m-%d %H:%M:%S IST"),
         "stage1_autopsy": None,
         "stage2_snr": {},
+        "stage2b_alert_postmortems": {},
         "stage3_drift": {},
         "status": "SKIPPED",
     }
@@ -79,6 +81,7 @@ def run_nightly_post_market_chain(
     # ── Stage 1: Mover Autopsy ─────────────────────────────────────────────
     try:
         from engine.mover_autopsy import mover_autopsy_engine
+
         autopsy = mover_autopsy_engine.perform_daily_autopsy()
         if autopsy:
             result["stage1_autopsy"] = autopsy.to_dict()
@@ -86,7 +89,9 @@ def run_nightly_post_market_chain(
             result["stage2_snr"] = snr_table
             logger.info(
                 "[NightlyChain] Stage 1 complete — %d gainers, %d losers, %d traps filtered",
-                len(autopsy.gainers), len(autopsy.losers), autopsy.traps_filtered,
+                len(autopsy.gainers),
+                len(autopsy.losers),
+                autopsy.traps_filtered,
             )
         else:
             logger.warning("[NightlyChain] Stage 1: autopsy returned None")
@@ -99,16 +104,36 @@ def run_nightly_post_market_chain(
     if snr_table:
         try:
             from engine.learning_engine import pattern_learning_engine
+
             if hasattr(pattern_learning_engine, "recalibrate_from_snr"):
                 pattern_learning_engine.recalibrate_from_snr(snr_table)
-                top5 = {k: round(v, 2) for k, v in sorted(snr_table.items(), key=lambda x: -x[1])[:5]}
-                logger.info("[NightlyChain] Stage 2 complete — SNR recalibration. Top factors: %s", top5)
+                top5 = {
+                    k: round(v, 2) for k, v in sorted(snr_table.items(), key=lambda x: -x[1])[:5]
+                }
+                logger.info(
+                    "[NightlyChain] Stage 2 complete — SNR recalibration. Top factors: %s", top5
+                )
         except Exception as exc:
             logger.error("[NightlyChain] Stage 2 (SNR recalibration) failed: %s", exc)
+
+    # ── Stage 2b: Alert Invalidation Post-Mortem & Recalibration ────────────
+    try:
+        from engine.alert_postmortem_runner import run_eod_alert_postmortems
+
+        pm_report = run_eod_alert_postmortems(force=force)
+        result["stage2b_alert_postmortems"] = pm_report
+        logger.info(
+            "[NightlyChain] Stage 2b complete — %d post-mortems conducted, %d outcomes recorded",
+            pm_report.get("post_mortems_conducted", 0),
+            pm_report.get("outcomes_recorded", 0),
+        )
+    except Exception as exc:
+        logger.error("[NightlyChain] Stage 2b (alert post-mortems) failed: %s", exc)
 
     # ── Stage 3: Drift Detection + Closed-Loop Correction ─────────────────
     try:
         from engine.drift import nightly_drift_check
+
         drift_result = nightly_drift_check()
         result["stage3_drift"] = drift_result
         corrections = drift_result.get("corrections", {})
@@ -143,6 +168,7 @@ def _dispatch_telegram_summary(result: dict[str, Any]) -> None:
     """Send a concise post-market health digest via Telegram bot."""
     try:
         from bot.telegram_bot import get_telegram_bot
+
         bot = get_telegram_bot()
         if not bot:
             return
@@ -186,6 +212,7 @@ def schedule_nightly_chain(hour: int = 15, minute: int = 45) -> None:
 
     Call this once at app startup (after broker login). No APScheduler dependency.
     """
+
     def _loop() -> None:
         while True:
             now = datetime.now(IST)
@@ -198,7 +225,8 @@ def schedule_nightly_chain(hour: int = 15, minute: int = 45) -> None:
             sleep_secs = (target - now).total_seconds()
             logger.info(
                 "[NightlyChain] Next run in %.0fs at %s",
-                sleep_secs, target.strftime("%Y-%m-%d %H:%M IST"),
+                sleep_secs,
+                target.strftime("%Y-%m-%d %H:%M IST"),
             )
             _time.sleep(max(1, sleep_secs))
             try:
@@ -213,7 +241,4 @@ def schedule_nightly_chain(hour: int = 15, minute: int = 45) -> None:
 
     t = threading.Thread(target=_loop, name="nightly-chain-scheduler", daemon=True)
     t.start()
-    logger.info(
-        "[NightlyChain] Scheduler started — fires weekdays at %02d:%02d IST", hour, minute
-    )
-
+    logger.info("[NightlyChain] Scheduler started — fires weekdays at %02d:%02d IST", hour, minute)

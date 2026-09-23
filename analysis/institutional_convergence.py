@@ -107,7 +107,9 @@ def evaluate_master_institutional_convergence(
         p2_score = 55
     else:
         p2_score = 40
-    p2_summary = f"Book-to-Bill: {b2b:.1f}x (₹{ob_rep.current_order_book_cr:,.0f} Cr order backlog)."
+    p2_summary = (
+        f"Book-to-Bill: {b2b:.1f}x (₹{ob_rep.current_order_book_cr:,.0f} Cr order backlog)."
+    )
 
     # 3. Pillar 3: Capex & CWIP Inflection
     capex_rep = analyze_capex_inflection(clean_sym)
@@ -118,7 +120,9 @@ def evaluate_master_institutional_convergence(
     block_rep = analyze_block_deal_absorption(clean_sym, current_price=price)
     if block_rep.status == "INSTITUTIONAL_ABSORPTION":
         p4_score = 90
-        p4_summary = f"Institutional Absorption active above ₹{block_rep.support_anchor_price:.2f} floor."
+        p4_summary = (
+            f"Institutional Absorption active above ₹{block_rep.support_anchor_price:.2f} floor."
+        )
     elif block_rep.status == "SUSPECTED_DISTRIBUTION":
         p4_score = 25
         p4_summary = f"Caution: Suspected Institutional Distribution below ₹{block_rep.support_anchor_price:.2f}."
@@ -165,7 +169,9 @@ def evaluate_master_institutional_convergence(
         verdict = f"🔥 APEX CONVERGENCE ({active_count}/6 Pillars Firing): Institutional Multibagger Super-Setup"
     elif composite >= 70 and active_count >= 3:
         tier = "HIGH_INSTITUTIONAL_CONVERGENCE"
-        verdict = f"🟢 HIGH CONVERGENCE ({active_count}/6 Pillars Firing): Strong Institutional Tailwinds"
+        verdict = (
+            f"🟢 HIGH CONVERGENCE ({active_count}/6 Pillars Firing): Strong Institutional Tailwinds"
+        )
     elif composite >= 55:
         tier = "SELECTIVE_PILLAR_EDGE"
         verdict = f"🟡 SELECTIVE EDGE ({active_count}/6 Pillars Active): Specific Catalyst Play"
@@ -185,7 +191,9 @@ def evaluate_master_institutional_convergence(
 
     return MasterConvergenceReport(
         symbol=clean_sym,
-        company_name=ob_rep.company_name if ob_rep.company_name != clean_sym else capex_rep.company_name,
+        company_name=ob_rep.company_name
+        if ob_rep.company_name != clean_sym
+        else capex_rep.company_name,
         sector=rrg_rep.sector,
         ltp=round(price, 2),
         cfai_score=p1_score,
@@ -204,7 +212,9 @@ def evaluate_master_institutional_convergence(
         block_deal_summary=p4_summary,
         rrg_summary=p5_summary,
         insider_summary=p6_summary,
-        institutional_support_floor=block_rep.support_anchor_price if block_rep.status == "INSTITUTIONAL_ABSORPTION" else None,
+        institutional_support_floor=block_rep.support_anchor_price
+        if block_rep.status == "INSTITUTIONAL_ABSORPTION"
+        else None,
         insights=insights,
     )
 
@@ -239,7 +249,10 @@ def scan_master_institutional_radar() -> list[MasterConvergenceReport]:
         rrg_matrix = None
 
     reports = [
-        evaluate_master_institutional_convergence(sym, rrg_matrix=rrg_matrix)
-        for sym in all_symbols
+        evaluate_master_institutional_convergence(sym, rrg_matrix=rrg_matrix) for sym in all_symbols
     ]
-    return sorted(reports, key=lambda r: (r.active_pillars_count, r.composite_institutional_score), reverse=True)
+    return sorted(
+        reports,
+        key=lambda r: (r.active_pillars_count, r.composite_institutional_score),
+        reverse=True,
+    )

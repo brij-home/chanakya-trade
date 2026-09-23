@@ -69,7 +69,7 @@ class ConstituentStatus:
     dist_from_high_pct: float
     dist_from_low_pct: float
     direction: str  # "BULLISH" | "BEARISH" | "NEUTRAL"
-    score: float   # -3.0 to +3.0
+    score: float  # -3.0 to +3.0
 
 
 @dataclass
@@ -162,7 +162,7 @@ class IndexContagionEngine:
             dist_from_high = max(0.0, (day_high - ltp) / max(1.0, day_high) * 100.0)
             dist_from_low = max(0.0, (ltp - day_low) / max(1.0, day_low) * 100.0)
 
-             # Score logic:
+            # Score logic:
             # Bullish impulse: Above VWAP, positive change, near day high, active RVOL
             c_score = 0.0
             is_above_vwap = ltp >= (vwap * 0.999)
@@ -197,7 +197,7 @@ class IndexContagionEngine:
                 rvol_tag = f", RVOL {rvol:.1f}x" if vol > 0 else ""
                 leading_bears.append(f"{sym} ({chg:.1f}%{rvol_tag})")
 
-            weighted_impulse += (c_score * weight)
+            weighted_impulse += c_score * weight
 
         bullish_pct = round((bullish_weight / total_tracked_weight) * 100.0, 1)
         bearish_pct = round((bearish_weight / total_tracked_weight) * 100.0, 1)
@@ -332,11 +332,13 @@ class IndexContagionEngine:
                     for c in chain
                     if getattr(c, "option_type", "") == opt_type
                     and float(getattr(c, "last_price", 0.0) or 0.0) > 0
-                    and (abs(float(getattr(c, "strike", 0.0)) - spot) / max(1.0, spot)) <= max_allowed_dist_pct
+                    and (abs(float(getattr(c, "strike", 0.0)) - spot) / max(1.0, spot))
+                    <= max_allowed_dist_pct
                 ]
                 # Prioritize liquid contracts with open interest or volume if available
                 liquid_matching = [
-                    c for c in matching
+                    c
+                    for c in matching
                     if int(getattr(c, "oi", 0) or 0) > 0 or int(getattr(c, "volume", 0) or 0) > 0
                 ]
                 chosen_pool = liquid_matching if liquid_matching else matching
@@ -372,7 +374,9 @@ class IndexContagionEngine:
             logger.debug(f"[IndexContagion] Option resolution failed for {index_name}: {e_opt}")
 
         if opt_ltp and opt_contract_sym:
-            headline = f"{tag}: {opt_contract_sym} @ ₹{opt_ltp:,.1f} ({sync_pct:.0f}% Weight {direction})"
+            headline = (
+                f"{tag}: {opt_contract_sym} @ ₹{opt_ltp:,.1f} ({sync_pct:.0f}% Weight {direction})"
+            )
             summary = (
                 f"Institutional {index_name} constituent synchronization ({sync_pct:.0f}% aligned). "
                 f"ATM Option: {opt_contract_sym} @ ₹{opt_ltp:,.1f} (SL ₹{opt_sl:,.1f} | T1 ₹{opt_t1:,.1f}). "
@@ -391,13 +395,17 @@ class IndexContagionEngine:
             est_sl = round(est_premium * 0.82, 1)
             est_t1 = round(est_premium * 1.35, 1)
             est_t2 = round(est_premium * 1.70, 1)
+            est_t3 = round(est_premium * 2.10, 1)
             opt_contract_sym = f"{index_name} {int(est_strike)} {opt_type}"
             opt_ltp = est_premium
             opt_sl = est_sl
             opt_t1 = est_t1
             opt_t2 = est_t2
+            opt_t3 = est_t3
             opt_strike = est_strike
-            headline = f"{tag}: {opt_contract_sym} ~₹{opt_ltp:,.1f} ({sync_pct:.0f}% Weight {direction})"
+            headline = (
+                f"{tag}: {opt_contract_sym} ~₹{opt_ltp:,.1f} ({sync_pct:.0f}% Weight {direction})"
+            )
             summary = (
                 f"Institutional {index_name} constituent synchronization ({sync_pct:.0f}% aligned). "
                 f"ATM Option: {opt_contract_sym} ~₹{opt_ltp:,.1f} (SL ₹{opt_sl:,.1f} | T1 ₹{opt_t1:,.1f}). "
@@ -419,6 +427,7 @@ class IndexContagionEngine:
 
         # Evaluate leader magnitude
         import re
+
         leader_chgs = []
         for l_str in leading:
             m = re.search(r"([+-]?\d+\.?\d*)%", l_str)
@@ -488,14 +497,17 @@ class IndexContagionEngine:
                 "target": f"₹{alert_t1:,.1f}",
                 "target_1": f"₹{alert_t1:,.1f}",
                 "target_2": f"₹{opt_t2:,.1f}" if opt_t2 else f"₹{round(alert_t1 * 1.3, 1):,.1f}",
+                "target_3": f"₹{opt_t3:,.1f}" if opt_t3 else f"₹{round(alert_t1 * 1.6, 1):,.1f}",
                 "underlying_spot": f"₹{spot:,.1f}",
                 "underlying_sl": f"₹{sl:,.1f}",
                 "underlying_target": f"₹{t1:,.1f}",
+                "underlying_target_2": f"₹{t2:,.1f}" if t2 else None,
+                "underlying_target_3": f"₹{t3:,.1f}" if t3 else None,
                 "risk_reward": rr_str,
                 "trade_plan": tp_dict,
                 "option_plan": opt_plan,
                 "when_to_buy": when_to_buy_str,
-                "when_to_wait": f"Do not chase if spot extends > 0.6% from VWAP without retest",
+                "when_to_wait": "Do not chase if spot extends > 0.6% from VWAP without retest",
                 "profit_rule": "Scale 50% at T1, move SL to breakeven, trail runner on 5m 20-EMA.",
             },
             confidence=final_conf,

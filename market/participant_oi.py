@@ -28,7 +28,6 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 import threading
 from typing import Any, Optional
-import httpx
 from market.http_pool import get_nse_client
 
 logger = logging.getLogger("market.participant_oi")
@@ -261,7 +260,7 @@ def fetch_and_cache_participant_oi() -> ParticipantOISummary:
         url = f"https://archives.nseindia.com/content/nsccl/fao_participant_oi_{dt_str}.csv"
         try:
             client = get_nse_client()
-            resp = client.get(url, timeout=6.0)
+            resp = client.get(url, headers=headers, timeout=6.0)
             if resp.status_code == 200 and len(resp.text) > 200:
                 summary = parse_participant_csv(
                     resp.text, as_of_date=f"{dt_str[4:]}-{dt_str[2:4]}-{dt_str[:2]}"
@@ -273,9 +272,7 @@ def fetch_and_cache_participant_oi() -> ParticipantOISummary:
                             with open(CACHE_FILE, "w", encoding="utf-8") as f:
                                 json.dump(summary.to_dict(), f, indent=2)
                         except Exception as write_err:
-                            logger.warning(
-                                "Could not persist participant OI cache: %s", write_err
-                            )
+                            logger.warning("Could not persist participant OI cache: %s", write_err)
                     return summary
         except Exception as net_err:
             logger.debug("Failed fetching %s: %s", url, net_err)

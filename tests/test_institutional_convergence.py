@@ -4,7 +4,6 @@ tests/test_institutional_convergence.py
 Unit tests for Master Institutional Edge Convergence Matrix (All 6 Pillars).
 """
 
-import pytest
 from analysis.institutional_convergence import (
     evaluate_master_institutional_convergence,
     scan_master_institutional_radar,

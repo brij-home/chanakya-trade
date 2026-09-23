@@ -122,15 +122,12 @@ def compute_cfai(
 
     # Baseline delivery represents normal non-institutional churn (typically ~35% or earlier 50D mean)
     baseline_deliv_pct = (
-        float(np.mean(delivery_pct_series[-min(50, n) : -min(20, n)]))
-        if n >= 35
-        else 35.0
+        float(np.mean(delivery_pct_series[-min(50, n) : -min(20, n)])) if n >= 35 else 35.0
     )
     baseline_deliv_pct = max(25.0, min(45.0, baseline_deliv_pct))
 
-    is_deliv_spike = (
-        cur_deliv_pct >= max(55.0, avg_deliv_20d * 1.20)
-        or (cur_deliv_pct >= 65.0 and avg_deliv_20d >= 48.0)
+    is_deliv_spike = cur_deliv_pct >= max(55.0, avg_deliv_20d * 1.20) or (
+        cur_deliv_pct >= 65.0 and avg_deliv_20d >= 48.0
     )
 
     # 3. Estimate Shares & Free Float
@@ -172,7 +169,8 @@ def compute_cfai(
     is_downtrend = p_change_20d < -2.5
 
     float_exhaustion = (not is_downtrend) and (
-        (cfai_pct >= 3.5 and base_tightness_pct <= 14.0) or (cfai_pct >= 5.0 and base_tightness_pct <= 18.0)
+        (cfai_pct >= 3.5 and base_tightness_pct <= 14.0)
+        or (cfai_pct >= 5.0 and base_tightness_pct <= 18.0)
     )
 
     # 8. Composite Institutional Accumulation Score (0 to 100)
@@ -244,10 +242,14 @@ def compute_cfai(
         )
     else:
         verdict = "NEUTRAL"
-        insights.append("Delivery activity aligned with historical normal baseline; no extreme float cornering detected.")
+        insights.append(
+            "Delivery activity aligned with historical normal baseline; no extreme float cornering detected."
+        )
 
     if is_deliv_spike:
-        insights.append(f"⚡ Delivery Spike: Today's delivery ({cur_deliv_pct:.1f}%) exceeds 20D baseline by {cur_deliv_pct - avg_deliv_20d:+.1f}%.")
+        insights.append(
+            f"⚡ Delivery Spike: Today's delivery ({cur_deliv_pct:.1f}%) exceeds 20D baseline by {cur_deliv_pct - avg_deliv_20d:+.1f}%."
+        )
 
     return CFAIReport(
         symbol=clean_sym,

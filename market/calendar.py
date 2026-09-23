@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from dataclasses import dataclass
 from datetime import date, datetime, time as dtime, timedelta
 from pathlib import Path
@@ -30,6 +29,7 @@ IST = ZoneInfo("Asia/Kolkata")
 # ─────────────────────────────────────────────────────────────────────────────
 # 1. Trading Holiday Master Data (NSE / BSE / MCX / CDS)
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 @dataclass(frozen=True)
 class HolidayRule:
@@ -52,16 +52,24 @@ _HOLIDAYS_CATALOG: dict[date, HolidayRule] = {
     date(2025, 1, 26): HolidayRule(date(2025, 1, 26), "Republic Day", mcx_status="CLOSED"),
     date(2025, 2, 26): HolidayRule(date(2025, 2, 26), "Mahashivratri", mcx_status="EVENING_ONLY"),
     date(2025, 3, 14): HolidayRule(date(2025, 3, 14), "Holi", mcx_status="EVENING_ONLY"),
-    date(2025, 3, 31): HolidayRule(date(2025, 3, 31), "Id-ul-Fitr (Ramzan Id)", mcx_status="EVENING_ONLY"),
+    date(2025, 3, 31): HolidayRule(
+        date(2025, 3, 31), "Id-ul-Fitr (Ramzan Id)", mcx_status="EVENING_ONLY"
+    ),
     date(2025, 4, 10): HolidayRule(date(2025, 4, 10), "Mahavir Jayanti", mcx_status="EVENING_ONLY"),
-    date(2025, 4, 14): HolidayRule(date(2025, 4, 14), "Dr. Baba Saheb Ambedkar Jayanti", mcx_status="EVENING_ONLY"),
+    date(2025, 4, 14): HolidayRule(
+        date(2025, 4, 14), "Dr. Baba Saheb Ambedkar Jayanti", mcx_status="EVENING_ONLY"
+    ),
     date(2025, 4, 18): HolidayRule(date(2025, 4, 18), "Good Friday", mcx_status="CLOSED"),
     date(2025, 5, 1): HolidayRule(date(2025, 5, 1), "Maharashtra Day", mcx_status="EVENING_ONLY"),
     date(2025, 6, 7): HolidayRule(date(2025, 6, 7), "Bakri Id / Eid-ul-Adha", mcx_status="CLOSED"),
     date(2025, 7, 6): HolidayRule(date(2025, 7, 6), "Muharram", mcx_status="CLOSED"),
     date(2025, 8, 15): HolidayRule(date(2025, 8, 15), "Independence Day", mcx_status="CLOSED"),
-    date(2025, 8, 27): HolidayRule(date(2025, 8, 27), "Ganesh Chaturthi", mcx_status="EVENING_ONLY"),
-    date(2025, 10, 2): HolidayRule(date(2025, 10, 2), "Mahatma Gandhi Jayanti", mcx_status="CLOSED"),
+    date(2025, 8, 27): HolidayRule(
+        date(2025, 8, 27), "Ganesh Chaturthi", mcx_status="EVENING_ONLY"
+    ),
+    date(2025, 10, 2): HolidayRule(
+        date(2025, 10, 2), "Mahatma Gandhi Jayanti", mcx_status="CLOSED"
+    ),
     date(2025, 10, 21): HolidayRule(
         date(2025, 10, 21),
         "Diwali Laxmi Pujan (Muhurat Trading)",
@@ -69,25 +77,38 @@ _HOLIDAYS_CATALOG: dict[date, HolidayRule] = {
         mcx_status="SPECIAL",
         special_session=(dtime(18, 15), dtime(19, 15)),
     ),
-    date(2025, 10, 22): HolidayRule(date(2025, 10, 22), "Diwali Balipratipada", mcx_status="EVENING_ONLY"),
-    date(2025, 11, 5): HolidayRule(date(2025, 11, 5), "Guru Nanak Jayanti", mcx_status="EVENING_ONLY"),
+    date(2025, 10, 22): HolidayRule(
+        date(2025, 10, 22), "Diwali Balipratipada", mcx_status="EVENING_ONLY"
+    ),
+    date(2025, 11, 5): HolidayRule(
+        date(2025, 11, 5), "Guru Nanak Jayanti", mcx_status="EVENING_ONLY"
+    ),
     date(2025, 12, 25): HolidayRule(date(2025, 12, 25), "Christmas", mcx_status="CLOSED"),
-
     # ── 2026 ──────────────────────────────────────────────────────────────────
     date(2026, 1, 26): HolidayRule(date(2026, 1, 26), "Republic Day", mcx_status="CLOSED"),
     date(2026, 2, 16): HolidayRule(date(2026, 2, 16), "Mahashivratri", mcx_status="EVENING_ONLY"),
     date(2026, 3, 4): HolidayRule(date(2026, 3, 4), "Holi", mcx_status="EVENING_ONLY"),
-    date(2026, 3, 20): HolidayRule(date(2026, 3, 20), "Id-ul-Fitr (Ramzan Id)", mcx_status="EVENING_ONLY"),
+    date(2026, 3, 20): HolidayRule(
+        date(2026, 3, 20), "Id-ul-Fitr (Ramzan Id)", mcx_status="EVENING_ONLY"
+    ),
     date(2026, 4, 3): HolidayRule(date(2026, 4, 3), "Good Friday", mcx_status="CLOSED"),
-    date(2026, 4, 14): HolidayRule(date(2026, 4, 14), "Dr. Baba Saheb Ambedkar Jayanti", mcx_status="EVENING_ONLY"),
+    date(2026, 4, 14): HolidayRule(
+        date(2026, 4, 14), "Dr. Baba Saheb Ambedkar Jayanti", mcx_status="EVENING_ONLY"
+    ),
     date(2026, 4, 21): HolidayRule(date(2026, 4, 21), "Ram Navami", mcx_status="EVENING_ONLY"),
     date(2026, 5, 1): HolidayRule(date(2026, 5, 1), "Maharashtra Day", mcx_status="EVENING_ONLY"),
-    date(2026, 5, 27): HolidayRule(date(2026, 5, 27), "Bakri Id / Eid-ul-Adha", mcx_status="EVENING_ONLY"),
+    date(2026, 5, 27): HolidayRule(
+        date(2026, 5, 27), "Bakri Id / Eid-ul-Adha", mcx_status="EVENING_ONLY"
+    ),
     date(2026, 6, 26): HolidayRule(date(2026, 6, 26), "Muharram", mcx_status="EVENING_ONLY"),
     date(2026, 8, 15): HolidayRule(date(2026, 8, 15), "Independence Day", mcx_status="CLOSED"),
     # Sep 14, 2026 — Ganesh Chaturthi (Current Date):
-    date(2026, 9, 14): HolidayRule(date(2026, 9, 14), "Ganesh Chaturthi", mcx_status="EVENING_ONLY"),
-    date(2026, 10, 2): HolidayRule(date(2026, 10, 2), "Mahatma Gandhi Jayanti", mcx_status="CLOSED"),
+    date(2026, 9, 14): HolidayRule(
+        date(2026, 9, 14), "Ganesh Chaturthi", mcx_status="EVENING_ONLY"
+    ),
+    date(2026, 10, 2): HolidayRule(
+        date(2026, 10, 2), "Mahatma Gandhi Jayanti", mcx_status="CLOSED"
+    ),
     date(2026, 10, 20): HolidayRule(date(2026, 10, 20), "Dussehra", mcx_status="EVENING_ONLY"),
     date(2026, 11, 8): HolidayRule(
         date(2026, 11, 8),
@@ -96,20 +117,27 @@ _HOLIDAYS_CATALOG: dict[date, HolidayRule] = {
         mcx_status="SPECIAL",
         special_session=(dtime(18, 15), dtime(19, 15)),
     ),
-    date(2026, 11, 10): HolidayRule(date(2026, 11, 10), "Diwali Balipratipada", mcx_status="EVENING_ONLY"),
-    date(2026, 11, 24): HolidayRule(date(2026, 11, 24), "Guru Nanak Jayanti", mcx_status="EVENING_ONLY"),
+    date(2026, 11, 10): HolidayRule(
+        date(2026, 11, 10), "Diwali Balipratipada", mcx_status="EVENING_ONLY"
+    ),
+    date(2026, 11, 24): HolidayRule(
+        date(2026, 11, 24), "Guru Nanak Jayanti", mcx_status="EVENING_ONLY"
+    ),
     date(2026, 12, 25): HolidayRule(date(2026, 12, 25), "Christmas", mcx_status="CLOSED"),
-
     # ── 2027 ──────────────────────────────────────────────────────────────────
     date(2027, 1, 26): HolidayRule(date(2027, 1, 26), "Republic Day", mcx_status="CLOSED"),
     date(2027, 3, 8): HolidayRule(date(2027, 3, 8), "Mahashivratri", mcx_status="EVENING_ONLY"),
     date(2027, 3, 23): HolidayRule(date(2027, 3, 23), "Holi", mcx_status="EVENING_ONLY"),
     date(2027, 3, 26): HolidayRule(date(2027, 3, 26), "Good Friday", mcx_status="CLOSED"),
-    date(2027, 4, 14): HolidayRule(date(2027, 4, 14), "Dr. Baba Saheb Ambedkar Jayanti", mcx_status="EVENING_ONLY"),
+    date(2027, 4, 14): HolidayRule(
+        date(2027, 4, 14), "Dr. Baba Saheb Ambedkar Jayanti", mcx_status="EVENING_ONLY"
+    ),
     date(2027, 5, 1): HolidayRule(date(2027, 5, 1), "Maharashtra Day", mcx_status="EVENING_ONLY"),
     date(2027, 8, 15): HolidayRule(date(2027, 8, 15), "Independence Day", mcx_status="CLOSED"),
     date(2027, 9, 4): HolidayRule(date(2027, 9, 4), "Ganesh Chaturthi", mcx_status="EVENING_ONLY"),
-    date(2027, 10, 2): HolidayRule(date(2027, 10, 2), "Mahatma Gandhi Jayanti", mcx_status="CLOSED"),
+    date(2027, 10, 2): HolidayRule(
+        date(2027, 10, 2), "Mahatma Gandhi Jayanti", mcx_status="CLOSED"
+    ),
     date(2027, 10, 10): HolidayRule(date(2027, 10, 10), "Dussehra", mcx_status="EVENING_ONLY"),
     date(2027, 10, 29): HolidayRule(
         date(2027, 10, 29),
@@ -118,7 +146,9 @@ _HOLIDAYS_CATALOG: dict[date, HolidayRule] = {
         mcx_status="SPECIAL",
         special_session=(dtime(18, 15), dtime(19, 15)),
     ),
-    date(2027, 11, 14): HolidayRule(date(2027, 11, 14), "Guru Nanak Jayanti", mcx_status="EVENING_ONLY"),
+    date(2027, 11, 14): HolidayRule(
+        date(2027, 11, 14), "Guru Nanak Jayanti", mcx_status="EVENING_ONLY"
+    ),
     date(2027, 12, 25): HolidayRule(date(2027, 12, 25), "Christmas", mcx_status="CLOSED"),
 }
 
@@ -158,6 +188,7 @@ def get_holiday_rule(d: date) -> Optional[HolidayRule]:
 # ─────────────────────────────────────────────────────────────────────────────
 # 2. Queryable Holiday & Session Functions
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def is_trading_holiday(
     check_date: Optional[date] = None,
@@ -303,7 +334,9 @@ def get_current_ist_session(ref_dt: Optional[datetime] = None) -> dict[str, bool
     current_t = now.time()
 
     # 09:15 to 15:30 IST: Pure Domestic Equity & NFO Desk
-    is_equity_nfo = is_market_open("NSE", ref_dt=now) and (dtime(9, 15) <= current_t <= dtime(15, 30))
+    is_equity_nfo = is_market_open("NSE", ref_dt=now) and (
+        dtime(9, 15) <= current_t <= dtime(15, 30)
+    )
 
     # Post-Equity Session: Currency (15:30 - 17:00 IST) and Commodities (15:30 - 23:30 IST)
     # Currency is also valid 09:00 - 09:15 IST before domestic equity opens
@@ -404,6 +437,7 @@ def get_market_status(
 # 3. Active Trading Minutes Elapsed (Greeks & Theta Stagnation Aware)
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def get_trading_minutes_elapsed(
     start_dt: datetime,
     end_dt: Optional[datetime] = None,
@@ -456,6 +490,7 @@ def get_trading_minutes_elapsed(
 # ─────────────────────────────────────────────────────────────────────────────
 # 4. F&O Expiry Date Preceding-Day Holiday Roll
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def get_adjusted_expiry_date(
     target_date: date,

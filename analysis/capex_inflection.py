@@ -223,7 +223,9 @@ def analyze_capex_inflection(
 
     if cwip_pct >= 25.0:
         score += 20
-        insights.append(f"Substantial CWIP ({cwip_pct}% of Gross Block): Major capacity coming online.")
+        insights.append(
+            f"Substantial CWIP ({cwip_pct}% of Gross Block): Major capacity coming online."
+        )
     elif cwip_pct >= 10.0:
         score += 10
         insights.append(f"Moderate CWIP ({cwip_pct}% of Gross Block): Steady capacity ramp-up.")

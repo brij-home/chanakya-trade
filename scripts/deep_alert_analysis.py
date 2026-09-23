@@ -8,8 +8,8 @@ Detailed analysis of all alerts from 2026-09-22:
 
 import json
 from collections import Counter, defaultdict
-from datetime import datetime
 from engine.auto_alert_engine import AUTO_ALERTS_FILE
+
 
 def analyze():
     with open(AUTO_ALERTS_FILE, "r", encoding="utf-8") as f:
@@ -55,7 +55,7 @@ def analyze():
     for ac, cnt in action_counts.most_common():
         print(f"  {ac}: {cnt}")
 
-    print(f"\nMissing Data Metrics:")
+    print("\nMissing Data Metrics:")
     print(f"  Missing Entry: {missing_entry}/{len(today_alerts)}")
     print(f"  Missing Action: {missing_action}/{len(today_alerts)}")
     print(f"  Missing Target 1: {missing_targets}/{len(today_alerts)}")
@@ -65,14 +65,37 @@ def analyze():
         print(f"  {tm}: {cnt} alerts")
 
     print("\nSample Alerts Details (first 3 and any non-09:21 alerts):")
-    non_morning = [a for a in today_alerts if not a.get("timestamp", "").startswith("2026-09-22 09:21")]
+    non_morning = [
+        a for a in today_alerts if not a.get("timestamp", "").startswith("2026-09-22 09:21")
+    ]
     print(f"Non-09:21 alerts count: {len(non_morning)}")
 
     for idx, a in enumerate(today_alerts[:3] + non_morning[:10]):
-        print(f"\n--- Alert #{idx+1} ---")
-        for k in ["alert_id", "timestamp", "symbol", "alert_type", "action", "entry_price", "stop_loss", "target_1", "target_2", "target_3", "target_status", "is_invalidated", "invalidation_reason", "achieved_milestones", "confidence", "horizon", "detector_source", "notes", "scrutiny_details"]:
+        print(f"\n--- Alert #{idx + 1} ---")
+        for k in [
+            "alert_id",
+            "timestamp",
+            "symbol",
+            "alert_type",
+            "action",
+            "entry_price",
+            "stop_loss",
+            "target_1",
+            "target_2",
+            "target_3",
+            "target_status",
+            "is_invalidated",
+            "invalidation_reason",
+            "achieved_milestones",
+            "confidence",
+            "horizon",
+            "detector_source",
+            "notes",
+            "scrutiny_details",
+        ]:
             if k in a:
                 print(f"  {k}: {a[k]}")
+
 
 if __name__ == "__main__":
     analyze()

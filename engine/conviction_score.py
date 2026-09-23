@@ -412,6 +412,7 @@ def _score_india_vix_regime(vix: Optional[float] = None) -> FactorScore:
     Falling VIX at elevated levels is more bullish than flat VIX at low levels.
     """
     import os
+
     is_testing = bool(os.environ.get("CHANAKYA_TESTING") or os.environ.get("PYTEST_CURRENT_TEST"))
     now_ts = time.time()
     cache_key = f"{round(vix, 1) if vix is not None else 'auto'}"
@@ -426,6 +427,7 @@ def _score_india_vix_regime(vix: Optional[float] = None) -> FactorScore:
 
         if vix_now is None:
             from market.indices import get_vix
+
             vix_now = get_vix()
 
         # Resolve direction from fast live quote change without blocking on 30s historical scrapes
@@ -433,11 +435,16 @@ def _score_india_vix_regime(vix: Optional[float] = None) -> FactorScore:
             try:
                 from market.quotes import get_quote
                 from market.indices import INDEX_INSTRUMENTS
+
                 vix_inst = INDEX_INSTRUMENTS.get("VIX", "NSE:INDIA VIX")
                 q_map = get_quote([vix_inst])
                 vq = q_map.get(vix_inst) or q_map.get("INDIA VIX") or q_map.get("NSE:INDIA VIX")
                 if vq:
-                    if (vix_now is None or vix_now <= 0) and getattr(vq, "last_price", 0) > 0 and vix is None:
+                    if (
+                        (vix_now is None or vix_now <= 0)
+                        and getattr(vq, "last_price", 0) > 0
+                        and vix is None
+                    ):
                         vix_now = float(vq.last_price)
                     chg = getattr(vq, "change", None)
                     if chg is not None:
@@ -870,8 +877,15 @@ def _score_sector_rotation(underlying: str = "NIFTY", symbol: str = "") -> Facto
         if symbol:
             try:
                 from analysis.sector_rotation import get_stock_tailwind
-                stock_tailwind = get_stock_tailwind(symbol.upper().replace("NSE:", "").replace(".NS", ""))
-                if stock_tailwind and stock_tailwind.quadrant and stock_tailwind.quadrant != "UNAVAILABLE":
+
+                stock_tailwind = get_stock_tailwind(
+                    symbol.upper().replace("NSE:", "").replace(".NS", "")
+                )
+                if (
+                    stock_tailwind
+                    and stock_tailwind.quadrant
+                    and stock_tailwind.quadrant != "UNAVAILABLE"
+                ):
                     # Found stock-specific sector RRG — highest accuracy path
                     quad = stock_tailwind.quadrant
                     sec_name = stock_tailwind.sector or symbol
@@ -1003,10 +1017,6 @@ def _score_sector_rotation(underlying: str = "NIFTY", symbol: str = "") -> Facto
             detail="Sector rotation data temporarily unavailable",
             axis="TIMING",
         )
-
-
-
-
 
 
 def _score_event_calendar() -> FactorScore:
@@ -1207,6 +1217,7 @@ def get_conviction_score(
     from datetime import datetime
 
     import os
+
     is_testing = bool(os.environ.get("CHANAKYA_TESTING") or os.environ.get("PYTEST_CURRENT_TEST"))
 
     # ── Check 45s TTL Cache (Institutional factors are macro/daily/hourly) ───

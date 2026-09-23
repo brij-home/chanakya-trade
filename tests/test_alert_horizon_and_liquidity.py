@@ -10,7 +10,6 @@ Unit tests for:
 
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
-import pytest
 
 from engine.alert_model import AutoAlert
 from engine.alert_evaluator import (
@@ -26,7 +25,7 @@ IST = ZoneInfo("Asia/Kolkata")
 def test_intraday_alert_auto_expires_at_session_cutoff():
     """Verify that INTRADAY alerts automatically expire past 15:15 IST same day or from a prior date."""
     now = datetime.now(IST)
-    
+
     # 1. Alert created on prior calendar date must be expired immediately
     yesterday = now - timedelta(days=1)
     alert_yesterday = AutoAlert(
@@ -74,7 +73,7 @@ def test_intraday_alert_invalidation_at_cutoff():
     """Verify evaluate_alert_invalidation returns session cutoff message for intraday trades."""
     now = datetime.now(IST)
     past_date = now - timedelta(days=1)
-    
+
     alert = AutoAlert(
         alert_id="test-inval-cutoff-003",
         alert_type="GAMMA_BLAST",
@@ -102,7 +101,7 @@ def test_unignited_early_warning_time_stop():
     """Verify that unignited EARLY_WARNING setups expire after 60 minutes."""
     now = datetime.now(IST)
     old_time = now - timedelta(minutes=75)
-    
+
     alert = AutoAlert(
         alert_id="test-timestop-004",
         alert_type="SQUEEZE_BREAKOUT",

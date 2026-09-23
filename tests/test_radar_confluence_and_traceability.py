@@ -8,8 +8,7 @@ Verification suite for:
   4. Batch quote pre-fetch and concurrent execution speed
 """
 
-import pytest
-from datetime import datetime, timezone, timedelta
+from datetime import timezone, timedelta
 from engine.auto_alert_engine import AutoAlert, AutoAlertEngine
 
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -123,6 +122,7 @@ def test_auto_alert_trace_id_and_quant_snapshot():
 def test_deterministic_asymmetric_alert_id(monkeypatch):
     """Verify that scan_asymmetric_opportunities produces deterministic IDs and suppresses duplicate cycles."""
     from engine.asymmetric_radar import AsymmetricOpportunity
+
     engine = AutoAlertEngine()
     engine._alerts.clear()
 

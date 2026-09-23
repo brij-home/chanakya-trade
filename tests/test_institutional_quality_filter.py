@@ -10,10 +10,8 @@ Verifies the institutional quality gates:
 
 from __future__ import annotations
 
-import time
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
-import pytest
 from engine.alert_preferences import AlertPreferences, AlertPreferencesManager
 from engine.auto_alert_engine import AutoAlert, AutoAlertEngine
 
@@ -69,20 +67,26 @@ def test_telegram_conviction_gate_filters_noise(tmp_path):
 
     # Mock telegram notify
     dispatched_msgs = []
+
     def mock_tg(msg, chat_id=None):
         dispatched_msgs.append((msg, chat_id))
 
-    with patch("engine.alerts._telegram_notify", side_effect=mock_tg), \
-         patch("engine.alerts._is_market_hours", return_value=True):
-
+    with (
+        patch("engine.alerts._telegram_notify", side_effect=mock_tg),
+        patch("engine.alerts._is_market_hours", return_value=True),
+    ):
         # Dispatch marginal alert -> Must be suppressed on Telegram!
         engine._dispatch(marginal_alert)
-        assert len(dispatched_msgs) == 0, "Marginal alert (<92% confidence) should NOT be dispatched to Telegram!"
+        assert len(dispatched_msgs) == 0, (
+            "Marginal alert (<92% confidence) should NOT be dispatched to Telegram!"
+        )
         assert marginal_alert.telegram_dispatched is False
 
         # Dispatch elite alert -> Must be permitted to Telegram!
         engine._dispatch(elite_alert)
-        assert len(dispatched_msgs) == 1, "Elite alert (>=92% confidence) MUST be dispatched to Telegram!"
+        assert len(dispatched_msgs) == 1, (
+            "Elite alert (>=92% confidence) MUST be dispatched to Telegram!"
+        )
         assert elite_alert.telegram_dispatched is True
 
 
@@ -125,14 +129,17 @@ def test_telegram_pacing_throttle_blocks_rapid_bursts(tmp_path):
     )
 
     dispatched = []
-    with patch("engine.alerts._telegram_notify", side_effect=lambda m, **kw: dispatched.append(m)), \
-         patch("engine.alerts._is_market_hours", return_value=True):
-
+    with (
+        patch("engine.alerts._telegram_notify", side_effect=lambda m, **kw: dispatched.append(m)),
+        patch("engine.alerts._is_market_hours", return_value=True),
+    ):
         engine._dispatch(alert1)
         assert len(dispatched) == 1
         assert alert1.telegram_dispatched is True
 
         # Second alert fired 5 seconds later on same segment
         engine._dispatch(alert2)
-        assert len(dispatched) == 1, "Second alert fired in rapid succession (<180s) must be held by pacing throttle!"
+        assert len(dispatched) == 1, (
+            "Second alert fired in rapid succession (<180s) must be held by pacing throttle!"
+        )
         assert alert2.telegram_dispatched is False

@@ -575,8 +575,6 @@ def test_tier1_stock_option_illiquidity_rejection(auditor):
 
 def test_tier1_midday_lunch_lull_rvol_rejection(auditor):
     """Breakouts attempted during 11:30-13:00 IST without RVOL >= 1.8x are vetoed as false breakouts."""
-    from datetime import datetime
-    from market.calendar import IST
 
     # 12:15 IST with low RVOL (1.2x) -> VETO
     alert_midday_low_vol = AutoAlert(
@@ -764,7 +762,7 @@ def test_tier1_opposing_supply_collision_veto(auditor):
     passed, reason, flags = auditor.verify_tier1_sanity(alert_supply_trap)
     assert passed is False
     assert "Opposing Supply Collision" in reason
-    assert ("Day High" in reason or "Previous Day High (PDH)" in reason)
+    assert "Day High" in reason or "Previous Day High (PDH)" in reason
 
 
 def test_tier1_opposing_demand_collision_veto(auditor):
@@ -795,12 +793,14 @@ def test_tier1_opposing_demand_collision_veto(auditor):
         is_live=True,
         environment="LIVE",
     )
-    with patch("engine.learning_engine.pattern_learning_engine.is_symbol_locked_out", return_value=(False, "")):
+    with patch(
+        "engine.learning_engine.pattern_learning_engine.is_symbol_locked_out",
+        return_value=(False, ""),
+    ):
         passed, reason, flags = auditor.verify_tier1_sanity(alert_demand_trap)
     assert passed is False
     assert "Opposing Demand Collision" in reason
-    assert ("Day Low" in reason or "Previous Day Low (PDL)" in reason)
-
+    assert "Day Low" in reason or "Previous Day Low (PDL)" in reason
 
 
 def test_tier1_vwap_overextension_veto(auditor):
@@ -829,7 +829,10 @@ def test_tier1_vwap_overextension_veto(auditor):
         is_live=True,
         environment="LIVE",
     )
-    with patch("engine.learning_engine.pattern_learning_engine.is_symbol_locked_out", return_value=(False, "")):
+    with patch(
+        "engine.learning_engine.pattern_learning_engine.is_symbol_locked_out",
+        return_value=(False, ""),
+    ):
         passed, reason, flags = auditor.verify_tier1_sanity(alert_vwap_ext)
     assert passed is False
     assert "Climax Exhaustion" in reason
@@ -862,11 +865,11 @@ def test_tier1_vwap_capitulation_veto(auditor):
         is_live=True,
         environment="LIVE",
     )
-    with patch("engine.learning_engine.pattern_learning_engine.is_symbol_locked_out", return_value=(False, "")):
+    with patch(
+        "engine.learning_engine.pattern_learning_engine.is_symbol_locked_out",
+        return_value=(False, ""),
+    ):
         passed, reason, flags = auditor.verify_tier1_sanity(alert_vwap_cap)
     assert passed is False
     assert "Capitulation Exhaustion" in reason
     assert "extended" in reason
-
-
-

@@ -16,7 +16,6 @@ from datetime import datetime, timezone, timedelta
 from typing import Any, Optional
 
 import numpy as np
-import pandas as pd
 
 from engine.alert_model import AutoAlert
 
@@ -107,9 +106,7 @@ def detect_intraday_mover_sparks(
     is_nifty_markdown = (nifty_chg <= -0.35) and (
         (nifty_ltp < nifty_vwap) if nifty_vwap > 0 else True
     )
-    is_nifty_markup = (nifty_chg >= 0.40) and (
-        (nifty_ltp > nifty_vwap) if nifty_vwap > 0 else True
-    )
+    is_nifty_markup = (nifty_chg >= 0.40) and ((nifty_ltp > nifty_vwap) if nifty_vwap > 0 else True)
 
     for sym in scan_universe:
         clean_sym = sym.upper().replace("NSE:", "").replace(".NS", "").strip()
@@ -143,6 +140,7 @@ def detect_intraday_mover_sparks(
                 )
                 try:
                     import engine.auto_alert_engine as aae
+
                     _rvol_fn = getattr(aae, "compute_time_of_day_rvol", compute_time_of_day_rvol)
                 except Exception:
                     _rvol_fn = compute_time_of_day_rvol
@@ -157,10 +155,13 @@ def detect_intraday_mover_sparks(
         min_rvol = 1.35 if seg == "INDEX" else 1.50
 
         # Session Time Gates
-        is_test_env = (os.environ.get("CHANAKYA_TESTING") == "1") or ("PYTEST_CURRENT_TEST" in os.environ)
+        is_test_env = (os.environ.get("CHANAKYA_TESTING") == "1") or (
+            "PYTEST_CURRENT_TEST" in os.environ
+        )
         if not is_test_env:
             try:
                 import engine.auto_alert_engine as aae
+
                 current_dt = aae.datetime.now(IST)
             except Exception:
                 current_dt = datetime.now(IST)
@@ -178,8 +179,12 @@ def detect_intraday_mover_sparks(
             if vwap_dist_pct > max_allowed_ext:
                 continue
 
-        is_bullish = (chg >= min_pos_chg) and (vwap <= 0 or ltp >= (vwap * 0.998)) and (rvol >= min_rvol)
-        is_bearish = (chg <= min_neg_chg) and (vwap > 0 and ltp < (vwap * 1.002)) and (rvol >= min_rvol)
+        is_bullish = (
+            (chg >= min_pos_chg) and (vwap <= 0 or ltp >= (vwap * 0.998)) and (rvol >= min_rvol)
+        )
+        is_bearish = (
+            (chg <= min_neg_chg) and (vwap > 0 and ltp < (vwap * 1.002)) and (rvol >= min_rvol)
+        )
 
         if not (is_bullish or is_bearish):
             continue
@@ -231,7 +236,9 @@ def detect_intraday_mover_sparks(
             direction = "BULLISH"
             alert_type = "INTRADAY_BREAKOUT_SPARK"
             stage = "IGNITED" if chg >= (min_pos_chg * 2.0) else "EARLY_WARNING"
-            headline = f"⚡ INTRADAY SPARK: {clean_sym} Surge +{chg:.1f}% (RVOL {rvol:.1f}x) @ ₹{ltp:,.1f}"
+            headline = (
+                f"⚡ INTRADAY SPARK: {clean_sym} Surge +{chg:.1f}% (RVOL {rvol:.1f}x) @ ₹{ltp:,.1f}"
+            )
             summary = (
                 f"T-0 Explosive Session Mover: {clean_sym} moving +{chg:.1f}% with "
                 f"{rvol:.1f}x Time-of-Day Relative Volume. Holding above VWAP ₹{vwap:,.1f}."
@@ -251,7 +258,9 @@ def detect_intraday_mover_sparks(
                     df=df,
                 )
             except Exception as e_tp:
-                logger.debug(f"[IntradaySpark] Trade plan calculation failed for {clean_sym}: {e_tp}")
+                logger.debug(
+                    f"[IntradaySpark] Trade plan calculation failed for {clean_sym}: {e_tp}"
+                )
 
             atr_val = max(1.0, ltp * 0.015)
             if df is not None and len(df) >= 5 and "high" in df.columns and "low" in df.columns:
@@ -268,7 +277,11 @@ def detect_intraday_mover_sparks(
                         atr_val = round(atr_calc, 2)
                 except Exception:
                     pass
-            min_risk = max(1.0, round(0.70 * atr_val, 2)) if seg != "INDEX" else max(1.0, round(0.50 * atr_val, 2))
+            min_risk = (
+                max(1.0, round(0.70 * atr_val, 2))
+                if seg != "INDEX"
+                else max(1.0, round(0.50 * atr_val, 2))
+            )
 
             if tp and tp.is_asymmetry_viable and tp.target_1 > ltp and tp.invalidation_stop < ltp:
                 risk_pts = max(min_risk, round(ltp - tp.invalidation_stop, 2))
@@ -279,7 +292,10 @@ def detect_intraday_mover_sparks(
                 rr_str = f"1:{round(abs(t1_price - ltp) / max(0.01, risk_pts), 1)}"
                 tp_dict = tp.as_dict()
             else:
-                risk_pts = max(min_risk, round(max(0.8 * atr_val, ltp - vwap if ltp > vwap else ltp * 0.012), 2))
+                risk_pts = max(
+                    min_risk,
+                    round(max(0.8 * atr_val, ltp - vwap if ltp > vwap else ltp * 0.012), 2),
+                )
                 sl_price = round(ltp - risk_pts, 2)
                 t1_price = round(ltp + 2.0 * risk_pts, 2)
                 t2_price = round(ltp + 3.5 * risk_pts, 2)
@@ -299,7 +315,6 @@ def detect_intraday_mover_sparks(
                 try:
                     from engine.alert_expiry import (
                         is_monthly_physical_expiry_week,
-                        get_last_thursday_of_month,
                         get_next_monthly_expiry_date,
                     )
 
@@ -328,7 +343,8 @@ def detect_intraday_mover_sparks(
                 "when_to_buy": f"Enter on 1m/5m consolidation holding above VWAP (₹{vwap:,.1f}).",
                 "when_to_wait": f"Do not chase if price moves > {round(chg + 1.2, 1)}% from open.",
                 "profit_rule": "Book 50% at T1, trail SL to Breakeven for T2 & Runner.",
-                "trade_plan": tp_dict or {
+                "trade_plan": tp_dict
+                or {
                     "symbol": clean_sym,
                     "direction": "LONG",
                     "timeframe": "INTRADAY",
@@ -367,7 +383,9 @@ def detect_intraday_mover_sparks(
                     df=df,
                 )
             except Exception as e_tp:
-                logger.debug(f"[IntradaySpark] Trade plan calculation failed for {clean_sym}: {e_tp}")
+                logger.debug(
+                    f"[IntradaySpark] Trade plan calculation failed for {clean_sym}: {e_tp}"
+                )
 
             atr_val = max(1.0, ltp * 0.015)
             if df is not None and len(df) >= 5 and "high" in df.columns and "low" in df.columns:
@@ -384,7 +402,11 @@ def detect_intraday_mover_sparks(
                         atr_val = round(atr_calc, 2)
                 except Exception:
                     pass
-            min_risk = max(1.0, round(0.70 * atr_val, 2)) if seg != "INDEX" else max(1.0, round(0.50 * atr_val, 2))
+            min_risk = (
+                max(1.0, round(0.70 * atr_val, 2))
+                if seg != "INDEX"
+                else max(1.0, round(0.50 * atr_val, 2))
+            )
 
             if tp and tp.is_asymmetry_viable and tp.target_1 < ltp and tp.invalidation_stop > ltp:
                 risk_pts = max(min_risk, round(tp.invalidation_stop - ltp, 2))
@@ -395,7 +417,10 @@ def detect_intraday_mover_sparks(
                 rr_str = f"1:{round(abs(ltp - t1_price) / max(0.01, risk_pts), 1)}"
                 tp_dict = tp.as_dict()
             else:
-                risk_pts = max(min_risk, round(max(0.8 * atr_val, vwap - ltp if vwap > ltp else ltp * 0.012), 2))
+                risk_pts = max(
+                    min_risk,
+                    round(max(0.8 * atr_val, vwap - ltp if vwap > ltp else ltp * 0.012), 2),
+                )
                 sl_price = round(ltp + risk_pts, 2)
                 t1_price = round(max(0.05, ltp - 2.0 * risk_pts), 2)
                 t2_price = round(max(0.05, ltp - 3.5 * risk_pts), 2)
@@ -443,7 +468,8 @@ def detect_intraday_mover_sparks(
                 "when_to_buy": f"Short on rejection retest of VWAP (₹{vwap:,.1f}) from below.",
                 "when_to_wait": f"Do not chase if breakdown already exceeds {round(abs(chg) + 1.2, 1)}%.",
                 "profit_rule": "Cover 50% at T1, trail stop to breakeven for T2 & Runner.",
-                "trade_plan": tp_dict or {
+                "trade_plan": tp_dict
+                or {
                     "symbol": clean_sym,
                     "direction": "SHORT",
                     "timeframe": "INTRADAY",
@@ -492,7 +518,9 @@ def detect_intraday_mover_sparks(
                 )
 
                 conf_res = detect_confirmation_candle(df_5m, direction=direction)
-                is_confirmed = bool(conf_res.get("confirmed")) if isinstance(conf_res, dict) else False
+                is_confirmed = (
+                    bool(conf_res.get("confirmed")) if isinstance(conf_res, dict) else False
+                )
                 conf_candle = conf_res.get("pattern") if isinstance(conf_res, dict) else None
                 if is_confirmed:
                     confirmation_bonus = 8
@@ -539,13 +567,7 @@ def detect_intraday_mover_sparks(
             stop_loss=sl_price,
             confidence=min(
                 95,
-                int(
-                    75
-                    + rvol * 5
-                    + sector_tailwind_bonus
-                    + confirmation_bonus
-                    + divergence_bonus
-                ),
+                int(75 + rvol * 5 + sector_tailwind_bonus + confirmation_bonus + divergence_bonus),
             ),
             created_at=now_iso,
             is_live=is_authentic_spark,

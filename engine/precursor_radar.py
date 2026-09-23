@@ -148,6 +148,9 @@ class PrecursorCandidate:
     prior_vol_ratio: float = 1.0
     squeeze_bars: int = 0
     coiling_pivot_high: float = 0.0
+    timeframe: str = "1D"
+    is_nr7_coiling: bool = False
+    is_inside_bar: bool = False
 
     # Execution Playbook
     when_to_buy: str = ""
@@ -330,6 +333,7 @@ class PrecursorRadarScanner:
         df: Optional[pd.DataFrame] = None,
         chain: Optional[list[Any]] = None,
         quote: Optional[Any] = None,
+        interval: str = "day",
     ) -> Optional[PrecursorCandidate]:
         """
         Evaluates a single stock for pre-move coiling DNA against dynamic factor weights.
@@ -443,14 +447,15 @@ class PrecursorRadarScanner:
         from market.history import get_ohlcv
 
         hist_exchange = (
-            "CRYPTO"
-            if sym_seg == "CRYPTO"
-            else ("MCX" if sym_seg == "COMMODITY" else "NSE")
+            "CRYPTO" if sym_seg == "CRYPTO" else ("MCX" if sym_seg == "COMMODITY" else "NSE")
         )
 
         if df is None or len(df) < 20:
             try:
-                df = get_ohlcv(clean_sym, exchange=hist_exchange, interval="day", days=45)
+                days_to_fetch = 45 if interval == "day" else 12
+                df = get_ohlcv(
+                    clean_sym, exchange=hist_exchange, interval=interval, days=days_to_fetch
+                )
             except Exception:
                 df = None
 
@@ -553,6 +558,27 @@ class PrecursorRadarScanner:
         if len(recent_spreads) >= 3 and min(recent_spreads) <= 1.2:
             score += 5
             matched_factors.append("Daily candle range tightly compressed (< 1.2% daily spread)")
+
+        # NR7 & Inside Bar Compression Check (Imminent Volatility Expansion Precursor)
+        is_nr7 = False
+        is_ib = False
+        if len(highs) >= 8 and len(lows) >= 8:
+            bar_ranges = [highs[i] - lows[i] for i in range(-7, 0)]
+            curr_bar_range = bar_ranges[-1]
+            prior_6_ranges = bar_ranges[:-1]
+            if curr_bar_range <= min(prior_6_ranges):
+                is_nr7 = True
+                score += 10
+                matched_factors.append(
+                    "NR7 Coiling Pattern (Narrowest Range of 7 bars — imminent explosive volatility expansion)"
+                )
+
+            if highs[-1] <= highs[-2] and lows[-1] >= lows[-2]:
+                is_ib = True
+                score += 8
+                matched_factors.append(
+                    "Inside Bar Compression (Range coiled entirely inside prior bar — energy coiling)"
+                )
 
         # C. Institutional Order Block Anchor & Structural Support [0–20 pts]
         ob_dist = 2.0
@@ -705,11 +731,7 @@ class PrecursorRadarScanner:
             else "ARCHETYPE_MOMENTUM_TREND_CONTINUATION"
         )
 
-        exchange = (
-            "CRYPTO"
-            if sym_seg == "CRYPTO"
-            else ("MCX" if sym_seg == "COMMODITY" else "NSE")
-        )
+        exchange = "CRYPTO" if sym_seg == "CRYPTO" else ("MCX" if sym_seg == "COMMODITY" else "NSE")
 
         return PrecursorCandidate(
             symbol=clean_sym,
@@ -731,6 +753,9 @@ class PrecursorRadarScanner:
             prior_vol_ratio=prior_vol_ratio,
             squeeze_bars=squeeze_bars,
             coiling_pivot_high=pivot_high,
+            timeframe="1D" if interval == "day" else interval.upper(),
+            is_nr7_coiling=is_nr7,
+            is_inside_bar=is_ib,
             when_to_buy=when_buy,
             when_to_wait=when_wait,
             profit_rule=profit_rule,
@@ -758,6 +783,7 @@ class PrecursorRadarScanner:
         quotes_map: dict[str, Any] = {}
         try:
             from market.quotes import get_quote
+
             formatted_syms = [
                 (f"MCX:{s}" if classify_symbol_segment(s) == "COMMODITY" else f"NSE:{s}")
                 if ":" not in s
@@ -781,7 +807,10 @@ class PrecursorRadarScanner:
             return self.evaluate_symbol(sym, quote=q)
 
         import concurrent.futures
-        with concurrent.futures.ThreadPoolExecutor(max_workers=min(6, len(symbols) or 1)) as executor:
+
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=min(6, len(symbols) or 1)
+        ) as executor:
             future_to_sym = {executor.submit(_worker, s): s for s in symbols}
             for fut in concurrent.futures.as_completed(future_to_sym):
                 s = future_to_sym[fut]

@@ -46,10 +46,11 @@ Register these redirect URIs in your broker developer consoles:
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Any, Optional
 import json
 import os
 import sys
+import threading
 from pathlib import Path
 
 # Fix Windows charmap / cp1252 codec errors for unicode console prints
@@ -579,6 +580,7 @@ async def _auto_restore_brokers() -> None:
                 register_broker("mstock", b)
                 try:
                     from brokers.session import _start_websocket
+
                     _start_websocket(b)
                 except Exception:
                     pass
@@ -689,6 +691,70 @@ async def api_mode():
             "mode": ui_mode,
             "backend_mode": mode_info.mode.value,
             "allowed_modes": list(_UI_MODE_MAP.values()),
+            "description": mode_info.description,
+        }
+    )
+
+
+@app.post("/api/mode", tags=["System"])
+async def set_mode(payload: dict[str, Any]):
+    """
+    Sets the server-authoritative trading mode dynamically.
+    Normalises UI modes (DEMO -> OBSERVE, PAPER -> SIMULATE, LIVE -> EXECUTE).
+    Enforces AGENTS.md Invariant 6 (LIVE mode gated by ALLOW_LIVE_TRADING=1).
+    """
+    from engine.modes import get_trading_mode
+    from web.sse import event_bus
+
+    raw_mode = str(payload.get("mode") or "").strip().upper()
+    _PARSE_MAP = {
+        "DEMO": "OBSERVE",
+        "OBSERVE": "OBSERVE",
+        "PAPER": "SIMULATE",
+        "SIMULATE": "SIMULATE",
+        "LIVE": "EXECUTE",
+        "EXECUTE": "EXECUTE",
+    }
+    if raw_mode not in _PARSE_MAP:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid mode '{raw_mode}'. Allowed: DEMO, PAPER, LIVE",
+        )
+
+    target_backend_mode = _PARSE_MAP[raw_mode]
+    if target_backend_mode == "EXECUTE":
+        allow_live = os.environ.get("ALLOW_LIVE_TRADING", "0").strip()
+        if allow_live != "1":
+            raise HTTPException(
+                status_code=403,
+                detail="Switching to LIVE mode requires ALLOW_LIVE_TRADING=1 environment safety gate.",
+            )
+
+    os.environ["TRADING_MODE"] = target_backend_mode
+    mode_info = get_trading_mode()
+    _UI_MODE_MAP = {
+        "OBSERVE": "DEMO",
+        "SIMULATE": "PAPER",
+        "EXECUTE": "LIVE",
+    }
+    ui_mode = _UI_MODE_MAP[mode_info.mode.value]
+
+    try:
+        await event_bus.broadcast(
+            {
+                "type": "mode_changed",
+                "mode": ui_mode,
+                "backend_mode": mode_info.mode.value,
+            }
+        )
+    except Exception:
+        pass
+
+    return JSONResponse(
+        {
+            "status": "SUCCESS",
+            "mode": ui_mode,
+            "backend_mode": mode_info.mode.value,
             "description": mode_info.description,
         }
     )
@@ -1798,6 +1864,7 @@ async def mstock_callback(request: Request):
         register_broker("mstock", b)
         try:
             from brokers.session import _start_websocket
+
             _start_websocket(b)
         except Exception:
             pass
@@ -2986,7 +3053,9 @@ async def invalidate_auto_alert_endpoint(payload: dict):
         raise HTTPException(status_code=400, detail="Missing alert_id")
     alert = auto_alert_engine.invalidate_alert_by_id(alert_id, reason=reason)
     if not alert:
-        raise HTTPException(status_code=404, detail=f"Alert {alert_id} not found or already invalidated")
+        raise HTTPException(
+            status_code=404, detail=f"Alert {alert_id} not found or already invalidated"
+        )
     return {"status": "ok", "data": alert.to_dict()}
 
 
@@ -3001,7 +3070,9 @@ async def invalidate_manual_alert_endpoint(payload: dict):
         raise HTTPException(status_code=400, detail="Missing alert_id")
     alert = alert_manager.invalidate_alert(alert_id, reason=reason)
     if not alert:
-        raise HTTPException(status_code=404, detail=f"Manual alert {alert_id} not found or already invalidated")
+        raise HTTPException(
+            status_code=404, detail=f"Manual alert {alert_id} not found or already invalidated"
+        )
     return {"status": "ok", "data": alert_manager.public_dict(alert)}
 
 
@@ -4164,7 +4235,12 @@ def trigger_compounder_scan(background: bool = True):
             name="compounder-batch-scanner",
         )
         t.start()
-        return JSONResponse({"status": "SCAN_INITIATED", "message": "Batch scan started in background across 750 equities."})
+        return JSONResponse(
+            {
+                "status": "SCAN_INITIATED",
+                "message": "Batch scan started in background across 750 equities.",
+            }
+        )
     else:
         roster = compounder_scanner.scan_universe_batch()
         return JSONResponse({"status": "SUCCESS", "data": roster.to_dict()})

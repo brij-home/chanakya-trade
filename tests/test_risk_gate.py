@@ -756,4 +756,3 @@ class TestSectorConcentrationLimit:
         # 20,000 / 1600 = 12 shares
         assert result.max_qty == 12
         assert "SECTOR_CONCENTRATION_LIMIT" not in result.flags
-

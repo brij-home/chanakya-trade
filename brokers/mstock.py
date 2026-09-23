@@ -835,7 +835,11 @@ class MStockAPI(BrokerAPI):
                 exchange = "BFO"
             elif inst.startswith("NFO:"):
                 exchange = "NFO"
-            elif re.search(r"\d+(?:CE|PE)$", clean_sym) or clean_sym.endswith("-FUT") or clean_sym.endswith("FUT"):
+            elif (
+                re.search(r"\d+(?:CE|PE)$", clean_sym)
+                or clean_sym.endswith("-FUT")
+                or clean_sym.endswith("FUT")
+            ):
                 exchange = "NFO"
             else:
                 exchange = "NSE"
@@ -856,9 +860,7 @@ class MStockAPI(BrokerAPI):
                     exch: list(dict.fromkeys(toks)) for exch, toks in exchange_tokens.items()
                 }
                 q_payload = {"mode": "OHLC", "exchangeTokens": dedup_payload}
-                resp = self._client.post(
-                    url, json=q_payload, headers=self._headers(), timeout=3.5
-                )
+                resp = self._client.post(url, json=q_payload, headers=self._headers(), timeout=3.5)
                 if resp.status_code == 200:
                     data = resp.json()
                     raw_data = data.get("data") or data.get("result") or data
@@ -874,7 +876,12 @@ class MStockAPI(BrokerAPI):
                     for item in fetched:
                         exch = item.get("exchange") or "NSE"
                         tok = str(item.get("symbolToken") or item.get("token") or "")
-                        ltp = float(item.get("ltp") or item.get("lastTradedPrice") or item.get("lastPrice") or 0.0)
+                        ltp = float(
+                            item.get("ltp")
+                            or item.get("lastTradedPrice")
+                            or item.get("lastPrice")
+                            or 0.0
+                        )
                         if ltp <= 0:
                             continue
                         close = float(item.get("close") or ltp)
@@ -896,7 +903,7 @@ class MStockAPI(BrokerAPI):
                             )
                             quotes[orig_inst] = q_obj
                             quotes[target_sym] = q_obj
-            except Exception as e:
+            except Exception:
                 pass
 
         # 3. Fallback for remaining unresolved instruments
@@ -1104,7 +1111,9 @@ class MStockAPI(BrokerAPI):
                     if expiry:
                         target_clean = expiry.strip()
                         for ep_int, date_str in candidates:
-                            if date_str == target_clean or (len(target_clean) >= 5 and date_str.endswith(target_clean[-5:])):
+                            if date_str == target_clean or (
+                                len(target_clean) >= 5 and date_str.endswith(target_clean[-5:])
+                            ):
                                 chosen_epoch = ep_int
                                 resolved_expiry_str = date_str
                                 break
@@ -1129,7 +1138,9 @@ class MStockAPI(BrokerAPI):
                                 except Exception:
                                     pass
 
-                            expiry_str = resolved_expiry_str or datetime.fromtimestamp(chosen_epoch).strftime("%Y-%m-%d")
+                            expiry_str = resolved_expiry_str or datetime.fromtimestamp(
+                                chosen_epoch
+                            ).strftime("%Y-%m-%d")
                             contracts: list[OptionsContract] = []
                             token_map: dict[str, OptionsContract] = {}
 
@@ -1185,6 +1196,7 @@ class MStockAPI(BrokerAPI):
                                     spot_est = 0.0
                                     try:
                                         from market.quotes import get_ltp
+
                                         fetched_spot = get_ltp(clean_sym)
                                         if fetched_spot and fetched_spot > 0:
                                             spot_est = float(fetched_spot)
@@ -1195,12 +1207,22 @@ class MStockAPI(BrokerAPI):
                                         all_strikes = sorted({c.strike for c in contracts})
                                         spot_est = all_strikes[len(all_strikes) // 2]
 
-                                    ce_contracts = sorted([c for c in contracts if c.option_type == "CE"], key=lambda c: abs(c.strike - spot_est))
-                                    pe_contracts = sorted([c for c in contracts if c.option_type == "PE"], key=lambda c: abs(c.strike - spot_est))
+                                    ce_contracts = sorted(
+                                        [c for c in contracts if c.option_type == "CE"],
+                                        key=lambda c: abs(c.strike - spot_est),
+                                    )
+                                    pe_contracts = sorted(
+                                        [c for c in contracts if c.option_type == "PE"],
+                                        key=lambda c: abs(c.strike - spot_est),
+                                    )
 
                                     atm_contracts = ce_contracts[:25] + pe_contracts[:25]
                                     contract_to_tok = {id(v): k for k, v in token_map.items()}
-                                    atm_tokens = [contract_to_tok[id(c)] for c in atm_contracts if id(c) in contract_to_tok]
+                                    atm_tokens = [
+                                        contract_to_tok[id(c)]
+                                        for c in atm_contracts
+                                        if id(c) in contract_to_tok
+                                    ]
 
                                     if atm_tokens:
                                         q_url = f"{MSTOCK_BASE_URL}/openapi/typeb/instruments/quote"
@@ -1241,13 +1263,14 @@ class MStockAPI(BrokerAPI):
                                                 if close_p > 0:
                                                     c.close = close_p
                                                     if ltp > 0:
-                                                        c.pchange = round(((ltp - close_p) / close_p) * 100.0, 2)
+                                                        c.pchange = round(
+                                                            ((ltp - close_p) / close_p) * 100.0, 2
+                                                        )
                                 except Exception:
                                     pass
 
                             if contracts and any(
-                                float(getattr(c, "last_price", 0.0) or 0.0) > 0
-                                for c in contracts
+                                float(getattr(c, "last_price", 0.0) or 0.0) > 0 for c in contracts
                             ):
                                 return contracts
             except Exception:

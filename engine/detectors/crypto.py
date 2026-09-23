@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone, timedelta
-from typing import Any, Optional
+from typing import Optional
 
 from engine.alert_model import AutoAlert
 
@@ -66,7 +66,7 @@ def detect_single_crypto_symbol(sym: str) -> list[AutoAlert]:
                 t2_price = round(ltp + 4.0 * risk_usd, 2)
                 headline = f"🪙 CRYPTO SQUEEZE: {clean_sym} Short-Squeeze Imminent @ ${ltp:,.2f}"
                 summary = (
-                    f"Heavily short-crowded funding (8h FR: {fr*100:.4f}%). "
+                    f"Heavily short-crowded funding (8h FR: {fr * 100:.4f}%). "
                     f"Extreme negative leverage positioning primed for upward cascade. Target: ${t1_price:,.2f}."
                 )
                 action = "BUY_SPOT / LONG"
@@ -75,9 +75,11 @@ def detect_single_crypto_symbol(sym: str) -> list[AutoAlert]:
                 sl_price = round(ltp + risk_usd, 2)
                 t1_price = round(ltp - 2.2 * risk_usd, 2)
                 t2_price = round(ltp - 4.0 * risk_usd, 2)
-                headline = f"🪙 CRYPTO SQUEEZE: {clean_sym} Long-Flush Liquidation Risk @ ${ltp:,.2f}"
+                headline = (
+                    f"🪙 CRYPTO SQUEEZE: {clean_sym} Long-Flush Liquidation Risk @ ${ltp:,.2f}"
+                )
                 summary = (
-                    f"Overheated long leverage (8h FR: +{fr*100:.4f}%). "
+                    f"Overheated long leverage (8h FR: +{fr * 100:.4f}%). "
                     f"Vulnerable to cascading long liquidations. Downside target: ${t1_price:,.2f}."
                 )
                 action = "SELL_SHORT_FUTURES / SHORT"
@@ -122,7 +124,9 @@ def detect_single_crypto_symbol(sym: str) -> list[AutoAlert]:
                     "risk_reward": rr_str,
                     "when_to_buy": "Enter on order book spread with defined risk below invalidation SL.",
                     "when_to_wait": "Do not chase if price extends > 0.8% beyond entry.",
-                    "no_chase_boundary": round(ltp * 1.008, 2) if is_bullish else round(ltp * 0.992, 2),
+                    "no_chase_boundary": round(ltp * 1.008, 2)
+                    if is_bullish
+                    else round(ltp * 0.992, 2),
                     "setup_confluence": conf,
                     "profit_rule": "Scale 50% at T1, trail remaining on 20-EMA / break-even.",
                     "trade_plan": {
@@ -145,7 +149,9 @@ def detect_single_crypto_symbol(sym: str) -> list[AutoAlert]:
     try:
         df = crypto_stream.get_klines(clean_sym, interval="15m", limit=120)
         if not df.empty and len(df) >= 30:
-            smc = analyze_market_structure(symbol=clean_sym, df=df, exchange="CRYPTO", timeframe="15m")
+            smc = analyze_market_structure(
+                symbol=clean_sym, df=df, exchange="CRYPTO", timeframe="15m"
+            )
             regime = (smc.regime or "").upper()
 
             if regime == "BULLISH" and smc.active_demand_zones:
@@ -384,7 +390,9 @@ def detect_single_crypto_symbol(sym: str) -> list[AutoAlert]:
                         "risk_reward": rr_str,
                         "when_to_buy": "Execute on structural support with defined risk below SL.",
                         "when_to_wait": "Do not chase if price moves > 1% towards Max Pain without retest.",
-                        "no_chase_boundary": round(ltp * 1.01, 2) if is_bullish else round(ltp * 0.99, 2),
+                        "no_chase_boundary": round(ltp * 1.01, 2)
+                        if is_bullish
+                        else round(ltp * 0.99, 2),
                         "setup_confluence": conf,
                         "profit_rule": f"Scale 50% at Max Pain magnet (${max_pain:,.0f}), trail remainder.",
                         "trade_plan": {

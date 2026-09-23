@@ -386,3 +386,14 @@ def test_ws_quotes_retrieves_mstock_tick():
         assert q.source == "STREAM"
         assert q.provider == "mstock"
 
+
+def test_mstock_websocket_circuit_breaker():
+    """Verify circuit breaker opens when circuit_open_until is in the future."""
+    from market.mstock_websocket import MStockWebSocket
+
+    mgr = MStockWebSocket(api_key="k", access_token="t")
+    assert not mgr.is_circuit_open
+    mgr._circuit_open_until = time.time() + 600.0
+    assert mgr.is_circuit_open
+    mgr._circuit_open_until = time.time() - 1.0
+    assert not mgr.is_circuit_open

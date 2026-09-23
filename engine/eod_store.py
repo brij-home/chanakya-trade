@@ -371,9 +371,7 @@ def get_cached_ohlcv_batch(
                         df.iloc[-days:].copy() if (days and len(df) > days) else df.copy()
                     )
                 else:
-                    results[orig_key] = (
-                        df.iloc[-days:] if (days and len(df) > days) else df
-                    )
+                    results[orig_key] = df.iloc[-days:] if (days and len(df) > days) else df
 
     # Populate L1 cache with newly loaded
     if newly_loaded:
@@ -430,42 +428,6 @@ def get_symbol_meta_batch(symbols: list[str]) -> dict[str, dict[str, Any]]:
             orig_s = clean_map.get(sym)
             if orig_s and orig_s != sym:
                 results[orig_s] = d
-    return results
-
-
-def get_cached_forensics(symbol: str, max_age_days: int = 30) -> Optional[dict[str, Any]]:
-    """Returns cached forensic audit report for a symbol if within max_age_days."""
-    clean_sym = symbol.upper().replace(".NS", "").replace("NSE:", "").strip()
-    try:
-        from engine.analysis_cache import analysis_cache
-
-        key = f"forensic_audit_v2_{clean_sym}"
-        res = analysis_cache.get_fundamental(key, max_age_seconds=max_age_days * 86400)
-        if res and isinstance(res, dict):
-            return res
-    except Exception:
-        pass
-    return None
-
-
-def get_cached_forensics_batch(symbols: list[str], max_age_days: int = 30) -> dict[str, Any]:
-    """Returns cached forensic audit reports for a batch of symbols in a single fast query."""
-    if not symbols:
-        return {}
-    results: dict[str, Any] = {}
-    try:
-        from engine.analysis_cache import analysis_cache
-
-        clean_map = {s.upper().replace(".NS", "").replace("NSE:", "").strip(): s for s in symbols}
-        keys = [f"forensic_audit_v2_{c}" for c in clean_map.keys()]
-        raw_map = analysis_cache.get_fundamentals_batch(keys)
-        for clean_sym, orig_sym in clean_map.items():
-            k = f"forensic_audit_v2_{clean_sym}"
-            if k in raw_map:
-                results[clean_sym] = raw_map[k]
-                results[orig_sym] = raw_map[k]
-    except Exception:
-        pass
     return results
 
 

@@ -6,7 +6,7 @@ holiday detection, MCX session handling, active trading minutes calculation,
 and asymmetry veto enforcement.
 """
 
-from datetime import date, datetime, time as dtime
+from datetime import date, datetime
 from zoneinfo import ZoneInfo
 import pytest
 
@@ -207,9 +207,16 @@ def test_gamma_blast_strictly_rejects_unviable_asymmetry():
     # Case A: NIFTY PE with extreme vol/OI (10x >= 2.0) — SMC bypass fires, alert EXPECTED
     chain_extreme = [
         OptionsContract(
-            symbol="NIFTY23500PE", underlying="NIFTY", expiry="2026-09-25",
-            strike=23500.0, option_type="PE", last_price=100.0,
-            oi=50000, oi_change=-25000, volume=500000, exchange="NFO",
+            symbol="NIFTY23500PE",
+            underlying="NIFTY",
+            expiry="2026-09-25",
+            strike=23500.0,
+            option_type="PE",
+            last_price=100.0,
+            oi=50000,
+            oi_change=-25000,
+            volume=500000,
+            exchange="NFO",
         )
     ]
     with pytest.MonkeyPatch.context() as mp:
@@ -223,9 +230,16 @@ def test_gamma_blast_strictly_rejects_unviable_asymmetry():
     # Case B: Equity stock (RELIANCE) — bypass is index-only, must still be rejected
     chain_equity = [
         OptionsContract(
-            symbol="RELIANCE2900PE", underlying="RELIANCE", expiry="2026-09-25",
-            strike=2900.0, option_type="PE", last_price=50.0,
-            oi=20000, oi_change=-10000, volume=200000, exchange="NFO",
+            symbol="RELIANCE2900PE",
+            underlying="RELIANCE",
+            expiry="2026-09-25",
+            strike=2900.0,
+            option_type="PE",
+            last_price=50.0,
+            oi=20000,
+            oi_change=-10000,
+            volume=200000,
+            exchange="NFO",
         )
     ]
     with pytest.MonkeyPatch.context() as mp:
@@ -236,9 +250,16 @@ def test_gamma_blast_strictly_rejects_unviable_asymmetry():
     # Case C: NIFTY PE with LOW vol/OI (1.2x < bypass threshold) — still rejected
     chain_low = [
         OptionsContract(
-            symbol="NIFTY23500PE", underlying="NIFTY", expiry="2026-09-25",
-            strike=23500.0, option_type="PE", last_price=100.0,
-            oi=50000, oi_change=-5000, volume=60000, exchange="NFO",
+            symbol="NIFTY23500PE",
+            underlying="NIFTY",
+            expiry="2026-09-25",
+            strike=23500.0,
+            option_type="PE",
+            last_price=100.0,
+            oi=50000,
+            oi_change=-5000,
+            volume=60000,
+            exchange="NFO",
         )
     ]
     with pytest.MonkeyPatch.context() as mp:
@@ -248,8 +269,6 @@ def test_gamma_blast_strictly_rejects_unviable_asymmetry():
             "NIFTY PE with 1.2x vol_oi (< 2.0 bypass threshold) must still be rejected "
             "when is_asymmetry_viable=False"
         )
-
-
 
 
 def test_scrutiny_auditor_vetoes_unviable_trade_plan():

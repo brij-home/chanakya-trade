@@ -192,6 +192,7 @@ def resolve_recommended_option_contract(
     # Resolve feed-variant names (e.g. "NIFTY 50" → "NIFTY") via the canonical alias map
     try:
         from engine.position_sizer import _SYMBOL_ALIASES
+
         clean_sym = _SYMBOL_ALIASES.get(clean_sym, clean_sym)
     except Exception:
         pass
@@ -234,9 +235,7 @@ def resolve_recommended_option_contract(
             ]
             target_expiry = matched[0] if matched else rec_exp
             is_next_month_routed = True
-            derivative_safeguard = (
-                "🎯 NEXT-MONTH ROLLOVER (Bypasses SEBI physical delivery margin surge & theta collapse)"
-            )
+            derivative_safeguard = "🎯 NEXT-MONTH ROLLOVER (Bypasses SEBI physical delivery margin surge & theta collapse)"
         elif available_expiries:
             if is_positional:
                 # Positional swing on stock F&O: require at least 7 DTE to avoid rapid theta bleed
@@ -249,9 +248,7 @@ def resolve_recommended_option_contract(
                     target_expiry = valid_stock_runways[0]
                     if target_expiry != available_expiries[0]:
                         is_next_month_routed = True
-                        derivative_safeguard = (
-                            "🛡️ STOCK SWING RUNWAY (Selected DTE >= 7 to protect multi-day swing from theta bleed)"
-                        )
+                        derivative_safeguard = "🛡️ STOCK SWING RUNWAY (Selected DTE >= 7 to protect multi-day swing from theta bleed)"
                 else:
                     target_expiry = available_expiries[0]
             else:
@@ -267,9 +264,7 @@ def resolve_recommended_option_contract(
             ]
             if valid_runways:
                 target_expiry = valid_runways[0]
-                derivative_safeguard = (
-                    "🛡️ POSITION RUNWAY (Selected DTE >= 10 to protect multi-day swing from weekly theta decay)"
-                )
+                derivative_safeguard = "🛡️ POSITION RUNWAY (Selected DTE >= 10 to protect multi-day swing from weekly theta decay)"
             else:
                 target_expiry = available_expiries[-1]
         elif available_expiries:
@@ -336,7 +331,9 @@ def resolve_recommended_option_contract(
             try:
                 from market.quotes import get_ltp
 
-                quote_ltp = get_ltp(f"NFO:{contract_sym}" if ":" not in contract_sym else contract_sym)
+                quote_ltp = get_ltp(
+                    f"NFO:{contract_sym}" if ":" not in contract_sym else contract_sym
+                )
                 if quote_ltp and quote_ltp > 0:
                     opt_ltp = float(quote_ltp)
             except Exception:
@@ -430,9 +427,7 @@ def resolve_recommended_option_contract(
         "futures_stop_loss": fut_sl,
         "futures_lot_size": lot_sz,
         "futures_recommendation": (
-            "Delta 1.0 zero-decay vehicle for positional swing"
-            if is_positional
-            else None
+            "Delta 1.0 zero-decay vehicle for positional swing" if is_positional else None
         ),
     }
 
@@ -708,7 +703,10 @@ class AsymmetricOpportunityRadar:
             if sec_tailwind:
                 if getattr(sec_tailwind, "intraday_alignment", "") == "SEVERE_INTRADAY_HEADWIND":
                     return None  # Drop setup when sector is under severe intraday dump
-                if getattr(sec_tailwind, "quadrant", "") == "LAGGING" and (cur_vol / max_down_vol) < 2.0:
+                if (
+                    getattr(sec_tailwind, "quadrant", "") == "LAGGING"
+                    and (cur_vol / max_down_vol) < 2.0
+                ):
                     return None  # Drop lagging sector unless volume is extraordinarily high (>2.0x)
         except Exception:
             pass
@@ -1428,7 +1426,11 @@ class AsymmetricOpportunityRadar:
                 or next(iter(quotes_dict.values()), None)
             )
         if isinstance(quote, dict):
-            quote = quote.get(f"MCX:{clean_sym}") or quote.get(clean_sym) or next(iter(quote.values()), None)
+            quote = (
+                quote.get(f"MCX:{clean_sym}")
+                or quote.get(clean_sym)
+                or next(iter(quote.values()), None)
+            )
         if not quote:
             return None
 
@@ -1534,7 +1536,7 @@ class AsymmetricOpportunityRadar:
             confluence_factors=confluences,
             catalyst_summary=f"Institutional pre-expansion coiling in {clean_sym} with favorable volatility risk-parity.",
             when_to_buy=f"Enter {direction} on 15m candle close adhering to VWAP ₹{vwap:,.1f}.",
-            when_to_wait=f"DO NOT CHASE if price moves > 1.2% past entry before confirmation.",
+            when_to_wait="DO NOT CHASE if price moves > 1.2% past entry before confirmation.",
             profit_rule=f"Book 50% at T1 (₹{t1_price:,.1f}), move SL to Breakeven, let runner target T2 (₹{t2_price:,.1f}).",
             metrics={
                 "atr": atr,
@@ -1562,7 +1564,9 @@ class AsymmetricOpportunityRadar:
           3. Micro stop-loss anchored immediately above the sweep wick high (+0.20x ATR).
           4. Targets opposing dealing range equilibrium (50%) and demand pool (1:4 to 1:7 R:R).
         """
-        clean_sym = symbol.upper().replace("NSE:", "").replace("BSE:", "").replace("NFO:", "").strip()
+        clean_sym = (
+            symbol.upper().replace("NSE:", "").replace("BSE:", "").replace("NFO:", "").strip()
+        )
 
         if quote is None:
             from market.quotes import get_quote
@@ -1793,7 +1797,9 @@ class AsymmetricOpportunityRadar:
         ]
 
         setup_lbl = f"🛡️ Delta-Neutral Iron Condor [{int(short_pe)}P/{int(short_ce)}C]"
-        entry_range_str = f"Net Credit ₹{credit_per_unit:,.1f}/share (₹{credit_per_unit * lot_sz:,.0f}/lot)"
+        entry_range_str = (
+            f"Net Credit ₹{credit_per_unit:,.1f}/share (₹{credit_per_unit * lot_sz:,.0f}/lot)"
+        )
 
         return AsymmetricOpportunity(
             opportunity_id=f"asym-condor-{clean_sym.lower()}-{uuid.uuid4().hex[:6]}",
@@ -1856,6 +1862,7 @@ class AsymmetricOpportunityRadar:
         quotes_map: dict[str, Any] = {}
         try:
             from market.quotes import get_quote
+
             formatted_syms = [
                 (
                     f"CRYPTO:{s}"
@@ -1974,7 +1981,10 @@ class AsymmetricOpportunityRadar:
             return sym_opps
 
         import concurrent.futures
-        with concurrent.futures.ThreadPoolExecutor(max_workers=min(6, len(universe) or 1)) as executor:
+
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=min(6, len(universe) or 1)
+        ) as executor:
             future_to_sym = {executor.submit(_evaluate_sym, s): s for s in universe}
             for fut in concurrent.futures.as_completed(future_to_sym):
                 s = future_to_sym[fut]

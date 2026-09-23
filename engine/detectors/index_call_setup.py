@@ -44,6 +44,7 @@ _SETUP_ICONS = {
     "BEARISH_EXHAUSTION_CE": "🎯",
     "DOUBLE_BOTTOM_BREAKOUT": "🟢",
     "VCP_COILING": "🔴",  # Red dot = early warning, coiling before explosive move
+    "DAY_HIGH_BREAKOUT": "🚀",
 }
 
 
@@ -57,7 +58,7 @@ def detect_index_call_setup(
     prev_day_high: Optional[float] = None,
     prev_day_low: Optional[float] = None,
     prev_week_low: Optional[float] = None,
-    ohlcv_5m: Optional[Any] = None,   # pandas DataFrame, 5-minute bars
+    ohlcv_5m: Optional[Any] = None,  # pandas DataFrame, 5-minute bars
 ) -> list[AutoAlert]:
     """
     Scans for institutional CALL entry setups on index options using SMC price action signals.
@@ -77,7 +78,9 @@ def detect_index_call_setup(
         prev_week_low: Previous week's low (PWL — weekly demand level).
         ohlcv_5m:      5-minute OHLCV DataFrame for structural analysis.
     """
-    clean_sym = underlying.upper().replace(".NS", "").replace("NSE:", "").replace("NFO:", "").strip()
+    clean_sym = (
+        underlying.upper().replace(".NS", "").replace("NSE:", "").replace("NFO:", "").strip()
+    )
     if clean_sym not in _INDEX_SYMBOLS or spot <= 0:
         return []
     if not chain:
@@ -92,39 +95,72 @@ def detect_index_call_setup(
     # ── Resolve lot size ─────────────────────────────────────────
     try:
         from engine.position_sizer import get_lot_size
+
         lot_sz = get_lot_size(underlying) or 1
     except Exception:
         lot_sz = 1
 
-    # ── Collect CE contracts within ATM band (within 1% of spot) ─
+    # ── Collect CE contracts within ATM band (within 1.2% of spot) ─
+    if clean_sym in ("SENSEX", "BANKEX"):
+        min_oi, min_vol = 300, 300
+    elif clean_sym == "MIDCPNIFTY":
+        min_oi, min_vol = 800, 400
+    elif clean_sym == "FINNIFTY":
+        min_oi, min_vol = 2000, 800
+    else:
+        min_oi, min_vol = 5000, 1000
+
     ce_contracts = [
-        c for c in chain
+        c
+        for c in chain
         if getattr(c, "option_type", "") == "CE"
-        and abs(getattr(c, "strike", 0.0) - spot) / max(1.0, spot) <= 0.01
+        and abs(getattr(c, "strike", 0.0) - spot) / max(1.0, spot) <= 0.012
         and getattr(c, "last_price", 0.0) >= 5.0
-        and getattr(c, "volume", 0) >= 1000
-        and getattr(c, "oi", 0) >= 5000
+        and getattr(c, "volume", 0) >= min_vol
+        and getattr(c, "oi", 0) >= min_oi
     ]
     if not ce_contracts:
         return []
 
-    # Sort by proximity to ATM, then by volume (highest participation first)
-    ce_contracts.sort(key=lambda c: (abs(getattr(c, "strike", 0.0) - spot), -getattr(c, "volume", 0)))
+    # Sort by optimal Gamma-Torque (high liquidity, proximity to ATM, and sweet-spot premium)
+    def _contract_score(c: Any) -> float:
+        lp = float(getattr(c, "last_price", 0.0) or 0.0)
+        vol = int(getattr(c, "volume", 0) or 0)
+        oi = int(getattr(c, "oi", 0) or 1)
+        vol_oi = vol / max(1, oi)
+        dist_pct = abs(float(getattr(c, "strike", 0.0) or 0.0) - spot) / max(1.0, spot)
+        ideal_prem = 40.0 if clean_sym in ("MIDCPNIFTY", "FINNIFTY", "SENSEX") else 125.0
+        prem_dist = abs(lp - ideal_prem) / ideal_prem if lp > 0 else 2.0
+        return (vol_oi * 15.0) + (min(10.0, vol / 500.0)) - (dist_pct * 300.0) - (prem_dist * 5.0)
+
+    ce_contracts.sort(key=_contract_score, reverse=True)
+
+    best_cand_ce = ce_contracts[0]
+    cand_ce_pchange = float(getattr(best_cand_ce, "pchange", 0.0) or 0.0)
+    cand_ce_vol = getattr(best_cand_ce, "volume", 0)
+    cand_ce_oi = getattr(best_cand_ce, "oi", 0)
+    cand_ce_vol_oi = round(cand_ce_vol / max(1, cand_ce_oi), 2)
+    is_breakout_momentum = cand_ce_pchange >= 8.0 or cand_ce_vol_oi >= 1.5
 
     # ── Opposing Supply Barrier Check (Headroom Sanity) ─────────
-    # If spot is right underneath Previous Day High or Day High (headroom < 0.20%),
-    # buying CE collides directly into overhead supply.
+    # If spot is right underneath Previous Day High or Day High,
+    # buying CE collides directly into overhead supply UNLESS breaking out with momentum.
     if prev_day_high and spot < prev_day_high:
         pdh_headroom_pct = (prev_day_high - spot) / spot * 100.0
-        if pdh_headroom_pct < 0.35:
+        if pdh_headroom_pct < 0.35 and not is_breakout_momentum:
             logger.debug(
                 f"[IndexCallSetup] Suppressed CE: Spot ₹{spot:,.1f} is within {pdh_headroom_pct:.2f}% of PDH ₹{prev_day_high:,.1f} (Opposing Supply Collision)"
             )
             return []
 
-    if day_high and spot < day_high and day_low and ((day_high - day_low) / max(1.0, spot)) >= 0.003:
+    if (
+        day_high
+        and spot < day_high
+        and day_low
+        and ((day_high - day_low) / max(1.0, spot)) >= 0.003
+    ):
         dh_headroom_pct = (day_high - spot) / spot * 100.0
-        if dh_headroom_pct < 0.30:
+        if dh_headroom_pct < 0.30 and not is_breakout_momentum:
             logger.debug(
                 f"[IndexCallSetup] Suppressed CE: Spot ₹{spot:,.1f} is within {dh_headroom_pct:.2f}% of Day High ₹{day_high:,.1f} (Headroom Truncated)"
             )
@@ -178,7 +214,9 @@ def detect_index_call_setup(
     # Spot was below VWAP, tagged it from below, and is now holding above
     if effective_vwap > 0 and spot > effective_vwap:
         vwap_reclaim_pct = (spot - effective_vwap) / effective_vwap * 100
-        day_low_vs_vwap = (effective_vwap - (day_low or spot)) / effective_vwap * 100 if day_low else 0.0
+        day_low_vs_vwap = (
+            (effective_vwap - (day_low or spot)) / effective_vwap * 100 if day_low else 0.0
+        )
         # Day low must have been at or below VWAP (was below it) but spot now above (reclaimed)
         if day_low_vs_vwap >= -0.1 and vwap_reclaim_pct >= 0.05:
             signals.append("VWAP_RECLAIM")
@@ -195,6 +233,7 @@ def detect_index_call_setup(
     if ohlcv_5m is not None:
         try:
             import pandas as pd  # noqa: F401 — runtime only
+
             if hasattr(ohlcv_5m, "iloc") and len(ohlcv_5m) >= 8:
                 col_h = "high" if "high" in ohlcv_5m.columns else "High"
                 col_l = "low" if "low" in ohlcv_5m.columns else "Low"
@@ -241,7 +280,10 @@ def detect_index_call_setup(
                     rolling_lows = ohlcv_5m[col_l].values
                     troughs = []
                     for i in range(2, len(rolling_lows) - 1):
-                        if rolling_lows[i] < rolling_lows[i - 1] and rolling_lows[i] < rolling_lows[i + 1]:
+                        if (
+                            rolling_lows[i] < rolling_lows[i - 1]
+                            and rolling_lows[i] < rolling_lows[i + 1]
+                        ):
                             troughs.append((i, rolling_lows[i]))
                     if len(troughs) >= 2:
                         t1_idx, t1_val = troughs[-2]
@@ -264,14 +306,23 @@ def detect_index_call_setup(
                     try:
                         recent = ohlcv_5m.iloc[-5:]
                         ranges = (recent[col_h] - recent[col_l]).values.tolist()
-                        is_compressing = all(
-                            ranges[i] < ranges[i - 1] * 1.05  # < 5% wider than prior bar
-                            for i in range(1, len(ranges))
-                        ) and ranges[-1] < ranges[0] * 0.70  # final bar < 70% of 5-bar open
-                        total_range_pct = (max(recent[col_h]) - min(recent[col_l])) / max(1.0, spot) * 100
+                        is_compressing = (
+                            all(
+                                ranges[i] < ranges[i - 1] * 1.05  # < 5% wider than prior bar
+                                for i in range(1, len(ranges))
+                            )
+                            and ranges[-1] < ranges[0] * 0.70
+                        )  # final bar < 70% of 5-bar open
+                        total_range_pct = (
+                            (max(recent[col_h]) - min(recent[col_l])) / max(1.0, spot) * 100
+                        )
                         # Spot within 0.30% of the recent high (coiling near top)
-                        near_session_high = (day_high and (day_high - spot) / max(1.0, spot) * 100 <= 0.30)
-                        last_bar_vol_ratio = last_bar_vol / max(1.0, avg_vol) if avg_vol > 0 else 1.0
+                        near_session_high = (
+                            day_high and (day_high - spot) / max(1.0, spot) * 100 <= 0.30
+                        )
+                        last_bar_vol_ratio = (
+                            last_bar_vol / max(1.0, avg_vol) if avg_vol > 0 else 1.0
+                        )
 
                         if (
                             is_compressing
@@ -281,7 +332,9 @@ def detect_index_call_setup(
                         ):
                             signals.append("VCP_COILING")
                             signal_tags["vcp_coiling"] = {
-                                "bar_ranges_pct": [round(r / max(1.0, spot) * 100, 3) for r in ranges],
+                                "bar_ranges_pct": [
+                                    round(r / max(1.0, spot) * 100, 3) for r in ranges
+                                ],
                                 "total_range_pct": round(total_range_pct, 3),
                                 "near_session_high": bool(near_session_high),
                                 "vol_ratio": round(last_bar_vol_ratio, 2),
@@ -291,6 +344,24 @@ def detect_index_call_setup(
 
         except Exception as e_ohlcv:
             logger.debug(f"[IndexCallSetup] OHLCV analysis error for {underlying}: {e_ohlcv}")
+
+    # 8. Day High Breakout (Bullish Continuation / Range Expansion)
+    # When spot is testing or breaking out through session high with VWAP support and CE momentum
+    if day_high and day_high > 0 and "DAY_HIGH_BREAKOUT" not in signals:
+        dh_dist_pct = (spot - day_high) / day_high * 100.0
+        # Within 0.15% below day high, or broke out above day high up to 0.50%
+        if -0.15 <= dh_dist_pct <= 0.50 and (
+            spot >= (effective_vwap * 0.998) if effective_vwap > 0 else True
+        ):
+            if is_breakout_momentum or (ohlcv_5m is not None and len(ohlcv_5m) >= 3):
+                signals.append("DAY_HIGH_BREAKOUT")
+                signal_tags["day_high_breakout"] = {
+                    "day_high": day_high,
+                    "spot": spot,
+                    "dh_dist_pct": round(dh_dist_pct, 3),
+                    "ce_pchange": cand_ce_pchange,
+                    "vol_oi": cand_ce_vol_oi,
+                }
 
     if not signals:
         return []
@@ -317,6 +388,7 @@ def detect_index_call_setup(
         "BEARISH_EXHAUSTION_CE": 10,
         "DOUBLE_BOTTOM_BREAKOUT": 8,
         "VCP_COILING": 7,  # Pre-breakout, lower confidence since not yet confirmed
+        "DAY_HIGH_BREAKOUT": 12,
     }
     confidence = base_confidence
     for sig in signals:
@@ -336,6 +408,7 @@ def detect_index_call_setup(
     try:
         from engine.trade_plan import calculate_option_execution_plan, get_market_status
         from engine.position_sizer import get_lot_size as _gls
+
         lot_sz = _gls(underlying) or lot_sz
         opt_plan = (
             calculate_option_execution_plan(
@@ -361,13 +434,35 @@ def detect_index_call_setup(
     rr_str = opt_plan.get("option_rr", "1:1.9") if opt_plan else "1:1.9"
     t1_pct = opt_plan.get("t1_pct", 30.0) if opt_plan else 30.0
 
+    # ── Velocity Regime Check ────────────────────────────────────
+    vel_regime = "NORMAL_TREND"
+    vel_score = 50.0
+    try:
+        from engine.index_velocity import calculate_index_velocity
+
+        v_metric = calculate_index_velocity(
+            clean_sym, spot=spot, ohlcv_5m=ohlcv_5m, day_high=day_high, day_low=day_low
+        )
+        vel_regime = v_metric.regime
+        vel_score = v_metric.velocity_score
+    except Exception:
+        pass
+
+    vel_badge = ""
+    if vel_regime == "LEADER_EXPANSION":
+        vel_badge = "🚀 LEADER "
+    elif vel_regime == "CHOP_PINNED":
+        vel_badge = "⚠️ LOW VELOCITY "
+
     # ── Build Headline & Summary ─────────────────────────────────
     primary_signal = signals[0]
     icon = _SETUP_ICONS.get(primary_signal, "🟢")
 
     if "PDL_DEMAND_REJECTION" in signals:
         level_type = signal_tags.get("pdl_demand_rejection", {}).get("level_type", "PDL")
-        headline = f"{icon} SMC {level_type} DEMAND REJECTION: {clean_sym} {int(strike)} CE"
+        headline = (
+            f"{vel_badge}{icon} SMC {level_type} DEMAND REJECTION: {clean_sym} {int(strike)} CE"
+        )
         struct_detail = signal_tags["pdl_demand_rejection"]
         ref_level = struct_detail.get("prev_day_low") or struct_detail.get("prev_week_low", 0.0)
         bounce_pct = struct_detail.get("bounce_pct", 0.0)
@@ -421,6 +516,14 @@ def detect_index_call_setup(
             f"Optimal Entry Zone: ₹{opt_ltp:,.1f}–₹{round(opt_ltp * 1.03, 1):,.1f} | SL: ₹{sl_premium:,.1f} | T1: ₹{t1_premium:,.1f} (+{t1_pct:.0f}%). "
             f"DO NOT CHASE above ₹{round(opt_ltp * 1.08, 1):,.1f} — wait for volume confirmation candle."
         )
+    elif "DAY_HIGH_BREAKOUT" in signals:
+        dhb = signal_tags.get("day_high_breakout", {})
+        headline = f"🚀 DAY HIGH BREAKOUT: {clean_sym} {int(strike)} CE"
+        summary = (
+            f"Spot (₹{spot:,.1f}) breaking out through Session High (₹{dhb.get('day_high', 0):,.1f}) with bullish momentum. "
+            f"Spot holding above VWAP (₹{effective_vwap:,.1f}) with CE volume expansion ({volume:,} contracts, {vol_oi_ratio:.1f}x Vol/OI, +{pchange:.1f}%). "
+            f"Entry: ₹{opt_ltp:,.1f} | SL: ₹{sl_premium:,.1f} | T1: ₹{t1_premium:,.1f} (+{t1_pct:.0f}%)."
+        )
     else:
         headline = f"{icon} SMC BULLISH SETUP: {clean_sym} {int(strike)} CE ({primary_signal.replace('_', ' ')})"
         summary = (
@@ -429,10 +532,10 @@ def detect_index_call_setup(
             f"Entry: ₹{opt_ltp:,.1f} | SL: ₹{sl_premium:,.1f} | T1: ₹{t1_premium:,.1f} (+{t1_pct:.0f}%)."
         )
 
-
     # ── Liquidity Audit ─────────────────────────────────────────
     try:
         from market.options import audit_option_liquidity
+
         liq_audit = audit_option_liquidity(best_ce, underlying=underlying, lot_size=lot_sz)
     except Exception:
         liq_audit = {"liquidity_status": "UNKNOWN", "bid_ask_spread_pct": 0.0}
@@ -484,7 +587,9 @@ def detect_index_call_setup(
             "vol_oi_ratio": vol_oi_ratio,
             "spot": spot,
             "vwap": effective_vwap,
-            "spot_to_vwap_pct": round(((spot - effective_vwap) / max(1.0, effective_vwap)) * 100, 2),
+            "spot_to_vwap_pct": round(
+                ((spot - effective_vwap) / max(1.0, effective_vwap)) * 100, 2
+            ),
             "lot_size": lot_sz,
             "liquidity": liq_audit,
             # SMC structural signal context
@@ -512,9 +617,12 @@ def detect_index_call_setup(
             "expiry_date": exp_date,
             "expiry_type": exp_type,
             "underlying_spot": f"₹{spot:,.1f}",
-            "recommended_entry": f"₹{opt_ltp:,.2f} (OTE Pullback: {entry_range_str})" if opt_ltp else "Market",
+            "recommended_entry": f"₹{opt_ltp:,.2f} (OTE Pullback: {entry_range_str})"
+            if opt_ltp
+            else "Market",
             "entry_range": entry_range_str,
             "no_chase": f"DO NOT CHASE above ₹{no_chase_lvl}",
+            "impulse_trigger_level": round(opt_ltp * 1.01, 2) if opt_ltp > 0 else spot,
             "target_1": f"₹{t1_premium:,.2f}",
             "target": f"₹{t1_premium:,.2f} (+{t1_pct:.0f}%)",
             "target_2": f"₹{t2_premium:,.2f}",
@@ -524,6 +632,20 @@ def detect_index_call_setup(
             "profit_rule": (
                 f"Book 50% at T1 (₹{t1_premium:,.2f}), move SL to cost, trail on T2 (₹{t2_premium:,.2f})."
             ),
+            "fast_scalp": (
+                opt_plan.get("fast_scalp")
+                if (opt_plan and opt_plan.get("fast_scalp"))
+                else {
+                    "scalp_target_premium": round(opt_ltp * 1.18, 2),
+                    "scalp_target_pct": 18.0,
+                    "scalp_target_eta": "10m–15m",
+                    "scalp_profit_rule": f"Book 70% at ₹{round(opt_ltp * 1.18, 2):,.2f} (+18%), move SL to Cost, or exit on first 5m red candle.",
+                    "time_stop_mins": 20,
+                    "time_stop_rule": "If trade active 20m with < +5% gain, exit at CMP/Scratch to avoid theta decay.",
+                }
+            ),
+            "velocity_regime": vel_regime,
+            "velocity_score": vel_score,
             "structural_signals": signals,
             "market_status": mkt_status,
             "lot_size": lot_sz,

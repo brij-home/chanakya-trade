@@ -706,6 +706,7 @@ def _call_llm(
     llm_provider: Any,
 ) -> str:
     """Call the LLM provider with system + user message. Returns response text."""
+
     def _execute():
         # Try the standard call interface used by the platform
         if hasattr(llm_provider, "call"):
@@ -981,10 +982,7 @@ def run_council(
 
     signals_by_pid: dict[str, PersonaSignal] = {}
     with ThreadPoolExecutor(max_workers=min(len(persona_ids), 4)) as executor:
-        future_to_pid = {
-            executor.submit(_run_single_persona, pid): pid
-            for pid in persona_ids
-        }
+        future_to_pid = {executor.submit(_run_single_persona, pid): pid for pid in persona_ids}
         for future, pid in future_to_pid.items():
             try:
                 sig = future.result(timeout=15.0)

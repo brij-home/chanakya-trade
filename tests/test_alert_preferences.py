@@ -682,7 +682,9 @@ def test_equity_telegram_destination_routing(monkeypatch):
     )
     engine._dispatch(coforge_alert)
     assert len(sent_calls) == 3
-    assert sent_calls[2][1] == "-1007777777777"  # Routes to Equity channel, NOT -1004393392375 (FnO)
+    assert (
+        sent_calls[2][1] == "-1007777777777"
+    )  # Routes to Equity channel, NOT -1004393392375 (FnO)
     assert "COFORGE [EQUITY]" in sent_calls[2][0]
     assert "Spot CMP: ₹1,864.90" in sent_calls[2][0]
     assert "Opt CMP" not in sent_calls[2][0]

@@ -1,7 +1,6 @@
 import pytest
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 from dataclasses import dataclass
-from datetime import datetime
 
 from engine.auto_alert_engine import AutoAlertEngine
 from brokers.base import Quote
@@ -29,6 +28,7 @@ def test_watched_equities_includes_full_fno_universe(engine):
 def test_mstock_known_tokens():
     """Verifies that mStock API knows tokens for major market movers."""
     from brokers.mstock import MStockAPI
+
     api = MStockAPI()
     assert api.get_symbol_token("OFSS", "NSE") == "10738"
     assert api.get_symbol_token("MFSL", "NSE") == "2142"
@@ -78,16 +78,19 @@ def test_opening_drive_detection_and_profit_playbook(engine):
     }
 
     mock_contracts = [
-        MockOptionContract(strike=11400.0, option_type="PE", last_price=125.0, volume=15000, oi=8000, pchange=50.0)
+        MockOptionContract(
+            strike=11400.0, option_type="PE", last_price=125.0, volume=15000, oi=8000, pchange=50.0
+        )
     ]
 
-    with patch.object(engine, "_watched_indices", []), \
-         patch.object(AutoAlertEngine, "watched_equities", new_callable=lambda: ["OFSS"]), \
-         patch("market.quotes.get_quote", return_value=mock_quotes_batch), \
-         patch("market.quotes.get_ltp", return_value=11300.0), \
-         patch("market.options.get_options_chain", return_value=mock_contracts), \
-         patch("market.history.get_ohlcv", return_value=None):
-
+    with (
+        patch.object(engine, "_watched_indices", []),
+        patch.object(AutoAlertEngine, "watched_equities", new_callable=lambda: ["OFSS"]),
+        patch("market.quotes.get_quote", return_value=mock_quotes_batch),
+        patch("market.quotes.get_ltp", return_value=11300.0),
+        patch("market.options.get_options_chain", return_value=mock_contracts),
+        patch("market.history.get_ohlcv", return_value=None),
+    ):
         alerts = engine.scan_options_momentum_breakouts()
 
         assert len(alerts) >= 1
@@ -123,12 +126,13 @@ def test_stage_1_skips_flat_sideways_stock(engine):
         "FLATSTOCK": mock_quote_flat,
     }
 
-    with patch.object(engine, "_watched_indices", []), \
-         patch.object(AutoAlertEngine, "watched_equities", new_callable=lambda: ["FLATSTOCK"]), \
-         patch("market.quotes.get_quote", return_value=mock_quotes_batch), \
-         patch("market.quotes.get_ltp", return_value=500.0), \
-         patch("market.options.get_options_chain") as mock_chain:
-
+    with (
+        patch.object(engine, "_watched_indices", []),
+        patch.object(AutoAlertEngine, "watched_equities", new_callable=lambda: ["FLATSTOCK"]),
+        patch("market.quotes.get_quote", return_value=mock_quotes_batch),
+        patch("market.quotes.get_ltp", return_value=500.0),
+        patch("market.options.get_options_chain") as mock_chain,
+    ):
         alerts = engine.scan_options_momentum_breakouts()
         assert len(alerts) == 0
         # Crucial invariant: get_options_chain should NOT be called for flat stocks

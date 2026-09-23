@@ -826,7 +826,9 @@ def get_stock_tailwind(
     if intraday_alignment in ("INTRADAY_HEADWIND", "SEVERE_INTRADAY_HEADWIND"):
         desc += f" ⚠️ CAUTION: Sector is lagging NIFTY by {abs(intraday_rs):.2f}% intraday (selling pressure)."
     elif intraday_alignment in ("INTRADAY_TAILWIND", "STRONG_INTRADAY_TAILWIND"):
-        desc += f" ⚡ Sector exhibits strong intraday relative strength ({intraday_rs:+.2f}% vs NIFTY)."
+        desc += (
+            f" ⚡ Sector exhibits strong intraday relative strength ({intraday_rs:+.2f}% vs NIFTY)."
+        )
 
     # Rotation velocity from historical trail
     rot_velocity = None

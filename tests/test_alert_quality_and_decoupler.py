@@ -3,10 +3,8 @@ Unit tests for Institutional Alert Quality, Decoupler Recognition,
 Anti-Storm Pacing, Trap Suppression, and Session-End Stagnation Resolution.
 """
 
-import time
 from datetime import datetime, timezone, timedelta
 from unittest.mock import MagicMock, patch
-import pytest
 
 from engine.alert_scrutiny import alert_scrutiny_auditor
 from engine.auto_alert_engine import AutoAlert, AutoAlertEngine
@@ -112,12 +110,11 @@ def test_mediocre_call_rejected_in_nifty_markdown():
     assert "Benchmark Gravitational Veto" in reason
 
 
-def test_anti_storm_candidate_ranking_and_top_n(tmp_path):
+def test_anti_storm_candidate_ranking_and_top_n():
     """
     Verifies that when multiple candidates qualify, the engine sorts candidates
     by composite Institutional Quality Score and caps alerts to top-N.
     """
-    alerts_file = tmp_path / "auto_alerts.json"
     engine = AutoAlertEngine()
     engine._alerts = []
 

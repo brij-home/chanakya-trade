@@ -136,7 +136,10 @@ class MultibaggerAlertManager:
                 triggered.append(alt)
 
         # 4. CFAI Floating Supply Exhaustion Catalyst
-        if getattr(report, "float_exhaustion_detected", False) and getattr(report, "cfai_pct", 0.0) >= 3.5:
+        if (
+            getattr(report, "float_exhaustion_detected", False)
+            and getattr(report, "cfai_pct", 0.0) >= 3.5
+        ):
             alt = MultibaggerAlert(
                 alert_id=f"alert-cfai-{uuid.uuid4().hex[:8]}",
                 symbol=report.symbol,
@@ -200,7 +203,7 @@ class MultibaggerAlertManager:
                 symbol=report.symbol,
                 event_type="CAPEX_INFLECTION",
                 headline=f"🏭 {report.symbol} Capex & CWIP Commercialization Inflection",
-                description=f"Massive capacity transition from CWIP to Gross Block with >75% utilization. Operating leverage margin expansion underway.",
+                description="Massive capacity transition from CWIP to Gross Block with >75% utilization. Operating leverage margin expansion underway.",
                 severity="HIGH",
                 horizon="MID_TERM",
                 ltp=report.ltp,
@@ -219,7 +222,7 @@ class MultibaggerAlertManager:
                 symbol=report.symbol,
                 event_type="RRG_ORDERBOOK_CONVERGENCE",
                 headline=f"🔄 {report.symbol} Apex RRG Sector x Order-Book Convergence",
-                description=f"Macro institutional sector inflows in Leading/Improving RRG quadrant converging with multi-year micro order book backlog.",
+                description="Macro institutional sector inflows in Leading/Improving RRG quadrant converging with multi-year micro order book backlog.",
                 severity="CRITICAL",
                 horizon="MID_TERM",
                 ltp=report.ltp,
@@ -239,7 +242,7 @@ class MultibaggerAlertManager:
                 symbol=report.symbol,
                 event_type="PROMOTER_SKIN_IN_THE_GAME",
                 headline=f"💎 {report.symbol} High Promoter Conviction ({ins_status})",
-                description=f"Zero margin call distress risk with heavy promoter alignment and insider open-market accumulation.",
+                description="Zero margin call distress risk with heavy promoter alignment and insider open-market accumulation.",
                 severity="HIGH",
                 horizon="LONG_TERM",
                 ltp=report.ltp,

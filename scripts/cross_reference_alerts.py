@@ -9,12 +9,12 @@ Deep dive into:
 import json
 import sys
 from collections import Counter, defaultdict
-from datetime import datetime
 
-if hasattr(sys.stdout, 'reconfigure'):
-    sys.stdout.reconfigure(encoding='utf-8')
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
 
 from engine.auto_alert_engine import AUTO_ALERTS_FILE
+
 
 def main():
     with open(AUTO_ALERTS_FILE, "r", encoding="utf-8") as f:
@@ -34,7 +34,7 @@ def main():
         is_inv = a.get("is_invalidated", False)
         milestones = a.get("achieved_milestones", [])
         atype = a.get("alert_type", "UNKNOWN")
-        
+
         outcome_key = status
         if is_inv:
             outcome_key = f"INVALIDATED ({a.get('invalidation_reason', 'unknown')})"
@@ -52,7 +52,7 @@ def main():
 
     print("\n=== OVERALL OUTCOMES OF TODAY'S ALERTS ===")
     for k, cnt in outcomes.most_common():
-        print(f"  {k:45}: {cnt} ({cnt/len(today_alerts)*100:.1f}%)")
+        print(f"  {k:45}: {cnt} ({cnt / len(today_alerts) * 100:.1f}%)")
 
     print("\n=== OUTCOMES BY ALERT TYPE ===")
     for atype, counts in status_by_type.items():
@@ -62,12 +62,25 @@ def main():
 
     # 2. Check top gainers & losers
     top_movers = [
-        ("RBLBANK", "+5.17%"), ("SWIGGY", "+4.16%"), ("PIIND", "+3.80%"), 
-        ("PAGEIND", "+3.34%"), ("SOLARINDS", "+3.24%"), ("COALINDIA", "+3.21%"),
-        ("BANDHANBNK", "+3.18%"), ("IDEA", "+3.11%"), ("BSE", "+2.34%"),
-        ("KAYNES", "-5.34%"), ("CONCOR", "-4.12%"), ("VOLTAS", "-3.62%"),
-        ("ATHERENERG", "-3.09%"), ("PGEL", "-3.05%"), ("BLUESTARCO", "-2.56%"),
-        ("OIL", "-2.37%"), ("ABB", "-2.07%"), ("CUMMINSIND", "-2.06%"), ("DIXON", "-1.99%")
+        ("RBLBANK", "+5.17%"),
+        ("SWIGGY", "+4.16%"),
+        ("PIIND", "+3.80%"),
+        ("PAGEIND", "+3.34%"),
+        ("SOLARINDS", "+3.24%"),
+        ("COALINDIA", "+3.21%"),
+        ("BANDHANBNK", "+3.18%"),
+        ("IDEA", "+3.11%"),
+        ("BSE", "+2.34%"),
+        ("KAYNES", "-5.34%"),
+        ("CONCOR", "-4.12%"),
+        ("VOLTAS", "-3.62%"),
+        ("ATHERENERG", "-3.09%"),
+        ("PGEL", "-3.05%"),
+        ("BLUESTARCO", "-2.56%"),
+        ("OIL", "-2.37%"),
+        ("ABB", "-2.07%"),
+        ("CUMMINSIND", "-2.06%"),
+        ("DIXON", "-1.99%"),
     ]
 
     print("\n=== CHECKING IF TOP MOVERS WERE ALERTED TODAY ===")
@@ -77,7 +90,9 @@ def main():
             print(f"✓ {sym:12} ({move:7}): {len(alerts)} alerts fired:")
             for al in alerts:
                 ts = al.get("timestamp", "")[11:19]
-                print(f"    [{ts}] {al.get('alert_type')} | {al.get('direction')} | LTP={al.get('ltp')} | SL={al.get('stop_loss')} | Status={al.get('target_status')} | Achieved={al.get('achieved_milestones')}")
+                print(
+                    f"    [{ts}] {al.get('alert_type')} | {al.get('direction')} | LTP={al.get('ltp')} | SL={al.get('stop_loss')} | Status={al.get('target_status')} | Achieved={al.get('achieved_milestones')}"
+                )
         else:
             print(f"✗ {sym:12} ({move:7}): MISSED (0 alerts)")
 
@@ -90,6 +105,7 @@ def main():
     print("Sample 09:21 alert headline:", sample_burst.get("headline"))
     print("Sample 09:21 alert summary:", sample_burst.get("summary"))
     print("Sample 09:21 metrics:", sample_burst.get("metrics"))
+
 
 if __name__ == "__main__":
     main()

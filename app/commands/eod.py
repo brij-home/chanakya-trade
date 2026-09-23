@@ -23,7 +23,11 @@ from rich import box
 console = Console()
 
 
-def run(target_date: Optional[str] = None, dispatch_telegram: bool = False, chat_id: Optional[str] = None) -> None:
+def run(
+    target_date: Optional[str] = None,
+    dispatch_telegram: bool = False,
+    chat_id: Optional[str] = None,
+) -> None:
     """Run EOD report command."""
     from engine.eod_report_generator import EODReportGenerator
 
@@ -37,7 +41,9 @@ def run(target_date: Optional[str] = None, dispatch_telegram: bool = False, chat
         )
     )
 
-    with console.status("[bold bright_cyan]Compiling Institutional Post-Market Intelligence...[/bold bright_cyan]"):
+    with console.status(
+        "[bold bright_cyan]Compiling Institutional Post-Market Intelligence...[/bold bright_cyan]"
+    ):
         gen = EODReportGenerator()
         rep = gen.generate(target_date=target_date)
         json_p, md_p = gen.save_to_disk(rep)
@@ -46,7 +52,10 @@ def run(target_date: Optional[str] = None, dispatch_telegram: bool = False, chat
             tg_status = gen.dispatch_to_telegram(rep, chat_id=chat_id)
 
     # 1. Market Overview & Flows Table
-    mkt_table = Table(box=box.SIMPLE_HEAVY, title="[bold yellow]Market Benchmarks & Institutional Flows[/bold yellow]")
+    mkt_table = Table(
+        box=box.SIMPLE_HEAVY,
+        title="[bold yellow]Market Benchmarks & Institutional Flows[/bold yellow]",
+    )
     mkt_table.add_column("Benchmark", style="cyan", justify="left")
     mkt_table.add_column("LTP", style="white", justify="right")
     mkt_table.add_column("Change", justify="right")
@@ -56,13 +65,31 @@ def run(target_date: Optional[str] = None, dispatch_telegram: bool = False, chat
     bn_color = "bright_green" if rep.banknifty_change_pct >= 0 else "bright_red"
     sx_color = "bright_green" if rep.sensex_change_pct >= 0 else "bright_red"
 
-    mkt_table.add_row("NIFTY 50", f"₹{rep.nifty_ltp:,.2f}", f"[{n_color}]{rep.nifty_change_pct:+.2f}%[/{n_color}]", rep.market_posture)
-    mkt_table.add_row("BANKNIFTY", f"₹{rep.banknifty_ltp:,.2f}", f"[{bn_color}]{rep.banknifty_change_pct:+.2f}%[/{bn_color}]", f"VIX: {rep.vix_ltp:.2f}")
-    mkt_table.add_row("SENSEX", f"₹{rep.sensex_ltp:,.2f}", f"[{sx_color}]{rep.sensex_change_pct:+.2f}%[/{sx_color}]", f"FII: {rep.fii_net_cr:+,.0f} Cr")
+    mkt_table.add_row(
+        "NIFTY 50",
+        f"₹{rep.nifty_ltp:,.2f}",
+        f"[{n_color}]{rep.nifty_change_pct:+.2f}%[/{n_color}]",
+        rep.market_posture,
+    )
+    mkt_table.add_row(
+        "BANKNIFTY",
+        f"₹{rep.banknifty_ltp:,.2f}",
+        f"[{bn_color}]{rep.banknifty_change_pct:+.2f}%[/{bn_color}]",
+        f"VIX: {rep.vix_ltp:.2f}",
+    )
+    mkt_table.add_row(
+        "SENSEX",
+        f"₹{rep.sensex_ltp:,.2f}",
+        f"[{sx_color}]{rep.sensex_change_pct:+.2f}%[/{sx_color}]",
+        f"FII: {rep.fii_net_cr:+,.0f} Cr",
+    )
     console.print(mkt_table)
 
     # 2. Performance Scorecard
-    score_table = Table(box=box.SIMPLE_HEAVY, title="[bold bright_green]Quantitative Signal Scorecard[/bold bright_green]")
+    score_table = Table(
+        box=box.SIMPLE_HEAVY,
+        title="[bold bright_green]Quantitative Signal Scorecard[/bold bright_green]",
+    )
     score_table.add_column("Total Setups", justify="center")
     score_table.add_column("Ignited", justify="center")
     score_table.add_column("Win Rate", justify="center", style="bold bright_green")
@@ -82,7 +109,10 @@ def run(target_date: Optional[str] = None, dispatch_telegram: bool = False, chat
 
     # 3. Star Setups
     if rep.star_setups:
-        star_table = Table(box=box.SIMPLE_HEAVY, title="[bold bright_green]🌟 Star Winning Setups[/bold bright_green]")
+        star_table = Table(
+            box=box.SIMPLE_HEAVY,
+            title="[bold bright_green]🌟 Star Winning Setups[/bold bright_green]",
+        )
         star_table.add_column("Symbol", style="bold cyan")
         star_table.add_column("Segment", style="dim")
         star_table.add_column("Dir", justify="center")
@@ -107,7 +137,10 @@ def run(target_date: Optional[str] = None, dispatch_telegram: bool = False, chat
 
     # 4. RCA Post-Mortem Table
     if rep.rca_breakdown:
-        rca_table = Table(box=box.SIMPLE_HEAVY, title="[bold bright_red]🔬 Root Cause Decomposition & Forensic RCA[/bold bright_red]")
+        rca_table = Table(
+            box=box.SIMPLE_HEAVY,
+            title="[bold bright_red]🔬 Root Cause Decomposition & Forensic RCA[/bold bright_red]",
+        )
         rca_table.add_column("Failure Vector", style="bold bright_red")
         rca_table.add_column("Count", justify="center")
         rca_table.add_column("Causal Attribution & Diagnosis", style="dim white")
@@ -123,11 +156,11 @@ def run(target_date: Optional[str] = None, dispatch_telegram: bool = False, chat
         console.print(rca_table)
 
     # 5. Strategic Recommendations & Blueprint
-    rec_content = [
-        f"[bold bright_yellow]Tomorrow ({rep.tomorrow_day_name}):[/bold bright_yellow]"
-    ]
+    rec_content = [f"[bold bright_yellow]Tomorrow ({rep.tomorrow_day_name}):[/bold bright_yellow]"]
     if rep.tomorrow_expiry_index:
-        rec_content.append(f"• [bold bright_magenta]Expiry Focus:[/bold bright_magenta] {rep.tomorrow_expiry_index} Weekly Settlement.")
+        rec_content.append(
+            f"• [bold bright_magenta]Expiry Focus:[/bold bright_magenta] {rep.tomorrow_expiry_index} Weekly Settlement."
+        )
     for r in rep.tomorrow_recommendations[:3]:
         rec_content.append(f"• {r}")
 
@@ -142,5 +175,7 @@ def run(target_date: Optional[str] = None, dispatch_telegram: bool = False, chat
 
     console.print(f"[dim]Report saved: {md_p}[/dim]")
     if dispatch_telegram:
-        console.print(f"[bold {'bright_green' if tg_status else 'bright_red'}]Telegram Dispatch: {'SUCCESS' if tg_status else 'FAILED'}[/bold {'bright_green' if tg_status else 'bright_red'}]")
+        console.print(
+            f"[bold {'bright_green' if tg_status else 'bright_red'}]Telegram Dispatch: {'SUCCESS' if tg_status else 'FAILED'}[/bold {'bright_green' if tg_status else 'bright_red'}]"
+        )
     console.print()

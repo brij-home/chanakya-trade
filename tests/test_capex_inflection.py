@@ -4,7 +4,6 @@ tests/test_capex_inflection.py
 Unit tests for Capex & CWIP-to-Gross-Block Inflection Engine.
 """
 
-import pytest
 from analysis.capex_inflection import (
     analyze_capex_inflection,
     scan_capex_inflection_universe,

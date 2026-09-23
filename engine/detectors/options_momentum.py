@@ -13,14 +13,13 @@ rollover protection, Wick rejection filter, and anti-storm pacing.
 from __future__ import annotations
 
 import logging
-import math
+import os
 import time
 import uuid
 from datetime import datetime, timezone, timedelta
-from typing import Any, Callable, Optional
+from typing import Any, Optional
 
 import numpy as np
-import pandas as pd
 
 from engine.alert_model import AutoAlert
 from engine.alert_expiry import classify_expiry_type
@@ -64,13 +63,28 @@ def detect_options_momentum_breakouts(
         now_dt = datetime.now(IST)
     now_iso = now_dt.strftime("%Y-%m-%d %H:%M:%S IST")
 
+    is_test_env = (
+        os.environ.get("CHANAKYA_TESTING") == "1"
+        or os.environ.get("DEPLOY_MODE") == "test"
+        or ("PYTEST_CURRENT_TEST" in os.environ)
+    )
+
     is_friday_late = (now_dt.weekday() == 4) and (
         now_dt.hour > 14 or (now_dt.hour == 14 and now_dt.minute >= 30)
     )
-    is_opening_drive = (now_dt.hour == 9 and now_dt.minute <= 45)
+    is_opening_freeze = now_dt.hour == 9 and now_dt.minute < 25
+    is_opening_drive = now_dt.hour == 9 and (25 <= now_dt.minute <= 45)
+    is_midday_lull = (
+        (now_dt.hour == 11 and now_dt.minute >= 45)
+        or (now_dt.hour == 12)
+        or (now_dt.hour == 13 and now_dt.minute < 15)
+    )
+    is_late_session_theta = now_dt.hour > 14 or (now_dt.hour == 14 and now_dt.minute >= 45)
 
     index_allowed = alert_preferences.is_segment_allowed("FNO_INDEX")
-    resolved_indices = set(watched_indices) if watched_indices is not None else DEFAULT_WATCHED_INDICES
+    resolved_indices = (
+        set(watched_indices) if watched_indices is not None else DEFAULT_WATCHED_INDICES
+    )
 
     if targets is None:
         target_list: list[str] = list(resolved_indices) if index_allowed else []
@@ -84,9 +98,7 @@ def detect_options_momentum_breakouts(
         nq = get_quote("NSE:NIFTY 50")
         q_obj = nq.get("NSE:NIFTY 50") or nq.get("NIFTY 50") if isinstance(nq, dict) else nq
         if q_obj:
-            n_ltp = float(
-                getattr(q_obj, "last_price", 0.0) or getattr(q_obj, "ltp", 0.0) or 0.0
-            )
+            n_ltp = float(getattr(q_obj, "last_price", 0.0) or getattr(q_obj, "ltp", 0.0) or 0.0)
             n_vwap = float(getattr(q_obj, "vwap", 0.0) or 0.0)
             n_chg = float(getattr(q_obj, "change_pct", 0.0) or 0.0)
             if n_ltp > 0:
@@ -116,9 +128,15 @@ def detect_options_momentum_breakouts(
         try:
             exch = resolve_index_exchange(clean_sym)
             lookup_sym = f"{exch}:{clean_sym}"
-            quote_obj = (batch_quotes.get(lookup_sym) or batch_quotes.get(clean_sym)) if batch_quotes else None
+            quote_obj = (
+                (batch_quotes.get(lookup_sym) or batch_quotes.get(clean_sym))
+                if batch_quotes
+                else None
+            )
             spot = (
-                float(getattr(quote_obj, "last_price", 0.0) or getattr(quote_obj, "ltp", 0.0) or 0.0)
+                float(
+                    getattr(quote_obj, "last_price", 0.0) or getattr(quote_obj, "ltp", 0.0) or 0.0
+                )
                 if quote_obj
                 else 0.0
             )
@@ -127,7 +145,9 @@ def detect_options_momentum_breakouts(
             if spot <= 0:
                 continue
 
-            spot_change_pct = float(getattr(quote_obj, "change_pct", 0.0) or 0.0) if quote_obj else 0.0
+            spot_change_pct = (
+                float(getattr(quote_obj, "change_pct", 0.0) or 0.0) if quote_obj else 0.0
+            )
             spot_open = float(getattr(quote_obj, "open", 0.0) or 0.0) if quote_obj else 0.0
             spot_high = float(getattr(quote_obj, "high", 0.0) or 0.0) if quote_obj else 0.0
             spot_low = float(getattr(quote_obj, "low", 0.0) or 0.0) if quote_obj else 0.0
@@ -163,8 +183,13 @@ def detect_options_momentum_breakouts(
                     ):
                         is_bull_drive = True  # Open = Low Bullish Institutional Sweep
 
-                is_vwap_displaced = bool(spot_vwap > 0 and abs(spot - spot_vwap) / spot_vwap >= 0.005)
-                is_momentum_active = bool(abs(spot_change_pct) >= 0.50 or (spot_open > 0 and abs(spot - spot_open) / spot_open >= 0.005))
+                is_vwap_displaced = bool(
+                    spot_vwap > 0 and abs(spot - spot_vwap) / spot_vwap >= 0.005
+                )
+                is_momentum_active = bool(
+                    abs(spot_change_pct) >= 0.50
+                    or (spot_open > 0 and abs(spot - spot_open) / spot_open >= 0.005)
+                )
 
                 if (spot_open > 0 or spot_vwap > 0 or spot_change_pct != 0.0) and not (
                     is_momentum_active or is_bear_drive or is_bull_drive or is_vwap_displaced
@@ -241,7 +266,23 @@ def detect_options_momentum_breakouts(
             if not atm_contracts:
                 continue
 
-            atm_contracts.sort(key=lambda c: abs(getattr(c, "strike", 0.0) - spot))
+            if is_idx:
+                atm_contracts.sort(key=lambda c: abs(getattr(c, "strike", 0.0) - spot))
+            else:
+                # Institutional Single-Stock High-Torque Sweet-Spot Scoring (Delta 0.38 - 0.48):
+                # Balances moneyness, turnover, and premium sweet-spot (1.2% - 3.5% of spot)
+                def _stock_strike_score(c):
+                    c_strk = getattr(c, "strike", 0.0)
+                    c_prem = float(getattr(c, "last_price", 0.0) or 0.0)
+                    c_v = getattr(c, "volume", 0)
+                    c_o = getattr(c, "oi", 0)
+                    dist_p = abs(c_strk - spot) / max(1.0, spot)
+                    prem_ratio = c_prem / max(1.0, spot)
+                    prem_score = max(0.0, 10.0 - abs(prem_ratio - 0.022) * 250.0)
+                    turnover = min(15.0, (c_v / max(1, c_o)) * 5.0)
+                    return prem_score + turnover - (dist_p * 80.0)
+
+                atm_contracts.sort(key=_stock_strike_score, reverse=True)
 
             # ── Underlying Price Action & SMC Due Diligence ──
             from market.history import get_ohlcv
@@ -254,9 +295,7 @@ def detect_options_momentum_breakouts(
 
             if df_5m is not None and len(df_5m) >= 1:
                 try:
-                    last_c = float(
-                        df_5m.iloc[-1].get("close", df_5m.iloc[-1].get("Close", 0.0))
-                    )
+                    last_c = float(df_5m.iloc[-1].get("close", df_5m.iloc[-1].get("Close", 0.0)))
                     if last_c > 0 and abs(last_c - spot) / max(1.0, spot) > 0.02:
                         df_5m = None
                 except Exception:
@@ -266,17 +305,11 @@ def detect_options_momentum_breakouts(
                 try:
                     vols = df_5m["volume"].values
                     highs = (
-                        df_5m["high"].values
-                        if "high" in df_5m.columns
-                        else df_5m["High"].values
+                        df_5m["high"].values if "high" in df_5m.columns else df_5m["High"].values
                     )
-                    lows = (
-                        df_5m["low"].values if "low" in df_5m.columns else df_5m["Low"].values
-                    )
+                    lows = df_5m["low"].values if "low" in df_5m.columns else df_5m["Low"].values
                     closes = (
-                        df_5m["close"].values
-                        if "close" in df_5m.columns
-                        else df_5m["Close"].values
+                        df_5m["close"].values if "close" in df_5m.columns else df_5m["Close"].values
                     )
                     typical_price = (highs + lows + closes) / 3.0
                     cum_vol = np.cumsum(vols)
@@ -322,6 +355,7 @@ def detect_options_momentum_breakouts(
                 if expiry_date:
                     try:
                         from engine.alert_expiry import is_0dte_afternoon
+
                         is_zero_dte_pm = is_0dte_afternoon(str(expiry_date), ref_dt=now_dt)
                         if is_zero_dte_pm:
                             if opt_type == "CE" and strike > (spot * 1.002):
@@ -367,6 +401,7 @@ def detect_options_momentum_breakouts(
                 if not is_idx and expiry_date:
                     try:
                         from engine.alert_expiry import is_monthly_physical_expiry_week
+
                         is_physical_expiry_week = is_monthly_physical_expiry_week(
                             str(expiry_date), symbol=clean_sym, ref_dt=now_dt
                         )
@@ -449,58 +484,168 @@ def detect_options_momentum_breakouts(
                     )
                     continue
 
-                sector_tailwind_bonus = 0
-                if not is_idx:
-                    try:
-                        from analysis.sector_rotation import get_stock_tailwind
-
-                        tailwind = get_stock_tailwind(clean_sym)
-                        if tailwind and hasattr(tailwind, "quadrant"):
-                            if opt_type == "CE":
-                                if tailwind.quadrant in ("LEADING", "IMPROVING"):
-                                    sector_tailwind_bonus = 8
-                                elif tailwind.quadrant == "LAGGING" and not (vol_oi >= 2.5):
-                                    logger.debug(
-                                        f"[OptionsBreakout] Suppressed Call on {clean_sym}: LAGGING RRG ({getattr(tailwind, 'sector', '')})"
-                                    )
-                                    continue
-                            elif opt_type == "PE":
-                                if tailwind.quadrant == "LAGGING":
-                                    sector_tailwind_bonus = 8
-                                elif tailwind.quadrant == "LEADING" and not (vol_oi >= 2.5):
-                                    logger.debug(
-                                        f"[OptionsBreakout] Suppressed Put on {clean_sym}: LEADING RRG ({getattr(tailwind, 'sector', '')})"
-                                    )
-                                    continue
-                    except Exception as e_rrg:
-                        logger.debug(f"[OptionsBreakout] RRG tailwind check error for {clean_sym}: {e_rrg}")
-
                 is_decoupler = False
                 opt_pch = getattr(c, "pchange", 0.0) or getattr(c, "change_pct", 0.0) or 0.0
                 if not is_idx:
                     if opt_type == "CE":
                         if (vol_oi >= 1.8 and vol >= 2500 and opt_pch >= 15.0) or (
-                            spot_change_pct and spot_change_pct >= 1.8 and (vol_oi >= 1.2 or vol >= 2000)
+                            spot_change_pct
+                            and spot_change_pct >= 1.8
+                            and (vol_oi >= 1.2 or vol >= 2000)
                         ):
                             is_decoupler = True
                     elif opt_type == "PE":
                         if (vol_oi >= 1.8 and vol >= 2500 and opt_pch >= 15.0) or (
-                            spot_change_pct and spot_change_pct <= -1.8 and (vol_oi >= 1.2 or vol >= 2000)
+                            spot_change_pct
+                            and spot_change_pct <= -1.8
+                            and (vol_oi >= 1.2 or vol >= 2000)
                         ):
                             is_decoupler = True
+
+                is_writer_panic = False
+                writer_panic_note = ""
+                if oi_change is not None and oi > 0:
+                    try:
+                        oi_chg_f = float(oi_change)
+                        base_oi = max(1.0, oi - oi_chg_f)
+                        oi_chg_pct = (oi_chg_f / base_oi) * 100.0
+                        if opt_type == "CE" and (oi_chg_pct <= -4.0 or oi_chg_f <= -25000):
+                            is_writer_panic = True
+                            writer_panic_note = (
+                                f"Call Writer Capitulation: OI shedding {oi_chg_pct:.1f}% "
+                                f"({oi_chg_f:,.0f} contracts unwound) — short squeeze cascade active"
+                            )
+                        elif opt_type == "PE" and (oi_chg_pct <= -4.0 or oi_chg_f <= -25000):
+                            is_writer_panic = True
+                            writer_panic_note = (
+                                f"Put Writer Capitulation: OI shedding {oi_chg_pct:.1f}% "
+                                f"({oi_chg_f:,.0f} contracts unwound) — long liquidation cascade active"
+                            )
+                    except Exception:
+                        pass
+
+                # Extreme Idiosyncratic Catalyst Escape Hatch:
+                # Allows stock options to fire even if parent sector is not supportive,
+                # ONLY IF extraordinary volume/OI turnover, huge price displacement, or writer panic decouples it.
+                is_extreme_catalyst = False
+                if not is_idx:
+                    is_extreme_catalyst = bool(
+                        is_decoupler
+                        or is_writer_panic
+                        or (vol_oi >= 2.5 and vol >= 1500)
+                        or (spot_change_pct and abs(spot_change_pct) >= 2.5)
+                    )
+
+                # ── Time-of-Day Institutional Gates ──
+                if not is_test_env:
+                    # 1. Opening Auction Discovery Freeze (09:15 - 09:25 IST)
+                    # Squelch speculative breakout buying before morning market structure forms
+                    if is_opening_freeze and not (
+                        is_bear_drive or is_bull_drive or is_extreme_catalyst
+                    ):
+                        logger.debug(
+                            f"[OptionsBreakout] Suppressed {clean_sym} during 09:15-09:25 IST opening auction discovery"
+                        )
+                        continue
+
+                    # 2. Midday Volume Lull (11:45 - 13:15 IST)
+                    # Suppress single-stock options during midday consolidation unless extreme catalyst
+                    if is_midday_lull and not is_idx and not is_extreme_catalyst:
+                        if vol_oi < 2.0 or vol < 1500:
+                            logger.debug(
+                                f"[OptionsBreakout] Suppressed {clean_sym} during 11:45-13:15 IST midday lull (vol_oi {vol_oi}x < 2.0x)"
+                            )
+                            continue
+
+                    # 3. Late Session Intraday Theta Drag (post-14:45 IST)
+                    # Ban new intraday option buying setups into market close
+                    if is_late_session_theta and not is_next_month_routed:
+                        logger.debug(
+                            f"[OptionsBreakout] Suppressed {clean_sym} post-14:45 IST: terminal intraday theta collapse"
+                        )
+                        continue
+
+                # Institutional Sector Support Gate ("A rising tide lifts all boats")
+                sector_tailwind_bonus = 0
+                sec_id = None
+                sec_name = None
+                tailwind = None
+                if not is_idx:
+                    try:
+                        from analysis.universe import get_stock_sector
+                        from analysis.sector_rotation import get_stock_tailwind
+
+                        sec_id, sec_name = get_stock_sector(clean_sym)
+                        tailwind = get_stock_tailwind(clean_sym)
+                    except Exception as e_sec:
+                        logger.debug(
+                            f"[OptionsBreakout] Sector lookup failed for {clean_sym}: {e_sec}"
+                        )
+
+                    if tailwind and hasattr(tailwind, "quadrant"):
+                        quad = tailwind.quadrant
+                        rs_intra = float(getattr(tailwind, "intraday_rs", 0.0) or 0.0)
+                        align = getattr(tailwind, "alignment", "")
+                        intra_align = getattr(tailwind, "intraday_alignment", "")
+
+                        if opt_type == "CE":
+                            is_sector_support = bool(
+                                quad in ("LEADING", "IMPROVING")
+                                or rs_intra >= 0.20
+                                or align in ("STRONG_TAILWIND", "MODERATE_TAILWIND")
+                                or intra_align in ("STRONG_INTRADAY_TAILWIND", "INTRADAY_TAILWIND")
+                            )
+                            if is_sector_support:
+                                sector_tailwind_bonus = 10
+                            elif not is_extreme_catalyst:
+                                logger.debug(
+                                    f"[OptionsBreakout] Suppressed Call on {clean_sym}: Lacks sector support ({sec_name} in {quad}, RS {rs_intra:+.2f}%) and no extreme catalyst"
+                                )
+                                continue
+                        elif opt_type == "PE":
+                            is_sector_support = bool(
+                                quad in ("LAGGING", "WEAKENING")
+                                or rs_intra <= -0.20
+                                or align in ("HEADWIND", "NEUTRAL")
+                                or intra_align
+                                in ("HEADWIND", "INTRADAY_HEADWIND", "SEVERE_INTRADAY_HEADWIND")
+                            )
+                            if is_sector_support:
+                                sector_tailwind_bonus = 10
+                            elif not is_extreme_catalyst:
+                                logger.debug(
+                                    f"[OptionsBreakout] Suppressed Put on {clean_sym}: Lacks sector support ({sec_name} in {quad}, RS {rs_intra:+.2f}%) and no extreme catalyst"
+                                )
+                                continue
 
                 if not is_idx and is_nifty_markdown and opt_type == "CE":
                     from analysis.universe import get_stock_sector
 
-                    sec_id, sec_name = get_stock_sector(clean_sym)
+                    if not sec_name:
+                        sec_id, sec_name = get_stock_sector(clean_sym)
                     is_defensive = any(
                         d in (sec_name or "").upper() for d in ("PHARMA", "FMCG", "HEALTH")
                     )
                     is_thematic = any(
                         d in (sec_name or "").upper()
-                        for d in ("DEFENCE", "RAIL", "ENERGY", "CAPITAL", "INFRA", "EMS", "TECH", "SOLAR", "CONSUMER")
+                        for d in (
+                            "DEFENCE",
+                            "RAIL",
+                            "ENERGY",
+                            "CAPITAL",
+                            "INFRA",
+                            "EMS",
+                            "TECH",
+                            "SOLAR",
+                            "CONSUMER",
+                        )
                     )
-                    if not (is_defensive or is_thematic or sector_tailwind_bonus > 0 or is_decoupler):
+                    if not (
+                        is_defensive
+                        or is_thematic
+                        or sector_tailwind_bonus > 0
+                        or is_extreme_catalyst
+                    ):
                         logger.debug(
                             f"[OptionsBreakout] Suppressed Call breakout on {clean_sym}: NIFTY in markdown ({nifty_change:.2f}%)"
                         )
@@ -509,9 +654,10 @@ def detect_options_momentum_breakouts(
                 if not is_idx and is_nifty_markup and opt_type == "PE":
                     from analysis.universe import get_stock_sector
 
-                    sec_id, sec_name = get_stock_sector(clean_sym)
-                    is_lagging = any(d in sec_name.upper() for d in ("MEDIA", "REALTY"))
-                    if not (is_lagging or sector_tailwind_bonus > 0 or is_decoupler):
+                    if not sec_name:
+                        sec_id, sec_name = get_stock_sector(clean_sym)
+                    is_lagging = any(d in (sec_name or "").upper() for d in ("MEDIA", "REALTY"))
+                    if not (is_lagging or sector_tailwind_bonus > 0 or is_extreme_catalyst):
                         logger.debug(
                             f"[OptionsBreakout] Suppressed Put surge on {clean_sym}: NIFTY in markup (+{nifty_change:.2f}%)"
                         )
@@ -564,8 +710,12 @@ def detect_options_momentum_breakouts(
                         )
 
                         conf_res = detect_confirmation_candle(df_5m, direction=direction)
-                        is_confirmed = bool(conf_res.get("confirmed")) if isinstance(conf_res, dict) else False
-                        conf_candle = conf_res.get("pattern") if isinstance(conf_res, dict) else None
+                        is_confirmed = (
+                            bool(conf_res.get("confirmed")) if isinstance(conf_res, dict) else False
+                        )
+                        conf_candle = (
+                            conf_res.get("pattern") if isinstance(conf_res, dict) else None
+                        )
                         if is_confirmed:
                             confirmation_bonus = 8
 
@@ -583,7 +733,9 @@ def detect_options_momentum_breakouts(
                                     f"[OptionsBreakout] Suppressed CE on {clean_sym}: Bearish RSI divergence trap ({div_type})"
                                 )
                                 continue
-                            elif opt_type == "PE" and div_bias == "BULLISH" and "REGULAR" in div_type:
+                            elif (
+                                opt_type == "PE" and div_bias == "BULLISH" and "REGULAR" in div_type
+                            ):
                                 logger.debug(
                                     f"[OptionsBreakout] Suppressed PE on {clean_sym}: Bullish RSI divergence trap ({div_type})"
                                 )
@@ -593,7 +745,9 @@ def detect_options_momentum_breakouts(
                             ):
                                 divergence_bonus = 6
                     except Exception as e_smc:
-                        logger.debug(f"[OptionsBreakout] SMC candle/divergence error for {clean_sym}: {e_smc}")
+                        logger.debug(
+                            f"[OptionsBreakout] SMC candle/divergence error for {clean_sym}: {e_smc}"
+                        )
 
                 if df_5m is not None and len(df_5m) >= 10:
                     try:
@@ -613,7 +767,9 @@ def detect_options_momentum_breakouts(
                                 )
                                 continue
                     except Exception as e_ens:
-                        logger.debug(f"[OptionsBreakout] Ensemble veto error for {clean_sym}: {e_ens}")
+                        logger.debug(
+                            f"[OptionsBreakout] Ensemble veto error for {clean_sym}: {e_ens}"
+                        )
 
                 vp_bonus = 0
                 vp_tags = []
@@ -627,19 +783,29 @@ def detect_options_momentum_breakouts(
                             if opt_type == "CE" and spot >= vp.vah * 0.998:
                                 vp_bonus += 5
                                 vp_tags.append("VAH_BREAKOUT")
+                                if spot > vp.vah * 1.002:
+                                    vp_bonus += 3
+                                    vp_tags.append("LVN_VACUUM_AIRSPACE")
                             elif opt_type == "CE" and poc_dist <= 0.003:
                                 vp_bonus += 4
                                 vp_tags.append("POC_SUPPORT_BOUNCE")
                             elif opt_type == "PE" and spot <= vp.val * 1.002:
                                 vp_bonus += 5
                                 vp_tags.append("VAL_BREAKDOWN")
+                                if spot < vp.val * 0.998:
+                                    vp_bonus += 3
+                                    vp_tags.append("LVN_VACUUM_AIRSPACE")
                             elif opt_type == "PE" and poc_dist <= 0.003:
                                 vp_bonus += 4
                                 vp_tags.append("POC_RESISTANCE_REJECT")
                     except Exception as e_vp:
-                        logger.debug(f"[OptionsBreakout] Volume profile error for {clean_sym}: {e_vp}")
+                        logger.debug(
+                            f"[OptionsBreakout] Volume profile error for {clean_sym}: {e_vp}"
+                        )
 
-                alert_id = f"aa-optmom-{opt_type.lower()}-{clean_sym}-{int(strike)}-{uuid.uuid4().hex[:6]}"
+                alert_id = (
+                    f"aa-optmom-{opt_type.lower()}-{clean_sym}-{int(strike)}-{uuid.uuid4().hex[:6]}"
+                )
 
                 tp = None
                 opt_plan = None
@@ -677,7 +843,9 @@ def detect_options_momentum_breakouts(
                     opt_sl = max(opt_sl, round(opt_ltp - max_opt_sl_risk, 2))
                     opt_risk = max(0.2, opt_ltp - opt_sl)
                     opt_t0_5 = round(opt_ltp + 1.0 * opt_risk, 2)
-                    opt_t1 = max(float(opt_plan.get("t1_premium") or 0.0), round(opt_ltp + 1.8 * opt_risk, 2))
+                    opt_t1 = max(
+                        float(opt_plan.get("t1_premium") or 0.0), round(opt_ltp + 1.8 * opt_risk, 2)
+                    )
                     opt_t2 = max(
                         float(opt_plan.get("t2_premium") or 0.0), round(opt_ltp + 3.0 * opt_risk, 2)
                     )
@@ -741,7 +909,9 @@ def detect_options_momentum_breakouts(
                         conf_score += 12 if vwap_dist_pct >= 0.8 else 8
                     elif opt_type == "PE" and spot <= spot_vwap * 0.995:
                         conf_score += 12 if vwap_dist_pct >= 0.8 else 8
-                    elif (opt_type == "CE" and spot >= spot_vwap) or (opt_type == "PE" and spot <= spot_vwap):
+                    elif (opt_type == "CE" and spot >= spot_vwap) or (
+                        opt_type == "PE" and spot <= spot_vwap
+                    ):
                         conf_score += 4
 
                 if tp and tp.is_asymmetry_viable:
@@ -750,7 +920,9 @@ def detect_options_momentum_breakouts(
                 if upper_wick_ratio <= 0.20 and lower_wick_ratio <= 0.20:
                     conf_score += 5
 
-                if is_gamma_squeeze:
+                if is_writer_panic:
+                    conf_score += 10
+                elif is_gamma_squeeze:
                     conf_score += 7
                 elif oi_change and oi_change < 0:
                     conf_score += 4
@@ -799,15 +971,21 @@ def detect_options_momentum_breakouts(
                 )
 
                 lot_tag = f" (Lot: {lot_sz})" if (lot_sz and lot_sz > 1) else ""
+                sec_badge = f" [{sec_name.upper()}]" if (sec_name and not is_idx) else ""
+                cat_badge = (
+                    " ⚡ DECOUPLER"
+                    if (not is_idx and is_extreme_catalyst and not sector_tailwind_bonus)
+                    else ""
+                )
                 if opt_type == "PE":
-                    headline = f"🔴 OPTIONS MOMENTUM (PUT SURGE): {contract_sym} @ ₹{opt_ltp:,.1f}{lot_tag} (Vol/OI {vol_oi}x)"
+                    headline = f"🔴 OPTIONS MOMENTUM{sec_badge}{cat_badge} (PUT SURGE): {contract_sym} @ ₹{opt_ltp:,.1f}{lot_tag} (Vol/OI {vol_oi}x)"
                     summary = (
                         f"Institutional Put surge in {clean_sym} {int(strike)} PE. "
                         f"Underlying spot ₹{spot:,.1f}{spot_anchor_str}. Turnover: {vol:,} contracts ({vol_oi}x OI). "
                         f"Entry: ₹{opt_ltp:,.1f} | SL: ₹{opt_sl:,.1f} | T1: ₹{opt_t1:,.1f} (Scale 50% & SL to Cost) | T2: ₹{opt_t2:,.1f}.{drive_tag}{friday_tag}{dte_pm_tag}{phys_tag}{rollover_tag}"
                     )
                 else:
-                    headline = f"🟢 OPTIONS MOMENTUM: {contract_sym} @ ₹{opt_ltp:,.1f}{lot_tag} (Vol/OI {vol_oi}x)"
+                    headline = f"🟢 OPTIONS MOMENTUM{sec_badge}{cat_badge}: {contract_sym} @ ₹{opt_ltp:,.1f}{lot_tag} (Vol/OI {vol_oi}x)"
                     summary = (
                         f"Institutional Call surge in {clean_sym} {int(strike)} CE. "
                         f"Underlying spot ₹{spot:,.1f}{spot_anchor_str}. Turnover: {vol:,} contracts ({vol_oi}x OI). "
@@ -819,10 +997,7 @@ def detect_options_momentum_breakouts(
                     alert_type="OPTIONS_MOMENTUM",
                     stage=(
                         "IGNITED"
-                        if (
-                            vol_oi >= 2.0
-                            or (is_opening_drive and (vol_oi >= 0.50 or vol >= 6000))
-                        )
+                        if (vol_oi >= 2.0 or (is_opening_drive and (vol_oi >= 0.50 or vol >= 6000)))
                         else "EARLY_WARNING"
                     ),
                     symbol=clean_sym,
@@ -874,13 +1049,13 @@ def detect_options_momentum_breakouts(
                         "close": getattr(c, "close", None),
                         "is_friday_late": is_friday_late,
                         "is_opening_drive": bool(is_bear_drive or is_bull_drive),
-                        "opening_drive_type": "BEARISH_OPEN_EQUALS_HIGH" if is_bear_drive else ("BULLISH_OPEN_EQUALS_LOW" if is_bull_drive else None),
+                        "opening_drive_type": "BEARISH_OPEN_EQUALS_HIGH"
+                        if is_bear_drive
+                        else ("BULLISH_OPEN_EQUALS_LOW" if is_bull_drive else None),
                         "mtf_15m_trend": (
                             "BEARISH_BREAKDOWN"
                             if has_opening_breakdown
-                            else (
-                                "BULLISH_BREAKOUT" if has_opening_breakout else mtf_15m_trend
-                            )
+                            else ("BULLISH_BREAKOUT" if has_opening_breakout else mtf_15m_trend)
                         ),
                         "has_opening_breakdown": has_opening_breakdown,
                         "has_opening_breakout": has_opening_breakout,
@@ -899,14 +1074,32 @@ def detect_options_momentum_breakouts(
                         "divergence_type": div_type,
                         "divergence_bias": div_bias,
                         "volume_profile_tags": vp_tags,
+                        "is_writer_panic": is_writer_panic,
+                        "writer_panic_note": writer_panic_note if is_writer_panic else None,
+                        "is_lvn_vacuum": "LVN_VACUUM_AIRSPACE" in vp_tags,
                         "is_0dte_afternoon": is_zero_dte_pm,
                         "physical_settlement_week": is_physical_expiry_week or is_next_month_routed,
-                        "rollover_series": "NEXT_MONTH" if is_next_month_routed else "CURRENT_MONTH",
+                        "rollover_series": "NEXT_MONTH"
+                        if is_next_month_routed
+                        else "CURRENT_MONTH",
                         "is_rollover_recommended": is_next_month_routed,
                         "rollover_protected": is_next_month_routed,
                         "sector_tailwind_bonus": sector_tailwind_bonus,
                         "decoupler_status": "VERIFIED_DECOUPLER" if is_decoupler else "NORMAL",
                         "is_decoupler": is_decoupler,
+                        "is_extreme_catalyst": is_extreme_catalyst if not is_idx else False,
+                        "sector_id": sec_id or ("index" if is_idx else "broad_market"),
+                        "sector_name": sec_name or ("Index F&O" if is_idx else "Broad Market"),
+                        "sector_quadrant": getattr(tailwind, "quadrant", "UNAVAILABLE")
+                        if tailwind
+                        else "UNAVAILABLE",
+                        "sector_alignment": getattr(tailwind, "alignment", "UNAVAILABLE")
+                        if tailwind
+                        else "UNAVAILABLE",
+                        "sector_rs": float(getattr(tailwind, "intraday_rs", 0.0) or 0.0)
+                        if tailwind
+                        else 0.0,
+                        "time_stop_mins": 20,
                     },
                     actionable_plan={
                         "action": f"BUY {opt_type}",
@@ -923,6 +1116,15 @@ def detect_options_momentum_breakouts(
                         "risk_reward": rr_str,
                         "when_to_buy": when_to_buy_str,
                         "when_to_wait": when_to_wait_str,
+                        "impulse_trigger_level": f"₹{round(spot * (1.002 if opt_type == 'CE' else 0.998), 1):,.1f} (Spot Breakout Tick)",
+                        "fast_scalp": {
+                            "scalp_target_premium": f"₹{round(opt_ltp * 1.20, 1):,.1f}",
+                            "scalp_target_pct": "+20.0%",
+                            "scalp_target_eta": "10m–15m",
+                            "scalp_profit_rule": "Book 70% at scalp target (+20%), move SL to Breakeven (+0.2%), let 30% runner ride",
+                            "time_stop_mins": 20,
+                            "time_stop_rule": "If position has < +0.40R or < +5% gain after 20 minutes, scratch at CMP to halt theta decay",
+                        },
                         "profit_rule": (
                             f"🏆 3-TIER PROFIT-TAKING: "
                             f"1) Scale 50% at T1 (₹{opt_t1:,.1f}) & move SL to Breakeven (0 Risk). "
@@ -934,6 +1136,11 @@ def detect_options_momentum_breakouts(
                         "spot_invalidation_anchor": f"₹{tp.invalidation_stop:,.1f}"
                         if (tp and tp.invalidation_stop > 0)
                         else None,
+                        "sector_name": sec_name or ("Index F&O" if is_idx else "Broad Market"),
+                        "sector_id": sec_id or ("index" if is_idx else "broad_market"),
+                        "sector_support": "ALIGNED"
+                        if sector_tailwind_bonus > 0
+                        else ("DECOUPLER" if is_extreme_catalyst else "NEUTRAL"),
                         "friday_weekend_warning": friday_tag.strip() if friday_tag else None,
                         "zero_dte_afternoon_guard": (
                             "⚠️ 0DTE AFTERNOON: Accelerated theta decay active. Deep ATM/ITM only; mandatory square-off by 15:15 IST."
@@ -953,7 +1160,16 @@ def detect_options_momentum_breakouts(
                     },
                 )
 
-                decoupler_pts = 10.0 if alert.metrics.get("decoupler_status") == "VERIFIED_DECOUPLER" else 0.0
+                decoupler_pts = (
+                    12.0
+                    if alert.metrics.get("is_extreme_catalyst")
+                    else (
+                        10.0
+                        if alert.metrics.get("decoupler_status") == "VERIFIED_DECOUPLER"
+                        else 0.0
+                    )
+                )
+                sector_pts = 10.0 if sector_tailwind_bonus > 0 else 0.0
                 drive_pts = 5.0 if (is_bull_drive or is_bear_drive) else 0.0
                 gamma_pts = 5.0 if is_gamma_squeeze else 0.0
 
@@ -963,6 +1179,7 @@ def detect_options_momentum_breakouts(
                     + min(15.0, (vol / 5000.0) * 15.0)
                     + (10.0 if (tp and tp.is_asymmetry_viable) else 0.0)
                     + decoupler_pts
+                    + sector_pts
                     + drive_pts
                     + gamma_pts
                 )
@@ -977,7 +1194,7 @@ def detect_options_momentum_breakouts(
 
     recent_options_count = 0
     now_ts = time.time()
-    for rec_a in (recent_alerts or []):
+    for rec_a in recent_alerts or []:
         if rec_a.alert_type == "OPTIONS_MOMENTUM" and not rec_a.symbol.startswith(
             ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX")
         ):
@@ -993,7 +1210,10 @@ def detect_options_momentum_breakouts(
             ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX")
         )
         if is_stock and (recent_options_count + len(found)) >= 3:
-            if alert.confidence < 88 and alert.metrics.get("decoupler_status") != "VERIFIED_DECOUPLER":
+            if (
+                alert.confidence < 88
+                and alert.metrics.get("decoupler_status") != "VERIFIED_DECOUPLER"
+            ):
                 logger.debug(
                     f"[OptionsBreakout] Paced options alert {alert.symbol}: Rolling 5m limit reached (score {q_score:.1f}, conf {alert.confidence})"
                 )

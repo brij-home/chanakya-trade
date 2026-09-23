@@ -4,10 +4,8 @@ Inspects today's alerts (2026-09-22) and assesses market data for the session.
 """
 
 import json
-import sys
-from datetime import datetime
-from pathlib import Path
-from engine.auto_alert_engine import AUTO_ALERTS_FILE, auto_alert_engine
+from engine.auto_alert_engine import AUTO_ALERTS_FILE
+
 
 def main():
     print(f"AUTO_ALERTS_FILE: {AUTO_ALERTS_FILE}")
@@ -36,7 +34,7 @@ def main():
         print(f"  {d}: {c} alerts")
 
     print(f"\nTotal alerts for today ({today_str}): {len(today_alerts)}")
-    
+
     # If today_alerts is empty, let's also check the most recent date
     target_alerts = today_alerts
     if not target_alerts and data:
@@ -62,25 +60,32 @@ def main():
         achieved = a.get("achieved_milestones", [])
         horizon = a.get("horizon")
         notes = a.get("notes", "")[:120] if a.get("notes") else ""
-        
+
         # Calculate R:R if available
         rr_str = "N/A"
         try:
             if entry and sl and t1 and float(entry) != float(sl):
                 risk = abs(float(entry) - float(sl))
                 reward = abs(float(t1) - float(entry))
-                rr_str = f"1:{reward/risk:.2f}"
+                rr_str = f"1:{reward / risk:.2f}"
         except Exception:
             pass
 
-        print(f"[{idx+1}] {ts} | {sym} | {atype} | {action} | Entry: {entry} | SL: {sl} | T1: {t1} | RR: {rr_str} | Conf: {conf}%")
-        print(f"    Status: {status} | Invalidated: {is_inv} ({inv_reason}) | Milestones: {achieved} | Horizon: {horizon}")
+        print(
+            f"[{idx + 1}] {ts} | {sym} | {atype} | {action} | Entry: {entry} | SL: {sl} | T1: {t1} | T2: {t2} | RR: {rr_str} | Conf: {conf}%"
+        )
+        print(
+            f"    Status: {status} | Invalidated: {is_inv} ({inv_reason}) | Milestones: {achieved} | Horizon: {horizon}"
+        )
         if notes:
             print(f"    Notes: {notes}")
         scrutiny = a.get("scrutiny_details")
         if scrutiny:
-            print(f"    Scrutiny: {scrutiny.get('verdict')} | Score: {scrutiny.get('composite_score')} | Reason: {scrutiny.get('reason')}")
+            print(
+                f"    Scrutiny: {scrutiny.get('verdict')} | Score: {scrutiny.get('composite_score')} | Reason: {scrutiny.get('reason')}"
+            )
         print("-" * 120)
+
 
 if __name__ == "__main__":
     main()

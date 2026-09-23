@@ -194,9 +194,7 @@ def parse_contract_announcement_text(
     cr_match = re.search(
         r"(?:Rs\.?|INR|₹)\s*([\d\.]+)\s*(?:Cr|Crore|crores)", clean_text, re.IGNORECASE
     )
-    usd_match = re.search(
-        r"(?:USD|\$)\s*([\d\.]+)\s*(?:Mn|Million|mn)", clean_text, re.IGNORECASE
-    )
+    usd_match = re.search(r"(?:USD|\$)\s*([\d\.]+)\s*(?:Mn|Million|mn)", clean_text, re.IGNORECASE)
 
     contract_cr = 0.0
     if cr_match:
@@ -320,7 +318,7 @@ def analyze_order_book_catalyst(
             f"🏗️ Massive Revenue Visibility: ₹{order_book_cr:,.0f} Cr order book provides {b_to_bill:.1f}x book-to-bill (~{runway_years} years revenue lock-in)."
         )
         insights.append(
-            f"High operating leverage potential: Fixed cost absorption expected to accelerate PAT expansion over FY26-FY28."
+            "High operating leverage potential: Fixed cost absorption expected to accelerate PAT expansion over FY26-FY28."
         )
     elif b_to_bill >= 1.5:
         verdict = "RAPID_EXPANSION"

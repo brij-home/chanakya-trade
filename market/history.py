@@ -150,12 +150,14 @@ def get_ohlcv(
                     try:
                         sliced = master_df.loc[master_df.index >= cutoff_dt]
                     except Exception:
-                        sliced = master_df.iloc[-min(len(master_df), max(15, days * 75)):]
+                        sliced = master_df.iloc[-min(len(master_df), max(15, days * 75)) :]
                     if sliced.empty:
-                        sliced = master_df.iloc[-min(len(master_df), max(15, days * 75)):]
+                        sliced = master_df.iloc[-min(len(master_df), max(15, days * 75)) :]
                     res_df = sliced.copy()
                     if include_live_candle:
-                        res_df = inject_live_tick(res_df, symbol=symbol, exchange=exchange, interval=kite_interval)
+                        res_df = inject_live_tick(
+                            res_df, symbol=symbol, exchange=exchange, interval=kite_interval
+                        )
                     return res_df
 
     to_date = effective_to or datetime.now()
@@ -238,7 +240,8 @@ def get_ohlcv(
     is_crypto = (
         exchange.upper() in ("CRYPTO", "BINANCE")
         or symbol.upper().startswith("CRYPTO:")
-        or clean_sym in (
+        or clean_sym
+        in (
             "BTC",
             "ETH",
             "SOL",
@@ -348,9 +351,7 @@ def get_ohlcv(
     df.rename(columns={"date": "date"}, inplace=True)
     if exchange.upper() in ("NSE", "BSE", "NFO", "MCX", "CDS"):
         dt_col = (
-            pd.to_datetime(df["date"], utc=True)
-            .dt.tz_convert("Asia/Kolkata")
-            .dt.tz_localize(None)
+            pd.to_datetime(df["date"], utc=True).dt.tz_convert("Asia/Kolkata").dt.tz_localize(None)
         )
         if kite_interval == "day":
             dt_col = dt_col.dt.normalize()

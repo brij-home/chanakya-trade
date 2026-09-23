@@ -631,7 +631,9 @@ def generate_mid_term_compounder_ticket(
     # Asymmetric positional targets
     target_1 = round(entry_price + (3.5 * risk_per_share), 2)  # ~+25% to +35% expansion
     target_2 = round(entry_price + (6.0 * risk_per_share), 2)  # ~+50% to +80% markup
-    target_superperformer = round(entry_price + (10.0 * risk_per_share), 2)  # +100% to +150% Superperformer
+    target_superperformer = round(
+        entry_price + (10.0 * risk_per_share), 2
+    )  # +100% to +150% Superperformer
 
     # Trailing anchors: 50 SMA / 20 EMA
     sma_50_est = round(entry_price - (1.2 * atr), 2)
@@ -900,7 +902,9 @@ def scan_multibagger_opportunity(
         entry_strat = "Wait for Minervini criteria >= 6/8 and confirmed Stage 2 expansion before taking heavy positional allocation."
 
     if cfai_rep.float_exhaustion_detected:
-        catalyst += f" 🐋 Float Exhaustion: {cfai_rep.cfai_pct:.1f}% free float absorbed in tight base."
+        catalyst += (
+            f" 🐋 Float Exhaustion: {cfai_rep.cfai_pct:.1f}% free float absorbed in tight base."
+        )
 
     if ob_rep.catalyst_verdict == "ORDER_BOOK_TITAN":
         catalyst += f" 🏗️ Order-Book Titan: {ob_rep.book_to_bill_ratio:.1f}x Book-to-Bill (~{ob_rep.revenue_runway_years}Y revenue lock-in)."
@@ -964,4 +968,3 @@ def scan_multibagger_opportunity(
         insider_de_pledging_status=insider_rep.de_pledging_status,
         insider_skin_score=insider_rep.skin_in_the_game_score,
     )
-

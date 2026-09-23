@@ -13,7 +13,6 @@ Verifies:
 from unittest.mock import MagicMock, patch
 from datetime import datetime, timezone, timedelta
 import pandas as pd
-import pytest
 
 from engine.alert_model import AutoAlert
 from engine.auto_alert_engine import AutoAlertEngine
@@ -88,11 +87,12 @@ def test_scan_crypto_now_detects_squeeze_and_momentum(tmp_path, monkeypatch):
     )
     sample_df["date"] = sample_df.index
 
-    with patch("market.crypto_stream.crypto_stream.get_quote", return_value=mock_quote), \
-         patch("market.crypto_stream.crypto_stream.get_squeeze_metrics", return_value=mock_squeeze), \
-         patch("market.crypto_stream.crypto_stream.get_klines", return_value=sample_df), \
-         patch.object(engine, "_dispatch", return_value=None):
-
+    with (
+        patch("market.crypto_stream.crypto_stream.get_quote", return_value=mock_quote),
+        patch("market.crypto_stream.crypto_stream.get_squeeze_metrics", return_value=mock_squeeze),
+        patch("market.crypto_stream.crypto_stream.get_klines", return_value=sample_df),
+        patch.object(engine, "_dispatch", return_value=None),
+    ):
         alerts = engine.scan_crypto_now()
         assert len(alerts) >= 1
         sq_alert = next((a for a in alerts if a.alert_type == "CRYPTO_SQUEEZE"), None)
@@ -155,7 +155,10 @@ def test_crypto_realtime_tick_invalidation(tmp_path, monkeypatch):
 
     assert alert.is_invalidated is True
     assert alert.stage == "INVALIDATED"
-    assert "Stop-Loss Breach" in (alert.invalidation_reason or "") or "breached" in (alert.invalidation_reason or "").lower()
+    assert (
+        "Stop-Loss Breach" in (alert.invalidation_reason or "")
+        or "breached" in (alert.invalidation_reason or "").lower()
+    )
     assert len(dispatched) == 1
     assert dispatched[0].alert_id == "crypto-test-btc-001"
 

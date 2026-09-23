@@ -23,7 +23,6 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 import threading
 from typing import Any, Optional
-import httpx
 from market.http_pool import get_nse_client
 
 logger = logging.getLogger("market.whale_feed")
@@ -176,7 +175,7 @@ def fetch_nse_bulk_block_deals() -> list[WhaleDeal]:
 
     try:
         client = get_nse_client()
-        resp = client.get(url, timeout=6.0)
+        resp = client.get(url, headers=headers, timeout=6.0)
         if resp.status_code == 200:
             raw_json = resp.json()
             raw_list = raw_json.get("data", []) if isinstance(raw_json, dict) else raw_json

@@ -6,16 +6,13 @@ Telegram chunking, RCA categorization, scheduler hooks, REST API, and CLI.
 """
 
 import json
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
 from engine.eod_report_generator import (
     EODReportGenerator,
-    EODReport,
     check_and_trigger_daily_eod,
-    get_reports_dir,
     _EOD_GENERATED_TODAY_LOCK,
 )
 
@@ -203,7 +200,7 @@ def test_eod_report_markdown_and_telegram_chunks(synthetic_alerts_file, tmp_path
     chunks = report.to_telegram_chunks()
     assert len(chunks) == 3
     for idx, c in enumerate(chunks):
-        assert len(c) <= 4000, f"Chunk {idx+1} exceeded 4000 characters ({len(c)})"
+        assert len(c) <= 4000, f"Chunk {idx + 1} exceeded 4000 characters ({len(c)})"
         assert "<b>" in c and "</b>" in c
 
 

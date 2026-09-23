@@ -9,8 +9,6 @@ Tests for:
 
 from __future__ import annotations
 
-import json
-import pytest
 from unittest.mock import MagicMock
 from engine.auto_alert_engine import AutoAlert, AutoAlertEngine
 from engine.eod_report_generator import EODReportGenerator
@@ -21,7 +19,10 @@ def test_option_entry_range_not_mangled_by_underlying_price(tmp_path, monkeypatc
     data_file = tmp_path / "auto_alerts_test.json"
     monkeypatch.setattr("engine.auto_alert_engine.get_auto_alerts_file", lambda: data_file)
     monkeypatch.setattr("engine.auto_alert_engine.AutoAlertEngine._dispatch", lambda self, a: None)
-    monkeypatch.setattr("engine.learning_engine.pattern_learning_engine.is_symbol_locked_out", lambda *a, **kw: (False, ""))
+    monkeypatch.setattr(
+        "engine.learning_engine.pattern_learning_engine.is_symbol_locked_out",
+        lambda *a, **kw: (False, ""),
+    )
     monkeypatch.setattr("market.macro.get_macro_snapshot", lambda: None)
 
     engine = AutoAlertEngine(max_buffer=20)
@@ -66,8 +67,12 @@ def test_option_entry_range_not_mangled_by_underlying_price(tmp_path, monkeypatc
 
     saved = engine._alerts[0]
     entry_range = saved.actionable_plan.get("entry_range", "")
-    assert "9,307" not in entry_range, "Entry range was erroneously overwritten with underlying futures levels!"
-    assert "340" in entry_range or "347" in entry_range, f"Entry range should remain in option premium space: {entry_range}"
+    assert "9,307" not in entry_range, (
+        "Entry range was erroneously overwritten with underlying futures levels!"
+    )
+    assert "340" in entry_range or "347" in entry_range, (
+        f"Entry range should remain in option premium space: {entry_range}"
+    )
 
 
 def test_closed_loop_target_milestone_recorded_in_learning_engine(monkeypatch):
@@ -116,7 +121,9 @@ def test_closed_loop_target_milestone_recorded_in_learning_engine(monkeypatch):
     mock_eval.r_multiple = 2.0
     mock_eval.pnl_pct = 2.2
 
-    monkeypatch.setattr("engine.auto_alert_engine.evaluate_alert_targets_and_trailing", lambda a, **kw: mock_eval)
+    monkeypatch.setattr(
+        "engine.auto_alert_engine.evaluate_alert_targets_and_trailing", lambda a, **kw: mock_eval
+    )
     monkeypatch.setattr("engine.auto_alert_engine.AutoAlertEngine._dispatch", lambda self, a: None)
     monkeypatch.setattr("market.quotes.get_ltp", lambda sym: 7000.0)
 

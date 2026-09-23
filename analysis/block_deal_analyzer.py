@@ -74,9 +74,7 @@ def analyze_block_deal_absorption(
         sym_deals = [d for d in deals_list if d.symbol.upper() == clean_sym]
 
     # Filter for institutional and promoter transactions
-    inst_deals = [
-        d for d in sym_deals if d.entity_type in ("FII", "MF", "DII", "PROMOTER")
-    ]
+    inst_deals = [d for d in sym_deals if d.entity_type in ("FII", "MF", "DII", "PROMOTER")]
 
     if not inst_deals:
         return BlockDealAbsorptionReport(
@@ -90,7 +88,9 @@ def analyze_block_deal_absorption(
             total_institutional_turnover_cr=0.0,
             deal_count=0,
             deals=[],
-            insights=[f"No major institutional block/bulk deals recorded for {clean_sym} in last {days} days."],
+            insights=[
+                f"No major institutional block/bulk deals recorded for {clean_sym} in last {days} days."
+            ],
         )
 
     # 2. Compute Volume-Weighted Institutional Execution Prices
@@ -112,9 +112,7 @@ def analyze_block_deal_absorption(
         else None
     )
 
-    total_turnover_cr = round(
-        sum(d.price * d.quantity for d in inst_deals) / 10_000_000.0, 2
-    )
+    total_turnover_cr = round(sum(d.price * d.quantity for d in inst_deals) / 10_000_000.0, 2)
 
     # 3. Determine Absorption vs Distribution Status
     insights: list[str] = []
@@ -139,7 +137,9 @@ def analyze_block_deal_absorption(
             )
         else:
             status = "NEUTRAL_CONSOLIDATION"
-            insights.append(f"Price consolidating right at institutional block cost basis ₹{vwap_buy:.2f}.")
+            insights.append(
+                f"Price consolidating right at institutional block cost basis ₹{vwap_buy:.2f}."
+            )
     elif vwap_sell is not None:
         if ltp < vwap_sell:
             status = "DISTRIBUTION_BREAKDOWN"

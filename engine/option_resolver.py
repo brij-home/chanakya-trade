@@ -95,7 +95,10 @@ def resolve_option_contract(
     lot_sz = 1
     try:
         from engine.position_sizer import get_lot_size
-        lot_sz = get_lot_size(clean_sym) or (15 if clean_sym == "NIFTY" else (15 if clean_sym == "BANKNIFTY" else 1))
+
+        lot_sz = get_lot_size(clean_sym) or (
+            15 if clean_sym == "NIFTY" else (15 if clean_sym == "BANKNIFTY" else 1)
+        )
     except Exception:
         lot_sz = 15 if is_idx else 1
 
@@ -180,7 +183,9 @@ def resolve_option_contract(
         t2_premium=opt_t2,
         lot_size=lot_sz,
         underlying_spot=spot,
-        underlying_sl=underlying_sl or (round(spot * 0.99, 1) if is_bull else round(spot * 1.01, 1)),
-        underlying_target=underlying_target or (round(spot * 1.02, 1) if is_bull else round(spot * 0.98, 1)),
+        underlying_sl=underlying_sl
+        or (round(spot * 0.99, 1) if is_bull else round(spot * 1.01, 1)),
+        underlying_target=underlying_target
+        or (round(spot * 1.02, 1) if is_bull else round(spot * 0.98, 1)),
         is_estimated=is_est,
     )

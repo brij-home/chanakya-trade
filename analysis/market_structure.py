@@ -121,10 +121,12 @@ class MarketStructureReport:
     inducement_swept: bool = False
 
     # Price Action Confirmation & Trap Filters
-    confirmation_candle: Optional[str] = None   # e.g. "Hammer", "Bullish Engulfing", None
-    confirmation_confirmed: bool = False         # True = a valid rejection candle is present
-    divergence_type: Optional[str] = None       # "BULLISH_REGULAR" | "BEARISH_REGULAR" | "BULLISH_HIDDEN" | "BEARISH_HIDDEN"
-    divergence_bias: Optional[str] = None       # "BULLISH" | "BEARISH"
+    confirmation_candle: Optional[str] = None  # e.g. "Hammer", "Bullish Engulfing", None
+    confirmation_confirmed: bool = False  # True = a valid rejection candle is present
+    divergence_type: Optional[str] = (
+        None  # "BULLISH_REGULAR" | "BEARISH_REGULAR" | "BULLISH_HIDDEN" | "BEARISH_HIDDEN"
+    )
+    divergence_bias: Optional[str] = None  # "BULLISH" | "BEARISH"
 
     summary: str = ""
     actionable_trade_idea: str = ""
@@ -196,7 +198,12 @@ def detect_confirmation_candle(
                 p2_c = float(prev2["close"])
                 p2_range = max(abs(p2_o - p2_c), 0.0001)
                 p_body = abs(p_o - p_c)
-                if p2_c < p2_o and p_body <= 0.35 * p2_range and c_c > c_o and body >= 0.5 * p2_range:
+                if (
+                    p2_c < p2_o
+                    and p_body <= 0.35 * p2_range
+                    and c_c > c_o
+                    and body >= 0.5 * p2_range
+                ):
                     result = {"confirmed": True, "pattern": "Morning Star", "strength": 88}
 
         else:  # BEARISH
@@ -220,7 +227,12 @@ def detect_confirmation_candle(
                 p2_c = float(prev2["close"])
                 p2_range = max(abs(p2_o - p2_c), 0.0001)
                 p_body = abs(p_o - p_c)
-                if p2_c > p2_o and p_body <= 0.35 * p2_range and c_c < c_o and body >= 0.5 * p2_range:
+                if (
+                    p2_c > p2_o
+                    and p_body <= 0.35 * p2_range
+                    and c_c < c_o
+                    and body >= 0.5 * p2_range
+                ):
                     result = {"confirmed": True, "pattern": "Evening Star", "strength": 88}
 
     except Exception:
@@ -1156,7 +1168,15 @@ def check_mtf_structural_alignment(
                 if hasattr(df_5m.index, "freq") or isinstance(df_5m.index, pd.DatetimeIndex):
                     df_15m = (
                         df_5m.resample("15min")
-                        .agg({"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"})
+                        .agg(
+                            {
+                                "open": "first",
+                                "high": "max",
+                                "low": "min",
+                                "close": "last",
+                                "volume": "sum",
+                            }
+                        )
                         .dropna()
                     )
             except Exception:
@@ -1172,9 +1192,8 @@ def check_mtf_structural_alignment(
                 elif ltp_15 <= ema9_15 and ema9_15 <= ema21_15 * 1.002:
                     tf_15m_trend = "BEARISH"
 
-                if (
-                    (direction == "BULLISH" and tf_15m_trend == "BULLISH")
-                    or (direction == "BEARISH" and tf_15m_trend == "BEARISH")
+                if (direction == "BULLISH" and tf_15m_trend == "BULLISH") or (
+                    direction == "BEARISH" and tf_15m_trend == "BEARISH"
                 ):
                     alignment_count += 1
 
@@ -1196,12 +1215,13 @@ def check_mtf_structural_alignment(
                 if recent_low > prior_low * 1.001 and float(recent5.mean()) > float(prior5.mean()):
                     tf_5m_trend = "BULLISH"
                 # 5m Bearish: recent high < prior high AND recent close < prior close avg
-                elif recent_high < prior_high * 0.999 and float(recent5.mean()) < float(prior5.mean()):
+                elif recent_high < prior_high * 0.999 and float(recent5.mean()) < float(
+                    prior5.mean()
+                ):
                     tf_5m_trend = "BEARISH"
 
-                if (
-                    (direction == "BULLISH" and tf_5m_trend == "BULLISH")
-                    or (direction == "BEARISH" and tf_5m_trend == "BEARISH")
+                if (direction == "BULLISH" and tf_5m_trend == "BULLISH") or (
+                    direction == "BEARISH" and tf_5m_trend == "BEARISH"
                 ):
                     alignment_count += 1
 

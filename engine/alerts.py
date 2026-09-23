@@ -311,9 +311,12 @@ class AlertManager:
             self._save()
         return removed
 
-    def invalidate_alert(self, alert_id: str, reason: str = "Manually invalidated") -> Optional[Alert]:
+    def invalidate_alert(
+        self, alert_id: str, reason: str = "Manually invalidated"
+    ) -> Optional[Alert]:
         """Invalidates an active manual alert with a clear rationale."""
         from datetime import datetime, timezone, timedelta
+
         IST = timezone(timedelta(hours=5, minutes=30))
         now_iso = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
         with self._lock:

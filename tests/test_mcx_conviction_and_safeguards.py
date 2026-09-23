@@ -19,7 +19,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from engine.alert_model import AutoAlert
-from engine.alert_scrutiny import AlertScrutinyAuditor, COMMODITY_MIN_SL_FLOORS, alert_scrutiny_auditor
+from engine.alert_scrutiny import AlertScrutinyAuditor, COMMODITY_MIN_SL_FLOORS
 from engine.auto_alert_engine import AutoAlertEngine
 from market.macro import MacroSnapshot
 
@@ -85,7 +85,9 @@ def test_natgas_sub_atr_stop_rejection(auditor: AlertScrutinyAuditor):
     assert "NATURALGAS" in reason
 
 
-def test_commodity_structural_noise_safe_stop_acceptance(auditor: AlertScrutinyAuditor, monkeypatch):
+def test_commodity_structural_noise_safe_stop_acceptance(
+    auditor: AlertScrutinyAuditor, monkeypatch
+):
     """Verifies that noise-safe structural stops (Crude >= 80 pts, NatGas >= 6 pts) pass Tier-1."""
     # Mock neutral macro to isolate stop distance testing
     monkeypatch.setattr(
@@ -323,7 +325,9 @@ def test_defined_risk_option_preferred_vehicle_annotation(monkeypatch):
 # ── 5. Tier-2 Scrutiny Prompt Injects Live Macro Context ───────────────────────
 
 
-def test_commodity_scrutiny_prompt_contains_macro_context(auditor: AlertScrutinyAuditor, monkeypatch):
+def test_commodity_scrutiny_prompt_contains_macro_context(
+    auditor: AlertScrutinyAuditor, monkeypatch
+):
     """Verifies that _build_scrutiny_prompt injects live DXY and Brent indicators into commodity prompt."""
     mock_macro = MacroSnapshot(
         dxy=103.8,
@@ -367,30 +371,15 @@ def test_format_readable_option_symbol():
     from market.options import format_readable_option_symbol, parse_option_symbol
 
     # 1. Crude Oil
-    assert (
-        format_readable_option_symbol("MCX:CRUDEOIL26SEP6500CE")
-        == "CRUDEOIL 6500 CE (26 Sep)"
-    )
-    assert (
-        format_readable_option_symbol("CRUDEOIL26SEP6500PE")
-        == "CRUDEOIL 6500 PE (26 Sep)"
-    )
+    assert format_readable_option_symbol("MCX:CRUDEOIL26SEP6500CE") == "CRUDEOIL 6500 CE (26 Sep)"
+    assert format_readable_option_symbol("CRUDEOIL26SEP6500PE") == "CRUDEOIL 6500 PE (26 Sep)"
 
     # 2. Natural Gas
-    assert (
-        format_readable_option_symbol("MCX:NATURALGAS26SEP240PE")
-        == "NATURALGAS 240 PE (26 Sep)"
-    )
+    assert format_readable_option_symbol("MCX:NATURALGAS26SEP240PE") == "NATURALGAS 240 PE (26 Sep)"
 
     # 3. Gold & Silver
-    assert (
-        format_readable_option_symbol("MCX:GOLD26OCT75000CE")
-        == "GOLD 75000 CE (26 Oct)"
-    )
-    assert (
-        format_readable_option_symbol("MCX:SILVER26NOV88000PE")
-        == "SILVER 88000 PE (26 Nov)"
-    )
+    assert format_readable_option_symbol("MCX:GOLD26OCT75000CE") == "GOLD 75000 CE (26 Oct)"
+    assert format_readable_option_symbol("MCX:SILVER26NOV88000PE") == "SILVER 88000 PE (26 Nov)"
 
     # 4. Explicit parameters override
     assert (
@@ -543,10 +532,12 @@ def test_detect_confirmation_candle_hammer():
     from analysis.market_structure import detect_confirmation_candle
 
     # Hammer: tiny body at top, long lower wick
-    df = pd.DataFrame([
-        {"open": 100.0, "high": 101.0, "low": 85.0, "close": 99.5},   # prev
-        {"open": 98.0,  "high": 99.0,  "low": 82.0, "close": 97.5},   # Hammer bar
-    ])
+    df = pd.DataFrame(
+        [
+            {"open": 100.0, "high": 101.0, "low": 85.0, "close": 99.5},  # prev
+            {"open": 98.0, "high": 99.0, "low": 82.0, "close": 97.5},  # Hammer bar
+        ]
+    )
     result = detect_confirmation_candle(df, direction="BULLISH")
     assert result["confirmed"] is True
     assert result["pattern"] in ("Hammer", "Bullish Pin Bar")
@@ -559,10 +550,12 @@ def test_detect_confirmation_candle_bearish_engulfing():
     from analysis.market_structure import detect_confirmation_candle
 
     # Prior bar is bullish, current bar fully engulfs it with bearish close
-    df = pd.DataFrame([
-        {"open": 100.0, "high": 105.0, "low": 99.0, "close": 104.0},  # bull bar
-        {"open": 106.0, "high": 107.0, "low": 97.0, "close": 98.5},   # bearish engulfing
-    ])
+    df = pd.DataFrame(
+        [
+            {"open": 100.0, "high": 105.0, "low": 99.0, "close": 104.0},  # bull bar
+            {"open": 106.0, "high": 107.0, "low": 97.0, "close": 98.5},  # bearish engulfing
+        ]
+    )
     result = detect_confirmation_candle(df, direction="BEARISH")
     assert result["confirmed"] is True
     assert result["pattern"] == "Bearish Engulfing"
@@ -571,30 +564,33 @@ def test_detect_confirmation_candle_bearish_engulfing():
 def test_detect_divergence_bullish_regular():
     """Regular bullish divergence: price LL, RSI HL."""
     import pandas as pd
-    import numpy as np
     from analysis.market_structure import detect_divergence
 
     # Construct data where price makes lower low in second half but RSI improves
     # Use a synthetic series that falls then recovers partially
-    n = 40
     prices_first = [100.0 - i * 0.2 for i in range(20)]  # declining
     prices_second = [96.0 - i * 0.3 for i in range(20)]  # declining MORE (LL in price)
 
     closes = pd.Series(prices_first + prices_second)
     # Simulate RSI improvement: first half has lower RSI, second half recovers
-    df = pd.DataFrame({
-        "close": closes,
-        "high": closes + 0.5,
-        "low": closes - 0.5,
-    })
+    df = pd.DataFrame(
+        {
+            "close": closes,
+            "high": closes + 0.5,
+            "low": closes - 0.5,
+        }
+    )
     result = detect_divergence(df)
     # We just check function returns valid dict without errors; divergence direction
     # depends on data shape
     assert "type" in result
     assert "bias" in result
     assert result["type"] in (
-        "BULLISH_REGULAR", "BEARISH_REGULAR",
-        "BULLISH_HIDDEN", "BEARISH_HIDDEN", "NONE"
+        "BULLISH_REGULAR",
+        "BEARISH_REGULAR",
+        "BULLISH_HIDDEN",
+        "BEARISH_HIDDEN",
+        "NONE",
     )
 
 
@@ -613,7 +609,7 @@ def test_tuesday_api_crude_blackout():
     """Tuesday API crude inventory blackout (20:00–21:30 IST) blocks CRUDEOIL signals."""
     import os
     from unittest.mock import patch, MagicMock
-    from datetime import datetime, timezone, timedelta
+    from datetime import timezone, timedelta
 
     IST = timezone(timedelta(hours=5, minutes=30))
     tuesday_api_time = datetime(2026, 9, 15, 20, 30, tzinfo=IST)  # Tuesday 20:30 IST
@@ -633,10 +629,15 @@ def test_tuesday_api_crude_blackout():
     mock_quote.data_state = "LIVE"
     mock_quote._is_mock = False
 
-    with patch("engine.auto_alert_engine.datetime") as mock_dt, \
-         patch("market.quotes.get_quote", return_value={"MCX:CRUDEOIL": mock_quote}), \
-         patch("engine.auto_alert_engine.AutoAlertEngine.record_alert", return_value=False), \
-         patch("engine.learning_engine.pattern_learning_engine.is_symbol_locked_out", return_value=(False, "")):
+    with (
+        patch("engine.auto_alert_engine.datetime") as mock_dt,
+        patch("market.quotes.get_quote", return_value={"MCX:CRUDEOIL": mock_quote}),
+        patch("engine.auto_alert_engine.AutoAlertEngine.record_alert", return_value=False),
+        patch(
+            "engine.learning_engine.pattern_learning_engine.is_symbol_locked_out",
+            return_value=(False, ""),
+        ),
+    ):
         mock_dt.now.return_value = tuesday_api_time
         mock_dt.side_effect = lambda *args, **kwargs: datetime(*args, **kwargs)
 
@@ -646,7 +647,9 @@ def test_tuesday_api_crude_blackout():
             results = engine.scan_commodities_now()
             # Either suppressed (0 alerts) or record_alert returned False (mocked)
             crudeoil_alerts = [a for a in results if "CRUDEOIL" in (a.symbol or "").upper()]
-            assert len(crudeoil_alerts) == 0, "CRUDEOIL signal must be suppressed during Tuesday API blackout"
+            assert len(crudeoil_alerts) == 0, (
+                "CRUDEOIL signal must be suppressed during Tuesday API blackout"
+            )
 
 
 def test_mtf_alignment_returns_alignment_count():
@@ -657,15 +660,19 @@ def test_mtf_alignment_returns_alignment_count():
     # Build a bullish 5m DataFrame
     n = 60
     prices = [100.0 + i * 0.1 for i in range(n)]
-    df_5m = pd.DataFrame({
-        "open":   [p - 0.05 for p in prices],
-        "high":   [p + 0.15 for p in prices],
-        "low":    [p - 0.15 for p in prices],
-        "close":  prices,
-        "volume": [1000] * n,
-    })
+    df_5m = pd.DataFrame(
+        {
+            "open": [p - 0.05 for p in prices],
+            "high": [p + 0.15 for p in prices],
+            "low": [p - 0.15 for p in prices],
+            "close": prices,
+            "volume": [1000] * n,
+        }
+    )
 
-    result = check_mtf_structural_alignment("CRUDEOIL", exchange="MCX", ltp=105.0, direction="BULLISH", df_5m=df_5m)
+    result = check_mtf_structural_alignment(
+        "CRUDEOIL", exchange="MCX", ltp=105.0, direction="BULLISH", df_5m=df_5m
+    )
     assert "alignment_count" in result
     assert 0 <= result["alignment_count"] <= 3
     assert "is_aligned" in result
@@ -734,9 +741,11 @@ def test_copper_and_base_metals_default_to_futures_never_options(monkeypatch):
     )
     monkeypatch.setattr("market.options.get_options_chain", lambda sym: [mock_opt])
 
-    with patch("market.quotes.get_quote", return_value={"MCX:COPPER": mock_quote}), \
-         patch("market.history.get_ohlcv", return_value=df_5m), \
-         patch("market.quotes.get_ltp", return_value=1413.5):
+    with (
+        patch("market.quotes.get_quote", return_value={"MCX:COPPER": mock_quote}),
+        patch("market.history.get_ohlcv", return_value=df_5m),
+        patch("market.quotes.get_ltp", return_value=1413.5),
+    ):
         alerts = engine.scan_commodities_now()
         assert len(alerts) >= 1
         alert = alerts[0]
@@ -838,7 +847,9 @@ def test_alert_invalidation_clears_milestones_and_purges_outcomes():
     assert inv.trailing_decision == "INVALIDATED"
 
     # Verify that pattern_learning_engine no longer holds WIN_T2 for this alert
-    matching = [o for o in pattern_learning_engine._outcomes if o.alert_id == "test-inv-milestones-123"]
+    matching = [
+        o for o in pattern_learning_engine._outcomes if o.alert_id == "test-inv-milestones-123"
+    ]
     assert len(matching) >= 1
     for m in matching:
         assert m.outcome == "INVALIDATED"
@@ -949,6 +960,3 @@ def test_eod_report_excludes_invalidated_corrupted_alerts(tmp_path, monkeypatch)
     assert report.win_count == 0
     assert report.loss_count == 0
     assert len(report.star_setups) == 0
-
-
-

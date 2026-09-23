@@ -142,12 +142,12 @@ def main() -> None:
     # Runs: Mover Autopsy → SNR Recalibration → Drift Check + Corrections → Telegram
     try:
         from engine.nightly_chain import schedule_nightly_chain
+
         schedule_nightly_chain()
     except Exception:
         pass  # Non-critical — never block startup
 
     if use_tui:
-
         # Launch Textual TUI
         from ui.app import run_tui
 

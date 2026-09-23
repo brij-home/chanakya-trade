@@ -31,7 +31,7 @@ from __future__ import annotations
 import logging
 import uuid
 from datetime import datetime, timezone, timedelta, time as dtime
-from typing import Any, Optional
+from typing import Optional
 from zoneinfo import ZoneInfo
 
 import numpy as np
@@ -167,7 +167,9 @@ def detect_opening_range_breakout(
     range_pct = (orb_range / ltp) * 100.0
     # Guard against flat chop (< 0.25% range has no expansion velocity)
     if range_pct < 0.25:
-        logger.debug(f"[ORB] {symbol} opening range too narrow ({range_pct:.2f}% < 0.25%), skipping.")
+        logger.debug(
+            f"[ORB] {symbol} opening range too narrow ({range_pct:.2f}% < 0.25%), skipping."
+        )
         return None
     # Guard against exhausted opening bar (> 3.5% range has consumed session ATR)
     if range_pct > 3.5:
@@ -175,7 +177,12 @@ def detect_opening_range_breakout(
         return None
 
     is_index = symbol.upper() in (
-        "NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX"
+        "NIFTY",
+        "BANKNIFTY",
+        "FINNIFTY",
+        "MIDCPNIFTY",
+        "SENSEX",
+        "BANKEX",
     )
 
     # 4. Evaluate Breakout Direction
@@ -231,7 +238,9 @@ def detect_opening_range_breakout(
 
             dir_eval = "BULLISH" if is_bullish else "BEARISH"
             conf_res = detect_confirmation_candle(df, direction=dir_eval)
-            is_candle_confirmed = bool(conf_res.get("confirmed")) if isinstance(conf_res, dict) else False
+            is_candle_confirmed = (
+                bool(conf_res.get("confirmed")) if isinstance(conf_res, dict) else False
+            )
             conf_candle = conf_res.get("pattern") if isinstance(conf_res, dict) else None
 
             div_res = detect_divergence(df)
@@ -282,7 +291,9 @@ def detect_opening_range_breakout(
             f"{rvol_val:.1f}x RVOL and VWAP support. Stop-Loss at Midpoint ₹{orb_mid:,.1f}."
         )
         when_buy = f"Enter on Ask or 5m retest of ₹{orb_high:,.1f} holding above VWAP."
-        when_wait = f"DO NOT CHASE above ₹{no_chase_lvl:,.1f}; wait for retest of Opening Range High."
+        when_wait = (
+            f"DO NOT CHASE above ₹{no_chase_lvl:,.1f}; wait for retest of Opening Range High."
+        )
     else:
         trigger_level = orb_low
         stop_loss = orb_mid
@@ -294,15 +305,15 @@ def detect_opening_range_breakout(
         entry_max = round(min(stop_loss - 0.5, ltp * 1.002), 1)
         entry_min = round(max(target_1 + 0.5, no_chase_lvl), 1)
         rr_ratio = round((ltp - target_1) / max(0.1, risk_pts), 1)
-        headline = (
-            f"⚡ ORB-15 BREAKDOWN: {symbol} at ₹{ltp:,.1f} (Broke Range Low ₹{orb_low:,.1f})"
-        )
+        headline = f"⚡ ORB-15 BREAKDOWN: {symbol} at ₹{ltp:,.1f} (Broke Range Low ₹{orb_low:,.1f})"
         summary = (
             f"15-min Opening Range Breakdown confirmed! Low ₹{orb_low:,.1f} breached with "
             f"{rvol_val:.1f}x RVOL and sub-VWAP pressure. Stop-Loss at Midpoint ₹{orb_mid:,.1f}."
         )
         when_buy = f"Short on Bid or 5m retest of ₹{orb_low:,.1f} staying below VWAP."
-        when_wait = f"DO NOT CHASE below ₹{no_chase_lvl:,.1f}; wait for retest of Opening Range Low."
+        when_wait = (
+            f"DO NOT CHASE below ₹{no_chase_lvl:,.1f}; wait for retest of Opening Range Low."
+        )
 
     confidence = 82
     if rvol_val >= 2.0:
@@ -311,7 +322,9 @@ def detect_opening_range_breakout(
         confidence += 4
     if is_candle_confirmed:
         confidence += 5
-    if div_type and ((is_bullish and div_bias == "BULLISH") or (is_bearish and div_bias == "BEARISH")):
+    if div_type and (
+        (is_bullish and div_bias == "BULLISH") or (is_bearish and div_bias == "BEARISH")
+    ):
         confidence += 4
     confidence = min(96, confidence)
 
@@ -442,4 +455,3 @@ def detect_opening_range_breakout(
             "profit_rule": f"Book 50% at Target 1 (₹{target_1:,.1f}), move Stop-Loss to Breakeven, trail runner to Target 2.",
         },
     )
-

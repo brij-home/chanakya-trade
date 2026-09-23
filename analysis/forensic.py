@@ -648,7 +648,9 @@ def audit_forensics(
 
     fcf_val = float(data.get("free_cash_flow") or 0.0)
     ic_val = float(data.get("interest_coverage") or 0.0)
-    is_telecom_or_utility_solvent = (sec_id in ("telecom", "utilities")) and (fcf_val > 0 or ic_val >= 2.5)
+    is_telecom_or_utility_solvent = (sec_id in ("telecom", "utilities")) and (
+        fcf_val > 0 or ic_val >= 2.5
+    )
 
     if distress_zone == "DISTRESS":
         if is_telecom_or_utility_solvent:

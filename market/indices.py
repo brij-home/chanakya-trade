@@ -114,7 +114,7 @@ class IndexPolarization:
     regime: str  # "TUG_OF_WAR_CHOP" | "UNIDIRECTIONAL_TREND" | "NORMAL_BREADTH"
     dispersion_std: float
     max_gainer: tuple[str, float]  # (symbol, change_pct)
-    max_loser: tuple[str, float]   # (symbol, change_pct)
+    max_loser: tuple[str, float]  # (symbol, change_pct)
     spread_pct: float
     heavyweight_changes: dict[str, float]
     summary: str

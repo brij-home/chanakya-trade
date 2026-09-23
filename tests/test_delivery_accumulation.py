@@ -6,7 +6,6 @@ Unit tests for Cumulative Free-Float Absorption Index (CFAI) & Stealth Delivery 
 
 import numpy as np
 import pandas as pd
-import pytest
 
 from analysis.delivery_accumulation import compute_cfai, CFAIReport
 
@@ -14,7 +13,7 @@ from analysis.delivery_accumulation import compute_cfai, CFAIReport
 def _create_synthetic_accumulation_df(n_bars: int = 30) -> pd.DataFrame:
     """Creates a synthetic DataFrame representing an institutional consolidation base with rising delivery."""
     dates = pd.date_range("2026-08-01", periods=n_bars, freq="B")
-    
+
     # Coiling price action between 1000 and 1050 (tightness ~5%)
     base_price = 1000.0
     noise = np.sin(np.linspace(0, 3 * np.pi, n_bars)) * 15.0
@@ -22,27 +21,30 @@ def _create_synthetic_accumulation_df(n_bars: int = 30) -> pd.DataFrame:
     highs = closes + 5.0
     lows = closes - 5.0
     opens = closes - 2.0
-    
+
     # Volume steady around 500k
     volumes = np.full(n_bars, 500_000.0)
-    
+
     # Delivery starts at 35% and jumps to 65%-75% over the last 15 bars
     deliv_pcts = np.full(n_bars, 35.0)
     deliv_pcts[15:] = 68.0  # Massive accumulation phase!
-    
-    return pd.DataFrame({
-        "open": opens,
-        "high": highs,
-        "low": lows,
-        "close": closes,
-        "volume": volumes,
-        "delivery_pct": deliv_pcts,
-    }, index=dates)
+
+    return pd.DataFrame(
+        {
+            "open": opens,
+            "high": highs,
+            "low": lows,
+            "close": closes,
+            "volume": volumes,
+            "delivery_pct": deliv_pcts,
+        },
+        index=dates,
+    )
 
 
 def test_cfai_stealth_accumulation_detected():
     df = _create_synthetic_accumulation_df(n_bars=30)
-    
+
     report = compute_cfai(
         symbol="MAZDOCK",
         df=df,
@@ -81,10 +83,16 @@ def test_cfai_distribution_detection():
     volumes = np.full(n_bars, 1_000_000.0)
     deliv_pcts = np.full(n_bars, 65.0)  # Heavy delivery dumping
 
-    df = pd.DataFrame({
-        "open": opens, "high": highs, "low": lows, "close": closes,
-        "volume": volumes, "delivery_pct": deliv_pcts
-    })
+    df = pd.DataFrame(
+        {
+            "open": opens,
+            "high": highs,
+            "low": lows,
+            "close": closes,
+            "volume": volumes,
+            "delivery_pct": deliv_pcts,
+        }
+    )
 
     report = compute_cfai("ABC", df=df, ltp=950.0)
     assert report.symbol == "ABC"

@@ -6,10 +6,8 @@ Verifies WebSocket message handling, BBO & tick aggregation, quotes & history
 integration, Smart Funnel quantitative pre-filtering, and FastAPI endpoints.
 """
 
-import json
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 import pandas as pd
-import pytest
 from fastapi.testclient import TestClient
 
 from brokers.base import Quote

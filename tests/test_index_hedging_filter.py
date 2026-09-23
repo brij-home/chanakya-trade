@@ -8,9 +8,12 @@ hedging signals remain permitted across all channels.
 
 from __future__ import annotations
 
-import pytest
-from engine.alert_preferences import AlertPreferences, AlertPreferencesManager, classify_alert_segment
-from engine.auto_alert_engine import AutoAlert, AutoAlertEngine
+from engine.alert_preferences import (
+    AlertPreferences,
+    AlertPreferencesManager,
+    classify_alert_segment,
+)
+from engine.auto_alert_engine import AutoAlertEngine
 
 
 def test_index_directional_blocked_hedging_permitted(tmp_path):
@@ -118,7 +121,7 @@ def test_scanner_omits_indices_when_fno_index_disabled(monkeypatch, tmp_path):
     from engine.alert_preferences import alert_preferences
 
     monkeypatch.setattr(alert_preferences, "_pref_file", tmp_path / "prefs.json")
-    
+
     # When FNO_INDEX is disabled:
     alert_preferences.update_preferences(
         {
@@ -131,7 +134,9 @@ def test_scanner_omits_indices_when_fno_index_disabled(monkeypatch, tmp_path):
     engine = AutoAlertEngine()
     targets = engine._get_prioritized_targets()
     for idx in ["NIFTY", "BANKNIFTY", "MIDCPNIFTY", "FINNIFTY", "SENSEX", "BANKEX"]:
-        assert idx not in targets, f"Index {idx} should NOT be in scanner targets when FNO_INDEX is disabled!"
+        assert idx not in targets, (
+            f"Index {idx} should NOT be in scanner targets when FNO_INDEX is disabled!"
+        )
 
     # Equities should still be present
     assert "RELIANCE" in targets
@@ -232,4 +237,3 @@ def test_index_options_permitted_futures_blocked(tmp_path):
     }
     assert mgr.is_alert_allowed(hedge_fut, "ui") is True
     assert mgr.is_alert_allowed(hedge_fut, "telegram") is True
-

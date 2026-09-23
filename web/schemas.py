@@ -38,6 +38,11 @@ class SymbolRequest(InstrumentBaseRequest):
 
 class BacktestRequest(InstrumentBaseRequest):
     strategy: str = "rsi"
+
+
+class ModeSwitchRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    mode: str
     period: str = "1y"
     capital: Optional[float] = None
     initial_capital: Optional[float] = None
@@ -98,6 +103,7 @@ class AlertRemoveRequest(BaseModel):
 
 
 class AlertInvalidateRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
     alert_id: str
     reason: Optional[str] = "Manually invalidated by user"
 
@@ -154,12 +160,6 @@ class AutoAlertTargetTestRequest(BaseModel):
     milestone: str = "T1"  # "T1" | "FINAL" | "TRAIL"
     should_trail: bool = True
     symbol: str = "RELIANCE"
-
-
-class AlertInvalidateRequest(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-    alert_id: str
-    reason: str = "Manually invalidated by user"
 
 
 class ManualAlertTestRequest(BaseModel):
@@ -228,3 +228,21 @@ class DefinedRiskSpreadRequest(BaseModel):
     iv: float = 0.15
     dte: int = 7
     num_lots: int = 1
+
+
+class RiskCompressionEvent(BaseModel):
+    """Event model dispatched when an active alert stop loss is dynamically compressed."""
+
+    model_config = ConfigDict(extra="ignore")
+    alert_id: str
+    symbol: str
+    milestone: (
+        str  # "DE_RISK_0_5R" | "BREAKEVEN_LOCKED" | "TRAIL_POST_SWEEP" | "COMPRESS_STALL_RISK"
+    )
+    original_stop: float
+    new_stop: float
+    risk_reduction_pct: float
+    current_ltp: float
+    r_multiple: float
+    pnl_pct: float
+    rationale: str

@@ -78,7 +78,9 @@ def evaluate_alert_invalidation(
         # 0b. Time-Stop for unignited EARLY_WARNING setups (default 60 mins for intraday)
         if getattr(alert, "stage", "") == "EARLY_WARNING":
             elapsed_sec = (now_ist - created_dt).total_seconds()
-            ttl_sec = getattr(alert, "ttl_seconds", None) or (3600 if th == "INTRADAY" else 86400 * 5)
+            ttl_sec = getattr(alert, "ttl_seconds", None) or (
+                3600 if th == "INTRADAY" else 86400 * 5
+            )
             if elapsed_sec >= ttl_sec:
                 mins = int(ttl_sec / 60)
                 return f"Time-Stop expired: Setup did not trigger within {mins}-minute momentum window."
@@ -113,6 +115,7 @@ def evaluate_alert_invalidation(
         except Exception:
             try:
                 from market.quotes import get_ltp
+
                 current_ltp = get_ltp(lookup_sym) if lookup_sym else None
             except Exception:
                 current_ltp = None
@@ -164,9 +167,15 @@ def evaluate_alert_invalidation(
                     opt_entry = alert.option_premium or alert.trigger_level or 0.0
 
                     if spot_anchor and underlying_spot and opt_entry > 0:
-                        is_ce = (alert.option_type == "CE" or alert.direction == "BULLISH")
-                        spot_holding = (underlying_spot >= spot_anchor) if is_ce else (underlying_spot <= spot_anchor)
-                        opt_drawdown = (opt_entry - current_ltp) / opt_entry if opt_entry > 0 else 0.0
+                        is_ce = alert.option_type == "CE" or alert.direction == "BULLISH"
+                        spot_holding = (
+                            (underlying_spot >= spot_anchor)
+                            if is_ce
+                            else (underlying_spot <= spot_anchor)
+                        )
+                        opt_drawdown = (
+                            (opt_entry - current_ltp) / opt_entry if opt_entry > 0 else 0.0
+                        )
                         if spot_holding and opt_drawdown < 0.28:
                             # Underlying structure is completely intact! Suppress premature stop-out.
                             return None
@@ -186,9 +195,7 @@ def evaluate_alert_invalidation(
             if exch in ("CRYPTO", "BINANCE", "DERIBIT"):
                 # Tight, institutional noise margin for crypto assets
                 vol_noise_margin = (
-                    max(0.01, min(1.0, alert.stop_loss * 0.0001))
-                    if alert.stop_loss > 0
-                    else 0.01
+                    max(0.01, min(1.0, alert.stop_loss * 0.0001)) if alert.stop_loss > 0 else 0.01
                 )
             else:
                 # Dynamic Volatility Noise Margin (0.15x ATR or 0.25% floor)
@@ -205,7 +212,9 @@ def evaluate_alert_invalidation(
                     else 0.10
                 )
 
-            is_live_alert = getattr(alert, "is_live", True) and getattr(alert, "environment", "") != "TEST"
+            is_live_alert = (
+                getattr(alert, "is_live", True) and getattr(alert, "environment", "") != "TEST"
+            )
             if alert.direction == "BEARISH":
                 # For short positions, stop loss is above entry
                 ref_entry = alert.ltp or alert.trigger_level or 0.0
@@ -215,7 +224,11 @@ def evaluate_alert_invalidation(
                             f"Price surged to {curr_sym}{current_ltp:,.1f} "
                             f"(breached stop-loss {curr_sym}{alert.stop_loss:,.1f}). Bearish thesis invalidated."
                         )
-                    if session_high and session_high > (alert.stop_loss + vol_noise_margin) and is_live_alert:
+                    if (
+                        session_high
+                        and session_high > (alert.stop_loss + vol_noise_margin)
+                        and is_live_alert
+                    ):
                         return (
                             f"Session high surged to {curr_sym}{session_high:,.1f} "
                             f"(breached stop-loss ceiling {curr_sym}{alert.stop_loss:,.1f}). Bearish thesis invalidated."
@@ -226,7 +239,11 @@ def evaluate_alert_invalidation(
                             f"Price dropped to {curr_sym}{current_ltp:,.1f} "
                             f"(breached stop-loss {curr_sym}{alert.stop_loss:,.1f}). Bearish thesis invalidated."
                         )
-                    if session_low and session_low < (alert.stop_loss - vol_noise_margin) and is_live_alert:
+                    if (
+                        session_low
+                        and session_low < (alert.stop_loss - vol_noise_margin)
+                        and is_live_alert
+                    ):
                         return (
                             f"Session low dropped to {curr_sym}{session_low:,.1f} "
                             f"(breached stop-loss floor {curr_sym}{alert.stop_loss:,.1f}). Bearish thesis invalidated."
@@ -238,7 +255,11 @@ def evaluate_alert_invalidation(
                         f"Price dropped to {curr_sym}{current_ltp:,.1f} "
                         f"(breached stop-loss {curr_sym}{alert.stop_loss:,.1f}). Bullish thesis invalidated."
                     )
-                if session_low and session_low < (alert.stop_loss - vol_noise_margin) and is_live_alert:
+                if (
+                    session_low
+                    and session_low < (alert.stop_loss - vol_noise_margin)
+                    and is_live_alert
+                ):
                     return (
                         f"Session low plunged to {curr_sym}{session_low:,.1f} "
                         f"(breached stop-loss floor {curr_sym}{alert.stop_loss:,.1f}). Bullish thesis invalidated."
@@ -324,6 +345,8 @@ class TargetTrailingEvaluation:
     is_superperforming: bool = False
     strike_roll_recommendation: Optional[dict[str, Any]] = None
     should_roll_strike: bool = False
+    is_risk_compression: bool = False
+    risk_reduction_pct: float = 0.0
 
     @property
     def is_t1_hit(self) -> bool:
@@ -335,7 +358,18 @@ class TargetTrailingEvaluation:
 
     @property
     def trailing_ratcheted(self) -> bool:
-        return self.new_milestone == "TRAILING_UPDATE" or self.should_trail
+        return (
+            self.new_milestone
+            in (
+                "TRAILING_UPDATE",
+                "DE_RISK_0_5R",
+                "BREAKEVEN_LOCKED",
+                "TRAIL_POST_SWEEP",
+                "COMPRESS_STALL_RISK",
+                "TIME_STOP_SCRATCH",
+            )
+            or self.should_trail
+        )
 
     @property
     def new_trailing_stop(self) -> float:
@@ -539,7 +573,10 @@ def evaluate_alert_targets_and_trailing(
     else:
         entry = None
         plan = getattr(alert, "actionable_plan", None)
-        if plan and (plan.get("instrument_type") == "OPTION" or plan.get("preferred_vehicle") == "DEFINED_RISK_OPTION"):
+        if plan and (
+            plan.get("instrument_type") == "OPTION"
+            or plan.get("preferred_vehicle") == "DEFINED_RISK_OPTION"
+        ):
             fut_ref = plan.get("futures_reference")
             if fut_ref and isinstance(fut_ref, dict) and fut_ref.get("entry"):
                 entry = float(fut_ref["entry"])
@@ -581,7 +618,14 @@ def evaluate_alert_targets_and_trailing(
     # Reference stop loss
     stop = None
     plan = getattr(alert, "actionable_plan", None)
-    if not is_option and plan and (plan.get("instrument_type") == "OPTION" or plan.get("preferred_vehicle") == "DEFINED_RISK_OPTION"):
+    if (
+        not is_option
+        and plan
+        and (
+            plan.get("instrument_type") == "OPTION"
+            or plan.get("preferred_vehicle") == "DEFINED_RISK_OPTION"
+        )
+    ):
         fut_ref = plan.get("futures_reference")
         if fut_ref and isinstance(fut_ref, dict) and fut_ref.get("stop_loss"):
             stop = float(fut_ref["stop_loss"])
@@ -615,7 +659,21 @@ def evaluate_alert_targets_and_trailing(
             )
             return None
 
-    initial_risk = max(0.01, abs(entry - stop))
+    initial_sl_val = (
+        (getattr(alert, "actionable_plan", {}) or {}).get("initial_sl")
+        or (getattr(alert, "actionable_plan", {}) or {}).get("initial_stop_loss")
+        or (getattr(alert, "metrics", {}) or {}).get("initial_sl")
+    )
+    if initial_sl_val:
+        m_isl = re.search(r"[\d,]+(?:\.\d+)?", str(initial_sl_val))
+        try:
+            initial_stop = float(m_isl.group(0).replace(",", "")) if m_isl else stop
+        except ValueError:
+            initial_stop = stop
+    else:
+        initial_stop = stop
+
+    initial_risk = max(0.01, abs(entry - initial_stop))
 
     # PnL & R-multiple
     if is_bullish:
@@ -633,7 +691,10 @@ def evaluate_alert_targets_and_trailing(
     plan_t2 = None
     plan_t3 = None
     if plan and isinstance(plan, dict):
-        if not is_option and (plan.get("instrument_type") == "OPTION" or plan.get("preferred_vehicle") == "DEFINED_RISK_OPTION"):
+        if not is_option and (
+            plan.get("instrument_type") == "OPTION"
+            or plan.get("preferred_vehicle") == "DEFINED_RISK_OPTION"
+        ):
             fut_ref = plan.get("futures_reference")
             if fut_ref and isinstance(fut_ref, dict):
                 if fut_ref.get("target_1"):
@@ -803,18 +864,27 @@ def evaluate_alert_targets_and_trailing(
     # Exchange High/Low & Dirty Tick Sanity Filter:
     # Discard unverified phantom spikes where current_ltp violates the day's exchange high/low.
     # Primarily guards option contracts against broker token cross-pollution or unverified feed spikes.
-    day_high = float(getattr(alert, "high", 0.0) or (getattr(alert, "metrics", {}) or {}).get("high", 0.0) or 0.0)
-    day_low = float(getattr(alert, "low", 0.0) or (getattr(alert, "metrics", {}) or {}).get("low", 0.0) or 0.0)
+    day_high = float(
+        getattr(alert, "high", 0.0) or (getattr(alert, "metrics", {}) or {}).get("high", 0.0) or 0.0
+    )
+    day_low = float(
+        getattr(alert, "low", 0.0) or (getattr(alert, "metrics", {}) or {}).get("low", 0.0) or 0.0
+    )
 
     if is_t1_hit or is_t2_hit or is_final_hit:
         try:
-            if is_option and (day_high <= 0 or day_low <= 0) and not os.environ.get("CHANAKYA_TESTING"):
+            if (
+                is_option
+                and (day_high <= 0 or day_low <= 0)
+                and not os.environ.get("CHANAKYA_TESTING")
+            ):
                 lookup_sym = getattr(alert, "contract_symbol", None) or (
                     f"{alert.exchange}:{alert.symbol}"
                     if ":" not in getattr(alert, "symbol", "")
                     else getattr(alert, "symbol", "")
                 )
                 from market.quotes import get_ohlc
+
                 ohlc = get_ohlc(lookup_sym)
                 if ohlc and isinstance(ohlc, dict):
                     day_high = day_high or float(ohlc.get("high") or 0.0)
@@ -1025,6 +1095,8 @@ def evaluate_alert_targets_and_trailing(
             r_multiple=round(r_multiple, 2),
             pnl_pct=round(pnl_pct, 2),
             is_superperforming=is_superperforming,
+            is_risk_compression=True,
+            risk_reduction_pct=100.0,
         )
 
     # 5. Trailing Stop Ratchet Higher (Dynamic Trail)
@@ -1089,26 +1161,248 @@ def evaluate_alert_targets_and_trailing(
                     is_superperforming=is_superperforming,
                 )
 
-    # 4. Early Sub-Target Phase (< 1.5R)
-    if r_multiple < 1.5:
-        rationale = (
-            f"Payoff is +{r_multiple:.1f}R (+{pnl_pct:.1f}%). "
-            f"DECISION: DO NOT TRAIL YET. Maintain initial Stop Loss at ₹{stop:,.2f}. "
-            f"Premature trailing in early stage causes whipsaws and unnecessary shakeouts."
-        )
-        return TargetTrailingEvaluation(
-            new_milestone=None,
-            target_status=getattr(alert, "target_status", None) or "PENDING",
-            should_trail=False,
-            trailing_decision="DO_NOT_TRAIL_HOLD_STOP",
-            recommended_stop=stop,
-            trailing_rationale=rationale,
-            locked_profit_pts=0.0,
-            locked_profit_pct=0.0,
-            r_multiple=round(r_multiple, 2),
-            pnl_pct=round(pnl_pct, 2),
-            is_superperforming=False,
-        )
+    # 4. Dynamic Risk Compression (DRC) — Pre-T1 & Sub-1.5R Logical Management
+    # Rule 4A: Pre-T1 Step-Ladder (+0.5R to +1.5R)
+    if 0.5 <= r_multiple < 1.5 and pnl_pts > 0:
+        cur_trail = getattr(alert, "trailing_stop", None) or stop
+
+        de_risk_thresh = 0.50 if is_option else 0.65
+        if (
+            0.8 <= r_multiple < 1.5
+            and "BREAKEVEN_LOCKED" not in achieved
+            and "T0_5_ACHIEVED" not in achieved
+            and "T1_ACHIEVED" not in achieved
+        ):
+            be_stop = round(entry * 1.002 if is_bullish else entry * 0.998, 2)
+            # Only trail if be_stop is tighter than current stop
+            if (is_bullish and be_stop > cur_trail) or (not is_bullish and be_stop < cur_trail):
+                locked_pts = abs(be_stop - entry)
+                locked_pct = 0.2
+                rationale = (
+                    f"Payoff reached +{r_multiple:.1f}R (+{pnl_pct:.1f}%). "
+                    f"DECISION: LOCK BREAKEVEN (₹{be_stop:,.2f}). "
+                    f"Trade is now de-risked to 100% free trade. Downside risk eliminated!"
+                )
+                return TargetTrailingEvaluation(
+                    new_milestone="BREAKEVEN_LOCKED",
+                    target_status=getattr(alert, "target_status", None) or "BREAKEVEN_LOCKED",
+                    should_trail=True,
+                    trailing_decision="TRAIL_BREAKEVEN",
+                    recommended_stop=be_stop,
+                    trailing_rationale=rationale,
+                    locked_profit_pts=round(locked_pts, 2),
+                    locked_profit_pct=locked_pct,
+                    r_multiple=round(r_multiple, 2),
+                    pnl_pct=round(pnl_pct, 2),
+                    is_superperforming=is_superperforming,
+                    is_risk_compression=True,
+                    risk_reduction_pct=100.0,
+                )
+
+        elif (
+            de_risk_thresh <= r_multiple < 0.8
+            and "DE_RISK_0_5R" not in achieved
+            and "BREAKEVEN_LOCKED" not in achieved
+            and "T0_5_ACHIEVED" not in achieved
+        ):
+            # Compress SL from -1.0R to -0.35R
+            compressed_stop = round(
+                entry - (initial_risk * 0.35) if is_bullish else entry + (initial_risk * 0.35), 2
+            )
+            if (is_bullish and compressed_stop > cur_trail) or (
+                not is_bullish and compressed_stop < cur_trail
+            ):
+                risk_saved = abs(compressed_stop - stop)
+                risk_reduction = (risk_saved / initial_risk) * 100.0 if initial_risk > 0 else 65.0
+                rationale = (
+                    f"Payoff expanded to +{r_multiple:.1f}R (+{pnl_pct:.1f}%). "
+                    f"DECISION: DE-RISK TRADE EARLY. Trail Stop-Loss from ₹{stop:,.2f} to ₹{compressed_stop:,.2f} (-0.35R). "
+                    f"Downside risk compressed by {risk_reduction:.0f}%!"
+                )
+                return TargetTrailingEvaluation(
+                    new_milestone="DE_RISK_0_5R",
+                    target_status=getattr(alert, "target_status", None) or "DE_RISKED",
+                    should_trail=True,
+                    trailing_decision="TRAIL_DE_RISK_HALF",
+                    recommended_stop=compressed_stop,
+                    trailing_rationale=rationale,
+                    locked_profit_pts=0.0,
+                    locked_profit_pct=0.0,
+                    r_multiple=round(r_multiple, 2),
+                    pnl_pct=round(pnl_pct, 2),
+                    is_superperforming=is_superperforming,
+                    is_risk_compression=True,
+                    risk_reduction_pct=round(risk_reduction, 1),
+                )
+
+    # Rule 4B: SMC Post-Sweep Pivot Trailing (Structural Liquidity Trail)
+    post_sweep_sl = (
+        (getattr(alert, "metrics", {}) or {}).get("post_sweep_sl")
+        if getattr(alert, "metrics", None)
+        else None
+    )
+    if post_sweep_sl and "TRAIL_POST_SWEEP" not in achieved:
+        cur_trail = getattr(alert, "trailing_stop", None) or stop
+        ps_sl = float(post_sweep_sl)
+        if (is_bullish and ps_sl > cur_trail) or (not is_bullish and ps_sl < cur_trail):
+            risk_saved = abs(ps_sl - stop)
+            risk_reduction = (risk_saved / initial_risk) * 100.0 if initial_risk > 0 else 40.0
+            rationale = (
+                f"SMC Liquidity Sweep confirmed on underlying. "
+                f"DECISION: TIGHTEN STOP-LOSS TO POST-SWEEP FLOOR ₹{ps_sl:,.2f}. "
+                f"Max potential loss cut by {risk_reduction:.0f}% while preserving 100% upside."
+            )
+            return TargetTrailingEvaluation(
+                new_milestone="TRAIL_POST_SWEEP",
+                target_status=getattr(alert, "target_status", None) or "POST_SWEEP_TIGHTENED",
+                should_trail=True,
+                trailing_decision="TRAIL_POST_SWEEP",
+                recommended_stop=ps_sl,
+                trailing_rationale=rationale,
+                locked_profit_pts=0.0,
+                locked_profit_pct=0.0,
+                r_multiple=round(r_multiple, 2),
+                pnl_pct=round(pnl_pct, 2),
+                is_superperforming=is_superperforming,
+                is_risk_compression=True,
+                risk_reduction_pct=round(risk_reduction, 1),
+            )
+
+    # Rule 4C: Midday Stall & Bleed Guard (Theta Decay Protection)
+    if (
+        is_option
+        and "COMPRESS_STALL_RISK" not in achieved
+        and "DE_RISK_0_5R" not in achieved
+        and "BREAKEVEN_LOCKED" not in achieved
+        and r_multiple < 0.35
+        and pnl_pct < 6.0
+    ):
+        created_str = getattr(alert, "created_at", "")
+        if created_str:
+            clean_ts = created_str.replace(" IST", "").strip()[:19]
+            for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+                try:
+                    c_dt = datetime.strptime(clean_ts, fmt).replace(tzinfo=IST)
+                    now_ist = datetime.now(IST)
+                    if c_dt.date() != now_ist.date():
+                        break
+                    elapsed_mins = (now_ist - c_dt).total_seconds() / 60.0
+                    # Midday window: 12:00 to 14:15 IST
+                    if 35.0 <= elapsed_mins <= 240.0 and (
+                        12 <= now_ist.hour < 14 or (now_ist.hour == 14 and now_ist.minute <= 15)
+                    ):
+                        cur_trail = getattr(alert, "trailing_stop", None) or stop
+                        stall_stop = round(
+                            entry - (initial_risk * 0.65)
+                            if is_bullish
+                            else entry + (initial_risk * 0.65),
+                            2,
+                        )
+                        if (is_bullish and stall_stop > cur_trail) or (
+                            not is_bullish and stall_stop < cur_trail
+                        ):
+                            risk_saved = abs(stall_stop - stop)
+                            risk_reduction = (
+                                (risk_saved / initial_risk) * 100.0 if initial_risk > 0 else 35.0
+                            )
+                            rationale = (
+                                f"Trade in consolidation for {int(elapsed_mins)} mins during midday lull without expansion. "
+                                f"DECISION: COMPRESS RISK AGAINST THETA BLEED. Tighten SL from ₹{stop:,.2f} to ₹{stall_stop:,.2f}. "
+                                f"Downside risk cut by {risk_reduction:.0f}%."
+                            )
+                            return TargetTrailingEvaluation(
+                                new_milestone="COMPRESS_STALL_RISK",
+                                target_status=getattr(alert, "target_status", None)
+                                or "STALL_COMPRESSED",
+                                should_trail=True,
+                                trailing_decision="COMPRESS_STALL_RISK",
+                                recommended_stop=stall_stop,
+                                trailing_rationale=rationale,
+                                locked_profit_pts=0.0,
+                                locked_profit_pct=0.0,
+                                r_multiple=round(r_multiple, 2),
+                                pnl_pct=round(pnl_pct, 2),
+                                is_superperforming=is_superperforming,
+                                is_risk_compression=True,
+                                risk_reduction_pct=round(risk_reduction, 1),
+                            )
+                    break
+                except Exception:
+                    pass
+
+    # Rule 4D: 20-Minute Velocity Time-Stop (Stagnation Scratch)
+    # Long options positions that fail to expand into momentum within 20 minutes (4 five-minute bars)
+    # suffer severe non-linear theta decay. Exit at CMP / scratch rather than waiting for -1.0R loss.
+    if (
+        is_option
+        and "TIME_STOP_SCRATCH" not in achieved
+        and "T0_5_ACHIEVED" not in achieved
+        and "T1_ACHIEVED" not in achieved
+        and "T2_ACHIEVED" not in achieved
+        and "TARGET_ACHIEVED" not in achieved
+        and r_multiple < 0.40
+        and pnl_pct < 5.0
+    ):
+        created_str = getattr(alert, "triggered_at", None) or getattr(alert, "created_at", "")
+        if created_str:
+            clean_ts = created_str.replace(" IST", "").strip()[:19]
+            for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+                try:
+                    c_dt = datetime.strptime(clean_ts, fmt).replace(tzinfo=IST)
+                    now_ist = datetime.now(IST)
+                    if c_dt.date() == now_ist.date():
+                        elapsed_mins = (now_ist - c_dt).total_seconds() / 60.0
+                        time_stop_limit = 20.0
+                        plan = getattr(alert, "actionable_plan", {}) or {}
+                        fast_scalp = plan.get("fast_scalp", {}) or {}
+                        if fast_scalp.get("time_stop_mins"):
+                            time_stop_limit = float(fast_scalp["time_stop_mins"])
+
+                        if elapsed_mins >= time_stop_limit:
+                            rationale = (
+                                f"⏱️ VELOCITY TIME-STOP: Trade active for {int(elapsed_mins)}m without momentum expansion "
+                                f"(P&L: {pnl_pct:+.1f}%, {r_multiple:+.2f}R). Theta decay risk accelerating. "
+                                f"DECISION: TIME-STOP SCRATCH EXIT. Close at CMP ₹{current_ltp:,.2f} to protect capital "
+                                f"and reallocate to active Leaders."
+                            )
+                            return TargetTrailingEvaluation(
+                                new_milestone="TIME_STOP_SCRATCH",
+                                target_status="TIME_STOP_EXIT",
+                                should_trail=True,
+                                trailing_decision="TIME_STOP_SCRATCH",
+                                recommended_stop=current_ltp,
+                                trailing_rationale=rationale,
+                                locked_profit_pts=round(current_ltp - entry, 2),
+                                locked_profit_pct=round(pnl_pct, 2),
+                                r_multiple=round(r_multiple, 2),
+                                pnl_pct=round(pnl_pct, 2),
+                                is_superperforming=False,
+                                is_risk_compression=True,
+                                risk_reduction_pct=100.0,
+                            )
+                    break
+                except Exception:
+                    pass
+
+    # Fallback: Early Sub-Target Phase (< 1.5R, No compression conditions met)
+    rationale = (
+        f"Payoff is +{r_multiple:.1f}R (+{pnl_pct:.1f}%). "
+        f"DECISION: DO NOT TRAIL YET. Maintain initial Stop Loss at ₹{stop:,.2f}. "
+        f"Premature trailing in early stage causes whipsaws and unnecessary shakeouts."
+    )
+    return TargetTrailingEvaluation(
+        new_milestone=None,
+        target_status=getattr(alert, "target_status", None) or "PENDING",
+        should_trail=False,
+        trailing_decision="DO_NOT_TRAIL_HOLD_STOP",
+        recommended_stop=stop,
+        trailing_rationale=rationale,
+        locked_profit_pts=0.0,
+        locked_profit_pct=0.0,
+        r_multiple=round(r_multiple, 2),
+        pnl_pct=round(pnl_pct, 2),
+        is_superperforming=False,
+    )
 
     return None
 
@@ -1143,12 +1437,16 @@ def evaluate_alert_in_flight_decay(
     """
     if (
         getattr(alert, "is_invalidated", False)
-        or getattr(alert, "stage", "") in ("INVALIDATED", "COMPLETED", "IN_FLIGHT_WARNING", "EARLY_WARNING")
+        or getattr(alert, "stage", "")
+        in ("INVALIDATED", "COMPLETED", "IN_FLIGHT_WARNING", "EARLY_WARNING")
         or getattr(alert, "in_flight_warning_sent", False)
         or getattr(alert, "target_status", "")
         in ("T1_ACHIEVED", "FINAL_ACHIEVED", "TARGET_ACHIEVED")
         or "T1_ACHIEVED" in (getattr(alert, "achieved_milestones", []) or [])
-        or (not getattr(alert, "triggered_at", None) and getattr(alert, "stage", "") not in ("IGNITED", "TRAILING_UPDATE"))
+        or (
+            not getattr(alert, "triggered_at", None)
+            and getattr(alert, "stage", "") not in ("IGNITED", "TRAILING_UPDATE")
+        )
     ):
         return None
 
@@ -1359,9 +1657,7 @@ def evaluate_alert_in_flight_decay(
             else:
                 from market.calendar import get_trading_minutes_elapsed
 
-                elapsed_secs = (
-                    get_trading_minutes_elapsed(created_dt, now_dt, exchange=exch) * 60.0
-                )
+                elapsed_secs = get_trading_minutes_elapsed(created_dt, now_dt, exchange=exch) * 60.0
 
             # Detect 0DTE (Same-Day Expiry) status
             is_0dte = False

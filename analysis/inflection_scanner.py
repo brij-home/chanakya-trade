@@ -469,46 +469,72 @@ def evaluate_single_stock_inflection(
     # Stocks in weekly Stage 3 (distribution) or Stage 4 (markdown) are killed immediately
     # regardless of daily signal quality — weekly > daily in Minervini/Weinstein methodology.
     weekly_stage = "NEUTRAL"
-    weekly_stage_confidence = 0
     try:
         weekly_df = None
         # 1. Prefer resampling provided daily df to respect caller's backtest/test data
         if df is not None and len(df) >= 100:
             try:
                 if isinstance(df.index, pd.DatetimeIndex):
-                    weekly_df = df.resample("W-FRI").agg(
-                        {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}
-                    ).dropna()
+                    weekly_df = (
+                        df.resample("W-FRI")
+                        .agg(
+                            {
+                                "open": "first",
+                                "high": "max",
+                                "low": "min",
+                                "close": "last",
+                                "volume": "sum",
+                            }
+                        )
+                        .dropna()
+                    )
                 else:
                     _d = df.copy()
                     _d.index = pd.to_datetime(_d.index)
-                    weekly_df = _d.resample("W-FRI").agg(
-                        {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}
-                    ).dropna()
+                    weekly_df = (
+                        _d.resample("W-FRI")
+                        .agg(
+                            {
+                                "open": "first",
+                                "high": "max",
+                                "low": "min",
+                                "close": "last",
+                                "volume": "sum",
+                            }
+                        )
+                        .dropna()
+                    )
             except Exception:
                 weekly_df = None
 
         # 2. If weekly_df not generated from df and network is allowed, fetch from history
-        if (weekly_df is None or len(weekly_df) < 25) and allow_network and not os.environ.get("CHANAKYA_TESTING"):
+        if (
+            (weekly_df is None or len(weekly_df) < 25)
+            and allow_network
+            and not os.environ.get("CHANAKYA_TESTING")
+        ):
             try:
                 from market.history import get_ohlcv
+
                 weekly_df = get_ohlcv(clean_sym, interval="week", days=520)  # ~2Y of weekly bars
             except Exception:
                 pass
 
         if weekly_df is not None and len(weekly_df) >= 25:
             _ws, _wc = classify_weinstein_stage(weekly_df)
-            weekly_stage = "WEEKLY_STAGE_2" if _ws == "STAGE_2_MARKUP" else _ws
-            weekly_stage_confidence = _wc
 
             # HARD KILL: Weekly Stage 3/4 — never enter a distribution or markdown on weekly chart
             if _ws in ("STAGE_3_DISTRIBUTION", "STAGE_4_MARKDOWN"):
                 return None  # Drop before scoring — weekly timeframe overrides all daily signals
 
             if _ws == "STAGE_2_MARKUP":
-                confluence_factors.append(f"👑 Weekly Weinstein Stage 2 Markup (confidence {_wc}/8)")
+                confluence_factors.append(
+                    f"👑 Weekly Weinstein Stage 2 Markup (confidence {_wc}/8)"
+                )
             elif _ws == "STAGE_1_BASE" and _wc >= 3:
-                confluence_factors.append(f"📐 Weekly Stage 1 Accumulation Base (late stage, conf {_wc}/8)")
+                confluence_factors.append(
+                    f"📐 Weekly Stage 1 Accumulation Base (late stage, conf {_wc}/8)"
+                )
     except Exception:
         pass
 

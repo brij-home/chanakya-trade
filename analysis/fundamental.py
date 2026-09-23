@@ -19,7 +19,7 @@ import re
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Any, Optional
 
 import httpx
 
@@ -100,11 +100,15 @@ class FundamentalSnapshot:
 
     # EPS Acceleration — Minervini SEPA Screening (59p)
     # Requires: most recent QoQ YoY EPS > 25% AND accelerating vs prior quarter
-    eps_q1_growth: Optional[float] = None   # Most recent quarter YoY EPS growth %
-    eps_q2_growth: Optional[float] = None   # Prior quarter YoY EPS growth %
-    eps_acceleration: Optional[float] = None  # eps_q1_growth - eps_q2_growth (positive = accelerating)
+    eps_q1_growth: Optional[float] = None  # Most recent quarter YoY EPS growth %
+    eps_q2_growth: Optional[float] = None  # Prior quarter YoY EPS growth %
+    eps_acceleration: Optional[float] = (
+        None  # eps_q1_growth - eps_q2_growth (positive = accelerating)
+    )
     revenue_q1_growth: Optional[float] = None  # Most recent quarter YoY revenue growth %
-    sepa_qualified: bool = False            # True if eps_q1 >= 25% AND eps_acceleration > 0 AND revenue_q1 > 0
+    sepa_qualified: bool = (
+        False  # True if eps_q1 >= 25% AND eps_acceleration > 0 AND revenue_q1 > 0
+    )
 
     # Governance risk (59e) — ISS scores 1-10 (10 = highest risk)
     overall_risk: Optional[int] = None
@@ -477,14 +481,19 @@ def _score(parsed: dict) -> tuple[int, list[FundamentalFlag]]:
     # ── EPS Acceleration / Minervini SEPA Screening (59p) ────────────────────
     # Rewards recent-quarter EPS acceleration — the #1 leading indicator for
     # Stage 2 multibagger candidates (Minervini SEPA method).
-    eps_q1 = parsed.get("eps_q1_growth")   # Most recent quarter YoY EPS %
-    eps_q2 = parsed.get("eps_q2_growth")   # Prior quarter YoY EPS %
+    eps_q1 = parsed.get("eps_q1_growth")  # Most recent quarter YoY EPS %
+    eps_q2 = parsed.get("eps_q2_growth")  # Prior quarter YoY EPS %
     rev_q1 = parsed.get("revenue_q1_growth")  # Most recent quarter YoY revenue %
 
     if eps_q1 is not None:
         eps_acc = (eps_q1 - eps_q2) if eps_q2 is not None else None
 
-        if eps_q1 >= 25.0 and eps_acc is not None and eps_acc > 0 and (rev_q1 is None or rev_q1 > 0):
+        if (
+            eps_q1 >= 25.0
+            and eps_acc is not None
+            and eps_acc > 0
+            and (rev_q1 is None or rev_q1 > 0)
+        ):
             # SEPA qualified: ≥25% YoY EPS growth + accelerating + revenue positive
             score += 12
             flags.append(
@@ -519,7 +528,6 @@ def _score(parsed: dict) -> tuple[int, list[FundamentalFlag]]:
             )
 
     return max(0, min(100, score)), flags
-
 
 
 # ── Main entry point ─────────────────────────────────────────
@@ -1428,14 +1436,8 @@ def analyse(symbol: str, fast: bool = False, **_kwargs) -> FundamentalSnapshot:
             or (
                 parsed.get("eps_q1_growth") is not None
                 and parsed.get("eps_q1_growth") >= 25.0
-                and (
-                    parsed.get("eps_acceleration") is None
-                    or parsed.get("eps_acceleration") > 0
-                )
-                and (
-                    parsed.get("revenue_q1_growth") is None
-                    or parsed.get("revenue_q1_growth") > 0
-                )
+                and (parsed.get("eps_acceleration") is None or parsed.get("eps_acceleration") > 0)
+                and (parsed.get("revenue_q1_growth") is None or parsed.get("revenue_q1_growth") > 0)
             )
         ),
         # 59g: Insider transactions

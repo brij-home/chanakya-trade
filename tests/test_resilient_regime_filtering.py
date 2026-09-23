@@ -259,13 +259,15 @@ def test_squeeze_breakout_upper_wick_rejection():
     closes[-1] = 104.8
     lows[-1] = 104.2
 
-    df = pd.DataFrame({
-        "open": closes - 0.2,
-        "high": highs,
-        "low": lows,
-        "close": closes,
-        "volume": vols,
-    })
+    df = pd.DataFrame(
+        {
+            "open": closes - 0.2,
+            "high": highs,
+            "low": lows,
+            "close": closes,
+            "volume": vols,
+        }
+    )
     df.loc[df.index[-1], "open"] = 104.5
 
     # Trigger with LTP at 106.0 (attempting ignited breakout above 105.5 pivot)
@@ -391,4 +393,3 @@ def test_stock_tailwind_intraday_rs_calculation():
     assert tw.tailwind_score <= 68
     assert tw.alignment == "MODERATE_TAILWIND"
     assert "CAUTION: Sector is lagging NIFTY by 1.60% intraday" in tw.analysis
-

@@ -361,7 +361,9 @@ class PatternLearningEngine:
         Dynamically recalibrates factor weights based on empirical win rate.
         If volume dry-up correlates with a high win rate, its weight expands.
         """
-        valid_outcomes = [o for o in self._outcomes if o.outcome not in ("INVALIDATED", "CORRUPTED", "EXCLUDED")]
+        valid_outcomes = [
+            o for o in self._outcomes if o.outcome not in ("INVALIDATED", "CORRUPTED", "EXCLUDED")
+        ]
         if len(valid_outcomes) < 5:
             # Not enough statistical sample size yet; preserve institutional baseline
             return
@@ -431,14 +433,14 @@ class PatternLearningEngine:
 
         # Full factor mapping: autopsy SNR key -> internal weight key
         mapping = {
-            "volume_dry_up":       "volume_dry_up",
+            "volume_dry_up": "volume_dry_up",
             "squeeze_compression": "squeeze_coiling",
             "gamma_short_squeeze": "ce_unwind",
-            "sector_tailwind":     "sector_tailwind",
-            "trend_score":         "trend_alignment",
-            "smc_score":           "ob_distance",
-            "rvol_20d":            "volume_dry_up",  # maps to same — RVOL surge boosts volume weight
-            "forensic_safe":       "sector_tailwind", # governance quality → sector quality proxy
+            "sector_tailwind": "sector_tailwind",
+            "trend_score": "trend_alignment",
+            "smc_score": "ob_distance",
+            "rvol_20d": "volume_dry_up",  # maps to same — RVOL surge boosts volume weight
+            "forensic_safe": "sector_tailwind",  # governance quality → sector quality proxy
         }
 
         weights_before = dict(self._factor_weights)
@@ -473,12 +475,20 @@ class PatternLearningEngine:
             }
 
         logger.info(
-            "[PatternLearningEngine] SNR recalibration complete. "
-            "Δweights: %s → %s",
-            {k: f"{weights_before.get(k,0)}→{v}" for k, v in self._factor_weights.items()
-             if weights_before.get(k) != v},
+            "[PatternLearningEngine] SNR recalibration complete. Δweights: %s → %s",
+            {
+                k: f"{weights_before.get(k, 0)}→{v}"
+                for k, v in self._factor_weights.items()
+                if weights_before.get(k) != v
+            },
             {k: v for k, v in sorted(self._factor_weights.items(), key=lambda x: -x[1])[:5]},
         )
+
+    def recalibrate_factor_weights(self) -> dict[str, int]:
+        """Public entrypoint for manual or nightly factor weight recalculation."""
+        with self._lock:
+            self._recalculate_factor_weights()
+            return dict(self._factor_weights)
 
     # ── Invalidation Post-Mortem & Retrospective Learning ───
 
@@ -693,7 +703,9 @@ class PatternLearningEngine:
                 or 0.0
             )
             if entry_price <= 0 and act_plan:
-                rec_str = str(act_plan.get("recommended_entry", "") or act_plan.get("entry_range", ""))
+                rec_str = str(
+                    act_plan.get("recommended_entry", "") or act_plan.get("entry_range", "")
+                )
                 m = re.search(r"[\d.]+", rec_str)
                 if m:
                     try:
@@ -1457,7 +1469,10 @@ class PatternLearningEngine:
                     sim += 20
                 if cand_rrg == getattr(fp, "rrg_quadrant", ""):
                     sim += 15
-                if abs(features.get("prior_vol_ratio", 1.0) - getattr(fp, "prior_vol_ratio", 1.0)) < 0.2:
+                if (
+                    abs(features.get("prior_vol_ratio", 1.0) - getattr(fp, "prior_vol_ratio", 1.0))
+                    < 0.2
+                ):
                     sim += 15
                 if abs(sq_bars - getattr(fp, "squeeze_bars", 0)) <= 1:
                     sim += 10
@@ -1491,7 +1506,9 @@ class PatternLearningEngine:
     def get_learning_analytics(self) -> dict[str, Any]:
         """Returns comprehensive self-learning intelligence and factor attribution."""
         total_archetypes = len(self._fingerprints)
-        valid_outcomes = [o for o in self._outcomes if o.outcome not in ("INVALIDATED", "CORRUPTED", "EXCLUDED")]
+        valid_outcomes = [
+            o for o in self._outcomes if o.outcome not in ("INVALIDATED", "CORRUPTED", "EXCLUDED")
+        ]
         total_outcomes = len(valid_outcomes)
         wins = [o for o in valid_outcomes if o.outcome in ("WIN_T1", "WIN_T2", "WIN_TARGET")]
         win_rate = (

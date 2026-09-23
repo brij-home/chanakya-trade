@@ -5,8 +5,6 @@ Institutional test suite for 24x7 Deribit Options, Squeeze Analysis,
 and Dedicated Telegram Routing to Crypto_Premium_Alpha_Vortex (-1004323607372).
 """
 
-from unittest.mock import MagicMock, patch
-import pytest
 from fastapi.testclient import TestClient
 
 from market.crypto_options import (
@@ -19,7 +17,6 @@ from market.crypto_stream import crypto_stream
 from engine.alert_preferences import (
     AlertPreferences,
     classify_alert_segment,
-    alert_preferences,
 )
 from web.api import app
 
@@ -210,7 +207,11 @@ def test_get_crypto_options_summary():
         assert "atm_implied_volatility_pct" in summary
         assert "net_gex_usd" in summary
         assert "gamma_regime" in summary
-        assert summary["gamma_regime"] in ("POSITIVE_GAMMA_PIN", "NEGATIVE_GAMMA_ACCELERATION", "NEUTRAL")
+        assert summary["gamma_regime"] in (
+            "POSITIVE_GAMMA_PIN",
+            "NEGATIVE_GAMMA_ACCELERATION",
+            "NEUTRAL",
+        )
         assert summary["pcr_sentiment"] in (
             "BULLISH_EXHAUSTION_EXTREME",
             "MILD_BULLISH",
@@ -329,4 +330,3 @@ def test_render_crypto_auto_alert():
     assert "$84,500.00" in rendered
     assert "Demand OB + FVG Reclaim" in rendered
     assert "Market is closed" not in rendered  # Crypto is 24x7, never suppressed!
-

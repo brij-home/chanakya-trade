@@ -78,8 +78,7 @@ def detect_commodity_breakouts(
             or getattr(q, "data_state", "") == "UNAVAILABLE"
         )
         is_test_env = (
-            os.environ.get("CHANAKYA_TESTING") == "1"
-            or os.environ.get("DEPLOY_MODE") == "test"
+            os.environ.get("CHANAKYA_TESTING") == "1" or os.environ.get("DEPLOY_MODE") == "test"
         )
         is_authentic_live = not (is_mock_quote or is_test_env)
 
@@ -98,9 +97,7 @@ def detect_commodity_breakouts(
         raw_vwap = getattr(q, "vwap", None)
         try:
             vwap = (
-                float(raw_vwap)
-                if (raw_vwap is not None and float(raw_vwap) > (ltp * 0.5))
-                else ltp
+                float(raw_vwap) if (raw_vwap is not None and float(raw_vwap) > (ltp * 0.5)) else ltp
             )
         except Exception:
             vwap = ltp
@@ -254,12 +251,8 @@ def detect_commodity_breakouts(
                 or (chg_from_high >= strict_min_chg * 1.2)
             )
             if has_real_vwap_diff:
-                is_bullish = (
-                    not is_locked_bull and is_bull_thrust and (ltp >= (vwap * 0.998))
-                )
-                is_bearish = (
-                    not is_locked_bear and is_bear_thrust and (ltp <= (vwap * 1.002))
-                )
+                is_bullish = not is_locked_bull and is_bull_thrust and (ltp >= (vwap * 0.998))
+                is_bearish = not is_locked_bear and is_bear_thrust and (ltp <= (vwap * 1.002))
             else:
                 is_bullish = not is_locked_bull and is_bull_thrust
                 is_bearish = not is_locked_bear and is_bear_thrust
@@ -325,9 +318,7 @@ def detect_commodity_breakouts(
 
         from engine.alert_scrutiny import COMMODITY_MIN_SL_FLOORS
 
-        min_structural_pts = COMMODITY_MIN_SL_FLOORS.get(
-            clean_sym, round(ltp * min_vol_pct, 1)
-        )
+        min_structural_pts = COMMODITY_MIN_SL_FLOORS.get(clean_sym, round(ltp * min_vol_pct, 1))
 
         # Institutional Smart Money Concepts (SMC) & Price Action Confluence
         smc_tags: list[str] = []
@@ -401,7 +392,9 @@ def detect_commodity_breakouts(
                 div_type = smc_report.divergence_type
                 if (is_bullish and div_bias == "BULLISH") or (is_bearish and div_bias == "BEARISH"):
                     smc_tags.append(f"RSI Divergence ({div_type.replace('_', ' ').title()})")
-                elif (is_bullish and div_bias == "BEARISH") or (is_bearish and div_bias == "BULLISH"):
+                elif (is_bullish and div_bias == "BEARISH") or (
+                    is_bearish and div_bias == "BULLISH"
+                ):
                     if rvol < 1.5:
                         logger.info(
                             f"[CommodityDetector] ⚠️ Contra divergence ({div_type}) on {clean_sym} — RVOL {rvol:.1f}x below 1.5x threshold; suppressing."
@@ -409,7 +402,11 @@ def detect_commodity_breakouts(
                         is_bullish = False
                         is_bearish = False
 
-        if smc_report and smc_report.setup_type in ("PULLBACK_RETEST", "BOTTOM_FISHING_SPRING", "TOP_FISHING_UTAD"):
+        if smc_report and smc_report.setup_type in (
+            "PULLBACK_RETEST",
+            "BOTTOM_FISHING_SPRING",
+            "TOP_FISHING_UTAD",
+        ):
             if smc_report.confirmation_confirmed is False and rvol < 1.5:
                 if is_bullish or is_bearish:
                     smc_tags.append("⚠️ Awaiting Candle Confirmation")
@@ -444,15 +441,17 @@ def detect_commodity_breakouts(
 
                 ens = ensemble_signal(df_5m)
                 if ens.confidence > 0:
-                    if (is_bullish and ens.verdict == "BEARISH" and ens.confidence >= 0.55) or \
-                       (is_bearish and ens.verdict == "BULLISH" and ens.confidence >= 0.55):
+                    if (is_bullish and ens.verdict == "BEARISH" and ens.confidence >= 0.55) or (
+                        is_bearish and ens.verdict == "BULLISH" and ens.confidence >= 0.55
+                    ):
                         logger.info(
                             f"[CommodityDetector] 🛑 Ensemble VETO on {clean_sym}: Suppressing."
                         )
                         is_bullish = False
                         is_bearish = False
-                    elif (is_bullish and ens.verdict == "BULLISH" and ens.confidence >= 0.55) or \
-                         (is_bearish and ens.verdict == "BEARISH" and ens.confidence >= 0.55):
+                    elif (is_bullish and ens.verdict == "BULLISH" and ens.confidence >= 0.55) or (
+                        is_bearish and ens.verdict == "BEARISH" and ens.confidence >= 0.55
+                    ):
                         smc_tags.append(f"Ensemble ✓ ({ens.verdict} {ens.confidence:.0%})")
             except Exception as e:
                 logger.debug(f"[CommodityDetector] Ensemble signal error for {clean_sym}: {e}")
@@ -487,7 +486,9 @@ def detect_commodity_breakouts(
             t1_price = round(ltp + 2.0 * risk_pts, 2)
             t2_price = round(ltp + 3.5 * risk_pts, 2)
             if is_donchian_breakout:
-                headline = f"🛢️ MCX BREAKOUT: {clean_sym} +{chg:.1f}% Breaking 20-bar High (₹{ltp:,.1f})"
+                headline = (
+                    f"🛢️ MCX BREAKOUT: {clean_sym} +{chg:.1f}% Breaking 20-bar High (₹{ltp:,.1f})"
+                )
                 summary = f"Institutional breakout in {clean_sym}: Trading at ₹{ltp:,.1f} (+{chg:.1f}%). 20-bar 5m Donchian high broken with VWAP support at ₹{vwap:,.1f}."
             elif has_real_vwap:
                 headline = f"MCX MOMENTUM: {clean_sym} +{chg:.1f}% Reclaiming VWAP (₹{vwap:,.1f})"
@@ -501,7 +502,9 @@ def detect_commodity_breakouts(
             t1_price = round(ltp - 2.0 * risk_pts, 2)
             t2_price = round(ltp - 3.5 * risk_pts, 2)
             if is_donchian_breakout:
-                headline = f"🛢️ MCX BREAKDOWN: {clean_sym} {chg:.1f}% Breaking 20-bar Low (₹{ltp:,.1f})"
+                headline = (
+                    f"🛢️ MCX BREAKDOWN: {clean_sym} {chg:.1f}% Breaking 20-bar Low (₹{ltp:,.1f})"
+                )
                 summary = f"Institutional breakdown in {clean_sym}: Trading at ₹{ltp:,.1f} ({chg:.1f}%). 20-bar 5m Donchian low broken below VWAP ₹{vwap:,.1f}."
             elif has_real_vwap:
                 headline = f"MCX BREAKDOWN: {clean_sym} {chg:.1f}% Lost VWAP (₹{vwap:,.1f})"
@@ -528,30 +531,50 @@ def detect_commodity_breakouts(
                 broker_key = (get_data_broker_key() or "").lower()
 
                 chain = get_options_chain(clean_sym)
-                is_mock_chain = any(type(c).__name__ == "MagicMock" for c in chain) if chain else False
-                is_test_env = os.environ.get("CHANAKYA_TESTING") == "1" or os.environ.get("DEPLOY_MODE") == "test"
+                is_mock_chain = (
+                    any(type(c).__name__ == "MagicMock" for c in chain) if chain else False
+                )
+                is_test_env = (
+                    os.environ.get("CHANAKYA_TESTING") == "1"
+                    or os.environ.get("DEPLOY_MODE") == "test"
+                )
 
                 # If broker doesn't feed MCX, chain is synthetic Black-76 theoretical pricing
                 is_synthetic_options = (
                     not is_mock_chain
                     and not is_test_env
-                    and (broker_key in ("mstock", "") or getattr(q, "source", "") == "FALLBACK" or getattr(q, "provider", "") == "yfinance")
+                    and (
+                        broker_key in ("mstock", "")
+                        or getattr(q, "source", "") == "FALLBACK"
+                        or getattr(q, "provider", "") == "yfinance"
+                    )
                 )
 
                 opt_type = "CE" if is_bullish else "PE"
-                filtered = [c for c in chain if getattr(c, "option_type", "") == opt_type and float(getattr(c, "last_price", 0.0) or 0.0) > 0]
+                filtered = [
+                    c
+                    for c in chain
+                    if getattr(c, "option_type", "") == opt_type
+                    and float(getattr(c, "last_price", 0.0) or 0.0) > 0
+                ]
                 if filtered:
                     atm_band = ltp * 0.03
                     atm_candidates = [
-                        c for c in filtered
-                        if abs(float(getattr(c, "strike", 0.0)) - ltp) <= atm_band and float(getattr(c, "last_price", 0.0)) >= 1.0
+                        c
+                        for c in filtered
+                        if abs(float(getattr(c, "strike", 0.0)) - ltp) <= atm_band
+                        and float(getattr(c, "last_price", 0.0)) >= 1.0
                     ]
                     candidates = atm_candidates if atm_candidates else filtered
                     candidates.sort(key=lambda c: abs(float(getattr(c, "strike", 0.0)) - ltp))
                     closest_opt = candidates[0]
 
                     strike_val = float(getattr(closest_opt, "strike", 0.0))
-                    moneyness_pct = (ltp - strike_val) / ltp * 100 if is_bullish else (strike_val - ltp) / ltp * 100
+                    moneyness_pct = (
+                        (ltp - strike_val) / ltp * 100
+                        if is_bullish
+                        else (strike_val - ltp) / ltp * 100
+                    )
                     if -1.0 <= moneyness_pct <= 1.0:
                         delta_tier = "ATM (Δ≈0.50)"
                     elif moneyness_pct > 1.0:
@@ -564,7 +587,12 @@ def detect_commodity_breakouts(
                         expiry = getattr(closest_opt, "expiry", None)
                         if expiry:
                             from datetime import date as _date
-                            exp_date = expiry if isinstance(expiry, _date) else _date.fromisoformat(str(expiry)[:10])
+
+                            exp_date = (
+                                expiry
+                                if isinstance(expiry, _date)
+                                else _date.fromisoformat(str(expiry)[:10])
+                            )
                             dte = (exp_date - _date.today()).days
                             if dte <= 5:
                                 dte_warning = f"⚠️ THETA RISK: Only {dte} DTE — rapid premium decay."
@@ -577,7 +605,9 @@ def detect_commodity_breakouts(
                     opt_t1 = round(opt_prem + 2.0 * opt_risk, 1)
                     opt_t2 = round(opt_prem + 3.5 * opt_risk, 1)
 
-                    opt_rr_calc = round(abs(opt_t1 - opt_prem) / max(0.01, abs(opt_prem - opt_sl)), 1)
+                    opt_rr_calc = round(
+                        abs(opt_t1 - opt_prem) / max(0.01, abs(opt_prem - opt_sl)), 1
+                    )
                     opt_rr_str = f"1:{opt_rr_calc}"
 
                     readable_contract = format_readable_option_symbol(
@@ -612,7 +642,9 @@ def detect_commodity_breakouts(
             e_high = round(min(sl_price - 0.5, ltp + 0.25 * risk_pts), 1)
             e_low = round(max(t1_price + 0.25 * risk_pts, ltp - 0.25 * risk_pts), 1)
 
-        confluence_str = " + ".join(smc_tags) if smc_tags else "Donchian Breakout + VWAP Confirmation"
+        confluence_str = (
+            " + ".join(smc_tags) if smc_tags else "Donchian Breakout + VWAP Confirmation"
+        )
 
         # Only prioritize option as primary vehicle if liquid AND verified from authentic live feed
         should_use_option_primary = bool(opt_recommendation and not is_synthetic_options)
@@ -729,8 +761,9 @@ def detect_commodity_breakouts(
         base_conf = min(88, int(68 + abs(chg) * 5))
         conf_boost = min(15, n_smc_tags * 3)
         if smc_report and smc_report.divergence_bias:
-            if (is_bullish and smc_report.divergence_bias == "BULLISH") or \
-               (is_bearish and smc_report.divergence_bias == "BEARISH"):
+            if (is_bullish and smc_report.divergence_bias == "BULLISH") or (
+                is_bearish and smc_report.divergence_bias == "BEARISH"
+            ):
                 conf_boost = min(15, conf_boost + 5)
         final_conf = min(92, base_conf + conf_boost)
 
@@ -752,8 +785,12 @@ def detect_commodity_breakouts(
             is_live=is_authentic_live,
             environment="LIVE" if is_authentic_live else "TEST",
             market_status=mcx_status,
-            option_premium=opt_recommendation["ltp"] if (should_use_option_primary and opt_recommendation) else None,
-            contract_symbol=opt_recommendation["contract"] if (should_use_option_primary and opt_recommendation) else f"MCX:{clean_sym}",
+            option_premium=opt_recommendation["ltp"]
+            if (should_use_option_primary and opt_recommendation)
+            else None,
+            contract_symbol=opt_recommendation["contract"]
+            if (should_use_option_primary and opt_recommendation)
+            else f"MCX:{clean_sym}",
             metrics={
                 "change_pct": chg,
                 "volume": vol,

@@ -25,15 +25,13 @@ Usage:
 from __future__ import annotations
 
 import logging
-import re
 import threading
 import time
 from collections import defaultdict
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-import httpx
 from market.http_pool import get_shared_client
 
 logger = logging.getLogger(__name__)
@@ -157,13 +155,15 @@ def calculate_deribit_gex(
         r = 0.04
 
         try:
-            d1 = (math.log(underlying_spot / c.strike) + (r + 0.5 * sigma * sigma) * t_years) / (sigma * math.sqrt(t_years))
+            d1 = (math.log(underlying_spot / c.strike) + (r + 0.5 * sigma * sigma) * t_years) / (
+                sigma * math.sqrt(t_years)
+            )
             pdf_d1 = math.exp(-0.5 * d1 * d1) / math.sqrt(2.0 * math.pi)
             gamma = pdf_d1 / (underlying_spot * sigma * math.sqrt(t_years))
         except (ValueError, ZeroDivisionError, OverflowError):
             continue
 
-        dollar_gamma = gamma * (underlying_spot ** 2) * 0.01 * c.open_interest
+        dollar_gamma = gamma * (underlying_spot**2) * 0.01 * c.open_interest
 
         if c.option_type == "CE":
             total_call_gex += dollar_gamma
@@ -193,7 +193,9 @@ def calculate_deribit_gex(
     }
 
 
-def get_crypto_options_summary(currency: str = "BTC", force_refresh: bool = False) -> dict[str, Any]:
+def get_crypto_options_summary(
+    currency: str = "BTC", force_refresh: bool = False
+) -> dict[str, Any]:
     """
     Fetch and compute institutional 24x7 options metrics for BTC or ETH.
     """
@@ -273,7 +275,9 @@ def get_crypto_options_summary(currency: str = "BTC", force_refresh: bool = Fals
         by_expiry[c.expiry].append(c)
 
     # Sort expiries by total OI
-    sorted_expiries = sorted(by_expiry.keys(), key=lambda exp: sum(c.open_interest for c in by_expiry[exp]), reverse=True)
+    sorted_expiries = sorted(
+        by_expiry.keys(), key=lambda exp: sum(c.open_interest for c in by_expiry[exp]), reverse=True
+    )
     nearest_expiry = sorted_expiries[0] if sorted_expiries else ""
     nearest_contracts = by_expiry.get(nearest_expiry, contracts)
 
@@ -297,7 +301,9 @@ def get_crypto_options_summary(currency: str = "BTC", force_refresh: bool = Fals
     # 4. Sentiment Verdict
     if pcr_oi >= 1.3:
         pcr_sentiment = "BULLISH_EXHAUSTION_EXTREME"
-        pcr_note = f"PCR {pcr_oi:.2f} heavily skewed to puts (hedging extreme / floor accumulation)."
+        pcr_note = (
+            f"PCR {pcr_oi:.2f} heavily skewed to puts (hedging extreme / floor accumulation)."
+        )
     elif pcr_oi >= 1.0:
         pcr_sentiment = "MILD_BULLISH"
         pcr_note = f"PCR {pcr_oi:.2f} indicates put demand supporting spot floor."
@@ -318,7 +324,9 @@ def get_crypto_options_summary(currency: str = "BTC", force_refresh: bool = Fals
         "contracts_count": len(contracts),
         "primary_expiry": nearest_expiry,
         "max_pain": max_pain,
-        "max_pain_distance_pct": round(((max_pain - underlying_spot) / underlying_spot) * 100, 2) if underlying_spot > 0 else 0.0,
+        "max_pain_distance_pct": round(((max_pain - underlying_spot) / underlying_spot) * 100, 2)
+        if underlying_spot > 0
+        else 0.0,
         "pcr_open_interest": pcr_oi,
         "pcr_volume": pcr_vol,
         "pcr_sentiment": pcr_sentiment,
@@ -374,20 +382,26 @@ def get_crypto_options_snapshot(
         spot = 0.0
         try:
             from market.crypto_pipeline import get_crypto_ticker
+
             t = get_crypto_ticker(f"{curr}USDT")
             spot = float(t.get("price", 0.0))
         except Exception:
             pass
-        return [], spot, [], {
-            "provider": "DERIBIT",
-            "source": "DERIBIT_REST",
-            "data_state": "UNAVAILABLE",
-            "is_realtime": False,
-            "is_market_open": True,
-            "as_of": now_utc,
-            "as_of_display": f"{now_ist} (Deribit 24x7)",
-            "source_label": "Deribit 24x7",
-        }
+        return (
+            [],
+            spot,
+            [],
+            {
+                "provider": "DERIBIT",
+                "source": "DERIBIT_REST",
+                "data_state": "UNAVAILABLE",
+                "is_realtime": False,
+                "is_market_open": True,
+                "as_of": now_utc,
+                "as_of_display": f"{now_ist} (Deribit 24x7)",
+                "source_label": "Deribit 24x7",
+            },
+        )
 
     contracts_by_exp: dict[str, list[OptionsContract]] = defaultdict(list)
     underlying_spot = 0.0
@@ -437,7 +451,11 @@ def get_crypto_options_snapshot(
         contracts_by_exp[iso_exp].append(contract)
 
     sorted_expiries = sorted(contracts_by_exp.keys())
-    active_exp = expiry if (expiry and expiry in contracts_by_exp) else (sorted_expiries[0] if sorted_expiries else "")
+    active_exp = (
+        expiry
+        if (expiry and expiry in contracts_by_exp)
+        else (sorted_expiries[0] if sorted_expiries else "")
+    )
     selected_contracts = contracts_by_exp.get(active_exp, [])
 
     source_info = {
@@ -452,4 +470,3 @@ def get_crypto_options_snapshot(
     }
 
     return selected_contracts, underlying_spot, sorted_expiries, source_info
-

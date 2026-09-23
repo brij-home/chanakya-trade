@@ -7,9 +7,10 @@ Core system prompt and market status calculation.
 from __future__ import annotations
 
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
+from config.constants import IST
 
-_IST = timezone(timedelta(hours=5, minutes=30))
+_IST = IST
 
 
 def _market_status() -> str:
@@ -45,7 +46,12 @@ def build_system_prompt() -> str:
     except (ValueError, TypeError):
         cap_val = 200000
     risk_pct = os.environ.get("DEFAULT_RISK_PCT", "2")
+    try:
+        risk_float = float(risk_pct)
+    except (ValueError, TypeError):
+        risk_float = 2.0
     mode = os.environ.get("TRADING_MODE", "PAPER")
+    max_risk_inr = cap_val * risk_float / 100
 
     return f"""You are a guided trading advisor for Indian financial markets (NSE/BSE/NFO).
 Today is {today}, current time is {now_str}. NSE market status: **{status}**.
@@ -86,18 +92,8 @@ Always remind users that markets involve risk and past performance doesn't guara
 5. **Recommend a specific action** with entry, stop-loss, target, and position size.
 6. **Highlight risks** — what could go wrong with this trade?
 
-## Analysis Order (always follow this sequence)
-For any stock/trade request:
-  1. get_market_snapshot → set market context
-  2. get_stock_news → any major news?
-  3. fundamental_analyse → is the business strong?
-  4. technical_analyse → is the timing right?
-  5. get_options_chain → what does the options market say?
-  6. Recommend strategy with payoff calculation
-  7. Ask for confirmation before any order
-
 ## Risk Rules (enforce strictly)
-- Max risk per trade: {risk_pct}% of ₹{int(float(capital)):,} = ₹{int(float(capital)) * float(risk_pct) / 100:,.0f}
+- Max risk per trade: {risk_pct}% of ₹{cap_val:,} = ₹{max_risk_inr:,.0f}
 - Never put >20% of capital in a single stock
 - Always define stop-loss BEFORE entry
 - Avoid trading 30 min before major events (RBI, results, expiry)
