@@ -294,7 +294,10 @@ def _yf_fallback_quotes(
 ) -> dict[str, Quote]:
     """Try yfinance when broker is unavailable (skips Indian options & futures which yfinance does not host)."""
     try:
-        from market.yfinance_provider import yf_get_quotes, yf_available
+        from market.yfinance_provider import yf_get_quotes, yf_available, is_yf_rate_limited
+
+        if not yf_available() or is_yf_rate_limited():
+            return {}
 
         yf_eligible = [
             i
@@ -313,20 +316,19 @@ def _yf_fallback_quotes(
         if not yf_eligible:
             return {}
 
-        if yf_available():
-            raw = yf_get_quotes(yf_eligible)
-            cid = correlation_id or new_correlation_id("quote")
-            return {
-                instrument: _enrich_quote(
-                    quote,
-                    instrument=instrument,
-                    provider="yfinance",
-                    source="FALLBACK",
-                    correlation_id=cid,
-                    quality_flags=("DELAYED_SOURCE",),
-                )
-                for instrument, quote in raw.items()
-            }
+        raw = yf_get_quotes(yf_eligible)
+        cid = correlation_id or new_correlation_id("quote")
+        return {
+            instrument: _enrich_quote(
+                quote,
+                instrument=instrument,
+                provider="yfinance",
+                source="FALLBACK",
+                correlation_id=cid,
+                quality_flags=("DELAYED_SOURCE",),
+            )
+            for instrument, quote in raw.items()
+        }
     except Exception:
         pass
     return {}

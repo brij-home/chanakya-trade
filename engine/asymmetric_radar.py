@@ -567,6 +567,12 @@ class AsymmetricOpportunityRadar:
     def __init__(self, min_rr: float = 3.0, min_conviction: int = 75) -> None:
         self.min_rr = min_rr
         self.min_conviction = min_conviction
+        self._cache: dict[Any, list[AsymmetricOpportunity]] = {}
+        self._cache_ts: dict[Any, float] = {}
+        self._cache_ttl: float = 30.0
+        import threading
+
+        self._cache_lock = threading.Lock()
 
     # ── 1. Pocket Pivot Base Accumulation ───────────────────────
 
@@ -1846,11 +1852,23 @@ class AsymmetricOpportunityRadar:
         self,
         segment: Optional[str] = None,
         top_n: int = 6,
+        force_refresh: bool = False,
     ) -> list[AsymmetricOpportunity]:
         """
         Sweeps the watched universe across F&O, Cash Equities, Indices, and MCX Commodities
         to surface top asymmetric opportunities meeting strict minimum 1:3.0 R:R.
         """
+        import time
+
+        cache_key = segment
+        now = time.monotonic()
+        if not force_refresh:
+            with self._cache_lock:
+                if cache_key in self._cache and (
+                    now - self._cache_ts.get(cache_key, 0.0) < self._cache_ttl
+                ):
+                    return list(self._cache[cache_key][:top_n])
+
         universe = get_scan_universe(segment=segment)
         opportunities: list[AsymmetricOpportunity] = []
 
@@ -1997,6 +2015,10 @@ class AsymmetricOpportunityRadar:
 
         # Sort descending by conviction score, then by R:R ratio
         opportunities.sort(key=lambda o: (o.conviction_score, o.risk_reward_ratio), reverse=True)
+        with self._cache_lock:
+            self._cache[cache_key] = opportunities
+            self._cache_ts[cache_key] = now
+
         top_opps = opportunities[:top_n]
 
         logger.info(

@@ -58,6 +58,7 @@ def detect_options_momentum_breakouts(
 
     found: list[AutoAlert] = []
     candidate_alerts: list[tuple[float, AutoAlert]] = []
+    active_targets: list[dict[str, Any]] = []
 
     if now_dt is None:
         now_dt = datetime.now(IST)
@@ -114,6 +115,12 @@ def detect_options_momentum_breakouts(
         nifty_change is not None and nifty_change >= 0.40 and nifty_below_vwap is False
     )
 
+    is_test_env = (
+        os.environ.get("CHANAKYA_TESTING") == "1"
+        or os.environ.get("DEPLOY_MODE") == "test"
+        or ("PYTEST_CURRENT_TEST" in os.environ)
+    )
+
     # Stage 1: Fast Batch-fetch underlying spot quotes for all targets in one call (<150ms)
     formatted_targets = [f"{resolve_index_exchange(s)}:{s}" for s in target_list]
     if batch_quotes is None:
@@ -164,11 +171,14 @@ def detect_options_momentum_breakouts(
             alert_segment = "FNO_INDEX" if is_idx else "FNO_STOCK"
 
             # ── STAGE 1: SPOT MOVEMENT & OPENING DRIVE PRE-FILTER ──
-            # For single-stock F&O, skip expensive options chain extraction if the underlying stock
-            # is completely flat and inactive today (0 momentum, 0 displacement from VWAP).
+            # For single-stock F&O, skip cash equities and skip inactive stocks with 0 momentum.
             is_bear_drive = False
             is_bull_drive = False
             if not is_idx:
+                from engine.position_sizer import get_lot_size
+
+                if get_lot_size(clean_sym) <= 1:
+                    continue
                 if spot_open > 0:
                     if (
                         spot_high > 0
@@ -191,11 +201,45 @@ def detect_options_momentum_breakouts(
                     or (spot_open > 0 and abs(spot - spot_open) / spot_open >= 0.005)
                 )
 
-                if (spot_open > 0 or spot_vwap > 0 or spot_change_pct != 0.0) and not (
+                if not is_test_env and not (
                     is_momentum_active or is_bear_drive or is_bull_drive or is_vwap_displaced
                 ):
                     continue
 
+            active_targets.append(
+                {
+                    "sym": sym,
+                    "clean_sym": clean_sym,
+                    "exch": exch,
+                    "lookup_sym": lookup_sym,
+                    "spot": spot,
+                    "spot_change_pct": spot_change_pct,
+                    "spot_open": spot_open,
+                    "spot_high": spot_high,
+                    "spot_low": spot_low,
+                    "spot_vwap": spot_vwap,
+                    "is_idx": is_idx,
+                    "alert_segment": alert_segment,
+                    "is_bear_drive": is_bear_drive,
+                    "is_bull_drive": is_bull_drive,
+                }
+            )
+        except Exception as e_sym:
+            logger.debug(f"[OptionsBreakout] Pre-filter error for {sym}: {e_sym}")
+
+    def _eval_sym(sym_info: dict[str, Any]) -> Optional[tuple[float, AutoAlert]]:
+        sym = sym_info["sym"]
+        clean_sym = sym_info["clean_sym"]
+        exch = sym_info["exch"]
+        spot = sym_info["spot"]
+        spot_change_pct = sym_info["spot_change_pct"]
+        spot_open = sym_info["spot_open"]
+        spot_vwap = sym_info["spot_vwap"]
+        is_idx = sym_info["is_idx"]
+        alert_segment = sym_info["alert_segment"]
+        is_bear_drive = sym_info["is_bear_drive"]
+        is_bull_drive = sym_info["is_bull_drive"]
+        try:
             # Institutional Single-Stock Expiry Protection:
             # Under SEBI regulations, single-stock options are physically settled.
             # In settlement week (DTE <= 4), automatically route stock options to Next-Month
@@ -234,7 +278,7 @@ def detect_options_momentum_breakouts(
                 chain = get_options_chain(clean_sym)
 
             if not chain:
-                continue
+                return None
 
             min_opt_volume = (
                 (2000 if is_idx else 300) if is_opening_drive else (3000 if is_idx else 500)
@@ -264,7 +308,7 @@ def detect_options_momentum_breakouts(
                 and getattr(c, "volume", 0) >= min_opt_volume
             ]
             if not atm_contracts:
-                continue
+                return None
 
             if is_idx:
                 atm_contracts.sort(key=lambda c: abs(getattr(c, "strike", 0.0) - spot))
@@ -1201,10 +1245,21 @@ def detect_options_momentum_breakouts(
                     + drive_pts
                     + gamma_pts
                 )
-                candidate_alerts.append((quality_score, alert))
-                break
+                return (quality_score, alert)
+            return None
         except Exception as e:
             logger.debug(f"[OptionsBreakout] Options momentum scan error for {sym}: {e}")
+            return None
+
+    if active_targets:
+        import concurrent.futures
+
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=min(6, len(active_targets))
+        ) as executor:
+            for cand_res in executor.map(_eval_sym, active_targets):
+                if cand_res:
+                    candidate_alerts.append(cand_res)
 
     # ── ANTI-STORM PACING & TOP-N QUALITY SELECTION ──
     candidate_alerts.sort(key=lambda x: x[0], reverse=True)

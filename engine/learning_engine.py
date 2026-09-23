@@ -1092,13 +1092,16 @@ class PatternLearningEngine:
         except Exception:
             pass
 
-        # 3. Call OI Unwinding in options chain
+        # 3. Call OI Unwinding in options chain (only query for F&O instruments with active coiling or volume dry-up)
         ce_unwind_pct = 0.0
-        if chain is None:
+        if chain is None and (prior_vol_ratio <= 0.45 or squeeze_bars >= 2):
             try:
-                from market.options import get_options_chain
+                from engine.position_sizer import get_lot_size
 
-                chain = get_options_chain(clean_sym)
+                if get_lot_size(clean_sym) > 1:
+                    from market.options import get_options_chain
+
+                    chain = get_options_chain(clean_sym)
             except Exception:
                 chain = None
 

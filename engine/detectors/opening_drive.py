@@ -179,7 +179,10 @@ def detect_opening_drive(
         from engine.position_sizer import get_lot_size
 
         lot_sz = get_lot_size(clean_sym)
-        raw_chain = get_options_chain(clean_sym)
+        if is_index or (lot_sz and lot_sz > 1):
+            raw_chain = get_options_chain(clean_sym)
+        else:
+            raw_chain = []
         contracts = (
             raw_chain.contracts
             if hasattr(raw_chain, "contracts")

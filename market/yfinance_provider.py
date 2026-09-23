@@ -288,13 +288,18 @@ logger = logging.getLogger("chanakya.yfinance")
 
 _quote_cache_lock = threading.Lock()
 _quote_cache: dict[str, tuple[float, Quote]] = {}  # key -> (timestamp, Quote)
-_QUOTE_TTL_SECONDS = 5.0
+_QUOTE_TTL_SECONDS = 30.0
 
 # 6-hour negative cache for delisted or 404 dead tickers to avoid synchronous network stalls
 # Uses a SEPARATE lock from _quote_cache_lock to prevent cross-blocking.
 _dead_ticker_lock = threading.Lock()
 _DEAD_TICKER_CACHE: dict[str, float] = {}  # ticker -> timestamp
 _DEAD_TICKER_TTL = 6 * 3600.0  # 6 hours (matches config.constants.DELISTED_SYMBOL_TTL_SECONDS)
+
+# Process-level circuit breaker for Yahoo Finance 429/401 crumb rate-limiting
+_yf_rate_limit_lock = threading.Lock()
+_yf_rate_limited_until: float = 0.0
+_yf_consecutive_rate_limits: int = 0
 
 # USD-denominated yfinance futures tickers mapped to their MCX contract quotation factor
 # COMEX/NYMEX futures are quoted in US units (troy oz, lbs, barrels), whereas MCX quotes in Indian standard units:
@@ -356,6 +361,7 @@ def yf_get_quote(symbol: str, exchange: str = "NSE") -> Quote:
     ~15 min delayed for Indian markets when no broker is connected.
     MCX commodity prices are converted from USD to INR automatically.
     """
+    global _yf_rate_limited_until, _yf_consecutive_rate_limits
     cache_key = f"{exchange.upper()}:{symbol.upper()}"
     now = time.time()
 
@@ -364,6 +370,12 @@ def yf_get_quote(symbol: str, exchange: str = "NSE") -> Quote:
             ts, cached_q = _quote_cache[cache_key]
             if now - ts < _QUOTE_TTL_SECONDS:
                 return cached_q
+
+    with _yf_rate_limit_lock:
+        if _yf_rate_limited_until > now:
+            raise RuntimeError(
+                f"yfinance rate-limited (circuit open until {int(_yf_rate_limited_until)})"
+            )
 
     yf = _get_yf()
     ticker = _to_yf_symbol(symbol, exchange)
@@ -386,19 +398,32 @@ def yf_get_quote(symbol: str, exchange: str = "NSE") -> Quote:
 
         # If fast_info is sparse or volume is missing, try history for today
         if not last_price or volume <= 0:
-            try:
-                hist = t.history(period="1d")
-                if not hist.empty:
-                    row = hist.iloc[-1]
-                    if not last_price:
-                        last_price = float(row.get("Close", 0))
-                        open_price = float(row.get("Open", 0))
-                        day_high = float(row.get("High", 0))
-                        day_low = float(row.get("Low", 0))
-                    if volume <= 0:
-                        volume = int(row.get("Volume", 0))
-            except Exception:
-                pass
+            with _yf_rate_limit_lock:
+                can_fetch_hist = _yf_rate_limited_until <= time.time()
+            if can_fetch_hist:
+                try:
+                    hist = t.history(period="1d")
+                    if not hist.empty:
+                        row = hist.iloc[-1]
+                        if not last_price:
+                            last_price = float(row.get("Close", 0))
+                            open_price = float(row.get("Open", 0))
+                            day_high = float(row.get("High", 0))
+                            day_low = float(row.get("Low", 0))
+                        if volume <= 0:
+                            volume = int(row.get("Volume", 0))
+                except Exception as e_hist:
+                    err_str = str(e_hist).lower()
+                    if (
+                        "429" in err_str
+                        or "crumb" in err_str
+                        or "rate" in err_str
+                        or "401" in err_str
+                    ):
+                        with _yf_rate_limit_lock:
+                            _yf_consecutive_rate_limits += 1
+                            if _yf_consecutive_rate_limits >= 2:
+                                _yf_rate_limited_until = time.time() + 60.0
 
         # ── MCX Commodity USD → INR conversion with unit multiplier ────
         # yfinance returns USD-denominated prices for commodity futures
@@ -446,6 +471,17 @@ def yf_get_quote(symbol: str, exchange: str = "NSE") -> Quote:
                         extra={"ticker": ticker, "symbol": symbol, "ttl_hours": 6},
                     )
                 _DEAD_TICKER_CACHE[ticker] = now
+        elif (
+            "429" in err_str
+            or "crumb" in err_str
+            or "rate" in err_str
+            or "401" in err_str
+            or "unauthorized" in err_str
+        ):
+            with _yf_rate_limit_lock:
+                _yf_consecutive_rate_limits += 1
+                if _yf_consecutive_rate_limits >= 2:
+                    _yf_rate_limited_until = time.time() + 60.0
         raise RuntimeError(f"yfinance quote failed for {symbol}: {e}") from e
 
 
@@ -474,6 +510,11 @@ def yf_get_quotes(instruments: list[str]) -> dict[str, Quote]:
 
     if not missing:
         return result
+
+    # Instant circuit breaker backoff: don't hammer Yahoo Finance when rate-limited
+    with _yf_rate_limit_lock:
+        if _yf_rate_limited_until > now:
+            return result
 
     def _fetch_single(inst_str: str) -> tuple[str, Optional[Quote]]:
         if ":" in inst_str:
@@ -532,10 +573,14 @@ def yf_get_ohlcv(
     Returns:
         List of dicts with keys: date, open, high, low, close, volume
     """
+    global _yf_rate_limited_until, _yf_consecutive_rate_limits
     yf = _get_yf()
     ticker = _to_yf_symbol(symbol, exchange)
 
     now_ts = time.time()
+    with _yf_rate_limit_lock:
+        if _yf_rate_limited_until > now_ts:
+            return []
     with _dead_ticker_lock:
         if ticker in _DEAD_TICKER_CACHE:
             if now_ts - _DEAD_TICKER_CACHE[ticker] < _DEAD_TICKER_TTL:
@@ -646,12 +691,25 @@ def yf_get_ohlcv(
                     "volume": vol_int,
                 }
             )
+        with _yf_rate_limit_lock:
+            _yf_consecutive_rate_limits = 0
         return rows
     except Exception as e:
         err_str = str(e).lower()
         if "404" in err_str or "not found" in err_str or "delisted" in err_str:
             with _quote_cache_lock:
                 _DEAD_TICKER_CACHE[ticker] = time.time()
+        elif (
+            "429" in err_str
+            or "crumb" in err_str
+            or "rate" in err_str
+            or "401" in err_str
+            or "unauthorized" in err_str
+        ):
+            with _yf_rate_limit_lock:
+                _yf_consecutive_rate_limits += 1
+                if _yf_consecutive_rate_limits >= 2:
+                    _yf_rate_limited_until = time.time() + 60.0
         return []
 
 
@@ -666,3 +724,9 @@ def yf_available() -> bool:
         return True
     except ImportError:
         return False
+
+
+def is_yf_rate_limited() -> bool:
+    """Check if yfinance is currently in rate-limit backoff cooldown."""
+    with _yf_rate_limit_lock:
+        return _yf_rate_limited_until > time.time()

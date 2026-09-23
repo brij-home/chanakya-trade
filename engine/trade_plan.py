@@ -213,6 +213,7 @@ def calculate_trade_plan(
     has_active_blast: bool = False,
     df: Optional[pd.DataFrame] = None,
     ref_dt: Optional[datetime] = None,
+    chain: Optional[Any] = None,
 ) -> TradePlan:
     """
     Generate an institutional, 100% data-driven trade plan with real invalidation,
@@ -308,29 +309,52 @@ def calculate_trade_plan(
     call_oi_walls: list[float] = []
     put_oi_walls: list[float] = []
     max_pain_strike: Optional[float] = None
-    try:
-        from market.options import get_options_chain, get_max_pain
+    is_fno_or_idx = clean_sym in (
+        "NIFTY",
+        "BANKNIFTY",
+        "FINNIFTY",
+        "MIDCPNIFTY",
+        "SENSEX",
+        "BANKEX",
+    )
+    if not is_fno_or_idx:
+        try:
+            from engine.position_sizer import get_lot_size
 
-        chain = get_options_chain(clean_sym)
-        if chain:
-            max_pain_strike = get_max_pain(clean_sym)
-            # Find major Call OI strikes above spot
-            call_contracts = [
-                c for c in chain if c.option_type == "CE" and c.strike > ltp and c.oi > 0
-            ]
-            if call_contracts:
-                call_contracts.sort(key=lambda c: c.oi, reverse=True)
-                call_oi_walls = [c.strike for c in call_contracts[:3]]
+            is_fno_or_idx = get_lot_size(clean_sym) > 1
+        except Exception:
+            is_fno_or_idx = False
 
-            # Find major Put OI strikes below spot
-            put_contracts = [
-                c for c in chain if c.option_type == "PE" and c.strike < ltp and c.oi > 0
-            ]
-            if put_contracts:
-                put_contracts.sort(key=lambda c: c.oi, reverse=True)
-                put_oi_walls = [c.strike for c in put_contracts[:3]]
-    except Exception as e:
-        logger.debug("Options chain fetch error: %s", e)
+    if is_fno_or_idx:
+        try:
+            if chain is None and (
+                clean_sym in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX")
+                or df is None
+            ):
+                from market.options import get_options_chain
+
+                chain = get_options_chain(clean_sym)
+            if chain:
+                from market.options import get_max_pain
+
+                max_pain_strike = get_max_pain(clean_sym)
+                # Find major Call OI strikes above spot
+                call_contracts = [
+                    c for c in chain if c.option_type == "CE" and c.strike > ltp and c.oi > 0
+                ]
+                if call_contracts:
+                    call_contracts.sort(key=lambda c: c.oi, reverse=True)
+                    call_oi_walls = [c.strike for c in call_contracts[:3]]
+
+                # Find major Put OI strikes below spot
+                put_contracts = [
+                    c for c in chain if c.option_type == "PE" and c.strike < ltp and c.oi > 0
+                ]
+                if put_contracts:
+                    put_contracts.sort(key=lambda c: c.oi, reverse=True)
+                    put_oi_walls = [c.strike for c in put_contracts[:3]]
+        except Exception as e:
+            logger.debug("Options chain fetch error: %s", e)
 
     # Volatility buffer for invalidation (prevents wick-hunting stop outs)
     vol_buffer = max(1.0, 0.15 * atr)

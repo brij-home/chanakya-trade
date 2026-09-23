@@ -60,7 +60,11 @@ def compute_time_of_day_rvol(
         now_ist = now_ist.astimezone(IST)
 
     mins_from_open = (now_ist.hour * 60 + now_ist.minute) - (9 * 60 + 15)
-    fraction = expected_volume_fraction(float(mins_from_open))
+    # Outside active market session, compare full day volume (fraction = 1.0)
+    if mins_from_open < 0 or mins_from_open >= 375:
+        fraction = 1.0
+    else:
+        fraction = expected_volume_fraction(float(mins_from_open))
     expected_vol = max(1.0, avg_daily_vol * fraction)
     return round(float(current_vol) / expected_vol, 2)
 
@@ -127,6 +131,11 @@ def detect_intraday_mover_sparks(
         # Check turnover gate for equities (₹5 Cr min, or active volume)
         turnover_cr = round((ltp * vol) / 1e7, 2)
         if seg != "INDEX" and turnover_cr < 5.0 and vol < 50000:
+            continue
+
+        # Fast pre-filter: Stock must meet minimal price movement threshold before computing historical RVOL
+        min_move = 0.20 if seg == "INDEX" else 0.80
+        if abs(chg) < min_move:
             continue
 
         # Calculate TOD-RVOL

@@ -29,15 +29,27 @@ def get_last_source(data_type: str) -> str:
     return _last_source.get(data_type, "none")
 
 
+import time
+
+_last_warn_time: dict[str, float] = {}
+
+
 def warn_fallback(data_type: str, reason: str, source: str) -> None:
     """
     Print a visible warning when the primary source failed and a fallback is used.
+    Rate-limited to at most once per 60 seconds per (data_type, source) to prevent I/O blocking.
 
     Args:
         data_type: Human-readable label ("options", "quotes", "holdings", etc.)
         reason:    Why the primary failed (exception message or short description)
         source:    The fallback source being used ("nse_scraper", "yfinance", etc.)
     """
+    now = time.monotonic()
+    key = f"{data_type}:{source}"
+    if key in _last_warn_time and (now - _last_warn_time[key]) < 60.0:
+        return
+    _last_warn_time[key] = now
+
     try:
         from rich.console import Console
 

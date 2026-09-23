@@ -27,6 +27,8 @@ _CHAIN_CACHE: dict[str, tuple[float, list[OptionsContract]]] = {}
 _CHAIN_CACHE_TTL_DEFAULT = 180.0  # Off-market hours fallback
 _CHAIN_CACHE_TTL_LIVE = 15.0  # 15s during live market hours for real-time gamma/OI shifts
 _CHAIN_CACHE_TTL_SCRAPER = 30.0  # 30s for scraper fallback
+_EXPIRIES_CACHE: dict[str, tuple[float, list[str]]] = {}
+_EXPIRIES_CACHE_TTL = 300.0  # 5 minutes cache for expiry dates
 
 
 def get_chain_cache_ttl(is_broker: bool = True) -> float:
@@ -165,11 +167,12 @@ def get_options_chain(
         .replace("CDS:", "")
         .replace("NFO:", "")
         .replace("NSE:", "")
+        .replace("BSE:", "")
         .strip()
     )
     is_commodity = clean_sym in COMMODITY_SYMBOLS or underlying.upper().startswith("MCX:")
 
-    cache_key = f"{underlying.upper()}:{expiry or 'nearest'}"
+    cache_key = f"{clean_sym}:{expiry or 'nearest'}"
     now = time.time()
     if cache_key in _CHAIN_CACHE:
         cached_at, cached_chain = _CHAIN_CACHE[cache_key]
@@ -348,11 +351,27 @@ def get_expiries(underlying: str) -> list[str]:
     All available expiry dates for an underlying (sorted ascending).
     Returns dates as "YYYY-MM-DD" strings.
     """
+    clean_u = (
+        underlying.replace("NSE:", "")
+        .replace("BSE:", "")
+        .replace("NFO:", "")
+        .replace("MCX:", "")
+        .upper()
+        .strip()
+    )
+    now = time.time()
+    if clean_u in _EXPIRIES_CACHE:
+        cached_at, cached_exp = _EXPIRIES_CACHE[clean_u]
+        ttl = _EXPIRIES_CACHE_TTL if cached_exp else 15.0
+        if (now - cached_at) < ttl:
+            return list(cached_exp)
+
     try:
         broker = get_data_broker()
         if hasattr(broker, "get_expiries"):
             exp = broker.get_expiries(underlying)
             if exp:
+                _EXPIRIES_CACHE[clean_u] = (now, exp)
                 return exp
     except Exception:
         pass
@@ -362,12 +381,14 @@ def get_expiries(underlying: str) -> list[str]:
 
         exp = nse_get_expiries(underlying)
         if exp:
+            _EXPIRIES_CACHE[clean_u] = (now, exp)
             return exp
     except Exception:
         pass
 
     chain = get_options_chain(underlying)
     dates = sorted({c.expiry for c in chain if c.expiry})
+    _EXPIRIES_CACHE[clean_u] = (now, dates)
     return dates
 
 

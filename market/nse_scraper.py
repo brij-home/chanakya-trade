@@ -300,6 +300,7 @@ def nse_fetch_full_snapshot(
         contract_info = nse_get_contract_info(clean_sym)
         nse_expiries = contract_info.get("expiryDates", [])
         if not nse_expiries:
+            _CACHE[cache_key] = (now, [], None, [])
             return [], None, []
 
         iso_expiries = [_nse_expiry_to_iso(e) for e in nse_expiries]
@@ -322,6 +323,7 @@ def nse_fetch_full_snapshot(
         )
         resp = session.get(url, timeout=12)
         if resp.status_code != 200:
+            _CACHE[cache_key] = (now, [], None, iso_expiries)
             return [], None, iso_expiries
 
         raw_json = resp.json()
@@ -336,13 +338,12 @@ def nse_fetch_full_snapshot(
         lot_sz = LOT_SIZES.get(clean_sym, 75 if is_idx else 250)
         contracts = _parse_v3_chain(raw_json, clean_sym, lot_sz)
 
-        if contracts:
-            _CACHE[cache_key] = (now, contracts, live_spot, iso_expiries)
-
+        _CACHE[cache_key] = (now, contracts, live_spot, iso_expiries)
         return contracts, live_spot, iso_expiries
 
     except Exception as e:
         log.warning(f"Failed to fetch live NSE options chain for {clean_sym}: {e}")
+        _CACHE[cache_key] = (now, [], None, [])
         return [], None, []
 
 
@@ -373,13 +374,7 @@ def nse_get_options_chain(
     if contracts:
         return contracts
 
-    # Secondary fallback to direct _fetch_nse_chain
-    try:
-        is_index = _is_index_underlying(underlying)
-        raw = _fetch_nse_chain(underlying, is_index)
-        return _parse_chain(raw, underlying, expiry)
-    except Exception:
-        return []
+    return []
 
 
 def nse_get_expiries(underlying: str) -> list[str]:

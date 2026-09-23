@@ -175,6 +175,12 @@ class PrecursorRadarScanner:
 
     def __init__(self, min_conviction: int = 70) -> None:
         self._min_conviction_alert = min_conviction
+        self._cache: dict[Any, list[PrecursorCandidate]] = {}
+        self._cache_ts: dict[Any, float] = {}
+        self._cache_ttl: float = 30.0
+        import threading
+
+        self._cache_lock = threading.Lock()
 
     def get_scan_universe(self, segment: Optional[str] = None) -> list[str]:
         """
@@ -618,59 +624,67 @@ class PrecursorRadarScanner:
         # D. Sector RRG Tailwind [0–15 pts]
         sector_name = "Equities"
         rrg_quad = "NEUTRAL"
-        try:
-            from analysis.sector_rotation import get_stock_sector_alignment
+        if sym_seg not in ("CRYPTO", "COMMODITY"):
+            try:
+                from analysis.sector_rotation import get_stock_sector_alignment
 
-            align = get_stock_sector_alignment(clean_sym)
-            if hasattr(align, "quadrant"):
-                rrg_quad = getattr(align, "quadrant", rrg_quad)
-                sector_name = getattr(align, "sector", getattr(align, "sector_name", sector_name))
-            elif isinstance(align, dict):
-                sector_name = align.get("sector_name", align.get("sector", sector_name))
-                rrg_quad = align.get("quadrant", rrg_quad)
+                align = get_stock_sector_alignment(clean_sym)
+                if hasattr(align, "quadrant"):
+                    rrg_quad = getattr(align, "quadrant", rrg_quad)
+                    sector_name = getattr(
+                        align, "sector", getattr(align, "sector_name", sector_name)
+                    )
+                elif isinstance(align, dict):
+                    sector_name = align.get("sector_name", align.get("sector", sector_name))
+                    rrg_quad = align.get("quadrant", rrg_quad)
 
-            if rrg_quad == "LEADING":
-                score += 15
-                matched_factors.append(
-                    f"Parent sector ({sector_name}) in LEADING RRG quadrant (Institutional inflow tailwind)"
-                )
-            elif rrg_quad == "IMPROVING":
-                score += 10
-                matched_factors.append(
-                    f"Parent sector ({sector_name}) in IMPROVING RRG quadrant (Emerging rotation)"
-                )
-            elif rrg_quad == "LAGGING":
-                score -= 10  # Mild drag penalty instead of harsh -15
-        except Exception:
-            pass
-
-        # E. Options Gamma & Call Unwinding [0–15 pts]
-        try:
-            from market.options import get_options_chain
-
-            if chain is None:
-                chain = get_options_chain(clean_sym)
-            if chain:
-                ce_shedding = []
-                for c in chain:
-                    if getattr(c, "option_type", "") == "CE":
-                        oi = getattr(c, "oi", 0)
-                        doi = getattr(c, "oi_change", 0)
-                        if doi < 0 and oi > 0:
-                            pct = (doi / max(1, oi - doi)) * 100.0
-                            ce_shedding.append(pct)
-                if ce_shedding and min(ce_shedding) <= -15.0:
+                if rrg_quad == "LEADING":
                     score += 15
                     matched_factors.append(
-                        f"Call writers shedding {abs(min(ce_shedding)):.1f}% OI (Gamma Trap primed for squeeze)"
+                        f"Parent sector ({sector_name}) in LEADING RRG quadrant (Institutional inflow tailwind)"
                     )
-                elif ce_shedding and min(ce_shedding) <= -8.0:
+                elif rrg_quad == "IMPROVING":
                     score += 10
                     matched_factors.append(
-                        f"Call OI liquidation detected ({abs(min(ce_shedding)):.1f}%)"
+                        f"Parent sector ({sector_name}) in IMPROVING RRG quadrant (Emerging rotation)"
                     )
-        except Exception:
-            pass
+                elif rrg_quad == "LAGGING":
+                    score -= 10  # Mild drag penalty instead of harsh -15
+            except Exception:
+                pass
+        elif sym_seg == "CRYPTO":
+            sector_name = "Crypto"
+        elif sym_seg == "COMMODITY":
+            sector_name = "Commodities"
+
+        # E. Options Gamma & Call Unwinding [0–15 pts]
+        if sym_seg not in ("CRYPTO", "COMMODITY"):
+            try:
+                from market.options import get_options_chain
+
+                if chain is None:
+                    chain = get_options_chain(clean_sym)
+                if chain:
+                    ce_shedding = []
+                    for c in chain:
+                        if getattr(c, "option_type", "") == "CE":
+                            oi = getattr(c, "oi", 0)
+                            doi = getattr(c, "oi_change", 0)
+                            if doi < 0 and oi > 0:
+                                pct = (doi / max(1, oi - doi)) * 100.0
+                                ce_shedding.append(pct)
+                    if ce_shedding and min(ce_shedding) <= -15.0:
+                        score += 15
+                        matched_factors.append(
+                            f"Call writers shedding {abs(min(ce_shedding)):.1f}% OI (Gamma Trap primed for squeeze)"
+                        )
+                    elif ce_shedding and min(ce_shedding) <= -8.0:
+                        score += 10
+                        matched_factors.append(
+                            f"Call OI liquidation detected ({abs(min(ce_shedding)):.1f}%)"
+                        )
+            except Exception:
+                pass
 
         # 5. Intraday VWAP & Knife-Catching Check (VETO / PENALTY)
         if vwap > 0 and ltp < vwap:
@@ -767,11 +781,23 @@ class PrecursorRadarScanner:
         universe: Optional[list[str]] = None,
         segment: Optional[str] = None,
         top_n: int = 5,
+        force_refresh: bool = False,
     ) -> list[PrecursorCandidate]:
         """
         Scans universe and returns top N high-conviction pre-ignition candidates.
         Can be filtered by segment ('INDEX' | 'FNO' | 'NON_FNO' | 'ALL').
         """
+        import time
+
+        cache_key = (tuple(universe) if universe else None, segment)
+        now = time.monotonic()
+        if not force_refresh:
+            with self._cache_lock:
+                if cache_key in self._cache and (
+                    now - self._cache_ts.get(cache_key, 0.0) < self._cache_ttl
+                ):
+                    return list(self._cache[cache_key][:top_n])
+
         symbols = universe or self.get_scan_universe(segment=segment)
         candidates: list[PrecursorCandidate] = []
 
@@ -784,12 +810,19 @@ class PrecursorRadarScanner:
         try:
             from market.quotes import get_quote
 
-            formatted_syms = [
-                (f"MCX:{s}" if classify_symbol_segment(s) == "COMMODITY" else f"NSE:{s}")
-                if ":" not in s
-                else s
-                for s in symbols
-            ]
+            formatted_syms = []
+            for s in symbols:
+                if ":" in s:
+                    formatted_syms.append(s)
+                else:
+                    seg = classify_symbol_segment(s)
+                    if seg == "CRYPTO":
+                        formatted_syms.append(f"CRYPTO:{s}")
+                    elif seg == "COMMODITY":
+                        formatted_syms.append(f"MCX:{s}")
+                    else:
+                        formatted_syms.append(f"NSE:{s}")
+
             q_res = get_quote(formatted_syms)
             if isinstance(q_res, dict):
                 quotes_map = q_res
@@ -797,9 +830,18 @@ class PrecursorRadarScanner:
             logger.debug(f"[PrecursorRadar] Batch quote fetch error: {e}")
 
         def _worker(sym: str) -> Optional[PrecursorCandidate]:
-            clean = sym.upper().replace("NSE:", "").replace("MCX:", "").replace(".NS", "").strip()
+            clean = (
+                sym.upper()
+                .replace("NSE:", "")
+                .replace("MCX:", "")
+                .replace("CRYPTO:", "")
+                .replace("BINANCE:", "")
+                .replace(".NS", "")
+                .strip()
+            )
             q = (
-                quotes_map.get(f"NSE:{clean}")
+                quotes_map.get(f"CRYPTO:{clean}")
+                or quotes_map.get(f"NSE:{clean}")
                 or quotes_map.get(f"MCX:{clean}")
                 or quotes_map.get(clean)
                 or quotes_map.get(sym)
@@ -823,6 +865,10 @@ class PrecursorRadarScanner:
 
         # Sort descending by conviction score
         candidates.sort(key=lambda c: c.conviction_score, reverse=True)
+        with self._cache_lock:
+            self._cache[cache_key] = candidates
+            self._cache_ts[cache_key] = now
+
         top_candidates = candidates[:top_n]
 
         logger.info(
