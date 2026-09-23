@@ -518,9 +518,15 @@ def test_options_scanner_auto_routes_stock_options_to_next_month_in_expiry_week(
     from engine.auto_alert_engine import AutoAlertEngine
     from brokers.base import OptionsContract, Quote
 
+    from collections import defaultdict
+    from engine.learning_engine import pattern_learning_engine
+
     eng = AutoAlertEngine()
     eng._alerts = []
     eng._cooldowns = {}
+    eng._sector_daily_dispatched = defaultdict(set)
+    pattern_learning_engine._symbol_lockouts.clear()
+    pattern_learning_engine._invalidation_counts.clear()
     monkeypatch.setattr(eng, "_save", lambda: None)
 
     spot = 3000.0

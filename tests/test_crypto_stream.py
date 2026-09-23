@@ -168,7 +168,23 @@ def test_smart_funnel_crypto_prefilter():
         provider="binance",
         data_state="LIVE",
     )
-    with patch.object(crypto_stream, "get_quote", return_value=test_quote):
+    sample_df = pd.DataFrame(
+        [
+            {
+                "date": pd.to_datetime(1789900000000 + i * 900000, unit="ms"),
+                "open": 80000.0 + i * 10,
+                "high": 80500.0 + i * 10,
+                "low": 79800.0 + i * 10,
+                "close": 80200.0 + i * 10,
+                "volume": 50.0,
+            }
+            for i in range(35)
+        ]
+    ).set_index("date")
+    with (
+        patch.object(crypto_stream, "get_quote", return_value=test_quote),
+        patch.object(crypto_stream, "get_klines", return_value=sample_df),
+    ):
         report = funnel.evaluate_stock_quant("BTCUSDT", exchange="CRYPTO")
         assert report.symbol == "BTCUSDT"
         assert report.exchange == "CRYPTO"

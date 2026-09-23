@@ -725,6 +725,7 @@ def test_tier1_commodity_option_exemption_from_stock_gate(auditor):
         metrics={"oi": 35, "volume": 18},
         is_live=True,
         environment="LIVE",
+        created_at="2026-09-23 11:00:00",
     )
     passed, reason, flags = auditor.verify_tier1_sanity(alert_mcx_opt)
     assert passed is True

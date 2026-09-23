@@ -44,6 +44,7 @@ def test_option_entry_range_not_mangled_by_underlying_price(tmp_path, monkeypatc
         target_level=8975.34,
         stop_loss=9306.54,
         option_premium=347.02,
+        created_at="2026-09-23 11:00:00",
         actionable_plan={
             "action": "BUY_PE",
             "segment": "COMMODITY",
