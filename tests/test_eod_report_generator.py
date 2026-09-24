@@ -486,3 +486,162 @@ def test_eod_report_tabular_journal_and_accurate_attribution(tmp_path, monkeypat
     assert "UNTRIGGERED" in md
     assert "EOD_SQUAREOFF" in md
 
+
+def test_eod_report_telegram_vs_ui_segregation(tmp_path, monkeypatch):
+    """Verify clean segregation between Telegram dispatched trades and UI terminal universe."""
+    import openpyxl
+
+    alerts = [
+        # 1. Telegram Winner (Target hit)
+        {
+            "alert_id": "tg-win-1",
+            "alert_type": "GAMMA_BLAST",
+            "stage": "IGNITED",
+            "symbol": "NIFTY 25400 CE",
+            "segment": "FNO",
+            "direction": "BULLISH",
+            "ltp": 160.0,
+            "trigger_level": 100.0,
+            "stop_loss": 70.0,
+            "target_level": 140.0,
+            "target_status": "T1_ACHIEVED",
+            "achieved_milestones": ["T1"],
+            "created_at": "2026-09-24 09:30:00 IST",
+            "is_invalidated": False,
+            "telegram_dispatched": True,
+        },
+        # 2. Telegram Stopped Loss
+        {
+            "alert_id": "tg-loss-1",
+            "alert_type": "GAMMA_BLAST",
+            "stage": "INVALIDATED",
+            "symbol": "BANKNIFTY 54500 PE",
+            "segment": "FNO",
+            "direction": "BEARISH",
+            "ltp": 50.0,
+            "trigger_level": 80.0,
+            "stop_loss": 60.0,
+            "target_level": 120.0,
+            "target_status": "PENDING",
+            "achieved_milestones": [],
+            "created_at": "2026-09-24 10:30:00 IST",
+            "is_invalidated": True,
+            "invalidation_reason": "Stop-loss hit on structural break.",
+            "telegram_dispatched": True,
+        },
+        # 3. Telegram Scratch (Velocity)
+        {
+            "alert_id": "tg-scratch-1",
+            "alert_type": "INTRADAY_MOMENTUM_SPARK",
+            "stage": "TIME_STOP_EXIT",
+            "symbol": "TATASTEEL",
+            "segment": "EQUITY",
+            "direction": "BULLISH",
+            "ltp": 150.0,
+            "trigger_level": 150.0,
+            "stop_loss": 146.0,
+            "target_level": 158.0,
+            "target_status": "TIME_STOP_EXIT",
+            "achieved_milestones": [],
+            "created_at": "2026-09-24 11:00:00 IST",
+            "is_invalidated": True,
+            "invalidation_reason": "Velocity time-stop expired. Stagnated for 35m.",
+            "telegram_dispatched": True,
+        },
+        # 4. UI-only Winner (Scale BE)
+        {
+            "alert_id": "ui-win-1",
+            "alert_type": "SQUEEZE_BREAKOUT",
+            "stage": "IGNITED",
+            "symbol": "RELIANCE",
+            "segment": "EQUITY",
+            "direction": "BULLISH",
+            "ltp": 3020.0,
+            "trigger_level": 3000.0,
+            "stop_loss": 2980.0,
+            "target_level": 3050.0,
+            "target_status": "PENDING",
+            "achieved_milestones": ["T0.5"],
+            "created_at": "2026-09-24 11:30:00 IST",
+            "is_invalidated": False,
+            "telegram_dispatched": False,
+        },
+        # 5. UI-only Untriggered
+        {
+            "alert_id": "ui-untrig-1",
+            "alert_type": "PRECURSOR_RADAR",
+            "stage": "EXPIRED",
+            "symbol": "HDFCBANK",
+            "segment": "EQUITY",
+            "direction": "BULLISH",
+            "ltp": 1650.0,
+            "trigger_level": 1670.0,
+            "stop_loss": 1640.0,
+            "target_level": 1720.0,
+            "target_status": "PENDING",
+            "achieved_milestones": [],
+            "created_at": "2026-09-24 12:00:00 IST",
+            "is_invalidated": True,
+            "invalidation_reason": "Time-Stop expired: Setup did not trigger.",
+            "telegram_dispatched": False,
+        },
+    ]
+
+    alerts_path = tmp_path / "auto_alerts.json"
+    alerts_path.write_text(json.dumps(alerts, indent=2), encoding="utf-8")
+    monkeypatch.setenv("TRADING_PLATFORM_DATA", str(tmp_path))
+
+    gen = EODReportGenerator(data_file=alerts_path)
+    report = gen.generate(target_date="2026-09-24")
+
+    # 1. Verification of Total Universe Metrics
+    assert report.total_alerts == 5
+    assert report.ignited_trades == 4
+    assert report.untriggered_count == 1
+
+    # 2. Verification of Telegram Segregated Metrics
+    assert report.telegram_total_alerts == 3
+    assert report.telegram_ignited_trades == 3
+    assert report.telegram_win_count == 1
+    assert report.telegram_loss_count == 1
+    assert report.telegram_scratch_count == 1
+    assert report.telegram_win_rate_pct == pytest.approx(50.0, 0.1)
+    assert report.telegram_total_realized_r > 0
+    assert len(report.telegram_star_setups) == 1
+    assert len(report.telegram_stopped_setups) == 1
+
+    # 3. Verification of UI-only Segregated Metrics
+    assert report.ui_total_alerts == 2
+    assert report.ui_ignited_trades == 1
+    assert report.ui_untriggered_count == 1
+    assert report.ui_win_count == 1
+    assert report.ui_loss_count == 0
+
+    # 4. Verification of Markdown Output
+    md = report.to_markdown()
+    assert "### 📱 Executive Summary: Telegram Trader Feed vs 🖥️ UI Scanner Universe" in md
+    assert "📱 TELEGRAM" in md
+    assert "🖥️ UI ONLY" in md
+
+    # 5. Verification of Telegram Chunks
+    chunks = report.to_telegram_chunks()
+    assert "📱 <b>1. TELEGRAM TRADER FEED" in chunks[0]
+    assert "🖥️ <b>2. UI SCANNER RADAR" in chunks[0]
+    assert "📱TG" in chunks[0]
+
+    # 6. Verification of Excel Workbook Tabs & Columns
+    xlsx_path = tmp_path / "reports" / "test_segregation.xlsx"
+    report.to_excel(xlsx_path)
+    wb = openpyxl.load_workbook(str(xlsx_path))
+    assert "2_Telegram_Trades" in wb.sheetnames
+    assert "2_Trading_Journal" in wb.sheetnames
+    ws_tg = wb["2_Telegram_Trades"]
+    assert ws_tg.cell(row=1, column=2).value == "Channel"
+    # Ensure only 3 Telegram setups are in ws_tg (header row + 3 entries = 4 rows)
+    assert ws_tg.max_row == 4
+    for r in range(2, 5):
+        assert ws_tg.cell(row=r, column=2).value == "📱 TELEGRAM"
+
+    ws_all = wb["2_Trading_Journal"]
+    assert ws_all.max_row == 6  # header + 5 alerts
+
