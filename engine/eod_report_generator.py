@@ -66,7 +66,7 @@ class TradeOutcomeSummary:
     peak_gain_pct: float
     realized_r: float
     milestones: list[str]
-    outcome: str  # "WIN_TARGET" | "WIN_SCALE" | "LOSS_STOPPED" | "IN_FLIGHT" | "SESSION_EOD_SQUAREOFF" | "VELOCITY_TIME_STOP" | "UNTRIGGERED_EXPIRED"
+    outcome: str  # "WIN_TARGET" | "WIN_SCALE" | "WIN_TRAIL" | "LOSS_STOPPED" | "IN_FLIGHT" | "SESSION_EOD_SQUAREOFF" | "VELOCITY_TIME_STOP" | "UNTRIGGERED_EXPIRED"
     headline: str = ""
     invalidation_reason: str = ""
     strategy: str = ""
@@ -136,12 +136,18 @@ class EODReport:
     untriggered_count: int = 0
     scratch_count: int = 0
     eod_squareoff_count: int = 0
+    win_target_count: int = 0
+    win_scale_count: int = 0
+    win_trail_count: int = 0
     market_provenance: str = "REAL/LIVE"
     ai_cio_synthesis: Optional[str] = None
     # ── Telegram Trader Feed (Dispatched Setups) ──────────────────────────
     telegram_total_alerts: int = 0
     telegram_ignited_trades: int = 0
     telegram_win_count: int = 0
+    telegram_win_target_count: int = 0
+    telegram_win_scale_count: int = 0
+    telegram_win_trail_count: int = 0
     telegram_loss_count: int = 0
     telegram_scratch_count: int = 0
     telegram_eod_squareoff_count: int = 0
@@ -157,6 +163,9 @@ class EODReport:
     ui_total_alerts: int = 0
     ui_ignited_trades: int = 0
     ui_win_count: int = 0
+    ui_win_target_count: int = 0
+    ui_win_scale_count: int = 0
+    ui_win_trail_count: int = 0
     ui_loss_count: int = 0
     ui_scratch_count: int = 0
     ui_eod_squareoff_count: int = 0
@@ -217,7 +226,10 @@ class EODReport:
                 "| :--- | :---: | :---: | :--- |",
                 f"| **Total Setups Audited** | **{self.telegram_total_alerts}** | **{self.total_alerts}** | {self.ui_total_alerts} UI setups filtered out |",
                 f"| **Ignited / Actionable Trades** | {self.telegram_ignited_trades} | {self.ignited_trades} | High conviction entry gates applied |",
-                f"| **Realized Wins** | {self.telegram_win_count} | {self.win_count} | Target T1/T2 & scaled de-risk |",
+                f"| **Realized Wins (Total)** | **{self.telegram_win_count}** | **{self.win_count}** | Target hits, Scaled BE & Trailed Profits |",
+                f"| ↳ *Target Hits (T1/T2)* | {self.telegram_win_target_count} | {self.win_target_count} | Clean momentum expansion |",
+                f"| ↳ *Scaled Breakeven (T0.5)* | {self.telegram_win_scale_count} | {self.win_scale_count} | Partial de-risk & SL to Cost |",
+                f"| ↳ *Ratcheted Trail Profit* | {self.telegram_win_trail_count} | {self.win_trail_count} | Trailing stop locked gains |",
                 f"| **Realized Losses** | {self.telegram_loss_count} | {self.loss_count} | True stop-loss breaches |",
                 f"| **Scratches & EOD Cutoffs** | {self.telegram_scratch_count + self.telegram_eod_squareoff_count} | {self.scratch_count + self.eod_squareoff_count} | Velocity & 15:15 IST cutoff defenses |",
                 f"| **Untriggered / Expired** | {self.telegram_untriggered_count} | {self.untriggered_count} | 0 capital risked |",
@@ -261,6 +273,7 @@ class EODReport:
                 status_badge = {
                     "WIN_TARGET": "🎯 TARGET_HIT",
                     "WIN_SCALE": "⚡ SCALED_BE",
+                    "WIN_TRAIL": "🛡️ TRAIL_PROFIT",
                     "LOSS_STOPPED": "🛑 STOP_HIT",
                     "SESSION_EOD_SQUAREOFF": "⏰ EOD_SQUAREOFF",
                     "VELOCITY_TIME_STOP": "⏱️ TIME_STOP",
@@ -1017,7 +1030,7 @@ class EODReport:
 
             badge_fill = r_fill
             badge_font = FONT_DATA_BOLD
-            if outcome_str in ("WIN_TARGET", "WIN_SCALE"):
+            if outcome_str in ("WIN_TARGET", "WIN_SCALE", "WIN_TRAIL"):
                 badge_fill = FILL_WIN
                 badge_font = FONT_WIN
             elif outcome_str == "LOSS_STOPPED":
@@ -1124,7 +1137,7 @@ class EODReport:
 
             badge_fill = r_fill
             badge_font = FONT_DATA_BOLD
-            if outcome_str in ("WIN_TARGET", "WIN_SCALE"):
+            if outcome_str in ("WIN_TARGET", "WIN_SCALE", "WIN_TRAIL"):
                 badge_fill = FILL_WIN
                 badge_font = FONT_WIN
             elif outcome_str == "LOSS_STOPPED":
@@ -1733,6 +1746,16 @@ class EODReportGenerator:
         ui_eod_squareoff_count = 0
         ui_total_realized_r = 0.0
 
+        win_target_count = 0
+        win_scale_count = 0
+        win_trail_count = 0
+        tg_win_target_count = 0
+        tg_win_scale_count = 0
+        tg_win_trail_count = 0
+        ui_win_target_count = 0
+        ui_win_scale_count = 0
+        ui_win_trail_count = 0
+
         # RCA categorization tracking
         rca_buckets: dict[str, list[str]] = {
             "PREMATURE_SL": [],
@@ -1880,17 +1903,20 @@ class EODReportGenerator:
             ):
                 outcome = "WIN_TARGET"
                 win_count += 1
+                win_target_count += 1
                 detector_stats[det]["wins"] += 1
                 r_achieved = max(1.8, round(r_mult, 2))
                 total_realized_r += r_achieved
                 detector_stats[det]["net_r"] += r_achieved
                 if is_tg:
                     tg_win_count += 1
+                    tg_win_target_count += 1
                     tg_total_realized_r += r_achieved
                     detector_stats[det]["tg_wins"] += 1
                     detector_stats[det]["tg_net_r"] += r_achieved
                 else:
                     ui_win_count += 1
+                    ui_win_target_count += 1
                     ui_total_realized_r += r_achieved
                     detector_stats[det]["ui_wins"] += 1
                     detector_stats[det]["ui_net_r"] += r_achieved
@@ -1933,17 +1959,20 @@ class EODReportGenerator:
             ):
                 outcome = "WIN_SCALE"
                 win_count += 1
+                win_scale_count += 1
                 detector_stats[det]["wins"] += 1
                 r_achieved = max(0.5, min(1.0, round(r_mult, 2))) if r_mult > 0 else 0.5
                 total_realized_r += r_achieved
                 detector_stats[det]["net_r"] += r_achieved
                 if is_tg:
                     tg_win_count += 1
+                    tg_win_scale_count += 1
                     tg_total_realized_r += r_achieved
                     detector_stats[det]["tg_wins"] += 1
                     detector_stats[det]["tg_net_r"] += r_achieved
                 else:
                     ui_win_count += 1
+                    ui_win_scale_count += 1
                     ui_total_realized_r += r_achieved
                     detector_stats[det]["ui_wins"] += 1
                     detector_stats[det]["ui_net_r"] += r_achieved
@@ -2109,6 +2138,7 @@ class EODReportGenerator:
                 )
                 outcome = "WIN_TRAIL"
                 win_count += 1
+                win_trail_count += 1
                 detector_stats[det]["wins"] += 1
 
                 init_risk = float(
@@ -2134,11 +2164,13 @@ class EODReportGenerator:
                 detector_stats[det]["net_r"] += r_achieved
                 if is_tg:
                     tg_win_count += 1
+                    tg_win_trail_count += 1
                     tg_total_realized_r += r_achieved
                     detector_stats[det]["tg_wins"] += 1
                     detector_stats[det]["tg_net_r"] += r_achieved
                 else:
                     ui_win_count += 1
+                    ui_win_trail_count += 1
                     ui_total_realized_r += r_achieved
                     detector_stats[det]["ui_wins"] += 1
                     detector_stats[det]["ui_net_r"] += r_achieved
@@ -2607,11 +2639,17 @@ class EODReportGenerator:
             untriggered_count=untriggered_count,
             scratch_count=scratch_count,
             eod_squareoff_count=eod_squareoff_count,
+            win_target_count=win_target_count,
+            win_scale_count=win_scale_count,
+            win_trail_count=win_trail_count,
             market_provenance=mkt.get("provenance", "REAL/LIVE"),
             ai_cio_synthesis=ai_cio_debrief,
             telegram_total_alerts=tg_total_alerts,
             telegram_ignited_trades=tg_ignited_count,
             telegram_win_count=tg_win_count,
+            telegram_win_target_count=tg_win_target_count,
+            telegram_win_scale_count=tg_win_scale_count,
+            telegram_win_trail_count=tg_win_trail_count,
             telegram_loss_count=tg_loss_count,
             telegram_scratch_count=tg_scratch_count,
             telegram_eod_squareoff_count=tg_eod_squareoff_count,
@@ -2626,6 +2664,9 @@ class EODReportGenerator:
             ui_total_alerts=ui_total_alerts,
             ui_ignited_trades=ui_ignited_count,
             ui_win_count=ui_win_count,
+            ui_win_target_count=ui_win_target_count,
+            ui_win_scale_count=ui_win_scale_count,
+            ui_win_trail_count=ui_win_trail_count,
             ui_loss_count=ui_loss_count,
             ui_scratch_count=ui_scratch_count,
             ui_eod_squareoff_count=ui_eod_squareoff_count,

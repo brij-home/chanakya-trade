@@ -185,6 +185,12 @@ def evaluate_alert_invalidation(
                         if (alert.option_type == "CE" or alert.direction == "BULLISH")
                         else "Put"
                     )
+                    # Check if stop-loss was ratcheted into guaranteed profit by the trailing stop engine
+                    if opt_entry > 0 and alert.stop_loss > opt_entry:
+                        return (
+                            f"Trailing stop triggered at ₹{current_ltp:.1f} "
+                            f"(ratcheted stop ₹{alert.stop_loss:.1f} locked profit above entry ₹{opt_entry:.1f}). {opt_desc} profit secured."
+                        )
                     return (
                         f"Option premium collapsed to ₹{current_ltp:.1f} "
                         f"(breached stop-loss ₹{alert.stop_loss:.1f}). {opt_desc} gamma thesis invalidated."
