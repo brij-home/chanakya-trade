@@ -2086,6 +2086,95 @@ class EODReportGenerator:
                     )
                 )
 
+            # 6.5 Profitable Trailing Stop / Ratchet Exit (Ratcheted SL triggered with locked profit)
+            elif is_inv and (
+                (float(a.get("locked_profit_pts") or 0.0) > 0)
+                or ("RATCHET TRAILING STOP" in str(a.get("trailing_rationale", "")).upper())
+                or ("TRAIL STOP-LOSS TO LOCK" in str(a.get("trailing_rationale", "")).upper())
+                or (
+                    bool(
+                        a.get("option_type")
+                        or " CE" in symbol
+                        or " PE" in symbol
+                        or a.get("strike")
+                    )
+                    and sl > entry > 0
+                )
+            ):
+                _is_opt_instrument = bool(
+                    a.get("option_type")
+                    or " CE" in symbol
+                    or " PE" in symbol
+                    or a.get("strike")
+                )
+                outcome = "WIN_TRAIL"
+                win_count += 1
+                detector_stats[det]["wins"] += 1
+
+                init_risk = float(
+                    a.get("initial_invalidation_stop")
+                    or (entry * 0.28 if _is_opt_instrument else risk)
+                )
+                init_risk_pts = abs(entry - init_risk) if abs(entry - init_risk) > 0.01 else risk
+                if _is_opt_instrument or direction == "BULLISH":
+                    realized_gain_pts = (
+                        max(0.0, sl - entry)
+                        if sl > entry
+                        else float(a.get("locked_profit_pts") or 0.0)
+                    )
+                else:
+                    realized_gain_pts = (
+                        max(0.0, entry - sl)
+                        if (sl < entry and sl > 0)
+                        else float(a.get("locked_profit_pts") or 0.0)
+                    )
+
+                r_achieved = max(0.5, round(realized_gain_pts / init_risk_pts, 2))
+                total_realized_r += r_achieved
+                detector_stats[det]["net_r"] += r_achieved
+                if is_tg:
+                    tg_win_count += 1
+                    tg_total_realized_r += r_achieved
+                    detector_stats[det]["tg_wins"] += 1
+                    detector_stats[det]["tg_net_r"] += r_achieved
+                else:
+                    ui_win_count += 1
+                    ui_total_realized_r += r_achieved
+                    detector_stats[det]["ui_wins"] += 1
+                    detector_stats[det]["ui_net_r"] += r_achieved
+
+                verdict_note = f"Trailing stop locked profit at ₹{sl:.1f} (+{realized_gain_pts:.1f} pts / +{r_achieved:.1f}R)."
+
+                summary = TradeOutcomeSummary(
+                    alert_id=a.get("alert_id", ""),
+                    symbol=symbol,
+                    segment=seg,
+                    direction=direction,
+                    entry_level=entry,
+                    stop_loss=sl,
+                    target_level=target,
+                    peak_gain_pct=gain_pct
+                    if gain_pct > 0
+                    else (realized_gain_pts / entry * 100.0 if entry > 0 else 15.0),
+                    realized_r=r_achieved,
+                    milestones=milestones or ["TRAIL_PROFIT"],
+                    outcome=outcome,
+                    headline=a.get("headline", ""),
+                    strategy=det,
+                    exit_level=sl,
+                    pnl_pct=gain_pct
+                    if gain_pct > 0
+                    else (realized_gain_pts / entry * 100.0 if entry > 0 else 15.0),
+                    time_str=time_part,
+                    verdict_note=verdict_note,
+                    telegram_dispatched=is_tg,
+                    dispatched_channels=dispatched_channels,
+                )
+                star_setups.append(summary)
+                if is_tg:
+                    telegram_star_setups.append(summary)
+                journal_entries.append(summary)
+
             # 7. True Stop-Loss Breach (Loss)
             elif is_inv:
                 outcome = "LOSS_STOPPED"

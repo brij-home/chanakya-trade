@@ -1742,6 +1742,64 @@ class AutoAlertEngine:
                             )
                             return
 
+                # ── Option Premium Floor Guard for Telegram ─────────────────────────
+                # Stock options with entry premium < ₹3.50 suffer from 5-10 paise bid-ask friction
+                # (4-8% instant drawdown) which prematurely trips tight stop-losses on single-tick chop
+                # (e.g. CANBK, FEDERALBNK, NATIONALUM). Hold penny options in Terminal UI only;
+                # require entry premium >= ₹3.50 for Telegram push.
+                opt_prem = (
+                    getattr(alert, "option_premium", None)
+                    or getattr(alert, "entry_price", None)
+                    or getattr(alert, "trigger_level", None)
+                )
+                if (
+                    alert.alert_type in ("OPTIONS_MOMENTUM", "GAMMA_BLAST")
+                    and getattr(alert, "option_type", None)
+                    and opt_prem is not None
+                    and getattr(alert, "segment", "") != "FNO_INDEX"
+                    and alert.symbol not in self._watched_indices
+                ):
+                    try:
+                        if float(opt_prem) < 3.50:
+                            logger.info(
+                                f"[AutoAlertEngine] 🛑 Suppressed micro-premium option setup for {alert.symbol} ({alert.option_type} @ ₹{float(opt_prem):.2f}) on Telegram: "
+                                f"Premium below ₹3.50 floor (high spread friction & tick whipsaw risk). Holding in Terminal UI only."
+                            )
+                            return
+                    except (ValueError, TypeError):
+                        pass
+
+                # ── Macro Regime Counter-Trend Guard ────────────────────────────────
+                # When broad market (NIFTY 50) is in severe risk-off mode (down <= -0.60%),
+                # suppress counter-trend bullish calls (CE) or long equity sparks on Telegram (e.g. OBEROIRLTY, LICI).
+                # Traders on Telegram should never be pushed long trades when the institutional tide is dumping.
+                if (
+                    alert.direction in ("BULLISH", "LONG", "BUY")
+                    or getattr(alert, "option_type", "") == "CE"
+                ):
+                    try:
+                        from market.quotes import get_market_quote
+                        nifty_q = get_market_quote("NIFTY 50") or get_market_quote("NIFTY")
+                        if (
+                            nifty_q
+                            and hasattr(nifty_q, "change_pct")
+                            and nifty_q.change_pct <= -0.60
+                        ):
+                            sec_name = str(
+                                (getattr(alert, "metrics", {}) or {}).get("sector_id", "")
+                            ).lower()
+                            if not (
+                                sec_name in ("pharma", "healthcare", "fmcg")
+                                and alert.confidence >= 92
+                            ):
+                                logger.info(
+                                    f"[AutoAlertEngine] 🛑 Suppressed counter-trend bullish setup for {alert.symbol} on Telegram: "
+                                    f"NIFTY is down {nifty_q.change_pct:.2f}% (Macro Risk-Off Regime). Holding in Terminal UI."
+                                )
+                                return
+                    except Exception as _e_regime:
+                        logger.debug(f"[AutoAlertEngine] Regime check bypassed: {_e_regime}")
+
                 # Segment-level Pacing Throttle:
                 # Prevent bursting multiple initial signals within a 45-second window on the same segment,
                 # unless the candidate has exceptional conviction (>= 90).
@@ -1756,8 +1814,8 @@ class AutoAlertEngine:
                     return
 
                 # Per-Sector Telegram Daily Cap: at most 2 stock options signals per sector per day on Telegram
-                # (UI allows up to 5; Telegram is curated to the top 2 for mobile readability)
-                _TG_SECTOR_CAP = 2
+                # (expands to 3 for exceptionally high conviction setups with confidence >= 90)
+                _TG_SECTOR_CAP = 3 if alert.confidence >= 90 else 2
                 is_stock_opt_tg = (
                     getattr(alert, "segment", "") == "FNO_STOCK"
                     or (
