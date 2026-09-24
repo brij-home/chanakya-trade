@@ -421,6 +421,31 @@ class EODReport:
                 "📓 <b>Trading Journal Crux (Key Setups):</b>",
             ]
         )
+        # Build ASCII Table for Top Setups (Winners + Stops)
+        key_samples = (self.star_setups[:3] if self.star_setups else []) + (
+            self.stopped_setups[:2] if self.stopped_setups else []
+        )
+        if key_samples:
+            table_lines = ["<pre>"]
+            table_lines.append(f"{'SYMBOL':<13} {'DIR':<4} {'R-MULT':>7} {'STAT'}")
+            table_lines.append("─" * 33)
+            for s in key_samples:
+                sym_clean = s.symbol.replace(" ", "")[:13]
+                dir_abbr = (
+                    "CALL"
+                    if "CALL" in s.symbol.upper() or s.direction.upper() in ("BULLISH", "CALL", "LONG")
+                    else (
+                        "PUT"
+                        if "PUT" in s.symbol.upper() or s.direction.upper() in ("BEARISH", "PUT", "SHORT")
+                        else s.direction[:4]
+                    )
+                )
+                r_str = f"{s.realized_r:+.2f}R"
+                status_icon = "WIN🎯" if s.realized_r > 0 else ("SL🛑" if s.realized_r < 0 else "BE⏱️")
+                table_lines.append(f"{sym_clean:<13} {dir_abbr:<4} {r_str:>7} {status_icon}")
+            table_lines.append("</pre>")
+            p1_lines.extend(table_lines)
+
         if self.star_setups:
             for s in self.star_setups[:5]:
                 ms = "/".join(s.milestones) if s.milestones else "T1"
@@ -516,12 +541,622 @@ class EODReport:
         p3_lines.extend(
             [
                 "",
+                "📎 <i>Detailed Multi-Tab Excel Journal (.xlsx) attached below.</i>",
+                "",
                 "🏁 <i>ChanakyaTrade Institutional Terminal — Fail-Closed Safety & Precision</i>",
             ]
         )
         part3 = "\n".join(p3_lines)
 
         return [part1, part2, part3]
+
+    def to_excel(self, file_path: str | Path) -> Path:
+        """
+        Generate a multi-tab institutional Excel workbook (.xlsx) with professional
+        formatting, conditional styling, auto-filters, frozen panes, and auto-fit column widths.
+
+        Tabs:
+          1. 1_Executive_Summary: Macro benchmarks, flows, performance KPIs, CIO debrief.
+          2. 2_Trading_Journal: Full tabular trade ledger with P&L, R-multiples, and diagnostics.
+          3. 3_Strategy_Efficacy: Detector performance breakdown, hit rates, net R, verdicts.
+          4. 4_Forensic_RCA: Stopped trades root cause analysis & systematic improvements.
+          5. 5_Tomorrow_Playbook: Reference pivot levels and tomorrow's execution rules.
+        """
+        import openpyxl
+        from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+        from openpyxl.utils import get_column_letter
+
+        wb = openpyxl.Workbook()
+
+        FONT_TITLE = Font(name="Segoe UI", size=13, bold=True, color="FFFFFF")
+        FONT_SECTION = Font(name="Segoe UI", size=10, bold=True, color="FFFFFF")
+        FONT_HEADER = Font(name="Segoe UI", size=9.5, bold=True, color="FFFFFF")
+        FONT_DATA = Font(name="Segoe UI", size=9, bold=False, color="1E293B")
+        FONT_DATA_BOLD = Font(name="Segoe UI", size=9, bold=True, color="1E293B")
+        FONT_MUTED = Font(name="Segoe UI", size=8.5, italic=True, color="64748B")
+        FONT_WIN = Font(name="Segoe UI", size=9, bold=True, color="065F46")
+        FONT_LOSS = Font(name="Segoe UI", size=9, bold=True, color="991B1B")
+        FONT_AMBER = Font(name="Segoe UI", size=9, bold=True, color="92400E")
+        FONT_SKY = Font(name="Segoe UI", size=9, bold=True, color="0369A1")
+
+        FILL_TITLE = PatternFill(start_color="0F172A", end_color="0F172A", fill_type="solid")
+        FILL_SECTION = PatternFill(start_color="1E293B", end_color="1E293B", fill_type="solid")
+        FILL_HEADER = PatternFill(start_color="334155", end_color="334155", fill_type="solid")
+        FILL_ZEBRA = PatternFill(start_color="F8FAFC", end_color="F8FAFC", fill_type="solid")
+        FILL_WHITE = PatternFill(start_color="FFFFFF", end_color="FFFFFF", fill_type="solid")
+        FILL_WIN = PatternFill(start_color="D1FAE5", end_color="D1FAE5", fill_type="solid")
+        FILL_LOSS = PatternFill(start_color="FEE2E2", end_color="FEE2E2", fill_type="solid")
+        FILL_AMBER = PatternFill(start_color="FEF3C7", end_color="FEF3C7", fill_type="solid")
+        FILL_SKY = PatternFill(start_color="E0F2FE", end_color="E0F2FE", fill_type="solid")
+
+        THIN_SIDE = Side(border_style="thin", color="E2E8F0")
+        BORDER_DATA = Border(left=THIN_SIDE, right=THIN_SIDE, top=THIN_SIDE, bottom=THIN_SIDE)
+
+        ALIGN_LEFT = Alignment(horizontal="left", vertical="center")
+        ALIGN_RIGHT = Alignment(horizontal="right", vertical="center")
+        ALIGN_CENTER = Alignment(horizontal="center", vertical="center")
+        ALIGN_HEADER = Alignment(horizontal="center", vertical="center", wrap_text=True)
+
+        FMT_CURRENCY = "₹#,##0.00"
+        FMT_PERCENT = "+0.0%;-0.0%;0.0%"
+        FMT_PERCENT_PLAIN = "0.0%"
+        FMT_R = '+0.00"R";-0.00"R";0.00"R"'
+        FMT_INT = "#,##0"
+
+        # ── TAB 1: 1_Executive_Summary ──────────────────────────────────────
+        ws1 = wb.active
+        ws1.title = "1_Executive_Summary"
+        ws1.views.sheetView[0].showGridLines = True
+
+        ws1.merge_cells("A1:F1")
+        ws1["A1"] = f"🏛️ CHANAKYATRADE INSTITUTIONAL EOD EXECUTIVE SCORECARD — {self.date_str}"
+        ws1["A1"].font = FONT_TITLE
+        ws1["A1"].fill = FILL_TITLE
+        ws1["A1"].alignment = ALIGN_CENTER
+        ws1.row_dimensions[1].height = 32
+
+        ws1.merge_cells("A2:F2")
+        ws1["A2"] = (
+            f"Generated: {self.generated_at} | Market Posture: {self.market_posture} | "
+            f"Provenance: {self.market_provenance} | Multi-Asset Indian Markets (NSE / BSE / MCX)"
+        )
+        ws1["A2"].font = FONT_MUTED
+        ws1["A2"].alignment = ALIGN_CENTER
+        ws1.row_dimensions[2].height = 18
+
+        # Section 1.1: Benchmarks
+        ws1.merge_cells("A4:F4")
+        ws1["A4"] = "📊 MARKET BENCHMARKS & INSTITUTIONAL FLOWS"
+        ws1["A4"].font = FONT_SECTION
+        ws1["A4"].fill = FILL_SECTION
+        ws1["A4"].alignment = Alignment(horizontal="left", vertical="center", indent=1)
+        ws1.row_dimensions[4].height = 22
+
+        mkt_headers = ["Benchmark / Metric", "LTP (₹)", "Change (%)", "Regime / VIX", "Flows / Notes", "Feed Status"]
+        for c_idx, h in enumerate(mkt_headers, 1):
+            cell = ws1.cell(row=5, column=c_idx, value=h)
+            cell.font = FONT_HEADER
+            cell.fill = FILL_HEADER
+            cell.alignment = ALIGN_HEADER
+            cell.border = BORDER_DATA
+        ws1.row_dimensions[5].height = 22
+
+        mkt_rows = [
+            ("NIFTY 50", self.nifty_ltp, self.nifty_change_pct / 100.0 if self.nifty_ltp > 0 else 0.0, f"VIX: {self.vix_ltp:.2f}", self.market_posture, "ACTIVE" if self.nifty_ltp > 0 else "UNAVAILABLE"),
+            ("BANKNIFTY", self.banknifty_ltp, self.banknifty_change_pct / 100.0 if self.banknifty_ltp > 0 else 0.0, "High Beta Banking", "-", "ACTIVE" if self.banknifty_ltp > 0 else "UNAVAILABLE"),
+            ("SENSEX", self.sensex_ltp, self.sensex_change_pct / 100.0 if self.sensex_ltp > 0 else 0.0, "BSE Benchmark", "-", "ACTIVE" if self.sensex_ltp > 0 else "UNAVAILABLE"),
+            ("INSTITUTIONAL FLOWS", None, None, f"FII: {self.fii_net_cr:+,.0f} Cr", f"DII: {self.dii_net_cr:+,.0f} Cr", "VERIFIED"),
+        ]
+
+        curr_row = 6
+        for item in mkt_rows:
+            r_fill = FILL_ZEBRA if curr_row % 2 == 0 else FILL_WHITE
+            for col_idx in range(1, 7):
+                cell = ws1.cell(row=curr_row, column=col_idx)
+                cell.fill = r_fill
+                cell.border = BORDER_DATA
+                cell.font = FONT_DATA
+                val = item[col_idx - 1]
+                if col_idx == 1:
+                    cell.value = val
+                    cell.font = FONT_DATA_BOLD
+                    cell.alignment = ALIGN_LEFT
+                elif col_idx == 2:
+                    cell.value = val
+                    if val is not None:
+                        cell.number_format = FMT_CURRENCY
+                        cell.alignment = ALIGN_RIGHT
+                    else:
+                        cell.value = "—"
+                        cell.alignment = ALIGN_CENTER
+                elif col_idx == 3:
+                    cell.value = val
+                    if val is not None:
+                        cell.number_format = FMT_PERCENT
+                        cell.alignment = ALIGN_RIGHT
+                        if val > 0:
+                            cell.font = FONT_WIN
+                        elif val < 0:
+                            cell.font = FONT_LOSS
+                    else:
+                        cell.value = "—"
+                        cell.alignment = ALIGN_CENTER
+                else:
+                    cell.value = str(val or "—")
+                    cell.alignment = ALIGN_CENTER if col_idx in (4, 6) else ALIGN_LEFT
+            ws1.row_dimensions[curr_row].height = 20
+            curr_row += 1
+
+        curr_row += 1
+        # Section 1.2: Quantitative Performance Scorecard
+        ws1.merge_cells(f"A{curr_row}:F{curr_row}")
+        ws1[f"A{curr_row}"] = "🎯 QUANTITATIVE SIGNAL SCORECARD & PAYOFF"
+        ws1[f"A{curr_row}"].font = FONT_SECTION
+        ws1[f"A{curr_row}"].fill = FILL_SECTION
+        ws1[f"A{curr_row}"].alignment = Alignment(horizontal="left", vertical="center", indent=1)
+        ws1.row_dimensions[curr_row].height = 22
+        curr_row += 1
+
+        perf_headers = ["Performance KPI", "Value", "Unit / Metric", "Detailed Breakdown", "Benchmark Standard", "Health"]
+        for c_idx, h in enumerate(perf_headers, 1):
+            cell = ws1.cell(row=curr_row, column=c_idx, value=h)
+            cell.font = FONT_HEADER
+            cell.fill = FILL_HEADER
+            cell.alignment = ALIGN_HEADER
+            cell.border = BORDER_DATA
+        ws1.row_dimensions[curr_row].height = 22
+        curr_row += 1
+
+        perf_rows = [
+            ("Total Alerts Audited", self.total_alerts, "Setups", f"{self.ignited_trades} Ignited · {self.untriggered_count} Untriggered", "All Signals", "NORMAL"),
+            ("Actionable / Ignited Trades", self.ignited_trades, "Executions", "Passed Entry Gating", "> 0", "HEALTHY" if self.ignited_trades > 0 else "FLAT"),
+            ("Realized Win Rate", self.win_rate_pct / 100.0, "Percent", f"{self.win_count} Wins / {self.loss_count} Losses", "Target >= 60.0%", "OPTIMAL" if self.win_rate_pct >= 60 else "WATCH"),
+            ("Scratches & Time Cutoffs", self.scratch_count + self.eod_squareoff_count, "Trades", f"{self.scratch_count} Scratches · {self.eod_squareoff_count} EOD Cutoffs", "Cutoff Traps", "REDUCED"),
+            ("Total Realized Payoff", self.total_realized_r, "R-Multiple", f"Avg: {self.avg_r_multiple:+.2f}R / trade", "Target > +5.0R", "PROFITABLE" if self.total_realized_r > 0 else "DRAWDOWN"),
+            ("Profit Factor", self.profit_factor, "Ratio", "Gross Profit / Gross Loss", "Target >= 1.50", "SOLID" if self.profit_factor >= 1.5 else "SCRATCH"),
+        ]
+
+        for p_idx, item in enumerate(perf_rows):
+            r_fill = FILL_ZEBRA if curr_row % 2 == 0 else FILL_WHITE
+            for col_idx in range(1, 7):
+                cell = ws1.cell(row=curr_row, column=col_idx)
+                cell.fill = r_fill
+                cell.border = BORDER_DATA
+                cell.font = FONT_DATA
+                val = item[col_idx - 1]
+                if col_idx == 1:
+                    cell.value = val
+                    cell.font = FONT_DATA_BOLD
+                    cell.alignment = ALIGN_LEFT
+                elif col_idx == 2:
+                    cell.value = val
+                    if p_idx == 2:
+                        cell.number_format = FMT_PERCENT_PLAIN
+                        cell.font = FONT_WIN if self.win_rate_pct >= 50 else FONT_LOSS
+                    elif p_idx == 4:
+                        cell.number_format = FMT_R
+                        cell.font = FONT_WIN if self.total_realized_r > 0 else FONT_LOSS
+                    elif p_idx in (0, 1, 3):
+                        cell.number_format = FMT_INT
+                    else:
+                        cell.number_format = "0.00"
+                    cell.alignment = ALIGN_RIGHT
+                elif col_idx == 3:
+                    cell.value = val
+                    cell.alignment = ALIGN_CENTER
+                elif col_idx == 4:
+                    cell.value = val
+                    cell.alignment = ALIGN_LEFT
+                elif col_idx == 5:
+                    cell.value = val
+                    cell.alignment = ALIGN_CENTER
+                    cell.font = FONT_MUTED
+                else:
+                    cell.value = val
+                    cell.alignment = ALIGN_CENTER
+                    if val in ("OPTIMAL", "SOLID", "HEALTHY", "PROFITABLE"):
+                        cell.font = FONT_WIN
+                        cell.fill = FILL_WIN
+                    elif val in ("WATCH", "DRAWDOWN"):
+                        cell.font = FONT_LOSS
+                        cell.fill = FILL_LOSS
+            ws1.row_dimensions[curr_row].height = 20
+            curr_row += 1
+
+        # CIO Synthesis
+        if self.ai_cio_synthesis:
+            curr_row += 1
+            ws1.merge_cells(f"A{curr_row}:F{curr_row}")
+            ws1[f"A{curr_row}"] = "🧠 CIO EXECUTIVE SYNTHESIS & STRATEGIC DEBRIEF"
+            ws1[f"A{curr_row}"].font = FONT_SECTION
+            ws1[f"A{curr_row}"].fill = FILL_SECTION
+            ws1[f"A{curr_row}"].alignment = Alignment(horizontal="left", vertical="center", indent=1)
+            ws1.row_dimensions[curr_row].height = 22
+            curr_row += 1
+
+            ws1.merge_cells(f"A{curr_row}:F{curr_row + 3}")
+            debrief_cell = ws1[f"A{curr_row}"]
+            debrief_cell.value = self.ai_cio_synthesis
+            debrief_cell.font = FONT_DATA
+            debrief_cell.alignment = Alignment(horizontal="left", vertical="top", wrap_text=True)
+            for r_sub in range(curr_row, curr_row + 4):
+                for c_sub in range(1, 7):
+                    ws1.cell(row=r_sub, column=c_sub).border = BORDER_DATA
+
+        # ── TAB 2: 2_Trading_Journal ────────────────────────────────────────
+        ws2 = wb.create_sheet("2_Trading_Journal")
+        ws2.views.sheetView[0].showGridLines = True
+        ws2.freeze_panes = "A2"
+
+        j_headers = [
+            "Time", "Symbol", "Segment", "Strategy / Detector", "Direction",
+            "Entry Price (₹)", "Stop Loss (₹)", "Target Level (₹)", "Exit / LTP (₹)",
+            "Realized R", "P&L (%)", "Peak Gain (%)", "Outcome", "Milestones", "Diagnosis & Journal Verdict"
+        ]
+        for c_idx, h in enumerate(j_headers, 1):
+            cell = ws2.cell(row=1, column=c_idx, value=h)
+            cell.font = FONT_HEADER
+            cell.fill = FILL_HEADER
+            cell.alignment = ALIGN_HEADER
+            cell.border = BORDER_DATA
+        ws2.row_dimensions[1].height = 26
+
+        row_idx = 2
+        for j in self.journal_entries:
+            r_fill = FILL_ZEBRA if row_idx % 2 == 0 else FILL_WHITE
+            time_str = j.time_str or "—"
+            dir_str = j.direction.upper()
+            outcome_str = j.outcome
+
+            badge_fill = r_fill
+            badge_font = FONT_DATA_BOLD
+            if outcome_str in ("WIN_TARGET", "WIN_SCALE"):
+                badge_fill = FILL_WIN
+                badge_font = FONT_WIN
+            elif outcome_str == "LOSS_STOPPED":
+                badge_fill = FILL_LOSS
+                badge_font = FONT_LOSS
+            elif outcome_str in ("SESSION_EOD_SQUAREOFF", "VELOCITY_TIME_STOP", "UNTRIGGERED_EXPIRED"):
+                badge_fill = FILL_AMBER
+                badge_font = FONT_AMBER
+            elif outcome_str == "IN_FLIGHT":
+                badge_fill = FILL_SKY
+                badge_font = FONT_SKY
+
+            values = [
+                time_str,
+                j.symbol,
+                j.segment,
+                j.strategy or "SCANNER",
+                dir_str,
+                j.entry_level,
+                j.stop_loss,
+                j.target_level,
+                j.exit_level,
+                j.realized_r,
+                j.pnl_pct / 100.0,
+                j.peak_gain_pct / 100.0,
+                outcome_str,
+                "/".join(j.milestones) if j.milestones else "—",
+                j.verdict_note or "—"
+            ]
+
+            for col_idx, val in enumerate(values, 1):
+                cell = ws2.cell(row=row_idx, column=col_idx, value=val)
+                cell.border = BORDER_DATA
+                cell.fill = r_fill
+                cell.font = FONT_DATA
+
+                if col_idx in (1, 3):
+                    cell.alignment = ALIGN_CENTER
+                elif col_idx in (2, 4):
+                    cell.alignment = ALIGN_LEFT
+                    cell.font = FONT_DATA_BOLD
+                elif col_idx == 5:
+                    cell.alignment = ALIGN_CENTER
+                    if dir_str in ("BULLISH", "CALL", "LONG"):
+                        cell.font = FONT_WIN
+                    elif dir_str in ("BEARISH", "PUT", "SHORT"):
+                        cell.font = FONT_LOSS
+                elif col_idx in (6, 7, 8, 9):
+                    cell.alignment = ALIGN_RIGHT
+                    cell.number_format = FMT_CURRENCY
+                elif col_idx == 10:
+                    cell.alignment = ALIGN_RIGHT
+                    cell.number_format = FMT_R
+                    if j.realized_r > 0:
+                        cell.font = FONT_WIN
+                    elif j.realized_r < 0:
+                        cell.font = FONT_LOSS
+                elif col_idx in (11, 12):
+                    cell.alignment = ALIGN_RIGHT
+                    cell.number_format = FMT_PERCENT
+                    if val and val > 0:
+                        cell.font = FONT_WIN
+                    elif val and val < 0:
+                        cell.font = FONT_LOSS
+                elif col_idx == 13:
+                    cell.alignment = ALIGN_CENTER
+                    cell.fill = badge_fill
+                    cell.font = badge_font
+                elif col_idx == 14:
+                    cell.alignment = ALIGN_CENTER
+                else:
+                    cell.alignment = ALIGN_LEFT
+
+            ws2.row_dimensions[row_idx].height = 20
+            row_idx += 1
+
+        ws2.auto_filter.ref = ws2.dimensions
+
+        # ── TAB 3: 3_Strategy_Efficacy ──────────────────────────────────────
+        ws3 = wb.create_sheet("3_Strategy_Efficacy")
+        ws3.views.sheetView[0].showGridLines = True
+        ws3.freeze_panes = "A2"
+
+        eff_headers = [
+            "Strategy / Detector", "Total Signals", "Ignited Trades", "Wins", "Losses",
+            "Scratches / EOD", "Win Rate (%)", "Net Realized R", "Action Verdict"
+        ]
+        for c_idx, h in enumerate(eff_headers, 1):
+            cell = ws3.cell(row=1, column=c_idx, value=h)
+            cell.font = FONT_HEADER
+            cell.fill = FILL_HEADER
+            cell.alignment = ALIGN_HEADER
+            cell.border = BORDER_DATA
+        ws3.row_dimensions[1].height = 26
+
+        eff_data = self.detector_efficacy or self.top_detectors
+        row_idx = 2
+        for d in eff_data:
+            r_fill = FILL_ZEBRA if row_idx % 2 == 0 else FILL_WHITE
+            det_name = d.get("detector", "UNKNOWN")
+            count = d.get("count", 0)
+            ignited = d.get("ignited", count)
+            wins = d.get("wins", 0)
+            losses = d.get("losses", max(0, count - wins))
+            scratches = d.get("scratches", 0)
+            win_rate = d.get("win_rate", 0.0) / 100.0
+            net_r = d.get("net_r", 0.0)
+            verdict = d.get("verdict", "—")
+
+            vals = [det_name, count, ignited, wins, losses, scratches, win_rate, net_r, verdict]
+            for col_idx, val in enumerate(vals, 1):
+                cell = ws3.cell(row=row_idx, column=col_idx, value=val)
+                cell.border = BORDER_DATA
+                cell.fill = r_fill
+                cell.font = FONT_DATA
+                if col_idx == 1:
+                    cell.alignment = ALIGN_LEFT
+                    cell.font = FONT_DATA_BOLD
+                elif col_idx in (2, 3, 4, 5, 6):
+                    cell.alignment = ALIGN_RIGHT
+                    cell.number_format = FMT_INT
+                elif col_idx == 7:
+                    cell.alignment = ALIGN_RIGHT
+                    cell.number_format = FMT_PERCENT_PLAIN
+                    cell.font = FONT_WIN if win_rate >= 0.50 else FONT_LOSS
+                elif col_idx == 8:
+                    cell.alignment = ALIGN_RIGHT
+                    cell.number_format = FMT_R
+                    cell.font = FONT_WIN if net_r > 0 else (FONT_LOSS if net_r < 0 else FONT_DATA)
+                else:
+                    cell.alignment = ALIGN_CENTER
+                    if any(w in str(val).upper() for w in ("CORE ALPHA", "PRIME", "EXPAND")):
+                        cell.font = FONT_WIN
+                        cell.fill = FILL_WIN
+                    elif any(w in str(val).upper() for w in ("GATE", "TUNE", "SCRUTINIZE")):
+                        cell.font = FONT_AMBER
+                        cell.fill = FILL_AMBER
+            ws3.row_dimensions[row_idx].height = 20
+            row_idx += 1
+
+        ws3.auto_filter.ref = ws3.dimensions
+
+        # ── TAB 4: 4_Forensic_RCA ───────────────────────────────────────────
+        ws4 = wb.create_sheet("4_Forensic_RCA")
+        ws4.views.sheetView[0].showGridLines = True
+
+        ws4.merge_cells("A1:E1")
+        ws4["A1"] = "🔬 ROOT CAUSE ANALYSIS (RCA) OF INVALIDATED SETUPS"
+        ws4["A1"].font = FONT_SECTION
+        ws4["A1"].fill = FILL_SECTION
+        ws4["A1"].alignment = Alignment(horizontal="left", vertical="center", indent=1)
+        ws4.row_dimensions[1].height = 24
+
+        rca_headers = ["Failure Category", "Failed Setups", "Affected Symbols", "Root Cause Diagnosis", "System Corrective Action"]
+        for c_idx, h in enumerate(rca_headers, 1):
+            cell = ws4.cell(row=2, column=c_idx, value=h)
+            cell.font = FONT_HEADER
+            cell.fill = FILL_HEADER
+            cell.alignment = ALIGN_HEADER
+            cell.border = BORDER_DATA
+        ws4.row_dimensions[2].height = 22
+
+        r_idx = 3
+        if self.rca_breakdown:
+            for rca in self.rca_breakdown:
+                r_fill = FILL_ZEBRA if r_idx % 2 == 0 else FILL_WHITE
+                syms_str = ", ".join(rca.symbols) if rca.symbols else "—"
+                vals = [rca.category.replace("_", " ").title(), rca.count, syms_str, rca.root_cause, rca.corrective_action]
+                for c_idx, val in enumerate(vals, 1):
+                    cell = ws4.cell(row=r_idx, column=c_idx, value=val)
+                    cell.border = BORDER_DATA
+                    cell.fill = r_fill
+                    cell.font = FONT_DATA
+                    if c_idx == 1:
+                        cell.font = FONT_LOSS
+                        cell.alignment = ALIGN_LEFT
+                    elif c_idx == 2:
+                        cell.alignment = ALIGN_CENTER
+                        cell.number_format = FMT_INT
+                    else:
+                        cell.alignment = ALIGN_LEFT
+                ws4.row_dimensions[r_idx].height = 22
+                r_idx += 1
+        else:
+            ws4.merge_cells(f"A{r_idx}:E{r_idx}")
+            ws4[f"A{r_idx}"] = "No structural stop-outs recorded for this session."
+            ws4[f"A{r_idx}"].font = FONT_MUTED
+            ws4[f"A{r_idx}"].alignment = ALIGN_CENTER
+            r_idx += 1
+
+        r_idx += 1
+        ws4.merge_cells(f"A{r_idx}:E{r_idx}")
+        ws4[f"A{r_idx}"] = "🟢 WHAT WENT WELL — ALPHA ATTRIBUTION"
+        ws4[f"A{r_idx}"].font = FONT_SECTION
+        ws4[f"A{r_idx}"].fill = FILL_SECTION
+        ws4[f"A{r_idx}"].alignment = Alignment(horizontal="left", vertical="center", indent=1)
+        ws4.row_dimensions[r_idx].height = 22
+        r_idx += 1
+
+        for pt in self.what_went_well_points:
+            ws4.merge_cells(f"A{r_idx}:E{r_idx}")
+            ws4[f"A{r_idx}"] = f"• {pt}"
+            ws4[f"A{r_idx}"].font = FONT_DATA
+            ws4[f"A{r_idx}"].fill = FILL_WIN
+            ws4[f"A{r_idx}"].border = BORDER_DATA
+            ws4[f"A{r_idx}"].alignment = Alignment(horizontal="left", vertical="center", indent=1)
+            ws4.row_dimensions[r_idx].height = 20
+            r_idx += 1
+
+        r_idx += 1
+        ws4.merge_cells(f"A{r_idx}:E{r_idx}")
+        ws4[f"A{r_idx}"] = "⚠️ WHAT WENT BAD — FRICTION & DRAWDOWN TRAPS"
+        ws4[f"A{r_idx}"].font = FONT_SECTION
+        ws4[f"A{r_idx}"].fill = FILL_SECTION
+        ws4[f"A{r_idx}"].alignment = Alignment(horizontal="left", vertical="center", indent=1)
+        ws4.row_dimensions[r_idx].height = 22
+        r_idx += 1
+
+        for pt in self.what_went_bad_points:
+            ws4.merge_cells(f"A{r_idx}:E{r_idx}")
+            ws4[f"A{r_idx}"] = f"• {pt}"
+            ws4[f"A{r_idx}"].font = FONT_DATA
+            ws4[f"A{r_idx}"].fill = FILL_LOSS
+            ws4[f"A{r_idx}"].border = BORDER_DATA
+            ws4[f"A{r_idx}"].alignment = Alignment(horizontal="left", vertical="center", indent=1)
+            ws4.row_dimensions[r_idx].height = 20
+            r_idx += 1
+
+        r_idx += 1
+        ws4.merge_cells(f"A{r_idx}:E{r_idx}")
+        ws4[f"A{r_idx}"] = "⚙️ SYSTEM OPTIMIZATIONS & SIGNAL QUALITY UPGRADES"
+        ws4[f"A{r_idx}"].font = FONT_SECTION
+        ws4[f"A{r_idx}"].fill = FILL_SECTION
+        ws4[f"A{r_idx}"].alignment = Alignment(horizontal="left", vertical="center", indent=1)
+        ws4.row_dimensions[r_idx].height = 22
+        r_idx += 1
+
+        for pt in self.system_improvement_points:
+            ws4.merge_cells(f"A{r_idx}:E{r_idx}")
+            ws4[f"A{r_idx}"] = f"• {pt}"
+            ws4[f"A{r_idx}"].font = FONT_DATA
+            ws4[f"A{r_idx}"].fill = FILL_WHITE
+            ws4[f"A{r_idx}"].border = BORDER_DATA
+            ws4[f"A{r_idx}"].alignment = Alignment(horizontal="left", vertical="center", indent=1)
+            ws4.row_dimensions[r_idx].height = 20
+            r_idx += 1
+
+        # ── TAB 5: 5_Tomorrow_Playbook ──────────────────────────────────────
+        ws5 = wb.create_sheet("5_Tomorrow_Playbook")
+        ws5.views.sheetView[0].showGridLines = True
+
+        ws5.merge_cells("A1:F1")
+        ws5["A1"] = f"🎯 TOMORROW'S STRATEGIC PLAYBOOK ({self.tomorrow_day_name.upper()})"
+        ws5["A1"].font = FONT_TITLE
+        ws5["A1"].fill = FILL_TITLE
+        ws5["A1"].alignment = ALIGN_CENTER
+        ws5.row_dimensions[1].height = 32
+
+        if self.tomorrow_expiry_index:
+            ws5.merge_cells("A2:F2")
+            ws5["A2"] = f"⚡ EXPIRY FOCUS: {self.tomorrow_expiry_index} Contract Settlement Day"
+            ws5["A2"].font = FONT_DATA_BOLD
+            ws5["A2"].fill = FILL_AMBER
+            ws5["A2"].alignment = ALIGN_CENTER
+            ws5.row_dimensions[2].height = 20
+
+        r5_idx = 4
+        ws5.merge_cells(f"A{r5_idx}:F{r5_idx}")
+        ws5[f"A{r5_idx}"] = "🏛️ KEY STRUCTURAL REFERENCE LEVELS"
+        ws5[f"A{r5_idx}"].font = FONT_SECTION
+        ws5[f"A{r5_idx}"].fill = FILL_SECTION
+        ws5[f"A{r5_idx}"].alignment = Alignment(horizontal="left", vertical="center", indent=1)
+        ws5.row_dimensions[r5_idx].height = 22
+        r5_idx += 1
+
+        lvl_headers = ["Benchmark Index", "Support 2", "Support 1", "Central Pivot", "Resistance 1", "Resistance 2"]
+        for c_idx, h in enumerate(lvl_headers, 1):
+            cell = ws5.cell(row=r5_idx, column=c_idx, value=h)
+            cell.font = FONT_HEADER
+            cell.fill = FILL_HEADER
+            cell.alignment = ALIGN_HEADER
+            cell.border = BORDER_DATA
+        ws5.row_dimensions[r5_idx].height = 22
+        r5_idx += 1
+
+        if self.key_levels:
+            for bmk, lvls in self.key_levels.items():
+                r_fill = FILL_ZEBRA if r5_idx % 2 == 0 else FILL_WHITE
+                vals = [bmk, lvls.get("s2", 0.0), lvls.get("s1", 0.0), lvls.get("pivot", 0.0), lvls.get("r1", 0.0), lvls.get("r2", 0.0)]
+                for c_idx, val in enumerate(vals, 1):
+                    cell = ws5.cell(row=r5_idx, column=c_idx, value=val)
+                    cell.border = BORDER_DATA
+                    cell.fill = r_fill
+                    cell.font = FONT_DATA
+                    if c_idx == 1:
+                        cell.font = FONT_DATA_BOLD
+                        cell.alignment = ALIGN_LEFT
+                    else:
+                        cell.alignment = ALIGN_RIGHT
+                        cell.number_format = "₹#,##0"
+                ws5.row_dimensions[r5_idx].height = 20
+                r5_idx += 1
+
+        r5_idx += 1
+        ws5.merge_cells(f"A{r5_idx}:F{r5_idx}")
+        ws5[f"A{r5_idx}"] = "📋 STRATEGIC EXECUTION DIRECTIVES FOR TOMORROW"
+        ws5[f"A{r5_idx}"].font = FONT_SECTION
+        ws5[f"A{r5_idx}"].fill = FILL_SECTION
+        ws5[f"A{r5_idx}"].alignment = Alignment(horizontal="left", vertical="center", indent=1)
+        ws5.row_dimensions[r5_idx].height = 22
+        r5_idx += 1
+
+        for pt in self.tomorrow_recommendations:
+            ws5.merge_cells(f"A{r5_idx}:F{r5_idx}")
+            ws5[f"A{r5_idx}"] = f"• {pt}"
+            ws5[f"A{r5_idx}"].font = FONT_DATA
+            ws5[f"A{r5_idx}"].fill = FILL_WHITE
+            ws5[f"A{r5_idx}"].border = BORDER_DATA
+            ws5[f"A{r5_idx}"].alignment = Alignment(horizontal="left", vertical="center", indent=1)
+            ws5.row_dimensions[r5_idx].height = 20
+            r5_idx += 1
+
+        # ── Column Auto-Width Calculation (Skipping Merged Ranges) ─────────
+        for ws in wb.worksheets:
+            merged_cells_coords = set()
+            for rng in ws.merged_cells.ranges:
+                if rng.min_col != rng.max_col:
+                    for r in range(rng.min_row, rng.max_row + 1):
+                        for c in range(rng.min_col, rng.max_col + 1):
+                            merged_cells_coords.add((r, c))
+
+            for col in ws.columns:
+                col_letter = get_column_letter(col[0].column)
+                max_len = 0
+                for cell in col:
+                    if (cell.row, cell.column) in merged_cells_coords:
+                        continue
+                    val_str = str(cell.value or "")
+                    if len(val_str) > max_len:
+                        max_len = len(val_str)
+                ws.column_dimensions[col_letter].width = max(min(max_len + 3, 50), 12)
+
+        out_path = Path(file_path)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        wb.save(str(out_path))
+        return out_path
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1375,16 +2010,24 @@ class EODReportGenerator:
             ai_cio_synthesis=ai_cio_debrief,
         )
 
+    def export_to_excel(self, report: EODReport, path: Optional[Path] = None) -> Path:
+        """Export report as multi-tab institutional Excel workbook (.xlsx)."""
+        if path is None:
+            path = get_reports_dir() / f"eod_{report.date_str}.xlsx"
+        return report.to_excel(path)
+
     def save_to_disk(self, report: EODReport) -> tuple[Path, Path]:
-        """Save report as JSON and Markdown in ~/.trading_platform/reports/."""
+        """Save report as JSON, Markdown, and Excel in ~/.trading_platform/reports/."""
         reports_dir = get_reports_dir()
         json_path = reports_dir / f"eod_{report.date_str}.json"
         md_path = reports_dir / f"eod_{report.date_str}.md"
+        xlsx_path = reports_dir / f"eod_{report.date_str}.xlsx"
 
         try:
             json_path.write_text(json.dumps(report.to_dict(), indent=2), encoding="utf-8")
             md_path.write_text(report.to_markdown(), encoding="utf-8")
-            logger.info(f"[EODReportGenerator] Successfully saved EOD report to {md_path}")
+            self.export_to_excel(report, xlsx_path)
+            logger.info(f"[EODReportGenerator] Successfully saved EOD reports to {md_path} and {xlsx_path}")
         except Exception as e:
             logger.error(f"[EODReportGenerator] Failed to save report to disk: {e}")
 
@@ -1396,7 +2039,7 @@ class EODReportGenerator:
         chat_id: Optional[str] = None,
     ) -> bool:
         """
-        Dispatch the 3-part EOD report to Telegram.
+        Dispatch the 3-part EOD report and attached Excel workbook to Telegram.
 
         Destination: exclusively TELEGRAM_CHANNEL_ID from .env (-1004393392375).
         The ``chat_id`` argument overrides for programmatic/ad-hoc calls only.
@@ -1433,6 +2076,7 @@ class EODReportGenerator:
             chunks = report.to_telegram_chunks()
             url = f"https://api.telegram.org/bot{token}/sendMessage"
 
+            # ── Step 1: Send 3-part Telegram messages ────────────────────────
             for idx, chunk in enumerate(chunks, 1):
                 payload = {
                     "chat_id": dest,
@@ -1447,6 +2091,39 @@ class EODReportGenerator:
                     )
                     clean_text = re.sub(r"<[^>]+>", "", chunk)
                     httpx.post(url, json={"chat_id": dest, "text": clean_text}, timeout=25)
+
+            # ── Step 2: Generate and attach Excel Workbook (.xlsx) ───────────
+            try:
+                xlsx_path = self.export_to_excel(report)
+                if xlsx_path and xlsx_path.exists():
+                    doc_url = f"https://api.telegram.org/bot{token}/sendDocument"
+                    caption_text = (
+                        f"📊 <b>ChanakyaTrade Institutional EOD Journal</b>\n"
+                        f"📅 <code>{report.date_str}</code> | Net: <b>{report.total_realized_r:+.2f}R</b> | "
+                        f"Win Rate: <b>{report.win_rate_pct:.1f}%</b> | Setups: <b>{report.total_alerts}</b>"
+                    )
+                    with open(xlsx_path, "rb") as f:
+                        files = {
+                            "document": (
+                                f"ChanakyaTrade_EOD_{report.date_str}.xlsx",
+                                f,
+                                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            )
+                        }
+                        data = {
+                            "chat_id": dest,
+                            "caption": caption_text,
+                            "parse_mode": "HTML",
+                        }
+                        doc_resp = httpx.post(doc_url, data=data, files=files, timeout=35)
+                        if doc_resp.is_success:
+                            logger.info(f"[EODReportGenerator] Excel workbook dispatched to {dest}.")
+                        else:
+                            logger.warning(
+                                f"[EODReportGenerator] Excel workbook dispatch failed ({doc_resp.status_code}): {doc_resp.text}"
+                            )
+            except Exception as doc_err:
+                logger.warning(f"[EODReportGenerator] Excel workbook dispatch error: {doc_err}")
 
             return True
         except Exception as e:

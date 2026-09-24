@@ -205,7 +205,7 @@ def test_eod_report_markdown_and_telegram_chunks(synthetic_alerts_file, tmp_path
 
 
 def test_eod_report_persistence(synthetic_alerts_file, tmp_path, monkeypatch):
-    """Verify JSON and Markdown files are created in reports directory."""
+    """Verify JSON, Markdown, and Excel files are created in reports directory."""
     monkeypatch.setenv("TRADING_PLATFORM_DATA", str(tmp_path))
     gen = EODReportGenerator(data_file=synthetic_alerts_file)
     report = gen.generate(target_date="2026-09-17")
@@ -213,21 +213,54 @@ def test_eod_report_persistence(synthetic_alerts_file, tmp_path, monkeypatch):
     json_p, md_p = gen.save_to_disk(report)
     assert json_p.exists()
     assert md_p.exists()
+    xlsx_p = tmp_path / "reports" / f"eod_{report.date_str}.xlsx"
+    assert xlsx_p.exists()
     loaded = json.loads(json_p.read_text(encoding="utf-8"))
     assert loaded["date_str"] == "2026-09-17"
 
 
+def test_eod_report_excel_generation(synthetic_alerts_file, tmp_path, monkeypatch):
+    """Verify Excel workbook generation across all 5 institutional tabs."""
+    import openpyxl
+
+    monkeypatch.setenv("TRADING_PLATFORM_DATA", str(tmp_path))
+    gen = EODReportGenerator(data_file=synthetic_alerts_file)
+    report = gen.generate(target_date="2026-09-17")
+
+    xlsx_path = tmp_path / "reports" / "test_eod.xlsx"
+    out_path = report.to_excel(xlsx_path)
+    assert out_path.exists()
+    assert out_path.stat().st_size > 0
+
+    wb = openpyxl.load_workbook(str(out_path))
+    expected_sheets = [
+        "1_Executive_Summary",
+        "2_Trading_Journal",
+        "3_Strategy_Efficacy",
+        "4_Forensic_RCA",
+        "5_Tomorrow_Playbook",
+    ]
+    for s_name in expected_sheets:
+        assert s_name in wb.sheetnames, f"Missing sheet: {s_name}"
+
+    # Verify Journal Sheet
+    ws_journal = wb["2_Trading_Journal"]
+    assert ws_journal.max_row >= 2
+    # Verify auto filter was applied
+    assert ws_journal.auto_filter.ref is not None
+
+
 def test_eod_report_dispatch_telegram_mock(synthetic_alerts_file, tmp_path, monkeypatch):
-    """Verify Telegram dispatch with mocked API response and plain text retry."""
+    """Verify Telegram dispatch sends 3 message chunks AND attaches the Excel workbook."""
     monkeypatch.setenv("TRADING_PLATFORM_DATA", str(tmp_path))
     monkeypatch.delenv("CHANAKYA_TESTING", raising=False)
     monkeypatch.setattr("bot.telegram_bot._get_bot_token", lambda: "mock_token_123")
     monkeypatch.setattr("bot.telegram_bot._load_chat_id", lambda: "1225164824")
 
-    posted_payloads = []
+    posted_calls = []
 
-    def mock_post(url, json=None, **kwargs):
-        posted_payloads.append(json)
+    def mock_post(url, json=None, data=None, files=None, **kwargs):
+        posted_calls.append({"url": url, "json": json, "data": data, "files": files})
         mock_resp = MagicMock()
         mock_resp.is_success = True
         mock_resp.status_code = 200
@@ -238,7 +271,15 @@ def test_eod_report_dispatch_telegram_mock(synthetic_alerts_file, tmp_path, monk
         report = gen.generate(target_date="2026-09-17")
         success = gen.dispatch_to_telegram(report, chat_id="1225164824")
         assert success is True
-        assert len(posted_payloads) == 3
+
+        # Exactly 3 sendMessage chunks and 1 sendDocument call
+        msg_calls = [c for c in posted_calls if c["url"].endswith("/sendMessage")]
+        doc_calls = [c for c in posted_calls if c["url"].endswith("/sendDocument")]
+
+        assert len(msg_calls) == 3
+        assert len(doc_calls) == 1
+        assert doc_calls[0]["data"]["chat_id"] == "1225164824"
+        assert "document" in doc_calls[0]["files"]
 
 
 def test_daily_eod_scheduler_hook(synthetic_alerts_file, tmp_path, monkeypatch):
