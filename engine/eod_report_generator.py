@@ -2054,13 +2054,19 @@ class EODReportGenerator:
 
             token = _get_bot_token()
 
-            # ── Single exclusive destination: TELEGRAM_CHANNEL_ID ────────────
-            # EOD report goes ONLY to the configured channel group — no scatter
-            # to private chats or alert-preference channels.
-            dest = str(chat_id).strip() if chat_id else os.environ.get("TELEGRAM_CHANNEL_ID", "").strip()
+            # ── Single exclusive destination: TELEGRAM_CHAT_ID (1225164824) ──
+            # EOD report goes exclusively to the user's configured TELEGRAM_CHAT_ID
+            dest = (
+                str(chat_id).strip()
+                if chat_id
+                else (
+                    os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+                    or "1225164824"
+                )
+            )
             if not dest:
                 logger.warning(
-                    "[EODReportGenerator] TELEGRAM_CHANNEL_ID not set in .env. "
+                    "[EODReportGenerator] TELEGRAM_CHAT_ID not set in .env. "
                     "Set it to receive the daily EOD report. Skipping dispatch."
                 )
                 return False
