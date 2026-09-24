@@ -296,3 +296,151 @@ def test_telegram_bot_cmd_eod():
 
     asyncio.run(cmd_eod(mock_update, mock_context))
     assert mock_update.message.reply_text.call_count >= 2
+
+
+def test_eod_report_persistent_disk_lock(tmp_path, monkeypatch):
+    """Verify that file-backed lock prevents re-triggering across process restarts."""
+    monkeypatch.setenv("TRADING_PLATFORM_DATA", str(tmp_path))
+    reports_dir = tmp_path / "reports"
+    reports_dir.mkdir(parents=True, exist_ok=True)
+    lock_file = reports_dir / ".eod_dispatch_lock.json"
+
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    IST = ZoneInfo("Asia/Kolkata")
+    today_str = datetime.now(IST).strftime("%Y-%m-%d")
+
+    # Simulate that an EOD report was already generated & dispatched earlier today
+    lock_data = {
+        today_str: {
+            "generated_at": "16:00:00 IST",
+            "dispatched_telegram": True,
+            "total_alerts": 10,
+            "win_rate_pct": 70.0,
+            "total_realized_r": 5.4,
+        }
+    }
+    lock_file.write_text(json.dumps(lock_data), encoding="utf-8")
+
+    # Clear in-memory set (simulating clean service restart)
+    _EOD_GENERATED_TODAY_LOCK.clear()
+
+    # Attempt trigger without force — MUST return None immediately without re-dispatching
+    result = check_and_trigger_daily_eod(force=False)
+    assert result is None, "Should not trigger on restart if already dispatched on disk today"
+
+    # Attempt trigger with force=True — MUST bypass lock
+    with patch("engine.eod_report_generator.EODReportGenerator._load_alerts", return_value=[]):
+        forced_report = check_and_trigger_daily_eod(force=True)
+        assert forced_report is not None
+
+
+def test_eod_report_tabular_journal_and_accurate_attribution(tmp_path, monkeypatch):
+    """Verify accurate classification of untriggered setups, EOD cutoffs, and velocity scratches."""
+    alerts = [
+        # 1. Untriggered setup: Radar alert that expired without entry trigger
+        {
+            "alert_id": "al-untrig-1",
+            "alert_type": "PRECURSOR_RADAR",
+            "stage": "EXPIRED",
+            "symbol": "INFY",
+            "segment": "EQUITY",
+            "direction": "BULLISH",
+            "ltp": 1920.0,
+            "trigger_level": 1935.0,
+            "stop_loss": 1910.0,
+            "target_level": 1980.0,
+            "target_status": "PENDING",
+            "achieved_milestones": [],
+            "created_at": "2026-09-24 10:00:00 IST",
+            "is_invalidated": True,
+            "invalidation_reason": "Time-Stop expired: Setup did not trigger within 60-minute momentum window.",
+        },
+        # 2. Session cutoff: Closed at 15:15 IST cutoff
+        {
+            "alert_id": "al-eod-1",
+            "alert_type": "SQUEEZE_BREAKDOWN",
+            "stage": "INVALIDATED",
+            "symbol": "TCS",
+            "segment": "FNO_STOCK",
+            "direction": "BEARISH",
+            "ltp": 4200.0,
+            "trigger_level": 4210.0,
+            "stop_loss": 4240.0,
+            "target_level": 4120.0,
+            "target_status": "INVALIDATED",
+            "achieved_milestones": [],
+            "created_at": "2026-09-24 13:45:00 IST",
+            "is_invalidated": True,
+            "invalidation_reason": "Intraday session expired (15:15 IST cutoff reached). Trade closed.",
+        },
+        # 3. Velocity time-stop exit: Early capital defense
+        {
+            "alert_id": "al-vel-1",
+            "alert_type": "INTRADAY_BREAKDOWN_SPARK",
+            "stage": "TIME_STOP_EXIT",
+            "symbol": "WIPRO",
+            "segment": "EQUITY",
+            "direction": "BEARISH",
+            "ltp": 540.0,
+            "trigger_level": 542.0,
+            "stop_loss": 548.0,
+            "target_level": 526.0,
+            "target_status": "TIME_STOP_EXIT",
+            "achieved_milestones": [],
+            "created_at": "2026-09-24 11:15:00 IST",
+            "is_invalidated": True,
+            "invalidation_reason": "⏱️ VELOCITY TIME-STOP: Trade active for 31m without momentum expansion (P&L: +0.3%). Scratched early.",
+        },
+        # 4. Target winner
+        {
+            "alert_id": "al-win-star",
+            "alert_type": "GAMMA_BLAST",
+            "stage": "IGNITED",
+            "symbol": "ETERNAL",
+            "segment": "FNO_STOCK",
+            "direction": "BEARISH",
+            "ltp": 13.85,
+            "trigger_level": 12.85,
+            "stop_loss": 11.50,
+            "target_level": 13.85,
+            "target_status": "TARGET_ACHIEVED",
+            "achieved_milestones": ["T1", "T2"],
+            "created_at": "2026-09-24 09:35:00 IST",
+            "is_invalidated": False,
+        },
+    ]
+
+    alerts_path = tmp_path / "auto_alerts.json"
+    alerts_path.write_text(json.dumps(alerts, indent=2), encoding="utf-8")
+    monkeypatch.setenv("TRADING_PLATFORM_DATA", str(tmp_path))
+
+    gen = EODReportGenerator(data_file=alerts_path)
+    report = gen.generate(target_date="2026-09-24")
+
+    # Assertions on accurate attribution
+    assert report.total_alerts == 4
+    assert report.untriggered_count == 1  # INFY did not trigger
+    assert report.ignited_trades == 3     # TCS, WIPRO, ETERNAL
+    assert report.win_count == 1          # ETERNAL
+    assert report.loss_count == 0         # No true SL breaches!
+    assert report.scratch_count == 1      # WIPRO velocity time-stop
+    assert report.eod_squareoff_count == 1 # TCS 15:15 session cutoff
+
+    # Trading journal verification
+    assert len(report.journal_entries) == 4
+    journal_outcomes = {j.outcome for j in report.journal_entries}
+    assert "UNTRIGGERED_EXPIRED" in journal_outcomes
+    assert "SESSION_EOD_SQUAREOFF" in journal_outcomes
+    assert "VELOCITY_TIME_STOP" in journal_outcomes
+    assert "WIN_TARGET" in journal_outcomes
+
+    # Markdown format verification
+    md = report.to_markdown()
+    assert "## 2. 📓 Institutional Trading Journal (Crux Recap)" in md
+    assert "## 3. 🎯 Strategy & Detector Efficacy Journal" in md
+    assert "ETERNAL" in md
+    assert "TARGET_HIT" in md
+    assert "UNTRIGGERED" in md
+    assert "EOD_SQUAREOFF" in md
+

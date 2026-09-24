@@ -55,7 +55,7 @@ DEFAULT_DATA_DIR_NAME: str = ".trading_platform"
 
 # ── F&O Lot Sizes (canonical as of Aug 2026 — check SEBI circular on changes) ─
 
-NIFTY_LOT_SIZE: int = 75
+NIFTY_LOT_SIZE: int = 65
 BANKNIFTY_LOT_SIZE: int = 15
 FINNIFTY_LOT_SIZE: int = 25
 MIDCPNIFTY_LOT_SIZE: int = 50

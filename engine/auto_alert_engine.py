@@ -216,6 +216,8 @@ class AutoAlertEngine:
         self._crypto_tick_history: dict[str, deque] = defaultdict(lambda: deque(maxlen=20))
         self._crypto_last_surge_eval: dict[str, float] = {}
         self._sector_daily_dispatched: dict[str, set[str]] = defaultdict(set)
+        # Telegram has a tighter 2-per-sector-per-day cap (separate from UI's 5)
+        self._sector_daily_telegram: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
         self._cycle_quotes_cache: dict[str, Any] = {}
         self._cycle_quotes_ts: float = 0.0
         self._cycle_quotes_lock = threading.Lock()
@@ -229,17 +231,58 @@ class AutoAlertEngine:
                 aid = getattr(a, "alert_id", "")
                 sym = getattr(a, "symbol", "")
                 atype = getattr(a, "alert_type", "")
+                csym = getattr(a, "contract_symbol", "") or ""
+                c_tag = csym if csym else sym
+
                 if getattr(a, "in_flight_warning_sent", False) or a.stage == "IN_FLIGHT_WARNING":
                     self._dispatched_milestones.add(f"{sym}:{aid}:IN_FLIGHT_WARNING")
+                    self._dispatched_milestones.add(f"{c_tag}:{aid}:IN_FLIGHT_WARNING")
                 if a.is_invalidated or a.stage == "INVALIDATED":
                     self._dispatched_milestones.add(f"{sym}:{aid}:INVALIDATED")
-                achieved = getattr(a, "achieved_milestones", []) or []
-                if "T1_ACHIEVED" in achieved:
-                    self._dispatched_milestones.add(f"{sym}:{atype}:T1")
-                if "FINAL_ACHIEVED" in achieved:
-                    self._dispatched_milestones.add(f"{sym}:{atype}:FINAL")
+                    self._dispatched_milestones.add(f"{c_tag}:{aid}:INVALIDATED")
+                    self._dispatched_milestones.add(f"{sym}:{atype}:INVALIDATED")
+                    self._dispatched_milestones.add(f"{c_tag}:{atype}:INVALIDATED")
 
-                # Seed sector daily cap ledger
+                achieved = set(getattr(a, "achieved_milestones", []) or [])
+                tstatus = getattr(a, "target_status", "") or ""
+                astage = getattr(a, "stage", "") or ""
+
+                if (
+                    "T0_5_ACHIEVED" in achieved
+                    or astage in ("T0_5_ACHIEVED", "DE_RISK_0_5R")
+                    or "T0_5" in tstatus
+                    or "T0.5" in tstatus
+                    or "TARGET_0_5" in tstatus
+                ):
+                    self._dispatched_milestones.add(f"{sym}:{atype}:T0_5")
+                    self._dispatched_milestones.add(f"{c_tag}:{atype}:T0_5")
+                    self._dispatched_milestones.add(f"{sym}:{aid}:T0_5")
+                    self._dispatched_milestones.add(f"{c_tag}:{aid}:T0_5")
+
+                if "T1_ACHIEVED" in achieved or astage == "T1_ACHIEVED" or "T1" in tstatus:
+                    self._dispatched_milestones.add(f"{sym}:{atype}:T1")
+                    self._dispatched_milestones.add(f"{c_tag}:{atype}:T1")
+                    self._dispatched_milestones.add(f"{sym}:{aid}:T1")
+                    self._dispatched_milestones.add(f"{c_tag}:{aid}:T1")
+
+                if "T2_ACHIEVED" in achieved or astage == "T2_ACHIEVED" or "T2" in tstatus:
+                    self._dispatched_milestones.add(f"{sym}:{atype}:T2")
+                    self._dispatched_milestones.add(f"{c_tag}:{atype}:T2")
+                    self._dispatched_milestones.add(f"{sym}:{aid}:T2")
+                    self._dispatched_milestones.add(f"{c_tag}:{aid}:T2")
+
+                if (
+                    "FINAL_ACHIEVED" in achieved
+                    or "TARGET_ACHIEVED" in achieved
+                    or astage in ("TARGET_ACHIEVED", "COMPLETED")
+                    or "FINAL" in tstatus
+                ):
+                    self._dispatched_milestones.add(f"{sym}:{atype}:FINAL")
+                    self._dispatched_milestones.add(f"{c_tag}:{atype}:FINAL")
+                    self._dispatched_milestones.add(f"{sym}:{aid}:FINAL")
+                    self._dispatched_milestones.add(f"{c_tag}:{aid}:FINAL")
+
+                # Seed sector daily cap ledger (UI: up to 5 per sector/day; Telegram: up to 2)
                 is_stock_opt = (getattr(a, "segment", "") == "FNO_STOCK") or (
                     sym not in self._watched_indices
                     and atype in ("OPTIONS_MOMENTUM", "GAMMA_BLAST")
@@ -257,6 +300,11 @@ class AutoAlertEngine:
                             sec = None
                     if d_key and sec and sec != "index":
                         self._sector_daily_dispatched[d_key].add(sec)
+                        # Seed Telegram ledger based on whether this alert was Telegram-dispatched
+                        if getattr(a, "telegram_dispatched", False):
+                            self._sector_daily_telegram[d_key][sec] = (
+                                self._sector_daily_telegram[d_key].get(sec, 0) + 1
+                            )
 
     @property
     def watched_crypto(self) -> list[str]:
@@ -562,6 +610,48 @@ class AutoAlertEngine:
                 logger.info(
                     f"[AutoAlertEngine] 🛑 Suppressed late-session intraday option alert for {clean_target} ({alert.alert_type}): "
                     f"Post-15:10 IST cutoff active (MIS closed, terminal theta decay risk)."
+                )
+                return False
+
+            # ── 14:00 IST Afternoon Entry Cutoff Gate ─────────────────────────
+            # Intraday stock/FnO momentum alerts fired after 14:00 IST leave < 75 minutes
+            # before the mandatory 15:15 IST square-off, consistently forcing premature exits
+            # and inflating the scratch/cutoff count (64/83 scratches in session diagnostics).
+            # Only new intraday momentum entries on domestic equity/NFO are blocked.
+            # Permitted post-14:00: index hedging (FNO_INDEX), positional/swing alerts,
+            # commodity (MCX), and currency (CDS) which run until 23:30/23:55 IST.
+            _INTRADAY_STOCK_MOMENTUM_TYPES = (
+                "OPTIONS_MOMENTUM",
+                "GAMMA_BLAST",
+                "SQUEEZE_BREAKOUT",
+                "INTRADAY_SPARK",
+                "VOLUME_EXPANSION",
+                "INTRADAY_MOVER_IGNITED",
+            )
+            _POSITIONAL_EXEMPT_TYPES = (
+                "SWING_TRADE",
+                "POSITIONAL",
+                "PRECURSOR_RADAR",
+                "ASYMMETRIC_OPPORTUNITY",
+                "MULTIBAGGER",
+            )
+            _is_domestic_equity_nfo = alert.exchange in ("NSE", "BSE", "NFO", "")
+            _is_commodity_currency = alert.exchange in ("MCX", "CDS") or getattr(
+                alert, "segment", ""
+            ) in ("COMMODITY", "CURRENCY", "CRYPTO")
+            _is_index_hedge = is_idx_alert  # already resolved above
+            _is_positional = alert.alert_type in _POSITIONAL_EXEMPT_TYPES
+            if (
+                now_t >= dtime(14, 0)
+                and alert.alert_type in _INTRADAY_STOCK_MOMENTUM_TYPES
+                and _is_domestic_equity_nfo
+                and not _is_index_hedge
+                and not _is_positional
+                and not _is_commodity_currency
+            ):
+                logger.info(
+                    f"[AutoAlertEngine] 🛑 Suppressed afternoon momentum alert for {clean_target} ({alert.alert_type}): "
+                    f"Post-14:00 IST Afternoon Entry Cutoff Gate active — insufficient time runway before 15:15 IST square-off."
                 )
                 return False
 
@@ -1406,12 +1496,24 @@ class AutoAlertEngine:
         else:
             env_tag = "[REAL/LIVE]"
 
-        is_t1 = "T1" in (alert.target_status or "") or alert.stage == "T1_ACHIEVED"
-        is_target = (
-            is_t1
-            or alert.stage in ("TARGET_ACHIEVED", "COMPLETED")
-            or "TARGET" in (alert.target_status or "")
+        is_t0_5 = (
+            alert.stage in ("T0_5_ACHIEVED", "DE_RISK_0_5R")
+            or "T0_5" in (alert.target_status or "")
+            or "T0.5" in (alert.target_status or "")
+            or "TARGET_0_5" in (alert.target_status or "")
         )
+        is_t1 = "T1" in (alert.target_status or "") or alert.stage == "T1_ACHIEVED"
+        is_t2 = (
+            alert.stage == "T2_ACHIEVED"
+            or "T2" in (alert.target_status or "")
+            or "TARGET_2" in (alert.target_status or "")
+        )
+        is_final = (
+            alert.stage in ("TARGET_ACHIEVED", "COMPLETED")
+            or "FINAL" in (alert.target_status or "")
+            or ("TARGET" in (alert.target_status or "") and not (is_t0_5 or is_t1 or is_t2))
+        )
+        is_target = is_t0_5 or is_t1 or is_t2 or is_final
         is_trail = alert.stage in (
             "TRAILING_UPDATE",
             "DE_RISK_0_5R",
@@ -1455,8 +1557,12 @@ class AutoAlertEngine:
             sys_type = "market_alert"
             if alert.is_invalidated:
                 sys_type = "invalidation_alert"
+            elif is_t0_5:
+                sys_type = "target_0_5_achieved"
             elif is_t1:
                 sys_type = "target_1_achieved"
+            elif is_t2:
+                sys_type = "target_2_achieved"
             elif is_target:
                 sys_type = "target_achieved"
             elif is_trail:
@@ -1490,9 +1596,17 @@ class AutoAlertEngine:
                 if alert.is_invalidated:
                     desktop_title = f"⚠️ {env_tag} [{ts_short}] VIEW INVALIDATED: {item_label}"
                     desktop_msg = alert.invalidation_reason or alert.summary
+                elif is_t0_5:
+                    desktop_title = (
+                        f"🎯 {env_tag} [{ts_short}] TARGET 0.5 (SCALE 1) HIT: {item_label}"
+                    )
+                    desktop_msg = f"{alert.trailing_decision or 'SCALE 35% & TRAIL TO COST'}: {alert.trailing_rationale or alert.summary}"
                 elif is_t1:
                     desktop_title = f"🎯 {env_tag} [{ts_short}] TARGET 1 HIT: {item_label}"
                     desktop_msg = f"{alert.trailing_decision or 'BOOK 50% & TRAIL TO BREAKEVEN'}: {alert.trailing_rationale or alert.summary}"
+                elif is_t2:
+                    desktop_title = f"🚀 {env_tag} [{ts_short}] TARGET 2 HIT: {item_label}"
+                    desktop_msg = f"{alert.trailing_decision or 'SCALE FURTHER / TRAIL RUNNER'}: {alert.trailing_rationale or alert.summary}"
                 elif is_target:
                     desktop_title = f"🏁 {env_tag} [{ts_short}] FINAL TARGET HIT: {item_label}"
                     desktop_msg = f"{alert.trailing_decision or 'TARGET ACHIEVED'}: {alert.trailing_rationale or alert.summary}"
@@ -1546,8 +1660,18 @@ class AutoAlertEngine:
             is_milestone = (
                 alert.is_invalidated
                 or alert.stage
-                in ("INVALIDATED", "IN_FLIGHT_WARNING", "TARGET_ACHIEVED", "COMPLETED")
+                in (
+                    "INVALIDATED",
+                    "IN_FLIGHT_WARNING",
+                    "T0_5_ACHIEVED",
+                    "T1_ACHIEVED",
+                    "T2_ACHIEVED",
+                    "TARGET_ACHIEVED",
+                    "COMPLETED",
+                )
+                or is_t0_5
                 or is_t1
+                or is_t2
                 or is_target
                 or is_trail
             )
@@ -1631,28 +1755,110 @@ class AutoAlertEngine:
                     )
                     return
 
+                # Per-Sector Telegram Daily Cap: at most 2 stock options signals per sector per day on Telegram
+                # (UI allows up to 5; Telegram is curated to the top 2 for mobile readability)
+                _TG_SECTOR_CAP = 2
+                is_stock_opt_tg = (
+                    getattr(alert, "segment", "") == "FNO_STOCK"
+                    or (
+                        alert.symbol not in self._watched_indices
+                        and alert.alert_type in ("OPTIONS_MOMENTUM", "GAMMA_BLAST")
+                    )
+                )
+                if is_stock_opt_tg:
+                    from datetime import datetime as _dt
+                    _today_tg = _dt.now(IST).strftime("%Y-%m-%d")
+                    _sec_tg = (getattr(alert, "metrics", {}) or {}).get("sector_id")
+                    if not _sec_tg:
+                        try:
+                            from analysis.universe import get_stock_sector
+                            _sec_tg, _ = get_stock_sector(alert.symbol)
+                        except Exception:
+                            _sec_tg = None
+                    if _sec_tg and _sec_tg != "index":
+                        _tg_count = self._sector_daily_telegram[_today_tg].get(_sec_tg, 0)
+                        if _tg_count >= _TG_SECTOR_CAP:
+                            logger.info(
+                                f"[AutoAlertEngine] 🛑 Telegram sector cap ({_TG_SECTOR_CAP}/{_TG_SECTOR_CAP}) "
+                                f"reached for '{_sec_tg}' today ({_today_tg}). "
+                                f"Holding {alert.symbol} in Terminal UI only."
+                            )
+                            return
+
             from engine.alerts import _telegram_notify
 
             # Anti-flood / deduplication filter for Telegram channel
             now_ts = time.time()
             with self._lock:
+                aid = getattr(alert, "alert_id", "")
+                c_tag = getattr(alert, "contract_symbol", "") or alert.symbol
+
                 if alert.is_invalidated or alert.stage == "INVALIDATED":
-                    m_key = f"{alert.symbol}:{alert.alert_type}:INVALIDATED"
-                    if m_key in self._dispatched_milestones:
+                    m_key1 = f"{alert.symbol}:{alert.alert_type}:INVALIDATED"
+                    m_key2 = f"{c_tag}:{aid}:INVALIDATED"
+                    if (
+                        m_key1 in self._dispatched_milestones
+                        or m_key2 in self._dispatched_milestones
+                    ):
                         return
-                    self._dispatched_milestones.add(m_key)
+                    self._dispatched_milestones.add(m_key1)
+                    self._dispatched_milestones.add(m_key2)
+
+                elif is_t0_5:
+                    m_key1 = f"{alert.symbol}:{alert.alert_type}:T0_5"
+                    m_key2 = f"{c_tag}:{aid}:T0_5"
+                    m_key3 = f"{c_tag}:{alert.alert_type}:T0_5"
+                    if (
+                        m_key1 in self._dispatched_milestones
+                        or m_key2 in self._dispatched_milestones
+                        or m_key3 in self._dispatched_milestones
+                    ):
+                        return
+                    self._dispatched_milestones.add(m_key1)
+                    self._dispatched_milestones.add(m_key2)
+                    self._dispatched_milestones.add(m_key3)
 
                 elif is_t1:
-                    m_key = f"{alert.symbol}:{alert.alert_type}:T1"
-                    if m_key in self._dispatched_milestones:
+                    m_key1 = f"{alert.symbol}:{alert.alert_type}:T1"
+                    m_key2 = f"{c_tag}:{aid}:T1"
+                    m_key3 = f"{c_tag}:{alert.alert_type}:T1"
+                    if (
+                        m_key1 in self._dispatched_milestones
+                        or m_key2 in self._dispatched_milestones
+                        or m_key3 in self._dispatched_milestones
+                    ):
                         return
-                    self._dispatched_milestones.add(m_key)
+                    self._dispatched_milestones.add(m_key1)
+                    self._dispatched_milestones.add(m_key2)
+                    self._dispatched_milestones.add(m_key3)
+
+                elif is_t2:
+                    m_key1 = f"{alert.symbol}:{alert.alert_type}:T2"
+                    m_key2 = f"{c_tag}:{aid}:T2"
+                    m_key3 = f"{c_tag}:{alert.alert_type}:T2"
+                    if (
+                        m_key1 in self._dispatched_milestones
+                        or m_key2 in self._dispatched_milestones
+                        or m_key3 in self._dispatched_milestones
+                    ):
+                        return
+                    self._dispatched_milestones.add(m_key1)
+                    self._dispatched_milestones.add(m_key2)
+                    self._dispatched_milestones.add(m_key3)
 
                 elif is_target:
-                    m_key = f"{alert.symbol}:{alert.alert_type}:FINAL"
-                    if m_key in self._dispatched_milestones:
+                    m_key1 = f"{alert.symbol}:{alert.alert_type}:FINAL"
+                    m_key2 = f"{c_tag}:{aid}:FINAL"
+                    m_key3 = f"{c_tag}:{alert.alert_type}:FINAL"
+                    if (
+                        m_key1 in self._dispatched_milestones
+                        or m_key2 in self._dispatched_milestones
+                        or m_key3 in self._dispatched_milestones
+                    ):
                         return
-                    self._dispatched_milestones.add(m_key)
+                    self._dispatched_milestones.add(m_key1)
+                    self._dispatched_milestones.add(m_key2)
+                    self._dispatched_milestones.add(m_key3)
 
                 elif is_trail:
                     # Significant Updates Only: Intermediate trail ratchets are kept in Terminal UI
@@ -1665,7 +1871,7 @@ class AutoAlertEngine:
                     )
                     if not allow_trails:
                         return
-                    m_key = f"{alert.symbol}:{alert.alert_type}:TRAIL"
+                    m_key = f"{c_tag}:{alert.alert_type}:TRAIL"
                     last_t = self._dispatch_cooldowns.get(m_key, 0.0)
                     if (now_ts - last_t) < 900.0:  # 15 min cooldown
                         return
@@ -1710,10 +1916,15 @@ class AutoAlertEngine:
                     self._dispatch_cooldowns[m_key] = now_ts
 
                 elif alert.stage == "IN_FLIGHT_WARNING":
-                    m_key = f"{alert.symbol}:{getattr(alert, 'alert_id', '')}:IN_FLIGHT_WARNING"
-                    if m_key in self._dispatched_milestones:
+                    m_key1 = f"{alert.symbol}:{aid}:IN_FLIGHT_WARNING"
+                    m_key2 = f"{c_tag}:{aid}:IN_FLIGHT_WARNING"
+                    if (
+                        m_key1 in self._dispatched_milestones
+                        or m_key2 in self._dispatched_milestones
+                    ):
                         return
-                    self._dispatched_milestones.add(m_key)
+                    self._dispatched_milestones.add(m_key1)
+                    self._dispatched_milestones.add(m_key2)
 
             from bot.alert_templates import render_auto_alert
 
@@ -1722,15 +1933,53 @@ class AutoAlertEngine:
             tg_msg = render_auto_alert(alert, in_market=in_market)
             target_seg = getattr(alert, "segment", None) or classify_alert_segment(alert)
             tg_target_chat_id = alert_preferences.get_telegram_chat_id(target_seg)
+            fno_index_chat_id = alert_preferences.get_telegram_chat_id("FNO_INDEX")
+
+            # F&O Index Telegram Whitelist:
+            # Strictly restrict TELEGRAM_FNO_INDEX_CHAT_ID to Nifty, Banknifty, Midcp, and Sensex
+            if (
+                target_seg == "FNO_INDEX"
+                or (tg_target_chat_id and fno_index_chat_id and str(tg_target_chat_id) == str(fno_index_chat_id))
+            ):
+                if not alert_preferences.is_fno_index_symbol_allowed(alert.symbol):
+                    logger.info(
+                        f"[AutoAlertEngine] 🛑 Suppressed index signal for '{alert.symbol}' on Telegram FNO_INDEX channel: "
+                        f"Channel is strictly restricted to Nifty, Banknifty, Midcp, and Sensex."
+                    )
+                    return
+
+            sig_id = (
+                getattr(alert, "signal_ref", None)
+                or getattr(alert, "signal_id", None)
+                or getattr(alert, "alert_id", None)
+            )
+            m_type = getattr(alert, "milestone_type", None) or getattr(alert, "target_status", None)
+            disable_notification = True if m_type == "TRAIL_RATCHET" else None
+
             if tg_target_chat_id:
                 try:
-                    _telegram_notify(tg_msg, chat_id=tg_target_chat_id)
+                    _telegram_notify(
+                        tg_msg,
+                        chat_id=tg_target_chat_id,
+                        signal_id=sig_id,
+                        disable_notification=disable_notification,
+                    )
+                except TypeError:
+                    try:
+                        _telegram_notify(tg_msg, chat_id=tg_target_chat_id)
+                    except TypeError:
+                        _telegram_notify(tg_msg)
+            else:
+                try:
+                    _telegram_notify(
+                        tg_msg,
+                        signal_id=sig_id,
+                        disable_notification=disable_notification,
+                    )
                 except TypeError:
                     _telegram_notify(tg_msg)
-            else:
-                _telegram_notify(tg_msg)
 
-            # Record channel delivery provenance and segment pacing timestamp
+            # Record channel delivery provenance, segment pacing timestamp, and sector Telegram ledger
             with self._lock:
                 alert.telegram_dispatched = True
                 if not isinstance(alert.dispatched_channels, list):
@@ -1740,6 +1989,28 @@ class AutoAlertEngine:
                 if not is_milestone:
                     seg_lbl = alert_dict.get("segment") or "GENERAL"
                     self._dispatch_cooldowns[f"PACING:{seg_lbl}"] = now_ts
+                    # Update per-sector Telegram dispatch counter
+                    _is_stk_opt = (
+                        getattr(alert, "segment", "") == "FNO_STOCK"
+                        or (
+                            alert.symbol not in self._watched_indices
+                            and alert.alert_type in ("OPTIONS_MOMENTUM", "GAMMA_BLAST")
+                        )
+                    )
+                    if _is_stk_opt:
+                        from datetime import datetime as _dt2
+                        _today_lk = _dt2.now(IST).strftime("%Y-%m-%d")
+                        _sec_lk = (getattr(alert, "metrics", {}) or {}).get("sector_id")
+                        if not _sec_lk:
+                            try:
+                                from analysis.universe import get_stock_sector
+                                _sec_lk, _ = get_stock_sector(alert.symbol)
+                            except Exception:
+                                _sec_lk = None
+                        if _sec_lk and _sec_lk != "index":
+                            self._sector_daily_telegram[_today_lk][_sec_lk] = (
+                                self._sector_daily_telegram[_today_lk].get(_sec_lk, 0) + 1
+                            )
                 self._save()
         except Exception as e:
             logger.warning(f"[AutoAlertEngine] Telegram dispatch failed: {e}", exc_info=True)
@@ -2100,7 +2371,7 @@ class AutoAlertEngine:
                         alert.headline = f"🔥 {env_tag} {dir_str} IGNITED: {inst_label} crossed ₹{trigger:,.1f} (LTP: ₹{cur_ltp:,.1f})"
                         alert.summary = (
                             f"Early warning coiling confirmed! {inst_label} triggered {dir_str.lower()} past ₹{trigger:,.1f}. "
-                            f"Live quote: ₹{cur_ltp:,.1f}. Invalidation SL: ₹{alert.stop_loss:,.1f} | Target 1: ₹{alert.target_level:,.1f}."
+                            f"Live quote: ₹{cur_ltp:,.1f}. SL: ₹{alert.stop_loss:,.1f} | T1: ₹{alert.target_level:,.1f}."
                         )
                         self._save()
 
@@ -2121,10 +2392,18 @@ class AutoAlertEngine:
     def resolve_session_end_alerts(self) -> list[AutoAlert]:
         """
         At or after 15:30 IST (Indian market close), automatically resolves remaining active
-        intraday alerts (OPTIONS_MOMENTUM, SCALP, OPENING_DRIVE, INTRADAY_EQUITY, GAMMA_BLAST)
-        that never hit T1 or SL during regular market hours.
+        intraday alerts that never completed during regular market hours.
         Marks them as 'EXPIRED_SESSION_END' with their final Mark-to-Market P&L,
-        preventing perpetual PENDING stagnation.
+        preventing perpetual PENDING or partially-achieved stagnation across sessions.
+
+        Bug fixes applied here:
+          1. alert_type set now includes ``OPENING_DRIVE_IGNITION`` — the actual type emitted
+             by engine/detectors/opening_drive.py. The old set only had ``OPENING_DRIVE`` which
+             never matched live alerts, letting them survive indefinitely after session close.
+          2. The ``target_status in (None, "", "PENDING")`` allowlist was replaced with an
+             exclusion list. The old guard silently skipped any alert with a partial milestone
+             (T0_5_ACHIEVED, T1_ACHIEVED, etc.), leaving it is_active=True across sessions
+             and generating spurious trailing updates the following day.
         """
         now_dt = datetime.now(IST)
         # Indian market hours for Equity/FNO: 09:15 to 15:30 IST.
@@ -2140,12 +2419,28 @@ class AutoAlertEngine:
 
         resolved = []
         now_iso = now_dt.strftime("%Y-%m-%d %H:%M:%S IST")
+        # FIX 1: Include OPENING_DRIVE_IGNITION — the actual alert_type emitted by
+        # engine/detectors/opening_drive.py. "OPENING_DRIVE" was a stale placeholder.
         intraday_types = {
             "OPTIONS_MOMENTUM",
             "SCALP",
             "OPENING_DRIVE",
+            "OPENING_DRIVE_IGNITION",  # ← actual type from opening_drive detector
             "INTRADAY_EQUITY",
             "GAMMA_BLAST",
+            "INTRADAY_MOVER_SPARK",
+            "INTRADAY_BREAKDOWN_SPARK",
+        }
+
+        # FIX 2: Exclusion list of terminal states — NOT an allowlist.
+        # Old: target_status in (None, "", "PENDING") — silently skipped T0_5_ACHIEVED, T1_ACHIEVED, etc.
+        # New: exclude only truly terminal statuses; all partial-milestone alerts now pass through.
+        _terminal_statuses = {
+            "COMPLETED",
+            "EXPIRED_SESSION_END",
+            "INVALIDATED",
+            "TARGET_ACHIEVED",
+            "TIME_STOP_EXIT",
         }
 
         with self._lock:
@@ -2155,7 +2450,8 @@ class AutoAlertEngine:
                     and not alert.is_archived
                     and alert.stage
                     not in ("INVALIDATED", "COMPLETED", "TARGET_ACHIEVED", "EXPIRED_SESSION_END")
-                    and alert.target_status in (None, "", "PENDING")
+                    # FIX 2: was target_status in (None, "", "PENDING") — excluded partial milestones.
+                    and (alert.target_status or "") not in _terminal_statuses
                     and alert.alert_type in intraday_types
                     and (alert.exchange or "NSE").upper() in ("NSE", "NFO", "BSE")
                 ):
@@ -2168,12 +2464,18 @@ class AutoAlertEngine:
                         else:
                             pnl_pct = round(((cur_p - entry_p) / entry_p) * 100.0, 2)
 
+                    # Capture partial-win context in the archive reason
+                    prior_status = alert.target_status or "PENDING"
+                    milestones = alert.achieved_milestones or []
+                    milestone_note = f" | Milestones: {', '.join(milestones)}" if milestones else ""
+
                     alert.stage = "COMPLETED"
                     alert.target_status = "EXPIRED_SESSION_END"
                     alert.is_archived = True
                     alert.archived_at = now_iso
                     alert.archive_reason = (
-                        f"Intraday market session closed at 15:30 IST (Final MTM: {pnl_pct:+.2f}%)"
+                        f"Intraday session closed at 15:30 IST "
+                        f"(Prior: {prior_status}{milestone_note}, Final MTM: {pnl_pct:+.2f}%)"
                     )
                     alert.pnl_pct = pnl_pct
                     resolved.append(alert)
@@ -2182,6 +2484,46 @@ class AutoAlertEngine:
                 self._save()
                 logger.info(
                     f"[AutoAlertEngine] Automatically resolved {len(resolved)} intraday alerts at session close."
+                )
+
+        # Session-close Telegram summary for partially-achieved intraday trades.
+        # Zero-ghost invariant: only dispatch if the original signal was Telegraphed.
+        for alert in resolved:
+            milestones = alert.achieved_milestones or []
+            if not milestones:
+                continue  # Pure PENDING → nothing meaningful to report
+            if not getattr(alert, "telegram_dispatched", False):
+                continue  # Zero-ghost: skip if original signal was never broadcast
+            try:
+                _sym = alert.contract_symbol or alert.symbol or ""
+                _pnl = alert.pnl_pct or 0.0
+                _pnl_sign = "+" if _pnl >= 0 else ""
+                _ms_str = " → ".join(milestones)
+                _entry = getattr(alert, "entry_price", None) or alert.trigger_level or 0.0
+                _ltp = alert.ltp or 0.0
+                _t1 = getattr(alert, "target_1", None) or alert.target_level or 0.0
+                _env = "[REAL/LIVE]" if getattr(alert, "is_live", True) else "[TEST]"
+
+                msg = (
+                    f"\U0001f514 <b>{_env} SESSION CLOSE \u2014 {_sym}</b>\n"
+                    f"<code>"
+                    f"Status  : INTRADAY CLOSED (15:30 IST)\n"
+                    f"Reached : {_ms_str}\n"
+                    f"Entry   : \u20b9{_entry:,.2f}  |  LTP: \u20b9{_ltp:,.2f}\n"
+                    f"T1      : \u20b9{_t1:,.2f}  |  MTM: {_pnl_sign}{_pnl:.1f}%\n"
+                    f"Action  : Position CLOSED at session end"
+                    f"</code>\n"
+                    f"<i>Intraday trade auto-closed. Re-evaluate next session if thesis holds.</i>"
+                )
+                from bot.telegram_bot import send_message as _tg_send
+                _tg_send(msg, parse_mode="HTML")
+                logger.info(
+                    f"[AutoAlertEngine] Session-close Telegram sent for {_sym} "
+                    f"({alert.alert_id}): milestones={milestones}, MTM={_pnl_sign}{_pnl:.1f}%"
+                )
+            except Exception as _tg_err:
+                logger.debug(
+                    f"[AutoAlertEngine] Session-close Telegram failed for {alert.alert_id}: {_tg_err}"
                 )
 
         return resolved
@@ -2276,6 +2618,18 @@ class AutoAlertEngine:
                             f"[AutoAlertEngine] Spread eval error for {alert.symbol}: {e_sp}"
                         )
 
+                # Fast delta filter: skip redundant evaluation if price hasn't shifted significantly
+                # and price is far from stop_loss and target levels
+                last_eval_ltp = getattr(alert, "_last_eval_ltp", None)
+                if last_eval_ltp is not None and cur_quote_ltp:
+                    rel_diff = abs(cur_quote_ltp - last_eval_ltp) / max(last_eval_ltp, 1e-6)
+                    if rel_diff < 0.0005:
+                        near_sl = alert.stop_loss and (abs(cur_quote_ltp - alert.stop_loss) / max(cur_quote_ltp, 1e-6) < 0.003)
+                        near_tgt = alert.target_level and (abs(cur_quote_ltp - alert.target_level) / max(cur_quote_ltp, 1e-6) < 0.003)
+                        if not (near_sl or near_tgt):
+                            continue
+
+                alert._last_eval_ltp = cur_quote_ltp
                 eval_res = evaluate_alert_targets_and_trailing(alert, current_ltp=cur_quote_ltp)
                 if not eval_res or not eval_res.new_milestone:
                     continue
@@ -2294,11 +2648,17 @@ class AutoAlertEngine:
                     alert.trailing_decision = eval_res.trailing_decision
                     alert.trailing_stop = eval_res.recommended_stop
                     if eval_res.recommended_stop and eval_res.should_trail:
+                        if getattr(alert, "initial_stop_loss", None) is None and getattr(alert, "stop_loss", None):
+                            alert.initial_stop_loss = alert.stop_loss
                         alert.stop_loss = eval_res.recommended_stop
                         alert.last_trail_alert_time = now_ts
                         if alert.actionable_plan:
+                            if "initial_invalidation_stop" not in alert.actionable_plan and alert.actionable_plan.get("invalidation_stop"):
+                                alert.actionable_plan["initial_invalidation_stop"] = alert.actionable_plan["invalidation_stop"]
                             alert.actionable_plan["invalidation_stop"] = eval_res.recommended_stop
                             if isinstance(alert.actionable_plan.get("option_plan"), dict):
+                                if "initial_sl_premium" not in alert.actionable_plan["option_plan"] and alert.actionable_plan["option_plan"].get("sl_premium"):
+                                    alert.actionable_plan["option_plan"]["initial_sl_premium"] = alert.actionable_plan["option_plan"]["sl_premium"]
                                 alert.actionable_plan["option_plan"]["sl_premium"] = (
                                     eval_res.recommended_stop
                                 )
@@ -2495,15 +2855,41 @@ class AutoAlertEngine:
                 for a in self._alerts
                 if not a.is_invalidated
                 and a.stage
-                not in ("INVALIDATED", "COMPLETED", "IN_FLIGHT_WARNING", "EARLY_WARNING")
+                not in (
+                    "INVALIDATED",
+                    "COMPLETED",
+                    "IN_FLIGHT_WARNING",
+                    "EARLY_WARNING",
+                    "T0_5_ACHIEVED",
+                    "DE_RISK_0_5R",
+                    "T1_ACHIEVED",
+                    "T2_ACHIEVED",
+                    "BREAKEVEN_LOCKED",
+                )
                 and (
                     a.stage in ("IGNITED", "TRAILING_UPDATE")
                     or getattr(a, "triggered_at", None) is not None
                 )
                 and not getattr(a, "in_flight_warning_sent", False)
                 and getattr(a, "target_status", "")
-                not in ("T1_ACHIEVED", "FINAL_ACHIEVED", "TARGET_ACHIEVED")
-                and "T1_ACHIEVED" not in (getattr(a, "achieved_milestones", []) or [])
+                not in (
+                    "T0_5_ACHIEVED",
+                    "TARGET_0_5_ACHIEVED",
+                    "T1_ACHIEVED",
+                    "T2_ACHIEVED",
+                    "FINAL_ACHIEVED",
+                    "TARGET_ACHIEVED",
+                )
+                and not any(
+                    m in (getattr(a, "achieved_milestones", []) or [])
+                    for m in (
+                        "T0_5_ACHIEVED",
+                        "T1_ACHIEVED",
+                        "T2_ACHIEVED",
+                        "FINAL_ACHIEVED",
+                        "DE_RISK_0_5R",
+                    )
+                )
                 and not (a.environment == "TEST" or not a.is_live)
                 and (not exch_filter or (a.exchange or "NSE").upper() in exch_filter)
             ]
@@ -3205,7 +3591,10 @@ class AutoAlertEngine:
                             found.append(a)
                     stock_candidates.extend(stk_alerts)
 
-        # Anti-storm pacing & daily sector cap for stock options: at most 1 signal per sector per day
+        # Anti-storm pacing & daily sector cap for stock options:
+        # UI Alert Screen: up to 5 signals per sector per day (ranked by confidence)
+        # Telegram: up to 2 per sector per day (enforced separately in _dispatch)
+        _UI_SECTOR_CAP = 5
         if stock_candidates:
             today_key = now_ist.strftime("%Y-%m-%d")
             stock_by_sec: dict[str, list[AutoAlert]] = defaultdict(list)
@@ -3221,7 +3610,14 @@ class AutoAlertEngine:
                 stock_by_sec[sec].append(a)
 
             for sec_id, cand_list in stock_by_sec.items():
-                if sec_id in self._sector_daily_dispatched[today_key]:
+                if not hasattr(self, "_sector_ui_counts"):
+                    self._sector_ui_counts = defaultdict(lambda: defaultdict(int))
+                sec_ui_count = self._sector_ui_counts[today_key][sec_id]
+                if sec_ui_count >= _UI_SECTOR_CAP:
+                    logger.debug(
+                        f"[AutoAlertEngine] Suppressed gamma stock options for sector '{sec_id}': "
+                        f"UI daily quota ({_UI_SECTOR_CAP}/{_UI_SECTOR_CAP}) already fulfilled ({today_key})"
+                    )
                     continue
                 cand_list.sort(
                     key=lambda a: (
@@ -3232,8 +3628,16 @@ class AutoAlertEngine:
                     reverse=True,
                 )
                 best_gamma = cand_list[0]
+                rank = sec_ui_count + 1
+                sec_name = (best_gamma.metrics or {}).get("sector_name", sec_id.upper())
+                leader_badge = f" [🏆 {sec_name.upper()} #{rank}/{_UI_SECTOR_CAP}]"
+                if leader_badge not in best_gamma.headline:
+                    best_gamma.headline += leader_badge
+                if best_gamma.actionable_plan and isinstance(best_gamma.actionable_plan, dict):
+                    best_gamma.actionable_plan["sector_daily_leader"] = f"{rank}/{_UI_SECTOR_CAP} Daily Sector Cap"
                 if self.record_alert(best_gamma):
                     self._sector_daily_dispatched[today_key].add(sec_id)
+                    self._sector_ui_counts[today_key][sec_id] += 1
                     found.append(best_gamma)
 
         return found
@@ -3565,7 +3969,7 @@ class AutoAlertEngine:
                     else ""
                 )
                 summary = (
-                    f"{opp.catalyst_summary} Invalidation SL: ₹{opp.stop_loss:,.1f} | "
+                    f"{opp.catalyst_summary} SL: ₹{opp.stop_loss:,.1f} | "
                     f"T1 (+2R): ₹{opp.target_1:,.1f} | T2 (+4R): ₹{opp.target_2:,.1f} | Moonshot: ₹{opp.target_moonshot:,.1f}{rollover_note}"
                 )
 
@@ -3600,26 +4004,27 @@ class AutoAlertEngine:
                         "risk_reward": opp.risk_reward,
                     },
                 }
+                # Preserve Spot baseline levels
+                plan["spot_entry_range"] = opp.entry_range
+                plan["spot_stop_loss"] = opp.stop_loss
+                plan["spot_target_1"] = opp.target_1
+
                 if opp.contract_symbol:
                     plan["contract"] = opp.contract_symbol
                     plan["instrument"] = opp.contract_symbol
                     plan["instrument_type"] = "OPTION"
-                    plan["action"] = f"BUY {opp.option_type}" if opp.option_type else "BUY_OPTION"
                     plan["option_type"] = opp.option_type
-                    plan["recommended_entry"] = (
-                        f"₹{opp.option_premium:,.2f}" if opp.option_premium else opp.entry_range
-                    )
                     if opp.option_premium:
-                        plan["entry_range"] = (
+                        plan["option_entry_range"] = (
                             f"₹{round(opp.option_premium * 0.96, 1):,.1f} – ₹{round(opp.option_premium * 1.04, 1):,.1f}"
                         )
                     if opp.option_stop_loss:
-                        plan["stop_loss"] = f"₹{opp.option_stop_loss:,.1f}"
+                        plan["option_stop_loss"] = f"₹{opp.option_stop_loss:,.1f}"
                     if opp.option_target_1:
-                        plan["target"] = f"₹{opp.option_target_1:,.1f}"
-                        plan["target_1"] = f"₹{opp.option_target_1:,.1f}"
+                        plan["option_target"] = f"₹{opp.option_target_1:,.1f}"
+                        plan["option_target_1"] = f"₹{opp.option_target_1:,.1f}"
                     if opp.option_target_2:
-                        plan["target_2"] = f"₹{opp.option_target_2:,.1f}"
+                        plan["option_target_2"] = f"₹{opp.option_target_2:,.1f}"
                     plan["underlying_spot"] = f"₹{opp.ltp:,.1f}"
                     plan["underlying_sl"] = f"₹{opp.stop_loss:,.1f}"
                     plan["underlying_target"] = f"₹{opp.target_1:,.1f}"
@@ -3629,23 +4034,16 @@ class AutoAlertEngine:
                         "option_type": opp.option_type,
                         "expiry_date": opp.expiry_date,
                         "entry_premium": opp.option_premium,
+                        "entry_range": plan.get("option_entry_range"),
                         "sl_premium": opp.option_stop_loss,
                         "t1_premium": opp.option_target_1,
                         "t2_premium": opp.option_target_2,
                         "lot_size": opp.lot_size,
+                        "instrument_type": "OPTION",
                     }
                     plan["option_contract"] = opp.contract_symbol
                     plan["option_entry"] = (
                         f"₹{opp.option_premium:,.1f}" if opp.option_premium else None
-                    )
-                    plan["option_target_1"] = (
-                        f"₹{opp.option_target_1:,.1f}" if opp.option_target_1 else None
-                    )
-                    plan["option_target_2"] = (
-                        f"₹{opp.option_target_2:,.1f}" if opp.option_target_2 else None
-                    )
-                    plan["option_stop_loss"] = (
-                        f"₹{opp.option_stop_loss:,.1f}" if opp.option_stop_loss else None
                     )
                     plan["lot_size"] = opp.lot_size
 
@@ -3769,13 +4167,18 @@ class AutoAlertEngine:
                         sec = "broad_market"
                 stock_by_sector[sec].append(a)
 
-        # Institutional 1-Signal-Per-Sector Daily Throttle:
-        # Prevents sibling duplication (e.g. 5 IT alerts) and limits to the #1 highest conviction setup
+        # Institutional Sector Daily Throttle:
+        # UI Alert Screen: up to 5 best signals per sector per day
+        # Telegram: up to 2 per sector per day (enforced separately in _dispatch)
+        _UI_SECTOR_CAP = 5
         for sec_id, cand_list in stock_by_sector.items():
-            if sec_id in self._sector_daily_dispatched[today_key]:
+            if not hasattr(self, "_sector_ui_counts"):
+                self._sector_ui_counts = defaultdict(lambda: defaultdict(int))
+            sec_ui_count = self._sector_ui_counts[today_key][sec_id]
+            if sec_ui_count >= _UI_SECTOR_CAP:
                 logger.debug(
                     f"[AutoAlertEngine] Suppressed {len(cand_list)} stock options for sector '{sec_id}': "
-                    f"Daily sector quota (1/1) already fulfilled today ({today_key})"
+                    f"UI daily quota ({_UI_SECTOR_CAP}/{_UI_SECTOR_CAP}) already fulfilled today ({today_key})"
                 )
                 continue
 
@@ -3789,19 +4192,23 @@ class AutoAlertEngine:
                 ),
                 reverse=True,
             )
+
             best_alert = cand_list[0]
+            rank = sec_ui_count + 1
             sec_name = (best_alert.metrics or {}).get("sector_name", sec_id.upper())
-            leader_badge = f" [🏆 {sec_name.upper()} LEADER 1/1]"
+            leader_badge = f" [🏆 {sec_name.upper()} #{rank}/{_UI_SECTOR_CAP}]"
             if leader_badge not in best_alert.headline:
                 best_alert.headline += leader_badge
             if best_alert.actionable_plan and isinstance(best_alert.actionable_plan, dict):
-                best_alert.actionable_plan["sector_daily_leader"] = "1/1 Daily Sector Cap Met"
+                best_alert.actionable_plan["sector_daily_leader"] = f"{rank}/{_UI_SECTOR_CAP} Daily Sector Cap"
 
             if self.record_alert(best_alert):
                 self._sector_daily_dispatched[today_key].add(sec_id)
+                self._sector_ui_counts[today_key][sec_id] += 1
                 found.append(best_alert)
                 logger.info(
-                    f"[AutoAlertEngine] Dispatched #1 Sector Leader for '{sec_id}': {best_alert.symbol} ({best_alert.headline})"
+                    f"[AutoAlertEngine] Dispatched Sector Opportunity #{rank}/{_UI_SECTOR_CAP} for '{sec_id}': "
+                    f"{best_alert.symbol} ({best_alert.headline})"
                 )
 
         return found
@@ -4566,7 +4973,7 @@ class AutoAlertEngine:
         ]
 
         results: list[AutoAlert] = []
-        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
             future_to_name = {executor.submit(_safe_run, name, fn): name for name, fn in tasks}
             for fut in concurrent.futures.as_completed(future_to_name):
                 res = fut.result()
@@ -4736,11 +5143,17 @@ class AutoAlertEngine:
                             alert.stage = "TRAILING_UPDATE"
 
                     if eval_res.new_trailing_stop:
+                        if getattr(alert, "initial_stop_loss", None) is None and getattr(alert, "stop_loss", None):
+                            alert.initial_stop_loss = alert.stop_loss
                         alert.trailing_stop = eval_res.new_trailing_stop
                         alert.stop_loss = eval_res.new_trailing_stop
                         if alert.actionable_plan:
+                            if "initial_invalidation_stop" not in alert.actionable_plan and alert.actionable_plan.get("invalidation_stop"):
+                                alert.actionable_plan["initial_invalidation_stop"] = alert.actionable_plan["invalidation_stop"]
                             alert.actionable_plan["invalidation_stop"] = eval_res.new_trailing_stop
                             if isinstance(alert.actionable_plan.get("option_plan"), dict):
+                                if "initial_sl_premium" not in alert.actionable_plan["option_plan"] and alert.actionable_plan["option_plan"].get("sl_premium"):
+                                    alert.actionable_plan["option_plan"]["initial_sl_premium"] = alert.actionable_plan["option_plan"]["sl_premium"]
                                 alert.actionable_plan["option_plan"]["sl_premium"] = (
                                     eval_res.new_trailing_stop
                                 )
@@ -5486,15 +5899,15 @@ class AutoAlertEngine:
 
     def _deduplicate_symbols_unlocked(self) -> int:
         """
-        Deduplicates multiple concurrent active alerts for the same symbol (keeps latest active).
-        Preserves past closed, invalidated, or archived setups for that symbol within the
+        Deduplicates multiple concurrent active alerts for the same symbol/contract (keeps latest active).
+        Preserves past closed, invalidated, or archived setups within the
         3-day retention window so multi-day trade history and post-mortem analysis remain intact.
         """
         surviving = []
         purged = 0
         seen_active = set()
 
-        for a in reversed(self._alerts):
+        for a in self._alerts:
             # Skip synthetic test alerts from symbol deduplication
             is_test = (
                 a.environment == "TEST"
@@ -5509,17 +5922,19 @@ class AutoAlertEngine:
                 continue
 
             clean_sym = a.symbol.replace("NSE:", "").replace("NFO:", "").strip().upper()
+            contract_sym = (a.contract_symbol or "").strip().upper()
+            dedup_key = contract_sym if contract_sym else clean_sym
+
             if a.is_active:
-                if clean_sym in seen_active:
+                if dedup_key in seen_active:
                     purged += 1
                     continue
-                seen_active.add(clean_sym)
+                seen_active.add(dedup_key)
                 surviving.append(a)
             else:
                 # Past archived, invalidated, or expired alerts are preserved for multi-day analysis
                 surviving.append(a)
 
-        surviving.reverse()
         if purged > 0:
             self._alerts = surviving
             self._save()

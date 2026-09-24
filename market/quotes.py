@@ -411,6 +411,8 @@ def normalize_instrument(inst: str) -> str:
         or _OPTION_PATTERN.match(clean_deriv)
         or _FUT_PATTERN.match(upper)
     ):
+        if any(upper.startswith(x) for x in ("SENSEX", "BANKEX")):
+            return f"BFO:{upper}"
         return f"NFO:{upper}"
     return f"NSE:{upper}"
 

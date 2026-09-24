@@ -412,7 +412,16 @@ def calculate_strike_roll_recommendation(
     spot = getattr(alert, "underlying_spot", None)
     if not spot or spot <= 0:
         metrics = getattr(alert, "metrics", {}) or {}
-        spot = metrics.get("spot")
+        spot = metrics.get("spot") or metrics.get("underlying_spot")
+    if not spot or spot <= 0:
+        plan = getattr(alert, "actionable_plan", {}) or {}
+        spot = plan.get("spot") or plan.get("underlying_spot")
+    if not spot or spot <= 0 and current_ltp > 0:
+        # Approximate spot from deep ITM intrinsic value if feed tick was omitted
+        if "PE" in str(opt_type).upper():
+            spot = max(1.0, cur_strike - current_ltp)
+        else:
+            spot = cur_strike + current_ltp
     if not spot or spot <= 0:
         return None
 
@@ -448,15 +457,26 @@ def calculate_strike_roll_recommendation(
     if abs(cur_strike - atm_strike) < (step * 0.5):
         return None
 
-    action_type = "ROLL_UP" if is_bullish else "ROLL_DOWN"
+    if atm_strike > cur_strike:
+        action_type = "ROLL_UP"
+        action_desc = "up"
+    elif atm_strike < cur_strike:
+        action_type = "ROLL_DOWN"
+        action_desc = "down"
+    else:
+        action_type = "ROLL_UP" if is_bullish else "ROLL_DOWN"
+        action_desc = "up" if is_bullish else "down"
+
     roll_target_strike = atm_strike
 
-    # Attempt to derive new contract symbol if possible
+    # Derive new contract symbol
     exp_date = getattr(alert, "expiry_date", None)
     cur_contract = getattr(alert, "contract_symbol", "")
     new_contract = None
     if cur_contract and str(int(cur_strike)) in cur_contract:
         new_contract = cur_contract.replace(str(int(cur_strike)), str(int(roll_target_strike)))
+    else:
+        new_contract = f"{sym} {int(roll_target_strike)} {opt_type}"
 
     action_desc = "up" if is_bullish else "down"
     return {
@@ -660,8 +680,10 @@ def evaluate_alert_targets_and_trailing(
             return None
 
     initial_sl_val = (
-        (getattr(alert, "actionable_plan", {}) or {}).get("initial_sl")
+        getattr(alert, "initial_stop_loss", None)
+        or (getattr(alert, "actionable_plan", {}) or {}).get("initial_sl")
         or (getattr(alert, "actionable_plan", {}) or {}).get("initial_stop_loss")
+        or (getattr(alert, "actionable_plan", {}) or {}).get("initial_invalidation_stop")
         or (getattr(alert, "metrics", {}) or {}).get("initial_sl")
     )
     if initial_sl_val:
@@ -828,6 +850,10 @@ def evaluate_alert_targets_and_trailing(
             t2_level = round(t1_level - (t1_level - target_final) * 0.5, 2)
 
     achieved = set(getattr(alert, "achieved_milestones", None) or [])
+    if getattr(alert, "stage", None):
+        achieved.add(alert.stage)
+    if getattr(alert, "target_status", None):
+        achieved.add(alert.target_status)
 
     # Volume / Momentum check for extension
     vol_ratio = current_volume_ratio or (
@@ -1441,8 +1467,11 @@ def evaluate_alert_in_flight_decay(
         in ("INVALIDATED", "COMPLETED", "IN_FLIGHT_WARNING", "EARLY_WARNING")
         or getattr(alert, "in_flight_warning_sent", False)
         or getattr(alert, "target_status", "")
-        in ("T1_ACHIEVED", "FINAL_ACHIEVED", "TARGET_ACHIEVED")
-        or "T1_ACHIEVED" in (getattr(alert, "achieved_milestones", []) or [])
+        in ("T0_5_ACHIEVED", "T1_ACHIEVED", "T2_ACHIEVED", "FINAL_ACHIEVED", "TARGET_ACHIEVED")
+        or any(
+            m in (getattr(alert, "achieved_milestones", []) or [])
+            for m in ("T0_5_ACHIEVED", "T1_ACHIEVED", "T2_ACHIEVED", "DE_RISK_0_5R")
+        )
         or (
             not getattr(alert, "triggered_at", None)
             and getattr(alert, "stage", "") not in ("IGNITED", "TRAILING_UPDATE")

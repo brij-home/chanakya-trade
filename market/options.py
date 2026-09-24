@@ -220,27 +220,40 @@ def get_options_chain(
         _CHAIN_CACHE[cache_key] = (now, chain)
         return chain
 
-    # Tier 4: High-fidelity synthetic chain for major indices (SENSEX/BANKEX on BSE, or when external feeds are unavailable)
-    if clean_sym in ("SENSEX", "BANKEX", "NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"):
-        try:
-            from market.quotes import get_ltp
+    # Tier 4: Synthetic chain ONLY in explicit Mock/Demo mode (never during LIVE/PAPER trading with real brokers)
+    import os
 
-            idx_spot = get_ltp(
-                f"BSE:{clean_sym}" if clean_sym in ("SENSEX", "BANKEX") else f"NSE:{clean_sym}"
-            ) or get_ltp(clean_sym)
-            if idx_spot and idx_spot > 0:
-                chain = build_index_synthetic_option_chain(clean_sym, spot=idx_spot, expiry=expiry)
-                if chain:
-                    record_source(
-                        "options",
-                        "index_synthetic_bfo"
-                        if clean_sym in ("SENSEX", "BANKEX")
-                        else "index_synthetic_nfo",
+    try:
+        from brokers.session import get_data_broker_key
+
+        broker_key = get_data_broker_key()
+    except Exception:
+        broker_key = ""
+
+    trading_mode = os.environ.get("TRADING_MODE", "").upper()
+    if broker_key == "mock" or trading_mode == "DEMO":
+        if clean_sym in ("SENSEX", "BANKEX", "NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"):
+            try:
+                from market.quotes import get_ltp
+
+                idx_spot = get_ltp(
+                    f"BSE:{clean_sym}" if clean_sym in ("SENSEX", "BANKEX") else f"NSE:{clean_sym}"
+                ) or get_ltp(clean_sym)
+                if idx_spot and idx_spot > 0:
+                    chain = build_index_synthetic_option_chain(
+                        clean_sym, spot=idx_spot, expiry=expiry
                     )
-                    _CHAIN_CACHE[cache_key] = (now, chain)
-                    return chain
-        except Exception:
-            pass
+                    if chain:
+                        record_source(
+                            "options",
+                            "index_synthetic_bfo"
+                            if clean_sym in ("SENSEX", "BANKEX")
+                            else "index_synthetic_nfo",
+                        )
+                        _CHAIN_CACHE[cache_key] = (now, chain)
+                        return chain
+            except Exception:
+                pass
 
     record_source("options", "none")
     _CHAIN_CACHE[cache_key] = (now, [])

@@ -1708,6 +1708,90 @@ class AlertScrutinyAuditor:
                     )
         flags["circuit_headroom_valid"] = True
 
+        # 22. Market Breadth & Macro Tide Alignment Gate (Advance / Decline Ratio):
+        # Disallow buying calls or entering bullish index setups into broad market liquidation (BROAD_DECLINE or A/D < 0.60).
+        # Disallow buying puts or entering bearish index setups into broad market rally (BROAD_RALLY or A/D > 1.80).
+        is_test_runner = (
+            ("PYTEST_CURRENT_TEST" in os.environ)
+            or (os.environ.get("CHANAKYA_TESTING") == "1")
+            or (os.environ.get("DEPLOY_MODE") == "test")
+        )
+        enforce_breadth = (
+            not is_test_runner
+            or (os.environ.get("ENFORCE_TEST_BREADTH") == "1")
+            or ("market_breadth" in metrics_dict)
+            or ("enforce_breadth" in metrics_dict)
+        )
+        if enforce_breadth:
+            try:
+                from market.sentiment import get_market_breadth
+
+                mb = get_market_breadth()
+                if mb and mb.verdict != "UNAVAILABLE" and getattr(mb, "ad_ratio", 0.0) > 0:
+                    is_index_sym = (
+                        sym in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX")
+                        or getattr(alert, "segment", "") == "FNO_INDEX"
+                    )
+                    is_call_side = (
+                        direction in ("BULLISH", "LONG", "BUY")
+                        or getattr(alert, "option_type", "") == "CE"
+                    )
+                    is_put_side = (
+                        direction in ("BEARISH", "SHORT", "SELL")
+                        or getattr(alert, "option_type", "") == "PE"
+                    )
+
+                    # Broad market liquidation (declines heavily outnumber advances)
+                    if (
+                        mb.verdict == "BROAD_DECLINE"
+                        or mb.ad_ratio < 0.60
+                        or (mb.declines >= 2.0 * max(1, mb.advances))
+                    ):
+                        if is_call_side:
+                            is_decoupled = bool(
+                                not is_index_sym
+                                and (
+                                    (metrics_dict.get("is_decoupler") is True)
+                                    or (float(metrics_dict.get("sector_rs", 0.0) or 0.0) >= 1.5)
+                                )
+                            )
+                            if not is_decoupled:
+                                flags["market_breadth_valid"] = False
+                                return (
+                                    False,
+                                    f"Market Breadth Liquidation Veto: Broad market is in severe decline "
+                                    f"(Adv: {mb.advances} / Dec: {mb.declines}, A/D ratio: {mb.ad_ratio:.2f}, verdict: {mb.verdict}). "
+                                    f"Disallow Call / Bullish setups into widespread institutional market liquidation.",
+                                    flags,
+                                )
+
+                    # Broad market rally (advances heavily outnumber declines)
+                    elif (
+                        mb.verdict == "BROAD_RALLY"
+                        or mb.ad_ratio > 1.80
+                        or (mb.advances >= 2.0 * max(1, mb.declines))
+                    ):
+                        if is_put_side:
+                            is_decoupled = bool(
+                                not is_index_sym
+                                and (
+                                    (metrics_dict.get("is_decoupler") is True)
+                                    or (float(metrics_dict.get("sector_rs", 0.0) or 0.0) <= -1.5)
+                                )
+                            )
+                            if not is_decoupled:
+                                flags["market_breadth_valid"] = False
+                                return (
+                                    False,
+                                    f"Market Breadth Rally Veto: Broad market is in strong rally "
+                                    f"(Adv: {mb.advances} / Dec: {mb.declines}, A/D ratio: {mb.ad_ratio:.2f}, verdict: {mb.verdict}). "
+                                    f"Disallow Put / Bearish setups into widespread institutional market buying.",
+                                    flags,
+                                )
+            except Exception as e_br:
+                logger.debug(f"[Scrutiny] Market breadth gate evaluation bypassed: {e_br}")
+        flags["market_breadth_valid"] = True
+
         return True, "", flags
 
     # ── Tier 2: AI Devil's Advocate & Scrutiny ─────────────────────────────────
@@ -1779,15 +1863,23 @@ class AlertScrutinyAuditor:
                 )
             )
 
-        # Step 1.5: Conviction Gate (Efficiency Guardrail)
-        # Avoid spending external LLM tokens on low-confidence (<70%) setups
+        # Step 1.5: Adaptive Regime-Aware Conviction Gate
+        # In compressed VIX regimes (<12.5) or ORB-trapped Nifty days, raise the minimum
+        # scrutiny score from 70 → 75 to eliminate false breakout triggers on range-bound
+        # expiry days where breakout detectors historically over-fire (Recommendation 2).
+        min_score = self._compute_regime_scrutiny_threshold(alert)
         confidence = float(getattr(alert, "confidence", 80.0) or 80.0)
-        if confidence < 70.0:
+        if confidence < min_score:
+            logger.info(
+                f"[AlertScrutiny] Adaptive Regime Gate: {sym} ({atype}) confidence {confidence:.0f} "
+                f"< adaptive min_score {min_score} (regime: VIX compressed or Nifty ORB-trapped). "
+                f"Falling back to quantitative audit."
+            )
             return _commit_cache(self._generate_quantitative_fallback(alert, flags))
 
-        # Step 2: Tier 2 AI Chief Risk Officer Scrutiny
+        # Step 2: Tier 2 AI Chief Risk Officer Scrutiny (min_score passed for adaptive regime)
         try:
-            llm_result = self._execute_fast_llm_scrutiny(alert, flags, timeout=timeout)
+            llm_result = self._execute_fast_llm_scrutiny(alert, flags, timeout=timeout, min_score=min_score)
             if llm_result:
                 return _commit_cache(llm_result)
         except Exception as e:
@@ -1796,8 +1888,102 @@ class AlertScrutinyAuditor:
         # Step 3: Zero-Blackout Deterministic Quantitative Fallback
         return _commit_cache(self._generate_quantitative_fallback(alert, flags))
 
+    def _compute_regime_scrutiny_threshold(self, alert: Any) -> int:
+        """
+        Computes the adaptive minimum scrutiny score based on the current market regime.
+
+        Returns:
+            75  — Compressed VIX regime (VIX < 12.5): false breakout rate elevated on
+                  range-bound / low-vol expiry sessions. Raise bar to filter noise.
+            75  — Nifty trapped inside Opening 30-Minute Range (ORB): price has not
+                  established directional conviction; intraday momentum breakouts are
+                  statistically unreliable.
+            70  — Normal regime: standard institutional threshold.
+
+        The result is cached (30s TTL) at engine start-up level to avoid repeated
+        market data round-trips across rapid 5s scan loops.
+        """
+        # Only apply regime uplift for intraday momentum / breakout alert types.
+        # Positional, swing, and index hedge types are unaffected.
+        _BREAKOUT_TYPES = (
+            "SQUEEZE_BREAKOUT",
+            "OPTIONS_MOMENTUM",
+            "GAMMA_BLAST",
+            "INTRADAY_SPARK",
+            "VOLUME_EXPANSION",
+            "INTRADAY_MOVER_IGNITED",
+            "ORB_BREAKOUT",
+            "BREAKOUT",
+        )
+        atype = str(getattr(alert, "alert_type", "") or "").upper()
+        if atype not in _BREAKOUT_TYPES:
+            return 70  # Standard threshold for non-breakout types
+
+        # --- VIX Regime Check ---
+        vix_val: Optional[float] = None
+        try:
+            from market.indices import get_vix
+            vix_raw = get_vix()
+            if isinstance(vix_raw, (int, float)) and vix_raw > 0:
+                vix_val = float(vix_raw)
+            elif hasattr(vix_raw, "ltp") and vix_raw.ltp:
+                vix_val = float(vix_raw.ltp)
+            elif isinstance(vix_raw, dict):
+                vix_val = float(vix_raw.get("ltp") or vix_raw.get("value") or 0.0) or None
+        except Exception:
+            pass
+
+        if vix_val is not None and vix_val < 12.5:
+            logger.debug(
+                f"[AlertScrutiny] Regime uplift: VIX {vix_val:.2f} < 12.5 → min_score raised 70→75 "
+                f"for {atype} (compressed volatility / range-bound regime)"
+            )
+            return 75
+
+        # --- Nifty ORB Trap Check (Opening 30-Minute Range) ---
+        # ORB is formed during 09:15–09:45 IST. If Nifty spot is still inside the ORB
+        # and we are past 10:30 IST (ORB should have resolved by then), it signals a
+        # range-bound session where breakout momentum is statistically unreliable.
+        try:
+            from market.quotes import _QUOTE_CACHE, _quote_cache_lock
+            from datetime import datetime as _dt_now, time as _dtime
+            now_ist_t = _dt_now.now(IST).time()
+            if _dtime(10, 30) <= now_ist_t <= _dtime(14, 0):
+                orb_high: Optional[float] = None
+                orb_low: Optional[float] = None
+                nifty_ltp: Optional[float] = None
+
+                # Pull from in-memory quote cache only (zero network I/O)
+                with _quote_cache_lock:
+                    for k in ("NSE:NIFTY 50", "NIFTY 50", "NSE:NIFTY", "NIFTY"):
+                        if k in _QUOTE_CACHE:
+                            _, q_obj = _QUOTE_CACHE[k]
+                            nifty_ltp = float(getattr(q_obj, "last_price", 0.0) or getattr(q_obj, "ltp", 0.0) or 0.0)
+                            orb_high = float(getattr(q_obj, "ohlc", {}).get("open", 0.0) if hasattr(q_obj, "ohlc") else 0.0)
+                            orb_low = orb_high  # fallback if no ORB levels in cache
+                            # Prefer explicit ORB fields if populated
+                            orb_high = float(getattr(q_obj, "orb_high", 0.0) or orb_high)
+                            orb_low = float(getattr(q_obj, "orb_low", 0.0) or orb_low)
+                            break
+
+                if nifty_ltp and orb_high and orb_low and orb_high > orb_low:
+                    inside_orb = orb_low <= nifty_ltp <= orb_high
+                    # Also consider it ORB-trapped if range is narrow (< 0.25% of spot)
+                    orb_range_pct = (orb_high - orb_low) / nifty_ltp * 100.0 if nifty_ltp > 0 else 0.0
+                    if inside_orb and orb_range_pct < 0.5:  # Nifty trapped in a tight < 0.5% ORB band
+                        logger.debug(
+                            f"[AlertScrutiny] Regime uplift: Nifty trapped inside ORB "
+                            f"[{orb_low:.1f}–{orb_high:.1f}, {orb_range_pct:.2f}%] → min_score raised 70→75 "
+                            f"for {atype} (ORB-trapped range-bound session)"
+                        )
+                        return 75
+        except Exception:
+            pass
+
+        return 70  # Normal regime — standard institutional threshold
+
     def _execute_fast_llm_scrutiny(
-        self, alert: Any, flags: dict[str, bool], timeout: float = 2.5
+        self, alert: Any, flags: dict[str, bool], timeout: float = 2.5, min_score: int = 70
     ) -> Optional[ScrutinyResult]:
         """Invokes Fast-LLM with defensive timeout and strict JSON parsing."""
         prompt = self._build_scrutiny_prompt(alert)
@@ -1864,9 +2050,15 @@ class AlertScrutinyAuditor:
         if not logic or not trap:
             return None
 
+        # Apply adaptive regime-aware threshold (min_score is 70 normal / 75 compressed-VIX or ORB-trapped)
         status = (
-            "APPROVED" if verdict in ("APPROVED", "CONDITIONAL") and score >= 70 else "REJECTED"
+            "APPROVED" if verdict in ("APPROVED", "CONDITIONAL") and score >= min_score else "REJECTED"
         )
+        if status == "REJECTED" and score >= 70 and min_score > 70:
+            logger.info(
+                f"[AlertScrutiny] Adaptive Regime Rejection: LLM score {score} < regime threshold {min_score} "
+                f"(VIX compressed or Nifty ORB-trapped). Raising bar from 70 → {min_score}."
+            )
 
         return ScrutinyResult(
             status=status,

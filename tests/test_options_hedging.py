@@ -381,7 +381,7 @@ def test_render_spread_milestone_alerts():
     )
 
     msg = render_auto_alert(alert, in_market=True)
-    assert "🎯 <b>[REAL/LIVE] SPREAD 70% PROFIT TARGET CAPTURED</b>" in msg
+    assert "SPREAD 70% PROFIT TARGET CAPTURED" in msg
     assert "Spread Net Value:</b> ₹42.50" in msg
     assert "+112.5%" in msg
     assert "CLOSE BOTH LEGS AT MARKET" in msg
@@ -390,7 +390,7 @@ def test_render_spread_milestone_alerts():
     alert.stage = "SPREAD_SHORT_STRIKE_TOUCH"
     alert.target_status = "SPREAD_SHORT_STRIKE_TOUCH"
     msg_touch = render_auto_alert(alert, in_market=True)
-    assert "⚠️ <b>[REAL/LIVE] SPREAD SHORT STRIKE PIN WALL</b>" in msg_touch
+    assert "SPREAD SHORT STRIKE PIN WALL" in msg_touch
     assert "CLOSE SPREAD OR ROLL SHORT LEG HIGHER" in msg_touch
 
     # Stop loss
@@ -400,7 +400,7 @@ def test_render_spread_milestone_alerts():
     alert.pnl_pct = -50.0
     alert.ltp = 10.0
     msg_sl = render_auto_alert(alert, in_market=True)
-    assert "🛑 <b>[REAL/LIVE] SPREAD RISK MITIGATION EXIT</b>" in msg_sl
+    assert "SPREAD RISK MITIGATION EXIT" in msg_sl
     assert "50% DEBIT EROSION" in msg_sl
     assert "SCRATCH / EXIT SPREAD AT MARKET" in msg_sl
 
@@ -576,7 +576,7 @@ def test_render_spread_free_roll_telegram_alert():
     )
 
     msg = render_auto_alert(alert, in_market=True)
-    assert "🛡️ <b>[REAL/LIVE] SPREAD FREE-ROLL UNLOCKED</b>" in msg
+    assert "SPREAD FREE-ROLL UNLOCKED" in msg
     assert "100% RISK-FREE SPREAD" in msg
     assert "Spread Net Value:</b> ₹36.25" in msg
     assert "SCALE 50% LONG LEG" in msg
@@ -631,3 +631,54 @@ def test_render_auto_alert_includes_ratio_spread_and_expiry_warning():
     assert "Sweet Spot Max Gain: ₹2,250" in msg
     assert "Upper Breakeven: ₹25,190" in msg
     assert "0DTE THETA CLIFF ACTIVE" in msg
+
+
+def test_single_stock_hedge_degraded_rr_promotes_ratio_spread():
+    """
+    When a single stock debit spread has degraded R:R (e.g. net debit > 45% of width),
+    the engine flags is_poor_rr, auto-promotes RATIO_SPREAD_1X2 as preferred_vehicle,
+    and attaches execution guidance for atomic limit combo orders.
+    """
+    # Simulate a setup like LAURUSLABS: Spot 2050, Buy 2020 CE @ 38.55, Sell 2040 CE @ 23.95 (Width 20, Debit 14.60 = 73% of width)
+    chain = [
+        DummyContract(2020.0, "CE", 38.55),
+        DummyContract(2040.0, "CE", 23.95),
+    ]
+
+    hedge = build_defined_risk_hedge_plan(
+        symbol="LAURUSLABS",
+        direction="BULLISH",
+        spot=2050.0,
+        strike=2020.0,
+        opt_type="CE",
+        opt_ltp=38.55,
+        chain=chain,
+        lot_size=850,
+        vix=14.0,
+        vel_score=85.0,
+    )
+
+    assert hedge is not None
+    assert hedge["is_poor_rr"] is True
+    assert hedge["debit_ratio"] >= 0.45
+    assert hedge["preferred_vehicle"] == "RATIO_SPREAD_1X2"
+    assert hedge["debit_rr_warning"] is not None
+    assert "DEBIT SPREAD R:R DEGRADED" in hedge["debit_rr_warning"]
+    assert "Stock Option Liquidity Guard" in hedge["combo_execution_note"]
+
+    # Verify Telegram formatting includes the Zero-Downside preferred banner and execution note
+    alert = make_dummy_alert(
+        alert_id="test-laurus-01",
+        symbol="LAURUSLABS",
+        ltp=38.55,
+        underlying_spot=2050.0,
+        strike=2020.0,
+        option_type="CE",
+        contract_symbol="LAURUSLABS2020CE",
+        actionable_plan={"hedge_plan": hedge},
+    )
+    msg = render_auto_alert(alert, in_market=True)
+    assert "Zero-Downside 1x2 Ratio: Preferred" in msg
+    assert "DEBIT SPREAD R:R DEGRADED" in msg
+    assert "Stock Option Liquidity Guard" in msg
+

@@ -193,8 +193,18 @@ class MStockAPI(BrokerAPI):
     def get_symbol_token(self, symbol: str, exchange: str = "NSE") -> str:
         """Resolve security token for symbol via known tokens or cached scrip master."""
         clean_sym = (
-            symbol.replace("NSE:", "").replace("BSE:", "").replace("-EQ", "").strip().upper()
+            symbol.replace("NSE:", "")
+            .replace("BSE:", "")
+            .replace("BFO:", "")
+            .replace("NFO:", "")
+            .replace("-EQ", "")
+            .strip()
+            .upper()
         )
+        if clean_sym == "SENSEX":
+            return "51" if str(exchange).upper() in ("BFO", "5") else "1"
+        if clean_sym == "BANKEX":
+            return "69" if str(exchange).upper() in ("BFO", "5") else "12"
         if clean_sym in _KNOWN_NSE_TOKENS:
             return _KNOWN_NSE_TOKENS[clean_sym]
 
@@ -840,7 +850,11 @@ class MStockAPI(BrokerAPI):
                 or clean_sym.endswith("-FUT")
                 or clean_sym.endswith("FUT")
             ):
-                exchange = "NFO"
+                exchange = (
+                    "BFO" if any(clean_sym.startswith(x) for x in ("SENSEX", "BANKEX")) else "NFO"
+                )
+            elif clean_sym in ("SENSEX", "BANKEX"):
+                exchange = "BSE"
             else:
                 exchange = "NSE"
 
@@ -1001,11 +1015,24 @@ class MStockAPI(BrokerAPI):
         Return all available sorted expiry dates (YYYY-MM-DD) for an underlying
         directly from m.Stock Option Chain Master.
         """
-        clean_sym = underlying.replace("NSE:", "").replace("BSE:", "").upper().strip()
+        clean_sym = (
+            underlying.replace("NSE:", "")
+            .replace("BSE:", "")
+            .replace("BFO:", "")
+            .replace("NFO:", "")
+            .upper()
+            .strip()
+        )
+        is_bse = (
+            clean_sym in ("SENSEX", "BANKEX")
+            or underlying.upper().startswith("BSE:")
+            or underlying.upper().startswith("BFO:")
+        )
+        exchange = 5 if is_bse else 2
         if not self._token:
             self.authenticate()
         try:
-            master = self.get_option_chain_master(exchange=2)
+            master = self.get_option_chain_master(exchange=exchange)
             dct_exp = master.get("dctExp", {})
             opt_idx = master.get("OPTIDX", [])
             of_stk = master.get("OFSTK", [])
@@ -1056,7 +1083,27 @@ class MStockAPI(BrokerAPI):
         Falls back seamlessly to the market engine (NSE scraper) if session is unauthenticated
         or if m.Stock API encounters an error.
         """
-        clean_sym = underlying.replace("NSE:", "").replace("BSE:", "").upper().strip()
+        clean_sym = (
+            underlying.replace("NSE:", "")
+            .replace("BSE:", "")
+            .replace("BFO:", "")
+            .replace("NFO:", "")
+            .upper()
+            .strip()
+        )
+        is_bse = (
+            clean_sym in ("SENSEX", "BANKEX")
+            or underlying.upper().startswith("BSE:")
+            or underlying.upper().startswith("BFO:")
+        )
+        exchange = 5 if is_bse else 2
+        opt_exch = "BFO" if is_bse else "NFO"
+
+        from engine.position_sizer import get_lot_size
+
+        lot_sz = get_lot_size(clean_sym) or (
+            20 if clean_sym == "SENSEX" else (30 if clean_sym == "BANKEX" else 1)
+        )
 
         # Attempt native m.Stock Option Chain if token available
         if not self._token:
@@ -1064,7 +1111,7 @@ class MStockAPI(BrokerAPI):
 
         if self._token:
             try:
-                master = self.get_option_chain_master(exchange=2)
+                master = self.get_option_chain_master(exchange=exchange)
                 dct_exp = master.get("dctExp", {})
                 opt_idx = master.get("OPTIDX", [])
                 of_stk = master.get("OFSTK", [])
@@ -1130,7 +1177,7 @@ class MStockAPI(BrokerAPI):
                         resolved_expiry_str = candidates[0][1]
 
                     if chosen_epoch:
-                        url = f"{MSTOCK_BASE_URL}/openapi/typeb/GetOptionChain/2/{chosen_epoch}/{token}"
+                        url = f"{MSTOCK_BASE_URL}/openapi/typeb/GetOptionChain/{exchange}/{chosen_epoch}/{token}"
                         resp = self._fetch_authed("GET", url)
                         if resp.status_code == 200:
                             data = resp.json()
@@ -1169,7 +1216,8 @@ class MStockAPI(BrokerAPI):
                                         oi=oi,
                                         oi_change=0,
                                         volume=vol,
-                                        exchange="NFO",
+                                        lot_size=lot_sz,
+                                        exchange=opt_exch,
                                     )
                                     contracts.append(c_obj)
                                     token_map[c_token] = c_obj
@@ -1192,7 +1240,8 @@ class MStockAPI(BrokerAPI):
                                         oi=oi,
                                         oi_change=0,
                                         volume=vol,
-                                        exchange="NFO",
+                                        lot_size=lot_sz,
+                                        exchange=opt_exch,
                                     )
                                     contracts.append(p_obj)
                                     token_map[p_token] = p_obj
@@ -1238,7 +1287,7 @@ class MStockAPI(BrokerAPI):
                                             q_url,
                                             json={
                                                 "mode": "OHLC",
-                                                "exchangeTokens": {"NFO": atm_tokens},
+                                                "exchangeTokens": {opt_exch: atm_tokens},
                                             },
                                             timeout=4.0,
                                         )
@@ -1282,6 +1331,9 @@ class MStockAPI(BrokerAPI):
                                 return contracts
             except Exception:
                 pass
+
+        if is_bse:
+            return []
 
         # Defensive fallback to institutional NSE scraper engine
         from market.nse_scraper import nse_get_options_chain

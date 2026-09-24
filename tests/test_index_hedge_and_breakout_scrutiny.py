@@ -328,3 +328,202 @@ def test_midday_chop_regime_sets_spread_preference():
     df_trend = _make_dummy_ohlcv(bars=15, trend="UP", base_price=56200.0)
     regime_trend = engine._get_index_intraday_regime(df_trend, spot=56550.0)
     assert regime_trend == "TRENDING"
+
+
+def test_market_breadth_sanity_veto_call_spreads_in_broad_decline(monkeypatch):
+    """
+    Gate 22 Verification:
+    When broad market breadth is in severe decline (BROAD_DECLINE, e.g. A/D 0.17, 73 Adv vs 426 Dec),
+    Bullish index Call spreads must be strictly VETOED by Tier-1 sanity.
+    Symmetrically, Bearish Put setups must be permitted.
+    """
+    from market.sentiment import MarketBreadth
+    from engine.alert_model import AutoAlert
+
+    monkeypatch.setenv("ENFORCE_TEST_BREADTH", "1")
+    monkeypatch.setattr(
+        "market.sentiment.get_market_breadth",
+        lambda *args, **kwargs: MarketBreadth(
+            advances=73, declines=426, unchanged=2, ad_ratio=0.17, verdict="BROAD_DECLINE"
+        ),
+    )
+
+    # 1. Bullish Call Alert on NIFTY
+    call_alert = AutoAlert(
+        alert_id="live-nifty-call-breadth-veto",
+        alert_type="OPTIONS_MOMENTUM",
+        stage="IGNITED",
+        symbol="NIFTY",
+        exchange="NFO",
+        direction="BULLISH",
+        headline="NIFTY 24800 CE BOUNCE OFF 200 EMA",
+        summary="Oversold RSI bounce",
+        ltp=150.0,
+        trigger_level=150.0,
+        target_level=220.0,
+        stop_loss=110.0,
+        option_type="CE",
+        strike=24800.0,
+        confidence=92,
+        is_live=True,
+        environment="LIVE",
+        segment="FNO_INDEX",
+        metrics={"enforce_breadth": True},
+    )
+
+    ok, reason, flags = alert_scrutiny_auditor.verify_tier1_sanity(call_alert)
+    assert ok is False
+    assert flags["market_breadth_valid"] is False
+    assert "Market Breadth Liquidation Veto" in reason
+
+    # 2. Bearish Put Alert on NIFTY (aligned with negative breadth tide)
+    put_alert = AutoAlert(
+        alert_id="live-nifty-put-breadth-allow",
+        alert_type="OPTIONS_MOMENTUM",
+        stage="IGNITED",
+        symbol="NIFTY",
+        exchange="NFO",
+        direction="BEARISH",
+        headline="NIFTY 24600 PE BREAKDOWN ACCELERATION",
+        summary="Support break",
+        ltp=150.0,
+        trigger_level=150.0,
+        target_level=220.0,
+        stop_loss=110.0,
+        option_type="PE",
+        strike=24600.0,
+        confidence=92,
+        is_live=True,
+        environment="LIVE",
+        segment="FNO_INDEX",
+        metrics={"enforce_breadth": True},
+    )
+
+    ok_put, reason_put, flags_put = alert_scrutiny_auditor.verify_tier1_sanity(put_alert)
+    assert flags_put["market_breadth_valid"] is True
+
+
+# ── Test 8: Optimization 1 — Intraday PCR Confluence Gate ─────────────────────
+
+
+def test_index_call_setup_suppressed_on_low_pcr_call_wall():
+    """When PCR < 0.65 (heavy Call writing wall), index call setup must be suppressed."""
+    spot = 56250.0
+    # Chain with 60k CE OI vs 20k PE OI -> PCR = 0.33
+    chain = [
+        DummyContract(56200.0, "CE", 380.0, vol=15000, oi=30000),
+        DummyContract(56300.0, "CE", 310.0, vol=15000, oi=30000),
+        DummyContract(56200.0, "PE", 350.0, vol=5000, oi=10000),
+        DummyContract(56100.0, "PE", 290.0, vol=5000, oi=10000),
+    ]
+    df_5m = _make_dummy_ohlcv(bars=12, trend="UP", base_price=56100.0)
+
+    alerts = detect_index_call_setup(
+        underlying="BANKNIFTY",
+        spot=spot,
+        chain=chain,
+        vwap=56200.0,
+        day_high=56300.0,
+        day_low=56100.0,
+        prev_day_high=56500.0,
+        prev_day_low=56000.0,
+        ohlcv_5m=df_5m,
+    )
+    # Must be suppressed due to low PCR call wall
+    assert len(alerts) == 0
+
+
+def test_index_put_setup_suppressed_on_high_pcr_put_cushion():
+    """When PCR > 1.45 (heavy Put writing floor cushion), index put setup must be suppressed."""
+    spot = 56250.0
+    # Chain with 15k CE OI vs 35k PE OI -> PCR = 2.33
+    chain = [
+        DummyContract(56300.0, "CE", 310.0, vol=5000, oi=8000),
+        DummyContract(56400.0, "CE", 250.0, vol=5000, oi=7000),
+        DummyContract(56200.0, "PE", 350.0, vol=15000, oi=18000),
+        DummyContract(56100.0, "PE", 290.0, vol=15000, oi=17000),
+    ]
+    df_5m = _make_dummy_ohlcv(bars=12, trend="DOWN", base_price=56400.0)
+
+    alerts = detect_index_put_setup(
+        underlying="BANKNIFTY",
+        spot=spot,
+        chain=chain,
+        vwap=56300.0,
+        day_high=56450.0,
+        day_low=56200.0,
+        prev_day_high=56600.0,
+        prev_day_low=56350.0,
+        ohlcv_5m=df_5m,
+    )
+    # Must be suppressed due to high PCR put floor cushion
+    assert len(alerts) == 0
+
+
+# ── Test 9: Optimization 2 — Index Heavyweight Locomotive Gate ────────────────
+
+
+def test_index_call_setup_suppressed_on_heavyweights_markdown(monkeypatch):
+    """When primary index heavyweights (e.g. HDFCBANK & RELIANCE) are all in markdown, Call setups are suppressed."""
+    spot = 24850.0
+    chain = [
+        DummyContract(24850.0, "CE", 120.0, vol=15000, oi=15000),
+        DummyContract(24900.0, "CE", 95.0, vol=15000, oi=15000),
+        DummyContract(24850.0, "PE", 115.0, vol=15000, oi=15000),
+        DummyContract(24800.0, "PE", 90.0, vol=15000, oi=15000),
+    ]
+    df_5m = _make_dummy_ohlcv(bars=12, trend="UP", base_price=24800.0)
+
+    # Mock heavyweights posture returning all_bearish=True
+    monkeypatch.setattr(
+        "market.indices.get_heavyweights_posture",
+        lambda sym: {
+            "underlying": sym,
+            "all_bearish": True,
+            "all_bullish": False,
+            "heavyweights": [
+                {"symbol": "RELIANCE", "change_pct": -0.85},
+                {"symbol": "HDFCBANK", "change_pct": -0.62},
+            ],
+            "summary": "ALL_BEARISH",
+        },
+    )
+
+    alerts = detect_index_call_setup(
+        underlying="NIFTY",
+        spot=spot,
+        chain=chain,
+        vwap=24820.0,
+        day_high=24880.0,
+        day_low=24800.0,
+        prev_day_high=25100.0,
+        prev_day_low=24750.0,
+        ohlcv_5m=df_5m,
+    )
+    assert len(alerts) == 0
+
+
+# ── Test 10: Optimization 4 — Market Regime Posture & Stand Aside Discipline ──
+
+
+def test_market_regime_posture_stand_aside_discipline(monkeypatch):
+    """When Market Breadth is MIXED and midday 1-hour price range is tight (<0.22%), signals STAND_ASIDE."""
+    from market.sentiment import MarketBreadth, get_market_regime_posture
+
+    monkeypatch.setattr(
+        "market.sentiment.get_market_breadth",
+        lambda *args, **kwargs: MarketBreadth(
+            advances=240, declines=255, unchanged=5, ad_ratio=0.94, verdict="MIXED"
+        ),
+    )
+
+    df_chop = _make_dummy_ohlcv(bars=15, trend="FLAT", base_price=24800.0)
+    midday_now = datetime(2026, 9, 24, 12, 30, tzinfo=IST)
+
+    posture = get_market_regime_posture(df_5m=df_chop, spot=24800.0, now_dt=midday_now)
+    assert posture.is_stand_aside is True
+    assert posture.action == "STAND_ASIDE"
+    assert posture.regime == "CHOP_CONSOLIDATION"
+    assert "STAND ASIDE & PRESERVE CAPITAL" in posture.verdict_message
+
+

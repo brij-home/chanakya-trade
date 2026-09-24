@@ -107,8 +107,23 @@ class AutoAlert:
     )
     bid_ask_spread_pct: Optional[float] = None
     strike_roll_recommendation: Optional[dict[str, Any]] = None
+    initial_stop_loss: Optional[float] = None
 
     def __post_init__(self) -> None:
+        if self.initial_stop_loss is None:
+            if self.actionable_plan and isinstance(self.actionable_plan.get("option_plan"), dict) and self.actionable_plan["option_plan"].get("sl_premium"):
+                try:
+                    self.initial_stop_loss = float(self.actionable_plan["option_plan"]["sl_premium"])
+                except (ValueError, TypeError):
+                    pass
+            elif self.actionable_plan and self.actionable_plan.get("invalidation_stop"):
+                try:
+                    self.initial_stop_loss = float(self.actionable_plan["invalidation_stop"])
+                except (ValueError, TypeError):
+                    pass
+            elif self.stop_loss is not None and self.stop_loss > 0:
+                self.initial_stop_loss = float(self.stop_loss)
+
         if not self.created_at:
             self.created_at = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
         if not self.trace_id:

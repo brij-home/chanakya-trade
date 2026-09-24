@@ -6,6 +6,8 @@ Anti-Storm Pacing, Trap Suppression, and Session-End Stagnation Resolution.
 from datetime import datetime, timezone, timedelta
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from engine.alert_scrutiny import alert_scrutiny_auditor
 from engine.auto_alert_engine import AutoAlert, AutoAlertEngine
 
@@ -247,3 +249,87 @@ def test_session_end_auto_resolution():
     assert pending_alert.stage == "COMPLETED"
     assert pending_alert.is_archived is True
     assert pending_alert.pnl_pct == 4.0  # (52 - 50) / 50 = +4.0%
+
+
+def test_session_end_resolves_opening_drive_ignition():
+    """
+    Regression: OPENING_DRIVE_IGNITION alerts must be auto-closed at session end.
+    The old intraday_types set only contained "OPENING_DRIVE" (stale name), so live
+    OPENING_DRIVE_IGNITION alerts survived indefinitely after market close.
+    """
+    engine = AutoAlertEngine()
+    alert = AutoAlert(
+        alert_id="test-opdrive-ignition",
+        alert_type="OPENING_DRIVE_IGNITION",  # actual type emitted by the detector
+        stage="IGNITED",
+        symbol="DIVISLAB",
+        exchange="NFO",
+        direction="BULLISH",
+        headline="DIVISLAB Opening Drive",
+        summary="Drive ignition",
+        ltp=107.0,
+        trigger_level=91.5,
+        target_level=123.5,
+        stop_loss=91.68,
+        confidence=92,
+        target_status="PENDING",
+        created_at="2026-09-24 02:48:00 IST",
+        is_live=True,
+        environment="LIVE",
+    )
+    engine._alerts = [alert]
+
+    mock_close_time = datetime(2026, 9, 24, 16, 0, 0, tzinfo=IST)
+    with patch("engine.auto_alert_engine.datetime") as mock_dt:
+        mock_dt.now.return_value = mock_close_time
+        mock_dt.strptime = datetime.strptime
+        resolved = engine.resolve_session_end_alerts()
+
+    assert len(resolved) == 1, "OPENING_DRIVE_IGNITION must be resolved at session end"
+    assert alert.target_status == "EXPIRED_SESSION_END"
+    assert alert.stage == "COMPLETED"
+    assert alert.is_archived is True
+
+
+def test_session_end_resolves_partial_milestone_alert():
+    """
+    Regression: Intraday alerts with a partial milestone (T0_5_ACHIEVED, T1_ACHIEVED, etc.)
+    must still be auto-closed at session end.
+    The old filter `target_status in (None, "", "PENDING")` excluded these, leaving them
+    is_active=True across sessions and generating ghost updates the following day.
+    """
+    engine = AutoAlertEngine()
+    alert = AutoAlert(
+        alert_id="test-opdrive-t05-achieved",
+        alert_type="OPENING_DRIVE_IGNITION",
+        stage="T0_5_ACHIEVED",
+        symbol="DIVISLAB",
+        exchange="NFO",
+        direction="BULLISH",
+        headline="DIVISLAB T0.5 Hit",
+        summary="Halfway to T1",
+        ltp=107.8,
+        trigger_level=91.5,
+        target_level=123.5,
+        stop_loss=91.68,
+        confidence=92,
+        target_status="T0_5_ACHIEVED",  # old code excluded this from session-end resolution
+        achieved_milestones=["T0_5_ACHIEVED"],
+        created_at="2026-09-24 02:48:00 IST",
+        is_live=True,
+        environment="LIVE",
+    )
+    engine._alerts = [alert]
+
+    mock_close_time = datetime(2026, 9, 24, 16, 0, 0, tzinfo=IST)
+    with patch("engine.auto_alert_engine.datetime") as mock_dt:
+        mock_dt.now.return_value = mock_close_time
+        mock_dt.strptime = datetime.strptime
+        resolved = engine.resolve_session_end_alerts()
+
+    assert len(resolved) == 1, "Partial-milestone intraday alert must be resolved at session end"
+    assert alert.target_status == "EXPIRED_SESSION_END"
+    assert alert.stage == "COMPLETED"
+    assert alert.is_archived is True
+    assert "T0_5_ACHIEVED" in alert.archive_reason  # milestone preserved in reason
+    assert alert.pnl_pct == pytest.approx(17.81, abs=0.6)  # (107.8 - 91.5) / 91.5 * 100

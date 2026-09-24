@@ -1015,8 +1015,8 @@ def test_early_warning_coiling_alert_header_and_plan_formatting(monkeypatch):
 
     # Direction and Trade plan checks
     assert "Action:</b> BUY" in msg
-    assert "Invalidation SL:</b> <code>₹" in msg
-    assert "Target 1:</b> <code>₹" in msg
+    assert "SL:</b> <code>₹" in msg
+    assert "T1:</b> <code>₹" in msg
     assert any(
         x in msg for x in ("ACCEPTABLE", "EXCELLENT_ASYMMETRY", "OPPOSING_ZONE_COLLISION_REJECTED")
     )
@@ -2096,8 +2096,9 @@ def test_scan_options_momentum_monthly_put_surge(tmp_path, monkeypatch):
 
     monkeypatch.setattr("market.quotes.get_ltp", lambda sym: 13520.0)
     monkeypatch.setattr("market.quotes.get_quote", lambda sym: {})
-    monkeypatch.setattr("market.options.get_options_chain", lambda sym: [mock_contract])
+    monkeypatch.setattr("market.options.get_options_chain", lambda sym, **kwargs: [mock_contract])
     monkeypatch.setattr("market.history.get_ohlcv", lambda sym, **kwargs: None)
+    monkeypatch.setattr("analysis.sector_rotation.get_stock_tailwind", lambda sym: None)
 
     alerts = eng.scan_options_momentum_breakouts()
     pe_alert = next((a for a in alerts if a.symbol == "DIXON" and a.option_type == "PE"), None)
@@ -3307,10 +3308,9 @@ def test_gamma_blast_dual_blueprint_runner_and_noise_margin(monkeypatch):
     assert runner["strike"] == 23350.0
     assert runner["symbol"] == "NIFTY23350PE"
 
-    # 3. Telegram rendering should include Runner Alternative
+    # 3. Telegram rendering should NOT include Runner Alternative (zero confusion)
     msg = render_auto_alert(alert_23400, in_market=True)
-    assert "Runner Alternative (High Beta):" in msg
-    assert "23350" in msg
+    assert "Runner Alternative" not in msg
 
     # 4. Volatility noise margin test:
     # If SL is ₹60.00, noise margin is 60 * 0.025 = 1.0. A tick at 59.50 should NOT trigger invalidation!
@@ -4092,3 +4092,120 @@ def test_scan_opening_drives_anti_storm_pacing(tmp_path, monkeypatch):
     assert "RELIANCE" in stock_syms, "Highest confidence stock must win a slot"
     assert "TCS" in stock_syms, "Second highest confidence stock must win a slot"
     assert "TATAMOTORS" not in stock_syms, "Lowest confidence stock must be filtered out"
+
+
+def test_auto_alert_t0_5_milestone_latch_and_deduplication(monkeypatch):
+    """
+    Verifies that:
+    1. T0_5_ACHIEVED milestone is latched in _dispatched_milestones and does not re-dispatch.
+    2. _deduplicate_symbols_unlocked keeps the newest active alert rather than the stale oldest alert.
+    3. Disambiguates option contracts (e.g. YESBANK 23 PE) from underlying equity (YESBANK).
+    """
+    engine = AutoAlertEngine(max_buffer=50)
+    engine.clear_alerts()
+
+    # 1. Test deduplication preserves newest active alert and contract disambiguation
+    old_alert = AutoAlert(
+        alert_id="yb-old",
+        alert_type="OPENING_DRIVE_IGNITION",
+        stage="IGNITED",
+        symbol="YESBANK",
+        contract_symbol="YESBANK23PE",
+        exchange="NFO",
+        direction="BEARISH",
+        headline="Old Alert",
+        summary="Old",
+        ltp=0.40,
+        trigger_level=0.39,
+        target_level=0.53,
+        stop_loss=0.30,
+        achieved_milestones=[],
+    )
+    new_alert = AutoAlert(
+        alert_id="yb-new",
+        alert_type="OPENING_DRIVE_IGNITION",
+        stage="T0_5_ACHIEVED",
+        symbol="YESBANK",
+        contract_symbol="YESBANK23PE",
+        exchange="NFO",
+        direction="BEARISH",
+        headline="New Alert",
+        summary="New",
+        ltp=0.48,
+        trigger_level=0.39,
+        target_level=0.53,
+        stop_loss=0.39,
+        achieved_milestones=["T0_5_ACHIEVED"],
+    )
+    equity_alert = AutoAlert(
+        alert_id="yb-equity",
+        alert_type="PRECURSOR_RADAR",
+        stage="IGNITED",
+        symbol="YESBANK",
+        contract_symbol=None,
+        exchange="NSE",
+        direction="BULLISH",
+        headline="Equity Alert",
+        summary="Equity",
+        ltp=23.5,
+        trigger_level=23.0,
+        target_level=25.0,
+        stop_loss=22.0,
+        achieved_milestones=[],
+    )
+
+    # In self._alerts (newest first): new_alert is at index 0, old_alert at index 1, equity_alert at index 2
+    engine._alerts = [new_alert, old_alert, equity_alert]
+    purged = engine._deduplicate_symbols_unlocked()
+    assert purged == 1
+    # Check that surviving has 2 alerts: new_alert (kept latest) and equity_alert (kept equity)
+    assert len(engine._alerts) == 2
+    assert engine._alerts[0].alert_id == "yb-new"
+    assert engine._alerts[0].stage == "T0_5_ACHIEVED"
+    assert engine._alerts[1].alert_id == "yb-equity"
+
+    # 2. Test Telegram anti-flood milestone latching for T0_5
+    sent_messages = []
+    monkeypatch.setattr(
+        "engine.alerts._telegram_notify",
+        lambda msg, **k: sent_messages.append(msg),
+    )
+    monkeypatch.setattr(
+        "engine.alerts._is_market_hours",
+        lambda exch: True,
+    )
+
+    # Create active alert with telegram_dispatched=True so lifecycle updates are allowed
+    alert_t0_5 = AutoAlert(
+        alert_id="yb-live-1",
+        alert_type="OPENING_DRIVE_IGNITION",
+        stage="T0_5_ACHIEVED",
+        symbol="YESBANK",
+        contract_symbol="YESBANK23PE",
+        exchange="NFO",
+        direction="BEARISH",
+        headline="TARGET 0.5 (SCALE 1) ACHIEVED: YESBANK 23 PE",
+        summary="Scale 35% partial profit",
+        ltp=0.48,
+        trigger_level=0.39,
+        target_level=0.53,
+        stop_loss=0.39,
+        achieved_milestones=["T0_5_ACHIEVED"],
+        is_live=True,
+        environment="LIVE",
+        telegram_dispatched=True,
+    )
+
+    # First dispatch of T0_5 should succeed
+    engine._dispatch(alert_t0_5)
+    assert len(sent_messages) == 1
+
+    # Second dispatch of T0_5 for the same alert must be blocked by the anti-flood latch
+    engine._dispatch(alert_t0_5)
+    assert len(sent_messages) == 1, (
+        "Duplicate T0_5 milestone dispatch must be suppressed by anti-flood filter"
+    )
+
+    # 3. Test that T0_5 is latched in _dispatched_milestones
+    assert "YESBANK:OPENING_DRIVE_IGNITION:T0_5" in engine._dispatched_milestones
+    assert "YESBANK23PE:yb-live-1:T0_5" in engine._dispatched_milestones

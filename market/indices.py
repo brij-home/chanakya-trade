@@ -464,3 +464,99 @@ def _yf_sector_fallback(sector_keys: list[str]) -> list[IndexSnapshot]:
         return snaps
     except ImportError:
         return []
+
+
+# ── Index Heavyweight Locomotives Mapping ──────────────────────
+
+INDEX_HEAVYWEIGHTS: dict[str, list[str]] = {
+    "NIFTY": ["RELIANCE", "HDFCBANK"],
+    "NIFTY 50": ["RELIANCE", "HDFCBANK"],
+    "BANKNIFTY": ["HDFCBANK", "ICICIBANK"],
+    "NIFTY BANK": ["HDFCBANK", "ICICIBANK"],
+    "FINNIFTY": ["HDFCBANK", "ICICIBANK", "BAJFINANCE"],
+    "SENSEX": ["HDFCBANK", "RELIANCE"],
+    "BANKEX": ["HDFCBANK", "ICICIBANK"],
+    "MIDCPNIFTY": ["PERSISTENT", "FEDERALBNK", "COFORGE"],
+}
+
+
+def get_heavyweights_posture(underlying: str) -> dict[str, Any]:
+    """
+    Checks the real-time posture (change_pct and ltp vs vwap) of key heavyweight
+    locomotives that drive the given index.
+    Uses in-memory quote cache (0ms, no network I/O).
+    """
+    clean_und = underlying.upper().replace(".NS", "").replace("NSE:", "").replace("BSE:", "").strip()
+    heavyweights = INDEX_HEAVYWEIGHTS.get(clean_und, [])
+    if not heavyweights:
+        return {
+            "underlying": clean_und,
+            "heavyweights": [],
+            "all_bullish": False,
+            "all_bearish": False,
+            "bull_count": 0,
+            "bear_count": 0,
+            "total_heavyweights": 0,
+            "summary": "NO_HEAVYWEIGHTS",
+        }
+
+    try:
+        from market.quotes import _QUOTE_CACHE, _quote_cache_lock
+
+        details = []
+        bull_count = 0
+        bear_count = 0
+
+        with _quote_cache_lock:
+            for sym in heavyweights:
+                q = None
+                for k in (f"NSE:{sym}", f"BSE:{sym}", sym, f"{sym}.NS"):
+                    if k in _QUOTE_CACHE:
+                        _, q = _QUOTE_CACHE[k]
+                        break
+                if q:
+                    ltp = float(getattr(q, "last_price", 0.0) or getattr(q, "ltp", 0.0) or 0.0)
+                    chg = float(getattr(q, "change_pct", 0.0) or 0.0)
+                    vwap = float(getattr(q, "vwap", 0.0) or 0.0)
+                    is_bull = (chg > 0.20) and (ltp >= vwap if vwap > 0 else True)
+                    is_bear = (chg < -0.20) and (ltp <= vwap if vwap > 0 else True)
+                    if is_bull:
+                        bull_count += 1
+                    elif is_bear:
+                        bear_count += 1
+                    details.append(
+                        {
+                            "symbol": sym,
+                            "ltp": ltp,
+                            "change_pct": chg,
+                            "vwap": vwap,
+                            "is_bullish": is_bull,
+                            "is_bearish": is_bear,
+                        }
+                    )
+
+        n = len(heavyweights)
+        all_bull = (bull_count == n and n > 0 and len(details) == n)
+        all_bear = (bear_count == n and n > 0 and len(details) == n)
+
+        return {
+            "underlying": clean_und,
+            "heavyweights": details,
+            "all_bullish": all_bull,
+            "all_bearish": all_bear,
+            "bull_count": bull_count,
+            "bear_count": bear_count,
+            "total_heavyweights": n,
+            "summary": "ALL_BULLISH" if all_bull else "ALL_BEARISH" if all_bear else "MIXED",
+        }
+    except Exception:
+        return {
+            "underlying": clean_und,
+            "heavyweights": [],
+            "all_bullish": False,
+            "all_bearish": False,
+            "bull_count": 0,
+            "bear_count": 0,
+            "total_heavyweights": 0,
+            "summary": "UNAVAILABLE",
+        }

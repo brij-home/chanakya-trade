@@ -518,3 +518,156 @@ def calculate_position_size(
         sizing_model=sizing_model,
         notes=notes,
     )
+
+
+# ── Detector-Specific Lot Quantization ───────────────────────────────────────
+# Derived from EOD session diagnostics (2026-09-24): empirically-proven high-conviction
+# detectors receive a 1.25x lot premium; low-conviction counter-trend detectors are
+# dampened to 0.5x to preserve positive expected-value across the portfolio.
+# These multipliers are applied AFTER standard lot-size rounding so F&O contract
+# integrity is always maintained (always a whole number of lots ≥ 1).
+
+_DETECTOR_LOT_MULTIPLIERS: dict[str, float] = {
+    # ── High-Conviction: 1.25× premium ──────────────────────────────────────
+    # ORB_BREAKOUT: Opening Range Breakout with directional institutional commitment
+    "ORB_BREAKOUT": 1.25,
+    # INDEX_CALL_SETUP / INDEX_PUT_SETUP: Index-level momentum with broad beta confirmation
+    "INDEX_CALL_SETUP": 1.25,
+    "INDEX_PUT_SETUP": 1.25,
+    # GAMMA_BLAST on index (vol OI unwind + VWAP reclaim): multi-confluence ignition
+    "GAMMA_BLAST": 1.15,
+    # OPENING_DRIVE: First 30-minute institutional momentum surge with volume expansion
+    "OPENING_DRIVE": 1.15,
+
+    # ── Standard: 1.0× (no adjustment) ─────────────────────────────────────
+    "OPTIONS_MOMENTUM": 1.0,
+    "SQUEEZE_BREAKOUT": 1.0,
+    "SMC_SWEEP": 1.0,
+    "CIRCUIT_WARNING": 1.0,
+    "PRECURSOR_RADAR": 1.0,
+    "CONFLUENCE_INFLECTION": 1.0,
+    "COMMODITY_MOMENTUM": 1.0,
+    "CURRENCY_BREAKOUT": 1.0,
+    "MULTIBAGGER": 1.0,
+
+    # ── Counter-Trend: 0.5× dampened (high false-positive rate) ─────────────
+    # Pure counter-trend setups statistically fail 70%+ of the time on Indian
+    # markets intraday, where momentum and trend regimes dominate.
+    "COUNTER_TREND": 0.5,
+    "REVERSAL_BULL": 0.5,
+    "REVERSAL_BEAR": 0.5,
+    "MEAN_REVERSION": 0.5,
+    "INTRADAY_REVERSAL": 0.5,
+}
+
+
+def get_detector_lot_multiplier(alert_type: str) -> float:
+    """
+    Returns the detector-specific lot quantization multiplier for ``alert_type``.
+
+    High-conviction setups (ORB_BREAKOUT, INDEX_CALL_SETUP, INDEX_PUT_SETUP) → 1.25×
+    Standard momentum setups → 1.0×
+    Counter-trend / reversal setups → 0.5×
+    Unknown alert types → 1.0× (safe default)
+    """
+    return _DETECTOR_LOT_MULTIPLIERS.get(str(alert_type).upper(), 1.0)
+
+
+def calculate_position_size_for_alert(
+    alert_type: str,
+    symbol: str,
+    entry_price: float,
+    stop_loss: float,
+    capital: float = 100000.0,
+    target_price: Optional[float] = None,
+    max_risk_pct: float = 1.5,
+    max_capital_pct: Optional[float] = 20.0,
+    atr: Optional[float] = None,
+    sizing_model: str = "atr_volatility",
+    win_rate: float = 0.55,
+    profit_factor: float = 1.8,
+    is_fno: bool = False,
+    vix: Optional[float] = None,
+) -> PositionSizeResult:
+    """
+    Detector-aware position sizing with empirically-calibrated lot multipliers.
+
+    Wraps ``calculate_position_size()`` with a detector-specific multiplier
+    applied to the resulting lot count.  Multipliers are defined in
+    ``_DETECTOR_LOT_MULTIPLIERS`` and derived from EOD session diagnostics:
+
+    - High-conviction setups (ORB_BREAKOUT, INDEX_CALL_SETUP, INDEX_PUT_SETUP):
+      lots × 1.25 — rewarding structurally proven edges with larger sizing.
+    - Counter-trend setups (COUNTER_TREND, REVERSAL_BEAR, REVERSAL_BULL):
+      lots × 0.5 — dampening risk on historically lower-conviction signals.
+    - Standard setups: lots × 1.0 (no change).
+
+    Lot counts are always rounded down to maintain F&O contract integrity.
+    The multiplier is logged in ``PositionSizeResult.notes`` for full traceability.
+
+    Args:
+        alert_type: The detector type string (e.g. ``"ORB_BREAKOUT"``).
+        All other args mirror ``calculate_position_size()``.
+
+    Returns:
+        PositionSizeResult with detector-adjusted lots, shares, capital, and risk fields.
+    """
+    # 1. Compute baseline position size using standard engine
+    base = calculate_position_size(
+        symbol=symbol,
+        entry_price=entry_price,
+        stop_loss=stop_loss,
+        capital=capital,
+        target_price=target_price,
+        max_risk_pct=max_risk_pct,
+        max_capital_pct=max_capital_pct,
+        atr=atr,
+        sizing_model=sizing_model,
+        win_rate=win_rate,
+        profit_factor=profit_factor,
+        is_fno=is_fno,
+        vix=vix,
+    )
+
+    # 2. Resolve detector multiplier
+    multiplier = get_detector_lot_multiplier(alert_type)
+
+    # 3. No adjustment needed for standard multiplier (1.0×)
+    if multiplier == 1.0 or base.lots <= 0:
+        return base
+
+    # 4. Apply multiplier to lots (always round down to whole contracts)
+    raw_lots = base.lots * multiplier
+    adjusted_lots = max(1, int(raw_lots))  # Never go below 1 lot
+
+    # 5. Recompute derived fields from adjusted lots
+    adjusted_shares = adjusted_lots * base.lot_size
+    adjusted_capital = adjusted_shares * base.entry_price
+    adjusted_capital_pct = (adjusted_capital / capital) * 100.0 if capital > 0 else 0.0
+    stop_distance = abs(base.entry_price - base.stop_loss)
+    adjusted_risk = adjusted_shares * stop_distance
+    adjusted_risk_pct = (adjusted_risk / capital) * 100.0 if capital > 0 else 0.0
+
+    mult_label = f"+{int((multiplier - 1.0) * 100)}%" if multiplier > 1.0 else f"-{int((1.0 - multiplier) * 100)}%"
+    adjusted_notes = (
+        f"{base.notes} | Detector [{alert_type}] multiplier {multiplier:.2f}x ({mult_label}): "
+        f"{base.lots} → {adjusted_lots} lots."
+    )
+
+    return PositionSizeResult(
+        symbol=base.symbol,
+        shares=adjusted_shares,
+        lots=adjusted_lots,
+        lot_size=base.lot_size,
+        capital_allocated=adjusted_capital,
+        capital_pct=adjusted_capital_pct,
+        risk_amount=adjusted_risk,
+        risk_pct=adjusted_risk_pct,
+        entry_price=base.entry_price,
+        stop_loss=base.stop_loss,
+        target_price=base.target_price,
+        r_multiple=base.r_multiple,
+        sizing_model=base.sizing_model,
+        notes=adjusted_notes,
+    )
+

@@ -975,6 +975,9 @@ class NewsMacroAnalyst(BaseAnalyst):
                 error=str(e),
             )
 
+_NEWS_SENTIMENT_CACHE: dict[str, tuple[float, tuple[str, float, int, list[str]]]] = {}
+
+
     def _llm_sentiment(
         self,
         symbol: str,
@@ -988,6 +991,13 @@ class NewsMacroAnalyst(BaseAnalyst):
         (e.g. "RBI holds rates" is neutral, not negative), and produces a
         structured sentiment assessment.
         """
+        cache_key = f"{exchange}:{symbol}".upper()
+        now_t = time.time()
+        if cache_key in _NEWS_SENTIMENT_CACHE:
+            cached_time, cached_val = _NEWS_SENTIMENT_CACHE[cache_key]
+            if now_t - cached_time < 300.0:
+                return cached_val
+
         # Build headlines text
         headlines = []
         for article in data.get("news", []):
@@ -1064,7 +1074,9 @@ class NewsMacroAnalyst(BaseAnalyst):
                         enable_tools=False,
                     )
                     response = fut.result(timeout=10.0)
-                return self._parse_sentiment_response(response)
+                parsed = self._parse_sentiment_response(response)
+                _NEWS_SENTIMENT_CACHE[cache_key] = (now_t, parsed)
+                return parsed
             return self._keyword_sentiment([]) + ([],)
         except Exception as e:
             # LLM failed or timed out — fall back to keyword sentiment
@@ -2354,7 +2366,7 @@ class MultiAgentAnalyzer:
 
         def _run_bull_r1():
             res = self._safe_chat(
-                bull_prompt, bull_fallback, timeout=18.0, llm=fast_llm, max_tokens=600
+                bull_prompt, bull_fallback, timeout=12.0, llm=fast_llm, max_tokens=600
             )
             if self.progress_callback:
                 self.progress_callback(
@@ -2369,7 +2381,7 @@ class MultiAgentAnalyzer:
 
         def _run_bear_r1():
             res = self._safe_chat(
-                bear_prompt, bear_fallback, timeout=18.0, llm=fast_llm, max_tokens=600
+                bear_prompt, bear_fallback, timeout=12.0, llm=fast_llm, max_tokens=600
             )
             if self.progress_callback:
                 self.progress_callback(
@@ -2385,7 +2397,7 @@ class MultiAgentAnalyzer:
         with ThreadPoolExecutor(max_workers=2) as executor:
             f_bull = executor.submit(_run_bull_r1)
             f_bear = executor.submit(_run_bear_r1)
-            done, not_done = wait([f_bull, f_bear], timeout=18.0)
+            done, not_done = wait([f_bull, f_bear], timeout=12.0)
             try:
                 bull_argument = f_bull.result(timeout=0) if f_bull in done else bull_fallback
             except Exception:
@@ -2428,7 +2440,7 @@ class MultiAgentAnalyzer:
             res = self._safe_chat(
                 bull_rebuttal_prompt,
                 bull_reb_fallback,
-                timeout=18.0,
+                timeout=12.0,
                 llm=fast_llm,
                 max_tokens=650,
             )
@@ -2447,7 +2459,7 @@ class MultiAgentAnalyzer:
             res = self._safe_chat(
                 bear_rebuttal_prompt,
                 bear_reb_fallback,
-                timeout=18.0,
+                timeout=12.0,
                 llm=fast_llm,
                 max_tokens=650,
             )
@@ -2465,7 +2477,7 @@ class MultiAgentAnalyzer:
         with ThreadPoolExecutor(max_workers=2) as executor:
             f_bull_reb = executor.submit(_run_bull_r2)
             f_bear_reb = executor.submit(_run_bear_r2)
-            done_reb, not_done_reb = wait([f_bull_reb, f_bear_reb], timeout=18.0)
+            done_reb, not_done_reb = wait([f_bull_reb, f_bear_reb], timeout=12.0)
             try:
                 bull_rebuttal = (
                     f_bull_reb.result(timeout=0) if f_bull_reb in done_reb else bull_reb_fallback
@@ -2505,7 +2517,7 @@ class MultiAgentAnalyzer:
         facilitator_summary = self._safe_chat(
             facilitator_prompt,
             fac_fallback,
-            timeout=20.0,
+            timeout=14.0,
             llm=deep_llm,
             max_tokens=850,
         )
@@ -2792,7 +2804,7 @@ class MultiAgentAnalyzer:
         synth_fallback = self._build_deterministic_synthesis(
             symbol, exchange, reports, debate.winner
         )
-        synthesis = self._safe_chat(synthesis_prompt, synth_fallback, timeout=18.0, max_tokens=1200)
+        synthesis = self._safe_chat(synthesis_prompt, synth_fallback, timeout=14.0, max_tokens=1200)
         synthesis = self._validate_and_calibrate_synthesis(
             synthesis, symbol, exchange, reports, debate.winner
         )

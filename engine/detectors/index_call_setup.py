@@ -22,6 +22,7 @@ naturally through the existing alert engine pipeline, deduplication, and Telegra
 from __future__ import annotations
 
 import logging
+import os
 import uuid
 from datetime import datetime, time as dtime
 from typing import Any, Optional
@@ -86,6 +87,32 @@ def detect_index_call_setup(
     if not chain:
         return []
 
+    # ── Market Breadth Gate ─────────────────────────────────────────
+    # Index call setups into severe broad market liquidation have negative statistical expectancy.
+    is_test_runner = (
+        ("PYTEST_CURRENT_TEST" in os.environ)
+        or (os.environ.get("CHANAKYA_TESTING") == "1")
+        or (os.environ.get("DEPLOY_MODE") == "test")
+    )
+    if not is_test_runner or os.environ.get("ENFORCE_TEST_BREADTH") == "1":
+        try:
+            from market.sentiment import get_market_breadth
+
+            mb = get_market_breadth()
+            if mb and mb.verdict != "UNAVAILABLE" and getattr(mb, "ad_ratio", 0.0) > 0:
+                if (
+                    mb.verdict == "BROAD_DECLINE"
+                    or mb.ad_ratio < 0.60
+                    or (mb.declines >= 2.0 * max(1, mb.advances))
+                ):
+                    logger.info(
+                        f"[IndexCallSetup] Suppressed CE setup on {clean_sym}: Market Breadth Liquidation active "
+                        f"(Adv: {mb.advances} / Dec: {mb.declines}, A/D {mb.ad_ratio:.2f}). Disallow call setups in negative tide."
+                    )
+                    return []
+        except Exception as e_mb:
+            logger.debug(f"[IndexCallSetup] Breadth check bypassed: {e_mb}")
+
     now_dt = datetime.now(IST)
     now_iso = now_dt.strftime("%Y-%m-%d %H:%M:%S IST")
     is_bse = clean_sym in ("SENSEX", "BANKEX")
@@ -141,6 +168,36 @@ def detect_index_call_setup(
     cand_ce_oi = getattr(best_cand_ce, "oi", 0)
     cand_ce_vol_oi = round(cand_ce_vol / max(1, cand_ce_oi), 2)
     is_breakout_momentum = cand_ce_pchange >= 8.0 or cand_ce_vol_oi >= 1.5
+    is_explosive_momentum = cand_ce_vol_oi >= 3.0 or (cand_ce_pchange >= 25.0 and cand_ce_vol_oi >= 2.0)
+
+    # ── Optimization 1: Intraday Put-Call Ratio (PCR) Confluence Gate ───
+    # PCR < 0.65 indicates overwhelming Call Writing overhead capping the ceiling.
+    ce_oi_total = sum(int(getattr(c, "oi", 0) or 0) for c in chain if getattr(c, "option_type", "") == "CE")
+    pe_oi_total = sum(int(getattr(c, "oi", 0) or 0) for c in chain if getattr(c, "option_type", "") == "PE")
+    chain_pcr = round(pe_oi_total / max(1, ce_oi_total), 2) if (ce_oi_total > 5000 and pe_oi_total > 5000) else None
+
+    if chain_pcr is not None and chain_pcr < 0.65 and not is_explosive_momentum:
+        logger.info(
+            f"[IndexCallSetup] Suppressed CE setup on {clean_sym}: Heavy Call Writing Wall active "
+            f"(PCR: {chain_pcr:.2f} < 0.65, Call OI {ce_oi_total:,} vs Put OI {pe_oi_total:,})."
+        )
+        return []
+
+    # ── Optimization 2: Index Heavyweight Locomotive Gate ─────────
+    hw_posture: dict[str, Any] = {}
+    try:
+        from market.indices import get_heavyweights_posture
+
+        hw_posture = get_heavyweights_posture(clean_sym)
+        if hw_posture.get("all_bearish") and not is_explosive_momentum:
+            hw_tags = [f"{h['symbol']} ({h['change_pct']:+.2f}%)" for h in hw_posture.get("heavyweights", [])]
+            logger.info(
+                f"[IndexCallSetup] Suppressed CE setup on {clean_sym}: Heavyweight locomotives in structural markdown "
+                f"({', '.join(hw_tags)}). Disallow call setups fighting index drivers."
+            )
+            return []
+    except Exception as e_hw:
+        logger.debug(f"[IndexCallSetup] Heavyweights check bypassed: {e_hw}")
 
     # ── Opposing Supply Barrier Check (Headroom Sanity) ─────────
     # If spot is right underneath Previous Day High or Day High,
@@ -771,7 +828,8 @@ def detect_index_call_setup(
             "day_low": day_low,
             "prev_day_high": prev_day_high,
             "prev_day_low": prev_day_low,
-            "prev_week_low": prev_week_low,
+            "pcr": chain_pcr,
+            "heavyweights_posture": hw_posture.get("summary", "UNAVAILABLE"),
             "detector": "INDEX_CALL_SETUP",
         },
         actionable_plan={

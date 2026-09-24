@@ -616,3 +616,83 @@ def get_sentiment(symbol: str, exchange: str = "NSE") -> SentimentSignal:
         sources=all_sources,
         score=round(total_score, 3),
     )
+
+
+# ── The "Stand Aside" Discipline & Market Regime Posture ───────
+
+
+@dataclass
+class MarketRegimePosture:
+    regime: str  # "TRENDING_EXPANSION" | "CHOP_CONSOLIDATION" | "NORMAL_ROTATION"
+    action: str  # "TRADE_DIRECTIONAL" | "STAND_ASIDE" | "HEDGED_ONLY"
+    verdict_message: str
+    ad_ratio: float
+    breadth_verdict: str
+    is_stand_aside: bool
+
+
+def get_market_regime_posture(
+    df_5m: Optional[Any] = None,
+    spot: Optional[float] = None,
+    now_dt: Optional[datetime] = None,
+) -> MarketRegimePosture:
+    """
+    Evaluates institutional market regime confluence:
+    Combines NIFTY 500 Market Breadth (A/D ratio) with Intraday Range / Volatility.
+    When Market Breadth is mixed (0.80 <= ad_ratio <= 1.25) and price is chopping
+    in a tight 1h range (< 0.22%), signals 'STAND_ASIDE' to protect capital.
+    """
+    from datetime import time as dtime
+
+    mb = get_market_breadth()
+    ad = getattr(mb, "ad_ratio", 1.0) or 1.0
+    b_verd = getattr(mb, "verdict", "MIXED")
+
+    now_t = (now_dt or datetime.now(IST)).time()
+    is_midday = dtime(11, 30) <= now_t <= dtime(14, 0)
+
+    # Check 1-hour range if dataframe provided
+    rng_pct = None
+    if df_5m is not None and hasattr(df_5m, "iloc") and len(df_5m) >= 6 and spot and spot > 0:
+        try:
+            col_h = "high" if "high" in df_5m.columns else "High"
+            col_l = "low" if "low" in df_5m.columns else "Low"
+            recent = df_5m.iloc[-12:] if len(df_5m) >= 12 else df_5m
+            rng_pts = float(recent[col_h].max() - recent[col_l].min())
+            rng_pct = (rng_pts / spot) * 100.0
+        except Exception:
+            rng_pct = None
+
+    if (b_verd == "MIXED" or 0.80 <= ad <= 1.25) and (
+        (rng_pct is not None and rng_pct < 0.22 and is_midday)
+        or (rng_pct is not None and rng_pct < 0.18)
+    ):
+        return MarketRegimePosture(
+            regime="CHOP_CONSOLIDATION",
+            action="STAND_ASIDE",
+            verdict_message="⏸️ MARKET REGIME: BALANCED ROTATION / NO CLEAR EDGE — STAND ASIDE & PRESERVE CAPITAL",
+            ad_ratio=ad,
+            breadth_verdict=b_verd,
+            is_stand_aside=True,
+        )
+
+    if (b_verd in ("BROAD_RALLY", "BROAD_DECLINE") or ad > 1.80 or ad < 0.60) or (
+        rng_pct is not None and rng_pct >= 0.50
+    ):
+        return MarketRegimePosture(
+            regime="TRENDING_EXPANSION",
+            action="TRADE_DIRECTIONAL",
+            verdict_message="⚡ MARKET REGIME: DIRECTIONAL MOMENTUM EXPANSION ACTIVE",
+            ad_ratio=ad,
+            breadth_verdict=b_verd,
+            is_stand_aside=False,
+        )
+
+    return MarketRegimePosture(
+        regime="NORMAL_ROTATION",
+        action="HEDGED_ONLY" if is_midday else "TRADE_DIRECTIONAL",
+        verdict_message="🎯 MARKET REGIME: NORMAL MARKET ROTATION (Defined Risk Recommended)",
+        ad_ratio=ad,
+        breadth_verdict=b_verd,
+        is_stand_aside=False,
+    )

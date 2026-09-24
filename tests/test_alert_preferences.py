@@ -688,3 +688,132 @@ def test_equity_telegram_destination_routing(monkeypatch):
     assert "COFORGE [EQUITY]" in sent_calls[2][0]
     assert "Spot CMP: ₹1,864.90" in sent_calls[2][0]
     assert "Opt CMP" not in sent_calls[2][0]
+
+
+def test_fno_index_channel_whitelist_nifty_banknifty_midcp_sensex_only(monkeypatch):
+    """
+    Verify user mandate:
+    In FnO_Index Telegram channel (TELEGRAM_FNO_INDEX_CHAT_ID=-1004380788314),
+    signals are permitted ONLY for Nifty, Banknifty, Midcp, and Sensex.
+    All other indices (e.g. FINNIFTY, BANKEX, NIFTYNXT50) are suppressed from Telegram,
+    while remaining fully functional in the Terminal UI.
+    """
+    from engine.alert_preferences import (
+        is_fno_index_channel_allowed,
+        alert_preferences,
+    )
+    from engine.auto_alert_engine import AutoAlert, AutoAlertEngine
+    from bot.telegram_bot import format_telegram_push_payload
+
+    # 1. Verification of the whitelist helper
+    assert is_fno_index_channel_allowed("NIFTY") is True
+    assert is_fno_index_channel_allowed("NIFTY 50") is True
+    assert is_fno_index_channel_allowed("BANKNIFTY") is True
+    assert is_fno_index_channel_allowed("Bank Nifty") is True
+    assert is_fno_index_channel_allowed("MIDCPNIFTY") is True
+    assert is_fno_index_channel_allowed("MIDCP") is True
+    assert is_fno_index_channel_allowed("Midcap Nifty") is True
+    assert is_fno_index_channel_allowed("SENSEX") is True
+    assert is_fno_index_channel_allowed("BSE SENSEX") is True
+
+    # Disallowed indices must return False
+    assert is_fno_index_channel_allowed("FINNIFTY") is False
+    assert is_fno_index_channel_allowed("BANKEX") is False
+    assert is_fno_index_channel_allowed("NIFTYNXT50") is False
+    assert is_fno_index_channel_allowed("NIFTYIT") is False
+    assert is_fno_index_channel_allowed("RELIANCE") is False
+
+    # 2. AlertPreferencesManager channel filter verification
+    nifty_alert = {"symbol": "NIFTY", "exchange": "NSE", "confidence": 95}
+    bn_alert = {"symbol": "BANKNIFTY", "exchange": "NSE", "confidence": 95}
+    midcp_alert = {"symbol": "MIDCPNIFTY", "exchange": "NSE", "confidence": 95}
+    sensex_alert = {"symbol": "SENSEX", "exchange": "BSE", "confidence": 95}
+    finnifty_alert = {"symbol": "FINNIFTY", "exchange": "NSE", "confidence": 95}
+    bankex_alert = {"symbol": "BANKEX", "exchange": "BSE", "confidence": 95}
+
+    assert alert_preferences.is_alert_allowed(nifty_alert, "telegram") is True
+    assert alert_preferences.is_alert_allowed(bn_alert, "telegram") is True
+    assert alert_preferences.is_alert_allowed(midcp_alert, "telegram") is True
+    assert alert_preferences.is_alert_allowed(sensex_alert, "telegram") is True
+
+    # FINNIFTY and BANKEX blocked on Telegram
+    assert alert_preferences.is_alert_allowed(finnifty_alert, "telegram") is False
+    assert alert_preferences.is_alert_allowed(bankex_alert, "telegram") is False
+
+    # But still allowed on UI!
+    assert alert_preferences.is_alert_allowed(finnifty_alert, "ui") is True
+    assert alert_preferences.is_alert_allowed(bankex_alert, "ui") is True
+
+    # 3. AutoAlertEngine._dispatch filtering verification
+    monkeypatch.setenv("TELEGRAM_FNO_INDEX_CHAT_ID", "-1004380788314")
+    monkeypatch.setattr("engine.alerts._is_market_hours", lambda exch: True)
+
+    sent_tg = []
+
+    def mock_tg(msg, chat_id=None, **kwargs):
+        sent_tg.append((msg, chat_id))
+
+    monkeypatch.setattr("engine.alerts._telegram_notify", mock_tg)
+
+    engine = AutoAlertEngine()
+
+    # Allowed: Nifty
+    n_alert = AutoAlert(
+        alert_id="live-nifty-allow-01",
+        alert_type="GAMMA_BLAST",
+        stage="IGNITED",
+        symbol="NIFTY",
+        exchange="NFO",
+        direction="BULLISH",
+        headline="NIFTY 24800 CE EXPLOSION",
+        summary="OI surge",
+        ltp=150.0,
+        trigger_level=140.0,
+        target_level=220.0,
+        stop_loss=110.0,
+        option_type="CE",
+        strike=24800.0,
+        confidence=95,
+        is_live=True,
+        environment="LIVE",
+        segment="FNO_INDEX",
+    )
+    engine._dispatch(n_alert)
+    assert len(sent_tg) == 1
+    assert sent_tg[0][1] == "-1004380788314"
+
+    # Disallowed: FINNIFTY (must be suppressed from Telegram!)
+    fin_alert = AutoAlert(
+        alert_id="live-finnifty-block-01",
+        alert_type="GAMMA_BLAST",
+        stage="IGNITED",
+        symbol="FINNIFTY",
+        exchange="NFO",
+        direction="BULLISH",
+        headline="FINNIFTY 23500 CE EXPLOSION",
+        summary="OI surge",
+        ltp=150.0,
+        trigger_level=140.0,
+        target_level=220.0,
+        stop_loss=110.0,
+        option_type="CE",
+        strike=23500.0,
+        confidence=95,
+        is_live=True,
+        environment="LIVE",
+        segment="FNO_INDEX",
+    )
+    engine._dispatch(fin_alert)
+    # Length of sent_tg must remain 1 (FINNIFTY was suppressed)
+    assert len(sent_tg) == 1
+
+    # 4. Telegram payload filter guard
+    p_nifty = format_telegram_push_payload("🟢 [REAL/LIVE] NEW CALL · NIFTY 24800 CE", chat_id="-1004380788314")
+    assert p_nifty.get("text") is not None
+
+    p_midcp = format_telegram_push_payload("🟢 [REAL/LIVE] NEW CALL · MIDCP 14100 PE", chat_id="-1004380788314")
+    assert p_midcp.get("text") is not None
+
+    p_fin = format_telegram_push_payload("🟢 [REAL/LIVE] NEW CALL · FINNIFTY 23500 CE", chat_id="-1004380788314")
+    assert p_fin == {}  # Suppressed!
+

@@ -137,20 +137,29 @@
 
 ## 4. Environment & Common Commands
 
+### ⚡ Rapid Iteration Protocol (Zero Wait-Time Invariant)
+- **During Active Iteration & Debugging**:
+  - **DO NOT** run `scripts/validate_all.py` (which spins up 21 Vitest workers, Ruff, and full multi-worker Pytest smoke matrix, adding 1+ minute overhead per turn).
+  - **ONLY** run targeted pytest for the modified module/test:
+    `& "C:\Users\brije\AppData\Local\Programs\Python\Python312\python.exe" -m pytest tests/test_specific.py -k "test_name" -q` (execution: 1–2s).
+  - Apply the targeted fix, run the specific test, restart the service with `scripts\service.ps1`, and respond immediately.
+- **Pre-Push / Release Gate Only**:
+  - Reserve `validate_all.py --fast` or `--full` exclusively for when the user explicitly requests full pre-commit validation or when preparing a final release push.
+
 ```powershell
 # Services & Lifecycle (Detached background daemon — 0 agent tasks, no prompt lock)
 powershell -ExecutionPolicy Bypass -File scripts\service.ps1 -Action restart
 powershell -ExecutionPolicy Bypass -File scripts\service.ps1 -Action status
 powershell -ExecutionPolicy Bypass -File scripts\service.ps1 -Action stop
 
-# Fast Pre-Commit Gate (< 8s)
+# Targeted Test Execution (< 2s) — MANDATORY FOR RAPID ITERATION
+& "C:\Users\brije\AppData\Local\Programs\Python\Python312\python.exe" -m pytest tests/test_auto_alerts.py -k "test_name" -q
+
+# Fast Pre-Commit Gate (~60s) — USE ONLY ON EXPLICIT USER REQUEST OR FINAL PRE-PUSH
 python scripts/validate_all.py --fast
 
-# Full CI/CD Pre-Push Gate (< 30s)
+# Full CI/CD Pre-Push Gate (~90s)
 python scripts/validate_all.py --full
-
-# Targeted Test Execution
-& "C:\Users\brije\AppData\Local\Programs\Python\Python312\python.exe" -m pytest tests/test_skills.py -v
 ```
 
 ---

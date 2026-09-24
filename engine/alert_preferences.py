@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import threading
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -113,6 +114,59 @@ INDEX_SYMBOLS = {
     "CNXIT",
     "CNXAUTO",
 }
+
+# F&O Index symbols specifically permitted on the dedicated F&O Index Telegram channel
+# User mandate: strictly restricted to Nifty, Banknifty, Midcp, and Sensex only.
+ALLOWED_FNO_INDEX_TELEGRAM_SYMBOLS = frozenset({
+    "NIFTY",
+    "BANKNIFTY",
+    "MIDCPNIFTY",
+    "SENSEX",
+})
+
+
+def is_fno_index_channel_allowed(symbol: str) -> bool:
+    """
+    Returns True only if the symbol belongs to one of the 4 permitted F&O Index channels:
+      1. NIFTY (Nifty 50)
+      2. BANKNIFTY (Bank Nifty)
+      3. MIDCPNIFTY (Midcap Nifty / Midcp / Mid Select)
+      4. SENSEX (BSE Sensex)
+    All other indices (e.g. FINNIFTY, BANKEX, NIFTYNXT50, sectoral indices) return False.
+    """
+    if not symbol:
+        return False
+
+    clean = re.sub(r"[^A-Za-z0-9]", "", str(symbol)).upper()
+
+    # Exact matches and canonical aliases
+    if clean in ("NIFTY", "NIFTY50", "NSEI"):
+        return True
+    if clean in ("BANKNIFTY", "NIFTYBANK", "NSEBANK"):
+        return True
+    if clean in ("MIDCPNIFTY", "MIDCP", "MIDCAPNIFTY", "NIFTYMIDSELECT", "MIDCAP"):
+        return True
+    if clean in ("SENSEX", "BSESENSEX"):
+        return True
+
+    # Derivative contract prefixes (e.g. NIFTY26OCT23100CE, MIDCPNIFTY26OCT...)
+    if clean.startswith("MIDCPNIFTY") or clean.startswith("MIDCAPNIFTY") or clean.startswith("MIDCP"):
+        return True
+    if clean.startswith("BANKNIFTY") or clean.startswith("NIFTYBANK"):
+        return True
+    if clean.startswith("SENSEX"):
+        return True
+    if clean.startswith("NIFTY") and not (
+        clean.startswith("NIFTYNXT50")
+        or clean.startswith("NIFTYIT")
+        or clean.startswith("NIFTYAUTO")
+        or clean.startswith("NIFTYPHARMA")
+        or clean.startswith("NIFTYMETAL")
+        or clean.startswith("NIFTYENERGY")
+    ):
+        return True
+
+    return False
 
 
 def classify_alert_segment(alert: Any) -> str:
@@ -333,6 +387,27 @@ class AlertPreferences:
     # Dedicated 24x7 Crypto Telegram Destination (Crypto_Premium_Alpha_Vortex)
     crypto_chat_id: Optional[str] = "-1004323607372"
 
+    # Allowed index symbols for Telegram FNO_INDEX channel (Nifty, Banknifty, Midcp, Sensex)
+    fno_index_allowed_symbols: list[str] = field(
+        default_factory=lambda: ["NIFTY", "BANKNIFTY", "MIDCPNIFTY", "SENSEX"]
+    )
+
+    def is_fno_index_symbol_allowed(self, symbol: str) -> bool:
+        """Returns True if the symbol is permitted on the F&O Index Telegram channel."""
+        env_allowed = os.environ.get("TELEGRAM_FNO_INDEX_ALLOWED_SYMBOLS")
+        if env_allowed:
+            custom_allowed = [s.strip().upper() for s in env_allowed.split(",") if s.strip()]
+            clean = re.sub(r"[^A-Za-z0-9]", "", str(symbol)).upper()
+            return any(clean.startswith(c) or clean == c for c in custom_allowed)
+        if self.fno_index_allowed_symbols:
+            clean = re.sub(r"[^A-Za-z0-9]", "", str(symbol)).upper()
+            return any(
+                clean.startswith(re.sub(r"[^A-Za-z0-9]", "", str(c)).upper())
+                or clean == re.sub(r"[^A-Za-z0-9]", "", str(c)).upper()
+                for c in self.fno_index_allowed_symbols
+            )
+        return is_fno_index_channel_allowed(symbol)
+
     def get_telegram_chat_id(self, segment: str = "EQUITY") -> Optional[str]:
         """Returns the target Telegram chat/group ID for a given segment."""
         seg = (segment or "").upper()
@@ -373,6 +448,7 @@ class AlertPreferences:
     def to_dict(self) -> dict[str, Any]:
         return {
             "allowed_segments": list(self.allowed_segments),
+            "fno_index_allowed_symbols": list(self.fno_index_allowed_symbols),
             "telegram": asdict(self.telegram),
             "ui": asdict(self.ui),
             "desktop": asdict(self.desktop),
@@ -449,6 +525,10 @@ class AlertPreferences:
             desktop=_make_channel(data.get("desktop"), default_min_conf=80, default_trails=False),
             sound=_make_channel(data.get("sound"), default_min_conf=80, default_trails=False),
             pause_disabled_scanners=bool(data.get("pause_disabled_scanners", True)),
+            fno_index_allowed_symbols=list(
+                data.get("fno_index_allowed_symbols")
+                or ["NIFTY", "BANKNIFTY", "MIDCPNIFTY", "SENSEX"]
+            ),
             fno_chat_id=data.get("fno_chat_id"),
             fno_index_chat_id=data.get("fno_index_chat_id"),
             mcx_chat_id=data.get("mcx_chat_id"),
@@ -613,6 +693,11 @@ class AlertPreferencesManager:
             }
         )
 
+    def is_fno_index_symbol_allowed(self, symbol: str) -> bool:
+        """Returns True if the symbol is permitted on the F&O Index Telegram channel."""
+        with self._lock:
+            return self._preferences.is_fno_index_symbol_allowed(symbol)
+
     def is_segment_allowed(self, segment: str, channel: str = "ui") -> bool:
         """Checks whether a specific segment is allowed for a given channel."""
         with self._lock:
@@ -637,6 +722,18 @@ class AlertPreferencesManager:
 
             if not ch_pref.enabled:
                 return False
+
+            # F&O Index Telegram Whitelist:
+            # Telegram FNO_INDEX channel is strictly restricted to Nifty, Banknifty, Midcp, and Sensex.
+            # Other indices (FINNIFTY, BANKEX, NIFTYNXT50, sectoral indices) are suppressed from Telegram.
+            if channel == "telegram" and seg == "FNO_INDEX":
+                sym = (
+                    alert.get("symbol")
+                    if isinstance(alert, dict)
+                    else getattr(alert, "symbol", "")
+                )
+                if not self.is_fno_index_symbol_allowed(sym):
+                    return False
 
             if not ch_pref.is_segment_allowed(seg):
                 # Hedging Exemption on FNO_INDEX:

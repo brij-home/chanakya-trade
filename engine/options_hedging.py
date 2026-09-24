@@ -293,6 +293,14 @@ def build_defined_risk_hedge_plan(
     is_nifty = clean_sym in ("NIFTY", "NIFTY 50")
     is_finnifty = clean_sym == "FINNIFTY"
     is_midcpnifty = clean_sym == "MIDCPNIFTY"
+    is_idx = (
+        is_sensex
+        or is_banknifty
+        or is_nifty
+        or is_finnifty
+        or is_midcpnifty
+        or any(x in clean_sym for x in ("NIFTY", "SENSEX", "BANKEX"))
+    )
 
     if is_sensex:
         step = 100.0
@@ -337,6 +345,38 @@ def build_defined_risk_hedge_plan(
     is_high_iv = current_vix > 16.5
 
     is_bullish = str(direction).upper() in ("BULLISH", "LONG", "BUY") or opt_type == "CE"
+
+    # Evaluate Macro Market Breadth alignment for spread selection
+    mb = None
+    is_counter_trend = False
+    counter_trend_warning = None
+    try:
+        from market.sentiment import get_market_breadth
+
+        mb = get_market_breadth()
+        if mb and mb.verdict != "UNAVAILABLE" and getattr(mb, "ad_ratio", 0.0) > 0:
+            if is_bullish and (
+                mb.verdict == "BROAD_DECLINE"
+                or mb.ad_ratio < 0.60
+                or (mb.declines >= 2.0 * max(1, mb.advances))
+            ):
+                is_counter_trend = True
+                counter_trend_warning = (
+                    f"⚠️ COUNTER-TREND WARNING: Broad Market Breadth is negative (Adv: {mb.advances} / Dec: {mb.declines}, "
+                    f"A/D {mb.ad_ratio:.2f}). Bull Call Spreads face heavy market resistance; recommend Bear Put Spreads or 50% reduced sizing."
+                )
+            elif (not is_bullish) and (
+                mb.verdict == "BROAD_RALLY"
+                or mb.ad_ratio > 1.80
+                or (mb.advances >= 2.0 * max(1, mb.declines))
+            ):
+                is_counter_trend = True
+                counter_trend_warning = (
+                    f"⚠️ COUNTER-TREND WARNING: Broad Market Breadth is positive (Adv: {mb.advances} / Dec: {mb.declines}, "
+                    f"A/D {mb.ad_ratio:.2f}). Bear Put Spreads face strong market bids; recommend Bull Call Spreads or 50% reduced sizing."
+                )
+    except Exception:
+        pass
 
     # Strategy Selection:
     # Under high IV (VIX > 16.5), sell overpriced extrinsic premium via Credit Spreads.
@@ -410,10 +450,11 @@ def build_defined_risk_hedge_plan(
     be_spot = round(spot + net_debit if is_bullish else spot - net_debit, 1)
     rr_spread = round(max_profit / max(1.0, max_loss), 2)
 
+    debit_ratio = round(net_debit / max(1.0, actual_width), 2)
+    is_poor_rr = (debit_ratio > 0.45) or (rr_spread < 1.1)
+
     booking_target_70 = round(net_debit + 0.70 * (actual_width - net_debit), 2)
     stop_loss_val = round(net_debit * 0.50, 2)
-
-    pref_veh = "HEDGED_SPREAD" if is_midday_chop else "NAKED_OPTION_OR_SPREAD"
 
     strat_title = strat_name.replace("_", " ").title()
     desc = f"Buy {int(strike)} {opt_type} & Sell {int(sell_strike)} {opt_type} (Defined Risk / Capped Loss)"
@@ -447,8 +488,9 @@ def build_defined_risk_hedge_plan(
     ]
 
     # Optional 1x2 Ratio Spread Alternative (Zero-Cost Asymmetric Upside)
+    # Compute if velocity is solid OR if this is a single stock / poor R:R debit spread
     ratio_plan = None
-    if vel_score >= 70.0:
+    if vel_score >= 65.0 or (not is_idx) or is_poor_rr:
         try:
             ratio_plan = build_ratio_spread_1x2_plan(
                 symbol=clean_sym,
@@ -464,6 +506,95 @@ def build_defined_risk_hedge_plan(
             )
         except Exception:
             ratio_plan = None
+
+    # Single-Stock Sector Confluence & Headwind Filter
+    stock_sector_warning = ""
+    if not is_idx:
+        try:
+            from analysis.sector_rotation import get_stock_tailwind
+
+            tw = get_stock_tailwind(clean_sym)
+            if tw and hasattr(tw, "quadrant"):
+                sec_q = getattr(tw, "quadrant", "")
+                sec_align = getattr(tw, "alignment", "")
+                sec_intra = getattr(tw, "intraday_alignment", "")
+                if is_bullish and (
+                    sec_q in ("LAGGING", "WEAKENING")
+                    or sec_align in ("HEADWIND", "STRONG_HEADWIND", "MODERATE_HEADWIND")
+                    or "HEADWIND" in sec_intra
+                ):
+                    stock_sector_warning = (
+                        f"⚠️ SECTOR HEADWIND ({tw.sector} in {sec_q}): Stock is fighting parent sector trend. "
+                        f"Debit spread decay risk is high."
+                    )
+                elif not is_bullish and (
+                    sec_q in ("LEADING", "IMPROVING")
+                    or sec_align in ("TAILWIND", "STRONG_TAILWIND", "MODERATE_TAILWIND")
+                    or "TAILWIND" in sec_intra
+                ):
+                    stock_sector_warning = (
+                        f"⚠️ SECTOR TAILWIND ({tw.sector} in {sec_q}): Shorting stock while parent sector is strong."
+                    )
+        except Exception:
+            pass
+
+    # Single-Stock Atomic Multi-Leg Execution Guard
+    combo_execution_note = ""
+    if not is_idx:
+        combo_execution_note = (
+            f"Stock Option Liquidity Guard: Enter as atomic Limit Multi-Leg combo at Net Price (Limit ₹{net_debit:,.2f}). "
+            f"DO NOT enter legs individually via Market Orders to avoid bid-ask slippage."
+        )
+
+    # Preferred Vehicle & Asymmetry Routing
+    debit_rr_warning = ""
+    if not is_idx and is_poor_rr:
+        debit_rr_warning = (
+            f"⚠️ DEBIT SPREAD R:R DEGRADED (1:{rr_spread:.1f}, Net Debit {int(debit_ratio*100)}% of width). "
+            f"Auto-promoted 1x2 Ratio Spread for Zero-Downside / Net Credit entry."
+        )
+        if ratio_plan and (
+            ratio_plan.get("downside_loss", 999) == 0
+            or "Credit" in str(ratio_plan.get("entry_cost_desc", ""))
+        ):
+            pref_veh = "RATIO_SPREAD_1X2"
+        elif is_midday_chop:
+            pref_veh = "HEDGED_SPREAD"
+        else:
+            pref_veh = "HEDGED_SPREAD"
+    elif not is_idx and stock_sector_warning:
+        if ratio_plan and (
+            ratio_plan.get("downside_loss", 999) == 0
+            or "Credit" in str(ratio_plan.get("entry_cost_desc", ""))
+        ):
+            pref_veh = "RATIO_SPREAD_1X2"
+        elif is_midday_chop:
+            pref_veh = "HEDGED_SPREAD"
+        else:
+            pref_veh = "HEDGED_SPREAD"
+    elif is_midday_chop:
+        pref_veh = "HEDGED_SPREAD"
+    else:
+        pref_veh = "NAKED_OPTION_OR_SPREAD"
+
+    # Assemble comprehensive execution guidance
+    guidance_parts = []
+    if is_midday_chop:
+        guidance_parts.append("⚠️ MIDDAY CHOP WINDOW: Execute Hedged Spread to avoid theta decay.")
+    if debit_rr_warning:
+        guidance_parts.append(debit_rr_warning)
+    if stock_sector_warning:
+        guidance_parts.append(stock_sector_warning)
+    if counter_trend_warning:
+        guidance_parts.append(counter_trend_warning)
+    if combo_execution_note:
+        guidance_parts.append(combo_execution_note)
+    if not guidance_parts:
+        guidance_parts.append(
+            "High Momentum: Fast scalpers can trade Naked Option; for defined risk, trade Hedged Spread."
+        )
+
+    exec_guidance = " ".join(guidance_parts)
 
     expiry_rec = get_optimal_expiry_recommendation(clean_sym, now_dt)
 
@@ -488,17 +619,19 @@ def build_defined_risk_hedge_plan(
         "max_profit": max_profit,
         "breakeven_spot": be_spot,
         "risk_reward": f"1:{rr_spread:.1f}",
+        "debit_ratio": debit_ratio,
+        "is_poor_rr": is_poor_rr,
+        "debit_rr_warning": debit_rr_warning or None,
+        "stock_sector_warning": stock_sector_warning or None,
+        "combo_execution_note": combo_execution_note or None,
         "lot_size": lot_sz,
         "booking_target_70": booking_target_70,
         "spread_stop_loss": stop_loss_val,
         "booking_rule": booking_rule,
         "margin_benefit_note": "SEBI Hedged Margin: ~70% margin reduction when executing both legs simultaneously.",
-        "peace_of_mind_benefit": "Zero Theta Bleed — short OTM leg finances time decay. Maximum risk strictly capped.",
-        "execution_guidance": (
-            "⚠️ MIDDAY CHOP WINDOW: Execute Hedged Spread to avoid theta decay."
-            if is_midday_chop
-            else "High Momentum: Fast scalpers can trade Naked Option; for defined risk, trade Hedged Spread."
-        ),
+        "execution_guidance": exec_guidance,
+        "counter_trend_warning": counter_trend_warning,
+        "market_breadth_ad_ratio": getattr(mb, "ad_ratio", None) if mb else None,
         "legs": legs,
         "ratio_spread_1x2": ratio_plan,
         "expiry_recommendation": expiry_rec,
