@@ -1549,14 +1549,17 @@ class MilestoneAlertData:
             t2_val = ltp
 
         # Performance & Gain calculation
-        # True market move is computed from actual price change (ltp - entry_price for long payoffs)
-        pnl_pts = None
-        pnl_pct = None
-        if entry_price and entry_price > 0 and ltp and ltp > 0:
-            pnl_pts = (
-                round(ltp - entry_price, 2) if is_payoff_bullish else round(entry_price - ltp, 2)
-            )
-            pnl_pct = round((pnl_pts / entry_price) * 100.0, 1)
+        # If pre-calculated on alert (e.g. spread evaluation or in-flight decay), prioritize it
+        pnl_pts = getattr(alert, "pnl_pts", None)
+        pnl_pct = getattr(alert, "pnl_pct", None)
+        if pnl_pts is None or pnl_pct is None:
+            if entry_price and entry_price > 0 and ltp and ltp > 0:
+                pnl_pts = (
+                    round(ltp - entry_price, 2)
+                    if is_payoff_bullish
+                    else round(entry_price - ltp, 2)
+                )
+                pnl_pct = round((pnl_pts / entry_price) * 100.0, 1)
 
         # R-multiple calculation against initial risk
         r_multiple = getattr(alert, "r_multiple", None)
@@ -1634,6 +1637,19 @@ class MilestoneAlertData:
             default_action = (
                 getattr(alert, "trailing_decision", None)
                 or "SCRATCH POSITION AT MARKET OR TIGHTEN STOP"
+            )
+        elif milestone_type in ("SPREAD_PROFIT_70", "SPREAD_PROFIT_TARGET"):
+            default_action = (
+                getattr(alert, "trailing_decision", None)
+                or "CLOSE BOTH LEGS AT MARKET (LOCK 70% GAIN)"
+            )
+        elif milestone_type == "SPREAD_SHORT_STRIKE_TOUCH":
+            default_action = (
+                getattr(alert, "trailing_decision", None) or "CLOSE SPREAD OR ROLL SHORT LEG HIGHER"
+            )
+        elif milestone_type == "SPREAD_STOP_LOSS":
+            default_action = (
+                getattr(alert, "trailing_decision", None) or "SCRATCH / EXIT SPREAD AT MARKET"
             )
         else:  # INVALIDATED
             default_action = "CANCEL PENDING ORDERS & CLOSE POSITIONS"
@@ -2770,6 +2786,99 @@ def render_milestone_alert(
             f"{footer_line}"
         )
 
+    if d.milestone_type in ("SPREAD_PROFIT_70", "SPREAD_PROFIT_TARGET"):
+        orig_plan_line = _build_orig_plan(
+            entry_p=d.entry_price,
+            entry_r=d.entry_range,
+            init_sl=d.initial_sl,
+            lot=d.lot_size,
+        )
+        move_str = ""
+        if d.pnl_pts is not None and d.pnl_pct is not None:
+            sign = "+" if d.pnl_pts >= 0 else ""
+            move_str = (
+                f" · 📈 <b>Spread P&L:</b> <b>{sign}₹{d.pnl_pts:,.2f} ({sign}{d.pnl_pct:.1f}%)</b>"
+            )
+
+        decisive_act = d.decisive_action or "CLOSE BOTH LEGS AT MARKET (LOCK 70% GAIN)"
+        diag = (
+            d.rationale
+            or "70% of maximum spread potential captured; avoid holding for residual 30% tail risk."
+        )
+
+        return (
+            f"🎯 <b>{env_tag} SPREAD 70% PROFIT TARGET CAPTURED</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"🏆 <b>{color_icon} {contract_title} — DEFINED-RISK SPREAD TARGET</b>\n"
+            f"{opt_spec_line}"
+            f"💰 <b>Spread Net Value:</b> ₹{d.ltp:,.2f}{move_str}\n"
+            f"💡 <b>Diagnosis:</b> {diag}\n"
+            f"⚡ <b>DECISIVE ACTION:</b> <code>{decisive_act}</code>"
+            f"{orig_plan_line}"
+            f"{footer_line}"
+        )
+
+    if d.milestone_type == "SPREAD_SHORT_STRIKE_TOUCH":
+        orig_plan_line = _build_orig_plan(
+            entry_p=d.entry_price,
+            entry_r=d.entry_range,
+            init_sl=d.initial_sl,
+            lot=d.lot_size,
+        )
+        move_str = ""
+        if d.pnl_pts is not None and d.pnl_pct is not None:
+            sign = "+" if d.pnl_pts >= 0 else ""
+            move_str = (
+                f" · 📈 <b>Spread P&L:</b> <b>{sign}₹{d.pnl_pts:,.2f} ({sign}{d.pnl_pct:.1f}%)</b>"
+            )
+
+        decisive_act = d.decisive_action or "CLOSE SPREAD OR ROLL SHORT LEG HIGHER"
+        diag = (
+            d.rationale
+            or f"Spot reached short strike wall (₹{d.target_level or 0:,.0f}). Spread delta flattened to ~0."
+        )
+
+        return (
+            f"⚠️ <b>{env_tag} SPREAD SHORT STRIKE PIN WALL</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"🚨 <b>{color_icon} {contract_title} — PIN WALL REACHED</b>\n"
+            f"{opt_spec_line}"
+            f"💰 <b>Spot / Spread:</b> ₹{d.ltp:,.2f}{move_str}\n"
+            f"💡 <b>Diagnosis:</b> {diag}\n"
+            f"⚡ <b>DECISIVE ACTION:</b> <code>{decisive_act}</code>"
+            f"{orig_plan_line}"
+            f"{footer_line}"
+        )
+
+    if d.milestone_type == "SPREAD_STOP_LOSS":
+        orig_plan_line = _build_orig_plan(
+            entry_p=d.entry_price,
+            entry_r=d.entry_range,
+            init_sl=d.initial_sl,
+            lot=d.lot_size,
+        )
+        move_str = ""
+        if d.pnl_pts is not None and d.pnl_pct is not None:
+            sign = "+" if d.pnl_pts >= 0 else ""
+            move_str = (
+                f" · 📉 <b>Spread P&L:</b> <b>{sign}₹{d.pnl_pts:,.2f} ({sign}{d.pnl_pct:.1f}%)</b>"
+            )
+
+        decisive_act = d.decisive_action or "SCRATCH / EXIT SPREAD AT MARKET"
+        diag = d.rationale or "50% net debit capital eroded; underlying thesis invalidated."
+
+        return (
+            f"🛑 <b>{env_tag} SPREAD RISK MITIGATION EXIT</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"🚨 <b>{color_icon} {contract_title} — 50% DEBIT EROSION</b>\n"
+            f"{opt_spec_line}"
+            f"💰 <b>Spread Net Value:</b> ₹{d.ltp:,.2f}{move_str}\n"
+            f"🛑 <b>Diagnosis:</b> {diag}\n"
+            f"⚡ <b>DECISIVE ACTION:</b> <code>{decisive_act}</code>"
+            f"{orig_plan_line}"
+            f"{footer_line}"
+        )
+
     # Fallback
     return f"🔔 <b>{env_tag} {d.symbol}</b>: Milestone reached · {cmp_label}: ₹{d.ltp:,.2f}{footer_line}"
 
@@ -2823,6 +2932,24 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
         not getattr(alert, "is_live", True)
     )
     env_tag = normalize_env_tag(getattr(alert, "environment", "LIVE"), in_market)
+
+    # 0a. Spread In-Flight Milestones (70% profit, short strike wall, spread SL)
+    spread_ms = (
+        getattr(alert, "stage", "")
+        if getattr(alert, "stage", "")
+        in ("SPREAD_PROFIT_70", "SPREAD_SHORT_STRIKE_TOUCH", "SPREAD_STOP_LOSS")
+        else (
+            getattr(alert, "target_status", "")
+            if getattr(alert, "target_status", "")
+            in ("SPREAD_PROFIT_70", "SPREAD_SHORT_STRIKE_TOUCH", "SPREAD_STOP_LOSS")
+            else None
+        )
+    )
+    if spread_ms:
+        return render_milestone_alert(
+            MilestoneAlertData.from_alert(alert, spread_ms, in_market=in_market),
+            in_market=in_market,
+        )
 
     # 0b. Velocity Time-Stop Exit (prioritized over standard invalidation)
     if getattr(alert, "stage", "") in ("TIME_STOP_EXIT", "TIME_STOP_SCRATCH") or (
@@ -3561,6 +3688,50 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
             target = actionable_plan.get("target", f"₹{getattr(alert, 'target_level', 0)}")
             sl = actionable_plan.get("stop_loss", f"₹{getattr(alert, 'stop_loss', 0)}")
             plan_str = f"• <b>Action:</b> {action} @ <code>{entry}</code>\n• <b>Target:</b> <code>{target}</code> | 🛑 <b>SL:</b> <code>{sl}</code>"
+
+    hedge_plan = actionable_plan.get("hedge_plan") or (
+        alert.metrics.get("hedge_plan")
+        if isinstance(getattr(alert, "metrics", None), dict)
+        else None
+    )
+    if (
+        isinstance(hedge_plan, dict)
+        and hedge_plan.get("legs")
+        and "DEFINED-RISK HEDGE SPREAD" not in (plan_str or "")
+    ):
+        strat = str(hedge_plan.get("strategy", "DEFINED_RISK_SPREAD")).replace("_", " ").title()
+        buy_leg = hedge_plan.get("buy_leg", "")
+        sell_leg = hedge_plan.get("sell_leg", "")
+        net_deb = float(hedge_plan.get("net_debit_per_share", 0.0) or 0.0)
+        max_l = float(hedge_plan.get("max_loss", 0.0) or 0.0)
+        max_p = float(hedge_plan.get("max_profit", 0.0) or 0.0)
+        rr_h = hedge_plan.get("risk_reward", "")
+        bk_70 = float(hedge_plan.get("booking_target_70", 0.0) or 0.0)
+        sl_val = float(hedge_plan.get("spread_stop_loss", 0.0) or 0.0)
+        sh_strike = float(hedge_plan.get("short_strike", 0.0) or 0.0)
+        pref_veh = hedge_plan.get("preferred_vehicle", "")
+        chop_banner = (
+            " ⚠️ <i>(Midday Chop Defense: Preferred)</i>" if pref_veh == "HEDGED_SPREAD" else ""
+        )
+
+        target_str = (
+            f"<code>₹{bk_70:,.1f} spread value</code> or <code>Spot ₹{sh_strike:,.0f}</code>"
+            if sh_strike > 0
+            else f"<code>₹{bk_70:,.1f} spread value</code>"
+        )
+
+        hedge_box = (
+            f"\n\n🛡️ <b>DEFINED-RISK HEDGE SPREAD{chop_banner}</b>\n"
+            f"• <b>Strategy:</b> <code>{strat}</code> ({rr_h})\n"
+            f"• <b>Leg 1 (Long):</b> <code>{buy_leg}</code>\n"
+            f"• <b>Leg 2 (Short):</b> <code>{sell_leg}</code>\n"
+            f"• <b>Net Debit / Max Loss:</b> <code>₹{net_deb:,.1f}/sh (₹{max_l:,.0f} total)</code>\n"
+            f"• <b>Max Profit Potential:</b> <code>₹{max_p:,.0f}</code>\n"
+            f"• <b>Booking Target (70%):</b> {target_str}\n"
+            f"• <b>Spread SL:</b> <code>₹{sl_val:,.1f}</code> (50% net debit)\n"
+            f"💡 <i>SEBI Hedged Margin: ~70% margin reduction. Zero theta bleed.</i>"
+        )
+        plan_str = (plan_str + hedge_box) if plan_str else hedge_box.strip()
 
     now_ts_str = (
         getattr(alert, "triggered_at", None)

@@ -2234,6 +2234,48 @@ class AutoAlertEngine:
                     if opt_ltp and opt_ltp > 0:
                         alert.option_premium = opt_ltp
 
+                # Spread-specific in-flight lifecycle evaluation
+                has_hedge = bool(
+                    (alert.actionable_plan or {}).get("hedge_plan")
+                    or (alert.metrics or {}).get("hedge_plan")
+                )
+                if has_hedge:
+                    try:
+                        from engine.options_hedging import evaluate_spread_in_flight
+
+                        spread_res = evaluate_spread_in_flight(alert, current_ltp=cur_quote_ltp)
+                        if (
+                            spread_res
+                            and spread_res.triggered
+                            and spread_res.milestone_type not in (alert.achieved_milestones or [])
+                        ):
+                            with self._lock:
+                                now_str = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
+                                alert.updated_at = now_str
+                                alert.triggered_at = now_str
+                                if alert.achieved_milestones is None:
+                                    alert.achieved_milestones = []
+                                alert.achieved_milestones.append(spread_res.milestone_type)
+                                alert.stage = spread_res.milestone_type
+                                alert.target_status = spread_res.milestone_type
+                                alert.headline = spread_res.headline
+                                alert.summary = spread_res.summary
+                                alert.trailing_decision = spread_res.coaching_decision
+                                alert.pnl_pts = spread_res.pnl_pts
+                                alert.pnl_pct = spread_res.pnl_pct
+                                self._save()
+
+                            self._dispatch(alert)
+                            updated_alerts.append(alert)
+                            logger.info(
+                                f"[AutoAlertEngine] Alert {alert.alert_id} spread milestone {spread_res.milestone_type}: {spread_res.coaching_decision}"
+                            )
+                            continue
+                    except Exception as e_sp:
+                        logger.debug(
+                            f"[AutoAlertEngine] Spread eval error for {alert.symbol}: {e_sp}"
+                        )
+
                 eval_res = evaluate_alert_targets_and_trailing(alert, current_ltp=cur_quote_ltp)
                 if not eval_res or not eval_res.new_milestone:
                     continue

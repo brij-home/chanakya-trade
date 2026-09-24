@@ -606,6 +606,17 @@ def detect_index_put_setup(
             "breakeven_spot": be_spot,
             "risk_reward": f"1:{rr_spread:.1f}",
             "lot_size": lot_sz,
+            "strike_width": actual_width,
+            "buy_strike": strike,
+            "sell_strike": sell_strike,
+            "short_strike": sell_strike,
+            "booking_target_70": round(net_debit + 0.70 * (actual_width - net_debit), 2),
+            "spread_stop_loss": round(net_debit * 0.50, 2),
+            "booking_rule": (
+                f"Book 70%–80% Max Profit (Net Spread value ₹{round(net_debit + 0.70 * (actual_width - net_debit), 2):,.1f}) "
+                f"or if Spot touches {sell_strike:,.0f} (Short Strike Wall). Stop loss if spread decays below ₹{round(net_debit * 0.50, 2):,.1f}."
+            ),
+            "margin_benefit_note": "SEBI Hedged Margin: ~70% margin reduction when executing both legs simultaneously.",
             "peace_of_mind_benefit": "Zero Theta Bleed — short OTM leg finances time decay. Maximum downside risk strictly capped.",
             "execution_guidance": (
                 "⚠️ MIDDAY CHOP WINDOW: Execute Bear Put Spread to avoid theta decay."

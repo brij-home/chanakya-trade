@@ -1054,6 +1054,28 @@ def detect_options_momentum_breakouts(
                         f"Entry: ₹{opt_ltp:,.1f} | SL: ₹{opt_sl:,.1f} | T1: ₹{opt_t1:,.1f} (Scale 50% & SL to Cost) | T2: ₹{opt_t2:,.1f}.{drive_tag}{friday_tag}{dte_pm_tag}{phys_tag}{rollover_tag}"
                     )
 
+                hedge_plan = None
+                try:
+                    from engine.options_hedging import build_defined_risk_hedge_plan
+
+                    hedge_plan = build_defined_risk_hedge_plan(
+                        symbol=clean_sym,
+                        direction="BULLISH" if opt_type == "CE" else "BEARISH",
+                        spot=spot,
+                        strike=strike,
+                        opt_type=opt_type,
+                        opt_ltp=opt_ltp,
+                        chain=chain,
+                        lot_size=lot_sz,
+                        vix=vix_val,
+                        now_dt=now_dt,
+                        vel_score=conf_score,
+                    )
+                except Exception as e_h:
+                    logger.debug(
+                        f"[OptionsBreakout] Hedge plan construction error for {clean_sym}: {e_h}"
+                    )
+
                 alert = AutoAlert(
                     alert_id=alert_id,
                     alert_type="OPTIONS_MOMENTUM",
@@ -1162,11 +1184,18 @@ def detect_options_momentum_breakouts(
                         if tailwind
                         else 0.0,
                         "time_stop_mins": 20,
+                        "hedge_plan": hedge_plan,
                     },
                     actionable_plan={
                         "action": f"BUY {opt_type}",
                         "segment": "FNO",
                         "contract": contract_sym,
+                        "preferred_vehicle": (
+                            hedge_plan.get("preferred_vehicle", "NAKED_OPTION_OR_SPREAD")
+                            if hedge_plan
+                            else "NAKED_OPTION_OR_SPREAD"
+                        ),
+                        "hedge_plan": hedge_plan,
                         "recommended_entry": f"₹{opt_ltp:,.2f}",
                         "entry_range": entry_range_str,
                         "stop_loss": f"₹{opt_sl:,.1f}",
