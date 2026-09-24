@@ -45,6 +45,209 @@ class SpreadEvaluationResult:
     short_strike: float
 
 
+def get_optimal_expiry_recommendation(
+    symbol: str,
+    now_dt: Optional[datetime] = None,
+) -> dict[str, Any]:
+    """
+    Evaluates whether current day/time warrants trading the Current Weekly vs Next Weekly expiry.
+    Protects positions from the Wednesday/Thursday post-13:00 IST Theta Cliff.
+    """
+    now = now_dt or datetime.now(IST)
+    weekday = now.weekday()  # 0=Mon, 1=Tue, 2=Wed, 3=Thu, 4=Fri
+    now_time = now.time()
+
+    is_wed_afternoon = weekday == 2 and now_time >= dtime(13, 0)
+    is_thu_expiry_day = weekday == 3
+    is_fri_weekend_eve = weekday == 4 and now_time >= dtime(14, 0)
+
+    if is_thu_expiry_day:
+        if now_time >= dtime(13, 15):
+            return {
+                "preferred_expiry": "NEXT_WEEKLY",
+                "warning": "⚠️ 0DTE THETA CLIFF ACTIVE: Same-day weekly options lose ~60% premium in final 90 minutes. Route defined-risk spreads to NEXT WEEKLY expiry.",
+                "reason": "EXPIRY_DAY_AFTERNOON_CLIFF",
+            }
+        else:
+            return {
+                "preferred_expiry": "CURRENT_WEEKLY_OR_NEXT",
+                "warning": "⚡ EXPIRY DAY MORNING: Fast morning scalp viable; for swing holds, select Next Weekly.",
+                "reason": "EXPIRY_DAY_MORNING",
+            }
+    elif is_wed_afternoon:
+        return {
+            "preferred_expiry": "NEXT_WEEKLY",
+            "warning": "⏳ PRE-EXPIRY DECAY ACCELERATION: Next Weekly contract provides ~5x more theta runway and avoids pin risk.",
+            "reason": "WEDNESDAY_PRE_EXPIRY",
+        }
+    elif is_fri_weekend_eve:
+        return {
+            "preferred_expiry": "CURRENT_WEEKLY",
+            "warning": "⚠️ WEEKEND THETA HOLD: Close intraday MIS before 15:20 IST or hold defined-risk spread to withstand weekend decay.",
+            "reason": "FRIDAY_WEEKEND_THETA",
+        }
+
+    return {
+        "preferred_expiry": "CURRENT_WEEKLY",
+        "warning": None,
+        "reason": "NORMAL_SESSION",
+    }
+
+
+def build_ratio_spread_1x2_plan(
+    symbol: str,
+    direction: str,
+    spot: float,
+    strike: float,
+    opt_type: str,
+    opt_ltp: float,
+    chain: Optional[list[Any]] = None,
+    lot_size: Optional[int] = None,
+    spread_width: Optional[float] = None,
+    now_dt: Optional[datetime] = None,
+) -> Optional[dict[str, Any]]:
+    """
+    Constructs an institutional 1x2 Ratio Spread (Buy 1 ATM, Sell 2 OTM).
+    Designed to achieve near Zero-Cost entry (Net Debit ~0), zero downside loss on thesis failure,
+    and massive payoff at the sweet spot (short strike).
+    """
+    clean_sym = symbol.replace("NSE:", "").replace("NFO:", "").replace("BSE:", "").strip().upper()
+    spot = float(spot or 0.0)
+    opt_ltp = float(opt_ltp or 0.0)
+    strike = float(strike or 0.0)
+
+    if spot <= 0 or opt_ltp <= 0 or strike <= 0:
+        return None
+
+    # Resolve lot size
+    lot_sz = lot_size
+    if not lot_sz or lot_sz <= 1:
+        try:
+            from engine.position_sizer import get_lot_size
+
+            lot_sz = get_lot_size(clean_sym)
+        except Exception:
+            lot_sz = 25 if "NIFTY" in clean_sym else 1
+
+    is_bullish = str(direction).upper() in ("BULLISH", "LONG", "BUY") or opt_type == "CE"
+
+    # Determine step & width (ratio leg is placed 2-3 strikes away)
+    if clean_sym in ("BANKNIFTY", "SENSEX"):
+        step = 100.0
+        width = spread_width or 300.0
+    elif clean_sym in ("NIFTY", "NIFTY 50", "FINNIFTY"):
+        step = 50.0
+        width = spread_width or 100.0
+    elif clean_sym == "MIDCPNIFTY":
+        step = 25.0
+        width = spread_width or 75.0
+    else:
+        step = 50.0 if spot >= 2500 else (20.0 if spot >= 1000 else 10.0)
+        width = spread_width or (step * 2.0)
+
+    target_sell_strike = strike + width if is_bullish else max(step, strike - width)
+    target_sell_prem = opt_ltp / 2.0  # Ideally 2 x sell_prem ~ opt_ltp
+
+    sell_strike = target_sell_strike
+    sell_prem = 0.0
+
+    if chain:
+        cands = [
+            c
+            for c in chain
+            if getattr(c, "option_type", "") == opt_type
+            and (
+                getattr(c, "strike", 0.0) >= strike + step
+                if is_bullish
+                else getattr(c, "strike", 0.0) <= strike - step
+            )
+            and float(getattr(c, "last_price", 0.0) or 0.0) > 0.0
+        ]
+        if cands:
+            cands.sort(
+                key=lambda c: abs(float(getattr(c, "last_price", 0.0) or 0.0) - target_sell_prem)
+            )
+            sell_strike = float(cands[0].strike)
+            sell_prem = float(cands[0].last_price)
+
+    if sell_prem <= 0.0 or sell_prem >= opt_ltp:
+        sell_prem = max(0.5, round(opt_ltp * 0.48, 2))
+
+    actual_width = abs(sell_strike - strike)
+    if actual_width <= 0:
+        actual_width = width
+        sell_strike = strike + width if is_bullish else strike - width
+
+    # Net debit: 1 x Long - 2 x Short
+    net_debit = round(opt_ltp - (2 * sell_prem), 2)
+    is_credit = net_debit < 0
+    entry_desc = (
+        f"Net Credit ₹{abs(net_debit):,.1f}" if is_credit else f"Net Debit ₹{net_debit:,.1f}"
+    )
+
+    downside_loss = max(0.0, net_debit * lot_sz)
+    sweet_spot_gain = round((actual_width - net_debit) * lot_sz, 2)
+    upper_breakeven = round(
+        sell_strike + (actual_width - net_debit)
+        if is_bullish
+        else sell_strike - (actual_width - net_debit),
+        1,
+    )
+
+    strat_name = "RATIO_CALL_SPREAD_1X2" if is_bullish else "RATIO_PUT_SPREAD_1X2"
+    strat_title = strat_name.replace("_", " ").title()
+
+    legs = [
+        {
+            "side": "BUY",
+            "strike": strike,
+            "option_type": opt_type,
+            "premium": opt_ltp,
+            "lots": 1,
+            "qty": lot_sz,
+            "instrument": f"{clean_sym} {int(strike)} {opt_type}",
+        },
+        {
+            "side": "SELL",
+            "strike": sell_strike,
+            "option_type": opt_type,
+            "premium": sell_prem,
+            "lots": 2,
+            "qty": lot_sz * 2,
+            "instrument": f"{clean_sym} {int(sell_strike)} {opt_type}",
+        },
+    ]
+
+    rr_desc = (
+        f"1:{round(sweet_spot_gain / max(1.0, downside_loss), 1)}"
+        if downside_loss > 0
+        else "INFINITE (Zero Downside)"
+    )
+
+    return {
+        "strategy": strat_name,
+        "strategy_title": strat_title,
+        "strategy_type": "RATIO_SPREAD",
+        "sentiment": "BULLISH" if is_bullish else "BEARISH",
+        "description": f"Buy 1x {int(strike)} {opt_type} & Sell 2x {int(sell_strike)} {opt_type} ({entry_desc})",
+        "buy_strike": strike,
+        "sell_strike": sell_strike,
+        "short_strike": sell_strike,
+        "strike_width": actual_width,
+        "net_debit_per_share": net_debit,
+        "entry_cost_desc": entry_desc,
+        "downside_loss": downside_loss,
+        "sweet_spot_gain": sweet_spot_gain,
+        "sweet_spot_strike": sell_strike,
+        "upper_breakeven": upper_breakeven,
+        "lot_size": lot_sz,
+        "risk_reward": rr_desc,
+        "invalidation_boundary": f"Exit if spot crosses ₹{upper_breakeven:,.0f} (Upper Tail Breakeven)",
+        "edge_note": "Zero-Cost Entry: 2x short legs completely finance the 1x long leg. ₹0 loss if trade thesis fails.",
+        "legs": legs,
+    }
+
+
 def build_defined_risk_hedge_plan(
     symbol: str,
     direction: str,
@@ -57,6 +260,8 @@ def build_defined_risk_hedge_plan(
     vix: Optional[float] = None,
     now_dt: Optional[datetime] = None,
     vel_score: float = 80.0,
+    spread_width: Optional[float] = None,
+    asymmetric_r_r: bool = False,
 ) -> Optional[dict[str, Any]]:
     """
     Constructs an institutional defined-risk hedge plan for any option signal.
@@ -82,15 +287,28 @@ def build_defined_risk_hedge_plan(
         except Exception:
             lot_sz = 25 if "NIFTY" in clean_sym else 1
 
-    # 2. Determine strike interval & spread width
-    is_banknifty = clean_sym in ("BANKNIFTY", "SENSEX")
-    is_nifty = clean_sym in ("NIFTY", "NIFTY 50", "FINNIFTY", "MIDCPNIFTY")
-    if is_banknifty:
+    # 2. Determine strike interval & calibrated spread width
+    is_sensex = clean_sym in ("SENSEX", "BANKEX")
+    is_banknifty = clean_sym in ("BANKNIFTY",)
+    is_nifty = clean_sym in ("NIFTY", "NIFTY 50")
+    is_finnifty = clean_sym == "FINNIFTY"
+    is_midcpnifty = clean_sym == "MIDCPNIFTY"
+
+    if is_sensex:
         step = 100.0
-        spread_width = 200.0
+        width = spread_width or (400.0 if asymmetric_r_r else 300.0)
+    elif is_banknifty:
+        step = 100.0
+        width = spread_width or (300.0 if asymmetric_r_r else 200.0)
     elif is_nifty:
         step = 50.0
-        spread_width = 50.0 if clean_sym == "NIFTY" else step
+        width = spread_width or (100.0 if asymmetric_r_r else 50.0)
+    elif is_finnifty:
+        step = 50.0
+        width = spread_width or (100.0 if asymmetric_r_r else 50.0)
+    elif is_midcpnifty:
+        step = 25.0
+        width = spread_width or (75.0 if asymmetric_r_r else 50.0)
     else:
         # Single-stock F&O: dynamic step based on stock price
         if spot >= 5000:
@@ -103,7 +321,7 @@ def build_defined_risk_hedge_plan(
             step = 10.0
         else:
             step = 5.0
-        spread_width = step
+        width = spread_width or (step * 2.0 if asymmetric_r_r else step)
 
     # 3. Volatility & Midday Regime
     current_vix = vix
@@ -140,9 +358,9 @@ def build_defined_risk_hedge_plan(
 
     # 4. Find Hedge Leg Strike
     if is_bullish:
-        sell_strike = strike + spread_width
+        sell_strike = strike + width
     else:
-        sell_strike = max(step, strike - spread_width)
+        sell_strike = max(step, strike - width)
 
     # 5. Extract or estimate Hedge Leg Premium
     sell_prem = 0.0
@@ -177,8 +395,8 @@ def build_defined_risk_hedge_plan(
 
     actual_width = abs(sell_strike - strike)
     if actual_width <= 0:
-        actual_width = spread_width
-        sell_strike = strike + spread_width if is_bullish else strike - spread_width
+        actual_width = width
+        sell_strike = strike + width if is_bullish else strike - width
 
     if sell_prem <= 0.0 or sell_prem >= opt_ltp or (opt_ltp - sell_prem) >= actual_width:
         # Realistic premium estimation for OTM hedge leg (~40% - 55% of ATM premium)
@@ -228,6 +446,27 @@ def build_defined_risk_hedge_plan(
         },
     ]
 
+    # Optional 1x2 Ratio Spread Alternative (Zero-Cost Asymmetric Upside)
+    ratio_plan = None
+    if vel_score >= 70.0:
+        try:
+            ratio_plan = build_ratio_spread_1x2_plan(
+                symbol=clean_sym,
+                direction=direction,
+                spot=spot,
+                strike=strike,
+                opt_type=opt_type,
+                opt_ltp=opt_ltp,
+                chain=chain,
+                lot_size=lot_sz,
+                spread_width=width,
+                now_dt=now_dt,
+            )
+        except Exception:
+            ratio_plan = None
+
+    expiry_rec = get_optimal_expiry_recommendation(clean_sym, now_dt)
+
     return {
         "strategy": strat_name,
         "strategy_title": strat_title,
@@ -261,6 +500,8 @@ def build_defined_risk_hedge_plan(
             else "High Momentum: Fast scalpers can trade Naked Option; for defined risk, trade Hedged Spread."
         ),
         "legs": legs,
+        "ratio_spread_1x2": ratio_plan,
+        "expiry_recommendation": expiry_rec,
     }
 
 
@@ -272,9 +513,10 @@ def evaluate_spread_in_flight(
     """
     Evaluates in-flight performance of a defined-risk spread.
     Triggers automated exit recommendations:
-      1. SPREAD_PROFIT_70: Spread value captures >= 70% of max profit potential.
-      2. SPREAD_SHORT_STRIKE_TOUCH: Underlying spot reaches short strike wall (delta near 0).
-      3. SPREAD_STOP_LOSS: Net spread value erodes by >= 50% from entry net debit.
+      1. SPREAD_SHORT_STRIKE_TOUCH: Underlying spot reaches short strike wall (delta near 0).
+      2. SPREAD_PROFIT_70: Spread value captures >= 70% of max profit potential.
+      3. SPREAD_FREE_ROLL: Net spread value expands >= 40% towards max gain (trim 50% long leg).
+      4. SPREAD_STOP_LOSS: Net spread value erodes by >= 50% from entry net debit.
     """
     plan = getattr(alert, "actionable_plan", None) or {}
     hedge_plan = plan.get("hedge_plan") or (
@@ -351,6 +593,8 @@ def evaluate_spread_in_flight(
     )
     env_tag = "[TEST]" if is_test else "[REAL/LIVE]"
 
+    achieved = getattr(alert, "achieved_milestones", None) or []
+
     # Trigger A: Short Strike Wall Reached (Delta collapsing to ~0)
     is_short_strike_hit = (spot >= sell_strike) if is_bullish else (spot <= sell_strike)
     if is_short_strike_hit and sell_strike > 0:
@@ -398,7 +642,29 @@ def evaluate_spread_in_flight(
             short_strike=sell_strike,
         )
 
-    # Trigger C: 50% Debit Erosion Stop Loss
+    # Trigger C: Spread Free-Roll Unlocked (+40% to +50% progress towards max profit)
+    free_roll_val = round(net_debit + 0.40 * (width - net_debit), 2)
+    if current_net_val >= free_roll_val and pnl_pts > 0 and "SPREAD_FREE_ROLL" not in achieved:
+        headline = f"🛡️ {env_tag} SPREAD FREE-ROLL UNLOCKED: {symbol} (+{pnl_pct:.0f}% Gain)"
+        summary = (
+            f"Net spread value expanded to ₹{current_net_val:,.1f} (Entry: ₹{net_debit:,.1f}, +{pnl_pct:.1f}%). "
+            f"DECISION: SCALE 50% OF LONG LEG (OR LOCK SL AT BREAKEVEN). TRADE IS NOW 100% CAPITAL RISK-FREE (FREE-ROLL)."
+        )
+        return SpreadEvaluationResult(
+            triggered=True,
+            milestone_type="SPREAD_FREE_ROLL",
+            headline=headline,
+            summary=summary,
+            coaching_decision="SCALE_50_PCT_LOCK_BREAKEVEN",
+            current_net_value=current_net_val,
+            entry_net_debit=net_debit,
+            pnl_pts=pnl_pts,
+            pnl_pct=pnl_pct,
+            spot_price=spot,
+            short_strike=sell_strike,
+        )
+
+    # Trigger D: 50% Debit Erosion Stop Loss
     if current_net_val <= stop_val and pnl_pts < 0:
         headline = f"🛑 {env_tag} SPREAD RISK MITIGATION: {symbol} (50% Debit Eroded)"
         summary = (

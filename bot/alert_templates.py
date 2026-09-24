@@ -1651,6 +1651,11 @@ class MilestoneAlertData:
             default_action = (
                 getattr(alert, "trailing_decision", None) or "SCRATCH / EXIT SPREAD AT MARKET"
             )
+        elif milestone_type in ("SPREAD_FREE_ROLL", "FREE_ROLL_UNLOCKED"):
+            default_action = (
+                getattr(alert, "trailing_decision", None)
+                or "SCALE 50% LONG LEG (RUNNER IS 100% RISK-FREE)"
+            )
         else:  # INVALIDATED
             default_action = "CANCEL PENDING ORDERS & CLOSE POSITIONS"
 
@@ -2786,6 +2791,38 @@ def render_milestone_alert(
             f"{footer_line}"
         )
 
+    if d.milestone_type in ("SPREAD_FREE_ROLL", "FREE_ROLL_UNLOCKED"):
+        orig_plan_line = _build_orig_plan(
+            entry_p=d.entry_price,
+            entry_r=d.entry_range,
+            init_sl=d.initial_sl,
+            lot=d.lot_size,
+        )
+        move_str = ""
+        if d.pnl_pts is not None and d.pnl_pct is not None:
+            sign = "+" if d.pnl_pts >= 0 else ""
+            move_str = (
+                f" · 📈 <b>Spread P&L:</b> <b>{sign}₹{d.pnl_pts:,.2f} ({sign}{d.pnl_pct:.1f}%)</b>"
+            )
+
+        decisive_act = d.decisive_action or "SCALE 50% LONG LEG (RUNNER IS 100% RISK-FREE)"
+        diag = (
+            d.rationale
+            or "Net spread value expanded by >= 45%. Trimming 50% long leg covers 100% initial debit."
+        )
+
+        return (
+            f"🛡️ <b>{env_tag} SPREAD FREE-ROLL UNLOCKED</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"🏆 <b>{color_icon} {contract_title} — 100% RISK-FREE SPREAD</b>\n"
+            f"{opt_spec_line}"
+            f"💰 <b>Spread Net Value:</b> ₹{d.ltp:,.2f}{move_str}\n"
+            f"💡 <b>Milestone:</b> {diag}\n"
+            f"⚡ <b>DECISIVE ACTION:</b> <code>{decisive_act}</code>"
+            f"{orig_plan_line}"
+            f"{footer_line}"
+        )
+
     if d.milestone_type in ("SPREAD_PROFIT_70", "SPREAD_PROFIT_TARGET"):
         orig_plan_line = _build_orig_plan(
             entry_p=d.entry_price,
@@ -2933,15 +2970,27 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
     )
     env_tag = normalize_env_tag(getattr(alert, "environment", "LIVE"), in_market)
 
-    # 0a. Spread In-Flight Milestones (70% profit, short strike wall, spread SL)
+    # 0a. Spread In-Flight Milestones (70% profit, short strike wall, spread SL, free-roll)
     spread_ms = (
         getattr(alert, "stage", "")
         if getattr(alert, "stage", "")
-        in ("SPREAD_PROFIT_70", "SPREAD_SHORT_STRIKE_TOUCH", "SPREAD_STOP_LOSS")
+        in (
+            "SPREAD_PROFIT_70",
+            "SPREAD_SHORT_STRIKE_TOUCH",
+            "SPREAD_STOP_LOSS",
+            "SPREAD_FREE_ROLL",
+            "FREE_ROLL_UNLOCKED",
+        )
         else (
             getattr(alert, "target_status", "")
             if getattr(alert, "target_status", "")
-            in ("SPREAD_PROFIT_70", "SPREAD_SHORT_STRIKE_TOUCH", "SPREAD_STOP_LOSS")
+            in (
+                "SPREAD_PROFIT_70",
+                "SPREAD_SHORT_STRIKE_TOUCH",
+                "SPREAD_STOP_LOSS",
+                "SPREAD_FREE_ROLL",
+                "FREE_ROLL_UNLOCKED",
+            )
             else None
         )
     )
@@ -3720,6 +3769,23 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
             else f"<code>₹{bk_70:,.1f} spread value</code>"
         )
 
+        ratio_sp = hedge_plan.get("ratio_spread_1x2")
+        ratio_str = ""
+        if isinstance(ratio_sp, dict) and ratio_sp.get("description"):
+            r_desc = ratio_sp["description"]
+            r_rr = ratio_sp.get("risk_reward", "")
+            r_gain = float(ratio_sp.get("sweet_spot_gain", 0.0) or 0.0)
+            r_be = float(ratio_sp.get("upper_breakeven", 0.0) or 0.0)
+            ratio_str = (
+                f"\n• ⚡ <b>1x2 Ratio Zero-Cost Alternative:</b> <code>{r_desc}</code> ({r_rr})\n"
+                f"  └ <i>Sweet Spot Max Gain: ₹{r_gain:,.0f} | Upper Breakeven: ₹{r_be:,.0f}</i>"
+            )
+
+        exp_rec = hedge_plan.get("expiry_recommendation")
+        exp_rec_str = ""
+        if isinstance(exp_rec, dict) and exp_rec.get("warning"):
+            exp_rec_str = f"\n• {exp_rec['warning']}"
+
         hedge_box = (
             f"\n\n🛡️ <b>DEFINED-RISK HEDGE SPREAD{chop_banner}</b>\n"
             f"• <b>Strategy:</b> <code>{strat}</code> ({rr_h})\n"
@@ -3728,7 +3794,9 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
             f"• <b>Net Debit / Max Loss:</b> <code>₹{net_deb:,.1f}/sh (₹{max_l:,.0f} total)</code>\n"
             f"• <b>Max Profit Potential:</b> <code>₹{max_p:,.0f}</code>\n"
             f"• <b>Booking Target (70%):</b> {target_str}\n"
-            f"• <b>Spread SL:</b> <code>₹{sl_val:,.1f}</code> (50% net debit)\n"
+            f"• <b>Spread SL:</b> <code>₹{sl_val:,.1f}</code> (50% net debit)"
+            f"{ratio_str}"
+            f"{exp_rec_str}\n"
             f"💡 <i>SEBI Hedged Margin: ~70% margin reduction. Zero theta bleed.</i>"
         )
         plan_str = (plan_str + hedge_box) if plan_str else hedge_box.strip()

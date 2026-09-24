@@ -12,7 +12,9 @@ from datetime import datetime, timezone, timedelta
 
 from engine.options_hedging import (
     build_defined_risk_hedge_plan,
+    build_ratio_spread_1x2_plan,
     evaluate_spread_in_flight,
+    get_optimal_expiry_recommendation,
 )
 from bot.alert_templates import render_auto_alert
 from engine.auto_alert_engine import AutoAlert
@@ -401,3 +403,231 @@ def test_render_spread_milestone_alerts():
     assert "🛑 <b>[REAL/LIVE] SPREAD RISK MITIGATION EXIT</b>" in msg_sl
     assert "50% DEBIT EROSION" in msg_sl
     assert "SCRATCH / EXIT SPREAD AT MARKET" in msg_sl
+
+
+def test_get_optimal_expiry_recommendation():
+    """Verify optimal expiry selector warns against Wednesday/Thursday post-13:00 IST Theta Cliff."""
+    # Thursday afternoon (0DTE Cliff)
+    thu_pm = datetime(2026, 9, 24, 13, 30, tzinfo=IST)
+    rec_thu_pm = get_optimal_expiry_recommendation("NIFTY", thu_pm)
+    assert rec_thu_pm["preferred_expiry"] == "NEXT_WEEKLY"
+    assert rec_thu_pm["reason"] == "EXPIRY_DAY_AFTERNOON_CLIFF"
+    assert "0DTE THETA CLIFF ACTIVE" in rec_thu_pm["warning"]
+
+    # Thursday morning (Fast scalp viable)
+    thu_am = datetime(2026, 9, 24, 10, 15, tzinfo=IST)
+    rec_thu_am = get_optimal_expiry_recommendation("NIFTY", thu_am)
+    assert rec_thu_am["preferred_expiry"] == "CURRENT_WEEKLY_OR_NEXT"
+    assert rec_thu_am["reason"] == "EXPIRY_DAY_MORNING"
+
+    # Wednesday afternoon (Pre-expiry decay)
+    wed_pm = datetime(2026, 9, 23, 14, 0, tzinfo=IST)
+    rec_wed_pm = get_optimal_expiry_recommendation("NIFTY", wed_pm)
+    assert rec_wed_pm["preferred_expiry"] == "NEXT_WEEKLY"
+    assert rec_wed_pm["reason"] == "WEDNESDAY_PRE_EXPIRY"
+
+    # Friday late afternoon (Weekend theta hold)
+    fri_pm = datetime(2026, 9, 25, 14, 30, tzinfo=IST)
+    rec_fri_pm = get_optimal_expiry_recommendation("NIFTY", fri_pm)
+    assert rec_fri_pm["preferred_expiry"] == "CURRENT_WEEKLY"
+    assert rec_fri_pm["reason"] == "FRIDAY_WEEKEND_THETA"
+
+    # Monday normal session
+    mon_am = datetime(2026, 9, 21, 10, 0, tzinfo=IST)
+    rec_mon = get_optimal_expiry_recommendation("NIFTY", mon_am)
+    assert rec_mon["preferred_expiry"] == "CURRENT_WEEKLY"
+    assert rec_mon["reason"] == "NORMAL_SESSION"
+    assert rec_mon["warning"] is None
+
+
+def test_build_ratio_spread_1x2_plan():
+    """Verify 1x2 Ratio Spread constructs zero-cost asymmetric upside with 1 long and 2 short legs."""
+    spot = 25000.0
+    strike = 25000.0
+    opt_ltp = 150.0
+
+    plan = build_ratio_spread_1x2_plan(
+        symbol="NIFTY",
+        direction="BULLISH",
+        spot=spot,
+        strike=strike,
+        opt_type="CE",
+        opt_ltp=opt_ltp,
+        lot_size=25,
+    )
+
+    assert plan is not None
+    assert plan["strategy"] == "RATIO_CALL_SPREAD_1X2"
+    assert plan["buy_strike"] == 25000.0
+    assert plan["sell_strike"] == 25100.0
+    assert len(plan["legs"]) == 2
+
+    # Leg 1: Buy 1x ATM CE
+    assert plan["legs"][0]["side"] == "BUY"
+    assert plan["legs"][0]["lots"] == 1
+    assert plan["legs"][0]["qty"] == 25
+
+    # Leg 2: Sell 2x OTM CE
+    assert plan["legs"][1]["side"] == "SELL"
+    assert plan["legs"][1]["lots"] == 2
+    assert plan["legs"][1]["qty"] == 50
+
+    # Payoff boundaries
+    assert plan["sweet_spot_gain"] > 0
+    assert plan["upper_breakeven"] > plan["sell_strike"]
+    assert "Upper Tail Breakeven" in plan["invalidation_boundary"]
+
+
+def test_build_defined_risk_hedge_plan_asymmetric_r_r():
+    """Verify asymmetric R:R strike width calibration across NIFTY, BANKNIFTY, and SENSEX."""
+    # NIFTY asymmetric spread (100 pt width instead of 50 pt)
+    hedge_nifty = build_defined_risk_hedge_plan(
+        symbol="NIFTY",
+        direction="BULLISH",
+        spot=25000.0,
+        strike=25000.0,
+        opt_type="CE",
+        opt_ltp=150.0,
+        lot_size=25,
+        asymmetric_r_r=True,
+    )
+    assert hedge_nifty is not None
+    assert hedge_nifty["strike_width"] == 100.0
+    assert hedge_nifty["sell_strike"] == 25100.0
+    assert hedge_nifty["ratio_spread_1x2"] is not None
+    assert hedge_nifty["expiry_recommendation"] is not None
+
+    # BANKNIFTY asymmetric spread (300 pt width instead of 200 pt)
+    hedge_bn = build_defined_risk_hedge_plan(
+        symbol="BANKNIFTY",
+        direction="BEARISH",
+        spot=56000.0,
+        strike=56000.0,
+        opt_type="PE",
+        opt_ltp=300.0,
+        lot_size=15,
+        asymmetric_r_r=True,
+    )
+    assert hedge_bn is not None
+    assert hedge_bn["strike_width"] == 300.0
+    assert hedge_bn["sell_strike"] == 55700.0
+
+    # SENSEX asymmetric spread (400 pt width)
+    hedge_sensex = build_defined_risk_hedge_plan(
+        symbol="SENSEX",
+        direction="BULLISH",
+        spot=82000.0,
+        strike=82000.0,
+        opt_type="CE",
+        opt_ltp=450.0,
+        lot_size=10,
+        asymmetric_r_r=True,
+    )
+    assert hedge_sensex is not None
+    assert hedge_sensex["strike_width"] == 400.0
+    assert hedge_sensex["sell_strike"] == 82400.0
+
+
+def test_evaluate_spread_free_roll_milestone():
+    """Triggers SPREAD_FREE_ROLL when net spread value expands >= 40% towards max gain."""
+    alert = make_dummy_alert(
+        alert_id="test-spread-fr-01",
+        symbol="NIFTY",
+        ltp=25025.0,
+        underlying_spot=25025.0,
+        strike=25000.0,
+        option_type="CE",
+        actionable_plan={
+            "hedge_plan": {
+                "strategy": "BULL_CALL_SPREAD",
+                "sentiment": "BULLISH",
+                "buy_strike": 25000.0,
+                "sell_strike": 25050.0,
+                "strike_width": 50.0,
+                "net_debit_per_share": 20.0,
+                "booking_target_70": 41.0,
+                "spread_stop_loss": 10.0,
+            }
+        },
+    )
+
+    # At spot=25025.0, modeled net spread value is: 20 + 25*0.65 = 36.25 (>= 32.0 free_roll_val, < 41 target_70)
+    res = evaluate_spread_in_flight(alert, current_ltp=25025.0)
+    assert res is not None
+    assert res.triggered is True
+    assert res.milestone_type == "SPREAD_FREE_ROLL"
+    assert "SPREAD FREE-ROLL UNLOCKED" in res.headline
+    assert res.coaching_decision == "SCALE_50_PCT_LOCK_BREAKEVEN"
+    assert res.pnl_pts > 0
+
+
+def test_render_spread_free_roll_telegram_alert():
+    """Verify SPREAD_FREE_ROLL renders distinctive 100% risk-free Telegram coaching card."""
+    alert = make_dummy_alert(
+        alert_id="test-ms-fr-01",
+        symbol="NIFTY",
+        ltp=36.25,
+        underlying_spot=25025.0,
+        contract_symbol="NIFTY 25000/25050 SPREAD",
+        stage="SPREAD_FREE_ROLL",
+        target_status="SPREAD_FREE_ROLL",
+        pnl_pts=16.25,
+        pnl_pct=81.25,
+    )
+
+    msg = render_auto_alert(alert, in_market=True)
+    assert "🛡️ <b>[REAL/LIVE] SPREAD FREE-ROLL UNLOCKED</b>" in msg
+    assert "100% RISK-FREE SPREAD" in msg
+    assert "Spread Net Value:</b> ₹36.25" in msg
+    assert "SCALE 50% LONG LEG" in msg
+
+
+def test_render_auto_alert_includes_ratio_spread_and_expiry_warning():
+    """Verify Telegram alert surfaces 1x2 ratio spread alternative and theta cliff warning."""
+    hedge_plan = {
+        "strategy": "BULL_CALL_SPREAD",
+        "buy_leg": "BUY NIFTY 25000 CE @ ₹180.0",
+        "sell_leg": "SELL NIFTY 25100 CE @ ₹110.0",
+        "net_debit_per_share": 70.0,
+        "max_loss": 1750.0,
+        "max_profit": 750.0,
+        "risk_reward": "1:0.4",
+        "booking_target_70": 91.0,
+        "spread_stop_loss": 35.0,
+        "short_strike": 25100.0,
+        "preferred_vehicle": "HEDGED_SPREAD",
+        "legs": [{"side": "BUY"}, {"side": "SELL"}],
+        "ratio_spread_1x2": {
+            "description": "Buy 1x 25000 CE & Sell 2x 25100 CE (Net Debit ₹10.0)",
+            "risk_reward": "1:22.5",
+            "sweet_spot_gain": 2250.0,
+            "upper_breakeven": 25190.0,
+        },
+        "expiry_recommendation": {
+            "warning": "⚠️ 0DTE THETA CLIFF ACTIVE: Route spreads to NEXT WEEKLY expiry.",
+        },
+    }
+
+    alert = make_dummy_alert(
+        alert_id="test-tg-ratio-01",
+        symbol="NIFTY",
+        ltp=180.0,
+        underlying_spot=25010.0,
+        strike=25000.0,
+        option_type="CE",
+        contract_symbol="NIFTY25000CE",
+        actionable_plan={
+            "action": "BUY CE",
+            "contract": "NIFTY 25000 CE",
+            "recommended_entry": "₹180.0",
+            "stop_loss": "₹140.0",
+            "target": "₹240.0",
+            "hedge_plan": hedge_plan,
+        },
+    )
+
+    msg = render_auto_alert(alert, in_market=True)
+    assert "1x2 Ratio Zero-Cost Alternative" in msg
+    assert "Sweet Spot Max Gain: ₹2,250" in msg
+    assert "Upper Breakeven: ₹25,190" in msg
+    assert "0DTE THETA CLIFF ACTIVE" in msg
