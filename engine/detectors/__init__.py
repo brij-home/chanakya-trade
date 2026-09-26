@@ -15,6 +15,7 @@ from engine.detectors.intraday_spark import detect_intraday_mover_sparks
 from engine.detectors.opening_drive import detect_opening_drive
 from engine.detectors.options_momentum import detect_options_momentum_breakouts
 from engine.detectors.orb import detect_opening_range_breakout
+from engine.detectors.order_flow import detect_order_flow_divergence, OrderFlowDivergenceDetector
 from engine.detectors.pattern_coiling import detect_learned_pattern_coiling
 from engine.detectors.pre_inflection_dryup import detect_pre_inflection_dryup
 from engine.detectors.preopen_bias import detect_preopen_bias

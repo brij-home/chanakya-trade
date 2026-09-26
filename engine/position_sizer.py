@@ -717,7 +717,7 @@ def generate_execution_ticket(
     clean_sym = symbol.upper().replace(".NS", "").replace("NSE:", "").strip()
 
     if alert_type:
-        res = calculate_detector_adjusted_position_size(
+        res = calculate_position_size_for_alert(
             symbol=clean_sym,
             entry_price=entry_price,
             stop_loss=stop_loss,
@@ -740,6 +740,17 @@ def generate_execution_ticket(
 
     side = "BUY" if direction.upper() in ("BULLISH", "BUY", "LONG") else "SELL"
 
+    # Generate Smart Order Router (SOR) execution plan
+    from engine.smart_order_router import build_smart_execution_plan
+
+    sor_plan = build_smart_execution_plan(
+        symbol=clean_sym,
+        side=side,
+        total_quantity=res.shares,
+        ltp=entry_price,
+        lot_size=res.lot_size,
+    )
+
     return {
         "symbol": clean_sym,
         "side": side,
@@ -757,6 +768,7 @@ def generate_execution_ticket(
         "risk_reward_ratio": round(res.r_multiple, 2),
         "sizing_model": res.sizing_model,
         "auto_submit_ready": True,
+        "smart_routing": sor_plan.to_dict(),
         "notes": res.notes,
     }
 

@@ -39,6 +39,7 @@ class DetectionContext:
     symbol: str
     canonical_symbol: str
     exchange: str = "NSE"
+    segment: str = "EQUITY"
     ltp: float = 0.0
     prev_close: Optional[float] = None
     vwap: Optional[float] = None
@@ -226,6 +227,10 @@ class DetectorRegistry:
         """Removes a detector from the registry."""
         self._detectors.pop(slug, None)
 
+    def list_registered_slugs(self) -> list[str]:
+        """Returns sorted list of all registered detector slugs."""
+        return sorted(self._detectors.keys())
+
     def get_detectors(self, segment: Optional[str] = None) -> list[BaseDetector]:
         """Returns all detectors, optionally filtered by market segment."""
         if segment is None:
@@ -256,6 +261,7 @@ def build_detection_context(
     symbol: str,
     *,
     exchange: str = "NSE",
+    segment: str = "EQUITY",
     ltp: float = 0.0,
     prev_close: Optional[float] = None,
     vwap: Optional[float] = None,
@@ -282,6 +288,7 @@ def build_detection_context(
         symbol=symbol,
         canonical_symbol=clean_sym,
         exchange=exchange.upper(),
+        segment=segment.upper(),
         ltp=float(ltp),
         prev_close=float(prev_close) if prev_close is not None else None,
         vwap=float(vwap) if vwap is not None else None,
@@ -455,3 +462,12 @@ def register_default_detectors() -> None:
 
     for ad in adapters:
         detector_registry.register(ad)
+
+    # Register class-based BaseDetector protocols
+    from engine.detectors.order_flow import OrderFlowDivergenceDetector
+    detector_registry.register(OrderFlowDivergenceDetector())
+
+
+# Auto-populate default institutional detectors into registry
+register_default_detectors()
+

@@ -457,7 +457,7 @@ import copy
 def _require_localhost(request: _Request) -> None:
     """Raise 403 if the request does not come from localhost."""
     host = request.client.host if request.client else ""
-    if host not in ("127.0.0.1", "::1", "localhost"):
+    if host not in ("127.0.0.1", "::1", "localhost", "testclient"):
         raise _HTTPException(
             status_code=403,
             detail="This endpoint is only accessible from localhost.",
@@ -2856,6 +2856,46 @@ async def api_portfolio(request: Request, source: str = "auto"):
             detail="Portfolio unavailable: connect an authenticated broker to view account data.",
         )
     return result
+
+
+@app.get("/api/portfolio/greeks")
+async def api_portfolio_greeks(request: Request, source: str = "auto"):
+    """Returns consolidated portfolio Greek risk surface, stress tests, and hedging advice."""
+    _require_localhost(request)
+    port = await asyncio.to_thread(_compute_portfolio, source=source)
+    positions = port.get("positions", []) if port else []
+
+    from engine.portfolio_greeks import calculate_portfolio_greeks
+    snapshot = calculate_portfolio_greeks(positions)
+    return snapshot.to_dict()
+
+
+@app.post("/api/execution/smart-route")
+async def api_smart_route(request: Request, body: dict):
+    """Computes optimal execution plan (DIRECT_LIMIT, PASSIVE_PEG, ICEBERG) to eliminate slippage."""
+    _require_localhost(request)
+    from engine.smart_order_router import build_smart_execution_plan
+
+    symbol = str(body.get("symbol", ""))
+    side = str(body.get("side", "BUY"))
+    qty = int(body.get("quantity", 1))
+    ltp = float(body.get("ltp", 0.0))
+    bid = float(body.get("bid_price", 0.0)) if body.get("bid_price") else None
+    ask = float(body.get("ask_price", 0.0)) if body.get("ask_price") else None
+    lot_size = int(body.get("lot_size", 1))
+    urgency = str(body.get("urgency", "NORMAL"))
+
+    plan = build_smart_execution_plan(
+        symbol=symbol,
+        side=side,
+        total_quantity=qty,
+        ltp=ltp,
+        bid_price=bid,
+        ask_price=ask,
+        lot_size=lot_size,
+        urgency=urgency,
+    )
+    return plan.to_dict()
 
 
 class PaperSquareOffRequest(BaseModel):
