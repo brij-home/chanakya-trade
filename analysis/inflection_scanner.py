@@ -58,6 +58,10 @@ from analysis.multibagger import (
     detect_vcp,
     evaluate_trend_template,
 )
+from analysis.institutional_catalysts import (
+    get_institutional_catalysts,
+    InstitutionalCatalystReport,
+)
 from analysis.sector_rotation import get_stock_tailwind
 from analysis.universe import (
     THEMATIC_PRESETS,
@@ -121,6 +125,14 @@ class InflectionSetup:
     executive_summary: str = ""
     data_quality_label: str = "💾 0ms Local Cache"
 
+    # Multi-Horizon & Cycle ETA Retention
+    horizon: str = "MID_TERM"  # "SHORT_TERM" | "MID_TERM" | "LONG_TERM"
+    cycle_state: str = "COILING_PIVOT"  # "TRIGGER_READY" | "COILING_PIVOT" | "STAGE_1_ACCUMULATION" | "PULLBACK_RETEST" | "STAGE_2_MARKUP"
+    eta_days: int = 3
+    eta_label: str = "2–5 Sessions"
+    catalyst_badges: list[str] = field(default_factory=list)
+    institutional_catalysts: dict[str, Any] = field(default_factory=dict)
+
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
@@ -131,11 +143,13 @@ class InflectionScanResult:
     universe_name: str
     archetype_filter: str
     timing_filter: str
-    total_scanned: int
-    total_qualified: int
+    horizon_filter: str = "ALL"
+    total_scanned: int = 0
+    total_qualified: int = 0
     candidates: list[InflectionSetup] = field(default_factory=list)
     archetype_counts: dict[str, int] = field(default_factory=dict)
     timing_counts: dict[str, int] = field(default_factory=dict)
+    horizon_counts: dict[str, int] = field(default_factory=dict)
     top_sectors: list[dict[str, Any]] = field(default_factory=list)
     scan_timestamp: str = ""
     execution_time_seconds: float = 0.0
@@ -148,11 +162,13 @@ class InflectionScanResult:
             "universe_name": self.universe_name,
             "archetype_filter": self.archetype_filter,
             "timing_filter": self.timing_filter,
+            "horizon_filter": self.horizon_filter,
             "total_scanned": self.total_scanned,
             "total_qualified": self.total_qualified,
             "candidates": [c.to_dict() for c in self.candidates],
             "archetype_counts": self.archetype_counts,
             "timing_counts": self.timing_counts,
+            "horizon_counts": self.horizon_counts,
             "top_sectors": self.top_sectors,
             "scan_timestamp": self.scan_timestamp,
             "execution_time_seconds": self.execution_time_seconds,
@@ -437,6 +453,13 @@ def evaluate_single_stock_inflection(
     if not forensic_safe:
         confluence_factors.append("⚠️ Forensic Caution: Elevated governance / audit flags")
 
+    # Institutional Catalysts & Credit Ratings Check
+    inst_report = get_institutional_catalysts(clean_sym)
+    catalyst_badges = list(inst_report.catalyst_badges)
+    for b in catalyst_badges[:2]:
+        if b not in confluence_factors:
+            confluence_factors.append(b)
+
     # Circuit Lock Detection
     is_uc_locked = False
     is_near_uc = False
@@ -700,6 +723,51 @@ def evaluate_single_stock_inflection(
     )
     confluence_total = int(min(99, tech_score + sec_score + qual_score))
 
+    # Multi-Horizon Classification
+    # 1. LONG_TERM (Multibagger Compounder 1-3Y):
+    #    Qualified institutional catalysts (CRISIL upgrade / FII-DII influx / zero pledge),
+    #    clean forensics, high moonshot asymmetry (+6R+), or established Stage 2 compounder.
+    if (
+        inst_report.is_multibagger_catalyst_qualified
+        or (forensic_safe and (target_moonshot / max(0.1, entry_price)) >= 1.5 and primary_archetype in ("STAGE_1_TO_2_EXPANSION", "RRG_SECTOR_ROTATION"))
+        or (score >= 70 and dist_52w_high <= 20.0 and trend_passed >= 6 and qual_score >= 18)
+    ):
+        horizon = "LONG_TERM"
+    elif (
+        primary_archetype in ("TTM_SQUEEZE_EXPLOSION", "SMC_SPRING_SWEEP")
+        or timing_state == "TRIGGER_NOW"
+        or rvol_20d >= 1.8
+    ):
+        horizon = "SHORT_TERM"
+    else:
+        horizon = "MID_TERM"
+
+    # Cycle State & Precise ETA Window
+    if timing_state == "TRIGGER_NOW":
+        cycle_state = "TRIGGER_READY"
+        eta_days = 0
+        eta_label = "🔥 TODAY (Trigger Ready)"
+    elif timing_state == "COILING_IMMINENT":
+        cycle_state = "COILING_PIVOT"
+        eta_days = 3
+        eta_label = "⏳ 2–5 Sessions (Coiling)"
+    elif timing_state == "PULLBACK_RETEST":
+        cycle_state = "PULLBACK_RETEST"
+        eta_days = 2
+        eta_label = "🎯 1–3 Sessions (Retest Zone)"
+    elif primary_archetype == "STAGE_1_TO_2_EXPANSION" and trend_passed < 6:
+        cycle_state = "STAGE_1_ACCUMULATION"
+        eta_days = 20
+        eta_label = "📐 2–4 Weeks (Accumulation)"
+    elif weekly_stage == "WEEKLY_STAGE_2":
+        cycle_state = "STAGE_2_MARKUP"
+        eta_days = 0
+        eta_label = "🚀 Active Markup (Stage 2)"
+    else:
+        cycle_state = "COILING_PIVOT"
+        eta_days = 5
+        eta_label = "⏳ Stalking Pivot"
+
     # Executive Action Verdict
     if is_uc_locked:
         exec_verdict = "🔒 CIRCUIT LOCKED"
@@ -770,6 +838,12 @@ def evaluate_single_stock_inflection(
         executive_verdict=exec_verdict,
         executive_summary=exec_summary,
         data_quality_label="💾 0ms Local Cache",
+        horizon=horizon,
+        cycle_state=cycle_state,
+        eta_days=eta_days,
+        eta_label=eta_label,
+        catalyst_badges=catalyst_badges,
+        institutional_catalysts=inst_report.to_dict(),
     )
 
 
@@ -780,6 +854,7 @@ def scan_inflections_universe(
     universe: str = "multibagger_hunters",
     archetype_filter: str = "ALL",
     timing_filter: str = "ALL",
+    horizon_filter: str = "ALL",
     min_score: int = 45,
     max_results: int = 40,
     min_turnover_cr: float = 0.0,
@@ -834,6 +909,7 @@ def scan_inflections_universe(
 
     norm_archetype = archetype_filter.upper().strip()
     norm_timing = timing_filter.upper().strip()
+    norm_horizon = horizon_filter.upper().strip()
     norm_cap_tier = cap_tier_filter.upper().strip()
 
     # Pre-fetch sector RRG matrix once to avoid hundreds of repetitive SQLite queries
@@ -887,11 +963,13 @@ def scan_inflections_universe(
     filtered: list[InflectionSetup] = []
     archetype_counts: dict[str, int] = {}
     timing_counts: dict[str, int] = {}
+    horizon_counts: dict[str, int] = {}
 
     for c in candidates:
         # Tally counts
         archetype_counts[c.primary_archetype] = archetype_counts.get(c.primary_archetype, 0) + 1
         timing_counts[c.timing_state] = timing_counts.get(c.timing_state, 0) + 1
+        horizon_counts[c.horizon] = horizon_counts.get(c.horizon, 0) + 1
 
         # Check archetype filter
         if norm_archetype != "ALL" and c.primary_archetype != norm_archetype:
@@ -899,6 +977,10 @@ def scan_inflections_universe(
 
         # Check timing filter
         if norm_timing != "ALL" and c.timing_state != norm_timing:
+            continue
+
+        # Check horizon filter
+        if norm_horizon != "ALL" and c.horizon != norm_horizon:
             continue
 
         # Check market cap tier filter
@@ -928,11 +1010,13 @@ def scan_inflections_universe(
         universe_name=u_name,
         archetype_filter=norm_archetype,
         timing_filter=norm_timing,
+        horizon_filter=norm_horizon,
         total_scanned=len(symbols),
         total_qualified=len(final_candidates),
         candidates=final_candidates,
         archetype_counts=archetype_counts,
         timing_counts=timing_counts,
+        horizon_counts=horizon_counts,
         top_sectors=top_sectors,
         scan_timestamp=timestamp_str,
         execution_time_seconds=round(t1 - t0, 3),

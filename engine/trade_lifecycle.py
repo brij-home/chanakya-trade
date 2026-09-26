@@ -326,10 +326,16 @@ def audit_position_lifecycle(
         action = "HOLD_COMPOUNDER"
 
     else:
-        # Default SWING Mode: High-velocity 2R scale-out and tight ATR trail
-        if r_multiple >= 3.0:
-            recommended_stop = max(breakeven_price, structure_stop, chandelier_stop)
-            stop_method = "CHANDELIER_ATR" if chandelier_stop >= structure_stop else "STRUCTURE_HL"
+        # Default SWING Mode: Institutional Dynamic Profit Ladder (+2R auto-partial 50%, +4R T2, trailing runner)
+        t1_lock_price = (
+            entry_price + (initial_risk * 2.0)
+            if position_type.upper() == "LONG"
+            else entry_price - (initial_risk * 2.0)
+        )
+        if r_multiple >= 4.0:
+            # At +4R, trail SL to lock at least +2R (T1) profit or higher Chandelier ATR trail
+            recommended_stop = max(t1_lock_price, breakeven_price, structure_stop, chandelier_stop)
+            stop_method = "CHANDELIER_ATR" if chandelier_stop >= max(t1_lock_price, structure_stop) else "T1_LOCK_2R"
         elif r_multiple >= 2.0:
             recommended_stop = max(breakeven_price, structure_stop)
             stop_method = "BREAKEVEN" if recommended_stop <= breakeven_price else "STRUCTURE_HL"
@@ -339,43 +345,78 @@ def audit_position_lifecycle(
 
         milestones = [
             ProfitMilestone(
-                name="2R Breakeven Pivot",
-                target_price=round(entry_price + (initial_risk * 2.0), 2),
+                name="1R Early De-Risk Window (Scale 1)",
+                target_price=round(
+                    entry_price + (initial_risk * 1.0)
+                    if position_type.upper() == "LONG"
+                    else entry_price - (initial_risk * 1.0),
+                    2,
+                ),
+                r_multiple=1.0,
+                action_required="Optional early scale 35% on high volatility; or hold full size for 2R institutional target.",
+                reached=bool(r_multiple >= 1.0),
+            ),
+            ProfitMilestone(
+                name="2R Auto-Partial Breakeven Pivot",
+                target_price=round(
+                    entry_price + (initial_risk * 2.0)
+                    if position_type.upper() == "LONG"
+                    else entry_price - (initial_risk * 2.0),
+                    2,
+                ),
                 r_multiple=2.0,
-                action_required="Book 33-50% profit & Shift SL to Breakeven (+0.2%)",
+                action_required="Auto-partial close 50% & Lock SL to Breakeven (+0.2% buffer)",
                 reached=bool(r_multiple >= 2.0),
             ),
             ProfitMilestone(
-                name="3R Growth Target",
-                target_price=round(entry_price + (initial_risk * 3.0), 2),
-                r_multiple=3.0,
-                action_required="Book secondary 25% & Activate Chandelier ATR Trail",
-                reached=bool(r_multiple >= 3.0),
+                name="4R Target 2 Scale",
+                target_price=round(
+                    entry_price + (initial_risk * 4.0)
+                    if position_type.upper() == "LONG"
+                    else entry_price - (initial_risk * 4.0),
+                    2,
+                ),
+                r_multiple=4.0,
+                action_required="Target 2 reached (+4R): Trail SL to +2R (T1 level)",
+                reached=bool(r_multiple >= 4.0),
             ),
             ProfitMilestone(
-                name="5R Superperformer Runner",
-                target_price=round(entry_price + (initial_risk * 5.0), 2),
-                r_multiple=5.0,
-                action_required="Hold remaining runner; Trail SL below Daily 20-EMA",
-                reached=bool(r_multiple >= 5.0),
+                name="6R+ Asymmetric Runner",
+                target_price=round(
+                    entry_price + (initial_risk * 6.0)
+                    if position_type.upper() == "LONG"
+                    else entry_price - (initial_risk * 6.0),
+                    2,
+                ),
+                r_multiple=6.0,
+                action_required="Hold runner; Trail SL dynamically via Chandelier ATR / 20-EMA",
+                reached=bool(r_multiple >= 6.0),
             ),
         ]
 
         diagnostics = []
-        if r_multiple >= 3.0:
+        if r_multiple >= 4.0:
             health_status = "HEALTHY_ACCELERATING"
-            health_score = 95
+            health_score = 98
             action = "HOLD_RUNNER"
-            diagnostics.append(f"Trade is superperforming at +{r_multiple:.2f}R (+{pnl_pct:.2f}%).")
-            diagnostics.append("Hold 33-50% runner with dynamic Chandelier ATR / Structure stop.")
+            diagnostics.append(f"Target 2 reached at +{r_multiple:.2f}R (+{pnl_pct:.2f}%).")
+            diagnostics.append(
+                "Stop-loss trailed to lock +2R profit. Runner position trailing via Chandelier ATR / Structure stop."
+            )
         elif r_multiple >= 2.0:
             health_status = "HEALTHY_ACCELERATING"
-            health_score = 85
+            health_score = 88
             action = "SCALE_OUT_50_PCT"
             diagnostics.append(f"Reached 2R Milestone (+{r_multiple:.2f}R, +{pnl_pct:.2f}%).")
             diagnostics.append(
-                "Lock in 33-50% partial profit and move SL to breakeven (Risk-Free Trade)."
+                "Auto-partial 50% profit booked; SL locked to Breakeven (100% risk-free trade)."
             )
+        elif r_multiple >= 1.0:
+            health_status = "HEALTHY_ACCELERATING"
+            health_score = 82
+            action = "HOLD_FOR_2R"
+            diagnostics.append(f"Trade expanded through 1R milestone (+{r_multiple:.2f}R, +{pnl_pct:.2f}%).")
+            diagnostics.append("De-risk window active. Hold core position for +2R auto-partial milestone.")
         elif r_multiple >= 0.5:
             health_status = (
                 "HEALTHY_PULLBACK" if ltp < highest_price * 0.98 else "HEALTHY_ACCELERATING"

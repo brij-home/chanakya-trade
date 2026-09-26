@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, lazy, Suspense } from 'react'
+import { useEffect, useState, useCallback, useRef, lazy, Suspense } from 'react'
 import { useChatStore, getBaseUrl } from './store/chatStore'
 import { useSSEStream } from './hooks/useSSEStream'
 import { useMarketClock } from './hooks/useMarketClock'
@@ -287,6 +287,10 @@ export default function App() {
   })
 
   // ── Real-Time Auto-Alert Stream (Gamma Blasts, Squeezes, Circuits, Targets, Invalidation) ─────────
+  const recentAlertsRef = useRef(new Map())
+  const lastToastTimeRef = useRef(0)
+  const lastChimeTimeRef = useRef(0)
+
   const handleAlertMessage = useCallback((payload) => {
     if (!payload) return
 
@@ -300,16 +304,53 @@ export default function App() {
       return
     }
 
-    playAlertChime()
-
-    // Add to persistent notification store (glanceable feed & history)
+    // Always record into persistent notification store (glanceable feed & history)
     useNotificationStore.getState().addNotification(payload)
+
+    // Notify Alerts Manager and other active screens that an alert arrived
+    window.dispatchEvent(new CustomEvent('new-market-alert', { detail: payload }))
+
+    // Respect preferences: if UI alerts disabled for this alert/segment, suppress toast & sound
+    if (payload.ui_allowed === false) return
+
+    // If user is currently looking at the Alerts Manager screen, don't double-clutter with popup toasts
+    if (activeView === 'alerts') return
 
     const isTest = payload.environment === 'TEST' || payload.is_live === false
     const isInvalidated = payload.is_invalidated === true || payload.stage === 'INVALIDATED'
     const isTarget = payload.is_target === true || payload.stage === 'T1_ACHIEVED' || payload.stage === 'TARGET_ACHIEVED' || payload.target_achieved === true
     const isTrail = payload.is_trail === true || payload.stage === 'TRAILING_UPDATE'
     const envBadge = isTest ? '🧪 [TEST]' : '🟢 [REAL/LIVE]'
+
+    const now = Date.now()
+
+    // Deduplication / Anti-flood:
+    // If the exact same alert or symbol+stage was toasted within the last 45 seconds, suppress duplicate popup
+    const alertKey = `${payload.alert_id || payload.symbol}_${payload.stage || payload.alert_type}`
+    const lastSeen = recentAlertsRef.current.get(alertKey) || 0
+    if (now - lastSeen < 45000) {
+      return
+    }
+    recentAlertsRef.current.set(alertKey, now)
+
+    // Garbage-collect old keys to prevent memory leak
+    if (recentAlertsRef.current.size > 150) {
+      for (const [k, v] of recentAlertsRef.current.entries()) {
+        if (now - v > 60000) recentAlertsRef.current.delete(k)
+      }
+    }
+
+    // Burst rate limiter: enforce at least 2.5s between toast popups (critical invalidations bypass)
+    if (!isInvalidated && now - lastToastTimeRef.current < 2500) {
+      return
+    }
+    lastToastTimeRef.current = now
+
+    // Chime rate limiter: max 1 sound chime every 8 seconds
+    if (now - lastChimeTimeRef.current > 8000) {
+      playAlertChime()
+      lastChimeTimeRef.current = now
+    }
 
     let headline = payload.headline || `${payload.symbol} ${payload.alert_type || 'Alert'}`
     if (!headline.includes('[TEST]') && !headline.includes('[REAL/LIVE]')) {
@@ -342,12 +383,11 @@ export default function App() {
       title: headline,
       message: `${decision}${summary}`,
       timestamp: timeStr,
-      duration: isInvalidated ? 12000 : (isTarget ? 10000 : 8000),
+      duration: isInvalidated ? 5500 : (isTarget ? 4800 : 3800),
+      alert: payload,
+      maxQueue: 2,
     })
-
-    // Notify Alerts Manager and other active screens that an alert arrived
-    window.dispatchEvent(new CustomEvent('new-market-alert', { detail: payload }))
-  }, [])
+  }, [activeView])
 
   useSSEStream(alertStreamUrl, {
     onMessage: handleAlertMessage,
@@ -454,6 +494,19 @@ export default function App() {
     }
     setIsOrderTicketOpen(true)
   }, [])
+
+  // Global listener for opening order ticket from toasts or external triggers
+  useEffect(() => {
+    const handleCustomTicket = (e) => {
+      if (e.detail) {
+        handleOpenOrderTicket(e.detail)
+      } else {
+        handleOpenOrderTicket()
+      }
+    }
+    window.addEventListener('open-order-ticket', handleCustomTicket)
+    return () => window.removeEventListener('open-order-ticket', handleCustomTicket)
+  }, [handleOpenOrderTicket])
 
   // ── Phase gates ──────────────────────────────────────────────────────────
   if (setupPhase === 'onboarding') {

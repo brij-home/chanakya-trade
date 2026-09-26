@@ -75,13 +75,14 @@ export const useToastStore = create((set) => ({
       const active = s.toasts.filter((t) => !t.exiting)
       let current = [...s.toasts]
 
-      // If already at 3 active toasts, gracefully fade out the oldest active one to make room
-      if (active.length >= 3) {
+      // If already at max active toasts, gracefully fade out the oldest active one to make room
+      const maxAllowed = toast.maxQueue ?? (toast.alert ? 2 : 3)
+      if (active.length >= maxAllowed) {
         const oldestId = active[0].id
         current = current.map((t) => (t.id === oldestId ? { ...t, exiting: true } : t))
         setTimeout(() => {
           set((st) => ({ toasts: st.toasts.filter((t) => t.id !== oldestId) }))
-        }, 320)
+        }, 280)
       }
 
       return { toasts: [...current, newToast] }

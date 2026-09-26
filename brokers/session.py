@@ -87,6 +87,10 @@ _BROKER_NAMES = {
     "8": "mstock",
     "mstock": "mstock",
     "m.stock": "mstock",
+    "9": "kotak",
+    "kotak": "kotak",
+    "kotakneo": "kotak",
+    "neo": "kotak",
 }
 
 _BROKER_LABELS = {
@@ -99,10 +103,11 @@ _BROKER_LABELS = {
     "stoxkart": "[bold cyan]Stoxkart (SMC)[/bold cyan]",
     "shoonya": "[bold green]Shoonya (Finvasia)[/bold green]",
     "mstock": "[bold blue]m.Stock (Mirae Asset)[/bold blue]",
+    "kotak": "[bold red]Kotak Neo[/bold red]",
 }
 
 # Brokers that use TOTP auto-login (no browser redirect)
-_TOTP_BROKERS = {"angelone", "stoxkart", "shoonya", "mstock"}
+_TOTP_BROKERS = {"angelone", "stoxkart", "shoonya", "mstock", "kotak"}
 
 # Broker menu display items (number, label, description)
 _BROKER_MENU = [
@@ -115,6 +120,7 @@ _BROKER_MENU = [
     ("6", "Stoxkart", "SMC API — free, live data & execution"),
     ("7", "Shoonya", "Finvasia Noren API — TOTP, live data & execution"),
     ("8", "m.Stock", "Mirae Asset — free API, live data & execution"),
+    ("9", "Kotak Neo", "Kotak Securities Neo API — TOTP, live data & execution"),
 ]
 
 
@@ -201,6 +207,22 @@ def _try_auto_restore_sessions() -> None:
             b = ShoonyaAPI()
             if b.is_authenticated():
                 register_broker("shoonya", b, role="both")
+                try:
+                    _start_websocket(b)
+                except Exception:
+                    pass
+                return
+    except Exception:
+        pass
+
+    # 3. Kotak Neo
+    try:
+        from brokers.kotak import KotakNeoAPI, TOKEN_FILE as _KT
+
+        if os.path.exists(_KT):
+            b = KotakNeoAPI()
+            if b.is_authenticated():
+                register_broker("kotak", b, role="both")
                 try:
                     _start_websocket(b)
                 except Exception:
@@ -541,6 +563,34 @@ def _make_broker(choice: str) -> tuple[str, BrokerAPI]:
             ),
         )
 
+    elif key == "kotak":
+        from .kotak import KotakNeoAPI
+
+        return key, KotakNeoAPI(
+            consumer_key=get_credential(
+                "KOTAK_CONSUMER_KEY", "Kotak Neo Consumer Key", secret=False, required=False
+            ),
+            consumer_secret=get_credential(
+                "KOTAK_CONSUMER_SECRET", "Kotak Neo Consumer Secret", secret=True, required=False
+            ),
+            mobile_number=get_credential(
+                "KOTAK_MOBILE_NUMBER", "Kotak Neo Mobile Number", secret=False, required=False
+            ),
+            ucc=get_credential(
+                "KOTAK_UCC", "Kotak Neo Client Code (UCC)", secret=False, required=False
+            ),
+            password=get_credential(
+                "KOTAK_PASSWORD", "Kotak Neo Password", secret=True, required=False
+            ),
+            totp_secret=get_credential(
+                "KOTAK_TOTP_SECRET", "Kotak Neo TOTP Secret", secret=True, required=False
+            ),
+            mpin=get_credential(
+                "KOTAK_MPIN", "Kotak Neo MPIN", secret=True, required=False
+            ),
+            environment=os.environ.get("KOTAK_ENVIRONMENT", "prod"),
+        )
+
     else:  # fyers
         from .fyers import FyersAPI
 
@@ -585,6 +635,7 @@ def _poll_sidecar_auth(broker_key: str, port: int, timeout: int = 180) -> dict[s
         "stoxkart": "stoxkart",
         "shoonya": "shoonya",
         "mstock": "mstock",
+        "kotak": "kotak",
     }
     status_key = _STATUS_KEYS.get(broker_key, broker_key)
     deadline = time.time() + timeout
@@ -724,6 +775,13 @@ def _recreate_broker_from_token(key: str):
                 b = MStockAPI()
                 if b.is_authenticated():
                     return b
+        elif key == "kotak":
+            from brokers.kotak import KotakNeoAPI, TOKEN_FILE
+
+            if TOKEN_FILE.exists():
+                b = KotakNeoAPI()
+                if b.is_authenticated():
+                    return b
     except Exception:
         pass
     return None
@@ -851,8 +909,20 @@ def _do_auth(key: str, broker: BrokerAPI) -> BrokerAPI:
 
 
 def _start_websocket(broker: BrokerAPI) -> None:
-    """Start WebSocket for real-time quotes (Fyers or m.Stock)."""
+    """Start WebSocket for real-time quotes (Fyers, m.Stock, or Kotak Neo)."""
     try:
+        broker_cls_name = broker.__class__.__name__
+        if getattr(broker, "name", "") == "kotak" or broker_cls_name == "KotakNeoAPI":
+            from market.kotak_websocket import kotak_ws
+
+            kotak_ws.start(
+                feed_url=getattr(broker, "_feed_url", ""),
+                access_token=getattr(broker, "_access_token", ""),
+                session_token=getattr(broker, "_session_token", ""),
+                sid=getattr(broker, "_sid", ""),
+            )
+            return
+
         if getattr(broker, "name", "") == "mstock":
             from market.mstock_websocket import mstock_ws
 

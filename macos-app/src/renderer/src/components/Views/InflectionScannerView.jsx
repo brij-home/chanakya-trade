@@ -55,6 +55,18 @@ export default function InflectionScannerView({
   const [sortColumn, setSortColumn] = useState('inflection_score')
   const [sortDirection, setSortDirection] = useState('desc')
 
+  // Multi-Horizon & Incubation Pipeline State
+  const [horizonFilter, setHorizonFilter] = useState('ALL') // 'ALL' | 'SHORT_TERM' | 'MID_TERM' | 'LONG_TERM'
+  const [activeMainTab, setActiveMainTab] = useState('scanner') // 'scanner' | 'incubation'
+  const [incubatedCandidates, setIncubatedCandidates] = useState([])
+  const [isLoadingIncubation, setIsLoadingIncubation] = useState(false)
+  const [incubationNotice, setIncubationNotice] = useState('')
+  const [centuryCandidates, setCenturyCandidates] = useState([])
+  const [isLoadingCentury, setIsLoadingCentury] = useState(false)
+  const [centuryUniverse, setCenturyUniverse] = useState('microcap250')
+  const [isSyncingMarket, setIsSyncingMarket] = useState(false)
+  const [syncMarketMsg, setSyncMarketMsg] = useState('')
+
   // Scan Data & Loading
   const [isScanning, setIsScanning] = useState(false)
   const [scanResult, setScanResult] = useState(null)
@@ -152,6 +164,7 @@ export default function InflectionScannerView({
           universe: targetUniverse,
           archetype: 'ALL',
           timing: 'ALL',
+          horizon: horizonFilter,
           min_score: 45,
           max_results: 100,
           min_turnover_cr: overrideTurnover,
@@ -208,10 +221,132 @@ export default function InflectionScannerView({
     }
   }
 
-  // Trigger scan when universe, minTurnoverCr, or capTierFilter changes (archetype, timing & score filter client-side instantly)
+  // Note: Scanning is triggered manually by user via 'Scan Market' / 'Rescan' buttons
+
+  // Incubation Pipeline Lifecycle
+  const loadIncubationPipeline = async () => {
+    setIsLoadingIncubation(true)
+    try {
+      const res = await call('/skills/incubation_pipeline', {
+        horizon: horizonFilter,
+        cycle_state: 'ALL',
+      })
+      if (res?.data?.candidates) {
+        setIncubatedCandidates(res.data.candidates)
+      }
+    } catch (err) {
+      console.error('Failed to load incubation pipeline:', err)
+    } finally {
+      setIsLoadingIncubation(false)
+    }
+  }
+
   useEffect(() => {
-    executeScan(universe, minTurnoverCr, capTierFilter)
-  }, [universe, minTurnoverCr, capTierFilter])
+    loadIncubationPipeline()
+  }, [])
+
+  useEffect(() => {
+    if (activeMainTab === 'incubation') {
+      loadIncubationPipeline()
+    } else if (activeMainTab === 'century') {
+      loadCenturyCompounders()
+    }
+  }, [activeMainTab, horizonFilter])
+
+  const loadCenturyCompounders = async (universeToUse) => {
+    setIsLoadingCentury(true)
+    try {
+      const u = universeToUse || centuryUniverse
+      const res = await call('/skills/century_compounders', {
+        universe: u,
+        min_score: 60,
+        top_n: 25,
+        use_cache: true,
+      })
+      const cands = res?.data?.candidates || res?.candidates || []
+      setCenturyCandidates(cands)
+    } catch (err) {
+      console.error('Failed to load century compounders:', err)
+    } finally {
+      setIsLoadingCentury(false)
+    }
+  }
+
+  const handleSyncEntireMarket = async () => {
+    setIsSyncingMarket(true)
+    setSyncMarketMsg(`Syncing entire ${centuryUniverse} market into persistent SQLite store...`)
+    try {
+      const res = await call('/skills/century_sync_market', {
+        universe: centuryUniverse,
+      })
+      const data = res?.data || res
+      setSyncMarketMsg(`✓ Synced ${data.precomputed_count || 0} stocks into SQLite in ${data.duration_sec || 0}s!`)
+      await loadCenturyCompounders(centuryUniverse)
+    } catch (err) {
+      console.error('Market batch sync failed:', err)
+      setSyncMarketMsg('⚠️ Batch market sync failed. Check server logs.')
+    } finally {
+      setIsSyncingMarket(false)
+      setTimeout(() => setSyncMarketMsg(''), 8000)
+    }
+  }
+
+  const handleAddToIncubation = async (candidate, e) => {
+    if (e) e.stopPropagation()
+    try {
+      const payload = {
+        symbol: candidate.symbol,
+        name: candidate.name,
+        sector: candidate.sector,
+        horizon: candidate.horizon || 'MID_TERM',
+        cycle_state: candidate.cycle_state || 'COILING_PIVOT',
+        eta_days: candidate.eta_days || 3,
+        eta_label: candidate.eta_label || '2–5 Sessions',
+        entry_pivot: candidate.entry_price || candidate.ltp,
+        current_price: candidate.ltp,
+        stop_loss: candidate.stop_loss,
+        target_1: candidate.target_1,
+        target_2: candidate.target_2,
+        target_moonshot: candidate.target_moonshot,
+        risk_reward_ratio: candidate.risk_reward_ratio || 2.5,
+        conviction_score: candidate.inflection_score || 75,
+        primary_archetype: candidate.primary_archetype || 'VCP_PIVOT_BREAKOUT',
+        catalyst_badges: candidate.catalyst_badges || [],
+        catalyst_summary: candidate.catalyst_summary || '',
+      }
+      await call('/skills/incubation_add', payload)
+      setIncubationNotice(`📌 ${candidate.symbol} retained in Incubation Pipeline!`)
+      setTimeout(() => setIncubationNotice(''), 4000)
+      loadIncubationPipeline()
+    } catch (err) {
+      console.error('Failed to add to incubation:', err)
+    }
+  }
+
+  const handleRemoveFromIncubation = async (symbol, e) => {
+    if (e) e.stopPropagation()
+    try {
+      await call('/skills/incubation_remove', { symbol })
+      setIncubatedCandidates((prev) => prev.filter((x) => x.symbol !== symbol))
+    } catch (err) {
+      console.error('Failed to remove from incubation:', err)
+    }
+  }
+
+  const handleEvaluateIncubation = async () => {
+    setIsLoadingIncubation(true)
+    try {
+      const res = await call('/skills/incubation_evaluate', {})
+      const d = res?.data || {}
+      setIncubationNotice(`Evaluated ${d.total_evaluated || 0} setups. Triggered: ${d.triggered_breakouts?.length || 0}`)
+      setTimeout(() => setIncubationNotice(''), 5000)
+      loadIncubationPipeline()
+    } catch (err) {
+      console.error('Failed to evaluate incubation:', err)
+    } finally {
+      setIsLoadingIncubation(false)
+    }
+  }
 
   // ── 3. Open AI Decision Matrix Drawer ───────────────────────────────
   const openDecisionDrawer = async (candidate) => {
@@ -320,6 +455,15 @@ export default function InflectionScannerView({
     return counts
   }, [scanResult])
 
+  const horizonCounts = useMemo(() => {
+    const counts = { ALL: scanResult?.candidates?.length || 0 }
+    scanResult?.candidates?.forEach((c) => {
+      const h = (c.horizon || 'MID_TERM').toUpperCase()
+      counts[h] = (counts[h] || 0) + 1
+    })
+    return counts
+  }, [scanResult])
+
   const activeFilterCount = useMemo(() => {
     let count = 0
     if (searchQuery.trim()) count++
@@ -383,6 +527,11 @@ export default function InflectionScannerView({
     // 2. Archetype filter
     if (archetypeFilter && archetypeFilter !== 'ALL') {
       list = list.filter((c) => c.primary_archetype === archetypeFilter)
+    }
+
+    // 2b. Horizon filter (Short, Mid, Long Multibagger)
+    if (horizonFilter && horizonFilter !== 'ALL') {
+      list = list.filter((c) => (c.horizon || 'MID_TERM').toUpperCase() === horizonFilter)
     }
 
     // 3. Timing state filter
@@ -556,16 +705,582 @@ export default function InflectionScannerView({
     return { total, highConviction, coiling, triggerNow, avgRR, topSector }
   }, [scanResult])
 
+  // Render Cycle Incubation Pipeline Board
+  const renderIncubationBoard = () => {
+    const displayed = horizonFilter === 'ALL'
+      ? incubatedCandidates
+      : incubatedCandidates.filter((c) => (c.horizon || 'MID_TERM').toUpperCase() === horizonFilter)
+
+    return (
+      <div className="flex flex-col gap-4 font-ui">
+        {/* Banner / Toolbar */}
+        <div className="flex flex-wrap items-center justify-between gap-3 p-3 rounded-xl border border-border bg-surface shadow-xs">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-xl bg-purple-500/15 border border-purple-500/30 flex items-center justify-center text-xl">
+              📌
+            </div>
+            <div>
+              <h2 className="text-sm font-bold text-text flex items-center gap-2">
+                <span>Cycle Incubation Pipeline</span>
+                <span className="text-xs px-2 py-0.5 rounded-full font-mono bg-purple-500/20 text-purple-600 dark:text-purple-400 font-bold">
+                  {displayed.length} Active Candidates
+                </span>
+              </h2>
+              <p className="text-xs text-muted">
+                Persistent quantitative incubation radar tracking setups across their cycle ETA until breakout ignition.
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2">
+            {incubationNotice && (
+              <span className="text-xs font-semibold text-emerald-600 dark:text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-2.5 py-1 rounded-lg">
+                {incubationNotice}
+              </span>
+            )}
+            <button
+              type="button"
+              onClick={handleEvaluateIncubation}
+              disabled={isLoadingIncubation}
+              className="text-xs font-bold px-3 py-1.5 rounded-lg border border-purple-500/40 bg-purple-500/15 text-purple-600 dark:text-purple-400 hover:bg-purple-500/25 flex items-center gap-1.5 transition-all cursor-pointer shadow-xs"
+              title="Evaluate price milestones & detect breakouts"
+            >
+              <span>🔄</span>
+              <span>{isLoadingIncubation ? 'Evaluating...' : 'Evaluate Cycles Now'}</span>
+            </button>
+          </div>
+        </div>
+
+        {/* Empty State */}
+        {displayed.length === 0 ? (
+          <div className="flex flex-col items-center justify-center h-80 rounded-2xl border border-dashed border-border bg-surface/50 text-center p-6">
+            <span className="text-4xl mb-3">🌱</span>
+            <h3 className="text-sm font-bold text-text">No Candidates Retained in Incubation</h3>
+            <p className="text-xs text-muted mt-1.5 max-w-md">
+              When screening Short, Mid, or Long-Term Multibaggers in the Radar, click the{' '}
+              <span className="px-1.5 py-0.5 rounded bg-purple-500/20 text-purple-400 font-mono">📌</span>{' '}
+              button on any candidate to retain and monitor it until its breakout moment arrives.
+            </p>
+            <button
+              type="button"
+              onClick={() => setActiveMainTab('scanner')}
+              className="mt-4 text-xs font-bold px-4 py-2 rounded-lg border border-gold/40 bg-gold/15 text-amber-600 dark:text-amber-400 hover:bg-gold/25 cursor-pointer transition-all"
+            >
+              📡 Return to Inflection Radar
+            </button>
+          </div>
+        ) : (
+          /* Table of Incubated Setups */
+          <div className="rounded-xl border border-border bg-surface overflow-hidden shadow-card">
+            <table className="w-full text-left border-collapse text-xs font-mono">
+              <thead>
+                <tr className="border-b border-border bg-panel text-[10px] font-mono text-muted uppercase tracking-wider">
+                  <th className="py-2.5 px-3">Symbol / Horizon</th>
+                  <th className="py-2.5 px-2">Cycle State / ETA</th>
+                  <th className="py-2.5 px-2 text-right">Pivot / Last Price</th>
+                  <th className="py-2.5 px-2 text-right">Stop Loss</th>
+                  <th className="py-2.5 px-2 text-left">Targets (T1 / T2 / 🚀T3)</th>
+                  <th className="py-2.5 px-2 text-center">Score & Payoff</th>
+                  <th className="py-2.5 px-2 text-left">Catalyst Badges</th>
+                  <th className="py-2.5 px-3 text-right">Actions</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-border/60">
+                {displayed.map((c) => {
+                  const isTriggerReady = c.cycle_state === 'TRIGGER_READY'
+                  const isInvalidated = c.cycle_state === 'CYCLE_INVALIDATED'
+                  return (
+                    <tr
+                      key={c.symbol}
+                      className="hover:bg-purple-500/[0.04] transition-all group cursor-pointer"
+                      onClick={() => openDecisionDrawer(c)}
+                    >
+                      {/* Symbol & Horizon */}
+                      <td className="py-2.5 px-3">
+                        <div className="flex flex-col">
+                          <div className="flex items-center gap-1.5">
+                            <span className="font-bold text-text text-xs group-hover:text-purple-400 transition-colors">
+                              {c.symbol}
+                            </span>
+                            <span
+                              className={`text-[8.5px] font-bold px-1.5 py-0.2 rounded border uppercase font-mono ${
+                                c.horizon === 'LONG_TERM'
+                                  ? 'bg-purple-500/15 text-purple-700 dark:text-purple-300 border-purple-500/30'
+                                  : c.horizon === 'SHORT_TERM'
+                                  ? 'bg-cyan-500/15 text-cyan-700 dark:text-cyan-300 border-cyan-500/30'
+                                  : 'bg-blue-500/15 text-blue-700 dark:text-blue-300 border-blue-500/30'
+                              }`}
+                            >
+                              {c.horizon === 'LONG_TERM' ? '💎 MULTIBAGGER' : c.horizon === 'SHORT_TERM' ? '⚡ SHORT-TERM' : '📈 MID-TERM'}
+                            </span>
+                          </div>
+                          <span className="text-[10px] text-muted truncate max-w-[130px] font-ui">
+                            {c.name || c.sector}
+                          </span>
+                        </div>
+                      </td>
+
+                      {/* Cycle State & ETA */}
+                      <td className="py-2.5 px-2">
+                        <div className="flex flex-col gap-0.5">
+                          <span
+                            className={`text-[10px] font-bold px-2 py-0.5 rounded-full border inline-block max-w-fit ${
+                              isTriggerReady
+                                ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 border-emerald-500/40 animate-pulse font-bold'
+                                : isInvalidated
+                                ? 'bg-rose-500/15 text-rose-700 dark:text-rose-400 border-rose-500/30'
+                                : 'bg-amber-500/15 text-amber-700 dark:text-amber-400 border border-amber-500/30'
+                            }`}
+                          >
+                            {c.cycle_state.replace('_', ' ')}
+                          </span>
+                          <span className="text-[9.5px] text-muted">
+                            {c.eta_label} ({c.days_in_incubation || 0}d inc)
+                          </span>
+                        </div>
+                      </td>
+
+                      {/* Pivot vs Last Price */}
+                      <td className="py-2.5 px-2 text-right">
+                        <div className="flex flex-col items-end">
+                          <span className="font-bold text-text">₹{c.entry_pivot.toFixed(1)}</span>
+                          <span className="text-[10px] text-muted">
+                            LTP: ₹{c.current_price.toFixed(1)}
+                          </span>
+                        </div>
+                      </td>
+
+                      {/* Stop Loss */}
+                      <td className="py-2.5 px-2 text-right text-rose-600 dark:text-rose-400 font-medium">
+                        ₹{c.stop_loss.toFixed(1)}
+                      </td>
+
+                      {/* Targets */}
+                      <td className="py-2.5 px-2">
+                        <div className="flex items-center gap-1.5 text-[10.5px]">
+                          <span className="text-emerald-600 dark:text-emerald-400 font-bold" title="Target 1 (+2R)">
+                            T1: ₹{c.target_1.toFixed(1)}
+                          </span>
+                          <span className="text-muted text-[8px]">•</span>
+                          <span className="text-amber-600 dark:text-amber-400 font-bold" title="Target 2 (+3.5R)">
+                            T2: ₹{c.target_2.toFixed(1)}
+                          </span>
+                          <span className="text-muted text-[8px]">•</span>
+                          <span className="text-purple-600 dark:text-purple-400 font-bold flex items-center gap-0.5" title="Target Moonshot (+6.5R)">
+                            <span>🚀</span>₹{c.target_moonshot.toFixed(1)}
+                          </span>
+                        </div>
+                      </td>
+
+                      {/* Score & Payoff */}
+                      <td className="py-2.5 px-2 text-center">
+                        <div className="flex items-center justify-center gap-1.5">
+                          <span className="px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-600 dark:text-amber-400 font-bold text-[10px]">
+                            {c.conviction_score}
+                          </span>
+                          <span className="text-[10px] text-muted">
+                            1:{c.risk_reward_ratio}
+                          </span>
+                        </div>
+                      </td>
+
+                      {/* Catalyst Badges */}
+                      <td className="py-2.5 px-2 font-ui">
+                        <div className="flex flex-wrap gap-1 max-w-[200px]">
+                          {c.catalyst_badges && c.catalyst_badges.length > 0 ? (
+                            c.catalyst_badges.map((b, i) => (
+                              <span
+                                key={i}
+                                className="text-[8.5px] px-1.5 py-0.5 rounded bg-surface border border-border text-muted font-mono"
+                              >
+                                {b}
+                              </span>
+                            ))
+                          ) : (
+                            <span className="text-[9px] text-muted">Technical setup</span>
+                          )}
+                        </div>
+                      </td>
+
+                      {/* Actions */}
+                      <td className="py-2.5 px-3 text-right" onClick={(e) => e.stopPropagation()}>
+                        <div className="flex items-center justify-end gap-1">
+                          <button
+                            type="button"
+                            onClick={() => openDecisionDrawer(c)}
+                            className="p-1 rounded hover:bg-amber-500/20 text-amber-600 dark:text-amber-400 border border-amber-500/30 transition-all cursor-pointer"
+                            title="AI 5W+H Decision Matrix"
+                          >
+                            🧠
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              if (onOpenOrderTicket) {
+                                onOpenOrderTicket({
+                                  symbol: c.symbol,
+                                  exchange: 'NSE',
+                                  price: c.current_price || c.entry_pivot,
+                                  stopLoss: c.stop_loss,
+                                  target: c.target_1,
+                                  target2: c.target_2,
+                                  targetMoonshot: c.target_moonshot,
+                                  _priceSource: 'INCUBATION_PIVOT',
+                                })
+                              }
+                            }}
+                            className="p-1 rounded hover:bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 transition-all cursor-pointer"
+                            title="Open Order Ticket"
+                          >
+                            ⚡
+                          </button>
+                          <button
+                            type="button"
+                            onClick={(e) => handleRemoveFromIncubation(c.symbol, e)}
+                            className="p-1 rounded hover:bg-rose-500/20 text-rose-500 border border-rose-500/30 transition-all cursor-pointer"
+                            title="Remove from Incubation"
+                          >
+                            ✕
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    )
+  }
+
+  // Render 100x & 1,000x Century Compounder Discovery Board
+  const renderCenturyBoard = () => {
+    return (
+      <div className="space-y-4">
+        {/* Banner with Twin Engine explanation & Market-Wide DB Control */}
+        <div className="p-4 rounded-xl border border-emerald-500/30 bg-emerald-500/10 flex flex-col gap-3 font-ui shadow-xs">
+          <div className="flex flex-col md:flex-row items-start md:items-center justify-between gap-3">
+            <div>
+              <div className="flex items-center gap-2">
+                <span className="text-xl">💎</span>
+                <h3 className="font-bold text-text text-sm">
+                  100x & 1,000x Century Compounder Discovery Terminal
+                </h3>
+                <span className="text-[10px] px-2 py-0.5 rounded-full font-mono bg-emerald-500/20 text-emerald-600 dark:text-emerald-400 font-bold border border-emerald-500/30">
+                  Twin Engines: PAT Growth × P/E Re-rating
+                </span>
+                <span className="text-[10px] px-2 py-0.5 rounded-full font-mono bg-panel text-muted border border-border">
+                  💾 SQLite Cached ({centuryCandidates.length} Active)
+                </span>
+              </div>
+              <p className="text-xs text-muted mt-1 max-w-3xl leading-relaxed">
+                Empirical Dalal Street compounding science (Titan, Bajaj Finance, Trent, Astral).
+                Evaluates Micro/Smallcap market cap headroom, operating leverage inflection, Buffett-Mauboussin reinvestment (ROCE &gt; 22%),
+                and forensic fortress integrity, with strict Anti-FOMO fair-value accumulation boundaries.
+              </p>
+            </div>
+
+            {/* Fast Trigger Actions */}
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => loadCenturyCompounders(centuryUniverse)}
+                disabled={isLoadingCentury || isSyncingMarket}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-emerald-500/40 bg-emerald-500/20 text-xs font-bold text-emerald-600 dark:text-emerald-400 hover:bg-emerald-500/30 transition-all cursor-pointer whitespace-nowrap shadow-xs"
+                title="Instant query cached compounders in under 50ms"
+              >
+                <span className={isLoadingCentury ? 'animate-spin' : ''}>⚡</span>
+                <span>{isLoadingCentury ? 'Querying...' : 'Instant Query (<50ms)'}</span>
+              </button>
+            </div>
+          </div>
+
+          {/* Market-wide Controls Row */}
+          <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-emerald-500/20 text-xs">
+            <div className="flex items-center gap-2">
+              <span className="text-muted font-mono text-[11px] uppercase tracking-wider">
+                Market Universe:
+              </span>
+              <select
+                value={centuryUniverse}
+                onChange={(e) => {
+                  setCenturyUniverse(e.target.value)
+                  loadCenturyCompounders(e.target.value)
+                }}
+                disabled={isSyncingMarket || isLoadingCentury}
+                className="select-input text-xs py-1 font-semibold"
+              >
+                <option value="microcap250">🌱 Nifty Microcap 250 (Emerging Champions)</option>
+                <option value="smallcap250">🚀 Nifty Smallcap 250 (Scale Compounders)</option>
+                <option value="nifty_total_market">🏛️ Nifty Total Market (750 Equities)</option>
+                <option value="all_nse_liquid">🇮🇳 All NSE Liquid (~2,100 Series EQ)</option>
+                <option value="bse_high_growth">💎 BSE High-Growth Micro & SME</option>
+              </select>
+
+              <button
+                type="button"
+                onClick={handleSyncEntireMarket}
+                disabled={isSyncingMarket || isLoadingCentury}
+                className="flex items-center gap-1.5 px-3 py-1 rounded-lg border border-purple-500/40 bg-purple-500/15 text-xs font-bold text-purple-600 dark:text-purple-400 hover:bg-purple-500/25 transition-all cursor-pointer whitespace-nowrap shadow-xs"
+                title="Batch-sync and precompute entire Indian market universe into local SQLite store"
+              >
+                <span className={isSyncingMarket ? 'animate-spin' : ''}>💾</span>
+                <span>{isSyncingMarket ? 'Syncing Market...' : 'Sync Market into DB'}</span>
+              </button>
+            </div>
+
+            {syncMarketMsg && (
+              <span className="text-xs font-semibold text-emerald-600 dark:text-emerald-400 bg-emerald-500/15 border border-emerald-500/30 px-2.5 py-0.5 rounded-lg animate-pulse font-mono">
+                {syncMarketMsg}
+              </span>
+            )}
+          </div>
+        </div>
+
+        {/* Compounders Grid */}
+        {isLoadingCentury ? (
+          <div className="flex flex-col items-center justify-center h-64 gap-3">
+            <div className="w-8 h-8 rounded-full border-2 border-emerald-500 border-t-transparent animate-spin" />
+            <span className="text-xs font-mono text-muted tracking-wider uppercase">
+              Computing Twin Engines & Forensic Integrity...
+            </span>
+          </div>
+        ) : centuryCandidates.length === 0 ? (
+          <div className="flex flex-col items-center justify-center h-64 text-center">
+            <span className="text-3xl mb-2">💎</span>
+            <span className="text-sm font-bold text-text">No Candidates Meeting 100x Criteria</span>
+            <p className="text-xs text-muted mt-1">Try recalculating or scanning a wider universe.</p>
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            {centuryCandidates.map((c) => {
+              const te = c.twin_engines || {}
+              const af = c.anti_fomo || {}
+              return (
+                <div
+                  key={c.symbol}
+                  className="rounded-xl border border-border bg-surface p-4 space-y-3.5 shadow-card hover:border-emerald-500/40 transition-all"
+                >
+                  {/* Card Header */}
+                  <div className="flex items-start justify-between">
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <span className="font-bold text-base text-text">{c.symbol}</span>
+                        <span className="text-xs font-mono text-muted">₹{c.ltp}</span>
+                        <span className="text-[10px] font-bold px-2 py-0.5 rounded border uppercase font-mono bg-purple-500/15 text-purple-700 dark:text-purple-300 border-purple-500/30">
+                          {c.compounder_tier}
+                        </span>
+                      </div>
+                      <p className="text-[11px] text-muted font-ui mt-0.5">
+                        Current MCap: ₹{te.current_market_cap_cr ? te.current_market_cap_cr.toLocaleString() : '—'} Cr • Current P/E: {te.current_pe}x
+                      </p>
+                    </div>
+
+                    <div className="text-right">
+                      <div className="flex items-center justify-end gap-1">
+                        <span className="text-xl font-black text-emerald-600 dark:text-emerald-400 font-mono">
+                          {te.total_projected_multiple}x
+                        </span>
+                      </div>
+                      <span className="text-[9px] text-muted font-mono uppercase">
+                        Projected 10Y Multiple
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Twin Engines Breakdown */}
+                  <div className="grid grid-cols-2 gap-2 text-xs font-mono p-2.5 rounded-lg bg-panel border border-border">
+                    <div>
+                      <span className="text-[9.5px] text-muted font-ui block">ENGINE 1: PAT EXPANSION</span>
+                      <span className="font-bold text-text">
+                        {te.pat_expansion_multiple}x ({te.forecast_pat_cagr_pct}% CAGR)
+                      </span>
+                    </div>
+                    <div>
+                      <span className="text-[9.5px] text-muted font-ui block">ENGINE 2: P/E RE-RATING</span>
+                      <span className="font-bold text-amber-600 dark:text-amber-400">
+                        {te.pe_expansion_multiple}x ({te.current_pe}x ➔ {te.projected_terminal_pe}x)
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Badges */}
+                  <div className="flex flex-wrap gap-1.5 font-ui">
+                    {c.catalyst_badges?.map((b, i) => (
+                      <span
+                        key={i}
+                        className="text-[9.5px] font-semibold px-2 py-0.5 rounded bg-elevated border border-border text-text font-mono"
+                      >
+                        {b}
+                      </span>
+                    ))}
+                  </div>
+
+                  {/* Anti-FOMO Execution Box */}
+                  <div className="p-3 rounded-lg border border-border/80 bg-surface/80 space-y-2">
+                    <div className="flex items-center justify-between font-ui">
+                      <span className="text-[10.5px] font-bold text-text flex items-center gap-1">
+                        <span>🛡️</span>
+                        <span>Anti-FOMO Accumulation Blueprint</span>
+                      </span>
+                      <span className={`text-[10px] font-bold px-2 py-0.5 rounded font-mono ${
+                        af.action_directive === 'ACCUMULATE_FAIR_VALUE'
+                          ? 'bg-emerald-500/20 text-emerald-600 dark:text-emerald-400'
+                          : af.action_directive === 'WAIT_FOR_PULLBACK'
+                          ? 'bg-rose-500/20 text-rose-600 dark:text-rose-400'
+                          : 'bg-amber-500/20 text-amber-600 dark:text-amber-400'
+                      }`}>
+                        {af.action_directive}
+                      </span>
+                    </div>
+
+                    <div className="grid grid-cols-3 gap-2 text-xs font-mono">
+                      <div>
+                        <span className="text-[9px] text-muted font-ui block">FAIR VALUE ZONE</span>
+                        <span className="font-bold text-text">
+                          ₹{af.accumulate_low} – ₹{af.accumulate_high}
+                        </span>
+                      </div>
+                      <div>
+                        <span className="text-[9px] text-rose-500 font-ui block">NO CHASE CEILING</span>
+                        <span className="font-bold text-rose-600 dark:text-rose-400">
+                          ₹{af.no_chase_boundary}
+                        </span>
+                      </div>
+                      <div>
+                        <span className="text-[9px] text-cyan-600 dark:text-cyan-400 font-ui block">PULLBACK LIMIT</span>
+                        <span className="font-bold text-cyan-600 dark:text-cyan-400">
+                          ₹{af.pullback_limit_entry}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Action Buttons */}
+                  <div className="flex items-center justify-between pt-1">
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-[10.5px] font-mono text-muted">
+                        Score: <strong className="text-text">{c.century_score}/100</strong>
+                      </span>
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => handleAddToIncubation({
+                          symbol: c.symbol,
+                          name: c.symbol,
+                          sector: 'Quality Microcap',
+                          horizon: 'LONG_TERM',
+                          cycle_state: 'STAGE_1_ACCUMULATION',
+                          eta_days: 15,
+                          eta_label: 'Stage 1 Base',
+                          entry_price: af.fair_value_anchor || c.ltp,
+                          ltp: c.ltp,
+                          stop_loss: af.invalidation_stop,
+                          target_1: af.fair_value_anchor * 2.0,
+                          target_2: af.fair_value_anchor * 4.0,
+                          target_moonshot: af.fair_value_anchor * 10.0,
+                          risk_reward_ratio: 4.5,
+                          inflection_score: c.century_score,
+                          primary_archetype: 'STAGE_1_TO_2_EXPANSION',
+                          catalyst_badges: c.catalyst_badges || [],
+                          catalyst_summary: c.summary,
+                        })}
+                        className="px-2.5 py-1 rounded-lg border border-purple-500/40 bg-purple-500/15 text-xs font-semibold text-purple-600 dark:text-purple-400 hover:bg-purple-500/25 transition-all cursor-pointer flex items-center gap-1"
+                        title="Retain in Incubation Pipeline"
+                      >
+                        <span>📌</span>
+                        <span>Retain</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (onOpenOrderTicket) {
+                            onOpenOrderTicket({
+                              symbol: c.symbol,
+                              exchange: 'NSE',
+                              price: af.accumulate_low || c.ltp,
+                              stopLoss: af.invalidation_stop,
+                              target: af.fair_value_anchor * 2.0,
+                              target2: af.fair_value_anchor * 4.0,
+                              targetMoonshot: af.fair_value_anchor * 10.0,
+                              _priceSource: 'FAIR_VALUE_POC',
+                            })
+                          }
+                        }}
+                        className="px-3 py-1 rounded-lg border border-emerald-500/30 bg-emerald-500/15 text-xs font-bold text-emerald-700 dark:text-emerald-300 hover:bg-emerald-500/25 transition-all cursor-pointer flex items-center gap-1"
+                      >
+                        <span>⚡</span>
+                        <span>Accumulate</span>
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        )}
+      </div>
+    )
+  }
+
   return (
     <div className="flex flex-col flex-1 h-full overflow-hidden select-none bg-void text-text">
       {/* ── ROW 1: MASTER CONTROLS & COMMAND DECK (Streamlined 36px) ─────────────────────────────── */}
       <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-1.5 border-b border-border bg-surface text-xs">
-        {/* Left: Title & Status */}
+        {/* Left: Title & Mode Toggle (Radar vs Incubation) */}
         <div className="flex items-center gap-2">
-          <span className="text-base">📡</span>
-          <h1 className="text-xs font-bold tracking-wide uppercase font-mono text-text">
-            Inflection Radar
-          </h1>
+          <div className="flex items-center rounded-lg border border-border p-0.5 bg-elevated">
+            <button
+              type="button"
+              onClick={() => setActiveMainTab('scanner')}
+              className={`text-xs px-2.5 py-1 rounded transition-all cursor-pointer flex items-center gap-1.5 ${
+                activeMainTab === 'scanner'
+                  ? 'font-bold bg-panel text-amber-600 dark:text-amber-400 shadow-xs'
+                  : 'text-muted hover:text-text'
+              }`}
+            >
+              <span>📡</span>
+              <span>Inflection Radar</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setActiveMainTab('incubation')}
+              className={`text-xs px-2.5 py-1 rounded transition-all cursor-pointer flex items-center gap-1.5 ${
+                activeMainTab === 'incubation'
+                  ? 'font-bold bg-panel text-purple-600 dark:text-purple-400 shadow-xs'
+                  : 'text-muted hover:text-text'
+              }`}
+            >
+              <span>📌</span>
+              <span>Incubation Pipeline</span>
+              {incubatedCandidates.length > 0 && (
+                <span className="text-[9px] px-1.5 py-0.2 rounded-full font-mono bg-purple-500/20 text-purple-600 dark:text-purple-400 font-bold">
+                  {incubatedCandidates.length}
+                </span>
+              )}
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setActiveMainTab('century')
+                if (centuryCandidates.length === 0) loadCenturyCompounders()
+              }}
+              className={`text-xs px-2.5 py-1 rounded transition-all cursor-pointer flex items-center gap-1.5 ${
+                activeMainTab === 'century'
+                  ? 'font-bold bg-panel text-emerald-600 dark:text-emerald-400 shadow-xs'
+                  : 'text-muted hover:text-text'
+              }`}
+            >
+              <span>💎</span>
+              <span>100x Century Compounders</span>
+            </button>
+          </div>
+
           <Badge variant="emerald" size="xs">
             5W+H
           </Badge>
@@ -733,15 +1448,20 @@ export default function InflectionScannerView({
             <span>{isSyncingEod ? 'Syncing...' : 'Sync EOD'}</span>
           </button>
 
-          {/* Rescan Button */}
+          {/* Scan / Rescan Button */}
           <button
             type="button"
             onClick={() => executeScan(universe, minTurnoverCr, capTierFilter, true)}
             disabled={isScanning}
-            className="flex items-center gap-1 text-xs font-bold px-2.5 py-1 rounded-lg border border-gold/40 bg-gold/15 text-amber-600 dark:text-amber-400 hover:bg-gold/25 shadow-xs cursor-pointer transition-all"
+            className={`flex items-center gap-1.5 text-xs font-bold px-3 py-1 rounded-lg border transition-all cursor-pointer shadow-xs ${
+              !scanResult
+                ? 'border-gold bg-gold/25 text-amber-700 dark:text-amber-300 hover:bg-gold/35 ring-1 ring-gold/50 animate-pulse font-bold'
+                : 'border-gold/40 bg-gold/15 text-amber-600 dark:text-amber-400 hover:bg-gold/25'
+            }`}
+            title={scanResult ? 'Re-run inflection scan across target universe' : 'Run inflection scan on target universe'}
           >
             <span className={isScanning ? 'animate-spin' : ''}>🔄</span>
-            <span>{isScanning ? 'Scanning...' : 'Rescan'}</span>
+            <span>{isScanning ? 'Scanning...' : scanResult ? 'Rescan' : 'Scan Market'}</span>
           </button>
         </div>
       </div>
@@ -749,6 +1469,39 @@ export default function InflectionScannerView({
       {/* ── ROW 2: ARCHETYPES, TIMING, CONDITIONS & LIVE METRICS (Streamlined 32px) ─────────────────────── */}
       <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-1 border-b border-border bg-panel text-xs">
         <div className="flex flex-wrap items-center gap-1.5 overflow-x-auto">
+          {/* Horizon Pills (Short, Mid, Long Multibagger) */}
+          <div className="flex items-center gap-1 border-r border-border/60 pr-2 mr-1">
+            {[
+              { id: 'ALL', label: 'All', icon: '🌐' },
+              { id: 'SHORT_TERM', label: 'Short (1–4W)', icon: '⚡' },
+              { id: 'MID_TERM', label: 'Mid (1–6M)', icon: '📈' },
+              { id: 'LONG_TERM', label: 'Multibagger (1–3Y)', icon: '💎' },
+            ].map((tab) => {
+              const active = horizonFilter === tab.id
+              const count = horizonCounts[tab.id] ?? 0
+              return (
+                <button
+                  key={tab.id}
+                  type="button"
+                  onClick={() => setHorizonFilter(tab.id)}
+                  className={`flex items-center gap-1 px-2 py-0.5 rounded-md text-[10.5px] font-semibold transition-all cursor-pointer ${
+                    active
+                      ? 'bg-purple-500/20 border border-purple-500 text-purple-600 dark:text-purple-400 shadow-xs font-bold'
+                      : 'bg-elevated/70 border border-border/50 text-muted hover:text-text'
+                  }`}
+                >
+                  <span>{tab.icon}</span>
+                  <span>{tab.label}</span>
+                  {count > 0 && (
+                    <span className="text-[9px] px-1 rounded-full font-mono bg-surface text-text">
+                      {count}
+                    </span>
+                  )}
+                </button>
+              )
+            })}
+          </div>
+
           {/* Archetype Chips */}
           <div className="flex items-center gap-1">
             {ARCHETYPE_TABS.map((tab) => {
@@ -902,12 +1655,37 @@ export default function InflectionScannerView({
 
       {/* ── MAIN CANDIDATES VIEW CONTAINER ──────────────────────────────── */}
       <div className="flex-1 overflow-y-auto p-4">
-        {isScanning && filteredCandidates.length === 0 ? (
+        {activeMainTab === 'incubation' ? (
+          renderIncubationBoard()
+        ) : activeMainTab === 'century' ? (
+          renderCenturyBoard()
+        ) : isScanning && filteredCandidates.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-64 gap-3">
             <div className="w-8 h-8 rounded-full border-2 border-gold border-t-transparent animate-spin" />
             <span className="text-xs font-mono tracking-wider text-muted uppercase">
               Screening 5 Inflection Engines & Computing Confluences...
             </span>
+          </div>
+        ) : !scanResult ? (
+          <div className="flex flex-col items-center justify-center h-80 rounded-2xl border border-dashed border-border bg-surface/50 text-center p-6 my-4 shadow-sm font-ui">
+            <div className="w-14 h-14 rounded-2xl bg-amber-500/10 border border-amber-500/25 flex items-center justify-center text-2xl mb-3 shadow-inner">
+              📡
+            </div>
+            <h3 className="text-sm font-bold text-text">
+              Strategic Inflection Radar Standby
+            </h3>
+            <p className="text-xs text-muted mt-1.5 max-w-md leading-relaxed">
+              Target universe configured to <strong className="text-text font-mono">{universe}</strong> (Liquidity Floor: ₹{minTurnoverCr} Cr).
+              Click <strong className="text-amber-500">Scan Market</strong> when ready to evaluate 5 quantitative inflection engines (VCP, Volume Profiles, Wyckoff, Super-Trend, Anti-FOMO).
+            </p>
+            <button
+              type="button"
+              onClick={() => executeScan(universe, minTurnoverCr, capTierFilter, true)}
+              className="mt-4 flex items-center gap-2 text-xs font-bold px-5 py-2.5 rounded-xl border border-gold/40 bg-gold/15 text-amber-600 dark:text-amber-400 hover:bg-gold/25 shadow-md hover:shadow-gold/10 transition-all cursor-pointer font-mono"
+            >
+              <span>⚡</span>
+              <span>Scan Market ({universe})</span>
+            </button>
           </div>
         ) : filteredCandidates.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-64 text-center">
@@ -966,6 +1744,28 @@ export default function InflectionScannerView({
                               <span className="font-bold text-text text-xs group-hover:text-amber-600 dark:group-hover:text-amber-400 transition-colors">
                                 {c.symbol}
                               </span>
+                              {c.horizon && (
+                                <span
+                                  className={`text-[8px] font-bold px-1.5 py-0.2 rounded border uppercase font-mono ${
+                                    c.horizon === 'LONG_TERM'
+                                      ? 'bg-purple-500/15 text-purple-700 dark:text-purple-300 border-purple-500/30'
+                                      : c.horizon === 'SHORT_TERM'
+                                      ? 'bg-cyan-500/15 text-cyan-700 dark:text-cyan-300 border-cyan-500/30'
+                                      : 'bg-blue-500/15 text-blue-700 dark:text-blue-300 border-blue-500/30'
+                                  }`}
+                                  title={`Investment Horizon: ${c.horizon}`}
+                                >
+                                  {c.horizon === 'LONG_TERM' ? '💎 MULTIBAGGER' : c.horizon === 'SHORT_TERM' ? '⚡ SHORT' : '📈 MID'}
+                                </span>
+                              )}
+                              {c.eta_label && (
+                                <span
+                                  className="text-[8px] font-mono px-1 py-0.2 rounded bg-amber-500/10 text-amber-700 dark:text-amber-400 border border-amber-500/20"
+                                  title={`Cycle ETA: ${c.eta_label}`}
+                                >
+                                  {c.eta_label}
+                                </span>
+                              )}
                               {c.executive_verdict && (
                                 <span
                                   className={`text-[8px] font-bold px-1.5 py-0.2 rounded uppercase font-mono ${
@@ -1191,6 +1991,14 @@ export default function InflectionScannerView({
                           </button>
                           <button
                             type="button"
+                            onClick={(e) => handleAddToIncubation(c, e)}
+                            className="p-1 rounded hover:bg-purple-500/20 text-purple-400 border border-purple-500/30 transition-all cursor-pointer"
+                            title="Retain in Cycle Incubation Pipeline"
+                          >
+                            📌
+                          </button>
+                          <button
+                            type="button"
                             onClick={() => {
                               if (onNavigateToTerminal) onNavigateToTerminal(c.symbol)
                               else setActiveView('terminal')
@@ -1281,6 +2089,28 @@ export default function InflectionScannerView({
 
                 {/* Badges Strip */}
                 <div className="flex flex-wrap items-center gap-1.5">
+                  {c.horizon && (
+                    <span
+                      className={`text-[9px] font-bold px-1.5 py-0.5 rounded border uppercase font-mono ${
+                        c.horizon === 'LONG_TERM'
+                          ? 'bg-purple-500/15 text-purple-700 dark:text-purple-300 border-purple-500/30'
+                          : c.horizon === 'SHORT_TERM'
+                          ? 'bg-cyan-500/15 text-cyan-700 dark:text-cyan-300 border-cyan-500/30'
+                          : 'bg-blue-500/15 text-blue-700 dark:text-blue-300 border-blue-500/30'
+                      }`}
+                      title={`Horizon: ${c.horizon}`}
+                    >
+                      {c.horizon === 'LONG_TERM' ? '💎 MULTIBAGGER' : c.horizon === 'SHORT_TERM' ? '⚡ SHORT' : '📈 MID'}
+                    </span>
+                  )}
+                  {c.eta_label && (
+                    <span
+                      className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-700 dark:text-amber-400 border border-amber-500/20"
+                      title={`ETA: ${c.eta_label}`}
+                    >
+                      {c.eta_label}
+                    </span>
+                  )}
                   {c.cap_tier && (
                     <span
                       className={`text-[9px] font-bold px-1.5 py-0.5 rounded border uppercase font-mono ${
@@ -1422,6 +2252,15 @@ export default function InflectionScannerView({
                   </button>
 
                   <div className="flex items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={(e) => handleAddToIncubation(c, e)}
+                      className="px-2 py-1.5 rounded-lg border border-purple-500/40 bg-purple-500/15 text-xs font-semibold text-purple-600 dark:text-purple-400 hover:bg-purple-500/25 transition-all cursor-pointer flex items-center gap-1"
+                      title="Retain in Cycle Incubation Pipeline"
+                    >
+                      <span>📌</span>
+                      <span>Retain</span>
+                    </button>
                     <button
                       type="button"
                       onClick={() => {

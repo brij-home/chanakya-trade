@@ -5,12 +5,12 @@ Options Gamma Blast detector (Early Warning & Ignited triggers on call/put write
 from __future__ import annotations
 
 import logging
-import uuid
 from datetime import datetime
 from typing import Any, Optional
 from zoneinfo import ZoneInfo
 
 from engine.alert_expiry import classify_expiry_type
+from engine.alert_identity import generate_alert_id
 from engine.alert_model import AutoAlert
 
 import time
@@ -119,6 +119,8 @@ def detect_gamma_blast(
     vwap: Optional[float] = None,
     day_high: Optional[float] = None,
     day_low: Optional[float] = None,
+    prev_day_high: Optional[float] = None,
+    prev_day_low: Optional[float] = None,
 ) -> list[AutoAlert]:
     """
     Evaluates options chain for explosive Gamma Blast early-warning and ignite triggers.
@@ -169,21 +171,94 @@ def detect_gamma_blast(
     effective_vwap = vwap if (vwap and vwap > 0) else spot
 
     # ── PDH / PDL Liquidity Sweep Detection (Fix 3) ────────────────────────────
-    # Detects when spot has swept the day's high (for PE) or day's low (for CE)
-    # and rejected — the highest-conviction SMC reversal signal.
-    # sweep_pct: how close spot came to tagging the intraday extreme.
-    _pdh_sweep_active = bool(
-        day_high
-        and day_high > 0
-        and spot <= day_high  # spot has pulled back from the high
-        and spot >= (day_high * 0.997)  # within 0.3% of day_high = sweep territory
+    # Detects when spot has swept previous session or intraday extreme and rejected/bounced
+    # — the highest-conviction SMC reversal signal.
+    # An active sweep REQUIRES:
+    #   1. Extreme was tested (within 0.15% or pierced)
+    #   2. Spot has actively bounced/pulled back >= 0.10% (cannot be resting at the extreme tick)
+    #   3. Spot is holding on the safe side of the key reference level
+    _spot_bounce_from_low = ((spot - day_low) / max(1.0, spot) * 100) if (day_low and spot >= day_low) else 0.0
+    _spot_pullback_from_high = ((day_high - spot) / max(1.0, spot) * 100) if (day_high and spot <= day_high) else 0.0
+
+    _pdl_tested = bool(
+        prev_day_low and prev_day_low > 0
+        and day_low and day_low <= (prev_day_low * 1.002)
+        and (prev_day_low - day_low) / prev_day_low * 100 <= 0.40
+    ) or bool(
+        day_low and day_low > 0 and (spot - day_low) / max(1.0, spot) * 100 >= 0.15
     )
+
     _pdl_sweep_active = bool(
-        day_low
-        and day_low > 0
-        and spot >= day_low  # spot has bounced off the low
-        and spot <= (day_low * 1.003)  # within 0.3% of day_low = sweep territory
+        _pdl_tested
+        and _spot_bounce_from_low >= 0.10  # Requires verified bounce off session low!
+        and (not prev_day_low or spot >= prev_day_low * 0.999)  # Reclaiming back above PDL
     )
+
+    _pdh_tested = bool(
+        prev_day_high and prev_day_high > 0
+        and day_high and day_high >= (prev_day_high * 0.998)
+        and (day_high - prev_day_high) / prev_day_high * 100 <= 0.40
+    ) or bool(
+        day_high and day_high > 0 and (day_high - spot) / max(1.0, spot) * 100 >= 0.15
+    )
+
+    _pdh_sweep_active = bool(
+        _pdh_tested
+        and _spot_pullback_from_high >= 0.10  # Requires verified rejection off session high!
+        and (not prev_day_high or spot <= prev_day_high * 1.001)  # Holding back below PDH
+    )
+
+    # ── PDL / PDH Proximity Gates (Previous Session Levels) ─────────────────────
+    # When current spot is very close to yesterday's key levels, the dynamics change:
+    #
+    # Near PDL (Previous Day Low):
+    #   → Buying PE risks hitting a major demand wall right below → suppress PE (opposing demand)
+    #   → CE bounce off PDL is a high-probability structural reversal → boost CE conviction
+    #
+    # Near PDH (Previous Day High):
+    #   → Buying CE risks hitting a major supply wall right above → suppress CE (opposing supply)
+    #   → PE rejection at PDH is a high-probability structural reversal → boost PE conviction
+    #
+    # Bypass: If a sweep is already confirmed (_pdl_sweep_active / _pdh_sweep_active),
+    # these gates are skipped — the sweep itself confirms directional intent.
+    _PDL_PROXIMITY_THRESHOLD = 0.0025  # 0.25% of spot = "at PDL"
+    _PDH_PROXIMITY_THRESHOLD = 0.0025  # 0.25% of spot = "at PDH"
+
+    _near_pdl = bool(
+        prev_day_low
+        and prev_day_low > 0
+        and spot >= prev_day_low  # spot is above PDL (not broken yet)
+        and (spot - prev_day_low) / spot <= _PDL_PROXIMITY_THRESHOLD
+    )
+    _near_pdh = bool(
+        prev_day_high
+        and prev_day_high > 0
+        and spot <= prev_day_high  # spot is below PDH (not broken yet)
+        and (prev_day_high - spot) / spot <= _PDH_PROXIMITY_THRESHOLD
+    )
+
+    # For PE: being at PDL means the demand wall is right below — extra headroom risk
+    # Bypass when _pdl_sweep_active (spot has already swept and bounced: that IS the CE setup)
+    _pe_near_pdl_suppressed = _near_pdl and not _pdl_sweep_active
+
+    # For CE: being at PDH means the supply wall is right above — extra headroom risk
+    # Bypass when _pdh_sweep_active (spot has already swept and wicked: that IS the PE setup)
+    _ce_near_pdh_suppressed = _near_pdh and not _pdh_sweep_active
+
+    if _near_pdl and is_index:
+        logger.debug(
+            f"[GammaBlast] {underlying}: Near PDL ₹{prev_day_low:,.1f} "  # type: ignore[str-format]
+            f"(spot ₹{spot:,.1f}, gap {((spot - prev_day_low) / spot * 100):.3f}%). "
+            f"PE suppressed={'Yes' if _pe_near_pdl_suppressed else 'No (sweep active)'}. "
+            f"CE conviction boosted +6."
+        )
+    if _near_pdh and is_index:
+        logger.debug(
+            f"[GammaBlast] {underlying}: Near PDH ₹{prev_day_high:,.1f} "  # type: ignore[str-format]
+            f"(spot ₹{spot:,.1f}, gap {((prev_day_high - spot) / spot * 100):.3f}%). "
+            f"CE suppressed={'Yes' if _ce_near_pdh_suppressed else 'No (sweep active)'}. "
+            f"PE conviction boosted +6."
+        )
 
     # ── Major Open Interest Concentration Walls ─────────────────────────────────
     # The strike with maximum Call OI acts as an institutional resistance ceiling.
@@ -380,7 +455,7 @@ def detect_gamma_blast(
         is_high_turnover = (
             vol_oi_ratio >= (0.80 if is_opening_drive else 1.4) or volume >= min_turnover_vol
         )
-        spot_above_vwap = spot >= (effective_vwap * 0.998)
+        spot_above_vwap = spot >= (effective_vwap * (1.0 if is_index else 0.998))
         # PDL sweep bypass: if spot tagged day_low and bounced, it's a structural CE trigger
         # regardless of VWAP position (covers gap-fill bounce + demand OB scenarios)
         if _pdl_sweep_active and not spot_above_vwap:
@@ -393,6 +468,16 @@ def detect_gamma_blast(
         # Opposing Day High collision & VWAP overextension filter for CE:
         if effective_vwap > 0 and (spot - effective_vwap) / effective_vwap * 100 > 0.65:
             continue  # Extended > 0.65% above VWAP: Climax exhaustion risk
+
+        # PDH Proximity Suppression for CE:
+        # If spot is within 0.25% of PDH and no confirmed PDH sweep, CE is colliding into
+        # a major previous-session supply wall — high probability of rejection.
+        if _ce_near_pdh_suppressed:
+            logger.debug(
+                f"[GammaBlast CE] Suppressed {contract_sym}: Spot ₹{spot:,.1f} within "
+                f"0.25% of PDH ₹{prev_day_high:,.1f} (Opposing Supply Collision — prior session wall)"
+            )
+            continue
         if (
             day_high
             and spot < day_high
@@ -504,6 +589,14 @@ def detect_gamma_blast(
                     is_wall_breakout=is_ce_wall_breakout,
                     is_physical_week=is_phys_week,
                 )
+
+                # PDL Proximity Boost: CE at PDL is a structural demand bounce — extra conviction
+                if _near_pdl and is_index:
+                    confidence = min(98, confidence + 6)
+                    logger.debug(
+                        f"[GammaBlast CE] +6 conviction boost for {contract_sym}: "
+                        f"Spot near PDL ₹{prev_day_low:,.1f} (demand bounce setup)"
+                    )
 
                 mkt_status = get_market_status(opt_exchange)
                 lot_sz = get_lot_size(underlying)
@@ -620,7 +713,11 @@ def detect_gamma_blast(
 
             alerts.append(
                 AutoAlert(
-                    alert_id=f"aa-gb-ce-{underlying}-{int(strike)}-{uuid.uuid4().hex[:6]}",
+                    alert_id=generate_alert_id(
+                        underlying,
+                        "GAMMA_BLAST",
+                        variant=f"ce-{int(strike)}",
+                    ),
                     alert_type="GAMMA_BLAST",
                     stage=stage,
                     symbol=underlying,
@@ -675,6 +772,10 @@ def detect_gamma_blast(
                         "pdl_sweep": _pdl_sweep_active,
                         "day_low": day_low,
                         "day_high": day_high,
+                        "prev_day_low": prev_day_low,
+                        "prev_day_high": prev_day_high,
+                        "near_pdl": _near_pdl,
+                        "near_pdh": _near_pdh,
                         "wall_breakout": is_ce_wall_breakout,
                         "physical_settlement_week": is_phys_week,
                         "physical_settlement_warning": (
@@ -911,6 +1012,16 @@ def detect_gamma_blast(
         # Opposing Day Low collision & VWAP overextension filter for PE:
         if effective_vwap > 0 and (effective_vwap - spot) / effective_vwap * 100 > 0.65:
             continue  # Extended > 0.65% below VWAP: Capitulation exhaustion risk
+
+        # PDL Proximity Suppression for PE:
+        # If spot is within 0.25% above PDL and no confirmed PDL bounce, PE is colliding into
+        # a major previous-session demand wall right below — high probability of support hold.
+        if _pe_near_pdl_suppressed:
+            logger.debug(
+                f"[GammaBlast PE] Suppressed {contract_sym}: Spot ₹{spot:,.1f} within "
+                f"0.25% of PDL ₹{prev_day_low:,.1f} (Opposing Demand Collision — prior session floor)"
+            )
+            continue
         if (
             day_low
             and spot > day_low
@@ -1022,6 +1133,14 @@ def detect_gamma_blast(
                     is_wall_breakout=is_pe_wall_breakout,
                     is_physical_week=is_phys_week,
                 )
+
+                # PDH Proximity Boost: PE at PDH is a structural supply rejection — extra conviction
+                if _near_pdh and is_index:
+                    confidence = min(98, confidence + 6)
+                    logger.debug(
+                        f"[GammaBlast PE] +6 conviction boost for {contract_sym}: "
+                        f"Spot near PDH ₹{prev_day_high:,.1f} (supply rejection setup)"
+                    )
 
                 mkt_status = get_market_status(opt_exchange)
                 lot_sz = get_lot_size(underlying)
@@ -1140,7 +1259,11 @@ def detect_gamma_blast(
 
             alerts.append(
                 AutoAlert(
-                    alert_id=f"aa-gb-pe-{underlying}-{int(strike)}-{uuid.uuid4().hex[:6]}",
+                    alert_id=generate_alert_id(
+                        underlying,
+                        "GAMMA_BLAST",
+                        variant=f"pe-{int(strike)}",
+                    ),
                     alert_type="GAMMA_BLAST",
                     stage=stage,
                     symbol=underlying,
@@ -1196,6 +1319,10 @@ def detect_gamma_blast(
                         "pdl_sweep": _pdl_sweep_active,
                         "day_high": day_high,
                         "day_low": day_low,
+                        "prev_day_low": prev_day_low,
+                        "prev_day_high": prev_day_high,
+                        "near_pdl": _near_pdl,
+                        "near_pdh": _near_pdh,
                         "choch": _pdh_sweep_active,
                         "wall_breakout": is_pe_wall_breakout,
                         "physical_settlement_week": is_phys_week,

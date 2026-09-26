@@ -45,6 +45,8 @@ MAX_SCORE_PER_FACTOR = 10
 _CONVICTION_CACHE: dict[str, tuple[float, Any]] = {}
 _CONVICTION_LOCK = threading.Lock()
 _CONVICTION_CACHE_TTL = 45.0  # 45-second TTL cache for institutional factor aggregation
+_EVENT_CALENDAR_CACHE: dict[str, tuple[float, Any]] = {}
+_EVENT_CALENDAR_CACHE_TTL = 900.0  # 15-minute TTL cache for event calendar
 
 
 @dataclass
@@ -425,7 +427,7 @@ def _score_india_vix_regime(vix: Optional[float] = None) -> FactorScore:
         vix_now = vix
         vix_direction = "STABLE"
 
-        if vix_now is None:
+        if vix_now is None and is_testing:
             from market.indices import get_vix
 
             vix_now = get_vix()
@@ -452,6 +454,10 @@ def _score_india_vix_regime(vix: Optional[float] = None) -> FactorScore:
                             vix_direction = "FALLING"
                         elif chg > 0.5:
                             vix_direction = "RISING"
+                elif vix_now is None:
+                    from market.indices import get_vix
+
+                    vix_now = get_vix()
             except Exception:
                 pass
 
@@ -526,11 +532,23 @@ def _score_india_vix_regime(vix: Optional[float] = None) -> FactorScore:
 # ── AXIS 3: OPTIONS INTELLIGENCE ─────────────────────────────────────────────
 
 
-def _score_gex_posture(gex_posture: Optional[str] = None) -> FactorScore:
+def _score_gex_posture(
+    gex_posture: Optional[str] = None, underlying: Optional[str] = None
+) -> FactorScore:
     """
     Factor 5: GEX Dealer Positioning.
     Measures market maker hedging requirement (flow-driven, not trend-driven).
     """
+    if gex_posture is None and underlying:
+        try:
+            from analysis.gex import get_gex_analysis
+
+            gex_data = get_gex_analysis(underlying)
+            if isinstance(gex_data, dict) and gex_data.get("regime"):
+                gex_posture = str(gex_data["regime"]).upper()
+        except Exception:
+            pass
+
     score = 5
     details = []
 
@@ -1024,6 +1042,15 @@ def _score_event_calendar() -> FactorScore:
     Factor 11: Event Calendar Clarity (36-hour window).
     STRICTER scoring: defaults to neutral (not bullish) when data is unavailable.
     """
+    import os
+
+    is_testing = bool(os.environ.get("CHANAKYA_TESTING") or os.environ.get("PYTEST_CURRENT_TEST"))
+    now_ts = time.time()
+    if not is_testing and "event_calendar" in _EVENT_CALENDAR_CACHE:
+        cached_ts, cached_score = _EVENT_CALENDAR_CACHE["event_calendar"]
+        if now_ts - cached_ts < _EVENT_CALENDAR_CACHE_TTL:
+            return cached_score
+
     try:
         from market.events import get_upcoming_events
         from datetime import datetime, timedelta
@@ -1065,7 +1092,7 @@ def _score_event_calendar() -> FactorScore:
             signal = "BEARISH"
             detail = f"{len(high_impact)} high-impact events: {', '.join(high_impact[:2])} (avoid naked positions)"
 
-        return FactorScore(
+        res = FactorScore(
             factor_id="event_calendar",
             label="Event Calendar Clarity (36h)",
             score=score,
@@ -1073,6 +1100,9 @@ def _score_event_calendar() -> FactorScore:
             detail=detail,
             axis="TIMING",
         )
+        if not is_testing:
+            _EVENT_CALENDAR_CACHE["event_calendar"] = (now_ts, res)
+        return res
     except Exception as e:
         logger.debug("event_calendar error: %s", e)
         return FactorScore(
@@ -1222,11 +1252,12 @@ def get_conviction_score(
 
     # ── Check 45s TTL Cache (Institutional factors are macro/daily/hourly) ───
     cache_key = f"{underlying.strip().upper()}_{round(spot, 1)}_{round(pcr, 2) if pcr else 0}_{gex_posture}_{round(vix, 1) if vix else 0}_{blast_score}_{data_state}"
+    clean_sym_key = underlying.strip().upper()
 
     now = time.time()
     if not is_testing:
         with _CONVICTION_LOCK:
-            cached = _CONVICTION_CACHE.get(cache_key)
+            cached = _CONVICTION_CACHE.get(cache_key) or _CONVICTION_CACHE.get(clean_sym_key)
             if cached is not None:
                 cached_time, cached_res = cached
                 if now - cached_time < _CONVICTION_CACHE_TTL:
@@ -1255,7 +1286,7 @@ def get_conviction_score(
         _score_global_macro(spot),
         _score_india_vix_regime(vix),
         # AXIS 3: OPTIONS
-        _score_gex_posture(gex_posture),
+        _score_gex_posture(gex_posture, underlying=underlying),
         _score_pcr_contrarian(pcr),
         _score_iv_skew(iv_skew),
         # AXIS 4: PRICE
@@ -1341,6 +1372,7 @@ def get_conviction_score(
     if not is_testing:
         with _CONVICTION_LOCK:
             _CONVICTION_CACHE[cache_key] = (now, res)
+            _CONVICTION_CACHE[clean_sym_key] = (now, res)
             if len(_CONVICTION_CACHE) > 50:
                 cutoff = now - _CONVICTION_CACHE_TTL
                 for k in list(_CONVICTION_CACHE.keys()):

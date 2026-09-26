@@ -5,11 +5,11 @@ Learned pattern coiling detector (Volume dry-up + Squeeze coiling + Order Block 
 from __future__ import annotations
 
 import logging
-import uuid
 from datetime import datetime
 from typing import Any, Optional
 from zoneinfo import ZoneInfo
 
+from engine.alert_identity import generate_alert_id
 from engine.alert_model import AutoAlert
 
 logger = logging.getLogger(__name__)
@@ -127,7 +127,7 @@ def detect_learned_pattern_coiling(
                 act_plan["trade_plan"] = tp_dict
 
             return AutoAlert(
-                alert_id=f"aa-coiling-{symbol}-{uuid.uuid4().hex[:6]}",
+                alert_id=generate_alert_id(symbol, "PATTERN_COILING", variant="coil"),
                 alert_type="PATTERN_COILING",
                 stage="EARLY_WARNING",
                 symbol=symbol,

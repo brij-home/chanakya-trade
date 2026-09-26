@@ -229,3 +229,32 @@ def test_fastapi_skill_endpoints(synthetic_vcp_breakout_df):
     assert chat_res.status_code == 200
     chat_data = chat_res.json()["data"]
     assert "answer" in chat_data
+
+
+def test_inflection_scanner_multi_horizon_and_catalysts(synthetic_vcp_breakout_df):
+    """Validates that candidate setups carry horizon, cycle state, eta label, and institutional badges."""
+    setup = evaluate_single_stock_inflection(
+        "TRENT", df=synthetic_vcp_breakout_df, allow_network=False
+    )
+    assert setup is not None
+    assert setup.horizon in ("SHORT_TERM", "MID_TERM", "LONG_TERM")
+    assert setup.cycle_state in ("TRIGGER_READY", "COILING_PIVOT", "PULLBACK_RETEST", "STAGE_1_ACCUMULATION", "STAGE_2_MARKUP")
+    assert len(setup.eta_label) > 0
+    assert isinstance(setup.catalyst_badges, list)
+    # TRENT is in canonical institutional catalysts with CRISIL upgrade
+    assert any("CRISIL" in b for b in setup.catalyst_badges)
+
+    # Test scan with horizon filtering
+    df_cache = {"TRENT": synthetic_vcp_breakout_df}
+    res = scan_inflections_universe(
+        universe="multibagger_hunters",
+        horizon_filter="ALL",
+        min_score=30,
+        max_results=10,
+        df_cache=df_cache,
+    )
+    assert "horizon_counts" in res.to_dict()
+    assert res.horizon_filter == "ALL"
+    assert len(res.candidates) >= 1
+    assert hasattr(res.candidates[0], "eta_label")
+

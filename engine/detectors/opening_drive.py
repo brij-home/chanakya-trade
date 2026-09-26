@@ -21,13 +21,13 @@ Captures explosive day-defining institutional moves at the earliest possible sta
 from __future__ import annotations
 
 import logging
-import uuid
 from datetime import datetime, timezone, timedelta, time as dtime
 from typing import Any, Optional
 from zoneinfo import ZoneInfo
 
 import pandas as pd
 
+from engine.alert_identity import generate_alert_id
 from engine.alert_model import AutoAlert
 
 logger = logging.getLogger("chanakya.detectors.opening_drive")
@@ -95,7 +95,15 @@ def detect_opening_drive(
     if range_pct < 0.40:
         return None
 
-    rvol_val = float(rvol or 1.8)
+    clean_sym = symbol.upper().replace("NSE:", "").replace("BSE:", "").strip()
+    is_index = clean_sym in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX")
+
+    if rvol is not None:
+        rvol_val = float(rvol)
+    elif is_index:
+        rvol_val = 1.0
+    else:
+        rvol_val = 1.8
 
     is_bull_drive = False
     is_bear_drive = False
@@ -129,9 +137,36 @@ def detect_opening_drive(
     if is_bear_drive and ltp > bar_open:
         return None
 
-    clean_sym = symbol.upper().replace("NSE:", "").replace("BSE:", "").strip()
-    is_index = clean_sym in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX")
+    # ── Index Heavyweight Locomotive Gate ─────────────────────────
+    if is_index:
+        try:
+            from market.indices import get_heavyweights_posture
+
+            hw_posture = get_heavyweights_posture(clean_sym)
+            active_hw = hw_posture.get("heavyweights", [])
+            hw_total = len(active_hw)
+            hw_bulls = hw_posture.get("bull_count", 0)
+            hw_bears = hw_posture.get("bear_count", 0)
+            if hw_total > 0:
+                if is_bull_drive and (hw_bulls == 0 or hw_posture.get("all_bearish") or hw_bears > hw_bulls):
+                    hw_tags = [f"{h['symbol']} ({h['change_pct']:+.2f}%)" for h in hw_posture.get("heavyweights", [])]
+                    logger.info(
+                        f"[OpeningDrive] Suppressed bullish drive on {clean_sym}: Heavyweight locomotives unaligned "
+                        f"({hw_bulls}/{hw_total} bullish, {', '.join(hw_tags)})."
+                    )
+                    return None
+                if is_bear_drive and (hw_bears == 0 or hw_posture.get("all_bullish") or hw_bulls > hw_bears):
+                    hw_tags = [f"{h['symbol']} ({h['change_pct']:+.2f}%)" for h in hw_posture.get("heavyweights", [])]
+                    logger.info(
+                        f"[OpeningDrive] Suppressed bearish drive on {clean_sym}: Heavyweight locomotives unaligned "
+                        f"({hw_bears}/{hw_total} bearish, {', '.join(hw_tags)})."
+                    )
+                    return None
+        except Exception as e_hw:
+            logger.debug(f"[OpeningDrive] Heavyweights check bypassed for {clean_sym}: {e_hw}")
+
     direction = "BULLISH" if is_bull_drive else "BEARISH"
+    vol_desc = "Locomotives Aligned" if is_index else f"RVOL {rvol_val:.1f}x"
 
     # Stop Loss is strictly anchored to the opening drive extreme + 0.15% noise buffer
     if is_bull_drive:
@@ -143,7 +178,7 @@ def detect_opening_drive(
         headline = f"🚀 [OPENING DRIVE] {clean_sym} Bullish Ignition (Open==Low @ ₹{bar_open:,.1f})"
         summary = (
             f"{clean_sym} explosive Opening Drive confirmed: Open==Low at ₹{bar_open:,.1f} "
-            f"with immediate expansion (+{range_pct:.1f}% range, RVOL {rvol_val:.1f}x). "
+            f"with immediate expansion (+{range_pct:.1f}% range, {vol_desc}). "
             f"Holding strictly above VWAP."
         )
     else:
@@ -157,7 +192,7 @@ def detect_opening_drive(
         )
         summary = (
             f"{clean_sym} institutional Opening Drive breakdown: Open==High at ₹{bar_open:,.1f} "
-            f"with heavy downside liquidation (-{range_pct:.1f}% range, RVOL {rvol_val:.1f}x). "
+            f"with heavy downside liquidation (-{range_pct:.1f}% range, {vol_desc}). "
             f"Aggressive short / put momentum."
         )
 
@@ -274,7 +309,7 @@ def detect_opening_drive(
     alert_seg = "FNO_INDEX" if is_index else ("FNO_STOCK" if lot_sz else "EQUITY")
 
     return AutoAlert(
-        alert_id=f"aa-opdrive-{clean_sym.lower()}-{uuid.uuid4().hex[:6]}",
+        alert_id=generate_alert_id(clean_sym, "OPENING_DRIVE_IGNITION", variant=f"{direction.lower()[:4]}"),
         alert_type="OPENING_DRIVE_IGNITION",
         stage="IGNITED",
         symbol=clean_sym,

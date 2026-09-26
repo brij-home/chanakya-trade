@@ -16,10 +16,26 @@ from engine.detectors.opening_drive import detect_opening_drive
 from engine.detectors.options_momentum import detect_options_momentum_breakouts
 from engine.detectors.orb import detect_opening_range_breakout
 from engine.detectors.pattern_coiling import detect_learned_pattern_coiling
+from engine.detectors.pre_inflection_dryup import detect_pre_inflection_dryup
 from engine.detectors.preopen_bias import detect_preopen_bias
 from engine.detectors.squeeze_breakout import detect_squeeze_breakout
 
+from engine.detection_context import (
+    BaseDetector,
+    DetectionContext,
+    DetectorRegistry,
+    FunctionalDetectorAdapter,
+    build_detection_context,
+    detector_registry,
+)
+
 __all__ = [
+    "BaseDetector",
+    "DetectionContext",
+    "DetectorRegistry",
+    "FunctionalDetectorAdapter",
+    "build_detection_context",
+    "detector_registry",
     "detect_gamma_blast",
     "detect_index_call_setup",
     "detect_index_put_setup",
@@ -28,6 +44,7 @@ __all__ = [
     "detect_squeeze_breakout",
     "detect_circuit_proximity",
     "detect_learned_pattern_coiling",
+    "detect_pre_inflection_dryup",
     "detect_opening_range_breakout",
     "detect_options_momentum_breakouts",
     "detect_commodity_breakouts",

@@ -562,7 +562,9 @@ def detect_intraday_mover_sparks(
             except Exception as e_smc:
                 logger.debug(f"[IntradaySpark] Spark candle/divergence check error: {e_smc}")
 
-        alert_id = f"spark-{clean_sym.lower()}-{datetime.now(IST).strftime('%Y%m%d%H%M')}"
+        from engine.alert_identity import generate_alert_id
+
+        alert_id = generate_alert_id(clean_sym, alert_type)
         alert = AutoAlert(
             alert_id=alert_id,
             alert_type=alert_type,

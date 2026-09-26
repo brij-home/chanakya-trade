@@ -270,7 +270,9 @@ def detect_opening_range_breakout(
     now_iso = now_dt.strftime("%Y-%m-%d %H:%M:%S IST")
     direction = "BULLISH" if is_bullish else "BEARISH"
     alert_type = "ORB_BREAKOUT" if is_bullish else "ORB_BREAKDOWN"
-    alert_id = f"orb-{direction.lower()[:4]}-{symbol.lower()}-{uuid.uuid4().hex[:6]}"
+    from engine.alert_identity import generate_alert_id
+
+    alert_id = generate_alert_id(symbol, alert_type, variant=direction.lower()[:4])
 
     if is_bullish:
         trigger_level = orb_high

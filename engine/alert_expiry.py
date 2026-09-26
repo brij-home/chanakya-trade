@@ -232,14 +232,20 @@ def is_alert_option_premium_level(alert: Any) -> bool:
     Returns True for pure option strategies (OPTIONS_MOMENTUM, OPTION_WRITE, GAMMA_BLAST with option_type)
     or when alert.contract_symbol represents an active option contract.
     Returns False for underlying stock/index setups even if an option recommendation is attached.
+    Safely handles both object/dataclass instances and dictionaries.
     """
-    atype = str(getattr(alert, "alert_type", "") or "")
+    def _g(key: str, default: Any = None) -> Any:
+        if isinstance(alert, dict):
+            return alert.get(key, default)
+        return getattr(alert, key, default)
+
+    atype = str(_g("alert_type", "") or "")
     if atype in ("OPTIONS_MOMENTUM", "OPTION_WRITE"):
         return True
-    if atype == "GAMMA_BLAST" and getattr(alert, "option_type", None):
+    if atype == "GAMMA_BLAST" and _g("option_type", None):
         return True
 
-    # Underlying stock/index setups are always anchored to spot
+    # Underlying stock/index setups are anchored to spot even if an option recommendation is attached
     if atype in (
         "ASYMMETRIC_OPPORTUNITY",
         "SQUEEZE_BREAKOUT",
@@ -252,15 +258,21 @@ def is_alert_option_premium_level(alert: Any) -> bool:
     ):
         return False
 
-    csym = str(getattr(alert, "contract_symbol", "") or "").upper()
-    opt_t = str(getattr(alert, "option_type", "") or "").upper()
+    csym = str(_g("contract_symbol", "") or "").upper()
+    opt_t = str(_g("option_type", "") or "").upper()
+
+    # If an option contract is explicitly attached with strike/premium, levels are option premiums
+    if (csym.endswith("CE") or csym.endswith("PE") or opt_t in ("CE", "PE")) and (
+        _g("option_premium") is not None or _g("strike") is not None
+    ):
+        return True
 
     if atype == "GAMMA_BLAST" and (
         opt_t in ("CE", "PE") or csym.endswith("CE") or csym.endswith("PE")
     ):
         return True
 
-    has_opt_marker = bool(csym or opt_t in ("CE", "PE") or getattr(alert, "strike", None))
+    has_opt_marker = bool(csym or opt_t in ("CE", "PE") or _g("strike", None))
     if not has_opt_marker:
         return False
 
@@ -268,12 +280,12 @@ def is_alert_option_premium_level(alert: Any) -> bool:
     if csym and (csym.endswith("CE") or csym.endswith("PE")):
         return True
 
-    if opt_t in ("CE", "PE") and getattr(alert, "strike", None):
+    if opt_t in ("CE", "PE") and _g("strike", None):
         return True
 
     # Check if ltp is close to option_premium (within 25% tolerance) for other derivatives
-    ltp = float(getattr(alert, "ltp", 0.0) or 0.0)
-    opt_prem = getattr(alert, "option_premium", None)
+    ltp = float(_g("ltp", 0.0) or 0.0)
+    opt_prem = _g("option_premium", None)
     if opt_prem is not None and float(opt_prem) > 0 and ltp > 0:
         prem = float(opt_prem)
         return abs(ltp - prem) <= max(2.0, prem * 0.25)

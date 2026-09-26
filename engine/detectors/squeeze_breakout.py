@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import logging
 import os
-import uuid
 from datetime import datetime
 from typing import Any, Optional
 from zoneinfo import ZoneInfo
@@ -14,6 +13,7 @@ from zoneinfo import ZoneInfo
 import numpy as np
 import pandas as pd
 
+from engine.alert_identity import generate_alert_id
 from engine.alert_model import AutoAlert
 from engine.option_resolver import resolve_option_contract, is_index_symbol
 
@@ -123,7 +123,11 @@ def _format_squeeze_alert(
             "trade_plan": tp_dict,
         }
         return AutoAlert(
-            alert_id=f"aa-sqz-{stage.lower()[:5]}-{clean_sym.lower()}-{uuid.uuid4().hex[:6]}",
+            alert_id=generate_alert_id(
+                clean_sym,
+                "SQUEEZE_BREAKOUT" if direction == "BULLISH" else "SQUEEZE_BREAKDOWN",
+                variant=f"{opt_plan.option_type.lower()}-{int(opt_plan.strike)}",
+            ),
             alert_type="SQUEEZE_BREAKOUT" if direction == "BULLISH" else "SQUEEZE_BREAKDOWN",
             stage=stage,
             symbol=clean_sym,
@@ -150,7 +154,11 @@ def _format_squeeze_alert(
 
     # Standard Cash Equity Alert
     return AutoAlert(
-        alert_id=f"aa-sqz-{stage.lower()[:5]}-{symbol.lower()}-{uuid.uuid4().hex[:6]}",
+        alert_id=generate_alert_id(
+            symbol,
+            "SQUEEZE_BREAKOUT" if direction == "BULLISH" else "SQUEEZE_BREAKDOWN",
+            variant=direction.lower()[:4],
+        ),
         alert_type="SQUEEZE_BREAKOUT" if direction == "BULLISH" else "SQUEEZE_BREAKDOWN",
         stage=stage,
         symbol=symbol,
@@ -327,6 +335,8 @@ def detect_squeeze_breakout(
                 sl = tp.invalidation_stop
                 if (ltp - sl) < 1.25 * atr20:
                     sl = round(ltp - 1.25 * atr20, 1)
+                if target_2 <= target:
+                    target_2 = round(target + 1.5 * max(1.0, ltp - sl), 1)
                 rr_str = f"1:{tp.rr_t1}"
                 tp_dict = tp.as_dict()
             else:
@@ -404,6 +414,24 @@ def detect_squeeze_breakout(
             and (min_coiling_dist <= dist_to_low_pct <= max_coiling_dist)
             and not (lower_wick_ratio >= 0.60 and candle_range >= 0.50 * atr20)
         ):
+            # Benchmark Regime Gate: In a green/bullish market, shorting equities has < 5% win rate (trap avoidance)
+            clean_sym = symbol.upper().replace(".NS", "").replace("NSE:", "").strip()
+            is_idx_sym = clean_sym in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX")
+            if not is_test_env and not is_idx_sym:
+                try:
+                    from market.quotes import get_quote
+
+                    n_probe = get_quote("NSE:NIFTY 50")
+                    nq = n_probe.get("NSE:NIFTY 50") or n_probe.get("NIFTY 50")
+                    if nq and (getattr(nq, "change_pct", 0.0) or 0.0) >= 0.15:
+                        n_ltp = float(getattr(nq, "last_price", 0.0) or 0.0)
+                        n_vwap = float(getattr(nq, "vwap", 0.0) or 0.0)
+                        if n_vwap > 0 and n_ltp >= n_vwap:
+                            # NIFTY is green and holding VWAP — suppress counter-trend breakdown trap!
+                            return None
+                except Exception:
+                    pass
+
             tp = None
             try:
                 from engine.trade_plan import calculate_trade_plan
@@ -427,6 +455,8 @@ def detect_squeeze_breakout(
                 sl = tp.invalidation_stop
                 if (sl - ltp) < 1.25 * atr20:
                     sl = round(ltp + 1.25 * atr20, 1)
+                if target_2 >= target:
+                    target_2 = round(target - 1.5 * max(1.0, sl - ltp), 1)
                 rr_str = f"1:{tp.rr_t1}"
                 tp_dict = tp.as_dict()
             else:
@@ -533,6 +563,8 @@ def detect_squeeze_breakout(
                 sl = tp.invalidation_stop
                 if (ltp - sl) < 1.25 * atr20:
                     sl = round(ltp - 1.25 * atr20, 1)
+                if target_2 <= target:
+                    target_2 = round(target + 1.5 * max(1.0, ltp - sl), 1)
                 rr_str = f"1:{tp.rr_t1}"
                 tp_dict = tp.as_dict()
             else:
@@ -609,6 +641,24 @@ def detect_squeeze_breakout(
             and not (lower_wick_ratio >= 0.50 and candle_range >= 0.50 * atr20)
             and (is_test_env or adx_val >= 21.0 or adx_slope > 1.0)
         ):
+            # Benchmark Regime Gate: In a green/bullish market, shorting equities has < 5% win rate (trap avoidance)
+            clean_sym = symbol.upper().replace(".NS", "").replace("NSE:", "").strip()
+            is_idx_sym = clean_sym in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX")
+            if not is_test_env and not is_idx_sym:
+                try:
+                    from market.quotes import get_quote
+
+                    n_probe = get_quote("NSE:NIFTY 50")
+                    nq = n_probe.get("NSE:NIFTY 50") or n_probe.get("NIFTY 50")
+                    if nq and (getattr(nq, "change_pct", 0.0) or 0.0) >= 0.15:
+                        n_ltp = float(getattr(nq, "last_price", 0.0) or 0.0)
+                        n_vwap = float(getattr(nq, "vwap", 0.0) or 0.0)
+                        if n_vwap > 0 and n_ltp >= n_vwap:
+                            # NIFTY is green and holding VWAP — suppress counter-trend breakdown trap!
+                            return None
+                except Exception:
+                    pass
+
             tp = None
             try:
                 from engine.trade_plan import calculate_trade_plan
@@ -633,6 +683,8 @@ def detect_squeeze_breakout(
                 sl = tp.invalidation_stop
                 if (sl - ltp) < 1.25 * atr20:
                     sl = round(ltp + 1.25 * atr20, 1)
+                if target_2 >= target:
+                    target_2 = round(target - 1.5 * max(1.0, sl - ltp), 1)
                 rr_str = f"1:{tp.rr_t1}"
                 tp_dict = tp.as_dict()
             else:

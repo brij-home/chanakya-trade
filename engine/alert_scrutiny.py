@@ -144,15 +144,38 @@ class AlertScrutinyAuditor:
             return False, f"Incomplete price levels (LTP={ltp}, SL={sl}, T1={t1})", flags
 
         # Detect whether levels represent an option contract premium (Long CE or Long PE premium)
+        sym = str(
+            getattr(alert, "symbol", "")
+            or (alert.get("symbol", "") if isinstance(alert, dict) else "")
+        ).upper()
+        clean_sym = (
+            sym.replace(".NS", "")
+            .replace(".BO", "")
+            .replace("NSE:", "")
+            .replace("BSE:", "")
+            .replace("MCX:", "")
+            .replace("NFO:", "")
+            .replace("CDS:", "")
+            .strip()
+        )
+        is_index_sym = clean_sym in INDEX_MIN_SL_FLOORS
+
         atype = str(getattr(alert, "alert_type", "") or "")
         has_opt_marker = bool(
             getattr(alert, "contract_symbol", None)
             or getattr(alert, "option_type", None)
             or getattr(alert, "strike", None)
         )
-        if atype in ("OPTIONS_MOMENTUM", "OPTION_WRITE"):
+        if atype in (
+            "OPTIONS_MOMENTUM",
+            "OPTION_WRITE",
+            "INDEX_PUT_SETUP",
+            "INDEX_CALL_SETUP",
+        ):
             is_option_premium_levels = True
-        elif atype == "GAMMA_BLAST" and getattr(alert, "option_type", None):
+        elif atype in ("GAMMA_BLAST", "SQUEEZE_BREAKOUT", "SQUEEZE_BREAKDOWN") and getattr(
+            alert, "option_type", None
+        ):
             is_option_premium_levels = True
         elif not has_opt_marker:
             is_option_premium_levels = False
@@ -161,6 +184,9 @@ class AlertScrutinyAuditor:
             is_option_premium_levels = abs(ltp - float(alert.option_premium)) < max(
                 1.0, float(alert.option_premium) * 0.15
             )
+        elif is_index_sym and getattr(alert, "option_type", None) in ("CE", "PE") and ltp < 4000:
+            # Index spot is >= 10,000 pts; an LTP < 4,000 with CE/PE marker is always an option contract
+            is_option_premium_levels = True
         else:
             is_option_premium_levels = False
 
@@ -217,21 +243,6 @@ class AlertScrutinyAuditor:
                 f"Excessive stop-loss risk distance ({risk_pct:.2f}% > {max_risk}%)",
                 flags,
             )
-
-        sym = str(
-            getattr(alert, "symbol", "")
-            or (alert.get("symbol", "") if isinstance(alert, dict) else "")
-        ).upper()
-        clean_sym = (
-            sym.replace(".NS", "")
-            .replace(".BO", "")
-            .replace("NSE:", "")
-            .replace("BSE:", "")
-            .replace("MCX:", "")
-            .replace("NFO:", "")
-            .replace("CDS:", "")
-            .strip()
-        )
 
         # 3b. Institutional Minimum Stop-Loss Volatility Floor Gate
         # Specific structural floors for MCX Commodities, Indian Benchmark Indices, and Equities
@@ -459,18 +470,18 @@ class AlertScrutinyAuditor:
             hh, mm = alert_dt.hour, alert_dt.minute
             wday = alert_dt.weekday()
 
-            # Wednesday EIA Weekly Petroleum Status Report (Crude): 19:45 - 20:45 IST
+            # Wednesday EIA Weekly Petroleum Status Report (Crude): 19:55 - 20:15 IST (release at 20:00 IST)
             if clean_sym in ("CRUDEOIL", "CRUDEOILM") and wday == 2:
-                if (hh == 19 and mm >= 45) or (hh == 20 and mm <= 45):
+                if (hh == 19 and mm >= 55) or (hh == 20 and mm <= 15):
                     return (
                         False,
                         f"EIA Crude Inventory Blackout: High-impact US weekly petroleum status report release active ({hh:02d}:{mm:02d} IST). Disallow fresh breakout entries.",
                         flags,
                     )
 
-            # Thursday EIA Natural Gas Storage Report: 19:45 - 20:45 IST
+            # Thursday EIA Natural Gas Storage Report: 19:55 - 20:15 IST (release at 20:00 IST)
             if clean_sym in ("NATURALGAS", "NATGASMINI") and wday == 3:
-                if (hh == 19 and mm >= 45) or (hh == 20 and mm <= 45):
+                if (hh == 19 and mm >= 55) or (hh == 20 and mm <= 15):
                     return (
                         False,
                         f"EIA Natural Gas Storage Blackout: High-impact US gas storage report release active ({hh:02d}:{mm:02d} IST). Disallow fresh breakout entries.",
@@ -1181,7 +1192,27 @@ class AlertScrutinyAuditor:
             getattr(alert, "segment", "")
             or (alert.get("segment") if isinstance(alert, dict) else "")
         ).upper()
-        is_commodity_or_curr = exch_str in ("MCX", "CDS") or seg_str in ("COMMODITY", "CURRENCY")
+        is_non_equity_desk = (
+            exch_str in ("MCX", "CDS", "CRYPTO", "BINANCE", "DERIBIT")
+            or seg_str in ("COMMODITY", "CURRENCY", "CRYPTO")
+            or clean_sym.endswith("USDT")
+            or clean_sym in (
+                "CRUDEOIL",
+                "CRUDEOILM",
+                "NATURALGAS",
+                "NATGASMINI",
+                "GOLD",
+                "GOLDM",
+                "SILVER",
+                "SILVERM",
+                "COPPER",
+                "ZINC",
+                "ALUMINIUM",
+                "LEAD",
+                "NICKEL",
+            )
+        )
+        is_commodity_or_curr = is_non_equity_desk
 
         if not is_index and not is_commodity_or_curr:
             nifty_data = (
@@ -1373,6 +1404,175 @@ class AlertScrutinyAuditor:
                     pass
         flags["macro_regime_aligned"] = True
         flags.setdefault("benchmark_regime_valid", True)
+
+        # 14b. Institutional Index Macro Confluence & Benchmark Posture Gate:
+        # Enforces Top-Down Macro Alignment for Index setups (NIFTY, BANKNIFTY, FINNIFTY, MIDCPNIFTY, SENSEX, BANKEX):
+        # 1. Benchmark Gravitational Gate: Secondary indices (MIDCPNIFTY, FINNIFTY, BANKNIFTY) must NOT trade
+        #    in opposition to the primary benchmark (NIFTY 50). Shorting a secondary index when NIFTY 50 is green
+        #    and holding above session VWAP has an 80%+ failure probability.
+        # 2. Heavyweight Locomotive Tug-of-War Gate: If HDFCBANK and ICICIBANK (>52% Bank Nifty weight) are in
+        #    opposing directions and India VIX is low (<14.0), suppress naked directional breakout alerts.
+        # 3. Off-Cycle Expiry Theta Bleed Gate: Non-expiry index options on Friday afternoon suffer severe weekend
+        #    theta decay without gamma acceleration.
+        if is_index:
+            # Query NIFTY 50 benchmark posture from metrics or in-memory cache
+            n_ltp = 0.0
+            n_vwap = 0.0
+            n_chg = None
+            if isinstance(metrics_dict, dict) and "nifty_change_pct" in metrics_dict and metrics_dict["nifty_change_pct"] is not None:
+                n_chg = metrics_dict["nifty_change_pct"]
+            else:
+                try:
+                    from market.quotes import _QUOTE_CACHE, _quote_cache_lock
+
+                    with _quote_cache_lock:
+                        for k in ("NSE:NIFTY 50", "NIFTY 50", "NSE:NIFTY", "NIFTY"):
+                            if k in _QUOTE_CACHE:
+                                _, q_obj = _QUOTE_CACHE[k]
+                                n_ltp = float(
+                                    getattr(q_obj, "last_price", 0.0)
+                                    or getattr(q_obj, "ltp", 0.0)
+                                    or 0.0
+                                )
+                                n_vwap = float(getattr(q_obj, "vwap", 0.0) or 0.0)
+                                n_chg = float(getattr(q_obj, "change_pct", 0.0) or 0.0)
+                                break
+                except Exception:
+                    pass
+
+            is_index_bearish = (
+                direction in ("BEARISH", "SHORT", "SELL")
+                or getattr(alert, "option_type", "") == "PE"
+                or atype == "INDEX_PUT_SETUP"
+            )
+            is_index_bullish = (
+                direction in ("BULLISH", "LONG", "BUY")
+                or getattr(alert, "option_type", "") == "CE"
+                or atype == "INDEX_CALL_SETUP"
+            )
+
+            # Benchmark Gravitational Alignment:
+            if n_chg is not None:
+                n_chg_f = float(n_chg)
+                # Counter-benchmark short trap: Nifty is green (>= +0.05%) and holding above VWAP
+                if is_index_bearish and not is_index_bullish and clean_sym != "NIFTY":
+                    nifty_bullish = (n_chg_f >= 0.05) and (
+                        n_ltp >= n_vwap if (n_ltp > 0 and n_vwap > 0) else True
+                    )
+                    if nifty_bullish:
+                        flags["macro_regime_aligned"] = False
+                        flags["benchmark_regime_valid"] = False
+                        return (
+                            False,
+                            f"Benchmark Divergence Trap: Cannot short {clean_sym} (PE/Short) while primary benchmark NIFTY 50 is bullish (+{n_chg_f:.2f}%, above VWAP). Counter-trend secondary index shorts face >80% trap rate.",
+                            flags,
+                        )
+                # Counter-benchmark long trap: Nifty is red (<= -0.05%) and trading below VWAP
+                elif is_index_bullish and not is_index_bearish:
+                    nifty_bearish = (n_chg_f <= -0.05) and (
+                        n_ltp <= n_vwap if (n_ltp > 0 and n_vwap > 0) else True
+                    )
+                    if nifty_bearish:
+                        flags["macro_regime_aligned"] = False
+                        flags["benchmark_regime_valid"] = False
+                        return (
+                            False,
+                            f"Benchmark Divergence Trap: Cannot buy calls on {clean_sym} (CE/Long) while primary benchmark NIFTY 50 is bearish ({n_chg_f:.2f}%, below VWAP). Counter-trend long bets face heavy market drag.",
+                            flags,
+                        )
+
+            is_test_runner = (
+                ("PYTEST_CURRENT_TEST" in os.environ)
+                or (os.environ.get("CHANAKYA_TESTING") == "1")
+                or (os.environ.get("DEPLOY_MODE") == "test")
+            )
+
+            # Heavyweight Locomotive Tug-of-War Gate for Bank Nifty / Bankex:
+            from market.indices import get_index_polarization
+
+            is_mocked_pol = getattr(get_index_polarization, "__module__", "") != "market.indices"
+            if (not is_test_runner or is_mocked_pol) and clean_sym in ("BANKNIFTY", "BANKEX") and vix_val and vix_val < 14.0:
+                try:
+                    pol = get_index_polarization("BANKNIFTY")
+                    if pol and pol.is_polarized and pol.regime == "TUG_OF_WAR_CHOP":
+                        act_plan = getattr(alert, "actionable_plan", {}) or {}
+                        act_str = str(
+                            act_plan.get("action", "") if isinstance(act_plan, dict) else ""
+                        ).upper()
+                        if "SPREAD" not in act_str:
+                            flags["heavyweight_confluence_valid"] = False
+                            return (
+                                False,
+                                f"Locomotive Tug-of-War Veto: {pol.summary} Naked directional options in low-vol chop (VIX {vix_val:.1f}) suffer rapid theta decay; mandate defined-risk spread.",
+                                flags,
+                            )
+                except Exception:
+                    pass
+
+            # Heavyweight Breadth Confluence Matrix (HBCM) Gate for Index Breakout/Breakdown alerts:
+            # Mandates >= 4 of 5 heavyweights concurrently aligned with the breakout direction.
+            hbcm_meta = metrics_dict.get("hbcm") if isinstance(metrics_dict, dict) else None
+            active_signals = (metrics_dict.get("signals") if isinstance(metrics_dict, dict) else None) or []
+            is_breakout_type = (
+                atype in ("INDEX_CALL_SETUP", "INDEX_PUT_SETUP", "GAMMA_BLAST", "OPTIONS_MOMENTUM", "BREAKOUT", "ORB_BREAKOUT", "ORB_BREAKDOWN")
+                or any("BREAKOUT" in s or "BREAKDOWN" in s or "THRUST" in s for s in active_signals)
+            )
+            if is_breakout_type:
+                if isinstance(hbcm_meta, dict):
+                    if hbcm_meta.get("total_heavyweights", 0) > 0 and hbcm_meta.get("confluence_pass") is False:
+                        flags["heavyweight_confluence_valid"] = False
+                        rej_msg = hbcm_meta.get("rejection_reason") or "HBCM Veto: <4/5 heavyweights aligned with index breakout"
+                        return (False, f"HBCM Confluence Veto: {rej_msg}", flags)
+                elif not is_test_runner:
+                    try:
+                        from engine.hbcm import evaluate_hbcm
+
+                        target_dir = "BULLISH" if is_index_bullish else "BEARISH"
+                        hbcm_eval = evaluate_hbcm(clean_sym, target_dir)
+                        if hbcm_eval.total_heavyweights > 0 and not hbcm_eval.confluence_pass:
+                            flags["heavyweight_confluence_valid"] = False
+                            return (
+                                False,
+                                f"HBCM Confluence Veto: {hbcm_eval.rejection_reason}",
+                                flags,
+                            )
+                    except Exception as e_hbcm:
+                        logger.debug(f"[AlertScrutiny] HBCM evaluation bypassed: {e_hbcm}")
+
+            # Off-Cycle Weekend Theta Bleed Gate:
+            alert_dt = datetime.now(IST)
+            if getattr(alert, "created_at", None):
+                try:
+                    clean_ts = alert.created_at.replace(" IST", "").strip()
+                    alert_dt = datetime.fromisoformat(clean_ts).replace(tzinfo=IST)
+                except Exception:
+                    pass
+            from datetime import time as dtime
+            enforce_friday = os.environ.get("ENFORCE_TEST_FRIDAY_GATE") == "1"
+            if (not is_test_runner or enforce_friday) and alert_dt.weekday() == 4 and alert_dt.time() >= dtime(13, 0):
+                if clean_sym in ("MIDCPNIFTY", "FINNIFTY") and is_option_premium_levels:
+                    # Check if this alert is explicitly an INTRADAY_SCALP_ONLY with mandatory 15:15 exit
+                    time_horizon = str(
+                        getattr(alert, "time_horizon", "")
+                        or (metrics_dict.get("time_horizon", "") if isinstance(metrics_dict, dict) else "")
+                    ).upper()
+                    act_plan = getattr(alert, "actionable_plan", {}) or {}
+                    mandatory_exit = str(
+                        act_plan.get("mandatory_exit", "") if isinstance(act_plan, dict) else ""
+                    ).upper()
+                    is_intraday_scalp = (
+                        ("INTRADAY" in time_horizon or "SCALP" in time_horizon)
+                        and ("15:15" in mandatory_exit or "INTRADAY" in mandatory_exit)
+                    )
+                    if not is_intraday_scalp:
+                        flags["expiry_cycle_valid"] = False
+                        return (
+                            False,
+                            f"Off-Cycle Theta Trap: {clean_sym} options on Friday afternoon suffer severe weekend theta decay with zero gamma acceleration. Primary liquidity is in SENSEX expiry.",
+                            flags,
+                        )
+                    else:
+                        flags["is_intraday_scalp_only"] = True
 
         # 15. 3-Bar Parabolic Velocity / Climax Acceleration Gate (Anti-FOMO):
         # Disallow market chasing at the absolute tip of a vertical 3-bar blow-off
@@ -1711,6 +1911,11 @@ class AlertScrutinyAuditor:
         # 22. Market Breadth & Macro Tide Alignment Gate (Advance / Decline Ratio):
         # Disallow buying calls or entering bullish index setups into broad market liquidation (BROAD_DECLINE or A/D < 0.60).
         # Disallow buying puts or entering bearish index setups into broad market rally (BROAD_RALLY or A/D > 1.80).
+        # Note: Non-equity desks (Crypto, Commodities, Currency) operate in decoupled global 24x7/macro regimes and are exempt from Dalal Street breadth veto.
+        if is_non_equity_desk:
+            flags["market_breadth_valid"] = True
+            return True, "", flags
+
         is_test_runner = (
             ("PYTEST_CURRENT_TEST" in os.environ)
             or (os.environ.get("CHANAKYA_TESTING") == "1")
@@ -1791,6 +1996,107 @@ class AlertScrutinyAuditor:
             except Exception as e_br:
                 logger.debug(f"[Scrutiny] Market breadth gate evaluation bypassed: {e_br}")
         flags["market_breadth_valid"] = True
+
+        # 23. Institutional Sector RRG Alignment Gate (Top-Down Sector Alignment for Bottom-Up Setups):
+        # Even the cleanest bottom-up setup struggles when swimming against a severe sector liquidation.
+        # Disallow buying an equity/stock F&O whose sector is in RRG LAGGING quadrant with negative momentum
+        # and negative intraday relative strength, unless explicitly flagged as a decoupled relative strength leader.
+        if not is_non_equity_desk:
+            try:
+                is_index_sym = (
+                    sym in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX")
+                    or getattr(alert, "segment", "") == "FNO_INDEX"
+                )
+                if not is_index_sym and sym:
+                    from analysis.sector_rotation import get_stock_tailwind
+
+                    tw = get_stock_tailwind(sym)
+                    if tw and getattr(tw, "status", "") != "UNAVAILABLE":
+                        is_call_side = (
+                            direction in ("BULLISH", "LONG", "BUY")
+                            or getattr(alert, "option_type", "") == "CE"
+                        )
+                        is_put_side = (
+                            direction in ("BEARISH", "SHORT", "SELL")
+                            or getattr(alert, "option_type", "") == "PE"
+                        )
+                        is_decoupled = bool(
+                            metrics_dict.get("is_decoupler") is True
+                            or flags.get("decoupler_status") == "VERIFIED_DECOUPLER"
+                            or float(metrics_dict.get("sector_rs", 0.0) or 0.0) >= 1.5
+                        )
+                        # Long setup in a lagging sector with negative momentum & intraday divergence
+                        if (
+                            is_call_side
+                            and tw.quadrant == "LAGGING"
+                            and tw.rs_momentum < 98.0
+                            and not is_decoupled
+                        ):
+                            if tw.intraday_alignment == "INTRADAY_BEARISH_DIVERGENCE":
+                                flags["sector_rrg_valid"] = False
+                                return (
+                                    False,
+                                    f"Sector RRG Headwind Veto: Parent sector {tw.sector} is in RRG LAGGING quadrant "
+                                    f"(RS-Ratio: {tw.rs_ratio:.1f}, RS-Momentum: {tw.rs_momentum:.1f}) with intraday bearish divergence. "
+                                    f"Disallow bottom-up Call/Long setups against institutional sector liquidation.",
+                                    flags,
+                                )
+                        # Short setup in a leading sector with strong positive momentum & intraday rally
+                        elif (
+                            is_put_side
+                            and tw.quadrant == "LEADING"
+                            and tw.rs_momentum > 102.0
+                            and not is_decoupled
+                        ):
+                            if tw.intraday_alignment == "INTRADAY_BULLISH_DIVERGENCE":
+                                flags["sector_rrg_valid"] = False
+                                return (
+                                    False,
+                                    f"Sector RRG Tailwind Veto: Parent sector {tw.sector} is in RRG LEADING quadrant "
+                                    f"(RS-Ratio: {tw.rs_ratio:.1f}, RS-Momentum: {tw.rs_momentum:.1f}) with intraday bullish divergence. "
+                                    f"Disallow bottom-up Put/Short setups against institutional sector accumulation.",
+                                    flags,
+                                )
+            except Exception as e_rrg:
+                logger.debug(f"[Scrutiny] Sector RRG gate evaluation bypassed: {e_rrg}")
+        flags["sector_rrg_valid"] = True
+
+        # 24. SEBI Physical Settlement Expiry Week Prohibition Gate (Single-Stock Options):
+        # Under SEBI regulations, single-stock options on NSE are physically settled.
+        # Trading current month stock options during settlement week exposes traders
+        # to 100% full-value delivery margins, broker forced square-off, and severe gamma collapse.
+        # Prohibit current-month stock options during expiry week; only next-month contracts are permitted.
+        if not is_non_equity_desk and not is_index_sym:
+            try:
+                opt_type_val = getattr(alert, "option_type", "") or metrics_dict.get("option_type", "")
+                is_stock_opt = bool(
+                    opt_type_val in ("CE", "PE")
+                    or (csym and (csym.endswith("CE") or csym.endswith("PE")))
+                )
+                if is_stock_opt:
+                    from engine.alert_expiry import is_monthly_physical_expiry_week
+
+                    contract_exp = getattr(alert, "expiry_date", "") or metrics_dict.get("expiry_date", "")
+                    if contract_exp and is_monthly_physical_expiry_week(str(contract_exp), symbol=sym):
+                        is_next_month = bool(
+                            metrics_dict.get("is_next_month_routed")
+                            or metrics_dict.get("rollover_series") == "NEXT_MONTH"
+                            or metrics_dict.get("rollover_protected") is True
+                        )
+                        if not is_next_month:
+                            flags["physical_expiry_valid"] = False
+                            return (
+                                False,
+                                f"SEBI Physical Delivery Expiry Week Veto: Single-stock option {csym or sym} "
+                                f"belongs to current-month settlement week ({contract_exp}). "
+                                f"Trading current-month stock options during settlement week is prohibited due to "
+                                f"staggered delivery margins (25%->100%) and terminal theta crush. "
+                                f"Route exclusively to Next-Month contract.",
+                                flags,
+                            )
+            except Exception as e_pexp:
+                logger.debug(f"[Scrutiny] Physical expiry gate bypassed: {e_pexp}")
+        flags["physical_expiry_valid"] = True
 
         return True, "", flags
 

@@ -60,9 +60,10 @@ def detect_currency_breakouts(
             continue
 
         is_bullish = chg > 0
-        direction = "BULLISH" if is_bullish else "BEARISH"
         alert_type = "CURRENCY_BREAKOUT"
-        alert_id = f"curr-{clean_sym.lower()}-{datetime.now(IST).strftime('%Y%m%d%H%M')}"
+        from engine.alert_identity import generate_alert_id
+
+        alert_id = generate_alert_id(clean_sym, alert_type)
 
         # Currency dynamic risk: based on CMP volatility
         risk_rupees = round(max(0.06, ltp * 0.0012), 4)

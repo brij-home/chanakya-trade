@@ -275,6 +275,12 @@ def detect_options_momentum_breakouts(
                     )
 
             if chain is None:
+                if not is_idx and "exp_res" in locals() and exp_res and exp_res.get("is_next_month_routed"):
+                    logger.info(
+                        f"[OptionsBreakout] {clean_sym} next-month chain unavailable during expiry week. "
+                        f"Suppressed current-month stock options to eliminate SEBI physical delivery margin risk."
+                    )
+                    return None
                 chain = get_options_chain(clean_sym)
 
             if not chain:
@@ -527,6 +533,22 @@ def detect_options_momentum_breakouts(
                         f"[OptionsBreakout] Suppressed Put surge on {clean_sym}: 15m trend BULLISH"
                     )
                     continue
+
+                hbcm_meta = None
+                if is_idx:
+                    try:
+                        from engine.hbcm import evaluate_hbcm
+
+                        hbcm_eval = evaluate_hbcm(clean_sym, direction)
+                        if hbcm_eval.total_heavyweights > 0:
+                            if not hbcm_eval.confluence_pass and not is_opening_drive:
+                                logger.info(
+                                    f"[OptionsBreakout] Suppressed index option alert for {clean_sym} {opt_type}: {hbcm_eval.rejection_reason}"
+                                )
+                                continue
+                            hbcm_meta = hbcm_eval.to_dict()
+                    except Exception as e_hbcm:
+                        logger.debug(f"[OptionsBreakout] HBCM check bypassed for {clean_sym}: {e_hbcm}")
 
                 is_decoupler = False
                 opt_pch = getattr(c, "pchange", 0.0) or getattr(c, "change_pct", 0.0) or 0.0
@@ -865,8 +887,12 @@ def detect_options_momentum_breakouts(
                             f"[OptionsBreakout] Volume profile error for {clean_sym}: {e_vp}"
                         )
 
-                alert_id = (
-                    f"aa-optmom-{opt_type.lower()}-{clean_sym}-{int(strike)}-{uuid.uuid4().hex[:6]}"
+                from engine.alert_identity import generate_alert_id
+
+                alert_id = generate_alert_id(
+                    clean_sym,
+                    "OPTIONS_MOMENTUM",
+                    variant=f"{opt_type.lower()}-{int(strike)}",
                 )
 
                 tp = None
@@ -1105,8 +1131,8 @@ def detect_options_momentum_breakouts(
                     underlying_spot=spot,
                     confidence=confidence,
                     created_at=now_iso,
-                    is_live=True,
-                    environment="LIVE",
+                    is_live=not is_test_env,
+                    environment="TEST" if is_test_env else "LIVE",
                     mtf_confluence=(
                         "BEARISH_BREAKDOWN"
                         if has_opening_breakdown
@@ -1114,6 +1140,7 @@ def detect_options_momentum_breakouts(
                     ),
                     vix_regime=vix_regime,
                     metrics={
+                        "hbcm": hbcm_meta,
                         "vol_oi_ratio": vol_oi,
                         "volume": vol,
                         "oi": oi,

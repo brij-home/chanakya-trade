@@ -313,6 +313,16 @@ export const AlertTriageCard = memo(function AlertTriageCard({
               {isT2Hit ? '✅ T2 ' : 'T2 '}{currSym}{fmtP(t2Num)}
             </span>
           )}
+          {t3Num && (
+            <span className={`font-bold px-1 py-px rounded ${isT3Hit ? 'bg-purple-500/25 text-purple-200 border border-purple-500/50' : 'text-purple-600 dark:text-purple-400'}`}>
+              {isT3Hit ? '✅ Runner ' : 'Runner '}{currSym}{fmtP(t3Num)}
+            </span>
+          )}
+          {alert.trailing_stop && (
+            <span className="font-bold px-1 py-px rounded bg-amber-500/20 text-amber-300 border border-amber-500/40">
+              Trail SL {currSym}{fmtP(alert.trailing_stop)}
+            </span>
+          )}
           <span className="text-muted">· {conviction}%</span>
         </div>
 

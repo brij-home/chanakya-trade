@@ -588,6 +588,25 @@ async def _auto_restore_brokers() -> None:
         except Exception as exc:
             logging.warning("[startup] Could not restore m.Stock: %s", exc)
 
+    # Kotak Neo
+    if _has_kotak():
+        try:
+            from brokers.kotak import KotakNeoAPI, TOKEN_FILE as _KT
+
+            if _KT.exists():
+                b = KotakNeoAPI()
+                if b.is_authenticated():
+                    register_broker("kotak", b)
+                    try:
+                        from brokers.session import _start_websocket
+
+                        _start_websocket(b)
+                    except Exception:
+                        pass
+                    logging.info("[startup] Kotak Neo session active & registered")
+        except Exception as exc:
+            logging.warning("[startup] Could not restore Kotak Neo: %s", exc)
+
 
 # ── P3-A: Correlation ID Middleware ─────────────────────────────────────────
 
@@ -925,6 +944,8 @@ h2       { font-size: 1rem; color: #8b949e; margin-bottom: 1.5rem; text-align: c
 .btn-stoxkart:hover { background: #0e7490; transform: translateY(-1px); }
 .btn-mstock   { background: #1d4ed8; color: #fff; }
 .btn-mstock:hover   { background: #1e40af; transform: translateY(-1px); }
+.btn-kotak    { background: #dc2626; color: #fff; }
+.btn-kotak:hover    { background: #b91c1c; transform: translateY(-1px); }
 .btn-demo     { background: #21262d; color: #8b949e; border: 1px solid #30363d; }
 .btn-demo:hover     { background: #30363d; color: #e6edf3; }
 .btn-back     { background: #21262d; color: #8b949e; border: 1px solid #30363d; margin-top: 1.25rem; }
@@ -942,6 +963,7 @@ h2       { font-size: 1rem; color: #8b949e; margin-bottom: 1.5rem; text-align: c
 .badge-fyers   { background: #431407; color: #fed7aa; }
 .badge-shoonya { background: #14532d; color: #86efac; }
 .badge-mstock  { background: #1e3a8a; color: #93c5fd; }
+.badge-kotak   { background: #450a0a; color: #fca5a5; }
 .badge-mock    { background: #2d2016; color: #d29922; }
 .success-icon  { font-size: 3rem; text-align: center; margin-bottom: 1rem; }
 .account-box {
@@ -1230,6 +1252,26 @@ def _mstock_auth() -> bool:
     return _cached_auth("mstock", _check)
 
 
+# Kotak Neo (Kotak Securities)
+def _has_kotak() -> bool:
+    return bool(_env("KOTAK_CONSUMER_KEY") or _env("KOTAK_UCC"))
+
+
+def _kotak_auth() -> bool:
+    def _check():
+        try:
+            if not _has_kotak():
+                return False
+            from brokers.kotak import KotakNeoAPI
+
+            b = KotakNeoAPI()
+            return b.is_authenticated()
+        except Exception:
+            return False
+
+    return _cached_auth("kotak", _check)
+
+
 # ── Shared success card ───────────────────────────────────────
 
 
@@ -1287,6 +1329,7 @@ async def index():
             _has_stoxkart(),
             _has_shoonya(),
             _has_mstock(),
+            _has_kotak(),
         ]
     )
 
@@ -1363,6 +1406,16 @@ async def index():
             "/mstock/login",
             _has_mstock(),
             _mstock_auth(),
+        )
+    }
+      {
+        _broker_btn(
+            "Login with Kotak Neo",
+            "🔴",
+            "btn-kotak",
+            "/kotak/login",
+            _has_kotak(),
+            _kotak_auth(),
         )
     }
       <div class="section-header">Premium Brokers</div>
@@ -1887,6 +1940,55 @@ async def mstock_callback(request: Request):
     )
 
 
+# ── Kotak Neo (Kotak Securities Trade API — TOTP) ────────────
+
+
+@app.get("/kotak/login", response_class=HTMLResponse)
+async def kotak_login():
+    if not _has_kotak():
+        body = """<div class="card">
+          <div class="info-box">
+            <strong>Kotak Neo API</strong> — Kotak Securities Trade REST/WebSocket integration.<br><br>
+            Set these values in <code>.env</code> or run <code>credentials setup</code>:<br>
+            <code>KOTAK_CONSUMER_KEY</code>, <code>KOTAK_CONSUMER_SECRET</code>,
+            <code>KOTAK_MOBILE_NUMBER</code>, <code>KOTAK_UCC</code>,
+            <code>KOTAK_PASSWORD</code>, <code>KOTAK_TOTP_SECRET</code>, and
+            <code>KOTAK_MPIN</code>.<br><br>
+            The TOTP secret must be the Base32 seed from your Kotak Neo Authenticator setup.
+          </div>
+          <a href="/" class="btn btn-back">← Back</a>
+        </div>"""
+        return HTMLResponse(_page("Kotak Neo Setup", body), status_code=400)
+    try:
+        from brokers.kotak import KotakNeoAPI
+        from brokers.session import register_broker
+
+        b = KotakNeoAPI()
+        profile = b.complete_login()
+        funds = b.get_funds()
+        register_broker("kotak", b)
+        _invalidate_auth_cache("kotak")
+    except Exception as e:
+        body = f"""<div class="card"><div class="err-box">
+          ❌ Kotak Neo login failed: {e}<br><br>
+          Check KOTAK_CONSUMER_KEY, KOTAK_CONSUMER_SECRET, KOTAK_MOBILE_NUMBER,
+          KOTAK_UCC, KOTAK_PASSWORD, KOTAK_TOTP_SECRET, and KOTAK_MPIN.
+        </div><a href="/" class="btn btn-back">← Try again</a></div>"""
+        return HTMLResponse(_page("Error", body), status_code=500)
+    return HTMLResponse(
+        _page(
+            "Connected",
+            _success_card(
+                "Kotak Neo",
+                "btn-kotak",
+                profile,
+                funds,
+                "Kotak Securities Neo API — TOTP login, live market quotes, historical data, and execution.",
+            ),
+        )
+    )
+
+
 # ── Demo mode ─────────────────────────────────────────────────
 
 
@@ -1976,6 +2078,15 @@ async def status_page():
             _has_mstock,
             _mstock_auth,
         ),
+        (
+            "kotak",
+            "Kotak Neo",
+            "badge-kotak",
+            "/kotak/login",
+            "#dc2626",
+            _has_kotak,
+            _kotak_auth,
+        ),
     ]
     rows = []
     for bkey, bname, badge_cls, login_path, color, has_fn, auth_fn in _BROKERS:
@@ -2049,6 +2160,11 @@ def _compute_status() -> dict:
             "configured": _has_mstock(),
             "authenticated": _mstock_auth(),
             "role": get_broker_role("mstock"),
+        },
+        "kotak": {
+            "configured": _has_kotak(),
+            "authenticated": _kotak_auth(),
+            "role": get_broker_role("kotak"),
         },
     }
 
@@ -2666,6 +2782,11 @@ def _compute_portfolio(source: str = "auto") -> Optional[dict]:
 
             _try("mstock", MStockAPI)
 
+        if _has_kotak():
+            from brokers.kotak import KotakNeoAPI
+
+            _try("kotak", KotakNeoAPI)
+
     if src == "paper" or (src == "auto" and not active_brokers):
         try:
             from engine.paper import PaperBroker
@@ -3006,6 +3127,81 @@ async def get_whale_deals_endpoint(min_deal_cr: float = 0.0, investor: Optional[
 
     flows = get_whale_flows(investor_filter=investor, min_deal_cr=min_deal_cr)
     return {"status": "ok", "data": flows}
+
+
+@app.get("/api/market/regime", tags=["Market Intelligence"])
+async def get_market_regime():
+    """
+    Institutional Market Regime Gate.
+
+    Returns the current EDGELESS CHOP / LOW VIX state for UI banner display.
+    Frontend should prominently display banner when is_edgeless=True.
+
+    Response fields:
+      - is_edgeless (bool): EDGELESS CHOP — PRESERVE CAPITAL is active
+      - prefer_spreads (bool): VIX < 13.0 — mandate defined-risk spreads
+      - banner (str): Display-ready status message (empty string in normal conditions)
+      - vix (float|null): Current India VIX
+      - ad_ratio (float|null): Current Advance/Decline ratio
+      - vix_status, ad_status: Classification labels
+      - data_quality: "LIVE" | "DEGRADED" | "UNAVAILABLE"
+      - reason (str): Full explanation for Telegram / trader awareness
+    """
+    try:
+        from engine.market_regime_gate import evaluate_market_regime
+        snap = evaluate_market_regime()
+        return {
+            "status": "ok",
+            "is_edgeless": snap.is_edgeless,
+            "prefer_spreads": snap.prefer_spreads,
+            "banner": snap.banner,
+            "vix": snap.vix,
+            "ad_ratio": snap.ad_ratio,
+            "vix_status": snap.vix_status,
+            "ad_status": snap.ad_status,
+            "data_quality": snap.data_quality,
+            "reason": snap.reason,
+            "is_locomotive_polarized": getattr(snap, "is_locomotive_polarized", False),
+            "locomotive_detail": getattr(snap, "locomotive_detail", ""),
+        }
+    except Exception as exc:
+        return {
+            "status": "UNAVAILABLE",
+            "is_edgeless": False,
+            "prefer_spreads": False,
+            "banner": "",
+            "data_quality": "UNAVAILABLE",
+            "reason": f"Regime gate unavailable: {exc}",
+        }
+
+
+@app.get("/api/market/council-sotd", tags=["Market Intelligence"])
+async def get_council_sotd():
+    """
+    Multi-Agent Council Setup of the Day (SOTD) winners.
+
+    Returns the Top 2-3 setups selected by the 10-minute council arbitration cycle.
+    Each alert returned has council_rank, council_score, and council_note
+    injected into its actionable_plan.
+    """
+    try:
+        from engine.council_arbitrator import get_last_winners
+        from engine.auto_alert_engine import auto_alert_engine
+
+        winner_ids = get_last_winners()
+        winners = []
+        for a in auto_alert_engine.get_alerts():
+            if getattr(a, "alert_id", "") in winner_ids:
+                d = a.to_dict()
+                d["_is_council_winner"] = True
+                winners.append(d)
+
+        winners.sort(key=lambda x: (x.get("actionable_plan") or {}).get("council_rank", 99))
+        return {"status": "ok", "count": len(winners), "data": winners}
+    except Exception as exc:
+        return {"status": "UNAVAILABLE", "count": 0, "data": [], "error": str(exc)}
+
+
 
 
 @app.post("/api/alerts/auto/archive", tags=["Alerts"])

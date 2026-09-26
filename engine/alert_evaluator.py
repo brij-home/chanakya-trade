@@ -186,10 +186,24 @@ def evaluate_alert_invalidation(
                         else "Put"
                     )
                     # Check if stop-loss was ratcheted into guaranteed profit by the trailing stop engine
-                    if opt_entry > 0 and alert.stop_loss > opt_entry:
+                    # or if Target 1 was already achieved
+                    has_hit_target = bool(
+                        "T1_ACHIEVED" in (getattr(alert, "achieved_milestones", []) or [])
+                        or getattr(alert, "target_status", "") in ("T1_ACHIEVED", "T2_ACHIEVED", "FINAL_TARGET", "TARGET_ACHIEVED")
+                        or getattr(alert, "stage", "") in ("TARGET_1", "T1_ACHIEVED", "TARGET_2", "FINAL_TARGET", "TARGET_ACHIEVED")
+                    )
+                    init_sl_val = getattr(alert, "initial_stop_loss", None)
+                    is_ratcheted = (
+                        (opt_entry > 0 and alert.stop_loss > opt_entry)
+                        or (init_sl_val is not None and alert.stop_loss > init_sl_val + 0.05)
+                        or has_hit_target
+                    )
+                    if is_ratcheted:
+                        init_sl_str = f" · original initial SL was ₹{init_sl_val:,.1f}" if init_sl_val else ""
+                        tgt_note = "Target 1 profit secured." if has_hit_target else "Profit secured."
                         return (
-                            f"Trailing stop triggered at ₹{current_ltp:.1f} "
-                            f"(ratcheted stop ₹{alert.stop_loss:.1f} locked profit above entry ₹{opt_entry:.1f}). {opt_desc} profit secured."
+                            f"Trailing runner stop triggered at ₹{current_ltp:.1f} "
+                            f"(breached ratcheted stop ₹{alert.stop_loss:.1f}{init_sl_str}). {opt_desc} {tgt_note}"
                         )
                     return (
                         f"Option premium collapsed to ₹{current_ltp:.1f} "
@@ -221,42 +235,58 @@ def evaluate_alert_invalidation(
             is_live_alert = (
                 getattr(alert, "is_live", True) and getattr(alert, "environment", "") != "TEST"
             )
+            has_hit_target = bool(
+                "T1_ACHIEVED" in (getattr(alert, "achieved_milestones", []) or [])
+                or getattr(alert, "target_status", "") in ("T1_ACHIEVED", "T2_ACHIEVED", "FINAL_TARGET", "TARGET_ACHIEVED")
+                or getattr(alert, "stage", "") in ("TARGET_1", "T1_ACHIEVED", "TARGET_2", "FINAL_TARGET", "TARGET_ACHIEVED")
+            )
+            init_sl_val = getattr(alert, "initial_stop_loss", None)
             if alert.direction == "BEARISH":
                 # For short positions, stop loss is above entry
                 ref_entry = alert.ltp or alert.trigger_level or 0.0
-                if alert.stop_loss > ref_entry:
-                    if current_ltp > (alert.stop_loss + vol_noise_margin):
+                is_ratcheted = (
+                    (ref_entry > 0 and alert.stop_loss < ref_entry)
+                    or (init_sl_val is not None and alert.stop_loss < init_sl_val - 0.05)
+                    or has_hit_target
+                )
+                if current_ltp > (alert.stop_loss + vol_noise_margin):
+                    if is_ratcheted:
+                        init_sl_str = f" · original initial SL was {curr_sym}{init_sl_val:,.1f}" if init_sl_val else ""
+                        tgt_note = "Target 1 profit secured." if has_hit_target else "Profit secured."
                         return (
-                            f"Price surged to {curr_sym}{current_ltp:,.1f} "
-                            f"(breached stop-loss {curr_sym}{alert.stop_loss:,.1f}). Bearish thesis invalidated."
+                            f"Trailing runner stop triggered at {curr_sym}{current_ltp:,.1f} "
+                            f"(breached ratcheted stop {curr_sym}{alert.stop_loss:,.1f}{init_sl_str}). {tgt_note}"
                         )
-                    if (
-                        session_high
-                        and session_high > (alert.stop_loss + vol_noise_margin)
-                        and is_live_alert
-                    ):
-                        return (
-                            f"Session high surged to {curr_sym}{session_high:,.1f} "
-                            f"(breached stop-loss ceiling {curr_sym}{alert.stop_loss:,.1f}). Bearish thesis invalidated."
-                        )
-                else:
-                    if current_ltp < (alert.stop_loss - vol_noise_margin):
-                        return (
-                            f"Price dropped to {curr_sym}{current_ltp:,.1f} "
-                            f"(breached stop-loss {curr_sym}{alert.stop_loss:,.1f}). Bearish thesis invalidated."
-                        )
-                    if (
-                        session_low
-                        and session_low < (alert.stop_loss - vol_noise_margin)
-                        and is_live_alert
-                    ):
-                        return (
-                            f"Session low dropped to {curr_sym}{session_low:,.1f} "
-                            f"(breached stop-loss floor {curr_sym}{alert.stop_loss:,.1f}). Bearish thesis invalidated."
-                        )
+                    return (
+                        f"Price surged to {curr_sym}{current_ltp:,.1f} "
+                        f"(breached stop-loss {curr_sym}{alert.stop_loss:,.1f}). Bearish thesis invalidated."
+                    )
+                if (
+                    session_high
+                    and session_high > (alert.stop_loss + vol_noise_margin)
+                    and is_live_alert
+                    and not is_ratcheted
+                ):
+                    return (
+                        f"Session high surged to {curr_sym}{session_high:,.1f} "
+                        f"(breached stop-loss ceiling {curr_sym}{alert.stop_loss:,.1f}). Bearish thesis invalidated."
+                    )
             else:
                 # Bullish / Neutral long positions
+                ref_entry = alert.ltp or alert.trigger_level or 0.0
+                is_ratcheted = (
+                    (ref_entry > 0 and alert.stop_loss > ref_entry)
+                    or (init_sl_val is not None and alert.stop_loss > init_sl_val + 0.05)
+                    or has_hit_target
+                )
                 if current_ltp < (alert.stop_loss - vol_noise_margin):
+                    if is_ratcheted:
+                        init_sl_str = f" · original initial SL was {curr_sym}{init_sl_val:,.1f}" if init_sl_val else ""
+                        tgt_note = "Target 1 profit secured." if has_hit_target else "Profit secured."
+                        return (
+                            f"Trailing runner stop triggered at {curr_sym}{current_ltp:,.1f} "
+                            f"(breached ratcheted stop {curr_sym}{alert.stop_loss:,.1f}{init_sl_str}). {tgt_note}"
+                        )
                     return (
                         f"Price dropped to {curr_sym}{current_ltp:,.1f} "
                         f"(breached stop-loss {curr_sym}{alert.stop_loss:,.1f}). Bullish thesis invalidated."
@@ -265,6 +295,7 @@ def evaluate_alert_invalidation(
                     session_low
                     and session_low < (alert.stop_loss - vol_noise_margin)
                     and is_live_alert
+                    and not is_ratcheted
                 ):
                     return (
                         f"Session low plunged to {curr_sym}{session_low:,.1f} "
@@ -800,8 +831,6 @@ def evaluate_alert_targets_and_trailing(
 
     if plan_t3:
         target_final = plan_t3
-    elif plan_t2 and not plan_t1:
-        target_final = plan_t2
     elif valid_alert_tgt and valid_alert_tgt > (plan_t2 or 0):
         target_final = valid_alert_tgt
     elif plan_t2:
@@ -809,28 +838,42 @@ def evaluate_alert_targets_and_trailing(
     elif valid_alert_tgt:
         target_final = valid_alert_tgt
     elif is_option:
-        # For options, if target_2 was not specified, compute a distinct 3.0R final target
+        # For options, if target was not specified, compute a distinct 6.0R runner final target
         target_final = round(
-            entry + (initial_risk * 3.0) if is_bullish else max(0.05, entry - (initial_risk * 3.0)),
+            entry + (initial_risk * 6.0) if is_bullish else max(0.05, entry - (initial_risk * 6.0)),
             2,
         )
     else:
         target_final = round(
-            entry + (initial_risk * 3.0) if is_bullish else entry - (initial_risk * 3.0),
+            entry + (initial_risk * 6.0) if is_bullish else entry - (initial_risk * 6.0),
             2,
         )
 
+    # 1. Target 1 (+2R Milestone): Book 50% partial profit & lock SL to Breakeven
     if plan_t1:
         t1_level = plan_t1
     elif is_bullish:
-        t1_level = round(entry + (initial_risk * 1.8), 2)
-        if target_final > entry:
-            t1_level = min(t1_level, round(entry + (target_final - entry) * 0.5, 2))
+        t1_level = round(entry + (initial_risk * 2.0), 2)
+        if target_final > entry and t1_level >= target_final:
+            t1_level = round(entry + (target_final - entry) * 0.5, 2)
     else:
-        t1_level = round(entry - (initial_risk * 1.8), 2)
-        if target_final < entry:
-            t1_level = max(t1_level, round(entry - (entry - target_final) * 0.5, 2))
+        t1_level = round(entry - (initial_risk * 2.0), 2)
+        if target_final < entry and t1_level <= target_final:
+            t1_level = round(entry - (entry - target_final) * 0.5, 2)
 
+    # 2. Target 2 (+4R Milestone): Lock SL to +2R (T1) level
+    t2_level = plan_t2
+    if not t2_level:
+        if is_bullish:
+            t2_level = round(entry + (initial_risk * 4.0), 2)
+            if target_final > t1_level and t2_level >= target_final:
+                t2_level = round(t1_level + (target_final - t1_level) * 0.5, 2)
+        else:
+            t2_level = round(entry - (initial_risk * 4.0), 2)
+            if target_final < t1_level and t2_level <= target_final:
+                t2_level = round(t1_level - (t1_level - target_final) * 0.5, 2)
+
+    # 3. Target 0.5 (Scale 1 / Early De-Risk at +1.0R):
     t0_5_level = plan_t0_5
     if not t0_5_level:
         if is_option and entry > 0:
@@ -847,13 +890,6 @@ def evaluate_alert_targets_and_trailing(
     else:
         if not (t1_level < t0_5_level < entry):
             t0_5_level = round(entry - (entry - t1_level) * 0.5, 2) if t1_level < entry else None
-
-    t2_level = plan_t2
-    if not t2_level and target_final != t1_level:
-        if is_bullish and target_final > t1_level:
-            t2_level = round(t1_level + (target_final - t1_level) * 0.5, 2)
-        elif not is_bullish and target_final < t1_level:
-            t2_level = round(t1_level - (t1_level - target_final) * 0.5, 2)
 
     achieved = set(getattr(alert, "achieved_milestones", None) or [])
     if getattr(alert, "stage", None):
@@ -1020,16 +1056,16 @@ def evaluate_alert_targets_and_trailing(
                 should_roll_strike=bool(roll_rec),
             )
 
-    # 2. Target 2 (T2) Check - intermediate expansion milestone
+    # 2. Target 2 (T2) Check - Target 2 at +4R (lock SL to +2R / T1 level)
     if (
-        is_t2_hit
+        (is_t2_hit or r_multiple >= 4.0)
         and pnl_pts > 0
         and t2_level
         and (target_final > t2_level if is_bullish else target_final < t2_level)
         and "T2_ACHIEVED" not in achieved
         and "TARGET_ACHIEVED" not in achieved
     ):
-        # T2 reached -> Trail SL to T1 level (Guarantees T1 profit locked)
+        # T2 reached (+4R) -> Trail SL to T1 level (Guarantees +2R / T1 profit locked)
         roll_rec = (
             calculate_strike_roll_recommendation(alert, current_ltp, pnl_pct, is_bullish)
             if is_option
@@ -1039,9 +1075,9 @@ def evaluate_alert_targets_and_trailing(
         locked_pts = abs(rec_stop - entry)
         locked_pct = round((locked_pts / entry) * 100, 2) if entry > 0 else 0.0
         rationale = (
-            f"Target 2 reached at ₹{current_ltp:,.2f} (+{pnl_pct:.1f}%, +{r_multiple:.1f}R). "
-            f"DECISION: TRAIL STOP-LOSS TO T1 (₹{rec_stop:,.2f}) LOCKING +{locked_pct:.1f}% PROFIT. "
-            f"Hold runner position for Final Target (₹{target_final:,.2f})."
+            f"Target 2 (+4R Milestone) reached at ₹{current_ltp:,.2f} (+{pnl_pct:.1f}%, +{r_multiple:.1f}R). "
+            f"DECISION: TRAIL STOP-LOSS TO T1 / +2R (₹{rec_stop:,.2f}) LOCKING +{locked_pct:.1f}% PROFIT. "
+            f"Hold runner position for Runner Target (₹{target_final:,.2f})."
         )
         if roll_rec:
             rationale += f" | 🔄 OPTION ROLL: {roll_rec['reason']}"
@@ -1061,25 +1097,25 @@ def evaluate_alert_targets_and_trailing(
             should_roll_strike=bool(roll_rec),
         )
 
-    # 3. Target 1 (T1) Check - Strictly requires positive PnL and genuine milestone achievement
+    # 3. Target 1 (T1) Check - Auto-partial at +2R (close 50%, lock SL to Breakeven)
     if (
-        is_t1_hit
+        (is_t1_hit or r_multiple >= 1.8)
         and pnl_pts > 0
         and r_multiple >= 0.5
         and "T1_ACHIEVED" not in achieved
         and "T2_ACHIEVED" not in achieved
         and "TARGET_ACHIEVED" not in achieved
     ):
-        # T1 reached -> Book 50% & Trail SL to Breakeven (+0.2% buffer)
+        # T1 reached (+2R) -> Book 50% & Lock SL to Breakeven (+0.2% buffer)
         be_stop = round(entry * 1.002 if is_bullish else entry * 0.998, 2)
         rec_stop = be_stop
         locked_pts = abs(rec_stop - entry)
         locked_pct = 0.2
         next_tgt = t2_level or target_final
         rationale = (
-            f"Target 1 reached at ₹{current_ltp:,.2f} (+{pnl_pct:.1f}%, +{r_multiple:.1f}R). "
+            f"Target 1 (+2R Milestone) reached at ₹{current_ltp:,.2f} (+{pnl_pct:.1f}%, +{r_multiple:.1f}R). "
             f"DECISION: BOOK 50% PARTIAL PROFIT NOW & TRAIL STOP-LOSS TO BREAKEVEN (₹{rec_stop:,.2f}). "
-            f"Trade is now 100% risk-free. Hold remaining 50% runner for Target 2 (₹{next_tgt:,.2f})."
+            f"Trade is now 100% risk-free. Hold remaining 50% runner for Target 2 (+4R / ₹{next_tgt:,.2f})."
         )
         return TargetTrailingEvaluation(
             new_milestone="T1_ACHIEVED",

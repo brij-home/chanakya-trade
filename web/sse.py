@@ -109,5 +109,19 @@ class SSEEventBus:
         except RuntimeError:
             self._dispatch_to_queues(channel, data)
 
+    def publish_domain_event(self, event: Any) -> None:
+        """
+        Thread-safe publish for strongly-typed domain events (e.g. AlertDomainEvent).
+        Enforces contract serialization and dispatches to 'alert' channel.
+        """
+        if hasattr(event, "to_sse_dict"):
+            data = event.to_sse_dict()
+        elif isinstance(event, dict):
+            data = event
+        else:
+            raise TypeError(f"Expected AlertDomainEvent or dict, got {type(event).__name__}")
+        self.publish_sync("alert", data)
+
 
 event_bus = SSEEventBus()  # module-level singleton
+

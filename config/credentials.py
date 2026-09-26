@@ -90,6 +90,15 @@ KNOWN_CREDENTIALS: list[tuple[str, str, bool]] = [
     ("MSTOCK_PASSWORD", "m.Stock Trading Password", True),
     ("MSTOCK_TOTP_SECRET", "m.Stock TOTP Secret (Base32)", True),
     ("MSTOCK_REDIRECT_URL", "m.Stock Redirect / Callback URL", False),
+    # ── Kotak Neo ────────────────────────────────────────────
+    ("KOTAK_CONSUMER_KEY", "Kotak Neo Consumer Key", False),
+    ("KOTAK_CONSUMER_SECRET", "Kotak Neo Consumer Secret", True),
+    ("KOTAK_MOBILE_NUMBER", "Kotak Neo Mobile Number", False),
+    ("KOTAK_UCC", "Kotak Neo Client Code (UCC)", False),
+    ("KOTAK_PASSWORD", "Kotak Neo Trading Password", True),
+    ("KOTAK_TOTP_SECRET", "Kotak Neo TOTP Secret (Base32)", True),
+    ("KOTAK_MPIN", "Kotak Neo 6-digit MPIN", True),
+    ("KOTAK_ENVIRONMENT", "Kotak Neo Environment (prod/uat)", False),
     # ── AI Provider selection ─────────────────────────────────
     (
         "AI_PROVIDER",
@@ -416,6 +425,16 @@ def run_setup_wizard(keys: Optional[list[str]] = None) -> None:
         "MSTOCK_TOTP_SECRET",
         "MSTOCK_REDIRECT_URL",
     }
+    _KOTAK_KEYS = {
+        "KOTAK_CONSUMER_KEY",
+        "KOTAK_CONSUMER_SECRET",
+        "KOTAK_MOBILE_NUMBER",
+        "KOTAK_UCC",
+        "KOTAK_PASSWORD",
+        "KOTAK_TOTP_SECRET",
+        "KOTAK_MPIN",
+        "KOTAK_ENVIRONMENT",
+    }
     _AI_KEYS = {
         "AI_PROVIDER",
         "ANTHROPIC_API_KEY",
@@ -437,6 +456,7 @@ def run_setup_wizard(keys: Optional[list[str]] = None) -> None:
         "Stoxkart": [(k, l, s) for k, l, s in targets if k in _STOXKART_KEYS],
         "Shoonya (Finvasia Noren)": [(k, l, s) for k, l, s in targets if k in _SHOONYA_KEYS],
         "m.Stock (Mirae Asset — free)": [(k, l, s) for k, l, s in targets if k in _MSTOCK_KEYS],
+        "Kotak Neo (Kotak Securities)": [(k, l, s) for k, l, s in targets if k in _KOTAK_KEYS],
         "AI Provider": [(k, l, s) for k, l, s in targets if k in _AI_KEYS],
         "Market Data": [(k, l, s) for k, l, s in targets if "NEWSAPI" in k],
         "Notifications (Telegram)": [(k, l, s) for k, l, s in targets if k in _TELEGRAM_KEYS],

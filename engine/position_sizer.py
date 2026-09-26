@@ -442,6 +442,17 @@ def calculate_position_size(
     # India VIX Volatility Regime Scaling
     effective_risk_pct = max_risk_pct
     vix_note = ""
+
+    # If VIX is not explicitly passed, query the live/cached market regime gate
+    if vix is None:
+        try:
+            from engine.market_regime_gate import get_cached_regime
+            _reg = get_cached_regime()
+            if _reg and _reg.vix:
+                vix = float(_reg.vix)
+        except Exception:
+            pass
+
     if vix is not None and vix > 0:
         if vix >= 25.0:
             effective_risk_pct = round(
@@ -453,6 +464,20 @@ def calculate_position_size(
                 max_risk_pct * 0.70, 2
             )  # Scale down 30% during elevated volatility
             vix_note = f" [VIX={vix:.1f} ELEVATED: Risk scaled down 30% to {effective_risk_pct}%]"
+
+    # Market Regime Gate Sizing Coupling (Edgeless Chop / Locomotive Polarization)
+    try:
+        from engine.market_regime_gate import get_cached_regime
+        _cached_reg = get_cached_regime()
+        if _cached_reg:
+            if _cached_reg.is_edgeless:
+                effective_risk_pct = round(effective_risk_pct * 0.25, 2)
+                vix_note += " [EDGELESS CHOP: Risk scaled down to 25% to preserve capital]"
+            elif getattr(_cached_reg, "is_locomotive_polarized", False):
+                effective_risk_pct = round(effective_risk_pct * 0.50, 2)
+                vix_note += " [LOCOMOTIVE POLARIZATION: Risk scaled down 50%]"
+    except Exception:
+        pass
 
     # Dollar risk budget
     risk_budget = capital * (effective_risk_pct / 100.0)
@@ -670,4 +695,69 @@ def calculate_position_size_for_alert(
         sizing_model=base.sizing_model,
         notes=adjusted_notes,
     )
+
+
+def generate_execution_ticket(
+    symbol: str,
+    entry_price: float,
+    stop_loss: float,
+    target_price: Optional[float] = None,
+    capital: float = 100000.0,
+    max_risk_pct: float = 1.0,
+    direction: str = "BULLISH",
+    alert_type: Optional[str] = None,
+    is_fno: bool = False,
+    order_type: str = "LIMIT",
+) -> dict[str, Any]:
+    """
+    Builds a capital-calibrated, ready-to-execute institutional order ticket.
+    Translates raw quantitative alert price levels into an actionable order payload
+    with lot-size quantization, max INR risk cap, and 1-click execution support.
+    """
+    clean_sym = symbol.upper().replace(".NS", "").replace("NSE:", "").strip()
+
+    if alert_type:
+        res = calculate_detector_adjusted_position_size(
+            symbol=clean_sym,
+            entry_price=entry_price,
+            stop_loss=stop_loss,
+            alert_type=alert_type,
+            capital=capital,
+            target_price=target_price,
+            max_risk_pct=max_risk_pct,
+            is_fno=is_fno,
+        )
+    else:
+        res = calculate_position_size(
+            symbol=clean_sym,
+            entry_price=entry_price,
+            stop_loss=stop_loss,
+            capital=capital,
+            target_price=target_price,
+            max_risk_pct=max_risk_pct,
+            is_fno=is_fno,
+        )
+
+    side = "BUY" if direction.upper() in ("BULLISH", "BUY", "LONG") else "SELL"
+
+    return {
+        "symbol": clean_sym,
+        "side": side,
+        "order_type": order_type,
+        "limit_price": round(entry_price, 2),
+        "shares": res.shares,
+        "lots": res.lots,
+        "lot_size": res.lot_size,
+        "stop_loss": round(stop_loss, 2),
+        "target_price": round(res.target_price, 2),
+        "risk_amount_inr": round(res.risk_amount, 2),
+        "capital_allocated_inr": round(res.capital_allocated, 2),
+        "capital_pct": round(res.capital_pct, 2),
+        "risk_pct": round(res.risk_pct, 2),
+        "risk_reward_ratio": round(res.r_multiple, 2),
+        "sizing_model": res.sizing_model,
+        "auto_submit_ready": True,
+        "notes": res.notes,
+    }
+
 

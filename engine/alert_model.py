@@ -108,6 +108,7 @@ class AutoAlert:
     bid_ask_spread_pct: Optional[float] = None
     strike_roll_recommendation: Optional[dict[str, Any]] = None
     initial_stop_loss: Optional[float] = None
+    update_count: int = 0
 
     def __post_init__(self) -> None:
         if self.initial_stop_loss is None:
@@ -286,6 +287,21 @@ class AutoAlert:
         if self.stage == "IGNITED" and not self.triggered_at:
             self.triggered_at = self.created_at
 
+        # Model invariant: validate institutional alert ID determinism in live/real environments
+        if self.alert_id and self.environment not in ("TEST", "SIMULATION") and not self.alert_id.startswith(("test-", "mock-", "sim-", "yb-")):
+            try:
+                from engine.alert_identity import validate_alert_id
+
+                is_valid, reason = validate_alert_id(self.alert_id)
+                if not is_valid:
+                    import logging
+
+                    logging.getLogger(__name__).debug(
+                        "Alert ID invariant notice for %s: %s", self.alert_id, reason
+                    )
+            except Exception:
+                pass
+
     @property
     def is_expired(self) -> bool:
         """
@@ -427,15 +443,19 @@ class AutoAlert:
 
     @property
     def is_active(self) -> bool:
-        """A trade is active if it is not archived, not invalidated, not expired, and has not completed final target."""
+        """A trade is active if it is not archived, not invalidated, not expired, and has not completed final target or runner exit."""
         if self.is_expired:
             return False
         return (
             not self.is_archived
             and not self.is_invalidated
-            and self.stage not in ("INVALIDATED", "TARGET_ACHIEVED", "EXPIRED")
-            and self.target_status != "TARGET_ACHIEVED"
+            and self.stage not in ("INVALIDATED", "TARGET_ACHIEVED", "EXPIRED", "RUNNER_EXIT", "PROFIT_SECURED")
+            and self.target_status not in ("TARGET_ACHIEVED", "RUNNER_CLOSED")
         )
+
+    @is_active.setter
+    def is_active(self, val: bool) -> None:
+        self.is_archived = not val
 
     @property
     def entry_price(self) -> float:
@@ -474,26 +494,34 @@ class AutoAlert:
 
     @property
     def target_2(self) -> Optional[float]:
-        """Canonical Target 2 price level."""
+        """Canonical Target 2 price level with strict monotonicity guardrails."""
         plan = self.actionable_plan if isinstance(self.actionable_plan, dict) else {}
         t2_val = plan.get("target_2")
+        t2_num = None
         if t2_val:
             try:
                 import re
 
                 m = re.findall(r"[\d.]+", str(t2_val).replace(",", ""))
                 if m:
-                    return float(m[0])
+                    t2_num = float(m[0])
             except Exception:
                 pass
         t1 = self.target_1
         ep = self.entry_price
         sl = self.stop_loss
+        is_bull = self.direction in ("BULLISH", "LONG", "BUY") or self.option_type == "CE"
         if t1 and ep and sl and ep != sl:
             risk = abs(ep - sl)
-            is_bull = self.direction in ("BULLISH", "LONG", "BUY") or self.option_type == "CE"
-            return round(ep + (3.0 * risk) if is_bull else ep - (3.0 * risk), 2)
-        return None
+            # Enforce strict monotonicity relative to t1
+            if t2_num is not None:
+                if is_bull and t2_num > t1:
+                    return t2_num
+                elif not is_bull and t2_num < t1:
+                    return t2_num
+            # If t2 was missing, zero, or inverted, calculate mathematically sound T2 (+3.0R)
+            return round(t1 + (1.2 * risk) if is_bull else max(0.05, t1 - (1.2 * risk)), 2)
+        return t2_num
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)

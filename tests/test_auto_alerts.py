@@ -1759,6 +1759,8 @@ def test_auto_alert_rehabilitates_falsely_invalidated_options(tmp_path, monkeypa
 
     engine = AutoAlertEngine(max_buffer=50)
     engine._load()
+    rehab_count = engine.rehabilitate_falsely_invalidated_options()
+    assert rehab_count == 1
 
     alerts = engine.get_alerts(view_mode="ALL")
     assert len(alerts) == 1
@@ -2300,6 +2302,111 @@ def test_auto_alert_directional_whiplash_guard():
         assert all(a.alert_id != "whiplash-bull-1" for a in engine._alerts)
 
 
+def test_index_directional_supremacy_gate():
+    """
+    Index Directional Supremacy Gate:
+    When a NIFTY GAMMA_BLAST CE (BULLISH) is already active, an incoming GAMMA_BLAST PE (BEARISH)
+    must be suppressed unless its supremacy score (confidence × R:R) exceeds the existing by >= 8.
+    Only one directional bias is shown to the trader at any time.
+    """
+    from unittest.mock import patch
+
+    with patch(
+        "engine.alert_scrutiny.alert_scrutiny_auditor._execute_fast_llm_scrutiny",
+        return_value=None,
+    ), patch(
+        "engine.auto_alert_engine.AutoAlertEngine._get_index_intraday_regime",
+        return_value="TRENDING",
+    ):
+        engine = AutoAlertEngine()
+        engine._alerts = []
+
+        # BULLISH CE alert fires first (confidence=82, R:R ~ 2.5 → score ~ 205)
+        nifty_ce = AutoAlert(
+            alert_id="idx-sup-ce-1",
+            alert_type="GAMMA_BLAST",
+            stage="EARLY_WARNING",
+            symbol="NIFTY",
+            exchange="NFO",
+            direction="BULLISH",
+            headline="CALL GAMMA BLAST EARLY WARNING: NIFTY 23050 CE",
+            summary="CE VWAP expansion with fresh OI accumulation",
+            ltp=149.45,
+            trigger_level=155.0,
+            target_level=215.0,  # R:R ~ 2.5
+            stop_loss=115.0,
+            option_type="CE",
+            strike=23050,
+            contract_symbol="NIFTY23050CE",
+            confidence=82,
+            is_live=True,
+            environment="LIVE",
+        )
+        assert engine.record_alert(nifty_ce) is True
+        assert len(engine._alerts) == 1
+        assert engine._alerts[0].direction == "BULLISH"
+
+        # BEARISH PE alert fires shortly after (confidence=72, R:R ~ 1.8 → score ~ 130)
+        # Lower score — should be suppressed
+        nifty_pe_weak = AutoAlert(
+            alert_id="idx-sup-pe-weak",
+            alert_type="GAMMA_BLAST",
+            stage="IGNITED",
+            symbol="NIFTY",
+            exchange="NFO",
+            direction="BEARISH",
+            headline="BREAKDOWN IGNITED: NIFTY 23000 PE crossed 69.4",
+            summary="PUT VWAP failure, breakdown ignited",
+            ltp=65.6,
+            trigger_level=69.4,
+            target_level=38.0,   # R:R ~ 1.8
+            stop_loss=84.0,
+            option_type="PE",
+            strike=23000,
+            contract_symbol="NIFTY23000PE",
+            confidence=72,
+            is_live=True,
+            environment="LIVE",
+        )
+        # CE score = 82 × 2.5 = 205; PE score = 72 × 1.8 = ~130 — gap=75 → PE should lose
+        assert engine.record_alert(nifty_pe_weak) is False
+        # Bullish CE still the only active alert
+        assert len([a for a in engine._alerts if a.is_active]) == 1
+        assert engine._alerts[0].direction == "BULLISH"
+
+        # Now fire a PE with much higher conviction (confidence=90, R:R≈4.0 → score≈360)
+        # Should win and retire the CE (CE score = 82 × 2.5 = 205; gap = 155 >> 8)
+        nifty_pe_strong = AutoAlert(
+            alert_id="idx-sup-pe-strong",
+            alert_type="GAMMA_BLAST",
+            stage="IGNITED",
+            symbol="NIFTY",
+            exchange="NFO",
+            direction="BEARISH",
+            headline="BREAKDOWN IGNITED: NIFTY 22900 PE — Structural breakdown",
+            summary="PDH sweep rejection + OI unwind, high conviction breakdown",
+            ltp=95.0,
+            trigger_level=100.0,
+            target_level=175.0,    # R:R = (175-95)/(95-75) = 80/20 = 4.0 on premium gain
+            stop_loss=75.0,        # 21% SL below entry — proper premium risk floor
+            option_type="PE",
+            strike=22900,
+            contract_symbol="NIFTY22900PE",
+            confidence=90,
+            metrics={"pdh_sweep": True},
+            is_live=True,
+            environment="LIVE",
+        )
+        # CE score = 82×2.5=205; PE score = 90×3.0=270 — gap=65 → PE wins
+        assert engine.record_alert(nifty_pe_strong) is True
+        # CE should now be invalidated/retired, PE is the active call
+        active_alerts = [a for a in engine._alerts if a.is_active and not a.is_invalidated]
+        assert any(a.direction == "BEARISH" for a in active_alerts)
+        # No simultaneous conflicting CE/PE should remain active
+        active_bullish = [a for a in engine._alerts if a.direction == "BULLISH" and a.is_active and not a.is_invalidated]
+        assert len(active_bullish) == 0, "No conflicting BULLISH leg should survive when BEARISH wins supremacy"
+
+
 @pytest.mark.anyio
 async def test_send_alert_to_telegram_endpoint(monkeypatch, tmp_path):
     """Verify POST /api/alerts/auto/send-telegram renders message and dispatches via send_push."""
@@ -2494,6 +2601,7 @@ def test_record_alert_active_trade_immutable(tmp_path, monkeypatch):
         option_type="PE",
         contract_symbol="NIFTY23000PE",
         option_premium=18.25,
+        confidence=85,
         is_live=True,
         environment="LIVE",
         expiry_date="2026-09-24",

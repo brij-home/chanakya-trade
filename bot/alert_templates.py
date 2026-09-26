@@ -1371,6 +1371,7 @@ class MilestoneAlertData:
     lot_size: Optional[int] = None
     strike_roll_recommendation: Optional[dict[str, Any]] = None
     update_number: Optional[int] = None
+    is_t1_achieved: bool = False
 
     @classmethod
     def from_alert(
@@ -1596,7 +1597,13 @@ class MilestoneAlertData:
                 if t1_val and raw_target_level > t1_val:
                     t2_val = raw_target_level
                 elif not t1_val:
-                    if milestone_type == "TARGET_1":
+                    if milestone_type in (
+                        "TARGET_1",
+                        "RUNNER_EXIT",
+                        "PROFIT_SECURED",
+                        "BREAKEVEN_EXIT",
+                        "TRAILING_STOP_EXIT",
+                    ):
                         if (
                             entry_price
                             and abs(raw_target_level - entry_price) > abs(ltp - entry_price) * 1.3
@@ -1607,6 +1614,11 @@ class MilestoneAlertData:
                             t1_val = raw_target_level
                     else:
                         t2_val = raw_target_level
+
+        if not t1_val:
+            raw_t1 = getattr(alert, "target_1", None)
+            if raw_t1 and (not is_opt_contract or (entry_price and raw_t1 <= entry_price * 10)):
+                t1_val = raw_t1
 
         # Strict Domain Sanity Filter for Option Contracts:
         # Prevent any stray underlying spot prices from polluting option target/SL fields.
@@ -1815,7 +1827,13 @@ class MilestoneAlertData:
         # Determine sequential update number
         update_num = getattr(alert, "update_number", None)
         if update_num is None:
+            raw_update_cnt = getattr(alert, "update_count", None)
             achieved = getattr(alert, "achieved_milestones", None) or []
+            is_t1_achieved = (
+                ("T1_ACHIEVED" in achieved)
+                or ("T1" in str(getattr(alert, "target_status", "")).upper())
+                or ("T1" in str(getattr(alert, "stage", "")).upper())
+            )
             m_key = milestone_type.upper()
             found_idx = None
             for idx, m in enumerate(achieved):
@@ -1826,7 +1844,7 @@ class MilestoneAlertData:
             if found_idx is not None:
                 update_num = found_idx
             elif achieved:
-                update_num = len(achieved) + 1
+                update_num = len(achieved) + (0 if m_key in achieved else 1)
             else:
                 type_order_map = {
                     "TARGET_0_5": 1,
@@ -1834,6 +1852,9 @@ class MilestoneAlertData:
                     "TARGET_2": 2,
                     "FINAL_TARGET": 3,
                     "TRAIL_RATCHET": 1,
+                    "RUNNER_EXIT": 2,
+                    "PROFIT_SECURED": 2,
+                    "BREAKEVEN_EXIT": 2,
                     "TIME_STOP_SCRATCH": 1,
                     "TIME_STOP_EXIT": 1,
                     "INVALIDATED": 1,
@@ -1844,6 +1865,9 @@ class MilestoneAlertData:
                     "SPREAD_STOP_LOSS": 1,
                 }
                 update_num = type_order_map.get(m_key, 1)
+
+            if raw_update_cnt is not None and int(raw_update_cnt) > 0:
+                update_num = max(update_num or 1, int(raw_update_cnt))
 
         return cls(
             milestone_type=milestone_type,
@@ -1906,6 +1930,7 @@ class MilestoneAlertData:
             lot_size=lot_sz,
             strike_roll_recommendation=strike_roll_rec,
             update_number=update_num,
+            is_t1_achieved=is_t1_achieved,
         )
 
 
@@ -2544,6 +2569,7 @@ def render_milestone_alert(
             lot_size=data.get("lot_size"),
             strike_roll_recommendation=data.get("strike_roll_recommendation"),
             update_number=data.get("update_number"),
+            is_t1_achieved=bool(data.get("is_t1_achieved", False)),
         )
     else:
         d = data
@@ -2556,6 +2582,9 @@ def render_milestone_alert(
             "TARGET_2": 2,
             "FINAL_TARGET": 3,
             "TRAIL_RATCHET": 1,
+            "RUNNER_EXIT": 2,
+            "PROFIT_SECURED": 2,
+            "BREAKEVEN_EXIT": 2,
             "TIME_STOP_SCRATCH": 1,
             "TIME_STOP_EXIT": 1,
             "INVALIDATED": 1,
@@ -2696,6 +2725,48 @@ def render_milestone_alert(
             f"{opt_spec_line}"
             f"⚡ <b>DECISIVE ACTION:</b> <code>CANCEL PENDING ORDERS & CLOSE POSITIONS</code>\n"
             f"🛑 <b>Reason:</b> {d.invalidation_reason or d.rationale or 'Stop-loss or invalidation floor breached'}"
+            f"{orig_plan_line}"
+            f"{footer_line}"
+        )
+
+    if d.milestone_type in ("RUNNER_EXIT", "PROFIT_SECURED", "BREAKEVEN_EXIT", "TRAILING_STOP_EXIT"):
+        orig_plan_line = _build_orig_plan(
+            entry_p=d.entry_price,
+            entry_r=d.entry_range,
+            init_sl=d.initial_sl,
+            lot=d.lot_size,
+        )
+        move_str = ""
+        if d.pnl_pts is not None and d.pnl_pct is not None:
+            sign = "+" if d.pnl_pts >= 0 else ""
+            r_str = f" | {sign}{d.r_multiple}R" if d.r_multiple is not None else ""
+            move_str = (
+                f" · 🏁 <b>P&L:</b> <b>{sign}₹{d.pnl_pts:,.2f} ({sign}{d.pnl_pct:.1f}%{r_str})</b>"
+            )
+
+        is_profit = (
+            (d.pnl_pts and d.pnl_pts > 0)
+            or (d.locked_profit_pts and d.locked_profit_pts > 0)
+            or (d.target_1 is not None)
+            or getattr(d, "is_t1_achieved", False)
+        )
+        title_badge = (
+            "RUNNER CLOSED (PROFIT SECURED)"
+            if is_profit
+            else "RUNNER CLOSED (BREAKEVEN EXIT)"
+        )
+        sub_title = f"{color_icon} {contract_title} — Trailing Stop Hit (Trade Completed)"
+        decisive_act = "CLOSE REMAINING RUNNER POSITION (PROFIT LOCKED)"
+
+        return (
+            f"🏁 <b>{env_tag} {update_prefix}{title_badge}</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"🏆 <b>{sub_title}</b>\n"
+            f"{opt_spec_line}"
+            f"💰 <b>{cmp_label}:</b> ₹{d.ltp:,.2f}{move_str}\n"
+            f"⚡ <b>DECISIVE ACTION:</b> <code>{decisive_act}</code>\n"
+            f"🛡️ <b>Exit Reason:</b> {d.invalidation_reason or d.rationale or 'Trailing stop-loss breached; profit secured.'}\n"
+            f"🔒 <b>Milestone History:</b> Target 1 was achieved. Initial SL was never breached."
             f"{orig_plan_line}"
             f"{footer_line}"
         )
@@ -3218,6 +3289,18 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
     ):
         return render_milestone_alert(
             MilestoneAlertData.from_alert(alert, "TIME_STOP_EXIT", in_market=in_market),
+            in_market=in_market,
+        )
+
+    # 0c. Runner Exit / Profit Secured / Breakeven Exit
+    is_runner_exit = (
+        getattr(alert, "stage", "") in ("RUNNER_EXIT", "PROFIT_SECURED", "BREAKEVEN_EXIT")
+        or getattr(alert, "target_status", "") in ("RUNNER_CLOSED", "RUNNER_EXIT", "PROFIT_SECURED")
+        or "RUNNER CLOSED" in (getattr(alert, "headline", "") or "").upper()
+    )
+    if is_runner_exit:
+        return render_milestone_alert(
+            MilestoneAlertData.from_alert(alert, "RUNNER_EXIT", in_market=in_market),
             in_market=in_market,
         )
 

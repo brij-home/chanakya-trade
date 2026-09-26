@@ -4,11 +4,11 @@ Upper Circuit proximity detector.
 
 from __future__ import annotations
 
-import uuid
 from datetime import datetime
 from typing import Optional
 from zoneinfo import ZoneInfo
 
+from engine.alert_identity import generate_alert_id
 from engine.alert_model import AutoAlert
 
 IST = ZoneInfo("Asia/Kolkata")
@@ -45,7 +45,7 @@ def detect_circuit_proximity(
         rr_str = f"1:{round((t1_price - ltp) / risk_pts, 1)}"
 
         return AutoAlert(
-            alert_id=f"aa-cir-prox-{symbol}-{uuid.uuid4().hex[:6]}",
+            alert_id=generate_alert_id(symbol, "CIRCUIT_WARNING", variant="prox"),
             alert_type="CIRCUIT_WARNING",
             stage="EARLY_WARNING",
             symbol=symbol,

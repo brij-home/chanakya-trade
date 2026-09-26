@@ -3642,6 +3642,7 @@ class InflectionScanSkillRequest(BaseModel):
     universe: str = "multibagger_hunters"
     archetype: str = "ALL"
     timing: str = "ALL"
+    horizon: str = "ALL"
     min_score: int = 40
     max_results: int = 40
     min_turnover_cr: float = 0.5
@@ -3681,12 +3682,13 @@ async def skill_inflection_scan(req: InflectionScanSkillRequest):
     """
     Scan universe for stocks at high-asymmetry inflection points across VCP pivots,
     TTM squeezes, Stage 1->2 breakouts, SMC springs, and Sector RRG rotation.
+    Supports Multi-Horizon filtering: SHORT_TERM, MID_TERM, LONG_TERM.
     Uses local SQLite EOD store for zero-latency scanning.
     """
     from engine.analysis_cache import analysis_cache
 
     cache_key = (
-        f"inflection_scan:{req.universe}:{req.archetype}:{req.timing}:"
+        f"inflection_scan:{req.universe}:{req.archetype}:{req.timing}:{req.horizon}:"
         f"{req.min_score}:{req.max_results}:{req.min_turnover_cr}:{req.cap_tier}"
     )
     if req.use_local_cache:
@@ -3701,6 +3703,7 @@ async def skill_inflection_scan(req: InflectionScanSkillRequest):
             universe=req.universe,
             archetype_filter=req.archetype,
             timing_filter=req.timing,
+            horizon_filter=req.horizon,
             min_score=req.min_score,
             max_results=req.max_results,
             min_turnover_cr=req.min_turnover_cr,
@@ -3849,6 +3852,239 @@ async def skill_inflection_chat(req: InflectionChatSkillRequest):
     try:
         res = await asyncio.to_thread(_chat)
         return _ok(res)
+    except Exception as e:
+        raise _err(str(e))
+
+
+# ── Cycle Incubation Pipeline & Institutional Catalyst Endpoints ────────
+
+
+class IncubationAddSkillRequest(BaseModel):
+    symbol: str
+    name: Optional[str] = None
+    sector: Optional[str] = "Broad Market"
+    horizon: str = "MID_TERM"  # "SHORT_TERM" | "MID_TERM" | "LONG_TERM"
+    cycle_state: str = "COILING_PIVOT"
+    eta_days: int = 3
+    eta_label: str = "2–5 Sessions"
+    entry_pivot: float = 0.0
+    current_price: float = 0.0
+    stop_loss: float = 0.0
+    target_1: float = 0.0
+    target_2: float = 0.0
+    target_moonshot: float = 0.0
+    risk_reward_ratio: float = 2.5
+    conviction_score: int = 75
+    primary_archetype: str = "VCP_PIVOT_BREAKOUT"
+    catalyst_badges: list[str] = []
+    catalyst_summary: str = ""
+    user_notes: str = ""
+
+
+class IncubationPipelineSkillRequest(BaseModel):
+    horizon: Optional[str] = "ALL"
+    cycle_state: Optional[str] = "ALL"
+
+
+class IncubationRemoveSkillRequest(BaseModel):
+    symbol: str
+
+
+class InstitutionalCatalystSkillRequest(BaseModel):
+    symbol: str
+
+
+@router.get("/incubation_pipeline")
+@router.post("/incubation_pipeline")
+async def skill_incubation_pipeline(req: Optional[IncubationPipelineSkillRequest] = None):
+    """
+    Retrieves all retained setups in the persistent cycle incubation pipeline,
+    optionally filtered by Horizon (Short, Mid, Long) or Cycle State.
+    """
+    try:
+        from engine.incubation_radar import get_incubated_candidates
+
+        h = req.horizon if req else "ALL"
+        c = req.cycle_state if req else "ALL"
+        candidates = get_incubated_candidates(horizon_filter=h, cycle_state_filter=c)
+        return _ok({
+            "total": len(candidates),
+            "candidates": [item.to_dict() for item in candidates],
+        })
+    except Exception as e:
+        raise _err(str(e))
+
+
+@router.post("/incubation_add")
+async def skill_incubation_add(req: IncubationAddSkillRequest):
+    """
+    1-Click retains or updates a candidate setup in the persistent cycle incubation pipeline.
+    """
+    try:
+        from engine.incubation_radar import add_to_incubation
+
+        saved = add_to_incubation(req.model_dump())
+        return _ok(saved.to_dict())
+    except Exception as e:
+        raise _err(str(e))
+
+
+@router.post("/incubation_remove")
+async def skill_incubation_remove(req: IncubationRemoveSkillRequest):
+    """
+    Removes a setup from the persistent cycle incubation pipeline.
+    """
+    try:
+        from engine.incubation_radar import remove_from_incubation
+
+        success = remove_from_incubation(req.symbol)
+        return _ok({"symbol": req.symbol, "removed": success})
+    except Exception as e:
+        raise _err(str(e))
+
+
+@router.post("/incubation_evaluate")
+async def skill_incubation_evaluate():
+    """
+    Evaluates all incubated candidates against latest price/volume milestones,
+    auto-promoting coiling candidates to TRIGGER_READY upon breakout.
+    """
+    try:
+        from engine.incubation_radar import evaluate_incubated_pipeline
+
+        res = evaluate_incubated_pipeline()
+        return _ok(res)
+    except Exception as e:
+        raise _err(str(e))
+
+
+@router.get("/institutional_catalysts/{symbol}")
+@router.post("/institutional_catalysts")
+async def skill_institutional_catalysts(
+    symbol: Optional[str] = None,
+    req: Optional[InstitutionalCatalystSkillRequest] = None,
+):
+    """
+    Evaluates CRISIL/credit rating upgrades, FII/DII QoQ interest, promoter creeping acquisition,
+    and de-pledging trajectory for an Indian equity ticker.
+    """
+    target_sym = (req.symbol if req else symbol) or "TRENT"
+    try:
+        from analysis.institutional_catalysts import get_institutional_catalysts
+
+        rep = get_institutional_catalysts(target_sym)
+        return _ok(rep.to_dict())
+    except Exception as e:
+        raise _err(str(e))
+
+
+# ── Century Compounder (100x–1,000x) & Anti-FOMO Early Warning Endpoints ─
+
+
+class CenturyCompounderSkillRequest(BaseModel):
+    symbol: Optional[str] = None
+    universe: Optional[str | list[str]] = None
+    min_score: int = 65
+    top_n: int = 20
+    use_cache: bool = True
+
+
+class CenturySyncMarketSkillRequest(BaseModel):
+    universe: str = "microcap250"
+
+
+class PreInflectionEarlyWarningRequest(BaseModel):
+    universe: Optional[list[str]] = None
+    top_n: int = 10
+
+
+@router.get("/century_compounders")
+@router.post("/century_compounders")
+async def skill_century_compounders(req: Optional[CenturyCompounderSkillRequest] = None):
+    """
+    Evaluates or scans for 100x, 1,000x & 10,000x Century Compounders using
+    the empirical Twin Engines math (PAT Growth × PE Expansion) and the 7 Dalal Street pillars.
+    """
+    try:
+        from analysis.century_compounder import evaluate_century_compounder, scan_century_compounders
+
+        target_sym = req.symbol if req and req.symbol else None
+        if target_sym:
+            rep = evaluate_century_compounder(target_sym)
+            return _ok(rep.to_dict())
+        else:
+            universe = req.universe if req and req.universe else None
+            min_score = req.min_score if req else 65
+            top_n = req.top_n if req else 20
+            use_cache = req.use_cache if req else True
+            reps = scan_century_compounders(
+                universe=universe, min_score=min_score, top_n=top_n, use_cache=use_cache
+            )
+            return _ok({"candidates": [r.to_dict() for r in reps], "count": len(reps)})
+    except Exception as e:
+        raise _err(str(e))
+
+
+@router.post("/century_sync_market")
+async def skill_century_sync_market(req: Optional[CenturySyncMarketSkillRequest] = None):
+    """
+    Syncs EOD/fundamentals for an entire market universe (NSE EQ series & BSE) and precomputes
+    100x Century Compounder ratings into the persistent SQLite database.
+    """
+    try:
+        from analysis.century_compounder import sync_and_precompute_market_compounders
+
+        u_name = req.universe if req else "microcap250"
+        res = sync_and_precompute_market_compounders(universe_name=u_name)
+        return _ok(res)
+    except Exception as e:
+        raise _err(str(e))
+
+
+@router.get("/pre_inflection_early_warning")
+@router.post("/pre_inflection_early_warning")
+async def skill_pre_inflection_early_warning(
+    req: Optional[PreInflectionEarlyWarningRequest] = None,
+):
+    """
+    Scans for early-warning Volume Dry-Up and Range Compression at Fair Value,
+    generating actionable anti-FOMO entry brackets before the breakout candle detonates.
+    """
+    try:
+        from engine.detectors.pre_inflection_dryup import detect_pre_inflection_dryup
+        from market.history import get_ohlcv
+
+        universe = (req.universe if req and req.universe else None) or [
+            "TRENT",
+            "DIXON",
+            "KAYNES",
+            "PREMIERENE",
+            "WAAREEENER",
+            "INOXWIND",
+            "KPITTECH",
+            "ZENTEC",
+            "DATAPATTNS",
+            "ARE&M",
+            "NEWGEN",
+            "RATEGAIN",
+            "ASTRAL",
+            "POLYCAB",
+            "KALYANKJIL",
+            "CDSL",
+            "BSE",
+            "MCX",
+        ]
+        top_n = req.top_n if req else 10
+        alerts = []
+        for sym in universe:
+            clean_sym = sym.upper().replace(".NS", "").replace("NSE:", "").strip()
+            df = get_ohlcv(clean_sym, exchange="NSE", interval="day", days=60)
+            if df is not None and len(df) >= 25:
+                ltp = float(df["close"].iloc[-1])
+                alt = detect_pre_inflection_dryup(clean_sym, df, ltp)
+                if alt:
+                    alerts.append(alt.to_dict())
+        return _ok({"alerts": alerts[:top_n], "count": len(alerts[:top_n])})
     except Exception as e:
         raise _err(str(e))
 
@@ -6867,6 +7103,9 @@ def _fetch_options_and_spot(clean_sym: str, norm_inst: str, req_exp: Optional[st
     return quote, contracts, chain_spot, expiries, source_info
 
 
+_CONVICTION_BG_TASKS: dict[str, asyncio.Task] = {}
+
+
 @router.get("/gex_snapshot")
 @router.post("/gex_snapshot")
 async def skill_gex_snapshot(
@@ -6949,12 +7188,14 @@ async def skill_gex_snapshot(
                     "time": now_time,
                     "as_of": source_info.get("as_of"),
                     "as_of_display": now_time,
-                    "data_state": source_info.get(
-                        "data_state", "BROKER_REQUIRED" if is_bse else "UNAVAILABLE"
+                    "data_state": "BROKER_REQUIRED" if is_bse else source_info.get(
+                        "data_state", "UNAVAILABLE"
                     ),
-                    "data_source": source_info.get("provider", "bse_live" if is_bse else "none"),
-                    "source_label": source_info.get(
-                        "source_label", "Broker Required for BFO" if is_bse else "Data Unavailable"
+                    "data_source": "bse_live" if is_bse else source_info.get("provider", "none"),
+                    "source_label": (
+                        "Broker Required for BFO"
+                        if is_bse
+                        else source_info.get("source_label", "Data Unavailable")
                     ),
                     "is_realtime": source_info.get("is_realtime", False),
                     "message": (
@@ -7543,24 +7784,43 @@ async def skill_gex_snapshot(
             if cached_entry and (time.time() - cached_entry[0] < 120.0):
                 conviction_data = cached_entry[1].as_dict()
             else:
-                conviction = await asyncio.wait_for(
-                    asyncio.to_thread(
-                        get_conviction_score,
-                        underlying=clean_sym,
-                        spot=spot,
+                # If cached within 300s, serve stale cache while refreshing
+                if cached_entry:
+                    conviction_data = cached_entry[1].as_dict()
+
+                # Trigger non-blocking background refresh if not already calculating
+                bg_task = _CONVICTION_BG_TASKS.get(clean_sym)
+                if bg_task is None or bg_task.done():
+                    def _run_bg_conviction(
+                        sym=clean_sym,
+                        sp=spot,
                         pcr=pcr_val,
-                        gex_posture=_gex_posture,
-                        vix=None,
-                        blast_score=top_blast["score"] if top_blast else None,
-                        vol_oi_ratio=top_blast.get("vol_oi_ratio") if top_blast else None,
-                        imbalance_ratio=top_blast.get("imbalance_ratio") if top_blast else None,
-                        iv_skew=iv_skew if iv_skew else [],
-                        max_pain=float(max_pain) if max_pain else None,
-                        data_state=source_info.get("data_state"),
-                    ),
-                    timeout=1.2,
-                )
-                conviction_data = conviction.as_dict()
+                        gex_post=_gex_posture,
+                        tb=top_blast,
+                        skew=iv_skew,
+                        mp=max_pain,
+                        dstate=source_info.get("data_state"),
+                    ):
+                        try:
+                            get_conviction_score(
+                                underlying=sym,
+                                spot=sp,
+                                pcr=pcr,
+                                gex_posture=gex_post,
+                                vix=None,
+                                blast_score=tb["score"] if tb else None,
+                                vol_oi_ratio=tb.get("vol_oi_ratio") if tb else None,
+                                imbalance_ratio=tb.get("imbalance_ratio") if tb else None,
+                                iv_skew=skew if skew else [],
+                                max_pain=float(mp) if mp else None,
+                                data_state=dstate,
+                            )
+                        except Exception:
+                            pass
+
+                    _CONVICTION_BG_TASKS[clean_sym] = asyncio.create_task(
+                        asyncio.to_thread(_run_bg_conviction)
+                    )
         except Exception as _ce:
             try:
                 from engine.conviction_score import _CONVICTION_CACHE

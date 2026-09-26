@@ -533,6 +533,7 @@ class PatternLearningEngine:
             "symbol": clean_sym,
             "direction": dir_clean,
             "locked_at": datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST"),
+            "locked_at_ts": time.time(),
             "expires_at": expires_at,
             "expires_at_str": expiry_dt_str,
             "duration_minutes": round(duration_seconds / 60, 1),
@@ -567,7 +568,8 @@ class PatternLearningEngine:
         Two-Strike Invariant:
         If symbol has failed twice in the current session (is_hard_session_lockout = True),
         structural reclaim is disabled to prevent whipsawing on false bounces.
-        Otherwise, adaptive structural reclaim can lift the lockout early.
+        Otherwise, adaptive structural reclaim can lift the lockout early, subject to a
+        mandatory 15-minute refractory window to eliminate immediate post-stop churn.
         """
         clean_sym = (
             symbol.upper()
@@ -600,14 +602,32 @@ class PatternLearningEngine:
             return True, reason
 
         # Adaptive Structural Reclaim Check (Wyckoff Spring / Liquidity Sweep Reversal)
+        # Mandatory 15-minute refractory window prevents same-candle or sub-minute churn
+        locked_at_ts = float(lockout.get("locked_at_ts") or 0.0)
+        MIN_REFRACTORY_SECONDS = 900.0  # 15 minutes refractory period
+        elapsed_since_lock = now - locked_at_ts
         reclaim_lvl = float(lockout.get("reclaim_level") or 0.0)
-        if ltp and ltp > 0 and reclaim_lvl > 0:
+        if (
+            elapsed_since_lock >= MIN_REFRACTORY_SECONDS
+            and ltp
+            and ltp > 0
+            and reclaim_lvl > 0
+        ):
             if lock_dir == "BULLISH" and ltp >= reclaim_lvl:
                 if vwap is None or ltp >= vwap:
                     logger.info(
                         f"[PatternLearningEngine] ⚡ Structural Reclaim detected for {clean_sym}! "
                         f"LTP ₹{ltp:,.2f} >= Reclaim Level ₹{reclaim_lvl:,.2f} & VWAP. "
                         f"Lockout automatically cleared to capture genuine explosive reversal."
+                    )
+                    self._symbol_lockouts.pop(clean_sym, None)
+                    return False, ""
+            elif lock_dir == "BEARISH" and ltp <= reclaim_lvl:
+                if vwap is None or ltp <= vwap:
+                    logger.info(
+                        f"[PatternLearningEngine] ⚡ Bearish Structural Reclaim detected for {clean_sym}! "
+                        f"LTP ₹{ltp:,.2f} <= Reclaim Level ₹{reclaim_lvl:,.2f}. "
+                        f"Lockout automatically cleared."
                     )
                     self._symbol_lockouts.pop(clean_sym, None)
                     return False, ""

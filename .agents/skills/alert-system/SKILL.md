@@ -1,4 +1,4 @@
-﻿---
+---
 name: alert-system
 description: >-
   Full alert system runbook for ChanakyaTrade: alert lifecycle, 4-stage
@@ -22,7 +22,9 @@ description: >-
 - [6. Adding a New Detector](#6-adding-a-new-detector)
 - [7. Auto Alert Engine Loop](#7-auto-alert-engine-loop)
 - [8. Multi-Channel Dispatch](#8-multi-channel-dispatch)
-- [9. Testing](#9-testing)
+- [9. Alert Identity & Deduplication Invariants](#9-alert-identity--deduplication-invariants)
+- [10. Institutional RCA-First Debugging Protocol](#10-institutional-rca-first-debugging-protocol)
+- [11. Testing & Invariant Verification](#11-testing--invariant-verification)
 <!-- /TOC -->
 
 ---
@@ -46,9 +48,9 @@ CREATED -> PENDING -> ACTIVE -> TRIGGERED -> [INVALIDATED or EXPIRED]
 
 ### Key Fields in `AutoAlert` (engine/alert_model.py)
 ```python
-alert_id: str          # UUID
-symbol: str
-alert_type: str        # "GAMMA_BLAST", "SQUEEZE_BREAKOUT", etc.
+alert_id: str          # Deterministic: aa-{alert_type_slug}-{canonical_symbol}[-{variant}]-{YYYYMMDD} from generate_alert_id()
+symbol: str            # Clean canonical symbol via canonical_alert_symbol() (no exchange prefix)
+alert_type: str        # "GAMMA_BLAST", "SQUEEZE_BREAKOUT", "ORB", etc.
 direction: str         # "BULLISH" | "BEARISH"
 entry_price: float
 stop_loss: float
@@ -67,14 +69,15 @@ expires_at: str        # IST timestamp
 
 | Module | Responsibility |
 |--------|---------------|
-| `engine/alert_model.py` | `AutoAlert` dataclass, status transitions |
+| `engine/alert_identity.py` | Single authority for alert ID generation (`generate_alert_id`), symbol normalization (`canonical_alert_symbol`), and determinism validation (`validate_alert_id`) |
+| `engine/alert_model.py` | `AutoAlert` dataclass, status transitions, defensive invariant setters |
 | `engine/alerts.py` | CRUD: save/load/update alerts to JSON storage |
 | `engine/alert_evaluator.py` | Evaluate invalidation, target hits, trailing stop updates |
 | `engine/alert_expiry.py` | TTL classification, options expiry detection |
 | `engine/alert_scrutiny.py` | Tier 1 math sanity + Tier 2 LLM devil's advocate |
 | `engine/alert_preferences.py` | User alert preference filters (asset class, type, confidence) |
 | `engine/auto_alert_engine.py` | Main engine loop, detector dispatch, circular buffer, SSE |
-| `engine/detectors/` | 16 individual detector implementations |
+| `engine/detectors/` | 16 individual detector implementations (ALL use `generate_alert_id`) |
 | `engine/multibagger_alerts.py` | Multibagger-specific alert generation |
 | `engine/precursor_radar.py` | Precursor signal detection (early warning) |
 
@@ -280,24 +283,62 @@ When an alert is approved and dispatched:
 
 ---
 
-## 9. Testing
+## 9. Alert Identity & Deduplication Invariants
+
+All alerts in ChanakyaTrade must strictly follow centralized determinism rules:
+
+1. **Single Canonical Authority**:
+   - Every detector MUST call `generate_alert_id(symbol, alert_type, session_date, variant)`.
+   - Never mint ad-hoc strings in detectors.
+2. **Calendar Session Date Determinism**:
+   - Alert IDs are bound to calendar session date (`%Y%m%d`), NEVER to minute/second timestamps (`%H%M`, `%S`) or random UUIDs (`uuid.uuid4()`).
+   - Format: `aa-{alert_type_slug}-{canonical_symbol}[-{variant}]-{YYYYMMDD}`
+   - Example: `aa-gamma-blast-nifty-ce-25000-20260926`, `aa-crypto-squeeze-btcusdt-20260926`.
+3. **Symbol Normalization**:
+   - Always normalize symbols with `canonical_alert_symbol(sym)`, which strips exchange prefixes (`NSE:`, `BSE:`, `MCX:`, `NFO:`, `BFO:`, `CDS:`, `CRYPTO:`, `BINANCE:`, `DERIBIT:`).
+4. **Validation Guard**:
+   - `validate_alert_id(alert_id)` rejects IDs with banned minute timestamps (12+ digits) or random UUID hex suffixes.
+5. **Static Code Audits**:
+   - Statically validated via `tests/test_alert_identity_invariants.py`, which parses all files in `engine/detectors/*.py` to ensure zero banned patterns exist.
+
+---
+
+## 10. Institutional RCA-First Debugging Protocol
+
+When diagnosing alert storms, UI popup bursts, or unexpected state transitions:
+
+1. **Step 1 — Full Pipeline Inspection**:
+   - Read backend logs (`.logs/backend_err.log`, `.logs/backend.log`).
+   - Inspect SSE event payloads and network traffic to determine if the event stream is flooded.
+   - Check `auto_alerts.json` to verify whether IDs are unique per iteration (indicating broken dedup) or identical (indicating duplicate broadcast).
+2. **Step 2 — Identify Root Cause (RCA)**:
+   - Identify whether the fault is in detector ID generation, cooldown caches, state machine transitions, or model properties.
+3. **Step 3 — Remediate at the Source**:
+   - NEVER apply cosmetic UI debounces, rate-limiters, or toast hiding to mask an underlying engine bug.
+   - Fix the schema, factory, or deduplication logic at the source.
+4. **Step 4 — Invariant Prevention**:
+   - Add a deterministic unit/invariant test to prevent any future regression.
+5. **Step 5 — Zero In-Line Migrations**:
+   - Do not inject historical ad-hoc regex repair loops into `_load()` or hot loops. Use offline repair scripts (`scripts/remediate_corrupted_alerts.py`).
+
+---
+
+## 11. Testing & Invariant Verification
 
 ```powershell
-# Full auto-alert engine tests
-.venv\Scripts\pytest.exe tests/test_auto_alerts.py -v
+# Alert identity, symbol normalization, and detector static invariants (< 1s)
+& "C:\Users\brije\AppData\Local\Programs\Python\Python312\python.exe" -m pytest tests/test_alert_identity_invariants.py -q
+
+# Full auto-alert engine tests (dedup, cooldown, lifecycle)
+& "C:\Users\brije\AppData\Local\Programs\Python\Python312\python.exe" -m pytest tests/test_auto_alerts.py -q
+
+# Crypto alert pipeline tests
+& "C:\Users\brije\AppData\Local\Programs\Python\Python312\python.exe" -m pytest tests/test_crypto_alert_pipeline.py -q
 
 # Alert scrutiny tier 1 and tier 2
-.venv\Scripts\pytest.exe tests/test_alert_scrutiny.py -v
+& "C:\Users\brije\AppData\Local\Programs\Python\Python312\python.exe" -m pytest tests/test_alert_scrutiny.py -q
 
 # Alert lifecycle and expiry
-.venv\Scripts\pytest.exe tests/test_alert_revamp.py tests/test_alert_horizon_and_liquidity.py -v
-
-# Specific detector tests
-.venv\Scripts\pytest.exe tests/test_alert_templates.py -v
-
-# Alert preferences and filtering
-.venv\Scripts\pytest.exe tests/test_alert_preferences.py -v
-
-# Full alert quality pipeline
-.venv\Scripts\pytest.exe tests/test_alert_quality_and_decoupler.py tests/test_alert_quality_and_realtime_feed.py -v
+& "C:\Users\brije\AppData\Local\Programs\Python\Python312\python.exe" -m pytest tests/test_alert_revamp.py tests/test_alert_horizon_and_liquidity.py -q
 ```
+

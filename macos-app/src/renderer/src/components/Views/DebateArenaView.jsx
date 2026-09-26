@@ -32,6 +32,7 @@ export default function DebateArenaView({ onOpenOrderTicket, externalSymbol, onS
   const { call } = useAPI()
   const sendDraft = useChatStore((s) => s.sendDraft)
   const [symbol, setSymbolState] = useState(externalSymbol || 'RELIANCE')
+  const [inputSymbol, setInputSymbol] = useState('')
   const [selectedCouncil, setSelectedCouncil] = useState('debate')
   const [data, setData] = useState(null)
   const [councilData, setCouncilData] = useState(null)
@@ -165,9 +166,8 @@ export default function DebateArenaView({ onOpenOrderTicket, externalSymbol, onS
     }
   }
 
-  // Trigger analysis whenever symbol or selectedCouncil changes
+  // Note: Analysis is triggered manually by user via 'Run Analysis' button
   useEffect(() => {
-    executeDebate(symbol, selectedCouncil)
     return () => {
       if (abortRef.current) {
         try {
@@ -175,7 +175,7 @@ export default function DebateArenaView({ onOpenOrderTicket, externalSymbol, onS
         } catch (e) {}
       }
     }
-  }, [symbol, selectedCouncil])
+  }, [])
 
   const handleSearch = (e) => {
     e.preventDefault()
@@ -244,7 +244,12 @@ export default function DebateArenaView({ onOpenOrderTicket, externalSymbol, onS
           <button
             onClick={startLiveDebate}
             disabled={isStreaming}
-            className="btn btn-sm btn-emerald py-0.5 px-2.5 text-xs font-bold"
+            className={`btn btn-sm py-1 px-3 text-xs font-bold transition-all cursor-pointer ${
+              !data && !councilData && !isStreaming
+                ? 'btn-emerald shadow-md ring-1 ring-emerald-400/50 animate-pulse'
+                : 'btn-emerald'
+            }`}
+            title={`Run live multi-agent analysis for ${symbol}`}
           >
             <span>{isStreaming ? '🔄' : '⚡'}</span>
             <span>{isStreaming ? 'Polling...' : 'Run Analysis'}</span>
@@ -439,14 +444,37 @@ export default function DebateArenaView({ onOpenOrderTicket, externalSymbol, onS
           <span className="w-2 h-2 rounded-full bg-amber animate-ping" />
           <span>Synthesizing multi-agent specialist consensus for {symbol}...</span>
         </div>
-      ) : (
-        <div className="mx-auto my-3 max-w-md rounded-xl border border-border/60 bg-panel px-4 py-3 text-center text-xs text-muted">
-          Evidence is unavailable or incomplete. No conviction score has been calculated.
-        </div>
-      )}
+      ) : null}
 
-      {/* VIEW MODE 1: ADVERSARIAL BULL VS BEAR DEBATE */}
-      {selectedCouncil === 'debate' && (
+      {/* Standby State when no analysis has been run yet */}
+      {!data && !councilData && !loading && !isStreaming ? (
+        <div className="flex flex-col items-center justify-center h-80 rounded-2xl border border-dashed border-border bg-panel/50 text-center p-6 my-4 shadow-sm font-ui">
+          <div className="w-14 h-14 rounded-2xl bg-amber-500/10 border border-amber-500/25 flex items-center justify-center text-2xl mb-3 shadow-inner">
+            ⚔️
+          </div>
+          <h3 className="text-sm font-bold text-text">
+            Multi-Agent Intelligence Standby
+          </h3>
+          <p className="text-xs text-muted mt-1.5 max-w-md leading-relaxed">
+            Target stock: <strong className="text-text font-mono">{symbol}</strong> · Council Mode:{' '}
+            <strong className="text-amber-500 font-mono">
+              {COUNCIL_MODES.find((c) => c.id === selectedCouncil)?.name}
+            </strong>
+            . Click <strong className="text-emerald-500">Run Analysis</strong> when you are ready to initiate dual-LLM adversarial debate, Wyckoff/SMC order-block extractions, and multi-persona consensus.
+          </p>
+          <button
+            type="button"
+            onClick={startLiveDebate}
+            className="mt-4 flex items-center gap-2 text-xs font-bold px-5 py-2.5 rounded-xl border border-emerald-500/40 bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 hover:bg-emerald-500/25 shadow-md hover:shadow-emerald-500/10 transition-all cursor-pointer font-mono"
+          >
+            <span>⚡</span>
+            <span>Run Analysis on {symbol}</span>
+          </button>
+        </div>
+      ) : (
+        <>
+          {/* VIEW MODE 1: ADVERSARIAL BULL VS BEAR DEBATE */}
+          {selectedCouncil === 'debate' && (
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start relative animate-fade-slide">
           {/* Left Column (5 Cols): BULL CASE */}
           <div className="lg:col-span-5 space-y-4">
@@ -680,6 +708,8 @@ export default function DebateArenaView({ onOpenOrderTicket, externalSymbol, onS
             })}
           </div>
         </div>
+      )}
+        </>
       )}
 
       {/* Bottom Footer Bar with Provenance */}

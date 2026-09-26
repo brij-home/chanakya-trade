@@ -339,7 +339,9 @@ def test_market_breadth_sanity_veto_call_spreads_in_broad_decline(monkeypatch):
     """
     from market.sentiment import MarketBreadth
     from engine.alert_model import AutoAlert
+    from engine.learning_engine import pattern_learning_engine
 
+    pattern_learning_engine.clear_symbol_lockout("NIFTY")
     monkeypatch.setenv("ENFORCE_TEST_BREADTH", "1")
     monkeypatch.setattr(
         "market.sentiment.get_market_breadth",

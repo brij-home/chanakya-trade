@@ -118,25 +118,25 @@ def detect_commodity_breakouts(
             hh, mm = now_ist.hour, now_ist.minute
             weekday = now_ist.weekday()  # Monday=0, Tuesday=1, Wednesday=2, Thursday=3
 
-            # 1. Wednesday EIA Weekly Petroleum Status Report (Crude): 19:45 - 20:45 IST
+            # 1. Wednesday EIA Weekly Petroleum Status Report (Crude): 19:55 - 20:15 IST (release at 20:00 IST)
             if clean_sym in ("CRUDEOIL", "CRUDEOILM") and weekday == 2:
-                if (hh == 19 and mm >= 45) or (hh == 20 and mm <= 45):
+                if (hh == 19 and mm >= 55) or (hh == 20 and mm <= 15):
                     logger.info(
                         f"[CommodityDetector] Suppressing {clean_sym} during Wednesday EIA Crude inventory blackout window ({hh:02d}:{mm:02d} IST)"
                     )
                     continue
 
-            # 2. Thursday EIA Natural Gas Storage Report: 19:45 - 20:45 IST
+            # 2. Thursday EIA Natural Gas Storage Report: 19:55 - 20:15 IST (release at 20:00 IST)
             if clean_sym in ("NATURALGAS", "NATGASMINI") and weekday == 3:
-                if (hh == 19 and mm >= 45) or (hh == 20 and mm <= 45):
+                if (hh == 19 and mm >= 55) or (hh == 20 and mm <= 15):
                     logger.info(
                         f"[CommodityDetector] Suppressing {clean_sym} during Thursday EIA NatGas storage blackout window ({hh:02d}:{mm:02d} IST)"
                     )
                     continue
 
-            # 3. Tuesday API Weekly Crude Inventory (American Petroleum Institute): 20:00 - 21:30 IST
+            # 3. Tuesday API Weekly Crude Inventory (American Petroleum Institute): 20:00 - 20:20 IST
             if clean_sym in ("CRUDEOIL", "CRUDEOILM") and weekday == 1:
-                if (hh == 20) or (hh == 21 and mm <= 30):
+                if hh == 20 and mm <= 20:
                     logger.info(
                         f"[CommodityDetector] Suppressing {clean_sym} during Tuesday API crude inventory blackout window ({hh:02d}:{mm:02d} IST)"
                     )
@@ -214,10 +214,33 @@ def detect_commodity_breakouts(
             req_bull_close = 0.55 if is_us_open_transition else 0.50
             req_bear_close = 0.55 if is_us_open_transition else 0.50
 
+            # Trend continuation condition (trading firmly above VWAP with momentum and healthy candle close)
+            is_vwap_trend_bull = (
+                not is_locked_bull
+                and has_bull_chg
+                and ltp >= vwap * 1.002
+                and cur_close > cur_open
+                and upper_wick_ratio <= max_wick
+                and bull_close_ratio >= req_bull_close
+                and rvol >= 1.25
+            )
+            is_vwap_trend_bear = (
+                not is_locked_bear
+                and has_bear_chg
+                and ltp <= vwap * 0.998
+                and cur_close < cur_open
+                and lower_wick_ratio <= max_wick
+                and bear_close_ratio >= req_bear_close
+                and rvol >= 1.25
+            )
+
             if (
                 not is_locked_bull
                 and has_bull_chg
-                and (ltp >= prior_high * 0.999 or cur_close >= prior_high)
+                and (
+                    (ltp >= prior_high * 0.999 or cur_close >= prior_high)
+                    or is_vwap_trend_bull
+                )
                 and upper_wick_ratio <= max_wick
                 and bull_close_ratio >= req_bull_close
                 and ltp >= vwap * 0.998
@@ -229,7 +252,10 @@ def detect_commodity_breakouts(
             elif (
                 not is_locked_bear
                 and has_bear_chg
-                and (ltp <= prior_low * 1.001 or cur_close <= prior_low)
+                and (
+                    (ltp <= prior_low * 1.001 or cur_close <= prior_low)
+                    or is_vwap_trend_bear
+                )
                 and lower_wick_ratio <= max_wick
                 and bear_close_ratio >= req_bear_close
                 and ltp <= vwap * 1.002
@@ -473,8 +499,9 @@ def detect_commodity_breakouts(
         risk_pts = round(max(1.0, noise_safe_pts), 1)
         atr = round(base_atr, 1)
         direction = "BULLISH" if is_bullish else "BEARISH"
-        alert_type = "COMMODITY_MOMENTUM"
-        alert_id = f"comm-{clean_sym.lower()}-{datetime.now(IST).strftime('%Y%m%d%H%M')}"
+        from engine.alert_identity import generate_alert_id
+
+        alert_id = generate_alert_id(clean_sym, alert_type)
 
         from engine.position_sizer import get_lot_size
 

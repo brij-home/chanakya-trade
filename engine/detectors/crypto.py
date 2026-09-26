@@ -20,7 +20,7 @@ from engine.alert_model import AutoAlert
 logger = logging.getLogger("chanakya.detectors.crypto")
 IST = timezone(timedelta(hours=5, minutes=30))
 
-DEFAULT_CRYPTO = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"]
+DEFAULT_CRYPTO = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "DOGEUSDT"]
 
 
 def detect_single_crypto_symbol(sym: str) -> list[AutoAlert]:
@@ -28,6 +28,7 @@ def detect_single_crypto_symbol(sym: str) -> list[AutoAlert]:
     from market.crypto_stream import crypto_stream, normalize_crypto_symbol
     from analysis.market_structure import analyze_market_structure
     from engine.alert_preferences import alert_preferences
+    from engine.alert_identity import generate_alert_id
 
     if alert_preferences.is_segment_globally_disabled("CRYPTO"):
         return []
@@ -36,7 +37,6 @@ def detect_single_crypto_symbol(sym: str) -> list[AutoAlert]:
     found: list[AutoAlert] = []
     now_dt = datetime.now(IST)
     now_iso = now_dt.strftime("%Y-%m-%d %H:%M:%S IST")
-    date_str = now_dt.strftime("%Y%m%d%H%M")
 
     q = crypto_stream.get_quote(clean_sym)
     if not q or float(getattr(q, "last_price", 0.0) or 0.0) <= 0:
@@ -56,7 +56,7 @@ def detect_single_crypto_symbol(sym: str) -> list[AutoAlert]:
             is_bullish = sq_sig == "SHORT_SQUEEZE_IMMINENT"
             direction = "BULLISH" if is_bullish else "BEARISH"
             alert_type = "CRYPTO_SQUEEZE"
-            alert_id = f"crypto-sq-{clean_sym.lower()}-{date_str}"
+            alert_id = generate_alert_id(clean_sym, alert_type)
             squeeze_confidence = 91 if sq_sig == "SHORT_SQUEEZE_IMMINENT" else 90
             risk_usd = round(max(0.5, ltp * 0.018), 2)  # 1.8% structural risk stop
 
@@ -164,7 +164,7 @@ def detect_single_crypto_symbol(sym: str) -> list[AutoAlert]:
                         t2_price = round(ltp + 4.2 * risk_usd, 2)
                         smc_stage = "IGNITED" if ltp > ob.top else "EARLY_WARNING"
                         smc_confidence = 91 if smc_stage == "IGNITED" else 85
-                        alert_id = f"crypto-smc-{clean_sym.lower()}-{date_str}"
+                        alert_id = generate_alert_id(clean_sym, "CRYPTO_MOMENTUM", variant="demand")
                         headline = f"⚡ CRYPTO SMC ALPHA: {clean_sym} Demand Order Block Reclaim @ ${ltp:,.2f}"
                         summary = (
                             f"Smart Money structural reclaim at 15m Demand OB (${ob.bottom:,.2f} - ${ob.top:,.2f}). "
@@ -237,7 +237,7 @@ def detect_single_crypto_symbol(sym: str) -> list[AutoAlert]:
                         t2_price = round(ltp - 4.2 * risk_usd, 2)
                         smc_stage = "IGNITED" if ltp < ob.bottom else "EARLY_WARNING"
                         smc_confidence = 91 if smc_stage == "IGNITED" else 85
-                        alert_id = f"crypto-smc-{clean_sym.lower()}-{date_str}"
+                        alert_id = generate_alert_id(clean_sym, "CRYPTO_MOMENTUM", variant="supply")
                         headline = f"⚡ CRYPTO SMC BREAKDOWN: {clean_sym} Supply OB Rejection @ ${ltp:,.2f}"
                         summary = (
                             f"Smart Money rejection at 15m Supply OB (${ob.bottom:,.2f} - ${ob.top:,.2f}). "
@@ -302,6 +302,115 @@ def detect_single_crypto_symbol(sym: str) -> list[AutoAlert]:
     except Exception as e:
         logger.debug(f"[CryptoDetector] SMC check failed for {clean_sym}: {e}")
 
+    # ── 2b. CRYPTO MOMENTUM & VOLATILITY EXPANSION DETECTOR: 15m Donchian / EMA Trend ──
+    try:
+        if df is not None and not df.empty and len(df) >= 20:
+            recent_20 = df.iloc[-21:-1]
+            prior_high = float(recent_20["high"].max())
+            prior_low = float(recent_20["low"].min())
+            last_bar = df.iloc[-1]
+            cur_close = float(last_bar.get("close", ltp))
+            vols = df["volume"] if "volume" in df.columns else df.get("Volume")
+            rvol = 1.0
+            if vols is not None and len(vols) >= 20:
+                avg_v = float(vols.iloc[-21:-1].mean())
+                cur_v = float(last_bar.get("volume", 0.0) or 0.0)
+                rvol = round(cur_v / max(1.0, avg_v), 2) if avg_v > 0 else 1.0
+
+            ema20 = float(df["close"].ewm(span=20, adjust=False).mean().iloc[-1])
+            is_breakout_long = (ltp >= prior_high * 0.999 or cur_close >= prior_high) and ltp > ema20 and rvol >= 1.25 and chg_pct >= 0.8
+            is_breakdown_short = (ltp <= prior_low * 1.001 or cur_close <= prior_low) and ltp < ema20 and rvol >= 1.25 and chg_pct <= -0.8
+
+            if is_breakout_long or is_breakdown_short:
+                brk_dir = "BULLISH" if is_breakout_long else "BEARISH"
+                risk_usd = round(max(0.5, ltp * 0.015), 2)
+                sl_price = round(ltp - risk_usd, 2) if is_breakout_long else round(ltp + risk_usd, 2)
+                t1_price = round(ltp + 2.2 * risk_usd, 2) if is_breakout_long else round(ltp - 2.2 * risk_usd, 2)
+                t2_price = round(ltp + 4.0 * risk_usd, 2) if is_breakout_long else round(ltp - 4.0 * risk_usd, 2)
+                rr_str = "1:2.2"
+                alert_id = generate_alert_id(
+                    clean_sym,
+                    "CRYPTO_BREAKOUT",
+                    variant="long" if is_breakout_long else "short",
+                )
+                headline = (
+                    f"🚀 CRYPTO MOMENTUM BREAKOUT: {clean_sym} Pierces 20-Bar High @ ${ltp:,.2f} (RVOL {rvol:.1f}x)"
+                    if is_breakout_long
+                    else f"🔻 CRYPTO MOMENTUM BREAKDOWN: {clean_sym} Pierces 20-Bar Low @ ${ltp:,.2f} (RVOL {rvol:.1f}x)"
+                )
+                summary = (
+                    f"24x7 volume expansion breakout (RVOL {rvol:.1f}x, 24h: {chg_pct:+.2f}%). "
+                    f"Structure confirmed above 20-EMA (${ema20:,.2f}). Target 1: ${t1_price:,.2f}."
+                    if is_breakout_long
+                    else f"24x7 volume expansion breakdown (RVOL {rvol:.1f}x, 24h: {chg_pct:+.2f}%). "
+                    f"Structure confirmed below 20-EMA (${ema20:,.2f}). Target 1: ${t1_price:,.2f}."
+                )
+                action = "BUY_SPOT / LONG" if is_breakout_long else "SELL_SHORT_FUTURES / SHORT"
+                conf = (
+                    f"15m 20-Bar High Breakout + RVOL {rvol:.1f}x + 20-EMA Support"
+                    if is_breakout_long
+                    else f"15m 20-Bar Low Breakdown + RVOL {rvol:.1f}x + 20-EMA Resistance"
+                )
+
+                alert = AutoAlert(
+                    alert_id=alert_id,
+                    alert_type="CRYPTO_BREAKOUT",
+                    stage="IGNITED" if rvol >= 1.5 else "EARLY_WARNING",
+                    symbol=clean_sym,
+                    exchange="CRYPTO",
+                    direction=brk_dir,
+                    headline=headline,
+                    summary=summary,
+                    ltp=ltp,
+                    trigger_level=prior_high if is_breakout_long else prior_low,
+                    target_level=t1_price,
+                    stop_loss=sl_price,
+                    confidence=92 if rvol >= 1.5 else 86,
+                    created_at=now_iso,
+                    is_live=True,
+                    environment="LIVE",
+                    market_status="LIVE",
+                    metrics={
+                        "change_pct": chg_pct,
+                        "segment": "CRYPTO",
+                        "rvol": rvol,
+                        "ema20": ema20,
+                        "prior_high": prior_high,
+                        "prior_low": prior_low,
+                        "setup_confluence": conf,
+                    },
+                    actionable_plan={
+                        "action": action,
+                        "segment": "CRYPTO",
+                        "contract": f"CRYPTO:{clean_sym}",
+                        "entry_range": f"${round(ltp * 0.995, 2):,.2f} – ${round(ltp * 1.005, 2):,.2f}",
+                        "stop_loss": f"${sl_price:,.2f}",
+                        "target": f"${t1_price:,.2f}",
+                        "target_2": f"${t2_price:,.2f}",
+                        "risk_reward": rr_str,
+                        "when_to_buy": "Execute on volume breakout or retest of pivot.",
+                        "when_to_wait": "Do not chase beyond 0.8% from entry.",
+                        "no_chase_boundary": (
+                            round(ltp * 1.008, 2) if is_breakout_long else round(ltp * 0.992, 2)
+                        ),
+                        "setup_confluence": conf,
+                        "profit_rule": "Scale 50% at T1, trail remainder.",
+                        "trade_plan": {
+                            "symbol": clean_sym,
+                            "direction": "LONG" if is_breakout_long else "SHORT",
+                            "timeframe": "15M",
+                            "entry_price": ltp,
+                            "invalidation_stop": sl_price,
+                            "target_1": t1_price,
+                            "target_2": t2_price,
+                            "risk_reward": rr_str,
+                        },
+                    },
+                )
+                found.append(alert)
+    except Exception as e:
+        logger.debug(f"[CryptoDetector] Momentum breakout check failed for {clean_sym}: {e}")
+
     # ── 3. OPTIONS VOLATILITY & MAX PAIN DETECTOR: Deribit Options Surface (BTC/ETH) ──
     if clean_sym in ("BTCUSDT", "BTC", "ETHUSDT", "ETH"):
         try:
@@ -317,9 +426,14 @@ def detect_single_crypto_symbol(sym: str) -> list[AutoAlert]:
             gex_flip = float(opt_sum.get("gex_flip_strike", 0.0) or 0.0)
 
             if abs(dist_pct) >= 4.5 and max_pain > 0:
-                is_bullish = dist_pct < 0
+                # Correct Institutional Deribit Max Pain Gravitational Mechanics:
+                # If dist_pct > 0 (Max Pain > Spot), spot is below Max Pain and pulled UP -> BULLISH
+                # If dist_pct < 0 (Max Pain < Spot), spot is above Max Pain and pulled DOWN -> BEARISH
+                is_bullish = dist_pct > 0
                 direction = "BULLISH" if is_bullish else "BEARISH"
-                alert_id = f"crypto-opt-{clean_sym.lower()}-{date_str}"
+                alert_id = generate_alert_id(
+                    clean_sym, "CRYPTO_VOLATILITY", variant="options-gravity"
+                )
                 risk_usd = round(max(1.0, ltp * 0.02), 2)  # 2% defined risk stop
 
                 if is_bullish:
@@ -328,7 +442,7 @@ def detect_single_crypto_symbol(sym: str) -> list[AutoAlert]:
                     t2_price = round(max_pain * 1.03, 2)
                     headline = f"🌊 DERIBIT OPTIONS GRAVITY: {clean_sym} Max Pain Magnet at ${max_pain:,.0f}"
                     summary = (
-                        f"Spot is {abs(dist_pct):.1f}% below Deribit Max Pain (${max_pain:,.0f}). "
+                        f"Spot (${ltp:,.2f}) is {abs(dist_pct):.1f}% below Deribit Max Pain (${max_pain:,.0f}). "
                         f"Options dealer gamma position exerts strong upward gravitational pull into expiry."
                     )
                     action = "BUY_SPOT / LONG"
@@ -338,8 +452,8 @@ def detect_single_crypto_symbol(sym: str) -> list[AutoAlert]:
                     t2_price = round(max_pain * 0.97, 2)
                     headline = f"🌊 DERIBIT OPTIONS GRAVITY: {clean_sym} Overextended Above Max Pain (${max_pain:,.0f})"
                     summary = (
-                        f"Spot is +{dist_pct:.1f}% extended above Deribit Max Pain (${max_pain:,.0f}). "
-                        f"Dealer gamma pull indicates mean-reversion pull towards ${max_pain:,.0f}."
+                        f"Spot (${ltp:,.2f}) is +{abs(dist_pct):.1f}% extended above Deribit Max Pain (${max_pain:,.0f}). "
+                        f"Dealer gamma pull indicates mean-reversion pull down towards ${max_pain:,.0f}."
                     )
                     action = "SELL_SHORT_FUTURES / SHORT"
 
@@ -360,7 +474,9 @@ def detect_single_crypto_symbol(sym: str) -> list[AutoAlert]:
                     headline=headline,
                     summary=summary,
                     ltp=ltp,
-                    trigger_level=ltp,
+                    trigger_level=(
+                        round(ltp * 1.0025, 2) if is_bullish else round(ltp * 0.9975, 2)
+                    ),
                     target_level=t1_price,
                     stop_loss=sl_price,
                     confidence=85,
@@ -371,6 +487,7 @@ def detect_single_crypto_symbol(sym: str) -> list[AutoAlert]:
                     metrics={
                         "change_pct": chg_pct,
                         "segment": "CRYPTO",
+                        "time_horizon": "SWING",
                         "max_pain": max_pain,
                         "max_pain_dist_pct": dist_pct,
                         "pcr_oi": pcr_oi,
@@ -390,9 +507,9 @@ def detect_single_crypto_symbol(sym: str) -> list[AutoAlert]:
                         "risk_reward": rr_str,
                         "when_to_buy": "Execute on structural support with defined risk below SL.",
                         "when_to_wait": "Do not chase if price moves > 1% towards Max Pain without retest.",
-                        "no_chase_boundary": round(ltp * 1.01, 2)
-                        if is_bullish
-                        else round(ltp * 0.99, 2),
+                        "no_chase_boundary": (
+                            round(ltp * 1.01, 2) if is_bullish else round(ltp * 0.99, 2)
+                        ),
                         "setup_confluence": conf,
                         "profit_rule": f"Scale 50% at Max Pain magnet (${max_pain:,.0f}), trail remainder.",
                         "trade_plan": {

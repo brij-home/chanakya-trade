@@ -183,7 +183,37 @@ def init_eod_store() -> None:
             """
         )
         conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS century_compounder_cache (
+                symbol TEXT PRIMARY KEY,
+                century_score INTEGER NOT NULL,
+                compounder_tier TEXT NOT NULL,
+                total_projected_multiple REAL NOT NULL,
+                current_market_cap_cr REAL,
+                current_pe REAL,
+                projected_terminal_pe REAL,
+                forecast_pat_cagr_pct REAL,
+                pat_expansion_multiple REAL,
+                pe_expansion_multiple REAL,
+                fair_value_anchor REAL,
+                accumulate_low REAL,
+                accumulate_high REAL,
+                no_chase_boundary REAL,
+                pullback_limit_entry REAL,
+                action_directive TEXT,
+                catalyst_badges_json TEXT,
+                pillar_notes_json TEXT,
+                summary TEXT,
+                raw_json TEXT,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_ohlcv_sym_date ON ohlcv_daily (symbol, date DESC)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_century_score ON century_compounder_cache (century_score DESC, total_projected_multiple DESC)"
         )
         conn.commit()
 
@@ -1044,6 +1074,132 @@ def get_cached_forensics_batch(
             with _l1_lock:
                 _l1_forensics_cache[sym] = (now_ts, d)
 
+    return results
+
+
+# ── Century Compounder (100x–1,000x) Cache Operations ───────────────
+
+
+def save_century_compounders_batch(records: list[dict[str, Any]]) -> int:
+    """Atomically persists computed Century Compounder reports into SQLite."""
+    if not records:
+        return 0
+    now_iso = datetime.now(timezone.utc).isoformat()
+    rows = []
+    for r in records:
+        sym = r.get("symbol", "").upper().replace(".NS", "").replace("NSE:", "").strip()
+        if not sym:
+            continue
+        te = r.get("twin_engines") or {}
+        af = r.get("anti_fomo") or {}
+        rows.append(
+            (
+                sym,
+                int(r.get("century_score", 0)),
+                str(r.get("compounder_tier", "STANDARD")),
+                float(te.get("total_projected_multiple", 1.0)),
+                float(te.get("current_market_cap_cr", 0.0)),
+                float(te.get("current_pe", 0.0)),
+                float(te.get("projected_terminal_pe", 0.0)),
+                float(te.get("forecast_pat_cagr_pct", 0.0)),
+                float(te.get("pat_expansion_multiple", 1.0)),
+                float(te.get("pe_expansion_multiple", 1.0)),
+                float(af.get("fair_value_anchor", 0.0)),
+                float(af.get("accumulate_low", 0.0)),
+                float(af.get("accumulate_high", 0.0)),
+                float(af.get("no_chase_boundary", 0.0)),
+                float(af.get("pullback_limit_entry", 0.0)),
+                str(af.get("action_directive", "STALK_PIVOT")),
+                json.dumps(r.get("catalyst_badges", [])),
+                json.dumps(r.get("pillar_notes", [])),
+                str(r.get("summary", "")),
+                json.dumps(r, default=str),
+                now_iso,
+            )
+        )
+
+    if not rows:
+        return 0
+
+    with _store_lock:
+        conn = _get_connection()
+        conn.executemany(
+            """
+            INSERT OR REPLACE INTO century_compounder_cache
+            (symbol, century_score, compounder_tier, total_projected_multiple,
+             current_market_cap_cr, current_pe, projected_terminal_pe,
+             forecast_pat_cagr_pct, pat_expansion_multiple, pe_expansion_multiple,
+             fair_value_anchor, accumulate_low, accumulate_high, no_chase_boundary,
+             pullback_limit_entry, action_directive, catalyst_badges_json,
+             pillar_notes_json, summary, raw_json, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            rows,
+        )
+        conn.commit()
+    return len(rows)
+
+
+def get_cached_century_compounders_batch(
+    symbols: list[str], max_age_days: int = 7
+) -> dict[str, dict[str, Any]]:
+    """Loads cached compounder evaluations for a batch of symbols if updated within max_age_days."""
+    if not symbols:
+        return {}
+    clean_map = {s.upper().replace(".NS", "").replace("NSE:", "").strip(): s for s in symbols}
+    clean_syms = list(clean_map.keys())
+    conn = _get_connection()
+    cutoff_iso = (datetime.now(timezone.utc) - timedelta(days=max_age_days)).isoformat()
+    results = {}
+    chunk_size = 400
+    for i in range(0, len(clean_syms), chunk_size):
+        chunk = clean_syms[i : i + chunk_size]
+        placeholders = ",".join(["?"] * len(chunk))
+        rows = conn.execute(
+            f"""
+            SELECT * FROM century_compounder_cache 
+            WHERE symbol IN ({placeholders}) AND updated_at >= ?
+            """,
+            [*chunk, cutoff_iso],
+        ).fetchall()
+        for r in rows:
+            sym = r["symbol"]
+            d = dict(r)
+            if d.get("raw_json"):
+                try:
+                    results[sym] = json.loads(d["raw_json"])
+                    continue
+                except Exception:
+                    pass
+            results[sym] = d
+    return results
+
+
+def get_top_cached_century_compounders(
+    min_score: int = 60, limit: int = 50, max_age_days: int = 7
+) -> list[dict[str, Any]]:
+    """Returns top ranked century compounders directly from SQLite in < 5ms."""
+    conn = _get_connection()
+    cutoff_iso = (datetime.now(timezone.utc) - timedelta(days=max_age_days)).isoformat()
+    rows = conn.execute(
+        """
+        SELECT * FROM century_compounder_cache 
+        WHERE century_score >= ? AND updated_at >= ?
+        ORDER BY century_score DESC, total_projected_multiple DESC
+        LIMIT ?
+        """,
+        (min_score, cutoff_iso, limit),
+    ).fetchall()
+    results = []
+    for r in rows:
+        d = dict(r)
+        if d.get("raw_json"):
+            try:
+                results.append(json.loads(d["raw_json"]))
+                continue
+            except Exception:
+                pass
+        results.append(d)
     return results
 
 

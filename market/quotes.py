@@ -22,7 +22,7 @@ from engine.observability import get_registry, new_correlation_id
 from market.data_events import classify_data_state, utc_now_iso
 
 _OPTION_PATTERN = re.compile(
-    r"^(?:NFO:|BFO:|NSE:|BSE:)?([A-Za-z0-9_& -]+?)(?:20\d{6}|\d{2}[A-Z]{3}|\d{5}(?=\d{3,}))?\s*(\d{1,6}(?:\.\d+)?)\s*(CE|PE)$",
+    r"^(?:NFO:|BFO:|NSE:|BSE:)?([A-Za-z0-9_& -]+?)(?:(20\d{6})|(\d{2}[A-Z]{3})|(\d{5}(?=\d{3,})))?\s*(\d{1,6}(?:\.\d+)?)\s*(CE|PE)$",
     re.IGNORECASE,
 )
 
@@ -145,7 +145,56 @@ def _ws_quotes(instruments: list[str], *, correlation_id: str) -> dict[str, Quot
             except Exception:
                 return {}
 
-        # 2. Fyers WebSocket
+        # 2. Kotak Neo WebSocket
+        if broker_key == "kotak":
+            try:
+                from market.kotak_websocket import kotak_ws
+                from market.websocket import ws_manager
+
+                missing = []
+                for inst in instruments:
+                    clean = inst.split(":")[-1].strip().upper()
+                    tick = kotak_ws.get_tick(inst) or kotak_ws.get_tick(clean)
+                    if not tick or getattr(tick, "ltp", 0.0) <= 0:
+                        c_tick = ws_manager.get_tick(inst) or ws_manager.get_tick(clean)
+                        if c_tick and getattr(c_tick, "ltp", 0.0) > 0:
+                            tick = c_tick
+                    if tick and getattr(tick, "ltp", 0.0) > 0:
+                        result[inst] = _enrich_quote(
+                            Quote(
+                                symbol=clean,
+                                last_price=float(tick.ltp),
+                                open=getattr(tick, "open", None),
+                                high=getattr(tick, "high", None),
+                                low=getattr(tick, "low", None),
+                                close=getattr(tick, "close", None),
+                                volume=int(getattr(tick, "volume", 0) or 0),
+                                change=float(getattr(tick, "change", 0.0) or 0.0),
+                                change_pct=float(getattr(tick, "change_pct", 0.0) or 0.0),
+                                exchange_timestamp=(
+                                    datetime.fromtimestamp(
+                                        tick.timestamp, tz=timezone.utc
+                                    ).isoformat()
+                                    if getattr(tick, "timestamp", 0) and tick.timestamp > 0
+                                    else None
+                                ),
+                            ),
+                            instrument=inst,
+                            provider="kotak",
+                            source="STREAM",
+                            correlation_id=correlation_id,
+                        )
+                    else:
+                        missing.append(inst)
+
+                if missing and getattr(kotak_ws, "is_connected", lambda: False)():
+                    kotak_ws.subscribe(missing)
+
+                return result
+            except Exception:
+                return {}
+
+        # 3. Fyers WebSocket
         if broker_key != "fyers":
             return {}
 
@@ -200,23 +249,29 @@ def _options_quotes(instruments: list[str], *, correlation_id: str) -> dict[str,
         from market.options import get_options_snapshot
 
         res: dict[str, Quote] = {}
-        by_und: dict[str, list[tuple[str, str, float, str]]] = {}
+        by_und_exp: dict[tuple[str, Optional[str]], list[tuple[str, str, float, str, Optional[str]]]] = {}
         for inst in instruments:
             clean = inst.split(":")[-1].strip().upper()
             m = _OPTION_PATTERN.match(clean)
             if not m:
                 continue
-            und, strike_str, opt_type = m.groups()
-            by_und.setdefault(und.upper(), []).append(
-                (inst, clean, float(strike_str), opt_type.upper())
+            und, exp_iso, exp_nfo, exp_num, strike_str, opt_type = m.groups()
+            exp_date_str = None
+            if exp_iso:
+                # 20261027 -> 2026-10-27
+                exp_date_str = f"{exp_iso[:4]}-{exp_iso[4:6]}-{exp_iso[6:8]}"
+            by_und_exp.setdefault((und.upper(), exp_date_str), []).append(
+                (inst, clean, float(strike_str), opt_type.upper(), exp_date_str)
             )
 
-        for und, items in by_und.items():
+        for (und, exp_date_str), items in by_und_exp.items():
             try:
-                contracts, spot, expiries, src_info = get_options_snapshot(und)
-                for inst, clean, strike, opt_type in items:
+                contracts, spot, expiries, src_info = get_options_snapshot(und, expiry=exp_date_str)
+                for inst, clean, strike, opt_type, target_exp in items:
                     for c in contracts:
                         if c.option_type == opt_type and abs(c.strike - strike) < 0.01:
+                            if target_exp and getattr(c, "expiry", None) and c.expiry != target_exp:
+                                continue
                             chg_pct = (
                                 getattr(c, "pchange", 0.0) or getattr(c, "change_pct", 0.0) or 0.0
                             )
@@ -289,51 +344,6 @@ def _futures_quotes(instruments: list[str], *, correlation_id: str) -> dict[str,
     return res
 
 
-def _yf_fallback_quotes(
-    instruments: list[str], *, correlation_id: Optional[str] = None
-) -> dict[str, Quote]:
-    """Try yfinance when broker is unavailable (skips Indian options & futures which yfinance does not host)."""
-    try:
-        from market.yfinance_provider import yf_get_quotes, yf_available, is_yf_rate_limited
-
-        if not yf_available() or is_yf_rate_limited():
-            return {}
-
-        yf_eligible = [
-            i
-            for i in instruments
-            if not (
-                i.startswith("NFO:")
-                or i.startswith("BFO:")
-                or _OPTION_PATTERN.match(i.split(":")[-1])
-                or _OPTION_PATTERN.match(
-                    i.split(":")[-1].replace("NIFTY 50", "NIFTY").replace("NIFTY BANK", "BANKNIFTY")
-                )
-                or _FUT_PATTERN.match(i.split(":")[-1])
-            )
-        ]
-
-        if not yf_eligible:
-            return {}
-
-        raw = yf_get_quotes(yf_eligible)
-        cid = correlation_id or new_correlation_id("quote")
-        return {
-            instrument: _enrich_quote(
-                quote,
-                instrument=instrument,
-                provider="yfinance",
-                source="FALLBACK",
-                correlation_id=cid,
-                quality_flags=("DELAYED_SOURCE",),
-            )
-            for instrument, quote in raw.items()
-        }
-    except Exception:
-        pass
-    return {}
-
-
 _MCX_SYMBOLS = {
     "GOLD",
     "GOLDM",
@@ -388,6 +398,54 @@ _CRYPTO_SYMBOLS = {
     "BNB-USD",
     "BNBUSDT",
 }
+
+
+def _yf_fallback_quotes(
+    instruments: list[str], *, correlation_id: Optional[str] = None
+) -> dict[str, Quote]:
+    """Try yfinance when broker is unavailable (skips Indian options & futures which yfinance does not host)."""
+    try:
+        from market.yfinance_provider import yf_get_quotes, yf_available, is_yf_rate_limited
+
+        if not yf_available() or is_yf_rate_limited():
+            return {}
+
+        yf_eligible = [
+            i
+            for i in instruments
+            if not (
+                i.startswith("NFO:")
+                or i.startswith("BFO:")
+                or i.startswith("CRYPTO:")
+                or i.startswith("BINANCE:")
+                or i.split(":")[-1].upper() in _CRYPTO_SYMBOLS
+                or _OPTION_PATTERN.match(i.split(":")[-1])
+                or _OPTION_PATTERN.match(
+                    i.split(":")[-1].replace("NIFTY 50", "NIFTY").replace("NIFTY BANK", "BANKNIFTY")
+                )
+                or _FUT_PATTERN.match(i.split(":")[-1])
+            )
+        ]
+
+        if not yf_eligible:
+            return {}
+
+        raw = yf_get_quotes(yf_eligible)
+        cid = correlation_id or new_correlation_id("quote")
+        return {
+            instrument: _enrich_quote(
+                quote,
+                instrument=instrument,
+                provider="yfinance",
+                source="FALLBACK",
+                correlation_id=cid,
+                quality_flags=("DELAYED_SOURCE",),
+            )
+            for instrument, quote in raw.items()
+        }
+    except Exception:
+        pass
+    return {}
 
 
 def normalize_instrument(inst: str) -> str:

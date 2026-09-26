@@ -47,7 +47,7 @@ from market.http_pool import get_binance_client
 logger = logging.getLogger(__name__)
 
 # Supported core crypto pairs and canonical alias map
-DEFAULT_CRYPTO_SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"]
+DEFAULT_CRYPTO_SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "DOGEUSDT"]
 
 CRYPTO_ALIAS_MAP = {
     "BTC": "BTCUSDT",
@@ -87,13 +87,29 @@ CRYPTO_ALIAS_MAP = {
     "CRYPTO:BNB": "BNBUSDT",
     "CRYPTO:BNBUSDT": "BNBUSDT",
     "BNBUSDT": "BNBUSDT",
+    "XRP": "XRPUSDT",
+    "RIPPLE": "XRPUSDT",
+    "XRPUSD": "XRPUSDT",
+    "XRP-USD": "XRPUSDT",
+    "CRYPTO:XRP": "XRPUSDT",
+    "CRYPTO:RIPPLE": "XRPUSDT",
+    "CRYPTO:XRPUSDT": "XRPUSDT",
+    "XRPUSDT": "XRPUSDT",
+    "DOGE": "DOGEUSDT",
+    "DOGECOIN": "DOGEUSDT",
+    "DOGEUSD": "DOGEUSDT",
+    "DOGE-USD": "DOGEUSDT",
+    "CRYPTO:DOGE": "DOGEUSDT",
+    "CRYPTO:DOGECOIN": "DOGEUSDT",
+    "CRYPTO:DOGEUSDT": "DOGEUSDT",
+    "DOGEUSDT": "DOGEUSDT",
 }
 
 BINANCE_WS_URL = (
     "wss://stream.binance.com:9443/stream?streams="
-    "btcusdt@ticker/ethusdt@ticker/solusdt@ticker/bnbusdt@ticker/"
-    "btcusdt@bookTicker/ethusdt@bookTicker/solusdt@bookTicker/bnbusdt@bookTicker/"
-    "btcusdt@kline_1m/ethusdt@kline_1m/solusdt@kline_1m/bnbusdt@kline_1m"
+    "btcusdt@ticker/ethusdt@ticker/solusdt@ticker/bnbusdt@ticker/xrpusdt@ticker/dogeusdt@ticker/"
+    "btcusdt@bookTicker/ethusdt@bookTicker/solusdt@bookTicker/bnbusdt@bookTicker/xrpusdt@bookTicker/dogeusdt@bookTicker/"
+    "btcusdt@kline_1m/ethusdt@kline_1m/solusdt@kline_1m/bnbusdt@kline_1m/xrpusdt@kline_1m/dogeusdt@kline_1m"
 )
 
 BINANCE_REST_KLINES = "https://api.binance.com/api/v3/klines"

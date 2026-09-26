@@ -187,8 +187,43 @@ class MStockAPI(BrokerAPI):
 
         # Restore saved token session if valid
         self._load_token()
+        try:
+            self._ensure_scrip_cache()
+        except Exception:
+            pass
 
     # ── Token Resolution Helper ──────────────────────────────
+
+    @staticmethod
+    def _resolve_derivative_candidates(clean_sym: str) -> list[str]:
+        """Convert ISO YYYYMMDD derivative format to NSE YYMMM / weekly YYMDD formats."""
+        m = re.match(
+            r"^([A-Za-z0-9_& -]+?)(20\d{2})(\d{2})(\d{2})(\d+(?:\.\d+)?)(CE|PE)$",
+            clean_sym,
+            re.IGNORECASE,
+        )
+        if not m:
+            return [clean_sym]
+        und, yyyy, mm, dd, strike, opt_type = m.groups()
+        yy = yyyy[2:]
+        m_int = int(mm)
+        s_int = str(int(float(strike)))
+        opt_t = opt_type.upper()
+        cands = [clean_sym]
+        m_map_3 = {
+            1: "JAN", 2: "FEB", 3: "MAR", 4: "APR", 5: "MAY", 6: "JUN",
+            7: "JUL", 8: "AUG", 9: "SEP", 10: "OCT", 11: "NOV", 12: "DEC",
+        }
+        m_map_1 = {
+            1: "1", 2: "2", 3: "3", 4: "4", 5: "5", 6: "6",
+            7: "7", 8: "8", 9: "9", 10: "O", 11: "N", 12: "D",
+        }
+        if m_int in m_map_3:
+            cands.append(f"{und}{yy}{m_map_3[m_int]}{s_int}{opt_t}")
+        if m_int in m_map_1:
+            cands.append(f"{und}{yy}{m_map_1[m_int]}{dd}{s_int}{opt_t}")
+        cands.append(f"{und}{yy}{mm}{dd}{s_int}{opt_t}")
+        return cands
 
     def get_symbol_token(self, symbol: str, exchange: str = "NSE") -> str:
         """Resolve security token for symbol via known tokens or cached scrip master."""
@@ -216,18 +251,26 @@ class MStockAPI(BrokerAPI):
             self._ensure_scrip_cache()
             if cache_key in self._scrip_token_cache:
                 return self._scrip_token_cache[cache_key]
+
+            # Check candidate derivative symbol variations (e.g. ISO YYYYMMDD -> NSE YYMMM)
+            for cand in self._resolve_derivative_candidates(clean_sym):
+                cand_key = f"{exchange}:{cand}"
+                if cand_key in self._scrip_token_cache:
+                    tok = self._scrip_token_cache[cand_key]
+                    self._scrip_token_cache[cache_key] = tok
+                    return tok
         except Exception:
             pass
         return clean_sym
 
     def _ensure_scrip_cache(self) -> None:
         """Parse instruments from Scrip Master if not yet loaded."""
-        if self._scrip_token_cache or not self._token:
+        if self._scrip_token_cache:
             return
 
         cache_disk_file = app_data_path("mstock_scrip_cache.json")
         now_ts = time.time()
-        # 1. Try local disk cache if fresher than 24 hours
+        # 1. Try local disk cache if fresher than 24 hours (does not require active broker token)
         if cache_disk_file.exists():
             try:
                 disk_data = json.loads(cache_disk_file.read_text(encoding="utf-8"))
@@ -236,6 +279,9 @@ class MStockAPI(BrokerAPI):
                     return
             except Exception:
                 pass
+
+        if not self._token:
+            return
 
         scrip_txt = self.download_scrip_master()
         if not scrip_txt:

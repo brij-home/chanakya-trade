@@ -252,7 +252,7 @@ def test_crypto_telegram_routing_and_formatting():
     )
 
     rendered = render_auto_alert(alert, in_market=True)
-    assert "[CRYPTO 24x7] ALPHA VORTEX" in rendered
+    assert "[CRYPTO 24x7]" in rendered and "ALPHA VORTEX" in rendered
     assert "$85,000" in rendered or "$84,800" in rendered
     assert "$83,500" in rendered
     assert "$88,000" in rendered

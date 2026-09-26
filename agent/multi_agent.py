@@ -758,6 +758,9 @@ class OptionsAnalyst(BaseAnalyst):
             )
 
 
+_NEWS_SENTIMENT_CACHE: dict[str, tuple[float, tuple[str, float, int, list[str]]]] = {}
+
+
 class NewsMacroAnalyst(BaseAnalyst):
     """
     Gathers news, FII/DII flows, market breadth, upcoming events.
@@ -974,9 +977,6 @@ class NewsMacroAnalyst(BaseAnalyst):
                 score=0,
                 error=str(e),
             )
-
-_NEWS_SENTIMENT_CACHE: dict[str, tuple[float, tuple[str, float, int, list[str]]]] = {}
-
 
     def _llm_sentiment(
         self,

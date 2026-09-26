@@ -242,6 +242,14 @@ NIFTY_TOP_HEAVYWEIGHTS = [
     "LT",
 ]
 
+BANKNIFTY_TOP_HEAVYWEIGHTS = [
+    "HDFCBANK",
+    "ICICIBANK",
+    "SBIN",
+    "AXISBANK",
+    "KOTAKBANK",
+]
+
 
 def get_index_polarization(index: str = "NIFTY") -> IndexPolarization:
     """
@@ -252,7 +260,9 @@ def get_index_polarization(index: str = "NIFTY") -> IndexPolarization:
     from market.quotes import get_quote
     import numpy as np
 
-    symbols = NIFTY_TOP_HEAVYWEIGHTS
+    idx_upper = str(index).upper()
+    is_bank_index = any(k in idx_upper for k in ("BANK", "BANKNIFTY", "BANKEX"))
+    symbols = BANKNIFTY_TOP_HEAVYWEIGHTS if is_bank_index else NIFTY_TOP_HEAVYWEIGHTS
     instruments = [f"NSE:{s}" for s in symbols]
     quotes = get_quote(instruments)
 
@@ -283,19 +293,40 @@ def get_index_polarization(index: str = "NIFTY") -> IndexPolarization:
     max_loser = (max_loser_sym, changes[max_loser_sym])
     spread_pct = round(max_gainer[1] - max_loser[1], 2)
 
+    # Bank Nifty: HDFCBANK (~29%) and ICICIBANK (~23%) together control >52% of index.
+    # If they are pulling in opposite directions with magnitude >= 0.40%, index is in gridlock chop.
+    hdfc_chg = changes.get("HDFCBANK", 0.0)
+    icici_chg = changes.get("ICICIBANK", 0.0)
+    bank_locomotive_split = (
+        is_bank_index
+        and (
+            (hdfc_chg >= 0.40 and icici_chg <= -0.40)
+            or (hdfc_chg <= -0.40 and icici_chg >= 0.40)
+        )
+    )
+
     # Polarized Tug-of-War threshold:
     # Spread between top gainer and top loser >= 3.0% with opposing signs (one >= +1.0%, other <= -1.0%)
     # OR dispersion standard deviation >= 1.5% with mixed signs.
     has_opposing_momentum = max_gainer[1] >= 1.0 and max_loser[1] <= -1.0
-    is_polarized = has_opposing_momentum and (spread_pct >= 3.0 or dispersion_std >= 1.5)
+    is_polarized = bool(
+        bank_locomotive_split
+        or (has_opposing_momentum and (spread_pct >= 3.0 or dispersion_std >= 1.5))
+    )
 
     if is_polarized:
         regime = "TUG_OF_WAR_CHOP"
-        summary = (
-            f"⚠️ Heavyweight Tug-of-War: {max_gainer[0]} ({max_gainer[1]:+.2f}%) pulling UP vs. "
-            f"{max_loser[0]} ({max_loser[1]:+.2f}%) dragging DOWN. Spread: {spread_pct:.2f}%. "
-            f"Index trapped in range-bound chop; suppress directional breakout alerts."
-        )
+        if bank_locomotive_split:
+            summary = (
+                f"⚠️ Heavyweight Tug-of-War: HDFCBANK ({hdfc_chg:+.2f}%) vs ICICIBANK ({icici_chg:+.2f}%) "
+                f"in direct conflict (>52% Bank Nifty weight). Index trapped in gridlock chop."
+            )
+        else:
+            summary = (
+                f"⚠️ Heavyweight Tug-of-War: {max_gainer[0]} ({max_gainer[1]:+.2f}%) pulling UP vs. "
+                f"{max_loser[0]} ({max_loser[1]:+.2f}%) dragging DOWN. Spread: {spread_pct:.2f}%. "
+                f"Index trapped in range-bound chop; suppress directional breakout alerts."
+            )
     elif abs(float(np.mean(vals))) > 1.0 and dispersion_std < 1.2:
         regime = "UNIDIRECTIONAL_TREND"
         summary = (
@@ -469,14 +500,14 @@ def _yf_sector_fallback(sector_keys: list[str]) -> list[IndexSnapshot]:
 # ── Index Heavyweight Locomotives Mapping ──────────────────────
 
 INDEX_HEAVYWEIGHTS: dict[str, list[str]] = {
-    "NIFTY": ["RELIANCE", "HDFCBANK"],
-    "NIFTY 50": ["RELIANCE", "HDFCBANK"],
-    "BANKNIFTY": ["HDFCBANK", "ICICIBANK"],
-    "NIFTY BANK": ["HDFCBANK", "ICICIBANK"],
-    "FINNIFTY": ["HDFCBANK", "ICICIBANK", "BAJFINANCE"],
-    "SENSEX": ["HDFCBANK", "RELIANCE"],
-    "BANKEX": ["HDFCBANK", "ICICIBANK"],
-    "MIDCPNIFTY": ["PERSISTENT", "FEDERALBNK", "COFORGE"],
+    "NIFTY": ["RELIANCE", "HDFCBANK", "ICICIBANK", "INFOSYS", "TCS"],
+    "NIFTY 50": ["RELIANCE", "HDFCBANK", "ICICIBANK", "INFOSYS", "TCS"],
+    "BANKNIFTY": ["HDFCBANK", "ICICIBANK", "SBIN", "AXISBANK", "KOTAKBANK"],
+    "NIFTY BANK": ["HDFCBANK", "ICICIBANK", "SBIN", "AXISBANK", "KOTAKBANK"],
+    "FINNIFTY": ["HDFCBANK", "ICICIBANK", "BAJFINANCE", "KOTAKBANK", "AXISBANK"],
+    "SENSEX": ["RELIANCE", "HDFCBANK", "ICICIBANK", "INFOSYS", "TCS"],
+    "BANKEX": ["HDFCBANK", "ICICIBANK", "SBIN", "AXISBANK", "KOTAKBANK"],
+    "MIDCPNIFTY": ["PERSISTENT", "FEDERALBNK", "COFORGE", "DIXON", "MAXHEALTH"],
 }
 
 
@@ -535,9 +566,22 @@ def get_heavyweights_posture(underlying: str) -> dict[str, Any]:
                         }
                     )
 
-        n = len(heavyweights)
-        all_bull = (bull_count == n and n > 0 and len(details) == n)
-        all_bear = (bear_count == n and n > 0 and len(details) == n)
+        n = len(details)
+        if n == 0:
+            return {
+                "underlying": clean_und,
+                "heavyweights": [],
+                "all_bullish": False,
+                "all_bearish": False,
+                "bull_count": 0,
+                "bear_count": 0,
+                "total_heavyweights": 0,
+                "summary": "UNAVAILABLE",
+            }
+
+        target_n = len(heavyweights)
+        all_bull = (bull_count == target_n and target_n > 0 and n == target_n)
+        all_bear = (bear_count == target_n and target_n > 0 and n == target_n)
 
         return {
             "underlying": clean_und,
