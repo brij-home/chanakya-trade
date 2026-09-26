@@ -72,6 +72,13 @@ export const AUTO_TYPE_STYLE = {
     bg: 'rgba(255, 79, 123, 0.08)',
     border: 'rgba(255, 79, 123, 0.20)',
   },
+  ORDER_FLOW_DIVERGENCE: {
+    icon: '📊',
+    label: 'CVD ORDER FLOW',
+    color: '#38bdf8',
+    bg: 'rgba(56, 189, 248, 0.08)',
+    border: 'rgba(56, 189, 248, 0.20)',
+  },
   PATTERN_COILING: {
     icon: '🌀',
     label: 'PATTERN COILING',

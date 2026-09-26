@@ -29,6 +29,7 @@ export default function PortfolioView() {
   
   const [portfolioSource, setPortfolioSource] = useState('auto') // 'auto' | 'broker' | 'paper'
   const [portfolio, setPortfolio] = useState(null)
+  const [greeks, setGreeks] = useState(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
 
@@ -52,8 +53,21 @@ export default function PortfolioView() {
     setError(null)
     const targetSource = sourceOverride || portfolioSource
     try {
-      const data = await getRef.current(`/api/portfolio?source=${targetSource}`)
-      setPortfolio(data)
+      const [portRes, greeksRes] = await Promise.allSettled([
+        getRef.current(`/api/portfolio?source=${targetSource}`),
+        getRef.current(`/api/portfolio/greeks?source=${targetSource}`),
+      ])
+      if (portRes.status === 'fulfilled') {
+        setPortfolio(portRes.value)
+      } else {
+        setPortfolio(null)
+        setError(portRes.reason?.message || 'Portfolio unavailable')
+      }
+      if (greeksRes.status === 'fulfilled') {
+        setGreeks(greeksRes.value)
+      } else {
+        setGreeks(null)
+      }
     } catch (err) {
       setPortfolio(null)
       setError(err.message || 'Portfolio unavailable')
@@ -75,6 +89,16 @@ export default function PortfolioView() {
     () => [...(portfolio?.holdings || []), ...(portfolio?.positions || [])],
     [portfolio]
   )
+
+  const greeksBySymbol = useMemo(() => {
+    const map = new Map()
+    if (greeks?.positions && Array.isArray(greeks.positions)) {
+      for (const p of greeks.positions) {
+        if (p.symbol) map.set(p.symbol.toUpperCase(), p)
+      }
+    }
+    return map
+  }, [greeks])
 
   const handleSort = (col) => {
     if (sortColumn === col) {
@@ -292,6 +316,145 @@ export default function PortfolioView() {
             <Metric label="Available cash" value={money(portfolio?.funds?.available_cash)} tone="var(--color-cyan)" />
           </div>
 
+          {/* Institutional Portfolio Greek Risk Surface & Market Stress Testing Card */}
+          <div
+            className="rounded-2xl p-4 shadow-sm space-y-3"
+            style={{ background: 'var(--color-panel)', border: '1px solid var(--color-border)' }}
+          >
+            {/* Header with Posture & Net Delta */}
+            <div className="flex items-center justify-between flex-wrap gap-2 pb-2 border-b" style={{ borderColor: 'var(--color-border-subtle)' }}>
+              <div className="flex items-center gap-2">
+                <span className="text-base">🛡️</span>
+                <div>
+                  <h3 className="text-xs font-black uppercase tracking-wider text-text flex items-center gap-2">
+                    <span>Portfolio Greek Risk Surface</span>
+                    {greeks?.delta_posture && (
+                      <span className={`text-[9px] px-2 py-0.5 rounded font-black font-mono border ${
+                        greeks.delta_posture === 'EXTREME_LONG' || greeks.delta_posture === 'EXTREME_SHORT'
+                          ? 'bg-rose-500/20 text-rose-300 border-rose-500/40 animate-pulse'
+                          : greeks.delta_posture === 'BULLISH'
+                          ? 'bg-sky-500/20 text-sky-300 border-sky-500/40'
+                          : greeks.delta_posture === 'BEARISH'
+                          ? 'bg-amber-500/20 text-amber-300 border-amber-500/40'
+                          : 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
+                      }`}>
+                        {greeks.delta_posture.replace('_', ' ')}
+                      </span>
+                    )}
+                    {greeks?.theta_status && (
+                      <span className={`text-[9px] px-2 py-0.5 rounded font-black font-mono border ${
+                        greeks.theta_status === 'HAZARDOUS_THETA_CLIFF'
+                          ? 'bg-rose-500/20 text-rose-300 border-rose-500/40 animate-pulse'
+                          : greeks.theta_status === 'HEALTHY_INCOME'
+                          ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
+                          : 'bg-zinc-500/20 text-zinc-300 border-zinc-500/40'
+                      }`}>
+                        {greeks.theta_status.replace('_', ' ')}
+                      </span>
+                    )}
+                  </h3>
+                  <p className="text-[10px] text-muted">
+                    NIFTY contract equivalent delta exposure &amp; 4-scenario volatility stress test
+                  </p>
+                </div>
+              </div>
+
+              {/* Quick Net Exposure Stats */}
+              <div className="flex items-center gap-3 text-xs font-mono">
+                <div>
+                  <span className="text-[9px] uppercase text-muted block">Net Delta Eq</span>
+                  <span className={`font-black ${
+                    (greeks?.net_delta_nifty_eq || 0) > 0 ? 'text-sky-400' : (greeks?.net_delta_nifty_eq || 0) < 0 ? 'text-amber-400' : 'text-text'
+                  }`}>
+                    {(greeks?.net_delta_nifty_eq || 0) >= 0 ? '+' : ''}
+                    {(greeks?.net_delta_nifty_eq || 0).toFixed(2)} Lots
+                  </span>
+                </div>
+                <div className="border-l border-border/50 pl-3">
+                  <span className="text-[9px] uppercase text-muted block">Daily Theta</span>
+                  <span className={`font-black ${
+                    (greeks?.net_theta_daily_inr || 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'
+                  }`}>
+                    {(greeks?.net_theta_daily_inr || 0) >= 0 ? '+' : ''}
+                    {money(greeks?.net_theta_daily_inr)} / day
+                  </span>
+                </div>
+                <div className="border-l border-border/50 pl-3">
+                  <span className="text-[9px] uppercase text-muted block">Net Gamma</span>
+                  <span className="font-black text-text">
+                    {(greeks?.net_gamma || 0).toFixed(4)}
+                  </span>
+                </div>
+                <div className="border-l border-border/50 pl-3">
+                  <span className="text-[9px] uppercase text-muted block">Net Vega</span>
+                  <span className={`font-black ${
+                    (greeks?.net_vega_inr || 0) >= 0 ? 'text-cyan-400' : 'text-purple-400'
+                  }`}>
+                    {money(greeks?.net_vega_inr)}
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            {/* Autonomous Hedging Alert Banner if hedge is recommended */}
+            {greeks?.hedging_recommendation && (
+              <div className="p-3 rounded-xl bg-rose-500/10 border border-rose-500/40 flex items-center justify-between flex-wrap gap-2 text-xs">
+                <div className="flex items-center gap-2">
+                  <span className="text-rose-400 text-sm">🚨</span>
+                  <div>
+                    <div className="font-bold text-rose-300">
+                      Delta Neutralization Required: {greeks.hedging_recommendation.action} {greeks.hedging_recommendation.lots} Lots {greeks.hedging_recommendation.underlying}
+                    </div>
+                    <div className="text-[10px] text-rose-200/80 font-mono mt-0.5">
+                      {greeks.hedging_recommendation.rationale}
+                    </div>
+                  </div>
+                </div>
+                <button
+                  onClick={() => sendDraft(`deploy hedge ${greeks.hedging_recommendation.action} ${greeks.hedging_recommendation.lots} lots ${greeks.hedging_recommendation.underlying}`)}
+                  className="px-3 py-1.5 rounded-lg font-bold text-xs bg-rose-500 text-white hover:bg-rose-600 transition-all cursor-pointer shadow-sm flex items-center gap-1.5"
+                >
+                  ⚡ Deploy Autonomous Hedge
+                </button>
+              </div>
+            )}
+
+            {/* 4-Scenario Shock Stress Testing Matrix */}
+            <div>
+              <div className="text-[9px] font-bold uppercase tracking-wider text-muted mb-1.5">
+                Market Shock Scenarios (Gamma &amp; Vega-Calibrated P&amp;L Impact)
+              </div>
+              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2">
+                {[
+                  { label: '🔻 Gap Down -2.5%', val: greeks?.stress_tests?.gap_down_2_5_pct, desc: 'Market crash shock' },
+                  { label: '🔻 Gap Down -1.5%', val: greeks?.stress_tests?.gap_down_1_5_pct, desc: 'Mild morning dip' },
+                  { label: '🔺 Gap Up +1.5%', val: greeks?.stress_tests?.gap_up_1_5_pct, desc: 'Mild morning rally' },
+                  { label: '🔺 Gap Up +2.5%', val: greeks?.stress_tests?.gap_up_2_5_pct, desc: 'Breakout rally shock' },
+                  { label: '⚡ VIX Surge +25%', val: greeks?.stress_tests?.vix_spike_25_pct, desc: 'Volatility spike' },
+                  { label: '📉 IV Crush -15%', val: greeks?.stress_tests?.iv_crush_15_pct, desc: 'Post-event IV drop' },
+                ].map((sc, i) => {
+                  const num = Number(sc.val || 0)
+                  const tone = num > 0 ? 'var(--color-emerald)' : num < 0 ? 'var(--color-rose)' : 'var(--color-muted)'
+                  return (
+                    <div
+                      key={i}
+                      className="p-2 rounded-xl text-xs font-mono"
+                      style={{ background: 'var(--color-surface)', border: '1px solid var(--color-border-subtle)' }}
+                      title={sc.desc}
+                    >
+                      <div className="text-[8px] font-bold uppercase tracking-wider text-muted truncate">
+                        {sc.label}
+                      </div>
+                      <div className="text-xs font-black mt-1" style={{ color: tone }}>
+                        {num >= 0 ? '+' : ''}{money(num)}
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+            </div>
+          </div>
+
           {rawRows.length === 0 ? (
             <UnavailableState
               title={portfolioSource === 'paper' ? "No open paper positions" : "No open holdings or positions"}
@@ -362,6 +525,7 @@ export default function PortfolioView() {
                 const pnl = Number(row.pnl || 0)
                 const tone = pnl >= 0 ? 'var(--color-emerald)' : 'var(--color-rose)'
                 const isPaper = row.broker === 'Paper' || portfolio?.source === 'paper'
+                const greek = greeksBySymbol.get(row.symbol?.toUpperCase())
                 return (
                   <div
                     key={`${row.broker || 'broker'}-${row.symbol}-${index}`}
@@ -373,8 +537,13 @@ export default function PortfolioView() {
                   >
                     <div>
                       <div className="text-xs font-bold text-text group-hover:text-gold transition-colors">{row.symbol}</div>
-                      <div className="text-[9px]" style={{ color: 'var(--color-muted)' }}>
-                        {row.broker || '—'} {row.product ? `· ${row.product}` : ''}
+                      <div className="text-[9px] flex items-center gap-1.5 flex-wrap" style={{ color: 'var(--color-muted)' }}>
+                        <span>{row.broker || '—'} {row.product ? `· ${row.product}` : ''}</span>
+                        {greek && (
+                          <span className="font-mono text-[8px] font-bold text-sky-400 bg-sky-500/10 px-1 py-px rounded border border-sky-500/20" title={`Delta: ${greek.delta}, Gamma: ${greek.gamma}, Vega: ₹${greek.vega_inr}`}>
+                            Δ {greek.delta >= 0 ? '+' : ''}{Number(greek.delta).toFixed(2)} · Θ {money(greek.theta_daily_inr)}/d
+                          </span>
+                        )}
                       </div>
                     </div>
                     <span className="text-xs font-mono text-text">{row.qty}</span>

@@ -246,6 +246,49 @@ export const AlertTriageCard = memo(function AlertTriageCard({
               🟢 LIVE L2
             </span>
           ) : null}
+
+          {/* Smart Order Routing Badge */}
+          {plan.execution_ticket?.smart_routing && (
+            <span
+              className={`text-[7px] px-1 py-px rounded font-black uppercase whitespace-nowrap border ${
+                plan.execution_ticket.smart_routing.routing_mode === 'ICEBERG'
+                  ? 'bg-sky-500/20 text-sky-300 border-sky-500/40'
+                  : plan.execution_ticket.smart_routing.routing_mode === 'PASSIVE_PEG'
+                  ? 'bg-cyan-500/20 text-cyan-300 border-cyan-500/40'
+                  : 'bg-zinc-500/20 text-zinc-300 border-zinc-500/30'
+              }`}
+              title={
+                plan.execution_ticket.smart_routing.notes ||
+                `Smart Routing: ${plan.execution_ticket.smart_routing.routing_mode} (Est saved: ₹${plan.execution_ticket.smart_routing.estimated_spread_savings_inr || 0})`
+              }
+            >
+              {plan.execution_ticket.smart_routing.routing_mode === 'ICEBERG'
+                ? `🧊 ICEBERG (${plan.execution_ticket.smart_routing.num_tranches}T)`
+                : plan.execution_ticket.smart_routing.routing_mode === 'PASSIVE_PEG'
+                ? '🎯 PASSIVE PEG'
+                : '⚡ DIRECT LIMIT'}
+            </span>
+          )}
+
+          {/* Liquidity Spread Warning */}
+          {(alert.metrics?.liquidity_warning || plan.execution_ticket?.liquidity_warning || alert.extra_metrics?.bid_ask_spread_pct > 2.0) && (
+            <span
+              className="text-[7px] px-1 py-px rounded font-black bg-amber-500/20 text-amber-300 border border-amber-500/40 whitespace-nowrap"
+              title={alert.metrics?.liquidity_warning || 'Wide bid-ask spread detected. Limit execution enforced.'}
+            >
+              ⚠️ SPREAD
+            </span>
+          )}
+
+          {/* Detector Degradation Probation */}
+          {(alert.metrics?.detector_status === 'PROBATION' || alert.metrics?.probationary_discount) && (
+            <span
+              className="text-[7px] px-1 py-px rounded font-black bg-rose-500/20 text-rose-300 border border-rose-500/40 whitespace-nowrap"
+              title="Detector is in probation due to negative rolling expectancy. Confidence discounted by 25%."
+            >
+              ⚠️ PROBATION
+            </span>
+          )}
         </div>
 
         {/* Live Price & Return */}

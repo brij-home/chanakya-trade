@@ -2456,16 +2456,19 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
       ? (optPlan?.lot_size || alt.lot_size || alt.metrics?.lot_size || INDEX_LOT_SIZES[cleanSym] || null)
       : (seg === 'COMMODITY' || seg === 'CURRENCY' ? (alt.lot_size || INDEX_LOT_SIZES[cleanSym] || null) : null)
 
+    const execTicket = actPlan.execution_ticket || null
+
     const ticketData = {
-      symbol: targetSym,
-      contract_symbol: targetSym,
+      symbol: execTicket?.symbol || targetSym,
+      contract_symbol: execTicket?.symbol || targetSym,
       exchange: targetExchange,
-      price: targetPrice != null && !isNaN(targetPrice) ? Number(targetPrice) : undefined,
-      target: targetTP != null && !isNaN(targetTP) ? Number(targetTP) : undefined,
-      stopLoss: targetSL != null && !isNaN(targetSL) ? Number(targetSL) : undefined,
-      lotSize: lotSize != null && !isNaN(lotSize) ? Number(lotSize) : undefined,
-      quantity: lotSize != null && !isNaN(lotSize) ? Number(lotSize) : 1,
-      action: alt.direction === 'BEARISH' && !String(targetSym).toUpperCase().includes('PE') ? 'SELL' : 'BUY',
+      price: execTicket?.limit_price != null ? Number(execTicket.limit_price) : (targetPrice != null && !isNaN(targetPrice) ? Number(targetPrice) : undefined),
+      target: execTicket?.target_price != null ? Number(execTicket.target_price) : (targetTP != null && !isNaN(targetTP) ? Number(targetTP) : undefined),
+      stopLoss: execTicket?.stop_loss != null ? Number(execTicket.stop_loss) : (targetSL != null && !isNaN(targetSL) ? Number(targetSL) : undefined),
+      lotSize: execTicket?.lot_size != null ? Number(execTicket.lot_size) : (lotSize != null && !isNaN(lotSize) ? Number(lotSize) : undefined),
+      quantity: execTicket?.shares != null ? Number(execTicket.shares) : (execTicket?.quantity != null ? Number(execTicket.quantity) : (lotSize != null && !isNaN(lotSize) ? Number(lotSize) : 1)),
+      action: execTicket?.side || (alt.direction === 'BEARISH' && !String(targetSym).toUpperCase().includes('PE') ? 'SELL' : 'BUY'),
+      smart_routing: execTicket?.smart_routing || null,
     }
 
     if (onOpenOrderTicket) {
