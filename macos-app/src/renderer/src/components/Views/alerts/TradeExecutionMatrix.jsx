@@ -38,10 +38,19 @@ export function TradeExecutionMatrix({
   const isUpward = levels.isUpwardPayoff !== undefined ? levels.isUpwardPayoff : (isBull || isDerivative)
 
   // Stage Hit Real-time Calculations
-  const isSLHit = Boolean(
-    levels.is_invalidated ||
-    (levels.sl && currentPrice && (isUpward ? currentPrice <= levels.sl : currentPrice >= levels.sl))
+  const isExplicitSL = Boolean(
+    alert?.stage === 'SL_HIT' ||
+    alert?.target_status === 'SL_HIT' ||
+    alert?.invalidation_reason?.toUpperCase().includes('STOP_LOSS') ||
+    alert?.invalidation_reason?.toUpperCase().includes('SL HIT') ||
+    alert?.invalidation_reason?.toUpperCase().includes('SL BREACH')
   )
+
+  const isPriceBreachedSL = Boolean(
+    levels.sl && currentPrice && (isUpward ? currentPrice <= levels.sl : currentPrice >= levels.sl)
+  )
+
+  const isSLHit = Boolean(isExplicitSL || isPriceBreachedSL)
 
   const isT3Hit = Boolean(
     levels.t3 && currentPrice && !isSLHit && (isUpward ? currentPrice >= levels.t3 : currentPrice <= levels.t3)

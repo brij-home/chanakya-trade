@@ -23,8 +23,9 @@ function loadStoredNotifications() {
     const now = new Date()
     return sanitized.map((item) => {
       const isIntraday = item.time_horizon === 'INTRADAY' || item.timeHorizon === 'INTRADAY'
+      const isSwingOrPositional = ['SWING_SHORT', 'SWING_MID', 'POSITIONAL'].includes(item.time_horizon || item.timeHorizon)
       const timeStr = item.created_at || item.timestamp
-      if (isIntraday && timeStr) {
+      if (isIntraday && !isSwingOrPositional && timeStr) {
         try {
           const d = new Date(String(timeStr).replace(' IST', '').trim())
           if (!isNaN(d.getTime()) && d.toDateString() !== now.toDateString()) {
@@ -32,6 +33,7 @@ function loadStoredNotifications() {
               ...item,
               is_invalidated: true,
               isInvalidated: true,
+              is_active: false,
               stage: 'EXPIRED',
               invalidation_reason: item.invalidation_reason || 'Intraday session expired (15:15 IST cutoff reached). Trade closed.'
             }
@@ -83,17 +85,32 @@ export function normalizeNotification(payload) {
   const t3Num = optPlan?.t3_premium ? Number(optPlan.t3_premium) : (tradePlan.target_3 ? Number(tradePlan.target_3) : (payload.t3 ? Number(payload.t3) : null))
 
   const rawTime = payload.created_at || payload.timestamp || payload.triggered_at || now.toISOString()
+  const timeHorizon = payload.time_horizon || payload.timeHorizon || (tradePlan?.timeframe?.toUpperCase().includes('SWING') ? 'SWING_MID' : 'SWING_MID')
 
   return {
     id,
+    alert_id: id,
     symbol: cleanSym || 'UNKNOWN',
     contract_symbol: payload.contract_symbol || null,
+    exchange: payload.exchange || 'NSE',
+    segment: payload.segment || null,
     strike: strikeNum,
     option_type: optType,
     direction: payload.direction || (payload.headline?.includes('BULL') ? 'BULLISH' : 'BEARISH'),
     alert_type: payload.alert_type || 'ALERT',
     stage: payload.stage || (isInvalidated ? 'INVALIDATED' : isTarget ? 'TARGET_ACHIEVED' : isTrail ? 'TRAILING_UPDATE' : 'ACTIVE'),
+    time_horizon: timeHorizon,
+    timeHorizon: timeHorizon,
+    is_active: payload.is_active !== undefined ? Boolean(payload.is_active) : (!isInvalidated && payload.stage !== 'INVALIDATED' && !payload.is_archived),
+    is_archived: Boolean(payload.is_archived || payload.isArchived),
+    is_expired: Boolean(payload.is_expired || payload.isExpired),
     is_invalidated: isInvalidated,
+    invalidation_reason: payload.invalidation_reason || null,
+    invalidated_at: payload.invalidated_at || null,
+    archived_at: payload.archived_at || null,
+    archive_reason: payload.archive_reason || null,
+    target_status: payload.target_status || 'PENDING',
+    achieved_milestones: payload.achieved_milestones || [],
     is_target: isTarget,
     is_trail: isTrail,
     is_test: isTest,
@@ -113,6 +130,7 @@ export function normalizeNotification(payload) {
     metrics: payload.metrics || {},
     actionable_plan: plan,
     rawPayload: payload,
+    created_at: payload.created_at || rawTime,
     timestamp: rawTime,
     read: false,
   }

@@ -19,14 +19,16 @@ Fully implements the BaseDetector protocol for unified single-pass evaluation.
 from __future__ import annotations
 
 import logging
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import numpy as np
 import pandas as pd
 
 from engine.alert_identity import canonical_alert_symbol, generate_alert_id
 from engine.alert_model import AutoAlert
-from engine.detection_context import DetectionContext
+
+if TYPE_CHECKING:
+    from engine.detection_context import DetectionContext
 
 logger = logging.getLogger("engine.detectors.order_flow")
 

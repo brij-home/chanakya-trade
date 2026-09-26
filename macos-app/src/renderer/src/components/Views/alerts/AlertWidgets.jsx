@@ -32,11 +32,27 @@ export function RRMiniBar({ sl, entry, t1, t2, t3, currentPrice, isUpward = true
   )
 }
 
-export function MilestoneDots({ targetStatus, stage, isSLHit = false }) {
-  if (isSLHit || stage === 'INVALIDATED') {
+export function MilestoneDots({ targetStatus, stage, isSLHit = false, isExpired = false, isInvalidated = false }) {
+  if (isSLHit || stage === 'SL_HIT') {
     return (
-      <span className="flex items-center gap-0.5 font-mono text-[9px] text-rose-400 font-bold" title="Stop-Loss Hit / Invalidated">
+      <span className="flex items-center gap-0.5 font-mono text-[9px] text-rose-400 font-bold" title="Stop-Loss Hit">
         <span>🛑</span>
+      </span>
+    )
+  }
+
+  if (isExpired || stage === 'EXPIRED') {
+    return (
+      <span className="flex items-center gap-0.5 font-mono text-[9px] text-zinc-400 font-bold" title="Expired / Session Closed">
+        <span>⏱️</span>
+      </span>
+    )
+  }
+
+  if (isInvalidated || stage === 'INVALIDATED') {
+    return (
+      <span className="flex items-center gap-0.5 font-mono text-[9px] text-amber-400 font-bold" title="Thesis Invalidated">
+        <span>⚠️</span>
       </span>
     )
   }

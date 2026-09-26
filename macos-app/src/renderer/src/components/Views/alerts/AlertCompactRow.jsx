@@ -31,7 +31,7 @@ export const AlertCompactRow = memo(function AlertCompactRow({ alert, onSendTele
   const isEarly = alert.stage === 'EARLY_WARNING'
   const isIgnited = alert.stage === 'IGNITED'
   const isExpired = alert.is_expired || alert.stage === 'EXPIRED'
-  const isInvalidated = alert.is_invalidated || alert.stage === 'INVALIDATED' || isExpired
+  const isInvalidated = alert.is_invalidated || alert.stage === 'INVALIDATED'
   const isT1Achieved = alert.stage === 'T1_ACHIEVED' || alert.target_status === 'T1_ACHIEVED'
   const isT2Achieved = alert.stage === 'T2_ACHIEVED' || alert.target_status === 'T2_ACHIEVED'
   const isFinalTargetAchieved = alert.stage === 'TARGET_ACHIEVED' || alert.target_status === 'TARGET_ACHIEVED' || alert.stage === 'COMPLETED'
@@ -108,16 +108,25 @@ export const AlertCompactRow = memo(function AlertCompactRow({ alert, onSendTele
   }
 
   // Dynamic live stage hit detection (real-time cross evaluation)
-  const isSLHit = Boolean(
-    isInvalidated ||
-    (slNum && currentPrice && (
+  const isExplicitSL = Boolean(
+    alert.stage === 'SL_HIT' ||
+    alert.target_status === 'SL_HIT' ||
+    alert.invalidation_reason?.toUpperCase().includes('STOP_LOSS') ||
+    alert.invalidation_reason?.toUpperCase().includes('SL HIT') ||
+    alert.invalidation_reason?.toUpperCase().includes('SL BREACH')
+  )
+
+  const isPriceBreachedSL = Boolean(
+    slNum && currentPrice && (
       isDerivative
         ? (isOptionSell ? currentPrice >= slNum : currentPrice <= slNum)
         : isNeutral
         ? (currentPrice < slNum || (alert.metrics?.long_ce && currentPrice > alert.metrics.long_ce))
         : (isBull ? currentPrice <= slNum : currentPrice >= slNum)
-    ))
+    )
   )
+
+  const isSLHit = Boolean(isExplicitSL || isPriceBreachedSL)
 
   const isT3Hit = Boolean(
     isFinalTargetAchieved ||
@@ -243,6 +252,8 @@ export const AlertCompactRow = memo(function AlertCompactRow({ alert, onSendTele
     ? { label: '⏱️ EXPIRED', cls: 'bg-zinc-700/40 text-zinc-300 border-zinc-600/40' }
     : isSLHit
     ? { label: '🛑 SL HIT', cls: 'bg-rose-500/25 text-rose-300 border-rose-500/60 ring-1 ring-rose-500/40 animate-pulse' }
+    : isInvalidated
+    ? { label: '⚠️ INVALIDATED', cls: 'bg-amber-500/20 text-amber-300 border-amber-500/40' }
     : isT3Hit
     ? { label: '🚀 T3 HIT', cls: 'bg-purple-500/25 text-purple-200 border-purple-400/60 ring-1 ring-purple-500/40 animate-pulse' }
     : isT2Hit
@@ -422,7 +433,7 @@ export const AlertCompactRow = memo(function AlertCompactRow({ alert, onSendTele
           </span>
         )}
 
-        <MilestoneDots targetStatus={isT3Hit ? 'TARGET_ACHIEVED' : isT2Hit ? 'T2_ACHIEVED' : isT1Hit ? 'T1_ACHIEVED' : alert.target_status} stage={alert.stage} isSLHit={isSLHit} />
+        <MilestoneDots targetStatus={isT3Hit ? 'TARGET_ACHIEVED' : isT2Hit ? 'T2_ACHIEVED' : isT1Hit ? 'T1_ACHIEVED' : alert.target_status} stage={alert.stage} isSLHit={isSLHit} isExpired={isExpired} isInvalidated={isInvalidated} />
 
         {/* Live Return Pill (Right direction = Green, Loss = Red) */}
         {liveReturn && (

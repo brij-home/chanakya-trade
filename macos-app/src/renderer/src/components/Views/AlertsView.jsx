@@ -85,8 +85,11 @@ function mergeAlertsInPlace(prevAlerts = [], freshAlerts = []) {
 
     const freshItem = freshMap.get(id)
     if (!freshItem) {
-      const horizon = oldItem.time_horizon || oldItem.timeHorizon || 'INTRADAY'
-      if (horizon === 'INTRADAY' && (oldItem.created_at || oldItem.timestamp)) {
+      const horizon = String(oldItem.time_horizon || oldItem.timeHorizon || '').toUpperCase()
+      const isExplicitIntraday = horizon === 'INTRADAY' || (oldItem.alert_type && (oldItem.alert_type.toUpperCase().includes('INTRADAY') || oldItem.alert_type.toUpperCase().includes('ORB') || oldItem.alert_type.toUpperCase().includes('SCALP')))
+      const isSwingOrPositional = horizon.includes('SWING') || horizon.includes('POSITIONAL') || (oldItem.alert_type && oldItem.alert_type.toUpperCase().includes('SWING'))
+
+      if (isExplicitIntraday && !isSwingOrPositional && (oldItem.created_at || oldItem.timestamp)) {
         try {
           const clean = String(oldItem.created_at || oldItem.timestamp).replace(' IST', '').trim()
           const createdDate = new Date(clean)
@@ -114,6 +117,9 @@ function mergeAlertsInPlace(prevAlerts = [], freshAlerts = []) {
       oldItem.stage !== freshItem.stage ||
       oldItem.is_invalidated !== freshItem.is_invalidated ||
       oldItem.is_archived !== freshItem.is_archived ||
+      oldItem.is_active !== freshItem.is_active ||
+      oldItem.is_expired !== freshItem.is_expired ||
+      oldItem.time_horizon !== freshItem.time_horizon ||
       oldItem.target_status !== freshItem.target_status ||
       oldItem.trailing_stop !== freshItem.trailing_stop ||
       oldItem.ltp !== freshItem.ltp ||
@@ -287,14 +293,23 @@ const AutoAlertCard = memo(function AutoAlertCard({
   }
 
   // Dynamic live stage hit detection (real-time cross evaluation)
-  const isSLHit = Boolean(
-    isInvalidated ||
-    (slNum && currentPrice && (
+  const isExplicitSL = Boolean(
+    alert.stage === 'SL_HIT' ||
+    alert.target_status === 'SL_HIT' ||
+    alert.invalidation_reason?.toUpperCase().includes('STOP_LOSS') ||
+    alert.invalidation_reason?.toUpperCase().includes('SL HIT') ||
+    alert.invalidation_reason?.toUpperCase().includes('SL BREACH')
+  )
+
+  const isPriceBreachedSL = Boolean(
+    slNum && currentPrice && (
       isDerivative
         ? (isOptionSell ? currentPrice >= slNum : currentPrice <= slNum)
         : (isBull ? currentPrice <= slNum : currentPrice >= slNum)
-    ))
+    )
   )
+
+  const isSLHit = Boolean(isExplicitSL || isPriceBreachedSL)
 
   const isT3Hit = Boolean(
     isFinalTarget ||
@@ -329,8 +344,22 @@ const AutoAlertCard = memo(function AutoAlertCard({
     if (isSLHit) {
       return {
         badge: '🛑 SL BREACHED',
-        text: 'Stop loss triggered — trade thesis invalidated',
+        text: alert.invalidation_reason || 'Stop loss triggered — trade thesis invalidated',
         theme: 'rose',
+      }
+    }
+    if (isExpired) {
+      return {
+        badge: '⏱️ EXPIRED',
+        text: alert.invalidation_reason || 'Session time cutoff reached — trade closed',
+        theme: 'slate',
+      }
+    }
+    if (isInvalidated) {
+      return {
+        badge: '⚠️ INVALIDATED',
+        text: alert.invalidation_reason || 'Trade setup invalidated — structure or momentum collapsed',
+        theme: 'amber',
       }
     }
     if (isT3Hit) {
@@ -2489,9 +2518,13 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
     if (a.is_expired || a.stage === 'EXPIRED' || a.is_invalidated || a.is_archived) return false
     if (a.stage === 'INVALIDATED' || a.stage === 'TARGET_ACHIEVED' || a.stage === 'COMPLETED' || a.target_status === 'TARGET_ACHIEVED') return false
 
-    // Check Intraday session expiration
-    const horizon = a.time_horizon || a.timeHorizon || 'INTRADAY'
-    if (horizon === 'INTRADAY' && (a.created_at || a.timestamp)) {
+    // Check Intraday session expiration: strictly for explicit intraday setups!
+    // Swing and positional setups (SWING_SHORT, SWING_MID, POSITIONAL) remain active across calendar days.
+    const horizon = String(a.time_horizon || a.timeHorizon || '').toUpperCase()
+    const isExplicitIntraday = horizon === 'INTRADAY' || (a.alert_type && (a.alert_type.toUpperCase().includes('INTRADAY') || a.alert_type.toUpperCase().includes('ORB') || a.alert_type.toUpperCase().includes('SCALP')))
+    const isSwingOrPositional = horizon.includes('SWING') || horizon.includes('POSITIONAL') || (a.alert_type && a.alert_type.toUpperCase().includes('SWING'))
+
+    if (isExplicitIntraday && !isSwingOrPositional && (a.created_at || a.timestamp)) {
       try {
         const clean = String(a.created_at || a.timestamp).replace(' IST', '').trim()
         const createdDate = new Date(clean)

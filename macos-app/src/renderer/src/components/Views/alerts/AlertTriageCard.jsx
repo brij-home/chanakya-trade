@@ -34,6 +34,7 @@ export const AlertTriageCard = memo(function AlertTriageCard({
   const isBull = alert.direction === 'BULLISH'
   const isBear = alert.direction === 'BEARISH'
   const isNeutral = alert.direction === 'NEUTRAL' || alert.alert_type === 'IRON_CONDOR_PINNING'
+  const isExpired = alert.is_expired || alert.stage === 'EXPIRED'
   const isInvalidated = alert.is_invalidated || alert.stage === 'INVALIDATED'
   const isT1Achieved = alert.stage === 'T1_ACHIEVED' || alert.target_status === 'T1_ACHIEVED'
   const isT2Achieved = alert.stage === 'T2_ACHIEVED' || alert.target_status === 'T2_ACHIEVED'
@@ -104,16 +105,25 @@ export const AlertTriageCard = memo(function AlertTriageCard({
   }
 
   // Dynamic stage hits
-  const isSLHit = Boolean(
-    isInvalidated ||
-    (slNum && currentPrice && (
+  const isExplicitSL = Boolean(
+    alert.stage === 'SL_HIT' ||
+    alert.target_status === 'SL_HIT' ||
+    alert.invalidation_reason?.toUpperCase().includes('STOP_LOSS') ||
+    alert.invalidation_reason?.toUpperCase().includes('SL HIT') ||
+    alert.invalidation_reason?.toUpperCase().includes('SL BREACH')
+  )
+
+  const isPriceBreachedSL = Boolean(
+    slNum && currentPrice && (
       isDerivative
         ? (isOptionSell ? currentPrice >= slNum : currentPrice <= slNum)
         : isNeutral
         ? (currentPrice < slNum || (alert.metrics?.long_ce && currentPrice > alert.metrics.long_ce))
         : (isBull ? currentPrice <= slNum : currentPrice >= slNum)
-    ))
+    )
   )
+
+  const isSLHit = Boolean(isExplicitSL || isPriceBreachedSL)
 
   const isT3Hit = Boolean(
     isFinalTargetAchieved ||
@@ -160,6 +170,8 @@ export const AlertTriageCard = memo(function AlertTriageCard({
           ? 'bg-surface border-l-4 border-l-gold border-y border-r border-gold/30 shadow-md ring-1 ring-gold/20'
           : isSLHit
           ? 'bg-panel/50 hover:bg-surface/60 border border-rose-500/30 hover:border-rose-500/50 opacity-80'
+          : isExpired || isInvalidated
+          ? 'bg-panel/40 hover:bg-surface/50 border border-border/30 opacity-75'
           : 'bg-panel hover:bg-surface/80 border border-border/40 hover:border-border'
       }`}
     >
@@ -167,7 +179,7 @@ export const AlertTriageCard = memo(function AlertTriageCard({
       <div className="flex items-center justify-between gap-1.5 min-w-0">
         <div className="flex items-center gap-1.5 min-w-0 flex-wrap">
           <span className="text-xs">
-            {isSLHit ? '🛑' : isT3Hit ? '🚀' : isT2Hit ? '🏁' : isT1Hit ? '🎯' : isTrail ? '📈' : isEarly ? '⏳' : style.icon}
+            {isSLHit ? '🛑' : isExpired ? '⏱️' : isInvalidated ? '⚠️' : isT3Hit ? '🚀' : isT2Hit ? '🏁' : isT1Hit ? '🎯' : isTrail ? '📈' : isEarly ? '⏳' : style.icon}
           </span>
           <span className="font-black text-sm text-text leading-none">{alert.symbol}</span>
           {strikeNum && !isFuture && (
@@ -207,6 +219,14 @@ export const AlertTriageCard = memo(function AlertTriageCard({
           {isSLHit ? (
             <span className="text-[7px] px-1.5 py-px rounded font-black uppercase bg-rose-500/25 text-rose-300 border border-rose-500/50 animate-pulse">
               🛑 SL HIT
+            </span>
+          ) : isExpired ? (
+            <span className="text-[7px] px-1.5 py-px rounded font-black uppercase bg-zinc-700/40 text-zinc-300 border border-zinc-600/40">
+              ⏱️ EXPIRED
+            </span>
+          ) : isInvalidated ? (
+            <span className="text-[7px] px-1.5 py-px rounded font-black uppercase bg-amber-500/20 text-amber-300 border border-amber-500/40">
+              ⚠️ INVALIDATED
             </span>
           ) : isT3Hit ? (
             <span className="text-[7px] px-1.5 py-px rounded font-black uppercase bg-purple-500/25 text-purple-200 border border-purple-400/50 animate-pulse">
