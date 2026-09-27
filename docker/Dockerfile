@@ -32,8 +32,9 @@ RUN pip install --no-cache-dir -e . \
 # Electron package so the FastAPI app can serve the generated frontend.
 COPY --from=web-builder --chown=trader:trader /web/static ./web/static
 
-# Data directory for SQLite + exports
-RUN mkdir -p /data && chown trader:trader /data
+# Data directory for SQLite + exports & ensure backward-compatible paths route to /data
+RUN mkdir -p /data/exports && chown -R trader:trader /data \
+    && ln -s /data /home/trader/.trading_platform
 ENV TRADING_PLATFORM_HOME=/data \
     TRADING_PLATFORM_DATA=/data \
     TRADING_PLATFORM_PDF_DIR=/data/exports

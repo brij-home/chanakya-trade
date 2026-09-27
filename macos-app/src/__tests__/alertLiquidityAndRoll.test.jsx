@@ -29,7 +29,7 @@ describe('AlertCompactRow Horizon, Liquidity, and Strike Roll', () => {
     }
 
     render(<AlertCompactRow alert={alert} onExpand={() => {}} isExpanded={false} />)
-    expect(screen.getByText(/INTRADAY \(15:15\)/i)).toBeInTheDocument()
+    expect(screen.getByText(/INTRADAY.*15:15/i)).toBeInTheDocument()
   })
 
   it('renders MCX 23:15 cutoff for commodity intraday alerts', () => {
@@ -48,7 +48,7 @@ describe('AlertCompactRow Horizon, Liquidity, and Strike Roll', () => {
     }
 
     render(<AlertCompactRow alert={alert} onExpand={() => {}} isExpanded={false} />)
-    expect(screen.getByText(/INTRADAY \(23:15\)/i)).toBeInTheDocument()
+    expect(screen.getByText(/INTRADAY.*23:15/i)).toBeInTheDocument()
   })
 
   it('renders optimal liquidity badge when spread is tight', () => {

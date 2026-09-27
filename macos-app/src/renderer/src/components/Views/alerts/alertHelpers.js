@@ -37,17 +37,64 @@ export function isTestOrSimAlert(item) {
 
   // 1. Explicit test flags or non-live environment
   if (isTestFlag || env === 'TEST' || env === 'SIMULATE' || env === 'DEMO' || !isLiveFlag) return true
-  if (id.startsWith('test-') || id.startsWith('sim-')) return true
+  if (id.startsWith('test-') || id.startsWith('sim-') || id.startsWith('mock-') || id.startsWith('synthetic-') || id.includes('-test-')) return true
 
-  // 2. Headline / summary containing test indicators
-  if (headline.includes('[TEST]') || headline.includes('🧪') || headline.includes('SIMULAT') || headline.includes('TEST ALERT')) return true
-  if (summary.includes('SIMULAT') || summary.includes('TEST ALERT') || summary.includes('TEST MODE')) return true
-
-  // 3. Known synthetic/mock test phrases from unit tests
-  if (id.startsWith('mock-') || id.startsWith('synthetic-')) return true
-  if (headline.includes('SYNTHETIC TEST') || summary.includes('SYNTHETIC TEST')) return true
+  // 2. Headline / summary containing test indicators (including word boundaries)
+  if (/\btest\b/i.test(headline) || /\bsimulat/i.test(headline) || /\bmock\b/i.test(headline) || headline.includes('[TEST]') || headline.includes('🧪')) return true
+  if (/\btest\b/i.test(summary) || /\bsimulat/i.test(summary) || /\bmock\b/i.test(summary) || summary.includes('TEST ALERT') || summary.includes('TEST MODE')) return true
 
   return false
+}
+
+/**
+ * Institutional Provenance Resolver.
+ * Maps alert state strictly to verified execution environment:
+ * 🧪 TEST: Mock, unit test, simulation
+ * 🌙 OFF-MARKET / EOD: Post-market or weekend EOD scanner
+ * 🟢 REAL / LIVE: Live verified broker stream during active trading session
+ */
+export function resolveAlertProvenance(alert) {
+  if (!alert) {
+    return {
+      label: '🟢 REAL / LIVE',
+      cls: 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40',
+      isTest: false,
+      isLive: true,
+      isOffMarket: false,
+    }
+  }
+
+  if (isTestOrSimAlert(alert)) {
+    return {
+      label: '🧪 TEST',
+      cls: 'bg-purple-500/20 text-purple-300 border-purple-500/40',
+      isTest: true,
+      isLive: false,
+      isOffMarket: false,
+    }
+  }
+
+  const env = String(alert.environment || '').toUpperCase()
+  const mkt = String(alert.market_status || alert.actionable_plan?.market_status?.status || '').toUpperCase()
+  const isOffMarket = env === 'EOD_SCAN' || env === 'OFF-MARKET' || mkt === 'SESSION_CLOSED'
+
+  if (isOffMarket) {
+    return {
+      label: '🌙 OFF-MARKET / EOD',
+      cls: 'bg-sky-500/20 text-sky-300 border-sky-500/30',
+      isTest: false,
+      isLive: false,
+      isOffMarket: true,
+    }
+  }
+
+  return {
+    label: '🟢 REAL / LIVE',
+    cls: 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40',
+    isTest: false,
+    isLive: true,
+    isOffMarket: false,
+  }
 }
 
 export const AUTO_TYPE_STYLE = {
@@ -190,6 +237,34 @@ export const AUTO_TYPE_STYLE = {
     color: '#818cf8',
     bg: 'rgba(129, 140, 248, 0.08)',
     border: 'rgba(129, 140, 248, 0.20)',
+  },
+  CRYPTO_CVD_ABSORPTION: {
+    icon: '🪙',
+    label: 'ORDER FLOW CVD',
+    color: '#38bdf8',
+    bg: 'rgba(56, 189, 248, 0.08)',
+    border: 'rgba(56, 189, 248, 0.20)',
+  },
+  CRYPTO_LIQUIDATION_FLUSH: {
+    icon: '⚡',
+    label: 'LIQUIDATION FLUSH',
+    color: '#f43f5e',
+    bg: 'rgba(244, 63, 94, 0.08)',
+    border: 'rgba(244, 63, 94, 0.20)',
+  },
+  CRYPTO_BASIS_ARBITRAGE: {
+    icon: '🌾',
+    label: 'BASIS ARBITRAGE',
+    color: '#10b981',
+    bg: 'rgba(16, 185, 129, 0.08)',
+    border: 'rgba(16, 185, 129, 0.20)',
+  },
+  CRYPTO_VOL_ARBITRAGE: {
+    icon: '🎯',
+    label: 'VOL ARBITRAGE',
+    color: '#a855f7',
+    bg: 'rgba(168, 85, 247, 0.08)',
+    border: 'rgba(168, 85, 247, 0.20)',
   },
 }
 
@@ -754,5 +829,630 @@ export function computeExecutionLevels(alert, isDerivative, spotNum, optLtpNum) 
     anchored_levels: alert.anchored_levels || tradePlan.anchored_levels || null,
     time_horizon: alert.time_horizon || null,
     order_flow_signals: alert.order_flow_signals || null,
+  }
+}
+
+/**
+ * Institutional active validation check (SSOT):
+ * True only if a trade setup is neither archived, invalidated, expired, nor exited (SL, Time Stop, Runner, Target).
+ */
+export function isAlertActive(a) {
+  if (!a) return false
+  if (a.is_expired || a.isExpired || a.stage === 'EXPIRED') return false
+  if (a.is_invalidated || a.isInvalidated || a.is_archived || a.isArchived) return false
+  const stage = String(a.stage || '').toUpperCase()
+  const targetStatus = String(a.target_status || a.targetStatus || '').toUpperCase()
+  if (
+    stage === 'INVALIDATED' ||
+    stage === 'TARGET_ACHIEVED' ||
+    stage === 'COMPLETED' ||
+    stage === 'SL_HIT' ||
+    stage === 'TIME_STOP_EXIT' ||
+    stage === 'RUNNER_EXIT' ||
+    stage === 'PROFIT_SECURED' ||
+    targetStatus === 'TARGET_ACHIEVED' ||
+    targetStatus === 'RUNNER_CLOSED' ||
+    targetStatus === 'SL_HIT' ||
+    targetStatus === 'TIME_STOP_EXIT'
+  ) return false
+
+  // Check Intraday session expiration: strictly for explicit intraday setups!
+  const horizon = String(a.time_horizon || a.timeHorizon || '').toUpperCase()
+  const isExplicitIntraday = horizon === 'INTRADAY' || (a.alert_type && (a.alert_type.toUpperCase().includes('INTRADAY') || a.alert_type.toUpperCase().includes('ORB') || a.alert_type.toUpperCase().includes('SCALP')))
+  const isSwingOrPositional =
+    horizon.includes('SWING') ||
+    horizon.includes('POSITIONAL') ||
+    horizon.includes('LONG') ||
+    horizon.includes('MULTIBAGGER') ||
+    (a.alert_type && (
+      a.alert_type.toUpperCase().includes('SWING') ||
+      a.alert_type.toUpperCase().includes('MULTIBAGGER') ||
+      a.alert_type.toUpperCase().includes('STAGE_1_TO_2')
+    ))
+
+  if (isExplicitIntraday && !isSwingOrPositional && (a.created_at || a.timestamp)) {
+    try {
+      const exch = String(a.exchange || '').toUpperCase()
+      const seg = String(a.segment || a.metrics?.segment || '').toUpperCase()
+      const isCrypto = exch === 'CRYPTO' || exch === 'BINANCE' || exch === 'DERIBIT' || seg === 'CRYPTO' || String(a.symbol || '').toUpperCase().endsWith('USDT')
+
+      const clean = String(a.created_at || a.timestamp).replace(' IST', '').trim()
+      const createdDate = new Date(clean)
+      const now = new Date()
+      if (!isNaN(createdDate.getTime())) {
+        if (isCrypto) {
+          // 24x7 Crypto uses 24-hour rolling expiry window
+          if (now.getTime() - createdDate.getTime() >= 86_400_000) {
+            return false
+          }
+        } else if (createdDate.toDateString() !== now.toDateString()) {
+          return false
+        }
+      }
+    } catch (_) {}
+  }
+
+  return a.is_active !== undefined
+    ? Boolean(a.is_active)
+    : true
+}
+
+/**
+ * Canonical 5-Tier Horizon & ETA Resolver (SSOT):
+ * Maps setups across:
+ *   - INTRADAY: ⏱️ Intraday Scalp / Day Trade (Cutoff: Today 15:15 IST / MCX 23:15 IST)
+ *   - SWING_SHORT: ⚡ Short-Term Swing (2–5 Sessions)
+ *   - SWING_MID: 📈 Mid-Term Swing (1–4 Weeks)
+ *   - LONG_TERM / POSITIONAL: 🏛️ Long-Term Positional (1–6 Months)
+ *   - MULTIBAGGER: 🚀 Multibagger Alpha (6–24 Months Compounding Runway)
+ */
+export function resolveHorizonAndETA(alert) {
+  if (!alert) {
+    return {
+      key: 'INTRADAY',
+      label: 'INTRADAY',
+      shortLabel: 'INTRADAY',
+      icon: '⏱️',
+      etaLabel: '15:15',
+      etaFull: 'Today by 15:15 IST',
+      compactBadge: '⏱️ INTRADAY • 15:15',
+      badgeClasses: 'bg-sky-500/15 text-sky-300 border-sky-500/30',
+      etaClasses: 'bg-sky-500/10 text-sky-300 border-sky-500/20',
+      tooltip: 'Intraday Setup: Square-off by 15:15 IST.',
+    }
+  }
+
+  const rawHorizon = String(alert.time_horizon || alert.timeHorizon || '').toUpperCase()
+  const rawType = String(alert.alert_type || alert.alertType || '').toUpperCase()
+  const exch = String(alert.exchange || 'NSE').toUpperCase()
+
+  let key = 'INTRADAY'
+  if (
+    rawHorizon === 'MULTIBAGGER' ||
+    rawType.includes('MULTIBAGGER') ||
+    rawType.includes('STAGE_1_TO_2')
+  ) {
+    key = 'MULTIBAGGER'
+  } else if (
+    rawHorizon === 'LONG_TERM' ||
+    (rawHorizon === 'POSITIONAL' && !rawType.includes('SWING'))
+  ) {
+    key = 'LONG_TERM'
+  } else if (
+    rawHorizon === 'SWING_MID' ||
+    rawType.includes('SQUEEZE') ||
+    rawType.includes('RRG') ||
+    rawType.includes('PULLBACK')
+  ) {
+    key = 'SWING_MID'
+  } else if (
+    rawHorizon === 'SWING_SHORT' ||
+    rawHorizon === 'SWING' ||
+    rawType.includes('COILING') ||
+    rawType.includes('CIRCUIT') ||
+    rawType.includes('VCP')
+  ) {
+    key = 'SWING_SHORT'
+  } else if (
+    rawHorizon === 'INTRADAY' ||
+    rawType.includes('GAMMA') ||
+    rawType.includes('SPARK') ||
+    rawType.includes('ORB') ||
+    rawType.includes('CONTAGION')
+  ) {
+    key = 'INTRADAY'
+  } else if (rawHorizon) {
+    key = rawHorizon
+  }
+
+  // Derive ETA
+  let etaLabel = alert.eta_label || alert.etaLabel || null
+  let etaFull = null
+  const isCrypto =
+    exch === 'CRYPTO' ||
+    exch === 'BINANCE' ||
+    exch === 'DERIBIT' ||
+    (alert.segment || '').toUpperCase() === 'CRYPTO' ||
+    String(alert.symbol || '').toUpperCase().endsWith('USDT') ||
+    String(alert.symbol || '').toUpperCase().endsWith('USDC') ||
+    String(alert.symbol || '').toUpperCase().startsWith('CRYPTO:')
+
+  if (isCrypto && (!etaLabel || etaLabel.includes('15:15') || etaLabel.includes('Today'))) {
+    etaLabel = '24h'
+    etaFull = '24h Rolling Window'
+  } else if (!etaLabel) {
+    if (key === 'MULTIBAGGER') {
+      etaLabel = '6–24m'
+      etaFull = '6–24 Months'
+    } else if (key === 'LONG_TERM' || key === 'POSITIONAL') {
+      etaLabel = '1–6m'
+      etaFull = '1–6 Months'
+    } else if (key === 'SWING_MID') {
+      if (alert.expiry_date) {
+        etaLabel = alert.dte ? `${alert.dte}d` : '1–4w'
+        etaFull = alert.dte ? `${alert.dte}d (${alert.expiry_type || 'Monthly'} Exp)` : '1–4 Weeks'
+      } else {
+        etaLabel = '1–4w'
+        etaFull = '1–4 Weeks'
+      }
+    } else if (key === 'SWING_SHORT') {
+      if (alert.expiry_date) {
+        etaLabel = alert.dte ? `${alert.dte}d` : '2–5d'
+        etaFull = alert.dte ? `${alert.dte}d (${alert.expiry_type || 'Weekly'} Exp)` : '2–5 Sessions'
+      } else {
+        etaLabel = '2–5d'
+        etaFull = '2–5 Sessions'
+      }
+    } else {
+      // INTRADAY
+      etaLabel = isCrypto ? '24h' : (exch === 'MCX' ? '23:15' : '15:15')
+      etaFull = isCrypto ? '24h Rolling Window' : (exch === 'MCX' ? 'Today by 23:15 IST' : 'Today by 15:15 IST')
+    }
+  } else {
+    etaFull = etaLabel
+    if (isCrypto && (etaLabel.includes('15:15') || etaLabel.includes('Today'))) {
+      etaLabel = '24h'
+      etaFull = '24h Rolling Window'
+    } else if (etaLabel.includes('Today')) {
+      etaLabel = exch === 'MCX' ? '23:15' : '15:15'
+    } else if (etaLabel.includes('2–5 Sessions') || etaLabel.includes('2-5')) {
+      etaLabel = '2–5d'
+    } else if (etaLabel.includes('1–4 Weeks') || etaLabel.includes('1-4')) {
+      etaLabel = '1–4w'
+    } else if (etaLabel.includes('1–6 Months') || etaLabel.includes('1-6')) {
+      etaLabel = '1–6m'
+    } else if (etaLabel.includes('6–24 Months') || etaLabel.includes('6-24')) {
+      etaLabel = '6–24m'
+    } else if (etaLabel.includes('24h') || etaLabel.includes('Rolling')) {
+      etaLabel = '24h'
+      etaFull = '24h Rolling Window'
+    }
+  }
+
+  // Token styles & metadata
+  switch (key) {
+    case 'MULTIBAGGER':
+      return {
+        key: 'MULTIBAGGER',
+        label: 'MULTIBAGGER',
+        shortLabel: 'MULTI',
+        icon: '🚀',
+        etaLabel,
+        etaFull: etaFull || '6–24 Months',
+        compactBadge: `🚀 MULTI • ${etaLabel}`,
+        badgeClasses: 'bg-fuchsia-500/20 text-fuchsia-300 border-fuchsia-500/40 ring-1 ring-fuchsia-500/20 shadow-sm shadow-fuchsia-950/40',
+        etaClasses: 'bg-fuchsia-500/10 text-fuchsia-300 border-fuchsia-500/30',
+        tooltip: 'Multibagger Alpha: Fundamental compounding, CANSLIM acceleration, or Stage 2 breakout. Target ETA: 6–24 Months.',
+      }
+    case 'LONG_TERM':
+    case 'POSITIONAL':
+      return {
+        key: 'LONG_TERM',
+        label: 'LONG POSITIONAL',
+        shortLabel: 'LONG',
+        icon: '🏛️',
+        etaLabel,
+        etaFull: etaFull || '1–6 Months',
+        compactBadge: `🏛️ LONG • ${etaLabel}`,
+        badgeClasses: 'bg-indigo-500/20 text-indigo-300 border-indigo-500/40',
+        etaClasses: 'bg-indigo-500/10 text-indigo-300 border-indigo-500/30',
+        tooltip: 'Long-Term Positional: Multi-quarter structural compounding. Target ETA: 1–6 Months.',
+      }
+    case 'SWING_MID':
+      return {
+        key: 'SWING_MID',
+        label: 'MID SWING',
+        shortLabel: 'MID',
+        icon: '📈',
+        etaLabel,
+        etaFull: etaFull || '1–4 Weeks',
+        compactBadge: `📈 MID • ${etaLabel}`,
+        badgeClasses: 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30',
+        etaClasses: 'bg-emerald-500/10 text-emerald-300 border-emerald-500/20',
+        tooltip: 'Mid-Term Swing: Structural trend continuation & sector rotation. Target ETA: 1–4 Weeks.',
+      }
+    case 'SWING_SHORT':
+      return {
+        key: 'SWING_SHORT',
+        label: 'SHORT SWING',
+        shortLabel: 'SHORT',
+        icon: '⚡',
+        etaLabel,
+        etaFull: etaFull || '2–5 Sessions',
+        compactBadge: `⚡ SHORT • ${etaLabel}`,
+        badgeClasses: 'bg-amber-500/15 text-amber-300 border-amber-500/30',
+        etaClasses: 'bg-amber-500/10 text-amber-300 border-amber-500/20',
+        tooltip: 'Short-Term Swing: Volatility compression & momentum breakout. Target ETA: 2–5 Sessions.',
+      }
+    default:
+      return {
+        key: 'INTRADAY',
+        label: 'INTRADAY',
+        shortLabel: 'INTRADAY',
+        icon: '⏱️',
+        etaLabel,
+        etaFull: etaFull || (exch === 'MCX' ? 'Today by 23:15 IST' : 'Today by 15:15 IST'),
+        compactBadge: `⏱️ INTRADAY • ${etaLabel}`,
+        badgeClasses: 'bg-sky-500/15 text-sky-300 border-sky-500/30',
+        etaClasses: 'bg-sky-500/10 text-sky-300 border-sky-500/20',
+        tooltip: `Intraday Setup: Active for current session only. Hard square-off by ${exch === 'MCX' ? '23:15' : '15:15'} IST.`,
+      }
+  }
+}
+
+/**
+ * Institutional Single Source of Truth (SSOT) Lifecycle Resolver for AutoAlerts.
+ * Unifies level calculation, price resolution, P&L, stage mapping, and UI badge pills.
+ * Enforces historical immutability: closed/terminal alerts read recorded backend exit metrics
+ * and NEVER oscillate or recalculate against live streaming market quotes.
+ */
+export function resolveAlertLifecycle(alert, { liveSpot = null, liveContract = null } = {}) {
+  if (!alert) return null
+
+  const isTerminal = !isAlertActive(alert)
+  const isCrypto = (alert.exchange || '').toUpperCase() === 'CRYPTO' || (alert.exchange || '').toUpperCase() === 'BINANCE' || (alert.segment || '').toUpperCase() === 'CRYPTO'
+  const horizonInfo = resolveHorizonAndETA(alert)
+
+  const plan = alert.actionable_plan || {}
+  const tradePlan = plan.trade_plan || {}
+  const optPlan = plan.option_plan || null
+
+  const rawContract = alert.contract_symbol || optPlan?.contract_symbol || plan.option_contract || ''
+  const cleanContract = rawContract.replace(/^(NSE|BSE|MCX|NFO|CDS|CRYPTO|BINANCE):/, '').trim().toUpperCase()
+  const cleanSym = (alert.symbol || '').replace(/^(NSE|BSE|MCX|NFO|CDS|CRYPTO|BINANCE):/, '').trim().toUpperCase()
+
+  const optType = alert.option_type || optPlan?.option_type || (rawContract?.endsWith('PE') ? 'PE' : rawContract?.endsWith('CE') ? 'CE' : null)
+  const rawStrike = alert.strike || optPlan?.strike || alert.metrics?.strike
+  const strikeNum = rawStrike ? Number(String(rawStrike).replace(/[^0-9.-]/g, '')) : null
+  const isFuture = Boolean(rawContract?.toUpperCase().includes('FUT') || alert.symbol?.toUpperCase().includes('FUT') || alert.derivative_type === 'FUT')
+
+  const isPureOption = alert.alert_type === 'OPTIONS_MOMENTUM' || alert.alert_type === 'OPTION_WRITE' || (alert.alert_type === 'GAMMA_BLAST' && optType) || (rawContract && (rawContract.endsWith('CE') || rawContract.endsWith('PE')) && alert.exchange === 'NFO')
+  const isSpotSetup = !isFuture && !isPureOption && (alert.alert_type === 'ASYMMETRIC_OPPORTUNITY' || alert.alert_type === 'SQUEEZE_BREAKOUT' || alert.alert_type === 'SQUEEZE_BREAKDOWN' || alert.alert_type === 'PATTERN_COILING' || alert.alert_type === 'MOMENTUM_ACCELERATION' || alert.alert_type === 'POCKET_PIVOT' || alert.alert_type === 'PRECURSOR_RADAR' || alert.alert_type === 'SMC_SWEEP' || alert.alert_type === 'CIRCUIT_WARNING' || alert.alert_type === 'COMMODITY_MOMENTUM' || alert.alert_type === 'TURTLE_SOUP_SHORT' || alert.alert_type === 'IRON_CONDOR_PINNING' || alert.alert_type === 'CRYPTO_SQUEEZE' || alert.alert_type === 'CRYPTO_MOMENTUM')
+  const isDerivative = !isSpotSetup && Boolean(isFuture || isPureOption || (alert.exchange === 'NFO' && (optType || strikeNum || rawContract)))
+
+  const isBull = alert.direction === 'BULLISH'
+  const isBear = alert.direction === 'BEARISH'
+  const isNeutral = alert.direction === 'NEUTRAL' || alert.alert_type === 'IRON_CONDOR_PINNING'
+
+  const act = String(tradePlan.action || plan.action || '').toUpperCase()
+  const isOptionSell = isDerivative && (
+    act === 'SELL' ||
+    act === 'WRITE' ||
+    act === 'SHORT' ||
+    alert.alert_type === 'OPTION_WRITE'
+  )
+
+  // 1. Resolve Execution Levels
+  const levels = computeExecutionLevels(
+    alert,
+    isDerivative,
+    liveSpot?.ltp,
+    liveContract?.ltp
+  )
+  const entryNum = levels.entry
+  const slNum = levels.sl
+  const t1Num = levels.t1
+  const t2Num = levels.t2
+  const t3Num = levels.t3
+
+  // 2. SSOT Price Resolution
+  // CRITICAL INVARIANT: For terminal/archived trades, NEVER use live streaming ticks!
+  // Read recorded exit price: alert.ltp (which backend sets to CMP on exit)
+  let currentPrice = null
+  let spotNum = null
+  let premiumNum = null
+
+  if (isTerminal) {
+    if (isDerivative) {
+      const raw = alert.ltp != null ? alert.ltp : (alert.option_premium != null ? alert.option_premium : alert.trigger_level)
+      currentPrice = raw != null ? Number(String(raw).replace(/[^0-9.-]/g, '')) : null
+      premiumNum = currentPrice
+      const rawS = alert.underlying_spot != null ? alert.underlying_spot : alert.metrics?.spot
+      spotNum = rawS != null ? Number(String(rawS).replace(/[^0-9.-]/g, '')) : null
+    } else {
+      const raw = alert.ltp != null ? alert.ltp : (alert.underlying_spot != null ? alert.underlying_spot : alert.trigger_level)
+      currentPrice = raw != null ? Number(String(raw).replace(/[^0-9.-]/g, '')) : null
+      spotNum = currentPrice
+    }
+  } else {
+    // In-flight active trade: live quote takes priority, fallback to alert snapshot
+    const rawSpot = liveSpot?.ltp ?? alert.underlying_spot ?? alert.metrics?.spot
+    spotNum = rawSpot != null ? Number(String(rawSpot).replace(/[^0-9.-]/g, '')) : null
+
+    if (isDerivative) {
+      const rawOpt = liveContract?.ltp ?? alert.ltp ?? alert.option_premium ?? alert.trigger_level
+      premiumNum = rawOpt != null ? Number(String(rawOpt).replace(/[^0-9.-]/g, '')) : null
+      currentPrice = premiumNum
+    } else {
+      const rawEq = liveSpot?.ltp ?? alert.ltp ?? alert.underlying_spot ?? alert.trigger_level
+      currentPrice = rawEq != null ? Number(String(rawEq).replace(/[^0-9.-]/g, '')) : null
+    }
+  }
+
+  // 3. Return / P&L Resolution (SSOT)
+  let liveReturn = null
+  if (isTerminal && alert.pnl_pct !== undefined && alert.pnl_pct !== null) {
+    const pctVal = Number(alert.pnl_pct)
+    const pct = pctVal.toFixed(1)
+    const diff = (entryNum && !isNaN(entryNum))
+      ? ((isOptionSell ? -1 : 1) * (entryNum * (pctVal / 100)))
+      : (currentPrice && entryNum ? currentPrice - entryNum : 0)
+    liveReturn = {
+      diff,
+      pct,
+      isProfitable: pctVal >= 0,
+      isRealized: true,
+      rMultiple: alert.r_multiple ?? null,
+    }
+  } else if (currentPrice && entryNum && entryNum > 0) {
+    let diff = 0
+    let isProf = false
+    if (isDerivative) {
+      diff = isOptionSell ? entryNum - currentPrice : currentPrice - entryNum
+      isProf = diff >= 0
+    } else if (isNeutral) {
+      const spe = Number(alert.metrics?.short_pe || slNum || entryNum * 0.985)
+      const sce = Number(alert.metrics?.short_ce || t1Num || entryNum * 1.015)
+      isProf = currentPrice >= spe && currentPrice <= sce
+      const center = (spe + sce) / 2
+      diff = isProf ? Math.max(0, (entryNum * 0.015) - Math.abs(currentPrice - center) * 0.03) : -Math.min(Math.abs(currentPrice - spe), Math.abs(currentPrice - sce))
+    } else {
+      diff = isBull ? currentPrice - entryNum : entryNum - currentPrice
+      isProf = diff >= 0
+    }
+    const pct = ((diff / entryNum) * 100).toFixed(1)
+    liveReturn = {
+      diff,
+      pct,
+      isProfitable: isProf,
+      isRealized: isTerminal,
+      rMultiple: alert.r_multiple ?? null,
+    }
+  }
+
+  // 4. Stage & Milestones Resolution (SSOT)
+  let isTimeStop = false
+  let isSLHit = false
+  let isExpired = false
+  let isInvalidated = false
+  let isT3Hit = false
+  let isT2Hit = false
+  let isT1Hit = false
+  let isRunnerExit = false
+  let isTrail = false
+  let isEarly = false
+  let isIgnited = false
+  let resolvedStage = String(alert.stage || '').toUpperCase()
+
+  const rawStage = String(alert.stage || '').toUpperCase()
+  const targetStatus = String(alert.target_status || alert.targetStatus || '').toUpperCase()
+  const reason = String(alert.invalidation_reason || alert.archive_reason || alert.summary || '').toUpperCase()
+
+  if (isTerminal) {
+    // IMMUTABLE HISTORICAL RECORD: Read stage strictly from backend SSOT
+    if (rawStage === 'TIME_STOP_EXIT' || targetStatus === 'TIME_STOP_EXIT' || reason.includes('TIME-STOP') || reason.includes('TIME STOP')) {
+      resolvedStage = 'TIME_STOP_EXIT'
+      isTimeStop = true
+    } else if (rawStage === 'SL_HIT' || targetStatus === 'SL_HIT' || reason.includes('STOP_LOSS') || reason.includes('SL HIT') || reason.includes('SL BREACH')) {
+      resolvedStage = 'SL_HIT'
+      isSLHit = true
+    } else if (rawStage === 'EXPIRED' || alert.is_expired || alert.isExpired) {
+      resolvedStage = 'EXPIRED'
+      isExpired = true
+    } else if (rawStage === 'TARGET_ACHIEVED' || rawStage === 'COMPLETED' || targetStatus === 'TARGET_ACHIEVED') {
+      resolvedStage = 'TARGET_ACHIEVED'
+      isT3Hit = true
+      isT2Hit = true
+      isT1Hit = true
+    } else if (rawStage === 'RUNNER_EXIT' || targetStatus === 'RUNNER_CLOSED') {
+      resolvedStage = 'RUNNER_EXIT'
+      isRunnerExit = true
+    } else if (rawStage === 'T2_ACHIEVED' || targetStatus === 'T2_ACHIEVED') {
+      resolvedStage = 'T2_ACHIEVED'
+      isT2Hit = true
+      isT1Hit = true
+    } else if (rawStage === 'T1_ACHIEVED' || targetStatus === 'T1_ACHIEVED') {
+      resolvedStage = 'T1_ACHIEVED'
+      isT1Hit = true
+    } else if (alert.is_invalidated || alert.isInvalidated || rawStage === 'INVALIDATED') {
+      resolvedStage = 'INVALIDATED'
+      isInvalidated = true
+    } else {
+      resolvedStage = rawStage || 'ARCHIVED'
+      isInvalidated = true
+    }
+
+    // Historical milestone checks for dots
+    if (alert.achieved_milestones && Array.isArray(alert.achieved_milestones)) {
+      if (alert.achieved_milestones.includes('T1_ACHIEVED')) isT1Hit = true
+      if (alert.achieved_milestones.includes('T2_ACHIEVED')) isT2Hit = true
+      if (alert.achieved_milestones.includes('TARGET_ACHIEVED') || alert.achieved_milestones.includes('T3_ACHIEVED')) isT3Hit = true
+    }
+  } else {
+    // ACTIVE IN-FLIGHT TRADE: Dynamic evaluation
+    const isExplicitSL = Boolean(
+      rawStage === 'SL_HIT' ||
+      targetStatus === 'SL_HIT' ||
+      reason.includes('STOP_LOSS') ||
+      reason.includes('SL HIT') ||
+      reason.includes('SL BREACH')
+    )
+
+    const isPriceBreachedSL = Boolean(
+      slNum && currentPrice && (
+        isDerivative
+          ? (isOptionSell ? currentPrice >= slNum : currentPrice <= slNum)
+          : isNeutral
+          ? (currentPrice < slNum || (alert.metrics?.long_ce && currentPrice > alert.metrics.long_ce))
+          : (isBull ? currentPrice <= slNum : currentPrice >= slNum)
+      )
+    )
+
+    isSLHit = isExplicitSL || isPriceBreachedSL
+
+    isT3Hit = Boolean(
+      rawStage === 'TARGET_ACHIEVED' || rawStage === 'COMPLETED' || targetStatus === 'TARGET_ACHIEVED' ||
+      (t3Num && currentPrice && !isSLHit && (
+        isDerivative ? (isOptionSell ? currentPrice <= t3Num : currentPrice >= t3Num) : (isBull ? currentPrice >= t3Num : currentPrice <= t3Num)
+      ))
+    )
+
+    isT2Hit = Boolean(
+      isT3Hit || rawStage === 'T2_ACHIEVED' || targetStatus === 'T2_ACHIEVED' ||
+      (t2Num && currentPrice && !isSLHit && (
+        isDerivative ? (isOptionSell ? currentPrice <= t2Num : currentPrice >= t2Num) : (isBull ? currentPrice >= t2Num : currentPrice <= t2Num)
+      ))
+    )
+
+    isT1Hit = Boolean(
+      isT2Hit || rawStage === 'T1_ACHIEVED' || targetStatus === 'T1_ACHIEVED' ||
+      (t1Num && currentPrice && !isSLHit && (
+        isDerivative ? (isOptionSell ? currentPrice <= t1Num : currentPrice >= t1Num) : (isBull ? currentPrice >= t1Num : currentPrice <= t1Num)
+      ))
+    )
+
+    isTrail = rawStage === 'TRAILING_UPDATE'
+    isEarly = rawStage === 'EARLY_WARNING'
+    isIgnited = rawStage === 'IGNITED'
+    resolvedStage = isSLHit ? 'SL_HIT' : isT3Hit ? 'TARGET_ACHIEVED' : isT2Hit ? 'T2_ACHIEVED' : isT1Hit ? 'T1_ACHIEVED' : rawStage
+  }
+
+  // 5. Stage Pill & Trajectory Status
+  let stagePill = { label: '🟢 ACTIVE', cls: 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20', icon: '🟢' }
+  let trajectoryStatus = { badge: '🟢 ACTIVE', text: 'Trade in flight — active execution', theme: 'emerald' }
+
+  if (isTimeStop) {
+    stagePill = { label: '⏱️ TIME STOP', cls: 'bg-amber-500/20 text-amber-300 border-amber-500/40', icon: '⏱️' }
+    trajectoryStatus = { badge: '⏱️ TIME STOP', text: alert.invalidation_reason || 'Velocity time stop reached — closed at CMP', theme: 'amber' }
+  } else if (isSLHit) {
+    stagePill = { label: '🛑 SL HIT', cls: 'bg-rose-500/25 text-rose-300 border-rose-500/60 ring-1 ring-rose-500/40' + (!isTerminal ? ' animate-pulse' : ''), icon: '🛑' }
+    trajectoryStatus = { badge: '🛑 SL BREACHED', text: alert.invalidation_reason || 'Stop loss triggered — trade thesis invalidated', theme: 'rose' }
+  } else if (isExpired) {
+    stagePill = { label: '⏱️ EXPIRED', cls: 'bg-zinc-700/40 text-zinc-300 border-zinc-600/40', icon: '⏱️' }
+    trajectoryStatus = { badge: '⏱️ EXPIRED', text: alert.invalidation_reason || 'Session time cutoff reached — trade closed', theme: 'slate' }
+  } else if (isInvalidated) {
+    stagePill = { label: '⚠️ INVALIDATED', cls: 'bg-amber-500/20 text-amber-300 border-amber-500/40', icon: '⚠️' }
+    trajectoryStatus = { badge: '⚠️ INVALIDATED', text: alert.invalidation_reason || 'Trade setup invalidated — structure or momentum collapsed', theme: 'amber' }
+  } else if (isT3Hit) {
+    stagePill = { label: '🚀 T3 HIT', cls: 'bg-purple-500/25 text-purple-200 border-purple-400/60 ring-1 ring-purple-500/40' + (!isTerminal ? ' animate-pulse' : ''), icon: '🚀' }
+    trajectoryStatus = { badge: '🚀 T3 REACHED', text: 'Target 3 hit — runners locked (+6R+ extension)', theme: 'purple' }
+  } else if (isT2Hit) {
+    stagePill = { label: '🏁 T2 HIT', cls: 'bg-cyan-500/25 text-cyan-200 border-cyan-400/60 ring-1 ring-cyan-500/40' + (!isTerminal ? ' animate-pulse' : ''), icon: '🏁' }
+    trajectoryStatus = { badge: '🏁 T2 ACHIEVED', text: 'Target 2 hit — 75% profit secured, trailing at T1', theme: 'cyan' }
+  } else if (isT1Hit) {
+    stagePill = { label: '🎯 T1 HIT', cls: 'bg-emerald-500/25 text-emerald-200 border-emerald-400/60 ring-1 ring-emerald-500/40' + (!isTerminal ? ' animate-pulse' : ''), icon: '🎯' }
+    trajectoryStatus = { badge: '🎯 T1 ACHIEVED', text: 'Target 1 hit — 50% scale out complete, SL ratcheted to breakeven', theme: 'emerald' }
+  } else if (isRunnerExit) {
+    stagePill = { label: '🏁 RUNNER EXIT', cls: 'bg-cyan-500/25 text-cyan-200 border-cyan-400/60', icon: '🏁' }
+    trajectoryStatus = { badge: '🏁 RUNNER CLOSED', text: alert.invalidation_reason || 'Runner trailing exit hit — remaining position closed', theme: 'cyan' }
+  } else if (isTrail) {
+    stagePill = { label: '📈 TRAIL', cls: 'bg-blue-500/20 text-blue-300 border-blue-500/40', icon: '📈' }
+    trajectoryStatus = { badge: '📈 TRAILING ACTIVE', text: alert.trailing_rationale || 'Trailing stop active to protect gains', theme: 'blue' }
+  } else if (isEarly) {
+    stagePill = { label: '⏳ EARLY', cls: 'bg-amber-500/15 text-amber-400 border-amber-500/30', icon: '⏳' }
+    trajectoryStatus = { badge: '⏳ EARLY WARNING', text: 'Setup forming — awaiting trigger breakout', theme: 'amber' }
+  } else if (isIgnited) {
+    stagePill = { label: '🔥 IGNITED', cls: 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30 animate-pulse', icon: '🔥' }
+    trajectoryStatus = { badge: '🔥 IGNITED', text: 'Breakout confirmed — trade active in flight', theme: 'emerald' }
+  } else if (liveReturn && currentPrice && entryNum) {
+    if (liveReturn.isProfitable) {
+      if (t1Num) {
+        const t1Dist = Math.abs(t1Num - entryNum)
+        const currDist = Math.abs(currentPrice - entryNum)
+        const pctToT1 = Math.min(100, Math.max(0, Math.round((currDist / (t1Dist || 1)) * 100)))
+        const ptsAway = Math.abs(t1Num - currentPrice)
+        trajectoryStatus = {
+          badge: `🟢 RIGHT DIRECTION (+${liveReturn.pct}%)`,
+          text: `${pctToT1}% progress to T1 (${ptsAway > 0 ? `₹${ptsAway.toFixed(1)} away` : 'at target'})`,
+          theme: 'emerald',
+        }
+      } else {
+        trajectoryStatus = {
+          badge: `🟢 PROFITABLE (+${liveReturn.pct}%)`,
+          text: `Moving favorably from entry ₹${entryNum.toFixed(1)}`,
+          theme: 'emerald',
+        }
+      }
+    } else {
+      if (slNum) {
+        const slDist = Math.abs(entryNum - slNum)
+        const adverseDist = Math.abs(entryNum - currentPrice)
+        const pctToSL = Math.min(100, Math.max(0, Math.round((adverseDist / (slDist || 1)) * 100)))
+        const ptsBuffer = Math.abs(currentPrice - slNum)
+        trajectoryStatus = {
+          badge: `⚠️ PULLBACK (${liveReturn.pct}%)`,
+          text: `${pctToSL}% toward SL — ₹${ptsBuffer.toFixed(1)} buffer remaining`,
+          theme: 'amber',
+        }
+      } else {
+        trajectoryStatus = {
+          badge: `⚠️ AGAINST ENTRY (${liveReturn.pct}%)`,
+          text: 'Testing below entry level',
+          theme: 'amber',
+        }
+      }
+    }
+  }
+
+  return {
+    isTerminal,
+    isDerivative,
+    isBull,
+    isBear,
+    isNeutral,
+    isOptionSell,
+    cleanSym,
+    cleanContract,
+    rawContract,
+    optType,
+    strikeNum,
+    isFuture,
+    isCrypto,
+    currSym: isCrypto ? '$' : '₹',
+    levels,
+    entryNum,
+    slNum,
+    t1Num,
+    t2Num,
+    t3Num,
+    currentPrice,
+    spotNum,
+    premiumNum,
+    liveReturn,
+    stage: resolvedStage,
+    stagePill,
+    trajectoryStatus,
+    isTimeStop,
+    isSLHit,
+    isExpired,
+    isInvalidated,
+    isT3Hit,
+    isT2Hit,
+    isT1Hit,
+    isRunnerExit,
+    isTrail,
+    isEarly,
+    isIgnited,
+    horizonInfo,
   }
 }

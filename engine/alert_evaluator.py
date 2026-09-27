@@ -189,8 +189,16 @@ def evaluate_alert_invalidation(
                     # or if Target 1 was already achieved
                     has_hit_target = bool(
                         "T1_ACHIEVED" in (getattr(alert, "achieved_milestones", []) or [])
-                        or getattr(alert, "target_status", "") in ("T1_ACHIEVED", "T2_ACHIEVED", "FINAL_TARGET", "TARGET_ACHIEVED")
-                        or getattr(alert, "stage", "") in ("TARGET_1", "T1_ACHIEVED", "TARGET_2", "FINAL_TARGET", "TARGET_ACHIEVED")
+                        or getattr(alert, "target_status", "")
+                        in ("T1_ACHIEVED", "T2_ACHIEVED", "FINAL_TARGET", "TARGET_ACHIEVED")
+                        or getattr(alert, "stage", "")
+                        in (
+                            "TARGET_1",
+                            "T1_ACHIEVED",
+                            "TARGET_2",
+                            "FINAL_TARGET",
+                            "TARGET_ACHIEVED",
+                        )
                     )
                     init_sl_val = getattr(alert, "initial_stop_loss", None)
                     is_ratcheted = (
@@ -199,8 +207,12 @@ def evaluate_alert_invalidation(
                         or has_hit_target
                     )
                     if is_ratcheted:
-                        init_sl_str = f" · original initial SL was ₹{init_sl_val:,.1f}" if init_sl_val else ""
-                        tgt_note = "Target 1 profit secured." if has_hit_target else "Profit secured."
+                        init_sl_str = (
+                            f" · original initial SL was ₹{init_sl_val:,.1f}" if init_sl_val else ""
+                        )
+                        tgt_note = (
+                            "Target 1 profit secured." if has_hit_target else "Profit secured."
+                        )
                         return (
                             f"Trailing runner stop triggered at ₹{current_ltp:.1f} "
                             f"(breached ratcheted stop ₹{alert.stop_loss:.1f}{init_sl_str}). {opt_desc} {tgt_note}"
@@ -237,8 +249,10 @@ def evaluate_alert_invalidation(
             )
             has_hit_target = bool(
                 "T1_ACHIEVED" in (getattr(alert, "achieved_milestones", []) or [])
-                or getattr(alert, "target_status", "") in ("T1_ACHIEVED", "T2_ACHIEVED", "FINAL_TARGET", "TARGET_ACHIEVED")
-                or getattr(alert, "stage", "") in ("TARGET_1", "T1_ACHIEVED", "TARGET_2", "FINAL_TARGET", "TARGET_ACHIEVED")
+                or getattr(alert, "target_status", "")
+                in ("T1_ACHIEVED", "T2_ACHIEVED", "FINAL_TARGET", "TARGET_ACHIEVED")
+                or getattr(alert, "stage", "")
+                in ("TARGET_1", "T1_ACHIEVED", "TARGET_2", "FINAL_TARGET", "TARGET_ACHIEVED")
             )
             init_sl_val = getattr(alert, "initial_stop_loss", None)
             if alert.direction == "BEARISH":
@@ -251,8 +265,14 @@ def evaluate_alert_invalidation(
                 )
                 if current_ltp > (alert.stop_loss + vol_noise_margin):
                     if is_ratcheted:
-                        init_sl_str = f" · original initial SL was {curr_sym}{init_sl_val:,.1f}" if init_sl_val else ""
-                        tgt_note = "Target 1 profit secured." if has_hit_target else "Profit secured."
+                        init_sl_str = (
+                            f" · original initial SL was {curr_sym}{init_sl_val:,.1f}"
+                            if init_sl_val
+                            else ""
+                        )
+                        tgt_note = (
+                            "Target 1 profit secured." if has_hit_target else "Profit secured."
+                        )
                         return (
                             f"Trailing runner stop triggered at {curr_sym}{current_ltp:,.1f} "
                             f"(breached ratcheted stop {curr_sym}{alert.stop_loss:,.1f}{init_sl_str}). {tgt_note}"
@@ -281,8 +301,14 @@ def evaluate_alert_invalidation(
                 )
                 if current_ltp < (alert.stop_loss - vol_noise_margin):
                     if is_ratcheted:
-                        init_sl_str = f" · original initial SL was {curr_sym}{init_sl_val:,.1f}" if init_sl_val else ""
-                        tgt_note = "Target 1 profit secured." if has_hit_target else "Profit secured."
+                        init_sl_str = (
+                            f" · original initial SL was {curr_sym}{init_sl_val:,.1f}"
+                            if init_sl_val
+                            else ""
+                        )
+                        tgt_note = (
+                            "Target 1 profit secured." if has_hit_target else "Profit secured."
+                        )
                         return (
                             f"Trailing runner stop triggered at {curr_sym}{current_ltp:,.1f} "
                             f"(breached ratcheted stop {curr_sym}{alert.stop_loss:,.1f}{init_sl_str}). {tgt_note}"

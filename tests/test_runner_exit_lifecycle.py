@@ -8,14 +8,12 @@ and initial SL vs ratcheted trailing SL clarity.
 from __future__ import annotations
 
 import json
-from unittest.mock import MagicMock, patch
-import pytest
 
 from engine.alert_model import AutoAlert
 from engine.alert_expiry import is_alert_option_premium_level
 from engine.alert_evaluator import evaluate_alert_invalidation
 from engine.auto_alert_engine import AutoAlertEngine
-from bot.alert_templates import MilestoneAlertData, render_milestone_alert, render_auto_alert
+from bot.alert_templates import MilestoneAlertData, render_auto_alert
 
 
 def test_is_alert_option_premium_level_with_dict():

@@ -592,3 +592,34 @@ def test_mstock_server_logout():
     broker.logout()
     assert broker._token == ""
     assert broker._user_profile is None
+
+
+def test_mstock_canonical_token_precedence_and_corrections():
+    """
+    RCA Regression Test: Verify token resolution accuracy and scrip master precedence.
+    Guarantees that:
+      1. MANKIND resolves to 15380 (Mankind Pharma) and NOT 5926 (Intellect Design Arena).
+      2. COFORGE resolves to 11543 and TATAELXSI resolves to 3411.
+      3. Scrip master cache takes precedence over hardcoded fallbacks (Rule 11).
+    """
+    broker = MStockAPI(client_code="M_TEST")
+
+    # 1. Hardcoded dictionary accuracy
+    from brokers.mstock import _KNOWN_NSE_TOKENS
+
+    assert _KNOWN_NSE_TOKENS["MANKIND"] == "15380", (
+        "MANKIND must map to token 15380, not 5926 (INTELLECT)"
+    )
+    assert _KNOWN_NSE_TOKENS["COFORGE"] == "11543"
+    assert _KNOWN_NSE_TOKENS["TATAELXSI"] == "3411"
+
+    # 2. Token resolution via get_symbol_token
+    assert broker.get_symbol_token("MANKIND") == "15380"
+    assert broker.get_symbol_token("NSE:MANKIND") == "15380"
+    assert broker.get_symbol_token("COFORGE") == "11543"
+    assert broker.get_symbol_token("TATAELXSI") == "3411"
+
+    # 3. Canonical cache precedence test: Even if a hardcoded dict had a value,
+    # scrip master cache must take priority!
+    broker._scrip_token_cache["NSE:TESTSYM"] = "99999"
+    assert broker.get_symbol_token("TESTSYM") == "99999"

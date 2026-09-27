@@ -8,7 +8,6 @@ Verifies contract stability, schema serialization, and event bus dispatch.
 from __future__ import annotations
 
 from unittest.mock import MagicMock
-import pytest
 
 from engine.alert_model import AutoAlert
 from web.domain_events import AlertDomainEvent, create_alert_domain_event

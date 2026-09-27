@@ -1,6 +1,6 @@
 import React, { memo, useMemo } from 'react'
 import { useLiveSpot } from './LiveSpotsContext'
-import { AUTO_TYPE_STYLE, INDEX_LOT_SIZES, convictionEmoji, getStaleness, formatExpiryDetails } from './alertHelpers'
+import { AUTO_TYPE_STYLE, INDEX_LOT_SIZES, convictionEmoji, getStaleness, formatExpiryDetails, resolveAlertLifecycle } from './alertHelpers'
 import { RRMiniBar, MilestoneDots } from './AlertWidgets'
 
 export const AlertCompactRow = memo(function AlertCompactRow({ alert, onSendTelegram, onTrade, onExpand, isExpanded, onDismiss }) {
@@ -12,9 +12,6 @@ export const AlertCompactRow = memo(function AlertCompactRow({ alert, onSendTele
   const rawContract = alert.contract_symbol || optPlan?.contract_symbol || plan.option_contract || ''
   const cleanContract = rawContract.replace(/^(NSE|BSE|MCX|NFO|CDS|CRYPTO|BINANCE):/, '').trim().toUpperCase()
 
-  const isCrypto = (alert.exchange || '').toUpperCase() === 'CRYPTO' || (alert.exchange || '').toUpperCase() === 'BINANCE' || (alert.segment || '').toUpperCase() === 'CRYPTO'
-  const currSym = isCrypto ? '$' : '₹'
-
   const liveSpotBySym = useLiveSpot(cleanSym)
   const liveSpotByFull = useLiveSpot(alert.symbol !== cleanSym ? alert.symbol : null)
   const liveSpot = liveSpotBySym ?? liveSpotByFull
@@ -24,138 +21,50 @@ export const AlertCompactRow = memo(function AlertCompactRow({ alert, onSendTele
   const liveContract = liveContractByClean ?? liveContractByFull
 
   const style = AUTO_TYPE_STYLE[alert.alert_type] || AUTO_TYPE_STYLE.GAMMA_BLAST
-  const isBull = alert.direction === 'BULLISH'
-  const isBear = alert.direction === 'BEARISH'
-  const isNeutral = alert.direction === 'NEUTRAL' || alert.alert_type === 'IRON_CONDOR_PINNING'
   const isTest = alert.environment === 'TEST' || alert.is_live === false
-  const isEarly = alert.stage === 'EARLY_WARNING'
-  const isIgnited = alert.stage === 'IGNITED'
-  const isExpired = alert.is_expired || alert.stage === 'EXPIRED'
-  const isInvalidated = alert.is_invalidated || alert.stage === 'INVALIDATED'
-  const isT1Achieved = alert.stage === 'T1_ACHIEVED' || alert.target_status === 'T1_ACHIEVED'
-  const isT2Achieved = alert.stage === 'T2_ACHIEVED' || alert.target_status === 'T2_ACHIEVED'
-  const isFinalTargetAchieved = alert.stage === 'TARGET_ACHIEVED' || alert.target_status === 'TARGET_ACHIEVED' || alert.stage === 'COMPLETED'
-  const isTrail = alert.stage === 'TRAILING_UPDATE'
+  const isOffMarket = alert.environment === 'EOD_SCAN' || alert.environment === 'OFF-MARKET' || alert.market_status === 'SESSION_CLOSED'
 
-  const optType = alert.option_type || optPlan?.option_type || (rawContract?.endsWith('PE') ? 'PE' : rawContract?.endsWith('CE') ? 'CE' : null)
-  const rawStrike = alert.strike || optPlan?.strike || alert.metrics?.strike
-  const strikeNum = rawStrike ? Number(String(rawStrike).replace(/[^0-9.-]/g, '')) : null
-  const isFuture = Boolean(rawContract?.toUpperCase().includes('FUT') || alert.symbol?.toUpperCase().includes('FUT') || alert.derivative_type === 'FUT')
-  
-  const isPureOption = alert.alert_type === 'OPTIONS_MOMENTUM' || alert.alert_type === 'OPTION_WRITE' || (alert.alert_type === 'GAMMA_BLAST' && optType) || (rawContract && (rawContract.endsWith('CE') || rawContract.endsWith('PE')) && alert.exchange === 'NFO')
-  const isSpotSetup = alert.alert_type === 'ASYMMETRIC_OPPORTUNITY' || alert.alert_type === 'SQUEEZE_BREAKOUT' || alert.alert_type === 'SQUEEZE_BREAKDOWN' || alert.alert_type === 'PATTERN_COILING' || alert.alert_type === 'MOMENTUM_ACCELERATION' || alert.alert_type === 'POCKET_PIVOT' || alert.alert_type === 'PRECURSOR_RADAR' || alert.alert_type === 'SMC_SWEEP' || alert.alert_type === 'CIRCUIT_WARNING' || alert.alert_type === 'COMMODITY_MOMENTUM' || alert.alert_type === 'TURTLE_SOUP_SHORT' || alert.alert_type === 'IRON_CONDOR_PINNING' || alert.alert_type === 'CRYPTO_SQUEEZE' || alert.alert_type === 'CRYPTO_MOMENTUM'
-  const isDerivative = !isSpotSetup && Boolean(isFuture || isPureOption || (alert.exchange === 'NFO' && (optType || strikeNum || rawContract)))
+  // Canonical Single Source of Truth Lifecycle Evaluation
+  const lifecycle = useMemo(
+    () => resolveAlertLifecycle(alert, { liveSpot, liveContract }),
+    [alert, liveSpot, liveContract]
+  )
+
+  const {
+    isTerminal,
+    isDerivative,
+    isBull,
+    isBear,
+    isNeutral,
+    isOptionSell,
+    optType,
+    strikeNum,
+    isFuture,
+    isCrypto,
+    currSym,
+    levels,
+    entryNum,
+    slNum,
+    t1Num,
+    t2Num,
+    t3Num,
+    currentPrice,
+    spotNum,
+    premiumNum,
+    liveReturn,
+    stagePill,
+    isTimeStop,
+    isSLHit,
+    isExpired,
+    isInvalidated,
+    isT3Hit,
+    isT2Hit,
+    isT1Hit,
+    horizonInfo,
+  } = lifecycle
 
   const lotSize = isDerivative ? (alert.lot_size || alert.metrics?.lot_size || INDEX_LOT_SIZES[cleanSym] || null) : null
-
   const expiryInfo = useMemo(() => formatExpiryDetails(alert), [alert])
-
-  const act = String(tradePlan.action || plan.action || '').toUpperCase()
-  const isOptionSell = isDerivative && (
-    act === 'SELL' ||
-    act === 'WRITE' ||
-    act === 'SHORT' ||
-    alert.alert_type === 'OPTION_WRITE'
-  )
-
-  // Real-time live prices
-  const rawSpot = liveSpot?.ltp ?? alert.underlying_spot ?? alert.metrics?.spot
-  const spotNum = rawSpot ? Number(rawSpot) : null
-
-  const rawOptLtp = liveContract?.ltp ?? alert.option_premium ?? (isDerivative ? alert.ltp : null)
-  const premiumNum = rawOptLtp ? Number(rawOptLtp) : null
-
-  const rawLtp = (!isDerivative ? liveSpot?.ltp : null) ?? alert.ltp
-  const ltpNum = rawLtp ? Number(String(rawLtp).replace(/[^0-9.-]/g, '')) : null
-
-  const slNum = isDerivative
-    ? (optPlan?.sl_premium ? Number(optPlan.sl_premium) : (alert.option_stop_loss ? Number(alert.option_stop_loss) : (alert.stop_loss ? Number(alert.stop_loss) : null)))
-    : (tradePlan.invalidation_stop ? Number(tradePlan.invalidation_stop) : (alert.stop_loss ? Number(alert.stop_loss) : null))
-  const entryNum = isDerivative
-    ? (optPlan?.entry_premium ? Number(optPlan.entry_premium) : (alert.option_premium ? Number(alert.option_premium) : (premiumNum || ltpNum)))
-    : (tradePlan.entry_price ? Number(tradePlan.entry_price) : (alert.trigger_level ? Number(alert.trigger_level) : ltpNum))
-  const t1Num = isDerivative
-    ? (optPlan?.t1_premium ? Number(optPlan.t1_premium) : (alert.option_target_1 ? Number(alert.option_target_1) : (alert.target_level ? Number(alert.target_level) : null)))
-    : (tradePlan.target_1 ? Number(tradePlan.target_1) : (alert.target_level ? Number(alert.target_level) : null))
-  const t2Num = isDerivative
-    ? (optPlan?.t2_premium ? Number(optPlan.t2_premium) : (alert.option_target_2 ? Number(alert.option_target_2) : null))
-    : (tradePlan.target_2 ? Number(tradePlan.target_2) : null)
-  const t3Num = isDerivative
-    ? (optPlan?.t3_premium ? Number(optPlan.t3_premium) : null)
-    : (tradePlan.target_3 ? Number(tradePlan.target_3) : null)
-
-  // Live Return % calculation & direction tracking
-  const currentPrice = isDerivative ? premiumNum : spotNum
-  let liveReturn = null
-  if (currentPrice && entryNum && entryNum > 0) {
-    let diff = 0
-    let isProf = false
-    if (isDerivative) {
-      diff = isOptionSell ? entryNum - currentPrice : currentPrice - entryNum
-      isProf = diff >= 0
-    } else if (isNeutral) {
-      const spe = Number(alert.metrics?.short_pe || slNum || entryNum * 0.985)
-      const sce = Number(alert.metrics?.short_ce || t1Num || entryNum * 1.015)
-      isProf = currentPrice >= spe && currentPrice <= sce
-      const center = (spe + sce) / 2
-      diff = isProf ? Math.max(0, (entryNum * 0.015) - Math.abs(currentPrice - center) * 0.03) : -Math.min(Math.abs(currentPrice - spe), Math.abs(currentPrice - sce))
-    } else {
-      diff = isBull ? currentPrice - entryNum : entryNum - currentPrice
-      isProf = diff >= 0
-    }
-    const pct = ((diff / entryNum) * 100).toFixed(1)
-    liveReturn = { diff, pct, isProfitable: isProf }
-  }
-
-  // Dynamic live stage hit detection (real-time cross evaluation)
-  const isExplicitSL = Boolean(
-    alert.stage === 'SL_HIT' ||
-    alert.target_status === 'SL_HIT' ||
-    alert.invalidation_reason?.toUpperCase().includes('STOP_LOSS') ||
-    alert.invalidation_reason?.toUpperCase().includes('SL HIT') ||
-    alert.invalidation_reason?.toUpperCase().includes('SL BREACH')
-  )
-
-  const isPriceBreachedSL = Boolean(
-    slNum && currentPrice && (
-      isDerivative
-        ? (isOptionSell ? currentPrice >= slNum : currentPrice <= slNum)
-        : isNeutral
-        ? (currentPrice < slNum || (alert.metrics?.long_ce && currentPrice > alert.metrics.long_ce))
-        : (isBull ? currentPrice <= slNum : currentPrice >= slNum)
-    )
-  )
-
-  const isSLHit = Boolean(isExplicitSL || isPriceBreachedSL)
-
-  const isT3Hit = Boolean(
-    isFinalTargetAchieved ||
-    (t3Num && currentPrice && !isSLHit && (
-      isDerivative
-        ? (isOptionSell ? currentPrice <= t3Num : currentPrice >= t3Num)
-        : (isBull ? currentPrice >= t3Num : currentPrice <= t3Num)
-    ))
-  )
-
-  const isT2Hit = Boolean(
-    isT3Hit ||
-    isT2Achieved ||
-    (t2Num && currentPrice && !isSLHit && (
-      isDerivative
-        ? (isOptionSell ? currentPrice <= t2Num : currentPrice >= t2Num)
-        : (isBull ? currentPrice >= t2Num : currentPrice <= t2Num)
-    ))
-  )
-
-  const isT1Hit = Boolean(
-    isT2Hit ||
-    isT1Achieved ||
-    (t1Num && currentPrice && !isSLHit && (
-      isDerivative
-        ? (isOptionSell ? currentPrice <= t1Num : currentPrice >= t1Num)
-        : (isBull ? currentPrice >= t1Num : currentPrice <= t1Num)
-    ))
-  )
 
   const expiryShort = useMemo(() => {
     if (expiryInfo?.fullDisplay) return expiryInfo.fullDisplay
@@ -247,27 +156,6 @@ export const AlertCompactRow = memo(function AlertCompactRow({ alert, onSendTele
   const conviction = Number(alert.confidence || alert.metrics?.scrutiny?.score || 75)
   const reasonShort = (alert.summary || alert.headline || '').slice(0, 40)
 
-  // Stage pill styling with high-contrast glowing alerts
-  const stagePill = isExpired
-    ? { label: '⏱️ EXPIRED', cls: 'bg-zinc-700/40 text-zinc-300 border-zinc-600/40' }
-    : isSLHit
-    ? { label: '🛑 SL HIT', cls: 'bg-rose-500/25 text-rose-300 border-rose-500/60 ring-1 ring-rose-500/40 animate-pulse' }
-    : isInvalidated
-    ? { label: '⚠️ INVALIDATED', cls: 'bg-amber-500/20 text-amber-300 border-amber-500/40' }
-    : isT3Hit
-    ? { label: '🚀 T3 HIT', cls: 'bg-purple-500/25 text-purple-200 border-purple-400/60 ring-1 ring-purple-500/40 animate-pulse' }
-    : isT2Hit
-    ? { label: '🏁 T2 HIT', cls: 'bg-cyan-500/25 text-cyan-200 border-cyan-400/60 ring-1 ring-cyan-500/40 animate-pulse' }
-    : isT1Hit
-    ? { label: '🎯 T1 HIT', cls: 'bg-emerald-500/25 text-emerald-200 border-emerald-400/60 ring-1 ring-emerald-500/40 animate-pulse' }
-    : isTrail
-    ? { label: '📈 TRAIL', cls: 'bg-blue-500/20 text-blue-300 border-blue-500/40' }
-    : isEarly
-    ? { label: '⏳ EARLY', cls: 'bg-amber-500/15 text-amber-400 border-amber-500/30' }
-    : isIgnited
-    ? { label: '🔥 IGNITED', cls: 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30 animate-pulse' }
-    : { label: '🟢 ACTIVE', cls: 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20' }
-
   const fmt = (n, dec = 0) => n != null && !isNaN(n) ? Number(n).toLocaleString(isCrypto ? 'en-US' : 'en-IN', { minimumFractionDigits: dec, maximumFractionDigits: dec }) : '—'
   const fmtP = (n) => n != null && !isNaN(n) ? Number(n).toLocaleString(isCrypto ? 'en-US' : 'en-IN', { minimumFractionDigits: Number(n) < 100 ? 1 : 0, maximumFractionDigits: isCrypto ? 2 : 1 }) : '—'
 
@@ -317,24 +205,21 @@ export const AlertCompactRow = memo(function AlertCompactRow({ alert, onSendTele
 
         <span className="text-border/30 text-[9px] hidden sm:inline">│</span>
 
-        {isTest
-          ? <span className="text-[7px] px-1 py-px rounded font-black bg-purple-500/20 text-purple-300 border border-purple-500/30 whitespace-nowrap">🧪 TEST</span>
-          : <span className="text-[7px] px-1 py-px rounded font-black bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 whitespace-nowrap">🟢 REAL / LIVE</span>
-        }
+        {isTest ? (
+          <span className="text-[7px] px-1 py-px rounded font-black bg-purple-500/20 text-purple-300 border border-purple-500/30 whitespace-nowrap">🧪 TEST</span>
+        ) : isOffMarket ? (
+          <span className="text-[7px] px-1 py-px rounded font-black bg-sky-500/20 text-sky-300 border border-sky-500/30 whitespace-nowrap">🌙 OFF-MARKET / EOD</span>
+        ) : (
+          <span className="text-[7px] px-1 py-px rounded font-black bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 whitespace-nowrap">🟢 REAL / LIVE</span>
+        )}
 
-        {/* ── Time Horizon Badge ── */}
-        {alert.time_horizon && (
-          <span className={`text-[7px] px-1.5 py-px rounded font-black whitespace-nowrap border ${
-            alert.time_horizon === 'INTRADAY' ? 'bg-sky-500/15 text-sky-300 border-sky-500/30' :
-            alert.time_horizon === 'SWING_SHORT' ? 'bg-amber-500/15 text-amber-300 border-amber-500/30' :
-            alert.time_horizon === 'SWING_MID' ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30' :
-            'bg-purple-500/15 text-purple-300 border-purple-500/30'
-          }`}>
-            {alert.time_horizon === 'INTRADAY'
-              ? (alert.exchange === 'MCX' ? '⏱️ INTRADAY (23:15)' : '⏱️ INTRADAY (15:15)')
-              : alert.time_horizon === 'SWING_SHORT' ? '⚡ 2-5D SWING'
-              : alert.time_horizon === 'SWING_MID' ? '📈 1-4W SWING'
-              : '🏛️ POSITIONAL'}
+        {/* ── Time Horizon & ETA Badge ── */}
+        {horizonInfo && (
+          <span
+            title={horizonInfo.tooltip}
+            className={`text-[7px] px-1.5 py-px rounded font-black whitespace-nowrap border cursor-help ${horizonInfo.badgeClasses}`}
+          >
+            {horizonInfo.compactBadge}
           </span>
         )}
 
@@ -433,7 +318,7 @@ export const AlertCompactRow = memo(function AlertCompactRow({ alert, onSendTele
           </span>
         )}
 
-        <MilestoneDots targetStatus={isT3Hit ? 'TARGET_ACHIEVED' : isT2Hit ? 'T2_ACHIEVED' : isT1Hit ? 'T1_ACHIEVED' : alert.target_status} stage={alert.stage} isSLHit={isSLHit} isExpired={isExpired} isInvalidated={isInvalidated} />
+        <MilestoneDots targetStatus={isT3Hit ? 'TARGET_ACHIEVED' : isT2Hit ? 'T2_ACHIEVED' : isT1Hit ? 'T1_ACHIEVED' : alert.target_status} stage={alert.stage} isSLHit={isSLHit} isExpired={isExpired} isInvalidated={isInvalidated} isTimeStop={isTimeStop} />
 
         {/* Live Return Pill (Right direction = Green, Loss = Red) */}
         {liveReturn && (
@@ -477,14 +362,14 @@ export const AlertCompactRow = memo(function AlertCompactRow({ alert, onSendTele
           premiumNum && (
             <span className={`text-[9px] font-mono px-1 py-0.5 rounded transition-all duration-200 whitespace-nowrap ${flashClass || 'bg-panel'}`}>
               Prem <span className="text-gold font-black">{currSym}{fmtP(premiumNum)}</span>
-              {liveContract?.ltp ? <span className="inline-block w-1 h-1 rounded-full bg-emerald-400 animate-pulse ml-0.5 align-middle" /> : null}
+              {liveContract?.ltp && !isTerminal ? <span className="inline-block w-1 h-1 rounded-full bg-emerald-400 animate-pulse ml-0.5 align-middle" /> : null}
             </span>
           )
         ) : (
-          ltpNum && (
+          currentPrice && (
             <span className={`text-[9px] font-mono px-1 py-0.5 rounded transition-all duration-200 whitespace-nowrap ${flashClass || 'bg-panel'}`}>
-              LTP <span className="text-text font-black">{currSym}{fmt(ltpNum)}</span>
-              {liveSpot?.ltp ? <span className="inline-block w-1 h-1 rounded-full bg-emerald-400 animate-pulse ml-0.5 align-middle" /> : null}
+              LTP <span className="text-text font-black">{currSym}{fmt(currentPrice)}</span>
+              {liveSpot?.ltp && !isTerminal ? <span className="inline-block w-1 h-1 rounded-full bg-emerald-400 animate-pulse ml-0.5 align-middle" /> : null}
             </span>
           )
         )}
@@ -569,7 +454,7 @@ export const AlertCompactRow = memo(function AlertCompactRow({ alert, onSendTele
             e.stopPropagation()
             const txt = [
               `${cleanSym}${strikeNum ? ' ' + strikeNum : ''}${optType ? optType : ''}${expiryShort ? ' ' + expiryShort : ''}`,
-              isDerivative ? (spotNum ? `Spot ${currSym}${fmt(spotNum)} Prem ${currSym}${fmtP(premiumNum)}` : '') : `LTP ${currSym}${fmt(ltpNum)}`,
+              isDerivative ? (spotNum ? `Spot ${currSym}${fmt(spotNum)} Prem ${currSym}${fmtP(premiumNum)}` : '') : `LTP ${currSym}${fmt(currentPrice)}`,
               lotSize ? `Lot ${lotSize}` : '',
               slNum ? `SL ${currSym}${fmtP(slNum)}` : '',
               entryNum ? `Entry ${currSym}${fmtP(entryNum)}` : '',
@@ -605,7 +490,7 @@ export const AlertCompactRow = memo(function AlertCompactRow({ alert, onSendTele
         )}
 
         {/* ── 1-Click Roll Strike Button ── */}
-        {isDerivative && (isT2Hit || isT3Hit || isFinalTargetAchieved || Boolean(alert.strike_roll_recommendation)) && (
+        {isDerivative && (isT2Hit || isT3Hit || Boolean(alert.strike_roll_recommendation)) && (
           <button
             onClick={(e) => {
               e.stopPropagation()

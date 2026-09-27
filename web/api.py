@@ -2866,6 +2866,7 @@ async def api_portfolio_greeks(request: Request, source: str = "auto"):
     positions = port.get("positions", []) if port else []
 
     from engine.portfolio_greeks import calculate_portfolio_greeks
+
     snapshot = calculate_portfolio_greeks(positions)
     return snapshot.to_dict()
 
@@ -3122,6 +3123,7 @@ async def get_auto_alerts(
     view_mode: str = "ACTIVE",  # "ACTIVE" | "ARCHIVED" | "ALL"
     is_archived: Optional[bool] = None,
     horizon: Optional[str] = None,
+    segment: Optional[str] = None,
 ):
     """
     Get real-time auto-detected alerts with active/archived partitioning and horizon differentiation.
@@ -3138,6 +3140,7 @@ async def get_auto_alerts(
         view_mode=view_mode,
         is_archived=is_archived,
         horizon=horizon,
+        segment=segment,
     )
     return {"status": "ok", "data": [a.to_dict() for a in alerts]}
 
@@ -3189,6 +3192,7 @@ async def get_market_regime():
     """
     try:
         from engine.market_regime_gate import evaluate_market_regime
+
         snap = evaluate_market_regime()
         return {
             "status": "ok",
@@ -3242,8 +3246,6 @@ async def get_council_sotd():
         return {"status": "UNAVAILABLE", "count": 0, "data": [], "error": str(exc)}
 
 
-
-
 @app.post("/api/alerts/auto/archive", tags=["Alerts"])
 async def archive_auto_alert(payload: dict):
     """Archive or restore an alert by ID."""
@@ -3257,6 +3259,21 @@ async def archive_auto_alert(payload: dict):
     alert = auto_alert_engine.archive_alert_by_id(alert_id, archive=archive, reason=reason)
     if not alert:
         raise HTTPException(status_code=404, detail=f"Alert {alert_id} not found")
+    try:
+        from web.sse import event_bus
+        from datetime import datetime, timezone
+
+        await event_bus.broadcast(
+            {
+                "type": "auto_alert_archived",
+                "alert_id": alert_id,
+                "is_archived": archive,
+                "reason": reason,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+    except Exception:
+        pass
     return {"status": "ok", "data": alert.to_dict()}
 
 
@@ -3333,6 +3350,27 @@ async def rescrutinize_auto_alert(payload: dict):
     target.confidence = max(target.confidence, scrutiny.score)
     auto_alert_engine._save()
     return {"status": "ok", "data": target.to_dict(), "scrutiny": scrutiny.to_dict()}
+
+
+@app.post("/api/alerts/auto/scan-multibaggers", tags=["Alerts"])
+async def trigger_multibagger_scan_api(top_n: int = 10, min_conviction: int = 65):
+    """
+    Triggers an institutional compounder & multibagger breakout scan across 40+ growth leaders.
+    Evaluates Minervini 8-point Trend Template, Stan Weinstein Stage 2 markup, and float absorption.
+    """
+    from engine.auto_alert_engine import auto_alert_engine
+    import asyncio
+
+    fresh = await asyncio.to_thread(
+        auto_alert_engine.scan_multibagger_compounders,
+        top_n=top_n,
+        min_conviction=min_conviction,
+    )
+    return {
+        "status": "ok",
+        "count": len(fresh),
+        "data": [a.to_dict() for a in fresh],
+    }
 
 
 @app.get("/api/alerts/auto/telegram-destinations", tags=["Alerts"])
@@ -3776,6 +3814,71 @@ async def get_crypto_squeeze(symbol: str = "BTCUSDT"):
     return await asyncio.to_thread(
         crypto_stream.get_squeeze_metrics,
         symbol=symbol,
+    )
+
+
+@app.get("/api/crypto/orderflow", tags=["Crypto 24x7"])
+async def get_crypto_orderflow(
+    symbol: str = "BTCUSDT",
+    timeframe: str = "15m",
+    limit: int = 60,
+):
+    """
+    Institutional Cumulative Volume Delta (CVD) & Order Flow Absorption Analysis.
+    Computes aggressive buyer vs seller volume delta, cumulative delta slope,
+    and institutional absorption divergence alerts.
+    """
+    from market.crypto_stream import crypto_stream
+
+    return await asyncio.to_thread(
+        crypto_stream.get_order_flow_metrics,
+        symbol=symbol,
+        interval=timeframe,
+        limit=limit,
+    )
+
+
+@app.get("/api/crypto/liquidations", tags=["Crypto 24x7"])
+async def get_crypto_liquidations(symbol: str = "BTCUSDT"):
+    """
+    Institutional Liquidation Cascade & Flush Exhaustion Reversal Detector.
+    Scans for extreme volume anomalies accompanied by long/short rejection wicks
+    and Open Interest drain to identify high R:R counter-trend reversal entries.
+    """
+    from market.crypto_stream import crypto_stream
+
+    return await asyncio.to_thread(
+        crypto_stream.get_liquidation_cascade_metrics,
+        symbol=symbol,
+    )
+
+
+@app.get("/api/crypto/basis", tags=["Crypto 24x7"])
+async def get_crypto_basis():
+    """
+    Institutional Delta-Neutral Basis & Funding Rate Arbitrage Engine.
+    Scans all major crypto benchmarks (BTC, ETH, SOL, BNB, XRP, DOGE)
+    for Cash-and-Carry (Long Spot + Short Perp) delta-neutral yield opportunities.
+    """
+    from market.crypto_stream import crypto_stream
+
+    return await asyncio.to_thread(
+        crypto_stream.get_basis_arbitrage_matrix,
+    )
+
+
+@app.get("/api/crypto/volatility-surface", tags=["Crypto 24x7"])
+async def get_crypto_volatility_surface(currency: str = "BTC", force_refresh: bool = False):
+    """
+    Institutional 24x7 Deribit Options Surface, ATM IV vs 30d Realized Volatility Spread,
+    Dealer GEX (Gamma Exposure) inflection zones, and Max Pain Magnet.
+    """
+    from market.crypto_options import get_crypto_options_summary
+
+    return await asyncio.to_thread(
+        get_crypto_options_summary,
+        currency=currency,
+        force_refresh=force_refresh,
     )
 
 

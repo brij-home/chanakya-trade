@@ -808,12 +808,17 @@ def test_fno_index_channel_whitelist_nifty_banknifty_midcp_sensex_only(monkeypat
     assert len(sent_tg) == 1
 
     # 4. Telegram payload filter guard
-    p_nifty = format_telegram_push_payload("🟢 [REAL/LIVE] NEW CALL · NIFTY 24800 CE", chat_id="-1004380788314")
+    p_nifty = format_telegram_push_payload(
+        "🟢 [REAL/LIVE] NEW CALL · NIFTY 24800 CE", chat_id="-1004380788314"
+    )
     assert p_nifty.get("text") is not None
 
-    p_midcp = format_telegram_push_payload("🟢 [REAL/LIVE] NEW CALL · MIDCP 14100 PE", chat_id="-1004380788314")
+    p_midcp = format_telegram_push_payload(
+        "🟢 [REAL/LIVE] NEW CALL · MIDCP 14100 PE", chat_id="-1004380788314"
+    )
     assert p_midcp.get("text") is not None
 
-    p_fin = format_telegram_push_payload("🟢 [REAL/LIVE] NEW CALL · FINNIFTY 23500 CE", chat_id="-1004380788314")
+    p_fin = format_telegram_push_payload(
+        "🟢 [REAL/LIVE] NEW CALL · FINNIFTY 23500 CE", chat_id="-1004380788314"
+    )
     assert p_fin == {}  # Suppressed!
-

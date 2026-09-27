@@ -15,7 +15,6 @@ from __future__ import annotations
 import logging
 import os
 import time
-import uuid
 from datetime import datetime, timezone, timedelta
 from typing import Any, Optional
 
@@ -275,7 +274,12 @@ def detect_options_momentum_breakouts(
                     )
 
             if chain is None:
-                if not is_idx and "exp_res" in locals() and exp_res and exp_res.get("is_next_month_routed"):
+                if (
+                    not is_idx
+                    and "exp_res" in locals()
+                    and exp_res
+                    and exp_res.get("is_next_month_routed")
+                ):
                     logger.info(
                         f"[OptionsBreakout] {clean_sym} next-month chain unavailable during expiry week. "
                         f"Suppressed current-month stock options to eliminate SEBI physical delivery margin risk."
@@ -548,7 +552,9 @@ def detect_options_momentum_breakouts(
                                 continue
                             hbcm_meta = hbcm_eval.to_dict()
                     except Exception as e_hbcm:
-                        logger.debug(f"[OptionsBreakout] HBCM check bypassed for {clean_sym}: {e_hbcm}")
+                        logger.debug(
+                            f"[OptionsBreakout] HBCM check bypassed for {clean_sym}: {e_hbcm}"
+                        )
 
                 is_decoupler = False
                 opt_pch = getattr(c, "pchange", 0.0) or getattr(c, "change_pct", 0.0) or 0.0

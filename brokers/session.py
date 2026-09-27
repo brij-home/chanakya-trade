@@ -585,9 +585,7 @@ def _make_broker(choice: str) -> tuple[str, BrokerAPI]:
             totp_secret=get_credential(
                 "KOTAK_TOTP_SECRET", "Kotak Neo TOTP Secret", secret=True, required=False
             ),
-            mpin=get_credential(
-                "KOTAK_MPIN", "Kotak Neo MPIN", secret=True, required=False
-            ),
+            mpin=get_credential("KOTAK_MPIN", "Kotak Neo MPIN", secret=True, required=False),
             environment=os.environ.get("KOTAK_ENVIRONMENT", "prod"),
         )
 

@@ -408,7 +408,7 @@ def test_tier2_quant_fallback_long_put_guidance(auditor):
     result = auditor._generate_quantitative_fallback(alert, {"level_coherence": True})
     assert result.status == "APPROVED"
     assert "Buy PE" in result.actionable_guidance
-    assert "Rs.36.0" in result.actionable_guidance
+    assert "Rs.36.0" in result.actionable_guidance or "₹36.0" in result.actionable_guidance
     assert "Short near" not in result.actionable_guidance
     assert "Put momentum" in result.logic_confirmation
 

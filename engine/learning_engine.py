@@ -607,12 +607,7 @@ class PatternLearningEngine:
         MIN_REFRACTORY_SECONDS = 900.0  # 15 minutes refractory period
         elapsed_since_lock = now - locked_at_ts
         reclaim_lvl = float(lockout.get("reclaim_level") or 0.0)
-        if (
-            elapsed_since_lock >= MIN_REFRACTORY_SECONDS
-            and ltp
-            and ltp > 0
-            and reclaim_lvl > 0
-        ):
+        if elapsed_since_lock >= MIN_REFRACTORY_SECONDS and ltp and ltp > 0 and reclaim_lvl > 0:
             if lock_dir == "BULLISH" and ltp >= reclaim_lvl:
                 if vwap is None or ltp >= vwap:
                     logger.info(

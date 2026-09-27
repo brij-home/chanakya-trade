@@ -681,4 +681,3 @@ def test_single_stock_hedge_degraded_rr_promotes_ratio_spread():
     assert "Zero-Downside 1x2 Ratio: Preferred" in msg
     assert "DEBIT SPREAD R:R DEGRADED" in msg
     assert "Stock Option Liquidity Guard" in msg
-

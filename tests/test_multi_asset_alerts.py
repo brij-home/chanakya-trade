@@ -151,7 +151,9 @@ def test_mcx_commodity_alert_template_rendering():
     )
 
     rendered = render_auto_alert(alert, in_market=True)
-    assert "[REAL/LIVE] NEW CALL · MCX MOMENTUM" in rendered or "[REAL/LIVE] MCX MOMENTUM" in rendered
+    assert (
+        "[REAL/LIVE] NEW CALL · MCX MOMENTUM" in rendered or "[REAL/LIVE] MCX MOMENTUM" in rendered
+    )
     assert rendered.count("[REAL/LIVE]") == 1
     assert "[REAL / LIVE" not in rendered
     assert "MCX Commodity Plan" not in rendered
@@ -193,7 +195,10 @@ def test_cds_currency_alert_template_rendering():
     )
 
     rendered = render_auto_alert(alert, in_market=True)
-    assert "[REAL/LIVE] NEW CALL · CURRENCY BREAKOUT" in rendered or "[REAL/LIVE] CURRENCY BREAKOUT" in rendered
+    assert (
+        "[REAL/LIVE] NEW CALL · CURRENCY BREAKOUT" in rendered
+        or "[REAL/LIVE] CURRENCY BREAKOUT" in rendered
+    )
     assert rendered.count("[REAL/LIVE]") == 1
     assert "[REAL / LIVE" not in rendered
     assert "Macro Currency Plan" not in rendered

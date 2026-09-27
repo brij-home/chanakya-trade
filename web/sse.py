@@ -20,7 +20,7 @@ import asyncio
 import json
 import logging
 from collections import defaultdict
-from typing import AsyncGenerator
+from typing import Any, AsyncGenerator
 
 logger = logging.getLogger("web.sse")
 
@@ -124,4 +124,3 @@ class SSEEventBus:
 
 
 event_bus = SSEEventBus()  # module-level singleton
-

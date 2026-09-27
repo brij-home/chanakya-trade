@@ -78,7 +78,9 @@ def run(
     mkt_table.add_row(
         "BANKNIFTY",
         f"₹{rep.banknifty_ltp:,.2f}" if rep.banknifty_ltp > 0 else "UNAVAILABLE",
-        f"[{bn_color}]{rep.banknifty_change_pct:+.2f}%[/{bn_color}]" if rep.banknifty_ltp > 0 else "—",
+        f"[{bn_color}]{rep.banknifty_change_pct:+.2f}%[/{bn_color}]"
+        if rep.banknifty_ltp > 0
+        else "—",
         f"VIX: {rep.vix_ltp:.2f}" if rep.vix_ltp > 0 else "VIX: —",
     )
     mkt_table.add_row(
@@ -139,9 +141,7 @@ def run(
                 else ("bold bright_red" if j.realized_r < 0 else "dim")
             )
             pnl_style = (
-                "bright_green"
-                if j.pnl_pct > 0
-                else ("bright_red" if j.pnl_pct < 0 else "dim")
+                "bright_green" if j.pnl_pct > 0 else ("bright_red" if j.pnl_pct < 0 else "dim")
             )
 
             status_color = {

@@ -10,11 +10,9 @@ Unit & integration tests for:
 
 import os
 import tempfile
-import pytest
 from starlette.testclient import TestClient
 
 from analysis.institutional_catalysts import (
-    CreditRatingProfile,
     get_institutional_catalysts,
 )
 from engine.incubation_radar import (
@@ -99,9 +97,7 @@ def test_incubation_pipeline_lifecycle():
         assert len(short_term_list) == 0
 
         # 3. Simulate breakout: price crosses entry_pivot (1510 >= 1500)
-        eval_res = evaluate_incubated_pipeline(
-            db_path=test_db, live_quotes={"TESTSTOCK": 1515.0}
-        )
+        eval_res = evaluate_incubated_pipeline(db_path=test_db, live_quotes={"TESTSTOCK": 1515.0})
         assert "TESTSTOCK" in eval_res["triggered_breakouts"]
 
         # Verify candidate transitioned to TRIGGER_READY

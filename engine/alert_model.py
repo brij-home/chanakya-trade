@@ -91,7 +91,8 @@ class AutoAlert:
     in_flight_warning_at: Optional[str] = None
     mtf_confluence: Optional[str] = None
     vix_regime: Optional[str] = None
-    time_horizon: str = "INTRADAY"  # "INTRADAY" | "SWING_SHORT" | "SWING_MID" | "POSITIONAL"
+    time_horizon: str = "INTRADAY"  # "INTRADAY" | "SWING_SHORT" | "SWING_MID" | "LONG_TERM" | "POSITIONAL" | "MULTIBAGGER"
+    eta_label: Optional[str] = None
     setup_style: str = "CONTINUATION"  # "CONTINUATION" | "REVERSAL"
     entry_type: str = "LIMIT_ON_PULLBACK"  # "LIMIT_ON_PULLBACK" | "BREAKOUT_STOP" | "MARKET_NOW"
     anchored_levels: dict[str, float] = field(default_factory=dict)
@@ -109,12 +110,20 @@ class AutoAlert:
     strike_roll_recommendation: Optional[dict[str, Any]] = None
     initial_stop_loss: Optional[float] = None
     update_count: int = 0
+    telegram_update_count: int = 0
+    update_number: Optional[int] = None
 
     def __post_init__(self) -> None:
         if self.initial_stop_loss is None:
-            if self.actionable_plan and isinstance(self.actionable_plan.get("option_plan"), dict) and self.actionable_plan["option_plan"].get("sl_premium"):
+            if (
+                self.actionable_plan
+                and isinstance(self.actionable_plan.get("option_plan"), dict)
+                and self.actionable_plan["option_plan"].get("sl_premium")
+            ):
                 try:
-                    self.initial_stop_loss = float(self.actionable_plan["option_plan"]["sl_premium"])
+                    self.initial_stop_loss = float(
+                        self.actionable_plan["option_plan"]["sl_premium"]
+                    )
                 except (ValueError, TypeError):
                     pass
             elif self.actionable_plan and self.actionable_plan.get("invalidation_stop"):
@@ -210,8 +219,8 @@ class AutoAlert:
         # Auto-infer horizon if default
         if self.time_horizon == "INTRADAY":
             atype = (self.alert_type or "").upper()
-            if atype in ("STAGE_1_TO_2_EXPANSION", "MULTIBAGGER"):
-                self.time_horizon = "POSITIONAL"
+            if atype in ("MULTIBAGGER", "STAGE_1_TO_2_EXPANSION"):
+                self.time_horizon = "MULTIBAGGER"
             elif atype in ("SQUEEZE_BREAKOUT", "VCP_PIVOT_BREAKOUT", "RRG_SECTOR_ROTATION"):
                 self.time_horizon = "SWING_MID"
             elif atype == "ASYMMETRIC_OPPORTUNITY":
@@ -231,6 +240,44 @@ class AutoAlert:
                 "INDEX_CONTAGION",
             ):
                 self.time_horizon = "INTRADAY"
+
+        # Auto-derive or sanitize ETA label
+        exch = (self.exchange or "NSE").upper()
+        seg = (getattr(self, "segment", "") or "").upper()
+        sym_u = (self.symbol or "").upper()
+        is_crypto = (
+            exch in ("CRYPTO", "BINANCE", "DERIBIT", "COINBASE")
+            or seg == "CRYPTO"
+            or sym_u.startswith("CRYPTO:")
+            or sym_u.endswith("USDT")
+            or sym_u.endswith("USDC")
+            or sym_u.endswith("BTC")
+        )
+        if is_crypto and (not self.eta_label or "15:15" in str(self.eta_label)):
+            self.eta_label = "24h Rolling"
+        elif not self.eta_label:
+            th = (self.time_horizon or "INTRADAY").upper()
+            if th == "INTRADAY":
+                if exch == "MCX":
+                    self.eta_label = "Today 23:15 IST"
+                else:
+                    self.eta_label = "Today 15:15 IST"
+            elif th == "SWING_SHORT":
+                if self.expiry_date and self.segment in ("FNO", "OPTIONS"):
+                    self.eta_label = f"2–5 Sessions ({self.expiry_type or 'Weekly'} Exp)"
+                else:
+                    self.eta_label = "2–5 Sessions"
+            elif th == "SWING_MID":
+                if self.expiry_date and self.segment in ("FNO", "OPTIONS"):
+                    self.eta_label = f"1–4 Weeks ({self.expiry_type or 'Monthly'} Exp)"
+                else:
+                    self.eta_label = "1–4 Weeks"
+            elif th in ("LONG_TERM", "POSITIONAL"):
+                self.eta_label = "1–6 Months"
+            elif th == "MULTIBAGGER":
+                self.eta_label = "6–24 Months"
+            else:
+                self.eta_label = "Today 15:15 IST"
 
         # Calculate no-chase boundary if not provided
         if self.no_chase_boundary is None and self.trigger_level > 0:
@@ -288,7 +335,11 @@ class AutoAlert:
             self.triggered_at = self.created_at
 
         # Model invariant: validate institutional alert ID determinism in live/real environments
-        if self.alert_id and self.environment not in ("TEST", "SIMULATION") and not self.alert_id.startswith(("test-", "mock-", "sim-", "yb-")):
+        if (
+            self.alert_id
+            and self.environment not in ("TEST", "SIMULATION")
+            and not self.alert_id.startswith(("test-", "mock-", "sim-", "yb-"))
+        ):
             try:
                 from engine.alert_identity import validate_alert_id
 
@@ -391,21 +442,35 @@ class AutoAlert:
                     and not getattr(self, "_force_test_expiry", False)
                 )
 
+                exch = (self.exchange or "NSE").upper()
+                seg = (getattr(self, "segment", "") or "").upper()
+                is_crypto = (
+                    exch in ("CRYPTO", "BINANCE", "DERIBIT", "COINBASE")
+                    or seg == "CRYPTO"
+                    or self.symbol.upper().startswith("CRYPTO:")
+                    or self.symbol.upper().endswith("USDT")
+                )
+
                 if not has_future_expiry and not is_active_deriv:
-                    if created_dt.date() < now.date():
+                    if is_crypto:
+                        # Crypto is a 24x7 continuous global market; intraday alerts have a 24-hour rolling expiry window
+                        if (now - created_dt).total_seconds() >= 86400:
+                            return True
+                    elif created_dt.date() < now.date():
                         return True
-                    exch = (self.exchange or "NSE").upper()
-                    if exch == "MCX":
+                    elif exch == "MCX":
                         if now.hour > 23 or (now.hour == 23 and now.minute >= 15):
                             return True
                     else:
                         if now.hour > 15 or (now.hour == 15 and now.minute >= 15):
                             return True
                 elif getattr(self, "_force_test_expiry", False):
-                    if created_dt.date() < now.date():
+                    if is_crypto:
+                        if (now - created_dt).total_seconds() >= 86400:
+                            return True
+                    elif created_dt.date() < now.date():
                         return True
-                    exch = (self.exchange or "NSE").upper()
-                    if exch == "MCX":
+                    elif exch == "MCX":
                         if now.hour > 23 or (now.hour == 23 and now.minute >= 15):
                             return True
                     else:
@@ -414,11 +479,22 @@ class AutoAlert:
 
             # 2c. Unignited Early Warning Setup Time-Stop:
             # Pre-breakout early warnings expire if left unignited from a prior day,
-            # or if 60 minutes have elapsed without triggering during an active session.
+            # or if 60 minutes have elapsed without triggering during an active session (4h for 24x7 crypto).
             if self.stage == "EARLY_WARNING":
-                if created_dt.date() < now.date():
+                exch = (self.exchange or "NSE").upper()
+                seg = (getattr(self, "segment", "") or "").upper()
+                is_crypto = (
+                    exch in ("CRYPTO", "BINANCE", "DERIBIT", "COINBASE")
+                    or seg == "CRYPTO"
+                    or self.symbol.upper().startswith("CRYPTO:")
+                    or self.symbol.upper().endswith("USDT")
+                )
+                if is_crypto:
+                    if (now - created_dt).total_seconds() >= 14400:
+                        return True
+                elif created_dt.date() < now.date():
                     return True
-                if th == "INTRADAY" and (now - created_dt).total_seconds() >= 3600:
+                elif th == "INTRADAY" and (now - created_dt).total_seconds() >= 3600:
                     return True
 
         if is_deriv:
@@ -443,14 +519,25 @@ class AutoAlert:
 
     @property
     def is_active(self) -> bool:
-        """A trade is active if it is not archived, not invalidated, not expired, and has not completed final target or runner exit."""
+        """A trade is active if it is not archived, not invalidated, not expired, and has not completed final target, runner exit, sl hit, or time stop."""
         if self.is_expired:
             return False
         return (
             not self.is_archived
             and not self.is_invalidated
-            and self.stage not in ("INVALIDATED", "TARGET_ACHIEVED", "EXPIRED", "RUNNER_EXIT", "PROFIT_SECURED")
-            and self.target_status not in ("TARGET_ACHIEVED", "RUNNER_CLOSED")
+            and self.stage
+            not in (
+                "INVALIDATED",
+                "TARGET_ACHIEVED",
+                "COMPLETED",
+                "EXPIRED",
+                "RUNNER_EXIT",
+                "PROFIT_SECURED",
+                "SL_HIT",
+                "TIME_STOP_EXIT",
+            )
+            and self.target_status
+            not in ("TARGET_ACHIEVED", "RUNNER_CLOSED", "SL_HIT", "TIME_STOP_EXIT")
         )
 
     @is_active.setter

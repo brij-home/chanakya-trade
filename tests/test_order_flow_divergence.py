@@ -6,9 +6,7 @@ Unit tests for Institutional Order Flow & Cumulative Volume Delta (CVD) Divergen
 
 from __future__ import annotations
 
-import numpy as np
 import pandas as pd
-import pytest
 
 from engine.detection_context import build_detection_context, detector_registry
 from engine.detectors.order_flow import compute_bar_volume_delta, detect_order_flow_divergence
@@ -38,13 +36,32 @@ def test_bullish_absorption_divergence():
     # Bar 6-13: sideways consolidation
     # Bar 14 (current): price retests 24200, but closed strong near high with 100,000 buyer volume
     data = []
-    prices = [24300, 24280, 24250, 24220, 24200, 24205, 24210, 24215, 24220, 24225, 24210, 24205, 24200, 24201]
-    
+    prices = [
+        24300,
+        24280,
+        24250,
+        24220,
+        24200,
+        24205,
+        24210,
+        24215,
+        24220,
+        24225,
+        24210,
+        24205,
+        24200,
+        24201,
+    ]
+
     for i, p in enumerate(prices):
         if i == 4:  # Prior low
-            data.append({"open": p + 10, "high": p + 12, "low": p, "close": p + 1, "volume": 50000.0})
+            data.append(
+                {"open": p + 10, "high": p + 12, "low": p, "close": p + 1, "volume": 50000.0}
+            )
         elif i == 13:  # Absorption retest
-            data.append({"open": p, "high": p + 15, "low": p - 1, "close": p + 14, "volume": 120000.0})
+            data.append(
+                {"open": p, "high": p + 15, "low": p - 1, "close": p + 14, "volume": 120000.0}
+            )
         else:
             data.append({"open": p, "high": p + 5, "low": p - 5, "close": p + 2, "volume": 10000.0})
 
@@ -66,7 +83,11 @@ def test_bullish_absorption_divergence():
     assert alert.direction == "BULLISH"
     assert alert.metrics["pattern"] == "BULLISH_ABSORPTION"
     assert "execution_ticket" in alert.actionable_plan
-    assert alert.actionable_plan["execution_ticket"]["smart_routing"]["routing_mode"] in ("DIRECT_LIMIT", "PASSIVE_PEG", "ICEBERG")
+    assert alert.actionable_plan["execution_ticket"]["smart_routing"]["routing_mode"] in (
+        "DIRECT_LIMIT",
+        "PASSIVE_PEG",
+        "ICEBERG",
+    )
 
 
 def test_order_flow_detector_registered():

@@ -532,9 +532,7 @@ def build_defined_risk_hedge_plan(
                     or sec_align in ("TAILWIND", "STRONG_TAILWIND", "MODERATE_TAILWIND")
                     or "TAILWIND" in sec_intra
                 ):
-                    stock_sector_warning = (
-                        f"⚠️ SECTOR TAILWIND ({tw.sector} in {sec_q}): Shorting stock while parent sector is strong."
-                    )
+                    stock_sector_warning = f"⚠️ SECTOR TAILWIND ({tw.sector} in {sec_q}): Shorting stock while parent sector is strong."
         except Exception:
             pass
 
@@ -550,7 +548,7 @@ def build_defined_risk_hedge_plan(
     debit_rr_warning = ""
     if not is_idx and is_poor_rr:
         debit_rr_warning = (
-            f"⚠️ DEBIT SPREAD R:R DEGRADED (1:{rr_spread:.1f}, Net Debit {int(debit_ratio*100)}% of width). "
+            f"⚠️ DEBIT SPREAD R:R DEGRADED (1:{rr_spread:.1f}, Net Debit {int(debit_ratio * 100)}% of width). "
             f"Auto-promoted 1x2 Ratio Spread for Zero-Downside / Net Credit entry."
         )
         if ratio_plan and (
@@ -631,6 +629,7 @@ def build_defined_risk_hedge_plan(
         "margin_benefit_note": "SEBI Hedged Margin: ~70% margin reduction when executing both legs simultaneously.",
         "execution_guidance": exec_guidance,
         "counter_trend_warning": counter_trend_warning,
+        "is_counter_trend": is_counter_trend,
         "market_breadth_ad_ratio": getattr(mb, "ad_ratio", None) if mb else None,
         "legs": legs,
         "ratio_spread_1x2": ratio_plan,

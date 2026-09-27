@@ -148,15 +148,25 @@ def detect_opening_drive(
             hw_bulls = hw_posture.get("bull_count", 0)
             hw_bears = hw_posture.get("bear_count", 0)
             if hw_total > 0:
-                if is_bull_drive and (hw_bulls == 0 or hw_posture.get("all_bearish") or hw_bears > hw_bulls):
-                    hw_tags = [f"{h['symbol']} ({h['change_pct']:+.2f}%)" for h in hw_posture.get("heavyweights", [])]
+                if is_bull_drive and (
+                    hw_bulls == 0 or hw_posture.get("all_bearish") or hw_bears > hw_bulls
+                ):
+                    hw_tags = [
+                        f"{h['symbol']} ({h['change_pct']:+.2f}%)"
+                        for h in hw_posture.get("heavyweights", [])
+                    ]
                     logger.info(
                         f"[OpeningDrive] Suppressed bullish drive on {clean_sym}: Heavyweight locomotives unaligned "
                         f"({hw_bulls}/{hw_total} bullish, {', '.join(hw_tags)})."
                     )
                     return None
-                if is_bear_drive and (hw_bears == 0 or hw_posture.get("all_bullish") or hw_bulls > hw_bears):
-                    hw_tags = [f"{h['symbol']} ({h['change_pct']:+.2f}%)" for h in hw_posture.get("heavyweights", [])]
+                if is_bear_drive and (
+                    hw_bears == 0 or hw_posture.get("all_bullish") or hw_bulls > hw_bears
+                ):
+                    hw_tags = [
+                        f"{h['symbol']} ({h['change_pct']:+.2f}%)"
+                        for h in hw_posture.get("heavyweights", [])
+                    ]
                     logger.info(
                         f"[OpeningDrive] Suppressed bearish drive on {clean_sym}: Heavyweight locomotives unaligned "
                         f"({hw_bears}/{hw_total} bearish, {', '.join(hw_tags)})."
@@ -309,7 +319,9 @@ def detect_opening_drive(
     alert_seg = "FNO_INDEX" if is_index else ("FNO_STOCK" if lot_sz else "EQUITY")
 
     return AutoAlert(
-        alert_id=generate_alert_id(clean_sym, "OPENING_DRIVE_IGNITION", variant=f"{direction.lower()[:4]}"),
+        alert_id=generate_alert_id(
+            clean_sym, "OPENING_DRIVE_IGNITION", variant=f"{direction.lower()[:4]}"
+        ),
         alert_type="OPENING_DRIVE_IGNITION",
         stage="IGNITED",
         symbol=clean_sym,

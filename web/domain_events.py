@@ -50,7 +50,9 @@ class AlertDomainEvent:
     target_level: float
     stop_loss: float
     correlation_id: str = field(default_factory=lambda: f"evt-{uuid.uuid4().hex[:8]}")
-    timestamp_iso: str = field(default_factory=lambda: datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST"))
+    timestamp_iso: str = field(
+        default_factory=lambda: datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
+    )
     environment: str = "LIVE"
     metrics: dict[str, Any] = field(default_factory=dict)
     actionable_plan: dict[str, Any] = field(default_factory=dict)

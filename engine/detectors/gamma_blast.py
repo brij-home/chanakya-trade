@@ -177,16 +177,20 @@ def detect_gamma_blast(
     #   1. Extreme was tested (within 0.15% or pierced)
     #   2. Spot has actively bounced/pulled back >= 0.10% (cannot be resting at the extreme tick)
     #   3. Spot is holding on the safe side of the key reference level
-    _spot_bounce_from_low = ((spot - day_low) / max(1.0, spot) * 100) if (day_low and spot >= day_low) else 0.0
-    _spot_pullback_from_high = ((day_high - spot) / max(1.0, spot) * 100) if (day_high and spot <= day_high) else 0.0
+    _spot_bounce_from_low = (
+        ((spot - day_low) / max(1.0, spot) * 100) if (day_low and spot >= day_low) else 0.0
+    )
+    _spot_pullback_from_high = (
+        ((day_high - spot) / max(1.0, spot) * 100) if (day_high and spot <= day_high) else 0.0
+    )
 
     _pdl_tested = bool(
-        prev_day_low and prev_day_low > 0
-        and day_low and day_low <= (prev_day_low * 1.002)
+        prev_day_low
+        and prev_day_low > 0
+        and day_low
+        and day_low <= (prev_day_low * 1.002)
         and (prev_day_low - day_low) / prev_day_low * 100 <= 0.40
-    ) or bool(
-        day_low and day_low > 0 and (spot - day_low) / max(1.0, spot) * 100 >= 0.15
-    )
+    ) or bool(day_low and day_low > 0 and (spot - day_low) / max(1.0, spot) * 100 >= 0.15)
 
     _pdl_sweep_active = bool(
         _pdl_tested
@@ -195,12 +199,12 @@ def detect_gamma_blast(
     )
 
     _pdh_tested = bool(
-        prev_day_high and prev_day_high > 0
-        and day_high and day_high >= (prev_day_high * 0.998)
+        prev_day_high
+        and prev_day_high > 0
+        and day_high
+        and day_high >= (prev_day_high * 0.998)
         and (day_high - prev_day_high) / prev_day_high * 100 <= 0.40
-    ) or bool(
-        day_high and day_high > 0 and (day_high - spot) / max(1.0, spot) * 100 >= 0.15
-    )
+    ) or bool(day_high and day_high > 0 and (day_high - spot) / max(1.0, spot) * 100 >= 0.15)
 
     _pdh_sweep_active = bool(
         _pdh_tested

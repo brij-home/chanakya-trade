@@ -71,6 +71,7 @@ def detect_currency_breakouts(
 
         curr_lot = get_lot_size(clean_sym) or 1000
 
+        direction = "BULLISH" if is_bullish else "BEARISH"
         if is_bullish:
             sl_price = round(ltp - risk_rupees, 4)
             t1_price = round(ltp + 1.8 * risk_rupees, 4)

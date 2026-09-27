@@ -234,6 +234,7 @@ def is_alert_option_premium_level(alert: Any) -> bool:
     Returns False for underlying stock/index setups even if an option recommendation is attached.
     Safely handles both object/dataclass instances and dictionaries.
     """
+
     def _g(key: str, default: Any = None) -> Any:
         if isinstance(alert, dict):
             return alert.get(key, default)

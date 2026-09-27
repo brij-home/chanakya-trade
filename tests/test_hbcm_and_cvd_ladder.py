@@ -8,10 +8,9 @@ Comprehensive Institutional Unit Tests for:
 """
 
 import pytest
-import pandas as pd
 from unittest.mock import MagicMock
 
-from engine.hbcm import evaluate_hbcm, get_hbcm_constituents, MIN_CONFLUENCE_THRESHOLD
+from engine.hbcm import evaluate_hbcm, get_hbcm_constituents
 from engine.alert_evaluator import evaluate_alert_targets_and_trailing, TargetTrailingEvaluation
 from engine.trade_lifecycle import audit_position_lifecycle
 from engine.alert_scrutiny import AlertScrutinyAuditor
@@ -21,6 +20,7 @@ from engine.auto_alert_engine import AutoAlert
 # ─────────────────────────────────────────────────────────────────────────────
 # 1. Heavyweight Breadth Confluence Matrix (HBCM) Tests
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def test_hbcm_constituents_mapping():
     """Verify canonical top 5 constituents for NIFTY and BANKNIFTY."""
@@ -133,10 +133,10 @@ def test_alert_scrutiny_tier1_hbcm_gate():
 # 2. Cumulative Volume Delta (CVD) Footprint Check Tests
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def test_cvd_footprint_calculation():
     """Verify CVD calculation and ratio threshold (>= 2.2x)."""
     last_vol = 100000.0
-    last_o = 24500.0
     last_h = 24550.0
     last_l = 24490.0
     last_c = 24545.0  # Closed in top 10% of bar
@@ -164,6 +164,7 @@ def test_cvd_footprint_calculation():
 # ─────────────────────────────────────────────────────────────────────────────
 # 3. Automated Dynamic Profit Ladder Tests (+2R, +4R, Runner)
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def test_alert_evaluator_2r_milestone_auto_partial():
     """Alert evaluator auto-partials 50% at +2R and locks SL to Breakeven."""
@@ -252,7 +253,9 @@ def test_trade_lifecycle_swing_ladder_milestones():
     assert report_2r.recommended_action == "SCALE_OUT_50_PCT"
     assert report_2r.breakeven_reached is True
     assert report_2r.trailing_stops.stop_method in ("BREAKEVEN", "STRUCTURE_HL")
-    assert any("2R Auto-Partial Breakeven Pivot" in m.name and m.reached for m in report_2r.milestones)
+    assert any(
+        "2R Auto-Partial Breakeven Pivot" in m.name and m.reached for m in report_2r.milestones
+    )
 
     # At 4R (LTP = 2600.0):
     report_4r = audit_position_lifecycle(

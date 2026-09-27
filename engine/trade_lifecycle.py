@@ -335,7 +335,11 @@ def audit_position_lifecycle(
         if r_multiple >= 4.0:
             # At +4R, trail SL to lock at least +2R (T1) profit or higher Chandelier ATR trail
             recommended_stop = max(t1_lock_price, breakeven_price, structure_stop, chandelier_stop)
-            stop_method = "CHANDELIER_ATR" if chandelier_stop >= max(t1_lock_price, structure_stop) else "T1_LOCK_2R"
+            stop_method = (
+                "CHANDELIER_ATR"
+                if chandelier_stop >= max(t1_lock_price, structure_stop)
+                else "T1_LOCK_2R"
+            )
         elif r_multiple >= 2.0:
             recommended_stop = max(breakeven_price, structure_stop)
             stop_method = "BREAKEVEN" if recommended_stop <= breakeven_price else "STRUCTURE_HL"
@@ -415,8 +419,12 @@ def audit_position_lifecycle(
             health_status = "HEALTHY_ACCELERATING"
             health_score = 82
             action = "HOLD_FOR_2R"
-            diagnostics.append(f"Trade expanded through 1R milestone (+{r_multiple:.2f}R, +{pnl_pct:.2f}%).")
-            diagnostics.append("De-risk window active. Hold core position for +2R auto-partial milestone.")
+            diagnostics.append(
+                f"Trade expanded through 1R milestone (+{r_multiple:.2f}R, +{pnl_pct:.2f}%)."
+            )
+            diagnostics.append(
+                "De-risk window active. Hold core position for +2R auto-partial milestone."
+            )
         elif r_multiple >= 0.5:
             health_status = (
                 "HEALTHY_PULLBACK" if ltp < highest_price * 0.98 else "HEALTHY_ACCELERATING"

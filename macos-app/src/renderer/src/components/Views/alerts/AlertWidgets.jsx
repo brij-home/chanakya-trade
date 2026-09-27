@@ -32,11 +32,19 @@ export function RRMiniBar({ sl, entry, t1, t2, t3, currentPrice, isUpward = true
   )
 }
 
-export function MilestoneDots({ targetStatus, stage, isSLHit = false, isExpired = false, isInvalidated = false }) {
+export function MilestoneDots({ targetStatus, stage, isSLHit = false, isExpired = false, isInvalidated = false, isTimeStop = false }) {
   if (isSLHit || stage === 'SL_HIT') {
     return (
       <span className="flex items-center gap-0.5 font-mono text-[9px] text-rose-400 font-bold" title="Stop-Loss Hit">
         <span>🛑</span>
+      </span>
+    )
+  }
+
+  if (isTimeStop || stage === 'TIME_STOP_EXIT') {
+    return (
+      <span className="flex items-center gap-0.5 font-mono text-[9px] text-amber-400 font-bold" title="Velocity Time-Stop Exit">
+        <span>⏱️</span>
       </span>
     )
   }

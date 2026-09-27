@@ -41,6 +41,10 @@ import {
   AlertTriageCard,
   TradeExecutionMatrix,
   isTestOrSimAlert,
+  resolveAlertProvenance,
+  isAlertActive,
+  resolveAlertLifecycle,
+  resolveHorizonAndETA,
 } from './alerts'
 
 /**
@@ -87,7 +91,16 @@ function mergeAlertsInPlace(prevAlerts = [], freshAlerts = []) {
     if (!freshItem) {
       const horizon = String(oldItem.time_horizon || oldItem.timeHorizon || '').toUpperCase()
       const isExplicitIntraday = horizon === 'INTRADAY' || (oldItem.alert_type && (oldItem.alert_type.toUpperCase().includes('INTRADAY') || oldItem.alert_type.toUpperCase().includes('ORB') || oldItem.alert_type.toUpperCase().includes('SCALP')))
-      const isSwingOrPositional = horizon.includes('SWING') || horizon.includes('POSITIONAL') || (oldItem.alert_type && oldItem.alert_type.toUpperCase().includes('SWING'))
+      const isSwingOrPositional =
+        horizon.includes('SWING') ||
+        horizon.includes('POSITIONAL') ||
+        horizon.includes('LONG') ||
+        horizon.includes('MULTIBAGGER') ||
+        (oldItem.alert_type && (
+          oldItem.alert_type.toUpperCase().includes('SWING') ||
+          oldItem.alert_type.toUpperCase().includes('MULTIBAGGER') ||
+          oldItem.alert_type.toUpperCase().includes('STAGE_1_TO_2')
+        ))
 
       if (isExplicitIntraday && !isSwingOrPositional && (oldItem.created_at || oldItem.timestamp)) {
         try {
@@ -155,6 +168,8 @@ function mergeAlertsInPlace(prevAlerts = [], freshAlerts = []) {
   return [...brandNewAlerts, ...updatedExisting]
 }
 
+// Institutional active validation check re-exported from canonical alertHelpers
+export { isAlertActive }
 
 
 const AutoAlertCard = memo(function AutoAlertCard({
@@ -205,244 +220,46 @@ const AutoAlertCard = memo(function AutoAlertCard({
 
   const postMortem = alert.metrics?.post_mortem
   const style = AUTO_TYPE_STYLE[alert.alert_type] || AUTO_TYPE_STYLE.GAMMA_BLAST
-  const isEarly = alert.stage === 'EARLY_WARNING'
-  const isInvalidated = alert.is_invalidated || alert.stage === 'INVALIDATED'
-  const isExpired = alert.is_expired || alert.stage === 'EXPIRED'
-  const isBull = alert.direction === 'BULLISH'
-  const isTest = alert.environment === 'TEST' || alert.is_live === false
-  const isT1 = alert.stage === 'T1_ACHIEVED' || alert.target_status === 'T1_ACHIEVED'
-  const isFinalTarget = alert.stage === 'TARGET_ACHIEVED' || alert.target_status === 'TARGET_ACHIEVED'
-  const isTarget = isT1 || isFinalTarget
-  const isTrail = alert.stage === 'TRAILING_UPDATE'
+  const provenance = resolveAlertProvenance(alert)
+  const isTest = provenance.isTest
 
-  const isFuture = Boolean(
-    alert.contract_symbol?.toUpperCase().includes('FUT') ||
-    alert.symbol?.toUpperCase().includes('FUT') ||
-    alert.derivative_type === 'FUT' ||
-    alert.alert_type === 'FUTURES'
+  const lifecycle = useMemo(
+    () => resolveAlertLifecycle(alert, { liveSpot, liveContract }),
+    [alert, liveSpot, liveContract]
   )
-
-  const isPureOption = alert.alert_type === 'OPTIONS_MOMENTUM' || alert.alert_type === 'OPTION_WRITE' || (alert.alert_type === 'GAMMA_BLAST' && (alert.option_type || alert.contract_symbol)) || (alert.contract_symbol && (alert.contract_symbol.endsWith('CE') || alert.contract_symbol.endsWith('PE')) && alert.exchange === 'NFO')
-  const isSpotSetup = !isFuture && !isPureOption && (alert.alert_type === 'ASYMMETRIC_OPPORTUNITY' || alert.alert_type === 'SQUEEZE_BREAKOUT' || alert.alert_type === 'SQUEEZE_BREAKDOWN' || alert.alert_type === 'PATTERN_COILING' || alert.alert_type === 'MOMENTUM_ACCELERATION' || alert.alert_type === 'POCKET_PIVOT' || alert.alert_type === 'PRECURSOR_RADAR' || alert.alert_type === 'SMC_SWEEP' || alert.alert_type === 'CIRCUIT_WARNING' || alert.alert_type === 'COMMODITY_MOMENTUM')
-
-  const isDerivative = isFuture || isPureOption || Boolean(
-    !isSpotSetup && (
-      (alert.exchange === 'NFO' && (alert.option_type || alert.strike || alert.contract_symbol))
-    )
-  )
-
-  const plan = alert.actionable_plan || {}
-  const tradePlan = plan.trade_plan || {}
-  const optPlan = plan.option_plan || null
-
-  const rawStrike = alert.strike || optPlan?.strike || alert.metrics?.strike
-  const strikeNum = rawStrike ? Number(String(rawStrike).replace(/[^0-9.-]/g, '')) : null
-
-  // Dynamic Live Spot: Prioritize streamed live quote if available, fallback to alert trigger spot
-  const rawSpot = liveSpot?.ltp ?? alert.underlying_spot ?? alert.metrics?.spot
-  const spotNum = rawSpot ? Number(String(rawSpot).replace(/[^0-9.-]/g, '')) : null
-
-  // Dynamic Live Contract Premium/Price (Options Premium or Futures Price)
-  const rawOptLtp = liveContract?.ltp ?? alert.ltp ?? alert.option_premium
-  const optLtpNum = rawOptLtp ? Number(String(rawOptLtp).replace(/[^0-9.-]/g, '')) : null
 
   const expiryInfo = useMemo(() => formatExpiryDetails(alert), [alert])
   const nextExpiryOpp = useMemo(() => computeNextExpiryOpportunity(alert, expiryInfo), [alert, expiryInfo])
-  const executionLevels = useMemo(
-    () => computeExecutionLevels(alert, isDerivative, spotNum, optLtpNum),
-    [alert, isDerivative, spotNum, optLtpNum]
-  )
 
-  const act = String(tradePlan.action || plan.action || '').toUpperCase()
-  const isOptionSell = isDerivative && (
-    act === 'SELL' ||
-    act === 'WRITE' ||
-    act === 'SHORT' ||
-    alert.alert_type === 'OPTION_WRITE'
-  )
+  const {
+    isDerivative,
+    isBull,
+    isOptionSell,
+    isTerminal,
+    isTimeStop,
+    isSLHit,
+    isExpired,
+    isInvalidated,
+    isT1Hit,
+    isT2Hit,
+    isT3Hit,
+    isTrail,
+    isEarly,
+    strikeNum,
+    optType,
+    isFuture,
+    spotNum,
+    currentPrice,
+    liveReturn,
+    levels: executionLevels,
+    stagePill,
+    trajectoryStatus,
+    horizonInfo,
+  } = lifecycle
 
-  const slNum = isDerivative
-    ? (optPlan?.sl_premium ? Number(optPlan.sl_premium) : (alert.option_stop_loss ? Number(alert.option_stop_loss) : (alert.stop_loss ? Number(alert.stop_loss) : null)))
-    : (tradePlan.invalidation_stop ? Number(tradePlan.invalidation_stop) : (alert.stop_loss ? Number(alert.stop_loss) : null))
-  const entryNum = isDerivative
-    ? (optPlan?.entry_premium ? Number(optPlan.entry_premium) : (alert.option_premium ? Number(alert.option_premium) : (optLtpNum || null)))
-    : (tradePlan.entry_price ? Number(tradePlan.entry_price) : (alert.trigger_level ? Number(alert.trigger_level) : spotNum))
-  const t1Num = isDerivative
-    ? (optPlan?.t1_premium ? Number(optPlan.t1_premium) : (alert.option_target_1 ? Number(alert.option_target_1) : (alert.target_level ? Number(alert.target_level) : null)))
-    : (tradePlan.target_1 ? Number(tradePlan.target_1) : (alert.target_level ? Number(alert.target_level) : null))
-  const t2Num = isDerivative
-    ? (optPlan?.t2_premium ? Number(optPlan.t2_premium) : (alert.option_target_2 ? Number(alert.option_target_2) : null))
-    : (tradePlan.target_2 ? Number(tradePlan.target_2) : null)
-  const t3Num = isDerivative
-    ? (optPlan?.t3_premium ? Number(optPlan.t3_premium) : null)
-    : (tradePlan.target_3 ? Number(tradePlan.target_3) : null)
-
-  const currentPrice = isDerivative ? (optLtpNum || spotNum) : spotNum
-
-  // Live Return % calculation & direction tracking
-  let liveReturn = null
-  if (currentPrice && entryNum && entryNum > 0) {
-    let diff = 0
-    if (isDerivative) {
-      diff = isOptionSell ? entryNum - currentPrice : currentPrice - entryNum
-    } else {
-      diff = isBull ? currentPrice - entryNum : entryNum - currentPrice
-    }
-    const pct = ((diff / entryNum) * 100).toFixed(1)
-    liveReturn = { diff, pct, isProfitable: diff >= 0 }
-  }
-
-  // Dynamic live stage hit detection (real-time cross evaluation)
-  const isExplicitSL = Boolean(
-    alert.stage === 'SL_HIT' ||
-    alert.target_status === 'SL_HIT' ||
-    alert.invalidation_reason?.toUpperCase().includes('STOP_LOSS') ||
-    alert.invalidation_reason?.toUpperCase().includes('SL HIT') ||
-    alert.invalidation_reason?.toUpperCase().includes('SL BREACH')
-  )
-
-  const isPriceBreachedSL = Boolean(
-    slNum && currentPrice && (
-      isDerivative
-        ? (isOptionSell ? currentPrice >= slNum : currentPrice <= slNum)
-        : (isBull ? currentPrice <= slNum : currentPrice >= slNum)
-    )
-  )
-
-  const isSLHit = Boolean(isExplicitSL || isPriceBreachedSL)
-
-  const isT3Hit = Boolean(
-    isFinalTarget ||
-    (t3Num && currentPrice && !isSLHit && (
-      isDerivative
-        ? (isOptionSell ? currentPrice <= t3Num : currentPrice >= t3Num)
-        : (isBull ? currentPrice >= t3Num : currentPrice <= t3Num)
-    ))
-  )
-
-  const isT2Hit = Boolean(
-    isT3Hit ||
-    alert.stage === 'T2_ACHIEVED' || alert.target_status === 'T2_ACHIEVED' ||
-    (t2Num && currentPrice && !isSLHit && (
-      isDerivative
-        ? (isOptionSell ? currentPrice <= t2Num : currentPrice >= t2Num)
-        : (isBull ? currentPrice >= t2Num : currentPrice <= t2Num)
-    ))
-  )
-
-  const isT1Hit = Boolean(
-    isT2Hit ||
-    isT1 ||
-    (t1Num && currentPrice && !isSLHit && (
-      isDerivative
-        ? (isOptionSell ? currentPrice <= t1Num : currentPrice >= t1Num)
-        : (isBull ? currentPrice >= t1Num : currentPrice <= t1Num)
-    ))
-  )
-
-  const trajectoryStatus = (() => {
-    if (isSLHit) {
-      return {
-        badge: '🛑 SL BREACHED',
-        text: alert.invalidation_reason || 'Stop loss triggered — trade thesis invalidated',
-        theme: 'rose',
-      }
-    }
-    if (isExpired) {
-      return {
-        badge: '⏱️ EXPIRED',
-        text: alert.invalidation_reason || 'Session time cutoff reached — trade closed',
-        theme: 'slate',
-      }
-    }
-    if (isInvalidated) {
-      return {
-        badge: '⚠️ INVALIDATED',
-        text: alert.invalidation_reason || 'Trade setup invalidated — structure or momentum collapsed',
-        theme: 'amber',
-      }
-    }
-    if (isT3Hit) {
-      return {
-        badge: '🚀 T3 REACHED',
-        text: 'Target 3 hit — runners locked (+6R+ extension)',
-        theme: 'purple',
-      }
-    }
-    if (isT2Hit) {
-      return {
-        badge: '🏁 T2 ACHIEVED',
-        text: 'Target 2 hit — 75% profit secured, trailing at T1',
-        theme: 'cyan',
-      }
-    }
-    if (isT1Hit) {
-      return {
-        badge: '🎯 T1 ACHIEVED',
-        text: 'Target 1 hit — 50% scale out complete, SL ratcheted to breakeven',
-        theme: 'emerald',
-      }
-    }
-    if (liveReturn && currentPrice && entryNum) {
-      if (liveReturn.isProfitable) {
-        if (t1Num) {
-          const t1Dist = Math.abs(t1Num - entryNum)
-          const currDist = Math.abs(currentPrice - entryNum)
-          const pctToT1 = Math.min(100, Math.max(0, Math.round((currDist / (t1Dist || 1)) * 100)))
-          const ptsAway = Math.abs(t1Num - currentPrice)
-          return {
-            badge: `🟢 RIGHT DIRECTION (+${liveReturn.pct}%)`,
-            text: `${pctToT1}% progress to T1 (${ptsAway > 0 ? `₹${ptsAway.toFixed(1)} away` : 'at target'})`,
-            theme: 'emerald',
-          }
-        }
-        return {
-          badge: `🟢 PROFITABLE (+${liveReturn.pct}%)`,
-          text: `Moving favorably from entry ₹${entryNum.toFixed(1)}`,
-          theme: 'emerald',
-        }
-      } else {
-        if (slNum) {
-          const slDist = Math.abs(entryNum - slNum)
-          const adverseDist = Math.abs(entryNum - currentPrice)
-          const pctToSL = Math.min(100, Math.max(0, Math.round((adverseDist / (slDist || 1)) * 100)))
-          const ptsBuffer = Math.abs(currentPrice - slNum)
-          return {
-            badge: `⚠️ PULLBACK (${liveReturn.pct}%)`,
-            text: `${pctToSL}% toward SL — ₹${ptsBuffer.toFixed(1)} buffer remaining`,
-            theme: 'amber',
-          }
-        }
-        return {
-          badge: `⚠️ AGAINST ENTRY (${liveReturn.pct}%)`,
-          text: `Testing below entry level`,
-          theme: 'amber',
-        }
-      }
-    }
-    return {
-      badge: '⚡ LIVE TRACKING',
-      text: 'Awaiting price updates',
-      theme: 'blue',
-    }
-  })()
-
-  // Real-time Cash Equity Return vs Trigger Level
-  let liveCashReturn = null
-  if (spotNum && alert.trigger_level && !isDerivative) {
-    const trigger = Number(alert.trigger_level)
-    if (trigger > 0) {
-      const diff = isBull ? spotNum - trigger : trigger - spotNum
-      const pct = ((diff / trigger) * 100).toFixed(1)
-      liveCashReturn = { diff, pct, isProfitable: diff >= 0 }
-    }
-  }
-
-  const targetNum = alert.target_level ? Number(String(alert.target_level).replace(/[^0-9.-]/g, '')) : null
-  const stopLossNum = alert.stop_loss ? Number(String(alert.stop_loss).replace(/[^0-9.-]/g, '')) : null
-
-  const expiryType = alert.expiry_type || (alert.contract_symbol && !['NIFTY', 'BANKNIFTY', 'FINNIFTY'].some((idx) => alert.symbol?.includes(idx)) ? 'MONTHLY' : 'WEEKLY')
-  const optType = alert.option_type || optPlan?.option_type || (alert.contract_symbol?.endsWith('PE') ? 'PE' : alert.contract_symbol?.endsWith('CE') ? 'CE' : (optPlan?.contract_symbol?.endsWith('PE') ? 'PE' : optPlan?.contract_symbol?.endsWith('CE') ? 'CE' : null))
+  const isT1 = isT1Hit
+  const isFinalTarget = isT3Hit
+  const optPlan = alert.actionable_plan?.option_plan || null
 
   let moneyness = null
   if (strikeNum && spotNum && optType && !isFuture) {
@@ -453,13 +270,14 @@ const AutoAlertCard = memo(function AutoAlertCard({
     }
   }
 
+
   return (
     <article
       className="rounded-2xl p-3 sm:p-3.5 space-y-2.5 transition-all duration-150 hover:border-gold/40 shadow-sm"
       style={{
-        background: isInvalidated ? 'rgba(255, 79, 123, 0.04)' : 'var(--color-panel)',
-        border: isInvalidated ? '1px solid rgba(255, 79, 123, 0.45)' : `1px solid ${style.border}`,
-        boxShadow: isInvalidated
+        background: (isInvalidated || isSLHit) ? 'rgba(255, 79, 123, 0.04)' : isTimeStop ? 'rgba(245, 158, 11, 0.04)' : 'var(--color-panel)',
+        border: (isInvalidated || isSLHit) ? '1px solid rgba(255, 79, 123, 0.45)' : isTimeStop ? '1px solid rgba(245, 158, 11, 0.4)' : `1px solid ${style.border}`,
+        boxShadow: (isInvalidated || isSLHit)
           ? '0 0 16px rgba(255, 79, 123, 0.08)'
           : isEarly
           ? 'var(--shadow-card)'
@@ -475,21 +293,17 @@ const AutoAlertCard = memo(function AutoAlertCard({
           <div
             className="w-7 h-7 rounded-lg flex items-center justify-center text-sm flex-shrink-0"
             style={{
-              background: isInvalidated ? 'rgba(255, 79, 123, 0.15)' : style.bg,
-              border: `1px solid ${isInvalidated ? 'rgba(255, 79, 123, 0.4)' : style.border}`,
+              background: (isInvalidated || isSLHit) ? 'rgba(255, 79, 123, 0.15)' : isTimeStop ? 'rgba(245, 158, 11, 0.15)' : style.bg,
+              border: `1px solid ${(isInvalidated || isSLHit) ? 'rgba(255, 79, 123, 0.4)' : isTimeStop ? 'rgba(245, 158, 11, 0.4)' : style.border}`,
             }}
           >
-            {isInvalidated ? '🛑' : isFinalTarget ? '🏁' : isT1 ? '🎯' : isTrail ? '📈' : style.icon}
+            {isSLHit ? '🛑' : isTimeStop ? '⏱️' : isExpired ? '⏱️' : isInvalidated ? '⚠️' : isFinalTarget ? '🏁' : isT1 ? '🎯' : isTrail ? '📈' : style.icon}
           </div>
           <div className="min-w-0">
             <div className="flex items-center gap-1 flex-wrap">
               <span className="text-sm font-black tracking-wide text-text leading-none">{alert.symbol}</span>
-              <span className={`text-[8px] px-1.5 py-px rounded font-black tracking-wider uppercase border ${
-                isTest
-                  ? 'bg-purple-500/20 text-purple-300 border-purple-500/40'
-                  : 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
-              }`}>
-                {isTest ? '🧪 TEST' : '🟢 REAL / LIVE'}
+              <span className={`text-[8px] px-1.5 py-px rounded font-black tracking-wider uppercase border ${provenance.cls}`}>
+                {provenance.label}
               </span>
               {strikeNum && !isFuture && (
                 <span className="text-[9px] font-black text-gold font-mono leading-none">₹{Number(strikeNum).toLocaleString('en-IN')}</span>
@@ -526,18 +340,22 @@ const AutoAlertCard = memo(function AutoAlertCard({
                 </span>
               )}
 
-              {/* Time Horizon Badge */}
-              {alert.time_horizon && (
-                <span className={`text-[7px] px-1.5 py-px rounded font-black uppercase whitespace-nowrap border ${
-                  alert.time_horizon === 'INTRADAY' ? 'bg-sky-500/15 text-sky-300 border-sky-500/30' :
-                  alert.time_horizon === 'SWING_SHORT' ? 'bg-amber-500/15 text-amber-300 border-amber-500/30' :
-                  alert.time_horizon === 'SWING_MID' ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30' :
-                  'bg-purple-500/15 text-purple-300 border-purple-500/30'
-                }`}>
-                  {alert.time_horizon === 'INTRADAY' ? '⏱️ INTRADAY' :
-                   alert.time_horizon === 'SWING_SHORT' ? '⚡ 2-5D SWING' :
-                   alert.time_horizon === 'SWING_MID' ? '📈 1-4W SWING' : '🏛️ POSITIONAL'}
-                </span>
+              {/* Time Horizon & ETA Badges */}
+              {horizonInfo && (
+                <div className="flex items-center gap-1">
+                  <span
+                    title={horizonInfo.tooltip}
+                    className={`text-[8px] px-1.5 py-px rounded font-black uppercase whitespace-nowrap border cursor-help ${horizonInfo.badgeClasses}`}
+                  >
+                    {horizonInfo.icon} {horizonInfo.label}
+                  </span>
+                  <span
+                    title={`Target ETA: ${horizonInfo.etaFull}`}
+                    className={`text-[8px] px-1.5 py-px rounded font-bold uppercase whitespace-nowrap border ${horizonInfo.etaClasses}`}
+                  >
+                    🎯 ETA: {horizonInfo.etaFull}
+                  </span>
+                </div>
               )}
 
               {/* Order Flow & Broker Depth Feed Status */}
@@ -566,32 +384,13 @@ const AutoAlertCard = memo(function AutoAlertCard({
               <span className="text-[8px] px-1.5 py-0.5 rounded-full font-black uppercase bg-purple-500/20 text-purple-300 border border-purple-500/40 whitespace-nowrap">
                 🧪 TEST
               </span>
-            ) : isInvalidated ? (
-              <span className="text-[8px] px-1.5 py-0.5 rounded-full font-black uppercase bg-rose-500/20 text-rose-300 border border-rose-500/40 animate-pulse whitespace-nowrap">
-                ❌ Invalid
-              </span>
-            ) : isFinalTarget ? (
-              <span className="text-[8px] px-1.5 py-0.5 rounded-full font-black uppercase bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 animate-pulse whitespace-nowrap">
-                🏁 Hit
-              </span>
-            ) : isT1 ? (
-              <span className="text-[8px] px-1.5 py-0.5 rounded-full font-black uppercase bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 animate-pulse whitespace-nowrap">
-                🎯 T1
-              </span>
-            ) : isTrail ? (
-              <span className="text-[8px] px-1.5 py-0.5 rounded-full font-black uppercase bg-blue-500/20 text-blue-300 border border-blue-500/40 whitespace-nowrap">
-                📈 Trail
-              </span>
-            ) : isEarly ? (
-              <span className="text-[8px] px-1.5 py-0.5 rounded-full font-black uppercase bg-amber-500/15 text-amber-400 border border-amber-500/30 whitespace-nowrap">
-                ⏳ Early
-              </span>
             ) : (
-              <span className="text-[8px] px-1.5 py-0.5 rounded-full font-black uppercase bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 animate-pulse whitespace-nowrap">
-                🔥 Live
+              <span className={`text-[8px] px-1.5 py-0.5 rounded-full font-black uppercase whitespace-nowrap border ${stagePill.cls}`}>
+                {stagePill.label}
               </span>
             )}
           </div>
+
 
           {/* Headline — single line, truncated, most important signal info */}
           <p className="text-[11px] font-bold text-text truncate min-w-0 flex-1" title={alert.headline}>
@@ -648,27 +447,27 @@ const AutoAlertCard = memo(function AutoAlertCard({
             {isDerivative ? (
               <>
                 <span className={`text-[11px] font-black font-mono leading-none ${
-                  liveContract?.flash === 'up' ? 'text-emerald-400' : liveContract?.flash === 'down' ? 'text-rose-400' : 'text-gold'
+                  liveContract?.flash === 'up' && !isTerminal ? 'text-emerald-400' : liveContract?.flash === 'down' && !isTerminal ? 'text-rose-400' : 'text-gold'
                 }`}>
-                  ₹{Number(optLtpNum || 0).toLocaleString('en-IN', { minimumFractionDigits: 1, maximumFractionDigits: 1 })}
-                  {liveContract?.ltp ? <span className="inline-block w-1 h-1 rounded-full bg-emerald-400 animate-pulse ml-0.5 align-middle" /> : null}
+                  ₹{Number(currentPrice || 0).toLocaleString('en-IN', { minimumFractionDigits: 1, maximumFractionDigits: 1 })}
+                  {liveContract?.ltp && !isTerminal ? <span className="inline-block w-1 h-1 rounded-full bg-emerald-400 animate-pulse ml-0.5 align-middle" /> : null}
                 </span>
                 {liveReturn && (
                   <span className={`text-[9px] font-bold leading-none ${liveReturn.isProfitable ? 'text-emerald-400' : 'text-rose-400'}`}>
                     {liveReturn.isProfitable ? '+' : ''}{liveReturn.pct}%
                   </span>
                 )}
-                <span className={`text-[8px] font-mono text-muted leading-none ${liveSpot?.flash === 'up' ? 'text-emerald-300' : liveSpot?.flash === 'down' ? 'text-rose-300' : ''}`}>
+                <span className={`text-[8px] font-mono text-muted leading-none ${liveSpot?.flash === 'up' && !isTerminal ? 'text-emerald-300' : liveSpot?.flash === 'down' && !isTerminal ? 'text-rose-300' : ''}`}>
                   Spot ₹{Number(spotNum || 0).toLocaleString('en-IN', { maximumFractionDigits: 0 })}
                 </span>
               </>
             ) : (
               <>
                 <span className={`text-[11px] font-black font-mono leading-none ${
-                  liveSpot?.flash === 'up' ? 'text-emerald-400' : liveSpot?.flash === 'down' ? 'text-rose-400' : 'text-text'
+                  liveSpot?.flash === 'up' && !isTerminal ? 'text-emerald-400' : liveSpot?.flash === 'down' && !isTerminal ? 'text-rose-400' : 'text-text'
                 }`}>
-                  ₹{Number(spotNum || 0).toLocaleString('en-IN', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}
-                  {liveSpot?.ltp ? <span className="inline-block w-1 h-1 rounded-full bg-emerald-400 animate-pulse ml-0.5 align-middle" /> : null}
+                  ₹{Number(currentPrice || 0).toLocaleString('en-IN', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}
+                  {liveSpot?.ltp && !isTerminal ? <span className="inline-block w-1 h-1 rounded-full bg-emerald-400 animate-pulse ml-0.5 align-middle" /> : null}
                 </span>
                 {liveReturn && (
                   <span className={`text-[9px] font-bold leading-none ${liveReturn.isProfitable ? 'text-emerald-400' : 'text-rose-400'}`}>
@@ -689,7 +488,7 @@ const AutoAlertCard = memo(function AutoAlertCard({
             title={`Deep analyze ${alert.symbol}`}
           >📊</button>
 
-          {alert.option_type && !isInvalidated && (
+          {alert.option_type && !isTerminal && (
             <button
               onClick={() => onInspectOptions(alert.symbol)}
               className="btn btn-xs btn-ghost text-[10px] px-1.5 text-gold hover:bg-gold/10 border border-gold/30"
@@ -718,13 +517,14 @@ const AutoAlertCard = memo(function AutoAlertCard({
             </button>
           )}
 
-          {!isInvalidated ? (
+          {!isTerminal ? (
             <button
               onClick={() => onOpenTicket(alert)}
               className="btn btn-xs btn-gold text-[10px] font-black px-2"
               title="Open order ticket"
             >🎫</button>
           ) : null}
+
 
           <button
             onClick={() => setShowDetails((v) => !v)}
@@ -816,15 +616,15 @@ const AutoAlertCard = memo(function AutoAlertCard({
         </div>
       )}
 
-      {/* Invalidation Callout & Forensic Post-Mortem if invalidated */}
-      {isInvalidated && (
+      {/* Invalidation Callout & Forensic Post-Mortem if invalidated or stopped */}
+      {(isInvalidated || isSLHit || isTimeStop) && (
         <div className="rounded-xl border border-rose-500/35 bg-rose-500/10 p-2.5 space-y-2 text-xs text-rose-800 dark:text-rose-200 animate-slide-up-fade">
           <div className="flex items-center justify-between gap-2 flex-wrap">
             <div className="flex items-center gap-2 min-w-0 flex-1">
-              <span className="text-base flex-shrink-0">🛑</span>
+              <span className="text-base flex-shrink-0">{isTimeStop ? '⏱️' : '🛑'}</span>
               <div className="min-w-0 flex-1">
                 <span className="font-black text-rose-700 dark:text-rose-300 block tracking-wide text-xs">
-                  Trade Thesis Invalidated:
+                  {isTimeStop ? 'Velocity Time-Stop Reached:' : isSLHit ? 'Stop-Loss Triggered:' : 'Trade Thesis Invalidated:'}
                 </span>
                 <span className="leading-relaxed text-rose-900/80 dark:text-rose-200/90 font-medium text-[11px] block truncate" title={alert.invalidation_reason || alert.summary}>
                   {alert.invalidation_reason || alert.summary}
@@ -1340,7 +1140,8 @@ const ManualAlertCard = memo(function ManualAlertCard({ alert, onRemove, onAnaly
   const liveSpotByFull = useLiveSpot(alert.symbol !== cleanSym ? alert.symbol : null)
   const liveSpot = liveSpotBySym ?? liveSpotByFull
   const style = TYPE_STYLE[alert.alert_type] || { icon: '🔔', color: 'var(--color-sapphire)' }
-  const isTest = alert.environment === 'TEST' || alert.is_live === false
+  const provenance = resolveAlertProvenance(alert)
+  const isTest = provenance.isTest
   const isInvalidated = alert.is_invalidated
   const alertTime = alert.timestamp || alert.triggered_at || alert.invalidated_at || alert.created_at || ''
   const timeShort = alertTime.includes(' ') ? alertTime.split(' ').slice(-2).join(' ') : alertTime
@@ -1365,13 +1166,9 @@ const ManualAlertCard = memo(function ManualAlertCard({ alert, onRemove, onAnaly
             <div className="flex items-center gap-2 flex-wrap">
               <span className="text-xs font-black">{alert.symbol}</span>
               <span
-                className={`text-[9px] px-2 py-0.5 rounded-full font-black uppercase tracking-wider ${
-                  isTest
-                    ? 'bg-purple-500/20 text-purple-300 border border-purple-500/40'
-                    : 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
-                }`}
+                className={`text-[9px] px-2 py-0.5 rounded-full font-black uppercase tracking-wider border ${provenance.cls}`}
               >
-                {isTest ? '🧪 TEST' : '🟢 REAL / LIVE'}
+                {provenance.label}
               </span>
               <span
                 className="text-[9px] px-1.5 py-0.5 rounded font-bold"
@@ -1922,15 +1719,22 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
   const storeNotifications = useNotificationStore((s) => s.notifications)
   useEffect(() => {
     if (!storeNotifications || storeNotifications.length === 0) return
-    // Only merge AUTO-type alerts (PRICE/TECHNICAL/OPTIONS alerts come from manual list)
-    // and exclude any test/simulated alerts
+    // Only merge AUTO-type alerts matching the current view_mode so historical archived
+    // items from notifications do not leak into the active radar table
     const autoFromStore = storeNotifications.filter(
       (n) => n.alert_type && !['PRICE', 'TECHNICAL', 'CONDITIONAL'].includes(n.alert_type) && !isTestOrSimAlert(n)
     )
     if (autoFromStore.length > 0) {
-      setAutoAlerts((prev) => mergeAlertsInPlace(prev, autoFromStore))
+      const modeFiltered = autoFromStore.filter((n) => {
+        if (autoViewMode === 'ACTIVE') return isAlertActive(n)
+        if (autoViewMode === 'ARCHIVED') return !isAlertActive(n)
+        return true
+      })
+      if (modeFiltered.length > 0) {
+        setAutoAlerts((prev) => mergeAlertsInPlace(prev, modeFiltered))
+      }
     }
-  }, [storeNotifications])
+  }, [storeNotifications, autoViewMode])
 
   useEffect(() => {
     loadAlerts(true)
@@ -1964,7 +1768,37 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
       }
     }
 
+    // 2. Real-time sync when an alert is archived/unarchived anywhere (another window, Edge, API, or bot)
+    const handleAlertArchived = (e) => {
+      const { alert_id, is_archived } = e?.detail || {}
+      if (!alert_id) return
+      setAutoAlerts((prev) =>
+        prev.map((a) =>
+          (a.alert_id === alert_id || a.id === alert_id)
+            ? {
+                ...a,
+                is_archived: Boolean(is_archived),
+                is_active: !is_archived && !a.is_invalidated && a.stage !== 'INVALIDATED' && a.stage !== 'TARGET_ACHIEVED',
+              }
+            : a
+        )
+      )
+    }
+
+    // 3. Real-time sync when all invalidated alerts are bulk-archived
+    const handleBulkArchived = () => {
+      setAutoAlerts((prev) =>
+        prev.map((a) =>
+          (a.is_invalidated || a.stage === 'INVALIDATED')
+            ? { ...a, is_archived: true, is_active: false }
+            : a
+        )
+      )
+    }
+
     window.addEventListener('new-market-alert', handleLiveAlert)
+    window.addEventListener('auto-alert-archived', handleAlertArchived)
+    window.addEventListener('auto-alerts-bulk-archived', handleBulkArchived)
 
     // Clear event dispatched from SSE auto_alerts_cleared broadcast
     const handleClearEvent = (e) => {
@@ -1980,8 +1814,7 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
     }
     window.addEventListener('auto-alerts-cleared', handleClearEvent)
 
-    // 2. Background polling — MANUAL alerts only (30s); auto-alerts come from SSE + store.
-    // Reduced from 15s to 30s; auto-alerts no longer duplicated here.
+    // 4. Background polling — MANUAL alerts only (30s); auto-alerts come from SSE + store.
     const syncTimer = setInterval(() => {
       loadAlerts(false)
     }, 30_000)
@@ -1989,6 +1822,8 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
     return () => {
       window.removeEventListener('new-market-alert', handleLiveAlert)
       window.removeEventListener('auto-alerts-cleared', handleClearEvent)
+      window.removeEventListener('auto-alert-archived', handleAlertArchived)
+      window.removeEventListener('auto-alerts-bulk-archived', handleBulkArchived)
       clearInterval(syncTimer)
     }
   }, [loadAlerts, loadAutoAlerts, chimeEnabled])
@@ -2286,6 +2121,7 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
     setSelectedSegment('ALL')
     setSelectedStage('ALL')
     setSelectedEnv('ALL')
+    setSelectedHorizon('ALL')
     setDensityMode('compact')
     setSelectedSort('NEWEST')
     setExpandedRows(new Set())
@@ -2512,33 +2348,8 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
   }, [onOpenOrderTicket])
 
 
-  // Active validation check: True only if trade is neither archived, invalidated, expired, nor final target reached
-  const isAlertActive = (a) => {
-    if (!a) return false
-    if (a.is_expired || a.stage === 'EXPIRED' || a.is_invalidated || a.is_archived) return false
-    if (a.stage === 'INVALIDATED' || a.stage === 'TARGET_ACHIEVED' || a.stage === 'COMPLETED' || a.target_status === 'TARGET_ACHIEVED') return false
-
-    // Check Intraday session expiration: strictly for explicit intraday setups!
-    // Swing and positional setups (SWING_SHORT, SWING_MID, POSITIONAL) remain active across calendar days.
-    const horizon = String(a.time_horizon || a.timeHorizon || '').toUpperCase()
-    const isExplicitIntraday = horizon === 'INTRADAY' || (a.alert_type && (a.alert_type.toUpperCase().includes('INTRADAY') || a.alert_type.toUpperCase().includes('ORB') || a.alert_type.toUpperCase().includes('SCALP')))
-    const isSwingOrPositional = horizon.includes('SWING') || horizon.includes('POSITIONAL') || (a.alert_type && a.alert_type.toUpperCase().includes('SWING'))
-
-    if (isExplicitIntraday && !isSwingOrPositional && (a.created_at || a.timestamp)) {
-      try {
-        const clean = String(a.created_at || a.timestamp).replace(' IST', '').trim()
-        const createdDate = new Date(clean)
-        const now = new Date()
-        if (!isNaN(createdDate.getTime()) && createdDate.toDateString() !== now.toDateString()) {
-          return false
-        }
-      } catch (_) {}
-    }
-
-    return a.is_active !== undefined
-      ? Boolean(a.is_active)
-      : true
-  }
+  // Active validation check delegates to top-level institutional isAlertActive
+  const checkIsAlertActive = isAlertActive
 
   const activeCount = autoAlerts.filter(isAlertActive).length
   const archivedCount = autoAlerts.length - activeCount
@@ -2666,8 +2477,20 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
 
       // 7b. Time Horizon Filter
       if (selectedHorizon !== 'ALL') {
-        const h = a.time_horizon || 'INTRADAY'
-        if (h !== selectedHorizon) return false
+        const hzInfo = resolveHorizonAndETA(a)
+        if (selectedHorizon === 'MULTIBAGGER') {
+          if (hzInfo.key !== 'MULTIBAGGER') return false
+        } else if (selectedHorizon === 'LONG_TERM' || selectedHorizon === 'POSITIONAL') {
+          if (hzInfo.key !== 'LONG_TERM' && hzInfo.key !== 'POSITIONAL') return false
+        } else if (selectedHorizon === 'SWING_MID') {
+          if (hzInfo.key !== 'SWING_MID') return false
+        } else if (selectedHorizon === 'SWING_SHORT') {
+          if (hzInfo.key !== 'SWING_SHORT') return false
+        } else if (selectedHorizon === 'INTRADAY') {
+          if (hzInfo.key !== 'INTRADAY') return false
+        } else if (hzInfo.key !== selectedHorizon && (a.time_horizon || 'INTRADAY') !== selectedHorizon) {
+          return false
+        }
       }
 
       return true
@@ -3407,6 +3230,7 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
                   <option value="MULTI_FLOW">🌊 Multi-Strike Flow</option>
                   <option value="GAMMA_BLAST">⚡ Gamma Blast</option>
                   <option value="SQUEEZE_BREAKOUT">🚀 Squeeze Breakout</option>
+                  <option value="MULTIBAGGER">🚀 Multibagger Alpha</option>
                   <option value="CFAI_FLOAT_EXHAUSTION">🐋 Float Exhaustion (CFAI)</option>
                   <option value="ORDER_BOOK_EXPANSION">🏗️ Order-Book Titan</option>
                   <option value="BLOCK_DEAL_ABSORPTION">🛡️ Block Deal Absorption</option>
@@ -3420,6 +3244,10 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
                   <option value="CRYPTO_SQUEEZE">🪙 Crypto Squeeze (24x7)</option>
                   <option value="CRYPTO_MOMENTUM">🪙 Crypto Momentum</option>
                   <option value="CRYPTO_VOLATILITY">🪙 Crypto Volatility</option>
+                  <option value="CRYPTO_CVD_ABSORPTION">🪙 Crypto Order Flow (CVD)</option>
+                  <option value="CRYPTO_LIQUIDATION_FLUSH">⚡ Crypto Liquidation Flush</option>
+                  <option value="CRYPTO_BASIS_ARBITRAGE">🌾 Crypto Basis Arbitrage</option>
+                  <option value="CRYPTO_VOL_ARBITRAGE">🎯 Crypto Vol Arbitrage</option>
                   <option value="INVALIDATED">❌ Invalidated ({invalidatedCount})</option>
                 </select>
 
@@ -3432,13 +3260,14 @@ function AlertsViewInner({ onOpenOrderTicket, defaultDensity = 'expanded' }) {
                       ? 'border-sky-400 text-sky-300 font-bold bg-sky-500/10'
                       : 'border-border hover:border-gold/50'
                   }`}
-                  title="Filter by trade time horizon"
+                  title="Filter by trade time horizon & ETA"
                 >
                   <option value="ALL">All Horizons</option>
-                  <option value="INTRADAY">⏱️ Intraday (15m–60m)</option>
-                  <option value="SWING_SHORT">⚡ 2–5D Swing</option>
-                  <option value="SWING_MID">📈 1–4W Swing</option>
-                  <option value="POSITIONAL">🏛️ 1–6M Positional</option>
+                  <option value="INTRADAY">⏱️ Intraday (Today)</option>
+                  <option value="SWING_SHORT">⚡ 2–5D Short Swing</option>
+                  <option value="SWING_MID">📈 1–4W Mid Swing</option>
+                  <option value="POSITIONAL">🏛️ 1–6M Long Positional</option>
+                  <option value="MULTIBAGGER">🚀 6–24M Multibagger Alpha</option>
                 </select>
               </div>
 

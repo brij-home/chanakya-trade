@@ -7,7 +7,6 @@ Verifies expectancy calculation, Kelly fraction, degradation state transitions, 
 
 from __future__ import annotations
 
-from pathlib import Path
 import pytest
 
 from engine.detector_circuit_breaker import DetectorCircuitBreaker

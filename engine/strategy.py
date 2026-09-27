@@ -402,6 +402,7 @@ def get_atm_data(symbol: str, spot: float) -> tuple[float, float, float, int]:
 def _default_lot(symbol: str) -> int:
     try:
         from engine.position_sizer import get_lot_size
+
         ls = get_lot_size(symbol)
         if ls and ls > 1:
             return ls

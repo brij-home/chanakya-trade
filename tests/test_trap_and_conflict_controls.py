@@ -9,8 +9,6 @@ Validates trap prevention and opportunity preservation controls:
   5. Gamma Blast sweep requirement: Requires verified bounce >= 0.10% off the low, not resting at day_low.
 """
 
-import pytest
-from datetime import datetime
 from zoneinfo import ZoneInfo
 from unittest.mock import MagicMock
 
@@ -52,13 +50,17 @@ def test_put_option_ignition_requires_premium_breakout(monkeypatch):
     engine._alerts.append(put_alert)
 
     # 1. Price drops to 65.6 (below trigger 69.4) -> MUST NOT IGNITE
-    monkeypatch.setattr(engine, "_batch_refresh_quotes", lambda alerts: {"NFO:NIFTY26SEP23000PE": 65.6})
+    monkeypatch.setattr(
+        engine, "_batch_refresh_quotes", lambda alerts: {"NFO:NIFTY26SEP23000PE": 65.6}
+    )
     ignited = engine.check_and_ignite_early_warnings()
     assert len(ignited) == 0
     assert put_alert.stage == "EARLY_WARNING"
 
     # 2. Price surges to 71.0 (above trigger 69.4) -> MUST IGNITE AS PUT BREAKDOWN
-    monkeypatch.setattr(engine, "_batch_refresh_quotes", lambda alerts: {"NFO:NIFTY26SEP23000PE": 71.0})
+    monkeypatch.setattr(
+        engine, "_batch_refresh_quotes", lambda alerts: {"NFO:NIFTY26SEP23000PE": 71.0}
+    )
     ignited = engine.check_and_ignite_early_warnings()
     assert len(ignited) == 1
     assert put_alert.stage == "IGNITED"
@@ -119,7 +121,9 @@ def test_opposing_trade_mutex_suppresses_conflicting_ignition(monkeypatch):
     engine._alerts.extend([active_ce, pe_early])
 
     # PE crosses trigger, but no CHoCH/reversal metric -> MUST BE SUPPRESSED
-    monkeypatch.setattr(engine, "_batch_refresh_quotes", lambda alerts: {"NFO:NIFTY26SEP23000PE": 72.0})
+    monkeypatch.setattr(
+        engine, "_batch_refresh_quotes", lambda alerts: {"NFO:NIFTY26SEP23000PE": 72.0}
+    )
     ignited = engine.check_and_ignite_early_warnings()
     assert len(ignited) == 0
     assert pe_early.stage == "EARLY_WARNING"
@@ -147,7 +151,7 @@ def test_pdl_bear_trap_suppression():
     mock_pe.last_price = 70.0
     mock_pe.pchange = 4.0  # Weak change, not true momentum
     mock_pe.volume = 5000
-    mock_pe.oi = 10000     # Vol/OI = 0.5 (low)
+    mock_pe.oi = 10000  # Vol/OI = 0.5 (low)
     mock_pe.option_type = "PE"
     mock_pe.symbol = "NIFTY26SEP23000PE"
     mock_pe.expiry = "2026-09-25"
@@ -371,6 +375,7 @@ def test_directional_quarantine_blocks_rapid_flip_flop(monkeypatch):
     a 20-minute directional quarantine suppresses opposing setups to prevent whipsaws.
     """
     import time
+
     engine = AutoAlertEngine(max_buffer=50)
     engine.clear_alerts()
 
@@ -512,5 +517,3 @@ def test_tier1_sanity_at_step_00e_protects_existing_trades():
     assert radar_ce.stage == "EARLY_WARNING"
 
     engine.clear_alerts()
-
-

@@ -19,10 +19,9 @@ Fully implements the BaseDetector protocol for unified single-pass evaluation.
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING
 
 import numpy as np
-import pandas as pd
 
 from engine.alert_identity import canonical_alert_symbol, generate_alert_id
 from engine.alert_model import AutoAlert
@@ -55,7 +54,11 @@ def detect_order_flow_divergence(ctx: DetectionContext) -> list[AutoAlert]:
     """
     Evaluates 5-minute / 15-minute candles for institutional order flow divergence.
     """
-    df = ctx.candles_5m if ctx.candles_5m is not None and len(ctx.candles_5m) >= 12 else ctx.candles_15m
+    df = (
+        ctx.candles_5m
+        if ctx.candles_5m is not None and len(ctx.candles_5m) >= 12
+        else ctx.candles_15m
+    )
     if df is None or len(df) < 12:
         return []
 

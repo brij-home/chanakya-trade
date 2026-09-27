@@ -139,7 +139,9 @@ def evaluate_hbcm(
     - Direction BULLISH: >= 4 of 5 heavyweights must print 5m close >= VWAP.
     - Direction BEARISH: >= 4 of 5 heavyweights must print 5m close <= VWAP.
     """
-    clean_und = underlying.upper().replace(".NS", "").replace("NSE:", "").replace("BSE:", "").strip()
+    clean_und = (
+        underlying.upper().replace(".NS", "").replace("NSE:", "").replace("BSE:", "").strip()
+    )
     dir_norm = direction.upper().strip()
     if dir_norm in ("BUY", "CALL", "LONG"):
         dir_norm = "BULLISH"
@@ -262,8 +264,12 @@ def evaluate_hbcm(
             is_above_vwap = (ltp >= vwap) if vwap > 0 else (chg_pct >= 0.0)
             is_below_vwap = (ltp <= vwap) if vwap > 0 else (chg_pct <= 0.0)
 
-            is_5m_green = (c_5m >= o_5m) if (c_5m is not None and o_5m is not None) else (chg_pct >= -0.10)
-            is_5m_red = (c_5m <= o_5m) if (c_5m is not None and o_5m is not None) else (chg_pct <= 0.10)
+            is_5m_green = (
+                (c_5m >= o_5m) if (c_5m is not None and o_5m is not None) else (chg_pct >= -0.10)
+            )
+            is_5m_red = (
+                (c_5m <= o_5m) if (c_5m is not None and o_5m is not None) else (chg_pct <= 0.10)
+            )
 
             is_bull = is_above_vwap and is_5m_green and (chg_pct > -0.25)
             is_bear = is_below_vwap and is_5m_red and (chg_pct < 0.25)
@@ -336,7 +342,7 @@ def evaluate_hbcm(
     if is_testing and not has_constituent_data:
         confluence_pass = True
         rejection_reason = None
-        summary = f"HBCM_TEST_PASSTHROUGH (No constituent quotes in test environment)"
+        summary = "HBCM_TEST_PASSTHROUGH (No constituent quotes in test environment)"
 
     res = HBCMResult(
         index_symbol=clean_und,

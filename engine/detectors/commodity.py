@@ -237,10 +237,7 @@ def detect_commodity_breakouts(
             if (
                 not is_locked_bull
                 and has_bull_chg
-                and (
-                    (ltp >= prior_high * 0.999 or cur_close >= prior_high)
-                    or is_vwap_trend_bull
-                )
+                and ((ltp >= prior_high * 0.999 or cur_close >= prior_high) or is_vwap_trend_bull)
                 and upper_wick_ratio <= max_wick
                 and bull_close_ratio >= req_bull_close
                 and ltp >= vwap * 0.998
@@ -252,10 +249,7 @@ def detect_commodity_breakouts(
             elif (
                 not is_locked_bear
                 and has_bear_chg
-                and (
-                    (ltp <= prior_low * 1.001 or cur_close <= prior_low)
-                    or is_vwap_trend_bear
-                )
+                and ((ltp <= prior_low * 1.001 or cur_close <= prior_low) or is_vwap_trend_bear)
                 and lower_wick_ratio <= max_wick
                 and bear_close_ratio >= req_bear_close
                 and ltp <= vwap * 1.002
@@ -499,6 +493,7 @@ def detect_commodity_breakouts(
         risk_pts = round(max(1.0, noise_safe_pts), 1)
         atr = round(base_atr, 1)
         direction = "BULLISH" if is_bullish else "BEARISH"
+        alert_type = "COMMODITY_MOMENTUM"
         from engine.alert_identity import generate_alert_id
 
         alert_id = generate_alert_id(clean_sym, alert_type)

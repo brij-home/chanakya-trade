@@ -7,10 +7,8 @@ and static prevention of volatile ID anti-patterns across all detectors.
 
 from __future__ import annotations
 
-import ast
 from datetime import date
 from pathlib import Path
-import pytest
 
 from engine.alert_identity import (
     canonical_alert_symbol,
@@ -135,4 +133,6 @@ def test_all_detectors_use_canonical_identity():
             if banned in content:
                 violations.append(f"{f.name}: contains banned pattern '{banned}'")
 
-    assert not violations, f"Banned alert identity patterns detected in detectors:\n" + "\n".join(violations)
+    assert not violations, "Banned alert identity patterns detected in detectors:\n" + "\n".join(
+        violations
+    )

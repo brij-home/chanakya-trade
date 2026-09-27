@@ -3,22 +3,24 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile
-    image: vibe-trading:latest
-    container_name: vibe-trading-app
+    image: chanakya-trade:latest
+    container_name: chanakya-trade-app
     ports:
       - "127.0.0.1:8765:8765"
     volumes:
-      - vibe-trading-data:/data
+      - chanakya-trade-data:/data
     environment:
       - DEPLOY_MODE=self-hosted
       - TRADING_PLATFORM_HOME=/data
       - TRADING_PLATFORM_DATA=/data
       - TRADING_PLATFORM_PDF_DIR=/data/exports
       - SESSION_SECRET=${SESSION_SECRET:-change-me-in-production}
+      - CSRF_SECRET=${CSRF_SECRET:-}
       - AI_PROVIDER=${AI_PROVIDER:-}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - GROQ_API_KEY=${GROQ_API_KEY:-}
       - NEWSAPI_KEY=${NEWSAPI_KEY:-}
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
       - TRADING_CAPITAL=${TRADING_CAPITAL:-100000}
@@ -47,5 +49,5 @@ services:
         max-file: "3"
 
 volumes:
-  vibe-trading-data:
+  chanakya-trade-data:
     driver: local

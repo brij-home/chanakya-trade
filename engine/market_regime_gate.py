@@ -10,7 +10,7 @@ import logging
 import threading
 import time
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +44,7 @@ class RegimeSnapshot:
 def _fetch_vix() -> Optional[float]:
     try:
         from market.indices import get_vix
+
         val = get_vix()
         if val and float(val) > 0:
             return float(val)
@@ -278,6 +279,7 @@ def build_spread_recommendation(
 ) -> dict:
     try:
         from engine.defined_risk_spreads import build_defined_risk_spread
+
         strategy = "BULL_CALL_SPREAD" if direction == "BULLISH" else "BEAR_PUT_SPREAD"
         spread = build_defined_risk_spread(
             underlying=underlying,

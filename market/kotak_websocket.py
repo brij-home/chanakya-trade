@@ -29,7 +29,6 @@ Usage:
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import threading
@@ -145,7 +144,9 @@ class KotakWebSocketManager:
         with self._lock:
             for inst in instruments:
                 clean = inst.strip().upper()
-                tok = SYMBOL_TO_TOKEN.get(clean) or SYMBOL_TO_TOKEN.get(clean.split(":")[-1]) or clean
+                tok = (
+                    SYMBOL_TO_TOKEN.get(clean) or SYMBOL_TO_TOKEN.get(clean.split(":")[-1]) or clean
+                )
                 self._subscribed_tokens.add(tok)
 
     def unsubscribe(self, instruments: list[str]) -> None:
@@ -153,7 +154,9 @@ class KotakWebSocketManager:
         with self._lock:
             for inst in instruments:
                 clean = inst.strip().upper()
-                tok = SYMBOL_TO_TOKEN.get(clean) or SYMBOL_TO_TOKEN.get(clean.split(":")[-1]) or clean
+                tok = (
+                    SYMBOL_TO_TOKEN.get(clean) or SYMBOL_TO_TOKEN.get(clean.split(":")[-1]) or clean
+                )
                 self._subscribed_tokens.discard(tok)
 
     def get_tick(self, instrument: str) -> Optional[KotakTick]:
@@ -247,7 +250,6 @@ class KotakWebSocketManager:
     def _run_loop(self) -> None:
         """WebSocket connection loop using websockets library."""
         try:
-            import websockets
             from websockets.sync.client import connect
         except ImportError:
             logger.warning("websockets library not available for Kotak WS feed.")

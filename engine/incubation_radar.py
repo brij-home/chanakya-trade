@@ -285,9 +285,7 @@ def remove_from_incubation(
         conn = _get_connection(db_path)
         try:
             if hard_delete:
-                cur = conn.execute(
-                    "DELETE FROM incubation_pipeline WHERE symbol = ?", (clean_sym,)
-                )
+                cur = conn.execute("DELETE FROM incubation_pipeline WHERE symbol = ?", (clean_sym,))
             else:
                 cur = conn.execute(
                     "UPDATE incubation_pipeline SET is_archived = 1 WHERE symbol = ?",
@@ -359,7 +357,11 @@ def evaluate_incubated_pipeline(
                     invalidated.append(c.symbol)
 
                 # Case C: Target 1 Reached
-                elif curr_price >= c.target_1 and c.target_1 > 0 and c.cycle_state != "TARGET_1_ACHIEVED":
+                elif (
+                    curr_price >= c.target_1
+                    and c.target_1 > 0
+                    and c.cycle_state != "TARGET_1_ACHIEVED"
+                ):
                     new_state = "TARGET_1_ACHIEVED"
                     new_eta_label = "🎯 +2R De-Risked"
 

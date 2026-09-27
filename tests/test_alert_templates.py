@@ -274,16 +274,23 @@ def test_asymmetric_setup_alert_readable_futures_and_no_spot_clash():
     msg = render_asymmetric_alert(asym_dict)
 
     # 1. Spot Action line must use spot range, not option premium range
-    assert "Action: BUY</b> @ <code>₹23,000 – ₹23,100</code> (Lot: 65) (Spot CMP: ₹23,077.00)" in msg
+    assert (
+        "Action: BUY</b> @ <code>₹23,000 – ₹23,100</code> (Lot: 65) (Spot CMP: ₹23,077.00)" in msg
+    )
     assert "SL:</b> <code>₹22,661.61</code>" in msg
     assert "T1 (+2R):</b> <code>₹24,057.49</code>" in msg
 
     # 2. Futures Preferred line must show clean symbol with expiry, lot size, and execution levels
-    assert "Futures Preferred:</b> <code>NIFTY 26-OCT FUT</code> (Lot: 65) @ ₹23,157.8 | SL: ₹22,661.6 | T1: ₹24,057.5 [Delta 1.0 · Zero Theta Decay]" in msg
+    assert (
+        "Futures Preferred:</b> <code>NIFTY 26-OCT FUT</code> (Lot: 65) @ ₹23,157.8 | SL: ₹22,661.6 | T1: ₹24,057.5 [Delta 1.0 · Zero Theta Decay]"
+        in msg
+    )
 
     # 3. F&O Alternative option line must show clean option, lot size, and execution levels
-    assert "F&O Alternative:</b> <code>NIFTY 23100 CE</code> (Lot: 65) @ ₹210.3 | SL: ₹147.2 | T1: ₹700.5" in msg
-
+    assert (
+        "F&O Alternative:</b> <code>NIFTY 23100 CE</code> (Lot: 65) @ ₹210.3 | SL: ₹147.2 | T1: ₹700.5"
+        in msg
+    )
 
 
 def test_render_milestone_alerts():
@@ -2148,3 +2155,136 @@ def test_crisp_alert_formatting_and_sector_shortening():
     assert "1.5R" in rendered or "1.4R" in rendered
     assert ":1 R:R" not in rendered
 
+
+def test_render_crypto_alert_holistic_sanitization():
+    """Verify that crypto alerts render without duplicate CMP, without truncated ($ in signals,
+
+    with 24h rolling ETA, and with Runner (T3) support.
+    """
+    from bot.alert_templates import render_auto_alert
+    from engine.alert_model import AutoAlert
+    from engine.alert_scrutiny import alert_scrutiny_auditor
+
+    alert = AutoAlert(
+        alert_id="aa-crypto-momentum-btcusdt-demand-20260927",
+        alert_type="CRYPTO_MOMENTUM",
+        stage="IGNITED",
+        symbol="BTCUSDT",
+        exchange="CRYPTO",
+        segment="CRYPTO",
+        direction="BULLISH",
+        headline="⚡ CRYPTO SMC ALPHA: BTCUSDT Demand Order Block Reclaim @ $84,893.89",
+        summary="Smart Money structural reclaim at 15m Demand OB ($83,886.03 - $84,573.03). Bullish structure confirmed.",
+        ltp=84893.89,
+        trigger_level=84573.03,
+        target_level=88923.37,
+        stop_loss=83214.94,
+        confidence=91,
+        time_horizon="INTRADAY",
+        eta_label="Today 15:15 IST",  # Simulating an alert corrupted with 15:15 IST
+        metrics={
+            "setup_confluence": "15m Bullish Regime + Unmitigated Demand OB ($83,886.0 - $84,573.0)",
+        },
+        actionable_plan={
+            "action": "BUY_SPOT / LONG",
+            "segment": "CRYPTO",
+            "contract": "CRYPTO:BTCUSDT",
+            "entry_range": "$83,886.03 – $84,995.90",
+            "stop_loss": "$83,214.94",
+            "target": "$88,923.37",
+            "target_2": "$91,945.48",
+            "target_3": "$94,967.59",
+            "runner": "$94,967.59",
+            "risk_reward": "1:2.4 (T1) | 1:4.2 (T2)",
+            "setup_confluence": "15m Bullish Regime + Unmitigated Demand OB ($83,886.0 - $84,573.0)",
+            "profit_rule": "Scale 50% at T1, trail remaining to breakeven.",
+            "no_chase_boundary": 85587.91,
+        },
+    )
+
+    rendered = render_auto_alert(alert, in_market=True)
+
+    # 1. Zero duplicate price in headline
+    assert rendered.count("$84,893.89") == 1
+    assert "Spot CMP: <b>$84,893.89</b>" not in rendered
+
+    # 2. No truncated "($ " or duplicated confluence in Signals
+    assert "($\n" not in rendered
+    assert "($," not in rendered
+    assert "• Signals: 15m Bullish Regime" not in rendered
+    assert (
+        "• <b>Structure:</b> <i>15m Bullish Regime + Unmitigated Demand OB ($83,886.0 - $84,573.0)</i>"
+        in rendered
+    )
+
+    # 3. ETA corrected to 24h Rolling (never 15:15 IST for crypto)
+    assert "Today 15:15 IST" not in rendered
+    assert "24h Rolling" in rendered
+
+    # 4. Runner (T3) rendered in trade plan
+    assert "Runner:" in rendered
+    assert "$94,967.59" in rendered
+
+    # 5. Crypto Quant Scrutiny fallback formats in USD ($) and zero Rs.
+    scrutiny = alert_scrutiny_auditor._generate_quantitative_fallback(alert, {})
+    assert "Rs." not in scrutiny.logic_confirmation
+    assert "Rs." not in scrutiny.trap_risk_warning
+    assert "Rs." not in scrutiny.actionable_guidance
+    assert "$" in scrutiny.logic_confirmation
+
+
+def test_crypto_milestone_update_numbering_and_currency():
+    """Verify crypto milestone updates start at UPDATE #1 (not skipping to #4) and format in USD ($)."""
+    alert = AutoAlert(
+        alert_id="aa-crypto-solusdt-short-test",
+        alert_type="CRYPTO_MOMENTUM",
+        stage="T1_ACHIEVED",
+        symbol="SOLUSDT",
+        exchange="CRYPTO",
+        direction="BEARISH",
+        headline="🏆 🔴 CRYPTO:SOLUSDT (CRYPTO MOMENTUM) — TARGET 1 ACHIEVED",
+        summary="Target 1 hit at $120.07",
+        ltp=123.86,
+        trigger_level=124.12,
+        target_level=120.07,
+        stop_loss=125.65,
+        created_at="2026-09-27 16:30:00 IST",
+        actionable_plan={
+            "action": "SELL / SHORT",
+            "contract": "CRYPTO:SOLUSDT",
+            "recommended_entry": "$124.12",
+            "entry_price": 124.12,
+            "stop_loss": "$125.65",
+            "target": "$120.07",
+            "target_1": "$120.07",
+            "target_2": "$117.12",
+            "runner": "$115.00",
+        },
+        trailing_stop=123.87,
+        locked_profit_pct=0.2,
+        achieved_milestones=["T1_ACHIEVED"],
+        is_live=True,
+        environment="LIVE",
+        telegram_update_count=0,
+        update_number=1,
+    )
+
+    # 1. Update number and milestone data extraction
+    ms_data = MilestoneAlertData.from_alert(alert, "TARGET_1")
+    assert ms_data.update_number == 1
+    assert ms_data.exchange == "CRYPTO"
+    assert ms_data.currency == "$"
+
+    rendered = render_milestone_alert(ms_data)
+
+    # 2. Header must be UPDATE #1, never UPDATE #4 or UPDATE #2
+    assert "UPDATE #1 · TARGET 1 HIT" in rendered
+    assert "UPDATE #4" not in rendered
+
+    # 3. Currency symbol must be $ throughout, zero ₹
+    assert "₹" not in rendered
+    assert "$123.86" in rendered
+    assert "T1:</b> $120.07" in rendered
+    assert "Trail Stop:</b> <code>$123.87</code>" in rendered
+    assert "Entry: $124.12 | SL: $125.65 | T1: $120.07 | T2: $117.12" in rendered
+    assert "T2: $117.12" in rendered

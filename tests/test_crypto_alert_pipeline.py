@@ -257,3 +257,164 @@ def test_crypto_telegram_routing_and_formatting():
     assert "$83,500" in rendered
     assert "$88,000" in rendered
     assert "24x7 Continuous Liquidity" in rendered
+
+
+def test_detect_new_crypto_signals():
+    """Verify autonomous detection of CVD Absorption, Liquidation Flush, Basis Arbitrage, and Vol Arbitrage."""
+    from engine.detectors.crypto import detect_single_crypto_symbol
+
+    mock_quote = MagicMock()
+    mock_quote.last_price = 82000.0
+    mock_quote.change_pct = 1.8
+
+    mock_of = {
+        "status": "ONLINE",
+        "absorption_signal": "BULLISH_CVD_ABSORPTION",
+        "conviction": 90,
+        "current_delta": 450.0,
+        "cumulative_volume_delta": 1250.0,
+        "delta_bias": "BULLISH_AGGRESSIVE",
+        "cvd_trend": "RISING",
+    }
+
+    mock_liq = {
+        "status": "ONLINE",
+        "flush_signal": "LONG_LIQUIDATION_FLUSH_REVERSAL",
+        "conviction": 92,
+        "rvol": 2.4,
+        "atr_14": 420.0,
+        "stop_loss": 81200.0,
+        "target_1": 84000.0,
+        "target_2": 85500.0,
+    }
+
+    mock_fut = {
+        "symbol": "BTCUSDT",
+        "mark_price": 82050.0,
+        "funding_rate_8h": 0.00035,  # ~38.3% APY -> basis arbitrage
+        "open_interest_usd": 650000000.0,
+    }
+
+    mock_opt = {
+        "volatility_regime": "VOLATILITY_OVERPRICED_IV_RICH",
+        "iv_rv_spread_pct": 14.5,
+        "atm_implied_volatility_pct": 62.0,
+        "realized_volatility_30d_pct": 47.5,
+        "max_pain": 82000.0,
+        "max_pain_distance_pct": 0.0,
+    }
+
+    with (
+        patch("market.crypto_stream.crypto_stream.get_quote", return_value=mock_quote),
+        patch("market.crypto_stream.crypto_stream.get_order_flow_metrics", return_value=mock_of),
+        patch(
+            "market.crypto_stream.crypto_stream.get_liquidation_cascade_metrics",
+            return_value=mock_liq,
+        ),
+        patch("market.crypto_stream.crypto_stream.fetch_futures_metrics", return_value=mock_fut),
+        patch("market.crypto_options.get_crypto_options_summary", return_value=mock_opt),
+    ):
+        alerts = detect_single_crypto_symbol("BTCUSDT")
+        alert_types = {a.alert_type for a in alerts}
+        assert "CRYPTO_CVD_ABSORPTION" in alert_types
+        assert "CRYPTO_LIQUIDATION_FLUSH" in alert_types
+        assert "CRYPTO_BASIS_ARBITRAGE" in alert_types
+        assert "CRYPTO_VOL_ARBITRAGE" in alert_types
+
+        # Verify alert properties
+        cvd_alert = next(a for a in alerts if a.alert_type == "CRYPTO_CVD_ABSORPTION")
+        assert cvd_alert.direction == "BULLISH"
+        assert cvd_alert.confidence >= 88
+        assert "aa-crypto-cvd-absorption" in cvd_alert.alert_id
+
+        basis_alert = next(a for a in alerts if a.alert_type == "CRYPTO_BASIS_ARBITRAGE")
+        assert basis_alert.direction == "NEUTRAL"
+        assert "aa-crypto-basis-arbitrage" in basis_alert.alert_id
+
+
+def test_crypto_trade_plan_logical_derivation():
+    """Verify that derive_crypto_trade_plan computes dynamic levels from market structure without hardcoding."""
+    from engine.detectors.crypto import derive_crypto_trade_plan
+
+    # Test 1: Bullish Demand OB Setup with real klines
+    dates = pd.date_range("2026-09-27 10:00", periods=60, freq="15min")
+    # Synthetic realistic price movement around $85,000
+    df = pd.DataFrame(
+        {
+            "open": [85000.0 + (i % 5) * 50 for i in range(60)],
+            "high": [85100.0 + (i % 5) * 50 for i in range(60)],
+            "low": [84900.0 + (i % 5) * 50 for i in range(60)],
+            "close": [85050.0 + (i % 5) * 50 for i in range(60)],
+            "volume": [1000.0 for _ in range(60)],
+        },
+        index=dates,
+    )
+    df["date"] = df.index
+
+    # 1. Bullish Demand OB Reclaim: OB at 84200 - 84600, LTP at 85000
+    plan_bull = derive_crypto_trade_plan(
+        symbol="BTCUSDT",
+        direction="BULLISH",
+        ltp=85000.0,
+        df=df,
+        ob_bottom=84200.0,
+        ob_top=84600.0,
+    )
+
+    # Invalidation SL must be strictly below Demand OB bottom (84200)
+    assert plan_bull.sl_price < 84200.0
+    # Entry range must logically bound between OB top and current LTP
+    assert plan_bull.entry_min <= 84600.0 <= plan_bull.entry_max
+    # Targets must expand upward logically: T1 < T2 < T3
+    assert (
+        plan_bull.sl_price
+        < plan_bull.entry_ref
+        < plan_bull.t1_price
+        < plan_bull.t2_price
+        < plan_bull.t3_price
+    )
+    # Mathematical R:R check
+    expected_risk = plan_bull.entry_ref - plan_bull.sl_price
+    expected_rr1 = round((plan_bull.t1_price - plan_bull.entry_ref) / expected_risk, 1)
+    expected_rr2 = round((plan_bull.t2_price - plan_bull.entry_ref) / expected_risk, 1)
+    expected_rr3 = round((plan_bull.t3_price - plan_bull.entry_ref) / expected_risk, 1)
+    assert plan_bull.rr_1 == expected_rr1
+    assert plan_bull.rr_2 == expected_rr2
+    assert plan_bull.rr_3 == expected_rr3
+    assert (
+        f"1:{expected_rr1:.1f} (T1) | 1:{expected_rr2:.1f} (T2) | 1:{expected_rr3:.1f} (Runner)"
+        == plan_bull.rr_str
+    )
+    # Verify profit rule contains real computed targets and R-multipliers
+    assert f"+{expected_rr1:.1f}R" in plan_bull.profit_rule
+    assert f"+{expected_rr2:.1f}R" in plan_bull.profit_rule
+    assert plan_bull.no_chase > plan_bull.entry_max
+
+    # 2. Bearish Supply OB Setup: OB at 85500 - 85900, LTP at 85000
+    plan_bear = derive_crypto_trade_plan(
+        symbol="BTCUSDT",
+        direction="BEARISH",
+        ltp=85000.0,
+        df=df,
+        ob_bottom=85500.0,
+        ob_top=85900.0,
+    )
+
+    # Invalidation SL must be strictly above Supply OB top (85900)
+    assert plan_bear.sl_price > 85900.0
+    # Entry range must logically bound between LTP and OB bottom
+    assert plan_bear.entry_min <= 85000.0
+    # Targets must expand downward logically: T1 > T2 > T3
+    assert (
+        plan_bear.sl_price
+        > plan_bear.entry_ref
+        > plan_bear.t1_price
+        > plan_bear.t2_price
+        > plan_bear.t3_price
+    )
+    # Bearish mathematical R:R check
+    expected_risk_bear = plan_bear.sl_price - plan_bear.entry_ref
+    expected_rr1_bear = round((plan_bear.entry_ref - plan_bear.t1_price) / expected_risk_bear, 1)
+    assert plan_bear.rr_1 == expected_rr1_bear
+    assert f"+{expected_rr1_bear:.1f}R" in plan_bear.profit_rule
+    assert plan_bear.no_chase < plan_bear.entry_min

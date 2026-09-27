@@ -88,18 +88,12 @@ class SQLiteAlertStore:
                 );
                 """
             )
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_alerts_symbol ON alerts(symbol);"
-            )
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_alerts_symbol ON alerts(symbol);")
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_alerts_session_date ON alerts(session_date);"
             )
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_alerts_status ON alerts(status);"
-            )
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_alerts_alert_type ON alerts(alert_type);"
-            )
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_alerts_status ON alerts(status);")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_alerts_alert_type ON alerts(alert_type);")
             conn.commit()
 
     def save_alert(self, alert_or_dict: Any) -> None:

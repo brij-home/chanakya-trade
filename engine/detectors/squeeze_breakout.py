@@ -416,7 +416,14 @@ def detect_squeeze_breakout(
         ):
             # Benchmark Regime Gate: In a green/bullish market, shorting equities has < 5% win rate (trap avoidance)
             clean_sym = symbol.upper().replace(".NS", "").replace("NSE:", "").strip()
-            is_idx_sym = clean_sym in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX")
+            is_idx_sym = clean_sym in (
+                "NIFTY",
+                "BANKNIFTY",
+                "FINNIFTY",
+                "MIDCPNIFTY",
+                "SENSEX",
+                "BANKEX",
+            )
             if not is_test_env and not is_idx_sym:
                 try:
                     from market.quotes import get_quote
@@ -643,7 +650,14 @@ def detect_squeeze_breakout(
         ):
             # Benchmark Regime Gate: In a green/bullish market, shorting equities has < 5% win rate (trap avoidance)
             clean_sym = symbol.upper().replace(".NS", "").replace("NSE:", "").strip()
-            is_idx_sym = clean_sym in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX")
+            is_idx_sym = clean_sym in (
+                "NIFTY",
+                "BANKNIFTY",
+                "FINNIFTY",
+                "MIDCPNIFTY",
+                "SENSEX",
+                "BANKEX",
+            )
             if not is_test_env and not is_idx_sym:
                 try:
                     from market.quotes import get_quote

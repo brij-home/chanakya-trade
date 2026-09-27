@@ -10,9 +10,7 @@ Deterministic unit and integration tests for:
 
 from __future__ import annotations
 
-import numpy as np
 import pandas as pd
-import pytest
 
 from analysis.century_compounder import (
     calculate_twin_engines,
@@ -26,12 +24,12 @@ def _build_synthetic_coiling_df(n: int = 50, dry_up: bool = True) -> pd.DataFram
     """Generates synthetic daily OHLCV dataframe with dry-up or expansion volume."""
     base_price = 500.0
     dates = pd.date_range("2026-01-01", periods=n, freq="B")
-    
+
     # Flat horizontal coiling price
     closes = [base_price + (i % 3) * 1.5 - 1.0 for i in range(n)]
     highs = [c + 2.0 for c in closes]
     lows = [c - 2.0 for c in closes]
-    
+
     # 50-day average volume = 100,000
     volumes = [100000.0] * n
     if dry_up:
@@ -41,15 +39,17 @@ def _build_synthetic_coiling_df(n: int = 50, dry_up: bool = True) -> pd.DataFram
             # Narrow range
             highs[-i] = closes[-i] + 0.8
             lows[-i] = closes[-i] - 0.8
-            
-    return pd.DataFrame({
-        "date": dates,
-        "open": closes,
-        "high": highs,
-        "low": lows,
-        "close": closes,
-        "volume": volumes,
-    })
+
+    return pd.DataFrame(
+        {
+            "date": dates,
+            "open": closes,
+            "high": highs,
+            "low": lows,
+            "close": closes,
+            "volume": volumes,
+        }
+    )
 
 
 def test_twin_engines_calculation_century_tier():
@@ -64,7 +64,7 @@ def test_twin_engines_calculation_century_tier():
         gross_block_growth_pct=30.0,
         tam_cr=200000.0,
     )
-    
+
     # PE re-rating: from 18x to 55x terminal PE = ~3.06x
     assert fe.pe_expansion_multiple >= 2.5
     # Operating leverage boost: 26% sales growth -> ~37.7% PAT CAGR -> 10Y ~27x to 35x PAT expansion
@@ -79,14 +79,14 @@ def test_evaluate_century_compounder_pillars():
     """Test 7-pillar evaluation and anti-FOMO execution blueprint."""
     df = _build_synthetic_coiling_df(40, dry_up=True)
     report = evaluate_century_compounder("TRENT", df=df, ltp=500.0)
-    
+
     assert report.symbol == "TRENT"
     assert report.century_score >= 60
     assert report.runway_score >= 0
     assert report.reinvestment_score >= 0
     assert report.operating_leverage_score >= 0
     assert len(report.pillar_notes) > 0
-    
+
     # Anti-FOMO Blueprint Checks
     af = report.anti_fomo
     assert af.fair_value_anchor > 0
@@ -100,14 +100,14 @@ def test_detect_pre_inflection_dryup_success():
     """Test that pre-inflection detector triggers when volume contracts and range squeezes."""
     df = _build_synthetic_coiling_df(50, dry_up=True)
     ltp = float(df["close"].iloc[-1])
-    
+
     alert = detect_pre_inflection_dryup("KAYNES", df=df, ltp=ltp)
     assert alert is not None
     assert alert.alert_type == "PRE_INFLECTION_DRYUP"
     assert alert.stage == "EARLY_WARNING"
     assert "PRE-INFLECTION DRY-UP" in alert.headline
     assert alert.confidence >= 70
-    
+
     plan = alert.actionable_plan
     assert "entry_range" in plan
     assert "do_not_chase_above" in plan
@@ -124,7 +124,7 @@ def test_detect_pre_inflection_dryup_rejection_on_expansion():
         df.loc[df.index[-i], "volume"] = 300000.0  # 3x volume
         df.loc[df.index[-i], "high"] = df.loc[df.index[-i], "close"] + 25.0  # 5% daily range
         df.loc[df.index[-i], "low"] = df.loc[df.index[-i], "close"] - 25.0
-        
+
     ltp = float(df["close"].iloc[-1])
     alert = detect_pre_inflection_dryup("VOLATILE_SYM", df=df, ltp=ltp)
     assert alert is None, "Should reject assets with high volume and wide price swings"

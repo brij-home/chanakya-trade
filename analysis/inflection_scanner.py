@@ -60,7 +60,6 @@ from analysis.multibagger import (
 )
 from analysis.institutional_catalysts import (
     get_institutional_catalysts,
-    InstitutionalCatalystReport,
 )
 from analysis.sector_rotation import get_stock_tailwind
 from analysis.universe import (
@@ -729,7 +728,11 @@ def evaluate_single_stock_inflection(
     #    clean forensics, high moonshot asymmetry (+6R+), or established Stage 2 compounder.
     if (
         inst_report.is_multibagger_catalyst_qualified
-        or (forensic_safe and (target_moonshot / max(0.1, entry_price)) >= 1.5 and primary_archetype in ("STAGE_1_TO_2_EXPANSION", "RRG_SECTOR_ROTATION"))
+        or (
+            forensic_safe
+            and (target_moonshot / max(0.1, entry_price)) >= 1.5
+            and primary_archetype in ("STAGE_1_TO_2_EXPANSION", "RRG_SECTOR_ROTATION")
+        )
         or (score >= 70 and dist_52w_high <= 20.0 and trend_passed >= 6 and qual_score >= 18)
     ):
         horizon = "LONG_TERM"

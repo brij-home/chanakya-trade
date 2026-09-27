@@ -229,8 +229,16 @@ class AlertScrutinyAuditor:
 
         # 3. Maximum Risk Boundary Check
         # Options allow up to 45% defined risk stop; cash equities/futures capped at max_intraday_risk_pct (8%)
+        # Multibaggers & long-term compounders ride out multi-quarter corrections with wide structural trailing floors (up to 30%)
         # For OPTIONS_MOMENTUM, enforce disciplined risk stop (capped at 32% max to align with trade_plan 30% drawdown ceiling)
-        if atype == "OPTIONS_MOMENTUM":
+        time_horizon = str(getattr(alert, "time_horizon", "") or "").upper()
+        if time_horizon in ("MULTIBAGGER", "LONG_TERM") or atype in (
+            "STAGE_1_TO_2_EXPANSION",
+            "MULTIBAGGER",
+            "SUPERPERFORMER",
+        ):
+            max_risk = 30.0
+        elif atype == "OPTIONS_MOMENTUM":
             max_risk = 32.0
         elif is_option_premium_levels:
             max_risk = 45.0
@@ -1196,7 +1204,8 @@ class AlertScrutinyAuditor:
             exch_str in ("MCX", "CDS", "CRYPTO", "BINANCE", "DERIBIT")
             or seg_str in ("COMMODITY", "CURRENCY", "CRYPTO")
             or clean_sym.endswith("USDT")
-            or clean_sym in (
+            or clean_sym
+            in (
                 "CRUDEOIL",
                 "CRUDEOILM",
                 "NATURALGAS",
@@ -1419,7 +1428,11 @@ class AlertScrutinyAuditor:
             n_ltp = 0.0
             n_vwap = 0.0
             n_chg = None
-            if isinstance(metrics_dict, dict) and "nifty_change_pct" in metrics_dict and metrics_dict["nifty_change_pct"] is not None:
+            if (
+                isinstance(metrics_dict, dict)
+                and "nifty_change_pct" in metrics_dict
+                and metrics_dict["nifty_change_pct"] is not None
+            ):
                 n_chg = metrics_dict["nifty_change_pct"]
             else:
                 try:
@@ -1491,7 +1504,12 @@ class AlertScrutinyAuditor:
             from market.indices import get_index_polarization
 
             is_mocked_pol = getattr(get_index_polarization, "__module__", "") != "market.indices"
-            if (not is_test_runner or is_mocked_pol) and clean_sym in ("BANKNIFTY", "BANKEX") and vix_val and vix_val < 14.0:
+            if (
+                (not is_test_runner or is_mocked_pol)
+                and clean_sym in ("BANKNIFTY", "BANKEX")
+                and vix_val
+                and vix_val < 14.0
+            ):
                 try:
                     pol = get_index_polarization("BANKNIFTY")
                     if pol and pol.is_polarized and pol.regime == "TUG_OF_WAR_CHOP":
@@ -1512,16 +1530,29 @@ class AlertScrutinyAuditor:
             # Heavyweight Breadth Confluence Matrix (HBCM) Gate for Index Breakout/Breakdown alerts:
             # Mandates >= 4 of 5 heavyweights concurrently aligned with the breakout direction.
             hbcm_meta = metrics_dict.get("hbcm") if isinstance(metrics_dict, dict) else None
-            active_signals = (metrics_dict.get("signals") if isinstance(metrics_dict, dict) else None) or []
-            is_breakout_type = (
-                atype in ("INDEX_CALL_SETUP", "INDEX_PUT_SETUP", "GAMMA_BLAST", "OPTIONS_MOMENTUM", "BREAKOUT", "ORB_BREAKOUT", "ORB_BREAKDOWN")
-                or any("BREAKOUT" in s or "BREAKDOWN" in s or "THRUST" in s for s in active_signals)
-            )
+            active_signals = (
+                metrics_dict.get("signals") if isinstance(metrics_dict, dict) else None
+            ) or []
+            is_breakout_type = atype in (
+                "INDEX_CALL_SETUP",
+                "INDEX_PUT_SETUP",
+                "GAMMA_BLAST",
+                "OPTIONS_MOMENTUM",
+                "BREAKOUT",
+                "ORB_BREAKOUT",
+                "ORB_BREAKDOWN",
+            ) or any("BREAKOUT" in s or "BREAKDOWN" in s or "THRUST" in s for s in active_signals)
             if is_breakout_type:
                 if isinstance(hbcm_meta, dict):
-                    if hbcm_meta.get("total_heavyweights", 0) > 0 and hbcm_meta.get("confluence_pass") is False:
+                    if (
+                        hbcm_meta.get("total_heavyweights", 0) > 0
+                        and hbcm_meta.get("confluence_pass") is False
+                    ):
                         flags["heavyweight_confluence_valid"] = False
-                        rej_msg = hbcm_meta.get("rejection_reason") or "HBCM Veto: <4/5 heavyweights aligned with index breakout"
+                        rej_msg = (
+                            hbcm_meta.get("rejection_reason")
+                            or "HBCM Veto: <4/5 heavyweights aligned with index breakout"
+                        )
                         return (False, f"HBCM Confluence Veto: {rej_msg}", flags)
                 elif not is_test_runner:
                     try:
@@ -1548,22 +1579,30 @@ class AlertScrutinyAuditor:
                 except Exception:
                     pass
             from datetime import time as dtime
+
             enforce_friday = os.environ.get("ENFORCE_TEST_FRIDAY_GATE") == "1"
-            if (not is_test_runner or enforce_friday) and alert_dt.weekday() == 4 and alert_dt.time() >= dtime(13, 0):
+            if (
+                (not is_test_runner or enforce_friday)
+                and alert_dt.weekday() == 4
+                and alert_dt.time() >= dtime(13, 0)
+            ):
                 if clean_sym in ("MIDCPNIFTY", "FINNIFTY") and is_option_premium_levels:
                     # Check if this alert is explicitly an INTRADAY_SCALP_ONLY with mandatory 15:15 exit
                     time_horizon = str(
                         getattr(alert, "time_horizon", "")
-                        or (metrics_dict.get("time_horizon", "") if isinstance(metrics_dict, dict) else "")
+                        or (
+                            metrics_dict.get("time_horizon", "")
+                            if isinstance(metrics_dict, dict)
+                            else ""
+                        )
                     ).upper()
                     act_plan = getattr(alert, "actionable_plan", {}) or {}
                     mandatory_exit = str(
                         act_plan.get("mandatory_exit", "") if isinstance(act_plan, dict) else ""
                     ).upper()
                     is_intraday_scalp = (
-                        ("INTRADAY" in time_horizon or "SCALP" in time_horizon)
-                        and ("15:15" in mandatory_exit or "INTRADAY" in mandatory_exit)
-                    )
+                        "INTRADAY" in time_horizon or "SCALP" in time_horizon
+                    ) and ("15:15" in mandatory_exit or "INTRADAY" in mandatory_exit)
                     if not is_intraday_scalp:
                         flags["expiry_cycle_valid"] = False
                         return (
@@ -2068,7 +2107,12 @@ class AlertScrutinyAuditor:
         # Prohibit current-month stock options during expiry week; only next-month contracts are permitted.
         if not is_non_equity_desk and not is_index_sym:
             try:
-                opt_type_val = getattr(alert, "option_type", "") or metrics_dict.get("option_type", "")
+                csym = getattr(alert, "contract_symbol", "") or metrics_dict.get(
+                    "contract_symbol", ""
+                )
+                opt_type_val = getattr(alert, "option_type", "") or metrics_dict.get(
+                    "option_type", ""
+                )
                 is_stock_opt = bool(
                     opt_type_val in ("CE", "PE")
                     or (csym and (csym.endswith("CE") or csym.endswith("PE")))
@@ -2076,8 +2120,12 @@ class AlertScrutinyAuditor:
                 if is_stock_opt:
                     from engine.alert_expiry import is_monthly_physical_expiry_week
 
-                    contract_exp = getattr(alert, "expiry_date", "") or metrics_dict.get("expiry_date", "")
-                    if contract_exp and is_monthly_physical_expiry_week(str(contract_exp), symbol=sym):
+                    contract_exp = getattr(alert, "expiry_date", "") or metrics_dict.get(
+                        "expiry_date", ""
+                    )
+                    if contract_exp and is_monthly_physical_expiry_week(
+                        str(contract_exp), symbol=sym
+                    ):
                         is_next_month = bool(
                             metrics_dict.get("is_next_month_routed")
                             or metrics_dict.get("rollover_series") == "NEXT_MONTH"
@@ -2185,7 +2233,9 @@ class AlertScrutinyAuditor:
 
         # Step 2: Tier 2 AI Chief Risk Officer Scrutiny (min_score passed for adaptive regime)
         try:
-            llm_result = self._execute_fast_llm_scrutiny(alert, flags, timeout=timeout, min_score=min_score)
+            llm_result = self._execute_fast_llm_scrutiny(
+                alert, flags, timeout=timeout, min_score=min_score
+            )
             if llm_result:
                 return _commit_cache(llm_result)
         except Exception as e:
@@ -2229,6 +2279,7 @@ class AlertScrutinyAuditor:
         vix_val: Optional[float] = None
         try:
             from market.indices import get_vix
+
             vix_raw = get_vix()
             if isinstance(vix_raw, (int, float)) and vix_raw > 0:
                 vix_val = float(vix_raw)
@@ -2253,6 +2304,7 @@ class AlertScrutinyAuditor:
         try:
             from market.quotes import _QUOTE_CACHE, _quote_cache_lock
             from datetime import datetime as _dt_now, time as _dtime
+
             now_ist_t = _dt_now.now(IST).time()
             if _dtime(10, 30) <= now_ist_t <= _dtime(14, 0):
                 orb_high: Optional[float] = None
@@ -2264,8 +2316,16 @@ class AlertScrutinyAuditor:
                     for k in ("NSE:NIFTY 50", "NIFTY 50", "NSE:NIFTY", "NIFTY"):
                         if k in _QUOTE_CACHE:
                             _, q_obj = _QUOTE_CACHE[k]
-                            nifty_ltp = float(getattr(q_obj, "last_price", 0.0) or getattr(q_obj, "ltp", 0.0) or 0.0)
-                            orb_high = float(getattr(q_obj, "ohlc", {}).get("open", 0.0) if hasattr(q_obj, "ohlc") else 0.0)
+                            nifty_ltp = float(
+                                getattr(q_obj, "last_price", 0.0)
+                                or getattr(q_obj, "ltp", 0.0)
+                                or 0.0
+                            )
+                            orb_high = float(
+                                getattr(q_obj, "ohlc", {}).get("open", 0.0)
+                                if hasattr(q_obj, "ohlc")
+                                else 0.0
+                            )
                             orb_low = orb_high  # fallback if no ORB levels in cache
                             # Prefer explicit ORB fields if populated
                             orb_high = float(getattr(q_obj, "orb_high", 0.0) or orb_high)
@@ -2275,8 +2335,12 @@ class AlertScrutinyAuditor:
                 if nifty_ltp and orb_high and orb_low and orb_high > orb_low:
                     inside_orb = orb_low <= nifty_ltp <= orb_high
                     # Also consider it ORB-trapped if range is narrow (< 0.25% of spot)
-                    orb_range_pct = (orb_high - orb_low) / nifty_ltp * 100.0 if nifty_ltp > 0 else 0.0
-                    if inside_orb and orb_range_pct < 0.5:  # Nifty trapped in a tight < 0.5% ORB band
+                    orb_range_pct = (
+                        (orb_high - orb_low) / nifty_ltp * 100.0 if nifty_ltp > 0 else 0.0
+                    )
+                    if (
+                        inside_orb and orb_range_pct < 0.5
+                    ):  # Nifty trapped in a tight < 0.5% ORB band
                         logger.debug(
                             f"[AlertScrutiny] Regime uplift: Nifty trapped inside ORB "
                             f"[{orb_low:.1f}–{orb_high:.1f}, {orb_range_pct:.2f}%] → min_score raised 70→75 "
@@ -2358,7 +2422,9 @@ class AlertScrutinyAuditor:
 
         # Apply adaptive regime-aware threshold (min_score is 70 normal / 75 compressed-VIX or ORB-trapped)
         status = (
-            "APPROVED" if verdict in ("APPROVED", "CONDITIONAL") and score >= min_score else "REJECTED"
+            "APPROVED"
+            if verdict in ("APPROVED", "CONDITIONAL") and score >= min_score
+            else "REJECTED"
         )
         if status == "REJECTED" and score >= 70 and min_score > 70:
             logger.info(
@@ -2521,6 +2587,8 @@ Respond STRICTLY in valid JSON matching this schema:
         alert_type = getattr(alert, "alert_type", "SETUP")
         metrics = getattr(alert, "metrics", {}) or {}
 
+        exch = getattr(alert, "exchange", "") or ""
+        seg = getattr(alert, "segment", "") or ""
         act_plan = getattr(alert, "actionable_plan", {}) or {}
         action = str(act_plan.get("action", "") if isinstance(act_plan, dict) else "").upper()
         opt_type = str(getattr(alert, "option_type", "") or "").upper()
@@ -2626,6 +2694,60 @@ Respond STRICTLY in valid JSON matching this schema:
                 auditor_model="QUANT_FALLBACK",
             )
 
+        # ── Crypto 24x7 Quant Fallback ────────────────────────────────────────
+        is_crypto_segment = (
+            str(exch).upper() in ("CRYPTO", "BINANCE", "DERIBIT", "COINBASE")
+            or str(seg).upper() == "CRYPTO"
+            or alert_type.startswith("CRYPTO_")
+            or str(sym).upper().startswith("CRYPTO:")
+            or str(sym).upper().endswith("USDT")
+            or str(sym).upper().endswith("USDC")
+            or str(sym).upper().endswith("BTC")
+        )
+        if is_crypto_segment:
+            clean_crypto_sym = str(sym).replace("CRYPTO:", "").upper()
+            if direction in ("BEARISH", "SHORT", "SELL"):
+                logic = (
+                    f"Quant-validated {clean_crypto_sym} crypto breakdown: structural pivot holds below ${sl:,.2f} "
+                    f"with calibrated 1:{rr:.1f} downside asymmetry; continuous 24x7 liquidity."
+                )
+                trap = (
+                    f"Watch for sudden short squeeze or funding rate flip near ${t1:,.2f}; "
+                    f"scale 50% profit at T1 and trail SL to breakeven."
+                )
+                guidance = (
+                    f"Short near ${ltp:,.2f}; strictly invalidate if candle reclaims ${sl:,.2f}."
+                )
+            elif direction == "NEUTRAL" or "ARBITRAGE" in alert_type:
+                logic = (
+                    f"Quant-validated {clean_crypto_sym} delta-neutral setup: basis spread yields statistical edge "
+                    f"with zero directional market exposure across 24x7 liquidity."
+                )
+                trap = (
+                    "Monitor perpetual funding payment rate; unwind if funding reverts to neutral."
+                )
+                guidance = f"Execute simultaneous Spot and Perp leg near ${ltp:,.2f}."
+            else:
+                logic = (
+                    f"Quant-validated {clean_crypto_sym} crypto momentum: structural pivot holds above ${sl:,.2f} "
+                    f"with favorable 1:{rr:.1f} R:R asymmetry; continuous 24x7 liquidity."
+                )
+                trap = (
+                    f"Overhead resistance or long-flush risk near target ${t1:,.2f}; "
+                    f"scale 50% profit at T1 and trail SL to breakeven."
+                )
+                guidance = f"Enter near ${ltp:,.2f}; strictly invalidate if candle closes below ${sl:,.2f}."
+
+            return ScrutinyResult(
+                status="APPROVED",
+                score=score,
+                logic_confirmation=logic,
+                trap_risk_warning=trap,
+                actionable_guidance=guidance,
+                sanctity_matrix=flags,
+                auditor_model="QUANT_FALLBACK",
+            )
+
         # ── Generic Equity / Derivative Fallback ─────────────────────────────
         if is_option_buy:
             is_friday_late = (
@@ -2639,26 +2761,28 @@ Respond STRICTLY in valid JSON matching this schema:
             spot_anchor = (
                 metrics.get("spot_invalidation_anchor") if isinstance(metrics, dict) else None
             )
-            anchor_note = f" (Spot Anchor Rs.{float(spot_anchor):,.1f})" if spot_anchor else ""
+            anchor_note = f" (Spot Anchor ₹{float(spot_anchor):,.1f})" if spot_anchor else ""
 
             if opt_type == "PE" or "PE" in contract or "PUT" in action or direction == "BEARISH":
                 opt_lbl = contract or f"{sym} {opt_type or 'PE'}"
                 logic = f"Quant-validated {opt_lbl} Put momentum: bearish underlying breakdown confirmed with 1:{rr:.1f} R:R premium expansion asymmetry."
-                trap = f"Watch for sudden underlying short-covering bounce{friday_warning}; scale 50% profit at option target Rs.{t1:,.1f} and trail SL to breakeven."
-                guidance = f"Buy PE near Rs.{ltp:,.1f}{anchor_note}; strictly invalidate if option premium drops below Rs.{sl:,.1f}."
+                trap = f"Watch for sudden underlying short-covering bounce{friday_warning}; scale 50% profit at option target ₹{t1:,.1f} and trail SL to breakeven."
+                guidance = f"Buy PE near ₹{ltp:,.1f}{anchor_note}; strictly invalidate if option premium drops below ₹{sl:,.1f}."
             else:
                 opt_lbl = contract or f"{sym} {opt_type or 'CE'}"
                 logic = f"Quant-validated {opt_lbl} Call momentum: bullish momentum holds with favorable 1:{rr:.1f} R:R premium expansion asymmetry."
-                trap = f"Watch for overhead resistance or IV crush near target Rs.{t1:,.1f}{friday_warning}; scale 50% profit at T1 and trail SL to breakeven."
-                guidance = f"Buy CE near Rs.{ltp:,.1f}{anchor_note}; strictly invalidate if option premium drops below Rs.{sl:,.1f}."
+                trap = f"Watch for overhead resistance or IV crush near target ₹{t1:,.1f}{friday_warning}; scale 50% profit at T1 and trail SL to breakeven."
+                guidance = f"Buy CE near ₹{ltp:,.1f}{anchor_note}; strictly invalidate if option premium drops below ₹{sl:,.1f}."
         elif direction in ("BEARISH", "SHORT", "SELL"):
-            logic = f"Quant-validated {sym} breakdown: distribution structure below Rs.{sl:,.1f} confirmed with 1:{rr:.1f} downside asymmetry."
-            trap = f"Watch for sudden short-covering bounce near Rs.{t1:,.1f}; tighten stop on lower timeframe CHoCH."
-            guidance = f"Short near Rs.{ltp:,.1f}; invalidate trade immediately if price reclaims Rs.{sl:,.1f}."
+            logic = f"Quant-validated {sym} breakdown: distribution structure below ₹{sl:,.1f} confirmed with 1:{rr:.1f} downside asymmetry."
+            trap = f"Watch for sudden short-covering bounce near ₹{t1:,.1f}; tighten stop on lower timeframe CHoCH."
+            guidance = f"Short near ₹{ltp:,.1f}; invalidate trade immediately if price reclaims ₹{sl:,.1f}."
         else:
-            logic = f"Quant-validated {sym} {alert_type.lower().replace('_', ' ')}: structural pivot holds above Rs.{sl:,.1f} with favorable 1:{rr:.1f} R:R asymmetry."
-            trap = f"Overhead resistance near target Rs.{t1:,.1f}; scale 50% profit at T1 and trail SL to breakeven."
-            guidance = f"Enter near Rs.{ltp:,.1f}; strictly invalidate if candle closes below Rs.{sl:,.1f}."
+            logic = f"Quant-validated {sym} {alert_type.lower().replace('_', ' ')}: structural pivot holds above ₹{sl:,.1f} with favorable 1:{rr:.1f} R:R asymmetry."
+            trap = f"Overhead resistance near target ₹{t1:,.1f}; scale 50% profit at T1 and trail SL to breakeven."
+            guidance = (
+                f"Enter near ₹{ltp:,.1f}; strictly invalidate if candle closes below ₹{sl:,.1f}."
+            )
 
         return ScrutinyResult(
             status="APPROVED",

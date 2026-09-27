@@ -249,7 +249,9 @@ def _options_quotes(instruments: list[str], *, correlation_id: str) -> dict[str,
         from market.options import get_options_snapshot
 
         res: dict[str, Quote] = {}
-        by_und_exp: dict[tuple[str, Optional[str]], list[tuple[str, str, float, str, Optional[str]]]] = {}
+        by_und_exp: dict[
+            tuple[str, Optional[str]], list[tuple[str, str, float, str, Optional[str]]]
+        ] = {}
         for inst in instruments:
             clean = inst.split(":")[-1].strip().upper()
             m = _OPTION_PATTERN.match(clean)

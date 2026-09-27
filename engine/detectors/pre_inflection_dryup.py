@@ -21,7 +21,6 @@ from typing import Any, Optional
 from zoneinfo import ZoneInfo
 
 import numpy as np
-import pandas as pd
 
 from engine.alert_identity import generate_alert_id
 from engine.alert_model import AutoAlert
@@ -75,6 +74,7 @@ def detect_pre_inflection_dryup(
         # Compute 20-day Volume Profile POC or 20-SMA baseline
         try:
             from analysis.volume_profile import compute_volume_profile
+
             poc_price, vah_price, val_price, _ = compute_volume_profile(df, num_bins=10)
             if poc_price > 0:
                 fair_value = poc_price

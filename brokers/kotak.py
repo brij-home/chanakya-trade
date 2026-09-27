@@ -34,7 +34,7 @@ import os
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Optional
 
 import httpx
 
@@ -136,24 +136,28 @@ class KotakNeoAPI(BrokerAPI):
         environment: str = "prod",
     ) -> None:
         self._consumer_key = consumer_key or os.environ.get("KOTAK_CONSUMER_KEY", "").strip()
-        self._consumer_secret = consumer_secret or os.environ.get("KOTAK_CONSUMER_SECRET", "").strip()
+        self._consumer_secret = (
+            consumer_secret or os.environ.get("KOTAK_CONSUMER_SECRET", "").strip()
+        )
         self._mobile_number = mobile_number or os.environ.get("KOTAK_MOBILE_NUMBER", "").strip()
         self._ucc = (ucc or os.environ.get("KOTAK_UCC", "")).strip().upper()
         self._password = password or os.environ.get("KOTAK_PASSWORD", "").strip()
         self._totp_secret = totp_secret or os.environ.get("KOTAK_TOTP_SECRET", "").strip()
         self._mpin = mpin or os.environ.get("KOTAK_MPIN", "").strip()
-        self._environment = (environment or os.environ.get("KOTAK_ENVIRONMENT", "prod")).strip().lower()
+        self._environment = (
+            (environment or os.environ.get("KOTAK_ENVIRONMENT", "prod")).strip().lower()
+        )
 
         self._base_url = PROD_BASE_URL if self._environment == "prod" else UAT_BASE_URL
         self._gw_url = PROD_GW_URL if self._environment == "prod" else UAT_BASE_URL
 
         # Auth session variables
-        self._access_token: str = ""       # OAuth Bearer token
-        self._session_token: str = ""      # User trading session token
-        self._sid: str = ""                # Session ID
-        self._hs_server_id: str = ""       # Feed server ID
-        self._feed_token: str = ""         # Feed authentication token
-        self._feed_url: str = ""           # Live WebSocket URL
+        self._access_token: str = ""  # OAuth Bearer token
+        self._session_token: str = ""  # User trading session token
+        self._sid: str = ""  # Session ID
+        self._hs_server_id: str = ""  # Feed server ID
+        self._feed_token: str = ""  # Feed authentication token
+        self._feed_url: str = ""  # Live WebSocket URL
         self._user_name: str = ""
         self._user_email: str = ""
         self._token_saved_at: float = 0.0
@@ -210,7 +214,9 @@ class KotakNeoAPI(BrokerAPI):
             except Exception as e:
                 logger.debug(f"Kotak OAuth token attempt failed on {url}: {e}")
 
-        raise RuntimeError("Failed to obtain Kotak Neo OAuth access token. Check KOTAK_CONSUMER_KEY & KOTAK_CONSUMER_SECRET.")
+        raise RuntimeError(
+            "Failed to obtain Kotak Neo OAuth access token. Check KOTAK_CONSUMER_KEY & KOTAK_CONSUMER_SECRET."
+        )
 
     def complete_login(self, **kwargs) -> UserProfile:
         """
@@ -232,7 +238,9 @@ class KotakNeoAPI(BrokerAPI):
 
         # Step 2: Validate Credentials + TOTP
         if not self._mobile_number or not self._ucc:
-            raise RuntimeError("KOTAK_MOBILE_NUMBER and KOTAK_UCC are required for Kotak Neo auto-login.")
+            raise RuntimeError(
+                "KOTAK_MOBILE_NUMBER and KOTAK_UCC are required for Kotak Neo auto-login."
+            )
 
         totp = kwargs.get("totp") or self._generate_totp()
 
@@ -246,7 +254,9 @@ class KotakNeoAPI(BrokerAPI):
         clean_mobile = self._mobile_number.replace("+91", "").strip()
 
         login_payload = {
-            "mobileNumber": f"+91{clean_mobile}" if not clean_mobile.startswith("+") else clean_mobile,
+            "mobileNumber": f"+91{clean_mobile}"
+            if not clean_mobile.startswith("+")
+            else clean_mobile,
             "ucc": self._ucc,
             "totp": totp,
         }
@@ -541,7 +551,9 @@ class KotakNeoAPI(BrokerAPI):
                 if resp.status_code == 200:
                     results = resp.json().get("data", [])
                     if results:
-                        return str(results[0].get("instrumentToken") or results[0].get("token") or "")
+                        return str(
+                            results[0].get("instrumentToken") or results[0].get("token") or ""
+                        )
         except Exception as e:
             logger.debug(f"Kotak scrip search failed for {symbol}: {e}")
         return ""
@@ -569,7 +581,9 @@ class KotakNeoAPI(BrokerAPI):
         url = f"{self._gw_url}/apim/orders/1.0/quotes"
         try:
             with httpx.Client(timeout=8.0) as client:
-                resp = client.post(url, headers=self._req_headers(), json={"instruments": token_reqs})
+                resp = client.post(
+                    url, headers=self._req_headers(), json={"instruments": token_reqs}
+                )
                 if resp.status_code == 200:
                     data = resp.json().get("data", [])
                     for item in data:
@@ -584,7 +598,9 @@ class KotakNeoAPI(BrokerAPI):
                         close_p = float(item.get("prevClose") or item.get("close") or 0.0) or None
                         vol = int(item.get("volume") or 0)
                         chg = float(item.get("change") or 0.0)
-                        chg_pct = float(item.get("netPricePercentageChange") or item.get("changePct") or 0.0)
+                        chg_pct = float(
+                            item.get("netPricePercentageChange") or item.get("changePct") or 0.0
+                        )
                         oi = int(item.get("openInterest") or item.get("oi") or 0) or None
 
                         result[orig_key] = Quote(
@@ -633,7 +649,9 @@ class KotakNeoAPI(BrokerAPI):
         Falls back to institutional store or yfinance if broker endpoint is unavailable.
         """
         to_date = to_date or datetime.now(timezone.utc)
-        from_date = from_date or datetime(to_date.year - 1, to_date.month, to_date.day, tzinfo=timezone.utc)
+        from_date = from_date or datetime(
+            to_date.year - 1, to_date.month, to_date.day, tzinfo=timezone.utc
+        )
 
         interval_map = {
             "day": "1d",
@@ -761,12 +779,7 @@ class KotakNeoAPI(BrokerAPI):
         expiry: Optional[str] = None,
     ) -> list[OptionsContract]:
         """Fetch options chain for an underlying index or stock."""
-        clean_und = (
-            underlying.upper()
-            .replace("NSE:", "")
-            .replace("NFO:", "")
-            .replace(" ", "")
-        )
+        clean_und = underlying.upper().replace("NSE:", "").replace("NFO:", "").replace(" ", "")
 
         url = f"{self._gw_url}/apim/orders/1.0/option-chain"
         params = {"underlying": clean_und}
@@ -856,7 +869,9 @@ class KotakNeoAPI(BrokerAPI):
                 if resp.status_code in (200, 201):
                     res = resp.json().get("data", {})
                     order_id = str(res.get("orderId") or res.get("nOrderId") or "")
-                    return OrderResponse(order_id=order_id, status="OPEN", message="Order placed successfully")
+                    return OrderResponse(
+                        order_id=order_id, status="OPEN", message="Order placed successfully"
+                    )
                 raise RuntimeError(f"Kotak order rejected (HTTP {resp.status_code}): {resp.text}")
         except Exception as e:
             logger.error(f"Kotak order error: {e}")

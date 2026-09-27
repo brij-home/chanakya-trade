@@ -7,7 +7,6 @@ Unit tests for /api/portfolio/greeks and /api/execution/smart-route endpoints.
 from __future__ import annotations
 
 from fastapi.testclient import TestClient
-import pytest
 
 from web.api import app
 

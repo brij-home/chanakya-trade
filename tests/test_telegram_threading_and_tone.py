@@ -138,7 +138,10 @@ def test_audio_tone_differentiator_audible_vs_silent():
     p_explicit_loud = format_telegram_push_payload(
         "📈 [REAL/LIVE] UPDATE #2 · TRAILING STOP RATCHET", disable_notification=False
     )
-    assert "disable_notification" not in p_explicit_loud or p_explicit_loud.get("disable_notification") is False
+    assert (
+        "disable_notification" not in p_explicit_loud
+        or p_explicit_loud.get("disable_notification") is False
+    )
 
 
 def test_multichannel_chat_scoped_and_alias_threading():
@@ -181,4 +184,3 @@ def test_multichannel_chat_scoped_and_alias_threading():
     )
     p_fno = format_telegram_push_payload(fno_update, chat_id=fno_chat, signal_id=fno_internal)
     assert p_fno["reply_to_message_id"] == 1185
-

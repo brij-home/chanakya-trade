@@ -106,10 +106,18 @@ def estimate_contract_delta(
 
         if norm_type == "CE":
             delta = nd1
-            theta_annual = -(spot_price * npd1 * vol) / (2.0 * math.sqrt(t)) - r * strike * math.exp(-r * t) * (0.5 * (1.0 + math.erf((d1 - vol * math.sqrt(t)) / math.sqrt(2.0))))
+            theta_annual = -(spot_price * npd1 * vol) / (
+                2.0 * math.sqrt(t)
+            ) - r * strike * math.exp(-r * t) * (
+                0.5 * (1.0 + math.erf((d1 - vol * math.sqrt(t)) / math.sqrt(2.0)))
+            )
         else:  # PE
             delta = nd1 - 1.0
-            theta_annual = -(spot_price * npd1 * vol) / (2.0 * math.sqrt(t)) + r * strike * math.exp(-r * t) * (1.0 - (0.5 * (1.0 + math.erf((d1 - vol * math.sqrt(t)) / math.sqrt(2.0)))))
+            theta_annual = -(spot_price * npd1 * vol) / (
+                2.0 * math.sqrt(t)
+            ) + r * strike * math.exp(-r * t) * (
+                1.0 - (0.5 * (1.0 + math.erf((d1 - vol * math.sqrt(t)) / math.sqrt(2.0))))
+            )
 
         theta_daily = theta_annual / 365.0
         return round(delta, 3), round(gamma, 5), round(theta_daily, 2), round(vega_unit, 2)
@@ -220,10 +228,14 @@ def calculate_portfolio_greeks(
 
     # 4-Scenario Shock Stress Test (P&L impact)
     stress_tests = {
-        "gap_down_2_5_pct": round(agg_delta_value * -0.025 + (0.5 * agg_gamma * (nifty_spot * -0.025)**2), 2),
+        "gap_down_2_5_pct": round(
+            agg_delta_value * -0.025 + (0.5 * agg_gamma * (nifty_spot * -0.025) ** 2), 2
+        ),
         "gap_down_1_5_pct": round(agg_delta_value * -0.015, 2),
         "gap_up_1_5_pct": round(agg_delta_value * 0.015, 2),
-        "gap_up_2_5_pct": round(agg_delta_value * 0.025 + (0.5 * agg_gamma * (nifty_spot * 0.025)**2), 2),
+        "gap_up_2_5_pct": round(
+            agg_delta_value * 0.025 + (0.5 * agg_gamma * (nifty_spot * 0.025) ** 2), 2
+        ),
         "vix_spike_25_pct": round(agg_vega_inr * (vix * 0.25), 2),
         "iv_crush_15_pct": round(agg_vega_inr * (vix * -0.15), 2),
     }

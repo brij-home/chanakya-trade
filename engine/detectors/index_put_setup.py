@@ -128,7 +128,11 @@ def detect_index_put_setup(
     # First 10 minutes (09:15 - 09:25 IST) are noisy opening auction price discovery.
     # Multi-candle structural setups (trend pullbacks, double tops, day-low breakdowns)
     # require at least 2 completed 5m bars and cannot form before 09:25 IST.
-    is_opening_buffer = (curr_time < dtime(9, 25)) and not ignore_time_gate and (not is_test_runner or ref_time is not None)
+    is_opening_buffer = (
+        (curr_time < dtime(9, 25))
+        and not ignore_time_gate
+        and (not is_test_runner or ref_time is not None)
+    )
     if is_opening_buffer:
         logger.info(
             f"[IndexPutSetup] Suppressed PE setup on {clean_sym} at {curr_time.strftime('%H:%M:%S')}: "
@@ -204,14 +208,26 @@ def detect_index_put_setup(
     cand_pe_vol = getattr(best_cand_pe, "volume", 0)
     cand_pe_oi = getattr(best_cand_pe, "oi", 0)
     cand_pe_vol_oi = round(cand_pe_vol / max(1, cand_pe_oi), 2)
-    is_breakdown_momentum = (cand_pe_pchange >= 15.0 and cand_pe_vol_oi >= 1.2) or cand_pe_vol_oi >= 2.0
-    is_explosive_momentum = cand_pe_vol_oi >= 3.0 or (cand_pe_pchange >= 25.0 and cand_pe_vol_oi >= 2.0)
+    is_breakdown_momentum = (
+        cand_pe_pchange >= 15.0 and cand_pe_vol_oi >= 1.2
+    ) or cand_pe_vol_oi >= 2.0
+    is_explosive_momentum = cand_pe_vol_oi >= 3.0 or (
+        cand_pe_pchange >= 25.0 and cand_pe_vol_oi >= 2.0
+    )
 
     # ── Optimization 1: Intraday Put-Call Ratio (PCR) Confluence Gate ───
     # PCR > 1.45 indicates overwhelming Put Writing cushion providing a floor.
-    ce_oi_total = sum(int(getattr(c, "oi", 0) or 0) for c in chain if getattr(c, "option_type", "") == "CE")
-    pe_oi_total = sum(int(getattr(c, "oi", 0) or 0) for c in chain if getattr(c, "option_type", "") == "PE")
-    chain_pcr = round(pe_oi_total / max(1, ce_oi_total), 2) if (ce_oi_total > 5000 and pe_oi_total > 5000) else None
+    ce_oi_total = sum(
+        int(getattr(c, "oi", 0) or 0) for c in chain if getattr(c, "option_type", "") == "CE"
+    )
+    pe_oi_total = sum(
+        int(getattr(c, "oi", 0) or 0) for c in chain if getattr(c, "option_type", "") == "PE"
+    )
+    chain_pcr = (
+        round(pe_oi_total / max(1, ce_oi_total), 2)
+        if (ce_oi_total > 5000 and pe_oi_total > 5000)
+        else None
+    )
 
     if chain_pcr is not None and chain_pcr > 1.45 and not is_explosive_momentum:
         logger.info(
@@ -264,11 +280,13 @@ def detect_index_put_setup(
     vix_val = None
     try:
         from market.indices import get_vix
+
         vix_val = get_vix()
     except Exception:
         pass
     is_low_vix_range = bool(
-        vix_val and 0 < vix_val < 13.0
+        vix_val
+        and 0 < vix_val < 13.0
         and effective_vwap > 0
         and abs((spot - effective_vwap) / effective_vwap * 100.0) < 0.35
         and not is_explosive_momentum
@@ -437,7 +455,11 @@ def detect_index_put_setup(
 
                 # 6. Trend Continuation Retrace / Rejection (EMA 9/20 & VWAP Resistance Rejection)
                 # Catches sustained downtrends where price retraces up into EMA/VWAP resistance and resumes down
-                if len(active_ohlcv) >= 6 and not is_opening_buffer and "TREND_PULLBACK_REJECTION" not in signals:
+                if (
+                    len(active_ohlcv) >= 6
+                    and not is_opening_buffer
+                    and "TREND_PULLBACK_REJECTION" not in signals
+                ):
                     try:
                         closes = active_ohlcv[col_c].values
                         lows = active_ohlcv[col_l].values
@@ -511,6 +533,7 @@ def detect_index_put_setup(
     if active_ohlcv is not None and len(active_ohlcv) >= 6 and not is_opening_buffer:
         try:
             import pandas as pd  # noqa: F401
+
             col_h = "high" if "high" in active_ohlcv.columns else "High"
             col_l = "low" if "low" in active_ohlcv.columns else "Low"
             col_c = "close" if "close" in active_ohlcv.columns else "Close"
@@ -526,13 +549,21 @@ def detect_index_put_setup(
             # 5m ATR(14)
             tr = [highs[0] - lows[0]]
             for i in range(1, len(active_ohlcv)):
-                tr.append(max(highs[i] - lows[i], abs(highs[i] - closes[i - 1]), abs(lows[i] - closes[i - 1])))
+                tr.append(
+                    max(
+                        highs[i] - lows[i],
+                        abs(highs[i] - closes[i - 1]),
+                        abs(lows[i] - closes[i - 1]),
+                    )
+                )
             atr_14 = float(pd.Series(tr).rolling(min(14, len(tr)), min_periods=1).mean().iloc[-1])
 
             last_bar_rng = max(0.1, float(highs[-1]) - float(lows[-1]))
             rng_atr_ratio = round(last_bar_rng / max(1.0, atr_14), 2)
 
-            avg_vol_20 = float(pd.Series(vols).rolling(min(20, len(vols)), min_periods=1).mean().iloc[-1])
+            avg_vol_20 = float(
+                pd.Series(vols).rolling(min(20, len(vols)), min_periods=1).mean().iloc[-1]
+            )
             last_vol = float(vols[-1])
             vol_ratio = round(last_vol / max(1.0, avg_vol_20), 2)
 
@@ -549,7 +580,9 @@ def detect_index_put_setup(
             close_pos_pct = round(((last_h - last_c) / last_bar_rng) * 100.0, 1)
 
             # Day low or session low breakdown
-            dl_val = day_low or (min(lows[:-1]) if len(lows) >= 2 else (lows[0] if len(lows) >= 1 else spot))
+            dl_val = day_low or (
+                min(lows[:-1]) if len(lows) >= 2 else (lows[0] if len(lows) >= 1 else spot)
+            )
             is_at_or_below_dl = (last_c <= dl_val * 1.0005) or (spot <= dl_val)
 
             # Cumulative Volume Delta (CVD) Footprint Check:
@@ -570,7 +603,9 @@ def detect_index_put_setup(
             cvd_ratio = round(seller_vol / max(1.0, buyer_vol), 2)
             is_cvd_seller_dominant = cvd_ratio >= 2.2
 
-            is_vol_surge = (vol_ratio >= 1.6) or (last_vol >= max(vols[-min(10, len(vols)):-1]) if len(vols) >= 3 else True)
+            is_vol_surge = (vol_ratio >= 1.6) or (
+                last_vol >= max(vols[-min(10, len(vols)) : -1]) if len(vols) >= 3 else True
+            )
             if (
                 rng_atr_ratio >= 1.3
                 and is_vol_surge
@@ -927,7 +962,9 @@ def detect_index_put_setup(
         symbol=clean_sym,
         exchange=opt_exchange,
         direction="BEARISH",
-        headline=f"🛡️ [HEDGED SPREAD MANDATE] {headline}" if (is_low_vix_range and hedge_plan) else headline,
+        headline=f"🛡️ [HEDGED SPREAD MANDATE] {headline}"
+        if (is_low_vix_range and hedge_plan)
+        else headline,
         summary=f"{summary} | OTE Entry: {entry_range_str} | No Chase > ₹{no_chase_lvl}",
         ltp=opt_ltp or spot,
         trigger_level=opt_ltp if (opt_ltp and opt_ltp > 0) else strike,
@@ -979,7 +1016,9 @@ def detect_index_put_setup(
             "pcr": chain_pcr,
             "heavyweights_posture": hw_posture.get("summary", "UNAVAILABLE"),
             "hbcm": hbcm_dict,
-            "cvd_ratio": thrust_details.get("cvd_ratio", cvd_ratio if "cvd_ratio" in locals() else 0.0),
+            "cvd_ratio": thrust_details.get(
+                "cvd_ratio", cvd_ratio if "cvd_ratio" in locals() else 0.0
+            ),
             "detector": "INDEX_PUT_SETUP",
             "is_institutional_thrust": is_institutional_thrust,
             "thrust_details": thrust_details,

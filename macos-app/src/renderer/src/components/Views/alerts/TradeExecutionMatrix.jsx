@@ -1,11 +1,12 @@
-import React from 'react'
+import React, { useMemo } from 'react'
+import { resolveAlertLifecycle, resolveAlertProvenance } from './alertHelpers'
 
 export function TradeExecutionMatrix({
   alert,
   levels,
   isBull,
   isDerivative,
-  currentPrice,
+  currentPrice: currentPriceProp,
   trailingStop,
   slRationale,
   tradePlan,
@@ -15,6 +16,15 @@ export function TradeExecutionMatrix({
 }) {
   const tp = tradePlan || {}
   const mktSt = marketStatus || 'SESSION_CLOSED'
+
+  // Single Source of Truth Lifecycle evaluated against the exact current price
+  const lifecycle = useMemo(
+    () => (alert ? resolveAlertLifecycle(alert, { liveSpot: { ltp: currentPriceProp }, liveContract: { ltp: currentPriceProp } }) : null),
+    [alert, currentPriceProp]
+  )
+
+  const isTerminal = lifecycle?.isTerminal ?? false
+  const currentPrice = isTerminal ? (lifecycle?.currentPrice ?? currentPriceProp) : (currentPriceProp ?? lifecycle?.currentPrice)
 
   const isCrypto = (alert?.exchange || '').toUpperCase() === 'CRYPTO' || (alert?.exchange || '').toUpperCase() === 'BINANCE' || (alert?.segment || '').toUpperCase() === 'CRYPTO'
   const currSym = isCrypto ? '$' : '₹'
@@ -37,37 +47,18 @@ export function TradeExecutionMatrix({
 
   const isUpward = levels.isUpwardPayoff !== undefined ? levels.isUpwardPayoff : (isBull || isDerivative)
 
-  // Stage Hit Real-time Calculations
-  const isExplicitSL = Boolean(
-    alert?.stage === 'SL_HIT' ||
-    alert?.target_status === 'SL_HIT' ||
-    alert?.invalidation_reason?.toUpperCase().includes('STOP_LOSS') ||
-    alert?.invalidation_reason?.toUpperCase().includes('SL HIT') ||
-    alert?.invalidation_reason?.toUpperCase().includes('SL BREACH')
-  )
-
-  const isPriceBreachedSL = Boolean(
-    levels.sl && currentPrice && (isUpward ? currentPrice <= levels.sl : currentPrice >= levels.sl)
-  )
-
-  const isSLHit = Boolean(isExplicitSL || isPriceBreachedSL)
-
-  const isT3Hit = Boolean(
-    levels.t3 && currentPrice && !isSLHit && (isUpward ? currentPrice >= levels.t3 : currentPrice <= levels.t3)
-  )
-
-  const isT2Hit = Boolean(
-    isT3Hit ||
-    (levels.t2 && currentPrice && !isSLHit && (isUpward ? currentPrice >= levels.t2 : currentPrice <= levels.t2))
-  )
-
-  const isT1Hit = Boolean(
-    isT2Hit ||
-    (levels.t1 && currentPrice && !isSLHit && (isUpward ? currentPrice >= levels.t1 : currentPrice <= levels.t1))
-  )
+  // Stage Hit Calculations from SSOT lifecycle
+  const isTimeStop = lifecycle?.isTimeStop ?? false
+  const isExpired = lifecycle?.isExpired ?? false
+  const isInvalidated = lifecycle?.isInvalidated ?? false
+  const isSLHit = lifecycle ? lifecycle.isSLHit : false
+  const isT3Hit = lifecycle ? lifecycle.isT3Hit : false
+  const isT2Hit = lifecycle ? lifecycle.isT2Hit : false
+  const isT1Hit = lifecycle ? lifecycle.isT1Hit : false
+  const horizonInfo = lifecycle?.horizonInfo ?? null
 
   // Active Target Stage in Flight
-  const activeStage = isSLHit ? 'SL' : isT3Hit ? 'T3_DONE' : isT2Hit ? 'T3' : isT1Hit ? 'T2' : 'T1'
+  const activeStage = isTimeStop ? 'TIME_STOP' : isSLHit ? 'SL' : isExpired ? 'EXPIRED' : isInvalidated ? 'INVALIDATED' : isT3Hit ? 'T3_DONE' : isT2Hit ? 'T3' : isT1Hit ? 'T2' : 'T1'
 
   // Distance & Progress to Active Stage
   let t1DistInfo = null
@@ -105,14 +96,29 @@ export function TradeExecutionMatrix({
     progressPct = Math.min(100, Math.max(0, Math.round((currentDist / totalSpan) * 100)))
   }
 
-  const isTestAlert = alert.environment === 'TEST' || alert.is_live === false || alert.alert_id?.startsWith?.('test-')
-  const mktBadge = isTestAlert
-    ? { cls: 'text-purple-400 bg-purple-500/15 border-purple-500/40', label: '🧪 TEST SIMULATION' }
-    : mktSt === 'LIVE'
-    ? { cls: 'text-emerald-400 bg-emerald-500/15 border-emerald-500/40', label: '🟢 LIVE MARKET' }
-    : mktSt === 'PRE_MARKET'
-    ? { cls: 'text-amber-400 bg-amber-500/15 border-amber-500/40', label: '🌅 PRE-MARKET' }
-    : { cls: 'text-blue-400 bg-blue-500/15 border-blue-500/40', label: '🌙 SESSION CLOSED' }
+  // Provenance & Extension Calculations
+  const provenance = resolveAlertProvenance(alert)
+  const mktBadge = {
+    cls: provenance.cls,
+    label: provenance.isTest
+      ? '🧪 TEST SIMULATION'
+      : provenance.isOffMarket
+      ? '🌙 SESSION CLOSED'
+      : '🟢 LIVE MARKET',
+  }
+
+  const noChaseLimit = Number(levels.no_chase_boundary || (levels.entry ? (isUpward ? levels.entry * 1.05 : levels.entry * 0.95) : 0))
+  const isExtended = Boolean(
+    !isTerminal && currentPrice && noChaseLimit && (
+      isUpward ? currentPrice > noChaseLimit : currentPrice < noChaseLimit
+    )
+  )
+  const extendedPct = isExtended && levels.entry
+    ? Math.abs(((currentPrice - levels.entry) / levels.entry) * 100).toFixed(1)
+    : null
+
+  const pyramidRule = alert.actionable_plan?.pyramid_rule || alert.metrics?.pyramid_rule || tp.pyramid_rule
+  const structuralFloor50 = alert.actionable_plan?.structural_floor_50sma || alert.metrics?.structural_floor_50sma || tp.structural_floor_50sma
 
   const expBadge = expiryInfo?.formatted
     ? `⏳ ${expiryInfo.formatted}${expiryInfo.dte !== null ? ` (${expiryInfo.dte} DTE)` : ''}`
@@ -128,13 +134,17 @@ export function TradeExecutionMatrix({
       <div className="flex items-center justify-between flex-wrap gap-1 pb-1 border-b border-border/30 text-[10px]">
         <div className="flex items-center gap-1.5">
           <span className="font-mono">
-            {isSLHit ? '🛑' : isT3Hit ? '🚀' : isT2Hit ? '🏁' : isT1Hit ? '🎯' : '⚡'}
+            {lifecycle?.stagePill?.icon || (isSLHit ? '🛑' : isT3Hit ? '🚀' : isT2Hit ? '🏁' : isT1Hit ? '🎯' : '⚡')}
           </span>
           <span className="font-black uppercase tracking-wider text-text text-[10px]">
             Trade Execution Matrix &amp; Target Milestones
           </span>
           {/* Real-time Status Pill */}
-          {isSLHit ? (
+          {lifecycle?.stagePill ? (
+            <span className={`text-[8px] font-black px-1.5 py-0.5 rounded-full border ${lifecycle.stagePill.cls}`}>
+              {lifecycle.stagePill.label}
+            </span>
+          ) : isSLHit ? (
             <span className="text-[8px] font-black px-1.5 py-0.5 rounded-full bg-rose-500/25 text-rose-300 border border-rose-500/50 animate-pulse">
               🛑 STOP LOSS HIT
             </span>
@@ -161,10 +171,21 @@ export function TradeExecutionMatrix({
           <span className={`px-1.5 py-0.5 rounded border ${mktBadge.cls}`}>
             {mktBadge.label}
           </span>
-          {levels.time_horizon && (
-            <span className="px-1.5 py-0.5 rounded bg-sky-500/10 text-sky-300 border border-sky-500/25">
-              ⏱️ {levels.time_horizon === 'INTRADAY' ? 'INTRADAY' : levels.time_horizon === 'SWING_SHORT' ? '2-5D SWING' : levels.time_horizon === 'SWING_MID' ? '1-4W SWING' : 'POSITIONAL'}
-            </span>
+          {horizonInfo && (
+            <div className="flex items-center gap-1">
+              <span
+                title={horizonInfo.tooltip}
+                className={`px-1.5 py-0.5 rounded font-black border cursor-help ${horizonInfo.badgeClasses}`}
+              >
+                {horizonInfo.icon} {horizonInfo.label}
+              </span>
+              <span
+                title={`Target ETA: ${horizonInfo.etaFull}`}
+                className={`px-1.5 py-0.5 rounded font-bold border ${horizonInfo.etaClasses}`}
+              >
+                🎯 ETA: {horizonInfo.etaFull}
+              </span>
+            </div>
           )}
           {expBadge && (
             <span className="px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-300 border border-amber-500/25">
@@ -206,22 +227,28 @@ export function TradeExecutionMatrix({
 
         {/* 2. ENTRY TRIGGER */}
         <div className={`p-1.5 rounded-lg transition-all ${
-          currentPrice && !isSLHit
+          isExtended
+            ? 'bg-amber-500/10 border border-amber-500/40 shadow-sm'
+            : currentPrice && !isSLHit
             ? 'bg-gold/15 border border-gold/50 shadow-sm'
             : 'bg-gold/5 border border-gold/25'
         }`}>
           <div className="flex items-center justify-between text-[9px]">
-            <span className="font-black uppercase tracking-wider text-gold">
-              ⚡ Entry Trigger
+            <span className={`font-black uppercase tracking-wider ${isExtended ? 'text-amber-400' : 'text-gold'}`}>
+              {isExtended ? '🛑 No Chase' : '⚡ Entry Trigger'}
             </span>
-            <span className="font-bold text-amber-300">
-              {isUpward ? 'BUY' : 'SELL'}
+            <span className={`font-bold ${isExtended ? 'text-amber-300 bg-amber-500/20 px-1 rounded' : 'text-amber-300'}`}>
+              {isExtended ? `EXTENDED +${extendedPct}%` : (isUpward ? 'BUY' : 'SELL')}
             </span>
           </div>
           <div className="text-xs font-black text-amber-200 mt-0.5">
             {currSym}{formatNum(levels.entry)}
           </div>
-          {levels.entry_range ? (
+          {isExtended ? (
+            <div className="text-[8px] text-amber-300 font-bold truncate" title="Price is extended beyond buy zone. Wait for pullback to 50-SMA or secondary base consolidation.">
+              ⏳ WAIT FOR PULLBACK
+            </div>
+          ) : levels.entry_range ? (
             <div className="text-[8px] text-amber-300/90 font-mono font-medium truncate" title="Optimal Trade Entry (OTE) Pullback Range">
               🎯 OTE {levels.entry_range}
             </div>
@@ -353,6 +380,21 @@ export function TradeExecutionMatrix({
           />
         ) : null}
       </div>
+
+      {/* Dynamic Institutional Guidance: Extended / Pullback / Pyramiding */}
+      {isExtended && (
+        <div className="px-2 py-1 rounded bg-amber-500/10 border border-amber-500/25 flex items-center justify-between text-[9.5px] text-amber-200 flex-wrap gap-1">
+          <div className="flex items-center gap-1.5 font-bold">
+            <span>⏳</span>
+            <span>WAIT FOR PULLBACK: Price is +{extendedPct}% past base entry. Institutional accumulation floor: {structuralFloor50 ? `Rising 50-SMA ₹${formatNum(structuralFloor50)}` : 'Rising 50-Day Moving Average'}.</span>
+          </div>
+          {pyramidRule && (
+            <div className="text-[9px] text-cyan-300 font-semibold" title={pyramidRule}>
+              🧗 Pyramiding: Add +30% on secondary base breakout only
+            </div>
+          )}
+        </div>
+      )}
     </div>
   )
 }

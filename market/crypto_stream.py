@@ -341,13 +341,20 @@ class CryptoStreamManager:
             return
         sym = p.get("s", "").upper()
         start_time = int(k.get("t", 0))
+        tot_vol = float(k.get("v", 0.0))
+        buy_vol = float(k.get("V", 0.0)) if "V" in k else tot_vol * 0.5
+        sell_vol = max(0.0, tot_vol - buy_vol)
+        delta = buy_vol - sell_vol
         candle = {
             "date": pd.to_datetime(start_time, unit="ms"),
             "open": float(k.get("o", 0.0)),
             "high": float(k.get("h", 0.0)),
             "low": float(k.get("l", 0.0)),
             "close": float(k.get("c", 0.0)),
-            "volume": float(k.get("v", 0.0)),
+            "volume": tot_vol,
+            "buy_volume": buy_vol,
+            "sell_volume": sell_vol,
+            "delta": delta,
             "is_closed": bool(k.get("x", False)),
         }
 
@@ -439,6 +446,10 @@ class CryptoStreamManager:
 
             rows = []
             for c in data:
+                tot_vol = float(c[5])
+                buy_vol = float(c[9]) if len(c) > 9 else tot_vol * 0.5
+                sell_vol = max(0.0, tot_vol - buy_vol)
+                delta = buy_vol - sell_vol
                 rows.append(
                     {
                         "date": pd.to_datetime(c[0], unit="ms"),
@@ -446,7 +457,10 @@ class CryptoStreamManager:
                         "high": float(c[2]),
                         "low": float(c[3]),
                         "close": float(c[4]),
-                        "volume": float(c[5]),
+                        "volume": tot_vol,
+                        "buy_volume": buy_vol,
+                        "sell_volume": sell_vol,
+                        "delta": delta,
                     }
                 )
             df = pd.DataFrame(rows)
@@ -673,6 +687,329 @@ class CryptoStreamManager:
             "conviction": signal_conviction,
             "recommendation": recommendation,
             "futures_metrics": f_data,
+        }
+
+    def get_order_flow_metrics(
+        self,
+        symbol: str = "BTCUSDT",
+        interval: str = "15m",
+        limit: int = 60,
+    ) -> dict[str, Any]:
+        """
+        Institutional Cumulative Volume Delta (CVD) & Order Flow Absorption Engine.
+        Computes aggressive taker buy vs sell delta, cumulative delta slope,
+        and identifies institutional absorption divergences.
+        """
+        canon_sym = normalize_crypto_symbol(symbol)
+        df = self.get_klines(canon_sym, interval=interval, limit=limit)
+        if df.empty or len(df) < 10:
+            return {
+                "symbol": canon_sym,
+                "interval": interval,
+                "status": "INSUFFICIENT_DATA",
+                "current_delta": 0.0,
+                "cvd": 0.0,
+                "absorption_signal": "NONE",
+                "delta_bias": "NEUTRAL",
+                "bars": [],
+            }
+
+        # Ensure buy_volume, sell_volume, and delta columns exist
+        if "buy_volume" not in df.columns or "delta" not in df.columns:
+            tot_v = df["volume"]
+            df["buy_volume"] = tot_v * 0.5
+            df["sell_volume"] = tot_v * 0.5
+            df["delta"] = 0.0
+
+        df["cvd"] = df["delta"].cumsum()
+        last_bar = df.iloc[-1]
+        cur_close = float(last_bar["close"])
+        cur_delta = float(last_bar["delta"])
+        cur_vol = float(last_bar["volume"])
+        cur_cvd = float(last_bar["cvd"])
+        delta_ratio = cur_delta / max(1.0, cur_vol)
+
+        # 1. Delta Bias
+        if delta_ratio >= 0.25:
+            delta_bias = "BULLISH_AGGRESSIVE"
+        elif delta_ratio <= -0.25:
+            delta_bias = "BEARISH_AGGRESSIVE"
+        else:
+            delta_bias = "NEUTRAL"
+
+        # 2. CVD Trend over last 10 bars
+        recent_10 = df.iloc[-10:]
+        cvd_change_10 = float(recent_10["cvd"].iloc[-1] - recent_10["cvd"].iloc[0])
+        price_change_10 = float(
+            (recent_10["close"].iloc[-1] - recent_10["close"].iloc[0])
+            / max(1e-6, recent_10["close"].iloc[0])
+            * 100
+        )
+        cvd_trend = "RISING" if cvd_change_10 > 0 else ("FALLING" if cvd_change_10 < 0 else "FLAT")
+
+        # 3. Absorption / Divergence Scanner
+        absorption_signal = "NONE"
+        conviction = 50
+        absorption_note = "Order flow in equilibrium."
+
+        if len(df) >= 20:
+            p_prior = df.iloc[-25:-10]
+            p_recent = df.iloc[-10:]
+
+            p_prior_min = float(p_prior["low"].min())
+            p_recent_min = float(p_recent["low"].min())
+            cvd_prior_min = float(p_prior["cvd"].min())
+            cvd_recent_min = float(p_recent["cvd"].min())
+
+            p_prior_max = float(p_prior["high"].max())
+            p_recent_max = float(p_recent["high"].max())
+            cvd_prior_max = float(p_prior["cvd"].max())
+            cvd_recent_max = float(p_recent["cvd"].max())
+
+            # Bullish absorption: Price lower low, CVD higher low
+            if p_recent_min < p_prior_min * 0.998 and cvd_recent_min > cvd_prior_min:
+                absorption_signal = "BULLISH_CVD_ABSORPTION"
+                conviction = 90
+                absorption_note = (
+                    f"Bullish Absorption: Price swept lows to ${p_recent_min:,.2f}, but CVD formed a higher low. "
+                    "Aggressive sellers were absorbed by institutional passive limit bids."
+                )
+            # Bearish exhaustion: Price higher high, CVD lower high
+            elif p_recent_max > p_prior_max * 1.002 and cvd_recent_max < cvd_prior_max:
+                absorption_signal = "BEARISH_CVD_EXHAUSTION"
+                conviction = 90
+                absorption_note = (
+                    f"Bearish Exhaustion: Price swept highs to ${p_recent_max:,.2f}, but CVD formed a lower high. "
+                    "Aggressive buyers were absorbed by institutional passive limit offers."
+                )
+            # Immediate bar-level absorption
+            elif cur_vol > float(df["volume"].iloc[-21:-1].mean()) * 1.5:
+                if price_change_10 < -1.0 and delta_ratio > 0.15:
+                    absorption_signal = "BULLISH_DELTA_ABSORPTION"
+                    conviction = 86
+                    absorption_note = "High-volume downward move where taker delta flipped positive (buyers absorbing supply)."
+                elif price_change_10 > 1.0 and delta_ratio < -0.15:
+                    absorption_signal = "BEARISH_DELTA_ABSORPTION"
+                    conviction = 86
+                    absorption_note = "High-volume upward move where taker delta flipped negative (sellers capping advance)."
+
+        bars_summary = []
+        for _, r in df.iloc[-15:].iterrows():
+            bars_summary.append(
+                {
+                    "time": str(r["date"]),
+                    "open": round(float(r["open"]), 2),
+                    "high": round(float(r["high"]), 2),
+                    "low": round(float(r["low"]), 2),
+                    "close": round(float(r["close"]), 2),
+                    "volume": round(float(r["volume"]), 2),
+                    "buy_volume": round(float(r.get("buy_volume", 0.0)), 2),
+                    "sell_volume": round(float(r.get("sell_volume", 0.0)), 2),
+                    "delta": round(float(r.get("delta", 0.0)), 2),
+                    "cvd": round(float(r.get("cvd", 0.0)), 2),
+                }
+            )
+
+        return {
+            "symbol": canon_sym,
+            "interval": interval,
+            "status": "ONLINE",
+            "current_price": cur_close,
+            "current_delta": round(cur_delta, 2),
+            "current_volume": round(cur_vol, 2),
+            "delta_ratio": round(delta_ratio, 3),
+            "delta_bias": delta_bias,
+            "cumulative_volume_delta": round(cur_cvd, 2),
+            "cvd_trend": cvd_trend,
+            "absorption_signal": absorption_signal,
+            "conviction": conviction,
+            "absorption_note": absorption_note,
+            "recent_bars_count": len(df),
+            "bars": bars_summary,
+        }
+
+    def get_liquidation_cascade_metrics(self, symbol: str = "BTCUSDT") -> dict[str, Any]:
+        """
+        Institutional Liquidation Cascade & Flush Exhaustion Engine.
+        Scans for extreme volume anomalies accompanied by long/short rejection wicks
+        and Open Interest drain to identify high R:R counter-trend reversal entries.
+        """
+        canon_sym = normalize_crypto_symbol(symbol)
+        f_data = self.fetch_futures_metrics(canon_sym)
+        df = self.get_klines(canon_sym, interval="15m", limit=40)
+
+        if df.empty or len(df) < 20:
+            return {
+                "symbol": canon_sym,
+                "status": "INSUFFICIENT_DATA",
+                "flush_signal": "NONE",
+                "conviction": 50,
+            }
+
+        ltp = float(df["close"].iloc[-1])
+        vol_series = df["volume"]
+        avg_vol = float(vol_series.iloc[-21:-1].mean())
+        cur_vol = float(vol_series.iloc[-1])
+        rvol = round(cur_vol / max(1.0, avg_vol), 2) if avg_vol > 0 else 1.0
+
+        # ATR calculation
+        highs = df["high"]
+        lows = df["low"]
+        closes = df["close"]
+        prev_closes = closes.shift(1).fillna(closes)
+        tr = pd.concat(
+            [highs - lows, (highs - prev_closes).abs(), (lows - prev_closes).abs()], axis=1
+        ).max(axis=1)
+        atr = float(tr.iloc[-15:-1].mean()) if len(tr) >= 15 else float(tr.mean())
+
+        flush_signal = "NONE"
+        conviction = 50
+        recommendation = "Normal liquidity conditions."
+        sl_price = 0.0
+        t1_price = 0.0
+        t2_price = 0.0
+
+        for idx in (-1, -2):
+            bar = df.iloc[idx]
+            b_open = float(bar["open"])
+            b_high = float(bar["high"])
+            b_low = float(bar["low"])
+            b_close = float(bar["close"])
+            b_vol = float(bar["volume"])
+            b_rvol = b_vol / max(1.0, avg_vol) if avg_vol > 0 else 1.0
+            rng = max(1e-6, b_high - b_low)
+            lower_wick = min(b_open, b_close) - b_low
+            upper_wick = b_high - max(b_open, b_close)
+            lower_wick_ratio = lower_wick / rng
+            upper_wick_ratio = upper_wick / rng
+
+            prior_low = float(df["low"].iloc[-25:idx].min()) if len(df) >= 25 else b_low
+            prior_high = float(df["high"].iloc[-25:idx].max()) if len(df) >= 25 else b_high
+
+            # Long Liquidation Flush Reversal
+            if (
+                b_rvol >= 1.8
+                and rng >= (1.2 * atr)
+                and lower_wick_ratio >= 0.38
+                and b_low <= prior_low
+            ):
+                flush_signal = "LONG_LIQUIDATION_FLUSH_REVERSAL"
+                conviction = 92
+                risk = max(0.5, (ltp - b_low) * 1.05)
+                sl_price = round(b_low * 0.996, 2)
+                t1_price = round(ltp + 2.5 * risk, 2)
+                t2_price = round(ltp + 4.5 * risk, 2)
+                recommendation = (
+                    f"Cascading long liquidations flushed into ${b_low:,.2f} before violent wick reclaim "
+                    f"({lower_wick_ratio * 100:.0f}% lower shadow, RVOL {b_rvol:.1f}x). Institutional buyers absorbed stops."
+                )
+                break
+
+            # Short Squeeze Blowoff Reversal
+            if (
+                b_rvol >= 1.8
+                and rng >= (1.2 * atr)
+                and upper_wick_ratio >= 0.38
+                and b_high >= prior_high
+            ):
+                flush_signal = "SHORT_SQUEEZE_BLOWOFF_REVERSAL"
+                conviction = 92
+                risk = max(0.5, (b_high - ltp) * 1.05)
+                sl_price = round(b_high * 1.004, 2)
+                t1_price = round(ltp - 2.5 * risk, 2)
+                t2_price = round(ltp - 4.5 * risk, 2)
+                recommendation = (
+                    f"Overleveraged shorts liquidated on parabolic wick to ${b_high:,.2f} "
+                    f"({upper_wick_ratio * 100:.0f}% upper shadow, RVOL {b_rvol:.1f}x). Exhaustion blow-off top."
+                )
+                break
+
+        return {
+            "symbol": canon_sym,
+            "status": "ONLINE",
+            "flush_signal": flush_signal,
+            "conviction": conviction,
+            "recommendation": recommendation,
+            "rvol": rvol,
+            "atr_14": round(atr, 2),
+            "stop_loss": sl_price,
+            "target_1": t1_price,
+            "target_2": t2_price,
+            "futures_metrics": f_data,
+        }
+
+    def get_basis_arbitrage_matrix(self) -> dict[str, Any]:
+        """
+        Institutional Delta-Neutral Basis & Funding Rate Arbitrage Engine.
+        Scans all major crypto benchmarks (BTC, ETH, SOL, BNB, XRP, DOGE)
+        for Cash-and-Carry (Long Spot + Short Perp) delta-neutral yield opportunities.
+        """
+        opportunities = []
+        for sym in self.symbols:
+            q = self.get_quote(sym)
+            if not q or float(getattr(q, "last_price", 0.0) or 0.0) <= 0:
+                continue
+
+            spot = float(q.last_price)
+            f_data = self.fetch_futures_metrics(sym)
+            perp_price = float(f_data.get("mark_price", 0.0) or spot)
+            fr = float(f_data.get("funding_rate_8h", 0.0) or 0.0)
+            ann_yield = round(fr * 3 * 365 * 100, 2)
+            basis_pct = round(((perp_price - spot) / spot) * 100, 3) if spot > 0 else 0.0
+            daily_yield_pct = round(fr * 3 * 100, 3)
+
+            # Determine opportunity regime
+            if ann_yield >= 18.0:
+                strategy = "CASH_AND_CARRY_PRIME"
+                action = "BUY_SPOT_AND_SHORT_PERP"
+                rating = "HIGH_YIELD"
+                note = f"Delta-Neutral Cash & Carry: earn {ann_yield:.1f}% annualized APY paid every 8 hours with zero directional risk."
+            elif ann_yield >= 10.0:
+                strategy = "CASH_AND_CARRY_MODERATE"
+                action = "BUY_SPOT_AND_SHORT_PERP"
+                rating = "ATTRACTIVE"
+                note = f"Moderate delta-neutral funding yield: {ann_yield:.1f}% annualized APY."
+            elif ann_yield <= -12.0:
+                strategy = "REVERSE_CASH_AND_CARRY"
+                action = "BORROW_SELL_SPOT_AND_LONG_PERP"
+                rating = "OPPORTUNITY"
+                note = f"Deeply negative funding ({ann_yield:.1f}% APY): longs receive payments from short sellers."
+            else:
+                strategy = "NEUTRAL_EQUILIBRIUM"
+                action = "MONITOR"
+                rating = "BALANCED"
+                note = f"Equilibrium funding ({ann_yield:.1f}% APY). Spread within normal market bounds."
+
+            daily_usd_per_10k = round(10000 * (daily_yield_pct / 100.0), 2)
+
+            opportunities.append(
+                {
+                    "symbol": sym,
+                    "display_name": sym.replace("USDT", ""),
+                    "spot_price": spot,
+                    "perp_price": perp_price,
+                    "basis_pct": basis_pct,
+                    "funding_rate_8h_pct": round(fr * 100, 4),
+                    "annualized_funding_yield_pct": ann_yield,
+                    "daily_yield_pct": daily_yield_pct,
+                    "daily_usd_per_10k": daily_usd_per_10k,
+                    "strategy": strategy,
+                    "action": action,
+                    "rating": rating,
+                    "note": note,
+                    "open_interest_usd": f_data.get("open_interest_usd", 0.0),
+                    "next_funding_time": f_data.get("next_funding_time"),
+                }
+            )
+
+        opportunities.sort(key=lambda x: abs(x["annualized_funding_yield_pct"]), reverse=True)
+
+        return {
+            "status": "ONLINE",
+            "pairs_scanned": len(opportunities),
+            "timestamp": time.time(),
+            "best_opportunity": opportunities[0] if opportunities else None,
+            "matrix": opportunities,
         }
 
 

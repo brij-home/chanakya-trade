@@ -349,6 +349,7 @@ def test_eod_report_persistent_disk_lock(tmp_path, monkeypatch):
 
     from datetime import datetime
     from zoneinfo import ZoneInfo
+
     IST = ZoneInfo("Asia/Kolkata")
     today_str = datetime.now(IST).strftime("%Y-%m-%d")
 
@@ -463,11 +464,11 @@ def test_eod_report_tabular_journal_and_accurate_attribution(tmp_path, monkeypat
     # Assertions on accurate attribution
     assert report.total_alerts == 4
     assert report.untriggered_count == 1  # INFY did not trigger
-    assert report.ignited_trades == 3     # TCS, WIPRO, ETERNAL
-    assert report.win_count == 1          # ETERNAL
-    assert report.loss_count == 0         # No true SL breaches!
-    assert report.scratch_count == 1      # WIPRO velocity time-stop
-    assert report.eod_squareoff_count == 1 # TCS 15:15 session cutoff
+    assert report.ignited_trades == 3  # TCS, WIPRO, ETERNAL
+    assert report.win_count == 1  # ETERNAL
+    assert report.loss_count == 0  # No true SL breaches!
+    assert report.scratch_count == 1  # WIPRO velocity time-stop
+    assert report.eod_squareoff_count == 1  # TCS 15:15 session cutoff
 
     # Trading journal verification
     assert len(report.journal_entries) == 4
@@ -644,4 +645,3 @@ def test_eod_report_telegram_vs_ui_segregation(tmp_path, monkeypatch):
 
     ws_all = wb["2_Trading_Journal"]
     assert ws_all.max_row == 6  # header + 5 alerts
-

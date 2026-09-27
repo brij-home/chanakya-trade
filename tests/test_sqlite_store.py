@@ -8,8 +8,6 @@ Verifies WAL pragma settings, atomic UPSERTs, query filtering, and legacy JSON s
 from __future__ import annotations
 
 import json
-from pathlib import Path
-import tempfile
 import pytest
 
 from engine.alert_model import AutoAlert

@@ -527,5 +527,3 @@ def test_market_regime_posture_stand_aside_discipline(monkeypatch):
     assert posture.action == "STAND_ASIDE"
     assert posture.regime == "CHOP_CONSOLIDATION"
     assert "STAND ASIDE & PRESERVE CAPITAL" in posture.verdict_message
-
-

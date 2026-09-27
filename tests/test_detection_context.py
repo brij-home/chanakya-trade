@@ -7,7 +7,6 @@ and DetectorRegistry for pure and decoupled detector evaluation.
 
 from __future__ import annotations
 
-from datetime import datetime
 import pandas as pd
 import pytest
 
@@ -113,6 +112,7 @@ def test_detector_registry_and_evaluation():
 
 def test_functional_detector_adapter():
     """Verify FunctionalDetectorAdapter wraps standard functions seamlessly."""
+
     def legacy_func(ctx: DetectionContext):
         if ctx.day_change_pct >= 5.0:
             return AutoAlert(

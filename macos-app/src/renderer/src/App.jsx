@@ -304,6 +304,21 @@ export default function App() {
       return
     }
 
+    if (payload.type === 'auto_alert_archived') {
+      const { alert_id, is_archived } = payload
+      if (alert_id) {
+        useNotificationStore.getState().updateAlertArchived?.(alert_id, is_archived)
+        window.dispatchEvent(new CustomEvent('auto-alert-archived', { detail: payload }))
+      }
+      return
+    }
+
+    if (payload.type === 'auto_alerts_bulk_archived') {
+      useNotificationStore.getState().archiveAllInvalidated?.()
+      window.dispatchEvent(new CustomEvent('auto-alerts-bulk-archived', { detail: payload }))
+      return
+    }
+
     // Always record into persistent notification store (glanceable feed & history)
     useNotificationStore.getState().addNotification(payload)
 
@@ -319,8 +334,8 @@ export default function App() {
     const isTest = payload.environment === 'TEST' || payload.is_live === false
     const isInvalidated = payload.is_invalidated === true || payload.stage === 'INVALIDATED'
     const isTarget = payload.is_target === true || payload.stage === 'T1_ACHIEVED' || payload.stage === 'TARGET_ACHIEVED' || payload.target_achieved === true
-    const isTrail = payload.is_trail === true || payload.stage === 'TRAILING_UPDATE'
-    const envBadge = isTest ? '🧪 [TEST]' : '🟢 [REAL/LIVE]'
+    const isOffMarket = payload.environment === 'EOD_SCAN' || payload.environment === 'OFF-MARKET' || payload.market_status === 'SESSION_CLOSED'
+    const envBadge = isTest ? '🧪 [TEST]' : (isOffMarket ? '🌙 [OFF-MARKET/EOD]' : '🟢 [REAL/LIVE]')
 
     const now = Date.now()
 

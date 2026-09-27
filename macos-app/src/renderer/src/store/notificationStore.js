@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import { isTestOrSimAlert } from '../components/Views/alerts/alertHelpers'
+import { isTestOrSimAlert, isAlertActive } from '../components/Views/alerts/alertHelpers'
 
 const STORAGE_KEY = 'chanakya_notifications_v1'
 // Singleton polling interval — only ONE interval runs across the entire app
@@ -24,18 +24,34 @@ function loadStoredNotifications() {
     return sanitized.map((item) => {
       const isIntraday = item.time_horizon === 'INTRADAY' || item.timeHorizon === 'INTRADAY'
       const isSwingOrPositional = ['SWING_SHORT', 'SWING_MID', 'POSITIONAL'].includes(item.time_horizon || item.timeHorizon)
+      const exch = String(item.exchange || '').toUpperCase()
+      const seg = String(item.segment || item.metrics?.segment || '').toUpperCase()
+      const isCrypto = exch === 'CRYPTO' || exch === 'BINANCE' || exch === 'DERIBIT' || seg === 'CRYPTO' || String(item.symbol || '').toUpperCase().endsWith('USDT')
       const timeStr = item.created_at || item.timestamp
       if (isIntraday && !isSwingOrPositional && timeStr) {
         try {
           const d = new Date(String(timeStr).replace(' IST', '').trim())
-          if (!isNaN(d.getTime()) && d.toDateString() !== now.toDateString()) {
-            return {
-              ...item,
-              is_invalidated: true,
-              isInvalidated: true,
-              is_active: false,
-              stage: 'EXPIRED',
-              invalidation_reason: item.invalidation_reason || 'Intraday session expired (15:15 IST cutoff reached). Trade closed.'
+          if (!isNaN(d.getTime())) {
+            if (isCrypto) {
+              if (now.getTime() - d.getTime() >= 86_400_000) {
+                return {
+                  ...item,
+                  is_invalidated: true,
+                  isInvalidated: true,
+                  is_active: false,
+                  stage: 'EXPIRED',
+                  invalidation_reason: item.invalidation_reason || '24x7 Crypto session expired (24h rolling limit reached). Trade closed.'
+                }
+              }
+            } else if (d.toDateString() !== now.toDateString()) {
+              return {
+                ...item,
+                is_invalidated: true,
+                isInvalidated: true,
+                is_active: false,
+                stage: 'EXPIRED',
+                invalidation_reason: item.invalidation_reason || 'Intraday session expired (15:15 IST cutoff reached). Trade closed.'
+              }
             }
           }
         } catch (_) {}
@@ -101,7 +117,7 @@ export function normalizeNotification(payload) {
     stage: payload.stage || (isInvalidated ? 'INVALIDATED' : isTarget ? 'TARGET_ACHIEVED' : isTrail ? 'TRAILING_UPDATE' : 'ACTIVE'),
     time_horizon: timeHorizon,
     timeHorizon: timeHorizon,
-    is_active: payload.is_active !== undefined ? Boolean(payload.is_active) : (!isInvalidated && payload.stage !== 'INVALIDATED' && !payload.is_archived),
+    is_active: payload.is_active !== undefined ? Boolean(payload.is_active) : isAlertActive(payload),
     is_archived: Boolean(payload.is_archived || payload.isArchived),
     is_expired: Boolean(payload.is_expired || payload.isExpired),
     is_invalidated: isInvalidated,
@@ -175,27 +191,18 @@ export const useNotificationStore = create((set, get) => ({
         }
       }
 
-      // Preserve any local/SSE alerts not present in the backend snapshot
+      // Preserve only recently received in-flight SSE alerts (< 90s) not yet captured in backend snapshot
       const now = new Date()
       for (const rem of existingMap.values()) {
-        const isIntraday = rem.time_horizon === 'INTRADAY' || rem.timeHorizon === 'INTRADAY'
         const timeStr = rem.created_at || rem.timestamp
-        if (isIntraday && timeStr) {
+        if (timeStr) {
           try {
             const d = new Date(String(timeStr).replace(' IST', '').trim())
-            if (!isNaN(d.getTime()) && d.toDateString() !== now.toDateString()) {
-              merged.push({
-                ...rem,
-                is_invalidated: true,
-                isInvalidated: true,
-                stage: 'EXPIRED',
-                invalidation_reason: rem.invalidation_reason || 'Intraday session expired (15:15 IST cutoff reached). Trade closed.'
-              })
-              continue
+            if (!isNaN(d.getTime()) && (now.getTime() - d.getTime()) < 90_000) {
+              merged.push(rem)
             }
           } catch (_) {}
         }
-        merged.push(rem)
       }
 
       // Sort newest-first based on timestamp / created_at
@@ -213,6 +220,41 @@ export const useNotificationStore = create((set, get) => ({
         lastSyncedAt: new Date().toISOString(),
         isLoading: false,
       }
+    })
+  },
+
+  updateAlertArchived: (alertId, isArchived) => {
+    if (!alertId) return
+    set((s) => {
+      const next = s.notifications.map((n) =>
+        (n.id === alertId || n.alert_id === alertId)
+          ? {
+              ...n,
+              is_archived: isArchived,
+              isArchived: isArchived,
+              is_active: !isArchived && isAlertActive({ ...n, is_archived: false, isArchived: false }),
+            }
+          : n
+      )
+      saveNotifications(next)
+      return { notifications: next }
+    })
+  },
+
+  archiveAllInvalidated: () => {
+    set((s) => {
+      const next = s.notifications.map((n) =>
+        (n.is_invalidated || n.stage === 'INVALIDATED')
+          ? {
+              ...n,
+              is_archived: true,
+              isArchived: true,
+              is_active: false,
+            }
+          : n
+      )
+      saveNotifications(next)
+      return { notifications: next }
     })
   },
 

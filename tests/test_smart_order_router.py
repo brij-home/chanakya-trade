@@ -6,7 +6,6 @@ Unit tests for Smart Order Router (SOR) and Passive PEG / Iceberg execution.
 
 from __future__ import annotations
 
-import pytest
 
 from engine.smart_order_router import build_smart_execution_plan, resolve_tick_size
 

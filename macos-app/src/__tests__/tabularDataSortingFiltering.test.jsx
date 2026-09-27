@@ -272,7 +272,7 @@ describe('Tabular Data Sorting and Multi-Criteria Filtering', () => {
       render(<InflectionScannerView />)
 
       // Trigger initial scan to load candidates
-      const rescanBtn = screen.getByRole('button', { name: /rescan|scanning/i })
+      const rescanBtn = screen.getAllByRole('button', { name: /scan/i })[0]
       fireEvent.click(rescanBtn)
 
       await waitFor(() => {
@@ -303,7 +303,7 @@ describe('Tabular Data Sorting and Multi-Criteria Filtering', () => {
       render(<InflectionScannerView />)
 
       // Load data
-      fireEvent.click(screen.getByRole('button', { name: /rescan|scanning/i }))
+      fireEvent.click(screen.getAllByRole('button', { name: /scan/i })[0])
       await waitFor(() => {
         expect(screen.getByText('DIXON')).toBeInTheDocument()
       })
@@ -327,7 +327,7 @@ describe('Tabular Data Sorting and Multi-Criteria Filtering', () => {
     it('supports quick condition toggles (e.g. Squeeze Coiling, Exclude UC)', async () => {
       render(<InflectionScannerView />)
 
-      fireEvent.click(screen.getByRole('button', { name: /rescan|scanning/i }))
+      fireEvent.click(screen.getAllByRole('button', { name: /scan/i })[0])
       await waitFor(() => {
         expect(screen.getByText('DIXON')).toBeInTheDocument()
       })

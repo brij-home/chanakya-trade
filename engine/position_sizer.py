@@ -447,6 +447,7 @@ def calculate_position_size(
     if vix is None:
         try:
             from engine.market_regime_gate import get_cached_regime
+
             _reg = get_cached_regime()
             if _reg and _reg.vix:
                 vix = float(_reg.vix)
@@ -468,6 +469,7 @@ def calculate_position_size(
     # Market Regime Gate Sizing Coupling (Edgeless Chop / Locomotive Polarization)
     try:
         from engine.market_regime_gate import get_cached_regime
+
         _cached_reg = get_cached_regime()
         if _cached_reg:
             if _cached_reg.is_edgeless:
@@ -563,7 +565,6 @@ _DETECTOR_LOT_MULTIPLIERS: dict[str, float] = {
     "GAMMA_BLAST": 1.15,
     # OPENING_DRIVE: First 30-minute institutional momentum surge with volume expansion
     "OPENING_DRIVE": 1.15,
-
     # ── Standard: 1.0× (no adjustment) ─────────────────────────────────────
     "OPTIONS_MOMENTUM": 1.0,
     "SQUEEZE_BREAKOUT": 1.0,
@@ -574,7 +575,6 @@ _DETECTOR_LOT_MULTIPLIERS: dict[str, float] = {
     "COMMODITY_MOMENTUM": 1.0,
     "CURRENCY_BREAKOUT": 1.0,
     "MULTIBAGGER": 1.0,
-
     # ── Counter-Trend: 0.5× dampened (high false-positive rate) ─────────────
     # Pure counter-trend setups statistically fail 70%+ of the time on Indian
     # markets intraday, where momentum and trend regimes dominate.
@@ -673,7 +673,11 @@ def calculate_position_size_for_alert(
     adjusted_risk = adjusted_shares * stop_distance
     adjusted_risk_pct = (adjusted_risk / capital) * 100.0 if capital > 0 else 0.0
 
-    mult_label = f"+{int((multiplier - 1.0) * 100)}%" if multiplier > 1.0 else f"-{int((1.0 - multiplier) * 100)}%"
+    mult_label = (
+        f"+{int((multiplier - 1.0) * 100)}%"
+        if multiplier > 1.0
+        else f"-{int((1.0 - multiplier) * 100)}%"
+    )
     adjusted_notes = (
         f"{base.notes} | Detector [{alert_type}] multiplier {multiplier:.2f}x ({mult_label}): "
         f"{base.lots} → {adjusted_lots} lots."
@@ -771,5 +775,3 @@ def generate_execution_ticket(
         "smart_routing": sor_plan.to_dict(),
         "notes": res.notes,
     }
-
-

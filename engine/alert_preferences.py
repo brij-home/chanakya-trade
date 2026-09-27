@@ -117,12 +117,14 @@ INDEX_SYMBOLS = {
 
 # F&O Index symbols specifically permitted on the dedicated F&O Index Telegram channel
 # User mandate: strictly restricted to Nifty, Banknifty, Midcp, and Sensex only.
-ALLOWED_FNO_INDEX_TELEGRAM_SYMBOLS = frozenset({
-    "NIFTY",
-    "BANKNIFTY",
-    "MIDCPNIFTY",
-    "SENSEX",
-})
+ALLOWED_FNO_INDEX_TELEGRAM_SYMBOLS = frozenset(
+    {
+        "NIFTY",
+        "BANKNIFTY",
+        "MIDCPNIFTY",
+        "SENSEX",
+    }
+)
 
 
 def is_fno_index_channel_allowed(symbol: str) -> bool:
@@ -150,7 +152,11 @@ def is_fno_index_channel_allowed(symbol: str) -> bool:
         return True
 
     # Derivative contract prefixes (e.g. NIFTY26OCT23100CE, MIDCPNIFTY26OCT...)
-    if clean.startswith("MIDCPNIFTY") or clean.startswith("MIDCAPNIFTY") or clean.startswith("MIDCP"):
+    if (
+        clean.startswith("MIDCPNIFTY")
+        or clean.startswith("MIDCAPNIFTY")
+        or clean.startswith("MIDCP")
+    ):
         return True
     if clean.startswith("BANKNIFTY") or clean.startswith("NIFTYBANK"):
         return True
@@ -728,9 +734,7 @@ class AlertPreferencesManager:
             # Other indices (FINNIFTY, BANKEX, NIFTYNXT50, sectoral indices) are suppressed from Telegram.
             if channel == "telegram" and seg == "FNO_INDEX":
                 sym = (
-                    alert.get("symbol")
-                    if isinstance(alert, dict)
-                    else getattr(alert, "symbol", "")
+                    alert.get("symbol") if isinstance(alert, dict) else getattr(alert, "symbol", "")
                 )
                 if not self.is_fno_index_symbol_allowed(sym):
                     return False

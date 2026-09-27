@@ -1,7 +1,11 @@
 {$DOMAIN} {
-    reverse_proxy app:8765
+    reverse_proxy app:8765 {
+        flush_interval -1
+    }
 }
 
 :80 {
-    reverse_proxy app:8765
+    reverse_proxy app:8765 {
+        flush_interval -1
+    }
 }

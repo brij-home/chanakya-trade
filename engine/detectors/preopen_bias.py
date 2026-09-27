@@ -87,7 +87,9 @@ def detect_preopen_bias(
     entry_str = f"Rs{chosen_ltp:.1f}" if chosen_ltp > 0 else "Await 09:15 open print"
     summary = f"GIFT Nifty at Rs{gift_futures_price:.1f} ({gap_pct:+.2f}% vs prev close Rs{prev_close:.1f}). Implies {bias_dir}. Entry: {entry_str} | SL: Rs{sl_prem:.1f} | T1: Rs{t1_prem:.1f} (+30%) | T2: Rs{t2_prem:.1f} (+60%). Strength: {strength} ({abs_gap:.2f}%)"
     a = AutoAlert(
-        alert_id=generate_alert_id(clean_sym, "PREOPEN_BIAS", variant=f"{option_type.lower()}-{int(atm_strike)}"),
+        alert_id=generate_alert_id(
+            clean_sym, "PREOPEN_BIAS", variant=f"{option_type.lower()}-{int(atm_strike)}"
+        ),
         alert_type="GAMMA_BLAST",
         stage="EARLY_WARNING",
         symbol=clean_sym,

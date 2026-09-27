@@ -126,7 +126,7 @@ _KNOWN_NSE_TOKENS = {
     "MARUTI": "10999",
     "TATAMOTORS": "3456",
     "WIPRO": "3787",
-    "COFORGE": "11540",
+    "COFORGE": "11543",
     "TRENT": "1964",
     "HCLTECH": "7229",
     "DIVISLAB": "10940",
@@ -139,9 +139,9 @@ _KNOWN_NSE_TOKENS = {
     "PATANJALI": "17029",
     "OBEROIRLTY": "20242",
     "KPITTECH": "9683",
-    "TATAELXSI": "3506",
+    "TATAELXSI": "3411",
     "MPHASIS": "4503",
-    "MANKIND": "5926",
+    "MANKIND": "15380",
     "BSE": "19585",
     "MCX": "31181",
     "GOLD": "GOLD",
@@ -211,12 +211,32 @@ class MStockAPI(BrokerAPI):
         opt_t = opt_type.upper()
         cands = [clean_sym]
         m_map_3 = {
-            1: "JAN", 2: "FEB", 3: "MAR", 4: "APR", 5: "MAY", 6: "JUN",
-            7: "JUL", 8: "AUG", 9: "SEP", 10: "OCT", 11: "NOV", 12: "DEC",
+            1: "JAN",
+            2: "FEB",
+            3: "MAR",
+            4: "APR",
+            5: "MAY",
+            6: "JUN",
+            7: "JUL",
+            8: "AUG",
+            9: "SEP",
+            10: "OCT",
+            11: "NOV",
+            12: "DEC",
         }
         m_map_1 = {
-            1: "1", 2: "2", 3: "3", 4: "4", 5: "5", 6: "6",
-            7: "7", 8: "8", 9: "9", 10: "O", 11: "N", 12: "D",
+            1: "1",
+            2: "2",
+            3: "3",
+            4: "4",
+            5: "5",
+            6: "6",
+            7: "7",
+            8: "8",
+            9: "9",
+            10: "O",
+            11: "N",
+            12: "D",
         }
         if m_int in m_map_3:
             cands.append(f"{und}{yy}{m_map_3[m_int]}{s_int}{opt_t}")
@@ -240,17 +260,16 @@ class MStockAPI(BrokerAPI):
             return "51" if str(exchange).upper() in ("BFO", "5") else "1"
         if clean_sym == "BANKEX":
             return "69" if str(exchange).upper() in ("BFO", "5") else "12"
-        if clean_sym in _KNOWN_NSE_TOKENS:
-            return _KNOWN_NSE_TOKENS[clean_sym]
 
-        cache_key = f"{exchange}:{clean_sym}"
-        if cache_key in self._scrip_token_cache:
-            return self._scrip_token_cache[cache_key]
-
+        # 1. Canonical Scrip Master Cache takes PRECEDENCE (Rule 11: Exchange Authority)
         try:
             self._ensure_scrip_cache()
+            cache_key = f"{exchange}:{clean_sym}"
+            eq_cache_key = f"{exchange}:{clean_sym}-EQ"
             if cache_key in self._scrip_token_cache:
                 return self._scrip_token_cache[cache_key]
+            if eq_cache_key in self._scrip_token_cache:
+                return self._scrip_token_cache[eq_cache_key]
 
             # Check candidate derivative symbol variations (e.g. ISO YYYYMMDD -> NSE YYMMM)
             for cand in self._resolve_derivative_candidates(clean_sym):
@@ -261,6 +280,11 @@ class MStockAPI(BrokerAPI):
                     return tok
         except Exception:
             pass
+
+        # 2. Hardcoded fallback (only if scrip master cache miss)
+        if clean_sym in _KNOWN_NSE_TOKENS:
+            return _KNOWN_NSE_TOKENS[clean_sym]
+
         return clean_sym
 
     def _ensure_scrip_cache(self) -> None:
@@ -1402,7 +1426,7 @@ class MStockAPI(BrokerAPI):
 
         clean_sym = symbol.replace("NSE:", "").replace("BSE:", "")
         exchange = "BSE" if symbol.startswith("BSE:") else "NSE"
-        token = _KNOWN_NSE_TOKENS.get(clean_sym, "")
+        token = self.get_symbol_token(clean_sym, exchange)
 
         interval_map = {
             "D": "ONE_DAY",
@@ -1999,7 +2023,7 @@ class MStockAPI(BrokerAPI):
 
         clean_sym = symbol.replace("NSE:", "").replace("BSE:", "")
         exchange_id = "4" if symbol.startswith("BSE:") else "1"
-        token = _KNOWN_NSE_TOKENS.get(clean_sym, "")
+        token = self.get_symbol_token(clean_sym, "BSE" if exchange_id == "4" else "NSE")
 
         if self._token and token:
             try:

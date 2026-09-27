@@ -14,7 +14,7 @@ services:
 
   caddy:
     image: caddy:2-alpine
-    container_name: vibe-trading-caddy
+    container_name: chanakya-trade-caddy
     ports:
       - "80:80"
       - "443:443"

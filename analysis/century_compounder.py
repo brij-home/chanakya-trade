@@ -58,24 +58,28 @@ logger = logging.getLogger("analysis.century_compounder")
 @dataclass
 class TwinEngineForecast:
     """Mathematical projection of earnings expansion and multiple re-rating."""
+
     current_market_cap_cr: float
     current_pe: float
     projected_terminal_pe: float
     pe_expansion_multiple: float  # e.g. 3.5x
-    
+
     current_pat_cr: float
     forecast_pat_cagr_pct: float  # e.g. 28%
     years_horizon: int  # 5 or 10 years
     pat_expansion_multiple: float  # e.g. 11.8x
-    
+
     total_projected_multiple: float  # pat_multiple * pe_multiple (e.g. 41.3x)
     target_market_cap_cr: float
-    compounder_tier: str  # "1000X_POTENTIAL" | "100X_CENTURY" | "25X_MULTIBAGGER" | "10X_QUALITY" | "STANDARD"
+    compounder_tier: (
+        str  # "1000X_POTENTIAL" | "100X_CENTURY" | "25X_MULTIBAGGER" | "10X_QUALITY" | "STANDARD"
+    )
 
 
 @dataclass
 class AntiFomoExecutionBlueprint:
     """Discipline framework to prevent emotional chasing and accumulate at fair value."""
+
     fair_value_anchor: float  # Anchored VWAP / Volume Profile POC
     fair_value_source: str  # "VOLUME_PROFILE_POC" | "ANCHORED_VWAP" | "20_EMA_BASE"
     accumulate_low: float  # Fair value - 1.5%
@@ -94,11 +98,13 @@ class CenturyCompounderReport:
     ltp: float
     century_score: int  # 0 to 100
     is_qualified_compounder: bool  # Score >= 75
-    compounder_tier: str  # "1000X_POTENTIAL" | "100X_CENTURY" | "25X_MULTIBAGGER" | "10X_QUALITY" | "STANDARD"
-    
+    compounder_tier: (
+        str  # "1000X_POTENTIAL" | "100X_CENTURY" | "25X_MULTIBAGGER" | "10X_QUALITY" | "STANDARD"
+    )
+
     # Mathematical Twin Engines
     twin_engines: TwinEngineForecast
-    
+
     # 7 Pillar Breakdown
     runway_score: int  # 0 - 15 (Microcap headroom vs TAM)
     reinvestment_score: int  # 0 - 15 (ROIC >= 22% & Reinvestment Rate >= 70%)
@@ -107,24 +113,26 @@ class CenturyCompounderReport:
     institutional_catalyst_score: int  # 0 - 15 (Credit upgrade & FII/DII accumulation)
     forensic_fortress_score: int  # 0 - 15 (Beneish, Altman, CFO/EBITDA, Zero Pledge)
     smile_framework_score: int  # 0 - 10 (Vijay Kedia SMILE criteria)
-    
+
     pillar_notes: list[str] = field(default_factory=list)
     catalyst_badges: list[str] = field(default_factory=list)
-    
+
     # Anti-FOMO Execution Blueprint
-    anti_fomo: AntiFomoExecutionBlueprint = field(default_factory=lambda: AntiFomoExecutionBlueprint(
-        fair_value_anchor=0.0,
-        fair_value_source="VOLUME_PROFILE_POC",
-        accumulate_low=0.0,
-        accumulate_high=0.0,
-        pivot_trigger=0.0,
-        no_chase_boundary=0.0,
-        pullback_limit_entry=0.0,
-        invalidation_stop=0.0,
-        risk_reward_to_2x="1:4.0",
-        action_directive="STALK_PIVOT"
-    ))
-    
+    anti_fomo: AntiFomoExecutionBlueprint = field(
+        default_factory=lambda: AntiFomoExecutionBlueprint(
+            fair_value_anchor=0.0,
+            fair_value_source="VOLUME_PROFILE_POC",
+            accumulate_low=0.0,
+            accumulate_high=0.0,
+            pivot_trigger=0.0,
+            no_chase_boundary=0.0,
+            pullback_limit_entry=0.0,
+            invalidation_stop=0.0,
+            risk_reward_to_2x="1:4.0",
+            action_directive="STALK_PIVOT",
+        )
+    )
+
     summary: str = ""
 
     def to_dict(self) -> dict[str, Any]:
@@ -142,14 +150,14 @@ def calculate_twin_engines(
 ) -> TwinEngineForecast:
     """
     Computes the empirical Twin Engines (PAT Growth × PE Multiple Expansion).
-    
+
     Indian Market Realities:
       - Titan, Bajaj Finance, Eicher Motors started at P/E 8–18x and expanded to 55–80x.
       - Operating leverage accelerates PAT CAGR significantly above top-line sales growth.
     """
     mcap = max(100.0, market_cap_cr)
     curr_pe = max(5.0, min(120.0, pe if pe and pe > 0 else 22.0))
-    
+
     # 1. PE Re-Rating Potential
     # If company has high ROCE (>25%) and enters institutional scale, terminal PE is 45-65x.
     if roce_pct >= 25.0:
@@ -160,30 +168,34 @@ def calculate_twin_engines(
         base_terminal_pe = 28.0
     else:
         base_terminal_pe = 18.0
-        
+
     # Cap terminal PE so it doesn't exceed 75x
     terminal_pe = round(min(75.0, max(curr_pe, base_terminal_pe)), 1)
     pe_expansion_mult = round(max(1.0, terminal_pe / curr_pe), 2)
-    
+
     # 2. PAT CAGR Projection with Operating Leverage Boost
     # If gross block (capex) expanded > 25%, operating leverage multiplier = 1.35x to 1.7x
-    op_lev_boost = 1.45 if gross_block_growth_pct >= 25.0 else (1.20 if gross_block_growth_pct >= 12.0 else 1.05)
+    op_lev_boost = (
+        1.45
+        if gross_block_growth_pct >= 25.0
+        else (1.20 if gross_block_growth_pct >= 12.0 else 1.05)
+    )
     base_sales_growth = max(10.0, min(50.0, sales_growth_pct if sales_growth_pct else 20.0))
     projected_pat_cagr = round(min(45.0, base_sales_growth * op_lev_boost), 1)
-    
+
     # 10-Year Horizon Compounding
     years = 10
     pat_expansion_mult = round(float((1.0 + (projected_pat_cagr / 100.0)) ** years), 1)
-    
+
     # Market Cap Headroom Constraint
     # A company cannot expand beyond the Total Addressable Market (TAM)
     raw_total_mult = pe_expansion_mult * pat_expansion_mult
     max_mcap_headroom = tam_cr / mcap
     total_mult = round(min(raw_total_mult, max_mcap_headroom * 1.5), 1)
-    
+
     target_mcap = round(mcap * total_mult, 1)
     current_pat = round(mcap / curr_pe, 1)
-    
+
     if total_mult >= 500.0:
         tier = "1000X_POTENTIAL"
     elif total_mult >= 75.0:
@@ -194,7 +206,7 @@ def calculate_twin_engines(
         tier = "10X_QUALITY"
     else:
         tier = "STANDARD"
-        
+
     return TwinEngineForecast(
         current_market_cap_cr=round(mcap, 1),
         current_pe=round(curr_pe, 1),
@@ -221,7 +233,7 @@ def evaluate_century_compounder(
     computes the Twin Engines projection, and formulates the Anti-FOMO Fair Value blueprint.
     """
     clean_sym = symbol.upper().replace(".NS", "").replace("NSE:", "").strip()
-    
+
     # 1. Resolve Price
     if ltp is None or ltp <= 0:
         if df is not None and len(df) > 0 and "close" in df.columns:
@@ -229,13 +241,14 @@ def evaluate_century_compounder(
         else:
             try:
                 from market.quotes import get_quote
+
                 q = get_quote(f"NSE:{clean_sym}")
                 if q:
                     ltp = float(getattr(q, "last_price", getattr(q, "ltp", 0.0)))
             except Exception:
                 ltp = 0.0
     ltp = round(float(ltp if ltp and ltp > 0 else 100.0), 2)
-    
+
     # 2. Gather Fundamentals
     mcap_cr = 2500.0
     pe = 22.0
@@ -245,23 +258,30 @@ def evaluate_century_compounder(
     debt_equity = 0.25
     promoter_holding = 65.0
     pledge_pct = 0.0
-    free_cash_flow = 80.0
-    cfo_pat_ratio = 0.95
     gross_block_growth = 25.0
-    
+
     if not os.environ.get("CHANAKYA_TESTING"):
         try:
             from analysis.fundamental import analyse
+
             snap = analyse(clean_sym)
             if snap:
-                if snap.market_cap: mcap_cr = float(snap.market_cap)
-                if snap.pe: pe = float(snap.pe)
-                if snap.roce: roce = float(snap.roce)
-                if snap.sales_growth: sales_growth = float(snap.sales_growth)
-                if snap.profit_growth: profit_growth = float(snap.profit_growth)
-                if snap.debt_equity: debt_equity = float(snap.debt_equity)
-                if snap.promoter_holding: promoter_holding = float(snap.promoter_holding)
-                if snap.pledged_pct is not None: pledge_pct = float(snap.pledged_pct)
+                if snap.market_cap:
+                    mcap_cr = float(snap.market_cap)
+                if snap.pe:
+                    pe = float(snap.pe)
+                if snap.roce:
+                    roce = float(snap.roce)
+                if snap.sales_growth:
+                    sales_growth = float(snap.sales_growth)
+                if snap.profit_growth:
+                    profit_growth = float(snap.profit_growth)
+                if snap.debt_equity:
+                    debt_equity = float(snap.debt_equity)
+                if snap.promoter_holding:
+                    promoter_holding = float(snap.promoter_holding)
+                if snap.pledged_pct is not None:
+                    pledge_pct = float(snap.pledged_pct)
         except Exception as e:
             logger.debug(f"[CenturyCompounder] Fundamental fetch error for {clean_sym}: {e}")
 
@@ -271,9 +291,10 @@ def evaluate_century_compounder(
     fii_delta = 0.8
     dii_delta = 1.2
     has_creeping_acquisition = False
-    
+
     try:
         from analysis.institutional_catalysts import get_institutional_catalysts
+
         cat_report = get_institutional_catalysts(clean_sym)
         if cat_report:
             credit_rating = cat_report.credit_rating.current_rating
@@ -291,6 +312,7 @@ def evaluate_century_compounder(
     is_manipulator = False
     try:
         from analysis.forensic import audit_company_forensics
+
         fa = audit_company_forensics(clean_sym)
         if fa and fa.available:
             beneish_m = fa.beneish_m_score if fa.beneish_m_score is not None else -2.5
@@ -302,49 +324,67 @@ def evaluate_century_compounder(
     # ── Pillar Scoring (0–100 total) ───────────────────────────
     pillar_notes: list[str] = []
     badges: list[str] = []
-    
+
     # Pillar 1: Market Cap Runway (0–15 pts)
     # Headroom to 100x: ₹500 Cr – ₹5,000 Cr is prime sweet spot
     if mcap_cr <= 2500.0:
         runway_score = 15
-        pillar_notes.append(f"Sub-₹2,500 Cr Microcap (₹{mcap_cr:,.0f} Cr) with supreme 50x–100x scaling runway.")
+        pillar_notes.append(
+            f"Sub-₹2,500 Cr Microcap (₹{mcap_cr:,.0f} Cr) with supreme 50x–100x scaling runway."
+        )
         badges.append("🚀 Micro-Runway (<₹2.5k Cr)")
     elif mcap_cr <= 7500.0:
         runway_score = 12
-        pillar_notes.append(f"High-growth Smallcap (₹{mcap_cr:,.0f} Cr) with 20x–40x institutional expansion runway.")
+        pillar_notes.append(
+            f"High-growth Smallcap (₹{mcap_cr:,.0f} Cr) with 20x–40x institutional expansion runway."
+        )
         badges.append("📈 Smallcap Runway")
     elif mcap_cr <= 20000.0:
         runway_score = 7
-        pillar_notes.append(f"Midcap (₹{mcap_cr:,.0f} Cr) — Strong 5x–10x potential; 100x constrained by size.")
+        pillar_notes.append(
+            f"Midcap (₹{mcap_cr:,.0f} Cr) — Strong 5x–10x potential; 100x constrained by size."
+        )
     else:
         runway_score = 2
-        pillar_notes.append(f"Large-cap (₹{mcap_cr:,.0f} Cr) — Law of large numbers caps terminal multiple.")
+        pillar_notes.append(
+            f"Large-cap (₹{mcap_cr:,.0f} Cr) — Law of large numbers caps terminal multiple."
+        )
 
     # Pillar 2: Buffett-Mauboussin Reinvestment Engine (0–15 pts)
     # Intrinsic Growth = ROIC * Reinvestment Rate
     if roce >= 24.0 and debt_equity <= 0.4:
         reinvestment_score = 15
-        pillar_notes.append(f"Compounding Machine: Elite ROCE ({roce:.1f}%) + Low D/E ({debt_equity:.2f}) self-funds hypergrowth.")
+        pillar_notes.append(
+            f"Compounding Machine: Elite ROCE ({roce:.1f}%) + Low D/E ({debt_equity:.2f}) self-funds hypergrowth."
+        )
         badges.append(f"💎 Elite ROCE {roce:.0f}%")
     elif roce >= 18.0 and debt_equity <= 0.8:
         reinvestment_score = 11
-        pillar_notes.append(f"High-return capital deployment: ROCE ({roce:.1f}%) exceeds cost of capital.")
+        pillar_notes.append(
+            f"High-return capital deployment: ROCE ({roce:.1f}%) exceeds cost of capital."
+        )
     elif roce >= 12.0:
         reinvestment_score = 6
     else:
         reinvestment_score = 0
-        pillar_notes.append(f"Low capital efficiency: ROCE ({roce:.1f}%) creates zero economic value.")
+        pillar_notes.append(
+            f"Low capital efficiency: ROCE ({roce:.1f}%) creates zero economic value."
+        )
 
     # Pillar 3: Operating Leverage Inflection & Capex Cycle (0–15 pts)
     # (% Δ EBIT) / (% Δ Revenue) >= 2.0x
     op_lev_ratio = profit_growth / max(5.0, sales_growth)
     if op_lev_ratio >= 1.5 and sales_growth >= 18.0:
         operating_leverage_score = 15
-        pillar_notes.append(f"Operating Leverage Tipping Point: Profit growth ({profit_growth:.1f}%) outpaces Sales ({sales_growth:.1f}%) by {op_lev_ratio:.2f}x.")
+        pillar_notes.append(
+            f"Operating Leverage Tipping Point: Profit growth ({profit_growth:.1f}%) outpaces Sales ({sales_growth:.1f}%) by {op_lev_ratio:.2f}x."
+        )
         badges.append(f"⚡ Operating Leverage {op_lev_ratio:.1f}x")
     elif op_lev_ratio >= 1.2 or sales_growth >= 20.0:
         operating_leverage_score = 11
-        pillar_notes.append(f"Strong capacity utilization & margin expansion (Sales +{sales_growth:.1f}%).")
+        pillar_notes.append(
+            f"Strong capacity utilization & margin expansion (Sales +{sales_growth:.1f}%)."
+        )
     else:
         operating_leverage_score = 5
 
@@ -352,7 +392,9 @@ def evaluate_century_compounder(
     # Mispriced entry PE with huge room to expand
     if pe <= 22.0 and sales_growth >= 20.0:
         multiple_rerating_score = 15
-        pillar_notes.append(f"P/E Alchemy: Deep PEG undervaluation (PE {pe:.1f}x vs {sales_growth:.1f}% growth) primed for 3x–5x multiple re-rating.")
+        pillar_notes.append(
+            f"P/E Alchemy: Deep PEG undervaluation (PE {pe:.1f}x vs {sales_growth:.1f}% growth) primed for 3x–5x multiple re-rating."
+        )
         badges.append(f"🎯 PE Re-rating (P/E {pe:.1f}x)")
     elif pe <= 35.0:
         multiple_rerating_score = 10
@@ -361,7 +403,9 @@ def evaluate_century_compounder(
         multiple_rerating_score = 5
     else:
         multiple_rerating_score = 2
-        pillar_notes.append(f"Elevated valuation (PE {pe:.1f}x) leaves little headroom for multiple expansion.")
+        pillar_notes.append(
+            f"Elevated valuation (PE {pe:.1f}x) leaves little headroom for multiple expansion."
+        )
 
     # Pillar 5: Institutional & Credit Rating Catalyst (0–15 pts)
     # CRISIL/ICRA upgrade + FII/DII QoQ accumulation
@@ -393,11 +437,16 @@ def evaluate_century_compounder(
 
     # Pillar 7: Vijay Kedia SMILE Framework (0–10 pts)
     smile_pts = 0
-    if mcap_cr <= 5000.0: smile_pts += 2  # Small in size
-    if promoter_holding >= 55.0 and pledge_pct == 0.0: smile_pts += 2  # Extraordinary leadership
-    if sales_growth >= 18.0: smile_pts += 2  # Large market
-    if gross_block_growth >= 15.0 or debt_equity <= 0.5: smile_pts += 2  # Investing in business
-    if roce >= 20.0: smile_pts += 2
+    if mcap_cr <= 5000.0:
+        smile_pts += 2  # Small in size
+    if promoter_holding >= 55.0 and pledge_pct == 0.0:
+        smile_pts += 2  # Extraordinary leadership
+    if sales_growth >= 18.0:
+        smile_pts += 2  # Large market
+    if gross_block_growth >= 15.0 or debt_equity <= 0.5:
+        smile_pts += 2  # Investing in business
+    if roce >= 20.0:
+        smile_pts += 2
     smile_framework_score = min(10, smile_pts)
 
     century_score = (
@@ -425,10 +474,11 @@ def evaluate_century_compounder(
     fair_value = ltp
     fv_source = "20_EMA_BASE"
     pivot = round(ltp * 1.02, 2)
-    
+
     if df is not None and len(df) >= 20:
         try:
             from analysis.volume_profile import compute_volume_profile
+
             poc_p, vah_p, val_p, _ = compute_volume_profile(df, num_bins=12)
             if poc_p > 0:
                 fair_value = round(poc_p, 2)
@@ -443,7 +493,7 @@ def evaluate_century_compounder(
     no_chase = round(pivot * 1.025, 2)  # Hard +2.5% max boundary
     pullback_limit = round(max(fair_value, pivot * 0.985), 2)
     invalidation_sl = round(acc_low * 0.94, 2)  # Structural base low
-    
+
     # Determine Action Directive
     if ltp > no_chase:
         action_directive = "WAIT_FOR_PULLBACK"

@@ -21,4 +21,6 @@ for i, a in enumerate(today):
     pnl = a.get("pnl_pct")
     inv = a.get("is_invalidated")
     time_str = a.get("created_at")
-    print(f"[{i+1:02d}] {time_str} | {sym:<12} | {atype:<24} | {adir:<7} | LTP: {str(ltp):<7} | Trg: {str(trg):<7} | SL: {str(sl):<7} | Tgt: {str(tgt):<7} | Conf: {str(conf):<3} | Stage: {str(stage):<18} | PnL: {str(pnl):<6} | Inv: {inv}")
+    print(
+        f"[{i + 1:02d}] {time_str} | {sym:<12} | {atype:<24} | {adir:<7} | LTP: {str(ltp):<7} | Trg: {str(trg):<7} | SL: {str(sl):<7} | Tgt: {str(tgt):<7} | Conf: {str(conf):<3} | Stage: {str(stage):<18} | PnL: {str(pnl):<6} | Inv: {inv}"
+    )

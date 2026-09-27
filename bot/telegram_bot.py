@@ -1752,9 +1752,7 @@ def _save_threads() -> None:
         pass
 
 
-def get_signal_message_id(
-    signal_id: str, chat_id: Optional[str] = None
-) -> Optional[int]:
+def get_signal_message_id(signal_id: str, chat_id: Optional[str] = None) -> Optional[int]:
     """Retrieve original Telegram message_id for a given signal_id to thread replies."""
     if not signal_id:
         return None
@@ -1831,7 +1829,9 @@ def format_telegram_push_payload(
                 message_thread_id = int(parts[1].strip())
 
     if message_thread_id is None:
-        env_tid = os.environ.get("TELEGRAM_TOPIC_ID") or os.environ.get("TELEGRAM_MESSAGE_THREAD_ID")
+        env_tid = os.environ.get("TELEGRAM_TOPIC_ID") or os.environ.get(
+            "TELEGRAM_MESSAGE_THREAD_ID"
+        )
         if env_tid and env_tid.strip().isdigit():
             message_thread_id = int(env_tid.strip())
 
@@ -1861,7 +1861,9 @@ def format_telegram_push_payload(
 
     # Thread Partitioning via reply_to_message_id:
     # If not explicitly specified, auto-lookup root message ID for updates/milestones
-    if reply_to_message_id is None and (resolved_sig or re.search(r"#(SIG_[a-zA-Z0-9_]+)", message)):
+    if reply_to_message_id is None and (
+        resolved_sig or re.search(r"#(SIG_[a-zA-Z0-9_]+)", message)
+    ):
         is_update = bool(
             re.search(r"\bUPDATE\s*#?\d*\b", message, re.IGNORECASE)
             or re.search(
@@ -1876,7 +1878,9 @@ def format_telegram_push_payload(
             if not reply_to_message_id:
                 m_tag = re.search(r"#(SIG_[a-zA-Z0-9_]+)", message)
                 if m_tag:
-                    reply_to_message_id = get_signal_message_id(m_tag.group(1), chat_id=target_chat_id)
+                    reply_to_message_id = get_signal_message_id(
+                        m_tag.group(1), chat_id=target_chat_id
+                    )
 
     if reply_to_message_id:
         payload["reply_to_message_id"] = reply_to_message_id

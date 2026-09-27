@@ -8,7 +8,7 @@ SENSEX, sector indices, and a market posture helper.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional
 
 
 # ── Key instruments ──────────────────────────────────────────
@@ -297,12 +297,8 @@ def get_index_polarization(index: str = "NIFTY") -> IndexPolarization:
     # If they are pulling in opposite directions with magnitude >= 0.40%, index is in gridlock chop.
     hdfc_chg = changes.get("HDFCBANK", 0.0)
     icici_chg = changes.get("ICICIBANK", 0.0)
-    bank_locomotive_split = (
-        is_bank_index
-        and (
-            (hdfc_chg >= 0.40 and icici_chg <= -0.40)
-            or (hdfc_chg <= -0.40 and icici_chg >= 0.40)
-        )
+    bank_locomotive_split = is_bank_index and (
+        (hdfc_chg >= 0.40 and icici_chg <= -0.40) or (hdfc_chg <= -0.40 and icici_chg >= 0.40)
     )
 
     # Polarized Tug-of-War threshold:
@@ -517,7 +513,9 @@ def get_heavyweights_posture(underlying: str) -> dict[str, Any]:
     locomotives that drive the given index.
     Uses in-memory quote cache (0ms, no network I/O).
     """
-    clean_und = underlying.upper().replace(".NS", "").replace("NSE:", "").replace("BSE:", "").strip()
+    clean_und = (
+        underlying.upper().replace(".NS", "").replace("NSE:", "").replace("BSE:", "").strip()
+    )
     heavyweights = INDEX_HEAVYWEIGHTS.get(clean_und, [])
     if not heavyweights:
         return {
@@ -580,8 +578,8 @@ def get_heavyweights_posture(underlying: str) -> dict[str, Any]:
             }
 
         target_n = len(heavyweights)
-        all_bull = (bull_count == target_n and target_n > 0 and n == target_n)
-        all_bear = (bear_count == target_n and target_n > 0 and n == target_n)
+        all_bull = bull_count == target_n and target_n > 0 and n == target_n
+        all_bear = bear_count == target_n and target_n > 0 and n == target_n
 
         return {
             "underlying": clean_und,

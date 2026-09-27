@@ -238,7 +238,13 @@ def test_inflection_scanner_multi_horizon_and_catalysts(synthetic_vcp_breakout_d
     )
     assert setup is not None
     assert setup.horizon in ("SHORT_TERM", "MID_TERM", "LONG_TERM")
-    assert setup.cycle_state in ("TRIGGER_READY", "COILING_PIVOT", "PULLBACK_RETEST", "STAGE_1_ACCUMULATION", "STAGE_2_MARKUP")
+    assert setup.cycle_state in (
+        "TRIGGER_READY",
+        "COILING_PIVOT",
+        "PULLBACK_RETEST",
+        "STAGE_1_ACCUMULATION",
+        "STAGE_2_MARKUP",
+    )
     assert len(setup.eta_label) > 0
     assert isinstance(setup.catalyst_badges, list)
     # TRENT is in canonical institutional catalysts with CRISIL upgrade
@@ -257,4 +263,3 @@ def test_inflection_scanner_multi_horizon_and_catalysts(synthetic_vcp_breakout_d
     assert res.horizon_filter == "ALL"
     assert len(res.candidates) >= 1
     assert hasattr(res.candidates[0], "eta_label")
-

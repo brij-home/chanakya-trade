@@ -241,3 +241,106 @@ def test_evaluate_targets_and_trailing_attaches_strike_roll():
     assert res.strike_roll_recommendation is not None
     assert res.strike_roll_recommendation["action"] == "ROLL_UP"
     assert res.strike_roll_recommendation["recommended_strike"] == 25350.0
+
+
+def test_multibagger_and_eta_metadata_in_auto_alert_and_telegram():
+    """Verify AutoAlert derives MULTIBAGGER + ETA and Telegram template places them at the bottom."""
+    from bot.alert_templates import format_auto_alert_telegram
+
+    alert = AutoAlert(
+        alert_id="aa-mb-titagarh-20260927",
+        alert_type="STAGE_1_TO_2_EXPANSION",
+        stage="IGNITED",
+        symbol="TITAGARH",
+        exchange="NSE",
+        direction="BULLISH",
+        headline="TITAGARH · Stage 2 Breakout",
+        summary="Institutional accumulation and multibagger base breakout.",
+        ltp=1150.0,
+        trigger_level=1140.0,
+        target_level=1450.0,
+        stop_loss=1020.0,
+        actionable_plan={
+            "action": "BUY",
+            "entry_range": "₹1,140–1,155",
+            "stop_loss": "₹1,020.0",
+            "target": "₹1,450.0",
+            "target_2": "₹1,750.0",
+            "risk_reward": "1:4.8",
+            "profit_rule": "Scale 50% at T1, move SL to breakeven.",
+        },
+    )
+    # 1. Verify AutoAlert auto-derivation
+    assert alert.time_horizon == "MULTIBAGGER"
+    assert alert.eta_label == "6–24 Months"
+    assert alert.is_expired is False
+
+    # 2. Verify Telegram formatting layout
+    msg = format_auto_alert_telegram(alert)
+    assert "MULTIBAGGER ALPHA" in msg
+    assert "<b>Action:</b>" in msg
+    assert "<b>SL:</b>" in msg
+    assert "<b>T1:</b>" in msg
+
+    # Verify Horizon & ETA are at the bottom:
+    lines = [l for l in msg.strip().split("\n") if l.strip()]
+    action_line_idx = next(i for i, line in enumerate(lines) if "<b>Action:</b>" in line)
+    # Action line must appear in the top 5 lines for instant trader visibility
+    assert action_line_idx <= 5
+
+    # Horizon line must appear in the footer block (within the last 3 non-empty lines)
+    horizon_line_idx = next(i for i, line in enumerate(lines) if "<b>Horizon:</b>" in line)
+    assert horizon_line_idx >= len(lines) - 3
+    assert "🚀 MULTIBAGGER" in lines[horizon_line_idx]
+    assert "6–24 Months" in lines[horizon_line_idx]
+
+
+def test_crypto_24x7_intraday_rolling_expiry():
+    """Verify that 24x7 Crypto alerts do not expire past 15:15 IST and obey 24-hour rolling expiry."""
+    now = datetime.now(IST)
+
+    # 1. Crypto alert created 2 hours ago (even after 15:15 IST) must remain ACTIVE
+    two_hours_ago = now - timedelta(hours=2)
+    crypto_active = AutoAlert(
+        alert_id="test-crypto-btcusdt-active",
+        alert_type="CRYPTO_MOMENTUM",
+        stage="IGNITED",
+        symbol="BTCUSDT",
+        exchange="CRYPTO",
+        segment="CRYPTO",
+        direction="BULLISH",
+        headline="BTCUSDT Order Block Reclaim",
+        summary="Testing 24x7 crypto active state",
+        ltp=85000.0,
+        trigger_level=84500.0,
+        target_level=89000.0,
+        stop_loss=83200.0,
+        time_horizon="INTRADAY",
+        created_at=two_hours_ago.strftime("%Y-%m-%d %H:%M:%S IST"),
+    )
+    crypto_active._force_test_expiry = True
+    assert crypto_active.eta_label == "24h Rolling"
+    assert crypto_active.is_expired is False
+    assert crypto_active.is_active is True
+
+    # 2. Crypto alert created 25 hours ago (>24h rolling limit) must expire
+    old_crypto = AutoAlert(
+        alert_id="test-crypto-btcusdt-old",
+        alert_type="CRYPTO_MOMENTUM",
+        stage="IGNITED",
+        symbol="BTCUSDT",
+        exchange="CRYPTO",
+        segment="CRYPTO",
+        direction="BULLISH",
+        headline="BTCUSDT Expired Setup",
+        summary="Testing 24h rolling window expiration",
+        ltp=85000.0,
+        trigger_level=84500.0,
+        target_level=89000.0,
+        stop_loss=83200.0,
+        time_horizon="INTRADAY",
+        created_at=(now - timedelta(hours=25)).strftime("%Y-%m-%d %H:%M:%S IST"),
+    )
+    old_crypto._force_test_expiry = True
+    assert old_crypto.is_expired is True
+    assert old_crypto.is_active is False

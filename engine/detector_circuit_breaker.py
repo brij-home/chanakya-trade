@@ -163,9 +163,7 @@ class DetectorCircuitBreaker:
 
         win_rate = len(wins) / count
         avg_win_r = float(sum(r.realized_r for r in wins) / len(wins)) if wins else 0.0
-        avg_loss_r = (
-            float(sum(abs(r.realized_r) for r in losses) / len(losses)) if losses else 1.0
-        )
+        avg_loss_r = float(sum(abs(r.realized_r) for r in losses) / len(losses)) if losses else 1.0
         if avg_loss_r <= 0.01:
             avg_loss_r = 0.5  # Defensive floor
 
@@ -238,7 +236,7 @@ class DetectorCircuitBreaker:
             return (
                 True,
                 1.05,
-                f"Detector '{alert_type}' institutional alpha confirmed (E={metrics.expectancy:.2f}, W={metrics.win_rate*100:.1f}%).",
+                f"Detector '{alert_type}' institutional alpha confirmed (E={metrics.expectancy:.2f}, W={metrics.win_rate * 100:.1f}%).",
             )
         return (True, 1.0, f"Detector '{alert_type}' operating within normal tolerances.")
 

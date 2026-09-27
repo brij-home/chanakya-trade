@@ -1680,6 +1680,7 @@ async def skill_auto_alerts_list(req: Optional[AutoAlertsListRequest] = None):
         view_mode = (req.view_mode or "ACTIVE") if req else "ACTIVE"
         is_archived = req.is_archived if req else None
         segment = req.segment if req else None
+        horizon = req.horizon if req else None
 
         alerts = await asyncio.to_thread(
             auto_alert_engine.get_alerts,
@@ -1692,6 +1693,7 @@ async def skill_auto_alerts_list(req: Optional[AutoAlertsListRequest] = None):
             view_mode=view_mode,
             is_archived=is_archived,
             segment=segment,
+            horizon=horizon,
         )
         return {"status": "ok", "data": [a.to_dict() for a in alerts]}
     except Exception as e:
@@ -1986,12 +1988,27 @@ async def skill_auto_alerts_archive(req: AutoAlertArchiveRequest):
     """Manually archive or unarchive an auto-alert by ID."""
     try:
         from engine.auto_alert_engine import auto_alert_engine
+        from web.sse import event_bus
 
         alert = auto_alert_engine.archive_alert_by_id(
             req.alert_id, archive=req.archive, reason=req.reason
         )
         if not alert:
             raise _err(f"Alert {req.alert_id} not found", 404)
+
+        try:
+            await event_bus.broadcast(
+                {
+                    "type": "auto_alert_archived",
+                    "alert_id": req.alert_id,
+                    "is_archived": req.archive,
+                    "reason": req.reason,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+        except Exception:
+            pass
+
         return {"status": "ok", "data": alert.to_dict()}
     except HTTPException:
         raise
@@ -2004,8 +2021,19 @@ async def skill_auto_alerts_archive_all_invalidated():
     """Bulk archive all currently invalidated auto-alerts to historical storage."""
     try:
         from engine.auto_alert_engine import auto_alert_engine
+        from web.sse import event_bus
 
         count = await asyncio.to_thread(auto_alert_engine.archive_all_invalidated)
+        try:
+            await event_bus.broadcast(
+                {
+                    "type": "auto_alerts_bulk_archived",
+                    "archived_count": count,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+        except Exception:
+            pass
         return {"status": "ok", "archived_count": count}
     except Exception as e:
         raise _err(str(e))
@@ -3907,10 +3935,12 @@ async def skill_incubation_pipeline(req: Optional[IncubationPipelineSkillRequest
         h = req.horizon if req else "ALL"
         c = req.cycle_state if req else "ALL"
         candidates = get_incubated_candidates(horizon_filter=h, cycle_state_filter=c)
-        return _ok({
-            "total": len(candidates),
-            "candidates": [item.to_dict() for item in candidates],
-        })
+        return _ok(
+            {
+                "total": len(candidates),
+                "candidates": [item.to_dict() for item in candidates],
+            }
+        )
     except Exception as e:
         raise _err(str(e))
 
@@ -4006,7 +4036,10 @@ async def skill_century_compounders(req: Optional[CenturyCompounderSkillRequest]
     the empirical Twin Engines math (PAT Growth × PE Expansion) and the 7 Dalal Street pillars.
     """
     try:
-        from analysis.century_compounder import evaluate_century_compounder, scan_century_compounders
+        from analysis.century_compounder import (
+            evaluate_century_compounder,
+            scan_century_compounders,
+        )
 
         target_sym = req.symbol if req and req.symbol else None
         if target_sym:
@@ -7188,9 +7221,9 @@ async def skill_gex_snapshot(
                     "time": now_time,
                     "as_of": source_info.get("as_of"),
                     "as_of_display": now_time,
-                    "data_state": "BROKER_REQUIRED" if is_bse else source_info.get(
-                        "data_state", "UNAVAILABLE"
-                    ),
+                    "data_state": "BROKER_REQUIRED"
+                    if is_bse
+                    else source_info.get("data_state", "UNAVAILABLE"),
                     "data_source": "bse_live" if is_bse else source_info.get("provider", "none"),
                     "source_label": (
                         "Broker Required for BFO"
@@ -7791,6 +7824,7 @@ async def skill_gex_snapshot(
                 # Trigger non-blocking background refresh if not already calculating
                 bg_task = _CONVICTION_BG_TASKS.get(clean_sym)
                 if bg_task is None or bg_task.done():
+
                     def _run_bg_conviction(
                         sym=clean_sym,
                         sp=spot,

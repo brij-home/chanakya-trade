@@ -432,7 +432,9 @@ def get_institutional_catalysts(
         credit_verdict = f"👑 Sovereign/Tier-1 {credit.agency} AAA Pristine Balance Sheet."
     elif "AA" in credit.current_rating:
         credit_status = "INVESTMENT_GRADE_AA"
-        credit_verdict = f"🏛️ Institutional Grade {credit.agency} {credit.current_rating} (MF Mandate Cleared)."
+        credit_verdict = (
+            f"🏛️ Institutional Grade {credit.agency} {credit.current_rating} (MF Mandate Cleared)."
+        )
     else:
         credit_status = "INVESTMENT_GRADE_A"
         credit_verdict = f"🟢 Investment Grade {credit.agency} {credit.current_rating}."

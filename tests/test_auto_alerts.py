@@ -2311,12 +2311,15 @@ def test_index_directional_supremacy_gate():
     """
     from unittest.mock import patch
 
-    with patch(
-        "engine.alert_scrutiny.alert_scrutiny_auditor._execute_fast_llm_scrutiny",
-        return_value=None,
-    ), patch(
-        "engine.auto_alert_engine.AutoAlertEngine._get_index_intraday_regime",
-        return_value="TRENDING",
+    with (
+        patch(
+            "engine.alert_scrutiny.alert_scrutiny_auditor._execute_fast_llm_scrutiny",
+            return_value=None,
+        ),
+        patch(
+            "engine.auto_alert_engine.AutoAlertEngine._get_index_intraday_regime",
+            return_value="TRENDING",
+        ),
     ):
         engine = AutoAlertEngine()
         engine._alerts = []
@@ -2359,7 +2362,7 @@ def test_index_directional_supremacy_gate():
             summary="PUT VWAP failure, breakdown ignited",
             ltp=65.6,
             trigger_level=69.4,
-            target_level=38.0,   # R:R ~ 1.8
+            target_level=38.0,  # R:R ~ 1.8
             stop_loss=84.0,
             option_type="PE",
             strike=23000,
@@ -2387,8 +2390,8 @@ def test_index_directional_supremacy_gate():
             summary="PDH sweep rejection + OI unwind, high conviction breakdown",
             ltp=95.0,
             trigger_level=100.0,
-            target_level=175.0,    # R:R = (175-95)/(95-75) = 80/20 = 4.0 on premium gain
-            stop_loss=75.0,        # 21% SL below entry — proper premium risk floor
+            target_level=175.0,  # R:R = (175-95)/(95-75) = 80/20 = 4.0 on premium gain
+            stop_loss=75.0,  # 21% SL below entry — proper premium risk floor
             option_type="PE",
             strike=22900,
             contract_symbol="NIFTY22900PE",
@@ -2403,8 +2406,14 @@ def test_index_directional_supremacy_gate():
         active_alerts = [a for a in engine._alerts if a.is_active and not a.is_invalidated]
         assert any(a.direction == "BEARISH" for a in active_alerts)
         # No simultaneous conflicting CE/PE should remain active
-        active_bullish = [a for a in engine._alerts if a.direction == "BULLISH" and a.is_active and not a.is_invalidated]
-        assert len(active_bullish) == 0, "No conflicting BULLISH leg should survive when BEARISH wins supremacy"
+        active_bullish = [
+            a
+            for a in engine._alerts
+            if a.direction == "BULLISH" and a.is_active and not a.is_invalidated
+        ]
+        assert len(active_bullish) == 0, (
+            "No conflicting BULLISH leg should survive when BEARISH wins supremacy"
+        )
 
 
 @pytest.mark.anyio

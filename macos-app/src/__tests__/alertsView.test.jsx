@@ -2,6 +2,7 @@ import React from 'react'
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import AlertsView from '../renderer/src/components/Views/AlertsView'
+import { resolveHorizonAndETA } from '../renderer/src/components/Views/alerts/alertHelpers'
 
 // Mock useAPI hook
 const mockCall = vi.fn()
@@ -469,5 +470,39 @@ describe('AlertsView - Institutional Active/Archived standard & Derivative Clari
         contract_symbol: 'NIFTY2691124600CE',
       })
     )
+  })
+
+  it('correctly resolves 5-tier horizons and deterministic ETAs (Intraday, Short, Mid, Long, Multibagger)', () => {
+    // 1. Intraday
+    const intra = resolveHorizonAndETA({ time_horizon: 'INTRADAY', exchange: 'NSE' })
+    expect(intra.key).toBe('INTRADAY')
+    expect(intra.icon).toBe('⏱️')
+    expect(intra.compactBadge).toContain('INTRADAY')
+    expect(intra.etaFull).toContain('15:15 IST')
+
+    // 2. Short Swing
+    const shortSwing = resolveHorizonAndETA({ time_horizon: 'SWING_SHORT' })
+    expect(shortSwing.key).toBe('SWING_SHORT')
+    expect(shortSwing.icon).toBe('⚡')
+    expect(shortSwing.etaFull).toBe('2–5 Sessions')
+
+    // 3. Mid Swing
+    const midSwing = resolveHorizonAndETA({ time_horizon: 'SWING_MID' })
+    expect(midSwing.key).toBe('SWING_MID')
+    expect(midSwing.icon).toBe('📈')
+    expect(midSwing.etaFull).toBe('1–4 Weeks')
+
+    // 4. Long Positional
+    const longPos = resolveHorizonAndETA({ time_horizon: 'LONG_TERM' })
+    expect(longPos.key).toBe('LONG_TERM')
+    expect(longPos.icon).toBe('🏛️')
+    expect(longPos.etaFull).toBe('1–6 Months')
+
+    // 5. Multibagger
+    const multi = resolveHorizonAndETA({ time_horizon: 'MULTIBAGGER' })
+    expect(multi.key).toBe('MULTIBAGGER')
+    expect(multi.icon).toBe('🚀')
+    expect(multi.compactBadge).toContain('MULTI')
+    expect(multi.etaFull).toBe('6–24 Months')
   })
 })

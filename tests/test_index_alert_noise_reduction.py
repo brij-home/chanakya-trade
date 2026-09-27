@@ -13,7 +13,6 @@ from datetime import datetime
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 import pandas as pd
-import pytest
 
 from engine.detectors.index_call_setup import detect_index_call_setup
 from engine.detectors.index_put_setup import detect_index_put_setup
@@ -23,7 +22,14 @@ IST = ZoneInfo("Asia/Kolkata")
 
 
 class DummyContract:
-    def __init__(self, strike: float, option_type: str, last_price: float, volume: int = 15000, oi: int = 8000):
+    def __init__(
+        self,
+        strike: float,
+        option_type: str,
+        last_price: float,
+        volume: int = 15000,
+        oi: int = 8000,
+    ):
         self.strike = strike
         self.option_type = option_type
         self.last_price = last_price

@@ -19,7 +19,6 @@ import logging
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Callable, Optional, Protocol, runtime_checkable
-from zoneinfo import ZoneInfo
 
 import pandas as pd
 
@@ -236,7 +235,11 @@ class DetectorRegistry:
         if segment is None:
             return list(self._detectors.values())
         seg = segment.upper()
-        return [d for d in self._detectors.values() if seg in d.supported_segments or "ALL" in d.supported_segments]
+        return [
+            d
+            for d in self._detectors.values()
+            if seg in d.supported_segments or "ALL" in d.supported_segments
+        ]
 
     def evaluate_all(self, ctx: DetectionContext) -> list[AutoAlert]:
         """
@@ -446,18 +449,54 @@ def register_default_detectors() -> None:
         return None
 
     adapters = [
-        FunctionalDetectorAdapter("circuit_proximity", "Upper Circuit Proximity", ("EQUITY",), _circuit_adapter),
-        FunctionalDetectorAdapter("orb", "Opening Range Breakout (15m)", ("EQUITY", "FNO_STOCK", "FNO_INDEX"), _orb_adapter),
-        FunctionalDetectorAdapter("squeeze_breakout", "TTM Squeeze Breakout", ("EQUITY", "FNO_STOCK", "FNO_INDEX"), _squeeze_adapter),
-        FunctionalDetectorAdapter("gamma_blast", "Options Gamma Blast", ("FNO_INDEX", "FNO_STOCK"), _gamma_adapter),
-        FunctionalDetectorAdapter("opening_drive", "Opening Drive Ignition", ("EQUITY", "FNO_STOCK", "FNO_INDEX"), _opening_drive_adapter),
-        FunctionalDetectorAdapter("pre_inflection_dryup", "Pre-Inflection Dryup", ("EQUITY", "FNO_STOCK"), _dryup_adapter),
-        FunctionalDetectorAdapter("pattern_coiling", "Pattern Coiling", ("EQUITY", "FNO_STOCK"), _pattern_coiling_adapter),
-        FunctionalDetectorAdapter("index_call_setup", "Institutional Index Call Setup", ("FNO_INDEX",), _index_call_adapter),
-        FunctionalDetectorAdapter("index_put_setup", "Institutional Index Put Setup", ("FNO_INDEX",), _index_put_adapter),
-        FunctionalDetectorAdapter("commodity_breakout", "Commodity Momentum Breakout", ("COMMODITY",), _commodity_adapter),
-        FunctionalDetectorAdapter("currency_breakout", "Currency Macro Breakout", ("CURRENCY",), _currency_adapter),
-        FunctionalDetectorAdapter("crypto_signal", "24x7 Crypto Squeeze & Flow", ("CRYPTO",), _crypto_adapter),
+        FunctionalDetectorAdapter(
+            "circuit_proximity", "Upper Circuit Proximity", ("EQUITY",), _circuit_adapter
+        ),
+        FunctionalDetectorAdapter(
+            "orb",
+            "Opening Range Breakout (15m)",
+            ("EQUITY", "FNO_STOCK", "FNO_INDEX"),
+            _orb_adapter,
+        ),
+        FunctionalDetectorAdapter(
+            "squeeze_breakout",
+            "TTM Squeeze Breakout",
+            ("EQUITY", "FNO_STOCK", "FNO_INDEX"),
+            _squeeze_adapter,
+        ),
+        FunctionalDetectorAdapter(
+            "gamma_blast", "Options Gamma Blast", ("FNO_INDEX", "FNO_STOCK"), _gamma_adapter
+        ),
+        FunctionalDetectorAdapter(
+            "opening_drive",
+            "Opening Drive Ignition",
+            ("EQUITY", "FNO_STOCK", "FNO_INDEX"),
+            _opening_drive_adapter,
+        ),
+        FunctionalDetectorAdapter(
+            "pre_inflection_dryup", "Pre-Inflection Dryup", ("EQUITY", "FNO_STOCK"), _dryup_adapter
+        ),
+        FunctionalDetectorAdapter(
+            "pattern_coiling", "Pattern Coiling", ("EQUITY", "FNO_STOCK"), _pattern_coiling_adapter
+        ),
+        FunctionalDetectorAdapter(
+            "index_call_setup",
+            "Institutional Index Call Setup",
+            ("FNO_INDEX",),
+            _index_call_adapter,
+        ),
+        FunctionalDetectorAdapter(
+            "index_put_setup", "Institutional Index Put Setup", ("FNO_INDEX",), _index_put_adapter
+        ),
+        FunctionalDetectorAdapter(
+            "commodity_breakout", "Commodity Momentum Breakout", ("COMMODITY",), _commodity_adapter
+        ),
+        FunctionalDetectorAdapter(
+            "currency_breakout", "Currency Macro Breakout", ("CURRENCY",), _currency_adapter
+        ),
+        FunctionalDetectorAdapter(
+            "crypto_signal", "24x7 Crypto Squeeze & Flow", ("CRYPTO",), _crypto_adapter
+        ),
     ]
 
     for ad in adapters:
@@ -465,9 +504,9 @@ def register_default_detectors() -> None:
 
     # Register class-based BaseDetector protocols
     from engine.detectors.order_flow import OrderFlowDivergenceDetector
+
     detector_registry.register(OrderFlowDivergenceDetector())
 
 
 # Auto-populate default institutional detectors into registry
 register_default_detectors()
-

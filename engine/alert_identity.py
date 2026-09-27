@@ -69,12 +69,7 @@ def generate_alert_id(
              aa-orb-reliance-bull-20260926
     """
     clean_sym = canonical_alert_symbol(symbol).lower().replace(" ", "-")
-    type_slug = (
-        alert_type.lower()
-        .replace("crypto_", "crypto-")
-        .replace("_", "-")
-        .strip("-")
-    )
+    type_slug = alert_type.lower().replace("crypto_", "crypto-").replace("_", "-").strip("-")
     if not type_slug.startswith("aa-"):
         prefix = "aa"
     else:

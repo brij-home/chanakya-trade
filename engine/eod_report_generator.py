@@ -288,7 +288,9 @@ class EODReport:
                     f"₹{j.exit_level:,.2f} | **{j.realized_r:+.2f}R** | {j.pnl_pct:+.1f}% | `{status_badge}` | {note} |"
                 )
         else:
-            lines.append("| — | — | No active signals logged for this session. | — | — | — | — | — | — | — | — | — | — | — |")
+            lines.append(
+                "| — | — | No active signals logged for this session. | — | — | — | — | — | — | — | — | — | — | — |"
+            )
 
         # ─────────────────────────────────────────────────────────────────────
         # Section 3: Strategy & Detector Efficacy Journal
@@ -512,15 +514,19 @@ class EODReport:
                 sym_clean = s.symbol.replace(" ", "")[:13]
                 dir_abbr = (
                     "CALL"
-                    if "CALL" in s.symbol.upper() or s.direction.upper() in ("BULLISH", "CALL", "LONG")
+                    if "CALL" in s.symbol.upper()
+                    or s.direction.upper() in ("BULLISH", "CALL", "LONG")
                     else (
                         "PUT"
-                        if "PUT" in s.symbol.upper() or s.direction.upper() in ("BEARISH", "PUT", "SHORT")
+                        if "PUT" in s.symbol.upper()
+                        or s.direction.upper() in ("BEARISH", "PUT", "SHORT")
                         else s.direction[:4]
                     )
                 )
                 r_str = f"{s.realized_r:+.2f}R"
-                status_icon = "WIN🎯" if s.realized_r > 0 else ("SL🛑" if s.realized_r < 0 else "BE⏱️")
+                status_icon = (
+                    "WIN🎯" if s.realized_r > 0 else ("SL🛑" if s.realized_r < 0 else "BE⏱️")
+                )
                 table_lines.append(f"{sym_clean:<13} {dir_abbr:<4} {r_str:>7} {status_icon}")
             table_lines.append("</pre>")
             p1_lines.extend(table_lines)
@@ -713,7 +719,14 @@ class EODReport:
         ws1["A4"].alignment = Alignment(horizontal="left", vertical="center", indent=1)
         ws1.row_dimensions[4].height = 22
 
-        mkt_headers = ["Benchmark / Metric", "LTP (₹)", "Change (%)", "Regime / VIX", "Flows / Notes", "Feed Status"]
+        mkt_headers = [
+            "Benchmark / Metric",
+            "LTP (₹)",
+            "Change (%)",
+            "Regime / VIX",
+            "Flows / Notes",
+            "Feed Status",
+        ]
         for c_idx, h in enumerate(mkt_headers, 1):
             cell = ws1.cell(row=5, column=c_idx, value=h)
             cell.font = FONT_HEADER
@@ -723,10 +736,38 @@ class EODReport:
         ws1.row_dimensions[5].height = 22
 
         mkt_rows = [
-            ("NIFTY 50", self.nifty_ltp, self.nifty_change_pct / 100.0 if self.nifty_ltp > 0 else 0.0, f"VIX: {self.vix_ltp:.2f}", self.market_posture, "ACTIVE" if self.nifty_ltp > 0 else "UNAVAILABLE"),
-            ("BANKNIFTY", self.banknifty_ltp, self.banknifty_change_pct / 100.0 if self.banknifty_ltp > 0 else 0.0, "High Beta Banking", "-", "ACTIVE" if self.banknifty_ltp > 0 else "UNAVAILABLE"),
-            ("SENSEX", self.sensex_ltp, self.sensex_change_pct / 100.0 if self.sensex_ltp > 0 else 0.0, "BSE Benchmark", "-", "ACTIVE" if self.sensex_ltp > 0 else "UNAVAILABLE"),
-            ("INSTITUTIONAL FLOWS", None, None, f"FII: {self.fii_net_cr:+,.0f} Cr", f"DII: {self.dii_net_cr:+,.0f} Cr", "VERIFIED"),
+            (
+                "NIFTY 50",
+                self.nifty_ltp,
+                self.nifty_change_pct / 100.0 if self.nifty_ltp > 0 else 0.0,
+                f"VIX: {self.vix_ltp:.2f}",
+                self.market_posture,
+                "ACTIVE" if self.nifty_ltp > 0 else "UNAVAILABLE",
+            ),
+            (
+                "BANKNIFTY",
+                self.banknifty_ltp,
+                self.banknifty_change_pct / 100.0 if self.banknifty_ltp > 0 else 0.0,
+                "High Beta Banking",
+                "-",
+                "ACTIVE" if self.banknifty_ltp > 0 else "UNAVAILABLE",
+            ),
+            (
+                "SENSEX",
+                self.sensex_ltp,
+                self.sensex_change_pct / 100.0 if self.sensex_ltp > 0 else 0.0,
+                "BSE Benchmark",
+                "-",
+                "ACTIVE" if self.sensex_ltp > 0 else "UNAVAILABLE",
+            ),
+            (
+                "INSTITUTIONAL FLOWS",
+                None,
+                None,
+                f"FII: {self.fii_net_cr:+,.0f} Cr",
+                f"DII: {self.dii_net_cr:+,.0f} Cr",
+                "VERIFIED",
+            ),
         ]
 
         curr_row = 6
@@ -779,7 +820,14 @@ class EODReport:
         ws1.row_dimensions[curr_row].height = 22
         curr_row += 1
 
-        perf_headers = ["Performance KPI", "Value", "Unit / Metric", "Detailed Breakdown", "Benchmark Standard", "Health"]
+        perf_headers = [
+            "Performance KPI",
+            "Value",
+            "Unit / Metric",
+            "Detailed Breakdown",
+            "Benchmark Standard",
+            "Health",
+        ]
         for c_idx, h in enumerate(perf_headers, 1):
             cell = ws1.cell(row=curr_row, column=c_idx, value=h)
             cell.font = FONT_HEADER
@@ -790,12 +838,54 @@ class EODReport:
         curr_row += 1
 
         tg_perf_rows = [
-            ("Telegram Alerts Dispatched", self.telegram_total_alerts, "Setups", f"{self.telegram_ignited_trades} Ignited · {self.telegram_untriggered_count} Untriggered", "Active Feed", "BROADCAST"),
-            ("Actionable / Ignited Trades", self.telegram_ignited_trades, "Executions", "Passed Entry Gating", "> 0", "HEALTHY" if self.telegram_ignited_trades > 0 else "FLAT"),
-            ("Telegram Realized Win Rate", self.telegram_win_rate_pct / 100.0, "Percent", f"{self.telegram_win_count} Wins / {self.telegram_loss_count} Losses", "Target >= 60.0%", "OPTIMAL" if self.telegram_win_rate_pct >= 60 else "WATCH"),
-            ("Scratches & Time Cutoffs", self.telegram_scratch_count + self.telegram_eod_squareoff_count, "Trades", f"{self.telegram_scratch_count} Scratches · {self.telegram_eod_squareoff_count} EOD Cutoffs", "Cutoff Traps", "REDUCED"),
-            ("Telegram Realized Payoff", self.telegram_total_realized_r, "R-Multiple", f"Avg: {self.telegram_avg_r_multiple:+.2f}R / trade", "Target > +5.0R", "PROFITABLE" if self.telegram_total_realized_r > 0 else "DRAWDOWN"),
-            ("Telegram Profit Factor", self.telegram_profit_factor, "Ratio", "Gross Profit / Gross Loss", "Target >= 1.50", "SOLID" if self.telegram_profit_factor >= 1.5 else "SCRATCH"),
+            (
+                "Telegram Alerts Dispatched",
+                self.telegram_total_alerts,
+                "Setups",
+                f"{self.telegram_ignited_trades} Ignited · {self.telegram_untriggered_count} Untriggered",
+                "Active Feed",
+                "BROADCAST",
+            ),
+            (
+                "Actionable / Ignited Trades",
+                self.telegram_ignited_trades,
+                "Executions",
+                "Passed Entry Gating",
+                "> 0",
+                "HEALTHY" if self.telegram_ignited_trades > 0 else "FLAT",
+            ),
+            (
+                "Telegram Realized Win Rate",
+                self.telegram_win_rate_pct / 100.0,
+                "Percent",
+                f"{self.telegram_win_count} Wins / {self.telegram_loss_count} Losses",
+                "Target >= 60.0%",
+                "OPTIMAL" if self.telegram_win_rate_pct >= 60 else "WATCH",
+            ),
+            (
+                "Scratches & Time Cutoffs",
+                self.telegram_scratch_count + self.telegram_eod_squareoff_count,
+                "Trades",
+                f"{self.telegram_scratch_count} Scratches · {self.telegram_eod_squareoff_count} EOD Cutoffs",
+                "Cutoff Traps",
+                "REDUCED",
+            ),
+            (
+                "Telegram Realized Payoff",
+                self.telegram_total_realized_r,
+                "R-Multiple",
+                f"Avg: {self.telegram_avg_r_multiple:+.2f}R / trade",
+                "Target > +5.0R",
+                "PROFITABLE" if self.telegram_total_realized_r > 0 else "DRAWDOWN",
+            ),
+            (
+                "Telegram Profit Factor",
+                self.telegram_profit_factor,
+                "Ratio",
+                "Gross Profit / Gross Loss",
+                "Target >= 1.50",
+                "SOLID" if self.telegram_profit_factor >= 1.5 else "SCRATCH",
+            ),
         ]
 
         for p_idx, item in enumerate(tg_perf_rows):
@@ -865,12 +955,54 @@ class EODReport:
         curr_row += 1
 
         ui_perf_rows = [
-            ("Total Alerts Audited", self.total_alerts, "Setups", f"{self.ui_total_alerts} UI-Only Scanner Signals", "Full Radar", "NORMAL"),
-            ("Actionable / Ignited Trades", self.ignited_trades, "Executions", "Passed Entry Gating", "> 0", "HEALTHY" if self.ignited_trades > 0 else "FLAT"),
-            ("Terminal Realized Win Rate", self.win_rate_pct / 100.0, "Percent", f"{self.win_count} Wins / {self.loss_count} Losses", "Target >= 60.0%", "OPTIMAL" if self.win_rate_pct >= 60 else "WATCH"),
-            ("Scratches & Time Cutoffs", self.scratch_count + self.eod_squareoff_count, "Trades", f"{self.scratch_count} Scratches · {self.eod_squareoff_count} EOD Cutoffs", "Cutoff Traps", "REDUCED"),
-            ("Terminal Realized Payoff", self.total_realized_r, "R-Multiple", f"Avg: {self.avg_r_multiple:+.2f}R / trade", "Target > +5.0R", "PROFITABLE" if self.total_realized_r > 0 else "DRAWDOWN"),
-            ("Terminal Profit Factor", self.profit_factor, "Ratio", "Gross Profit / Gross Loss", "Target >= 1.50", "SOLID" if self.profit_factor >= 1.5 else "SCRATCH"),
+            (
+                "Total Alerts Audited",
+                self.total_alerts,
+                "Setups",
+                f"{self.ui_total_alerts} UI-Only Scanner Signals",
+                "Full Radar",
+                "NORMAL",
+            ),
+            (
+                "Actionable / Ignited Trades",
+                self.ignited_trades,
+                "Executions",
+                "Passed Entry Gating",
+                "> 0",
+                "HEALTHY" if self.ignited_trades > 0 else "FLAT",
+            ),
+            (
+                "Terminal Realized Win Rate",
+                self.win_rate_pct / 100.0,
+                "Percent",
+                f"{self.win_count} Wins / {self.loss_count} Losses",
+                "Target >= 60.0%",
+                "OPTIMAL" if self.win_rate_pct >= 60 else "WATCH",
+            ),
+            (
+                "Scratches & Time Cutoffs",
+                self.scratch_count + self.eod_squareoff_count,
+                "Trades",
+                f"{self.scratch_count} Scratches · {self.eod_squareoff_count} EOD Cutoffs",
+                "Cutoff Traps",
+                "REDUCED",
+            ),
+            (
+                "Terminal Realized Payoff",
+                self.total_realized_r,
+                "R-Multiple",
+                f"Avg: {self.avg_r_multiple:+.2f}R / trade",
+                "Target > +5.0R",
+                "PROFITABLE" if self.total_realized_r > 0 else "DRAWDOWN",
+            ),
+            (
+                "Terminal Profit Factor",
+                self.profit_factor,
+                "Ratio",
+                "Gross Profit / Gross Loss",
+                "Target >= 1.50",
+                "SOLID" if self.profit_factor >= 1.5 else "SCRATCH",
+            ),
         ]
 
         for p_idx, item in enumerate(ui_perf_rows):
@@ -930,7 +1062,14 @@ class EODReport:
         ws1.row_dimensions[curr_row].height = 22
         curr_row += 1
 
-        comp_headers = ["Metric / Alpha Vector", "📱 Telegram Feed", "🖥️ UI Universe", "⚡ Delta / Filtration Edge", "Significance", "Verdict"]
+        comp_headers = [
+            "Metric / Alpha Vector",
+            "📱 Telegram Feed",
+            "🖥️ UI Universe",
+            "⚡ Delta / Filtration Edge",
+            "Significance",
+            "Verdict",
+        ]
         for c_idx, h in enumerate(comp_headers, 1):
             cell = ws1.cell(row=curr_row, column=c_idx, value=h)
             cell.font = FONT_HEADER
@@ -944,10 +1083,38 @@ class EODReport:
         delta_r_val = self.telegram_total_realized_r - self.total_realized_r
 
         comp_rows = [
-            ("Setup Filtration / Noise Gate", f"{self.telegram_total_alerts} Pushed", f"{self.total_alerts} Scanned", f"{self.ui_total_alerts} Setups Filtered", "Noise Reduction", "PROTECTED"),
-            ("Realized Win Rate Edge", f"{self.telegram_win_rate_pct:.1f}%", f"{self.win_rate_pct:.1f}%", f"{delta_wr_pct:+.1f}% Edge", "Selection Precision", "ALPHA" if delta_wr_pct >= 0 else "WATCH"),
-            ("Realized Payoff Edge", f"{self.telegram_total_realized_r:+.2f}R", f"{self.total_realized_r:+.2f}R", f"{delta_r_val:+.2f}R Delta", "Payoff Asymmetry", "OPTIMAL" if delta_r_val >= 0 else "DILUTED"),
-            ("Profit Factor Efficiency", f"{self.telegram_profit_factor:.2f}", f"{self.profit_factor:.2f}", f"{(self.telegram_profit_factor - self.profit_factor):+.2f} Delta", "Capital Efficiency", "SOLID" if self.telegram_profit_factor >= self.profit_factor else "FLAT"),
+            (
+                "Setup Filtration / Noise Gate",
+                f"{self.telegram_total_alerts} Pushed",
+                f"{self.total_alerts} Scanned",
+                f"{self.ui_total_alerts} Setups Filtered",
+                "Noise Reduction",
+                "PROTECTED",
+            ),
+            (
+                "Realized Win Rate Edge",
+                f"{self.telegram_win_rate_pct:.1f}%",
+                f"{self.win_rate_pct:.1f}%",
+                f"{delta_wr_pct:+.1f}% Edge",
+                "Selection Precision",
+                "ALPHA" if delta_wr_pct >= 0 else "WATCH",
+            ),
+            (
+                "Realized Payoff Edge",
+                f"{self.telegram_total_realized_r:+.2f}R",
+                f"{self.total_realized_r:+.2f}R",
+                f"{delta_r_val:+.2f}R Delta",
+                "Payoff Asymmetry",
+                "OPTIMAL" if delta_r_val >= 0 else "DILUTED",
+            ),
+            (
+                "Profit Factor Efficiency",
+                f"{self.telegram_profit_factor:.2f}",
+                f"{self.profit_factor:.2f}",
+                f"{(self.telegram_profit_factor - self.profit_factor):+.2f} Delta",
+                "Capital Efficiency",
+                "SOLID" if self.telegram_profit_factor >= self.profit_factor else "FLAT",
+            ),
         ]
 
         for p_idx, item in enumerate(comp_rows):
@@ -989,7 +1156,9 @@ class EODReport:
             ws1[f"A{curr_row}"] = "🧠 CIO EXECUTIVE SYNTHESIS & STRATEGIC DEBRIEF"
             ws1[f"A{curr_row}"].font = FONT_SECTION
             ws1[f"A{curr_row}"].fill = FILL_SECTION
-            ws1[f"A{curr_row}"].alignment = Alignment(horizontal="left", vertical="center", indent=1)
+            ws1[f"A{curr_row}"].alignment = Alignment(
+                horizontal="left", vertical="center", indent=1
+            )
             ws1.row_dimensions[curr_row].height = 22
             curr_row += 1
 
@@ -1008,9 +1177,22 @@ class EODReport:
         ws_tg.freeze_panes = "A2"
 
         j_headers = [
-            "Time", "Channel", "Symbol", "Segment", "Strategy / Detector", "Direction",
-            "Entry Price (₹)", "Stop Loss (₹)", "Target Level (₹)", "Exit / LTP (₹)",
-            "Realized R", "P&L (%)", "Peak Gain (%)", "Outcome", "Milestones", "Diagnosis & Journal Verdict"
+            "Time",
+            "Channel",
+            "Symbol",
+            "Segment",
+            "Strategy / Detector",
+            "Direction",
+            "Entry Price (₹)",
+            "Stop Loss (₹)",
+            "Target Level (₹)",
+            "Exit / LTP (₹)",
+            "Realized R",
+            "P&L (%)",
+            "Peak Gain (%)",
+            "Outcome",
+            "Milestones",
+            "Diagnosis & Journal Verdict",
         ]
         for c_idx, h in enumerate(j_headers, 1):
             cell = ws_tg.cell(row=1, column=c_idx, value=h)
@@ -1036,7 +1218,11 @@ class EODReport:
             elif outcome_str == "LOSS_STOPPED":
                 badge_fill = FILL_LOSS
                 badge_font = FONT_LOSS
-            elif outcome_str in ("SESSION_EOD_SQUAREOFF", "VELOCITY_TIME_STOP", "UNTRIGGERED_EXPIRED"):
+            elif outcome_str in (
+                "SESSION_EOD_SQUAREOFF",
+                "VELOCITY_TIME_STOP",
+                "UNTRIGGERED_EXPIRED",
+            ):
                 badge_fill = FILL_AMBER
                 badge_font = FONT_AMBER
             elif outcome_str == "IN_FLIGHT":
@@ -1059,7 +1245,7 @@ class EODReport:
                 j.peak_gain_pct / 100.0,
                 outcome_str,
                 "/".join(j.milestones) if j.milestones else "—",
-                j.verdict_note or "—"
+                j.verdict_note or "—",
             ]
 
             for col_idx, val in enumerate(values, 1):
@@ -1143,7 +1329,11 @@ class EODReport:
             elif outcome_str == "LOSS_STOPPED":
                 badge_fill = FILL_LOSS
                 badge_font = FONT_LOSS
-            elif outcome_str in ("SESSION_EOD_SQUAREOFF", "VELOCITY_TIME_STOP", "UNTRIGGERED_EXPIRED"):
+            elif outcome_str in (
+                "SESSION_EOD_SQUAREOFF",
+                "VELOCITY_TIME_STOP",
+                "UNTRIGGERED_EXPIRED",
+            ):
                 badge_fill = FILL_AMBER
                 badge_font = FONT_AMBER
             elif outcome_str == "IN_FLIGHT":
@@ -1166,7 +1356,7 @@ class EODReport:
                 j.peak_gain_pct / 100.0,
                 outcome_str,
                 "/".join(j.milestones) if j.milestones else "—",
-                j.verdict_note or "—"
+                j.verdict_note or "—",
             ]
 
             for col_idx, val in enumerate(values, 1):
@@ -1230,8 +1420,17 @@ class EODReport:
         ws3.freeze_panes = "A2"
 
         eff_headers = [
-            "Strategy / Detector", "Total Signals", "📱 TG Signals", "🖥️ UI Signals", "Ignited Trades", "Wins", "Losses",
-            "Scratches / EOD", "Win Rate (%)", "Net Realized R", "Action Verdict"
+            "Strategy / Detector",
+            "Total Signals",
+            "📱 TG Signals",
+            "🖥️ UI Signals",
+            "Ignited Trades",
+            "Wins",
+            "Losses",
+            "Scratches / EOD",
+            "Win Rate (%)",
+            "Net Realized R",
+            "Action Verdict",
         ]
         for c_idx, h in enumerate(eff_headers, 1):
             cell = ws3.cell(row=1, column=c_idx, value=h)
@@ -1257,7 +1456,19 @@ class EODReport:
             net_r = d.get("net_r", 0.0)
             verdict = d.get("verdict", "—")
 
-            vals = [det_name, count, tg_cnt, ui_cnt, ignited, wins, losses, scratches, win_rate, net_r, verdict]
+            vals = [
+                det_name,
+                count,
+                tg_cnt,
+                ui_cnt,
+                ignited,
+                wins,
+                losses,
+                scratches,
+                win_rate,
+                net_r,
+                verdict,
+            ]
             for col_idx, val in enumerate(vals, 1):
                 cell = ws3.cell(row=row_idx, column=col_idx, value=val)
                 cell.border = BORDER_DATA
@@ -1303,7 +1514,13 @@ class EODReport:
         ws4["A1"].alignment = Alignment(horizontal="left", vertical="center", indent=1)
         ws4.row_dimensions[1].height = 24
 
-        rca_headers = ["Failure Category", "Failed Setups", "Affected Symbols", "Root Cause Diagnosis", "System Corrective Action"]
+        rca_headers = [
+            "Failure Category",
+            "Failed Setups",
+            "Affected Symbols",
+            "Root Cause Diagnosis",
+            "System Corrective Action",
+        ]
         for c_idx, h in enumerate(rca_headers, 1):
             cell = ws4.cell(row=2, column=c_idx, value=h)
             cell.font = FONT_HEADER
@@ -1317,7 +1534,13 @@ class EODReport:
             for rca in self.rca_breakdown:
                 r_fill = FILL_ZEBRA if r_idx % 2 == 0 else FILL_WHITE
                 syms_str = ", ".join(rca.symbols) if rca.symbols else "—"
-                vals = [rca.category.replace("_", " ").title(), rca.count, syms_str, rca.root_cause, rca.corrective_action]
+                vals = [
+                    rca.category.replace("_", " ").title(),
+                    rca.count,
+                    syms_str,
+                    rca.root_cause,
+                    rca.corrective_action,
+                ]
                 for c_idx, val in enumerate(vals, 1):
                     cell = ws4.cell(row=r_idx, column=c_idx, value=val)
                     cell.border = BORDER_DATA
@@ -1425,7 +1648,14 @@ class EODReport:
         ws5.row_dimensions[r5_idx].height = 22
         r5_idx += 1
 
-        lvl_headers = ["Benchmark Index", "Support 2", "Support 1", "Central Pivot", "Resistance 1", "Resistance 2"]
+        lvl_headers = [
+            "Benchmark Index",
+            "Support 2",
+            "Support 1",
+            "Central Pivot",
+            "Resistance 1",
+            "Resistance 2",
+        ]
         for c_idx, h in enumerate(lvl_headers, 1):
             cell = ws5.cell(row=r5_idx, column=c_idx, value=h)
             cell.font = FONT_HEADER
@@ -1438,7 +1668,14 @@ class EODReport:
         if self.key_levels:
             for bmk, lvls in self.key_levels.items():
                 r_fill = FILL_ZEBRA if r5_idx % 2 == 0 else FILL_WHITE
-                vals = [bmk, lvls.get("s2", 0.0), lvls.get("s1", 0.0), lvls.get("pivot", 0.0), lvls.get("r1", 0.0), lvls.get("r2", 0.0)]
+                vals = [
+                    bmk,
+                    lvls.get("s2", 0.0),
+                    lvls.get("s1", 0.0),
+                    lvls.get("pivot", 0.0),
+                    lvls.get("r1", 0.0),
+                    lvls.get("r2", 0.0),
+                ]
                 for c_idx, val in enumerate(vals, 1):
                     cell = ws5.cell(row=r5_idx, column=c_idx, value=val)
                     cell.border = BORDER_DATA
@@ -1649,7 +1886,9 @@ class EODReportGenerator:
             top_engine_str = ""
             if top_detectors:
                 t = top_detectors[0]
-                top_engine_str = f"Top engine: {t['detector']} ({t['wins']}W, {t['win_rate']:.1f}% WR)."
+                top_engine_str = (
+                    f"Top engine: {t['detector']} ({t['wins']}W, {t['win_rate']:.1f}% WR)."
+                )
 
             leak_str = ""
             if stopped_setups:
@@ -1809,7 +2048,9 @@ class EODReportGenerator:
             ltp = float(a.get("ltp") or 0.0)
             entry = float(a.get("trigger_level") or a.get("entry_price") or ltp)
             sl = float(a.get("stop_loss") or (entry * 0.95 if entry > 0 else 0.0))
-            target = float(a.get("target_level") or a.get("target_1") or (entry * 1.10 if entry > 0 else 0.0))
+            target = float(
+                a.get("target_level") or a.get("target_1") or (entry * 1.10 if entry > 0 else 0.0)
+            )
             direction = a.get("direction") or "BULLISH"
             symbol = a.get("symbol") or "UNKNOWN"
             inv_reason = a.get("invalidation_reason") or ""
@@ -1835,7 +2076,8 @@ class EODReportGenerator:
 
             # 2. Check if setup was untriggered / expired before crossing entry
             is_untriggered = (
-                is_inv and any(k in lower_inv for k in ("did not trigger", "not trigger", "untriggered"))
+                is_inv
+                and any(k in lower_inv for k in ("did not trigger", "not trigger", "untriggered"))
             ) or (
                 stage == "EXPIRED"
                 and not a.get("triggered_at")
@@ -1895,7 +2137,9 @@ class EODReportGenerator:
                 ui_ignited_count += 1
 
             # 3. Target / Milestone Achieved (Win)
-            if any(m in ("T1", "T2", "T3", "TARGET_ACHIEVED") for m in milestones) or target_status in (
+            if any(
+                m in ("T1", "T2", "T3", "TARGET_ACHIEVED") for m in milestones
+            ) or target_status in (
                 "T1_ACHIEVED",
                 "T2_ACHIEVED",
                 "T3_ACHIEVED",
@@ -1954,7 +2198,9 @@ class EODReportGenerator:
             elif (
                 "T0.5" in milestones
                 or target_status == "T0_5_ACHIEVED"
-                or any(m in ("T0_5_ACHIEVED", "DE_RISK_0_5R", "BREAKEVEN_LOCKED") for m in milestones)
+                or any(
+                    m in ("T0_5_ACHIEVED", "DE_RISK_0_5R", "BREAKEVEN_LOCKED") for m in milestones
+                )
                 or (gain_pct >= 12.0 and not is_inv)
             ):
                 outcome = "WIN_SCALE"
@@ -2131,10 +2377,7 @@ class EODReportGenerator:
                 )
             ):
                 _is_opt_instrument = bool(
-                    a.get("option_type")
-                    or " CE" in symbol
-                    or " PE" in symbol
-                    or a.get("strike")
+                    a.get("option_type") or " CE" in symbol or " PE" in symbol or a.get("strike")
                 )
                 outcome = "WIN_TRAIL"
                 win_count += 1
@@ -2225,7 +2468,9 @@ class EODReportGenerator:
                     detector_stats[det]["ui_losses"] += 1
                     detector_stats[det]["ui_net_r"] -= 1.0
 
-                verdict_note = f"Stop-loss breached: {inv_reason[:65] if inv_reason else 'Risk limit reached'}"
+                verdict_note = (
+                    f"Stop-loss breached: {inv_reason[:65] if inv_reason else 'Risk limit reached'}"
+                )
 
                 summary = TradeOutcomeSummary(
                     alert_id=a.get("alert_id", ""),
@@ -2695,7 +2940,9 @@ class EODReportGenerator:
             json_path.write_text(json.dumps(report.to_dict(), indent=2), encoding="utf-8")
             md_path.write_text(report.to_markdown(), encoding="utf-8")
             self.export_to_excel(report, xlsx_path)
-            logger.info(f"[EODReportGenerator] Successfully saved EOD reports to {md_path} and {xlsx_path}")
+            logger.info(
+                f"[EODReportGenerator] Successfully saved EOD reports to {md_path} and {xlsx_path}"
+            )
         except Exception as e:
             logger.error(f"[EODReportGenerator] Failed to save report to disk: {e}")
 
@@ -2727,10 +2974,7 @@ class EODReportGenerator:
             dest = (
                 str(chat_id).strip()
                 if chat_id
-                else (
-                    os.environ.get("TELEGRAM_CHAT_ID", "").strip()
-                    or "1225164824"
-                )
+                else (os.environ.get("TELEGRAM_CHAT_ID", "").strip() or "1225164824")
             )
             if not dest:
                 logger.warning(
@@ -2740,7 +2984,9 @@ class EODReportGenerator:
                 return False
 
             if not token:
-                logger.warning("[EODReportGenerator] Missing Telegram bot token. Skipping EOD dispatch.")
+                logger.warning(
+                    "[EODReportGenerator] Missing Telegram bot token. Skipping EOD dispatch."
+                )
                 return False
 
             logger.info(f"[EODReportGenerator] Dispatching EOD report → channel {dest}.")
@@ -2791,7 +3037,9 @@ class EODReportGenerator:
                         }
                         doc_resp = httpx.post(doc_url, data=data, files=files, timeout=35)
                         if doc_resp.is_success:
-                            logger.info(f"[EODReportGenerator] Excel workbook dispatched to {dest}.")
+                            logger.info(
+                                f"[EODReportGenerator] Excel workbook dispatched to {dest}."
+                            )
                         else:
                             logger.warning(
                                 f"[EODReportGenerator] Excel workbook dispatch failed ({doc_resp.status_code}): {doc_resp.text}"

@@ -23,7 +23,6 @@ import logging
 import threading
 import time
 from datetime import datetime
-from typing import Optional
 from zoneinfo import ZoneInfo
 
 logger = logging.getLogger(__name__)
@@ -67,6 +66,7 @@ def _score_alert(alert: object, nifty_posture: str = "NEUTRAL") -> float:
         if expiry_date:
             try:
                 from dateutil.parser import parse as dateutil_parse
+
                 exp_dt = dateutil_parse(expiry_date)
                 days_to_exp = (exp_dt.date() - datetime.now(IST).date()).days
                 if 0 < days_to_exp <= 2:
@@ -80,14 +80,7 @@ def _score_alert(alert: object, nifty_posture: str = "NEUTRAL") -> float:
         elif nifty_posture == "BEARISH" and direction == "BEARISH":
             bench_bonus = 4.0
 
-        score = (
-            conf * 0.40
-            + rr * 10.0 * 0.25
-            + sms * 0.15
-            + vix_bonus
-            + expiry_bonus
-            + bench_bonus
-        )
+        score = conf * 0.40 + rr * 10.0 * 0.25 + sms * 0.15 + vix_bonus + expiry_bonus + bench_bonus
         return round(score, 2)
     except Exception:
         return 50.0
@@ -116,6 +109,7 @@ def run_council_arbitration(engine: object) -> list:
         created_at_str = getattr(a, "created_at", "") or ""
         try:
             from dateutil.parser import parse as dateutil_parse
+
             created_epoch = dateutil_parse(created_at_str).timestamp()
         except Exception:
             created_epoch = now
@@ -132,6 +126,7 @@ def run_council_arbitration(engine: object) -> list:
     nifty_posture = "NEUTRAL"
     try:
         from market.indices import get_market_snapshot
+
         snap = get_market_snapshot()
         nifty_posture = snap.posture
     except Exception:
@@ -189,7 +184,9 @@ def run_council_arbitration(engine: object) -> list:
 
     logger.info(
         "[CouncilArbitrator] Arbitration complete: %d candidates -> %d SOTD winners. Benchmark: %s",
-        len(candidates), len(winner_ids), nifty_posture,
+        len(candidates),
+        len(winner_ids),
+        nifty_posture,
     )
     return winner_ids
 

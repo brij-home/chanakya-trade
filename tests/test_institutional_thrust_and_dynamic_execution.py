@@ -16,7 +16,6 @@ import os
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 import pandas as pd
-import pytest
 
 from engine.alert_model import AutoAlert
 from engine.alert_scrutiny import alert_scrutiny_auditor
@@ -83,26 +82,30 @@ def _build_thrust_ohlcv(is_bullish: bool = True) -> pd.DataFrame:
         l_thrust = o_thrust - 3.0
         h_thrust = o_thrust + 55.0
         c_thrust = h_thrust - 2.0  # Upper wick = 2.0 pts out of 58 pts (< 4%)
-        rows.append({
-            "open": o_thrust,
-            "high": h_thrust,
-            "low": l_thrust,
-            "close": c_thrust,
-            "volume": 55000,
-        })
+        rows.append(
+            {
+                "open": o_thrust,
+                "high": h_thrust,
+                "low": l_thrust,
+                "close": c_thrust,
+                "volume": 55000,
+            }
+        )
     else:
         # Bar 10: Institutional Bearish Breakdown Flush
         o_thrust = base + 15.0
         h_thrust = o_thrust + 3.0
         l_thrust = o_thrust - 55.0
         c_thrust = l_thrust + 2.0  # Lower wick = 2.0 pts (< 4%)
-        rows.append({
-            "open": o_thrust,
-            "high": h_thrust,
-            "low": l_thrust,
-            "close": c_thrust,
-            "volume": 55000,
-        })
+        rows.append(
+            {
+                "open": o_thrust,
+                "high": h_thrust,
+                "low": l_thrust,
+                "close": c_thrust,
+                "volume": 55000,
+            }
+        )
 
     df = pd.DataFrame(rows, index=times)
     return df
@@ -231,18 +234,23 @@ def test_edgeless_chop_gate_filters_routine_setups_but_permits_thrust():
     q_dict = {"ltp": spot, "vwap": 25010.0, "high": 25050.0, "low": 24980.0, "change_pct": 0.35}
     q_map = {"NSE:NIFTY": q_dict, "NIFTY": q_dict}
 
-    with patch.dict(os.environ, {"ENFORCE_TEST_REGIME": "1"}), \
-         patch("engine.market_regime_gate.evaluate_market_regime", return_value=edgeless_regime), \
-         patch.object(engine, "_watched_indices", {"NIFTY"}), \
-         patch.object(engine, "_get_prioritized_targets", return_value=["NIFTY"]), \
-         patch.object(engine, "record_alert", return_value=True), \
-         patch("market.history.get_ohlcv", return_value=None), \
-         patch("market.options.get_options_chain", return_value=chain):
-
+    with (
+        patch.dict(os.environ, {"ENFORCE_TEST_REGIME": "1"}),
+        patch("engine.market_regime_gate.evaluate_market_regime", return_value=edgeless_regime),
+        patch.object(engine, "_watched_indices", {"NIFTY"}),
+        patch.object(engine, "_get_prioritized_targets", return_value=["NIFTY"]),
+        patch.object(engine, "record_alert", return_value=True),
+        patch("market.history.get_ohlcv", return_value=None),
+        patch("market.options.get_options_chain", return_value=chain),
+    ):
         # Case A: detector returns only routine alert -> must be filtered out completely under chop
-        with patch("engine.auto_alert_engine.detect_index_call_setup", return_value=[alert_routine]):
+        with patch(
+            "engine.auto_alert_engine.detect_index_call_setup", return_value=[alert_routine]
+        ):
             results = engine.scan_index_call_setups(quotes_map=q_map)
-            assert len(results) == 0, "Routine setup should be strictly suppressed under edgeless chop"
+            assert len(results) == 0, (
+                "Routine setup should be strictly suppressed under edgeless chop"
+            )
 
         # Case B: detector returns institutional thrust alert -> must bypass chop and emit alert
         with patch("engine.auto_alert_engine.detect_index_call_setup", return_value=[alert_thrust]):
@@ -300,5 +308,7 @@ def test_friday_afternoon_intraday_scalp_passes_tier1_scrutiny():
 
     with patch.dict(os.environ, {"ENFORCE_TEST_FRIDAY_GATE": "1"}):
         ok, reason, flags = alert_scrutiny_auditor.verify_tier1_sanity(alert)
-        assert ok is True, f"Expected Friday afternoon intraday scalp to pass Tier-1 sanity, but failed: {reason}"
+        assert ok is True, (
+            f"Expected Friday afternoon intraday scalp to pass Tier-1 sanity, but failed: {reason}"
+        )
         assert flags.get("is_intraday_scalp_only") is True
