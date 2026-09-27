@@ -247,6 +247,8 @@ class AutoAlertEngine:
                     self._dispatched_milestones.add(f"{sym}:{aid}:IN_FLIGHT_WARNING")
                     self._dispatched_milestones.add(f"{c_tag}:{aid}:IN_FLIGHT_WARNING")
                 if a.is_invalidated or a.stage == "INVALIDATED":
+                    if aid:
+                        self._dispatched_milestones.add(f"{aid}:TERMINAL_EXIT")
                     self._dispatched_milestones.add(f"{sym}:{aid}:INVALIDATED")
                     self._dispatched_milestones.add(f"{c_tag}:{aid}:INVALIDATED")
                     self._dispatched_milestones.add(f"{sym}:{atype}:INVALIDATED")
@@ -255,6 +257,16 @@ class AutoAlertEngine:
                 achieved = set(getattr(a, "achieved_milestones", []) or [])
                 tstatus = getattr(a, "target_status", "") or ""
                 astage = getattr(a, "stage", "") or ""
+
+                if (
+                    astage in ("RUNNER_EXIT", "PROFIT_SECURED", "BREAKEVEN_EXIT")
+                    or "RUNNER_EXIT" in achieved
+                    or tstatus in ("RUNNER_CLOSED", "RUNNER_EXIT", "PROFIT_SECURED")
+                ):
+                    if aid:
+                        self._dispatched_milestones.add(f"{aid}:TERMINAL_EXIT")
+                    self._dispatched_milestones.add(f"{sym}:{atype}:RUNNER_EXIT")
+                    self._dispatched_milestones.add(f"{c_tag}:{aid}:RUNNER_EXIT")
 
                 if (
                     "T0_5_ACHIEVED" in achieved

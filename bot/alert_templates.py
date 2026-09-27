@@ -2807,7 +2807,16 @@ def render_milestone_alert(
             "RUNNER CLOSED (PROFIT SECURED)" if is_profit else "RUNNER CLOSED (BREAKEVEN EXIT)"
         )
         sub_title = f"{color_icon} {contract_title} — Trailing Stop Hit (Trade Completed)"
-        decisive_act = "CLOSE REMAINING RUNNER POSITION (PROFIT LOCKED)"
+        decisive_act = (
+            "CLOSE REMAINING RUNNER POSITION (PROFIT LOCKED)"
+            if is_profit
+            else "CLOSE REMAINING RUNNER POSITION (BREAKEVEN / CAPITAL PROTECTED)"
+        )
+        ms_history = (
+            "Target 1 was achieved. Initial SL was never breached."
+            if getattr(d, "is_t1_achieved", False)
+            else "Trailing stop protected trade. Initial SL was never breached."
+        )
 
         return (
             f"🏁 <b>{env_tag} {update_prefix}{title_badge}</b>\n"
@@ -2817,7 +2826,7 @@ def render_milestone_alert(
             f"💰 <b>{cmp_label}:</b> {cs}{d.ltp:,.2f}{move_str}\n"
             f"⚡ <b>DECISIVE ACTION:</b> <code>{decisive_act}</code>\n"
             f"🛡️ <b>Exit Reason:</b> {d.invalidation_reason or d.rationale or 'Trailing stop-loss breached; profit secured.'}\n"
-            f"🔒 <b>Milestone History:</b> Target 1 was achieved. Initial SL was never breached."
+            f"🔒 <b>Milestone History:</b> {ms_history}"
             f"{orig_plan_line}"
             f"{footer_line}"
         )
