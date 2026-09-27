@@ -672,6 +672,72 @@ async def health_readiness():
     return JSONResponse(result, status_code=status_code)
 
 
+@app.get("/api/telemetry/health", tags=["System"])
+async def telemetry_health():
+    """
+    Comprehensive institutional telemetry snapshot:
+      - Memory Guard resource consumption and system RAM pressure
+      - In-memory quote cache depth & TTL metrics
+      - Streaming WebSocket connection statuses (NSE, BSE, Binance Crypto)
+      - Active broker data and execution assignments
+      - Trading mode and safety gate status
+    """
+    from datetime import datetime, timezone
+    from engine.memory_guard import get_memory_status
+    from market.quotes import _QUOTE_CACHE, _quote_cache_lock
+    from brokers.session import get_data_broker_key, get_execution_broker_key
+    from engine.modes import get_trading_mode
+
+    mem_status = get_memory_status().to_dict()
+
+    with _quote_cache_lock:
+        cache_size = len(_QUOTE_CACHE)
+
+    crypto_connected = False
+    try:
+        from market.crypto_stream import crypto_stream
+
+        crypto_connected = bool(crypto_stream.is_connected)
+    except Exception:
+        pass
+
+    mstock_ws_connected = False
+    try:
+        from market.mstock_websocket import get_mstock_websocket
+
+        ws = get_mstock_websocket()
+        mstock_ws_connected = bool(ws and ws.is_connected)
+    except Exception:
+        pass
+
+    mode_info = get_trading_mode()
+
+    return JSONResponse(
+        {
+            "status": "HEALTHY",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "memory": mem_status,
+            "quotes": {
+                "cache_entries": cache_size,
+                "cache_ttl_seconds": 3.0,
+            },
+            "streams": {
+                "binance_crypto_connected": crypto_connected,
+                "mstock_ws_connected": mstock_ws_connected,
+            },
+            "brokers": {
+                "data": get_data_broker_key(),
+                "execution": get_execution_broker_key(),
+            },
+            "trading_mode": {
+                "mode": mode_info.mode.name,
+                "is_live_allowed": mode_info.is_execute,
+                "description": mode_info.description,
+            },
+        }
+    )
+
+
 # ── P0-B: Canonical Mode Endpoint ────────────────────────────────────────────
 
 
@@ -1864,8 +1930,9 @@ async def mstock_login():
         return HTMLResponse(_page("m.Stock Setup", body), status_code=400)
     try:
         from brokers.mstock import MStockAPI
+        from config.constants import get_broker_callback_url
 
-        redirect = _env("MSTOCK_REDIRECT_URL") or "http://103.149.127.88:8765/mstock/callback"
+        redirect = get_broker_callback_url("mstock")
         b = MStockAPI(
             api_key=_env("MSTOCK_API_KEY"),
             api_secret=_env("MSTOCK_API_SECRET"),
@@ -1880,8 +1947,10 @@ async def mstock_login():
     return RedirectResponse(url)
 
 
-@app.api_route("/mstock/callback", methods=["GET", "POST"], response_class=HTMLResponse)
+@app.get("/mstock/callback", response_class=HTMLResponse, operation_id="mstock_callback_get")
+@app.post("/mstock/callback", response_class=HTMLResponse, operation_id="mstock_callback_post")
 async def mstock_callback(request: Request):
+
     params = dict(request.query_params)
     token = (
         params.get("token")
@@ -1902,14 +1971,16 @@ async def mstock_callback(request: Request):
     try:
         from brokers.mstock import MStockAPI
         from brokers.session import register_broker
+        from config.constants import get_broker_callback_url
 
-        redirect = _env("MSTOCK_REDIRECT_URL") or "http://103.149.127.88:8765/mstock/callback"
+        redirect = get_broker_callback_url("mstock")
         b = MStockAPI(
             api_key=_env("MSTOCK_API_KEY"),
             api_secret=_env("MSTOCK_API_SECRET"),
             client_code=_env("MSTOCK_CLIENT_CODE"),
             redirect_uri=redirect,
         )
+
         cb_params = dict(params)
         cb_params.pop("token", None)
         profile = b.complete_login(token=token, **cb_params)
@@ -4592,18 +4663,23 @@ def get_compounder_lifecycle(
     sl: float = 0.0,
     mode: str = "STAGE_2_COMPOUNDER",
     ltp: Optional[float] = None,
+    is_0dte: bool = False,
 ):
     """
-    Audits a position's health with dual-mode lifecycle rules:
+    Audits a position's health with multi-mode lifecycle rules:
       - mode='SWING': 2R 50% scale-out, Chandelier ATR stop
       - mode='STAGE_2_COMPOUNDER': ZERO 2R profit booking, base pivot breakeven, 50-SMA trail, +30% pyramiding signal
       - mode='GENERATIONAL': 200-SMA / 40-week trail
     """
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    from engine.alert_identity import canonical_alert_symbol
     from engine.trade_lifecycle import audit_position_lifecycle
 
-    clean_sym = symbol.upper().replace(".NS", "").replace("NSE:", "").strip()
+    clean_sym = canonical_alert_symbol(symbol)
     entry_p = float(entry) if entry > 0 else 100.0
     sl_p = float(sl) if sl > 0 else (entry_p * 0.93)
+    curr_hour = datetime.now(ZoneInfo("Asia/Kolkata")).hour
 
     report = audit_position_lifecycle(
         symbol=clean_sym,
@@ -4611,6 +4687,8 @@ def get_compounder_lifecycle(
         initial_stop_loss=sl_p,
         current_ltp=ltp,
         mode=mode,
+        is_0dte=is_0dte,
+        current_hour=curr_hour,
     )
     return JSONResponse(report.to_dict())
 

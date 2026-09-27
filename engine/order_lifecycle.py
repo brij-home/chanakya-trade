@@ -553,6 +553,27 @@ def confirm_order_intent(order_id: str, preview_hash: str) -> OrderIntent:
                 f"Order {order_id} cannot be confirmed because current status is '{d['status']}'."
             )
 
+        # 60-Second Preview TTL Staleness Guard
+        created_at_val = d.get("created_at")
+        if created_at_val and isinstance(created_at_val, str):
+            try:
+                if created_at_val.endswith("Z"):
+                    created_dt = datetime.fromisoformat(created_at_val.replace("Z", "+00:00"))
+                elif "+" in created_at_val or ("-" in created_at_val[10:]):
+                    created_dt = datetime.fromisoformat(created_at_val)
+                else:
+                    created_dt = datetime.fromisoformat(created_at_val).replace(tzinfo=timezone.utc)
+                age_sec = (datetime.now(timezone.utc) - created_dt).total_seconds()
+                if age_sec > 60.0:
+                    raise TimeoutError(
+                        f"Order preview {order_id} has expired (age: {age_sec:.1f}s > 60.0s TTL). "
+                        "Re-generate order preview to prevent stale price slippage."
+                    )
+            except TimeoutError:
+                raise
+            except Exception:
+                pass
+
         cursor = conn.execute(
             """
             UPDATE orders_ledger

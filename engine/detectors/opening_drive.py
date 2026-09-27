@@ -27,7 +27,7 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 
-from engine.alert_identity import generate_alert_id
+from engine.alert_identity import generate_alert_id, canonical_alert_symbol
 from engine.alert_model import AutoAlert
 
 logger = logging.getLogger("chanakya.detectors.opening_drive")
@@ -95,7 +95,7 @@ def detect_opening_drive(
     if range_pct < 0.40:
         return None
 
-    clean_sym = symbol.upper().replace("NSE:", "").replace("BSE:", "").strip()
+    clean_sym = canonical_alert_symbol(symbol)
     is_index = clean_sym in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX")
 
     if rvol is not None:

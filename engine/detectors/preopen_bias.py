@@ -3,7 +3,7 @@ import logging
 import os
 from datetime import datetime
 from zoneinfo import ZoneInfo
-from engine.alert_identity import generate_alert_id
+from engine.alert_identity import generate_alert_id, canonical_alert_symbol
 from engine.alert_model import AutoAlert
 from engine.alert_expiry import classify_expiry_type
 
@@ -23,7 +23,7 @@ def detect_preopen_bias(
     atm_pe_ltp=None,
     atm_strike=None,
 ):
-    clean_sym = underlying.upper().replace(".NS", "").replace("NSE:", "").strip()
+    clean_sym = canonical_alert_symbol(underlying)
     if clean_sym not in _INDEX_UNIVERSE:
         return []
     if gift_futures_price <= 0 or prev_close <= 0:

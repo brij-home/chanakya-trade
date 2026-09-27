@@ -23,6 +23,8 @@ import numpy as np
 from engine.alert_model import AutoAlert
 from engine.alert_expiry import classify_expiry_type
 
+from engine.alert_identity import canonical_alert_symbol
+
 logger = logging.getLogger("chanakya.detectors.options_momentum")
 IST = timezone(timedelta(hours=5, minutes=30))
 
@@ -31,10 +33,13 @@ DEFAULT_WATCHED_INDICES = {"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENS
 
 def resolve_index_exchange(sym: str) -> str:
     """Resolves BSE for SENSEX/BANKEX, MCX for commodities, otherwise NSE."""
-    clean = sym.replace("NSE:", "").replace("BSE:", "").replace("MCX:", "").strip().upper()
-    if clean in ("SENSEX", "BANKEX"):
+    from config.market_universes import BSE_EQUITY_SYMBOLS, MCX_COMMODITY_SYMBOLS
+    from engine.alert_identity import canonical_alert_symbol
+
+    clean = canonical_alert_symbol(sym)
+    if clean in BSE_EQUITY_SYMBOLS:
         return "BSE"
-    if clean in ("CRUDEOIL", "NATURALGAS", "GOLD", "SILVER", "COPPER", "ZINC"):
+    if clean in MCX_COMMODITY_SYMBOLS:
         return "MCX"
     return "NSE"
 
@@ -68,6 +73,14 @@ def detect_options_momentum_breakouts(
         or os.environ.get("DEPLOY_MODE") == "test"
         or ("PYTEST_CURRENT_TEST" in os.environ)
     )
+
+    is_preopen_auction = now_dt.hour == 9 and now_dt.minute < 15
+    if not is_test_env and is_preopen_auction:
+        logger.debug(
+            "[OptionsBreakout] Suppressed during pre-open call auction (09:00–09:15 IST). "
+            "Continuous F&O session begins at 09:15 IST."
+        )
+        return []
 
     is_friday_late = (now_dt.weekday() == 4) and (
         now_dt.hour > 14 or (now_dt.hour == 14 and now_dt.minute >= 30)
@@ -130,7 +143,7 @@ def detect_options_momentum_breakouts(
             batch_quotes = {}
 
     for sym in target_list:
-        clean_sym = sym.replace("NSE:", "").replace("NFO:", "").replace("BSE:", "").strip().upper()
+        clean_sym = canonical_alert_symbol(sym)
         try:
             exch = resolve_index_exchange(clean_sym)
             lookup_sym = f"{exch}:{clean_sym}"
@@ -768,6 +781,8 @@ def detect_options_momentum_breakouts(
                 else:
                     vix_regime = "NORMAL_VOLATILITY"
 
+                is_high_iv_risk = bool(vix_val is not None and vix_val >= 18.0)
+
                 confirmation_bonus = 0
                 divergence_bonus = 0
                 conf_candle = None
@@ -978,6 +993,11 @@ def detect_options_momentum_breakouts(
                     if is_next_month_routed
                     else ""
                 )
+                high_vix_tag = (
+                    f" ⚠️ HIGH VIX ({vix_val:.1f}): Elevated IV crush risk on naked options. Prefer Deep ITM (Delta >= 0.65) or Defined-Risk Spreads."
+                    if is_high_iv_risk
+                    else ""
+                )
 
                 conf_score = 50
                 if vol_oi >= 3.0:
@@ -1076,14 +1096,14 @@ def detect_options_momentum_breakouts(
                     summary = (
                         f"Institutional Put surge in {clean_sym} {int(strike)} PE. "
                         f"Underlying spot ₹{spot:,.1f}{spot_anchor_str}. Turnover: {vol:,} contracts ({vol_oi}x OI). "
-                        f"Entry: ₹{opt_ltp:,.1f} | SL: ₹{opt_sl:,.1f} | T1: ₹{opt_t1:,.1f} (Scale 50% & SL to Cost) | T2: ₹{opt_t2:,.1f}.{drive_tag}{friday_tag}{dte_pm_tag}{phys_tag}{rollover_tag}"
+                        f"Entry: ₹{opt_ltp:,.1f} | SL: ₹{opt_sl:,.1f} | T1: ₹{opt_t1:,.1f} (Scale 50% & SL to Cost) | T2: ₹{opt_t2:,.1f}.{drive_tag}{friday_tag}{dte_pm_tag}{phys_tag}{rollover_tag}{high_vix_tag}"
                     )
                 else:
                     headline = f"🟢 OPTIONS MOMENTUM{sec_badge}{cat_badge}: {contract_sym} @ ₹{opt_ltp:,.1f}{lot_tag} (Vol/OI {vol_oi}x)"
                     summary = (
                         f"Institutional Call surge in {clean_sym} {int(strike)} CE. "
                         f"Underlying spot ₹{spot:,.1f}{spot_anchor_str}. Turnover: {vol:,} contracts ({vol_oi}x OI). "
-                        f"Entry: ₹{opt_ltp:,.1f} | SL: ₹{opt_sl:,.1f} | T1: ₹{opt_t1:,.1f} (Scale 50% & SL to Cost) | T2: ₹{opt_t2:,.1f}.{drive_tag}{friday_tag}{dte_pm_tag}{phys_tag}{rollover_tag}"
+                        f"Entry: ₹{opt_ltp:,.1f} | SL: ₹{opt_sl:,.1f} | T1: ₹{opt_t1:,.1f} (Scale 50% & SL to Cost) | T2: ₹{opt_t2:,.1f}.{drive_tag}{friday_tag}{dte_pm_tag}{phys_tag}{rollover_tag}{high_vix_tag}"
                     )
 
                 hedge_plan = None
@@ -1178,6 +1198,7 @@ def detect_options_momentum_breakouts(
                         "has_opening_breakout": has_opening_breakout,
                         "vix_regime": vix_regime,
                         "india_vix": vix_val,
+                        "is_high_iv_risk": is_high_iv_risk,
                         "is_gamma_squeeze": is_gamma_squeeze,
                         "nifty_change_pct": nifty_change,
                         "nifty_below_vwap": nifty_below_vwap,
@@ -1224,9 +1245,23 @@ def detect_options_momentum_breakouts(
                         "segment": "FNO",
                         "contract": contract_sym,
                         "preferred_vehicle": (
-                            hedge_plan.get("preferred_vehicle", "NAKED_OPTION_OR_SPREAD")
+                            hedge_plan.get(
+                                "preferred_vehicle",
+                                "DEEP_ITM_OR_SPREAD"
+                                if is_high_iv_risk
+                                else "NAKED_OPTION_OR_SPREAD",
+                            )
                             if hedge_plan
-                            else "NAKED_OPTION_OR_SPREAD"
+                            else (
+                                "DEEP_ITM_OR_SPREAD"
+                                if is_high_iv_risk
+                                else "NAKED_OPTION_OR_SPREAD"
+                            )
+                        ),
+                        "iv_crush_defense": (
+                            f"HIGH_VIX_IV_CRUSH_WARNING: India VIX {vix_val:.1f} >= 18.0. Elevated IV crush risk on OTM/ATM longs. Prefer Deep ITM (Delta >= 0.65), Bull/Bear Vertical Spreads, or Futures."
+                            if is_high_iv_risk
+                            else None
                         ),
                         "hedge_plan": hedge_plan,
                         "recommended_entry": f"₹{opt_ltp:,.2f}",

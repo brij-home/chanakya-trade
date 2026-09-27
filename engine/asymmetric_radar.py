@@ -36,7 +36,9 @@ from typing import Any, Optional
 import numpy as np
 import pandas as pd
 
+from engine.alert_identity import canonical_alert_symbol
 from engine.precursor_radar import classify_symbol_segment, get_scan_universe
+
 
 logger = logging.getLogger("chanakya.asymmetric_radar")
 
@@ -1899,16 +1901,9 @@ class AsymmetricOpportunityRadar:
 
         def _evaluate_sym(sym: str) -> list[AsymmetricOpportunity]:
             sym_opps: list[AsymmetricOpportunity] = []
-            clean_sym = (
-                sym.upper()
-                .replace("NSE:", "")
-                .replace("BSE:", "")
-                .replace("MCX:", "")
-                .replace("CRYPTO:", "")
-                .replace("BINANCE:", "")
-                .strip()
-            )
+            clean_sym = canonical_alert_symbol(sym)
             seg = classify_symbol_segment(clean_sym)
+
             is_comm = seg == "COMMODITY"
             is_crypto = seg == "CRYPTO"
 

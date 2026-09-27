@@ -16,62 +16,62 @@ def test_option_pattern_matching():
     # Weekly NIFTY format
     m1 = _OPTION_PATTERN.match("NIFTY2691124500CE")
     assert m1 is not None
-    assert m1.group(1) == "NIFTY"
-    assert m1.group(2) == "24500"
-    assert m1.group(3) == "CE"
+    assert m1.group("underlying") == "NIFTY"
+    assert m1.group("strike") == "24500"
+    assert m1.group("opt_type") == "CE"
 
     # Monthly / standard strike format
     m2 = _OPTION_PATTERN.match("BANKNIFTY51000PE")
     assert m2 is not None
-    assert m2.group(1) == "BANKNIFTY"
-    assert m2.group(2) == "51000"
-    assert m2.group(3) == "PE"
+    assert m2.group("underlying") == "BANKNIFTY"
+    assert m2.group("strike") == "51000"
+    assert m2.group("opt_type") == "PE"
 
     # With exchange prefix
     m3 = _OPTION_PATTERN.match("NFO:RELIANCE3000CE")
     assert m3 is not None
-    assert m3.group(1) == "RELIANCE"
-    assert m3.group(2) == "3000"
-    assert m3.group(3) == "CE"
+    assert m3.group("underlying") == "RELIANCE"
+    assert m3.group("strike") == "3000"
+    assert m3.group("opt_type") == "CE"
 
     # Sub-1000 stocks (1 to 3 digit strikes)
     m4 = _OPTION_PATTERN.match("SBIN990PE")
     assert m4 is not None
-    assert m4.group(1) == "SBIN"
-    assert m4.group(2) == "990"
-    assert m4.group(3) == "PE"
+    assert m4.group("underlying") == "SBIN"
+    assert m4.group("strike") == "990"
+    assert m4.group("opt_type") == "PE"
 
     m5 = _OPTION_PATTERN.match("TATASTEEL182PE")
     assert m5 is not None
-    assert m5.group(1) == "TATASTEEL"
-    assert m5.group(2) == "182"
-    assert m5.group(3) == "PE"
+    assert m5.group("underlying") == "TATASTEEL"
+    assert m5.group("strike") == "182"
+    assert m5.group("opt_type") == "PE"
 
     m6 = _OPTION_PATTERN.match("IREDA112CE")
     assert m6 is not None
-    assert m6.group(1) == "IREDA"
-    assert m6.group(2) == "112"
-    assert m6.group(3) == "CE"
+    assert m6.group("underlying") == "IREDA"
+    assert m6.group("strike") == "112"
+    assert m6.group("opt_type") == "CE"
 
     # High strike 6-digit stock (MRF)
     m7 = _OPTION_PATTERN.match("MRF135000CE")
     assert m7 is not None
-    assert m7.group(1) == "MRF"
-    assert m7.group(2) == "135000"
-    assert m7.group(3) == "CE"
+    assert m7.group("underlying") == "MRF"
+    assert m7.group("strike") == "135000"
+    assert m7.group("opt_type") == "CE"
 
     # ISO 8-digit date format (e.g. BAJFINANCE202609291020PE)
     m8 = _OPTION_PATTERN.match("BAJFINANCE202609291020PE")
     assert m8 is not None
-    assert m8.group(1) == "BAJFINANCE"
-    assert m8.group(2) == "1020"
-    assert m8.group(3) == "PE"
+    assert m8.group("underlying") == "BAJFINANCE"
+    assert m8.group("strike") == "1020"
+    assert m8.group("opt_type") == "PE"
 
     m9 = _OPTION_PATTERN.match("HAL202609294800PE")
     assert m9 is not None
-    assert m9.group(1) == "HAL"
-    assert m9.group(2) == "4800"
-    assert m9.group(3) == "PE"
+    assert m9.group("underlying") == "HAL"
+    assert m9.group("strike") == "4800"
+    assert m9.group("opt_type") == "PE"
 
 
 def test_futures_pattern_matching():

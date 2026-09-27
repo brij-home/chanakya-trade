@@ -10,7 +10,7 @@ from typing import Any, Optional
 from zoneinfo import ZoneInfo
 
 from engine.alert_expiry import classify_expiry_type
-from engine.alert_identity import generate_alert_id
+from engine.alert_identity import generate_alert_id, canonical_alert_symbol
 from engine.alert_model import AutoAlert
 
 import time
@@ -146,8 +146,20 @@ def detect_gamma_blast(
     now_dt = datetime.now(IST)
     now_iso = now_dt.strftime("%Y-%m-%d %H:%M:%S IST")
     is_opening_drive = now_dt.hour == 9 and now_dt.minute <= 45
-    clean_sym = (
-        underlying.upper().replace(".NS", "").replace("NSE:", "").replace("NFO:", "").strip()
+    clean_sym = canonical_alert_symbol(underlying)
+
+    vix_val = None
+    try:
+        from market.indices import get_vix
+
+        vix_val = get_vix()
+    except Exception:
+        vix_val = None
+    is_high_iv_risk = bool(vix_val is not None and vix_val >= 18.0)
+    high_vix_tag = (
+        f" | ⚠️ HIGH VIX ({vix_val:.1f}): Elevated IV crush risk; prefer Deep ITM or Defined-Risk Spreads."
+        if is_high_iv_risk
+        else ""
     )
 
     # Institutional Liquidity & Significance Filters (SEBI / F&O standard):
@@ -724,11 +736,11 @@ def detect_gamma_blast(
                     ),
                     alert_type="GAMMA_BLAST",
                     stage=stage,
-                    symbol=underlying,
+                    symbol=clean_sym,
                     exchange=opt_exchange,
                     direction="BULLISH",
                     headline=headline,
-                    summary=f"{summary} | OTE Entry: {entry_range_ce} | No Chase > ₹{no_chase_ce}",
+                    summary=f"{summary} | OTE Entry: {entry_range_ce} | No Chase > ₹{no_chase_ce}{high_vix_tag}",
                     ltp=opt_ltp or spot,
                     trigger_level=opt_ltp if (opt_ltp and opt_ltp > 0) else strike,
                     target_level=target_premium,
@@ -787,10 +799,20 @@ def detect_gamma_blast(
                             if is_phys_week
                             else None
                         ),
+                        "india_vix": vix_val,
+                        "is_high_iv_risk": is_high_iv_risk,
                     },
                     actionable_plan={
                         "action": "BUY CE",
                         "contract": contract_sym,
+                        "preferred_vehicle": "DEEP_ITM_OR_SPREAD"
+                        if is_high_iv_risk
+                        else "NAKED_OPTION_OR_SPREAD",
+                        "iv_crush_defense": (
+                            f"HIGH_VIX_IV_CRUSH_WARNING: India VIX {vix_val:.1f} >= 18.0. Elevated IV crush risk on OTM/ATM longs. Prefer Deep ITM (Delta >= 0.65), Bull/Bear Vertical Spreads, or Futures."
+                            if is_high_iv_risk
+                            else None
+                        ),
                         "instrument": contract_sym,
                         "instrument_type": "OPTION",
                         "strike": strike,
@@ -1270,11 +1292,11 @@ def detect_gamma_blast(
                     ),
                     alert_type="GAMMA_BLAST",
                     stage=stage,
-                    symbol=underlying,
+                    symbol=clean_sym,
                     exchange=opt_exchange,
                     direction="BEARISH",
                     headline=headline,
-                    summary=f"{summary} | OTE Entry: {entry_range_pe} | No Chase > ₹{no_chase_pe}",
+                    summary=f"{summary} | OTE Entry: {entry_range_pe} | No Chase > ₹{no_chase_pe}{high_vix_tag}",
                     ltp=opt_ltp or spot,
                     trigger_level=opt_ltp if (opt_ltp and opt_ltp > 0) else strike,
                     target_level=target_premium,
@@ -1335,10 +1357,20 @@ def detect_gamma_blast(
                             if is_phys_week
                             else None
                         ),
+                        "india_vix": vix_val,
+                        "is_high_iv_risk": is_high_iv_risk,
                     },
                     actionable_plan={
                         "action": "BUY PE",
                         "contract": contract_sym,
+                        "preferred_vehicle": "DEEP_ITM_OR_SPREAD"
+                        if is_high_iv_risk
+                        else "NAKED_OPTION_OR_SPREAD",
+                        "iv_crush_defense": (
+                            f"HIGH_VIX_IV_CRUSH_WARNING: India VIX {vix_val:.1f} >= 18.0. Elevated IV crush risk on OTM/ATM longs. Prefer Deep ITM (Delta >= 0.65), Bull/Bear Vertical Spreads, or Futures."
+                            if is_high_iv_risk
+                            else None
+                        ),
                         "instrument": contract_sym,
                         "instrument_type": "OPTION",
                         "strike": strike,

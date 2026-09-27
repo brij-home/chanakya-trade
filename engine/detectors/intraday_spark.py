@@ -18,6 +18,7 @@ from typing import Any, Optional
 import numpy as np
 
 from engine.alert_model import AutoAlert
+from engine.alert_identity import canonical_alert_symbol
 
 logger = logging.getLogger("chanakya.detectors.intraday_spark")
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -113,7 +114,7 @@ def detect_intraday_mover_sparks(
     is_nifty_markup = (nifty_chg >= 0.40) and ((nifty_ltp > nifty_vwap) if nifty_vwap > 0 else True)
 
     for sym in scan_universe:
-        clean_sym = sym.upper().replace("NSE:", "").replace(".NS", "").strip()
+        clean_sym = canonical_alert_symbol(sym)
         q = quotes_map.get(f"NSE:{clean_sym}") or quotes_map.get(clean_sym)
         if not q:
             continue

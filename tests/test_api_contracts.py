@@ -330,3 +330,41 @@ def test_options_chain_integrity_stale_chain_blocked(client):
     report = data["data"]
     assert report["is_actionable"] is False
     assert report["action_eligibility"] in ("UNAVAILABLE", "RESTRICTED")
+
+
+def test_telemetry_health_endpoint_contract(client):
+    """Verify /api/telemetry/health returns comprehensive institutional system health."""
+    res = client.get("/api/telemetry/health")
+    assert res.status_code == 200
+    data = res.json()
+    assert data["status"] == "HEALTHY"
+    assert "memory" in data
+    assert "process_rss_mb" in data["memory"]
+    assert "pressure_level" in data["memory"]
+    assert "quotes" in data
+    assert "cache_entries" in data["quotes"]
+    assert "streams" in data
+    assert "brokers" in data
+    assert "trading_mode" in data
+
+
+def test_compounder_lifecycle_endpoint_with_0dte(client):
+    """Verify /api/compounder/lifecycle/{symbol} accepts is_0dte and returns valid diagnostics."""
+    res = client.get(
+        "/api/compounder/lifecycle/RELIANCE",
+        params={
+            "entry": 2800.0,
+            "sl": 2750.0,
+            "ltp": 2845.0,
+            "mode": "SWING",
+            "is_0dte": True,
+        },
+    )
+    assert res.status_code == 200
+    data = res.json()
+    assert "symbol" in data
+    assert data["symbol"] == "RELIANCE"
+    assert "health_score" in data
+    assert "trailing_stops" in data
+    assert "recommended_active_stop" in data["trailing_stops"]
+    assert data["trailing_stops"]["recommended_active_stop"] > 0

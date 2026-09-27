@@ -58,9 +58,10 @@ DEFAULT_DATA_DIR_NAME: str = ".trading_platform"
 NIFTY_LOT_SIZE: int = 65
 BANKNIFTY_LOT_SIZE: int = 15
 FINNIFTY_LOT_SIZE: int = 25
-MIDCPNIFTY_LOT_SIZE: int = 50
+MIDCPNIFTY_LOT_SIZE: int = 120
 SENSEX_LOT_SIZE: int = 10
 BANKEX_LOT_SIZE: int = 15
+
 
 # ── Alert & Analysis TTLs ─────────────────────────────────────────────────────
 
@@ -78,3 +79,37 @@ CHAT_SESSION_TTL_SECONDS: int = 2 * 3600
 
 #: Max chat sessions in LRU store
 CHAT_SESSION_MAX_SIZE: int = 50
+
+# ── Broker OAuth Redirect URIs & SEBI Network Binding ─────────────────────────
+
+#: Static IPv4 whitelisted with SEBI brokers (Mirae Asset m.Stock)
+DEFAULT_SEBI_WHITELISTED_IP: str = "103.149.127.88"
+
+#: Default FastAPI sidecar port
+DEFAULT_SIDECAR_PORT: int = 8765
+
+DEFAULT_BROKER_CALLBACK_URLS: dict[str, str] = {
+    "fyers": f"http://127.0.0.1:{DEFAULT_SIDECAR_PORT}/fyers/callback",
+    "groww": f"http://localhost:{DEFAULT_SIDECAR_PORT}/groww/callback",
+    "upstox": f"http://localhost:{DEFAULT_SIDECAR_PORT}/upstox/callback",
+    "mstock": f"http://{DEFAULT_SEBI_WHITELISTED_IP}:{DEFAULT_SIDECAR_PORT}/mstock/callback",
+    "zerodha": f"http://127.0.0.1:{DEFAULT_SIDECAR_PORT}/zerodha/callback",
+}
+
+
+def get_broker_callback_url(broker_key: str) -> str:
+    """
+    Returns the authoritative OAuth callback redirect URI for the given broker.
+    Resolves environment variable override (e.g. MSTOCK_REDIRECT_URL) first,
+    falling back to canonical default.
+    """
+    import os
+
+    k = broker_key.lower().strip()
+    env_var = f"{k.upper()}_REDIRECT_URL"
+    val = os.environ.get(env_var, "").strip()
+    if val:
+        return val
+    return DEFAULT_BROKER_CALLBACK_URLS.get(
+        k, f"http://localhost:{DEFAULT_SIDECAR_PORT}/{k}/callback"
+    )

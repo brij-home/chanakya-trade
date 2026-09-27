@@ -22,7 +22,7 @@ from zoneinfo import ZoneInfo
 
 import numpy as np
 
-from engine.alert_identity import generate_alert_id
+from engine.alert_identity import generate_alert_id, canonical_alert_symbol
 from engine.alert_model import AutoAlert
 
 logger = logging.getLogger(__name__)
@@ -122,7 +122,7 @@ def detect_pre_inflection_dryup(
         rr_str = f"1:{(4.0 * risk_pts / risk_pts):.1f}"
 
         now_iso = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
-        clean_sym = symbol.upper().replace(".NS", "").replace("NSE:", "").strip()
+        clean_sym = canonical_alert_symbol(symbol)
 
         headline = f"🤫 PRE-INFLECTION DRY-UP: {clean_sym} at ₹{ltp:,.1f} (Fair Value Zone)"
         summary = (

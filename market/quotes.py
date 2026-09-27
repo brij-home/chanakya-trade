@@ -22,7 +22,7 @@ from engine.observability import get_registry, new_correlation_id
 from market.data_events import classify_data_state, utc_now_iso
 
 _OPTION_PATTERN = re.compile(
-    r"^(?:NFO:|BFO:|NSE:|BSE:)?([A-Za-z0-9_& -]+?)(?:(20\d{6})|(\d{2}[A-Z]{3})|(\d{5}(?=\d{3,})))?\s*(\d{1,6}(?:\.\d+)?)\s*(CE|PE)$",
+    r"^(?:NFO:|BFO:|NSE:|BSE:)?(?P<underlying>[A-Za-z0-9_& -]+?)(?:(?P<exp_iso>20\d{6})|(?P<exp_nfo>\d{2}[A-Z]{3})|(?P<exp_num>\d{5}(?=\d{3,})))?\s*(?P<strike>\d{1,6}(?:\.\d+)?)\s*(?P<opt_type>CE|PE)$",
     re.IGNORECASE,
 )
 
@@ -346,60 +346,12 @@ def _futures_quotes(instruments: list[str], *, correlation_id: str) -> dict[str,
     return res
 
 
-_MCX_SYMBOLS = {
-    "GOLD",
-    "GOLDM",
-    "GOLDPETAL",
-    "SILVER",
-    "SILVERM",
-    "SILVERMIC",
-    "CRUDEOIL",
-    "CRUDEOILM",
-    "CRUDE",
-    "BRENT",
-    "NATURALGAS",
-    "NATGASMINI",
-    "NATGAS",
-    "COPPER",
-    "ZINC",
-    "ALUMINIUM",
-    "ALUMINUM",
-    "LEAD",
-    "COTTON",
-}
-_CDS_SYMBOLS = {
-    "USDINR",
-    "USD/INR",
-    "EURINR",
-    "EUR/INR",
-    "GBPINR",
-    "GBP/INR",
-    "JPYINR",
-    "JPY/INR",
-}
-_BSE_SYMBOLS = {"SENSEX", "BANKEX", "BSE SENSEX", "BSE BANKEX"}
-_CRYPTO_SYMBOLS = {
-    "BTC",
-    "BITCOIN",
-    "BTCUSD",
-    "BTC-USD",
-    "BTCUSDT",
-    "BTCINR",
-    "ETH",
-    "ETHEREUM",
-    "ETHUSD",
-    "ETH-USD",
-    "ETHUSDT",
-    "SOL",
-    "SOLANA",
-    "SOLUSD",
-    "SOL-USD",
-    "SOLUSDT",
-    "BNB",
-    "BNBUSD",
-    "BNB-USD",
-    "BNBUSDT",
-}
+from config.market_universes import (
+    BSE_EQUITY_SYMBOLS as _BSE_SYMBOLS,
+    CDS_CURRENCY_SYMBOLS as _CDS_SYMBOLS,
+    CRYPTO_SYMBOLS as _CRYPTO_SYMBOLS,
+    MCX_COMMODITY_SYMBOLS as _MCX_SYMBOLS,
+)
 
 
 def _yf_fallback_quotes(

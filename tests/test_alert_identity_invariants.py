@@ -29,6 +29,9 @@ def test_canonical_alert_symbol_prefixes():
     assert canonical_alert_symbol("CRYPTO:BTCUSDT") == "BTCUSDT"
     assert canonical_alert_symbol("BINANCE:ETHUSDT") == "ETHUSDT"
     assert canonical_alert_symbol("DERIBIT:BTC-PERP") == "BTC-PERP"
+    assert canonical_alert_symbol("RELIANCE.NS") == "RELIANCE"
+    assert canonical_alert_symbol("TCS.BO") == "TCS"
+    assert canonical_alert_symbol("^NSEI") == "NSEI"
     assert canonical_alert_symbol("  nse:infy  ") == "INFY"
     assert canonical_alert_symbol("") == ""
 

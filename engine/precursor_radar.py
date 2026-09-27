@@ -53,63 +53,32 @@ MAJOR_INDICES = [
 ]
 
 
+from config.market_universes import (
+    CRYPTO_SYMBOLS,
+    INDEX_BENCHMARKS,
+    MCX_COMMODITY_SYMBOLS,
+)
+from engine.alert_identity import canonical_alert_symbol
+
+
 def classify_symbol_segment(symbol: str) -> str:
     """
     Classifies a symbol into 'INDEX', 'FNO', 'NON_FNO', 'COMMODITY', or 'CRYPTO'.
     """
-    clean = (
-        symbol.upper()
-        .replace("NSE:", "")
-        .replace("BSE:", "")
-        .replace("MCX:", "")
-        .replace("CRYPTO:", "")
-        .replace("BINANCE:", "")
-        .replace(".NS", "")
-        .replace("^", "")
-        .strip()
-    )
-    if symbol.upper().startswith("CRYPTO:") or symbol.upper().startswith("BINANCE:"):
-        return "CRYPTO"
-    try:
-        from market.quotes import _CRYPTO_SYMBOLS
+    if not symbol:
+        return "NON_FNO"
+    clean = canonical_alert_symbol(symbol)
+    sym_upper = symbol.strip().upper()
 
-        if clean in _CRYPTO_SYMBOLS:
-            return "CRYPTO"
-    except Exception:
-        pass
-    if clean in ("BTC", "ETH", "SOL", "BNB", "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"):
-        return "CRYPTO"
-    if symbol.upper().startswith("MCX:"):
-        return "COMMODITY"
-    try:
-        from market.quotes import _MCX_SYMBOLS
-
-        if clean in _MCX_SYMBOLS and clean not in ("MCX",):
-            return "COMMODITY"
-    except Exception:
-        pass
     if (
-        clean
-        in (
-            "NIFTY",
-            "BANKNIFTY",
-            "FINNIFTY",
-            "MIDCPNIFTY",
-            "NIFTYIT",
-            "NIFTYAUTO",
-            "NIFTYPHARMA",
-            "NIFTYMETAL",
-            "NIFTYENERGY",
-            "SENSEX",
-            "BANKEX",
-            "NSEI",
-            "NSEBANK",
-            "CNXIT",
-            "CNXAUTO",
-        )
-        or clean.endswith("INDEX")
-        or clean.startswith("NIFTY")
+        sym_upper.startswith("CRYPTO:")
+        or sym_upper.startswith("BINANCE:")
+        or clean in CRYPTO_SYMBOLS
     ):
+        return "CRYPTO"
+    if sym_upper.startswith("MCX:") or (clean in MCX_COMMODITY_SYMBOLS and clean != "MCX"):
+        return "COMMODITY"
+    if clean in INDEX_BENCHMARKS or clean.endswith("INDEX") or clean.startswith("NIFTY"):
         return "INDEX"
     try:
         from engine.position_sizer import is_fno_symbol
@@ -345,16 +314,7 @@ class PrecursorRadarScanner:
         Evaluates a single stock for pre-move coiling DNA against dynamic factor weights.
         Returns a PrecursorCandidate if the setup meets quality and conviction thresholds.
         """
-        clean_sym = (
-            symbol.upper()
-            .replace("NSE:", "")
-            .replace("BSE:", "")
-            .replace("MCX:", "")
-            .replace("CRYPTO:", "")
-            .replace("BINANCE:", "")
-            .replace(".NS", "")
-            .strip()
-        )
+        clean_sym = canonical_alert_symbol(symbol)
         sym_seg = classify_symbol_segment(symbol)
 
         # 1. Check Symbol Invalidation Lockout (Anti-knife catching)
@@ -830,15 +790,7 @@ class PrecursorRadarScanner:
             logger.debug(f"[PrecursorRadar] Batch quote fetch error: {e}")
 
         def _worker(sym: str) -> Optional[PrecursorCandidate]:
-            clean = (
-                sym.upper()
-                .replace("NSE:", "")
-                .replace("MCX:", "")
-                .replace("CRYPTO:", "")
-                .replace("BINANCE:", "")
-                .replace(".NS", "")
-                .strip()
-            )
+            clean = canonical_alert_symbol(sym)
             q = (
                 quotes_map.get(f"CRYPTO:{clean}")
                 or quotes_map.get(f"NSE:{clean}")

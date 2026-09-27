@@ -37,6 +37,7 @@ import numpy as np
 import pandas as pd
 
 from engine.alert_model import AutoAlert
+from engine.alert_identity import canonical_alert_symbol
 from engine.option_resolver import resolve_option_contract, is_index_symbol
 
 logger = logging.getLogger("chanakya.detectors.orb")
@@ -329,7 +330,7 @@ def detect_opening_range_breakout(
         confidence += 4
     confidence = min(96, confidence)
 
-    clean_sym = symbol.upper().replace("NSE:", "").replace("BSE:", "").strip()
+    clean_sym = canonical_alert_symbol(symbol)
     is_idx = is_index_symbol(clean_sym)
     opt_plan = (
         resolve_option_contract(

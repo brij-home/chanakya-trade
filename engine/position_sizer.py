@@ -529,6 +529,9 @@ def calculate_position_size(
     actual_risk = shares * stop_distance
     actual_risk_pct = (actual_risk / capital) * 100.0 if capital > 0 else 0.0
 
+    if (is_fno or lot_size > 1) and lots == 1 and actual_risk_pct > max_risk_pct:
+        notes += f" [HIGH_TICKET_RISK: Single lot risk ({actual_risk_pct:.1f}%) exceeds max risk tolerance ({max_risk_pct:.1f}%). Consider cash equity shares or defined-risk spread.]"
+
     return PositionSizeResult(
         symbol=clean_sym,
         shares=shares,

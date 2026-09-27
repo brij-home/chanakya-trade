@@ -118,6 +118,9 @@ def audit_position_lifecycle(
     mode: str = "SWING",
     bars_held: int = 0,
     duration_minutes: float = 0.0,
+    *,
+    is_0dte: bool = False,
+    current_hour: Optional[int] = None,
 ) -> PositionLifecycleReport:
     """
     Audits an open trade's health and dynamically calibrates trailing stops based on the position mode:
@@ -343,6 +346,9 @@ def audit_position_lifecycle(
         elif r_multiple >= 2.0:
             recommended_stop = max(breakeven_price, structure_stop)
             stop_method = "BREAKEVEN" if recommended_stop <= breakeven_price else "STRUCTURE_HL"
+        elif is_0dte and (current_hour is not None and current_hour >= 14) and r_multiple >= 0.8:
+            recommended_stop = max(breakeven_price, initial_stop_loss)
+            stop_method = "0DTE_AFTERNOON_BREAKEVEN_LOCK"
         else:
             recommended_stop = initial_stop_loss
             stop_method = "INITIAL_STOP"
@@ -422,9 +428,14 @@ def audit_position_lifecycle(
             diagnostics.append(
                 f"Trade expanded through 1R milestone (+{r_multiple:.2f}R, +{pnl_pct:.2f}%)."
             )
-            diagnostics.append(
-                "De-risk window active. Hold core position for +2R auto-partial milestone."
-            )
+            if stop_method == "0DTE_AFTERNOON_BREAKEVEN_LOCK":
+                diagnostics.append(
+                    "0DTE Post-14:00 IST Gamma Defense: SL locked to Breakeven (+0.2%) to protect gains from rapid expiry theta decay."
+                )
+            else:
+                diagnostics.append(
+                    "De-risk window active. Hold core position for +2R auto-partial milestone."
+                )
         elif r_multiple >= 0.5:
             health_status = (
                 "HEALTHY_PULLBACK" if ltp < highest_price * 0.98 else "HEALTHY_ACCELERATING"
@@ -434,7 +445,12 @@ def audit_position_lifecycle(
             diagnostics.append(
                 f"Trade progressing favorably (+{r_multiple:.2f}R, +{pnl_pct:.2f}%)."
             )
-            diagnostics.append("Maintain initial stop-loss until 2R target is reached.")
+            if stop_method == "0DTE_AFTERNOON_BREAKEVEN_LOCK":
+                diagnostics.append(
+                    "0DTE Post-14:00 IST Gamma Defense: SL locked to Breakeven (+0.2%) to protect gains from rapid expiry theta decay."
+                )
+            else:
+                diagnostics.append("Maintain initial stop-loss until 2R target is reached.")
         elif r_multiple >= -0.5:
             # Time-Decay Stall Kill-Switch:
             # If position has stalled near entry for 4+ bars or 20+ minutes without expanding past 0.5R,

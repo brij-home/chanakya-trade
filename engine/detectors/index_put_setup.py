@@ -27,7 +27,7 @@ from datetime import datetime, time as dtime
 from typing import Any, Optional
 from zoneinfo import ZoneInfo
 
-from engine.alert_identity import generate_alert_id
+from engine.alert_identity import generate_alert_id, canonical_alert_symbol
 from engine.alert_model import AutoAlert
 from engine.alert_expiry import classify_expiry_type
 
@@ -82,9 +82,7 @@ def detect_index_put_setup(
         ref_time:      Reference datetime for testing or historical audit.
         ignore_time_gate: If True, bypasses 09:25 IST stabilization gate for unit testing.
     """
-    clean_sym = (
-        underlying.upper().replace(".NS", "").replace("NSE:", "").replace("NFO:", "").strip()
-    )
+    clean_sym = canonical_alert_symbol(underlying)
     if clean_sym not in _INDEX_SYMBOLS or spot <= 0:
         return []
     if not chain:
@@ -291,6 +289,7 @@ def detect_index_put_setup(
         and abs((spot - effective_vwap) / effective_vwap * 100.0) < 0.35
         and not is_explosive_momentum
     )
+    is_high_iv_risk = bool(vix_val is not None and vix_val >= 18.0)
 
     # ── Opposing Demand Barrier Check (Headroom Sanity & Bear Trap Prevention) ───
     # If spot is right above Previous Day Low or Day Low, buying PE collides directly
@@ -882,6 +881,12 @@ def detect_index_put_setup(
                 "🛡️ MANDATORY HEDGED SPREAD: India VIX < 13.0 indicates low volatility / mean-reverting regime. "
                 "Naked options suffer heavy theta bleed. Execute Bear Put Spread only."
             )
+        elif is_high_iv_risk:
+            pref_veh = "SPREAD_ONLY"
+            spread_guidance = (
+                f"⚠️ HIGH-VIX REGIME (India VIX {vix_val:.1f} >= 18.0): High IV crush risk on naked options; "
+                "execute defined-risk Bear Put Spread or Deep ITM only."
+            )
         elif is_midday_chop_window:
             pref_veh = "HEDGED_SPREAD"
             spread_guidance = "⚠️ MIDDAY CHOP WINDOW: Execute Bear Put Spread to avoid theta decay."
@@ -943,10 +948,12 @@ def detect_index_put_setup(
         )
         return []
 
-    act_verb = "BEAR PUT SPREAD" if (is_low_vix_range and hedge_plan) else "BUY PE"
+    act_verb = (
+        "BEAR PUT SPREAD" if ((is_low_vix_range or is_high_iv_risk) and hedge_plan) else "BUY PE"
+    )
     target_inst = (
         f"{clean_sym} {int(strike)}/{int(hedge_plan['sell_strike'])} Bear Put Spread"
-        if (is_low_vix_range and hedge_plan)
+        if ((is_low_vix_range or is_high_iv_risk) and hedge_plan)
         else contract_sym
     )
 
@@ -963,7 +970,7 @@ def detect_index_put_setup(
         exchange=opt_exchange,
         direction="BEARISH",
         headline=f"🛡️ [HEDGED SPREAD MANDATE] {headline}"
-        if (is_low_vix_range and hedge_plan)
+        if ((is_low_vix_range or is_high_iv_risk) and hedge_plan)
         else headline,
         summary=f"{summary} | OTE Entry: {entry_range_str} | No Chase > ₹{no_chase_lvl}",
         ltp=opt_ltp or spot,
@@ -1023,12 +1030,26 @@ def detect_index_put_setup(
             "is_institutional_thrust": is_institutional_thrust,
             "thrust_details": thrust_details,
             "breakout_bar_high": thrust_details.get("breakout_bar_high"),
+            "india_vix": vix_val,
+            "is_high_iv_risk": is_high_iv_risk,
         },
         actionable_plan={
             "action": act_verb,
             "contract": target_inst,
             "instrument": target_inst,
-            "instrument_type": "SPREAD" if (is_low_vix_range and hedge_plan) else "OPTION",
+            "instrument_type": "SPREAD"
+            if ((is_low_vix_range or is_high_iv_risk) and hedge_plan)
+            else "OPTION",
+            "preferred_vehicle": hedge_plan.get(
+                "preferred_vehicle", "DEEP_ITM_OR_SPREAD" if is_high_iv_risk else "NAKED_OPTION"
+            )
+            if hedge_plan
+            else ("DEEP_ITM_OR_SPREAD" if is_high_iv_risk else "NAKED_OPTION"),
+            "iv_crush_defense": (
+                f"HIGH_VIX_IV_CRUSH_WARNING: India VIX {vix_val:.1f} >= 18.0. Elevated IV crush risk on OTM/ATM longs. Prefer Deep ITM (Delta >= 0.65), Bear Put Vertical Spreads, or Futures."
+                if is_high_iv_risk
+                else None
+            ),
             "strike": strike,
             "option_type": "PE",
             "expiry_date": exp_date,
@@ -1061,9 +1082,6 @@ def detect_index_put_setup(
                     "time_stop_rule": "If trade active 20m with < +5% gain, exit at CMP/Scratch to avoid theta decay.",
                 }
             ),
-            "preferred_vehicle": hedge_plan.get("preferred_vehicle")
-            if hedge_plan
-            else "NAKED_OPTION_OR_SPREAD",
             "hedge_plan": hedge_plan,
             "velocity_regime": vel_regime,
             "velocity_score": vel_score,

@@ -427,3 +427,30 @@ def test_authoritative_instrument_resolution_in_order_lifecycle():
     )
     assert eq_delivery.exchange == "NSE"
     assert eq_delivery.segment == "EQUITY_DELIVERY"
+
+
+def test_preview_order_intent_ttl_expiration():
+    """
+    Safety Invariant: A preview order intent older than 60 seconds cannot be confirmed.
+    Raises TimeoutError to prevent stale price slippage.
+    """
+    from datetime import datetime, timezone, timedelta
+    from engine.order_lifecycle import preview_order_intent, confirm_order_intent, _get_orders_db
+
+    intent = preview_order_intent(
+        symbol="INFY",
+        side="BUY",
+        quantity=10,
+        price=1800.0,
+    )
+    # Manually backdate created_at in the orders_ledger by 75 seconds
+    stale_dt = (datetime.now(timezone.utc) - timedelta(seconds=75)).isoformat()
+    with _get_orders_db() as conn:
+        conn.execute(
+            "UPDATE orders_ledger SET created_at = ? WHERE order_id = ?",
+            (stale_dt, intent.order_id),
+        )
+        conn.commit()
+
+    with pytest.raises(TimeoutError, match="has expired"):
+        confirm_order_intent(intent.order_id, intent.preview_hash)

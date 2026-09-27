@@ -4269,6 +4269,8 @@ class LifecycleSkillRequest(BaseModel):
     current_ltp: Optional[float] = None
     position_type: str = "LONG"
     exchange: str = "NSE"
+    mode: str = "SWING"
+    is_0dte: bool = False
 
 
 @router.post("/lifecycle")
@@ -4277,7 +4279,11 @@ async def skill_lifecycle(req: LifecycleSkillRequest):
     Audit active trade health, R-multiple payoff, 2R breakeven shift, and Chandelier ATR / Structure Trailing Stops.
     """
     try:
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
         from engine.trade_lifecycle import audit_position_lifecycle
+
+        curr_hour = datetime.now(ZoneInfo("Asia/Kolkata")).hour
 
         report = audit_position_lifecycle(
             symbol=req.symbol,
@@ -4286,6 +4292,9 @@ async def skill_lifecycle(req: LifecycleSkillRequest):
             current_ltp=req.current_ltp,
             position_type=req.position_type,
             exchange=req.exchange,
+            mode=req.mode,
+            is_0dte=req.is_0dte,
+            current_hour=curr_hour,
         )
         return _ok(report.to_dict())
     except Exception as e:

@@ -13,7 +13,7 @@ from zoneinfo import ZoneInfo
 import numpy as np
 import pandas as pd
 
-from engine.alert_identity import generate_alert_id
+from engine.alert_identity import generate_alert_id, canonical_alert_symbol
 from engine.alert_model import AutoAlert
 from engine.option_resolver import resolve_option_contract, is_index_symbol
 
@@ -85,7 +85,7 @@ def _format_squeeze_alert(
     entry_rg: str,
     trigger_lvl: float,
 ) -> AutoAlert:
-    clean_sym = symbol.upper().replace("NSE:", "").replace("BSE:", "").strip()
+    clean_sym = canonical_alert_symbol(symbol)
     is_idx = is_index_symbol(clean_sym)
     opt_plan = (
         resolve_option_contract(
@@ -415,7 +415,7 @@ def detect_squeeze_breakout(
             and not (lower_wick_ratio >= 0.60 and candle_range >= 0.50 * atr20)
         ):
             # Benchmark Regime Gate: In a green/bullish market, shorting equities has < 5% win rate (trap avoidance)
-            clean_sym = symbol.upper().replace(".NS", "").replace("NSE:", "").strip()
+            clean_sym = canonical_alert_symbol(symbol)
             is_idx_sym = clean_sym in (
                 "NIFTY",
                 "BANKNIFTY",
@@ -649,7 +649,7 @@ def detect_squeeze_breakout(
             and (is_test_env or adx_val >= 21.0 or adx_slope > 1.0)
         ):
             # Benchmark Regime Gate: In a green/bullish market, shorting equities has < 5% win rate (trap avoidance)
-            clean_sym = symbol.upper().replace(".NS", "").replace("NSE:", "").strip()
+            clean_sym = canonical_alert_symbol(symbol)
             is_idx_sym = clean_sym in (
                 "NIFTY",
                 "BANKNIFTY",

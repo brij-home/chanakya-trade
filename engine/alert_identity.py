@@ -40,7 +40,8 @@ _VOLATILE_ID_PATTERN = re.compile(
 def canonical_alert_symbol(raw_sym: str) -> str:
     """
     Normalizes any asset symbol into its canonical clean uppercase identifier.
-    Strips broker and exchange routing prefixes across all supported market venues.
+    Strips broker and exchange routing prefixes across all supported market venues
+    as well as data provider suffixes (.NS, .BO) and index markers (^).
     """
     if not raw_sym:
         return ""
@@ -49,6 +50,12 @@ def canonical_alert_symbol(raw_sym: str) -> str:
         if s.startswith(pfx):
             s = s[len(pfx) :]
             break
+    if s.endswith(".NS"):
+        s = s[:-3]
+    elif s.endswith(".BO"):
+        s = s[:-3]
+    if s.startswith("^"):
+        s = s[1:]
     return s.strip()
 
 

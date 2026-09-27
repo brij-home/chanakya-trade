@@ -458,9 +458,11 @@ def _make_broker(choice: str) -> tuple[str, BrokerAPI]:
     elif key == "groww":
         from .groww import GrowwAPI
 
+        from config.constants import get_broker_callback_url
+
         client_id = get_credential("GROWW_CLIENT_ID", "Groww Client ID", secret=False)
         client_secret = get_credential("GROWW_CLIENT_SECRET", "Groww Client Secret", secret=True)
-        redirect_uri = os.environ.get("GROWW_REDIRECT_URL", "http://localhost:8765/groww/callback")
+        redirect_uri = get_broker_callback_url("groww")
         return key, GrowwAPI(
             client_id=client_id,
             client_secret=client_secret,
@@ -487,12 +489,11 @@ def _make_broker(choice: str) -> tuple[str, BrokerAPI]:
 
     elif key == "upstox":
         from .upstox import UpstoxAPI
+        from config.constants import get_broker_callback_url
 
         api_key = get_credential("UPSTOX_API_KEY", "Upstox API Key", secret=False)
         api_secret = get_credential("UPSTOX_API_SECRET", "Upstox API Secret", secret=True)
-        redirect_uri = os.environ.get(
-            "UPSTOX_REDIRECT_URL", "http://localhost:8765/upstox/callback"
-        )
+        redirect_uri = get_broker_callback_url("upstox")
         return key, UpstoxAPI(
             api_key=api_key,
             api_secret=api_secret,
@@ -558,9 +559,7 @@ def _make_broker(choice: str) -> tuple[str, BrokerAPI]:
             totp_secret=get_credential(
                 "MSTOCK_TOTP_SECRET", "m.Stock TOTP Secret", secret=True, required=False
             ),
-            redirect_uri=os.environ.get(
-                "MSTOCK_REDIRECT_URL", "http://103.149.127.88:8765/mstock/callback"
-            ),
+            redirect_uri=get_broker_callback_url("mstock"),
         )
 
     elif key == "kotak":
@@ -591,10 +590,11 @@ def _make_broker(choice: str) -> tuple[str, BrokerAPI]:
 
     else:  # fyers
         from .fyers import FyersAPI
+        from config.constants import get_broker_callback_url
 
         app_id = get_credential("FYERS_APP_ID", "Fyers App ID", secret=False)
         secret_key = get_credential("FYERS_SECRET_KEY", "Fyers Secret Key", secret=True)
-        redirect_uri = os.environ.get("FYERS_REDIRECT_URL", "http://127.0.0.1:8765/fyers/callback")
+        redirect_uri = get_broker_callback_url("fyers")
         return key, FyersAPI(
             app_id=app_id,
             secret_key=secret_key,
@@ -806,32 +806,19 @@ def _do_auth(key: str, broker: BrokerAPI) -> BrokerAPI:
     console.print(f"   URL: [link={login_url}]{login_url}[/link]\n")
 
     # ── Per-broker OAuth config ───────────────────────────────────
+    from config.constants import get_broker_callback_url
+
+    redirect = get_broker_callback_url(key)
+    _path = urlparse(redirect).path
+    _port = urlparse(redirect).port or 8765
+
     if key == "fyers":
-        redirect = os.environ.get("FYERS_REDIRECT_URL", "http://127.0.0.1:8765/fyers/callback")
-        _path = urlparse(redirect).path
-        _port = urlparse(redirect).port or 8765
         _params = ("auth_code",)
     elif key == "zerodha":
-        redirect = "http://localhost:8765/zerodha/callback"
-        _path = "/zerodha/callback"
-        _port = 8765
         _params = ("request_token",)
-    elif key == "groww":
-        redirect = os.environ.get("GROWW_REDIRECT_URL", "http://localhost:8765/groww/callback")
-        _path = urlparse(redirect).path
-        _port = urlparse(redirect).port or 8765
-        _params = ("code",)
     elif key == "mstock":
-        redirect = os.environ.get(
-            "MSTOCK_REDIRECT_URL", "http://103.149.127.88:8765/mstock/callback"
-        )
-        _path = urlparse(redirect).path
-        _port = urlparse(redirect).port or 8765
         _params = ("token", "auth_token", "jwt", "request_token", "code")
-    else:  # upstox
-        redirect = os.environ.get("UPSTOX_REDIRECT_URL", "http://localhost:8765/upstox/callback")
-        _path = urlparse(redirect).path
-        _port = urlparse(redirect).port or 8765
+    else:  # groww, upstox
         _params = ("code",)
 
     # Start local callback listener BEFORE opening the browser so we never

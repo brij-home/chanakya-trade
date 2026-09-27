@@ -94,3 +94,18 @@ class TestPositionSizer:
         assert res.lot_size == 65
         assert res.shares % 65 == 0
         assert res.lots >= 1
+
+    def test_fno_single_lot_risk_advisory(self):
+        # When single lot risk exceeds max_risk_pct, high ticket risk advisory is attached to notes
+        res = calculate_position_size(
+            symbol="NIFTY",
+            entry_price=250.0,
+            stop_loss=200.0,
+            capital=100000.0,
+            max_risk_pct=1.5,
+            sizing_model="fixed_fractional",
+            is_fno=True,
+        )
+        assert res.lots == 1
+        assert "HIGH_TICKET_RISK" in res.notes
+        assert "exceeds max risk tolerance" in res.notes

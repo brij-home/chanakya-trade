@@ -414,13 +414,9 @@ class AutoAlertEngine:
 
     @staticmethod
     def _clean_sym(raw_sym: str) -> str:
-        if not raw_sym:
-            return ""
-        s = str(raw_sym).strip().upper()
-        for pfx in ("NSE:", "BSE:", "MCX:", "NFO:", "CDS:", "CRYPTO:", "BINANCE:"):
-            if s.startswith(pfx):
-                s = s[len(pfx) :]
-        return s.strip()
+        from engine.alert_identity import canonical_alert_symbol
+
+        return canonical_alert_symbol(raw_sym)
 
     @staticmethod
     def _alert_date(al: AutoAlert) -> Optional[datetime.date]:
@@ -6350,8 +6346,8 @@ class AutoAlertEngine:
         if not tick or not isinstance(tick, dict):
             return
 
-        raw_sym = str(tick.get("symbol") or "").upper()
-        clean_sym = raw_sym.replace("CRYPTO:", "").replace("BINANCE:", "").strip()
+        raw_sym = str(tick.get("symbol") or "")
+        clean_sym = self._clean_sym(raw_sym)
         ltp = float(tick.get("ltp") or 0.0)
         if not clean_sym or ltp <= 0:
             return

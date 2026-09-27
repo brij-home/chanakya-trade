@@ -27,7 +27,7 @@ from datetime import datetime, time as dtime
 from typing import Any, Optional
 from zoneinfo import ZoneInfo
 
-from engine.alert_identity import generate_alert_id
+from engine.alert_identity import generate_alert_id, canonical_alert_symbol
 from engine.alert_model import AutoAlert
 from engine.alert_expiry import classify_expiry_type
 
@@ -83,9 +83,7 @@ def detect_index_call_setup(
         ref_time:      Reference datetime for testing or historical audit.
         ignore_time_gate: If True, bypasses 09:25 IST stabilization gate for unit testing.
     """
-    clean_sym = (
-        underlying.upper().replace(".NS", "").replace("NSE:", "").replace("NFO:", "").strip()
-    )
+    clean_sym = canonical_alert_symbol(underlying)
     if clean_sym not in _INDEX_SYMBOLS or spot <= 0:
         return []
     if not chain:
@@ -292,6 +290,7 @@ def detect_index_call_setup(
         and abs((spot - effective_vwap) / effective_vwap * 100.0) < 0.35
         and not is_explosive_momentum
     )
+    is_high_iv_risk = bool(vix_val is not None and vix_val >= 18.0)
 
     # ── Opposing Supply Barrier Check (Headroom Sanity & Bull Trap Prevention) ───
     # If spot is right underneath Previous Day High or Day High, buying CE collides directly
@@ -958,6 +957,12 @@ def detect_index_call_setup(
                 "⚠️ LOW-VIX RANGE-BOUND REGIME (India VIX < 13.0): Naked CE prohibited due to accelerated theta decay; "
                 "execute defined-risk Bull Call Spread only."
             )
+        elif is_high_iv_risk:
+            pref_veh = "SPREAD_ONLY"
+            spread_guidance = (
+                f"⚠️ HIGH-VIX REGIME (India VIX {vix_val:.1f} >= 18.0): High IV crush risk on naked options; "
+                "execute defined-risk Bull Call Spread or Deep ITM only."
+            )
         elif is_midday_chop_window:
             pref_veh = "HEDGED_SPREAD"
             spread_guidance = "⚠️ MIDDAY CHOP WINDOW: Execute Bull Call Spread to avoid theta decay."
@@ -1019,10 +1024,12 @@ def detect_index_call_setup(
         )
         return []
 
-    act_verb = "BULL CALL SPREAD" if (is_low_vix_range and hedge_plan) else "BUY CE"
+    act_verb = (
+        "BULL CALL SPREAD" if ((is_low_vix_range or is_high_iv_risk) and hedge_plan) else "BUY CE"
+    )
     target_inst = (
         f"{clean_sym} {int(strike)}/{int(hedge_plan['sell_strike'])} Bull Call Spread"
-        if (is_low_vix_range and hedge_plan)
+        if ((is_low_vix_range or is_high_iv_risk) and hedge_plan)
         else contract_sym
     )
 
@@ -1039,7 +1046,7 @@ def detect_index_call_setup(
         exchange=opt_exchange,
         direction="BULLISH",
         headline=f"🛡️ [HEDGED SPREAD MANDATE] {headline}"
-        if (is_low_vix_range and hedge_plan)
+        if ((is_low_vix_range or is_high_iv_risk) and hedge_plan)
         else headline,
         summary=f"{summary} | OTE Entry: {entry_range_str} | No Chase > ₹{no_chase_lvl}",
         ltp=opt_ltp or spot,
@@ -1099,15 +1106,26 @@ def detect_index_call_setup(
             "is_institutional_thrust": is_institutional_thrust,
             "thrust_details": thrust_details,
             "breakout_bar_low": thrust_details.get("breakout_bar_low"),
+            "india_vix": vix_val,
+            "is_high_iv_risk": is_high_iv_risk,
         },
         actionable_plan={
             "action": act_verb,
             "contract": contract_sym,
             "instrument": target_inst,
-            "instrument_type": "OPTION_SPREAD" if (is_low_vix_range and hedge_plan) else "OPTION",
-            "preferred_vehicle": hedge_plan.get("preferred_vehicle")
+            "instrument_type": "OPTION_SPREAD"
+            if ((is_low_vix_range or is_high_iv_risk) and hedge_plan)
+            else "OPTION",
+            "preferred_vehicle": hedge_plan.get(
+                "preferred_vehicle", "DEEP_ITM_OR_SPREAD" if is_high_iv_risk else "NAKED_OPTION"
+            )
             if hedge_plan
-            else "NAKED_OPTION",
+            else ("DEEP_ITM_OR_SPREAD" if is_high_iv_risk else "NAKED_OPTION"),
+            "iv_crush_defense": (
+                f"HIGH_VIX_IV_CRUSH_WARNING: India VIX {vix_val:.1f} >= 18.0. Elevated IV crush risk on OTM/ATM longs. Prefer Deep ITM (Delta >= 0.65), Bull Call Vertical Spreads, or Futures."
+                if is_high_iv_risk
+                else None
+            ),
             "strike": strike,
             "option_type": "CE",
             "expiry_date": exp_date,

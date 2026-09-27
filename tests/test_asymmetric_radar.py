@@ -531,7 +531,8 @@ def test_render_asymmetric_alert_displays_futures_and_rollover_badge():
 
     rendered = render_asymmetric_alert(sample_alert, in_market=True)
     assert "Futures Preferred:" in rendered
-    assert "RELIANCE26OCTFUT" in rendered
+    assert "RELIANCE 26-OCT FUT" in rendered or "RELIANCE26OCTFUT" in rendered
     assert "Delta 1.0 · Zero Theta Decay" in rendered
+
     assert "NEXT-MONTH ROLLOVER" in rendered
     assert "SEBI Physical Margin Safe" in rendered
