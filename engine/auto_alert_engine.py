@@ -2337,24 +2337,33 @@ class AutoAlertEngine:
                 c_tag = getattr(alert, "contract_symbol", "") or alert.symbol
 
                 if is_runner_exit:
+                    # Fix 1: TERMINAL_EXIT is the shared canonical key covering BOTH
+                    # RUNNER_EXIT and INVALIDATED paths — prevents cross-path dual dispatch
+                    m_key_terminal = f"{aid}:TERMINAL_EXIT"
                     m_key1 = f"{alert.symbol}:{alert.alert_type}:RUNNER_EXIT"
                     m_key2 = f"{c_tag}:{aid}:RUNNER_EXIT"
                     if (
-                        m_key1 in self._dispatched_milestones
+                        m_key_terminal in self._dispatched_milestones
+                        or m_key1 in self._dispatched_milestones
                         or m_key2 in self._dispatched_milestones
                     ):
                         return
+                    self._dispatched_milestones.add(m_key_terminal)
                     self._dispatched_milestones.add(m_key1)
                     self._dispatched_milestones.add(m_key2)
 
                 elif alert.is_invalidated or alert.stage == "INVALIDATED":
+                    # Fix 1: Check TERMINAL_EXIT dedup key first to block if RUNNER_EXIT already fired
+                    m_key_terminal = f"{aid}:TERMINAL_EXIT"
                     m_key1 = f"{alert.symbol}:{alert.alert_type}:INVALIDATED"
                     m_key2 = f"{c_tag}:{aid}:INVALIDATED"
                     if (
-                        m_key1 in self._dispatched_milestones
+                        m_key_terminal in self._dispatched_milestones
+                        or m_key1 in self._dispatched_milestones
                         or m_key2 in self._dispatched_milestones
                     ):
                         return
+                    self._dispatched_milestones.add(m_key_terminal)
                     self._dispatched_milestones.add(m_key1)
                     self._dispatched_milestones.add(m_key2)
 
@@ -2482,10 +2491,12 @@ class AutoAlertEngine:
                     self._dispatched_milestones.add(m_key2)
 
             if is_milestone:
-                # Strictly sequential Telegram update tracking without skips:
-                # Initial alert = NEW CALL (not an update).
-                # Subsequent milestone alerts = UPDATE #1, UPDATE #2, UPDATE #3...
-                next_tg_up = getattr(alert, "telegram_update_count", 0) + 1
+                # Fix 5: Increment and persist telegram_update_count ATOMICALLY under lock
+                # before rendering, so concurrent dispatches cannot both read count=0 and
+                # both produce UPDATE #1. This is the "compare-and-increment before render" pattern.
+                with self._lock:
+                    next_tg_up = getattr(alert, "telegram_update_count", 0) + 1
+                    alert.telegram_update_count = next_tg_up
                 alert.update_number = next_tg_up
 
             from bot.alert_templates import render_auto_alert
@@ -6360,17 +6371,41 @@ class AutoAlertEngine:
                 a
                 for a in self._alerts
                 if not a.is_invalidated
-                and a.stage not in ("INVALIDATED", "COMPLETED", "TARGET_ACHIEVED")
+                and not a.is_archived  # Fix 3: exclude already-archived alerts
+                and a.stage
+                not in (
+                    "INVALIDATED",
+                    "COMPLETED",
+                    "TARGET_ACHIEVED",
+                    "RUNNER_EXIT",  # Fix 3: exclude already-terminated runner exits
+                )
                 and (a.exchange or "").upper() in ("CRYPTO", "BINANCE")
                 and a.symbol.upper().replace("CRYPTO:", "").strip()
                 in (clean_sym, f"{clean_sym}USDT", clean_sym.replace("USDT", ""))
             ]
 
         for alert in active_crypto_alerts:
-            # 1a. Instant Invalidation
+            # 1a. Instant Invalidation — respects trailing-exit routing (Fix 1 & 2)
             reason = evaluate_alert_invalidation(alert, current_ltp=ltp)
             if reason:
                 now_iso = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
+
+                # Fix 2: Apply identical is_trailing_exit routing as the batch loop
+                has_hit_target = bool(
+                    "T1_ACHIEVED" in (getattr(alert, "achieved_milestones", []) or [])
+                    or getattr(alert, "target_status", "")
+                    in ("T1_ACHIEVED", "T2_ACHIEVED", "FINAL_TARGET", "TARGET_ACHIEVED")
+                    or getattr(alert, "stage", "")
+                    in ("TARGET_1", "T1_ACHIEVED", "TARGET_2", "FINAL_TARGET", "TARGET_ACHIEVED")
+                )
+                is_trailing_exit = (
+                    has_hit_target
+                    or "trailing runner stop" in reason.lower()
+                    or "trailing stop" in reason.lower()
+                    or "profit secured" in reason.lower()
+                    or "breakeven" in reason.lower()
+                )
+
                 pm_dict = None
                 try:
                     from engine.learning_engine import pattern_learning_engine
@@ -6382,25 +6417,71 @@ class AutoAlertEngine:
                 except Exception as e:
                     logger.debug(f"[AutoAlertEngine] Post-mortem error for {alert.symbol}: {e}")
 
+                is_test_env = (alert.environment == "TEST") or (not alert.is_live)
+                tag = "[TEST]" if is_test_env else "[REAL/LIVE]"
+
                 with self._lock:
-                    alert.is_invalidated = True
-                    alert.invalidation_reason = reason
-                    alert.invalidated_at = now_iso
-                    alert.stage = "INVALIDATED"
+                    # Fix 4: Set full terminal state (identical to batch loop)
+                    alert.is_active = False
+                    alert.should_trail = False
                     alert.is_archived = True
                     alert.archived_at = now_iso
                     alert.archive_reason = reason
                     if pm_dict:
                         alert.metrics["post_mortem"] = pm_dict
-                    is_test = (alert.environment == "TEST") or (not alert.is_live)
-                    tag = "[TEST]" if is_test else "[REAL/LIVE]"
-                    alert.headline = f"⚠️ {tag} VIEW INVALIDATED: {alert.symbol} {alert.alert_type.replace('_', ' ')}"
-                    alert.summary = reason
+                    if alert.achieved_milestones is None:
+                        alert.achieved_milestones = []
+
+                    if is_trailing_exit:
+                        # Route to RUNNER_EXIT — same as batch loop
+                        alert.is_invalidated = False
+                        alert.stage = "RUNNER_EXIT"
+                        alert.target_status = "RUNNER_CLOSED"
+                        alert.trailing_decision = "RUNNER_CLOSED"
+                        if "RUNNER_EXIT" not in alert.achieved_milestones:
+                            alert.achieved_milestones.append("RUNNER_EXIT")
+                        # Calculate final PnL at runner exit
+                        entry_p = (
+                            getattr(alert, "entry_price", None)
+                            or getattr(alert, "option_premium", None)
+                            or getattr(alert, "trigger_level", None)
+                            or 0.0
+                        )
+                        if entry_p and entry_p > 0 and ltp and ltp > 0:
+                            is_bull = alert.direction in ("BULLISH", "LONG", "BUY")
+                            pts = round(ltp - entry_p if is_bull else entry_p - ltp, 2)
+                            pct = round((pts / entry_p) * 100.0, 1)
+                            if alert.pnl_pct is None or alert.pnl_pct == 0.0:
+                                alert.pnl_pct = pct
+                            alert.locked_profit_pts = max(0.0, pts)
+                            alert.locked_profit_pct = max(0.0, pct)
+                        inst_label = (
+                            alert.contract_symbol
+                            or f"{alert.symbol} {getattr(alert, 'strike', '') or ''} {getattr(alert, 'option_type', '') or ''}".strip()
+                        )
+                        alert.headline = f"🏁 {tag} RUNNER CLOSED (PROFIT SECURED): {inst_label}"
+                        alert.summary = reason
+                        logger.info(
+                            f"[AutoAlertEngine] ⚡ Sub-Second Runner Exit for {alert.symbol}: {reason}"
+                        )
+                    else:
+                        # Route to INVALIDATED
+                        alert.is_invalidated = True
+                        alert.invalidation_reason = reason
+                        alert.invalidated_at = now_iso
+                        alert.stage = "INVALIDATED"
+                        alert.target_status = "INVALIDATED"
+                        alert.trailing_decision = "INVALIDATED"
+                        if "INVALIDATED" not in alert.achieved_milestones:
+                            alert.achieved_milestones.append("INVALIDATED")
+                        alert.headline = f"⚠️ {tag} VIEW INVALIDATED: {alert.symbol} {alert.alert_type.replace('_', ' ')}"
+                        alert.summary = reason
+                        logger.warning(
+                            f"[AutoAlertEngine] ⚡ Sub-Second Live Invalidation for {alert.symbol}: {reason}"
+                        )
                     self._save()
+
                 self._dispatch(alert)
-                logger.warning(
-                    f"[AutoAlertEngine] ⚡ Sub-Second Live Invalidation for {alert.symbol}: {reason}"
-                )
                 continue
 
             # 1b. Instant Target 1 / Target 2 / Trailing Milestone
