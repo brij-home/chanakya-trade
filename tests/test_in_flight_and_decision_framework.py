@@ -684,7 +684,7 @@ class TestInFlightAlertTemplates:
         assert "RELIANCE (SQUEEZE BREAKOUT)" in msg
         assert "₹2,825.00" in msg
         assert "DANGER ZONE: 87% risk budget consumed" in msg
-        assert "SCRATCH_OR_TIGHTEN_STOP" in msg
+        assert "SCRATCH OR TIGHTEN STOP" in msg
 
     def test_render_theta_stagnation_in_flight_warning_alert(self):
         """Verifies Telegram formatting for Theta Stagnation in-flight warning alert."""
@@ -716,7 +716,7 @@ class TestInFlightAlertTemplates:
         assert "THETA DECAY WARNING" in msg
         assert "NIFTY 24500 CE" in msg
         assert "THETA STAGNATION: 18m elapsed" in msg
-        assert "EXIT_STAGNANT_OPTION" in msg
+        assert "EXIT STAGNANT OPTION" in msg
 
     def test_render_vwap_band_in_flight_warning_alert(self):
         """Verifies Telegram formatting for VWAP Band Breakdown warning alert."""
@@ -746,7 +746,7 @@ class TestInFlightAlertTemplates:
         assert "TRENT (SQUEEZE BREAKOUT)" in msg
         assert "₹2,815.00" in msg
         assert "broke below -1.0σ band" in msg
-        assert "SCRATCH_OR_TIGHTEN_TO_VWAP" in msg
+        assert "SCRATCH OR TIGHTEN TO VWAP" in msg
 
     def test_render_0dte_cliff_in_flight_warning_alert(self):
         """Verifies Telegram formatting for 0DTE Afternoon Theta Cliff warning alert."""
@@ -779,7 +779,7 @@ class TestInFlightAlertTemplates:
         assert "0DTE THETA CLIFF WARNING" in msg
         assert "NIFTY 24200 CE" in msg
         assert "0DTE_AFTERNOON_THETA_CLIFF" in msg
-        assert "EXIT_0DTE_OPTION_IMMEDIATELY" in msg
+        assert "EXIT 0DTE OPTION IMMEDIATELY" in msg
 
     def test_create_test_in_flight_warning_alert_engine(self, mock_engine):
         """Engine test helper create_test_in_flight_warning_alert generates valid test alerts for all variants."""

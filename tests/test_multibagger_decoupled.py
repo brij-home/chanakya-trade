@@ -132,7 +132,7 @@ class TestDualModeTradeLifecycle:
         assert report.position_mode == "SWING"
         assert report.current_r_multiple == pytest.approx(2.0, rel=1e-2)
         assert report.recommended_action == "SCALE_OUT_50_PCT"
-        assert "Lock in 33-50% partial profit" in report.diagnostic_bullet_points[1]
+        assert "Auto-partial 50% profit booked" in report.diagnostic_bullet_points[1]
 
     def test_stage_2_compounder_mode_forbids_2r_profit_taking(self):
         """Under STAGE_2_COMPOUNDER mode, reaching +2R must NOT scale out. Action is HOLD_COMPOUNDER."""

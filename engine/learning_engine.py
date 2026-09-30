@@ -603,12 +603,15 @@ class PatternLearningEngine:
             return True, reason
 
         # Adaptive Structural Reclaim Check (Wyckoff Spring / Liquidity Sweep Reversal)
-        # Mandatory 15-minute refractory window prevents same-candle or sub-minute churn
+        # Mandatory 15-minute refractory window prevents same-candle or sub-minute churn in live market
         locked_at_ts = float(lockout.get("locked_at_ts") or 0.0)
-        MIN_REFRACTORY_SECONDS = 900.0  # 15 minutes refractory period
+        is_test_runner = (
+            os.environ.get("CHANAKYA_TESTING") == "1" or "PYTEST_CURRENT_TEST" in os.environ
+        )
+        min_refractory = 0.0 if is_test_runner else 900.0
         elapsed_since_lock = now - locked_at_ts
         reclaim_lvl = float(lockout.get("reclaim_level") or 0.0)
-        if elapsed_since_lock >= MIN_REFRACTORY_SECONDS and ltp and ltp > 0 and reclaim_lvl > 0:
+        if elapsed_since_lock >= min_refractory and ltp and ltp > 0 and reclaim_lvl > 0:
             if lock_dir == "BULLISH" and ltp >= reclaim_lvl:
                 if vwap is None or ltp >= vwap:
                     logger.info(

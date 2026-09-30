@@ -3360,10 +3360,7 @@ class AutoAlertEngine:
                     )
                     return
                 # Suppress non-actionable chatter milestones from Telegram
-                if (
-                    alert.stage in ("IN_FLIGHT_WARNING", "SPREAD_SHORT_STRIKE_TOUCH")
-                    or getattr(alert, "milestone_type", None) == "IN_FLIGHT_WARNING"
-                ):
+                if alert.stage in ("SPREAD_SHORT_STRIKE_TOUCH",):
                     _suppress_tg(f"Milestone {alert.stage} held in Terminal UI only")
                     return
 

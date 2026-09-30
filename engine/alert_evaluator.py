@@ -164,7 +164,15 @@ def evaluate_alert_invalidation(
                     or alert.ltp
                     or 0.0
                 )
-                if alert.stop_loss and ref_entry > 0 and alert.stop_loss >= ref_entry:
+                has_ratcheted_sl = (
+                    getattr(alert, "target_status", "") in ("T1_ACHIEVED", "T2_ACHIEVED", "RUNNER_CLOSED", "FINAL_TARGET", "TARGET_ACHIEVED")
+                    or "T1_ACHIEVED" in (getattr(alert, "achieved_milestones", None) or [])
+                    or getattr(alert, "stage", "") in ("TARGET_1", "T1_ACHIEVED", "TARGET_2", "RUNNER_EXIT", "FINAL_TARGET", "TARGET_ACHIEVED")
+                    or getattr(alert, "should_trail", False)
+                    or getattr(alert, "trailing_stop", None) is not None
+                    or getattr(alert, "initial_stop_loss", None) is not None
+                )
+                if not has_ratcheted_sl and alert.stop_loss and ref_entry > 0 and alert.stop_loss >= ref_entry:
                     logger.warning(
                         f"[AlertEvaluator] Inverted stop-loss detected for {alert.symbol} ({alert.alert_id}): "
                         f"SL ₹{alert.stop_loss:.2f} >= Entry ₹{ref_entry:.2f}. Suppressing invalidation."

@@ -57,7 +57,7 @@ def test_evaluate_invalidation_distinguishes_trailing_stop_from_initial_sl():
     assert "Trailing runner stop triggered" in reason
     assert "breached ratcheted stop ₹18.8" in reason
     assert "original initial SL was ₹13.5" in reason
-    assert "Target 1 profit secured" in reason
+    assert "T1 profit banked earlier" in reason
 
 
 def test_post_t1_exit_becomes_runner_exit_not_invalidated(tmp_path, monkeypatch):
@@ -149,7 +149,7 @@ def test_monotonic_update_number_never_resets():
     assert ms_data.update_number == 4
 
     rendered = render_auto_alert(alert)
-    assert "UPDATE #4 · RUNNER CLOSED (PROFIT SECURED)" in rendered
+    assert "UPDATE #4 · RUNNER CLOSED" in rendered
     assert "VIEW INVALIDATED" not in rendered
     assert "Target 1 was achieved. Initial SL was never breached." in rendered
 

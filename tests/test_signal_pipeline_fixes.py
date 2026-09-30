@@ -31,7 +31,7 @@ def test_option_entry_range_not_mangled_by_underlying_price(tmp_path, monkeypatc
     # Commodity Momentum alert where underlying is CRUDEOIL at ~9196, SL is 9306.54
     # But the actionable plan is for an ATM Put Option trading at ₹347.02
     alert = AutoAlert(
-        alert_id="comm-crudeoil-test",
+        alert_id="test-comm-crudeoil",
         alert_type="COMMODITY_MOMENTUM",
         stage="IGNITED",
         symbol="CRUDEOIL",
@@ -45,6 +45,8 @@ def test_option_entry_range_not_mangled_by_underlying_price(tmp_path, monkeypatc
         stop_loss=9306.54,
         option_premium=347.02,
         created_at="2026-09-23 11:00:00",
+        environment="TEST",
+        is_live=False,
         actionable_plan={
             "action": "BUY_PE",
             "segment": "COMMODITY",

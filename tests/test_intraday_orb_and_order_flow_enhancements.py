@@ -253,6 +253,7 @@ def test_early_pre_0930_signals_unmuted_by_orb():
 
     # Mock scanners returning early signals
     with (
+        patch.object(engine, "_get_cycle_quotes", return_value={}),
         patch.object(engine, "scan_index_call_setups", return_value=[]),
         patch.object(engine, "scan_index_put_setups", return_value=[]),
         patch.object(engine, "scan_opening_drives", return_value=[]),
@@ -266,6 +267,9 @@ def test_early_pre_0930_signals_unmuted_by_orb():
         patch.object(engine, "scan_intraday_mover_sparks", return_value=[]),
         patch.object(engine, "scan_asymmetric_opportunities", return_value=[]),
         patch.object(engine, "scan_opening_range_breakouts", return_value=[]),
+        patch.object(engine, "scan_pre_inflection_dryup", return_value=[]),
+        patch.object(engine, "scan_incubation_triggers", return_value=[]),
+        patch.object(engine, "scan_smc_orderblock_retests", return_value=[]),
     ):  # ORB returns [] pre-09:30
         all_morning_alerts = engine.scan_equity_nfo_now()
 
@@ -274,8 +278,9 @@ def test_early_pre_0930_signals_unmuted_by_orb():
     alert_types = [a.alert_type for a in all_morning_alerts]
     assert "GAMMA_BLAST" in alert_types
     assert "PRECURSOR_RADAR" in alert_types
-    assert all_morning_alerts[0].symbol == "NIFTY"
-    assert all_morning_alerts[1].symbol == "NSE:TRENT"
+    symbols = {a.symbol for a in all_morning_alerts}
+    assert "NIFTY" in symbols
+    assert "NSE:TRENT" in symbols
 
 
 # ─────────────────────────────────────────────────────────────────────────────

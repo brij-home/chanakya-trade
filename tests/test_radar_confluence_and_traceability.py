@@ -157,7 +157,7 @@ def test_deterministic_asymmetric_alert_id(monkeypatch):
     found1 = engine.scan_asymmetric_opportunities()
     assert len(found1) == 1
     first_id = found1[0].alert_id
-    assert first_id.startswith("asym-coforge-pocket-pivot-")
+    assert first_id.startswith("aa-asym-pocket-pivot-coforge-")
     assert len(engine._alerts) == 1
 
     # Cycle 2 (next 45s tick) - should be completely deduplicated, NOT inserted again!
