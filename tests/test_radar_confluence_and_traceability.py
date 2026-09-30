@@ -34,8 +34,8 @@ def test_cross_radar_confluence_aggregation():
         target_level=7800.0,
         stop_loss=7320.0,
         confidence=88,
-        is_live=True,
-        environment="LIVE",
+        is_live=False,
+        environment="TEST",
     )
 
     res1 = engine.record_alert(alert1)
@@ -59,8 +59,8 @@ def test_cross_radar_confluence_aggregation():
         target_level=7850.0,
         stop_loss=7320.0,
         confidence=90,
-        is_live=True,
-        environment="LIVE",
+        is_live=False,
+        environment="TEST",
     )
 
     # Calling record_alert with the second detector

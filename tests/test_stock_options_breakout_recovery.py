@@ -9,7 +9,7 @@ Verifies fixes for high-momentum stock options (SONACOMS, MCX, etc.):
    prioritized ahead of idle equities.
 """
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from unittest.mock import patch
 import pandas as pd
 from config.constants import IST
@@ -25,13 +25,15 @@ def test_mcx_gamma_blast_low_oi_change_recovery():
     is detected by gamma_blast even if absolute OI change is small (e.g. 700 shares / 3 contracts).
     """
     spot = 3374.0
+    now_dt = datetime.now(IST)
+    exp_dt = (now_dt + timedelta(days=14)).strftime("%Y-%m-%d")
     contracts = [
         OptionsContract(
             symbol="MCX26SEP3350CE",
             underlying="MCX",
             strike=3350.0,
             option_type="CE",
-            expiry="2026-09-24",
+            expiry=exp_dt,
             last_price=48.5,
             volume=1160000,
             oi=489000,
@@ -45,7 +47,7 @@ def test_mcx_gamma_blast_low_oi_change_recovery():
             underlying="MCX",
             strike=3350.0,
             option_type="PE",
-            expiry="2026-09-24",
+            expiry=exp_dt,
             last_price=12.0,
             volume=150000,
             oi=250000,
@@ -56,8 +58,7 @@ def test_mcx_gamma_blast_low_oi_change_recovery():
         ),
     ]
 
-    ref_dt = datetime(2026, 9, 10, 10, 0, tzinfo=IST)
-    alerts = detect_gamma_blast("MCX", spot, contracts, now_dt=ref_dt)
+    alerts = detect_gamma_blast("MCX", spot, contracts, now_dt=now_dt)
 
     assert len(alerts) >= 1
     mcx_ce = next((a for a in alerts if a.strike == 3350.0 and a.option_type == "CE"), None)
@@ -71,13 +72,15 @@ def test_sonacoms_staged_scaleout_scrutiny_approval():
     and T2 offering expansion (R:R >= 1.5, blended R:R >= req_rr) pass Tier-1 scrutiny.
     """
     spot = 835.0
+    now_dt = datetime.now(IST)
+    exp_dt = (now_dt + timedelta(days=14)).strftime("%Y-%m-%d")
     contracts = [
         OptionsContract(
             symbol="SONACOMS26SEP840CE",
             underlying="SONACOMS",
             strike=840.0,
             option_type="CE",
-            expiry="2026-09-24",
+            expiry=exp_dt,
             last_price=7.80,
             volume=1040000,
             oi=830000,
@@ -91,7 +94,7 @@ def test_sonacoms_staged_scaleout_scrutiny_approval():
             underlying="SONACOMS",
             strike=840.0,
             option_type="PE",
-            expiry="2026-09-24",
+            expiry=exp_dt,
             last_price=15.0,
             volume=80000,
             oi=400000,
@@ -102,8 +105,7 @@ def test_sonacoms_staged_scaleout_scrutiny_approval():
         ),
     ]
 
-    ref_dt = datetime(2026, 9, 10, 10, 0, tzinfo=IST)
-    alerts = detect_gamma_blast("SONACOMS", spot, contracts, now_dt=ref_dt)
+    alerts = detect_gamma_blast("SONACOMS", spot, contracts, now_dt=now_dt)
 
     assert len(alerts) >= 1
     alert = alerts[0]
@@ -119,13 +121,14 @@ def test_options_momentum_explosive_volume_bypasses_rsi_divergence():
     are not falsely suppressed by minor 5-minute RSI divergence.
     """
     spot = 3374.0
+    exp_dt = (datetime.now(IST) + timedelta(days=14)).strftime("%Y-%m-%d")
     contracts = [
         OptionsContract(
             symbol="MCX26SEP3350CE",
             underlying="MCX",
             strike=3350.0,
             option_type="CE",
-            expiry="2026-09-24",
+            expiry=exp_dt,
             last_price=48.5,
             volume=1160000,
             oi=489000,

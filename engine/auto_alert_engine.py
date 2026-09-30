@@ -1565,7 +1565,7 @@ class AutoAlertEngine:
                 # If a different detector is already tracking an active trade for this stock in the same direction today,
                 # suppress new initial alerts from other detectors (e.g. don't fire GAMMA_BLAST if
                 # OPTIONS_MOMENTUM or INTRADAY_SPARK is already active).
-                if not is_sim and alert.stage in ("IGNITED", "EARLY_WARNING"):
+                if alert.stage in ("IGNITED", "EARLY_WARNING"):
                     active_diff_detector = next(
                         (
                             a
