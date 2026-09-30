@@ -227,7 +227,13 @@ def evaluate_hbcm(
     neutral_symbols: list[str] = []
 
     for sym in symbols:
-        q = quotes_map.get(sym) or quotes_map.get(f"NSE:{sym}")
+        alias_sym = "INFOSYS" if sym == "INFY" else ("INFY" if sym == "INFOSYS" else None)
+        q = (
+            quotes_map.get(sym)
+            or quotes_map.get(f"NSE:{sym}")
+            or (quotes_map.get(alias_sym) if alias_sym else None)
+            or (quotes_map.get(f"NSE:{alias_sym}") if alias_sym else None)
+        )
         w_pct = weights_map.get(sym, 0.0)
 
         ltp = 0.0
@@ -238,13 +244,29 @@ def evaluate_hbcm(
             vwap = float(getattr(q, "vwap", 0.0) or 0.0)
             chg_pct = float(getattr(q, "change_pct", 0.0) or getattr(q, "pchange", 0.0) or 0.0)
 
+        # In production, mStock REST and yfinance don't include VWAP in quote; resolve computed VWAP
+        if vwap <= 0 and ltp > 0 and not is_testing:
+            try:
+                from market.quotes import get_computed_vwap
+
+                c_vwap = get_computed_vwap(sym) or (
+                    get_computed_vwap(alias_sym) if alias_sym else None
+                )
+                if c_vwap and c_vwap > 0:
+                    vwap = float(c_vwap)
+            except Exception:
+                pass
+
         # 5m candle close vs open
         c_5m = None
         o_5m = None
-        if mock_5m_candles and sym in mock_5m_candles:
-            c_data = mock_5m_candles[sym]
-            c_5m = c_data.get("close")
-            o_5m = c_data.get("open")
+        if mock_5m_candles:
+            c_data = mock_5m_candles.get(sym) or (
+                mock_5m_candles.get(alias_sym) if alias_sym else None
+            )
+            if c_data:
+                c_5m = c_data.get("close")
+                o_5m = c_data.get("open")
         elif not is_testing and ltp > 0:
             try:
                 from market.history import get_ohlcv
@@ -268,19 +290,29 @@ def evaluate_hbcm(
             is_bull = False
             is_bear = False
         else:
-            # Directional scoring
-            is_above_vwap = (ltp >= vwap) if vwap > 0 else (chg_pct >= 0.0)
-            is_below_vwap = (ltp <= vwap) if vwap > 0 else (chg_pct <= 0.0)
+            # Directional scoring with absolute VWAP boundary
+            is_above_vwap = (ltp > vwap * 1.0005) if vwap > 0 else (chg_pct > 0.05)
+            is_below_vwap = (ltp < vwap * 0.9995) if vwap > 0 else (chg_pct < -0.05)
 
-            is_5m_green = (
-                (c_5m >= o_5m) if (c_5m is not None and o_5m is not None) else (chg_pct >= -0.10)
+            candle_is_strongly_red = (
+                (c_5m < o_5m * 0.9985)
+                if (c_5m is not None and o_5m is not None)
+                else (chg_pct <= -0.20)
             )
-            is_5m_red = (
-                (c_5m <= o_5m) if (c_5m is not None and o_5m is not None) else (chg_pct <= 0.10)
+            candle_is_strongly_green = (
+                (c_5m > o_5m * 1.0015)
+                if (c_5m is not None and o_5m is not None)
+                else (chg_pct >= 0.20)
             )
 
-            is_bull = is_above_vwap and is_5m_green and (chg_pct > -0.25)
-            is_bear = is_below_vwap and is_5m_red and (chg_pct < 0.25)
+            is_deeply_bearish = (vwap > 0 and (vwap - ltp) / vwap >= 0.006) or chg_pct <= -1.0
+            is_deeply_bullish = (vwap > 0 and (ltp - vwap) / vwap >= 0.006) or chg_pct >= 1.0
+
+            # A constituent can only be BEARISH if trading below VWAP (and not surging green, unless deeply bearish)
+            is_bear = is_below_vwap and (not candle_is_strongly_green or is_deeply_bearish)
+
+            # A constituent can only be BULLISH if trading above VWAP (and not dumping red, unless deeply bullish)
+            is_bull = is_above_vwap and (not candle_is_strongly_red or is_deeply_bullish)
 
             if is_bull and not is_bear:
                 posture = "BULLISH"

@@ -573,7 +573,7 @@ def calculate_strike_roll_recommendation(
     if not cur_strike or not opt_type:
         return None
 
-    # Underlying spot price reference
+    # Underlying spot price reference — cascade through all available sources
     spot = getattr(alert, "underlying_spot", None)
     if not spot or spot <= 0:
         metrics = getattr(alert, "metrics", {}) or {}
@@ -581,12 +581,21 @@ def calculate_strike_roll_recommendation(
     if not spot or spot <= 0:
         plan = getattr(alert, "actionable_plan", {}) or {}
         spot = plan.get("spot") or plan.get("underlying_spot")
-    if not spot or spot <= 0 and current_ltp > 0:
-        # Approximate spot from deep ITM intrinsic value if feed tick was omitted
-        if "PE" in str(opt_type).upper():
-            spot = max(1.0, cur_strike - current_ltp)
-        else:
-            spot = cur_strike + current_ltp
+    if (
+        not spot or spot <= 0
+    ) and current_ltp > 0:  # FIX: explicit parenthesis — operator precedence guard
+        # Intrinsic-value approximation: only safe when the option premium is extremely large
+        # (i.e., deep ITM confirmed by premium > 15% of strike).  For OTM options with small
+        # premiums the approximation inverts spot and makes OTM appear deep ITM → wrong roll.
+        premium_pct = current_ltp / cur_strike if cur_strike > 0 else 0.0
+        if (
+            premium_pct >= 0.10
+        ):  # Only approximate spot when premium >= 10% of strike (deep ITM proxy)
+            if "PE" in str(opt_type).upper():
+                spot = max(1.0, cur_strike - current_ltp)
+            else:
+                spot = cur_strike + current_ltp
+        # else: leave spot as None / 0 → will return None below (no spurious roll for OTM options)
     if not spot or spot <= 0:
         return None
 
@@ -615,6 +624,15 @@ def calculate_strike_roll_recommendation(
         else:
             step = 2.5
 
+    # An institutional strike roll is strictly recommended to manage deep ITM exposure
+    # (avoiding delta ~ 1.0, wide spreads, and locked intrinsic capital).
+    # If the option is NOT ITM (e.g. Call when Spot <= Strike, or Put when Spot >= Strike),
+    # rolling to ATM does NOT lock ITM gains and is mathematically invalid.
+    is_pe = "PE" in str(opt_type).upper()
+    is_itm = (cur_strike > spot) if is_pe else (cur_strike < spot)
+    if not is_itm:
+        return None
+
     # Compute fresh ATM strike
     atm_strike = round(spot / step) * step
 
@@ -629,8 +647,8 @@ def calculate_strike_roll_recommendation(
         action_type = "ROLL_DOWN"
         action_desc = "down"
     else:
-        action_type = "ROLL_UP" if is_bullish else "ROLL_DOWN"
-        action_desc = "up" if is_bullish else "down"
+        action_type = "ROLL_DOWN" if is_pe else "ROLL_UP"
+        action_desc = "down" if is_pe else "up"
 
     roll_target_strike = atm_strike
 
@@ -642,8 +660,6 @@ def calculate_strike_roll_recommendation(
         new_contract = cur_contract.replace(str(int(cur_strike)), str(int(roll_target_strike)))
     else:
         new_contract = f"{sym} {int(roll_target_strike)} {opt_type}"
-
-    action_desc = "up" if is_bullish else "down"
     return {
         "action": action_type,
         "current_strike": cur_strike,

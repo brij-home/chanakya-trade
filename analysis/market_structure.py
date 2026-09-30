@@ -131,6 +131,11 @@ class MarketStructureReport:
     summary: str = ""
     actionable_trade_idea: str = ""
 
+    @property
+    def order_blocks(self) -> list[OrderBlock]:
+        """Convenience property returning all active institutional order blocks."""
+        return (self.active_demand_zones or []) + (self.active_supply_zones or [])
+
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 

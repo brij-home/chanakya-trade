@@ -280,6 +280,9 @@ def test_index_call_setup_generates_hedge_plan():
     assert len(hedge["legs"]) == 2
     assert hedge["legs"][0]["side"] == "BUY" and hedge["legs"][0]["option_type"] == "CE"
     assert hedge["legs"][1]["side"] == "SELL" and hedge["legs"][1]["option_type"] == "CE"
+    assert hedge["long_delta"] > 0
+    assert hedge["short_delta"] >= 0
+    assert hedge["net_spread_delta"] > 0
     assert "preferred_vehicle" in alert.actionable_plan
 
 
@@ -323,6 +326,9 @@ def test_index_put_setup_generates_hedge_plan():
     assert len(hedge["legs"]) == 2
     assert hedge["legs"][0]["side"] == "BUY" and hedge["legs"][0]["option_type"] == "PE"
     assert hedge["legs"][1]["side"] == "SELL" and hedge["legs"][1]["option_type"] == "PE"
+    assert hedge["long_delta"] < 0
+    assert hedge["short_delta"] <= 0
+    assert hedge["net_spread_delta"] < 0
 
 
 # ── Test 6: Midday Chop Regime Detection Enforces Spread Preference ────────────
@@ -545,3 +551,81 @@ def test_market_regime_posture_stand_aside_discipline(monkeypatch):
     assert posture.action == "STAND_ASIDE"
     assert posture.regime == "CHOP_CONSOLIDATION"
     assert "STAND ASIDE & PRESERVE CAPITAL" in posture.verdict_message
+
+
+def test_nifty_call_setup_spread_width_at_least_100_pts():
+    """NIFTY Bull Call Spread width must be at least 100 points, never cramped 50 points."""
+    spot = 22725.0
+    chain = [
+        DummyContract(22700.0, "CE", 175.0),
+        DummyContract(22750.0, "CE", 141.0),
+        DummyContract(22800.0, "CE", 112.0),
+        DummyContract(22850.0, "CE", 88.0),
+        DummyContract(22900.0, "CE", 65.0),
+    ]
+    df_5m = _make_dummy_ohlcv(bars=12, trend="UP", base_price=22680.0)
+    alerts = detect_index_call_setup(
+        underlying="NIFTY",
+        spot=spot,
+        chain=chain,
+        vwap=22700.0,
+        day_high=22730.0,
+        day_low=22650.0,
+        prev_day_high=22600.0,
+        prev_day_low=22500.0,
+        ohlcv_5m=df_5m,
+    )
+    assert len(alerts) >= 1
+    hedge = alerts[0].actionable_plan["hedge_plan"]
+    assert hedge is not None
+    assert hedge["strike_width"] >= 100.0
+    assert hedge["sell_strike"] >= 22850.0
+    assert hedge["net_spread_delta"] >= 0.10
+
+
+def test_defined_risk_template_displays_greeks():
+    """Verify alert_templates formats Greeks when net_spread_delta is available."""
+    from bot.alert_templates import render_auto_alert
+    from engine.alert_model import AutoAlert
+
+    alert = AutoAlert(
+        alert_id="test-greeks-display-01",
+        alert_type="INDEX_CALL_SETUP",
+        stage="IGNITED",
+        symbol="NIFTY",
+        exchange="NSE",
+        direction="BULLISH",
+        headline="🟢 VWAP RECLAIM: NIFTY 22750 CE",
+        summary="Reclaimed VWAP",
+        ltp=141.0,
+        trigger_level=141.0,
+        target_level=183.0,
+        stop_loss=112.0,
+        strike=22750.0,
+        option_type="CE",
+        underlying_spot=22725.0,
+        actionable_plan={
+            "action": "BULL CALL SPREAD",
+            "hedge_plan": {
+                "strategy": "BULL_CALL_SPREAD",
+                "risk_reward": "1:1.6",
+                "buy_leg": "BUY NIFTY 22750 CE @ ₹141.0",
+                "sell_leg": "SELL NIFTY 22850 CE @ ₹88.0",
+                "net_debit_per_share": 53.0,
+                "max_loss": 1325.0,
+                "max_profit": 2175.0,
+                "booking_target_70": 85.9,
+                "spread_stop_loss": 26.5,
+                "long_delta": 0.50,
+                "short_delta": 0.28,
+                "net_spread_delta": 0.22,
+                "legs": [
+                    {"side": "BUY", "strike": 22750.0, "option_type": "CE"},
+                    {"side": "SELL", "strike": 22850.0, "option_type": "CE"},
+                ],
+            },
+        },
+    )
+    msg = render_auto_alert(alert)
+    assert "Net Delta" in msg
+    assert "(Long: 0.50 | Short: 0.28)" in msg

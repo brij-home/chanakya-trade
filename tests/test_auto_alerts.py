@@ -2923,6 +2923,16 @@ def test_offmarket_intraday_suppressed_while_swing_allowed(tmp_path, monkeypatch
         "market.quotes.get_quote",
         lambda sym: {sym: fake_quote, "TATASTEEL": fake_quote, "RELIANCE": fake_quote},
     )
+    monkeypatch.setattr(
+        "market.sentiment.get_market_breadth",
+        lambda *args, **kwargs: {
+            "advances": 250,
+            "declines": 250,
+            "ad_ratio": 1.0,
+            "verdict": "NEUTRAL",
+            "status": "AVAILABLE",
+        },
+    )
 
     engine = AutoAlertEngine(max_buffer=20)
     engine.clear_alerts()

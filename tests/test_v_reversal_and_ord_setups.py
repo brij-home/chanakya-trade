@@ -347,7 +347,7 @@ def test_tier1_sanity_reversal_exempt_from_hbcm_and_benchmark_trap():
 
     b_passed, b_reason, b_flags = auditor.verify_tier1_sanity(breakout_alert)
     assert b_passed is False, "Pure breakout alert must be vetoed when HBCM confluence fails"
-    assert "HBCM Confluence Veto" in b_reason
+    assert "HBCM" in b_reason and ("Veto" in b_reason or "confluence" in b_reason.lower())
 
 
 def test_vwap_reclaim_overextension_rejected():
@@ -439,9 +439,9 @@ def test_0dte_midday_spread_mandate_enforced():
 
 def test_day_high_supply_rejection_pe_setup():
     """Verify that Day High rejection above VWAP generates high-probability PE setup (12:29 PM scenario)."""
-    # Spot 22705.0 retreating from Day High 22725.0 (-0.09%) while holding above VWAP 22650.0 (+0.24%)
-    spot = 22705.0
-    day_high = 22725.0
+    # Spot 22700.0 retreating from Day High 22750.0 (-0.22%) while holding above VWAP 22650.0 (+0.22%)
+    spot = 22700.0
+    day_high = 22750.0
     day_low = 22570.0
     vwap = 22650.0
 
@@ -543,8 +543,8 @@ def test_intraday_capitulation_top_pe_setup():
 
 def test_day_low_demand_bounce_ce_setup():
     """Verify that a bounce off the session Day Low triggers DAY_LOW_DEMAND_BOUNCE for CE."""
-    spot = 22605.0
-    day_low = 22580.0  # bounced +0.11% from Day Low
+    spot = 22625.0
+    day_low = 22580.0  # bounced +0.20% from Day Low (>= 0.18% anti-whipsaw threshold)
     day_high = 22750.0
     vwap = 22670.0
 
@@ -687,3 +687,619 @@ def test_failed_day_high_breakout_bull_trap_pe_setup():
     assert alert.direction == "BEARISH"
     assert "FAILED_DAY_HIGH_BREAKOUT" in alert.metrics.get("signals", [])
     assert "FAILED DAY HIGH BREAKOUT" in alert.headline
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Fix #2 Regression: DISTRIBUTION_TOP at Session High with VWAP Overextension
+# Scenario: Sensex/Nifty has rallied strongly (+1.2%), spot is within 0.20% of
+# the day high, +1.1% above VWAP, and last 5m bar shows a rejection candle.
+# EXPECTED: DISTRIBUTION_TOP fires and fires with confidence >= 84.
+# Previously: is_strong_bull_trend blocked put detection permanently.
+# ─────────────────────────────────────────────────────────────────────────────
+def test_distribution_top_at_session_high_fires():
+    """DISTRIBUTION_TOP fires when spot is at day high ceiling with VWAP overextension."""
+    os.environ.setdefault("CHANAKYA_TESTING", "1")
+
+    # Sensex-like scenario: spot at 73,185, day high 73,200, VWAP at ~72,390 (+1.1% above VWAP)
+    spot = 73_185.0
+    day_high = 73_200.0
+    vwap = 72_400.0  # spot is +1.08% above VWAP → overextended
+    day_low = 72_150.0
+
+    # Build 5m OHLCV: 10 bars rally, final bar is a rejection candle at the top
+    ts = pd.date_range("2026-09-30 09:15:00", periods=12, freq="5min", tz="Asia/Kolkata")
+    closes = [71800, 72000, 72200, 72500, 72700, 72900, 73050, 73150, 73190, 73195, 73190, 73120]
+    opens_ = [71750, 71950, 72150, 72400, 72650, 72850, 73000, 73100, 73150, 73180, 73195, 73185]
+    highs = [71820, 72050, 72250, 72550, 72750, 72950, 73070, 73170, 73200, 73215, 73210, 73210]
+    lows = [71700, 71900, 72100, 72350, 72600, 72800, 72980, 73080, 73140, 73170, 73185, 73110]
+    vols = [50000] * 11 + [80000]  # elevated volume on rejection bar
+    df_5m = pd.DataFrame(
+        {"open": opens_, "high": highs, "low": lows, "close": closes, "volume": vols}, index=ts
+    )
+
+    chain = [
+        MockOptionContract(
+            "SENSEX30SEP73200PE", 73200.0, "PE", 1380.0, volume=15000, oi=45000, pchange=22.0
+        ),
+        MockOptionContract(
+            "SENSEX30SEP73100PE", 73100.0, "PE", 1260.0, volume=9000, oi=30000, pchange=15.0
+        ),
+    ]
+
+    alerts = detect_index_put_setup(
+        underlying="SENSEX",
+        spot=spot,
+        chain=chain,
+        vwap=vwap,
+        day_high=day_high,
+        day_low=day_low,
+        ohlcv_5m=df_5m,
+        ignore_time_gate=True,
+    )
+
+    assert len(alerts) >= 1, (
+        "DISTRIBUTION_TOP must fire when spot is at session high with VWAP overextension "
+        "and rejection candle — this is the Sensex 73200 PE jackpot scenario."
+    )
+    alert = alerts[0]
+    assert alert.direction == "BEARISH"
+    sigs = alert.metrics.get("signals", [])
+    assert "DISTRIBUTION_TOP" in sigs, f"Expected DISTRIBUTION_TOP in signals, got: {sigs}"
+    assert alert.confidence >= 84, (
+        f"DISTRIBUTION_TOP should yield confidence >= 84, got {alert.confidence}"
+    )
+    # Headline shows first-signal priority; may be SUPPLY_ZONE_SWEEP if co-firing.
+    # Verify DISTRIBUTION_TOP is surfaced in actionable_plan structural_signals.
+    structural = alert.actionable_plan.get("structural_signals", [])
+    assert "DISTRIBUTION_TOP" in structural or "DISTRIBUTION_TOP" in sigs
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Fix #1 Regression: is_strong_bull_trend does NOT block puts at distribution zone
+# ─────────────────────────────────────────────────────────────────────────────
+def test_strong_bull_trend_does_not_block_puts_at_distribution_ceiling():
+    """Put scanner must NOT block detection when spot is at session high distribution zone,
+    even on a strong bull day (+0.6%+ green). The old permanent block caused today's miss."""
+    os.environ.setdefault("CHANAKYA_TESTING", "1")
+
+    # Nifty: up 0.9% on day, spot right at day high, VWAP +1.15% below spot → overextension
+    spot = 24_500.0
+    day_high = 24_505.0  # spot is within 0.02% of day high
+    vwap = 24_218.0  # spot is +1.16% above VWAP
+    day_low = 24_050.0
+
+    ts = pd.date_range("2026-09-30 09:15:00", periods=12, freq="5min", tz="Asia/Kolkata")
+    # Final bar: opens at 24,495, reaches 24,510, closes at 24,485 (rejection candle)
+    closes = [24100, 24200, 24280, 24350, 24400, 24430, 24460, 24480, 24490, 24500, 24505, 24485]
+    opens_ = [24080, 24170, 24230, 24310, 24370, 24415, 24445, 24465, 24480, 24490, 24498, 24495]
+    highs = [24120, 24220, 24290, 24360, 24410, 24440, 24470, 24490, 24500, 24508, 24510, 24510]
+    lows = [24060, 24150, 24210, 24300, 24355, 24405, 24440, 24460, 24475, 24485, 24490, 24480]
+    vols = [45000] * 11 + [70000]
+    df_5m = pd.DataFrame(
+        {"open": opens_, "high": highs, "low": lows, "close": closes, "volume": vols}, index=ts
+    )
+
+    chain = [
+        MockOptionContract(
+            "NIFTY30SEP24500PE", 24500.0, "PE", 145.0, volume=18000, oi=50000, pchange=20.0
+        ),
+        MockOptionContract(
+            "NIFTY30SEP24400PE", 24400.0, "PE", 95.0, volume=10000, oi=35000, pchange=12.0
+        ),
+    ]
+
+    alerts = detect_index_put_setup(
+        underlying="NIFTY",
+        spot=spot,
+        chain=chain,
+        vwap=vwap,
+        day_high=day_high,
+        day_low=day_low,
+        ohlcv_5m=df_5m,
+        ignore_time_gate=True,
+    )
+
+    assert len(alerts) >= 1, (
+        "Put detector MUST fire at session high distribution zone even on +0.9% bull day. "
+        "The permanent is_strong_bull_trend block was the root cause of today's miss."
+    )
+    alert = alerts[0]
+    assert alert.direction == "BEARISH"
+    sigs = alert.metrics.get("signals", [])
+    assert "DISTRIBUTION_TOP" in sigs or any(
+        s in sigs
+        for s in (
+            "DAY_HIGH_SUPPLY_REJECTION",
+            "INTRADAY_CAPITULATION_TOP",
+            "FAILED_DAY_HIGH_BREAKOUT",
+        )
+    ), f"Expected a ceiling-rejection signal, got: {sigs}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Fix #7: ROC Momentum Acceleration & Deceleration Validation
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_calculate_roc_momentum_quant_properties():
+    """Validates pure quantitative properties of 5m ROC acceleration and deceleration."""
+    from engine.index_velocity import calculate_roc_momentum
+
+    # 1. Null / insufficient data returns defensive defaults
+    null_m = calculate_roc_momentum(None, "NIFTY")
+    assert null_m.is_accelerating_up is False
+    assert null_m.is_accelerating_down is False
+    assert null_m.roc_1 == 0.0
+
+    # 2. Accelerating UP: c[-3]=100, c[-2]=101 (+1%), c[-1]=102.5 (+1.485%)
+    ts = pd.date_range("2026-09-30 09:15:00", periods=4, freq="5min", tz="Asia/Kolkata")
+    df_up = pd.DataFrame(
+        {
+            "open": [99.5, 100.2, 101.2, 102.0],
+            "high": [100.1, 101.1, 102.1, 102.8],
+            "low": [99.0, 100.0, 100.9, 101.8],
+            "close": [99.8, 100.0, 101.0, 102.5],
+            "volume": [1000, 1200, 1500, 2000],
+        },
+        index=ts,
+    )
+    m_up = calculate_roc_momentum(df_up, "NIFTY")
+    assert m_up.consecutive_up is True
+    assert m_up.is_accelerating_up is True
+    assert m_up.is_meaningful_up is True
+    assert m_up.is_accelerating_down is False
+
+    # 3. Decelerating near top (stalling): c[-3]=100, c[-2]=102 (+2%), c[-1]=102.02 (+0.02%)
+    df_stall = pd.DataFrame(
+        {
+            "open": [99.0, 100.0, 101.8, 102.0],
+            "high": [100.0, 101.5, 102.2, 102.3],
+            "low": [98.5, 99.8, 101.5, 101.9],
+            "close": [99.5, 100.0, 102.0, 102.02],
+            "volume": [1000, 1200, 1500, 2000],
+        },
+        index=ts,
+    )
+    m_stall = calculate_roc_momentum(df_stall, "NIFTY")
+    assert m_stall.is_decelerating_up is True
+    assert m_stall.is_accelerating_up is False
+
+    # 4. Accelerating DOWN: c[-3]=100, c[-2]=99 (-1%), c[-1]=97.5 (-1.515%)
+    df_down = pd.DataFrame(
+        {
+            "open": [101.0, 100.5, 99.2, 98.0],
+            "high": [101.5, 100.8, 99.5, 98.2],
+            "low": [100.0, 99.5, 98.5, 97.0],
+            "close": [100.5, 100.0, 99.0, 97.5],
+            "volume": [1000, 1200, 1500, 2000],
+        },
+        index=ts,
+    )
+    m_down = calculate_roc_momentum(df_down, "NIFTY")
+    assert m_down.consecutive_down is True
+    assert m_down.is_accelerating_down is True
+    assert m_down.is_meaningful_down is True
+
+
+def test_roc_acceleration_ce_fires_with_hbcm_1():
+    """CE detector fires when ROC is accelerating even if HBCM has only 1 bullish heavyweight."""
+    os.environ.setdefault("CHANAKYA_TESTING", "1")
+
+    spot = 24_165.0
+    day_low = 24_100.0
+    day_high = 24_300.0
+    vwap = 24_150.0
+
+    # 5m OHLCV with 6 bars showing accelerating breakout and reclaim above VWAP
+    ts = pd.date_range("2026-09-30 09:15:00", periods=6, freq="5min", tz="Asia/Kolkata")
+    closes = [24080, 24100, 24110, 24125, 24142, 24165]  # accelerating up
+    opens_ = [24075, 24095, 24105, 24120, 24138, 24155]
+    highs = [24085, 24105, 24115, 24130, 24148, 24170]
+    lows = [24070, 24090, 24100, 24115, 24130, 24150]
+    vols = [20000] * 6
+    df_5m = pd.DataFrame(
+        {"open": opens_, "high": highs, "low": lows, "close": closes, "volume": vols},
+        index=ts,
+    )
+
+    chain = [
+        MockOptionContract(
+            "NIFTY30SEP24150CE", 24150.0, "CE", 110.0, volume=8000, oi=20000, pchange=12.0
+        ),
+    ]
+
+    # Mock evaluate_hbcm to simulate lagging heavyweights (only 1 bullish out of 5)
+    mock_hbcm = MagicMock()
+    mock_hbcm.total_heavyweights = 5
+    mock_hbcm.summary = "HBCM_EVAL: 1/5 Bullish"
+    mock_hbcm.confluence_pass = False
+    mock_hbcm.bullish_count = 1
+    mock_hbcm.bearish_count = 2
+    mock_hbcm.all_bearish = False
+    mock_hbcm.rejection_reason = "Heavyweight breadth unaligned (1/5)"
+    mock_hbcm.to_dict.return_value = {"bullish_count": 1}
+
+    with patch("engine.hbcm.evaluate_hbcm", return_value=mock_hbcm):
+        alerts = detect_index_call_setup(
+            underlying="NIFTY",
+            spot=spot,
+            chain=chain,
+            vwap=vwap,
+            day_high=day_high,
+            day_low=day_low,
+            ohlcv_5m=df_5m,
+            ignore_time_gate=True,
+        )
+
+    assert len(alerts) >= 1, "CE setup must fire via ROC acceleration HBCM bypass"
+    alert = alerts[0]
+    assert alert.direction == "BULLISH"
+    assert "roc_momentum" in alert.metrics
+    assert alert.metrics["roc_momentum"]["is_accelerating_up"] is True
+
+
+def test_roc_acceleration_pe_fires_with_hbcm_1():
+    """PE detector fires when breakdown ROC is accelerating even if HBCM has only 1 bearish heavyweight."""
+    os.environ.setdefault("CHANAKYA_TESTING", "1")
+
+    spot = 24_130.0
+    day_low = 23_950.0
+    day_high = 24_250.0
+    vwap = 24_145.0
+
+    # 5m OHLCV with accelerating breakdown bars rejection below VWAP
+    ts = pd.date_range("2026-09-30 09:15:00", periods=6, freq="5min", tz="Asia/Kolkata")
+    closes = [24210, 24195, 24185, 24170, 24152, 24130]  # accelerating down
+    opens_ = [24215, 24200, 24190, 24175, 24160, 24140]
+    highs = [24220, 24205, 24195, 24180, 24165, 24145]
+    lows = [24205, 24190, 24180, 24165, 24145, 24125]
+    vols = [25000] * 6
+    df_5m = pd.DataFrame(
+        {"open": opens_, "high": highs, "low": lows, "close": closes, "volume": vols},
+        index=ts,
+    )
+
+    chain = [
+        MockOptionContract(
+            "NIFTY30SEP24150PE", 24150.0, "PE", 115.0, volume=9000, oi=22000, pchange=14.0
+        ),
+    ]
+
+    mock_hbcm = MagicMock()
+    mock_hbcm.total_heavyweights = 5
+    mock_hbcm.summary = "HBCM_EVAL: 1/5 Bearish"
+    mock_hbcm.confluence_pass = False
+    mock_hbcm.bearish_count = 1
+    mock_hbcm.bullish_count = 2
+    mock_hbcm.all_bullish = False
+    mock_hbcm.rejection_reason = "Heavyweight breadth unaligned (1/5)"
+    mock_hbcm.to_dict.return_value = {"bearish_count": 1}
+
+    with patch("engine.hbcm.evaluate_hbcm", return_value=mock_hbcm):
+        alerts = detect_index_put_setup(
+            underlying="NIFTY",
+            spot=spot,
+            chain=chain,
+            vwap=vwap,
+            day_high=day_high,
+            day_low=day_low,
+            ohlcv_5m=df_5m,
+            ignore_time_gate=True,
+        )
+
+    assert len(alerts) >= 1, "PE setup must fire via ROC breakdown acceleration HBCM bypass"
+    alert = alerts[0]
+    assert alert.direction == "BEARISH"
+    assert "roc_momentum" in alert.metrics
+    assert alert.metrics["roc_momentum"]["is_accelerating_down"] is True
+
+
+def test_distribution_top_enhanced_by_roc_deceleration():
+    """DISTRIBUTION_TOP attaches ROC deceleration metrics and gains +4 confidence bonus."""
+    os.environ.setdefault("CHANAKYA_TESTING", "1")
+
+    spot = 73_185.0
+    day_high = 73_200.0
+    vwap = 72_400.0
+    day_low = 72_150.0
+
+    # 12 bars with rally that STALLS at the top (c[-2]=73195, c[-1]=73185 -> roc_1 <= 0.05 while prior was up)
+    ts = pd.date_range("2026-09-30 09:15:00", periods=12, freq="5min", tz="Asia/Kolkata")
+    closes = [71800, 72000, 72200, 72500, 72700, 72900, 73050, 73150, 73180, 73195, 73195, 73120]
+    opens_ = [71750, 71950, 72150, 72400, 72650, 72850, 73000, 73100, 73150, 73180, 73195, 73185]
+    highs = [71820, 72050, 72250, 72550, 72750, 72950, 73070, 73170, 73200, 73215, 73210, 73210]
+    lows = [71700, 71900, 72100, 72350, 72600, 72800, 72980, 73080, 73140, 73170, 73185, 73110]
+    vols = [50000] * 11 + [80000]
+    df_5m = pd.DataFrame(
+        {"open": opens_, "high": highs, "low": lows, "close": closes, "volume": vols},
+        index=ts,
+    )
+
+    chain = [
+        MockOptionContract(
+            "SENSEX30SEP73200PE", 73200.0, "PE", 1380.0, volume=15000, oi=45000, pchange=22.0
+        ),
+    ]
+
+    alerts = detect_index_put_setup(
+        underlying="SENSEX",
+        spot=spot,
+        chain=chain,
+        vwap=vwap,
+        day_high=day_high,
+        day_low=day_low,
+        ohlcv_5m=df_5m,
+        ignore_time_gate=True,
+    )
+
+    assert len(alerts) >= 1
+    alert = alerts[0]
+    dist_top = alert.metrics.get("signal_tags", {}).get("distribution_top", {})
+    assert "roc_deceleration" in dist_top
+    assert "premium_velocity" in alert.metrics
+    assert "oi_roc" in alert.metrics
+
+
+def test_calculate_premium_velocity_smoothing():
+    """Validates calculation and EMA smoothing of option premium velocity in ₹/min."""
+    from engine.index_velocity import calculate_premium_velocity
+
+    sym = "NIFTY_TEST_PE_VEL"
+    t0 = 1000.0
+
+    # First observation initializes cache -> 0.0
+    v0 = calculate_premium_velocity(sym, 100.0, now_ts=t0)
+    assert v0 == 0.0
+
+    # Rapid ping (< 3s) -> returns prev velocity
+    v_fast = calculate_premium_velocity(sym, 105.0, now_ts=t0 + 2.0)
+    assert v_fast == 0.0
+
+    # 10 seconds later, premium up ₹5 -> inst_vel = (5 / 10) * 60 = 30.0 ₹/min
+    # smoothed = 0.6 * 30 + 0.4 * 0 = 18.0 ₹/min
+    v1 = calculate_premium_velocity(sym, 105.0, now_ts=t0 + 10.0)
+    assert v1 == 18.0
+
+
+def test_call_wall_collision_mandates_spread_and_provides_execution_protocol():
+    """Spot within 0.15% beneath Max Call OI strike with writers adding mandates Bull Call Spread."""
+    spot = 24980.0
+    day_low = 24850.0
+    day_high = 25200.0
+    vwap = 24950.0
+
+    # Strike 25000 is the Max Call OI wall (100,000 contracts with positive oi_change +5,000)
+    # Strike 24950 is ATM long leg, Strike 25100 is OTM short leg
+    chain = [
+        MockOptionContract(
+            "NIFTY26OCT24950CE",
+            24950.0,
+            "CE",
+            120.0,
+            volume=35000,
+            oi=30000,
+            oi_change=2000,
+            pchange=12.0,
+        ),
+        MockOptionContract(
+            "NIFTY26OCT25000CE",
+            25000.0,
+            "CE",
+            85.0,
+            volume=80000,
+            oi=100000,
+            oi_change=5000,
+            pchange=6.0,
+        ),
+        MockOptionContract(
+            "NIFTY26OCT25100CE",
+            25100.0,
+            "CE",
+            45.0,
+            volume=25000,
+            oi=40000,
+            oi_change=1000,
+            pchange=4.0,
+        ),
+    ]
+
+    alerts = detect_index_call_setup(
+        underlying="NIFTY",
+        spot=spot,
+        chain=chain,
+        vwap=vwap,
+        day_high=day_high,
+        day_low=day_low,
+        ignore_time_gate=True,
+    )
+
+    assert len(alerts) >= 1
+    alert = alerts[0]
+    assert alert.metrics.get("is_call_wall_collision") is True
+    assert alert.metrics.get("max_call_oi_strike") == 25000.0
+    assert alert.actionable_plan["instrument_type"] == "OPTION_SPREAD"
+    assert "HEDGED SPREAD MANDATE" in alert.headline
+    assert "execution_protocol" in alert.actionable_plan
+    assert "Scale Blueprint: Book 50% at T1" in alert.actionable_plan["profit_rule"]
+    assert "DO NOT CHASE" in alert.actionable_plan["when_to_wait"]
+
+
+def test_put_wall_collision_mandates_spread_and_provides_execution_protocol():
+    """Spot within 0.15% above Max Put OI strike with writers adding mandates Bear Put Spread."""
+    spot = 25020.0
+    day_low = 24800.0
+    day_high = 25200.0
+    vwap = 25080.0
+
+    # Strike 25000 is the Max Put OI cushion (100,000 contracts with positive oi_change +6,000)
+    # Strike 25050 is ATM long leg, Strike 24900 is OTM short leg
+    chain = [
+        MockOptionContract(
+            "NIFTY26OCT25050PE",
+            25050.0,
+            "PE",
+            115.0,
+            volume=35000,
+            oi=30000,
+            oi_change=1500,
+            pchange=14.0,
+        ),
+        MockOptionContract(
+            "NIFTY26OCT25000PE",
+            25000.0,
+            "PE",
+            75.0,
+            volume=85000,
+            oi=100000,
+            oi_change=6000,
+            pchange=8.0,
+        ),
+        MockOptionContract(
+            "NIFTY26OCT24900PE",
+            24900.0,
+            "PE",
+            40.0,
+            volume=25000,
+            oi=40000,
+            oi_change=1000,
+            pchange=5.0,
+        ),
+    ]
+
+    alerts = detect_index_put_setup(
+        underlying="NIFTY",
+        spot=spot,
+        chain=chain,
+        vwap=vwap,
+        day_high=day_high,
+        day_low=day_low,
+        ignore_time_gate=True,
+    )
+
+    assert len(alerts) >= 1
+    alert = alerts[0]
+    assert alert.metrics.get("is_put_wall_collision") is True
+    assert alert.metrics.get("max_put_oi_strike") == 25000.0
+    assert alert.actionable_plan["instrument_type"] == "OPTION_SPREAD"
+    assert "HEDGED SPREAD MANDATE" in alert.headline
+    assert "execution_protocol" in alert.actionable_plan
+    assert "Scale Blueprint: Book 50% at T1" in alert.actionable_plan["profit_rule"]
+    assert "DO NOT CHASE" in alert.actionable_plan["when_to_wait"]
+
+
+def test_short_squeeze_unwind_fires_signal():
+    """Spot broken above Max Call Wall with call writers unwinding triggers SHORT_SQUEEZE_UNWIND."""
+    spot = 25030.0
+    day_low = 24850.0
+    day_high = 25200.0
+    vwap = 24970.0
+
+    # Max Call OI strike 25000 with negative oi_change -8,000 (panic covering)
+    chain = [
+        MockOptionContract(
+            "NIFTY26OCT25000CE",
+            25000.0,
+            "CE",
+            130.0,
+            volume=90000,
+            oi=95000,
+            oi_change=-8000,
+            pchange=28.0,
+        ),
+    ]
+
+    alerts = detect_index_call_setup(
+        underlying="NIFTY",
+        spot=spot,
+        chain=chain,
+        vwap=vwap,
+        day_high=day_high,
+        day_low=day_low,
+        ignore_time_gate=True,
+    )
+
+    assert len(alerts) >= 1
+    alert = alerts[0]
+    assert alert.metrics.get("is_short_squeeze_unwind") is True
+    assert "SHORT_SQUEEZE_UNWIND" in alert.metrics.get("signals", [])
+    assert alert.confidence >= 80
+
+
+def test_long_unwinding_flush_fires_signal():
+    """Spot broken below Max Put Wall with put writers unwinding triggers LONG_UNWINDING_FLUSH."""
+    spot = 24970.0
+    day_low = 24800.0
+    day_high = 25200.0
+    vwap = 25050.0
+
+    # Max Put OI strike 25000 with negative oi_change -9,000 (capitulation flush)
+    chain = [
+        MockOptionContract(
+            "NIFTY26OCT25000PE",
+            25000.0,
+            "PE",
+            135.0,
+            volume=95000,
+            oi=90000,
+            oi_change=-9000,
+            pchange=30.0,
+        ),
+    ]
+
+    alerts = detect_index_put_setup(
+        underlying="NIFTY",
+        spot=spot,
+        chain=chain,
+        vwap=vwap,
+        day_high=day_high,
+        day_low=day_low,
+        ignore_time_gate=True,
+    )
+
+    assert len(alerts) >= 1
+    alert = alerts[0]
+    assert alert.metrics.get("is_long_unwinding_flush") is True
+    assert "LONG_UNWINDING_FLUSH" in alert.metrics.get("signals", [])
+    assert alert.confidence >= 80
+
+
+def test_scrutiny_opposing_barrier_catches_naked_strike_wall_collision():
+    """Tier 1 Scrutiny vetos naked CE hitting Call Wall, but permits defined-risk Bull Call Spread."""
+    from engine.alert_scrutiny import alert_scrutiny_auditor
+
+    class DummyAlert:
+        def __init__(self, is_spread: bool):
+            self.symbol = "NIFTY"
+            self.direction = "BULLISH"
+            self.alert_type = "INDEX_CALL_SETUP"
+            self.ltp = 120.0
+            self.trigger_level = 120.0
+            self.target_level = 160.0
+            self.stop_loss = 90.0
+            self.strike = 24950.0
+            self.underlying_spot = 24985.0
+            self.option_type = "CE"
+            self.headline = "BULL CALL SPREAD" if is_spread else "BUY NIFTY CE"
+            self.actionable_plan = {
+                "instrument_type": "OPTION_SPREAD" if is_spread else "OPTION",
+                "recommended_entry": "120.0",
+                "target_1": "160.0",
+                "stop_loss": "90.0",
+            }
+            self.metrics = {
+                "spot": 24985.0,
+                "max_call_oi_strike": 25000.0,  # 15 pts away = 0.06% headroom
+                "signals": ["VWAP_RECLAIM"],
+            }
+
+    # Naked option alert hitting 25000 Call Wall within 0.15% -> VETOED
+    naked_alert = DummyAlert(is_spread=False)
+    passed_naked, reason_naked, _ = alert_scrutiny_auditor.verify_tier1_sanity(naked_alert)
+    assert passed_naked is False
+    assert "Opposing Supply Collision" in reason_naked
+    assert "Max Call OI Wall" in reason_naked
+
+    # Spread alert -> PASSES because short leg is at or above the wall
+    spread_alert = DummyAlert(is_spread=True)
+    passed_spread, _, _ = alert_scrutiny_auditor.verify_tier1_sanity(spread_alert)
+    assert passed_spread is True

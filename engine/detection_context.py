@@ -226,6 +226,10 @@ class DetectorRegistry:
         """Removes a detector from the registry."""
         self._detectors.pop(slug, None)
 
+    def get(self, slug: str) -> Optional[BaseDetector]:
+        """Returns a registered detector by slug, or None if not found."""
+        return self._detectors.get(slug)
+
     def list_registered_slugs(self) -> list[str]:
         """Returns sorted list of all registered detector slugs."""
         return sorted(self._detectors.keys())
@@ -328,6 +332,7 @@ def register_default_detectors() -> None:
     from engine.detectors.commodity import detect_commodity_breakouts
     from engine.detectors.currency import detect_currency_breakouts
     from engine.detectors.crypto import detect_single_crypto_symbol
+    from engine.detectors.smc_orderblock_retest import detect_smc_orderblock_retest
 
     def _circuit_adapter(ctx: DetectionContext):
         if ctx.ltp > 0 and ctx.prev_close and ctx.prev_close > 0:
@@ -448,6 +453,23 @@ def register_default_detectors() -> None:
             )
         return None
 
+    def _smc_ob_retest_adapter(ctx: DetectionContext):
+        # Uses daily candles to detect unmitigated OB re-tests.
+        # Runs on EQUITY and FNO_STOCK segments only (not indices — OBs are per-stock).
+        if ctx.segment not in ("EQUITY", "FNO_STOCK"):
+            return None
+        df = ctx.candles_daily
+        if df is None or len(df) < 30:
+            return None
+        alerts = detect_smc_orderblock_retest(
+            symbol=ctx.canonical_symbol,
+            df=df,
+            ltp=ctx.ltp,
+            exchange=ctx.exchange,
+            rvol=ctx.rvol,
+        )
+        return alerts if alerts else None
+
     adapters = [
         FunctionalDetectorAdapter(
             "circuit_proximity", "Upper Circuit Proximity", ("EQUITY",), _circuit_adapter
@@ -496,6 +518,12 @@ def register_default_detectors() -> None:
         ),
         FunctionalDetectorAdapter(
             "crypto_signal", "24x7 Crypto Squeeze & Flow", ("CRYPTO",), _crypto_adapter
+        ),
+        FunctionalDetectorAdapter(
+            "smc_ob_retest",
+            "SMC Order Block Re-Test",
+            ("EQUITY", "FNO_STOCK"),
+            _smc_ob_retest_adapter,
         ),
     ]
 

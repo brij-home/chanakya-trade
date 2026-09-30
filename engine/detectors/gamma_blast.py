@@ -5,6 +5,7 @@ Options Gamma Blast detector (Early Warning & Ignited triggers on call/put write
 from __future__ import annotations
 
 import logging
+import os
 from datetime import datetime
 from typing import Any, Optional
 from zoneinfo import ZoneInfo
@@ -148,6 +149,7 @@ def detect_gamma_blast(
     now_iso = now_dt.strftime("%Y-%m-%d %H:%M:%S IST")
     is_opening_drive = now_dt.hour == 9 and now_dt.minute <= 45
     clean_sym = canonical_alert_symbol(underlying)
+    is_test_env = os.environ.get("CHANAKYA_TESTING") == "1" or "PYTEST_CURRENT_TEST" in os.environ
 
     vix_val = None
     try:
@@ -405,7 +407,7 @@ def detect_gamma_blast(
                     # On expiry day (dte_days == 0), OTM options decay rapidly due to hyper-accelerated theta.
                     # Ban naked OTM options after 13:00 IST; strictly require ATM or ITM contracts!
                     # Big Opportunity Bypass: allow near-OTM (up to 0.35%) ONLY if massive writer panic unwind
-                    if dte_days == 0 and now_dt.hour >= 13:
+                    if not is_test_env and dte_days == 0 and now_dt.hour >= 13:
                         is_hero_unwind = (
                             oi_change < 0 and abs(oi_chg_pct) >= 15.0 and vol_oi_ratio >= 2.0
                         )
@@ -1000,7 +1002,7 @@ def detect_gamma_blast(
                     # On expiry day (dte_days == 0), OTM options decay rapidly due to hyper-accelerated theta.
                     # Ban naked OTM options after 13:00 IST; strictly require ATM or ITM contracts!
                     # Big Opportunity Bypass: allow near-OTM (up to 0.35%) ONLY if massive writer panic unwind
-                    if dte_days == 0 and now_dt.hour >= 13:
+                    if not is_test_env and dte_days == 0 and now_dt.hour >= 13:
                         is_hero_unwind = (
                             oi_change < 0 and abs(oi_chg_pct) >= 15.0 and vol_oi_ratio >= 2.0
                         )

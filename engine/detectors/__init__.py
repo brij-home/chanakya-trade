@@ -21,6 +21,7 @@ from engine.detectors.pattern_coiling import detect_learned_pattern_coiling
 from engine.detectors.pre_inflection_dryup import detect_pre_inflection_dryup
 from engine.detectors.preopen_bias import detect_preopen_bias
 from engine.detectors.squeeze_breakout import detect_squeeze_breakout
+from engine.detectors.smc_orderblock_retest import detect_smc_orderblock_retest
 
 from engine.detection_context import (
     BaseDetector,
@@ -58,4 +59,5 @@ __all__ = [
     "get_multibagger_universe",
     "detect_order_flow_divergence",
     "OrderFlowDivergenceDetector",
+    "detect_smc_orderblock_retest",
 ]

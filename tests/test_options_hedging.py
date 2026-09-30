@@ -70,7 +70,7 @@ def test_build_hedge_plan_bull_call_spread_low_vix():
     assert hedge["strategy_type"] == "DEBIT_SPREAD"
     assert hedge["sentiment"] == "BULLISH"
     assert hedge["buy_strike"] == 25000.0
-    assert hedge["sell_strike"] == 25050.0
+    assert hedge["sell_strike"] == 25100.0
     assert hedge["net_debit_per_share"] > 0
     assert hedge["max_loss"] > 0
     assert hedge["max_profit"] > 0
@@ -79,7 +79,7 @@ def test_build_hedge_plan_bull_call_spread_low_vix():
     assert "SEBI Hedged Margin" in hedge["margin_benefit_note"]
     assert len(hedge["legs"]) == 2
     assert hedge["legs"][0]["side"] == "BUY" and hedge["legs"][0]["strike"] == 25000.0
-    assert hedge["legs"][1]["side"] == "SELL" and hedge["legs"][1]["strike"] == 25050.0
+    assert hedge["legs"][1]["side"] == "SELL" and hedge["legs"][1]["strike"] == 25100.0
 
 
 def test_build_hedge_plan_credit_spread_high_vix():
@@ -163,7 +163,22 @@ def test_single_stock_strike_step():
         lot_size=250,
     )
     assert hedge_rel is not None
-    assert hedge_rel["strike_width"] == 50.0
+    assert hedge_rel["step"] == 50.0
+    # In default trend/thrust regime, width is calibrated to 2x step (100 pt width)
+    assert hedge_rel["strike_width"] == 100.0
+
+    # In low-VIX chop defense, width is 1x step (50 pt width)
+    hedge_rel_chop = build_defined_risk_hedge_plan(
+        symbol="RELIANCE",
+        direction="BULLISH",
+        spot=2900.0,
+        strike=2900.0,
+        opt_type="CE",
+        opt_ltp=45.0,
+        lot_size=250,
+        vix=12.0,
+    )
+    assert hedge_rel_chop["strike_width"] == 50.0
 
     # TATASTEEL @ 160: step = 5
     hedge_ts = build_defined_risk_hedge_plan(
@@ -176,7 +191,8 @@ def test_single_stock_strike_step():
         lot_size=5500,
     )
     assert hedge_ts is not None
-    assert hedge_ts["strike_width"] == 5.0
+    assert hedge_ts["step"] == 5.0
+    assert hedge_ts["strike_width"] == 10.0
 
 
 def make_dummy_alert(**kwargs) -> AutoAlert:
@@ -479,9 +495,9 @@ def test_build_ratio_spread_1x2_plan():
 
 
 def test_build_defined_risk_hedge_plan_asymmetric_r_r():
-    """Verify asymmetric R:R strike width calibration across NIFTY, BANKNIFTY, and SENSEX."""
-    # NIFTY asymmetric spread (100 pt width instead of 50 pt)
-    hedge_nifty = build_defined_risk_hedge_plan(
+    """Verify market-adaptive spread width calibration across NIFTY, BANKNIFTY, and SENSEX."""
+    # 1. High-Velocity / Momentum Thrust (Default for breakouts: 200 pt NIFTY, 500 pt BANKNIFTY, 700 pt SENSEX)
+    hedge_nifty_thrust = build_defined_risk_hedge_plan(
         symbol="NIFTY",
         direction="BULLISH",
         spot=25000.0,
@@ -491,14 +507,14 @@ def test_build_defined_risk_hedge_plan_asymmetric_r_r():
         lot_size=25,
         asymmetric_r_r=True,
     )
-    assert hedge_nifty is not None
-    assert hedge_nifty["strike_width"] == 100.0
-    assert hedge_nifty["sell_strike"] == 25100.0
-    assert hedge_nifty["ratio_spread_1x2"] is not None
-    assert hedge_nifty["expiry_recommendation"] is not None
+    assert hedge_nifty_thrust is not None
+    assert hedge_nifty_thrust["strike_width"] == 200.0
+    assert hedge_nifty_thrust["sell_strike"] == 25200.0
+    assert hedge_nifty_thrust["ratio_spread_1x2"] is not None
+    assert hedge_nifty_thrust["expiry_recommendation"] is not None
+    assert "THRUST" in hedge_nifty_thrust["adaptive_regime"]
 
-    # BANKNIFTY asymmetric spread (300 pt width instead of 200 pt)
-    hedge_bn = build_defined_risk_hedge_plan(
+    hedge_bn_thrust = build_defined_risk_hedge_plan(
         symbol="BANKNIFTY",
         direction="BEARISH",
         spot=56000.0,
@@ -508,12 +524,11 @@ def test_build_defined_risk_hedge_plan_asymmetric_r_r():
         lot_size=15,
         asymmetric_r_r=True,
     )
-    assert hedge_bn is not None
-    assert hedge_bn["strike_width"] == 300.0
-    assert hedge_bn["sell_strike"] == 55700.0
+    assert hedge_bn_thrust is not None
+    assert hedge_bn_thrust["strike_width"] == 500.0
+    assert hedge_bn_thrust["sell_strike"] == 55500.0
 
-    # SENSEX asymmetric spread (400 pt width)
-    hedge_sensex = build_defined_risk_hedge_plan(
+    hedge_sensex_thrust = build_defined_risk_hedge_plan(
         symbol="SENSEX",
         direction="BULLISH",
         spot=82000.0,
@@ -523,9 +538,69 @@ def test_build_defined_risk_hedge_plan_asymmetric_r_r():
         lot_size=10,
         asymmetric_r_r=True,
     )
-    assert hedge_sensex is not None
-    assert hedge_sensex["strike_width"] == 400.0
-    assert hedge_sensex["sell_strike"] == 82400.0
+    assert hedge_sensex_thrust is not None
+    assert hedge_sensex_thrust["strike_width"] == 700.0
+    assert hedge_sensex_thrust["sell_strike"] == 82700.0
+
+    # 2. Trend Continuation (150 pt NIFTY, 400 pt BANKNIFTY, 600 pt SENSEX)
+    hedge_nifty_trend = build_defined_risk_hedge_plan(
+        symbol="NIFTY",
+        direction="BULLISH",
+        spot=25000.0,
+        strike=25000.0,
+        opt_type="CE",
+        opt_ltp=150.0,
+        lot_size=25,
+        asymmetric_r_r=True,
+        vel_score=65.0,
+    )
+    assert hedge_nifty_trend["strike_width"] == 150.0
+    assert hedge_nifty_trend["sell_strike"] == 25150.0
+    assert "TREND" in hedge_nifty_trend["adaptive_regime"]
+
+    # 3. Tight Midday Chop / Low-VIX Range Defense (100 pt NIFTY, 300 pt BANKNIFTY, 400 pt SENSEX)
+    hedge_nifty_chop = build_defined_risk_hedge_plan(
+        symbol="NIFTY",
+        direction="BULLISH",
+        spot=25000.0,
+        strike=25000.0,
+        opt_type="CE",
+        opt_ltp=150.0,
+        lot_size=25,
+        asymmetric_r_r=True,
+        vix=12.0,
+    )
+    assert hedge_nifty_chop["strike_width"] == 100.0
+    assert hedge_nifty_chop["sell_strike"] == 25100.0
+    assert "CHOP" in hedge_nifty_chop["adaptive_regime"]
+
+    hedge_bn_chop = build_defined_risk_hedge_plan(
+        symbol="BANKNIFTY",
+        direction="BEARISH",
+        spot=56000.0,
+        strike=56000.0,
+        opt_type="PE",
+        opt_ltp=300.0,
+        lot_size=15,
+        asymmetric_r_r=True,
+        vix=12.0,
+    )
+    assert hedge_bn_chop["strike_width"] == 300.0
+    assert hedge_bn_chop["sell_strike"] == 55700.0
+
+    hedge_sensex_chop = build_defined_risk_hedge_plan(
+        symbol="SENSEX",
+        direction="BULLISH",
+        spot=82000.0,
+        strike=82000.0,
+        opt_type="CE",
+        opt_ltp=450.0,
+        lot_size=10,
+        asymmetric_r_r=True,
+        vix=12.0,
+    )
+    assert hedge_sensex_chop["strike_width"] == 400.0
+    assert hedge_sensex_chop["sell_strike"] == 82400.0
 
 
 def test_evaluate_spread_free_roll_milestone():
@@ -681,3 +756,98 @@ def test_single_stock_hedge_degraded_rr_promotes_ratio_spread():
     assert "Zero-Downside 1x2 Ratio: Preferred" in msg
     assert "DEBIT SPREAD R:R DEGRADED" in msg
     assert "Stock Option Liquidity Guard" in msg
+
+
+def test_evaluate_spread_pre_breached_short_strike_prevents_false_trigger():
+    """
+    Ensure that when an alert is entered with spot already past or at the short strike,
+    evaluate_spread_in_flight will NEVER fire SPREAD_SHORT_STRIKE_TOUCH or hallucinate P&L.
+    """
+    # Reproducing the exact MIDCPNIFTY bug:
+    # Spot 13,764.2, Buy 13600 CE, Short 13650 CE (Short strike was already breached at entry)
+    alert = make_dummy_alert(
+        alert_id="test-midcp-prebreached",
+        symbol="MIDCPNIFTY",
+        ltp=404.0,
+        underlying_spot=13764.2,
+        strike=13600.0,
+        option_type="CE",
+        contract_symbol="MIDCPNIFTY26OCT13600CE",
+        actionable_plan={
+            "hedge_plan": {
+                "strategy": "BULL_CALL_SPREAD",
+                "sentiment": "BULLISH",
+                "buy_strike": 13600.0,
+                "sell_strike": 13650.0,
+                "strike_width": 50.0,
+                "entry_spot": 13764.2,
+                "net_debit_per_share": 10.0,
+                "booking_target_70": 38.0,
+                "spread_stop_loss": 5.0,
+            }
+        },
+    )
+
+    # 1 minute later, spot is unchanged (13764.2)
+    res = evaluate_spread_in_flight(alert, current_ltp=13764.2)
+    # Must NOT trigger SPREAD_SHORT_STRIKE_TOUCH or any premature exit milestone
+    assert res is None, (
+        "Should not fire any milestone when spot hasn't moved from pre-breached entry"
+    )
+
+    # Bear Put Spread where entry spot was 24,000, buy strike 24,100 PE, short strike 24,050 PE (pre-breached)
+    alert_pe = make_dummy_alert(
+        alert_id="test-pe-prebreached",
+        symbol="NIFTY",
+        ltp=150.0,
+        underlying_spot=24000.0,
+        strike=24100.0,
+        option_type="PE",
+        actionable_plan={
+            "hedge_plan": {
+                "strategy": "BEAR_PUT_SPREAD",
+                "sentiment": "BEARISH",
+                "buy_strike": 24100.0,
+                "sell_strike": 24050.0,
+                "strike_width": 50.0,
+                "entry_spot": 24000.0,
+                "net_debit_per_share": 15.0,
+                "booking_target_70": 39.5,
+                "spread_stop_loss": 7.5,
+            }
+        },
+    )
+    res_pe = evaluate_spread_in_flight(alert_pe, current_ltp=24000.0)
+    assert res_pe is None, "Bear Put Spread short strike already breached at entry must not fire"
+
+    # Genuine unbreached Bull Call Spread DOES trigger when spot crosses short strike
+    alert_clean = make_dummy_alert(
+        alert_id="test-clean-spread",
+        symbol="MIDCPNIFTY",
+        ltp=120.0,
+        underlying_spot=13700.0,
+        strike=13700.0,
+        option_type="CE",
+        actionable_plan={
+            "hedge_plan": {
+                "strategy": "BULL_CALL_SPREAD",
+                "sentiment": "BULLISH",
+                "buy_strike": 13700.0,
+                "sell_strike": 13800.0,
+                "strike_width": 100.0,
+                "entry_spot": 13700.0,
+                "net_debit_per_share": 30.0,
+                "booking_target_70": 79.0,
+                "spread_stop_loss": 15.0,
+            }
+        },
+    )
+    # At entry: no trigger
+    assert evaluate_spread_in_flight(alert_clean, current_ltp=13700.0) is None
+
+    # Spot moves from 13,700 to 13,805 (crosses 13,800 short strike wall)
+    res_clean = evaluate_spread_in_flight(alert_clean, current_ltp=13805.0)
+    assert res_clean is not None
+    assert res_clean.triggered is True
+    assert res_clean.milestone_type == "SPREAD_SHORT_STRIKE_TOUCH"
+    assert res_clean.pnl_pts > 0

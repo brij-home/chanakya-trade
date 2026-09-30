@@ -76,6 +76,44 @@ class IndexVelocityMetric:
         }
 
 
+@dataclass
+class RocMomentumMetric:
+    """Quantitative Rate-of-Change (ROC) and acceleration metrics on 5m OHLCV."""
+
+    symbol: str
+    consecutive_up: bool  # c[-1] > c[-2] > c[-3]
+    consecutive_down: bool  # c[-1] < c[-2] < c[-3]
+    roc_1: float  # 1-bar ROC %: (c[-1] - c[-2]) / c[-2] * 100
+    roc_2: float  # Previous 1-bar ROC %: (c[-2] - c[-3]) / c[-3] * 100
+    roc_3bar: float  # 3-bar ROC %: (c[-1] - c[-4]) / c[-4] * 100
+    is_accelerating_up: bool  # consecutive_up and roc_1 > roc_2 > 0
+    is_accelerating_down: bool  # consecutive_down and roc_1 < roc_2 < 0 (faster drop)
+    is_decelerating_up: bool  # Price rising, but momentum stalling: roc_1 < roc_2 and roc_1 <= 0.05
+    is_decelerating_down: (
+        bool  # Price falling, but momentum stalling: roc_1 > roc_2 and roc_1 >= -0.05
+    )
+    is_meaningful_up: bool  # Exceeds index-specific threshold for genuine impulse
+    is_meaningful_down: bool  # Exceeds index-specific threshold for genuine breakdown
+    summary: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "symbol": self.symbol,
+            "consecutive_up": self.consecutive_up,
+            "consecutive_down": self.consecutive_down,
+            "roc_1": round(self.roc_1, 3),
+            "roc_2": round(self.roc_2, 3),
+            "roc_3bar": round(self.roc_3bar, 3),
+            "is_accelerating_up": self.is_accelerating_up,
+            "is_accelerating_down": self.is_accelerating_down,
+            "is_decelerating_up": self.is_decelerating_up,
+            "is_decelerating_down": self.is_decelerating_down,
+            "is_meaningful_up": self.is_meaningful_up,
+            "is_meaningful_down": self.is_meaningful_down,
+            "summary": self.summary,
+        }
+
+
 # ── Thread-safe TTL Cache for Velocity Metrics ─────────────────────────
 _velocity_cache_lock = threading.Lock()
 _velocity_cache: dict[str, tuple[float, IndexVelocityMetric]] = {}
@@ -302,3 +340,170 @@ def get_prioritized_index_symbols(indices: Optional[list[str]] = None) -> list[s
     """
     ranked = rank_indices_by_velocity(indices)
     return [m.symbol for m in ranked]
+
+
+# ── ROC Momentum & Acceleration Calculator ─────────────────────────────
+
+
+def calculate_roc_momentum(
+    ohlcv_5m: Optional[pd.DataFrame],
+    symbol: str = "",
+) -> RocMomentumMetric:
+    """
+    Computes 3-bar Rate of Change (ROC) and 2nd derivative acceleration on 5m OHLCV.
+    Deterministic, zero-network, defensive against missing/empty DataFrames.
+
+    Formulation:
+      ROC_1 = (c[-1] - c[-2]) / c[-2] * 100
+      ROC_2 = (c[-2] - c[-3]) / c[-3] * 100
+      ROC_3bar = (c[-1] - c[-4]) / c[-4] * 100
+      is_accelerating_up = consecutive_up and ROC_1 > ROC_2 > 0
+      is_accelerating_down = consecutive_down and ROC_1 < ROC_2 < 0
+      is_decelerating_up = ROC_2 > 0 and ROC_1 < ROC_2 and ROC_1 <= 0.05 (stalling near highs)
+      is_decelerating_down = ROC_2 < 0 and ROC_1 > ROC_2 and ROC_1 >= -0.05 (stalling near lows)
+    """
+    clean_sym = symbol.replace("NSE:", "").replace("BSE:", "").strip().upper()
+
+    null_metric = RocMomentumMetric(
+        symbol=clean_sym,
+        consecutive_up=False,
+        consecutive_down=False,
+        roc_1=0.0,
+        roc_2=0.0,
+        roc_3bar=0.0,
+        is_accelerating_up=False,
+        is_accelerating_down=False,
+        is_decelerating_up=False,
+        is_decelerating_down=False,
+        is_meaningful_up=False,
+        is_meaningful_down=False,
+        summary=f"{clean_sym} ROC: Insufficient data",
+    )
+
+    if ohlcv_5m is None or not hasattr(ohlcv_5m, "iloc") or len(ohlcv_5m) < 3:
+        return null_metric
+
+    try:
+        col_c = "close" if "close" in ohlcv_5m.columns else "Close"
+        closes = [float(x) for x in ohlcv_5m[col_c].values]
+        if len(closes) < 3:
+            return null_metric
+
+        c1 = closes[-1]
+        c2 = closes[-2]
+        c3 = closes[-3]
+        c4 = closes[-4] if len(closes) >= 4 else closes[-3]
+
+        if c2 <= 0 or c3 <= 0 or c4 <= 0:
+            return null_metric
+
+        roc_1 = ((c1 - c2) / c2) * 100.0
+        roc_2 = ((c2 - c3) / c3) * 100.0
+        roc_3bar = ((c1 - c4) / c4) * 100.0
+
+        consecutive_up = bool(c1 > c2 > c3)
+        consecutive_down = bool(c1 < c2 < c3)
+
+        is_accelerating_up = bool(consecutive_up and roc_1 > roc_2 > 0)
+        is_accelerating_down = bool(consecutive_down and roc_1 < roc_2 < 0)
+
+        # Deceleration / Stalling at high:
+        # Prior bars were green (roc_2 > 0), but latest bar is smaller or stalled near zero (roc_1 <= 0.05)
+        is_decelerating_up = bool(roc_2 > 0 and roc_1 < roc_2 and roc_1 <= 0.05)
+        # Deceleration / Stalling at low:
+        is_decelerating_down = bool(roc_2 < 0 and roc_1 > roc_2 and roc_1 >= -0.05)
+
+        # Index-specific meaningful magnitude thresholds:
+        # High-beta / larger point indices (BANKNIFTY, SENSEX, BANKEX) need slightly higher threshold
+        is_high_beta = clean_sym in ("BANKNIFTY", "SENSEX", "BANKEX")
+        up_thresh_1 = 0.15 if is_high_beta else 0.10
+        up_thresh_3 = 0.30 if is_high_beta else 0.20
+        is_meaningful_up = bool(roc_1 >= up_thresh_1 or roc_3bar >= up_thresh_3)
+
+        down_thresh_1 = -0.15 if is_high_beta else -0.10
+        down_thresh_3 = -0.30 if is_high_beta else -0.20
+        is_meaningful_down = bool(roc_1 <= down_thresh_1 or roc_3bar <= down_thresh_3)
+
+        if is_accelerating_up:
+            state = f"ACCELERATING_UP (+{roc_1:.2f}% vs +{roc_2:.2f}%)"
+        elif is_accelerating_down:
+            state = f"ACCELERATING_DOWN ({roc_1:.2f}% vs {roc_2:.2f}%)"
+        elif is_decelerating_up:
+            state = f"STALLING_AT_TOP ({roc_1:+.2f}% vs +{roc_2:.2f}%)"
+        elif is_decelerating_down:
+            state = f"STALLING_AT_BOTTOM ({roc_1:+.2f}% vs {roc_2:.2f}%)"
+        else:
+            state = f"STEADY ({roc_1:+.2f}%)"
+
+        summary = f"{clean_sym} 5m ROC: {state} | 3-bar: {roc_3bar:+.2f}%"
+
+        return RocMomentumMetric(
+            symbol=clean_sym,
+            consecutive_up=consecutive_up,
+            consecutive_down=consecutive_down,
+            roc_1=round(roc_1, 3),
+            roc_2=round(roc_2, 3),
+            roc_3bar=round(roc_3bar, 3),
+            is_accelerating_up=is_accelerating_up,
+            is_accelerating_down=is_accelerating_down,
+            is_decelerating_up=is_decelerating_up,
+            is_decelerating_down=is_decelerating_down,
+            is_meaningful_up=is_meaningful_up,
+            is_meaningful_down=is_meaningful_down,
+            summary=summary,
+        )
+    except Exception as e:
+        logger.debug(f"[IndexVelocity] ROC calculation error for {clean_sym}: {e}")
+        return null_metric
+
+
+# ── Option Premium Velocity Tracker (₹/min) ───────────────────────────
+_premium_velocity_lock = threading.Lock()
+# contract_symbol -> (last_timestamp, last_ltp, smoothed_velocity_rs_per_min)
+_PREMIUM_VELOCITY_CACHE: dict[str, tuple[float, float, float]] = {}
+
+
+def calculate_premium_velocity(
+    contract_symbol: str,
+    ltp: float,
+    now_ts: Optional[float] = None,
+) -> float:
+    """
+    Computes real-time option premium velocity (₹ / minute rate of change).
+    Thread-safe with bounded TTL eviction.
+    Returns:
+        Velocity in ₹ per minute (positive = expanding premium, negative = decaying/falling).
+    """
+    if not contract_symbol or ltp <= 0:
+        return 0.0
+
+    ts = now_ts if now_ts is not None else time.time()
+    clean_sym = contract_symbol.strip().upper()
+
+    with _premium_velocity_lock:
+        # Periodic cleanup of entries older than 10 minutes
+        if len(_PREMIUM_VELOCITY_CACHE) > 500:
+            stale_keys = [k for k, v in _PREMIUM_VELOCITY_CACHE.items() if (ts - v[0]) > 600.0]
+            for k in stale_keys:
+                _PREMIUM_VELOCITY_CACHE.pop(k, None)
+
+        cached = _PREMIUM_VELOCITY_CACHE.get(clean_sym)
+        if cached is None:
+            _PREMIUM_VELOCITY_CACHE[clean_sym] = (ts, ltp, 0.0)
+            return 0.0
+
+        last_ts, last_ltp, prev_vel = cached
+        dt = ts - last_ts
+
+        # Wait at least 3 seconds between updates to avoid tick-noise spikes
+        if dt < 3.0:
+            return prev_vel
+
+        # Calculate instantaneous velocity: ₹ change per minute
+        dl = ltp - last_ltp
+        inst_vel = (dl / dt) * 60.0
+
+        # Exponential moving average smoothing: 0.6 * inst + 0.4 * prev
+        smoothed_vel = round(0.6 * inst_vel + 0.4 * prev_vel, 2)
+        _PREMIUM_VELOCITY_CACHE[clean_sym] = (ts, ltp, smoothed_vel)
+        return smoothed_vel

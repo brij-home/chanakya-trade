@@ -440,16 +440,20 @@ def is_monthly_physical_expiry_week(
         return dte <= 4
 
     # 1. Calendar settlement status: check if now_d is within monthly physical settlement window
-    is_settle, dte_settle = check_monthly_physical_settlement_status(clean_sym, ref_dt=ref_dt or datetime.now(IST))
+    is_settle, dte_settle = check_monthly_physical_settlement_status(
+        clean_sym, ref_dt=ref_dt or datetime.now(IST)
+    )
     if is_settle:
         return True
 
     # 2. If available_expiries passed, check expiries in the current calendar month
     if available_expiries:
         month_avail = [
-            p for exp in available_expiries
+            p
+            for exp in available_expiries
             if (p := _parse_expiry_date(exp)) is not None
-            and p.year == now_d.year and p.month == now_d.month
+            and p.year == now_d.year
+            and p.month == now_d.month
         ]
         if month_avail:
             for p in month_avail:
@@ -467,9 +471,11 @@ def is_monthly_physical_expiry_week(
             if exps:
                 # Find expiries in the same month/year as now_d
                 month_exps = [
-                    p for exp in exps
+                    p
+                    for exp in exps
                     if (p := _parse_expiry_date(exp)) is not None
-                    and p.year == now_d.year and p.month == now_d.month
+                    and p.year == now_d.year
+                    and p.month == now_d.month
                 ]
                 if month_exps:
                     for p in month_exps:

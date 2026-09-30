@@ -1486,6 +1486,8 @@ class MilestoneAlertData:
     is_t1_achieved: bool = False
     hedge_plan: Optional[dict[str, Any]] = None
     spread_entry_debit: Optional[float] = None
+    underlying_spot: Optional[float] = None
+    spread_net_value: Optional[float] = None
 
     @property
     def currency(self) -> str:
@@ -2143,6 +2145,15 @@ class MilestoneAlertData:
                     else None
                 )
             ),
+            underlying_spot=getattr(alert, "underlying_spot", None)
+            or (
+                float(str(act_plan.get("underlying_spot", "")).replace("₹", "").replace(",", ""))
+                if act_plan.get("underlying_spot")
+                and re.search(r"\d", str(act_plan.get("underlying_spot")))
+                else None
+            )
+            or (getattr(alert, "metrics", {}) or {}).get("spot"),
+            spread_net_value=getattr(alert, "spread_net_value", None),
         )
 
 
@@ -2375,10 +2386,11 @@ def render_precursor_alert(data: dict[str, Any], in_market: bool = True) -> str:
     t2 = float(data.get("target_2", 0.0))
     rr = data.get("risk_reward", "1:2.5")
 
+    sym_upper = str(sym).upper()
     is_bear = (
         str(data.get("direction", "")).upper() in ("BEARISH", "SHORT", "SELL")
         or "SHORT" in str(data.get("setup_title", "")).upper()
-        or "PE" in str(sym).upper()
+        or bool(re.search(r"\bPE\b|\d+PE$", sym_upper))
     )
     dir_icon = "🔴" if is_bear else "🟢"
     act_verb = "SELL" if is_bear else "BUY"
@@ -2981,11 +2993,18 @@ def render_milestone_alert(
     if d.symbol and d.symbol not in contract_title:
         contract_title = f"{d.symbol} {contract_title}"
 
-    is_pe = (
-        "PE" in str(d.contract or "").upper()
-        or "PE" in str(d.symbol or "").upper()
-        or str(d.direction).upper() in ("BEARISH", "SHORT", "SELL")
-    )
+    contract_upper = str(d.contract or "").upper()
+    symbol_upper = str(d.symbol or "").upper()
+    if contract_upper.endswith("PE") or re.search(r"\bPE\b|\d+PE$", contract_upper):
+        is_pe = True
+    elif contract_upper.endswith("CE") or re.search(r"\bCE\b|\d+CE$", contract_upper):
+        is_pe = False
+    elif symbol_upper.endswith("PE") or re.search(r"\bPE\b|\d+PE$", symbol_upper):
+        is_pe = True
+    elif symbol_upper.endswith("CE") or re.search(r"\bCE\b|\d+CE$", symbol_upper):
+        is_pe = False
+    else:
+        is_pe = str(d.direction).upper() in ("BEARISH", "SHORT", "SELL")
     color_icon = "🔴" if is_pe else "🟢"
 
     comps = parse_contract_components(contract=d.contract or "", underlying=d.symbol)
@@ -3542,12 +3561,13 @@ def render_milestone_alert(
             or "Net spread value expanded by >= 45%. Trimming 50% long leg covers 100% initial debit."
         )
 
+        spread_val = getattr(d, "spread_net_value", None) or d.ltp
         return (
             f"🛡️ <b>{env_tag} {update_prefix}SPREAD FREE-ROLL UNLOCKED</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"🏆 <b>{color_icon} {contract_title} — 100% RISK-FREE SPREAD</b>\n"
             f"{opt_spec_line}"
-            f"💰 <b>Spread Net Value:</b> {cs}{d.ltp:,.2f}{move_str}\n"
+            f"💰 <b>Spread Net Value:</b> {cs}{spread_val:,.2f}{move_str}\n"
             f"⚡ <b>DECISIVE ACTION:</b> <code>{decisive_act}</code>\n"
             f"💡 <b>Milestone:</b> {diag}"
             f"{orig_plan_line}"
@@ -3585,12 +3605,13 @@ def render_milestone_alert(
             or "70% of maximum spread potential captured; avoid holding for residual 30% tail risk."
         )
 
+        spread_val = getattr(d, "spread_net_value", None) or d.ltp
         return (
             f"🎯 <b>{env_tag} {update_prefix}SPREAD 70% PROFIT TARGET CAPTURED</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"🏆 <b>{color_icon} {contract_title} — DEFINED-RISK SPREAD TARGET</b>\n"
             f"{opt_spec_line}"
-            f"💰 <b>Spread Net Value:</b> {cs}{d.ltp:,.2f}{move_str}\n"
+            f"💰 <b>Spread Net Value:</b> {cs}{spread_val:,.2f}{move_str}\n"
             f"⚡ <b>DECISIVE ACTION:</b> <code>{decisive_act}</code>\n"
             f"💡 <b>Diagnosis:</b> {diag}"
             f"{orig_plan_line}"
@@ -3628,12 +3649,23 @@ def render_milestone_alert(
             or f"Spot reached short strike wall ({cs}{d.target_level or 0:,.0f}). Spread delta flattened to ~0."
         )
 
+        spread_val = getattr(d, "spread_net_value", None)
+        spot_val = getattr(d, "underlying_spot", None)
+        if spot_val and spot_val > 0:
+            val_info = f"💰 <b>Spot:</b> {cs}{spot_val:,.1f}"
+            if spread_val is not None:
+                val_info += f" · <b>Spread Net Value:</b> {cs}{spread_val:,.2f}"
+            val_info += f"{move_str}\n"
+        else:
+            spread_val_final = spread_val if spread_val is not None else d.ltp
+            val_info = f"💰 <b>Spread Net Value:</b> {cs}{spread_val_final:,.2f}{move_str}\n"
+
         return (
             f"⚠️ <b>{env_tag} {update_prefix}SPREAD SHORT STRIKE PIN WALL</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"🚨 <b>{color_icon} {contract_title} — PIN WALL REACHED</b>\n"
             f"{opt_spec_line}"
-            f"💰 <b>Spot / Spread:</b> {cs}{d.ltp:,.2f}{move_str}\n"
+            f"{val_info}"
             f"⚡ <b>DECISIVE ACTION:</b> <code>{decisive_act}</code>\n"
             f"💡 <b>Diagnosis:</b> {diag}"
             f"{orig_plan_line}"
@@ -3668,12 +3700,13 @@ def render_milestone_alert(
         )
         diag = d.rationale or "50% net debit capital eroded; underlying thesis invalidated."
 
+        spread_val = getattr(d, "spread_net_value", None) or d.ltp
         return (
             f"🛑 <b>{env_tag} {update_prefix}SPREAD RISK MITIGATION EXIT</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"🚨 <b>{color_icon} {contract_title} — 50% DEBIT EROSION</b>\n"
             f"{opt_spec_line}"
-            f"💰 <b>Spread Net Value:</b> {cs}{d.ltp:,.2f}{move_str}\n"
+            f"💰 <b>Spread Net Value:</b> {cs}{spread_val:,.2f}{move_str}\n"
             f"⚡ <b>DECISIVE ACTION:</b> <code>{decisive_act}</code>\n"
             f"🛑 <b>Diagnosis:</b> {diag}"
             f"{orig_plan_line}"
@@ -3917,13 +3950,36 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
         elif getattr(alert, "alert_type", "") in ("GAMMA_BLAST", "OPTIONS_MOMENTUM") or getattr(
             alert, "option_type", None
         ):
-            is_put = (
-                getattr(alert, "option_type", "") == "PE"
-                or (getattr(alert, "direction", "") or "").upper() in ("BEARISH", "SHORT", "SELL")
-                or "PE" in str(getattr(alert, "contract_symbol", "")).upper()
-                or "PE" in str(getattr(alert, "headline", "")).upper()
-            )
-            opt_tag = "OPTIONS PUT SURGE" if is_put else "OPTIONS BREAKOUT"
+            opt_type = (getattr(alert, "option_type", "") or "").upper()
+            contract = str(getattr(alert, "contract_symbol", "") or "").upper()
+            direction = (getattr(alert, "direction", "") or "").upper()
+            # Strict CE/PE determination: option_type > contract_symbol suffix > direction
+            # This prevents a CE alert from ever receiving a PUT label
+            if opt_type == "PE":
+                is_put = True
+            elif opt_type == "CE":
+                is_put = False
+            elif contract.endswith("PE") or re.search(r"\bPE\b|\d+PE$", contract):
+                is_put = True
+            elif contract.endswith("CE") or re.search(r"\bCE\b|\d+CE$", contract):
+                is_put = False
+            else:
+                is_put = direction in ("BEARISH", "SHORT", "SELL")
+
+            # FIX: alert_type-specific header takes STRICT PRIORITY over generic PUT/CE labels.
+            # Prevents OPENING_DRIVE_IGNITION CE from being labelled "OPTIONS PUT SURGE".
+            alert_type_val = getattr(alert, "alert_type", "")
+            if alert_type_val in ("OPENING_DRIVE", "OPENING_DRIVE_IGNITION"):
+                opt_tag = "OPENING DRIVE BREAKDOWN" if is_put else "OPENING DRIVE IGNITION"
+            elif alert_type_val == "GAMMA_BLAST":
+                opt_tag = "GAMMA BLAST (PUT)" if is_put else "GAMMA BLAST"
+            elif alert_type_val == "OPTIONS_MOMENTUM":
+                opt_tag = "OPTIONS PUT SURGE" if is_put else "OPTIONS BREAKOUT"
+            elif alert_type_val in ("INDEX_PUT_SETUP", "INDEX_CALL_SETUP"):
+                opt_tag = "INDEX PUT SETUP" if is_put else "INDEX CALL SETUP"
+            else:
+                # Generic options alert: label strictly by CE/PE, never assume PUT for CE
+                opt_tag = "OPTIONS PUT SURGE" if is_put else "OPTIONS BREAKOUT"
             icon = "🔴" if is_put else "🟢"
             tg_header = f"{icon} <b>{env_tag} NEW CALL · {opt_tag}</b>"
         elif getattr(alert, "time_horizon", "") == "MULTIBAGGER" or getattr(
@@ -4012,6 +4068,35 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
         ):
             act = re.sub(r"\b(CE|PE)\b", "", act, flags=re.IGNORECASE).strip()
             act = re.sub(r"\s+", " ", act)
+
+        # If action is labelled as SPREAD but the target instrument is a single option contract (CE/PE),
+        # normalize action verb to BUY so that the single leg's entry/SL/target match the action,
+        # and attach a clear reference to the attached Defined-Risk Spread below.
+        spread_ref_inline = ""
+        has_hedge_box = bool(
+            actionable_plan.get("hedge_plan")
+            or (
+                isinstance(getattr(alert, "metrics", None), dict)
+                and alert.metrics.get("hedge_plan")
+            )
+        )
+        if "SPREAD" in act.upper() and any(tok in inst_u for tok in (" CE", " PE", "CE", "PE")):
+            act = "BUY"
+
+        if has_hedge_box:
+            pref_veh = ""
+            hp = actionable_plan.get("hedge_plan") or (
+                alert.metrics.get("hedge_plan")
+                if isinstance(getattr(alert, "metrics", None), dict)
+                else {}
+            )
+            if isinstance(hp, dict):
+                pref_veh = hp.get("preferred_vehicle", "")
+            if pref_veh in ("HEDGED_SPREAD", "SPREAD_ONLY", "RATIO_SPREAD_1X2"):
+                spread_ref_inline = " <i>(Hedged Spread Preferred 👇)</i>"
+            else:
+                spread_ref_inline = " <i>(or Hedged Spread below 👇)</i>"
+
         entry = (
             actionable_plan.get("recommended_entry")
             or actionable_plan.get("entry_range")
@@ -4186,7 +4271,7 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
 
         plan_str = (
             f"{exp_line}"
-            f"• <b>Action:</b> {act} <b>{inst}</b> @ <code>{entry}</code>{lot_beside_p}{opt_cmp_str}{spot_ref}\n"
+            f"• <b>Action:</b> {act} <b>{inst}</b> @ <code>{entry}</code>{lot_beside_p}{opt_cmp_str}{spot_ref}{spread_ref_inline}\n"
             f"• <b>SL:</b> <code>{sl}</code>{spot_anchor_str}\n"
             f"• <b>T1:</b> <code>{tgt}</code>{tgt2_str}\n"
             f"• <b>R:R:</b> <b>{rr}</b>{lot_str}{no_chase_inline}"
@@ -4545,11 +4630,23 @@ def render_auto_alert(alert: Any, in_market: bool = True) -> str:
 
         warn_block = ("\n" + "\n".join(warn_notes)) if warn_notes else ""
 
+        greeks_str = ""
+        net_delta = hedge_plan.get("net_spread_delta") or hedge_plan.get("net_delta")
+        long_delta = hedge_plan.get("long_delta")
+        short_delta = hedge_plan.get("short_delta")
+        if net_delta is not None and long_delta is not None and short_delta is not None:
+            sign = "+" if net_delta > 0 else ""
+            greeks_str = f"\n• <b>Greeks:</b> Net Delta <code>{sign}{net_delta:.2f}</code> (Long: {long_delta:.2f} | Short: {short_delta:.2f})"
+
+        adapt_note = hedge_plan.get("adaptive_regime")
+        adapt_str = f" · <i>{adapt_note}</i>" if adapt_note else ""
+
         hedge_box = (
             f"\n\n🛡️ <b>DEFINED-RISK HEDGE SPREAD{chop_banner}</b>\n"
-            f"• <b>Strategy:</b> <code>{strat}</code> ({rr_h})\n"
+            f"• <b>Strategy:</b> <code>{strat}</code> ({rr_h}){adapt_str}\n"
             f"• <b>Leg 1 (Long):</b> <code>{buy_leg}</code>\n"
-            f"• <b>Leg 2 (Short):</b> <code>{sell_leg}</code>\n"
+            f"• <b>Leg 2 (Short):</b> <code>{sell_leg}</code>"
+            f"{greeks_str}\n"
             f"• <b>Net Debit / Max Loss:</b> <code>₹{net_deb:,.1f}/sh (₹{max_l:,.0f} total)</code>\n"
             f"• <b>Max Profit Potential:</b> <code>₹{max_p:,.0f}</code>\n"
             f"• <b>Booking Target (70%):</b> {target_str}\n"

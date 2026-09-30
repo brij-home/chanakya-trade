@@ -303,21 +303,67 @@ def build_defined_risk_hedge_plan(
         or any(x in clean_sym for x in ("NIFTY", "SENSEX", "BANKEX"))
     )
 
+    # 2. Volatility & Midday Regime
+    current_vix = vix
+    if current_vix is None:
+        try:
+            from market.indices import get_vix
+
+            current_vix = get_vix() or 14.0
+        except Exception:
+            current_vix = 14.0
+
+    is_low_vix_range = current_vix < 13.0
+    is_midday_chop = (dtime(11, 30) <= now_time <= dtime(14, 0)) and (vel_score < 65)
+    is_chop_regime = is_midday_chop or is_low_vix_range or (vel_score < 55)
+    is_explosive = vel_score >= 75
+    is_high_iv = current_vix > 16.5
+
+    # 3. Determine strike interval & calibrated spread width
     if is_sensex:
         step = 100.0
-        width = spread_width or (400.0 if asymmetric_r_r else 300.0)
+        if is_chop_regime:
+            width = spread_width or 400.0
+            adaptive_regime_desc = "CHOP / RANGE DEFENSE (400 pt width)"
+        elif is_explosive:
+            width = spread_width or 700.0
+            adaptive_regime_desc = "HIGH-VELOCITY MOMENTUM / THRUST (700 pt width)"
+        else:
+            width = spread_width or 600.0
+            adaptive_regime_desc = "TREND CONTINUATION (600 pt width)"
     elif is_banknifty:
         step = 100.0
-        width = spread_width or (300.0 if asymmetric_r_r else 200.0)
-    elif is_nifty:
+        if is_chop_regime:
+            width = spread_width or 300.0
+            adaptive_regime_desc = "CHOP / RANGE DEFENSE (300 pt width)"
+        elif is_explosive:
+            width = spread_width or 500.0
+            adaptive_regime_desc = "HIGH-VELOCITY MOMENTUM / THRUST (500 pt width)"
+        else:
+            width = spread_width or 400.0
+            adaptive_regime_desc = "TREND CONTINUATION (400 pt width)"
+    elif is_nifty or is_finnifty:
         step = 50.0
-        width = spread_width or (100.0 if asymmetric_r_r else 50.0)
-    elif is_finnifty:
-        step = 50.0
-        width = spread_width or (100.0 if asymmetric_r_r else 50.0)
+        if is_chop_regime:
+            width = spread_width or 100.0
+            adaptive_regime_desc = "CHOP / RANGE DEFENSE (100 pt width)"
+        elif is_explosive:
+            width = spread_width or 200.0
+            adaptive_regime_desc = "HIGH-VELOCITY MOMENTUM / THRUST (200 pt width)"
+        else:
+            width = spread_width or 150.0
+            adaptive_regime_desc = "TREND CONTINUATION (150 pt width)"
     elif is_midcpnifty:
         step = 25.0
-        width = spread_width or (75.0 if asymmetric_r_r else 50.0)
+        if is_chop_regime:
+            width = spread_width or 75.0
+            adaptive_regime_desc = "CHOP / RANGE DEFENSE (75 pt width)"
+        elif is_explosive:
+            width = spread_width or 125.0
+            adaptive_regime_desc = "HIGH-VELOCITY MOMENTUM / THRUST (125 pt width)"
+        else:
+            width = spread_width or 100.0
+            adaptive_regime_desc = "TREND CONTINUATION (100 pt width)"
     else:
         # Single-stock F&O: dynamic step based on stock price
         if spot >= 5000:
@@ -330,20 +376,15 @@ def build_defined_risk_hedge_plan(
             step = 10.0
         else:
             step = 5.0
-        width = spread_width or (step * 2.0 if asymmetric_r_r else step)
-
-    # 3. Volatility & Midday Regime
-    current_vix = vix
-    if current_vix is None:
-        try:
-            from market.indices import get_vix
-
-            current_vix = get_vix() or 14.0
-        except Exception:
-            current_vix = 14.0
-
-    is_midday_chop = (dtime(11, 30) <= now_time <= dtime(14, 0)) and (vel_score < 70)
-    is_high_iv = current_vix > 16.5
+        if is_chop_regime:
+            width = spread_width or (step * 2.0 if asymmetric_r_r else step)
+            adaptive_regime_desc = f"CHOP / RANGE DEFENSE ({int(width)} pt width)"
+        elif is_explosive:
+            width = spread_width or (step * 4.0 if asymmetric_r_r else step * 2.0)
+            adaptive_regime_desc = f"HIGH-VELOCITY MOMENTUM / THRUST ({int(width)} pt width)"
+        else:
+            width = spread_width or (step * 3.0 if asymmetric_r_r else step * 2.0)
+            adaptive_regime_desc = f"TREND CONTINUATION ({int(width)} pt width)"
 
     is_bullish = str(direction).upper() in ("BULLISH", "LONG", "BUY") or opt_type == "CE"
 
@@ -429,6 +470,19 @@ def build_defined_risk_hedge_plan(
                 )
                 and float(getattr(c, "last_price", 0.0) or 0.0) > 0.0
             ]
+            if not cands:
+                # If chain doesn't extend far enough, pick the best available OTM strike beyond long strike
+                cands = [
+                    c
+                    for c in chain
+                    if getattr(c, "option_type", "") == opt_type
+                    and (
+                        getattr(c, "strike", 0.0) > strike
+                        if is_bullish
+                        else getattr(c, "strike", 0.0) < strike
+                    )
+                    and float(getattr(c, "last_price", 0.0) or 0.0) > 0.0
+                ]
             if cands:
                 cands.sort(key=lambda c: abs(getattr(c, "strike", 0.0) - sell_strike))
                 sell_strike = float(cands[0].strike)
@@ -456,6 +510,29 @@ def build_defined_risk_hedge_plan(
 
     booking_target_70 = round(net_debit + 0.70 * (actual_width - net_debit), 2)
     stop_loss_val = round(net_debit * 0.50, 2)
+
+    # 5b. Greeks Calculation
+    long_delta = 0.50 if is_bullish else -0.50
+    short_delta = 0.28 if is_bullish else -0.28
+    net_spread_delta = 0.22 if is_bullish else -0.22
+    try:
+        from engine.options_backtest import bs_delta
+        from engine.alert_expiry import get_expiry_metadata
+
+        dte = 7
+        try:
+            exp_meta = get_expiry_metadata(expiry_date, None, clean_sym, None)
+            if exp_meta and "dte" in exp_meta:
+                dte = max(0, int(exp_meta["dte"]))
+        except Exception:
+            pass
+
+        iv_val = max(0.10, (current_vix / 100.0) if current_vix else 0.14)
+        long_delta = bs_delta(spot, strike, dte, iv_val, opt_type)
+        short_delta = bs_delta(spot, sell_strike, dte, iv_val, opt_type)
+        net_spread_delta = round(long_delta - short_delta, 2)
+    except Exception:
+        pass
 
     strat_title = strat_name.replace("_", " ").title()
     desc = f"Buy {int(strike)} {opt_type} & Sell {int(sell_strike)} {opt_type} (Defined Risk / Capped Loss)"
@@ -609,9 +686,21 @@ def build_defined_risk_hedge_plan(
         "buy_strike": strike,
         "sell_strike": sell_strike,
         "short_strike": sell_strike,
+        "long_delta": round(long_delta, 2),
+        "short_delta": round(short_delta, 2),
+        "net_spread_delta": net_spread_delta,
+        "net_delta": net_spread_delta,
+        "adaptive_regime": adaptive_regime_desc,
+        "greeks": {
+            "long_delta": round(long_delta, 2),
+            "short_delta": round(short_delta, 2),
+            "net_delta": net_spread_delta,
+        },
         "buy_premium": opt_ltp,
         "sell_premium": sell_prem,
+        "step": step,
         "strike_width": actual_width,
+        "entry_spot": spot,
         "net_debit_per_share": net_debit,
         "net_debit_total": max_loss,
         "max_loss": max_loss,
@@ -676,11 +765,24 @@ def evaluate_spread_in_flight(
     spot = 0.0
     if current_ltp and current_ltp > (buy_strike * 0.5):
         spot = float(current_ltp)
-    elif getattr(alert, "underlying_spot", None) and float(alert.underlying_spot) > 0:
+    elif quotes_map:
+        sym = getattr(alert, "symbol", "")
+        for k in (sym, f"NSE:{sym}", f"BSE:{sym}", f"MCX:{sym}", f"NFO:{sym}"):
+            if k in quotes_map:
+                v = quotes_map[k]
+                val = (
+                    getattr(v, "last_price", None)
+                    or getattr(v, "ltp", None)
+                    or (v if isinstance(v, (int, float)) else 0.0)
+                )
+                if float(val or 0.0) > (buy_strike * 0.5):
+                    spot = float(val)
+                    break
+    if spot <= 0 and getattr(alert, "underlying_spot", None) and float(alert.underlying_spot) > 0:
         spot = float(alert.underlying_spot)
-    elif getattr(alert, "ltp", None) and float(alert.ltp) > (buy_strike * 0.5):
+    elif spot <= 0 and getattr(alert, "ltp", None) and float(alert.ltp) > (buy_strike * 0.5):
         spot = float(alert.ltp)
-    else:
+    elif spot <= 0:
         try:
             from market.quotes import get_ltp
 
@@ -692,6 +794,12 @@ def evaluate_spread_in_flight(
 
     if spot <= 0:
         return None
+
+    # Entry spot baseline: prefer explicit entry_spot, fallback to buy_strike if synthetic test mock
+    has_explicit_entry = bool(hedge_plan.get("entry_spot") or getattr(alert, "entry_spot", None))
+    entry_baseline = float(
+        hedge_plan.get("entry_spot") or getattr(alert, "entry_spot", 0.0) or buy_strike
+    )
 
     # 2. Estimate or resolve current spread value
     current_net_val = None
@@ -710,12 +818,12 @@ def evaluate_spread_in_flight(
                 if b_ltp > 0 and s_ltp > 0:
                     current_net_val = round(b_ltp - s_ltp, 2)
 
-    # If leg quotes are absent, model intrinsic spread expansion from spot progress
+    # If leg quotes are absent, model intrinsic spread expansion from spot progress since entry
     if current_net_val is None:
         if is_bullish:
-            spot_progress = max(0.0, min(width, spot - buy_strike))
+            spot_progress = max(0.0, min(width, spot - entry_baseline))
         else:
-            spot_progress = max(0.0, min(width, buy_strike - spot))
+            spot_progress = max(0.0, min(width, entry_baseline - spot))
         # Net spread expansion tracks spot progress bounded between 0 and width
         current_net_val = round(max(0.1, min(width * 0.95, net_debit + (spot_progress * 0.65))), 2)
 
@@ -730,7 +838,33 @@ def evaluate_spread_in_flight(
     achieved = getattr(alert, "achieved_milestones", None) or []
 
     # Trigger A: Short Strike Wall Reached (Delta collapsing to ~0)
-    is_short_strike_hit = (spot >= sell_strike) if is_bullish else (spot <= sell_strike)
+    # Invariant: A short strike that was ALREADY breached or reached at entry can NEVER trigger this milestone.
+    was_already_breached_at_entry = (
+        (
+            has_explicit_entry
+            and (
+                (entry_baseline >= (sell_strike * 0.999))
+                if is_bullish
+                else (entry_baseline <= (sell_strike * 1.001))
+            )
+        )
+        if entry_baseline > 0 and sell_strike > 0
+        else False
+    )
+
+    is_short_strike_hit = (
+        (
+            spot >= sell_strike
+            and (spot > entry_baseline or not has_explicit_entry)
+            and not was_already_breached_at_entry
+        )
+        if is_bullish
+        else (
+            spot <= sell_strike
+            and (spot < entry_baseline or not has_explicit_entry)
+            and not was_already_breached_at_entry
+        )
+    )
     if is_short_strike_hit and sell_strike > 0:
         headline = (
             f"⚠️ {env_tag} SPREAD SHORT STRIKE REACHED: {symbol} (Pin Wall @ ₹{sell_strike:,.0f})"

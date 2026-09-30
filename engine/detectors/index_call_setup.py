@@ -43,6 +43,7 @@ _SETUP_ICONS = {
     "DAY_LOW_DEMAND_BOUNCE": "🟢",
     "FAILED_DAY_LOW_BREAKDOWN": "⚡",
     "VWAP_RECLAIM": "🟢",
+    "VWAP_BREAKOUT": "🚀",
     "DEMAND_ZONE_SWEEP": "⚡",
     "BEARISH_EXHAUSTION_CE": "🎯",
     "DOUBLE_BOTTOM_BREAKOUT": "🟢",
@@ -206,6 +207,16 @@ def detect_index_call_setup(
         except Exception:
             df_today_5m = ohlcv_5m
 
+    active_ohlcv = df_today_5m if df_today_5m is not None else ohlcv_5m
+    try:
+        from engine.index_velocity import calculate_roc_momentum, calculate_premium_velocity
+
+        roc_metric = calculate_roc_momentum(active_ohlcv, symbol=clean_sym)
+    except Exception:
+        from engine.index_velocity import calculate_roc_momentum, calculate_premium_velocity
+
+        roc_metric = calculate_roc_momentum(None, symbol=clean_sym)
+
     is_bse = clean_sym in ("SENSEX", "BANKEX")
     opt_exchange = "BFO" if is_bse else "NFO"
     effective_vwap = vwap if (vwap and vwap > 0) else spot
@@ -228,12 +239,27 @@ def detect_index_call_setup(
     else:
         min_oi, min_vol = 5000, 1000
 
+    # Fix #6 (P1): Time-of-day OI relaxation — opening-range setups
+    # Before 09:45 IST, options OI hasn't built to full session liquidity yet.
+    # The best R:R setups of the day (PDL rejection, ORB) happen in first 30 min
+    # but get silently dropped because chain hasn't accumulated target OI.
+    # Apply a graduated relaxation that normalizes by 09:45 IST.
+    _session_minute = (curr_time.hour * 60 + curr_time.minute) - (9 * 60 + 15)  # mins since open
+    if _session_minute <= 20:  # Before 09:35 IST: 40% threshold
+        min_oi = max(50, int(min_oi * 0.40))
+        min_vol = max(50, int(min_vol * 0.40))
+    elif _session_minute <= 30:  # 09:35–09:45 IST: 60% threshold
+        min_oi = max(100, int(min_oi * 0.60))
+        min_vol = max(100, int(min_vol * 0.60))
+    # After 09:45 IST: full standard thresholds apply
+
+    min_contract_prem = 2.0 if clean_sym in ("MIDCPNIFTY", "FINNIFTY") else 3.5
     ce_contracts = [
         c
         for c in chain
         if getattr(c, "option_type", "") == "CE"
         and abs(getattr(c, "strike", 0.0) - spot) / max(1.0, spot) <= 0.012
-        and getattr(c, "last_price", 0.0) >= 5.0
+        and getattr(c, "last_price", 0.0) >= min_contract_prem
         and getattr(c, "volume", 0) >= min_vol
         and getattr(c, "oi", 0) >= min_oi
     ]
@@ -245,11 +271,11 @@ def detect_index_call_setup(
         lp = float(getattr(c, "last_price", 0.0) or 0.0)
         vol = int(getattr(c, "volume", 0) or 0)
         oi = int(getattr(c, "oi", 0) or 1)
-        vol_oi = vol / max(1, oi)
+        vol_oi = min(4.0, vol / max(1, oi))
         dist_pct = abs(float(getattr(c, "strike", 0.0) or 0.0) - spot) / max(1.0, spot)
         ideal_prem = 40.0 if clean_sym in ("MIDCPNIFTY", "FINNIFTY", "SENSEX") else 125.0
         prem_dist = abs(lp - ideal_prem) / ideal_prem if lp > 0 else 2.0
-        return (vol_oi * 15.0) + (min(10.0, vol / 500.0)) - (dist_pct * 300.0) - (prem_dist * 5.0)
+        return (vol_oi * 10.0) + (min(10.0, vol / 500.0)) - (dist_pct * 800.0) - (prem_dist * 5.0)
 
     ce_contracts.sort(key=_contract_score, reverse=True)
 
@@ -258,6 +284,12 @@ def detect_index_call_setup(
     cand_ce_vol = getattr(best_cand_ce, "volume", 0)
     cand_ce_oi = getattr(best_cand_ce, "oi", 0)
     cand_ce_vol_oi = round(cand_ce_vol / max(1, cand_ce_oi), 2)
+    cand_ce_oi_change = int(getattr(best_cand_ce, "oi_change", 0) or 0)
+    cand_ce_oi_roc = (
+        round((cand_ce_oi_change / max(1, cand_ce_oi - cand_ce_oi_change)) * 100.0, 1)
+        if cand_ce_oi > cand_ce_oi_change and cand_ce_oi_change > 0
+        else 0.0
+    )
     is_breakout_momentum = (
         cand_ce_pchange >= 15.0 and cand_ce_vol_oi >= 1.2
     ) or cand_ce_vol_oi >= 2.0
@@ -287,12 +319,7 @@ def detect_index_call_setup(
     # Veto only when: PCR < 0.65 AND writers are actively adding new calls (ceiling building)
     # NOT when writers are unwinding (short squeeze = CE rally signal)
     _pcr_writers_adding_ce = ce_oi_change_sum > 0
-    if (
-        chain_pcr is not None
-        and chain_pcr < 0.65
-        and _pcr_writers_adding_ce
-        and not is_explosive_momentum
-    ):
+    if chain_pcr is not None and chain_pcr < 0.65 and _pcr_writers_adding_ce:
         logger.info(
             f"[IndexCallSetup] Suppressed CE setup on {clean_sym}: Active Call Writing Wall "
             f"(PCR: {chain_pcr:.2f} < 0.65, CE OI adding {ce_oi_change_sum:+,}). Ceiling-building writers resist breakout."
@@ -304,6 +331,57 @@ def detect_index_call_setup(
             f"→ NOT a ceiling, this is a short-squeeze signal. Allowing CE setup to proceed."
         )
 
+    # ── Strike Wall Radar: Max Call OI Resistance vs Short Squeeze Unwind ──
+    ce_contracts_oi = [
+        c
+        for c in chain
+        if getattr(c, "option_type", "") == "CE" and int(getattr(c, "oi", 0) or 0) > 0
+    ]
+    pe_contracts_oi = [
+        c
+        for c in chain
+        if getattr(c, "option_type", "") == "PE" and int(getattr(c, "oi", 0) or 0) > 0
+    ]
+    max_ce_contract = (
+        max(ce_contracts_oi, key=lambda c: int(getattr(c, "oi", 0) or 0))
+        if ce_contracts_oi
+        else None
+    )
+    max_pe_contract = (
+        max(pe_contracts_oi, key=lambda c: int(getattr(c, "oi", 0) or 0))
+        if pe_contracts_oi
+        else None
+    )
+    max_call_oi_strike = (
+        float(getattr(max_ce_contract, "strike", 0.0) or 0.0) if max_ce_contract else None
+    )
+    max_put_oi_strike = (
+        float(getattr(max_pe_contract, "strike", 0.0) or 0.0) if max_pe_contract else None
+    )
+    max_ce_oi_change = int(getattr(max_ce_contract, "oi_change", 0) or 0) if max_ce_contract else 0
+    max_pe_oi_change = int(getattr(max_pe_contract, "oi_change", 0) or 0) if max_pe_contract else 0
+
+    is_call_wall_collision = False
+    is_short_squeeze_unwind = False
+    call_wall_dist_pct = None
+
+    if max_call_oi_strike and max_call_oi_strike > 0 and spot > 0:
+        call_wall_dist_pct = round(((max_call_oi_strike - spot) / spot) * 100.0, 3)
+        # Collision: Spot is within 0.15% beneath the Max Call OI strike and writers are actively adding
+        if 0.0 < call_wall_dist_pct <= 0.15 and max_ce_oi_change > 0:
+            is_call_wall_collision = True
+            logger.info(
+                f"[IndexCallSetup] Max Call OI Wall Collision: Spot ₹{spot:,.1f} is {call_wall_dist_pct:.2f}% "
+                f"below Call Wall ₹{max_call_oi_strike:,.0f} with writers adding ({max_ce_oi_change:+,}). Mandating Bull Call Spread."
+            )
+        # Short Squeeze: Spot has reclaimed at or above the Max Call OI strike AND writers are unwinding
+        elif spot >= max_call_oi_strike and max_ce_oi_change < 0:
+            is_short_squeeze_unwind = True
+            logger.info(
+                f"[IndexCallSetup] SHORT SQUEEZE UNWIND: Spot ₹{spot:,.1f} broke above Max Call Wall ₹{max_call_oi_strike:,.0f} "
+                f"with call writers unwinding ({max_ce_oi_change:+,})."
+            )
+
     # ── Optimization 2: Index Heavyweight Breadth Confluence Matrix (HBCM) ──
     hw_posture: dict[str, Any] = {}
     hbcm_dict: dict[str, Any] = {}
@@ -312,12 +390,13 @@ def detect_index_call_setup(
         from market.indices import get_heavyweights_posture
 
         hw_posture = get_heavyweights_posture(clean_sym)
-        # Pass allow_weighted_fallback when momentum is explosive so that 3/5 heavyweights
-        # with >= 55% combined weight can satisfy the confluence gate on fast rally days.
+        # Pass allow_weighted_fallback when momentum is active or V-bottom escape is triggered so that
+        # 3/5 heavyweights with >= 55% combined weight can satisfy the confluence gate on fast rally days.
+        _allow_weighted = is_explosive_momentum or is_breakout_momentum or _breadth_bypassed
         hbcm_res = evaluate_hbcm(
             clean_sym,
             "BULLISH",
-            allow_weighted_fallback=is_explosive_momentum,
+            allow_weighted_fallback=_allow_weighted,
         )
         hbcm_dict = hbcm_res.to_dict()
 
@@ -325,16 +404,64 @@ def detect_index_call_setup(
             hbcm_res.summary or ""
         ).startswith("HBCM_TEST_PASSTHROUGH")
         if has_hbcm_quotes:
-            if not hbcm_res.confluence_pass and not is_explosive_momentum:
-                logger.info(
-                    f"[IndexCallSetup] Suppressed CE setup on {clean_sym}: {hbcm_res.rejection_reason}"
+            if not hbcm_res.confluence_pass:
+                # If market breadth bypassed via strong V-bottom bounce (price action voted)
+                # and at least 3 heavyweights are already bullish or net heavyweights bullish:
+                _v_bottom_hbcm_pass = _breadth_bypassed and (
+                    hbcm_res.bullish_count >= 3
+                    or (
+                        hbcm_res.bullish_count > hbcm_res.bearish_count
+                        and hbcm_res.bullish_count >= 2
+                    )
                 )
-                return []
+                # Fix #4 (P1): Explosive Momentum HBCM Bypass
+                # Heavyweights LAG the index by 1-3 minutes during fast institutional breakouts.
+                # When option momentum is explosive (vol/OI ≥ 3.0x or CE premium +25%+), the market
+                # has voted with order flow. Lower the HBCM bar to ≥ 1 bullish heavyweight so we
+                # fire 2-4 min earlier — before 80% of the option move is gone.
+                _explosive_momentum_hbcm_pass = (
+                    is_explosive_momentum
+                    and hbcm_res.bullish_count >= 1  # at least one locomotive aligned
+                    and not getattr(hbcm_res, "all_bearish", False)  # not all heavies fighting
+                )
+                # Fix #7: ROC Momentum Acceleration HBCM Bypass
+                # Continuous accelerating positive ROC (d²P/dt² > 0) with meaningful magnitude
+                # confirms institutional thrust. Heavyweights lag during impulse rallies;
+                # as long as at least 1 heavyweight is pulling (bullish_count >= 1) and not all
+                # heavyweights are bearish, allow the CE setup.
+                _roc_hbcm_pass = (
+                    roc_metric.is_accelerating_up
+                    and roc_metric.is_meaningful_up
+                    and hbcm_res.bullish_count >= 1
+                    and not getattr(hbcm_res, "all_bearish", False)
+                )
+                if not (_v_bottom_hbcm_pass or _explosive_momentum_hbcm_pass or _roc_hbcm_pass):
+                    logger.info(
+                        f"[IndexCallSetup] Suppressed CE setup on {clean_sym}: {hbcm_res.rejection_reason}"
+                    )
+                    return []
+                elif _roc_hbcm_pass:
+                    logger.info(
+                        f"[IndexCallSetup] ROC ACCELERATION HBCM Bypass: CE setup on {clean_sym} allowed "
+                        f"with {hbcm_res.bullish_count}/5 bullish heavyweights — "
+                        f"price velocity accelerating (ROC_1=+{roc_metric.roc_1:.2f}%, 3-bar=+{roc_metric.roc_3bar:.2f}%)."
+                    )
+                elif _explosive_momentum_hbcm_pass:
+                    logger.info(
+                        f"[IndexCallSetup] EXPLOSIVE MOMENTUM HBCM Bypass: CE setup on {clean_sym} allowed "
+                        f"with {hbcm_res.bullish_count}/5 bullish heavyweights — "
+                        f"option vol/OI surge confirms institutional breakout (heavyweights lagging by ~2min)."
+                    )
+                else:
+                    logger.info(
+                        f"[IndexCallSetup] V-Bottom Price Action Confluence: Allowed CE setup on {clean_sym} "
+                        f"with {hbcm_res.bullish_count}/5 bullish heavyweights (V-bottom bounce overrides lagging constituent)."
+                    )
         else:
             active_hw = hw_posture.get("heavyweights", [])
             hw_total = len(active_hw)
             hw_bulls = hw_posture.get("bull_count", 0)
-            if hw_posture.get("all_bearish") and not is_explosive_momentum:
+            if hw_posture.get("all_bearish"):
                 hw_tags = [f"{h['symbol']} ({h['change_pct']:+.2f}%)" for h in active_hw]
                 logger.info(
                     f"[IndexCallSetup] Suppressed CE setup on {clean_sym}: Heavyweight locomotives in structural markdown "
@@ -342,8 +469,27 @@ def detect_index_call_setup(
                 )
                 return []
 
+            _roc_hw_pass = (
+                roc_metric.is_accelerating_up
+                and roc_metric.is_meaningful_up
+                and hw_bulls >= 1
+                and not hw_posture.get("all_bearish")
+            )
+            hw_bears = hw_posture.get("bear_count", 0)
+            if (
+                hw_total >= 3
+                and hw_bears > hw_bulls
+                and not (is_explosive_momentum or _roc_hw_pass)
+            ):
+                hw_tags = [f"{h['symbol']} ({h['change_pct']:+.2f}%)" for h in active_hw]
+                logger.info(
+                    f"[IndexCallSetup] Suppressed CE setup on {clean_sym}: Heavyweights are net bearish "
+                    f"({hw_bears} bears vs {hw_bulls} bulls: {', '.join(hw_tags)}). Disallow call setups fighting net index driver bias."
+                )
+                return []
+
             # High Conviction Invariant: Index Call requires at least 1 active heavyweight expanding (bull_count >= 1)
-            if hw_total > 0 and hw_bulls == 0 and not is_explosive_momentum:
+            if hw_total > 0 and hw_bulls == 0 and not (is_explosive_momentum or _roc_hw_pass):
                 hw_tags = [f"{h['symbol']} ({h['change_pct']:+.2f}%)" for h in active_hw]
                 logger.info(
                     f"[IndexCallSetup] Suppressed CE setup on {clean_sym}: Zero heavyweight locomotives expanding (0/{hw_total} bullish: {', '.join(hw_tags)}). "
@@ -429,7 +575,38 @@ def detect_index_call_setup(
 
     # ── Structural Signal Detection ───────────────────────────────
     signals: list[str] = []
-    signal_tags: dict[str, Any] = {}
+    signal_tags: dict[str, Any] = {
+        "roc_momentum": roc_metric.to_dict(),
+        "oi_roc": cand_ce_oi_roc,
+    }
+
+    if is_short_squeeze_unwind:
+        signals.append("SHORT_SQUEEZE_UNWIND")
+        signal_tags["short_squeeze_unwind"] = {
+            "max_call_oi_strike": max_call_oi_strike,
+            "oi_unwind": max_ce_oi_change,
+            "spot": spot,
+        }
+
+    # 5m Trend Structure Alignment: Detect sustained bearish momentum
+    is_5m_bear_trend = False
+    if active_ohlcv is not None and hasattr(active_ohlcv, "iloc") and len(active_ohlcv) >= 12:
+        try:
+            import pandas as pd  # noqa: F401
+
+            col_c = "close" if "close" in active_ohlcv.columns else "Close"
+            closes = active_ohlcv[col_c].values
+            ema9 = pd.Series(closes).ewm(span=9, adjust=False).mean().values[-1]
+            ema20 = (
+                pd.Series(closes).ewm(span=20, adjust=False).mean().values[-1]
+                if len(closes) >= 20
+                else pd.Series(closes).mean()
+            )
+            is_5m_bear_trend = bool(
+                ema9 < (ema20 * 0.9995) and (effective_vwap > 0 and spot < effective_vwap * 0.999)
+            )
+        except Exception:
+            pass
 
     # 1. PDL Demand Rejection (symmetric to PDH Supply Rejection in put detector)
     # Spot came within 0.25% of prev_day_low and is now bouncing
@@ -460,10 +637,53 @@ def detect_index_call_setup(
             }
 
     # 2b. Day Low Demand Bounce (Current Session Day Low Demand Support)
-    # Spot tested Day Low and has now bounced >= 0.08% from the low
+    # Spot tested Day Low and has now bounced from the low
     if day_low and day_low > 0 and "PDL_DEMAND_REJECTION" not in signals:
         dl_bounce_pct = (spot - day_low) / max(1.0, day_low) * 100.0
-        if 0.08 <= dl_bounce_pct <= 0.50:
+
+        # When spot is trading BELOW session VWAP in a bearish session:
+        # A tiny pause is normal trend consolidation, NOT a demand floor!
+        # Require:
+        # 1. Not in a 5m death bear trend (EMA9 < EMA20 < VWAP) unless extreme exhaustion
+        # 2. Minimum bounce >= 0.18% (40+ pts on Nifty, 100+ pts on BankNifty)
+        # 3. Candlestick demand absorption verification: lower wick >= 38% and green/top close
+        # 4. Call option must not be bleeding heavily (pchange >= -8.0% or vol_oi >= 1.2)
+        is_below_vwap = bool(effective_vwap > 0 and spot <= effective_vwap * 0.9995)
+
+        has_candle_bounce = True
+        if active_ohlcv is not None and hasattr(active_ohlcv, "iloc") and len(active_ohlcv) >= 1:
+            try:
+                col_h = "high" if "high" in active_ohlcv.columns else "High"
+                col_l = "low" if "low" in active_ohlcv.columns else "Low"
+                col_c = "close" if "close" in active_ohlcv.columns else "Close"
+                col_o = "open" if "open" in active_ohlcv.columns else "Open"
+                last_b = active_ohlcv.iloc[-1]
+                b_h = float(last_b[col_h])
+                b_l = float(last_b[col_l])
+                b_c = float(last_b[col_c])
+                b_o = float(last_b[col_o])
+                b_rng = max(0.1, b_h - b_l)
+                l_wick_pct = (min(b_c, b_o) - b_l) / b_rng * 100.0
+                has_candle_bounce = (l_wick_pct >= 38.0) or (
+                    b_c > b_o and (b_c - b_l) / b_rng >= 0.50
+                )
+            except Exception:
+                has_candle_bounce = True
+
+        ce_receptive = (cand_ce_pchange >= -8.0) or (cand_ce_vol_oi >= 1.2) or is_breakout_momentum
+
+        if is_below_vwap:
+            is_valid_dl_bounce = (
+                (0.18 <= dl_bounce_pct <= 0.60)
+                and has_candle_bounce
+                and ce_receptive
+                and (not is_5m_bear_trend or cand_ce_vol_oi >= 2.0)
+            )
+        else:
+            # Above VWAP: 0.10% to 0.50% bounce is valid support defense
+            is_valid_dl_bounce = (0.10 <= dl_bounce_pct <= 0.50) and ce_receptive
+
+        if is_valid_dl_bounce:
             signals.append("DAY_LOW_DEMAND_BOUNCE")
             signal_tags["day_low_demand_bounce"] = {
                 "day_low": day_low,
@@ -492,6 +712,61 @@ def detect_index_call_setup(
                 "vwap_reclaim_pct": round(vwap_reclaim_pct, 3),
                 "day_low": day_low,
                 "day_low_vs_vwap_pct": round(day_low_vs_vwap, 3),
+            }
+
+    # 3b. VWAP Breakout (Institutional Transition from Bear to Bull Regime)
+    # Price was trading below VWAP in the session and decisively sliced above VWAP
+    # with confirmed 5m close above VWAP and receptive Call momentum.
+    if (
+        effective_vwap > 0
+        and spot > effective_vwap
+        and "VWAP_BREAKOUT" not in signals
+        and not is_opening_buffer
+    ):
+        vwap_bo_pct = (spot - effective_vwap) / effective_vwap * 100.0
+        day_low_vs_vwap = (
+            (effective_vwap - (day_low or spot)) / effective_vwap * 100.0 if day_low else 0.0
+        )
+        was_below_vwap = day_low_vs_vwap >= 0.08
+
+        has_bar_breakout = True
+        if active_ohlcv is not None and hasattr(active_ohlcv, "iloc") and len(active_ohlcv) >= 1:
+            try:
+                col_c = "close" if "close" in active_ohlcv.columns else "Close"
+                col_o = "open" if "open" in active_ohlcv.columns else "Open"
+                col_h = "high" if "high" in active_ohlcv.columns else "High"
+                col_l = "low" if "low" in active_ohlcv.columns else "Low"
+                last_b = active_ohlcv.iloc[-1]
+                b_c = float(last_b[col_c])
+                b_o = float(last_b[col_o])
+                b_h = float(last_b[col_h])
+                b_l = float(last_b[col_l])
+                b_rng = max(0.1, b_h - b_l)
+                has_bar_breakout = (b_c >= effective_vwap * 0.9995) and (
+                    b_c >= b_o or (b_c - b_l) / b_rng >= 0.35
+                )
+            except Exception:
+                has_bar_breakout = True
+
+        ce_momentum_receptive = (
+            cand_ce_vol_oi >= 1.1 or cand_ce_pchange >= 8.0 or is_breakout_momentum
+        )
+
+        if (
+            0.04 <= vwap_bo_pct <= 0.45
+            and was_below_vwap
+            and has_bar_breakout
+            and ce_momentum_receptive
+        ):
+            signals.append("VWAP_BREAKOUT")
+            signal_tags["vwap_breakout"] = {
+                "vwap": effective_vwap,
+                "spot": spot,
+                "vwap_bo_pct": round(vwap_bo_pct, 3),
+                "day_low": day_low,
+                "day_low_vs_vwap_pct": round(day_low_vs_vwap, 3),
+                "vol_oi": cand_ce_vol_oi,
+                "ce_pchange": cand_ce_pchange,
             }
 
     # 4. Intraday Demand Zone Sweep (symmetric to Supply Zone Sweep in put detector)
@@ -903,6 +1178,32 @@ def detect_index_call_setup(
     pchange = float(getattr(best_ce, "pchange", 0.0) or 0.0)
     exp_type = classify_expiry_type(exp_date, underlying) if exp_date else "WEEKLY"
 
+    # ── Option Greeks & DTE Computation ───────────────────────────
+    opt_delta = None
+    opt_gamma = None
+    opt_iv = None
+    is_0dte = False
+    dte_days = 1
+    if exp_date:
+        try:
+            exp_d = datetime.strptime(str(exp_date)[:10], "%Y-%m-%d").date()
+            today_d = datetime.now(IST).date()
+            dte_days = max(0, (exp_d - today_d).days)
+            is_0dte = dte_days == 0
+        except Exception:
+            pass
+    if opt_ltp > 0 and exp_date:
+        try:
+            from analysis.options import compute_greeks
+
+            g = compute_greeks(spot, strike, str(exp_date)[:10], "CE", opt_ltp)
+            if g and getattr(g, "delta", None) is not None:
+                opt_delta = round(float(g.delta), 4)
+                opt_gamma = round(float(g.gamma), 6)
+                opt_iv = round(float(g.iv_pct), 2)
+        except Exception:
+            pass
+
     # ── Confidence Score ─────────────────────────────────────────
     base_confidence = 68
     signal_bonuses = {
@@ -911,12 +1212,14 @@ def detect_index_call_setup(
         "FAILED_DAY_LOW_BREAKDOWN": 15,
         "INTRADAY_CAPITULATION_REVERSAL": 15,
         "VWAP_RECLAIM": 10,
+        "VWAP_BREAKOUT": 14,
         "DEMAND_ZONE_SWEEP": 8,
         "BEARISH_EXHAUSTION_CE": 10,
         "DOUBLE_BOTTOM_BREAKOUT": 8,
         "VCP_COILING": 7,  # Pre-breakout, lower confidence since not yet confirmed
         "DAY_HIGH_BREAKOUT": 12,
         "INSTITUTIONAL_EXPANSION_THRUST": 16,
+        "SHORT_SQUEEZE_UNWIND": 16,
     }
     confidence = base_confidence
     for sig in signals:
@@ -924,7 +1227,25 @@ def detect_index_call_setup(
     confidence += min(8, int(vol_oi_ratio * 3))
     if pchange >= 10.0:
         confidence += 6
+    if roc_metric.is_accelerating_up and roc_metric.is_meaningful_up:
+        confidence += 5
+    if cand_ce_oi_roc >= 15.0:
+        confidence += 3
+    prem_vel = calculate_premium_velocity(contract_sym, opt_ltp)
+    signal_tags["premium_velocity"] = round(prem_vel, 2)
+    if prem_vel >= 25.0:
+        confidence += 5
+    elif prem_vel >= 10.0:
+        confidence += 3
     confidence = min(96, confidence)
+
+    # Single-signal unconfirmed guard: if only 1 secondary signal, cap at 72%
+    if (
+        len(signals) == 1
+        and signals[0] in ("DAY_LOW_DEMAND_BOUNCE", "DEMAND_ZONE_SWEEP")
+        and not is_breakout_momentum
+    ):
+        confidence = min(72, confidence)
 
     # VCP_COILING is always EARLY_WARNING (fires before the breakout candle)
     if signals == ["VCP_COILING"]:
@@ -1017,6 +1338,15 @@ def detect_index_call_setup(
             f"Spot reclaimed VWAP (₹{effective_vwap:,.1f}) — now acting as support (bullish flip). "
             f"Spot {vr.get('vwap_reclaim_pct', 0):.2f}% above VWAP post-reclaim. "
             f"Call volume active ({volume:,} contracts, {vol_oi_ratio:.1f}x). "
+            f"Entry: ₹{opt_ltp:,.1f} | SL: ₹{sl_premium:,.1f} | T1: ₹{t1_premium:,.1f} (+{t1_pct:.0f}%)."
+        )
+    elif "VWAP_BREAKOUT" in signals:
+        vbo = signal_tags.get("vwap_breakout", {})
+        headline = f"{vel_badge}🚀 VWAP BREAKOUT CALL SETUP: {clean_sym} {int(strike)} CE"
+        summary = (
+            f"Institutional Regime Shift: Spot sliced cleanly above session VWAP (₹{effective_vwap:,.1f}) "
+            f"after earlier trading below VWAP. Spot now +{vbo.get('vwap_bo_pct', 0):.2f}% above VWAP with confirmed "
+            f"5m bar breakout and Call volume expansion ({volume:,} contracts, {vol_oi_ratio:.1f}x Vol/OI). "
             f"Entry: ₹{opt_ltp:,.1f} | SL: ₹{sl_premium:,.1f} | T1: ₹{t1_premium:,.1f} (+{t1_pct:.0f}%)."
         )
     elif "INTRADAY_CAPITULATION_REVERSAL" in signals:
@@ -1118,54 +1448,156 @@ def detect_index_call_setup(
 
     # ── Defined-Risk Hedged Spread Construction (Bull Call Spread) ─
     hedge_plan = None
-    step = 100.0 if clean_sym in ("BANKNIFTY", "SENSEX") else 50.0
-    spread_width = 2.0 * step if clean_sym in ("BANKNIFTY", "SENSEX") else step
-    otm_target_strike = strike + spread_width
+    now_time = now_dt.time()
+    is_low_vix_range = bool(vix_val is not None and vix_val < 13.0)
+    is_midday_chop_window = bool(dtime(11, 30) <= now_time <= dtime(14, 0)) and (vel_score < 65)
+    is_chop_regime = (
+        is_midday_chop_window
+        or is_low_vix_range
+        or (vel_regime == "CHOP_PINNED")
+        or (vel_score < 55)
+    )
+    is_explosive_momentum = bool(
+        is_institutional_thrust
+        or (vel_score >= 75)
+        or ("DAY_HIGH_BREAKOUT" in signals)
+        or (vel_regime == "LEADER_EXPANSION")
+    )
 
-    # 1. Try exact target OTM strike in provided chain
-    otm_cand = None
-    exact_matches = [
-        c
-        for c in chain
-        if getattr(c, "option_type", "") == "CE"
-        and abs(getattr(c, "strike", 0.0) - otm_target_strike) <= (step * 0.25)
-        and float(getattr(c, "last_price", 0.0) or 0.0) > 0.0
-    ]
-    if exact_matches:
-        otm_cand = exact_matches[0]
+    if clean_sym in ("BANKNIFTY", "BANKEX"):
+        step = 100.0
+        if is_chop_regime:
+            min_spread_width = 300.0
+            regime_note = "CHOP / RANGE DEFENSE (300 pt width)"
+        elif is_explosive_momentum:
+            min_spread_width = 500.0
+            regime_note = "HIGH-VELOCITY MOMENTUM / THRUST (500 pt width)"
+        else:
+            min_spread_width = 400.0
+            regime_note = "TREND CONTINUATION (400 pt width)"
+    elif clean_sym == "SENSEX":
+        step = 100.0
+        if is_chop_regime:
+            min_spread_width = 400.0
+            regime_note = "CHOP / RANGE DEFENSE (400 pt width)"
+        elif is_explosive_momentum:
+            min_spread_width = 700.0
+            regime_note = "HIGH-VELOCITY MOMENTUM / THRUST (700 pt width)"
+        else:
+            min_spread_width = 600.0
+            regime_note = "TREND CONTINUATION (600 pt width)"
+    elif clean_sym == "MIDCPNIFTY":
+        step = 25.0
+        if is_chop_regime:
+            min_spread_width = 75.0
+            regime_note = "CHOP / RANGE DEFENSE (75 pt width)"
+        elif is_explosive_momentum:
+            min_spread_width = 125.0
+            regime_note = "HIGH-VELOCITY MOMENTUM / THRUST (125 pt width)"
+        else:
+            min_spread_width = 100.0
+            regime_note = "TREND CONTINUATION (100 pt width)"
+    elif clean_sym in ("NIFTY", "FINNIFTY"):
+        step = 50.0
+        if is_chop_regime:
+            min_spread_width = 100.0
+            regime_note = "CHOP / RANGE DEFENSE (100 pt width)"
+        elif is_explosive_momentum:
+            min_spread_width = 200.0
+            regime_note = "HIGH-VELOCITY MOMENTUM / THRUST (200 pt width)"
+        else:
+            min_spread_width = 150.0
+            regime_note = "TREND CONTINUATION (150 pt width)"
     else:
-        # Fallback to any contract in chain with strike > strike
-        higher_strikes = [
+        step = 50.0
+        min_spread_width = 100.0 if is_chop_regime else (200.0 if is_explosive_momentum else 150.0)
+        regime_note = "ADAPTIVE SPREAD"
+
+    # DTE and Volatility for Delta / Greeks evaluation
+    dte = 7
+    try:
+        from engine.alert_expiry import get_expiry_metadata
+
+        exp_meta = get_expiry_metadata(exp_date, exp_type, clean_sym, contract_sym)
+        if exp_meta and "dte" in exp_meta:
+            dte = max(0, int(exp_meta["dte"]))
+    except Exception:
+        pass
+
+    iv_val = max(0.10, (vix_val / 100.0) if vix_val else 0.14)
+    from engine.options_backtest import bs_delta
+
+    long_delta = bs_delta(spot, strike, dte, iv_val, "CE")
+
+    # Target 1 Confluence: Short leg must be strictly OTM and sit at or beyond Target 1 resistance
+    # so the spread never caps profitability before Target 1 is attained.
+    otm_target_strike = max(strike + min_spread_width, (round(spot / step) * step) + step)
+
+    # 1. Evaluate candidate OTM strikes from chain (aiming for short delta ~ 0.25 - 0.32 or ~45% long premium)
+    target_short_delta = 0.28
+    otm_cand = None
+    if chain:
+        # Preferred candidates: strictly above strike + spread_width * 0.75 and above spot
+        preferred_candidates = [
             c
             for c in chain
             if getattr(c, "option_type", "") == "CE"
-            and getattr(c, "strike", 0.0) >= (strike + spread_width * 0.75)
+            and getattr(c, "strike", 0.0)
+            >= max(strike + min_spread_width * 0.75, spot + (step * 0.25))
             and float(getattr(c, "last_price", 0.0) or 0.0) > 0.0
         ]
-        if higher_strikes:
-            higher_strikes.sort(key=lambda c: abs(getattr(c, "strike", 0.0) - otm_target_strike))
-            otm_cand = higher_strikes[0]
+        if preferred_candidates:
+
+            def _score_call_cand(c):
+                c_strike = float(getattr(c, "strike", 0.0))
+                c_ltp = float(getattr(c, "last_price", 0.0))
+                c_delta = bs_delta(spot, c_strike, dte, iv_val, "CE")
+                delta_diff = abs(c_delta - target_short_delta)
+                prem_ratio_diff = abs((c_ltp / max(1.0, opt_ltp)) - 0.45) if opt_ltp > 0 else 0.0
+                strike_dist = abs(c_strike - otm_target_strike) / max(1.0, step)
+                return delta_diff * 2.0 + prem_ratio_diff + strike_dist * 0.1
+
+            preferred_candidates.sort(key=_score_call_cand)
+            otm_cand = preferred_candidates[0]
+        else:
+            # Fallback to any contract in chain strictly higher than strike and spot
+            fallback_candidates = [
+                c
+                for c in chain
+                if getattr(c, "option_type", "") == "CE"
+                and getattr(c, "strike", 0.0) > max(strike, spot)
+                and float(getattr(c, "last_price", 0.0) or 0.0) > 0.0
+            ]
+            if fallback_candidates:
+                fallback_candidates.sort(
+                    key=lambda c: abs(getattr(c, "strike", 0.0) - otm_target_strike)
+                )
+                otm_cand = fallback_candidates[0]
 
     if otm_cand:
         sell_strike = float(getattr(otm_cand, "strike", otm_target_strike))
         sell_prem = float(getattr(otm_cand, "last_price", 0.0) or 0.0)
     else:
-        sell_strike = strike + spread_width
+        sell_strike = otm_target_strike
         try:
             from engine.options_backtest import bs_premium
 
-            sell_prem = round(bs_premium(spot, sell_strike, 7, 0.15, "CE"), 2)
+            sell_prem = round(bs_premium(spot, sell_strike, max(1, dte), iv_val, "CE"), 2)
         except Exception:
             sell_prem = 0.0
 
-    if sell_strike <= strike:
-        sell_strike = strike + spread_width
+    if sell_strike <= strike or sell_strike <= spot:
+        atm_strike = round(spot / step) * step
+        sell_strike = max(strike + min_spread_width, atm_strike + step)
 
     actual_width = sell_strike - strike
     if sell_prem <= 0.0 or sell_prem >= opt_ltp or (opt_ltp - sell_prem) >= actual_width:
         sell_prem = max(
             1.0, round(min(opt_ltp * 0.55, max(1.0, opt_ltp - (actual_width * 0.35))), 2)
         )
+
+    short_delta = bs_delta(spot, sell_strike, dte, iv_val, "CE")
+    net_spread_delta = round(long_delta - short_delta, 2)
 
     is_spread_mandated = False
     is_0dte_midday_trap = False
@@ -1239,9 +1671,20 @@ def detect_index_call_setup(
             "risk_reward": f"1:{rr_spread:.1f}",
             "lot_size": lot_sz,
             "strike_width": actual_width,
+            "entry_spot": spot,
             "buy_strike": strike,
             "sell_strike": sell_strike,
             "short_strike": sell_strike,
+            "long_delta": round(long_delta, 2),
+            "short_delta": round(short_delta, 2),
+            "net_spread_delta": net_spread_delta,
+            "net_delta": net_spread_delta,
+            "adaptive_regime": regime_note,
+            "greeks": {
+                "long_delta": round(long_delta, 2),
+                "short_delta": round(short_delta, 2),
+                "net_delta": net_spread_delta,
+            },
             "booking_target_70": round(net_debit + 0.70 * (actual_width - net_debit), 2),
             "spread_stop_loss": round(net_debit * 0.50, 2),
             "booking_rule": (
@@ -1271,14 +1714,21 @@ def detect_index_call_setup(
             ],
         }
         is_spread_mandated = bool(
-            (is_low_vix_range or is_high_iv_risk or is_midday_chop_window or is_0dte_midday_trap)
+            (
+                is_low_vix_range
+                or is_high_iv_risk
+                or is_midday_chop_window
+                or is_0dte_midday_trap
+                or is_call_wall_collision
+            )
             and hedge_plan is not None
         )
 
     # ── Optimal Trade Entry (OTE) & No-Chase Guard ───────────────
-    if (is_low_vix_range or is_0dte_midday_trap) and not hedge_plan:
+    if (is_low_vix_range or is_0dte_midday_trap or is_call_wall_collision) and not hedge_plan:
         logger.info(
-            f"[IndexCallSetup] Suppressed CE setup on {clean_sym}: {'0DTE Midday Theta Trap' if is_0dte_midday_trap else 'Low-VIX range-bound regime'} without viable hedged spread."
+            f"[IndexCallSetup] Suppressed CE setup on {clean_sym}: "
+            f"{'Imminent Call Wall Collision' if is_call_wall_collision else ('0DTE Midday Theta Trap' if is_0dte_midday_trap else 'Low-VIX range-bound regime')} without viable hedged spread."
         )
         return []
 
@@ -1302,7 +1752,7 @@ def detect_index_call_setup(
         exchange=opt_exchange,
         direction="BULLISH",
         headline=f"🛡️ [HEDGED SPREAD MANDATE] {headline}" if is_spread_mandated else headline,
-        summary=f"{summary} | OTE Entry: {entry_range_str} | No Chase > ₹{no_chase_lvl}",
+        summary=f"{summary} | OTE: {entry_range_str} | No Chase > ₹{no_chase_lvl:,.1f} | Rule: 50% @ T1 -> SL to BE",
         ltp=opt_ltp or spot,
         trigger_level=opt_ltp if (opt_ltp and opt_ltp > 0) else strike,
         target_level=t1_premium,
@@ -1326,6 +1776,11 @@ def detect_index_call_setup(
         created_at=now_iso,
         metrics={
             "strike": strike,
+            "delta": opt_delta,
+            "gamma": opt_gamma,
+            "iv": opt_iv,
+            "dte": dte_days,
+            "is_0dte": is_0dte,
             "oi": oi,
             "oi_change": oi_change,
             "volume": volume,
@@ -1353,6 +1808,14 @@ def detect_index_call_setup(
             "pcr": chain_pcr,
             "heavyweights_posture": hw_posture.get("summary", "UNAVAILABLE"),
             "hbcm": hbcm_dict,
+            "max_call_oi_strike": max_call_oi_strike,
+            "max_put_oi_strike": max_put_oi_strike,
+            "call_wall_dist_pct": call_wall_dist_pct,
+            "is_call_wall_collision": is_call_wall_collision,
+            "is_short_squeeze_unwind": is_short_squeeze_unwind,
+            "roc_momentum": roc_metric.to_dict(),
+            "premium_velocity": round(prem_vel, 2),
+            "oi_roc": cand_ce_oi_roc,
             "cvd_ratio": thrust_details.get(
                 "cvd_ratio", cvd_ratio if "cvd_ratio" in locals() else 0.0
             ),
@@ -1387,7 +1850,7 @@ def detect_index_call_setup(
             if opt_ltp
             else "Market",
             "entry_range": entry_range_str,
-            "no_chase": f"DO NOT CHASE above ₹{no_chase_lvl}",
+            "no_chase": f"DO NOT CHASE above ₹{no_chase_lvl:,.1f}",
             "impulse_trigger_level": round(opt_ltp * 1.01, 2) if opt_ltp > 0 else spot,
             "target_1": f"₹{t1_premium:,.2f}",
             "target": f"₹{t1_premium:,.2f} (+{t1_pct:.0f}%)",
@@ -1396,8 +1859,21 @@ def detect_index_call_setup(
             "stop_loss": f"₹{sl_premium:,.2f}",
             "risk_reward": rr_str,
             "profit_rule": (
-                f"Book 50% at T1 (₹{t1_premium:,.2f}), move SL to cost, trail on T2 (₹{t2_premium:,.2f})."
+                f"Scale Blueprint: Book 50% at T1 (₹{t1_premium:,.1f}) & move SL to Cost/Breakeven (Zero Risk). "
+                f"Book 25% at T2 (₹{t2_premium:,.1f}). Leave 25% runner trailing on 5m 9-EMA."
             ),
+            "when_to_wait": (
+                f"DO NOT CHASE above ₹{no_chase_lvl:,.1f}. If premium > ₹{no_chase_lvl:,.1f}, place LIMIT order in OTE zone "
+                f"({entry_range_str}) on 1m-5m pullback retest. If not filled, cancel order."
+            ),
+            "execution_protocol": {
+                "ote_limit_zone": entry_range_str,
+                "no_chase_boundary": f"₹{no_chase_lvl:,.1f}",
+                "rule": "Never chase market orders if price > No Chase. Wait for limit retest or cancel.",
+                "t1_scale": "50% off + Move SL to Breakeven",
+                "t2_scale": "25% off",
+                "runner_trail": "25% position trailed via 5m 9-EMA close",
+            },
             "fast_scalp": (
                 opt_plan.get("fast_scalp")
                 if (opt_plan and opt_plan.get("fast_scalp"))

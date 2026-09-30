@@ -2612,3 +2612,113 @@ def test_auto_alert_telegram_expiry_price_coherence():
     assert "27-Oct-2026" in msg_oct
     assert "Next Monthly" in msg_oct
     assert "29-Sep-2026" not in msg_oct
+
+
+def test_opening_drive_call_option_header_not_put_surge():
+    """Verify that a Call option with 'OPENING' or 'Open==Low' in headline is NEVER rendered as PUT SURGE."""
+    from bot.alert_templates import format_auto_alert_telegram
+    from engine.auto_alert_engine import AutoAlert
+
+    alert = AutoAlert(
+        alert_id="aa-opening-drive-ignition-solarinds-bull-20260930",
+        alert_type="OPENING_DRIVE_IGNITION",
+        stage="IGNITED",
+        symbol="SOLARINDS",
+        exchange="NSE",
+        direction="BULLISH",
+        headline="[OPENING DR] SOLARINDS Bullish Ignition (Open==Low @ ₹19,200.0 (Lot: 50))",
+        summary="SOLARINDS explosive Opening Drive confirmed: Open==Low at ₹19,200.0 with immediate expansion",
+        ltp=700.0,
+        trigger_level=700.0,
+        target_level=945.0,
+        stop_loss=546.0,
+        strike=19750.0,
+        option_type="CE",
+        contract_symbol="SOLARINDS2026102719750CE",
+        confidence=92,
+        actionable_plan={
+            "action": "BUY SOLARINDS 19750 CE",
+            "contract": "SOLARINDS 19750 CE",
+            "recommended_entry": "₹700.00",
+            "stop_loss": "₹546.0",
+            "target_1": "₹945.0",
+            "target_2": "₹1,190.0",
+            "lot_size": 50,
+        },
+    )
+
+    rendered = format_auto_alert_telegram(alert)
+    # Must NOT have PUT SURGE or red icon in header
+    assert "OPTIONS PUT SURGE" not in rendered
+    assert "🔴 <b>[REAL/LIVE] NEW CALL · OPTIONS PUT SURGE</b>" not in rendered
+    # Must have green icon and appropriate breakout/ignition header
+    assert "🟢" in rendered
+    assert "OPENING DRIVE IGNITION" in rendered
+    assert "BUY" in rendered
+    assert "SOLARINDS 19750 CE" in rendered
+
+
+def test_option_alert_action_line_clarity_with_hedged_spread():
+    """Verify that when an option alert has actionable_plan['action'] == 'BULL CALL SPREAD',
+    the top Action line renders BUY <contract> @ <LTP> with Hedged Spread Preferred signpost,
+    preventing confusion between single option levels and spread levels."""
+    from bot.alert_templates import format_auto_alert_telegram
+    from engine.auto_alert_engine import AutoAlert
+
+    alert = AutoAlert(
+        alert_id="aa-nifty-vwap-reclaim-ce-22750-20260930",
+        alert_type="INDEX_CALL_SETUP",
+        stage="IGNITED",
+        symbol="NIFTY",
+        exchange="NSE",
+        direction="BULLISH",
+        headline="[HEDGED SPR] VWAP RECLAIM CALL SETUP: NIFTY 22750 CE",
+        summary="Spot reclaimed VWAP now acting as support",
+        ltp=141.05,
+        trigger_level=141.05,
+        target_level=183.40,
+        stop_loss=112.80,
+        strike=22750.0,
+        option_type="CE",
+        contract_symbol="NIFTY2026100622750CE",
+        confidence=96,
+        actionable_plan={
+            "action": "BULL CALL SPREAD",
+            "contract": "NIFTY2026100622750CE",
+            "recommended_entry": "₹141.05",
+            "stop_loss": "₹112.80",
+            "target_1": "₹183.40",
+            "target_2": "₹218.60",
+            "lot_size": 65,
+            "hedge_plan": {
+                "strategy": "BULL_CALL_SPREAD",
+                "sentiment": "BULLISH",
+                "preferred_vehicle": "HEDGED_SPREAD",
+                "buy_leg": "BUY NIFTY 22750 CE @ ₹141.1",
+                "sell_leg": "SELL NIFTY 22800 CE @ ₹117.3",
+                "buy_strike": 22750.0,
+                "sell_strike": 22800.0,
+                "strike_width": 50.0,
+                "net_debit_per_share": 23.8,
+                "max_loss": 1547.0,
+                "max_profit": 1703.0,
+                "risk_reward": "1:1.1",
+                "booking_target_70": 42.1,
+                "spread_stop_loss": 11.9,
+                "legs": [
+                    {"strike": 22750, "side": "BUY"},
+                    {"strike": 22800, "side": "SELL"},
+                ],
+            },
+        },
+    )
+
+    rendered = format_auto_alert_telegram(alert)
+    # The Action line must NOT start with 'BULL CALL SPREAD NIFTY 22750 CE @ ₹141.05'
+    assert "• <b>Action:</b> BULL CALL SPREAD" not in rendered
+    # It must render BUY NIFTY 22750 CE @ ₹141.05 with the signpost
+    assert "• <b>Action:</b> BUY <b>NIFTY 22750 CE</b> @ <code>₹141.05</code>" in rendered
+    assert "(Hedged Spread Preferred 👇)" in rendered
+    # The shield box must still be rendered below
+    assert "🛡️ <b>DEFINED-RISK HEDGE SPREAD" in rendered
+    assert "Net Debit / Max Loss:</b> <code>₹23.8/sh (₹1,547 total)</code>" in rendered

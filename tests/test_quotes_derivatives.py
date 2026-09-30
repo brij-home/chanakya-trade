@@ -73,6 +73,14 @@ def test_option_pattern_matching():
     assert m9.group("strike") == "4800"
     assert m9.group("opt_type") == "PE"
 
+    # NSE weekly option format with month letter (e.g. 26O06 for 06-Oct-2026)
+    m10 = _OPTION_PATTERN.match("NIFTY26O0622550PE")
+    assert m10 is not None
+    assert m10.group("underlying") == "NIFTY"
+    assert m10.group("exp_weekly") == "26O06"
+    assert m10.group("strike") == "22550"
+    assert m10.group("opt_type") == "PE"
+
 
 def test_futures_pattern_matching():
     m1 = _FUT_PATTERN.match("RELIANCE26SEPFUT")

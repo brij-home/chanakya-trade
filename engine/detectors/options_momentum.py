@@ -321,7 +321,7 @@ def detect_options_momentum_breakouts(
                 if is_idx
                 else spot * 0.02
             )
-            min_opt_price = 10.0 if is_idx else 2.0
+            min_opt_price = 2.5 if clean_sym in ("MIDCPNIFTY",) else (5.0 if is_idx else 1.5)
 
             atm_contracts = [
                 c
@@ -1133,11 +1133,30 @@ def detect_options_momentum_breakouts(
                         vix=vix_val,
                         now_dt=now_dt,
                         vel_score=conf_score,
+                        asymmetric_r_r=True,
                     )
                 except Exception as e_h:
                     logger.debug(
                         f"[OptionsBreakout] Hedge plan construction error for {clean_sym}: {e_h}"
                     )
+
+                opt_delta = None
+                opt_gamma = None
+                opt_iv = None
+                dte_days = 0
+                is_0dte = False
+                try:
+                    if expiry_date:
+                        exp_d = datetime.strptime(str(expiry_date)[:10], "%Y-%m-%d").date()
+                        dte_days = max(0, (exp_d - now_dt.date()).days)
+                        is_0dte = dte_days == 0
+                    from engine.options_backtest import bs_delta
+
+                    iv_est = (vix_val / 100.0) if (vix_val and vix_val > 0) else 0.15
+                    opt_iv = round(iv_est, 4)
+                    opt_delta = round(bs_delta(spot, strike, dte_days, iv_est, opt_type), 4)
+                except Exception:
+                    pass
 
                 alert = AutoAlert(
                     alert_id=alert_id,
@@ -1177,6 +1196,11 @@ def detect_options_momentum_breakouts(
                     ),
                     vix_regime=vix_regime,
                     metrics={
+                        "delta": opt_delta,
+                        "gamma": opt_gamma,
+                        "iv": opt_iv,
+                        "dte": dte_days,
+                        "is_0dte": is_0dte,
                         "hbcm": hbcm_meta,
                         "vol_oi_ratio": vol_oi,
                         "volume": vol,

@@ -517,3 +517,370 @@ def test_tier1_sanity_at_step_00e_protects_existing_trades():
     assert radar_ce.stage == "EARLY_WARNING"
 
     engine.clear_alerts()
+
+
+def test_hbcm_contradiction_veto_blocks_counter_heavyweight_reversals():
+    """
+    Validates that even if an index alert carries reversal tags (e.g. DAY_HIGH_SUPPLY_REJECTION),
+    if heavyweights are overwhelmingly bullish (e.g. 3/5 or 4/5 bullish), HBCM Locomotive
+    Contradiction Veto strictly kills the put setup.
+    """
+    from engine.alert_scrutiny import alert_scrutiny_auditor
+
+    alert = AutoAlert(
+        alert_id="bn-pe-reversal-trap",
+        alert_type="INDEX_PUT_SETUP",
+        stage="IGNITED",
+        symbol="BANKNIFTY",
+        exchange="NSE",
+        direction="BEARISH",
+        headline="Supply Rejection Put",
+        summary="Testing day high",
+        option_type="PE",
+        strike=54400.0,
+        underlying_spot=54850.0,
+        ltp=548.0,
+        trigger_level=548.0,
+        stop_loss=438.0,
+        target_level=712.0,
+        is_live=True,
+        environment="LIVE",
+        metrics={
+            "signals": ["DAY_HIGH_SUPPLY_REJECTION"],
+            "day_high": 54900.0,
+            "vwap": 54750.0,
+            "hbcm": {
+                "total_heavyweights": 5,
+                "bullish_count": 3,
+                "bearish_count": 1,
+                "confluence_pass": False,
+                "rejection_reason": "Only 1/5 heavyweights bearish",
+            },
+        },
+    )
+
+    passed, reason, flags = alert_scrutiny_auditor.verify_tier1_sanity(alert)
+    assert passed is False
+    assert "HBCM Locomotive Contradiction Veto" in (reason or "")
+    assert flags.get("heavyweight_confluence_valid") is False
+
+
+def test_active_opposing_direction_conflict_gate_blocks_simultaneous_opposite_alerts(monkeypatch):
+    """
+    Validates that if MIDCPNIFTY has an active BULLISH (CE) alert in-flight,
+    an incoming BEARISH (PE) alert within 30 minutes is automatically suppressed at Step 00f-2.
+    """
+    engine = AutoAlertEngine(max_buffer=50)
+    engine.clear_alerts()
+
+    # Provide aligned HBCM metrics so Tier-1 Perimeter passes
+    call_alert = AutoAlert(
+        alert_id="midcp-ce-active",
+        alert_type="INDEX_CALL_SETUP",
+        stage="IGNITED",
+        symbol="MIDCPNIFTY",
+        contract_symbol="NFO:MIDCPNIFTY26OCT13600CE",
+        exchange="NFO",
+        direction="BULLISH",
+        headline="Midcap Bull Call",
+        summary="Bull setup",
+        option_type="CE",
+        strike=13600,
+        ltp=140.0,
+        trigger_level=140.0,
+        stop_loss=112.0,
+        target_level=183.0,
+        is_live=True,
+        environment="LIVE",
+        confidence=85,
+        metrics={
+            "hbcm": {
+                "confluence_pass": True,
+                "total_heavyweights": 5,
+                "bullish_count": 4,
+                "bearish_count": 0,
+            }
+        },
+    )
+    ok1 = engine.record_alert(call_alert)
+    assert ok1 is True
+
+    # 7 seconds later, another detector generates an opposing PE setup on MIDCPNIFTY
+    put_alert = AutoAlert(
+        alert_id="midcp-pe-conflict",
+        alert_type="INDEX_PUT_SETUP",
+        stage="IGNITED",
+        symbol="MIDCPNIFTY",
+        contract_symbol="NFO:MIDCPNIFTY26OCT13650PE",
+        exchange="NFO",
+        direction="BEARISH",
+        headline="Midcap Bear Put",
+        summary="Bear setup",
+        option_type="PE",
+        strike=13650,
+        ltp=150.0,
+        trigger_level=150.0,
+        stop_loss=120.0,
+        target_level=200.0,
+        is_live=True,
+        environment="LIVE",
+        confidence=85,
+        metrics={
+            "hbcm": {
+                "confluence_pass": True,
+                "total_heavyweights": 5,
+                "bullish_count": 0,
+                "bearish_count": 4,
+            }
+        },
+    )
+    ok2 = engine.record_alert(put_alert)
+    # MUST be suppressed by Active Opposing Direction Conflict Gate
+    assert ok2 is False
+
+    engine.clear_alerts()
+
+
+def test_market_breadth_rally_veto_blocks_index_put_without_breakdown(monkeypatch):
+    """
+    Validates that when market breadth A/D ratio is >= 1.50 (e.g. 317 Adv / 182 Dec = 1.74),
+    an index PUT setup is vetoed unless constituent breakdown is confirmed.
+    """
+    monkeypatch.setenv("ENFORCE_TEST_BREADTH", "1")
+    from engine.alert_scrutiny import alert_scrutiny_auditor
+    from market.sentiment import MarketBreadth
+
+    mock_mb = MarketBreadth(
+        advances=317,
+        declines=182,
+        unchanged=1,
+        ad_ratio=1.74,
+        verdict="BROAD_RALLY",
+    )
+    monkeypatch.setattr("market.sentiment.get_market_breadth", lambda: mock_mb)
+
+    alert = AutoAlert(
+        alert_id="test-breadth-rally-put",
+        alert_type="INDEX_PUT_SETUP",
+        stage="IGNITED",
+        symbol="BANKNIFTY",
+        exchange="NSE",
+        direction="BEARISH",
+        headline="Bank Nifty Put into Rally",
+        summary="Put setup into breadth rally",
+        option_type="PE",
+        strike=54400.0,
+        underlying_spot=54900.0,
+        ltp=500.0,
+        trigger_level=500.0,
+        stop_loss=400.0,
+        target_level=680.0,
+        is_live=True,
+        environment="LIVE",
+        metrics={
+            "day_high": 54920.0,  # drop is only (54920 - 54900)/54920 = 0.036% < 0.40%
+            "signals": ["DAY_HIGH_SUPPLY_REJECTION"],
+        },
+    )
+
+    passed, reason, flags = alert_scrutiny_auditor.verify_tier1_sanity(alert)
+    assert passed is False
+    assert "Market Breadth Rally Veto" in (reason or "")
+    assert flags.get("market_breadth_valid") is False
+
+
+def test_day_high_supply_rejection_suppressed_when_above_vwap_without_rejection_candle(monkeypatch):
+    """
+    Validates that when spot is cleanly above session VWAP in an ongoing bull trend,
+    a trivial 0.08% pause at Day High without a confirmed rejection candle is SUPPRESSED.
+    This permanently prevents false Put signals when the market is rallying.
+    """
+    import pandas as pd
+    from engine.detectors.index_put_setup import detect_index_put_setup
+
+    mock_pe = MagicMock()
+    mock_pe.strike = 22800.0
+    mock_pe.option_type = "PE"
+    mock_pe.last_price = 120.0
+    mock_pe.volume = 50000
+    mock_pe.oi = 30000
+    mock_pe.pchange = -12.0  # Put premium is depreciating (-12%) as market rallies
+    mock_pe.symbol = "NIFTY22800PE"
+    mock_pe.expiry = "2026-10-06"
+
+    # Spot is at 22,790, VWAP is at 22,725 (+65 pts above VWAP), Day High is 22,805 (0.06% retreat)
+    # The last 5m candle is a green bullish candle with tiny upper wick (not a supply rejection)
+    ohlcv = pd.DataFrame(
+        [
+            {"open": 22750.0, "high": 22770.0, "low": 22745.0, "close": 22765.0, "volume": 10000},
+            {"open": 22765.0, "high": 22795.0, "low": 22760.0, "close": 22790.0, "volume": 12000},
+            {
+                "open": 22790.0,
+                "high": 22805.0,
+                "low": 22785.0,
+                "close": 22800.0,
+                "volume": 15000,
+            },  # Green bar, close near high
+        ]
+    )
+
+    # Mock heavyweights to passthrough
+    monkeypatch.setattr(
+        "market.indices.get_heavyweights_posture",
+        lambda sym: {"heavyweights": [], "bear_count": 0, "bull_count": 0},
+    )
+
+    alerts = detect_index_put_setup(
+        underlying="NIFTY",
+        spot=22790.0,
+        chain=[mock_pe],
+        vwap=22725.0,
+        day_high=22805.0,
+        day_low=22680.0,
+        ohlcv_5m=ohlcv,
+        ignore_time_gate=True,
+    )
+    # Must be completely suppressed — zero false Put signals during an active bull trend above VWAP
+    assert len(alerts) == 0
+
+
+def test_put_setup_suppressed_when_heavyweights_net_bullish(monkeypatch):
+    """
+    Validates that when index heavyweights are net bullish (e.g. 4 bulls vs 1 bear),
+    IndexPutSetup suppresses PE setups to avoid fighting index locomotive thrust.
+    """
+    from engine.detectors.index_put_setup import detect_index_put_setup
+
+    mock_pe = MagicMock()
+    mock_pe.strike = 22800.0
+    mock_pe.option_type = "PE"
+    mock_pe.last_price = 120.0
+    mock_pe.volume = 50000
+    mock_pe.oi = 30000
+    mock_pe.pchange = 5.0
+    mock_pe.symbol = "NIFTY22800PE"
+    mock_pe.expiry = "2026-10-06"
+
+    # 4 heavyweights bullish, 1 bearish
+    hw_posture = {
+        "heavyweights": [
+            {"symbol": "RELIANCE", "change_pct": 1.5},
+            {"symbol": "HDFCBANK", "change_pct": 1.2},
+            {"symbol": "ICICIBANK", "change_pct": 0.8},
+            {"symbol": "INFY", "change_pct": 0.5},
+            {"symbol": "TCS", "change_pct": -0.1},
+        ],
+        "bull_count": 4,
+        "bear_count": 1,
+        "all_bullish": False,
+        "all_bearish": False,
+    }
+    monkeypatch.setattr("market.indices.get_heavyweights_posture", lambda sym: hw_posture)
+
+    alerts = detect_index_put_setup(
+        underlying="NIFTY",
+        spot=22750.0,
+        chain=[mock_pe],
+        vwap=22760.0,
+        day_high=22800.0,
+        day_low=22700.0,
+        ignore_time_gate=True,
+    )
+    assert len(alerts) == 0
+
+
+def test_call_setup_suppressed_when_heavyweights_net_bearish(monkeypatch):
+    """
+    Validates that when index heavyweights are net bearish (e.g. 4 bears vs 1 bull),
+    IndexCallSetup suppresses CE setups to avoid catching falling knives.
+    """
+    from engine.detectors.index_call_setup import detect_index_call_setup
+
+    mock_ce = MagicMock()
+    mock_ce.strike = 22750.0
+    mock_ce.option_type = "CE"
+    mock_ce.last_price = 140.0
+    mock_ce.volume = 50000
+    mock_ce.oi = 30000
+    mock_ce.pchange = 5.0
+    mock_ce.symbol = "NIFTY22750CE"
+    mock_ce.expiry = "2026-10-06"
+
+    hw_posture = {
+        "heavyweights": [
+            {"symbol": "RELIANCE", "change_pct": -1.5},
+            {"symbol": "HDFCBANK", "change_pct": -1.2},
+            {"symbol": "ICICIBANK", "change_pct": -0.8},
+            {"symbol": "INFY", "change_pct": -0.5},
+            {"symbol": "TCS", "change_pct": 0.1},
+        ],
+        "bull_count": 1,
+        "bear_count": 4,
+        "all_bullish": False,
+        "all_bearish": False,
+    }
+    monkeypatch.setattr("market.indices.get_heavyweights_posture", lambda sym: hw_posture)
+
+    alerts = detect_index_call_setup(
+        underlying="NIFTY",
+        spot=22750.0,
+        chain=[mock_ce],
+        vwap=22740.0,
+        day_high=22800.0,
+        day_low=22700.0,
+        ignore_time_gate=True,
+    )
+    assert len(alerts) == 0
+
+
+def test_in_flight_directional_lockout_protects_profitable_spreads():
+    """
+    Validates that an active in-flight index trade in SPREAD_PROFIT_70, RUNNER, or SPREAD_FREE_ROLL
+    blocks opposing directional signals from entering, preventing whipsaws.
+    """
+    engine = AutoAlertEngine(max_buffer=50)
+    engine.clear_alerts()
+
+    # Active winning NIFTY Bull Call Spread capturing 70% max profit
+    active_spread_ce = AutoAlert(
+        alert_id="aa-call-setup-nifty-20260930",
+        alert_type="INDEX_CALL_SETUP",
+        stage="SPREAD_PROFIT_70",
+        symbol="NIFTY",
+        exchange="NFO",
+        direction="BULLISH",
+        headline="70% MAX PROFIT CAPTURED: NIFTY Hedged Spread",
+        summary="Active runner secured",
+        ltp=183.4,
+        trigger_level=141.0,
+        stop_loss=141.0,
+        target_level=218.6,
+        is_live=True,
+        environment="LIVE",
+    )
+    engine._alerts.append(active_spread_ce)
+
+    # Incoming conflicting Bearish Put setup
+    conflicting_pe = AutoAlert(
+        alert_id="aa-put-setup-nifty-20260930",
+        alert_type="INDEX_PUT_SETUP",
+        stage="IGNITED",
+        symbol="NIFTY",
+        exchange="NFO",
+        direction="BEARISH",
+        headline="DAY HIGH SUPPLY REJECTION: NIFTY 22800 PE",
+        summary="Conflicting put setup",
+        ltp=120.8,
+        trigger_level=120.8,
+        stop_loss=96.7,
+        target_level=157.1,
+        is_live=True,
+        environment="LIVE",
+    )
+
+    # Must be blocked by In-Flight Directional Lockout
+    result = engine.record_alert(conflicting_pe)
+    assert result is False
+    assert len(engine._alerts) == 1
+    assert engine._alerts[0].direction == "BULLISH"
+    assert engine._alerts[0].stage == "SPREAD_PROFIT_70"

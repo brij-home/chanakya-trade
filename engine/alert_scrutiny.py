@@ -748,18 +748,32 @@ class AlertScrutinyAuditor:
                 or "ORB-15 BREAKDOWN" in headline_str
             )
 
+            is_spread = (
+                (getattr(alert, "actionable_plan", {}) or {}).get("instrument_type")
+                == "OPTION_SPREAD"
+                or bool(metrics_dict.get("hedge_plan"))
+                or "SPREAD" in (getattr(alert, "headline", "") or "").upper()
+            )
+
             if is_bull_setup and not is_bear_setup:
                 overhead_barriers: list[tuple[float, str]] = []
                 pdh = float(metrics_dict.get("prev_day_high") or 0.0)
                 pwh = float(metrics_dict.get("prev_week_high") or 0.0)
                 dh = float(metrics_dict.get("day_high") or 0.0)
                 dl = float(metrics_dict.get("day_low") or 0.0)
+                call_wall = float(metrics_dict.get("max_call_oi_strike") or 0.0)
                 if dh > ref_spot and dl > 0 and ((dh - dl) / ref_spot) >= 0.0025:
                     overhead_barriers.append((dh, "Day High"))
                 if pdh > ref_spot:
                     overhead_barriers.append((pdh, "Previous Day High (PDH)"))
                 if pwh > ref_spot:
                     overhead_barriers.append((pwh, "Previous Week High (PWH)"))
+                if (
+                    call_wall > ref_spot
+                    and not is_spread
+                    and not metrics_dict.get("is_short_squeeze_unwind")
+                ):
+                    overhead_barriers.append((call_wall, "Max Call OI Wall"))
 
                 for barrier_lvl, barrier_name in overhead_barriers:
                     # Breakout setups testing or coiled right beneath Day High / PDH are intentional breakouts
@@ -770,6 +784,8 @@ class AlertScrutinyAuditor:
                     headroom_pts = barrier_lvl - ref_spot
                     headroom_pct = (headroom_pts / ref_spot) * 100.0
                     if 0.0 < headroom_pct < 0.15:
+                        flags["obstacle_runway_clear"] = False
+                        flags["trap_immediate_resistance"] = True
                         return (
                             False,
                             f"Opposing Supply Collision: Spot (₹{ref_spot:,.1f}) is right beneath {barrier_name} (₹{barrier_lvl:,.1f}, only {headroom_pts:.1f} pts / {headroom_pct:.2f}% headroom); avoid buying into resistance",
@@ -781,12 +797,20 @@ class AlertScrutinyAuditor:
                 pwl = float(metrics_dict.get("prev_week_low") or 0.0)
                 dh = float(metrics_dict.get("day_high") or 0.0)
                 dl = float(metrics_dict.get("day_low") or 0.0)
+                put_wall = float(metrics_dict.get("max_put_oi_strike") or 0.0)
                 if dl > 0 and dl < ref_spot and dh > 0 and ((dh - dl) / ref_spot) >= 0.0025:
                     underneath_barriers.append((dl, "Day Low"))
                 if pdl > 0 and pdl < ref_spot:
                     underneath_barriers.append((pdl, "Previous Day Low (PDL)"))
                 if pwl > 0 and pwl < ref_spot:
                     underneath_barriers.append((pwl, "Previous Week Low (PWL)"))
+                if (
+                    put_wall > 0
+                    and put_wall < ref_spot
+                    and not is_spread
+                    and not metrics_dict.get("is_long_unwinding_flush")
+                ):
+                    underneath_barriers.append((put_wall, "Max Put OI Wall"))
 
                 for barrier_lvl, barrier_name in underneath_barriers:
                     # Breakdown setups testing or coiled right above Day Low / PDL are intentional breakdowns
@@ -797,6 +821,8 @@ class AlertScrutinyAuditor:
                     headroom_pts = ref_spot - barrier_lvl
                     headroom_pct = (headroom_pts / ref_spot) * 100.0
                     if 0.0 < headroom_pct < 0.15:
+                        flags["obstacle_runway_clear"] = False
+                        flags["trap_immediate_support"] = True
                         return (
                             False,
                             f"Opposing Demand Collision: Spot (₹{ref_spot:,.1f}) is right above {barrier_name} (₹{barrier_lvl:,.1f}, only {headroom_pts:.1f} pts / {headroom_pct:.2f}% headroom); avoid shorting into support",
@@ -1514,7 +1540,9 @@ class AlertScrutinyAuditor:
                     "OPENING_RANGE_DISPLACEMENT",
                 }
             )
-            is_reversal_or_displacement = any(s in reversal_signals for s in active_signals)
+            is_reversal_or_displacement = atype == "SMC_OB_RETEST" or any(
+                s in reversal_signals for s in active_signals
+            )
 
             # Benchmark Gravitational Alignment:
             if n_chg is not None:
@@ -1522,9 +1550,22 @@ class AlertScrutinyAuditor:
                 sym_spot = float(
                     getattr(alert, "underlying_spot", 0.0)
                     or (metrics_dict.get("spot", 0.0) if isinstance(metrics_dict, dict) else 0.0)
-                    or getattr(alert, "ltp", 0.0)
+                    or (
+                        metrics_dict.get("underlying_spot", 0.0)
+                        if isinstance(metrics_dict, dict)
+                        else 0.0
+                    )
                     or 0.0
                 )
+                if (
+                    sym_spot <= 0.0
+                    and getattr(alert, "strike", 0.0)
+                    and float(alert.strike) > 500.0
+                ):
+                    sym_spot = float(alert.strike)
+                if sym_spot <= 0.0:
+                    sym_spot = float(getattr(alert, "ltp", 0.0) or 0.0)
+
                 sym_day_low = float(
                     (metrics_dict.get("day_low", 0.0) if isinstance(metrics_dict, dict) else 0.0)
                     or 0.0
@@ -1543,35 +1584,117 @@ class AlertScrutinyAuditor:
                     if (sym_day_high > 0 and sym_spot < sym_day_high)
                     else 0.0
                 )
-                bullish_decoupled = bool(sym_bounce_from_low >= 0.45 or is_reversal_or_displacement)
-                bearish_decoupled = bool(sym_drop_from_high >= 0.45 or is_reversal_or_displacement)
+                sym_vwap = float(
+                    getattr(alert, "vwap", 0.0)
+                    or (metrics_dict.get("vwap", 0.0) if isinstance(metrics_dict, dict) else 0.0)
+                    or 0.0
+                )
+                sym_below_vwap_pct = (
+                    ((sym_vwap - sym_spot) / sym_vwap * 100.0)
+                    if (sym_vwap > 0 and sym_spot > 0 and sym_spot < sym_vwap)
+                    else 0.0
+                )
+                sym_above_vwap_pct = (
+                    ((sym_spot - sym_vwap) / sym_vwap * 100.0)
+                    if (sym_vwap > 0 and sym_spot > 0 and sym_spot > sym_vwap)
+                    else 0.0
+                )
+
+                hbcm_meta = metrics_dict.get("hbcm") if isinstance(metrics_dict, dict) else None
+                hbcm_allows_short = True
+                hbcm_allows_long = True
+                if isinstance(hbcm_meta, dict) and hbcm_meta.get("total_heavyweights", 0) > 0:
+                    hb_bulls = hbcm_meta.get("bullish_count", 0)
+                    hb_bears = hbcm_meta.get("bearish_count", 0)
+                    # Shorting requires at least 1 falling constituent and no more than 2 rising
+                    hbcm_allows_short = (hb_bears >= 1) and (hb_bulls <= 2)
+                    # Buying calls requires at least 1 rising constituent and no more than 2 falling
+                    hbcm_allows_long = (hb_bulls >= 1) and (hb_bears <= 2)
+
+                is_reversal_alert = bool(
+                    any(
+                        sig
+                        in (
+                            "INTRADAY_CAPITULATION_REVERSAL",
+                            "INTRADAY_CAPITULATION_TOP",
+                            "FAILED_DAY_LOW_BREAKDOWN",
+                            "FAILED_DAY_HIGH_BREAKOUT",
+                            "PDL_DEMAND_REJECTION",
+                            "PDH_SUPPLY_REJECTION",
+                            "DAY_LOW_DEMAND_BOUNCE",
+                            "DAY_HIGH_SUPPLY_REJECTION",
+                        )
+                        for sig in (
+                            (metrics_dict.get("signals") if isinstance(metrics_dict, dict) else [])
+                            or []
+                        )
+                    )
+                    or "CAPITULATION" in (getattr(alert, "headline", "") or "").upper()
+                    or "REVERSAL" in (getattr(alert, "headline", "") or "").upper()
+                    or "BOUNCE" in (getattr(alert, "headline", "") or "").upper()
+                    or "SUPPLY REJECTION" in (getattr(alert, "headline", "") or "").upper()
+                    or "DEMAND REJECTION" in (getattr(alert, "headline", "") or "").upper()
+                )
+
+                # True decoupling requires price displacement (>= 0.45% from high or below VWAP) AND constituent support
+                # For structural reversal setups (V-bottom / V-top capitulation), price displacement alone establishes decoupling
+                bullish_decoupled = bool(
+                    (hbcm_allows_long or is_reversal_alert)
+                    and (sym_bounce_from_low >= 0.45 or sym_above_vwap_pct >= 0.45)
+                )
+                bearish_decoupled = bool(
+                    (hbcm_allows_short or is_reversal_alert)
+                    and (sym_drop_from_high >= 0.45 or sym_below_vwap_pct >= 0.45)
+                )
 
                 # Counter-benchmark short trap: Nifty is green (>= +0.05%) and holding above VWAP
-                if is_index_bearish and not is_index_bullish and clean_sym != "NIFTY":
+                if is_index_bearish and not is_index_bullish:
                     nifty_bullish = (n_chg_f >= 0.05) and (
                         n_ltp >= n_vwap if (n_ltp > 0 and n_vwap > 0) else True
                     )
-                    if nifty_bullish and not bearish_decoupled:
-                        flags["macro_regime_aligned"] = False
-                        flags["benchmark_regime_valid"] = False
-                        return (
-                            False,
-                            f"Benchmark Divergence Trap: Cannot short {clean_sym} (PE/Short) while primary benchmark NIFTY 50 is bullish (+{n_chg_f:.2f}%, above VWAP). Counter-trend secondary index shorts face >80% trap rate.",
-                            flags,
-                        )
+                    if clean_sym != "NIFTY":
+                        if nifty_bullish and not bearish_decoupled:
+                            flags["macro_regime_aligned"] = False
+                            flags["benchmark_regime_valid"] = False
+                            return (
+                                False,
+                                f"Benchmark Divergence Trap: Cannot short {clean_sym} (PE/Short) while primary benchmark NIFTY 50 is bullish (+{n_chg_f:.2f}%, above VWAP). Counter-trend secondary index shorts face >80% trap rate.",
+                                flags,
+                            )
+                    else:
+                        # Direct NIFTY short into bullish benchmark markup
+                        if nifty_bullish and not bearish_decoupled:
+                            flags["macro_regime_aligned"] = False
+                            flags["benchmark_regime_valid"] = False
+                            return (
+                                False,
+                                f"Benchmark Divergence Trap: Cannot short NIFTY (PE/Short) while NIFTY 50 is structurally bullish (+{n_chg_f:.2f}%, holding above VWAP). Disallow counter-trend index shorts into benchmark markup.",
+                                flags,
+                            )
                 # Counter-benchmark long trap: Nifty is red (<= -0.05%) and trading below VWAP
-                elif is_index_bullish and not is_index_bearish and clean_sym != "NIFTY":
+                elif is_index_bullish and not is_index_bearish:
                     nifty_bearish = (n_chg_f <= -0.05) and (
                         n_ltp <= n_vwap if (n_ltp > 0 and n_vwap > 0) else True
                     )
-                    if nifty_bearish and not bullish_decoupled:
-                        flags["macro_regime_aligned"] = False
-                        flags["benchmark_regime_valid"] = False
-                        return (
-                            False,
-                            f"Benchmark Divergence Trap: Cannot buy calls on {clean_sym} (CE/Long) while primary benchmark NIFTY 50 is bearish ({n_chg_f:.2f}%, below VWAP). Counter-trend long bets face heavy market drag.",
-                            flags,
-                        )
+                    if clean_sym != "NIFTY":
+                        if nifty_bearish and not bullish_decoupled:
+                            flags["macro_regime_aligned"] = False
+                            flags["benchmark_regime_valid"] = False
+                            return (
+                                False,
+                                f"Benchmark Divergence Trap: Cannot buy calls on {clean_sym} (CE/Long) while primary benchmark NIFTY 50 is bearish ({n_chg_f:.2f}%, below VWAP). Counter-trend long bets face heavy market drag.",
+                                flags,
+                            )
+                    else:
+                        # Direct NIFTY call into bearish benchmark markdown
+                        if nifty_bearish and not bullish_decoupled:
+                            flags["macro_regime_aligned"] = False
+                            flags["benchmark_regime_valid"] = False
+                            return (
+                                False,
+                                f"Benchmark Divergence Trap: Cannot buy calls on NIFTY (CE/Long) while NIFTY 50 is structurally bearish ({n_chg_f:.2f}%, trading below VWAP). Disallow counter-trend index calls into benchmark markdown.",
+                                flags,
+                            )
 
             is_test_runner = (
                 ("PYTEST_CURRENT_TEST" in os.environ)
@@ -1606,11 +1729,56 @@ class AlertScrutinyAuditor:
                 except Exception:
                     pass
 
-            # Heavyweight Breadth Confluence Matrix (HBCM) Gate for Index Breakout/Breakdown alerts:
-            # Mandates >= 4 of 5 heavyweights concurrently aligned with the breakout direction.
-            # EXEMPTION: Mean-reversion reversals (ICR, PDL/PDH sweep, VWAP reclaim) and Opening Range
-            # Displacements occur at turning points before all constituents have crossed VWAP.
+            # Heavyweight Breadth Confluence Matrix (HBCM) Gate for Index setups:
             hbcm_meta = metrics_dict.get("hbcm") if isinstance(metrics_dict, dict) else None
+
+            # 1. Hard Invariant Veto: Overwhelming Locomotive Contradiction
+            # Regardless of whether a setup is labeled a breakout, breakdown, or mean-reversion reversal,
+            # an index trade CANNOT fight overwhelming constituent locomotives.
+            # E.g. Shorting when 0 heavyweights are falling or >=4 are bullish, or buying calls when 0 are rising.
+            if isinstance(hbcm_meta, dict) and hbcm_meta.get("total_heavyweights", 0) > 0:
+                hb_bulls = hbcm_meta.get("bullish_count", 0)
+                hb_bears = hbcm_meta.get("bearish_count", 0)
+                if is_index_bearish:
+                    # Structural reversal signals (capitulation top, failed breakouts,
+                    # supply zone sweeps) fire precisely when heavyweights are topping.
+                    # HBCM breadth is a lagging indicator at these inflection points — do NOT
+                    # apply the hard 0-locomotive veto to recognized structural reversals.
+                    if not is_reversal_or_displacement and (hb_bears == 0 or hb_bulls >= 4):
+                        flags["heavyweight_confluence_valid"] = False
+                        return (
+                            False,
+                            f"HBCM Locomotive Contradiction Veto: Cannot short {clean_sym} when constituent heavyweights are overwhelmingly bullish ({hb_bulls}/5 bullish, {hb_bears} bearish). Disallow put setups fighting index locomotive drivers.",
+                            flags,
+                        )
+                    if is_reversal_or_displacement and hb_bulls >= 3:
+                        flags["heavyweight_confluence_valid"] = False
+                        return (
+                            False,
+                            f"HBCM Locomotive Contradiction Veto: Mean-reversion short on {clean_sym} lacks constituent backing ({hb_bulls}/5 heavyweights still bullish above VWAP). Requires at least 3 heavyweights failing or neutral.",
+                            flags,
+                        )
+                elif is_index_bullish:
+                    # Structural reversal signals (V-bottom capitulation, failed breakdowns,
+                    # demand zone sweeps) fire precisely when heavyweights are inflecting.
+                    # HBCM breadth is a lagging indicator at these inflection points — do NOT
+                    # apply the hard 0-locomotive veto to recognized structural reversals.
+                    if not is_reversal_or_displacement and (hb_bulls == 0 or hb_bears >= 4):
+                        flags["heavyweight_confluence_valid"] = False
+                        return (
+                            False,
+                            f"HBCM Locomotive Contradiction Veto: Cannot buy calls on {clean_sym} when constituent heavyweights are overwhelmingly bearish ({hb_bears}/5 bearish, {hb_bulls} bullish). Disallow call setups fighting index locomotive drivers.",
+                            flags,
+                        )
+                    if is_reversal_or_displacement and hb_bears >= 3:
+                        flags["heavyweight_confluence_valid"] = False
+                        return (
+                            False,
+                            f"HBCM Locomotive Contradiction Veto: Mean-reversion long on {clean_sym} lacks constituent backing ({hb_bears}/5 heavyweights still bearish below VWAP). Requires at least 3 heavyweights expanding or neutral.",
+                            flags,
+                        )
+
+            # 2. Strict Confluence Gate for Breakouts/Breakdowns/Momentum:
             is_breakout_type = (
                 atype
                 in (
@@ -1624,7 +1792,7 @@ class AlertScrutinyAuditor:
                     atype in ("INDEX_CALL_SETUP", "INDEX_PUT_SETUP", "GAMMA_BLAST")
                     and not is_reversal_or_displacement
                 )
-            ) and not is_reversal_or_displacement
+            )
             if is_breakout_type:
                 if isinstance(hbcm_meta, dict):
                     if (
@@ -2071,8 +2239,8 @@ class AlertScrutinyAuditor:
                     # Broad market liquidation (declines heavily outnumber advances)
                     if (
                         mb.verdict == "BROAD_DECLINE"
-                        or mb.ad_ratio < 0.60
-                        or (mb.declines >= 2.0 * max(1, mb.advances))
+                        or mb.ad_ratio <= 0.65
+                        or (mb.declines >= 1.5 * max(1, mb.advances))
                     ):
                         u_spot_ref = float(
                             getattr(alert, "underlying_spot", 0.0)
@@ -2092,17 +2260,27 @@ class AlertScrutinyAuditor:
                                     or (float(metrics_dict.get("sector_rs", 0.0) or 0.0) >= 1.5)
                                 )
                             )
+                            hbcm_meta_mb = (
+                                metrics_dict.get("hbcm") if isinstance(metrics_dict, dict) else None
+                            )
+                            hbcm_allows_ce = True
+                            if (
+                                isinstance(hbcm_meta_mb, dict)
+                                and hbcm_meta_mb.get("total_heavyweights", 0) > 0
+                            ):
+                                hbcm_allows_ce = (hbcm_meta_mb.get("bullish_count", 0) >= 2) and (
+                                    hbcm_meta_mb.get("bearish_count", 0) <= 2
+                                )
+
                             is_index_reversal = bool(
                                 is_index_sym
+                                and hbcm_allows_ce
                                 and (
-                                    is_reversal_or_displacement
-                                    or (
-                                        metrics_dict.get("day_low")
-                                        and (u_spot_ref - float(metrics_dict["day_low"]))
-                                        / max(1.0, float(metrics_dict["day_low"]))
-                                        * 100
-                                        >= 0.30
-                                    )
+                                    metrics_dict.get("day_low")
+                                    and (u_spot_ref - float(metrics_dict["day_low"]))
+                                    / max(1.0, float(metrics_dict["day_low"]))
+                                    * 100
+                                    >= 0.40
                                 )
                             )
                             is_decoupled = is_equity_decoupled or is_index_reversal
@@ -2112,16 +2290,26 @@ class AlertScrutinyAuditor:
                                     False,
                                     f"Market Breadth Liquidation Veto: Broad market is in severe decline "
                                     f"(Adv: {mb.advances} / Dec: {mb.declines}, A/D ratio: {mb.ad_ratio:.2f}, verdict: {mb.verdict}). "
-                                    f"Disallow Call / Bullish setups into widespread institutional market liquidation.",
+                                    f"Disallow Call / Bullish setups into widespread institutional market liquidation without constituent breakout.",
                                     flags,
                                 )
 
                     # Broad market rally (advances heavily outnumber declines)
                     elif (
                         mb.verdict == "BROAD_RALLY"
-                        or mb.ad_ratio > 1.80
-                        or (mb.advances >= 2.0 * max(1, mb.declines))
+                        or mb.ad_ratio >= 1.50
+                        or (mb.advances >= 1.5 * max(1, mb.declines))
                     ):
+                        u_spot_ref = float(
+                            getattr(alert, "underlying_spot", 0.0)
+                            or (
+                                metrics_dict.get("spot", 0.0)
+                                if isinstance(metrics_dict, dict)
+                                else 0.0
+                            )
+                            or ltp
+                            or 0.0
+                        )
                         if is_put_side:
                             is_equity_decoupled = bool(
                                 not is_index_sym
@@ -2130,17 +2318,27 @@ class AlertScrutinyAuditor:
                                     or (float(metrics_dict.get("sector_rs", 0.0) or 0.0) <= -1.5)
                                 )
                             )
+                            hbcm_meta_mb = (
+                                metrics_dict.get("hbcm") if isinstance(metrics_dict, dict) else None
+                            )
+                            hbcm_allows_pe = True
+                            if (
+                                isinstance(hbcm_meta_mb, dict)
+                                and hbcm_meta_mb.get("total_heavyweights", 0) > 0
+                            ):
+                                hbcm_allows_pe = (hbcm_meta_mb.get("bearish_count", 0) >= 2) and (
+                                    hbcm_meta_mb.get("bullish_count", 0) <= 2
+                                )
+
                             is_index_breakdown = bool(
                                 is_index_sym
+                                and hbcm_allows_pe
                                 and (
-                                    is_reversal_or_displacement
-                                    or (
-                                        metrics_dict.get("day_high")
-                                        and (float(metrics_dict["day_high"]) - u_spot_ref)
-                                        / max(1.0, float(metrics_dict["day_high"]))
-                                        * 100
-                                        >= 0.30
-                                    )
+                                    metrics_dict.get("day_high")
+                                    and (float(metrics_dict["day_high"]) - u_spot_ref)
+                                    / max(1.0, float(metrics_dict["day_high"]))
+                                    * 100
+                                    >= 0.40
                                 )
                             )
                             is_decoupled = is_equity_decoupled or is_index_breakdown
@@ -2150,7 +2348,7 @@ class AlertScrutinyAuditor:
                                     False,
                                     f"Market Breadth Rally Veto: Broad market is in strong rally "
                                     f"(Adv: {mb.advances} / Dec: {mb.declines}, A/D ratio: {mb.ad_ratio:.2f}, verdict: {mb.verdict}). "
-                                    f"Disallow Put / Bearish setups into widespread institutional market buying.",
+                                    f"Disallow Put / Bearish setups into widespread institutional market buying without constituent breakdown.",
                                     flags,
                                 )
             except Exception as e_br:
@@ -2884,7 +3082,18 @@ Respond STRICTLY in valid JSON matching this schema:
             )
             anchor_note = f" (Spot Anchor ₹{float(spot_anchor):,.1f})" if spot_anchor else ""
 
-            if opt_type == "PE" or "PE" in contract or "PUT" in action or direction == "BEARISH":
+            if opt_type == "PE":
+                is_pe_trade = True
+            elif opt_type == "CE":
+                is_pe_trade = False
+            elif contract.endswith("PE") or re.search(r"\bPE\b|\d+PE$", contract):
+                is_pe_trade = True
+            elif contract.endswith("CE") or re.search(r"\bCE\b|\d+CE$", contract):
+                is_pe_trade = False
+            else:
+                is_pe_trade = "PUT" in action or direction == "BEARISH"
+
+            if is_pe_trade:
                 opt_lbl = contract or f"{sym} {opt_type or 'PE'}"
                 logic = f"Quant-validated {opt_lbl} Put momentum: bearish underlying breakdown confirmed with 1:{rr:.1f} R:R premium expansion asymmetry."
                 trap = f"Watch for sudden underlying short-covering bounce{friday_warning}; scale 50% profit at option target ₹{t1:,.1f} and trail SL to breakeven."

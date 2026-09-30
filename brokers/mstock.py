@@ -238,11 +238,17 @@ class MStockAPI(BrokerAPI):
             11: "N",
             12: "D",
         }
-        if m_int in m_map_3:
-            cands.append(f"{und}{yy}{m_map_3[m_int]}{s_int}{opt_t}")
+        # 1. Weekly specific-day formats MUST take precedence over monthly formats
+        # NSE weekly contracts use single-character month (1-9, O, N, D) + two-digit day (dd)
         if m_int in m_map_1:
             cands.append(f"{und}{yy}{m_map_1[m_int]}{dd}{s_int}{opt_t}")
+            if dd.startswith("0"):
+                cands.append(f"{und}{yy}{m_map_1[m_int]}{dd[1:]}{s_int}{opt_t}")
+        # 2. Two-digit numeric month + day format
         cands.append(f"{und}{yy}{mm}{dd}{s_int}{opt_t}")
+        # 3. Monthly format (YYMMM) only as fallback when day is not a separate weekly expiry
+        if m_int in m_map_3:
+            cands.append(f"{und}{yy}{m_map_3[m_int]}{s_int}{opt_t}")
         return cands
 
     def get_symbol_token(self, symbol: str, exchange: str = "NSE") -> str:

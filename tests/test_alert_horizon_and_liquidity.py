@@ -205,6 +205,158 @@ def test_strike_roll_recommendation_generation():
     assert "Roll up to liquid ATM 25400 CE" in roll["reason"]
 
 
+def test_calculate_strike_roll_put_deep_itm_rolls_down():
+    """Verify deep ITM Put rolls DOWN to ATM to lock gains and restore gamma leverage."""
+    alert = AutoAlert(
+        alert_id="test-roll-pe-001",
+        alert_type="OPTIONS_MOMENTUM",
+        stage="IGNITED",
+        symbol="NIFTY",
+        exchange="NFO",
+        direction="BEARISH",
+        headline="NIFTY 23000 PE",
+        summary="Nifty Put Momentum",
+        ltp=120.0,
+        trigger_level=120.0,
+        target_level=220.0,
+        stop_loss=90.0,
+        strike=23000.0,
+        option_type="PE",
+        contract_symbol="NIFTY2692423000PE",
+        underlying_spot=22620.0,  # Spot fell by 380 points! 23000 PE is deep ITM
+    )
+
+    roll = calculate_strike_roll_recommendation(
+        alert=alert,
+        current_ltp=450.0,
+        pnl_pct=275.0,
+        is_bullish=False,
+    )
+    assert roll is not None
+    assert roll["action"] == "ROLL_DOWN"
+    assert roll["current_strike"] == 23000.0
+    # 22620 spot with 50-step rounds to 22600 ATM
+    assert roll["recommended_strike"] == 22600.0
+    assert "22600" in roll["recommended_contract"]
+    assert "Roll down to liquid ATM 22600 PE" in roll["reason"]
+
+
+def test_calculate_strike_roll_otm_put_is_suppressed():
+    """Verify OTM Put (strike < spot) does NOT recommend strike roll to lock ITM gains."""
+    alert = AutoAlert(
+        alert_id="test-roll-pe-otm",
+        alert_type="OPTIONS_MOMENTUM",
+        stage="IGNITED",
+        symbol="NIFTY",
+        exchange="NFO",
+        direction="BEARISH",
+        headline="NIFTY 22550 PE",
+        summary="Nifty Put Momentum",
+        ltp=76.65,
+        trigger_level=76.65,
+        target_level=118.8,
+        stop_loss=61.3,
+        strike=22550.0,
+        option_type="PE",
+        contract_symbol="NIFTY2026100622550PE",
+        underlying_spot=22704.65,  # Spot is ABOVE strike, so 22550 PE is OTM!
+    )
+
+    roll = calculate_strike_roll_recommendation(
+        alert=alert,
+        current_ltp=201.5,
+        pnl_pct=162.9,
+        is_bullish=False,
+    )
+    # Should be None because 22550 PE is OTM when spot is 22704
+    assert roll is None
+
+
+def test_calculate_strike_roll_otm_put_missing_spot_no_spurious_roll():
+    """Regression: OTM PE with NO underlying_spot must NOT generate a spurious ROLL_UP.
+
+    Before the operator-precedence fix (Bug 1), the fallback approximation
+    ``spot = cur_strike - current_ltp`` was always executed when underlying_spot was
+    missing (regardless of option_type).  For a small-premium OTM PE this produced
+    a *lower* spot than the strike, making the OTM PE appear deep ITM and triggering
+    a wrong ROLL_UP recommendation.
+    """
+    alert = AutoAlert(
+        alert_id="test-roll-pe-missing-spot",
+        alert_type="INDEX_PUT_SETUP",
+        stage="TARGET_ACHIEVED",
+        symbol="NIFTY",
+        exchange="NFO",
+        direction="BEARISH",
+        headline="NIFTY 22550 PE",
+        summary="Nifty Put Setup",
+        ltp=76.65,
+        trigger_level=76.65,
+        target_level=118.8,
+        stop_loss=61.3,
+        strike=22550.0,
+        option_type="PE",
+        contract_symbol="NIFTY2026100622550PE",
+        underlying_spot=None,  # Deliberately missing — triggers the approximation path
+    )
+
+    roll = calculate_strike_roll_recommendation(
+        alert=alert,
+        current_ltp=201.5,  # premium = 201.5 / 22550 = 0.89% << 10% threshold
+        pnl_pct=162.9,
+        is_bullish=False,
+    )
+    # Must be None: premium < 10% of strike → not deep ITM confirmed → no spurious roll
+    assert roll is None, (
+        f"Expected None (OTM PE without underlying_spot must not generate a roll), got: {roll}"
+    )
+
+
+def test_opening_drive_ignition_ce_header_is_not_put_surge():
+    """Regression: OPENING_DRIVE_IGNITION CE alert header must read 'OPENING DRIVE IGNITION',
+    not 'OPTIONS PUT SURGE'.
+
+    Before Bug 2 fix, the generic fallback ``opt_tag = 'OPTIONS PUT SURGE' if is_put else ...``
+    could fire for OPENING_DRIVE_IGNITION alerts if option_type was missing, because the
+    direction fallback incorrectly classified BULLISH CE as PUT SURGE.
+    """
+    from bot.alert_templates import format_auto_alert_telegram
+
+    alert = AutoAlert(
+        alert_id="aa-opening-drive-ignition-solarinds-bull-20260930",
+        alert_type="OPENING_DRIVE_IGNITION",
+        stage="IGNITED",
+        symbol="SOLARINDS",
+        exchange="NFO",
+        direction="BULLISH",
+        headline="SOLARINDS Bullish Ignition (Open==Low)",
+        summary="Opening Drive confirmed CE call",
+        ltp=700.0,
+        trigger_level=700.0,
+        target_level=945.0,
+        stop_loss=546.0,
+        strike=19750.0,
+        option_type="CE",
+        contract_symbol="SOLARINDS2026102719750CE",
+        underlying_spot=19670.0,
+        lot_size=50,
+        confidence=92,
+        environment="LIVE",
+        is_live=True,
+        metrics={},
+    )
+
+    msg = format_auto_alert_telegram(alert)
+    # The header must contain OPENING DRIVE IGNITION, not OPTIONS PUT SURGE
+    assert "OPENING DRIVE IGNITION" in msg, (
+        f"Expected 'OPENING DRIVE IGNITION' in header for CE OPENING_DRIVE_IGNITION alert.\n"
+        f"Got header section: {msg[:300]}"
+    )
+    assert "OPTIONS PUT SURGE" not in msg, (
+        f"CE OPENING_DRIVE_IGNITION alert must never display 'OPTIONS PUT SURGE'.\nGot: {msg[:300]}"
+    )
+
+
 def test_evaluate_targets_and_trailing_attaches_strike_roll():
     """Verify evaluate_alert_targets_and_trailing attaches strike_roll_recommendation upon T2 / Final Hit."""
     alert = AutoAlert(

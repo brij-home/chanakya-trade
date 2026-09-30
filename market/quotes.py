@@ -22,7 +22,7 @@ from engine.observability import get_registry, new_correlation_id
 from market.data_events import classify_data_state, utc_now_iso
 
 _OPTION_PATTERN = re.compile(
-    r"^(?:NFO:|BFO:|NSE:|BSE:)?(?P<underlying>[A-Za-z0-9_& -]+?)(?:(?P<exp_iso>20\d{6})|(?P<exp_nfo>\d{2}[A-Z]{3})|(?P<exp_num>\d{5}(?=\d{3,})))?\s*(?P<strike>\d{1,6}(?:\.\d+)?)\s*(?P<opt_type>CE|PE)$",
+    r"^(?:NFO:|BFO:|NSE:|BSE:)?(?P<underlying>[A-Za-z0-9_& -]+?)(?:(?P<exp_iso>20\d{6})|(?P<exp_nfo>\d{2}[A-Z]{3})|(?P<exp_weekly>\d{2}[OND]\d{2})|(?P<exp_num>\d{5}(?=\d{3,})))?\s*(?P<strike>\d{1,6}(?:\.\d+)?)\s*(?P<opt_type>CE|PE)$",
     re.IGNORECASE,
 )
 
@@ -368,11 +368,44 @@ def _options_quotes(instruments: list[str], *, correlation_id: str) -> dict[str,
             m = _OPTION_PATTERN.match(clean)
             if not m:
                 continue
-            und, exp_iso, exp_nfo, exp_num, strike_str, opt_type = m.groups()
+            und = m.group("underlying")
+            exp_iso = m.group("exp_iso")
+            exp_weekly = m.group("exp_weekly")
+            exp_num = m.group("exp_num")
+            strike_str = m.group("strike")
+            opt_type = m.group("opt_type")
             exp_date_str = None
             if exp_iso:
                 # 20261027 -> 2026-10-27
                 exp_date_str = f"{exp_iso[:4]}-{exp_iso[4:6]}-{exp_iso[6:8]}"
+            elif exp_weekly:
+                # 26O06 -> 2026-10-06
+                yy = exp_weekly[:2]
+                m_char = exp_weekly[2].upper()
+                dd = exp_weekly[3:5]
+                m_map_rev = {
+                    "1": "01",
+                    "2": "02",
+                    "3": "03",
+                    "4": "04",
+                    "5": "05",
+                    "6": "06",
+                    "7": "07",
+                    "8": "08",
+                    "9": "09",
+                    "O": "10",
+                    "N": "11",
+                    "D": "12",
+                }
+                mm = m_map_rev.get(m_char, "10")
+                exp_date_str = f"20{yy}-{mm}-{dd}"
+            elif exp_num and len(exp_num) == 5:
+                # 26911 -> 2026-09-11
+                yy = exp_num[:2]
+                m_char = exp_num[2]
+                dd = exp_num[3:5]
+                mm = f"0{m_char}" if m_char.isdigit() else "10"
+                exp_date_str = f"20{yy}-{mm}-{dd}"
             by_und_exp.setdefault((und.upper(), exp_date_str), []).append(
                 (inst, clean, float(strike_str), opt_type.upper(), exp_date_str)
             )
