@@ -9,8 +9,10 @@ Verifies fixes for high-momentum stock options (SONACOMS, MCX, etc.):
    prioritized ahead of idle equities.
 """
 
+from datetime import datetime
 from unittest.mock import patch
 import pandas as pd
+from config.constants import IST
 
 from brokers.base import OptionsContract, Quote
 from engine.alert_scrutiny import alert_scrutiny_auditor
@@ -99,7 +101,8 @@ def test_sonacoms_staged_scaleout_scrutiny_approval():
         ),
     ]
 
-    alerts = detect_gamma_blast("SONACOMS", spot, contracts)
+    ref_dt = datetime(2026, 9, 18, 10, 0, tzinfo=IST)
+    alerts = detect_gamma_blast("SONACOMS", spot, contracts, now_dt=ref_dt)
 
     assert len(alerts) >= 1
     alert = alerts[0]
