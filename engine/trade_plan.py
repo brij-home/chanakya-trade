@@ -37,14 +37,12 @@ from __future__ import annotations
 
 import logging
 import math
-import os
 import time
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
 from typing import Any, Optional
 
 import pandas as pd
-from config.constants import IST
 
 logger = logging.getLogger("chanakya.trade_plan")
 
