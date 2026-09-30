@@ -253,6 +253,7 @@ def calculate_trade_plan(
 
     # ── 2. Fetch Historical OHLCV & Compute Realized ATR ───────────────────────
     atr = 0.0
+    has_custom_df = df is not None
     try:
         if df is None or len(df) < 5:
             from market.history import get_ohlcv
@@ -823,8 +824,8 @@ def calculate_trade_plan(
                 f"Trade should be SKIPPED or taken via credit spreads only."
             )
 
-    # Check ADR exhaustion if df provides active current session range
-    if df is not None and len(df) >= 2 and atr > 0:
+    # Check ADR exhaustion if caller explicitly supplied active session dataframe
+    if has_custom_df and df is not None and len(df) >= 2 and atr > 0:
         try:
             curr_h = float(df["High"].iloc[-1] if "High" in df.columns else df["high"].iloc[-1])
             curr_l = float(df["Low"].iloc[-1] if "Low" in df.columns else df["low"].iloc[-1])

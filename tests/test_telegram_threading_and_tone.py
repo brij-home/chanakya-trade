@@ -334,6 +334,8 @@ def test_auto_alert_upgrade_preserves_telegram_root(tmp_path, monkeypatch):
         telegram_root_message_id=99001,
         telegram_message_id=99001,
         signal_ref="#SIG_HDFCBANK_1700CE_11SEP_1000",
+        environment="TEST",
+        is_live=False,
     )
     engine.record_alert(early)
 
@@ -355,6 +357,8 @@ def test_auto_alert_upgrade_preserves_telegram_root(tmp_path, monkeypatch):
         contract_symbol="HDFCBANK1700CE",
         confidence=90,
         created_at=now_str,
+        environment="TEST",
+        is_live=False,
     )
 
     recorded = engine.record_alert(ignited)

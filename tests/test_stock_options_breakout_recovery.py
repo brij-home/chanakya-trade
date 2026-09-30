@@ -56,7 +56,8 @@ def test_mcx_gamma_blast_low_oi_change_recovery():
         ),
     ]
 
-    alerts = detect_gamma_blast("MCX", spot, contracts)
+    ref_dt = datetime(2026, 9, 10, 10, 0, tzinfo=IST)
+    alerts = detect_gamma_blast("MCX", spot, contracts, now_dt=ref_dt)
 
     assert len(alerts) >= 1
     mcx_ce = next((a for a in alerts if a.strike == 3350.0 and a.option_type == "CE"), None)
@@ -101,7 +102,7 @@ def test_sonacoms_staged_scaleout_scrutiny_approval():
         ),
     ]
 
-    ref_dt = datetime(2026, 9, 18, 10, 0, tzinfo=IST)
+    ref_dt = datetime(2026, 9, 10, 10, 0, tzinfo=IST)
     alerts = detect_gamma_blast("SONACOMS", spot, contracts, now_dt=ref_dt)
 
     assert len(alerts) >= 1
