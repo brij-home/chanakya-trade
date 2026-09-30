@@ -396,7 +396,7 @@ def detect_gamma_blast(
                     except ValueError:
                         continue
                 if exp_dt:
-                    today_ist = datetime.now(IST).date()
+                    today_ist = now_dt.date()
                     dte_days = (exp_dt - today_ist).days
                     max_gamma_dte = (
                         8 if (is_index and clean_sym == "NIFTY") else (16 if is_index else 35)
@@ -991,7 +991,7 @@ def detect_gamma_blast(
                     except ValueError:
                         continue
                 if exp_dt:
-                    today_ist = datetime.now(IST).date()
+                    today_ist = now_dt.date()
                     dte_days = (exp_dt - today_ist).days
                     max_gamma_dte = (
                         8 if (is_index and clean_sym == "NIFTY") else (16 if is_index else 35)
