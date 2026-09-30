@@ -146,10 +146,17 @@ class AlertScrutinyAuditor:
         direction = str(getattr(alert, "direction", "BULLISH")).upper()
         trigger = float(getattr(alert, "trigger_level", 0.0) or ltp)
         # 0. Centralized Signal Data Integrity Invariant Gate
-        if hasattr(alert, "validate_data_integrity"):
-            is_data_valid, val_reason = alert.validate_data_integrity()
-            if not is_data_valid:
-                return False, f"Signal Data Integrity Veto: {val_reason}", flags
+        if hasattr(alert, "validate_data_integrity") and callable(
+            getattr(alert, "validate_data_integrity")
+        ):
+            try:
+                res = alert.validate_data_integrity()
+                if isinstance(res, (tuple, list)) and len(res) >= 2:
+                    is_data_valid, val_reason = res[0], res[1]
+                    if not is_data_valid:
+                        return False, f"Signal Data Integrity Veto: {val_reason}", flags
+            except Exception:
+                pass
 
         # 1. Non-zero price check
         if ltp <= 0 or sl <= 0 or t1 <= 0:

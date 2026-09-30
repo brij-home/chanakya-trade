@@ -284,18 +284,18 @@ def test_auto_alert_engine_gated_approval_attaches_scrutiny():
 
 
 def test_auto_alert_engine_urgent_signal_enrichment():
-    """Urgent signal (Gamma Blast) records immediately with QUANT_VERIFIED and runs async enrichment."""
+    """Urgent signal (Circuit Warning) records immediately with QUANT_VERIFIED and runs async enrichment."""
     engine = AutoAlertEngine()
     engine._alerts = []
     urgent_alert = AutoAlert(
-        alert_id="urgent-gamma-1",
-        alert_type="GAMMA_BLAST",
+        alert_id="urgent-circuit-1",
+        alert_type="CIRCUIT_WARNING",
         stage="IGNITED",
         symbol="NSE:RELIANCE",
         exchange="NSE",
         direction="BULLISH",
-        headline="Reliance Gamma Blast",
-        summary="OI unwinding surge",
+        headline="Reliance Circuit Warning",
+        summary="Upper circuit headroom approaching",
         ltp=2500.0,
         trigger_level=2500.0,
         stop_loss=2450.0,

@@ -64,6 +64,11 @@ def _is_index_underlying(underlying: str) -> bool:
 
 def _get_session():
     """Return an active session with valid NSE session cookies."""
+    import os
+
+    if os.environ.get("CHANAKYA_TESTING") == "1" and os.environ.get("ALLOW_TEST_NETWORK") != "1":
+        return None
+
     global _session, _session_created_at
     now = time.time()
     with _session_lock:
@@ -150,6 +155,8 @@ def nse_get_contract_info(underlying: str) -> dict:
     """
     clean_sym = underlying.upper().replace("NSE:", "").replace("NFO:", "").strip()
     session = _get_session()
+    if not session:
+        return {}
     url = f"{_NSE_BASE}/api/option-chain-contract-info?symbol={clean_sym}"
     try:
         resp = session.get(url, timeout=10)
@@ -172,6 +179,8 @@ def _fetch_nse_chain(underlying: str, is_index: bool) -> dict:
         Parsed JSON dict from NSE API.
     """
     session = _get_session()
+    if not session:
+        return {}
     clean_sym = underlying.upper().replace("NSE:", "").replace("NFO:", "").strip()
     endpoint = "indices" if is_index else "equities"
     url = f"{_NSE_BASE}/api/option-chain-{endpoint}?symbol={clean_sym}"

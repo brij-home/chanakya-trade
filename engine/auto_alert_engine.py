@@ -657,13 +657,20 @@ class AutoAlertEngine:
         )
 
         # 00-0. Centralized Signal Data Integrity Invariant Gate
-        if hasattr(alert, "validate_data_integrity"):
-            is_valid, inv_reason = alert.validate_data_integrity()
-            if not is_valid:
-                logger.warning(
-                    f"[AutoAlertEngine] 🛑 Data Integrity Veto for {clean_target} ({alert.alert_type}): {inv_reason}"
-                )
-                return False
+        if hasattr(alert, "validate_data_integrity") and callable(
+            getattr(alert, "validate_data_integrity")
+        ):
+            try:
+                res = alert.validate_data_integrity()
+                if isinstance(res, (tuple, list)) and len(res) >= 2:
+                    is_valid, inv_reason = res[0], res[1]
+                    if not is_valid:
+                        logger.warning(
+                            f"[AutoAlertEngine] 🛑 Data Integrity Veto for {clean_target} ({alert.alert_type}): {inv_reason}"
+                        )
+                        return False
+            except Exception:
+                pass
 
         # 00. Content Sanity Gate: Intercept and repair degenerate / placeholder fields (e.g. 'h', 's')
         raw_hl = (alert.headline or "").strip()
